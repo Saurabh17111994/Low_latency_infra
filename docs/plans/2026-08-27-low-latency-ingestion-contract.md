@@ -18,6 +18,8 @@ Replace the Go→Java **stdout NDJSON pipe** with:
   → raw_table_1 LOG (16 buckets, unchanged) → Flink SignalJob (unchanged)
 ```
 
+**Interim transport (T6 default, O-4):** the pipeline above is the **conditional end-state**. The initial build (T1→T2→T5→T6) runs the same Go batcher + protobuf framing over the **existing stdout pipe**; gRPC/UDS is built only if E2E-after-T6 profiling shows the pipe itself is material. This matches the locked O-4 decision and Test C gate.
+
 **Hard constraints (approved, non-negotiable):**
 - **No Rust, no Kafka, no NATS, no shared memory, no custom UDS framing, no CPU pinning.**
 - **No per-event RPC, no per-event Fluss write, no single global Java queue, no unbounded queue, no silent dropping.**
@@ -191,7 +193,7 @@ message TickEvent {
 - O-2 → resolved: fixed 5 depth levels (matches current arrays).
 - O-3 → resolved: UDS via shared volume across the two containers.
 - O-4 → resolved: control records ride the gRPC stream.
-- O-5 → resolved: writer count 3 initially, benchmark decides.
+- O-5 → resolved: writer count = **1** (O-1, measured 58k–357k rows/s on a single AppendWriter); 2/4/8 only if E2E-after-T6 misses 50k sustained (Test D trigger).
 
 ---
 
@@ -231,61 +233,230 @@ message TickEvent {
 
 **T1 — Protobuf contract (Q1-Q7):**
 - `market_data.proto` per §3.2; generate Go + Java; field-mapping tests vs `Tick`/`GoTick`; serialization round-trip tests; bit-exact `raw_payload` test.
-- **Exit:** proto + mapping tests green; `make gate` still green (no production code changed yet).
+- **Exit:** T1-P1/P2 (mapping + integer fidelity), T1-R1/R2 (round-trip + unknown-version), T1-X1 (bit-exact raw), T1-H1 (hash-once) green; mapping + serialization evidence recorded; `make gate` still green (no production code changed yet).
 
 **T2 — Go batcher (Q3, Q13):**
 - `batch.go` (count/bytes/age), keep NDJSON emitter for fallback; unit tests for flush limits.
-- **Exit:** Go tests green; NDJSON path still works.
+- **Exit:** T2-B1..B6 (batch boundaries/edge cases) + T2-S1/S2 (sequence, golden-corpus finding) green; NDJSON path still works; evidence recorded.
 
 **T3 — [CONDITIONAL] Go gRPC client + UDS (Q14, Q20) — only if Test C shows IPC material:**
 - Persistent stream, reconnect, flow-control, metrics; control records ride the stream.
 - **Test B (Go-only):** broker replay → decode → batch; max Go throughput. *(Runs regardless — pure Go throughput is a Gate-0-style measurement that does not depend on gRPC.)*
-- **Exit:** Test B recorded; gRPC client connects to a stub server over UDS. *(Only built if the T3 gate opens.)*
+- **Exit:** Test B recorded; T3-G1/G2 green against a stub server over UDS. *(Only built if the T3 gate opens; otherwise skip reason recorded as evidence — O-4.)*
 
 **T4 — [CONDITIONAL] Java gRPC server + router (Q16, Q17) — only if Test C shows IPC material:**
 - UDS bind, decode, freshness gates (kept), router `token%16`, bounded queues, queue metrics.
 - **Test C (IPC-only):** Go → proto → gRPC/UDS → Java, no Fluss. Measures whether IPC is material.
-- **Exit:** Test C recorded; **this is the gRPC/UDS decision gate (Q13, O-4)** — **2026-08-27 evidence (THR-PROBE-002 + Gate 0): pipe is at 18.5% CPU, linger is the bottleneck → gRPC/UDS DEFERRED. T3/T4 only start if E2E-after-T6 profiling shows the stdout pipe itself is material.**
+- **Exit:** Test C recorded; T4-G3/G4 green if built (UDS perms/stale-socket cleanup, router token%16 even). **This is the gRPC/UDS decision gate (Q13, O-4)** — **2026-08-27 evidence (THR-PROBE-002 + Gate 0): pipe is at 18.5% CPU, linger is the bottleneck → gRPC/UDS DEFERRED. T3/T4 only start if E2E-after-T6 profiling shows the stdout pipe itself is material; otherwise skip evidence recorded.**
 
 **T5 — Java writer + batching (Q17, Q18):**
 - **Single AppendWriter is the default** (O-1 RESOLVED: 58k–357k rows/s measured on one writer; multi-writer only if E2E misses 50k). Batching: client `batch-timeout=1ms` (O-2 RESOLVED), per-writer batch; ack handling; retries; per-writer AppendTracker.
 - **Test D:** Java → Fluss scaling (1/2/3/4/8 writers) — **RE-SCOPED: run only if E2E-after-T6 misses 50k sustained**; otherwise single-writer result stands.
-- **Exit:** fail-closed backpressure verified; single-writer batching meets 50k or Test D triggered.
+- **Exit:** T5-Q1..Q3 (queue thresholds/accounting/bounded) + T5-W1..W4 (batching @1ms, retries, no-silent-drop, drain) + T5-J1..J3 (freshness/fingerprint/quarantine) + T5-H2 (hash config) green; fail-closed backpressure verified; no per-event Fluss write proven; single-writer batching meets 50k or Test D triggered.
 
 **T6 — Integration + fallback flag (Q21):**
 - `TRANSPORT=pipe|grpc` — **pipe is the default/primary transport** (O-4); `grpc` is the opt-in mode used only if T3/T4 were built. Wire the batcher into the existing pipe first; keep NDJSON fallback. UDS volume + gRPC wiring only if T3/T4 exist.
 - **Test E:** end-to-end vs baseline (Test A). 
-- **Exit:** E2E ≥ 18k live / 49k synthetic, p99 ≤ 250ms, gate green.
+- **Exit:** Test E + T6-I1 (replay correctness) + T6-I2 (control records) + T6-I3 (pipe parity) + T6-RB1 (rollback mechanism) green; E2E ≥ 18k live / 49k synthetic, p99 ≤ 250ms, gate green.
 
 **T7 — Failure testing (Q22, doc §53):**
 - Broker disconnect/reconnect, Java restart, Fluss down/slow, queue saturation, malformed proto, sequence gap, duplicate, graceful shutdown. *(gRPC drop / UDS failure cases only if T3/T4 were built.)*
-- **Exit:** full matrix green with evidence.
+- **Exit:** T7-F1..F18 (failure matrix) + T7-L1 (loss bound) + T7-D1 (duplicates) green with per-test evidence; ≤1s loss bound proven or the gate FAILS (no silent weakening).
 
 **T8 — Performance matrix (Q12, doc §37-38):**
 - 1/2/3 conns × 1/2/3/4/8 writers *(writer sweep only if Test D triggered; else single writer)* × batch 16..1024 × loads 15k..150k; capture throughput, p50/p95/p99/p99.9, CPU, RSS, alloc, GC, queue depth/bytes, Fluss latency, retry rate.
-- **Exit:** the 50k sustained + p99 250ms acceptance numbers met with evidence.
+- **Exit:** T8-PERF1..N matrix complete (every record with all mandated fields incl. staged latencies); ≥50k sustained + p99 ≤250ms met; dominant latency stage identified; Test D ran only if E2E missed 50k (with evidence or documented non-trigger).
 
 **T9 — Hardening + soak (Q23, Q25):**
 - Resource limits, socket perms, dashboards, alerts, rollback proc, 30-min+ soak (bounded RSS/queue/latency, no leaks, stable retry).
-- **Exit:** soak green; `make gate` 13/13; `make full-audit` green; rollback via `TRANSPORT=pipe` proven.
+- **Exit:** T9-S1 (30+ min soak, bounded RSS/queue/latency, no retry storm/sequence corruption/leaks) + T9-H1 (hardening) + T9-RB2 (operational rollback drill) green; regression R-215..R-224 green; `make gate` 13/13; `make full-audit` green; rollback via `TRANSPORT=pipe` proven.
 
 ---
 
-## 7. Testing Requirements (per task)
+## 7. Testing Contract (comprehensive, enforceable)
 
-| Task | Required tests |
-|---|---|
-| T1 | Proto field-mapping vs `Tick`/`GoTick`; serialization round-trip; bit-exact `raw_payload`; unknown-version rejection |
-| T2 | Batch flush at count/bytes/age boundaries; batch empty; single-event batch |
-| T3 | *(conditional)* Stream connect/reconnect; flow-control; UDS path/perms; control-record framing |
-| T4 | *(conditional)* Router distribution (token%16 even); queue byte accounting; freshness gates still reject stale/future |
-| T5 | Writer retry/backoff; ack handling; single-writer batching @1ms; per-writer halt at 100%; no silent drop |
-| T6 | `TRANSPORT=pipe` fallback parity; E2E vs baseline; gate green |
-| T7 | Full failure matrix (doc §53) |
-| T8 | Full benchmark matrix (doc §37) with all metrics |
-| T9 | Soak (doc §53): bounded RSS, stable latency/retry, no leaks, sequence integrity |
+Every implementation task maps to tests with stable IDs. **A task is not complete until its mapped tests pass and the required evidence is recorded under `logs/tracker-14/`** (guardrail 9). Tests below are the acceptance mechanism for T1–T9; nothing may claim completion without them. Testing validates the locked architecture — it does not redesign it.
 
----
+### 7.1 Test taxonomy (levels)
+
+| Level | Scope | Determinism | Runner | Applies to |
+|---|---|---|---|---|
+| UNIT | One function/class; fake clock; no I/O, no network | Deterministic, fast | Go `go test` / Java JUnit | proto mapping, batch boundaries, byte accounting, timestamps, sequence, validation, retry/backoff, queue thresholds, config, transport selection |
+| COMPONENT | One component vs controlled deps (in-memory Fluss, stub gRPC, fake clock) | Deterministic | Go tests / JUnit | batcher, transport, gRPC handler (if built), router, bounded queue, writer, AppendWriter interaction, shutdown |
+| CONTRACT | Go ↔ protobuf ↔ Java cross-language; golden byte fixtures committed | Deterministic | Go + JUnit sharing fixtures | serialization, field mapping, depth arrays, integer fidelity, raw payload, metadata, version/unknown-version, fingerprint inputs, timestamp semantics |
+| INTEGRATION | Real pipeline: broker replay → Go → transport → Java → Fluss; verify persisted rows | Deterministic replay corpus | `make` targets / compose | Test E, replay correctness, control records, pipe parity |
+| FAILURE | Every §5 scenario injected; expected + recovery behavior asserted | Controlled injection | `make` targets / compose | T7 matrix, loss bound, duplicates |
+| PERFORMANCE | Acceptance metrics incl. staged latencies | Fixed env + load profile | `make perf` / JFR / pprof | T8 matrix, Test A/B/D/E |
+| SOAK | Long-running degradation detection | Fixed env, 30+ min | `make soak` | T9 |
+| REGRESSION | Untouched contracts unchanged | Repo-level | `make gate` (13/13), `make full-audit`, `make pin-check`, R-215..R-224 | Every task |
+
+### 7.2 Test ID scheme
+
+`T<task>-<area><n>` — areas: `P`=proto/mapping, `R`=round-trip/version, `X`=raw-payload, `H`=hash/integrity, `B`=batch, `S`=sequence, `Q`=queue/backpressure, `W`=writer, `J`=Java gates, `G`=gRPC/UDS (conditional), `I`=integration, `RB`=rollback, `F`=failure, `L`=loss-bound, `D`=duplicate, `PERF`=performance, `S1`=soak, `H1`=hardening. `R-2xx` = regression checks (existing repo R-* convention). Every row below states: **what** it tests, **setup/input → action → expected**, **failure condition**, **evidence required**.
+
+### 7.3 Unit & contract tests — T1 (proto)
+
+| ID | What | Setup → Action → Expected | Failure | Evidence |
+|---|---|---|---|---|
+| T1-P1 | Field mapping: every broker field → Go `Tick` → proto → Java → Fluss column | Golden-corpus ticks → decode → marshal → unmarshal → row build. Assert every field path exists, types match the locked §3.2 mapping table, no field missing/extra/type-changed | Any missing/extra/type-changed field; any float conversion of integer paise | mapping-table diff + test report |
+| T1-P2 | Integer fidelity: prices are integer paise, no float anywhere | Values: normal, zero, negative (where valid), max, 5-level depth arrays, large quantities, empty arrays. Assert no float/double in the path, no truncation/overflow | Any float in the path; truncation/overflow | serialization evidence + float-usage grep |
+| T1-R1 | Round trip: Go object → protobuf → Java object identical | Same corpus as P1; compare every field incl. zero/empty values | Any field differs | round-trip diff |
+| T1-R2 | Unknown `contract_version` rejection | Craft batch with unknown version → Java rejects → quarantined, stream continues | Accepted silently | test report |
+| T1-X1 | Bit-exact `raw_payload`: original broker bytes → proto `bytes` → Java → `raw_table_1` byte-for-byte | Binary payloads containing `0x00`, high-bit bytes, arbitrary binary sequences. Compare **actual bytes**, never decoded content | Any byte differs; base64/JSON anywhere in the path | byte-level diff artifact |
+| T1-H1 | Hash computed once — no per-event recompute in hot path | Instrument SHA calls over an N-event run; assert call count == N (Go, once per event), zero Java recomputes when `INGEST_VALIDATE_PAYLOAD_HASH=false` | Per-tick recompute in Java; >1 hash per event in hot path | profiler sample + call-count assert |
+
+### 7.4 Unit & component tests — T2 (Go batcher, sequence)
+
+| ID | What | Setup → Action → Expected | Failure | Evidence |
+|---|---|---|---|---|
+| T2-B1 | Count boundary | MAX_EVENTS=256; feed 255/256/257 events → flush exactly at 256 | Flush at 255 or 257 | test report |
+| T2-B2 | Bytes boundary | MAX_BYTES=64KiB; feed just-below / at / just-above → flush at ≥ MAX_BYTES, never overshoot by more than one event | Overshoot >1 event; early flush | byte-accounting assert |
+| T2-B3 | Age boundary (fake clock) | MAX_AGE=1ms; injectable clock → flush at exactly 1ms, not before/after | Early/late flush | clock assert |
+| T2-B4 | Edge cases | Empty batch; single-event batch; count+bytes simultaneous; count+age; bytes+age; pending batch at shutdown; oversized single event; repeated flushes. Assert no event duplicated or silently lost, counters exact | Any dup/loss; counter mismatch | counters + event-set diff |
+| T2-S1 | Connection-local sequence monotonic, per-epoch | Replay N ticks → `feed_sequence_local` = 1..N; reconnect → new epoch resets, old epoch never reused | Gap / monotonic break | sequence assert |
+| T2-S2 | O-3 finding: does the broker supply a real sequence? | Golden corpus: inspect Full Depth packet for a real broker/exchange seq; record the finding (honest semantics — Q15) | n/a (finding recorded) | finding in evidence |
+
+### 7.5 Component tests — T5 (queue, writer, Java gates)
+
+| ID | What | Setup → Action → Expected | Failure | Evidence |
+|---|---|---|---|---|
+| T5-Q1 | Queue thresholds | Enqueue to <80%, exactly 80%, >80%, exactly 100%, attempt beyond 100%. Assert: 80% → warn + readiness false; 100% → halt; beyond → rejected with no silent drop | Wrong threshold; drop at full | readiness/halt logs |
+| T5-Q2 | Byte accounting | Vary event sizes; assert accounted bytes == sum; 192 MiB budget enforced | Mismatch; budget breach | accounting report |
+| T5-Q3 | Bounded — no hidden overflow | Concurrent producers; large + small batches; assert bounded memory; dequeue after saturation works; no unbounded queue or hidden overflow path | Unbounded growth | RSS + queue-depth traces |
+| T5-W1 | Batching @1ms, **no per-event Fluss write** | Feed 10k events; count AppendWriter invocations; assert write count << event count (batches), never 1 write/event | Per-event write | write-count evidence |
+| T5-W2 | Retry/backoff/ack | Fluss transient failure → retry with existing backoff (100/200/400ms); permanent failure → classified; ack accounting matches | Wrong backoff; ack mismatch | retry log + counters |
+| T5-W3 | No silent drop: queue → writer → AppendWriter → ack | Inject failures; assert every accepted event is either acked or halted-with-record; **none vanish** | Any accepted-but-lost event | event-set reconciliation |
+| T5-W4 | Drain on shutdown | Shutdown mid-batch; assert pending batch submitted, acks awaited, no lost pending | Lost pending | shutdown trace |
+| T5-J1 | Freshness gates unchanged | Valid ts; exactly-at-boundary ts; >2s NTP skew; >5s age; stale; future — assert behavior identical to today's contract | Behavior drift | gate log diff |
+| T5-J2 | Fingerprint regression | `FingerprintBuilder` from proto fields == expected fingerprint; stays in Java | Moved to Go; wrong value | fingerprint diff |
+| T5-J3 | Quarantine | Malformed/invalid events → rejected, counted, quarantined per existing behavior, never reach Fluss; stream continues | Reached Fluss; stream halted | quarantine row + counters |
+| T5-H2 | Hash config both ways | `INGEST_VALIDATE_PAYLOAD_HASH=true`: valid passes, corrupted fails + quarantined; `false`: row contents unmutated, no recompute | Corrupt passes (true); mutation (false) | run-matrix evidence |
+
+### 7.6 Conditional tests — T3/T4 (gRPC/UDS) — ONLY if the gate opens (O-4)
+
+| ID | What | Setup → Action → Expected | Failure | Evidence |
+|---|---|---|---|---|
+| T3-G1 | Persistent stream connect/reconnect | Stub server; kill/restart server → client reconnects, new epoch | No reconnect | stream log |
+| T3-G2 | Flow-control | Slow consumer → producer throttled; no unbounded buffering | Unbounded buffer | depth traces |
+| T4-G3 | UDS perms + stale socket | mode 660, group `fluss-ingest`, stale-socket cleanup in entrypoint | Wrong perms; stale-socket EADDRINUSE | perms + cleanup assert |
+| T4-G4 | Router `token%16` even | 10k mixed tokens → bucket counts within tolerance; per-token order preserved | Skew; order break | distribution report |
+
+### 7.7 Integration — T6
+
+| ID | What | Setup → Action → Expected | Failure | Evidence |
+|---|---|---|---|---|
+| T6-I1 | Replay correctness (Test E core) | Deterministic replay corpus → full pipeline → Fluss. Capture: input count, expected count, output count, rejected, quarantined, duplicates, sequence gaps, raw-payload hashes, fingerprints, timestamps, persisted values. Compare expected vs actual | Any count/value mismatch | full corpus report |
+| T6-I2 | Control records via same transport | `bridge_metrics` / `broker_quarantine` / `bridge_event` through the proto transport; distinguishable from market data; Java handlers unchanged; malformed control records handled safely, cannot corrupt market-data processing | Confused with data; handler breakage | control-record trace |
+| T6-I3 | Pipe parity | Same corpus over NDJSON vs proto-batch pipe; identical persisted rows | Row drift | row diff |
+| T6-RB1 | Rollback mechanism | `TRANSPORT=grpc` → set `TRANSPORT=pipe` → old path starts, accepts traffic, persists correct rows | Env change alone doesn't restore | rollback trace |
+
+### 7.8 Failure — T7 (all §5 scenarios)
+
+Each test documents: **failure injected → expected behavior → observed → recovery → data-loss bound → evidence**.
+
+| ID | Failure injected | Expected behavior | Failure condition | Evidence |
+|---|---|---|---|---|
+| T7-F1 | Broker disconnect (one conn) | That slot reconnects independently; others unaffected; sequence gap → `sequence_gaps_total++` + gap evidence row; data path NOT halted | Other slots affected; path halted | slot logs + gap row |
+| T7-F2 | Broker reconnect | New epoch; sequence restarts; no cross-epoch reuse | Epoch reuse | sequence trace |
+| T7-F3 | Go crash | Supervisor restarts (1× then terminal); Java sees drop → slot disconnected; reconnect = new epoch; compute dedup absorbs duplicates | No restart; dupes beyond TTL | restart log + dedup count |
+| T7-F4 | Java crash | Go detects stream failure → controlled backoff reconnect; Go in-flight buffer bounded (Q22); no loss beyond bound | Unbounded Go buffer | buffer trace |
+| T7-F5 | Fluss slow | Queues fill → flow-control slows Go → batch pause; sustained → halt + alert; no silent drop | Drop; no halt | queue depth + alert |
+| T7-F6 | Fluss unavailable | Client retries (existing 30s wait-timeout → bounded); writers fail; queues fill → same backpressure; never drop | Unbounded retry; drop | retry + queue traces |
+| T7-F7 | Queue 80% | Warn + readiness false + producer slowed | No warn | readiness log |
+| T7-F8 | Queue 100% | Halt, critical alert, preserved acknowledged-loss record | Silent drop | halt record |
+| T7-F9 | Malformed protobuf | Decode error counted, quarantined, rate-limited log; stream continues | Stream dies | quarantine + counter |
+| T7-F10 | Malformed broker packet | Same handling as F9 on the Go side | Pipeline halt | counter |
+| T7-F11 | Sequence gap | Detected per-connection; metrics + discontinuity evidence (TimeJumpMonitor pattern); does NOT halt | Halts path | gap evidence |
+| T7-F12 | Duplicate delivery | At-least-once; compute dedup (TTL 300s) removes; no mutation while dedup | Exactly-once claim; mutation | dedup trace |
+| T7-F13 | Graceful shutdown | Exact doc §43 order; no lost pending, no unacked writes, no premature exit | Any violation | shutdown trace |
+| T7-F14 | Restart | Clean restart; state consistent; no corruption | Corruption | restart evidence |
+| T7-F15 | Rollback | `TRANSPORT=pipe` restores working path under failure | Rollback fails | rollback drill log |
+| T7-F16 | Resource exhaustion | Per-container limits + queue budgets; OOM → container restart → replay from Go buffer (bounded) / broker resubscribe | Unbounded memory | RSS trace |
+| T7-F17 | Transport failure (gRPC) | *Only if T3/T4 built:* stream failure → reconnect/backoff; no silent loss | Loss | stream log |
+| T7-F18 | UDS failure | *Only if T3/T4 built:* stale socket/permission → entrypoint cleanup, retry | Crash-loop | socket log |
+
+| ID | What | Setup → Action → Expected | Failure | Evidence |
+|---|---|---|---|---|
+| T7-L1 | Loss bound ≤1s of feed | Deliberately kill/restart the relevant component under controlled load. Measure: events submitted, events acknowledged, events recovered, events lost, duration of loss, max in-flight. Assert lost ≤ 1s of feed (~50k events @ 50k tps) | Bound not provable → **gate FAILS** (no silent weakening) | loss-accounting report |
+| T7-D1 | Duplicates / at-least-once | Retry-induced duplicates; assert measurable, transport never claims exactly-once, compute dedup removes within TTL, no data mutation | Exactly-once claim; dedup miss | dedup evidence |
+
+### 7.9 Performance — T8 (acceptance metrics + staged latencies)
+
+- **Baseline:** Test A (recorded 2026-08-27: 18,103 rows/s @ 20k envelope, JVM ~369 MB/s alloc, GC p50 6.4ms, RSS 1.62 GB — `logs/tracker-14/gate0-testA-20260827/`). Re-measure the new implementation on the same workload + environment.
+- **Matrix (T8-PERF1..N):** 1/2/3 conns × writers (1 = default; 2/4/8 **ONLY if Test D triggered** — else record "not triggered") × batch 16..1024 × loads 15k..150k.
+- **Every benchmark record must include:** exact configuration; duration; warm-up; steady-state interval; input volume; output volume; errors; retries; throughput; p50/p95/p99/p99.9/max; CPU; RSS; JVM allocation; GC; queue depth + bytes; Fluss submit latency; Fluss ack latency; **staged latencies `decode_latency`, `batching_latency`, `ipc_latency`, `routing_latency`, `fluss_submit_latency`, `fluss_ack_latency`, `end_to_end_latency`** — aggregate-only reporting is a failure.
+- **Latency-budget validation (T8-LB):** the report must identify which stage consumes the p99/p99.9 tail (the 2026-08-27 evidence says the 20ms linger was dominant — this test proves whether the new bottleneck is decode, batching, IPC, routing, queue, or Fluss submit/ack).
+- **Failed benchmark definition:** any record missing a mandated field; unexplained errors/retries; load drift (input ≠ declared volume); p99 tail unexplained by the stage histogram.
+- **Test D (conditional):** 1/2/4/8 writers with throughput, p50/95/99/99.9, CPU, RSS, queue depth, Fluss latency, retries, ordering, correctness — **ONLY if E2E-after-T6 misses 50k sustained**; otherwise skip-evidence recorded ("not triggered — single writer met target"). Multi-writer never becomes the default silently.
+- **Exit:** ≥50k sustained + p99 ≤ 250ms met; matrix complete; dominant stage identified.
+
+### 7.10 Soak & hardening — T9
+
+| ID | What | Setup → Action → Expected | Failure | Evidence |
+|---|---|---|---|---|
+| T9-S1 | 30+ min soak | Monitor: throughput, p50/95/99/99.9, max, CPU, RSS, JVM heap, direct memory, alloc rate, GC, queue depth + bytes, retries, reconnects, sequence gaps, duplicate rate, quarantine rate, writer utilization. Acceptable: no unbounded RSS, no unbounded queue, no progressive latency degradation, no retry storm, no sequence corruption, no unexplained throughput decline, no silent drops | Any unacceptable trend | full soak report + traces |
+| T9-H1 | Hardening | Resource limits, socket perms, dashboards, alerts, rollback proc — all present and exercised | Missing/inert | config + alert evidence |
+| T9-RB2 | Operational rollback drill | `TRANSPORT=pipe` in production-like env: starts, accepts traffic, persists correct rows, passes correctness tests + `make gate` | Rollback not operational | drill log |
+
+### 7.11 Regression — every task (Q23c, §29)
+
+R-215..R-224 must stay green on every task (existing repo R-* convention):
+
+| ID | Check | Mechanism |
+|---|---|---|
+| R-215 | `raw_table_1` schema + 20-column row contract unchanged | `make pin-check` + schema diff |
+| R-216 | DDL manifest + 27-table manifest unchanged | `make pin-check` + diff |
+| R-217 | Flink SignalJob unchanged | git diff guard |
+| R-218 | Safety behavior unchanged | gate suite |
+| R-219 | Quarantine behavior unchanged | gate suite |
+| R-220 | Discontinuity evidence unchanged | gate suite |
+| R-221 | Token-set safety hashes unchanged | gate suite |
+| R-222 | `ingest_ts` / `ack_ts` semantics unchanged | unit + gate |
+| R-223 | 7-day retention + Iceberg offload unchanged | config diff + gate |
+| R-224 | `make gate` 13/13, `make full-audit`, `make pin-check` green | CI-style run each task |
+
+### 7.12 Evidence requirements (guardrail 9)
+
+Every gate-level test produces an evidence record under `logs/tracker-14/` containing: test ID; task/gate; commit SHA; CHG identifier (rollback-affecting changes); environment; configuration; input dataset; event count; duration; result (pass/fail); metrics; relevant logs; failure injection (if applicable); artifact paths; skipped-test reason (if conditional).
+
+> **A task is not complete until its mapped tests pass and its required evidence is recorded.**
+
+### 7.13 Test-to-requirement traceability (Q1–Q25 → task → test → acceptance → evidence)
+
+| Locked decision/req | Task | Test ID(s) | Acceptance criterion | Evidence artifact |
+|---|---|---|---|---|
+| Q1 decode ownership | T1 | T1-P1, T1-R1 | (e) bit-exact + mapping | mapping + round-trip report |
+| Q2 schema | T1 | T1-P1, R-215/R-216 | (c) no regression | pin-check diff |
+| Q3 raw bytes | T1 | T1-X1 | (e) bit-exact raw | byte-diff artifact |
+| Q4 Java validation | T5 | T5-J1 | (b) reliability | gate log diff |
+| Q5 payload hash | T1/T5 | T1-H1, T5-H2 | hash-once; both configs | JFR + run matrix |
+| Q6 binary transport | T1/T6 | T1-X1, T6-I3 | (e) no inflation, no mutation | byte diff + parity |
+| Q7 replay | T6 | T6-I1 | (e) replay correctness | corpus report |
+| Q9 row contract | T1/T6 | T1-P1, T6-I3, R-215 | (c) bit-identical rows | row diff |
+| Q12 performance | T8 | T8-PERF1..N, T8-LB | (a) 50k + p99 ≤ 250ms | full perf records |
+| Q14 topology | T6 | T6-I2 | two containers | compose diff |
+| Q15 sequence | T2/T7 | T2-S1/S2, T7-F11 | gap detection; honest semantics | seq trace + gap evidence |
+| Q16 routing | T4* | T4-G4 | even distribution | distribution report |
+| Q17 writer/queue | T5 | T5-Q1..Q3, T5-W1 | 1 writer; 192 MiB budget | queue/writer evidence |
+| Q18 backpressure | T5/T7 | T5-Q1, T7-F5..F8 | fail-closed; no drop | readiness/halt logs |
+| Q19 fingerprint | T5 | T5-J2 | stays in Java | fingerprint diff |
+| Q20 control records | T6 | T6-I2 | same transport; handlers unchanged | control trace |
+| Q21 fallback | T6/T9 | T6-RB1, T9-RB2 | pipe restores path | rollback logs |
+| Q22 loss bound | T7 | T7-L1 | ≤1s proven or fail | loss accounting |
+| Q23 DoD | all | all above | order (e)→(a)→(b)→(c)→(d) | all artifacts |
+| Q25 sacred contracts | all | R-215..R-224 | untouchable | gate + diffs |
+
+### 7.14 Quality bar (self-check before each task closes)
+
+- **Correctness:** can every data transformation be auto-verified? (T1-P*, T6-I1)
+- **Safety:** can silent loss / corruption / unbounded buffering be detected? (T5-Q*, T7-F*, T7-L1)
+- **Performance:** can ≥50k sustained + p99 ≤ 250ms be proven? (T8-PERF*)
+- **Tail latency:** can the p99/p99.9 stage be identified? (T8-LB)
+- **Reliability:** can every §5 failure mode be reproduced + verified? (T7-F1..F18)
+- **Regression:** Flink/DDL/schema/safety/quarantine unchanged? (R-215..R-224)
+- **Rollback:** `TRANSPORT=pipe` restores the working path? (T6-RB1, T9-RB2)
+- **Evidence:** can an independent reviewer determine exactly what was tested? (7.12)
+- **Coding-agent usability:** can another agent implement without inventing its own test strategy? (this §7)
 
 ## 8. Acceptance Criteria (Definition of Done — Q23)
 
