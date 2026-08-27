@@ -1,6 +1,6 @@
 # Low-Latency Ingestion Implementation Contract — 2026-08-27
 
-**Status:** Locked. All 25 architectural decisions resolved and approved by the operator (`all recommended`, 2026-08-27).
+**Status:** Locked. All 25 architectural decisions resolved and approved by the operator (`all recommended`, 2026-08-27). **Open items O-1/O-2/O-3 resolved by measured evidence 2026-08-27** (`logs/tracker-14/thr-probe-002-linger-writer-20260827.md`): writer count=1, batch linger=1ms, gRPC/UDS deferred behind batching.
 **Supersedes:** the generic guidance in `Low_latency_ingestion.md` (kept as reference; every open question it raised is now decided here).
 **Scope:** transport-only rewrite of the ingestion hot path. **Flink compute, DDL, safety, evidence, and the 13/13 gate must not regress.**
 
@@ -169,11 +169,11 @@ message TickEvent {
 | Q10 | Consumers | Both decoded columns + raw bytes (already provided by `raw_payload` column). |
 | Q11 | Profiling first | Yes, time-boxed ~1 day: Test A baseline + Go CPU / JVM alloc-GC profile before rewrite. |
 | Q12 | Targets | 50k sustained (DEC-036), p99 end-to-end ≤ 250ms. |
-| Q13 | Evidence gate | Hybrid: batching + multi-writer first (needed for 50k anyway); gRPC/UDS decision gated on Test C. |
+| Q13 | Evidence gate | **RESOLVED 2026-08-27: batching + 1ms linger first** (measured: linger is the bottleneck, not IPC). gRPC/UDS deferred until profiling proves the pipe material. |
 | Q14 | Topology | Two containers, shared UDS volume. |
 | Q15 | Broker sequence | Verify from golden corpus; if absent, connection-local only, honest gap semantics. |
 | Q16 | Router key | `instrument_token % 16`. |
-| Q17 | Writer/queue | Start 3, total budget 192 MiB, Test D decides winner (2/4/8). |
+| Q17 | Writer/queue | **RESOLVED 2026-08-27: 1 writer** (measured 58k-357k rows/s single writer; 2/4/8 only if E2E misses 50k). Total budget 192 MiB. |
 | Q18 | Backpressure | Fail-closed: 80% warn/readiness false, 100% halt; gRPC flow-control primary, halt terminal. Never drop. |
 | Q19 | Fingerprint+freshness | Stay in Java. Fingerprint computes from proto fields. No move to Go. |
 | Q20 | Control records | Into same gRPC stream (one transport). Types/handlers unchanged. |
@@ -218,6 +218,13 @@ message TickEvent {
 - Test A: baseline pipe path at 18k live / 49k synthetic. Record CPU, RSS, JVM alloc, GC, p50/p99/p99.9.
 - Go CPU profile + JVM allocation/GC profile. Identify whether JSON parse / base64 / SHA / single-writer is the cost.
 - **Exit:** written evidence record (`logs/tracker-14/`), the number to beat, and confirmation of which optimizations matter.
+
+**Gate 0 status: DONE 2026-08-27** (`logs/tracker-14/gate0-testA-20260827/test-a-20k-evidence-20260827.md`):
+- **Baseline to beat: 18,103 rows/s @ 20k envelope** (1,339,466 rows, errors=0, uncertain=0; matches documented 18,441 live)
+- **JVM:** ~369 MB/s allocation, 23 GC young pauses (median 3.28s), pause p50 6.4ms/max 8.5ms, RSS plateau 1.62 GB (stable)
+- **JFR top:** base64 decode (89 samples), regex (96), SHA-256 (24), netty+ReentrantLock contention (184), `processLine` (41)
+- **Go (30s CPU, 18.5% of wall):** JSON encoding 23%, syscalls 17%, base64 1.4%, SHA 1.8%, broker decode only 1.3% — bridge NOT CPU-bound
+- **Confirmed:** JSON/base64/SHA hot path is material (the #1 cost); batching (1ms linger, THR-PROBE-002) removes lock/GC contention; gRPC/UDS further deferred (not needed to hit targets)
 
 **T1 — Protobuf contract (Q1-Q7):**
 - `market_data.proto` per §3.2; generate Go + Java; field-mapping tests vs `Tick`/`GoTick`; serialization round-trip tests; bit-exact `raw_payload` test.
@@ -306,10 +313,10 @@ Gate 0 (profiling) → T1 (proto) → T2 (Go batch) + T3 (Go gRPC) → T4 (Java 
 
 ## 10. Open Items (genuinely deferred, must be confirmed during T8)
 
-- **O-1 (writer count):** 3 initial; Test D (2/4/8) picks the production value. Benchmark, not assumption.
-- **O-2 (batch params):** `MAX_EVENTS`, `MAX_BYTES`, `MAX_AGE` are benchmark parameters (doc §10). Initial: 256 events / 64KiB / 20ms; T8 tunes.
+- **O-1 (writer count):** **RESOLVED 2026-08-27: 1 writer** — single AppendWriter measured 58k-357k rows/s across lingers (THR-PROBE-001/002), exceeding the 50k target. Revisit 2/4/8 only if E2E misses 50k.
+- **O-2 (batch params):** **RESOLVED 2026-08-27: MAX_AGE=1ms** (measured p99 10.5ms at 200k rows/s vs 38ms at 20ms — THR-PROBE-002). MAX_EVENTS≈256, MAX_BYTES≈64KiB. T8 tunes only if E2E misses p99 ≤ 250ms.
 - **O-3 (sequence):** whether the Full Depth packet carries a real broker/exchange sequence — verify from golden corpus in T1; if absent, connection-local only.
-- **O-4 (gRPC/UDS justification):** the Test C evidence determines whether gRPC/UDS is kept as the sole transport or the pipe stays with batching. **Decision is benchmark-gated per Q13 — do not skip.**
+- **O-4 (gRPC/UDS justification):** **RESOLVED 2026-08-27: defer gRPC/UDS.** THR-PROBE-002 shows the 20ms client linger (not the pipe) is the dominant latency cost. Build batching + 1ms linger on the existing path first; gRPC/UDS only if end-to-end profiling then shows IPC material (doc §40).
 
 ---
 
