@@ -342,9 +342,13 @@ public final class IngestionService {
         }
 
         // 4. Connect to Fluss and verify schema version (D3)
+        FlussClientAdapter.WriterMode writerMode =
+                "typed".equals(config.flussWriterMode)
+                        ? FlussClientAdapter.WriterMode.TYPED
+                        : FlussClientAdapter.WriterMode.GENERIC;
         FlussRowConverter converter = FlussClientAdapter.connect(
                 config.flussBootstrap, config.rawTableName,
-                config.flussWriterBatchTimeoutMs);
+                config.flussWriterBatchTimeoutMs, writerMode);
         LOG.info("ingestion: Fluss connected (bootstrap={}, table={})",
                 config.flussBootstrap, config.rawTableName);
 

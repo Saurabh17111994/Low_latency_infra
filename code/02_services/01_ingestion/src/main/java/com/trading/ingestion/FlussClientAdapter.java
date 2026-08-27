@@ -11,6 +11,7 @@ import org.apache.fluss.client.ConnectionFactory;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.writer.AppendResult;
 import org.apache.fluss.client.table.writer.AppendWriter;
+import org.apache.fluss.client.table.writer.TypedAppendWriter;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.BinaryString;
@@ -40,6 +41,12 @@ final class FlussClientAdapter {
 
     private static final Logger LOG = LoggerFactory.getLogger(FlussClientAdapter.class);
 
+    /** Writer mode for the A/B bench: generic (default) or typed. */
+    enum WriterMode {
+        GENERIC,
+        TYPED
+    }
+
     private FlussClientAdapter() {}
 
     /**
@@ -48,7 +55,20 @@ final class FlussClientAdapter {
      */
     static FlussRowConverter connect(String bootstrapServers, String tablePath,
                                       int writerBatchTimeoutMs) {
-        LOG.info("fluss: connecting (bootstrap={}, table={})", bootstrapServers, tablePath);
+        return connect(bootstrapServers, tablePath, writerBatchTimeoutMs, WriterMode.GENERIC);
+    }
+
+    /**
+     * A/B bench (2026-08-27, forensic audit): connect with an explicit writer
+     * mode. {@code GENERIC} = our hand-optimized {@code GenericRow.of(20)} path
+     * (default, locked); {@code TYPED} = Fluss {@code TypedAppendWriter} POJO
+     * reflection path. The typed path exists ONLY to measure whether the SDK's
+     * POJO converter beats our explicit build — it is not the default.
+     */
+    static FlussRowConverter connect(String bootstrapServers, String tablePath,
+                                      int writerBatchTimeoutMs, WriterMode writerMode) {
+        LOG.info("fluss: connecting (bootstrap={}, table={}, mode={})",
+                bootstrapServers, tablePath, writerMode);
 
         // 1. Configure bootstrap
         Configuration conf = new Configuration();
@@ -78,9 +98,17 @@ final class FlussClientAdapter {
         LOG.info("fluss: schema verified (table={}, schemaId={}, columns={})",
                 tablePath, info.getSchemaId(), info.getRowType().getFieldCount());
 
-        // 6. Create append writer (starts background Sender + MetadataUpdater)
-        AppendWriter appendWriter = table.newAppend().createWriter();
+        // 6. Create append writer (starts background Sender + MetadataUpdater).
+        //    A/B: typed mode uses the SDK's reflection POJO converter instead
+        //    of our explicit GenericRow build (measured — see forensic audit).
+        if (writerMode == WriterMode.TYPED) {
+            TypedAppendWriter<TypedFlussRowConverter.TickRow> typedWriter =
+                    table.newAppend().createTypedWriter(TypedFlussRowConverter.TickRow.class);
+            LOG.info("fluss: connected (table={}, path={}, mode=TYPED)", tablePath, path);
+            return new TypedFlussRowConverter(typedWriter, connection, path.toString());
+        }
 
+        AppendWriter appendWriter = table.newAppend().createWriter();
         LOG.info("fluss: connected (table={}, path={})", tablePath, path);
         return new RealFlussRowConverter(appendWriter, connection, path.toString());
     }

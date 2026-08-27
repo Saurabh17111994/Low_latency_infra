@@ -45,6 +45,9 @@ public final class IngestionConfig {
     public final int maxBatchWaitMs;
     /** Fluss AppendWriter batch linger (O-2 RESOLVED: 1ms). */
     public final int flussWriterBatchTimeoutMs;
+    /** A/B bench (forensic audit 2026-08-27): "generic" (default, locked) or
+     *  "typed" (Fluss TypedAppendWriter POJO reflection path, measurement only). */
+    public final String flussWriterMode;
     /** Per-tick SHA-256 payload validation (A2 decision: keep, config-optional).
      *  true=validate (safety default); false=skip recompute (perf, proto path). */
     public final boolean validatePayloadHash;
@@ -89,6 +92,7 @@ public final class IngestionConfig {
         this.maxBatchRecords = b.maxBatchRecords;
         this.maxBatchWaitMs = b.maxBatchWaitMs;
         this.flussWriterBatchTimeoutMs = b.flussWriterBatchTimeoutMs;
+        this.flussWriterMode = b.flussWriterMode;
         this.validatePayloadHash = b.validatePayloadHash;
         this.maxPendingRecords = b.maxPendingRecords;
         this.maxPendingBytes = b.maxPendingBytes;
@@ -169,6 +173,12 @@ public final class IngestionConfig {
         // 20ms — THR-PROBE-002). Config-driven so T8 can sweep 16..1024.
         b.flussWriterBatchTimeoutMs = intRange(
                 env, "FLUSS_WRITER_BATCH_TIMEOUT_MS", 1, 1, 1000, errors);
+        // A/B bench: FLUSS_WRITER_MODE=generic (default) | typed (measurement only)
+        String mode = env.getOrDefault("FLUSS_WRITER_MODE", "generic").trim().toLowerCase();
+        if (!mode.equals("generic") && !mode.equals("typed")) {
+            errors.add("FLUSS_WRITER_MODE must be 'generic' or 'typed' (got '" + mode + "')");
+        }
+        b.flussWriterMode = mode;
         b.validatePayloadHash = boolEnv(env, "INGEST_VALIDATE_PAYLOAD_HASH", true, errors);
 
         // ---- Backpressure -- T2 tunable (G2 Ingest) ----
@@ -527,6 +537,7 @@ public final class IngestionConfig {
 
     private static class Builder {
         int flussWriterBatchTimeoutMs = 1; // O-2 default
+        String flussWriterMode = "generic"; // A/B: locked default is generic
         boolean validatePayloadHash = true; // A2: keep validation, default on
         String arrowAppId = "", arrowAppSecret = "", arrowToken = "";
         String arrowUserId = "", arrowPassword = "", arrowTotpKey = "";
