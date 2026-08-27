@@ -16,7 +16,7 @@ class SignalJobConfigTest {
 
     private static Map<String, String> env() {
         Map<String, String> env = new HashMap<>();
-        env.put("DEDUP_TTL_MS", "300000");
+        env.put("DEDUP_TTL_MS", "60000");
         env.put("CANDLE_WINDOW_MS", "15000");
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");
@@ -28,7 +28,7 @@ class SignalJobConfigTest {
     @Test
     void acceptsPinnedValuesAndDefaultsForTuning() {
         SignalJobConfig cfg = SignalJobConfig.from(env());
-        assertEquals(300_000L, cfg.dedupTtlMs());
+        assertEquals(60_000L, cfg.dedupTtlMs());
         assertEquals(15_000L, cfg.candleWindowMs());
         assertEquals(10_000L, cfg.checkpointIntervalMs());
         assertEquals(30_000L, cfg.checkpointTimeoutMs());

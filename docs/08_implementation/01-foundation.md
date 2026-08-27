@@ -1,6 +1,6 @@
 # Foundation
 
-> **2026-08-28 current test truth:** unit suites green 466/286/386 (common/ingestion/compute) — CHG-102 doc-repair re-verified 2026-08-25: common surefire 469 raw minus 2 gated `FlussBundleReader*` reports (classes removed from src/test — C6 counts only live classes; 469−2=467 vs stated 466 — see `docs_audit` C6 for the live-class definition); compute plain-suite skip count 22 env-gated classes; CHG-100 DdlSmokeTwinSweepTest +4 (2 unit run everywhere, 2 env-gated live skipped in plain runs; common 464→466); plain-suite totals re-verified 2026-08-25 (mvn test per module). **2026-08-26 (stale-code audit): compute 388→386 — deleted `ActiveSignalFilterFunctionTest` (4 tests, superseded by `ActiveSignalFeedbackFunctionTest`) and added 2 ported assertions (`indefiniteBlockSurvivesProcessingTimeAdvance`, `remainsBlockedAcrossManyWindows`) to the feedback test. 2026-08-28 (T1–T9 low-latency ingestion): ingestion 247→286 — proto transport, batch queue, sequence-gap, failure-matrix, staged-latency, and soak-contract tests (CHG-113 scope, this dossier's truth line).**
+> **2026-08-28 current test truth:** unit suites green 466/286/385 (common/ingestion/compute) — 386→385 corrected 2026-08-28 (CHG-116 re-verify: surefire XML total 385, the declared 386 was an off-by-one from the 2026-08-26 stale-code audit; CHG-116 itself changed no test count — pure value edits) — CHG-102 doc-repair re-verified 2026-08-25: common surefire 469 raw minus 2 gated `FlussBundleReader*` reports (classes removed from src/test — C6 counts only live classes; 469−2=467 vs stated 466 — see `docs_audit` C6 for the live-class definition); compute plain-suite skip count 22 env-gated classes; CHG-100 DdlSmokeTwinSweepTest +4 (2 unit run everywhere, 2 env-gated live skipped in plain runs; common 464→466); plain-suite totals re-verified 2026-08-25 (mvn test per module). **2026-08-26 (stale-code audit): compute 388→386 — deleted `ActiveSignalFilterFunctionTest` (4 tests, superseded by `ActiveSignalFeedbackFunctionTest`) and added 2 ported assertions (`indefiniteBlockSurvivesProcessingTimeAdvance`, `remainsBlockedAcrossManyWindows`) to the feedback test. 2026-08-28 (T1–T9 low-latency ingestion): ingestion 247→286 — proto transport, batch queue, sequence-gap, failure-matrix, staged-latency, and soak-contract tests (CHG-113 scope, this dossier's truth line).**
 > The longer historical status line below remains a dated implementation record; the current
 > C6 machine gate reads this line.
 
@@ -72,7 +72,7 @@ Per the `00-start-here.md` conflict rule (`docs/08_implementation/00-start-here.
 
 #### Implementation checklist
 
-- [x] Centralized config-constants module (all keys, no scattered literals); startup rejects DEDUP_TTL_MS!=300000 and CANDLE_WINDOW_MS!=15000.
+- [x] Centralized config-constants module (all keys, no scattered literals); startup rejects DEDUP_TTL_MS!=60000 and CANDLE_WINDOW_MS!=15000.
   - Source: 01-foundation.md -> "Required configuration constants" (orig L37)
   - Design: Design-ready | Implementation: Implemented | Evidence: Untested | Live-money: Blocked
   - Location: code/common/src/main/java/com/trading/common/config/PlatformConfig.java
@@ -88,7 +88,7 @@ All constants are versioned runtime configuration. No numeric literals scattered
 | `MAX_PENDING_APPEND_RECORDS` | `50000` (validated 100..1000000) | Stop accepting at limit; set readiness false |
 | `MAX_PENDING_APPEND_BYTES` | `min(67108864, floor(container_memory_limit_bytes × 0.10))` | Stop accepting at limit; set readiness false |
 | `PENDING_APPEND_WARNING_PERCENT` | `80` | Emit warning alert; set readiness false at 80% of either limit |
-| `DEDUP_TTL_MS` | `300000` | Five minutes; reject startup for any other value |
+| `DEDUP_TTL_MS` | `60000` | One minute; reject startup for any other value |
 | `CANDLE_WINDOW_MS` | `15000` | Fifteen seconds; reject startup for any other value |
 | `CHECKPOINT_INTERVAL_MS` | `10000` | Signal and Babysitter jobs |
 | `CHECKPOINT_TIMEOUT_MS` | `30000` | Signal and Babysitter jobs |

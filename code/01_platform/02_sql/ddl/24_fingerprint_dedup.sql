@@ -1,4 +1,6 @@
--- fingerprint_dedup: authoritative dedup state — one row per accepted fingerprint
+-- fingerprint_dedup: HISTORICAL DDL (DEC-038 era, superseded 2026-08-17 by Design B:
+--   the dedup set is authoritative Flink keyed state; this table is no longer a SignalJob
+--   startup dependency — kept on file as the DDL record). One row per accepted fingerprint
 --   within its logical TTL (DEC-038; docs/08_implementation/04-signal-job.md
 --   "Design — fingerprint_dedup dedup state table")
 -- Owner: Signal job
@@ -9,9 +11,9 @@
 --   2026-08-22 — was 2d; now 7d + block-delete-unverified guard: Fluss delete
 --   blocked until iceberg manifest VERIFIED, else EOD controller extends;
 --   critical alert). The logical dedup lifetime is the column-based expiry
---   (DEDUP_TTL_MS = 300000), enforced by the writer + cleanup pass — never
+--   (DEDUP_TTL_MS = 60000), enforced by the writer + cleanup pass — never
 --   the log TTL alone
--- Lake: none — transient state (logical life ≤ 5 min); no EOD/audit value; avoids
+-- Lake: none — transient state (logical life ≤ 1 min); no EOD/audit value; avoids
 --   lake churn at the write rate (datalake disabled, like forming_bar)
 -- Scope: account_scope_id
 -- Schema version: 1

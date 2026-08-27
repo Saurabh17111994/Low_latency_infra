@@ -185,7 +185,7 @@ class SignalJobOperatorUidTest {
                 System.getenv().getOrDefault("SIGNAL_CANDIDATES_TABLE", "Signal_Candidates"));
         env.put("SIGNAL_CURRENT_TABLE",
                 System.getenv().getOrDefault("SIGNAL_CURRENT_TABLE", "Signal_Candidates_current"));
-        env.put("DEDUP_TTL_MS", "300000");
+        env.put("DEDUP_TTL_MS", "60000");
         env.put("CANDLE_WINDOW_MS", "15000");
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");

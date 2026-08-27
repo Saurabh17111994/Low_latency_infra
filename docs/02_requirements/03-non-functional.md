@@ -75,7 +75,7 @@ The following configuration values SHALL be enforced at startup. Deployment SHAL
 | `CONTAINER_MEMORY_ALERT_PERCENT` | `85` | Emit critical alert at or above 85% total container memory for 60 consecutive seconds |
 | `BROKER_BASELINE_TICKS_PER_INSTRUMENT_PER_SEC` | `20` | Synthetic baseline average only; not a live-feed or per-instrument scheduling guarantee |
 | `BROKER_MAX_TICKS_PER_INSTRUMENT_PER_SEC` | `30` | Workload generator rejects profiles that exceed 30 for any instrument |
-| `DEDUP_TTL_MS` | `300000` | Five minutes; startup fails for any other value |
+| `DEDUP_TTL_MS` | `60000` | One minute; startup fails for any other value |
 | `CANDLE_WINDOW_MS` | `15000` | Fifteen seconds; startup fails for any other value |
 | `CHECKPOINT_INTERVAL_MS` | `10000` | Signal and Babysitter jobs use this interval |
 | `CHECKPOINT_TIMEOUT_MS` | `30000` | Signal and Babysitter jobs use this timeout |

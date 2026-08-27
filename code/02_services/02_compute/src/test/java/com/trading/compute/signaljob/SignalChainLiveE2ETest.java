@@ -320,7 +320,7 @@ class SignalChainLiveE2ETest {
         e.put("CANDLE_TABLE", "feature_candles_15s");
         e.put("SIGNAL_CANDIDATES_TABLE", "Signal_Candidates");
         e.put("SIGNAL_CURRENT_TABLE", "Signal_Candidates_current");
-        e.put("DEDUP_TTL_MS", "300000");
+        e.put("DEDUP_TTL_MS", "60000");
         e.put("CANDLE_WINDOW_MS", "15000");
         e.put("CHECKPOINT_INTERVAL_MS", "10000");
         e.put("CHECKPOINT_TIMEOUT_MS", "30000");

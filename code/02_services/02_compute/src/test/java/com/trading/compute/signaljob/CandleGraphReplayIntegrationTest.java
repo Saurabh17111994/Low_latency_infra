@@ -487,7 +487,7 @@ class CandleGraphReplayIntegrationTest {
         e.put("SIGNAL_CANDIDATES_TABLE", s.candName());
         e.put("SIGNAL_CURRENT_TABLE", s.curName());
         e.put("QUARANTINE_TABLE", s.quarName());
-        e.put("DEDUP_TTL_MS", "300000");
+        e.put("DEDUP_TTL_MS", "60000");
         e.put("CANDLE_WINDOW_MS", "15000");
         e.put("WATERMARK_OUT_OF_ORDER_MS", "5000");
         e.put("ALLOWED_LATENESS_MS", "5000");

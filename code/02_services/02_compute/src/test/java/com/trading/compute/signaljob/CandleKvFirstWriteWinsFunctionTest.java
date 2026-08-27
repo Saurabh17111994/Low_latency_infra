@@ -177,7 +177,7 @@ class CandleKvFirstWriteWinsFunctionTest {
     /** Same 5-key baseline as SignalJobConfigTest; tuning keys take defaults. */
     private static Map<String, String> env() {
         Map<String, String> env = new HashMap<>();
-        env.put("DEDUP_TTL_MS", "300000");
+        env.put("DEDUP_TTL_MS", "60000");
         env.put("CANDLE_WINDOW_MS", "15000");
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");

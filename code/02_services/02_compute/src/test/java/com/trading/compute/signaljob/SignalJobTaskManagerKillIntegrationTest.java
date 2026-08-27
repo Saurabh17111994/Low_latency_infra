@@ -154,7 +154,7 @@ class SignalJobTaskManagerKillIntegrationTest {
 
     private static Map<String, String> env() {
         Map<String, String> env = new HashMap<>();
-        env.put("DEDUP_TTL_MS", "300000");
+        env.put("DEDUP_TTL_MS", "60000");
         env.put("CANDLE_WINDOW_MS", "15000");
         // CHECKPOINT_INTERVAL_MS is F005-pinned to 10000 (fixed scope) — an
         // override is rejected by SignalJobConfig, which is itself a gate.

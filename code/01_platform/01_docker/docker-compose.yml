@@ -117,7 +117,7 @@ x-flink-common: &flink-common
       # options) — do NOT set env.java.opts here: it collides with the
       # nested env.java.opts.all key in YamlParserUtils and aborts startup
       # (ClassCastException: String cannot be cast to Map).
-    DEDUP_TTL_MS: "300000"
+    DEDUP_TTL_MS: "60000"
     CANDLE_WINDOW_MS: "15000"
     CHECKPOINT_INTERVAL_MS: "10000"
     CHECKPOINT_TIMEOUT_MS: "30000"

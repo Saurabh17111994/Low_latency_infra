@@ -81,7 +81,7 @@ convention).
 make rollout-savepoint ARGS="DRY_RUN=1"
 
 # full rollout (env-driven; export the required pinned job config first)
-export DEDUP_TTL_MS=300000 CANDLE_WINDOW_MS=15000 \
+export DEDUP_TTL_MS=60000 CANDLE_WINDOW_MS=15000 \
        CHECKPOINT_INTERVAL_MS=10000 CHECKPOINT_TIMEOUT_MS=30000 \
        MAX_CONCURRENT_CHECKPOINTS=1
 make rollout-savepoint ARGS="JAR=/tmp/compute.jar"

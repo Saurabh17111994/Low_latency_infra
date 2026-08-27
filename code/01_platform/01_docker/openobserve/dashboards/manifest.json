@@ -14,7 +14,7 @@
       "duration": "dynamic dashboard window (relative)",
       "utc_clock": "host UTC; O2 _timestamp; offset panel bound to service clock_offset_ms",
       "sample_count": "n/a (dynamic)",
-      "failures_or_restarts_included": "yes \u2014 panel 2 (unresolved/unknown) and log tails explicitly capture failures",
+      "failures_or_restarts_included": "yes — panel 2 (unresolved/unknown) and log tails explicitly capture failures",
       "streams": [
         "metrics",
         "logs"
@@ -32,7 +32,7 @@
       "duration": "dynamic dashboard window (relative)",
       "utc_clock": "host UTC; O2 _timestamp",
       "sample_count": "n/a (dynamic)",
-      "failures_or_restarts_included": "yes \u2014 reject/unknown panel and executor log tail",
+      "failures_or_restarts_included": "yes — reject/unknown panel and executor log tail",
       "streams": [
         "metrics",
         "logs"
@@ -50,7 +50,7 @@
       "duration": "dynamic dashboard window (relative)",
       "utc_clock": "host UTC; O2 _timestamp; clock-offset panel bound to service clock_offset_ms",
       "sample_count": "n/a (dynamic)",
-      "failures_or_restarts_included": "yes \u2014 reconnect/epoch panel and ingestion log tail",
+      "failures_or_restarts_included": "yes — reconnect/epoch panel and ingestion log tail",
       "streams": [
         "metrics",
         "logs"
@@ -68,7 +68,7 @@
       "duration": "dynamic dashboard window (relative)",
       "utc_clock": "host UTC; O2 _timestamp",
       "sample_count": "n/a (dynamic)",
-      "failures_or_restarts_included": "yes \u2014 checkpoint-failure panel and Fluss log tail",
+      "failures_or_restarts_included": "yes — checkpoint-failure panel and Fluss log tail",
       "streams": [
         "metrics",
         "logs"
@@ -76,7 +76,7 @@
       "software_versions": "OpenObserve v0.91.5-amd64; Fluss client pinned in ingestion Cargo/pom"
     },
     {
-      "title": "Position State \u2014 Max-One-Active",
+      "title": "Position State — Max-One-Active",
       "file": "position-state.json",
       "folder": "default",
       "dashboard_version": 8,
@@ -86,7 +86,7 @@
       "duration": "dynamic dashboard window (relative)",
       "utc_clock": "host UTC; O2 _timestamp",
       "sample_count": "n/a (dynamic)",
-      "failures_or_restarts_included": "yes \u2014 dropped/cleared counters and trading_alerts table capture indefinite-stuck and ADMIN_CLEAR break-glass",
+      "failures_or_restarts_included": "yes — dropped/cleared counters and trading_alerts table capture indefinite-stuck and ADMIN_CLEAR break-glass",
       "streams": [
         "metrics",
         "logs"
@@ -94,17 +94,17 @@
       "software_versions": "OpenObserve v0.91.5-amd64; SignalJob ActiveSignalFeedbackFunction v1 (Option B strict, no TTL) + Position_State v1 (7 cols, 16 buckets)"
     },
     {
-      "title": "Dedup State \u2014 Design B (Flink keyed MapState, native TTL)",
+      "title": "Dedup State — Design B (Flink keyed MapState, native TTL)",
       "file": "dedup-state.json",
       "folder": "default",
       "dashboard_version": 9,
       "query_version": "o2-sql-2026-08-22",
-      "measurement_boundary": "SignalJob FingerprintDedupFunction keyed MapState: live entry count (compute.dedup.state.count), bytes estimate (compute.dedup.state.bytes.estimate), accepted first-seen rate (compute.dedup.first), duplicate drop rate (compute.dedup.duplicates). Native StateTtlConfig expiry (DEDUP_TTL_MS, ProcessingTime, OnCreateAndWrite) \u2014 CHG-022/023.",
+      "measurement_boundary": "SignalJob FingerprintDedupFunction keyed MapState: live entry count (compute.dedup.state.count), bytes estimate (compute.dedup.state.bytes.estimate), accepted first-seen rate (compute.dedup.first), duplicate drop rate (compute.dedup.duplicates). Native StateTtlConfig expiry (DEDUP_TTL_MS=60000, ProcessingTime, OnCreateAndWrite) — CHG-022/023.",
       "workload": "SignalJob FingerprintDedupFunction (Flink keyed MapState, native TTL) via flink-metrics-otel -> otel-collector:4318",
       "duration": "dynamic dashboard window (relative)",
       "utc_clock": "host UTC; O2 _timestamp",
       "sample_count": "n/a (dynamic)",
-      "failures_or_restarts_included": "yes \u2014 TTL expiry is native; state restored from checkpoint includes the full live set (state IS authoritative)",
+      "failures_or_restarts_included": "yes — TTL expiry is native; state restored from checkpoint includes the full live set (state IS authoritative)",
       "streams": [
         "metrics",
         "logs"
@@ -112,7 +112,7 @@
       "software_versions": "OpenObserve v0.91.5-amd64; FingerprintDedupFunction Design-B v1 (CHG-022/023); no Fluss dedup store"
     },
     {
-      "title": "Security and Platform \u2014 Host/Container/JVM/ZK/Swarm",
+      "title": "Security and Platform — Host/Container/JVM/ZK/Swarm",
       "file": "security-platform.json",
       "folder": "default",
       "dashboard_version": 8,
@@ -122,7 +122,7 @@
       "duration": "dynamic dashboard window (relative)",
       "utc_clock": "host UTC; O2 _timestamp",
       "sample_count": "n/a (dynamic)",
-      "failures_or_restarts_included": "yes \u2014 host alert + JVM heap 85% + ZK quorum loss + infrastructure_logs tail",
+      "failures_or_restarts_included": "yes — host alert + JVM heap 85% + ZK quorum loss + infrastructure_logs tail",
       "streams": [
         "metrics",
         "logs"
@@ -130,7 +130,7 @@
       "software_versions": "OpenObserve v0.91.5-amd64; node_exporter v1.8.2 cadvisor v0.49.1 opentelemetry-javaagent"
     },
     {
-      "title": "Compute and Decision \u2014 Backpressure/Checkpoint/DEC-038",
+      "title": "Compute and Decision — Backpressure/Checkpoint/DEC-038",
       "file": "compute-decision.json",
       "folder": "default",
       "dashboard_version": 8,
@@ -140,7 +140,7 @@
       "duration": "dynamic dashboard window (relative)",
       "utc_clock": "host UTC; O2 _timestamp",
       "sample_count": "n/a (dynamic)",
-      "failures_or_restarts_included": "yes \u2014 checkpoint failure/restore, rehydration failure, backpressure/decision p99",
+      "failures_or_restarts_included": "yes — checkpoint failure/restore, rehydration failure, backpressure/decision p99",
       "streams": [
         "metrics",
         "logs"

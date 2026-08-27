@@ -10,7 +10,7 @@ The Signal Flink job consumes `raw_table_1`, performs bounded best-effort dedupl
 
 - Compute SHALL NOT read `feature_candles_15s` or any other feature table back from Fluss for signal generation — normal feature computation stays in-process within the Signal job. This prohibition does not cover the explicitly designated Fluss-authoritative state tables (dedup state table, `feature_candles_15s` KV, `Signal_Candidates_current` KV — DEC-038), which SHALL be read/written only for externalized state management, hydration, recovery, and authoritative state access; temporary Flink → Fluss → Flink round trips merely to compute a feature remain prohibited.
 - Deduplication SHALL NOT use `seq_no` as a required key, ordering field, or completeness assertion. Fingerprint-based dedup is best-effort only.
-- The deployed `DEDUP_TTL_MS` SHALL be exactly `300000` (5 minutes). Deployment SHALL reject any other value.
+- The deployed `DEDUP_TTL_MS` SHALL be exactly `60000` (1 minute). Deployment SHALL reject any other value.
 - `CANDLE_WINDOW_MS` SHALL be exactly `15000` (15 seconds). Deployment SHALL reject any other value.
 - `CHECKPOINT_INTERVAL_MS` SHALL be exactly `10000` (10 seconds). `CHECKPOINT_TIMEOUT_MS` SHALL be exactly `30000` (30 seconds). `MAX_CONCURRENT_CHECKPOINTS` SHALL be exactly `1`. Deployment SHALL reject any other values.
 - `MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT` SHALL be exactly `1`. Do not forward another active candidate for that instrument.
@@ -80,7 +80,7 @@ Compute SHALL use a bounded state keyed by the versioned `event_fingerprint` and
 
 The deduplication guarantee is best-effort. It may collapse identical legitimate events or fail to identify semantically duplicate packets. It SHALL NOT use `seq_no` as a required key or deterministic ordering field.
 
-Dedup state TTL is **exactly 5 minutes (300000 ms)**. The deployment SHALL reject any other value.
+Dedup state TTL is **exactly 1 minute (60000 ms)**. The deployment SHALL reject any other value.
 
 `CANDLE_WINDOW_MS` SHALL be exactly `15000` in MVP. Deployment SHALL reject any other value.
 

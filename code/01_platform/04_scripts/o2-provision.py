@@ -811,10 +811,10 @@ ALERTS = [
         # per subtask, `sum` totals them (validated 16.75M/23.18M @12:52/12:55Z
         # vs the SQL-derived totals). Evaluates every 1 min.
         promql="sum(max by (subtask_index) (flink_taskmanager_job_task_operator_compute_dedup_state_count))",
-        promql_condition=(">", 6500000),
+        promql_condition=(">", 3600000),
         period=1,
         frequency=1,
-        desc="[Warning/compute] TOTAL dedup state across ALL subtasks > 6.5M entries (Design-B envelope = 20 480 t/s x 300 s TTL ≈ 6.1M, 2026-08-17 CHG-022/DEC-040: dedup is authoritative Flink keyed state — the MapState IS the set). SCHEDULED promql (O2 v0.91.5 realtime = per-row only, so a cross-subtask sum cannot be realtime); max by (subtask_index) collapses the reporter's per-flush start_time series, sum totals the subtasks — validated 2026-08-17 (naive sum over-counts ~15x). Recovery = check accepted-rate/TTL math vs the envelope, not a cache sweep. Series = Flink FingerprintDedupFunction gauge (retargeted 2026-08-12 from the dead ComputeOtlpEmitter stream; threshold re-based 2026-08-17 to the Design-B envelope TOTAL)",
+        desc="[Warning/compute] TOTAL dedup state across ALL subtasks > 3.6M entries (envelope = 60 000 t/s x 60 s TTL ≈ 3.6M, 2026-08-28 CHG-116: DEDUP_TTL_MS 300000->60000, broker docs rule out replay on reconnect; 6.5M/300s-era re-based): dedup is authoritative Flink keyed state — the MapState IS the set). SCHEDULED promql (O2 v0.91.5 realtime = per-row only, so a cross-subtask sum cannot be realtime); max by (subtask_index) collapses the reporter's per-flush start_time series, sum totals the subtasks — validated 2026-08-17 (naive sum over-counts ~15x). Recovery = check accepted-rate/TTL math vs the envelope, not a cache sweep. Series = Flink FingerprintDedupFunction gauge (retargeted 2026-08-12 from the dead ComputeOtlpEmitter stream; threshold re-based 2026-08-28 to the 60s-TTL envelope TOTAL)",
     ),
     # RETIRED 2026-08-17 (CHG-023 item 2): SIGNAL-warn-dedup-expiry watched
     # compute_dedup_expiry_index_count — the expiry-index gauge is DELETED with

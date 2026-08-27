@@ -20,12 +20,12 @@ import org.junit.jupiter.api.Test;
 @DisplayName("DEC-038: DedupExpiry (logical TTL + bounded cleanup selection)")
 class DedupExpiryTest {
 
-    private static final long TTL_MS = 300_000L;
+    private static final long TTL_MS = 60_000L;
 
     @Test
     @DisplayName("expiry_ms is exactly first_seen_ms + ttl_ms — entries are never expired early")
     void expiryIsFirstSeenPlusTtl() {
-        assertEquals(1_000_000L, DedupExpiry.expiryMs(700_000L, TTL_MS));
+        assertEquals(700_000L + TTL_MS, DedupExpiry.expiryMs(700_000L, TTL_MS));
         assertEquals(TTL_MS, DedupExpiry.expiryMs(0L, TTL_MS));
     }
 

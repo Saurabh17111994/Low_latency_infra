@@ -9,7 +9,7 @@ import java.util.Set;
  * <p>No numeric literals for these keys may be scattered through source files. Startup must
  * reject two values outright (see {@link #validateStartup()}):
  * <ul>
- *   <li>{@code DEDUP_TTL_MS} must equal 300000</li>
+ *   <li>{@code DEDUP_TTL_MS} must equal 60000</li>
  *   <li>{@code CANDLE_WINDOW_MS} must equal 15000</li>
  * </ul>
  *
@@ -42,7 +42,7 @@ public final class PlatformConfig {
     public static final String RAW_TABLE_1_SCHEMA_VERSION = "2";
 
     // ---- dedup / candles (reject-startup values) ----
-    public static final long DEDUP_TTL_MS = 300_000L;
+    public static final long DEDUP_TTL_MS = 60_000L;
     public static final long CANDLE_WINDOW_MS = 15_000L;
 
     // ---- checkpointing ----

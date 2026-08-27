@@ -81,7 +81,7 @@ class DedupRocksDbThroughputMemoryIT {
     private static final Duration POLL = Duration.ofMillis(200);
     private static final Duration TIMEOUT = Duration.ofSeconds(120);
     private static final long WALL_T0 = System.currentTimeMillis();
-    private static final long TTL_MS = 300_000L;
+    private static final long TTL_MS = 60_000L;
 
     /** Serializable row spec — GenericRowData is not serializable. */
     private record RowSpec(long token, long eventTime, String fingerprint)
@@ -89,7 +89,7 @@ class DedupRocksDbThroughputMemoryIT {
 
     private static Map<String, String> env() {
         Map<String, String> env = new HashMap<>();
-        env.put("DEDUP_TTL_MS", "300000");
+        env.put("DEDUP_TTL_MS", "60000");
         env.put("CANDLE_WINDOW_MS", "15000");
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");

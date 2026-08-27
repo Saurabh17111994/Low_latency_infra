@@ -175,7 +175,7 @@ class SignalJobObjectStoreCheckpointIntegrationTest {
 
     private static Map<String, String> envFor(String cp, String recovery) {
         Map<String, String> e = new HashMap<>();
-        e.put("DEDUP_TTL_MS", "300000");
+        e.put("DEDUP_TTL_MS", "60000");
         e.put("CANDLE_WINDOW_MS", "15000");
         e.put("CHECKPOINT_INTERVAL_MS", "10000");
         e.put("CHECKPOINT_TIMEOUT_MS", "30000");

@@ -38,9 +38,9 @@ class SignalHarnessContractTest {
         int checkpointEntries = 100;
         int tableEntries = 10_000;
         assertTrue(checkpointEntries < tableEntries);
-        // TTL 300s pinned
-        long ttlMs = 300_000L;
-        assertEquals(300_000L, ttlMs);
+        // TTL 60s pinned
+        long ttlMs = 60_000L;
+        assertEquals(60_000L, ttlMs);
     }
 
     // SIG-STATE-002: restart rehydrate compact cache from table

@@ -138,7 +138,7 @@ Environment: the distributed SignalJob runs on the compose Flink cluster as a
 
 | Env | Pinned value | Meaning |
 | --- | --- | --- |
-| `DEDUP_TTL_MS` | `300000` | dedup expiry TTL |
+| `DEDUP_TTL_MS` | `60000` | dedup expiry TTL |
 | `CANDLE_WINDOW_MS` | `15000` | candle aggregation window |
 | `CHECKPOINT_INTERVAL_MS` | `10000` | checkpoint cadence |
 | `CHECKPOINT_TIMEOUT_MS` | `30000` | checkpoint timeout |
@@ -160,7 +160,7 @@ path throws `StringIndexOutOfBoundsException` at `SignalJob.java:310`).
    `/opt/flink/jobs/compute.jar`).
 2. Copy the jar into the jobmanager container if rebuilt.
 3. Submit with the pinned env set (exact working dev command):
-   `docker exec -e RAW_TABLE=… -e CANDLE_TABLE=… -e SIGNAL_CANDIDATES_TABLE=… -e SIGNAL_CURRENT_TABLE=… -e STATE_RECOVERY_PATH=… -e CHECKPOINT_DIR=file:///tmp/p8-checkpoints -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 -e DEDUP_TTL_MS=300000 -e CANDLE_WINDOW_MS=15000 -e CHECKPOINT_INTERVAL_MS=10000 -e CHECKPOINT_TIMEOUT_MS=30000 -e MAX_CONCURRENT_CHECKPOINTS=1 01_docker-flink-jobmanager-1 flink run -d -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar`
+   `docker exec -e RAW_TABLE=… -e CANDLE_TABLE=… -e SIGNAL_CANDIDATES_TABLE=… -e SIGNAL_CURRENT_TABLE=… -e STATE_RECOVERY_PATH=… -e CHECKPOINT_DIR=file:///tmp/p8-checkpoints -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 -e DEDUP_TTL_MS=60000 -e CANDLE_WINDOW_MS=15000 -e CHECKPOINT_INTERVAL_MS=10000 -e CHECKPOINT_TIMEOUT_MS=30000 -e MAX_CONCURRENT_CHECKPOINTS=1 01_docker-flink-jobmanager-1 flink run -d -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar`
    (This is the normal RESTORE-mode command: `STATE_RECOVERY_PATH` names the
    previous run's last checkpoint and `ALLOW_FULL_REPLAY` is absent; the log
    line `signal-job: startup mode = RESTORE (restore=…, fullReplay=false)` at
