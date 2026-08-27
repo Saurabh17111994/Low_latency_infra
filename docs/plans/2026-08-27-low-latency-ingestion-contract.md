@@ -14,7 +14,7 @@ Replace the Go→Java **stdout NDJSON pipe** with:
 3 broker conns → Go per-slot decode → per-slot sequence → batch builder (count|bytes|age)
   → protobuf MarketDataBatch → persistent gRPC stream → Unix Domain Socket (shared volume)
   → Java fluss-writer: gRPC server → protobuf decode → freshness/sanity gates → router (token%16)
-  → 3 bounded queues → 3 writer workers → Fluss AppendWriter (batch-timeout 20ms)
+  → 1 bounded queue → 1 writer worker → Fluss AppendWriter (batch-timeout 1ms — O-2 RESOLVED)
   → raw_table_1 LOG (16 buckets, unchanged) → Flink SignalJob (unchanged)
 ```
 
@@ -37,7 +37,7 @@ Replace the Go→Java **stdout NDJSON pipe** with:
 | T2 | Go | Batch flush when `count>=MAX_EVENTS` OR `bytes>=MAX_BYTES` OR `age>=MAX_AGE` |
 | T2→T3 | gRPC | `MarketDataBatch` proto → persistent gRPC stream → UDS |
 | T3→T4 | Java | Decode proto, structural validation, freshness gates (NTP 2s / age 5s) |
-| T4→T5 | Java router | `instrument_token % 16` → one of 3 bounded queues |
+| T4→T5 | Java router | `instrument_token % 16` → 1 bounded queue (multi-writer only if Test D) |
 | T5→T6 | Writer | Batch rows → `AppendWriter` → Fluss |
 | T6 | Fluss | Ack → write latency recorded |
 
@@ -53,7 +53,7 @@ Replace the Go→Java **stdout NDJSON pipe** with:
 
 | Existing (reuse as-is) | New (build) |
 |---|---|
-| `arrow-trade/go-arrow` SDK, `hft_stream.go` decode, golden corpus | `batch.go` — batch builder (count/bytes/age flush limits) |
+| `arrow-trade/go-arrow` SDK (`HFTFullTick`/`HFTLTPTick` decode in vendored SDK), golden corpus | `batch.go` — batch builder (count/bytes/age flush limits) |
 | `supervisor.go` + `hft_slot.go` — 3 independent connections, per-slot epoch, reconnect | `transport.go` — persistent gRPC client over UDS, reconnect, flow-control |
 | `metrics.go` — broker/reconnect/sequence metrics | `marketdata.pb.go` — generated proto |
 | `subscription_plan.go`, manifest handling | Sequence-gap detection metric (`sequence_gaps_total`) |
@@ -81,7 +81,8 @@ message MarketDataBatch {
 message TickEvent {
   string slot_id = 1;
   string mode = 2;             // "ltp" | "ltpc" | "quote" | "full"
-  int64  token = 3;            // instrument_token
+  int32  token = 3;            // instrument_token (Go int32 — bit-exact)
+  string feed = 29;            // "hft" (Go Tick.Feed, not persisted to row but carried for parity)
   int64  ts_ms = 4;            // exchange timestamp (source time, preserved — Q29)
   int64  received_ms = 5;      // T1 (Go receipt)
   int64  feed_sequence_local = 6; // connection-local sequence (Q15: verify packet has real seq first)
@@ -101,8 +102,8 @@ message TickEvent {
   repeated int32 ask_px = 19;
   repeated int32 bid_qty = 20;
   repeated int32 ask_qty = 21;
-  repeated int32 bid_orders = 22;
-  repeated int32 ask_orders = 23;
+  repeated uint32 bid_orders = 22; // Go [5]uint16 — uint32 for proto3 (no uint16)
+  repeated uint32 ask_orders = 23;
   bytes  raw_payload = 24;      // EXACT original broker packet bytes (Q3, Q6) — never base64
   string fingerprint_version = 25;
   string event_fingerprint = 26; // computed in Java (Q19) or Go? — see Q19 resolution below
@@ -111,7 +112,9 @@ message TickEvent {
 }
 ```
 
-**Q19 resolution (fingerprint stays in Java):** the proto carries the *inputs* Java needs (raw_payload + fields); Java's `FingerprintBuilder` stays in Java, computes `event_fingerprint` from the proto fields, and fills columns 25-26 at row-build time. Go does NOT compute fingerprints. `decoder_version`/`protocol_version` carried from Go.
+**Q5/Q19 SHA decision (AUDIT 2026-08-27):** Java currently RECOMPUTES SHA-256 per tick for validation (`PayloadHashValidator.validate`, 24 JFR samples). **Decision: keep validation in the proto path as well** (integrity > the ~24 samples), but make it **config-optional** (`INGEST_VALIDATE_PAYLOAD_HASH=true|false`) — default true for safety; the pipe path keeps it mandatory. This preserves Q3's perf intent (no base64 round-trip) while keeping integrity gates.
+
+**Q19 resolution (fingerprint stays in Java):** the proto carries the *inputs* Java needs (raw_payload + fields); Java's `FingerprintBuilder` stays in Java, computes `event_fingerprint` from the proto fields, and fills columns 25-26 at row-build time. Go does NOT compute fingerprints. `decoder_version`/`protocol_version` are **set in Java** at row-build (`FlussClientAdapter.java:174-175`: "go-arrow-sdk"/""), NOT carried from Go.
 
 **Field mapping requirement (doc §46):** every broker field → proto field → Java representation → Fluss column must be documented in a mapping table and locked by a serialization round-trip test. No invented fields.
 
@@ -122,14 +125,14 @@ message TickEvent {
 | `FlussClientAdapter` → `AppendWriter` (batch-timeout 20ms) | `GrpcServer.java` — gRPC server bound to UDS |
 | `RawTickWriter` + `AppendTracker` (150k/192MiB, 80% warn / 100% halt) | `PartitionRouter.java` — `token % 16` → queue |
 | `FingerprintBuilder`, NTP/freshness gates, quarantine, safety, discontinuity | `BoundedQueue.java` — byte-budgeted (Q17) |
-| `IngestionService` lifecycle, shutdown, health, metrics | `WriterWorker.java` — N=3 writers, each owns a queue |
+| `IngestionService` lifecycle, shutdown, health, metrics | `WriterWorker.java` — 1 writer by default (O-1); N>1 only if Test D triggers |
 | `OtlpMetricsEmitter` (OTLP :4318) | `marketdata.pb.java` — generated proto |
 
 **Q14 topology:** Go bridge and Java writer become **two containers** (crash isolation, independent limits — doc §44). UDS over a **shared named volume** (`/run/fluss-ingest`), mode 660, group `fluss-ingest`, stale-socket cleanup in entrypoint, no TCP listener.
 
-**Q16 router:** `instrument_token % 16`. Never connection/slot-based. No cross-instrument ordering requirement exists.
+**Q16 router:** `instrument_token % 16` — **only if multi-writer is triggered** (Test D). With 1 writer (O-1), routing is moot; single queue + writer. No cross-instrument ordering requirement exists.
 
-**Q17 writers:** start 3 × byte-budgeted queues; total budget 192 MiB regardless of count; Test D (2/4/8) decides the winner.
+**Q17 writers:** start **1 × byte-budgeted queue** (O-1 RESOLVED: single writer measured 58k-357k rows/s); total budget 192 MiB regardless of count; Test D (2/4/8) only if E2E-after-T6 misses 50k.
 
 **Q18 backpressure:** keep fail-closed (80% warn + readiness false; 100% halt). Add gRPC flow-control as the *primary* slow-down (smooth), halt as terminal guard. Never silent drop.
 
