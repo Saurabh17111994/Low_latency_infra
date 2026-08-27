@@ -6,7 +6,7 @@ COMPOSE := docker compose -f code/01_platform/01_docker/docker-compose.yml
 # fails obscurely). Set MVN_FLAGS=-o when the local cache is warm.
 MVN := mvn $(MVN_FLAGS)
 
-.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite check-image-stale branch-check
+.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite check-image-stale branch-check proto
 
 # Branch guard: low-latency work must happen on the low-latency branch.
 # Any agent (human or AI) MUST run this before editing code. Fails (exit 1)
@@ -20,6 +20,17 @@ branch-check:
 		exit 1; \
 	fi; \
 	echo "OK: on low-latency-ingestion-based-project"
+
+# Regenerate protobuf code (T1). Requires protoc + protoc-gen-go on PATH.
+# Outputs: go-bridge/marketdata/market_data.pb.go + Java transport classes.
+proto:
+	@echo "== regenerating proto code from proto/market_data.proto =="
+	@protoc --version >/dev/null 2>&1 || { echo "ERROR: protoc not found"; exit 1; }
+	protoc --proto_path=proto \
+	  --go_out=code/02_services/01_ingestion/go-bridge/marketdata --go_opt=paths=source_relative \
+	  --java_out=code/02_services/01_ingestion/src/main/java \
+	  proto/market_data.proto
+	@echo "== done =="
 
 help:
 	@echo "Targets:"

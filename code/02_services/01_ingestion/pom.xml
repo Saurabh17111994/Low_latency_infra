@@ -37,6 +37,13 @@
       <artifactId>jackson-databind</artifactId>
     </dependency>
 
+    <!-- Protobuf runtime (T1: market_data.proto transport contract) -->
+    <dependency>
+      <groupId>com.google.protobuf</groupId>
+      <artifactId>protobuf-java</artifactId>
+      <version>3.25.5</version>
+    </dependency>
+
     <!-- Platform common types -->
     <dependency>
       <groupId>com.trading</groupId>

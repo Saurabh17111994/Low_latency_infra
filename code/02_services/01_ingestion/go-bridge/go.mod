@@ -11,10 +11,14 @@ go 1.24.5
 require github.com/arrow-trade/go-arrow v0.0.0-20260622-7cce1630
 
 require (
+	github.com/gorilla/websocket v1.5.3
+	github.com/klauspost/compress v1.18.0
+	google.golang.org/protobuf v1.36.12
+)
+
+require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
 	github.com/boombuler/barcode v1.1.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/pquerna/otp v1.5.0 // indirect
