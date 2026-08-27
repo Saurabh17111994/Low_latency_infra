@@ -215,7 +215,9 @@ var _ Transport = (*ProtoEmitter)(nil)
 //   - "proto" (or "grpc" alias for the future gRPC mode): proto frames
 //   - anything else ("pipe", unset): NDJSON (fallback / rollback path)
 func initBridgeEmitter(w io.Writer) Transport {
-	switch v := strings.ToLower(strings.TrimSpace(os.Getenv("TRANSPORT"))); v {
+	raw := os.Getenv("TRANSPORT")
+	v := strings.ToLower(strings.TrimSpace(raw))
+	switch v {
 	case "proto", "grpc":
 		fmt.Fprintf(os.Stderr, "arrow-bridge: transport=proto frames (TRANSPORT=%s)\n", v)
 		batcher := NewBatcher(DefaultBatchLimits(), func(batch *marketdata.MarketDataBatch) error {
@@ -223,8 +225,14 @@ func initBridgeEmitter(w io.Writer) Transport {
 			return protoWriteFrame(w, batch)
 		}, nil)
 		return NewProtoEmitter(w, batcher)
+	case "pipe":
+		fmt.Fprintf(os.Stderr, "arrow-bridge: transport=NDJSON pipe (TRANSPORT=pipe — deliberate rollback path)\n")
+		return NewBridgeEmitter(w)
 	default:
-		fmt.Fprintf(os.Stderr, "arrow-bridge: transport=NDJSON pipe (TRANSPORT=%s)\n", v)
+		// TRANSPORT unset or unknown: fall back to NDJSON for compatibility
+		// (rollback / old deployments), but say so LOUDLY — a silently unset
+		// TRANSPORT previously let benches run the NDJSON path by accident.
+		fmt.Fprintf(os.Stderr, "arrow-bridge: WARNING transport=NDJSON pipe (TRANSPORT=%q — UNSET/unknown; proto is the low-latency path, set TRANSPORT=proto explicitly)\n", raw)
 		return NewBridgeEmitter(w)
 	}
 }
