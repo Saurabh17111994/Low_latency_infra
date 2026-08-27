@@ -273,6 +273,8 @@ message TickEvent {
 - Resource limits, socket perms, dashboards, alerts, rollback proc, 30-min+ soak (bounded RSS/queue/latency, no leaks, stable retry).
 - **Exit:** T9-S1 (30+ min soak, bounded RSS/queue/latency, no retry storm/sequence corruption/leaks) + T9-H1 (hardening) + T9-RB2 (operational rollback drill) green; regression R-215..R-224 green; `make gate` 13/13; `make full-audit` green; rollback via `TRANSPORT=pipe` proven.
 
+**T9 status: DONE 2026-08-27** — T9-S1 31-min soak PASS (38.0M rows @ 20,450/s, 0 errors/loss/gaps, RSS plateau 1.74 GB, 0 full GC, e2e p99 28 ms; evidence `logs/tracker-14/t9-evidence-20260827.md`); T9-H1 hardening present (resource limits, readiness perms, dashboards/alerts, rollback proc; gap: OTLP collector down, pre-existing); T9-RB2 rollback drill PASS (`TRANSPORT=pipe`, 1.08M rows, 0 errors, clean drain); regression green (Java 285/0, mock 3/0, `make pin-check` PASS). Gates: `make gate` 12/13 + [8/13] image-staleness (pre-existing, CHG-101 — compute/execution-bridge/nautilus images never built on this box); `make full-audit` fails only on pre-existing docs-audit C6/CHG-103 (proven via stash test). **Rollback via `TRANSPORT=pipe` PROVEN.**
+
 ---
 
 ## 7. Testing Contract (comprehensive, enforceable)
