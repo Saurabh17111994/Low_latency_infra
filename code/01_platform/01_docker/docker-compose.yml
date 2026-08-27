@@ -378,6 +378,9 @@ services:
       dockerfile: 02_services/01_ingestion/Dockerfile
     depends_on: [fluss-coordinator, fluss-tablet]
     environment:
+      # T6: proto is the primary low-latency transport (CHG-115). NDJSON pipe
+      # remains the rollback path (TRANSPORT=pipe).
+      TRANSPORT: ${TRANSPORT:-proto}
       ARROW_APP_ID: ${ARROW_APP_ID}
       ARROW_APP_SECRET: ${ARROW_APP_SECRET}
       ARROW_USER_ID: ${ARROW_USER_ID}

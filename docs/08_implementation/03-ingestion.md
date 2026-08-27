@@ -21,9 +21,9 @@ Build this phase, then implement the tests in the second section before moving o
 
 Two colocated processes in the same container form the ingestion boundary:
 
-**Go arrow-bridge** — uses the official Arrow Go SDK (`go-arrow`) for: authentication (AutoLogin or static token), WebSocket connection (`wss://socket.arrow.trade`), binary frame decode (HFT LTPC + FULL including 5-level bid/ask depth; the Standard feed that carried LTP/Quote modes was removed 2026-08-14 — see [`DEC-039`](../01_project/04-decisions.md) §1 and `DEC-012`), zstd decompression (HFT), subscription management, keepalive, and reconnection. Outputs one newline-delimited JSON tick per line to stdout.
+**Go arrow-bridge** — uses the official Arrow Go SDK (`go-arrow`) for: authentication (AutoLogin or static token), WebSocket connection (`wss://socket.arrow.trade`), binary frame decode (HFT LTPC + FULL including 5-level bid/ask depth; the Standard feed that carried LTP/Quote modes was removed 2026-08-14 — see [`DEC-039`](../01_project/04-decisions.md) §1 and `DEC-012`), zstd decompression (HFT), subscription management, keepalive, and reconnection. Outputs **proto frames (T6, primary — `TRANSPORT=proto`)**: ticks batched (1ms/256/64KiB) into length-prefixed protobuf `TransportFrame` on stdout. `TRANSPORT=pipe` selects the legacy NDJSON fallback (rollback path, T6-RB1/T9-RB2 proven).
 
-**Java IngestionService** — reads NDJSON from stdin, validates, resolves instruments, computes a versioned canonical fingerprint, and appends each tick individually to `raw_table_1` through the Fluss Java client.
+**Java IngestionService** — sniffs the bridge stdout (T6): proto frames → batched `MarketDataBatch` → `processTickEvent`; NDJSON → legacy line path. Both paths validate, resolve instruments, compute a versioned canonical fingerprint, and append each tick to `raw_table_1` through the Fluss Java client.
 
 The pipe is the kernel's stdin/stdout — not a message queue, not a network hop. Both processes share one container lifecycle. Do not insert Python, Kafka, ZeroMQ, or another transport between the Go bridge and the Java Fluss append.
 
@@ -108,7 +108,7 @@ Missing required configuration makes readiness false. Production never falls bac
 5. Validate every active row and routing field.
 6. Validate the Go arrow-bridge binary exists and is runnable; a missing or non-runnable binary is a FATAL startup error (clear message, non-zero exit).
 7. Start arrow-bridge as subprocess with configured auth env vars.
-8. Java reads NDJSON from bridge's stdout.
+8. Java sniffs bridge's stdout (proto frames primary; NDJSON fallback).
 9. Enter READY only after recent successful Fluss append acknowledgement and acceptable clock offset.
 
 ### Packet processing algorithm
@@ -142,7 +142,7 @@ Ingestion appends an accepted raw packet even if its fingerprint was seen before
 | Configurable count | `ARROW_HFT_CONNECTIONS` range 1..3 | `main.go` policy block |
 | Token split across sockets | `SubscriptionPlan.Slots` (`hft-0/1/2`) | `subscription_plan.go` |
 | Multi-slot supervisor | `runHFTSupervisor` (multi-slot) | `supervisor.go` |
-| One raw table | All slots → one NDJSON stream → one `RawTickWriter` → one `raw_table_1` | Java `IngestionService` |
+| One raw table | All slots → one proto stream (T6; NDJSON on `TRANSPORT=pipe`) → one `RawTickWriter` → one `raw_table_1` | Java `IngestionService` |
 | Per-slot fidelity | `slot_id`/`connection_id`/`connection_epoch` on every event | bridge events |
 
 **The single deliberate guard (the only change required to enable 3 sockets):**
@@ -319,4 +319,3 @@ The required behavior above is verified by the canonical [Ingestion test design]
 - **G8 (readiness):** `isReady()` false when any single dimension false — `10` cases incl. fail-closed clock.
 
 **Ground-rule carry-forward (from 15 §2):** pure JDK / Go stdlib / Python `unittest` only (no new deps), every `ING-*` ID now in `11-testing-and-release.md` §Ingestion and `docs_audit.py` C6 line `341/236/294` (prior `341/235…` etc — see 03 §Status); 3k envelope stays `ACCEPTED DEFERRAL` per §5.
-

@@ -257,7 +257,7 @@ message TickEvent {
 - **Exit:** T5-Q1..Q3 (queue thresholds/accounting/bounded) + T5-W1..W4 (batching @1ms, retries, no-silent-drop, drain) + T5-J1..J3 (freshness/fingerprint/quarantine) + T5-H2 (hash config) green; fail-closed backpressure verified; no per-event Fluss write proven; single-writer batching meets 50k or Test D triggered.
 
 **T6 — Integration + fallback flag (Q21):**
-- `TRANSPORT=pipe|grpc` — **pipe is the default/primary transport** (O-4); `grpc` is the opt-in mode used only if T3/T4 were built. Wire the batcher into the existing pipe first; keep NDJSON fallback. UDS volume + gRPC wiring only if T3/T4 exist.
+- `TRANSPORT=proto|pipe` — **proto is the default/primary transport** (O-4; flipped 2026-08-28 CHG-115 — T6 proto measured +30% vs NDJSON in Test D: 29.3k vs 22.6k smoke, 27.4k/s sustained 5-min bench); `pipe` is the NDJSON rollback path (T6-RB1/T9-RB2 proven). Wire the batcher into the proto emitter first; keep NDJSON fallback for rollback. UDS volume + gRPC wiring only if T3/T4 exist.
 - **Test E:** end-to-end vs baseline (Test A). 
 - **Exit:** Test E + T6-I1 (replay correctness) + T6-I2 (control records) + T6-I3 (pipe parity) + T6-RB1 (rollback mechanism) green; E2E ≥ 18k live / 49k synthetic, p99 ≤ 250ms, gate green.
 

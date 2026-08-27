@@ -523,6 +523,9 @@ services:
       - arrow_password
       - arrow_totp_key
     environment:
+      # T6: proto is the primary low-latency transport (CHG-115). NDJSON pipe
+      # remains the rollback path (TRANSPORT=pipe).
+      TRANSPORT: ${TRANSPORT:-proto}
       ARROW_APP_ID: ${ARROW_APP_ID:?set ARROW_APP_ID}
       ARROW_USER_ID: ${ARROW_USER_ID:?set ARROW_USER_ID}
       ARROW_INSTRUMENT_TOKENS: ${ARROW_INSTRUMENT_TOKENS:-}
