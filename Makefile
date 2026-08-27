@@ -6,7 +6,20 @@ COMPOSE := docker compose -f code/01_platform/01_docker/docker-compose.yml
 # fails obscurely). Set MVN_FLAGS=-o when the local cache is warm.
 MVN := mvn $(MVN_FLAGS)
 
-.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite check-image-stale
+.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite check-image-stale branch-check
+
+# Branch guard: low-latency work must happen on the low-latency branch.
+# Any agent (human or AI) MUST run this before editing code. Fails (exit 1)
+# with a clear message if the current branch is wrong.
+branch-check:
+	@branch=$$(git branch --show-current); \
+	if [ "$$branch" != "low-latency-ingestion-based-project" ]; then \
+		echo "ERROR: on branch '$$branch' — low-latency work is ONLY allowed on"; \
+		echo "       'low-latency-ingestion-based-project'. Switch first or ask the operator."; \
+		echo "       (AGENTS.md 'Branch Context'; contract §header)."; \
+		exit 1; \
+	fi; \
+	echo "OK: on low-latency-ingestion-based-project"
 
 help:
 	@echo "Targets:"
