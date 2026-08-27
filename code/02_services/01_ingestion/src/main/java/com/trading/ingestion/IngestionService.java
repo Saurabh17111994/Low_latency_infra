@@ -493,9 +493,12 @@ public final class IngestionService {
                         new ProtoFrameReader.FrameHandler() {
                             @Override
                             public void onMarketBatch(com.trading.ingestion.transport.MarketDataBatch batch) {
+                                long frameReadMs = System.currentTimeMillis(); // T8: frame-read time
+                                long batchCreatedMs = batch.getCreatedMs();    // T8: Go batch creation
                                 for (com.trading.ingestion.transport.TickEvent ev : batch.getEventsList()) {
                                     handleFrameArrival();
-                                    processTickEvent(ev, batch.getConnectionId(), batch.getConnectionEpoch());
+                                    processTickEvent(ev, batch.getConnectionId(), batch.getConnectionEpoch(),
+                                            frameReadMs, batchCreatedMs);
                                 }
                             }
 
@@ -1192,10 +1195,27 @@ public final class IngestionService {
      */
     void processTickEvent(com.trading.ingestion.transport.TickEvent ev,
                            String batchConnectionId, long batchConnectionEpoch) {
+        processTickEvent(ev, batchConnectionId, batchConnectionEpoch,
+                System.currentTimeMillis(), 0);
+    }
+
+    void processTickEvent(com.trading.ingestion.transport.TickEvent ev,
+                           String batchConnectionId, long batchConnectionEpoch,
+                           long frameReadMs, long batchCreatedMs) {
         frameCount.incrementAndGet();
         try {
             long receiveTsMs = ev.getReceivedMs() > 0 ? ev.getReceivedMs() : System.currentTimeMillis();
             byte[] packetBytes = ev.getRawPayload().toByteArray();
+
+            // T8 staged latencies (contract §7.9): decode/batching/ipc are
+            // measured here against the proto provenance timestamps.
+            long nowMs = System.currentTimeMillis();
+            if (frameReadMs > 0 && batchCreatedMs > 0 && ev.getGoReceivedMs() > 0 && ev.getGoEmitMs() > 0) {
+                metrics.recordStageLatencyMs(OtlpMetricsEmitter.STAGE_DECODE, nowMs - batchCreatedMs);
+                metrics.recordStageLatencyMs(OtlpMetricsEmitter.STAGE_BATCHING, batchCreatedMs - ev.getGoEmitMs());
+                metrics.recordStageLatencyMs(OtlpMetricsEmitter.STAGE_IPC, ev.getGoEmitMs() - ev.getGoReceivedMs());
+                metrics.recordStageLatencyMs(OtlpMetricsEmitter.STAGE_ROUTING, nowMs - frameReadMs);
+            }
 
             // T7-F11: per-connection sequence-gap detection (evidence only).
             checkSequenceGap(
@@ -1357,6 +1377,18 @@ public final class IngestionService {
                 ? java.time.Duration.between(outcome.acceptTime(), outcome.ackTime()).toMillis()
                 : -1;
         if (latencyMs >= 0) metrics.recordAppendLatencyMs(latencyMs);
+
+        // T8 staged latencies (contract §7.9): fluss_submit = accept→ack (the
+        // writer's whole append path), fluss_ack = same window at the outcome
+        // layer, end_to_end = broker receipt (eventTime) → ack.
+        if (latencyMs >= 0) {
+            metrics.recordStageLatencyMs(OtlpMetricsEmitter.STAGE_FLUSS_SUBMIT, latencyMs);
+            metrics.recordStageLatencyMs(OtlpMetricsEmitter.STAGE_FLUSS_ACK, latencyMs);
+        }
+        if (outcome.eventTime() != null && outcome.ackTime() != null) {
+            long e2eMs = java.time.Duration.between(outcome.eventTime(), outcome.ackTime()).toMillis();
+            if (e2eMs >= 0) metrics.recordStageLatencyMs(OtlpMetricsEmitter.STAGE_END_TO_END, e2eMs);
+        }
 
         switch (outcome.status()) {
             case TIMEOUT -> LOG.warn("ingestion: append timeout (rowBytes={})",
@@ -1899,6 +1931,9 @@ public final class IngestionService {
 
     public HealthProbe health() { return health; }
     public AppendTracker tracker() { return tracker; }
+
+    /** T8 test seam: expose the metrics emitter (package-private, tests only). */
+    OtlpMetricsEmitter metrics() { return metrics; }
 
     /** Freshness classification for a broker timestamp vs. receive time. */
     enum FreshnessDecision { FRESH, STALE, FUTURE }

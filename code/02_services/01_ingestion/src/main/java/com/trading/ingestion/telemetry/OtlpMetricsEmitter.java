@@ -81,11 +81,34 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
     private final AtomicLong authFailures = new AtomicLong(0);
 
     // ---- Histogram (approximate via linear buckets) ----
+    private volatile String lastMetricsJson = "";
     private final AtomicLong appendLatencyTotalMs = new AtomicLong(0);
     private final AtomicLong appendLatencyCount = new AtomicLong(0);
     private final AtomicLong appendLatencyP50 = new AtomicLong(0);
     private final AtomicLong appendLatencyP90 = new AtomicLong(0);
     private final AtomicLong appendLatencyP99 = new AtomicLong(0);
+
+    // T8 staged-latency histograms (contract §7.9). Each stage shares the
+    // same ring/percentile machinery via a dedicated ring (stages are
+    // recorded on the same thread; the append ring stays append-only).
+    private final AtomicLong[] stageLatencyTotalMs = new AtomicLong[STAGE_COUNT];
+    private final AtomicLong[] stageLatencyCount = new AtomicLong[STAGE_COUNT];
+    private final AtomicLong[] stageLatencyP50 = new AtomicLong[STAGE_COUNT];
+    private final AtomicLong[] stageLatencyP90 = new AtomicLong[STAGE_COUNT];
+    private final AtomicLong[] stageLatencyP99 = new AtomicLong[STAGE_COUNT];
+    private final long[][] stageRings = new long[STAGE_COUNT][LATENCY_RING_SIZE];
+    private final int[] stageRecordPos = new int[STAGE_COUNT];
+    private static final int STAGE_COUNT = 7;
+
+    {
+        for (int i = 0; i < STAGE_COUNT; i++) {
+            stageLatencyTotalMs[i] = new AtomicLong(0);
+            stageLatencyCount[i] = new AtomicLong(0);
+            stageLatencyP50[i] = new AtomicLong(0);
+            stageLatencyP90[i] = new AtomicLong(0);
+            stageLatencyP99[i] = new AtomicLong(0);
+        }
+    }
     // Simple percentile tracking: wrapping ring buffer (R-065/R-179).
     // All access is synchronized on LATENCY_LOCK: the recorder thread and the
     // background flush thread share the array, and a plain read-check-then-write
@@ -192,6 +215,25 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
         }
     }
 
+    /** T8 staged-latency stage names (contract §7.9) — order matches STAGE_* indices. */
+    public static final String[] STAGE_NAMES = {
+        "decode_latency", "batching_latency", "ipc_latency", "routing_latency",
+        "fluss_submit_latency", "fluss_ack_latency", "end_to_end_latency"
+    };
+    public static final int STAGE_DECODE = 0, STAGE_BATCHING = 1, STAGE_IPC = 2,
+            STAGE_ROUTING = 3, STAGE_FLUSS_SUBMIT = 4, STAGE_FLUSS_ACK = 5, STAGE_END_TO_END = 6;
+
+    /** T8: record one staged-latency sample (ms). Thread-safe ring. */
+    public void recordStageLatencyMs(int stage, long latencyMs) {
+        if (stage < 0 || stage >= STAGE_COUNT || latencyMs < 0) return;
+        stageLatencyTotalMs[stage].addAndGet(latencyMs);
+        stageLatencyCount[stage].incrementAndGet();
+        synchronized (LATENCY_LOCK) {
+            stageRings[stage][stageRecordPos[stage] & (LATENCY_RING_SIZE - 1)] = latencyMs;
+            stageRecordPos[stage]++;
+        }
+    }
+
     public void setPendingRecords(long v) { this.pendingRecords = v; }
     public void setPendingBytes(long v) { this.pendingBytes = v; }
     public void incrementBridgeReconnects() { bridgeReconnects.incrementAndGet(); }
@@ -290,6 +332,7 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
         try {
             String json = buildMetricsJson();
             if (json == null) return;
+            lastMetricsJson = json;
 
             URL url = URI.create(collectorUrl).toURL();
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
@@ -315,6 +358,10 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
             conn.disconnect();
 
         } catch (Exception e) {
+            // T8: the collector is usually down in bench runs — persist the
+            // metrics JSON to the log so staged latencies remain measurable.
+            LOG.warn("otlp-metrics: flush failed (collector down) — metrics payload follows");
+            LOG.info("otlp-metrics-payload: {}", lastMetricsJson);
             LOG.debug("otlp-metrics: flush failed (collector may not be running): {}",
                     e.getMessage());
             reportHealth(false);
@@ -333,10 +380,11 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
 
     // ---- JSON builder (minimal OTLP metrics format) ----
 
-    String buildMetricsJson() {
+    public String buildMetricsJson() {
         long now = System.currentTimeMillis() * 1_000_000L; // epoch nanos
         // Compute approximate percentiles from ring buffer
         computeLatencyPercentiles();
+        computeStagePercentiles();
 
         StringBuilder sb = new StringBuilder(4096);
         sb.append("{\"resourceMetrics\":[{\"resource\":{\"attributes\":[");
@@ -368,6 +416,15 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
         appendHistogram(sb, "append.latency.ms", "ms", appendLatencyCount.get(),
                 appendLatencyTotalMs.get(), appendLatencyP50.get(),
                 appendLatencyP90.get(), appendLatencyP99.get(), now);
+
+        // T8 staged-latency histograms (contract §7.9 — every record must
+        // include these; aggregate-only reporting is a failure).
+        for (int st = 0; st < STAGE_COUNT; st++) {
+            appendHistogram(sb, "stage." + STAGE_NAMES[st], "ms",
+                    stageLatencyCount[st].get(), stageLatencyTotalMs[st].get(),
+                    stageLatencyP50[st].get(), stageLatencyP90[st].get(),
+                    stageLatencyP99[st].get(), now);
+        }
 
         // Gauge: append.pending.records
         appendGaugeLong(sb, "append.pending.records", "records", pendingRecords, now);
@@ -442,6 +499,27 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
         appendLatencyP50.set(sorted[count / 2]);                    // p50
         appendLatencyP90.set(sorted[(int) (count * 0.90)]);         // p90
         appendLatencyP99.set(sorted[(int) (count * 0.99)]);         // p99
+    }
+
+    /** T8: percentile snapshot for every stage (same ring semantics as append). */
+    private void computeStagePercentiles() {
+        for (int st = 0; st < STAGE_COUNT; st++) {
+            int n;
+            long[] sorted;
+            synchronized (LATENCY_LOCK) {
+                n = Math.min(stageRecordPos[st], LATENCY_RING_SIZE);
+                if (n == 0) continue;
+                sorted = new long[n];
+                for (int i = 0; i < n; i++) {
+                    sorted[i] = stageRings[st][(stageRecordPos[st] - n + i) & (LATENCY_RING_SIZE - 1)];
+                }
+                stageRecordPos[st] = 0;
+            }
+            java.util.Arrays.sort(sorted);
+            stageLatencyP50[st].set(sorted[n / 2]);
+            stageLatencyP90[st].set(sorted[(int) (n * 0.90)]);
+            stageLatencyP99[st].set(sorted[(int) (n * 0.99)]);
+        }
     }
 
     private void appendSum(StringBuilder sb, String name, String unit, long value, long timeNanos) {

@@ -7,6 +7,8 @@
 
 package marketdata
 
+import "time"
+
 // Tick mirrors the bridge's canonical Tick struct (go-bridge/main.go:21).
 // Duplicated here to keep the mapping test self-contained and free of import
 // cycles; the bridge converts its real Tick to this shape before marshaling.
@@ -46,6 +48,8 @@ func (t Tick) ToTickEvent(slotID string, connID string, epoch uint64, receivedMs
 		Feed:              t.Feed,
 		TsMs:              t.TS,
 		ReceivedMs:        receivedMs,
+		GoReceivedMs:      receivedMs,             // T8: staged-latency provenance (T1 receipt)
+		GoEmitMs:          time.Now().UnixMilli(), // T8: batcher Add time (before marshal)
 		FeedSequenceLocal: seq,
 		LtpPaise:          int64(t.LTP),
 		ClosePaise:        int64(t.Close),

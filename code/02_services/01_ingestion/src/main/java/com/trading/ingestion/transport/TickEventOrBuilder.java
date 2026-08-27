@@ -394,4 +394,25 @@ public interface TickEventOrBuilder extends
    * @return The payloadHash.
    */
   com.google.protobuf.ByteString getPayloadHash();
+
+  /**
+   * <pre>
+   * T8 staged-latency timestamps (ms epoch, monotonic — never persisted,
+   * transport-only provenance for the T8 latency budget):
+   * </pre>
+   *
+   * <code>int64 go_received_ms = 31;</code>
+   * @return The goReceivedMs.
+   */
+  long getGoReceivedMs();
+
+  /**
+   * <pre>
+   * T6: Go batcher Add (before proto marshal/write)
+   * </pre>
+   *
+   * <code>int64 go_emit_ms = 32;</code>
+   * @return The goEmitMs.
+   */
+  long getGoEmitMs();
 }

@@ -48,7 +48,7 @@ public final class MarketDataProto {
       "nnection_epoch\030\002 \001(\003\022\021\n\tbatch_seq\030\003 \001(\003\022" +
       "\022\n\ncreated_ms\030\004 \001(\003\022%\n\006events\030\005 \003(\0132\025.ma" +
       "rketdata.TickEvent\022\032\n\022batch_payload_hash" +
-      "\030\006 \001(\014\"\342\004\n\tTickEvent\022\017\n\007slot_id\030\001 \001(\t\022\014\n" +
+      "\030\006 \001(\014\"\216\005\n\tTickEvent\022\017\n\007slot_id\030\001 \001(\t\022\014\n" +
       "\004mode\030\002 \001(\t\022\r\n\005token\030\003 \001(\005\022\014\n\004feed\030\035 \001(\t" +
       "\022\r\n\005ts_ms\030\004 \001(\003\022\023\n\013received_ms\030\005 \001(\003\022\033\n\023" +
       "feed_sequence_local\030\006 \001(\003\022\021\n\tltp_paise\030\007" +
@@ -63,26 +63,27 @@ public final class MarketDataProto {
       "load\030\030 \001(\014\022\033\n\023fingerprint_version\030\031 \001(\t\022" +
       "\031\n\021event_fingerprint\030\032 \001(\t\022\027\n\017decoder_ve" +
       "rsion\030\033 \001(\t\022\030\n\020protocol_version\030\034 \001(\t\022\024\n" +
-      "\014payload_hash\030\036 \001(\014\"\334\003\n\rControlRecord\022\023\n" +
-      "\013record_type\030\001 \001(\t\022\030\n\020contract_version\030\002" +
-      " \001(\005\022\r\n\005event\030\003 \001(\t\022\017\n\007slot_id\030\004 \001(\t\022\025\n\r" +
-      "connection_id\030\005 \001(\t\022\030\n\020connection_epoch\030" +
-      "\006 \001(\003\022\r\n\005state\030\007 \001(\t\022\027\n\017assigned_tokens\030" +
-      "\010 \001(\005\022\033\n\023acknowledged_tokens\030\t \001(\005\022\027\n\017re" +
-      "jected_tokens\030\n \001(\005\022\016\n\006reason\030\013 \001(\t\022\026\n\016r" +
-      "eceived_ts_ms\030\014 \001(\003\022\034\n\024manifest_fingerpr" +
-      "int\030\r \001(\t\022\037\n\027assigned_token_set_hash\030\016 \001" +
-      "(\t\022\035\n\025reconnect_consecutive\030\017 \001(\005\022\026\n\016act" +
-      "ive_sockets\030\020 \001(\005\022\025\n\rgo_goroutines\030\021 \001(\005" +
-      "\022\r\n\005ts_ms\030\022 \001(\003\022\023\n\013raw_payload\030\023 \001(\014\022\024\n\014" +
-      "broker_error\030\024 \001(\t\"\230\001\n\016TransportFrame\0223\n" +
-      "\014market_batch\030\001 \001(\0132\033.marketdata.MarketD" +
-      "ataBatchH\000\022,\n\007control\030\002 \001(\0132\031.marketdata" +
-      ".ControlRecordH\000\022\030\n\020protocol_version\030\003 \001" +
-      "(\005B\t\n\007payloadBk\n\037com.trading.ingestion.t" +
-      "ransportB\017MarketDataProtoP\001Z5github.com/" +
-      "trading/arrow-bridge/marketdata;marketda" +
-      "tab\006proto3"
+      "\014payload_hash\030\036 \001(\014\022\026\n\016go_received_ms\030\037 " +
+      "\001(\003\022\022\n\ngo_emit_ms\030  \001(\003\"\334\003\n\rControlRecor" +
+      "d\022\023\n\013record_type\030\001 \001(\t\022\030\n\020contract_versi" +
+      "on\030\002 \001(\005\022\r\n\005event\030\003 \001(\t\022\017\n\007slot_id\030\004 \001(\t" +
+      "\022\025\n\rconnection_id\030\005 \001(\t\022\030\n\020connection_ep" +
+      "och\030\006 \001(\003\022\r\n\005state\030\007 \001(\t\022\027\n\017assigned_tok" +
+      "ens\030\010 \001(\005\022\033\n\023acknowledged_tokens\030\t \001(\005\022\027" +
+      "\n\017rejected_tokens\030\n \001(\005\022\016\n\006reason\030\013 \001(\t\022" +
+      "\026\n\016received_ts_ms\030\014 \001(\003\022\034\n\024manifest_fing" +
+      "erprint\030\r \001(\t\022\037\n\027assigned_token_set_hash" +
+      "\030\016 \001(\t\022\035\n\025reconnect_consecutive\030\017 \001(\005\022\026\n" +
+      "\016active_sockets\030\020 \001(\005\022\025\n\rgo_goroutines\030\021" +
+      " \001(\005\022\r\n\005ts_ms\030\022 \001(\003\022\023\n\013raw_payload\030\023 \001(\014" +
+      "\022\024\n\014broker_error\030\024 \001(\t\"\230\001\n\016TransportFram" +
+      "e\0223\n\014market_batch\030\001 \001(\0132\033.marketdata.Mar" +
+      "ketDataBatchH\000\022,\n\007control\030\002 \001(\0132\031.market" +
+      "data.ControlRecordH\000\022\030\n\020protocol_version" +
+      "\030\003 \001(\005B\t\n\007payloadBk\n\037com.trading.ingesti" +
+      "on.transportB\017MarketDataProtoP\001Z5github." +
+      "com/trading/arrow-bridge/marketdata;mark" +
+      "etdatab\006proto3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,
@@ -99,7 +100,7 @@ public final class MarketDataProto {
     internal_static_marketdata_TickEvent_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_marketdata_TickEvent_descriptor,
-        new java.lang.String[] { "SlotId", "Mode", "Token", "Feed", "TsMs", "ReceivedMs", "FeedSequenceLocal", "LtpPaise", "ClosePaise", "OpenPaise", "HighPaise", "LowPaise", "VwapPaise", "Ltq", "Volume", "TotalBuyQty", "TotalSellQty", "OpenInterest", "BidPx", "AskPx", "BidQty", "AskQty", "BidOrders", "AskOrders", "RawPayload", "FingerprintVersion", "EventFingerprint", "DecoderVersion", "ProtocolVersion", "PayloadHash", });
+        new java.lang.String[] { "SlotId", "Mode", "Token", "Feed", "TsMs", "ReceivedMs", "FeedSequenceLocal", "LtpPaise", "ClosePaise", "OpenPaise", "HighPaise", "LowPaise", "VwapPaise", "Ltq", "Volume", "TotalBuyQty", "TotalSellQty", "OpenInterest", "BidPx", "AskPx", "BidQty", "AskQty", "BidOrders", "AskOrders", "RawPayload", "FingerprintVersion", "EventFingerprint", "DecoderVersion", "ProtocolVersion", "PayloadHash", "GoReceivedMs", "GoEmitMs", });
     internal_static_marketdata_ControlRecord_descriptor =
       getDescriptor().getMessageTypes().get(2);
     internal_static_marketdata_ControlRecord_fieldAccessorTable = new

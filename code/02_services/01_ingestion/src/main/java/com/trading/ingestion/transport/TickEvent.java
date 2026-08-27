@@ -792,6 +792,37 @@ private static final long serialVersionUID = 0L;
     return payloadHash_;
   }
 
+  public static final int GO_RECEIVED_MS_FIELD_NUMBER = 31;
+  private long goReceivedMs_ = 0L;
+  /**
+   * <pre>
+   * T8 staged-latency timestamps (ms epoch, monotonic — never persisted,
+   * transport-only provenance for the T8 latency budget):
+   * </pre>
+   *
+   * <code>int64 go_received_ms = 31;</code>
+   * @return The goReceivedMs.
+   */
+  @java.lang.Override
+  public long getGoReceivedMs() {
+    return goReceivedMs_;
+  }
+
+  public static final int GO_EMIT_MS_FIELD_NUMBER = 32;
+  private long goEmitMs_ = 0L;
+  /**
+   * <pre>
+   * T6: Go batcher Add (before proto marshal/write)
+   * </pre>
+   *
+   * <code>int64 go_emit_ms = 32;</code>
+   * @return The goEmitMs.
+   */
+  @java.lang.Override
+  public long getGoEmitMs() {
+    return goEmitMs_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -920,6 +951,12 @@ private static final long serialVersionUID = 0L;
     }
     if (!payloadHash_.isEmpty()) {
       output.writeBytes(30, payloadHash_);
+    }
+    if (goReceivedMs_ != 0L) {
+      output.writeInt64(31, goReceivedMs_);
+    }
+    if (goEmitMs_ != 0L) {
+      output.writeInt64(32, goEmitMs_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -1103,6 +1140,14 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeBytesSize(30, payloadHash_);
     }
+    if (goReceivedMs_ != 0L) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(31, goReceivedMs_);
+    }
+    if (goEmitMs_ != 0L) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(32, goEmitMs_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -1178,6 +1223,10 @@ private static final long serialVersionUID = 0L;
         .equals(other.getProtocolVersion())) return false;
     if (!getPayloadHash()
         .equals(other.getPayloadHash())) return false;
+    if (getGoReceivedMs()
+        != other.getGoReceivedMs()) return false;
+    if (getGoEmitMs()
+        != other.getGoEmitMs()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -1275,6 +1324,12 @@ private static final long serialVersionUID = 0L;
     hash = (53 * hash) + getProtocolVersion().hashCode();
     hash = (37 * hash) + PAYLOAD_HASH_FIELD_NUMBER;
     hash = (53 * hash) + getPayloadHash().hashCode();
+    hash = (37 * hash) + GO_RECEIVED_MS_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+        getGoReceivedMs());
+    hash = (37 * hash) + GO_EMIT_MS_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+        getGoEmitMs());
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -1434,6 +1489,8 @@ private static final long serialVersionUID = 0L;
       decoderVersion_ = "";
       protocolVersion_ = "";
       payloadHash_ = com.google.protobuf.ByteString.EMPTY;
+      goReceivedMs_ = 0L;
+      goEmitMs_ = 0L;
       return this;
     }
 
@@ -1572,6 +1629,12 @@ private static final long serialVersionUID = 0L;
       }
       if (((from_bitField0_ & 0x20000000) != 0)) {
         result.payloadHash_ = payloadHash_;
+      }
+      if (((from_bitField0_ & 0x40000000) != 0)) {
+        result.goReceivedMs_ = goReceivedMs_;
+      }
+      if (((from_bitField0_ & 0x80000000) != 0)) {
+        result.goEmitMs_ = goEmitMs_;
       }
     }
 
@@ -1764,6 +1827,12 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getPayloadHash() != com.google.protobuf.ByteString.EMPTY) {
         setPayloadHash(other.getPayloadHash());
+      }
+      if (other.getGoReceivedMs() != 0L) {
+        setGoReceivedMs(other.getGoReceivedMs());
+      }
+      if (other.getGoEmitMs() != 0L) {
+        setGoEmitMs(other.getGoEmitMs());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -2007,6 +2076,16 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x20000000;
               break;
             } // case 242
+            case 248: {
+              goReceivedMs_ = input.readInt64();
+              bitField0_ |= 0x40000000;
+              break;
+            } // case 248
+            case 256: {
+              goEmitMs_ = input.readInt64();
+              bitField0_ |= 0x80000000;
+              break;
+            } // case 256
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -3814,6 +3893,97 @@ private static final long serialVersionUID = 0L;
     public Builder clearPayloadHash() {
       bitField0_ = (bitField0_ & ~0x20000000);
       payloadHash_ = getDefaultInstance().getPayloadHash();
+      onChanged();
+      return this;
+    }
+
+    private long goReceivedMs_ ;
+    /**
+     * <pre>
+     * T8 staged-latency timestamps (ms epoch, monotonic — never persisted,
+     * transport-only provenance for the T8 latency budget):
+     * </pre>
+     *
+     * <code>int64 go_received_ms = 31;</code>
+     * @return The goReceivedMs.
+     */
+    @java.lang.Override
+    public long getGoReceivedMs() {
+      return goReceivedMs_;
+    }
+    /**
+     * <pre>
+     * T8 staged-latency timestamps (ms epoch, monotonic — never persisted,
+     * transport-only provenance for the T8 latency budget):
+     * </pre>
+     *
+     * <code>int64 go_received_ms = 31;</code>
+     * @param value The goReceivedMs to set.
+     * @return This builder for chaining.
+     */
+    public Builder setGoReceivedMs(long value) {
+      
+      goReceivedMs_ = value;
+      bitField0_ |= 0x40000000;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * T8 staged-latency timestamps (ms epoch, monotonic — never persisted,
+     * transport-only provenance for the T8 latency budget):
+     * </pre>
+     *
+     * <code>int64 go_received_ms = 31;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearGoReceivedMs() {
+      bitField0_ = (bitField0_ & ~0x40000000);
+      goReceivedMs_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private long goEmitMs_ ;
+    /**
+     * <pre>
+     * T6: Go batcher Add (before proto marshal/write)
+     * </pre>
+     *
+     * <code>int64 go_emit_ms = 32;</code>
+     * @return The goEmitMs.
+     */
+    @java.lang.Override
+    public long getGoEmitMs() {
+      return goEmitMs_;
+    }
+    /**
+     * <pre>
+     * T6: Go batcher Add (before proto marshal/write)
+     * </pre>
+     *
+     * <code>int64 go_emit_ms = 32;</code>
+     * @param value The goEmitMs to set.
+     * @return This builder for chaining.
+     */
+    public Builder setGoEmitMs(long value) {
+      
+      goEmitMs_ = value;
+      bitField0_ |= 0x80000000;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * T6: Go batcher Add (before proto marshal/write)
+     * </pre>
+     *
+     * <code>int64 go_emit_ms = 32;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearGoEmitMs() {
+      bitField0_ = (bitField0_ & ~0x80000000);
+      goEmitMs_ = 0L;
       onChanged();
       return this;
     }

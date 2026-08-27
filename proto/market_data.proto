@@ -76,6 +76,11 @@ message TickEvent {
 
   // payload integrity (Q5): sha256 of raw_payload, computed ONCE in Go
   bytes payload_hash = 30;
+
+  // T8 staged-latency timestamps (ms epoch, monotonic — never persisted,
+  // transport-only provenance for the T8 latency budget):
+  int64  go_received_ms = 31;  // T1: Go bridge receipt (source of received_ms)
+  int64  go_emit_ms = 32;      // T6: Go batcher Add (before proto marshal/write)
 }
 
 // ── Control records (Q20) — ride the same transport, distinguished by type ───

@@ -449,4 +449,50 @@ class ProtoTransportTest {
             Thread.sleep(5);
         }
     }
+    // ---- T8 staged latencies ----
+
+    @Test
+    @DisplayName("T8: staged-latency fields roundtrip proto → metrics (decode/batching/ipc/routing)")
+    void stagedLatencyFieldsRoundtrip() throws Exception {
+        // Build a proto tick with the T8 provenance timestamps and verify
+        // the 4 pre-append stages are recorded (decode/batching/ipc/routing).
+        CountingConverter converter = new CountingConverter();
+        IngestionService service = makeService(converter);
+        Method m = IngestionService.class.getDeclaredMethod("processTickEvent",
+                com.trading.ingestion.transport.TickEvent.class, String.class, long.class);
+        m.setAccessible(true);
+
+        long now = System.currentTimeMillis();
+        com.trading.ingestion.transport.TickEvent ev =
+                com.trading.ingestion.transport.TickEvent.newBuilder()
+                        .setSlotId("hft-0").setMode("full").setToken((int) TOKEN_A)
+                        .setFeed("hft").setTsMs(now - 10).setReceivedMs(now - 5)
+                        .setGoReceivedMs(now - 5).setGoEmitMs(now - 3)
+                        .setFeedSequenceLocal(1).setLtpPaise(100).setVolume(100)
+                        .setRawPayload(com.google.protobuf.ByteString.copyFrom(FRAME_PAYLOAD))
+                        .setPayloadHash(com.google.protobuf.ByteString.copyFrom(
+                                sha256Hex(FRAME_PAYLOAD).getBytes(StandardCharsets.UTF_8)))
+                        .build();
+        // Call the 5-arg overload directly to pass frameRead/batchCreated.
+        Method m5 = IngestionService.class.getDeclaredMethod("processTickEvent",
+                com.trading.ingestion.transport.TickEvent.class, String.class, long.class,
+                long.class, long.class);
+        m5.setAccessible(true);
+        m5.invoke(service, ev, "hft-0", 1L, now, now - 2); // frameRead=now, batchCreated=now-2
+
+        awaitDrain(service, converter, 1);
+        assertEquals(1, converter.appendCalls.get(), "tick appended");
+
+        // The metrics emitter records the 4 pre-append stages. Verify the
+        // stage histograms are present in the OTLP JSON.
+        String json = service.metrics().buildMetricsJson();
+        assertTrue(json.contains("stage.decode_latency"), "decode stage emitted");
+        assertTrue(json.contains("stage.batching_latency"), "batching stage emitted");
+        assertTrue(json.contains("stage.ipc_latency"), "ipc stage emitted");
+        assertTrue(json.contains("stage.routing_latency"), "routing stage emitted");
+        assertTrue(json.contains("stage.fluss_submit_latency"), "fluss_submit stage emitted");
+        assertTrue(json.contains("stage.fluss_ack_latency"), "fluss_ack stage emitted");
+        assertTrue(json.contains("stage.end_to_end_latency"), "end_to_end stage emitted");
+    }
+
 }

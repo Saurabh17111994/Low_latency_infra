@@ -158,7 +158,11 @@ type TickEvent struct {
 	DecoderVersion     string `protobuf:"bytes,27,opt,name=decoder_version,json=decoderVersion,proto3" json:"decoder_version,omitempty"`       // SET IN JAVA at row-build (not from Go)
 	ProtocolVersion    string `protobuf:"bytes,28,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`    // SET IN JAVA at row-build (not from Go)
 	// payload integrity (Q5): sha256 of raw_payload, computed ONCE in Go
-	PayloadHash   []byte `protobuf:"bytes,30,opt,name=payload_hash,json=payloadHash,proto3" json:"payload_hash,omitempty"`
+	PayloadHash []byte `protobuf:"bytes,30,opt,name=payload_hash,json=payloadHash,proto3" json:"payload_hash,omitempty"`
+	// T8 staged-latency timestamps (ms epoch, monotonic — never persisted,
+	// transport-only provenance for the T8 latency budget):
+	GoReceivedMs  int64 `protobuf:"varint,31,opt,name=go_received_ms,json=goReceivedMs,proto3" json:"go_received_ms,omitempty"` // T1: Go bridge receipt (source of received_ms)
+	GoEmitMs      int64 `protobuf:"varint,32,opt,name=go_emit_ms,json=goEmitMs,proto3" json:"go_emit_ms,omitempty"`             // T6: Go batcher Add (before proto marshal/write)
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -401,6 +405,20 @@ func (x *TickEvent) GetPayloadHash() []byte {
 		return x.PayloadHash
 	}
 	return nil
+}
+
+func (x *TickEvent) GetGoReceivedMs() int64 {
+	if x != nil {
+		return x.GoReceivedMs
+	}
+	return 0
+}
+
+func (x *TickEvent) GetGoEmitMs() int64 {
+	if x != nil {
+		return x.GoEmitMs
+	}
+	return 0
 }
 
 type ControlRecord struct {
@@ -704,7 +722,7 @@ const file_market_data_proto_rawDesc = "" +
 	"\n" +
 	"created_ms\x18\x04 \x01(\x03R\tcreatedMs\x12-\n" +
 	"\x06events\x18\x05 \x03(\v2\x15.marketdata.TickEventR\x06events\x12,\n" +
-	"\x12batch_payload_hash\x18\x06 \x01(\fR\x10batchPayloadHash\"\xad\a\n" +
+	"\x12batch_payload_hash\x18\x06 \x01(\fR\x10batchPayloadHash\"\xf1\a\n" +
 	"\tTickEvent\x12\x17\n" +
 	"\aslot_id\x18\x01 \x01(\tR\x06slotId\x12\x12\n" +
 	"\x04mode\x18\x02 \x01(\tR\x04mode\x12\x14\n" +
@@ -744,7 +762,10 @@ const file_market_data_proto_rawDesc = "" +
 	"\x11event_fingerprint\x18\x1a \x01(\tR\x10eventFingerprint\x12'\n" +
 	"\x0fdecoder_version\x18\x1b \x01(\tR\x0edecoderVersion\x12)\n" +
 	"\x10protocol_version\x18\x1c \x01(\tR\x0fprotocolVersion\x12!\n" +
-	"\fpayload_hash\x18\x1e \x01(\fR\vpayloadHash\"\xf5\x05\n" +
+	"\fpayload_hash\x18\x1e \x01(\fR\vpayloadHash\x12$\n" +
+	"\x0ego_received_ms\x18\x1f \x01(\x03R\fgoReceivedMs\x12\x1c\n" +
+	"\n" +
+	"go_emit_ms\x18  \x01(\x03R\bgoEmitMs\"\xf5\x05\n" +
 	"\rControlRecord\x12\x1f\n" +
 	"\vrecord_type\x18\x01 \x01(\tR\n" +
 	"recordType\x12)\n" +
