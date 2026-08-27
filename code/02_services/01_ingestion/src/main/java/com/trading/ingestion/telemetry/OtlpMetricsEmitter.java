@@ -72,6 +72,7 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
     private final AtomicLong decodeErrors = new AtomicLong(0);
     private final AtomicLong fingerprintCount = new AtomicLong(0);
     private final AtomicLong acknowledgedLoss = new AtomicLong(0);
+    private final AtomicLong sequenceGaps = new AtomicLong(0);
     private final AtomicLong heartbeatFailures = new AtomicLong(0);
     private final AtomicLong feedStalls = new AtomicLong(0);
     private final AtomicLong subscriptionRetries = new AtomicLong(0);
@@ -211,6 +212,8 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
     public void setClockOffsetMs(long v) { clockOffsetMs = v; }
     public void setIngestionReady(boolean v) { ingestionReady = v ? 1 : 0; }
     public void incrementAcknowledgedLoss() { acknowledgedLoss.incrementAndGet(); }
+    /** T7-F11: one per detected feed_sequence_local gap. */
+    public void incrementSequenceGaps() { sequenceGaps.incrementAndGet(); }
     public void incrementHeartbeatFailure() { heartbeatFailures.incrementAndGet(); }
     public void incrementFeedStall() { feedStalls.incrementAndGet(); }
     public void incrementSubscriptionRetry() { subscriptionRetries.incrementAndGet(); }
@@ -353,6 +356,7 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
                 appendReasonSum(sb, reason, counter.get(), now));
         appendSum(sb, "fingerprint.count", "fingerprints", fingerprintCount.get(), now);
         appendSum(sb, "append.acknowledged.loss", "records", acknowledgedLoss.get(), now);
+        appendSum(sb, "sequence.gaps", "gaps", sequenceGaps.get(), now);
         appendSum(sb, "heartbeat.failures", "failures", heartbeatFailures.get(), now);
         appendSum(sb, "feed.stalls", "stalls", feedStalls.get(), now);
         appendSum(sb, "subscription.retries", "retries", subscriptionRetries.get(), now);

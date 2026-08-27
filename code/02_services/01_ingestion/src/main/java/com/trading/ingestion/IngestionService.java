@@ -11,6 +11,7 @@ import com.trading.ingestion.bridge.BridgeMetrics;
 import com.trading.ingestion.bridge.BrokerQuarantine;
 import com.trading.ingestion.bridge.PayloadHashValidator;
 import com.trading.ingestion.discontinuity.DiscontinuitySink;
+import com.trading.ingestion.discontinuity.SequenceGapMonitor;
 import com.trading.ingestion.discontinuity.DiscontinuityWriter;
 import com.trading.ingestion.discontinuity.TimeJumpMonitor;
 import com.trading.ingestion.fingerprint.FingerprintBuilder;
@@ -123,6 +124,8 @@ public final class IngestionService {
     private final RawTickWriter writer;
     /** T6-3: bounded byte-budgeted queue (proto path) + single writer worker. */
     private final BoundedQueue queue;
+    /** T7-F11: per-connection sequence-gap detection (never halts path). */
+    private final SequenceGapMonitor sequenceGapMonitor = new SequenceGapMonitor();
     private final WriterWorker writerWorker;
     private final Map<Long, Instrument> instrumentMap;
     private final AtomicLong frameCount = new AtomicLong(0);
@@ -807,6 +810,26 @@ public final class IngestionService {
         );
     }
 
+    /**
+     * T7-F11: check a tick's per-connection sequence for a gap. Emits the
+     * metric increment + a SEQUENCE_GAP discontinuity evidence row when a gap
+     * is detected. NEVER halts the data path (contract §7.8 F11).
+     */
+    private void checkSequenceGap(String connectionKey, long seq, long token) {
+        if (seq <= 0) {
+            return;
+        }
+        if (sequenceGapMonitor.onTick(connectionKey, seq)) {
+            metrics.incrementSequenceGaps();
+            discontinuityWriter.write(
+                    DiscontinuityWriter.Reason.SEQUENCE_GAP,
+                    "feed_sequence_local gap on " + connectionKey + " at seq " + seq
+                            + " (token=" + token + ")",
+                    lastTickSnapshot
+            );
+        }
+    }
+
     private void processLine(String jsonLine) {
         frameCount.incrementAndGet();
         try {
@@ -849,6 +872,11 @@ public final class IngestionService {
             GoTick gt = MAPPER.treeToValue(jsonNode, GoTick.class);
             long receiveTsMs = gt.received_ts_ms > 0 ? gt.received_ts_ms : System.currentTimeMillis();
             byte[] rawBytes = jsonLine.getBytes(StandardCharsets.UTF_8);
+
+            // T7-F11: per-connection sequence-gap detection (evidence only).
+            checkSequenceGap(
+                    (gt.slot_id == null ? "?" : gt.slot_id) + "/" + gt.connection_epoch,
+                    gt.feed_sequence_local, gt.token);
 
             // 1a. Validate the original-bytes hash (plan §Tick / §Data Flow):
             //     raw_payload is the exact decompressed broker packet bytes
@@ -1168,6 +1196,11 @@ public final class IngestionService {
         try {
             long receiveTsMs = ev.getReceivedMs() > 0 ? ev.getReceivedMs() : System.currentTimeMillis();
             byte[] packetBytes = ev.getRawPayload().toByteArray();
+
+            // T7-F11: per-connection sequence-gap detection (evidence only).
+            checkSequenceGap(
+                    (ev.getSlotId().isEmpty() ? "?" : ev.getSlotId()) + "/" + batchConnectionEpoch,
+                    ev.getFeedSequenceLocal(), ev.getToken());
 
             // Same gates as the NDJSON path (processLine steps 1b-8).
             if (ev.getTsMs() <= 0) {

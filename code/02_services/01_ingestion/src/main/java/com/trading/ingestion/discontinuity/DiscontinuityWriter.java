@@ -62,7 +62,9 @@ public class DiscontinuityWriter implements DiscontinuitySink {
         /** Feed-health signal from broker (e.g. broker-side gap warning). */
         FEED_HEALTH,
         /** Reconnection occurred — epoch bumped while pipeline is continuous. */
-        RECONNECT
+        RECONNECT,
+        /** T7-F11: per-connection feed_sequence_local jumped (lost ticks). */
+        SEQUENCE_GAP
     }
 
     private final AppendWriter writer;
