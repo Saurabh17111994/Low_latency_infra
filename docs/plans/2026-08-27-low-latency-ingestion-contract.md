@@ -4,6 +4,8 @@
 **Supersedes:** the generic guidance in `Low_latency_ingestion.md` (kept as reference; every open question it raised is now decided here).
 **Scope:** transport-only rewrite of the ingestion hot path. **Flink compute, DDL, safety, evidence, and the 13/13 gate must not regress.**
 
+**Branch:** all work implementing this contract is committed **ONLY** to branch `low-latency-ingestion-based-project` (never `main`). Verify with `git branch --show-current` before starting; see AGENTS.md "Branch Context".
+
 ---
 
 ## 1. Architecture (what we are building)

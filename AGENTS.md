@@ -52,3 +52,19 @@ Spec-driven repo: `docs/` is the spec, `code/` is the implementation.
 
 Numbered read order `docs/01` → `09`. Update the relevant dossier in the same change
 when behavior, schemas, or interfaces change.
+
+## Branch Context (read this before ANY change)
+
+- **Active low-latency work lives on branch `low-latency-ingestion-based-project`.** All
+  commits for the low-latency ingestion rewrite (contract, proto, Go batcher, Java
+  writer, integration, perf) go ONLY to that branch.
+- **`main` is the stable production branch.** Never commit low-latency work to `main`;
+  never merge this branch into `main` without explicit operator sign-off.
+- **Before starting any task, verify the current branch:**
+  `git branch --show-current` — if it is NOT `low-latency-ingestion-based-project`, do
+  NOT edit code; switch first (or ask the operator).
+- The low-latency implementation contract is `docs/plans/2026-08-27-low-latency-ingestion-contract.md`.
+  Its §6 T1–T9 are the ONLY sanctioned implementation steps for this work.
+- Do not confuse the low-latency branch with `main`: `main` contains the pre-existing
+  platform (gateway, compute, EOD, DDL tools). Low-latency files (proto/, batch.go,
+  BoundedQueue.java, WriterWorker.java) are new files created by THIS branch's tasks.
