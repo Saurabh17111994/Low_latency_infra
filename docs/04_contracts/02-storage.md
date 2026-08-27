@@ -8,7 +8,7 @@ Exact Fluss DDL properties are version-gated; unsupported syntax is not invented
 
 ## Production topology
 
-Three Fluss replicas/quorum are placed across the three workload VMs with anti-co-location (v1: the three Manager+Worker VMs; v2: the three+ Worker VMs — Fluss data placement is independent of the Swarm manager/worker split; see 09 v1→v2). One-VM-loss tests at the variable 50,000 ticks/s average baseline are mandatory. (The 90,000 ticks/s peak is retired, DEC-036.)
+Three Fluss replicas/quorum are placed across the three workload VMs with anti-co-location (v1: the three Manager+Worker VMs; v2: the three+ Worker VMs — Fluss data placement is independent of the Swarm manager/worker split; see 09 v1→v2). One-VM-loss tests at the variable 50,000 ticks/s average baseline are mandatory. (The 90,000 ticks/s peak is retired, DEC-036; 60,000 ticks/s gate, DEC-045.)
 
 ## Required schemas
 

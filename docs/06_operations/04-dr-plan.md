@@ -37,7 +37,7 @@ Keep the order gate halted if signal or changelog continuity is uncertain. Resto
 
 ### Fluss tablet, quorum, or workload VM loss
 
-Verify three-node replication/quorum, anti-co-location, remaining capacity, backlog, acknowledged-loss counters, and recovery point. Restore Flink from S3 as needed. Run the one-workload-VM acceptance scenario at the variable 50,000 ticks/s average baseline (90,000 ticks/s peak retired, DEC-036) and record RPO/RTO.
+Verify three-node replication/quorum, anti-co-location, remaining capacity, backlog, acknowledged-loss counters, and recovery point. Restore Flink from S3 as needed. Run the one-workload-VM acceptance scenario at the variable 50,000 ticks/s average baseline (90,000 ticks/s peak retired, DEC-036; 60,000 ticks/s gate, DEC-045) and record RPO/RTO.
 
 ### Broker or Arrow REST outage
 

@@ -22,7 +22,7 @@
 | --- | --- | --- |
 | ASM-NFR-001 | TCP preserves order within each Arrow WebSocket connection, and the `raw_table_1` append order is sufficient for deterministic event-time replay. | ASM-001 |
 | ASM-NFR-002 | Arrow postbacks expose `broker_order_id`, lifecycle status, and the submitted `remarks` value for correlation. | ASM-002 |
-| ASM-NFR-003 | The production baseline (v1: 4 VMs Manager+Worker; v2: 7 VMs with N≥3 Workers) can sustain the normal variable 50,000 ticks/s average baseline while one HA VM is unavailable, using the three workload VMs (v2: Worker VMs) as the load-bearing capacity with managers isolated from workload contention (the 90,000 ticks/s peak campaign is retired, DEC-036). | ASM-005, RISK-010 |
+| ASM-NFR-003 | The production baseline (v1: 4 VMs Manager+Worker; v2: 7 VMs with N≥3 Workers) can sustain the normal variable 50,000 ticks/s average baseline while one HA VM is unavailable, using the three workload VMs (v2: Worker VMs) as the load-bearing capacity with managers isolated from workload contention (the 90,000 ticks/s peak campaign is retired, DEC-036; 60,000 ticks/s gate, DEC-045). | ASM-005, RISK-010 |
 | ASM-NFR-004 | S3 `ap-south-1` can complete verified EOD offload of a full trading day within 30 minutes. | ASM-006 |
 | ASM-NFR-005 | ~~OpenAlgo exposes deterministic REST order-submission responses~~ (obsolete — OpenAlgo removed per DEC-006). Arrow REST `POST /order/regular` returns deterministic order-submission responses and enough evidence to correlate broker order identity. | ASM-007 |
 | ASM-NFR-006 | The selected Fluss version supports BYTES payload, KV state tables, changelog images, three-node replication (LOG tables; KV tables are single-replica in Fluss 0.9.1 — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038)), retention extension, and lake tiering properties. | ASM-008 |
@@ -45,7 +45,7 @@ These behaviors are conscious trade-offs accepted by the platform:
 - **RPO is per-boundary, not a single platform claim:** Recovery Point Objective is defined separately for raw packets, immutable instructions, postback audit, Executor attempts/audit, projections, and EOD data.
 - **Health is multidimensional:** A single green/red indicator cannot represent the platform. Liveness, readiness, job health, and trading readiness are separate dimensions.
 - **Audit retention is policy-gated:** Money-moving audit records are immutable and encrypted at rest in the lake tier. Audit access is role-restricted and itself logged. Deletion before the approved retention period requires policy change, applicable legal-hold release, and single-operator (Saurabh, DEC-044) authorization.
-- **Slow-Fluss ingestion policy** (`EVIDENCE-GATE-ING-BUFFER-001`) **resolved by capacity:** Fluss ingests up to 1-2 million ticks/s and the platform’s theoretical cap ceiling is 90,000 ticks/s (3,000 × 30; sustained gate 50,000 per DEC-036), so no durable local SSD buffer or controlled subscription pause is required. Bounded pending-append limits (50,000 records / `min(64MiB, 10% container memory)` bytes) remain as the defensive backpressure bound; indefinite in-memory buffering and silent data loss remain prohibited. An affected instrument becomes not-ready when the ...
+- **Slow-Fluss ingestion policy** (`EVIDENCE-GATE-ING-BUFFER-001`) **resolved by capacity:** Fluss ingests up to 1-2 million ticks/s and the platform’s theoretical cap ceiling is 60,000 ticks/s (3,000 × 20; sustained gate 60,000 per DEC-045), so no durable local SSD buffer or controlled subscription pause is required. Bounded pending-append limits (50,000 records / `min(64MiB, 10% container memory)` bytes) remain as the defensive backpressure bound; indefinite in-memory buffering and silent data loss remain prohibited. An affected instrument becomes not-ready when the ...
 
 ## Out of Scope
 
@@ -90,14 +90,14 @@ The following configuration values SHALL be enforced at startup. Deployment SHAL
 
 ### NFR-PERF-001: Workload envelope
 
-The active instrument manifest is fixed at **3,000 instruments** for a trading session. Runtime manifest changes require a controlled restart. The production baseline is **50,000 ticks/s on average** (≈16.7 ticks/s/instrument over the declared window); arrivals are variable, and each instrument is capped at **30 ticks/s**. The capacity-peak campaign at **90,000 ticks/s** is RETIRED (DEC-036); the theoretical cap ceiling (3,000 × 30) remains a generator stress bound only.
+The active instrument manifest is fixed at **3,000 instruments** for a trading session. Runtime manifest changes require a controlled restart. The production baseline is **50,000 ticks/s on average** (≈16.7 ticks/s/instrument over the declared window); arrivals are variable, and each instrument is capped at **20 ticks/s**. The capacity-peak campaign at **60,000 ticks/s** is RETIRED (DEC-036); the theoretical cap ceiling (3,000 × 20) remains a generator stress bound only.
 
 Final machine sizing (CPU, RAM, disk I/O, network bandwidth) is evidence-gated by `PERF-PROD-60000-001` and the one-workload-VM-loss test.
 
 | Scenario | Rate | Duration | Required evidence |
 | --- | ---: | ---: | --- |
 | Variable baseline | 50,000 ticks/s average | Full production-equivalent trading session | p99 latency, checkpoint, loss, and recovery SLOs |
-| Capacity peak | ~~90,000 ticks/s~~ RETIRED (DEC-036); theoretical cap ceiling for generator stress only | — | No peak-capacity acceptance evidence required |
+| Capacity peak | ~~60,000 ticks/s~~ RETIRED (DEC-036); theoretical cap ceiling for generator stress only | — | No peak-capacity acceptance evidence required |
 
 Tests use the full 3,000-instrument production manifest, connection count, subscription mode, packet-size/type distribution, and exact software versions.
 

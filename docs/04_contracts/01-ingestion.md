@@ -38,7 +38,7 @@ Unsupported protocol, incomplete subscription, auth exhaustion, append uncertain
 
 ## Acceptance
 
-Golden packet decoding, byte round-trip/hash, typed normalization, reconnect/subscription completeness, fingerprint limitations, bounded backpressure, credential rotation, the variable 50,000 ticks/s average baseline workload tests must pass. (The 90,000 ticks/s peak-capacity campaign is retired, DEC-036.)
+Golden packet decoding, byte round-trip/hash, typed normalization, reconnect/subscription completeness, fingerprint limitations, bounded backpressure, credential rotation, the variable 50,000 ticks/s average baseline workload tests must pass. (The 90,000 ticks/s peak-capacity campaign is retired, DEC-036; 60,000 ticks/s gate, DEC-045.)
 
 ## Requirement traceability
 

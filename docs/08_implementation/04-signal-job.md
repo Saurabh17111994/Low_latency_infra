@@ -591,7 +591,7 @@ Before code is accepted, verify each item (items 2-5 are re-scoped by DEC-038: t
 
 #### Task 3 acceptance checks
 
-- 15-minute tests at the variable 50,000 ticks/s average baseline (3,000 instruments; every instrument ≤30 ticks/s; 90,000 ticks/s peak retired, DEC-036) report no state object containing raw packet bytes or a list of ticks.
+- 15-minute tests at the variable 50,000 ticks/s average baseline (3,000 instruments; every instrument ≤20 ticks/s; 90,000 ticks/s peak retired, DEC-036; 60,000 ticks/s gate, DEC-045) report no state object containing raw packet bytes or a list of ticks.
 - Duplicate state for expired tick fingerprint is absent after its expiry cleanup runs (Fluss-side and cache-side).
 - One final candle per non-empty instrument/window and no correction candle after finalization.
 - ~~The Fluss dedup table holds the accepted dedup set; the Flink checkpoint does not duplicate it~~ — **SUPERSEDED 2026-08-17 (CHG-022 / Design B): the Flink checkpoint holds the dedup set; there is no Fluss dedup table.**

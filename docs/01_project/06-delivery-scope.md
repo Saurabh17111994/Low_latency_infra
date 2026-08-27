@@ -27,7 +27,7 @@ The MVP proves the complete path with conservative safety boundaries.
 
 ### MVP acceptance gates
 
-1. A variable **50,000 ticks/s average baseline** (no instrument above 30 ticks/s) is sustained for its declared test window without acknowledged data loss. (The **90,000 ticks/s peak** campaign is retired, DEC-036.)
+1. A variable **50,000 ticks/s average baseline** (no instrument above 20 ticks/s) is sustained for its declared test window without acknowledged data loss. The **60,000 ticks/s sustained gate** (3,000 × 20, DEC-045) is the acceptance target; the **90,000 ticks/s peak** campaign is retired (DEC-036).
 2. Trigger-tick-to-winner p99 meets the agreed target at the variable 50,000 ticks/s average baseline.
 3. No duplicate broker order in crash-window fault-injection tests.
 4. Order gate halts within five seconds of every defined uncertainty trigger.

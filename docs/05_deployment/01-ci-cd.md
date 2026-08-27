@@ -81,7 +81,7 @@ Failure of an evidence-gated integration keeps live-money readiness blocked.
 
 Deploy immutable candidate artifacts to the production-like Swarm environment (09 v1 4 VMs Manager+Worker; v2 7 VMs) and run:
 
-- Full-session variable 50,000 ticks/s average baseline (90,000 ticks/s peak retired, DEC-036)
+- Full-session variable 50,000 ticks/s average baseline (90,000 ticks/s peak retired, DEC-036; 60,000 ticks/s gate, DEC-045)
 - One workload VM loss
 - Checkpoint and object-store failure exercises
 - Executor crash-window and duplicate-order tests

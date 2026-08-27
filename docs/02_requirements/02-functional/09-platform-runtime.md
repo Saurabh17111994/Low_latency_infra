@@ -126,7 +126,7 @@ Tests cover network exposure, TLS, secret scanning/redaction, rotation/revocatio
 
 ## REQ-PF-011: N+1 resource and recovery budget
 
-The production-like Swarm environment SHALL document per-VM CPU, memory, network, disk, Flink slots, Fluss tablet/quorum capacity, checkpoint bandwidth, and catch-up service rate. After loss of any one workload VM, the remaining placement SHALL sustain the declared 50,000 ticks/s average-baseline profile within the declared backlog, checkpoint, durability, and recovery thresholds. (The 90,000 ticks/s peak profile is retired, DEC-036.)
+The production-like Swarm environment SHALL document per-VM CPU, memory, network, disk, Flink slots, Fluss tablet/quorum capacity, checkpoint bandwidth, and catch-up service rate. After loss of any one workload VM, the remaining placement SHALL sustain the declared 50,000 ticks/s average-baseline profile within the declared backlog, checkpoint, durability, and recovery thresholds. (The 90,000 ticks/s peak profile is retired, DEC-036; 60,000 ticks/s gate, DEC-045.)
 
 The one-VM test SHALL report detection, safe halt, job restore, source catch-up, steady-state recovery, Fluss re-replication, and maximum backlog separately.
 

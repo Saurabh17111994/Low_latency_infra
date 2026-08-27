@@ -37,6 +37,6 @@ class PlatformConfigTest {
     void maxTicksSingleSource() {
         assertEquals(com.trading.common.config.FixedScope.MAX_TICKS_PER_INSTRUMENT_PER_SEC,
                 PlatformConfig.BROKER_MAX_TICKS_PER_INSTRUMENT_PER_SEC);
-        assertEquals(30, PlatformConfig.BROKER_MAX_TICKS_PER_INSTRUMENT_PER_SEC);
+        assertEquals(20, PlatformConfig.BROKER_MAX_TICKS_PER_INSTRUMENT_PER_SEC);
     }
 }

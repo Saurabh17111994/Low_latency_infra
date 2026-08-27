@@ -103,7 +103,7 @@ Live-money deployment requires all of the following:
 - Unknown outcomes halt within five seconds and cannot retry automatically
 - Restart with unverifiable Executor state defaults to `HALTED`
 - Fencing prevents concurrent active Executors
-- variable 50,000 ticks/s average-baseline workload tests passes (90,000 ticks/s peak retired, DEC-036)
+- variable 50,000 ticks/s average-baseline workload tests passes (90,000 ticks/s peak retired, DEC-036; 60,000 ticks/s gate, DEC-045)
 - One-workload-VM failure posture is proven
 - Data recovery target under 30 seconds is met for accepted scenarios
 - EOD offload and three-day retention safety are proven

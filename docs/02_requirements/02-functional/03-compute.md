@@ -4,7 +4,7 @@
 
 The Signal Flink job consumes `raw_table_1`, performs bounded best-effort deduplication, assigns event-time semantics, emits final MVP candles, and passes closed-candle plus forming-bar state to Business Logic within the same job. It does not read feature tables back from Fluss for signal generation.
 
-**Tier-scoped deployment (current testing phase):** the current phase builds and validates Compute on the approved 1,024-instrument / single-connection envelope (20,480 ticks/s at 20 Hz per instrument). The 3,000-instrument / 50,000 ticks/s variable baseline remains the deferred production target; `PERF-PROD-60000-001` and the 3,000-instrument acceptance rows (AC-FC-007/011, NFR-PERF-002) are not part of this phase's acceptance. (`PERF-PROD-90000-001` and the 90,000 ticks/s peak are retired, DEC-036.) Windowing, dedup, and candle logic are envelope-independent — only the load/acceptance profile differs.
+**Tier-scoped deployment (current testing phase):** the current phase builds and validates Compute on the approved 1,024-instrument / single-connection envelope (20,480 ticks/s at 20 Hz per instrument). The 3,000-instrument / 50,000 ticks/s variable baseline remains the deferred production target; `PERF-PROD-60000-001` and the 3,000-instrument acceptance rows (AC-FC-007/011, NFR-PERF-002) are not part of this phase's acceptance. (`PERF-PROD-90000-001` and the 90,000 ticks/s peak are retired, DEC-036; the 60,000 ticks/s gate is current, DEC-045.) Windowing, dedup, and candle logic are envelope-independent — only the load/acceptance profile differs.
 
 ## Constraints
 
@@ -158,7 +158,7 @@ The term `allowed lateness` SHALL not imply correction/update rows in MVP. Event
 
 Deployment SHALL define `dedup_horizon` as the maximum supported append retry, connector replay/rewind, checkpoint restore rewind, broker replay, and approved operational replay interval, plus a documented safety margin. `DEDUP_TTL` shorter than this horizon or unbounded SHALL be rejected.
 
-The implementation SHALL report accepted event rate, dedup entries, serialized entry bytes, physical backend/checkpoint bytes, cleanup progress, and restore duration. Acceptance SHALL include state-growth evidence at the variable 50,000 ticks/s average baseline. (The 90,000 ticks/s peak is retired, DEC-036.)
+The implementation SHALL report accepted event rate, dedup entries, serialized entry bytes, physical backend/checkpoint bytes, cleanup progress, and restore duration. Acceptance SHALL include state-growth evidence at the variable 50,000 ticks/s average baseline. (The 90,000 ticks/s peak is retired, DEC-036; 60,000 ticks/s gate, DEC-045.)
 
 ## REQ-FC-013: Typed closed-candle handoff
 

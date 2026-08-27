@@ -63,11 +63,12 @@ public final class SyntheticWorkload {
 
     private long nextIntervalMs() {
         if (config.profile() == Profile.PEAK) {
-            // 34/35 ms gives <=29.5 ticks/s per instrument (MOCK-UNIT-002: no
-            // instrument exceeds 30/s) and a variable stream. 33 ms would be
-            // 1000/33 = 30.3/s and violates the cap; 34 ms is the smallest
-            // interval that stays under it.
-            return 34L + random.nextLong(2L);
+            // 51..54 ms worst case gives <=19.6 ticks/s per instrument
+            // (MOCK-UNIT-002: no instrument exceeds 20/s) and a variable
+            // stream. ~52.5 ms mean = the real broker per-instrument peak
+            // (1 tick/50 ms) with the same ~2% worst-case margin the 34 ms
+            // mean gave the old 30/s cap.
+            return 51L + random.nextLong(4L);
         }
         // 40..60 ms has a 50 ms mean: 20 ticks/s/instrument baseline average.
         return 40L + random.nextLong(21L);

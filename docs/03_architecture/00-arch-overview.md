@@ -193,7 +193,7 @@ Every managed and durable state category must have a defined capacity budget for
 | Postback quarantine | unresolved records | Per-quarantine entry ~2 KB | N/A (LOG durable state) | Fluss LOG durable state |
 | Suspected discontinuities | operational investigation window | Per-discontinuity ~512 B | N/A (LOG durable state) | Fluss LOG durable state |
 
-All bounds that depend on external configuration (instruments, portfolios, rate) must be workload-validated at the variable 50,000 ticks/s average baseline with every instrument capped at 30 ticks/s. (The 90,000 ticks/s peak is retired, DEC-036.) State categories without a measured bound are evidence-gated until measurement. The dedup checkpoint contribution above is a target — the actual checkpoint size after externalization must be measured, not asserted (DEC-038).
+All bounds that depend on external configuration (instruments, portfolios, rate) must be workload-validated at the variable 50,000 ticks/s average baseline with every instrument capped at 20 ticks/s. (The 90,000 ticks/s peak is retired, DEC-036; 60,000 ticks/s gate, DEC-045.) State categories without a measured bound are evidence-gated until measurement. The dedup checkpoint contribution above is a target — the actual checkpoint size after externalization must be measured, not asserted (DEC-038).
 
 ## Required logical state inventory
 

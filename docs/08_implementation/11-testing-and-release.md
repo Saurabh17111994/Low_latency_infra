@@ -74,7 +74,7 @@ The following mappings identify the detailed sections in this catalog.
 | --- | ---: | --- | --- |
 | `PERF-PER-INSTRUMENT-001` | 30 min | 3,000 instruments; variable 50,000 ticks/s average baseline | Raw append p99 <50 ms; decision p99 <100 ms; no acknowledged loss; total memory <85%; checkpoint p99 <5 s |
 | `PERF-PER-INSTRUMENT-002` | 10 min | 3,000 instruments; variable baseline; restart Signal job once | Processing resumes <30 s; state restores; no duplicate final candle or decision within proven boundary |
-| `PERF-PER-INSTRUMENT-003` | RETIRED with the peak campaign (DEC-036, 2026-08-13) | — | Was: declared campaign at 3,000 instruments and 90,000 ticks/s peak; no peak-capacity evidence row remains |
+| `PERF-PER-INSTRUMENT-003` | RETIRED with the peak campaign (DEC-036, 2026-08-13) | — | Was: declared campaign at 3,000 instruments and 60,000 ticks/s peak; no peak-capacity evidence row remains |
 | `FAIL-PENDING-001` | Until queue limit | Fluss append artificially stalled | Warning at 80%; readiness false; critical at 100%; no unrecorded loss |
 | `FAIL-CHECKPOINT-001` | 5 min | Force checkpoint failure | Signal job suppresses decisions; one idempotent safety halt published; no Arrow REST call from Flink |
 | `STATE-DEDUP-001` | 15 min | Variable baseline plus duplicates | Duplicate state contains compact identity/timestamps only; expired entries removed; no raw payload retained (DEC-038: the accepted dedup set is observable in the Fluss dedup table; the Flink checkpoint does not duplicate it) |
@@ -84,8 +84,8 @@ The following mappings identify the detailed sections in this catalog.
 | Test ID | What is tested | Pass result |
 | --- | --- | --- |
 | `MOCK-UNIT-001` | Same manifest, seed, profile, and clock | Repeated runs produce the identical tick sequence and timestamps. |
-| `MOCK-UNIT-002` | Variable baseline and peak profiles | The baseline averages ≈16.7 ticks/s/instrument at the 50,000 gate (generator capable of 20 ticks/s/instrument); the peak profile reaches the 90,000 ticks/s theoretical cap ceiling across 3,000 instruments — generator capability only, not a platform acceptance target (DEC-036); no instrument exceeds 30 ticks/s in the defined enforcement window. |
-| `MOCK-UNIT-003` | Missing seed, unknown profile, missing instrument manifest, or a cap above 30 ticks/s | Startup rejects the invalid configuration with a clear error. |
+| `MOCK-UNIT-002` | Variable baseline and peak profiles | The baseline averages ≈16.7 ticks/s/instrument at the 50,000 gate (generator capable of 20 ticks/s/instrument); the peak profile reaches the 60,000 ticks/s theoretical cap ceiling across 3,000 instruments — generator capability only, not a platform acceptance target (DEC-036); no instrument exceeds 20 ticks/s in the defined enforcement window. |
+| `MOCK-UNIT-003` | Missing seed, unknown profile, missing instrument manifest, or a cap above 20 ticks/s | Startup rejects the invalid configuration with a clear error. |
 | `MOCK-PERF-001` | Recorded per-instrument and aggregate rate distribution | The evidence shows variable arrivals rather than a universal 50 ms cycle, plus the configured seed, profile, average, cap, and observed distribution. |
 
 ### Schema and storage
@@ -173,7 +173,7 @@ Live evidence: `logs/schema-compat/compat-fluss-001-003-20260815.md` + `logs/sch
 | `ING-RES-003` | Backoff(attempt) golden sequence | Exactly 1,2,4,8,16,30,30… s with NO jitter (deterministic for ING-RES-001 soak accounting); negative attempts clamp to 1 s. Verified by `TestBackoffGoldenSequence` (M4 2026-08-15). |
 | `ING-RES-004` | NDJSON contract version on every emit path | `tick`, `bridge_event`, and `bridge_metrics` records all carry `contract_version=2` (schema conformance across the contract). Verified by `TestIngRes004AllEmitPathsCarryContractVersion2` (M4 2026-08-15). |
 | `ING-PERF-001` | Variable 50,000 ticks/s average baseline, 3,000 instruments | Append p99 is under 50 ms and memory/backlog remain bounded. 1,024-envelope probe 58,951 ticks/s recorded 2026-08-09; gate certified 2026-08-13 at the synthetic hot-path envelope (socket 49,242 tps / 0 wire loss; append 49,578 tps / 0 failures / p99 &lt; 5 ms); the 3,000/50k production-envelope run is removed from acceptance (DEC-037, 2026-08-13 — not to be tested). |
-| `ING-PERF-002` | RETIRED with the peak campaign (DEC-036, 2026-08-13) | Was: 90,000 ticks/s peak; every instrument at or below 30 ticks/s. Superseded by `ING-PERF-001` (50,000 gate). |
+| `ING-PERF-002` | RETIRED with the peak campaign (DEC-036, 2026-08-13) | Was: 60,000 ticks/s peak; every instrument at or below 20 ticks/s. Superseded by `ING-PERF-001` (50,000 gate). |
 | `ING-UNIT-010` | raw_payload hash validation (SHA-256 + base64) | Hash mismatch, malformed hash, invalid base64, and empty payload are rejected with a typed result. |
 | `ING-UNIT-010b` | Golden-corpus payload hash validation | Every golden packet validates and decodes to the exact frame bytes; tampered frames are rejected. |
 | `ING-UNIT-011` | Bridge event → discontinuity reason mapping | Disconnect/auth/shutdown → DROP; heartbeat/stall → HEARTBEAT_GAP; reconnect → RECONNECT; partial subscription_ack → FEED_HEALTH; non-evidence events produce no row. |
@@ -353,7 +353,7 @@ Swarm control-plane HA (Raft) is tested separately from ZooKeeper HA and Fluss H
 | `SWARM-MGR-005` | Two-manager failure (quorum loss) | 1 manager remains, Swarm Raft quorum lost, control-plane degraded correctly detected and documented. Workload survival ≠ control-plane health. |
 | `SWARM-MGR-006` | Manager recovery | Failed manager rejoins, `docker node ls` returns to 3 managers, quorum restored, services stabilize, no duplicate ownership. |
 | `SWARM-FAIL-001` | One workload VM loss (v1: one Manager+Worker, v2: one Worker) | ZooKeeper quorum 2-of-3 maintained with leader re-election; Fluss quorum/restore passes; Flink HA failover; processing recovery within target and gate halts within 5s when required. Swarm quorum unaffected in v2 (managers separate). |
-| `PERF-NODELOSS-001` | 50,000 ticks/s average baseline plus one VM loss (90,000 ticks/s peak retired, DEC-036) | Records ZK quorum degradation/leader re-election, Fluss quorum degradation, Flink JM HA failover, Swarm manager quorum status, checkpoint restore, safe-halt latency, processing recovery, backlog drain, replica catch-up, zero acknowledged loss. |
+| `PERF-NODELOSS-001` | 50,000 ticks/s average baseline plus one VM loss (90,000 ticks/s peak retired, DEC-036; 60,000 ticks/s gate, DEC-045) | Records ZK quorum degradation/leader re-election, Fluss quorum degradation, Flink JM HA failover, Swarm manager quorum status, checkpoint restore, safe-halt latency, processing recovery, backlog drain, replica catch-up, zero acknowledged loss. |
 | `SWARM-NET-001` | Single-node network partition (manager and worker separately) | Partition detected, scheduling/reconciliation behavior documented, recovery after partition heals, not conflated with VM power-off. |
 | `SWARM-PLACEMENT-001` | Replica anti-co-location | Critical replicas not all on one VM — placement constraints spread across failure domains. |
 | `SWARM-DEPLOY-001` | Rolling deployment while one worker unavailable | Update succeeds per policy, rollback correct, placement respected. |
@@ -573,18 +573,18 @@ Every fixture has a version/checksum and expected output. Any count or hash mism
 | --- | ---: | ---: | --- |
 | `PERF-PER-INSTRUMENT-001` | variable 50,000 ticks/s average baseline (3,000 instruments; ≈16.7 ticks/s/instrument average) | Full trading session | SLOs, loss, backlog, checkpoints |
 | `PERF-PER-INSTRUMENT-002` | Same manifest; restart Signal job once | Recovery window | Restore, no duplicate final candle or decision |
-| `PERF-NODELOSS-001` | 50,000 ticks/s average-baseline profile + one VM loss (90,000 ticks/s peak retired, DEC-036) | Recovery window | Quorum, restore, <30 s accepted recovery, <5 s halt |
+| `PERF-NODELOSS-001` | 50,000 ticks/s average-baseline profile + one VM loss (90,000 ticks/s peak retired, DEC-036; 60,000 ticks/s gate, DEC-045) | Recovery window | Quorum, restore, <30 s accepted recovery, <5 s halt |
 | `PERF-EOD-001` | Full-volume day | EOD | Verified manifest <30 min target |
 
 Use production instrument universe, connections, packet-size distribution, strategy state, and exact versions. Window waiting is reported separately from processing latency.
 
 ### Performance benchmark procedure
 
-The active instrument manifest is fixed at 3,000 instruments during a trading session. The baseline is 50,000 ticks/s on average across the declared measurement window (≈16.7 ticks/s/instrument on average). No instrument may exceed 30 ticks/s in the profile enforcement window. The capacity-peak campaign at 90,000 ticks/s is RETIRED (DEC-036); the theoretical cap ceiling (3,000 × 30) remains a generator stress bound only. A universal fixed 50 ms schedule is prohibited. The current testing phase uses the 1,024-instrument manifest `Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv` on one HFT connection (basic tier); the 3,000-instrument / 3-connection envelope is the deferred production target.
+The active instrument manifest is fixed at 3,000 instruments during a trading session. The baseline is 50,000 ticks/s on average across the declared measurement window (≈16.7 ticks/s/instrument on average). No instrument may exceed 20 ticks/s in the profile enforcement window. The capacity-peak campaign at 60,000 ticks/s is RETIRED (DEC-036); the theoretical cap ceiling (3,000 × 20) remains a generator stress bound only. A universal fixed 50 ms schedule is prohibited. The current testing phase uses the 1,024-instrument manifest `Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv` on one HFT connection (basic tier); the 3,000-instrument / 3-connection envelope is the deferred production target.
 
 Record decode-to-append, tick-to-decision, decision-to-Executor receipt, and Arrow REST response percentiles separately. Also record throughput, backlog, source/sink and watermark lag, backpressure, state/checkpoint size and duration, restart count, acknowledged loss, recovery time, safe-halt time, EOD offload duration, and expiry margin. Every result includes versions/digests, configuration hash, duration, UTC and monotonic clock source, sample count, and whether a restart/failure occurred.
 
-The per-instrument mock Arrow broker is the normal benchmark source. It uses a recorded seed, variable arrivals, the production instrument manifest, an ≈16.7 ticks/s/instrument baseline average at the 50,000 gate (generator capable of 20 ticks/s/instrument), and a hard 30 ticks/s/instrument cap. It rejects a missing seed, unknown profile, or a cap above 30. A live Arrow Trade WebSocket capture is optional for protocol evidence only; it records actual packet sizes, tick frequency, total rate, endpoint/session/reconnect data, and still uses the full Ingestion → Fluss → Flink path.
+The per-instrument mock Arrow broker is the normal benchmark source. It uses a recorded seed, variable arrivals, the production instrument manifest, an ≈16.7 ticks/s/instrument baseline average at the 50,000 gate (generator capable of 20 ticks/s/instrument), and a hard 20 ticks/s/instrument cap. It rejects a missing seed, unknown profile, or a cap above 30. A live Arrow Trade WebSocket capture is optional for protocol evidence only; it records actual packet sizes, tick frequency, total rate, endpoint/session/reconnect data, and still uses the full Ingestion → Fluss → Flink path.
 
 | Tool | Purpose |
 | --- | --- |
@@ -600,7 +600,7 @@ Each benchmark produces a versioned JSON record in `code/benchmarks/results/` an
 | --- | --- |
 | Warm-up | Run for two minutes for JIT and cache stabilization. |
 | Variable baseline | Run 50,000 ticks/s average across the 3,000-instrument manifest for 30 minutes. |
-| Capacity peak | RETIRED (DEC-036) — was: run 90,000 ticks/s with every instrument capped at 30 ticks/s for the declared campaign. |
+| Capacity peak | RETIRED (DEC-036) — was: run 60,000 ticks/s with every instrument capped at 20 ticks/s for the declared campaign. |
 | Cool-down | Drain backlog, wait for checkpoints, and verify no acknowledged loss. |
 
 The baseline must meet the documented decision p99 target. Backlog must stay bounded, checkpoints must restore, safe halt must remain below five seconds, accepted data recovery below thirty seconds, and EOD verification below thirty minutes at full volume. Performance alone never proves protocol correctness, duplicate safety, or live-money readiness.
@@ -609,7 +609,7 @@ The baseline must meet the documented decision p99 target. Backlog must stay bou
 
 Re-measures the Signal job after dedup externalization to prove the DEC-038 checkpoint invariant: **checkpoint size scales with bounded working/recovery state, not with Fluss-authoritative dedup cardinality; normal restart rehydrates from Fluss without full raw-history replay; the hot path does not become a per-tick Fluss round trip.** All numbers below are measurement targets — no value may be asserted (DEC-038 §9: replacing the old ~1 GB evidence with an invented number is prohibited). The pre-externalization references are historical baselines for the *why*, not target bounds.
 
-Run on the current 1,024-instrument / 20,480 ticks/s envelope first (Phase 6 acceptance), then re-run at the deferred 50,000 ticks/s baseline (3,000 instruments; ≈16.7 ticks/s/instrument average; every instrument ≤30 ticks/s). The two runs use the same procedure, envelope tooling, and versioned evidence record as the performance benchmark procedure above; they differ only in envelope/acceptance profile (DEC-036/037).
+Run on the current 1,024-instrument / 20,480 ticks/s envelope first (Phase 6 acceptance), then re-run at the deferred 50,000 ticks/s baseline (3,000 instruments; ≈16.7 ticks/s/instrument average; every instrument ≤20 ticks/s). The two runs use the same procedure, envelope tooling, and versioned evidence record as the performance benchmark procedure above; they differ only in envelope/acceptance profile (DEC-036/037).
 
 | Metric | Pre-externalization reference (historical) | Post-externalization measurement target | Pass gate |
 | --- | --- | --- | --- |
@@ -628,7 +628,7 @@ Evidence record: versioned JSON in `code/benchmarks/results/` (same convention a
 
 ### One-VM-loss procedure
 
-Run this at the variable baseline profile (the 90,000 ticks/s peak is retired, DEC-036). All three Fluss workload VMs and encrypted-S3 checkpoints must be healthy first. The Executor may be enabled only against a sandbox broker.
+Run this at the variable baseline profile (the 90,000 ticks/s peak is retired, DEC-036; 60,000 ticks/s gate, DEC-045). All three Fluss workload VMs and encrypted-S3 checkpoints must be healthy first. The Executor may be enabled only against a sandbox broker.
 
 1. Record two minutes of healthy baseline metrics.
 2. Hard-stop one workload VM and record `T0`.
@@ -650,7 +650,7 @@ Pass requires zero acknowledged loss, safe halt below five seconds, data-path re
 | `PERF-PER-INSTRUMENT-002` | 10 min | Same manifest; restart Signal job once | Processing resumes <30 s; state restores; no duplicate final candle or decision within the proven boundary |
 | `FAIL-PENDING-001` | Until queue limit | Fluss append artificially stalled | Warning at 80%; readiness false; critical at 100%; no unrecorded loss |
 | `FAIL-CHECKPOINT-001` | 5 min | Force checkpoint failure | Signal job suppresses decisions; one idempotent safety halt published; no Arrow REST call from Flink |
-| `PERF-PER-INSTRUMENT-003` | RETIRED with the peak campaign (DEC-036, 2026-08-13) | — | Was: declared campaign at variable 90,000 ticks/s peak; no peak-capacity evidence row remains | No acknowledged loss; bounded memory/backlog; checkpoint and recovery evidence; no cap violation |
+| `PERF-PER-INSTRUMENT-003` | RETIRED with the peak campaign (DEC-036, 2026-08-13) | — | Was: declared campaign at variable 60,000 ticks/s peak; no peak-capacity evidence row remains | No acknowledged loss; bounded memory/backlog; checkpoint and recovery evidence; no cap violation |
 | `STATE-DEDUP-001` | 15 min | Variable baseline plus duplicates | Duplicate state contains compact identity/timestamps only; expired entries removed; no raw payload retained (DEC-038: the accepted dedup set is observable in the Fluss dedup table; the Flink checkpoint does not duplicate it) |
 | `STATE-CANDLE-001` | 15 min | Variable baseline input | One final candle per non-empty 15-second window; no tick collection exists in active state |
 | `BABYSITTER-001` | 5 min | Repeated position updates | Latest state only; zero actions; startup rejects action enablement |
@@ -678,7 +678,7 @@ CI must fail for:
 - DDL apply exit-code contract drift: `make ddl-apply-smoke` (env-gated on `FLUSS_BOOTSTRAP`; in the Monday gate) must pass — the orchestrator is run three times against scratch-prefixed catalogs and the terminal contract (0 full PASS / 6 acknowledged `PASS_WITH_LIMITATION` / 1 refused limitation) plus the `RESULT=`/`DDL-APPLY-RESULT:` sentinels and evidence record are asserted; when docker + the ddl-apply image are present a fourth containerized drill mounts a pre-seeded engine-uid 644 evidence record and asserts the apply exits 1 with `EVIDENCE OWNERSHIP CHECK FAILED` naming the seed (`ddl_apply_smoke.py`; see `02-schema-storage.md`).
 - Non-root evidence ownership contract drift: `make evidence-ownership-check` (in the Monday gate DDL step and `docs-audit` C15) must pass — the evidence root dir must carry setgid + group-write (2775), and every evidence record the ddl-apply container wrote (owner == the engine uid) must be group-writable AND carry the engine GID; no record or root dir may be root-owned (`evidence_ownership_check.py`; host-side `make ddl` records are out of scope).
 
-`CI-PERF-001`: the variable baseline and peak benchmark profiles use a recorded seed, the production instrument count, no fixed 50 ms schedule, no per-instrument rate above 30 ticks/s, and zero acknowledged loss.
+`CI-PERF-001`: the variable baseline and peak benchmark profiles use a recorded seed, the production instrument count, no fixed 50 ms schedule, no per-instrument rate above 20 ticks/s, and zero acknowledged loss.
 
 - Secret/redaction failure.
 - Unsupported state/schema compatibility.

@@ -28,7 +28,7 @@ A candle is final from its first write: the final row emits at first window fire
 
 ## Deduplication horizon
 
-The `dedup_horizon` is the maximum supported append retry, connector replay/rewind, checkpoint restore rewind, broker replay, and approved operational replay interval, plus a documented safety margin. `DEDUP_TTL_MS` SHALL be exactly `300000` (5 minutes) in MVP; deployment SHALL reject any other value. The implementation SHALL report accepted event rate, dedup entries, serialized entry bytes, physical backend/checkpoint bytes, and restore duration at the variable 50,000 ticks/s average baseline. (The 90,000 ticks/s peak is retired, DEC-036.)
+The `dedup_horizon` is the maximum supported append retry, connector replay/rewind, checkpoint restore rewind, broker replay, and approved operational replay interval, plus a documented safety margin. `DEDUP_TTL_MS` SHALL be exactly `300000` (5 minutes) in MVP; deployment SHALL reject any other value. The implementation SHALL report accepted event rate, dedup entries, serialized entry bytes, physical backend/checkpoint bytes, and restore duration at the variable 50,000 ticks/s average baseline. (The 90,000 ticks/s peak is retired, DEC-036; 60,000 ticks/s gate, DEC-045.)
 
 ## Typed handoff to Business Logic
 

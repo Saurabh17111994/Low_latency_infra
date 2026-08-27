@@ -81,7 +81,7 @@ Startup dependencies and health checks never automatically enable order placemen
 
 ## Failure and maintenance behavior
 
-- Loss of any one workload VM is tested at the variable 50,000 ticks/s average baseline (90,000 ticks/s peak retired, DEC-036); ZooKeeper ensemble holds quorum (2-of-3) through that loss.
+- Loss of any one workload VM is tested at the variable 50,000 ticks/s average baseline (90,000 ticks/s peak retired, DEC-036; 60,000 ticks/s gate, DEC-045); ZooKeeper ensemble holds quorum (2-of-3) through that loss.
 - ZooKeeper quorum loss, Fluss quorum degradation, checkpoint failure, changelog discontinuity, or uncertain Executor state halts new money-moving calls. A single ZooKeeper node loss is tolerated while quorum holds.
 - Broker/authentication failure makes affected services not ready and alerts operations.
 - Planned maintenance begins with the gate halted, drains or reconciles attempts, checkpoints jobs, and verifies durable state.
@@ -89,7 +89,7 @@ Startup dependencies and health checks never automatically enable order placemen
 
 ## Environment acceptance
 
-Acceptance must prove the variable 50,000 ticks/s average baseline profile (90,000 ticks/s peak retired, DEC-036), one-VM loss, bounded backlog, checkpoint restore, data recovery under 30 seconds for accepted cases, safe-halt under five seconds, EOD manifest verification, security controls, and audit reconstruction.
+Acceptance must prove the variable 50,000 ticks/s average baseline profile (90,000 ticks/s peak retired, DEC-036; 60,000 ticks/s gate, DEC-045), one-VM loss, bounded backlog, checkpoint restore, data recovery under 30 seconds for accepted cases, safe-halt under five seconds, EOD manifest verification, security controls, and audit reconstruction.
 
 ## References
 

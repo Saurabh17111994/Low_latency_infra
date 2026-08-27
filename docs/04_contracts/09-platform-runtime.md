@@ -15,7 +15,7 @@ Local development/integration uses Docker Compose. Production uses Docker Swarm 
 - Durable volumes and encrypted policy-controlled audit/lake storage with a one-year minimum target.
 - Executor fencing: one active owner per `execution_partition_id`.
 - EOD controller service or scheduled job owning manifest lifecycle, retention extension, and storage-pressure alerts.
-- N+1 resource budget: per-VM CPU, memory, network, disk, Flink slots, Fluss capacity, checkpoint bandwidth, and catch-up rate documented; post-loss validation at the variable 50,000 ticks/s average baseline. (The 90,000 ticks/s peak is retired, DEC-036.)
+- N+1 resource budget: per-VM CPU, memory, network, disk, Flink slots, Fluss capacity, checkpoint bandwidth, and catch-up rate documented; post-loss validation at the variable 50,000 ticks/s average baseline. (The 90,000 ticks/s peak is retired, DEC-036; 60,000 ticks/s gate, DEC-045.)
 
 ## Readiness
 
@@ -23,7 +23,7 @@ Fluss quorum/schemas, Flink jobs/checkpoints, broker subscriptions/schema, Execu
 
 ## Capacity and failure gates
 
-Pass variable 50,000 ticks/s average baseline full session (≈16.7 ticks/s/instrument average; 90,000 ticks/s peak retired, DEC-036), one workload VM loss at per-instrument production rate, data recovery <30 seconds, safe-halt <5 seconds, decision p99 <100 ms, and EOD manifest <30 minutes target.
+Pass variable 50,000 ticks/s average baseline full session (≈16.7 ticks/s/instrument average; 90,000 ticks/s peak retired, DEC-036; 60,000 ticks/s gate, DEC-045), one workload VM loss at per-instrument production rate, data recovery <30 seconds, safe-halt <5 seconds, decision p99 <100 ms, and EOD manifest <30 minutes target.
 
 ## Security and rollout
 

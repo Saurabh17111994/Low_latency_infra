@@ -2,7 +2,7 @@
 
 ## Purpose and readiness
 
-Ingestion is the sole market-data entry point. It connects to the evidence-approved broker stream, preserves each original packet losslessly, maps verified fields into normalized typed columns, computes a versioned event fingerprint, and appends to Fluss. The production workload has a variable 50,000 ticks/s average baseline (3,000 instruments; ≈16.7 ticks/s/instrument average) with a hard 30 ticks/s/instrument maximum. (The 90,000 ticks/s capacity-peak campaign is retired, DEC-036.)
+Ingestion is the sole market-data entry point. It connects to the evidence-approved broker stream, preserves each original packet losslessly, maps verified fields into normalized typed columns, computes a versioned event fingerprint, and appends to Fluss. The production workload has a variable 50,000 ticks/s average baseline (3,000 instruments; ≈16.7 ticks/s/instrument average) with a hard 20 ticks/s/instrument maximum (DEC-045). The acceptance gate is 60,000 ticks/s sustained; the 90,000 ticks/s capacity-peak campaign is retired (DEC-036).
 
 **Tier-scoped deployment (current testing phase):** Arrow basic tier provides one WebSocket connection; premium tier provides three. The current testing phase runs on the basic tier with exactly **one HFT connection** and the approved **1,024-instrument manifest** `Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv` (unique tokens, quoted CSV). The full 3,000-instrument / 3-connection coverage remains the approved future production target and is **deferred** to a later phase, which requires the 3-socket capability evidence before activation. The implementation MUST accept a configured connection count and manifest path so the deferred phase is a configuration change, not a rewrite.
 
@@ -19,7 +19,7 @@ Live-money readiness is blocked until Platform and Execution provide official pr
 - Ingestion SHALL NOT perform inline historical backfill in MVP.
 - Ingestion SHALL NOT log original packet bytes, credentials, or secrets.
 - Ingestion SHALL accept variable broker arrivals. It SHALL NOT require or infer a fixed 50 ms tick interval.
-- Synthetic workload profiles use an ≈16.7 ticks/s/instrument baseline average at the 50,000 gate (the generator keeps a 20 ticks/s/instrument capability, MOCK-UNIT-002) and SHALL enforce a 30 ticks/s/instrument maximum; live broker arrivals below or above the baseline are valid.
+- Synthetic workload profiles use an ≈16.7 ticks/s/instrument baseline average at the 50,000 gate (the generator keeps a 20 ticks/s/instrument capability, MOCK-UNIT-002) and SHALL enforce a 20 ticks/s/instrument maximum; live broker arrivals below or above the baseline are valid.
 - Ingestion SHALL NOT batch ticks. Each accepted tick SHALL be submitted immediately. `INGESTION_MAX_BATCH_RECORDS` SHALL validate within `1..1000` (default `1`) and `INGESTION_MAX_BATCH_WAIT_MS` SHALL validate within `0..100` (default `0`). Startup SHALL fail for out-of-range values.
 - Application-level batching beyond a single tick is prohibited.
 - Ingestion SHALL maintain pending append counters in both records (`MAX_PENDING_APPEND_RECORDS=50000`, validated 100..1000000) and bytes (`MAX_PENDING_APPEND_BYTES = min(67108864, floor(container_memory_limit_bytes × 0.10))`).
@@ -38,7 +38,7 @@ Live-money readiness is blocked until Platform and Execution provide official pr
 | ASM-ING-003 | The instrument manifest loaded at startup is authoritative and complete for the trading session. Runtime instrument changes require a controlled restart. | REQ-ING-004 |
 | ASM-ING-004 | The Fluss Java client's buffering, retry, and append-acknowledgement behavior matches the pinned client version. | REQ-ING-008, REQ-ING-012 |
 | ASM-ING-005 | Production hosts can maintain UTC clock offset within 100 ms. | REQ-ING-006 |
-| ASM-ING-006 | A single ingestion process instance can sustain the variable 50,000 ticks/s baseline and safely bound/recover when arrivals exceed it. (The 90,000 ticks/s peak campaign is retired, DEC-036.) | REQ-ING-016, RISK-007 |
+| ASM-ING-006 | A single ingestion process instance can sustain the variable 50,000 ticks/s baseline and safely bound/recover when arrivals exceed it. (The 90,000 ticks/s peak campaign is retired, DEC-036; 60,000 ticks/s gate, DEC-045.) | REQ-ING-016, RISK-007 |
 
 Assumptions are validated by the owner and method recorded in the project risks and assumptions register (`docs/01_project/05-risks-and-assumptions.md`). An invalidated assumption blocks the affected requirement.
 
@@ -52,7 +52,7 @@ These behaviors are conscious trade-offs accepted by the platform:
 - **Bounded memory with hard limit:** Under sustained backpressure, ingestion makes readiness false before memory exhaustion. Packets may be dropped only under an explicit acknowledged-loss policy with readiness impact.
 - **Partial subscription is not READY:** Unless an explicitly approved degraded mode exists, all configured instruments must be subscribed for readiness.
 - **Unknown outcomes are counted, not hidden:** Append timeouts, Fluss unavailability, and uncertain write outcomes increment uncertainty counters and affect readiness. They are never silently absorbed.
-- **Slow-Fluss policy:** Resolved by capacity. Fluss ingests up to 1-2 million ticks/s, and the platform's theoretical cap ceiling is 90,000 ticks/s (3,000 instruments × 30 ticks/s; sustained gate 50,000 per DEC-036). The steady state and peak are within Fluss capacity with margin, so neither a durable local SSD buffer nor a controlled subscription pause is required. Bounded pending-append limits (50,000 records / `min(64MiB, 10% container memory)` bytes) remain as the defensive backpressure bound; reaching them indicates a platform-capacity fault, not a normal operating condition.
+- **Slow-Fluss policy:** Resolved by capacity. Fluss ingests up to 1-2 million ticks/s, and the platform's theoretical cap ceiling is 60,000 ticks/s (3,000 instruments × 20 ticks/s; sustained gate 60,000 per DEC-045). The steady state and peak are within Fluss capacity with margin, so neither a durable local SSD buffer nor a controlled subscription pause is required. Bounded pending-append limits (50,000 records / `min(64MiB, 10% container memory)` bytes) remain as the defensive backpressure bound; reaching them indicates a platform-capacity fault, not a normal operating condition.
 
 ## Out of Scope
 
@@ -231,7 +231,7 @@ Logs SHALL be structured and include service, instance, connection scope, protoc
 4. Reconnect/re-subscription tests prove manifest completeness.
 5. Duplicate/fingerprint tests document both false-positive and false-negative limits.
 6. Backpressure tests stay within configured memory and backlog bounds.
-7. Variable 50,000 ticks/s average-baseline tests with defined loss accounting and no per-instrument rate above 30 ticks/s. (The 90,000 ticks/s peak tests are retired, DEC-036.)
+7. Variable 50,000 ticks/s average-baseline tests with defined loss accounting and no per-instrument rate above 20 ticks/s. (The 90,000 ticks/s peak tests are retired, DEC-036; 60,000 ticks/s gate, DEC-045.)
 8. Credential rotation, exhaustion, shutdown, clock-skew, and observability failure tests pass.
 
 ##

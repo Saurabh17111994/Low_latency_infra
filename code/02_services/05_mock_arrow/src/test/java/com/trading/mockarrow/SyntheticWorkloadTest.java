@@ -24,7 +24,7 @@ class SyntheticWorkloadTest {
     }
 
     @Test
-    void baselineIsVariableAndPeakNeverExceedsThirtyPerInstrument() {
+    void baselineIsVariableAndPeakNeverExceedsTwentyPerInstrument() {
         var baseline = new SyntheticWorkload(new SyntheticWorkload.Config(
                 INSTRUMENTS, 9L, SyntheticWorkload.Profile.BASELINE, 0L));
         var baselineTicks = baseline.sample(20_000);
@@ -39,7 +39,7 @@ class SyntheticWorkloadTest {
         byInstrument.values().forEach(ticks -> {
             long first = ticks.stream().mapToLong(SyntheticWorkload.Tick::eventTimeMs).min().orElse(0L);
             long last = ticks.stream().mapToLong(SyntheticWorkload.Tick::eventTimeMs).max().orElse(first);
-            if (last > first) assertTrue((ticks.size() - 1) * 1000L <= (last - first) * 30L);
+            if (last > first) assertTrue((ticks.size() - 1) * 1000L <= (last - first) * 20L);
         });
     }
 

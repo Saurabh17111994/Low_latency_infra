@@ -179,7 +179,7 @@ Each EOD commit produces a manifest with trading date, table/schema version, sou
 
 ## 4.8 Storage capacity budget (`STOR-7DAY-60000-001`)
 
-Seven-day Fluss retention is the ceiling for the operational source buffer, subject to measured capacity. Actual data volume at the variable 50,000 ticks/s average baseline (3,000 instruments, no instrument above 30 ticks/s; the 90,000 ticks/s peak model is retired, DEC-036) for seven complete trading days is evidence-gated. The storage capacity formula SHALL account for:
+Seven-day Fluss retention is the ceiling for the operational source buffer, subject to measured capacity. Actual data volume at the variable 50,000 ticks/s average baseline (3,000 instruments, no instrument above 20 ticks/s; the 90,000 ticks/s peak model is retired, DEC-036; 60,000 ticks/s gate, DEC-045) for seven complete trading days is evidence-gated. The storage capacity formula SHALL account for:
 
 - Raw data volume (packet bytes + typed fields + overhead per row)
 - Three-node replication factor (3× raw data)
@@ -193,6 +193,6 @@ Warning, critical, and stop thresholds SHALL be defined as configuration placeho
 | Evidence ID | Purpose | Status |
 | --- | --- | --- |
 | `STOR-7DAY-60000-001` | Seven-day capacity model from 50,000 ticks/s workload measuring projected data volume with replication, checkpoints, buffer, and free-space reserve | `EVIDENCE-BLOCKED`; live-money blocking |
-| `STOR-7DAY-90000-001` | RETIRED with the peak campaign (DEC-036, 2026-08-13) — was: seven-day capacity model from the 90,000 ticks/s peak | `RETIRED`; storage model uses the 50,000 ticks/s baseline |
+| `STOR-7DAY-90000-001` | RETIRED with the peak campaign (DEC-036, 2026-08-13) — was: seven-day capacity model from the 90,000 ticks/s peak | `RETIRED`; storage model uses the 60,000 ticks/s gate (DEC-045) / 50,000 ticks/s baseline |
 
 All state tables must be rebuildable from immutable events/audit or have a documented backup/restore contract. Schema evolution requires compatibility classification, replay test, lake synchronization, deployment order, and rollback. Audit deletion requires an approved retention-policy change, applicable legal-hold handling, and immutable deletion evidence.

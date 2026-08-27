@@ -189,7 +189,7 @@ Show credential age/expiry/rotation/revocation; authentication/token-refresh fai
 
 #### `Safe to Trade` operator dashboard
 
-The primary operator dashboard is named **`Safe to Trade`**. It contains broker connection and subscription status; per-instrument freshness (`FRESH`, `STALE`, `UNKNOWN`, `MARKET_CLOSED`); current tick rate against the 50,000 ticks/s average baseline (the 90,000 ticks/s peak is retired, DEC-036; 3,000-instrument production targets; the current testing phase runs the 1,024-instrument / 20,480 ticks/s envelope); decision and Fluss append percentiles; Flink checkpoint/restart state; per-VM CPU/memory/SSD/network; Executor gate state/epoch; unknown-attempt count/age; and active scoped halts.
+The primary operator dashboard is named **`Safe to Trade`**. It contains broker connection and subscription status; per-instrument freshness (`FRESH`, `STALE`, `UNKNOWN`, `MARKET_CLOSED`); current tick rate against the 50,000 ticks/s average baseline (the 90,000 ticks/s peak is retired, DEC-036; 60,000 ticks/s gate, DEC-045; 3,000-instrument production targets; the current testing phase runs the 1,024-instrument / 20,480 ticks/s envelope); decision and Fluss append percentiles; Flink checkpoint/restart state; per-VM CPU/memory/SSD/network; Executor gate state/epoch; unknown-attempt count/age; and active scoped halts.
 
 `GREEN` means nominal, `YELLOW` means attention is needed without blocking new orders, and `RED` means orders are blocked or safety is violated. These colours are summaries only; the Executor gate is the authority for order placement.
 
@@ -231,7 +231,7 @@ All thresholds use 60s consecutive breach (Foundation Task 7) and a bounded `sco
 | Safe halt | Uncertainty detected → calls blocked | <5 s |
 | EOD | Market close → verified manifest | <30 min target |
 
-Acceptance uses a full session at the variable 50,000 ticks/s average baseline, with every instrument capped at 30 ticks/s. (The 90,000 ticks/s peak is retired, DEC-036.)
+Acceptance uses a full session at the variable 50,000 ticks/s average baseline, with every instrument capped at 20 ticks/s. (The 90,000 ticks/s peak is retired, DEC-036; 60,000 ticks/s gate, DEC-045.)
 
 ### Alert contract
 

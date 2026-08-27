@@ -47,7 +47,7 @@ Replace the Go→Java **stdout NDJSON pipe** with:
 
 **Latency model (mandatory, per doc §34):** T0-T6 staged timestamps carried in the proto batch + per-event; report p50/p95/p99/p99.9/max for `decode_latency`, `batching_latency`, `ipc_latency`, `routing_latency`, `fluss_submit_latency`, `fluss_ack_latency`, `end_to_end_latency`.
 
-**Targets (Q12):** 50k sustained (DEC-036), p99 end-to-end broker→Fluss ack ≤ 250ms. These are the acceptance numbers.
+**Targets (Q12):** 60k sustained (DEC-045; re-raised from DEC-036's 50k), p99 end-to-end broker→Fluss ack ≤ 250ms. These are the acceptance numbers.
 
 ---
 
@@ -175,7 +175,7 @@ message TickEvent {
 | Q9 | Row contract | Bit-identical rows, no column changes. |
 | Q10 | Consumers | Both decoded columns + raw bytes (already provided by `raw_payload` column). |
 | Q11 | Profiling first | Yes, time-boxed ~1 day: Test A baseline + Go CPU / JVM alloc-GC profile before rewrite. |
-| Q12 | Targets | 50k sustained (DEC-036), p99 end-to-end ≤ 250ms. |
+| Q12 | Targets | 60k sustained (DEC-045; re-raised from DEC-036's 50k), p99 end-to-end ≤ 250ms. |
 | Q13 | Evidence gate | **RESOLVED 2026-08-27: batching + 1ms linger first** (measured: linger is the bottleneck, not IPC). gRPC/UDS deferred until profiling proves the pipe material. |
 | Q14 | Topology | Two containers, shared UDS volume. |
 | Q15 | Broker sequence | Verify from golden corpus; if absent, connection-local only, honest gap semantics. |
@@ -195,7 +195,7 @@ message TickEvent {
 - O-2 → resolved: fixed 5 depth levels (matches current arrays).
 - O-3 → resolved: UDS via shared volume across the two containers.
 - O-4 → resolved: control records ride the gRPC stream.
-- O-5 → resolved: writer count = **1** (O-1, measured 58k–357k rows/s on a single AppendWriter); 2/4/8 only if E2E-after-T6 misses 50k sustained (Test D trigger).
+- O-5 → resolved: writer count = **1** (O-1, measured 58k–357k rows/s on a single AppendWriter); 2/4/8 only if E2E-after-T6 misses 60k sustained (Test D trigger).
 
 ---
 
@@ -253,7 +253,7 @@ message TickEvent {
 
 **T5 — Java writer + batching (Q17, Q18):**
 - **Single AppendWriter is the default** (O-1 RESOLVED: 58k–357k rows/s measured on one writer; multi-writer only if E2E misses 50k). Batching: client `batch-timeout=1ms` (O-2 RESOLVED), per-writer batch; ack handling; retries; per-writer AppendTracker.
-- **Test D:** Java → Fluss scaling (1/2/3/4/8 writers) — **RE-SCOPED: run only if E2E-after-T6 misses 50k sustained**; otherwise single-writer result stands.
+- **Test D:** Java → Fluss scaling (1/2/3/4/8 writers) — **RE-SCOPED: run only if E2E-after-T6 misses 60k sustained**; otherwise single-writer result stands.
 - **Exit:** T5-Q1..Q3 (queue thresholds/accounting/bounded) + T5-W1..W4 (batching @1ms, retries, no-silent-drop, drain) + T5-J1..J3 (freshness/fingerprint/quarantine) + T5-H2 (hash config) green; fail-closed backpressure verified; no per-event Fluss write proven; single-writer batching meets 50k or Test D triggered.
 
 **T6 — Integration + fallback flag (Q21):**
@@ -267,7 +267,7 @@ message TickEvent {
 
 **T8 — Performance matrix (Q12, doc §37-38):**
 - 1/2/3 conns × 1/2/3/4/8 writers *(writer sweep only if Test D triggered; else single writer)* × batch 16..1024 × loads 15k..150k; capture throughput, p50/p95/p99/p99.9, CPU, RSS, alloc, GC, queue depth/bytes, Fluss latency, retry rate.
-- **Exit:** T8-PERF1..N matrix complete (every record with all mandated fields incl. staged latencies); ≥50k sustained + p99 ≤250ms met; dominant latency stage identified; Test D ran only if E2E missed 50k (with evidence or documented non-trigger).
+- **Exit:** T8-PERF1..N matrix complete (every record with all mandated fields incl. staged latencies); ≥60k sustained + p99 ≤250ms met; dominant latency stage identified; Test D ran only if E2E missed 60k (with evidence or documented non-trigger).
 
 **T9 — Hardening + soak (Q23, Q25):**
 - Resource limits, socket perms, dashboards, alerts, rollback proc, 30-min+ soak (bounded RSS/queue/latency, no leaks, stable retry).
@@ -389,8 +389,8 @@ Each test documents: **failure injected → expected behavior → observed → r
 - **Every benchmark record must include:** exact configuration; duration; warm-up; steady-state interval; input volume; output volume; errors; retries; throughput; p50/p95/p99/p99.9/max; CPU; RSS; JVM allocation; GC; queue depth + bytes; Fluss submit latency; Fluss ack latency; **staged latencies `decode_latency`, `batching_latency`, `ipc_latency`, `routing_latency`, `fluss_submit_latency`, `fluss_ack_latency`, `end_to_end_latency`** — aggregate-only reporting is a failure.
 - **Latency-budget validation (T8-LB):** the report must identify which stage consumes the p99/p99.9 tail (the 2026-08-27 evidence says the 20ms linger was dominant — this test proves whether the new bottleneck is decode, batching, IPC, routing, queue, or Fluss submit/ack).
 - **Failed benchmark definition:** any record missing a mandated field; unexplained errors/retries; load drift (input ≠ declared volume); p99 tail unexplained by the stage histogram.
-- **Test D (conditional):** 1/2/4/8 writers with throughput, p50/95/99/99.9, CPU, RSS, queue depth, Fluss latency, retries, ordering, correctness — **ONLY if E2E-after-T6 misses 50k sustained**; otherwise skip-evidence recorded ("not triggered — single writer met target"). Multi-writer never becomes the default silently.
-- **Exit:** ≥50k sustained + p99 ≤ 250ms met; matrix complete; dominant stage identified.
+- **Test D (conditional):** 1/2/4/8 writers with throughput, p50/95/99/99.9, CPU, RSS, queue depth, Fluss latency, retries, ordering, correctness — **ONLY if E2E-after-T6 misses 60k sustained**; otherwise skip-evidence recorded ("not triggered — single writer met target"). Multi-writer never becomes the default silently.
+- **Exit:** ≥60k sustained + p99 ≤ 250ms met; matrix complete; dominant stage identified.
 
 ### 7.10 Soak & hardening — T9
 
@@ -452,7 +452,7 @@ Every gate-level test produces an evidence record under `logs/tracker-14/` conta
 
 - **Correctness:** can every data transformation be auto-verified? (T1-P*, T6-I1)
 - **Safety:** can silent loss / corruption / unbounded buffering be detected? (T5-Q*, T7-F*, T7-L1)
-- **Performance:** can ≥50k sustained + p99 ≤ 250ms be proven? (T8-PERF*)
+- **Performance:** can ≥60k sustained + p99 ≤ 250ms be proven? (T8-PERF*)
 - **Tail latency:** can the p99/p99.9 stage be identified? (T8-LB)
 - **Reliability:** can every §5 failure mode be reproduced + verified? (T7-F1..F18)
 - **Regression:** Flink/DDL/schema/safety/quarantine unchanged? (R-215..R-224)
@@ -465,7 +465,7 @@ Every gate-level test produces an evidence record under `logs/tracker-14/` conta
 All must hold, in this order:
 
 1. **(e) Bit-exact raw proof:** a round-trip test proves the exact original broker packet bytes reach `raw_payload` in `raw_table_1` — no base64, no JSON, no mutation. **First.**
-2. **(a) Performance:** E2E ≥ 18,441 rows/s live / 49,237 tps synthetic (baseline, Test A) AND ≥ 50k sustained at 3,000-instrument envelope, p99 end-to-end ≤ 250ms, with the full benchmark evidence record.
+2. **(a) Performance:** E2E ≥ 18,441 rows/s live / 49,237 tps synthetic (baseline, Test A) AND ≥ 60k sustained at 3,000-instrument envelope, p99 end-to-end ≤ 250ms, with the full benchmark evidence record.
 3. **(b) Reliability:** all failure tests + 30-min soak green; no silent drops; queue saturation halts; sequence gaps detected; duplicates documented (at-least-once, compute dedup).
 4. **(c) No regression:** `make gate` 13/13, `make full-audit`, `make pin-check` all green. `raw_table_1` schema + Flink SignalJob + DDL manifest unchanged.
 5. **(d) Rollback:** `TRANSPORT=pipe` restores the old path; proven in T6/T9.
@@ -483,7 +483,7 @@ Gate 0 (profiling, DONE) → T1 (proto) → T2 (Go batch) → T5 (single writer 
 - **T3/T4 (gRPC/UDS) are CONDITIONAL** — they sit off the critical path and start only if E2E-after-T6 profiling shows the stdout pipe itself is material (O-4). Test B still runs (pure Go throughput, no gRPC dependency).
 - T6 requires T2 + T5.
 - T7 requires T6. T8 requires T7. T9 requires T8.
-- **Test D (multi-writer sweep) is conditional** — runs only if E2E-after-T6 misses 50k sustained (O-1).
+- **Test D (multi-writer sweep) is conditional** — runs only if E2E-after-T6 misses 60k sustained (O-1).
 
 ---
 

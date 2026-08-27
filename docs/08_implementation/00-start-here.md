@@ -225,7 +225,7 @@ Read these **in order** before writing any code:
 
 1. Wire all services in Docker Compose (already scaffolded)
 2. Run the 30-min variable-baseline perf test — current phase envelope: 1,024 instruments / 20,480 ticks/s average; the 3,000-instrument / 50k ticks/s average baseline is the deferred production target
-3. Run the peak-capacity campaign — current phase: sustained 20,480 ticks/s with ≤30 ticks/s per instrument; the 90k ticks/s peak campaign is RETIRED (DEC-036); the 50k sustained gate is the production target
+3. Run the peak-capacity campaign — current phase: sustained 20,480 ticks/s with ≤20 ticks/s per instrument; the 90k ticks/s peak campaign is RETIRED (DEC-036); the 50k sustained gate is the production target
 4. Capability evidence: Fluss LOG/KV/changelog, Flink checkpoint/savepoint/rescale, Arrow REST sandbox
 5. Record evidence per `EvidenceRecord` format
 6. Produce release evidence package (`11-testing-and-release.md`)

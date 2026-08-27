@@ -20,25 +20,25 @@ Every latency report MUST include p50, p95, p99, UTC clock source, test duration
 
 ## Workload envelope
 
-The active instrument manifest is fixed at **3,000 instruments** for a trading session (runtime manifest changes require a controlled restart). Market-data arrival is variable: an instrument may receive fewer than ≈16.7 ticks/s, and no instrument may exceed **30 ticks/s**. The expected baseline is an average of **≈16.7 ticks/s per instrument** over the declared measurement window, or **50,000 ticks/s** across the manifest. The capacity-peak campaign at **90,000 ticks/s** (3,000 × 30) is RETIRED (DEC-036); the theoretical cap ceiling remains a generator stress bound only. Arrival spacing is not fixed and a 50 ms per-instrument schedule is prohibited as a production claim.
+The active instrument manifest is fixed at **3,000 instruments** for a trading session (runtime manifest changes require a controlled restart). Market-data arrival is variable: an instrument may receive fewer than ≈16.7 ticks/s, and no instrument may exceed **20 ticks/s**. The expected baseline is an average of **≈16.7 ticks/s per instrument** over the declared measurement window, or **50,000 ticks/s** across the manifest. The acceptance gate is **60,000 ticks/s sustained** (3,000 × 20, DEC-045); the 90,000 ticks/s peak campaign is RETIRED (DEC-036). Arrival spacing is not fixed and a 50 ms per-instrument schedule is prohibited as a production claim.
 
 Final machine sizing (CPU, RAM, disk I/O, network bandwidth) is evidence-gated by `PERF-PROD-60000-001` and the one-workload-VM-loss test. Current deployment allocations (500 GB SSD per VM) are a starting point, not a proven sizing result.
 
 | Scenario | Tick rate | Duration | Purpose |
 | --- | ---: | --- | --- |
 | Variable baseline | 50,000 ticks/s average (3,000 instruments; ≈16.7 ticks/s/instrument average) | ~~30-minute production-manifest test~~ REMOVED (DEC-037, 2026-08-13); certified at the synthetic hot-path envelope | Required latency release gate |
-| Capacity peak | ~~90,000 ticks/s~~ RETIRED (DEC-036); theoretical cap ceiling (3,000 × 30) for generator stress only | — | No peak-capacity acceptance evidence required |
+| Capacity peak | ~~60,000 ticks/s~~ RETIRED (DEC-036); theoretical cap ceiling (3,000 × 20) for generator stress only | — | No peak-capacity acceptance evidence required |
 
 Synthetic workloads must preserve variable per-instrument arrivals, maintain the declared average/cap, and record the generator seed/profile. The p99 <100 ms release target applies at the baseline; the gate proves safety and boundedness rather than inventing a second latency threshold (the peak campaign is retired, DEC-036). The 30-minute 3,000-instrument production-manifest run is REMOVED from acceptance (DEC-037, 2026-08-13 — user decision: not to be tested); the 50k gate is certified at the synthetic hot-path envelope.
 
-The platform must meet the production latency SLO at the 50,000 ticks/s baseline and must verify bounded backlog, backpressure, checkpoint stability, recovery, and absence of acknowledged data loss at that gate (the 90,000 ticks/s peak is retired, DEC-036).
+The platform must meet the production latency SLO at the 50,000 ticks/s baseline and must verify bounded backlog, backpressure, checkpoint stability, recovery, and absence of acknowledged data loss at that gate (the 90,000 ticks/s peak is retired, DEC-036; 60,000 ticks/s gate, DEC-045).
 
 ### Production-workload evidence record
 
 | ID | Purpose | Status |
 | --- | --- | --- |
 | `PERF-PROD-60000-001` | Daily declared-duration run at 3,000 instruments and 50,000 ticks/s with complete resource/checkpoint/latency report | `DEFERRED`; not a live-money blocker for the current testing phase. The current phase validates the 1,024-instrument / single-connection configuration. |
-| `PERF-PROD-90000-001` | RETIRED with the peak campaign (DEC-036, 2026-08-13) — was: declared-duration peak run at 3,000 instruments and 90,000 ticks/s | `RETIRED`; no peak-capacity evidence row remains |
+| `PERF-PROD-90000-001` | RETIRED with the peak campaign (DEC-036, 2026-08-13) — was: declared-duration peak run at 3,000 instruments and 60,000 ticks/s | `RETIRED`; no peak-capacity evidence row remains |
 
 ## Delivery guarantees
 
