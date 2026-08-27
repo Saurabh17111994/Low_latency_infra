@@ -10,6 +10,9 @@ COPY 02_services/01_ingestion/go-bridge/third_party ./third_party
 # In-repo SDK (relative replace in go.mod) — self-contained, reproducible.
 RUN go mod download
 COPY 02_services/01_ingestion/go-bridge/*.go ./
+# Generated proto package (market_data.pb.go + convert.go) — imported by
+# batch.go; the top-level *.go glob above does not descend into subdirs.
+COPY 02_services/01_ingestion/go-bridge/marketdata ./marketdata
 RUN CGO_ENABLED=0 go build -o /arrow-bridge .
 
 # Stage 2: Build Java ingestion (full reactor: parent + common + ingestion)

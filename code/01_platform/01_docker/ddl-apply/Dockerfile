@@ -96,9 +96,12 @@ COPY code/01_platform/04_scripts/tests/test_ddl_apply.py \
 # The contract inputs: the pinned DDL corpus + the committed manifest.
 COPY code/01_platform/02_sql/ddl /app/code/01_platform/02_sql/ddl
 
-# COMPAT-FLUSS-005 capability evidence — the default --matrix-evidence for the
-# apply (the smoke falls back to a placeholder if it is ever absent).
-COPY logs/schema-compat/composite-pk-raw-client-20260815.md /app/logs/schema-compat/
+# COMPAT-FLUSS-005 capability evidence is RUNTIME-ONLY: the raw-client
+# composite-PK evidence lives under logs/ (gitignored per R-051 — host paths,
+# endpoints, account identifiers) and cannot be COPY'd into an image from a
+# clean checkout. The smoke resolves it at runtime when present
+# (ddl_apply_smoke.py REAL_EVIDENCE + isfile guard) and falls back to a
+# placeholder otherwise — so no image COPY is needed here.
 
 # Evidence output (host bind-mounts over this in compose): owned by the
 # non-root engine user, setgid 2775 so records land group-writable (umask 002
