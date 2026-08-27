@@ -16,7 +16,6 @@ BRIDGE_DIR="$ROOT/code/02_services/01_ingestion/go-bridge"
 MANIFEST="/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv"
 OUT="$ROOT/logs/tracker-14/test-d-$(date +%Y%m%d-%H%M%S)"
 DURATION_S="${TEST_D_DURATION_S:-300}"   # 5 min default
-INTERVAL_S="${TEST_D_INTERVAL_S:-10}"
 mkdir -p "$OUT" "$OUT/j1" "$OUT/j2" "$OUT/j3" "$OUT/bin"
 export ARROW_APP_ID="testd" ARROW_APP_SECRET="testd" ARROW_FAKE_BROKER="1"
 export TRANSPORT="proto"   # T6 proto path (NOT NDJSON pipe) — the low-latency transport
