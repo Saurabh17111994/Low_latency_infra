@@ -30,8 +30,11 @@ import com.trading.ingestion.shutdown.UncertaintyJournal;
 import com.trading.ingestion.telemetry.OtlpAlertLogs;
 import com.trading.ingestion.telemetry.OtlpMetricsEmitter;
 import com.trading.ingestion.write.AppendTracker;
+import com.trading.ingestion.write.BoundedQueue;
 import com.trading.ingestion.write.FlussRowConverter;
+import com.trading.ingestion.write.ProtoFrameReader;
 import com.trading.ingestion.write.RawTickWriter;
+import com.trading.ingestion.write.WriterWorker;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
@@ -118,6 +121,9 @@ public final class IngestionService {
     private final AppendTracker tracker;
     private final HealthProbe health;
     private final RawTickWriter writer;
+    /** T6-3: bounded byte-budgeted queue (proto path) + single writer worker. */
+    private final BoundedQueue queue;
+    private final WriterWorker writerWorker;
     private final Map<Long, Instrument> instrumentMap;
     private final AtomicLong frameCount = new AtomicLong(0);
     private final AtomicLong errorCount = new AtomicLong(0);
@@ -227,6 +233,15 @@ public final class IngestionService {
         // counters, and discontinuity evidence are driven by the writer's
         // completion callback — write() no longer blocks on the Fluss ack.
         writer.setOutcomeListener(this::onAppendOutcome);
+
+        // T6-3: bounded queue + single writer worker (O-1). The proto path
+        // submits via queue.offer; the worker drains to RawTickWriter →
+        // AppendWriter (client-side batch-timeout=1ms coalesces). The NDJSON
+        // path keeps the direct write (existing regression suite is
+        // synchronous). Queue budgets mirror AppendTracker (Q17: total 192MiB).
+        this.queue = new BoundedQueue(config.maxPendingBytes, (int) Math.min(config.maxPendingRecords, Integer.MAX_VALUE));
+        this.writerWorker = new WriterWorker(queue, writer, config.drainDeadline);
+        writerWorker.start();
 
         // Telemetry emitter — flushes every 10s to otel-collector:4318
         String otelHost = System.getenv().getOrDefault(
@@ -467,8 +482,34 @@ public final class IngestionService {
                 stderrThread.start();
                 currentBridgeStderrThread = stderrThread;
 
+                // T6-2: sniff the transport. If the bridge emits proto frames
+                // (TRANSPORT=proto|grpc), route binary frames; else NDJSON
+                // (TRANSPORT=pipe fallback / rollback, T6-RB1).
+                java.io.InputStream bridgeIn = bridgeProcess.getInputStream();
+                ProtoFrameReader protoReader = new ProtoFrameReader(bridgeIn,
+                        new ProtoFrameReader.FrameHandler() {
+                            @Override
+                            public void onMarketBatch(com.trading.ingestion.transport.MarketDataBatch batch) {
+                                for (com.trading.ingestion.transport.TickEvent ev : batch.getEventsList()) {
+                                    handleFrameArrival();
+                                    processTickEvent(ev, batch.getConnectionId(), batch.getConnectionEpoch());
+                                }
+                            }
+
+                            @Override
+                            public void onControl(com.trading.ingestion.transport.ControlRecord control) {
+                                handleFrameArrival();
+                                handleControlRecord(control);
+                            }
+                        });
+                boolean protoMode = protoReader.sniffProto();
+                if (protoMode) {
+                    LOG.info("ingestion: bridge transport = proto frames (T6)");
+                    // First frame was already delivered by sniffProto.
+                    protoReader.readLoop();
+                } else {
                 try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(bridgeProcess.getInputStream(), StandardCharsets.UTF_8))) {
+                        new InputStreamReader(protoReader.stream(), StandardCharsets.UTF_8))) {
 
                     String line;
                     while (running && (line = reader.readLine()) != null) {
@@ -569,6 +610,7 @@ public final class IngestionService {
                         processLine(line);
                     }
                 }
+                } // else NDJSON path (T6-2)
 
                 int exitCode = bridgeProcess.waitFor();
                 // A shutdown-begun exit is a requested exit: the hook is
@@ -1004,6 +1046,266 @@ public final class IngestionService {
                 LOG.error("ingestion: quarantine writer failed: {}", nested.getMessage());
             }
             LOG.warn("ingestion: line processing error: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Shared frame-arrival bookkeeping (proto path): ING-1 broker-staleness
+     * detection + connection state. Mirrors the NDJSON loop's inline block.
+     */
+    private void handleFrameArrival() {
+        long nowNanos = System.nanoTime();
+        long msSinceLastFrame = (lastFrameNanos > 0)
+                ? java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(nowNanos - lastFrameNanos)
+                : 0;
+        if (lastFrameNanos > 0 && msSinceLastFrame > FRAME_STALE_MS && health.isBrokerConnected()) {
+            LOG.warn("ingestion: broker data stale ({}ms since last frame) — marking disconnected",
+                    msSinceLastFrame);
+            health.setBrokerConnected(false);
+            metrics.setBridgeConnected(false);
+        }
+        lastFrameNanos = nowNanos;
+        if (!health.isBrokerConnected()) {
+            String userInfo = config.arrowUserId.isBlank() ? "token" : config.arrowUserId;
+            LOG.info("ingestion: ✅ CONNECTED to Arrow Trade as user {} — broker data flowing", userInfo);
+            health.setBrokerConnected(true);
+            metrics.setBridgeConnected(true);
+        }
+        health.setLastFrameReceived(nowNanos);
+    }
+
+    /**
+     * T6-I2: route a ControlRecord (proto transport) to the existing control
+     * handlers — bridge_event / bridge_metrics / broker_quarantine are
+     * distinguished by record_type; a malformed or unknown record is
+     * quarantined, never allowed to corrupt market-data processing.
+     */
+    private void handleControlRecord(com.trading.ingestion.transport.ControlRecord cr) {
+        String rt = cr.getRecordType();
+        try {
+            switch (rt) {
+                case "bridge_event" -> {
+                    BridgeEvent event = new BridgeEvent(
+                            cr.getEvent(),
+                            BridgeEvent.CONTRACT_VERSION,
+                            cr.getSlotId(),
+                            cr.getConnectionId(),
+                            cr.getConnectionEpoch(),
+                            cr.getState(),
+                            cr.getAssignedTokens(),
+                            cr.getAcknowledgedTokens(),
+                            cr.getRejectedTokens(),
+                            cr.getReason(),
+                            cr.getReceivedTsMs(),
+                            cr.getManifestFingerprint(),
+                            cr.getAssignedTokenSetHash());
+                    handleBridgeEvent(event);
+                }
+                case "bridge_metrics" -> {
+                    BridgeMetrics m = new BridgeMetrics(
+                            cr.getTsMs(),
+                            cr.getReconnectConsecutive(),
+                            cr.getActiveSockets(),
+                            cr.getGoGoroutines());
+                    metrics.setReconnectConsecutive(m.reconnectConsecutive());
+                    metrics.setActiveSockets(m.activeSockets());
+                    metrics.setGoGoroutines(m.goGoroutines());
+                }
+                case "broker_quarantine" -> {
+                    BrokerQuarantine record = new BrokerQuarantine(
+                            BrokerQuarantine.CONTRACT_VERSION,
+                            cr.getSlotId(),
+                            cr.getConnectionId(),
+                            cr.getConnectionEpoch(),
+                            cr.getRawPayload() == null ? 0L : cr.getReceivedTsMs(),
+                            cr.getReason(),
+                            cr.getRawPayload() == null ? new byte[0] : cr.getRawPayload().toByteArray(),
+                            "",
+                            cr.getReceivedTsMs());
+                    quarantineWriter.write(record.rawPayload(),
+                            QuarantineWriter.Reason.valueOf(record.reason()),
+                            "bridge broker quarantine (proto)",
+                            record.token(), null, null);
+                    metrics.incrementDecodeError(record.reason());
+                }
+                default -> {
+                    // Unknown control record type — quarantine evidence, never
+                    // a silent drop (fail-closed, Q18).
+                    byte[] raw = cr.getRawPayload() == null ? new byte[0] : cr.getRawPayload().toByteArray();
+                    quarantineWriter.write(raw, QuarantineWriter.Reason.INVALID_SCHEMA,
+                            "unknown control record_type: " + rt, 0L, null, null);
+                    metrics.incrementDecodeError("UNKNOWN_CONTROL_TYPE");
+                }
+            }
+        } catch (Exception e) {
+            // A malformed control record must not corrupt market-data
+            // processing (T6-I2) — quarantine and continue.
+            errorCount.incrementAndGet();
+            LOG.warn("ingestion: control record error (type={}): {}", rt, e.getMessage());
+            try {
+                quarantineWriter.write(
+                        cr.getRawPayload() == null ? new byte[0] : cr.getRawPayload().toByteArray(),
+                        QuarantineWriter.Reason.INTERNAL_ERROR,
+                        "control record " + rt + ": " + e.getClass().getSimpleName(),
+                        0L, null, null);
+            } catch (Exception nested) {
+                LOG.error("ingestion: quarantine writer failed: {}", nested.getMessage());
+            }
+        }
+    }
+
+    /**
+     * T6 proto-path per-tick processing (contract §6 T6). Mirrors the NDJSON
+     * path gates EXACTLY (freshness, instrument, validity, fingerprint,
+     * quarantine) but consumes a decoded {@code TickEvent} — the raw payload
+     * is already bytes (no base64 round-trip, Q3/Q6) and the payload hash is
+     * already validated at the frame level. Rows built here are byte-identical
+     * to the NDJSON path (T6-I3 pipe parity).
+     */
+    void processTickEvent(com.trading.ingestion.transport.TickEvent ev,
+                           String batchConnectionId, long batchConnectionEpoch) {
+        frameCount.incrementAndGet();
+        try {
+            long receiveTsMs = ev.getReceivedMs() > 0 ? ev.getReceivedMs() : System.currentTimeMillis();
+            byte[] packetBytes = ev.getRawPayload().toByteArray();
+
+            // Same gates as the NDJSON path (processLine steps 1b-8).
+            if (ev.getTsMs() <= 0) {
+                quarantineWriter.write(packetBytes, QuarantineWriter.Reason.INVALID_VALUES,
+                        "missing or non-positive broker timestamp", (long) ev.getToken(), null, null);
+                return;
+            }
+            FreshnessDecision fd = classifyFreshness(ev.getTsMs(), receiveTsMs,
+                    config.arrowMaxFutureEventSkewMs, config.arrowMaxEventAgeMs);
+            if (fd == FreshnessDecision.FUTURE) {
+                quarantineWriter.write(packetBytes, QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP,
+                        "event timestamp exceeds receive time", (long) ev.getToken(), null, null);
+                emitQualityUnsafe(ev.getSlotId(), batchConnectionEpoch,
+                        QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP);
+                return;
+            }
+            if (fd == FreshnessDecision.STALE) {
+                quarantineWriter.write(packetBytes, QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP,
+                        "event timestamp is older than configured age", (long) ev.getToken(), null, null);
+                metrics.incrementDecodeError("STALE_BROKER_TIMESTAMP");
+                emitQualityUnsafe(ev.getSlotId(), batchConnectionEpoch,
+                        QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP);
+                return;
+            }
+
+            Instrument instr = instrumentMap.get((long) (long) ev.getToken());
+            if (instr == null) {
+                LOG.warn("ingestion: missing instrument token={}", (long) ev.getToken());
+                quarantineWriter.write(packetBytes,
+                        QuarantineWriter.Reason.MISSING_INSTRUMENT,
+                        "token=" + ev.getToken() + " not found in daily manifest",
+                        (long) ev.getToken(), null, null);
+                metrics.incrementDecodeError("MISSING_INSTRUMENT");
+                return;
+            }
+
+            ValidityClassification validity;
+            String validityReason = null;
+            if (!"hft".equals(ev.getFeed())) {
+                quarantineWriter.write(packetBytes,
+                        QuarantineWriter.Reason.INVALID_SCHEMA,
+                        "unknown broker protocol version: " + (ev.getFeed().isEmpty() ? "<null>" : ev.getFeed()),
+                        (long) ev.getToken(), null, null);
+                metrics.incrementDecodeError("UNKNOWN_VERSION");
+                return;
+            }
+            String mode = ev.getMode();
+            if (ev.getLtpPaise() <= 0 && (mode.equals("ltp") || mode.equals("ltpc"))) {
+                validity = ValidityClassification.INVALID_VALUES;
+                validityReason = "ltp_paise <= 0";
+            } else if (mode.equals("ltp") || mode.equals("ltpc") || mode.equals("full")) {
+                validity = ValidityClassification.VALID_TRADE;
+            } else {
+                validity = ValidityClassification.VALID_NON_TRADE;
+            }
+
+            if (validity == ValidityClassification.INVALID_VALUES) {
+                quarantineWriter.write(packetBytes,
+                        QuarantineWriter.Reason.INVALID_VALUES,
+                        validityReason,
+                        instr.instrumentToken(), instr.exchange(), instr.tradingSymbol());
+                metrics.incrementDecodeError("INVALID_VALUES");
+                return;
+            }
+
+            String tickType = (validity == ValidityClassification.VALID_TRADE) ? "TRADE" : "QUOTE";
+            FingerprintBuilder.Result fp = FingerprintBuilder.build(
+                    batchConnectionEpoch,
+                    (long) ev.getToken(),
+                    ev.getTsMs(),
+                    tickType,
+                    ev.getLtpPaise(),
+                    ev.getLtq(),
+                    ev.getBidPxCount() > 0 && ev.getBidPx(0) != 0 ? (long) ev.getBidPx(0) : 0L,
+                    ev.getAskPxCount() > 0 && ev.getAskPx(0) != 0 ? (long) ev.getAskPx(0) : 0L
+            );
+
+            RawTick raw = new RawTick.Builder()
+                    .rawPayload(packetBytes)
+                    .payloadHash(ev.getPayloadHash().isEmpty() ? "" : ev.getPayloadHash().toStringUtf8())
+                    .hashAlgorithm(FINGERPRINT_ALGO)
+                    .protocolVersion(ev.getFeed())
+                    .decoderVersion("arrow-go-sdk")
+                    .receiveTime(Instant.now())
+                    .receiveTimeNanos(System.nanoTime())
+                    .build();
+
+            TickPacket packet = new TickPacket.Builder()
+                    .raw(raw)
+                    .validity(validity)
+                    .validityReason(validityReason)
+                    .instrumentToken((long) ev.getToken())
+                    .tradingSymbol(instr.tradingSymbol())
+                    .exchange(instr.exchange())
+                    .eventTime(Instant.ofEpochMilli(ev.getTsMs()))
+                    .ingestTs(Instant.now())
+                    .lastPricePaise(ev.getLtpPaise())
+                    .volume(ev.getVolume())
+                    .ohlcOpenPaise(ev.getOpenPaise())
+                    .ohlcHighPaise(ev.getHighPaise())
+                    .ohlcLowPaise(ev.getLowPaise())
+                    .ohlcClosePaise(ev.getClosePaise())
+                    .eventFingerprint(fp.hash())
+                    .fingerprintVersion(fp.version())
+                    .connectionId(batchConnectionId == null || batchConnectionId.isEmpty() ? "arrow-bridge" : batchConnectionId)
+                    .connectionEpoch(batchConnectionEpoch)
+                    .instanceId(instanceId)
+                    .build();
+
+            // T6-3: submit via bounded queue → writer worker (proto path only).
+            // The NDJSON path keeps the direct write so the existing regression
+            // suite (synchronous processLine assertions) is unaffected.
+            int rowBytes = packetBytes.length + 64; // conservative row estimate
+            if (!queue.offer(packet, rowBytes)) {
+                LOG.warn("ingestion: tick rejected (queue full) token={}", (long) ev.getToken());
+                metrics.incrementAcknowledgedLoss();
+            }
+
+            metrics.recordTick(packetBytes.length);
+            metrics.incrementFingerprint();
+            health.setLastFrameReceived(System.nanoTime());
+            metrics.setPendingRecords(tracker.pendingRecords());
+            metrics.setPendingBytes(tracker.pendingBytes());
+            metrics.setIngestionReady(health.isReady());
+            metrics.setBridgeConnected(true);
+            refreshResourceMetrics();
+            updateReadinessFile();
+        } catch (Exception e) {
+            errorCount.incrementAndGet();
+            metrics.incrementDecodeError(e.getClass().getSimpleName());
+            try {
+                quarantineWriter.write(ev.getRawPayload().toByteArray(),
+                        QuarantineWriter.Reason.INTERNAL_ERROR,
+                        e.getClass().getSimpleName() + ": " + e.getMessage());
+            } catch (Exception nested) {
+                LOG.error("ingestion: quarantine writer failed: {}", nested.getMessage());
+            }
+            LOG.warn("ingestion: proto tick processing error: {}", e.getMessage());
         }
     }
 
@@ -1518,7 +1820,10 @@ public final class IngestionService {
         if (discontinuityWriter != null) discontinuityWriter.close();
         if (safetyHaltWriter != null) safetyHaltWriter.close();
 
-        // J2: Drain pending writes with deadline
+        // J2: Drain pending writes with deadline — T6-3: close the queue
+        // first (stops new offers), the worker drains everything queued,
+        // then the writer closes (pending acks + drain deadline).
+        if (writerWorker != null) writerWorker.close();
         if (writer != null) writer.close();
         // Join the main thread (bounded) when this is the shutdown hook and the
         // bridge loop was live: the loop logs the final "bridge loop ended

@@ -45,7 +45,9 @@ type Tick struct {
 	AskOrd  [5]uint16 `json:"ask_orders,omitempty"`
 }
 
-var bridgeEmitter = NewBridgeEmitter(os.Stdout)
+// bridgeEmitter is the transport-agnostic emitter. main() reassigns it
+// based on TRANSPORT (T6): NDJSON pipe (default/fallback) or proto frames.
+var bridgeEmitter Transport = NewBridgeEmitter(os.Stdout)
 
 // maxDecodeErrorsPer10s is the decode-error burst threshold per slot (plan
 // §Error Handling): 100 errors in 10 seconds closes the slot and reconnects.
@@ -83,6 +85,11 @@ func main() {
 
 	client := arrow.NewClient(appID, appSecret)
 	var refreshAuth func(context.Context) error
+
+	// T6: select the transport emitter (TRANSPORT=pipe|proto|grpc) BEFORE
+	// any emit — the bridge must not write NDJSON lines to a proto reader.
+	// Runs in BOTH fake-broker and live modes.
+	bridgeEmitter = initBridgeEmitter(os.Stdout)
 
 	// Test-only fake-broker auth mode (ARROW_FAKE_BROKER=1, paired with the
 	// ARROW_HFT_URL development override): skip AutoLogin so bridge lifecycle
@@ -224,7 +231,14 @@ func main() {
 	// further work or return) so the ING-TCP-001 shutdown report cannot be
 	// lost to a goroutine/main exit race.
 	finalTickCountReport.Do(reportTickCounts)
+	// T6: drain any pending batched ticks BEFORE the shutdown marker so the
+	// Java reader sees the complete stream (proto mode: Flush writes the
+	// final MarketDataBatch frame; NDJSON mode: no-op).
+	if err := bridgeEmitter.Flush(); err != nil {
+		fmt.Fprintf(os.Stderr, "arrow-bridge: final flush failed: %v\n", err)
+	}
 	emitShutdownEvent()
+	_ = bridgeEmitter.Close()
 }
 
 // isFakeBrokerMode reports the test-only fake-broker auth mode
@@ -359,7 +373,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 	defer stopRead()
 	// R-185: a new connection epoch begins — restart the per-slot tick
 	// sequence so feed_sequence_local does not grow across reconnects.
-	bridgeEmitter.resetSeq(slot.SlotID)
+	bridgeEmitter.ResetSeq(slot.SlotID)
 
 	// onDecoded fires immediately before each LTP/full tick dispatch in the
 	// same read goroutine, so lastDecoded holds the exact decompressed packet

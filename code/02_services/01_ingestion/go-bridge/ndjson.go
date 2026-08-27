@@ -116,7 +116,8 @@ func (e *BridgeEmitter) nextSeq(slotID string) uint64 {
 // the counter "resets when a new connection epoch begins" — callers invoke it
 // at the start of each epoch so feed_sequence_local restarts after a reconnect
 // instead of growing for the process lifetime.
-func (e *BridgeEmitter) resetSeq(slotID string) {
+// ResetSeq zeroes the per-slot tick sequence (new epoch, R-185).
+func (e *BridgeEmitter) ResetSeq(slotID string) {
 	e.seqMu.Lock()
 	defer e.seqMu.Unlock()
 	e.seqBySlot[slotID] = 0
@@ -273,6 +274,13 @@ func (e *BridgeEmitter) EmitMetrics(m BridgeMetrics) error {
 	}
 	return e.write(m)
 }
+
+// Flush is a no-op for the NDJSON emitter — every record is written
+// synchronously; there is no pending batch to drain.
+func (e *BridgeEmitter) Flush() error { return nil }
+
+// Close is a no-op for the NDJSON emitter (see Flush).
+func (e *BridgeEmitter) Close() error { return nil }
 
 func (e *BridgeEmitter) write(value any) error {
 	e.mu.Lock()
