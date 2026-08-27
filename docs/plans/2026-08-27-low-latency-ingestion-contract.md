@@ -234,32 +234,32 @@ message TickEvent {
 - `batch.go` (count/bytes/age), keep NDJSON emitter for fallback; unit tests for flush limits.
 - **Exit:** Go tests green; NDJSON path still works.
 
-**T3 — Go gRPC client + UDS (Q14, Q20):**
+**T3 — [CONDITIONAL] Go gRPC client + UDS (Q14, Q20) — only if Test C shows IPC material:**
 - Persistent stream, reconnect, flow-control, metrics; control records ride the stream.
-- **Test B (Go-only):** broker replay → decode → batch; max Go throughput.
-- **Exit:** Test B recorded; gRPC client connects to a stub server over UDS.
+- **Test B (Go-only):** broker replay → decode → batch; max Go throughput. *(Runs regardless — pure Go throughput is a Gate-0-style measurement that does not depend on gRPC.)*
+- **Exit:** Test B recorded; gRPC client connects to a stub server over UDS. *(Only built if the T3 gate opens.)*
 
-**T4 — Java gRPC server + router (Q16, Q17):**
+**T4 — [CONDITIONAL] Java gRPC server + router (Q16, Q17) — only if Test C shows IPC material:**
 - UDS bind, decode, freshness gates (kept), router `token%16`, bounded queues, queue metrics.
 - **Test C (IPC-only):** Go → proto → gRPC/UDS → Java, no Fluss. Measures whether IPC is material.
-- **Exit:** Test C recorded; **this is the gRPC/UDS decision gate (Q13)** — if IPC-only ≈ pipe, gRPC still proceeds (decided) but the perf evidence is documented.
+- **Exit:** Test C recorded; **this is the gRPC/UDS decision gate (Q13, O-4)** — **2026-08-27 evidence (THR-PROBE-002 + Gate 0): pipe is at 18.5% CPU, linger is the bottleneck → gRPC/UDS DEFERRED. T3/T4 only start if E2E-after-T6 profiling shows the stdout pipe itself is material.**
 
-**T5 — Java multi-writer (Q17, Q18):**
-- N AppendWriters; per-writer batch; ack handling; retries; per-writer AppendTracker.
-- **Test D:** Java → Fluss scaling (1/2/3/4/8 writers).
-- **Exit:** writer-count winner chosen from evidence; fail-closed backpressure verified.
+**T5 — Java writer + batching (Q17, Q18):**
+- **Single AppendWriter is the default** (O-1 RESOLVED: 58k–357k rows/s measured on one writer; multi-writer only if E2E misses 50k). Batching: client `batch-timeout=1ms` (O-2 RESOLVED), per-writer batch; ack handling; retries; per-writer AppendTracker.
+- **Test D:** Java → Fluss scaling (1/2/3/4/8 writers) — **RE-SCOPED: run only if E2E-after-T6 misses 50k sustained**; otherwise single-writer result stands.
+- **Exit:** fail-closed backpressure verified; single-writer batching meets 50k or Test D triggered.
 
 **T6 — Integration + fallback flag (Q21):**
-- `TRANSPORT=grpc|pipe`; wire both containers + UDS volume into compose; keep NDJSON fallback.
+- `TRANSPORT=pipe|grpc` — **pipe is the default/primary transport** (O-4); `grpc` is the opt-in mode used only if T3/T4 were built. Wire the batcher into the existing pipe first; keep NDJSON fallback. UDS volume + gRPC wiring only if T3/T4 exist.
 - **Test E:** end-to-end vs baseline (Test A). 
 - **Exit:** E2E ≥ 18k live / 49k synthetic, p99 ≤ 250ms, gate green.
 
 **T7 — Failure testing (Q22, doc §53):**
-- Broker disconnect/reconnect, Java restart, gRPC drop, UDS failure, Fluss down/slow, queue saturation, malformed proto, sequence gap, duplicate, graceful shutdown.
+- Broker disconnect/reconnect, Java restart, Fluss down/slow, queue saturation, malformed proto, sequence gap, duplicate, graceful shutdown. *(gRPC drop / UDS failure cases only if T3/T4 were built.)*
 - **Exit:** full matrix green with evidence.
 
 **T8 — Performance matrix (Q12, doc §37-38):**
-- 1/2/3 conns × 1/2/3/4/8 writers × batch 16..1024 × loads 15k..150k; capture throughput, p50/p95/p99/p99.9, CPU, RSS, alloc, GC, queue depth/bytes, Fluss latency, retry rate.
+- 1/2/3 conns × 1/2/3/4/8 writers *(writer sweep only if Test D triggered; else single writer)* × batch 16..1024 × loads 15k..150k; capture throughput, p50/p95/p99/p99.9, CPU, RSS, alloc, GC, queue depth/bytes, Fluss latency, retry rate.
 - **Exit:** the 50k sustained + p99 250ms acceptance numbers met with evidence.
 
 **T9 — Hardening + soak (Q23, Q25):**
@@ -274,9 +274,9 @@ message TickEvent {
 |---|---|
 | T1 | Proto field-mapping vs `Tick`/`GoTick`; serialization round-trip; bit-exact `raw_payload`; unknown-version rejection |
 | T2 | Batch flush at count/bytes/age boundaries; batch empty; single-event batch |
-| T3 | Stream connect/reconnect; flow-control; UDS path/perms; control-record framing |
-| T4 | Router distribution (token%16 even); queue byte accounting; freshness gates still reject stale/future |
-| T5 | Writer retry/backoff; ack handling; per-writer halt at 100%; no silent drop |
+| T3 | *(conditional)* Stream connect/reconnect; flow-control; UDS path/perms; control-record framing |
+| T4 | *(conditional)* Router distribution (token%16 even); queue byte accounting; freshness gates still reject stale/future |
+| T5 | Writer retry/backoff; ack handling; single-writer batching @1ms; per-writer halt at 100%; no silent drop |
 | T6 | `TRANSPORT=pipe` fallback parity; E2E vs baseline; gate green |
 | T7 | Full failure matrix (doc §53) |
 | T8 | Full benchmark matrix (doc §37) with all metrics |
@@ -299,15 +299,15 @@ All must hold, in this order:
 ## 9. Dependencies (what before what)
 
 ```
-Gate 0 (profiling) → T1 (proto) → T2 (Go batch) + T3 (Go gRPC) → T4 (Java server+router) → T5 (writers)
-→ T6 (integration) → T7 (failure) → T8 (perf) → T9 (harden+soak)
+Gate 0 (profiling, DONE) → T1 (proto) → T2 (Go batch) → T5 (single writer + 1ms linger) → T6 (integration)
+→ T7 (failure) → T8 (perf) → T9 (harden+soak)
 ```
 
 - T1 blocks everything (contract first).
-- T3/T4 can proceed in parallel after T1 (Go client + Java server, tested against stubs).
-- T6 requires T2-T5.
+- **T3/T4 (gRPC/UDS) are CONDITIONAL** — they sit off the critical path and start only if E2E-after-T6 profiling shows the stdout pipe itself is material (O-4). Test B still runs (pure Go throughput, no gRPC dependency).
+- T6 requires T2 + T5.
 - T7 requires T6. T8 requires T7. T9 requires T8.
-- **Do not** start T3+ until Test C's evidence is recorded (Q13).
+- **Test D (multi-writer sweep) is conditional** — runs only if E2E-after-T6 misses 50k sustained (O-1).
 
 ---
 
