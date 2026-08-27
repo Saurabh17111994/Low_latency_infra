@@ -55,7 +55,13 @@ final class FlussClientAdapter {
      */
     static FlussRowConverter connect(String bootstrapServers, String tablePath,
                                       int writerBatchTimeoutMs) {
-        return connect(bootstrapServers, tablePath, writerBatchTimeoutMs, WriterMode.GENERIC);
+        return connect(bootstrapServers, tablePath, writerBatchTimeoutMs, 0, WriterMode.GENERIC);
+    }
+
+    static FlussRowConverter connect(String bootstrapServers, String tablePath,
+                                      int writerBatchTimeoutMs, int writerBatchSizeBytes) {
+        return connect(bootstrapServers, tablePath, writerBatchTimeoutMs,
+                writerBatchSizeBytes, WriterMode.GENERIC);
     }
 
     /**
@@ -66,7 +72,8 @@ final class FlussClientAdapter {
      * POJO converter beats our explicit build — it is not the default.
      */
     static FlussRowConverter connect(String bootstrapServers, String tablePath,
-                                      int writerBatchTimeoutMs, WriterMode writerMode) {
+                                      int writerBatchTimeoutMs, int writerBatchSizeBytes,
+                                      WriterMode writerMode) {
         LOG.info("fluss: connecting (bootstrap={}, table={}, mode={})",
                 bootstrapServers, tablePath, writerMode);
 
@@ -77,6 +84,10 @@ final class FlussClientAdapter {
         // 20ms — THR-PROBE-002). Config-driven (FLUSS_WRITER_BATCH_TIMEOUT_MS)
         // so T8 can sweep. Default is 100ms — never fall back to it.
         conf.setString("client.writer.batch-timeout", writerBatchTimeoutMs + "ms");
+        // A/B bench (Exp 4): client.writer.batch-size in bytes; 0 = client default.
+        if (writerBatchSizeBytes > 0) {
+            conf.setString("client.writer.batch-size", writerBatchSizeBytes + "b");
+        }
         // R-297 wedge fix: bound the writer memory-pool wait. The default
         // client.writer.buffer.wait-timeout is infinite — when the sender
         // thread is wedged (leaderless tables) the 64MB pool exhausts and

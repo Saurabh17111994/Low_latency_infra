@@ -48,6 +48,14 @@ public final class IngestionConfig {
     /** A/B bench (forensic audit 2026-08-27): "generic" (default, locked) or
      *  "typed" (Fluss TypedAppendWriter POJO reflection path, measurement only). */
     public final String flussWriterMode;
+    /** A/B bench (forensic audit 2026-08-27): number of proto-path writer
+     *  workers/queues (1-8, default 1). Probes whether the shared Fluss Sender
+     *  lock is the throughput ceiling (Test D proxy without policy change). */
+    public final int flussWriters;
+    /** A/B bench (forensic audit 2026-08-27): client.writer.batch-size bytes.
+     *  0 = unset (Fluss client default). Batch sweep (Exp 4): 16/64/256/1024
+     *  events → maps to batch-size bytes via the Fluss accumulator. */
+    public final int flussWriterBatchSizeBytes;
     /** Per-tick SHA-256 payload validation (A2 decision: keep, config-optional).
      *  true=validate (safety default); false=skip recompute (perf, proto path). */
     public final boolean validatePayloadHash;
@@ -93,6 +101,8 @@ public final class IngestionConfig {
         this.maxBatchWaitMs = b.maxBatchWaitMs;
         this.flussWriterBatchTimeoutMs = b.flussWriterBatchTimeoutMs;
         this.flussWriterMode = b.flussWriterMode;
+        this.flussWriters = b.flussWriters;
+        this.flussWriterBatchSizeBytes = b.flussWriterBatchSizeBytes;
         this.validatePayloadHash = b.validatePayloadHash;
         this.maxPendingRecords = b.maxPendingRecords;
         this.maxPendingBytes = b.maxPendingBytes;
@@ -179,6 +189,11 @@ public final class IngestionConfig {
             errors.add("FLUSS_WRITER_MODE must be 'generic' or 'typed' (got '" + mode + "')");
         }
         b.flussWriterMode = mode;
+        // A/B bench: FLUSS_WRITERS=1..8 (default 1 — locked). >1 only for the
+        // lock-scaling probe (Test D proxy); not a production default.
+        b.flussWriters = intRange(env, "FLUSS_WRITERS", 1, 1, 8, errors);
+        // A/B bench (Exp 4): client.writer.batch-size in bytes; 0 = unset.
+        b.flussWriterBatchSizeBytes = intRange(env, "FLUSS_WRITER_BATCH_SIZE_BYTES", 0, 0, 16_777_216, errors);
         b.validatePayloadHash = boolEnv(env, "INGEST_VALIDATE_PAYLOAD_HASH", true, errors);
 
         // ---- Backpressure -- T2 tunable (G2 Ingest) ----
@@ -538,6 +553,8 @@ public final class IngestionConfig {
     private static class Builder {
         int flussWriterBatchTimeoutMs = 1; // O-2 default
         String flussWriterMode = "generic"; // A/B: locked default is generic
+        int flussWriters = 1; // A/B: locked default is 1 (single writer worker)
+        int flussWriterBatchSizeBytes = 0; // A/B: 0 = client default batch size
         boolean validatePayloadHash = true; // A2: keep validation, default on
         String arrowAppId = "", arrowAppSecret = "", arrowToken = "";
         String arrowUserId = "", arrowPassword = "", arrowTotpKey = "";

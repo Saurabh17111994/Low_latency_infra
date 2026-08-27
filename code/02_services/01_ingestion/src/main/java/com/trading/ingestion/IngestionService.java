@@ -122,11 +122,15 @@ public final class IngestionService {
     private final AppendTracker tracker;
     private final HealthProbe health;
     private final RawTickWriter writer;
-    /** T6-3: bounded byte-budgeted queue (proto path) + single writer worker. */
-    private final BoundedQueue queue;
+    /** T6-3/A-B: bounded byte-budgeted queues (proto path) + writer workers.
+     *  FLUSS_WRITERS>1 (A/B probe): N queues + N workers share the one
+     *  threadsafe RawTickWriter → same Fluss Sender (lock-scaling probe). */
+    private final BoundedQueue[] queues;
     /** T7-F11: per-connection sequence-gap detection (never halts path). */
     private final SequenceGapMonitor sequenceGapMonitor = new SequenceGapMonitor();
-    private final WriterWorker writerWorker;
+    private final WriterWorker[] writerWorkers;
+    /** Number of proto-path writer workers (FLUSS_WRITERS, default 1). */
+    private final int writerCount;
     private final Map<Long, Instrument> instrumentMap;
     private final AtomicLong frameCount = new AtomicLong(0);
     private final AtomicLong errorCount = new AtomicLong(0);
@@ -237,14 +241,21 @@ public final class IngestionService {
         // completion callback — write() no longer blocks on the Fluss ack.
         writer.setOutcomeListener(this::onAppendOutcome);
 
-        // T6-3: bounded queue + single writer worker (O-1). The proto path
-        // submits via queue.offer; the worker drains to RawTickWriter →
-        // AppendWriter (client-side batch-timeout=1ms coalesces). The NDJSON
-        // path keeps the direct write (existing regression suite is
+        // T6-3/A-B: N bounded queues + N writer workers (FLUSS_WRITERS, default
+        // 1). Proto path submits via queue[i].offer; workers drain to the shared
+        // threadsafe RawTickWriter → AppendWriter (client-side batch-timeout=1ms
+        // coalesces). NDJSON path keeps the direct write (regression suite is
         // synchronous). Queue budgets mirror AppendTracker (Q17: total 192MiB).
-        this.queue = new BoundedQueue(config.maxPendingBytes, (int) Math.min(config.maxPendingRecords, Integer.MAX_VALUE));
-        this.writerWorker = new WriterWorker(queue, writer, config.drainDeadline);
-        writerWorker.start();
+        this.writerCount = Math.max(1, Math.min(config.flussWriters, 8));
+        this.queues = new BoundedQueue[writerCount];
+        this.writerWorkers = new WriterWorker[writerCount];
+        for (int i = 0; i < writerCount; i++) {
+            this.queues[i] = new BoundedQueue(
+                    config.maxPendingBytes,
+                    (int) Math.min(config.maxPendingRecords, Integer.MAX_VALUE));
+            this.writerWorkers[i] = new WriterWorker(queues[i], writer, config.drainDeadline);
+            this.writerWorkers[i].start();
+        }
 
         // Telemetry emitter — flushes every 10s to otel-collector:4318
         String otelHost = System.getenv().getOrDefault(
@@ -348,7 +359,8 @@ public final class IngestionService {
                         : FlussClientAdapter.WriterMode.GENERIC;
         FlussRowConverter converter = FlussClientAdapter.connect(
                 config.flussBootstrap, config.rawTableName,
-                config.flussWriterBatchTimeoutMs, writerMode);
+                config.flussWriterBatchTimeoutMs,
+                config.flussWriterBatchSizeBytes, writerMode);
         LOG.info("ingestion: Fluss connected (bootstrap={}, table={})",
                 config.flussBootstrap, config.rawTableName);
 
@@ -1334,11 +1346,14 @@ public final class IngestionService {
                     .instanceId(instanceId)
                     .build();
 
-            // T6-3: submit via bounded queue → writer worker (proto path only).
-            // The NDJSON path keeps the direct write so the existing regression
-            // suite (synchronous processLine assertions) is unaffected.
+            // T6-3/A-B: submit via bounded queue[i] → writer worker[i] (proto
+            // path only). The NDJSON path keeps the direct write so the
+            // existing regression suite (synchronous processLine assertions)
+            // is unaffected. token % N routes to the i-th queue (Test D proxy:
+            // does N workers beat the shared Sender lock?).
             int rowBytes = packetBytes.length + 64; // conservative row estimate
-            if (!queue.offer(packet, rowBytes)) {
+            int qi = (int) ((long) ev.getToken() % writerCount);
+            if (!queues[qi].offer(packet, rowBytes)) {
                 LOG.warn("ingestion: tick rejected (queue full) token={}", (long) ev.getToken());
                 metrics.incrementAcknowledgedLoss();
             }
@@ -1892,7 +1907,11 @@ public final class IngestionService {
         // J2: Drain pending writes with deadline — T6-3: close the queue
         // first (stops new offers), the worker drains everything queued,
         // then the writer closes (pending acks + drain deadline).
-        if (writerWorker != null) writerWorker.close();
+        if (writerWorkers != null) {
+            for (WriterWorker w : writerWorkers) {
+                if (w != null) w.close();
+            }
+        }
         if (writer != null) writer.close();
         // Join the main thread (bounded) when this is the shutdown hook and the
         // bridge loop was live: the loop logs the final "bridge loop ended
