@@ -84,10 +84,17 @@ final class FlussClientAdapter {
         // 20ms — THR-PROBE-002). Config-driven (FLUSS_WRITER_BATCH_TIMEOUT_MS)
         // so T8 can sweep. Default is 100ms — never fall back to it.
         conf.setString("client.writer.batch-timeout", writerBatchTimeoutMs + "ms");
-        // A/B bench (Exp 4): client.writer.batch-size in bytes; 0 = client default.
-        if (writerBatchSizeBytes > 0) {
-            conf.setString("client.writer.batch-size", writerBatchSizeBytes + "b");
-        }
+        // Forensic audit 2026-08-27 (Fluss source lever): pin the batch at the
+        // measured optimum and DISABLE the client's dynamic batch-size estimator.
+        // Fluss default batch-size is 2mb and dynamic-batch-size.enabled=true
+        // grows batches toward that cap at sustained throughput — the Exp 4
+        // 1MiB cliff (e2e p99 696ms vs 24ms at 64KiB) is that estimator running.
+        // Pinning 64KiB + disabling dynamic = quality-preserving (same data,
+        // same acks/idempotence) and prevents the 29x latency regression.
+        // FLUSS_WRITER_BATCH_SIZE_BYTES (A/B sweep) overrides when >0; 0 = pin 64KiB.
+        int batchSizeBytes = writerBatchSizeBytes > 0 ? writerBatchSizeBytes : 64 * 1024;
+        conf.setString("client.writer.batch-size", batchSizeBytes + "b");
+        conf.setString("client.writer.dynamic-batch-size.enabled", "false");
         // R-297 wedge fix: bound the writer memory-pool wait. The default
         // client.writer.buffer.wait-timeout is infinite — when the sender
         // thread is wedged (leaderless tables) the 64MB pool exhausts and
