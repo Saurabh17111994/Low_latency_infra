@@ -46,17 +46,17 @@ final class FlussClientAdapter {
      * Connect to Fluss, get the table, create an append writer, and return
      * a row converter that uses the real client.
      */
-    static FlussRowConverter connect(String bootstrapServers, String tablePath) {
+    static FlussRowConverter connect(String bootstrapServers, String tablePath,
+                                      int writerBatchTimeoutMs) {
         LOG.info("fluss: connecting (bootstrap={}, table={})", bootstrapServers, tablePath);
 
         // 1. Configure bootstrap
         Configuration conf = new Configuration();
         conf.setString("bootstrap.servers", bootstrapServers);
-        // Throughput plan Phase 3: bound transport-batch linger at 20ms so a
-        // single table writer keeps per-row latency ~25-35ms at 20k/s
-        // (default is 100ms; the batch-size cap alone is never the binding
-        // wait at target rate).
-        conf.setString("client.writer.batch-timeout", "20ms");
+        // O-2 RESOLVED 2026-08-27: linger 1ms (measured p99 10.5ms vs 38ms @
+        // 20ms — THR-PROBE-002). Config-driven (FLUSS_WRITER_BATCH_TIMEOUT_MS)
+        // so T8 can sweep. Default is 100ms — never fall back to it.
+        conf.setString("client.writer.batch-timeout", writerBatchTimeoutMs + "ms");
         // R-297 wedge fix: bound the writer memory-pool wait. The default
         // client.writer.buffer.wait-timeout is infinite — when the sender
         // thread is wedged (leaderless tables) the 64MB pool exhausts and

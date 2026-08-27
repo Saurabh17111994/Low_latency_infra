@@ -45,7 +45,7 @@ class NoBatchingTest {
 
         FlussRowConverter converter;
         try {
-            converter = FlussClientAdapter.connect(bootstrap, "default.raw_table_1");
+            converter = FlussClientAdapter.connect(bootstrap, "default.raw_table_1", 1);
         } catch (Exception e) {
             LOG.warn("Fluss not reachable at {} — skipping integration test", bootstrap);
             assumeTrue(false, "Fluss cluster not available at " + bootstrap);

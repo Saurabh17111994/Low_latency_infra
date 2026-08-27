@@ -55,7 +55,7 @@ class FlussThroughputProbeTest {
 
         FlussRowConverter converter;
         try {
-            converter = FlussClientAdapter.connect(bootstrap, "default.raw_table_1");
+            converter = FlussClientAdapter.connect(bootstrap, "default.raw_table_1", 1);
         } catch (Exception e) {
             throw new IllegalStateException(
                     "Fluss not reachable at " + bootstrap

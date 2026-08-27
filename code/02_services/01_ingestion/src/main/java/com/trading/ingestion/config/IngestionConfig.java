@@ -43,6 +43,11 @@ public final class IngestionConfig {
     public final String rawTableName;
     public final int maxBatchRecords;
     public final int maxBatchWaitMs;
+    /** Fluss AppendWriter batch linger (O-2 RESOLVED: 1ms). */
+    public final int flussWriterBatchTimeoutMs;
+    /** Per-tick SHA-256 payload validation (A2 decision: keep, config-optional).
+     *  true=validate (safety default); false=skip recompute (perf, proto path). */
+    public final boolean validatePayloadHash;
     public final int maxPendingRecords;
     public final long maxPendingBytes;
     public final double pendingWarningPercent;
@@ -83,6 +88,8 @@ public final class IngestionConfig {
         this.rawTableName = b.rawTableName;
         this.maxBatchRecords = b.maxBatchRecords;
         this.maxBatchWaitMs = b.maxBatchWaitMs;
+        this.flussWriterBatchTimeoutMs = b.flussWriterBatchTimeoutMs;
+        this.validatePayloadHash = b.validatePayloadHash;
         this.maxPendingRecords = b.maxPendingRecords;
         this.maxPendingBytes = b.maxPendingBytes;
         this.pendingWarningPercent = b.pendingWarningPercent;
@@ -158,6 +165,11 @@ public final class IngestionConfig {
         // defaults — the Fluss client owns transport-level coalescing) ----
         b.maxBatchRecords = intRange(env, "INGESTION_MAX_BATCH_RECORDS", 1, 1, 1000, errors);
         b.maxBatchWaitMs = intRange(env, "INGESTION_MAX_BATCH_WAIT_MS", 0, 0, 100, errors);
+        // O-2 RESOLVED 2026-08-27: linger 1ms (measured p99 10.5ms vs 38ms @
+        // 20ms — THR-PROBE-002). Config-driven so T8 can sweep 16..1024.
+        b.flussWriterBatchTimeoutMs = intRange(
+                env, "FLUSS_WRITER_BATCH_TIMEOUT_MS", 1, 1, 1000, errors);
+        b.validatePayloadHash = boolEnv(env, "INGEST_VALIDATE_PAYLOAD_HASH", true, errors);
 
         // ---- Backpressure -- T2 tunable (G2 Ingest) ----
         // streaming-3000: bounded halt tunable 50k/64M (1k) → 150k/192M (3k).
@@ -261,6 +273,8 @@ public final class IngestionConfig {
         m.put("RAW_TABLE_NAME", rawTableName);
         m.put("INGESTION_MAX_BATCH_RECORDS", maxBatchRecords);
         m.put("INGESTION_MAX_BATCH_WAIT_MS", maxBatchWaitMs);
+        m.put("FLUSS_WRITER_BATCH_TIMEOUT_MS", flussWriterBatchTimeoutMs);
+        m.put("INGEST_VALIDATE_PAYLOAD_HASH", validatePayloadHash);
         m.put("MAX_PENDING_APPEND_RECORDS", maxPendingRecords);
         m.put("MAX_PENDING_APPEND_BYTES", maxPendingBytes);
         m.put("PENDING_APPEND_WARNING_PERCENT", pendingWarningPercent);
@@ -488,9 +502,32 @@ public final class IngestionConfig {
         return parsed;
     }
 
+    /**
+     * Boolean flag with fail-closed default. Accepts "true"/"false"
+     * (case-insensitive); anything else is a config error (fail-closed, Q18).
+     */
+    private static boolean boolEnv(Map<String, String> env, String key, boolean defVal,
+                                   List<String> errors) {
+        String v = env.get(key);
+        if (v == null || v.isBlank()) {
+            LOG.warn("ingestion-config: {} not set; using default {}", key, defVal);
+            return defVal;
+        }
+        if (v.equalsIgnoreCase("true")) {
+            return true;
+        }
+        if (v.equalsIgnoreCase("false")) {
+            return false;
+        }
+        errors.add(key + " must be true or false, got: " + v);
+        return defVal;
+    }
+
     // ---- Builder ----
 
     private static class Builder {
+        int flussWriterBatchTimeoutMs = 1; // O-2 default
+        boolean validatePayloadHash = true; // A2: keep validation, default on
         String arrowAppId = "", arrowAppSecret = "", arrowToken = "";
         String arrowUserId = "", arrowPassword = "", arrowTotpKey = "";
         int arrowHftLatencyMs = 50;

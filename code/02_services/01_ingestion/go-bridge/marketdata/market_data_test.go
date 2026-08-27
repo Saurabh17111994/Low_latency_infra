@@ -14,12 +14,12 @@ import (
 
 // golden raw payloads — binary bytes that would break text/base64 assumptions
 var rawPayloads = [][]byte{
-	{0x00, 0x01, 0x02, 0x03},                          // leading zero byte
-	{0xFF, 0xFE, 0x80, 0x7F},                          // high-bit bytes
-	{0x00, 0x00, 0x00, 0x00},                          // all zeros
-	{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF},              // mixed
-	[]byte("not-json-not-base64-{}[]\\"),              // text-ish but binary-safe
-	{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},  // long zeros
+	{0x00, 0x01, 0x02, 0x03},                         // leading zero byte
+	{0xFF, 0xFE, 0x80, 0x7F},                         // high-bit bytes
+	{0x00, 0x00, 0x00, 0x00},                         // all zeros
+	{0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF},             // mixed
+	[]byte("not-json-not-base64-{}[]\\"),             // text-ish but binary-safe
+	{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, // long zeros
 }
 
 func sampleTick() Tick {
@@ -28,10 +28,10 @@ func sampleTick() Tick {
 		LTP: 98765, Close: 98000, Open: 97000, High: 99500, Low: 96500,
 		VWAP: 98123, LTQ: 42, Volume: 1_000_000, TBQ: 5_000_000, TSQ: 4_000_000,
 		ATV: 12, BTV: 34, OI: 999, TS: 1_720_000_000_000,
-		BidPx: [5]int32{100, 99, 98, 97, 96},
-		AskPx: [5]int32{101, 102, 103, 104, 105},
-		BidSz: [5]int32{10, 20, 30, 40, 50},
-		AskSz: [5]int32{11, 21, 31, 41, 51},
+		BidPx:  [5]int32{100, 99, 98, 97, 96},
+		AskPx:  [5]int32{101, 102, 103, 104, 105},
+		BidSz:  [5]int32{10, 20, 30, 40, 50},
+		AskSz:  [5]int32{11, 21, 31, 41, 51},
 		BidOrd: [5]uint16{1, 2, 3, 4, 5},
 		AskOrd: [5]uint16{6, 7, 8, 9, 10},
 	}
@@ -98,7 +98,7 @@ func TestT1P2_IntegerFidelity(t *testing.T) {
 		Feed: "hft", Mode: "full", Token: math.MaxInt32,
 		LTP: math.MaxInt32, Volume: math.MaxInt64,
 		TS: math.MaxInt64, OI: math.MaxInt64,
-		BidPx: [5]int32{math.MaxInt32, 0, -1, math.MinInt32, 5},
+		BidPx:  [5]int32{math.MaxInt32, 0, -1, math.MinInt32, 5},
 		BidOrd: [5]uint16{math.MaxUint16, 0, 1, 2, 3},
 	}
 	ev := tick.ToTickEvent("s", "c", 1, 0, 0, nil)

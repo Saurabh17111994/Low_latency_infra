@@ -36,6 +36,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -324,7 +325,8 @@ public final class IngestionService {
 
         // 4. Connect to Fluss and verify schema version (D3)
         FlussRowConverter converter = FlussClientAdapter.connect(
-                config.flussBootstrap, config.rawTableName);
+                config.flussBootstrap, config.rawTableName,
+                config.flussWriterBatchTimeoutMs);
         LOG.info("ingestion: Fluss connected (bootstrap={}, table={})",
                 config.flussBootstrap, config.rawTableName);
 
@@ -810,9 +812,23 @@ public final class IngestionService {
             //     raw_payload is the exact decompressed broker packet bytes
             //     (Base64); payload_hash is their SHA-256. Decoded JSON must not
             //     replace those bytes. A mismatch quarantines the record.
-            byte[] packetBytes = decodeAndValidatePayload(gt, rawBytes);
-            if (packetBytes == null) {
-                return; // already quarantined
+            //     A2 decision: INGEST_VALIDATE_PAYLOAD_HASH=false skips the
+            //     per-tick recompute (proto path carries the hash inside the
+            //     frame; validation is the T3/T6 job). Default true (safety).
+            byte[] packetBytes;
+            if (config.validatePayloadHash) {
+                packetBytes = decodeAndValidatePayload(gt, rawBytes);
+                if (packetBytes == null) {
+                    return; // already quarantined
+                }
+            } else {
+                // No SHA-256 round trip: decode only (validation disabled).
+                // Malformed Base64 still quarantines — the payload must be
+                // decodable regardless of hash policy.
+                packetBytes = decodePayloadOnly(gt, rawBytes);
+                if (packetBytes == null) {
+                    return; // already quarantined
+                }
             }
 
             if (gt.ts_ms <= 0) {
@@ -1777,6 +1793,29 @@ public final class IngestionService {
      *         record must be quarantined (bad Base64, empty payload, or hash
      *         mismatch). Quarantining is performed here; the caller returns.
      */
+    /** Base64-decode raw_payload without hash validation (A2 off path). */
+    private byte[] decodePayloadOnly(GoTick gt, byte[] rawLine) {
+        if (gt.raw_payload == null || gt.raw_payload.isBlank()) {
+            quarantineWriter.write(rawLine, QuarantineWriter.Reason.HASH_MISMATCH,
+                    "raw_payload missing or empty", gt.token, null, null);
+            return null;
+        }
+        byte[] packet;
+        try {
+            packet = Base64.getDecoder().decode(gt.raw_payload);
+        } catch (IllegalArgumentException e) {
+            quarantineWriter.write(rawLine, QuarantineWriter.Reason.HASH_MISMATCH,
+                    "raw_payload not valid Base64", gt.token, null, null);
+            return null;
+        }
+        if (packet.length == 0) {
+            quarantineWriter.write(rawLine, QuarantineWriter.Reason.HASH_MISMATCH,
+                    "raw_payload decodes to empty", gt.token, null, null);
+            return null;
+        }
+        return packet;
+    }
+
     private byte[] decodeAndValidatePayload(GoTick gt, byte[] rawLine) {
         // R-248: result is returned directly (no caller-owned out-array).
         PayloadHashValidator.Result result = PayloadHashValidator.validate(gt.raw_payload, gt.payload_hash);

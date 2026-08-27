@@ -40,7 +40,8 @@ public final class SmokeTest {
 
         // Step 3: Connect to Fluss
         FlussRowConverter converter = FlussClientAdapter.connect(
-                config.flussBootstrap, config.rawTableName);
+                config.flussBootstrap, config.rawTableName,
+                config.flussWriterBatchTimeoutMs);
         System.out.println("✓ Fluss connected: " + config.rawTableName);
 
         // Step 4: Append 10 ticks
