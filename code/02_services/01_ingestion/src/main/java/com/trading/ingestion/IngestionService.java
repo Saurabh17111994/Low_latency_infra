@@ -462,6 +462,14 @@ public final class IngestionService {
         LOG.info("ingestion: launching arrow-bridge (binary={}, instance={})",
                 bridgeBinary, instanceId);
 
+        // A1: arm the freshness-gate grace window at bridge launch — the
+        // startup snapshot burst can hit the freshness gate BEFORE the
+        // subscription_ack arrives (observed: STALE at +1.9s, ack at +2.0s),
+        // so arming only on the ack leaves a ~50ms race window where the
+        // startup transient still halts. Arming here covers connect + reconnect.
+        gracePeriodUntilMs = System.currentTimeMillis() + 30_000L;
+        LOG.info("freshness gate grace period armed at bridge launch (30s)");
+
         // R-108: broker-staleness must be detected even while readLine() blocks
         // during a genuine feed outage — the ING-1 inline check only runs after
         // a new frame arrives. A watchdog thread evaluates staleness every 5s.
