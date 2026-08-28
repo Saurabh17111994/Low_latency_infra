@@ -31,7 +31,12 @@ PROM="http://localhost:9250/metrics"
 FLINK="http://localhost:8081"
 LIVE_THRESHOLD_RATE=500            # source records/s below this => feed stalled
 
-# --- source feed-liveness: raw-table-1 source numRecordsInPerSecond, summed ---
+# --- source feed-liveness: raw-table-1 source numRecordsInPerSecond ---
+# FIX (2026-08-29): feed_rate previously summed numRecordsInPerSecond across
+# ALL tasks of the job — forming_bar_detection (1431/s), candle sinks, signal
+# sinks etc. — inflating the "feed" to ~124k/s when the true source feed was
+# 20.5k/s. It must measure ONLY the raw source task (task_name ~ "raw-table-1"),
+# summed across its subtasks.
 feed_rate() {
   curl -s --max-time 5 "$PROM" 2>/dev/null > /tmp/loadtest-metrics.txt
   python3 - "$JOB_ID" /tmp/loadtest-metrics.txt <<'PY'
@@ -42,7 +47,10 @@ for line in open(path):
     m = re.match(r'^flink_taskmanager_job_task_numRecordsInPerSecond\{([^}]*)\}\s+([0-9.]+)$', line)
     if not m: continue
     lab = dict(re.findall(r'(\w+)="([^"]*)"', m.group(1)))
-    if lab.get('job_id') == job:
+    # Flink sanitizes operator names in Prometheus labels: spaces/dashes
+    # become underscores — "Source: raw-table-1 -> raw-validation" is exposed
+    # as "Source:_raw_table_1____raw_validation". Match the sanitized prefix.
+    if lab.get('job_id') == job and 'Source:_raw_table_1' in lab.get('task_name', ''):
         tot += float(m.group(2))
 print(f"{tot:.0f}")
 PY
