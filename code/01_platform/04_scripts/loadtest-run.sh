@@ -1,0 +1,145 @@
+#!/usr/bin/env bash
+# Load-test runner with ASSERTIVE preflight guards (audit #9 lessons, 2026-08-28).
+#
+# Failure class this guards against (each was hit during the 20,480/s compute test):
+#   G1. faketool fails to start (bad flag/port) but script continues            -> port+alive assert
+#   G2. faketool starts but idles (no -real-rate) => "live" but zero frames     -> log assert real_rate=true
+#   G3. jar/bridge binary missing => java exits instantly, confusing output     -> file-exists preflight
+#   G4. wrong env var names (INSTRUMENT_MANIFEST_PATH, ARROW_BRIDGE_BIN, ...)   -> single canonical env block (never re-typed)
+#   G5. stray faketool from a previous run => "port already in use" -> the NEW
+#       JVM silently talks to a STALE broker (wrong measurements!)              -> port-free preflight + pgrep -x cleanup
+#   G6. token count exceeds the 1024 per-connection cap => bridge FATAL         -> count assert
+#   G7. manifest CSV missing/deleted => synthetic fallback (50 instruments) or
+#       empty set -> wrong subscription                                       -> file-exists + count assert
+#   G8. collector reports p99 from a STALLED feed as if live (the 5.8s artifact)
+#                                                                              -> feed-liveness tag in collect.sh
+#
+# Usage: bash loadtest-run.sh [duration_s] [interval_s]
+# Defaults: 240s duration, 30s interval. Output: logs/tracker-14/loadtest-<ts>/
+set -uo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+JAR="$ROOT/code/02_services/01_ingestion/target/ingestion.jar"
+BRIDGE_DIR="$ROOT/code/02_services/01_ingestion/go-bridge"
+MANIFEST="$ROOT/../../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv"
+FAKETOOL_SRC="$BRIDGE_DIR/faketool/main.go"
+OUT="$ROOT/logs/tracker-14/loadtest-$(date +%Y%m%d-%H%M%S)"
+DURATION_S="${1:-240}"
+INTERVAL_S="${2:-30}"
+JVM_PID=""; FAKETOOL_PID=""
+
+fail() { echo "FATAL: $*" >&2; exit 1; }
+
+cleanup() {
+  [ -n "$JVM_PID" ] && kill -9 "$JVM_PID" 2>/dev/null || true
+  [ -n "$FAKETOOL_PID" ] && kill -9 "$FAKETOOL_PID" 2>/dev/null || true
+  rm -f /tmp/ingestion.loadtest.ready
+  echo "cleanup: killed jvm=$JVM_PID faketool=$FAKETOOL_PID"
+}
+
+if [ "${1:-}" = "--check-only" ]; then
+  # Preflight-only: verify the environment without launching anything.
+  # Mirrors the G1/G3/G5/G6/G7 asserts below; used by `make check-loadtest-env`.
+  [ -f "$JAR" ] || fail "ingestion jar missing: $JAR (run make build)"
+  [ -f "$BRIDGE_DIR/arrow-bridge" ] || fail "arrow-bridge binary missing: $BRIDGE_DIR/arrow-bridge"
+  [ -f "$FAKETOOL_SRC" ] || fail "faketool source missing: $FAKETOOL_SRC"
+  [ -f "$MANIFEST" ] || fail "manifest CSV missing: $MANIFEST"
+  MT=$(tail -n +2 "$MANIFEST" | wc -l)
+  [ "$MT" -ge 1024 ] || fail "manifest has only $MT tokens; need >=1024"
+  if (exec 3<>/dev/tcp/127.0.0.1/8899) 2>/dev/null; then exec 3>&-; fail "port 8899 busy — stale faketool?"; fi
+  echo "check-loadtest-env: OK (jar, bridge, faketool src, manifest >=1024 tokens, port 8899 free)"
+  exit 0
+fi
+
+trap cleanup EXIT
+
+echo "=== loadtest start $(date -Iseconds) duration=${DURATION_S}s interval=${INTERVAL_S}s ==="
+
+# ---------- G1+G5: port must be free before we start ----------
+if (exec 3<>/dev/tcp/127.0.0.1/8899) 2>/dev/null; then
+  exec 3>&-
+  fail "port 8899 already in use — a stale faketool/broker is running. Kill it first: pgrep -x faketool"
+fi
+
+# ---------- G5: also kill any stray faketool by exact name (never -f; that matches our own shell) ----------
+STRAY=$(pgrep -x faketool || true)
+[ -z "$STRAY" ] || { echo "WARN: killing stray faketool(s): $STRAY"; for p in $STRAY; do kill -9 "$p" 2>/dev/null || true; done; sleep 1; }
+
+# ---------- G3+G7: preflight files + counts ----------
+[ -f "$JAR" ] || fail "ingestion jar missing: $JAR (run make build)"
+[ -f "$BRIDGE_DIR/arrow-bridge" ] || fail "arrow-bridge binary missing: $BRIDGE_DIR/arrow-bridge"
+[ -f "$FAKETOOL_SRC" ] || fail "faketool source missing: $FAKETOOL_SRC"
+[ -f "$MANIFEST" ] || fail "manifest CSV missing: $MANIFEST (recreate from tokens: docs/...)"
+
+MANIFEST_TOKENS=$(tail -n +2 "$MANIFEST" | wc -l)
+[ "$MANIFEST_TOKENS" -ge 1024 ] || fail "manifest has only $MANIFEST_TOKENS tokens; need >=1024 for the 20k/s test"
+echo "manifest OK: $MANIFEST_TOKENS tokens"
+
+# ---------- G6: exactly 1024 tokens (per-connection cap) ----------
+TOKENS=$(tail -n +2 "$MANIFEST" | head -1024 | cut -d, -f4 | tr '\n' ',' | sed 's/,$//')
+N_TOKENS=$(echo "$TOKENS" | tr ',' '\n' | grep -c . )
+[ "$N_TOKENS" -eq 1024 ] || fail "expected exactly 1024 tokens, got $N_TOKENS"
+echo "tokens: $N_TOKENS (chars=${#TOKENS})"
+
+mkdir -p "$OUT" "$OUT/bin" "$OUT/j1"
+
+# ---------- 1. faketool (build from source, like test-d) ----------
+echo "building faketool from $FAKETOOL_SRC"
+(cd "$BRIDGE_DIR" && go build -tags faketool -o "$OUT/bin/faketool" ./faketool) || fail "faketool build failed"
+"$OUT/bin/faketool" -port 8899 -real-rate -real-rate-hz 20 > "$OUT/faketool.log" 2>&1 &
+FAKETOOL_PID=$!
+
+# G1: wait for the port to actually bind
+BOUND=0
+for _ in $(seq 1 15); do
+  if (exec 3<>/dev/tcp/127.0.0.1/8899) 2>/dev/null; then exec 3>&-; BOUND=1; break; fi
+  sleep 1
+done
+[ "$BOUND" = 1 ] || { echo "!! faketool did not bind :8899 — log tail:"; tail -5 "$OUT/faketool.log"; fail "faketool failed to start"; }
+
+# G2: assert real-rate mode is actually on (idle faketool = silently wrong measurements)
+if ! grep -q "real_rate=true" "$OUT/faketool.log"; then
+  echo "!! faketool log missing real_rate=true — log:"; cat "$OUT/faketool.log"
+  fail "faketool is NOT in real-rate mode; aborting to avoid idle-feed measurements"
+fi
+echo "faketool on :8899 (20Hz x 1024 = 20,480/s), pid $FAKETOOL_PID, real-rate confirmed"
+
+# ---------- 2. one ingestion JVM (single canonical env block — never re-typed) ----------
+# G4: this block is the ONLY place these vars live; anything else sources it.
+LOG_DIR="$OUT/j1" READINESS_FILE_PATH="/tmp/ingestion.loadtest.ready" \
+ARROW_HFT_URL="ws://127.0.0.1:8899" ARROW_BRIDGE_BIN="$BRIDGE_DIR/arrow-bridge" \
+ARROW_INSTRUMENT_TOKENS="$TOKENS" ARROW_FAKE_BROKER="1" TRANSPORT="proto" \
+ARROW_APP_ID="testd" ARROW_APP_SECRET="testd" \
+ARROW_USER_ID="testd-user" ARROW_PASSWORD="testd-pass" ARROW_TOTP_KEY="JBSWY3DPEHPK3PXP" \
+INSTRUMENT_MANIFEST_PATH="$MANIFEST" \
+FLUSS_BOOTSTRAP="localhost:9123" FLUSS_BOOTSTRAP_SERVERS="localhost:9123" \
+RAW_TABLE_NAME="raw_table_1" ARROW_HFT_CONNECTIONS="1" \
+ARROW_MAX_EVENT_AGE_MS="5000" ARROW_MAX_FUTURE_EVENT_SKEW_MS="2000" \
+ARROW_HFT_LATENCY_MS="50" CLOCK_CHECK_REQUIRED="false" OTEL_COLLECTOR_HOST="localhost:4318" \
+FLUSS_WRITER_MODE="generic" FLUSS_WRITERS="1" FLUSS_WRITER_BATCH_SIZE_BYTES="0" \
+java --add-opens=java.base/java.nio=ALL-UNNAMED \
+  -Xms2g -Xmx2g -XX:MaxDirectMemorySize=1g \
+  -Dlog.dir="$OUT/j1" \
+  -cp "$JAR" com.trading.ingestion.IngestionService > "$OUT/j1/java.out" 2>&1 &
+JVM_PID=$!
+echo "ingestion JVM pid $JVM_PID"
+
+# ---------- readiness wait with log-tail on failure ----------
+READY=0
+for _ in $(seq 1 60); do [ -f "/tmp/ingestion.loadtest.ready" ] && { READY=1; break; }; sleep 2; done
+[ "$READY" = 1 ] || { echo "!! JVM not ready — log tail:"; tail -10 "$OUT/j1/java.out"; fail "ingestion JVM failed to become ready"; }
+
+# G4-extra: assert the bridge actually SUBSCRIBED (not just connected)
+for _ in $(seq 1 30); do
+  grep -q "HFT subscribed" "$OUT/j1/java.out" && break
+  sleep 1
+done
+grep -q "HFT subscribed" "$OUT/j1/java.out" || { echo "!! bridge never subscribed — log tail:"; tail -10 "$OUT/j1/java.out"; fail "bridge subscription failed"; }
+echo "ingestion JVM ready + bridge subscribed (1024 tokens)"
+
+# ---------- 3. collector with feed-liveness guard (G8) ----------
+bash "$(dirname "${BASH_SOURCE[0]}")/loadtest-collect.sh" "$OUT" "$DURATION_S" "$INTERVAL_S" "$JOB_ID"
+
+echo "=== loadtest done out=$OUT ==="
+echo "--- post-run overlay check: ingestion container env still real feed? ---"
+docker exec 01_docker-ingestion-1 sh -c 'echo "FAKE=$ARROW_FAKE_BROKER"; echo "TOKENS=$ARROW_INSTRUMENT_TOKENS"' 2>/dev/null || echo "(container not up — skip)"

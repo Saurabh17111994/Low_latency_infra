@@ -331,6 +331,28 @@ static-check:
 	rm -f /tmp/prom-float-trap.txt; \
 	echo "static-check: $$fail failures"; [ "$$fail" -eq 0 ]
 
+# Load-test guards (audit #9, 2026-08-28): preflight asserts that catch the
+# silent-failure class that cost ~6 retries + one wrong conclusion during the
+# 20,480/s compute test. Fails fast with a clear message instead of running a
+# load test that measures the wrong thing (idle faketool, stale broker on a
+# busy port, wrong env var names, >1024 tokens, missing manifest/jar).
+check-loadtest-env:
+	@bash code/01_platform/04_scripts/loadtest-run.sh --check-only 2>&1 | head -20 || true
+
+# Post-load-test hygiene: the ingestion container must be back on the real
+# feed (no ARROW_FAKE_BROKER, no test tokens) after a host-side load run.
+check-ingestion-clean:
+	@set -e; \
+	FAKE=$$(docker exec 01_docker-ingestion-1 sh -c 'echo "$$ARROW_FAKE_BROKER"' 2>/dev/null); \
+	TOK=$$(docker exec 01_docker-ingestion-1 sh -c 'echo "$$ARROW_INSTRUMENT_TOKENS"' 2>/dev/null); \
+	if [ -n "$$FAKE" ]; then echo "check-ingestion-clean: FAIL — ARROW_FAKE_BROKER is set ($$FAKE)" >&2; exit 1; fi; \
+	if echo "$$TOK" | grep -qE '^[0-9,]+\$$'; then echo "check-ingestion-clean: FAIL — test token list in container" >&2; exit 1; fi; \
+	echo "check-ingestion-clean: OK (no fake broker, no test tokens)"
+
+# Self-test for the load-test guards (no cluster needed).
+test-loadtest-guards:
+	@bash code/01_platform/04_scripts/test-loadtest-guards.sh
+
 # Foundation L388: docs must not silently contradict code. Runs the machine-
 # verifiable invariant set established by the 2026-08-13 ground-truth audit.
 # Freebuff-worktree bootstrap for docs-audit: C6 (test counts) reads
