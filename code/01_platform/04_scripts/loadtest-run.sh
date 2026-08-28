@@ -191,7 +191,27 @@ liveness_check() { # liveness_check <when> <pid> <name>: FATAL + rc 1 if dead
 }
 
 # ---------- 3. collector with feed-liveness guard (G8) + mid-run liveness (B3) ----------
-JOB_ID="${JOB_ID:-e641dc3e5de1b9f9d8f66248fbc4383c}"   # same default as collect.sh
+# Resolve the RUNNING signal-job-compute at collector start — NEVER hardcode:
+# a rollout replaces the job ID and a stale default silently samples a
+# CANCELED job (all metrics n/a, 0 VALID snapshots). Discovered 2026-08-29
+# during the Finding #17 fix rollout (smoke sampled the dead e641dc3e).
+if [ -z "${JOB_ID:-}" ]; then
+  JOB_ID="$(curl -s --max-time 5 http://localhost:8081/jobs/overview 2>/dev/null \
+    | python3 -c "
+import json,sys
+try:
+    jobs=json.load(sys.stdin).get('jobs',[])
+    running=[j['jid'] for j in jobs if j.get('state')=='RUNNING' and 'signal-job-compute' in j.get('name','')]
+    print(running[0] if running else '')
+except Exception:
+    pass
+" 2>/dev/null)"
+  if [ -z "$JOB_ID" ]; then
+    echo "FATAL: could not resolve a RUNNING signal-job-compute job id (rollout in progress?)" >&2
+    exit 2
+  fi
+  echo "loadtest: resolved RUNNING signal-job-compute job id=$JOB_ID"
+fi
 bash "$(dirname "${BASH_SOURCE[0]}")/loadtest-collect.sh" "$OUT" "$DURATION_S" "$INTERVAL_S" "$JOB_ID" &
 COLLECTOR_PID=$!
 (
