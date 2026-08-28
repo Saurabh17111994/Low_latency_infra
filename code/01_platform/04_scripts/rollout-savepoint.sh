@@ -217,7 +217,12 @@ compose() { # docker compose wrapper honoring file/project overrides
 sample_dedup() {
 	local body state first dup
 	body="$(curl -fsS --max-time 10 "$PROMETHEUS_URL" 2>/dev/null)" || { echo ""; return 0; }
-	state="$(printf '%s\n' "$body" | grep -E '^flink_taskmanager_job_task_operator_compute_dedup_firsts_cumulative\{' \
+	# Transition-safe (2026-08-28 gauge remediation): accept the NEW name
+	# (compute_dedup_firsts_cumulative) OR the OLD name
+	# (compute_dedup_state_count) so a pre/post comparison works across a
+	# redeploy that renames the gauge. Both are cumulative-firsts counters.
+	state="$(printf '%s\n' "$body" \
+		| grep -E '^flink_taskmanager_job_task_operator_compute_dedup_(firsts_cumulative|state_count)\{' \
 		| awk '{ s += $NF } END { print s + 0 }')"
 	first="$(printf '%s\n' "$body" | grep -E '^flink_taskmanager_job_task_operator_compute_dedup_first\{' \
 		| awk '{ s += $NF } END { print s + 0 }')"
@@ -302,12 +307,16 @@ fi
 
 STATE_BEFORE=""
 if [ "$VERIFY_DEDUP_STATE" = "1" ]; then
+	# 2026-08-28 gauge remediation: the pre baseline is the job's latest
+	# completed checkpoint state_size (TRUE live state) — the cumulative
+	# firsts gauge is not a state proxy and resets on restart.
+	STATE_BEFORE="$(api_get "/jobs/$JOB_ID/checkpoints" 2>/dev/null \
+		| sed -n 's/.*"state_size":\([0-9][0-9]*\).*/\1/p' | tail -1)"
 	before="$(sample_dedup)"
-	if [ -n "$before" ]; then
-		STATE_BEFORE="${before%% *}"
-		log "dedup evidence (pre): state_count=$STATE_BEFORE counters=$before"
+	if [ -n "$STATE_BEFORE" ]; then
+		log "dedup evidence (pre): checkpoint_state_size=$STATE_BEFORE counters=$before"
 	else
-		warn "Prometheus dedup metrics unavailable at $PROMETHEUS_URL — continuity check reduced to a post-restore sanity check"
+		warn "checkpoint state_size unavailable for job $JOB_ID — continuity check reduced to a post-restore sanity check (counters=$before)"
 	fi
 fi
 
@@ -465,50 +474,47 @@ log "job $NEW_JOB_ID completed checkpoint(s): $completed"
 # ---- 6. dedup continuity evidence --------------------------------------------
 
 if [ "$VERIFY_DEDUP_STATE" = "1" ]; then
-	log "== dedup continuity check (sampling ${HIT_SAMPLE_S}s of restored traffic) =="
-	sleep "$HIT_SAMPLE_S"
+	# 2026-08-28 gauge remediation: the dedup gauge (compute.dedup.firsts.
+	# cumulative) is a CUMULATIVE counter that resets on restart — it is NOT a
+	# live-state proxy, so it cannot compare pre/post restore. The TRUE
+	# preserved state is the checkpoint state_size (REST API). The continuity
+	# gate now compares latest-checkpoint state_size pre vs post restore.
+	# Prometheus counters remain as traffic/hit-rate evidence only.
+	log "== dedup continuity check (checkpoint state_size, ${HIT_SAMPLE_S}s sample) =="
+	# Post-restore: sample the new job's latest completed checkpoint state_size.
+	state_after=""
+	deadline=$(( $(date +%s) + CHECKPOINT_TIMEOUT_S ))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		state_after="$(api_get "/jobs/$NEW_JOB_ID/checkpoints" 2>/dev/null \
+			| sed -n 's/.*"state_size":\([0-9][0-9]*\).*/\1/p' | tail -1)"
+		[ -n "$state_after" ] && break
+		sleep 5
+	done
+	# Post-restore traffic evidence (degradable): cumulative counters since
+	# the restored start.
 	after="$(sample_dedup)"
-	if [ -z "$after" ]; then
-		warn "Prometheus dedup metrics unavailable after restore — continuity NOT asserted"
-	else
-		state_after="${after%% *}"
-		first_after="$(printf '%s' "$after" | awk '{print $2}')"
-		dup_after="$(printf '%s' "$after" | awk '{print $3}')"
-		log "dedup evidence (post): state_count=$state_after counters=$after"
-		if [ -n "$STATE_BEFORE" ]; then
-			if [ "$state_after" -lt $(( STATE_BEFORE / 2 )) ]; then
-				# TTL/quiet-market semantics (observed 2026-08-22): dedup
-				# entries expire DEDUP_TTL_MS after their last access and the
-				# compute.dedup.state.count gauge folds per-token map sizes in
-				# only on traffic, so an idle restored job legitimately reads 0
-				# even when the savepoint carried the state (same-token dup
-				# probe after a live-state restore returned 80/80 duplicates).
-				# Fail only when rows ARE flowing — a near-zero restored count
-				# under traffic is a real preservation failure.
-				traffic=0
-				if [ -n "$T0_DEDUP" ]; then
-					t0_first="$(printf '%s' "$T0_DEDUP" | awk '{print $2}')"
-					t0_dup="$(printf '%s' "$T0_DEDUP" | awk '{print $3}')"
-					traffic=$(( (first_after - t0_first) + (dup_after - t0_dup) ))
-				fi
-				if [ "$traffic" -gt 0 ]; then
-					die "dedup state count after restore ($state_after) < 50% of pre-rollout ($STATE_BEFORE) with $traffic row(s) processed post-restore — dedup state was NOT preserved; investigate before continuing"
-				fi
-				warn "dedup state count reads $state_after vs pre $STATE_BEFORE but no rows were processed in the check window (quiet market; TTL-expired state legitimately empty) — count continuity NOT asserted; restore itself was already verified via TaskManager restore lines"
-				log "dedup state check degraded to warning (no post-restore traffic)"
-			else
-				log "dedup state preserved: $STATE_BEFORE -> $state_after (>= 50% gate passed)"
-			fi
-			# hit-rate continuity is traffic-dependent — reported as evidence,
-			# not gated (the 1k acceptance run measures it externally).
-			if [ "$dup_after" -gt 0 ] && [ "$first_after" -gt 0 ]; then
-				pre_hits=$(( dup_after * 100 / (dup_after + first_after) ))
-				log "session dedup hit share since restored start: ${pre_hits}% (dup=$dup_after first=$first_after)"
-			fi
+	first_after="$(printf '%s' "$after" | awk '{print $2}')"
+	dup_after="$(printf '%s' "$after" | awk '{print $3}')"
+	log "dedup evidence (post): checkpoint_state_size=$state_after counters=$after"
+	if [ -n "$STATE_BEFORE" ] && [ -n "$state_after" ]; then
+		if [ "$state_after" -lt $(( STATE_BEFORE / 2 )) ]; then
+			# TTL semantics: state naturally shrinks as entries expire, but a
+			# >50% drop in the FIRST post-restore checkpoint means the restore
+			# did NOT carry the state.
+			die "dedup checkpoint state_size after restore ($state_after) < 50% of pre-rollout ($STATE_BEFORE) — dedup state was NOT preserved; investigate before continuing"
 		else
-			[ "$state_after" -gt 0 ] \
-				&& log "post-restore sanity: restored state count = $state_after (> 0)"
+			log "dedup state preserved: checkpoint state_size $STATE_BEFORE -> $state_after (>= 50% gate passed)"
 		fi
+	elif [ -n "$state_after" ] && [ "$state_after" -gt 0 ]; then
+		log "post-restore sanity: checkpoint state_size = $state_after (> 0)"
+	else
+		warn "checkpoint state_size unavailable after restore — continuity NOT asserted (restore itself already verified via TaskManager restore lines)"
+	fi
+	# Hit-rate evidence (traffic-dependent, reported not gated).
+	if [ -n "$dup_after" ] && [ -n "$first_after" ] \
+		&& [ "$dup_after" -gt 0 ] && [ "$first_after" -gt 0 ]; then
+		pre_hits=$(( dup_after * 100 / (dup_after + first_after) ))
+		log "session dedup hit share since restored start: ${pre_hits}% (dup=$dup_after first=$first_after)"
 	fi
 fi
 
