@@ -26,6 +26,17 @@ Spec-driven repo: `docs/` is the spec, `code/` is the implementation.
   pre-builds binaries that a clean checkout otherwise fails without.
 - After production-code changes: run `make gate` (or the scoped suite) + `make static-check`.
 
+## Testing Workflow
+
+1. **Smoke test first, then the real test.** Whenever you want to perform any test, first
+   add/run a smoke test for that change, make it pass, and only then run the actual test.
+   Never run the full/actual test before its smoke test has passed.
+2. **Document after verification, not before.** Once a test for an entity (component,
+   function, service, contract) is added AND verified passing, immediately write a
+   comment (inline in code) or a short note (doc/dossier entry) stating what that entity
+   does / its function. This is done only after the test exists and passes — so the next
+   person does not have to re-verify what each entity does.
+
 ## Hazards
 
 - DDL in `code/01_platform/02_sql/ddl/` is reconciled proposals, NOT applied anywhere —
