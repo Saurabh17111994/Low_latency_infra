@@ -86,9 +86,11 @@ x-flink-common: &flink-common
       metrics.reporter.prom.port: 9249
       metrics.reporter.prom.interval: 15 SECONDS
       # P7 (tracker 14): operator latency histograms for the PERF-LATENCY-001
-      # gate (flink_taskmanager_job_task_operator_*_latency_*). 5s interval
-      # matches the collector scrape cadence; default granularity=operator.
-      metrics.latency.interval: 5000
+      # gate (flink_taskmanager_job_task_operator_*_latency_*). 1s interval
+      # (was 5s) for 5x better p99 sample density at low real-feed rates
+      # (histogram capacity 1024 samples; 1s → 60 markers/min, fills ~17min);
+      # default granularity=operator.
+      metrics.latency.interval: 1000
       taskmanager.numberOfTaskSlots: 10
       # P9 (tracker 14 box 1007): explicit JM/TM memory envelopes. JM process
       # 1600m = heap 1024m (the 1 GiB cap the SIGNAL-warn-jvm-heap-high 900 MB
