@@ -48,7 +48,7 @@ the artifact, and restores from the fresh savepoint.
    config comes from `System.getenv()` in `main()` (SignalJobConfig via
    `fromEnv()`), and the JVM that runs `main()` is the submitting client.
    `submit-jobs.sh`'s `/jars/run` executes in the JobManager JVM, whose
-   composed env carries `ALLOW_FULL_REPLAY=true` and cannot take a
+   composed env carries `ALLOW_FULL_REPLAY=false` (restore-only default) and cannot take a
    per-release restore path. The `docker compose exec -e` pattern is the one
    already verified in `docs/06_operations/01-runbooks.md` (start/restart).
    The script forces `ALLOW_FULL_REPLAY=false`, so the F005 combination

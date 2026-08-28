@@ -324,7 +324,7 @@ Actual chaining is performance-tested; logical boundaries remain explicit for me
 | `SIGNAL_CANDIDATES_TABLE` | Signal LOG sink table, default `Signal_Candidates` — append-only, one row per fired signal |
 | `SIGNAL_CURRENT_TABLE` | Signal KV current-state table, default `Signal_Candidates_current` — PK `(instrument_token)`, 16 buckets, `bucket.key=instrument_token`, 22-column signal row contract; enforced at startup by `TableContractValidator` (SIGNAL-SCHEMA-001) |
 | `STATE_RECOVERY_PATH` | Required for normal restarts (checkpoint/savepoint dir). Absent → startup fails closed unless `ALLOW_FULL_REPLAY=true` (CANDLE-KV-REPLAY-001 startup gate) |
-| `ALLOW_FULL_REPLAY` | Explicit break-glass for deliberate offset-0 replay. **Never `true` in a normal production launch**; replay without restore is what caused the 2026-08-10 incident |
+| `ALLOW_FULL_REPLAY` | Explicit break-glass for deliberate offset-0 replay. **Compose default is now `false` (restore-only, 2026-08-28 #3 hardening)**; a missing restore path fails closed (`[F005]`) unless the operator sets `ALLOW_FULL_REPLAY=true` + `COMPUTE_ALLOW_REPLAY=1` (first-ever deploy / deliberate replay). **Never `true` in a normal production launch**; replay without restore is what caused the 2026-08-10 incident |
 | `CHECKPOINT_INTERVAL_MS` | Fixed at `10000`; Signal and Babysitter jobs use this value |
 | `CHECKPOINT_TIMEOUT_MS` | Fixed at `30000`; Signal and Babysitter jobs use this value |
 | `MAX_CONCURRENT_CHECKPOINTS` | Fixed at `1`; Signal and Babysitter jobs use this value |

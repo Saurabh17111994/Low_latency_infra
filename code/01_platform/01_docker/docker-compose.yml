@@ -42,7 +42,12 @@ x-flink-common: &flink-common
   networks: [trading-net]
   depends_on: [fluss-coordinator]
   environment:
-    ALLOW_FULL_REPLAY: "true"
+    # Restore-only default (2026-08-28, #3 hardening): normal launches must
+    # carry STATE_RECOVERY_PATH and restore. A missing restore path fails
+    # closed at startup ([F005]) unless the operator deliberately overrides
+    # with COMPUTE_ALLOW_REPLAY=1 (first-ever deploy) or ALLOW_FULL_REPLAY=true
+    # at launch (documented break-glass — see docs/08_implementation/04-signal-job.md).
+    ALLOW_FULL_REPLAY: "false"
     # G4 Durability T9: checkpoint storage contract
     # - Dev (default): keeps local durable volume via flink-checkpoints:/checkpoints
     #   (CHECKPOINT_DIR=file:///checkpoints via CheckpointingOptions.CHECKPOINTS_DIRECTORY;

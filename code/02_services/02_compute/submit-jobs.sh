@@ -141,13 +141,14 @@ submit_job() {
 	# F005 fail-closed replay guard (CANDLE-KV-REPLAY-001 A3.3): a signal-job
 	# restart must EITHER restore from a checkpoint (STATE_RECOVERY_PATH) OR
 	# be an EXPLICIT operator-approved full replay. The compose flink-common
-	# anchor sets ALLOW_FULL_REPLAY=true by default — without this guard a
-	# stack restart would silently submit signal-job as an offset-0 full
-	# replay (re-emits the whole backlog, balloons dedup MapState past the
-	# pinned checkpoint contract, appends duplicate candle rows to the
-	# immutable Signal_Candidates LOG — observed 2026-08-10). The operator
-	# must set COMPUTE_ALLOW_REPLAY=1 at launch to override (intentional
-	# full-replay bootstrap, e.g. first-ever deploy).
+	# anchor now defaults ALLOW_FULL_REPLAY=false (restore-only, 2026-08-28
+	# #3 hardening) — this guard is defense-in-depth for explicit overrides:
+	# if the operator launches with ALLOW_FULL_REPLAY=true but NO
+	# STATE_RECOVERY_PATH, refuse unless COMPUTE_ALLOW_REPLAY=1 (intentional
+	# full-replay bootstrap, e.g. first-ever deploy). A silent offset-0
+	# replay re-emits the whole backlog, balloons dedup MapState past the
+	# pinned checkpoint contract, and appends duplicate candle rows to the
+	# immutable Signal_Candidates LOG — observed 2026-08-10.
 	if [ "${entry_class}" = "com.trading.compute.signaljob.SignalJob" ] \
 		&& [ -z "${STATE_RECOVERY_PATH:-}" ] \
 		&& [ "${ALLOW_FULL_REPLAY:-false}" = "true" ] \
