@@ -115,10 +115,11 @@ class SignalJobConfigTest {
     }
 
     @Test
-    void rejectsNeitherRestoreNorReplay() {
+    void noRestoreNoReplayYieldsLatestMode() {
         Map<String, String> env = env();
         env.remove("ALLOW_FULL_REPLAY");
-        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
+        assertEquals(SignalJobConfig.StartupMode.LATEST,
+                SignalJobConfig.from(env).startupMode());
     }
 
     @Test

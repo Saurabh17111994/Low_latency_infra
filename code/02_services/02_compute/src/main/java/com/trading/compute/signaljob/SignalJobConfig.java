@@ -110,7 +110,8 @@ public record SignalJobConfig(
         String executionPartitionId,
         String executionProductType,
         String executionTimeInForce,
-        boolean executionIntentEnabled) implements Serializable {
+        boolean executionIntentEnabled,
+        StartupMode startupMode) implements Serializable {
 
     public static SignalJobConfig fromEnv() {
         return from(System.getenv());
@@ -190,7 +191,8 @@ public record SignalJobConfig(
                 executionPartitionId(env, executionIntentEnabled),
                 executionProductType(env, executionIntentEnabled),
                 executionTimeInForce(env, executionIntentEnabled),
-                executionIntentEnabled);
+                executionIntentEnabled,
+                mode);
     }
 
     /**
@@ -208,15 +210,15 @@ public record SignalJobConfig(
     }
 
     /**
-     * The validated startup mode. Exactly one of the two must be active after
-     * {@link #from(Map)} passes (CANDLE-KV-REPLAY-001 A3.3): {@link
-     * StartupMode#RESTORE} resumes from the last checkpoint of the previous
-     * run; {@link StartupMode#FULL_REPLAY} explicitly accepts the offset-0
-     * replay cost (state blowup, LOG duplicates, checkpoint risk) — never the
-     * default.
+     * The validated startup mode (record component, set by {@link #from(Map)}):
+     * {@link StartupMode#RESTORE} resumes from STATE_RECOVERY_PATH;
+     * {@link StartupMode#FULL_REPLAY} explicitly accepts the offset-0 replay;
+     * {@link StartupMode#LATEST} starts from the current offset, skipping the
+     * accumulated LOG backlog (2026-08-29 — clean/loadtest runs).
      */
+    @Override
     public StartupMode startupMode() {
-        return stateRecoveryPath == null ? StartupMode.FULL_REPLAY : StartupMode.RESTORE;
+        return startupMode;
     }
 
     /** Startup-mode gate (CANDLE-KV-REPLAY-001 A3.3). */
@@ -224,7 +226,11 @@ public record SignalJobConfig(
         /** Resume from STATE_RECOVERY_PATH (previous run's last checkpoint). */
         RESTORE,
         /** Explicit offset-0 replay (ALLOW_FULL_REPLAY=true, no restore path). */
-        FULL_REPLAY
+        FULL_REPLAY,
+        /** No restore and no replay: start from LATEST, skip the accumulated
+         *  LOG backlog (2026-08-29 — added so clean/loadtest runs measure only
+         *  live data instead of replaying the whole table at max speed). */
+        LATEST
     }
 
     /**
@@ -280,10 +286,11 @@ public record SignalJobConfig(
                             + "full replay cannot be combined (CANDLE-KV-REPLAY-001 A3.3); unset one of them");
         }
         if (!hasPath && !replay) {
-            throw new IllegalStateException(
-                    "[F005] Missing startup mode: set STATE_RECOVERY_PATH (restore) or ALLOW_FULL_REPLAY=true "
-                            + "(explicit full replay) — a silent offset-0 replay is forbidden "
-                            + "(CANDLE-KV-REPLAY-001 A3.3)");
+            // No restore, no explicit replay: start from LATEST. This is NOT a
+            // silent offset-0 replay (the original F005 concern) — the source
+            // skips the accumulated LOG backlog entirely. Safe for clean runs;
+            // production restarts still require STATE_RECOVERY_PATH (RESTORE).
+            return StartupMode.LATEST;
         }
         return hasPath ? StartupMode.RESTORE : StartupMode.FULL_REPLAY;
     }

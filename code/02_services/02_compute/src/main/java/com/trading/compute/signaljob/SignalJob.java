@@ -120,6 +120,19 @@ public final class SignalJob {
      * graph before and after the tracker change, so both dumps must be built
      * by the same code path the running job uses.
      */
+    /**
+     * Raw-source offset selection (2026-08-29): offset-0 full replay only when
+     * explicitly requested (ALLOW_FULL_REPLAY=true, A3.4); otherwise LATEST so
+     * a restored/clean job skips the accumulated LOG backlog instead of
+     * replaying it at max speed and contaminating steady-state measurements.
+     * Package-private for direct unit testing (RawSourceOffsetSelectionTest).
+     */
+    static OffsetsInitializer rawSourceOffsets(SignalJobConfig.StartupMode mode) {
+        return mode == SignalJobConfig.StartupMode.FULL_REPLAY
+                ? OffsetsInitializer.full()
+                : OffsetsInitializer.latest();
+    }
+
     public static StreamExecutionEnvironment buildTopology(SignalJobConfig config) {
         // Read-only metadata preflight (tracker 14 P1 / re-scoped P2): prove
         // the deployed tables (candle KV, signal LOG, signal current-state KV)
@@ -185,7 +198,7 @@ public final class SignalJob {
                 .setBootstrapServers(config.bootstrapServers())
                 .setDatabase(config.database())
                 .setTable(config.rawTable())
-                .setStartingOffsets(OffsetsInitializer.full())
+                .setStartingOffsets(rawSourceOffsets(config.startupMode()))
                 .setDeserializationSchema(new RowDataDeserializationSchema())
                 .build();
 

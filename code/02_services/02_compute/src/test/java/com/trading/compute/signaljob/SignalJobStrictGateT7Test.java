@@ -28,25 +28,20 @@ class SignalJobStrictGateT7Test {
     }
 
     @Test
-    void missingBothFailsWithF005() {
+    void missingBothYieldsLatestMode() {
         Map<String, String> env = baseEnv();
-        // neither STATE_RECOVERY_PATH nor ALLOW_FULL_REPLAY=true
-        IllegalStateException e = assertThrows(IllegalStateException.class,
-                () -> SignalJobConfig.from(env));
-        assertTrue(e.getMessage().contains("F005"),
-                "gate must surface explicit F005, got: " + e.getMessage());
-        assertTrue(e.getMessage().contains("Missing startup mode")
-                        || e.getMessage().contains("STATE_RECOVERY_PATH"),
-                "message must name startup mode, got: " + e.getMessage());
+        // neither STATE_RECOVERY_PATH nor ALLOW_FULL_REPLAY=true: the source
+        // starts from LATEST (2026-08-29) — skips the LOG backlog, no F005.
+        assertEquals(SignalJobConfig.StartupMode.LATEST,
+                SignalJobConfig.from(env).startupMode());
     }
 
     @Test
-    void missingModeWithExplicitFalseStillF005() {
+    void missingModeWithExplicitFalseYieldsLatest() {
         Map<String, String> env = baseEnv();
         env.put("ALLOW_FULL_REPLAY", "false");
-        IllegalStateException e = assertThrows(IllegalStateException.class,
-                () -> SignalJobConfig.from(env));
-        assertTrue(e.getMessage().contains("F005"), e.getMessage());
+        assertEquals(SignalJobConfig.StartupMode.LATEST,
+                SignalJobConfig.from(env).startupMode());
     }
 
     @Test
