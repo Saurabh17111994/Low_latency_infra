@@ -316,6 +316,19 @@ static-check:
 			shellcheck -S warning "$$s" || fail=1; \
 		fi; \
 	done; \
+	# Prometheus float trap guard (audit #8, 2026-08-28): parsing a Prometheus \
+	# float like 127.0 with `grep -oE '[0-9]+$'` extracts only the last digit \
+	# ("0"), silently zeroing sums and producing false "delta=0" conclusions. \
+	# Flag the pattern ONLY when it appears near a metrics scrape (curl to a \
+	# :9249/:9250/:9090 endpoint or a file named *metrics*) — the same pattern \
+	# on a config file / test log (e.g. MAX_BRIDGE_RESTARTS=3) is fine. \
+	if rg -n 'grep -o[E]?.*\[0-9\].*(9250|9249|9090|prom|metrics)|(9250|9249|9090|prom|metrics).*grep -o[E]?.*\[0-9\]' code --glob '*.sh' -g '!**/target/**' >/tmp/prom-float-trap.txt; then \
+		echo "static-check: Prometheus float-trap pattern found (grep -oE '[0-9]+$$'):" >&2; \
+		cat /tmp/prom-float-trap.txt >&2; \
+		rm -f /tmp/prom-float-trap.txt; \
+		fail=1; \
+	fi; \
+	rm -f /tmp/prom-float-trap.txt; \
 	echo "static-check: $$fail failures"; [ "$$fail" -eq 0 ]
 
 # Foundation L388: docs must not silently contradict code. Runs the machine-
