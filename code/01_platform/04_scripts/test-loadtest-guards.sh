@@ -6,6 +6,7 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 RUN="$ROOT/code/01_platform/04_scripts/loadtest-run.sh"
+COL="$ROOT/code/01_platform/04_scripts/loadtest-collect.sh"
 PASS=0; FAIL=0
 
 ok()   { PASS=$((PASS+1)); echo "  PASS: $1"; }
@@ -83,6 +84,32 @@ printf '2026-08-28T00:00:01+05:30\t20000\tVALID\t3.4GiB\t20%%\t2\t0\t120\t220\t3
 if grep -q $'\tVALID\t' "$OUT_TMP/snapshots.tsv"; then ok "G8: live-feed snapshot tagged VALID"; else bad "G8: VALID tagging broken"; fi
 rm -rf "$OUT_TMP"
 
+echo "=== B1: rate validity (RATE_HZ must divide 1000) ==="
+if grep -q "must divide 1000" "$RUN"; then ok "B1: rate-validity message present in run.sh"; else bad "B1: rate-validity message missing"; fi
+expect_fail "B1: RATE_HZ=15 rejected (does not divide 1000)" env RATE_HZ=15 bash "$RUN" --check-only
+expect_ok  "B1: RATE_HZ=20 accepted" env RATE_HZ=20 bash "$RUN" --check-only
+
+echo "=== B2: minimum-duration guard (verdict invalid < 190s) ==="
+if grep -q "lt 190" "$COL"; then ok "B2: min-duration guard present in collect.sh"; else bad "B2: min-duration guard missing"; fi
+expect_fail "B2: collect with duration 90 exits non-zero (exit 2)" bash "$COL" /tmp 90 30 xyz
+
+echo "=== B3: mid-run liveness (dead pid => abort) ==="
+if grep -q "t+180" "$RUN"; then ok "B3: t+60/t+180 liveness checks present in run.sh"; else bad "B3: liveness watcher missing"; fi
+expect_fail "B3: liveness_check aborts on dead pid" bash -c '
+  RUN="$1"; shift
+  eval "$(sed -n "/^alive() {/,/^}/p" "$RUN")"
+  eval "$(sed -n "/^liveness_check() {/,/^}/p" "$RUN")"
+  liveness_check t+60 999999999 faketool   # pid beyond pid_max => always dead
+' bash "$RUN"
+
+echo "=== B4: ss-based port check (free port passes) ==="
+if grep -q "ss -tln" "$RUN"; then ok "B4: ss -tln check present in run.sh"; else bad "B4: ss check missing"; fi
+expect_ok "B4: port check passes when :8899 is free (ss path)" bash -c '
+  RUN="$1"; shift
+  eval "$(sed -n "/^port_8899_free() {/,/^}/p" "$RUN")"
+  port_8899_free
+' bash "$RUN"
+
 echo ""
-echo "=== guard self-test result: PASS=$PASS FAIL=$FAIL ==="
+echo "=== guard self-test result: PASS=$PASS FAIL=$FAIL (total $((PASS+FAIL)) asserts) ==="
 [ "$FAIL" -eq 0 ] || exit 1

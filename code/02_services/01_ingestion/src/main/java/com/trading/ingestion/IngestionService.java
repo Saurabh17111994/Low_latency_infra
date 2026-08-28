@@ -136,6 +136,9 @@ public final class IngestionService {
     private final AtomicLong errorCount = new AtomicLong(0);
     private final AtomicBoolean shutdownStarted = new AtomicBoolean(false);
     private volatile boolean running;
+    /** Set on graceful shutdown (shutdown() or the shutdown hook) so an expected
+     *  bridge exit during shutdown is not recorded as a BRIDGE_EXIT halt. */
+    private volatile boolean shuttingDown = false;
     private volatile boolean subscriptionPaused;
     private volatile long lastFrameNanos;
     private volatile long lastResourceRefreshNanos;
@@ -172,6 +175,11 @@ public final class IngestionService {
     /** R-209: last readiness value written + timestamp (per-tick write guard). */
     private volatile boolean lastReadinessWritten = false;
     private volatile long lastReadinessWriteMs = 0L;
+    /** A1: one-time freshness-gate grace window (ms epoch) set on subscription_ack.
+     *  Startup snapshot burst + subscription latency can exceed the 5s freshness
+     *  window in the first seconds; within the grace window stale/future ticks
+     *  are still quarantined but do not halt processing. */
+    private volatile long gracePeriodUntilMs = 0L;
     private final BridgeEventParser bridgeEventParser = new BridgeEventParser(MAPPER);
     private final AtomicLong connectionEpoch = new AtomicLong(0);
     private volatile DiscontinuityWriter.LastTickSnapshot lastTickSnapshot;
@@ -401,6 +409,9 @@ public final class IngestionService {
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             LOG.info("ingestion: shutdown requested");
+            // Mark shuttingDown before shutdown() runs so an expected bridge
+            // exit during shutdown is not recorded as a BRIDGE_EXIT halt.
+            service.shuttingDown = true;
             service.shutdown();
         }));
 
@@ -938,17 +949,21 @@ public final class IngestionService {
             if (fd == FreshnessDecision.FUTURE) {
                 quarantineWriter.write(rawBytes, QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP,
                         "event timestamp exceeds receive time", gt.token, null, null);
-                emitQualityUnsafe(gt.slot_id, gt.connection_epoch,
-                        QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP);
-                return;
+                if (!inFreshnessGracePeriod()) {
+                    emitQualityUnsafe(gt.slot_id, gt.connection_epoch,
+                            QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP);
+                    return;
+                }
             }
             if (fd == FreshnessDecision.STALE) {
                 quarantineWriter.write(rawBytes, QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP,
                         "event timestamp is older than configured age", gt.token, null, null);
                 metrics.incrementDecodeError("STALE_BROKER_TIMESTAMP");
-                emitQualityUnsafe(gt.slot_id, gt.connection_epoch,
-                        QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP);
-                return;
+                if (!inFreshnessGracePeriod()) {
+                    emitQualityUnsafe(gt.slot_id, gt.connection_epoch,
+                            QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP);
+                    return;
+                }
             }
 
             // 2. Resolve instrument
@@ -1252,17 +1267,21 @@ public final class IngestionService {
             if (fd == FreshnessDecision.FUTURE) {
                 quarantineWriter.write(packetBytes, QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP,
                         "event timestamp exceeds receive time", (long) ev.getToken(), null, null);
-                emitQualityUnsafe(ev.getSlotId(), batchConnectionEpoch,
-                        QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP);
-                return;
+                if (!inFreshnessGracePeriod()) {
+                    emitQualityUnsafe(ev.getSlotId(), batchConnectionEpoch,
+                            QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP);
+                    return;
+                }
             }
             if (fd == FreshnessDecision.STALE) {
                 quarantineWriter.write(packetBytes, QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP,
                         "event timestamp is older than configured age", (long) ev.getToken(), null, null);
                 metrics.incrementDecodeError("STALE_BROKER_TIMESTAMP");
-                emitQualityUnsafe(ev.getSlotId(), batchConnectionEpoch,
-                        QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP);
-                return;
+                if (!inFreshnessGracePeriod()) {
+                    emitQualityUnsafe(ev.getSlotId(), batchConnectionEpoch,
+                            QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP);
+                    return;
+                }
             }
 
             Instrument instr = instrumentMap.get((long) (long) ev.getToken());
@@ -1513,6 +1532,14 @@ public final class IngestionService {
             // Partial acknowledgement is feed-health evidence.
             discontinuityWriter.writeBridgeEvent(event, lastTickSnapshot);
         }
+        if ("subscription_ack".equals(event.event())) {
+            // A1: arm the one-time 30s freshness-gate grace window so the startup
+            // snapshot burst + subscription latency (which exceeds the 5s freshness
+            // window in the first seconds) cannot trigger the STALE_BROKER_TIMESTAMP
+            // safety halt before the feed catches up.
+            gracePeriodUntilMs = System.currentTimeMillis() + 30_000L;
+            LOG.info("freshness gate grace period active (30s)");
+        }
         if ("bridge_shutdown".equals(event.event())) {
             LOG.info("ingestion: bridge requested shutdown (slot={}, epoch={})", event.slotId(), event.connectionEpoch());
             running = false;
@@ -1551,7 +1578,7 @@ public final class IngestionService {
      *         event carries no unsafe transition
      */
     static com.trading.ingestion.safety.SafetyHaltWriter.ReasonCode unsafeReasonFor(
-            BridgeEvent event, boolean active) {
+            BridgeEvent event, boolean active, boolean shuttingDown) {
         com.trading.ingestion.safety.SafetyHaltWriter.ReasonCode unsafe = null;
         switch (event.event()) {
             case "feed_stalled" ->
@@ -1565,7 +1592,7 @@ public final class IngestionService {
             case "auth_failure" ->
                 unsafe = com.trading.ingestion.safety.SafetyHaltWriter.ReasonCode.AUTH_FAILURE;
             case "bridge_shutdown", "bridge_exit" ->
-                unsafe = com.trading.ingestion.safety.SafetyHaltWriter.ReasonCode.BRIDGE_EXIT;
+                unsafe = shuttingDown ? null : com.trading.ingestion.safety.SafetyHaltWriter.ReasonCode.BRIDGE_EXIT;
             case "subscription_ack" -> {
                 if (event.rejectedTokens() > 0 && !active) {
                     unsafe = com.trading.ingestion.safety.SafetyHaltWriter.ReasonCode.SUBSCRIPTION_PARTIAL;
@@ -1601,7 +1628,7 @@ public final class IngestionService {
         long epoch = event.connectionEpoch();
 
         com.trading.ingestion.safety.SafetyHaltWriter.ReasonCode unsafe =
-                unsafeReasonFor(event, active);
+                unsafeReasonFor(event, active, shuttingDown);
 
         if (unsafe != null) {
             String id = com.trading.ingestion.safety.SafetyHaltWriter.computeHaltRequestId(
@@ -1838,6 +1865,7 @@ public final class IngestionService {
     // ---- shutdown ----
 
     private void shutdown() {
+        shuttingDown = true;
         if (!shutdownStarted.compareAndSet(false, true)) {
             LOG.debug("ingestion: duplicate shutdown ignored");
             return;
@@ -1990,6 +2018,11 @@ public final class IngestionService {
         if (receiveTsMs - tsMs > maxEventAgeMs) return FreshnessDecision.STALE;
         if (tsMs - receiveTsMs > maxFutureSkewMs) return FreshnessDecision.FUTURE;
         return FreshnessDecision.FRESH;
+    }
+
+    /** A1: true while the one-time post-subscription freshness-gate grace window is open. */
+    private boolean inFreshnessGracePeriod() {
+        return System.currentTimeMillis() < gracePeriodUntilMs;
     }
 
     // ---- GoTick JSON model (matches arrow-bridge output) ----

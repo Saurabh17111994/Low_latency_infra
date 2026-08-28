@@ -448,7 +448,7 @@ services:
       # R-171: persistent log volume so the JSON log survives recreate.
       LOG_DIR: /data/ingestion/logs
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/ingestion.ready"]
+      test: ["CMD-SHELL", "test -f \"$${READINESS_FILE_PATH:-/tmp/ingestion.ready}\""]
       interval: 10s
       timeout: 3s
       retries: 3

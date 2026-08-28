@@ -353,6 +353,24 @@ check-ingestion-clean:
 test-loadtest-guards:
 	@bash code/01_platform/04_scripts/test-loadtest-guards.sh
 
+# R-209 regression gate: 20,480/s (1024 tokens × 20hz) for 5 min must run
+# clean (0 UNSAFE halts, >= 5.5M appended). Seals the readiness-file fix so
+# any future throughput regression fails the gate, not production. Requires
+# the ingestion jar (make build) + a running Flink cluster (REST :8081).
+loadtest-20k-regression:
+	@set -e; \
+	echo "=== R-209 regression: 20k/s × 5min (0 UNSAFE, >= 5.5M appended) ==="; \
+	OUT=$$(bash code/01_platform/04_scripts/loadtest-run.sh 300 30 2>&1 | tail -5); \
+	echo "$$OUT"; \
+	DIR=$$(echo "$$OUT" | grep -oE 'logs/tracker-14/loadtest-[0-9-]+' | head -1); \
+	[ -n "$$DIR" ] || { echo "loadtest-20k-regression: FAIL — no output dir" >&2; exit 1; }; \
+	APPENDED=$$(grep -oE 'appended=[0-9]+' "$$DIR"/j1/java.out 2>/dev/null | tail -1 | cut -d= -f2); \
+	UNSAFE=$$(grep -c 'UNSAFE' "$$DIR"/j1/java.out 2>/dev/null || echo 0); \
+	echo "loadtest-20k-regression: appended=$${APPENDED:-0} unsafe=$$UNSAFE"; \
+	[ "$${APPENDED:-0}" -ge 5500000 ] || { echo "loadtest-20k-regression: FAIL — appended $${APPENDED:-0} < 5.5M" >&2; exit 1; }; \
+	[ "$$UNSAFE" -eq 0 ] || { echo "loadtest-20k-regression: FAIL — $$UNSAFE UNSAFE halts" >&2; exit 1; }; \
+	echo "loadtest-20k-regression: PASS (appended=$$APPENDED, unsafe=0)"
+
 # Foundation L388: docs must not silently contradict code. Runs the machine-
 # verifiable invariant set established by the 2026-08-13 ground-truth audit.
 # Freebuff-worktree bootstrap for docs-audit: C6 (test counts) reads

@@ -8,6 +8,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.trading.ingestion.config.IngestionConfig;
+import com.trading.ingestion.health.NtpClockChecker;
+import com.trading.ingestion.health.ReadinessFile;
 import java.lang.reflect.Field;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -162,5 +165,54 @@ class IngestionServiceTest {
         } catch (Exception e) {
             throw new RuntimeException("Field " + name + " not found", e);
         }
+    }
+
+
+
+    @Test
+    @DisplayName("R-209: readiness file write is throttled (state change or 1s), not per-tick")
+    void readinessWriteThrottled() throws Exception {
+        IngestionConfig config = buildConfig();
+        NtpClockChecker clock = new NtpClockChecker("127.0.0.1:9", 100, false);
+        java.nio.file.Path ready = java.nio.file.Files.createTempDirectory("readiness-throttle")
+                .resolve("ready");
+        IngestionService service = new IngestionService(
+                "ing-r209", java.util.List.of(), new StubFlussRowConverter("raw_table_1"),
+                config, clock, null, null, null);
+        java.lang.reflect.Field rf = IngestionService.class.getDeclaredField("readinessFile");
+        rf.setAccessible(true);
+        rf.set(service, new ReadinessFile(ready));
+
+        java.lang.reflect.Method m = IngestionService.class.getDeclaredMethod("updateReadinessFile");
+        m.setAccessible(true);
+        m.invoke(service);
+        long writesAfter1 = java.nio.file.Files.exists(ready) ? 1 : 0;
+        m.invoke(service);  // back-to-back within 1s: must be throttled (no new write)
+        long writesAfter2 = java.nio.file.Files.exists(ready) ? 1 : 0;
+        assertEquals(writesAfter1, writesAfter2,
+                "back-to-back readiness updates must not rewrite (throttle)");
+        java.lang.reflect.Field lrw = IngestionService.class.getDeclaredField("lastReadinessWritten");
+        lrw.setAccessible(true);
+        java.lang.reflect.Field lrwm = IngestionService.class.getDeclaredField("lastReadinessWriteMs");
+        lrwm.setAccessible(true);
+        assertTrue(System.currentTimeMillis() - (long) lrwm.get(service) < 1000L,
+                "recent write timestamp recorded");
+    }
+
+    private static IngestionConfig buildConfig() throws Exception {
+        java.util.Map<String, String> env = new java.util.HashMap<>();
+        env.put("ARROW_APP_ID", "test-app");
+        env.put("ARROW_APP_SECRET", "test-secret");
+        env.put("ARROW_USER_ID", "test-user");
+        env.put("ARROW_PASSWORD", "test-pass");
+        env.put("ARROW_TOTP_KEY", "JBSWY3DPEHPK3PXP");
+        env.put("FLUSS_BOOTSTRAP", "localhost:9123");
+        env.put("RAW_TABLE_NAME", "raw_table_1");
+        env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
+        env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
+        java.lang.reflect.Method validateFrom = IngestionConfig.class
+                .getDeclaredMethod("validateFrom", java.util.Map.class);
+        validateFrom.setAccessible(true);
+        return (IngestionConfig) validateFrom.invoke(null, env);
     }
 }

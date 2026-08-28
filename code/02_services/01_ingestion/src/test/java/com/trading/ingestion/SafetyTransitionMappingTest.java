@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.trading.ingestion.bridge.BridgeEvent;
+import com.trading.ingestion.config.IngestionConfig;
+import com.trading.ingestion.health.NtpClockChecker;
 import com.trading.ingestion.quarantine.QuarantineWriter;
 import com.trading.ingestion.safety.SafetyHaltWriter;
 import java.util.List;
@@ -69,10 +71,10 @@ class SafetyTransitionMappingTest {
     void disconnectIsUnsafeReadFailure() {
         BridgeEvent e = event("disconnect", "ACTIVE", 1024, 1024, 0, null);
         assertEquals(SafetyHaltWriter.ReasonCode.READ_FAILURE,
-                IngestionService.unsafeReasonFor(e, active(e)));
+                IngestionService.unsafeReasonFor(e, active(e), false));
         // Healthier slot on the same event stream (full ack) is not unsafe.
         BridgeEvent healthy = event("subscription_ack", "ACTIVE", 1024, 1024, 0, null);
-        assertNull(IngestionService.unsafeReasonFor(healthy, active(healthy)));
+        assertNull(IngestionService.unsafeReasonFor(healthy, active(healthy), false));
     }
 
     @Test
@@ -81,45 +83,48 @@ class SafetyTransitionMappingTest {
         // feed_stalled without decode_error_burst
         BridgeEvent stall = event("feed_stalled", "STALLED", 1024, 512, 0, "feed gap");
         assertEquals(SafetyHaltWriter.ReasonCode.FEED_STALLED,
-                IngestionService.unsafeReasonFor(stall, active(stall)));
+                IngestionService.unsafeReasonFor(stall, active(stall), false));
 
         // feed_stalled with decode_error_burst
         BridgeEvent burst = event("feed_stalled", "STALLED", 1024, 512, 0, "decode_error_burst");
         assertEquals(SafetyHaltWriter.ReasonCode.DECODE_ERROR_BURST,
-                IngestionService.unsafeReasonFor(burst, active(burst)));
+                IngestionService.unsafeReasonFor(burst, active(burst), false));
 
         // heartbeat_failed
         BridgeEvent hb = event("heartbeat_failed", "ACTIVE", 1024, 1024, 0, null);
         assertEquals(SafetyHaltWriter.ReasonCode.HEARTBEAT_FAILED,
-                IngestionService.unsafeReasonFor(hb, active(hb)));
+                IngestionService.unsafeReasonFor(hb, active(hb), false));
 
         // auth_failure
         BridgeEvent auth = event("auth_failure", "AUTH_FAILED", 0, 0, 0, "401");
         assertEquals(SafetyHaltWriter.ReasonCode.AUTH_FAILURE,
-                IngestionService.unsafeReasonFor(auth, active(auth)));
+                IngestionService.unsafeReasonFor(auth, active(auth), false));
 
         // bridge_shutdown → BRIDGE_EXIT (bridge_exit is dead vocabulary —
         // BridgeEvent rejects it, the switch arm is preserved for exactness)
         BridgeEvent shut = event("bridge_shutdown", "TERMINAL", 0, 0, 0, "operator");
         assertEquals(SafetyHaltWriter.ReasonCode.BRIDGE_EXIT,
-                IngestionService.unsafeReasonFor(shut, active(shut)));
+                IngestionService.unsafeReasonFor(shut, active(shut), false));
+        // A2: during graceful shutdown a bridge exit is expected — no halt.
+        assertNull(IngestionService.unsafeReasonFor(shut, active(shut), true),
+                "shutdown-initiated bridge exit must not map to BRIDGE_EXIT");
 
         // subscription_ack partial → SUBSCRIPTION_PARTIAL
         BridgeEvent partial = event("subscription_ack", "PARTIAL", 1024, 900, 124, "tokens rejected");
         assertEquals(SafetyHaltWriter.ReasonCode.SUBSCRIPTION_PARTIAL,
-                IngestionService.unsafeReasonFor(partial, active(partial)));
+                IngestionService.unsafeReasonFor(partial, active(partial), false));
 
         // subscription_ack TERMINAL + timeout → SUBSCRIPTION_TIMEOUT
         BridgeEvent timeout = event("subscription_ack", "TERMINAL", 0, 0, 0,
                 "subscription_response_timeout");
         assertEquals(SafetyHaltWriter.ReasonCode.SUBSCRIPTION_TIMEOUT,
-                IngestionService.unsafeReasonFor(timeout, active(timeout)));
+                IngestionService.unsafeReasonFor(timeout, active(timeout), false));
 
         // slot_state / reconnect carry no unsafe transition
         BridgeEvent slotState = event("slot_state", "CONNECTING", 0, 0, 0, null);
-        assertNull(IngestionService.unsafeReasonFor(slotState, active(slotState)));
+        assertNull(IngestionService.unsafeReasonFor(slotState, active(slotState), false));
         BridgeEvent reconnect = event("reconnect", "ACTIVE", 1024, 1024, 0, null);
-        assertNull(IngestionService.unsafeReasonFor(reconnect, active(reconnect)));
+        assertNull(IngestionService.unsafeReasonFor(reconnect, active(reconnect), false));
     }
 
     @Test
@@ -127,19 +132,19 @@ class SafetyTransitionMappingTest {
     void partialAckUnsafeFullAckNever() {
         BridgeEvent partial = event("subscription_ack", "PARTIAL", 1024, 900, 124, "tokens rejected");
         assertEquals(SafetyHaltWriter.ReasonCode.SUBSCRIPTION_PARTIAL,
-                IngestionService.unsafeReasonFor(partial, active(partial)));
+                IngestionService.unsafeReasonFor(partial, active(partial), false));
 
         // Full ack, any state — never unsafe.
         BridgeEvent fullActive = event("subscription_ack", "ACTIVE", 1024, 1024, 0, null);
-        assertNull(IngestionService.unsafeReasonFor(fullActive, active(fullActive)));
+        assertNull(IngestionService.unsafeReasonFor(fullActive, active(fullActive), false));
         BridgeEvent fullNonActive = event("subscription_ack", "CONNECTING", 1024, 1024, 0, null);
-        assertNull(IngestionService.unsafeReasonFor(fullNonActive, active(fullNonActive)));
+        assertNull(IngestionService.unsafeReasonFor(fullNonActive, active(fullNonActive), false));
 
         // A partial ack with active() true (impossible by construction) must
         // still not map to SUBSCRIPTION_PARTIAL — the guard requires both
         // rejected > 0 AND !active.
         BridgeEvent partialActive = event("subscription_ack", "ACTIVE", 1024, 900, 124, "partial");
-        assertNull(IngestionService.unsafeReasonFor(partialActive, true));
+        assertNull(IngestionService.unsafeReasonFor(partialActive, true, false));
     }
 
     @Test
@@ -308,5 +313,44 @@ class SafetyTransitionMappingTest {
         String recovered = SafetyHaltWriter.computeHaltRequestId(fp, "hft-0", epoch, "RECOVERED", "");
         assertNotEquals(preWrite, recovered);
         assertEquals(64, recovered.length());
+    }
+
+    @Test
+    @DisplayName("A1: freshness-gate grace window is open only while armed")
+    void freshnessGraceWindow() throws Exception {
+        // A1: after subscription_ack the service arms a 30s grace window during
+        // which STALE/FUTURE packets are quarantined but do NOT halt. The helper
+        // is wall-clock based; pin its semantics via the armed-until field.
+        java.util.Map<String, String> env = new java.util.HashMap<>();
+        env.put("ARROW_APP_ID", "test-app");
+        env.put("ARROW_APP_SECRET", "test-secret");
+        env.put("ARROW_USER_ID", "test-user");
+        env.put("ARROW_PASSWORD", "test-pass");
+        env.put("ARROW_TOTP_KEY", "JBSWY3DPEHPK3PXP");
+        env.put("FLUSS_BOOTSTRAP", "localhost:9123");
+        env.put("RAW_TABLE_NAME", "raw_table_1");
+        env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
+        env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
+        java.lang.reflect.Method validateFrom = IngestionConfig.class
+                .getDeclaredMethod("validateFrom", java.util.Map.class);
+        validateFrom.setAccessible(true);
+        IngestionConfig config = (IngestionConfig) validateFrom.invoke(null, env);
+        IngestionService service = new IngestionService(
+                "ing-a1", java.util.List.of(), new StubFlussRowConverter("raw_table_1"),
+                config, new NtpClockChecker("127.0.0.1:9", 100, false),
+                null, null, null);
+        java.lang.reflect.Field f = IngestionService.class.getDeclaredField("gracePeriodUntilMs");
+        f.setAccessible(true);
+        java.lang.reflect.Method m = IngestionService.class.getDeclaredMethod("inFreshnessGracePeriod");
+        m.setAccessible(true);
+
+        // Not armed yet (default 0L) → no grace.
+        assertFalse((Boolean) m.invoke(service), "before arming, grace must be inactive");
+        // Armed 30s in the future (as subscription_ack does) → grace active.
+        f.setLong(service, System.currentTimeMillis() + 30_000L);
+        assertTrue((Boolean) m.invoke(service), "within the 30s window, grace must be active");
+        // Window expired → grace inactive again (original halt behavior resumes).
+        f.setLong(service, System.currentTimeMillis() - 1L);
+        assertFalse((Boolean) m.invoke(service), "after the window expires, grace must be inactive");
     }
 }

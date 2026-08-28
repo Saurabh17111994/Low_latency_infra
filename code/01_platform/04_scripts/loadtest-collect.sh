@@ -7,8 +7,10 @@
 # rate is actually flowing (numRecordsInPerSecond on the raw source > threshold);
 # INVALID snapshots are excluded from the summary. A report built from INVALID
 # snapshots alone prints a loud warning instead of numbers.
+#   B2. minimum-duration guard: runs shorter than 190s get NO verdict (the stale
+#       storm needs >47s to appear, so a 90s clean run is a false negative)  -> exit 2 below
 #
-# Usage: bash loadtest-collect.sh <out_dir> <duration_s> <interval_s> <job_id>
+# Usage: bash loadtest-collect.sh <out_dir> <duration_s> <interval_s> <job_id>  (duration_s >= 190)
 # Requires: running Flink (REST :8081), Prometheus (:9250), TM container stats.
 set -uo pipefail
 
@@ -16,6 +18,15 @@ OUT="${1:?out_dir required}"
 DURATION_S="${2:-240}"
 INTERVAL_S="${3:-30}"
 JOB_ID="${4:-e641dc3e5de1b9f9d8f66248fbc4383c}"
+
+# ---------- B2: minimum-duration guard (audit #9 lesson) ----------
+# A 90s run is a FALSE NEGATIVE: the stale storm takes >47s to appear, so a
+# short clean run "proves" nothing. Refuse to emit any verdict below 190s.
+if [ "$DURATION_S" -lt 190 ]; then
+  echo "WARN: DURATION_S=$DURATION_S < 190 — verdict INVALID: the stale storm needs >47s to appear, so sub-190s runs are false-negatives. Refusing to produce a summary." >&2
+  exit 2
+fi
+
 PROM="http://localhost:9250/metrics"
 FLINK="http://localhost:8081"
 LIVE_THRESHOLD_RATE=500            # source records/s below this => feed stalled

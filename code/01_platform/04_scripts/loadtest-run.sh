@@ -13,8 +13,13 @@
 #       empty set -> wrong subscription                                       -> file-exists + count assert
 #   G8. collector reports p99 from a STALLED feed as if live (the 5.8s artifact)
 #                                                                              -> feed-liveness tag in collect.sh
+#   B1. faketool -real-rate-hz must DIVIDE 1000 (15Hz died "must divide 1000") -> RATE_HZ validity assert
+#   B2. runs <190s are false negatives (stale storm needs >47s to appear)      -> min-duration guard in collect.sh
+#   B3. faketool/JVM can die MID-RUN (session teardown) while the JVM keeps    -> mid-run liveness watcher
+#       "measuring" nothing                                                    (t+60/t+180 checks, abort on death)
+#   B4. /dev/tcp port probe once reported false-CLOSED while ss showed LISTEN  -> ss-based port check
 #
-# Usage: bash loadtest-run.sh [duration_s] [interval_s]
+# Usage: bash loadtest-run.sh [duration_s] [interval_s]  (env: RATE_HZ, default 20)
 # Defaults: 240s duration, 30s interval. Output: logs/tracker-14/loadtest-<ts>/
 set -uo pipefail
 
@@ -26,9 +31,38 @@ FAKETOOL_SRC="$BRIDGE_DIR/faketool/main.go"
 OUT="$ROOT/logs/tracker-14/loadtest-$(date +%Y%m%d-%H%M%S)"
 DURATION_S="${1:-240}"
 INTERVAL_S="${2:-30}"
+RATE_HZ="${RATE_HZ:-20}"      # B1: faketool -real-rate-hz (must divide 1000)
 JVM_PID=""; FAKETOOL_PID=""
 
 fail() { echo "FATAL: $*" >&2; exit 1; }
+
+# ---------- B1: rate validity ----------
+# faketool's -real-rate-hz must DIVIDE 1000 (the ticker quantizes to whole
+# milliseconds); 15Hz died in the audit with "must divide 1000". RATE_HZ comes
+# from the env (default 20) and is passed straight through to faketool below.
+validate_rate() { # validate_rate <hz>
+  local hz="$1"
+  case "$hz" in
+    ''|*[!0-9]*) fail "RATE_HZ='$hz' is not a positive integer; valid rates: 1,2,4,5,8,10,20,25,40,50,100,125,200,250,500,1000";;
+  esac
+  [ "$hz" -gt 0 ] || fail "RATE_HZ must be a positive integer, got '$hz'"
+  [ $(( 1000 % 10#$hz )) -eq 0 ] || fail "RATE_HZ=$hz is invalid: faketool -real-rate-hz must divide 1000 (1ms tick quantization). Valid rates: 1,2,4,5,8,10,20,25,40,50,100,125,200,250,500,1000"
+}
+validate_rate "$RATE_HZ"
+
+# ---------- B4: port-free check ----------
+# The /dev/tcp probe once reported false-CLOSED while `ss` showed LISTEN;
+# prefer `ss -tln` when available, fall back to /dev/tcp only when ss is absent.
+port_8899_free() {
+  if command -v ss >/dev/null 2>&1; then
+    if ss -tln 2>/dev/null | awk 'NR>1 {print $4}' | grep -q ':8899$'; then
+      return 1   # a listener is bound to :8899 => busy
+    fi
+    return 0
+  fi
+  if (exec 3<>/dev/tcp/127.0.0.1/8899) 2>/dev/null; then exec 3>&-; return 1; fi
+  return 0
+}
 
 cleanup() {
   [ -n "$JVM_PID" ] && kill -9 "$JVM_PID" 2>/dev/null || true
@@ -46,7 +80,7 @@ if [ "${1:-}" = "--check-only" ]; then
   [ -f "$MANIFEST" ] || fail "manifest CSV missing: $MANIFEST"
   MT=$(tail -n +2 "$MANIFEST" | wc -l)
   [ "$MT" -ge 1024 ] || fail "manifest has only $MT tokens; need >=1024"
-  if (exec 3<>/dev/tcp/127.0.0.1/8899) 2>/dev/null; then exec 3>&-; fail "port 8899 busy — stale faketool?"; fi
+  port_8899_free || fail "port 8899 busy — stale faketool?"
   echo "check-loadtest-env: OK (jar, bridge, faketool src, manifest >=1024 tokens, port 8899 free)"
   exit 0
 fi
@@ -55,11 +89,8 @@ trap cleanup EXIT
 
 echo "=== loadtest start $(date -Iseconds) duration=${DURATION_S}s interval=${INTERVAL_S}s ==="
 
-# ---------- G1+G5: port must be free before we start ----------
-if (exec 3<>/dev/tcp/127.0.0.1/8899) 2>/dev/null; then
-  exec 3>&-
-  fail "port 8899 already in use — a stale faketool/broker is running. Kill it first: pgrep -x faketool"
-fi
+# ---------- G1+G5+B4: port must be free before we start ----------
+port_8899_free || fail "port 8899 already in use — a stale faketool/broker is running. Kill it first: pgrep -x faketool"
 
 # ---------- G5: also kill any stray faketool by exact name (never -f; that matches our own shell) ----------
 STRAY=$(pgrep -x faketool || true)
@@ -86,7 +117,7 @@ mkdir -p "$OUT" "$OUT/bin" "$OUT/j1"
 # ---------- 1. faketool (build from source, like test-d) ----------
 echo "building faketool from $FAKETOOL_SRC"
 (cd "$BRIDGE_DIR" && go build -tags faketool -o "$OUT/bin/faketool" ./faketool) || fail "faketool build failed"
-"$OUT/bin/faketool" -port 8899 -real-rate -real-rate-hz 20 > "$OUT/faketool.log" 2>&1 &
+"$OUT/bin/faketool" -port 8899 -real-rate -real-rate-hz "$RATE_HZ" > "$OUT/faketool.log" 2>&1 &
 FAKETOOL_PID=$!
 
 # G1: wait for the port to actually bind
@@ -102,7 +133,7 @@ if ! grep -q "real_rate=true" "$OUT/faketool.log"; then
   echo "!! faketool log missing real_rate=true — log:"; cat "$OUT/faketool.log"
   fail "faketool is NOT in real-rate mode; aborting to avoid idle-feed measurements"
 fi
-echo "faketool on :8899 (20Hz x 1024 = 20,480/s), pid $FAKETOOL_PID, real-rate confirmed"
+echo "faketool on :8899 (${RATE_HZ}Hz x 1024 = $((RATE_HZ * 1024))/s), pid $FAKETOOL_PID, real-rate confirmed"
 
 # ---------- 2. one ingestion JVM (single canonical env block — never re-typed) ----------
 # G4: this block is the ONLY place these vars live; anything else sources it.
@@ -137,8 +168,51 @@ done
 grep -q "HFT subscribed" "$OUT/j1/java.out" || { echo "!! bridge never subscribed — log tail:"; tail -10 "$OUT/j1/java.out"; fail "bridge subscription failed"; }
 echo "ingestion JVM ready + bridge subscribed (1024 tokens)"
 
-# ---------- 3. collector with feed-liveness guard (G8) ----------
-bash "$(dirname "${BASH_SOURCE[0]}")/loadtest-collect.sh" "$OUT" "$DURATION_S" "$INTERVAL_S" "$JOB_ID"
+# ---------- B3: mid-run liveness ----------
+# faketool/JVM can die MID-RUN (e.g. killed by session teardown) and leave the
+# JVM consuming nothing while the collector keeps "measuring". Watch both PIDs
+# at t+60 and t+180; on the first death print FATAL and abort the run early.
+alive() { # alive <pid>: kill -0, refined against zombies (/proc state Z = dead)
+  local pid="$1" st
+  kill -0 "$pid" 2>/dev/null || return 1
+  if [ -r "/proc/$pid/stat" ]; then
+    st=$(awk -F')' '{split($2,a," "); print a[2]}' "/proc/$pid/stat" 2>/dev/null)
+    [ "$st" != "Z" ] || return 1
+  fi
+  return 0
+}
+liveness_check() { # liveness_check <when> <pid> <name>: FATAL + rc 1 if dead
+  local when="$1" pid="$2" name="${3:-proc}"
+  if ! alive "$pid"; then
+    echo "FATAL: mid-run liveness ($when): $name pid $pid is DEAD — measurements are garbage; aborting" >&2
+    return 1
+  fi
+  return 0
+}
+
+# ---------- 3. collector with feed-liveness guard (G8) + mid-run liveness (B3) ----------
+JOB_ID="${JOB_ID:-e641dc3e5de1b9f9d8f66248fbc4383c}"   # same default as collect.sh
+bash "$(dirname "${BASH_SOURCE[0]}")/loadtest-collect.sh" "$OUT" "$DURATION_S" "$INTERVAL_S" "$JOB_ID" &
+COLLECTOR_PID=$!
+(
+  sleep 60   # first liveness check at t+60
+  if ! liveness_check t+60 "$FAKETOOL_PID" faketool || ! liveness_check t+60 "$JVM_PID" jvm; then
+    kill -9 "$COLLECTOR_PID" 2>/dev/null || true
+    exit 1
+  fi
+  sleep 120  # second liveness check at t+180
+  if ! liveness_check t+180 "$FAKETOOL_PID" faketool || ! liveness_check t+180 "$JVM_PID" jvm; then
+    kill -9 "$COLLECTOR_PID" 2>/dev/null || true
+    exit 1
+  fi
+) &
+LIVENESS_PID=$!
+
+# wait on the collector (the main duration window) and on the liveness watcher
+wait "$COLLECTOR_PID"; RC=$?
+if [ "$RC" -ne 0 ]; then kill -9 "$LIVENESS_PID" 2>/dev/null || true; fi
+wait "$LIVENESS_PID" || [ "$RC" -ne 0 ] || RC=1
+[ "$RC" -eq 0 ] || fail "loadtest aborted (rc=$RC) — see FATAL above"
 
 echo "=== loadtest done out=$OUT ==="
 echo "--- post-run overlay check: ingestion container env still real feed? ---"
