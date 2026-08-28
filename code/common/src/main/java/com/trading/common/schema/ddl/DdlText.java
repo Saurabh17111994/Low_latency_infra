@@ -49,7 +49,7 @@ public final class DdlText {
     private static final Pattern CREATE_TABLE = Pattern.compile("CREATE TABLE\\s+(\\w+)");
     private static final Pattern PRIMARY_KEY = Pattern.compile("PRIMARY KEY\\s*\\(([^)]+)\\)");
     private static final Pattern COLUMN_LINE =
-            Pattern.compile("^\\s*([a-zA-Z0-9_]+)\\s+([A-Z]+)\\s*(?:NOT\\s+NULL)?\\s*,?\\s*$");
+            Pattern.compile("^\\s*([a-zA-Z0-9_]+)\\s+([A-Z]+)\\s*(?:NOT\\s+NULL|NULL)?\\s*,?\\s*$");
     private static final Pattern OPTION =
             Pattern.compile("'([a-zA-Z0-9_.-]+)'\\s*=\\s*'([^']*)'");
 
@@ -70,10 +70,18 @@ public final class DdlText {
 
         List<Column> columns = new ArrayList<>();
         for (String line : body.split("\\n")) {
-            if (line.trim().startsWith("PRIMARY KEY")) {
+            // Inline `--` comments (e.g. `ack_ts BIGINT NULL, -- 0 = unknown (R-010)`)
+            // must be stripped BEFORE matching — otherwise the trailing comment
+            // breaks the end-anchored COLUMN_LINE regex and the column is
+            // silently dropped from the applied schema (DdlText parser bug,
+            // fixed 2026-08-28: apply created raw_table_1 with 19 cols, missing
+            // ack_ts, which failed ingestion DdlBootstrap's 20-col expectation).
+            String bare = line.indexOf("--") >= 0
+                    ? line.substring(0, line.indexOf("--")) : line;
+            if (bare.trim().startsWith("PRIMARY KEY")) {
                 continue;
             }
-            Matcher col = COLUMN_LINE.matcher(line);
+            Matcher col = COLUMN_LINE.matcher(bare);
             if (col.matches()) {
                 columns.add(new Column(col.group(1), type(col.group(2))));
             }

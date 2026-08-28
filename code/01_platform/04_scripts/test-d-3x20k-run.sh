@@ -22,7 +22,7 @@ export TRANSPORT="proto"   # T6 proto path (NOT NDJSON pipe) — the low-latency
 export ARROW_USER_ID="testd-user" ARROW_PASSWORD="testd-pass" ARROW_TOTP_KEY="JBSWY3DPEHPK3PXP"
 export FLUSS_BOOTSTRAP="localhost:9123" FLUSS_BOOTSTRAP_SERVERS="localhost:9123"
 export RAW_TABLE_NAME="raw_table_1"
-export ARROW_MAX_EVENT_AGE_MS="5000" ARROW_MAX_FUTURE_EVENT_SKEW_MS="2000"
+export ARROW_MAX_EVENT_AGE_MS="${ARROW_MAX_EVENT_AGE_MS:-5000}" ARROW_MAX_FUTURE_EVENT_SKEW_MS="${ARROW_MAX_FUTURE_EVENT_SKEW_MS:-2000}"
 export ARROW_HFT_LATENCY_MS="50"
 export CLOCK_CHECK_REQUIRED="false" OTEL_COLLECTOR_HOST="localhost:4318"
 export FLUSS_WRITER_MODE="generic" FLUSS_WRITERS="1" FLUSS_WRITER_BATCH_SIZE_BYTES="0"
@@ -59,7 +59,7 @@ echo "=== faketool ready, launching 3 JVMs ==="
 JVMS=()
 for i in 1 2 3; do
   R="$OUT/j$i"
-  LOG_DIR="$R" READINESS_FILE_PATH="/tmp/ingestion.ready$i" \
+  LOG_DIR="$R" READINESS_FILE_PATH="${READINESS_FILE_PATH-/tmp/ingestion.ready$i}" \
   ARROW_HFT_URL="ws://127.0.0.1:$((8898+i))" ARROW_BRIDGE_BIN="$BRIDGE_DIR/arrow-bridge" \
   ARROW_INSTRUMENT_TOKENS="$(cat "$OUT/tokens-$i.txt")" \
   INSTRUMENT_MANIFEST_PATH="$MANIFEST" \

@@ -298,7 +298,7 @@
     {
       "table_name": "fingerprint_dedup",
       "ddl_path": "24_fingerprint_dedup.sql",
-      "ddl_sha256": "8d24cf2b2eebe4c32f954fdd86e3586d0e34aeb495b9deda6a015aebb32e7afa",
+      "ddl_sha256": "f1c78596fc8981a708b69768df83125a71f8838087cae2a5b08e6366b6c549df",
       "table_kind": "KV",
       "primary_key": "instrument_token, fingerprint_version, event_fingerprint",
       "bucket_key": null,

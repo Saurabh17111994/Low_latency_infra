@@ -376,7 +376,13 @@ services:
       # root (code/ = ../.. from 01_docker/), not the ingestion directory.
       context: ../..
       dockerfile: 02_services/01_ingestion/Dockerfile
-    depends_on: [fluss-coordinator, fluss-tablet]
+    # CHG-117 hygiene: bounded restart — the OTLP exporter fails fast when
+    # otel-collector is not yet ready (distroless image has no healthcheck
+    # probe), and `unless-stopped` turned that into an infinite crash loop
+    # (22 restarts observed). on-failure:3 stops the churn; prod should also
+    # gate on otel health via the OTLP endpoint.
+    restart: on-failure:3
+    depends_on: [fluss-coordinator, fluss-tablet, otel-collector]
     environment:
       # T6: proto is the primary low-latency transport (CHG-115). NDJSON pipe
       # remains the rollback path (TRANSPORT=pipe).
