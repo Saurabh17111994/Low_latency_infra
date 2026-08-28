@@ -322,7 +322,7 @@ static-check:
 	# Flag the pattern ONLY when it appears near a metrics scrape (curl to a \
 	# :9249/:9250/:9090 endpoint or a file named *metrics*) — the same pattern \
 	# on a config file / test log (e.g. MAX_BRIDGE_RESTARTS=3) is fine. \
-	if rg -n 'grep -o[E]?.*\[0-9\].*(9250|9249|9090|prom|metrics)|(9250|9249|9090|prom|metrics).*grep -o[E]?.*\[0-9\]' code --glob '*.sh' -g '!**/target/**' >/tmp/prom-float-trap.txt; then \
+	if rg -n 'grep -o[EP]?.*(\[0-9\]|\\d).*(9250|9249|9090|prom|metrics)|(9250|9249|9090|prom|metrics).*grep -o[EP]?.*(\[0-9\]|\\d)' code --glob '*.sh' -g '!**/target/**' >/tmp/prom-float-trap.txt; then \
 		echo "static-check: Prometheus float-trap pattern found (grep -oE '[0-9]+$$'):" >&2; \
 		cat /tmp/prom-float-trap.txt >&2; \
 		rm -f /tmp/prom-float-trap.txt; \
