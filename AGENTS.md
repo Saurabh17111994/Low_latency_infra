@@ -31,6 +31,20 @@ Spec-driven repo: `docs/` is the spec, `code/` is the implementation.
 1. **Smoke test first, then the real test.** Whenever you want to perform any test, first
    add/run a smoke test for that change, make it pass, and only then run the actual test.
    Never run the full/actual test before its smoke test has passed.
+
+   **Mandatory for long runs: any test/measurement expected to run >5 minutes MUST be
+   preceded by a smoke test** (short run, e.g. 200s) that: (a) starts the same pipeline
+   path, (b) verifies end-to-end data flow (table growth / source read counters / VALID
+   snapshots), and (c) is confirmed PASSING before the real run starts. Only after the
+   smoke test has passed AND been verified may the actual >5min test begin. If the smoke
+   test fails or shows no data flow, STOP — fix the cause first; never start a long run
+   on an unverified path.
+
+   **No artificial sleeps >30s:** never add a `sleep` (or equivalent blocking wait) longer
+   than 30 seconds to wait for a process, run, or pipeline stage. Use real completion
+   signals instead: poll a readiness file/port/metric with short intervals, wait on the
+   actual process exit, or check the artifact (table growth, snapshot count, job state)
+   before proceeding. A long fixed sleep that hides progress is not a completion signal.
 2. **Document after verification, not before.** Once a test for an entity (component,
    function, service, contract) is added AND verified passing, immediately write a
    comment (inline in code) or a short note (doc/dossier entry) stating what that entity
