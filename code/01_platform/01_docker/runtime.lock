@@ -1,0 +1,59 @@
+# Runtime lock — pinned semantic versions for the streaming trading platform.
+#
+# Purpose: every container image, library, and runtime version that affects
+# reproducible behavior is pinned here. This file is the single source of truth
+# for version compatibility. No "latest", no ranges.
+#
+# Usage: copy to runtime.lock and fill image digests when they are available.
+# Never commit digests you cannot verify from the upstream registry.
+#
+# VERSIONS: aligned to the pinned version matrix (DEC-021, project memory #17).
+#   Fluss: 0.9.1-incubating | Flink: 2.2.1 | Java: 17.0.19 | Python: 3.11.9
+#   OpenObserve: v0.91.5-amd64 (public.ecr.aws/zinclabs/openobserve)
+#
+# Last updated: 2026-07-24 (pinned matrix aligned)
+
+# ---- Container image versions (semantic tags; fill digests before production) ----
+FLUSS_IMAGE=apache/fluss:0.9.1-incubating@sha256:65f5513b33dde10ace4f8adb3956f17226a2a1e2663f92b3096e4769b0ee1d1c
+FLINK_IMAGE=flink:2.2.1-scala_2.12-java17@sha256:1934ab4b984d0873ef46825b1140377eed34475904aa077062497712d6e259f8
+OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64@sha256:9e3da77459b0b53a2b955fb34ae08ddf01be04b0699a5c1ffefb36bf05ae5644
+INGESTION_IMAGE=01_docker-ingestion@sha256:630166c0ac4b  # local build — pin image ID
+# ACTION_CAPTURE_IMAGE=  # built from code/02_services/03_action_capture — pin digest
+# COMPUTE_IMAGE=  # built from code/02_services/02_compute — pin digest
+# EXECUTOR_IMAGE=  # built from code/02_services/04_executor — pin digest
+
+# ---- Library and runtime versions (from code/pom.xml dependency management) ----
+FLINK_VERSION=2.2.1
+FLUSS_VERSION=0.9.1-incubating
+JAVA_VERSION=17.0.19
+SCALA_BINARY_VERSION=2.12
+
+# ---- Fluss-Flink connector ----
+# Fluss 0.9.1-incubating ships connectors matching Flink minor: fluss-flink-2.2
+FLUSS_FLINK_CONNECTOR=fluss-flink-2.2
+
+# ---- Arrow Trade protocol evidence ----
+# Market-data: binary WebSocket, 4 modes (LTP 13B, LTPC 17B, Quote 93B, Full 241B)
+# Order execution: REST POST /order/regular on https://edge.arrow.trade
+# Order updates: JSON WebSocket on wss://order-updates.arrow.trade
+# Reconciliation: GET /user/orders, /user/trades, /user/positions, /order/{id}
+# Auth (2026-08-24+): TOTP AutoLogin — ARROW_APP_ID + ARROW_APP_SECRET +
+#   ARROW_USER_ID + ARROW_PASSWORD + ARROW_TOTP_KEY (client.AutoLogin).
+#   ARROW_TOKEN is REMOVED (dead since 2026-08-24); only the faketool test
+#   broker path (run-full-suite.sh, ARROW_FAKE_BROKER=1) sets a fake token.
+# SDK: github.com/arrow-trade/go-arrow
+# Rate limit: 10 req/sec per endpoint
+
+# ---- Required env vars (values from .env; listed here for completeness) ----
+# ARROW_MARKET_DATA_URL, ARROW_ORDER_UPDATES_URL, ARROW_REST_URL
+# ARROW_APP_ID, ARROW_APP_SECRET, ARROW_USER_ID, ARROW_PASSWORD, ARROW_TOTP_KEY
+# EXECUTION_ENABLED (must be false)
+# AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, S3_WAREHOUSE_PATH
+# O2_USER, O2_PASSWORD
+# OTEL_EXPORTER_OTLP_ENDPOINT
+
+# ---- Other registry images ----
+ZOOKEEPER_IMAGE=zookeeper:3.9.2@sha256:43d39109cbd4de394742efbfc162a8a0a93731e806374b71f3865f4ef4460a56
+NAUTILUS_IMAGE=01_docker-nautilus@sha256:ecd51cdce0dc  # local build — pin image ID
+EXECUTION_BRIDGE_IMAGE=01_docker-execution-bridge@sha256:f2206d850721  # local build — pin image ID
+EXECUTION_GATEWAY_IMAGE=01_docker-execution-gateway@sha256:b1b63d077c41  # local build — pin image ID
