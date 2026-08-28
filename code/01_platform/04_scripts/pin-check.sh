@@ -8,7 +8,8 @@
 #   2. broker corpus integrity (corpus-pin.sh --verify)
 #   3. external SNAPSHOT ban (pom-snapshot-scan.py)
 #   4. platform version pins (versions.pin: no latest/TO_BE_PINNED)
-# Exit 0 only when all four pass. Run as `make pin-check`.
+#   5. runtime.lock image refs all digest-pinned (no bare tags)
+# Exit 0 only when all five pass. Run as `make pin-check`.
 
 set -euo pipefail
 
@@ -42,6 +43,27 @@ else
 		echo "FAIL: FLUSS_VERSION missing"
 		rc=1
 	}
+fi
+
+echo "== [5/5] runtime.lock image refs pinned =="
+LOCK="$REPO_ROOT/code/01_platform/01_docker/runtime.lock"
+if [ ! -f "$LOCK" ]; then
+	echo "FAIL: runtime.lock missing (copy runtime.lock.example + pin digests)"
+	rc=1
+else
+	# Every *_IMAGE= line in runtime.lock must carry @sha256:<digest>.
+	# Registry digests are 64 hex; local build IDs are 12+ hex (image ID
+	# pinning). Trailing comments (# ...) are allowed after the ref.
+	bad=$(grep -E '^[A-Z0-9_]+_IMAGE=' "$LOCK" \
+		| grep -vE '@sha256:[0-9a-f]{12,64}([[:space:]]+#.*)?$' || true)
+	if [ -n "$bad" ]; then
+		echo "FAIL: bare/unpinned image refs in runtime.lock:"
+		printf '%s\n' "$bad"
+		rc=1
+	else
+		n=$(grep -cE '^[A-Z0-9_]+_IMAGE=' "$LOCK")
+		echo "  OK: $n image refs all digest-pinned"
+	fi
 fi
 
 if [ "$rc" -eq 0 ]; then

@@ -57,6 +57,14 @@ resolve_one() {
 		err=$(docker buildx imagetools inspect "$img" \
 			--format '{{.Manifest.Digest}}' 2>&1) && digest="$err" ||
 			err="docker buildx imagetools inspect failed: $err"
+		# R-223: for a multi-arch INDEX (e.g. fluss/flink official images),
+		# buildx prints the whole index document (not a plain digest); the
+		# index's own digest appears as `Digest: sha256:<hex>` on its own
+		# line. Extract it so the defensive regex below passes. A single-arch
+		# manifest prints the plain digest directly and is left untouched.
+		if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+			digest=$(printf '%s\n' "$digest" | sed -n 's/^[[:space:]]*Digest:[[:space:]]*\(sha256:[0-9a-f]\{64\}\)$/\1/p' | head -1)
+		fi
 	fi
 	if [ -z "$digest" ] && command -v skopeo &>/dev/null; then
 		err=$(skopeo inspect --format '{{.Digest}}' "docker://${img}" 2>&1) && digest="$err" ||
