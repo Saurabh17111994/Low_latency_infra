@@ -74,9 +74,9 @@ public class FingerprintDedupFunction extends KeyedProcessFunction<Long, RowData
      * MapState.entries()} skips expired entries) and folds the actual live
      * count in. The per-token scan is small (steady state ≈ 6k entries per
      * instrument at 20 480 t/s) and runs ≈ 2×/s across all instruments —
-     * negligible, and it keeps {@code compute.dedup.state.count} honest
-     * between restores. Package-visible test seam: expiry-leg tests lower it
-     * to force an immediate resync.
+     * negligible, and it keeps the cumulative gauge honest between restores.
+     * Package-visible test seam: expiry-leg tests lower it to force an
+     * immediate resync.
      */
     static long GAUGE_RESYNC_INTERVAL_ROWS = 10_000L;
 
@@ -87,10 +87,11 @@ public class FingerprintDedupFunction extends KeyedProcessFunction<Long, RowData
     private transient Counter duplicates;
 
     /**
-     * Gauge state (tracker 14 P5.1): live sizes of the MapState plus a
-     * conservative bytes estimate. Keyed {@code MapState} cannot be iterated
-     * in {@code open()} (no key namespace — verified: the harness throws "No
-     * key set" on {@code entries()} outside a keyed callback), so each token's
+     * Gauge state (tracker 14 P5.1): cumulative firsts seen plus a conservative
+     * bytes estimate — NOT the live MapState size (see the resync javadoc for
+     * the RocksDB divergence). Keyed {@code MapState} cannot be iterated in
+     * {@code open()} (no key namespace — verified: the harness throws "No key
+     * set" on {@code entries()} outside a keyed callback), so each token's
      * restored size is folded in EXACTLY on its first post-restore row.
      */
     private transient long dedupCount;
@@ -131,18 +132,28 @@ public class FingerprintDedupFunction extends KeyedProcessFunction<Long, RowData
         firstEvents = getRuntimeContext().getMetricGroup().counter("compute.dedup.first");
         duplicates = getRuntimeContext().getMetricGroup().counter("compute.dedup.duplicates");
 
-        getRuntimeContext().getMetricGroup().gauge("compute.dedup.state.count",
+        getRuntimeContext().getMetricGroup().gauge("compute.dedup.firsts.cumulative",
                 (Gauge<Long>) () -> dedupCount);
-        getRuntimeContext().getMetricGroup().gauge("compute.dedup.state.bytes.estimate",
+        getRuntimeContext().getMetricGroup().gauge("compute.dedup.firsts.bytes.estimate",
                 (Gauge<Long>) () -> bytesEstimate);
     }
 
     /**
-     * Fold the current key's ACTUAL live count into the gauges. TTL-aware:
-     * {@code MapState.entries()} skips (and lazily removes) expired entries,
-     * so the scan returns the true live set — the resync corrects both the
-     * restore case (fresh gauge fields vs restored state) and the TTL-drift
-     * case (entries that expired invisibly since the last resync).
+     * Fold the current key's ACTUAL stored count into the gauges. This is a
+     * CUMULATIVE counter, NOT the live MapState size: {@code MapState.entries()}
+     * returns ALL stored entries on the RocksDB state backend — TTL-expired
+     * entries are NOT filtered at iteration time (verified in
+     * {@code RocksDBMapState$RocksDBMapIterator} bytecode, Flink 2.2.1; the
+     * TTL filter runs only during compaction). The heap backend DOES filter at
+     * iteration, so the gauge was accurate only on heap — tests run on heap
+     * (harness default) and passed; production RocksDB diverged, over-reporting
+     * ~39× (see logs/tracker-14/dedup-ttl-diagnosis-20260828.md).
+     *
+     * <p>The resync corrects the restore case (fresh gauge fields vs restored
+     * state) and folds in compaction-removed entries (small downward deltas),
+     * but the gauge remains a monotonic cumulative-firsts signal. Monitoring
+     * must read {@code flink_jobmanager_job_lastCheckpointSize} for the true
+     * live state; the alerts were repointed accordingly (o2-provision.py).
      */
     private void resyncTokenGauges(long token) throws Exception {
         long tracked = tokenStateCount.getOrDefault(token, 0L);

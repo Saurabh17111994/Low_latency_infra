@@ -206,11 +206,18 @@ compose() { # docker compose wrapper honoring file/project overrides
 }
 
 # Prometheus sampling of the dedup evidence (best-effort). Prints a single
-# line: state_count first_total dup_total (empty when unavailable).
+# line: firsts_cumulative first_total dup_total (empty when unavailable).
+# 2026-08-28 gauge remediation: the gauge formerly named
+# compute_dedup_state_count is RENAMED compute_dedup_firsts_cumulative (it is
+# a cumulative-firsts counter, NOT live state size — MapState.entries() does
+# not filter TTL-expired on RocksDB; see logs/tracker-14/dedup-ttl-diagnosis-
+# 20260828.md). The rollout continuity check is RELATIVE (pre vs post restore),
+# so the cumulative counter remains valid for it; live-state monitoring reads
+# flink_jobmanager_job_lastCheckpointSize instead.
 sample_dedup() {
 	local body state first dup
 	body="$(curl -fsS --max-time 10 "$PROMETHEUS_URL" 2>/dev/null)" || { echo ""; return 0; }
-	state="$(printf '%s\n' "$body" | grep -E '^flink_taskmanager_job_task_operator_compute_dedup_state_count\{' \
+	state="$(printf '%s\n' "$body" | grep -E '^flink_taskmanager_job_task_operator_compute_dedup_firsts_cumulative\{' \
 		| awk '{ s += $NF } END { print s + 0 }')"
 	first="$(printf '%s\n' "$body" | grep -E '^flink_taskmanager_job_task_operator_compute_dedup_first\{' \
 		| awk '{ s += $NF } END { print s + 0 }')"

@@ -1271,7 +1271,9 @@ connector jar, or operator-only P10 territory.
    series, not the dead ComputeOtlpEmitter streams. **VERIFIED 2026-08-17:**
    `SIGNAL-warn-dedup-state` (id `3I2RmqeXtLEGlW0B7rrVta0Ro3R`) confirmed bound
    to `stream_name=flink_taskmanager_job_task_operator_compute_dedup_state_count`
-   (native series, live at 901 128 during the 10-min E2E) and
+   (native series, live at 901 128 during the 10-min E2E; **2026-08-28 gauge
+   remediation: repointed to `flink_jobmanager_job_lastcheckpointsize`** — the
+   state-count gauge was a cumulative counter, ~39× over-report on RocksDB) and
    `SIGNAL-warn-dedup-expiry` confirmed ABSENT (retired CHG-023 item 2) —
    evidence `logs/tracker-14/o2-native-reporter-series-20260817.md`.
 2. `CandleFailureInjectionIntegrationTest.kvTableDeletionFailsWholeJobNotLogOnlyDegraded`
@@ -1307,15 +1309,16 @@ sources on 2026-08-12.
   `RawValidationFunction.java:74-76` registers `compute.startup.mode`; the alert
   retarget precedent (delete + recreate rule, alert_id `3HmIy7IwzFgY563mG6tL1sxouhq`)
   is recorded in tracker P8.1 box 850 and `logs/tracker-14/p8-5-observability-live-2026-08-11.md` §4.
-- Alert rules to retarget: `code/01_platform/04_scripts/o2-provision.py:425-430`
-  (`SIGNAL-warn-dedup-state` stream=`compute_dedup_state_count`,
-  `SIGNAL-warn-dedup-expiry` stream=`compute_dedup_expiry_index_count` —
-  **2026-08-17, CHG-023 item 2: `SIGNAL-warn-dedup-expiry` is RETIRED — its
-  series is deleted with the expiry index; only `SIGNAL-warn-dedup-state`
-  remains (runbooks + o2-provision.py carry the retirement)**).
-- Dashboard panels already use the live names (same file :188, :263-267:
-  `flink_taskmanager_job_task_operator_compute_dedup_state_count`,
-  `flink_taskmanager_job_task_operator_compute_dedup_state_bytes_estimate`).
+- Alert rules (2026-08-28 gauge remediation): `SIGNAL-warn-dedup-state`
+  now reads `flink_jobmanager_job_lastcheckpointsize` (TRUE live state,
+  threshold 1.5 GB); the old `compute_dedup_state_count` gauge is RENAMED to
+  `compute_dedup.firsts.cumulative` (cumulative firsts, not state size —
+  `MapState.entries()` does not filter TTL-expired in RocksDB, ~39× over-report;
+  see `logs/tracker-14/dedup-ttl-diagnosis-20260828.md`).
+  `SIGNAL-warn-dedup-firsts-rate` (new) guards input rate on
+  `compute_dedup_first` > 50k/s. `SIGNAL-warn-dedup-state-bytes` REMOVED
+  (redundant with the checkpoint-size alert). `SIGNAL-warn-dedup-expiry`
+  remains RETIRED (2026-08-17, CHG-023 item 2).
 - Sink wiring: `SignalJob.buildTopology` uses `FlussSink.builder()` `.sinkTo(...)`
   at `SignalJob.java:205-260` (LOG candle sink ~:206, Signal_Candidates ~:227,
   KV current sink ~:257).
@@ -1722,7 +1725,10 @@ as the historical record and this task is closed without execution.
   `flink_taskmanager_job_task_operator_<metric-name>`; O2 normalizes stream names to lowercase
   with underscores (P8.1 evidence note: "metric names are lowercase stream names"). The dedup
   gauges' dotted names become `flink_taskmanager_job_task_operator_compute_dedup_state_count`
-  (matches the dashboard panels already stored in O2). Confirm every name from live `/labels`
+  (matches the dashboard panels already stored in O2; **2026-08-28 remediation renamed
+  the dedup gauges to `compute_dedup_firsts_cumulative`/`compute_dedup_firsts_bytes_estimate`** —
+  they are cumulative-firsts counters, not live state; live-state monitoring reads
+  `flink_jobmanager_job_lastcheckpointsize`). Confirm every name from live `/labels`
   before editing rules.
 - **RocksDB metrics:** per-property boolean keys `state.backend.rocksdb.metrics.<kebab>`; the
   property set is `RocksDBProperty` (javap-verified from the pinned 2.2.1 jar). These metrics
@@ -1762,3 +1768,33 @@ as the historical record and this task is closed without execution.
 - Upstream apache/fluss `forLogRecords` fix (P3.3 connector patch replacement when a release lands).
 - Optional: add a RocksDB native-memory panel to the COMPUTE - Checkpoints & State dashboard in
   o2-provision.py after Task 3's names are confirmed live.
+
+### 2026-08-28 ADDENDUM — gauge remediation (dedup monitoring)
+
+**Why:** the `compute.dedup.state.count` gauge (registered in
+`FingerprintDedupFunction.open()`) was a **cumulative counter**, not live
+state size — `MapState.entries()` does not filter TTL-expired entries on the
+RocksDB state backend (bytecode-verified in `RocksDBMapState$RocksDBMapIterator`,
+Flink 2.2.1), so the gauge over-reported ~39× vs the true live set
+(checkpoint `state_size` ≈ 16-18 MB total, dedup share ~5.75 MB ≈ 40k entries).
+Full diagnosis: `logs/tracker-14/dedup-ttl-diagnosis-20260828.md`.
+
+**Changes (landed in this commit):**
+- Gauges renamed: `compute.dedup.state.count` → `compute.dedup.firsts.cumulative`,
+  `compute.dedup.state.bytes.estimate` → `compute.dedup.firsts.bytes.estimate`
+  (honest names — they are cumulative-firsts counters, not state size).
+- `SIGNAL-warn-dedup-state` repointed to `flink_jobmanager_job_lastcheckpointsize`
+  (TRUE live state, threshold 1.5 GB). `SIGNAL-warn-dedup-state-bytes` REMOVED
+  (redundant). New `SIGNAL-warn-dedup-firsts-rate` (input-rate guard, >50k/s).
+- `rollout-savepoint.sh` `sample_dedup` reads the renamed gauge (relative
+  continuity check still valid — cumulative counter preserved across restore).
+
+**REQUIRED OPS STEPS (O2 is create-only idempotent — manual delete+recreate):**
+1. Delete old `SIGNAL-warn-dedup-state` alert from O2 (still bound to the
+   broken `compute_dedup_state_count` stream).
+2. Delete old `SIGNAL-warn-dedup-state-bytes` alert.
+3. Re-run `o2-provision.py` (creates the new `SIGNAL-warn-dedup-state` on
+   `lastcheckpointsize` + `SIGNAL-warn-dedup-firsts-rate`).
+4. Redeploy SignalJob (compute.jar) for the renamed gauges to take effect;
+   the alerts on `lastcheckpointsize`/`first` are already valid against the
+   live metrics before redeploy.

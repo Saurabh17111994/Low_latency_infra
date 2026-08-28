@@ -787,34 +787,32 @@ ALERTS = [
         desc="[Warning/compute] Candle KV sink writing 0 records/s for 2 min while running: window-close stall / watermark freeze; recovery = sink resumes (quiesced dev feeds false-fire by design)",
     ),
     dict(
-        name="SIGNAL-warn-dedup-state-bytes",
-        stream="flink_taskmanager_job_task_operator_compute_dedup_state_bytes_estimate",
-        # Added 2026-08-22 T4: total dedup bytes alert for 3k/p8 ~1GB budget. Mirrors count alert logic: max by subtask then sum.
-        promql="sum(max by (subtask_index) (flink_taskmanager_job_task_operator_compute_dedup_state_bytes_estimate))",
-        promql_condition=(">", 800*1024*1024),
+        name="SIGNAL-warn-dedup-state",
+        stream="flink_jobmanager_job_lastcheckpointsize",
+        # 2026-08-28 (gauge remediation): repointed from the broken
+        # compute_dedup_state_count gauge (cumulative firsts, ~39x over-report;
+        # MapState.entries() does NOT filter TTL-expired in RocksDB — see
+        # logs/tracker-14/dedup-ttl-diagnosis-20260828.md) to the TRUE live
+        # state: the job's last checkpoint size. Bounded at ~rate x TTL
+        # (observed ~16-18 MB total). Threshold 1.5 GB = the checkpoint size
+        # when live state approaches the 6 GB TM budget minus other operators,
+        # with margin. Job-level gauge — no subtask aggregation needed.
+        conditions=[("value", ">", 1500000000)],
         period=1,
-        frequency=1,
-        desc="[Warning/compute] TOTAL dedup bytes >800MB: large state near 1GB budget at 3k/p8; checkpoint may timeout, consider restore/balance. Mirrors count alert logic.",
+        desc="[Warning/compute] TOTAL dedup+compute state (last checkpoint size) > 1.5 GB: state approaching the 6 GB TM budget; checkpoint timeout risk; recovery = check accepted-rate/TTL math vs envelope, consider restore/balance",
     ),
     dict(
-        name="SIGNAL-warn-dedup-state",
-        stream="flink_taskmanager_job_task_operator_compute_dedup_state_count",
-        # 2026-08-17: the old custom condition (value > 6.5M) was PER-SUBTASK —
-        # ~8x too loose for the intended TOTAL envelope (fires only when one
-        # subtask holds > 6.5M). O2 v0.91.5 realtime alerts are per-row only
-        # (evaluate_realtime(row), source-verified) and promql/sql are rejected
-        # for realtime ("Realtime alert should use Custom query type", probed),
-        # so the total is only expressible as a SCHEDULED promql alert. The
-        # reporter's gauge carries a start_time label that changes EVERY flush,
-        # so a naive sum() over-counts ~15x (validated: 202M vs ~23M at peak) —
-        # `max by (subtask_index)` collapses the per-flush series to one value
-        # per subtask, `sum` totals them (validated 16.75M/23.18M @12:52/12:55Z
-        # vs the SQL-derived totals). Evaluates every 1 min.
-        promql="sum(max by (subtask_index) (flink_taskmanager_job_task_operator_compute_dedup_state_count))",
-        promql_condition=(">", 3600000),
+        name="SIGNAL-warn-dedup-firsts-rate",
+        stream="flink_taskmanager_job_task_operator_compute_dedup_first",
+        # 2026-08-28 (gauge remediation): the cumulative firsts counter is a
+        # valid INPUT-rate signal (dedup throughput), not state size. A
+        # sustained firsts rate above the real-broker max (48.7k/s) means the
+        # feed is beyond the envelope — state grows faster than the 60s TTL
+        # can drain it. 300s range averages out per-flush spikes.
+        promql="sum(increase(flink_taskmanager_job_task_operator_compute_dedup_first[300s]))/300",
+        promql_condition=(">", 50000),
         period=1,
-        frequency=1,
-        desc="[Warning/compute] TOTAL dedup state across ALL subtasks > 3.6M entries (envelope = 60 000 t/s x 60 s TTL ≈ 3.6M, 2026-08-28 CHG-116: DEDUP_TTL_MS 300000->60000, broker docs rule out replay on reconnect; 6.5M/300s-era re-based): dedup is authoritative Flink keyed state — the MapState IS the set). SCHEDULED promql (O2 v0.91.5 realtime = per-row only, so a cross-subtask sum cannot be realtime); max by (subtask_index) collapses the reporter's per-flush start_time series, sum totals the subtasks — validated 2026-08-17 (naive sum over-counts ~15x). Recovery = check accepted-rate/TTL math vs the envelope, not a cache sweep. Series = Flink FingerprintDedupFunction gauge (retargeted 2026-08-12 from the dead ComputeOtlpEmitter stream; threshold re-based 2026-08-28 to the 60s-TTL envelope TOTAL)",
+        desc="[Warning/compute] Dedup firsts (unique fingerprints) sustained > 50k/s over 5 min: input beyond the real-broker envelope (48.7k/s); state grows faster than TTL drains; recovery = check feed rate vs envelope",
     ),
     # RETIRED 2026-08-17 (CHG-023 item 2): SIGNAL-warn-dedup-expiry watched
     # compute_dedup_expiry_index_count — the expiry-index gauge is DELETED with
