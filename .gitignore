@@ -21,6 +21,7 @@ config/*.local.*
 .vscode/
 .DS_Store
 code/01_platform/01_docker/.env
+code/01_platform/01_docker/.env.bak-*
 
 # Runtime logs / evidence artifacts (R-051: log4j2 JSON journals, dated gz
 # rolls, and soak TSVs are generated per run and must never be committed —
