@@ -95,6 +95,45 @@ PY
 
 header="ts\tfeed_rate\tfeed_valid\tflink_rss\tflink_cpu\tckpt_ok\tckpt_fail\tp99_dedup\tp99_writer\tp99_detection\tp99_builder\tp99_sink"
 echo "$header" > "$OUT/snapshots.tsv"
+header_busy="ts\toperator\tbusy_ms_s\tbackpressure_ms_s\tidle_ms_s"
+echo "$header_busy" > "$OUT/busy.tsv"
+
+# --- per-operator busy/backpressure/idle (Finding #17 diagnostic) ---
+# Samples every vertex's aggregated busy/backpressure/idle ms/s from the
+# Flink REST API. Runs in background so the main loop's cadence is unchanged.
+busy_sampler() {
+  while :; do
+    TS=$(date -Iseconds)
+    # 1) get all vertices for the job
+    VERTICES=$(curl -s --max-time 5 "$FLINK/jobs/$JOB_ID" 2>/dev/null | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    for v in d.get('vertices',[]):
+        print(v['id'], v.get('name',''), sep='\t')
+except Exception:
+    pass
+" 2>/dev/null)
+    # 2) for each vertex, get its busy/backpressure/idle aggregate
+    while IFS=$'\t' read -r VID VNAME; do
+      [ -z "$VID" ] && continue
+      # The aggregate endpoint needs the subtask-scope prefix '0.' (verified:
+      # bare names return [] in Flink 2.2.1). '0.' = aggregated across subtasks.
+      MET=$(curl -s --max-time 5 "$FLINK/jobs/$JOB_ID/vertices/$VID/metrics?get=0.busyTimeMsPerSecond,0.backPressuredTimeMsPerSecond,0.idleTimeMsPerSecond" 2>/dev/null | python3 -c "
+import json,sys
+try:
+    d={m['id']:m['value'] for m in json.load(sys.stdin)}
+    print(f\"{d.get('0.busyTimeMsPerSecond','n/a')}\t{d.get('0.backPressuredTimeMsPerSecond','n/a')}\t{d.get('0.idleTimeMsPerSecond','n/a')}\")
+except Exception:
+    print('n/a\tn/a\tn/a')
+" 2>/dev/null)
+      echo -e "$TS\t$VNAME\t$MET" >> "$OUT/busy.tsv"
+    done <<< "$VERTICES"
+    sleep "$INTERVAL_S"
+  done
+}
+busy_sampler &
+BUSY_PID=$!
 
 START=$SECONDS
 VALID_COUNT=0; INVALID_COUNT=0
@@ -126,6 +165,9 @@ print('\t'.join([g('fingerprint_dedup'), g('forming_bar_writer'), g('forming_bar
   echo -e "$TS\t$FR\t$VALID\t$RSS\t$CPU\t$CK\t$P99_LINE" >> "$OUT/snapshots.tsv"
   sleep "$INTERVAL_S"
 done
+
+# stop the busy sampler
+kill "$BUSY_PID" 2>/dev/null || true
 
 # --- summary: ONLY VALID snapshots contribute p99; INVALID-only => loud warning ---
 echo ""
