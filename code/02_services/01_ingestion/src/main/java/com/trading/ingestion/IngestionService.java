@@ -169,6 +169,9 @@ public final class IngestionService {
     private final String assignedTokenSetHash;
     private final java.util.Set<String> safetyEmitted = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final ReadinessFile readinessFile;
+    /** R-209: last readiness value written + timestamp (per-tick write guard). */
+    private volatile boolean lastReadinessWritten = false;
+    private volatile long lastReadinessWriteMs = 0L;
     private final BridgeEventParser bridgeEventParser = new BridgeEventParser(MAPPER);
     private final AtomicLong connectionEpoch = new AtomicLong(0);
     private volatile DiscontinuityWriter.LastTickSnapshot lastTickSnapshot;
@@ -1711,8 +1714,22 @@ public final class IngestionService {
 
     private void updateReadinessFile() {
         if (readinessFile == null) return;
+        // R-209: the readiness marker is a slow-moving state (ready/not-ready
+        // on connect/disconnect). Writing it on EVERY tick was the #1 CPU
+        // consumer in the asprof profile (updateReadinessFile → setReady →
+        // writeString + ATOMIC_MOVE rename ≈ 2,400 samples at 15.4k/s) and the
+        // actual cause of the ~16k/s ingestion ceiling: ~62k fs syscalls/sec.
+        // Write only on state change, or at most once per second for liveness.
+        boolean nowReady = health.isReady();
+        long now = System.currentTimeMillis();
+        if (nowReady == lastReadinessWritten
+                && now - lastReadinessWriteMs < 1_000L) {
+            return;
+        }
+        lastReadinessWritten = nowReady;
+        lastReadinessWriteMs = now;
         try {
-            readinessFile.setReady(health.isReady());
+            readinessFile.setReady(nowReady);
         } catch (java.io.IOException e) {
             LOG.warn("ingestion: readiness marker update failed: {}", sanitizeLog(e.getMessage()));
         }
