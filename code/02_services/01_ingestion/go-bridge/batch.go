@@ -17,6 +17,8 @@ package main
 
 import (
 	"crypto/sha256"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -38,6 +40,39 @@ func DefaultBatchLimits() BatchLimits {
 		MaxEvents: 256,
 		MaxBytes:  64 * 1024,
 	}
+}
+
+// batchLimitsFromEnv reads the BRIDGE_BATCH_* tuning knobs (K1, 2026-08-29).
+// Unset keys fall back to the locked O-2 defaults; a non-integer or
+// out-of-range value is a FATAL startup error (same contract as hftRange).
+func batchLimitsFromEnv(logf func(string, ...any)) BatchLimits {
+	limits := DefaultBatchLimits()
+
+	if v := os.Getenv("BRIDGE_BATCH_MAX_AGE_MS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 1000 {
+			logf("FATAL: BRIDGE_BATCH_MAX_AGE_MS=%s — must be an integer in 1..1000", v)
+			os.Exit(exitFatalStart)
+		}
+		limits.MaxAge = time.Duration(n) * time.Millisecond
+	}
+	if v := os.Getenv("BRIDGE_BATCH_MAX_EVENTS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 1_000_000 {
+			logf("FATAL: BRIDGE_BATCH_MAX_EVENTS=%s — must be an integer in 1..1000000", v)
+			os.Exit(exitFatalStart)
+		}
+		limits.MaxEvents = n
+	}
+	if v := os.Getenv("BRIDGE_BATCH_MAX_BYTES"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1024 || n > 64*1024*1024 {
+			logf("FATAL: BRIDGE_BATCH_MAX_BYTES=%s — must be an integer in 1024..67108864", v)
+			os.Exit(exitFatalStart)
+		}
+		limits.MaxBytes = n
+	}
+	return limits
 }
 
 // FlushFunc receives a complete batch for transport. Called synchronously;

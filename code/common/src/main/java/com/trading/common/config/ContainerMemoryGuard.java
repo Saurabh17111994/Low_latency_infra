@@ -31,6 +31,47 @@ import java.nio.file.Path;
 public final class ContainerMemoryGuard {
     private static final long NO_LIMIT = -1L;
 
+    // ---- env-tunable percentages (P3, 2026-08-29) ----
+    private static final String HEAP_PCT_KEY = "JVM_HEAP_PERCENT";
+    private static final String RESERVE_PCT_KEY = "NON_HEAP_RESERVE_PERCENT";
+    private static final String ALERT_PCT_KEY = "MEMORY_ALERT_PERCENT";
+
+    /** Heap share of the container limit, env-tunable (default 65). */
+    static int heapPercent() {
+        return percentFromEnv(HEAP_PCT_KEY, PlatformConfig.JVM_HEAP_PERCENT_OF_CONTAINER_LIMIT);
+    }
+
+    /** Non-heap reserve share, env-tunable (default 35). */
+    static int reservePercent() {
+        return percentFromEnv(RESERVE_PCT_KEY, PlatformConfig.NON_HEAP_MEMORY_RESERVE_PERCENT);
+    }
+
+    /** Alert threshold share, env-tunable (default 85). */
+    static int alertPercent() {
+        return percentFromEnv(ALERT_PCT_KEY, PlatformConfig.CONTAINER_MEMORY_ALERT_PERCENT);
+    }
+
+    private static int percentFromEnv(String key, int fallback) {
+        // System property wins (testability); falls back to the env var.
+        String v = System.getProperty(key);
+        if (v == null) {
+            v = System.getenv(key);
+        }
+        if (v == null || v.isBlank()) {
+            return fallback;
+        }
+        int n;
+        try {
+            n = Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException("Config " + key + " must be an integer percent, got '" + v + "'");
+        }
+        if (n < 1 || n > 99) {
+            throw new IllegalStateException("Config " + key + " must be in 1..99, got " + n);
+        }
+        return n;
+    }
+
     private ContainerMemoryGuard() {
     }
 
@@ -39,7 +80,7 @@ public final class ContainerMemoryGuard {
         if (containerLimitBytes <= 0) {
             throw new IllegalArgumentException("containerLimitBytes must be positive, got " + containerLimitBytes);
         }
-        return Math.floorDiv(containerLimitBytes * PlatformConfig.JVM_HEAP_PERCENT_OF_CONTAINER_LIMIT, 100L);
+        return Math.floorDiv(containerLimitBytes * heapPercent(), 100L);
     }
 
     /** Non-heap reserve = container limit − allowed max heap. */
@@ -64,7 +105,7 @@ public final class ContainerMemoryGuard {
      * readiness while this holds.
      */
     public static boolean atOrAboveAlertPercent(long containerLimitBytes, long usedBytes) {
-        return utilizedPercent(containerLimitBytes, usedBytes) >= PlatformConfig.CONTAINER_MEMORY_ALERT_PERCENT;
+        return utilizedPercent(containerLimitBytes, usedBytes) >= alertPercent();
     }
 
     /**
@@ -89,13 +130,13 @@ public final class ContainerMemoryGuard {
         long currentMaxHeap = Runtime.getRuntime().maxMemory();
         if (currentMaxHeap > heapBudget) {
             long reserve = nonHeapReserve(limit);
-            long reserveMin = Math.floorDiv(limit * PlatformConfig.NON_HEAP_MEMORY_RESERVE_PERCENT, 100L);
+            long reserveMin = Math.floorDiv(limit * reservePercent(), 100L);
             throw new IllegalStateException(
                 "Container memory contract violated: container limit=" + limit
                     + " bytes, JVM max heap=" + currentMaxHeap + " bytes exceeds the "
-                    + PlatformConfig.JVM_HEAP_PERCENT_OF_CONTAINER_LIMIT
+                    + heapPercent()
                     + "% share (" + heapBudget + "), leaving non-heap reserve=" + reserve
-                    + " below the required " + PlatformConfig.NON_HEAP_MEMORY_RESERVE_PERCENT
+                    + " below the required " + reservePercent()
                     + "% (" + reserveMin + "). Set an explicit container memory limit consistent with the 65/35 rule"
                     + " (docs/08_implementation/09-production-swarm.md § JVM and memory configuration). Refusing to start.");
         }

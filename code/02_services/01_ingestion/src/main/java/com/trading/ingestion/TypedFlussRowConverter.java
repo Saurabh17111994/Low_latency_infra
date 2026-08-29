@@ -1,5 +1,6 @@
 package com.trading.ingestion;
 
+import com.trading.common.schema.RawTableSchema;
 import com.trading.ingestion.model.RawTick;
 import com.trading.ingestion.model.TickPacket;
 import com.trading.ingestion.write.FlussRowConverter;
@@ -67,6 +68,27 @@ final class TypedFlussRowConverter implements FlussRowConverter {
         public String validity_state;
         public String validity_reason;
         public String schema_version;
+    }
+
+    // SC2 (2026-08-29): the POJO above is the SDK's reflection target, so its
+    // fields cannot be *derived* from RawTableSchema at runtime — instead we
+    // verify field names + count against the single source at class load, so a
+    // schema change is one edit (RawTableSchema) and a loud failure here if the
+    // POJO lags. Field *types* are pinned by the DDL (STRING/BIGINT/BYTES).
+    static {
+        java.lang.reflect.Field[] fields = TickRow.class.getDeclaredFields();
+        if (fields.length != RawTableSchema.FIELD_COUNT) {
+            throw new IllegalStateException("TickRow declares " + fields.length
+                    + " fields but RawTableSchema requires " + RawTableSchema.FIELD_COUNT
+                    + " — update TickRow or RawTableSchema (SC2)");
+        }
+        for (int i = 0; i < fields.length; i++) {
+            if (!fields[i].getName().equals(RawTableSchema.COLUMNS.get(i))) {
+                throw new IllegalStateException("TickRow field #" + i + " is '"
+                        + fields[i].getName() + "' but RawTableSchema requires '"
+                        + RawTableSchema.COLUMNS.get(i) + "' (SC2)");
+            }
+        }
     }
 
     @Override

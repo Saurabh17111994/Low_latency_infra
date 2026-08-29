@@ -27,7 +27,7 @@ CODE_DIR="${CODE_DIR:-$PROJECT_ROOT/code}"
 COMPOSE_DIR="${COMPOSE_DIR:-$CODE_DIR/01_platform/01_docker}"
 COMPOSE_FILE="${COMPOSE_FILE:-$COMPOSE_DIR/docker-compose.yml}"
 SECRETS_FILE="${SECRETS_FILE:-$HOME/.env.arrow}"
-MANIFEST="${ARROW_INSTRUMENT_MANIFEST:-/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv}"
+MANIFEST="${ARROW_INSTRUMENT_MANIFEST:-$PROJECT_ROOT/../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv}"
 BRIDGE_DIR="${BRIDGE_DIR:-$CODE_DIR/02_services/01_ingestion/go-bridge}"
 JAVA_DIR="${JAVA_DIR:-$CODE_DIR/02_services/01_ingestion}"
 DDL_DIR="${DDL_DIR:-$CODE_DIR/01_platform/02_sql/ddl}"
@@ -79,6 +79,18 @@ elif [ -f "$COMPOSE_DIR/.env" ]; then
 		export "$key=$value"
 	done < <(awk -F= '/^ARROW_[A-Z_]+=/ {print $1 "=" substr($0, index($0,"=")+1)}' "$COMPOSE_DIR/.env")
 	log "no $SECRETS_FILE — using ARROW_* credentials from $COMPOSE_DIR/.env"
+	# S2 (2026-08-29): secrets moved to secrets.env — pull ARROW_* from it too.
+	if [ -f "$COMPOSE_DIR/secrets.env" ]; then
+		while IFS= read -r line; do
+			key="${line%%=*}"
+			value="${line#*=}"
+			[ -n "$key" ] || continue
+			export "$key=$value"
+		done < <(awk -F= '/^ARROW_[A-Z_]+=/ {print $1 "=" substr($0, index($0,"=")+1)}' "$COMPOSE_DIR/secrets.env")
+		log "no $SECRETS_FILE — using ARROW_* credentials from $COMPOSE_DIR/.env + secrets.env"
+	else
+		log "no $SECRETS_FILE — .env lacks ARROW_* and secrets.env is MISSING"
+	fi
 else
 	cat >"$SECRETS_FILE" <<EOF
 # Arrow broker credentials — fill these in, then re-run start-all.sh

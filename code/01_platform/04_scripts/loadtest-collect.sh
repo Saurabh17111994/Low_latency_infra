@@ -27,8 +27,9 @@ if [ "$DURATION_S" -lt 190 ]; then
   exit 2
 fi
 
-PROM="http://localhost:9250/metrics"
-FLINK="http://localhost:8081"
+# H3 (2026-08-29): endpoints env-overridable with localhost defaults.
+PROM="${PROM_URL:-http://localhost:9250/metrics}"
+FLINK="${FLINK_URL:-http://localhost:8081}"
 LIVE_THRESHOLD_RATE=500            # source records/s below this => feed stalled
 
 # --- source feed-liveness: raw-table-1 source numRecordsInPerSecond ---

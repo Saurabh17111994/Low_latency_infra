@@ -58,6 +58,8 @@ public record BabysitterConfig(
 
     /** Builds a config from env vars, failing closed on anything invalid. */
     public static BabysitterConfig fromEnv() {
+        // G1 (2026-08-29): every declared config key must actually be read.
+        com.trading.common.config.ConfigGuard.assertAllKeysRead();
         return new BabysitterConfig(
                 envOrNull(FLUSS_BOOTSTRAP_SERVERS),
                 envOrDefault(FLUSS_DATABASE, DEFAULT_DATABASE),

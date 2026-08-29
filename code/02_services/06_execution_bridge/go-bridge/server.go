@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,11 +47,32 @@ func NewBridgeServer(broker Broker, authToken, mode string) (*BridgeServer, erro
 	if strings.TrimSpace(authToken) == "" {
 		return nil, errors.New("private bridge auth token is required")
 	}
+	timeout, err := commandTimeoutFromEnv()
+	if err != nil {
+		return nil, err
+	}
 	return &BridgeServer{
 		broker: broker, authToken: authToken, mode: mode,
-		commandTimeout: 10 * time.Second, hub: NewEventHub(),
+		commandTimeout: timeout, hub: NewEventHub(),
 		requests: make(map[string]*requestState),
 	}, nil
+}
+
+// commandTimeoutFromEnv reads EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS (K4,
+// 2026-08-29). Unset defaults to 10s; a present value must parse as a
+// positive integer in 100..600000 ms — a zero/negative timeout would hang
+// command dispatch forever.
+func commandTimeoutFromEnv() (time.Duration, error) {
+	const defaultMs = 10_000
+	v := os.Getenv("EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS")
+	if v == "" {
+		return time.Duration(defaultMs) * time.Millisecond, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 100 || n > 600_000 {
+		return 0, fmt.Errorf("EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS=%q must be an integer in 100..600000", v)
+	}
+	return time.Duration(n) * time.Millisecond, nil
 }
 
 func (s *BridgeServer) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }

@@ -199,6 +199,10 @@ services:
   fluss-coordinator:
     <<: *fluss-common
     image: ${FLUSS_IMAGE:?set FLUSS_IMAGE to an immutable digest}
+    env_file:
+      - .env
+      - secrets.env
+
     command: ["coordinatorServer"]
     depends_on: [zookeeper]
     ports: ["9123:9123"]
@@ -270,6 +274,10 @@ services:
   fluss-tablet:
     <<: *fluss-common
     image: ${FLUSS_IMAGE:?set FLUSS_IMAGE to an immutable digest}
+    env_file:
+      - .env
+      - secrets.env
+
     command: ["tabletServer"]
     # T13 chaos-03: tablet must auto-restart after SIGKILL (kill→recovery invariant)
     restart: unless-stopped
@@ -383,6 +391,10 @@ services:
       # root (code/ = ../.. from 01_docker/), not the ingestion directory.
       context: ../..
       dockerfile: 02_services/01_ingestion/Dockerfile
+    env_file:
+      - .env
+      - secrets.env
+
     # CHG-117 hygiene: bounded restart — the OTLP exporter fails fast when
     # otel-collector is not yet ready (distroless image has no healthcheck
     # probe), and `unless-stopped` turned that into an infinite crash loop
@@ -483,6 +495,10 @@ services:
       # matching the ingestion image build context above.
       context: ../..
       dockerfile: 02_services/06_execution_bridge/Dockerfile
+    env_file:
+      - .env
+      - secrets.env
+
     networks: [execution-net, arrow-egress]
     environment:
       EXECUTION_BRIDGE_AUTH_TOKEN: ${EXECUTION_BRIDGE_AUTH_TOKEN:-local-only}
@@ -696,6 +712,10 @@ services:
   # standard OTel transport — deliberately NOT in the ingestion critical path.
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.123.0
+    env_file:
+      - .env
+      - secrets.env
+
     restart: unless-stopped
     networks: [trading-net]
     command: ["--config=/etc/otel-collector-config.yaml"]
@@ -725,6 +745,10 @@ services:
     restart: unless-stopped
     networks: [trading-net]
     image: ${OPENOBSERVE_IMAGE:?set OPENOBSERVE_IMAGE to an immutable digest}
+    env_file:
+      - .env
+      - secrets.env
+
     ports:
       - "5080:5080"
       - "5081:5081"
@@ -766,6 +790,10 @@ services:
   # ---- MinIO: S3-compatible lake for Fluss Iceberg tiering (dev) ----------
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    env_file:
+      - .env
+      - secrets.env
+
     restart: unless-stopped
     networks: [trading-net]
     ports:
@@ -786,6 +814,10 @@ services:
 
   minio-init:
     image: minio/mc:RELEASE.2025-05-21T01-59-54Z
+    env_file:
+      - .env
+      - secrets.env
+
     networks: [trading-net]
     depends_on:
       minio:

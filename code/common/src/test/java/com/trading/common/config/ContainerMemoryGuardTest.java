@@ -67,4 +67,46 @@ class ContainerMemoryGuardTest {
         long used = ContainerMemoryGuard.readContainerMemoryUsedBytes();
         assertTrue(used == -1L || used >= 0, "usage reader must return -1 or a non-negative byte count");
     }
+
+    @Test
+    void envOverridesChangePercentages() {
+        // P3 (2026-08-29): JVM_HEAP_PERCENT / NON_HEAP_RESERVE_PERCENT /
+        // MEMORY_ALERT_PERCENT are env-tunable.
+        System.setProperty("JVM_HEAP_PERCENT", "50");
+        System.setProperty("NON_HEAP_RESERVE_PERCENT", "50");
+        System.setProperty("MEMORY_ALERT_PERCENT", "90");
+        try {
+            long limit = 100L * 1024 * 1024;
+            long budget = ContainerMemoryGuard.maxHeapBudget(limit);
+            assertEquals(limit * 50L / 100L, budget, "50% heap override must apply");
+            assertTrue(ContainerMemoryGuard.atOrAboveAlertPercent(limit, limit * 90L / 100L),
+                    "90% alert override must trigger at 90%");
+            assertFalse(ContainerMemoryGuard.atOrAboveAlertPercent(limit, limit * 89L / 100L),
+                    "89% must not trigger the 90% alert");
+        } finally {
+            System.clearProperty("JVM_HEAP_PERCENT");
+            System.clearProperty("NON_HEAP_RESERVE_PERCENT");
+            System.clearProperty("MEMORY_ALERT_PERCENT");
+        }
+    }
+
+    @Test
+    void invalidPercentEnvFails() {
+        // P3: a non-integer / out-of-range percent is a startup error.
+        System.setProperty("JVM_HEAP_PERCENT", "abc");
+        try {
+            assertThrows(IllegalStateException.class,
+                    () -> ContainerMemoryGuard.maxHeapBudget(100L * 1024 * 1024));
+        } finally {
+            System.clearProperty("JVM_HEAP_PERCENT");
+        }
+
+        System.setProperty("MEMORY_ALERT_PERCENT", "100");
+        try {
+            assertThrows(IllegalStateException.class,
+                    () -> ContainerMemoryGuard.atOrAboveAlertPercent(1000, 900));
+        } finally {
+            System.clearProperty("MEMORY_ALERT_PERCENT");
+        }
+    }
 }

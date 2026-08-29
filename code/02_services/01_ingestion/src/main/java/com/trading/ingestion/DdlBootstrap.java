@@ -9,6 +9,8 @@ import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
+import com.trading.common.schema.RawTableSchema;
+import java.util.ArrayList;
 import org.apache.fluss.metadata.TablePath;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -199,29 +201,40 @@ public final class DdlBootstrap {
     private static final List<String> OWNED_TABLES =
             List.of("raw_table_1", "suspected_discontinuities", "ingestion_quarantine");
 
-    /** Full 20-column schema for raw_table_1 matching DDL v2 (R-054/R-231). */
-    private static final Schema RAW_TABLE_1_SCHEMA = Schema.newBuilder()
-            .column("event_fingerprint", org.apache.fluss.types.DataTypes.STRING())
-            .column("fingerprint_version", org.apache.fluss.types.DataTypes.STRING())
-            .column("connection_id", org.apache.fluss.types.DataTypes.STRING())
-            .column("connection_epoch", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("exchange", org.apache.fluss.types.DataTypes.STRING())
-            .column("symbol", org.apache.fluss.types.DataTypes.STRING())
-            .column("event_time", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("ingest_ts", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("ack_ts", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("tick_type", org.apache.fluss.types.DataTypes.STRING())
-            .column("last_price_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("last_qty", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("raw_payload", org.apache.fluss.types.DataTypes.BYTES())
-            .column("payload_hash", org.apache.fluss.types.DataTypes.STRING())
-            .column("decoder_version", org.apache.fluss.types.DataTypes.STRING())
-            .column("protocol_version", org.apache.fluss.types.DataTypes.STRING())
-            .column("validity_state", org.apache.fluss.types.DataTypes.STRING())
-            .column("validity_reason", org.apache.fluss.types.DataTypes.STRING())
-            .column("schema_version", org.apache.fluss.types.DataTypes.STRING())
-            .build();
+    /**
+     * Full 20-column schema for raw_table_1 matching DDL v2 (R-054/R-231).
+     * SC2 (2026-08-29): derived from {@link RawTableSchema} — the single
+     * source of truth — so DDL, bootstrap, and the row converter cannot drift.
+     */
+    private static final Schema RAW_TABLE_1_SCHEMA = rawTableSchema();
+
+    /** Builds the Fluss {@link Schema} from {@link RawTableSchema} (SC2). */
+    private static Schema rawTableSchema() {
+        org.apache.fluss.types.DataType[] types = new org.apache.fluss.types.DataType[
+                RawTableSchema.FIELD_COUNT];
+        for (int i = 0; i < RawTableSchema.FIELD_COUNT; i++) {
+            types[i] = toFlussType(RawTableSchema.COLUMN_TYPE_ROOTS.get(i));
+        }
+        org.apache.fluss.metadata.Schema.Builder b = Schema.newBuilder();
+        for (int i = 0; i < RawTableSchema.FIELD_COUNT; i++) {
+            b.column(RawTableSchema.COLUMNS.get(i), types[i]);
+        }
+        return b.build();
+    }
+
+    /** Maps a {@code DataTypeRoot} name to the Fluss {@link org.apache.fluss.types.DataType}. */
+    private static org.apache.fluss.types.DataType toFlussType(String root) {
+        switch (root) {
+            case "STRING":
+                return org.apache.fluss.types.DataTypes.STRING();
+            case "BIGINT":
+                return org.apache.fluss.types.DataTypes.BIGINT();
+            case "BYTES":
+                return org.apache.fluss.types.DataTypes.BYTES();
+            default:
+                throw new IllegalStateException("Unsupported raw-table type root: " + root);
+        }
+    }
 
     /** Full 13-column schema for Postback_Quarantine matching DDL 16. */
     private static final Schema POSTBACK_QUARANTINE_SCHEMA = Schema.newBuilder()
@@ -394,6 +407,36 @@ public final class DdlBootstrap {
             .build();
 
     /**
+     * 14-column KV schema for feature_candles_15s_preview (low-latency candles
+     * Phase 1, 2026-08-29): live OHLCV of in-progress 15s windows, overwritten
+     * every 1s by CandlePreviewEmitFunction (compute job). PK
+     * (instrument_token, window_start) — same as the final candle table, so an
+     * upsert overwrites the same row each tick (the row "grows" live) and the
+     * row auto-expires after the 60s TTL. Columns mirror
+     * {@code com.trading.common.schema.CandlePreviewTableSchema} — the shared
+     * contract the preview sink serializes against. is_preview is always TRUE
+     * here (the marker exists so consumers can distinguish preview rows from
+     * final candles without joining tables).
+     */
+    private static final Schema FEATURE_CANDLES_PREVIEW_SCHEMA = Schema.newBuilder()
+            .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("exchange", org.apache.fluss.types.DataTypes.STRING())
+            .column("symbol", org.apache.fluss.types.DataTypes.STRING())
+            .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("window_end", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("open_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("high_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("low_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("close_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("volume", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("tick_count", org.apache.fluss.types.DataTypes.INT())
+            .column("is_preview", org.apache.fluss.types.DataTypes.BOOLEAN())
+            .column("output_ts", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("schema_version", org.apache.fluss.types.DataTypes.STRING())
+            .primaryKey("instrument_token", "window_start")
+            .build();
+
+    /**
      * Minimal placeholder schema for platform tables whose owning service is
      * not built yet. These tables are only existence-checked at runtime — the
      * full DDL (applied by the offline DDL gate) is authoritative for their
@@ -444,6 +487,11 @@ public final class DdlBootstrap {
                     Map.entry("feature_candles_15s",
                             TableDescriptor.builder()
                                     .schema(FEATURE_CANDLES_SCHEMA)
+                                    .distributedBy(16, "instrument_token")
+                                    .build()),
+                    Map.entry("feature_candles_15s_preview",
+                            TableDescriptor.builder()
+                                    .schema(FEATURE_CANDLES_PREVIEW_SCHEMA)
                                     .distributedBy(16, "instrument_token")
                                     .build()),
                     Map.entry("Signal_Candidates",

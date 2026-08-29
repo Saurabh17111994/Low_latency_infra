@@ -30,7 +30,6 @@ public final class PlatformConfig {
     // Note: MAX_PENDING_APPEND_RECORDS is owned by IngestionConfig (env default
     // 50,000, range 100..1,000,000) — no duplicate constant here. A stale 10,000
     // literal was removed 2026-08-13 (it was unused and contradicted the runtime).
-    public static final int PENDING_APPEND_WARNING_PERCENT = 80;
 
     // ---- raw_table_1 schema contract ----
     /**
@@ -127,13 +126,29 @@ public final class PlatformConfig {
      * vector a deploy could use), so the guard is real.
      */
     public static void validateStartup() {
-        validateLoadBearing("DEDUP_TTL_MS", envLong("DEDUP_TTL_MS"), DEDUP_TTL_MS);
-        validateLoadBearing("CANDLE_WINDOW_MS", envLong("CANDLE_WINDOW_MS"), CANDLE_WINDOW_MS);
+        // G1 (2026-08-29): every declared config key must actually be read —
+        // a config-defined-but-ignored key is a silent lie.
+        ConfigGuard.assertAllKeysRead();
+        // P1 (2026-08-29): the load-bearing pins apply in production only;
+        // dev is tunable (SignalJobConfig enforces the dev ranges).
+        if (isProductionEnv()) {
+            validateLoadBearing("DEDUP_TTL_MS", envLong("DEDUP_TTL_MS"), DEDUP_TTL_MS);
+            validateLoadBearing("CANDLE_WINDOW_MS", envLong("CANDLE_WINDOW_MS"), CANDLE_WINDOW_MS);
+        }
         // 09-production-swarm § JVM and memory configuration: inside a real
         // container, enforce the 65/35 contract so a mis-sized container aborts
         // startup instead of OOM-ing at runtime. Non-fatal on a bare JVM (no
         // bounded cgroup budget) — keeps dev/test unaffected.
         ContainerMemoryGuard.assertContainerMemoryContract();
+    }
+
+    private static boolean isProductionEnv() {
+        String env = System.getenv("DEPLOYMENT_ENV");
+        if (env == null) {
+            env = System.getenv("DEPLOY_ENV");
+        }
+        return env != null && ("production".equalsIgnoreCase(env.trim())
+                || "prod".equalsIgnoreCase(env.trim()));
     }
 
     private static void validateLoadBearing(String key, Long runtimeValue, long pinned) {

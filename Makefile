@@ -1,7 +1,9 @@
 # Trading_project — common dev commands (MVP scaffold)
 # Run from the repo root: make <target>
 
-COMPOSE := docker compose -f code/01_platform/01_docker/docker-compose.yml
+# S2 (2026-08-29): secrets live in secrets.env (git-ignored); both env files are
+# loaded at parse time so ${VAR} interpolation sees the secrets.
+COMPOSE := docker compose --env-file code/01_platform/01_docker/.env --env-file code/01_platform/01_docker/secrets.env -f code/01_platform/01_docker/docker-compose.yml
 # R-143: default to ONLINE maven (a fresh checkout has an empty ~/.m2 and -o
 # fails obscurely). Set MVN_FLAGS=-o when the local cache is warm.
 MVN := mvn $(MVN_FLAGS)

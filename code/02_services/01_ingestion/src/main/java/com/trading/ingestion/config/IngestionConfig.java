@@ -1,5 +1,6 @@
 package com.trading.ingestion.config;
 
+import com.trading.common.config.SecretGuard;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -137,7 +138,10 @@ public final class IngestionConfig {
      * Throws {@link IllegalStateException} on any violation.
      */
     public static IngestionConfig validate() {
-        return validateFrom(System.getenv());
+        // G1 (2026-08-29): every declared config key must actually be read.
+        com.trading.common.config.ConfigGuard.assertAllKeysRead();
+        // S3 (2026-08-29): production startup always guards secrets.
+        return validateFrom(System.getenv(), true);
     }
 
     /**
@@ -145,8 +149,19 @@ public final class IngestionConfig {
      * tests can exercise exact-value validation without mutating the real env.
      */
     static IngestionConfig validateFrom(Map<String, String> env) {
+        // Test seam: no secret guard (tests inject fake secret-named keys as
+        // fixtures). Production uses validate(), which always guards.
+        return validateFrom(env, false);
+    }
+
+    static IngestionConfig validateFrom(Map<String, String> env, boolean guardSecrets) {
         List<String> errors = new ArrayList<>();
         Builder b = new Builder();
+
+        // S3 (2026-08-29): secrets must live in secrets.env, never the main env map.
+        if (guardSecrets) {
+            SecretGuard.assertNoSecrets(env);
+        }
 
         // ---- Arrow auth (TOTP only — ARROW_TOKEN removed 2026-08-24) ----
         b.arrowAppId = required(env, "ARROW_APP_ID", errors);

@@ -222,7 +222,10 @@ func initBridgeEmitter(w io.Writer) Transport {
 	switch v {
 	case "proto", "grpc":
 		fmt.Fprintf(os.Stderr, "arrow-bridge: transport=proto frames (TRANSPORT=%s)\n", v)
-		batcher := NewBatcher(DefaultBatchLimits(), func(batch *marketdata.MarketDataBatch) error {
+		// K1 (2026-08-29): batch limits are env-tunable; unset = O-2 defaults.
+		batcher := NewBatcher(batchLimitsFromEnv(func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, "arrow-bridge: "+format+"\n", args...)
+		}), func(batch *marketdata.MarketDataBatch) error {
 			// synchronous flush under batcher lock — write the frame
 			return protoWriteFrame(w, batch)
 		}, nil)

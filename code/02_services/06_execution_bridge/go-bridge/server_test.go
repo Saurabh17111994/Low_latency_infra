@@ -163,3 +163,26 @@ func TestMalformedCommandDoesNotReachBroker(t *testing.T) {
 		t.Fatal("malformed command reached broker")
 	}
 }
+
+// K4 (2026-08-29): EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS — default 10s, valid
+// override honored, invalid value rejected (error, not hang).
+func TestCommandTimeoutFromEnv(t *testing.T) {
+	t.Setenv("EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS", "")
+	d, err := commandTimeoutFromEnv()
+	if err != nil || d != 10*time.Second {
+		t.Fatalf("unset env: got %v, err %v; want 10s, nil", d, err)
+	}
+
+	t.Setenv("EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS", "5000")
+	d, err = commandTimeoutFromEnv()
+	if err != nil || d != 5*time.Second {
+		t.Fatalf("5000: got %v, err %v; want 5s, nil", d, err)
+	}
+
+	for _, bad := range []string{"0", "-1", "50", "abc", "700000"} {
+		t.Setenv("EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS", bad)
+		if _, err := commandTimeoutFromEnv(); err == nil {
+			t.Fatalf("%s: expected error, got nil", bad)
+		}
+	}
+}
