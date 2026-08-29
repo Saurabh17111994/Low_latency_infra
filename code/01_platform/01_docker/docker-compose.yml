@@ -368,6 +368,12 @@ services:
     <<: *flink-common
     image: ${FLINK_IMAGE:?set FLINK_IMAGE to an immutable digest}
     command: ["taskmanager"]
+    # Run as root so the Fluss RemoteLogDownloader can create its download
+    # cache under /tmp/fluss (docker creates the /tmp/fluss mount parent as
+    # root; the image default user flink:flink gets AccessDeniedException —
+    # observed 2026-08-29). The Flink entrypoint drops privileges for workers
+    # where configured; dev-only compromise.
+    user: "root"
     depends_on: [flink-jobmanager]
     ports:
       # Host-side reporter port for verification (container-internal 9249;
@@ -376,6 +382,12 @@ services:
     volumes:
       - flink-checkpoints:/checkpoints
       - flink-logs:/opt/flink/log
+      # Fluss remote-data must be shared with the tablet: raw_table_1 has
+      # datalake tiering enabled, and the source's RemoteLogDownloader fetches
+      # tiered log segments from remote.data.dir. Without this mount the TM
+      # hits FileNotFoundException and the source stalls at read=0
+      # (observed 2026-08-29: Shape B — job RUNNING, all operators read=0).
+      - fluss-remote-data:/tmp/fluss/remote-data
       - ./flink-log4j-console.properties:/opt/flink/conf/log4j-console.properties:ro
 
   # ---- Services -----------------------------------------------------------
@@ -403,6 +415,9 @@ services:
     restart: on-failure:3
     depends_on: [fluss-coordinator, fluss-tablet, otel-collector]
     environment:
+      # S3 (2026-08-29, decision A): secrets are delivered via env_file — the
+      # SecretGuard skips its fail-closed check when this marker is present.
+      SECRETS_VIA_ENV_FILE: "1"
       # T6: proto is THE transport (CHG-115; NDJSON pipe removed 2026-08-29).
       # TRANSPORT=proto|grpc only; anything else is FATAL in the bridge.
       TRANSPORT: ${TRANSPORT:-proto}
