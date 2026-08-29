@@ -52,4 +52,25 @@ class SecretGuardTest {
         env.put("ARROW_APP_SECRET", "fake-secret");
         assertThrows(IllegalStateException.class, () -> SecretGuard.assertNoSecrets(env));
     }
+
+    /** 2026-08-29 decision A: compose env-file marker skips the fail-closed check. */
+    @Test
+    void envFileMarkerSkipsSecretCheck() {
+        Map<String, String> env = new HashMap<>();
+        env.put(SecretGuard.SECRETS_VIA_ENV_FILE, "1");
+        env.put("ARROW_APP_SECRET", "whatever");
+        env.put("EOD_MASTER_KEY", "whatever");
+        assertDoesNotThrow(() -> SecretGuard.assertNoSecrets(env),
+                "SECRETS_VIA_ENV_FILE=1 must allow secrets delivered via env_file");
+    }
+
+    /** 2026-08-29 decision A: a marker value other than "1" does NOT skip. */
+    @Test
+    void envFileMarkerOnlySkipsWhenExactlyOne() {
+        Map<String, String> env = new HashMap<>();
+        env.put(SecretGuard.SECRETS_VIA_ENV_FILE, "yes");
+        env.put("ARROW_APP_SECRET", "fake-secret");
+        assertThrows(IllegalStateException.class, () -> SecretGuard.assertNoSecrets(env),
+                "a non-'1' marker value must not disable the guard");
+    }
 }

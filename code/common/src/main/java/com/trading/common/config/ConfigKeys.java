@@ -58,6 +58,9 @@ public final class ConfigKeys {
     public static final String DEDUP_TTL_MS = "DEDUP_TTL_MS";
     public static final String DEPLOYMENT_ENV = "DEPLOYMENT_ENV";
     public static final String DEPLOY_ENV = "DEPLOY_ENV";
+
+    /** Compose env-file deployments set this marker; SecretGuard respects it. */
+    public static final String SECRETS_VIA_ENV_FILE = "SECRETS_VIA_ENV_FILE";
     public static final String DRAIN_DEADLINE_SECONDS = "DRAIN_DEADLINE_SECONDS";
     public static final String EARLY_SIGNAL_CONFIRM_AFTER_MS = "EARLY_SIGNAL_CONFIRM_AFTER_MS";
     public static final String EARLY_SIGNAL_ENABLED = "EARLY_SIGNAL_ENABLED";

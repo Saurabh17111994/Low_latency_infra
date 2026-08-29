@@ -160,7 +160,7 @@ secrets:       (separate, git-ignored) ARROW_APP_SECRET, ARROW_PASSWORD, ARROW_T
 
 **Phase 2 — split secrets:**
 5. ✅ Move secrets from `.env` → `secrets.env` (git-ignored); compose loads both (`--env-file .env --env-file secrets.env`).
-6. ✅ Add a startup check that rejects secrets in the main config (`SecretGuard`).
+6. ✅ Add a startup check that rejects secrets in the main config (`SecretGuard`). Note (decision A, 2026-08-29): compose delivers secrets via env_file, so the guard skips its fail-closed check when `SECRETS_VIA_ENV_FILE=1` is set (compose + loadtest harness set it); host processes without the marker still fail closed.
 
 **Phase 3 — schema single-source (highest structural value):**
 7. ✅ Make DDL the single source of truth for the 20-column raw schema; `DdlBootstrap` reads the DDL (or a generated `RawTableSchema` class) instead of hand-written `SchemaBuilder`; `TypedFlussRowConverter` derives from the same. (This is the biggest risk-reducer.)
