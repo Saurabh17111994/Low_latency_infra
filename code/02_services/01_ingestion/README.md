@@ -32,7 +32,7 @@ The current architecture does **not** assume Arrow Trade, `seq_no`, exact sequen
 
 - [x] Go bridge binary — `go-bridge/main.go` (~220 lines)
 - [x] Arrow Go SDK (`go-arrow`) via local replace directive — HFT WebSocket (Standard feed removed 2026-08-14)
-- [x] NDJSON stdout output matching `TickPacket`/`GoTick` schema
+- [x] Proto stdout output (length-prefixed `TransportFrame`; NDJSON pipe removed 2026-08-29)
 - [x] Auth: AutoLogin (user+pass+TOTP) only (ARROW_TOKEN removed 2026-08-24)
 - [x] Subscription: configurable token set via `ARROW_INSTRUMENT_TOKENS` env
 - [x] Graceful shutdown via SIGINT/SIGTERM
@@ -43,12 +43,12 @@ The current architecture does **not** assume Arrow Trade, `seq_no`, exact sequen
 ### Java ingestion pipeline
 
 - [x] Main pipeline — `IngestionService.java` (518 lines)
-- [x] Go bridge lifecycle: launched as subprocess via `ProcessBuilder`, stdout → NDJSON, stderr → SLF4J
+- [x] Go bridge lifecycle: launched as subprocess via `ProcessBuilder`, stdout → proto frames, stderr → SLF4J
 - [x] Bridge crash → `BRIDGE_CRASH` discontinuity, epoch bump, non-zero exit
 - [x] Broker disconnect → frame staleness detection, auto-restore on next frame
 - [x] Subscription completeness → 30s startup check verifies all manifest tokens seen
 - [x] Slow-Fluss backpressure → controlled pause at 90%, resume at 50% pending
-- [x] Parse NDJSON → `GoTick` (Jackson, 25 fields)
+- [x] Parse proto frames → `TickEvent` (protobuf, 25+ fields)
 - [x] Instrument resolution via `InstrumentManifestLoader`; missing → quarantine; manifest enforcement (version + count + fingerprint validation) ✓ SCH-22
 - [x] Validity classification — `ValidityClassification`: VALID_TRADE / VALID_NON_TRADE / INVALID_VALUES
 - [x] Invalid values → quarantine, not appended

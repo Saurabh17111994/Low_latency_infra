@@ -89,7 +89,7 @@ public final class HealthProbe {
         this.lastFrameReceivedNanos = nanoTime;
         // R-031: per-slot frame recency must reflect real frame flow. The Go
         // bridge emits no periodic lifecycle events while a slot is healthy —
-        // ticks arrive as NDJSON lines that only hit this global setter. Refresh
+        // ticks arrive as proto events that only hit this global setter. Refresh
         // every ACTIVE slot's lastFrameNanos so isDataReady() does not flip
         // false ~15s after the last ACTIVE event during steady-state.
         long now = nanoTime;

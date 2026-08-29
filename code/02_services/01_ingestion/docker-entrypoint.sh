@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Ingestion entrypoint — Java IngestionService manages Go arrow-bridge lifecycle.
-# Java launches bridge as subprocess (ProcessBuilder), reads proto frames (T6,
-# primary) or NDJSON (TRANSPORT=pipe rollback) from stdout, pipes bridge stderr
-# into SLF4J logs. Bridge crash → discontinuity → shutdown.
+# Java launches bridge as subprocess (ProcessBuilder), reads proto frames (T6)
+# from stdout (the NDJSON pipe transport was removed 2026-08-29; anything but
+# TRANSPORT=proto|grpc is FATAL in the bridge), pipes bridge stderr into SLF4J
+# logs. Bridge crash → discontinuity → shutdown.
 set -euo pipefail
 
 echo "ingestion: starting (FLUSS_BOOTSTRAP=${FLUSS_BOOTSTRAP:-fluss-coordinator:9123})"
 
-# T6/CHG-115: proto is the primary low-latency transport; pipe is the rollback.
+# T6/CHG-115: proto is THE transport (NDJSON pipe removed 2026-08-29).
 # An explicit TRANSPORT env (compose/stack) wins; entrypoint default is proto.
 export TRANSPORT="${TRANSPORT:-proto}"
 echo "ingestion: transport=${TRANSPORT}"

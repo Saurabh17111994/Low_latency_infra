@@ -2,49 +2,32 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
-// countEvents returns the number of NDJSON lines whose event field equals want.
+// countEvents returns the number of bridge_event control records whose event
+// field equals want (proto frames — NDJSON removed 2026-08-29).
 func countEvents(t *testing.T, out string, event string) int {
 	t.Helper()
-	n := 0
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if line == "" {
-			continue
-		}
-		var ev struct {
-			Event string `json:"event"`
-		}
-		if err := json.Unmarshal([]byte(line), &ev); err != nil {
-			t.Fatalf("unmarshal line %q: %v", line, err)
-		}
-		if ev.Event == event {
-			n++
-		}
-	}
-	return n
+	return countContaining(eventsAsStrings(t, out), "event="+event)
 }
 
-// lastLineEvent returns the event field of the final NDJSON line.
+// lastLineEvent returns the event field of the final bridge_event control
+// record (proto frames — NDJSON removed 2026-08-29).
 func lastLineEvent(t *testing.T, out string) string {
 	t.Helper()
-	trimmed := strings.TrimSpace(out)
-	if trimmed == "" {
+	strs := eventsAsStrings(t, out)
+	if len(strs) == 0 {
 		return ""
 	}
-	lines := strings.Split(trimmed, "\n")
-	var ev struct {
-		Event string `json:"event"`
+	rest := strings.TrimPrefix(strs[len(strs)-1], "event=")
+	if i := strings.Index(rest, " state="); i >= 0 {
+		return rest[:i]
 	}
-	if err := json.Unmarshal([]byte(lines[len(lines)-1]), &ev); err != nil {
-		t.Fatalf("unmarshal last line %q: %v", lines[len(lines)-1], err)
-	}
-	return ev.Event
+	return rest
 }
 
 // withShutdownOnce resets the package-level shutdown once and restores it after.
@@ -60,7 +43,7 @@ func withShutdownOnce(t *testing.T) {
 func TestShutdownDrainEventEmittedOnce(t *testing.T) {
 	old := bridgeEmitter
 	var out bytes.Buffer
-	bridgeEmitter = NewBridgeEmitter(&out)
+	bridgeEmitter = newTestProtoEmitter(&out)
 	defer func() { bridgeEmitter = old }()
 	withShutdownOnce(t)
 
@@ -84,7 +67,7 @@ func TestShutdownDrainEventEmittedOnce(t *testing.T) {
 func TestShutdownDuplicateIsIdempotent(t *testing.T) {
 	old := bridgeEmitter
 	var out bytes.Buffer
-	bridgeEmitter = NewBridgeEmitter(&out)
+	bridgeEmitter = newTestProtoEmitter(&out)
 	defer func() { bridgeEmitter = old }()
 	withShutdownOnce(t)
 
@@ -94,14 +77,8 @@ func TestShutdownDuplicateIsIdempotent(t *testing.T) {
 	if got := countEvents(t, out.String(), EventBridgeShutdown); got != 1 {
 		t.Fatalf("bridge_shutdown emitted %d times on duplicate shutdown, want 1\n%s", got, out.String())
 	}
-	// Stream must still be valid NDJSON (no partial/corrupt line).
-	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var v map[string]any
-		if err := json.Unmarshal([]byte(line), &v); err != nil {
-			t.Fatalf("duplicate shutdown left corrupt NDJSON: %q: %v", line, err)
-		}
+	// Stream must still be valid proto frames (no partial/corrupt frame).
+	if frames := splitFrames(out.Bytes()); len(frames) == 0 {
+		t.Fatalf("duplicate shutdown left no decodable frames: %q", out.String())
 	}
 }

@@ -18,7 +18,6 @@ import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
-import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -74,10 +73,13 @@ class ShutdownDeadlockTest {
         // 1. Feed 3 valid ticks — each is ACCEPTED, each reservation stays
         //    pending because the ack future never completes.
         long now = System.currentTimeMillis();
-        Method processLine = IngestionService.class.getDeclaredMethod("processLine", String.class);
-        processLine.setAccessible(true);
         for (int i = 0; i < 3; i++) {
-            processLine.invoke(service, tickLine(TOKEN_A, now, 100 + i));
+            service.processTickEvent(protoTick(TOKEN_A, now, 100 + i), "hft-0", 1L);
+        }
+        // The proto path enqueues asynchronously — wait for acceptance.
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (service.tracker().totalAccepted() < 3 && System.nanoTime() < deadline) {
+            Thread.sleep(5);
         }
         assertEquals(3, service.tracker().totalAccepted(), "all 3 ticks must be accepted");
         long expectedPendingBytes = 3L * converter.estimatedRowSize(null);
@@ -145,19 +147,20 @@ class ShutdownDeadlockTest {
     private static final byte[] FRAME_PAYLOAD =
             new byte[] {0x01, 0x02, 0x03, 0x04, (byte) 0xFF, 0x00, 0x10};
 
-    private static String tickLine(long token, long tsMs, long ltpPaise) {
-        String payload = Base64.getEncoder().encodeToString(FRAME_PAYLOAD);
-        return "{"
-                + "\"record_type\":\"tick\","
-                + "\"feed\":\"hft\","
-                + "\"mode\":\"ltpc\","
-                + "\"token\":" + token + ","
-                + "\"ltp_paise\":" + ltpPaise + ","
-                + "\"ts_ms\":" + tsMs + ","
-                + "\"received_ts_ms\":" + System.currentTimeMillis() + ","
-                + "\"raw_payload\":\"" + payload + "\","
-                + "\"payload_hash\":\"" + sha256Hex(FRAME_PAYLOAD) + "\""
-                + "}";
+    private static com.trading.ingestion.transport.TickEvent protoTick(long token, long tsMs, long ltpPaise) {
+        return com.trading.ingestion.transport.TickEvent.newBuilder()
+                .setSlotId("hft-0")
+                .setMode("ltpc")
+                .setToken((int) token)
+                .setFeed("hft")
+                .setTsMs(tsMs)
+                .setReceivedMs(System.currentTimeMillis())
+                .setFeedSequenceLocal(1)
+                .setLtpPaise(ltpPaise)
+                .setVolume(100)
+                .setRawPayload(com.google.protobuf.ByteString.copyFrom(FRAME_PAYLOAD))
+                .setPayloadHash(com.google.protobuf.ByteString.copyFrom(sha256Hex(FRAME_PAYLOAD).getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                .build();
     }
 
     private static String sha256Hex(byte[] data) {

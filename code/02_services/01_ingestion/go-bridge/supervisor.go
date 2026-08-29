@@ -146,8 +146,9 @@ func runHFTSupervisorWithFactory(ctx context.Context, makeFactory func(*arrow.Cl
 			outcomes[i] = runHFTSlotWithFactory(ctx, makeFactory(client, i), slot, latencyMs, responseTimeout, refreshAuth, logf)
 		}(i, slot)
 	}
-	// Supervisor health snapshot: one bridge_metrics NDJSON line per 10s
-	// (reconnect_consecutive, active_sockets, go_goroutines). Exits on cancel
+	// Supervisor health snapshot: one bridge_metrics control record per 10s
+	// (reconnect_consecutive, active_sockets, go_goroutines) via the active
+	// transport (proto frames). Exits on cancel
 	// so a cancelled supervisor's goroutine count settles for ING-RES-001.
 	go bridgeMetricsTicker(ctx)
 	wg.Wait()

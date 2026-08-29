@@ -2,16 +2,17 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"strings"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/arrow-trade/go-arrow/arrow"
+	"github.com/trading/arrow-bridge/marketdata"
+	"google.golang.org/protobuf/proto"
 )
 
 // captureBridge runs fn with a fresh buffer-backed emitter so tests can assert
-// on the NDJSON events produced by runHFTEpoch. The capture buffer is the
+// on the proto frames produced by runHFTEpoch. The capture buffer is the
 // package-level syncBuffer (fault_injection_test.go): runHFTEpoch writes from
 // its own emit goroutines while the test reads after fn returns, so a plain
 // bytes.Buffer would race under -race.
@@ -19,16 +20,19 @@ func captureBridge(t *testing.T, fn func()) string {
 	t.Helper()
 	old := bridgeEmitter
 	out := newSyncBuffer()
-	bridgeEmitter = NewBridgeEmitter(out)
+	bridgeEmitter = newTestProtoEmitter(out)
 	defer func() { bridgeEmitter = old }()
 	fn()
 	// The epoch's read/heartbeat goroutines emit one final event after
 	// runHFTEpoch returns (signalEpochStop fires before the emit — R-297), so
 	// wait for the capture to settle before the deferred restore of the global
 	// bridgeEmitter — a straggler read would race the restore under -race.
+	// The proto emitter batches, so settle() must flush each iteration to
+	// push buffered ticks into the buffer before comparing sizes.
 	settle := func() bool {
 		prev := -1
 		for i := 0; i < 500; i++ { // up to 5 s (10 ms steps); stragglers finish in µs
+			flushTestEmitter()
 			cur := len(out.String())
 			if cur == prev {
 				return true
@@ -58,22 +62,72 @@ func baseSlotCfg() SlotConfig {
 		StallTimeout: 15 * time.Second, ResponseTimeout: 10 * time.Second, MaxAuthRefreshes: 3}
 }
 
+// eventsFrom decodes the captured PROTO stream (TransportFrame protobuf —
+// NDJSON removed 2026-08-29) into bridge_event maps with the same keys the
+// old NDJSON parser produced, so callers are unchanged: event/state/slot_id/
+// connection_id/connection_epoch/assigned_tokens/acknowledged_tokens/
+// rejected_tokens/reason.
 func eventsFrom(t *testing.T, output string) []map[string]any {
 	t.Helper()
 	var events []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
-		if line == "" {
+	for _, b := range splitFrames([]byte(output)) {
+		f := &marketdata.TransportFrame{}
+		if err := proto.Unmarshal(b, f); err != nil {
 			continue
 		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			continue // skip tick lines that fail decode (unlikely)
+		c, ok := f.Payload.(*marketdata.TransportFrame_Control)
+		if !ok || c.Control.GetRecordType() != "bridge_event" {
+			continue
 		}
-		if rt, _ := m["record_type"].(string); rt == "bridge_event" {
-			events = append(events, m)
-		}
+		cr := c.Control
+		events = append(events, map[string]any{
+			"record_type":        cr.GetRecordType(),
+			"event":              cr.GetEvent(),
+			"state":              cr.GetState(),
+			"slot_id":            cr.GetSlotId(),
+			"connection_id":      cr.GetConnectionId(),
+			"connection_epoch":   cr.GetConnectionEpoch(),
+			"assigned_tokens":    cr.GetAssignedTokens(),
+			"acknowledged_tokens": cr.GetAcknowledgedTokens(),
+			"rejected_tokens":    cr.GetRejectedTokens(),
+			"reason":             cr.GetReason(),
+		})
 	}
 	return events
+}
+
+// ticksFrom decodes the captured PROTO stream into tick token strings.
+func ticksFrom(t *testing.T, output string) []string {
+	t.Helper()
+	var ticks []string
+	for _, b := range splitFrames([]byte(output)) {
+		f := &marketdata.TransportFrame{}
+		if err := proto.Unmarshal(b, f); err != nil {
+			continue
+		}
+		mb, ok := f.Payload.(*marketdata.TransportFrame_MarketBatch)
+		if !ok {
+			continue
+		}
+		for _, ev := range mb.MarketBatch.GetEvents() {
+			ticks = append(ticks, fmt.Sprintf("token=%d", ev.GetToken()))
+		}
+	}
+	return ticks
+}
+
+// splitFrames splits a length-prefixed proto stream into frame bodies.
+func splitFrames(b []byte) [][]byte {
+	var out [][]byte
+	for len(b) >= 4 {
+		n := int(uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24)
+		if n <= 0 || n > len(b)-4 {
+			break
+		}
+		out = append(out, b[4:4+n])
+		b = b[4+n:]
+	}
+	return out
 }
 
 func lastEventState(events []map[string]any, event string) string {
@@ -113,7 +167,7 @@ func TestFakeBrokerSubscriptionSuccess(t *testing.T) {
 	if got := lastEventState(eventsFrom(t, out), "subscription_ack"); got != "ACTIVE" {
 		t.Fatalf("expected ACTIVE, got %q\n%s", got, out)
 	}
-	if !strings.Contains(out, `"feed":"hft"`) {
+	if len(ticksFrom(t, out)) == 0 {
 		t.Fatal("expected a tick emission")
 	}
 	if fake.closed != true {
@@ -206,7 +260,7 @@ func TestTickNotAcceptedAsSubscriptionAck(t *testing.T) {
 
 	events := eventsFrom(t, out)
 	// The tick must have been observed (proving the stream delivered data)…
-	if !strings.Contains(out, `"feed":"hft"`) {
+	if len(ticksFrom(t, out)) == 0 {
 		t.Fatalf("expected the tick to be observed\n%s", out)
 	}
 	// …but the subscription must NOT be considered acknowledged by it.

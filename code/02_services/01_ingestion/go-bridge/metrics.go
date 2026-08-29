@@ -9,7 +9,7 @@ import (
 )
 
 // reconnectState tracks consecutive reconnect attempts per slot. It backs the
-// reconnect_consecutive field of the bridge_metrics NDJSON record.
+// reconnect_consecutive field of the bridge_metrics control record.
 var reconnectState = struct {
 	mu      sync.Mutex
 	perSlot map[string]int
@@ -53,7 +53,8 @@ var activeSockets atomic.Int32
 
 func addActiveSocket(delta int32) { activeSockets.Add(delta) }
 
-// bridgeMetricsTicker emits one bridge_metrics NDJSON record every 10s until
+// bridgeMetricsTicker emits one bridge_metrics control record (proto
+// frames) every 10s until
 // ctx is done. It exits promptly on cancel so the supervisor's goroutine
 // count settles back to baseline (ING-RES-001 baseline+2).
 func bridgeMetricsTicker(ctx context.Context) {

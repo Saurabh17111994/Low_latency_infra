@@ -1,4 +1,9 @@
-# Tick NDJSON Schema — Go arrow-bridge ↔ Java IngestionService
+# DEPRECATED — Tick NDJSON Schema (transport removed 2026-08-29)
+
+> **This contract is historical.** The NDJSON pipe transport was removed
+> 2026-08-29: the bridge emits length-prefixed protobuf `TransportFrame`
+> only (`TRANSPORT=proto|grpc`; any other value is FATAL). This document is
+> retained for the record — see the proto contract instead.
 
 <!--
   Version 2.2 — 2026-08-08.

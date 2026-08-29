@@ -10,7 +10,8 @@
 //   - payload_hash computed ONCE per event at add time (Q5: no recompute).
 //   - raw_payload carried as exact bytes (Q3/Q6: never base64/JSON).
 //   - Fake clock (now func) makes boundary tests deterministic (T2-B*).
-//   - Flush callback owns transport (NDJSON fallback or proto pipe / gRPC).
+//   - Flush callback owns transport (proto frames / gRPC — the only
+//     transport since the NDJSON pipe was removed 2026-08-29).
 
 package main
 

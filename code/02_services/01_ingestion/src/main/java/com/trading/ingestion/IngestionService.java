@@ -1,15 +1,9 @@
 package com.trading.ingestion;
 
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.trading.ingestion.config.IngestionConfig;
 import com.trading.ingestion.bridge.BridgeEvent;
-import com.trading.ingestion.bridge.BridgeEventParser;
 import com.trading.ingestion.bridge.BridgeMetrics;
 import com.trading.ingestion.bridge.BrokerQuarantine;
-import com.trading.ingestion.bridge.PayloadHashValidator;
 import com.trading.ingestion.discontinuity.DiscontinuitySink;
 import com.trading.ingestion.discontinuity.SequenceGapMonitor;
 import com.trading.ingestion.discontinuity.DiscontinuityWriter;
@@ -40,7 +34,6 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -50,16 +43,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Ingestion main entry point — consumes NDJSON ticks from the Arrow Go bridge
- * (stdin), normalizes, fingerprints, and appends to Fluss {@code raw_table_1}.
+ * Ingestion main entry point — consumes length-prefixed protobuf frames from the
+ * Arrow Go bridge (stdout), normalizes, fingerprints, and appends to Fluss
+ * {@code raw_table_1}.
  *
  * <h3>Pipeline</h3>
  * <pre>{@code
- * Go arrow-bridge stdout (NDJSON)
- *   → IngestionService.main() reads stdin line-at-a-time
- *   → parse Tick JSON → RawTick → valid? → TickPacket
+ * Go arrow-bridge stdout (proto TransportFrame)
+ *   → ProtoFrameReader.sniffProto() + readLoop()
+ *   → MarketDataBatch → TickEvent → processTickEvent(...) → RawTick → TickPacket
+ *   → ControlRecord → handleControlRecord(...) (bridge_event / metrics / quarantine)
  *   → FingerprintBuilder.build(…) → fingerprint
- *   → RawTickWriter.write(…) → Fluss append
+ *   → BoundedQueue[i] → WriterWorker[i] → RawTickWriter.write(…) → Fluss append
  * }</pre>
  *
  * <p>The Go arrow-bridge process uses the official Arrow Go SDK for:
@@ -78,17 +73,6 @@ public final class IngestionService {
 
     private static final String VERSION = "0.2.0";
     private static final String FINGERPRINT_ALGO = "SHA-256";
-    /**
-     * ING-DQ-001: static detail for malformed-JSON quarantine rows. Never
-     * interpolated with the offending line — Jackson's message embeds the
-     * input snippet, which would leak raw line content into quarantine/logs.
-     */
-    private static final String MALFORMED_JSON_DETAIL =
-            "NDJSON line is not valid JSON — quarantined per REQ-ING";
-    private static final ObjectMapper MAPPER = new ObjectMapper()
-            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
-            .configure(JsonParser.Feature.ALLOW_UNQUOTED_FIELD_NAMES, true);
-
     private static final long FRAME_STALE_MS = 15_000L;
     private static final long SUBSCRIPTION_COMPLETENESS_TIMEOUT_MS = 30_000L;
     /** Clock re-measurement cadence (ING-FAIL-007). NTP queries are cheap but
@@ -180,7 +164,6 @@ public final class IngestionService {
      *  window in the first seconds; within the grace window stale/future ticks
      *  are still quarantined but do not halt processing. */
     private volatile long gracePeriodUntilMs = 0L;
-    private final BridgeEventParser bridgeEventParser = new BridgeEventParser(MAPPER);
     private final AtomicLong connectionEpoch = new AtomicLong(0);
     private volatile DiscontinuityWriter.LastTickSnapshot lastTickSnapshot;
     /** Current arrow-bridge subprocess, so shutdown can signal it (SIGTERM) and
@@ -255,8 +238,9 @@ public final class IngestionService {
         // T6-3/A-B: N bounded queues + N writer workers (FLUSS_WRITERS, default
         // 1). Proto path submits via queue[i].offer; workers drain to the shared
         // threadsafe RawTickWriter → AppendWriter (client-side batch-timeout=1ms
-        // coalesces). NDJSON path keeps the direct write (regression suite is
-        // synchronous). Queue budgets mirror AppendTracker (Q17: total 192MiB).
+        // coalesces). The proto path is the only submitter: every tick goes
+        // through queue[i] → worker[i]. Queue budgets mirror AppendTracker
+        // (Q17: total 192MiB).
         this.writerCount = Math.max(1, Math.min(config.flussWriters, 8));
         this.queues = new BoundedQueue[writerCount];
         this.writerWorkers = new WriterWorker[writerCount];
@@ -415,7 +399,7 @@ public final class IngestionService {
             service.shutdown();
         }));
 
-        // 6. Launch Go arrow-bridge and pipe NDJSON through Java (D7, I1, I6)
+        // 6. Launch Go arrow-bridge and read proto frames from its stdout (D7, I1, I6)
         String bridgeBin = System.getenv().getOrDefault("ARROW_BRIDGE_BIN", "/app/arrow-bridge");
         service.runWithBridge(bridgeBin);
     }
@@ -447,7 +431,7 @@ public final class IngestionService {
     }
 
     /**
-     * Launch the Go arrow-bridge as a subprocess, read NDJSON from its stdout,
+     * Launch the Go arrow-bridge as a subprocess, read proto frames from its stdout,
      * and pipe its stderr into SLF4J. This replaces the shell pipe
      * ({@code arrow-bridge | java}) with Java-managed lifecycle.
      *
@@ -470,7 +454,7 @@ public final class IngestionService {
         gracePeriodUntilMs = System.currentTimeMillis() + 30_000L;
         LOG.info("freshness gate grace period armed at bridge launch (30s)");
 
-        // R-108: broker-staleness must be detected even while readLine() blocks
+        // R-108: broker-staleness must be detected even while the frame read blocks
         // during a genuine feed outage — the ING-1 inline check only runs after
         // a new frame arrives. A watchdog thread evaluates staleness every 5s.
         stalenessWatchdog.scheduleAtFixedRate(() -> {
@@ -524,8 +508,9 @@ public final class IngestionService {
                 currentBridgeStderrThread = stderrThread;
 
                 // T6-2: sniff the transport. If the bridge emits proto frames
-                // (TRANSPORT=proto|grpc), route binary frames; else NDJSON
-                // (TRANSPORT=pipe fallback / rollback, T6-RB1).
+                // (TRANSPORT=proto|grpc), route binary frames; anything else
+                // (garbage, stale NDJSON, or silence) is a bridge failure —
+                // there is no NDJSON fallback (2026-08-29).
                 java.io.InputStream bridgeIn = bridgeProcess.getInputStream();
                 ProtoFrameReader protoReader = new ProtoFrameReader(bridgeIn,
                         new ProtoFrameReader.FrameHandler() {
@@ -552,109 +537,17 @@ public final class IngestionService {
                     // First frame was already delivered by sniffProto.
                     protoReader.readLoop();
                 } else {
-                try (BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(protoReader.stream(), StandardCharsets.UTF_8))) {
-
-                    String line;
-                    while (running && (line = reader.readLine()) != null) {
-                        line = line.strip();
-                        if (line.isEmpty()) continue;
-
-                        long nowNanos = System.nanoTime();
-
-                        // ---- ING-1: Broker disconnect detection via frame staleness ----
-                        long msSinceLastFrame = (lastFrameNanos > 0)
-                                ? java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(nowNanos - lastFrameNanos)
-                                : 0;
-                        if (lastFrameNanos > 0 && msSinceLastFrame > FRAME_STALE_MS && health.isBrokerConnected()) {
-                            LOG.warn("ingestion: broker data stale ({}ms since last frame) — marking disconnected",
-                                    msSinceLastFrame);
-                            health.setBrokerConnected(false);
-                            metrics.setBridgeConnected(false);
-                        }
-
-                        // Record frame arrival
-                        lastFrameNanos = nowNanos;
-                        if (!health.isBrokerConnected()) {
-                            String userInfo = config.arrowUserId.isBlank() ? "token" : config.arrowUserId;
-                            LOG.info("ingestion: ✅ CONNECTED to Arrow Trade as user {} — broker data flowing", userInfo);
-                            health.setBrokerConnected(true);
-                            metrics.setBridgeConnected(true);
-                        }
-                        health.setLastFrameReceived(nowNanos);
-
-                        // ---- ING-2: Subscription completeness check ----
-                        if (!health.isSubscriptionComplete()) {
-                            long msSinceStart = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
-                                    nowNanos - bridgeStartNanos);
-                            // Try to extract token from JSON (lightweight parse before full processLine)
-                            try {
-                                int idx = line.indexOf("\"token\"");
-                                if (idx >= 0) {
-                                    int colon = line.indexOf(':', idx);
-                                    if (colon >= 0) {
-                                        int start = colon + 1;
-                                        while (start < line.length() && Character.isWhitespace(line.charAt(start))) start++;
-                                        int end = start;
-                                        while (end < line.length() && Character.isDigit(line.charAt(end))) end++;
-                                        if (end > start) {
-                                            long token = Long.parseLong(line.substring(start, end));
-                                            seenTokens.add(token);
-                                        }
-                                    }
-                                }
-                            } catch (Exception ignore) { /* lightweight parse failure — skip */ }
-
-                            if (msSinceStart > SUBSCRIPTION_COMPLETENESS_TIMEOUT_MS) {
-                                if (seenTokens.size() >= instrumentMap.size()) {
-                                    LOG.info("ingestion: subscription complete ({} of {} tokens seen in {}ms)",
-                                            seenTokens.size(), instrumentMap.size(), msSinceStart);
-                                    health.setSubscriptionComplete(true);
-                                } else {
-                                    long msSinceLastWarning = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(
-                                            nowNanos - lastSubscriptionWarningNanos);
-                                    if (msSinceLastWarning >= SUBSCRIPTION_COMPLETENESS_TIMEOUT_MS) {
-                                        LOG.warn("ingestion: subscription incomplete after {}ms — {} of {} tokens seen",
-                                                msSinceStart, seenTokens.size(), instrumentMap.size());
-                                        lastSubscriptionWarningNanos = nowNanos;
-                                    }
-                                    health.setSubscriptionComplete(false);
-                                }
-                            }
-                        }
-
-                        // ---- ING-3: Slow-Fluss controlled pause ----
-                        long pendingRecs = tracker.pendingRecords();
-                        // R-109: the pause threshold must use the CONFIGURED max pending
-                        // records (tracker.maxPendingRecords()), not the static 10,000 — a
-                        // smaller configured limit would never reach the 90% pause.
-                        long maxRecs = tracker.maxPendingRecords();
-                        double pendingPct = (double) pendingRecs / maxRecs;
-
-                        if (!subscriptionPaused && pendingPct >= SLOW_FLUSS_PAUSE_PERCENT) {
-                            subscriptionPaused = true;
-                            LOG.warn("ingestion: Slow-Fluss backpressure — pending at {}% ({} of {} records), "
-                                    + "pausing subscription reads to protect memory",
-                                    String.format("%.0f", pendingPct * 100), pendingRecs, maxRecs);
-                            metrics.incrementAcknowledgedLoss();
-                        }
-
-                        if (subscriptionPaused) {
-                            if (pendingPct <= SLOW_FLUSS_RESUME_PERCENT) {
-                                subscriptionPaused = false;
-                                LOG.info("ingestion: Slow-Fluss backpressure resolved — pending at {}% ({} records), "
-                                        + "resuming subscription reads",
-                                        String.format("%.0f", pendingPct * 100), pendingRecs);
-                            } else {
-                                // Skip processing this frame — queue is still draining
-                                continue;
-                            }
-                        }
-
-                        processLine(line);
-                    }
+                    // Proto-only decision (2026-08-29): the NDJSON pipe
+                    // fallback is removed. A bridge that emits non-proto
+                    // bytes (or nothing before exiting) is a CRASH: log
+                    // loudly, then fall through to the normal exit-code
+                    // handling (BRIDGE_CRASH + restart policy) — the bridge
+                    // process itself exits(2) on TRANSPORT unset/pipe, and a
+                    // quiet bridge that died without emitting proto is
+                    // treated as an unexpected exit, never as NDJSON.
+                    LOG.error("ingestion: bridge did not emit proto frames (TRANSPORT=proto|grpc only; "
+                            + "NDJSON pipe transport removed 2026-08-29) — treating as bridge failure");
                 }
-                } // else NDJSON path (T6-2)
 
                 int exitCode = bridgeProcess.waitFor();
                 // A shutdown-begun exit is a requested exit: the hook is
@@ -717,6 +610,14 @@ public final class IngestionService {
     private Process startBridge(String bridgeBinary) throws java.io.IOException {
         ProcessBuilder pb = new ProcessBuilder(bridgeBinary);
         pb.environment().putAll(System.getenv());
+        // Proto-only default (2026-08-29): the NDJSON pipe transport was
+        // removed from the bridge. If TRANSPORT is unset, default to proto
+        // here so the bridge never falls back to a removed path (it exits(2)
+        // on anything but proto/grpc, so an explicit TRANSPORT=pipe fails
+        // loudly at the bridge instead of silently here).
+        if (System.getenv("TRANSPORT") == null) {
+            pb.environment().put("TRANSPORT", "proto");
+        }
         pb.redirectErrorStream(false);
         Process process = pb.start();
         LOG.info("ingestion: arrow-bridge started (pid={})", process.pid());
@@ -783,7 +684,7 @@ public final class IngestionService {
      * its shutdown work — the bridge-stderr drain thread would die before the
      * bridge's final ARROW_TICK_COUNTS report arrives, the main loop would
      * take the exception path instead of reading the final {@code
-     * bridge_shutdown} NDJSON event, and the authoritative per-token count for
+     * bridge_shutdown} control event, and the authoritative per-token count for
      * ING-TCP-001 would be lost from the logs (only the report FILE survives).
      * Sending the signal via {@code kill -TERM <pid>} (POSIX) leaves the pipes
      * open: the bridge writes its final report to stderr, drains, EOFs, and
@@ -871,260 +772,9 @@ public final class IngestionService {
         }
     }
 
-    private void processLine(String jsonLine) {
-        frameCount.incrementAndGet();
-        try {
-            // R-214: parse the NDJSON line exactly ONCE and route by
-            // record_type. The old flow ran three full JSON parses per tick
-            // (bridge-event readTree + quarantine readTree + GoTick readValue).
-            com.fasterxml.jackson.databind.JsonNode jsonNode = MAPPER.readTree(jsonLine);
-            if (jsonNode == null || jsonNode.isNull() || jsonNode.isMissingNode()) {
-                return;
-            }
-            java.util.Optional<BridgeEvent> bridgeEvent = bridgeEventParser.parse(jsonNode);
-            if (bridgeEvent.isPresent()) {
-                handleBridgeEvent(bridgeEvent.get());
-                return;
-            }
-            java.util.Optional<BrokerQuarantine> brokerQuarantine = bridgeEventParser.parseQuarantine(jsonNode);
-            if (brokerQuarantine.isPresent()) {
-                BrokerQuarantine record = brokerQuarantine.get();
-                quarantineWriter.write(record.rawPayload(),
-                        QuarantineWriter.Reason.valueOf(record.reason()),
-                        "bridge broker quarantine",
-                        record.token(), null, null);
-                metrics.incrementDecodeError(record.reason());
-                return;
-            }
-            // Supervisor health snapshot (additive v2 record). Must be routed
-            // BEFORE the GoTick fall-through — a bridge_metrics line has no
-            // feed/state and would otherwise be quarantined as INVALID_SCHEMA.
-            java.util.Optional<BridgeMetrics> bridgeMetrics = bridgeEventParser.parseMetrics(jsonNode);
-            if (bridgeMetrics.isPresent()) {
-                BridgeMetrics m = bridgeMetrics.get();
-                // The Go supervisor is authoritative for these (10s cadence);
-                // the lifecycle-derived values are only pre-metrics fallbacks.
-                metrics.setReconnectConsecutive(m.reconnectConsecutive());
-                metrics.setActiveSockets(m.activeSockets());
-                metrics.setGoGoroutines(m.goGoroutines());
-                return;
-            }
-            // 1. Bind the tree → GoTick (no third parse)
-            GoTick gt = MAPPER.treeToValue(jsonNode, GoTick.class);
-            long receiveTsMs = gt.received_ts_ms > 0 ? gt.received_ts_ms : System.currentTimeMillis();
-            byte[] rawBytes = jsonLine.getBytes(StandardCharsets.UTF_8);
-
-            // T7-F11: per-connection sequence-gap detection (evidence only).
-            checkSequenceGap(
-                    (gt.slot_id == null ? "?" : gt.slot_id) + "/" + gt.connection_epoch,
-                    gt.feed_sequence_local, gt.token);
-
-            // 1a. Validate the original-bytes hash (plan §Tick / §Data Flow):
-            //     raw_payload is the exact decompressed broker packet bytes
-            //     (Base64); payload_hash is their SHA-256. Decoded JSON must not
-            //     replace those bytes. A mismatch quarantines the record.
-            //     A2 decision: INGEST_VALIDATE_PAYLOAD_HASH=false skips the
-            //     per-tick recompute (proto path carries the hash inside the
-            //     frame; validation is the T3/T6 job). Default true (safety).
-            byte[] packetBytes;
-            if (config.validatePayloadHash) {
-                packetBytes = decodeAndValidatePayload(gt, rawBytes);
-                if (packetBytes == null) {
-                    return; // already quarantined
-                }
-            } else {
-                // No SHA-256 round trip: decode only (validation disabled).
-                // Malformed Base64 still quarantines — the payload must be
-                // decodable regardless of hash policy.
-                packetBytes = decodePayloadOnly(gt, rawBytes);
-                if (packetBytes == null) {
-                    return; // already quarantined
-                }
-            }
-
-            if (gt.ts_ms <= 0) {
-                quarantineWriter.write(rawBytes, QuarantineWriter.Reason.INVALID_VALUES,
-                        "missing or non-positive broker timestamp", gt.token, null, null);
-                return;
-            }
-            // Freshness gate (T10 NTP 2s gate): stale or future broker timestamps are quarantined
-            // BEFORE any trade classification, so stale data can never become a
-            // trade decision. Future ticks > ARROW_MAX_FUTURE_EVENT_SKEW_MS (2s, T10)
-            // are quarantined per slot (slot_id + epoch) and emit slot-scoped safety
-            // evidence; ticks <2s keep existing behavior. (Plan §Production hardening: 1376.)
-            FreshnessDecision fd = classifyFreshness(gt.ts_ms, receiveTsMs,
-                    config.arrowMaxFutureEventSkewMs, config.arrowMaxEventAgeMs);
-            if (fd == FreshnessDecision.FUTURE) {
-                quarantineWriter.write(rawBytes, QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP,
-                        "event timestamp exceeds receive time", gt.token, null, null);
-                if (!inFreshnessGracePeriod()) {
-                    emitQualityUnsafe(gt.slot_id, gt.connection_epoch,
-                            QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP);
-                    return;
-                }
-            }
-            if (fd == FreshnessDecision.STALE) {
-                quarantineWriter.write(rawBytes, QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP,
-                        "event timestamp is older than configured age", gt.token, null, null);
-                metrics.incrementDecodeError("STALE_BROKER_TIMESTAMP");
-                if (!inFreshnessGracePeriod()) {
-                    emitQualityUnsafe(gt.slot_id, gt.connection_epoch,
-                            QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP);
-                    return;
-                }
-            }
-
-            // 2. Resolve instrument
-            Instrument instr = instrumentMap.get(gt.token);
-            if (instr == null) {
-                LOG.warn("ingestion: missing instrument token={}", gt.token);
-                // E4, I3: Missing instrument → quarantine, don't silently skip
-                quarantineWriter.write(rawBytes,
-                        QuarantineWriter.Reason.MISSING_INSTRUMENT,
-                        "token=" + gt.token + " not found in daily manifest",
-                        gt.token, null, null);
-                metrics.incrementDecodeError("MISSING_INSTRUMENT");
-                return;
-            }
-
-            // 3. Validate
-            ValidityClassification validity;
-            String validityReason = null;
-            // AC-ING-002: an unrecognized broker protocol version is quarantined
-            // (UNKNOWN_VERSION) before any trade classification — the raw bytes
-            // are preserved but the tick can never become a trade decision.
-            // HFT is the only supported feed (the Standard feed was removed
-            // 2026-08-14); any other feed value is rejected.
-            if (!"hft".equals(gt.feed)) {
-                quarantineWriter.write(rawBytes,
-                        QuarantineWriter.Reason.INVALID_SCHEMA,
-                        "unknown broker protocol version: " + (gt.feed == null ? "<null>" : gt.feed),
-                        gt.token, null, null);
-                metrics.incrementDecodeError("UNKNOWN_VERSION");
-                return;
-            }
-            if (gt.ltp_paise <= 0 && (gt.mode.equals("ltp") || gt.mode.equals("ltpc"))) {
-                validity = ValidityClassification.INVALID_VALUES;
-                validityReason = "ltp_paise <= 0";
-            } else if (gt.mode.equals("ltp") || gt.mode.equals("ltpc") || gt.mode.equals("full")) {
-                validity = ValidityClassification.VALID_TRADE;
-            } else {
-                validity = ValidityClassification.VALID_NON_TRADE;
-            }
-
-            if (validity == ValidityClassification.INVALID_VALUES) {
-                // E4: Invalid values → quarantine with instrument context
-                quarantineWriter.write(rawBytes,
-                        QuarantineWriter.Reason.INVALID_VALUES,
-                        validityReason,
-                        instr.instrumentToken(), instr.exchange(), instr.tradingSymbol());
-                metrics.incrementDecodeError("INVALID_VALUES");
-                return;
-            }
-
-            String tickType = (validity == ValidityClassification.VALID_TRADE) ? "TRADE" : "QUOTE";
-
-            // 4. Fingerprint
-            FingerprintBuilder.Result fp = FingerprintBuilder.build(
-                    gt.connection_epoch,
-                    gt.token,
-                    gt.ts_ms,
-                    tickType,
-                    gt.ltp_paise,
-                    gt.ltq,
-                    gt.bid_px != null && gt.bid_px[0] != 0 ? gt.bid_px[0] : 0L,
-                    gt.ask_px != null && gt.ask_px[0] != 0 ? gt.ask_px[0] : 0L
-            );
-
-            // 5. Build RawTick (raw_payload = exact decompressed broker packet
-            //    bytes validated in step 1a, not the NDJSON line)
-            RawTick raw = new RawTick.Builder()
-                    .rawPayload(packetBytes)
-                    .payloadHash(gt.payload_hash)
-                    .hashAlgorithm(FINGERPRINT_ALGO)
-                    .protocolVersion(gt.feed)
-                    .decoderVersion("arrow-go-sdk")
-                    .receiveTime(Instant.now())
-                    .receiveTimeNanos(System.nanoTime())
-                    .build();
-
-            // 6. Build TickPacket
-            TickPacket packet = new TickPacket.Builder()
-                    .raw(raw)
-                    .validity(validity)
-                    .validityReason(validityReason)
-                    .instrumentToken(gt.token)
-                    .tradingSymbol(instr.tradingSymbol())
-                    .exchange(instr.exchange())
-                    .eventTime(Instant.ofEpochMilli(gt.ts_ms))
-                    .ingestTs(Instant.now())
-                    .lastPricePaise(gt.ltp_paise)
-                    .volume(gt.volume)
-                    .ohlcOpenPaise(gt.open_paise)
-                    .ohlcHighPaise(gt.high_paise)
-                    .ohlcLowPaise(gt.low_paise)
-                    .ohlcClosePaise(gt.close_paise)
-                    .eventFingerprint(fp.hash())
-                    .fingerprintVersion(fp.version())
-                    .connectionId(gt.connection_id == null || gt.connection_id.isBlank() ? "arrow-bridge" : gt.connection_id)
-                    .connectionEpoch(gt.connection_epoch)
-                    .instanceId(instanceId)
-                    .build();
-
-            // 7. Submit to bounded writer (async append — each tick is its
-            //    own append call; the terminal outcome is delivered via
-            //    onAppendOutcome when the Fluss ack completes)
-            RawTickWriter.AppendOutcome outcome = writer.write(packet);
-
-            // Record receive-side metrics
-            metrics.recordTick(packetBytes.length);
-            metrics.incrementFingerprint();
-
-            if (outcome.status() == RawTickWriter.Status.REJECTED) {
-                LOG.warn("ingestion: tick rejected (reason={})", outcome.detail());
-                metrics.incrementAcknowledgedLoss();
-            }
-
-            // 8. Update health probe + gauge metrics + lastTickSnapshot
-            health.setLastFrameReceived(System.nanoTime());
-            metrics.setPendingRecords(tracker.pendingRecords());
-            metrics.setPendingBytes(tracker.pendingBytes());
-            metrics.setIngestionReady(health.isReady());
-            metrics.setBridgeConnected(true);
-            refreshResourceMetrics();
-            // R-246: the readiness marker must track the tick-processing path
-            // too, not just bridge lifecycle events.
-            updateReadinessFile();
-
-        } catch (JsonProcessingException e) {
-            // ING-DQ-001: a malformed NDJSON line must produce quarantine
-            // evidence — never a silent drop (REQ-ING: every accepted or
-            // rejected packet SHALL produce audit evidence). The raw line
-            // bytes are preserved as the quarantine payload; the detail is a
-            // static constant because Jackson's message embeds the offending
-            // input snippet (line content must not leak into logs).
-            MalformedJsonDecision decision = malformedJsonDecision(rawLineBytes(jsonLine));
-            quarantineWriter.write(decision.rawPayload(), decision.reason(), decision.detail());
-            metrics.incrementDecodeError("MALFORMED_JSON");
-        } catch (Exception e) {
-            errorCount.incrementAndGet();
-            metrics.incrementDecodeError(e.getClass().getSimpleName());
-            // Write quarantine record for any unhandled processing failure
-            try {
-                byte[] rawBytes = jsonLine != null ? jsonLine.getBytes(StandardCharsets.UTF_8) : null;
-                quarantineWriter.write(rawBytes,
-                        QuarantineWriter.Reason.INTERNAL_ERROR,
-                        e.getClass().getSimpleName() + ": " + e.getMessage());
-            } catch (Exception nested) {
-                LOG.error("ingestion: quarantine writer failed: {}", nested.getMessage());
-            }
-            LOG.warn("ingestion: line processing error: {}", e.getMessage());
-        }
-    }
-
     /**
      * Shared frame-arrival bookkeeping (proto path): ING-1 broker-staleness
-     * detection + connection state. Mirrors the NDJSON loop's inline block.
+     * detection + connection state.
      */
     private void handleFrameArrival() {
         long nowNanos = System.nanoTime();
@@ -1228,12 +878,11 @@ public final class IngestionService {
     }
 
     /**
-     * T6 proto-path per-tick processing (contract §6 T6). Mirrors the NDJSON
-     * path gates EXACTLY (freshness, instrument, validity, fingerprint,
-     * quarantine) but consumes a decoded {@code TickEvent} — the raw payload
-     * is already bytes (no base64 round-trip, Q3/Q6) and the payload hash is
-     * already validated at the frame level. Rows built here are byte-identical
-     * to the NDJSON path (T6-I3 pipe parity).
+     * T6 proto-path per-tick processing (contract §6 T6) — the ONLY tick path
+     * since the NDJSON pipe transport was removed (2026-08-29). Gates:
+     * sequence gap, freshness, instrument, validity, fingerprint, quarantine.
+     * The raw payload arrives as bytes (no base64 round-trip, Q3/Q6) and the
+     * payload hash travels inside the frame.
      */
     void processTickEvent(com.trading.ingestion.transport.TickEvent ev,
                            String batchConnectionId, long batchConnectionEpoch) {
@@ -1264,7 +913,6 @@ public final class IngestionService {
                     (ev.getSlotId().isEmpty() ? "?" : ev.getSlotId()) + "/" + batchConnectionEpoch,
                     ev.getFeedSequenceLocal(), ev.getToken());
 
-            // Same gates as the NDJSON path (processLine steps 1b-8).
             if (ev.getTsMs() <= 0) {
                 quarantineWriter.write(packetBytes, QuarantineWriter.Reason.INVALID_VALUES,
                         "missing or non-positive broker timestamp", (long) ev.getToken(), null, null);
@@ -1376,11 +1024,9 @@ public final class IngestionService {
                     .instanceId(instanceId)
                     .build();
 
-            // T6-3/A-B: submit via bounded queue[i] → writer worker[i] (proto
-            // path only). The NDJSON path keeps the direct write so the
-            // existing regression suite (synchronous processLine assertions)
-            // is unaffected. token % N routes to the i-th queue (Test D proxy:
-            // does N workers beat the shared Sender lock?).
+            // T6-3/A-B: submit via bounded queue[i] → writer worker[i].
+            // token % N routes to the i-th queue (Test D proxy: does N workers
+            // beat the shared Sender lock?).
             int rowBytes = packetBytes.length + 64; // conservative row estimate
             int qi = (int) ((long) ev.getToken() % writerCount);
             if (!queues[qi].offer(packet, rowBytes)) {
@@ -1414,8 +1060,8 @@ public final class IngestionService {
     /**
      * Async append completion (throughput plan Phase 2) — invoked by the
      * writer's background completion for every terminal outcome. Metrics,
-     * error counters, and discontinuity evidence move here because
-     * {@link #processLine} no longer blocks on the Fluss ack.
+     * error counters, and discontinuity evidence move here because the
+     * writer path never blocks on the Fluss ack.
      *
      * <p>R-111: lastTickSnapshot is discontinuity evidence — it must only
      * reflect a tick that was actually persisted; only SUCCESS completes
@@ -2033,93 +1679,7 @@ public final class IngestionService {
         return System.currentTimeMillis() < gracePeriodUntilMs;
     }
 
-    // ---- GoTick JSON model (matches arrow-bridge output) ----
-
-    /**
-     * Mirrors the NDJSON schema emitted by the Go arrow-bridge.
-     * All prices in paise, all timestamps in epoch ms.
-     */
-    @SuppressWarnings("unused")
-    private static final class GoTick {
-        @com.fasterxml.jackson.annotation.JsonProperty("record_type")
-        public String record_type;
-        @com.fasterxml.jackson.annotation.JsonProperty("connection_id")
-        public String connection_id;
-        @com.fasterxml.jackson.annotation.JsonProperty("connection_epoch")
-        public long connection_epoch;
-        @com.fasterxml.jackson.annotation.JsonProperty("slot_id")
-        public String slot_id;
-        @com.fasterxml.jackson.annotation.JsonProperty("received_ts_ms")
-        public long received_ts_ms;
-        @com.fasterxml.jackson.annotation.JsonProperty("feed_sequence_local")
-        public long feed_sequence_local;
-        @com.fasterxml.jackson.annotation.JsonProperty("raw_payload")
-        public String raw_payload;
-        @com.fasterxml.jackson.annotation.JsonProperty("payload_hash")
-        public String payload_hash;
-        public String feed;
-        public String mode;
-        public long token;
-        @com.fasterxml.jackson.annotation.JsonProperty("ltp_paise")
-        public long ltp_paise;
-        @com.fasterxml.jackson.annotation.JsonProperty("close_paise")
-        public long close_paise;
-        @com.fasterxml.jackson.annotation.JsonProperty("open_paise")
-        public long open_paise;
-        @com.fasterxml.jackson.annotation.JsonProperty("high_paise")
-        public long high_paise;
-        @com.fasterxml.jackson.annotation.JsonProperty("low_paise")
-        public long low_paise;
-        @com.fasterxml.jackson.annotation.JsonProperty("vwap_paise")
-        public long vwap_paise;
-        public long ltq;
-        public long volume;
-        @com.fasterxml.jackson.annotation.JsonProperty("total_buy_qty")
-        public long total_buy_qty;
-        @com.fasterxml.jackson.annotation.JsonProperty("total_sell_qty")
-        public long total_sell_qty;
-        public long atv;
-        public long btv;
-        @com.fasterxml.jackson.annotation.JsonProperty("open_interest")
-        public long open_interest;
-        @com.fasterxml.jackson.annotation.JsonProperty("ts_ms")
-        public long ts_ms;
-        @com.fasterxml.jackson.annotation.JsonProperty("bid_px")
-        public long[] bid_px;
-        @com.fasterxml.jackson.annotation.JsonProperty("ask_px")
-        public long[] ask_px;
-        @com.fasterxml.jackson.annotation.JsonProperty("bid_qty")
-        public long[] bid_qty;
-        @com.fasterxml.jackson.annotation.JsonProperty("ask_qty")
-        public long[] ask_qty;
-
-    }
-
     // ---- helpers ----
-
-    /** Raw NDJSON line bytes for quarantine evidence (null-safe). */
-    static byte[] rawLineBytes(String jsonLine) {
-        return jsonLine != null ? jsonLine.getBytes(StandardCharsets.UTF_8) : null;
-    }
-
-    /** Decision for a malformed NDJSON line (ING-DQ-001). */
-    record MalformedJsonDecision(QuarantineWriter.Reason reason, byte[] rawPayload, String detail) {}
-
-    /**
-     * Classify a non-JSON line for quarantine (ING-DQ-001). The raw line bytes
-     * are preserved verbatim as quarantine evidence; the detail is the static
-     * {@link #MALFORMED_JSON_DETAIL} constant — never the Jackson message, which
-     * embeds the offending input snippet.
-     */
-    static MalformedJsonDecision malformedJsonDecision(byte[] rawLine) {
-        return new MalformedJsonDecision(
-                QuarantineWriter.Reason.MALFORMED_JSON, rawLine, MALFORMED_JSON_DETAIL);
-    }
-
-    /** The static detail used for MALFORMED_JSON quarantine rows (ING-DQ-001). */
-    static String malformedJsonDetail() {
-        return MALFORMED_JSON_DETAIL;
-    }
 
     /**
      * Refresh resource gauges (plan Amendment §Resource): FDs, RSS, JVM threads.
@@ -2239,52 +1799,4 @@ public final class IngestionService {
         return 0L;
     }
 
-    /**
-     * Decode the Base64 {@code raw_payload} from a tick and verify its SHA-256
-     * digest equals the bridge-provided {@code payload_hash}.
-     *
-     * @return the exact decompressed broker packet bytes, or {@code null} if the
-     *         record must be quarantined (bad Base64, empty payload, or hash
-     *         mismatch). Quarantining is performed here; the caller returns.
-     */
-    /** Base64-decode raw_payload without hash validation (A2 off path). */
-    private byte[] decodePayloadOnly(GoTick gt, byte[] rawLine) {
-        if (gt.raw_payload == null || gt.raw_payload.isBlank()) {
-            quarantineWriter.write(rawLine, QuarantineWriter.Reason.HASH_MISMATCH,
-                    "raw_payload missing or empty", gt.token, null, null);
-            return null;
-        }
-        byte[] packet;
-        try {
-            packet = Base64.getDecoder().decode(gt.raw_payload);
-        } catch (IllegalArgumentException e) {
-            quarantineWriter.write(rawLine, QuarantineWriter.Reason.HASH_MISMATCH,
-                    "raw_payload not valid Base64", gt.token, null, null);
-            return null;
-        }
-        if (packet.length == 0) {
-            quarantineWriter.write(rawLine, QuarantineWriter.Reason.HASH_MISMATCH,
-                    "raw_payload decodes to empty", gt.token, null, null);
-            return null;
-        }
-        return packet;
-    }
-
-    private byte[] decodeAndValidatePayload(GoTick gt, byte[] rawLine) {
-        // R-248: result is returned directly (no caller-owned out-array).
-        PayloadHashValidator.Result result = PayloadHashValidator.validate(gt.raw_payload, gt.payload_hash);
-        if (result == PayloadHashValidator.Result.VALID) {
-            return PayloadHashValidator.decodeValid(gt.raw_payload, gt.payload_hash);
-        }
-        String detail = switch (result) {
-            case MALFORMED_PAYLOAD -> "raw_payload missing, not valid Base64, or empty";
-            case MALFORMED_HASH -> "payload_hash missing or not a SHA-256 hex digest";
-            case HASH_MISMATCH -> "payload hash mismatch: broker packet bytes do not match payload_hash";
-            case VALID -> "unreachable";
-        };
-        quarantineWriter.write(rawLine, QuarantineWriter.Reason.HASH_MISMATCH,
-                detail, gt.token, null, null);
-        metrics.incrementDecodeError("HASH_MISMATCH");
-        return null;
-    }
 }

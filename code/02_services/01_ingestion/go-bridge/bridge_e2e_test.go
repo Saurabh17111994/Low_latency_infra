@@ -192,7 +192,7 @@ func TestBridgeE2EFakeBrokerSubscribeTickAndReconnect(t *testing.T) {
 
 	old := bridgeEmitter
 	out := newLockedBuffer()
-	bridgeEmitter = NewBridgeEmitter(out)
+	bridgeEmitter = newTestProtoEmitter(out)
 	defer func() { bridgeEmitter = old }()
 
 	client := arrow.NewClient("app", "secret")
@@ -221,7 +221,7 @@ func TestBridgeE2EFakeBrokerSubscribeTickAndReconnect(t *testing.T) {
 	deadline := time.Now().Add(6 * time.Second)
 	for {
 		snap := out.String()
-		tickCount := countLinesWith(t, snap, `"feed":"hft"`)
+		tickCount := len(tickMapsFrom(t, snap))
 		hasReconnect := lastEventState(eventsFrom(t, snap), "reconnect") == "BACKOFF"
 		if tickCount >= 2 && hasReconnect && fake.connections.Load() >= 2 {
 			break
@@ -233,6 +233,7 @@ func TestBridgeE2EFakeBrokerSubscribeTickAndReconnect(t *testing.T) {
 	}
 	cancel()
 	<-done
+	flushTestEmitter()
 
 	events := eventsFrom(t, out.String())
 	if got := lastEventState(events, "subscription_ack"); got != "ACTIVE" {
@@ -240,7 +241,7 @@ func TestBridgeE2EFakeBrokerSubscribeTickAndReconnect(t *testing.T) {
 	}
 	// Recovery integration: ticks must flow BOTH before (connection 1) and
 	// after (connection 2) the forced disconnect — the feed resumes.
-	tickCount := countLinesWith(t, out.String(), `"feed":"hft"`)
+	tickCount := len(tickMapsFrom(t, out.String()))
 	if tickCount < 2 {
 		t.Fatalf("expected >=2 tick emissions across the disconnect (feed must resume), got %d\n%s", tickCount, out.String())
 	}
@@ -264,7 +265,7 @@ func TestFakeBrokerMultiSlotSupervisor(t *testing.T) {
 
 	old := bridgeEmitter
 	out := newLockedBuffer()
-	bridgeEmitter = NewBridgeEmitter(out)
+	bridgeEmitter = newTestProtoEmitter(out)
 	defer func() { bridgeEmitter = old }()
 
 	client := arrow.NewClient("app", "secret")
@@ -295,7 +296,7 @@ func TestFakeBrokerMultiSlotSupervisor(t *testing.T) {
 				active++
 			}
 		}
-		if active >= 2 && strings.Contains(snap, `"token":1000`) && strings.Contains(snap, `"token":1001`) {
+		if active >= 2 && containsAny(ticksFrom(t, snap), "token=1000") && containsAny(ticksFrom(t, snap), "token=1001") {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -305,6 +306,7 @@ func TestFakeBrokerMultiSlotSupervisor(t *testing.T) {
 	}
 	cancel()
 	<-done
+	flushTestEmitter()
 
 	events := eventsFrom(t, out.String())
 	active := 0
@@ -317,7 +319,7 @@ func TestFakeBrokerMultiSlotSupervisor(t *testing.T) {
 		t.Fatalf("expected 2 ACTIVE subscriptions, got %d\n%s", active, out.String())
 	}
 	// Each slot's token tick must appear (tokens 1000 and 1001).
-	if !strings.Contains(out.String(), `"token":1000`) || !strings.Contains(out.String(), `"token":1001`) {
+	if !containsAny(ticksFrom(t, out.String()), "token=1000") || !containsAny(ticksFrom(t, out.String()), "token=1001") {
 		t.Fatalf("expected ticks for both slot tokens\n%s", out.String())
 	}
 	// Two distinct slot IDs must appear in events.
@@ -342,7 +344,7 @@ func TestFakeBrokerForcedOneSlotDisconnect(t *testing.T) {
 
 	old := bridgeEmitter
 	out := newLockedBuffer()
-	bridgeEmitter = NewBridgeEmitter(out)
+	bridgeEmitter = newTestProtoEmitter(out)
 	defer func() { bridgeEmitter = old }()
 
 	client := arrow.NewClient("app", "secret")
@@ -382,6 +384,7 @@ func TestFakeBrokerForcedOneSlotDisconnect(t *testing.T) {
 	}
 	cancel()
 	<-done
+	flushTestEmitter()
 
 	events := eventsFrom(t, out.String())
 	// Both slots must reach ACTIVE eventually (slot-0 after reconnect).
@@ -414,7 +417,7 @@ func TestFakeBrokerAllSlotTerminal(t *testing.T) {
 
 	old := bridgeEmitter
 	out := newLockedBuffer()
-	bridgeEmitter = NewBridgeEmitter(out)
+	bridgeEmitter = newTestProtoEmitter(out)
 	defer func() { bridgeEmitter = old }()
 
 	client := arrow.NewClient("app", "secret")
@@ -460,7 +463,7 @@ func TestFakeBrokerAllSlotTerminal(t *testing.T) {
 		t.Fatalf("expected 2 TERMINAL subscription_acks, got %d\n%s", terminalCount, out.String())
 	}
 	// No ACTIVE — nothing healthy survived.
-	if strings.Contains(out.String(), `"state":"ACTIVE"`) {
+	if containsAny(eventsAsStrings(t, out.String()), "state=ACTIVE") {
 		t.Fatalf("no slot should reach ACTIVE when all subscriptions are invalid\n%s", out.String())
 	}
 }
@@ -478,7 +481,7 @@ func TestSlotIsolationSuppressesOnlyAssignedInstruments(t *testing.T) {
 
 	old := bridgeEmitter
 	out := newLockedBuffer()
-	bridgeEmitter = NewBridgeEmitter(out)
+	bridgeEmitter = newTestProtoEmitter(out)
 	defer func() { bridgeEmitter = old }()
 
 	client := arrow.NewClient("app", "secret")
@@ -507,7 +510,7 @@ func TestSlotIsolationSuppressesOnlyAssignedInstruments(t *testing.T) {
 				terminal++
 			}
 		}
-		if terminal >= 1 && slotEventState(events, "hft-1", "subscription_ack") == "ACTIVE" && strings.Contains(snap, `"token":1001`) {
+		if terminal >= 1 && slotEventState(events, "hft-1", "subscription_ack") == "ACTIVE" && containsAny(ticksFrom(t, snap), "token=1001") {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -517,6 +520,7 @@ func TestSlotIsolationSuppressesOnlyAssignedInstruments(t *testing.T) {
 	}
 	cancel()
 	<-done
+	flushTestEmitter()
 
 	// Slot-0 (token 1000) must be TERMINAL — its assigned instrument is
 	// suppressed (no ticks for token 1000 emitted as trade-eligible).
@@ -535,11 +539,11 @@ func TestSlotIsolationSuppressesOnlyAssignedInstruments(t *testing.T) {
 	if got := slotEventState(events, "hft-1", "subscription_ack"); got != "ACTIVE" {
 		t.Fatalf("healthy slot-1 must reach ACTIVE, got %q\n%s", got, out.String())
 	}
-	if !strings.Contains(out.String(), `"token":1001`) {
+	if !containsAny(ticksFrom(t, out.String()), "token=1001") {
 		t.Fatalf("slot-1's instrument must keep emitting ticks\n%s", out.String())
 	}
 	// Slot-0's token must NOT produce any ticks (suppressed by terminal state).
-	if strings.Contains(out.String(), `"token":1000`) {
+	if containsAny(ticksFrom(t, out.String()), "token=1000") {
 		t.Fatalf("slot-0's assigned instrument must be suppressed after terminal\n%s", out.String())
 	}
 }

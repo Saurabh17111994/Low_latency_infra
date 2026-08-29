@@ -119,37 +119,23 @@ class BridgeAuthFailureE2ETest {
     /**
      * A scripted fake bridge for the revoked-creds scenario: emit the
      * auth_failure bridge event, the bridge_shutdown drain event, then exit 2.
+     * Proto-only transport (2026-08-29): control records are length-prefixed
+     * TransportFrame protobufs (see {@link ProtoControlFrame}).
      */
     private Path writeAuthFailingBridge(long now) throws Exception {
-        String authFailure = eventJson("auth_failure", "authentication_refresh_exhausted", now);
-        String bridgeShutdown = eventJson("bridge_shutdown", "drain_complete", now);
+        String authFailure = ProtoControlFrame.controlFrameB64(
+                "auth_failure", "authentication_refresh_exhausted", "TERMINAL", now);
+        String bridgeShutdown = ProtoControlFrame.controlFrameB64(
+                "bridge_shutdown", "drain_complete", "TERMINAL", now);
         Path script = tempDir.resolve("fake-bridge-auth.sh");
         Files.writeString(script,
                 "#!/bin/sh\n"
-                        + "printf '%s\\n' '" + authFailure + "'\n"
-                        + "printf '%s\\n' '" + bridgeShutdown + "'\n"
+                        + ProtoControlFrame.shellDecode(authFailure)
+                        + ProtoControlFrame.shellDecode(bridgeShutdown)
                         + "exit 2\n");
         Set<PosixFilePermission> perms = EnumSet.copyOf(PosixFilePermissions.fromString("rwxr-xr-x"));
         Files.setPosixFilePermissions(script, perms);
         return script;
-    }
-
-    /** One bridge_event NDJSON line in the v2 contract shape. */
-    private static String eventJson(String event, String reason, long now) {
-        return "{\"record_type\":\"bridge_event\","
-                + "\"contract_version\":2,"
-                + "\"event\":\"" + event + "\","
-                + "\"slot_id\":\"hft-0\","
-                + "\"connection_id\":\"conn-1\","
-                + "\"connection_epoch\":1,"
-                + "\"state\":\"TERMINAL\","
-                + "\"assigned_tokens\":0,"
-                + "\"acknowledged_tokens\":0,"
-                + "\"rejected_tokens\":0,"
-                + "\"reason\":\"" + reason + "\","
-                + "\"received_ts_ms\":" + now + ","
-                + "\"manifest_fingerprint\":\"" + HASH_64 + "\","
-                + "\"assigned_token_set_hash\":\"" + HASH_64 + "\"}";
     }
 
     private static IngestionConfig buildConfig(Path journalPath) throws Exception {

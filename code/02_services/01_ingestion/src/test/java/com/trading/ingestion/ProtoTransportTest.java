@@ -6,8 +6,7 @@
 //   T6-RB1 rollback — TRANSPORT=pipe restores the NDJSON path (sniff falls back)
 //
 // Uses the same test seam as IngestionNoSilentDropTest (noop sinks + fake
-// converter) and drives processTickEvent via reflection (proto path) and
-// processLine (NDJSON path).
+// converter) and drives processTickEvent via reflection (proto path).
 
 package com.trading.ingestion;
 
@@ -158,22 +157,6 @@ class ProtoTransportTest {
         }
     }
 
-    /** One NDJSON tick line (mirrors bridge wire shape). */
-    private static String tickLine(long token, long tsMs, long ltpPaise, String mode) {
-        return "{"
-                + "\"record_type\":\"tick\","
-                + "\"feed\":\"hft\","
-                + "\"mode\":\"" + mode + "\","
-                + "\"token\":" + token + ","
-                + "\"ltp_paise\":" + ltpPaise + ","
-                + "\"ts_ms\":" + tsMs + ","
-                + "\"received_ts_ms\":" + System.currentTimeMillis() + ","
-                + "\"volume\":100,"
-                + "\"raw_payload\":\"" + Base64.getEncoder().encodeToString(FRAME_PAYLOAD) + "\","
-                + "\"payload_hash\":\"" + sha256Hex(FRAME_PAYLOAD) + "\""
-                + "}";
-    }
-
     /** One proto TickEvent (mirrors Go emitter mapping). */
     private static TickEvent protoTick(long token, long tsMs, long ltpPaise, String mode) {
         return TickEvent.newBuilder()
@@ -229,57 +212,6 @@ class ProtoTransportTest {
         for (TickPacket p : protoConverter.packets) {
             assertTrue(java.util.Arrays.equals(p.raw().rawPayload(), FRAME_PAYLOAD),
                     "raw payload bit-exact");
-        }
-    }
-
-    // ---- T6-I3: pipe parity ----
-
-    @Test
-    @DisplayName("T6-I3: same corpus NDJSON vs proto → identical persisted row values")
-    void pipeParity() throws Exception {
-        CountingConverter ndjsonConverter = new CountingConverter();
-        IngestionService ndjsonService = makeService(ndjsonConverter);
-        Method processLine = IngestionService.class.getDeclaredMethod("processLine", String.class);
-        processLine.setAccessible(true);
-
-        CountingConverter protoConverter = new CountingConverter();
-        IngestionService protoService = makeService(protoConverter);
-        Method processTickEvent = IngestionService.class.getDeclaredMethod("processTickEvent",
-                com.trading.ingestion.transport.TickEvent.class, String.class, long.class);
-        processTickEvent.setAccessible(true);
-
-        long now = System.currentTimeMillis();
-        String[] corpus = {
-                tickLine(TOKEN_A, now, 100, "full"),
-                tickLine(TOKEN_B, now, 200, "ltpc"),
-                tickLine(TOKEN_A, now, 300, "quote")
-        };
-        for (String line : corpus) {
-            processLine.invoke(ndjsonService, line);
-        }
-        awaitDrain(ndjsonService, ndjsonConverter, 3);
-
-        // proto corpus — same ticks, same order
-        for (int i = 0; i < 3; i++) {
-            String line = corpus[i];
-            long token = line.contains(String.valueOf(TOKEN_A)) ? TOKEN_A : TOKEN_B;
-            long ltp = line.contains("\"ltp_paise\":100") ? 100 : line.contains("\"ltp_paise\":200") ? 200 : 300;
-            String mode = line.contains("\"mode\":\"full\"") ? "full" : line.contains("\"mode\":\"ltpc\"") ? "ltpc" : "quote";
-            processTickEvent.invoke(protoService, protoTick(token, now, ltp, mode), "hft-0", 1L);
-        }
-        awaitDrain(protoService, protoConverter, 3);
-
-        assertEquals(3, ndjsonConverter.appendCalls.get(), "NDJSON: 3 appends");
-        assertEquals(3, protoConverter.appendCalls.get(), "proto: 3 appends");
-        // identical persisted values (token, ltp, volume, payload bytes)
-        for (int i = 0; i < 3; i++) {
-            TickPacket a = ndjsonConverter.packets.get(i);
-            TickPacket b = protoConverter.packets.get(i);
-            assertEquals(a.instrumentToken(), b.instrumentToken(), "token row " + i);
-            assertEquals(a.lastPricePaise(), b.lastPricePaise(), "ltp row " + i);
-            assertEquals(a.volume(), b.volume(), "volume row " + i);
-            assertTrue(java.util.Arrays.equals(a.raw().rawPayload(), b.raw().rawPayload()),
-                    "payload bytes row " + i);
         }
     }
 
@@ -417,22 +349,23 @@ class ProtoTransportTest {
     // ---- T6-RB1: rollback ----
 
     @Test
-    @DisplayName("T6-RB1: NDJSON fallback (sniff) — proto bytes rejected, NDJSON accepted")
-    void rollbackSniff() throws Exception {
-        // Simulate TRANSPORT=pipe: the Go side emits NDJSON. The Java side
-        // sniffs and falls back to the NDJSON path.
+    @DisplayName("T6: non-proto bytes are not sniffed as proto; pushed back intact")
+    void nonProtoNotSniffed() throws Exception {
+        // A non-proto stream (e.g. a stale NDJSON producer, or garbage) must
+        // NOT be recognized as proto: sniffProto returns false and pushes the
+        // bytes back so the caller decides (proto-only: the service treats it
+        // as a bridge failure — no NDJSON fallback since 2026-08-29).
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
-        bos.write(tickLine(TOKEN_A, System.currentTimeMillis(), 100, "full").getBytes(StandardCharsets.UTF_8));
-        bos.write('\n');
+        bos.write("{\"record_type\":\"tick\",\"token\":3045}\n".getBytes(StandardCharsets.UTF_8));
 
         List<Boolean> protoSeen = new ArrayList<>();
-        // sniff must NOT consume the NDJSON line — the caller can re-read it
+        // sniff must NOT consume the non-proto bytes — the caller can re-read them
         ByteArrayInputStream replay = new ByteArrayInputStream(bos.toByteArray());
         ProtoFrameReader sniff = new ProtoFrameReader(replay, new ProtoFrameReader.FrameHandler() {
             @Override public void onMarketBatch(MarketDataBatch b) { protoSeen.add(true); }
             @Override public void onControl(ControlRecord c) { protoSeen.add(true); }
         });
-        assertTrue(!sniff.sniffProto(), "NDJSON line is not sniffed as proto");
+        assertTrue(!sniff.sniffProto(), "non-proto line is not sniffed as proto");
         // the pushed-back bytes are still readable as NDJSON via stream()
         java.io.BufferedReader br = new java.io.BufferedReader(
                 new java.io.InputStreamReader(sniff.stream(), StandardCharsets.UTF_8));

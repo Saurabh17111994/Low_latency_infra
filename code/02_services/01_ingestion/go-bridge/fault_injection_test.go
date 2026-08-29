@@ -71,7 +71,7 @@ func TestFaultInjectionDecodeBurstRecovers(t *testing.T) {
 	// Thread-safe capture buffer — the bridge goroutine writes concurrently
 	// while the test polls (a plain bytes.Buffer would be a data race).
 	capture := newSyncBuffer()
-	bridgeEmitter = NewBridgeEmitter(capture)
+	bridgeEmitter = newTestProtoEmitter(capture)
 	defer func() { bridgeEmitter = oldEmitter }()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -84,13 +84,14 @@ func TestFaultInjectionDecodeBurstRecovers(t *testing.T) {
 	// longer than 300ms, which made this assertion flaky.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(capture.String(), `"event":"subscription_ack","state":"ACTIVE"`) {
+		if containsAny(eventsAsStrings(t, capture.String()), "event=subscription_ack state=ACTIVE") {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	cancel()
 	<-done
+	flushTestEmitter()
 	out := capture.String()
 
 	// The burst epoch must have produced an error, then a reconnect, and the

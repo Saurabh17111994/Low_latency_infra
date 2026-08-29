@@ -15,18 +15,17 @@ import org.junit.jupiter.api.Test;
  * ING-DQ-001..002 — typed quality classification and quarantine routing
  * evidence (plan Amendment §Required tests and evidence).
  *
- * <p>The routing itself lives in {@link IngestionService#processLine} and is
+ * <p>The routing itself lives in {@link IngestionService#processTickEvent} and is
  * driven by live Fluss writers, so the pure seams are pinned here instead:
- * the malformed-JSON routing decision ({@link IngestionService#malformedJsonDecision})
- * with its static, non-leaking detail constant, plus the exact quarantine
- * reason vocabularies shared by the Go bridge and the Java writer. Stale/future
- * routing and its boundary semantics are covered by {@link StaleDataTradeGuardTest}.
+ * the exact quarantine reason vocabularies shared by the Go bridge and the
+ * Java writer. Malformed frames are rejected at the ProtoFrameReader level.
+ * Stale/future routing and its boundary semantics are covered by
+ * {@link StaleDataTradeGuardTest}.
  *
  * <ul>
- *   <li>ING-DQ-001 — a malformed NDJSON line is classified MALFORMED_JSON, its
- *       raw bytes are preserved as evidence, and the detail carries no line
- *       content (Jackson's exception message embeds the offending snippet and
- *       must never be logged).</li>
+ *   <li>ING-DQ-001 — a malformed transport frame is rejected at frame-parse
+ *       time and quarantined with the MALFORMED_JSON reason; the reason
+ *       vocabulary stays exactly per plan.</li>
  *   <li>ING-DQ-002 — stale records remain durable evidence (STALE_BROKER_TIMESTAMP
  *       quarantine) and can never reach a trade path: the freshness gate runs
  *       before any trade classification (covered by StaleDataTradeGuardTest).</li>
@@ -35,39 +34,11 @@ import org.junit.jupiter.api.Test;
 @DisplayName("ING-DQ-001..002: typed quality classification and quarantine routing")
 class IngestionQualityEvidenceTest {
 
-    @Test
-    @DisplayName("ING-DQ-001: malformed line classifies MALFORMED_JSON with raw bytes preserved")
-    void malformedJsonPreservesRawBytes() {
-        String malformed = "{\"record_type\":\"tick\",\"token\":3045,\"ltp_paise\":\"not-a-number\",";
-        byte[] raw = malformed.getBytes(StandardCharsets.UTF_8);
-        IngestionService.MalformedJsonDecision decision =
-                IngestionService.malformedJsonDecision(raw);
-
-        assertEquals(QuarantineWriter.Reason.MALFORMED_JSON, decision.reason());
-        assertArrayEquals(raw, decision.rawPayload(),
-                "quarantine evidence must preserve the exact received line bytes");
-        assertEquals(IngestionService.malformedJsonDetail(), decision.detail(),
-                "detail must be the static constant");
-        assertFalse(decision.detail().contains(malformed),
-                "detail must not contain any line content (no log leakage)");
-    }
-
-    @Test
-    @DisplayName("ING-DQ-001: static detail never leaks line content and stays bounded")
-    void detailConstantIsStaticAndBounded() {
-        String detail = IngestionService.malformedJsonDetail();
-        assertFalse(detail.contains("{"), "static detail must not interpolate line bytes");
-        assertFalse(detail.contains("record_type"), "static detail must not echo line content");
-        assertTrue(detail.length() <= 512, "detail must stay within the 512-char bound");
-    }
-
-    @Test
-    @DisplayName("ING-DQ-001: rawLineBytes is null-safe and byte-exact")
-    void rawLineBytesNullSafe() {
-        assertNull(IngestionService.rawLineBytes(null));
-        assertArrayEquals("abc".getBytes(StandardCharsets.UTF_8),
-                IngestionService.rawLineBytes("abc"));
-    }
+    // (NDJSON-path helpers malformedJsonDecision/malformedJsonDetail/
+    // rawLineBytes were removed with the NDJSON transport 2026-08-29 —
+    // malformed frames are rejected at ProtoFrameReader level. The
+    // MALFORMED_JSON quarantine reason remains for the vocabulary tests
+    // below and for bridge-side broker_quarantine records.)
 
     @Test
     @DisplayName("ING-DQ-001: quarantine reason vocabulary is exact per plan")

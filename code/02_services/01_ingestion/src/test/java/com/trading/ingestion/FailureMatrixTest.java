@@ -154,24 +154,6 @@ class FailureMatrixTest {
         }
     }
 
-    /** NDJSON tick line WITH feed_sequence_local (for gap tests). */
-    private static String tickLineSeq(long token, long tsMs, long ltpPaise, long seq, long epoch) {
-        return "{"
-                + "\"record_type\":\"tick\","
-                + "\"feed\":\"hft\","
-                + "\"mode\":\"full\","
-                + "\"token\":" + token + ","
-                + "\"ltp_paise\":" + ltpPaise + ","
-                + "\"ts_ms\":" + tsMs + ","
-                + "\"received_ts_ms\":" + System.currentTimeMillis() + ","
-                + "\"feed_sequence_local\":" + seq + ","
-                + "\"connection_epoch\":" + epoch + ","
-                + "\"slot_id\":\"hft-0\","
-                + "\"volume\":100,"
-                + "\"raw_payload\":\"" + Base64.getEncoder().encodeToString(FRAME_PAYLOAD) + "\","
-                + "\"payload_hash\":\"" + sha256Hex(FRAME_PAYLOAD) + "\""
-                + "}";
-    }
 
     private static void awaitDrain(CountingConverter converter, int expected) throws Exception {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
@@ -207,24 +189,21 @@ class FailureMatrixTest {
     // ---- T7-F11: sequence gap end-to-end ----
 
     @Test
-    @DisplayName("T7-F11: sequence gap detected via processLine, data path NOT halted")
+    @DisplayName("T7-F11: sequence gap detected via proto TickEvent path, data path NOT halted")
     void sequenceGapEndToEnd() throws Exception {
         CountingConverter converter = new CountingConverter();
         IngestionService service = makeService(converter);
-        Method processLine = IngestionService.class.getDeclaredMethod("processLine", String.class);
-        processLine.setAccessible(true);
-
         long now = System.currentTimeMillis();
         // contiguous 1,2,3 — no gaps
-        processLine.invoke(service, tickLineSeq(TOKEN_A, now, 100, 1, 1));
-        processLine.invoke(service, tickLineSeq(TOKEN_A, now, 101, 2, 1));
-        processLine.invoke(service, tickLineSeq(TOKEN_A, now, 102, 3, 1));
+        service.processTickEvent(ProtoTickFactory.tick(TOKEN_A, now, 100, 1, 1), "hft-0", 1L);
+        service.processTickEvent(ProtoTickFactory.tick(TOKEN_A, now, 101, 2, 1), "hft-0", 1L);
+        service.processTickEvent(ProtoTickFactory.tick(TOKEN_A, now, 102, 3, 1), "hft-0", 1L);
         // GAP: 3 → 7 (missing 4,5,6)
-        processLine.invoke(service, tickLineSeq(TOKEN_A, now, 103, 7, 1));
+        service.processTickEvent(ProtoTickFactory.tick(TOKEN_A, now, 103, 7, 1), "hft-0", 1L);
         // duplicate seq 7 — NOT a gap (T7-D1)
-        processLine.invoke(service, tickLineSeq(TOKEN_A, now, 104, 7, 1));
+        service.processTickEvent(ProtoTickFactory.tick(TOKEN_A, now, 104, 7, 1), "hft-0", 1L);
         // epoch bump — new baseline, seq 1 NOT a gap (T7-F2)
-        processLine.invoke(service, tickLineSeq(TOKEN_A, now, 105, 1, 2));
+        service.processTickEvent(ProtoTickFactory.tick(TOKEN_A, now, 105, 1, 2), "hft-0", 2L);
 
         awaitDrain(converter, 6);
         assertEquals(6, converter.appendCalls.get(), "ALL ticks processed despite gap (path not halted)");
@@ -283,17 +262,19 @@ class FailureMatrixTest {
         assertEquals(0, service.tracker().pendingRecords(), "no leaked reservations");
     }
 
-    // ---- T7-F15: rollback under failure ----
+    // ---- T7-F15: no fallback under failure (proto-only) ----
 
     @Test
-    @DisplayName("T7-F15: after proto stream fails, NDJSON fallback still works")
-    void rollbackAfterProtoFailure() throws Exception {
-        // Simulate: TRANSPORT=proto fails (garbage), then TRANSPORT=pipe —
-        // the Java reader falls back to NDJSON and the service processes.
+    @DisplayName("T7-F15: garbage on the wire is not proto; no NDJSON fallback (2026-08-29)")
+    void nonProtoGarbageIsNotFallback() throws Exception {
+        // Proto-only transport: garbage (or NDJSON from a stale bridge) is
+        // NOT sniffed as proto, and the service never falls back to NDJSON —
+        // the bridge loop treats it as a failure instead. This replaces the
+        // old rollback test (NDJSON pipe removed 2026-08-29).
         CountingConverter converter = new CountingConverter();
         IngestionService service = makeService(converter);
 
-        // 1. Garbage proto stream → sniff rejects → NDJSON path
+        // 1. Garbage proto stream → sniff rejects (bytes preserved for caller)
         byte[] garbage = new byte[] {0x7F, 0x7F, 0x7F, 0x7F, 0x01};
         ProtoFrameReader sniff = new ProtoFrameReader(new ByteArrayInputStream(garbage),
                 new ProtoFrameReader.FrameHandler() {
@@ -302,13 +283,13 @@ class FailureMatrixTest {
                 });
         assertFalse(sniff.sniffProto(), "garbage not sniffed as proto");
 
-        // 2. NDJSON line still processes end-to-end
-        Method processLine = IngestionService.class.getDeclaredMethod("processLine", String.class);
-        processLine.setAccessible(true);
+        // 2. The proto path still accepts valid ticks after garbage on the
+        //    wire: the sniff rejection is transport-level, and a subsequent
+        //    valid proto tick flows through processTickEvent untouched.
         long now = System.currentTimeMillis();
-        processLine.invoke(service, tickLineSeq(TOKEN_A, now, 100, 1, 1));
+        service.processTickEvent(ProtoTickFactory.tick(TOKEN_A, now, 100, 1, 1), "hft-0", 1L);
         awaitDrain(converter, 1);
-        assertEquals(1, converter.appendCalls.get(), "NDJSON path restored after proto failure");
+        assertEquals(1, converter.appendCalls.get(), "proto path processes valid ticks after garbage sniff");
     }
 
     // ---- T7-L1: loss bound accounting ----

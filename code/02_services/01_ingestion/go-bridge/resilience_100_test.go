@@ -128,7 +128,7 @@ func TestINGRES001OneHundredForcedDisconnectReconnectCycles(t *testing.T) {
 
 	old := bridgeEmitter
 	out := newLockedBuffer()
-	bridgeEmitter = NewBridgeEmitter(out)
+	bridgeEmitter = newTestProtoEmitter(out)
 	defer func() { bridgeEmitter = old }()
 
 	client := arrow.NewClient("app", "secret")
@@ -198,7 +198,7 @@ func TestINGRES001OneHundredForcedDisconnectReconnectCycles(t *testing.T) {
 	}
 	// Every cycle must have recovered to ACTIVE — a healthy slot is never
 	// left interrupted by the previous epoch's drop.
-	actives := countLinesWith(t, out.String(), `"state":"ACTIVE"`)
+	actives := countContaining(eventsAsStrings(t, out.String()), "state=ACTIVE")
 	if actives < cycles {
 		t.Errorf("ACTIVE recoveries=%d, want ≥ %d (cycles)", actives, cycles)
 	}
@@ -243,7 +243,7 @@ func TestINGRES001OneHundredForcedDisconnectReconnectCyclesRealBackoff(t *testin
 
 	old := bridgeEmitter
 	out := newLockedBuffer()
-	bridgeEmitter = NewBridgeEmitter(out)
+	bridgeEmitter = newTestProtoEmitter(out)
 	defer func() { bridgeEmitter = old }()
 
 	client := arrow.NewClient("app", "secret")
@@ -329,7 +329,7 @@ func TestINGRES001HealthySlotNotInterruptedByPeerReconnect(t *testing.T) {
 
 	old := bridgeEmitter
 	out := newLockedBuffer()
-	bridgeEmitter = NewBridgeEmitter(out)
+	bridgeEmitter = newTestProtoEmitter(out)
 	defer func() { bridgeEmitter = old }()
 
 	client := arrow.NewClient("app", "secret")
@@ -376,10 +376,10 @@ func TestINGRES001HealthySlotNotInterruptedByPeerReconnect(t *testing.T) {
 		t.Errorf("slot-1 last state=%q, want ACTIVE (healthy slot interrupted)\n%s", got, out.String())
 	}
 	// Slot-1 must not have emitted a single disconnect (its stream never fails).
-	if n := countLinesWith(t, out.String(), `"slot_id":"hft-1"`); n == 0 {
+	if n := countContaining(eventsAsStrings(t, out.String()), "slot=hft-1"); n == 0 {
 		t.Errorf("slot-1 emitted no events — healthy slot never started\n%s", out.String())
 	}
-	if n := countLinesWith(t, out.String(), `"event":"disconnect"`); n == 0 {
+	if n := countContaining(eventsAsStrings(t, out.String()), "event=disconnect"); n == 0 {
 		t.Errorf("slot-0 never disconnected — drop broker not exercised\n%s", out.String())
 	}
 

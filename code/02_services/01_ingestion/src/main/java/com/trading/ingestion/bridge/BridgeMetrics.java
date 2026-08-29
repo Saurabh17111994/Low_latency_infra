@@ -1,7 +1,7 @@
 package com.trading.ingestion.bridge;
 
 /**
- * Supervisor health snapshot (NDJSON record_type {@code "bridge_metrics"}).
+ * Supervisor health snapshot (proto control record {@code "bridge_metrics"}).
  *
  * <p>Additive v2 extension of the bridge NDJSON contract: the Go supervisor
  * emits one line every 10s with the values it is authoritative for — the

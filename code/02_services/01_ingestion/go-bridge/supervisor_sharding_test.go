@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -132,7 +131,7 @@ func TestSupervisorAuthTerminalIsolatedPerSlot(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	oldEmitter := bridgeEmitter
 	capture := newSyncBuffer()
-	bridgeEmitter = NewBridgeEmitter(capture)
+	bridgeEmitter = newTestProtoEmitter(capture)
 	defer func() { bridgeEmitter = oldEmitter }()
 
 	terminal := make(chan int, 1)
@@ -145,13 +144,14 @@ func TestSupervisorAuthTerminalIsolatedPerSlot(t *testing.T) {
 	// after attempts 1-2) and must reach TERMINAL on its own.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if strings.Contains(capture.String(), `"auth_failure"`) {
+		if containsAny(eventsAsStrings(t, capture.String()), "event=auth_failure") {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	flushTestEmitter()
 	out := capture.String()
-	if !strings.Contains(out, `"auth_failure"`) {
+	if !containsAny(eventsAsStrings(t, out), "event=auth_failure") {
 		t.Fatalf("slot 0 must go terminal after 3 failed auth refreshes\n%s", out)
 	}
 	// Isolation assertions, while the other two slots are still running:
@@ -173,7 +173,7 @@ func TestSupervisorAuthTerminalIsolatedPerSlot(t *testing.T) {
 	if countState(t, out, "ACTIVE") < 2 {
 		t.Fatalf("both peers must reach ACTIVE\n%s", out)
 	}
-	if !strings.Contains(out, `"token":2024`) || !strings.Contains(out, `"token":3048`) {
+	if !containsAny(ticksFrom(t, out), "token=2024") || !containsAny(ticksFrom(t, out), "token=3048") {
 		t.Fatalf("peer ticks must flow while slot 0 is terminal\n%s", out)
 	}
 	// 5. The supervisor keeps waiting on the healthy peers (did not collapse).

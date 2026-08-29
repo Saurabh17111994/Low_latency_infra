@@ -13,11 +13,14 @@ import com.trading.ingestion.quarantine.QuarantineSink;
 import com.trading.ingestion.quarantine.QuarantineWriter;
 import com.trading.ingestion.safety.SafetyHaltWriter;
 import com.trading.ingestion.safety.SafetySink;
+import com.google.protobuf.ByteString;
 import com.trading.ingestion.telemetry.OtlpMetricsEmitter;
+import com.trading.ingestion.transport.TickEvent;
 import com.trading.ingestion.write.FlussRowConverter;
 import com.trading.ingestion.write.RawTickWriter;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -34,18 +37,23 @@ import org.junit.jupiter.api.Test;
 /**
  * ING-DQ-010: no-silent-drop global invariant.
  *
- * <p>Every NDJSON line fed to {@code processLine} must produce EXACTLY one
- * outcome — an append, a quarantine row, or a rejection — and no line may
+ * <p>Every proto {@code TickEvent} fed to {@code processTickEvent} must
+ * produce EXACTLY one outcome — an append or a quarantine — and no event may
  * vanish without evidence or throw out of the method. This test feeds a mixed
- * corpus (valid, malformed, unknown-feed, missing-instrument, invalid-values,
- * stale, future, huge, control-character) through the real service pipeline
- * and reconciles the outcome ledger:
+ * corpus (valid, unknown-feed, missing-instrument, invalid-values, stale,
+ * future) through the real service pipeline and reconciles the outcome
+ * ledger:
  *
  * <pre>{@code
- *   appendCalls + quarantineCalls == linesFed
- *   frameCount == linesFed          (every line processed)
- *   errorCount == 0                 (no uncaught exception)
+ *   appendCalls + quarantineCalls == eventsFed
+ *   frameCount == eventsFed        (every event processed)
+ *   errorCount == 0                (no uncaught exception)
  * }</pre>
+ *
+ * <p><i>2026-08-29:</i> migrated from NDJSON lines to proto TickEvents. The
+ * malformed-JSON / 1 MB non-JSON / NUL-char classes moved to the frame layer
+ * (ProtoFrameReader rejects them before the service — covered by
+ * FuzzIngestionTest.rejectBucketConsumedWithoutEvidence).
  *
  * <p><b>Default-run:</b> the service is constructed with no-op evidence sinks
  * ({@link QuarantineSink}, {@link DiscontinuitySink}, {@link SafetySink}), so
@@ -72,24 +80,19 @@ class IngestionNoSilentDropTest {
         long now = System.currentTimeMillis();
         List<Line> corpus = new ArrayList<>();
         // ---- valid ticks (must be appended) ----
-        corpus.add(new Line(tickLine("hft", "full", TOKEN_A, now, 100), Outcome.APPEND));
-        corpus.add(new Line(tickLine("hft", "ltpc", TOKEN_B, now, 200), Outcome.APPEND));
-        corpus.add(new Line(tickLine("hft", "quote", TOKEN_A, now, 0), Outcome.APPEND)); // VALID_NON_TRADE → QUOTE
+        corpus.add(new Line(tick("hft", "full", TOKEN_A, now, 100), Outcome.APPEND));
+        corpus.add(new Line(tick("hft", "ltpc", TOKEN_B, now, 200), Outcome.APPEND));
+        corpus.add(new Line(tick("hft", "quote", TOKEN_A, now, 0), Outcome.APPEND)); // VALID_NON_TRADE → QUOTE
         // ---- quarantined classes (must never reach the writer) ----
-        corpus.add(new Line("{\"feed\":", Outcome.QUARANTINE_METRIC));                 // malformed JSON → MALFORMED_JSON
-        corpus.add(new Line(tickLine("standard", "ltp", TOKEN_A, now, 100), Outcome.QUARANTINE_METRIC)); // unknown feed
-        corpus.add(new Line(tickLine("hft", "ltpc", 999_999L, now, 100), Outcome.QUARANTINE_METRIC));   // missing instrument
-        corpus.add(new Line(tickLine("hft", "ltpc", TOKEN_A, now, 0), Outcome.QUARANTINE_METRIC));      // invalid values
-        corpus.add(new Line(tickLine("hft", "full", TOKEN_A, now - 10_000, 100), Outcome.QUARANTINE_METRIC)); // stale
-        corpus.add(new Line(tickLine("hft", "full", TOKEN_B, now + 10_000, 100), Outcome.QUARANTINE_NO_METRIC)); // future
-        corpus.add(new Line("x".repeat(1_000_000), Outcome.QUARANTINE_METRIC));            // 1 MB non-JSON
-        corpus.add(new Line("{\"feed\":\"hft\u0000x\",\"mode\":\"ltp\"}", Outcome.QUARANTINE_METRIC)); // NUL char
+        corpus.add(new Line(tick("standard", "ltp", TOKEN_A, now, 100), Outcome.QUARANTINE_METRIC)); // unknown feed
+        corpus.add(new Line(tick("hft", "ltpc", 999_999L, now, 100), Outcome.QUARANTINE_METRIC));   // missing instrument
+        corpus.add(new Line(tick("hft", "ltpc", TOKEN_A, now, 0), Outcome.QUARANTINE_METRIC));      // invalid values
+        corpus.add(new Line(tick("hft", "full", TOKEN_A, now - 10_000, 100), Outcome.QUARANTINE_METRIC)); // stale
+        corpus.add(new Line(tick("hft", "full", TOKEN_B, now + 10_000, 100), Outcome.QUARANTINE_NO_METRIC)); // future
 
-        Method processLine = IngestionService.class.getDeclaredMethod("processLine", String.class);
-        processLine.setAccessible(true);
         for (Line line : corpus) {
-            processLine.invoke(service, line.line());
-            // any uncaught exception surfaces as InvocationTargetException → test fails
+            service.processTickEvent(line.event(), "hft-0", 1L);
+            // any uncaught exception fails the test directly
         }
 
         long expectedAppends = corpus.stream().filter(l -> l.outcome() == Outcome.APPEND).count();
@@ -100,11 +103,11 @@ class IngestionNoSilentDropTest {
 
         // The observable ledger: every line is an append or a quarantine; nothing
         // may vanish, nothing may throw.
-        assertEquals(corpus.size(), frameCount(service), "every fed line must be processed");
-        assertEquals(0, errorCount(service), "no line may throw out of processLine");
+        assertEquals(corpus.size(), frameCount(service), "every fed event must be processed");
+        assertEquals(0, errorCount(service), "no event may throw out of processTickEvent");
         assertEquals(expectedAppends, converter.appendCalls.get(),
                 "exactly the valid ticks reach the writer — none of the "
-                        + (corpus.size() - expectedAppends) + " bad lines may append");
+                        + (corpus.size() - expectedAppends) + " bad events may append");
         assertEquals(expectedMetricQuarantines + expectedNoMetricQuarantines,
                 corpus.size() - expectedAppends, "corpus classification sanity");
         assertEquals(expectedMetricQuarantines, decodeErrors(service),
@@ -133,8 +136,8 @@ class IngestionNoSilentDropTest {
         QUARANTINE_NO_METRIC
     }
 
-    /** One corpus line with its expected outcome. */
-    private record Line(String line, Outcome outcome) {}
+    /** One corpus event with its expected outcome. */
+    private record Line(TickEvent event, Outcome outcome) {}
 
     // ---- fixtures and harness ----
 
@@ -162,22 +165,23 @@ class IngestionNoSilentDropTest {
                         .exchange("NSE").segment("CM").lotSize(1).manifestVersion(1).build());
     }
 
-    /** One tick NDJSON line with a valid payload + hash (mirrors the bridge wire shape). */
-    private static String tickLine(String feed, String mode, long token, long tsMs, long ltpPaise) {
-        String payload = Base64.getEncoder().encodeToString(FRAME_PAYLOAD);
-        return "{"
-                + "\"record_type\":\"tick\","
-                + "\"feed\":\"" + feed + "\","
-                + "\"mode\":\"" + mode + "\","
-                + "\"token\":" + token + ","
-                + "\"ltp_paise\":" + ltpPaise + ","
-                + "\"ts_ms\":" + tsMs + ","
+    /** One proto TickEvent with a valid payload + hash (mirrors the bridge emitter). */
+    private static TickEvent tick(String feed, String mode, long token, long tsMs, long ltpPaise) {
+        return TickEvent.newBuilder()
+                .setSlotId("hft-0")
+                .setMode(mode)
+                .setToken((int) token)
+                .setFeed(feed)
+                .setTsMs(tsMs)
                 // receive time is the wall clock at emission — the freshness
                 // gate compares broker ts_ms against this, never against itself.
-                + "\"received_ts_ms\":" + System.currentTimeMillis() + ","
-                + "\"raw_payload\":\"" + payload + "\","
-                + "\"payload_hash\":\"" + sha256Hex(FRAME_PAYLOAD) + "\""
-                + "}";
+                .setReceivedMs(System.currentTimeMillis())
+                .setFeedSequenceLocal(1)
+                .setLtpPaise(ltpPaise)
+                .setVolume(100)
+                .setRawPayload(ByteString.copyFrom(FRAME_PAYLOAD))
+                .setPayloadHash(ByteString.copyFrom(sha256Hex(FRAME_PAYLOAD).getBytes(StandardCharsets.UTF_8)))
+                .build();
     }
 
     private static final byte[] FRAME_PAYLOAD =

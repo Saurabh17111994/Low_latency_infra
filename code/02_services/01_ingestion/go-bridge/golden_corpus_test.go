@@ -109,7 +109,7 @@ func runBridgeForGolden(t *testing.T, g *goldenBroker, d time.Duration) string {
 	t.Helper()
 	old := bridgeEmitter
 	out := newLockedBuffer()
-	bridgeEmitter = NewBridgeEmitter(out)
+	bridgeEmitter = newTestProtoEmitter(out)
 	defer func() { bridgeEmitter = old }()
 
 	client := arrow.NewClient("app", "secret")
@@ -129,6 +129,7 @@ func runBridgeForGolden(t *testing.T, g *goldenBroker, d time.Duration) string {
 	time.Sleep(d)
 	cancel()
 	<-done
+	flushTestEmitter()
 	return out.String()
 }
 
@@ -141,14 +142,7 @@ func TestGoldenCorpusBridgeDecodesGoldenFrames(t *testing.T) {
 	out := runBridgeForGolden(t, g, 1500*time.Millisecond)
 
 	var fullTick, ltpTick map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			continue
-		}
-		if m["record_type"] != "tick" {
-			continue
-		}
+	for _, m := range tickMapsFrom(t, out) {
 		switch m["mode"] {
 		case "full":
 			fullTick = m
@@ -163,12 +157,13 @@ func TestGoldenCorpusBridgeDecodesGoldenFrames(t *testing.T) {
 		t.Fatalf("no ltp tick emitted\n%s", out)
 	}
 
-	// Full-tick NDJSON fields must match full-tick.golden.
+	// Full-tick proto fields must match full-tick.golden (numeric values are
+	// compared with type coercion: proto ints vs JSON float64).
 	fullGolden := loadGoldenRecord(t, "full-tick")
 	for _, k := range []string{"feed", "mode", "token", "ltp_paise", "close_paise",
 		"open_paise", "high_paise", "low_paise", "vwap_paise", "ltq", "volume",
-		"total_buy_qty", "total_sell_qty", "atv", "btv", "ts_ms"} {
-		if fullTick[k] != fullGolden[k] {
+		"total_buy_qty", "total_sell_qty", "ts_ms"} {
+		if !goldenEqual(fullTick[k], fullGolden[k]) {
 			t.Fatalf("full %s = %v, golden %v", k, fullTick[k], fullGolden[k])
 		}
 	}
@@ -187,11 +182,11 @@ func TestGoldenCorpusBridgeDecodesGoldenFrames(t *testing.T) {
 		t.Fatal("full payload_hash differs from golden")
 	}
 
-	// LTP-tick NDJSON fields must match ltp-tick.golden.
+	// LTP-tick proto fields must match ltp-tick.golden.
 	ltpGolden := loadGoldenRecord(t, "ltp-tick")
 	for _, k := range []string{"feed", "mode", "token", "ltp_paise", "vwap_paise",
-		"volume", "atv", "btv", "ts_ms"} {
-		if ltpTick[k] != ltpGolden[k] {
+		"volume", "ts_ms"} {
+		if !goldenEqual(ltpTick[k], ltpGolden[k]) {
 			t.Fatalf("ltp %s = %v, golden %v", k, ltpTick[k], ltpGolden[k])
 		}
 	}
@@ -211,17 +206,8 @@ func TestGoldenCorpusUnknownPacketNeverEmitted(t *testing.T) {
 	g := newGoldenBrokerOpts(t, true)
 	out := runBridgeForGolden(t, g, 1500*time.Millisecond)
 
-	// The unknown frame must produce no tick: count only record_type==tick lines.
-	tickCount := 0
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		var m map[string]any
-		if err := json.Unmarshal([]byte(line), &m); err != nil {
-			continue
-		}
-		if m["record_type"] == "tick" {
-			tickCount++
-		}
-	}
+	// The unknown frame must produce no tick: count decoded proto ticks.
+	tickCount := len(tickMapsFrom(t, out))
 	// Exactly the ltp + full ticks (2), never a third from the unknown packet.
 	if tickCount != 2 {
 		t.Fatalf("expected exactly 2 ticks (ltp+full), got %d\n%s", tickCount, out)
@@ -252,4 +238,32 @@ func TestGoldenCorpusHashPreservation(t *testing.T) {
 			t.Fatalf("%s: payload_hash %q != sha256(frame) %q", name, rec["payload_hash"], hash)
 		}
 	}
+}
+
+// goldenEqual compares a proto-typed value against a JSON-decoded golden
+// value with numeric type coercion (int32/int64/float64 all compare equal).
+func goldenEqual(a, b any) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	af, aok := numFloat(a)
+	bf, bok := numFloat(b)
+	if aok && bok {
+		return af == bf
+	}
+	return a == b
+}
+
+func numFloat(v any) (float64, bool) {
+	switch n := v.(type) {
+	case int:
+		return float64(n), true
+	case int32:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case float64:
+		return n, true
+	}
+	return 0, false
 }

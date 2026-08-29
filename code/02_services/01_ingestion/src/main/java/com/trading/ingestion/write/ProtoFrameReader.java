@@ -7,7 +7,8 @@
 // Supports transport sniffing: probe() reads the first 4 bytes; if they
 // form a plausible frame length AND the first frame parses as a
 // TransportFrame, the stream is proto. Otherwise the bytes are pushed back
-// and the caller uses the NDJSON path (fallback / rollback).
+// and the caller treats the bridge as failed (proto-only since 2026-08-29;
+// the NDJSON fallback was removed).
 //
 // Frames are delivered to a callback. MarketDataBatch frames carry market
 // ticks (batched); ControlRecord frames carry bridge_event / bridge_metrics
@@ -51,8 +52,8 @@ public final class ProtoFrameReader {
 
     /**
      * The buffered stream with any sniffed-then-pushed-back bytes restored.
-     * After {@link #sniffProto()} returns false, the NDJSON reader must read
-     * from THIS stream (not the raw input) — the sniff consumed up to 4 bytes.
+     * After {@link #sniffProto()} returns false, the caller must read from
+     * THIS stream (not the raw input) — the sniff consumed up to 4 bytes.
      */
     public InputStream stream() {
         return in;
@@ -63,14 +64,14 @@ public final class ProtoFrameReader {
      * on a miss they are pushed back so the stream is un-consumed.
      *
      * @return true if the first 4 bytes form a plausible length prefix whose
-     *         frame parses as a TransportFrame; false → NDJSON path.
+     *         frame parses as a TransportFrame; false → not proto (bridge failure).
      */
     public boolean sniffProto() throws IOException {
         byte[] hdr = new byte[4];
         int got = readFullyOrEof(hdr);
         if (got < 4) {
-            // stream too short to be proto — could be a valid NDJSON stream
-            // ending, or empty. Treat as NDJSON (never auto-quarantine).
+            // stream too short to be proto — could be an empty stream or a
+            // trailing partial frame. Report not-proto (never auto-quarantine).
             if (got > 0) {
                 in.unread(hdr, 0, got);
             }
@@ -82,8 +83,8 @@ public final class ProtoFrameReader {
             in.unread(hdr);
             return false;
         }
-        // Try to parse the first frame. If it fails, the stream is NDJSON —
-        // push back the header and report NDJSON.
+        // Try to parse the first frame. If it fails, the stream is not proto —
+        // push back the header and report not-proto.
         byte[] body = new byte[(int) len];
         try {
             readFully(body);

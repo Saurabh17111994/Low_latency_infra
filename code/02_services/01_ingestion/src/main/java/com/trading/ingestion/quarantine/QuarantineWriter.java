@@ -41,7 +41,7 @@ import org.slf4j.LoggerFactory;
  * instrument_token    BIGINT   — may be null if missing
  * exchange            STRING   — may be null
  * symbol              STRING   — may be null
- * raw_payload         BYTES    — original NDJSON line bytes
+ * raw_payload         BYTES    — original broker frame bytes
  * payload_hash        STRING   — SHA-256 hex
  * detected_ts         BIGINT   — epoch ms
  * detail              STRING   — scrubbed operator detail
@@ -71,7 +71,7 @@ public class QuarantineWriter implements QuarantineSink {
      * MISSING_BROKER_ID etc. Those are postback-only categories.
      */
     public enum Reason {
-        /** NDJSON line is not valid JSON. */
+        /** Frame payload is not valid (kept for vocabulary compatibility). */
         MALFORMED_JSON,
         /** JSON parsed but required fields missing or of wrong type. */
         INVALID_SCHEMA,
@@ -122,7 +122,7 @@ public class QuarantineWriter implements QuarantineSink {
      * Write a quarantined tick. Never throws — failures are logged
      * at ERROR and must not block the ingestion pipeline.
      *
-     * @param rawPayload  raw NDJSON bytes (may be null if we have no bytes)
+     * @param rawPayload  raw broker frame bytes (may be null if we have no bytes)
      * @param reason      why this is quarantined
      * @param detail      human-readable detail for operator, logged inline
      */

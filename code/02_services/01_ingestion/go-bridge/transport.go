@@ -1,7 +1,7 @@
 // transport.go — proto transport emitter (T6, contract §6 T6).
 //
-// TRANSPORT=pipe  (default) — NDJSON lines on stdout (existing path, fallback).
-// TRANSPORT=proto — length-prefixed protobuf TransportFrame on stdout:
+// TRANSPORT=proto (or the grpc alias) — length-prefixed protobuf
+// TransportFrame on stdout:
 //
 //	[4-byte little-endian length][protobuf TransportFrame bytes]
 //
@@ -11,8 +11,9 @@
 // ControlRecord frames, distinguished by record_type — never interleaved
 // into market batches (Q20). Control frames flush immediately (ordering).
 //
-// The NDJSON and proto emitters share the BridgeEmitter interface so the
-// production emit call sites are unchanged.
+// ProtoEmitter is the only emitter: the production emit call sites go through
+// the Transport interface so a future gRPC transport can slot in without
+// touching them.
 
 package main
 
@@ -37,7 +38,7 @@ const TransportVersion = 1
 // bounds memory and rejects corrupt length prefixes).
 const maxFrameLen = 64 << 20
 
-// Transport is the emit interface shared by NDJSON and proto emitters.
+// Transport is the emit interface implemented by the proto emitter.
 type Transport interface {
 	EmitTick(t Tick, connectionID, slotID string, epoch uint64, received time.Time, rawPayload []byte) error
 	EmitEvent(event BridgeEvent) error
@@ -56,7 +57,7 @@ type ProtoEmitter struct {
 	mu      sync.Mutex
 	w       io.Writer
 	batcher *Batcher
-	// slot-identity map for control records (same contract as NDJSON emitter)
+	// slot-identity map for control records
 	fingerprint     string
 	tokenHashBySlot map[string]string
 }
@@ -86,8 +87,8 @@ func (e *ProtoEmitter) writeFrame(frame *marketdata.TransportFrame) error {
 	return err
 }
 
-// toMarketTick converts the main-package Tick (NDJSON shape) to the proto
-// package Tick so its ToTickEvent mapping applies (single mapping contract).
+// toMarketTick converts the main-package Tick to the proto package Tick so its
+// ToTickEvent mapping applies (single mapping contract).
 func (t Tick) toMarketTick() marketdata.Tick {
 	return marketdata.Tick{
 		Feed: t.Feed, Mode: t.Mode, Token: t.Token,
@@ -102,6 +103,9 @@ func (t Tick) toMarketTick() marketdata.Tick {
 // EmitTick batches one tick into the batcher. The flush callback writes a
 // MarketDataBatch frame synchronously (batcher lock → writeFrame).
 func (e *ProtoEmitter) EmitTick(t Tick, connectionID, slotID string, epoch uint64, received time.Time, rawPayload []byte) error {
+	if tickCountsOn {
+		recordTickCount(t.Token)
+	}
 	ev := t.toMarketTick().ToTickEvent(slotID, connectionID, epoch, received.UnixMilli(), 0, rawPayload)
 	// batcher.Add computes payload_hash once (Q5), assigns per-slot seq, and
 	// flushes on count/bytes/age via the callback below.
@@ -112,7 +116,7 @@ func (e *ProtoEmitter) EmitTick(t Tick, connectionID, slotID string, epoch uint6
 func (e *ProtoEmitter) controlFrame(recordType string, ev *BridgeEvent, m *BridgeMetrics) *marketdata.TransportFrame {
 	cr := &marketdata.ControlRecord{
 		RecordType:      recordType,
-		ContractVersion: NDJSONContractVersion,
+		ContractVersion: ContractVersion,
 	}
 	if ev != nil {
 		cr.Event = ev.Event
@@ -143,10 +147,9 @@ func (e *ProtoEmitter) controlFrame(recordType string, ev *BridgeEvent, m *Bridg
 // EmitEvent writes a bridge_event control frame immediately (no batching).
 func (e *ProtoEmitter) EmitEvent(event BridgeEvent) error {
 	event.RecordType = "bridge_event"
-	event.ContractVersion = NDJSONContractVersion
+	event.ContractVersion = ContractVersion
 	event.Reason = sanitizeDiagnostic(event.Reason)
-	// R-097: validate BEFORE write (same as NDJSON emitter) — an invalid
-	// event must never reach the wire.
+	// R-097: validate BEFORE write — an invalid event must never reach the wire.
 	if err := validateBridgeEvent(event); err != nil {
 		return fmt.Errorf("bridge event rejected: %w", err)
 	}
@@ -166,7 +169,7 @@ func (e *ProtoEmitter) EmitEvent(event BridgeEvent) error {
 // EmitMetrics writes a bridge_metrics control frame immediately.
 func (e *ProtoEmitter) EmitMetrics(m BridgeMetrics) error {
 	m.RecordType = "bridge_metrics"
-	m.ContractVersion = NDJSONContractVersion
+	m.ContractVersion = ContractVersion
 	if m.TsMs <= 0 {
 		return fmt.Errorf("bridge metrics rejected: ts_ms must be positive")
 	}
@@ -206,14 +209,13 @@ func (e *ProtoEmitter) Close() error {
 	return e.Flush()
 }
 
-// BridgeEmitter keeps its type name as the transport-agnostic interface —
-// main.go's `bridgeEmitter` global is reassigned based on TRANSPORT.
-var _ Transport = (*BridgeEmitter)(nil)
 var _ Transport = (*ProtoEmitter)(nil)
 
 // initBridgeEmitter selects the emitter based on TRANSPORT env (T6, Q21).
 //   - "proto" (or "grpc" alias for the future gRPC mode): proto frames
-//   - anything else ("pipe", unset): NDJSON (fallback / rollback path)
+//   - anything else (unset, "pipe", unknown): FATAL — proto is the only
+//     transport; there is deliberately no line-delimited fallback (the NDJSON
+//     pipe was removed 2026-08-29, proto-default decision).
 func initBridgeEmitter(w io.Writer) Transport {
 	raw := os.Getenv("TRANSPORT")
 	v := strings.ToLower(strings.TrimSpace(raw))
@@ -225,15 +227,12 @@ func initBridgeEmitter(w io.Writer) Transport {
 			return protoWriteFrame(w, batch)
 		}, nil)
 		return NewProtoEmitter(w, batcher)
-	case "pipe":
-		fmt.Fprintf(os.Stderr, "arrow-bridge: transport=NDJSON pipe (TRANSPORT=pipe — deliberate rollback path)\n")
-		return NewBridgeEmitter(w)
 	default:
-		// TRANSPORT unset or unknown: fall back to NDJSON for compatibility
-		// (rollback / old deployments), but say so LOUDLY — a silently unset
-		// TRANSPORT previously let benches run the NDJSON path by accident.
-		fmt.Fprintf(os.Stderr, "arrow-bridge: WARNING transport=NDJSON pipe (TRANSPORT=%q — UNSET/unknown; proto is the low-latency path, set TRANSPORT=proto explicitly)\n", raw)
-		return NewBridgeEmitter(w)
+		// TRANSPORT unset, "pipe", or unknown: fail loudly instead of
+		// silently falling back to a line transport. Proto is the only transport.
+		fmt.Fprintf(os.Stderr, "arrow-bridge: FATAL TRANSPORT=%q — only proto (or grpc alias) is supported; NDJSON pipe removed\n", raw)
+		os.Exit(2)
+		return nil
 	}
 }
 

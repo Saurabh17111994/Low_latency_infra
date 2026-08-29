@@ -16,7 +16,11 @@ import (
 	"github.com/arrow-trade/go-arrow/arrow"
 )
 
-// Tick is the unified NDJSON output format consumed by the Java pipeline.
+// Tick is the unified tick record consumed by the Java pipeline. The emitter
+// maps it onto a proto TickEvent (the NDJSON pipe was removed 2026-08-29);
+// the json tags stay because cmd/gen-corpus and the
+// testdata/golden/*.golden fixtures describe the record in JSON — a data
+// format, not a transport.
 // All prices in integer paise (₹1 = 100 paise). Timestamps in epoch ms.
 type Tick struct {
 	Feed   string `json:"feed"` // "hft" (the only feed since the Standard feed was removed 2026-08-14)
@@ -45,9 +49,10 @@ type Tick struct {
 	AskOrd  [5]uint16 `json:"ask_orders,omitempty"`
 }
 
-// bridgeEmitter is the transport-agnostic emitter. main() reassigns it
-// based on TRANSPORT (T6): NDJSON pipe (default/fallback) or proto frames.
-var bridgeEmitter Transport = NewBridgeEmitter(os.Stdout)
+// bridgeEmitter is the transport emitter. It is deliberately nil until main()
+// calls initBridgeEmitter (T6) — before ANY emit — so the process can never
+// write through an unconfigured transport.
+var bridgeEmitter Transport
 
 // maxDecodeErrorsPer10s is the decode-error burst threshold per slot (plan
 // §Error Handling): 100 errors in 10 seconds closes the slot and reconnects.
@@ -86,8 +91,9 @@ func main() {
 	client := arrow.NewClient(appID, appSecret)
 	var refreshAuth func(context.Context) error
 
-	// T6: select the transport emitter (TRANSPORT=pipe|proto|grpc) BEFORE
-	// any emit — the bridge must not write NDJSON lines to a proto reader.
+	// T6: select the transport emitter (TRANSPORT=proto|grpc — the only
+	// values; anything else is FATAL exit 2) BEFORE
+	// any emit — the bridge must not write a line transport to a proto reader.
 	// Runs in BOTH fake-broker and live modes.
 	bridgeEmitter = initBridgeEmitter(os.Stdout)
 
@@ -225,7 +231,7 @@ func main() {
 	runHFT(ctx, cancel, client, plan, latencyMs, responseTimeout, refreshAuth, logf)
 	// Drain point: all EmitTick/EmitEvent calls are synchronous and ordered
 	// under the emitter mutex, so the bridge_shutdown event below is
-	// guaranteed to be the last NDJSON line. Duplicate shutdown paths are
+	// guaranteed to be the last frame. Duplicate shutdown paths are
 	// collapsed by bridgeShutdownOnce — the event is emitted exactly once.
 	// Emit the final per-token tick count synchronously HERE (before any
 	// further work or return) so the ING-TCP-001 shutdown report cannot be
@@ -233,7 +239,7 @@ func main() {
 	finalTickCountReport.Do(reportTickCounts)
 	// T6: drain any pending batched ticks BEFORE the shutdown marker so the
 	// Java reader sees the complete stream (proto mode: Flush writes the
-	// final MarketDataBatch frame; NDJSON mode: no-op).
+	// final MarketDataBatch frame).
 	if err := bridgeEmitter.Flush(); err != nil {
 		fmt.Fprintf(os.Stderr, "arrow-bridge: final flush failed: %v\n", err)
 	}
@@ -450,7 +456,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 					// and the slot reconnected forever).
 					terminalAuthFailure = true
 					// R-297: signal the epoch stop BEFORE the emit — EmitEvent
-					// blocks on a full NDJSON pipe, and the stop must never wait
+					// blocks on a full stdout pipe, and the stop must never wait
 					// behind a write that cannot complete.
 					signalEpochStop()
 					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "auth_failure", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotTerminal), Reason: reason, ReceivedTsMs: time.Now().UnixMilli()})
@@ -473,7 +479,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 				// seconds per slot; exceeding it closes that slot and reconnects.
 				if burst.exceeded {
 					// R-297 wedge fix: signal the epoch stop BEFORE the emit —
-					// EmitEvent blocks on a full NDJSON pipe, and the stop must
+					// EmitEvent blocks on a full stdout pipe, and the stop must
 					// never wait behind a write that cannot complete.
 					signalEpochStop()
 					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "feed_stalled", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotStalled), Reason: "decode_error_burst", ReceivedTsMs: time.Now().UnixMilli()})
@@ -549,7 +555,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 			case <-heartbeat.C:
 				if err := stream.WriteText("PONG"); err != nil {
 					// R-297 wedge fix: signal the epoch stop BEFORE the emit —
-					// EmitEvent blocks on a full NDJSON pipe, and the stop must
+					// EmitEvent blocks on a full stdout pipe, and the stop must
 					// never wait behind a write that cannot complete.
 					signalEpochStop()
 					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "heartbeat_failed", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: sanitizeDiagnostic(err.Error()), ReceivedTsMs: time.Now().UnixMilli()})
@@ -572,7 +578,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 				last := lastFrameNanos.Load()
 				if last > 0 && time.Since(time.Unix(0, last)) > stallTimeout {
 					// R-297 wedge fix: signal the epoch stop BEFORE the emit —
-					// the feed_stalled emit was blocking on a full NDJSON pipe,
+					// the feed_stalled emit was blocking on a full stdout pipe,
 					// so the epoch never stopped and the slot never reconnected.
 					signalEpochStop()
 					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "feed_stalled", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotStalled), Reason: "no_tick_for_15s", ReceivedTsMs: time.Now().UnixMilli()})

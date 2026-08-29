@@ -40,7 +40,7 @@ func TestLosslessnessMultiConn(t *testing.T) {
 				bridgeCounts[tok] = int64(tok%100) + 1 // 1..100 per token
 			}
 			// Simulate per-slot emission: each slot emits its assigned tokens' counts.
-			// Aggregate across slots (like ndjson.go's tickCounts, which is global).
+			// Aggregate across slots (like tickcounts.go's tickCounts, which is global).
 			aggregated := make(map[int32]int64)
 			for _, slot := range plan.Slots {
 				for _, tok := range slot.Tokens {

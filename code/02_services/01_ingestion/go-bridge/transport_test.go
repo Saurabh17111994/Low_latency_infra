@@ -13,6 +13,8 @@ import (
 	"encoding/binary"
 	"io"
 	"os"
+	"errors"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -211,57 +213,58 @@ func TestProtoEmitterHashOnce(t *testing.T) {
 	}
 }
 
-// TestInitBridgeEmitter: TRANSPORT env selects proto vs NDJSON fallback.
+// TestInitBridgeEmitter: TRANSPORT env selects the proto emitter. Proto is
+// the ONLY transport (NDJSON pipe removed 2026-08-29): "pipe", unset, and
+// unknown values are FATAL (the bridge exits 2 — verified via subprocess in
+// TestInitBridgeEmitterRejectsNonProto, since os.Exit cannot run in-process).
 func TestInitBridgeEmitter(t *testing.T) {
 	t.Setenv("TRANSPORT", "proto")
 	e := initBridgeEmitter(io.Discard)
 	if _, ok := e.(*ProtoEmitter); !ok {
 		t.Fatalf("TRANSPORT=proto → %T, want *ProtoEmitter", e)
 	}
-	t.Setenv("TRANSPORT", "pipe")
+	t.Setenv("TRANSPORT", "grpc")
 	e = initBridgeEmitter(io.Discard)
-	if _, ok := e.(*BridgeEmitter); !ok {
-		t.Fatalf("TRANSPORT=pipe → %T, want *BridgeEmitter", e)
-	}
-	t.Setenv("TRANSPORT", "")
-	e = initBridgeEmitter(io.Discard)
-	if _, ok := e.(*BridgeEmitter); !ok {
-		t.Fatalf("TRANSPORT unset → %T, want *BridgeEmitter (fallback)", e)
+	if _, ok := e.(*ProtoEmitter); !ok {
+		t.Fatalf("TRANSPORT=grpc → %T, want *ProtoEmitter", e)
 	}
 }
 
-// TestInitBridgeEmitterUnsetWarnsLoudly: an UNSET TRANSPORT must not silently
-// pick the NDJSON path — it falls back (rollback compatibility) but screams
-// about it so benches can't run the wrong transport by accident. The warning
-// must contain the WARNING marker and the proto hint; an explicit TRANSPORT=pipe
-// (deliberate rollback) must NOT scream.
-func TestInitBridgeEmitterUnsetWarnsLoudly(t *testing.T) {
-	old := os.Stderr
-	r, w, err := os.Pipe()
+// TestInitBridgeEmitterRejectsNonProto: TRANSPORT=pipe / unset / unknown must
+// be FATAL (exit 2) with a loud message — the bridge never silently falls
+// back to NDJSON. Runs the real initBridgeEmitter in a subprocess (see
+// transport_emit_probe_test.go) because os.Exit would kill the test binary
+// in-process.
+func TestInitBridgeEmitterRejectsNonProto(t *testing.T) {
+	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.Stderr = w
-	defer func() { os.Stderr = old }()
-
-	t.Setenv("TRANSPORT", "")
-	initBridgeEmitter(io.Discard)
-	w.Close()
-	got, _ := io.ReadAll(r)
-	r.Close()
-	if !bytes.Contains(got, []byte("WARNING")) || !bytes.Contains(got, []byte("TRANSPORT=proto")) {
-		t.Fatalf("unset TRANSPORT should warn loudly, stderr=%q", got)
-	}
-
-	// Explicit rollback path must be quiet about WARNING (deliberate).
-	r2, w2, _ := os.Pipe()
-	os.Stderr = w2
-	t.Setenv("TRANSPORT", "pipe")
-	initBridgeEmitter(io.Discard)
-	w2.Close()
-	got2, _ := io.ReadAll(r2)
-	r2.Close()
-	if bytes.Contains(got2, []byte("WARNING")) {
-		t.Fatalf("explicit TRANSPORT=pipe should not WARN, stderr=%q", got2)
+	for _, tc := range []struct {
+		name string
+		env  string // value or "" for unset
+	}{
+		{"explicit-pipe", "pipe"},
+		{"unset", ""},
+		{"unknown", "banana"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(exe, "-test.run=TestBridgeEmitterFatalProbe")
+			cmd.Env = append(os.Environ(),
+				"BRIDGE_EMITTER_PROBE=1",
+				"TRANSPORT="+tc.env,
+			)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("TRANSPORT=%q: expected exit(2), got success", tc.env)
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Fatalf("TRANSPORT=%q: expected exit code 2, got %v (out=%q)", tc.env, err, out)
+			}
+			if !bytes.Contains(out, []byte("FATAL")) || !bytes.Contains(out, []byte("TRANSPORT")) {
+				t.Fatalf("TRANSPORT=%q: stderr must name FATAL + TRANSPORT, got %q", tc.env, out)
+			}
+		})
 	}
 }

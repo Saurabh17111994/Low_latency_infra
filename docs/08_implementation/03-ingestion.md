@@ -21,9 +21,9 @@ Build this phase, then implement the tests in the second section before moving o
 
 Two colocated processes in the same container form the ingestion boundary:
 
-**Go arrow-bridge** — uses the official Arrow Go SDK (`go-arrow`) for: authentication (AutoLogin or static token), WebSocket connection (`wss://socket.arrow.trade`), binary frame decode (HFT LTPC + FULL including 5-level bid/ask depth; the Standard feed that carried LTP/Quote modes was removed 2026-08-14 — see [`DEC-039`](../01_project/04-decisions.md) §1 and `DEC-012`), zstd decompression (HFT), subscription management, keepalive, and reconnection. Outputs **proto frames (T6, primary — `TRANSPORT=proto`)**: ticks batched (1ms/256/64KiB) into length-prefixed protobuf `TransportFrame` on stdout. `TRANSPORT=pipe` selects the legacy NDJSON fallback (rollback path, T6-RB1/T9-RB2 proven).
+**Go arrow-bridge** — uses the official Arrow Go SDK (`go-arrow`) for: authentication (AutoLogin or static token), WebSocket connection (`wss://socket.arrow.trade`), binary frame decode (HFT LTPC + FULL including 5-level bid/ask depth; the Standard feed that carried LTP/Quote modes was removed 2026-08-14 — see [`DEC-039`](../01_project/04-decisions.md) §1 and `DEC-012`), zstd decompression (HFT), subscription management, keepalive, and reconnection. Outputs **proto frames (T6 — `TRANSPORT=proto`, the only transport)**: ticks batched (1ms/256/64KiB) into length-prefixed protobuf `TransportFrame` on stdout. The NDJSON pipe transport was removed 2026-08-29; any non-proto `TRANSPORT` value is FATAL in the bridge.
 
-**Java IngestionService** — sniffs the bridge stdout (T6): proto frames → batched `MarketDataBatch` → `processTickEvent`; NDJSON → legacy line path. Both paths validate, resolve instruments, compute a versioned canonical fingerprint, and append each tick to `raw_table_1` through the Fluss Java client.
+**Java IngestionService** — sniffs the bridge stdout (T6): proto frames → batched `MarketDataBatch` → `processTickEvent`. The single path validates, resolves instruments, computes a versioned canonical fingerprint, and appends each tick to `raw_table_1` through the Fluss Java client.
 
 The pipe is the kernel's stdin/stdout — not a message queue, not a network hop. Both processes share one container lifecycle. Do not insert Python, Kafka, ZeroMQ, or another transport between the Go bridge and the Java Fluss append.
 
@@ -31,7 +31,7 @@ The pipe is the kernel's stdin/stdout — not a message queue, not a network hop
 
 | Module | Responsibility |
 | --- | --- |
-| `bridge` | Go arrow-bridge process lifecycle, stdin/stdout contract, [NDJSON schema](../04_contracts/ingestion-ndjson-schema.md), reconnect backoff |
+| `bridge` | Go arrow-bridge process lifecycle, stdin/stdout contract (proto `TransportFrame`), reconnect backoff |
 | `model` + `bridge` | Verified units, timestamps, instrument mapping, validity classification (lives in the `model`/`bridge` packages) |
 | `fingerprint` | Canonical versioned best-effort event fingerprint |
 | `writer` | Bounded Fluss append, acknowledgements, retry classification |
@@ -108,13 +108,13 @@ Missing required configuration makes readiness false. Production never falls bac
 5. Validate every active row and routing field.
 6. Validate the Go arrow-bridge binary exists and is runnable; a missing or non-runnable binary is a FATAL startup error (clear message, non-zero exit).
 7. Start arrow-bridge as subprocess with configured auth env vars.
-8. Java sniffs bridge's stdout (proto frames primary; NDJSON fallback).
+8. Java sniffs bridge's stdout (proto frames only).
 9. Enter READY only after recent successful Fluss append acknowledgement and acceptable clock offset.
 
 ### Packet processing algorithm
 
 ```text
-receive NDJSON line from stdin
+receive proto frame from stdin
 → parse JSON; reject malformed lines
 → validate token, price, and timestamp semantics
 → resolve instrument manifest row; quarantine missing tokens
@@ -142,7 +142,7 @@ Ingestion appends an accepted raw packet even if its fingerprint was seen before
 | Configurable count | `ARROW_HFT_CONNECTIONS` range 1..3 | `main.go` policy block |
 | Token split across sockets | `SubscriptionPlan.Slots` (`hft-0/1/2`) | `subscription_plan.go` |
 | Multi-slot supervisor | `runHFTSupervisor` (multi-slot) | `supervisor.go` |
-| One raw table | All slots → one proto stream (T6; NDJSON on `TRANSPORT=pipe`) → one `RawTickWriter` → one `raw_table_1` | Java `IngestionService` |
+| One raw table | All slots → one proto stream (T6) → one `RawTickWriter` → one `raw_table_1` | Java `IngestionService` |
 | Per-slot fidelity | `slot_id`/`connection_id`/`connection_epoch` on every event | bridge events |
 
 **The single deliberate guard (the only change required to enable 3 sockets):**
@@ -242,8 +242,8 @@ Logs include service, instance, connection scope, decoder/protocol version, mani
 
 Current golden-corpus coverage (Step 2 of the ingestion audit):
 
-- `go-bridge/testdata/golden/` — committed wire frames + NDJSON-format golden records (full-tick 196B, ltp-tick 40B, response 540B wire-only fixture never emitted as NDJSON, unknown-packet 64B), generated reproducibly by `go-bridge/cmd/gen-corpus`.
-- Go (`go-bridge/golden_corpus_test.go`): the real bridge path (SDK connect + `runHFT` against a fake broker) decodes the golden frames to NDJSON matching the golden records byte-for-byte, including the full depth ladder; the unknown packet is rejected at SDK decode and never emitted; `raw_payload`/`payload_hash` preserve the exact frame bytes + SHA-256.
+- `go-bridge/testdata/golden/` — committed wire frames + golden tick records (full-tick 196B, ltp-tick 40B, response 540B wire-only fixture, unknown-packet 64B), generated reproducibly by `go-bridge/cmd/gen-corpus`.
+- Go (`go-bridge/golden_corpus_test.go`): the real bridge path (SDK connect + `runHFT` against a fake broker) emits golden ticks matching the golden records byte-for-byte, including the full depth ladder; the unknown packet is rejected at SDK decode and never emitted; `raw_payload`/`payload_hash` preserve the exact frame bytes + SHA-256.
 - Java (`GoldenCorpusPayloadHashTest`): `PayloadHashValidator` accepts every golden packet and decodes it to the exact frame bytes; a tampered frame is rejected with `HASH_MISMATCH`.
 - Java service: unknown `feed` values are quarantined (`UNKNOWN_VERSION`) before trade classification (`IngestionService` step 3, `AC-ING-002` defense-in-depth; the SDK already rejects unknown packet types at decode).
 - Mode-coverage (HFT feed): the bridge emits HFT LTPC + FULL ticks through the vendored SDK (`hft_stream.go` `parseHFTLTP`/`parseHFTFull`, 40 B / 196 B zstd); the golden corpus (`go-bridge/testdata/golden/`) pins FULL and LTP frames byte-for-byte, and `hft_stream_test.go` pins the SDK parse layouts. Standard-stream decode coverage (13/17/93/249 B `ParseMarketTick` layouts, CAS trailer, `fromStandardTick`) was REMOVED 2026-08-14 with the Standard feed — the vendored SDK still carries those parsers (pinned third-party code) but the bridge never invokes them. The AutoLogin auth fix (validate-2fa host + appID field) remains in the vendored SDK.
