@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.trading.common.config.PlatformConfig;
+import com.trading.common.schema.CandlePreviewTableSchema;
 import com.trading.common.schema.CandleTableSchema;
 import java.util.HashMap;
 import java.util.Map;
@@ -161,38 +162,84 @@ class SignalJobConfigTest {
     }
 
     @Test
-    void rejectsDedupTtlDifferentFromPinned() {
+    void rejectsDedupTtlDifferentFromPinnedInProduction() {
+        // P1 (2026-08-29): the dedup pin is production-only — dev is tunable.
         Map<String, String> env = env();
+        env.put("DEPLOYMENT_ENV", "production");
         env.put("DEDUP_TTL_MS", "100");
         assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
     }
 
     @Test
-    void rejectsMissingDedupTtl() {
+    void rejectsMissingDedupTtlInProduction() {
         Map<String, String> env = env();
+        env.put("DEPLOYMENT_ENV", "production");
         env.remove("DEDUP_TTL_MS");
         assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
     }
 
     @Test
-    void rejectsCandleWindowDifferentFromPinned() {
+    void rejectsCandleWindowDifferentFromPinnedInProduction() {
         Map<String, String> env = env();
+        env.put("DEPLOYMENT_ENV", "production");
         env.put("CANDLE_WINDOW_MS", "20000");
         assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
     }
 
     @Test
-    void rejectsCheckpointIntervalDifferentFromPinned() {
+    void devAcceptsTunableDedupAndCandle() {
+        // P1: in dev the values are tunable within range.
         Map<String, String> env = env();
+        env.put("DEDUP_TTL_MS", "120000");
+        env.put("CANDLE_WINDOW_MS", "30000");
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertEquals(120_000L, cfg.dedupTtlMs());
+        assertEquals(30_000L, cfg.candleWindowMs());
+    }
+
+    @Test
+    void devRejectsOutOfRangeDedupAndCandle() {
+        Map<String, String> env = env();
+        env.put("DEDUP_TTL_MS", "50"); // below dev range 1000..600000
+        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
+
+        Map<String, String> env2 = env();
+        env2.put("CANDLE_WINDOW_MS", "999"); // below dev range 1000..60000
+        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env2));
+    }
+
+    @Test
+    void rejectsCheckpointIntervalDifferentFromPinnedInProduction() {
+        // P2 (2026-08-29): checkpoint pins are production-only — dev is tunable.
+        Map<String, String> env = env();
+        env.put("DEPLOYMENT_ENV", "production");
         env.put("CHECKPOINT_INTERVAL_MS", "5000");
         assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
     }
 
     @Test
-    void rejectsMaxConcurrentCheckpointsDifferentFromPinned() {
+    void rejectsMaxConcurrentCheckpointsDifferentFromPinnedInProduction() {
         Map<String, String> env = env();
+        env.put("DEPLOYMENT_ENV", "production");
         env.put("MAX_CONCURRENT_CHECKPOINTS", "3");
         assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
+    }
+
+    @Test
+    void devAcceptsTunableCheckpointAndRejectsOutOfRange() {
+        // P2: dev checkpoint keys are tunable within range.
+        Map<String, String> env = env();
+        env.put("CHECKPOINT_INTERVAL_MS", "2000");
+        env.put("CHECKPOINT_TIMEOUT_MS", "60000");
+        env.put("MAX_CONCURRENT_CHECKPOINTS", "2");
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertEquals(2_000L, cfg.checkpointIntervalMs());
+        assertEquals(60_000L, cfg.checkpointTimeoutMs());
+        assertEquals(2, cfg.maxConcurrentCheckpoints());
+
+        Map<String, String> bad = env();
+        bad.put("MAX_CONCURRENT_CHECKPOINTS", "9"); // above dev range 1..4
+        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(bad));
     }
 
     @Test
@@ -690,5 +737,94 @@ class SignalJobConfigTest {
         assertFalse(cfg.stateBackendManagedMemory());
         assertEquals(2, cfg.parallelism());
         assertEquals("file:///tmp/savepoints", cfg.savepointDir());
+    }
+
+    @Test
+    void previewEnabledDefaultsTrueWith1sIntervalAnd60sTtl() {
+        Map<String, String> env = env();
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertTrue(cfg.previewEnabled(), "preview visibility must default ON");
+        assertEquals(1_000L, cfg.previewIntervalMs(), "preview cadence must default to 1s");
+        assertEquals(60_000L, cfg.previewTtlMs(), "preview TTL must default to 60s");
+        assertEquals("1", cfg.previewSchemaVersion(), "preview schema version must be v1");
+    }
+
+    @Test
+    void honorsPreviewOverrides() {
+        Map<String, String> env = env();
+        env.put("PREVIEW_ENABLED", "false");
+        // Early signals consume previews — disable them too (validated pair).
+        env.put("EARLY_SIGNAL_ENABLED", "false");
+        env.put("PREVIEW_INTERVAL_MS", "500");
+        env.put("PREVIEW_TTL_MS", "30000");
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertFalse(cfg.previewEnabled());
+        assertEquals(500L, cfg.previewIntervalMs());
+        assertEquals(30_000L, cfg.previewTtlMs());
+    }
+
+    @Test
+    void rejectsNonPositivePreviewInterval() {
+        Map<String, String> env = env();
+        env.put("PREVIEW_INTERVAL_MS", "0");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(env));
+        assertTrue(e.getMessage().contains("PREVIEW_INTERVAL_MS"), e.getMessage());
+    }
+
+    @Test
+    void earlySignalDefaultsEnabledWithCanonicalRule() {
+        SignalJobConfig cfg = SignalJobConfig.from(env());
+        assertTrue(cfg.earlySignalEnabled());
+        assertEquals(SignalCandidatesTableColumns.CANONICAL_RULE_ID, cfg.earlySignalRuleId());
+    }
+
+    @Test
+    void earlySignalHonorsOverrideAndRequiresPreviews() {
+        Map<String, String> env = env();
+        env.put("EARLY_SIGNAL_RULE", "breakout-20-bullish-trend");
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertEquals("breakout-20-bullish-trend", cfg.earlySignalRuleId());
+
+        // Early signals consume preview rows — disabling previews without
+        // disabling early signals is a config contract violation (fail-fast).
+        Map<String, String> bad = env();
+        bad.put("PREVIEW_ENABLED", "false");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(bad));
+        assertTrue(e.getMessage().contains("EARLY_SIGNAL_ENABLED"), e.getMessage());
+    }
+
+    @Test
+    void writerRetriesDefaultsAndOverrides() {
+        // K2 (2026-08-29): default 2, tunable via FLUSS_WRITER_RETRIES.
+        assertEquals(2, SignalJobConfig.from(env()).writerRetries());
+
+        Map<String, String> env = env();
+        env.put("FLUSS_WRITER_RETRIES", "5");
+        assertEquals(5, SignalJobConfig.from(env).writerRetries());
+
+        Map<String, String> zero = env();
+        zero.put("FLUSS_WRITER_RETRIES", "0");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(zero));
+        assertTrue(e.getMessage().contains(">= 1"), e.getMessage());
+
+        Map<String, String> nonInt = env();
+        nonInt.put("FLUSS_WRITER_RETRIES", "abc");
+        IllegalStateException e2 = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(nonInt));
+        assertTrue(e2.getMessage().contains("integer"), e2.getMessage());
+    }
+
+    @Test
+    void previewTableDefaultsAndOverrides() {
+        // K3 (2026-08-29): PREVIEW_TABLE env, default from CandlePreviewTableSchema.
+        assertEquals(CandlePreviewTableSchema.TABLE,
+                SignalJobConfig.from(env()).previewTable());
+
+        Map<String, String> env = env();
+        env.put("PREVIEW_TABLE", "preview_custom");
+        assertEquals("preview_custom", SignalJobConfig.from(env).previewTable());
     }
 }

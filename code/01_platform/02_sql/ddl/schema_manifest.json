@@ -378,6 +378,20 @@
       "writer_owner": "Execution Gateway (Nautilus) \u2014 sole writer",
       "retention_policy": "7d",
       "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+    },
+    {
+      "table_name": "feature_candles_15s_preview",
+      "ddl_path": "30_feature_candles_15s_preview.sql",
+      "ddl_sha256": "e347baecf17e79fa3322b90ecaa547089a2f507038415f71f9c89c07bf111e11",
+      "table_kind": "KV",
+      "primary_key": "instrument_token, window_start",
+      "bucket_key": null,
+      "compatibility_class": "UNKNOWN",
+      "validated_matrix": "VM-FLUSS-CONN-007",
+      "schema_version": "1",
+      "writer_owner": "Signal job",
+      "retention_policy": "60s",
+      "lake_policy": "off"
     }
   ]
 }

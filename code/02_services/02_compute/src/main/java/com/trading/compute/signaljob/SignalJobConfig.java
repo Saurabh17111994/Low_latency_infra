@@ -1,6 +1,7 @@
 package com.trading.compute.signaljob;
 
 import com.trading.common.config.PlatformConfig;
+import com.trading.common.schema.CandlePreviewTableSchema;
 import com.trading.common.schema.CandleTableSchema;
 import java.io.Serializable;
 import java.util.Map;
@@ -56,6 +57,7 @@ public record SignalJobConfig(
         String database,
         String rawTable,
         String candleTable,
+        String previewTable,
         String quarantineTable,
         String rawSchemaVersion,
         String algorithmVersion,
@@ -82,6 +84,12 @@ public record SignalJobConfig(
         long signalQuantity,
         String formingRuleId,
         int formingLookbackCandles,
+        boolean previewEnabled,
+        long previewIntervalMs,
+        long previewTtlMs,
+        boolean earlySignalEnabled,
+        String earlySignalRuleId,
+        long earlySignalConfirmAfterMs,
         String formingBarTable,
         long formingBarWriteBatchMs,
         String positionStateTable,
@@ -102,6 +110,7 @@ public record SignalJobConfig(
         String s3Region,
         boolean s3PathStyle,
         long sinkWriteStallTimeoutMs,
+        int writerRetries,
         String tradeDecisionsTable,
         String tradeInstructionStateTable,
         boolean tradeDecisionsEnabled,
@@ -114,6 +123,8 @@ public record SignalJobConfig(
         StartupMode startupMode) implements Serializable {
 
     public static SignalJobConfig fromEnv() {
+        // G1 (2026-08-29): every declared config key must actually be read.
+        com.trading.common.config.ConfigGuard.assertAllKeysRead();
         return from(System.getenv());
     }
 
@@ -127,26 +138,33 @@ public record SignalJobConfig(
             throw new IllegalStateException("Config CONFIGURATION_VERSION must be explicit when "
                     + "EXECUTION_INTENT_ENABLED=true — no implicit execution contract version");
         }
+        boolean earlySignalEnabled = booleanValue(env, "EARLY_SIGNAL_ENABLED", true);
+        boolean previewEnabled = booleanValue(env, "PREVIEW_ENABLED", true);
+        if (earlySignalEnabled && !previewEnabled) {
+            throw new IllegalStateException("Config EARLY_SIGNAL_ENABLED=true requires "
+                    + "PREVIEW_ENABLED=true — the early-signal path consumes preview rows");
+        }
         return new SignalJobConfig(
                 bootstrapServers(env),
                 env.getOrDefault("FLUSS_DATABASE", "default"),
                 env.getOrDefault("RAW_TABLE", "raw_table_1"),
                 env.getOrDefault("CANDLE_TABLE", "feature_candles_15s"),
+                previewTable(env),
                 env.getOrDefault("QUARANTINE_TABLE", "ingestion_quarantine"),
                 env.getOrDefault("RAW_SCHEMA_VERSION", PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION),
                 requireCanonicalVersion(env, "ALGORITHM_VERSION",
                         CandleTableSchema.CANONICAL_ALGORITHM_VERSION),
                 configurationVersion,
                 env.getOrDefault("CANDLE_SCHEMA_VERSION", "2"),
-                requirePinnedLong(env, "DEDUP_TTL_MS", PlatformConfig.DEDUP_TTL_MS),
-                requirePinnedLong(env, "CANDLE_WINDOW_MS", PlatformConfig.CANDLE_WINDOW_MS),
+                dedupTtlMs(env),
+                candleWindowMs(env),
                 longValue(env, "WATERMARK_OUT_OF_ORDER_MS", 5_000L),
                 longValue(env, "ALLOWED_LATENESS_MS", 5_000L),
                 longValue(env, "SOURCE_IDLE_MS", 15_000L),
                 sourceIdleAlertMs(env),
-                requirePinnedLong(env, "CHECKPOINT_INTERVAL_MS", PlatformConfig.CHECKPOINT_INTERVAL_MS),
-                requirePinnedLong(env, "CHECKPOINT_TIMEOUT_MS", PlatformConfig.CHECKPOINT_TIMEOUT_MS),
-                requirePinnedInt(env, "MAX_CONCURRENT_CHECKPOINTS", PlatformConfig.MAX_CONCURRENT_CHECKPOINTS),
+                checkpointIntervalMs(env),
+                checkpointTimeoutMs(env),
+                maxConcurrentCheckpoints(env),
                 restartMaxAttempts(env),
                 restartDelayMs(env),
                 checkpointDir(env),
@@ -163,6 +181,13 @@ public record SignalJobConfig(
                 env.getOrDefault("FORMING_RULE_ID",
                         SignalCandidatesTableColumns.CANONICAL_FORMING_RULE_ID),
                 formingLookbackCandles(env),
+                previewEnabled,
+                positiveLong(env, "PREVIEW_INTERVAL_MS", 1_000L),
+                positiveLong(env, "PREVIEW_TTL_MS", 60_000L),
+                earlySignalEnabled,
+                env.getOrDefault("EARLY_SIGNAL_RULE",
+                        SignalCandidatesTableColumns.CANONICAL_RULE_ID),
+                positiveLong(env, "EARLY_SIGNAL_CONFIRM_AFTER_MS", 4_000L),
                 env.getOrDefault("FORMING_BAR_TABLE", "forming_bar"),
                 positiveLong(env, "FORMING_BAR_WRITE_BATCH_MS", 250L),
                 env.getOrDefault("POSITION_STATE_TABLE", "Position_State"),
@@ -183,6 +208,7 @@ public record SignalJobConfig(
                 s3Region(env),
                 s3PathStyle(env),
                 sinkWriteStallTimeoutMs(env),
+                parseWriterRetries(env),
                 env.getOrDefault("TRADE_DECISIONS_TABLE", "Trade_Decisions"),
                 env.getOrDefault("TRADE_INSTRUCTION_STATE_TABLE", "trade_instruction_state"),
                 booleanValue(env, "TRADE_DECISIONS_ENABLED", false),
@@ -219,6 +245,44 @@ public record SignalJobConfig(
     @Override
     public StartupMode startupMode() {
         return startupMode;
+    }
+
+    /** Preview visibility enabled (low-latency candles Phase 1). */
+    public boolean previewEnabled() {
+        return previewEnabled;
+    }
+
+    /** Preview emission cadence (default 1s). */
+    public long previewIntervalMs() {
+        return previewIntervalMs;
+    }
+
+    /** Preview row TTL in the KV table (default 60s — auto-expiry). */
+    public long previewTtlMs() {
+        return previewTtlMs;
+    }
+
+    /** Early-signal path enabled (low-latency candles Phase 2 — requires previews). */
+    public boolean earlySignalEnabled() {
+        return earlySignalEnabled;
+    }
+
+    /** Early-signal rule identity (defaults to the canonical breakout rule —
+     *  consistent with detection; the supersession chain stays coherent). */
+    public String earlySignalRuleId() {
+        return earlySignalRuleId;
+    }
+
+    /** Confirm-window shortening threshold (Phase 3): after this much
+     *  sustained preview hold, the tentative is confirmed early (default 4s —
+     *  4 consecutive 1s previews). */
+    public long earlySignalConfirmAfterMs() {
+        return earlySignalConfirmAfterMs;
+    }
+
+    /** Preview table schema version (pinned from the shared contract). */
+    public String previewSchemaVersion() {
+        return CandlePreviewTableSchema.ROW_SCHEMA_VERSION;
     }
 
     /** Startup-mode gate (CANDLE-KV-REPLAY-001 A3.3). */
@@ -335,6 +399,60 @@ public record SignalJobConfig(
                     + "(the rule compares against the previous completed candles), got " + value);
         }
         return value;
+    }
+
+    /**
+     * Checkpoint interval (P2, 2026-08-29): production-pinned to
+     * {@link PlatformConfig#CHECKPOINT_INTERVAL_MS}; dev tunable in
+     * 1000..600000 ms (low intervals speed up dev checkpoint cycling).
+     */
+    private static long checkpointIntervalMs(Map<String, String> env) {
+        if (isProduction(env)) {
+            return requirePinnedLong(env, "CHECKPOINT_INTERVAL_MS",
+                    PlatformConfig.CHECKPOINT_INTERVAL_MS);
+        }
+        long v = longValue(env, "CHECKPOINT_INTERVAL_MS", PlatformConfig.CHECKPOINT_INTERVAL_MS);
+        if (v < 1_000 || v > 600_000) {
+            throw new IllegalStateException("Config CHECKPOINT_INTERVAL_MS must be in "
+                    + "1000..600000 (dev), got " + v);
+        }
+        return v;
+    }
+
+    /**
+     * Checkpoint timeout (P2, 2026-08-29): production-pinned to
+     * {@link PlatformConfig#CHECKPOINT_TIMEOUT_MS}; dev tunable in
+     * 1000..600000 ms.
+     */
+    private static long checkpointTimeoutMs(Map<String, String> env) {
+        if (isProduction(env)) {
+            return requirePinnedLong(env, "CHECKPOINT_TIMEOUT_MS",
+                    PlatformConfig.CHECKPOINT_TIMEOUT_MS);
+        }
+        long v = longValue(env, "CHECKPOINT_TIMEOUT_MS", PlatformConfig.CHECKPOINT_TIMEOUT_MS);
+        if (v < 1_000 || v > 600_000) {
+            throw new IllegalStateException("Config CHECKPOINT_TIMEOUT_MS must be in "
+                    + "1000..600000 (dev), got " + v);
+        }
+        return v;
+    }
+
+    /**
+     * Max concurrent checkpoints (P2, 2026-08-29): production-pinned to
+     * {@link PlatformConfig#MAX_CONCURRENT_CHECKPOINTS}; dev tunable in 1..4.
+     */
+    private static int maxConcurrentCheckpoints(Map<String, String> env) {
+        if (isProduction(env)) {
+            return requirePinnedInt(env, "MAX_CONCURRENT_CHECKPOINTS",
+                    PlatformConfig.MAX_CONCURRENT_CHECKPOINTS);
+        }
+        int v = intValue(env, "MAX_CONCURRENT_CHECKPOINTS",
+                PlatformConfig.MAX_CONCURRENT_CHECKPOINTS);
+        if (v < 1 || v > 4) {
+            throw new IllegalStateException("Config MAX_CONCURRENT_CHECKPOINTS must be in "
+                    + "1..4 (dev), got " + v);
+        }
+        return v;
     }
 
     /**
@@ -772,6 +890,76 @@ public record SignalJobConfig(
             throw new IllegalStateException("Config SINK_WRITE_STALL_TIMEOUT_MS must be > 0 "
                     + "(pinned default " + PlatformConfig.SINK_WRITE_STALL_TIMEOUT_MS
                     + "), got " + value);
+        }
+        return value;
+    }
+
+    /**
+     * Dedup TTL (P1, 2026-08-29): pinned to {@link PlatformConfig#DEDUP_TTL_MS}
+     * in production (a deployment cannot silently change dedup semantics);
+     * in dev it is tunable within 1000..600000 ms (failure-injection tests
+     * need low TTLs).
+     */
+    private static long dedupTtlMs(Map<String, String> env) {
+        if (isProduction(env)) {
+            return requirePinnedLong(env, "DEDUP_TTL_MS", PlatformConfig.DEDUP_TTL_MS);
+        }
+        long v = longValue(env, "DEDUP_TTL_MS", PlatformConfig.DEDUP_TTL_MS);
+        if (v < 1_000 || v > 600_000) {
+            throw new IllegalStateException("Config DEDUP_TTL_MS must be in 1000..600000 (dev), got "
+                    + v + " (production pins " + PlatformConfig.DEDUP_TTL_MS + ")");
+        }
+        return v;
+    }
+
+    /**
+     * Candle window (P1, 2026-08-29): pinned to
+     * {@link PlatformConfig#CANDLE_WINDOW_MS} in production; in dev it is
+     * tunable within 1000..60000 ms.
+     */
+    private static long candleWindowMs(Map<String, String> env) {
+        if (isProduction(env)) {
+            return requirePinnedLong(env, "CANDLE_WINDOW_MS", PlatformConfig.CANDLE_WINDOW_MS);
+        }
+        long v = longValue(env, "CANDLE_WINDOW_MS", PlatformConfig.CANDLE_WINDOW_MS);
+        if (v < 1_000 || v > 60_000) {
+            throw new IllegalStateException("Config CANDLE_WINDOW_MS must be in 1000..60000 (dev), got "
+                    + v + " (production pins " + PlatformConfig.CANDLE_WINDOW_MS + ")");
+        }
+        return v;
+    }
+
+    /**
+     * Candle-preview table (K3, 2026-08-29). Default
+     * {@link CandlePreviewTableSchema#TABLE}; an override must be a
+     * non-blank identifier.
+     */
+    private static String previewTable(Map<String, String> env) {
+        String v = env.get("PREVIEW_TABLE");
+        if (v == null || v.isBlank()) {
+            return CandlePreviewTableSchema.TABLE;
+        }
+        return v.trim();
+    }
+
+    /**
+     * Fluss client writer retry budget (K2, 2026-08-29). Default 2; a present
+     * value must parse and be >= 1 — a zero retry budget would make every
+     * transient writer failure fatal.
+     */
+    private static int parseWriterRetries(Map<String, String> env) {
+        String v = env.get("FLUSS_WRITER_RETRIES");
+        if (v == null || v.isBlank()) {
+            return 2;
+        }
+        int value;
+        try {
+            value = Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException("Config FLUSS_WRITER_RETRIES must be an integer, got '" + v + "'");
+        }
+        if (value < 1) {
+            throw new IllegalStateException("Config FLUSS_WRITER_RETRIES must be >= 1, got " + value);
         }
         return value;
     }

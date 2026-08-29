@@ -1,11 +1,6 @@
 package com.trading.compute.signaljob;
 
-import java.util.ArrayList;
-import java.util.List;
 import org.apache.flink.api.common.functions.OpenContext;
-import org.apache.flink.api.common.state.ValueState;
-import org.apache.flink.api.common.state.ValueStateDescriptor;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.table.data.GenericRowData;
@@ -39,23 +34,20 @@ import org.apache.flink.util.Collector;
  * closes per (instrument, window_end).
  *
  * <p>Keyed state: two bounded ring buffers (highs, closes) of the last
- * {@code lookback} completed candles per instrument. Candidate lifecycle
- * (max-one-active, supersession, expiry) is intentionally NOT implemented in
- * this phase — it lands with the postponed ranking work.
+ * {@code lookback} completed candles per instrument, held in the shared
+ * {@link SignalLookbackState} helper (Phase 2, 2026-08-29 — same descriptors
+ * as before, restore-compatible; the early-signal path reuses the same
+ * helper). Candidate lifecycle (max-one-active, supersession, expiry) is
+ * intentionally NOT implemented in this function — the active-signal gate is
+ * a separate operator.
  */
 public class SignalDetectionFunction extends KeyedProcessFunction<Long, RowData, RowData> {
 
     private static final long serialVersionUID = 1L;
 
-    private static final ValueStateDescriptor<List<Long>> HIGHS_DESCRIPTOR =
-            new ValueStateDescriptor<>("signal-candle-highs", Types.LIST(Types.LONG));
-    private static final ValueStateDescriptor<List<Long>> CLOSES_DESCRIPTOR =
-            new ValueStateDescriptor<>("signal-candle-closes", Types.LIST(Types.LONG));
-
     private final SignalJobConfig config;
 
-    private transient ValueState<List<Long>> highsState;
-    private transient ValueState<List<Long>> closesState;
+    private transient SignalLookbackState lookback;
     private transient Counter detectedCounter;
 
     public SignalDetectionFunction(SignalJobConfig config) {
@@ -64,8 +56,10 @@ public class SignalDetectionFunction extends KeyedProcessFunction<Long, RowData,
 
     @Override
     public void open(OpenContext openContext) {
-        highsState = getRuntimeContext().getState(HIGHS_DESCRIPTOR);
-        closesState = getRuntimeContext().getState(CLOSES_DESCRIPTOR);
+        lookback = new SignalLookbackState(
+                getRuntimeContext().getState(SignalLookbackState.highsDescriptor()),
+                getRuntimeContext().getState(SignalLookbackState.closesDescriptor()),
+                config.signalLookbackCandles());
         detectedCounter = getRuntimeContext().getMetricGroup().counter("compute.signals.detected");
     }
 
@@ -83,43 +77,9 @@ public class SignalDetectionFunction extends KeyedProcessFunction<Long, RowData,
         String exchange = candle.getString(CandleTableColumns.EXCHANGE).toString();
         String symbol = candle.getString(CandleTableColumns.SYMBOL).toString();
 
-        List<Long> highs = highsState.value();
-        if (highs == null) {
-            highs = new ArrayList<>();
-        }
-        List<Long> closes = closesState.value();
-        if (closes == null) {
-            closes = new ArrayList<>();
-        }
-
-        int lookback = config.signalLookbackCandles();
-        boolean fired = false;
-        if (highs.size() >= lookback && closes.size() >= lookback) {
-            long maxHigh = 0;
-            for (long h : highs) {
-                maxHigh = Math.max(maxHigh, h);
-            }
-            long sumCloses = 0;
-            for (long c : closes) {
-                sumCloses += c;
-            }
-            boolean bullish = close > open;
-            boolean breakout = close > maxHigh;
-            boolean trend = close * (long) closes.size() > sumCloses;
-            fired = bullish && breakout && trend;
-        }
-
+        boolean fired = lookback.evaluate(open, close);
         // Ring buffers over completed candles: append current, drop oldest beyond lookback.
-        highs.add(high);
-        closes.add(close);
-        while (highs.size() > lookback) {
-            highs.remove(0);
-        }
-        while (closes.size() > lookback) {
-            closes.remove(0);
-        }
-        highsState.update(highs);
-        closesState.update(closes);
+        lookback.append(high, close);
 
         if (fired) {
             detectedCounter.inc();

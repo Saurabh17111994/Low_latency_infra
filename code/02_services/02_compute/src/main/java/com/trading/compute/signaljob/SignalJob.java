@@ -234,6 +234,46 @@ public final class SignalJob {
                 .name("candle-15s")
                 .uid("candle-15s");
 
+        // --- Low-latency candles Phase 1 (2026-08-29): live preview path ---
+        // A SECOND, parallel window over the same deduped ticks emits the
+        // in-progress OHLCV every PREVIEW_INTERVAL_MS (default 1s) to the
+        // ephemeral feature_candles_15s_preview KV table (TTL 60s). The final
+        // candle path above is byte-identical (same accumulator, same emit).
+        // The preview window is intentionally separate: it must NOT run the
+        // CandleInvariantCheck (partial OHLCV), must NOT touch the
+        // CandleKvFirstWriteWinsFunction (previews are upserts, not
+        // emissions), and must NOT feed signal detection (partial candles
+        // would corrupt its lookback). The previews stream is hoisted out of
+        // the guard so Phase 2's EarlySignalFunction can consume it.
+        DataStream<RowData> previews = null;
+        if (config.previewEnabled()) {
+            previews = deduped
+                    .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
+                    .window(TumblingEventTimeWindows.of(Duration.ofMillis(config.candleWindowMs())))
+                    .trigger(CandlePreviewTrigger.of(Duration.ofMillis(config.previewIntervalMs())))
+                    .allowedLateness(Duration.ofMillis(config.allowedLatenessMs()))
+                    .aggregate(new CandleAggregateFunction(), new CandlePreviewEmitFunction(config))
+                    .returns(CandlePreviewColumns.ROW_TYPE_INFO)
+                    .name("candle-preview-15s")
+                    .uid("candle-preview-15s");
+
+            previews.sinkTo(FlussSink.<RowData>builder()
+                            .setBootstrapServers(config.bootstrapServers())
+                            .setDatabase(config.database())
+                            .setTable(config.previewTable())
+                            // KV upsert: same PK as the final candle, so each
+                            // 1s preview overwrites the same row (the candle
+                            // "grows" live) and the row expires after the 60s
+                            // TTL. (false,false) RowDataSerializationSchema maps
+                            // INSERT RowKinds to UPSERTs — same as the main sink.
+                            .setSerializationSchema(new RowDataSerializationSchema(false, false))
+                            .setOption("client.request-timeout",
+                                    config.sinkWriteStallTimeoutMs() + "ms")
+                            .build())
+                    .name("feature-candles-15s-preview-sink")
+                    .uid("feature-candles-15s-preview-sink");
+        }
+
         // REQ-FC-006: raw ticks dropped as beyond-allowed-lateness are counted
         // (compute.candles.late.dropped) instead of vanishing silently. The
         // counter operator is observability-only — no keyed state, no output.
@@ -280,7 +320,7 @@ public final class SignalJob {
                                 .setSerializationSchema(new RowDataSerializationSchema(false, false))
                                 .setOption("client.request-timeout",
                                         config.sinkWriteStallTimeoutMs() + "ms")
-                                .setOption("client.writer.retries", "2")
+                                .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
                                 .build())
                 .name("feature-candles-15s-sink")
                 .uid("feature-candles-15s-sink");
@@ -307,7 +347,7 @@ public final class SignalJob {
                         .setSerializationSchema(new RowDataSerializationSchema(true, true))
                         .setOption("client.request-timeout",
                                 config.sinkWriteStallTimeoutMs() + "ms")
-                        .setOption("client.writer.retries", "2")
+                        .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
                         .build())
                 .name("candle-invalid-quarantine-sink")
                 .uid("candle-invalid-quarantine-sink");
@@ -397,7 +437,7 @@ public final class SignalJob {
                                 .setSerializationSchema(new RowDataSerializationSchema(false, false))
                                 .setOption("client.request-timeout",
                                         config.sinkWriteStallTimeoutMs() + "ms")
-                                .setOption("client.writer.retries", "2")
+                                .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
                                 .build())
                 .name("forming-bar-sink")
                 .uid("forming-bar-sink");
@@ -412,6 +452,31 @@ public final class SignalJob {
         // (checkpointed ValueState) and is cleared only on explicit CLOSED.
         // Stuck ACTIVE never auto-frees — needs CLOSED or admin clear.
         DataStream<RowData> allSignals = signals.union(formingSignals);
+
+        // --- Low-latency candles Phase 2 (2026-08-29): early-signal path ---
+        // EarlySignalFunction consumes (previews, finals) keyed by instrument:
+        // previews → TENTATIVE candidate (once per window); finals → update
+        // the shared completed-candle lookback + settle the tentative with a
+        // CONFIRM (rule held) or CANCEL (rule failed) row superseding it.
+        //
+        // CRITICAL: early rows (tentative/confirm/cancel) bypass
+        // ActiveSignalFeedbackFunction — the max-one-active gate must not
+        // swallow the CONFIRM because a TENTATIVE set ACTIVE first. They also
+        // bypass the KV current-state sink (CanonicalSignalFilterFunction):
+        // only finals are authoritative for position-opening. Early rows go
+        // to the LOG candidates sink ONLY (auditable supersession chain).
+        DataStream<RowData> earlySignals = null;
+        if (config.earlySignalEnabled() && previews != null) {
+            earlySignals = previews
+                    .connect(candles)
+                    .keyBy(
+                            row -> row.getLong(CandlePreviewColumns.INSTRUMENT_TOKEN),
+                            row -> row.getLong(CandleTableColumns.INSTRUMENT_TOKEN))
+                    .process(new EarlySignalFunction(config))
+                    .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
+                    .name("early-signal")
+                    .uid("early-signal");
+        }
 
         FlussSource<RowData> positionStateSource = FlussSource.<RowData>builder()
                 .setBootstrapServers(config.bootstrapServers())
@@ -441,7 +506,7 @@ public final class SignalJob {
                                 .setSerializationSchema(new RowDataSerializationSchema(true, true))
                                 .setOption("client.request-timeout",
                                         config.sinkWriteStallTimeoutMs() + "ms")
-                                .setOption("client.writer.retries", "2")
+                                .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
                                 .build())
                 .name("signal-candidates-sink")
                 .uid("signal-candidates-sink");
@@ -457,10 +522,29 @@ public final class SignalJob {
                                 .setSerializationSchema(new RowDataSerializationSchema(false, false))
                                 .setOption("client.request-timeout",
                                         config.sinkWriteStallTimeoutMs() + "ms")
-                                .setOption("client.writer.retries", "2")
+                                .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
                                 .build())
                 .name("signal-candidates-current-sink")
                 .uid("signal-candidates-current-sink");
+
+        // Early-signal rows → LOG candidates sink ONLY (bypasses the
+        // active-signal gate + KV current filter — see the Phase 2 comment
+        // above). Tentative/confirm/cancel are an auditable supersession
+        // chain; the authoritative position trigger stays the gated finals.
+        if (earlySignals != null) {
+            earlySignals
+                    .sinkTo(FlussSink.<RowData>builder()
+                                    .setBootstrapServers(config.bootstrapServers())
+                                    .setDatabase(config.database())
+                                    .setTable(config.signalCandidatesTable())
+                                    .setSerializationSchema(new RowDataSerializationSchema(true, true))
+                                    .setOption("client.request-timeout",
+                                            config.sinkWriteStallTimeoutMs() + "ms")
+                                    .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
+                                    .build())
+                    .name("early-signal-candidates-sink")
+                    .uid("early-signal-candidates-sink");
+        }
 
         // Execution intent is a separate, explicitly disabled-by-default
         // branch. It consumes the immutable candidate stream but does not
@@ -479,7 +563,7 @@ public final class SignalJob {
                             .setSerializationSchema(new RowDataSerializationSchema(true, true))
                             .setOption("client.request-timeout",
                                     config.sinkWriteStallTimeoutMs() + "ms")
-                            .setOption("client.writer.retries", "2")
+                            .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
                             .build())
                     .name("execution-intent-sink")
                     .uid("execution-intent-sink");
@@ -686,6 +770,13 @@ public final class SignalJob {
                     .getTable(org.apache.fluss.metadata.TablePath.of(config.database(), config.candleTable()))
                     .getTableInfo();
             TableContractValidator.validateCandleKvTable(candleKv);
+            if (config.previewEnabled()) {
+                org.apache.fluss.metadata.TableInfo previewKv = conn
+                        .getTable(org.apache.fluss.metadata.TablePath.of(
+                                config.database(), config.previewTable()))
+                        .getTableInfo();
+                TableContractValidator.validatePreviewTable(previewKv);
+            }
             org.apache.fluss.metadata.TableInfo signalLog = conn
                     .getTable(org.apache.fluss.metadata.TablePath.of(
                             config.database(), config.signalCandidatesTable()))
