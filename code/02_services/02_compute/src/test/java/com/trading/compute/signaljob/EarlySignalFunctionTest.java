@@ -104,7 +104,7 @@ class EarlySignalFunctionTest {
         return row;
     }
 
-    /** Preview row (14 columns, CandlePreviewColumns layout, is_preview=true). */
+    /** Preview row (15 columns, CandlePreviewColumns v2 layout, is_preview=true). */
     private static GenericRowData preview(long token, long start, long end,
             long open, long high, long low, long close) {
         GenericRowData row = new GenericRowData(CandlePreviewColumns.FIELD_COUNT);
@@ -121,7 +121,8 @@ class EarlySignalFunctionTest {
         row.setField(CandlePreviewColumns.TICK_COUNT, 5);
         row.setField(CandlePreviewColumns.IS_PREVIEW, true);
         row.setField(CandlePreviewColumns.OUTPUT_TS, end - 1_000L);
-        row.setField(CandlePreviewColumns.SCHEMA_VERSION, StringData.fromString("1"));
+        row.setField(CandlePreviewColumns.LAST_EVENT_TS, end - 2_000L);
+        row.setField(CandlePreviewColumns.SCHEMA_VERSION, StringData.fromString("2"));
         return row;
     }
 

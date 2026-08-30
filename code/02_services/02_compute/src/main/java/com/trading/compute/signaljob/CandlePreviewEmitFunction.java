@@ -93,6 +93,12 @@ public class CandlePreviewEmitFunction
         row.setField(CandlePreviewColumns.TICK_COUNT, (int) acc.tickCount);
         row.setField(CandlePreviewColumns.IS_PREVIEW, true);
         row.setField(CandlePreviewColumns.OUTPUT_TS, outputTs);
+        // v2 (2026-08-30): event time of the latest tick incorporated into
+        // this preview. output_ts - last_event_ts = per-row broker→table
+        // latency (REQ-FC-002 target < 1s). Empty accumulator (no ticks yet,
+        // timer fired on schedule) → no measurable latency, stamp output_ts.
+        row.setField(CandlePreviewColumns.LAST_EVENT_TS,
+                acc.lastEventTime == Long.MIN_VALUE ? outputTs : acc.lastEventTime);
         row.setField(CandlePreviewColumns.SCHEMA_VERSION,
                 StringData.fromString(config.previewSchemaVersion()));
         return row;

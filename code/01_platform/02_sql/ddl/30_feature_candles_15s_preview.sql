@@ -10,7 +10,9 @@
 -- Lake: none — previews are transient; no Iceberg offload (the final
 --   candle table owns the historical record).
 -- Scope: account_scope_id
--- Schema version: 1 (2026-08-29 — low-latency candles Phase 1)
+-- Schema version: 2 (2026-08-30 — adds last_event_ts for the per-row
+--   broker→table latency measurement: output_ts - last_event_ts, the core
+--   e2e metric with target < 1s, REQ-FC-002. v1: 2026-08-29 Phase 1.)
 --
 -- Writes: CandlePreviewEmitFunction (compute job) — same PK as the final
 --   candle, so an upsert overwrites the same row each 1s tick; the row "grows"
@@ -32,6 +34,7 @@ CREATE TABLE feature_candles_15s_preview (
     tick_count              INT         NOT NULL,
     is_preview              BOOLEAN     NOT NULL,
     output_ts               BIGINT      NOT NULL,
+    last_event_ts           BIGINT      NOT NULL,
     schema_version          STRING      NOT NULL,
     PRIMARY KEY (instrument_token, window_start) NOT ENFORCED
 ) WITH (

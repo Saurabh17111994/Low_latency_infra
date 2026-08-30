@@ -382,16 +382,16 @@
     {
       "table_name": "feature_candles_15s_preview",
       "ddl_path": "30_feature_candles_15s_preview.sql",
-      "ddl_sha256": "e347baecf17e79fa3322b90ecaa547089a2f507038415f71f9c89c07bf111e11",
+      "ddl_sha256": "afb01ad964823a50c9163d296cf247edf8416d29c133bccac4017771488e6173",
       "table_kind": "KV",
       "primary_key": "instrument_token, window_start",
       "bucket_key": null,
       "compatibility_class": "UNKNOWN",
       "validated_matrix": "VM-FLUSS-CONN-007",
-      "schema_version": "1",
+      "schema_version": "2",
       "writer_owner": "Signal job",
       "retention_policy": "60s",
-      "lake_policy": "off"
+      "lake_policy": "enabled=false"
     }
   ]
 }

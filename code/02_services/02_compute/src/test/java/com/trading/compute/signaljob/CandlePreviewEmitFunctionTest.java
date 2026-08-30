@@ -50,12 +50,13 @@ class CandlePreviewEmitFunctionTest {
         acc.closePaise = 105;  // tracks the latest price
         acc.volume = 25;
         acc.tickCount = 7;
+        acc.lastEventTime = 1_750_000_004_700L;  // event time of latest tick
 
         TimeWindow window = new TimeWindow(T0, T0 + 15_000L);
         GenericRowData row = CandlePreviewEmitFunction.buildRow(2885L, acc, window,
                 1_750_000_005_000L, config);
 
-        assertEquals(14, row.getArity(), "preview row must have the shared 14-column layout");
+        assertEquals(15, row.getArity(), "preview row must have the shared 15-column v2 layout");
         assertEquals(2885L, row.getLong(CandlePreviewColumns.INSTRUMENT_TOKEN));
         assertEquals("NSE", row.getString(CandlePreviewColumns.EXCHANGE).toString());
         assertEquals("TEST", row.getString(CandlePreviewColumns.SYMBOL).toString());
@@ -71,9 +72,27 @@ class CandlePreviewEmitFunctionTest {
         // The visibility marker + pinned preview schema version:
         assertTrue(row.getBoolean(CandlePreviewColumns.IS_PREVIEW),
                 "preview row must carry is_preview=TRUE");
-        assertEquals("1", row.getString(CandlePreviewColumns.SCHEMA_VERSION).toString(),
-                "preview schema version must be the pinned v1");
+        assertEquals("2", row.getString(CandlePreviewColumns.SCHEMA_VERSION).toString(),
+                "preview schema version must be the pinned v2");
         assertEquals(1_750_000_005_000L, row.getLong(CandlePreviewColumns.OUTPUT_TS));
+        // v2 (2026-08-30): the per-row e2e latency inputs — output_ts minus
+        // last_event_ts here is 300ms (broker→preview-table for this row).
+        assertEquals(1_750_000_004_700L, row.getLong(CandlePreviewColumns.LAST_EVENT_TS),
+                "last_event_ts must be the accumulator's latest tick event time");
+    }
+
+    @Test
+    @DisplayName("empty accumulator stamps last_event_ts = output_ts (no measurable latency)")
+    void emptyAccumulatorStampsOutputTs() {
+        SignalJobConfig config = config();
+        CandleAccumulator acc = new CandleAccumulator();  // lastEventTime = MIN_VALUE
+        acc.exchange = "NSE";
+        acc.symbol = "TEST";
+        TimeWindow window = new TimeWindow(T0, T0 + 15_000L);
+        GenericRowData row = CandlePreviewEmitFunction.buildRow(2885L, acc, window,
+                1_750_000_005_000L, config);
+        assertEquals(1_750_000_005_000L, row.getLong(CandlePreviewColumns.LAST_EVENT_TS),
+                "no ticks yet — last_event_ts degrades to output_ts so output_ts - last_event_ts = 0");
     }
 
     @Test
@@ -81,15 +100,15 @@ class CandlePreviewEmitFunctionTest {
     void previewOmitsFinalOnlyColumns() {
         // The preview table deliberately drops algorithm_version and
         // configuration_version (CanonicalCandlePolicy fields) — they only
-        // make sense on a COMPLETED candle. Guard the 14-column layout.
+        // make sense on a COMPLETED candle. Guard the 15-column v2 layout.
         SignalJobConfig config = config();
-        assertEquals(14, CandlePreviewColumns.FIELD_COUNT);
+        assertEquals(15, CandlePreviewColumns.FIELD_COUNT);
         for (String name : CandlePreviewColumns.NAMES) {
             if (name.equals("algorithm_version") || name.equals("configuration_version")) {
                 throw new AssertionError("preview must not carry " + name);
             }
         }
-        assertTrue(CandlePreviewColumns.NAMES.length == 14,
-                "preview row must stay 14 columns");
+        assertTrue(CandlePreviewColumns.NAMES.length == 15,
+                "preview row must stay 15 columns (v2: +last_event_ts)");
     }
 }

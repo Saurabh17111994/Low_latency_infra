@@ -35,7 +35,10 @@ class SignalJobConfigTest {
         assertEquals(30_000L, cfg.checkpointTimeoutMs());
         assertEquals(1, cfg.maxConcurrentCheckpoints());
         // documented tuning defaults
-        assertEquals(5_000L, cfg.outOfOrderMs());
+        // Single-timeline rule (2026-08-30): 500ms out-of-orderness — pins
+        // the default for BOTH preview and final-candle paths. If you change
+        // this, change it with measured real-feed lateness data, not a guess.
+        assertEquals(500L, cfg.outOfOrderMs());
         assertEquals(5_000L, cfg.allowedLatenessMs());
         assertEquals(15_000L, cfg.sourceIdleMs());
         assertEquals(60_000L, cfg.sourceIdleAlertMs());
@@ -746,7 +749,7 @@ class SignalJobConfigTest {
         assertTrue(cfg.previewEnabled(), "preview visibility must default ON");
         assertEquals(1_000L, cfg.previewIntervalMs(), "preview cadence must default to 1s");
         assertEquals(60_000L, cfg.previewTtlMs(), "preview TTL must default to 60s");
-        assertEquals("1", cfg.previewSchemaVersion(), "preview schema version must be v1");
+        assertEquals("2", cfg.previewSchemaVersion(), "preview schema version must be v2 (last_event_ts)");
     }
 
     @Test

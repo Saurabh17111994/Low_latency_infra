@@ -39,9 +39,10 @@ public final class CandlePreviewColumns {
     public static final int TICK_COUNT = 10;
     public static final int IS_PREVIEW = 11;
     public static final int OUTPUT_TS = 12;
-    public static final int SCHEMA_VERSION = 13;
+    public static final int LAST_EVENT_TS = 13;
+    public static final int SCHEMA_VERSION = 14;
 
-    /** Field count from the shared contract (must stay 14). */
+    /** Field count from the shared contract (15 since v2). */
     public static final int FIELD_COUNT = CandlePreviewTableSchema.FIELD_COUNT;
 
     /** DDL column names in index order — derived from the shared contract. */
@@ -69,6 +70,7 @@ public final class CandlePreviewColumns {
                 new IntType(),                           // tick_count
                 new BooleanType(),                       // is_preview
                 new BigIntType(),                        // output_ts
+                new BigIntType(),                        // last_event_ts
                 new VarCharType(VarCharType.MAX_LENGTH)  // schema_version
             });
 }

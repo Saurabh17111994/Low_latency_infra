@@ -158,7 +158,16 @@ public record SignalJobConfig(
                 env.getOrDefault("CANDLE_SCHEMA_VERSION", "2"),
                 dedupTtlMs(env),
                 candleWindowMs(env),
-                longValue(env, "WATERMARK_OUT_OF_ORDER_MS", 5_000L),
+                // Single-timeline rule (decision 2026-08-30): the SAME wait
+                // bounds both the preview path and the final candle path, so
+                // live decisions and backtests always see the same tick set.
+                // 500ms: the fake broker delivers in order; revisit ONLY with
+                // measured real-feed lateness percentiles (set just above the
+                // observed p99.9 arrival lag) — never guess upward, every ms
+                // here is added preview latency on every window tail
+                // (measured 2026-08-30: 5s default produced p95=5.7s e2e,
+                // with the last-preview p50=6.5s ≈ the wait itself).
+                longValue(env, "WATERMARK_OUT_OF_ORDER_MS", 500L),
                 longValue(env, "ALLOWED_LATENESS_MS", 5_000L),
                 longValue(env, "SOURCE_IDLE_MS", 15_000L),
                 sourceIdleAlertMs(env),

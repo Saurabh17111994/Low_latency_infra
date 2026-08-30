@@ -114,7 +114,7 @@ public final class TableContractValidator {
         }
         validateSchema(info, CandlePreviewTableSchema.COLUMNS,
                 CandlePreviewTableSchema.COLUMN_TYPE_ROOTS,
-                "14-column v1 candle preview", CANDLE_CONTRACT);
+                "15-column v2 candle preview (last_event_ts for e2e latency)", CANDLE_CONTRACT);
         validateRouting(info, CandlePreviewTableSchema.BUCKET_KEY,
                 CandlePreviewTableSchema.BUCKET_COUNT, CANDLE_CONTRACT);
     }

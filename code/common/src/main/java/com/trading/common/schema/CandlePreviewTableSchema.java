@@ -25,8 +25,14 @@ public final class CandlePreviewTableSchema {
 
     private CandlePreviewTableSchema() {}
 
-    /** DDL schema version of the preview row (v1 since Phase 1). */
-    public static final String ROW_SCHEMA_VERSION = "1";
+    /**
+     * DDL schema version of the preview row.
+     * v2 (2026-08-30): adds {@code last_event_ts} — the event time of the
+     * latest tick incorporated into the preview. {@code output_ts -
+     * last_event_ts} is the per-row broker→preview-table latency, the core
+     * e2e measurement (target < 1s, REQ-FC-002).
+     */
+    public static final String ROW_SCHEMA_VERSION = "2";
 
     /** KV current-state table (upsert on PK instrument_token, window_start). */
     public static final String TABLE = "feature_candles_15s_preview";
@@ -42,9 +48,10 @@ public final class CandlePreviewTableSchema {
     public static final String BUCKET_KEY = "instrument_token";
 
     /**
-     * The 14 preview columns in DDL index order (v1). Physical writer layouts
-     * ({@code CandlePreviewColumns}) MUST derive from this list so the sink,
-     * the preflight metadata validator, and the DDL cannot drift apart.
+     * The 15 preview columns in DDL index order (v2). Physical writer
+     * layouts ({@code CandlePreviewColumns}) MUST derive from this list so
+     * the sink, the preflight metadata validator, and the DDL cannot drift
+     * apart.
      */
     public static final List<String> COLUMNS = List.of(
             "instrument_token",
@@ -60,6 +67,7 @@ public final class CandlePreviewTableSchema {
             "tick_count",
             "is_preview",
             "output_ts",
+            "last_event_ts",
             "schema_version");
 
     /**
@@ -82,12 +90,13 @@ public final class CandlePreviewTableSchema {
             "INTEGER",  // tick_count
             "BOOLEAN",  // is_preview
             "BIGINT",   // output_ts
+            "BIGINT",   // last_event_ts
             "STRING");  // schema_version
 
     /** DDL nullability intent per column (all NOT NULL in the DDL). */
     public static final List<Boolean> COLUMN_NULLABLE_IN_DDL = List.of(
             false, false, false, false, false, false, false, false, false,
-            false, false, false, false, false);
+            false, false, false, false, false, false);
 
     /** Column count — must equal {@code COLUMNS.size()}; mirrors the DDL. */
     public static final int FIELD_COUNT = COLUMNS.size();
