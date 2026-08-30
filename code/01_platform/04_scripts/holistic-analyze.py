@@ -180,6 +180,43 @@ def main():
     print(f"- preview freshness at run end (staleness): p50={fmt_ms(pct(freshness,50))} "
           f"p95={fmt_ms(pct(freshness,95))} p99={fmt_ms(pct(freshness,99))} (n={len(freshness)})")
 
+    # ---- Final candle path (2026-08-30): window-close → committed latency ----
+    # feature_candles_15s (v2) has output_ts + window_end but no
+    # last_event_ts, so the measurable latency is output_ts - window_end:
+    # how long after a 15s window closed did its FINAL row land in the
+    # table. (For context: the last tick of the window typically arrives
+    # just before window_end, so broker→final-candle ≈ this value + tick
+    # lead-in. This is the broker→FEATURE-TABLE headline number.)
+    final_rows = collect_rows("feature_candles_15s", cp, out_dir)
+    final_rows = list(dict.fromkeys(final_rows))  # same re-delivery dedupe
+    close_lat = []
+    for ln in final_rows:
+        # DDL column order: token,exchange,symbol,window_start,window_end,
+        # o,h,l,c,v,tick_count,algo_ver,config_ver,output_ts,schema_version
+        # → output_ts is index 13 (15 fields; index 12 is config_version —
+        # a first draft used 12 and silently read 0 rows).
+        f = ln.strip("()").split(",")
+        if len(f) >= 15:
+            try:
+                ots, wend = int(f[13]), int(f[4])
+                # window_end is window_start+15000-1 style; the window
+                # CLOSE is the end boundary. Negative = row stamped before
+                # close (shouldn't happen); huge = replay of old rows.
+                lat = ots - wend
+                if run_start and not (run_start <= ots <= (run_end or ots)):
+                    continue
+                if 0 <= lat <= 60000:
+                    close_lat.append(lat)
+            except ValueError:
+                continue
+    print(f"\n### Final candle path ({len(close_lat)} final candles in run window)")
+    if close_lat:
+        print(f"- window-close → committed (output_ts - window_end): "
+              f"p50={fmt_ms(pct(close_lat,50))} p95={fmt_ms(pct(close_lat,95))} "
+              f"p99={fmt_ms(pct(close_lat,99))} (n={len(close_lat)})")
+    else:
+        print("- no final-candle rows in run window (final emission off?)")
+
     # ---- Signal_Candidates: volume by status + settlement balance ----
     # NOTE: detection_ts/evaluation_ts are EVENT-TIME (window-aligned), so
     # no wall-clock latency is derivable here — per-operator wall-clock
