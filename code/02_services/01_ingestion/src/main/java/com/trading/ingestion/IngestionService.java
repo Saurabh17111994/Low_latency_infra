@@ -154,6 +154,8 @@ public final class IngestionService {
     private final SafetySink safetyHaltWriter;
     private final String manifestFingerprint;
     private final String assignedTokenSetHash;
+    /** Tokens of the loaded manifest, subscription order (G3 handoff). */
+    private final java.util.List<Long> subscriptionTokens;
     private final java.util.Set<String> safetyEmitted = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final ReadinessFile readinessFile;
     /** R-209: last readiness value written + timestamp (per-tick write guard). */
@@ -210,6 +212,14 @@ public final class IngestionService {
         for (Instrument inst : instruments) {
             instrumentMap.put(inst.instrumentToken(), inst);
         }
+        // G3 single source of truth: startBridge hands exactly this set to
+        // the Go child, so the bridge can never re-resolve a different one
+        // (observed 2026-08-31: bridge env carried 1,024 tokens while Java
+        // loaded the full 2,431-row CSV → every bridge event tripped the
+        // fingerprint cross-check with a false mismatch).
+        this.subscriptionTokens = instruments.stream()
+                .map(Instrument::instrumentToken)
+                .toList();
         // T2 G2 Ingest: tunable pending limits from IngestionConfig (env-driven 80%/100%).
         // Defaults 150k/192M (3k); 50k/64M (1k) via env override. Halt stays fail-closed.
         this.tracker = new AppendTracker(config.maxPendingRecords, config.maxPendingBytes,
@@ -618,10 +628,35 @@ public final class IngestionService {
         if (System.getenv("TRANSPORT") == null) {
             pb.environment().put("TRANSPORT", "proto");
         }
+        // G3 single source of truth: hand the bridge EXACTLY the manifest
+        // token set Java loaded — the bridge's ARROW_INSTRUMENT_TOKENS env
+        // path (parseTokensEnv) takes precedence over its own CSV read, so
+        // the child subscribes to precisely what Java's fingerprint and
+        // safety digests were computed over. Any inherited value from the
+        // parent environment is overwritten on purpose: after this change a
+        // fingerprint mismatch can only mean real broker-side drift.
+        pb.environment().put("ARROW_INSTRUMENT_TOKENS", joinTokensCsv(subscriptionTokens));
+        LOG.info("ingestion: bridge token handoff ({} instruments from loaded manifest, "
+                + "overriding any inherited ARROW_INSTRUMENT_TOKENS)", subscriptionTokens.size());
         pb.redirectErrorStream(false);
         Process process = pb.start();
         LOG.info("ingestion: arrow-bridge started (pid={})", process.pid());
         return process;
+    }
+
+    /**
+     * Join manifest tokens into the bridge's comma-separated env format
+     * (parseTokensEnv: "t1,t2,..." with per-token trim + int32 range check).
+     */
+    static String joinTokensCsv(java.util.List<Long> tokens) {
+        StringBuilder sb = new StringBuilder(Math.max(16, tokens.size() * 8));
+        for (int i = 0; i < tokens.size(); i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(tokens.get(i));
+        }
+        return sb.toString();
     }
 
     /**

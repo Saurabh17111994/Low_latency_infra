@@ -106,13 +106,18 @@ MANIFEST_TOKENS=$(tail -n +2 "$MANIFEST" | wc -l)
 [ "$MANIFEST_TOKENS" -ge 1024 ] || fail "manifest has only $MANIFEST_TOKENS tokens; need >=1024 for the 20k/s test"
 echo "manifest OK: $MANIFEST_TOKENS tokens"
 
-# ---------- G6: exactly 1024 tokens (per-connection cap) ----------
-TOKENS=$(tail -n +2 "$MANIFEST" | head -1024 | cut -d, -f4 | tr '\n' ',' | sed 's/,$//')
-N_TOKENS=$(echo "$TOKENS" | tr ',' '\n' | grep -c . )
-[ "$N_TOKENS" -eq 1024 ] || fail "expected exactly 1024 tokens, got $N_TOKENS"
-echo "tokens: $N_TOKENS (chars=${#TOKENS})"
-
 mkdir -p "$OUT" "$OUT/bin" "$OUT/j1"
+
+# ---------- G6: exactly 1024 tokens (per-connection cap) ----------
+# G3 (2026-08-31): single source of truth — slice the manifest to the
+# instrument count of the run and hand ONLY the slice to Java; the bridge
+# gets the same set from Java (child-env handoff in startBridge). The old
+# TOKENS env var is no longer passed to the ingestion JVM.
+MANIFEST_SLICE="$OUT/instruments-1024.csv"
+head -1025 "$MANIFEST" > "$MANIFEST_SLICE"
+N_TOKENS=$(tail -n +2 "$MANIFEST_SLICE" | grep -c .)
+[ "$N_TOKENS" -eq 1024 ] || fail "expected exactly 1024 tokens in slice, got $N_TOKENS"
+echo "tokens: $N_TOKENS (manifest slice: $MANIFEST_SLICE)"
 
 # ---------- 1. faketool (build from source, like test-d) ----------
 echo "building faketool from $FAKETOOL_SRC"
@@ -139,11 +144,11 @@ echo "faketool on :8899 (${RATE_HZ}Hz x 1024 = $((RATE_HZ * 1024))/s), pid $FAKE
 # G4: this block is the ONLY place these vars live; anything else sources it.
 LOG_DIR="$OUT/j1" READINESS_FILE_PATH="/tmp/ingestion.loadtest.ready" \
 ARROW_HFT_URL="ws://127.0.0.1:8899" ARROW_BRIDGE_BIN="$BRIDGE_DIR/arrow-bridge" \
-ARROW_INSTRUMENT_TOKENS="$TOKENS" ARROW_FAKE_BROKER="1" TRANSPORT="proto" \
+ARROW_FAKE_BROKER="1" TRANSPORT="proto" \
 SECRETS_VIA_ENV_FILE="1" \
 ARROW_APP_ID="testd" ARROW_APP_SECRET="testd" \
 ARROW_USER_ID="testd-user" ARROW_PASSWORD="testd-pass" ARROW_TOTP_KEY="JBSWY3DPEHPK3PXP" \
-INSTRUMENT_MANIFEST_PATH="$MANIFEST" \
+INSTRUMENT_MANIFEST_PATH="$MANIFEST_SLICE" \
 FLUSS_BOOTSTRAP="localhost:9123" FLUSS_BOOTSTRAP_SERVERS="localhost:9123" \
 RAW_TABLE_NAME="raw_table_1" ARROW_HFT_CONNECTIONS="1" \
 ARROW_MAX_EVENT_AGE_MS="5000" ARROW_MAX_FUTURE_EVENT_SKEW_MS="2000" \
@@ -237,4 +242,4 @@ wait "$LIVENESS_PID" || [ "$RC" -ne 0 ] || RC=1
 
 echo "=== loadtest done out=$OUT ==="
 echo "--- post-run overlay check: ingestion container env still real feed? ---"
-docker exec 01_docker-ingestion-1 sh -c 'echo "FAKE=$ARROW_FAKE_BROKER"; echo "TOKENS=$ARROW_INSTRUMENT_TOKENS"' 2>/dev/null || echo "(container not up — skip)"
+docker exec 01_docker-ingestion-1 sh -c 'echo "FAKE=$ARROW_FAKE_BROKER"' 2>/dev/null || echo "(container not up — skip)"

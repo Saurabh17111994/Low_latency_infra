@@ -130,10 +130,20 @@ pipeline_preflight() {
   local mtok
   mtok=$(tail -n +2 "$LIB_MANIFEST" | wc -l)
   [ "$mtok" -ge 1024 ] || { pipeline_fail "manifest has only $mtok tokens; need >=1024"; return 1; }
-  TOKENS=$(tail -n +2 "$LIB_MANIFEST" | head -1024 | cut -d, -f4 | tr '\n' ',' | sed 's/,$//')
+  # G3 single source of truth (2026-08-31): the manifest SLICE handed to
+  # Java (INSTRUMENT_MANIFEST_PATH) is the ONE token set for the run — the
+  # bridge receives it from Java via the child-env handoff (startBridge
+  # overwrites ARROW_INSTRUMENT_TOKENS with the loaded set), so the old
+  # TOKENS env plumbing (and the 1,024-vs-2,431 skew that tripped the
+  # fingerprint cross-check on every bridge event) is gone.
+  local slice
+  slice="$OUT/instruments-1024.csv"
+  head -1025 "$LIB_MANIFEST" > "$slice"
   local ntok
-  ntok=$(echo "$TOKENS" | tr ',' '\n' | grep -c .)
-  [ "$ntok" -eq 1024 ] || { pipeline_fail "expected exactly 1024 tokens, got $ntok"; return 1; }
+  ntok=$(tail -n +2 "$slice" | grep -c .)
+  [ "$ntok" -eq 1024 ] || { pipeline_fail "expected exactly 1024 tokens in slice, got $ntok"; return 1; }
+  LIB_MANIFEST_SLICE="$slice"
+  TOKENS=""   # deprecated: kept as empty for callers that still reference it
 
   mkdir -p "$OUT" "$OUT/bin" "$OUT/j1"
   pipeline_log "preflight OK (jars, bridge, manifest, port $FAKETOOL_PORT free, fluss up, TM fresh)"
@@ -190,11 +200,11 @@ pipeline_start_faketool() {
 pipeline_start_ingestion() {
   LOG_DIR="$OUT/j1" READINESS_FILE_PATH="/tmp/ingestion.loadtest.ready" \
   ARROW_HFT_URL="ws://127.0.0.1:$FAKETOOL_PORT" ARROW_BRIDGE_BIN="$LIB_BRIDGE_DIR/arrow-bridge" \
-  ARROW_INSTRUMENT_TOKENS="$TOKENS" ARROW_FAKE_BROKER="1" TRANSPORT="proto" \
+  ARROW_FAKE_BROKER="1" TRANSPORT="proto" \
   SECRETS_VIA_ENV_FILE="1" \
   ARROW_APP_ID="testd" ARROW_APP_SECRET="testd" \
   ARROW_USER_ID="testd-user" ARROW_PASSWORD="testd-pass" ARROW_TOTP_KEY="JBSWY3DPEHPK3PXP" \
-  INSTRUMENT_MANIFEST_PATH="$LIB_MANIFEST" \
+  INSTRUMENT_MANIFEST_PATH="$LIB_MANIFEST_SLICE" \
   FLUSS_BOOTSTRAP="localhost:9123" FLUSS_BOOTSTRAP_SERVERS="localhost:9123" \
   RAW_TABLE_NAME="raw_table_1" ARROW_HFT_CONNECTIONS="1" \
   ARROW_MAX_EVENT_AGE_MS="${ARROW_MAX_EVENT_AGE_MS:-5000}" \

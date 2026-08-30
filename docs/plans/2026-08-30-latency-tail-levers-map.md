@@ -132,6 +132,8 @@ prime suspect per A4).
 | **Final-candle path (2026-08-30)** | ✅ MEASURED (dd17230) | Analyzer v-final-candle: window-close→committed p50 1,164 / p95 1,260 / p99 1,275 ms (n=48,128). output_ts is field index **13** of 15 (index 12 is config_version) |
 | **State-recovery drill (2026-08-30)** | ✅ **ZERO DATA LOSS** | Savepoint (11 MB, dedup 1,063,976 firsts/0 dups) → stop → restore → job RUNNING → dedup preserved (831,998 firsts/0 dups), post-restore checkpoint 91 MB. Full final-table continuity read: **1024/1024 candles in every 15s window across the restart**. 3 rollout-savepoint.sh bugs found by the live drill (compose wrapper missing --env-file pair; empty JOB_ID → rc=22; pipefail+empty-sed → rc=1) — fixed in 72c9743. Lesson: recovery tooling must be drilled live, not read |
 | **EOD controller test (2026-08-30 22:13)** | ✅ 8/8 PASS (6c48efd) | 6 guards (fail-closed offload=none, lease fencing rc=5, clean-state no-ops, idempotency, reconcile stability, purge hygiene) + 120s smoke + 600s main cycle via mock executor. Encodes measured semantics: leases persist in eod_offload_state across process death (purge between subtests); 2nd run on VERIFIED day = no-op. Real MinIO/R2 offload still untested (needs sidecars + lake tiering session) |
+| **F2/F3/F5 data-quality audit (2026-08-31)** | ✅ **ALL EXACT (329560f)** | Live A/B injection: smoke gate 200/200 dups + 20/20 lates dropped exactly; full run 1,200 dups / 120 lates all in raw, counters exact within the sampling window (round 6 fired post-teardown — expected, now capped at 4 rounds). G7c parity: full raw recount (7.53M rows, audit-mode sanitized reader) vs 47,104 (token,window) final candles — **0 mismatches**; LATEST-mode startup skip tolerated by design. Guards proven against a bug-injected evidence copy: all 3 tamper classes fired, G7c named the exact damaged window. 4 harness bugs found: binary `payload_hash` column broke line parsing (~23% rows silently dropped — false data-loss alarm), stale LogFullRead.class ignored the new audit mode, counter-vs-sent comparison ignored the sampling window, post-teardown injection round |
+| **G3 fingerprint drift (2026-08-31)** | ✅ **NATIVE FIX + GATE** | Root cause of the long-observed `manifest_fingerprint mismatch` WARNs: NOT broker drift — the bench handed the bridge 1,024 tokens (env) while Java loaded the full 2,431-row CSV (manifest path). Two configs for one set = guaranteed false alarm on every bridge event. Native fix (no patchwork): Java's `startBridge` now writes the loaded manifest set into the child's `ARROW_INSTRUMENT_TOKENS` — the bridge's own env-override path consumes it, so both sides hash the identical set by construction. Harness passes only `INSTRUMENT_MANIFEST_PATH` (the 1,024-row slice). New G8 run-gate (both phases' java.out must show zero mismatch lines) + G9/G10 guard tests (wiring + tamper-proof). Live proof: zero mismatches both phases, G6/G7 all green, p95 722ms, counter exactness now perfect (sent=raw=counter 800/800/800, 80/80/80 — the 4-round cap eliminated the post-teardown round) |
 
 **Status legend:** ✅ done/verified · 🔶 partial/in-flight · ❌ not started ·
 (deprioritized marks explain why)
@@ -179,7 +181,7 @@ anything invasive.
 | C1 | **Real-feed measurement** | Tick lateness percentiles on real broker → set watermark to just above p99.9 (provisional 500 ms gets re-validated) |
 | C2 | **Failover/recovery test** | ✅ **DONE 2026-08-30 (savepoint→stop→restore drill, zero data loss — see scoreboard)**. Caveat: this was a graceful savepoint drill, not a kill -9 mid-burst. A TM-kill-at-full-load drill remains open if that failure mode matters |
 | C3 | **Long soak (hours)** | State growth, memory leaks, RocksDB degradation over time — 15-min runs cannot see this |
-| C4 | **Backtest-parity check** | Mechanical test that preview candle and final candle saw identical tick sets on a recorded run (single-timeline rule deserves a test, not just design intent) |
+| C4 | **Backtest-parity check** | ✅ **DONE 2026-08-31 via F5's stronger form (commit 329560f):** the G7c audit proves final candles == full raw recount per (token, window) — since previews and finals share one watermark (single-timeline rule, §2.2), tick-set parity holds by construction with evidence. The literal preview-final-row vs final-candle-row comparison was intentionally NOT built: preview trigger timing is event-time driven inside the window, so preview-last ≠ final by design (see scoreboard F2/F3/F5 entry) |
 | C5 | **KV point-lookup flakiness** | Known intermittent Fluss 0.9.1 issue — file upstream or work around; currently untracked |
 | C6 | **Capacity ceiling** | At what tick rate does it break? Current headroom 2.5× measured, but no explicit breaking-point test |
 
@@ -221,10 +223,10 @@ than a right one that arrives in 2 s.
 | # | Lever | Current state | What's missing |
 |---|---|---|---|
 | F1 | **Zero-loss verification** (tick in broker → tick in raw table) | ✅ Strong: from-earliest LOG reads + source throughput vs input rate already cross-checked in every measurement run | Automate as a standing assertion on production feed (not just test harness) |
-| F2 | **Dedup correctness** (dedup operator drops only true duplicates) | Dedup operator exists (`DEDUP_TTL_MS=60000`); never independently audited | A/B test: inject known duplicates via faketool, assert exactly those are dropped |
-| F3 | **Late-tick accounting** (ticks dropped beyond watermark wait) | Mechanism exists (single-timeline rule); dropped-tick count is NOT measured | Add a counter: late-beyond-wait ticks per window — the number that defines backtest/live parity loss |
+| F2 | **Dedup correctness** (dedup operator drops only true duplicates) | ✅ **DONE 2026-08-31 (commit 329560f):** faketool injects verbatim-resend duplicates (`-inject-dups`); smoke gate asserts live counter delta == injected (200/200); full audit asserts counter == dups ingested inside the counter sampling window (1000/1000) AND raw-table fingerprint-extras == sent (1200/1200) | Standing guard in harness (G7a, `holistic-analyze.py`) |
+| F3 | **Late-tick accounting** (ticks dropped beyond watermark wait) | ✅ **DONE 2026-08-31 (commit 329560f):** `CandleLateDrop` counter (`compute.candles.late.dropped`) existed in code; now injected-audited — smoke gate 20/20 live; full audit counter 100/100 in sampling window, 120/120 in raw | Standing guard in harness (G7b) |
 | F4 | **Signal settlement correctness** (TENTATIVE→CONFIRM/CANCEL) | ✅ Measured per run (settlement balance 8100/8049 in latest run, remainder = open windows, expected) | Assert no TENTATIVE is orphaned after grace period |
-| F5 | **Preview↔final candle parity** | Design intent (single-timeline rule); overlaps lever C4 | Mechanical test: same window's preview final row == final candle row, field by field |
+| F5 | **Preview↔final candle parity** | ✅ **DONE 2026-08-31 (commit 329560f), stronger than planned:** instead of preview-vs-final (preview trigger timing differs by design), the audit does a FULL RAW RECOUNT — every final candle's tick_count+volume vs a from-earliest raw-table recount per (token, 15s window): 47,104 windows, 0 mismatches. Proven against a bug-injected evidence copy (guards fired on all 3 tamper classes) | Standing guard in harness (G7c) |
 | F6 | **Tick sanity/validation** (bad prices, zero volume, crossed markets) | `raw-validation` operator exists; validation rules coverage unreviewed | Review rules; add rejection counters (how many ticks rejected, by which rule) |
 | F7 | **Schema contract enforcement** | ✅ `TableContractValidator` fails closed at job start (schema v2, 15 cols) | Broker-side schema drift is not covered — manifest fingerprint is the natural gate (see G3) |
 | F8 | **Clock/ordering sanity** (event-time monotonicity per instrument) | `ARROW_MAX_FUTURE_EVENT_SKEW_MS=2000` guards future skew; backward disorder handled by watermark | A periodic assertion that per-token event time never jumps backward beyond the watermark budget |
@@ -240,7 +242,7 @@ alerts, not by a downstream trading decision going wrong.
 |---|---|---|---|
 | G1 | **Volume monitoring** (events/s per table, per instrument) | Measured in test harness only | Continuous production monitor + alert on rate drop (e.g. >50% below rolling median = broker feed problem) |
 | G2 | **Freshness monitoring** (age of newest row per table) | Freshness measured per run (p50=841ms staleness at run end) | Continuous freshness SLO with alert (e.g. alert if newest preview > 5 s old) |
-| G3 | **Schema/broker drift detection** | ⚠ OBSERVED: ingestion logs `bridge manifest_fingerprint mismatch` WARNs — the signal exists but nothing acts on it | Escalate fingerprint mismatch to a hard alert (instrument set changed = silent data gap) |
+| G3 | **Schema/broker drift detection** | ✅ **DONE 2026-08-31 (native fix + G8 gate):** root cause was config skew — bridge env carried a 1,024-token slice while Java loaded the full 2,431-row CSV, so every bridge event tripped the cross-check. Native fix: `startBridge` hands the Go child EXACTLY Java's loaded manifest set via `ARROW_INSTRUMENT_TOKENS` (child-env handoff, one source of truth — the manifest slice). Bench scripts no longer pass a second token config. New G8 gate fails any run on a mismatch line in java.out (both phases); G9/G10 guard tests prove the wiring + gate fires on tampered logs. Live proof run: zero mismatches, G6/G7 all pass, p95 722ms | Escalating to fail-closed halt in production is now safe (no false alarms) — wire when production monitors land (G6) |
 | G4 | **Distribution drift** (price/volume ranges per instrument) | Nothing — candles computed but never profiled | Nightly job: per-instrument min/max/mean vs trailing baseline; flag breakouts as possible bad ticks |
 | G5 | **Table-level health** (row counts, partition/bucket balance) | Ad-hoc via LOG reads | Scheduled check: expected-rows vs actual-rows per window (ties into F1) |
 | G6 | **Alert routing** (who gets told, how fast) | Nothing production-facing | Even a single webhook/email on F1/F3/G1/G2/G3 violations is enough for now |
@@ -264,21 +266,25 @@ not new systems.
 4. ~~D1 POJO fix~~ **DONE 2026-08-30** (39adae2).
 5. ~~C2 recovery drill~~ **DONE 2026-08-30** — zero data loss; rollout
    tooling drilled live and fixed (72c9743).
-6. **Next session:** restart sidecars (minio, openobserve, cadvisor,
+6. ~~F2/F3/F5 data-quality audit~~ **DONE 2026-08-31 (commit 329560f)** —
+   injection-based dedup/late-drop guards + full raw recount parity
+   (47,104 windows, 0 mismatches), proven against bug-injected evidence.
+   C4 closed with it (stronger form). Evidence:
+   `logs/tracker-14/holistic-measure-20260831-002628`.
+7. **Next session:** restart sidecars (minio, openobserve, cadvisor,
    node-exporter — currently stopped by choice), then the **lake tiering /
    real EOD offload test** (REQ-FLS-011 / AC-FLS-004/005). Note: the
    tiering interval was set to `0s` as a bench-only latency knob — it must
    be reverted for this test (that is the point of the test).
-7. **Then:** signal-path latency measurement (tentative→confirm/cancel) —
-   completes the trading-side picture; C4 (preview↔final tick-set parity
-   test) — the single-timeline rule deserves its mechanical test.
-8. **Before production feed:** G3 (act on the fingerprint mismatch warnings
-   already appearing in logs) and F3 (late-tick counter) — both are cheap
-   and directly protect trading decisions; F1/G1/G2 become production
+8. **Then:** signal-path latency measurement (tentative→confirm/cancel) —
+   completes the trading-side picture.
+9. **Before production feed:** G3 (act on the fingerprint mismatch warnings
+   already appearing in logs) — cheap and directly protects trading
+   decisions; F1/G1/G2 become production
    monitors at the same time
-9. **When load grows:** scale test 1,024 → 3,000 instruments (box's 16 GB
+10. **When load grows:** scale test 1,024 → 3,000 instruments (box's 16 GB
    RAM may cap this; C6), then Group E (scaling) — not before
-10. **Blocked on real feed:** C1 final watermark numbers; D7's batching
+11. **Blocked on real feed:** C1 final watermark numbers; D7's batching
    tradeoff also needs real-rate data
 
 ### Efficiency principles (why Groups D/E are ordered last)
@@ -306,6 +312,13 @@ not new systems.
   drill: savepoint, restore, post-restore verification
 - `logs/eod-test/eod-test-20260830-221347.log` — EOD controller test 8/8
   (guards + smoke + main)
+- `logs/tracker-14/holistic-measure-20260831-002628` — F2/F3/F5 audit run:
+  injection gate + G7 evidence (raw recount 7.53M rows, 47,104-window
+  parity, 0 mismatches). Raw evidence file is the sanitized audit format
+  (965 MB) — NOT the 6.3 GB full-row format of earlier runs
+- `logs/tracker-14/holistic-measure-20260831-022833` — G3 native-fix proof
+  run: zero fingerprint mismatches both phases (java.out has the token
+  handoff line), G6/G7 all pass, p95 722ms
 - ⚠ runs 140907 and 173514's rows files were destroyed by an analyzer bug
   (live re-read overwrote them) — fixed 9274ad8; later runs intact
 - Harness: `code/01_platform/04_scripts/` — `pipeline-lib.sh` (shared),
@@ -331,6 +344,37 @@ not new systems.
 13. **LogFullRead needs** `--add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED`, and long reads need run_ms ≥ 600000.
 14. **Checkpoints JSONL dedupe must key on `"id": N`** — keying on `$1` of a JSON line collapses every checkpoint into one (this bug hid the checkpoint/burst correlation for two runs).
 15. **Standing rule:** every fixed bug gets a mechanical guard so it cannot recur (comment-only fixes are not fixes).
+
+### 6.2 More gotchas from the F2/F3/F5 audit (2026-08-31)
+
+16. **Binary columns break line-based reads** — Fluss prints VARBINARY
+    (`payload_hash`, `raw_payload`) as raw bytes: `0x0A` splits lines,
+    `0x2C` shifts comma-split fields. Never parse full-row toString of a
+    table with binary columns; use a sanitized field projection (audit
+    mode in LogFullRead reads columns by INDEX and prints only ASCII-safe
+    fields). Symptom: silent row loss (~23%) → false data-loss alarms.
+17. **Always recompile embedded Java helpers** — `LogFullRead.class` was
+    cached from an earlier run and silently ignored the new `audit` mode
+    argument (fell back to plain mode). The analyzer now regenerates +
+    recompiles on every call (~2 s).
+18. **Counter exactness needs a sampling window** — Prometheus counters
+    only cover what ingested BEFORE the last sample; injection rounds
+    firing after the final sample land in raw but never in the counters.
+    G7a/G7b now compare counter delta vs dups ingested before the last
+    sample timestamp, not vs total sent. Injection is capped
+    (`INJECT_MAX_ROUNDS=4`) so rounds don't fire during teardown drift.
+19. **LATEST startup mode skips the backlog by design** — the source
+    subscribes at LATEST (2026-08-29 decision: measure the live path
+    only), so the first 15s window after job start is legitimately partial
+    (e.g. 142/150 ticks) and pre-startup windows have no candle at all.
+    G7c tolerates the contiguous startup prefix; a gap AFTER the first
+    present candle is still a failure.
+20. **Two configs for one token set = guaranteed fingerprint false alarms**
+    (G3, 2026-08-31) — the bridge's `ARROW_INSTRUMENT_TOKENS` env and
+    Java's `INSTRUMENT_MANIFEST_PATH` can drift apart silently. The native
+    fix is ownership: Java loads the manifest and hands the exact set to
+    the child in `startBridge`; the harness configures ONE input. Any
+    mismatch line in java.out is now real drift and fails the run (G8).
 
 ### 6.1 Observed-but-unfixed warnings (candidates, not confirmed problems)
 

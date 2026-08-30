@@ -98,6 +98,47 @@ while IFS= read -r line; do
 done < "$LIB"
 [ "$fail" -eq 0 ] && ok "G4 no comments/blanks inside continued commands"
 
+# ---- G9 (2026-08-31): the G3 native fix is in place and total —
+# (a) pipeline-lib must NOT pass ARROW_INSTRUMENT_TOKENS to the ingestion
+#     JVM (Java's startBridge now owns that env var in the child);
+# (b) INSTRUMENT_MANIFEST_PATH must point at the SLICE, not the full CSV;
+# (c) holistic-measure must contain the G8 fingerprint gate that fails the
+#     run on any mismatch line in java.out.
+if grep -q 'ARROW_INSTRUMENT_TOKENS=' "$LIB"; then
+    bad "G9 pipeline-lib still sets ARROW_INSTRUMENT_TOKENS — Java's child-env handoff (G3) is the single source of truth now"
+else
+    ok "G9 pipeline-lib does not pass ARROW_INSTRUMENT_TOKENS (G3 handoff owns it)"
+fi
+if grep -q 'INSTRUMENT_MANIFEST_PATH="\$LIB_MANIFEST_SLICE"' "$LIB"; then
+    ok "G9 pipeline-lib hands Java the manifest SLICE (single token set)"
+else
+    bad "G9 INSTRUMENT_MANIFEST_PATH must point at \$LIB_MANIFEST_SLICE, not the full CSV"
+fi
+HM="$SCRIPT_DIR/holistic-measure.sh"
+grep -q 'fingerprint_gate' "$HM" \
+    && ok "G9 holistic-measure has the G8 fingerprint gate" \
+    || bad "G9 holistic-measure missing fingerprint_gate (G8)"
+
+# ---- G10 (2026-08-31): the G8 gate must FIRE on tampered evidence —
+# a java.out containing a mismatch line must fail the gate (proven against
+# a bug-injected copy, per the standing rule).
+G10DIR="$(mktemp -d)"
+mkdir -p "$G10DIR/j1"
+printf 'INFO  ok line\nWARN  ingestion: bridge manifest_fingerprint mismatch (slot=hft-0, epoch=1): got=aa want=bb\n' \
+    > "$G10DIR/j1/java.out"
+n=$(grep -ac "manifest_fingerprint mismatch\|assigned_token_set_hash mismatch" "$G10DIR/j1/java.out" 2>/dev/null || true)
+if [ "${n:-0}" -ge 1 ]; then
+    ok "G10 tampered java.out detected ($n mismatch line(s) — gate would fire)"
+else
+    bad "G10 tampered java.out NOT detected — the G8 gate is decorative"
+fi
+printf 'INFO  clean log\n' > "$G10DIR/j1/java.out"
+n=$(grep -ac "manifest_fingerprint mismatch\|assigned_token_set_hash mismatch" "$G10DIR/j1/java.out" 2>/dev/null || true)
+[ "${n:-0}" -eq 0 ] \
+    && ok "G10 clean java.out passes (zero mismatch lines)" \
+    || bad "G10 clean java.out flagged — gate has false positives"
+rm -rf "$G10DIR"
+
 rm -rf "$OUT"
 echo "---"
 echo "guards: $pass passed, $fail failed"

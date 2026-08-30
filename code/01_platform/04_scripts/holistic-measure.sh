@@ -319,6 +319,32 @@ if ! smoke_inject_gate; then
   exit 1
 fi
 
+# ---------- G8: bridge/manifest fingerprint consistency (2026-08-31) ------
+# The G3 native fix (startBridge hands Java's loaded token set to the Go
+# child via ARROW_INSTRUMENT_TOKENS) made Go and Java hash the SAME set by
+# construction — so any remaining mismatch line in java.out is REAL drift
+# (manifest changed under a running bridge, wrong binary, tampering).
+# Before G3, every bench run logged a mismatch (1,024-token bridge env vs
+# 2,431-token Java manifest) — a loud signal nobody acted on. Now it fails
+# the run. Checked on BOTH phases' java.out (smoke already completed; main
+# runs next — check it post-hoc in the analysis step via the same grep).
+fingerprint_gate() {
+  local dir="$1" n
+  n=$(grep -ac "manifest_fingerprint mismatch\|assigned_token_set_hash mismatch" \
+      "$dir/j1/java.out" 2>/dev/null || true)
+  [ "${n:-0}" -eq 0 ] || {
+    echo "!! G8 FINGERPRINT GATE FAIL: $n mismatch line(s) in $dir/j1/java.out" >&2
+    grep -a "manifest_fingerprint mismatch\|assigned_token_set_hash mismatch" \
+      "$dir/j1/java.out" | head -3 >&2
+    return 1
+  }
+  echo "G8 fingerprint gate PASS ($dir): zero mismatch lines"
+}
+if ! fingerprint_gate "$PHASE_OUT/smoke"; then
+  echo "G8 FAIL — main measurement SKIPPED" >&2
+  exit 1
+fi
+
 # ---------- Phase B: main measurement --------------------------------------
 if ! OUT="$PHASE_OUT/main" run_phase main "$MAIN_S"; then
   echo "MAIN FAIL — partial evidence in $PHASE_OUT/main" >&2
@@ -327,6 +353,12 @@ fi
 
 # ---------- Latency analysis (from-earliest LOG reads of both tables) -----
 echo "--- latency analysis (from-earliest LOG reads) ---"
+# G8 continues here: main phase has run — its java.out must also show zero
+# fingerprint mismatches before any analysis numbers are trusted.
+if ! fingerprint_gate "$PHASE_OUT/main"; then
+  echo "G8 FAIL (main) — analysis SKIPPED" >&2
+  exit 1
+fi
 OUT="$PHASE_OUT"
 MAIN_START="$(cat "$PHASE_OUT/main/run-start-epoch")"
 MAIN_END="$(cat "$PHASE_OUT/main/run-end-epoch")"
