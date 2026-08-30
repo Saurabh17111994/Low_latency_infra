@@ -10,26 +10,33 @@ import java.io.Serializable;
  * deterministically under out-of-order arrival and replay. No tick list, no
  * raw payloads, no fingerprint lists are ever retained (Signal dossier: "no
  * tick collection exists in active state").
+ *
+ * <p>D1 (2026-08-30): class and fields MUST stay public. Flink POJO
+ * recognition requires a public class with public fields (or getters);
+ * anything less makes the type extractor fall back to GenericType/Kryo —
+ * observed as a JM warning on every job submit and slower state
+ * serialization. Guard: CandlePojoRecognitionTest asserts this class
+ * extracts as a POJO, not a GenericType.
  */
-final class CandleAccumulator implements Serializable {
+public class CandleAccumulator implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
-    String exchange;
-    String symbol;
+    public String exchange;
+    public String symbol;
 
-    long openPaise;
-    long highPaise;
-    long lowPaise;
-    long closePaise;
-    long volume;
-    long tickCount;
+    public long openPaise;
+    public long highPaise;
+    public long lowPaise;
+    public long closePaise;
+    public long volume;
+    public long tickCount;
 
     /** Order key of the window's earliest event; open = its price. */
-    long firstEventTime = Long.MAX_VALUE;
-    String firstFingerprint;
+    public long firstEventTime = Long.MAX_VALUE;
+    public String firstFingerprint;
 
     /** Order key of the window's latest event; close = its price. */
-    long lastEventTime = Long.MIN_VALUE;
-    String lastFingerprint;
+    public long lastEventTime = Long.MIN_VALUE;
+    public String lastFingerprint;
 }
