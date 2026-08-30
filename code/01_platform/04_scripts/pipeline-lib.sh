@@ -148,7 +148,24 @@ pipeline_start_faketool() {
   pipeline_log "building faketool from $LIB_FAKETOOL_SRC"
   (cd "$LIB_BRIDGE_DIR" && go build -tags faketool -o "$OUT/bin/faketool" ./faketool) \
     || { pipeline_fail "faketool build failed"; return 1; }
-  "$OUT/bin/faketool" -port "$FAKETOOL_PORT" -real-rate -real-rate-hz "$RATE_HZ" > "$OUT/faketool.log" 2>&1 &
+  local inject_args=()
+  # F2/F3 audit injection (2026-08-30): optional, from INJECT_* env vars.
+  # See faketool main.go -inject-* flags for semantics.
+  if [ "${INJECT_AFTER_MS:-0}" -gt 0 ]; then
+    inject_args=(
+      -inject-after-ms "${INJECT_AFTER_MS}ms"
+      -inject-dups "${INJECT_DUPS:-0}"
+      -inject-late "${INJECT_LATE:-0}"
+      -inject-late-ms "${INJECT_LATE_MS:-90000}"
+    )
+    [ "${INJECT_EVERY_MS:-0}" -gt 0 ] \
+      && inject_args+=(-inject-every-ms "${INJECT_EVERY_MS}ms")
+    [ "${INJECT_MAX_ROUNDS:-0}" -gt 0 ] \
+      && inject_args+=(-inject-max-rounds "${INJECT_MAX_ROUNDS}")
+    pipeline_log "injection enabled: after=${INJECT_AFTER_MS}ms dups=${INJECT_DUPS:-0} late=${INJECT_LATE:-0} every=${INJECT_EVERY_MS:-0}ms"
+  fi
+  "$OUT/bin/faketool" -port "$FAKETOOL_PORT" -real-rate -real-rate-hz "$RATE_HZ" \
+    "${inject_args[@]}" > "$OUT/faketool.log" 2>&1 &
   FAKETOOL_PID=$!
 
   local bound=0 i
@@ -180,7 +197,8 @@ pipeline_start_ingestion() {
   INSTRUMENT_MANIFEST_PATH="$LIB_MANIFEST" \
   FLUSS_BOOTSTRAP="localhost:9123" FLUSS_BOOTSTRAP_SERVERS="localhost:9123" \
   RAW_TABLE_NAME="raw_table_1" ARROW_HFT_CONNECTIONS="1" \
-  ARROW_MAX_EVENT_AGE_MS="5000" ARROW_MAX_FUTURE_EVENT_SKEW_MS="2000" \
+  ARROW_MAX_EVENT_AGE_MS="${ARROW_MAX_EVENT_AGE_MS:-5000}" \
+  ARROW_MAX_FUTURE_EVENT_SKEW_MS="2000" \
   ARROW_HFT_LATENCY_MS="50" CLOCK_CHECK_REQUIRED="false" \
   OTEL_COLLECTOR_HOST="localhost:4319" \
   FLUSS_WRITER_MODE="generic" FLUSS_WRITERS="1" FLUSS_WRITER_BATCH_SIZE_BYTES="0" \
@@ -217,9 +235,15 @@ pipeline_start_ingestion() {
 # and the analyzer's from-earliest read (30s budget) couldn't reach the run
 # window. Dropping + recreating before each run resets both. Preview data
 # is transient diagnostics — nothing else consumes it between runs.
-pipeline_purge_preview_table() {
-  pipeline_log "purging feature_candles_15s_preview (drop + recreate)"
-  cat > /tmp/PreviewPurge.java <<'JAVAEOF'
+pipeline_purge_table() {
+  # Generic drop+recreate from a DDL file. Used to bound what a fresh job
+  # replays (the SignalJob source reads from EARLIEST — an unpurged table
+  # means every phase replays all prior phases' rows) and to keep the
+  # from-earliest evidence reads bounded (raw grows ~6M rows per 10-min
+  # phase; reading all history would blow the analyzer's memory).
+  local ddl_file="$1" label="$2"
+  pipeline_log "purging $label table (drop + recreate)"
+  cat > /tmp/TablePurge.java <<'JAVAEOF'
 import com.trading.common.schema.ddl.DdlText;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
@@ -231,7 +255,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.TimeUnit;
 
-public class PreviewPurge {
+public class TablePurge {
     public static void main(String[] args) throws Exception {
         String ddl = Files.readString(Path.of(args[0]));
         DdlText.ParsedDdl parsed = DdlText.parse(ddl, args[0]);
@@ -252,20 +276,30 @@ public class PreviewPurge {
     }
 }
 JAVAEOF
-  local ddl_file="$ROOT/code/01_platform/02_sql/ddl/30_feature_candles_15s_preview.sql"
   local purge_out
-  purge_out="$(cd /tmp && javac -cp "$CP" -d /tmp PreviewPurge.java 2>&1     && java --add-opens=java.base/java.lang=ALL-UNNAMED \
+  purge_out="$(cd /tmp && javac -cp "$CP" -d /tmp TablePurge.java 2>&1 \
+      && java --add-opens=java.base/java.lang=ALL-UNNAMED \
        --add-opens=java.base/java.nio=ALL-UNNAMED \
-       -cp "/tmp:$CP" PreviewPurge "$ddl_file" 2>&1)" || true
-  rm -f /tmp/PreviewPurge.java /tmp/PreviewPurge.class
+       -cp "/tmp:$CP" TablePurge "$ddl_file" 2>&1)" || true
+  rm -f /tmp/TablePurge.java /tmp/TablePurge.class
   if echo "$purge_out" | grep -q "PURGED"; then
-    pipeline_log "preview table purged"
+    pipeline_log "$label table purged"
   else
     # Non-fatal: first run after a fresh DDL apply may legitimately have
     # nothing to drop; failure to CREATE would surface as the smoke gate
     # failing (preview metrics = 0). Log loudly for diagnosis.
-    pipeline_log "WARN: preview purge output: $(echo "$purge_out" | tail -2)"
+    pipeline_log "WARN: $label purge output: $(echo "$purge_out" | tail -2)"
   fi
+}
+
+pipeline_purge_preview_table() {
+  pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/30_feature_candles_15s_preview.sql" preview
+}
+
+pipeline_purge_raw_table() {
+  # Raw must be purged BEFORE pipeline_start_ingestion (the ingestion JVM
+  # writes it; preview is only written by the job, so it purges later).
+  pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/02_raw_table_1.sql" raw
 }
 
 pipeline_submit_job() {

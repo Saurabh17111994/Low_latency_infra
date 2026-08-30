@@ -51,6 +51,19 @@ public class LogFullRead {
         conf.setString("bootstrap.servers", "localhost:9123");
         TablePath tp = TablePath.of("default", args[0]);
         long runMs = args.length > 1 ? Long.parseLong(args[1]) : 20000L;
+        // args[2] == "offset": prefix each row with its bucket:offset so the
+        // caller can dedupe EXACTLY (the LogScanner re-delivers records —
+        // line dedupe alone cannot distinguish a re-delivery from an
+        // injected duplicate tick, which is the whole point of the F2 audit).
+        // args[2] == "audit": offset mode PLUS a sanitized field projection
+        // (tab-separated, no raw_payload/payload_hash). The raw table's
+        // payload_hash VARBINARY prints as raw binary bytes — a 0x0A hash
+        // byte split the line and a 0x2C byte shifted comma-split fields,
+        // silently dropping ~23% of rows in the first G7 recount (2026-08-31).
+        // The audit projection reads columns by INDEX and prints only the
+        // ASCII-safe fields the audit needs.
+        boolean audit = args.length > 2 && "audit".equals(args[2]);
+        boolean withOffset = audit || (args.length > 2 && "offset".equals(args[2]));
         try (Connection c = ConnectionFactory.createConnection(conf);
              Table t = c.getTable(tp);
              LogScanner scanner = t.newScan().createLogScanner()) {
@@ -59,7 +72,33 @@ public class LogFullRead {
             long deadline = System.currentTimeMillis() + runMs;
             while (System.currentTimeMillis() < deadline) {
                 ScanRecords records = scanner.poll(Duration.ofSeconds(1));
-                for (var r : records) System.out.println(r.getRow().toString());
+                if (audit || withOffset) {
+                    // per-bucket iteration: ScanRecord exposes logOffset()
+                    // but not its bucket, so the bucket must come from the
+                    // records-per-bucket map (bucket:offset is the exact
+                    // dedupe key).
+                    for (var tb : records.buckets()) {
+                        for (var r : records.records(tb)) {
+                            if (audit) {
+                                // raw_table_1 column indexes (RawTableColumns):
+                                // 0 fingerprint, 4 token, 7 event_time, 8 ingest_ts,
+                                // 11 price, 12 qty, 17 validity_state
+                                var rw = r.getRow();
+                                System.out.println(
+                                    tb.getBucket() + ":" + r.logOffset() + "\t"
+                                    + rw.getString(0) + "\t" + rw.getLong(4)
+                                    + "\t" + rw.getLong(7) + "\t" + rw.getLong(8)
+                                    + "\t" + rw.getLong(11) + "\t" + rw.getLong(12)
+                                    + "\t" + rw.getString(17));
+                            } else {
+                                System.out.println("@" + tb.getBucket() + ":" + r.logOffset()
+                                    + " " + r.getRow().toString());
+                            }
+                        }
+                    }
+                } else {
+                    for (var r : records) System.out.println(r.getRow().toString());
+                }
             }
         }
     }
@@ -78,10 +117,15 @@ def fmt_ms(v):
     return "n/a" if v is None else f"{v:.0f}ms"
 
 
-def collect_rows(table, cp, out_dir, run_ms=30000):
+def collect_rows(table, cp, out_dir, run_ms=30000, with_offset=False):
     """Compile (once) and run the LOG reader; return parsed rows."""
     java_file = os.path.join(out_dir, "LogFullRead.java")
-    if not os.path.exists(os.path.join(out_dir, "LogFullRead.class")):
+    class_file = os.path.join(out_dir, "LogFullRead.class")
+    # regenerate + recompile when the source is newer than the class — a
+    # stale class silently ignores new modes (observed 2026-08-31)
+    if (not os.path.exists(class_file)
+            or not os.path.exists(java_file)
+            or os.path.getmtime(java_file) > os.path.getmtime(class_file)):
         with open(java_file, "w") as f:
             f.write(LOG_READ_SRC)
         r = subprocess.run(["javac", "-cp", cp, "-d", out_dir, java_file],
@@ -93,7 +137,8 @@ def collect_rows(table, cp, out_dir, run_ms=30000):
         ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",
          "--add-opens=java.base/java.nio=ALL-UNNAMED",
          "-Dlog.dir=/tmp/fluss-probe-logs",
-         "-cp", f"{out_dir}:{cp}", "LogFullRead", table, str(run_ms)],
+         "-cp", f"{out_dir}:{cp}", "LogFullRead", table, str(run_ms)]
+        + (["offset"] if with_offset else []),
         capture_output=True, text=True, timeout=run_ms / 1000 + 90,
     )
     rows = [ln for ln in r.stdout.splitlines() if ln.strip()]
@@ -106,6 +151,44 @@ def collect_rows(table, cp, out_dir, run_ms=30000):
         with open(rows_path, "w") as f:
             f.write("\n".join(rows) + "\n")
     return rows
+
+def collect_rows_stream(table, cp, out_dir, run_ms=30000, mode="offset"):
+    """Like collect_rows but streams stdout straight to the evidence file —
+    for tables too big to hold in memory (raw_table_1 at ~6M rows/10-min
+    phase ≈ 1.2 GB of text). Returns the rows file path; callers iterate
+    the file line-by-line (two passes are fine — the file is the evidence).
+    mode: "offset" (bucket:offset + full row toString) or "audit"
+    (bucket:offset + sanitized tab-separated fields — see LogFullRead).
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    java_file = os.path.join(out_dir, "LogFullRead.java")
+    # ALWAYS regenerate + recompile (~2s): a stale class silently ignores
+    # new modes (observed 2026-08-31: an old class treated "audit" as plain
+    # mode, re-read the whole table in full-row format — 8 wasted minutes,
+    # 0 audit rows, and a false all-failures verdict)
+    with open(java_file, "w") as f:
+        f.write(LOG_READ_SRC)
+    r = subprocess.run(["javac", "-cp", cp, "-d", out_dir, java_file],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"!! LogFullRead compile failed for {table}: {r.stderr[:400]}")
+        return None
+    rows_path = os.path.join(out_dir, f"latency-{table}.rows.txt")
+    with open(rows_path, "w") as fh:
+        subprocess.run(
+            ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",
+             "--add-opens=java.base/java.nio=ALL-UNNAMED",
+             "-Dlog.dir=/tmp/fluss-probe-logs",
+             "-cp", f"{out_dir}:{cp}", "LogFullRead", table, str(run_ms)]
+            + ([mode] if mode else []),
+            stdout=fh, stderr=subprocess.DEVNULL,
+            timeout=run_ms / 1000 + 90,
+        )
+    # Evidence preservation (same rule as collect_rows): never let an empty
+    # re-read destroy a previously captured file.
+    if os.path.exists(rows_path) and os.path.getsize(rows_path) == 0:
+        return None
+    return rows_path
 
 
 def classify_status(candidate_id):
@@ -738,11 +821,259 @@ def main():
     except (OSError, NameError):
         pass  # proc-io absent (older harness) — not a failure
 
+    # ---- G7 DATA-QUALITY GUARDS (F2/F3 audit, 2026-08-30) ----------------
+    # The main phase injects duplicate ticks (verbatim frame resends - same
+    # fingerprint) and late ticks (old event_time, unique fingerprint).
+    # Three exactness assertions:
+    #   G7a dedup:   compute.dedup.duplicates delta == dups sent == dups
+    #                observed duplicated in raw_table_1 (repeated fingerprint)
+    #   G7b late:    compute.candles.late.dropped delta == late sent == late
+    #                observed in raw_table_1 (event_time lagging ingest_ts)
+    #   G7c parity:  per (token, 15s window), the final candle's tick_count
+    #                and volume == raw recount MINUS dropped dups and late
+    #                ticks - zero loss, no over-drop, no double-count.
+    print("\n### G7 data-quality audit (dedup / late-drop / tick-set parity)")
+    g7_dir = os.path.join(out_dir, "main")
+    want_dups = want_late = 0
+    try:
+        for ln in open(os.path.join(g7_dir, "faketool.log")):
+            m = re.search(r"INJECT round=\d+ token=\d+ dups=(\d+) late=(\d+)", ln)
+            if m:
+                want_dups += int(m.group(1))
+                want_late += int(m.group(2))
+    except OSError:
+        pass
+    if want_dups == 0 and want_late == 0:
+        print("- G7: no injection configured (no INJECT lines) - audit SKIPPED")
+    else:
+        # counter deltas: last sample per series minus first sample per
+        # series, summed over subtask series (counters are cumulative per job).
+        def counter_deltas(path):
+            first, last = {}, {}
+            try:
+                for ln in open(path):
+                    parts = ln.split()
+                    # Prometheus text format: "<ts> name{labels} value".
+                    # HELP/TYPE lines also match the name grep ("# HELP
+                    # name (scope: taskmanager_job_task_operator)") — their
+                    # last field is not a float; skip them (observed live:
+                    # crashed the G7 audit on its first run).
+                    if len(parts) < 3 or parts[1].startswith("#"):
+                        continue
+                    try:
+                        val = float(parts[-1])
+                    except ValueError:
+                        continue
+                    name = parts[1]
+                    first.setdefault(name, val)
+                    last[name] = val
+            except OSError:
+                pass
+            names = set(first) | set(last)
+            return {n: last.get(n, 0) - first.get(n, 0) for n in names}
+
+        deltas = counter_deltas(os.path.join(g7_dir, "tm-prom-dedup-late.tsv"))
+        dup_delta = sum(v for k, v in deltas.items() if "dedup_duplicates" in k)
+        late_delta = sum(v for k, v in deltas.items() if "candles_late_dropped" in k)
+
+        # raw recount with EXACT offset dedupe (the LogScanner re-delivers
+        # records; line dedupe would erase the injected duplicates).
+        # G7_REUSE_RAW=1: re-analyze the evidence file already in out_dir
+        # instead of re-reading Fluss (test hook for the bug-injection
+        # proof: tamper a COPY of the evidence and the guards must fire).
+        if os.environ.get("G7_REUSE_RAW") == "1":
+            raw_path = os.path.join(out_dir, "latency-raw_table_1.rows.txt")
+            if not os.path.exists(raw_path):
+                failures.append("G7: G7_REUSE_RAW=1 but no evidence file")
+                raw_path = os.devnull
+        else:
+            print("- G7: reading raw_table_1 for full recount (this takes a few "
+                  "minutes at ~6M rows)...")
+            raw_path = collect_rows_stream("raw_table_1", cp, out_dir,
+                                           run_ms=300000, mode="audit")
+        if raw_path is None:
+            failures.append("G7: raw_table_1 read failed — audit incomplete")
+            raw_path = os.devnull
+        # last counter sample timestamp: counter deltas only cover rounds
+        # that fired BEFORE this moment (observed 2026-08-31: injection
+        # round 6 fired after the final Prometheus sample — its frames
+        # reached raw but the job's counters never saw them; the analyzer
+        # originally misread that as dedup loss).
+        last_sample_ms = 0
+        try:
+            for ln in open(os.path.join(g7_dir, "tm-prom-dedup-late.tsv")):
+                try:
+                    last_sample_ms = max(last_sample_ms, int(ln.split()[0]) * 1000)
+                except ValueError:
+                    pass
+        except OSError:
+            pass
+        seen_offsets = set()
+        fp_seen = set()
+        win_ticks = defaultdict(int)         # (token, window_start) -> ticks
+        win_vol = defaultdict(int)           # (token, window_start) -> qty sum
+        dup_extras = late_rows = 0
+        dup_in_window = late_in_window = 0   # ingested before last counter sample
+        dup_ing_max = 0
+        LATE_LAG_MS = 20000                  # > watermark(500) + lateness(5000) + margin
+        for ln in open(raw_path):
+            # audit mode: "b:o\tfp\ttoken\tev\ting\tprice\tqty\tvalidity"
+            # (sanitized projection — the full-row toString prints the
+            # payload_hash VARBINARY as raw binary; 0x0A bytes split lines
+            # and 0x2C bytes shifted comma-split fields, silently dropping
+            # ~23% of rows in the first G7 recount, 2026-08-31)
+            if "\t" not in ln:
+                continue
+            try:
+                f = ln.rstrip("\n").split("\t")
+                if len(f) < 8:
+                    continue
+                off = f[0]
+                if off in seen_offsets:
+                    continue  # scanner re-delivery
+                seen_offsets.add(off)
+                fp = f[1]
+                token = int(f[2])
+                ev_ms = int(f[3])
+                ing_ms = int(f[4])
+                qty = int(f[6])
+                validity = f[7]
+            except (ValueError, IndexError):
+                continue
+            if ing_ms - ev_ms > LATE_LAG_MS:
+                late_rows += 1
+                if ing_ms <= last_sample_ms:
+                    late_in_window += 1
+                continue
+            if not validity.startswith("VALID"):
+                continue  # invalid ticks are quarantined pre-candle
+            if run_start and ev_ms < run_start:
+                continue  # pre-run history (raw table is not purged)
+            if fp in fp_seen:
+                # repeat fingerprint = duplicate the dedup operator drops;
+                # exclude from the window recount (candles never saw it)
+                dup_extras += 1
+                if ing_ms <= last_sample_ms:
+                    dup_in_window += 1
+                continue
+            fp_seen.add(fp)
+            ws = (ev_ms // 15000) * 15000
+            win_ticks[(token, ws)] += 1
+            win_vol[(token, ws)] += qty
+        print(f"- G7 raw recount: {len(seen_offsets)} logical rows, "
+              f"{dup_extras} duplicate extras (repeated fingerprints), "
+              f"{late_rows} late rows (event_time lag > {LATE_LAG_MS}ms)")
+
+        # final candles per (token, ws): tick_count (idx 10) + volume (idx 9)
+        final_by_key = {}
+        for ln in final_rows:
+            f = ln.strip("()").split(",")
+            if len(f) >= 15:
+                try:
+                    key = (int(f[0]), int(f[3]))
+                    final_by_key[key] = (int(f[10]), int(f[9]))
+                except ValueError:
+                    continue
+
+        # compare fully-closed windows inside the run window
+        cutoff_end = (run_end or 0) - 10000
+        mismatch = []
+        compared = 0
+        startup_skipped = 0
+        # The SignalJob source starts in LATEST mode (2026-08-29 design:
+        # skip the LOG backlog accumulated during job startup, measure only
+        # the live path). The first windows after run_start may therefore
+        # legitimately have NO candle. G7c tolerates a CONTIGUOUS STARTUP
+        # PREFIX of candle-less windows — anything missing after the first
+        # present candle is a real gap (observed 2026-08-31: the first G7
+        # run misread the startup skip as 47k data-loss mismatches).
+        first_candle_window = None
+        for key in final_by_key:
+            ws = key[1]
+            if run_start and ws < run_start:
+                continue
+            if first_candle_window is None or ws < first_candle_window:
+                first_candle_window = ws
+        for (token, ws), exp_ticks in sorted(win_ticks.items()):
+            wend = ws + 14999
+            if run_start and ws < ((run_start + 14999) // 15000) * 15000:
+                continue  # window straddles run start - partial raw history
+            if wend > cutoff_end:
+                continue  # window not fully closed + drained at run end
+            key = (token, ws)
+            if key not in final_by_key:
+                if first_candle_window is None or ws < first_candle_window:
+                    startup_skipped += 1
+                else:
+                    mismatch.append(f"window {ws} token {token}: NO final "
+                                    f"candle (expected {exp_ticks} ticks)")
+                continue
+            fticks, fvol = final_by_key[key]
+            compared += 1
+            # The first present candle's window may be PARTIAL (the LATEST
+            # source entered mid-window); every window after it must match
+            # the raw recount exactly.
+            if ws == first_candle_window:
+                continue
+            if fticks != exp_ticks or fvol != win_vol[key]:
+                mismatch.append(
+                    f"window {ws} token {token}: candle ticks={fticks} "
+                    f"vol={fvol} vs raw recount ticks={exp_ticks} "
+                    f"vol={win_vol[key]}")
+
+        print(f"- G7a dedup: sent={want_dups} raw-observed-extras={dup_extras} "
+              f"counter-delta={dup_delta:.0f} (rounds in counter window: "
+              f"{dup_in_window})")
+        print(f"- G7b late:  sent={want_late} raw-observed={late_rows} "
+              f"counter-delta={late_delta:.0f} (rounds in counter window: "
+              f"{late_in_window})")
+        print(f"- G7c parity: {compared} fully-closed (token,window) pairs "
+              f"compared candle-vs-raw, {len(mismatch)} mismatches")
+        if startup_skipped:
+            print(f"- G7c note: {startup_skipped} (token,window) pair(s) before "
+                  f"the first final candle — LATEST-mode startup skip "
+                  f"(documented design), not data loss")
+        # counter exactness: the counter must equal the dups that INGESTED
+        # before the last counter sample (rounds firing later land in raw
+        # but can never reach the counters — the job is torn down).
+        if want_dups and dup_delta != dup_in_window:
+            failures.append(
+                f"G7a: dedup duplicates counter {dup_delta:.0f} != "
+                f"{dup_in_window} dups ingested inside the counter sampling "
+                f"window - ticks are being lost or double-counted "
+                f"downstream of dedup")
+        if dup_extras != want_dups:
+            failures.append(
+                f"G7a: raw table shows {dup_extras} duplicate extras but "
+                f"{want_dups} were injected - unexpected duplication "
+                f"(bridge resend?) or dropped frames")
+        if want_late and late_delta != late_in_window:
+            failures.append(
+                f"G7b: late-drop counter {late_delta:.0f} != "
+                f"{late_in_window} late ticks ingested inside the counter "
+                f"sampling window - late ticks are reaching candles "
+                f"(wrong data) or being lost before the counter")
+        if late_rows != want_late:
+            failures.append(
+                f"G7b: raw table shows {late_rows} late ticks but "
+                f"{want_late} were injected - some late ticks never reached "
+                f"raw_table_1 (quarantined? dropped?)")
+        if mismatch:
+            for msg in mismatch[:10]:
+                failures.append(f"G7c: {msg}")
+            if len(mismatch) > 10:
+                failures.append(f"G7c: ...and {len(mismatch) - 10} more "
+                                "window mismatches")
+        else:
+            print("- G7: data-quality guards passed (dedup exact, late-drop "
+                  "exact, tick-set parity exact)")
+
+
     if failures:
         print()
         for f in failures:
             print(f"!! {f}")
-        print("!! G6 GUARD FAILED — latency regression: this run FAILS")
+        print("!! GUARD FAILED — this run FAILS (see failures above)")
         sys.exit(1)
     if not guard_off:
         print("- G6: latency guards passed (p95<1s, no burst seconds, "

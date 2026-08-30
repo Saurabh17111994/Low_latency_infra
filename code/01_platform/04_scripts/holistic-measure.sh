@@ -68,7 +68,27 @@ run_phase() {
   local name="$1" duration_s="$2"
 
   pipeline_log "=== phase $name: ${duration_s}s at ${RATE_HZ}Hz x 1024 ==="
+  # F2/F3 audit injection (2026-08-30, revised 2026-08-31): smoke injects
+  # once (gate proof); main injects every 2 min, capped at 4 rounds. The
+  # cap matters: teardown lags run_end by up to ~100s (poll drift + evidence
+  # harvest), and an uncapped round firing in that gap lands in raw but
+  # after the job's last counter sample (observed: round 6 at +600s).
+  # Rounds at ticker+120..480 are safely inside the counter window.
+  # The late-tick injection needs the ingestion freshness gate widened —
+  # default 5s would quarantine the old ticks before the candle window
+  # could late-drop them (measured: with a 5s age cap, window late-drop is
+  # arithmetically unreachable on an in-order feed).
+  if [ "$name" = "smoke" ]; then
+    export INJECT_AFTER_MS=120000 INJECT_DUPS=200 INJECT_LATE=20 INJECT_EVERY_MS=0
+  else
+    export INJECT_AFTER_MS=120000 INJECT_DUPS=200 INJECT_LATE=20 \
+      INJECT_EVERY_MS=120000 INJECT_MAX_ROUNDS=4
+  fi
+  export ARROW_MAX_EVENT_AGE_MS=180000
   pipeline_preflight || return 1
+  # Purge raw BEFORE ingestion starts (ingestion holds the writer; raw is
+  # also what the fresh job would otherwise replay from earliest).
+  pipeline_purge_raw_table || true
   pipeline_start_faketool || return 1
   pipeline_start_ingestion || return 1
   pipeline_purge_preview_table || true
@@ -182,6 +202,13 @@ run_phase() {
     if [ $(( i / POLL_S % 3 )) -eq 0 ]; then
       curl -s --max-time 5 http://localhost:9250/metrics \
         | grep -E "rocksdb" | sed "s/^/$now /" >> "$OUT/tm-prom-rocksdb.tsv" || true
+      # F2/F3 audit counters (2026-08-30): dedup drop count and candle
+      # late-drop count. Same 15s cadence; the analyzer takes
+      # last-sample-minus-first-sample as the run delta (counters are
+      # cumulative since job start, and each phase submits a fresh job).
+      curl -s --max-time 5 http://localhost:9250/metrics \
+        | grep -E "^flink_.*compute_dedup_(first|duplicates)|^flink_.*compute_candles_late_dropped" \
+        | sed "s/^/$now /" >> "$OUT/tm-prom-dedup-late.tsv" || true
     fi
     # Liveness guard (B2 family): a dead feed invalidates the series.
     kill -0 "$FAKETOOL_PID" 2>/dev/null || { echo "!! faketool dead at t+${i}s" >&2; return 1; }
@@ -243,6 +270,52 @@ if OUT="$PHASE_OUT/smoke" run_phase smoke "$SMOKE_S"; then
   echo "SMOKE PASS — proceeding to main measurement"
 else
   echo "SMOKE FAIL — main measurement SKIPPED (a broken pipeline must not produce confident-looking numbers)" >&2
+  exit 1
+fi
+
+# ---------- Smoke injection gate (F2/F3, 2026-08-30) ----------------------
+# The smoke phase injected 200 duplicate + 20 late ticks at t+60s. Before
+# main runs, assert the counters moved by EXACTLY those amounts:
+#   compute.dedup.duplicates    +200  (dedup dropped every injected dup)
+#   compute.candles.late.dropped +20  (window dropped every injected late tick)
+# A counter short of the injected count = drops being lost (data duplication
+# downstream); a counter over = over-dropping (data loss). Both fail the gate.
+smoke_inject_gate() {
+  local dir="$PHASE_OUT/smoke"
+  local want_dups want_late
+  want_dups="$(grep -oE 'dups=[0-9]+' "$dir/faketool.log" 2>/dev/null | cut -d= -f2 | awk '{s+=$1} END {print s+0}')"
+  want_late="$(grep -oE 'late=[0-9]+' "$dir/faketool.log" 2>/dev/null | cut -d= -f2 | awk '{s+=$1} END {print s+0}')"
+  if [ "${want_dups:-0}" -eq 0 ] && [ "${want_late:-0}" -eq 0 ]; then
+    echo "!! SMOKE INJECT GATE: no INJECT lines in faketool.log — injection never fired" >&2
+    return 1
+  fi
+  # counter delta: last sample minus first sample per series, SUMMED over
+  # subtask series (operator parallelism may expose several series; counters
+  # are cumulative since job start — the smoke job is fresh, but subtract
+  # the first sample anyway in case sampling began mid-injection).
+  local dup_delta late_delta
+  dup_delta="$(awk '/compute_dedup_duplicates/ {last[$2]=$NF} END {s=0; for (k in last) s+=last[k]; printf "%.0f", s}' "$dir/tm-prom-dedup-late.tsv" 2>/dev/null)"
+  local dup_first
+  dup_first="$(awk '/compute_dedup_duplicates/ {if (!($2 in first)) first[$2]=$NF} END {s=0; for (k in first) s+=first[k]; printf "%.0f", s}' "$dir/tm-prom-dedup-late.tsv" 2>/dev/null)"
+  dup_delta=$(( ${dup_delta:-0} - ${dup_first:-0} ))
+  late_delta="$(awk '/compute_candles_late_dropped/ {last[$2]=$NF} END {s=0; for (k in last) s+=last[k]; printf "%.0f", s}' "$dir/tm-prom-dedup-late.tsv" 2>/dev/null)"
+  local late_first
+  late_first="$(awk '/compute_candles_late_dropped/ {if (!($2 in first)) first[$2]=$NF} END {s=0; for (k in first) s+=first[k]; printf "%.0f", s}' "$dir/tm-prom-dedup-late.tsv" 2>/dev/null)"
+  late_delta=$(( ${late_delta:-0} - ${late_first:-0} ))
+  echo "smoke inject gate: want dups=${want_dups:-0} late=${want_late:-0}; got dups=${dup_delta} late=${late_delta}"
+  if [ "${dup_delta:-x}" != "${want_dups:-x}" ]; then
+    echo "!! SMOKE INJECT GATE FAIL: dedup duplicates counter ${dup_delta} != injected ${want_dups}" >&2
+    return 1
+  fi
+  if [ "${late_delta:-x}" != "${want_late:-x}" ]; then
+    echo "!! SMOKE INJECT GATE FAIL: late-drop counter ${late_delta} != injected ${want_late}" >&2
+    return 1
+  fi
+  echo "SMOKE INJECT GATE PASS — dedup dropped exactly ${want_dups} dups, window late-dropped exactly ${want_late}"
+  return 0
+}
+if ! smoke_inject_gate; then
+  echo "SMOKE INJECT GATE FAIL — main measurement SKIPPED" >&2
   exit 1
 fi
 

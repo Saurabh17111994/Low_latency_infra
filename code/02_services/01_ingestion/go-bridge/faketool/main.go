@@ -55,6 +55,31 @@ func main() {
 	// 20 Hz = 20,480 frames/s (the redesign's per-connection target).
 	realRate := flag.Bool("real-rate", false, "emit one frame per subscribed id at -real-rate-hz (bench mode)")
 	realRateHz := flag.Int("real-rate-hz", 20, "frames per second per subscribed id when -real-rate; must divide 1000")
+	// Data-quality audit injection (F2/F3 live A/B, 2026-08-30): after the
+	// tick stream has run for inject-after-ms, send a burst of crafted
+	// frames for the first subscribed token and log the exact counts:
+	//   - inject-dups D: D verbatim resends of the token's most recent
+	//     normal frame. Same fingerprint (epoch|token|ts|price|qty) → the
+	//     compute dedup operator MUST drop all D (compute.dedup.duplicates).
+	//   - inject-late L with -inject-late-ms M: L frames with a fresh
+	//     price/qty (unique fingerprint, passes dedup) but event timestamp
+	//     M ms in the past (default 90000 — beyond the 15s window +
+	//     lateness) → the candle window MUST late-drop all L
+	//     (compute.candles.late.dropped).
+	// Both kinds still land in raw_table_1 (ingestion writes raw before
+	// compute dedups), so raw counts grow by D+L. One injection per
+	// connection; repeats every inject-every-ms (0 = once).
+	injectAfter := flag.Duration("inject-after-ms", 0, "start injection this long after the ticker starts; 0 = never")
+	injectDups := flag.Int("inject-dups", 0, "verbatim duplicate frames to inject per round")
+	injectLate := flag.Int("inject-late", 0, "late-timestamp unique frames to inject per round")
+	injectLateMs := flag.Int("inject-late-ms", 90000, "how far in the past injected late frames' event time is")
+	injectEvery := flag.Duration("inject-every-ms", 0, "repeat injection every this long; 0 = once")
+	// Cap the number of rounds: the harness teardown lags the measurement
+	// window by up to ~100s (poll-loop drift + evidence harvest), and a
+	// round firing in that gap lands in raw but past the job's counters —
+	// the analyzer then has to reason about post-counter rounds (observed
+	// 2026-08-31: round 6 at +600s fired after the last Prometheus sample).
+	injectMaxRounds := flag.Int("inject-max-rounds", 0, "stop after this many rounds; 0 = unlimited")
 	flag.Parse()
 	if *realRate && *tickInterval > 0 {
 		fmt.Fprintln(os.Stderr, "faketool: -real-rate and -tick-interval-ms are mutually exclusive")
@@ -199,6 +224,10 @@ func main() {
 				tickerStarted = true
 				if *realRate {
 					logf("real-rate ticker start (hz=%d)", *realRateHz)
+					// last frame per token, captured after each send, so a
+					// duplicate injection resends the exact bytes the bridge
+					// just accepted (identical fingerprint by construction).
+					var lastFrames sync.Map // token -> []byte
 					go func() {
 						interval := time.Duration(1000 / *realRateHz) * time.Millisecond
 						t := time.NewTicker(interval)
@@ -237,6 +266,7 @@ func main() {
 								binary.LittleEndian.PutUint32(frame[12:16], qty)
 								binary.LittleEndian.PutUint64(frame[64:72], uint64(qty))
 								binary.LittleEndian.PutUint64(frame[180:188], uint64(time.Now().UnixNano()))
+								lastFrames.Store(tok, append([]byte(nil), frame...))
 								if err := send(frame); err != nil {
 									logf("real-rate send failed: %v", err)
 									return
@@ -244,6 +274,79 @@ func main() {
 							}
 						}
 					}()
+					// Injection goroutine (F2/F3 audit): waits for the first
+					// subscribed token, then after inject-after-ms replays its
+					// last frame verbatim (dups) and sends old-timestamp
+					// unique frames (late). Counts logged as INJECT lines —
+					// the harness parses them and asserts the counters match.
+					if *injectAfter > 0 && (*injectDups > 0 || *injectLate > 0) {
+						go func() {
+							// wait for at least one subscribed token with a
+							// captured frame
+							var tok uint32
+							var last []byte
+							deadline := time.Now().Add(*injectAfter)
+							for time.Now().Before(deadline) {
+								subMu.Lock()
+								n := len(subscribed)
+								if n > 0 {
+									tok = subscribed[0]
+								}
+								subMu.Unlock()
+								if n > 0 {
+									if v, ok := lastFrames.Load(tok); ok {
+										last = v.([]byte)
+										break
+									}
+								}
+								time.Sleep(50 * time.Millisecond)
+							}
+							if last == nil {
+								logf("INJECT skipped — no captured frame before deadline")
+								return
+							}
+							time.Sleep(time.Until(deadline))
+							for round := 1; ; round++ {
+								// refresh the captured frame each round so
+								// duplicates are always copies of a frame the
+								// pipeline has just seen (dedup TTL is 60s)
+								if v, ok := lastFrames.Load(tok); ok {
+									last = v.([]byte)
+								}
+								for i := 0; i < *injectDups; i++ {
+									if err := send(last); err != nil {
+										logf("INJECT dup send failed: %v", err)
+										return
+									}
+								}
+								for i := 0; i < *injectLate; i++ {
+									late := append([]byte(nil), last...)
+									// fresh price/qty → unique fingerprint →
+									// passes dedup; old timestamp → the candle
+									// window late-drops it.
+									binary.LittleEndian.PutUint32(late[8:12], uint32(15050+i))
+									binary.LittleEndian.PutUint32(late[12:16], uint32(7+i))
+									binary.LittleEndian.PutUint64(late[64:72], uint64(7+i))
+									binary.LittleEndian.PutUint64(late[180:188],
+										uint64(time.Now().UnixNano()-int64(*injectLateMs)*int64(time.Millisecond)))
+									if err := send(late); err != nil {
+										logf("INJECT late send failed: %v", err)
+										return
+									}
+								}
+								logf("INJECT round=%d token=%d dups=%d late=%d late_ms=%d",
+									round, tok, *injectDups, *injectLate, *injectLateMs)
+								if *injectEvery <= 0 {
+									return
+								}
+								if *injectMaxRounds > 0 && round >= *injectMaxRounds {
+									logf("INJECT done — max rounds reached (%d)", *injectMaxRounds)
+									return
+								}
+								time.Sleep(*injectEvery)
+							}
+						}()
+					}
 				} else {
 					logf("ticker start (every %dms)", *tickInterval)
 					tickerFrame := make([]byte, hftSizeFull)

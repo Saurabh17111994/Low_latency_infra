@@ -1,7 +1,8 @@
 # System Quality Lever Map — Latency Tail Investigation and Beyond
 
 > **Date:** 2026-08-30
-> **Status:** Active investigation — GC-telemetry run in progress
+> **Status:** Target MET (p95 = 740 ms) — investigation closed 2026-08-30;
+> this map now tracks follow-up levers only
 > **Owner:** measurement→attribute→fix loop (tracker-14 evidence chain)
 > **Prerequisite reading:** `2026-08-29-low-latency-candles-plan.md` (the feature),
 > `performance-audit-2026-08-26.md` (the audit that started this)
@@ -34,14 +35,23 @@ The pipeline ingests ticks (fake broker @ 10 Hz × 1024 instruments =
 CONFIRM/CANCEL). The user requirement: **end-to-end latency broker→feature
 table < 1 second**.
 
-Current status vs that requirement (wm500 run, 2026-08-30):
+Current status vs that requirement (final combo run 2026-08-30 18:47,
+PREVIEW_INTERVAL_MS=500 + CHECKPOINT_INTERVAL_MS=60000 — now the
+pipeline-lib.sh defaults):
 
 | Metric | Value | Verdict |
 |---|---|---|
-| p50 | 340 ms | ✅ |
-| p95 | 2,766 ms | ❌ (tail) |
-| p99 | 4,400 ms | ❌ (tail) |
+| p50 | 346 ms | ✅ |
+| **p95** | **740 ms** | ✅ **TARGET MET** |
+| p99 | 2,396 ms | 🔶 accepted (per-checkpoint emission freeze ~3 s, documented) |
 | Throughput | source 10,127/s, zero loss, ~2.5× headroom | ✅ |
+
+Baseline re-run with the new defaults (no env overrides): p95 = 685 ms —
+the defaults hold without per-run tuning. Full latency picture:
+ingestion broker→raw table ~15–50 ms p99; preview path p50 346 / p95 740 /
+p99 2,396 ms; final candle window-close→committed p50 1,164 / p95 1,260 ms
+(by design: 500 ms out-of-order allowance + ~500 ms watermark advance +
+write; tunable via watermark if ever needed).
 
 ### 2.2 The single-timeline rule (user decision, do not revisit)
 
@@ -70,7 +80,7 @@ individually slow.
 | ActiveSignal log flooding | steady ~800 lines/min, no burst correlation |
 | Harness metric polling | 15 s cadence ≠ 90 s bursts |
 
-### 2.5 What the current GC-telemetry run will answer
+### 2.5 What the GC-telemetry run answered (closed 2026-08-30)
 
 Instrumentation added 2026-08-30 (three harness bugs found and fixed along
 the way — see §6):
@@ -85,9 +95,11 @@ the way — see §6):
   (p95>2s per 1s slice) cross-checked against GC pauses (±3 s) and slow
   checkpoints (±8 s), prints a machine verdict
 
-The run in progress (1-min smoke + 10-min main, ~6-7 burst cycles) either
-names GC/checkpoints as the culprit or eliminates both — either outcome
-narrows the field.
+Verdict: GC eliminated (TM max pause 25 ms, ingestion 16 ms). The run's
+instrumentation (GC logs, live checkpoint capture, burst attribution in the
+analyzer) stays in the harness as standing baseline. The burst hunt
+continued through A1–A5 and closed with three root causes — see the
+scoreboard.
 
 ### 2.6 Investigation scoreboard (updated 2026-08-30, post A1/A2/A3/A5 batch)
 
@@ -115,6 +127,11 @@ prime suspect per A4).
 | **Checkpoint = 3rd cause (2026-08-30 17:35)** | ✅ CONFIRMED & FIXED | Two harness bugs found first: checkpoints.jsonl dedupe collapsed 70→1 line (awk `$1` identical on all JSON lines) + analyzer units bug (epoch vs offset — 0/70 overlap was impossible, corrected 43/70). 76/85 bursts at +2–4s after checkpoint trigger (inside its ~2.5s window). Fix: CHECKPOINT_INTERVAL_MS parameterized; 10s→60s cut bursts 58→3, p95 2857→1120ms. 120s gained nothing (1,150ms) — floor reached |
 | **Latency floor law (2026-08-30 18:27)** | ✅ MEASURED | With stalls gone, e2e p95 ≈ emission-interval + fixed pipeline cost (~200ms): 1s interval → 1,150ms; 2s → 2,215ms. Timer-driven preview makes p95 < interval structurally impossible |
 | **FINAL RESULT (2026-08-30 18:47)** | ✅ **TARGET MET: p95=740ms** | PREVIEW_INTERVAL_MS=500 + CHECKPOINT_INTERVAL_MS=60000: p50=346 / **p95=740 / p99=2396**, staleness 414ms, 2.87M rows. G6a passes. G6b still fires: 10 burst-seconds ≈ every 60s at 3–3.6s = the per-checkpoint emission freeze (~3s each) — next lever if p99 matters: unaligned checkpoints |
+| **Defaults encoded (2026-08-30 19:0x)** | ✅ COMMITTED (9274ad8) | pipeline-lib.sh defaults now PREVIEW_INTERVAL_MS:-500, CHECKPOINT_INTERVAL_MS:-60000; env vars override. Guards 19/19 pass. Baseline re-run with bare defaults: p95=685ms |
+| **G6b redesign (2026-08-30)** | ✅ COMMITTED | Flat 3s/4s thresholds nagged on the documented checkpoint tail. Final design: exempt checkpoint-window seconds [trigger−1s, end+6s] (measured post-end lag 0.5–5.0s + 1s bucket rounding). Guard catches NEW stall types; the known checkpoint tail is G6a's job. Also fixed: analyzer live re-read was overwriting the rows evidence file (two runs' evidence lost that way) |
+| **Final-candle path (2026-08-30)** | ✅ MEASURED (dd17230) | Analyzer v-final-candle: window-close→committed p50 1,164 / p95 1,260 / p99 1,275 ms (n=48,128). output_ts is field index **13** of 15 (index 12 is config_version) |
+| **State-recovery drill (2026-08-30)** | ✅ **ZERO DATA LOSS** | Savepoint (11 MB, dedup 1,063,976 firsts/0 dups) → stop → restore → job RUNNING → dedup preserved (831,998 firsts/0 dups), post-restore checkpoint 91 MB. Full final-table continuity read: **1024/1024 candles in every 15s window across the restart**. 3 rollout-savepoint.sh bugs found by the live drill (compose wrapper missing --env-file pair; empty JOB_ID → rc=22; pipefail+empty-sed → rc=1) — fixed in 72c9743. Lesson: recovery tooling must be drilled live, not read |
+| **EOD controller test (2026-08-30 22:13)** | ✅ 8/8 PASS (6c48efd) | 6 guards (fail-closed offload=none, lease fencing rc=5, clean-state no-ops, idempotency, reconcile stability, purge hygiene) + 120s smoke + 600s main cycle via mock executor. Encodes measured semantics: leases persist in eod_offload_state across process death (purge between subtests); 2nd run on VERIFIED day = no-op. Real MinIO/R2 offload still untested (needs sidecars + lake tiering session) |
 
 **Status legend:** ✅ done/verified · 🔶 partial/in-flight · ❌ not started ·
 (deprioritized marks explain why)
@@ -125,7 +142,8 @@ prime suspect per A4).
 
 ### Group A — burst root-cause levers (current hunt)
 
-If the GC run doesn't fully explain the bursts:
+All closed (hunt finished 2026-08-30 — three root causes, three fixes;
+kept for the record of how each suspect was eliminated):
 
 | # | Lever | How to measure | What it decides |
 |---|---|---|---|
@@ -147,8 +165,11 @@ anything invasive.
 | # | Lever | Status |
 |---|---|---|
 | B1 | Watermark wait (500 ms) | ✅ Done 2026-08-30 (p95 5.7s→2.8s). Revisit only with real feed |
-| B2 | Preview interval (1 s) | Already at REQ-FC-002 spec; lower = more rows, not faster decisions |
-| B3 | Checkpoint interval (10 s, 3–4 s duration — barriers in flight 30–40% of the time) | ✅ **RESOLVED 2026-08-30: checkpoints ruled out as burst cause** (0 slow checkpoints across 2 instrumented runs). Interval tuning remains a general lever but is NOT needed for the tail. |
+| B2 | Preview interval | ✅ **Now 500 ms (default in pipeline-lib.sh, 2026-08-30)** — this is what took p95 under 1 s (floor law: p95 ≈ interval + ~200 ms). Going lower needs event-driven emission (code change), not a smaller timer |
+| B3 | Checkpoint interval | ✅ **RESOLVED & APPLIED: 60 s (default in pipeline-lib.sh)**. 10 s→60 s cut bursts 58→3, p95 2,857→1,120 ms; 120 s gained nothing. Checkpoints WERE a real cause (76/85 bursts at +2–4 s after trigger); first ruled out on the wm500 run because a harness dedupe bug collapsed 70 checkpoints to 1 |
+| B4 | Operator parallelism | Currently 8 source parallelism / mostly 1 elsewhere, 1 TM × 10 slots. Headroom exists; only if throughput grows |
+| B5 | p99 tail (per-checkpoint ~3 s emission freeze) | 🔶 Deferred by choice. Lever = unaligned checkpoints (let barriers overtake in-flight data instead of freezing emission). Only if a p99 < 1.5 s requirement ever appears |
+| B6 | p95 < 500 ms | ❌ Deferred by choice. Structurally impossible with timer-driven emission at 500 ms interval (floor law). Would need event-driven preview emission — a code change, estimate before ever starting |
 | B4 | Operator parallelism | Currently 8 source parallelism / mostly 1 elsewhere, 1 TM × 10 slots. Headroom exists; only if throughput grows |
 
 ### Group C — production-readiness levers (separate workstream, all open)
@@ -156,7 +177,7 @@ anything invasive.
 | # | Lever | What's missing |
 |---|---|---|
 | C1 | **Real-feed measurement** | Tick lateness percentiles on real broker → set watermark to just above p99.9 (provisional 500 ms gets re-validated) |
-| C2 | **Failover/recovery test** | Kill TM mid-run at full load → preview correctness during recovery? recovery time? data gap? |
+| C2 | **Failover/recovery test** | ✅ **DONE 2026-08-30 (savepoint→stop→restore drill, zero data loss — see scoreboard)**. Caveat: this was a graceful savepoint drill, not a kill -9 mid-burst. A TM-kill-at-full-load drill remains open if that failure mode matters |
 | C3 | **Long soak (hours)** | State growth, memory leaks, RocksDB degradation over time — 15-min runs cannot see this |
 | C4 | **Backtest-parity check** | Mechanical test that preview candle and final candle saw identical tick sets on a recorded run (single-timeline rule deserves a test, not just design intent) |
 | C5 | **KV point-lookup flakiness** | Known intermittent Fluss 0.9.1 issue — file upstream or work around; currently untracked |
@@ -170,11 +191,11 @@ system scales on the same hardware before needing more machines.
 
 | # | Lever | Evidence / how to check | Expected effect |
 |---|---|---|---|
-| D1 | **POJO serialization for CandleAccumulator** | ⚠ OBSERVED in JM logs: `CandleAccumulator is not public so it cannot be used as a POJO type and must be processed as GenericType` (logged every job submit). GenericType = Kryo serialization = slower + larger state. Fix: make the class public with public fields. | Less CPU per record, smaller RocksDB state, cheaper checkpoints |
+| D1 | **POJO serialization for CandleAccumulator** | ✅ **FIXED 2026-08-30 (commit 39adae2): full POJO (public class + public fields)**. JM no longer logs the GenericType warning. A/B latency measurement not done — fix was free and safe; measure only if D-group ever becomes urgent |
 | D2 | **GC tuning / collector choice** | GC logs now captured (2026-08-30). If pauses are the burst cause: G1 tuning (region size, pause-target) or switch collector (ZGC/shenandoah = sub-ms pauses, some throughput cost) | ✅ **MEASURED 2026-08-30 (2 runs): GC is healthy and NOT the burst cause.** TM: 424 pauses, max 25 ms; ingestion: 70 pauses, max 16 ms. No tuning needed at current load; GC logging stays in harness as a standing baseline. |
 | D3 | **Operator object-churn audit** | Flink metrics: `numRecordsOutPerSecond` already tracked; add allocation profiling (JFR on TM for 60 s during a run) if GC frequency looks allocation-driven | Lower GC frequency = fewer pauses |
 | D4 | **RocksDB state tuning** | Default block cache/write-buffer sizes on a 2.2 GB heap TM; check `state.backend.rocksdb.memory` config vs actual state size (candles state = 1024 tokens × open window) | Less memory pressure, fewer compactions |
-| D5 | **Preview row volume** | 1,013 preview rows/s at 1 s cadence × 1024 tokens — the preview table grows ~87M rows/day at test rates. Consider TTL/compaction policy on the preview table if it is query-only for live decisions | Bounds storage + read amplification |
+| D5 | **Preview row volume** | ✅ **PARTIALLY FIXED 2026-08-30:** the real problem was Fluss's CALENDAR-DAY TTL never expiring same-day data (11.6 M keys accumulated). Harness now purges (drop+recreate) the preview table at every run start (`pipeline_purge_preview_table`). Remaining: decide if a production TTL policy (e.g. hourly buckets) is needed once preview runs continuously | Bounds storage + read amplification |
 | D6 | **Ingestion JVM footprint** | 2 g heap + 1 g direct, but idle-processing load is light; measure actual live-set during a run (GC logs now show it) — right-size before production replicas | 🔶 Partial: GC logging wired (gc.log in evidence every run); live-set analysis not yet done — one offline pass over captured gc.logs, no new run needed. |
 | D7 | **Fluss writer batching** (relates to A3) | `FLUSS_WRITER_BATCH_SIZE_BYTES=0` = every tick is its own append (lowest latency, highest RPC overhead). At production rates this trade may flip — measure RPC count/s | Throughput headroom at modest latency cost |
 
@@ -234,34 +255,31 @@ not new systems.
 
 ## 4. Recommended sequencing
 
-1. **Now:** GC-telemetry run verdict (in progress)
-2. ~~**Next batch:** A1 + A2 + A5 harness upgrade → one run answers all three~~ **DONE 2026-08-30** — A1/A2/A3/A5 all answered in one run (see scoreboard); disk saturation confirmed as the cause
-3. **Then (NEXT INVESTIGATION):** 2 consecutive 10-min runs with v2 samplers
-   (fixed distroless coverage + disk await/queue depth). Decision matrix:
-   - TM spikes + disk await high + burst-aligned → fix = checkpoint/state
-     write pacing (unaligned checkpoints, `state.backend.rocksdb`
-     write-buffer throttling, or async checkpoint tuning), then assertive guard
-   - minio/openobserve revealed as the writer → isolate their volumes
-     (separate disk / tmpfs) or throttle tiering upload cadence
-   - disk clean but bursts persist → the tail is NOT disk; next suspect is
-     Flink network-buffer credit recursion (E4) measured via backpressure
-     trace (`/jobs/{id}/backpressure`), or accept tail as faketool-artifact
-     (validate on real feed, C1)
-   - Then: one targeted fix + verification run + assertive guard (the
-     analyzer's disk/burst correlation verdict becomes a FAILING exit once
-     the fix lands — regression protection)
-4. **Cheap and confirmed-broken:** D1 (POJO fix) — the JM log literally
-   flags it every submit; one-line visibility change + measurement A/B
-5. **Parallel-safe workstream:** C2, C3, C4 are correctness tests — each one
-   run, no new instrumentation, can be done any time
-6. **Before production feed:** G3 (act on the fingerprint mismatch warnings
+1. ~~GC-telemetry run verdict~~ **DONE 2026-08-30** — GC eliminated.
+2. ~~A1 + A2 + A5 batch~~ **DONE** — all answered; disk saturation named,
+   tiering fixed, then checkpoint cause found and fixed (scoreboard).
+3. ~~Target p95 < 1 s~~ **DONE 2026-08-30** — p95 = 740 ms (740 with env
+   overrides, 685 with bare defaults); defaults committed. Investigation
+   CLOSED.
+4. ~~D1 POJO fix~~ **DONE 2026-08-30** (39adae2).
+5. ~~C2 recovery drill~~ **DONE 2026-08-30** — zero data loss; rollout
+   tooling drilled live and fixed (72c9743).
+6. **Next session:** restart sidecars (minio, openobserve, cadvisor,
+   node-exporter — currently stopped by choice), then the **lake tiering /
+   real EOD offload test** (REQ-FLS-011 / AC-FLS-004/005). Note: the
+   tiering interval was set to `0s` as a bench-only latency knob — it must
+   be reverted for this test (that is the point of the test).
+7. **Then:** signal-path latency measurement (tentative→confirm/cancel) —
+   completes the trading-side picture; C4 (preview↔final tick-set parity
+   test) — the single-timeline rule deserves its mechanical test.
+8. **Before production feed:** G3 (act on the fingerprint mismatch warnings
    already appearing in logs) and F3 (late-tick counter) — both are cheap
    and directly protect trading decisions; F1/G1/G2 become production
    monitors at the same time
-7. **When load grows:** Group E (scaling) — not before; measuring now would
-   be premature optimization
-8. **Blocked on real feed:** C1, C6 final numbers; D7's batching tradeoff
-   also needs real-rate data
+9. **When load grows:** scale test 1,024 → 3,000 instruments (box's 16 GB
+   RAM may cap this; C6), then Group E (scaling) — not before
+10. **Blocked on real feed:** C1 final watermark numbers; D7's batching
+   tradeoff also needs real-rate data
 
 ### Efficiency principles (why Groups D/E are ordered last)
 
@@ -280,9 +298,21 @@ not new systems.
 - `logs/tracker-14/holistic-measure-20260830-021926` — v2 instrumented baseline (last_event_ts)
 - `logs/tracker-14/holistic-measure-20260830-030012` — wm500 run, current best numbers + burst analysis source
 - `logs/tracker-14/loadtest-20260829-192648` — committed 18/18 verification evidence (KEEP)
+- `logs/tracker-14/holistic-measure-20260830-142542` and `-145108` —
+  tiering-fix verification runs (first post-fix zero-burst evidence)
+- `logs/tracker-14/holistic-measure-20260830-173514` — final combo run,
+  p95 = 740 ms (the target-met evidence)
+- `logs/rollout/rollout-signal-job-compute-20260830-*.log` — recovery
+  drill: savepoint, restore, post-restore verification
+- `logs/eod-test/eod-test-20260830-221347.log` — EOD controller test 8/8
+  (guards + smoke + main)
+- ⚠ runs 140907 and 173514's rows files were destroyed by an analyzer bug
+  (live re-read overwrote them) — fixed 9274ad8; later runs intact
 - Harness: `code/01_platform/04_scripts/` — `pipeline-lib.sh` (shared),
   `holistic-measure.sh` (gate+measure), `holistic-analyze.py` (report+burst
-  attribution), `test-pipeline-lib.sh` (19 guards)
+  attribution+G6 guards+final-candle path), `test-pipeline-lib.sh` (19
+  guards), `rollout-savepoint.sh` (deploy/savepoint/restore drill),
+  `eod-controller-test.sh` (EOD machinery), `eod_controller.py` (EOD CLI)
 
 ## 6. Hard-won gotchas (do not rediscover these)
 
@@ -294,13 +324,18 @@ not new systems.
 6. **LogScanner double-delivery** — every Fluss log row appears twice in from-earliest reads; always dedupe.
 7. **Event-time vs wall-clock** — signal rows carry event-time stamps (eval_ts=window_end), NOT wall-clock; preview `output_ts` IS wall-clock. Latency = `output_ts − last_event_ts` per row (schema v2).
 8. **Never pipe loadtest scripts through `grep | head`** — SIGPIPE kills the pipeline; use bg_run with output redirect.
-9. **`docker compose` always needs `--env-file .env --env-file secrets.env`.**
-10. **Standing rule:** every fixed bug gets a mechanical guard so it cannot recur (comment-only fixes are not fixes).
+9. **`docker compose` always needs `--env-file .env --env-file secrets.env`** — in manual commands AND in script wrappers; a wrapper that omits them aborts interpolating AWS_SECRET_ACCESS_KEY (rollout-savepoint.sh bug 1 of 3, found live).
+10. **`set -o pipefail` + `set -e` traps:** `sed -n 's/../../p'` exits 1 on empty input and `curl -f` exits 22 on HTTP 4xx — both kill scripts via assignment status. Use `{ ...; } 2>/dev/null || true` around probes.
+11. **Comments must NEVER sit inside backslash-continued commands** — a `#` on a continuation line comments out the rest (G4/G4b guard in test-pipeline-lib.sh).
+12. **Fluss duration configs need units** — `remote.log.task-interval-duration: 0` is invalid; `0s` is valid.
+13. **LogFullRead needs** `--add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.nio=ALL-UNNAMED`, and long reads need run_ms ≥ 600000.
+14. **Checkpoints JSONL dedupe must key on `"id": N`** — keying on `$1` of a JSON line collapses every checkpoint into one (this bug hid the checkpoint/burst correlation for two runs).
+15. **Standing rule:** every fixed bug gets a mechanical guard so it cannot recur (comment-only fixes are not fixes).
 
 ### 6.1 Observed-but-unfixed warnings (candidates, not confirmed problems)
 
-- `CandleAccumulator` GenericType serialization warning (→ lever D1) —
-  logged by the JobManager on every job submit since at least 2026-08-29.
+- ~~`CandleAccumulator` GenericType serialization warning~~ **FIXED
+  2026-08-30** (D1, commit 39adae2).
 - Fluss `NettyServerHandler` idle-connection warnings on tablet teardown —
   cosmetic so far, watch for recurrence under load.
 - Faketool logged 653 `non-json frame` events during the wm500 run — the
