@@ -41,7 +41,13 @@ x-flink-common: &flink-common
   restart: unless-stopped
   networks: [trading-net]
   depends_on: [fluss-coordinator]
-  environment:
+  # NOTE: this environment map carries its own anchor (&flink-common-env).
+  # A service that needs extra env vars MUST merge it explicitly with
+  # `<<: *flink-common-env` — a bare `environment:` at the service level
+  # REPLACES this whole map (observed 2026-08-30: TM lost FLINK_PROPERTIES
+  # → tried to reach the ResourceManager at its own address and never
+  # registered; also lost TASK_MANAGER_MEMORY_MANAGED_SIZE → 512M heap).
+  environment: &flink-common-env
     # Restore-only default (2026-08-28, #3 hardening): normal launches must
     # carry STATE_RECOVERY_PATH and restore. A missing restore path fails
     # closed at startup ([F005]) unless the operator deliberately overrides
@@ -314,6 +320,17 @@ services:
         kv.snapshot.interval: 0s
         data.dir: /tmp/fluss/data
         remote.data.dir: /tmp/fluss/remote-data
+        # 2026-08-30 burst root cause (A2b v3): LogTieringTask copies rolled
+        # segments to remote.data.dir — on this single-NVMe dev box that is
+        # read+write on the SAME disk at 150-200 MB/s, saturating it and
+        # bursting preview latency (~90s period; 35/42 burst-aligned across
+        # 3 runs; tablet spikes 3/3 aligned in run 145108). 0 disables
+        # remote-log tiering (Fluss source: RemoteLogManager.remoteDisabled).
+        # Bench runs: FLUSS_REMOTE_LOG_TASK_INTERVAL=0s docker compose up -d
+        # fluss-tablet. MUST be '0s', not '0' — duration type needs a unit or
+        # the tablet fails to start (Could not parse value '0').
+        # Lake/tiering tests keep the 1m default (minio up).
+        remote.log.task-interval-duration: ${FLUSS_REMOTE_LOG_TASK_INTERVAL:-1m}
         # Lake tiering (tracker 14 P3.2) — same datalake.* block as the
         # coordinator: datalake.iceberg.* → Iceberg catalog props,
         # iceberg.hadoop.* → Hadoop fs.s3a.* (R2). Credentials only via .env.
@@ -368,6 +385,47 @@ services:
     <<: *flink-common
     image: ${FLINK_IMAGE:?set FLINK_IMAGE to an immutable digest}
     command: ["taskmanager"]
+    environment:
+      # Merge the flink-common env map (see anchor note above) — do NOT let
+      # this block replace it.
+      <<: *flink-common-env
+      # GC pause logging (2026-08-30): periodic ~90s latency bursts across
+      # all operators were attributed to neither compute nor checkpoints;
+      # GC pauses are the remaining hypothesis and were previously
+      # unobservable (no GC logging). Unified JVM logging to a dedicated
+      # file inside the mounted flink-logs volume; rotate at 50MB x 5.
+      # The docker-entrypoint appends FLINK_ENV_JAVA_OPTS AFTER the memory
+      # settings, so taskmanager.heap.size etc. stay intact.
+      # WARNING: setting FLINK_ENV_JAVA_OPTS makes config.sh SKIP reading
+      # env.java.opts.all from config.yaml (config.sh: "if [ -z FLINK_ENV_
+      # JAVA_OPTS ]..."). The image default env.java.opts.all carries the
+      # --add-opens=java.base/java.nio=ALL-UNNAMED that Fluss's Arrow
+      # deserialization REQUIRES — omit it and every source subtask fails
+      # with ExceptionInInitializerError: MemoryUtil (observed 2026-08-30,
+      # job 966456a5). Therefore this value = image default env.java.opts.all
+      # + GC/safepoint logging. If the image changes, re-sync with the
+      # image's config.yaml env.java.opts.all.
+      FLINK_ENV_JAVA_OPTS: >-
+        --add-exports=java.rmi/sun.rmi.registry=ALL-UNNAMED
+        --add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED
+        --add-exports=jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED
+        --add-exports=jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED
+        --add-exports=jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED
+        --add-exports=jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED
+        --add-exports=java.security.jgss/sun.security.krb5=ALL-UNNAMED
+        --add-opens=java.base/java.lang=ALL-UNNAMED
+        --add-opens=java.base/java.net=ALL-UNNAMED
+        --add-opens=java.base/java.io=ALL-UNNAMED
+        --add-opens=java.base/java.nio=ALL-UNNAMED
+        --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+        --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+        --add-opens=java.base/java.text=ALL-UNNAMED
+        --add-opens=java.base/java.time=ALL-UNNAMED
+        --add-opens=java.base/java.util=ALL-UNNAMED
+        --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+        --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+        --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED
+        -Xlog:gc*,safepoint:file=/opt/flink/log/gc.log:time,uptime,level,tags:filecount=5,filesize=50m
     # Run as root so the Fluss RemoteLogDownloader can create its download
     # cache under /tmp/fluss (docker creates the /tmp/fluss mount parent as
     # root; the image default user flink:flink gets AccessDeniedException —
