@@ -22,185 +22,38 @@
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-JAR="$ROOT/code/02_services/02_compute/target/compute.jar"
-ING_JAR="$ROOT/code/02_services/01_ingestion/target/ingestion.jar"
-BRIDGE_DIR="$ROOT/code/02_services/01_ingestion/go-bridge"
-MANIFEST="$ROOT/../../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv"
-FAKETOOL_SRC="$BRIDGE_DIR/faketool/main.go"
-FAKETOOL_PORT="${FAKETOOL_PORT:-8899}"  # H3 (2026-08-29)
-COMPOSE_FILE="$ROOT/code/01_platform/01_docker/docker-compose.yml"
-# Compose requires both env files for variable interpolation (FLINK_IMAGE:?,
-# S3_WAREHOUSE_PATH:? etc. hard-fail without them — observed 2026-08-29:
-# "flink-taskmanager restart failed" on a bare `docker compose -f` call).
-COMPOSE="docker compose -f $COMPOSE_FILE --env-file $ROOT/code/01_platform/01_docker/.env --env-file $ROOT/code/01_platform/01_docker/secrets.env"
+# ---- shared orchestration (pipeline-lib.sh) --------------------------------
+# Bring-up/teardown/metrics live in ONE lib shared with holistic-measure.sh
+# so the gate harness and the measurement harness cannot drift apart.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$SCRIPT_DIR/../../.."
+ROOT="$(cd "$ROOT" && pwd)"
 OUT="$ROOT/logs/tracker-14/loadtest-preview-$(date +%Y%m%d-%H%M%S)"
 DURATION_S="${1:-300}"
 INTERVAL_S="${2:-30}"
-# 2026-08-29: with the fluss-remote-data mount on the TM, a fresh job's
-# replay re-downloads tiered log segments (~80s each, ~6 min total) and
-# stalls barriers past a 30s checkpoint timeout — the job then FAILs with
-# "Exceeded checkpoint tolerable failure threshold". 120s survives the replay.
 CHECKPOINT_TIMEOUT_MS="${CHECKPOINT_TIMEOUT_MS:-30000}"
-# 2026-08-29: preview verification only needs LIVE windows — use the
-# designed LATEST startup mode (ALLOW_FULL_REPLAY=false, no restore path):
-# the source tails new appends instead of replaying the whole tiered log,
-# so there is no ~6-min segment-download phase and no barrier stall.
-# Set ALLOW_FULL_REPLAY=true to restore the old full-replay behaviour.
 ALLOW_FULL_REPLAY="${ALLOW_FULL_REPLAY:-false}"
-# Warm-up before the first P1 sample: LATEST mode needs only the first
-# 15s candle window + a few preview ticks (~45s); full replay needs ~6 min.
 WARMUP_S="${WARMUP_S:-45}"
-# 10Hz default: the preview+candidates sinks add Fluss direct-buffer load;
-# at 20Hz x 1024 the TM's direct memory (512m off-heap) OOMs the new sinks
-# (observed 2026-08-29: OutOfMemoryError in early-signal-candidates-sink).
-# 10Hz x 1024 = 10240 el/s still exercises the path at load.
+P2_TIMEOUT_S="${P2_TIMEOUT_S:-180}"
 RATE_HZ="${RATE_HZ:-10}"
-JVM_PID=""; FAKETOOL_PID=""; JOB_ID=""
-CP_FILE="$ROOT/code/02_services/01_ingestion/target/cp.txt"
 
+# shellcheck source=pipeline-lib.sh
+source "$SCRIPT_DIR/pipeline-lib.sh"
+
+pipeline_install_cleanup_trap
+
+# Gate-script failure semantics: fail FAST (measurement scripts warn instead).
 fail() { echo "FATAL: $*" >&2; exit 1; }
-
-# ---------- B1: rate validity (mirrors loadtest-run.sh) ----------
-validate_rate() {
-  local hz="$1"
-  case "$hz" in
-    ''|*[!0-9]*) fail "RATE_HZ='$hz' is not a positive integer; valid rates: 1,2,4,5,8,10,20,25,40,50,100,125,200,250,500,1000";;
-  esac
-  [ "$hz" -gt 0 ] || fail "RATE_HZ must be a positive integer, got '$hz'"
-  [ $(( 1000 % 10#$hz )) -eq 0 ] || fail "RATE_HZ=$hz is invalid: faketool -real-rate-hz must divide 1000"
-}
-validate_rate "$RATE_HZ"
-
-port_8899_free() {
-  if command -v ss >/dev/null 2>&1; then
-    # NOTE: must be double quotes so $FAKETOOL_PORT expands (single quotes
-    # made this a literal-string grep that never matched — preflight always
-    # passed even with a stale faketool holding :8899, observed 2026-08-30).
-    if ss -tln 2>/dev/null | awk 'NR>1 {print $4}' | grep -q ":$FAKETOOL_PORT"'$'; then return 1; fi
-    return 0
-  fi
-  if (exec 3<>/dev/tcp/127.0.0.1/$FAKETOOL_PORT) 2>/dev/null; then exec 3>&-; return 1; fi
-  return 0
-}
-
-cleanup() {
-  [ -n "$JVM_PID" ] && kill -9 "$JVM_PID" 2>/dev/null || true
-  [ -n "$FAKETOOL_PID" ] && kill -9 "$FAKETOOL_PID" 2>/dev/null || true
-  rm -f /tmp/ingestion.loadtest.ready
-  # Cancel the SignalJob if we started one (fresh start, no savepoint restore)
-  if [ -n "$JOB_ID" ]; then
-    echo "cleanup: cancelling SignalJob $JOB_ID"
-    $COMPOSE exec -T flink-jobmanager flink cancel "$JOB_ID" >/dev/null 2>&1 || true
-  fi
-  echo "cleanup: killed jvm=$JVM_PID faketool=$FAKETOOL_PID job=$JOB_ID"
-}
-trap cleanup EXIT
 
 echo "=== loadtest-preview start $(date -Iseconds) duration=${DURATION_S}s interval=${INTERVAL_S}s ==="
 
-# ---------- preflight ----------
-[ -f "$JAR" ] || fail "compute jar missing: $JAR (run: cd code/02_services/02_compute && mvn package)"
-[ -f "$ING_JAR" ] || fail "ingestion jar missing: $ING_JAR"
-[ -f "$CP_FILE" ] || fail "ingestion classpath file missing: $CP_FILE (run mvn package in 01_ingestion)"
-[ -f "$BRIDGE_DIR/arrow-bridge" ] || fail "arrow-bridge binary missing: $BRIDGE_DIR/arrow-bridge"
-[ -f "$FAKETOOL_SRC" ] || fail "faketool source missing: $FAKETOOL_SRC"
-[ -f "$MANIFEST" ] || fail "manifest CSV missing: $MANIFEST"
-port_8899_free || fail "port 8899 already in use — stale faketool/broker running"
-
-STRAY=$(pgrep -x faketool || true)
-[ -z "$STRAY" ] || { echo "WARN: killing stray faketool(s): $STRAY"; for p in $STRAY; do kill -9 "$p" 2>/dev/null || true; done; sleep 1; }
-
-# Fluss must be reachable (tables applied)
-docker exec 01_docker-fluss-coordinator-1 sh -c 'exit 0' 2>/dev/null \
-  || fail "fluss-coordinator container not up — run make up first"
-# Restart the TaskManager for direct-buffer hygiene: Fluss client direct
-# buffers accumulate across cancelled job runs (observed OOM at
-# early-signal-candidates-sink after repeated runs; fresh TM survives).
-echo "restarting flink-taskmanager for direct-buffer hygiene..."
-$COMPOSE restart flink-taskmanager >/dev/null 2>&1 \
-  || fail "flink-taskmanager restart failed"
-sleep 12
-echo "preflight OK (jar, bridge, faketool src, manifest, port 8899 free, fluss up, tm fresh)"
-
-CP="$(cat "$CP_FILE")"
-[ -n "$CP" ] || fail "empty classpath from $CP_FILE"
-
-MANIFEST_TOKENS=$(tail -n +2 "$MANIFEST" | wc -l)
-[ "$MANIFEST_TOKENS" -ge 1024 ] || fail "manifest has only $MANIFEST_TOKENS tokens; need >=1024"
-TOKENS=$(tail -n +2 "$MANIFEST" | head -1024 | cut -d, -f4 | tr '\n' ',' | sed 's/,$//')
-N_TOKENS=$(echo "$TOKENS" | tr ',' '\n' | grep -c . )
-[ "$N_TOKENS" -eq 1024 ] || fail "expected exactly 1024 tokens, got $N_TOKENS"
-echo "tokens: $N_TOKENS"
-
-mkdir -p "$OUT" "$OUT/bin" "$OUT/j1"
-
-# ---------- 1. faketool ----------
-echo "building faketool from $FAKETOOL_SRC"
-(cd "$BRIDGE_DIR" && go build -tags faketool -o "$OUT/bin/faketool" ./faketool) || fail "faketool build failed"
-"$OUT/bin/faketool" -port "$FAKETOOL_PORT" -real-rate -real-rate-hz "$RATE_HZ" > "$OUT/faketool.log" 2>&1 &
-FAKETOOL_PID=$!
-
-BOUND=0
-for _ in $(seq 1 15); do
-  if (exec 3<>/dev/tcp/127.0.0.1/$FAKETOOL_PORT) 2>/dev/null; then exec 3>&-; BOUND=1; break; fi
-  sleep 1
-done
-[ "$BOUND" = 1 ] || { echo "!! faketool did not bind :$FAKETOOL_PORT — log tail:"; tail -5 "$OUT/faketool.log"; fail "faketool failed to start"; }
-grep -q "real_rate=true" "$OUT/faketool.log" || { echo "!! faketool log missing real_rate=true — log:"; cat "$OUT/faketool.log"; fail "faketool is NOT in real-rate mode"; }
-echo "faketool on :$FAKETOOL_PORT (${RATE_HZ}Hz x 1024 = $((RATE_HZ * 1024))/s), pid $FAKETOOL_PID, real-rate confirmed"
-
-# ---------- 2. ingestion JVM (same canonical env block as loadtest-run.sh) ----------
-LOG_DIR="$OUT/j1" READINESS_FILE_PATH="/tmp/ingestion.loadtest.ready" \
-ARROW_HFT_URL="ws://127.0.0.1:$FAKETOOL_PORT" ARROW_BRIDGE_BIN="$BRIDGE_DIR/arrow-bridge" \
-ARROW_INSTRUMENT_TOKENS="$TOKENS" ARROW_FAKE_BROKER="1" TRANSPORT="proto" \
-SECRETS_VIA_ENV_FILE="1" \
-ARROW_APP_ID="testd" ARROW_APP_SECRET="testd" \
-ARROW_USER_ID="testd-user" ARROW_PASSWORD="testd-pass" ARROW_TOTP_KEY="JBSWY3DPEHPK3PXP" \
-INSTRUMENT_MANIFEST_PATH="$MANIFEST" \
-FLUSS_BOOTSTRAP="localhost:9123" FLUSS_BOOTSTRAP_SERVERS="localhost:9123" \
-RAW_TABLE_NAME="raw_table_1" ARROW_HFT_CONNECTIONS="1" \
-ARROW_MAX_EVENT_AGE_MS="5000" ARROW_MAX_FUTURE_EVENT_SKEW_MS="2000" \
-ARROW_HFT_LATENCY_MS="50" CLOCK_CHECK_REQUIRED="false" OTEL_COLLECTOR_HOST="localhost:4318" \
-FLUSS_WRITER_MODE="generic" FLUSS_WRITERS="1" FLUSS_WRITER_BATCH_SIZE_BYTES="0" \
-java --add-opens=java.base/java.nio=ALL-UNNAMED \
-  -Xms2g -Xmx2g -XX:MaxDirectMemorySize=1g \
-  -Dlog.dir="$OUT/j1" \
-  -cp "$ING_JAR" com.trading.ingestion.IngestionService > "$OUT/j1/java.out" 2>&1 &
-JVM_PID=$!
-echo "ingestion JVM pid $JVM_PID"
-
-READY=0
-for _ in $(seq 1 60); do [ -f "/tmp/ingestion.loadtest.ready" ] && { READY=1; break; }; sleep 2; done
-[ "$READY" = 1 ] || { echo "!! JVM not ready — log tail:"; tail -10 "$OUT/j1/java.out"; fail "ingestion JVM failed to become ready"; }
-for _ in $(seq 1 30); do grep -q "HFT subscribed" "$OUT/j1/java.out" && break; sleep 1; done
-grep -q "HFT subscribed" "$OUT/j1/java.out" || { echo "!! bridge never subscribed — log tail:"; tail -10 "$OUT/j1/java.out"; fail "bridge subscription failed"; }
-echo "ingestion JVM ready + bridge subscribed (1024 tokens)"
-
-# ---------- 3. deploy SignalJob with preview/early knobs (fresh start) ----------
-echo "deploying SignalJob (previews 1s, early signals on, confirm-after 4s)"
-docker exec 01_docker-flink-jobmanager-1 mkdir -p /opt/flink/jobs 2>/dev/null \
-  || fail "mkdir /opt/flink/jobs in flink-jobmanager failed"
-docker cp "$JAR" 01_docker-flink-jobmanager-1:/opt/flink/jobs/compute.jar \
-  || fail "jar copy to flink-jobmanager failed"
-SUBMIT_OUT="$($COMPOSE exec -T \
-  -e ALLOW_FULL_REPLAY="$ALLOW_FULL_REPLAY" \
-  -e DEPLOYMENT_ENV=dev \
-  -e CONFIGURATION_VERSION=1.0.0 \
-  -e ALGORITHM_VERSION=candle-15s-v1 \
-  -e DEDUP_TTL_MS=60000 -e CANDLE_WINDOW_MS=15000 \
-  -e CHECKPOINT_INTERVAL_MS=10000 -e CHECKPOINT_TIMEOUT_MS="$CHECKPOINT_TIMEOUT_MS" -e MAX_CONCURRENT_CHECKPOINTS=1 \
-  -e PREVIEW_ENABLED=true -e PREVIEW_INTERVAL_MS=1000 \
-  -e EARLY_SIGNAL_ENABLED=true -e EARLY_SIGNAL_CONFIRM_AFTER_MS=4000 \
-  -e SIGNAL_LOOKBACK_CANDLES=2 \
-  -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 \
-  -e SIGNAL_CANDIDATES_TABLE=Signal_Candidates \
-  -e SIGNAL_CURRENT_TABLE=Signal_Candidates_current \
-  flink-jobmanager flink run -d -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar 2>&1)"
-echo "$SUBMIT_OUT"
-JOB_ID="$(echo "$SUBMIT_OUT" | grep -oE 'JobID [a-f0-9]+' | awk '{print $2}' | head -1)"
-[ -n "$JOB_ID" ] || { echo "!! SignalJob submit output:"; echo "$SUBMIT_OUT"; fail "could not extract JobID from submit output"; }
-echo "SignalJob submitted: job_id=$JOB_ID"
+# ---------- bring-up (all shared: pipeline-lib.sh) ----------
+pipeline_preflight || exit 1
+echo "tokens: 1024"
+pipeline_start_faketool || exit 1
+pipeline_start_ingestion || exit 1
+pipeline_submit_job || exit 1
+flink_wait_state RUNNING 60 || exit 1
 
 # ---------- 4. compile FlussPreviewProbe (generic LOG tailer) ----------
 cat > "$OUT/FlussKvProbe.java" <<'JAVA_EOF'
