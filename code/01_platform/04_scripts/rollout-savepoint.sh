@@ -198,10 +198,19 @@ wait_state() { # jobid expected-state timeout-s label
 }
 
 compose() { # docker compose wrapper honoring file/project overrides
+	# --env-file (.env + secrets.env, same pair every other compose call in
+	# this project uses): without it, compose interpolates the tablet's
+	# AWS_SECRET_ACCESS_KEY from the EMPTY environment and aborts before
+	# running any command (observed 2026-08-30 recovery drill: deploy step
+	# failed with "required variable AWS_SECRET_ACCESS_KEY is missing").
+	local -a ef=(
+		--env-file "$(dirname "$COMPOSE_FILE")/.env"
+		--env-file "$(dirname "$COMPOSE_FILE")/secrets.env"
+	)
 	if [ -n "$COMPOSE_PROJECT" ]; then
-		docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT" "$@"
+		docker compose -f "$COMPOSE_FILE" "${ef[@]}" -p "$COMPOSE_PROJECT" "$@"
 	else
-		docker compose -f "$COMPOSE_FILE" "$@"
+		docker compose -f "$COMPOSE_FILE" "${ef[@]}" "$@"
 	fi
 }
 
@@ -310,8 +319,16 @@ if [ "$VERIFY_DEDUP_STATE" = "1" ]; then
 	# 2026-08-28 gauge remediation: the pre baseline is the job's latest
 	# completed checkpoint state_size (TRUE live state) — the cumulative
 	# firsts gauge is not a state proxy and resets on restart.
-	STATE_BEFORE="$(api_get "/jobs/$JOB_ID/checkpoints" 2>/dev/null \
-		| sed -n 's/.*"state_size":\([0-9][0-9]*\).*/\1/p' | tail -1)"
+	# RECOVERY_PATH mode has no old job (JOB_ID empty). Two failure modes
+	# guarded (observed 2026-08-30 recovery drill, rc=22 then rc=1):
+	# 1. curl -f on /jobs//checkpoints → HTTP 400 → exit 22
+	# 2. EMPTY pipeline input + pipefail → sed -n 's/../../p' exits 1 when
+	#    nothing is printed → assignment status 1 → set -e kills the script
+	# The trailing `|| true` inside the substitution covers both;
+	# STATE_BEFORE stays empty and the post-restore check degrades to a
+	# sanity check (by design for this mode).
+	STATE_BEFORE="$( { [ -n "$JOB_ID" ] && api_get "/jobs/$JOB_ID/checkpoints" \
+		| sed -n 's/.*"state_size":\([0-9][0-9]*\).*/\1/p' | tail -1; } 2>/dev/null || true)"
 	before="$(sample_dedup)"
 	if [ -n "$STATE_BEFORE" ]; then
 		log "dedup evidence (pre): checkpoint_state_size=$STATE_BEFORE counters=$before"
