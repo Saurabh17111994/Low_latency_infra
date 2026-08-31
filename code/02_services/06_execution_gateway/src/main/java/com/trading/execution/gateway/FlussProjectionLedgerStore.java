@@ -37,16 +37,23 @@ public final class FlussProjectionLedgerStore implements ProjectionLedgerStore {
     }
     @Override public Entry lookup(String eventId) throws Exception {
         Lookuper l = table.newLookup().createLookuper();
-        InternalRow r = l.lookup(GenericRow.of(bs(eventId))).get(timeout.toMillis(), TimeUnit.MILLISECONDS)
-                .getSingletonRow();
+        // C5 guard: same transient-lookup retry as FlussControlStateStore (5s settle vs 2s timeout).
+        InternalRow r = BoundedRetry.run(() -> l.lookup(GenericRow.of(bs(eventId)))
+                .get(timeout.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow());
         return r == null ? null : decode(r);
     }
     @Override public void put(Entry e) throws Exception {
         GenericRow row = GenericRow.of(bs(e.eventId()), bs(e.state().name()), bs(e.expectedPriorState()),
                 e.retryCount(), bs(e.lastError()), bs(e.disposition()), e.stepTs(), e.completedTs(), bs("2"));
         UpsertWriter w = table.newUpsert().createWriter();
-        try { w.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS); }
-        finally { w.flush(); }
+        try {
+            // C5 guard: transient upsert-ack timeouts are retried with the same bounded budget;
+            // upsert is idempotent by eventId (last-write-wins), so a retried write is safe.
+            BoundedRetry.run(() -> {
+                w.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+                return null;
+            });
+        } finally { w.flush(); }
     }
     @Override public List<Entry> incomplete() throws Exception {
         List<Entry> out = new ArrayList<>();

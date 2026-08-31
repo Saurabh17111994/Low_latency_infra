@@ -43,8 +43,11 @@ public final class FlussControlStateStore implements ControlStateStore {
             Table table = table(tableName);
             Object[] key = keyFields.stream().map(FlussControlStateStore::value).toArray();
             Lookuper lookuper = table.newLookup().createLookuper();
-            InternalRow row = lookuper.lookup(GenericRow.of(key))
-                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow();
+            // C5 guard: transient Fluss lookups (leader-election settle ~5s vs 2s timeout)
+            // previously surfaced as intermittent TimeoutException / UNAVAILABLE even
+            // though the RPC would have recovered; retry a bounded budget, fail fast after.
+            InternalRow row = BoundedRetry.run(() -> lookuper.lookup(GenericRow.of(key))
+                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow());
             return row == null ? new Lookup(Status.NOT_FOUND, null, "key not found")
                     : new Lookup(Status.FOUND, row, "ok");
         } catch (Exception e) {
