@@ -326,6 +326,14 @@ pipeline_submit_job() {
   # matches the code default. NOTE: keep comments OUT of the continued
   # command — a '#' line between backslash continuations broke the whole
   # submit ("requires at least 2 args", observed 2026-08-30).
+  # B5 Phase-1 (2026-08-31): UNALIGNED_CHECKPOINTS=true appends the
+  # unaligned-checkpoint flag to the submit (falsification test — the
+  # backpressure audit predicts no effect, but a negative result closes
+  # the lever with evidence). Default OFF: baseline behavior unchanged.
+  local extra_flags=(-Dmetrics.latency.interval="${LATENCY_TRACKING_MS:-2000}")
+  if [ "${UNALIGNED_CHECKPOINTS:-false}" = "true" ]; then
+    extra_flags+=(-Dexecution.checkpointing.unaligned=true)
+  fi
   submit_out="$($COMPOSE exec -T \
     -e ALLOW_FULL_REPLAY="${ALLOW_FULL_REPLAY:-false}" \
     -e DEPLOYMENT_ENV=dev \
@@ -340,7 +348,7 @@ pipeline_submit_job() {
     -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 \
     -e SIGNAL_CANDIDATES_TABLE=Signal_Candidates \
     -e SIGNAL_CURRENT_TABLE=Signal_Candidates_current \
-    flink-jobmanager flink run -d -Dmetrics.latency.interval="${LATENCY_TRACKING_MS:-2000}" \
+    flink-jobmanager flink run -d "${extra_flags[@]}" \
       -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar 2>&1)"
   JOB_ID="$(echo "$submit_out" | grep -oE 'JobID [a-f0-9]+' | awk '{print $2}' | head -1)"
   if [ -z "$JOB_ID" ]; then
@@ -383,6 +391,50 @@ for c in j.get('history', []):
                       'duration_ms': c.get('end_to_end_duration'),
                       'size': c.get('state_size'), 'status': c.get('status')}))
 " >> "$dest" 2>/dev/null || true
+  # B5 Phase-0 (2026-08-31): the slim projection above cannot answer WHICH
+  # phase of a checkpoint freezes emission (sync / async / alignment).
+  # The per-task breakdown IS available live via the detail endpoint — the
+ # history 'tasks' map is empty after cancel, so it must be captured during
+  # the run. Written to a separate file to keep the slim file's schema
+  # stable for the existing analyzer paths.
+  local detail_dest="${dest%.jsonl}-detail.jsonl"
+  curl -s --max-time 10 "http://localhost:8081/jobs/$JOB_ID/checkpoints" \
+    | python3 -c "
+import json, sys
+try:
+    j = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+# latest completed checkpoint only (poll runs every POLL_S seconds; the
+# detail endpoint returns the FULL tasks map per checkpoint — capturing all
+# history each poll would duplicate megabytes)
+done = [c for c in j.get('history', []) if c.get('status') == 'COMPLETED']
+if done:
+    c = max(done, key=lambda x: x.get('latest_ack_timestamp') or 0)
+    tasks = c.get('tasks') or {}
+    rows = []
+    for tname, t in tasks.items():
+        dur = t.get('duration') or {}
+        rows.append({
+            'task': tname,
+            'sync_ms': dur.get('sync'),
+            'async_ms': dur.get('async'),
+            'alignment_ms': dur.get('alignment'),
+            'start_delay_ms': dur.get('start_delay'),
+            'bytes': t.get('checkpointed_size'),
+        })
+    print(json.dumps({'id': c.get('id'),
+                      'trigger_ts': c.get('trigger_timestamp'),
+                      'e2e_ms': c.get('end_to_end_duration'),
+                      'alignment_buffered': c.get('alignment_buffered'),
+                      'tasks': rows}))
+" >> "$detail_dest" 2>/dev/null || true
+  if [ -s "$detail_dest" ]; then
+    local tmpd
+    tmpd="$(mktemp)"
+    awk 'match($0, /"id": *[0-9]+/) { k=substr($0, RSTART, RLENGTH); if (!seen[k]++) print }' \
+      "$detail_dest" > "$tmpd" && mv "$tmpd" "$detail_dest" || true
+  fi
   # Dedupe on the checkpoint ID, not $1 — every JSONL line starts with
   # '{"id":' so $1 is identical for all lines and the old awk dropped
   # everything after the first entry (observed 2026-08-30: 600s run with a

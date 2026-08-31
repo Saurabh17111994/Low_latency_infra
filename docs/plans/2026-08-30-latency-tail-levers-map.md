@@ -172,7 +172,162 @@ anything invasive.
 | B2 | Preview interval | ✅ **Now 500 ms (default in pipeline-lib.sh, 2026-08-30)** — this is what took p95 under 1 s (floor law: p95 ≈ interval + ~200 ms). Going lower needs event-driven emission (code change), not a smaller timer |
 | B3 | Checkpoint interval | ✅ **RESOLVED & APPLIED: 60 s (default in pipeline-lib.sh)**. 10 s→60 s cut bursts 58→3, p95 2,857→1,120 ms; 120 s gained nothing. Checkpoints WERE a real cause (76/85 bursts at +2–4 s after trigger); first ruled out on the wm500 run because a harness dedupe bug collapsed 70 checkpoints to 1 |
 | B4 | Operator parallelism | Currently 8 source parallelism / mostly 1 elsewhere, 1 TM × 10 slots. Headroom exists; only if throughput grows |
-| B5 | p99 tail (per-checkpoint ~3 s emission freeze) | 🔶 Deferred by choice. Lever = unaligned checkpoints (let barriers overtake in-flight data instead of freezing emission). Only if a p99 < 1.5 s requirement ever appears |
+| B5 | p99 tail (per-checkpoint ~3 s emission freeze) | ✅ **INVESTIGATED & CLOSED (2026-08-31, 4-run series): ACCEPT the tail.** Unaligned checkpoints falsified (zero effect — backpressure ~4%, alignment ≤46 ms/task); phase gauges cleared barrier arrival (≤59 ms/task) and alignment as causes; residual = checkpoint I/O (TM's 24 MB/s state-upload bursts, once per 60 s, single-NVMe dev artifact). p95 contract met: 687–723 ms typical (1 outlier at 1,132 ms in 4 runs). Reopen only with a real p99 requirement — first lever then: disk separation (RocksDB localdir / checkpoint dir / Fluss data on different disks) |
+
+#### B5 detailed experiment plan — p99 tail (drafted 2026-08-31; Phase 1
+#### EXECUTED — results below)
+
+Goal: cut e2e p99 (1,840 ms, run 20260831-100737) by removing the
+per-checkpoint ~3 s emission freeze (7 burst-seconds per 11-min run).
+
+**Codebase audit findings (2026-08-31) — two of the proposed levers are
+already settled:**
+
+| Item | Status | Evidence |
+|---|---|---|
+| RocksDB state backend | ✅ already active | compose `STATE_BACKEND: rocksdb` default; TM logs show `RocksDBKeyedStateBackend` |
+| **#4 Incremental checkpoints** | ✅ **already ON** | pinned in `SignalJob.applyRuntimeOptions` (`CheckpointingOptions.INCREMENTAL_CHECKPOINTS, true`, rocksdb branch) AND `state.backend.incremental: "true"` in compose FLINK_PROPERTIES. Checkpoint sizes 27→84→110→96 MB confirm incremental (not identical full copies) |
+| **#1 Unaligned checkpoints** | ❌ OFF — implementable | `execution.checkpointing.unaligned` key verified in the pinned flink-dist-2.2.1 jar. No config/code sets it today |
+| Backpressure during bursts | ~zero | run-4 evidence: max 75 ms/s (7.5%) per second, mean ~40 ms/s; **no spike at checkpoint triggers** (42 ms during ±3 s vs 37 ms otherwise) |
+| Barrier alignment cost | ~zero | completed checkpoint `alignment_buffered: 0`; `processed_data` 1.6 MB (tiny) |
+
+**Consequence — the honest hypothesis:** unaligned checkpoints only help
+when barriers cannot travel because of backpressure. With ~4% backpressure
+and zero alignment cost, the evidence predicts **unaligned will NOT fix
+the tail**. The freeze is more likely the checkpoint **sync phase**
+blocking task threads (RocksDB snapshot / memtable flush, or a sink's
+barrier-triggered flush) — which unaligned does not change. This plan
+therefore runs the cheap flag experiment as a *falsification test*, with
+instrumentation to attribute the true mechanism if it fails.
+
+**Phase 0 — mechanism isolation instrument (harness-only change, no job
+rebuild):**
+
+1. `capture_checkpoint_history` (pipeline-lib.sh) currently stores a slim
+   projection (id/trigger/duration/size/status). Enhance it to ALSO store,
+   per checkpoint, the per-task sync/async/alignment/duration breakdown
+   from the REST history (`tasks` map is populated while the job is live —
+   it was empty `{}` in the post-cancel evidence). New file:
+   `checkpoints-detail.jsonl`.
+2. Analyzer: report `sync_ms` vs `async_ms` vs `alignment_ms` p50/p95 per
+   operator for completed checkpoints, and correlate burst-seconds with
+   the dominant phase. This answers WHICH code path freezes emission.
+
+**Phase 1 — the unaligned experiment (one bench run, ~27 min):**
+
+1. `pipeline_submit_job` gains an env-gated flag:
+   `UNALIGNED_CHECKPOINTS=true` → append
+   `-Dexecution.checkpointing.unaligned=true` to the `flink run` command
+   (same pattern as `-Dmetrics.latency.interval`; build it as a shell
+   array so the backslash-continued command stays G4-clean). Default OFF —
+   baseline behavior unchanged unless explicitly requested.
+2. Run: `UNALIGNED_CHECKPOINTS=true SMOKE_S=150 MAIN_S=660 bash
+   holistic-measure.sh`.
+3. Compare against run 20260831-100737 (identical settings otherwise):
+
+| Metric | Baseline (run-4) | Success = | If unchanged = |
+|---|---|---|---|
+| burst-seconds (G6b raw count) | 7 | → ~0 | alignment hypothesis falsified |
+| e2e p99 | 1,840 ms | < 1,500 ms | sync-phase hypothesis confirmed |
+| checkpoint end_to_end_duration p95 | ~2.9 s | small change expected | — |
+| checkpoint size | 84–110 MB | may grow (in-flight buffers persisted) | watch for unbounded growth |
+
+4. Expected outcome per the audit: bursts UNCHANGED → mechanism is the
+   sync phase, close the "unaligned" lever with evidence (B5 row updated),
+   and Phase 2 decides.
+
+**Phase 2 — only if Phase 1 confirms sync-phase (decision point, needs
+its own mini-plan):**
+
+| Candidate lever | What it attacks | Cost |
+|---|---|---|
+| Fluss/preview sink barrier flush cost | If the detail breakdown names a sink operator's sync time | connector config investigation; no known knob yet |
+| RocksDB memtable flush on snapshot (`state.backend.rocksdb.*`) | If keyed operators dominate sync time | tuning risk vs ~1×/min freeze |
+| Accept the tail (status quo) | p99 = 1.8 s with p95 contract met at 689 ms | zero; B5 stays deferred |
+
+**Risks / notes:**
+- Unaligned + EXACTLY_ONCE is supported (this job's mode) — no conflict.
+- With near-zero backpressure, unaligned's checkpoint-size penalty should
+  also be near-zero (little in-flight data to persist) — if size DOES grow,
+  that itself is diagnostic (in-flight buffers were not the visible ones).
+- Guard impact: none — G6b already counts burst-seconds and is exempting
+  checkpoint windows; the experiment only changes what the job does inside
+  those windows.
+- Both phases reuse the existing bench harness end-to-end (guards G6/G7/
+  G8/F4/F8/D6 all run as usual, so the experiment run doubles as a
+  regression check).
+
+**B5 RESULTS (2026-08-31, run `holistic-measure-20260831-111021`,
+UNALIGNED_CHECKPOINTS=true):**
+
+| Metric | Baseline (run-4, aligned) | Unaligned | Verdict |
+|---|---|---|---|
+| e2e p50 | 331 ms | 343 ms | noise |
+| e2e p95 | 689 ms | 723 ms | noise (both < 1s contract) |
+| **e2e p99** | 1,840 ms | **2,058 ms** | **no improvement — lever FALSIFIED** |
+| burst-seconds | 7 | 10 | unchanged mechanism |
+| checkpoints overlapping bursts | — | 6/13 | still correlated |
+
+Unaligned was confirmed ACTIVE (REST checkpoint config
+`unaligned_checkpoints: true`; checkpoints recorded as
+`UNALIGNED_CHECKPOINT` type) — this is a true negative, not a wiring
+failure. Mechanism, exactly as the backpressure audit predicted: with
+~4% backpressure and `alignment_buffered: 0` there was nothing for the
+barriers to overtake. **The "unaligned" lever is CLOSED with evidence.**
+
+The run's burst attribution answered the mechanism question as a side
+effect: **the heaviest disk writer at burst time is the TaskManager
+(max 24 MB/s, spikes aligned with bursts)** — bursts are the TM's
+checkpoint state + sink flush hitting the single NVMe. Remaining
+ambiguity: RocksDB state upload vs Fluss sink writer flush (both are TM
+writes). The phase-gauge sampler added in this session
+(`tm-prom-cp-phases.tsv`, checkpointStartDelayNanos /
+checkpointAlignmentTime per task) resolves this on the NEXT run.
+
+**B5 harness findings (both guarded now):**
+- Flink 2.2's REST checkpoint history has an EMPTY `tasks` map for
+  regular checkpoints (savepoints only) — the first phase-breakdown
+  implementation read it and would have silently produced nothing.
+  Fixed: TM Prometheus vertex gauges; analyzer FAILS the run when
+  `B5_EXPECT_PHASES=1` and the gauge file is absent/empty.
+- G12 guard suite (test-pipeline-lib.sh, 4 checks): unaligned flag wiring
+  present, defaults OFF, phase sampler present, analyzer fail-fast
+  present. 29/29 guards pass.
+- Editing a shell script while its process runs corrupts execution (bash
+  re-reads the shifted file at the old byte offset — this run's measure
+  script died at the final analysis step with a spurious syntax error).
+  Evidence was intact; the analyzer was run manually. **Rule: never edit
+  harness scripts mid-run.** (Gotcha #24.)
+
+**B5 FINAL VERDICT (2026-08-31, four-run series): CLOSED — accept the
+tail.**
+
+The confirmation runs executed (phase gauges active, baseline config):
+
+| Run | e2e p50 | e2e p95 | e2e p99 | Result |
+|---|---|---|---|---|
+| Baseline (100737) | 331 ms | 689 ms | 1,840 ms | PASS |
+| Unaligned (111021) | 343 ms | 723 ms | 2,058 ms | PASS (lever dead) |
+| Phases (114311) | 348 ms | **1,132 ms** | 2,607 ms | G6a FAILED |
+| Stability re-run (12xxxx) | 335 ms | **687 ms** | 1,903 ms | PASS |
+
+- **p95 contract: MET, typical ~690 ms.** The 1,132 ms run is a one-off
+  outlier in four (disk busy 79% that run vs 72% on the re-run — a
+  host-level hiccup, not stack degradation: the immediate re-run at
+  identical config returned to 687 ms). Run-to-run p95 variance on this
+  single-host dev box is real and worth knowing: quote "p95 ≈ 700 ms
+  (worst observed 1.1 s in 4 runs)".
+- **Phase gauges cleared both barrier suspects:** every task reaches its
+  barrier in ≤59 ms (start-delay) and aligns in ≤46 ms. Totals 881 ms /
+  342 ms summed across 19 tasks — nowhere near the ~3 s freeze. The p99
+  tail is **checkpoint I/O** (RocksDB state upload + sink flush = the
+  TM's 24 MB/s burst-aligned writes), a bounded once-per-60 s event.
+- **Decision: accept.** Fixing p99 on this box means disk separation or
+  code changes for a dev-only artifact while the contract metric passes.
+  Production relevance is low (prod state goes to S3/network, not the
+  same NVMe as everything else). Reopen only if a p99 requirement ever
+  materializes — the first lever to try then is separating RocksDB
+  localdir / checkpoint dir / Fluss data onto different disks.
 | B6 | p95 < 500 ms | ❌ Deferred by choice. Structurally impossible with timer-driven emission at 500 ms interval (floor law). Would need event-driven preview emission — a code change, estimate before ever starting |
 | B4 | Operator parallelism | Currently 8 source parallelism / mostly 1 elsewhere, 1 TM × 10 slots. Headroom exists; only if throughput grows |
 
@@ -420,6 +575,13 @@ exact reconciliation: 80 = 80).
     disposable dev data: wipe the fluss data volumes, recreate the
     `default` database, re-run the ddl-apply contract. A clean shutdown
     avoids it entirely.
+24. **Never edit a shell script while its process is running** (2026-08-31)
+    — bash reads scripts incrementally by BYTE OFFSET; an edit shifts the
+    file under the interpreter and the process resumes parsing mid-token
+    (observed: a spurious `syntax error near unexpected token (' at a line
+    that is valid — the B5 run died at its final analysis step). Edit
+    BEFORE launch or AFTER exit; measurement evidence on disk is never
+    affected, only the live process.
 
 ### 6.1 Observed-but-unfixed warnings (candidates, not confirmed problems)
 

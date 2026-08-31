@@ -217,6 +217,17 @@ run_phase() {
       curl -s --max-time 5 http://localhost:9250/metrics \
         | grep -E "^flink_.*latency" \
         | sed "s/^/$now /" >> "$OUT/tm-prom-latency.tsv" || true
+      # B5 Phase-0 (2026-08-31): per-task checkpoint phase gauges — the
+      # REST history 'tasks' map is EMPTY for regular checkpoints in
+      # Flink 2.2 (populated for savepoints only; observed live — the
+      # detail endpoint takes a triggerid, not the numeric checkpoint
+      # id, and also returns nothing useful). The vertex-level gauges
+      # checkpointStartDelayNanos / checkpointAlignmentTime per task ARE
+      # exposed on TM Prometheus — capture them; the analyzer derives
+      # the sync/async/alignment attribution from these.
+      curl -s --max-time 5 http://localhost:9250/metrics \
+        | grep -E "^flink_taskmanager_job_task_checkpoint" \
+        | sed "s/^/$now /" >> "$OUT/tm-prom-cp-phases.tsv" || true
     fi
     # Liveness guard (B2 family): a dead feed invalidates the series.
     kill -0 "$FAKETOOL_PID" 2>/dev/null || { echo "!! faketool dead at t+${i}s" >&2; return 1; }

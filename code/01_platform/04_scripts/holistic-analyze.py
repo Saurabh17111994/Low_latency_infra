@@ -533,6 +533,84 @@ def main():
                        for b in burst_secs))
             print(f"- checkpoints overlapping a burst second: "
                   f"{cp_hits}/{len(cps)}")
+            # ---- B5 Phase-0 (2026-08-31): WHICH phase of a checkpoint
+            # freezes emission? Per-task sync/async/alignment breakdown
+            # from TM Prometheus vertex gauges. The REST history 'tasks'
+            # map is EMPTY for regular checkpoints in Flink 2.2 (live
+            # observation 2026-08-31) — the first attempt to capture it
+            # produced empty task lists and would have silently answered
+            # nothing. FAIL-FAST: a B5 analysis without gauge data is a
+            # broken measurement, not a no-op.
+            phases_path = os.path.join(out_dir, "main",
+                                       "tm-prom-cp-phases.tsv")
+            try:
+                # gauges: "<epoch> flink_..._checkpointStartDelayNanos{...,
+                # task_name="x",...} 1.2E7" (nanoseconds, per task)
+                start_delay = defaultdict(list)   # task -> [ns]
+                align_time = defaultdict(list)    # task -> [ns]
+                n_phase_rows = 0
+                with open(phases_path) as f:
+                    for ln in f:
+                        parts = ln.split(" ", 1)
+                        if len(parts) != 2:
+                            continue
+                        body = parts[1]
+                        try:
+                            val = float(body[body.rindex("}") + 1:]
+                                        .strip() or "nan")
+                        except ValueError:
+                            continue
+                        labels = dict(re.findall(r'(\w+)="([^"]*)"',
+                                                 body[:body.rindex("}") + 1]))
+                        task = labels.get("task_name", "")
+                        if not task:
+                            continue
+                        n_phase_rows += 1
+                        if "checkpointStartDelayNanos" in body:
+                            start_delay[task.split(" -> ")[0][:44]].append(val)
+                        elif "checkpointAlignmentTime" in body:
+                            align_time[task.split(" -> ")[0][:44]].append(val)
+                if n_phase_rows == 0:
+                    failures.append(
+                        "B5: tm-prom-cp-phases.tsv has no parseable gauge "
+                        "rows — checkpoint phase attribution is broken "
+                        "(sampler not capturing vertex gauges?)")
+                else:
+                    # gauges are LAST-CHECKPOINT snapshots (ns). Report
+                    # per-task maxima; verdict from the dominant family.
+                    def _mx_ns(d):
+                        return {k: max(v) for k, v in d.items() if v}
+                    sd, al = _mx_ns(start_delay), _mx_ns(align_time)
+                    print(f"- checkpoint phase gauges ({n_phase_rows} rows; "
+                          f"start-delay / alignment, last-checkpoint ns):")
+                    print(f"{'task':<46} {'start delay':>12} {'alignment':>12}")
+                    for name in sorted(set(sd) | set(al),
+                                       key=lambda n: -(sd.get(n, 0))):
+                        print(f"{name:<46} {sd.get(name, 0)/1e6:>10.1f}ms "
+                              f"{al.get(name, 0)/1e6:>10.1f}ms")
+                    tot_sd = sum(sd.values()) / 1e6
+                    tot_al = sum(al.values()) / 1e6
+                    print(f"- totals (sum of per-task maxima): "
+                          f"start-delay={tot_sd:.0f}ms "
+                          f"alignment={tot_al:.0f}ms")
+                    if tot_al > tot_sd:
+                        print("- verdict: ALIGNMENT dominates → unaligned "
+                              "checkpoints are the right lever")
+                    else:
+                        print("- verdict: start-delay (barrier arrival) "
+                              "dominates over alignment → operators are "
+                              "slow to REACH the barrier (busy threads / "
+                              "sink flush before barrier), not stuck "
+                              "aligning — unaligned checkpoints will NOT "
+                              "fix this")
+            except OSError:
+                # pre-B5 evidence dir (file absent): not a failure UNLESS
+                # the run was flagged as a B5 experiment
+                if os.environ.get("B5_EXPECT_PHASES") == "1":
+                    failures.append(
+                        "B5: tm-prom-cp-phases.tsv absent but "
+                        "B5_EXPECT_PHASES=1 — phase instrumentation did "
+                        "not run (sampler broken or poll never fired)")
         else:
             cp_hits = 0
         cp_slow = [c for c in cps if (c.get("duration_ms") or 0) > 5000]

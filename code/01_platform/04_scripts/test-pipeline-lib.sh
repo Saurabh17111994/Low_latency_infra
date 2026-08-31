@@ -155,6 +155,28 @@ n=$(grep -ac "manifest_fingerprint mismatch\|assigned_token_set_hash mismatch" "
     || bad "G10 clean java.out flagged — gate has false positives"
 rm -rf "$G10DIR"
 
+# ---- G12 (2026-08-31): B5 experiment integrity — when
+# UNALIGNED_CHECKPOINTS=true is set, the submit MUST carry the unaligned
+# flag; without it, a "B5 experiment run" silently measures the baseline
+# and closes the lever on fabricated evidence.
+PL="$SCRIPT_DIR/pipeline-lib.sh"
+grep -q 'UNALIGNED_CHECKPOINTS' "$PL" \
+    && grep -q 'execution.checkpointing.unaligned=true' "$PL" \
+    && ok "G12 unaligned flag wiring present in pipeline_submit_job" \
+    || bad "G12 UNALIGNED_CHECKPOINTS wiring missing — B5 experiments run the baseline by mistake"
+# flag default must be OFF (baseline unchanged unless requested)
+grep -q '\${UNALIGNED_CHECKPOINTS:-false}' "$PL" \
+    && ok "G12 unaligned flag defaults OFF (baseline preserved)" \
+    || bad "G12 unaligned flag not default-OFF — every run would be unaligned"
+# phase gauge sampler must exist in the measure script
+grep -q 'checkpointStartDelayNanos\|tm-prom-cp-phases' "$HM" \
+    && ok "G12 checkpoint-phase gauge sampler present" \
+    || bad "G12 phase gauge sampler missing — B5 attribution silently broken"
+# analyzer must fail-fast when B5 data is expected but absent
+grep -q 'B5_EXPECT_PHASES' "$SCRIPT_DIR/holistic-analyze.py" \
+    && ok "G12 analyzer fail-fast (B5_EXPECT_PHASES) present" \
+    || bad "G12 analyzer lacks B5 fail-fast — empty phase data reads as 'no verdict'"
+
 rm -rf "$OUT"
 echo "---"
 echo "guards: $pass passed, $fail failed"
