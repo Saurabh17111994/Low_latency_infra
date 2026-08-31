@@ -8,7 +8,7 @@ DDL_DIR = ROOT / "code/01_platform/02_sql/ddl"
 
 def compose_json(profile="execution-t3"):
     import json, subprocess
-    cmd=["docker","compose","-f",str(COMPOSE)]
+    cmd=["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env")]
     if profile: cmd+=["--profile", profile]
     cmd+=["config","--format","json"]
     return json.loads(subprocess.check_output(cmd, text=True))
@@ -144,8 +144,12 @@ class ExecutionL7Test(unittest.TestCase):
         collector = (ROOT / "code/01_platform/01_docker/otel-collector-config.yaml").read_text()
         self.assertIn("prometheus", collector, "STREAM-009: Flink backpressure metrics scrape missing")
         self.assertIn("9249", collector)
-        ingestion_cfg = (ROOT / "code/common/src/main/java/com/trading/common/config/PlatformConfig.java").read_text()
+        # PENDING_APPEND_WARNING_PERCENT moved from PlatformConfig to
+        # IngestionConfig (T2 streaming-3000 backpressure tunables); the
+        # warning-percent pin and its env key live there now.
+        ingestion_cfg = (ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/config/IngestionConfig.java").read_text()
         self.assertIn("PENDING_APPEND_WARNING_PERCENT", ingestion_cfg)
+        self.assertIn("WARNING_PERCENT = 0.80", ingestion_cfg)
 
     def test_EXEC_010_fill_stream_ordering(self):
         """EXEC-010: controlled update sequence → ordering rules hold."""

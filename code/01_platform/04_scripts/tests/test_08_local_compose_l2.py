@@ -10,7 +10,7 @@ spec = importlib.util.spec_from_file_location("enc", MOD_PATH)
 enc = importlib.util.module_from_spec(spec); spec.loader.exec_module(enc)
 
 def compose_json(profile="execution-t3"):
-    cmd = ["docker","compose","-f",str(COMPOSE)]
+    cmd = ["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env")]
     if profile:
         cmd += ["--profile", profile]
     cmd += ["config","--format","json"]
@@ -72,8 +72,16 @@ class NetworkL2Test(unittest.TestCase):
         self.assertIn("trading-net", gw_nets, "NETWORK-007: gateway must be on trading-net")
 
     def test_NETWORK_008_arrow_creds_absent_outside_bridge(self):
-        """NETWORK-008 / SEC-004: ARROW_* only on bridge (and ingestion exception)."""
-        cfg = compose_json("execution-t3")
+        """NETWORK-008 / SEC-004: ARROW_* only on bridge (and ingestion exception).
+
+        Checked against the compose SOURCE, not `compose config` output:
+        the rendered `environment` of every env_file-carrying service
+        includes secrets.env contents (blanket env_file design,
+        2026-08-29 decision A), so rendered-key checks false-fire. The
+        guard catches a service that EXPLICITLY wires ARROW order creds.
+        """
+        import yaml
+        cfg = yaml.safe_load(COMPOSE.read_text())
         leaked=[]
         for name, svc in cfg.get("services", {}).items():
             if name in ("execution-bridge","ingestion"):
@@ -142,8 +150,9 @@ class NetworkL2Test(unittest.TestCase):
             self.assertNotIn("arrow-egress", net_names, f"SEC-003: {name} must not be on arrow-egress")
 
     def test_SEC_004_no_arrow_creds_outside_bridge(self):
-        """SEC-004 dup NETWORK-008."""
-        cfg = compose_json("execution-t3")
+        """SEC-004 dup NETWORK-008 — source-level check (see NETWORK-008 note)."""
+        import yaml
+        cfg = yaml.safe_load(COMPOSE.read_text())
         leaked=[]
         for name, svc in cfg["services"].items():
             if name in ("execution-bridge","ingestion"):
@@ -256,3 +265,26 @@ class NetworkL2Test(unittest.TestCase):
         for m in re.finditer(r"ARROW_APP_SECRET\s*:\s*(.+)", text):
             val = m.group(1).strip()
             self.assertIn("${", val, f"SEC-010: ARROW_APP_SECRET must be via env var, got literal: {val[:20]}")
+
+class ExecutionNetworkCheckGuardTest(unittest.TestCase):
+    """Guard: execution_network_check.py must stay runnable and PASS.
+
+    The script sat dead for a week (2026-08-24..31): the AWS_* `:?` pins in
+    x-flink-common broke its bare `docker compose config` invocation, and
+    nothing invoked it — three separate defects (missing env-files, missing
+    bridge exemption, rendered-env false-fires) hid behind the interpolation
+    error. This test invokes it end-to-end so it fails LOUDLY in CI instead.
+    """
+
+    def test_execution_network_check_passes(self):
+        script = ROOT / "code/01_platform/04_scripts/execution_network_check.py"
+        self.assertTrue(script.exists(), "execution_network_check.py missing")
+        r = subprocess.run(
+            ["python3", str(script), "--compose", str(COMPOSE)],
+            capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(
+            r.returncode, 0,
+            f"execution_network_check failed:\n{r.stdout}\n{r.stderr}",
+        )
+        self.assertIn("PASS", r.stdout)

@@ -119,9 +119,9 @@ class ProdHardeningTest(unittest.TestCase):
     def test_PROD_011_execution_t3_disabled_by_default(self):
         """PROD-011: bridge disabled by default; needs --profile execution-t3 to appear."""
         import json, subprocess
-        cfg_default = json.loads(subprocess.check_output(["docker","compose","-f",str(COMPOSE),"config","--format","json"], text=True))
+        cfg_default = json.loads(subprocess.check_output(["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env"),"config","--format","json"], text=True))
         self.assertNotIn("execution-bridge", cfg_default.get("services", {}))
-        cfg_t3 = json.loads(subprocess.check_output(["docker","compose","-f",str(COMPOSE),"--profile","execution-t3","config","--format","json"], text=True))
+        cfg_t3 = json.loads(subprocess.check_output(["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env"),"--profile","execution-t3","config","--format","json"], text=True))
         self.assertIn("execution-bridge", cfg_t3["services"])
 
     def test_PROD_012_no_aws_creds_in_fluss_properties(self):
@@ -159,15 +159,17 @@ class ProdHardeningTest(unittest.TestCase):
             self.assertIn(needle, cfg, f"PROD-015: governed pin missing: {needle}")
 
     def test_PROD_016_ingestion_backpressure_guards(self):
-        """PROD-016: MAX_PENDING 50k (80% warn), baseline 20 ticks, reconnect 1s/30s."""
+        """PROD-016: MAX_PENDING 150k (T2 tunable, 80% warn), baseline 20 ticks, reconnect 1s/30s."""
         cfg = PLATFORM_CONFIG.read_text()
         self.assertIn("BROKER_BASELINE_TICKS_PER_INSTRUMENT_PER_SEC = 20", cfg)
-        self.assertIn("PENDING_APPEND_WARNING_PERCENT = 80", cfg)
-        # IngestionConfig env defaults
-        ing_cfg = (ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/config/IngestionConfig.java").read_text() if (ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/config/IngestionConfig.java").exists() else ""
-        if ing_cfg:
-            self.assertIn("50_000", ing_cfg)
-            self.assertIn("reconnect", ing_cfg.lower())
+        # Backpressure pins moved from PlatformConfig to IngestionConfig
+        # (T2 streaming-3000): warning percent 80% + bounded-halt defaults.
+        ing_path = ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/config/IngestionConfig.java"
+        ing_cfg = ing_path.read_text()
+        self.assertIn("WARNING_PERCENT = 0.80", ing_cfg)
+        self.assertIn("PENDING_APPEND_WARNING_PERCENT", ing_cfg)
+        self.assertIn("150_000", ing_cfg)
+        self.assertIn("reconnect", ing_cfg.lower())
         # recomputed: max concurrent checkpoint is 1 so no concurrent stall
         self.assertIn("MAX_CONCURRENT_CHECKPOINTS = 1", cfg)
 

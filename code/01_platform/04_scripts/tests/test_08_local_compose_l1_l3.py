@@ -7,7 +7,7 @@ COMPOSE = ROOT / "code/01_platform/01_docker/docker-compose.yml"
 
 def compose_json(profile="execution-t3"):
     import json, subprocess
-    cmd=["docker","compose","-f",str(COMPOSE)]
+    cmd=["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env")]
     if profile: cmd+=["--profile", profile]
     cmd+=["config","--format","json"]
     return json.loads(subprocess.check_output(cmd, text=True))

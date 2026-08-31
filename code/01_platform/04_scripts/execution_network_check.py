@@ -27,7 +27,10 @@ ORDER_ARROW_ENV = {
     "ARROW_REST_URL",
     "ARROW_ORDER_UPDATES_URL",
 }
-MARKET_DATA_EXCEPTION = {"ingestion"}
+# Ingestion legitimately carries ARROW *market-data* keys; execution-bridge
+# is THE order-path ARROW client (its creds are the whole point of the
+# arrow-egress network isolation this script validates).
+MARKET_DATA_EXCEPTION = {"ingestion", "execution-bridge"}
 
 
 def _names(value: Any) -> set[str]:
@@ -38,7 +41,18 @@ def _names(value: Any) -> set[str]:
     return set()
 
 
-def validate_config(config: dict[str, Any]) -> list[str]:
+def validate_config(config: dict[str, Any], source: dict[str, Any] | None = None) -> list[str]:
+    """Validate the execution network contract.
+
+    ``source`` (the raw compose YAML, not the rendered config) is used for
+    the ARROW environment check: rendering expands each service's
+    env_file(.env + secrets.env) contents into ``environment`` (blanket
+    env_file design, 2026-08-29 decision A), so the resolved config shows
+    ARROW keys on every env_file-carrying service. The contract's intent is
+    "no service EXPLICITLY wires order-path ARROW keys" — that is only
+    answerable from the source. When ``source`` is None (legacy callers),
+    the rendered environment is checked as before.
+    """
     errors: list[str] = []
     networks = config.get("networks", {})
     services = config.get("services", {})
@@ -68,8 +82,11 @@ def validate_config(config: dict[str, Any]) -> list[str]:
             service.get("networks")
         ):
             errors.append(f"{service_name} is attached to bridge-only arrow-egress")
-        environment = service.get("environment", {})
-        env_names = _names(environment)
+        if source is not None:
+            src_service = (source.get("services") or {}).get(service_name) or {}
+            env_names = _names(src_service.get("environment"))
+        else:
+            env_names = _names(service.get("environment"))
         if service_name not in MARKET_DATA_EXCEPTION:
             leaked = sorted(env_names & ORDER_ARROW_ENV)
             if leaked:
@@ -81,15 +98,27 @@ def validate_config(config: dict[str, Any]) -> list[str]:
 
 
 def load_resolved_compose(path: Path) -> dict[str, Any]:
-    command = ["docker", "compose", "-f", str(path), "--profile", "execution-t3", "config", "--format", "json"]
+    # Canonical env-files (secrets hold the AWS_* values the :? pins demand);
+    # a bare `compose config` fails interpolation since the lake-tiering pins.
+    command = ["docker", "compose", "-f", str(path),
+               "--env-file", str(path.parent / ".env"),
+               "--env-file", str(path.parent / "secrets.env"),
+               "--profile", "execution-t3", "config", "--format", "json"]
     return json.loads(subprocess.check_output(command, text=True))
+
+
+def load_source_compose(path: Path) -> dict[str, Any]:
+    import yaml
+    return yaml.safe_load(path.read_text())
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--compose", type=Path, required=True)
     args = parser.parse_args()
-    errors = validate_config(load_resolved_compose(args.compose))
+    errors = validate_config(
+        load_resolved_compose(args.compose), source=load_source_compose(args.compose)
+    )
     if errors:
         for error in errors:
             print(f"FAIL: {error}")

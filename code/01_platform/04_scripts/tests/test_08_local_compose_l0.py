@@ -8,7 +8,7 @@ COMPOSE = ROOT / "code/01_platform/01_docker/docker-compose.yml"
 class ConfigL0Test(unittest.TestCase):
     def test_CONFIG_001_compose_syntax_valid(self):
         """CONFIG-001: docker compose config must succeed (YAML parses, interpolation ok)."""
-        out = subprocess.check_output(["docker","compose","-f",str(COMPOSE),"config","--format","json"], text=True)
+        out = subprocess.check_output(["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env"),"config","--format","json"], text=True)
         cfg = json.loads(out)
         self.assertIn("services", cfg, "CONFIG-001: compose JSON missing services")
         self.assertIn("networks", cfg, "CONFIG-001: compose JSON missing networks")
@@ -55,7 +55,7 @@ class ConfigL0Test(unittest.TestCase):
 
     def test_CONFIG_005_secret_leakage_scan(self):
         """CONFIG-005: docker compose config must not leak secret values (only var names)."""
-        out = subprocess.check_output(["docker","compose","-f",str(COMPOSE),"config"], text=True)
+        out = subprocess.check_output(["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env"),"config"], text=True)
         # config should contain variable names, not values; check no obvious secret value appears
         # we can't know values, but we can assert no quoted secret-looking assignment leaks
         self.assertNotIn("ARROW_TOKEN=", out.replace(" ", ""), "CONFIG-005: raw ARROW_TOKEN assignment leaked")

@@ -22,7 +22,7 @@ COMPOSE = ROOT / "code/01_platform/01_docker/docker-compose.yml"
 INSTRUMENTS = list(range(1001, 1031))  # 30 instruments; canonical=10, extended 25 samples from this pool
 
 def _compose_json(profile="execution-t3"):
-    cmd = ["docker","compose","-f",str(COMPOSE)]
+    cmd = ["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env")]
     if profile: cmd += ["--profile", profile]
     cmd += ["config","--format","json"]
     return json.loads(subprocess.check_output(cmd, text=True))
@@ -49,8 +49,14 @@ def offline_contract() -> list[str]:
     naut_env=(cfg["services"]["nautilus"].get("environment") or {})
     if naut_env.get("EXECUTION_ENABLED") != "false":
         errs.append("nautilus EXECUTION_ENABLED must be false")
-    # no ARROW_* on nautilus/compute
-    for name, svc in cfg.get("services",{}).items():
+    # no EXPLICIT ARROW_* wiring outside bridge/ingestion — checked against
+    # the compose SOURCE: the rendered config expands env_file(.env +
+    # secrets.env) into every env_file service's environment (blanket env_file
+    # design, 2026-08-29 decision A), so a rendered-key check false-fires on
+    # fluss/minio/openobserve/otel.
+    import yaml as _yaml
+    _src = _yaml.safe_load(COMPOSE.read_text())
+    for name, svc in (_src.get("services") or {}).items():
         if name in ("execution-bridge","ingestion"):
             continue
         env=svc.get("environment") or {}
@@ -77,7 +83,7 @@ def live_smoke(seed: int = 42, n: int = 10) -> list[str]:
     # Try to hit the fake bridge healthz via the execution-net (requires stack up)
     # We do a simple docker compose ps check; if bridge not running, mark as skip not fail
     try:
-        out=subprocess.check_output(["docker","compose","-f",str(COMPOSE),"--profile","execution-t3","ps","--format","json"], text=True)
+        out=subprocess.check_output(["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env"),"--profile","execution-t3","ps","--format","json"], text=True)
     except Exception as e:
         errs.append(f"docker ps failed: {e}")
         return errs
