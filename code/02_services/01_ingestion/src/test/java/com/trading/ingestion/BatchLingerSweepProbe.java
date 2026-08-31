@@ -2,6 +2,7 @@ package com.trading.ingestion;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.trading.common.schema.EventDay;
 import com.trading.ingestion.model.RawTick;
 import com.trading.ingestion.model.TickPacket;
 import java.util.Arrays;
@@ -101,6 +102,7 @@ class BatchLingerSweepProbe {
     private static InternalRow toRow(TickPacket p) {
         RawTick raw = p.raw();
         return GenericRow.of(
+                BinaryString.fromString(EventDay.of(p.eventTime())),   // event_day (partition key)
                 BinaryString.fromString("fp_" + p.instrumentToken()),  // event_fingerprint
                 BinaryString.fromString("1"),                          // fingerprint_version
                 BinaryString.fromString(p.connectionId()),             // connection_id

@@ -2,6 +2,7 @@ package com.trading.ingestion;
 
 import com.trading.ingestion.model.RawTick;
 import com.trading.ingestion.model.TickPacket;
+import com.trading.common.schema.EventDay;
 import com.trading.ingestion.write.FlussRowConverter;
 import com.trading.ingestion.write.RawTickWriter;
 import java.time.Instant;
@@ -174,7 +175,7 @@ class RealFlussRowConverter implements FlussRowConverter {
      * <p>DDL column order (20 columns, schema v2 — R-054/R-231 removed the
      * bid/ask and option-metadata columns that the bridge never populates):
      * <pre>{@code
-     *   event_fingerprint, fingerprint_version, connection_id, connection_epoch,
+     *   event_day, event_fingerprint, fingerprint_version, connection_id, connection_epoch,
      *   instrument_token, exchange, symbol, event_time, ingest_ts, ack_ts,
      *   tick_type, last_price_paise, last_qty, raw_payload, payload_hash,
      *   decoder_version, protocol_version, validity_state, validity_reason,
@@ -192,6 +193,8 @@ class RealFlussRowConverter implements FlussRowConverter {
         RawTick raw = packet.raw();
 
         GenericRow row = GenericRow.of(
+                // partition (v3: daily yyyyMMdd IST — order MUST match DDL)
+                bs(EventDay.of(packet.eventTime())),                // event_day STRING (partition key)
                 // identity and routing
                 bs(packet.eventFingerprint()),                      // event_fingerprint STRING
                 bs(String.valueOf(packet.fingerprintVersion())),   // fingerprint_version STRING

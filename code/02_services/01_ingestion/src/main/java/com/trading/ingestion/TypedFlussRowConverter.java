@@ -2,6 +2,7 @@ package com.trading.ingestion;
 
 import com.trading.common.schema.RawTableSchema;
 import com.trading.ingestion.model.RawTick;
+import com.trading.common.schema.EventDay;
 import com.trading.ingestion.model.TickPacket;
 import com.trading.ingestion.write.FlussRowConverter;
 import com.trading.ingestion.write.RawTickWriter;
@@ -48,6 +49,7 @@ final class TypedFlussRowConverter implements FlussRowConverter {
 
     /** POJO matching the 20-column raw_table_1 DDL (names must equal columns). */
     public static final class TickRow {
+        public String event_day;            // partition key, yyyyMMdd IST (v3)
         public String event_fingerprint;
         public String fingerprint_version;
         public String connection_id;
@@ -101,6 +103,7 @@ final class TypedFlussRowConverter implements FlussRowConverter {
         RawTick raw = packet.raw();
 
         TickRow row = new TickRow();
+        row.event_day = EventDay.of(packet.eventTime());
         row.event_fingerprint = packet.eventFingerprint();
         row.fingerprint_version = String.valueOf(packet.fingerprintVersion());
         row.connection_id = packet.connectionId();

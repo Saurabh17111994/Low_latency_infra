@@ -38,7 +38,7 @@ public final class PlatformConfig {
      * this value and SignalJob's {@code RAW_SCHEMA_VERSION} default derives from it,
      * so the producer label and the consumer default cannot drift apart.
      */
-    public static final String RAW_TABLE_1_SCHEMA_VERSION = "2";
+    public static final String RAW_TABLE_1_SCHEMA_VERSION = "3";
 
     // ---- dedup / candles (reject-startup values) ----
     public static final long DEDUP_TTL_MS = 60_000L;

@@ -23,8 +23,8 @@ public final class RawTableSchema {
 
     private RawTableSchema() {}
 
-    /** DDL schema version of the raw row (v2 since R-054/R-231). */
-    public static final String ROW_SCHEMA_VERSION = "2";
+    /** DDL schema version of the raw row (v3 since daily-partition migration). */
+    public static final String ROW_SCHEMA_VERSION = "3";
 
     /** Immutable LOG table holding every accepted market tick. */
     public static final String TABLE = "raw_table_1";
@@ -42,6 +42,7 @@ public final class RawTableSchema {
      * apart.
      */
     public static final List<String> COLUMNS = List.of(
+            "event_day",              // partition key, yyyyMMdd IST (v3)
             "event_fingerprint",
             "fingerprint_version",
             "connection_id",
@@ -75,6 +76,7 @@ public final class RawTableSchema {
      * {@code DdlBootstrap} maps them onto Fluss {@code DataTypes}.
      */
     public static final List<String> COLUMN_TYPE_ROOTS = List.of(
+            "STRING",   // event_day (partition key)
             "STRING",   // event_fingerprint
             "STRING",   // fingerprint_version
             "STRING",   // connection_id

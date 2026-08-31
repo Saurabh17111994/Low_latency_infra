@@ -482,7 +482,18 @@ public final class DdlBootstrap {
                     Map.entry("raw_table_1",
                             TableDescriptor.builder()
                                     .schema(RAW_TABLE_1_SCHEMA)
+                                    .partitionedBy("event_day")
                                     .distributedBy(16, "instrument_token")
+                                    .property("table.log.ttl", "7d")
+                                    .property("table.auto-partition.enabled", "true")
+                                    .property("table.auto-partition.time-unit", "DAY")
+                                    .property("table.auto-partition.num-precreate", "2")
+                                    .property("table.auto-partition.num-retention", "7")
+                                    .property("table.auto-partition.time-zone", "Asia/Kolkata")
+                                    .property("table.datalake.enabled", "true")
+                                    .property("table.datalake.format", "iceberg")
+                                    .property("table.datalake.freshness", "5min")
+                                    .property("table.datalake.auto-compaction", "true")
                                     .build()),
                     Map.entry("feature_candles_15s",
                             TableDescriptor.builder()
