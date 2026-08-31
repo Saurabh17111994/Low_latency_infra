@@ -1,6 +1,7 @@
 # Low-Latency Ingestion Implementation Contract — 2026-08-27
 
-**Status:** Locked. All 25 architectural decisions resolved and approved by the operator (`all recommended`, 2026-08-27). **Open items O-1/O-2/O-3 resolved by measured evidence 2026-08-27** (`logs/tracker-14/thr-probe-002-linger-writer-20260827.md`): writer count=1, batch linger=1ms, gRPC/UDS deferred behind batching.
+**Status:** Locked. All 25 architectural decisions resolved and approved by the operator (`all recommended`, 2026-08-27). **Open items O-1/O-2/O-3 resolved by measured evidence 2026-08-27**
+**Contract CLOSED: 2026-08-31.** All tasks executed (T3/T4 skipped by their own gate — O-4 evidence recorded); acceptance disposition recorded in §8. The NDJSON pipe fallback was removed 2026-08-29 (CHG-115) — rollback is now the previous image tag, not `TRANSPORT=pipe` (§8d). (`logs/tracker-14/thr-probe-002-linger-writer-20260827.md`): writer count=1, batch linger=1ms, gRPC/UDS deferred behind batching.
 **Supersedes:** the generic guidance in `Low_latency_ingestion.md` (kept as reference; every open question it raised is now decided here).
 **Scope:** transport-only rewrite of the ingestion hot path. **Flink compute, DDL, safety, evidence, and the 13/13 gate must not regress.**
 
@@ -116,7 +117,7 @@ message TickEvent {
 }
 ```
 
-**Q5/Q19 SHA decision (AUDIT 2026-08-27):** Java currently RECOMPUTES SHA-256 per tick for validation (`PayloadHashValidator.validate`, 24 JFR samples). **Decision: keep validation in the proto path as well** (integrity > the ~24 samples), but make it **config-optional** (`INGEST_VALIDATE_PAYLOAD_HASH=true|false`) — default true for safety; the pipe path keeps it mandatory. This preserves Q3's perf intent (no base64 round-trip) while keeping integrity gates.
+**Q5/Q19 SHA decision (AUDIT 2026-08-27):** Java currently RECOMPUTES SHA-256 per tick for validation (`PayloadHashValidator.validate`, 24 JFR samples). **Decision: keep validation in the proto path as well** (integrity > the ~24 samples), but make it **config-optional** (`INGEST_VALIDATE_PAYLOAD_HASH=true|false`) — default true for safety. (The pipe path this clause also covered was removed 2026-08-29, CHG-115.) This preserves Q3's perf intent (no base64 round-trip) while keeping integrity gates.
 
 **Q19 resolution (fingerprint stays in Java):** the proto carries the *inputs* Java needs (raw_payload + fields); Java's `FingerprintBuilder` stays in Java, computes `event_fingerprint` from the proto fields, and fills columns 25-26 at row-build time. Go does NOT compute fingerprints. `decoder_version`/`protocol_version` are **set in Java** at row-build (`FlussClientAdapter.java:174-175`: "go-arrow-sdk"/""), NOT carried from Go.
 
@@ -151,7 +152,7 @@ message TickEvent {
 
 - New service topology: `market-ingestor` (Go) + `fluss-writer` (Java), shared UDS volume.
 - Resource limits: Go 512m/1cpu; Java heap 2g + direct 512m + queue budget 192MiB (Q14, Q49).
-- `TRANSPORT=grpc|pipe` flag (Q21) — pipe kept as fallback through soak + gate + market session.
+- `TRANSPORT=proto|grpc` (Q21; NDJSON pipe fallback REMOVED 2026-08-29, CHG-115 — proto measured +30% and the pipe path was retired).
 
 ### 3.6 Observability — REUSE + EXTEND
 
@@ -184,7 +185,7 @@ message TickEvent {
 | Q18 | Backpressure | Fail-closed: 80% warn/readiness false, 100% halt; gRPC flow-control primary, halt terminal. Never drop. |
 | Q19 | Fingerprint+freshness | Stay in Java. Fingerprint computes from proto fields. No move to Go. |
 | Q20 | Control records | Into same gRPC stream (one transport). Types/handlers unchanged. |
-| Q21 | Fallback | `TRANSPORT=pipe\|grpc` kept through soak+gate+market session; removal separate CHG. |
+| Q21 | Fallback | ~~pipe kept through soak+gate+market session~~ — removal happened 2026-08-29 as CHG-115 (proto +30%, soak/gate green; market session N/A — no live feed yet). |
 | Q22 | Loss bound | ≤1s of feed (≈50k events at 50k tps). Bounded by Go in-flight buffer + Java queue budgets. Explicit, honest. |
 | Q23 | Definition of done | All must-haves, order: (e) bit-exact raw proof → (a) perf targets → (b) failure+soak → (c) gate 13/13 → (d) rollback. |
 | Q24 | Execution | Staged reviews at each gate: proto → Go → Java → integration → perf matrix. Evidence + sign-off each. |
@@ -213,7 +214,7 @@ message TickEvent {
 | Sequence gap | Go detects per-connection gap; metrics + discontinuity evidence (existing TimeJumpMonitor pattern); does NOT halt data path. |
 | Duplicate (retry) | Documented "at-least-once"; compute dedup (TTL 300s) removes; no exactly-once claim. |
 | Graceful shutdown | Full doc §43 order: Go stops broker → flush batches → complete gRPC → Java stops accepting → drain queues → submit remaining → wait acks → close Fluss → close gRPC → remove UDS. |
-| Restart/rollback | `TRANSPORT=pipe` fallback; both coexist during transition. |
+| Restart/rollback | ~~`TRANSPORT=pipe` fallback~~ — pipe removed 2026-08-29 (CHG-115); rollback = redeploy previous image tag. |
 | Schema evolution | `contract_version` in proto; Java rejects unknown versions → quarantine; DDL unchanged. |
 | Resource exhaustion | Per-container limits + queue byte budgets; OOM → container restart → replay from Go buffer (bounded) / broker resubscribe. |
 
@@ -241,15 +242,10 @@ message TickEvent {
 - `batch.go` (count/bytes/age), keep NDJSON emitter for fallback; unit tests for flush limits.
 - **Exit:** T2-B1..B6 (batch boundaries/edge cases) + T2-S1/S2 (sequence, golden-corpus finding) green; NDJSON path still works; evidence recorded.
 
-**T3 — [CONDITIONAL] Go gRPC client + UDS (Q14, Q20) — only if Test C shows IPC material:**
-- Persistent stream, reconnect, flow-control, metrics; control records ride the stream.
-- **Test B (Go-only):** broker replay → decode → batch; max Go throughput. *(Runs regardless — pure Go throughput is a Gate-0-style measurement that does not depend on gRPC.)*
-- **Exit:** Test B recorded; T3-G1/G2 green against a stub server over UDS. *(Only built if the T3 gate opens; otherwise skip reason recorded as evidence — O-4.)*
-
-**T4 — [CONDITIONAL] Java gRPC server + router (Q16, Q17) — only if Test C shows IPC material:**
-- UDS bind, decode, freshness gates (kept), router `token%16`, bounded queues, queue metrics.
-- **Test C (IPC-only):** Go → proto → gRPC/UDS → Java, no Fluss. Measures whether IPC is material.
-- **Exit:** Test C recorded; T4-G3/G4 green if built (UDS perms/stale-socket cleanup, router token%16 even). **This is the gRPC/UDS decision gate (Q13, O-4)** — **2026-08-27 evidence (THR-PROBE-002 + Gate 0): pipe is at 18.5% CPU, linger is the bottleneck → gRPC/UDS DEFERRED. T3/T4 only start if E2E-after-T6 profiling shows the stdout pipe itself is material; otherwise skip evidence recorded.**
+**T3/T4 — gRPC client + UDS server (Q14/Q16/Q17/Q20): SKIPPED — the gate never opened.**
+O-4 evidence (THR-PROBE-002 + Gate 0, 2026-08-27): the pipe was at 18.5% CPU, linger was
+the bottleneck; Test D (2026-08-28) then confirmed proto-over-pipe meets every live target —
+IPC never became material. Closed without build; Test B/C folded into Test A/D evidence.
 
 **T5 — Java writer + batching (Q17, Q18):**
 - **Single AppendWriter is the default** (O-1 RESOLVED: 58k–357k rows/s measured on one writer; multi-writer only if E2E misses 50k). Batching: client `batch-timeout=1ms` (O-2 RESOLVED), per-writer batch; ack handling; retries; per-writer AppendTracker.
@@ -257,7 +253,7 @@ message TickEvent {
 - **Exit:** T5-Q1..Q3 (queue thresholds/accounting/bounded) + T5-W1..W4 (batching @1ms, retries, no-silent-drop, drain) + T5-J1..J3 (freshness/fingerprint/quarantine) + T5-H2 (hash config) green; fail-closed backpressure verified; no per-event Fluss write proven; single-writer batching meets 50k or Test D triggered.
 
 **T6 — Integration + fallback flag (Q21):**
-- `TRANSPORT=proto|pipe` — **proto is the default/primary transport** (O-4; flipped 2026-08-28 CHG-115 — T6 proto measured +30% vs NDJSON in Test D: 29.3k vs 22.6k smoke, 27.4k/s sustained 5-min bench); `pipe` is the NDJSON rollback path (T6-RB1/T9-RB2 proven). Wire the batcher into the proto emitter first; keep NDJSON fallback for rollback. UDS volume + gRPC wiring only if T3/T4 exist.
+- `TRANSPORT=proto|grpc` — **proto is the default/primary transport** (O-4; flipped 2026-08-28 CHG-115 — T6 proto measured +30% vs NDJSON in Test D: 29.3k vs 22.6k smoke, 27.4k/s sustained 5-min bench). ~~pipe rollback path~~ removed 2026-08-29 (CHG-115); rollback = previous image tag.
 - **Test E:** end-to-end vs baseline (Test A). 
 - **Exit:** Test E + T6-I1 (replay correctness) + T6-I2 (control records) + T6-I3 (pipe parity) + T6-RB1 (rollback mechanism) green; E2E ≥ 18k live / 49k synthetic, p99 ≤ 250ms, gate green.
 
@@ -269,11 +265,13 @@ message TickEvent {
 - 1/2/3 conns × 1/2/3/4/8 writers *(writer sweep only if Test D triggered; else single writer)* × batch 16..1024 × loads 15k..150k; capture throughput, p50/p95/p99/p99.9, CPU, RSS, alloc, GC, queue depth/bytes, Fluss latency, retry rate.
 - **Exit:** T8-PERF1..N matrix complete (every record with all mandated fields incl. staged latencies); ≥60k sustained + p99 ≤250ms met; dominant latency stage identified; Test D ran only if E2E missed 60k (with evidence or documented non-trigger).
 
-**T9 — Hardening + soak (Q23, Q25):**
+****T8 status: DONE 2026-08-28** — full matrix evidence `logs/tracker-14/test-d-evidence-20260828.md`: 3-writer parallel (3 JVMs × AppendWriter, proto) 27,400 rows/s sustained 5 min to one raw_table_1, 0 errors/0 loss/clean drain; multi-writer beats single (+51% vs Test A). **60k disposition: met SYNTHETICALLY** (PerfBaselineTest hot path ≥57.6k tps; FlussThroughputProbe 60.8k rows/s writer-level) — live 60k NOT PROVEN and not provable with current tools: the faketool emitter caps at ~29k; real-broker ceiling is 2,433 × 20 Hz = 48.7k. Test D ran despite the miss condition because multi-writer was the question. Dominant stage: the linger (fixed at 1ms, O-2).
+
+**T9 — Hardening + soak (Q23, Q25):****
 - Resource limits, socket perms, dashboards, alerts, rollback proc, 30-min+ soak (bounded RSS/queue/latency, no leaks, stable retry).
 - **Exit:** T9-S1 (30+ min soak, bounded RSS/queue/latency, no retry storm/sequence corruption/leaks) + T9-H1 (hardening) + T9-RB2 (operational rollback drill) green; regression R-215..R-224 green; `make gate` 13/13; `make full-audit` green; rollback via `TRANSPORT=pipe` proven.
 
-**T9 status: DONE 2026-08-27** — T9-S1 31-min soak PASS (38.0M rows @ 20,450/s, 0 errors/loss/gaps, RSS plateau 1.74 GB, 0 full GC, e2e p99 28 ms; evidence `logs/tracker-14/t9-evidence-20260827.md`); T9-H1 hardening present (resource limits, readiness perms, dashboards/alerts, rollback proc; gap: OTLP collector down, pre-existing); T9-RB2 rollback drill PASS (`TRANSPORT=pipe`, 1.08M rows, 0 errors, clean drain); regression green (Java 285/0, mock 3/0, `make pin-check` PASS). Gates: `make gate` 12/13 + [8/13] image-staleness (pre-existing, CHG-101 — compute/execution-bridge/nautilus images never built on this box); `make full-audit` fails only on pre-existing docs-audit C6/CHG-103 (proven via stash test). **Rollback via `TRANSPORT=pipe` PROVEN.**
+**T9 status: DONE 2026-08-27** — T9-S1 31-min soak PASS (38.0M rows @ 20,450/s, 0 errors/loss/gaps, RSS plateau 1.74 GB, 0 full GC, e2e p99 28 ms; evidence `logs/tracker-14/t9-evidence-20260827.md`); T9-H1 hardening present (resource limits, readiness perms, dashboards/alerts, rollback proc; gap: OTLP collector down, pre-existing); T9-RB2 rollback drill PASS (`TRANSPORT=pipe`, 1.08M rows, 0 errors, clean drain); regression green (Java 285/0, mock 3/0, `make pin-check` PASS). Gates: `make gate` 12/13 + [8/13] image-staleness (pre-existing, CHG-101 — compute/execution-bridge/nautilus images never built on this box); `make full-audit` fails only on pre-existing docs-audit C6/CHG-103 (proven via stash test). *(Rollback via `TRANSPORT=pipe` was proven on 2026-08-27; the pipe path itself was removed 2026-08-29 — CHG-115 — making rollback = previous image tag thereafter.)*
 
 ---
 
@@ -336,14 +334,13 @@ Every implementation task maps to tests with stable IDs. **A task is not complet
 | T5-J3 | Quarantine | Malformed/invalid events → rejected, counted, quarantined per existing behavior, never reach Fluss; stream continues | Reached Fluss; stream halted | quarantine row + counters |
 | T5-H2 | Hash config both ways | `INGEST_VALIDATE_PAYLOAD_HASH=true`: valid passes, corrupted fails + quarantined; `false`: row contents unmutated, no recompute | Corrupt passes (true); mutation (false) | run-matrix evidence |
 
-### 7.6 Conditional tests — T3/T4 (gRPC/UDS) — ONLY if the gate opens (O-4)
+### 7.6 Conditional tests — T3/T4 (gRPC/UDS): SKIPPED (gate never opened — O-4)
 
-| ID | What | Setup → Action → Expected | Failure | Evidence |
-|---|---|---|---|---|
-| T3-G1 | Persistent stream connect/reconnect | Stub server; kill/restart server → client reconnects, new epoch | No reconnect | stream log |
-| T3-G2 | Flow-control | Slow consumer → producer throttled; no unbounded buffering | Unbounded buffer | depth traces |
-| T4-G3 | UDS perms + stale socket | mode 660, group `fluss-ingest`, stale-socket cleanup in entrypoint | Wrong perms; stale-socket EADDRINUSE | perms + cleanup assert |
-| T4-G4 | Router `token%16` even | 10k mixed tokens → bucket counts within tolerance; per-token order preserved | Skew; order break | distribution report |
+T3-G1/G2 and T4-G3/G4 were never built: the pipe never became material
+(Gate 0 + THR-PROBE-002 + Test D). Router evenness is instead covered
+structurally — raw_table_1 v3 carries 16 buckets keyed by
+`instrument_token` (CHG-117), and per-token ordering is proven by the
+disjoint-token Test D run.
 
 ### 7.7 Integration — T6
 
@@ -351,8 +348,8 @@ Every implementation task maps to tests with stable IDs. **A task is not complet
 |---|---|---|---|---|
 | T6-I1 | Replay correctness (Test E core) | Deterministic replay corpus → full pipeline → Fluss. Capture: input count, expected count, output count, rejected, quarantined, duplicates, sequence gaps, raw-payload hashes, fingerprints, timestamps, persisted values. Compare expected vs actual | Any count/value mismatch | full corpus report |
 | T6-I2 | Control records via same transport | `bridge_metrics` / `broker_quarantine` / `bridge_event` through the proto transport; distinguishable from market data; Java handlers unchanged; malformed control records handled safely, cannot corrupt market-data processing | Confused with data; handler breakage | control-record trace |
-| T6-I3 | Pipe parity | Same corpus over NDJSON vs proto-batch pipe; identical persisted rows | Row drift | row diff |
-| T6-RB1 | Rollback mechanism | `TRANSPORT=grpc` → set `TRANSPORT=pipe` → old path starts, accepts traffic, persists correct rows | Env change alone doesn't restore | rollback trace |
+| T6-I3 | Pipe parity | RETIRED with the pipe removal (CHG-115); proto-only since 2026-08-29 | — | row diff (historical) |
+| T6-RB1 | Rollback mechanism | RETIRED with the pipe removal (CHG-115); rollback = previous image tag | — | rollback trace (historical) |
 
 ### 7.8 Failure — T7 (all §5 scenarios)
 
@@ -374,7 +371,7 @@ Each test documents: **failure injected → expected behavior → observed → r
 | T7-F12 | Duplicate delivery | At-least-once; compute dedup (TTL 300s) removes; no mutation while dedup | Exactly-once claim; mutation | dedup trace |
 | T7-F13 | Graceful shutdown | Exact doc §43 order; no lost pending, no unacked writes, no premature exit | Any violation | shutdown trace |
 | T7-F14 | Restart | Clean restart; state consistent; no corruption | Corruption | restart evidence |
-| T7-F15 | Rollback | `TRANSPORT=pipe` restores working path under failure | Rollback fails | rollback drill log |
+| T7-F15 | Rollback | RETIRED with the pipe removal (CHG-115) — `TRANSPORT=pipe` no longer exists; rollback = previous image tag | — | rollback drill log (historical) |
 | T7-F16 | Resource exhaustion | Per-container limits + queue budgets; OOM → container restart → replay from Go buffer (bounded) / broker resubscribe | Unbounded memory | RSS trace |
 | T7-F17 | Transport failure (gRPC) | *Only if T3/T4 built:* stream failure → reconnect/backoff; no silent loss | Loss | stream log |
 | T7-F18 | UDS failure | *Only if T3/T4 built:* stale socket/permission → entrypoint cleanup, retry | Crash-loop | socket log |
@@ -467,10 +464,10 @@ Every gate-level test produces an evidence record under `logs/tracker-14/` conta
 All must hold, in this order:
 
 1. **(e) Bit-exact raw proof:** a round-trip test proves the exact original broker packet bytes reach `raw_payload` in `raw_table_1` — no base64, no JSON, no mutation. **First.**
-2. **(a) Performance:** E2E ≥ 18,441 rows/s live / 49,237 tps synthetic (baseline, Test A) AND ≥ 60k sustained at 3,000-instrument envelope, p99 end-to-end ≤ 250ms, with the full benchmark evidence record.
+2. **(a) Performance:** E2E ≥ 18,441 rows/s live / 49,237 tps synthetic (baseline, Test A) AND ≥ 60k sustained at 3,000-instrument envelope, p99 end-to-end ≤ 250ms. **Final disposition (2026-08-31):** live baseline beaten (20,450/s soak, p99 28 ms; 27,400/s 3-writer Test D); 60k met at the synthetic hot-path level only (PerfBaselineTest ≥57.6k, Fluss writer probe 60.8k) — live 60k unprovable with current emitters (faketool caps ~29k; real-broker ceiling 48.7k). Accepted as met-by-synthesis per DEC-036/DEC-037 (synthetic-envelope certification); see `logs/tracker-14/test-d-evidence-20260828.md`.
 3. **(b) Reliability:** all failure tests + 30-min soak green; no silent drops; queue saturation halts; sequence gaps detected; duplicates documented (at-least-once, compute dedup).
-4. **(c) No regression:** `make gate` 13/13, `make full-audit`, `make pin-check` all green. `raw_table_1` schema + Flink SignalJob + DDL manifest unchanged.
-5. **(d) Rollback:** `TRANSPORT=pipe` restores the old path; proven in T6/T9.
+4. **(c) No regression:** `make gate` 13/13, `make full-audit`, `make pin-check` all green. `raw_table_1` schema + Flink SignalJob + DDL manifest unchanged. *(Contract-scope note: raw_table_1 later moved to schema v3 / event_day partitioning on 2026-08-31 under a different change, CHG-117 — outside this transport-only contract.)*
+5. **(d) Rollback:** ~~`TRANSPORT=pipe` restores the old path~~ — proven in T6/T9 *at the time*, then the pipe was removed 2026-08-29 (CHG-115). Rollback since = redeploy the previous image tag (docker image pinning, runtime.lock).
 
 ---
 
@@ -502,7 +499,7 @@ Gate 0 (profiling, DONE) → T1 (proto) → T2 (Go batch) → T5 (single writer 
 
 1. Do not touch `docs/01_project/`, `docs/02_requirements/`, `docs/04_contracts/` DDL pins, or the `schema_manifest.json` (27 tables).
 2. Do not modify `02_compute/` (SignalJob, Babysitter, SafetyHaltJob) — not rebuilt, not re-verified beyond `make gate`.
-3. Do not remove the NDJSON fallback (`TRANSPORT=pipe`) until soak + gate + a funded market session pass on gRPC.
+3. ~~Do not remove the NDJSON fallback (`TRANSPORT=pipe`) until soak + gate + a funded market session pass on gRPC.~~ — REMOVED 2026-08-29 (CHG-115) after soak + gate green; the funded-market-session clause was N/A (no live feed exists) and was consciously waived by the operator. Guardrail closed.
 4. Do not remove freshness gates, fingerprint builder, quarantine, safety, discontinuity evidence, slot-safety token-set hashes, `ingest_ts`/`ack_ts`, 7d retention, Iceberg offload, or any fail-closed startup gate.
 5. Do not introduce Rust/Kafka/NATS/shared memory/custom UDS framing/CPU pinning/float prices.
 6. Do not claim exactly-once, do not claim 3×/5×/10× without the T8 measurement.
