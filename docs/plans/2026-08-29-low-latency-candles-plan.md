@@ -2,8 +2,14 @@
 
 **Date:** 2026-08-29
 **Branch:** low-latency-ingestion-based-project
-**Status:** Implemented (unit-verified); live integration OPEN — see
-`logs/tracker-14/finding-preview-sink-zero-writes.md`
+**Status:** Implemented and verified end-to-end. All 3 phases unit-verified
+2026-08-29 (compute surefire 410/0/22, `make gate` 13/13); live integration
+**CLOSED 2026-08-30** — the preview-sink zero-writes blocker (see
+`logs/tracker-14/finding-preview-sink-zero-writes.md`) was root-caused (Fluss
+calendar-day TTL never expired same-day data → 11.6M live KV keys → read
+slowdown; levers-map scoreboard) and fixed. Contract met: e2e p95 = 740 ms
+with env overrides / 685 ms on bare defaults, target < 1 s. Follow-up levers
+live in `2026-08-30-latency-tail-levers-map.md` (successor doc).
 **Predecessor:** `docs/Context/latency-optimization-context.md` (the problem analysis)
 
 ---
@@ -204,13 +210,24 @@
 
 ## Verification
 
-> **Verification status 2026-08-29 (audit):** unit levels below are green and
+> **Verification status (updated 2026-08-31):** unit levels green and
 > evidence-backed (compute surefire 410/0/22). The integration/loadtest levels
-> are **OPEN** — `loadtest-preview.sh` runs 15:03–15:17 on 2026-08-29 all
-> failed P1 (see `logs/tracker-14/finding-preview-sink-zero-writes.md`).
-> Known limitation: at RATE_HZ=20 × 1024 instruments the TM's 512m direct
-> memory OOMs the early-signal-candidates sink (observed 2026-08-29); the
-> loadtest defaults to RATE_HZ=10 for this reason.
+> — **OPEN as of 2026-08-29** (`loadtest-preview.sh` 15:03–15:17 all failed
+> P1, see `logs/tracker-14/finding-preview-sink-zero-writes.md`) — were
+> **CLOSED 2026-08-30** once the zero-writes blocker was fixed:
+> - preview emission sustained (710k preview rows/run after the fix)
+> - finals identical to a no-preview baseline, in the strongest form: G7c
+>   full raw recount per (token, 15s window) — 47,104 windows, 0 mismatches
+>   (commit 329560f, 2026-08-31)
+> - early-signal latency measured (first profile: levers-map §4.8, p50 ~140 ms
+>   source→operator)
+> - e2e contract p95 = 740 ms (target < 1 s) — investigation closed, defaults
+>   committed to pipeline-lib.sh
+> Known limitation (still true): at RATE_HZ=20 × 1024 instruments the TM's
+> 512m direct memory OOMs the early-signal-candidates sink (observed
+> 2026-08-29); the loadtest defaults to RATE_HZ=10 for this reason. Not
+> revisited since — see levers-map C6 (capacity ceiling) before relying on
+> 2× rates through the compute path.
 
 ### Phase 1
 
@@ -244,8 +261,15 @@
 ## Decisions (LOCKED 2026-08-29, user-approved)
 
 1. **Preview table name:** `feature_candles_15s_preview`
-2. **Preview cadence:** 1s (15,360 writes/s at 1024 instruments)
-3. **Preview TTL:** 60s (auto-expiry, no cleanup job)
+2. **Preview cadence:** 1s at design time (15,360 writes/s at 1024
+   instruments); **tuned to 500 ms 2026-08-30** (pipeline-lib.sh default —
+   the lever that took p95 under 1 s; floor law: p95 ≈ interval + ~200 ms)
+3. **Preview TTL:** 60s (auto-expiry, no cleanup job) — **premise broken in
+   practice**: Fluss 0.9.1 TTL is CALENDAR-DAY based and never expired
+   same-day data (11.6M keys accumulated, the zero-writes root cause).
+   Current mitigation: the harness purges (drop+recreate) the preview table
+   at every run start; a production TTL policy (e.g. hourly buckets) is
+   still open (levers-map D5)
 4. **Early-signal rule:** `breakout-20-bullish-trend` (consistent with detection)
 5. **Supersession:** CANCEL row superseding the tentative (auditable, uses `supersedes_candidate_id`)
 6. **Phase gating:** Phase 1 first (visibility), get data, then Phase 2 (early signals), then
@@ -257,7 +281,7 @@
 
 |                   | Today | After Phase 1             | After Phase 2                      | After Phase 3               |
 | ----------------- | ----- | ------------------------- | ---------------------------------- | --------------------------- |
-| Candle visible    | 15s   | **1s**                    | 1s                                 | 1s                          |
+| Candle visible    | 15s   | **1s** (→ 500 ms, 08-30)  | 1s                                 | 1s                          |
 | Signal fires      | 15s   | 15s                       | **~1-3s tentative, 15s confirmed** | **~5s confirmed**           |
 | OHLCV correctness | exact | exact                     | exact                              | exact                       |
 | False signals     | none  | none                      | none (finals authoritative)        | none (gated on reliability) |
