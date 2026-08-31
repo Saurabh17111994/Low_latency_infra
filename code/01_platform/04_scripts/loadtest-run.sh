@@ -142,6 +142,8 @@ echo "faketool on :8899 (${RATE_HZ}Hz x 1024 = $((RATE_HZ * 1024))/s), pid $FAKE
 
 # ---------- 2. one ingestion JVM (single canonical env block — never re-typed) ----------
 # G4: this block is the ONLY place these vars live; anything else sources it.
+  # D6 right-size (2026-08-31): ingestion live-set measured 64-90MB over 17 runs;
+  # 512m heap + 512m direct = 8x headroom (was 2g/1g). Verified by bench run G6/G7 guards.
 LOG_DIR="$OUT/j1" READINESS_FILE_PATH="/tmp/ingestion.loadtest.ready" \
 ARROW_HFT_URL="ws://127.0.0.1:8899" ARROW_BRIDGE_BIN="$BRIDGE_DIR/arrow-bridge" \
 ARROW_FAKE_BROKER="1" TRANSPORT="proto" \
@@ -155,7 +157,7 @@ ARROW_MAX_EVENT_AGE_MS="5000" ARROW_MAX_FUTURE_EVENT_SKEW_MS="2000" \
 ARROW_HFT_LATENCY_MS="50" CLOCK_CHECK_REQUIRED="false" OTEL_COLLECTOR_HOST="localhost:4318" \
 FLUSS_WRITER_MODE="generic" FLUSS_WRITERS="1" FLUSS_WRITER_BATCH_SIZE_BYTES="0" \
 java --add-opens=java.base/java.nio=ALL-UNNAMED \
-  -Xms2g -Xmx2g -XX:MaxDirectMemorySize=1g \
+  -Xms512m -Xmx512m -XX:MaxDirectMemorySize=512m \
   -Dlog.dir="$OUT/j1" \
   -cp "$JAR" com.trading.ingestion.IngestionService > "$OUT/j1/java.out" 2>&1 &
 JVM_PID=$!

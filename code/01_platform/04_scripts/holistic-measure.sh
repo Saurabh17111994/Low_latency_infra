@@ -209,6 +209,14 @@ run_phase() {
       curl -s --max-time 5 http://localhost:9250/metrics \
         | grep -E "^flink_.*compute_dedup_(first|duplicates)|^flink_.*compute_candles_late_dropped" \
         | sed "s/^/$now /" >> "$OUT/tm-prom-dedup-late.tsv" || true
+      # Signal-path latency (2026-08-31): the job already runs with
+      # -Dmetrics.latency.interval=2000, so Flink emits source->operator
+      # latency histograms per operator into TM Prometheus — they were
+      # never sampled. Capture all *_latency series (quantile gauges);
+      # the analyzer reports p50/p95/p99 for the signal operators.
+      curl -s --max-time 5 http://localhost:9250/metrics \
+        | grep -E "^flink_.*latency" \
+        | sed "s/^/$now /" >> "$OUT/tm-prom-latency.tsv" || true
     fi
     # Liveness guard (B2 family): a dead feed invalidates the series.
     kill -0 "$FAKETOOL_PID" 2>/dev/null || { echo "!! faketool dead at t+${i}s" >&2; return 1; }

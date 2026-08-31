@@ -198,6 +198,8 @@ pipeline_start_faketool() {
 # ---------- ingestion JVM ----------
 # Canonical env block (same as loadtest-run.sh). Sets JVM_PID.
 pipeline_start_ingestion() {
+  # D6 right-size (2026-08-31): ingestion live-set measured 64-90MB over 17 runs;
+  # 512m heap + 512m direct = 8x headroom (was 2g/1g). Verified by bench run G6/G7 guards.
   LOG_DIR="$OUT/j1" READINESS_FILE_PATH="/tmp/ingestion.loadtest.ready" \
   ARROW_HFT_URL="ws://127.0.0.1:$FAKETOOL_PORT" ARROW_BRIDGE_BIN="$LIB_BRIDGE_DIR/arrow-bridge" \
   ARROW_FAKE_BROKER="1" TRANSPORT="proto" \
@@ -213,7 +215,7 @@ pipeline_start_ingestion() {
   OTEL_COLLECTOR_HOST="localhost:4319" \
   FLUSS_WRITER_MODE="generic" FLUSS_WRITERS="1" FLUSS_WRITER_BATCH_SIZE_BYTES="0" \
   java --add-opens=java.base/java.nio=ALL-UNNAMED \
-    -Xms2g -Xmx2g -XX:MaxDirectMemorySize=1g \
+    -Xms512m -Xmx512m -XX:MaxDirectMemorySize=512m \
     -Xlog:gc*,safepoint:file="$OUT/j1/gc.log:time,uptime,level,tags" \
     -Dlog.dir="$OUT/j1" \
     -cp "$LIB_ING_JAR" com.trading.ingestion.IngestionService > "$OUT/j1/java.out" 2>&1 &

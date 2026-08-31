@@ -98,6 +98,22 @@ while IFS= read -r line; do
 done < "$LIB"
 [ "$fail" -eq 0 ] && ok "G4 no comments/blanks inside continued commands"
 
+# ---- G11 (2026-08-31): JVM flags must be IDENTICAL in both harness
+# scripts. pipeline-lib.sh and loadtest-run.sh each carry a full java
+# invocation for the ingestion JVM (historical duplication). They were
+# patched in lockstep for the D6 right-size — this guard makes drift
+# impossible to miss: different heap/direct flags in the two scripts mean
+# different bench runs measure different JVMs.
+JVM_FLAGS_LIB=$(grep -oE -- '-Xms[0-9]+[mg] -Xmx[0-9]+[mg] -XX:MaxDirectMemorySize=[0-9]+[mg]' "$LIB" | sort -u)
+JVM_FLAGS_LOADTEST=$(grep -oE -- '-Xms[0-9]+[mg] -Xmx[0-9]+[mg] -XX:MaxDirectMemorySize=[0-9]+[mg]' "$SCRIPT_DIR/loadtest-run.sh" | sort -u)
+if [ -n "$JVM_FLAGS_LIB" ] && [ "$JVM_FLAGS_LIB" = "$JVM_FLAGS_LOADTEST" ]; then
+    ok "G11 JVM flags identical in pipeline-lib and loadtest-run ($JVM_FLAGS_LIB)"
+elif [ -z "$JVM_FLAGS_LIB" ]; then
+    bad "G11 could not find JVM flags in pipeline-lib.sh — pattern drifted?"
+else
+    bad "G11 JVM flags DRIFTED: pipeline-lib='$JVM_FLAGS_LIB' vs loadtest-run='$JVM_FLAGS_LOADTEST'"
+fi
+
 # ---- G9 (2026-08-31): the G3 native fix is in place and total —
 # (a) pipeline-lib must NOT pass ARROW_INSTRUMENT_TOKENS to the ingestion
 #     JVM (Java's startBridge now owns that env var in the child);

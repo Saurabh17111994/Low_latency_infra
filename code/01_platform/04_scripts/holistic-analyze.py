@@ -147,10 +147,15 @@ def collect_rows(table, cp, out_dir, run_ms=30000, with_offset=False):
     # old 'w' mode destroyed the original rows file (observed 2026-08-30:
     # runs 140907 and 173514 lost their evidence this way).
     rows_path = os.path.join(out_dir, f"latency-{table}.rows.txt")
-    if rows or not os.path.exists(rows_path):
+    # A ROW starts with '(' (Fluss Row toString). When Fluss is DOWN the
+    # reader prints connection errors to stdout — those lines are NOT rows,
+    # and counting them as rows let an offline re-analysis overwrite 300MB
+    # of preview evidence with 91 error lines (observed 2026-08-31).
+    real_rows = [ln for ln in rows if ln.startswith("(")]
+    if real_rows or not os.path.exists(rows_path):
         with open(rows_path, "w") as f:
             f.write("\n".join(rows) + "\n")
-    return rows
+    return real_rows
 
 def collect_rows_stream(table, cp, out_dir, run_ms=30000, mode="offset"):
     """Like collect_rows but streams stdout straight to the evidence file —
@@ -186,7 +191,19 @@ def collect_rows_stream(table, cp, out_dir, run_ms=30000, mode="offset"):
         )
     # Evidence preservation (same rule as collect_rows): never let an empty
     # re-read destroy a previously captured file.
-    if os.path.exists(rows_path) and os.path.getsize(rows_path) == 0:
+    # Same error-vs-row discipline as collect_rows: with Fluss down the
+    # streamed output is connection errors, not rows — treat a file with
+    # no '(' -prefixed lines as empty (protects evidence, 2026-08-31).
+    n_real = 0
+    try:
+        with open(rows_path) as f:
+            for ln in f:
+                if ln.startswith("(") or ln[0:1].isdigit():
+                    n_real += 1
+                    break
+    except OSError:
+        n_real = 0
+    if n_real == 0:
         return None
     return rows_path
 
@@ -204,6 +221,7 @@ def classify_status(candidate_id):
 
 
 def main():
+    failures = []  # collected by all guards; exit 1 if non-empty
     out_dir, cp = sys.argv[1], sys.argv[2]
     run_start = int(sys.argv[3]) * 1000 if len(sys.argv) > 3 else None
     run_end = int(sys.argv[4]) * 1000 if len(sys.argv) > 4 else None
@@ -305,12 +323,27 @@ def main():
     # no wall-clock latency is derivable here — per-operator wall-clock
     # latency comes from Flink latency metrics (see throughput.tsv). We
     # report per-status volumes and the tentative→settlement balance.
-    sig_rows = collect_rows("Signal_Candidates", cp, out_dir)
+    # G7_REUSE_RAW=1 (evidence replay) also covers the signal table: reuse
+    # the saved rows file instead of re-reading live Fluss (the table may
+    # have been purged, and re-reads cost 30s each). This is also the F4
+    # tamper-proof path: bug-inject the rows file, re-run, guard fires.
+    sig_reuse_path = os.path.join(out_dir, "latency-Signal_Candidates.rows.txt")
+    if (os.environ.get("G7_REUSE_RAW") == "1"
+            and os.path.exists(sig_reuse_path)):
+        with open(sig_reuse_path) as f:
+            sig_rows = [ln for ln in f.read().splitlines() if ln.strip()]
+    else:
+        sig_rows = collect_rows("Signal_Candidates", cp, out_dir)
     # DEDUPE: same LogScanner re-delivery (see preview note above).
     sig_rows = list(dict.fromkeys(sig_rows))
     status_counts = defaultdict(int)
     settle_by_status = defaultdict(int)
     candle_re = re.compile(r"candle:(\d{13}):(\d{13})")
+    # F4 pairing (2026-08-31): group rows by candidate_id prefix (status
+    # stripped) so a TENTATIVE can be matched to its CONFIRM/CANCEL
+    # partner. Orphan check runs after the loop — see below.
+    sig_groups = defaultdict(set)
+    sig_group_ts = {}
     for ln in sig_rows:
         parts = ln.strip("()").split(",")
         if len(parts) < 12:
@@ -323,6 +356,18 @@ def main():
             continue
         st = classify_status(parts[0])
         status_counts[st] += 1
+        # Settle rows come in TWO shapes (found via tamper proof 2026-08-31):
+        # suffixed "-CONFIRM"/"-CANCEL", AND the unsuffixed base id with
+        # validity_reason=VALID. Both are settlement partners — the pairing
+        # must count either, or deleting one shape hides a dropped decision.
+        m = re.match(r"(.*)-(TENTATIVE|CONFIRM|CANCEL)$", parts[0])
+        if m:
+            # in-run membership uses ANY row of the group inside the window
+            sig_groups[m.group(1)].add(m.group(2))
+            sig_group_ts[m.group(1)] = max(sig_group_ts.get(m.group(1), 0), eval_ts)
+        else:
+            sig_groups[parts[0]].add("BASE")
+            sig_group_ts[parts[0]] = max(sig_group_ts.get(parts[0], 0), eval_ts)
         if st in ("CONFIRM", "CANCEL"):
             settle_by_status[st] += 1
 
@@ -336,8 +381,71 @@ def main():
         print(f"- settlement balance: {settled}/{tent} tentatives settled "
               f"(confirm={conf} cancel={canc}) — unsettled tentatives belong to "
               f"windows still open at run end (expected)")
+    # F4 guard (2026-08-31): "expected" above was an assumption — now
+    # checked. A TENTATIVE whose window closed more than GRACE_MS before
+    # run end MUST have a CONFIRM/CANCEL partner; without one the signal
+    # path silently dropped a settlement (a trading decision vanished).
+    # Verified on the 2026-08-31-022833 evidence: 205 in-run TENTATIVE-only
+    # groups, ALL inside the last 15s window (open at run end) — 0 orphans.
+    F4_GRACE_MS = 30000
+    orphan_ts = [ts for pfx, sts in sig_groups.items()
+                 if sts == {"TENTATIVE"}
+                 for ts in [sig_group_ts[pfx]]
+                 if (run_end or ts) - ts > F4_GRACE_MS]
+    lonely_n = sum(1 for sts in sig_groups.values() if sts == {"TENTATIVE"})
+    print(f"- F4 orphan check: {len(orphan_ts)} orphaned TENTATIVE(s) beyond "
+          f"{F4_GRACE_MS // 1000}s grace ({lonely_n} in-run tentative-only "
+          f"groups, all others inside the open-window tail)")
+    if orphan_ts:
+        failures.append(
+            f"F4: {len(orphan_ts)} TENTATIVE signal(s) never settled — "
+            f"windows closed >{F4_GRACE_MS // 1000}s before run end with no "
+            f"CONFIRM/CANCEL partner (settlement path dropped decisions)")
     print("\n(Per-operator wall-clock latency: Flink latency histograms in "
           "main/latency-metrics.tsv; event-time row stamps cannot measure it.)")
+    # ---- Signal-path latency (2026-08-31) -------------------------------
+    # Flink latency tracking (metrics.latency.interval=2000, set at submit)
+    # emits source->operator wall-clock latency histograms per operator.
+    # Sampled by the harness since 2026-08-31 (tm-prom-latency.tsv) — this
+    # is the only wall-clock signal-path measurement that exists: the signal
+    # tables carry event-time stamps only, so the table rows themselves
+    # cannot answer "how late did the signal land".
+    try:
+        lat_series = defaultdict(list)   # (opname, quantile) -> [values]
+        with open(os.path.join(out_dir, "main", "tm-prom-latency.tsv")) as f:
+            for ln in f:
+                # "<epoch> flink_..._latency{...,task_name="op -> x",...,
+                #  quantile="0.99",} 123.0" — the operator name is the
+                # task_name LABEL (first path segment), not part of the
+                # metric name; quantile is a label too (not first).
+                parts = ln.split(" ", 1)
+                if len(parts) != 2:
+                    continue
+                mq = re.match(r'(flink_\S*latency)\{(.*)\}\s+([\d.]+)$',
+                              parts[1])
+                if not mq or mq.group(1).endswith("_count"):
+                    continue
+                labels = dict(re.findall(r'(\w+)="([^"]*)"', mq.group(2)))
+                task = labels.get("task_name", "")
+                qtl = labels.get("quantile")
+                if task and qtl:
+                    op = task.split(" -> ")[0][:44]
+                    lat_series[(op, float(qtl))].append(float(mq.group(3)))
+        if lat_series:
+            ops = sorted({op for op, _ in lat_series})
+            print("\n### Signal-path latency (Flink source->operator, wall-clock ms)")
+            print(f"{'operator':<28} {'p50':>8} {'p95':>8} {'p99':>8} {'n samples':>10}")
+            for op in ops:
+                def q(v):
+                    return (pct(lat_series.get((op, v), []), 100 * v)
+                            or 0)
+                n = max(len(lat_series[(op, qq)]) for qq in (0.5, 0.95, 0.99))
+                print(f"{op:<28} {q(0.5):>8.0f} {q(0.95):>8.0f} {q(0.99):>8.0f} {n:>10}")
+        else:
+            print("\n(signal-path latency: no tm-prom-latency.tsv samples — "
+                  "pre-2026-08-31 evidence dir)")
+    except OSError:
+        print("\n(signal-path latency: tm-prom-latency.tsv absent)")
 
     # ---- Burst attribution (2026-08-30): correlate latency spikes with
     # GC pauses (TM + ingestion JVM) and slow checkpoints ----
@@ -728,7 +836,38 @@ def main():
     # The tiering-off + preview-purge fixes are proven; these guards make a
     # regression FAIL the run (non-zero exit) instead of printing a verdict
     # nobody reads. Failures collected here, exit code set at the end.
-    failures = []
+
+    # ---- D6 guard (2026-08-31): ingestion JVM live-set leak alarm ----
+    # Baseline measured over 17 runs (2026-08-31): post-GC heap 64-90 MB
+    # (then at 2g heap; unchanged at 512m — live-set is driven by the
+    # working set, not the heap size). A code change that leaks shows an
+    # inflated live-set long before it OOMs — this turns the D6 one-off
+    # analysis into a standing per-run check. Bound = 200 MB (~2.2x
+    # baseline max): normal variance passes, a leak fails.
+    print("\n### D6 ingestion JVM live-set (gc.log)")
+    try:
+        live = []
+        with open(os.path.join(out_dir, "main", "j1", "gc.log")) as f:
+            for ln in f:
+                m = re.search(
+                    r"GC\(\d+\) Pause \w+[^\n]*? \d+M->(\d+)M\(\d+M\) [\d.]+ms", ln)
+                if m:
+                    live.append(int(m.group(1)))
+        if live:
+            live_tail = live[len(live) // 2:]  # second half: warm, post-startup
+            ls_max = max(live_tail)
+            print(f"- post-GC live-set: n={len(live)} max(all)={max(live)}MB "
+                  f"max(warm half)={ls_max}MB (guard bound 200MB)")
+            if ls_max > 200:
+                failures.append(
+                    f"D6: ingestion JVM post-GC live-set reached {ls_max}MB "
+                    f"(bound 200MB, baseline 64-90MB) - possible memory leak; "
+                    f"compare with prior runs before shipping")
+        else:
+            print("- gc.log present but no pause lines parsed (format drift?)")
+    except OSError:
+        print("- gc.log absent (D6 guard skipped - legacy evidence dir?)")
+
 
     # G6a: preview e2e p95 MUST stay under 1s (REQ-FC-002 target, broker→
     # feature table). Proven achievable post-fix: bursts (tiering copies)
@@ -916,6 +1055,15 @@ def main():
         dup_in_window = late_in_window = 0   # ingested before last counter sample
         dup_ing_max = 0
         LATE_LAG_MS = 20000                  # > watermark(500) + lateness(5000) + margin
+        # F8 (2026-08-31): per-token event-time ordering in LOG order. A
+        # backward jump beyond LATE_LAG_MS cannot be accepted by the candle
+        # window (watermark has passed it) — so every such jump must be one
+        # of the late-observed rows. The two are INDEPENDENT measurements
+        # (ingest-lag vs prev-event-time) of the same underlying ticks: a
+        # bridge that rewrote timestamps would lag small but jump big →
+        # mismatch → fire.
+        prev_ev = {}                          # token -> last event_time seen
+        f8_jumps = 0
         for ln in open(raw_path):
             # audit mode: "b:o\tfp\ttoken\tev\ting\tprice\tqty\tvalidity"
             # (sanitized projection — the full-row toString prints the
@@ -940,6 +1088,9 @@ def main():
                 validity = f[7]
             except (ValueError, IndexError):
                 continue
+            if token in prev_ev and prev_ev[token] - ev_ms > LATE_LAG_MS:
+                f8_jumps += 1
+            prev_ev[token] = max(prev_ev.get(token, ev_ms), ev_ms)
             if ing_ms - ev_ms > LATE_LAG_MS:
                 late_rows += 1
                 if ing_ms <= last_sample_ms:
@@ -963,6 +1114,14 @@ def main():
         print(f"- G7 raw recount: {len(seen_offsets)} logical rows, "
               f"{dup_extras} duplicate extras (repeated fingerprints), "
               f"{late_rows} late rows (event_time lag > {LATE_LAG_MS}ms)")
+        print(f"- F8 ordering: {f8_jumps} per-token backward jump(s) beyond "
+              f"{LATE_LAG_MS}ms in log order (must equal late rows)")
+        if f8_jumps != late_rows:
+            failures.append(
+                f"F8: {f8_jumps} backward event-time jump(s) beyond "
+                f"{LATE_LAG_MS}ms but {late_rows} late-observed rows — "
+                f"timestamps and lag disagree (rewritten event times? "
+                f"replayed frames?)")
 
         # final candles per (token, ws): tick_count (idx 10) + volume (idx 9)
         final_by_key = {}

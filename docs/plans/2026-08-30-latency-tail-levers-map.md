@@ -134,6 +134,8 @@ prime suspect per A4).
 | **EOD controller test (2026-08-30 22:13)** | ✅ 8/8 PASS (6c48efd) | 6 guards (fail-closed offload=none, lease fencing rc=5, clean-state no-ops, idempotency, reconcile stability, purge hygiene) + 120s smoke + 600s main cycle via mock executor. Encodes measured semantics: leases persist in eod_offload_state across process death (purge between subtests); 2nd run on VERIFIED day = no-op. Real MinIO/R2 offload still untested (needs sidecars + lake tiering session) |
 | **F2/F3/F5 data-quality audit (2026-08-31)** | ✅ **ALL EXACT (329560f)** | Live A/B injection: smoke gate 200/200 dups + 20/20 lates dropped exactly; full run 1,200 dups / 120 lates all in raw, counters exact within the sampling window (round 6 fired post-teardown — expected, now capped at 4 rounds). G7c parity: full raw recount (7.53M rows, audit-mode sanitized reader) vs 47,104 (token,window) final candles — **0 mismatches**; LATEST-mode startup skip tolerated by design. Guards proven against a bug-injected evidence copy: all 3 tamper classes fired, G7c named the exact damaged window. 4 harness bugs found: binary `payload_hash` column broke line parsing (~23% rows silently dropped — false data-loss alarm), stale LogFullRead.class ignored the new audit mode, counter-vs-sent comparison ignored the sampling window, post-teardown injection round |
 | **G3 fingerprint drift (2026-08-31)** | ✅ **NATIVE FIX + GATE** | Root cause of the long-observed `manifest_fingerprint mismatch` WARNs: NOT broker drift — the bench handed the bridge 1,024 tokens (env) while Java loaded the full 2,431-row CSV (manifest path). Two configs for one set = guaranteed false alarm on every bridge event. Native fix (no patchwork): Java's `startBridge` now writes the loaded manifest set into the child's `ARROW_INSTRUMENT_TOKENS` — the bridge's own env-override path consumes it, so both sides hash the identical set by construction. Harness passes only `INSTRUMENT_MANIFEST_PATH` (the 1,024-row slice). New G8 run-gate (both phases' java.out must show zero mismatch lines) + G9/G10 guard tests (wiring + tamper-proof). Live proof: zero mismatches both phases, G6/G7 all green, p95 722ms, counter exactness now perfect (sent=raw=counter 800/800/800, 80/80/80 — the 4-round cap eliminated the post-teardown round) |
+| **D6 applied + combined verify (2026-08-31)** | ✅ **512m JVM VERIFIED LIVE** | Right-sized ingestion JVM (-Xms512m -Xmx512m -XX:MaxDirectMemorySize=512m in pipeline-lib.sh + loadtest-run.sh; G11 guard pins both scripts identical). Verify run 20260831-100737: live-set max **62 MB** (8× headroom), e2e **p50=331 / p95=689ms**, all G6/G7/G8 guards PASS — no regression from the 4× heap cut. D6 leak-alarm guard (warm-half live-set >200 MB fails the run) added to the analyzer. 2GB RAM freed for the future 3,000-instrument scale test |
+| **Signal-path latency (2026-08-31)** | ✅ **FIRST MEASUREMENT** | Flink latency histograms (`metrics.latency.interval=2000` — enabled all along, never sampled) now captured per run (tm-prom-latency.tsv) and reported per operator by the analyzer. First profile: early_signal p50=139ms / p95=3.6s; signal_detection p50=136ms / p95=2.7s; sink writers p95 1.7–3.5s. Medians healthy; the tail shares the known checkpoint/GC causes (§4.8). Two guards born: F4 (orphaned-TENTATIVE after 30s grace — settlement must never silently drop) and F8 (backward event-time jumps must equal late rows — exact reconciliation 80=80) |
 
 **Status legend:** ✅ done/verified · 🔶 partial/in-flight · ❌ not started ·
 (deprioritized marks explain why)
@@ -198,7 +200,7 @@ system scales on the same hardware before needing more machines.
 | D3 | **Operator object-churn audit** | Flink metrics: `numRecordsOutPerSecond` already tracked; add allocation profiling (JFR on TM for 60 s during a run) if GC frequency looks allocation-driven | Lower GC frequency = fewer pauses |
 | D4 | **RocksDB state tuning** | Default block cache/write-buffer sizes on a 2.2 GB heap TM; check `state.backend.rocksdb.memory` config vs actual state size (candles state = 1024 tokens × open window) | Less memory pressure, fewer compactions |
 | D5 | **Preview row volume** | ✅ **PARTIALLY FIXED 2026-08-30:** the real problem was Fluss's CALENDAR-DAY TTL never expiring same-day data (11.6 M keys accumulated). Harness now purges (drop+recreate) the preview table at every run start (`pipeline_purge_preview_table`). Remaining: decide if a production TTL policy (e.g. hourly buckets) is needed once preview runs continuously | Bounds storage + read amplification |
-| D6 | **Ingestion JVM footprint** | 2 g heap + 1 g direct, but idle-processing load is light; measure actual live-set during a run (GC logs now show it) — right-size before production replicas | 🔶 Partial: GC logging wired (gc.log in evidence every run); live-set analysis not yet done — one offline pass over captured gc.logs, no new run needed. |
+| D6 | **Ingestion JVM footprint** | ✅ **DONE + APPLIED 2026-08-31:** offline analysis (17 runs) put the ingestion live-set at **64–90 MB post-GC** on a 2,048 MB heap — 32× oversized. Right-sized to **512 MB heap + 512 MB direct** in `pipeline-lib.sh` + `loadtest-run.sh` (G11 guard keeps both scripts' flags identical). **Verified live (run 20260831-100737, 512m): live-set max 62 MB, e2e p95 689 ms, all G6/G7 guards PASS — no regression.** The D6 guard in the analyzer now fails any run whose warm-half live-set exceeds 200 MB (leak alarm). TM JVM: live-set ~1,010–1,115 MB on 2,270 MB heap (56% — healthy) — left as-is. | Done; watch the D6 guard on future runs |
 | D7 | **Fluss writer batching** (relates to A3) | `FLUSS_WRITER_BATCH_SIZE_BYTES=0` = every tick is its own append (lowest latency, highest RPC overhead). At production rates this trade may flip — measure RPC count/s | Throughput headroom at modest latency cost |
 
 ### Group E — throughput scaling levers (high-throughput goal)
@@ -298,6 +300,31 @@ not new systems.
   matter when the measured load demands them. The 2.5× headroom means
   neither is urgent at test rates.
 
+### 4.8 Signal-path latency (first measurement, 2026-08-31)
+
+The signal tables carry event-time stamps only (no wall clock), so the
+only honest wall-clock measurement is Flink's built-in source→operator
+latency tracking — enabled all along (`metrics.latency.interval=2000`) but
+never sampled until 2026-08-31 (`tm-prom-latency.tsv`, 15 s cadence).
+First profile (run 20260831-100737, 512 m ingestion JVM, 10 Hz × 1024):
+
+| operator | p50 | p95 | p99 |
+|---|---|---|---|
+| early_signal | 139 ms | 3.6 s | 5.7 s |
+| signal_detection | 136 ms | 2.7 s | 3.0 s |
+| early_signal_candidates_sink Writer | 185 ms | 3.5 s | 5.7 s |
+| candle_preview_15s | 90 ms | 2.7 s | 4.0 s |
+
+Reading: medians are healthy (~140 ms), the p95/p99 tail is dominated by
+the same tail that hits e2e (checkpoints + GC + writer batching). Note the
+numbers are source→operator, so the candle-path p95 (~2.7 s) includes
+window-close wait that is by design (15 s windows); the interesting
+tail-work is already covered by D2–D5. Two new guards came out of this
+work: F4 (a TENTATIVE whose window closed >30 s before run end MUST have
+a CONFIRM/CANCEL partner — 0 orphans across all runs) and F8 (per-token
+backward event-time jumps in log order must equal the late-row count —
+exact reconciliation: 80 = 80).
+
 ## 5. Where the evidence lives
 
 - `logs/tracker-14/holistic-measure-20260830-014108` — 5 s watermark baseline (KEEP)
@@ -375,6 +402,24 @@ not new systems.
     fix is ownership: Java loads the manifest and hands the exact set to
     the child in `startBridge`; the harness configures ONE input. Any
     mismatch line in java.out is now real drift and fails the run (G8).
+21. **A Fluss "row" starts with `(` — anything else on reader stdout is an
+    error line** (2026-08-31) — running the analyzer offline (stack down)
+    makes LogFullRead print connection errors to stdout; counting those as
+    rows let a re-analysis overwrite 300 MB of preview evidence with 91
+    error lines. Both readers now keep only `(`-prefixed lines before
+    deciding whether to overwrite the evidence file.
+22. **Flink latency histograms live in labels, not metric names**
+    (2026-08-31) — `flink_..._latency{...task_name="op -> x",...,
+    quantile="0.5",}`: the operator name is the `task_name` label's first
+    path segment and `quantile` is a label (not the first one). The job
+    already ran with `metrics.latency.interval=2000` since the beginning —
+    the data existed all along, nobody sampled it.
+23. **Power loss tears Fluss log segments** (2026-08-31) — a reboot
+    mid-write left a truncated record batch (EOF: expected 48 bytes, got
+    37) and the tablet server crash-looped on replay. Recovery for
+    disposable dev data: wipe the fluss data volumes, recreate the
+    `default` database, re-run the ddl-apply contract. A clean shutdown
+    avoids it entirely.
 
 ### 6.1 Observed-but-unfixed warnings (candidates, not confirmed problems)
 
