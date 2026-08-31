@@ -26,7 +26,7 @@ import org.junit.jupiter.api.Test;
 @DisplayName("raw_table_1 DDL header Schema version pin")
 class RawTable1DdlSchemaVersionTest {
 
-    /** Matches the header line {@code -- Schema version: 2} (see 02_raw_table_1.sql:11). */
+    /** Matches the header line {@code -- Schema version: N} (see 02_raw_table_1.sql). */
     private static final Pattern SCHEMA_VERSION_LINE =
             Pattern.compile("(?m)^--\\s*Schema version:\\s*(\\S+)\\s*$");
 
@@ -46,11 +46,11 @@ class RawTable1DdlSchemaVersionTest {
     }
 
     @Test
-    @DisplayName("parser reads a v3 header (mismatch would be caught, not silently passed)")
+    @DisplayName("parser reads a future version header (mismatch would be caught, not silently passed)")
     void parserDetectsVersionBump() {
-        String v3Header = "-- raw_table_1\n-- Schema version: 3\n--\n";
-        assertThat(parseSchemaVersion(v3Header)).isEqualTo("3");
-        assertThat(parseSchemaVersion(v3Header))
+        String futureHeader = "-- raw_table_1\n-- Schema version: 4\n--\n";
+        assertThat(parseSchemaVersion(futureHeader)).isEqualTo("4");
+        assertThat(parseSchemaVersion(futureHeader))
                 .isNotEqualTo(PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION);
     }
 

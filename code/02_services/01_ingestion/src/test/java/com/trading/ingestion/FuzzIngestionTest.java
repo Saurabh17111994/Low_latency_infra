@@ -109,6 +109,8 @@ class FuzzIngestionTest {
             }
         }
 
+        awaitPipelineDrain(converter, quarantine, totalLines);
+
         long appends = converter.appendCalls.get();
         long quarantineWrites = quarantine.writes.get();
         assertEquals(totalLines, frameCount(service), "every fed event must be processed");
@@ -148,6 +150,8 @@ class FuzzIngestionTest {
             expectedTokens.add(token);
             service.processTickEvent(validProtoTick(mode, token, ltp, tsMs), "hft-0", 1L);
         }
+
+        awaitPipelineDrain(converter, quarantine, 200);
 
         assertEquals(200, converter.appendCalls.get(),
                 "every guaranteed-valid tick must append — quarantine writes=" + quarantine.writes.get());
@@ -441,6 +445,31 @@ class FuzzIngestionTest {
         Field f = IngestionService.class.getDeclaredField("frameCount");
         f.setAccessible(true);
         return ((AtomicLong) f.get(service)).get();
+    }
+
+    /**
+     * The write path is async: processTickEvent queues to BoundedQueue and a
+     * WriterWorker thread performs the converter append, so appendCalls can
+     * legitimately lag the feed loop under full-suite JVM load (observed
+     * 2026-08-31: 197/200 immediately after feeding, 200/200 moments later —
+     * a test race, not a silent drop). Poll bounded: the ledger must settle
+     * at exactly eventsFed, else the "no silent drop" property genuinely
+     * failed and the failure message carries the counts.
+     */
+    private static void awaitPipelineDrain(CountingConverter converter,
+                                           CountingQuarantine quarantine,
+                                           long eventsFed) throws InterruptedException {
+        long deadline = System.nanoTime() + 10_000_000_000L; // 10s bound
+        while (converter.appendCalls.get() + quarantine.writes.get() < eventsFed) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError(
+                        "pipeline did not settle after " + eventsFed + " events (appends="
+                                + converter.appendCalls.get() + ", quarantines="
+                                + quarantine.writes.get()
+                                + ") — either a genuine silent drop or a stalled writer worker");
+            }
+            Thread.sleep(10);
+        }
     }
 
     private static long errorCount(IngestionService service) throws Exception {

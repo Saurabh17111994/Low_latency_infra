@@ -98,10 +98,11 @@ class SchemaAgreementTest {
     // ---- Phase 6 guards (G5): DDLs tell the truth ----------------
 
     @Test
-    @DisplayName("raw_table_1 v2 declares exactly the 20 written columns (R-054/R-231)")
-    void rawTableV2ColumnCount() throws IOException {
+    @DisplayName("raw_table_1 v3 declares exactly the 21 written columns (R-054/R-231; v3 event_day first, CHG-117)")
+    void rawTableV3ColumnCount() throws IOException {
         List<String> cols = parseColumns(readDdl("02_raw_table_1.sql"));
         String[] want = {
+                "event_day",
                 "event_fingerprint", "fingerprint_version", "connection_id",
                 "connection_epoch", "instrument_token", "exchange", "symbol",
                 "event_time", "ingest_ts", "ack_ts", "tick_type",
@@ -109,7 +110,7 @@ class SchemaAgreementTest {
                 "decoder_version", "protocol_version", "validity_state",
                 "validity_reason", "schema_version"};
         assertEquals(want.length, cols.size(),
-                "raw_table_1 must have " + want.length + " columns (R-054/R-231 removed the never-populated quote and option fields); got: " + cols);
+                "raw_table_1 must have " + want.length + " columns (R-054/R-231 removed the never-populated quote and option fields; v3 added event_day first — CHG-117); got: " + cols);
         for (int i = 0; i < want.length; i++) {
             assertEquals(want[i], cols.get(i), "column " + i);
         }
