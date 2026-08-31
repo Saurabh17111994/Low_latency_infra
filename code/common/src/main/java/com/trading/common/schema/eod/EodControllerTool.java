@@ -229,9 +229,7 @@ public final class EodControllerTool {
                         + opts.tables.size() + " DAYS=0");
                 return 5;
             }
-            EodOffloadExecutor executor = opts.offloadMode.equalsIgnoreCase("mock")
-                    ? new MockEodOffloadExecutor(true, true)
-                    : NotConfiguredEodOffloadExecutor.INSTANCE;
+            EodOffloadExecutor executor = buildOffloadExecutor(opts.offloadMode);
             List<EodController.RunOutcome> outcomes = EodController.runOnce(store, executor,
                     runDate, opts.tables, opts.schemaVersion, now);
             return reportRunOutcomes(outcomes, "run");
@@ -314,9 +312,7 @@ public final class EodControllerTool {
                         + opts.tables.size() + " DAYS=0");
                 return 5;
             }
-            EodOffloadExecutor executor = opts.offloadMode.equalsIgnoreCase("mock")
-                    ? new MockEodOffloadExecutor(true, true)
-                    : NotConfiguredEodOffloadExecutor.INSTANCE;
+            EodOffloadExecutor executor = buildOffloadExecutor(opts.offloadMode);
             List<EodController.RunOutcome> outcomes = EodController.reconcile(
                     store, executor, opts.tables, now);
             return reportRunOutcomes(outcomes, "reconcile");
@@ -606,7 +602,7 @@ public final class EodControllerTool {
                   --zone <zone>        (env EOD_ZONE, default Asia/Kolkata)
                   --run-date <date>    (run: trading date, default today in --zone)
                   --schema-version <v> (env EOD_SCHEMA_VERSION, default 1)
-                  --offload none|mock  (env EOD_OFFLOAD, default none — fail-closed)
+                  --offload none|mock|lake  (env EOD_OFFLOAD, default none — fail-closed)
                   --table <name>       (reset: single table scope)
                   --apply              (extend: perform the shadow rewrite drill)
                   --dry-run            (run/extend: print, don't write)
@@ -617,6 +613,26 @@ public final class EodControllerTool {
     }
 
     // ── options ───────────────────────────────────────────────────────────
+
+    /** Executor selection (2026-08-31): none=fail-closed, mock=drills,
+     *  lake=R2 iceberg evidence via r2-list.sh (tiering job does the copy). */
+    private static EodOffloadExecutor buildOffloadExecutor(String mode) {
+        switch (mode.toLowerCase()) {
+            case "mock":
+                return new MockEodOffloadExecutor(true, true);
+            case "lake":
+                String listSh = System.getenv().getOrDefault("R2_LIST_SCRIPT", "");
+                if (listSh.isBlank()) {
+                    throw new IllegalArgumentException(
+                            "EOD_OFFLOAD=lake requires R2_LIST_SCRIPT (absolute path to r2-list.sh)");
+                }
+                return new R2LakeTieringEodOffloadExecutor(
+                        java.nio.file.Path.of(listSh),
+                        System.getenv().getOrDefault("R2_LAKE_PREFIX", "lake"));
+            default:
+                return NotConfiguredEodOffloadExecutor.INSTANCE;
+        }
+    }
 
     record Options(String subcommand, String bootstrap, String database, String stateTable,
                    List<String> tables, Duration ttlDefault, Duration safetyFloor,
@@ -677,8 +693,9 @@ public final class EodControllerTool {
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
             }
-            if (!offloadMode.equalsIgnoreCase("none") && !offloadMode.equalsIgnoreCase("mock")) {
-                throw new IllegalArgumentException("--offload must be none or mock, got "
+            if (!offloadMode.equalsIgnoreCase("none") && !offloadMode.equalsIgnoreCase("mock")
+                    && !offloadMode.equalsIgnoreCase("lake")) {
+                throw new IllegalArgumentException("--offload must be none, mock or lake, got "
                         + offloadMode);
             }
             if (runDate != null && !runDate.matches("\\d{4}-\\d{2}-\\d{2}")) {
