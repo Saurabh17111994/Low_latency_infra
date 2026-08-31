@@ -87,6 +87,7 @@ Operations records UTC timestamps, workload, software/configuration versions, ga
 - Runbooks: `./01-runbooks.md`
 - Policy-controlled audit store (R2 bucket locks): `./06-audit-store.md`
 - R2 lake archive tiering (raw_table_1 daily partitions, tiering job, lake guard, per-day restore): `./07-lake-archive-ops.md`
+- G6 alert routing (O2 → dev-webhook → durable alert-consumer, selftest guard): `./03-alert-routing.md`
 - Observability, dashboards, alerts, and thresholds: `../08_implementation/10-observability.md`
 - DR: `./04-dr-plan.md`
 - Maintenance: `./05-maintenance.md`

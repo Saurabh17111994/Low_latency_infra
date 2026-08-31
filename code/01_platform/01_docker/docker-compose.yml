@@ -196,6 +196,8 @@ volumes:
   infra-logs:
   # P3.2 R2 lake dev — S3-compatible MinIO for E2E lake tiering (http://minio:9000)
   minio-data:
+  # G6 alert routing — durable O2 alert delivery history (alert-consumer).
+  alert-store:
 
 services:
   # ---- ZooKeeper: metadata store for Fluss -----------------------------
@@ -884,21 +886,26 @@ services:
       ZO_MEMORY_ALERT_THRESHOLD: ${ZO_MEMORY_ALERT_THRESHOLD:-14g}
     volumes: [openobserve-data:/data]
 
-  # Dev-only alert webhook receiver. Shares OpenObserve's network namespace so
-  # the alert destination URL http://localhost:9999/noop resolves inside O2
+  # G6 alert routing — persistent single-webhook consumer (successor of the
+  # CHG-093 stdout receiver). Shares OpenObserve's network namespace so the
+  # alert destination URL http://localhost:9999/noop resolves inside O2
   # (localhost would otherwise mean the O2 container itself, and O2 v0.91.5's
   # SSRF DNS resolver blocks every private-ranged target — 10/8, 172.16/12,
   # 192.168/16 — even with ZO_SSRF_ALLOW_LOOPBACK=true, which only exempts
-  # 127/8). Logs each delivery; replace with the real alert consumer when
-  # routing is approved.
-  webhook-receiver:
+  # 127/8). Deliveries are appended to alert-store:/data/alerts/alerts.jsonl
+  # (durable across restarts) and queryable via GET /alerts, /stats, /healthz
+  # (only from inside the netns: docker exec + python urllib — see
+  # 04_scripts/alert-routing-selftest.sh). Production: point the O2
+  # destination at a real pager; the JSONL record format is the contract.
+  alert-consumer:
     restart: unless-stopped
     image: python:3.11-slim
     network_mode: "service:openobserve"
     depends_on: [openobserve]
     volumes:
-      - ./webhook-receiver.py:/app/webhook-receiver.py:ro
-    command: ["python3", "/app/webhook-receiver.py"]
+      - ./alert-consumer.py:/app/alert-consumer.py:ro
+      - alert-store:/data/alerts
+    command: ["python3", "/app/alert-consumer.py"]
 
   # ---- MinIO: S3-compatible lake for Fluss Iceberg tiering (dev) ----------
   minio:

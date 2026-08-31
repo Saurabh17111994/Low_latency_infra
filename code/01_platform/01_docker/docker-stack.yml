@@ -123,6 +123,8 @@ volumes:
   fluss-logs:
   openobserve-data:
   ingestion-logs:
+  # G6 alert routing — durable O2 alert delivery history (alert-consumer).
+  alert-store:
 
 # ---- Configs: files mounted into service containers ------------------------
 # docker-stack.yml ships the collector config as a Swarm config (the collector
@@ -131,6 +133,8 @@ volumes:
 configs:
   otel-collector-config:
     file: ./otel-collector-config.swarm.yaml
+  alert-consumer-src:
+    file: ./alert-consumer.py
 
 services:
   # ---- ZooKeeper: 3-member ensemble (quorum 2-of-3), one member per VM ------
@@ -712,11 +716,27 @@ services:
     volumes:
       - openobserve-data:/data
 
-  webhook-receiver:
+  alert-consumer:
+    # G6 alert routing — persistent single-webhook consumer (dev twin:
+    # docker-compose.yml alert-consumer; CHG-093 stdout receiver retired).
     # x-healthcheck: none (stateless ingress; port is set in-app, restart policy covers
     # liveness; its correctness is tested by webhook dispatch unit tests).
+    # NOTE (fixed 2026-08-31): the predecessor service ran
+    # /app/webhook-receiver.py with NO mount of that file — it would have
+    # crash-looped on this stack; the script now ships as a Swarm config.
     image: python@sha256:9c900dea9e8fb7e16277c179b555cc72d29a352dbc33cff48ad5a0412fd5bfc7
     networks: [trading-net]
+    configs:
+      - source: alert-consumer-src
+        target: /app/alert-consumer.py
+    volumes:
+      - alert-store:/data/alerts
+    environment:
+      # Swarm: O2 and the consumer are separate netns — the destination URL
+      # must be http://alert-consumer:9999/noop (service DNS), NOT localhost,
+      # and the consumer must bind the overlay interface, not loopback.
+      ALERT_CONSUMER_PORT: "9999"
+      ALERT_BIND: "0.0.0.0"
     deploy:
       replicas: 1
       placement:
@@ -724,4 +744,4 @@ services:
       restart_policy: {condition: any}
       resources:
         limits: {cpus: "1", memory: 512M}
-    command: ["python3", "/app/webhook-receiver.py"]
+    command: ["python3", "/app/alert-consumer.py"]

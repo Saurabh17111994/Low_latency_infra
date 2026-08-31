@@ -10,7 +10,7 @@
 #     (SIGNAL includes P8.3 15 + SIGNAL-crit-schema 1; INFRA 9: host CPU 80/90, JVM heap 85, GC 500ms,
 #     disk 20%, disk IO 20ms, net 80%, O2 mem 14GB, collector export failed)
 #   - one dev webhook destination ("dev-webhook" -> localhost:9999 in O2's
-#     netns, served by the compose webhook-receiver; replace with the real
+#     netns, served by the compose alert-consumer; replace with the real
 #     delivery endpoint when alert routing is approved)
 #
 # Naming contract (user-approved Option A, 2026-08-08): one org, folders per
@@ -879,6 +879,24 @@ ALERTS = [
         period=2,
         desc="[Warning/ops] Event-time lag >= 600 s (10 min): source data stalled or replay far behind; recovery = live feed resumes / replay drains",
     ),
+    # G6/G1 (levers map 2026-08-30): volume-drop monitor — the source-stalled
+    # rule only fires at exactly 0 records/s; a partial feed degradation
+    # (broker throttling, partial subscription) kept that rule silent.
+    # Absolute floor at 50% of the design rate (10,240/s): sustained 5 min
+    # below ~5k/s while the job runs. Same quiesced-feed caveat as
+    # SIGNAL-error-source-stalled (fires by design when the feed is stopped).
+    # The lever-map ideal (relative >50% drop vs rolling median) needs a
+    # recording rule O2 v0.91.5 lacks; revisit on upgrade.
+    dict(
+        name="SIGNAL-warn-source-volume-drop",
+        stream="flink_taskmanager_job_task_numrecordsinpersecond",
+        conditions=[
+            ("task_name", "=", "Source:_raw_table_1____raw_validation"),
+            ("value", "<", 5000),
+        ],
+        period=5,
+        desc="[Warning/compute] Source consuming < 5,000 rec/s (50% of design rate) for 5 min while the job runs: partial feed degradation (broker throttle / partial subscription); recovery = rate recovers (quiesced dev feeds false-fire by design)",
+    ),
     # --- 2026-08-22 single-pane: infra/JVM/host infra alerts (10-observability.md scale-up thresholds) ---
     dict(
         name="INFRA-warn-host-cpu-80",
@@ -1208,7 +1226,7 @@ def provision_destination():
         return
     body = {
         "name": "dev-webhook",
-        # localhost = O2's own netns: the compose webhook-receiver service
+        # localhost = O2's own netns: the compose alert-consumer service
         # (network_mode: service:openobserve) listens on 127.0.0.1:9999 and
         # ZO_SSRF_ALLOW_LOOPBACK=true lets the guard pass it (dev only).
         # O2 v0.91.5's SSRF DNS resolver blocks ALL private-ranged targets

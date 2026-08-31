@@ -245,6 +245,15 @@ stack-config:
 seed-dashboards:
 	@python3 code/01_platform/04_scripts/seed_dashboards.py $(ARGS)
 
+# G6 alert routing (2026-08-31): end-to-end proof of O2 alert rule ->
+# dev-webhook destination -> alert-consumer JSONL persistence. Creates a
+# temporary always-firing probe alert, waits for the durable record, asserts
+# classification, deletes the probe. Also the negative proof: malformed
+# delivery -> 400, consumer survives. O2_PASSWORD must be in the environment.
+# Example: O2_PASSWORD=$(grep ^O2_PASSWORD= code/01_platform/01_docker/secrets.env | cut -d= -f2) make alert-routing-test
+alert-routing-test:
+	@python3 code/01_platform/04_scripts/alert-routing-selftest.py $(ARGS)
+
 # G5 Ops T12 (streaming-3000 hardening): rolling update of the SignalJob that
 # keeps the fingerprint-dedup state. Triggers a savepoint, stops the job,
 # copies the new compute jar into the flink-jobmanager container and submits

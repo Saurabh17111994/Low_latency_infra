@@ -1,6 +1,6 @@
 # System Quality Lever Map — Latency Tail Investigation and Beyond
 
-> **Date:** 2026-08-30
+> **Date:** 2026-08-30 (levers refreshed 2026-08-31 PM post-lake-migration)
 > **Status:** Target MET (p95 = 740 ms) — investigation closed 2026-08-30;
 > this map now tracks follow-up levers only
 > **Owner:** measurement→attribute→fix loop (tracker-14 evidence chain)
@@ -365,11 +365,11 @@ If production rate grows (more instruments, higher Hz, more tables):
 
 | # | Lever | Trigger condition |
 |---|---|---|
-| E1 | **Source parallelism** (currently 8; matches raw_table_1 buckets) | Source busy-time consistently >60% |
+| E1 | **Source parallelism** (currently 8; raw_table_1 v3 now has **16 buckets** — CHG-117 recreate — so headroom to raise before E5) | Source busy-time consistently >60% |
 | E2 | **Operator parallelism beyond 1** (candles, preview, signal currently parallelism 1) | When a single operator's busy-time saturates; requires key-by already in place (it is) |
 | E3 | **Multiple TMs / slots** (1 TM × 10 slots now; 152 tasks already run on it) | CPU throttling observed (A5) or slot exhaustion |
 | E4 | **Network buffers** (`taskmanager.memory.network.*` currently 128 MB) | Backpressure originating at network exchange, not compute (check backpressure metrics per vertex) |
-| E5 | **Fluss table bucket count** (raw_table_1 buckets = 8, fixing max source parallelism) | When E1 is capped at 8 and still saturated — needs table recreate, plan carefully |
+| E5 | **Fluss table bucket count** (raw_table_1 v3 = **16 buckets** since the 2026-08-31 recreate, CHG-117 — max source parallelism cap is now 16, not 8) | When E1 is raised to 16 and still saturated — needs another drop/recreate via `fluss-repair/RawTableAdmin.java` (archive the lake prefix first: see `06_operations/07-lake-archive-ops.md`) |
 
 ### Group F — data quality levers (is the data right?)
 
@@ -382,11 +382,11 @@ than a right one that arrives in 2 s.
 | F1 | **Zero-loss verification** (tick in broker → tick in raw table) | ✅ Strong: from-earliest LOG reads + source throughput vs input rate already cross-checked in every measurement run | Automate as a standing assertion on production feed (not just test harness) |
 | F2 | **Dedup correctness** (dedup operator drops only true duplicates) | ✅ **DONE 2026-08-31 (commit 329560f):** faketool injects verbatim-resend duplicates (`-inject-dups`); smoke gate asserts live counter delta == injected (200/200); full audit asserts counter == dups ingested inside the counter sampling window (1000/1000) AND raw-table fingerprint-extras == sent (1200/1200) | Standing guard in harness (G7a, `holistic-analyze.py`) |
 | F3 | **Late-tick accounting** (ticks dropped beyond watermark wait) | ✅ **DONE 2026-08-31 (commit 329560f):** `CandleLateDrop` counter (`compute.candles.late.dropped`) existed in code; now injected-audited — smoke gate 20/20 live; full audit counter 100/100 in sampling window, 120/120 in raw | Standing guard in harness (G7b) |
-| F4 | **Signal settlement correctness** (TENTATIVE→CONFIRM/CANCEL) | ✅ Measured per run (settlement balance 8100/8049 in latest run, remainder = open windows, expected) | Assert no TENTATIVE is orphaned after grace period |
+| F4 | **Signal settlement correctness** (TENTATIVE→CONFIRM/CANCEL) | ✅ **DONE 2026-08-31 (§4.8 F4 guard):** a TENTATIVE whose window closed >30 s before run end MUST have a CONFIRM/CANCEL partner — 0 orphans across all runs; harness asserts it every run | Production-feed equivalent still to wire (with G6) |
 | F5 | **Preview↔final candle parity** | ✅ **DONE 2026-08-31 (commit 329560f), stronger than planned:** instead of preview-vs-final (preview trigger timing differs by design), the audit does a FULL RAW RECOUNT — every final candle's tick_count+volume vs a from-earliest raw-table recount per (token, 15s window): 47,104 windows, 0 mismatches. Proven against a bug-injected evidence copy (guards fired on all 3 tamper classes) | Standing guard in harness (G7c) |
 | F6 | **Tick sanity/validation** (bad prices, zero volume, crossed markets) | ✅ **DONE 2026-08-31:** the operator already exported `compute.invalid.rows` + 8 per-reason `byReason` counters since inception — never sampled (gotcha-#22 pattern, again). Harness now captures them (`tm-prom-invalid.tsv`); the analyzer reports in-window deltas and FAILS the run on any non-zero rejection (clean bench feed ⇒ rejections = validation-rule regression or corrupt feed). G13 wiring guards (32/32). Tamper-proven: fabricated rising counters → "F6: 45 raw rows rejected... by-reason={'validity-state': 42}" fires, rc=1; zero-delta passes | Standing guard per run (F6, `holistic-analyze.py`) |
 | F7 | **Schema contract enforcement** | ✅ `TableContractValidator` fails closed at job start (schema v2, 15 cols) | Broker-side schema drift is not covered — manifest fingerprint is the natural gate (see G3) |
-| F8 | **Clock/ordering sanity** (event-time monotonicity per instrument) | `ARROW_MAX_FUTURE_EVENT_SKEW_MS=2000` guards future skew; backward disorder handled by watermark | A periodic assertion that per-token event time never jumps backward beyond the watermark budget |
+| F8 | **Clock/ordering sanity** (event-time monotonicity per instrument) | ✅ **HARNESS GUARD DONE 2026-08-31 (§4.8 F8):** per-token backward event-time jumps in log order must equal the late-row count — exact reconciliation (80 = 80) every run. `ARROW_MAX_FUTURE_EVENT_SKEW_MS=2000` guards future skew | Continuous production assertion still open (with G6) |
 
 ### Group G — data observability levers (can we SEE the data's health?)
 
@@ -397,13 +397,13 @@ alerts, not by a downstream trading decision going wrong.
 
 | # | Lever | Current state | What's missing |
 |---|---|---|---|
-| G1 | **Volume monitoring** (events/s per table, per instrument) | Measured in test harness only | Continuous production monitor + alert on rate drop (e.g. >50% below rolling median = broker feed problem) |
+| G1 | **Volume monitoring** (events/s per table, per instrument) | 🔶 **First rule 2026-08-31 (CHG-118):** `SIGNAL-warn-source-volume-drop` fires when the source runs < 5,000 rec/s (50% of design) for 5 min — covers the partial-degradation gap that source-stalled (0 rec/s only) missed. Routed to the G6 consumer | Relative >50% drop vs rolling median (needs an O2 recording rule — v0.91.5 lacks it, revisit on upgrade); per-instrument granularity; per-table rules beyond raw_table_1 |
 | G2 | **Freshness monitoring** (age of newest row per table) | Freshness measured per run (p50=841ms staleness at run end) | Continuous freshness SLO with alert (e.g. alert if newest preview > 5 s old) |
 | G3 | **Schema/broker drift detection** | ✅ **DONE 2026-08-31 (native fix + G8 gate):** root cause was config skew — bridge env carried a 1,024-token slice while Java loaded the full 2,431-row CSV, so every bridge event tripped the cross-check. Native fix: `startBridge` hands the Go child EXACTLY Java's loaded manifest set via `ARROW_INSTRUMENT_TOKENS` (child-env handoff, one source of truth — the manifest slice). Bench scripts no longer pass a second token config. New G8 gate fails any run on a mismatch line in java.out (both phases); G9/G10 guard tests prove the wiring + gate fires on tampered logs. Live proof run: zero mismatches, G6/G7 all pass, p95 722ms | Escalating to fail-closed halt in production is now safe (no false alarms) — wire when production monitors land (G6) |
 | G4 | **Distribution drift** (price/volume ranges per instrument) | Nothing — candles computed but never profiled | Nightly job: per-instrument min/max/mean vs trailing baseline; flag breakouts as possible bad ticks |
-| G5 | **Table-level health** (row counts, partition/bucket balance) | Ad-hoc via LOG reads | Scheduled check: expected-rows vs actual-rows per window (ties into F1) |
-| G6 | **Alert routing** (who gets told, how fast) | Nothing production-facing | Even a single webhook/email on F1/F3/G1/G2/G3 violations is enough for now |
-| G7 | **Runbook per alert** (what to DO when it fires) | Partial (docs/06_operations) | One paragraph per observable failure mode: feed loss, staleness, drift, orphaned signals |
+| G5 | **Table-level health** (row counts, partition/bucket balance) | **Lake side covered 2026-08-31:** `lake-guard.sh` (cron-able, negative-test-proven) checks yesterday's day-folder objects + iceberg manifests daily — see `06_operations/07-lake-archive-ops.md`. Fluss-side still ad-hoc via LOG reads | Scheduled expected-rows vs actual-rows per window on the live tables (ties into F1) |
+| G6 | **Alert routing** (who gets told, how fast) | ✅ **DONE 2026-08-31 (dev form, CHG-118):** all 47 O2 alert rules route to one webhook (`dev-webhook`) whose consumer now persists every delivery durably (JSONL on the alert-store volume, classified crit/error/warn × ing/signal/infra, queryable via `/alerts`/`/stats`) — the CHG-093 stdout receiver is retired. Mechanical guard: `make alert-routing-test` (end-to-end probe + malformed-delivery negative proof). Production = repoint the destination at a real pager; record format is the contract (`06_operations/03-alert-routing.md`) | Production pager destination (when the 4-VM stack lands); F1/G2 production monitors still to wire as rules |
+| G7 | **Runbook per alert** (what to DO when it fires) | Partial (docs/06_operations); the lake/tiering failure modes got a full runbook + known-failure-mode ledger 2026-08-31 (`06_operations/07-lake-archive-ops.md`, M-1…M-18) | One paragraph each for feed loss, staleness, drift, orphaned signals (candle-path alerts) |
 
 **Design principle for F/G:** prefer levers that reuse evidence already
 being produced (LOG reads, manifest fingerprints, settlement balances,
@@ -428,17 +428,20 @@ not new systems.
    (47,104 windows, 0 mismatches), proven against bug-injected evidence.
    C4 closed with it (stronger form). Evidence:
    `logs/tracker-14/holistic-measure-20260831-002628`.
-7. **Next session:** restart sidecars (minio, openobserve, cadvisor,
-   node-exporter — currently stopped by choice), then the **lake tiering /
-   real EOD offload test** (REQ-FLS-011 / AC-FLS-004/005). Note: the
-   tiering interval was set to `0s` as a bench-only latency knob — it must
-   be reverted for this test (that is the point of the test).
-8. **Then:** signal-path latency measurement (tentative→confirm/cancel) —
-   completes the trading-side picture.
-9. **Before production feed:** G3 (act on the fingerprint mismatch warnings
-   already appearing in logs) — cheap and directly protects trading
-   decisions; F1/G1/G2 become production
-   monitors at the same time
+7. ~~Lake tiering / real EOD offload test~~ **DONE 2026-08-31 (CHG-117)** —
+   continuous R2 iceberg tiering is live on the recreated raw_table_1 v3
+   (event_day daily partitions, 16 buckets, `table.datalake.freshness` back
+   at the 5 min default — the bench-only `0s` knob died with the old table);
+   EOD lake verification drilled live (day 2026-08-31 COMMITTED → VERIFIED
+   on R2 evidence). Ops surface + bug ledger M-1…M-18:
+   `06_operations/07-lake-archive-ops.md`. The v3 recreate also clears
+   E5's old bucket cap (8 → 16, above).
+8. ~~Signal-path latency measurement~~ **DONE 2026-08-31** — see §4.8 (first
+   profile + F4/F8 guards).
+9. ~~G3 fingerprint mismatch~~ **DONE 2026-08-31 (native fix + G8 gate,
+   commit 65da1e2)** — see scoreboard. Remaining before production feed:
+   G3's fail-closed halt wiring (safe now — no false alarms) and F1/G1/G2
+   as production monitors
 10. **When load grows:** scale test 1,024 → 3,000 instruments (box's 16 GB
    RAM may cap this; C6), then Group E (scaling) — not before
 11. **Blocked on real feed:** C1 final watermark numbers; D7's batching

@@ -30,7 +30,7 @@ WORKLOAD = [
     "flink-jobmanager", "flink-taskmanager", "ingestion",
     "execution-bridge", "execution-gateway", "nautilus",
 ]
-OBSERVABILITY = ["otel-collector", "openobserve", "webhook-receiver"]
+OBSERVABILITY = ["otel-collector", "openobserve", "alert-consumer"]
 
 def _load():
     return yaml.safe_load(STACK.read_text())
@@ -240,7 +240,7 @@ class TestTier2Hardening:
         "otel-collector",      # distroless — no shell, cannot run a CMD probe
         "flink-taskmanager",   # no fixed external listener
         "execution-gateway",   # GATEWAY_BIND_PORT env-driven; readiness = GatewayReadiness
-        "webhook-receiver",    # stateless ingress; port in-app
+        "alert-consumer",      # stateless ingress; port in-app
         "nautilus",            # EXECUTOR_LISTEN_ADDR env-driven; liveness = fencing
     }
 

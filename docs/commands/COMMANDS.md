@@ -68,6 +68,8 @@ unless a command says otherwise.
 | Chaos suite | `make chaos-suite` | 4 failure drills: slot / TM / tablet / VM kill |
 | Disaster drills | `make disaster-drills ARGS="--dry-run"` | Fault-injection practice runs (needs `--approve` to touch stack) |
 | Seed dashboards | `make seed-dashboards` | Idempotent OpenObserve dashboard provisioning (D7) |
+| Alert routing selftest | `make alert-routing-test` (needs `O2_PASSWORD`) | G6 guard: O2 rule → dev-webhook → alert-consumer JSONL end-to-end proof + malformed-delivery negative proof |
+| Query alert history | `docker exec 01_docker-alert-consumer-1 python3 -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:9999/alerts?limit=20').read().decode())"` | Recent O2 alert deliveries from the durable JSONL (also `/stats`); port not published — query via docker exec |
 | Seed alerts | `python3 code/01_platform/04_scripts/seed_alerts.py` | OpenObserve alert provisioning |
 | O2 provision | `python3 code/01_platform/04_scripts/o2-provision.py` | Observability provisioning (43 alerts, dashboards) |
 | R2 audit-store check | `python3 code/01_platform/04_scripts/audit_r2.py` | R2 bucket/versioning/lifecycle validation |
