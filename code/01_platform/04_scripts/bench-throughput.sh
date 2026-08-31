@@ -51,7 +51,10 @@ TSV="$OUT/bench/bench-throughput.tsv"
 : > "$RUN_LOG"
 
 # Never echo credentials: O2 auth header value read from .env, kept in a var.
+# M-13 (2026-08-31): O2_AUTH_BASIC moved from .env to secrets.env — read
+# .env first, then fall back to secrets.env (compose env-file order).
 O2_AUTH="$(awk -F= '/^O2_AUTH_BASIC=/{print $2; exit}' "$DOCKER_DIR/.env" 2>/dev/null || true)"
+[ -z "$O2_AUTH" ] && O2_AUTH="$(awk -F= '/^O2_AUTH_BASIC=/{print $2; exit}' "$DOCKER_DIR/secrets.env" 2>/dev/null || true)"
 
 # Everything lands in run.log AND the console.
 exec > >(tee -a "$RUN_LOG") 2>&1
@@ -117,7 +120,8 @@ cleanup() {
 	echo "-- teardown ($(now))"
 	[ -n "$FAKETOOL_PID" ] && kill "$FAKETOOL_PID" 2>/dev/null || true
 	[ -n "$FAKETOOL_PID" ] && wait "$FAKETOOL_PID" 2>/dev/null || true
-	(cd "$DOCKER_DIR" && docker compose -f docker-compose.yml \
+	(cd "$DOCKER_DIR" && docker compose --env-file .env --env-file secrets.env \
+		-f docker-compose.yml \
 		-f docker-compose.soak.yml -f docker-compose.bench.yml stop ingestion) >/dev/null 2>&1 || true
 	if port_open 127.0.0.1 8899; then
 		echo "!! teardown: port 8899 still busy"
@@ -186,10 +190,11 @@ port_open 127.0.0.1 8899 || { fail "faketool did not open :8899"; exit 1; }
 # ── Build + start ingestion container (fresh image carries the async writer
 #    and the 20ms client linger) ──────────────────────────────────────────────
 echo "=== ingestion container up (fresh image)"
-(cd "$DOCKER_DIR" && docker compose build ingestion) \
+(cd "$DOCKER_DIR" && docker compose --env-file .env --env-file secrets.env build ingestion) \
 	|| { fail "compose build ingestion failed"; exit 1; }
 (cd "$DOCKER_DIR" && SOAK_JOURNAL_DIR="$OUT/bench/journal" \
-	docker compose -f docker-compose.yml -f docker-compose.soak.yml \
+	docker compose --env-file .env --env-file secrets.env \
+	-f docker-compose.yml -f docker-compose.soak.yml \
 	-f docker-compose.bench.yml up -d ingestion) \
 	|| { fail "compose up ingestion failed"; exit 1; }
 
