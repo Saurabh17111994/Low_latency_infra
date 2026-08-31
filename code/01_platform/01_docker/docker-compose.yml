@@ -48,6 +48,10 @@ x-flink-common: &flink-common
   # → tried to reach the ResourceManager at its own address and never
   # registered; also lost TASK_MANAGER_MEMORY_MANAGED_SIZE → 512M heap).
   environment: &flink-common-env
+    # Lake tiering service (Flink job): S3A credentials for R2 via env only
+    # (same contract as fluss-coordinator — never in FLUSS_PROPERTIES).
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID for lake tiering}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY for lake tiering}
     # Restore-only default (2026-08-28, #3 hardening): normal launches must
     # carry STATE_RECOVERY_PATH and restore. A missing restore path fails
     # closed at startup ([F005]) unless the operator deliberately overrides
@@ -380,6 +384,24 @@ services:
       - flink-checkpoints:/checkpoints
       - flink-logs:/opt/flink/log
       - ./flink-log4j-console.properties:/opt/flink/conf/log4j-console.properties:ro
+      # Lake tiering service jars (Flink job classpath): fluss-flink-2.2 fat
+      # connector (client + tiering builder + 2.2 adapter), fluss-flink-tiering
+      # entrypoint, fluss-lake-iceberg plugin, and the s3a/hadoop trio the
+      # fluss-coordinator already mounts under plugins/iceberg (P3.2).
+      - ./fluss-plugins/iceberg/fluss-flink-2.2-0.9.1-incubating.jar:/opt/flink/lib/fluss-flink-2.2-0.9.1-incubating.jar:ro
+      - ./fluss-plugins/iceberg/fluss-flink-tiering-0.9.1-incubating.jar:/opt/flink/lib/fluss-flink-tiering-0.9.1-incubating.jar:ro
+      - ./fluss-plugins/iceberg/fluss-lake-iceberg-0.9.1-incubating.jar:/opt/flink/lib/fluss-lake-iceberg-0.9.1-incubating.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-s3-0.9.1-incubating.jar:/opt/flink/lib/fluss-fs-s3-0.9.1-incubating.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-hdfs-0.9.1-incubating.jar:/opt/flink/lib/fluss-fs-hdfs-0.9.1-incubating.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:/opt/flink/lib/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:ro
+      # M-15/M-16 (2026-08-31): iceberg's shaded parwrite path lazily loads
+      # org.apache.hadoop.mapreduce.lib.input.FileInputFormat; the class lives
+      # only in hadoop-mapreduce-client-core. Do NOT mount the full
+      # flink-shaded-hadoop-2-uber (2.8.3): its Configuration breaks fluss-fs-s3's
+      # S3A (NoSuchMethodError getTimeDuration). This minimal jar carries ONLY
+      # org/apache/hadoop/mapreduce/** — Configuration stays the 3.3.x one
+      # bundled in fluss-fs-s3/fluss-fs-hadoop-shaded.
+      - ./fluss-plugins/iceberg/hadoop-mapreduce-compat-2.8.5.jar:/opt/flink/lib/hadoop-mapreduce-compat-2.8.5.jar:ro
 
   flink-taskmanager:
     <<: *flink-common
@@ -447,6 +469,24 @@ services:
       # (observed 2026-08-29: Shape B — job RUNNING, all operators read=0).
       - fluss-remote-data:/tmp/fluss/remote-data
       - ./flink-log4j-console.properties:/opt/flink/conf/log4j-console.properties:ro
+      # Lake tiering service jars (Flink job classpath): fluss-flink-2.2 fat
+      # connector (client + tiering builder + 2.2 adapter), fluss-flink-tiering
+      # entrypoint, fluss-lake-iceberg plugin, and the s3a/hadoop trio the
+      # fluss-coordinator already mounts under plugins/iceberg (P3.2).
+      - ./fluss-plugins/iceberg/fluss-flink-2.2-0.9.1-incubating.jar:/opt/flink/lib/fluss-flink-2.2-0.9.1-incubating.jar:ro
+      - ./fluss-plugins/iceberg/fluss-flink-tiering-0.9.1-incubating.jar:/opt/flink/lib/fluss-flink-tiering-0.9.1-incubating.jar:ro
+      - ./fluss-plugins/iceberg/fluss-lake-iceberg-0.9.1-incubating.jar:/opt/flink/lib/fluss-lake-iceberg-0.9.1-incubating.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-s3-0.9.1-incubating.jar:/opt/flink/lib/fluss-fs-s3-0.9.1-incubating.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-hdfs-0.9.1-incubating.jar:/opt/flink/lib/fluss-fs-hdfs-0.9.1-incubating.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:/opt/flink/lib/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:ro
+      # M-15/M-16 (2026-08-31): iceberg's shaded parwrite path lazily loads
+      # org.apache.hadoop.mapreduce.lib.input.FileInputFormat; the class lives
+      # only in hadoop-mapreduce-client-core. Do NOT mount the full
+      # flink-shaded-hadoop-2-uber (2.8.3): its Configuration breaks fluss-fs-s3's
+      # S3A (NoSuchMethodError getTimeDuration). This minimal jar carries ONLY
+      # org/apache/hadoop/mapreduce/** — Configuration stays the 3.3.x one
+      # bundled in fluss-fs-s3/fluss-fs-hadoop-shaded.
+      - ./fluss-plugins/iceberg/hadoop-mapreduce-compat-2.8.5.jar:/opt/flink/lib/hadoop-mapreduce-compat-2.8.5.jar:ro
 
   # ---- Services -----------------------------------------------------------
   #
