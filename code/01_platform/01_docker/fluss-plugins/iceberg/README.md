@@ -13,7 +13,7 @@ Downloaded (Fluss 0.9.1 / Flink 2.2 distribution artifacts):
 - `fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar`
 - `flink-shaded-hadoop-2-uber-2.8.3-10.0.jar` — NOT mounted; its hadoop 2.8.3
   `Configuration` breaks fluss-fs-s3's S3A (NoSuchMethodError getTimeDuration,
-  M-16 in docs/plans/2026-08-31-r2-daily-partitioning-and-archive-plan.md)
+  M-16 in docs/06_operations/07-lake-archive-ops.md (CHG-117))
 
 ## hadoop-mapreduce-compat-2.8.5.jar — CUSTOM BUILD (M-15)
 

@@ -291,6 +291,23 @@ upstream is complete.
 > `logs/tracker-14/ttl-live-recreate-2d-20260813.md` (batch 1) +
 > `logs/tracker-14/ttl-live-recreate-2d-batch2-20260813.md` (batch 2).
 
+> **raw_table_1 lake migration (2026-08-31, CHG-117):** the 2026-08-13 state
+> above no longer holds for `raw_table_1` — it was dropped and recreated as
+> **v3** (table id 76, 21 columns, `event_day` first, `PARTITIONED BY
+> (event_day)`, auto-partition DAY, `table.datalake.enabled=true` at create),
+> and R2 iceberg tiering is live with a day-partitioned lake layout
+> (`.../data/event_day=<yyyyMMdd>/instrument_token_bucket=<N>/*.parquet`).
+> The other nine tables keep the 2026-08-13 lake-disabled state. Partition
+> keys are frozen at CREATE in Fluss 0.9.1 (no ALTER path) — any further
+> partitioning change is a drop/recreate via `fluss-repair/RawTableAdmin.java`
+> (archive the old lake prefix aside first or create collides with orphaned
+> R2 objects — see the T-7 precedent). Fluss API notes verified in source:
+> partition create is `ResolvedPartitionSpec.fromPartitionName(keys,name).toPartitionSpec()`
+> (not `PartitionSpec.of`); iceberg partition key columns must be STRING;
+> auto-partition DAY naming is `yyyyMMdd`; client dynamic partitioning
+> (on by default) creates today's partition on first write. Ops surface and
+> known failure modes: `06_operations/07-lake-archive-ops.md`.
+
 #### Phase D: Runtime enforcement (straddles Ingestion, Signal, Executor phases)
 
 | ID | Task | Status | Location / Evidence |

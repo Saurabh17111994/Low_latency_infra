@@ -13,7 +13,7 @@ import org.apache.fluss.types.DataTypes;
 
 /**
  * RawTableAdmin (2026-08-31) — mechanical admin for the daily-partition
- * migration (docs/plans/2026-08-31-r2-daily-partitioning-and-archive-plan.md).
+ * migration (docs/06_operations/07-lake-archive-ops.md (M-15/M-16 rows)).
  * Subcommands:
  *   drop                     drop default.raw_table_1 (ignoreIfNotExists=true)
  *   create                   create v3 partitioned table (options mirror

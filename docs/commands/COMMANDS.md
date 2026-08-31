@@ -74,6 +74,11 @@ unless a command says otherwise.
 | Repair tablet | `bash code/01_platform/04_scripts/fluss-repair/repair-tablet.sh` | Fluss tablet repair |
 | Import instruments | `bash code/01_platform/04_scripts/import_instruments.sh` | Instrument manifest import |
 | Evidence ownership check | `make evidence-ownership-check` | Non-root ownership contract gate (C15) |
+| Lake health check | `bash code/01_platform/04_scripts/lake-guard.sh` | Daily R2 lake guard: yesterday's day-folder + manifests + today's folder after 18:30 IST (cron-able; `LAKE_GUARD_CHECK_DAY` forces a day for tests) |
+| Tiering job status / restart | `bash code/01_platform/04_scripts/tiering-start.sh [--status]` | Idempotent Flink tiering-job submit; refuses to submit unless the hadoop-mapreduce-compat jar is in both flink libs and the bad uber jar is absent (CHG-117) |
+| Query the R2 lake | `bash code/01_platform/04_scripts/r2-query.sh "<sql>"` | DuckDB SQL over the iceberg lake (iceberg_scan; first run installs extensions) |
+| Restore one trading day | `bash code/01_platform/04_scripts/r2-restore.sh <yyyyMMdd> [out.parquet]` | Day-folder parquet export (partition-pruned glob) |
+| Tiering smoke (guarded E2E) | `TIER_WAIT=420 bash code/01_platform/04_scripts/tiering-smoke.sh 300` | Write→tier→R2 proof with GUARD A–E (see `06_operations/07-lake-archive-ops.md`) |
 
 ## E. Production / VM provisioning (future 4VM)
 

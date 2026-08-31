@@ -12,7 +12,7 @@ Three Fluss replicas/quorum are placed across the three workload VMs with anti-c
 
 ## Required schemas
 
-Market: `raw_table_1`, `feature_candles_15s` (KV upsert, PK `(instrument_token, window_start)` — sole candle output, 2026-08-13 conversion; authoritative durable candle state under DEC-038), `suspected_discontinuities`, `instruments`. (The pre-conversion `feature_candles_15s_current` KV projection is RETIRED 2026-08-13.)
+Market: `raw_table_1` (**v3 since 2026-08-31, CHG-117: 21 columns, `event_day STRING` (yyyyMMdd, Asia/Kolkata) first, `PARTITIONED BY (event_day)` with auto-partition DAY (precreate 2 / retention 7d), bucket key `instrument_token` (16 buckets), `table.datalake.enabled=true` — tiering to the R2 iceberg lake is live, day-partitioned layout; per-day restore and lake queries via `06_operations/07-lake-archive-ops.md`**), `feature_candles_15s` (KV upsert, PK `(instrument_token, window_start)` — sole candle output, 2026-08-13 conversion; authoritative durable candle state under DEC-038), `suspected_discontinuities`, `instruments`. (The pre-conversion `feature_candles_15s_current` KV projection is RETIRED 2026-08-13.)
 
 Strategy: `Signal_Candidates` (immutable append-only LOG — RE-SCOPED 2026-08-13, **implemented 2026-08-13 — LOG v3 id 607**; one row per fired signal), `Signal_Candidates_current` (candidate current-state KV, PK `(instrument_token)`, supersession overwrites — NEW 2026-08-13, **implemented 2026-08-13 — KV companion id 608**). ~~`Ranking_Results`, immutable `Trade_Decisions`~~ — **REMOVED 2026-08-15 (CHG-005 — ranking/decisions out of scope, not deferred).**
 
