@@ -177,6 +177,22 @@ grep -q 'B5_EXPECT_PHASES' "$SCRIPT_DIR/holistic-analyze.py" \
     && ok "G12 analyzer fail-fast (B5_EXPECT_PHASES) present" \
     || bad "G12 analyzer lacks B5 fail-fast — empty phase data reads as 'no verdict'"
 
+# ---- G13 (2026-08-31): F6 rejection-counter wiring — the counters have
+# existed in RawValidationFunction since the beginning; the harness must
+# sample them (tm-prom-invalid.tsv) and the analyzer must guard on them,
+# or rejections stay invisible (gotcha-#22 pattern).
+grep -q 'compute_invalid' "$HM" \
+    && ok "G13 F6 rejection-counter sampler present in measure script" \
+    || bad "G13 F6 sampler missing — rejections invisible (counters exist, nobody samples)"
+grep -q 'F6 raw-validation rejections' "$SCRIPT_DIR/holistic-analyze.py" \
+    && grep -q 'invalid_rows' "$SCRIPT_DIR/holistic-analyze.py" \
+    && ok "G13 F6 analyzer report + guard present" \
+    || bad "G13 analyzer lacks F6 report/guard — rejection counts never checked"
+# the analyzer's F6 failure message must reference byReason (per-rule detail)
+grep -q 'byReason' "$SCRIPT_DIR/holistic-analyze.py" \
+    && ok "G13 F6 guard names per-reason detail" \
+    || bad "G13 F6 guard lacks per-reason breakdown"
+
 rm -rf "$OUT"
 echo "---"
 echo "guards: $pass passed, $fail failed"

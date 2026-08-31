@@ -1264,6 +1264,26 @@ def main():
         print(f"- G7b late:  sent={want_late} raw-observed={late_rows} "
               f"counter-delta={late_delta:.0f} (rounds in counter window: "
               f"{late_in_window})")
+        # ---- F6 (2026-08-31): raw-validation rejection counters ----
+        # RawValidationFunction has ALWAYS exported compute.invalid.rows +
+        # per-reason byReason counters (8 reasons) — never sampled before
+        # (the gotcha-#22 pattern: exists, invisible). Clean bench feed =>
+        # every in-window delta must be 0. Non-zero = bad feed OR a
+        # validation-rule regression silently quarantining real ticks.
+        f6_deltas = counter_deltas(os.path.join(g7_dir, "tm-prom-invalid.tsv"))
+        total_rej = sum(v for k, v in f6_deltas.items()
+                        if "invalid_rows" in k)
+        by_reason = {k.split("byReason")[-1].lstrip("_").split("{")[0]: v
+                     for k, v in f6_deltas.items()
+                     if "byReason" in k and v != 0}
+        print(f"- F6 raw-validation rejections: total={total_rej:.0f} "
+              f"in-window, by-reason={by_reason or 'none'}")
+        if total_rej != 0 or any(by_reason.values()):
+            failures.append(
+                f"F6: {total_rej:.0f} raw rows rejected by the validation "
+                f"gate in-window ({by_reason}) — the bench feed is clean, "
+                f"so rejections mean a validation-rule regression or a "
+                f"corrupt feed silently dropping ticks before candles")
         print(f"- G7c parity: {compared} fully-closed (token,window) pairs "
               f"compared candle-vs-raw, {len(mismatch)} mismatches")
         if startup_skipped:

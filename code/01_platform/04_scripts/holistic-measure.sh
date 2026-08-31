@@ -209,6 +209,17 @@ run_phase() {
       curl -s --max-time 5 http://localhost:9250/metrics \
         | grep -E "^flink_.*compute_dedup_(first|duplicates)|^flink_.*compute_candles_late_dropped" \
         | sed "s/^/$now /" >> "$OUT/tm-prom-dedup-late.tsv" || true
+      # F6 (2026-08-31): raw-validation rejection counters. The operator
+      # has ALWAYS exported compute.invalid.rows + per-reason
+      # compute.invalid.byReason.<reason> counters (RawValidationFunction,
+      # 8 rejection reasons) — but nobody sampled them: the same
+      # "exists but never captured" pattern as the latency histograms
+      # (gotcha #22). Clean bench feed => all in-window deltas must be 0;
+      # any non-zero rejection is either a bad feed or a validation-rule
+      # regression. The analyzer guards this (F6).
+      curl -s --max-time 5 http://localhost:9250/metrics \
+        | grep -iE "^flink_.*compute_invalid" \
+        | sed "s/^/$now /" >> "$OUT/tm-prom-invalid.tsv" || true
       # Signal-path latency (2026-08-31): the job already runs with
       # -Dmetrics.latency.interval=2000, so Flink emits source->operator
       # latency histograms per operator into TM Prometheus — they were
