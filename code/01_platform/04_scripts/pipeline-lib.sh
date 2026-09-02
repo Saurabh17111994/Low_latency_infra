@@ -51,6 +51,22 @@ FAKETOOL_PORT="${FAKETOOL_PORT:-8899}"
 LIB_COMPOSE_FILE="$ROOT/code/01_platform/01_docker/docker-compose.yml"
 # B1 guard: always carry both env files.
 COMPOSE="docker compose -f $LIB_COMPOSE_FILE --env-file $ROOT/code/01_platform/01_docker/.env --env-file $ROOT/code/01_platform/01_docker/secrets.env"
+
+# Preflight-state guard (2026-09-02): launch-phase functions require
+# pipeline_preflight to have run — it populates CP, LIB_MANIFEST_SLICE,
+# restarts the TM fresh, and waits for Fluss/TM registration. A caller that
+# skips it (stage-a2-baseline.sh first attempt) previously got "unbound
+# variable" deep inside ingestion and a broken JVM launch. Guarded functions
+# now fail fast with a clear message instead.
+PIPELINE_PREFLIGHT_OK=0
+pipeline_require_preflight() {
+  local caller="${FUNCNAME[1]:-unknown-caller}"
+  [ "${PIPELINE_PREFLIGHT_OK:-0}" -eq 1 ] || {
+    pipeline_fail "pipeline_preflight not run — refusing $caller (run pipeline_preflight first; it sets CP + LIB_MANIFEST_SLICE and restarts the TM)"
+    return 1
+  }
+}
+
 LIB_COMPOSE_DIR="$ROOT/code/01_platform/01_docker"
 LIB_CP_FILE="$ROOT/code/02_services/01_ingestion/target/cp.txt"
 FLUSS_COORDINATOR_CONTAINER="${FLUSS_COORDINATOR_CONTAINER:-01_docker-fluss-coordinator-1}"
@@ -221,6 +237,7 @@ pipeline_wait_for_fluss_ready() {
 # restarts the TM (B3), resolves the 1024-token set, creates $OUT.
 # On success sets: CP, TOKENS (caller-readable).
 pipeline_preflight() {
+  PIPELINE_PREFLIGHT_OK=0
   mkdir -p "$OUT" "$OUT/bin" "$OUT/j1"
   [ -f "$LIB_JAR" ] || { pipeline_fail "compute jar missing: $LIB_JAR (run: cd code/02_services/02_compute && mvn package)"; return 1; }
   pipeline_validate_compute_jar || return 1
@@ -287,6 +304,7 @@ pipeline_preflight() {
   TOKENS=""   # deprecated: kept as empty for callers that still reference it
 
   mkdir -p "$OUT" "$OUT/bin" "$OUT/j1"
+  PIPELINE_PREFLIGHT_OK=1
   pipeline_log "preflight OK (jars, bridge, manifest, port $FAKETOOL_PORT free, fluss up, TM fresh)"
 }
 
@@ -296,6 +314,7 @@ pipeline_preflight() {
 # bind failure (e.g. port raced) leaves a dead PID that must abort now,
 # not at mid-run liveness.
 pipeline_start_faketool() {
+  pipeline_require_preflight || return 1
   pipeline_log "building faketool from $LIB_FAKETOOL_SRC"
   (cd "$LIB_BRIDGE_DIR" && go build -tags faketool -o "$OUT/bin/faketool" ./faketool) \
     || { pipeline_fail "faketool build failed"; return 1; }
@@ -339,6 +358,7 @@ pipeline_start_faketool() {
 # ---------- ingestion JVM ----------
 # Canonical env block (same as loadtest-run.sh). Sets JVM_PID.
 pipeline_start_ingestion() {
+  pipeline_require_preflight || return 1
   # Fail-closed readiness: an interrupted prior run can leave the readiness
   # marker behind. Remove it before starting a new JVM; otherwise the first
   # poll below can accept a dead process as ready and corrupt the run's
@@ -394,6 +414,7 @@ pipeline_start_ingestion() {
 # window. Dropping + recreating before each run resets both. Preview data
 # is transient diagnostics — nothing else consumes it between runs.
 pipeline_purge_table() {
+  pipeline_require_preflight || return 1
   # Generic drop+recreate from a DDL file. Used to bound what a fresh job
   # replays (the SignalJob source reads from EARLIEST — an unpurged table
   # means every phase replays all prior phases' rows) and to keep the
@@ -466,6 +487,7 @@ pipeline_purge_raw_table() {
 }
 
 pipeline_ensure_tentative_markers_table() {
+  pipeline_require_preflight || return 1
   # CHG-121 (2026-09-01): create Signal_Tentative_Markers if absent (no
   # drop — markers must SURVIVE phases; a drop would erase exactly the crash
   # reconciliation state the table exists to hold). Uses the same
@@ -519,6 +541,7 @@ JAVAEOF
 }
 
 pipeline_submit_job() {
+  pipeline_require_preflight || return 1
   pipeline_log "deploying SignalJob (previews 1s, early signals on, confirm-after 4s)"
   docker exec 01_docker-flink-jobmanager-1 mkdir -p /opt/flink/jobs 2>/dev/null \
     || { pipeline_fail "mkdir /opt/flink/jobs in flink-jobmanager failed"; return 1; }

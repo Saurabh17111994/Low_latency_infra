@@ -284,6 +284,56 @@ else
 fi
 rm -rf "$G16DIR"
 
+# ---- G19 (2026-09-02): preflight-state guard. Launch-phase functions that
+# depend on pipeline_preflight's setup (CP, LIB_MANIFEST_SLICE, fresh TM,
+# Fluss readiness) must fail fast with a clear message when preflight has
+# NOT run — the stage-a2-baseline "unbound variable deep inside ingestion"
+# failure class. Runtime negative tests + wiring greps (drift-proof).
+PL="$SCRIPT_DIR/pipeline-lib.sh"
+bash -n "$PL" || { bad "G19 lib syntax invalid"; exit 1; }
+
+# (a) runtime: guarded functions refuse BEFORE launching anything
+OUT="$(mktemp -d)" FAKETOOL_PORT=8899 RATE_HZ=10
+# shellcheck source=pipeline-lib.sh
+source "$PL"
+PIPELINE_PREFLIGHT_OK=0
+msg="$(pipeline_start_faketool 2>&1 || true)"
+case "$msg" in
+  *"pipeline_preflight not run"*) ok "G19 start_faketool refuses without preflight" ;;
+  *) bad "G19 start_faketool did not refuse: $msg" ;;
+esac
+msg="$(pipeline_purge_preview_table 2>&1 || true)"
+case "$msg" in
+  *"pipeline_preflight not run"*) ok "G19 purge refuses without preflight" ;;
+  *) bad "G19 purge did not refuse: $msg" ;;
+esac
+msg="$(pipeline_start_ingestion 2>&1 || true)"
+case "$msg" in
+  *"pipeline_preflight not run"*) ok "G19 start_ingestion refuses without preflight" ;;
+  *) bad "G19 start_ingestion did not refuse: $msg" ;;
+esac
+msg="$(pipeline_submit_job 2>&1 || true)"
+case "$msg" in
+  *"pipeline_preflight not run"*) ok "G19 submit refuses without preflight" ;;
+  *) bad "G19 submit did not refuse: $msg" ;;
+esac
+rm -rf "$OUT"
+
+# (b) wiring: every launch-phase function carries the guard; preflight sets
+# the OK flag only on success (reset at entry, set before the OK log).
+for fn in pipeline_purge_table pipeline_ensure_tentative_markers_table \
+          pipeline_start_faketool pipeline_start_ingestion pipeline_submit_job; do
+  if grep -q 'pipeline_require_preflight || return 1' "$PL"; then
+    ok "G19 guard wired in $fn"
+  else
+    bad "G19 guard MISSING in $fn — skips preflight silently"
+  fi
+done
+grep -q 'PIPELINE_PREFLIGHT_OK=0' "$PL" \
+  && grep -q 'PIPELINE_PREFLIGHT_OK=1' "$PL" \
+  && ok "G19 preflight resets (0) at entry and commits (1) on success" \
+  || bad "G19 preflight OK-flag wiring missing/incomplete"
+
 echo "---"
 echo "guards: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
