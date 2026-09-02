@@ -436,6 +436,63 @@ grep -q 'net_lag_p99_records' "$parse" \
   && ok "G21f B2 reports carry p99 columns (read-lag + consumer-read)" \
   || bad "G21f B2 reports missing p99 columns"
 
+
+# ---- G22/G23/G24 (2026-09-02): FLINK_PROPERTIES + TM-config fail-fast ----
+# Two silent failure classes hit in one day:
+#  (1) FLINK_PROPERTIES key collision (String leaf vs nested path) -> TM
+#      crash-loop (ClassCastException) OR SILENT drop of
+#      state.backend.rocksdb.localdir -> RocksDB on the container overlay
+#      (the CHG-120 ~1.7k/s degradation class, invisible until analysis).
+#  (2) `docker compose restart` reuses the OLD container config -> a compose
+#      edit (slots 10->16) never reached the TM -> job died "unassigned
+#      resource" at t+13s (and p16 OOM'd the TM heap later).
+# G22 = static compose validator; G23 = runtime preflight checks;
+# G24 = RocksDB-on-named-volume check in the A2 runner.
+echo "---"
+echo "G22 FLINK_PROPERTIES static validator"
+
+validator="$SCRIPT_DIR/check_flink_properties.py"
+[ -f "$validator" ] \
+  && ok "G22a check_flink_properties.py present" \
+  || bad "G22a check_flink_properties.py MISSING"
+python3 "$validator" >/dev/null 2>&1 \
+  && ok "G22b the REAL docker-compose.yml FLINK_PROPERTIES validates (no comments in block, no prefix collisions, required keys present)" \
+  || { python3 "$validator" 2>&1 | head -8 >&2; bad "G22b docker-compose.yml FLINK_PROPERTIES INVALID - see reason above"; }
+grep -q "FORBIDDEN_LEAVES" "$validator" \
+  && grep -q "PREFIX COLLISION" "$validator" \
+  && ok "G22c validator explains the WHY (prefix collision + forbidden leaf reasons)" \
+  || bad "G22c validator lost its explanatory failure reasons"
+
+echo "G23 TM config + slots runtime preflight"
+
+lib="$SCRIPT_DIR/pipeline-lib.sh"
+bash -n "$lib" || { bad "G23 pipeline-lib.sh syntax invalid"; exit 1; }
+grep -q "pipeline_verify_tm_config" "$lib" \
+  && ok "G23a pipeline-lib.sh has pipeline_verify_tm_config" \
+  || bad "G23a pipeline_verify_tm_config MISSING in pipeline-lib.sh"
+grep -q "pipeline_verify_tm_config || return 1" "$lib" \
+  && ok "G23b preflight calls the TM-config verification (fail-fast before feed/submit)" \
+  || bad "G23b preflight does NOT call pipeline_verify_tm_config"
+grep -q "unassigned resource" "$lib" \
+  && grep -q "force-recreate" "$lib" \
+  && ok "G23c slot-shortage failure explains WHY (compose restart reuses old config) + the recreate fix" \
+  || bad "G23c slot failure message lost its reason/fix hint"
+grep -q "CHG-120" "$lib" \
+  && ok "G23d missing-localdir failure names the degradation class (CHG-120 overlay)" \
+  || bad "G23d missing-localdir failure lost its reason"
+
+echo "G24 RocksDB-on-named-volume runtime check (A2 runner)"
+
+runner="$SCRIPT_DIR/stage-a2-baseline.sh"
+bash -n "$runner" || { bad "G24 stage-a2-baseline.sh syntax invalid"; exit 1; }
+grep -q "G24" "$runner" \
+  && grep -q "flink-rocksdb/job_\${JOB_ID}_op_" "$runner" \
+  && ok "G24a runner verifies the job's RocksDB dirs land under /tmp/flink-rocksdb (named volume)" \
+  || bad "G24a RocksDB-on-volume check MISSING in runner"
+grep -q "CHG-120" "$runner" \
+  && ok "G24b G24 failure names the degradation class + the config to check" \
+  || bad "G24b G24 failure lost its reason"
+
 echo "---"
 echo "guards: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

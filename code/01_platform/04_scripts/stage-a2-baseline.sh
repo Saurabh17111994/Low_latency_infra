@@ -109,6 +109,27 @@ done
 [ "$state" = "RUNNING" ] || fatal "job $JOB_ID never RUNNING (state=$state)"
 echo "STAGE-A2: job $JOB_ID RUNNING — capturing ${DURATION_S}s"
 
+# --- G24 (2026-09-02): RocksDB must land on the NAMED VOLUME -------------
+# The CHG-120 degradation class: if state.backend.rocksdb.localdir is not in
+# effect (dropped by the FLINK_PROPERTIES prefix collision or a bad env),
+# RocksDB silently writes to the container overlay fs and per-op cost jumps
+# ~100x (fingerprint-dedup ~2.3 ms busy/rec, pipeline capped ~1.7k/s) —
+# invisible until throughput analysis. Fail the run INSTEAD of capturing a
+# poisoned baseline: the job's RocksDB dirs are named job_<JOB_ID>_op_*;
+# they must appear under /tmp/flink-rocksdb (the named volume mount).
+if [ "${STATE_BACKEND:-rocksdb}" = "rocksdb" ]; then
+  rocks_ok=""
+  for i in $(seq 1 12); do
+    if $COMPOSE exec -T flink-taskmanager \
+        sh -c "ls -d /tmp/flink-rocksdb/job_${JOB_ID}_op_* >/dev/null 2>&1"; then
+      rocks_ok=1; break
+    fi
+    sleep 5
+  done
+  [ -n "$rocks_ok" ] || fatal "G24: no RocksDB dirs for job $JOB_ID under /tmp/flink-rocksdb after 60s — RocksDB is writing somewhere else (container overlay = the CHG-120 ~1.7k/s degradation). WHY: state.backend.rocksdb.localdir not in effect (FLINK_PROPERTIES prefix collision dropped it, or STATE_BACKEND_LOCAL_DIRS env wrong). Check: docker exec 01_docker-flink-taskmanager-1 grep -A4 localdir /opt/flink/conf/config.yaml — and guard G22 (check_flink_properties.py)"
+  echo "STAGE-A2: G24 OK — RocksDB on the named volume (job_${JOB_ID}_op_* under /tmp/flink-rocksdb)"
+fi
+
 # --- The capture (all stage metrics, one timeline) ---
 # B2 hooks (2026-09-02): FLUSS_PROBE_CP enables the two passive Fluss probes
 # (read-lag.tsv log-end offsets + consumer-read.tsv KV lookups); $CP comes

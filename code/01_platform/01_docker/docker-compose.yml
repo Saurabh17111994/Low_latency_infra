@@ -89,70 +89,83 @@ x-flink-common: &flink-common
     # 0.6 of the 7g TM process. Evidence:
     # docs/Investigations_and_Reports/2026-09-01-throughput-degradation.md.
     TASK_MANAGER_MEMORY_MANAGED_SIZE: ${TASK_MANAGER_MEMORY_MANAGED_SIZE:-4g}
+    # FLINK_PROPERTIES below feeds the image docker-entrypoint's
+    # process_flink_properties, which does NOT skip '#' lines — every line
+    # in the block becomes a Flink config property. Comment lines therefore
+    # become garbage dotted keys, and two garbage keys whose nested paths
+    # collide abort config.yaml generation with ClassCastException (String
+    # cannot be cast to Map, observed as a JM/TM crash-loop 2026-09-02 when
+    # new property keys shifted the collision). ALL comments live HERE,
+    # above the block; the block itself is property lines ONLY:
+    # - P8 (tracker 14): distributed-safe metrics via PrometheusReporter —
+    #   /metrics on :9249 inside each container; the otel-collector scrapes
+    #   flink-jobmanager:9249 + flink-taskmanager:9249 and remote-writes to
+    #   OpenObserve. flink-metrics-prometheus ships in the image under
+    #   /opt/flink/plugins/metrics-prometheus and is auto-loaded by
+    #   PluginManager — no lib copy needed.
+    # - P7 (tracker 14): metrics.latency.interval 1s (was 5s) for 5x better
+    #   p99 sample density at low real-feed rates (histogram capacity 1024
+    #   samples; 1s -> 60 markers/min, fills ~17min).
+    # - taskmanager.numberOfTaskSlots: 10 -> 16 (C2 20k bottleneck
+    #   2026-09-02): job p8 -> p16; fingerprint-dedup is the RocksDB-bound
+    #   hot operator at ~75% per-subtask occupancy (74-77%) at 20,480 t/s.
+    #   TM memory unchanged (slots share the task heap; RocksDB native
+    #   memory is the managed pool, not per-slot).
+    # - P9 (tracker 14 box 1007): explicit JM/TM memory envelopes. JM 1600m
+    #   = heap 1024m (SIGNAL-warn-jvm-heap-high cap) + off-heap 128m +
+    #   metaspace 256m + jvm-overhead 192m.
+    # - CHG-120 (2026-09-01): TM 6g -> 7g alongside managed 2g -> 4g;
+    #   managed fraction 0.4 -> 0.6 for RocksDB headroom (at 0.4 the ~80
+    #   RocksDB instances got ~25 MB each and fingerprint-dedup ~2.3 ms
+    #   busy/rec capped the pipeline at ~1.7k/s — stage-capture
+    #   logs/tracker-14/stage-capture-20260901-224849; 0.6 of 7g ->
+    #   ~3.2 GB managed, ~40 MB/instance, task heap ~2.1 GB).
+    # - P7 phase-1+ (tracker 14): explicit task off-heap (direct) budget —
+    #   the 1.7 GB RocksDB restore streams state-handle downloads through
+    #   direct buffers; 512m covers the concurrent 8-subtask restore.
+    # - Streaming-3000 T3 G3: RocksDB incremental on SSD, network 256m
+    #   (tested 512m under 10Hz full load: no throughput effect — network
+    #   buffers ruled out, the cap is RocksDB/compaction churn).
+    # - C2 20k bottleneck (2026-09-02): RocksDB write-path knobs for the
+    #   dedup hot operator (writebuffer.count 4 / memory.write-buffer-ratio
+    #   0.6 / threads.write 2 — every tick = 1 Get + 1 Put on a ~13MB-per-DB
+    #   TTL set at ~2,560 rec/s/subtask at peak; fewer larger flushes, less
+    #   compaction stall) are passed as JOB-LEVEL -D flags in
+    #   pipeline-lib.sh (pipeline_submit_job), NOT here: adding
+    #   state.backend.rocksdb.* keys to this block collides with the
+    #   `state.backend` String leaf in YamlParserUtils
+    #   convertAndDumpYamlFromFlatMap and crash-loops the TM (observed
+    #   2026-09-02). The `state.backend: rocksdb` LEAF is therefore NOT in
+    #   the block: it prefix-collides with state.backend.rocksdb.localdir /
+    #   state.backend.incremental and one side silently loses (HashMap-order
+    #   dependent — observed 2026-09-02: localdir+incremental dropped from
+    #   the generated config.yaml). The signal job pins backend + localdir +
+    #   incremental at JOB level (STATE_BACKEND env -> SignalJobConfig ->
+    #   applyRuntimeOptions), so the TM-level leaf was redundant for it.
+    #   NOTE: any OTHER job relying on the TM-level default now gets Flink's
+    #   default backend (hashmap) — pin your backend at job level. Guarded
+    #   by G22 (check_flink_properties.py) + the pipeline preflight.
+    # - The image default env.java.opts.all already includes
+    #   --add-opens=java.base/java.nio=ALL-UNNAMED (arrow-compatible JVM
+    #   options) — do NOT set env.java.opts here: it collides with the
+    #   nested env.java.opts.all key in YamlParserUtils and aborts startup.
     FLINK_PROPERTIES: |
       jobmanager.rpc.address: flink-jobmanager
       rest.address: flink-jobmanager
       rest.bind-address: 0.0.0.0
-      # P8 (tracker 14): distributed-safe metrics via PrometheusReporter —
-      # /metrics on :9249 inside each container; the otel-collector scrapes
-      # flink-jobmanager:9249 + flink-taskmanager:9249 and remote-writes to
-      # OpenObserve. flink-metrics-prometheus ships in the image under
-      # /opt/flink/plugins/metrics-prometheus and is auto-loaded by
-      # PluginManager — no lib copy needed.
       metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
       metrics.reporter.prom.port: 9249
       metrics.reporter.prom.interval: 15 SECONDS
-      # P7 (tracker 14): operator latency histograms for the PERF-LATENCY-001
-      # gate (flink_taskmanager_job_task_operator_*_latency_*). 1s interval
-      # (was 5s) for 5x better p99 sample density at low real-feed rates
-      # (histogram capacity 1024 samples; 1s → 60 markers/min, fills ~17min);
-      # default granularity=operator.
       metrics.latency.interval: 1000
-      taskmanager.numberOfTaskSlots: 10
-      # P9 (tracker 14 box 1007): explicit JM/TM memory envelopes. JM process
-      # 1600m = heap 1024m (the 1 GiB cap the SIGNAL-warn-jvm-heap-high 900 MB
-      # threshold was verified against) + off-heap 128m + metaspace 256m +
-      # jvm-overhead 192m (min). TM 2g = framework 256m + managed (0.4
-      # fraction) + task heap + jvm-overhead — derived by the Flink memory
-      # model at startup.
+      taskmanager.numberOfTaskSlots: 16
       jobmanager.memory.process.size: 1600m
-      # CHG-120 (2026-09-01): 6g → 7g alongside managed 2g → 4g (see
-      # TASK_MANAGER_MEMORY_MANAGED_SIZE above); non-managed budget unchanged.
       taskmanager.memory.process.size: 7g
-      # P7 phase-1+ (tracker 14): explicit task off-heap (direct) budget —
-      # the 1.7 GB RocksDB restore streams state-handle downloads through
-      # direct buffers; the 2g envelope's derived ~287m direct limit
-      # OOM'd on restore (job 8053f1c8da5e938e64da9e1e7f5088c1). 512m
-      # covers the concurrent 8-subtask restore; process bumped to 3g so
-      # the task heap keeps its ~800m budget (otherwise off-heap shrinks
-      # heap and the steady-state 434m heap OOMs).
       taskmanager.memory.task.off-heap.size: 512m
-      # Streaming-3000 T3 G3 Compute: p=8 (16 buckets → 8 slots, hash(token) 2:1)
-      # RocksDB incremental on SSD, managed 0.4, network 256m. Single-host dev
-      # keeps 8 slots so p8 runs without slot starvation (CompatRescale p2→p4
-      # already proven, T3 extends to p8 at 1k). Hashmap dev-override is via
-      # STATE_BACKEND=hashmap env; default RocksDB matches prod pin.
-      # CHG-120 (2026-09-01): 0.4 → 0.6 for RocksDB headroom. At 0.4 with a
-      # 6-7g process the ~80 RocksDB instances got ~25 MB each (≈13 MB write
-      # buffers) and per-record put cost (fingerprint-dedup ~2.3 ms busy/rec)
-      # capped the pipeline at ~1.7k/s (stage-capture evidence:
-      # logs/tracker-14/stage-capture-20260901-224849). 0.6 of 7g process →
-      # ~3.2 GB managed (~40 MB/instance); task heap stays ~2.1 GB.
       taskmanager.memory.managed.fraction: 0.6
-      # CHG-120 (2026-09-01): network memory parameterized via env (default 256m
-      # unchanged). Tested 512m under 10Hz full load: no throughput effect
-      # (network-buffer starvation ruled out; the cap is RocksDB/compaction churn,
-      # see CHG-120). Parameterization kept for capacity work.
       taskmanager.memory.network.max: ${TASK_MANAGER_NETWORK_MEMORY_MAX:-256m}
       taskmanager.memory.network.min: ${TASK_MANAGER_NETWORK_MEMORY_MIN:-256m}
-      state.backend: rocksdb
       state.backend.incremental: "true"
       state.backend.rocksdb.localdir: /tmp/flink-rocksdb
-      # Note: the image default env.java.opts.all already includes
-      # --add-opens=java.base/java.nio=ALL-UNNAMED (arrow-compatible JVM
-      # options) — do NOT set env.java.opts here: it collides with the
-      # nested env.java.opts.all key in YamlParserUtils and aborts startup
-      # (ClassCastException: String cannot be cast to Map).
     DEDUP_TTL_MS: "60000"
     CANDLE_WINDOW_MS: "15000"
     CHECKPOINT_INTERVAL_MS: "10000"

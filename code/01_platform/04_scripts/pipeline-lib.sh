@@ -294,6 +294,18 @@ pipeline_preflight() {
   [ "$tm_ok" -eq 1 ] \
     || { pipeline_fail "TM not registered with JM after 60s — refusing to submit job"; return 1; }
 
+  # G23 (2026-09-02): TM config + slots fail-fast. Two silent failure
+  # classes observed 2026-09-02, both AFTER preflight and mid-run:
+  #   (a) the FLINK_PROPERTIES prefix collision silently dropped
+  #       state.backend.rocksdb.localdir from the generated config.yaml ->
+  #       RocksDB back on the container overlay (the CHG-120 ~1.7k/s
+  #       degradation class, invisible until throughput analysis).
+  #   (b) `docker compose restart` reuses the OLD container's config — a
+  #       compose edit (slots 10->16) never reached the running TM and the
+  #       p16 job died on "unassigned resource" at t+13s.
+  # Both are caught here, BEFORE any feed or job submit, with the reason.
+  pipeline_verify_tm_config || return 1
+
   local mtok
   mtok=$(tail -n +2 "$LIB_MANIFEST" | wc -l)
   [ "$mtok" -ge 1024 ] || { pipeline_fail "manifest has only $mtok tokens; need >=1024"; return 1; }
@@ -315,6 +327,52 @@ pipeline_preflight() {
   mkdir -p "$OUT" "$OUT/bin" "$OUT/j1"
   PIPELINE_PREFLIGHT_OK=1
   pipeline_log "preflight OK (jars, bridge, manifest, port $FAKETOOL_PORT free, fluss up, TM fresh)"
+}
+
+# G23 (2026-09-02): verify the TM's GENERATED config and REGISTERED slots.
+# Called from pipeline_preflight after the TM-registration wait. Fails fast
+# (pipeline_fail carries the WHY + the exact fix command) on:
+#   - config.yaml unreadable / poisoned with '[ERROR]' (entrypoint merge
+#     failed - FLINK_PROPERTIES key collision; see G22 /
+#     check_flink_properties.py)
+#   - localdir / incremental missing from the generated config (silent
+#     drop by the prefix collision; RocksDB would run on the overlay)
+#   - configured or registered slots < PARALLELISM (stale container: a
+#     compose edit needs a RECREATE, not a restart)
+pipeline_verify_tm_config() {
+  local par="${PARALLELISM:-8}"
+  local recreate_hint="recreate the containers (a plain 'docker compose restart' reuses the OLD config): cd code/01_platform/01_docker && docker compose --env-file .env --env-file secrets.env up -d --force-recreate flink-jobmanager flink-taskmanager"
+
+  local cfg
+  cfg="$($COMPOSE exec -T flink-taskmanager cat /opt/flink/conf/config.yaml 2>/dev/null || true)"
+  [ -n "$cfg" ] || { pipeline_fail "G23: cannot read flink-taskmanager /opt/flink/conf/config.yaml - is the container up (or crash-looping? check: docker logs 01_docker-flink-taskmanager-1)"; return 1; }
+  if printf '%s\n' "$cfg" | head -1 | grep -q "ERROR"; then
+    pipeline_fail "G23: TM config.yaml starts with '[ERROR]' - the docker-entrypoint config merge FAILED (FLINK_PROPERTIES key collision; see code/01_platform/04_scripts/check_flink_properties.py, guard G22). The TM will crash-loop. Fix the compose file, then $recreate_hint"
+    return 1
+  fi
+  printf '%s\n' "$cfg" | grep -q "localdir" \
+    || { pipeline_fail "G23: TM config.yaml is missing state.backend.rocksdb.localdir - the FLINK_PROPERTIES merge silently dropped it (prefix collision; RocksDB would run on the container overlay = the CHG-120 ~1.7k/s degradation). See check_flink_properties.py (G22). Fix the compose file, then $recreate_hint"; return 1; }
+  printf '%s\n' "$cfg" | grep -q "incremental" \
+    || { pipeline_fail "G23: TM config.yaml is missing state.backend.incremental - the FLINK_PROPERTIES merge silently dropped it (prefix collision; checkpoints silently lose incremental mode). See check_flink_properties.py (G22). Fix the compose file, then $recreate_hint"; return 1; }
+
+  local slots
+  slots="$(printf '%s\n' "$cfg" | grep -oE "numberOfTaskSlots: ?'?[0-9]+" | grep -oE "[0-9]+" | head -1)"
+  if [ -z "$slots" ] || [ "$slots" -lt "$par" ]; then
+    pipeline_fail "G23: TM config.yaml has numberOfTaskSlots=${slots:-MISSING} but the job needs PARALLELISM=$par - the task would fail on 'unassigned resource'. WHY: a compose edit does NOT reach a restarted container. $recreate_hint"
+    return 1
+  fi
+
+  local reg
+  reg="$(curl -fsS --max-time 5 http://localhost:8081/taskmanagers 2>/dev/null \
+    | python3 -c 'import json,sys
+tms = json.load(sys.stdin).get("taskmanagers", [])
+print(max((t.get("slotsNumber", 0) for t in tms), default=0))' 2>/dev/null || echo 0)"
+  if [ "${reg:-0}" -lt "$par" ]; then
+    pipeline_fail "G23: TM registered only ${reg:-0} slots with the JM but the job needs PARALLELISM=$par - submit would fail on 'unassigned resource' (observed 2026-09-02: compose edit to 16 slots, TM still registered 10). $recreate_hint"
+    return 1
+  fi
+  pipeline_log "G23: TM config verified (localdir+incremental present, slots ${slots} >= PARALLELISM ${par}, registered ${reg})"
+  return 0
 }
 
 # ---------- faketool ----------
@@ -578,6 +636,20 @@ pipeline_submit_job() {
   # data integrity. 3 tolerated = bounded, still fails fast on persistent
   # checkpoint breakage.
   extra_flags+=(-Dexecution.checkpointing.tolerable-failed-checkpoints="${TOLERABLE_FAILED_CHECKPOINTS:-3}")
+  # C2 20k bottleneck (2026-09-02): RocksDB write-path tuning for the
+  # fingerprint-dedup hot operator (74-77% per-subtask occupancy at
+  # 20,480 t/s; every tick = 1 Get + 1 Put on a ~13MB-per-DB 60s-TTL set).
+  # JOB-LEVEL -D flags, NOT docker-compose FLINK_PROPERTIES: adding
+  # state.backend.rocksdb.* keys to that block collides with the
+  # `state.backend` String leaf in YamlParserUtils
+  # convertAndDumpYamlFromFlatMap and crash-loops the TM (observed
+  # 2026-09-02). 4 memtables + 60% write-buffer share + 2 flush threads =
+  # fewer, larger memtable flushes and less compaction stall at the dedup's
+  # write rate. Measure: re-run the 20Hz 180s capture and compare dedup
+  # occupancy (was 74-77%) + source rate (was ~19.85k/s).
+  extra_flags+=(-Dstate.backend.rocksdb.writebuffer.count="${ROCKSDB_WRITEBUFFER_COUNT:-4}")
+  extra_flags+=(-Dstate.backend.rocksdb.memory.write-buffer-ratio="${ROCKSDB_WRITE_BUFFER_RATIO:-0.6}")
+  extra_flags+=(-Dstate.backend.rocksdb.threads.write="${ROCKSDB_THREADS_WRITE:-2}")
   if [ "${UNALIGNED_CHECKPOINTS:-false}" = "true" ]; then
     extra_flags+=(-Dexecution.checkpointing.unaligned=true)
   fi
@@ -586,6 +658,7 @@ pipeline_submit_job() {
     -e DEPLOYMENT_ENV=dev \
     -e CONFIGURATION_VERSION=1.0.0 \
     -e ALGORITHM_VERSION=candle-15s-v1 \
+    -e PARALLELISM="${PARALLELISM:-8}" \
     -e DEDUP_TTL_MS=60000 -e CANDLE_WINDOW_MS=15000 \
     -e WATERMARK_OUT_OF_ORDER_MS="${WATERMARK_OUT_OF_ORDER_MS:-500}" \
     -e CHECKPOINT_INTERVAL_MS="${CHECKPOINT_INTERVAL_MS:-60000}" -e CHECKPOINT_TIMEOUT_MS="${CHECKPOINT_TIMEOUT_MS:-30000}" -e MAX_CONCURRENT_CHECKPOINTS=1 \
