@@ -1,129 +1,150 @@
-# Plan: Stage-by-Stage Latency & Throughput Detection Harness
+# Plan: Stage-by-Stage Latency & Throughput Detection Harness — v2 (evolved)
 
-- **Date**: 2026-09-01
-- **Status**: PROPOSED — awaiting approval to execute
+- **Date (original)**: 2026-09-01
+- **Date (v2 rewrite)**: 2026-09-02
+- **Status**: v2 ACTIVE — proposed, awaiting approval to execute the ramp
 - **Goal parent**: throughput >15k ticks/s sustained, end-to-end latency <4 s
-  (see docs/Investigations/2026-09-01-throughput-degradation.md)
+  (see docs/Investigations_and_Reports/2026-09-01-throughput-degradation.md — RESOLVED for the 10k tier)
 - **Repo**: streaming_project_New
 
-## Aim
+## Progress / evolution log (why this file v2)
 
-Name the exact pipeline stage where throughput collapses and where time is
-spent, with aligned per-stage measurements taken during (a) a fresh/healthy
-window and (b) a degraded window. The stage whose in-rate diverges from its
-out-rate — or whose latency/watermark-lag jumps — is the bottleneck, and
-becomes the single target of the next fix.
-
-## Design principles
-
-1. **Measure, don't instrument**: use Flink's native per-operator metrics
-   (numRecordsIn/Out, latency histograms, watermarks, busy/backpressure/idle)
-   and Fluss's native counters. No per-record timestamps, no code changes in
-   the data path — custom instrumentation would add overhead to the very
-   path under test and could distort the result.
-2. **One aligned timeline**: every source sampled at the same cadence (5 s),
-   written to one run directory. Offline analysis compares stage-by-stage.
-3. **Diagnostic artifacts are offline files (TSV/JSONL) by design** — they are
-   never in the data path and cannot affect latency or throughput. Production
-   data path contains no TSV/JSONL (proto/Arrow → Fluss native → Flink
-   internal → Fluss tables); nothing to replace there.
-4. **Fail-closed**: harness aborts if the job is not RUNNING or the feed is
-   not at the expected rate, so captures are never silently invalid.
-5. **Small, testable, reusable**: the harness is a script in
-   code/01_platform/04_scripts/ with a unit-testable parser, reusing
-   pipeline-lib.sh conventions (bash -n clean, py_compile clean).
-
-## Stages
-
-### Stage A — capture harness (build)
-
-**Deliverable**: `code/01_platform/04_scripts/stage-capture.sh`
-(+ parser module + unit tests).
-
-One run directory per capture: `logs/tracker-14/stage-capture-<timestamp>/`
-with:
-
-| File | Content | Source |
+| When | What | Outcome |
 |---|---|---|
-| `stages.tsv` | per 5 s: epoch, phase, per-operator numRecordsIn/Out (SUM across subtasks), busy/backpressured/idle ms per subtask | JM REST `/jobs/{jid}/vertices/{vid}/subtasks/metrics` |
-| `latency.tsv` | per 5 s: per-operator latency-histogram p50/p90/p99 (metrics.latency.interval=1s already enabled) | TM :9249 Prometheus |
-| `watermark-lag.tsv` | per 5 s: per-source-subtask current watermark + max event-time seen → event-time lag per stage | JM REST + TM Prometheus |
-| `ingestion.tsv` | per 10 s: tick.ththroughput, append ack latencies, pending records | ingestion JVM otlp payload log (existing) |
-| `fluss-side.tsv` | per 10 s: raw_table_1 append rate (coordinator/tablet side) + feature_candles_15s / preview / candidates sink arrival rates | Fluss tablet metrics / logs |
-| `flink-checkpoints.jsonl` | every checkpoint: id, status, e2e duration, size, per-operator start-delay/alignment | JM REST |
-| `run-meta.txt` | RATE_HZ, job id, TM memory config, checkpoint config, host load snapshot | env + REST |
+| 2026-09-01 | Original plan proposed (below, condensed): Stage-by-stage capture harness to find where throughput collapsed | Plan accepted; harness built |
+| 2026-09-01 | Stage A executed — `stage-capture.sh` + parser + tests landed | Harness works, unit-tested |
+| 2026-09-01 | Stage B+C executed **pre-fix** (10Hz load, 15min capture) | Captured the DEGRADED regime (~1.6–3k/s) — first evidence set |
+| 2026-09-01→02 | Root causes isolated **before** further Stages: (1) watermark idleness starved window closing under backpressure; (2) RocksDB managed-memory fraction 0.4→0.6 | Both fixed, validated at **9,950/s sustained** |
+| 2026-09-02 | C2 TM-kill drill full-chain PASS (G7c 33,792/0, F4 0 orphans) | Pipeline correct + full-load stable at the 10.24k feed |
+| 2026-09-02 | **v2 rewrite**: the original Stage C question ("which stage degrades?") is ANSWERED — the hunt shifts from *degradation* to *next bottleneck at higher rates* | This file |
 
-**Acceptance**: dry-run against a live RUNNING job produces all files with
-sane shapes; parser unit tests green (fixture-based, no live dependency);
-bash -n clean; docs-audit unaffected.
+**Key shift:** the original plan hunted a mystery collapse. We found it and fixed it
+(no per-stage divergence needed — the collapse was systemic: watermark idleness +
+RocksDB sizing, provable from the old captures + the fixes' validation). What remains
+is the ORIGINAL 15k goal: find the *next* limiter as the feed scales up, and
+decompose the latency budget. That is this v2.
 
-### Stage B — baseline capture (fresh window)
+## Aim (v2)
 
-Run: RATE_HZ=10, load start, capture minutes 0-3 (the window where the job
-historically sustains ~12k/s).
+1. **Throughput**: name the exact stage that limits sustained rate as the feed
+   ramps 10.24k → 12.5k → 15k ticks/s. The stage whose in-rate diverges from its
+   out-rate — or that shows busy while upstream shows backpressure — is the
+   bottleneck and the single target of the next fix.
+2. **Latency**: decompose the measured tick→preview p50 (611ms at 10.24k) into a
+   per-stage budget — feed→ack, read-lag, in-Flink, commit→read — so optimization
+   targets the largest segment, not guesses.
 
-**Deliverable**: baseline dataset + a one-page summary table: per stage,
-in-rate, out-rate, per-record cost (busy-time/rate), latency percentiles,
-watermark lag.
+## Design principles (unchanged from v1 — proven correct)
 
-**Acceptance**: capture completed with job RUNNING throughout; every stage
-row populated; baseline table committed with the dataset path.
+1. **Measure, don't instrument**: native Flink/Fluss metrics only. No per-record
+   timestamps, no data-path code changes — instrumentation would add overhead to
+   the path under test and distort the numbers.
+2. **One aligned timeline**: every source sampled at the same cadence (5s), one run
+   directory, offline analysis. Diagnostic artifacts are offline TSV/JSONL only —
+   never in the data path.
+3. **Fail-closed**: harness aborts if the job is not RUNNING or the feed is not at
+   the expected rate; captures are never silently invalid.
+4. **A/B validation for anything active**: any probe that touches Fluss while the
+   pipeline runs gets a with/without run at one tier first, to prove the delta is
+   noise (target: ≤1 read/s = 0.01% of write load).
+5. **One lever at a time** after the verdict; re-measure the same tier after each
+   change.
 
-### Stage C — degraded capture (same run, later window)
+## Reused assets (already built, zero new cost)
 
-Same load run, continue capture at minutes 5-15 (degraded regime).
+- `stage-capture.sh` + `stage_capture_parse.py` + tests — per-5s per-operator
+  numRecordsIn/Out, busy/backpressured/idle, latency histograms, watermark lag,
+  ingestion counters, fluss-side rates, checkpoint jsonl (Stage A deliverable).
+- Flink latency histograms already on (`metrics.latency.interval=2000`) in every drill.
+- `holistic-analyze.py` — drill-time e2e measurements (preview e2e, window-close→commit).
+- `tm-kill-full-load.sh` — proven load-gen + lifecycle harness (lock-serialized).
 
-**Deliverable**: comparison table (fresh vs degraded) per stage; **the
-divergence list** — stages where in-rate vs out-rate or latency/lag diverge
-between windows, ranked.
+## Stages (v2)
 
-**Acceptance**: the bottleneck stage(s) named with numbers, not adjectives.
-If ALL stages flow evenly and only the source stalls (as aggregate data
-suggests), that itself is a named result: the throttle is at the source's
-emit/fetch boundary or its input buffers, and Stage E targets it.
+### Stage A2 — fresh baseline at current code (10.24k)
 
-### Stage D — end-to-end latency
+Re-capture with the FIXED pipeline (the v1 Stage B capture predates the watermark
++ RocksDB fixes → invalid as baseline).
 
-Read feature_candles_15s_preview (preview rows carry window_start) during
-both windows; compute tick→preview-row latency distribution (max event-time
-in raw vs read time of the preview row). Same for early-signal candidates.
+- Run: RATE_HZ=10, 12 min load, stage-capture throughout.
+- Deliverable: per-stage in-rate / out-rate / busy% / latency / watermark-lag table
+  for the current healthy steady state; the 611ms-p50 baseline budget (known total,
+  unbudgeted).
 
-**Deliverable**: latency histogram per window; explicit answer to "is
-tick→preview < 4 s achievable at 10 Hz?" (final candles are floored at the
-15 s window by definition — measured, but reported separately).
+### Stage B2 — the two missing passive checkpoints (build, small)
 
-### Stage E — verdict + fix target
+1. **CP3→CP4 read lag** (Fluss append → Flink source consume): source offsets vs
+   appended count, sampled — both numbers already exist in metrics; this is a
+   subtraction, purely passive, zero hot-path cost.
+2. **CP9→CP10 consumer-read probe** (row committed → readable): one throttled
+   reader sampling latest preview row with timestamps, 1 read/s max. Active but
+   negligible; A/B-validated at one tier before trusting.
 
-**Deliverable**: update
-docs/Investigations/2026-09-01-throughput-degradation.md with: named
-bottleneck, evidence, chosen fix (one of: config, single-operator code,
-infrastructure), and re-measurement criteria. Fix implementation and its
-validation are a separate follow-up plan (not this one).
+### Stage C2 — rate ramp to find the NEXT bottleneck
 
-## What this plan deliberately does NOT do
+| Tier | Load | Capture | Question answered |
+|---|---|---|---|
+| 1 | 10.24k/s (RATE_HZ=10) | full stage capture | fresh baseline (Stage A2 already produced; reuse) |
+| 2 | 12.5k/s (RATE_HZ≈12.2) | full stage capture | first divergence appears? which stage? |
+| 3 | 15k/s (RATE_HZ≈14.6) | full stage capture | does the feed sustain 15k? where does it break? |
+
+Per-stage verdict rule at each tier (unchanged from v1, now the core method):
+
+```
+stage in-rate ≈ out-rate, all busy% high   → whole pipeline CPU-bound (scale problem)
+one stage: in > out, it is busy             → THAT operator is the bottleneck (code target)
+one stage: in > out, it is backpressured    → bottleneck is DOWNSTREAM of it (follow chain)
+source stalls, everything idle              → feed or Fluss read side (CP3→CP4)
+```
+
+Deliverable: per-tier divergence table + the named bottleneck stage with numbers.
+
+**Feed caveat:** faketool is currently the known bound at 10,240/s — tier 2/3 need
+a feed-rate bump first (faketool `-real-rate-hz` parameter; verify real-rate
+confirmation line, fail-closed if the feed can't deliver).
+
+### Stage D2 — latency budget decomposition
+
+Stack the 611ms total from passive timestamps:
+feed→ack (ingestion counters) + CP3→CP4 read lag (A2/B2) + in-Flink source→operator
+(latency markers) + window-close→commit (output_ts − window_end, known p50 1.6s for
+finals; preview path uses its own stamp) + commit→consumer-read (B2 probe).
+
+Deliverable: stacked budget table where segments sum ≈ the measured total; the
+largest segment is the latency fix target. Final candles stay floored at 15s by
+design (reported separately; optimization target = preview/early-signal path only).
+
+### Stage E2 — verdict + fix target
+
+Update the throughput investigation doc with: named bottleneck (throughput) +
+largest latency segment, evidence, chosen fix (config / single-operator code /
+infrastructure), re-measurement criteria. Fix implementation is a SEPARATE
+follow-up plan (not this file).
+
+## What this plan deliberately does NOT do (unchanged)
 
 - No code changes in the SignalJob data path.
-- No custom per-record instrumentation (native metrics only).
-- No serialization/format changes anywhere (data path has no TSV/JSONL).
-- No capacity tuning experiments (RocksDB buffers, checkpoint contract) —
-  those follow the verdict, one lever at a time.
+- No custom per-record instrumentation; no serialization/format changes.
+- No capacity tuning experiments before the verdict (RocksDB buffers, checkpoint
+  contract) — those follow, one lever at a time.
 - No production-sizing claims — single-box findings only.
+- No second "degradation hunt" — that question is answered (see evolution log).
 
 ## Risks / open questions
 
-- Flink 2.2's busy/backpressure metrics have shown inconsistent shapes via
-  REST (empty arrays on some vertices) — Stage A must verify per-vertex
-  availability first and fall back to TM Prometheus for those metrics.
-- Latency histograms are source-to-operator (Flink latency markers), not
-  tick-to-table; Stage D fills the true end-to-end gap.
-- TM Prometheus scrape of ~80 operators × histograms every 5 s is ~200 KB/scrape —
-  verified fine earlier (the drill already scrapes at this cadence).
-- If degradation refuses to reproduce in a clean session (it has been
-  intermittent), Stage C retries up to 3 times before declaring
-  "needs longer soak" and reports which hypothesis that supports.
+- Flink 2.2 busy/backpressure REST shapes were inconsistent for some vertices in
+  v1 — Stage A2 re-verifies per-vertex availability first; TM Prometheus fallback.
+- Latency histograms are source-to-operator, NOT tick-to-table — Stage D2 uses the
+  passive table-row stamps for the true e2e; the histograms only bound the in-Flink
+  segment.
+- Feed rate at 12.5k/15k unproven — fail-closed check first (feed is the cheapest
+  potential answer: if faketool can't sustain, the "bottleneck" is the harness).
+- Power-cut incident 2026-09-02 (host reboot mid-analysis) — runbooks now assume
+  captures may need standalone re-analysis; evidence files are the durable truth.
 
-## Sequencing note (user-directed)
+## Sequencing
 
-Investigation order agreed with the user: let all running tests complete →
-document evidence (done: Investigations doc) → build this plan → execute
-Stages A-E → only then change anything.
+1. Write v2 file (this). Wait for approval.
+2. Stage A2 (fresh baseline) → Stage B2 (two passive checkpoints, A/B-validated).
+3. Stage C2 tiers → Stage D2 budget → Stage E2 verdict.
+4. One fix lever → re-measure same tier → update investigation doc.
