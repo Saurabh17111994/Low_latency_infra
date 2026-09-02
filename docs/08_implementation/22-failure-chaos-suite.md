@@ -12,6 +12,15 @@ cluster-shaped assertions run against the live stack / Swarm and SKIP
 cleanly when the prerequisite is absent — because the deployment tests run
 later, serially, by the main agent.
 
+> **2026-09-02 supplement — C2 TM-kill-at-full-load drill (tracker-14 Block 1):**
+> beyond this suite's chaos-02 (kill on an idle-ish job), the C2 drill
+> (`code/01_platform/04_scripts/tm-kill-full-load.sh`, CHG-120/CHG-121) kills
+> the TaskManager under FULL load (10,240 ticks/s) with recovery, checkpoint
+> continuity, single-restart, drain, G7c zero-loss parity, and F4
+> settlement gates. Main-mode PASS 2026-09-02
+> (`tm-kill-full-load-20260902-121511`: G7c 33,792/0, F4 0 orphans,
+> recovery 52s). See CHG-121 for the five-fix hardening history.
+
 ## Files
 
 | Path | Role |

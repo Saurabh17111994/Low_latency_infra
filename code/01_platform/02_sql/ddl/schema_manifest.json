@@ -4,13 +4,13 @@
     {
       "table_name": "raw_table_1",
       "ddl_path": "02_raw_table_1.sql",
-      "ddl_sha256": "5bee5140b2c5d90ccaafe46a99ef2519fc3e42ef6ddd3a04a5c1a848b1cf3ecd",
+      "ddl_sha256": "08601b8768e8c1c0869803714ed99d4ba08e41622a4c74b3fddb3bab21af4c01",
       "table_kind": "LOG",
       "bucket_key": "instrument_token",
       "primary_key": null,
       "compatibility_class": "UNKNOWN",
       "validated_matrix": "VM-FLUSS-SRV-005",
-      "schema_version": "2",
+      "schema_version": "3",
       "writer_owner": "Ingestion",
       "retention_policy": "7d",
       "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
@@ -392,6 +392,20 @@
       "writer_owner": "Signal job",
       "retention_policy": "60s",
       "lake_policy": "enabled=false"
+    },
+    {
+      "table_name": "Signal_Tentative_Markers",
+      "ddl_path": "31_signal_tentative_markers.sql",
+      "ddl_sha256": "b605ef3bc311341fa2a6922c259464b9c5a9c32c017ede19f7f6ef8f27ff9ad1",
+      "table_kind": "KV",
+      "primary_key": "candidate_id",
+      "bucket_key": null,
+      "compatibility_class": "UNKNOWN",
+      "validated_matrix": "VM-FLUSS-SRV-005",
+      "schema_version": "1",
+      "writer_owner": "Signal job (sole writer)",
+      "retention_policy": "2d",
+      "lake_policy": "off"
     }
   ]
 }

@@ -41,7 +41,7 @@ that time" (e.g. "(2026-08-10: ... 21 tables ...)") — a distant date on the
 same line does NOT hide a stale code description.
 
 Test-count drift claims (same tiers, truth from the docs-audit C6 line,
-01-foundation.md L3 — TEST_COUNT_TRUTH below, currently 466/247/388):
+01-foundation.md L3 — TEST_COUNT_TRUTH below, currently 489/285/419):
 
   * test-count-stale -> "common N" / "ingestion N" / "compute N" (or
                         "N common/ingestion/compute tests") claims where N
@@ -184,7 +184,8 @@ NUMERIC_CLAIM_TYPES = (
 # Test-count drift: "common N" / "ingestion N" / "compute N" (or "N
 # common/ingestion/compute tests") claims whose count differs from the
 # current docs-audit C6 truth (01-foundation.md L3: unit suites green
-# 466/247/386 — common/ingestion/compute; 2026-08-26 stale-code audit
+# 489/285/419 — common/ingestion/compute; 2026-09-01 C2 hardening added
+# two DDL partition-preservation guard tests; 2026-08-26 stale-code audit
 # compute 388→386 (ActiveSignalFilterFunctionTest deleted −4, feedback
 # test +2); 2026-08-25 CHG-102 re-verified
 # 466/247/388 (surefire 469 minus 3 gated FlussBundleReader* reports — C6
@@ -198,7 +199,7 @@ NUMERIC_CLAIM_TYPES = (
 # DEC-038, −10/−2/−11 CHG-023, +2 forming-bar CHG-030; 2026-08-24 bump to 464/247/387,
 # 2026-08-25 CHG-100 to 466/247/387.
 # counts fire.
-TEST_COUNT_TRUTH = {"common": 466, "ingestion": 247, "compute": 386}
+TEST_COUNT_TRUTH = {"common": 489, "ingestion": 285, "compute": 419}
 TEST_COUNT_CLAIM_TYPES = (
     (
         "test-count-stale",
@@ -212,11 +213,11 @@ TEST_COUNT_CLAIM_TYPES = (
 
 # docs-audit C6 triple citations: "docs-audit C6 line N/N/N" where the three
 # counts (common/ingestion/compute) differ from the current C6 truth.
-C6_TRIPLE_TRUTH = (466, 247, 386)
+C6_TRIPLE_TRUTH = (489, 285, 419)
 
 # Current suite triples per module ("N run / 0 failures / M skips") — bare
 # N/0/M-skips claims carry no module word, so they need their own truth.
-SUITE_TRIPLE_TRUTH = {"common": (466, 0, 2), "ingestion": (247, 0, 8), "compute": (386, 0, 22)}
+SUITE_TRIPLE_TRUTH = {"common": (489, 0, 2), "ingestion": (285, 0, 8), "compute": (419, 0, 22)}
 
 # A "now/current N" count claim reads as CURRENT state regardless of any
 # nearby date marker (2026-08-18 masking class, CHG-033 follow-up): the

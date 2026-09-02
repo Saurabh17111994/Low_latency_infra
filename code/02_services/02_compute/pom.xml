@@ -115,9 +115,25 @@
       <version>2.25.4</version>
       <scope>test</scope>
     </dependency>
+    <!-- The Flink image supplies the Fluss connector and client in
+         /opt/flink/lib.  Keeping this dependency compile-scoped made the
+         shade plugin copy ~9,000 org.apache.fluss classes into compute.jar;
+         that duplicated the interface used by Fluss' HDFS/S3 ServiceLoader
+         providers and caused HdfsSecurityTokenReceiver "not a subtype" at
+         source startup (C2, 2026-09-01).  Provided keeps the API available to
+         javac/tests without shipping a second Fluss class universe. -->
     <dependency>
       <groupId>org.apache.fluss</groupId>
       <artifactId>fluss-flink-2.2</artifactId>
+      <scope>provided</scope>
+    </dependency>
+    <!-- common has a compile-scoped fluss-client dependency for DdlApplyTool;
+         override it here so shading common cannot reintroduce the duplicate
+         client transitively. -->
+    <dependency>
+      <groupId>org.apache.fluss</groupId>
+      <artifactId>fluss-client</artifactId>
+      <scope>provided</scope>
     </dependency>
     <!-- Native OpenTelemetry metric reporter (CHG-023 item 1, 2026-08-17):
          replaces the hand-rolled ComputeOtlpEmitter metric half. The 2.2.1

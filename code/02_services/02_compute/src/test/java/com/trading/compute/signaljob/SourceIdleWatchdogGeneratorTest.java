@@ -15,10 +15,14 @@ import org.junit.jupiter.api.Test;
 
 /**
  * SourceIdleWatchdogGenerator behavior with an injectable clock (tracker 14
- * P7/P10 — 2026-08-13 misdiagnosis lesson): the watchdog is observability
- * ONLY — it must never alter watermark emission (pure pass-through), must log
- * ONE alert per idle EPISODE (not per periodic tick), and must re-arm after
- * records resume.
+ * P7/P10 — 2026-08-13 misdiagnosis lesson; wall-clock idle marking added
+ * 2026-09-01 CHG-120): the watchdog marks the split idle after
+ * SOURCE_IDLE_MS of WALL-CLOCK silence (the withIdleness pausable clock is
+ * frozen by backpressure under load — the CHG-120 zero-emission root cause),
+ * reactivates it on the first record (markActive covers a non-advancing
+ * first record), never alters the DELEGATE's watermark emission (pure
+ * pass-through), and logs ONE alert per idle EPISODE (not per periodic
+ * tick).
  *
  * <p>CHG-023 item 1 (2026-08-17): the client-side {@code compute.source.idle.
  * at.tail} DELTA mirror was removed with ComputeOtlpEmitter — the episode
@@ -39,6 +43,7 @@ class SourceIdleWatchdogGeneratorTest {
         generator =
                 new SourceIdleWatchdogGenerator(
                         CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L),
+                        15_000L,
                         60_000L,
                         clock::get);
     }
@@ -141,8 +146,97 @@ class SourceIdleWatchdogGeneratorTest {
                 "periodic emits must still reach the delegate while idle");
     }
 
+    // ------------------------------------------------------------------
+    // Wall-clock idle marking (CHG-120): a split silent for SOURCE_IDLE_MS
+    // of WALL time is marked idle even when the withIdleness pausable clock
+    // would be frozen by backpressure — the mechanism that pinned the
+    // combined watermark at Long.MIN_VALUE behind the empty future-day
+    // partition splits under drill load.
+    // ------------------------------------------------------------------
+
+    @Test
+    void marksSplitIdleAfterWallClockSilence() {
+        RecordingOutput output = new RecordingOutput();
+        generator.onEvent(null, 10_000L, output);
+        clock.set(clock.get() + 15_000L); // exactly SOURCE_IDLE_MS
+
+        generator.onPeriodicEmit(output);
+
+        assertEquals(1, output.idleCalls,
+                "wall-clock silence >= SOURCE_IDLE_MS must mark the split idle exactly once");
+    }
+
+    @Test
+    void noIdleMarkingWhileRecordsFlow() {
+        RecordingOutput output = new RecordingOutput();
+        generator.onEvent(null, 10_000L, output);
+        clock.set(clock.get() + 14_999L); // 1 ms under the threshold
+        generator.onPeriodicEmit(output);
+        assertEquals(0, output.idleCalls, "silence below SOURCE_IDLE_MS must not mark idle");
+
+        // Regular traffic resets the wall clock: never idle.
+        generator.onEvent(null, 11_000L, output);
+        clock.set(clock.get() + 5_000L);
+        generator.onPeriodicEmit(output);
+        assertEquals(0, output.idleCalls, "flowing splits must never be marked idle");
+    }
+
+    @Test
+    void idleMarkingIsEdgeTriggeredPerEpisode() {
+        RecordingOutput output = new RecordingOutput();
+        generator.onEvent(null, 10_000L, output);
+        clock.set(clock.get() + 15_000L);
+        generator.onPeriodicEmit(output);
+
+        // Still silent — later periodic ticks must NOT re-mark (mirrors
+        // WatermarksWithIdleness.isIdleNow edge semantics; PartialWatermark
+        // would forward every repeated onIdleUpdate to the listener).
+        clock.set(clock.get() + 60_000L);
+        generator.onPeriodicEmit(output);
+        generator.onPeriodicEmit(output);
+        assertEquals(1, output.idleCalls, "one markIdle per idle episode, not per tick");
+    }
+
+    @Test
+    void firstRecordAfterIdleMarkReactivatesSplit() {
+        RecordingOutput output = new RecordingOutput();
+        generator.onEvent(null, 10_000L, output);
+        clock.set(clock.get() + 15_000L);
+        generator.onPeriodicEmit(output);
+        assertEquals(1, output.idleCalls);
+
+        // First record after idle: markActive is REQUIRED alongside the
+        // delegate's watermark because a non-advancing (stale) record emits
+        // nothing — without markActive the split would stay excluded from
+        // the combined minimum while delivering data again.
+        clock.set(clock.get() + 1_000L);
+        // STALE record (older than the running max): the bounded delegate
+        // emits NO watermark, so only markActive re-includes the split.
+        generator.onEvent(null, 9_000L, output);
+        assertEquals(1, output.activeCalls,
+                "the first record after an idle-mark must reactivate the split");
+
+        // And the next periodic emit does not re-mark idle (episode ended).
+        clock.set(clock.get() + 200L);
+        generator.onPeriodicEmit(output);
+        assertEquals(1, output.idleCalls, "no re-mark inside the reactivated episode");
+    }
+
+    @Test
+    void idleFromSourceOpenMarksIdleWithoutAnyEvent() {
+        // Empty future-day partition splits NEVER see a record: idle time
+        // runs from generator creation (source open) and must still mark.
+        RecordingOutput output = new RecordingOutput();
+        clock.set(clock.get() + 15_000L);
+        generator.onPeriodicEmit(output);
+        assertEquals(1, output.idleCalls,
+                "a never-data split must be marked idle after SOURCE_IDLE_MS from open");
+    }
+
     private static final class RecordingOutput implements WatermarkOutput {
         private final java.util.List<Long> timestamps = new java.util.ArrayList<>();
+        private int idleCalls;
+        private int activeCalls;
 
         @Override
         public void emitWatermark(Watermark watermark) {
@@ -150,9 +244,13 @@ class SourceIdleWatchdogGeneratorTest {
         }
 
         @Override
-        public void markIdle() {}
+        public void markIdle() {
+            idleCalls++;
+        }
 
         @Override
-        public void markActive() {}
+        public void markActive() {
+            activeCalls++;
+        }
     }
 }

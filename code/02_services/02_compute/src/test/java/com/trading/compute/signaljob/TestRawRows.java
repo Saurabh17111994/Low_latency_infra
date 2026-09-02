@@ -6,7 +6,7 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 
 /**
- * Test fixture builder for {@code raw_table_1} v2 rows (20 columns, DDL order).
+ * Test fixture builder for {@code raw_table_1} v3 rows (21 columns, DDL order).
  * Only the columns the operators read need values; the rest default to null.
  */
 final class TestRawRows {
@@ -16,6 +16,7 @@ final class TestRawRows {
     static GenericRowData row(long instrumentToken, long eventTime, String fingerprint,
             String tickType, long pricePaise, long qty) {
         GenericRowData row = new GenericRowData(RawTableColumns.FIELD_COUNT);
+        row.setField(RawTableColumns.EVENT_DAY, StringData.fromString("20260901"));
         row.setField(RawTableColumns.EVENT_FINGERPRINT, StringData.fromString(fingerprint));
         row.setField(RawTableColumns.FINGERPRINT_VERSION, StringData.fromString("v2"));
         row.setField(RawTableColumns.INSTRUMENT_TOKEN, instrumentToken);

@@ -35,6 +35,10 @@
 #   B4. Full-replay mode re-downloads tiered log segments (~80s each,
 #       ~6 min cold) and stalls barriers past a 30s checkpoint timeout →
 #       job FAILs. LATEST startup mode is the default here.
+#   B6. Shading Fluss into compute.jar creates a second class universe. The
+#       Flink image owns the connector/client; the pre-submit artifact guard
+#       below rejects duplicate org.apache.fluss classes before a job can
+#       reach RUNNING with a broken ServiceLoader (C2, 2026-09-01).
 # =============================================================================
 
 # Paths (derived from ROOT so callers only set ROOT + OUT)
@@ -47,7 +51,12 @@ FAKETOOL_PORT="${FAKETOOL_PORT:-8899}"
 LIB_COMPOSE_FILE="$ROOT/code/01_platform/01_docker/docker-compose.yml"
 # B1 guard: always carry both env files.
 COMPOSE="docker compose -f $LIB_COMPOSE_FILE --env-file $ROOT/code/01_platform/01_docker/.env --env-file $ROOT/code/01_platform/01_docker/secrets.env"
+LIB_COMPOSE_DIR="$ROOT/code/01_platform/01_docker"
 LIB_CP_FILE="$ROOT/code/02_services/01_ingestion/target/cp.txt"
+FLUSS_COORDINATOR_CONTAINER="${FLUSS_COORDINATOR_CONTAINER:-01_docker-fluss-coordinator-1}"
+FLUSS_TABLET_CONTAINER="${FLUSS_TABLET_CONTAINER:-01_docker-fluss-tablet-1}"
+FLUSS_READY_TIMEOUT_S="${FLUSS_READY_TIMEOUT_S:-180}"
+FLUSS_READY_TABLE="${FLUSS_READY_TABLE:-raw_table_1}"
 
 # Run state (owned by the lib; teardown reads these)
 FAKETOOL_PID=""
@@ -56,6 +65,54 @@ JOB_ID=""
 
 pipeline_log() { echo "[pipeline $(date +%H:%M:%S)] $*"; }
 pipeline_fail() { echo "[pipeline FATAL] $*" >&2; return 1; }
+
+# ---------- compute artifact classpath guard (B6) ----------
+# The Flink image is the single owner of org.apache.fluss.* at runtime. A
+# shaded copy in compute.jar can make ServiceLoader load a provider (for
+# example HdfsSecurityTokenReceiver) against a different SecurityTokenReceiver
+# interface, producing the misleading "not a subtype" failure only when the
+# source first touches tiered storage. Reject the artifact before copying or
+# submitting it so the failure is local, deterministic, and actionable.
+pipeline_validate_compute_jar() {
+  command -v jar >/dev/null 2>&1 \
+    || { pipeline_fail "JDK jar tool missing — cannot validate compute.jar classpath"; return 1; }
+  jar tf "$LIB_JAR" >/dev/null 2>&1 \
+    || { pipeline_fail "compute.jar is not a readable ZIP/JAR: $LIB_JAR"; return 1; }
+  local fluss_classes fluss_services
+  fluss_classes=$(jar tf "$LIB_JAR" 2>/dev/null \
+    | awk '/^org\/apache\/fluss\/.*\.class$/ { n++ } END { print n + 0 }')
+  [ "${fluss_classes:-0}" -eq 0 ] \
+    || { pipeline_fail "compute.jar bundles $fluss_classes org.apache.fluss classes — Flink /opt/flink/lib must be the single Fluss classpath owner; rebuild with fluss dependencies provided"; return 1; }
+  fluss_services=$(jar tf "$LIB_JAR" 2>/dev/null \
+    | grep -c '^META-INF/services/org\.apache\.fluss\.' || true)
+  [ "${fluss_services:-0}" -eq 0 ] \
+    || { pipeline_fail "compute.jar bundles $fluss_services Fluss ServiceLoader descriptors — refusing a split Fluss runtime"; return 1; }
+}
+
+# ---------- Compose bind-source guard (B7) ----------
+# Docker Compose creates a directory when a short-syntax bind source is
+# missing. The later container start then fails with the opaque OCI error
+# "not a directory" (observed 2026-09-01 after the plugin artifacts were
+# temporarily absent). Keep the existing short syntax for compatibility, but
+# refuse to run a measurement until every file-mounted source is a regular
+# file. This turns a daemon-time failure into a local actionable failure.
+pipeline_validate_compose_bind_sources() {
+  local relative path
+  for relative in \
+    "flink-log4j-console.properties" \
+    "alert-consumer.py" \
+    "fluss-plugins/iceberg/fluss-flink-2.2-0.9.1-incubating.jar" \
+    "fluss-plugins/iceberg/fluss-flink-tiering-0.9.1-incubating.jar" \
+    "fluss-plugins/iceberg/fluss-lake-iceberg-0.9.1-incubating.jar" \
+    "fluss-plugins/iceberg/fluss-fs-s3-0.9.1-incubating.jar" \
+    "fluss-plugins/iceberg/fluss-fs-hdfs-0.9.1-incubating.jar" \
+    "fluss-plugins/iceberg/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar" \
+    "fluss-plugins/iceberg/hadoop-mapreduce-compat-2.8.5.jar"; do
+    path="$LIB_COMPOSE_DIR/$relative"
+    [ -f "$path" ] \
+      || { pipeline_fail "Compose bind source is missing or not a regular file: $path (short bind syntax otherwise creates a directory and the container fails with OCI exit 127)"; return 1; }
+  done
+}
 
 # ---------- rate validation (mirrors loadtest-run.sh B1) ----------
 pipeline_validate_rate() {
@@ -80,12 +137,94 @@ pipeline_port_free() {
   return 0
 }
 
+# ---------- Fluss readiness (B8 guard) --------------------------------------
+# A running coordinator is not enough to serve table metadata: after an
+# unclean tablet shutdown the coordinator can accept connections while every
+# table bucket is still leaderless.  TablePurge then fails with the misleading
+# "Alive tablet server is empty".  Require both client listeners and both
+# containers to be running before any table drop/create or job submission.
+pipeline_fluss_port_open() {
+  local host="$1" port="$2"
+  (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null
+}
+
+pipeline_compile_fluss_ready_probe() {
+  local probe="$OUT/FlussReadyProbe.java"
+  cat > "$probe" <<'JAVAEOF'
+import org.apache.fluss.client.Connection;
+import org.apache.fluss.client.ConnectionFactory;
+import org.apache.fluss.client.admin.Admin;
+import org.apache.fluss.config.Configuration;
+import org.apache.fluss.metadata.TablePath;
+import java.util.concurrent.TimeUnit;
+
+/** Read-only readiness probe: client metadata initialization requires a live tablet. */
+public class FlussReadyProbe {
+    public static void main(String[] args) throws Exception {
+        String table = args.length > 0 ? args[0] : "raw_table_1";
+        Configuration conf = new Configuration();
+        conf.setString("bootstrap.servers", "localhost:9123");
+        try (Connection connection = ConnectionFactory.createConnection(conf);
+             Admin admin = connection.getAdmin()) {
+            var info = admin.getTableInfo(TablePath.of("default", table))
+                    .get(5, TimeUnit.SECONDS);
+            if (info.getNumBuckets() <= 0) {
+                throw new IllegalStateException("table has no buckets: " + table);
+            }
+            System.out.println("READY " + info.getTablePath());
+        }
+    }
+}
+JAVAEOF
+  javac -cp "$CP" -d "$OUT" "$probe" > "$OUT/fluss-ready-compile.log" 2>&1 \
+    || { pipeline_fail "Fluss readiness probe compilation failed — see $OUT/fluss-ready-compile.log"; return 1; }
+}
+
+pipeline_fluss_metadata_ready() {
+  java --add-opens=java.base/java.lang=ALL-UNNAMED \
+    --add-opens=java.base/java.nio=ALL-UNNAMED \
+    -cp "$OUT:$CP" FlussReadyProbe "$FLUSS_READY_TABLE" \
+    > "$OUT/fluss-ready-probe.log" 2>&1
+}
+
+pipeline_wait_for_fluss_ready() {
+  case "$FLUSS_READY_TIMEOUT_S" in
+    ''|*[!0-9]*|0)
+      pipeline_fail "FLUSS_READY_TIMEOUT_S='$FLUSS_READY_TIMEOUT_S' must be a positive integer"
+      return 1
+      ;;
+  esac
+  local i coord_state tablet_state
+  for ((i=0; i<FLUSS_READY_TIMEOUT_S; i+=2)); do
+    coord_state="$(docker inspect --format '{{.State.Status}}' "$FLUSS_COORDINATOR_CONTAINER" 2>/dev/null || true)"
+    tablet_state="$(docker inspect --format '{{.State.Status}}' "$FLUSS_TABLET_CONTAINER" 2>/dev/null || true)"
+    if [ "$coord_state" = "running" ] && [ "$tablet_state" = "running" ] \
+        && pipeline_fluss_port_open 127.0.0.1 9123 \
+        && pipeline_fluss_port_open 127.0.0.1 9124 \
+        && pipeline_fluss_metadata_ready; then
+      pipeline_log "Fluss ready (coordinator/tablet listeners + metadata probe; waited ${i}s)"
+      return 0
+    fi
+    if (( i == 0 || i % 20 == 0 )); then
+      pipeline_log "waiting for Fluss tablet readiness (coordinator=$coord_state tablet=$tablet_state, elapsed=${i}s)"
+    fi
+    sleep 2
+  done
+  coord_state="$(docker inspect --format '{{.State.Status}}' "$FLUSS_COORDINATOR_CONTAINER" 2>/dev/null || echo missing)"
+  tablet_state="$(docker inspect --format '{{.State.Status}}' "$FLUSS_TABLET_CONTAINER" 2>/dev/null || echo missing)"
+  pipeline_fail "Fluss did not become ready within ${FLUSS_READY_TIMEOUT_S}s (coordinator=$coord_state tablet=$tablet_state; see $OUT/fluss-ready-probe.log; inspect tablet logs and run code/01_platform/04_scripts/fluss-repair/repair-tablet.sh for a crash-looping tablet)"
+  return 1
+}
+
 # ---------- preflight ----------
 # Checks artifacts, kills stray faketools, verifies the port is free,
 # restarts the TM (B3), resolves the 1024-token set, creates $OUT.
 # On success sets: CP, TOKENS (caller-readable).
 pipeline_preflight() {
+  mkdir -p "$OUT" "$OUT/bin" "$OUT/j1"
   [ -f "$LIB_JAR" ] || { pipeline_fail "compute jar missing: $LIB_JAR (run: cd code/02_services/02_compute && mvn package)"; return 1; }
+  pipeline_validate_compute_jar || return 1
+  pipeline_validate_compose_bind_sources || return 1
   [ -f "$LIB_ING_JAR" ] || { pipeline_fail "ingestion jar missing: $LIB_ING_JAR"; return 1; }
   [ -f "$LIB_CP_FILE" ] || { pipeline_fail "ingestion classpath file missing: $LIB_CP_FILE (run mvn package in 01_ingestion)"; return 1; }
   [ -f "$LIB_BRIDGE_DIR/arrow-bridge" ] || { pipeline_fail "arrow-bridge binary missing: $LIB_BRIDGE_DIR/arrow-bridge"; return 1; }
@@ -99,8 +238,12 @@ pipeline_preflight() {
   [ -z "$stray" ] || { pipeline_log "WARN: killing stray faketool(s): $stray"; for p in $stray; do kill -9 "$p" 2>/dev/null || true; done; sleep 1; }
 
   # Fluss must be reachable (tables applied)
-  docker exec 01_docker-fluss-coordinator-1 sh -c 'exit 0' 2>/dev/null \
+  docker exec "$FLUSS_COORDINATOR_CONTAINER" sh -c 'exit 0' 2>/dev/null \
     || { pipeline_fail "fluss-coordinator container not up — run make up first"; return 1; }
+  CP="$(cat "$LIB_CP_FILE")"
+  [ -n "$CP" ] || { pipeline_fail "empty classpath from $LIB_CP_FILE"; return 1; }
+  pipeline_compile_fluss_ready_probe || return 1
+  pipeline_wait_for_fluss_ready || return 1
   # B3 guard: fresh TM for every run.
   pipeline_log "restarting flink-taskmanager for direct-buffer hygiene..."
   $COMPOSE restart flink-taskmanager >/dev/null 2>&1 \
@@ -110,22 +253,20 @@ pipeline_preflight() {
   # allowing job submit. A container "running" is not enough — observed job
   # f074d765 submitted while Registered TMs: 0 → NoResourceAvailableException
   # → job RESTARTING → phase aborted. Poll /taskmanagers for up to 60s.
-  # NOTE: /taskmanagers returns {"taskmanagers":[...]} — assert on a non-empty
-  # array (first pass of this guard grepped a nonexistent numRegisteredTMs
-  # field and false-failed while the TM was registered).
+  # NOTE: /taskmanagers returns {"taskmanagers":[...]} — parse JSON and assert
+  # on a non-empty array (the first pass grepped a nonexistent numRegisteredTMs
+  # field and a later pass was whitespace-sensitive).
   local tm_ok=0 tm_i
   for tm_i in $(seq 1 30); do
-    if curl -s --max-time 3 http://localhost:8081/taskmanagers \
-        | grep -q '"taskmanagers":\[{'; then
+    if curl -fsS --max-time 3 http://localhost:8081/taskmanagers 2>/dev/null \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("taskmanagers") else 1)' \
+        >/dev/null 2>&1; then
       tm_ok=1; break
     fi
     sleep 2
   done
   [ "$tm_ok" -eq 1 ] \
     || { pipeline_fail "TM not registered with JM after 60s — refusing to submit job"; return 1; }
-
-  CP="$(cat "$LIB_CP_FILE")"
-  [ -n "$CP" ] || { pipeline_fail "empty classpath from $LIB_CP_FILE"; return 1; }
 
   local mtok
   mtok=$(tail -n +2 "$LIB_MANIFEST" | wc -l)
@@ -198,6 +339,11 @@ pipeline_start_faketool() {
 # ---------- ingestion JVM ----------
 # Canonical env block (same as loadtest-run.sh). Sets JVM_PID.
 pipeline_start_ingestion() {
+  # Fail-closed readiness: an interrupted prior run can leave the readiness
+  # marker behind. Remove it before starting a new JVM; otherwise the first
+  # poll below can accept a dead process as ready and corrupt the run's
+  # evidence (observed during fault-harness bring-up, 2026-08-31).
+  rm -f /tmp/ingestion.loadtest.ready
   # D6 right-size (2026-08-31): ingestion live-set measured 64-90MB over 17 runs;
   # 512m heap + 512m direct = 8x headroom (was 2g/1g). Verified by bench run G6/G7 guards.
   LOG_DIR="$OUT/j1" READINESS_FILE_PATH="/tmp/ingestion.loadtest.ready" \
@@ -297,10 +443,15 @@ JAVAEOF
   if echo "$purge_out" | grep -q "PURGED"; then
     pipeline_log "$label table purged"
   else
-    # Non-fatal: first run after a fresh DDL apply may legitimately have
-    # nothing to drop; failure to CREATE would surface as the smoke gate
-    # failing (preview metrics = 0). Log loudly for diagnosis.
+    # Normal measurement runs keep the historical non-fatal behavior: the
+    # smoke gate will catch a failed CREATE. Fault drills can set
+    # PURGE_STRICT=true because stale rows make their reconciliation result
+    # invalid rather than merely reducing measurement quality.
     pipeline_log "WARN: $label purge output: $(echo "$purge_out" | tail -2)"
+    if [ "${PURGE_STRICT:-false}" = "true" ]; then
+      pipeline_fail "$label purge did not report PURGED — refusing to run a fault drill with stale data"
+      return 1
+    fi
   fi
 }
 
@@ -312,6 +463,59 @@ pipeline_purge_raw_table() {
   # Raw must be purged BEFORE pipeline_start_ingestion (the ingestion JVM
   # writes it; preview is only written by the job, so it purges later).
   pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/02_raw_table_1.sql" raw
+}
+
+pipeline_ensure_tentative_markers_table() {
+  # CHG-121 (2026-09-01): create Signal_Tentative_Markers if absent (no
+  # drop — markers must SURVIVE phases; a drop would erase exactly the crash
+  # reconciliation state the table exists to hold). Uses the same
+  # create-if-absent path as the purge helper's drop+recreate, minus drop.
+  pipeline_log "ensuring tentative-markers table exists"
+  cat > /tmp/TableEnsure.java <<'JAVAEOF'
+import com.trading.common.schema.ddl.DdlText;
+import org.apache.fluss.client.Connection;
+import org.apache.fluss.client.ConnectionFactory;
+import org.apache.fluss.client.admin.Admin;
+import org.apache.fluss.config.Configuration;
+import org.apache.fluss.metadata.TablePath;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
+
+public class TableEnsure {
+    public static void main(String[] args) throws Exception {
+        String ddl = Files.readString(Path.of(args[0]));
+        DdlText.ParsedDdl parsed = DdlText.parse(ddl, args[0]);
+        TablePath tp = TablePath.of("default", parsed.tableName());
+        Configuration conf = new Configuration();
+        conf.setString("bootstrap.servers", "localhost:9123");
+        try (Connection c = ConnectionFactory.createConnection(conf);
+             Admin admin = c.getAdmin()) {
+            try {
+                admin.getTableInfo(tp).get(10, TimeUnit.SECONDS);
+                System.out.println("EXISTS " + tp);
+            } catch (Exception notFound) {
+                admin.createTable(tp, DdlText.toDescriptor(parsed), false)
+                        .get(60, TimeUnit.SECONDS);
+                System.out.println("CREATED " + tp);
+            }
+        }
+    }
+}
+JAVAEOF
+  local ensure_out
+  ensure_out="$(cd /tmp && javac -cp "$CP" -d /tmp TableEnsure.java 2>&1 \
+      && java --add-opens=java.base/java.lang=ALL-UNNAMED \
+       --add-opens=java.base/java.nio=ALL-UNNAMED \
+       -cp "/tmp:$CP" TableEnsure "$ROOT/code/01_platform/02_sql/ddl/31_signal_tentative_markers.sql" 2>&1)" || true
+  rm -f /tmp/TableEnsure.java /tmp/TableEnsure.class
+  if echo "$ensure_out" | grep -qE "EXISTS|CREATED"; then
+    pipeline_log "tentative-markers table ready ($(echo "$ensure_out" | grep -oE 'EXISTS|CREATED'))"
+  else
+    pipeline_fail "tentative-markers table ensure failed: $(echo "$ensure_out" | tail -2)"
+    return 1
+  fi
 }
 
 pipeline_submit_job() {
@@ -331,6 +535,17 @@ pipeline_submit_job() {
   # backpressure audit predicts no effect, but a negative result closes
   # the lever with evidence). Default OFF: baseline behavior unchanged.
   local extra_flags=(-Dmetrics.latency.interval="${LATENCY_TRACKING_MS:-2000}")
+  # Tolerable checkpoint failures (2026-09-02): a TM-kill drill's catch-up
+  # replay backpressures the pipeline and a checkpoint can EXPIRE (barriers
+  # crawl; observed checkpoint 17 queue-sat 20s then expired → with the
+  # default tolerance 0, Flink escalated ONE expired checkpoint to a global
+  # failure and restarted all 152 tasks at t+75s — drills 20260902-005900
+  # and 20260902-025251 both failed this way, flaky by replay timing).
+  # A transient checkpoint miss is benign here: the NEXT checkpoint
+  # completes (wait_new_checkpoint proves it) and G7c verifies end-state
+  # data integrity. 3 tolerated = bounded, still fails fast on persistent
+  # checkpoint breakage.
+  extra_flags+=(-Dexecution.checkpointing.tolerable-failed-checkpoints="${TOLERABLE_FAILED_CHECKPOINTS:-3}")
   if [ "${UNALIGNED_CHECKPOINTS:-false}" = "true" ]; then
     extra_flags+=(-Dexecution.checkpointing.unaligned=true)
   fi
@@ -345,6 +560,8 @@ pipeline_submit_job() {
     -e PREVIEW_ENABLED=true -e PREVIEW_INTERVAL_MS="${PREVIEW_INTERVAL_MS:-500}" \
     -e EARLY_SIGNAL_ENABLED=true -e EARLY_SIGNAL_CONFIRM_AFTER_MS=4000 \
     -e SIGNAL_LOOKBACK_CANDLES=2 \
+    -e RESTART_MAX_ATTEMPTS="${RESTART_MAX_ATTEMPTS:-3}" \
+    -e RESTART_DELAY_MS="${RESTART_DELAY_MS:-30000}" \
     -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 \
     -e SIGNAL_CANDIDATES_TABLE=Signal_Candidates \
     -e SIGNAL_CURRENT_TABLE=Signal_Candidates_current \
@@ -457,21 +674,145 @@ harvest_tm_gc_log() {
 }
 
 # ---------- Flink metrics ----------
-# One REST call → lines of "name|read|write" per vertex (the format the
-# gate scripts and the measurement script both consume).
+# Emit lines of "name|read|write" per vertex (the format the gate scripts and
+# measurement script consume).  A RUNNING Flink job can report zero/stale
+# read-records and write-records in the /jobs/{id} vertex summary; those
+# counters were only populated after the C2 job was canceled (2026-09-01).
+# Query the live aggregate metrics endpoint first and keep the job-summary
+# counters only as a terminal-job fallback for post-run evidence.
 flink_metric_dump() {
   local job="${1:-$JOB_ID}"
-  curl -s --max-time 10 "http://localhost:8081/jobs/$job" | python3 -c "
-import json,sys
+  local rest="${FLINK_REST_URL:-http://localhost:8081}"
+  curl -fsS --max-time 10 "$rest/jobs/$job" | \
+    FLINK_METRIC_REST="$rest" FLINK_METRIC_JOB="$job" python3 -c '
+import json
+import os
+import sys
+import urllib.request
+
 try:
-    j=json.load(sys.stdin)
+    job = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
-print('STATE', j.get('state','?'))
-for v in j.get('vertices',[]):
-    m=v.get('metrics',{})
-    print(v['name'],'|',m.get('read-records','-'),'|',m.get('write-records','-'))
-" 2>/dev/null
+
+base = os.environ["FLINK_METRIC_REST"].rstrip("/")
+jid = os.environ["FLINK_METRIC_JOB"]
+print("STATE", job.get("state", "?"))
+
+def fetch(url):
+    with urllib.request.urlopen(url, timeout=5) as response:
+        return json.load(response)
+
+def live_subtask_sums(vertex_id):
+    # Sum the counter across ALL subtasks (2026-09-01, CHG-120: the previous
+    # 0.numRecordsIn/0.numRecordsOut read counted only subtask 0 — 1/8 of the
+    # true totals at parallelism 8, so drill evidence under-reported progress
+    # by 8x).  Live-verified on Flink 2.2.1: the subtasks endpoint answers an
+    # AGGREGATE object per metric — [{"id":"numRecordsIn","min":73360.0,
+    # "max":93010.0,"avg":83840.0,"sum":670720.0,"skew":5.27}, ...] — whose
+    # "sum" is the cross-subtask total.  A per-subtask shape
+    # ([{"id":"0.numRecordsIn","value":"123"}, ...]) is also accepted and
+    # summed, in case a deployment answers that form.
+    try:
+        items = fetch(
+            f"{base}/jobs/{jid}/vertices/{vertex_id}/subtasks/metrics"
+            "?get=numRecordsIn,numRecordsOut"
+        )
+    except Exception:
+        return None
+    sums = {}
+    for item in items:
+        metric_id = str(item.get("id", ""))
+        if metric_id in ("numRecordsIn", "numRecordsOut"):
+            # Aggregate shape: take the precomputed cross-subtask sum.
+            total = item.get("sum")
+            if isinstance(total, (int, float)):
+                sums[metric_id] = sums.get(metric_id, 0) + int(total)
+        elif "." in metric_id:
+            # Per-subtask shape: accumulate the per-index values.
+            name = metric_id.split(".", 1)[1]
+            value = str(item.get("value", ""))
+            if not value.isdigit():
+                # A non-counter value means this metric cannot be summed
+                # reliably; fail closed to the next fallback.
+                return None
+            sums[name] = sums.get(name, 0) + int(value)
+    if {"numRecordsIn", "numRecordsOut"} <= set(sums):
+        return sums
+    return None
+
+def live_subtask_zero(vertex_id):
+    # Last-resort live fallback: the vertex aggregate endpoint exposes one
+    # subtask at a time, so this counts subtask 0 only (documented partial
+    # view — kept for Flink versions without the subtasks endpoint).
+    try:
+        metrics = fetch(
+            f"{base}/jobs/{jid}/vertices/{vertex_id}/metrics"
+            "?get=0.numRecordsIn,0.numRecordsOut"
+        )
+    except Exception:
+        return None
+    live = {
+        item.get("id"): item.get("value", "-")
+        for item in metrics
+        if item.get("id") in {"0.numRecordsIn", "0.numRecordsOut"}
+    }
+    if "0.numRecordsIn" in live and "0.numRecordsOut" in live:
+        return {
+            "numRecordsIn": live["0.numRecordsIn"],
+            "numRecordsOut": live["0.numRecordsOut"],
+        }
+    return None
+
+for vertex in job.get("vertices", []):
+    vertex_id = vertex.get("id")
+    if not vertex_id:
+        continue
+
+    summary = vertex.get("metrics", {})
+    # Priority: full-subtask sum > subtask-0 live > terminal job summary.
+    # A terminal job may no longer expose live vertex metrics; the
+    # accumulated summary then remains the evidence of record.
+    totals = live_subtask_sums(vertex_id) or live_subtask_zero(vertex_id) or summary
+    read = totals.get("numRecordsIn", totals.get("read-records", "-"))
+    write = totals.get("numRecordsOut", totals.get("write-records", "-"))
+    print(vertex.get("name", "?"), "|", read, "|", write)
+' 2>/dev/null
+}
+
+# Return the cumulative counter used to prove that the raw feed is traversing
+# the running job.  The raw source's live aggregate can briefly report 0|0
+# while downstream vertices are already processing records (observed in C2 on
+# 2026-09-01); treating that snapshot as a dead pipeline causes a false
+# negative.  Prefer the raw source read/output counters, then use the largest
+# read counter from the bounded set of operators immediately downstream of the
+# raw path.  An absent signal remains -1 so callers still fail closed.
+pipeline_metric_input_progress() {
+  local dump="$1"
+  printf '%s\n' "$dump" | awk -F'|' '
+    function number(raw, value) {
+      value = raw
+      gsub(/^[ \t]+|[ \t]+$/, "", value)
+      return (value ~ /^[0-9]+$/) ? value + 0 : -1
+    }
+    {
+      name = $1
+      read = number($2)
+      write = number($3)
+      if (name ~ /raw[-_]table[-_]1/) {
+        raw_seen = 1
+        if (read > raw_read) raw_read = read
+        if (write > raw_write) raw_write = write
+      }
+      if (name ~ /fingerprint[-_]dedup|candle[-_]15s|forming[-_]bar[-_](builder|detection|writer)/ \
+          && read > downstream_read) downstream_read = read
+    }
+    END {
+      if (raw_read > 0) print raw_read
+      else if (raw_write > 0) print raw_write
+      else if (downstream_read > 0) print downstream_read
+      else print -1
+    }'
 }
 
 # Wait until the job reaches the given state (default RUNNING) or timeout.

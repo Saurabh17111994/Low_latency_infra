@@ -314,7 +314,7 @@ Actual chaining is performance-tested; logical boundaries remain explicit for me
 | `RAW_SCHEMA_VERSION` | Accepted input version/range |
 | `WATERMARK_OUT_OF_ORDER_MS` | Default 5000; change only through tested profile |
 | `ALLOWED_LATENESS_MS` | Default 5000; change only through tested profile |
-| `SOURCE_IDLE_MS` | Default 15000 per source partition |
+| `SOURCE_IDLE_MS` | Default 15000 per source partition. **2026-09-01 (CHG-120): now drives TWO complementary idle mechanisms.** Flink 2.2's `withIdleness` measures split silence on a per-split `PausableRelativeClock` that is PAUSED while the task is backpressured (`ProgressiveTimestampsAndWatermarks` registers it via `taskIOMetricGroup.registerBackPressureListener`) — under drill-level load that clock is effectively frozen, so the daily-partition table's permanently-empty future-day splits (and the `AutoPartitionManager` randomly back-created yesterday partition, delay `ThreadLocalRandom.nextInt(60*23)` minutes) are never marked idle and the operator watermark stays pinned at `Long.MIN_VALUE` (min over active splits) → zero candle/preview/signal emissions (live-reproduced 2026-09-01, job `e4b4c19f`: 670k records in, zero output at bp≈850-999ms/s; idle engaged ~100s once backpressure eased and 4096 candles fired immediately). `SourceIdleWatchdogGenerator` therefore ALSO marks the split idle after `SOURCE_IDLE_MS` of WALL-CLOCK silence (`output.markIdle()` from `onPeriodicEmit` → the split's `PartialWatermark` is excluded from the combined minimum at the same 200ms tick; the first record afterwards reactivates — `markActive()` covers a non-advancing first record), edge-triggered per split episode, mirroring `WatermarksWithIdleness.isIdleNow`. Pinned by `SourceIdleWatchdogGeneratorTest` (12 tests: 5 wall-clock-marking legs added 2026-09-01). |
 | `DEDUP_TTL_MS` | Fixed at `60000` (1 minute); reject startup for any other value in MVP |
 | `DEDUP_STATE_TABLE` (new, DEC-038) | **SUPERSEDED 2026-08-17 (CHG-022/CHG-023, Design B): this key is REMOVED from `SignalJobConfig` — the dedup set is authoritative Flink keyed state; the `fingerprint_dedup` table is no longer a SignalJob startup dependency (the preflight no longer validates it; `validateFingerprintDedupTable` survives only as a drift-guard validator exercised by `TableContractValidatorTest`). The DDL stays on file.** Historical (DEC-038 era): Fluss KV state table name for the authoritative dedup set (`fingerprint_dedup`); validated at startup by the extended table preflight — DDL/manifest entry + the live writer wiring landed 2026-08-15 (24-table manifest, CHG-003/CHG-005; `validateFingerprintDedupTable` ALWAYS-ON in `preflightTableContracts`); **live-cluster measurement landed 2026-08-15 (externalization benchmark, SIG-STATE-001/002 + SIG-PERF-001)** — bucket scoping fixed via `DedupBucketAssigner` (Fluss's `KeyEncoder`+`BucketingFunction` assignment, not `token % n`) and delete full-row contract fixed |
 | `DEDUP_CACHE_*` (new, DEC-038) | **SUPERSEDED 2026-08-17 (CHG-022/CHG-023, Design B): all `DEDUP_CACHE_*` / `DEDUP_WRITE_*` / `DEDUP_CLEANUP_INTERVAL_MS` keys are REMOVED from `SignalJobConfig` — there is no bounded cache, no dedup write path, no cleanup pass; expiry is native `StateTtlConfig` on the MapState.** Historical (DEC-038 era): Bounded working-cache bound and write cadence for the Flink side — keys and *starting* values defined in §Design — `fingerprint_dedup` dedup state table (tuning keys, validated at startup, re-derived from measurement) |
@@ -621,6 +621,43 @@ The implementation is complete when exactly one Signal job performs the full pat
 ## Verification mapping
 
 The required behavior above is verified by the canonical [Signal job test design](./11-testing-and-release.md#signal-job): `SIG-UNIT-001` to `SIG-UNIT-009`, `SIG-HARNESS-001` to `SIG-HARNESS-005`, `STATE-COMPAT-001`, `SIG-INT-001`, `SIG-INT-002`, `COMPAT-FLINK-001`, `SIG-FAIL-001`, and `SIG-PERF-001`, plus the DEC-038 state-boundary set `SIG-STATE-001` to `SIG-STATE-003` (2026-08-14: large dedup state observable in Fluss, bounded checkpoint, compact-restore + Fluss rehydration, fail-closed on Fluss unavailability). Implemented-test coverage of the SIG-* IDs is mapped in [Slice 1 evidence](#slice-1-evidence-implemented-2026-08-09) below.
+
+## Early-signal path — preview, tentative markers, settlement (integrated 2026-08-29 → validated 2026-09-02, CHG-121)
+
+The dossier topology above predates the low-latency early-signal path.
+As of 2026-09-02 the running SignalJob additionally contains (all behind
+config knobs, default-on in dev; full design + five-fix history in
+`05_deployment/change-records/CHG-121.md`):
+
+```
+raw_table_1 → validation → dedup → 15s forming (per-tick state)
+                                        ├─ preview emitter (1s) → feature_candles_15s_preview (LOG)
+                                        ├─ final candle (15s close) → feature_candles_15s (KV)
+                                        └─ EarlySignalFunction (two-input: preview + final)
+                                             ├─ preview passes rule v1 → TENTATIVE row → Signal_Candidates (LOG)
+                                             │    (marker write to Signal_Tentative_Markers KV staged first;
+                                             │     row emitted only after marker durable)
+                                             ├─ final candle arrives → CONFIRM/CANCEL row (supersedes tentative)
+                                             │    (rule re-evaluated on the final; marker cleared on every settle path)
+                                             └─ window ends + lateness, no final → CANCEL row (late-drop)
+```
+
+- `Signal_Tentative_Markers` — KV, PK `candidate_id`, 2d TTL: the
+  idempotence/recovery marker. A TENTATIVE is only ever emitted after its
+  marker is durable; a replayed final finds the marker and reconciles
+  rather than double-settling. **Design note:** marker I/O is fully
+  asynchronous (single-thread executor, staged drains, bounded retries) —
+  the task thread never blocks on Fluss I/O.
+- Settlement guarantee (F4, drill-proven): every in-run TENTATIVE settles
+  with CONFIRM/CANCEL or sits in a window that provably never closed —
+  0 dropped decisions at full load across a TM kill (drill
+  `tm-kill-full-load-20260902-121511`, settlement balance 7,340 settled,
+  0 orphans).
+- Pinning tests: `EarlySignalFunctionTest` 18 tests (ordering,
+  serialization round-trip — the transient-markerHook regression class —,
+  lookup retry, every-settle-path-clears-marker, reconcile paths).
+- Row layout of `Signal_Candidates` v3 unchanged from the frozen 22-col
+  v2 layout (schema_version="2"); the marker table is separate.
 
 ## Slice 1 evidence (implemented 2026-08-09)
 

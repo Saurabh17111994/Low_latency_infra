@@ -18,7 +18,7 @@ import org.apache.fluss.types.DataTypes;
  *
  * <p>Fluss 0.9.1 has no SQL client, so "parse against the pinned dialect"
  * means deriving the admin-API descriptor from the DDL text — columns, primary
- * key, bucket key, bucket count, and WITH options — and applying it through
+ * key, partition keys, bucket key, bucket count, and WITH options — and applying it through
  * {@code Admin.createTable}. Shared by {@link DdlApplyTool} (the DDL
  * application contract) and the COMPAT-FLUSS-001 parity test.
  *
@@ -36,7 +36,15 @@ public final class DdlText {
     /** Parsed DDL model. */
     public record ParsedDdl(String tableName, List<Column> columns, List<String> primaryKey,
                             int bucketCount, String bucketKey, Map<String, String> options,
-                            String sourcePath) {
+                            String sourcePath, List<String> partitionKeys) {
+
+        /** Backward-compatible constructor for synthetic test fixtures. */
+        public ParsedDdl(String tableName, List<Column> columns, List<String> primaryKey,
+                         int bucketCount, String bucketKey, Map<String, String> options,
+                         String sourcePath) {
+            this(tableName, columns, primaryKey, bucketCount, bucketKey, options, sourcePath,
+                    List.of());
+        }
 
         public boolean isKv() {
             return !primaryKey.isEmpty();
@@ -48,6 +56,8 @@ public final class DdlText {
 
     private static final Pattern CREATE_TABLE = Pattern.compile("CREATE TABLE\\s+(\\w+)");
     private static final Pattern PRIMARY_KEY = Pattern.compile("PRIMARY KEY\\s*\\(([^)]+)\\)");
+    private static final Pattern PARTITIONED_BY =
+            Pattern.compile("PARTITIONED\\s+BY\\s*\\(([^)]+)\\)", Pattern.CASE_INSENSITIVE);
     private static final Pattern COLUMN_LINE =
             Pattern.compile("^\\s*([a-zA-Z0-9_]+)\\s+([A-Z]+)\\s*(?:NOT\\s+NULL|NULL)?\\s*,?\\s*$");
     private static final Pattern OPTION =
@@ -98,6 +108,18 @@ public final class DdlText {
             }
         }
 
+        List<String> partitionKeys = new ArrayList<>();
+        Matcher partition = PARTITIONED_BY.matcher(text);
+        if (partition.find()) {
+            for (String part : partition.group(1).split(",")) {
+                String key = part.trim();
+                if (key.isEmpty()) {
+                    throw new IllegalArgumentException(sourcePath + ": empty partition key");
+                }
+                partitionKeys.add(key);
+            }
+        }
+
         Map<String, String> options = new HashMap<>();
         if (withIdx >= 0) {
             Matcher opt = OPTION.matcher(text.substring(withIdx));
@@ -116,7 +138,8 @@ public final class DdlText {
             throw new IllegalArgumentException(sourcePath + ": bad bucket.num", e);
         }
         return new ParsedDdl(tableName, List.copyOf(columns), List.copyOf(primaryKey),
-                bucketCount, bucketKey, Map.copyOf(options), sourcePath);
+                bucketCount, bucketKey, Map.copyOf(options), sourcePath,
+                List.copyOf(partitionKeys));
     }
 
     /** Build the admin-API descriptor that applies the parsed DDL to Fluss. */
@@ -133,6 +156,9 @@ public final class DdlText {
                 // via distributedBy, NOT table properties — Fluss rejects them
                 // as properties (InvalidConfigException).
                 .distributedBy(ddl.bucketCount(), ddl.bucketKey().split(","));
+        if (!ddl.partitionKeys().isEmpty()) {
+            tb.partitionedBy(ddl.partitionKeys());
+        }
         ddl.options().forEach((key, value) -> {
             if (key.equals("bucket.num") || key.equals("bucket.key")) {
                 return;

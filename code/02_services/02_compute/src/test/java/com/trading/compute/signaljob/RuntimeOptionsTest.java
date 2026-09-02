@@ -181,8 +181,10 @@ class RuntimeOptionsTest {
         assertTrue(flinkConfig.get(CheckpointingOptions.INCREMENTAL_CHECKPOINTS));
         assertNull(flinkConfig.getString("state.backend.rocksdb.memory.managed", null),
                 "managed memory defaults true in RocksDB — key only set when disabled");
-        assertEquals("0.4", flinkConfig.getString("taskmanager.memory.managed.fraction", null),
-                "Streaming-3000 T3 G3: managed 0.4 fraction for RocksDB (TM 3g → ~1.2 GB)");
+        assertEquals("0.6", flinkConfig.getString("taskmanager.memory.managed.fraction", null),
+                "CHG-120 2026-09-01: managed 0.6 fraction for RocksDB headroom "
+                        + "(embedded/local runs; cluster TM pool comes from flink-conf — "
+                        + "was 0.4, ~25 MB/RocksDB-instance, capped the pipeline at ~1.7k/s)");
         assertEquals("/tmp/flink-rocksdb", flinkConfig.getString("state.backend.rocksdb.localdir", null),
                 "T3 SSD dirs default when not overridden");
         assertEquals("256m", flinkConfig.getString("taskmanager.memory.network.max", null));

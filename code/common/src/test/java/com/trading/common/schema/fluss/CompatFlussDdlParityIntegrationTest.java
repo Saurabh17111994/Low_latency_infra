@@ -183,6 +183,8 @@ class CompatFlussDdlParityIntegrationTest {
 
         assertEquals(ddl.bucketCount(), info.getNumBuckets(),
                 label + ": effective bucket count must equal the DDL bucket.num");
+        assertEquals(ddl.partitionKeys(), info.getPartitionKeys(),
+                label + ": effective partition keys must match the DDL");
 
         Schema effective = info.getSchema();
         List<String> effectiveColumns = effective.getColumnNames();

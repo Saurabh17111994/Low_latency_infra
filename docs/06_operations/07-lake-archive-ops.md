@@ -81,7 +81,7 @@ firing before the fix landed.
 | M-8 | Tiering job gone after table recreate | job offsets tied to old table id; also container restarts kill jobs | smoke GUARD A (proven) + `tiering-start.sh --status` before any drill |
 | M-9 | DuckDB glob `*.parquet` finds nothing | layout nests `instrument_token_bucket=N` → need `**/*.parquet` (or iceberg_scan) | r2-query proof queries |
 | M-10 | VERIFY-3 fails at TIER_WAIT=240 | 5-min datalake freshness vs write+240s race | TIER_WAIT=420; VERIFY-3 itself (proven) |
-| M-11 | LogFullRead throws on partitioned tables | `subscribe(partitionId,bucket,offset)` is required for partitioned reads; ingestion SIGKILL prevents drained logging | smoke write-proof falls back to R2 day-folder row count (proven) |
+| M-11 | ~~LogFullRead throws on partitioned tables~~ **FIXED 2026-09-01 (CHG-120)** | The reader used the non-partitioned `subscribe(bucket,offset)` overload after the v3 `event_day` migration; it now enumerates partition IDs and subscribes with `subscribe(partitionId,bucket,offset)`; the v3 audit projection also validates column names and uses the shifted indexes | compile + live 5s read returned 908,500 partitioned audit rows; smoke's R2 day-folder fallback remains for old/incompatible reader failures |
 | M-12 | EOD run LEASED / exit 5 | stale lease held until 30m TTL — by-design fencing, not a bug | lease refusal itself (proven); `--lease-ttl` shortens drills |
 | M-13 | bench preflight "O2_AUTH_BASIC missing" | credential moved to secrets.env | bench reads secrets.env fallback (proven) |
 | M-14 | compose "required variable AWS_ACCESS_KEY_ID is missing" | compose calls missing `--env-file secrets.env` | compose interpolation error itself (proven) |

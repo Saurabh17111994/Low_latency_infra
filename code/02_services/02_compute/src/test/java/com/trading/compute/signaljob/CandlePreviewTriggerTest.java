@@ -34,7 +34,8 @@ class CandlePreviewTriggerTest {
     }
 
     static RowData tick(long token, long ts, long price) {
-        GenericRowData r = new GenericRowData(20);
+        GenericRowData r = new GenericRowData(RawTableColumns.FIELD_COUNT);
+        r.setField(RawTableColumns.EVENT_DAY, org.apache.flink.table.data.StringData.fromString("20260901"));
         r.setField(RawTableColumns.EVENT_FINGERPRINT, org.apache.flink.table.data.StringData.fromString("fp-" + token + "-" + ts));
         r.setField(RawTableColumns.INSTRUMENT_TOKEN, token);
         r.setField(RawTableColumns.EXCHANGE, org.apache.flink.table.data.StringData.fromString("NSE"));
@@ -43,7 +44,7 @@ class CandlePreviewTriggerTest {
         r.setField(RawTableColumns.TICK_TYPE, org.apache.flink.table.data.StringData.fromString("TRADE"));
         r.setField(RawTableColumns.LAST_PRICE_PAISE, price);
         r.setField(RawTableColumns.LAST_QTY, 100L);
-        r.setField(RawTableColumns.SCHEMA_VERSION, "2");
+        r.setField(RawTableColumns.SCHEMA_VERSION, org.apache.flink.table.data.StringData.fromString("3"));
         return r;
     }
 

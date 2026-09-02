@@ -2,6 +2,7 @@ package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
@@ -392,4 +393,322 @@ class EarlySignalFunctionTest {
         feedFinal(1L, 3, 115, 134, 110, 131);
         assertTrue(rows(harness).isEmpty(), "no double confirm after early confirm");
     }
+
+    // =====================================================================
+    // CHG-121 (2026-09-01): F4 crash reconciliation via durable markers.
+    // Scenario: tentative emitted pre-crash (marker written, LOG row
+    // survives), TM dies before the next checkpoint, pending state rolls
+    // back. On replay the final arrives with pending==null — the marker
+    // must produce the settle (CONFIRM or CANCEL by the final rule).
+    // =====================================================================
+
+    /** In-memory marker hook — records marks, simulates crash survival. */
+    private static class RecordingMarkerHook
+            implements EarlySignalFunction.TentativeMarkerHook {
+        final java.util.Set<String> markers = java.util.concurrent.ConcurrentHashMap
+                .newKeySet();
+
+        @Override
+        public java.util.concurrent.CompletableFuture<Void> mark(String candidateId,
+                long instrumentToken, long windowEnd) {
+            markers.add(candidateId);
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public java.util.concurrent.CompletableFuture<Boolean> exists(String candidateId) {
+            return java.util.concurrent.CompletableFuture.completedFuture(
+                    markers.contains(candidateId));
+        }
+
+        @Override
+        public java.util.concurrent.CompletableFuture<Void> clear(String candidateId) {
+            markers.remove(candidateId);
+            return java.util.concurrent.CompletableFuture.completedFuture(null);
+        }
+    }
+
+    /**
+     * Feed a rule-failing preview for the given window — its only effect is
+     * triggering the top-of-element drain (async marker path): the preview
+     * itself emits nothing.
+     */
+    private void pumpDrain(long token, int windowIdx) throws Exception {
+        feedPreview(token, windowIdx, 115, 116, 110, 112); // close 112 fails the rule
+    }
+
+    private void openHarnessWithHook(EarlySignalFunction.TentativeMarkerHook hook)
+            throws Exception {
+        SignalJobConfig config = SignalJobConfig.from(env());
+        harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
+                new EarlySignalFunction(config, hook),
+                row -> row.getLong(CandlePreviewColumns.INSTRUMENT_TOKEN),
+                row -> row.getLong(CandleTableColumns.INSTRUMENT_TOKEN),
+                Types.LONG);
+        harness.open();
+    }
+
+    @Test
+    void crashOrphanTentativeReconciledFromMarker() throws Exception {
+        RecordingMarkerHook hook = new RecordingMarkerHook();
+        openHarnessWithHook(hook);
+        feedFinal(1L, 0, 100, 110, 90, 105);
+        feedFinal(1L, 1, 105, 115, 95, 110);
+        feedFinal(1L, 2, 110, 120, 100, 115);
+        feedPreview(1L, 3, 115, 130, 110, 128); // tentative + marker
+        pumpDrain(1L, 3); // async drain: marker completed → tentative emitted
+        String tentativeId = str(rows(harness).get(0),
+                SignalCandidatesTableColumns.CANDIDATE_ID);
+        assertTrue(hook.markers.contains(tentativeId), "marker written at emit");
+        drain(harness);
+
+        // CRASH: fresh harness with the same hook (durable table survived,
+        // in-memory pending state did NOT — restored to a pre-tentative cp).
+        harness.close();
+        openHarnessWithHook(hook);
+        // lookback warm-up replays (the final candles re-arrive)
+        feedFinal(1L, 0, 100, 110, 90, 105);
+        feedFinal(1L, 1, 105, 115, 95, 110);
+        feedFinal(1L, 2, 110, 120, 100, 115);
+
+        // The window-3 final arrives with pending==null → marker reconcile.
+        feedFinal(1L, 3, 115, 130, 110, 128); // rule holds → CONFIRM
+        pumpDrain(1L, 4); // async drain: lookup completed → settle emitted
+        List<RowData> out = rows(harness);
+        assertEquals(1, out.size(), "orphan tentative settled from marker");
+        RowData confirm = out.get(0);
+        assertEquals(SignalCandidatesTableColumns.VALIDITY_REASON_CONFIRMED,
+                str(confirm, SignalCandidatesTableColumns.VALIDITY_REASON));
+        assertEquals(tentativeId,
+                str(confirm, SignalCandidatesTableColumns.SUPERSEDES_CANDIDATE_ID));
+        assertTrue(hook.markers.isEmpty(), "marker cleared after settle");
+    }
+
+    @Test
+    void crashOrphanTentativeCancelledWhenFinalRuleFails() throws Exception {
+        RecordingMarkerHook hook = new RecordingMarkerHook();
+        openHarnessWithHook(hook);
+        feedFinal(1L, 0, 100, 110, 90, 105);
+        feedFinal(1L, 1, 105, 115, 95, 110);
+        feedFinal(1L, 2, 110, 120, 100, 115);
+        feedPreview(1L, 3, 115, 130, 110, 128); // tentative on PARTIAL data
+        drain(harness);
+
+        harness.close();
+        openHarnessWithHook(hook);
+        feedFinal(1L, 0, 100, 110, 90, 105);
+        feedFinal(1L, 1, 105, 115, 95, 110);
+        feedFinal(1L, 2, 110, 120, 100, 115);
+
+        // The FULL window final fails the rule (close 112 < 120) — the
+        // orphan must settle as CANCEL, not stay dangling (F4).
+        feedFinal(1L, 3, 115, 130, 110, 112);
+        pumpDrain(1L, 4); // async drain: lookup completed → settle emitted
+        List<RowData> out = rows(harness);
+        assertEquals(1, out.size(), "orphan settled (CANCEL) from marker");
+        RowData cancel = out.get(0);
+        assertEquals(SignalCandidatesTableColumns.VALIDITY_REASON_SUPERSEDED,
+                str(cancel, SignalCandidatesTableColumns.VALIDITY_REASON));
+        assertTrue(str(cancel, SignalCandidatesTableColumns.CANDIDATE_ID)
+                .endsWith("-CANCEL"));
+        assertTrue(hook.markers.isEmpty(), "marker cleared after cancel");
+    }
+
+    @Test
+    void noMarkerNoReconcileFinalStaysSilent() throws Exception {
+        // Final with pending==null and NO marker → pre-CHG-121 behavior:
+        // nothing emitted (no false CONFIRM from a nonexistent tentative).
+        RecordingMarkerHook hook = new RecordingMarkerHook();
+        openHarnessWithHook(hook);
+        feedFinal(1L, 0, 100, 110, 90, 105);
+        feedFinal(1L, 1, 105, 115, 95, 110);
+        feedFinal(1L, 2, 110, 120, 100, 115);
+        // (no preview → no tentative, no marker)
+        feedFinal(1L, 3, 115, 130, 110, 128);
+        pumpDrain(1L, 4); // async drain: lookup says absent → nothing
+        assertTrue(rows(harness).isEmpty(), "no marker → no settle row");
+    }
+
+    @Test
+    void markerWriteFailureSuppressesTentative() throws Exception {
+        // Async rework (2026-09-02): a FAILED marker write must suppress
+        // the tentative entirely — no LOG row, no pending state. That is
+        // strictly safer than emitting an unmarked tentative (F4 orphan
+        // risk) and safer than a false settle later.
+        RecordingMarkerHook hook = new RecordingMarkerHook() {
+            @Override
+            public java.util.concurrent.CompletableFuture<Void> mark(String candidateId,
+                    long instrumentToken, long windowEnd) {
+                java.util.concurrent.CompletableFuture<Void> failed = new java.util.concurrent.CompletableFuture<>();
+                failed.completeExceptionally(new RuntimeException("fluss down"));
+                return failed;
+            }
+        };
+        openHarnessWithHook(hook);
+        feedFinal(1L, 0, 100, 110, 90, 105);
+        feedFinal(1L, 1, 105, 115, 95, 110);
+        feedFinal(1L, 2, 110, 120, 100, 115);
+        feedPreview(1L, 3, 115, 130, 110, 128); // stages the mark → fails
+        pumpDrain(1L, 3);
+        pumpDrain(1L, 3);
+        assertTrue(rows(harness).isEmpty(), "failed marker → no tentative row");
+        // The final settles nothing (pending was never set) and stays silent.
+        feedFinal(1L, 3, 115, 130, 110, 128);
+        pumpDrain(1L, 4);
+        assertTrue(rows(harness).isEmpty(), "failed marker → no settle row");
+    }
+
+    @Test
+    void tentativeEmittedOnlyAfterMarkerCompletes() throws Exception {
+        // Async rework (2026-09-02): the tentative LOG row must NOT be
+        // emitted before the marker write is durable — that ordering IS
+        // the F4 guarantee. Gate the future manually and observe both
+        // sides.
+        java.util.concurrent.CompletableFuture<Void> gate = new java.util.concurrent.CompletableFuture<>();
+        RecordingMarkerHook hook = new RecordingMarkerHook() {
+            @Override
+            public java.util.concurrent.CompletableFuture<Void> mark(String candidateId,
+                    long instrumentToken, long windowEnd) {
+                markers.add(candidateId);
+                return gate;
+            }
+        };
+        openHarnessWithHook(hook);
+        feedFinal(1L, 0, 100, 110, 90, 105);
+        feedFinal(1L, 1, 105, 115, 95, 110);
+        feedFinal(1L, 2, 110, 120, 100, 115);
+        feedPreview(1L, 3, 115, 130, 110, 128); // marker in flight
+        pumpDrain(1L, 3); // future not done → nothing emitted yet
+        assertTrue(rows(harness).isEmpty(),
+                "tentative must wait for the durable marker");
+        gate.complete(null); // marker now durable
+        pumpDrain(1L, 3); // drain emits the tentative
+        List<RowData> out = rows(harness);
+        assertEquals(1, out.size(), "tentative emitted after marker completes");
+        assertTrue(str(out.get(0), SignalCandidatesTableColumns.CANDIDATE_ID)
+                .endsWith("-TENTATIVE"));
+    }
+
+    @Test
+    void markerHookSurvivesJobGraphSerialization() throws Exception {
+        // 2026-09-02 root cause (drill tm-kill-full-load-20260902-014318):
+        // the markerHook field was declared transient — Flink ships the
+        // function from client to TaskManager by Java serialization, so the
+        // hook arrived NULL on the TM and markers were silently disabled in
+        // every cluster run (5,914 tentatives emitted, 0 markers written,
+        // 34 F4 orphans — exactly the pre-CHG-121 behavior). Unit tests
+        // construct the function directly and never serialize, which is why
+        // this shipped broken twice. This test pins the fix.
+        RecordingMarkerHook hook = new RecordingMarkerHook();
+        EarlySignalFunction fn =
+                new EarlySignalFunction(SignalJobConfig.from(env()), hook);
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        try (java.io.ObjectOutputStream oos = new java.io.ObjectOutputStream(bos)) {
+            oos.writeObject(fn);
+        }
+        Object revived;
+        try (java.io.ObjectInputStream ois = new java.io.ObjectInputStream(
+                new java.io.ByteArrayInputStream(bos.toByteArray()))) {
+            revived = ois.readObject();
+        }
+        java.lang.reflect.Field f =
+                EarlySignalFunction.class.getDeclaredField("markerHook");
+        f.setAccessible(true);
+        Object shipped = f.get(revived);
+        org.junit.jupiter.api.Assertions.assertNotNull(shipped,
+                "markerHook must survive job-graph serialization (was transient → "
+                        + "null on the TaskManager → markers silently disabled)");
+        org.junit.jupiter.api.Assertions.assertTrue(
+                shipped instanceof RecordingMarkerHook,
+                "the shipped hook must be the configured hook instance type");
+    }
+
+    @Test
+    void transientLookupFailureRetriesAndStillSettles() throws Exception {
+        // 2026-09-02 root cause of the residual 4 orphans (drill
+        // 20260902-022843): a single transient reconcile-lookup failure
+        // permanently dropped the settle. The drain must RETRY a failed
+        // lookup (bounded) and still settle the orphan tentative.
+        java.util.concurrent.atomic.AtomicInteger failures =
+                new java.util.concurrent.atomic.AtomicInteger(2);
+        RecordingMarkerHook hook = new RecordingMarkerHook() {
+            @Override
+            public java.util.concurrent.CompletableFuture<Boolean> exists(
+                    String candidateId) {
+                if (failures.getAndDecrement() > 0) {
+                    java.util.concurrent.CompletableFuture<Boolean> failed =
+                            new java.util.concurrent.CompletableFuture<>();
+                    failed.completeExceptionally(new RuntimeException("lookup timeout"));
+                    return failed;
+                }
+                return java.util.concurrent.CompletableFuture.completedFuture(
+                        markers.contains(candidateId));
+            }
+        };
+        openHarnessWithHook(hook);
+        feedFinal(1L, 0, 100, 110, 90, 105);
+        feedFinal(1L, 1, 105, 115, 95, 110);
+        feedFinal(1L, 2, 110, 120, 100, 115);
+        feedPreview(1L, 3, 115, 130, 110, 128); // tentative + marker
+        pumpDrain(1L, 3); // tentative emitted
+        drain(harness);
+
+        // Crash: fresh harness, marker table (hook) survives, state does not.
+        harness.close();
+        openHarnessWithHook(hook);
+        feedFinal(1L, 0, 100, 110, 90, 105);
+        feedFinal(1L, 1, 105, 115, 95, 110);
+        feedFinal(1L, 2, 110, 120, 100, 115);
+        feedFinal(1L, 3, 115, 130, 110, 128); // reconcile → lookup FAILS (1st)
+        pumpDrain(1L, 4); // drain: fail → retry scheduled
+        pumpDrain(1L, 5); // drain: fail again (2nd) → retry scheduled
+        pumpDrain(1L, 6); // drain: 3rd lookup succeeds → settle emitted
+        List<RowData> out = rows(harness);
+        assertEquals(1, out.size(), "orphan settled after transient lookup failures");
+        RowData settle = out.get(0);
+        assertEquals(SignalCandidatesTableColumns.VALIDITY_REASON_CONFIRMED,
+                str(settle, SignalCandidatesTableColumns.VALIDITY_REASON),
+                "settle is a CONFIRM by the final rule");
+        assertTrue(hook.markers.isEmpty(), "marker cleared after the retried settle");
+    }
+
+    @Test
+    void everySettlePathClearsItsMarker() throws Exception {
+        // 2026-09-02: only the reconcile path cleared markers; the normal
+        // settle, early confirm, and late-drop cancel all left stale
+        // markers (2d TTL). A stale marker + replayed final = duplicate
+        // settle. Guard: after ALL settle paths the marker must be gone.
+        // Path 1: normal final settle.
+        RecordingMarkerHook hook = new RecordingMarkerHook();
+        openHarnessWithHook(hook);
+        feedFinal(1L, 0, 100, 110, 90, 105);
+        feedFinal(1L, 1, 105, 115, 95, 110);
+        feedFinal(1L, 2, 110, 120, 100, 115);
+        feedPreview(1L, 3, 115, 130, 110, 128); // tentative + marker
+        pumpDrain(1L, 3);
+        assertFalse(hook.markers.isEmpty(), "marker present while tentative pending");
+        feedFinal(1L, 3, 115, 130, 110, 125); // normal settle (rule holds)
+        assertTrue(hook.markers.isEmpty(), "marker cleared by the NORMAL settle path");
+        drain(harness); // the CONFIRM row itself is expected — clear it
+        // The settled window's replayed final (pending==null) must find NO
+        // marker — no duplicate settle.
+        feedFinal(1L, 3, 115, 130, 110, 125);
+        pumpDrain(1L, 4);
+        // the replayed final enters the lookback only — no new candidate row
+        assertTrue(rows(harness).isEmpty(),
+                "no duplicate settle from the stale marker");
+
+        // Path 2: late-drop cancel. Window 4 tentative, no final → timer
+        // fires at windowEnd + lateness → CANCEL must clear the marker.
+        // close must beat window-3's high (130) for the rule to hold.
+        feedPreview(1L, 4, 115, 135, 110, 132);
+        pumpDrain(1L, 4);
+        drain(harness);
+        assertFalse(hook.markers.isEmpty(), "marker present for window-4 tentative");
+        harness.processBothWatermarks(new org.apache.flink.streaming.api.watermark.Watermark(
+                T0 + 4 * 15_000L + 15_000L + 60_000L));
+        drain(harness); // the CANCEL row itself is expected
+        assertTrue(hook.markers.isEmpty(), "marker cleared by the LATE-DROP cancel");
+    }
+
 }

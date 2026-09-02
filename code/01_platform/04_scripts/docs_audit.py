@@ -115,7 +115,7 @@ def c1_manifest():
     if m is None:
         return check("C1 manifest readable", False, p)
     tables = m.get("tables", [])
-    check("C1 manifest has 28 tables", len(tables) == 28, f"got {len(tables)}")
+    check("C1 manifest has 29 tables", len(tables) == 29, f"got {len(tables)}")
     bad_sha = [t["table_name"] for t in tables if not t.get("ddl_sha256")]
     bad_compat = [t["table_name"] for t in tables if not t.get("compatibility_class")]
     bad_routing = [
@@ -604,7 +604,7 @@ def c9_dec039_invariants():
 
     # --- DEC-038 dedup + SCH-19 index + SCH-23 EOD + REQ-EXE-004 intent DDL; 26 DDLs ---
     sqls = sorted(f for f in os.listdir(DDL_DIR) if f.endswith(".sql"))
-    check("C9 DDL count = 28", len(sqls) == 28, f"got {len(sqls)}")
+    check("C9 DDL count = 29", len(sqls) == 29, f"got {len(sqls)}")
     check(
         "C9 dedup DDL on file",
         os.path.exists(os.path.join(DDL_DIR, "24_fingerprint_dedup.sql")),

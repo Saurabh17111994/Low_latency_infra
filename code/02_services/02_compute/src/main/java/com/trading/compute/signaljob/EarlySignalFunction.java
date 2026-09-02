@@ -1,6 +1,9 @@
 package com.trading.compute.signaljob;
 
 import java.util.Map;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.concurrent.CompletableFuture;
 import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
@@ -73,6 +76,137 @@ public class EarlySignalFunction
             new ValueStateDescriptor<>("early-signal-pending-timer", Types.LONG);
 
     private final SignalJobConfig config;
+    /**
+     * Optional durable-marker hook for F4 crash reconciliation (CHG-121,
+     * 2026-09-01). Null in embedded tests → the function behaves exactly as
+     * before (marker paths are no-ops). In the cluster deployment this is a
+     * {@link FlussTentativeMarkerStore} wrapper owned by the operator
+     * lifecycle (open/close in SignalJob wiring).
+     */
+    // NOT transient (2026-09-02 root cause of the 01:43 drill F4 miss):
+    // Flink ships the function from client to TaskManager by serialization;
+    // a transient field arrives null on the TM and markers are silently
+    // disabled in every cluster run (unit tests construct the function
+    // directly, so they never caught it). The hook impl is Serializable;
+    // its task-side resources (store/executor) are transient inside the impl.
+    private final TentativeMarkerHook markerHook;
+
+    /**
+     * Durable tentative-marker operations; null = markers disabled.
+     *
+     * <p>ASYNC contract (2026-09-02 rework): all operations run on a
+     * background thread and return futures — the task thread NEVER blocks
+     * on Fluss I/O (the first synchronous version stalled the mailbox
+     * during post-crash replay catch-up until checkpoint RPCs timed out;
+     * drill tm-kill-full-load-20260902-005900). The function stages work
+     * and drains completed futures on subsequent elements/timers of the
+     * same key, so the durable-marker-before-LOG-row ordering is preserved.
+     */
+    public interface TentativeMarkerHook extends java.io.Serializable {
+        /** Task-side init (called from EarlySignalFunction.open). */
+        default void open() throws Exception {}
+
+        /** Task-side release (called from EarlySignalFunction.close). */
+        default void close() throws Exception {}
+
+        /** Record the marker BEFORE the tentative LOG row is emitted. */
+        CompletableFuture<Void> mark(String candidateId, long instrumentToken, long windowEnd);
+
+        /** Marker lookup for the post-crash settle path. */
+        CompletableFuture<Boolean> exists(String candidateId);
+
+        /** Marker removal after settlement. */
+        CompletableFuture<Void> clear(String candidateId);
+    }
+
+    /**
+     * A tentative whose marker write is in flight. The LOG row is emitted
+     * only AFTER the marker is durable (drain below); a failed marker
+     * suppresses the tentative entirely (no orphan, no false signal — the
+     * final-candle detection path is unaffected).
+     */
+    private static final class StagedMark {
+        final String candidateId;
+        final long token;
+        final long windowStart;
+        final long windowEnd;
+        final String exchange;
+        final String symbol;
+        final long open;
+        final long high;
+        final long low;
+        final long close;
+        final long volume;
+        CompletableFuture<Void> marker;
+
+        StagedMark(String candidateId, long token, long windowStart, long windowEnd,
+                String exchange, String symbol, long open, long high, long low, long close,
+                long volume) {
+            this.candidateId = candidateId;
+            this.token = token;
+            this.windowStart = windowStart;
+            this.windowEnd = windowEnd;
+            this.exchange = exchange;
+            this.symbol = symbol;
+            this.open = open;
+            this.high = high;
+            this.low = low;
+            this.close = close;
+            this.volume = volume;
+        }
+    }
+
+    /**
+     * A post-crash settle whose marker lookup is in flight. The rule was
+     * already evaluated on the task thread (correct lookback order); only
+     * the marker-present gate and the row emission are deferred.
+     */
+    private static final class StagedSettle {
+        final String candidateId;
+        final long token;
+        final long windowStart;
+        final long windowEnd;
+        final String exchange;
+        final String symbol;
+        final long open;
+        final long high;
+        final long low;
+        final long close;
+        final long volume;
+        final boolean ruleHolds;
+        /** Failed-lookup retry count (bounded by MAX_SETTLE_ATTEMPTS). */
+        int attempts;
+        CompletableFuture<Boolean> lookup;
+
+        StagedSettle(String candidateId, long token, long windowStart, long windowEnd,
+                String exchange, String symbol, long open, long high, long low, long close,
+                long volume, boolean ruleHolds) {
+            this.candidateId = candidateId;
+            this.token = token;
+            this.windowStart = windowStart;
+            this.windowEnd = windowEnd;
+            this.exchange = exchange;
+            this.symbol = symbol;
+            this.open = open;
+            this.high = high;
+            this.low = low;
+            this.close = close;
+            this.volume = volume;
+            this.ruleHolds = ruleHolds;
+        }
+    }
+
+    /** Cap on in-flight staged marker ops per subtask (replay backstop). */
+    private static final int STAGE_CAP = 4096;
+    /** Processing-time drain timer: bounds emit latency on an idle key. */
+    private static final long DRAIN_TIMER_DELAY_MS = 250;
+    /**
+     * Bounded retries for a failed reconcile lookup (drill 20260902-022843:
+     * 4/4876 settles lost to a transient lookup failure — give-up-on-first-
+     * failure was too brittle; retry keeps the F4 guarantee without
+     * unbounded work).
+     */
+    private static final int MAX_SETTLE_ATTEMPTS = 3;
 
     private transient SignalLookbackState lookback;
     private transient MapState<Long, String> pending;
@@ -82,13 +216,21 @@ public class EarlySignalFunction
     private transient Counter confirmCounter;
     private transient Counter cancelCounter;
     private transient Counter earlyConfirmCounter;
+    private transient Counter markerDroppedCounter;
+    private transient LinkedHashMap<String, StagedMark> stagedMarks;
+    private transient LinkedHashMap<String, StagedSettle> stagedSettles;
 
     public EarlySignalFunction(SignalJobConfig config) {
+        this(config, null);
+    }
+
+    public EarlySignalFunction(SignalJobConfig config, TentativeMarkerHook markerHook) {
         this.config = config;
+        this.markerHook = markerHook;
     }
 
     @Override
-    public void open(OpenContext openContext) {
+    public void open(OpenContext openContext) throws Exception {
         lookback = new SignalLookbackState(
                 getRuntimeContext().getState(SignalLookbackState.highsDescriptor()),
                 getRuntimeContext().getState(SignalLookbackState.closesDescriptor()),
@@ -104,12 +246,27 @@ public class EarlySignalFunction
                 getRuntimeContext().getMetricGroup().counter("compute.signals.early.cancelled");
         earlyConfirmCounter =
                 getRuntimeContext().getMetricGroup().counter("compute.signals.early.confirmed_early");
+        markerDroppedCounter =
+                getRuntimeContext().getMetricGroup().counter("compute.signals.early.marker_dropped");
+        stagedMarks = new LinkedHashMap<>();
+        stagedSettles = new LinkedHashMap<>();
+        if (markerHook != null) {
+            markerHook.open();
+        }
+    }
+
+    @Override
+    public void close() throws Exception {
+        if (markerHook != null) {
+            markerHook.close();
+        }
     }
 
     // --- Input 1: previews (tentative, once per window) ---
     @Override
     public void processElement1(RowData preview, Context ctx, Collector<RowData> out)
             throws Exception {
+        drain(ctx.getCurrentKey(), ctx, out);
         long windowStart = preview.getLong(CandlePreviewColumns.WINDOW_START);
         long open = preview.getLong(CandlePreviewColumns.OPEN_PAISE);
         long close = preview.getLong(CandlePreviewColumns.CLOSE_PAISE);
@@ -136,6 +293,13 @@ public class EarlySignalFunction
             pending.remove(windowStart);
             holds.remove(windowStart);
             clearSettlementTimer(ctx);
+            if (markerHook != null) {
+                // Every settle clears its marker (2026-09-02: only the
+                // reconcile path cleared before — a normally-settled
+                // tentative left a stale marker for 2d, and a replayed
+                // final hitting it would emit a DUPLICATE settle).
+                markerHook.clear(tentativeId);
+            }
             earlyConfirmCounter.inc();
             out.collect(candidateRow(
                     token,
@@ -161,6 +325,32 @@ public class EarlySignalFunction
         }
         // First holding preview → tentative.
         String candidateId = config.signalRuleId() + "-" + token + "-" + windowEnd + "-TENTATIVE";
+        if (markerHook != null) {
+            // Durable marker BEFORE the LOG row leaves the operator — but
+            // asynchronously: stage the tentative, emit it from drain()
+            // only once the marker future completes. If the TM dies before
+            // the next checkpoint, the marker (not the rolled-back pending
+            // state) is what the post-crash final path consults.
+            if (stagedMarks.containsKey(candidateId)) {
+                return; // marker already in flight for this window
+            }
+            if (stagedMarks.size() >= STAGE_CAP) {
+                // Replay backstop: drop the tentative (never emit a row
+                // whose marker we cannot track) — degradation to "no early
+                // signal for this window", final detection is unaffected.
+                markerDroppedCounter.inc();
+                return;
+            }
+            StagedMark staged = new StagedMark(candidateId, token, windowStart, windowEnd,
+                    exchangeOf(preview, true), symbolOf(preview, true),
+                    openOf(preview, true), highOf(preview, true), lowOf(preview, true),
+                    close, volumeOf(preview, true));
+            staged.marker = markerHook.mark(candidateId, token, windowEnd);
+            stagedMarks.put(candidateId, staged);
+            ctx.timerService().registerProcessingTimeTimer(
+                    ctx.timerService().currentProcessingTime() + DRAIN_TIMER_DELAY_MS);
+            return;
+        }
         pending.put(windowStart, candidateId);
         registerSettlementTimer(ctx, windowEnd);
         tentativeCounter.inc();
@@ -186,6 +376,7 @@ public class EarlySignalFunction
     @Override
     public void processElement2(RowData finalCandle, Context ctx, Collector<RowData> out)
             throws Exception {
+        drain(ctx.getCurrentKey(), ctx, out);
         long windowStart = finalCandle.getLong(CandleTableColumns.WINDOW_START);
         long windowEnd = finalCandle.getLong(CandleTableColumns.WINDOW_END);
         long open = finalCandle.getLong(CandleTableColumns.OPEN_PAISE);
@@ -194,8 +385,49 @@ public class EarlySignalFunction
 
         String tentativeId = pending.get(windowStart);
         if (tentativeId == null) {
-            // No tentative for this window — the completed candle still
-            // enters the lookback (ring buffers always track finals).
+            // No in-state tentative for this window. Two possibilities:
+            // (a) none was ever emitted — silent as before;
+            // (b) F4 crash path: a tentative WAS emitted pre-crash, the LOG
+            //     row survived, but this pending state rolled back to the
+            //     last checkpoint. The durable marker table distinguishes:
+            //     marker present → reconcile (settle by the FINAL rule and
+            //     clear the marker); marker absent → case (a).
+            if (markerHook != null) {
+                long token2 = finalCandle.getLong(CandleTableColumns.INSTRUMENT_TOKEN);
+                String candidateId =
+                        config.signalRuleId() + "-" + token2 + "-" + windowEnd + "-TENTATIVE";
+                if (!stagedSettles.containsKey(candidateId)) {
+                    if (stagedSettles.size() >= STAGE_CAP) {
+                        // Replay backstop: skip this reconcile lookup — the
+                        // worst case is one more F4 orphan, never a false
+                        // signal (no marker → no row).
+                        markerDroppedCounter.inc();
+                    } else {
+                        // Evaluate BEFORE appending (same strictly-before
+                        // semantics as the normal settle path below) — the
+                        // rule needs the task-thread lookback state, so it
+                        // runs now; only the marker lookup and the row
+                        // emission are deferred to drain().
+                        boolean ruleHolds = lookback.evaluate(open, close);
+                        StagedSettle staged = new StagedSettle(candidateId, token2,
+                                windowStart, windowEnd,
+                                exchangeOf(finalCandle, false),
+                                symbolOf(finalCandle, false),
+                                open, high,
+                                finalCandle.getLong(CandleTableColumns.LOW_PAISE),
+                                close,
+                                finalCandle.getLong(CandleTableColumns.VOLUME),
+                                ruleHolds);
+                        staged.lookup = markerHook.exists(candidateId);
+                        stagedSettles.put(candidateId, staged);
+                        ctx.timerService().registerProcessingTimeTimer(
+                                ctx.timerService().currentProcessingTime()
+                                        + DRAIN_TIMER_DELAY_MS);
+                    }
+                }
+            }
+            // The completed candle still enters the lookback (ring buffers
+            // always track finals) — both for case (a) and post-reconcile.
             lookback.append(high, close);
             return;
         }
@@ -206,6 +438,9 @@ public class EarlySignalFunction
         lookback.append(high, close);
         pending.remove(windowStart);
         clearSettlementTimer(ctx);
+        if (markerHook != null) {
+            markerHook.clear(tentativeId); // fire-and-forget
+        }
         long token = finalCandle.getLong(CandleTableColumns.INSTRUMENT_TOKEN);
         if (holds) {
             confirmCounter.inc();
@@ -250,6 +485,10 @@ public class EarlySignalFunction
     @Override
     public void onTimer(long timestamp, OnTimerContext ctx, Collector<RowData> out)
             throws Exception {
+        // Processing-time drain timers land here too — always drain first
+        // (drain timers never match pendingTimer, so the stale check below
+        // simply returns for them).
+        drain(ctx.getCurrentKey(), ctx, out);
         Long t = pendingTimer.value();
         if (t == null || t != timestamp) {
             return; // stale timer (final settled the window first)
@@ -262,6 +501,9 @@ public class EarlySignalFunction
                 cancelCounter.inc();
                 String tentativeId = e.getValue();
                 pending.remove(windowStart);
+                if (markerHook != null) {
+                    markerHook.clear(tentativeId); // fire-and-forget
+                }
                 out.collect(candidateRow(
                         ctx.getCurrentKey(),
                         null,
@@ -275,6 +517,104 @@ public class EarlySignalFunction
                         SignalCandidatesTableColumns.VALIDITY_REASON_SUPERSEDED,
                         SignalCandidatesTableColumns.ACTION_CANCEL,
                         "late-drop"));
+            }
+        }
+    }
+
+    /**
+     * Complete staged marker work for the CURRENT key only (keyed-state and
+     * timer access are only valid for the key whose element/timer we are
+     * processing). Completed futures are applied in staging order; pending
+     * futures stay staged until the next drain.
+     */
+    private void drain(long currentKey, Context ctx, Collector<RowData> out) throws Exception {
+        if (markerHook == null || (stagedMarks.isEmpty() && stagedSettles.isEmpty())) {
+            return;
+        }
+        if (!stagedMarks.isEmpty()) {
+            Iterator<Map.Entry<String, StagedMark>> it = stagedMarks.entrySet().iterator();
+            while (it.hasNext()) {
+                StagedMark m = it.next().getValue();
+                if (m.token != currentKey || !m.marker.isDone()) {
+                    continue;
+                }
+                it.remove();
+                try {
+                    m.marker.get();
+                } catch (Exception e) {
+                    // Marker write failed → suppress the tentative. No LOG
+                    // row, no pending state: nothing to orphan, no false
+                    // settle. The window's final-candle detection path is
+                    // unaffected.
+                    markerDroppedCounter.inc();
+                    continue;
+                }
+                pending.put(m.windowStart, m.candidateId);
+                registerSettlementTimer(ctx, m.windowEnd);
+                tentativeCounter.inc();
+                out.collect(candidateRow(
+                        m.token, m.exchange, m.symbol, m.windowStart, m.windowEnd,
+                        m.open, m.high, m.low, m.close, m.volume,
+                        m.candidateId, null,
+                        SignalCandidatesTableColumns.VALIDITY_REASON_TENTATIVE,
+                        SignalCandidatesTableColumns.ACTION_ENTRY,
+                        "preview"));
+            }
+        }
+        if (!stagedSettles.isEmpty()) {
+            Iterator<Map.Entry<String, StagedSettle>> it = stagedSettles.entrySet().iterator();
+            while (it.hasNext()) {
+                StagedSettle s = it.next().getValue();
+                if (s.token != currentKey || !s.lookup.isDone()) {
+                    continue;
+                }
+                Boolean present;
+                try {
+                    present = s.lookup.get();
+                } catch (Exception e) {
+                    // Lookup failed → bounded retry, then give up (worst
+                    // case one more F4 orphan; never a false signal). A
+                    // single transient failure (drill 20260902-022843: 4
+                    // settles lost to 5s lookup timeouts) must not orphan
+                    // a tentative.
+                    s.attempts++;
+                    if (s.attempts < MAX_SETTLE_ATTEMPTS) {
+                        s.lookup = markerHook.exists(s.candidateId);
+                        ctx.timerService().registerProcessingTimeTimer(
+                                ctx.timerService().currentProcessingTime()
+                                        + DRAIN_TIMER_DELAY_MS);
+                    } else {
+                        it.remove();
+                        markerDroppedCounter.inc();
+                    }
+                    continue;
+                }
+                it.remove();
+                if (!Boolean.TRUE.equals(present)) {
+                    continue; // no marker → case (a): silent as before
+                }
+                markerHook.clear(s.candidateId); // fire-and-forget
+                if (s.ruleHolds) {
+                    confirmCounter.inc();
+                    out.collect(candidateRow(
+                            s.token, s.exchange, s.symbol, s.windowStart, s.windowEnd,
+                            s.open, s.high, s.low, s.close, s.volume,
+                            s.candidateId.replace("-TENTATIVE", "-CONFIRM"),
+                            s.candidateId,
+                            SignalCandidatesTableColumns.VALIDITY_REASON_CONFIRMED,
+                            SignalCandidatesTableColumns.ACTION_ENTRY,
+                            "final-reconciled"));
+                } else {
+                    cancelCounter.inc();
+                    out.collect(candidateRow(
+                            s.token, s.exchange, s.symbol, s.windowStart, s.windowEnd,
+                            s.open, s.high, s.low, s.close, s.volume,
+                            s.candidateId.replace("-TENTATIVE", "-CANCEL"),
+                            s.candidateId,
+                            SignalCandidatesTableColumns.VALIDITY_REASON_SUPERSEDED,
+                            SignalCandidatesTableColumns.ACTION_CANCEL,
+                            "final-reconciled"));
+                }
             }
         }
     }

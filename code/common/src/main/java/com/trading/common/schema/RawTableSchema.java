@@ -4,7 +4,7 @@ import java.util.List;
 
 /**
  * Shared, versioned contract for the raw tick table
- * ({@code code/01_platform/02_sql/ddl/02_raw_table_1.sql}, v2, R-054/R-231).
+ * ({@code code/01_platform/02_sql/ddl/02_raw_table_1.sql}, v3, daily partitions).
  *
  * <p>One table carries every accepted market tick as an immutable LOG row:
  * <ul>
@@ -12,12 +12,12 @@ import java.util.List;
  *       {@code instrument_token}, 16 buckets, 7-day TTL, Iceberg offload.</li>
  * </ul>
  *
- * <p>This class is the <b>single source of truth</b> for the 20-column
+ * <p>This class is the <b>single source of truth</b> for the 21-column
  * raw-table layout (configuration-driven plan SC1, 2026-08-29). The DDL
  * ({@code 02_raw_table_1.sql}), {@code DdlBootstrap}, and
  * {@code TypedFlussRowConverter} all derive from it — a schema change is one
  * edit, not three. v2 dropped the 8 quote/option columns the ingestion path
- * never populates (28 → 20).
+ * never populates (28 → 20); v3 then adds the {@code event_day} partition key.
  */
 public final class RawTableSchema {
 
@@ -36,7 +36,7 @@ public final class RawTableSchema {
     public static final int BUCKET_COUNT = 16;
 
     /**
-     * The 20 raw columns in DDL index order (v2, R-054/R-231). Physical
+     * The 21 raw columns in DDL index order (v3, daily-partition migration). Physical
      * writer layouts ({@code TypedFlussRowConverter}) and bootstrap DDL
      * ({@code DdlBootstrap}) MUST derive from this list so they cannot drift
      * apart.
@@ -68,8 +68,8 @@ public final class RawTableSchema {
      * Fluss {@code DataTypeRoot} name per column, DDL index order. Mirrors
      * {@code 02_raw_table_1.sql} exactly: 7× BIGINT
      * (connection_epoch, instrument_token, event_time, ingest_ts, ack_ts,
-     * last_price_paise, last_qty), 1× BYTES (raw_payload), 12× STRING (the
-     * rest). Counted: 7 BIGINT + 1 BYTES + 12 STRING = 20.
+     * last_price_paise, last_qty), 1× BYTES (raw_payload), 13× STRING (the
+     * rest). Counted: 7 BIGINT + 1 BYTES + 13 STRING = 21.
      *
      * <p>Values are plain {@code DataTypeRoot.name()} strings so the shared
      * module stays free of a compile-time Fluss dependency; ingestion's

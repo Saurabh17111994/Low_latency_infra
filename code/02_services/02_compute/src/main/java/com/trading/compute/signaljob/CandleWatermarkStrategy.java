@@ -26,11 +26,17 @@ public final class CandleWatermarkStrategy {
         // source operator (FLIP-27 per-split generator): zero graph nodes
         // added, so StreamGraphHasherV2 operator IDs are bit-identical and
         // P10 archived-checkpoint restore (allowNonRestoredState=false)
-        // remains safe.
+        // remains safe. The watchdog also marks splits idle after
+        // SOURCE_IDLE_MS of WALL-CLOCK silence: withIdleness's
+        // PausableRelativeClock is frozen by backpressure under load, which
+        // pinned the combined watermark at Long.MIN_VALUE behind the
+        // daily-partition table's permanently-empty future-day splits
+        // (CHG-120, live-reproduced 2026-09-01).
         return WatermarkStrategy.<RowData>forGenerator(
                         context ->
                                 new SourceIdleWatchdogGenerator(
                                         boundedOutOfOrderGenerator(config.outOfOrderMs()),
+                                        config.sourceIdleMs(),
                                         config.sourceIdleAlertMs()))
                 .withIdleness(Duration.ofMillis(config.sourceIdleMs()))
                 .withTimestampAssigner(

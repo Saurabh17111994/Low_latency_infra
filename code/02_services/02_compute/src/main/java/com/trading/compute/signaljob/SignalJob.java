@@ -467,12 +467,24 @@ public final class SignalJob {
         // to the LOG candidates sink ONLY (auditable supersession chain).
         DataStream<RowData> earlySignals = null;
         if (config.earlySignalEnabled() && previews != null) {
+            // CHG-121 (2026-09-01): durable tentative markers for F4 crash
+            // reconciliation — the hook lazily opens the marker store on the
+            // task side; blank table name disables markers (legacy behavior).
+            EarlySignalFunction.TentativeMarkerHook markerHook = null;
+            if (config.tentativeMarkersTable() != null
+                    && !config.tentativeMarkersTable().isEmpty()) {
+                markerHook = new FlussTentativeMarkerHook(
+                        config.bootstrapServers(),
+                        config.database(),
+                        config.tentativeMarkersTable(),
+                        java.time.Duration.ofSeconds(5));
+            }
             earlySignals = previews
                     .connect(candles)
                     .keyBy(
                             row -> row.getLong(CandlePreviewColumns.INSTRUMENT_TOKEN),
                             row -> row.getLong(CandleTableColumns.INSTRUMENT_TOKEN))
-                    .process(new EarlySignalFunction(config))
+                    .process(new EarlySignalFunction(config, markerHook))
                     .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
                     .name("early-signal")
                     .uid("early-signal");
@@ -617,11 +629,14 @@ public final class SignalJob {
             if (!config.stateBackendManagedMemory()) {
                 flinkConfig.setString("state.backend.rocksdb.memory.managed", "false");
             } else {
-                // Streaming-3000 T3 G3: managed 0.4 — 40% of TM memory for
-                // RocksDB block cache/memtables (TM 3g → ~1.2 GB). Verified
-                // in DedupRocksDbThroughputMemoryIT (0.4). Explicit fraction
-                // so heap/TM headroom stays stable at p8.
-                flinkConfig.setString("taskmanager.memory.managed.fraction", "0.4");
+                // Streaming-3000 T3 G3: managed fraction for RocksDB block
+                // cache/memtables. NOTE (CHG-120 2026-09-01): in cluster mode
+                // the TM pool is sized at TM STARTUP from flink-conf
+                // (docker-compose taskmanager.memory.managed.fraction — 0.6
+                // there now); this job-level value only governs
+                // embedded/local runs. Verified in
+                // DedupRocksDbThroughputMemoryIT.
+                flinkConfig.setString("taskmanager.memory.managed.fraction", "0.6");
             }
             // E2E root cause (2026-08-17): under LOCAL execution (no
             // flink-conf.yaml) Flink defaults taskmanager.memory.managed.size

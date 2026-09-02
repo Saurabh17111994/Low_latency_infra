@@ -37,6 +37,7 @@ from collections import defaultdict
 LOG_READ_SRC = """
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
+import org.apache.fluss.client.admin.Admin;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.scanner.log.LogScanner;
 import org.apache.fluss.client.table.scanner.log.ScanRecords;
@@ -51,7 +52,8 @@ public class LogFullRead {
         conf.setString("bootstrap.servers", "localhost:9123");
         TablePath tp = TablePath.of("default", args[0]);
         long runMs = args.length > 1 ? Long.parseLong(args[1]) : 20000L;
-        // args[2] == "offset": prefix each row with its bucket:offset so the
+        // args[2] == "offset": prefix each row with its bucket:offset (or
+        // partition:bucket:offset for partitioned tables) so the
         // caller can dedupe EXACTLY (the LogScanner re-delivers records —
         // line dedupe alone cannot distinguish a re-delivery from an
         // injected duplicate tick, which is the whole point of the F2 audit).
@@ -65,33 +67,75 @@ public class LogFullRead {
         boolean audit = args.length > 2 && "audit".equals(args[2]);
         boolean withOffset = audit || (args.length > 2 && "offset".equals(args[2]));
         try (Connection c = ConnectionFactory.createConnection(conf);
+             Admin admin = c.getAdmin();
              Table t = c.getTable(tp);
              LogScanner scanner = t.newScan().createLogScanner()) {
+            if (audit) {
+                // The audit projection is positional.  Refuse to read if the
+                // live table no longer matches the shared v3 raw contract;
+                // otherwise a schema drift can turn strings into longs and
+                // produce an apparently empty (but false) parity result.
+                var expectedColumns = List.of(
+                    "event_day", "event_fingerprint", "fingerprint_version",
+                    "connection_id", "connection_epoch", "instrument_token",
+                    "exchange", "symbol", "event_time", "ingest_ts", "ack_ts",
+                    "tick_type", "last_price_paise", "last_qty", "raw_payload",
+                    "payload_hash", "decoder_version", "protocol_version",
+                    "validity_state", "validity_reason", "schema_version");
+                var actualColumns = t.getTableInfo().getSchema().getColumnNames();
+                if (!expectedColumns.equals(actualColumns)) {
+                    throw new IllegalStateException(
+                        "raw_table_1 audit schema mismatch: expected "
+                            + expectedColumns + " but got " + actualColumns);
+                }
+            }
             int buckets = t.getTableInfo().getNumBuckets();
-            for (int b = 0; b < buckets; b++) scanner.subscribe(b, 0L);
+            if (t.getTableInfo().isPartitioned()) {
+                // raw_table_1 is partitioned by event_day (v3).  The
+                // two-argument overload is deliberately rejected by Fluss
+                // for partitioned tables; subscribe every known partition
+                // and bucket with its three-argument form.  Partition 0 is
+                // not a valid substitute for the partition id.
+                var partitions = admin.listPartitionInfos(tp).get();
+                if (partitions.isEmpty()) {
+                    throw new IllegalStateException(
+                        "partitioned table has no partitions: " + tp);
+                }
+                for (var partition : partitions) {
+                    for (int b = 0; b < buckets; b++) {
+                        scanner.subscribe(partition.getPartitionId(), b, 0L);
+                    }
+                }
+            } else {
+                for (int b = 0; b < buckets; b++) scanner.subscribe(b, 0L);
+            }
             long deadline = System.currentTimeMillis() + runMs;
             while (System.currentTimeMillis() < deadline) {
                 ScanRecords records = scanner.poll(Duration.ofSeconds(1));
                 if (audit || withOffset) {
                     // per-bucket iteration: ScanRecord exposes logOffset()
                     // but not its bucket, so the bucket must come from the
-                    // records-per-bucket map (bucket:offset is the exact
-                    // dedupe key).
+                    // records-per-bucket map (the partition:bucket:offset or
+                    // bucket:offset prefix is the exact dedupe key).
                     for (var tb : records.buckets()) {
                         for (var r : records.records(tb)) {
+                            String offset = tb.getPartitionId() == null
+                                ? tb.getBucket() + ":" + r.logOffset()
+                                : tb.getPartitionId() + ":" + tb.getBucket()
+                                    + ":" + r.logOffset();
                             if (audit) {
-                                // raw_table_1 column indexes (RawTableColumns):
-                                // 0 fingerprint, 4 token, 7 event_time, 8 ingest_ts,
-                                // 11 price, 12 qty, 17 validity_state
+                                // raw_table_1 v3 column indexes (RawTableColumns):
+                                // 1 fingerprint, 5 token, 8 event_time, 9 ingest_ts,
+                                // 12 price, 13 qty, 18 validity_state
                                 var rw = r.getRow();
                                 System.out.println(
-                                    tb.getBucket() + ":" + r.logOffset() + "\t"
-                                    + rw.getString(0) + "\t" + rw.getLong(4)
-                                    + "\t" + rw.getLong(7) + "\t" + rw.getLong(8)
-                                    + "\t" + rw.getLong(11) + "\t" + rw.getLong(12)
-                                    + "\t" + rw.getString(17));
+                                    offset + "\t"
+                                    + rw.getString(1) + "\t" + rw.getLong(5)
+                                    + "\t" + rw.getLong(8) + "\t" + rw.getLong(9)
+                                    + "\t" + rw.getLong(12) + "\t" + rw.getLong(13)
+                                    + "\t" + rw.getString(18));
                             } else {
-                                System.out.println("@" + tb.getBucket() + ":" + r.logOffset()
+                                System.out.println("@" + offset
                                     + " " + r.getRow().toString());
                             }
                         }
@@ -117,8 +161,165 @@ def fmt_ms(v):
     return "n/a" if v is None else f"{v:.0f}ms"
 
 
+def counter_deltas(path):
+    """Counter series deltas from a Prometheus-text TSV capture.
+
+    Reset-aware (TM-kill drill, 2026-08-31): a job restart mid-run
+    re-creates every counter at 0, so the naive last-minus-first goes
+    NEGATIVE and every guard built on it mis-fires. Walk samples in file
+    order; when a series value drops below its previous sample, treat the
+    drop as a reset and carry the pre-reset value forward (the standard
+    Prometheus rate() reset handling). Sampler files are appended in time
+    order, so the walk is correct for old evidence too.
+    """
+    # Prometheus text format: "<ts> name{labels} value". HELP/TYPE lines
+    # also match the name grep ("# HELP name (scope: ...)") - their last
+    # field is not a float; the float parse rejects them (observed live:
+    # crashed the G7 audit on its first run).
+    first, prev, carried, last = {}, {}, {}, {}
+    try:
+        with open(path) as fh:
+            for ln in fh:
+                parts = ln.split()
+                if len(parts) < 3 or parts[1].startswith("#"):
+                    continue
+                try:
+                    val = float(parts[-1])
+                except ValueError:
+                    continue
+                name = parts[1]
+                first.setdefault(name, val)
+                if name in prev and val < prev[name]:
+                    # counter reset (job restart): carry the pre-reset total
+                    carried[name] = carried.get(name, 0) + prev[name]
+                prev[name] = val
+                last[name] = val
+    except OSError:
+        pass
+    names = set(first) | set(last)
+    return {n: carried.get(n, 0) + last.get(n, 0) - first.get(n, 0)
+            for n in names}
+
+
+def g7c_compare(win_ticks, win_vol, final_by_key, run_start, run_end,
+                event_horizon=None):
+    """G7c: per (token, 15s window) final-candle vs raw-recount parity.
+
+    Returns (mismatch_messages, compared_count, startup_skipped_count).
+    The SignalJob source starts in LATEST mode (2026-08-29 design: skip
+    the LOG backlog accumulated during job startup, measure only the live
+    path). The first windows after run_start may therefore legitimately
+    have NO candle. This tolerates a CONTIGUOUS STARTUP PREFIX of
+    candle-less windows - anything missing after the first present candle
+    is a real gap (observed 2026-08-31: the first G7 run misread the
+    startup skip as 47k data-loss mismatches). A mid-run job restart (TM
+    kill) replays from the last checkpoint, so every post-startup window
+    must still have its candle - a missing window after the kill IS data
+    loss and must fire.
+    """
+    # Trailing-window bound. A window can only have emitted its candle if
+    # the watermark passed its end; the watermark tops out at
+    # (max event ts - 500). Drill 20260902-034813: the drain phase stops
+    # the feed mid-window, so the LAST window never closes — demanding a
+    # candle for it (the old wall-clock run_end bound) fired 1024 phantom
+    # mismatches. The event horizon is measured from the raw recount, not
+    # wall clock, because analysis runs minutes after run end.
+    cutoff_end = (run_end or 0) - 10000
+    if event_horizon:
+        cutoff_end = min(cutoff_end, event_horizon - 500)
+    mismatch = []
+    compared = 0
+    startup_skipped = 0
+    first_candle_window = {}
+    for key in final_by_key:
+        token, ws = key
+        if run_start and ws < run_start:
+            continue
+        first_candle_window[token] = min(
+            ws, first_candle_window.get(token, ws))
+    for (token, ws), exp_ticks in sorted(win_ticks.items()):
+        wend = ws + 14999
+        if run_start and ws < ((run_start + 14999) // 15000) * 15000:
+            continue  # window straddles run start - partial raw history
+        if wend > cutoff_end:
+            continue  # window not fully closed (run end or event horizon)
+        key = (token, ws)
+        if key not in final_by_key:
+            token_first_window = first_candle_window.get(token)
+            if token_first_window is not None and ws < token_first_window:
+                startup_skipped += 1
+            else:
+                mismatch.append(f"window {ws} token {token}: NO final "
+                                f"candle (expected {exp_ticks} ticks)")
+            continue
+        fticks, fvol = final_by_key[key]
+        compared += 1
+        # The first present candle's window may be PARTIAL (the LATEST
+        # source entered mid-window); every window after it must match
+        # the raw recount exactly.
+        if ws == first_candle_window[token]:
+            continue
+        if fticks != exp_ticks or fvol != win_vol[key]:
+            mismatch.append(
+                f"window {ws} token {token}: candle ticks={fticks} "
+                f"vol={fvol} vs raw recount ticks={exp_ticks} "
+                f"vol={win_vol[key]}")
+    return mismatch, compared, startup_skipped
+
+
+def g7c_measurement_guard(raw_read_ok, compared):
+    """Require an actual raw/candle comparison before declaring G7c green."""
+    if not raw_read_ok:
+        return "G7c: raw recount unavailable — parity proof was not evaluated"
+    if compared == 0:
+        return ("G7c: zero fully-closed (token,window) pairs compared — "
+                "raw/candle parity proof is unavailable")
+    return None
+
+
+def f4_orphan_check(sig_groups, sig_group_ts, run_end, event_horizon=None,
+                    grace_ms=30000):
+    """F4: TENTATIVE-only groups whose settle decision MUST have landed.
+
+    A tentative is emitted DURING its 15s window, so its window end is
+    bounded above by eval_ts + 15000. The window only closes when the
+    watermark (max event ts - 500) passes that end; with the drain phase
+    stopping the feed mid-window, trailing tentatives can NEVER settle —
+    they are unverifiable, not orphans (drill 20260902-034813: the old
+    wall-clock grace misread exactly this tail as 31 orphans in
+    20260902-030521). A tentative is only an ORPHAN when the horizon is
+    past its window end + grace: the window closed, the final candle was
+    processed (drain guarantees backlog-free processing), and the settle
+    row is still missing — a dropped trading decision.
+
+    Returns (orphan_ts, lonely_n, unverifiable_n).
+    """
+    orphan_ts = []
+    lonely_n = 0
+    unverifiable_n = 0
+    for pfx, sts in sig_groups.items():
+        if sts != {"TENTATIVE"}:
+            continue
+        lonely_n += 1
+        ts = sig_group_ts[pfx]
+        if event_horizon:
+            window_end_max = ts + 15000  # tentative fires mid-window
+            if event_horizon - 500 < window_end_max + grace_ms:
+                unverifiable_n += 1  # window never provably closed+settled
+                continue
+        elif (run_end or ts) - ts <= grace_ms:
+            continue
+        orphan_ts.append(ts)
+    return orphan_ts, lonely_n, unverifiable_n
+
+
 def collect_rows(table, cp, out_dir, run_ms=30000, with_offset=False):
-    """Compile (once) and run the LOG reader; return parsed rows."""
+    """Compile (once) and run the LOG reader; return parsed rows.
+
+    A reader failure is a measurement failure, not an empty table.  Return
+    ``None`` in that case so callers can fail closed while preserving any
+    earlier evidence file for diagnosis.
+    """
     java_file = os.path.join(out_dir, "LogFullRead.java")
     class_file = os.path.join(out_dir, "LogFullRead.class")
     # regenerate + recompile when the source is newer than the class — a
@@ -133,28 +334,49 @@ def collect_rows(table, cp, out_dir, run_ms=30000, with_offset=False):
         if r.returncode != 0:
             print(f"!! LogFullRead compile failed for {table}: {r.stderr[:400]}")
             return []
-    r = subprocess.run(
-        ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",
-         "--add-opens=java.base/java.nio=ALL-UNNAMED",
-         "-Dlog.dir=/tmp/fluss-probe-logs",
-         "-cp", f"{out_dir}:{cp}", "LogFullRead", table, str(run_ms)]
-        + (["offset"] if with_offset else []),
-        capture_output=True, text=True, timeout=run_ms / 1000 + 90,
-    )
-    rows = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    err_path = os.path.join(out_dir, f"latency-{table}.reader.stderr.log")
+    try:
+        r = subprocess.run(
+            ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",
+             "--add-opens=java.base/java.nio=ALL-UNNAMED",
+             "-Dlog.dir=/tmp/fluss-probe-logs",
+             "-cp", f"{out_dir}:{cp}", "LogFullRead", table, str(run_ms)]
+            + (["offset"] if with_offset else []),
+            capture_output=True, text=True, timeout=run_ms / 1000 + 90,
+        )
+    except subprocess.TimeoutExpired:
+        with open(err_path, "w") as errh:
+            errh.write(f"reader timed out after {run_ms / 1000 + 90:.0f}s\n")
+        print(f"!! {table} LOG reader timed out after "
+              f"{run_ms / 1000 + 90:.0f}s; diagnostics: {err_path}")
+        return None
+
+    stderr = r.stderr or ""
+    with open(err_path, "w") as errh:
+        errh.write(stderr)
+    if r.returncode != 0:
+        detail = " ".join(stderr.split())[:600]
+        print(f"!! {table} LOG reader failed (rc={r.returncode}); "
+              f"diagnostics: {err_path}"
+              + (f": {detail}" if detail else ""))
+        return None
+
+    rows = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
     # Never overwrite saved evidence with an empty read: re-analyzing an old
     # out_dir after its table was purged/recreated returns 0 live rows — the
     # old 'w' mode destroyed the original rows file (observed 2026-08-30:
     # runs 140907 and 173514 lost their evidence this way).
     rows_path = os.path.join(out_dir, f"latency-{table}.rows.txt")
-    # A ROW starts with '(' (Fluss Row toString). When Fluss is DOWN the
-    # reader prints connection errors to stdout — those lines are NOT rows,
-    # and counting them as rows let an offline re-analysis overwrite 300MB
-    # of preview evidence with 91 error lines (observed 2026-08-31).
+    # A ROW starts with '(' (Fluss Row toString). When the reader returns no
+    # valid rows, treat that as a failed measurement rather than allowing
+    # downstream latency guards to pass on an empty input.
     real_rows = [ln for ln in rows if ln.startswith("(")]
-    if real_rows or not os.path.exists(rows_path):
-        with open(rows_path, "w") as f:
-            f.write("\n".join(rows) + "\n")
+    if not real_rows:
+        print(f"!! {table} LOG reader completed without valid rows; "
+              f"diagnostics: {err_path}")
+        return None
+    with open(rows_path, "w") as f:
+        f.write("\n".join(real_rows) + "\n")
     return real_rows
 
 def collect_rows_stream(table, cp, out_dir, run_ms=30000, mode="offset"):
@@ -163,7 +385,8 @@ def collect_rows_stream(table, cp, out_dir, run_ms=30000, mode="offset"):
     phase ≈ 1.2 GB of text). Returns the rows file path; callers iterate
     the file line-by-line (two passes are fine — the file is the evidence).
     mode: "offset" (bucket:offset + full row toString) or "audit"
-    (bucket:offset + sanitized tab-separated fields — see LogFullRead).
+    (partition:bucket:offset for partitioned tables, plus sanitized
+    tab-separated fields — see LogFullRead).
     """
     os.makedirs(out_dir, exist_ok=True)
     java_file = os.path.join(out_dir, "LogFullRead.java")
@@ -179,32 +402,68 @@ def collect_rows_stream(table, cp, out_dir, run_ms=30000, mode="offset"):
         print(f"!! LogFullRead compile failed for {table}: {r.stderr[:400]}")
         return None
     rows_path = os.path.join(out_dir, f"latency-{table}.rows.txt")
-    with open(rows_path, "w") as fh:
-        subprocess.run(
-            ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",
-             "--add-opens=java.base/java.nio=ALL-UNNAMED",
-             "-Dlog.dir=/tmp/fluss-probe-logs",
-             "-cp", f"{out_dir}:{cp}", "LogFullRead", table, str(run_ms)]
-            + ([mode] if mode else []),
-            stdout=fh, stderr=subprocess.DEVNULL,
-            timeout=run_ms / 1000 + 90,
-        )
-    # Evidence preservation (same rule as collect_rows): never let an empty
-    # re-read destroy a previously captured file.
+    tmp_path = rows_path + ".tmp"
+    err_path = os.path.join(out_dir, f"latency-{table}.reader.stderr.log")
+    try:
+        with open(tmp_path, "w") as fh, open(err_path, "w") as errh:
+            result = subprocess.run(
+                ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                 "--add-opens=java.base/java.nio=ALL-UNNAMED",
+                 "-Dlog.dir=/tmp/fluss-probe-logs",
+                 "-cp", f"{out_dir}:{cp}", "LogFullRead", table, str(run_ms)]
+                + ([mode] if mode else []),
+                stdout=fh, stderr=errh,
+                timeout=run_ms / 1000 + 90,
+            )
+    except subprocess.TimeoutExpired:
+        print(f"!! {table} LOG reader timed out after {run_ms / 1000 + 90:.0f}s; "
+              f"diagnostics: {err_path}")
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return None
+
+    if result.returncode != 0:
+        detail = ""
+        try:
+            with open(err_path) as errh:
+                detail = " ".join(errh.read().split())[:600]
+        except OSError:
+            pass
+        print(f"!! {table} LOG reader failed (rc={result.returncode}); "
+              f"diagnostics: {err_path}"
+              + (f": {detail}" if detail else ""))
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        return None
+
+    # Evidence preservation: only publish a complete, successful read.  A
+    # failed/empty re-read must never truncate an earlier evidence file (the
+    # old direct 'w' open did exactly that during offline re-analysis).
     # Same error-vs-row discipline as collect_rows: with Fluss down the
-    # streamed output is connection errors, not rows — treat a file with
-    # no '(' -prefixed lines as empty (protects evidence, 2026-08-31).
+    # reader has no valid row, so do not treat diagnostics as evidence.
     n_real = 0
     try:
-        with open(rows_path) as f:
+        with open(tmp_path) as f:
             for ln in f:
-                if ln.startswith("(") or ln[0:1].isdigit():
+                if (ln.startswith("(") or ln.startswith("@")
+                        or (mode == "audit" and ln[0:1].isdigit())):
                     n_real += 1
                     break
     except OSError:
         n_real = 0
     if n_real == 0:
+        print(f"!! {table} LOG reader completed without valid rows; "
+              f"diagnostics: {err_path}")
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
         return None
+    os.replace(tmp_path, rows_path)
     return rows_path
 
 
@@ -236,6 +495,10 @@ def main():
     # pipeline-lib.sh (purge_preview_table) — never here, or the rows this
     # read needs would be destroyed before reading them.
     prev_rows = collect_rows("feature_candles_15s_preview", cp, out_dir)
+    if prev_rows is None:
+        failures.append("G6: preview table LOG read failed — latency "
+                        "measurement is unavailable")
+        prev_rows = []
     # Row (v2): (token,NSE,symbol,window_start,window_end,o,h,l,c,vol,tick_count,
     #            is_preview,output_ts,last_event_ts,ver)
     prev_re = re.compile(
@@ -289,6 +552,10 @@ def main():
     # just before window_end, so broker→final-candle ≈ this value + tick
     # lead-in. This is the broker→FEATURE-TABLE headline number.)
     final_rows = collect_rows("feature_candles_15s", cp, out_dir)
+    if final_rows is None:
+        failures.append("G7c: final candle table LOG read failed — parity "
+                        "measurement is unavailable")
+        final_rows = []
     final_rows = list(dict.fromkeys(final_rows))  # same re-delivery dedupe
     close_lat = []
     for ln in final_rows:
@@ -334,6 +601,10 @@ def main():
             sig_rows = [ln for ln in f.read().splitlines() if ln.strip()]
     else:
         sig_rows = collect_rows("Signal_Candidates", cp, out_dir)
+        if sig_rows is None:
+            failures.append("F4: Signal_Candidates LOG read failed — signal "
+                            "settlement measurement is unavailable")
+            sig_rows = []
     # DEDUPE: same LogScanner re-delivery (see preview note above).
     sig_rows = list(dict.fromkeys(sig_rows))
     status_counts = defaultdict(int)
@@ -382,25 +653,14 @@ def main():
               f"(confirm={conf} cancel={canc}) — unsettled tentatives belong to "
               f"windows still open at run end (expected)")
     # F4 guard (2026-08-31): "expected" above was an assumption — now
-    # checked. A TENTATIVE whose window closed more than GRACE_MS before
-    # run end MUST have a CONFIRM/CANCEL partner; without one the signal
-    # path silently dropped a settlement (a trading decision vanished).
-    # Verified on the 2026-08-31-022833 evidence: 205 in-run TENTATIVE-only
-    # groups, ALL inside the last 15s window (open at run end) — 0 orphans.
-    F4_GRACE_MS = 30000
-    orphan_ts = [ts for pfx, sts in sig_groups.items()
-                 if sts == {"TENTATIVE"}
-                 for ts in [sig_group_ts[pfx]]
-                 if (run_end or ts) - ts > F4_GRACE_MS]
-    lonely_n = sum(1 for sts in sig_groups.values() if sts == {"TENTATIVE"})
-    print(f"- F4 orphan check: {len(orphan_ts)} orphaned TENTATIVE(s) beyond "
-          f"{F4_GRACE_MS // 1000}s grace ({lonely_n} in-run tentative-only "
-          f"groups, all others inside the open-window tail)")
-    if orphan_ts:
-        failures.append(
-            f"F4: {len(orphan_ts)} TENTATIVE signal(s) never settled — "
-            f"windows closed >{F4_GRACE_MS // 1000}s before run end with no "
-            f"CONFIRM/CANCEL partner (settlement path dropped decisions)")
+    # checked (extracted into f4_orphan_check — unit-tested). A TENTATIVE
+    # whose window closed more than GRACE_MS before the EVENT HORIZON MUST
+    # have a CONFIRM/CANCEL partner; without one the signal path silently
+    # dropped a settlement (a trading decision vanished). Wall-clock run_end
+    # F4 orphan check is DEFERRED to after the raw recount: the event
+    # horizon (max event ts) — the bound that separates a never-closed
+    # tail window from a real dropped settle — is only known once the raw
+    # log has been scanned. See f4_orphan_check for the full rationale.
     print("\n(Per-operator wall-clock latency: Flink latency histograms in "
           "main/latency-metrics.tsv; event-time row stamps cannot measure it.)")
     # ---- Signal-path latency (2026-08-31) -------------------------------
@@ -1060,270 +1320,251 @@ def main():
                 want_late += int(m.group(2))
     except OSError:
         pass
-    if want_dups == 0 and want_late == 0:
-        print("- G7: no injection configured (no INJECT lines) - audit SKIPPED")
-    else:
-        # counter deltas: last sample per series minus first sample per
-        # series, summed over subtask series (counters are cumulative per job).
-        def counter_deltas(path):
-            first, last = {}, {}
-            try:
-                for ln in open(path):
-                    parts = ln.split()
-                    # Prometheus text format: "<ts> name{labels} value".
-                    # HELP/TYPE lines also match the name grep ("# HELP
-                    # name (scope: taskmanager_job_task_operator)") — their
-                    # last field is not a float; skip them (observed live:
-                    # crashed the G7 audit on its first run).
-                    if len(parts) < 3 or parts[1].startswith("#"):
-                        continue
-                    try:
-                        val = float(parts[-1])
-                    except ValueError:
-                        continue
-                    name = parts[1]
-                    first.setdefault(name, val)
-                    last[name] = val
-            except OSError:
-                pass
-            names = set(first) | set(last)
-            return {n: last.get(n, 0) - first.get(n, 0) for n in names}
-
+    # Parity-only mode (TM-kill drill, 2026-08-31): without deliberate
+    # injection there are no counter-equality assertions to make (G7a/G7b
+    # compare counters against KNOWN injected counts), but the G7c full raw
+    # recount vs final-candle parity IS the zero-loss proof and must still
+    # run - previously the whole audit was skipped, leaving fault drills
+    # (TM kill mid-burst) with no data-loss evidence at all. Clean-feed
+    # assertions still apply: dup_extras == 0 and late_rows == 0 below.
+    parity_only = want_dups == 0 and want_late == 0
+    if parity_only:
+        print("- G7: no injection configured (no INJECT lines) - PARITY-ONLY "
+              "audit: full raw recount vs final candles (G7c) + clean-feed "
+              "assertion (zero repeated fingerprints, zero late rows). "
+              "Counter exactness (G7a/G7b) stays injection-gated by design.")
+        dup_delta = late_delta = 0.0
+        dup_in_window = late_in_window = 0
+    if not parity_only:
+        # counter deltas: reset-aware (module-level counter_deltas - a job
+        # restart mid-run resets counters; see its docstring)
         deltas = counter_deltas(os.path.join(g7_dir, "tm-prom-dedup-late.tsv"))
         dup_delta = sum(v for k, v in deltas.items() if "dedup_duplicates" in k)
         late_delta = sum(v for k, v in deltas.items() if "candles_late_dropped" in k)
 
-        # raw recount with EXACT offset dedupe (the LogScanner re-delivers
-        # records; line dedupe would erase the injected duplicates).
-        # G7_REUSE_RAW=1: re-analyze the evidence file already in out_dir
-        # instead of re-reading Fluss (test hook for the bug-injection
-        # proof: tamper a COPY of the evidence and the guards must fire).
-        if os.environ.get("G7_REUSE_RAW") == "1":
-            raw_path = os.path.join(out_dir, "latency-raw_table_1.rows.txt")
-            if not os.path.exists(raw_path):
-                failures.append("G7: G7_REUSE_RAW=1 but no evidence file")
-                raw_path = os.devnull
-        else:
-            print("- G7: reading raw_table_1 for full recount (this takes a few "
-                  "minutes at ~6M rows)...")
-            raw_path = collect_rows_stream("raw_table_1", cp, out_dir,
-                                           run_ms=300000, mode="audit")
-        if raw_path is None:
-            failures.append("G7: raw_table_1 read failed — audit incomplete")
+    # raw recount with EXACT offset dedupe (the LogScanner re-delivers
+    # records; line dedupe would erase the injected duplicates).
+    # G7_REUSE_RAW=1: re-analyze the evidence file already in out_dir
+    # instead of re-reading Fluss (test hook for the bug-injection
+    # proof: tamper a COPY of the evidence and the guards must fire).
+    raw_read_ok = True
+    if os.environ.get("G7_REUSE_RAW") == "1":
+        raw_path = os.path.join(out_dir, "latency-raw_table_1.rows.txt")
+        if not os.path.exists(raw_path):
+            raw_read_ok = False
             raw_path = os.devnull
-        # last counter sample timestamp: counter deltas only cover rounds
-        # that fired BEFORE this moment (observed 2026-08-31: injection
-        # round 6 fired after the final Prometheus sample — its frames
-        # reached raw but the job's counters never saw them; the analyzer
-        # originally misread that as dedup loss).
-        last_sample_ms = 0
-        try:
-            for ln in open(os.path.join(g7_dir, "tm-prom-dedup-late.tsv")):
-                try:
-                    last_sample_ms = max(last_sample_ms, int(ln.split()[0]) * 1000)
-                except ValueError:
-                    pass
-        except OSError:
-            pass
-        seen_offsets = set()
-        fp_seen = set()
-        win_ticks = defaultdict(int)         # (token, window_start) -> ticks
-        win_vol = defaultdict(int)           # (token, window_start) -> qty sum
-        dup_extras = late_rows = 0
-        dup_in_window = late_in_window = 0   # ingested before last counter sample
-        dup_ing_max = 0
-        LATE_LAG_MS = 20000                  # > watermark(500) + lateness(5000) + margin
-        # F8 (2026-08-31): per-token event-time ordering in LOG order. A
-        # backward jump beyond LATE_LAG_MS cannot be accepted by the candle
-        # window (watermark has passed it) — so every such jump must be one
-        # of the late-observed rows. The two are INDEPENDENT measurements
-        # (ingest-lag vs prev-event-time) of the same underlying ticks: a
-        # bridge that rewrote timestamps would lag small but jump big →
-        # mismatch → fire.
-        prev_ev = {}                          # token -> last event_time seen
-        f8_jumps = 0
-        for ln in open(raw_path):
-            # audit mode: "b:o\tfp\ttoken\tev\ting\tprice\tqty\tvalidity"
-            # (sanitized projection — the full-row toString prints the
-            # payload_hash VARBINARY as raw binary; 0x0A bytes split lines
-            # and 0x2C bytes shifted comma-split fields, silently dropping
-            # ~23% of rows in the first G7 recount, 2026-08-31)
-            if "\t" not in ln:
-                continue
+    else:
+        print("- G7: reading raw_table_1 for full recount (this takes a few "
+              "minutes at ~6M rows)...")
+        raw_path = collect_rows_stream("raw_table_1", cp, out_dir,
+                                       run_ms=300000, mode="audit")
+    if raw_path is None:
+        raw_read_ok = False
+        raw_path = os.devnull
+    # last counter sample timestamp: counter deltas only cover rounds
+    # that fired BEFORE this moment (observed 2026-08-31: injection
+    # round 6 fired after the final Prometheus sample — its frames
+    # reached raw but the job's counters never saw them; the analyzer
+    # originally misread that as dedup loss).
+    last_sample_ms = 0
+    try:
+        for ln in open(os.path.join(g7_dir, "tm-prom-dedup-late.tsv")):
             try:
-                f = ln.rstrip("\n").split("\t")
-                if len(f) < 8:
-                    continue
-                off = f[0]
-                if off in seen_offsets:
-                    continue  # scanner re-delivery
-                seen_offsets.add(off)
-                fp = f[1]
-                token = int(f[2])
-                ev_ms = int(f[3])
-                ing_ms = int(f[4])
-                qty = int(f[6])
-                validity = f[7]
-            except (ValueError, IndexError):
+                last_sample_ms = max(last_sample_ms, int(ln.split()[0]) * 1000)
+            except ValueError:
+                pass
+    except OSError:
+        pass
+    seen_offsets = set()
+    fp_seen = set()
+    win_ticks = defaultdict(int)         # (token, window_start) -> ticks
+    win_vol = defaultdict(int)           # (token, window_start) -> qty sum
+    dup_extras = late_rows = 0
+    dup_in_window = late_in_window = 0   # ingested before last counter sample
+    dup_ing_max = 0
+    LATE_LAG_MS = 20000                  # > watermark(500) + lateness(5000) + margin
+    # F8 (2026-08-31): per-token event-time ordering in LOG order. A
+    # backward jump beyond LATE_LAG_MS cannot be accepted by the candle
+    # window (watermark has passed it) — so every such jump must be one
+    # of the late-observed rows. The two are INDEPENDENT measurements
+    # (ingest-lag vs prev-event-time) of the same underlying ticks: a
+    # bridge that rewrote timestamps would lag small but jump big →
+    # mismatch → fire.
+    prev_ev = {}                          # token -> last event_time seen
+    f8_jumps = 0
+    event_horizon = 0                     # max event ts seen in the raw log
+    for ln in open(raw_path):
+        # audit mode: "b:o\tfp\ttoken\tev\ting\tprice\tqty\tvalidity"
+        # (sanitized projection — the full-row toString prints the
+        # payload_hash VARBINARY as raw binary; 0x0A bytes split lines
+        # and 0x2C bytes shifted comma-split fields, silently dropping
+        # ~23% of rows in the first G7 recount, 2026-08-31)
+        if "\t" not in ln:
+            continue
+        try:
+            f = ln.rstrip("\n").split("\t")
+            if len(f) < 8:
                 continue
-            if token in prev_ev and prev_ev[token] - ev_ms > LATE_LAG_MS:
-                f8_jumps += 1
-            prev_ev[token] = max(prev_ev.get(token, ev_ms), ev_ms)
-            if ing_ms - ev_ms > LATE_LAG_MS:
-                late_rows += 1
-                if ing_ms <= last_sample_ms:
-                    late_in_window += 1
-                continue
-            if not validity.startswith("VALID"):
-                continue  # invalid ticks are quarantined pre-candle
-            if run_start and ev_ms < run_start:
-                continue  # pre-run history (raw table is not purged)
-            if fp in fp_seen:
-                # repeat fingerprint = duplicate the dedup operator drops;
-                # exclude from the window recount (candles never saw it)
-                dup_extras += 1
-                if ing_ms <= last_sample_ms:
-                    dup_in_window += 1
-                continue
-            fp_seen.add(fp)
-            ws = (ev_ms // 15000) * 15000
-            win_ticks[(token, ws)] += 1
-            win_vol[(token, ws)] += qty
-        print(f"- G7 raw recount: {len(seen_offsets)} logical rows, "
-              f"{dup_extras} duplicate extras (repeated fingerprints), "
-              f"{late_rows} late rows (event_time lag > {LATE_LAG_MS}ms)")
-        print(f"- F8 ordering: {f8_jumps} per-token backward jump(s) beyond "
-              f"{LATE_LAG_MS}ms in log order (must equal late rows)")
-        if f8_jumps != late_rows:
-            failures.append(
-                f"F8: {f8_jumps} backward event-time jump(s) beyond "
-                f"{LATE_LAG_MS}ms but {late_rows} late-observed rows — "
-                f"timestamps and lag disagree (rewritten event times? "
-                f"replayed frames?)")
+            off = f[0]
+            if off in seen_offsets:
+                continue  # scanner re-delivery
+            seen_offsets.add(off)
+            fp = f[1]
+            token = int(f[2])
+            ev_ms = int(f[3])
+            if ev_ms > event_horizon:
+                event_horizon = ev_ms
+            ing_ms = int(f[4])
+            qty = int(f[6])
+            validity = f[7]
+        except (ValueError, IndexError):
+            continue
+        if token in prev_ev and prev_ev[token] - ev_ms > LATE_LAG_MS:
+            f8_jumps += 1
+        prev_ev[token] = max(prev_ev.get(token, ev_ms), ev_ms)
+        if ing_ms - ev_ms > LATE_LAG_MS:
+            late_rows += 1
+            if ing_ms <= last_sample_ms:
+                late_in_window += 1
+            continue
+        if not validity.startswith("VALID"):
+            continue  # invalid ticks are quarantined pre-candle
+        if run_start and ev_ms < run_start:
+            continue  # pre-run history (raw table is not purged)
+        if fp in fp_seen:
+            # repeat fingerprint = duplicate the dedup operator drops;
+            # exclude from the window recount (candles never saw it)
+            dup_extras += 1
+            if ing_ms <= last_sample_ms:
+                dup_in_window += 1
+            continue
+        fp_seen.add(fp)
+        ws = (ev_ms // 15000) * 15000
+        win_ticks[(token, ws)] += 1
+        win_vol[(token, ws)] += qty
+    print(f"- G7 raw recount: {len(seen_offsets)} logical rows, "
+          f"{dup_extras} duplicate extras (repeated fingerprints), "
+          f"{late_rows} late rows (event_time lag > {LATE_LAG_MS}ms)")
+    print(f"- F8 ordering: {f8_jumps} per-token backward jump(s) beyond "
+          f"{LATE_LAG_MS}ms in log order (must equal late rows)")
+    if f8_jumps != late_rows:
+        failures.append(
+            f"F8: {f8_jumps} backward event-time jump(s) beyond "
+            f"{LATE_LAG_MS}ms but {late_rows} late-observed rows — "
+            f"timestamps and lag disagree (rewritten event times? "
+            f"replayed frames?)")
 
-        # final candles per (token, ws): tick_count (idx 10) + volume (idx 9)
-        final_by_key = {}
-        for ln in final_rows:
-            f = ln.strip("()").split(",")
-            if len(f) >= 15:
-                try:
-                    key = (int(f[0]), int(f[3]))
-                    final_by_key[key] = (int(f[10]), int(f[9]))
-                except ValueError:
-                    continue
+    # final candles per (token, ws): tick_count (idx 10) + volume (idx 9)
+    final_by_key = {}
+    for ln in final_rows:
+        f = ln.strip("()").split(",")
+        if len(f) >= 15:
+            try:
+                key = (int(f[0]), int(f[3]))
+                final_by_key[key] = (int(f[10]), int(f[9]))
+            except ValueError:
+                continue
 
-        # compare fully-closed windows inside the run window
-        cutoff_end = (run_end or 0) - 10000
-        mismatch = []
-        compared = 0
-        startup_skipped = 0
-        # The SignalJob source starts in LATEST mode (2026-08-29 design:
-        # skip the LOG backlog accumulated during job startup, measure only
-        # the live path). The first windows after run_start may therefore
-        # legitimately have NO candle. G7c tolerates a CONTIGUOUS STARTUP
-        # PREFIX of candle-less windows — anything missing after the first
-        # present candle is a real gap (observed 2026-08-31: the first G7
-        # run misread the startup skip as 47k data-loss mismatches).
-        first_candle_window = None
-        for key in final_by_key:
-            ws = key[1]
-            if run_start and ws < run_start:
-                continue
-            if first_candle_window is None or ws < first_candle_window:
-                first_candle_window = ws
-        for (token, ws), exp_ticks in sorted(win_ticks.items()):
-            wend = ws + 14999
-            if run_start and ws < ((run_start + 14999) // 15000) * 15000:
-                continue  # window straddles run start - partial raw history
-            if wend > cutoff_end:
-                continue  # window not fully closed + drained at run end
-            key = (token, ws)
-            if key not in final_by_key:
-                if first_candle_window is None or ws < first_candle_window:
-                    startup_skipped += 1
-                else:
-                    mismatch.append(f"window {ws} token {token}: NO final "
-                                    f"candle (expected {exp_ticks} ticks)")
-                continue
-            fticks, fvol = final_by_key[key]
-            compared += 1
-            # The first present candle's window may be PARTIAL (the LATEST
-            # source entered mid-window); every window after it must match
-            # the raw recount exactly.
-            if ws == first_candle_window:
-                continue
-            if fticks != exp_ticks or fvol != win_vol[key]:
-                mismatch.append(
-                    f"window {ws} token {token}: candle ticks={fticks} "
-                    f"vol={fvol} vs raw recount ticks={exp_ticks} "
-                    f"vol={win_vol[key]}")
+    # compare fully-closed windows inside the run window (module-level
+    # g7c_compare - unit-tested in tests/test_holistic_g7_parity.py)
+    mismatch, compared, startup_skipped = g7c_compare(
+        win_ticks, win_vol, final_by_key, run_start, run_end,
+        event_horizon=event_horizon or None)
+    parity_failure = g7c_measurement_guard(raw_read_ok, compared)
+    if parity_failure:
+        failures.append(parity_failure)
 
-        print(f"- G7a dedup: sent={want_dups} raw-observed-extras={dup_extras} "
-              f"counter-delta={dup_delta:.0f} (rounds in counter window: "
-              f"{dup_in_window})")
-        print(f"- G7b late:  sent={want_late} raw-observed={late_rows} "
-              f"counter-delta={late_delta:.0f} (rounds in counter window: "
-              f"{late_in_window})")
-        # ---- F6 (2026-08-31): raw-validation rejection counters ----
-        # RawValidationFunction has ALWAYS exported compute.invalid.rows +
-        # per-reason byReason counters (8 reasons) — never sampled before
-        # (the gotcha-#22 pattern: exists, invisible). Clean bench feed =>
-        # every in-window delta must be 0. Non-zero = bad feed OR a
-        # validation-rule regression silently quarantining real ticks.
-        f6_deltas = counter_deltas(os.path.join(g7_dir, "tm-prom-invalid.tsv"))
-        total_rej = sum(v for k, v in f6_deltas.items()
-                        if "invalid_rows" in k)
-        by_reason = {k.split("byReason")[-1].lstrip("_").split("{")[0]: v
-                     for k, v in f6_deltas.items()
-                     if "byReason" in k and v != 0}
-        print(f"- F6 raw-validation rejections: total={total_rej:.0f} "
-              f"in-window, by-reason={by_reason or 'none'}")
-        if total_rej != 0 or any(by_reason.values()):
-            failures.append(
-                f"F6: {total_rej:.0f} raw rows rejected by the validation "
-                f"gate in-window ({by_reason}) — the bench feed is clean, "
-                f"so rejections mean a validation-rule regression or a "
-                f"corrupt feed silently dropping ticks before candles")
-        print(f"- G7c parity: {compared} fully-closed (token,window) pairs "
-              f"compared candle-vs-raw, {len(mismatch)} mismatches")
-        if startup_skipped:
-            print(f"- G7c note: {startup_skipped} (token,window) pair(s) before "
-                  f"the first final candle — LATEST-mode startup skip "
-                  f"(documented design), not data loss")
-        # counter exactness: the counter must equal the dups that INGESTED
-        # before the last counter sample (rounds firing later land in raw
-        # but can never reach the counters — the job is torn down).
-        if want_dups and dup_delta != dup_in_window:
-            failures.append(
-                f"G7a: dedup duplicates counter {dup_delta:.0f} != "
-                f"{dup_in_window} dups ingested inside the counter sampling "
-                f"window - ticks are being lost or double-counted "
-                f"downstream of dedup")
-        if dup_extras != want_dups:
-            failures.append(
-                f"G7a: raw table shows {dup_extras} duplicate extras but "
-                f"{want_dups} were injected - unexpected duplication "
-                f"(bridge resend?) or dropped frames")
-        if want_late and late_delta != late_in_window:
-            failures.append(
-                f"G7b: late-drop counter {late_delta:.0f} != "
-                f"{late_in_window} late ticks ingested inside the counter "
-                f"sampling window - late ticks are reaching candles "
-                f"(wrong data) or being lost before the counter")
-        if late_rows != want_late:
-            failures.append(
-                f"G7b: raw table shows {late_rows} late ticks but "
-                f"{want_late} were injected - some late ticks never reached "
-                f"raw_table_1 (quarantined? dropped?)")
-        if mismatch:
-            for msg in mismatch[:10]:
-                failures.append(f"G7c: {msg}")
-            if len(mismatch) > 10:
-                failures.append(f"G7c: ...and {len(mismatch) - 10} more "
-                                "window mismatches")
-        else:
-            print("- G7: data-quality guards passed (dedup exact, late-drop "
-                  "exact, tick-set parity exact)")
+    # F4 orphan check (deferred from the early-signal section — needs the
+    # event horizon from this raw scan). Original wall-clock bound
+    # (2026-08-31-022833 evidence: 205 in-run tentative-only groups, ALL
+    # inside the last 15s window — 0 orphans); with the 2026-09-02 drain
+    # phase the feed stops mid-window and trailing tentatives can never
+    # settle — the horizon bound excludes exactly those (drill
+    # 20260902-030521 misread this tail as 31 orphans; the wall-clock
+    # grace also fired the 034813 phantom-tail).
+    F4_GRACE_MS = 30000
+    orphan_ts, lonely_n, unverifiable_n = f4_orphan_check(
+        sig_groups, sig_group_ts, run_end,
+        event_horizon=event_horizon or None, grace_ms=F4_GRACE_MS)
+    print(f"- F4 orphan check: {len(orphan_ts)} orphaned TENTATIVE(s) beyond "
+          f"{F4_GRACE_MS // 1000}s grace ({lonely_n} in-run tentative-only "
+          f"groups: {unverifiable_n} in never-closed tail windows "
+          f"(unverifiable, excluded), rest inside the open-window tail)")
+    if orphan_ts:
+        failures.append(
+            f"F4: {len(orphan_ts)} TENTATIVE signal(s) never settled — "
+            f"windows closed >{F4_GRACE_MS // 1000}s before the event "
+            f"horizon with no CONFIRM/CANCEL partner (settlement path "
+            f"dropped decisions)")
+
+    print(f"- G7a dedup: sent={want_dups} raw-observed-extras={dup_extras} "
+          f"counter-delta={dup_delta:.0f} (rounds in counter window: "
+          f"{dup_in_window})")
+    print(f"- G7b late:  sent={want_late} raw-observed={late_rows} "
+          f"counter-delta={late_delta:.0f} (rounds in counter window: "
+          f"{late_in_window})")
+    # ---- F6 (2026-08-31): raw-validation rejection counters ----
+    # RawValidationFunction has ALWAYS exported compute.invalid.rows +
+    # per-reason byReason counters (8 reasons) — never sampled before
+    # (the gotcha-#22 pattern: exists, invisible). Clean bench feed =>
+    # every in-window delta must be 0. Non-zero = bad feed OR a
+    # validation-rule regression silently quarantining real ticks.
+    f6_deltas = counter_deltas(os.path.join(g7_dir, "tm-prom-invalid.tsv"))
+    total_rej = sum(v for k, v in f6_deltas.items()
+                    if "invalid_rows" in k)
+    by_reason = {k.split("byReason")[-1].lstrip("_").split("{")[0]: v
+                 for k, v in f6_deltas.items()
+                 if "byReason" in k and v != 0}
+    print(f"- F6 raw-validation rejections: total={total_rej:.0f} "
+          f"in-window, by-reason={by_reason or 'none'}")
+    if total_rej != 0 or any(by_reason.values()):
+        failures.append(
+            f"F6: {total_rej:.0f} raw rows rejected by the validation "
+            f"gate in-window ({by_reason}) — the bench feed is clean, "
+            f"so rejections mean a validation-rule regression or a "
+            f"corrupt feed silently dropping ticks before candles")
+    print(f"- G7c parity: {compared} fully-closed (token,window) pairs "
+          f"compared candle-vs-raw, {len(mismatch)} mismatches")
+    if startup_skipped:
+        print(f"- G7c note: {startup_skipped} (token,window) pair(s) before "
+              f"the first final candle — LATEST-mode startup skip "
+              f"(documented design), not data loss")
+    # counter exactness: the counter must equal the dups that INGESTED
+    # before the last counter sample (rounds firing later land in raw
+    # but can never reach the counters — the job is torn down).
+    if want_dups and dup_delta != dup_in_window:
+        failures.append(
+            f"G7a: dedup duplicates counter {dup_delta:.0f} != "
+            f"{dup_in_window} dups ingested inside the counter sampling "
+            f"window - ticks are being lost or double-counted "
+            f"downstream of dedup")
+    if dup_extras != want_dups:
+        failures.append(
+            f"G7a: raw table shows {dup_extras} duplicate extras but "
+            f"{want_dups} were injected - unexpected duplication "
+            f"(bridge resend?) or dropped frames")
+    if want_late and late_delta != late_in_window:
+        failures.append(
+            f"G7b: late-drop counter {late_delta:.0f} != "
+            f"{late_in_window} late ticks ingested inside the counter "
+            f"sampling window - late ticks are reaching candles "
+            f"(wrong data) or being lost before the counter")
+    if late_rows != want_late:
+        failures.append(
+            f"G7b: raw table shows {late_rows} late ticks but "
+            f"{want_late} were injected - some late ticks never reached "
+            f"raw_table_1 (quarantined? dropped?)")
+    if mismatch:
+        for msg in mismatch[:10]:
+            failures.append(f"G7c: {msg}")
+        if len(mismatch) > 10:
+            failures.append(f"G7c: ...and {len(mismatch) - 10} more "
+                            "window mismatches")
+    elif parity_failure is None:
+        print("- G7: data-quality guards passed (dedup exact, late-drop "
+              "exact, tick-set parity exact)")
+    else:
+        print("- G7: data-quality guards NOT EVALUATED — raw recount failed")
 
 
     if failures:

@@ -102,15 +102,17 @@ run_phase() {
   run_start_epoch=$(( $(date +%s) - WARMUP_S ))
   echo "$run_start_epoch" > "$OUT/run-start-epoch"
 
-  # Guard: the source MUST be reading by now. A source read=0 after
-  # warm-up means the pipeline is dead (observed: full-replay segment
-  # downloads; missing remote-data mount) — abort, do not measure.
-  local m src_read
+  # Guard: the raw path MUST be processing by now. A raw source 0|0 snapshot
+  # can race with live Flink metric publication while downstream vertices are
+  # already processing records (observed in C2 on 2026-09-01). The shared
+  # helper uses the raw counters first, then a bounded downstream proof; it
+  # still returns -1 when the pipeline is genuinely uninstrumented/dead.
+  local m src_progress
   m="$(flink_metric_dump)"
-  src_read="$(echo "$m" | grep 'raw-table-1' | awk -F'| ' '{print $2}')"
+  src_progress="$(pipeline_metric_input_progress "$m")"
   echo "$m" > "$OUT/metrics-warmup.txt"
-  if [ "${src_read:-0}" -le 0 ] 2>/dev/null; then
-    echo "!! source read=0 after ${WARMUP_S}s warm-up — pipeline dead:" >&2
+  if [ "${src_progress:-0}" -le 0 ] 2>/dev/null; then
+    echo "!! raw-path progress=0 after ${WARMUP_S}s warm-up — pipeline dead:" >&2
     echo "$m" >&2
     return 1
   fi

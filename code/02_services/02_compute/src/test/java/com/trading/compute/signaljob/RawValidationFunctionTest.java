@@ -60,13 +60,13 @@ class RawValidationFunctionTest {
     @Test
     void rejectsUnknownSchemaVersion() {
         RowData row = TestRawRows.row(2885L, 1_750_000_000_000L, "fp-1", "TRADE", 100, 5);
-        assertEquals("schema-version", fn.invalidReason(TestRawRows.withSchemaVersion(row, "3")));
+        assertEquals("schema-version", fn.invalidReason(TestRawRows.withSchemaVersion(row, "4")));
     }
 
     @Test
     void rejectsLegacyV1LabelUnderDefaultConfig() {
         // Pre-fix ingestion labeled the v2-shaped row "1" (TickPacket.schemaVersion=1).
-        // Under the v2-only contract that label stays rejected — no silent acceptance
+        // Under the v3-only contract that label stays rejected — no silent acceptance
         // of a label that would mask a future producer regression.
         RowData row = TestRawRows.row(2885L, 1_750_000_000_000L, "fp-1", "TRADE", 100, 5);
         assertEquals("schema-version", fn.invalidReason(TestRawRows.withSchemaVersion(row, "1")));

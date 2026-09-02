@@ -92,6 +92,7 @@ public record SignalJobConfig(
         long earlySignalConfirmAfterMs,
         String formingBarTable,
         long formingBarWriteBatchMs,
+        String tentativeMarkersTable,
         String positionStateTable,
         String otelCollectorHost,
         String stateRecoveryPath,
@@ -199,6 +200,11 @@ public record SignalJobConfig(
                 positiveLong(env, "EARLY_SIGNAL_CONFIRM_AFTER_MS", 4_000L),
                 env.getOrDefault("FORMING_BAR_TABLE", "forming_bar"),
                 positiveLong(env, "FORMING_BAR_WRITE_BATCH_MS", 250L),
+                // CHG-121 (2026-09-01): durable tentative-marker table for F4
+                // crash reconciliation. Empty string DISABLES markers (the
+                // pre-CHG-121 behavior — embedded tests, legacy runs).
+                env.getOrDefault("SIGNAL_TENTATIVE_MARKERS_TABLE",
+                        "Signal_Tentative_Markers"),
                 env.getOrDefault("POSITION_STATE_TABLE", "Position_State"),
                 env.getOrDefault("OTEL_COLLECTOR_HOST", "otel-collector:4318"),
                 stateRecoveryPath(env),

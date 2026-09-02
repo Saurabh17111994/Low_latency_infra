@@ -45,11 +45,30 @@ for j in jobs:
 ' 2>/dev/null || true
 }
 
+# A running job is not necessarily a recoverable job.  The cluster default is
+# currently NoRestartBackoffTimeStrategy, which turns a TaskManager loss into
+# a permanent tiering outage (observed during the C2 drill on 2026-09-01).
+# Verify the effective per-job strategy, not merely the REST RUNNING state.
+tiering_has_restart_strategy() {
+  local jid="$1" config
+  config="$(docker exec "$JM" sh -c "curl -fsS http://localhost:8081/jobs/$jid/config" \
+    2>/dev/null || true)"
+  # The REST API renders this as either the config token "fixed-delay" or
+  # the human label "Restart with fixed delay (...)" depending on Flink
+  # version.  Accept only those equivalent forms; the cluster-default label
+  # must not pass this guard.
+  printf '%s\n' "$config" | grep -Eqi 'fixed[- ]delay'
+}
+
 if [ "${1:-}" = "--status" ]; then
   JID="$(tiering_job_id)"
   if [ -n "$JID" ]; then
-    log "tiering job RUNNING (job_id=$JID)"
-    exit 0
+    if tiering_has_restart_strategy "$JID"; then
+      log "tiering job RUNNING with fixed-delay restart (job_id=$JID)"
+      exit 0
+    fi
+    log "!! tiering job RUNNING without fixed-delay restart (job_id=$JID)"
+    exit 1
   fi
   log "no RUNNING tiering job"
   exit 1
@@ -58,8 +77,12 @@ fi
 # --- idempotent start ----------------------------------------------------
 JID="$(tiering_job_id)"
 if [ -n "$JID" ]; then
-  log "tiering job already RUNNING (job_id=$JID) — nothing to do"
-  exit 0
+  if tiering_has_restart_strategy "$JID"; then
+    log "tiering job already RUNNING with fixed-delay restart (job_id=$JID) — nothing to do"
+    exit 0
+  fi
+  echo "!! tiering job $JID is RUNNING without fixed-delay restart — cancel it and resubmit" >&2
+  exit 1
 fi
 
 # GUARD (M-15/M-16, 2026-08-31): iceberg's shaded parquet write path lazily
@@ -100,6 +123,9 @@ submit_out="$(docker exec "$JM" flink run -d \
   -c "$ENTRY" \
   -Dpipeline.name="Fluss Lake Tiering" \
   -Dparallelism.default=2 \
+  '-Drestart-strategy.type=fixed-delay' \
+  '-Drestart-strategy.fixed-delay.attempts=3' \
+  '-Drestart-strategy.fixed-delay.delay=30 s' \
   "$TIERING_JAR" \
   --fluss.bootstrap.servers fluss-coordinator:9123 \
   --datalake.format iceberg \
@@ -127,8 +153,12 @@ for _ in $(seq 1 15); do
   STATE="$(docker exec "$JM" sh -c "curl -s http://localhost:8081/jobs/$NEW_JID" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["state"])' 2>/dev/null || true)"
   if [ "$STATE" = "RUNNING" ]; then
-    log "tiering job RUNNING (job_id=$NEW_JID)"
-    exit 0
+    if tiering_has_restart_strategy "$NEW_JID"; then
+      log "tiering job RUNNING with fixed-delay restart (job_id=$NEW_JID)"
+      exit 0
+    fi
+    echo "!! tiering job RUNNING but effective restart strategy is not fixed-delay" >&2
+    exit 1
   fi
   if [ "$STATE" = "FAILED" ] || [ "$STATE" = "CANCELED" ]; then
     echo "!! tiering job reached state $STATE — fetching exception:" >&2

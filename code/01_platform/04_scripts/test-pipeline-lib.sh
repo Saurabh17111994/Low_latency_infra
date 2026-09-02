@@ -33,10 +33,41 @@ FAKETOOL_PORT=8899 RATE_HZ=10
 source "$LIB"
 for fn in pipeline_preflight pipeline_start_faketool pipeline_start_ingestion \
           pipeline_submit_job pipeline_cleanup pipeline_install_cleanup_trap \
-          pipeline_validate_rate pipeline_port_free flink_metric_dump flink_wait_state; do
+          pipeline_validate_rate pipeline_port_free pipeline_validate_compute_jar \
+          pipeline_validate_compose_bind_sources pipeline_fluss_port_open \
+          pipeline_compile_fluss_ready_probe pipeline_fluss_metadata_ready \
+          pipeline_wait_for_fluss_ready \
+          flink_metric_dump flink_wait_state; do
     declare -f "$fn" >/dev/null 2>&1 && ok "G2 function $fn defined" \
         || bad "G2 function $fn MISSING from $LIB"
 done
+
+# ---- G17 (2026-09-01): Fluss readiness must precede table mutation. A
+# coordinator-only check accepts a live RPC endpoint while the tablet is
+# crash-looping/leaderless, producing "Alive tablet server is empty" during
+# the first destructive purge. Keep both container-state and client-listener
+# checks in the shared preflight, and make the timeout configurable but
+# positive.
+if grep -q 'pipeline_wait_for_fluss_ready || return 1' "$LIB" \
+    && grep -q 'pipeline_fluss_port_open 127.0.0.1 9123' "$LIB" \
+    && grep -q 'pipeline_fluss_port_open 127.0.0.1 9124' "$LIB" \
+    && grep -q 'FLUSS_READY_TIMEOUT_S' "$LIB"; then
+    ok "G17 Fluss coordinator+tablet readiness guard precedes table mutation"
+else
+    bad "G17 Fluss readiness guard missing — leaderless tablet can reach TablePurge"
+fi
+
+# ---- G18 (2026-09-01): open listeners are still not sufficient. The Fluss
+# client itself rejects metadata initialization while the tablet is alive but
+# not elected, so readiness must include a read-only metadata probe before the
+# first drop/create.
+if grep -q 'pipeline_compile_fluss_ready_probe || return 1' "$LIB" \
+    && grep -q 'pipeline_fluss_metadata_ready; then' "$LIB" \
+    && grep -q 'FlussReadyProbe' "$LIB"; then
+    ok "G18 Fluss metadata readiness probe precedes table mutation"
+else
+    bad "G18 metadata probe missing — listener-open/leaderless race can reach TablePurge"
+fi
 
 # ---- G3: the submit command is ONE complete command containing the
 # required env vars and the jar — the exact failure class of 2026-08-30.
@@ -194,6 +225,65 @@ grep -q 'byReason' "$SCRIPT_DIR/holistic-analyze.py" \
     || bad "G13 F6 guard lacks per-reason breakdown"
 
 rm -rf "$OUT"
+
+# ---- G14 (2026-09-01): B6 artifact classpath guard must FIRE on the exact
+# broken shape observed in C2. Use a temporary jar containing one Fluss class;
+# the guard must reject it. Then prove the production-shaped jar (no Fluss
+# classes/descriptors) passes, and a truncated/non-JAR file fails closed. This
+# is intentionally runtime execution, not just a grep for the guard text.
+G14DIR="$(mktemp -d)"
+mkdir -p "$G14DIR/org/apache/fluss/client"
+printf 'not-a-real-class' > "$G14DIR/org/apache/fluss/client/Duplicate.class"
+(cd "$G14DIR" && jar cf bad-compute.jar org) >/dev/null 2>&1
+LIB_JAR="$G14DIR/bad-compute.jar"
+if pipeline_validate_compute_jar >/dev/null 2>&1; then
+    bad "G14 duplicate Fluss class was accepted — B6 guard would not fire"
+else
+    ok "G14 duplicate Fluss class rejected before submit"
+fi
+mkdir -p "$G14DIR/good/com/trading"
+printf 'not-a-real-class' > "$G14DIR/good/com/trading/Job.class"
+(cd "$G14DIR/good" && jar cf ../good-compute.jar com) >/dev/null 2>&1
+LIB_JAR="$G14DIR/good-compute.jar"
+if pipeline_validate_compute_jar >/dev/null 2>&1; then
+    ok "G14 Flink-owned Fluss classpath shape accepted"
+else
+    bad "G14 valid compute artifact rejected"
+fi
+printf 'truncated jar\n' > "$G14DIR/truncated-compute.jar"
+LIB_JAR="$G14DIR/truncated-compute.jar"
+if pipeline_validate_compute_jar >/dev/null 2>&1; then
+    bad "G14 corrupt compute artifact was accepted — B6 guard did not fail closed"
+else
+    ok "G14 corrupt compute artifact rejected before submit"
+fi
+rm -rf "$G14DIR"
+
+# ---- G16 (2026-09-01): B7 Compose short-bind guard — a missing source must
+# fail before Docker can auto-create a directory and return an opaque OCI
+# exit-127 mount error. The real repository sources must still pass.
+G16DIR="$(mktemp -d)"
+G16_COMPOSE_DIR="$LIB_COMPOSE_DIR"
+LIB_COMPOSE_DIR="$G16DIR"
+if pipeline_validate_compose_bind_sources >/dev/null 2>&1; then
+    bad "G16 missing Compose bind sources were accepted"
+else
+    ok "G16 missing Compose bind source rejected before container start"
+fi
+mkdir -p "$G16DIR/flink-log4j-console.properties"
+if pipeline_validate_compose_bind_sources >/dev/null 2>&1; then
+    bad "G16 directory-shaped Compose bind source was accepted"
+else
+    ok "G16 directory-shaped Compose bind source rejected (OCI exit-127 prevented)"
+fi
+LIB_COMPOSE_DIR="$G16_COMPOSE_DIR"
+if pipeline_validate_compose_bind_sources >/dev/null 2>&1; then
+    ok "G16 repository Compose bind sources are regular files"
+else
+    bad "G16 repository Compose bind sources failed validation"
+fi
+rm -rf "$G16DIR"
+
 echo "---"
 echo "guards: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

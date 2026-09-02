@@ -103,7 +103,26 @@ cat "$SCAN_LOG"
 # ── 5. Decide: any truncations? ──────────────────────────────────────────────
 # The scan prints, per truncated segment, a "<path>: size=... zero_tail=N bytes"
 # line followed by a "TRUNCATE_TO=<end>" line. Extract (path, end) pairs.
-PAIRS="$(awk '/^TRUNCATE_TO=/{print prev "\t" substr($0, 14)} {prev=$0}' "$SCAN_LOG")"
+# Keep both fields exact. The old parser used substr($0, 14), which dropped the
+# first two digits of the offset (TRUNCATE_TO= is 12 bytes), and passed the
+# entire diagnostic line as the filename. That made repair either fail or
+# target the wrong byte boundary — a data-loss hazard in the repair tool.
+if ! PAIRS="$(awk '
+/^TRUNCATE_TO=/ {
+    path = prev
+    sub(/: size=.*/, "", path)
+    if (path !~ /^\/d\/.*\.log$/ || $0 !~ /^TRUNCATE_TO=[1-9][0-9]*$/) {
+        bad = 1
+    } else {
+        print path "\t" substr($0, index($0, "=") + 1)
+    }
+}
+{ prev = $0 }
+END { if (bad) exit 1 }
+' "$SCAN_LOG")"; then
+    echo "ERROR: malformed LogScan output — refusing to repair" >&2
+    exit 1
+fi
 if [ -z "$PAIRS" ]; then
     echo
     echo "No truncated segments — nothing to repair."
@@ -147,10 +166,25 @@ fi
 # ── 7. Truncate each affected segment to the authoritative boundary ──────────
 echo
 echo "=== truncating to the exact last-complete-batch ends ==="
-TRUNC_CMDS="$(printf '%s\n' "$PAIRS" | while IFS=$'\t' read -r path end; do
-    echo "truncate -s $end $path"
-done)"
-printf '%s\n' "$TRUNC_CMDS" | docker run --rm -i -v "$VOLUME:/d" alpine:3.20 sh
+printf '%s\n' "$PAIRS" > "$TMP/pairs.tsv"
+if ! docker run --rm -v "$VOLUME:/d" -v "$TMP:/t:ro" alpine:3.20 sh -c '
+set -eu
+while IFS="$(printf '\''\t'\'')" read -r path end; do
+    case "$end" in
+        '\'''\''|*[!0-9]*) echo "ERROR: non-numeric truncation offset: $end" >&2; exit 1 ;;
+    esac
+    size="$(stat -c '\''%s'\'' "$path")"
+    if [ "$end" -le 0 ] || [ "$end" -ge "$size" ]; then
+        echo "ERROR: unsafe truncation for $path: end=$end size=$size" >&2
+        exit 1
+    fi
+    truncate -s "$end" "$path"
+done < /t/pairs.tsv
+'
+then
+    echo "ERROR: one or more truncations failed — refusing a partial repair result" >&2
+    exit 1
+fi
 echo "truncated $(printf '%s\n' "$PAIRS" | wc -l) segment(s)"
 
 # ── 8. Restart the tablet and verify it survives recovery ────────────────────

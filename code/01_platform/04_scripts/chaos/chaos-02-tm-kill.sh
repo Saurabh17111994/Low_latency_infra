@@ -71,15 +71,24 @@ if [[ "${TM_UP}" -ne 1 ]]; then
   exit 1
 fi
 echo "TM-KILL-CHAOS-02: [leg B] taskmanager container is up again"
-# verify job RUNNING via REST (best-effort)
-if command -v curl >/dev/null 2>&1; then
-  if ! curl -sf "${FLINK_REST_URL}/jobs/overview" 2>/dev/null | grep -q "RUNNING"; then
-    echo "TM-KILL-CHAOS-02: [leg B] WARN — job not RUNNING after kill (continuing)" >&2
-  fi
-  if ! curl -sf "${TM_METRICS_URL}" 2>/dev/null | grep -q "compute_candles"; then
-    echo "TM-KILL-CHAOS-02: [leg B] WARN — metrics not available" >&2
-  fi
+# The quick probe is not the full C2 acceptance run. It must still fail closed
+# when Flink has no running job; the old WARN-and-continue path could report a
+# PASS for a TM container with no recovered workload. Checkpoint freshness is
+# asserted by tm-kill-full-load.sh, which runs the load and retains the
+# checkpoint ID across the kill.
+if ! command -v curl >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+  echo "TM-KILL-CHAOS-02: [leg B] FAIL — curl and python3 are required for the recovery probe" >&2
+  exit 1
 fi
-echo "TM-KILL-CHAOS-02: [leg B] PASS — container restart, job RUNNING, checkpoint newer"
+if ! curl -fsS --max-time 10 "${FLINK_REST_URL}/jobs/overview" 2>/dev/null \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(j.get("state") == "RUNNING" for j in d.get("jobs", [])) else 1)' \
+    >/dev/null 2>&1; then
+  echo "TM-KILL-CHAOS-02: [leg B] FAIL — no RUNNING Flink job after kill" >&2
+  exit 1
+fi
+if ! curl -fsS --max-time 10 "${TM_METRICS_URL}" 2>/dev/null | grep -q "compute_candles"; then
+  echo "TM-KILL-CHAOS-02: [leg B] WARN — metrics not available"
+fi
+echo "TM-KILL-CHAOS-02: [leg B] PASS — container restart and job RUNNING (checkpoint freshness not asserted by quick probe)"
 echo "TM-KILL-CHAOS-02: PASS — offline leg A PASS, leg B PASS|SKIP"
 exit 0

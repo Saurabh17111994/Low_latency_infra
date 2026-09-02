@@ -81,7 +81,14 @@ x-flink-common: &flink-common
     STATE_BACKEND_LOCAL_DIRS: ${STATE_BACKEND_LOCAL_DIRS:-/tmp/flink-rocksdb}
     STATE_BACKEND_MANAGED_MEMORY: ${STATE_BACKEND_MANAGED_MEMORY:-true}
     TASK_MANAGER_NETWORK_MEMORY_MAX: ${TASK_MANAGER_NETWORK_MEMORY_MAX:-256m}
-    TASK_MANAGER_MEMORY_MANAGED_SIZE: ${TASK_MANAGER_MEMORY_MANAGED_SIZE:-2g}  # blank default would fail SignalJobConfig validation; 2g matches 6g process @ managed 0.4
+    # CHG-120 (2026-09-01): NOTE — this env is a SignalJobConfig passthrough
+    # for EMBEDDED/LOCAL runs only (job-level taskmanager.memory.managed.size);
+    # in cluster mode it does NOT resize the TM's RocksDB pool, which is
+    # derived at TM startup from taskmanager.memory.managed.fraction (see the
+    # flink-conf block). Kept in sync with the cluster fraction: 4g matches
+    # 0.6 of the 7g TM process. Evidence:
+    # docs/Investigations_and_Reports/2026-09-01-throughput-degradation.md.
+    TASK_MANAGER_MEMORY_MANAGED_SIZE: ${TASK_MANAGER_MEMORY_MANAGED_SIZE:-4g}
     FLINK_PROPERTIES: |
       jobmanager.rpc.address: flink-jobmanager
       rest.address: flink-jobmanager
@@ -109,7 +116,9 @@ x-flink-common: &flink-common
       # fraction) + task heap + jvm-overhead — derived by the Flink memory
       # model at startup.
       jobmanager.memory.process.size: 1600m
-      taskmanager.memory.process.size: 6g
+      # CHG-120 (2026-09-01): 6g → 7g alongside managed 2g → 4g (see
+      # TASK_MANAGER_MEMORY_MANAGED_SIZE above); non-managed budget unchanged.
+      taskmanager.memory.process.size: 7g
       # P7 phase-1+ (tracker 14): explicit task off-heap (direct) budget —
       # the 1.7 GB RocksDB restore streams state-handle downloads through
       # direct buffers; the 2g envelope's derived ~287m direct limit
@@ -123,9 +132,19 @@ x-flink-common: &flink-common
       # keeps 8 slots so p8 runs without slot starvation (CompatRescale p2→p4
       # already proven, T3 extends to p8 at 1k). Hashmap dev-override is via
       # STATE_BACKEND=hashmap env; default RocksDB matches prod pin.
-      taskmanager.memory.managed.fraction: 0.4
-      taskmanager.memory.network.max: 256m
-      taskmanager.memory.network.min: 256m
+      # CHG-120 (2026-09-01): 0.4 → 0.6 for RocksDB headroom. At 0.4 with a
+      # 6-7g process the ~80 RocksDB instances got ~25 MB each (≈13 MB write
+      # buffers) and per-record put cost (fingerprint-dedup ~2.3 ms busy/rec)
+      # capped the pipeline at ~1.7k/s (stage-capture evidence:
+      # logs/tracker-14/stage-capture-20260901-224849). 0.6 of 7g process →
+      # ~3.2 GB managed (~40 MB/instance); task heap stays ~2.1 GB.
+      taskmanager.memory.managed.fraction: 0.6
+      # CHG-120 (2026-09-01): network memory parameterized via env (default 256m
+      # unchanged). Tested 512m under 10Hz full load: no throughput effect
+      # (network-buffer starvation ruled out; the cap is RocksDB/compaction churn,
+      # see CHG-120). Parameterization kept for capacity work.
+      taskmanager.memory.network.max: ${TASK_MANAGER_NETWORK_MEMORY_MAX:-256m}
+      taskmanager.memory.network.min: ${TASK_MANAGER_NETWORK_MEMORY_MIN:-256m}
       state.backend: rocksdb
       state.backend.incremental: "true"
       state.backend.rocksdb.localdir: /tmp/flink-rocksdb
@@ -182,6 +201,14 @@ volumes:
   # container recreation (previous recreation lost dev data).
   fluss-tablet-data:
   flink-checkpoints:
+  # CHG-120 (2026-09-01): RocksDB operator-state volume — the TM's
+  # state.backend.rocksdb.localdir (/tmp/flink-rocksdb) had no volume, so
+  # every state put/delete paid container-overlayfs I/O (~0.5-1ms per op
+  # vs ~5-20us on a volume). JFR profile showed task threads 100% inside
+  # org.rocksdb.RocksDB.put with system-CPU only, capping the pipeline at
+  # ~4k records/s and degrading checkpoints to expiry under load. Mounting
+  # this volume at the exact localdir path fixes it with zero other config.
+  flink-rocksdb:
   # P8.2 (tracker 14): flink_logs stream — JobManager/TaskManager file logs
   # land here and are read by the collector's filelog receiver.
   flink-logs:
@@ -464,6 +491,11 @@ services:
     volumes:
       - flink-checkpoints:/checkpoints
       - flink-logs:/opt/flink/log
+      # CHG-120 (2026-09-01): RocksDB state volume at the exact
+      # state.backend.rocksdb.localdir path — see the flink-rocksdb volume
+      # declaration for the full rationale (overlayfs was capping the
+      # pipeline at ~4k rec/s; JFR: task threads inside RocksDB.put only).
+      - flink-rocksdb:/tmp/flink-rocksdb
       # Fluss remote-data must be shared with the tablet: raw_table_1 has
       # datalake tiering enabled, and the source's RemoteLogDownloader fetches
       # tiered log segments from remote.data.dir. Without this mount the TM

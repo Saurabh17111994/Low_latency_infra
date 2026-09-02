@@ -34,7 +34,8 @@ public final class PlatformConfig {
     // ---- raw_table_1 schema contract ----
     /**
      * Authoritative {@code raw_table_1.schema_version} value — DDL 02_raw_table_1.sql
-     * "Schema version: 2" (the 20-column v2 layout, R-054/R-231). Ingestion writes
+     * "Schema version: 3" (the 21-column v3 layout with event_day partitioning).
+     * Ingestion writes
      * this value and SignalJob's {@code RAW_SCHEMA_VERSION} default derives from it,
      * so the producer label and the consumer default cannot drift apart.
      */
