@@ -17,6 +17,9 @@
 | 2026-09-01→02 | Root causes isolated **before** further Stages: (1) watermark idleness starved window closing under backpressure; (2) RocksDB managed-memory fraction 0.4→0.6 | Both fixed, validated at **9,950/s sustained** |
 | 2026-09-02 | C2 TM-kill drill full-chain PASS (G7c 33,792/0, F4 0 orphans) | Pipeline correct + full-load stable at the 10.24k feed |
 | 2026-09-02 | **v2 rewrite**: the original Stage C question ("which stage degrades?") is ANSWERED — the hunt shifts from *degradation* to *next bottleneck at higher rates* | This file |
+| 2026-09-02 | Stage A2 fresh baseline (probes OFF, 10.24k, 12 min) | 10,346/s source in=out; e2e p50 611ms; no diverging stage |
+| 2026-09-02 | Stage B2 probes built + A/B-validated (probes ON vs OFF) | CP3→CP4 net lag ~0 (source keeps up); CP9→CP10 staleness p50 1.9s; probe overhead +5-8% busy within noise (commit `f0ebbdd`) |
+| 2026-09-02 | p95/p99 latency coverage added (user request) | Ingestion sampler flattens p50/p90/p99; B2 reports carry p99 columns (74/74 guards) |
 
 **Key shift:** the original plan hunted a mystery collapse. We found it and fixed it
 (no per-stage divergence needed — the collapse was systemic: watermark idleness +

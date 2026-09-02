@@ -404,18 +404,19 @@ def b2_read_lag_report(capture_dir: str | Path,
                 out.setdefault((start, end), []).append(
                     f"{d_le:.0f}\t{d_c:.0f}\t{d_le - d_c:.0f}")
                 break
-    lines = ["window\tlast_append_delta\tlast_consume_delta\tnet_lag_p50_records\twindow_net_records"]
+    lines = ["window\tlast_append_delta\tlast_consume_delta\t"
+             "net_lag_p50_records\tnet_lag_p99_records\twindow_net_records"]
     for (start, end) in sorted(windows):
         rows = out.get((start, end), [])
         if not rows:
-            lines.append(f"{start}-{end}\t\t\t\t")
+            lines.append(f"{start}-{end}\t\t\t\t\t")
             continue
         nets = sorted(float(r.split("\t")[2]) for r in rows)
         p50 = nets[len(nets) // 2]
-        p95 = nets[min(len(nets) - 1, int(len(nets) * 0.95))]
+        p99 = nets[min(len(nets) - 1, int(len(nets) * 0.99))]
         window_net = sum(float(r.split("\t")[2]) for r in rows)
         lines.append(f"{start}-{end}\t{rows[-1].split(chr(9))[0]}\t"
-                     f"{rows[-1].split(chr(9))[1]}\t{p50:.0f}\t{window_net:.0f}")
+                     f"{rows[-1].split(chr(9))[1]}\t{p50:.0f}\t{p99:.0f}\t{window_net:.0f}")
     return "\n".join(lines)
 
 
@@ -445,15 +446,16 @@ def b2_consumer_read_report(capture_dir: str | Path,
             if start <= epoch_ms / 1000.0 < end:
                 samples.setdefault((start, end), []).append(lag)
                 break
-    lines = ["window\tcp9cp10_p50_ms\tcp9cp10_p95_ms\tsamples"]
+    lines = ["window\tcp9cp10_p50_ms\tcp9cp10_p95_ms\tcp9cp10_p99_ms\tsamples"]
     for (start, end) in sorted(windows):
         xs = sorted(samples.get((start, end), []))
         if not xs:
-            lines.append(f"{start}-{end}\t\t\t0")
+            lines.append(f"{start}-{end}\t\t\t\t0")
             continue
         p50 = xs[len(xs) // 2]
         p95 = xs[min(len(xs) - 1, int(len(xs) * 0.95))]
-        lines.append(f"{start}-{end}\t{p50:.0f}\t{p95:.0f}\t{len(xs)}")
+        p99 = xs[min(len(xs) - 1, int(len(xs) * 0.99))]
+        lines.append(f"{start}-{end}\t{p50:.0f}\t{p95:.0f}\t{p99:.0f}\t{len(xs)}")
     return "\n".join(lines)
 
 

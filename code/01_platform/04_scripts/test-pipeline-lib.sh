@@ -424,6 +424,18 @@ grep -q 'def b2_read_lag_report' "$parse" \
   && ok "G21e parser reads read-lag + consumer-read TSVs" \
   || bad "G21e parser B2 reports MISSING"
 
+# G21f (2026-09-02): p95/p99 latency coverage. The ingestion histogram
+# summary attrs carry p50/p90/p99 (no server-side p95 — 50/90/99 only); the
+# sampler must flatten all three, and the B2 reports must carry p99 columns
+# (read-lag + consumer-read) so tail latency is never silently dropped.
+grep -q '"p50", "p90", "p99"' "$cap" \
+  && ok "G21f ingestion sampler flattens p50/p90/p99 histogram quantiles" \
+  || bad "G21f ingestion sampler missing p90/p99 flattening"
+grep -q 'net_lag_p99_records' "$parse" \
+  && grep -q 'cp9cp10_p99_ms' "$parse" \
+  && ok "G21f B2 reports carry p99 columns (read-lag + consumer-read)" \
+  || bad "G21f B2 reports missing p99 columns"
+
 echo "---"
 echo "guards: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

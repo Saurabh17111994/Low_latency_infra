@@ -311,16 +311,18 @@ with open(java_out, "r", encoding="utf-8", errors="replace") as f:
                     val = dp[0].get("asInt", dp[0].get("asDouble", ""))
                     rows.append(f"{epoch}\t{name}\t{val}")
                     break
-            # Histogram: one row with count, one with p50 (from attributes)
+            # Histogram: count + one row per quantile attr present
+            # (p50/p90/p99 — the ingestion histogram summary carries these;
+            # p95 does not exist server-side, only 50/90/99).
             hist = met.get("histogram", {}).get("dataPoints", [])
             if hist:
                 h = hist[0]
                 rows.append(f"{epoch}\t{name}.count\t{h.get('count','')}")
                 for a in h.get("attributes", []):
-                    if a.get("key") == "p50":
+                    if a.get("key") in ("p50", "p90", "p99"):
                         v = a.get("value", {})
-                        p50 = v.get("intValue", v.get("doubleValue", ""))
-                        rows.append(f"{epoch}\t{name}.p50\t{p50}")
+                        q = v.get("intValue", v.get("doubleValue", ""))
+                        rows.append(f"{epoch}\t{name}.{a['key']}\t{q}")
 if rows:
     with open(f"{out_dir}/ingestion.tsv", "a") as f:
         f.write("\n".join(rows) + "\n")

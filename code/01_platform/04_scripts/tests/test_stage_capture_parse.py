@@ -153,11 +153,13 @@ def test_b2_read_lag_report():
         out = b2_read_lag_report(d, [(1000, 1030)])
         lines = out.splitlines()
         assert lines[0].startswith("window\tlast_append_delta\tlast_consume_delta\t"
-                                   "net_lag_p50_records\twindow_net_records")
+                                   "net_lag_p50_records\tnet_lag_p99_records\t"
+                                   "window_net_records")
         body = lines[1].split("\t")
         # Each 5s pair appends 10000+lag and consumes 10000 -> net lag_records.
         assert body[3] == f"{200}", body   # net_lag_p50 = injected per-pair lag
-        assert body[4] == "1000", body     # window_net = 5 pairs x 200
+        assert body[4] == f"{200}", body   # net_lag_p99 = same injected lag
+        assert body[5] == "1000", body     # window_net = 5 pairs x 200
 
 
 def test_b2_consumer_read_report():
@@ -165,10 +167,12 @@ def test_b2_consumer_read_report():
         d = _write_b2_fixture(Path(td))
         out = b2_consumer_read_report(d, [(1000, 1030)])
         lines = out.splitlines()
-        assert lines[0].startswith("window\tcp9cp10_p50_ms\tcp9cp10_p95_ms\tsamples")
+        assert lines[0].startswith("window\tcp9cp10_p50_ms\tcp9cp10_p95_ms\t"
+                                   "cp9cp10_p99_ms\tsamples")
         body = lines[1].split("\t")
         assert body[1] == "305", body   # injected visibility staleness
-        assert body[3] == "10", body
+        assert body[3] == "305", body   # p99 = same constant staleness
+        assert body[4] == "10", body
 
 
 def test_b2_reports_absent_files_degrade_with_note():
