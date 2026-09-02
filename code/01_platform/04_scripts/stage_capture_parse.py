@@ -316,6 +316,147 @@ def divergence_report(capture_dir: str | Path,
     return "\n".join(lines)
 
 
+def _parse_epoch_tsv(path: Path, ncols: int) -> list[list[str]]:
+    """Parse a B2 hook TSV (epoch_ms first, header row skipped)."""
+    rows: list[list[str]] = []
+    if not path.exists():
+        return rows
+    with open(path, encoding="utf-8") as f:
+        next(f, None)  # header
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) == ncols:
+                rows.append(parts)
+    return rows
+
+
+def b2_read_lag_report(capture_dir: str | Path,
+                       windows: list[tuple[int, int]]) -> str:
+    """B2 CP3->CP4 read lag (plan Stage B2): per-window delta differential.
+
+    log-end comes from read-lag.tsv (FlussReadLagProbe, one sample per tick);
+    source consumed comes from stages.tsv (source operator numRecordsIn). Both
+    are cumulative, but their ZERO POINTS differ: log-end counts records since
+    table creation; the Flink counter counts since job start. For a purged
+    table both start ~0 at the same moment, BUT the capture begins only after
+    warm-up (RUNNING + alignment), so the absolute difference at the first
+    sample already contains the pre-capture backlog and is meaningless.
+
+    The valid steady-state metric is the DELTA differential: per window,
+    (log_end_end - log_end_start) - (consumed_end - consumed_start) — zero
+    when CP3 append and CP4 consume are in sync, positive when the table
+    grows faster than the job consumes (a REAL read lag), negative when the
+    job drains faster than the feed appends (not a lag). Reported as the
+    p50/p95 of per-sample deltas plus the window net.
+    """
+    capture_dir = Path(capture_dir)
+    probe_rows = _parse_epoch_tsv(capture_dir / "read-lag.tsv", 5)
+    if not probe_rows:
+        return "CP3->CP4 read lag: read-lag.tsv absent (FLUSS_PROBE_CP not set for this capture)"
+    # logend: list of (epoch_s, sum); consumed: list of (epoch_s, counter).
+    logend: list[tuple[float, float]] = []
+    for r in probe_rows:
+        try:
+            logend.append((float(r[0]) / 1000.0, float(r[4])))
+        except ValueError:
+            continue
+    logend.sort()
+    consumed: list[tuple[float, float]] = []
+    for row in parse_stages_tsv(capture_dir / "stages.tsv"):
+        name = row.get("operator", "")
+        if "raw_table" not in name and "raw-table" not in name:
+            continue
+        if row.get("numRecordsIn") is None:
+            continue
+        consumed.append((float(row["epoch"]), float(row["numRecordsIn"])))
+    consumed.sort()
+    if not logend or not consumed:
+        return ("CP3->CP4 read lag: no data (read-lag.tsv %s, source series %s)"
+                % ("empty" if not logend else "ok",
+                   "missing" if not consumed else "ok"))
+
+    def _interp(series: list[tuple[float, float]], t: float) -> float | None:
+        """Piecewise-linear interpolation; None outside the series range."""
+        if t < series[0][0] or t > series[-1][0]:
+            return None
+        for i in range(len(series) - 1):
+            x0, y0 = series[i]
+            x1, y1 = series[i + 1]
+            if x0 <= t <= x1:
+                if x1 == x0:
+                    return y0
+                return y0 + (t - x0) * (y1 - y0) / (x1 - x0)
+        return series[-1][1]
+
+    # Per consecutive probe-sample pair: append delta vs consume delta.
+    out: dict[tuple[int, int], list[str]] = {}
+    for i in range(1, len(logend)):
+        t0, le0 = logend[i - 1]
+        t1, le1 = logend[i]
+        c0 = _interp(consumed, t0)
+        c1 = _interp(consumed, t1)
+        if c0 is None or c1 is None or t1 <= t0:
+            continue
+        for (start, end) in windows:
+            if start <= t0 < end:
+                d_le = le1 - le0
+                d_c = c1 - c0
+                out.setdefault((start, end), []).append(
+                    f"{d_le:.0f}\t{d_c:.0f}\t{d_le - d_c:.0f}")
+                break
+    lines = ["window\tlast_append_delta\tlast_consume_delta\tnet_lag_p50_records\twindow_net_records"]
+    for (start, end) in sorted(windows):
+        rows = out.get((start, end), [])
+        if not rows:
+            lines.append(f"{start}-{end}\t\t\t\t")
+            continue
+        nets = sorted(float(r.split("\t")[2]) for r in rows)
+        p50 = nets[len(nets) // 2]
+        p95 = nets[min(len(nets) - 1, int(len(nets) * 0.95))]
+        window_net = sum(float(r.split("\t")[2]) for r in rows)
+        lines.append(f"{start}-{end}\t{rows[-1].split(chr(9))[0]}\t"
+                     f"{rows[-1].split(chr(9))[1]}\t{p50:.0f}\t{window_net:.0f}")
+    return "\n".join(lines)
+
+
+def b2_consumer_read_report(capture_dir: str | Path,
+                            windows: list[tuple[int, int]]) -> str:
+    """B2 CP9->CP10 consumer-read (plan Stage B2): per-window p50/p95 of
+    (probe wallclock read - row last_event_ts) = commit->readable staleness.
+
+    output_ts is the pipeline's EVENT-time stamp (synthetic feed clock, may
+    run ahead of wall); last_event_ts is the newest visible event carried in
+    the row. A consumer reading now sees events up to last_event_ts, so
+    (now - last_event_ts) is the honest visibility staleness.
+    """
+    capture_dir = Path(capture_dir)
+    rows = _parse_epoch_tsv(capture_dir / "consumer-read.tsv", 6)
+    if not rows:
+        return "CP9->CP10 consumer read: consumer-read.tsv absent (FLUSS_PROBE_CP not set for this capture)"
+    # (epoch_ms, token, window_start, output_ts, last_event_ts, staleness_ms)
+    samples: dict[tuple[int, int], list[float]] = {}
+    for r in rows:
+        try:
+            epoch_ms = float(r[0])
+            lag = float(r[5])
+        except (ValueError, IndexError):
+            continue
+        for (start, end) in windows:
+            if start <= epoch_ms / 1000.0 < end:
+                samples.setdefault((start, end), []).append(lag)
+                break
+    lines = ["window\tcp9cp10_p50_ms\tcp9cp10_p95_ms\tsamples"]
+    for (start, end) in sorted(windows):
+        xs = sorted(samples.get((start, end), []))
+        if not xs:
+            lines.append(f"{start}-{end}\t\t\t0")
+            continue
+        p50 = xs[len(xs) // 2]
+        p95 = xs[min(len(xs) - 1, int(len(xs) * 0.95))]
+        lines.append(f"{start}-{end}\t{p50:.0f}\t{p95:.0f}\t{len(xs)}")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("capture_dir", help="stage-capture output directory")
@@ -339,6 +480,12 @@ def main(argv: list[str] | None = None) -> int:
 
     report = divergence_report(args.capture_dir, windows)
     print(report)
+
+    # B2 hook reports (plan Stage B2; absent files print an explicit note).
+    print()
+    print(b2_read_lag_report(args.capture_dir, windows))
+    print()
+    print(b2_consumer_read_report(args.capture_dir, windows))
 
     prom = parse_prom_files(args.capture_dir)
     if prom:

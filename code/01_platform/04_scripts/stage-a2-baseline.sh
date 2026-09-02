@@ -110,8 +110,13 @@ done
 echo "STAGE-A2: job $JOB_ID RUNNING — capturing ${DURATION_S}s"
 
 # --- The capture (all stage metrics, one timeline) ---
+# B2 hooks (2026-09-02): FLUSS_PROBE_CP enables the two passive Fluss probes
+# (read-lag.tsv log-end offsets + consumer-read.tsv KV lookups); $CP comes
+# from pipeline_preflight above. INGESTION_JAVA_OUT enables ingestion.tsv
+# (feed->ack OTLP payloads from the ingestion JVM's java.out).
 JOB_ID="$JOB_ID" DURATION_S="$DURATION_S" \
   INGESTION_JAVA_OUT="$OUT/j1/java.out" \
+  FLUSS_PROBE_CP="$CP" \
   OUT_DIR="$PHASE_OUT/stages" \
   bash "$SCRIPT_DIR/stage-capture.sh" || fatal "stage capture failed"
 

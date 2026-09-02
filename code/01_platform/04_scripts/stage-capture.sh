@@ -24,6 +24,8 @@
 # Usage:
 #   DURATION_S=900 bash stage-capture.sh            # 15 min capture
 #   JOB_ID=<jid> DURATION_S=180 bash stage-capture.sh
+#   INGESTION_JAVA_OUT=<j1/java.out> bash ...       # + ingestion.tsv (feed->ack)
+#   FLUSS_PROBE_CP=<cp> PROBE_TOKENS=4,7 bash ...   # + read-lag.tsv + consumer-read.tsv
 # =============================================================================
 set -uo pipefail
 
@@ -35,6 +37,21 @@ JOB_ID="${JOB_ID:-}"
 DURATION_S="${DURATION_S:-900}"
 CAPTURE_INTERVAL_S="${CAPTURE_INTERVAL_S:-5}"
 OUT_DIR="${OUT_DIR:-logs/tracker-14/stage-capture-$(date +%Y%m%d-%H%M%S)}"
+
+# B2 hooks (2026-09-02): optional, env-gated. When set, each tick also samples
+# the ingestion JVM's OTLP metrics payloads (java.out) into ingestion.tsv and
+# runs the two passive Fluss probes (read-lag.tsv = log-end offsets; the Flink
+# consumed side is offline from stages.tsv; consumer-read.tsv = KV preview
+# lookups). All probes are read-only admin/KV calls (<= 1/s); see
+# docs/plans/2026-09-01-stage-throughput-latency-detection-plan.md Stage B2.
+# Enabled-but-broken FAILS FAST (see probe_* below) — a silent gap in the
+# measurement timeline is worse than no capture.
+INGESTION_JAVA_OUT="${INGESTION_JAVA_OUT:-}"
+FLUSS_PROBE_CP="${FLUSS_PROBE_CP:-}"       # classpath for FlussReadLagProbe/FlussKvProbe
+FLUSS_PROBE_DIR="${FLUSS_PROBE_DIR:-$SCRIPT_DIR/fluss-probes}"
+PROBE_TABLE="${PROBE_TABLE:-feature_candles_15s_preview}"
+PROBE_TOKENS="${PROBE_TOKENS:-4,7,13,17,19}"
+PROBE_BOOTSTRAP="${PROBE_BOOTSTRAP:-localhost:9123}"
 
 mkdir -p "$OUT_DIR"
 
@@ -105,11 +122,25 @@ vertex_ids="$(cut -f1 "$OUT_DIR/vertex-map.tsv" | tr '\n' ' ')"
   echo "checkpoint_interval_ms=${CHECKPOINT_INTERVAL_MS:-unset}"
   echo "checkpoint_timeout_ms=${CHECKPOINT_TIMEOUT_MS:-unset}"
   echo "load_avg=$(cut -d' ' -f1-3 /proc/loadavg)"
+  echo "ingestion_java_out=${INGESTION_JAVA_OUT:-unset}"
+  echo "fluss_probe_cp=${FLUSS_PROBE_CP:+set}"       # never echo the cp path (huge)
+  echo "probe_table=${PROBE_TABLE}"
+  echo "probe_tokens=${PROBE_TOKENS}"
 } > "$OUT_DIR/run-meta.txt"
 
 echo -e "epoch\tvertex_id\toperator\tnumRecordsIn\tnumRecordsOut\tbusyMsSum\tbackpressuredMsSum\tidleMsSum" \
   > "$OUT_DIR/stages.tsv"
 echo -e "epoch\tvertex_id\toperator\tsubtask\twatermark" > "$OUT_DIR/watermark-lag.tsv"
+
+# B2 output files (headers). Files exist (possibly empty) whenever the
+# corresponding hook env is set; the parser keys on presence.
+if [ -n "$INGESTION_JAVA_OUT" ]; then
+  echo -e "epoch_ms\tmetric\tvalue" > "$OUT_DIR/ingestion.tsv"
+fi
+if [ -n "$FLUSS_PROBE_CP" ]; then
+  echo -e "epoch_ms\ttable\tpartitions\tbuckets\tlog_end_sum" > "$OUT_DIR/read-lag.tsv"
+  echo -e "epoch_ms\ttoken\twindow_start\toutput_ts\tlast_event_ts\tread_lag_ms" > "$OUT_DIR/consumer-read.tsv"
+fi
 
 # ---------------------------------------------------------------------------
 # One sample tick: stages + watermarks (+ checkpoint events since last tick).
@@ -206,6 +237,119 @@ PYEOF
   curl -fsS --max-time 8 "$TM_PROM_URL/metrics" 2>/dev/null \
     | grep -E 'busyTimeMsPerSecond|backPressuredTimeMsPerSecond|hardBackPressuredTimeMsPerSecond|idleTimeMsPerSecond|currentWatermark|latency_source_id' \
     > "$OUT_DIR/prom-$(date +%s).txt" || true
+
+  # B2 hooks: ingestion OTLP payloads (10s cadence — new rows every ~2 ticks)
+  # and the two passive Fluss probes.
+  sample_ingestion
+  sample_probes
+}
+
+# ---------------------------------------------------------------------------
+# B2 hooks (2026-09-02): ingestion.tsv + read-lag.tsv + consumer-read.tsv.
+# All three sample functions are measurement-only and fail LOUD (a printed
+# WARN once per hook — not silent, not per-tick spam) when enabled but broken.
+# ---------------------------------------------------------------------------
+
+# Tail java.out for OTLP payloads appended since the last tick. The ingestion
+# JVM flushes one payload line every 10s (OtlpMetricsEmitter). Each payload is
+# a single-line JSON with cumulative counters (tick.throughput, ...) and
+# histograms (append.latency.ms with count/sum/p50/p90/p99, stage.*_latency).
+# We flatten each metric to one TSV row: epoch_ms, metric, value. For
+# histograms the "value" is the p50 (the count column carries the sample
+# count via a separate metric "<name>.count" row).
+INGESTION_OFFSET_FILE="$OUT_DIR/.ingestion-java.out.offset"
+
+sample_ingestion() {
+  [ -n "$INGESTION_JAVA_OUT" ] || return 0
+  [ -f "$INGESTION_JAVA_OUT" ] || {
+    # Fail-fast: enabled but the file never appeared. One loud warn (guarded
+    # by the offset file's absence — it is created on first successful read).
+    if [ ! -f "$INGESTION_OFFSET_FILE" ]; then
+      echo "!! WARN: INGESTION_JAVA_OUT=$INGESTION_JAVA_OUT set but file missing — ingestion.tsv stays empty (feed->ack leg lost)" >&2
+      touch "$INGESTION_OFFSET_FILE"
+    fi
+    return 0
+  }
+
+  local start_off=0
+  [ -f "$INGESTION_OFFSET_FILE" ] && start_off="$(cat "$INGESTION_OFFSET_FILE")"
+  local fsize; fsize="$(stat -c %s "$INGESTION_JAVA_OUT" 2>/dev/null || echo 0)"
+  # File shrank (rotation) → restart from 0.
+  if [ "$fsize" -lt "$start_off" ]; then start_off=0; fi
+
+  # 2026-09-02 fix: the OTLP parse used to sit behind a heredoc
+  # (python3 ... <<'PYEOF') while ALSO receiving the tail pipe on stdin — the
+  # heredoc redirection WINS over the pipe, so python read the heredoc (its
+  # own source) instead of the java.out tail and ingestion.tsv stayed empty
+  # (observed in the 15:56 A/B capture: offset advanced, zero rows written).
+  # Python now opens the file itself at the offset — no pipe, no heredoc
+  # stdin conflict.
+  python3 - "$INGESTION_JAVA_OUT" "$start_off" "$OUT_DIR" "$(date +%s%3N)" <<'PYEOF'
+import json, os, re, sys
+java_out, start_off, out_dir, epoch = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
+rows = []
+with open(java_out, "r", encoding="utf-8", errors="replace") as f:
+    f.seek(start_off)
+    for line in f:
+        m = re.search(r"otlp-metrics-payload: (.*)", line)
+        if not m:
+            continue
+        try:
+            d = json.loads(m.group(1))
+        except Exception:
+            continue
+        try:
+            metrics = d["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+        except Exception:
+            continue
+        for met in metrics:
+            name = met.get("name", "?")
+            # Sum (cumulative counter) or gauge
+            for kind in ("sum", "gauge"):
+                dp = met.get(kind, {}).get("dataPoints", [])
+                if dp:
+                    val = dp[0].get("asInt", dp[0].get("asDouble", ""))
+                    rows.append(f"{epoch}\t{name}\t{val}")
+                    break
+            # Histogram: one row with count, one with p50 (from attributes)
+            hist = met.get("histogram", {}).get("dataPoints", [])
+            if hist:
+                h = hist[0]
+                rows.append(f"{epoch}\t{name}.count\t{h.get('count','')}")
+                for a in h.get("attributes", []):
+                    if a.get("key") == "p50":
+                        v = a.get("value", {})
+                        p50 = v.get("intValue", v.get("doubleValue", ""))
+                        rows.append(f"{epoch}\t{name}.p50\t{p50}")
+if rows:
+    with open(f"{out_dir}/ingestion.tsv", "a") as f:
+        f.write("\n".join(rows) + "\n")
+PYEOF
+  echo "$fsize" > "$INGESTION_OFFSET_FILE"
+}
+
+# Compile the two B2 probes once (fail fast if the classpath is broken).
+FLUSS_PROBE_BIN="$OUT_DIR/probes"
+if [ -n "$FLUSS_PROBE_CP" ]; then
+  mkdir -p "$FLUSS_PROBE_BIN"
+  for src in FlussReadLagProbe FlussKvProbe; do
+    javac -cp "$FLUSS_PROBE_CP" -d "$FLUSS_PROBE_BIN" \
+      "$FLUSS_PROBE_DIR/$src.java" > "$OUT_DIR/javac-$src.log" 2>&1 \
+      || { echo "!! FAIL: B2 probe $src compile failed — see $OUT_DIR/javac-$src.log (FLUSS_PROBE_CP broken?)" >&2; exit 1; }
+  done
+  echo "B2 probes compiled -> $FLUSS_PROBE_BIN"
+fi
+
+sample_probes() {
+  [ -n "$FLUSS_PROBE_CP" ] || return 0
+  # Probe 1: raw log-end offsets (CP3 side). One Admin.listOffsets RPC.
+  java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+    FlussReadLagProbe default raw_table_1 "$PROBE_BOOTSTRAP" \
+    >> "$OUT_DIR/read-lag.tsv" 2>/dev/null || echo "!! WARN: FlussReadLagProbe failed this tick" >&2
+  # Probe 2: KV preview lookups (CP9->CP10). 3 lookups, <=1/s aggregate.
+  java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+    FlussKvProbe "$PROBE_TABLE" 15000 "$PROBE_TOKENS" "$PROBE_BOOTSTRAP" \
+    >> "$OUT_DIR/consumer-read.tsv" 2>/dev/null || echo "!! WARN: FlussKvProbe failed this tick" >&2
 }
 
 # ---------------------------------------------------------------------------

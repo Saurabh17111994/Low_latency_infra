@@ -377,6 +377,53 @@ grep -q 'MIN_UPTIME_S' "$runner" \
   && ok "G20c runner refuses on freshly-booted host" \
   || bad "G20c uptime gate MISSING in runner"
 
+# ---- G21 (2026-09-02): B2 passive checkpoint probes (plan Stage B2) --------
+# The ingestion.tsv hook was PROMISED in stage-capture.sh's header but never
+# implemented (comment-only) — A2 captures silently lost the feed->ack leg.
+# G21 pins: the hook now exists, the two Fluss probes exist and are wired,
+# the runner enables them, and the parser reads them.
+echo "---"
+echo "G21 B2 checkpoint probes"
+
+cap="$SCRIPT_DIR/stage-capture.sh"
+bash -n "$cap" || { bad "G21 stage-capture.sh syntax invalid"; exit 1; }
+grep -q 'sample_ingestion' "$cap" \
+  && grep -q 'otlp-metrics-payload' "$cap" \
+  && ok "G21a ingestion.tsv hook implemented (was comment-only)" \
+  || bad "G21a ingestion.tsv hook MISSING"
+grep -q 'INGESTION_JAVA_OUT.*file missing' "$cap" \
+  && ok "G21a ingestion hook fails loud when java.out missing" \
+  || bad "G21a ingestion hook missing fail-loud guard"
+grep -q 'sample_probes' "$cap" \
+  && grep -q 'FlussReadLagProbe' "$cap" \
+  && grep -q 'FlussKvProbe' "$cap" \
+  && ok "G21b read-lag + consumer-read probes wired into ticks" \
+  || bad "G21b probe wiring MISSING"
+grep -q 'javac -cp "$FLUSS_PROBE_CP"' "$cap" \
+  && ok "G21b probes compile once, fail fast on broken CP" \
+  || bad "G21b probe compile guard MISSING"
+
+for src in FlussReadLagProbe FlussKvProbe; do
+  probe="$SCRIPT_DIR/fluss-probes/$src.java"
+  [ -f "$probe" ] || { bad "G21c $src.java MISSING"; continue; }
+  ok "G21c probe source present: $src"
+done
+grep -q 'listPartitionInfos' "$SCRIPT_DIR/fluss-probes/FlussReadLagProbe.java" \
+  && grep -q 'listOffsets(' "$SCRIPT_DIR/fluss-probes/FlussReadLagProbe.java" \
+  && grep -q 'p.getPartitionName()' "$SCRIPT_DIR/fluss-probes/FlussReadLagProbe.java" \
+  && ok "G21c read-lag probe is partition-aware (raw_table_1 is auto-partitioned)" \
+  || bad "G21c read-lag probe NOT partition-aware"
+
+grep -q 'FLUSS_PROBE_CP="$CP"' "$runner" \
+  && ok "G21d A2 runner enables B2 probes (FLUSS_PROBE_CP=CP)" \
+  || bad "G21d runner does not enable B2 probes"
+
+parse="$SCRIPT_DIR/stage_capture_parse.py"
+grep -q 'def b2_read_lag_report' "$parse" \
+  && grep -q 'def b2_consumer_read_report' "$parse" \
+  && ok "G21e parser reads read-lag + consumer-read TSVs" \
+  || bad "G21e parser B2 reports MISSING"
+
 echo "---"
 echo "guards: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
