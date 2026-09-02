@@ -631,7 +631,7 @@ config knobs, default-on in dev; full design + five-fix history in
 
 ```
 raw_table_1 → validation → dedup → 15s forming (per-tick state)
-                                        ├─ preview emitter (1s) → feature_candles_15s_preview (LOG)
+                                        ├─ preview emitter (1s) → feature_candles_15s_preview (LOG — not the current final-candle table; that is feature_candles_15s (KV))
                                         ├─ final candle (15s close) → feature_candles_15s (KV)
                                         └─ EarlySignalFunction (two-input: preview + final)
                                              ├─ preview passes rule v1 → TENTATIVE row → Signal_Candidates (LOG)

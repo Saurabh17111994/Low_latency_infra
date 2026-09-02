@@ -28,6 +28,7 @@ cd "$ROOT" || { echo "!! cannot cd to repo root $ROOT"; exit 1; }
 
 RATE_HZ="${RATE_HZ:-10}"
 DURATION_S="${DURATION_S:-720}"
+MIN_UPTIME_S="${MIN_UPTIME_S:-600}"
 FLINK_REST_URL="${FLINK_REST_URL:-http://localhost:8081}"
 COMPOSE_DIR="$ROOT/code/01_platform/01_docker"
 
@@ -53,6 +54,18 @@ fatal() {
 }
 
 echo "STAGE-A2: rate=${RATE_HZ}Hz duration=${DURATION_S}s out=$PHASE_OUT"
+
+# Host-stability gate (2026-09-02, after two power cuts in ~2h killed two
+# captures): right after a reboot the machine is still settling and a second
+# flap is most likely; also Fluss may be mid-recovery with torn segments that
+# only surface minutes later. Refuse to start a measurement until the host has
+# been up MIN_UPTIME_S (default 600s = 10min). If the power cut left torn
+# Fluss segments, the preflight's 180s readiness wait will fail closed — run
+# `fluss-repair/repair-tablet.sh --all` first.
+uptime_s="$(awk '{print int($1)}' /proc/uptime)"
+if [ "${uptime_s:-0}" -lt "$MIN_UPTIME_S" ]; then
+  fatal "host uptime ${uptime_s}s < MIN_UPTIME_S=${MIN_UPTIME_S}s — refusing a measurement start right after a reboot; re-run in $((MIN_UPTIME_S - uptime_s))s"
+fi
 
 # Same strictness as the drill: PURGE_STRICT removes stale history,
 # ALLOW_FULL_REPLAY=false keeps the source in LATEST mode.

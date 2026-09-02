@@ -103,6 +103,37 @@ Automatic resume and approval reuse across epochs are prohibited.
 5. Measure backlog recovery and data correctness at the current workload.
 6. Verify recovery under the accepted RTO and run reconciliation before resume.
 
+## Host power cut (unclean shutdown) recovery
+
+> 2026-09-02: two power cuts in one day. Symptoms seen and what they mean:
+> torn (zeroed-tail) Fluss segments crash-loop the tablet on recovery — one
+> table at a time (`Signal_Candidates_current`, then
+> `feature_candles_15s_preview`, then `forming_bar` each surfaced on the NEXT
+> restart until repaired); orphans (stray faketool, ingestion JVM) survive a
+> killed runner but not a reboot; a capture started minutes after reboot is
+> the likeliest to be lost. Guarded since: `repair-tablet.sh --all`,
+> stray-process kills in `pipeline_preflight`, and a 10-min minimum-uptime
+> gate on measurement runners (`MIN_UPTIME_S`).
+
+1. Stabilize: wait until the host is past its first flap (measurement runs
+   refuse to start until `MIN_UPTIME_S`, default 600s, of uptime).
+2. Repair Fluss BEFORE any drill/measurement — one command:
+   `code/01_platform/04_scripts/fluss-repair/repair-tablet.sh --all`
+   (dry-run first with `DRY_RUN=1`). The sweep pins the container restart
+   policy off, scans every table, truncates only zeroed tails (last complete
+   batch boundary, zero record loss), restores the policy, starts the tablet,
+   and fails the run if it is still crash-looping.
+3. Bring the stack up (docker compose up the Fluss + Flink containers; the
+   ingestion/compute services stay host-side per the drill recipe).
+4. Verify: `pipeline_preflight` (its 180s Fluss-readiness wait fails closed
+   if anything is still torn) before any run.
+5. Resume the interrupted activity (re-run the runner — it purges stale
+   state itself).
+
+Never: drop/recreate tables to "fix" a crash-loop (drops the history the
+drill evidence relies on), or run a measurement while the tablet shows
+`Restarting` in `docker ps`.
+
 ## Postback correlation or projection failure
 
 1. Preserve the immutable postback and payload hash.

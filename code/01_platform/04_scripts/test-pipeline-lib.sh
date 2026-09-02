@@ -334,6 +334,49 @@ grep -q 'PIPELINE_PREFLIGHT_OK=0' "$PL" \
   && ok "G19 preflight resets (0) at entry and commits (1) on success" \
   || bad "G19 preflight OK-flag wiring missing/incomplete"
 
+# ---- G20 (2026-09-02): power-cut resilience guards. After two power cuts in
+# one day destroyed data (torn Fluss segments -> tablet crash-loop) and left
+# orphan processes (a stray faketool had to be killed by hand), these guards
+# make recovery deterministic:
+#   (a) preflight kills stray ingestion JVMs (twin of the stray-faketool kill)
+#   (b) repair-tablet.sh --all sweep exists (one-command recovery), with
+#       policy pinning + final crash-loop check that fails the sweep
+#   (c) measurement runners refuse to start on a freshly-booted host
+echo "---"
+echo "G20 power-cut resilience guards"
+
+grep -q 'pgrep -f "com.trading.ingestion.IngestionService"' "$PL" \
+  && ok "G20a preflight kills stray ingestion JVM" \
+  || bad "G20a stray-ingestion kill MISSING in preflight"
+grep -q 'kill -9 "$p" 2>/dev/null || true' "$PL" \
+  && ok "G20a stray kills are non-fatal (best-effort)" \
+  || bad "G20a stray kill not best-effort"
+
+repair="$SCRIPT_DIR/fluss-repair/repair-tablet.sh"
+bash -n "$repair" || { bad "G20b repair-tablet.sh syntax invalid"; exit 1; }
+grep -q 'TABLE_ARG" = "--all"' "$repair" \
+  && ok "G20b repair-tablet.sh --all sweep mode exists" \
+  || bad "G20b --all sweep mode MISSING"
+grep -q 'docker update --restart=no "$CONTAINER"' "$repair" \
+  && grep -q 'docker update --restart="$POLICY_BEFORE"' "$repair" \
+  && ok "G20b sweep pins + restores the restart policy" \
+  || bad "G20b policy pin/restore MISSING"
+grep -q 'grep -q "Restarting"' "$repair" \
+  && grep -q 'exit 1' "$repair" \
+  && ok "G20b sweep fails closed if still crash-looping" \
+  || bad "G20b final crash-loop check MISSING"
+grep -q 'repair_one_table "$TABLE_DIR" "$TABLE" || rc=$?' "$repair" \
+  && ok "G20b single-table path is errexit-safe" \
+  || bad "G20b single-table call not errexit-safe"
+
+runner="$SCRIPT_DIR/stage-a2-baseline.sh"
+bash -n "$runner" || { bad "G20c stage-a2-baseline.sh syntax invalid"; exit 1; }
+grep -q 'MIN_UPTIME_S' "$runner" \
+  && grep -q '/proc/uptime' "$runner" \
+  && grep -q 'fatal "host uptime' "$runner" \
+  && ok "G20c runner refuses on freshly-booted host" \
+  || bad "G20c uptime gate MISSING in runner"
+
 echo "---"
 echo "guards: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

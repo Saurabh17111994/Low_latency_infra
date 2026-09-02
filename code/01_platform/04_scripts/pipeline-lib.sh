@@ -254,6 +254,15 @@ pipeline_preflight() {
   stray=$(pgrep -x faketool || true)
   [ -z "$stray" ] || { pipeline_log "WARN: killing stray faketool(s): $stray"; for p in $stray; do kill -9 "$p" 2>/dev/null || true; done; sleep 1; }
 
+  # Stray ingestion JVM (left behind when a runner was SIGKILLed — the
+  # cleanup trap does not survive kill -9/power cut). It would re-append to
+  # the raw table and pollute the purge + baseline; kill before launch.
+  # 2026-09-02: observed after a killed A2 runner (pid 8635 was faketool;
+  # the ingestion JVM is the same class of orphan).
+  local stray_ing
+  stray_ing=$(pgrep -f "com.trading.ingestion.IngestionService" || true)
+  [ -z "$stray_ing" ] || { pipeline_log "WARN: killing stray ingestion JVM(s): $stray_ing"; for p in $stray_ing; do kill -9 "$p" 2>/dev/null || true; done; sleep 1; }
+
   # Fluss must be reachable (tables applied)
   docker exec "$FLUSS_COORDINATOR_CONTAINER" sh -c 'exit 0' 2>/dev/null \
     || { pipeline_fail "fluss-coordinator container not up — run make up first"; return 1; }
