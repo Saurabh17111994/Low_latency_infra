@@ -15,10 +15,14 @@ changes, no feed or ingestion changes.
 
 Ticks are not transactions: a missed repeat double-counts one tick in one 15 s
 candle — harmless. Repeats arrive back-to-back (retries/resends), never minutes
-apart. Therefore "seen in the last ~2,000 per stock" protects longer (≈100+ s at
-target rates) than today's 60 s TTL, at ~10,000× lower per-record cost. Restores
-resume from saved read positions (no replay), so an empty-at-start filter is
-safe; atomic snapshots keep candles correct regardless.
+apart. Therefore "seen in the last 200 per stock" (10 s at target rates —
+changed from 2000/100 s on 2026-09-04: duplicates are only ever the most
+recent frame, seconds old, so 2000 was ~10× beyond any real horizon and cost
+~965 MB worst-case heap at 2433 tokens vs ~96 MB at 200) protects the
+redelivery horizon with ~10,000× lower per-record cost than the old 60 s TTL
+RocksDB mechanism. Restores resume from saved read positions (no replay), so
+an empty-at-start filter is safe; atomic snapshots keep candles correct
+regardless.
 
 ## 3. Step 0 — discriminating speed test (no cluster, no project changes)
 

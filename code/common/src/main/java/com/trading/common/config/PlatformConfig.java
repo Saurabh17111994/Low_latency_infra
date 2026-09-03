@@ -9,7 +9,8 @@ import java.util.Set;
  * <p>No numeric literals for these keys may be scattered through source files. Startup must
  * reject two values outright (see {@link #validateStartup()}):
  * <ul>
- *   <li>{@code DEDUP_WINDOW_ENTRIES} must equal 2000</li>
+ *   <li>{@code DEDUP_WINDOW_ENTRIES} must equal 200 (10 s dedup horizon at
+ *   20 Hz/token — changed from 2000 on 2026-09-04; see the constant doc)</li>
  *   <li>{@code CANDLE_WINDOW_MS} must equal 15000</li>
  * </ul>
  *
@@ -44,7 +45,15 @@ public final class PlatformConfig {
     // ---- dedup / candles (reject-startup values) ----
     // G-DEDUP-4 (2026-09-03 redesign): per-token recent-fingerprint bound for
     // the heap-window repeat filter (replaces the 60 s TTL pin).
-    public static final int DEDUP_WINDOW_ENTRIES = 2000;
+    // 2026-09-04 (soak OOM hunt): 2000 -> 200. Duplicates are only ever
+    // injected/resent as the token's MOST RECENT frame (seconds old — the
+    // faketool -inject-dups resends the last frame; plan doc: "repeats arrive
+    // back-to-back, never minutes apart"). At 20 Hz/token, 200 entries = 10 s
+    // horizon — still covers the 15 s source-idle watchdog boundary cases
+    // within one feed epoch and cuts worst-case dedup heap ~5x (965 MB ->
+    // ~96 MB at 2433 tokens fully filled; the 2000 bound was ~100 s of history,
+    // ~10x beyond any real duplicate horizon).
+    public static final int DEDUP_WINDOW_ENTRIES = 200;
     public static final long CANDLE_WINDOW_MS = 15_000L;
 
     // ---- checkpointing ----
