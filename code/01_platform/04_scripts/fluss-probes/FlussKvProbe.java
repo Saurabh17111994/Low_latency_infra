@@ -29,6 +29,17 @@ import java.util.concurrent.TimeUnit;
  * same synthetic clock, but staleness vs it stays meaningful: it measures
  * the emit cadence + read path (preview rows emit ~1/s/key).
  *
+ * Table layouts (column indices are hard-coded per table):
+ *   feature_candles_15s_preview  output_ts=12, last_event_ts=13  (preview)
+ *   feature_candles_15s          output_ts=13, NO last_event_ts  (closed)
+ * For the CLOSED table the probe reports staleness_ms = epoch_ms -
+ * output_ts: output_ts is the emit wall-clock of the closed candle row
+ * (HeapCandleEmitFunction passes currentProcessingTime), so this measures
+ * commit->readable age of the freshest closed row the read path can see.
+ * Same synthetic-clock caveat as the preview: the feed clock may run ahead
+ * of wall, so small negative values can appear; a large positive value is
+ * genuine closed-candle visibility lag.
+ *
  * The probe reads the CURRENT window first (freshest row), falling back to
  * the PREVIOUS window (at a window boundary the fresh window has no preview
  * for ~1s). Both windows are within the 60s TTL.
@@ -41,6 +52,13 @@ import java.util.concurrent.TimeUnit;
  *                                          [bootstrap]
  */
 public class FlussKvProbe {
+    private static final boolean TABLE_HAS_LAST_EVENT_TS(String table) {
+        // Preview rows carry last_event_ts (col 13); closed candle rows do
+        // not (the CLOSED candle's last event time is not part of the table
+        // contract). output_ts column differs between the two layouts too.
+        return "feature_candles_15s_preview".equals(table);
+    }
+
     public static void main(String[] args) throws Exception {
         String table = args.length > 0 ? args[0] : "feature_candles_15s_preview";
         long windowMs = args.length > 1 ? Long.parseLong(args[1]) : 15000L;
@@ -68,11 +86,9 @@ public class FlussKvProbe {
                     InternalRow key = GenericRow.of(token, w);
                     InternalRow row = lookuper.lookup(key).get(2, TimeUnit.SECONDS).getSingletonRow();
                     if (row != null) {
-                        // Column layout of feature_candles_15s_preview (v2,
-                        // 15 cols): see CandlePreviewColumns.java — output_ts
-                        // = col 12, last_event_ts = col 13.
-                        long outputTs = row.getLong(12);
-                        long lastEventTs = row.getLong(13);
+                        boolean hasLastEventTs = TABLE_HAS_LAST_EVENT_TS(table);
+                        long outputTs = row.getLong(hasLastEventTs ? 12 : 13);
+                        long lastEventTs = hasLastEventTs ? row.getLong(13) : outputTs;
                         long stalenessMs = epochMs - lastEventTs;
                         System.out.println(epochMs + "\t" + token + "\t" + w + "\t"
                                 + outputTs + "\t" + lastEventTs + "\t" + stalenessMs);

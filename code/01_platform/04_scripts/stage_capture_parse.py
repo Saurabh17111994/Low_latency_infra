@@ -133,11 +133,17 @@ def parse_prom_files(capture_dir: str | Path) -> list[dict]:
         idle: dict[tuple[str, str], float] = {}
         wms: dict[tuple[str, str], float] = {}
         lat: dict[tuple[str, str, str], dict[str, float]] = {}
+        # Custom operator metrics (2026-09-04): family names carry the
+        # `_operator_` scope separator —
+        # flink_taskmanager_job_task_operator_<group>_<metric>. Keep the
+        # FULL name (the stripped prefix only covered the system families).
+        custom: dict[tuple[str, str], dict[str, float]] = {}
         for line in path.read_text(encoding="utf-8").splitlines():
             m = _re.match(r'(\w+)\{([^}]*)\}\s+([\d\.eE+-]+)$', line.strip())
             if not m:
                 continue
-            name, labels_s, val_s = m.groups()
+            raw_name, labels_s, val_s = m.groups()
+            name = raw_name
             # strip the reporter scope prefix, e.g.
             # flink_taskmanager_job_task_busyBackPressuredTimeMsPerSecond ->
             # busyBackPressuredTimeMsPerSecond
@@ -168,10 +174,33 @@ def parse_prom_files(capture_dir: str | Path) -> list[dict]:
                 if q is not None:
                     op = labels.get("operator_subtask_index", "?")
                     lat.setdefault((task, sub, op), {})[q] = val
+            elif ("_operator_" in raw_name
+                    and "currentWatermark" not in name
+                    and "split_watermark" not in name):
+                # Custom operator counters/histograms. Counter families
+                # (compute.candles.emitted etc.) expose one gauge line per
+                # subtask: SUM across subtasks so a parallelism-N operator
+                # reads as its aggregate counter.
+                # Histogram families (compute.latency.*) expose quantile
+                # lines: keep the MAX quantile value across subtasks
+                # (upper-bound p-quantile of the union; per-subtask histograms
+                # are not exactly mergeable from quantiles alone).
+                q = labels.get("quantile")
+                # Display name: drop the scope path entirely
+                # (…_operator_compute_candles_emitted -> compute_candles_emitted)
+                # so the report reads like the code metric name.
+                disp = raw_name.split("_operator_", 1)[1] if "_operator_" in raw_name else name
+                key = (disp, task)
+                bucket = custom.setdefault(key, {})
+                if q is not None:
+                    # histogram quantile line
+                    bucket[q] = max(bucket.get(q, -1e300), val)
+                else:
+                    bucket[""] = bucket.get("", 0.0) + val
         samples.append({
             "epoch": epoch,
             "busy": busy, "backpressured": bpress, "hard_backpressured": hard,
-            "idle": idle, "watermarks": wms, "latency": lat,
+            "idle": idle, "watermarks": wms, "latency": lat, "custom": custom,
         })
     return samples
 
@@ -459,6 +488,119 @@ def b2_consumer_read_report(capture_dir: str | Path,
     return "\n".join(lines)
 
 
+def b2_closed_read_report(capture_dir: str | Path,
+                          windows: list[tuple[int, int]]) -> str:
+    """Closed feature-candle leg (feature_candles_15s): per-window p50/p95 of
+    (probe wallclock read - row output_ts) = closed-row visibility staleness.
+
+    The closed table carries no last_event_ts column; FlussKvProbe reports
+    staleness vs output_ts (the row emit wall-clock, HeapCandleEmitFunction
+    currentProcessingTime). Same synthetic-clock caveat as the preview leg:
+    small negative values can appear under feed skew; a large positive value
+    is genuine closed-candle visibility lag.
+    """
+    capture_dir = Path(capture_dir)
+    rows = _parse_epoch_tsv(capture_dir / "closed-read.tsv", 6)
+    if not rows:
+        return ("closed-table consumer read: closed-read.tsv absent "
+                "(FLUSS_PROBE_CP not set for this capture)")
+    samples: dict[tuple[int, int], list[float]] = {}
+    for r in rows:
+        try:
+            epoch_ms = float(r[0])
+            lag = float(r[5])
+        except (ValueError, IndexError):
+            continue
+        for (start, end) in windows:
+            if start <= epoch_ms / 1000.0 < end:
+                samples.setdefault((start, end), []).append(lag)
+                break
+    lines = ["window\tclosed_p50_ms\tclosed_p95_ms\tclosed_p99_ms\tsamples"]
+    for (start, end) in sorted(windows):
+        xs = sorted(samples.get((start, end), []))
+        if not xs:
+            lines.append(f"{start}-{end}\t\t\t\t0")
+            continue
+        p50 = xs[len(xs) // 2]
+        p95 = xs[min(len(xs) - 1, int(len(xs) * 0.95))]
+        p99 = xs[min(len(xs) - 1, int(len(xs) * 0.99))]
+        lines.append(f"{start}-{end}\t{p50:.0f}\t{p95:.0f}\t{p99:.0f}\t{len(xs)}")
+    return "\n".join(lines)
+
+
+def operator_custom_report(prom_samples: list[dict],
+                           windows: list[tuple[int, int]]) -> str:
+    """Custom operator counters/histograms from the TM Prometheus scrape.
+
+    The capture grep keeps every metric whose family name contains
+    `_operator_` (flink_taskmanager_job_task_operator_<group>_<name>);
+    parse_prom_files stores them under samples[].custom keyed by
+    (family, task_name) -> {quantile_or_empty: value}. Counters are summed
+    across subtasks at parse time; histogram quantile lines keep the max
+    per quantile. Reported per window: the LAST scrape value of each family
+    (counters are cumulative-since-start; the last scrape is the window
+    truth). Rows collapse across task names (parallelism or restart
+    attempts) by taking the newest sample.
+    """
+    # family -> quantile|"" -> [(epoch, val)]
+    series: dict[str, dict[str, list[tuple[float, float]]]] = {}
+    for s in prom_samples:
+        epoch = float(s["epoch"])
+        for (family, task), quantiles in s.get("custom", {}).items():
+            for q, val in quantiles.items():
+                series.setdefault(family, {}).setdefault(q, []).append((epoch, val))
+    if not series:
+        return "custom operator metrics: none captured (new scrape filter; run needs a live job)"
+    lines = ["metric\twindow\tlast_val"]
+    for family in sorted(series):
+        for (start, end) in windows:
+            for q in sorted(series[family]):
+                pts = series[family][q]
+                inwin = [(e, v) for (e, v) in pts if start <= e < end]
+                if not inwin:
+                    continue
+                # newest sample in the window (multiple task names/attempts
+                # may contribute; the newest scrape wins)
+                last = max(inwin, key=lambda p: p[0])[1]
+                fam = family if not q else f"{family}[q{q}]"
+                lines.append(f"{fam}\t{start}-{end}\t{last:.0f}")
+    return "\n".join(lines)
+
+
+def b2_custom_rest_report(capture_dir: str | Path,
+                          windows: list[tuple[int, int]]) -> str:
+    """Custom operator counters from the Flink REST per-vertex metrics
+    endpoint (custom-rest.tsv, 2026-09-04). The TM Prometheus reporter
+    exports operator-scope custom metrics as HELP-only on Flink 2.2.1, so
+    this leg reads the REST channel instead. Rows are epoch_ms/vertex/
+    operator/metric/sum; counters are cumulative-since-start — per window
+    we report the LAST value (newest sample wins across subtasks/attempts).
+    """
+    rows = _parse_epoch_tsv(Path(capture_dir) / "custom-rest.tsv", 5)
+    if not rows:
+        return "custom operator metrics (REST): none captured (custom-rest.tsv missing/empty)"
+    # metric -> operator -> [(epoch_ms, sum)]
+    series: dict[str, dict[str, list[tuple[float, float]]]] = {}
+    for epoch, _vid, op, metric, val in rows:
+        try:
+            e = float(epoch)
+            v = float(val)
+        except ValueError:
+            continue
+        series.setdefault(metric, {}).setdefault(op, []).append((e, v))
+    lines = ["metric\toperator\twindow\tlast_val"]
+    for metric in sorted(series):
+        for op in sorted(series[metric]):
+            pts = series[metric][op]
+            for (start, end) in windows:
+                inwin = [(e, v) for (e, v) in pts if start <= e < end]
+                if not inwin:
+                    continue
+                last = max(inwin, key=lambda p: p[0])[1]
+                lines.append(f"{metric}\t{op}\t{start}-{end}\t{last:.0f}")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("capture_dir", help="stage-capture output directory")
@@ -488,6 +630,10 @@ def main(argv: list[str] | None = None) -> int:
     print(b2_read_lag_report(args.capture_dir, windows))
     print()
     print(b2_consumer_read_report(args.capture_dir, windows))
+    print()
+    print(b2_closed_read_report(args.capture_dir, windows))
+    print()
+    print(b2_custom_rest_report(args.capture_dir, windows))
 
     prom = parse_prom_files(args.capture_dir)
     if prom:
@@ -495,6 +641,8 @@ def main(argv: list[str] | None = None) -> int:
         print(prom_operator_summary(prom, windows))
         print()
         print(latency_report(prom, windows))
+        print()
+        print(operator_custom_report(prom, windows))
         print()
         print(watermark_lag_report(prom, windows))
 

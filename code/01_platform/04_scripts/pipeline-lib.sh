@@ -17,9 +17,11 @@
 #       CHECKPOINT_TIMEOUT_MS=30000, DURATION_S=300
 #   - Functions print diagnostics and `return 1` on failure — the caller
 #     decides fail-fast (gate script) vs warn-and-continue (measurement).
-#   - pipeline_install_cleanup_trap() installs the EXIT trap that kills
-#     the faketool + ingestion JVM and cancels the job. State vars
-#     (FAKETOOL_PID, JVM_PID, JOB_ID) live here.
+#   - pipeline_install_cleanup_trap() installs the EXIT trap that removes
+#     the loadgen containers and cancels the job. State vars
+#     (FAKETOOL_LOG_PID, INGESTION_LOG_PID, JOB_ID) live here; faketool +
+#     ingestion are CONTAINERS (CHG-122), the *_LOG_PID vars are only the
+#     `docker logs -f` mirror processes.
 #
 # Bugs this lib exists to prevent (each observed live, 2026-08-29/30):
 #   B1. `docker compose -f` without BOTH --env-file flags: required
@@ -70,13 +72,27 @@ pipeline_require_preflight() {
 LIB_COMPOSE_DIR="$ROOT/code/01_platform/01_docker"
 LIB_CP_FILE="$ROOT/code/02_services/01_ingestion/target/cp.txt"
 FLUSS_COORDINATOR_CONTAINER="${FLUSS_COORDINATOR_CONTAINER:-01_docker-fluss-coordinator-1}"
+# CHG-122 (2026-09-02): fully-containerized data path. faketool + the
+# ingestion JVM run as Docker containers on the SAME network as Flink/Fluss
+# — never as host processes. WHY the policy change: the old hybrid layout
+# (host JVMs -> published ports -> NAT hairpin -> Fluss) made "is the
+# environment clean?" a manual audit and let host state (leftover JVMs,
+# host memory pressure) contaminate captures. Guard G26 in preflight fails
+# a run if any host data-path process is found.
+LIB_LOADGEN_IMAGE="${LIB_LOADGEN_IMAGE:-pipeline-loadgen:1.0.0}"
+LIB_TRADING_NET="${LIB_TRADING_NET:-01_docker_trading-net}"
+LIB_FAKETOOL_CONTAINER="pipeline-faketool"
+LIB_INGESTION_CONTAINER="pipeline-ingestion"
+FLINK_TM_CONTAINER="${FLINK_TM_CONTAINER:-01_docker-flink-taskmanager-1}"
 FLUSS_TABLET_CONTAINER="${FLUSS_TABLET_CONTAINER:-01_docker-fluss-tablet-1}"
 FLUSS_READY_TIMEOUT_S="${FLUSS_READY_TIMEOUT_S:-180}"
 FLUSS_READY_TABLE="${FLUSS_READY_TABLE:-raw_table_1}"
 
-# Run state (owned by the lib; teardown reads these)
-FAKETOOL_PID=""
-JVM_PID=""
+# Run state (owned by the lib; teardown reads these). CHG-122: the data
+# path is containers; the *_LOG_PID vars are `docker logs -f` mirrors that
+# die with their container.
+FAKETOOL_LOG_PID=""
+INGESTION_LOG_PID=""
 JOB_ID=""
 
 pipeline_log() { echo "[pipeline $(date +%H:%M:%S)] $*"; }
@@ -232,6 +248,65 @@ pipeline_wait_for_fluss_ready() {
   return 1
 }
 
+# ---------- G27: loadgen image verification (2026-09-02, user request) ----------
+# Every run MUST use the containerized loadgen image AND that image must
+# have passed its checks. Three failure classes, each with the WHY:
+#   (a) wrong/foreign image retagged as pipeline-loadgen:1.0.0 — the
+#       binaries are missing inside; docker run would die at launch
+#   (b) stale image: build-input sources (go-bridge, ingestion src, poms,
+#       Dockerfile.loadgen) newer than the image — the run would measure
+#       OLD code and produce a bogus baseline
+#   (c) guards red: test-pipeline-lib.sh failing — running on a known-bad
+#       harness contradicts the every-fix-pinned-by-a-guard policy
+# G27b helper: sha256 over EVERY build input of the loadgen image (the
+# exact set the Dockerfile COPYs). Sorted file list -> per-file sha ->
+# final digest, so any content change flips the stamp.
+pipeline_loadgen_input_stamp() {
+  { # everything the Dockerfile COPYs from go-bridge (go/mod/sum, *.go,
+    # marketdata, vendored third_party) EXCEPT the host-built arrow-bridge
+    # binary and test binaries — they are build OUTPUTS on the host, not
+    # image inputs, and would flip the stamp spuriously.
+    find "$ROOT/code/02_services/01_ingestion/go-bridge" \
+        -type f ! -name 'arrow-bridge' ! -name '*.test' -print 2>/dev/null
+    find "$ROOT/code/02_services/01_ingestion/src" -type f -print 2>/dev/null
+    printf '%s\n' \
+      "$ROOT/code/02_services/01_ingestion/Dockerfile.loadgen" \
+      "$ROOT/code/02_services/01_ingestion/pom.xml" \
+      "$ROOT/code/02_services/06_execution_gateway/pom.xml"
+    find "$ROOT/code/common" -type f -name '*.java' -print 2>/dev/null
+  } | sort | grep -v '^$' | xargs -r sha256sum 2>/dev/null \
+    | sha256sum | cut -d' ' -f1
+}
+
+pipeline_verify_loadgen_image() {
+  # (a) contents: all three artifacts present + executables runnable
+  if ! docker run --rm --network none "$LIB_LOADGEN_IMAGE" \
+      sh -c 'test -x /app/faketool && test -x /app/arrow-bridge && test -f /app/ingestion.jar' \
+      >/dev/null 2>&1; then
+    pipeline_fail "G27a: loadgen image $LIB_LOADGEN_IMAGE is missing its artifacts (/app/faketool, /app/arrow-bridge, /app/ingestion.jar) — a foreign or corrupt image was tagged with this name. Rebuild honestly: $COMPOSE build loadgen (and check no other image stole the tag: docker images pipeline-loadgen)"
+    return 1
+  fi
+  # (b) freshness: content-addressed. The image carries a BUILD_STAMP
+  # (sha256 of all build inputs, baked in at build time via compose build
+  # arg). Recompute now and compare — mismatch = the image was built from
+  # DIFFERENT sources than the tree (bogus baseline). Content-based on
+  # purpose: the mtime first draft false-positived on git checkout/touch
+  # (proven live 2026-09-02) and a fully-cached rebuild never bumps the
+  # image Created time, so it could never clear again.
+  local stamp_in_image
+  stamp_in_image="$(docker run --rm --network none "$LIB_LOADGEN_IMAGE" cat /app/build-stamp 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$stamp_in_image" ] || [ "$stamp_in_image" != "$LIB_LOADGEN_STAMP" ]; then
+    pipeline_fail "G27b: loadgen image $LIB_LOADGEN_IMAGE is STALE — its build stamp ($stamp_in_image) does not match the current sources ($LIB_LOADGEN_STAMP). The run would measure OLD code (bogus baseline). Rebuild: $COMPOSE build loadgen (with LOADGEN_BUILD_STAMP exported — pipeline_preflight does this for you)"
+    return 1
+  fi
+  # (c) harness guards green: the run script's own guard suite must pass.
+  if ! bash "$ROOT/code/01_platform/04_scripts/test-pipeline-lib.sh" >"$OUT/g27-guard-run.log" 2>&1; then
+    pipeline_fail "G27c: test-pipeline-lib.sh FAILED — refusing to run on a red harness (every fix is pinned by a guard; a red suite means a known-broken state). See $OUT/g27-guard-run.log; run it yourself, fix the FAIL lines, then re-run"
+    return 1
+  fi
+  pipeline_log "G27 OK: image $LIB_LOADGEN_IMAGE verified (artifacts present, no stale build inputs, guard suite green)"
+}
+
 # ---------- preflight ----------
 # Checks artifacts, kills stray faketools, verifies the port is free,
 # restarts the TM (B3), resolves the 1024-token set, creates $OUT.
@@ -245,23 +320,44 @@ pipeline_preflight() {
   [ -f "$LIB_ING_JAR" ] || { pipeline_fail "ingestion jar missing: $LIB_ING_JAR"; return 1; }
   [ -f "$LIB_CP_FILE" ] || { pipeline_fail "ingestion classpath file missing: $LIB_CP_FILE (run mvn package in 01_ingestion)"; return 1; }
   [ -f "$LIB_BRIDGE_DIR/arrow-bridge" ] || { pipeline_fail "arrow-bridge binary missing: $LIB_BRIDGE_DIR/arrow-bridge"; return 1; }
-  [ -f "$LIB_FAKETOOL_SRC" ] || { pipeline_fail "faketool source missing: $LIB_FAKETOOL_SRC"; return 1; }
+  # faketool source is a BUILD INPUT of the loadgen image (Dockerfile.loadgen)
+  [ -f "$LIB_FAKETOOL_SRC" ] || { pipeline_fail "faketool source missing: $LIB_FAKETOOL_SRC (build input of Dockerfile.loadgen - the loadgen image cannot be built without it)"; return 1; }
   [ -f "$LIB_MANIFEST" ] || { pipeline_fail "manifest CSV missing: $LIB_MANIFEST"; return 1; }
   pipeline_validate_rate "$RATE_HZ" || return 1
   pipeline_port_free "$FAKETOOL_PORT" || { pipeline_fail "port $FAKETOOL_PORT already in use — stale faketool/broker running (kill it or set FAKETOOL_PORT)"; return 1; }
 
-  local stray
-  stray=$(pgrep -x faketool || true)
-  [ -z "$stray" ] || { pipeline_log "WARN: killing stray faketool(s): $stray"; for p in $stray; do kill -9 "$p" 2>/dev/null || true; done; sleep 1; }
-
-  # Stray ingestion JVM (left behind when a runner was SIGKILLed — the
-  # cleanup trap does not survive kill -9/power cut). It would re-append to
-  # the raw table and pollute the purge + baseline; kill before launch.
-  # 2026-09-02: observed after a killed A2 runner (pid 8635 was faketool;
-  # the ingestion JVM is the same class of orphan).
-  local stray_ing
-  stray_ing=$(pgrep -f "com.trading.ingestion.IngestionService" || true)
-  [ -z "$stray_ing" ] || { pipeline_log "WARN: killing stray ingestion JVM(s): $stray_ing"; for p in $stray_ing; do kill -9 "$p" 2>/dev/null || true; done; sleep 1; }
+  # G26 (2026-09-02, CHG-122): host-isolation policy guard. The load-test
+  # data path (faketool, arrow-bridge, ingestion JVM) MUST run inside
+  # Docker. The old hybrid layout ran them as host processes; orphans
+  # (observed after SIGKILLed runners) re-appended to the raw table and
+  # poisoned baselines, and host state was unauditable. POLICY: no host
+  # data-path processes, ever. This is fail-fast, NOT auto-kill: a policy
+  # violation must be investigated, not papered over mid-run.
+  # Stale loadgen containers from a crashed prior run would collide with
+  # our docker run names and mix old/new feeds — fail with the reason.
+  local stale_ct
+  stale_ct="$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^(pipeline-faketool|pipeline-ingestion)$' || true)"
+  [ -z "$stale_ct" ] || {
+    pipeline_fail "G26: stale loadgen container(s) from a prior run exist: $(echo $stale_ct | tr '\n' ' ') — remove them first: docker rm -f pipeline-faketool pipeline-ingestion (they are leftovers of a crashed run; a name collision would abort our docker run mid-preflight)"
+    return 1
+  }
+  local stray p
+  stray=""
+  # pgrep sees CONTAINER JVMs through the host /proc (same kernel) — a
+  # container-owned PID (docker cgroup) is NOT a host process. Filter by
+  # cgroup: only PIDs OUTSIDE any docker*.scope cgroup are true host
+  # data-path processes. (False-positive observed 2026-09-02 post-reboot:
+  # the compose ingestion service's JVM tripped G26 and blocked the run.)
+  for p in $(pgrep -x faketool; pgrep -x arrow-bridge; pgrep -f 'com.trading.ingestion.IngestionService'; true); do
+    if ! grep -qs 'docker-' "/proc/$p/cgroup" 2>/dev/null; then
+      stray="$stray $p"
+    fi
+  done
+  stray="$(echo "$stray" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//')"
+  [ -z "$stray" ] || {
+    pipeline_fail "G26: host data-path process(es) running (pids: $stray) — POLICY VIOLATION (CHG-122: pipeline must be fully Docker-based). A host faketool/arrow-bridge/ingestion JVM bypasses the container network and can poison the baseline (e.g. re-append to the raw table). Find what harness started them, kill them (kill -9 $stray), then re-run. NOTE: container JVMs are host-visible via /proc - if `docker ps -a` shows pipeline-faketool/pipeline-ingestion, that is a stale-container case, remove those first"
+    return 1
+  }
 
   # Fluss must be reachable (tables applied)
   docker exec "$FLUSS_COORDINATOR_CONTAINER" sh -c 'exit 0' 2>/dev/null \
@@ -305,6 +401,30 @@ pipeline_preflight() {
   #       p16 job died on "unassigned resource" at t+13s.
   # Both are caught here, BEFORE any feed or job submit, with the reason.
   pipeline_verify_tm_config || return 1
+
+  # G26 (CHG-122): loadgen containers must share the TM's network so the
+  # ingestion JVM reaches Fluss by service name (fluss-coordinator:9123)
+  # and faketool by container name — no published ports, no NAT hairpin.
+  local tm_net
+  tm_net="$(docker inspect --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}} {{end}}' "$FLINK_TM_CONTAINER" 2>/dev/null | awk '{print $1}')"
+  [ "$tm_net" = "$LIB_TRADING_NET" ] || {
+    pipeline_fail "G26: flink-taskmanager is on network '$tm_net' but LIB_TRADING_NET=$LIB_TRADING_NET — the loadgen containers would land on a DIFFERENT network and the ingestion JVM could not reach Fluss by service name. WHY this matters: silent cross-network DNS failure = zero appends (observed 2026-09-02 run -192421). Fix: LIB_TRADING_NET='$tm_net' (or point it at the compose trading-net)"
+    return 1
+  }
+  # CHG-122: build (cached) the loadgen image here so a broken Dockerfile
+  # fails preflight with the reason, not mid-run. G27b: the current
+  # sources' stamp is passed as a build arg so the image records what it
+  # was built from (content-addressed freshness, checked right after).
+  LIB_LOADGEN_STAMP="$(pipeline_loadgen_input_stamp)"
+  export LOADGEN_BUILD_STAMP="$LIB_LOADGEN_STAMP"
+  pipeline_log "building loadgen image (cached): $LIB_LOADGEN_IMAGE (stamp ${LIB_LOADGEN_STAMP:0:12}...)"
+  $COMPOSE build loadgen >"$OUT/loadgen-build.log" 2>&1 \
+    || { pipeline_fail "G26: loadgen image build failed — see $OUT/loadgen-build.log (Dockerfile.loadgen at code/02_services/01_ingestion/; build with: $COMPOSE build loadgen)"; return 1; }
+  docker image inspect "$LIB_LOADGEN_IMAGE" --format '{{.Id}}' >/dev/null 2>&1 \
+    || { pipeline_fail "G26: loadgen image $LIB_LOADGEN_IMAGE not present after build — the compose service tagged a different image name; check the `image:` key of the loadgen service in docker-compose.yml"; return 1; }
+  # G27 (2026-09-02): the image itself must be verified before ANY run
+  # uses it — artifacts present, not stale, harness guards green.
+  pipeline_verify_loadgen_image || return 1
 
   local mtok
   mtok=$(tail -n +2 "$LIB_MANIFEST" | wc -l)
@@ -376,15 +496,13 @@ print(max((t.get("slotsNumber", 0) for t in tms), default=0))' 2>/dev/null || ec
 }
 
 # ---------- faketool ----------
-# Builds + launches the faketool, waits for bind, asserts real-rate mode.
-# B2 guard: after launching, verifies the process is STILL ALIVE — a
-# bind failure (e.g. port raced) leaves a dead PID that must abort now,
-# not at mid-run liveness.
+# CHG-122 (2026-09-02): faketool runs as a CONTAINER on trading-net (was a
+# host process talking through published ports). The binary is built into
+# the loadgen image (Dockerfile.loadgen) — no host `go build` here anymore.
+# B2 guard kept: after launch, verifies the container is STILL RUNNING —
+# an early exit (bad flag, missing binary) must abort now, not mid-run.
 pipeline_start_faketool() {
   pipeline_require_preflight || return 1
-  pipeline_log "building faketool from $LIB_FAKETOOL_SRC"
-  (cd "$LIB_BRIDGE_DIR" && go build -tags faketool -o "$OUT/bin/faketool" ./faketool) \
-    || { pipeline_fail "faketool build failed"; return 1; }
   local inject_args=()
   # F2/F3 audit injection (2026-08-30): optional, from INJECT_* env vars.
   # See faketool main.go -inject-* flags for semantics.
@@ -401,70 +519,104 @@ pipeline_start_faketool() {
       && inject_args+=(-inject-max-rounds "${INJECT_MAX_ROUNDS}")
     pipeline_log "injection enabled: after=${INJECT_AFTER_MS}ms dups=${INJECT_DUPS:-0} late=${INJECT_LATE:-0} every=${INJECT_EVERY_MS:-0}ms"
   fi
-  "$OUT/bin/faketool" -port "$FAKETOOL_PORT" -real-rate -real-rate-hz "$RATE_HZ" \
-    "${inject_args[@]}" > "$OUT/faketool.log" 2>&1 &
-  FAKETOOL_PID=$!
+  docker run -d --name "$LIB_FAKETOOL_CONTAINER" \
+    --network "$LIB_TRADING_NET" \
+    "$LIB_LOADGEN_IMAGE" \
+    /app/faketool -port "$FAKETOOL_PORT" -real-rate -real-rate-hz "$RATE_HZ" \
+    "${inject_args[@]}" \
+    || { pipeline_fail "faketool container failed to start — check: docker logs $LIB_FAKETOOL_CONTAINER (image: $LIB_LOADGEN_IMAGE, network: $LIB_TRADING_NET)"; return 1; }
+  # Mirror container stdout into the evidence dir continuously; `docker
+  # logs -f` exits when the container is removed at cleanup.
+  docker logs -f "$LIB_FAKETOOL_CONTAINER" > "$OUT/faketool.log" 2>&1 &
+  FAKETOOL_LOG_PID=$!
 
-  local bound=0 i
+  # Readiness: faketool prints real_rate=true once serving. Poll the
+  # mirrored log + container liveness (B2: alive after start).
+  local ready=0 i running
   for i in $(seq 1 15); do
-    if (exec 3<>/dev/tcp/127.0.0.1/$FAKETOOL_PORT) 2>/dev/null; then exec 3>&-; bound=1; break; fi
+    running="$(docker inspect --format '{{.State.Running}}' "$LIB_FAKETOOL_CONTAINER" 2>/dev/null || echo false)"
+    [ "$running" = "true" ] || break
+    if grep -q "real_rate=true" "$OUT/faketool.log" 2>/dev/null; then ready=1; break; fi
     sleep 1
   done
-  if [ "$bound" != 1 ]; then
-    echo "!! faketool did not bind :$FAKETOOL_PORT — log tail:" >&2
-    tail -5 "$OUT/faketool.log" >&2
+  if [ "$ready" != 1 ]; then
+    pipeline_fail "faketool container not ready in 15s (running=$running) — log tail (full log: $OUT/faketool.log):"
+    tail -5 "$OUT/faketool.log" >&2 || true
     return 1
   fi
-  # B2 guard: alive after bind (catches instant-death after a successful bind too).
-  kill -0 "$FAKETOOL_PID" 2>/dev/null || { pipeline_fail "faketool died right after bind — see $OUT/faketool.log"; return 1; }
-  grep -q "real_rate=true" "$OUT/faketool.log" \
-    || { echo "!! faketool log missing real_rate=true — log:" >&2; cat "$OUT/faketool.log" >&2; return 1; }
-  pipeline_log "faketool on :$FAKETOOL_PORT (${RATE_HZ}Hz x 1024 = $((RATE_HZ * 1024))/s), pid $FAKETOOL_PID, real-rate confirmed"
+  pipeline_log "faketool container $LIB_FAKETOOL_CONTAINER on :$FAKETOOL_PORT (${RATE_HZ}Hz x 1024 = $((RATE_HZ * 1024))/s), network $LIB_TRADING_NET, real-rate confirmed"
 }
 
 # ---------- ingestion JVM ----------
-# Canonical env block (same as loadtest-run.sh). Sets JVM_PID.
+# CHG-122 (2026-09-02): the ingestion JVM (+ its arrow-bridge child) runs as
+# a CONTAINER on trading-net. Canonical env block kept 1:1 from the host
+# launch EXCEPT the three endpoint values, which now use in-network names:
+#   ARROW_HFT_URL   ws://127.0.0.1:8899        -> ws://pipeline-faketool:8899
+#   FLUSS_BOOTSTRAP localhost:9123 (NAT)       -> fluss-coordinator:9123
+#   OTEL collector  localhost:4319 (was dead)  -> otel-collector:4318
+# $OUT is bind-mounted at /run (manifest slice + readiness marker) and
+# $OUT/j1 at /logs (gc.log, JSON logs) so every evidence file lands in the
+# same place as before. stdout is mirrored to j1/java.out (stage-capture
+# parses it for ingestion.tsv).
 pipeline_start_ingestion() {
   pipeline_require_preflight || return 1
   # Fail-closed readiness: an interrupted prior run can leave the readiness
-  # marker behind. Remove it before starting a new JVM; otherwise the first
-  # poll below can accept a dead process as ready and corrupt the run's
-  # evidence (observed during fault-harness bring-up, 2026-08-31).
-  rm -f /tmp/ingestion.loadtest.ready
-  # D6 right-size (2026-08-31): ingestion live-set measured 64-90MB over 17 runs;
-  # 512m heap + 512m direct = 8x headroom (was 2g/1g). Verified by bench run G6/G7 guards.
-  LOG_DIR="$OUT/j1" READINESS_FILE_PATH="/tmp/ingestion.loadtest.ready" \
-  ARROW_HFT_URL="ws://127.0.0.1:$FAKETOOL_PORT" ARROW_BRIDGE_BIN="$LIB_BRIDGE_DIR/arrow-bridge" \
-  ARROW_FAKE_BROKER="1" TRANSPORT="proto" \
-  SECRETS_VIA_ENV_FILE="1" \
-  ARROW_APP_ID="testd" ARROW_APP_SECRET="testd" \
-  ARROW_USER_ID="testd-user" ARROW_PASSWORD="testd-pass" ARROW_TOTP_KEY="JBSWY3DPEHPK3PXP" \
-  INSTRUMENT_MANIFEST_PATH="$LIB_MANIFEST_SLICE" \
-  FLUSS_BOOTSTRAP="localhost:9123" FLUSS_BOOTSTRAP_SERVERS="localhost:9123" \
-  RAW_TABLE_NAME="raw_table_1" ARROW_HFT_CONNECTIONS="1" \
-  ARROW_MAX_EVENT_AGE_MS="${ARROW_MAX_EVENT_AGE_MS:-5000}" \
-  ARROW_MAX_FUTURE_EVENT_SKEW_MS="2000" \
-  ARROW_HFT_LATENCY_MS="50" CLOCK_CHECK_REQUIRED="false" \
-  OTEL_COLLECTOR_HOST="localhost:4319" \
-  FLUSS_WRITER_MODE="generic" FLUSS_WRITERS="1" FLUSS_WRITER_BATCH_SIZE_BYTES="0" \
-  java --add-opens=java.base/java.nio=ALL-UNNAMED \
-    -Xms512m -Xmx512m -XX:MaxDirectMemorySize=512m \
-    -Xlog:gc*,safepoint:file="$OUT/j1/gc.log:time,uptime,level,tags" \
-    -Dlog.dir="$OUT/j1" \
-    -cp "$LIB_ING_JAR" com.trading.ingestion.IngestionService > "$OUT/j1/java.out" 2>&1 &
-  JVM_PID=$!
-  pipeline_log "ingestion JVM pid $JVM_PID"
+  # marker behind. Remove it before starting; otherwise the first poll
+  # below can accept a dead process as ready (observed 2026-08-31).
+  rm -f "$OUT/ingestion.loadtest.ready"
+  docker run -d --name "$LIB_INGESTION_CONTAINER" \
+    --network "$LIB_TRADING_NET" \
+    -v "$OUT":/run -v "$OUT/j1":/logs \
+    -e LOG_DIR=/logs \
+    -e READINESS_FILE_PATH=/run/ingestion.loadtest.ready \
+    -e ARROW_HFT_URL="ws://$LIB_FAKETOOL_CONTAINER:$FAKETOOL_PORT" \
+    -e ARROW_BRIDGE_BIN=/app/arrow-bridge \
+    -e ARROW_FAKE_BROKER=1 \
+    -e TRANSPORT=proto \
+    -e SECRETS_VIA_ENV_FILE=1 \
+    -e ARROW_APP_ID=testd -e ARROW_APP_SECRET=testd \
+    -e ARROW_USER_ID=testd-user -e ARROW_PASSWORD=testd-pass \
+    -e ARROW_TOTP_KEY=JBSWY3DPEHPK3PXP \
+    -e INSTRUMENT_MANIFEST_PATH=/run/instruments-1024.csv \
+    -e FLUSS_BOOTSTRAP=fluss-coordinator:9123 \
+    -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 \
+    -e RAW_TABLE_NAME=raw_table_1 \
+    -e ARROW_HFT_CONNECTIONS=1 \
+    -e ARROW_MAX_EVENT_AGE_MS="${ARROW_MAX_EVENT_AGE_MS:-5000}" \
+    -e ARROW_MAX_FUTURE_EVENT_SKEW_MS=2000 \
+    -e ARROW_HFT_LATENCY_MS=50 \
+    -e CLOCK_CHECK_REQUIRED=false \
+    -e OTEL_COLLECTOR_HOST=otel-collector:4318 \
+    -e FLUSS_WRITER_MODE=generic -e FLUSS_WRITERS=1 -e FLUSS_WRITER_BATCH_SIZE_BYTES=0 \
+    "$LIB_LOADGEN_IMAGE" \
+    java --add-opens=java.base/java.nio=ALL-UNNAMED \
+      -Xms512m -Xmx512m -XX:MaxDirectMemorySize=512m \
+      -Xlog:gc*,safepoint:file=/logs/gc.log:time,uptime,level,tags \
+      -Dlog.dir=/logs \
+      -cp /app/ingestion.jar com.trading.ingestion.IngestionService \
+    || { pipeline_fail "ingestion container failed to start — check: docker logs $LIB_INGESTION_CONTAINER (image: $LIB_LOADGEN_IMAGE, network: $LIB_TRADING_NET)"; return 1; }
+  # Mirror stdout (OTLP feed->ack payloads) — stage-capture parses this
+  # file for ingestion.tsv. Dies with the container at cleanup.
+  docker logs -f "$LIB_INGESTION_CONTAINER" > "$OUT/j1/java.out" 2>&1 &
+  INGESTION_LOG_PID=$!
 
-  local ready=0 i
-  for i in $(seq 1 60); do [ -f "/tmp/ingestion.loadtest.ready" ] && { ready=1; break; }; sleep 2; done
+  # Readiness = marker file via the /run bind mount + bridge subscription.
+  local ready=0 i running
+  for i in $(seq 1 60); do
+    running="$(docker inspect --format '{{.State.Running}}' "$LIB_INGESTION_CONTAINER" 2>/dev/null || echo false)"
+    [ "$running" = "true" ] || break
+    [ -f "$OUT/ingestion.loadtest.ready" ] && { ready=1; break; }
+    sleep 2
+  done
   if [ "$ready" != 1 ]; then
-    echo "!! JVM not ready — log tail:" >&2; tail -10 "$OUT/j1/java.out" >&2
+    pipeline_fail "ingestion container not ready in 120s (running=$running) — log tail (full log: $OUT/j1/java.out):"
+    tail -10 "$OUT/j1/java.out" >&2 || true
     return 1
   fi
-  for i in $(seq 1 30); do grep -q "HFT subscribed" "$OUT/j1/java.out" && break; sleep 1; done
-  grep -q "HFT subscribed" "$OUT/j1/java.out" \
-    || { echo "!! bridge never subscribed — log tail:" >&2; tail -10 "$OUT/j1/java.out" >&2; return 1; }
-  pipeline_log "ingestion JVM ready + bridge subscribed (1024 tokens)"
+  for i in $(seq 1 30); do grep -q "HFT subscribed" "$OUT/j1/java.out" 2>/dev/null && break; sleep 1; done
+  grep -q "HFT subscribed" "$OUT/j1/java.out" 2>/dev/null \
+    || { pipeline_fail "bridge never subscribed — log tail (full log: $OUT/j1/java.out):"; tail -10 "$OUT/j1/java.out" >&2; return 1; }
+  pipeline_log "ingestion container $LIB_INGESTION_CONTAINER ready + bridge subscribed (1024 tokens)"
 }
 
 # ---------- SignalJob submit ----------
@@ -636,20 +788,26 @@ pipeline_submit_job() {
   # data integrity. 3 tolerated = bounded, still fails fast on persistent
   # checkpoint breakage.
   extra_flags+=(-Dexecution.checkpointing.tolerable-failed-checkpoints="${TOLERABLE_FAILED_CHECKPOINTS:-3}")
-  # C2 20k bottleneck (2026-09-02): RocksDB write-path tuning for the
-  # fingerprint-dedup hot operator (74-77% per-subtask occupancy at
-  # 20,480 t/s; every tick = 1 Get + 1 Put on a ~13MB-per-DB 60s-TTL set).
-  # JOB-LEVEL -D flags, NOT docker-compose FLINK_PROPERTIES: adding
-  # state.backend.rocksdb.* keys to that block collides with the
-  # `state.backend` String leaf in YamlParserUtils
-  # convertAndDumpYamlFromFlatMap and crash-loops the TM (observed
-  # 2026-09-02). 4 memtables + 60% write-buffer share + 2 flush threads =
-  # fewer, larger memtable flushes and less compaction stall at the dedup's
-  # write rate. Measure: re-run the 20Hz 180s capture and compare dedup
-  # occupancy (was 74-77%) + source rate (was ~19.85k/s).
-  extra_flags+=(-Dstate.backend.rocksdb.writebuffer.count="${ROCKSDB_WRITEBUFFER_COUNT:-4}")
-  extra_flags+=(-Dstate.backend.rocksdb.memory.write-buffer-ratio="${ROCKSDB_WRITE_BUFFER_RATIO:-0.6}")
-  extra_flags+=(-Dstate.backend.rocksdb.threads.write="${ROCKSDB_THREADS_WRITE:-2}")
+  # C2 20k bottleneck (2026-09-02) - opt-in only, NO benefit measured:
+  # RocksDB write-path tuning via JOB-LEVEL -D flags (writebuffer.count,
+  # write-buffer-ratio, threads.write) for the fingerprint-dedup hot
+  # operator. 2026-09-02 falsification series at 20Hz (captures
+  # 20260902-175855/183643/184626/185513): tuned knobs 5.4k/s, default
+  # values 3.9k/s, NO flags 3.4k/s - versus the 17:01 baseline of 19.85k/s
+  # with no flags. The decline is MONOTONIC PER-RUN and independent of
+  # these flags (root cause under investigation: cumulative per-run
+  # degradation; see the plan evolution log). The flags showed no benefit
+  # in any configuration, so they stay opt-in OFF by default; ROCKSDB_TUNING
+  # requires all three knobs explicitly (partial sets are untested).
+  if [ "${ROCKSDB_TUNING:-false}" = "true" ]; then
+    if [ -z "${ROCKSDB_WRITEBUFFER_COUNT:-}" ] || [ -z "${ROCKSDB_WRITE_BUFFER_RATIO:-}" ] || [ -z "${ROCKSDB_THREADS_WRITE:-}" ]; then
+      pipeline_fail "ROCKSDB_TUNING=true requires ALL THREE knobs (ROCKSDB_WRITEBUFFER_COUNT, ROCKSDB_WRITE_BUFFER_RATIO, ROCKSDB_THREADS_WRITE) - partial sets degrade the managed-memory pool unevenly (measured 2026-09-02)"
+      return 1
+    fi
+    extra_flags+=(-Dstate.backend.rocksdb.writebuffer.count="${ROCKSDB_WRITEBUFFER_COUNT}")
+    extra_flags+=(-Dstate.backend.rocksdb.memory.write-buffer-ratio="${ROCKSDB_WRITE_BUFFER_RATIO}")
+    extra_flags+=(-Dstate.backend.rocksdb.threads.write="${ROCKSDB_THREADS_WRITE}")
+  fi
   if [ "${UNALIGNED_CHECKPOINTS:-false}" = "true" ]; then
     extra_flags+=(-Dexecution.checkpointing.unaligned=true)
   fi
@@ -659,7 +817,7 @@ pipeline_submit_job() {
     -e CONFIGURATION_VERSION=1.0.0 \
     -e ALGORITHM_VERSION=candle-15s-v1 \
     -e PARALLELISM="${PARALLELISM:-8}" \
-    -e DEDUP_TTL_MS=60000 -e CANDLE_WINDOW_MS=15000 \
+    -e DEDUP_WINDOW_ENTRIES="${DEDUP_WINDOW_ENTRIES:-200}" -e CANDLE_WINDOW_MS=15000 \
     -e WATERMARK_OUT_OF_ORDER_MS="${WATERMARK_OUT_OF_ORDER_MS:-500}" \
     -e CHECKPOINT_INTERVAL_MS="${CHECKPOINT_INTERVAL_MS:-60000}" -e CHECKPOINT_TIMEOUT_MS="${CHECKPOINT_TIMEOUT_MS:-30000}" -e MAX_CONCURRENT_CHECKPOINTS=1 \
     -e PREVIEW_ENABLED=true -e PREVIEW_INTERVAL_MS="${PREVIEW_INTERVAL_MS:-500}" \
@@ -682,14 +840,15 @@ pipeline_submit_job() {
 
 # ---------- teardown ----------
 pipeline_cleanup() {
-  [ -n "$JVM_PID" ] && kill -9 "$JVM_PID" 2>/dev/null || true
-  [ -n "$FAKETOOL_PID" ] && kill -9 "$FAKETOOL_PID" 2>/dev/null || true
-  rm -f /tmp/ingestion.loadtest.ready
+  # CHG-122: the data path is containers — remove them. The `docker logs -f`
+  # mirror processes exit when their container disappears.
+  docker rm -f "$LIB_INGESTION_CONTAINER" "$LIB_FAKETOOL_CONTAINER" >/dev/null 2>&1 || true
+  rm -f "$OUT/ingestion.loadtest.ready"
   if [ -n "$JOB_ID" ]; then
     echo "cleanup: cancelling SignalJob $JOB_ID"
     $COMPOSE exec -T flink-jobmanager flink cancel "$JOB_ID" >/dev/null 2>&1 || true
   fi
-  echo "cleanup: killed jvm=$JVM_PID faketool=$FAKETOOL_PID job=$JOB_ID"
+  echo "cleanup: removed containers=$LIB_FAKETOOL_CONTAINER,$LIB_INGESTION_CONTAINER job=$JOB_ID"
 }
 pipeline_install_cleanup_trap() { trap pipeline_cleanup EXIT; }
 

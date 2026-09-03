@@ -36,6 +36,25 @@ public final class FingerprintBuilder {
     private static final String ALGORITHM = "SHA-256";
     private static final byte DELIM = '|';
 
+    /**
+     * Cheap-dedup (C): shared formatter + per-thread digests.
+     *
+     * <p>{@code HexFormat} is stateless and thread-safe — one instance serves
+     * all calls. {@code MessageDigest} is stateful and NOT thread-safe — each
+     * thread gets its own via {@code ThreadLocal}. {@code digest()} resets
+     * the digest, so reuse across calls is output-identical to a fresh
+     * instance per call (pinned by the ING-UNIT-016 golden hash).
+     */
+    private static final HexFormat HEX = HexFormat.of();
+    private static final ThreadLocal<MessageDigest> DIGESTS =
+            ThreadLocal.withInitial(() -> {
+                try {
+                    return MessageDigest.getInstance(ALGORITHM);
+                } catch (NoSuchAlgorithmException e) {
+                    throw new RuntimeException("SHA-256 not available", e);
+                }
+            });
+
     private FingerprintBuilder() {}
 
     /**
@@ -59,7 +78,10 @@ public final class FingerprintBuilder {
                                long lastQty,
                                long bidPricePaise,
                                long askPricePaise) {
-        MessageDigest md = sha256();
+        // Cheap-dedup (C): reuse the per-thread digest — output-identical,
+        // no per-tick provider lookup. digest() resets, so no state leaks
+        // between calls.
+        MessageDigest md = DIGESTS.get();
         // canonical field order, big-endian, pipe-delimited
         writeLong(md, connectionEpoch);
         md.update(DELIM);
@@ -78,7 +100,8 @@ public final class FingerprintBuilder {
         writeLong(md, askPricePaise);
 
         byte[] digest = md.digest();
-        return new Result(HexFormat.of().formatHex(digest), FINGERPRINT_VERSION, ALGORITHM);
+        // Cheap-dedup (C): shared formatter — output-identical, no per-tick build.
+        return new Result(HEX.formatHex(digest), FINGERPRINT_VERSION, ALGORITHM);
     }
 
     /** Fingerprint result carrying hash, version, and algorithm metadata. */
@@ -105,13 +128,5 @@ public final class FingerprintBuilder {
     private static void writeStr(MessageDigest md, String s) {
         if (s == null) return;
         md.update(s.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static MessageDigest sha256() {
-        try {
-            return MessageDigest.getInstance(ALGORITHM);
-        } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("SHA-256 not available", e);
-        }
     }
 }

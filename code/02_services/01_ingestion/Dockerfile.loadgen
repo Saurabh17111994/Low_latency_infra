@@ -1,0 +1,64 @@
+# loadgen image — faketool (fake HFT broker) + arrow-bridge + ingestion JVM.
+#
+# WHY (2026-09-02, CHG-122): the load-test harness ran faketool, arrow-bridge
+# and the ingestion JVM as HOST processes talking to Fluss/Flink through the
+# published-port NAT hairpin. That hybrid made "is the environment clean?" a
+# manual audit and let host state contaminate captures. This image runs the
+# ENTIRE data path inside Docker on trading-net (policy: fully-containerized
+# infrastructure, enforced by guard G26 in pipeline-lib.sh).
+#
+# Same build contract as Dockerfile: context MUST be the Maven reactor root
+# `code/` (docker build -f 02_services/01_ingestion/Dockerfile.loadgen .).
+# Built via compose: docker compose ... build loadgen  (service is behind the
+# `loadgen` profile so `up` never starts it — pipeline-lib launches the two
+# containers per-run with `docker run`).
+#
+# No ENTRYPOINT on purpose: the run script selects the binary
+#   /app/faketool  (args: -port 8899 -real-rate -real-rate-hz N ...)
+#   java -cp /app/ingestion.jar com.trading.ingestion.IngestionService
+
+# Stage 1: Go arrow-bridge + faketool (SDK vendored in-repo)
+FROM golang:1.24-alpine AS go-builder
+WORKDIR /src
+COPY 02_services/01_ingestion/go-bridge/go.mod 02_services/01_ingestion/go-bridge/go.sum ./
+COPY 02_services/01_ingestion/go-bridge/third_party ./third_party
+RUN go mod download
+COPY 02_services/01_ingestion/go-bridge/*.go ./
+COPY 02_services/01_ingestion/go-bridge/marketdata ./marketdata
+RUN CGO_ENABLED=0 go build -o /arrow-bridge .
+# faketool is a build-tagged subpackage (//go:build faketool)
+COPY 02_services/01_ingestion/go-bridge/faketool ./faketool
+RUN CGO_ENABLED=0 go build -tags faketool -o /faketool ./faketool
+
+# Stage 2: Java ingestion (full reactor: parent + common + ingestion)
+FROM maven:3.9-eclipse-temurin-17 AS java-builder
+WORKDIR /src
+COPY pom.xml .
+COPY common ./common
+COPY 02_services/01_ingestion/pom.xml ./02_services/01_ingestion/pom.xml
+COPY 02_services/06_execution_gateway/pom.xml ./02_services/06_execution_gateway/pom.xml
+RUN mvn -q dependency:go-offline 2>/dev/null || true
+COPY 02_services/01_ingestion/src ./02_services/01_ingestion/src
+RUN mvn -q -DskipTests package -pl 02_services/01_ingestion -am
+
+# Stage 3: Runtime (JRE only — no maven, no go toolchain)
+# BUILD_STAMP (G27b): sha256 over the build inputs, passed by pipeline-lib
+# (env LOADGEN_BUILD_STAMP -> compose build arg). The preflight compares
+# it against a freshly computed hash — an image whose stamp mismatches
+# its sources is STALE and a run would measure old code. Content-based:
+# git checkout/touch with unchanged content does NOT false-positive
+# (the mtime-based first draft did, proven live 2026-09-02).
+FROM eclipse-temurin:17-jre
+ARG BUILD_STAMP=none
+WORKDIR /app
+RUN echo "$BUILD_STAMP" > /app/build-stamp
+COPY --from=go-builder /arrow-bridge /app/arrow-bridge
+COPY --from=go-builder /faketool /app/faketool
+COPY --from=java-builder /src/02_services/01_ingestion/target/ingestion.jar /app/ingestion.jar
+# In-container OTLP endpoint (same as the compose ingestion service). The
+# harness JVM runs without the javaagent by default — parity with the
+# pre-CHG-122 host launch, where OTEL_COLLECTOR_HOST=localhost:4319 pointed
+# at nothing and was a no-op.
+ENV OTEL_SERVICE_NAME=ingestion-loadgen \
+    OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+RUN chmod +x /app/arrow-bridge /app/faketool

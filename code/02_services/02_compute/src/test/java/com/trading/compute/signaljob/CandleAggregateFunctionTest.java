@@ -96,6 +96,28 @@ class CandleAggregateFunctionTest {
         assertEquals(4, merged.tickCount);
     }
 
+    @Test
+    void lastIngestTsTracksTheCloseSettingTick() {
+        CandleAccumulator acc = agg.createAccumulator();
+        // ingest_ts rides the row; close is set by the LATEST event-time row.
+        agg.add(TestRawRows.withIngestTs(trade(T0 + 1000, "fp-a", 100, 1), 1_000_000L), acc);
+        agg.add(TestRawRows.withIngestTs(trade(T0 + 5000, "fp-b", 105, 2), 5_000_000L), acc);
+        agg.add(TestRawRows.withIngestTs(trade(T0 + 9000, "fp-c", 107, 3), 9_000_000L), acc);
+
+        assertEquals(9_000_000L, acc.lastIngestTs); // the row that set closePaise
+    }
+
+    @Test
+    void lastIngestTsSurvivesMergeFromTheNewerPartial() {
+        CandleAccumulator a = agg.createAccumulator();
+        agg.add(TestRawRows.withIngestTs(trade(T0 + 1000, "fp-a", 100, 1), 1_000_000L), a);
+        CandleAccumulator b = agg.createAccumulator();
+        agg.add(TestRawRows.withIngestTs(trade(T0 + 9000, "fp-b", 107, 3), 9_000_000L), b);
+
+        CandleAccumulator merged = agg.merge(a, b);
+        assertEquals(9_000_000L, merged.lastIngestTs); // newer partial wins
+    }
+
     private static RowData trade(long eventTime, String fp, long price, long qty) {
         return TestRawRows.row(2885L, eventTime, fp, "TRADE", price, qty);
     }

@@ -9,7 +9,6 @@ import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.util.Collector;
-import org.apache.flink.util.Preconditions;
 
 /**
  * Fingerprint deduplication (Signal dossier operator 2, REQ-FC-003):
@@ -41,6 +40,11 @@ import org.apache.flink.util.Preconditions;
  * entries cap fails closed instead of silently evicting (eviction would
  * silently change repeat semantics); the window size is required,
  * range-validated config, never a silent default.
+ *
+ * <p><b>Cheap-dedup (A):</b> the per-tick waste is removed — the window bound
+ * is read once at {@code open()}, the window lookup uses get+put (no
+ * per-tick lambda allocation), and the guards are plain {@code if}+throw
+ * (messages built only on failure). Accept/drop behavior is unchanged.
  */
 public class FingerprintDedupFunction extends KeyedProcessFunction<Long, RowData, RowData> {
 
@@ -61,7 +65,9 @@ public class FingerprintDedupFunction extends KeyedProcessFunction<Long, RowData
 
         Window(int max) {
             super(Math.min(max * 2, 1 << 20), 0.75f, false);
-            Preconditions.checkArgument(max >= 1, "window max=%s", max);
+            if (max < 1) {
+                throw new IllegalArgumentException("window max=" + max);
+            }
             this.max = max;
         }
 
@@ -77,18 +83,27 @@ public class FingerprintDedupFunction extends KeyedProcessFunction<Long, RowData
     private final Map<Long, Window> windows = new HashMap<>();
     /** Guard counter (G-DEDUP-2): live entries across all windows. Resets with windows. */
     private long totalEntries;
+    /**
+     * Cheap-dedup (A): window bound cached at {@code open()} — the config
+     * value is fixed for the job, so re-reading it per tick is pure waste.
+     */
+    private int windowMax;
 
     private transient Counter firstEvents;
     private transient Counter duplicates;
 
     public FingerprintDedupFunction(SignalJobConfig config) {
-        this.config = Preconditions.checkNotNull(config);
+        if (config == null) {
+            throw new NullPointerException("config is required");
+        }
+        this.config = config;
     }
 
     @Override
     public void open(OpenContext openContext) {
         windows.clear();
         totalEntries = 0;
+        windowMax = config.dedupWindowEntries();
         firstEvents = getRuntimeContext().getMetricGroup().counter("compute.dedup.first");
         duplicates = getRuntimeContext().getMetricGroup().counter("compute.dedup.duplicates");
     }
@@ -99,8 +114,14 @@ public class FingerprintDedupFunction extends KeyedProcessFunction<Long, RowData
         // keyBy key (instrument token) via the per-key window.
         String fp = row.getString(RawTableColumns.FINGERPRINT_VERSION).toString()
                 + "|" + row.getString(RawTableColumns.EVENT_FINGERPRINT).toString();
-        int max = config.dedupWindowEntries();
-        Window w = windows.computeIfAbsent(ctx.getCurrentKey(), k -> new Window(max));
+        // Cheap-dedup (A): get+put instead of computeIfAbsent — same logic,
+        // no per-tick lambda allocation on the hot path.
+        int max = windowMax;
+        Window w = windows.get(ctx.getCurrentKey());
+        if (w == null) {
+            w = new Window(max);
+            windows.put(ctx.getCurrentKey(), w);
+        }
         int before = w.size();
         if (w.put(fp, Boolean.TRUE) != null) {
             duplicates.inc();
@@ -108,8 +129,12 @@ public class FingerprintDedupFunction extends KeyedProcessFunction<Long, RowData
         }
         // G-DEDUP-1: the bound is structural — an overgrown window means
         // trimming broke. Fail loud here, never grow into an OOM later.
-        Preconditions.checkState(w.size() <= max,
-                "dedup window overgrew bound: size=%s max=%s", w.size(), max);
+        // Cheap-dedup (A): plain if+throw — the message is built only on
+        // failure, not on every tick.
+        if (w.size() > max) {
+            throw new IllegalStateException(
+                    "dedup window overgrew bound: size=" + w.size() + " max=" + max);
+        }
         totalEntries++;
         if (w.size() == before) {
             // Insert displaced the eldest (self-trim): net entries unchanged.
@@ -117,9 +142,13 @@ public class FingerprintDedupFunction extends KeyedProcessFunction<Long, RowData
         }
         // G-DEDUP-2: global cap fails closed instead of silently evicting.
         // Eviction would silently change repeat semantics; a leak must shout.
-        Preconditions.checkState(totalEntries <= (long) max * GLOBAL_CAP_HEADROOM_TOKENS,
-                "dedup total entries %s exceeded cap %s — refusing silent eviction",
-                totalEntries, (long) max * GLOBAL_CAP_HEADROOM_TOKENS);
+        // Cheap-dedup (A): plain if+throw — same fail-closed, no per-tick
+        // varargs array + boxing on the hot path.
+        long cap = (long) max * GLOBAL_CAP_HEADROOM_TOKENS;
+        if (totalEntries > cap) {
+            throw new IllegalStateException("dedup total entries " + totalEntries
+                    + " exceeded cap " + cap + " — refusing silent eviction");
+        }
         firstEvents.inc();
         out.collect(row);
     }

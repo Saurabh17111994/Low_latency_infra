@@ -73,6 +73,13 @@ public class CandleAggregateFunction implements AggregateFunction<RowData, Candl
             acc.lastEventTime = eventTime;
             acc.lastFingerprint = fingerprint.toString();
             acc.closePaise = price;
+            // Latency probe: track the ingest time of the close-setting tick
+            // (same host clock as any downstream monitor — no skew; never
+            // written to an output row; observability only). Null-safe: a row
+            // without ingest_ts leaves the previous value untouched.
+            if (!row.isNullAt(RawTableColumns.INGEST_TS)) {
+                acc.lastIngestTs = row.getLong(RawTableColumns.INGEST_TS);
+            }
         }
 
         // tickType is only compared, never stored — compare StringData directly,
@@ -110,6 +117,7 @@ public class CandleAggregateFunction implements AggregateFunction<RowData, Candl
             a.lastEventTime = b.lastEventTime;
             a.lastFingerprint = b.lastFingerprint;
             a.closePaise = b.closePaise;
+            a.lastIngestTs = b.lastIngestTs;
         }
         a.highPaise = Math.max(a.highPaise, b.highPaise);
         a.lowPaise = Math.min(a.lowPaise, b.lowPaise);

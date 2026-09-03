@@ -39,4 +39,15 @@ public class CandleAccumulator implements Serializable {
     /** Order key of the window's latest event; close = its price. */
     public long lastEventTime = Long.MIN_VALUE;
     public String lastFingerprint;
+
+    /**
+     * Ingest wall-clock (raw {@code ingest_ts}) of the tick that set the
+     * window's close ({@code lastEventTime}). Observability only (latency
+     * probe): NOT written to any output row, NOT part of any table schema,
+     * never used by candle math. It rides the accumulator through the heap
+     * chain so a sink-side monitor can report
+     * {@code output_now - lastIngestTs} = age of the newest tick that formed
+     * the candle.
+     */
+    public long lastIngestTs;
 }

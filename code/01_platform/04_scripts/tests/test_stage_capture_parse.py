@@ -10,11 +10,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from stage_capture_parse import (  # noqa: E402
+    b2_custom_rest_report,
+    b2_closed_read_report,
     b2_consumer_read_report,
     b2_read_lag_report,
     compute_rates,
     divergence_report,
+    operator_custom_report,
     operator_series,
+    parse_prom_files,
     parse_stages_tsv,
     window_stats,
 )
@@ -182,3 +186,85 @@ def test_b2_reports_absent_files_degrade_with_note():
         ])
         assert "absent" in b2_read_lag_report(d, [(1000, 1030)])
         assert "absent" in b2_consumer_read_report(d, [(1000, 1030)])
+        assert "absent" in b2_closed_read_report(d, [(1000, 1030)])
+
+
+def test_b2_closed_read_report():
+    with tempfile.TemporaryDirectory() as td:
+        d = write_fixture(Path(td), [
+            "1000\tv1\tSource: raw-table-1\t0\t0\t0\t0\t0",
+        ])
+        (d / "closed-read.tsv").write_text(
+            "epoch_ms\ttoken\twindow_start\toutput_ts\tlast_event_ts\tstaleness_ms\n"
+            + "".join(f"{1010000+i}\t4\t5000\t{1010000+i-305}\t{1010000+i-305}\t305\n"
+                      for i in range(10)), encoding="utf-8")
+        out = b2_closed_read_report(d, [(1000, 1030)])
+        lines = out.splitlines()
+        assert lines[0].startswith("window\tclosed_p50_ms\tclosed_p95_ms\t"
+                                   "closed_p99_ms\tsamples")
+        body = lines[1].split("\t")
+        assert body[1] == "305", body   # injected closed-row staleness
+        assert body[3] == "305", body   # p99 = same constant staleness
+        assert body[4] == "10", body
+
+
+def test_b2_custom_rest_report():
+    """2026-09-04: custom operator counters arrive via the Flink REST
+    per-vertex metrics endpoint (custom-rest.tsv) because the TM Prometheus
+    reporter exports operator-scope metrics HELP-only on Flink 2.2.1. The
+    report must surface the newest cumulative counter per window."""
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "custom-rest.tsv").write_text(
+            "epoch_ms\tvertex_id\toperator\tmetric\tsum\n"
+            "1001\tv1\tfingerprint-dedup\tcompute.dedup.duplicates\t5\n"
+            "1002\tv1\tfingerprint-dedup\tcompute.dedup.duplicates\t7\n"
+            "1001\tv2\tcandle-15s\tcompute.candles.emitted\t3\n",
+            encoding="utf-8",
+        )
+        out = b2_custom_rest_report(d, [(1000, 1030)])
+        assert "compute.dedup.duplicates" in out
+        assert "fingerprint-dedup" in out
+        assert "\t7" in out, "newest cumulative value per window wins"
+        assert "compute.candles.emitted" in out
+        assert "1000-1030" in out
+
+
+def test_b2_custom_rest_absent_file_degrades_with_note():
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        out = b2_custom_rest_report(d, [(1000, 1030)])
+        assert "none captured" in out
+
+
+def test_operator_custom_report():
+    with tempfile.TemporaryDirectory() as td:
+        d = Path(td)
+        (d / "prom-1000.txt").write_text("\n".join([
+            # counter family, two subtasks -> sum 8
+            'flink_taskmanager_job_task_operator_compute_dedup_duplicates{'
+            'job_id="x",task_name="fingerprint_dedup",subtask_index="0",} 3.0',
+            'flink_taskmanager_job_task_operator_compute_dedup_duplicates{'
+            'job_id="x",task_name="fingerprint_dedup",subtask_index="1",} 5.0',
+            # histogram family, quantile line
+            'flink_taskmanager_job_task_operator_compute_latency_'
+            'ingest_to_candle_close{job_id="x",task_name="candle_15s",'
+            'subtask_index="0",quantile="0.5",} 42.0',
+            # unrelated system family must not be captured
+            'flink_taskmanager_job_task_busyTimeMsPerSecond{job_id="x",'
+            'task_name="candle_15s",subtask_index="0",} 100.0',
+            # watermark operator family must not be captured
+            'flink_taskmanager_job_task_operator_split_watermark_'
+            'currentWatermark{split="log_1",job_id="x",task_name="src",'
+            'subtask_index="0",} 42.0',
+        ]) + "\n", encoding="utf-8")
+        samples = parse_prom_files(d)
+        out = operator_custom_report(samples, [(1000, 1030)])
+        lines = out.splitlines()
+        assert lines[0] == "metric\twindow\tlast_val"
+        assert any(l.startswith("compute_dedup_duplicates\t1000-1030\t8")
+                   for l in lines), lines   # summed across subtasks
+        assert any(l.startswith("compute_latency_ingest_to_candle_close[q0.5]"
+                                "\t1000-1030\t42") for l in lines), lines
+        assert not any("busyTimeMsPerSecond" in l for l in lines), lines
+        assert not any("currentWatermark" in l for l in lines), lines

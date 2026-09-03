@@ -89,6 +89,8 @@ public class HeapCandleEmitFunction extends KeyedProcessFunction<Long, RowData, 
     private transient Counter emittedCounter;
     private transient Counter lateUpdateCounter;
     private transient Counter restoredTimerNoopCounter;
+    /** Step-2 latency probe: age of the newest tick in each closed candle. */
+    private transient org.apache.flink.metrics.Histogram outputLatency;
 
     public HeapCandleEmitFunction(SignalJobConfig config) {
         this.config = Preconditions.checkNotNull(config);
@@ -104,6 +106,9 @@ public class HeapCandleEmitFunction extends KeyedProcessFunction<Long, RowData, 
         restoredTimerNoopCounter = getRuntimeContext()
                 .getMetricGroup()
                 .counter("compute.candles.restored_timer_noop");
+        outputLatency = getRuntimeContext().getMetricGroup().histogram(
+                "compute.latency.ingest_to_candle_close",
+                LatencyHistograms.create());
     }
 
     @Override
@@ -260,6 +265,11 @@ public class HeapCandleEmitFunction extends KeyedProcessFunction<Long, RowData, 
             return;
         }
         emittedCounter.inc();
+        // Step-2: report the age of the newest tick that formed this candle
+        // (acc.lastIngestTs rides the accumulator, observability only).
+        if (acc.lastIngestTs > 0) {
+            outputLatency.update(now - acc.lastIngestTs);
+        }
         out.collect(CandleEmitFunction.buildRow(token, acc, window, now, config));
     }
 

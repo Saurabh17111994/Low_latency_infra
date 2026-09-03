@@ -71,6 +71,8 @@ public class HeapPreviewFunction extends KeyedProcessFunction<Long, RowData, Row
     private transient Counter previewCounter;
     private transient Counter lateDroppedCounter;
     private transient Counter restoredTimerNoopCounter;
+    /** Step-2 latency probe: age of the newest tick in each preview row. */
+    private transient org.apache.flink.metrics.Histogram outputLatency;
 
     public HeapPreviewFunction(SignalJobConfig config) {
         this.config = Preconditions.checkNotNull(config);
@@ -97,6 +99,9 @@ public class HeapPreviewFunction extends KeyedProcessFunction<Long, RowData, Row
         restoredTimerNoopCounter = getRuntimeContext()
                 .getMetricGroup()
                 .counter("compute.candles.previews.restored_timer_noop");
+        outputLatency = getRuntimeContext().getMetricGroup().histogram(
+                "compute.latency.ingest_to_preview",
+                LatencyHistograms.create());
     }
 
     @Override
@@ -161,6 +166,11 @@ public class HeapPreviewFunction extends KeyedProcessFunction<Long, RowData, Row
         long wEnd = w + windowMs;
         TimeWindow window = new TimeWindow(w, wEnd);
         previewCounter.inc();
+        // Step-2: report the age of the newest tick that formed this preview
+        // (acc.lastIngestTs rides the accumulator, observability only).
+        if (acc.lastIngestTs > 0) {
+            outputLatency.update(ctx.timerService().currentProcessingTime() - acc.lastIngestTs);
+        }
         out.collect(CandlePreviewEmitFunction.buildRow(ctx.getCurrentKey(), acc, window,
                 ctx.timerService().currentProcessingTime(), config));
         if (timestamp >= wEnd) {

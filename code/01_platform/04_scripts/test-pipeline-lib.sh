@@ -156,10 +156,14 @@ if grep -q 'ARROW_INSTRUMENT_TOKENS=' "$LIB"; then
 else
     ok "G9 pipeline-lib does not pass ARROW_INSTRUMENT_TOKENS (G3 handoff owns it)"
 fi
-if grep -q 'INSTRUMENT_MANIFEST_PATH="\$LIB_MANIFEST_SLICE"' "$LIB"; then
-    ok "G9 pipeline-lib hands Java the manifest SLICE (single token set)"
+# CHG-122: the JVM runs in a container; $OUT (which HOLDS the slice) is
+# bind-mounted at /run, so the in-container path IS the slice. Intent kept:
+# never the full CSV, always the 1024-token slice.
+if grep -q 'INSTRUMENT_MANIFEST_PATH=/run/instruments-1024.csv' "$LIB" \
+    && ! grep -q 'INSTRUMENT_MANIFEST_PATH="\$LIB_MANIFEST"' "$LIB"; then
+    ok "G9 pipeline-lib hands Java the manifest SLICE (in-container /run/instruments-1024.csv = the slice)"
 else
-    bad "G9 INSTRUMENT_MANIFEST_PATH must point at \$LIB_MANIFEST_SLICE, not the full CSV"
+    bad "G9 INSTRUMENT_MANIFEST_PATH must point at the 1024 SLICE, not the full CSV"
 fi
 HM="$SCRIPT_DIR/holistic-measure.sh"
 grep -q 'fingerprint_gate' "$HM" \
@@ -338,19 +342,23 @@ grep -q 'PIPELINE_PREFLIGHT_OK=0' "$PL" \
 # one day destroyed data (torn Fluss segments -> tablet crash-loop) and left
 # orphan processes (a stray faketool had to be killed by hand), these guards
 # make recovery deterministic:
-#   (a) preflight kills stray ingestion JVMs (twin of the stray-faketool kill)
+#   (a) preflight detects stray ingestion JVMs and FAILS the run (CHG-122:
+#       G26 host-isolation policy replaced the old silent auto-kill)
 #   (b) repair-tablet.sh --all sweep exists (one-command recovery), with
 #       policy pinning + final crash-loop check that fails the sweep
 #   (c) measurement runners refuse to start on a freshly-booted host
 echo "---"
 echo "G20 power-cut resilience guards"
 
-grep -q 'pgrep -f "com.trading.ingestion.IngestionService"' "$PL" \
-  && ok "G20a preflight kills stray ingestion JVM" \
-  || bad "G20a stray-ingestion kill MISSING in preflight"
-grep -q 'kill -9 "$p" 2>/dev/null || true' "$PL" \
-  && ok "G20a stray kills are non-fatal (best-effort)" \
-  || bad "G20a stray kill not best-effort"
+grep -q "pgrep -f 'com.trading.ingestion.IngestionService'" "$PL" \
+  && ok "G20a preflight detects stray ingestion JVM (G26 policy guard)" \
+  || bad "G20a stray-ingestion detection MISSING in preflight"
+# CHG-122 (2026-09-02): strays are a POLICY VIOLATION now - fail the run
+# with the reason instead of silently killing (auto-kill hid the incident
+# class that poisoned baselines).
+grep -q 'POLICY VIOLATION' "$PL" \
+  && ok "G20a host strays FAIL the run with the reason (CHG-122 policy)" \
+  || bad "G20a stray handling lost its fail-fast reason"
 
 repair="$SCRIPT_DIR/fluss-repair/repair-tablet.sh"
 bash -n "$repair" || { bad "G20b repair-tablet.sh syntax invalid"; exit 1; }
@@ -436,6 +444,33 @@ grep -q 'net_lag_p99_records' "$parse" \
   && ok "G21f B2 reports carry p99 columns (read-lag + consumer-read)" \
   || bad "G21f B2 reports missing p99 columns"
 
+# ---- G21g (2026-09-04): measurement-facility fixes for the 48k/s e2e --------
+# 1. Flink scrape keeps custom operator metrics (compute.*) — the old filter
+#    listed only the seven system families, so the latency/dedup scorecard
+#    was blank for every custom counter/histogram.
+# 2. Closed feature-candle table probe (feature_candles_15s) + parser report.
+# 3. Bridge tick-counts drained before container cleanup (ING-TCP-001).
+# 4. OTLP payload local-capture env gate (METRICS_LOCAL_LOG) wired by the
+#    soak runner so ingestion.tsv has rows even with a healthy collector.
+echo "---"
+echo "G21g 48k e2e measurement facilities"
+grep -qE '_operator_|operator_.*compute' "$cap" \
+  && ok "G21g scrape keeps custom operator metrics" \
+  || bad "G21g custom-operator scrape filter MISSING"
+grep -q 'PROBE_CLOSED_TABLE\|feature_candles_15s"' "$cap" \
+  && grep -q 'closed-read.tsv' "$cap" \
+  && ok "G21g closed-table probe wired (closed-read.tsv)" \
+  || bad "G21g closed-table probe MISSING"
+grep -q 'def b2_closed_read_report' "$parse" \
+  && ok "G21g parser reads closed-read.tsv" \
+  || bad "G21g closed-read parser report MISSING"
+grep -q 'tick-counts.txt\|arrow-tick-counts' "$SCRIPT_DIR/stage-soak-e2e.sh" \
+  && ok "G21g soak drains bridge tick-counts pre-cleanup" \
+  || bad "G21g tick-counts drain MISSING"
+grep -q 'METRICS_LOCAL_LOG=1' "$SCRIPT_DIR/stage-soak-e2e.sh" \
+  && ok "G21g soak enables OTLP local payload capture" \
+  || bad "G21g METRICS_LOCAL_LOG wiring MISSING"
+
 
 # ---- G22/G23/G24 (2026-09-02): FLINK_PROPERTIES + TM-config fail-fast ----
 # Two silent failure classes hit in one day:
@@ -492,6 +527,157 @@ grep -q "G24" "$runner" \
 grep -q "CHG-120" "$runner" \
   && ok "G24b G24 failure names the degradation class + the config to check" \
   || bad "G24b G24 failure lost its reason"
+
+echo "G26 host-isolation policy (CHG-122: fully-Docker data path)"
+
+# G26a: NO host launch paths remain in the lib — faketool must not be built
+# or executed on the host, and the ingestion JVM must not be a host `java`.
+grep -q 'go build .*faketool' "$lib" \
+  && bad "G26a host `go build` of faketool still present" \
+  || ok "G26a no host faketool build"
+grep -qE '"\$OUT/bin/faketool"' "$lib" \
+  && bad "G26a host faketool binary launch still present" \
+  || ok "G26a no host faketool launch"
+grep -q -- '-cp /app/ingestion.jar com.trading.ingestion.IngestionService' "$lib" \
+  && ! grep -q -- '-cp "$LIB_ING_JAR"' "$lib" \
+  && ok "G26a ingestion runs from the IMAGE jar (/app/ingestion.jar), never the host jar path" \
+  || bad "G26a ingestion JVM still launched on the host"
+
+# G26b: both loadgen components are docker-run on the shared network
+grep -q 'docker run -d --name "$LIB_FAKETOOL_CONTAINER"' "$lib" \
+  && grep -q 'docker run -d --name "$LIB_INGESTION_CONTAINER"' "$lib" \
+  && grep -q -- '--network "$LIB_TRADING_NET"' "$lib" \
+  && ok "G26b faketool + ingestion launch as containers on $LIB_TRADING_NET" \
+  || bad "G26b container launch missing/wrong network"
+grep -q 'ARROW_HFT_URL="ws://$LIB_FAKETOOL_CONTAINER:$FAKETOOL_PORT"' "$lib" \
+  && grep -q 'FLUSS_BOOTSTRAP=fluss-coordinator:9123' "$lib" \
+  && ok "G26b endpoints use in-network DNS names (no localhost NAT hairpin)" \
+  || bad "G26b endpoint still points at localhost"
+
+# G26c: the policy guard itself — host data-path processes fail the run
+# WITH the reason (policy violation, not auto-kill)
+grep -q "pgrep -x faketool" "$lib" \
+  && grep -q "pgrep -f 'com.trading.ingestion.IngestionService'" "$lib" \
+  && grep -q "POLICY VIOLATION" "$lib" \
+  && ok "G26c host data-path processes fail preflight with the reason" \
+  || bad "G26c host-process policy guard missing or lost its reason"
+
+# G26d: stale loadgen containers + network-mismatch fail with reasons
+grep -q "stale loadgen container" "$lib" \
+  && ok "G26d stale container collision fails with reason" \
+  || bad "G26d stale-container guard missing"
+grep -q "cross-network DNS failure" "$lib" \
+  && ok "G26d TM-network mismatch fails with reason (zero-append class)" \
+  || bad "G26d network-mismatch guard missing"
+
+# G26e: cleanup removes containers, not host PIDs
+grep -q 'docker rm -f "$LIB_INGESTION_CONTAINER" "$LIB_FAKETOOL_CONTAINER"' "$lib" \
+  && ok "G26e cleanup removes the loadgen containers" \
+  || bad "G26e cleanup does not remove containers"
+grep -q 'kill -9 "$JVM_PID"' "$lib" \
+  && bad "G26e cleanup still kills host PIDs" \
+  || ok "G26e no host-PID kills in cleanup"
+
+# G26f: compose gates the loadgen service behind a profile (never started
+# by `up`) and pins the image tag the lib expects
+compose="$ROOT/code/01_platform/01_docker/docker-compose.yml"
+grep -q 'profiles: \["loadgen"\]' "$compose" \
+  && ok "G26f loadgen compose service is profile-gated" \
+  || bad "G26f loadgen service would start with plain `up`"
+grep -q 'image: pipeline-loadgen:1.0.0' "$compose" \
+  && ok "G26f compose pins the image tag the lib expects" \
+  || bad "G26f image tag mismatch vs pipeline-lib.sh"
+
+echo "G27 loadgen image verification (user request 2026-09-02: always the Docker image, always tested)"
+
+# G27 is called by preflight BEFORE any run uses the image.
+grep -q "pipeline_verify_loadgen_image || return 1" "$lib" \
+  && ok "G27 preflight calls the image verification" \
+  || bad "G27 preflight never verifies the loadgen image"
+
+grep -q "test -x /app/faketool" "$lib" \
+  && grep -q "missing its artifacts" "$lib" \
+  && ok "G27a missing-artifact failure names WHY (foreign/corrupt tag) + rebuild command" \
+  || bad "G27a artifact check missing or lost its reason"
+
+grep -q "STALE" "$lib" \
+  && grep -q "bogus baseline" "$lib" \
+  && grep -q "Dockerfile.loadgen" "$lib" \
+  && ok "G27b stale-image failure names the build inputs + WHY (measuring old code)" \
+  || bad "G27b freshness check missing or lost its reason"
+
+grep -q "red harness" "$lib" \
+  && grep -q "g27-guard-run.log" "$lib" \
+  && ok "G27c red-guard-suite failure refuses the run with evidence path" \
+  || bad "G27c harness-green gate missing or lost its reason"
+
+# G27 must be fail-closed on every branch: each failure returns 1.
+n_g27_ret="$(sed -n '/pipeline_verify_loadgen_image() {/,/^}/p' "$lib" | grep -c 'return 1')"
+[ "$n_g27_ret" -ge 3 ] \
+  && ok "G27 all $n_g27_ret failure branches return 1 (fail-closed)" \
+  || bad "G27 a failure branch does not return 1 (would fall through)"
+
+echo "G28 observability bundle (2026-09-02 decline hunt: io latency + checkpoint alignment + RocksDB + O2 single-pane)"
+
+# G28a: io-latency probe exists, parses, and fails LOUD when iostat is absent
+probe="$SCRIPT_DIR/io-latency-probe.sh"
+[ -x "$probe" ] && bash -n "$probe" \
+  && ok "G28a io-latency-probe.sh present + parses" \
+  || bad "G28a io-latency-probe.sh missing or fails bash -n"
+grep -q "this probe is the per-op latency evidence source" "$probe" \
+  && ok "G28a iostat-absent failure names WHY" \
+  || bad "G28a iostat-absent failure lost its reason"
+grep -q 'colmap\["r_await"\]' "$probe" \
+  && ok "G28a probe parses iostat BY HEADER (fixed indices were the 2121ms bug)" \
+  || bad "G28a probe reverted to fixed-index parsing (sysstat-version fragile)"
+
+# G28b: o2_ingest refuses bad input with reasons
+o2i="$SCRIPT_DIR/o2_ingest.py"
+[ -f "$o2i" ] && python3 -c "import ast; ast.parse(open('$o2i').read())" \
+  && ok "G28b o2_ingest.py present + parses" \
+  || bad "G28b o2_ingest.py missing or syntax error"
+out="$(printf '' | python3 "$o2i" somestream 2>&1)"; rc=$?
+[ "$rc" -eq 5 ] \
+  && ok "G28b empty stdin -> exit 5 (nothing to do)" \
+  || bad "G28b empty stdin should exit 5, got $rc: $out"
+
+# G28c: stage-capture runs the probe and captures checkpoint alignment
+cap="$SCRIPT_DIR/stage-capture.sh"
+bash -n "$cap" \
+  && ok "G28c stage-capture.sh still parses after wiring" \
+  || bad "G28c stage-capture.sh syntax broken"
+grep -q "io-latency-probe.sh" "$cap" \
+  && grep -q "alignment_duration" "$cap" \
+  && grep -q "o2_ingest.py" "$cap" \
+  && ok "G28c capture wires probe + alignment fields + O2 push" \
+  || bad "G28c capture lost the io probe / alignment / O2 wiring"
+grep -q "DEGRADED" "$cap" \
+  && ok "G28c probe failure is a LOUD warn, never silent" \
+  || bad "G28c probe failure no longer warns"
+
+# G28d: compose exposes the RocksDB compaction/flush/SST families
+compose="$ROOT/code/01_platform/01_docker/docker-compose.yml"
+for key in num-running-compactions compaction-pending num-running-flushes \
+           estimate-num-keys total-sst-files-size estimate-live-data-size \
+           size-all-mem-tables num-entries-active-mem-table num-immutable-mem-table \
+           estimate-pending-compaction-bytes num-live-versions \
+           cur-size-active-mem-table num-entries-immutable-mem-table \
+           block-cache-pinned-usage; do
+  grep -q "state.backend.rocksdb.metrics.$key" "$compose" \
+    && ok "G28d rocksdb metric toggle present: $key" \
+    || bad "G28d rocksdb metric toggle missing: $key"
+done
+
+# G28e: fused timeline tool refuses without a window, with a reason
+ft="$SCRIPT_DIR/fused_timeline.py"
+[ -f "$ft" ] && python3 -c "import ast; ast.parse(open('$ft').read())" \
+  && ok "G28e fused_timeline.py present + parses" \
+  || bad "G28e fused_timeline.py missing or syntax error"
+mkdir -p /tmp/g28-empty-cap
+out="$(python3 "$ft" --capture /tmp/g28-empty-cap 2>&1)"; rc=$?
+[ "$rc" -eq 3 ] \
+  && ok "G28e no-window refusal -> exit 3 with reason" \
+  || bad "G28e no-window should exit 3, got $rc: $out"
 
 echo "---"
 echo "guards: $pass passed, $fail failed"

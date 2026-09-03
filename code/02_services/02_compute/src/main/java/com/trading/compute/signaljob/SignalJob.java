@@ -228,6 +228,20 @@ public final class SignalJob {
                 // no-allowNonRestoredState rule — clean start required.
                 .uid("fingerprint-dedup-v2");
 
+        // Step-2 latency observability (2026-09-03): per-tick exact age.
+        // Non-keyed identity map on the deduped stream — sees every accepted
+        // tick exactly once, no redistribution, records ingest_ts -> now into
+        // compute.latency.ingest_to_monitor (histogram, all ticks). No state,
+        // no output change. Restoring a pre-monitor checkpoint is safe (the
+        // operator holds no state and the uid is new only to avoid
+        // false-mapping a vanished operator — actually a NEW operator slot is
+        // created on restore with zero state, which is fine).
+        DataStream<RowData> monitored = deduped
+                .map(new IngestLatencyMonitorFunction())
+                .returns(ticks.getType())
+                .name("ingest-latency-monitor")
+                .uid("ingest-latency-monitor");
+
         // Chain-heap redesign (2026-09-03 plan, OP4): the tumbling window +
         // aggregate + emit operator did 2-3 RocksDB touches per tick (46.5%
         // busy at 4.9 k/s). HeapCandleEmitFunction keeps the same
@@ -235,7 +249,7 @@ public final class SignalJob {
         // accumulation math, the same quarantine gate and the same late-drop
         // leg — only the window state moved to the heap (see its javadoc
         // for the one documented fresh-slot edge).
-        SingleOutputStreamOperator<RowData> candles = deduped
+        SingleOutputStreamOperator<RowData> candles = monitored
                 .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
                 .process(new HeapCandleEmitFunction(config))
                 .returns(CandleTableColumns.ROW_TYPE_INFO)
@@ -269,7 +283,7 @@ public final class SignalJob {
             // feeds signal detection) — only the accumulation moved to the
             // heap; late ticks now drop loudly instead of resurrecting a
             // purged window (see its javadoc).
-            previews = deduped
+            previews = monitored
                     .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
                     .process(new HeapPreviewFunction(config))
                     .returns(CandlePreviewColumns.ROW_TYPE_INFO)
@@ -408,7 +422,7 @@ public final class SignalJob {
         //        └── (existing) keyBy(token) ── window ── candle sink / SignalDetection
         //   FormingBarBuilder ── connect(candles) ── FormingBarDetection ── union ──
         //        existing signal LOG + KV dual-sink (REQ-SS-003 + DEC-035)
-        SingleOutputStreamOperator<FormingBar> formingBars = deduped
+        SingleOutputStreamOperator<FormingBar> formingBars = monitored
                 .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
                 .process(new FormingBarBuilderFunction(config))
                 .returns(FormingBarTypeInfo.INSTANCE)

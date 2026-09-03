@@ -44,8 +44,7 @@ source "$SCRIPT_DIR/pipeline-lib.sh"
 pipeline_install_cleanup_trap
 
 JOB_ID=""
-JVM_PID=""
-FAKETOOL_PID=""
+# CHG-122: data path is containers now - no host PIDs to track
 
 fatal() {
   echo "STAGE-A2: FAIL — $*" >&2
@@ -93,6 +92,13 @@ pipeline_preflight || fatal "pipeline preflight failed"
 
 # --- Fresh tables (no backlog replay → measures steady state only) ---
 pipeline_purge_raw_table || fatal "raw table purge failed"
+# CHG-121 table (2026-09-02 catalog-wipe recovery): the DDL apply contract
+# deliberately skips Signal_Tentative_Markers (job is sole writer; the
+# runner owns creation). tm-kill-full-load.sh always ensured it; this
+# runner relied on it surviving in ZK forever — true until the first
+# full-stack bounce wiped the catalog and the job crash-looped on
+# TableNotExist at open. Ensure it here, same designed create-if-absent.
+pipeline_ensure_tentative_markers_table || fatal "tentative-markers table ensure failed"
 pipeline_start_faketool || fatal "faketool start failed"
 pipeline_start_ingestion || fatal "ingestion start failed"
 pipeline_purge_preview_table || fatal "preview table purge failed"
@@ -140,6 +146,34 @@ JOB_ID="$JOB_ID" DURATION_S="$DURATION_S" \
   FLUSS_PROBE_CP="$CP" \
   OUT_DIR="$PHASE_OUT/stages" \
   bash "$SCRIPT_DIR/stage-capture.sh" || fatal "stage capture failed"
+
+# --- G25 (2026-09-02): throughput-floor fail-fast --------------------------
+# 2026-09-02 incident class: four successive 20Hz captures each exited PASS
+# while the pipeline was silently degraded (source 19.8k -> 7.3k -> 5.4k ->
+# 3.9k -> 3.4k/s against a 20,480/s feed; every keyed operator's per-record
+# cost ~3x). The failure only surfaced in manual analysis AFTER burning the
+# run. A capture whose source cannot sustain at least SOURCE_RATE_FLOOR_PCT
+# (default 80%) of the feed rate is a POISONED BASELINE, not evidence -
+# fail it, with the numbers and the likely classes to check.
+floor_pct="${SOURCE_RATE_FLOOR_PCT:-80}"
+expected_rate=$((RATE_HZ * 1024))
+src_avg="$(python3 - "$PHASE_OUT/stages/stages.tsv" <<'PYCALC'
+import csv, sys
+rows = [r for r in csv.reader(open(sys.argv[1]), delimiter="\t")
+        if len(r) > 4 and "raw-validation" in r[2] and r[4]]
+rows.sort(key=lambda r: int(r[0]))
+if len(rows) < 2:
+    print(0); sys.exit(0)
+dt = int(rows[-1][0]) - int(rows[0][0])
+dout = int(rows[-1][4]) - int(rows[0][4])
+print(dout // dt if dt > 0 else 0)
+PYCALC
+)"
+floor_rate=$((expected_rate * floor_pct / 100))
+if [ "${src_avg:-0}" -lt "$floor_rate" ]; then
+  fatal "G25: source avg ${src_avg}/s is below ${floor_pct}% of the ${expected_rate}/s feed (floor ${floor_rate}/s) - the capture is a POISONED BASELINE, refusing to bless it. Likely classes: (1) RocksDB state silently misplaced (check G23/G24 lines in run.log above), (2) cumulative per-run degradation (2026-09-02: monotonic decline across runs 19.8k->3.4k, root cause then under investigation - see plan evolution log), (3) a new limiter (compare per-operator busy/per-record cost against the last good capture). Evidence: $PHASE_OUT/stages/stages.tsv"
+fi
+echo "STAGE-A2: G25 OK - source avg ${src_avg}/s >= ${floor_rate}/s (${floor_pct}% of feed)"
 
 echo "STAGE-A2: capture complete — evidence at $PHASE_OUT"
 ls -la "$PHASE_OUT/stages"

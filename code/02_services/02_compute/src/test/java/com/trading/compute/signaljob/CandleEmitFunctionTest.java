@@ -113,11 +113,13 @@ class CandleEmitFunctionTest {
                 .toList();
         assertEquals(List.of(
                         "closePaise", "exchange", "firstEventTime", "firstFingerprint",
-                        "highPaise", "lastEventTime", "lastFingerprint", "lowPaise",
+                        "highPaise", "lastEventTime", "lastFingerprint", "lastIngestTs", "lowPaise",
                         "openPaise", "symbol", "tickCount", "volume"),
                 fieldNames,
                 "active candle state must be exactly the compact scalar field set — adding a tick "
-                        + "list/collection breaks the no-tick-collection rule (SIG-UNIT-009)");
+                        + "list/collection breaks the no-tick-collection rule (SIG-UNIT-009); "
+                        + "lastIngestTs is the deliberate step-2 latency probe (2026-09-03) — a "
+                        + "scalar long, observability only, never an output column");
 
         for (Field f : CandleAccumulator.class.getDeclaredFields()) {
             if (Modifier.isStatic(f.getModifiers())) {

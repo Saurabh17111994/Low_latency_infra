@@ -64,4 +64,9 @@ final class TestRawRows {
         ((GenericRowData) base).setField(RawTableColumns.EVENT_TIME, eventTime);
         return base;
     }
+
+    static RowData withIngestTs(RowData base, long ingestTs) {
+        ((GenericRowData) base).setField(RawTableColumns.INGEST_TS, ingestTs);
+        return base;
+    }
 }

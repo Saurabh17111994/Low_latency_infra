@@ -10,8 +10,16 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.Layout;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.LoggerContext;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Configuration;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -23,6 +31,126 @@ import org.junit.jupiter.api.Test;
  */
 @DisplayName("ING-UNIT-012: slot + resource metrics")
 class OtlpMetricsEmitterTest {
+
+    // ---- log4j2 capture (same minimal AbstractAppender as
+    // BridgeShutdownRegressionTest) — pins the harness-facing
+    // `otlp-metrics-payload:` line that stage-capture.sh tails. ----
+
+    static final class CapturingAppender extends AbstractAppender {
+        final List<String> messages = new CopyOnWriteArrayList<>();
+
+        CapturingAppender(String name) {
+            super(name, null, (Layout<?>) null);
+        }
+
+        @Override
+        public void append(LogEvent event) {
+            messages.add(event.getMessage() == null
+                    ? "" : event.getMessage().getFormattedMessage());
+        }
+    }
+
+    private static CapturingAppender attachLogCapture(String name) {
+        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+        Configuration cfg = ctx.getConfiguration();
+        CapturingAppender appender = new CapturingAppender(name);
+        appender.start();
+        cfg.getRootLogger().addAppender(appender, null, null);
+        ctx.updateLoggers();
+        return appender;
+    }
+
+    private static void detachLogCapture(CapturingAppender appender) {
+        LoggerContext ctx = (LoggerContext) LogManager.getContext(false);
+        Configuration cfg = ctx.getConfiguration();
+        cfg.getRootLogger().removeAppender(appender.getName());
+        ctx.updateLoggers();
+        appender.stop();
+    }
+
+    /**
+     * METRICS_LOCAL_LOG=1 (soak harness): every flush also emits
+     * {@code otlp-metrics-payload: <json>} even when the collector is
+     * healthy, so stage-capture.sh's ingestion.tsv leg has data to tail.
+     * Default off — the env gate must not change normal log volume.
+     */
+    @Test
+    @DisplayName("METRICS_LOCAL_LOG=1 logs the payload on a healthy-path flush")
+    void localLogEmitsPayloadOnSuccess() throws Exception {
+        // Minimal HTTP collector: answers 200 to any POST so the emitter
+        // takes the healthy flush path (payload logging only happens there
+        // when localLogEnabled; the failure path always logs).
+        com.sun.net.httpserver.HttpServer server =
+                com.sun.net.httpserver.HttpServer.create(
+                        new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/", exchange -> {
+            try (java.io.InputStream body = exchange.getRequestBody()) {
+                body.readAllBytes();
+            }
+            byte[] ok = "{}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, ok.length);
+            try (java.io.OutputStream os = exchange.getResponseBody()) {
+                os.write(ok);
+            }
+        });
+        server.start();
+        try {
+            String hostPort = "127.0.0.1:" + server.getAddress().getPort();
+
+            // Flag ON: payload line must appear after a healthy flush.
+            CapturingAppender cap = attachLogCapture("localLogCapture");
+            OtlpMetricsEmitter on = new OtlpMetricsEmitter(hostPort, "test-instance", true);
+            try {
+                on.recordTick(100);
+                on.forceFlush();
+                assertTrue(cap.messages.stream().anyMatch(
+                                m -> m.startsWith("otlp-metrics-payload: {")),
+                        "METRICS_LOCAL_LOG=1 must log the payload on a healthy flush");
+            } finally {
+                on.close();
+                detachLogCapture(cap);
+            }
+
+            // Flag OFF (default): healthy flush logs NO payload line.
+            CapturingAppender cap2 = attachLogCapture("localLogCapture2");
+            OtlpMetricsEmitter off = new OtlpMetricsEmitter(hostPort, "test-instance", false);
+            try {
+                off.recordTick(100);
+                off.forceFlush();
+                assertFalse(cap2.messages.stream().anyMatch(
+                                m -> m.startsWith("otlp-metrics-payload:")),
+                        "default must not log the payload on a healthy flush (log volume)");
+            } finally {
+                off.close();
+                detachLogCapture(cap2);
+            }
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /**
+     * Regression (observed 2026-09-04 soak): the harness exports
+     * {@code METRICS_LOCAL_LOG=1} and Boolean.parseBoolean("1") is false —
+     * the flag silently stayed OFF and no payload lines appeared even
+     * though flushes succeeded. The env parse must accept "1" and "true".
+     */
+    @Test
+    @DisplayName("METRICS_LOCAL_LOG env parse accepts 1 and true, rejects 0/absent")
+    void parseLocalLogEnvAcceptsOneAndTrue() {
+        assertTrue(OtlpMetricsEmitter.parseLocalLogEnv("1"),
+                "METRICS_LOCAL_LOG=1 must enable local logging");
+        assertTrue(OtlpMetricsEmitter.parseLocalLogEnv("true"),
+                "METRICS_LOCAL_LOG=true must enable local logging");
+        assertTrue(OtlpMetricsEmitter.parseLocalLogEnv("TRUE"),
+                "parse must be case-insensitive for true");
+        assertFalse(OtlpMetricsEmitter.parseLocalLogEnv("0"),
+                "METRICS_LOCAL_LOG=0 must stay off");
+        assertFalse(OtlpMetricsEmitter.parseLocalLogEnv("false"),
+                "METRICS_LOCAL_LOG=false must stay off");
+        assertFalse(OtlpMetricsEmitter.parseLocalLogEnv(null),
+                "absent METRICS_LOCAL_LOG must stay off (default)");
+    }
 
     @Test
     @DisplayName("slot state snapshot records coverage and capacity")

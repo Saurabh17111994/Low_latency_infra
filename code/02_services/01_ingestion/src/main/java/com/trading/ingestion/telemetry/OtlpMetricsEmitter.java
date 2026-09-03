@@ -62,6 +62,17 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
     private final String collectorUrl;
     private final String instanceId;
     private final String serviceName = "ingestion";
+    /**
+     * Off by default: when set, every flush ALSO logs the metrics payload as
+     * {@code otlp-metrics-payload: <json>} regardless of collector health.
+     * The soak harness tails java.out into ingestion.tsv (stage-capture.sh),
+     * but the payload line is emitted ONLY on flush failure (T8: "collector
+     * usually down in bench runs"), so a healthy collector produced zero
+     * local evidence. This env gate lets the harness opt into local capture
+     * WITHOUT changing the default log volume (one ~4KB line per 10s flush).
+     * Local-capture only: the collector path is untouched.
+     */
+    private final boolean localLogEnabled;
     private final ScheduledExecutorService scheduler;
     private volatile boolean closed;
 
@@ -166,13 +177,31 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
     private volatile java.util.function.Consumer<Boolean> healthCallback;
 
     public OtlpMetricsEmitter(String collectorHostPort, String instanceId) {
+        this(collectorHostPort, instanceId,
+                parseLocalLogEnv(System.getenv("METRICS_LOCAL_LOG")));
+    }
+
+    /** Package-visible for tests; production uses the env-reading constructor. */
+    OtlpMetricsEmitter(String collectorHostPort, String instanceId, boolean localLog) {
         this.collectorUrl = "http://" + collectorHostPort + "/v1/metrics";
         this.instanceId = instanceId;
+        this.localLogEnabled = localLog;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "otlp-metrics-flush");
             t.setDaemon(true);
             return t;
         });
+    }
+
+    /**
+     * Tolerant METRICS_LOCAL_LOG parse: accepts "true"/"1" (case-insensitive
+     * for true). Boolean.parseBoolean("1") is FALSE — the soak harness set
+     * the env to 1 and the flag silently stayed off (observed 2026-09-04:
+     * collector healthy -> flushes succeeded, zero payload lines).
+     */
+    static boolean parseLocalLogEnv(String value) {
+        if (value == null) return false;
+        return value.equalsIgnoreCase("true") || value.equals("1");
     }
 
     /** Set a callback invoked with flush success/failure (telemetry readiness feed). */
@@ -365,6 +394,12 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
             LOG.debug("otlp-metrics: flush failed (collector may not be running): {}",
                     e.getMessage());
             reportHealth(false);
+            return;
+        }
+        // METRICS_LOCAL_LOG=1: local evidence even when the collector is
+        // healthy (soak harness ingestion.tsv leg — see field javadoc).
+        if (localLogEnabled) {
+            LOG.info("otlp-metrics-payload: {}", lastMetricsJson);
         }
     }
 
