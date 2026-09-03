@@ -120,6 +120,13 @@ x-flink-common: &flink-common
     #   busy/rec capped the pipeline at ~1.7k/s — stage-capture
     #   logs/tracker-14/stage-capture-20260901-224849; 0.6 of 7g ->
     #   ~3.2 GB managed, ~40 MB/instance, task heap ~2.1 GB).
+    # - 2026-09-04 (soak OOM hunt): 0.6 -> 0.5. The 0.6 fraction left the
+    #   JVM heap at only 1.545 GB (observed -Xmx1658930959), which OOM'd
+    #   under the 48k/s soak (~21:58:42 OutOfMemoryError -> prometheus-http
+    #   thread died -> prom endpoint dead while REST stayed healthy).
+    #   0.5 of 7g -> ~3.14 GB managed (still > CHG-120's ~40 MB/instance
+    #   target), heap ~2.16 GB. RocksDB actual RSS was ~1 GB — the 0.6
+    #   allowance was never used.
     # - P7 phase-1+ (tracker 14): explicit task off-heap (direct) budget —
     #   the 1.7 GB RocksDB restore streams state-handle downloads through
     #   direct buffers; 512m covers the concurrent 8-subtask restore.
@@ -149,23 +156,45 @@ x-flink-common: &flink-common
     #   --add-opens=java.base/java.nio=ALL-UNNAMED (arrow-compatible JVM
     #   options) — do NOT set env.java.opts here: it collides with the
     #   nested env.java.opts.all key in YamlParserUtils and aborts startup.
+    # RocksDB full metric set (2026-09-02 decline hunt): Flink's defaults
+    # expose only block_cache/memtable/readers-mem. The toggles below add the
+    # compaction + flush + SST growth story so OpenObserve can correlate
+    # per-record cost inflation with compaction activity. Observability-only:
+    # no data-path semantics change. Write LATENCY histograms are NOT
+    # exposeable by Flink at all (checked 2026-09-02) — compaction/flush/
+    # SST-size + host iostat await are the indirect latency evidence.
+    # (Comment must live OUTSIDE the FLINK_PROPERTIES block — G22b.)
     FLINK_PROPERTIES: |
       jobmanager.rpc.address: flink-jobmanager
       rest.address: flink-jobmanager
       rest.bind-address: 0.0.0.0
       metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
       metrics.reporter.prom.port: 9249
-      metrics.reporter.prom.interval: 15 SECONDS
+      metrics.reporter.prom.interval: 2 SECONDS
       metrics.latency.interval: 1000
       taskmanager.numberOfTaskSlots: 16
       jobmanager.memory.process.size: 1600m
       taskmanager.memory.process.size: 7g
       taskmanager.memory.task.off-heap.size: 512m
-      taskmanager.memory.managed.fraction: 0.6
+      taskmanager.memory.managed.fraction: 0.5
       taskmanager.memory.network.max: ${TASK_MANAGER_NETWORK_MEMORY_MAX:-256m}
       taskmanager.memory.network.min: ${TASK_MANAGER_NETWORK_MEMORY_MIN:-256m}
       state.backend.incremental: "true"
       state.backend.rocksdb.localdir: /tmp/flink-rocksdb
+      state.backend.rocksdb.metrics.num-running-compactions: true
+      state.backend.rocksdb.metrics.compaction-pending: true
+      state.backend.rocksdb.metrics.num-running-flushes: true
+      state.backend.rocksdb.metrics.estimate-num-keys: true
+      state.backend.rocksdb.metrics.total-sst-files-size: true
+      state.backend.rocksdb.metrics.estimate-live-data-size: true
+      state.backend.rocksdb.metrics.size-all-mem-tables: true
+      state.backend.rocksdb.metrics.num-entries-active-mem-table: true
+      state.backend.rocksdb.metrics.num-immutable-mem-table: true
+      state.backend.rocksdb.metrics.estimate-pending-compaction-bytes: true
+      state.backend.rocksdb.metrics.num-live-versions: true
+      state.backend.rocksdb.metrics.cur-size-active-mem-table: true
+      state.backend.rocksdb.metrics.num-entries-immutable-mem-table: true
+      state.backend.rocksdb.metrics.block-cache-pinned-usage: true
     DEDUP_TTL_MS: "60000"
     CANDLE_WINDOW_MS: "15000"
     CHECKPOINT_INTERVAL_MS: "10000"
@@ -351,6 +380,13 @@ services:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       FLUSS_COORDINATOR_HOST: fluss-coordinator
       FLUSS_TABLET_HOST: fluss-tablet
+      # Tablet JFR diagnostic (2026-09-02, temporary): the TM JFR proved
+      # operators park waiting for fetch results, moving the investigation
+      # boundary to the Fluss read path. tablet-server.sh appends
+      # FLUSS_ENV_JAVA_OPTS_TS to the JVM line. Instrumentation only —
+      # remove after the read-path diagnosis run.
+      FLUSS_ENV_JAVA_OPTS_TS: >-
+        -XX:StartFlightRecording=settings=profile,duration=900s,filename=/opt/fluss/log/tablet-diag.jfr,maxsize=1g
       # S3A credentials via env only (never in FLUSS_PROPERTIES — see below).
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID for lake tiering}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY for lake tiering}
@@ -469,6 +505,13 @@ services:
       # job 966456a5). Therefore this value = image default env.java.opts.all
       # + GC/safepoint logging. If the image changes, re-sync with the
       # image's config.yaml env.java.opts.all.
+      # JFR diagnostic (2026-09-02, temporary): appended to the folded
+      # scalar BELOW — profile settings (10ms execution sampling,
+      # ThreadPark/JavaMonitorBlocked/SocketRead/SocketWrite/alloc
+      # sampling). Duration-bounded, auto-dumped to the flink-logs
+      # volume. Instrumentation only — remove after diagnosis. NOTE:
+      # comments cannot live inside the >- folded scalar (they become
+      # part of the value and reach the JVM as a bogus arg).
       FLINK_ENV_JAVA_OPTS: >-
         --add-exports=java.rmi/sun.rmi.registry=ALL-UNNAMED
         --add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED
@@ -490,6 +533,7 @@ services:
         --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
         --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED
         -Xlog:gc*,safepoint:file=/opt/flink/log/gc.log:time,uptime,level,tags:filecount=5,filesize=50m
+        -XX:StartFlightRecording=settings=profile,duration=900s,filename=/opt/flink/log/tm-diag.jfr,maxsize=1g
     # Run as root so the Fluss RemoteLogDownloader can create its download
     # cache under /tmp/fluss (docker creates the /tmp/fluss mount parent as
     # root; the image default user flink:flink gets AccessDeniedException —
@@ -643,6 +687,28 @@ services:
         read_only: true
       # R-171: /data/ingestion/logs holds the JSON log (LOG_DIR default).
       - ingestion-logs:/data/ingestion/logs
+
+  # ---- CHG-122 loadgen profile (2026-09-02) --------------------------------
+  # Image for the load-test data path: faketool + arrow-bridge + ingestion
+  # JVM, ALL inside Docker on trading-net (policy: no host data-path
+  # processes — guard G26 in pipeline-lib.sh fails a run if it finds any).
+  # Behind the `loadgen` profile so `docker compose up` NEVER starts it;
+  # pipeline-lib builds it (`docker compose build loadgen`) and launches
+  # per-run containers with `docker run` (lifecycle belongs to the run
+  # script: names pipeline-faketool / pipeline-ingestion, removed in
+  # pipeline_cleanup).
+  loadgen:
+    build:
+      # Same reactor-root context contract as the ingestion service above.
+      context: ../..
+      dockerfile: 02_services/01_ingestion/Dockerfile.loadgen
+      # G27b content staleness stamp — pipeline-lib exports
+      # LOADGEN_BUILD_STAMP (sha256 of all build inputs) before building.
+      args:
+        BUILD_STAMP: ${LOADGEN_BUILD_STAMP:-nostamp}
+    image: pipeline-loadgen:1.0.0
+    networks: [trading-net]
+    profiles: ["loadgen"]
 
   # ---- T3 offline execution bridge profile -------------------------------
   # This is deliberately not part of the default stack. It is credential-free
