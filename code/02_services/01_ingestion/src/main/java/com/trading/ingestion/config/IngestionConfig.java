@@ -65,6 +65,12 @@ public final class IngestionConfig {
     public final double pendingWarningPercent;
     public final Duration appendTimeout;
     public final Duration drainDeadline;
+    /** Zero-ack watchdog: max time (ms) with broker frames flowing AND appends
+     *  accepted but NO successful Fluss append ack before the service fails
+     *  fast and exits (container restart policy revives it fresh). Catches the
+     *  wedged-Fluss-sender hang whose append futures never complete (no
+     *  per-append failure is ever surfaced). 0 = disabled. Default 10s. */
+    public final long zeroAckTimeoutMs;
     public final long clockOffsetLimitMs;
     public final long arrowMaxEventAgeMs;
     public final long arrowMaxFutureEventSkewMs;
@@ -110,6 +116,7 @@ public final class IngestionConfig {
         this.pendingWarningPercent = b.pendingWarningPercent;
         this.appendTimeout = b.appendTimeout;
         this.drainDeadline = b.drainDeadline;
+        this.zeroAckTimeoutMs = b.zeroAckTimeoutMs;
         this.clockOffsetLimitMs = b.clockOffsetLimitMs;
         this.arrowMaxEventAgeMs = b.arrowMaxEventAgeMs;
         this.arrowMaxFutureEventSkewMs = b.arrowMaxFutureEventSkewMs;
@@ -232,6 +239,9 @@ public final class IngestionConfig {
         b.appendTimeout = Duration.ofSeconds(timeoutSec);
         b.drainDeadline = Duration.ofSeconds(
                 intRange(env, "DRAIN_DEADLINE_SECONDS", 30, 1, 300, errors));
+        // Zero-ack watchdog: 0 = disabled. Default 10s.
+        b.zeroAckTimeoutMs = longRange(env, "INGESTION_ZERO_ACK_TIMEOUT_MS",
+                10_000L, 0L, 300_000L, errors);
         b.clockOffsetLimitMs = longRange(env, "CLOCK_OFFSET_LIMIT_MS",
                 2000L, 10L, 60_000L, errors);
         b.arrowMaxEventAgeMs = requiredLong(env, "ARROW_MAX_EVENT_AGE_MS", errors);
@@ -320,6 +330,7 @@ public final class IngestionConfig {
         m.put("PENDING_APPEND_WARNING_PERCENT", pendingWarningPercent);
         m.put("APPEND_TIMEOUT", appendTimeout);
         m.put("DRAIN_DEADLINE_SECONDS", drainDeadline.getSeconds());
+        m.put("INGESTION_ZERO_ACK_TIMEOUT_MS", zeroAckTimeoutMs);
         m.put("CLOCK_OFFSET_LIMIT_MS", clockOffsetLimitMs);
         m.put("ARROW_MAX_EVENT_AGE_MS", arrowMaxEventAgeMs);
         m.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", arrowMaxFutureEventSkewMs);
@@ -583,6 +594,7 @@ public final class IngestionConfig {
         double pendingWarningPercent = 0.80;
         Duration appendTimeout = Duration.ofSeconds(5);
         Duration drainDeadline = Duration.ofSeconds(30);
+        long zeroAckTimeoutMs = 10_000L; // zero-ack watchdog (0 = disabled)
         long clockOffsetLimitMs = 2000L; // T10: 2s default
         long arrowMaxEventAgeMs;
         long arrowMaxFutureEventSkewMs;

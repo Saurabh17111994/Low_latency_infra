@@ -123,7 +123,17 @@ public final class IngestionService {
     /** Set on graceful shutdown (shutdown() or the shutdown hook) so an expected
      *  bridge exit during shutdown is not recorded as a BRIDGE_EXIT halt. */
     private volatile boolean shuttingDown = false;
+    /** Non-null when a fatal append condition (stale table handle / zero-ack
+     *  progress) has been detected and the process must stop fail-fast so the
+     *  container restart policy can revive it against fresh metadata. Read by
+     *  the bridge loop to exit promptly instead of blocking on a wedged writer. */
+    private volatile String fatalStopReason;
     private volatile boolean subscriptionPaused;
+    /** Last wall-clock epoch (ms) a tick was ACCEPTED into a writer queue
+     *  (i.e. handed to the writer path). Feed signal for the zero-ack watchdog:
+     *  distinct from {@code writer.lastAppendSuccessEpochMs()} (acks). When
+     *  accepted keeps advancing but acks stop, the Fluss sender is wedged. */
+    private volatile long lastAcceptedEpochMs = 0L;
     private volatile long lastFrameNanos;
     private volatile long lastResourceRefreshNanos;
 
@@ -134,6 +144,12 @@ public final class IngestionService {
                 t.setDaemon(true);
                 return t;
             });
+
+    /** Zero-ack watchdog: detects a wedged Fluss sender (appends accepted but
+     *  never acked). Shares the staleness pattern — its own daemon thread so a
+     *  stall in one watchdog cannot block the other. Created lazily only when
+     *  {@code zeroAckTimeoutMs > 0} (disabled default is off entirely). */
+    private java.util.concurrent.ScheduledExecutorService zeroAckWatchdog;
 
     /** ING-FAIL-007: one TIME_JUMP discontinuity per clock-violation episode. */
     private final TimeJumpMonitor timeJumpMonitor;
@@ -412,6 +428,19 @@ public final class IngestionService {
         // 6. Launch Go arrow-bridge and read proto frames from its stdout (D7, I1, I6)
         String bridgeBin = System.getenv().getOrDefault("ARROW_BRIDGE_BIN", "/app/arrow-bridge");
         service.runWithBridge(bridgeBin);
+
+        // Exit-code ownership: the bridge loop's natural end returns here with
+        // the JVM about to exit 0. A fail-fast (requestFatalStop) running on
+        // the watchdog thread calls shutdown() — whose bounded main-thread
+        // join lets THIS thread finish first, so a bare System.exit(1) in the
+        // watchdog would lose the race to the JVM's natural exit(0). Main must
+        // therefore be the single exit-code decision point: nonzero only when
+        // a fatal stop was requested.
+        if (service.fatalStopReason != null) {
+            LOG.error("ingestion: exiting nonzero after FAIL-FAST ({}) — container restart policy revives us",
+                    service.fatalStopReason);
+            System.exit(1);
+        }
     }
 
     // ---- bridge subprocess loop ----
@@ -482,6 +511,44 @@ public final class IngestionService {
                 updateReadinessFile();
             }
         }, 5, 5, java.util.concurrent.TimeUnit.SECONDS);
+
+        // Zero-ack watchdog (C): catches the wedged-Fluss-sender hang where
+        // append futures never complete (so no per-append failure ever reaches
+        // onAppendOutcome). Armed only while the broker is actively sending AND
+        // appends are being accepted AND the writer is not closed. If accepted
+        // ticks keep flowing but NO successful append ack arrives within
+        // zeroAckTimeoutMs, the sender is wedged on a dead/stale handle — fail
+        // fast so the container restart policy revives us against fresh metadata.
+        if (config.zeroAckTimeoutMs > 0) {
+            zeroAckWatchdog = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "ingestion-zero-ack-watchdog");
+                t.setDaemon(true);
+                return t;
+            });
+            zeroAckWatchdog.scheduleAtFixedRate(() -> {
+                if (!running || shuttingDown) return;
+                long now = System.currentTimeMillis();
+                long sinceAccepted = lastAcceptedEpochMs > 0 ? now - lastAcceptedEpochMs : Long.MAX_VALUE;
+                long sinceAck = writer.lastAppendSuccessEpochMs() > 0
+                        ? now - writer.lastAppendSuccessEpochMs()
+                        : Long.MAX_VALUE;
+                boolean brokerActive = health.isBrokerConnected()
+                        && sinceAccepted < config.zeroAckTimeoutMs;
+                // Only fire when the writer is demonstrably being fed (recent
+                // accepted ticks) but has produced NO ack for the full window —
+                // i.e. genuine wedge, not a quiet feed. Also require at least one
+                // accepted tick since start (lastAcceptedEpochMs > 0) so a
+                // never-started writer does not false-trip.
+                if (brokerActive && lastAcceptedEpochMs > 0 && sinceAck >= config.zeroAckTimeoutMs) {
+                    String reason = String.format(
+                            "ZERO-ACK: accepted ticks flowing for %dms but no Fluss append ack for %dms "
+                                    + "(lastAccept=%dms ago) — wedged sender, restarting to re-resolve metadata",
+                            sinceAccepted, sinceAck, sinceAccepted);
+                    LOG.error("ingestion: {}", reason);
+                    requestFatalStop(reason);
+                }
+            }, 1, 1, java.util.concurrent.TimeUnit.SECONDS);
+        }
 
         // ---- Subscription completeness tracking (ING-2) ----
         java.util.Set<Long> seenTokens = java.util.concurrent.ConcurrentHashMap.newKeySet();
@@ -1067,6 +1134,8 @@ public final class IngestionService {
             if (!queues[qi].offer(packet, rowBytes)) {
                 LOG.warn("ingestion: tick rejected (queue full) token={}", (long) ev.getToken());
                 metrics.incrementAcknowledgedLoss();
+            } else {
+                lastAcceptedEpochMs = System.currentTimeMillis();
             }
 
             metrics.recordTick(packetBytes.length);
@@ -1128,9 +1197,26 @@ public final class IngestionService {
                         outcome.rowBytes(), outcome.detail());
                 errorCount.incrementAndGet();
             }
-            case FAILED, FATAL -> {
+            case FAILED -> {
+                // Retry-exhausted but non-fatal (classified retryable, gave up).
+                // Does NOT halt: the failure was transient-classified and the
+                // row is already accounted (tracker released by the writer).
                 errorCount.incrementAndGet();
-                metrics.incrementDecodeError("append_" + outcome.status().name().toLowerCase());
+                metrics.incrementDecodeError("append_failed");
+                LOG.error("ingestion: append FAILED after retries (rowBytes={}, detail={})",
+                        outcome.rowBytes(), outcome.detail());
+            }
+            case FATAL -> {
+                // Fail-fast: a FATAL append (per RetryClassifier — e.g. stale
+                // table handle: partition/table dropped+recreated under us) can
+                // NEVER succeed on retry. Stop accepting, flush, and exit so the
+                // container restart policy revives us against fresh metadata.
+                // Without this the writer busy-loops against a dead handle forever.
+                errorCount.incrementAndGet();
+                metrics.incrementDecodeError("append_fatal");
+                String reason = "FATAL append: " + outcome.detail();
+                LOG.error("ingestion: {}", reason);
+                requestFatalStop(reason);
             }
             case SUCCESS -> lastTickSnapshot = new DiscontinuityWriter.LastTickSnapshot(
                     outcome.eventTime().toEpochMilli(),
@@ -1143,6 +1229,35 @@ public final class IngestionService {
                 // are never delivered through the listener.
             }
         }
+    }
+
+    /**
+     * Fail-fast stop: record the fatal reason and drive a full shutdown (drain
+     * writers, flush journals, close sinks, signal the bridge) so the process
+     * can exit and the container restart policy revive it against fresh
+     * metadata. Safe to call from ANY thread (writer completion thread,
+     * watchdog thread): shutdown() is idempotent (shutdownStarted CAS). The
+     * bridge loop observes {@link #fatalStopReason} and exits without a bridge
+     * restart; main() owns the nonzero exit code (checked after
+     * runWithBridge returns) so the watchdog never races the JVM's natural
+     * exit(0).
+     */
+    private void requestFatalStop(String reason) {
+        if (fatalStopReason != null) return; // first fatal wins
+        fatalStopReason = reason;
+        health.markNotAlive();
+        metrics.setIngestionReady(false);
+        updateReadinessFile();
+        LOG.error("ingestion: FAIL-FAST — {}", reason);
+        // shutdown() sets running=false, signals the bridge, drains writers
+        // (bounded by drain deadline) and flushes journals/sinks. On the
+        // wedged-sender hang the drain may time out — that is acceptable: the
+        // uncertainty journal already pinned the pending count before drain.
+        shutdown();
+        // No System.exit here: shutdown() joined main (bounded), main checks
+        // fatalStopReason after runWithBridge returns and exits 1 itself. A
+        // System.exit(1) on THIS thread would race main's natural exit(0) —
+        // the exact bug where the container came down 0 instead of 1.
     }
 
     /**
@@ -1604,9 +1719,11 @@ public final class IngestionService {
             }
         }
         running = false;
-        // Stop the staleness watchdog (R-108) and the clock monitor (ING-FAIL-007).
+        // Stop the staleness watchdog (R-108), the clock monitor (ING-FAIL-007),
+        // the memory monitor, and the zero-ack watchdog.
         stalenessWatchdog.shutdownNow();
         clockMonitorScheduler.shutdownNow();
+        if (zeroAckWatchdog != null) zeroAckWatchdog.shutdownNow();
         if (readinessFile != null) {
             try { readinessFile.clear(); }
             catch (java.io.IOException e) { LOG.warn("ingestion: readiness marker clear failed: {}", sanitizeLog(e.getMessage())); }

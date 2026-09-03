@@ -104,4 +104,40 @@ class RetryClassifierTest {
         Throwable outer = new ExecutionException("network unavailable", middle);
         assertEquals(Classification.FATAL, RetryClassifier.classify(outer));
     }
+
+    @Test
+    @DisplayName("stale-handle: NotLeaderOrFollower surfaced is FATAL (B guard)")
+    void notLeaderOrFollowerIsFatal() {
+        // Once surfaced to the writer the Fluss client already exhausted its
+        // retry budget against a stale/dead table handle — retrying at the app
+        // layer is a busy-loop. Simulates Fluss NotLeaderOrFollowerException.
+        class FakeNotLeaderOrFollowerException extends RuntimeException {}
+        assertEquals(Classification.FATAL,
+                RetryClassifier.classify(new FakeNotLeaderOrFollowerException()));
+    }
+
+    @Test
+    @DisplayName("stale-handle: PartitionNotExist surfaced is FATAL (B guard)")
+    void partitionNotExistIsFatal() {
+        class FakePartitionNotExistException extends RuntimeException {}
+        assertEquals(Classification.FATAL,
+                RetryClassifier.classify(new FakePartitionNotExistException()));
+    }
+
+    @Test
+    @DisplayName("stale-handle: UnknownTableOrBucket surfaced is FATAL (B guard)")
+    void unknownTableOrBucketIsFatal() {
+        class FakeUnknownTableOrBucketException extends RuntimeException {}
+        assertEquals(Classification.FATAL,
+                RetryClassifier.classify(new FakeUnknownTableOrBucketException()));
+    }
+
+    @Test
+    @DisplayName("genuine transient leader change (retryable msg) stays RETRYABLE")
+    void transientLeaderChangeStaysRetryable() {
+        // A retryable-looking leader message is NOT a stale handle — it stays
+        // retryable. Only the surfaced NotLeaderOrFollower TYPE is fatal.
+        Throwable t = new RuntimeException("leader not available, re-electing");
+        assertEquals(Classification.RETRYABLE, RetryClassifier.classify(t));
+    }
 }

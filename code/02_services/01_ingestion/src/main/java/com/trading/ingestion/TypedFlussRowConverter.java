@@ -128,9 +128,16 @@ final class TypedFlussRowConverter implements FlussRowConverter {
         return writer.append(row)
                 .thenApply(result -> new RawTickWriter.AppendResult(0, tablePath))
                 .exceptionally(ex -> {
+                    // Propagate failures to RawTickWriter — do NOT swallow into a
+                    // success-shaped AppendResult. A swallowed exception previously
+                    // masked every append failure as SUCCESS (no FATAL/retry, no
+                    // tracker release) and defeated the fail-fast guards. The writer
+                    // layer (RawTickWriter.handleCompletion) owns the policy:
+                    // RetryClassifier for the cause type, CancellationException →
+                    // UNCERTAIN. R-190: ex.getCause() may be null (plain exception).
                     Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
-                    LOG.warn("fluss: typed append failed: {}", cause.getMessage());
-                    return new RawTickWriter.AppendResult(0, tablePath);
+                    LOG.warn("fluss: typed append failed (table={}): {}", tablePath, cause.getMessage());
+                    throw new RuntimeException("Fluss typed append failed", cause);
                 });
     }
 

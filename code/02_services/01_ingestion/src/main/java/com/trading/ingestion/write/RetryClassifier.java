@@ -101,6 +101,19 @@ public final class RetryClassifier {
                 || name.contains("UnknownTable")) {
             return true;
         }
+        // R-3xx stale-handle guard: a partition/table-bucket reference that no
+        // longer exists on the server, or a tablet that is neither leader nor
+        // follower for the referenced bucket. Inside the Fluss client these are
+        // retried (RetriableException) while the client refreshes metadata — but
+        // when one SURFACES here, the client has already exhausted its own retry
+        // budget against a handle the server considers dead (e.g. the table was
+        // dropped/recreated under a long-lived writer and the cached tableId is
+        // stale). Retrying at the app layer is a busy-loop against a dead handle.
+        if (name.contains("NotLeaderOrFollower")
+                || name.contains("PartitionNotExist")
+                || name.contains("UnknownTableOrBucket")) {
+            return true;
+        }
         if (name.contains("Schema") && (name.contains("Mismatch")
                 || name.contains("Exception")
                 || name.contains("Validation"))) {

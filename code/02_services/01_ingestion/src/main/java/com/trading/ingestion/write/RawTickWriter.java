@@ -59,6 +59,11 @@ public final class RawTickWriter implements AutoCloseable {
     private final AtomicLong appendCount = new AtomicLong(0);
     private final AtomicLong errorCount = new AtomicLong(0);
     private final AtomicLong uncertainCount = new AtomicLong(0);
+    /** Wall-clock epoch (ms) of the last SUCCESS ack. 0 = none yet. Feed for
+     *  the zero-ack watchdog: a sustained absence of SUCCESS while the broker
+     *  keeps sending indicates a wedged Fluss sender (append futures hang
+     *  in-flight, never completing) that no per-append path can observe. */
+    private volatile long lastAppendSuccessEpochMs = 0L;
     private volatile boolean closed;
 
     /** Schedules per-attempt timeouts and retry resubmissions (daemon threads). */
@@ -187,6 +192,7 @@ public final class RawTickWriter implements AutoCloseable {
             // ---- Success ----
             tracker.onAppendSuccess(rowBytes);
             appendCount.incrementAndGet();
+            lastAppendSuccessEpochMs = System.currentTimeMillis();
             completeOutcome(AppendOutcome.success(
                     packet, acceptTime, Instant.now(), rowBytes, result));
             return;
@@ -253,6 +259,7 @@ public final class RawTickWriter implements AutoCloseable {
     public long appendCount() { return appendCount.get(); }
     public long errorCount() { return errorCount.get(); }
     public long uncertainCount() { return uncertainCount.get(); }
+    public long lastAppendSuccessEpochMs() { return lastAppendSuccessEpochMs; }
 
     /**
      * Wait for pending appends to complete, up to the drain deadline.
