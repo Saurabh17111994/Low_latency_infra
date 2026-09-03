@@ -55,7 +55,7 @@ public final class ConfigKeys {
     public static final String CNC = "CNC";
     public static final String CONFIGURATION_VERSION = "CONFIGURATION_VERSION";
     public static final String DAY = "DAY";
-    public static final String DEDUP_TTL_MS = "DEDUP_TTL_MS";
+    public static final String DEDUP_WINDOW_ENTRIES = "DEDUP_WINDOW_ENTRIES";
     public static final String DEPLOYMENT_ENV = "DEPLOYMENT_ENV";
     public static final String DEPLOY_ENV = "DEPLOY_ENV";
 

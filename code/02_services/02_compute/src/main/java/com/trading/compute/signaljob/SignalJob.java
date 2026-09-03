@@ -222,7 +222,12 @@ public final class SignalJob {
                 .process(new FingerprintDedupFunction(config))
                 .returns(ticks.getType())
                 .name("fingerprint-dedup")
-                .uid("fingerprint-dedup");
+                // G-DEDUP-3 (2026-09-03 redesign): new uid so Flink never
+                // silently maps pre-redesign checkpointed MapState onto the
+                // heap-window operator (which requests no managed state).
+                // Restoring an old checkpoint fails closed via the
+                // no-allowNonRestoredState rule — clean start required.
+                .uid("fingerprint-dedup-v2");
 
         SingleOutputStreamOperator<RowData> candles = deduped
                 .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))

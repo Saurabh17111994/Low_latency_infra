@@ -29,9 +29,9 @@ class ConfigGuardTest {
 
     @Test
     void keyReadInCodeDetectsRealAndMissingKeys() {
-        // DEDUP_TTL_MS is read by SignalJobConfig — must be found.
-        assertTrue(ConfigGuard.keyReadInCode("DEDUP_TTL_MS"),
-                "DEDUP_TTL_MS is read by SignalJobConfig");
+        // DEDUP_WINDOW_ENTRIES is read by SignalJobConfig — must be found.
+        assertTrue(ConfigGuard.keyReadInCode("DEDUP_WINDOW_ENTRIES"),
+                "DEDUP_WINDOW_ENTRIES is read by SignalJobConfig");
         // A fabricated key must NOT be found — proves the scan isn't vacuous.
         // (Split so this test file itself doesn't contain the literal.)
         String fake = "THIS_KEY_DOES_NOT_" + "EXIST_ANYWHERE";

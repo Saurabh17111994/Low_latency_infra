@@ -9,7 +9,7 @@ import java.util.Set;
  * <p>No numeric literals for these keys may be scattered through source files. Startup must
  * reject two values outright (see {@link #validateStartup()}):
  * <ul>
- *   <li>{@code DEDUP_TTL_MS} must equal 60000</li>
+ *   <li>{@code DEDUP_WINDOW_ENTRIES} must equal 2000</li>
  *   <li>{@code CANDLE_WINDOW_MS} must equal 15000</li>
  * </ul>
  *
@@ -42,7 +42,9 @@ public final class PlatformConfig {
     public static final String RAW_TABLE_1_SCHEMA_VERSION = "3";
 
     // ---- dedup / candles (reject-startup values) ----
-    public static final long DEDUP_TTL_MS = 60_000L;
+    // G-DEDUP-4 (2026-09-03 redesign): per-token recent-fingerprint bound for
+    // the heap-window repeat filter (replaces the 60 s TTL pin).
+    public static final int DEDUP_WINDOW_ENTRIES = 2000;
     public static final long CANDLE_WINDOW_MS = 15_000L;
 
     // ---- checkpointing ----
@@ -133,7 +135,8 @@ public final class PlatformConfig {
         // P1 (2026-08-29): the load-bearing pins apply in production only;
         // dev is tunable (SignalJobConfig enforces the dev ranges).
         if (isProductionEnv()) {
-            validateLoadBearing("DEDUP_TTL_MS", envLong("DEDUP_TTL_MS"), DEDUP_TTL_MS);
+            validateLoadBearing("DEDUP_WINDOW_ENTRIES", envLong("DEDUP_WINDOW_ENTRIES"),
+                    DEDUP_WINDOW_ENTRIES);
             validateLoadBearing("CANDLE_WINDOW_MS", envLong("CANDLE_WINDOW_MS"), CANDLE_WINDOW_MS);
         }
         // 09-production-swarm § JVM and memory configuration: inside a real

@@ -11,7 +11,7 @@ import java.util.Map;
  *
  * <p><b>Load-bearing values are pinned, not tuned.</b> The fixed-scope contract
  * (docs/08_implementation/01-foundation.md, PlatformConfig javadoc) requires the
- * two correctness-critical constants — {@code DEDUP_TTL_MS} and
+ * two correctness-critical constants — {@code DEDUP_WINDOW_ENTRIES} and
  * {@code CANDLE_WINDOW_MS} — plus the checkpoint contract
  * (REQ-FC-006) to be exactly pinned or the job MUST fail at startup. A missing
  * required value also aborts: "no unsafe default may be substituted"
@@ -63,7 +63,7 @@ public record SignalJobConfig(
         String algorithmVersion,
         String configurationVersion,
         String candleSchemaVersion,
-        long dedupTtlMs,
+        int dedupWindowEntries,
         long candleWindowMs,
         long outOfOrderMs,
         long allowedLatenessMs,
@@ -157,7 +157,7 @@ public record SignalJobConfig(
                         CandleTableSchema.CANONICAL_ALGORITHM_VERSION),
                 configurationVersion,
                 env.getOrDefault("CANDLE_SCHEMA_VERSION", "2"),
-                dedupTtlMs(env),
+                dedupWindowEntries(env),
                 candleWindowMs(env),
                 // Single-timeline rule (decision 2026-08-30): the SAME wait
                 // bounds both the preview path and the final candle path, so
@@ -910,21 +910,23 @@ public record SignalJobConfig(
     }
 
     /**
-     * Dedup TTL (P1, 2026-08-29): pinned to {@link PlatformConfig#DEDUP_TTL_MS}
-     * in production (a deployment cannot silently change dedup semantics);
-     * in dev it is tunable within 1000..600000 ms (failure-injection tests
-     * need low TTLs).
+     * Dedup window (G-DEDUP-4, 2026-09-03 redesign): per-token recent-print
+     * bound, pinned to {@link PlatformConfig#DEDUP_WINDOW_ENTRIES} in
+     * production (a deployment cannot silently change repeat semantics); in
+     * dev tunable within 100..100000 (the speed-test prototype uses a large
+     * bound to measure the hot path, not trimming).
      */
-    private static long dedupTtlMs(Map<String, String> env) {
+    private static int dedupWindowEntries(Map<String, String> env) {
         if (isProduction(env)) {
-            return requirePinnedLong(env, "DEDUP_TTL_MS", PlatformConfig.DEDUP_TTL_MS);
+            return (int) requirePinnedLong(env, "DEDUP_WINDOW_ENTRIES",
+                    PlatformConfig.DEDUP_WINDOW_ENTRIES);
         }
-        long v = longValue(env, "DEDUP_TTL_MS", PlatformConfig.DEDUP_TTL_MS);
-        if (v < 1_000 || v > 600_000) {
-            throw new IllegalStateException("Config DEDUP_TTL_MS must be in 1000..600000 (dev), got "
-                    + v + " (production pins " + PlatformConfig.DEDUP_TTL_MS + ")");
+        long v = longValue(env, "DEDUP_WINDOW_ENTRIES", PlatformConfig.DEDUP_WINDOW_ENTRIES);
+        if (v < 100 || v > 100_000) {
+            throw new IllegalStateException("Config DEDUP_WINDOW_ENTRIES must be in 100..100000 (dev), got "
+                    + v + " (production pins " + PlatformConfig.DEDUP_WINDOW_ENTRIES + ")");
         }
-        return v;
+        return (int) v;
     }
 
     /**

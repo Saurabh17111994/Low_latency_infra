@@ -52,10 +52,11 @@ class SignalJobOperatorUidTest {
     static {
         EXPECTED_OPERATORS.put("raw-table-1", "Source: raw-table-1");
         EXPECTED_OPERATORS.put("raw-validation", "raw-validation");
-        EXPECTED_OPERATORS.put("fingerprint-dedup", "fingerprint-dedup");
-        // The DEC-038 dedup writer/sink branch was removed with design B
-        // (2026-08-16) — the dedup operator's uid is untouched, the writer +
-        // sink uids no longer exist.
+        EXPECTED_OPERATORS.put("fingerprint-dedup", "fingerprint-dedup-v2");
+        // G-DEDUP-3 (2026-09-03 redesign): uid bumped so pre-redesign
+        // checkpointed MapState can never silently attach to the heap-window
+        // operator (which requests no managed state). Restoring an old
+        // checkpoint fails closed — clean start required (plan §6).
         EXPECTED_OPERATORS.put("candle-15s", "candle-15s");
         EXPECTED_OPERATORS.put("candle-late-drop-counter", "candle-late-drop-counter");
         // Streaming-3000 T5 (decision 25): KV first-write-wins guard between

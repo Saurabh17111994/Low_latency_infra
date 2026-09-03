@@ -40,28 +40,33 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 /**
  * Foundation L477 / L850 — Flink savepoint/restore/rescale capability evidence
  * (version matrix VM-FLINK-SRV-003, VM-FLINK-API-004): the SignalJob's real
- * keyed dedup operator survives a stop-with-savepoint → start-from-savepoint
+ * keyed dedup operator rides a stop-with-savepoint → start-from-savepoint
  * cycle on a fresh cluster, at DIFFERENT parallelism, with strict restore
  * (no {@code allowNonRestoredState}).
+ *
+ * <p>Redesign note (2026-09-03): the heap-window operator holds NO managed
+ * state, so dedup history does NOT survive a restore — this is intentional
+ * amnesia (restores resume sources from checkpointed offsets; nothing
+ * replays). What this test proves is the restore contract that REMAINS:
+ * the job restores strictly and runs, and dedup rebuilds from live flow.
  *
  * <p>What this proves, with runtime artifacts (not config assertions):
  * <ul>
  *   <li><b>Savepoint production</b> — phase 1 (parallelism 2) runs the actual
- *       {@link FingerprintDedupFunction} (MapState fingerprint-dedup with
- *       native StateTtlConfig expiry — CHG-023 item 2 removed the expiry
- *       index + event-time timers) over real {@link TestRawRows} rows;
- *       {@code stopWithSavepoint} returns a path on the local filesystem and
- *       the job reaches CANCELED with that savepoint on disk.</li>
- *   <li><b>State continuity across a job upgrade</b> — phase 2 runs on a brand
- *       new MiniCluster (fresh TaskManagers, zero phase-1 memory) restored
- *       strictly from the savepoint: re-feeding the SAME fingerprints emits
- *       NOTHING (the dedup MapState survived — a zero-state re-run would emit
- *       every duplicate), while new fingerprints pass.</li>
- *   <li><b>Rescale</b> — phase 2 restores at parallelism 4 (2× phase 1):
- *       keyed state redistributes across the wider set of subtasks and
- *       continuity still holds. Restore is strict: a failed restore fails the
- *       job, so phase 2 producing exactly the NEW fingerprints is the negative
- *       proof.</li>
+ *       {@link FingerprintDedupFunction} (heap-window, no managed state, no
+ *       timers) over real {@link TestRawRows} rows; {@code stopWithSavepoint}
+ *       returns a path on the local filesystem and the job reaches CANCELED
+ *       with that savepoint on disk.</li>
+ *   <li><b>Strict restore + empty restart</b> — phase 2 runs on a brand new
+ *       MiniCluster (fresh TaskManagers, zero phase-1 memory) restored
+ *       strictly from the savepoint: the job STARTS (no restore failure
+ *       despite the operator requesting no state) and the re-fed phase-1
+ *       fingerprints PASS (dedup restarted empty — amnesia by design),
+ *       alongside the new fingerprints.</li>
+ *   <li><b>Rescale</b> — phase 2 restores at parallelism 4 (2× phase 1) and
+ *       runs. Restore is strict: a failed restore fails the job, so phase 2
+ *       emitting all 8 rows (6 re-fed + 2 new) is the positive proof that
+ *       restore succeeded and dedup rebuilt from live flow.</li>
  * </ul>
  *
  * <p>Gate: {@code @EnabledIfEnvironmentVariable(COMPUTE_INT_TEST_SAVEPOINT=true)}
@@ -71,7 +76,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  */
 @Tag("integration")
 @EnabledIfEnvironmentVariable(named = "COMPUTE_INT_TEST_SAVEPOINT", matches = "true")
-@DisplayName("foundation L477/L850: dedup state survives stop-with-savepoint -> strict restore at 2x parallelism")
+@DisplayName("foundation L477/L850: strict savepoint restore at 2x parallelism; dedup restarts empty by design")
 class SignalJobSavepointRestoreIntegrationTest {
 
     private static final Duration POLL = Duration.ofMillis(250);
@@ -82,7 +87,7 @@ class SignalJobSavepointRestoreIntegrationTest {
     private record RowSpec(long token, long eventTime, String fingerprint)
             implements java.io.Serializable {}
 
-    /** Phase-1 fingerprints: every one must be swallowed by phase-2 re-feeds. */
+    /** Phase-1 fingerprints: phase-2 re-feeds them to prove the empty restart. */
     private static final List<RowSpec> PHASE1_ROWS = List.of(
             new RowSpec(1L, 1_700_000_000_000L, "fp-p1-a"),
             new RowSpec(1L, 1_700_000_001_000L, "fp-p1-b"),
@@ -91,7 +96,7 @@ class SignalJobSavepointRestoreIntegrationTest {
             new RowSpec(2L, 1_700_000_001_000L, "fp-p1-e"),
             new RowSpec(2L, 1_700_000_002_000L, "fp-p1-f"));
 
-    /** Phase-2 NEW fingerprints: the only rows a restored job may emit. */
+    /** Phase-2 NEW fingerprints: emitted alongside the re-fed phase-1 rows. */
     private static final List<RowSpec> PHASE2_NEW_ROWS = List.of(
             new RowSpec(1L, 1_700_000_003_000L, "fp-p2-a"),
             new RowSpec(2L, 1_700_000_003_000L, "fp-p2-b"));
@@ -103,7 +108,7 @@ class SignalJobSavepointRestoreIntegrationTest {
     /** Config env identical to the unit-test baseline (tuning keys default). */
     private static Map<String, String> env() {
         Map<String, String> env = new HashMap<>();
-        env.put("DEDUP_TTL_MS", "60000");
+        env.put("DEDUP_WINDOW_ENTRIES", "2000");
         env.put("CANDLE_WINDOW_MS", "15000");
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");
@@ -204,7 +209,7 @@ class SignalJobSavepointRestoreIntegrationTest {
     }
 
     @Test
-    void dedupStateSurvivesSavepointRestoreAtTwoTimesParallelism() throws Exception {
+    void dedupRestartsEmptyAfterStrictSavepointRestoreAtTwoTimesParallelism() throws Exception {
         org.apache.logging.log4j.core.config.Configurator.setRootLevel(
                 org.apache.logging.log4j.Level.INFO);
         Path workDir = Files.createTempDirectory("savepoint-l850-");
@@ -273,19 +278,23 @@ class SignalJobSavepointRestoreIntegrationTest {
                     .sinkTo(new CollectingSink());
 
             JobClient client = submit(env);
-            awaitTrue("phase-2 NEW fingerprints to pass dedup", () -> EMITTED.size() == 2);
+            awaitTrue("all phase-2 rows to pass dedup", () -> EMITTED.size() == 8);
 
-            // Continuity: exactly the two NEW fingerprints — a zero-state re-run
-            // would have emitted all 8 (the 6 phase-1 duplicates included).
+            // Empty restart: the 6 re-fed phase-1 fingerprints PASS (dedup
+            // history did not survive — amnesia by design) plus the 2 new.
+            // A state-carrying operator would have emitted only the 2 new.
             List<String> emitted = new ArrayList<>(EMITTED);
-            List<String> expected = PHASE2_NEW_ROWS.stream()
+            List<String> expected = new ArrayList<>(PHASE1_ROWS.stream()
                     .map(RowSpec::fingerprint)
-                    .sorted()
-                    .collect(Collectors.toList());
+                    .collect(Collectors.toList()));
+            expected.addAll(PHASE2_NEW_ROWS.stream()
+                    .map(RowSpec::fingerprint)
+                    .collect(Collectors.toList()));
+            expected = expected.stream().sorted().collect(Collectors.toList());
             List<String> actual = emitted.stream().sorted().collect(Collectors.toList());
             assertEquals(expected, actual,
-                    "restored dedup state must swallow every phase-1 fingerprint "
-                            + "and pass exactly the new ones (rescale 2 -> " + parallelism + ")");
+                    "restored dedup restarts empty: all 6 re-fed phase-1 rows "
+                            + "plus the 2 new rows must pass (rescale 2 -> " + parallelism + ")");
 
             // The job must still be RUNNING (no state-restore failure).
             assertTrue(client.getJobStatus().get(15, TimeUnit.SECONDS)

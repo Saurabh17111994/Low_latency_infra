@@ -17,7 +17,7 @@ class SignalJobConfigTest {
 
     private static Map<String, String> env() {
         Map<String, String> env = new HashMap<>();
-        env.put("DEDUP_TTL_MS", "60000");
+        env.put("DEDUP_WINDOW_ENTRIES", "2000");
         env.put("CANDLE_WINDOW_MS", "15000");
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");
@@ -29,7 +29,7 @@ class SignalJobConfigTest {
     @Test
     void acceptsPinnedValuesAndDefaultsForTuning() {
         SignalJobConfig cfg = SignalJobConfig.from(env());
-        assertEquals(60_000L, cfg.dedupTtlMs());
+        assertEquals(2000, cfg.dedupWindowEntries());
         assertEquals(15_000L, cfg.candleWindowMs());
         assertEquals(10_000L, cfg.checkpointIntervalMs());
         assertEquals(30_000L, cfg.checkpointTimeoutMs());
@@ -193,17 +193,17 @@ class SignalJobConfigTest {
     void devAcceptsTunableDedupAndCandle() {
         // P1: in dev the values are tunable within range.
         Map<String, String> env = env();
-        env.put("DEDUP_TTL_MS", "120000");
+        env.put("DEDUP_WINDOW_ENTRIES", "5000");
         env.put("CANDLE_WINDOW_MS", "30000");
         SignalJobConfig cfg = SignalJobConfig.from(env);
-        assertEquals(120_000L, cfg.dedupTtlMs());
+        assertEquals(5000, cfg.dedupWindowEntries());
         assertEquals(30_000L, cfg.candleWindowMs());
     }
 
     @Test
     void devRejectsOutOfRangeDedupAndCandle() {
         Map<String, String> env = env();
-        env.put("DEDUP_TTL_MS", "50"); // below dev range 1000..600000
+        env.put("DEDUP_WINDOW_ENTRIES", "50"); // below dev range 100..100000
         assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
 
         Map<String, String> env2 = env();
