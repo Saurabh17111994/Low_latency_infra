@@ -69,15 +69,19 @@ import org.slf4j.LoggerFactory;
  *       the completed checkpoint contains {@code .sst} files — incremental
  *       RocksDB artifacts a heap-state checkpoint never produces.</li>
  *   <li>Dedup state restores: the restored job resumes at the checkpointed
- *       source offsets and dedup/window state — LOG reaches exactly 50 (the
- *       46 phase-1 rows + the two pending w23 windows held in checkpointed
- *       window state + the new w24 windows), never 92, which an offset-0
+ *       source offsets and dedup state — LOG reaches exactly 48 (the 46
+ *       phase-1 rows + the new w24 windows), never 92, which an offset-0
  *       fallback would emit.</li>
- *   <li>Window state restores: the pending w23 windows close exactly once
- *       (tickCount=1) and w24 folds its four ticks.</li>
+ *   <li>Window close-out restores EMPTY by design (chain-heap redesign,
+ *       2026-09-03, OP4): in-flight window state lives on the heap, so the
+ *       pre-restore w23 partial is intentionally dropped — it never re-emits
+ *       (asserted absent), never duplicates; the restored job's w24 folds its
+ *       four post-restore ticks and closes exactly once. Restored end-timers
+ *       without heap slots no-op loudly
+ *       ({@code compute.candles.restored_timer_noop}).</li>
  *   <li>Existing LOG rows survive the restore byte-identical in business
- *       fields, and the restored job appends exactly the 4 post-restore rows
- *       (w23+w24 × 2 tokens) — no duplicates, no lost rows.</li>
+ *       fields, and the restored job appends exactly the 2 post-restore rows
+ *       (w24 × 2 tokens) — no duplicates, no lost rows.</li>
  *   <li>Restore failure cannot fall back: startup mode is RESTORE (config
  *       gate, P6-proven) and the restore is strict (no {@code
  *       allowNonRestoredState}).</li>
@@ -192,18 +196,24 @@ class CandleRocksDbRestoreIntegrationTest {
             appendWindow(s, 24, 10024L); // 4 ticks per token in w24 (flat)
             appendPusher(s, 25, 10025L); // advance the watermark past w24's end
             JobClient job2 = startJob(envFor(s, restore, rocksDir), "p4.3-phase2");
-            awaitLogCount(s, 50,
-                    "restored RocksDB job must emit pending w23 and new w24 (46 + 2 + 2)", 180);
+            // Chain-heap redesign (2026-09-03, OP4): in-flight window state is
+            // heap amnesiac by design — the pre-restore pusher tick in w23 is
+            // GONE after restore, so the restored job emits ONLY the new w24
+            // (46 + 2). w23's restored end-timer no-ops loudly
+            // (compute.candles.restored_timer_noop); its in-flight partial is
+            // intentionally dropped, never re-emitted, never duplicated.
+            awaitLogCount(s, 48,
+                    "restored job must emit new w24 only (46 + 2) — w23 was amnesiac", 180);
             Map<CandleKey, List<CandleRow>> log2 = readLogMap(s);
-            assertEquals(50, log2.size(),
-                    "restored LOG must hold 46 old keys + pending w23 + new w24 for both tokens");
+            assertEquals(48, log2.size(),
+                    "restored LOG must hold 46 old keys + new w24 for both tokens");
             assertExistingKeysAndBusinessFields(log1, log2,
                     "restore must not change the business fields of already-written keys");
             for (long token : new long[] {TOKEN_A, TOKEN_B}) {
                 List<CandleRow> w23 = log2.get(new CandleKey(token, BASE + 23 * WINDOW_MS));
-                assertTrue(w23 != null && w23.size() == 1, "w23 must close exactly once for " + token);
-                assertEquals(1, w23.get(0).tickCount(),
-                        "restored pending pusher tick must close w23 exactly once");
+                assertTrue(w23 == null,
+                        "mid-flight w23 must NOT re-emit after restore (heap amnesia by design) for "
+                                + token);
                 List<CandleRow> w24 = log2.get(new CandleKey(token, BASE + 24 * WINDOW_MS));
                 assertTrue(w24 != null && w24.size() == 1, "w24 must close exactly once for " + token);
                 assertEquals(4, w24.get(0).tickCount(),

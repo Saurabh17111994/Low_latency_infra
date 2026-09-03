@@ -1,145 +1,115 @@
 package com.trading.compute.signaljob;
 
 import com.trading.common.model.FormingBar;
-import java.util.ArrayList;
-import java.util.List;
+import java.io.Serializable;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.Map;
 import org.apache.flink.api.common.functions.OpenContext;
-import org.apache.flink.api.common.state.ValueState;
-import org.apache.flink.api.common.state.ValueStateDescriptor;
-import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.functions.co.KeyedCoProcessFunction;
 import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.Preconditions;
 
 /**
- * Forming-bar placeholder detector (Slice 2.2 forming-bar handoff): the
- * Business Logic consumer that receives live {@link FormingBar} events and
- * emits {@code Signal_Candidates} rows via the shared candidate contract.
+ * Forming-bar breakout detection (Signal dossier, placeholder rule): heap
+ * state (chain-heap redesign, 2026-09-03 plan
+ * {@code docs/plans/2026-09-03-candle-chain-heap-plan.md} OP2).
  *
- * <p><b>Two inputs, same instrument key.</b> {@code processElement1} receives
- * the live forming-bar event (one per accepted tick — REQ-FC-007);
- * {@code processElement2} receives completed candles from the existing candle
- * pipeline (the same stream that feeds {@code SignalDetectionFunction}) and
- * maintains the lookback ring buffers. Both streams are keyed by
- * {@code instrument_token} and connected with matching key selectors, so a
- * forming-bar event for instrument X only ever sees completed-candle history
- * for instrument X (Flink keyed-state scoping).
+ * <p>Replaces 4 per-tick {@code ValueState} touches (1 write + 2 reads on
+ * every forming bar — the write fired even for ticks the rule ignores,
+ * 43.1% busy at 4.9 k/s) with a per-key in-heap slot. Evaluation ORDER and
+ * rule math are unchanged: current-window update before evaluation, warm
+ * gate, fire-once per forming window, strictly-prior guard on completed
+ * candles, lookback ring buffers trimmed to {@code formingLookbackCandles}.
  *
- * <p><b>Placeholder rule — "mirrored breakout" (PLACEHOLDER, not the real
- * strategy).</b> Mirrors the Slice 2.1 rule shape on the live forming bar:
- * <ol>
- *   <li><b>Bullish</b>: {@code close > open} (strict).</li>
- *   <li><b>Breakout</b>: {@code close > max(high of the previous
- *       {@code FORMING_LOOKBACK_CANDLES} completed candles)} (strict).</li>
- *   <li><b>Trend filter</b>: {@code close > mean(close of the previous
- *       completed candles)} — exact integer compare {@code close * n > sum}.</li>
- * </ol>
- * No evaluation before {@code lookback} completed candles exist per instrument
- * (warm-up). Lookback history is strictly prior: only candles with
- * {@code windowEnd <= formingBar.windowStart()} enter the buffers, so the
- * forming window's own candle (not yet closed) and future candles can never
- * leak into the comparison.
+ * <p><b>Intentional amnesia:</b> slots are plain fields, NOT Flink managed
+ * state. A restore restarts empty and re-warms in lookback×15 s from live
+ * completed candles. Run under uid {@code forming-bar-detection-v2} so
+ * pre-redesign checkpoints fail closed (G-CHAIN-3).
  *
- * <p><b>Fire-once per forming window — PLACEHOLDER-ONLY semantics.</b> The
- * detector fires at most one candidate per (instrument, forming window):
- * {@code forming-fired} {@code ValueState} records the fired window start and
- * is reset only when a new window's event arrives. It is NOT a semantic of
- * the forming-bar event contract or the handoff — future real strategies
- * remain free to react per update, revise, fire once, or fire many times. The
- * {@link FormingBar} event itself carries no fire-once encoding.
- *
- * <p><b>Emission profile — fire-once is deterministic, WHICH windows fire is
- * not (warm-up race).</b> The lookback ring fills from the candle stream
- * (input 2) racing the live forming-bar stream (input 1) at the {@code
- * connect}, so whether window {@code w} fires depends on whether its
- * {@code FORMING_LOOKBACK_CANDLES} prior candles reached the ring before
- * {@code w}'s qualifying tick was evaluated. On a feed whose prices drift
- * upward per window (e.g. the deterministic P6 feed's +50 paise high tick),
- * the forming close briefly beats the lookback max HIGH for EVERY warm
- * window, so up to {@code N − lookback + 1} warm windows fire once each; a
- * window whose qualifying tick lost the warm-up race is skipped permanently
- * (the tick is a single live instant). The observed forming-bar row count is
- * therefore a scheduling-dependent subset of the warm windows (P6: ~14–18 of
- * 18 per token), never a fixed number. Integration tests must not pin an
- * exact forming-bar count (CHG-030 scopes them to the window-driven rule);
- * unit tests pre-fill the lookback through the operator harness for
- * determinism.
- *
- * <p>Fire-once survives checkpoint recovery (keyed {@code ValueState}, the
- * same mechanism as {@code CandleEmitFunction}'s emitted flag) — replayed
- * events for an already-fired window emit nothing, so duplicate updates can
- * never generate duplicate candidates.
- *
- * <p><b>Candidate identity:</b> {@code rule_id-instrument_token-window_start}
- * — unique because the placeholder fires once per (instrument, window).
- * Downstream: the candidate rows union into the existing signal dual-sink
- * ({@code Signal_Candidates} LOG + {@code Signal_Candidates_current} KV via
- * the canonical filter, which now admits {@code CANONICAL_FORMING_RULE_ID}).
- * Candidates are observational/test data in the current build — the only
- * executable feed ({@code Trade_Decisions}) has no producer and the Executor
- * consumes {@code Trade_Decisions} only (see the dossier).
+ * <p><b>Fail-fast guards:</b> G-CHAIN-1 — ring buffers trim structurally to
+ * the lookback (never grow); G-CHAIN-2 — global slot cap fails closed instead
+ * of silently dropping instruments.
  */
 public class FormingBarDetectionFunction
         extends KeyedCoProcessFunction<Long, FormingBar, RowData, RowData> {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
-    private static final ValueStateDescriptor<List<Long>> HIGHS_DESCRIPTOR =
-            new ValueStateDescriptor<>("forming-candle-highs", Types.LIST(Types.LONG));
-    private static final ValueStateDescriptor<List<Long>> CLOSES_DESCRIPTOR =
-            new ValueStateDescriptor<>("forming-candle-closes", Types.LIST(Types.LONG));
-    private static final ValueStateDescriptor<Long> FIRED_DESCRIPTOR =
-            new ValueStateDescriptor<>("forming-fired-window-start", Types.LONG);
-    private static final ValueStateDescriptor<Long> CURRENT_WINDOW_DESCRIPTOR =
-            new ValueStateDescriptor<>("forming-current-window-start", Types.LONG);
+    /**
+     * Headroom over the instrument universe for the global slot cap
+     * (G-CHAIN-2): 1024 instruments expected; 64× headroom before failing
+     * closed.
+     */
+    static final int GLOBAL_SLOT_CAP = 65_536;
+
+    /** Per-key detection slot: reference window, fire flag, lookback rings. */
+    static final class Slot implements Serializable {
+        private static final long serialVersionUID = 1L;
+        long currentWindow = Long.MIN_VALUE;
+        long firedWindow = Long.MIN_VALUE;
+        final Deque<Long> highs = new ArrayDeque<>();
+        final Deque<Long> closes = new ArrayDeque<>();
+    }
 
     private final SignalJobConfig config;
 
-    private transient ValueState<List<Long>> highsState;
-    private transient ValueState<List<Long>> closesState;
-    private transient ValueState<Long> firedState;
-    private transient ValueState<Long> currentWindowState;
+    /** Per-key detection slots. Plain fields: intentionally NOT checkpointed. */
+    private final Map<Long, Slot> slots = new HashMap<>();
+
     private transient Counter detectedCounter;
 
     public FormingBarDetectionFunction(SignalJobConfig config) {
-        this.config = config;
+        this.config = Preconditions.checkNotNull(config);
     }
 
     @Override
     public void open(OpenContext openContext) {
-        highsState = getRuntimeContext().getState(HIGHS_DESCRIPTOR);
-        closesState = getRuntimeContext().getState(CLOSES_DESCRIPTOR);
-        firedState = getRuntimeContext().getState(FIRED_DESCRIPTOR);
-        currentWindowState = getRuntimeContext().getState(CURRENT_WINDOW_DESCRIPTOR);
+        slots.clear();
         detectedCounter = getRuntimeContext().getMetricGroup().counter("compute.signals.detected.forming");
+    }
+
+    private Slot slotFor(long key) {
+        Slot s = slots.get(key);
+        if (s == null) {
+            s = new Slot();
+            slots.put(key, s);
+            // G-CHAIN-2: fail closed on runaway key growth instead of
+            // silently dropping instruments.
+            Preconditions.checkState(slots.size() <= GLOBAL_SLOT_CAP,
+                    "forming-detection slots %s exceeded cap %s — refusing silent eviction",
+                    slots.size(), GLOBAL_SLOT_CAP);
+        }
+        return s;
     }
 
     /** Live forming-bar event (input 1): evaluate the placeholder rule. */
     @Override
     public void processElement1(FormingBar bar, Context ctx, Collector<RowData> out)
             throws Exception {
+        Slot s = slotFor(ctx.getCurrentKey());
         // Track the current forming window (drives the strictly-prior guard on
         // completed-candle ingestion below). Updated BEFORE evaluation so this
         // event's own window is the reference for the history it compares
         // against; the fire-once flag resets naturally when a later event
         // carries a different windowStart.
-        currentWindowState.update(bar.windowStart());
+        s.currentWindow = bar.windowStart();
 
-        List<Long> highs = highsState.value();
-        List<Long> closes = closesState.value();
+        Deque<Long> highs = s.highs;
+        Deque<Long> closes = s.closes;
         int lookback = config.formingLookbackCandles();
 
-        boolean warm = highs != null && closes != null
-                && highs.size() >= lookback && closes.size() >= lookback;
+        boolean warm = highs.size() >= lookback && closes.size() >= lookback;
         if (!warm) {
             return; // warm-up: not enough completed-candle history yet
         }
 
-        Long firedWindow = firedState.value();
-        if (firedWindow != null && firedWindow == bar.windowStart()) {
+        if (s.firedWindow == bar.windowStart()) {
             return; // fire-once per forming window (placeholder-only semantics)
         }
 
@@ -158,7 +128,7 @@ public class FormingBarDetectionFunction
             return;
         }
 
-        firedState.update(bar.windowStart());
+        s.firedWindow = bar.windowStart();
         detectedCounter.inc();
         out.collect(toCandidate(bar));
     }
@@ -178,37 +148,28 @@ public class FormingBarDetectionFunction
         // WHILE window [W, W+15) is still forming (watermark crosses W mid-
         // window), and the guard admits it (windowEnd == W <= W) while
         // rejecting anything from window [W, W+15) or later.
-        Long currentWindow = currentWindowState.value();
-        if (currentWindow != null && candleWindowEnd > currentWindow) {
+        Slot s = slotFor(ctx.getCurrentKey());
+        if (s.currentWindow != Long.MIN_VALUE && candleWindowEnd > s.currentWindow) {
             return;
         }
-        addToBuffers(candle);
+        addToBuffers(s, candle);
     }
 
-    private void addToBuffers(RowData candle) throws Exception {
+    private void addToBuffers(Slot s, RowData candle) {
         long high = candle.getLong(CandleTableColumns.HIGH_PAISE);
         long close = candle.getLong(CandleTableColumns.CLOSE_PAISE);
 
-        List<Long> highs = highsState.value();
-        if (highs == null) {
-            highs = new ArrayList<>();
-        }
-        List<Long> closes = closesState.value();
-        if (closes == null) {
-            closes = new ArrayList<>();
-        }
-
         int lookback = config.formingLookbackCandles();
-        highs.add(high);
-        closes.add(close);
-        while (highs.size() > lookback) {
-            highs.remove(0);
+        s.highs.addLast(high);
+        s.closes.addLast(close);
+        // G-CHAIN-1: structural trim — rings never exceed the lookback, so no
+        // key can grow memory across windows.
+        while (s.highs.size() > lookback) {
+            s.highs.removeFirst();
         }
-        while (closes.size() > lookback) {
-            closes.remove(0);
+        while (s.closes.size() > lookback) {
+            s.closes.removeFirst();
         }
-        highsState.update(highs);
-        closesState.update(closes);
     }
 
     private RowData toCandidate(FormingBar bar) {
@@ -244,5 +205,15 @@ public class FormingBarDetectionFunction
         row.setField(SignalCandidatesTableColumns.SCHEMA_VERSION,
                 StringData.fromString(SignalCandidatesTableColumns.SCHEMA_VERSION_V2));
         return row;
+    }
+
+    /** Test seams: live slot count; ring sizes for a token. */
+    int slotCountForTest() {
+        return slots.size();
+    }
+
+    int ringSizeForTest(long token) {
+        Slot s = slots.get(token);
+        return s == null ? 0 : s.highs.size();
     }
 }

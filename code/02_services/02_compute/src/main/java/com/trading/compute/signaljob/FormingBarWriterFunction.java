@@ -1,84 +1,102 @@
 package com.trading.compute.signaljob;
 
 import com.trading.common.model.FormingBar;
+import java.util.HashMap;
+import java.util.Map;
 import org.apache.flink.api.common.functions.OpenContext;
-import org.apache.flink.api.common.state.ValueState;
-import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.Preconditions;
 
 /**
- * Durable-write cadence for the {@code forming_bar} KV current-state
- * projection (forming-bar persistence phase, 2026-08-16). Keyed by
- * {@code instrument_token}, this operator coalesces the per-tick
- * {@link FormingBar} stream from the builder's {@code PERSIST_OUTPUT} side
- * output to <b>one row per instrument</b> — the latest forming bar, replacing
- * any previous state (current-state semantics: PK {@code instrument_token},
- * last-write-wins, never append-only history, never per-tick snapshots) — and
- * emits it on a processing-time cadence ({@code FORMING_BAR_WRITE_BATCH_MS})
- * for the downstream {@code FlussSink} (INSERT → UPSERT). The sink aligns to
- * checkpoint barriers, so the worst durable-write window is bounded by the
- * write cadence plus the sink's own batching — no per-tick Fluss write is
- * ever placed on the forming-bar hot path.
+ * Forming-bar persistence coalescer (REQ-FC-007): heap snapshots (chain-heap
+ * redesign, 2026-09-03 plan
+ * {@code docs/plans/2026-09-03-candle-chain-heap-plan.md} OP3).
  *
- * <p><b>State ownership (DEC-038):</b> Fluss owns the durable forming-bar
- * state; this operator holds only the bounded active context — one buffered
- * row per instrument (bounded by instrument count, not by update rate). The
- * buffer is cleared after each flush: a quiet instrument writes nothing until
- * its forming bar moves again, and a restart rehydrates the row from Fluss
- * (the durable authority), not from this operator's state.
+ * <p>Replaces the per-tick {@code ValueState} read-modify-write on the
+ * persist leg (2 touches per tick, 36.6% busy at 4.9 k/s) with a per-key
+ * in-heap snapshot slot. The coalescing and timer cadence are unchanged: at
+ * most {@code formingBatchMs} stale, one sink row per instrument per flush.
+ * The processing-time flush timer survives as the ONLY managed piece
+ * (timers cannot live in the heap — Flink owns the clock).
+ *
+ * <p><b>Intentional amnesia:</b> the buffered snapshot is a plain field, NOT
+ * Flink managed state. A restore keeps the timer rhythm but drops the
+ * pre-crash snapshot: the next post-restore tick re-buffers within a
+ * fraction of a second and the KV row converges on the next flush — nobody
+ * reads a half-second-stale in-progress bar on a restart path. Run under uid
+ * {@code forming-bar-writer-v2} so pre-redesign checkpoints fail closed
+ * (G-CHAIN-3).
+ *
+ * <p><b>Fail-fast guards:</b> G-CHAIN-1 — one slot per key is structural;
+ * G-CHAIN-2 — global slot cap fails closed instead of silently dropping
+ * instruments.
  */
 public class FormingBarWriterFunction extends KeyedProcessFunction<Long, FormingBar, RowData> {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
-    private static final ValueStateDescriptor<FormingBar> LATEST_DESCRIPTOR =
-            new ValueStateDescriptor<>("forming-bar-latest", FormingBarTypeInfo.INSTANCE);
-    private static final ValueStateDescriptor<Long> PENDING_TIMER_DESCRIPTOR =
-            new ValueStateDescriptor<>("forming-bar-pending-timer", Long.class);
+    /**
+     * Headroom over the instrument universe for the global slot cap
+     * (G-CHAIN-2): 1024 instruments expected; 64× headroom before failing
+     * closed.
+     */
+    static final int GLOBAL_SLOT_CAP = 65_536;
 
     private final SignalJobConfig config;
 
-    private transient ValueState<FormingBar> latest;
-    private transient ValueState<Long> pendingTimer;
+    /**
+     * Per-key latest snapshot. Plain fields: intentionally NOT checkpointed —
+     * the Fluss KV table holds the durable row; this buffer only coalesces.
+     */
+    private final Map<Long, FormingBar> latestByInstrument = new HashMap<>();
 
     public FormingBarWriterFunction(SignalJobConfig config) {
-        this.config = config;
+        this.config = Preconditions.checkNotNull(config);
     }
 
     @Override
-    public void open(OpenContext openContext) {
-        latest = getRuntimeContext().getState(LATEST_DESCRIPTOR);
-        pendingTimer = getRuntimeContext().getState(PENDING_TIMER_DESCRIPTOR);
+    public void open(OpenContext openContext) throws Exception {
+        latestByInstrument.clear();
     }
 
     @Override
     public void processElement(FormingBar bar, Context ctx, Collector<RowData> out)
             throws Exception {
-        // Current-state coalescing: the latest snapshot for this instrument
-        // REPLACES the buffered one — the table never holds per-tick history.
-        latest.update(bar);
-        if (pendingTimer.value() == null) {
+        // Buffer ONLY the latest snapshot per instrument per window (last
+        // write wins) and collapse redundant processing-time timers into ONE
+        // outstanding flush per instrument: the per-tick KvState read-
+        // modify-write pair and the old enqueue-every-tick timer storm both
+        // disappear.
+        boolean fresh = !latestByInstrument.containsKey(ctx.getCurrentKey());
+        latestByInstrument.put(ctx.getCurrentKey(), bar);
+        if (fresh) {
+            // G-CHAIN-2: fail closed on runaway key growth instead of
+            // silently dropping instruments.
+            Preconditions.checkState(latestByInstrument.size() <= GLOBAL_SLOT_CAP,
+                    "forming-writer slots %s exceeded cap %s — refusing silent eviction",
+                    latestByInstrument.size(), GLOBAL_SLOT_CAP);
+            // Processing-time cadence UNCHANGED (same staleness bound as
+            // before: worst durable-write window = cadence + sink batching).
             long fireAt = ctx.timerService().currentProcessingTime()
                     + config.formingBarWriteBatchMs();
             ctx.timerService().registerProcessingTimeTimer(fireAt);
-            pendingTimer.update(fireAt);
         }
     }
 
     @Override
     public void onTimer(long timestamp, OnTimerContext ctx, Collector<RowData> out)
             throws Exception {
-        pendingTimer.clear();
-        FormingBar bar = latest.value();
-        if (bar == null) {
+        FormingBar latest = latestByInstrument.remove(ctx.getCurrentKey());
+        if (latest == null) {
             return;
         }
-        out.collect(FormingBarRowMapper.toRow(bar));
-        // The row is now handed to the sink (durable at the next barrier);
-        // Fluss is the authority. Clear the bounded active context so a quiet
-        // instrument holds nothing (DEC-038: small working state).
-        latest.clear();
+        out.collect(FormingBarRowMapper.toRow(latest));
+    }
+
+    /** Test seam: live buffered-snapshot count. */
+    int bufferedCountForTest() {
+        return latestByInstrument.size();
     }
 }

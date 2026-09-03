@@ -16,7 +16,6 @@ import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
 import org.apache.flink.table.data.RowData;
 import org.apache.fluss.client.initializer.OffsetsInitializer;
 import org.apache.fluss.flink.sink.FlussSink;
@@ -229,15 +228,24 @@ public final class SignalJob {
                 // no-allowNonRestoredState rule — clean start required.
                 .uid("fingerprint-dedup-v2");
 
+        // Chain-heap redesign (2026-09-03 plan, OP4): the tumbling window +
+        // aggregate + emit operator did 2-3 RocksDB touches per tick (46.5%
+        // busy at 4.9 k/s). HeapCandleEmitFunction keeps the same
+        // epoch-aligned 15 s windows, the same end-timer fire time, the same
+        // accumulation math, the same quarantine gate and the same late-drop
+        // leg — only the window state moved to the heap (see its javadoc
+        // for the one documented fresh-slot edge).
         SingleOutputStreamOperator<RowData> candles = deduped
                 .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
-                .window(TumblingEventTimeWindows.of(Duration.ofMillis(config.candleWindowMs())))
-                .allowedLateness(Duration.ofMillis(config.allowedLatenessMs()))
-                .sideOutputLateData(CandleLateDrop.OUTPUT)
-                .aggregate(new CandleAggregateFunction(), new CandleEmitFunction(config))
+                .process(new HeapCandleEmitFunction(config))
                 .returns(CandleTableColumns.ROW_TYPE_INFO)
                 .name("candle-15s")
-                .uid("candle-15s");
+                // G-CHAIN-3 (chain-heap redesign): new uid so Flink never
+                // silently maps pre-redesign checkpointed window state onto
+                // the heap operator (which requests no managed window
+                // state). Restoring an old checkpoint fails closed — clean
+                // start required.
+                .uid("candle-15s-v2");
 
         // --- Low-latency candles Phase 1 (2026-08-29): live preview path ---
         // A SECOND, parallel window over the same deduped ticks emits the
@@ -252,15 +260,22 @@ public final class SignalJob {
         // the guard so Phase 2's EarlySignalFunction can consume it.
         DataStream<RowData> previews = null;
         if (config.previewEnabled()) {
+            // Chain-heap redesign (2026-09-03 plan, OP5): the second window
+            // operator duplicated every tick's accumulator RocksDB traffic
+            // (42.9% busy at 4.9 k/s). HeapPreviewFunction keeps the same
+            // event-time preview cadence (first at windowStart + interval,
+            // then per interval, final at windowEnd), the same row building
+            // and the same contracts (no invariant check, no KV guard, never
+            // feeds signal detection) — only the accumulation moved to the
+            // heap; late ticks now drop loudly instead of resurrecting a
+            // purged window (see its javadoc).
             previews = deduped
                     .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
-                    .window(TumblingEventTimeWindows.of(Duration.ofMillis(config.candleWindowMs())))
-                    .trigger(CandlePreviewTrigger.of(Duration.ofMillis(config.previewIntervalMs())))
-                    .allowedLateness(Duration.ofMillis(config.allowedLatenessMs()))
-                    .aggregate(new CandleAggregateFunction(), new CandlePreviewEmitFunction(config))
+                    .process(new HeapPreviewFunction(config))
                     .returns(CandlePreviewColumns.ROW_TYPE_INFO)
                     .name("candle-preview-15s")
-                    .uid("candle-preview-15s");
+                    // G-CHAIN-3 (chain-heap redesign): new uid — see candle-15s-v2.
+                    .uid("candle-preview-15s-v2");
 
             previews.sinkTo(FlussSink.<RowData>builder()
                             .setBootstrapServers(config.bootstrapServers())
@@ -398,7 +413,10 @@ public final class SignalJob {
                 .process(new FormingBarBuilderFunction(config))
                 .returns(FormingBarTypeInfo.INSTANCE)
                 .name("forming-bar-builder")
-                .uid("forming-bar-builder");
+                // G-CHAIN-3 (chain-heap redesign): uid bumped — the builder
+                // now keeps forming slots on the heap (no managed state);
+                // restoring a pre-redesign checkpoint fails closed.
+                .uid("forming-bar-builder-v2");
 
         // The detector co-locates both inputs by instrument key: the live
         // forming-bar events (input 1) and the completed candles (input 2,
@@ -412,7 +430,10 @@ public final class SignalJob {
                 .process(new FormingBarDetectionFunction(config))
                 .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
                 .name("forming-bar-detection")
-                .uid("forming-bar-detection");
+                // G-CHAIN-3 (chain-heap redesign): uid bumped — heap slots,
+                // no managed state; restoring a pre-redesign checkpoint
+                // fails closed.
+                .uid("forming-bar-detection-v2");
 
         // Forming-bar durable home (persistence phase, 2026-08-16): the
         // builder's PERSIST_OUTPUT carries every tick's snapshot to a
@@ -430,7 +451,10 @@ public final class SignalJob {
                 .process(new FormingBarWriterFunction(config))
                 .returns(FormingBarTableColumns.ROW_TYPE_INFO)
                 .name("forming-bar-writer")
-                .uid("forming-bar-writer")
+                // G-CHAIN-3 (chain-heap redesign): uid bumped — the buffered
+                // snapshot moved to the heap (only the flush timer remains
+                // managed); restoring a pre-redesign checkpoint fails closed.
+                .uid("forming-bar-writer-v2")
                 .sinkTo(FlussSink.<RowData>builder()
                                 .setBootstrapServers(config.bootstrapServers())
                                 .setDatabase(config.database())

@@ -1,47 +1,57 @@
 package com.trading.compute.signaljob;
 
 import com.trading.common.model.FormingBar;
+import java.io.Serializable;
+import java.util.HashMap;
+import java.util.Map;
 import org.apache.flink.api.common.functions.OpenContext;
-import org.apache.flink.api.common.state.ValueState;
-import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.util.Collector;
 import org.apache.flink.util.OutputTag;
+import org.apache.flink.util.Preconditions;
 
 /**
- * Forming-bar builder (Slice 2.2 forming-bar handoff, REQ-FC-007): consumes
- * the deduped, validated tick stream keyed by {@code instrument_token} and
- * maintains the CURRENT 15-second forming bar per instrument, emitting a
- * {@link FormingBar} record on EVERY accepted tick — Business Logic sees the
- * latest forming state immediately, with no wait for the window to close and
- * no Fluss round trip.
+ * Per-tick forming-bar builder (Signal dossier, REQ-FC-002/007): heap
+ * accumulation (chain-heap redesign, 2026-09-03 plan
+ * {@code docs/plans/2026-09-03-candle-chain-heap-plan.md} OP1).
  *
- * <p><b>Live forming state, not history:</b> this operator holds only the
- * current window's accumulator (bounded by instrument count — DEC-038 open-
- * candle working state). Per-tick snapshots are transient stream events; they
- * are never retained in Flink state and never written anywhere. The FINALIZED
- * candle is produced exclusively by the completed-candle pipeline (the window
- * operator) — this operator finalizes nothing and never emits a candle.
+ * <p>Replaces the per-tick {@code ValueState} read-modify-write pair (2
+ * RocksDB reads + 1-2 writes per tick, 47.6% busy at 4.9 k/s) with a per-key
+ * in-heap slot: {@code windowStart + CandleAccumulator}. Accumulation math is
+ * the untouched shared {@link CandleAggregateFunction#add}; only
+ * state-holding moved. Output contract unchanged: one {@link FormingBar} to
+ * main + the same reference to {@link #PERSIST_OUTPUT} per accepted tick.
  *
- * <p><b>Aggregation semantics:</b> identical to the candle path — this
- * operator reuses {@link CandleAccumulator} + {@link CandleAggregateFunction}
- * (REQ-FC-002: OHLC from {@code last_price_paise} on trades AND quotes,
- * volume/tick_count only on {@code TRADE} rows with {@code last_qty > 0},
- * open/close by the deterministic {@code (event_time, event_fingerprint)}
- * order key). Window alignment is epoch-aligned
- * ({@code floor(event_time / CANDLE_WINDOW_MS) * CANDLE_WINDOW_MS}) — the
- * same alignment the tumbling window operator uses, so the forming bar and
- * the eventual finalized candle always agree.
+ * <p><b>Intentional amnesia</b> (same rationale as the dedup redesign): slots
+ * are plain fields, NOT Flink managed state. A restore restarts empty and
+ * rebuilds from live ticks; the forming window in flight at the crash
+ * restarts partial. Completed candles, signals and saved tables are
+ * unaffected. Run under uid {@code forming-bar-builder-v2} so pre-redesign
+ * checkpoints fail closed (G-CHAIN-3).
  *
- * <p>Per-tick event volume is intentional (REQ-FC-007 "whenever an eligible
- * trade updates the current forming bar"); the counter
- * {@code compute.forming.bar.updates} measures the update rate (REQ-FC-010).
+ * <p><b>Fail-fast guards:</b> G-CHAIN-1 — single slot per key is structural
+ * (nothing to bound per key); G-CHAIN-2 — global key cap fails closed instead
+ * of silently dropping instruments (a leak must shout, §OP1).
  */
 public class FormingBarBuilderFunction extends KeyedProcessFunction<Long, RowData, FormingBar> {
 
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
+
+    /**
+     * Headroom over the instrument universe for the global slot cap
+     * (G-CHAIN-2): 1024 instruments expected; 64× headroom before failing
+     * closed. Growth beyond it is a key leak, not legitimate listings.
+     */
+    static final int GLOBAL_SLOT_CAP = 65_536;
+
+    /** Per-key forming slot: current window + running accumulator. */
+    static final class Slot implements Serializable {
+        private static final long serialVersionUID = 1L;
+        long windowStart = Long.MIN_VALUE;
+        CandleAccumulator acc = new CandleAccumulator();
+    }
 
     /**
      * Durable-persistence leg (forming_bar KV current-state home, 2026-08-16):
@@ -55,27 +65,22 @@ public class FormingBarBuilderFunction extends KeyedProcessFunction<Long, RowDat
     public static final OutputTag<FormingBar> PERSIST_OUTPUT = new OutputTag<>(
             "forming-bar-persist", FormingBarTypeInfo.INSTANCE);
 
-    private static final ValueStateDescriptor<CandleAccumulator> ACC_DESCRIPTOR =
-            new ValueStateDescriptor<>("forming-bar-acc", CandleAccumulator.class);
-    private static final ValueStateDescriptor<Long> WINDOW_START_DESCRIPTOR =
-            new ValueStateDescriptor<>("forming-bar-window-start", Long.class);
-
     private final SignalJobConfig config;
     private final CandleAggregateFunction aggregate;
 
-    private transient ValueState<CandleAccumulator> accState;
-    private transient ValueState<Long> windowStartState;
+    /** Per-key forming slots. Plain fields: intentionally NOT checkpointed. */
+    private final Map<Long, Slot> slots = new HashMap<>();
+
     private transient Counter updateCounter;
 
     public FormingBarBuilderFunction(SignalJobConfig config) {
-        this.config = config;
+        this.config = Preconditions.checkNotNull(config);
         this.aggregate = new CandleAggregateFunction();
     }
 
     @Override
     public void open(OpenContext openContext) {
-        accState = getRuntimeContext().getState(ACC_DESCRIPTOR);
-        windowStartState = getRuntimeContext().getState(WINDOW_START_DESCRIPTOR);
+        slots.clear();
         updateCounter = getRuntimeContext().getMetricGroup().counter("compute.forming.bar.updates");
     }
 
@@ -87,20 +92,31 @@ public class FormingBarBuilderFunction extends KeyedProcessFunction<Long, RowDat
         // Epoch-aligned window start — the same alignment as TumblingEventTimeWindows.
         long windowStart = (eventTime / windowMs) * windowMs;
 
-        Long storedWindow = windowStartState.value();
-        CandleAccumulator acc = accState.value();
-        if (storedWindow == null || storedWindow != windowStart || acc == null) {
-            // First tick of a new window: start a fresh bar (open = this tick's price).
-            acc = new CandleAccumulator();
-            windowStartState.update(windowStart);
+        Slot slot = slots.get(ctx.getCurrentKey());
+        if (slot == null) {
+            slot = new Slot();
+            slots.put(ctx.getCurrentKey(), slot);
+            // G-CHAIN-2: fail closed on runaway key growth instead of
+            // silently dropping instruments (eviction would corrupt bars).
+            Preconditions.checkState(slots.size() <= GLOBAL_SLOT_CAP,
+                    "forming-bar slots %s exceeded cap %s — refusing silent eviction",
+                    slots.size(), GLOBAL_SLOT_CAP);
+        }
+        if (slot.windowStart != windowStart) {
+            // First tick of a new window: start a fresh bar. A fresh object
+            // (not in-place reset) so a future field added to
+            // CandleAccumulator can never leak across windows silently —
+            // one small alloc per 15 s window per key is negligible.
+            slot.acc = new CandleAccumulator();
+            slot.windowStart = windowStart;
         }
 
         // Same accumulation semantics as the candle path (REQ-FC-002).
-        aggregate.add(tick, acc);
-        accState.update(acc);
+        aggregate.add(tick, slot.acc);
 
         updateCounter.inc();
 
+        CandleAccumulator acc = slot.acc;
         FormingBar bar = new FormingBar(
                 tick.getLong(RawTableColumns.INSTRUMENT_TOKEN),
                 windowStart,
@@ -119,5 +135,15 @@ public class FormingBarBuilderFunction extends KeyedProcessFunction<Long, RowDat
         // Same snapshot to the persistence leg (the writer coalesces — the
         // side output is in-process, never a Fluss write per tick).
         ctx.output(PERSIST_OUTPUT, bar);
+    }
+
+    /** Test seams: live slot count; window start tracked for a token. */
+    int slotCountForTest() {
+        return slots.size();
+    }
+
+    long windowStartForTest(long token) {
+        Slot s = slots.get(token);
+        return s == null ? Long.MIN_VALUE : s.windowStart;
     }
 }

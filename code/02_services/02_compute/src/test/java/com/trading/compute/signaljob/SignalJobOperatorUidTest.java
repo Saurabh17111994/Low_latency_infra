@@ -57,7 +57,20 @@ class SignalJobOperatorUidTest {
         // checkpointed MapState can never silently attach to the heap-window
         // operator (which requests no managed state). Restoring an old
         // checkpoint fails closed — clean start required (plan §6).
-        EXPECTED_OPERATORS.put("candle-15s", "candle-15s");
+        // G-CHAIN-3 (chain-heap redesign, 2026-09-03): the window operator
+        // became HeapCandleEmitFunction and the preview window became
+        // HeapPreviewFunction — uids bumped so pre-redesign checkpointed
+        // window state can never silently attach to heap operators (they
+        // request no managed window state). Restoring an old checkpoint
+        // fails closed — clean start required (plan §2).
+        EXPECTED_OPERATORS.put("candle-15s-v2", "candle-15s");
+        // NOTE (review 2026-09-03): NO preview entries here on purpose. This
+        // test creates no preview scratch table and preflightTableContracts
+        // fails closed on a missing preview table whenever previews are on —
+        // so the preview branch is absent from the graph this contract
+        // pins (17 operators, unchanged by this redesign). The preview uid
+        // bump (candle-preview-15s-v2) is covered by HeapPreviewFunctionTest
+        // + the proof-run topology dump instead.
         EXPECTED_OPERATORS.put("candle-late-drop-counter", "candle-late-drop-counter");
         // Streaming-3000 T5 (decision 25): KV first-write-wins guard between
         // the window operator and the candle sink.
@@ -75,9 +88,9 @@ class SignalJobOperatorUidTest {
         // (CHG-029) — the topology grew 10 -> 14 operators when forming-bar
         // landed (04-signal-job.md JobGraphDump proof), but the pinned set
         // was never extended, so the contract test failed on first live run.
-        EXPECTED_OPERATORS.put("forming-bar-builder", "forming-bar-builder");
-        EXPECTED_OPERATORS.put("forming-bar-detection", "forming-bar-detection");
-        EXPECTED_OPERATORS.put("forming-bar-writer", "forming-bar-writer");
+        EXPECTED_OPERATORS.put("forming-bar-builder-v2", "forming-bar-builder");
+        EXPECTED_OPERATORS.put("forming-bar-detection-v2", "forming-bar-detection");
+        EXPECTED_OPERATORS.put("forming-bar-writer-v2", "forming-bar-writer");
         EXPECTED_OPERATORS.put("forming-bar-sink", "forming-bar-sink");
         EXPECTED_OPERATORS.put("signal-candidates-sink", "signal-candidates-sink");
         EXPECTED_OPERATORS.put("canonical-signal-filter", "canonical-signal-filter");
@@ -186,7 +199,7 @@ class SignalJobOperatorUidTest {
                 System.getenv().getOrDefault("SIGNAL_CANDIDATES_TABLE", "Signal_Candidates"));
         env.put("SIGNAL_CURRENT_TABLE",
                 System.getenv().getOrDefault("SIGNAL_CURRENT_TABLE", "Signal_Candidates_current"));
-        env.put("DEDUP_TTL_MS", "60000");
+        env.put("DEDUP_WINDOW_ENTRIES", "2000");
         env.put("CANDLE_WINDOW_MS", "15000");
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");

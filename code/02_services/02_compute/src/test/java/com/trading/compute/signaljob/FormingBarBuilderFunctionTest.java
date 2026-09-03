@@ -2,6 +2,7 @@ package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.trading.common.model.FormingBar;
 import java.lang.reflect.Field;
@@ -57,7 +58,7 @@ class FormingBarBuilderFunctionTest {
 
     private static Map<String, String> env() {
         Map<String, String> env = new HashMap<>();
-        env.put("DEDUP_TTL_MS", "60000");
+        env.put("DEDUP_WINDOW_ENTRIES", "2000");
         env.put("CANDLE_WINDOW_MS", "15000");
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");
@@ -210,5 +211,71 @@ class FormingBarBuilderFunctionTest {
         assertEquals(T0, persisted.get(0).windowStart());
         assertEquals(102, persisted.get(1).closePaise(), "same latest-bar semantics as main output");
         assertEquals(8L, persisted.get(2).instrumentToken());
+    }
+
+    @Test
+    void heapRedesignRequestsNoManagedState() throws Exception {
+        openHarness();
+        process(TestRawRows.row(7L, T0 + 1_000L, "fp-1", "TRADE", 100, 5));
+        process(TestRawRows.row(7L, T0 + 4_000L, "fp-2", "TRADE", 102, 2));
+        process(TestRawRows.row(8L, T0 + 2_000L, "fp-3", "TRADE", 50, 1));
+        assertEquals(0, harness.numKeyedStateEntries(),
+                "heap redesign requests no managed state");
+        assertEquals(0, harness.numEventTimeTimers(), "no timers in the builder");
+        assertEquals(2, function.slotCountForTest(), "two live slots, one per key");
+        assertEquals(T0, function.windowStartForTest(7L));
+    }
+
+    @Test
+    void restoreStartsEmptyAndRebuilds() throws Exception {
+        openHarness();
+        process(TestRawRows.row(7L, T0 + 1_000L, "fp-1", "TRADE", 100, 5));
+        assertEquals(1, function.slotCountForTest());
+        harness.close();
+
+        // New instance (what a restore produces for unmanaged fields): the
+        // forming window rebuilds from live ticks, starting fresh.
+        openHarness();
+        assertEquals(0, function.slotCountForTest(), "restore starts empty by design");
+        process(TestRawRows.row(7L, T0 + 2_000L, "fp-2", "TRADE", 200, 1));
+        List<FormingBar> bars = emittedBars(harness);
+        assertEquals(1, bars.size());
+        assertEquals(200, bars.get(0).openPaise(), "rebuilt bar starts fresh, no carry-over");
+    }
+
+    @Test
+    void slotCapTripFailsClosed() throws Exception {
+        openHarness();
+        int cap = FormingBarBuilderFunction.GLOBAL_SLOT_CAP;
+        try {
+            for (long t = 1; t <= (long) cap + 10; t++) {
+                process(TestRawRows.row(t, T0 + 1_000L, "fp-" + t, "TRADE", 100, 1));
+                if (t % 20_000 == 0) {
+                    harness.getOutput().clear(); // keep the harness queue bounded
+                }
+            }
+        } catch (IllegalStateException expected) {
+            assertTrue(expected.getMessage().contains("cap"),
+                    "trip message names the cap: " + expected.getMessage());
+            return;
+        }
+        throw new AssertionError("slot cap never tripped after " + (cap + 10) + " keys");
+    }
+
+    @Test
+    void heapHotPathStaysWithinBudget() throws Exception {
+        openHarness();
+        int n = 20_000;
+        long[] lat = new long[n];
+        for (int i = 0; i < n; i++) {
+            long s = System.nanoTime();
+            process(TestRawRows.row(7L, T0 + i, "fp-" + i, "TRADE", 100, 1));
+            lat[i] = System.nanoTime() - s;
+        }
+        java.util.Arrays.sort(lat);
+        long p99 = lat[(int) (n * 0.99)];
+        System.out.println("CHAIN[builder] p99ns=" + p99);
+        assertEquals(n, emittedBars(harness).size(), "every tick emits exactly one bar");
+        assertTrue(p99 < 50_000L, "builder p99 " + p99 + "ns exceeds 50us budget");
     }
 }

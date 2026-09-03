@@ -38,6 +38,7 @@ class FormingBarDetectionFunctionTest {
     private static final long WINDOW_MS = 15_000L;
 
     private KeyedTwoInputStreamOperatorTestHarness<Long, FormingBar, RowData, RowData> harness;
+    private FormingBarDetectionFunction function;
 
     @AfterEach
     void tearDown() throws Exception {
@@ -48,8 +49,9 @@ class FormingBarDetectionFunctionTest {
     }
 
     private void openHarness() throws Exception {
+        function = new FormingBarDetectionFunction(SignalJobConfig.from(env()));
         harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
-                new FormingBarDetectionFunction(SignalJobConfig.from(env())),
+                function,
                 bar -> bar.instrumentToken(),
                 candle -> candle.getLong(CandleTableColumns.INSTRUMENT_TOKEN),
                 Types.LONG);
@@ -58,7 +60,7 @@ class FormingBarDetectionFunctionTest {
 
     private static Map<String, String> env() {
         Map<String, String> env = new HashMap<>();
-        env.put("DEDUP_TTL_MS", "60000");
+        env.put("DEDUP_WINDOW_ENTRIES", "2000");
         env.put("CANDLE_WINDOW_MS", "15000");
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");
@@ -89,6 +91,23 @@ class FormingBarDetectionFunctionTest {
     private void sendCandle(long windowStart, long high, long close) throws Exception {
         harness.processElement2(candle(7L, windowStart, high, close),
                 windowStart + WINDOW_MS - 1L);
+    }
+
+    @Test
+    void candleForUnknownKeyWarmsLookbackButStaysBounded() throws Exception {
+        openHarness();
+        // A completed candle for a key with no forming bar warms that key's
+        // lookback rings (same as the old keyed state did) — the rings stay
+        // trimmed to the lookback and the key map stays under the global cap.
+        sendCandle(0L, 10700L, 10650L);
+        assertEquals(1, function.slotCountForTest(),
+                "candle for a fresh key warms its lookback");
+        for (int k = 0; k < 10; k++) {
+            harness.processElement2(candle(100L + k, k * 15_000L, 10700L, 10650L),
+                    k * 15_000L + 1L);
+        }
+        assertEquals(11, function.slotCountForTest(),
+                "one slot per unseen key, still far under the 65536 cap");
     }
 
     private void sendFormingBar(FormingBar bar) throws Exception {
@@ -300,5 +319,52 @@ class FormingBarDetectionFunctionTest {
 
     private static String stringAt(RowData row, int index) {
         return row.isNullAt(index) ? null : row.getString(index).toString();
+    }
+
+    @Test
+    void heapRedesignRequestsNoManagedState() throws Exception {
+        openHarness();
+        sendCandle(T0 - 3 * WINDOW_MS, 100, 100);
+        sendCandle(T0 - 2 * WINDOW_MS, 101, 101);
+        sendCandle(T0 - WINDOW_MS, 102, 102);
+        sendFormingBar(formingBar(7L, T0, 100, 120, 99, 120));
+        assertEquals(0, harness.numKeyedStateEntries(),
+                "heap redesign requests no managed state");
+        assertEquals(0, harness.numEventTimeTimers(), "no timers in detection");
+        assertEquals(1, function.slotCountForTest(), "one live slot");
+        assertEquals(3, function.ringSizeForTest(7L), "ring holds the lookback");
+    }
+
+    @Test
+    void ringsTrimStructurallyToLookback() throws Exception {
+        openHarness();
+        for (int i = 10; i >= 1; i--) {
+            sendCandle(T0 - i * WINDOW_MS, 100, 100);
+        }
+        assertEquals(3, function.ringSizeForTest(7L),
+                "rings never exceed the lookback no matter how many candles arrive");
+    }
+
+    @Test
+    void restoreStartsEmptyAndRewarms() throws Exception {
+        openHarness();
+        sendCandle(T0 - 3 * WINDOW_MS, 100, 100);
+        sendCandle(T0 - 2 * WINDOW_MS, 101, 101);
+        sendCandle(T0 - WINDOW_MS, 102, 102);
+        sendFormingBar(formingBar(7L, T0, 100, 120, 99, 120));
+        assertEquals(1, candidates(harness).size(), "warmed detector fires before restart");
+        harness.close();
+
+        // New instance (what a restore produces for unmanaged fields):
+        // cold, then re-warms from live completed candles and fires again.
+        openHarness();
+        assertEquals(0, function.slotCountForTest(), "restore starts empty by design");
+        sendFormingBar(formingBar(7L, T0, 100, 120, 99, 120));
+        assertEquals(0, candidates(harness).size(), "cold detector stays silent, fails safe");
+        sendCandle(T0 - 3 * WINDOW_MS, 100, 100);
+        sendCandle(T0 - 2 * WINDOW_MS, 101, 101);
+        sendCandle(T0 - WINDOW_MS, 102, 102);
+        sendFormingBar(formingBar(7L, T0, 100, 120, 99, 120));
+        assertEquals(1, candidates(harness).size(), "re-warmed detector fires again");
     }
 }

@@ -32,6 +32,7 @@ class FormingBarWriterFunctionTest {
     private static final long T0 = 1_710_000_000_000L;
 
     private KeyedOneInputStreamOperatorTestHarness<Long, FormingBar, RowData> harness;
+    private FormingBarWriterFunction function;
 
     @AfterEach
     void tearDown() throws Exception {
@@ -43,7 +44,7 @@ class FormingBarWriterFunctionTest {
 
     private static Map<String, String> envFor(long batchMs) {
         Map<String, String> env = new HashMap<>();
-        env.put("DEDUP_TTL_MS", "60000");
+        env.put("DEDUP_WINDOW_ENTRIES", "2000");
         env.put("CANDLE_WINDOW_MS", "15000");
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");
@@ -54,8 +55,9 @@ class FormingBarWriterFunctionTest {
     }
 
     private void openHarness(long batchMs) throws Exception {
+        function = new FormingBarWriterFunction(SignalJobConfig.from(envFor(batchMs)));
         harness = ProcessFunctionTestHarnesses.forKeyedProcessFunction(
-                new FormingBarWriterFunction(SignalJobConfig.from(envFor(batchMs))),
+                function,
                 bar -> bar.instrumentToken(),
                 Types.LONG);
         harness.open();
@@ -174,7 +176,7 @@ class FormingBarWriterFunctionTest {
     }
 
     @Test
-    void checkpointRestoreResumesBufferedStateAndTimer() throws Exception {
+    void checkpointRestoreKeepsTimerButDropsBuffer() throws Exception {
         SignalJobConfig config = SignalJobConfig.from(envFor(250));
         KeyedOneInputStreamOperatorTestHarness<Long, FormingBar, RowData> h1 =
                 ProcessFunctionTestHarnesses.forKeyedProcessFunction(
@@ -184,16 +186,18 @@ class FormingBarWriterFunctionTest {
         h1.open();
         h1.setProcessingTime(1_000L);
         h1.processElement(bar(7L, T0, 100, 5, 1), T0 + 1_000L);
-        // Buffered bar + timer at 1250 are now in the operator state.
+        // The event-time flush timer (managed) is in the snapshot; the
+        // buffered bar (heap) is intentionally NOT.
         OperatorSubtaskState snapshot = h1.snapshot(1L, 1_000L);
         h1.close();
 
         // Simulated Flink restart: a FRESH operator instance restored from
-        // the compact checkpoint (DEC-038: small active context — the
-        // buffered latest bar + the pending flush timer). The restore harness
-        // must be constructed DIRECTLY — ProcessFunctionTestHarnesses already
-        // calls harness.open(), and initializeState() after that fails
-        // (verified against flink-runtime 2.2.1 bytecode).
+        // the checkpoint. Heap amnesia by design: the restored timer fires
+        // but flushes NOTHING (buffer lost); the next live tick re-buffers
+        // and the KV row converges on the following flush. The restore
+        // harness must be constructed DIRECTLY — ProcessFunctionTestHarnesses
+        // already calls harness.open(), and initializeState() after that
+        // fails (verified against flink-runtime 2.2.1 bytecode).
         KeyedOneInputStreamOperatorTestHarness<Long, FormingBar, RowData> h2 =
                 new KeyedOneInputStreamOperatorTestHarness<>(
                         new KeyedProcessOperator<>(new FormingBarWriterFunction(config)),
@@ -204,12 +208,18 @@ class FormingBarWriterFunctionTest {
         h2.open();
         assertEquals(0, emittedRows(h2).size(),
                 "restored operator emits nothing before the restored timer fires");
+        assertEquals(0, h2.numKeyedStateEntries(),
+                "heap snapshot takes no managed state — timer only");
         h2.setProcessingTime(1_250L);
+        assertEquals(0, emittedRows(h2).size(),
+                "restored timer fires but the pre-crash buffer is gone — no stale write");
+        // Next live tick re-buffers; convergence resumes on the next flush.
+        h2.processElement(bar(7L, T0, 102, 7, 2), T0 + 4_000L);
+        h2.setProcessingTime(4_250L);
         List<RowData> rows = emittedRows(h2);
-        assertEquals(1, rows.size(),
-                "the restored buffer flushes on the restored timer — coalescing resumes exactly");
+        assertEquals(1, rows.size(), "post-restore tick flushes on the next cadence");
         assertEquals(7L, rows.get(0).getLong(FormingBarTableColumns.INSTRUMENT_TOKEN));
-        assertEquals(100, rows.get(0).getLong(FormingBarTableColumns.CLOSE_PAISE));
+        assertEquals(102, rows.get(0).getLong(FormingBarTableColumns.CLOSE_PAISE));
         h2.close();
     }
 
@@ -230,5 +240,19 @@ class FormingBarWriterFunctionTest {
         assertEquals(T0, rows.get(0).getLong(FormingBarTableColumns.WINDOW_START));
         assertEquals(T0, rows.get(1).getLong(FormingBarTableColumns.WINDOW_START));
         assertEquals(110, rows.get(1).getLong(FormingBarTableColumns.CLOSE_PAISE));
+    }
+
+    @Test
+    void heapRedesignBuffersWithoutManagedState() throws Exception {
+        openHarness(250);
+        harness.setProcessingTime(1_000L);
+        harness.processElement(bar(7L, T0, 100, 5, 1), T0 + 1_000L);
+        harness.processElement(bar(8L, T0, 200, 1, 1), T0 + 2_000L);
+        assertEquals(0, harness.numKeyedStateEntries(),
+                "heap redesign buffers snapshots without managed state");
+        assertEquals(2, function.bufferedCountForTest(), "two live snapshots, one per key");
+        harness.setProcessingTime(1_250L);
+        assertEquals(2, emittedRows(harness).size(), "both instruments flush");
+        assertEquals(0, function.bufferedCountForTest(), "flush clears the buffer");
     }
 }
