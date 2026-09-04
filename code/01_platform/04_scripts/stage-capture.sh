@@ -646,11 +646,17 @@ while :; do
         capture_stall_diagnostics "no arrow-tick-counts line ever in java.out by t+${ELAPSED}s"
         exit 2
       fi
-      # last_report is a log timestamp (HH:MM:SS.mmm) — compare wall-clock.
-      last_epoch="$(date -d "$(echo "$last_report" | sed 's/\..*//')" +%s 2>/dev/null)"
-      if [ -n "$last_epoch" ] && [ $((NOW - last_epoch)) -gt 40 ]; then
-        echo "!! FAIL: last arrow-tick-counts report $((NOW - last_epoch))s old at t+${ELAPSED}s (report at $last_report) — the arrow-bridge interval report stopped (bridge stall / feed stall); Java otlp may still flush. Dumping stall diagnostics now." >&2
-        capture_stall_diagnostics "arrow-bridge tick-count report stalled $((NOW - last_epoch))s (last $last_report)"
+      # last_report is a log timestamp (HH:MM:SS.mmm). The ingestion JVM
+      # logs in UTC (log4j pattern ends with Z; verified 2026-09-04), while
+      # the host runs IST (+5:30). Parsing the bare HH:MM:SS in the LOCAL
+      # zone misread 08:41 UTC as 08:41 IST -> "19819s old" -> false stall
+      # killed a healthy run at t+76s (soak 20260904-140936). Compare in
+      # UTC on both sides.
+      last_epoch="$(TZ=UTC date -d "$(echo "$last_report" | sed 's/\..*//')" +%s 2>/dev/null)"
+      now_utc="$(date -u +%s)"
+      if [ -n "$last_epoch" ] && [ $((now_utc - last_epoch)) -gt 40 ]; then
+        echo "!! FAIL: last arrow-tick-counts report $((now_utc - last_epoch))s old at t+${ELAPSED}s (report at $last_report UTC) — the arrow-bridge interval report stopped (bridge stall / feed stall); Java otlp may still flush. Dumping stall diagnostics now." >&2
+        capture_stall_diagnostics "arrow-bridge tick-count report stalled $((now_utc - last_epoch))s (last $last_report UTC)"
         exit 2
       fi
     fi

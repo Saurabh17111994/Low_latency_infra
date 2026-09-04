@@ -481,6 +481,14 @@ grep -q 'tick-counts.txt\|arrow-tick-counts' "$SCRIPT_DIR/stage-soak-e2e.sh" \
 grep -q 'METRICS_LOCAL_LOG=1' "$SCRIPT_DIR/stage-soak-e2e.sh" \
   && ok "G21g soak enables OTLP local payload capture" \
   || bad "G21g METRICS_LOCAL_LOG wiring MISSING"
+# 2026-09-05 (false-stall): the t+65 arrow-bridge stall guard parsed the
+# log's HH:MM:SS (UTC — log4j pattern ends in Z) with the LOCAL zone (IST,
+# +5:30), so a fresh UTC report read as ~5.5h old and the guard killed a
+# healthy soak at t+76s (run 20260904-140936). Both sides must be UTC.
+grep -q 'TZ=UTC date' "$cap" \
+  && grep -q 'now_utc="\$(date -u' "$cap" \
+  && ok "G21g bridge-stall guard compares UTC (2026-09-05 false-stall fix)" \
+  || bad "G21g bridge-stall guard not UTC-safe (UTC log vs IST host -> false stall kills healthy soaks)"
 
 
 # ---- G22/G23/G24 (2026-09-02): FLINK_PROPERTIES + TM-config fail-fast ----
