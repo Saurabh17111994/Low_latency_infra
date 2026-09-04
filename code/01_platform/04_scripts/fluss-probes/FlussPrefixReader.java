@@ -91,15 +91,25 @@ public class FlussPrefixReader {
                     scanner.subscribeFromBeginning(b);
                 }
                 long deadline = System.currentTimeMillis() + 60_000L;
+                int emptyPolls = 0;
                 while (System.currentTimeMillis() < deadline) {
                     ScanRecords records = scanner.poll(Duration.ofSeconds(2));
                     if (records == null || records.isEmpty()) {
-                        // No more data available now; wait briefly for more
-                        // then stop (bounded read of a finite append-only
-                        // table's current contents).
+                        // No more data available now. A LOG table's current
+                        // contents are finite: once a poll drains empty, we
+                        // have read everything appended so far. Allow a short
+                        // settling grace (in-flight writes may still land),
+                        // then STOP — otherwise this loop spins until the
+                        // 60s deadline on every LOG read and the soak gate's
+                        // subprocess timeout (180s) trips when several tables
+                        // are read in sequence.
+                        if (++emptyPolls >= 3) {
+                            break;
+                        }
                         Thread.sleep(200);
                         continue;
                     }
+                    emptyPolls = 0;
                     boolean advanced = false;
                     for (ScanRecord rec : records) {
                         InternalRow row = rec.getRow();
