@@ -307,13 +307,23 @@ public class EarlySignalFunction
             // A failed preview resets the consecutive-hold streak even when a
             // tentative exists — "4 consecutive holds" must be truly
             // consecutive for the Phase 3 early confirm.
-            holds.remove(windowStart);
+            // Perf trim (2026-09-05): this runs on EVERY failed preview
+            // (thousands/s) but a streak entry exists only for windows
+            // currently holding. A blind remove writes a tombstone to disk
+            // even when nothing is stored; the guard turns the common
+            // no-streak case into a cheap cache-friendly read. Semantically
+            // identical: remove-if-present == blind remove.
+            if (holds.contains(windowStart)) {
+                holds.remove(windowStart);
+            }
             return; // rule does not hold on this partial OHLCV
         }
 
         // Phase 3 confirm-window shortening: count consecutive holding
         // previews; at CONFIRM_AFTER_MS of sustained hold, confirm early.
-        int streak = (holds.get(windowStart) == null ? 0 : holds.get(windowStart)) + 1;
+        // Single read (was: two reads of the same key).
+        Integer current = holds.get(windowStart);
+        int streak = (current == null ? 0 : current) + 1;
         holds.put(windowStart, streak);
         long confirmAfterMs = config.earlySignalConfirmAfterMs();
         int needed = (int) Math.max(1, confirmAfterMs / config.previewIntervalMs());

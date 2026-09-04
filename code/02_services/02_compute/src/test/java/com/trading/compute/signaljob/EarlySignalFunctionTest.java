@@ -358,6 +358,41 @@ class EarlySignalFunctionTest {
     }
 
     @Test
+    void streakResetsOnFailThenRebuildsToEarlyConfirm() throws Exception {
+        // Locks the guarded streak-clear path (perf trim 2026-09-05): a
+        // failing preview must reset the streak so the NEXT holds start
+        // from 1 — and the rebuilt streak must still early-confirm on
+        // the 4th consecutive hold. Same answers with or without the
+        // contains-guard; the soak's busy metric is the perf proof.
+        openHarness();
+        long token = 5L;
+        feedFinal(token, 0, 100, 110, 90, 105);
+        feedFinal(token, 1, 105, 115, 95, 110);
+        feedFinal(token, 2, 110, 120, 100, 115);
+        // Two holds build a streak of 2 (first emits the tentative).
+        feedPreview(token, 3, 115, 130, 110, 128);
+        String tentativeId = str(drain(harness).get(0),
+                SignalCandidatesTableColumns.CANDIDATE_ID);
+        feedPreview(token, 3, 115, 132, 110, 129);
+        assertTrue(rows(harness).isEmpty(), "2nd hold emits nothing");
+        // Failing preview resets the streak (close below open breaks it).
+        feedPreview(token, 3, 135, 136, 110, 112);
+        assertTrue(rows(harness).isEmpty(), "failed preview emits nothing");
+        // Rebuild: 4 consecutive holds must early-confirm again.
+        feedPreview(token, 3, 115, 130, 110, 128);
+        feedPreview(token, 3, 115, 132, 110, 129);
+        feedPreview(token, 3, 115, 133, 110, 130);
+        assertTrue(rows(harness).isEmpty(), "rebuilt holds 1-3 emit nothing");
+        feedPreview(token, 3, 115, 134, 110, 131); // 4th hold after reset
+        List<RowData> out = drain(harness);
+        assertEquals(1, out.size(), "4th hold after reset emits the early CONFIRM");
+        assertEquals(SignalCandidatesTableColumns.VALIDITY_REASON_CONFIRMED,
+                str(out.get(0), SignalCandidatesTableColumns.VALIDITY_REASON));
+        assertEquals(tentativeId,
+                str(out.get(0), SignalCandidatesTableColumns.SUPERSEDES_CANDIDATE_ID));
+    }
+
+    @Test
     void cachedEvaluationMatchesDirectEvaluationAfterRestore() throws Exception {
         // Restart must reload the (transient) cache from restored disk state:
         // a restored run must emit exactly what an uninterrupted run emits.
