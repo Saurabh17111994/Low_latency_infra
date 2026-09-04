@@ -615,10 +615,22 @@ while :; do
       exit 2
     fi
     if [ -n "$FLUSS_PROBE_CP" ]; then
-      for f in read-lag consumer-read closed-read; do
+      # read-lag (log-end offsets) MUST advance — a header-only read-lag.tsv
+      # means Fluss itself is unreadable (genuine death), fail fast.
+      if [ "$(($(wc -l < "$OUT_DIR/read-lag.tsv" 2>/dev/null || echo 1) - 1))" -le 0 ]; then
+        echo "!! FAIL: read-lag.tsv still header-only at t+${ELAPSED}s — the Fluss log-end probe leg is dead (probe classpath/table/bootstrapping broken). Check FLUSS_PROBE_CP and the probe javac logs." >&2
+        exit 2
+      fi
+      # consumer-read/closed-read are KV POINT-SAMPLERS: they look up only
+      # the current+previous 15s window at each probe tick, so a legitimately
+      # empty sample (row not yet KV-visible at the exact window boundary)
+      # is NOT a dead leg. Warning-only since 2026-09-05 (multi-TF soak:
+      # attempt 4 aborted on this false alarm while stages.tsv showed both
+      # chains emitting healthily). The gate (multitf_soak_verify.py) is the
+      # authoritative closed-row check.
+      for f in consumer-read closed-read; do
         if [ "$(($(wc -l < "$OUT_DIR/$f.tsv" 2>/dev/null || echo 1) - 1))" -le 0 ]; then
-          echo "!! FAIL: $f.tsv still header-only at t+${ELAPSED}s — the Fluss probe leg is dead (probe classpath/table/bootstrapping broken). Check FLUSS_PROBE_CP and the probe javac logs." >&2
-          exit 2
+          echo "!! WARN: $f.tsv still header-only at t+${ELAPSED}s — KV point-sampler found no current-window row this tick (may be empty-sample, not dead). See stages.tsv for real operator counts." >&2
         fi
       done
     fi

@@ -164,8 +164,13 @@ def main() -> int:
         sys.exit(2)
     ws_raw = os.environ.get("WINDOW_START_MS", "")
     we_raw = os.environ.get("WINDOW_END_MS", "")
-    window_start_ms = int(ws_raw) if ws_raw else None
-    window_end_ms = int(we_raw) if we_raw else None
+    # The reader's convention (and the caller stage-soak-e2e.sh) uses
+    # 0/empty = "no bound". Treating a literal 0 as a real bound filtered
+    # every row out (window_start inside [0,0]) and the gate PASSED on a
+    # 0-vs-0 comparison — a vacuous verdict (observed 2026-09-04 soak
+    # 234313). 0 must mean "no lower/upper bound", matching the reader.
+    window_start_ms = int(ws_raw) if ws_raw and int(ws_raw) != 0 else None
+    window_end_ms = int(we_raw) if we_raw and int(we_raw) != 0 else None
 
     old_rows = read_table(OLD_TABLE, cp, tokens_csv, window_start_ms, window_end_ms)
     new_rows = read_table(NEW_CLOSED_TABLE, cp, tokens_csv, window_start_ms, window_end_ms)
@@ -249,6 +254,13 @@ def main() -> int:
             print(f"    NEW-ONLY {k}")
 
     ok = True
+    if not old_map and not new_map:
+        print("!! FAIL: side-by-side compare matched ZERO 15s closed rows "
+              "(old and new both empty in window) — a 0-vs-0 comparison "
+              "proves nothing. Set WINDOW_START_MS/WINDOW_END_MS to the "
+              "soak's tick window or confirm the closed tables have rows.",
+              file=sys.stderr)
+        ok = False
     if mismatches:
         print(f"!! FAIL: {len(mismatches)} OHLCV mismatches on matched keys "
               f"(first: {mismatches[0]})", file=sys.stderr)
@@ -261,10 +273,32 @@ def main() -> int:
         print(f"!! FAIL: {live_dup} live keys have >1 KV row (duplicate "
               f"upserts — the 1s overwrite must not append)", file=sys.stderr)
         ok = False
-    if not multitf_signals:
-        print("!! FAIL: no multi-TF/breakout signal rows found in "
-              f"{SIGNAL_TABLE}", file=sys.stderr)
-        ok = False
+    # Gate 3: signals — warm-up aware (design §G + line 1165 warm-up table:
+    # the demo multi-TF rule needs 15 closed 15s candles (225s) before its
+    # ring is warm; a soak shorter than that MUST emit 0 signals (FAIL if
+    # early fire), and only a soak >= warm-up may demand signals. 180s =
+    # 12 candles, so the standard soak proves "no premature fire", not
+    # "signals fire". Forcing signals in 180s would mean weakening warm-up.
+    try:
+        duration_s = int(os.environ.get("DURATION_S", "") or 0)
+    except ValueError:
+        duration_s = 0
+    warmup_s = 15 * 15  # WARMUP_CLOSED (15) x 15s window (MultiTimeframeClosedRing.CAPACITY)
+    if duration_s < warmup_s:
+        print(f"  signal leg: DURATION_S={duration_s}s < warm-up {warmup_s}s "
+              f"(15x15s) — expecting 0 premature multi-TF signals")
+        if multitf_signals:
+            print(f"!! FAIL: {len(multitf_signals)} multi-TF signals fired "
+                  f"BEFORE warm-up (design says first N×listSize ticks per "
+                  f"instrument emit exactly 0 signals per TF). FAIL if early "
+                  f"fire.", file=sys.stderr)
+            ok = False
+    else:
+        if not multitf_signals:
+            print("!! FAIL: no multi-TF/breakout signal rows found in "
+                  f"{SIGNAL_TABLE} despite DURATION_S={duration_s}s >= "
+                  f"warm-up {warmup_s}s", file=sys.stderr)
+            ok = False
 
     if not ok:
         return 1

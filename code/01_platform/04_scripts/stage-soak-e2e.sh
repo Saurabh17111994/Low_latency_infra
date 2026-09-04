@@ -85,9 +85,18 @@ pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/04_forming_bar.sql" form
 pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/05_signal_candidates.sql" signals || fatal "signal purge failed"
 pipeline_ensure_tentative_markers_table || fatal "tentative-markers ensure failed"
 # Phase 5 (2026-09-05): when MULTITF_ENABLED=true the job preflights +
-# writes candle_live/candle_closed — ensure they exist (create-if-absent;
-# never drop, the old chain writes feature_candles_15s alongside).
+# writes candle_live/candle_closed. PURGE both (drop+recreate, same as the
+# old tables): they are LOG-append tables, so a run that only "ensures"
+# accumulates every prior run's rows and the side-by-side gate (which must
+# compare this run's new-15s rows against this run's old-15s rows) reads
+# stale cross-run rows. Observed 2026-09-05: attempts 2/3/4 data piled up
+# in candle_closed (we=15:30 pre-fix rows from attempt 3 polluting the
+# attempt 4 gate) until a purge was added.
 if [ "${MULTITF_ENABLED:-false}" = "true" ]; then
+  pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" candle_closed \
+    || fatal "candle_closed purge failed"
+  pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/32_candle_live.sql" candle_live \
+    || fatal "candle_live purge failed"
   pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/32_candle_live.sql" "candle_live" \
     || fatal "candle_live ensure failed"
   pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" "candle_closed" \
@@ -177,7 +186,7 @@ echo "SOAK-E2E: capture complete — evidence at $PHASE_OUT"
 if [ "${MULTITF_ENABLED:-false}" = "true" ]; then
   echo "SOAK-E2E: MULTITF_ENABLED=true — running side-by-side 15s gate"
   FLUSS_PROBE_CP="$CP" PROBE_TOKENS="$VERIFY_TOKENS" \
-    WINDOW_START_MS=0 WINDOW_END_MS=0 \
+    WINDOW_START_MS=0 WINDOW_END_MS=0 DURATION_S="$DURATION_S" \
     python3 "$SCRIPT_DIR/multitf_soak_verify.py" \
     || fatal "multitf side-by-side gate FAILED (see above)"
   echo "SOAK-E2E: multitf side-by-side gate PASS"
