@@ -436,6 +436,32 @@ class EarlySignalFunctionTest {
         restored.close();
     }
 
+    @Test
+    void perfMetersAccumulateLookbackAndStreakTime() throws Exception {
+        // Attribution meters (2026-09-05): rule-check time vs saved-state
+        // time must both accumulate on the preview path. Unit scope proves
+        // they count; the production split is read in the next soak.
+        openHarness();
+        long token = 11L;
+        feedFinal(token, 0, 100, 110, 90, 105);
+        feedFinal(token, 1, 105, 115, 95, 110);
+        feedFinal(token, 2, 110, 120, 100, 115);
+        assertEquals(0L, fn.lookbackNsTotal(), "no preview yet -> no rule time");
+        assertEquals(0L, fn.streakStateNsTotal(), "no preview yet -> no state time");
+        // Holding preview: rule-check + streak write + pending check.
+        feedPreview(token, 3, 115, 130, 110, 128);
+        rows(harness);
+        long rule1 = fn.lookbackNsTotal();
+        long state1 = fn.streakStateNsTotal();
+        assertTrue(rule1 > 0, "holding preview must meter rule time");
+        assertTrue(state1 > 0, "holding preview must meter state time");
+        // Failing preview on a fresh window: rule-check + guarded clear.
+        feedPreview(token, 4, 135, 136, 110, 112);
+        rows(harness);
+        assertTrue(fn.lookbackNsTotal() > rule1, "rule time must keep accumulating");
+        assertTrue(fn.streakStateNsTotal() > state1, "state time must keep accumulating");
+    }
+
     // --- Phase 3: confirm-window shortening (4 consecutive 1s previews) ---
 
     @Test

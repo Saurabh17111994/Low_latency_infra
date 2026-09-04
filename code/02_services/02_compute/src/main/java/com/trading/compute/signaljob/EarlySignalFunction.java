@@ -217,6 +217,17 @@ public class EarlySignalFunction
     private transient Counter cancelCounter;
     private transient Counter earlyConfirmCounter;
     private transient Counter markerDroppedCounter;
+    /**
+     * Attribution meters (2026-09-05): nanoseconds spent in the rule-check
+     * vs in streak/pending saved-state ops, per preview row. Exported as
+     * Flink counters so the split is readable in OpenObserve; the local
+     * fields back the unit test. Production read happens in a soak —
+     * behavior is unchanged, only observed.
+     */
+    private transient Counter lookbackNsCounter;
+    private transient Counter streakStateNsCounter;
+    private transient long lookbackNs;
+    private transient long streakStateNs;
     private transient LinkedHashMap<String, StagedMark> stagedMarks;
     private transient LinkedHashMap<String, StagedSettle> stagedSettles;
     /**
@@ -258,6 +269,10 @@ public class EarlySignalFunction
                 getRuntimeContext().getMetricGroup().counter("compute.signals.early.confirmed_early");
         markerDroppedCounter =
                 getRuntimeContext().getMetricGroup().counter("compute.signals.early.marker_dropped");
+        lookbackNsCounter =
+                getRuntimeContext().getMetricGroup().counter("compute.signals.early.lookback_ns");
+        streakStateNsCounter =
+                getRuntimeContext().getMetricGroup().counter("compute.signals.early.streak_state_ns");
         stagedMarks = new LinkedHashMap<>();
         stagedSettles = new LinkedHashMap<>();
         lookbackCache = new java.util.HashMap<>();
@@ -293,6 +308,15 @@ public class EarlySignalFunction
         return lookbackCache != null && lookbackCache.containsKey(token);
     }
 
+    /** Test probes for the attribution meters. */
+    long lookbackNsTotal() {
+        return lookbackNs;
+    }
+
+    long streakStateNsTotal() {
+        return streakStateNs;
+    }
+
     // --- Input 1: previews (tentative, once per window) ---
     @Override
     public void processElement1(RowData preview, Context ctx, Collector<RowData> out)
@@ -303,7 +327,17 @@ public class EarlySignalFunction
         long close = preview.getLong(CandlePreviewColumns.CLOSE_PAISE);
         long windowEnd = preview.getLong(CandlePreviewColumns.WINDOW_END);
         long token = preview.getLong(CandlePreviewColumns.INSTRUMENT_TOKEN);
-        if (!evaluateLookback(token, open, close)) {
+        long ruleStart = System.nanoTime();
+        boolean ruleHoldsNow = evaluateLookback(token, open, close);
+        long ruleDt = System.nanoTime() - ruleStart;
+        lookbackNs += ruleDt;
+        lookbackNsCounter.inc(ruleDt);
+        // Everything below is streak/pending saved-state work (plus rare
+        // row building on tentative/confirm paths only) — metered as one
+        // block so every exit stays covered.
+        long stateStart = System.nanoTime();
+        try {
+            if (!ruleHoldsNow) {
             // A failed preview resets the consecutive-hold streak even when a
             // tentative exists — "4 consecutive holds" must be truly
             // consecutive for the Phase 3 early confirm.
@@ -317,7 +351,7 @@ public class EarlySignalFunction
                 holds.remove(windowStart);
             }
             return; // rule does not hold on this partial OHLCV
-        }
+            }
 
         // Phase 3 confirm-window shortening: count consecutive holding
         // previews; at CONFIRM_AFTER_MS of sustained hold, confirm early.
@@ -411,6 +445,11 @@ public class EarlySignalFunction
                 SignalCandidatesTableColumns.VALIDITY_REASON_TENTATIVE,
                 SignalCandidatesTableColumns.ACTION_ENTRY,
                 "preview"));
+        } finally {
+            long stateDt = System.nanoTime() - stateStart;
+            streakStateNs += stateDt;
+            streakStateNsCounter.inc(stateDt);
+        }
     }
 
     // --- Input 2: finals (lookback update + settle tentative) ---
