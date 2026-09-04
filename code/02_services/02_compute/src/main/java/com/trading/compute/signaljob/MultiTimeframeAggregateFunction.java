@@ -348,12 +348,21 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             ctx.timerService().registerEventTimeTimer(nextEvent);
             slot.nextLiveEventTimer = nextEvent;
         }
-        // Schedule session-close forced-roll timer for this date if not already
-        long sessClose = TimeframeBucket.sessionCloseMs(eventTime);
-        if (slot.sessionCloseTimer == Long.MIN_VALUE || slot.sessionCloseTimer != sessClose) {
-            // Only schedule if this sessClose is in the future relative to eventTime (it will be, since in-session eventTime < sessClose)
-            ctx.timerService().registerEventTimeTimer(sessClose);
-            slot.sessionCloseTimer = sessClose;
+        // Schedule session-close forced-roll timer for this date if not already.
+        // Session bypass (soak mode A): there is no session — event times can
+        // be after 15:30 IST (off-hours fake feed), so 15:30 of the event's
+        // date is in the PAST and a registered session-close timer fires
+        // immediately, force-closing every forming window with a truncated
+        // window_end = 15:30 (observed 2026-09-04 soak: every candle_closed
+        // row carried window_end=1788516000000 = 15:30 IST). With bypass the
+        // boundary timers (windowStart + tfMs) alone close windows correctly.
+        if (!sessionBypass) {
+            long sessClose = TimeframeBucket.sessionCloseMs(eventTime);
+            if (slot.sessionCloseTimer == Long.MIN_VALUE || slot.sessionCloseTimer != sessClose) {
+                // Only schedule if this sessClose is in the future relative to eventTime (it will be, since in-session eventTime < sessClose)
+                ctx.timerService().registerEventTimeTimer(sessClose);
+                slot.sessionCloseTimer = sessClose;
+            }
         }
 
         // Per-TF bucket management and accumulation
@@ -612,6 +621,15 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         boolean isLiveEvent = timestamp == slot.nextLiveEventTimer;
         boolean isLiveProc = timestamp == slot.nextLiveProcTimer;
         boolean isSessionClose = timestamp == slot.sessionCloseTimer;
+
+        // Session bypass (soak mode A): never run the session-close forced
+        // roll — there is no session boundary to force (see the scheduling
+        // guard in processElement). A stale sessionCloseTimer value from a
+        // non-bypass run cannot leak in because the timer is only registered
+        // when !sessionBypass; this guard is belt-and-braces.
+        if (sessionBypass) {
+            isSessionClose = false;
+        }
 
         if (isLiveEvent) {
             emitLiveForTimerSlot(slot, key, ctx);

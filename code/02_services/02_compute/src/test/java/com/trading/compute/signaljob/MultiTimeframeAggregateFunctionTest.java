@@ -309,6 +309,13 @@ class MultiTimeframeAggregateFunctionTest {
             if (r.getLong(CandleClosedColumns.WINDOW_START) == saturday
                     && Timeframe.FIFTEEN_S.code().equals(r.getString(CandleClosedColumns.TF).toString())) {
                 anyClosed = true;
+                // Regression (2026-09-04 soak): a stale session-close timer
+                // fired with the bypass (off-hours ticks -> 15:30 IST of the
+                // event date is in the PAST) and truncated every closed row's
+                // window_end to 15:30. window_end must be window_start + tfMs.
+                assertEquals(saturday + 15_000L, r.getLong(CandleClosedColumns.WINDOW_END),
+                        "bypass-mode closed row window_end must be window_start + 15s, "
+                                + "not the session-close constant");
             }
         }
         assertTrue(anyClosed, "bypass mode must close the weekend 15s bucket on watermark");
