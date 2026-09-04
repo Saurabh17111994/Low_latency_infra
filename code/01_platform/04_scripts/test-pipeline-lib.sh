@@ -457,6 +457,17 @@ echo "G21g 48k e2e measurement facilities"
 grep -qE '_operator_|operator_.*compute' "$cap" \
   && ok "G21g scrape keeps custom operator metrics" \
   || bad "G21g custom-operator scrape filter MISSING"
+# 2026-09-05 (grep-filter regression): the old alternation
+# 'flink_taskmanager_job_task_.*_operator_' does NOT match chain-head custom
+# families (flink_taskmanager_job_task_operator_compute_* — the prefix ends
+# in '_' so '.*_operator_' needs a SECOND '_' before 'operator'). Every soak
+# prom file silently dropped compute.* samples while RocksDB/split_watermark
+# (which have extra '_' segments) survived. The filter must be the literal
+# prefix 'flink_taskmanager_job_task_operator_'; this pins it.
+grep -q "flink_taskmanager_job_task_operator_" "$cap" \
+  && ! grep -q "flink_taskmanager_job_task_.\*_operator_" "$cap" \
+  && ok "G21g scrape filter is the literal operator prefix (2026-09-05 fix)" \
+  || bad "G21g scrape filter regressed to the .*_operator_ form that drops chain-head compute.* samples"
 grep -q 'PROBE_CLOSED_TABLE\|feature_candles_15s"' "$cap" \
   && grep -q 'closed-read.tsv' "$cap" \
   && ok "G21g closed-table probe wired (closed-read.tsv)" \

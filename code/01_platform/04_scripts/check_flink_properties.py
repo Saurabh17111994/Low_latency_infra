@@ -25,6 +25,14 @@ This validator fails LOUD at edit time (exit 1 + reason) for:
   A. comment lines inside the FLINK_PROPERTIES block
   B. any key that is a strict path prefix of another key
   C. required keys missing from the block
+  D. any value wrapped in literal double quotes (e.g. `key: "true"`)
+     - the entrypoint's process_flink_properties splits on the first ':' and
+       keeps the rest VERBATIM, so a YAML-quoted "true" becomes the 6-char
+       string '"true"' in config.yaml. Flink's typed option parsers then fail
+       with "Could not parse value '\"true\"' for key '...'" (booleans,
+       enums) or silently carry the quotes into paths/addresses. Observed
+       2026-09-04: state.backend.incremental: "true" killed RocksDB jobs at
+       JobMaster init ("Could not parse value '\"true\"'").
 
 Pinned by G22 in test-pipeline-lib.sh; unit-tested by
 tests/test_check_flink_properties.py.
@@ -136,6 +144,21 @@ def check(compose_path: Path = COMPOSE) -> list[str]:
                 f"    (e.g. no localdir -> RocksDB on the container overlay, the CHG-120\n"
                 f"    ~1.7k/s degradation class).\n"
                 f"    FIX: restore the key in the FLINK_PROPERTIES block."
+            )
+
+    # D. quoted values (literal double quotes survive the entrypoint split)
+    for k, v in props:
+        if v.startswith('"') and v.endswith('"'):
+            failures.append(
+                f"QUOTED VALUE: {k!r} = {v!r}\n"
+                f"    WHY: process_flink_properties keeps the value VERBATIM after the\n"
+                f"    first ':', so the literal quotes reach config.yaml and Flink's\n"
+                f"    typed parsers fail (observed 2026-09-04: state.backend.\n"
+                f"    incremental: \"true\" -> \"Could not parse value '\\\"true\\\"' for\n"
+                f"    key 'execution.checkpointing.incremental'\" -> RocksDB jobs die at\n"
+                f"    JobMaster init).\n"
+                f"    FIX: drop the quotes — booleans/numbers must be bare (true, 0.5);\n"
+                f"    strings with special chars belong in a YAML anchor env, not here."
             )
 
     return failures

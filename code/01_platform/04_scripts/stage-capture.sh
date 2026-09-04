@@ -343,18 +343,21 @@ PYEOF
   # REST answered empty aggregates for the time-share metrics on Flink 2.2.1
   # (live-observed 2026-09-01); TM :9249 exposes per-subtask gauges instead.
   # Scraped every tick into prom-<epoch>.txt; the parser merges later.
-  # 2026-09-04 (corrected): the earlier widened filter kept every metric
-  # whose name contains "_operator_", expecting custom operator samples
-  # (compute.dedup.duplicates etc.). Live scrapes proved Flink 2.2.1
-  # exports ALL operator-scope metrics (custom + rocksdb + timer-state)
-  # as HELP-only — zero sample lines — so that filter could never fill the
-  # custom leg. Custom operator counters now come from the Flink REST
-  # per-vertex metrics endpoint (custom-rest.tsv below); this prom scrape
-  # stays scoped to the system families that DO carry samples.
+  # 2026-09-05 (corrected twice): the earlier widened filter kept every
+  # metric whose name contains "_operator_", expecting custom operator
+  # samples (compute.dedup.duplicates etc.). A 2026-09-04 analysis claimed
+  # Flink 2.2.1 exports operator-scope metrics as HELP-only with ZERO sample
+  # lines, so the filter was narrowed away from them and the custom leg was
+  # moved to REST — but the REST leg then queried BARE names (see below) and
+  # came back empty, and the false "HELP-only" belief hid the real cause.
+  # Live probes (2026-09-04/05) prove operator-scope custom metrics DO carry
+  # real sample lines on the TM prom endpoint. Keep the scrape wide enough
+  # to keep them as a cross-check; the authoritative custom leg is
+  # custom-rest.tsv (REST full-id query, fixed 2026-09-05).
   local prom_file
   prom_file="$OUT_DIR/prom-$(date +%s).txt"
   if ! curl -fsS --max-time 8 "$TM_PROM_URL/metrics" 2>/dev/null \
-      | grep -E 'busyTimeMsPerSecond|backPressuredTimeMsPerSecond|hardBackPressuredTimeMsPerSecond|idleTimeMsPerSecond|currentWatermark|latency_source_id|flink_taskmanager_job_task_.*_operator_' \
+      | grep -E 'busyTimeMsPerSecond|backPressuredTimeMsPerSecond|hardBackPressuredTimeMsPerSecond|idleTimeMsPerSecond|currentWatermark|latency_source_id|flink_taskmanager_job_task_operator_' \
       > "$prom_file"; then
     echo "!! FAIL: TM prom scrape dead at $(date +%s) ($TM_PROM_URL/metrics empty/failed) — TM likely restarting/heartbeat-lost; the latency/custom legs would be silent. Check TM logs." >&2
     capture_stall_diagnostics "TM prom scrape dead at $(date +%s) — endpoint $TM_PROM_URL/metrics empty/failed"
@@ -367,13 +370,23 @@ PYEOF
   sample_probes
 
   # Custom operator counters (compute.dedup.duplicates, compute.candles.*,
-  # compute.signals.*, ...). The TM Prometheus reporter exports these as
-  # HELP-only on Flink 2.2.1 (no sample lines — verified 2026-09-04 on a
-  # live scrape), so the custom scorecard leg comes from the Flink REST
-  # per-vertex metrics endpoint instead — the same channel that serves
-  # numRecordsIn/Out in stages.tsv. One comma-joined get= request per
-  # vertex per tick; a vertex that does not own a metric simply returns no
-  # datapoint for it. Rows: epoch, vertex_id, operator, metric, sum.
+  # compute.signals.*, ...), read from the Flink REST per-vertex metrics
+  # endpoint. IMPORTANT (2026-09-05, root-caused): REST metric IDs are
+  # FULLY-QUALIFIED: per-subtask listings carry
+  # "<subtask>.<operator>.<metric_with_underscores>" (e.g.
+  # "3.fingerprint-dedup.compute_dedup_first"); the AGGREGATE subtasks
+  # endpoint serves "<operator>.<metric_with_underscores>" and dots in the
+  # metric name become underscores. A bare-name get= (compute.dedup.first)
+  # returns [] ALWAYS — the pre-2026-09-05 leg queried bare names and was
+  # therefore empty on every soak while the pipeline exported the values all
+  # along (the metrics were ALSO visible with real sample lines on the TM
+  # prom endpoint — the earlier "HELP-only on Flink 2.2.1" claim in this
+  # comment was WRONG, misattributed from those empty legs; live probes
+  # 2026-09-04/05 show real sample lines). The fix: list
+  # /vertices/{vid}/metrics once per vertex, derive "<operator>.<metric>"
+  # pairs from the per-subtask full ids, then fetch aggregate values via
+  # /subtasks/metrics?get=<operator>.<metric>.
+  # Rows: epoch, vertex_id, operator, metric(dotted), sum.
   local custom_names
   custom_names="compute.dedup.first,compute.dedup.duplicates,compute.candles.emitted,compute.candles.late.updates,compute.candles.late.dropped,compute.candles.previews.emitted,compute.candles.previews.late.dropped,compute.candles.previews.restored_timer_noop,compute.candles.restored_timer_noop,compute.candles.duplicate_window,compute.candles.invalid.total,compute.candles.invalid.,compute.forming.bar.updates,compute.signal.passed,compute.signal.dropped.active_exists,compute.signal.cleared.closed,compute.signal.cleared.admin,compute.signal.active.count,compute.signals.detected,compute.signals.detected.forming,compute.signals.early.tentative,compute.signals.early.confirmed,compute.signals.early.confirmed_early,compute.signals.early.cancelled,compute.signals.early.marker_dropped,compute.invalid.rows,compute.invalid.byReason,compute.execution_intent.rejected,babysitter.positions.applied,babysitter.positions.conflict,babysitter.positions.duplicate,babysitter.positions.observed,babysitter.positions.stale,babysitter.positions.latest_observed_version,preview.trigger.previewFires,preview.trigger.eventTimeFires,rows.malformed,rows.skipped,transitions.applied"
   local epoch_ms
@@ -382,7 +395,11 @@ PYEOF
   python3 - "$FLINK_REST_URL" "$JOB_ID" "$epoch_ms" "$custom_names" "$OUT_DIR" "$names_file" <<'PYEOF'
 import json, sys, urllib.request
 rest, jid, epoch_ms, names, out_dir, names_file = sys.argv[1:7]
-name_list = names.split(",")
+# Dotted names we want -> the underscored last segment REST uses. Keep both
+# so rows stay readable (dotted) while matching is done on the underscored
+# form REST actually serves.
+wanted = [n for n in names.split(",") if n]
+wanted_underscore = {n: n.replace(".", "_") for n in wanted}
 vertex_names = {}
 try:
     with open(names_file) as f:
@@ -398,16 +415,44 @@ rows = []
 for vid in vertex_names:
     op = vertex_names[vid].split(" -> ", 1)[0].replace("\t", " ")
     try:
-        items = fetch(f"{rest}/jobs/{jid}/vertices/{vid}/subtasks/metrics?get={names}")
+        # 1) List the ids THIS vertex actually serves (they are
+        #    fully-qualified: "<subtask>.<operator>.<underscored_metric>").
+        available = fetch(f"{rest}/jobs/{jid}/vertices/{vid}/metrics")
+    except Exception:
+        continue
+    # 2) Collect "<operator>.<underscored>" query ids whose metric segment
+    #    matches a wanted metric. The operator segment comes from the id
+    #    itself (the vertex may be a chain — the OWNING operator is in the
+    #    id, e.g. "3.fingerprint-dedup.compute_dedup_first").
+    pairs: dict[str, str] = {}  # "<operator>.<underscored>" -> dotted name
+    for m in available:
+        mid = str(m.get("id", ""))
+        parts = mid.split(".")
+        if len(parts) < 3:
+            continue
+        op_seg = parts[1]
+        last_seg = parts[-1]
+        for dotted, underscored in wanted_underscore.items():
+            if last_seg == underscored:
+                pairs[f"{op_seg}.{underscored}"] = dotted
+                break
+    if not pairs:
+        continue
+    # 3) Fetch aggregate values for the "<operator>.<metric>" pairs (one
+    #    comma-joined request on the aggregate subtasks endpoint).
+    try:
+        items = fetch(f"{rest}/jobs/{jid}/vertices/{vid}/subtasks/metrics?get="
+                      + ",".join(pairs))
     except Exception:
         continue
     for item in items:
-        mid = str(item.get("id", ""))
-        if mid not in name_list:
+        qid = str(item.get("id", ""))
+        dotted = pairs.get(qid)
+        if not dotted:
             continue
         total = item.get("sum")
         if isinstance(total, (int, float)):
-            rows.append(f"{epoch_ms}\t{vid}\t{op}\t{mid}\t{int(total)}")
+            rows.append(f"{epoch_ms}\t{vid}\t{op}\t{dotted}\t{int(total)}")
 if rows:
     with open(f"{out_dir}/custom-rest.tsv", "a") as f:
         f.write("\n".join(rows) + "\n")
@@ -578,7 +623,8 @@ while :; do
       done
     fi
     if [ "$(($(wc -l < "$OUT_DIR/custom-rest.tsv" 2>/dev/null || echo 1) - 1))" -le 0 ]; then
-      echo "!! WARN: custom-rest.tsv header-only at t+${ELAPSED}s — the REST custom-metric leg is empty (best-effort; Flink 2.2.1 exposes operator-scope metrics empty via REST+Prom). Tick-counts + ingestion OTLP are the authoritative custom legs." >&2
+      echo "!! FAIL: custom-rest.tsv still header-only at t+${ELAPSED}s — the REST custom-metric leg is dead. 2026-09-05 root cause: REST serves operator metrics as '<operator>.<underscored_metric>' (bare-name get= returns []); the fixed leg lists /vertices/{vid}/metrics and queries /subtasks/metrics?get=<operator>.<metric>. Empty here = the fix regressed, the job has no such operators, or REST stopped answering — check the capture log and the Flink REST endpoint now." >&2
+      exit 2
     fi
     echo "stage-capture: legs alive at t+${ELAPSED}s (ingestion + probes + custom-rest have rows)"
   fi

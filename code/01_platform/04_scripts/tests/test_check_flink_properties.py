@@ -47,7 +47,7 @@ metrics.latency.interval: 1000
 taskmanager.numberOfTaskSlots: 16
 taskmanager.memory.process.size: 7g
 taskmanager.memory.managed.fraction: 0.6
-state.backend.incremental: "true"
+state.backend.incremental: true
 state.backend.rocksdb.localdir: /tmp/flink-rocksdb
 """
 
@@ -70,6 +70,39 @@ def test_prefix_collision_fails_with_reason(tmp_path):
     assert any("PREFIX COLLISION" in f for f in failures)
     assert any("state.backend" in f and "localdir" in f for f in failures)
     assert any("SILENTLY dropped" in f for f in failures)  # the WHY
+
+
+def test_quoted_boolean_value_fails(tmp_path):
+    # The 2026-09-04 regression: a YAML-quoted "true" survives the entrypoint
+    # split verbatim -> config.yaml carries '"true"' -> Flink's boolean parse
+    # dies at JobMaster init. The validator must fail this at edit time.
+    block = VALID_BLOCK.replace(
+        "state.backend.incremental: true",
+        'state.backend.incremental: "true"')
+    failures = check(_compose(tmp_path, block))
+    assert any("QUOTED VALUE" in f and "incremental" in f for f in failures)
+    assert any("VERBATIM" in f for f in failures)  # the WHY
+
+
+def test_quoted_nonboolean_value_fails(tmp_path):
+    # Quoting is wrong for ANY value here (paths, addresses, sizes): the
+    # quotes reach config.yaml verbatim and corrupt typed parsing or the
+    # literal value itself.
+    block = VALID_BLOCK.replace(
+        "state.backend.rocksdb.localdir: /tmp/flink-rocksdb",
+        'state.backend.rocksdb.localdir: "/tmp/flink-rocksdb"')
+    failures = check(_compose(tmp_path, block))
+    assert any("QUOTED VALUE" in f and "localdir" in f for f in failures)
+
+
+def test_single_quote_is_not_flagged(tmp_path):
+    # Only literal DOUBLE quotes are the entrypoint-verbatim hazard; a value
+    # that legitimately contains an apostrophe must not false-positive.
+    block = VALID_BLOCK.replace(
+        "state.backend.rocksdb.localdir: /tmp/flink-rocksdb",
+        "state.backend.rocksdb.localdir: /tmp/flink-rocksdb-it's")
+    failures = check(_compose(tmp_path, block))
+    assert not any("QUOTED VALUE" in f for f in failures)
 
 
 def test_forbidden_leaf_state_backend_fails(tmp_path):

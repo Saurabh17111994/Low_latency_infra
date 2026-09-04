@@ -210,16 +210,17 @@ def test_b2_closed_read_report():
 
 def test_b2_custom_rest_report():
     """2026-09-04: custom operator counters arrive via the Flink REST
-    per-vertex metrics endpoint (custom-rest.tsv) because the TM Prometheus
-    reporter exports operator-scope metrics HELP-only on Flink 2.2.1. The
-    report must surface the newest cumulative counter per window."""
+    per-vertex metrics endpoint (custom-rest.tsv) with FULLY-QUALIFIED id
+    matching (2026-09-05 fix: REST serves "<subtask>.<operator>.<metric>",
+    bare-name get= always returns []). The report must surface the newest
+    cumulative counter per window."""
     with tempfile.TemporaryDirectory() as td:
         d = Path(td)
         (d / "custom-rest.tsv").write_text(
             "epoch_ms\tvertex_id\toperator\tmetric\tsum\n"
-            "1001\tv1\tfingerprint-dedup\tcompute.dedup.duplicates\t5\n"
-            "1002\tv1\tfingerprint-dedup\tcompute.dedup.duplicates\t7\n"
-            "1001\tv2\tcandle-15s\tcompute.candles.emitted\t3\n",
+            "1001000\tv1\tfingerprint-dedup\tcompute.dedup.duplicates\t5\n"
+            "1002000\tv1\tfingerprint-dedup\tcompute.dedup.duplicates\t7\n"
+            "1001000\tv2\tcandle-15s\tcompute.candles.emitted\t3\n",
             encoding="utf-8",
         )
         out = b2_custom_rest_report(d, [(1000, 1030)])
@@ -268,3 +269,45 @@ def test_operator_custom_report():
                                 "\t1000-1030\t42") for l in lines), lines
         assert not any("busyTimeMsPerSecond" in l for l in lines), lines
         assert not any("currentWatermark" in l for l in lines), lines
+
+
+def test_capture_prom_filter_keeps_chain_head_compute_samples():
+    """2026-09-05 regression: the capture grep filter must keep chain-head
+    custom families (flink_taskmanager_job_task_operator_compute_*). The old
+    alternation 'flink_taskmanager_job_task_.*_operator_' did NOT match them
+    (the scope prefix already ends in '_', so '.*_operator_' needs a second
+    '_' before 'operator') — every soak prom file silently dropped compute.*
+    samples while RocksDB/split_watermark lines (extra '_' segments)
+    survived. Pin the actual filter text from stage-capture.sh and simulate
+    it on the real line shapes."""
+    import re
+    from pathlib import Path
+    cap = Path(__file__).resolve().parents[1] / "stage-capture.sh"
+    m = re.search(
+        r"grep -E '([^']*flink_taskmanager_job_task_operator_[^']*)'",
+        cap.read_text(encoding="utf-8"))
+    assert m, "capture scrape filter not found in stage-capture.sh"
+    flt = m.group(1)
+    lines = [
+        # chain-head custom counter (the class the old filter dropped)
+        'flink_taskmanager_job_task_operator_compute_dedup_first{job_id="x",'
+        'task_name="fingerprint_dedup",subtask_index="0",} 3.0',
+        # rocksdb operator family (survived under old filter too)
+        'flink_taskmanager_job_task_operator_candle_kv_written_rocksdb_'
+        'size_all_mem_tables{job_id="x",task_name="candle_15s",'
+        'subtask_index="0",} 1.0',
+        # split-watermark family (kept for watermark leg)
+        'flink_taskmanager_job_task_operator_split_watermark_currentWatermark'
+        '{split="log_1",job_id="x",task_name="src",subtask_index="0",} 42.0',
+        # task-scope busy (system leg)
+        'flink_taskmanager_job_task_busyTimeMsPerSecond{job_id="x",'
+        'task_name="candle_15s",subtask_index="0",} 100.0',
+    ]
+    import re as _re
+    pat = _re.compile(flt)
+    kept = [l for l in lines if pat.search(l)]
+    assert any("compute_dedup_first" in l for l in kept), (
+        f"filter dropped chain-head compute sample; kept={kept}")
+    assert any("rocksdb" in l for l in kept)
+    assert any("split_watermark" in l for l in kept)
+    assert any("busyTimeMsPerSecond" in l for l in kept)

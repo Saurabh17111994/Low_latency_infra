@@ -550,7 +550,7 @@ def operator_custom_report(prom_samples: list[dict],
             for q, val in quantiles.items():
                 series.setdefault(family, {}).setdefault(q, []).append((epoch, val))
     if not series:
-        return "custom operator metrics: none captured (new scrape filter; run needs a live job)"
+        return "custom operator metrics (prom): none captured — prom-*.txt had no operator-scope sample lines (capture grep filter regression? run needs a live job?)"
     lines = ["metric\twindow\tlast_val"]
     for family in sorted(series):
         for (start, end) in windows:
@@ -570,11 +570,12 @@ def operator_custom_report(prom_samples: list[dict],
 def b2_custom_rest_report(capture_dir: str | Path,
                           windows: list[tuple[int, int]]) -> str:
     """Custom operator counters from the Flink REST per-vertex metrics
-    endpoint (custom-rest.tsv, 2026-09-04). The TM Prometheus reporter
-    exports operator-scope custom metrics as HELP-only on Flink 2.2.1, so
-    this leg reads the REST channel instead. Rows are epoch_ms/vertex/
-    operator/metric/sum; counters are cumulative-since-start — per window
-    we report the LAST value (newest sample wins across subtasks/attempts).
+    endpoint (custom-rest.tsv, fixed 2026-09-05). REST metric IDs are
+    fully-qualified ("<subtask>.<operator>.<underscored_metric>"); the
+    capture writes rows with the DOTTED metric name (readable here).
+    Rows are epoch_ms/vertex/operator/metric/sum; counters are
+    cumulative-since-start — per window we report the LAST value (newest
+    sample wins across subtasks/attempts).
     """
     rows = _parse_epoch_tsv(Path(capture_dir) / "custom-rest.tsv", 5)
     if not rows:
@@ -583,7 +584,7 @@ def b2_custom_rest_report(capture_dir: str | Path,
     series: dict[str, dict[str, list[tuple[float, float]]]] = {}
     for epoch, _vid, op, metric, val in rows:
         try:
-            e = float(epoch)
+            e = float(epoch) / 1000.0  # TSV epochs are ms; windows are seconds
             v = float(val)
         except ValueError:
             continue
