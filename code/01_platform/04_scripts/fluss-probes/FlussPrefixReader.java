@@ -128,6 +128,15 @@ public class FlussPrefixReader {
                 }
             }
             System.out.println("__END__ " + total);
+            // The LOG scanner's teardown (close of an idle from-beginning
+            // log subscription) can block indefinitely on the Fluss client
+            // (observed 2026-09-04: __END__ printed, process then hung until
+            // external timeout). This is a read-only one-shot CLI probe:
+            // stdout is already flushed, so exit hard instead of waiting on
+            // a client-side fetch/ack that never resolves. The connection
+            // dies with the JVM.
+            System.out.flush();
+            System.exit(0);
         }
     }
 
