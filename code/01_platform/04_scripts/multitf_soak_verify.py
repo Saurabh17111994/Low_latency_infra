@@ -234,9 +234,16 @@ def main() -> int:
     # Gate 3: signal rows (count + any multi-TF rule id present).
     signal_rows = read_table(SIGNAL_TABLE, cp, tokens_csv, None, None)
     signal_count = len(signal_rows)
+    # Multi-TF signals are EXACTLY rule breakout-15-forming-trend
+    # (MultiTimeframeSignalProducer.RULE_ID). The old chain writes its own
+    # breakout-* rows (breakout-20-bullish-trend, breakout-5-forming-bar)
+    # into the SAME shared Signal_Candidates LOG — a substring "breakout"
+    # match conflates the two chains and the gate then blames the multi-TF
+    # leg for the old chain's (warm-up-free, expected) fires. Observed
+    # 2026-09-05: 4,440 old-chain rows misread as premature multi-TF fire.
+    MULTITF_RULE_ID = "breakout-15-forming-trend"
     multitf_signals = [r for r in signal_rows
-                       if "multi" in str(r.get("rule_id", "")).lower()
-                       or "breakout" in str(r.get("rule_id", "")).lower()]
+                       if str(r.get("rule_id", "")) == MULTITF_RULE_ID]
 
     print("multitf_soak_verify: side-by-side gate")
     print(f"  old 15s rows (in window): {len(old_map)}")
