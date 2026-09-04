@@ -164,6 +164,32 @@ Show packet/tick and byte throughput; append acknowledgements and p50/p95/p99 wr
 
 Show source throughput/lag; watermarks and allowed lateness; invalid, late, and discarded-after-emission events; candle/forming-bar rates; candidate rates (**ranking/reservation/instruction rates, score-validation reasons, and trigger-tick-to-instruction p50/p95/p99 REMOVED 2026-08-15, CHG-005**); operator busy/idle/backpressure; and checkpoint duration, size, failure, restore, and state recovery. Report window waiting separately from processing latency. **DEC-038 additions:** Fluss dedup-table state size (entries + bytes) + update rate, dedup cache size/utilization, dedup cache hit ratio, and rehydration latency/failures (proof the large state is in Fluss and the checkpoint is small).
 
+#### Multi-timeframe dashboard (Phase 5, 2026-09-05)
+
+One screen answering "is the NEW multi-TF branch alive and agreeing with the
+old 15s chain?" Provisioned by `code/01_platform/04_scripts/o2-provision.py`
+as `COMPUTE - Multi-Timeframe` (11 panels, folder COMPUTE): branch
+throughput old-vs-new, aggregator input share of source, session-filtered
+drops (pre/post cumulative), new closed/live sink rates vs old closed-sink
+rate, multi-TF signals emitted vs latch-suppressed (cumulative), new
+signal-sink rate, duplicate-window guard hits. Every series is registered by
+`MultiTimeframeAggregateFunction` / `MultiTimeframeSignalProducer` and flows
+on the existing Flink->Prometheus->remote-write path — no new plumbing.
+Verified live 2026-09-05: dashboard present with 11 panels; all 11 panel
+queries return points over the 2026-09-04 soak window via O2 `query_range`
+(aggregator ~48.9k/s in, old closed-sink ~162-203/s, new legs 0 — the
+post-close soak starved the branch exactly as designed); 3 new alerts
+(`SIGNAL-warn-multitf-session-drop`, `-branch-stall`, `-signal-suppressed`)
+live and enabled; retention synced (logs 30d / metrics 90d / traces 14d).
+
+Soak evidence leg: `code/01_platform/04_scripts/soak-o2-evidence.py` re-queries
+the same 11-series set over the run window into `stages/o2-evidence.jsonl`
+(1 record/query: n_points, first/last/min/max), wired best-effort at the end
+of `stage-soak-e2e.sh`, and pushed back into O2 stream `soak_o2_evidence` via
+`o2_ingest.py` — the scorecard's "what O2 saw" section is evidence, not a
+screenshot. Smoke-verified 2026-09-05 against the 2026-09-04 window
+(11/11 queries answered, push + `_search` readback green).
+
 #### Dedup state dashboard (DEC-038)
 
 Dedicated panels for the externalized dedup model, with bounded cardinality (per-table gauges and per-reason counters, never per-key labels):

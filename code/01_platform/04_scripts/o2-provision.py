@@ -540,6 +540,85 @@ DASHBOARDS = [
         ],
     },
     {
+        # 2026-09-05 Phase 5 multi-TF side-by-side: the one screen that
+        # answers "is the NEW branch alive and agreeing with the old chain?"
+        # Every series is registered by the Phase 2-4 operators and flows on
+        # the existing Flink->Prometheus->remote-write path (verified live
+        # 2026-09-04: post_close 3.3M -> 11.4M visible in O2 query_range;
+        # task_name labels multi_tf_aggregator / *_sink:_Writer confirmed).
+        "title": "COMPUTE - Multi-Timeframe",
+        "description": "Multi-TF side-by-side branch health (Phase 5): branch throughput old-vs-new, aggregator input, session-filter drops, closed/live sink rates, signal emitted vs suppressed (design doc docs/plans/2026-09-05-multitimeframe-candle-aggregator-design.md).",
+        "folder": "COMPUTE",
+        "panels": [
+            (
+                "Branch throughput old vs new (records/s)",
+                "promql",
+                'sum by (task_name) (flink_taskmanager_job_task_numrecordsinpersecond{task_name=~"multi_tf_aggregator|candle_closed_first_write_wins|candle_15s_____candle_late_drop_counter__candle_invalid_quarantine_"})',
+                "flink_taskmanager_job_task_numrecordsinpersecond",
+            ),
+            (
+                "Aggregator input vs old-chain candles (records/s)",
+                "promql",
+                'sum(flink_taskmanager_job_task_numrecordsinpersecond{task_name="multi_tf_aggregator"}) / sum(flink_taskmanager_job_task_numrecordsinpersecond{task_name="Source:_raw_table_1____raw_validation"})',
+                "flink_taskmanager_job_task_numrecordsinpersecond",
+            ),
+            (
+                "Session-filtered drops (post-close, cumulative)",
+                "promql",
+                "max(flink_taskmanager_job_task_operator_compute_session_filtered_post_close)",
+                "flink_taskmanager_job_task_operator_compute_session_filtered_post_close",
+            ),
+            (
+                "Session-filtered drops (pre-open, cumulative)",
+                "promql",
+                "max(flink_taskmanager_job_task_operator_compute_session_filtered_pre_open)",
+                "flink_taskmanager_job_task_operator_compute_session_filtered_pre_open",
+            ),
+            (
+                "New closed-sink rate (upserts/s)",
+                "promql",
+                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_closed_sink:_Writer"})',
+                "flink_taskmanager_job_task_numrecordsinpersecond",
+            ),
+            (
+                "New live-sink rate (upserts/s)",
+                "promql",
+                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_live_sink:_Writer"})',
+                "flink_taskmanager_job_task_numrecordsinpersecond",
+            ),
+            (
+                "Old closed-sink rate (upserts/s)",
+                "promql",
+                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="feature_candles_15s_sink:_Writer"})',
+                "flink_taskmanager_job_task_numrecordsinpersecond",
+            ),
+            (
+                "Multi-TF signals emitted (cumulative)",
+                "promql",
+                "max(flink_taskmanager_job_task_operator_compute_multitf_signal_emitted)",
+                "flink_taskmanager_job_task_operator_compute_multitf_signal_emitted",
+            ),
+            (
+                "Multi-TF signals suppressed by latch (cumulative)",
+                "promql",
+                "max(flink_taskmanager_job_task_operator_compute_multitf_signal_suppressed)",
+                "flink_taskmanager_job_task_operator_compute_multitf_signal_suppressed",
+            ),
+            (
+                "New signal-sink rate (rows/s)",
+                "promql",
+                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="multitf_signal_candidates_sink:_Writer"})',
+                "flink_taskmanager_job_task_numrecordsinpersecond",
+            ),
+            (
+                "Duplicate-window guard hits (cumulative)",
+                "promql",
+                "max(flink_taskmanager_job_task_operator_compute_candles_multitf_duplicate_window)",
+                "flink_taskmanager_job_task_operator_compute_candles_multitf_duplicate_window",
+            ),
+        ],
+    },
+    {
         "title": "COMPUTE - Quality",
         "description": "Validation quality, dedup efficiency, source health, collector delivery (tracker 14 P8.4, mirrors the INGESTION - Quality convention).",
         "folder": "COMPUTE",
@@ -896,6 +975,43 @@ ALERTS = [
         ],
         period=5,
         desc="[Warning/compute] Source consuming < 5,000 rec/s (50% of design rate) for 5 min while the job runs: partial feed degradation (broker throttle / partial subscription); recovery = rate recovers (quiesced dev feeds false-fire by design)",
+    ),
+    # --- 2026-09-05 Phase 5 multi-TF side-by-side (design doc
+    # docs/plans/2026-09-05-multitimeframe-candle-aggregator-design.md).
+    # All three series are registered by the new operators
+    # (MultiTimeframeAggregateFunction / MultiTimeframeSignalProducer) and
+    # flow to O2 on the existing Flink->Prometheus->remote-write path with
+    # no new plumbing. Verified live 2026-09-04 (soak-e2e-20260904-182216):
+    # post_close rose 3.3M -> 11.4M in O2 while every tick was
+    # session-filtered — the query path below is proven end to end. The
+    # stall/suppression rules share the quiesced-feed caveat of the other
+    # SIGNAL- throughput rules (they false-fire by design when the feed is
+    # stopped or outside 09:15-15:30 IST).
+    dict(
+        name="SIGNAL-warn-multitf-session-drop",
+        stream="flink_taskmanager_job_task_operator_compute_session_filtered_post_close",
+        promql="sum(increase(flink_taskmanager_job_task_operator_compute_session_filtered_post_close[300s]))",
+        promql_condition=(">", 10000),
+        period=2,
+        desc="[Warning/compute] Multi-TF aggregator session-dropping >10k ticks / 5 min over 2 evals: feed outside 09:15-15:30 IST (post-close soak) or clock skew while ticks flow; the new candle/signal legs are starved; recovery = in-session feed resumes",
+    ),
+    dict(
+        name="SIGNAL-warn-multitf-branch-stall",
+        stream="flink_taskmanager_job_task_numrecordsinpersecond",
+        conditions=[
+            ("task_name", "=", "multi_tf_aggregator"),
+            ("value", "=", 0),
+        ],
+        period=5,
+        desc="[Warning/compute] multi-tf-aggregator consuming 0 records/s for 5 min while the job runs: branch starved (session filter, upstream stall, or flag miswired); old chain unaffected; recovery = branch rate resumes (quiesced/off-session feeds false-fire by design)",
+    ),
+    dict(
+        name="SIGNAL-warn-multitf-signal-suppressed",
+        stream="flink_taskmanager_job_task_operator_compute_multitf_signal_suppressed",
+        promql="sum(increase(flink_taskmanager_job_task_operator_compute_multitf_signal_suppressed[600s]))",
+        promql_condition=(">", 1000),
+        period=1,
+        desc="[Warning/compute] Multi-TF fire-once latch suppressing >1000 candidate signals / 10 min: rule stuck true on forming candles or latch not clearing at boundaries; recovery = suppression rate falls",
     ),
     # --- 2026-08-22 single-pane: infra/JVM/host infra alerts (10-observability.md scale-up thresholds) ---
     dict(

@@ -759,6 +759,62 @@ JAVAEOF
   fi
 }
 
+# Ensure the multi-timeframe candle tables exist (Phase 5 side-by-side soak;
+# DDLs 32_candle_live.sql / 33_candle_closed.sql). Create-if-absent, never
+# drop — the old chain must keep writing feature_candles_15s while the new
+# branch writes candle_live/candle_closed. Uses the same TableEnsure pattern
+# as pipeline_ensure_tentative_markers_table.
+pipeline_ensure_candle_tables() {
+  pipeline_require_preflight || return 1
+  local ddl_file="$1" label="$2"
+  pipeline_log "ensuring $label table exists (create-if-absent)"
+  cat > /tmp/TableEnsureCandle.java <<'JAVAEOF'
+import com.trading.common.schema.ddl.DdlText;
+import org.apache.fluss.client.Connection;
+import org.apache.fluss.client.ConnectionFactory;
+import org.apache.fluss.client.admin.Admin;
+import org.apache.fluss.config.Configuration;
+import org.apache.fluss.metadata.TablePath;
+
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
+
+public class TableEnsureCandle {
+    public static void main(String[] args) throws Exception {
+        String ddl = Files.readString(Path.of(args[0]));
+        DdlText.ParsedDdl parsed = DdlText.parse(ddl, args[0]);
+        TablePath tp = TablePath.of("default", parsed.tableName());
+        Configuration conf = new Configuration();
+        conf.setString("bootstrap.servers", "localhost:9123");
+        try (Connection c = ConnectionFactory.createConnection(conf);
+             Admin admin = c.getAdmin()) {
+            try {
+                admin.getTableInfo(tp).get(10, TimeUnit.SECONDS);
+                System.out.println("EXISTS " + tp);
+            } catch (Exception notFound) {
+                admin.createTable(tp, DdlText.toDescriptor(parsed), false)
+                        .get(60, TimeUnit.SECONDS);
+                System.out.println("CREATED " + tp);
+            }
+        }
+    }
+}
+JAVAEOF
+  local ensure_out
+  ensure_out="$(cd /tmp && javac -cp "$CP" -d /tmp TableEnsureCandle.java 2>&1 \
+      && java --add-opens=java.base/java.lang=ALL-UNNAMED \
+       --add-opens=java.base/java.nio=ALL-UNNAMED \
+       -cp "/tmp:$CP" TableEnsureCandle "$ddl_file" 2>&1)" || true
+  rm -f /tmp/TableEnsureCandle.java /tmp/TableEnsureCandle.class
+  if echo "$ensure_out" | grep -qE "EXISTS|CREATED"; then
+    pipeline_log "$label table ready ($(echo "$ensure_out" | grep -oE 'EXISTS|CREATED'))"
+  else
+    pipeline_fail "$label table ensure failed: $(echo "$ensure_out" | tail -2)"
+    return 1
+  fi
+}
+
 pipeline_submit_job() {
   pipeline_require_preflight || return 1
   pipeline_log "deploying SignalJob (previews 1s, early signals on, confirm-after 4s)"
@@ -828,6 +884,10 @@ pipeline_submit_job() {
     -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 \
     -e SIGNAL_CANDIDATES_TABLE=Signal_Candidates \
     -e SIGNAL_CURRENT_TABLE=Signal_Candidates_current \
+    -e MULTITF_ENABLED="${MULTITF_ENABLED:-false}" \
+    -e CANDLE_LIVE_TABLE="${CANDLE_LIVE_TABLE:-candle_live}" \
+    -e CANDLE_CLOSED_TABLE="${CANDLE_CLOSED_TABLE:-candle_closed}" \
+    -e MULTITF_LIVE_SNAPSHOT_INTERVAL_MS="${MULTITF_LIVE_SNAPSHOT_INTERVAL_MS:-1000}" \
     flink-jobmanager flink run -d "${extra_flags[@]}" \
       -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar 2>&1)"
   JOB_ID="$(echo "$submit_out" | grep -oE 'JobID [a-f0-9]+' | awk '{print $2}' | head -1)"

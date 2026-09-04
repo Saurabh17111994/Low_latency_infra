@@ -84,6 +84,15 @@ pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/30_feature_candles_15s_p
 pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/04_forming_bar.sql" forming || fatal "forming purge failed"
 pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/05_signal_candidates.sql" signals || fatal "signal purge failed"
 pipeline_ensure_tentative_markers_table || fatal "tentative-markers ensure failed"
+# Phase 5 (2026-09-05): when MULTITF_ENABLED=true the job preflights +
+# writes candle_live/candle_closed — ensure they exist (create-if-absent;
+# never drop, the old chain writes feature_candles_15s alongside).
+if [ "${MULTITF_ENABLED:-false}" = "true" ]; then
+  pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/32_candle_live.sql" "candle_live" \
+    || fatal "candle_live ensure failed"
+  pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" "candle_closed" \
+    || fatal "candle_closed ensure failed"
+fi
 # --- feed: 1 faketool + 3 ingestions x 811 ---
 head -1 "$NSE" | grep -q "OptionType" || fatal "wrong universe file (missing OptionType column): $NSE"
 head -1 "$NSE" > "$OUT/header.csv"
@@ -147,10 +156,32 @@ if [ "${STATE_BACKEND:-rocksdb}" = "rocksdb" ]; then
   echo "SOAK-E2E: G24 OK"
 fi
 TOK12="$(tail -n +2 "$NSE" | head -2 | cut -d, -f4 | paste -sd, -)"
+# Phase 5 (2026-09-05): the side-by-side gate compares a SPREAD token sample
+# (~every 60th token, bounded ~40) — the old table is purged pre-run so all
+# its rows are this run's; a spread sample bounds the verify read while still
+# crossing all 16 Fluss buckets (bucket key = instrument_token hash).
+VERIFY_TOKENS="$(python3 - "$NSE" <<'PYEOF'
+import csv, sys
+with open(sys.argv[1]) as f:
+    toks = [row["Token"].strip() for row in csv.DictReader(f) if row.get("Token")]
+print(",".join(toks[::60][:60]))
+PYEOF
+)"
 JOB_ID="$JOB_ID" DURATION_S="$DURATION_S" INGESTION_JAVA_OUT="$OUT/j1-0/java.out" \
   FLUSS_PROBE_CP="$CP" OUT_DIR="$PHASE_OUT/stages" PROBE_TOKENS="$TOK12" \
-  bash "$SCRIPT_DIR/stage-capture.sh" || fatal "stage capture failed"
+bash "$SCRIPT_DIR/stage-capture.sh" || fatal "stage capture failed"
 echo "SOAK-E2E: capture complete — evidence at $PHASE_OUT"
+# Phase 5 (2026-09-05): side-by-side verify — new 15s closed candles must be
+# bit-identical (minus output_ts/version cols) to the old chain's, the live
+# leg must show sane 1s upsert cadence, and multi-TF signals must appear.
+if [ "${MULTITF_ENABLED:-false}" = "true" ]; then
+  echo "SOAK-E2E: MULTITF_ENABLED=true — running side-by-side 15s gate"
+  FLUSS_PROBE_CP="$CP" PROBE_TOKENS="$VERIFY_TOKENS" \
+    WINDOW_START_MS=0 WINDOW_END_MS=0 \
+    python3 "$SCRIPT_DIR/multitf_soak_verify.py" \
+    || fatal "multitf side-by-side gate FAILED (see above)"
+  echo "SOAK-E2E: multitf side-by-side gate PASS"
+fi
 # Tick-count losslessness leg (2026-09-04): the per-container emitted-tick
 # counts are THE authoritative feed-side throughput/loss evidence (Flink
 # operator counters are empty on 2.2.1 via REST+Prom). The containers are
@@ -221,3 +252,21 @@ print(f"SOAK-E2E: {c} ticks OK — {ntokens} tokens x {median} ticks "
 PYEOF
 done
 ls "$PHASE_OUT/stages" | head -8
+# O2 window-evidence leg (2026-09-05 single-pane policy): re-query OpenObserve
+# for the fixed multi-TF query set over this run's capture window and store
+# the raw per-query series summary as o2-evidence.jsonl. This is the QUERIED
+# half of the single-pane contract (dashboards/alerts are the live half):
+# the scorecard's O2 section is built from this file, so "what O2 saw" is
+# evidence, not a screenshot. Best-effort BY DESIGN (the stages/ TSVs remain
+# raw truth): a failed leg warns but never fails the run.
+RUN_START_UTC="$(date -u -d @$(stat -c %Y "$PHASE_OUT/stages/run-meta.txt" 2>/dev/null || date +%s) +%Y-%m-%dT%H:%M:%SZ)"
+RUN_END_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RUN_ID="$(basename "$PHASE_OUT")"
+if python3 "$SCRIPT_DIR/soak-o2-evidence.py" --start "$RUN_START_UTC" --end "$RUN_END_UTC" \
+    --run "$RUN_ID" --job "${JOB_ID:-}" > "$PHASE_OUT/stages/o2-evidence.jsonl" 2>"$PHASE_OUT/stages/o2-evidence.err"; then
+  echo "SOAK-E2E: O2 window evidence -> $PHASE_OUT/stages/o2-evidence.jsonl ($(wc -l < "$PHASE_OUT/stages/o2-evidence.jsonl") queries)"
+  python3 "$SCRIPT_DIR/o2_ingest.py" soak_o2_evidence < "$PHASE_OUT/stages/o2-evidence.jsonl" \
+    || echo "SOAK-E2E: WARN — O2 evidence push failed (raw truth: $PHASE_OUT/stages/o2-evidence.jsonl)"
+else
+  echo "SOAK-E2E: WARN — O2 window-evidence leg failed (see $PHASE_OUT/stages/o2-evidence.err); local TSVs remain raw truth"
+fi
