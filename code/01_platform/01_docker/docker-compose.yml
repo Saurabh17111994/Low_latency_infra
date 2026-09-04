@@ -164,6 +164,12 @@ x-flink-common: &flink-common
     # exposeable by Flink at all (checked 2026-09-02) — compaction/flush/
     # SST-size + host iostat await are the indirect latency evidence.
     # (Comment must live OUTSIDE the FLINK_PROPERTIES block — G22b.)
+    # Values in the block must stay UNQUOTED: the entrypoint's
+    # process_flink_properties splits on the first ':' and keeps the rest
+    # VERBATIM, so a YAML-quoted "true" lands in config.yaml as the 6-char
+    # string '"true"' (literal quotes) -> Flink's boolean parse fails with
+    # "Could not parse value '\"true\"' for key '...'" and RocksDB jobs die at
+    # JobMaster init (observed 2026-09-04; guarded by check_flink_properties.py).
     FLINK_PROPERTIES: |
       jobmanager.rpc.address: flink-jobmanager
       rest.address: flink-jobmanager
@@ -179,7 +185,7 @@ x-flink-common: &flink-common
       taskmanager.memory.managed.fraction: 0.5
       taskmanager.memory.network.max: ${TASK_MANAGER_NETWORK_MEMORY_MAX:-256m}
       taskmanager.memory.network.min: ${TASK_MANAGER_NETWORK_MEMORY_MIN:-256m}
-      state.backend.incremental: "true"
+      state.backend.incremental: true
       state.backend.rocksdb.localdir: /tmp/flink-rocksdb
       state.backend.rocksdb.metrics.num-running-compactions: true
       state.backend.rocksdb.metrics.compaction-pending: true
