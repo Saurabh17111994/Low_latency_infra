@@ -5,6 +5,12 @@
 # Creates, in org `default`:
 #   - INGESTION folder (via dashboards carrying folder="INGESTION")
 #   - 4 dashboards: Overview, Slots, Resources, Quality
+#   - COMMAND - Command Center (captain's single screen, 2026-09-05):
+#     plain-English tiles reusing existing queries verbatim (no new metric
+#     pipelines); [NOT LIVE YET] tiles are honest placeholders for the
+#     unwired execution path (gateway/Nautilus/bridge/broker) until the C2
+#     instrumentation spec lands. (Grouping is by title prefix — O2 v0.91.5
+#     has no folder-create API; all dashboards live in folder "default".)
 #   - 43 alert rules (18 ING- ingestion incl. the 11-rule 02-ingestion-alerting
 #     contract + 16 SIGNAL- + 9 INFRA- infra/JVM/host; CHG-093)
 #     (SIGNAL includes P8.3 15 + SIGNAL-crit-schema 1; INFRA 9: host CPU 80/90, JVM heap 85, GC 500ms,
@@ -615,6 +621,148 @@ DASHBOARDS = [
                 "promql",
                 "max(flink_taskmanager_job_task_operator_compute_candles_multitf_duplicate_window)",
                 "flink_taskmanager_job_task_operator_compute_candles_multitf_duplicate_window",
+            ),
+        ],
+    },
+    {
+        # 2026-09-05 COMMAND - Command Center (captain's single screen).
+        # Plain-English tiles only: every query below is copied VERBATIM from
+        # an existing dashboard in this file (same stream, same PromQL/SQL
+        # shape) so nothing drifts — deep detail lives in the specialist
+        # dashboards, this screen is for go/no-go. [NOT LIVE YET] tiles point
+        # at streams that do not exist yet (execution path: gateway/Nautilus/
+        # bridge/broker emit zero telemetry today); they render empty BY
+        # DESIGN and name the C2 wiring task. No new metric pipelines, no new
+        # scrape jobs, no new alerts in this commit.
+        "title": "COMMAND - Command Center",
+        "description": "Captain's screen: can I trade? Is money flowing in? Is the engine healthy? Are trade ideas forming? Did orders reach the broker? Will the machine survive the day? Plain words; details live in the INGESTION/COMPUTE dashboards.",
+        "panels": [
+            # ROW 0 — which ship am I on (live: job count; the rest rides the
+            # dashboard description + the job config log, not metrics).
+            (
+                "Jobs running now (want 1+ when market is open)",
+                "promql",
+                "max(flink_jobmanager_numrunningjobs)",
+                "flink_jobmanager_numrunningjobs",
+            ),
+            # ROW 1 — can I trade right now?
+            (
+                "Feed link up? (1 = yes, 0 = no)",
+                "promql",
+                "max(bridge_connected)",
+                "bridge_connected",
+            ),
+            (
+                "Feed safe? (1 = safe, 0 = stop)",
+                "promql",
+                "min(bridge_slot_safety_state)",
+                "bridge_slot_safety_state",
+            ),
+            (
+                "Pipeline ready? (1 = yes, 0 = no)",
+                "promql",
+                "min(ingestion_ready)",
+                "ingestion_ready",
+            ),
+            # ROW 2 — is live market data flowing?
+            (
+                "Ticks per second coming in",
+                "promql",
+                "sum(increase(tick_throughput[300s]))/300",
+                "tick_throughput",
+            ),
+            (
+                "Feed gaps so far (should stay flat)",
+                "promql",
+                "max(feed_stalls)",
+                "feed_stalls",
+            ),
+            (
+                "Jumbled ticks so far (should stay flat)",
+                "promql",
+                "max(sequence_gaps)",
+                "sequence_gaps",
+            ),
+            (
+                "Broker link drops (reconnects, want 0)",
+                "promql",
+                "sum(increase(bridge_reconnects[600s]))",
+                "bridge_reconnects",
+            ),
+            (
+                "How old is newest data? (over 5000 ms = stale)",
+                "promql",
+                "max(bridge_slot_last_frame_age_ms)",
+                "bridge_slot_last_frame_age_ms",
+            ),
+            (
+                "Bad ticks thrown away (should stay flat)",
+                "promql",
+                "sum(increase(decode_errors[70s]))",
+                "decode_errors",
+            ),
+            # ROW 3 — is the engine (Flink) healthy?
+            (
+                "Math workers alive (want 1+)",
+                "promql",
+                "max(flink_jobmanager_numregisteredtaskmanagers)",
+                "flink_jobmanager_numregisteredtaskmanagers",
+            ),
+            (
+                "Safety saves failed (want 0)",
+                "promql",
+                "max(flink_jobmanager_job_numberoffailedcheckpoints)",
+                "flink_jobmanager_job_numberoffailedcheckpoints",
+            ),
+            (
+                "New candles flowing? (0 = nothing coming)",
+                "promql",
+                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_closed_sink:_Writer"})',
+                "flink_taskmanager_job_task_numrecordsinpersecond",
+            ),
+            (
+                "New trade ideas so far (total)",
+                "promql",
+                "max(flink_taskmanager_job_task_operator_compute_multitf_signal_emitted)",
+                "flink_taskmanager_job_task_operator_compute_multitf_signal_emitted",
+            ),
+            # ROW 4 — did my orders reach the broker? NOT LIVE YET (C2).
+            (
+                "[NOT LIVE YET] Orders sent to broker",
+                "timeseries",
+                "select _timestamp, value from \"execution_orders_submitted\" where _timestamp >= '{start_time}' and _timestamp <= '{end_time}' order by _timestamp",
+                "execution_orders_submitted",
+            ),
+            (
+                "[NOT LIVE YET] Broker confirmed fills",
+                "timeseries",
+                "select _timestamp, value from \"execution_fills_confirmed\" where _timestamp >= '{start_time}' and _timestamp <= '{end_time}' order by _timestamp",
+                "execution_fills_confirmed",
+            ),
+            (
+                "[NOT LIVE YET] Orders blocked for safety",
+                "timeseries",
+                "select _timestamp, value from \"execution_gate_denied\" where _timestamp >= '{start_time}' and _timestamp <= '{end_time}' order by _timestamp",
+                "execution_gate_denied",
+            ),
+            # ROW 5 — will the machine survive the day?
+            (
+                "Health reports lost on the way (want 0)",
+                "promql",
+                "max(otelcol_exporter_send_failed_metric_points)",
+                "otelcol_exporter_send_failed_metric_points",
+            ),
+            (
+                "Disk free %, worst disk (act before 20)",
+                "promql",
+                "min(node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100",
+                "node_filesystem_avail_bytes",
+            ),
+            (
+                "Broker session number (a jump = link reset)",
+                "promql",
+                "max(bridge_connection_epoch)",
+                "bridge_connection_epoch",
             ),
         ],
     },
@@ -1288,6 +1436,9 @@ def provision_dashboards():
         title = spec["title"]
         db = by_title.get(title)
         if db is None:
+            # NOTE: O2 v0.91.5 has no folder-create API and rejects
+            # ?folder=<new> with 404; every dashboard in this file lives in
+            # folder "default" and groups by title prefix (INGESTION - /COMPUTE - /COMMAND -).
             status, resp = api("POST", "/dashboards", make_dashboard_v8(spec))
             print(f"{status} create dashboard {title}: {json.dumps(resp)[:160]}")
             continue

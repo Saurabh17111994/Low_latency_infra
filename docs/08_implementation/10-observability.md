@@ -164,6 +164,22 @@ Show packet/tick and byte throughput; append acknowledgements and p50/p95/p99 wr
 
 Show source throughput/lag; watermarks and allowed lateness; invalid, late, and discarded-after-emission events; candle/forming-bar rates; candidate rates (**ranking/reservation/instruction rates, score-validation reasons, and trigger-tick-to-instruction p50/p95/p99 REMOVED 2026-08-15, CHG-005**); operator busy/idle/backpressure; and checkpoint duration, size, failure, restore, and state recovery. Report window waiting separately from processing latency. **DEC-038 additions:** Fluss dedup-table state size (entries + bytes) + update rate, dedup cache size/utilization, dedup cache hit ratio, and rehydration latency/failures (proof the large state is in Fluss and the checkpoint is small).
 
+#### Command Center (captain's single screen, 2026-09-05)
+
+One dashboard answering "can I trade?" in plain words: `COMMAND - Command
+Center` (20 tiles). Every live tile reuses an existing query verbatim — no
+new metric pipelines, no new scrape jobs, no new alerts. Proven live
+2026-09-05: 17/17 live tiles answer over the 2026-09-04 soak window
+(`query_range` verified one by one; the 3 `[NOT LIVE YET]` execution tiles
+render empty by design until the C2 instrumentation spec wires
+gateway/Nautilus/bridge/broker counters into O2). Fixes found while
+building: SQL `timeseries` panels on OTLP gauge streams render empty — the
+4 gauge tiles use PromQL (`max(bridge_connected)` etc.); disk-free uses the
+worst-mount ratio; `trading_alerts` is a LOGS stream so it cannot back a
+metrics panel (replaced with the broker session-number gauge). O2 v0.91.5
+has no folder-create API — grouping is by title prefix (`COMMAND - `),
+same as `INGESTION - `/`COMPUTE - `.
+
 #### Multi-timeframe dashboard (Phase 5, 2026-09-05)
 
 One screen answering "is the NEW multi-TF branch alive and agreeing with the
