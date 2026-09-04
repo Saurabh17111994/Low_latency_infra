@@ -140,6 +140,10 @@ public final class ConfigKeys {
     public static final String TRADE_DECISIONS_ENABLED = "TRADE_DECISIONS_ENABLED";
     public static final String TRADE_DECISIONS_TABLE = "TRADE_DECISIONS_TABLE";
     public static final String TRADE_INSTRUCTION_STATE_TABLE = "TRADE_INSTRUCTION_STATE_TABLE";
+    public static final String MULTITF_ENABLED = "MULTITF_ENABLED";
+    public static final String MULTITF_LIVE_SNAPSHOT_INTERVAL_MS = "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS";
+    public static final String CANDLE_LIVE_TABLE = "CANDLE_LIVE_TABLE";
+    public static final String CANDLE_CLOSED_TABLE = "CANDLE_CLOSED_TABLE";
     public static final String UNCERTAINTY_JOURNAL_PATH = "UNCERTAINTY_JOURNAL_PATH";
     public static final String WARN = "WARN";
     public static final String WATERMARK_OUT_OF_ORDER_MS = "WATERMARK_OUT_OF_ORDER_MS";

@@ -121,6 +121,10 @@ public record SignalJobConfig(
         String executionProductType,
         String executionTimeInForce,
         boolean executionIntentEnabled,
+        boolean multiTfEnabled,
+        long liveSnapshotIntervalMs,
+        String candleLiveTable,
+        String candleClosedTable,
         StartupMode startupMode) implements Serializable {
 
     public static SignalJobConfig fromEnv() {
@@ -145,6 +149,10 @@ public record SignalJobConfig(
             throw new IllegalStateException("Config EARLY_SIGNAL_ENABLED=true requires "
                     + "PREVIEW_ENABLED=true — the early-signal path consumes preview rows");
         }
+        boolean multiTfEnabled = booleanValue(env, "MULTITF_ENABLED", false);
+        long liveSnapshotIntervalMs = positiveLong(env, "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS", 1_000L);
+        String candleLiveTable = stringEnv(env, "CANDLE_LIVE_TABLE", "candle_live");
+        String candleClosedTable = stringEnv(env, "CANDLE_CLOSED_TABLE", "candle_closed");
         return new SignalJobConfig(
                 bootstrapServers(env),
                 env.getOrDefault("FLUSS_DATABASE", "default"),
@@ -233,6 +241,10 @@ public record SignalJobConfig(
                 executionProductType(env, executionIntentEnabled),
                 executionTimeInForce(env, executionIntentEnabled),
                 executionIntentEnabled,
+                multiTfEnabled,
+                liveSnapshotIntervalMs,
+                candleLiveTable,
+                candleClosedTable,
                 mode);
     }
 
@@ -298,6 +310,26 @@ public record SignalJobConfig(
     /** Preview table schema version (pinned from the shared contract). */
     public String previewSchemaVersion() {
         return CandlePreviewTableSchema.ROW_SCHEMA_VERSION;
+    }
+
+    /** Multi-timeframe aggregator enabled (Phase 4, default false). */
+    public boolean multiTfEnabled() {
+        return multiTfEnabled;
+    }
+
+    /** Live snapshot interval for the multi-TF aggregator (default 1000ms). */
+    public long liveSnapshotIntervalMs() {
+        return liveSnapshotIntervalMs;
+    }
+
+    /** Fluss table for candle_live (default candle_live). */
+    public String candleLiveTable() {
+        return candleLiveTable;
+    }
+
+    /** Fluss table for candle_closed (default candle_closed). */
+    public String candleClosedTable() {
+        return candleClosedTable;
     }
 
     /** Startup-mode gate (CANDLE-KV-REPLAY-001 A3.3). */
@@ -1067,6 +1099,14 @@ public record SignalJobConfig(
                     + "EXECUTION_INTENT_ENABLED=true");
         }
         return value.trim();
+    }
+
+    private static String stringEnv(Map<String, String> env, String key, String defaultValue) {
+        String v = env.get(key);
+        if (v == null || v.isBlank()) {
+            return defaultValue;
+        }
+        return v.trim();
     }
 
     /**

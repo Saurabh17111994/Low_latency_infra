@@ -830,4 +830,100 @@ class SignalJobConfigTest {
         env.put("PREVIEW_TABLE", "preview_custom");
         assertEquals("preview_custom", SignalJobConfig.from(env).previewTable());
     }
+
+    // ── Phase 4 multi-TF config (2026-09-05) ──────────────────────────────
+
+    @Test
+    void multiTfDefaultsToDisabled() {
+        SignalJobConfig cfg = SignalJobConfig.from(env());
+        assertFalse(cfg.multiTfEnabled(), "MULTITF_ENABLED defaults to false");
+        assertEquals(1_000L, cfg.liveSnapshotIntervalMs(), "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS default 1000");
+        assertEquals("candle_live", cfg.candleLiveTable(), "CANDLE_LIVE_TABLE default candle_live");
+        assertEquals("candle_closed", cfg.candleClosedTable(), "CANDLE_CLOSED_TABLE default candle_closed");
+    }
+
+    @Test
+    void honorsMultiTfEnabledTrue() {
+        Map<String, String> env = env();
+        env.put("MULTITF_ENABLED", "true");
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertTrue(cfg.multiTfEnabled());
+    }
+
+    @Test
+    void rejectsInvalidMultiTfEnabledBoolean() {
+        Map<String, String> env = env();
+        env.put("MULTITF_ENABLED", "yes");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(env));
+        assertTrue(e.getMessage().contains("MULTITF_ENABLED"), e.getMessage());
+
+        Map<String, String> env2 = env();
+        env2.put("MULTITF_ENABLED", "");
+        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env2));
+
+        Map<String, String> env3 = env();
+        env3.put("MULTITF_ENABLED", "   ");
+        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env3));
+    }
+
+    @Test
+    void rejectsBlankMultiTfEnabledFailsClosed() {
+        Map<String, String> env = env();
+        env.put("MULTITF_ENABLED", "  ");
+        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
+    }
+
+    @Test
+    void multiTfEnabledIsCaseInsensitive() {
+        Map<String, String> trueUpper = env();
+        trueUpper.put("MULTITF_ENABLED", "TRUE");
+        assertTrue(SignalJobConfig.from(trueUpper).multiTfEnabled());
+
+        Map<String, String> falseUpper = env();
+        falseUpper.put("MULTITF_ENABLED", "FALSE");
+        assertFalse(SignalJobConfig.from(falseUpper).multiTfEnabled());
+    }
+
+    @Test
+    void tableNameAccessorsDefaultAndTrim() {
+        assertEquals("candle_live", SignalJobConfig.from(env()).candleLiveTable());
+        assertEquals("candle_closed", SignalJobConfig.from(env()).candleClosedTable());
+
+        Map<String, String> env = env();
+        env.put("CANDLE_LIVE_TABLE", "  my_live  ");
+        env.put("CANDLE_CLOSED_TABLE", " my_closed ");
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertEquals("my_live", cfg.candleLiveTable());
+        assertEquals("my_closed", cfg.candleClosedTable());
+
+        Map<String, String> blankLive = env();
+        blankLive.put("CANDLE_LIVE_TABLE", "   ");
+        assertEquals("candle_live", SignalJobConfig.from(blankLive).candleLiveTable(),
+                "blank CANDLE_LIVE_TABLE falls back to default");
+
+        Map<String, String> blankClosed = env();
+        blankClosed.put("CANDLE_CLOSED_TABLE", "");
+        assertEquals("candle_closed", SignalJobConfig.from(blankClosed).candleClosedTable(),
+                "blank CANDLE_CLOSED_TABLE falls back to default");
+    }
+
+    @Test
+    void liveSnapshotIntervalDefaultAndPositiveOnly() {
+        assertEquals(1_000L, SignalJobConfig.from(env()).liveSnapshotIntervalMs());
+
+        Map<String, String> env = env();
+        env.put("MULTITF_LIVE_SNAPSHOT_INTERVAL_MS", "500");
+        assertEquals(500L, SignalJobConfig.from(env).liveSnapshotIntervalMs());
+
+        Map<String, String> zero = env();
+        zero.put("MULTITF_LIVE_SNAPSHOT_INTERVAL_MS", "0");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(zero));
+        assertTrue(e.getMessage().contains("MULTITF_LIVE_SNAPSHOT_INTERVAL_MS"), e.getMessage());
+
+        Map<String, String> neg = env();
+        neg.put("MULTITF_LIVE_SNAPSHOT_INTERVAL_MS", "-1");
+        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(neg));
+    }
 }

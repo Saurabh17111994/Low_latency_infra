@@ -2,6 +2,7 @@ package com.trading.compute.signaljob;
 
 import com.trading.common.model.FormingBar;
 import com.trading.common.schema.CandleTableSchema;
+import org.apache.flink.util.OutputTag;
 import com.trading.compute.telemetry.ComputeAlertLogs;
 import java.time.Duration;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
@@ -241,6 +242,71 @@ public final class SignalJob {
                 .returns(ticks.getType())
                 .name("ingest-latency-monitor")
                 .uid("ingest-latency-monitor");
+
+        // ── Multi-timeframe aggregator branch (Phase 4, 2026-09-05) ──────────
+        // Behind MULTITF_ENABLED (default false) the SAME deduped stream
+        // (via monitored, which is an identity map) branches to the
+        // multi-TF operator so the old 15s path is untouched and both
+        // consume the same ticks. Heap-state operator (intentional amnesia)
+        // — checkpoint-restore rebuilds from live ticks, no RocksDB touch.
+        SingleOutputStreamOperator<RowData> multiTfClosed = null;
+        DataStream<RowData> multiTfLive = null;
+        DataStream<MultiTimeframeSignalContext> multiTfSignalContexts = null;
+        DataStream<RowData> multiTfSignals = null;
+        if (config.multiTfEnabled()) {
+            SingleOutputStreamOperator<RowData> aggregator = monitored
+                    .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
+                    .process(new MultiTimeframeAggregateFunction(config.liveSnapshotIntervalMs()))
+                    .returns(CandleClosedColumns.ROW_TYPE_INFO)
+                    .name("multi-tf-aggregator")
+                    .uid("multi-tf-aggregator-v1");
+            multiTfClosed = aggregator;
+            multiTfLive = aggregator.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TAG);
+            multiTfSignalContexts = aggregator.getSideOutput(MultiTimeframeAggregateFunction.SIGNAL_TAG);
+
+            // Closed rows: first-write-wins filter + KV sink
+            MultiTimeframeSinks.sinkClosed(multiTfClosed, config, config.candleClosedTable());
+            // Live rows: KV upsert sink (1s overwrite)
+            MultiTimeframeSinks.sinkLive(multiTfLive, config, config.candleLiveTable());
+
+            // Signal contexts -> RowData via MultiTimeframeSignalProducer, then dual-sink
+            // (LOG append + KV current) exactly mirrored from the existing signal path
+            multiTfSignals = multiTfSignalContexts
+                    .keyBy(ctx -> ctx.instrumentToken())
+                    .process(new MultiTimeframeSignalProducer())
+                    .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
+                    .name("multi-tf-signal")
+                    .uid("multi-tf-signal-v1");
+
+            multiTfSignals
+                    .sinkTo(FlussSink.<RowData>builder()
+                                    .setBootstrapServers(config.bootstrapServers())
+                                    .setDatabase(config.database())
+                                    .setTable(config.signalCandidatesTable())
+                                    .setSerializationSchema(new RowDataSerializationSchema(true, true))
+                                    .setOption("client.request-timeout",
+                                            config.sinkWriteStallTimeoutMs() + "ms")
+                                    .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
+                                    .build())
+                    .name("multitf-signal-candidates-sink")
+                    .uid("multitf-signal-candidates-sink");
+
+            multiTfSignals
+                    .filter(new CanonicalSignalFilterFunction())
+                    .name("canonical-signal-filter-multitf")
+                    .uid("canonical-signal-filter-multitf")
+                    .sinkTo(FlussSink.<RowData>builder()
+                                    .setBootstrapServers(config.bootstrapServers())
+                                    .setDatabase(config.database())
+                                    .setTable(config.signalCurrentTable())
+                                    .setSerializationSchema(new RowDataSerializationSchema(false, false))
+                                    .setOption("client.request-timeout",
+                                            config.sinkWriteStallTimeoutMs() + "ms")
+                                    .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
+                                    .build())
+                    .name("multitf-signal-candidates-current-sink")
+                    .uid("multitf-signal-candidates-current-sink");
+        }
 
         // Chain-heap redesign (2026-09-03 plan, OP4): the tumbling window +
         // aggregate + emit operator did 2-3 RocksDB touches per tick (46.5%
@@ -864,6 +930,26 @@ public final class SignalJob {
                             config.database(), config.positionStateTable()))
                     .getTableInfo();
             TableContractValidator.validatePositionStateKvTable(positionState);
+            if (config.multiTfEnabled()) {
+                org.apache.fluss.metadata.TableInfo candleLive = conn
+                        .getTable(org.apache.fluss.metadata.TablePath.of(
+                                config.database(), config.candleLiveTable()))
+                        .getTableInfo();
+                TableContractValidator.validateCandleLiveTable(candleLive);
+                org.apache.fluss.metadata.TableInfo candleClosed = conn
+                        .getTable(org.apache.fluss.metadata.TablePath.of(
+                                config.database(), config.candleClosedTable()))
+                        .getTableInfo();
+                TableContractValidator.validateCandleClosedTable(candleClosed);
+                LOG.info("signal-job: candle_live contract OK ({})", config.candleLiveTable());
+                LOG.info("signal-job: {}",
+                        TableContractValidator.schemaReport(
+                                candleLive, CandleLiveColumns.COLUMN_NULLABLE_IN_DDL));
+                LOG.info("signal-job: candle_closed contract OK ({})", config.candleClosedTable());
+                LOG.info("signal-job: {}",
+                        TableContractValidator.schemaReport(
+                                candleClosed, CandleClosedColumns.COLUMN_NULLABLE_IN_DDL));
+            }
             if (config.executionIntentEnabled()) {
                 org.apache.fluss.metadata.TableInfo executionIntent = conn
                         .getTable(org.apache.fluss.metadata.TablePath.of(

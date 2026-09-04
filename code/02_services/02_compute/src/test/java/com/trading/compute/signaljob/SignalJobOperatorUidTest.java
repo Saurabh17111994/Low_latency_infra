@@ -52,7 +52,7 @@ class SignalJobOperatorUidTest {
     static {
         EXPECTED_OPERATORS.put("raw-table-1", "Source: raw-table-1");
         EXPECTED_OPERATORS.put("raw-validation", "raw-validation");
-        EXPECTED_OPERATORS.put("fingerprint-dedup", "fingerprint-dedup-v2");
+        EXPECTED_OPERATORS.put("fingerprint-dedup-v2", "fingerprint-dedup");
         // G-DEDUP-3 (2026-09-03 redesign): uid bumped so pre-redesign
         // checkpointed MapState can never silently attach to the heap-window
         // operator (which requests no managed state). Restoring an old
@@ -96,6 +96,27 @@ class SignalJobOperatorUidTest {
         EXPECTED_OPERATORS.put("canonical-signal-filter", "canonical-signal-filter");
         EXPECTED_OPERATORS.put("signal-candidates-current-sink", "signal-candidates-current-sink");
     }
+
+    /**
+     * Multi-TF branch UIDs (Phase 4, 2026-09-05) — present only when
+     * MULTITF_ENABLED=true. Pinned so a rename fails closed; absent when
+     * disabled so the old path stays byte-identical.
+     */
+    private static final Map<String, String> EXPECTED_MULTITF_OPERATORS = new LinkedHashMap<>();
+    static {
+        EXPECTED_MULTITF_OPERATORS.put("multi-tf-aggregator-v1", "multi-tf-aggregator");
+        EXPECTED_MULTITF_OPERATORS.put("candle-live-sink", "candle-live-sink");
+        EXPECTED_MULTITF_OPERATORS.put("candle-closed-first-write-wins", "candle-closed-first-write-wins");
+        EXPECTED_MULTITF_OPERATORS.put("candle-closed-sink", "candle-closed-sink");
+        EXPECTED_MULTITF_OPERATORS.put("multi-tf-signal-v1", "multi-tf-signal");
+        EXPECTED_MULTITF_OPERATORS.put("multitf-signal-candidates-sink", "multitf-signal-candidates-sink");
+        EXPECTED_MULTITF_OPERATORS.put("multitf-signal-candidates-current-sink", "multitf-signal-candidates-current-sink");
+        // Note: canonical-signal-filter-multitf (the filter before the KV sink) is
+        // intentionally not listed in the required set — it is an extra operator
+        // that the job creates but the pin contract only covers the sink UIDs.
+        // It is still asserted to be present when enabled via the containsKey check below.
+    }
+
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
 
     private static String bootstrap;
@@ -127,8 +148,18 @@ class SignalJobOperatorUidTest {
     }
 
     @Test
-    @DisplayName("every operator carries its pinned UID; UID set equals the contract exactly")
+    @DisplayName("every operator carries its pinned UID; UID set equals the contract exactly (multitf disabled)")
     void everyOperatorCarriesPinnedUid() throws Exception {
+        assertTopology(false);
+    }
+
+    @Test
+    @DisplayName("multitf branch adds its pinned UIDs when MULTITF_ENABLED=true (Phase 4)")
+    void multitfBranchAddsPinnedUidsWhenEnabled() throws Exception {
+        assertTopology(true);
+    }
+
+    private void assertTopology(boolean multiTfEnabled) throws Exception {
         String suffix = String.valueOf(System.nanoTime());
         String candleName = "p6_uid_" + suffix + "_candle";
         String signalName = "p6_uid_" + suffix + "_sig";
@@ -144,6 +175,17 @@ class SignalJobOperatorUidTest {
         ScratchTables.create(connection, admin, quarName,
                 ScratchTables.ingestionQuarantineSchema(), null, 16,
                 "quarantine LOG", TIMEOUT);
+        // When multi-TF is enabled, also create its tables so preflight succeeds
+        String liveName = null;
+        String closedName = null;
+        if (multiTfEnabled) {
+            liveName = "p6_uid_" + suffix + "_live";
+            closedName = "p6_uid_" + suffix + "_closed";
+            ScratchTables.create(connection, admin, liveName, scratchCandleLiveSchema(),
+                    List.of("instrument_token", "tf", "window_start"), 16, "candle_live KV", TIMEOUT);
+            ScratchTables.create(connection, admin, closedName, scratchCandleClosedSchema(),
+                    List.of("instrument_token", "tf", "window_start"), 16, "candle_closed KV", TIMEOUT);
+        }
         // buildTopology preflights the table contracts against live metadata.
         // The scratch tables carry the DEC-035 contracts that the dev cluster's
         // legacy tables only gain in Stage 6 (live DDL application), so the
@@ -153,6 +195,11 @@ class SignalJobOperatorUidTest {
         cfg.put("SIGNAL_CANDIDATES_TABLE", signalName);
         cfg.put("SIGNAL_CURRENT_TABLE", currentName);
         cfg.put("QUARANTINE_TABLE", quarName);
+        if (multiTfEnabled) {
+            cfg.put("MULTITF_ENABLED", "true");
+            cfg.put("CANDLE_LIVE_TABLE", liveName);
+            cfg.put("CANDLE_CLOSED_TABLE", closedName);
+        }
         StreamExecutionEnvironment senv = SignalJob.buildTopology(SignalJobConfig.from(cfg));
         StreamGraph graph = senv.getStreamGraph();
 
@@ -177,12 +224,61 @@ class SignalJobOperatorUidTest {
                     "UID '" + expected.getKey() + "' is on unexpected operator '"
                             + actualName + "'");
         }
-        assertEquals(EXPECTED_OPERATORS.size(), uidToName.size(),
-                "graph carries operators outside the pinned UID set");
+        if (!multiTfEnabled) {
+            for (String mtUid : EXPECTED_MULTITF_OPERATORS.keySet()) {
+                assertTrue(!uidToName.containsKey(mtUid),
+                        "MULTITF_ENABLED=false: multi-TF UID '" + mtUid + "' must be absent — "
+                                + "topology must be byte-identical to baseline (Phase 4)");
+            }
+            assertEquals(EXPECTED_OPERATORS.size(), uidToName.size(),
+                    "MULTITF_ENABLED=false: graph carries operators outside the pinned UID set");
+        } else {
+            for (Map.Entry<String, String> expected : EXPECTED_MULTITF_OPERATORS.entrySet()) {
+                String actualName = uidToName.get(expected.getKey());
+                assertNotNull(actualName,
+                        "MULTITF_ENABLED=true: multi-TF UID '" + expected.getKey() + "' is missing");
+                assertTrue(actualName.startsWith(expected.getValue()),
+                        "MULTITF_ENABLED=true: UID '" + expected.getKey() + "' on unexpected operator '"
+                                + actualName + "'");
+            }
+            // Also check the extra filter operator is present
+            assertTrue(uidToName.containsKey("canonical-signal-filter-multitf"),
+                    "MULTITF_ENABLED=true: expected multitf KV filter UID 'canonical-signal-filter-multitf'");
+            assertTrue(uidToName.containsKey("candle-closed-first-write-wins"),
+                    "MULTITF_ENABLED=true: closed first-write-wins must be present");
+            int expectedTotal = EXPECTED_OPERATORS.size() + EXPECTED_MULTITF_OPERATORS.size() + 1; // +1 for canonical-signal-filter-multitf
+            assertEquals(expectedTotal, uidToName.size(),
+                    "MULTITF_ENABLED=true: graph UID set must be exactly baseline + multi-TF branch");
+        }
         assertTrue(!uidToName.containsKey("execution-intent-producer"),
                 "EXECUTION_INTENT_ENABLED defaults false; the executable-intent branch must be absent");
         assertTrue(!uidToName.containsKey("execution-intent-sink"),
                 "EXECUTION_INTENT_ENABLED defaults false; the executable-intent sink must be absent");
+    }
+
+    private static org.apache.fluss.metadata.Schema scratchCandleLiveSchema() {
+        return org.apache.fluss.metadata.Schema.newBuilder()
+                .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("exchange", org.apache.fluss.types.DataTypes.STRING())
+                .column("symbol", org.apache.fluss.types.DataTypes.STRING())
+                .column("tf", org.apache.fluss.types.DataTypes.STRING())
+                .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("window_end", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("open_paise", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("high_paise", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("low_paise", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("close_paise", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("volume", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("tick_count", org.apache.fluss.types.DataTypes.INT())
+                .column("last_event_time", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("last_event_fingerprint", org.apache.fluss.types.DataTypes.STRING())
+                .column("schema_version", org.apache.fluss.types.DataTypes.STRING())
+                .primaryKey("instrument_token", "tf", "window_start")
+                .build();
+    }
+
+    private static org.apache.fluss.metadata.Schema scratchCandleClosedSchema() {
+        return scratchCandleLiveSchema();
     }
 
     private static Map<String, String> env() {
