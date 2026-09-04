@@ -65,6 +65,8 @@ public final class TableContractValidator {
     private static final String DEDUP_CONTRACT = "DEC-038, DEDUP-SCHEMA-001";
     private static final String FORMING_BAR_CONTRACT = "DEC-038, FORMING-BAR-SCHEMA-001";
     private static final String POSITION_STATE_CONTRACT = "Option-B, POSITION-STATE-SCHEMA-001";
+    private static final String MULTITF_CANDLE_CONTRACT =
+            "2026-09-05 multi-TF aggregator Phase 0, CANDLE-MULTITF-001";
 
     private TableContractValidator() {}
 
@@ -241,6 +243,48 @@ public final class TableContractValidator {
                 "22-column v3 signal", SIGNAL_CONTRACT);
         validateRouting(info, CandleTableSchema.BUCKET_KEY, CandleTableSchema.BUCKET_COUNT,
                 SIGNAL_CONTRACT);
+    }
+
+    /**
+     * Candle live KV (multi-TF aggregator Phase 0, 2026-09-05): PK exactly
+     * [instrument_token, tf, window_start], instrument_token routing, exact
+     * 15-column v1 schema. Ephemeral live snapshots overwritten every 1s;
+     * history lives in {@code candle_closed} (7d). Not wired into
+     * {@code SignalJob#preflightTableContracts} until Phase 4.
+     */
+    public static void validateCandleLiveTable(TableInfo info) {
+        List<String> expectedPk = List.of(
+                CandleLiveColumns.NAMES[CandleLiveColumns.INSTRUMENT_TOKEN],
+                CandleLiveColumns.NAMES[CandleLiveColumns.TF],
+                CandleLiveColumns.NAMES[CandleLiveColumns.WINDOW_START]);
+        requireExactPrimaryKey(info, expectedPk, MULTITF_CANDLE_CONTRACT);
+        validateSchema(info, Arrays.asList(CandleLiveColumns.NAMES),
+                CandleLiveColumns.TYPE_ROOTS, "15-column v1 candle_live",
+                MULTITF_CANDLE_CONTRACT);
+        validateRouting(info,
+                CandleLiveColumns.NAMES[CandleLiveColumns.INSTRUMENT_TOKEN],
+                16, MULTITF_CANDLE_CONTRACT);
+    }
+
+    /**
+     * Candle closed KV (multi-TF aggregator Phase 0, 2026-09-05): PK exactly
+     * [instrument_token, tf, window_start], instrument_token routing, exact
+     * 15-column v1 schema. Immutable closed history, first-write-wins;
+     * Iceberg offloaded (7d, 5min freshness, auto-compaction). Not wired
+     * into {@code SignalJob#preflightTableContracts} until Phase 4.
+     */
+    public static void validateCandleClosedTable(TableInfo info) {
+        List<String> expectedPk = List.of(
+                CandleClosedColumns.NAMES[CandleClosedColumns.INSTRUMENT_TOKEN],
+                CandleClosedColumns.NAMES[CandleClosedColumns.TF],
+                CandleClosedColumns.NAMES[CandleClosedColumns.WINDOW_START]);
+        requireExactPrimaryKey(info, expectedPk, MULTITF_CANDLE_CONTRACT);
+        validateSchema(info, Arrays.asList(CandleClosedColumns.NAMES),
+                CandleClosedColumns.TYPE_ROOTS, "15-column v1 candle_closed",
+                MULTITF_CANDLE_CONTRACT);
+        validateRouting(info,
+                CandleClosedColumns.NAMES[CandleClosedColumns.INSTRUMENT_TOKEN],
+                16, MULTITF_CANDLE_CONTRACT);
     }
 
     /**

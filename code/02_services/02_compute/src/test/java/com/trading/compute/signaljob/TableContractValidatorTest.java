@@ -526,6 +526,139 @@ class TableContractValidatorTest {
                                 shortTypes, false)));
     }
 
+    // ── candle_live KV (2026-09-05 multi-TF aggregator Phase 0, CANDLE-MULTITF-001) ──
+
+    private static final List<String> CANDLE_LIVE_NAMES = java.util.Arrays.asList(CandleLiveColumns.NAMES);
+    private static final List<String> CANDLE_LIVE_TYPES = CandleLiveColumns.TYPE_ROOTS;
+    private static final List<String> CANDLE_CLOSED_NAMES = java.util.Arrays.asList(CandleClosedColumns.NAMES);
+    private static final List<String> CANDLE_CLOSED_TYPES = CandleClosedColumns.TYPE_ROOTS;
+    private static final String CANDLE_LIVE_TABLE = "candle_live";
+    private static final String CANDLE_CLOSED_TABLE = "candle_closed";
+    private static final List<String> CANDLE_MULTITF_PK = List.of("instrument_token", "tf", "window_start");
+
+    @Test
+    @DisplayName("candle_live KV with PK exactly [instrument_token, tf, window_start] and matching routing passes")
+    void candleLiveKvExactPasses() {
+        assertDoesNotThrow(() -> TableContractValidator.validateCandleLiveTable(
+                candleLive(CANDLE_LIVE_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16)));
+    }
+
+    @Test
+    @DisplayName("candle_live KV without a primary key is rejected")
+    void candleLiveKvNoPkRejected() {
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateCandleLiveTable(
+                        candleLive(CANDLE_LIVE_TABLE, null, List.of(TOKEN), 16)));
+    }
+
+    @Test
+    @DisplayName("candle_live KV with a narrower PK is rejected (exact composite)")
+    void candleLiveKvNarrowerPkRejected() {
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateCandleLiveTable(
+                        candleLive(CANDLE_LIVE_TABLE, List.of(TOKEN, "tf"), List.of(TOKEN), 16)));
+    }
+
+    @Test
+    @DisplayName("candle_live KV with a wider PK is rejected")
+    void candleLiveKvWiderPkRejected() {
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateCandleLiveTable(
+                        candleLive(CANDLE_LIVE_TABLE, List.of(TOKEN, "tf", "window_start", "window_end"),
+                                List.of(TOKEN), 16)));
+    }
+
+    @Test
+    @DisplayName("candle_live KV with schema drift is rejected (14 columns)")
+    void candleLiveKvSchemaDriftRejected() {
+        List<String> shortTypes = new java.util.ArrayList<>(CANDLE_LIVE_TYPES);
+        shortTypes.remove(14);
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateCandleLiveTable(
+                        candleLive(CANDLE_LIVE_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16, shortTypes, false)));
+    }
+
+    @Test
+    @DisplayName("candle_live KV with wrong bucket key is rejected")
+    void candleLiveKvWrongBucketKeyRejected() {
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateCandleLiveTable(
+                        candleLive(CANDLE_LIVE_TABLE, CANDLE_MULTITF_PK, List.of("tf"), 16)));
+    }
+
+    @Test
+    @DisplayName("candle_live KV with wrong bucket count is rejected")
+    void candleLiveKvWrongBucketCountRejected() {
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateCandleLiveTable(
+                        candleLive(CANDLE_LIVE_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 17)));
+    }
+
+    @Test
+    @DisplayName("candle_live KV with wrong type root is rejected (volume BIGINT vs STRING)")
+    void candleLiveKvWrongTypeRootRejected() {
+        List<String> types = new java.util.ArrayList<>(CANDLE_LIVE_TYPES);
+        types.set(10, "STRING");
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateCandleLiveTable(
+                        candleLive(CANDLE_LIVE_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16, types, false)));
+    }
+
+    @Test
+    @DisplayName("candle_live schemaReport is informational")
+    void candleLiveSchemaReportIsInformational() {
+        TableInfo info = candleLive(CANDLE_LIVE_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16);
+        String report = TableContractValidator.schemaReport(info, CandleLiveColumns.COLUMN_NULLABLE_IN_DDL);
+        assertNotNull(report);
+        assertTrue(report.contains("instrument_token:BIGINT"));
+        assertTrue(report.contains("tf:STRING"));
+    }
+
+    // ── candle_closed KV (same contract) ──
+
+    @Test
+    @DisplayName("candle_closed KV with PK exactly [instrument_token, tf, window_start] passes")
+    void candleClosedKvExactPasses() {
+        assertDoesNotThrow(() -> TableContractValidator.validateCandleClosedTable(
+                candleClosed(CANDLE_CLOSED_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16)));
+    }
+
+    @Test
+    @DisplayName("candle_closed KV without a primary key is rejected")
+    void candleClosedKvNoPkRejected() {
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateCandleClosedTable(
+                        candleClosed(CANDLE_CLOSED_TABLE, null, List.of(TOKEN), 16)));
+    }
+
+    @Test
+    @DisplayName("candle_closed KV with schema drift is rejected (14 columns)")
+    void candleClosedKvSchemaDriftRejected() {
+        List<String> shortTypes = new java.util.ArrayList<>(CANDLE_CLOSED_TYPES);
+        shortTypes.remove(14);
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateCandleClosedTable(
+                        candleClosed(CANDLE_CLOSED_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16, shortTypes, false)));
+    }
+
+    @Test
+    @DisplayName("candle_closed KV with wrong bucket key is rejected")
+    void candleClosedKvWrongBucketKeyRejected() {
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateCandleClosedTable(
+                        candleClosed(CANDLE_CLOSED_TABLE, CANDLE_MULTITF_PK, List.of("window_start"), 16)));
+    }
+
+    @Test
+    @DisplayName("candle_closed KV with wrong type root is rejected")
+    void candleClosedKvWrongTypeRootRejected() {
+        List<String> types = new java.util.ArrayList<>(CANDLE_CLOSED_TYPES);
+        types.set(3, "BIGINT");
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateCandleClosedTable(
+                        candleClosed(CANDLE_CLOSED_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16, types, false)));
+    }
+
     // ── fixtures ──
 
     /**
@@ -622,6 +755,28 @@ class TableContractValidatorTest {
             int numBuckets, List<String> columnTypes, boolean pkNonNullable) {
         return table(name, schemaPk, bucketKeys, numBuckets, FORMING_BAR_NAMES,
                 FORMING_BAR_TYPES, columnTypes, pkNonNullable);
+    }
+
+    private static TableInfo candleLive(String name, List<String> schemaPk, List<String> bucketKeys,
+            int numBuckets) {
+        return table(name, schemaPk, bucketKeys, numBuckets, CANDLE_LIVE_NAMES, CANDLE_LIVE_TYPES, null, true);
+    }
+
+    private static TableInfo candleLive(String name, List<String> schemaPk, List<String> bucketKeys,
+            int numBuckets, List<String> columnTypes, boolean pkNonNullable) {
+        return table(name, schemaPk, bucketKeys, numBuckets, CANDLE_LIVE_NAMES, CANDLE_LIVE_TYPES,
+                columnTypes, pkNonNullable);
+    }
+
+    private static TableInfo candleClosed(String name, List<String> schemaPk, List<String> bucketKeys,
+            int numBuckets) {
+        return table(name, schemaPk, bucketKeys, numBuckets, CANDLE_CLOSED_NAMES, CANDLE_CLOSED_TYPES, null, true);
+    }
+
+    private static TableInfo candleClosed(String name, List<String> schemaPk, List<String> bucketKeys,
+            int numBuckets, List<String> columnTypes, boolean pkNonNullable) {
+        return table(name, schemaPk, bucketKeys, numBuckets, CANDLE_CLOSED_NAMES, CANDLE_CLOSED_TYPES,
+                columnTypes, pkNonNullable);
     }
 
     private static TableInfo table(String name, List<String> schemaPk, List<String> bucketKeys,

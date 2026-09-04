@@ -406,6 +406,34 @@
       "writer_owner": "Signal job (sole writer)",
       "retention_policy": "2d",
       "lake_policy": "off"
+    },
+    {
+      "table_name": "candle_live",
+      "ddl_path": "32_candle_live.sql",
+      "ddl_sha256": "9e8e7362734b54a442aa6d12ea1a2214458e55a9e1f8a02d1a96ddccfa9f9196",
+      "table_kind": "KV",
+      "primary_key": "instrument_token, tf, window_start",
+      "bucket_key": null,
+      "compatibility_class": "UNKNOWN",
+      "validated_matrix": "VM-FLUSS-CONN-007",
+      "schema_version": "1",
+      "writer_owner": "Signal job",
+      "retention_policy": "60s",
+      "lake_policy": "enabled=false"
+    },
+    {
+      "table_name": "candle_closed",
+      "ddl_path": "33_candle_closed.sql",
+      "ddl_sha256": "267bf510a52c61b8e0f229ab74c4084d860b1b8106957d49412fd1f84277de13",
+      "table_kind": "KV",
+      "primary_key": "instrument_token, tf, window_start",
+      "bucket_key": null,
+      "compatibility_class": "UNKNOWN",
+      "validated_matrix": "VM-FLUSS-CONN-007",
+      "schema_version": "1",
+      "writer_owner": "Signal job",
+      "retention_policy": "7d",
+      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
     }
   ]
 }
