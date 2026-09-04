@@ -83,6 +83,15 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
      */
     private final boolean sessionBypass;
 
+    /**
+     * Candle-phase soak switch (2026-09-05): when false, {@code processElement}
+     * skips the per-tick {@link #SIGNAL_TAG} snapshot build (6 forming copies +
+     * 6 closed-ring deep copies per tick) and emits nothing to the signal side
+     * output. Candle accumulation, timers, closed/live rows are untouched.
+     * Production default true (wired from {@code MULTITF_SIGNAL_CONTEXT_ENABLED}).
+     */
+    private final boolean signalContextEnabled;
+
     /** Reused aggregation math — TRADE-only volume/tickCount lives here (D2). */
     private final CandleAggregateFunction aggregate = new CandleAggregateFunction();
 
@@ -123,13 +132,19 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     }
 
     public MultiTimeframeAggregateFunction(long liveSnapshotIntervalMs) {
-        this(liveSnapshotIntervalMs, false);
+        this(liveSnapshotIntervalMs, false, true);
     }
 
     public MultiTimeframeAggregateFunction(long liveSnapshotIntervalMs, boolean sessionBypass) {
+        this(liveSnapshotIntervalMs, sessionBypass, true);
+    }
+
+    public MultiTimeframeAggregateFunction(long liveSnapshotIntervalMs, boolean sessionBypass,
+            boolean signalContextEnabled) {
         Preconditions.checkArgument(liveSnapshotIntervalMs > 0, "liveSnapshotIntervalMs must be >0");
         this.liveSnapshotIntervalMs = liveSnapshotIntervalMs;
         this.sessionBypass = sessionBypass;
+        this.signalContextEnabled = signalContextEnabled;
     }
 
     @Override
@@ -539,21 +554,25 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             slot.state.lastFingerprint = tick.getString(RawTableColumns.EVENT_FINGERPRINT).toString();
         }
 
-        // SIGNAL_TAG side-output: snapshot AFTER mutation (Decision 6 signals consume forming per-tick)
-        List<MultiTimeframeSignalContext.TimeframeContext> frames = new ArrayList<>(Timeframe.values().length);
-        String exchange = tick.isNullAt(RawTableColumns.EXCHANGE) ? null : tick.getString(RawTableColumns.EXCHANGE).toString();
-        String symbol = tick.isNullAt(RawTableColumns.SYMBOL) ? null : tick.getString(RawTableColumns.SYMBOL).toString();
-        for (Timeframe tf : Timeframe.values()) {
-            CandleAccumulator formingCopy = copyAccumulator(slot.state.forming(tf));
-            List<ClosedCandle> closedView = slot.state.closed(tf).snapshotNewestFirst();
-            List<ClosedCandle> closedCopy = new ArrayList<>(closedView.size());
-            for (ClosedCandle c : closedView) {
-                closedCopy.add(copyClosed(c));
+        // SIGNAL_TAG side-output: snapshot AFTER mutation (Decision 6 signals consume forming per-tick).
+        // Candle-phase soak switch: when signalContextEnabled is false the
+        // per-tick photocopy is skipped entirely (candles need none of it).
+        if (signalContextEnabled) {
+            List<MultiTimeframeSignalContext.TimeframeContext> frames = new ArrayList<>(Timeframe.values().length);
+            String exchange = tick.isNullAt(RawTableColumns.EXCHANGE) ? null : tick.getString(RawTableColumns.EXCHANGE).toString();
+            String symbol = tick.isNullAt(RawTableColumns.SYMBOL) ? null : tick.getString(RawTableColumns.SYMBOL).toString();
+            for (Timeframe tf : Timeframe.values()) {
+                CandleAccumulator formingCopy = copyAccumulator(slot.state.forming(tf));
+                List<ClosedCandle> closedView = slot.state.closed(tf).snapshotNewestFirst();
+                List<ClosedCandle> closedCopy = new ArrayList<>(closedView.size());
+                for (ClosedCandle c : closedView) {
+                    closedCopy.add(copyClosed(c));
+                }
+                frames.add(new MultiTimeframeSignalContext.TimeframeContext(tf, formingCopy, closedCopy));
             }
-            frames.add(new MultiTimeframeSignalContext.TimeframeContext(tf, formingCopy, closedCopy));
+            MultiTimeframeSignalContext signalCtx = new MultiTimeframeSignalContext(key, exchange, symbol, eventTime, frames);
+            ctx.output(SIGNAL_TAG, signalCtx);
         }
-        MultiTimeframeSignalContext signalCtx = new MultiTimeframeSignalContext(key, exchange, symbol, eventTime, frames);
-        ctx.output(SIGNAL_TAG, signalCtx);
     }
 
     private void emitLiveForSlot(Slot slot, long token, KeyedProcessFunction<Long, RowData, RowData>.Context ctx) throws Exception {

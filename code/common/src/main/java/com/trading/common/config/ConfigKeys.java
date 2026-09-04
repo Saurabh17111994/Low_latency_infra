@@ -143,6 +143,7 @@ public final class ConfigKeys {
     public static final String MULTITF_ENABLED = "MULTITF_ENABLED";
     public static final String MULTITF_LIVE_SNAPSHOT_INTERVAL_MS = "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS";
     public static final String MULTITF_SESSION_BYPASS = "MULTITF_SESSION_BYPASS";
+    public static final String MULTITF_SIGNAL_CONTEXT_ENABLED = "MULTITF_SIGNAL_CONTEXT_ENABLED";
     public static final String CANDLE_LIVE_TABLE = "CANDLE_LIVE_TABLE";
     public static final String CANDLE_CLOSED_TABLE = "CANDLE_CLOSED_TABLE";
     public static final String UNCERTAINTY_JOURNAL_PATH = "UNCERTAINTY_JOURNAL_PATH";

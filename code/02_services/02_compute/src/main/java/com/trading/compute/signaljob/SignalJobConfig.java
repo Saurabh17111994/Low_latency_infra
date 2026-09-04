@@ -124,6 +124,7 @@ public record SignalJobConfig(
         boolean multiTfEnabled,
         long liveSnapshotIntervalMs,
         boolean multiTfSessionBypass,
+        boolean multiTfSignalContextEnabled,
         String candleLiveTable,
         String candleClosedTable,
         StartupMode startupMode) implements Serializable {
@@ -158,6 +159,12 @@ public record SignalJobConfig(
         // 09:15-15:30 IST session filter. The soak harness sets it ONLY for
         // the dedicated soak run; it does not touch the old 15s path.
         boolean multiTfSessionBypass = booleanValue(env, "MULTITF_SESSION_BYPASS", false);
+        // Candle-phase soak switch (2026-09-05): when false the multi-TF
+        // aggregator skips the per-tick SIGNAL_TAG snapshot build (signal-job
+        // work, unused while the focus is ticks -> candles). Default true —
+        // production behavior unchanged; the candle soak sets it false.
+        boolean multiTfSignalContextEnabled =
+                booleanValue(env, "MULTITF_SIGNAL_CONTEXT_ENABLED", true);
         String candleLiveTable = stringEnv(env, "CANDLE_LIVE_TABLE", "candle_live");
         String candleClosedTable = stringEnv(env, "CANDLE_CLOSED_TABLE", "candle_closed");
         return new SignalJobConfig(
@@ -251,6 +258,7 @@ public record SignalJobConfig(
                 multiTfEnabled,
                 liveSnapshotIntervalMs,
                 multiTfSessionBypass,
+                multiTfSignalContextEnabled,
                 candleLiveTable,
                 candleClosedTable,
                 mode);

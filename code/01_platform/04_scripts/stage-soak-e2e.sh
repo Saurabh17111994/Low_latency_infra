@@ -16,7 +16,11 @@ FLINK_REST_URL="${FLINK_REST_URL:-http://localhost:8081}"
 COMPOSE_DIR="$ROOT/code/01_platform/01_docker"
 PHASE_OUT="$ROOT/logs/soak-e2e-$(date +%Y%m%d-%H%M%S)"
 OUT="$PHASE_OUT/capture"
-export OUT RATE_HZ MULTITF_SESSION_BYPASS
+export OUT RATE_HZ MULTITF_SESSION_BYPASS MULTITF_SIGNAL_CONTEXT_ENABLED
+# Candle-phase focus (2026-09-05): skip the per-tick signal-context snapshot
+# build (signal-job work) unless the caller explicitly enables it.
+: "${MULTITF_SIGNAL_CONTEXT_ENABLED:=false}"
+export MULTITF_SIGNAL_CONTEXT_ENABLED
 mkdir -p "$OUT/j1-0" "$OUT/j1-1" "$OUT/j1-2"
 exec > >(tee -a "$PHASE_OUT/run.log") 2>&1
 # shellcheck disable=SC1091

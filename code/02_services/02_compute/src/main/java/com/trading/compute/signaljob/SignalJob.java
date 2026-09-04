@@ -257,7 +257,8 @@ public final class SignalJob {
             SingleOutputStreamOperator<RowData> aggregator = monitored
                     .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
                     .process(new MultiTimeframeAggregateFunction(config.liveSnapshotIntervalMs(),
-                            config.multiTfSessionBypass()))
+                            config.multiTfSessionBypass(),
+                            config.multiTfSignalContextEnabled()))
                     .returns(CandleClosedColumns.ROW_TYPE_INFO)
                     .name("multi-tf-aggregator")
                     .uid("multi-tf-aggregator-v1");

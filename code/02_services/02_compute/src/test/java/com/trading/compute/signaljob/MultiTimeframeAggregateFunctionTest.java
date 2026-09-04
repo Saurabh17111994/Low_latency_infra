@@ -331,6 +331,75 @@ class MultiTimeframeAggregateFunctionTest {
                 "without the soak flag an out-of-session tick must stay dropped");
     }
 
+    private void openWith(MultiTimeframeAggregateFunction f) throws Exception {
+        fn = f;
+        harness = ProcessFunctionTestHarnesses.forKeyedProcessFunction(
+                fn,
+                row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN),
+                Types.LONG);
+        harness.open();
+    }
+
+    /** Drives 3 in-session trades, fires live timers, closes the first 15s bucket. */
+    private void driveThreeTradesAndClose(long T0) throws Exception {
+        harness.processElement(trade(T0 + 2_000L, "fp-a", 100_00L, 10L), T0 + 2_000L);
+        harness.processElement(trade(T0 + 5_000L, "fp-b", 101_00L, 20L), T0 + 5_000L);
+        harness.processElement(trade(T0 + 8_000L, "fp-c", 99_00L, 5L), T0 + 8_000L);
+        harness.setProcessingTime(20_000L);
+        harness.processWatermark(new Watermark(T0 + 10_000L));
+        harness.processWatermark(new Watermark(T0 + 15_000L));
+        harness.setProcessingTime(70_000L);
+    }
+
+    private static String closedKey(RowData r) {
+        return r.getString(CandleClosedColumns.TF).toString() + "|"
+                + r.getLong(CandleClosedColumns.WINDOW_START);
+    }
+
+    private static void assertClosedOhlcvEquals(RowData expected, RowData actual) {
+        assertEquals(expected.getLong(CandleClosedColumns.WINDOW_START), actual.getLong(CandleClosedColumns.WINDOW_START));
+        assertEquals(expected.getLong(CandleClosedColumns.WINDOW_END), actual.getLong(CandleClosedColumns.WINDOW_END));
+        assertEquals(expected.getLong(CandleClosedColumns.OPEN_PAISE), actual.getLong(CandleClosedColumns.OPEN_PAISE));
+        assertEquals(expected.getLong(CandleClosedColumns.HIGH_PAISE), actual.getLong(CandleClosedColumns.HIGH_PAISE));
+        assertEquals(expected.getLong(CandleClosedColumns.LOW_PAISE), actual.getLong(CandleClosedColumns.LOW_PAISE));
+        assertEquals(expected.getLong(CandleClosedColumns.CLOSE_PAISE), actual.getLong(CandleClosedColumns.CLOSE_PAISE));
+        assertEquals(expected.getLong(CandleClosedColumns.VOLUME), actual.getLong(CandleClosedColumns.VOLUME));
+    }
+
+    @Test
+    @DisplayName("signal context OFF: zero SIGNAL_TAG rows, identical closed/live OHLCV vs ON")
+    void signalContextDisabledSkipsSideOutputButKeepsCandles() throws Exception {
+        // Candle-phase soak switch: skipping the per-tick signal-context
+        // photocopy must not change one byte of candle output.
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0); // in-session, aligned for all 6 TFs
+        openWith(new MultiTimeframeAggregateFunction(LIVE_INTERVAL, false, true));
+        driveThreeTradesAndClose(T0);
+        assertEquals(3, signalRows().size(), "ON must emit one signal context per TRADE tick");
+        List<RowData> mainsOn = mainRows();
+        List<RowData> livesOn = liveRows();
+        assertFalse(mainsOn.isEmpty(), "ON must close the 15s bucket");
+        assertFalse(livesOn.isEmpty(), "ON must emit live snapshots");
+        harness.close();
+        harness = null;
+
+        openWith(new MultiTimeframeAggregateFunction(LIVE_INTERVAL, false, false));
+        driveThreeTradesAndClose(T0);
+        assertEquals(0, signalRows().size(),
+                "OFF must emit zero SIGNAL_TAG rows (photocopy skipped)");
+        List<RowData> mainsOff = mainRows();
+        List<RowData> livesOff = liveRows();
+        assertEquals(mainsOn.size(), mainsOff.size(), "closed row count must match ON");
+        java.util.Map<String, RowData> offByKey = new java.util.HashMap<>();
+        for (RowData r : mainsOff) offByKey.put(closedKey(r), r);
+        for (RowData r : mainsOn) {
+            RowData o = offByKey.remove(closedKey(r));
+            assertNotNull(o, "OFF missing closed row " + closedKey(r));
+            assertClosedOhlcvEquals(r, o);
+        }
+        assertTrue(offByKey.isEmpty(), "OFF emitted extra closed rows: " + offByKey.keySet());
+        assertEquals(livesOn.size(), livesOff.size(), "live snapshot count must match ON");
+    }
+
     @Test
     @DisplayName("metrics: slot cap and duplicate guard")
     void duplicateGuard() throws Exception {

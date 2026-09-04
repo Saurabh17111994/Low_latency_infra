@@ -948,4 +948,27 @@ class SignalJobConfigTest {
                 () -> SignalJobConfig.from(env));
         assertTrue(e.getMessage().contains("MULTITF_SESSION_BYPASS"), e.getMessage());
     }
+
+    @Test
+    void multiTfSignalContextDefaultsToEnabled() {
+        SignalJobConfig cfg = SignalJobConfig.from(env());
+        assertTrue(cfg.multiTfSignalContextEnabled(),
+                "MULTITF_SIGNAL_CONTEXT_ENABLED defaults to true (production unchanged)");
+    }
+
+    @Test
+    void honorsMultiTfSignalContextDisabled() {
+        Map<String, String> env = env();
+        env.put("MULTITF_SIGNAL_CONTEXT_ENABLED", "false");
+        assertFalse(SignalJobConfig.from(env).multiTfSignalContextEnabled());
+    }
+
+    @Test
+    void rejectsInvalidMultiTfSignalContextBoolean() {
+        Map<String, String> env = env();
+        env.put("MULTITF_SIGNAL_CONTEXT_ENABLED", "yes");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(env));
+        assertTrue(e.getMessage().contains("MULTITF_SIGNAL_CONTEXT_ENABLED"), e.getMessage());
+    }
 }
