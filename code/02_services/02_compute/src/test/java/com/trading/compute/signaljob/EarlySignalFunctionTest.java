@@ -41,18 +41,22 @@ class EarlySignalFunctionTest {
 
     private KeyedTwoInputStreamOperatorTestHarness<Long, RowData, RowData, RowData> harness;
 
+    private EarlySignalFunction fn;
+
     @AfterEach
     void tearDown() throws Exception {
         if (harness != null) {
             harness.close();
             harness = null;
         }
+        fn = null;
     }
 
     private void openHarness() throws Exception {
         SignalJobConfig config = SignalJobConfig.from(env());
+        fn = new EarlySignalFunction(config);
         harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
-                new EarlySignalFunction(config),
+                fn,
                 row -> row.getLong(CandlePreviewColumns.INSTRUMENT_TOKEN),
                 row -> row.getLong(CandleTableColumns.INSTRUMENT_TOKEN),
                 Types.LONG);
@@ -61,8 +65,9 @@ class EarlySignalFunctionTest {
 
     private void openHarnessWithStateBackend() throws Exception {
         SignalJobConfig config = SignalJobConfig.from(env());
+        fn = new EarlySignalFunction(config);
         harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
-                new EarlySignalFunction(config),
+                fn,
                 row -> row.getLong(CandlePreviewColumns.INSTRUMENT_TOKEN),
                 row -> row.getLong(CandleTableColumns.INSTRUMENT_TOKEN),
                 Types.LONG);
@@ -317,6 +322,82 @@ class EarlySignalFunctionTest {
                 str(out.get(0), SignalCandidatesTableColumns.ACTION));
         assertEquals(tentativeId,
                 str(out.get(0), SignalCandidatesTableColumns.SUPERSEDES_CANDIDATE_ID));
+        restored.close();
+    }
+
+    // --- Perf trim options 1+2 (2026-09-05): single-read snapshot + per-key
+    // memory cache. Same signals, same timing, ~99% fewer state reads. ---
+
+    private static List<String> idActions(List<RowData> out) {
+        List<String> result = new java.util.ArrayList<>();
+        for (RowData row : out) {
+            result.add(str(row, SignalCandidatesTableColumns.CANDIDATE_ID)
+                    + "|" + str(row, SignalCandidatesTableColumns.ACTION));
+        }
+        return result;
+    }
+
+    @Test
+    void lookbackCachePopulatedOnPreviewAndInvalidatedOnFinal() throws Exception {
+        openHarness();
+        long token = 7L;
+        feedFinal(token, 0, 100, 110, 90, 105);
+        feedFinal(token, 1, 105, 115, 95, 110);
+        feedFinal(token, 2, 110, 120, 100, 115);
+        assertFalse(fn.isLookbackCached(token), "no evaluation yet -> cache must be empty");
+        // Rule holds here (close 128 > max high 120, trend holds) -> tentative.
+        feedPreview(token, 3, 115, 130, 110, 128);
+        rows(harness);
+        assertTrue(fn.isLookbackCached(token),
+                "preview evaluation must populate the per-key cache");
+        // Settle path evaluates BEFORE appending; append invalidates after.
+        feedFinal(token, 3, 115, 130, 110, 128);
+        rows(harness);
+        assertFalse(fn.isLookbackCached(token),
+                "final append must invalidate the per-key cache");
+    }
+
+    @Test
+    void cachedEvaluationMatchesDirectEvaluationAfterRestore() throws Exception {
+        // Restart must reload the (transient) cache from restored disk state:
+        // a restored run must emit exactly what an uninterrupted run emits.
+        openHarnessWithStateBackend();
+        feedFinal(9L, 0, 100, 110, 90, 105);
+        feedFinal(9L, 1, 105, 115, 95, 110);
+        feedFinal(9L, 2, 110, 120, 100, 115);
+        feedPreview(9L, 3, 115, 130, 110, 128); // tentative T3
+        List<String> before = idActions(rows(harness));
+        OperatorSubtaskState state = harness.snapshot(2L, 0L);
+        feedFinal(9L, 3, 115, 130, 110, 128); // CONFIRM T3
+        feedPreview(9L, 4, 128, 140, 125, 138); // tentative T4
+        feedFinal(9L, 4, 128, 140, 125, 138); // CONFIRM T4
+        before.addAll(idActions(rows(harness)));
+        harness.close();
+        harness = null;
+
+        KeyedTwoInputStreamOperatorTestHarness<Long, RowData, RowData, RowData> restored =
+                new KeyedTwoInputStreamOperatorTestHarness<>(
+                        new org.apache.flink.streaming.api.operators.co.KeyedCoProcessOperator<>(
+                                new EarlySignalFunction(SignalJobConfig.from(env()))),
+                        row -> row.getLong(CandlePreviewColumns.INSTRUMENT_TOKEN),
+                        row -> row.getLong(CandleTableColumns.INSTRUMENT_TOKEN),
+                        Types.LONG,
+                        1, 1, 0);
+        restored.setStateBackend(new HashMapStateBackend());
+        restored.initializeState(state);
+        restored.open();
+        // Cache is empty after restore: these previews/finals force the
+        // reload path — outputs must still match the uninterrupted run.
+        restored.processElement2(candle(9L, T0 + 3 * 15_000L, T0 + 4 * 15_000L,
+                115, 130, 110, 128), T0 + 4 * 15_000L);
+        restored.processElement1(preview(9L, T0 + 4 * 15_000L, T0 + 5 * 15_000L,
+                128, 140, 125, 138), T0 + 4 * 15_000L + 14_000L);
+        restored.processElement2(candle(9L, T0 + 4 * 15_000L, T0 + 5 * 15_000L,
+                128, 140, 125, 138), T0 + 5 * 15_000L);
+        List<String> after = idActions(rows(restored));
+        // Suffix outputs (last 3 rows) must equal the uninterrupted suffix.
+        assertEquals(before.subList(1, before.size()), after,
+                "restored run must emit exactly what the uninterrupted run emitted");
         restored.close();
     }
 

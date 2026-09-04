@@ -219,6 +219,16 @@ public class EarlySignalFunction
     private transient Counter markerDroppedCounter;
     private transient LinkedHashMap<String, StagedMark> stagedMarks;
     private transient LinkedHashMap<String, StagedSettle> stagedSettles;
+    /**
+     * Perf trim options 1+2 (2026-09-05): per-key memory copy of the
+     * lookback ring buffers. The buffers change ONLY on completed finals
+     * (~81/s); previews (~2,600/s) evaluate against the copy, so ~99% of
+     * state reads disappear. Transient: after a restart the map is empty
+     * and the first evaluation per key reloads from restored disk state
+     * (same answers — the rule is pure, see SignalLookbackState.ruleHolds).
+     * Key universe is the fixed instrument set, so the map is bounded.
+     */
+    private transient Map<Long, SignalLookbackState.Snapshot> lookbackCache;
 
     public EarlySignalFunction(SignalJobConfig config) {
         this(config, null);
@@ -250,6 +260,7 @@ public class EarlySignalFunction
                 getRuntimeContext().getMetricGroup().counter("compute.signals.early.marker_dropped");
         stagedMarks = new LinkedHashMap<>();
         stagedSettles = new LinkedHashMap<>();
+        lookbackCache = new java.util.HashMap<>();
         if (markerHook != null) {
             markerHook.open();
         }
@@ -262,6 +273,26 @@ public class EarlySignalFunction
         }
     }
 
+    /**
+     * Rule answer for one row: cache hit = zero state reads; miss = one
+     * single-pass snapshot read ({@link SignalLookbackState#readSnapshot}).
+     * Callers must drop the key from the cache after every
+     * {@code lookback.append(...)} (completed finals only).
+     */
+    private boolean evaluateLookback(long token, long open, long close) throws Exception {
+        SignalLookbackState.Snapshot snap = lookbackCache.get(token);
+        if (snap == null) {
+            snap = lookback.readSnapshot();
+            lookbackCache.put(token, snap);
+        }
+        return lookback.evaluateSnapshot(open, close, snap);
+    }
+
+    /** Test probe: is this key's lookback currently served from memory? */
+    boolean isLookbackCached(long token) {
+        return lookbackCache != null && lookbackCache.containsKey(token);
+    }
+
     // --- Input 1: previews (tentative, once per window) ---
     @Override
     public void processElement1(RowData preview, Context ctx, Collector<RowData> out)
@@ -272,7 +303,7 @@ public class EarlySignalFunction
         long close = preview.getLong(CandlePreviewColumns.CLOSE_PAISE);
         long windowEnd = preview.getLong(CandlePreviewColumns.WINDOW_END);
         long token = preview.getLong(CandlePreviewColumns.INSTRUMENT_TOKEN);
-        if (!lookback.evaluate(open, close)) {
+        if (!evaluateLookback(token, open, close)) {
             // A failed preview resets the consecutive-hold streak even when a
             // tentative exists — "4 consecutive holds" must be truly
             // consecutive for the Phase 3 early confirm.
@@ -408,7 +439,7 @@ public class EarlySignalFunction
                         // rule needs the task-thread lookback state, so it
                         // runs now; only the marker lookup and the row
                         // emission are deferred to drain().
-                        boolean ruleHolds = lookback.evaluate(open, close);
+                        boolean ruleHolds = evaluateLookback(token2, open, close);
                         StagedSettle staged = new StagedSettle(candidateId, token2,
                                 windowStart, windowEnd,
                                 exchangeOf(finalCandle, false),
@@ -429,13 +460,16 @@ public class EarlySignalFunction
             // The completed candle still enters the lookback (ring buffers
             // always track finals) — both for case (a) and post-reconcile.
             lookback.append(high, close);
+            lookbackCache.remove(finalCandle.getLong(CandleTableColumns.INSTRUMENT_TOKEN));
             return;
         }
         // Evaluate BEFORE appending: the rule compares against the PREVIOUS
         // completed candles only (strictly-before semantics, same as
         // SignalDetectionFunction, which evaluates then appends).
-        boolean holds = lookback.evaluate(open, close);
+        long settleToken = finalCandle.getLong(CandleTableColumns.INSTRUMENT_TOKEN);
+        boolean holds = evaluateLookback(settleToken, open, close);
         lookback.append(high, close);
+        lookbackCache.remove(settleToken);
         pending.remove(windowStart);
         clearSettlementTimer(ctx);
         if (markerHook != null) {

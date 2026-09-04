@@ -128,18 +128,71 @@ final class SignalLookbackState {
      * condition fails.
      */
     boolean evaluate(long open, long close) throws Exception {
-        if (!isWarm()) {
+        return evaluateSnapshot(open, close, readSnapshot());
+    }
+
+    /**
+     * One-shot read of everything the rule needs (perf trim 2026-09-05):
+     * exactly 1 highs read + 1 closes read. The old path read the highs
+     * list twice (isWarm + maxHigh) plus closes = 3 reads per evaluation.
+     */
+    Snapshot readSnapshot() throws Exception {
+        List<Long> highs = highsState.value();
+        List<Long> closes = closesState.value();
+        if (highs == null) {
+            return new Snapshot(0, 0L, 0L);
+        }
+        long max = 0;
+        for (long h : highs) {
+            max = Math.max(max, h);
+        }
+        long sum = 0;
+        if (closes != null) {
+            for (long c : closes) {
+                sum += c;
+            }
+        }
+        return new Snapshot(highs.size(), max, sum);
+    }
+
+    /**
+     * Rule answer from an already-read snapshot (no state access — safe to
+     * call per preview row against a cached snapshot).
+     */
+    boolean evaluateSnapshot(long open, long close, Snapshot snap) {
+        return ruleHolds(open, close, snap, lookback);
+    }
+
+    /**
+     * Pure rule (no state, no instance): bullish + breakout + trend, all
+     * strict, cold (count &lt; lookback) never fires. This is the single
+     * definition of the rule — both {@link #evaluate} and cached callers
+     * answer through it, so caching cannot change an answer.
+     */
+    static boolean ruleHolds(long open, long close, Snapshot snap, int lookback) {
+        if (snap.count < lookback) {
             return false;
         }
-        long maxHigh = maxHigh();
-        List<Long> closes = closesState.value();
-        long sum = 0;
-        for (long c : closes) {
-            sum += c;
-        }
         boolean bullish = close > open;
-        boolean breakout = close > maxHigh;
-        boolean trend = close * (long) closes.size() > sum;
+        boolean breakout = close > snap.maxHigh;
+        boolean trend = close * (long) snap.count > snap.sumCloses;
         return bullish && breakout && trend;
+    }
+
+    /**
+     * Immutable one-shot view of the ring buffers: element count, highest
+     * high, sum of closes. Read once via {@link #readSnapshot}, reuse for
+     * every preview until the next completed candle invalidates it.
+     */
+    static final class Snapshot {
+        final int count;
+        final long maxHigh;
+        final long sumCloses;
+
+        Snapshot(int count, long maxHigh, long sumCloses) {
+            this.count = count;
+            this.maxHigh = maxHigh;
+            this.sumCloses = sumCloses;
+        }
     }
 }
