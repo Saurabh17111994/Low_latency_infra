@@ -29,6 +29,7 @@
 # =============================================================================
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -77,6 +78,93 @@ METRIC_TYPES = {
 # bridge.slot.capacity_used_percent lands as bridge_slot_capacity_used_percent).
 def stream(metric_name):
     return metric_name.replace(".", "_")
+
+
+# ---------------------------------------------------------------------------
+# COMMAND - Command Center corpus contract (2026-09-05).
+# KNOWN_COMMAND_LIVE_STREAMS: every O2 stream the captain's screen reads that
+# exists in this stack today. KNOWN_COMMAND_MISSING_STREAMS: the execution
+# path (gateway/Nautilus/bridge/broker) emits zero telemetry, so those tiles
+# are honest "[NOT LIVE YET]" placeholders until the C2 instrumentation spec
+# lands. validate_command_spec() fails fast -- run with --check (CI) or at
+# provision time -- instead of silently pushing a broken spec to O2.
+# ---------------------------------------------------------------------------
+KNOWN_COMMAND_LIVE_STREAMS = {
+    "flink_jobmanager_numrunningjobs",
+    "bridge_connected",
+    "bridge_slot_safety_state",
+    "ingestion_ready",
+    "tick_throughput",
+    "feed_stalls",
+    "sequence_gaps",
+    "bridge_reconnects",
+    "bridge_slot_last_frame_age_ms",
+    "decode_errors",
+    "flink_jobmanager_numregisteredtaskmanagers",
+    "flink_jobmanager_job_numberoffailedcheckpoints",
+    "flink_taskmanager_job_task_numrecordsinpersecond",
+    "flink_taskmanager_job_task_operator_compute_multitf_signal_emitted",
+    "otelcol_exporter_send_failed_metric_points",
+    "node_filesystem_avail_bytes",
+    "bridge_connection_epoch",
+}
+KNOWN_COMMAND_MISSING_STREAMS = {
+    "execution_orders_submitted",
+    "execution_fills_confirmed",
+    "execution_gate_denied",
+}
+
+
+def legend_of(title, ptype, query, stream, *rest):
+    """5th tuple slot = explicit legend override (None = use default)."""
+    return rest[0] if rest else None
+
+
+def validate_command_spec(specs=None):
+    """Fail-fast checks on the COMMAND corpus (no network). Return a list of
+    human-readable problems; empty list = clean."""
+    specs = specs if specs is not None else DASHBOARDS
+    problems = []
+    for spec in specs:
+        if spec.get("title") != "COMMAND - Command Center":
+            continue
+        for entry in spec["panels"]:
+            title, ptype, query, stream = entry[0], entry[1], entry[2], entry[3]
+            where = f"panel {title!r}"
+            if re.search(r"\(1\s*=\s*(yes|no|safe|stop|ready)", title, re.I):
+                problems.append(
+                    f"{where}: title still carries a numeric 0/1 legend "
+                    "— replace with words"
+                )
+            if "." in stream:
+                problems.append(
+                    f"{where}: stream {stream!r} has a dot; O2 metric "
+                    "streams use underscores"
+                )
+            if stream in KNOWN_COMMAND_MISSING_STREAMS and "[NOT LIVE YET]" not in title:
+                problems.append(
+                    f"{where}: stream {stream!r} does not exist yet — title "
+                    "must start [NOT LIVE YET]"
+                )
+            if (
+                stream not in KNOWN_COMMAND_MISSING_STREAMS
+                and stream not in KNOWN_COMMAND_LIVE_STREAMS
+                and "[NOT LIVE YET]" not in title
+            ):
+                problems.append(
+                    f"{where}: stream {stream!r} is in neither "
+                    "KNOWN_COMMAND_LIVE_STREAMS nor the MISSING set"
+                )
+            if (
+                ptype == "promql"
+                and "task_name" not in query
+                and not legend_of(title, ptype, query, stream, *entry[4:])
+            ):
+                problems.append(
+                    f"{where}: promql without task_name renders raw "
+                    "{{task_name}} — add a fixed legend"
+                )
+    return problems
 
 
 DASHBOARDS = [
@@ -640,29 +728,43 @@ DASHBOARDS = [
             # ROW 0 — which ship am I on (live: job count; the rest rides the
             # dashboard description + the job config log, not metrics).
             (
-                "Jobs running now (want 1+ when market is open)",
+                "Jobs running now",
                 "promql",
                 "max(flink_jobmanager_numrunningjobs)",
                 "flink_jobmanager_numrunningjobs",
+                "Flink jobs",
+                "1+ when market is open; 0 = engine down.",
             ),
-            # ROW 1 — can I trade right now?
+            # ROW 1 — can I trade right now? Status tiles are SQL text tables:
+            # O2 renders CASE-WHEN string columns as words, and the request
+            # time window applies even without a WHERE clause (verified live
+            # 2026-09-05) — so an old/no-data stream shows an empty tile
+            # rather than a lie. NOTE: never put '{start_time}' in SQL here —
+            # O2 does NOT substitute those placeholders; a string-vs-BIGINT
+            # comparison silently returns nothing.
             (
-                "Feed link up? (1 = yes, 0 = no)",
-                "promql",
-                "max(bridge_connected)",
+                "Feed link is...",
+                "table",
+                "select _timestamp, CASE WHEN value = 1 THEN 'UP' ELSE 'DOWN' END as value from \"bridge_connected\" order by _timestamp desc limit 1",
                 "bridge_connected",
+                "",
+                "UP = link to broker feed alive; DOWN or blank = not connected.",
             ),
             (
-                "Feed safe? (1 = safe, 0 = stop)",
-                "promql",
-                "min(bridge_slot_safety_state)",
+                "Feed safety is...",
+                "table",
+                "select _timestamp, CASE WHEN value = 1 THEN 'SAFE' ELSE 'STOP' END as value from \"bridge_slot_safety_state\" order by _timestamp desc limit 1",
                 "bridge_slot_safety_state",
+                "",
+                "SAFE = slots within limits; STOP or blank = trading must halt.",
             ),
             (
-                "Pipeline ready? (1 = yes, 0 = no)",
-                "promql",
-                "min(ingestion_ready)",
+                "Pipeline is...",
+                "table",
+                "select _timestamp, CASE WHEN value = 1 THEN 'READY' ELSE 'NOT READY' END as value from \"ingestion_ready\" order by _timestamp desc limit 1",
                 "ingestion_ready",
+                "",
+                "READY = pipeline armed; NOT READY or blank = not armed.",
             ),
             # ROW 2 — is live market data flowing?
             (
@@ -670,99 +772,115 @@ DASHBOARDS = [
                 "promql",
                 "sum(increase(tick_throughput[300s]))/300",
                 "tick_throughput",
+                "ticks/s",
+                "Market-data rate; ~0 off-hours is expected.",
             ),
             (
-                "Feed gaps so far (should stay flat)",
+                "Feed gaps so far",
                 "promql",
                 "max(feed_stalls)",
                 "feed_stalls",
+                "stalls",
+                "Should stay flat — a jump = feed froze.",
             ),
             (
-                "Jumbled ticks so far (should stay flat)",
+                "Jumbled ticks so far",
                 "promql",
                 "max(sequence_gaps)",
                 "sequence_gaps",
+                "gaps",
+                "Should stay flat — a jump = ticks arrived out of order.",
             ),
             (
-                "Broker link drops (reconnects, want 0)",
+                "Broker link drops",
                 "promql",
                 "sum(increase(bridge_reconnects[600s]))",
                 "bridge_reconnects",
+                "reconnects",
+                "Want 0 — a jump = the broker link dropped.",
             ),
             (
                 "How old is newest data? (over 5000 ms = stale)",
                 "promql",
                 "max(bridge_slot_last_frame_age_ms)",
                 "bridge_slot_last_frame_age_ms",
+                "age ms",
+                "Age of the newest tick; over 5000 ms = stale.",
             ),
             (
-                "Bad ticks thrown away (should stay flat)",
+                "Bad ticks thrown away",
                 "promql",
                 "sum(increase(decode_errors[70s]))",
                 "decode_errors",
+                "bad ticks",
+                "Should stay flat — a jump = the feed sent junk.",
             ),
             # ROW 3 — is the engine (Flink) healthy?
             (
-                "Math workers alive (want 1+)",
+                "Math workers alive",
                 "promql",
                 "max(flink_jobmanager_numregisteredtaskmanagers)",
                 "flink_jobmanager_numregisteredtaskmanagers",
+                "workers",
+                "1+ = engine workers running; 0 = engine down.",
             ),
             (
-                "Safety saves failed (want 0)",
+                "Safety saves failed",
                 "promql",
                 "max(flink_jobmanager_job_numberoffailedcheckpoints)",
                 "flink_jobmanager_job_numberoffailedcheckpoints",
+                "failed saves",
+                "0 = every checkpoint saved; a jump = saves failing.",
             ),
             (
                 "New candles flowing? (0 = nothing coming)",
                 "promql",
                 'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_closed_sink:_Writer"})',
                 "flink_taskmanager_job_task_numrecordsinpersecond",
+                "upserts/s",
+                ">0 = fresh candles landing in the store.",
             ),
             (
                 "New trade ideas so far (total)",
                 "promql",
                 "max(flink_taskmanager_job_task_operator_compute_multitf_signal_emitted)",
                 "flink_taskmanager_job_task_operator_compute_multitf_signal_emitted",
+                "ideas",
+                "Cumulative signal count.",
             ),
-            # ROW 4 — did my orders reach the broker? NOT LIVE YET (C2).
-            (
-                "[NOT LIVE YET] Orders sent to broker",
-                "timeseries",
-                "select _timestamp, value from \"execution_orders_submitted\" where _timestamp >= '{start_time}' and _timestamp <= '{end_time}' order by _timestamp",
-                "execution_orders_submitted",
-            ),
-            (
-                "[NOT LIVE YET] Broker confirmed fills",
-                "timeseries",
-                "select _timestamp, value from \"execution_fills_confirmed\" where _timestamp >= '{start_time}' and _timestamp <= '{end_time}' order by _timestamp",
-                "execution_fills_confirmed",
-            ),
-            (
-                "[NOT LIVE YET] Orders blocked for safety",
-                "timeseries",
-                "select _timestamp, value from \"execution_gate_denied\" where _timestamp >= '{start_time}' and _timestamp <= '{end_time}' order by _timestamp",
-                "execution_gate_denied",
-            ),
+            # ROW 4 — did my orders reach the broker? [NOT LIVE YET]: the
+            # execution path (gateway/Nautilus/bridge/broker) emits zero
+            # telemetry, so there is NOTHING honest to draw. O2 v0.91.5 has no
+            # text/placeholder panel, and BOTH a SQL table and a promql query
+            # on the future stream suppress the OTHER SQL panels in this
+            # dashboard (the missing stream stalls the UI batch — verified
+            # live 2026-09-05). So the tiles are absent BY DESIGN until C2;
+            # the C2 wiring task is tracked in docs/08_implementation/
+            # 10-observability.md + test_command_center.py (missing-stream set).
             # ROW 5 — will the machine survive the day?
             (
-                "Health reports lost on the way (want 0)",
+                "Health reports lost on the way",
                 "promql",
                 "max(otelcol_exporter_send_failed_metric_points)",
                 "otelcol_exporter_send_failed_metric_points",
+                "lost reports",
+                "0 = every health report arrived.",
             ),
             (
-                "Disk free %, worst disk (act before 20)",
+                "Disk free %, worst disk",
                 "promql",
                 "min(node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100",
                 "node_filesystem_avail_bytes",
+                "free %",
+                "Worst disk; act before 20.",
             ),
             (
                 "Broker session number (a jump = link reset)",
                 "promql",
                 "max(bridge_connection_epoch)",
                 "bridge_connection_epoch",
+                "session",
+                "A jump = the broker link reset.",
             ),
         ],
     },
@@ -1356,9 +1474,15 @@ EMPTY_FILTER = {
 }
 
 
-def make_panel_v8(pid, index, title, ptype, query, stream):
+def make_panel_v8(pid, index, title, ptype, query, stream, legend=None,
+               description=""):
     """v8 Panel JSON: 192-col grid (x=column 0-191, w=half=96), auto-visible
-    on all metrics streams; query_type promql vs sql."""
+    on all metrics streams; query_type promql vs sql.
+
+    5th tuple slot legend (COMMAND only): fixed PromQL legend. O2 renders
+    the raw '{{task_name}}' template when the query has no task_name label
+    (seen live 2026-09-05), so pass e.g. 'all slots' instead.
+    """
     if ptype == "promql":
         query_type, chart_type = "promql", "line"
         fields = {
@@ -1369,18 +1493,29 @@ def make_panel_v8(pid, index, title, ptype, query, stream):
             "z": [],
             "filter": dict(EMPTY_FILTER),
         }
-        qconfig = {"promql_legend": "{{task_name}}"}
+        qconfig = {"promql_legend": legend or "{{task_name}}"}
     else:
         query_type = "sql"
         chart_type = {"table": "table", "gauge": "gauge", "value": "value"}.get(
             ptype, "line"
         )
+        # Text tables (COMMAND status tiles) return a single aliased column
+        # (e.g. CASE WHEN ... as value). O2's dashboard UI only fires SQL for
+        # a table whose fields line up with the query: count(*) tiles carry
+        # no _timestamp (x empty), while value-mapping tiles must select
+        # _timestamp (x populated) or the UI never sends the request
+        # (verified live 2026-09-05 by request capture).
+        xcols = (
+            []
+            if chart_type == "table" and "count(*)" in query.lower()
+            else [
+                {"label": "_timestamp", "alias": "_timestamp", "column": "_timestamp"}
+            ]
+        )
         fields = {
             "stream": stream,
             "stream_type": "metrics",
-            "x": [
-                {"label": "_timestamp", "alias": "_timestamp", "column": "_timestamp"}
-            ],
+            "x": xcols,
             "y": [{"label": "value", "alias": "value", "column": "value"}],
             "z": [],
             "filter": dict(EMPTY_FILTER),
@@ -1392,7 +1527,7 @@ def make_panel_v8(pid, index, title, ptype, query, stream):
         "id": pid,
         "type": chart_type,
         "title": title,
-        "description": "",
+        "description": description,
         "config": {"show_legends": True},
         "queryType": query_type,
         "queries": [
@@ -1418,7 +1553,8 @@ def make_dashboard_v8(spec):
                 "tabId": "t0",
                 "name": "Overview",
                 "panels": [
-                    make_panel_v8(f"p{i}", i, *p) for i, p in enumerate(spec["panels"])
+                    make_panel_v8(f"p{i}", i, *p)
+                    for i, p in enumerate(spec["panels"])
                 ],
             }
         ],
@@ -1426,6 +1562,12 @@ def make_dashboard_v8(spec):
 
 
 def provision_dashboards():
+    problems = validate_command_spec()
+    if problems:
+        print("ERROR: COMMAND - Command Center spec is invalid:")
+        for p in problems:
+            print(f"  - {p}")
+        sys.exit(2)
     _, existing = api("GET", "/dashboards")
     by_title = (
         {d.get("title"): d for d in existing.get("dashboards", [])}
@@ -1442,9 +1584,6 @@ def provision_dashboards():
             status, resp = api("POST", "/dashboards", make_dashboard_v8(spec))
             print(f"{status} create dashboard {title}: {json.dumps(resp)[:160]}")
             continue
-        # Converge: the v0.91.5 v8 API stores panels per-panel; add any spec
-        # panel whose title is missing from the current body (idempotent —
-        # existing panels are left untouched).
         did = db["dashboard_id"]
         status, full = api("GET", f"/dashboards/{did}")
         hashv = full.get("hash", "")
@@ -1454,6 +1593,38 @@ def provision_dashboards():
         missing = [
             (i, p) for i, p in enumerate(spec["panels"]) if p[0] not in existing_panels
         ]
+        # COMMAND converges by EXACT SINGLE-PUT REWRITE (hash-tagged): panel
+        # titles/queries/legends change together and old titles must not
+        # linger as duplicates. Other dashboards stay additive/idempotent.
+        if title == "COMMAND - Command Center":
+            cur = [
+                (
+                    p.get("title"),
+                    p.get("queryType"),
+                    p["queries"][0].get("query") if p.get("queries") else "",
+                    (p["queries"][0].get("config") or {}).get("promql_legend", ""),
+                    p.get("description", ""),
+                )
+                for t in tabs
+                for p in t.get("panels", [])
+            ]
+            want = [
+                (pt, "promql" if ptp == "promql" else "sql", pq, (rest[0] if rest else ""), (rest[1] if len(rest) > 1 else ""))
+                for (pt, ptp, pq, _ps, *rest) in spec["panels"]
+            ]
+            if cur != want:
+                body = make_dashboard_v8(spec)
+                status, resp = api(
+                    "PUT",
+                    f"/dashboards/{did}?hash={hashv}",
+                    body,
+                )
+                print(f"{status} rewrite dashboard {title} "
+                      f"({len(cur)} -> {len(want)} panels)")
+                hashv = resp.get("hash", hashv) if isinstance(resp, dict) else hashv
+            # After rewrite the panels match the spec; nothing left to add.
+            print(f"dashboard converged: {title} ({len(want)} panels)")
+            continue
         if not missing:
             print(f"dashboard converged: {title} ({len(existing_panels)} panels)")
             continue
@@ -1472,8 +1643,8 @@ def provision_dashboards():
             status, resp = api("PUT", f"/dashboards/{did}?hash={hashv}", seed)
             hashv = resp.get("hash", hashv) if isinstance(resp, dict) else hashv
             print(f"{status} seed tab for {title}")
-        for i, (ptitle, ptype, query, stream) in missing:
-            panel = make_panel_v8(f"p{i}", i, ptitle, ptype, query, stream)
+        for i, (ptitle, ptype, query, stream, *rest) in missing:
+            panel = make_panel_v8(f"p{i}", i, ptitle, ptype, query, stream, *rest)
             status, resp = api(
                 "POST",
                 f"/dashboards/{did}/panels?hash={hashv}",
@@ -1717,6 +1888,18 @@ def provision_alerts():
 
 
 if __name__ == "__main__":
+    # --check: offline fail-fast validation of the COMMAND corpus (CI gate).
+    # Requires O2_AUTH_BASIC only to satisfy the import-time env guard;
+    # makes no network calls.
+    if "--check" in sys.argv:
+        problems = validate_command_spec()
+        if problems:
+            print("ERROR: COMMAND - Command Center spec is invalid:")
+            for p in problems:
+                print(f"  - {p}")
+            sys.exit(2)
+        print("COMMAND spec check: OK")
+        sys.exit(0)
     # Health gate: O2 must be reachable and credentials valid.
     # Route is GET /config (v0.91.5 nests config under /config, not /api/{org}).
     req = urllib.request.Request(f"{BASE}/config", headers=HEADERS, method="GET")
