@@ -885,6 +885,7 @@ pipeline_submit_job() {
     -e SIGNAL_CANDIDATES_TABLE=Signal_Candidates \
     -e SIGNAL_CURRENT_TABLE=Signal_Candidates_current \
     -e MULTITF_ENABLED="${MULTITF_ENABLED:-false}" \
+    -e MULTITF_SESSION_BYPASS="${MULTITF_SESSION_BYPASS:-false}" \
     -e CANDLE_LIVE_TABLE="${CANDLE_LIVE_TABLE:-candle_live}" \
     -e CANDLE_CLOSED_TABLE="${CANDLE_CLOSED_TABLE:-candle_closed}" \
     -e MULTITF_LIVE_SNAPSHOT_INTERVAL_MS="${MULTITF_LIVE_SNAPSHOT_INTERVAL_MS:-1000}" \

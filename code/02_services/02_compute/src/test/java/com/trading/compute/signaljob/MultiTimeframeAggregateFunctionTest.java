@@ -282,6 +282,49 @@ class MultiTimeframeAggregateFunctionTest {
     }
 
     @Test
+    @DisplayName("session bypass (soak): weekend tick accepted when flag set")
+    void sessionBypassAcceptsOutOfSession() throws Exception {
+        // Phase 5 soak mode A: MULTITF_SESSION_BYPASS lets the 15s fake-broker
+        // soak run outside market hours (Sat 20:00 IST — the session filter is
+        // hour-of-day only, no weekday check). The tick must flow
+        // through to signal + bucket accumulation exactly like an in-session
+        // tick — no pre/post drop, no state mutation skip.
+        fn = new MultiTimeframeAggregateFunction(LIVE_INTERVAL, true);
+        harness = ProcessFunctionTestHarnesses.forKeyedProcessFunction(
+                fn,
+                row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN),
+                Types.LONG);
+        harness.open();
+        long saturday = ist(2026, 9, 5, 20, 0, 0, 0); // Sat 2026-09-05 20:00 IST
+        harness.processElement(trade(saturday + 1_000L, "fp-sat-1", 10000L, 5L), saturday + 1_000L);
+        harness.processElement(trade(saturday + 2_000L, "fp-sat-2", 10001L, 7L), saturday + 2_000L);
+        assertEquals(2, signalRows().size(),
+                "bypass mode must emit a signal context per accepted out-of-session TRADE tick");
+        // Close a 15s bucket via watermark to prove accumulation happened.
+        harness.processWatermark(new Watermark(saturday + 15_000L));
+        harness.setProcessingTime(20_000L);
+        List<RowData> mains = mainRows();
+        boolean anyClosed = false;
+        for (RowData r : mains) {
+            if (r.getLong(CandleClosedColumns.WINDOW_START) == saturday
+                    && Timeframe.FIFTEEN_S.code().equals(r.getString(CandleClosedColumns.TF).toString())) {
+                anyClosed = true;
+            }
+        }
+        assertTrue(anyClosed, "bypass mode must close the weekend 15s bucket on watermark");
+    }
+
+    @Test
+    @DisplayName("session bypass default off: weekend tick still dropped")
+    void sessionBypassDefaultsOff() throws Exception {
+        open(); // default constructor => bypass=false
+        long saturday = ist(2026, 9, 5, 20, 0, 0, 0);
+        harness.processElement(trade(saturday + 1_000L, "fp-sat-x", 10000L, 5L), saturday + 1_000L);
+        assertEquals(0, signalRows().size(),
+                "without the soak flag an out-of-session tick must stay dropped");
+    }
+
+    @Test
     @DisplayName("metrics: slot cap and duplicate guard")
     void duplicateGuard() throws Exception {
         open();

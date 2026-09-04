@@ -74,6 +74,15 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
 
     private final long liveSnapshotIntervalMs;
 
+    /**
+     * Phase 5 soak mode A (2026-09-05): accept ticks OUTSIDE the NSE
+     * 09:15-15:30 IST session so the 15s fake-broker side-by-side soak can run
+     * on a weekend/after-close clock. Mirrors the pre/post session counter
+     * behavior of {@link TimeframeBucket#isInSession} but skips the DROP.
+     * Production default false (wired from {@code MULTITF_SESSION_BYPASS}).
+     */
+    private final boolean sessionBypass;
+
     /** Reused aggregation math — TRADE-only volume/tickCount lives here (D2). */
     private final CandleAggregateFunction aggregate = new CandleAggregateFunction();
 
@@ -114,8 +123,13 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     }
 
     public MultiTimeframeAggregateFunction(long liveSnapshotIntervalMs) {
+        this(liveSnapshotIntervalMs, false);
+    }
+
+    public MultiTimeframeAggregateFunction(long liveSnapshotIntervalMs, boolean sessionBypass) {
         Preconditions.checkArgument(liveSnapshotIntervalMs > 0, "liveSnapshotIntervalMs must be >0");
         this.liveSnapshotIntervalMs = liveSnapshotIntervalMs;
+        this.sessionBypass = sessionBypass;
     }
 
     @Override
@@ -262,7 +276,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         }
 
         // Session filter: isInSession false → pre/post drop
-        if (!TimeframeBucket.isInSession(eventTime)) {
+        if (!sessionBypass && !TimeframeBucket.isInSession(eventTime)) {
             if (TimeframeBucket.isPreOpen(eventTime)) {
                 if (sessionFilteredPreCounter != null) sessionFilteredPreCounter.inc();
             } else {

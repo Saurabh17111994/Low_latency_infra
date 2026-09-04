@@ -1043,6 +1043,18 @@ Why: proves the reuse of CandleAggregateFunction.add and the session filter
      introduced no regression on the existing path before cutover is approved.
 ```
 
+> **Soak mode A (approved 2026-09-05):** the Phase 5 side-by-side soak runs
+> the 15s fake-broker feed at ANY wall-clock time (weekend / after close), so
+> it is not pinned to the 09:15-15:30 IST market window. Because the fake
+> broker stamps real `time.Now()` event times and the aggregator's session
+> filter is hour-of-day only (no weekday check), off-hours wall-clock ticks
+> would be dropped as pre/post-session. The soak therefore sets
+> `MULTITF_SESSION_BYPASS=true` (default `false`, production never sets it):
+> the aggregator accepts out-of-session ticks exactly like in-session ones
+> (signal + bucket accumulation; the only skipped step is the pre/post drop).
+> The old 15s path and the real market feed are untouched. The soak scorecard
+> gates below still apply unchanged.
+
 ---
 
 ## H. Migration — Phase 0–6

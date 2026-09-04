@@ -926,4 +926,26 @@ class SignalJobConfigTest {
         neg.put("MULTITF_LIVE_SNAPSHOT_INTERVAL_MS", "-1");
         assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(neg));
     }
+
+    @Test
+    void multiTfSessionBypassDefaultsToDisabled() {
+        SignalJobConfig cfg = SignalJobConfig.from(env());
+        assertFalse(cfg.multiTfSessionBypass(), "MULTITF_SESSION_BYPASS defaults to false");
+    }
+
+    @Test
+    void honorsMultiTfSessionBypassTrue() {
+        Map<String, String> env = env();
+        env.put("MULTITF_SESSION_BYPASS", "true");
+        assertTrue(SignalJobConfig.from(env).multiTfSessionBypass());
+    }
+
+    @Test
+    void rejectsInvalidMultiTfSessionBypassBoolean() {
+        Map<String, String> env = env();
+        env.put("MULTITF_SESSION_BYPASS", "yes");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(env));
+        assertTrue(e.getMessage().contains("MULTITF_SESSION_BYPASS"), e.getMessage());
+    }
 }

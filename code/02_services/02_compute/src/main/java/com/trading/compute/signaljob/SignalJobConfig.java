@@ -123,6 +123,7 @@ public record SignalJobConfig(
         boolean executionIntentEnabled,
         boolean multiTfEnabled,
         long liveSnapshotIntervalMs,
+        boolean multiTfSessionBypass,
         String candleLiveTable,
         String candleClosedTable,
         StartupMode startupMode) implements Serializable {
@@ -151,6 +152,12 @@ public record SignalJobConfig(
         }
         boolean multiTfEnabled = booleanValue(env, "MULTITF_ENABLED", false);
         long liveSnapshotIntervalMs = positiveLong(env, "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS", 1_000L);
+        // Phase 5 soak mode A (2026-09-05): lets the multi-TF aggregator run
+        // against the 15s fake-broker feed OUTSIDE market hours (weekend /
+        // after close). Default false — production never bypasses the
+        // 09:15-15:30 IST session filter. The soak harness sets it ONLY for
+        // the dedicated soak run; it does not touch the old 15s path.
+        boolean multiTfSessionBypass = booleanValue(env, "MULTITF_SESSION_BYPASS", false);
         String candleLiveTable = stringEnv(env, "CANDLE_LIVE_TABLE", "candle_live");
         String candleClosedTable = stringEnv(env, "CANDLE_CLOSED_TABLE", "candle_closed");
         return new SignalJobConfig(
@@ -243,6 +250,7 @@ public record SignalJobConfig(
                 executionIntentEnabled,
                 multiTfEnabled,
                 liveSnapshotIntervalMs,
+                multiTfSessionBypass,
                 candleLiveTable,
                 candleClosedTable,
                 mode);
