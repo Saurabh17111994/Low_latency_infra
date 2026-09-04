@@ -218,11 +218,21 @@ if [ "$TABLE_ARG" = "--all" ]; then
             [ "$torn_in_table" -gt 0 ] && echo "repaired: $td ($torn_in_table segment(s))"
         elif [ "$rc" -eq 2 ]; then
             echo "clean: $td"
+        elif [ "$rc" -eq 3 ]; then
+            # Metadata-only dir (table created but no log segments yet, or a
+            # leftover empty dir from a table recreation). In --all sweep this
+            # is normal — skipping is correct; aborting the sweep on it (the
+            # pre-2026-09-04 behavior) left the tablet stopped with the
+            # restart policy pinned off whenever any metadata-only dir sorted
+            # first. Single-table mode still treats rc=3 as an error (below).
+            echo "skip (no log segments): $td"
         else
             echo "ERROR repairing $td (rc=$rc):" >&2
             printf '%s
 ' "$out" >&2
             docker update --restart="$POLICY_BEFORE" "$CONTAINER" >/dev/null 2>&1 || true
+            echo "tablet left stopped with restart policy $POLICY_BEFORE — start it manually if this abort was unexpected:" >&2
+            echo "    docker update --restart=$POLICY_BEFORE $CONTAINER && docker start $CONTAINER" >&2
             exit 1
         fi
     done
