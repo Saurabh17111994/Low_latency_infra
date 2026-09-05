@@ -117,6 +117,8 @@ ddl:
 
 up:
 	$(COMPOSE) up -d
+	@bash code/01_platform/04_scripts/catalog-guard.sh \
+		|| echo "!!! catalog-guard: catalog NOT healthy — see messages above. Fix before trading."
 
 down:
 	$(COMPOSE) down

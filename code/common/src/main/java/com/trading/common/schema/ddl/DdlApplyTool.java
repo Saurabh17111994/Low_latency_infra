@@ -233,6 +233,14 @@ public final class DdlApplyTool {
             connection = ConnectionFactory.createConnection(conf);
             admin = connection.getAdmin();
 
+            // Step 3a — ensure the target database exists. A lost catalog
+            // (2026-09-05: ZK had no named volume) leaves NO 'default'
+            // database; the apply contract's "empty catalog" precondition is
+            // satisfied by a missing db, so create it (ignore if exists) to
+            // make recovery self-sufficient. Never drops or alters an
+            // existing database.
+            ensureDatabase(admin, "default");
+
             // Step 4 — empty-catalog precondition.
             List<String> existing = new ArrayList<>();
             for (String name : targetNames) {
@@ -603,6 +611,23 @@ public final class DdlApplyTool {
                 + "(kv.format-version=2 + single-field subset bucket key).");
         return new StatusDecision("PASS_WITH_LIMITATION", 1,
                 List.copyOf(limitationTables), List.copyOf(ackLimitations), messages);
+    }
+
+    // ── database ensure (apply step 3a) ──────────────────────────────────
+
+    /** Creates {@code name} when absent (ignoreIfExists). Never drops. */
+    private static void ensureDatabase(Admin admin, String name) throws Exception {
+        try {
+            admin.createDatabase(name, org.apache.fluss.metadata.DatabaseDescriptor.builder()
+                    .build(), false).get();
+            System.out.println("ddl-apply: created database '" + name
+                    + "' (catalog was absent)");
+        } catch (Exception e) {
+            String msg = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
+            if (!msg.contains("already exist")) {
+                throw e;
+            }
+        }
     }
 
     // ── parity (step 6) ───────────────────────────────────────────────────
