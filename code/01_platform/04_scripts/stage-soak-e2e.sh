@@ -84,6 +84,7 @@ echo "SOAK-E2E: loadgen image fresh (stamp ${LIB_LOADGEN_STAMP:0:12})"
 # --- fresh tables ---
 pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/02_raw_table_1.sql" raw || fatal "raw purge failed"
 pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/05_signal_candidates.sql" signals || fatal "signal purge failed"
+pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/27_execution_intent.sql" intents || fatal "intent purge failed"
 # Cutover (2026-09-05): the job preflights + writes candle_live/candle_closed.
 # PURGE both (drop+recreate): they are LOG-append tables, so a run that only
 # "ensures" accumulates every prior run's rows. The old-chain tables (03

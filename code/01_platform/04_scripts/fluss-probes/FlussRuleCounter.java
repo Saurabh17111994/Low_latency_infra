@@ -45,15 +45,23 @@ public class FlussRuleCounter {
                     TableBucket tb = new TableBucket(info.getTableId(), b);
                     try (BatchScanner scanner = table.newScan()
                                  .limit(1_000_000_000)
-                                 .createBatchScanner(tb);
-                         CloseableIterator<InternalRow> it =
-                                 scanner.pollBatch(Duration.ofMillis(5000))) {
-                        while (it.hasNext()) {
-                            InternalRow row = it.next();
-                            total++;
-                            String rule = row.isNullAt(ruleIdx)
-                                    ? "<null>" : row.getString(ruleIdx).toString();
-                            byRule.merge(rule, 1L, Long::sum);
+                                 .createBatchScanner(tb)) {
+                        // Drain every batch: one pollBatch call returns a
+                        // single page, so a lone poll undercounts wide buckets.
+                        while (true) {
+                            try (CloseableIterator<InternalRow> batch =
+                                    scanner.pollBatch(Duration.ofMillis(5000))) {
+                                if (batch == null || !batch.hasNext()) {
+                                    break;
+                                }
+                                while (batch.hasNext()) {
+                                    InternalRow row = batch.next();
+                                    total++;
+                                    String rule = row.isNullAt(ruleIdx)
+                                            ? "<null>" : row.getString(ruleIdx).toString();
+                                    byRule.merge(rule, 1L, Long::sum);
+                                }
+                            }
                         }
                     }
                 }
