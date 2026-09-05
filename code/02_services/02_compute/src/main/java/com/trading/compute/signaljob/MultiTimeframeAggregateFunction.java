@@ -28,15 +28,12 @@ import org.apache.flink.util.Preconditions;
  * <p><b>Intentional amnesia:</b> State is held in a plain {@code HashMap<Long,Slot>} on-heap,
  * NOT as Flink managed {@code ValueState}. A checkpoint-restore restarts empty and rebuilds strictly
  * from live ticks; restored event-time timers with no heap slot loud-noop via
- * {@code compute.candles.restored_timer_noop}. This mirrors {@link HeapCandleEmitFunction} /
- * {@link HeapPreviewFunction} (chain-heap redesign OP4/OP5) and avoids per-tick RocksDB
+ * {@code compute.candles.restored_timer_noop} and avoids per-tick RocksDB
  * read-modify-write. The job is launched under uid {@code multi-tf-aggregator-v1} so pre-redesign
  * checkpoints fail closed (G-CHAIN-3). See design §C.2 §E.4.
  *
  * <p><b>Fail-fast caps:</b> Global slot cap {@code 65_536} and per-TF pending-close cap
- * {@code 16} fail closed via {@code Preconditions.checkState} instead of silently dropping
- * instruments — mirrors {@link HeapCandleEmitFunction#GLOBAL_SLOT_CAP} /
- * {@link HeapCandleEmitFunction#MAX_PENDING_CLOSES} (G-CHAIN-2).
+ * instruments.
  *
  * <p>Behavior contract (design §E/F/D, §A decisions 3,4,6,12):
  * <ul>
@@ -56,6 +53,10 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
 
     private static final long serialVersionUID = 1L;
 
+    /** Side-output for ticks dropped as late (unconsumed; kept for debuggability). */
+    public static final OutputTag<RowData> LATE_DROPPED_TAG =
+            new OutputTag<RowData>("candle-late-dropped") {};
+
     /** Side-output for live-candle refresh: per-TF forming RowData in {@link CandleLiveColumns} layout. */
     public static final OutputTag<RowData> LIVE_TAG = new OutputTag<RowData>("candle-live") {};
 
@@ -63,7 +64,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     public static final OutputTag<MultiTimeframeSignalContext> SIGNAL_TAG =
             new OutputTag<MultiTimeframeSignalContext>("signal-context") {};
 
-    /** Global heap slot cap — mirrors HeapCandleEmitFunction.GLOBAL_SLOT_CAP (G-CHAIN-2). */
+    /** Global heap slot cap (G-CHAIN-2). */
     static final int GLOBAL_SLOT_CAP = 65_536;
 
     /** Bound on rolled windows awaiting their event-time close per TF per key (G-CHAIN-2).
@@ -286,7 +287,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             if (lateDroppedCounter != null) lateDroppedCounter.inc();
             // Emit to late-drop side for observability (reuse existing tag if desired — here just count)
             // We do not update state, do not emit signal/live
-            ctx.output(CandleLateDrop.OUTPUT, tick);
+            ctx.output(LATE_DROPPED_TAG, tick);
             return;
         }
 
@@ -388,7 +389,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             long currStart = slot.windowStarts[ord];
             CandleAccumulator acc = slot.state.forming(tf);
 
-            // Per-TF late/pending guards (mirrors HeapCandleEmitFunction folding into pending/emitted):
+            // Per-TF late/pending guards:
             // If this tick's bucket is already pending or emitted for this TF, fold or drop per-TF
             // without reopening a duplicate forming window (immutability §G.5).
             CandleAccumulator pendingAcc = slot.pending[ord].get(newStart);
@@ -544,7 +545,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             // Return early without signal and without advancing lastEventTime? Keep advancing to avoid stall? For now keep advancing but skip signal.
             // Actually to mirror Heap, we should not advance lastEventTime for fully late; so revert? We'll keep lastEventTime unchanged for fully late.
             if (lateDroppedCounter != null) lateDroppedCounter.inc();
-            ctx.output(CandleLateDrop.OUTPUT, tick);
+            ctx.output(LATE_DROPPED_TAG, tick);
             return;
         }
 

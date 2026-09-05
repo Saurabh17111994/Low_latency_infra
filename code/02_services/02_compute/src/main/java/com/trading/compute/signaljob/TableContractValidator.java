@@ -69,30 +69,7 @@ public final class TableContractValidator {
 
     private TableContractValidator() {}
 
-    /**
-     * Candle KV: PK exactly [instrument_token, window_start],
-     * instrument_token routing, exact 15-col schema.
-     */
-    public static void validateCandleKvTable(TableInfo info) {
-        List<String> expectedPk = CandleTableSchema.PRIMARY_KEY_COLUMNS;
-        if (!info.hasPrimaryKey()) {
-            throw new ContractViolation(
-                    "KV table " + info.getTablePath() + " must carry primary key exactly "
-                            + expectedPk + " (one row per closed window per instrument), "
-                            + "but has NO primary key (" + CANDLE_CONTRACT + ")");
-        }
-        if (!expectedPk.equals(info.getPrimaryKeys())) {
-            throw new ContractViolation(
-                    "KV table " + info.getTablePath() + " must carry primary key exactly "
-                            + expectedPk + " (one row per closed window per instrument), got "
-                            + info.getPrimaryKeys() + " (" + CANDLE_CONTRACT + ")");
-        }
-        validateSchema(info, CandleTableSchema.COLUMNS, CandleTableSchema.COLUMN_TYPE_ROOTS,
-                "15-column v2 candle", CANDLE_CONTRACT);
-        validateRouting(info, CandleTableSchema.BUCKET_KEY, CandleTableSchema.BUCKET_COUNT,
-                CANDLE_CONTRACT);
-    }
-
+    
     /** Signal LOG: append-only, no primary key, instrument_token routing, exact 22-col schema. */
     public static void validateSignalLogTable(TableInfo info) {
         requireNoPrimaryKey(info, "append-only signal LOG", SIGNAL_CONTRACT);
@@ -158,43 +135,8 @@ public final class TableContractValidator {
         validateRouting(info, "instrument_token", 16, DEDUP_CONTRACT);
     }
 
-    /**
-     * Forming-bar current-state KV (forming-bar persistence phase,
-     * 2026-08-16): PK exactly [instrument_token], instrument_token routing,
-     * exact 11-column v1 schema. The durable home of the live forming bar
-     * (DEC-038 state-ownership matrix); the writer emits one upsert per
-     * instrument per cadence — current-state only, never history.
-     */
-    public static void validateFormingBarKvTable(TableInfo info) {
-        requireExactPrimaryKey(info,
-                List.of(FormingBarTableColumns.NAMES[FormingBarTableColumns.INSTRUMENT_TOKEN]),
-                FORMING_BAR_CONTRACT);
-        validateSchema(info, Arrays.asList(FormingBarTableColumns.NAMES),
-                FormingBarTableColumns.TYPE_ROOTS, "11-column v1 forming bar",
-                FORMING_BAR_CONTRACT);
-        validateRouting(info, FormingBarTableColumns.NAMES[FormingBarTableColumns.INSTRUMENT_TOKEN],
-                16, FORMING_BAR_CONTRACT);
-    }
-
-    /**
-     * Position_State KV (Option B, 2026-08-18): PK exactly [instrument_token],
-     * instrument_token routing, exact 7-column v1 schema. The handshake table:
-     * Execution Gateway / Nautilus UPSERTS OPEN on fill and CLOSED on exit;
-     * Signal job reads the changelog and clears its per-instrument ACTIVE
-     * block only on CLOSED (or ADMIN_CLEAR). No TTL — survives restarts.
-     */
-    public static void validatePositionStateKvTable(TableInfo info) {
-        requireExactPrimaryKey(info,
-                List.of(PositionStateTableColumns.NAMES[PositionStateTableColumns.INSTRUMENT_TOKEN]),
-                POSITION_STATE_CONTRACT);
-        validateSchema(info, Arrays.asList(PositionStateTableColumns.NAMES),
-                PositionStateTableColumns.TYPE_ROOTS, "7-column v1 position_state",
-                POSITION_STATE_CONTRACT);
-        validateRouting(info,
-                PositionStateTableColumns.NAMES[PositionStateTableColumns.INSTRUMENT_TOKEN],
-                16, POSITION_STATE_CONTRACT);
-    }
-
+    
+    
     /** Signal current-state KV: PK exactly [instrument_token], instrument_token routing, exact 22-col schema. */
     public static void validateSignalCurrentKvTable(TableInfo info) {
         List<String> expectedPk = List.of(SignalCandidatesTableColumns.NAMES[

@@ -1,8 +1,5 @@
 package com.trading.compute.signaljob;
 
-import com.trading.common.model.FormingBar;
-import com.trading.common.schema.CandleTableSchema;
-import org.apache.flink.util.OutputTag;
 import com.trading.compute.telemetry.ComputeAlertLogs;
 import java.time.Duration;
 import java.util.Set;
@@ -252,6 +249,7 @@ public final class SignalJob {
         // — checkpoint-restore rebuilds from live ticks, no RocksDB touch.
         SingleOutputStreamOperator<RowData> multiTfClosed = null;
         DataStream<RowData> multiTfLive = null;
+        DataStream<RowData> strategySignals = null;
         if (config.multiTfEnabled()) {
             SingleOutputStreamOperator<RowData> aggregator = monitored
                     .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
@@ -288,7 +286,7 @@ public final class SignalJob {
             // retired n7-signal branch used. The stub smoke id is LOG-only
             // by filter design.
             if (config.strategyHostEnabled()) {
-                DataStream<RowData> strategySignals = multiTfLive
+                strategySignals = multiTfLive
                         .connect(multiTfClosed)
                         .keyBy(
                                 live -> live.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
@@ -334,249 +332,33 @@ public final class SignalJob {
             }
         }
 
-        // Chain-heap redesign (2026-09-03 plan, OP4): the tumbling window +
-        // aggregate + emit operator did 2-3 RocksDB touches per tick (46.5%
-        // busy at 4.9 k/s). HeapCandleEmitFunction keeps the same
-        // epoch-aligned 15 s windows, the same end-timer fire time, the same
-        // accumulation math, the same quarantine gate and the same late-drop
-        // leg — only the window state moved to the heap (see its javadoc
-        // for the one documented fresh-slot edge).
-        SingleOutputStreamOperator<RowData> candles = monitored
-                .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
-                .process(new HeapCandleEmitFunction(config))
-                .returns(CandleTableColumns.ROW_TYPE_INFO)
-                .name("candle-15s")
-                // G-CHAIN-3 (chain-heap redesign): new uid so Flink never
-                // silently maps pre-redesign checkpointed window state onto
-                // the heap operator (which requests no managed window
-                // state). Restoring an old checkpoint fails closed — clean
-                // start required.
-                .uid("candle-15s-v2");
 
             // Preview path retired (2026-09-05 cutover, batch 3):
             // candle_live serves evolving candles; the parallel 1s
             // preview window, its KV sink, and its classes are gone.
 
-        // REQ-FC-006: raw ticks dropped as beyond-allowed-lateness are counted
-        // (compute.candles.late.dropped) instead of vanishing silently. The
-        // counter operator is observability-only — no keyed state, no output.
-        candles.getSideOutput(CandleLateDrop.OUTPUT)
-                .process(new CandleLateDrop.CounterFunction(config.candleWindowMs()))
-                .returns(ticks.getType())
-                .name("candle-late-drop-counter")
-                .uid("candle-late-drop-counter");
 
-        // Plain FlussSink (CHG-023 item 4, 2026-08-17): the StallGuardedSink
-        // watchdog is REMOVED. The native stall-guard is the checkpoint
-        // timeout (30 s) + fixed-delay restart failing the job, never hanging
-        // it; the Fluss client's own request-timeout (client.request-timeout
-        // below) + retries=2 bound the write path. The 2026-08-12 hang the
-        // guard patched (deleted table -> flush latch never counts down) is
-        // now bounded by the checkpoint timeout + restart policy, and the
-        // checkpoint-1 zero-ack stall class was eliminated by Design B (no
-        // RPC on the hot path, CHG-022).
-        //
-        // Streaming-3000 T5 (decision 25): the KV write path is first-write-
-        // wins. CandleKvFirstWriteWinsFunction (keyed by the candle PK
-        // instrument_token + window_start) forwards the first emission of a
-        // window to the sink and drops + counts any second emission
-        // (compute.candles.duplicate_window) — a re-emission after a
-        // checkpoint-restore re-fire or a same-day rollback must never
-        // overwrite an already-written candle row.
-        candles.keyBy(CandleKvFirstWriteWinsFunction.keySelector(),
-                        Types.TUPLE(Types.LONG, Types.LONG))
-                .process(new CandleKvFirstWriteWinsFunction())
-                .returns(CandleTableColumns.ROW_TYPE_INFO)
-                .name("candle-kv-first-write-wins")
-                .uid("candle-kv-first-write-wins")
-                .sinkTo(FlussSink.<RowData>builder()
-                                .setBootstrapServers(config.bootstrapServers())
-                                .setDatabase(config.database())
-                                .setTable(config.candleTable())
-                                // KV upsert: feature_candles_15s is a KV table
-                                // (PK instrument_token, window_start) — the
-                                // (false, false) RowDataSerializationSchema maps
-                                // INSERT RowKinds to UPSERTs so replay/restart
-                                // re-emits converge instead of appending
-                                // duplicates (user requirement 2026-08-13:
-                                // candle tables are KV-only, no LOG+KV twin).
-                                .setSerializationSchema(new RowDataSerializationSchema(false, false))
-                                .setOption("client.request-timeout",
-                                        config.sinkWriteStallTimeoutMs() + "ms")
-                                .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                                .build())
-                .name("feature-candles-15s-sink")
-                .uid("feature-candles-15s-sink");
 
-        // Streaming-3000 T6 (decision 24): candles that fail one of the five
-        // CandleInvariantCheck OHLC invariants never reach the main output —
-        // CandleEmitFunction routes them here, to the quarantine side output.
-        // The counter operator counts each into compute.candles.invalid.total
-        // + the per-reason compute.candles.invalid.<reason> counters and logs
-        // the violation (one bounded WARN per candle); the FlussSink appends
-        // the evidence row to ingestion_quarantine (LOG append — the same
-        // table the ingestion pipeline uses for invalid raw ticks, DDL 21).
-        candles.getSideOutput(CandleQuarantine.OUTPUT)
-                .process(new CandleQuarantine.CounterFunction())
-                .returns(CandleQuarantineColumns.ROW_TYPE_INFO)
-                .name("candle-invalid-quarantine")
-                .uid("candle-invalid-quarantine")
-                .sinkTo(FlussSink.<RowData>builder()
-                        .setBootstrapServers(config.bootstrapServers())
-                        .setDatabase(config.database())
-                        .setTable(config.quarantineTable())
-                        // LOG append-only: ingestion_quarantine has no primary
-                        // key — (true, true) serialization ignores deletes.
-                        .setSerializationSchema(new RowDataSerializationSchema(true, true))
-                        .setOption("client.request-timeout",
-                                config.sinkWriteStallTimeoutMs() + "ms")
-                        .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                        .build())
-                .name("candle-invalid-quarantine-sink")
-                .uid("candle-invalid-quarantine-sink");
 
-        // Slice 2.2 forming-bar handoff (REQ-FC-007/AC-FC-014, REQ-FC-013):
-        // the LIVE forming bar forks off the SAME deduped tick stream (the
-        // candle window's input), updated in-process on every accepted tick
-        // and handed straight to Business Logic — no Fluss round trip, no
-        // database read/write, no new transport on the hot path. The
-        // completed-candle pipeline above is untouched: the window operator
-        // remains the sole producer of finalized candles.
-        //
-        // Topology (both branches coexist from the same deduped input):
-        //   deduped ── keyBy(token) ── FormingBarBuilder (per-tick emit)
-        //        └── (existing) keyBy(token) ── window ── candle sink / SignalDetection
-        //   FormingBarBuilder ── connect(candles) ── FormingBarDetection ── union ──
-        //        existing signal LOG + KV dual-sink (REQ-SS-003 + DEC-035)
-        SingleOutputStreamOperator<FormingBar> formingBars = monitored
-                .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
-                .process(new FormingBarBuilderFunction(config))
-                .returns(FormingBarTypeInfo.INSTANCE)
-                .name("forming-bar-builder")
-                // G-CHAIN-3 (chain-heap redesign): uid bumped — the builder
-                // now keeps forming slots on the heap (no managed state);
-                // restoring a pre-redesign checkpoint fails closed.
-                .uid("forming-bar-builder-v2");
 
-        // The detector co-locates both inputs by instrument key: the live
-        // forming-bar events (input 1) and the completed candles (input 2).
-        // Candidate rows feed the signal dual-sink below.
-        DataStream<RowData> formingSignals = formingBars
-                .connect(candles)
-                .keyBy(
-                        bar -> bar.instrumentToken(),
-                        candle -> candle.getLong(CandleTableColumns.INSTRUMENT_TOKEN))
-                .process(new FormingBarDetectionFunction(config))
-                .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
-                .name("forming-bar-detection")
-                // G-CHAIN-3 (chain-heap redesign): uid bumped — heap slots,
-                // no managed state; restoring a pre-redesign checkpoint
-                // fails closed.
-                .uid("forming-bar-detection-v2");
 
-        // Forming-bar durable home (persistence phase, 2026-08-16): the
-        // builder's PERSIST_OUTPUT carries every tick's snapshot to a
-        // coalescing writer (keyed by instrument — one buffered row per
-        // instrument, the LATEST forming bar) that flushes on the
-        // FORMING_BAR_WRITE_BATCH_MS cadence into the forming_bar KV
-        // current-state projection (PK instrument_token, INSERT→UPSERT).
-        // Current-state only, never per-tick history; the finalized candle
-        // remains the completed-candle pipeline's artifact. The hot path
-        // (tick → builder → detector → Business Logic) is untouched — the
-        // Fluss write is off the per-tick path.
-        formingBars
-                .getSideOutput(FormingBarBuilderFunction.PERSIST_OUTPUT)
-                .keyBy(bar -> bar.instrumentToken())
-                .process(new FormingBarWriterFunction(config))
-                .returns(FormingBarTableColumns.ROW_TYPE_INFO)
-                .name("forming-bar-writer")
-                // G-CHAIN-3 (chain-heap redesign): uid bumped — the buffered
-                // snapshot moved to the heap (only the flush timer remains
-                // managed); restoring a pre-redesign checkpoint fails closed.
-                .uid("forming-bar-writer-v2")
-                .sinkTo(FlussSink.<RowData>builder()
-                                .setBootstrapServers(config.bootstrapServers())
-                                .setDatabase(config.database())
-                                .setTable(config.formingBarTable())
-                                // KV upsert: forming_bar is a KV table (PK
-                                // instrument_token) — (false, false) maps
-                                // INSERT RowKinds to UPSERTs so replay/re-
-                                // flush re-emits converge on the same key.
-                                .setSerializationSchema(new RowDataSerializationSchema(false, false))
-                                .setOption("client.request-timeout",
-                                        config.sinkWriteStallTimeoutMs() + "ms")
-                                .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                                .build())
-                .name("forming-bar-sink")
-                .uid("forming-bar-sink");
 
-        // The forming-bar rule (breakout-5-forming-bar) is the sole
-        // completed-candle signal producer after the 20-candle breakout rule
-        // (signal-detection, 2026-09-05) was deleted — N7 on the multi-TF
-        // chain (multi-tf branch above) supersedes it as the entry method.
-        // Active-signal indefinite + CLOSED handshake (max-one-active, Option B
-        // strict, 2026-08-18): if instrument already ACTIVE, drop new candidate
-        // — wait till Position_State(status=CLOSED or ADMIN_CLEAR) from
-        // Nautilus/Execution Gateway. No TTL — block survives restarts
-        // (checkpointed ValueState) and is cleared only on explicit CLOSED.
-        // Stuck ACTIVE never auto-frees — needs CLOSED or admin clear.
-        DataStream<RowData> allSignals = formingSignals;
 
-        FlussSource<RowData> positionStateSource = FlussSource.<RowData>builder()
-                .setBootstrapServers(config.bootstrapServers())
-                .setDatabase(config.database())
-                .setTable(config.positionStateTable())
-                .setStartingOffsets(OffsetsInitializer.full())
-                .setDeserializationSchema(new RowDataDeserializationSchema())
-                .build();
-        DataStream<RowData> positionStates = env.fromSource(
-                        positionStateSource, WatermarkStrategy.noWatermarks(), "position-state")
-                .uid("position-state");
-
-        DataStream<RowData> filteredSignals = allSignals
-                .connect(positionStates)
-                .keyBy(
-                        row -> row.getLong(SignalCandidatesTableColumns.INSTRUMENT_TOKEN),
-                        row -> row.getLong(PositionStateTableColumns.INSTRUMENT_TOKEN))
-                .process(new ActiveSignalFeedbackFunction(config))
-                .name("active-signal-feedback")
-                .uid("active-signal-feedback");
-
-        filteredSignals
-                .sinkTo(FlussSink.<RowData>builder()
-                                .setBootstrapServers(config.bootstrapServers())
-                                .setDatabase(config.database())
-                                .setTable(config.signalCandidatesTable())
-                                .setSerializationSchema(new RowDataSerializationSchema(true, true))
-                                .setOption("client.request-timeout",
-                                        config.sinkWriteStallTimeoutMs() + "ms")
-                                .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                                .build())
-                .name("signal-candidates-sink")
-                .uid("signal-candidates-sink");
-
-        filteredSignals
-                .filter(new CanonicalSignalFilterFunction())
-                .name("canonical-signal-filter")
-                .uid("canonical-signal-filter")
-                .sinkTo(FlussSink.<RowData>builder()
-                                .setBootstrapServers(config.bootstrapServers())
-                                .setDatabase(config.database())
-                                .setTable(config.signalCurrentTable())
-                                .setSerializationSchema(new RowDataSerializationSchema(false, false))
-                                .setOption("client.request-timeout",
-                                        config.sinkWriteStallTimeoutMs() + "ms")
-                                .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                                .build())
-                .name("signal-candidates-current-sink")
-                .uid("signal-candidates-current-sink");
+        // Cutover 2026-09-05 (batch 3): the 15 s candle path (window emit,
+        // late-drop counter, KV first-write-wins + sink, candle quarantine),
+        // the forming-bar stack (builder, detection, writer + sink), the
+        // position-state gate, and the old signal LOG + KV sinks are retired.
+        // Signals now flow raw ticks -> dedup -> multi-TF candles ->
+        // strategy host -> LOG + KV above. Execution intent below consumes
+        // host signals with no position gate (D2).
 
         // Execution intent is a separate, explicitly disabled-by-default
-        // branch. It consumes the immutable candidate stream but does not
-        // call a broker, gateway, or Arrow service. The gateway remains the
-        // authoritative duplicate/quarantine boundary in T2.
-        if (config.executionIntentEnabled()) {
-            filteredSignals
+        // branch. It consumes host strategy signals with no position gate
+        // (D1 + D2, cutover 2026-09-05) but does not call a broker, gateway,
+        // or Arrow service. The gateway remains the authoritative
+        // duplicate/quarantine boundary in T2.
+        if (config.executionIntentEnabled() && strategySignals != null) {
+            strategySignals
                     .flatMap(new ExecutionIntentProducerFunction(config))
                     .returns(ExecutionIntentTableColumns.ROW_TYPE_INFO)
                     .name("execution-intent-producer")
@@ -794,10 +576,6 @@ public final class SignalJob {
         clientConf.setString("bootstrap.servers", config.bootstrapServers());
         try (org.apache.fluss.client.Connection conn =
                 org.apache.fluss.client.ConnectionFactory.createConnection(clientConf)) {
-            org.apache.fluss.metadata.TableInfo candleKv = conn
-                    .getTable(org.apache.fluss.metadata.TablePath.of(config.database(), config.candleTable()))
-                    .getTableInfo();
-            TableContractValidator.validateCandleKvTable(candleKv);
             org.apache.fluss.metadata.TableInfo signalLog = conn
                     .getTable(org.apache.fluss.metadata.TablePath.of(
                             config.database(), config.signalCandidatesTable()))
@@ -808,25 +586,6 @@ public final class SignalJob {
                             config.database(), config.signalCurrentTable()))
                     .getTableInfo();
             TableContractValidator.validateSignalCurrentKvTable(signalCurrent);
-            // Forming-bar durable home (persistence phase, 2026-08-16): the
-            // forming_bar KV is Fluss-authoritative durable state (DEC-038
-            // matrix) — a hard startup dependency; fail closed on drift,
-            // never write to a table that contradicts the 11-column v1
-            // current-state contract.
-            org.apache.fluss.metadata.TableInfo formingBar = conn
-                    .getTable(org.apache.fluss.metadata.TablePath.of(
-                            config.database(), config.formingBarTable()))
-                    .getTableInfo();
-            TableContractValidator.validateFormingBarKvTable(formingBar);
-            // Position_State handshake (Option B, 2026-08-18): Signal job reads
-            // the changelog of this KV table (PK instrument_token, 7 cols, 16
-            // buckets) and clears its per-instrument ACTIVE block only on
-            // CLOSED — fail closed on drift, never degrade to TTL.
-            org.apache.fluss.metadata.TableInfo positionState = conn
-                    .getTable(org.apache.fluss.metadata.TablePath.of(
-                            config.database(), config.positionStateTable()))
-                    .getTableInfo();
-            TableContractValidator.validatePositionStateKvTable(positionState);
             if (config.multiTfEnabled()) {
                 org.apache.fluss.metadata.TableInfo candleLive = conn
                         .getTable(org.apache.fluss.metadata.TablePath.of(
@@ -884,10 +643,6 @@ public final class SignalJob {
             // Log the validated schema reports — exact live columns/types
             // (and the DDL-vs-live nullability divergence where Fluss does
             // not carry NOT NULL) as startup evidence.
-            LOG.info("signal-job: candle table contract OK ({} KV)", config.candleTable());
-            LOG.info("signal-job: {}",
-                    TableContractValidator.schemaReport(
-                            candleKv, CandleTableSchema.COLUMN_NULLABLE_IN_DDL));
             LOG.info("signal-job: signal LOG contract OK ({})", config.signalCandidatesTable());
             LOG.info("signal-job: {}",
                     TableContractValidator.schemaReport(
@@ -897,16 +652,6 @@ public final class SignalJob {
             LOG.info("signal-job: {}",
                     TableContractValidator.schemaReport(
                             signalCurrent, SignalCandidatesTableColumns.COLUMN_NULLABLE_IN_DDL));
-            LOG.info("signal-job: forming-bar KV contract OK ({})",
-                    config.formingBarTable());
-            LOG.info("signal-job: {}",
-                    TableContractValidator.schemaReport(
-                            formingBar, FormingBarTableColumns.COLUMN_NULLABLE_IN_DDL));
-            LOG.info("signal-job: position-state KV contract OK ({})",
-                    config.positionStateTable());
-            LOG.info("signal-job: {}",
-                    TableContractValidator.schemaReport(
-                            positionState, PositionStateTableColumns.COLUMN_NULLABLE_IN_DDL));
         } catch (TableContractValidator.ContractViolation e) {
             throw e; // contract drift: fail closed, do not build a degraded graph
         } catch (Exception e) {

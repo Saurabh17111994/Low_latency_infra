@@ -56,46 +56,10 @@ class SignalJobOperatorUidTest {
         // Per-tick ingest->monitor age observability (2026-09-03, 2aef756):
         // non-keyed identity map on the deduped stream, no state. Unconditional.
         EXPECTED_OPERATORS.put("ingest-latency-monitor", "ingest-latency-monitor");
-        // G-DEDUP-3 (2026-09-03 redesign): uid bumped so pre-redesign
-        // checkpointed MapState can never silently attach to the heap-window
-        // operator (which requests no managed state). Restoring an old
-        // checkpoint fails closed — clean start required (plan §6).
-        // G-CHAIN-3 (chain-heap redesign, 2026-09-03): the window operator
-        // became HeapCandleEmitFunction and the preview window became
-        // HeapPreviewFunction — uids bumped so pre-redesign checkpointed
-        // window state can never silently attach to heap operators (they
-        // request no managed window state). Restoring an old checkpoint
-        // fails closed — clean start required (plan §2).
-        EXPECTED_OPERATORS.put("candle-15s-v2", "candle-15s");
-        // NOTE (cutover 2026-09-05, batch 3): the 1s preview path is retired —
-        // candle_live serves evolving candles — so no preview uids exist.
-        EXPECTED_OPERATORS.put("candle-late-drop-counter", "candle-late-drop-counter");
-        // Streaming-3000 T5 (decision 25): KV first-write-wins guard between
-        // the window operator and the candle sink.
-        EXPECTED_OPERATORS.put("candle-kv-first-write-wins", "candle-kv-first-write-wins");
-        EXPECTED_OPERATORS.put("feature-candles-15s-sink", "feature-candles-15s-sink");
-        // Streaming-3000 T6 (decision 24): OHLC-invariant quarantine branch —
-        // counter operator + ingestion_quarantine LOG sink off the window op's
-        // side output. Both carry pinned UIDs (new operators are restore-safe:
-        // they have no pre-existing state).
-        EXPECTED_OPERATORS.put("candle-invalid-quarantine", "candle-invalid-quarantine");
-        EXPECTED_OPERATORS.put("candle-invalid-quarantine-sink", "candle-invalid-quarantine-sink");
-        // Forming-bar branch (Slice 2.2, 2026-08-16): builder -> detection ->
-        // writer -> sink carry pinned UIDs. Since the 20-candle breakout rule
-        // was deleted (signal-detection, 2026-09-05) the forming-bar rule is
-        // the sole 15s-chain signal producer feeding the dual-sink.
-        EXPECTED_OPERATORS.put("forming-bar-builder-v2", "forming-bar-builder");
-        EXPECTED_OPERATORS.put("forming-bar-detection-v2", "forming-bar-detection");
-        EXPECTED_OPERATORS.put("forming-bar-writer-v2", "forming-bar-writer");
-        EXPECTED_OPERATORS.put("forming-bar-sink", "forming-bar-sink");
-        // Position_State KV source for the max-one-active handshake
-        // (2026-08-18, 404945f): unconditional source feeding
-        // active-signal-feedback.
-        EXPECTED_OPERATORS.put("position-state", "Source: position-state");
-        EXPECTED_OPERATORS.put("active-signal-feedback", "active-signal-feedback");
-        EXPECTED_OPERATORS.put("signal-candidates-sink", "signal-candidates-sink");
-        EXPECTED_OPERATORS.put("canonical-signal-filter", "canonical-signal-filter");
-        EXPECTED_OPERATORS.put("signal-candidates-current-sink", "signal-candidates-current-sink");
+        // NOTE (cutover 2026-09-05, batch 3): the 15 s candle path, the
+        // forming-bar stack, the position-state gate, and the old signal
+        // sinks are retired — no uids for them exist. Signals flow
+        // raw ticks -> dedup -> multi-TF candles -> strategy host.
     }
 
     /**

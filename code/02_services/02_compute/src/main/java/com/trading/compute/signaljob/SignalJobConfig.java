@@ -57,12 +57,9 @@ public record SignalJobConfig(
         String bootstrapServers,
         String database,
         String rawTable,
-        String candleTable,
-        String quarantineTable,
         String rawSchemaVersion,
         String algorithmVersion,
         String configurationVersion,
-        String candleSchemaVersion,
         int dedupWindowEntries,
         long candleWindowMs,
         long outOfOrderMs,
@@ -80,11 +77,7 @@ public record SignalJobConfig(
         String signalStrategyId,
         String signalStrategyVersion,
         long signalQuantity,
-        String formingRuleId,
-        int formingLookbackCandles,
-        String formingBarTable,
-        long formingBarWriteBatchMs,
-        String positionStateTable,
+
         String otelCollectorHost,
         String stateRecoveryPath,
         boolean allowFullReplay,
@@ -177,13 +170,10 @@ public record SignalJobConfig(
                 bootstrapServers(env),
                 env.getOrDefault("FLUSS_DATABASE", "default"),
                 env.getOrDefault("RAW_TABLE", "raw_table_1"),
-                env.getOrDefault("CANDLE_TABLE", "feature_candles_15s"),
-                env.getOrDefault("QUARANTINE_TABLE", "ingestion_quarantine"),
                 env.getOrDefault("RAW_SCHEMA_VERSION", PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION),
                 requireCanonicalVersion(env, "ALGORITHM_VERSION",
                         CandleTableSchema.CANONICAL_ALGORITHM_VERSION),
                 configurationVersion,
-                env.getOrDefault("CANDLE_SCHEMA_VERSION", "2"),
                 dedupWindowEntries(env),
                 candleWindowMs(env),
                 // Single-timeline rule (decision 2026-08-30): the SAME wait
@@ -212,12 +202,6 @@ public record SignalJobConfig(
                 env.getOrDefault("SIGNAL_STRATEGY_VERSION",
                         SignalCandidatesTableColumns.CANONICAL_STRATEGY_VERSION),
                 signalQuantity(env),
-                env.getOrDefault("FORMING_RULE_ID",
-                        SignalCandidatesTableColumns.CANONICAL_FORMING_RULE_ID),
-                formingLookbackCandles(env),
-                env.getOrDefault("FORMING_BAR_TABLE", "forming_bar"),
-                positiveLong(env, "FORMING_BAR_WRITE_BATCH_MS", 250L),
-                env.getOrDefault("POSITION_STATE_TABLE", "Position_State"),
                 env.getOrDefault("OTEL_COLLECTOR_HOST", "otel-collector:4318"),
                 stateRecoveryPath(env),
                 mode == StartupMode.FULL_REPLAY,
@@ -392,25 +376,6 @@ public record SignalJobConfig(
         long value = longValue(env, "SIGNAL_QUANTITY", 1L);
         if (value <= 0) {
             throw new IllegalStateException("Config SIGNAL_QUANTITY must be > 0, got " + value);
-        }
-        return value;
-    }
-
-    /**
-     * Forming-bar placeholder detector lookback (Slice 2.2, Phase C). The
-     * mirrored breakout rule compares the live forming bar against the
-     * {@code high}s/{@code close}s of the previous completed candles; the
-     * lookback must be &ge; 2 (a one-candle lookback would compare against
-     * the candle still forming's predecessor only, and the warm-up gate needs
-     * at least one completed candle before any comparison). Default 5 = 75 s
-     * of completed history. PLACEHOLDER tuning key — the real strategy
-     * replaces the rule without changing the pipeline.
-     */
-    private static int formingLookbackCandles(Map<String, String> env) {
-        int value = intValue(env, "FORMING_LOOKBACK_CANDLES", 5);
-        if (value < 2) {
-            throw new IllegalStateException("Config FORMING_LOOKBACK_CANDLES must be >= 2 "
-                    + "(the rule compares against the previous completed candles), got " + value);
         }
         return value;
     }

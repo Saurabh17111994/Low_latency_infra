@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import com.trading.common.schema.CandleTableSchema;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.fluss.config.Configuration;
@@ -30,13 +29,10 @@ import org.junit.jupiter.api.Test;
 @DisplayName("TableContractValidator")
 class TableContractValidatorTest {
 
-    private static final String LOG = "feature_candles_15s";
     private static final String SIGNAL_LOG = "Signal_Candidates";
     private static final String SIGNAL_CURRENT = "Signal_Candidates_current";
     private static final String TOKEN = "instrument_token";
 
-    private static final List<String> CANDLE_NAMES = CandleTableSchema.COLUMNS;
-    private static final List<String> CANDLE_TYPES = CandleTableSchema.COLUMN_TYPE_ROOTS;
     private static final List<String> SIGNAL_NAMES = Arrays.asList(SignalCandidatesTableColumns.NAMES);
     private static final List<String> SIGNAL_TYPES = SignalCandidatesTableColumns.TYPE_ROOTS;
     private static final List<String> TRADE_NAMES = Arrays.asList(TradeDecisionsTableColumns.NAMES);
@@ -48,132 +44,12 @@ class TableContractValidatorTest {
     private static final List<String> EXECUTION_INTENT_TYPES = ExecutionIntentTableColumns.TYPE_ROOTS;
     private static final List<String> DEDUP_NAMES = Arrays.asList(FingerprintDedupTableColumns.NAMES);
     private static final List<String> DEDUP_TYPES = FingerprintDedupTableColumns.TYPE_ROOTS;
-    private static final List<String> FORMING_BAR_NAMES = Arrays.asList(FormingBarTableColumns.NAMES);
-    private static final List<String> FORMING_BAR_TYPES = FormingBarTableColumns.TYPE_ROOTS;
 
     private static final String TRADE_LOG = "Trade_Decisions";
     private static final String TRADE_INDEX = "trade_instruction_state";
     private static final String DEDUP_TABLE = "fingerprint_dedup";
-    private static final String FORMING_BAR_TABLE = "forming_bar";
     private static final String INSTRUCTION_ID = "instruction_id";
     private static final String EXECUTION_INTENT = "Execution_Intent";
-
-    // ── candle KV (CANDLE-SCHEMA-002) ──
-
-    private static final List<String> CANDLE_PK = List.of(TOKEN, "window_start");
-
-    @Test
-    @DisplayName("candle KV with PK exactly [instrument_token, window_start] and matching routing passes")
-    void candleKvTableExactPkPasses() {
-        assertDoesNotThrow(() -> TableContractValidator.validateCandleKvTable(
-                candle(LOG, CANDLE_PK, List.of(TOKEN), 16)));
-    }
-
-    @Test
-    @DisplayName("candle KV without a primary key is rejected (one row per closed window)")
-    void candleKvTableNoPkRejected() {
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateCandleKvTable(
-                        candle(LOG, null, List.of(TOKEN), 16)));
-    }
-
-    @Test
-    @DisplayName("candle KV with a narrower PK is rejected (exact (instrument_token, window_start))")
-    void candleKvTableWrongPkRejected() {
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateCandleKvTable(
-                        candle(LOG, List.of(TOKEN), List.of(TOKEN), 16)));
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateCandleKvTable(
-                        candle(LOG, List.of(TOKEN, "window_start", "output_ts"),
-                                List.of(TOKEN), 16)));
-    }
-
-    @Test
-    @DisplayName("candle KV with exact 15-column v2 schema and all-nullable live metadata passes")
-    void candleKvExactSchemaPasses() {
-        // Live metadata reports every column nullable (DDL NOT NULL is not
-        // carried into Fluss metadata — verified 2026-08-10); that must pass.
-        assertDoesNotThrow(() -> TableContractValidator.validateCandleKvTable(
-                candle(LOG, CANDLE_PK, List.of(TOKEN), 16)));
-    }
-
-    @Test
-    @DisplayName("candle wrong column count is rejected (14 or 16 columns)")
-    void candleWrongColumnCountRejected() {
-        List<String> shortTypes = new java.util.ArrayList<>(CANDLE_TYPES);
-        shortTypes.remove(14); // drop schema_version -> 14 columns
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateCandleKvTable(
-                        candle(LOG, CANDLE_PK, List.of(TOKEN), 16, shortTypes, false)));
-        List<String> longTypes = new java.util.ArrayList<>(CANDLE_TYPES);
-        longTypes.add("BIGINT"); // extra column -> 16
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateCandleKvTable(
-                        candle(LOG, CANDLE_PK, List.of(TOKEN), 16, longTypes, false)));
-    }
-
-    @Test
-    @DisplayName("candle renamed column is rejected (name drift breaks writer layout)")
-    void candleRenamedColumnRejected() {
-        Schema.Builder sb = Schema.newBuilder();
-        for (int i = 0; i < CANDLE_NAMES.size(); i++) {
-            String col = i == 1 ? "exchng" : CANDLE_NAMES.get(i);
-            sb.column(col, dataType(CANDLE_TYPES.get(i), false));
-        }
-        sb.primaryKey(CANDLE_PK);
-        TableInfo info = info(LOG, sb, List.of(TOKEN), 16);
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateCandleKvTable(info));
-    }
-
-    @Test
-    @DisplayName("candle reordered column is rejected (DDL index order is part of the contract)")
-    void candleReorderedColumnRejected() {
-        Schema.Builder sb = Schema.newBuilder();
-        for (int i = 0; i < CANDLE_NAMES.size(); i++) {
-            String col = i == 1 ? CANDLE_NAMES.get(2)
-                    : i == 2 ? CANDLE_NAMES.get(1)
-                    : CANDLE_NAMES.get(i);
-            sb.column(col, dataType(CANDLE_TYPES.get(i), false));
-        }
-        sb.primaryKey(CANDLE_PK);
-        TableInfo info = info(LOG, sb, List.of(TOKEN), 16);
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateCandleKvTable(info));
-    }
-
-    @Test
-    @DisplayName("candle wrong type root per column is rejected (exchange STRING vs BIGINT)")
-    void candleWrongTypeRootRejected() {
-        List<String> types = new java.util.ArrayList<>(CANDLE_TYPES);
-        types.set(1, "BIGINT"); // exchange must be STRING
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateCandleKvTable(
-                        candle(LOG, CANDLE_PK, List.of(TOKEN), 16, types, false)));
-    }
-
-    @Test
-    @DisplayName("candle tick_count must be INTEGER, not BIGINT")
-    void candleTickCountMustBeInteger() {
-        List<String> types = new java.util.ArrayList<>(CANDLE_TYPES);
-        types.set(10, "BIGINT");
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateCandleKvTable(
-                        candle(LOG, CANDLE_PK, List.of(TOKEN), 16, types, false)));
-    }
-
-    @Test
-    @DisplayName("candle schemaReport never throws and names the DDL-vs-live nullability divergence")
-    void candleSchemaReportIsInformational() {
-        TableInfo kv = candle(LOG, CANDLE_PK, List.of(TOKEN), 16);
-        String report = TableContractValidator.schemaReport(kv, CandleTableSchema.COLUMN_NULLABLE_IN_DDL);
-        assertNotNull(report);
-        assertTrue(report.contains("instrument_token:BIGINT"),
-                "report must name live type roots, got: " + report);
-        assertTrue(report.contains("nullable(DDL NOT NULL not carried)"),
-                "report must surface the DDL-vs-live nullability divergence, got: " + report);
-    }
 
     // ── signal LOG (SIGNAL-SCHEMA-001) ──
 
@@ -489,43 +365,6 @@ class TableContractValidatorTest {
                         dedup(DEDUP_TABLE, DEDUP_PK, List.of(TOKEN), 17)));
     }
 
-    // ── forming_bar KV current-state home (DEC-038, FORMING-BAR-SCHEMA-001) ──
-
-    @Test
-    @DisplayName("forming-bar KV with PK exactly [instrument_token] and matching routing passes")
-    void formingBarKvExactPasses() {
-        assertDoesNotThrow(() -> TableContractValidator.validateFormingBarKvTable(
-                formingBar(FORMING_BAR_TABLE, List.of(TOKEN), List.of(TOKEN), 16)));
-    }
-
-    @Test
-    @DisplayName("forming-bar KV without a primary key is rejected (current-state contract)")
-    void formingBarKvNoPkRejected() {
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateFormingBarKvTable(
-                        formingBar(FORMING_BAR_TABLE, null, List.of(TOKEN), 16)));
-    }
-
-    @Test
-    @DisplayName("forming-bar KV with a wider primary key is rejected (exact per-ticker current state)")
-    void formingBarKvWiderPkRejected() {
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateFormingBarKvTable(
-                        formingBar(FORMING_BAR_TABLE, List.of(TOKEN, "window_start"),
-                                List.of(TOKEN), 16)));
-    }
-
-    @Test
-    @DisplayName("forming-bar KV with schema drift is rejected (10 columns)")
-    void formingBarKvSchemaDriftRejected() {
-        List<String> shortTypes = new java.util.ArrayList<>(FORMING_BAR_TYPES);
-        shortTypes.remove(10); // drop schema_version -> 10 columns
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateFormingBarKvTable(
-                        formingBar(FORMING_BAR_TABLE, List.of(TOKEN), List.of(TOKEN), 16,
-                                shortTypes, false)));
-    }
-
     // ── candle_live KV (2026-09-05 multi-TF aggregator Phase 0, CANDLE-MULTITF-001) ──
 
     private static final List<String> CANDLE_LIVE_NAMES = java.util.Arrays.asList(CandleLiveColumns.NAMES);
@@ -674,17 +513,6 @@ class TableContractValidatorTest {
      * {@code columnTypes} / {@code pkNonNullable} override that default to
      * build the negative fixtures.
      */
-    private static TableInfo candle(String name, List<String> schemaPk, List<String> bucketKeys,
-            int numBuckets) {
-        return table(name, schemaPk, bucketKeys, numBuckets, CANDLE_NAMES, CANDLE_TYPES, null, true);
-    }
-
-    private static TableInfo candle(String name, List<String> schemaPk, List<String> bucketKeys,
-            int numBuckets, List<String> columnTypes, boolean pkNonNullable) {
-        return table(name, schemaPk, bucketKeys, numBuckets, CANDLE_NAMES, CANDLE_TYPES,
-                columnTypes, pkNonNullable);
-    }
-
     private static TableInfo signal(String name, List<String> schemaPk, List<String> bucketKeys,
             int numBuckets) {
         return table(name, schemaPk, bucketKeys, numBuckets, SIGNAL_NAMES, SIGNAL_TYPES, null, true);
@@ -743,18 +571,6 @@ class TableContractValidatorTest {
             int numBuckets, List<String> columnTypes, boolean pkNonNullable) {
         return table(name, schemaPk, bucketKeys, numBuckets, DEDUP_NAMES, DEDUP_TYPES,
                 columnTypes, pkNonNullable);
-    }
-
-    private static TableInfo formingBar(String name, List<String> schemaPk, List<String> bucketKeys,
-            int numBuckets) {
-        return table(name, schemaPk, bucketKeys, numBuckets, FORMING_BAR_NAMES,
-                FORMING_BAR_TYPES, null, true);
-    }
-
-    private static TableInfo formingBar(String name, List<String> schemaPk, List<String> bucketKeys,
-            int numBuckets, List<String> columnTypes, boolean pkNonNullable) {
-        return table(name, schemaPk, bucketKeys, numBuckets, FORMING_BAR_NAMES,
-                FORMING_BAR_TYPES, columnTypes, pkNonNullable);
     }
 
     private static TableInfo candleLive(String name, List<String> schemaPk, List<String> bucketKeys,

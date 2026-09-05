@@ -115,7 +115,9 @@ class CandleWatermarkIdlenessTest {
 
     /** The exact config the job runs: SOURCE_IDLE_MS=15000 drives the idleness. */
     private static Map<String, String> env() {
-        Map<String, String> env = CandleWindowTestHarness.env();
+        Map<String, String> env = new HashMap<>();
+        env.put("DEDUP_TTL_MS", "60000");
+        env.put("CANDLE_WINDOW_MS", "15000");
         env.put("SOURCE_IDLE_MS", "15000");
         env.put("WATERMARK_OUT_OF_ORDER_MS", "5000");
         env.put("ALLOWED_LATENESS_MS", "5000");

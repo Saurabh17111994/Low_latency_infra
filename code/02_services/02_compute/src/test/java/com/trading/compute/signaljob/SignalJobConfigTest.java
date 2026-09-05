@@ -46,23 +46,13 @@ class SignalJobConfigTest {
         assertEquals("localhost:9123", cfg.bootstrapServers());
         assertEquals("default", cfg.database());
         assertEquals("raw_table_1", cfg.rawTable());
-        assertEquals("feature_candles_15s", cfg.candleTable());
-        // Streaming-3000 T6: candle-invariant quarantine table (shared DDL 21)
-        assertEquals("ingestion_quarantine", cfg.quarantineTable());
         assertEquals(PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION, cfg.rawSchemaVersion());
-        assertEquals("2", cfg.candleSchemaVersion());
         // signal detection tuning defaults (DEC-034)
         assertEquals("Signal_Candidates", cfg.signalCandidatesTable());
         assertEquals("Signal_Candidates_current", cfg.signalCurrentTable());
         assertEquals("simple-breakout", cfg.signalStrategyId());
         assertEquals("1.0.0", cfg.signalStrategyVersion());
         assertEquals(1L, cfg.signalQuantity());
-        // Slice 2.2 forming-bar placeholder defaults (Phase C)
-        assertEquals("breakout-5-forming-bar", cfg.formingRuleId());
-        assertEquals(5, cfg.formingLookbackCandles());
-        // forming_bar KV persistence defaults (persistence phase, 2026-08-16)
-        assertEquals("forming_bar", cfg.formingBarTable());
-        assertEquals(250L, cfg.formingBarWriteBatchMs());
         // OTLP collector: compose DNS default, live-run override (process rule 2)
         assertEquals("otel-collector:4318", cfg.otelCollectorHost());
         // state restore: absent by default (first start replays from offset 0)
@@ -292,10 +282,6 @@ class SignalJobConfigTest {
         assertEquals("my-strategy", cfg.signalStrategyId());
         assertEquals("2.1.0", cfg.signalStrategyVersion());
         assertEquals(3L, cfg.signalQuantity());
-        assertEquals("my-forming-rule", cfg.formingRuleId());
-        assertEquals(8, cfg.formingLookbackCandles());
-        assertEquals("forming_bar_dev", cfg.formingBarTable());
-        assertEquals(100L, cfg.formingBarWriteBatchMs());
         assertEquals("Trade_Decisions_dev", cfg.tradeDecisionsTable());
         assertEquals("trade_instruction_state_dev", cfg.tradeInstructionStateTable());
         assertEquals(true, cfg.tradeDecisionsEnabled(),
@@ -437,14 +423,6 @@ class SignalJobConfigTest {
         assertTrue(e.getMessage().contains("TRADE_DECISIONS_ENABLED"), e.getMessage());
     }
 
-    @Test
-    void rejectsNonPositiveFormingBarWriteBatchMs() {
-        Map<String, String> env = env();
-        env.put("FORMING_BAR_WRITE_BATCH_MS", "0");
-        IllegalStateException e = assertThrows(IllegalStateException.class,
-                () -> SignalJobConfig.from(env));
-        assertTrue(e.getMessage().contains("FORMING_BAR_WRITE_BATCH_MS"), e.getMessage());
-    }
 
     // The DEC-038 dedup tuning-key rejection legs (DEDUP_CACHE_* /
     // DEDUP_WRITE_* / DEDUP_CLEANUP_*) were retired with design B (2026-08-16).
@@ -503,14 +481,6 @@ class SignalJobConfigTest {
         assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
     }
 
-    @Test
-    void rejectsFormingLookbackBelowTwo() {
-        Map<String, String> env = env();
-        env.put("FORMING_LOOKBACK_CANDLES", "1");
-        IllegalStateException e = assertThrows(IllegalStateException.class,
-                () -> SignalJobConfig.from(env));
-        assertTrue(e.getMessage().contains("FORMING_LOOKBACK_CANDLES"), e.getMessage());
-    }
 
     // ── tracker 14 P4: state backend + durable checkpoints ────────────────
 

@@ -44,8 +44,6 @@ public final class ConfigKeys {
     public static final String AWS_REGION = "AWS_REGION";
     public static final String AWS_SECRET_ACCESS_KEY = "AWS_SECRET_ACCESS_KEY";
     public static final String AWS_SECRET_ACCESS_KEY_FILE = "AWS_SECRET_ACCESS_KEY_FILE";
-    public static final String CANDLE_SCHEMA_VERSION = "CANDLE_SCHEMA_VERSION";
-    public static final String CANDLE_TABLE = "CANDLE_TABLE";
     public static final String CANDLE_WINDOW_MS = "CANDLE_WINDOW_MS";
     public static final String CHECKPOINT_DIR = "CHECKPOINT_DIR";
     public static final String CHECKPOINT_INTERVAL_MS = "CHECKPOINT_INTERVAL_MS";
@@ -77,10 +75,6 @@ public final class ConfigKeys {
     public static final String FLUSS_WRITER_BATCH_TIMEOUT_MS = "FLUSS_WRITER_BATCH_TIMEOUT_MS";
     public static final String FLUSS_WRITER_MODE = "FLUSS_WRITER_MODE";
     public static final String FLUSS_WRITER_RETRIES = "FLUSS_WRITER_RETRIES";
-    public static final String FORMING_BAR_TABLE = "FORMING_BAR_TABLE";
-    public static final String FORMING_BAR_WRITE_BATCH_MS = "FORMING_BAR_WRITE_BATCH_MS";
-    public static final String FORMING_LOOKBACK_CANDLES = "FORMING_LOOKBACK_CANDLES";
-    public static final String FORMING_RULE_ID = "FORMING_RULE_ID";
     public static final String GO_ARROW_SDK_VERSION = "GO_ARROW_SDK_VERSION";
     public static final String HOSTNAME = "HOSTNAME";
     public static final String INFO = "INFO";
@@ -102,9 +96,7 @@ public final class ConfigKeys {
     public static final String PENDING_MAX_BYTES = "PENDING_MAX_BYTES";
     public static final String PENDING_MAX_RECORDS = "PENDING_MAX_RECORDS";
     public static final String PENDING_WARNING_PERCENT = "PENDING_WARNING_PERCENT";
-    public static final String POSITION_STATE_TABLE = "POSITION_STATE_TABLE";
     public static final String PROFILE = "PROFILE";
-    public static final String QUARANTINE_TABLE = "QUARANTINE_TABLE";
     public static final String R2_ENDPOINT = "R2_ENDPOINT";
     public static final String RAW_SCHEMA_VERSION = "RAW_SCHEMA_VERSION";
     public static final String RAW_TABLE = "RAW_TABLE";
