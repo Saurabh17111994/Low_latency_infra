@@ -28,10 +28,11 @@ import org.slf4j.LoggerFactory;
  * Signal job — compute path (docs/08_implementation/04-signal-job.md).
  *
  * <p>Topology: {@code raw_table_1} (Fluss LOG source, full offsets) → raw
- * schema/validity gate → state-authoritative fingerprint dedup → 15-second event-time
- * tumbling window (OHLCV aggregate) → {@code feature_candles_15s} (Fluss KV
- * upsert sink — user requirement 2026-08-13: candle tables are KV-only, no
- * LOG+KV twin) → MVP signal detection (Slice 2.1, DEC-034) → signal dual-sink
+ * schema/validity gate → state-authoritative fingerprint dedup →
+ * multi-timeframe aggregator (per-trade OHLCV forming rings for 15s/30s/1m/
+ * 3m/5m/15m) → {@code candle_live} (Fluss KV evolving snapshots) +
+ * {@code candle_closed} (Fluss KV immutable closed history) → strategy host
+ * (config-driven strategies; N7 range-breakout first) → signal dual-sink
  * (DEC-035): {@code Signal_Candidates} (Fluss LOG append, every signal) and
  * {@code Signal_Candidates_current} (Fluss KV upsert behind the
  * canonical-signal filter). Business Logic operator internals (candidate

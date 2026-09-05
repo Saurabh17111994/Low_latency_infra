@@ -4,94 +4,83 @@ import org.apache.fluss.client.lookup.Lookuper;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.TablePath;
+import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalRow;
 
 import java.util.concurrent.TimeUnit;
 
 /**
- * FlussKvProbe — B2 CP9->CP10 passive sampler (plan
+ * FlussKvProbe — B2 CP9-&gt;CP10 passive sampler (plan
  * docs/plans/2026-09-01-stage-throughput-latency-detection-plan.md, Stage B2).
  *
- * KV point-lookup probe: looks up preview rows by PK
- * (instrument_token, window_start) for the CURRENT 15s window of a small
+ * KV point-lookup probe: looks up candle rows by PK
+ * (instrument_token, tf, window_start) for the CURRENT 15s window of a small
  * fixed token sample, printing one TSV row per found row:
  *
- *   <epoch_ms>\t<token>\t<window_start>\t<output_ts>\t<last_event_ts>\t<staleness_ms>
+ *   &lt;epoch_ms&gt;\t&lt;token&gt;\t&lt;window_start&gt;\t&lt;window_end&gt;\t&lt;last_event_time&gt;\t&lt;staleness_ms&gt;
  *
- * staleness_ms = epoch_ms - last_event_ts = CP9(commit) -> CP10(readable)
+ * staleness_ms = epoch_ms - last_event_time = CP9(commit) -&gt; CP10(readable)
  * visibility staleness: how long before a consumer reading NOW can see an
- * event committed at last_event_ts. output_ts is the pipeline's EVENT-time
- * stamp (synthetic feed clock, which may run slightly AHEAD of wall — the
- * feed allows 2000ms future skew), so epoch_ms - output_ts goes NEGATIVE
- * under skew and is NOT a wall-clock latency (observed 2026-09-02 A/B:
- * p50 -113ms). last_event_ts is carried from the raw event and tracks the
- * same synthetic clock, but staleness vs it stays meaningful: it measures
- * the emit cadence + read path (preview rows emit ~1/s/key).
+ * event committed at last_event_time. window_end is the STATIC event-time
+ * boundary of the sampled window (kept in the TSV shape so downstream
+ * parsers keep working); last_event_time is the freshness signal (the
+ * freshest raw event folded into the row). For candle_live rows emit ~1/s
+ * per key, so staleness tracks emit cadence + read path. For candle_closed
+ * the probe reports the freshest CLOSED row's age the read path can see.
+ * Same synthetic-clock caveat as before: the feed clock may run ahead of
+ * wall, so small negative values can appear; a large positive value is
+ * genuine visibility lag.
  *
- * Table layouts (column indices are hard-coded per table):
- *   feature_candles_15s_preview  output_ts=12, last_event_ts=13  (preview)
- *   feature_candles_15s          output_ts=13, NO last_event_ts  (closed)
- * For the CLOSED table the probe reports staleness_ms = epoch_ms -
- * output_ts: output_ts is the emit wall-clock of the closed candle row
- * (HeapCandleEmitFunction passes currentProcessingTime), so this measures
- * commit->readable age of the freshest closed row the read path can see.
- * Same synthetic-clock caveat as the preview: the feed clock may run ahead
- * of wall, so small negative values can appear; a large positive value is
- * genuine closed-candle visibility lag.
+ * New-layout column indices (candle_live / candle_closed, 15-col v1):
+ * token=0, tf=3, window_start=4, window_end=5, last_event_time=12.
  *
  * The probe reads the CURRENT window first (freshest row), falling back to
- * the PREVIOUS window (at a window boundary the fresh window has no preview
+ * the PREVIOUS window (at a window boundary the fresh window has no row
  * for ~1s). Both windows are within the 60s TTL.
  *
  * Cost: one KV lookup per token per invocation, on a fixed 5-token sample,
- * invoked once per capture tick (5s) => <= 1 lookup/s total. Negligible and
+ * invoked once per capture tick (5s) =&gt; &lt;= 1 lookup/s total. Negligible and
  * A/B-validated (probes-on vs probes-off at one tier before trusting).
  *
- * Usage: java -cp <cp> FlussKvProbe <table> <window_ms> <tokens_csv>
- *                                          [bootstrap]
+ * Usage: java -cp &lt;cp&gt; FlussKvProbe &lt;table&gt; &lt;window_ms&gt; &lt;tokens_csv&gt;
+ *                                          [bootstrap] [tf]
  */
 public class FlussKvProbe {
-    private static final boolean TABLE_HAS_LAST_EVENT_TS(String table) {
-        // Preview rows carry last_event_ts (col 13); closed candle rows do
-        // not (the CLOSED candle's last event time is not part of the table
-        // contract). output_ts column differs between the two layouts too.
-        return "feature_candles_15s_preview".equals(table);
-    }
-
     public static void main(String[] args) throws Exception {
-        String table = args.length > 0 ? args[0] : "feature_candles_15s_preview";
+        String table = args.length > 0 ? args[0] : "candle_live";
         long windowMs = args.length > 1 ? Long.parseLong(args[1]) : 15000L;
         String tokensRaw = args.length > 2 ? args[2] : "4,7,13,17,19";
         String bootstrap = args.length > 3 ? args[3] : "localhost:9123";
+        String tf = args.length > 4 ? args[4] : "FIFTEEN_S";
         long epochMs = System.currentTimeMillis();
         long windowStart = (epochMs / windowMs) * windowMs;
         // Current window FIRST, previous as fallback (see class doc). The
-        // current window's row is the freshest (<= 1 preview interval old);
-        // preferring it keeps read_lag_ms a true commit->read measure. The
+        // current window's row is the freshest (&lt;= 1 live interval old);
+        // preferring it keeps staleness_ms a true commit-&gt;read measure. The
         // previous window's row can be up to 15s old yet still within the 60s
         // TTL — reading it first would inflate the lag (observed 2026-09-02
-        // smoke: 3.1s instead of <= 1s).
+        // smoke: 3.1s instead of &lt;= 1s).
         long[] windows = {windowStart, windowStart - windowMs};
         Configuration conf = new Configuration();
         conf.setString("bootstrap.servers", bootstrap);
         TablePath tp = TablePath.of("default", table);
         String[] toks = tokensRaw.split(",");
+        BinaryString tfBin = BinaryString.fromString(tf);
         try (Connection c = ConnectionFactory.createConnection(conf);
              Table t = c.getTable(tp)) {
             Lookuper lookuper = t.newLookup().createLookuper();
             for (String tok : toks) {
                 long token = Long.parseLong(tok.trim());
                 for (long w : windows) {
-                    InternalRow key = GenericRow.of(token, w);
+                    InternalRow key = GenericRow.of(token, tfBin, w);
                     InternalRow row = lookuper.lookup(key).get(2, TimeUnit.SECONDS).getSingletonRow();
                     if (row != null) {
-                        boolean hasLastEventTs = TABLE_HAS_LAST_EVENT_TS(table);
-                        long outputTs = row.getLong(hasLastEventTs ? 12 : 13);
-                        long lastEventTs = hasLastEventTs ? row.getLong(13) : outputTs;
-                        long stalenessMs = epochMs - lastEventTs;
+                        long windowEnd = row.getLong(5);
+                        long lastEventTime = row.getLong(12);
+                        long stalenessMs = epochMs - lastEventTime;
                         System.out.println(epochMs + "\t" + token + "\t" + w + "\t"
-                                + outputTs + "\t" + lastEventTs + "\t" + stalenessMs);
+                                + windowEnd + "\t" + lastEventTime + "\t" + stalenessMs);
                         break;
                     }
                 }

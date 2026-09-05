@@ -36,8 +36,8 @@ import org.apache.fluss.flink.sink.serializer.RowDataSerializationSchema;
  *       (mirror of {@link CandleKvFirstWriteWinsFunction}, design Decision 12).</li>
  * </ul>
  *
- * <p>Builder pattern mirrors {@code SignalJob.java:320-390} (FlussSink for
- * feature_candles_15s) <b>exactly</b>:
+ * <p>Builder pattern mirrors {@code SignalJob.java} candle-live/closed sinks
+ * (FlussSink for {@code candle_live}/{@code candle_closed}) <b>exactly</b>:
  * {@code .setBootstrapServers/.setDatabase/.setTable/.setSerializationSchema(new RowDataSerializationSchema(false,false))/.setOption client.request-timeout + retries}.
  *
  * <p><b>Contract validator seam.</b> The two tables must be validated before

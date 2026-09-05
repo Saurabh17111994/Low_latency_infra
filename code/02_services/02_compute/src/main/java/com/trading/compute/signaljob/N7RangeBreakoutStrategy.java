@@ -303,8 +303,9 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
         row.setField(SignalCandidatesTableColumns.QUANTITY, config.signalQuantity());
         row.setField(SignalCandidatesTableColumns.ORDER_TYPE,
                 StringData.fromString(SignalCandidatesTableColumns.ORDER_TYPE_MARKET));
-        // MARKET order: no limit price. The old-chain rows used 0 as a sentinel.
-        row.setField(SignalCandidatesTableColumns.LIMIT_PRICE_PAISE, 0L);
+        // MARKET order: no limit price (null, not the old-chain 0 sentinel:
+        // ExecutionIntentBuilder rejects a present-but-non-positive limit).
+        row.setField(SignalCandidatesTableColumns.LIMIT_PRICE_PAISE, null);
         row.setField(SignalCandidatesTableColumns.SCORE_INPUTS,
                 StringData.fromString(scoreInputs(tf, setup, side, price)));
         row.setField(SignalCandidatesTableColumns.FORMATION_SNAPSHOT_REF,

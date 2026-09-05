@@ -49,8 +49,8 @@ OUT_DIR="${OUT_DIR:-logs/tracker-14/stage-capture-$(date +%Y%m%d-%H%M%S)}"
 INGESTION_JAVA_OUT="${INGESTION_JAVA_OUT:-}"
 FLUSS_PROBE_CP="${FLUSS_PROBE_CP:-}"       # classpath for FlussReadLagProbe/FlussKvProbe
 FLUSS_PROBE_DIR="${FLUSS_PROBE_DIR:-$SCRIPT_DIR/fluss-probes}"
-PROBE_TABLE="${PROBE_TABLE:-feature_candles_15s_preview}"
-PROBE_CLOSED_TABLE="${PROBE_CLOSED_TABLE:-feature_candles_15s}"
+PROBE_TABLE="${PROBE_TABLE:-candle_live}"
+PROBE_CLOSED_TABLE="${PROBE_CLOSED_TABLE:-candle_closed}"
 PROBE_TOKENS="${PROBE_TOKENS:-4,7,13,17,19}"
 PROBE_BOOTSTRAP="${PROBE_BOOTSTRAP:-localhost:9123}"
 
@@ -563,13 +563,13 @@ sample_probes() {
   java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
     FlussReadLagProbe default raw_table_1 "$PROBE_BOOTSTRAP" \
     >> "$OUT_DIR/read-lag.tsv" 2>/dev/null || echo "!! WARN: FlussReadLagProbe failed this tick" >&2
-  # Probe 2: KV preview lookups (CP9->CP10). 3 lookups, <=1/s aggregate.
+  # Probe 2: KV live lookups (CP9->CP10). 3 lookups, <=1/s aggregate.
   java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
     FlussKvProbe "$PROBE_TABLE" 15000 "$PROBE_TOKENS" "$PROBE_BOOTSTRAP" \
     >> "$OUT_DIR/consumer-read.tsv" 2>/dev/null || echo "!! WARN: FlussKvProbe failed this tick" >&2
-  # Probe 3: CLOSED feature-candle table (CP9->CP10 for the closed leg).
-  # Same lookups against feature_candles_15s; FlussKvProbe picks the closed
-  # column layout (output_ts only, no last_event_ts).
+  # Probe 3: CLOSED candle table (CP9->CP10 for the closed leg).
+  # Same lookups against candle_closed; FlussKvProbe reads the new 15-col
+  # layout (token=0, tf=3, window_start=4, window_end=5, last_event_time=12).
   java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
     FlussKvProbe "$PROBE_CLOSED_TABLE" 15000 "$PROBE_TOKENS" "$PROBE_BOOTSTRAP" \
     >> "$OUT_DIR/closed-read.tsv" 2>/dev/null || echo "!! WARN: FlussKvProbe(closed) failed this tick" >&2
@@ -626,8 +626,8 @@ while :; do
       # empty sample (row not yet KV-visible at the exact window boundary)
       # is NOT a dead leg. Warning-only since 2026-09-05 (multi-TF soak:
       # attempt 4 aborted on this false alarm while stages.tsv showed both
-      # chains emitting healthily). The gate (multitf_soak_verify.py) is the
-      # authoritative closed-row check.
+      # chains emitting healthily). The host-N7 gate in stage-soak-e2e.sh is
+      # the authoritative signal-row check.
       for f in consumer-read closed-read; do
         if [ "$(($(wc -l < "$OUT_DIR/$f.tsv" 2>/dev/null || echo 1) - 1))" -le 0 ]; then
           echo "!! WARN: $f.tsv still header-only at t+${ELAPSED}s — KV point-sampler found no current-window row this tick (may be empty-sample, not dead). See stages.tsv for real operator counts." >&2

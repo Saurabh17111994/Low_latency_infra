@@ -217,6 +217,11 @@ class N7RangeBreakoutStrategyTest {
                 field(row, SignalCandidatesTableColumns.CANDIDATE_ID));
         assertTrue(field(row, SignalCandidatesTableColumns.FORMATION_SNAPSHOT_REF)
                 .startsWith("n7:FIFTEEN_S:"));
+        // MARKET order carries no limit price: null, not 0 — the intent
+        // leg rejects a present-but-non-positive limit (B4 live, 2026-09-05).
+        assertEquals(SignalCandidatesTableColumns.ORDER_TYPE_MARKET,
+                field(row, SignalCandidatesTableColumns.ORDER_TYPE));
+        assertTrue(row.isNullAt(SignalCandidatesTableColumns.LIMIT_PRICE_PAISE));
     }
 
     @Test

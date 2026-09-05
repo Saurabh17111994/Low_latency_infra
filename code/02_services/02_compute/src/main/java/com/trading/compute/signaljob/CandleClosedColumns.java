@@ -20,8 +20,8 @@ import org.apache.flink.table.types.logical.VarCharType;
  * {@code FIFTEEN_S, THIRTY_S, ONE_M, THREE_M, FIVE_M, FIFTEEN_M}. The
  * first-write-wins sink's {@code RowDataSerializationSchema} projects by
  * column name, so emitted {@code GenericRowData} fields must be positioned
- * in DDL column order. Lake offload mirrors 03_feature_candles_15s (7d,
- * iceberg, 5min freshness, auto-compaction).
+ * in DDL column order. Lake offload mirrors this table (7d, iceberg, 5min
+ * freshness, auto-compaction).
  */
 public final class CandleClosedColumns {
 

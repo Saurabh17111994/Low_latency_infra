@@ -759,11 +759,9 @@ JAVAEOF
   fi
 }
 
-# Ensure the multi-timeframe candle tables exist (Phase 5 side-by-side soak;
-# DDLs 32_candle_live.sql / 33_candle_closed.sql). Create-if-absent, never
-# drop — the old chain must keep writing feature_candles_15s while the new
-# branch writes candle_live/candle_closed. Uses the same TableEnsure pattern
-# as pipeline_ensure_tentative_markers_table.
+# Ensure the multi-timeframe candle tables exist (cutover: the strategy host
+# reads candle_live/candle_closed, DDLs 32/33). Create-if-absent, never drop.
+# Uses the same TableEnsure pattern as the retired tentative-markers ensure.
 pipeline_ensure_candle_tables() {
   pipeline_require_preflight || return 1
   local ddl_file="$1" label="$2"

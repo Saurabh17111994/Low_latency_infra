@@ -47,10 +47,10 @@ import org.slf4j.LoggerFactory;
  *  broker, no market hours: raw ticks are written directly to raw_table_1 with
  *  event-time timestamps that force the pinned 15 s event-time candle windows
  *  to close (the ingestion leg itself is SIGNAL-CHAIN-E2E's domain), and a
- *  rising price series deterministically fires the forming-bar breakout rule
- *  (breakout-5-forming-bar, the sole 15s-chain signal producer since the
- *  20-candle rule was deleted 2026-09-05). The real SignalJob topology then
- *  produces Signal_Candidates and -- only with
+ *  crafted narrowing-range series deterministically fires the N7
+ *  range-breakout rule on the strategy host (n7-range-breakout-v1, the sole
+ *  signal producer since the 15 s chain was retired 2026-09-05). The real
+ *  SignalJob topology then produces Signal_Candidates and -- only with
  *  EXECUTION_INTENT_ENABLED=true -- immutable Execution_Intent LOG rows.
  *
  *  Tests:
@@ -128,10 +128,10 @@ class B4SignalIntentE2ETest {
                 // force a full-log drain first — tens of millions of rows on
                 // a lived-in cluster — and the tail never arrives in budget.
                 // Replay semantics belong to RawSourceOffsetSelectionTest.)
-                // Two-burst write (the detector only evaluates forming bars
-                // against WARM rings: one-shot bursts race closed candles
-                // and never fire). Burst 1 closes 7 candles; burst 2 fires.
-                int[] price = {1_000};
+                // Two-burst write (N7 only evaluates against a WARM 7-candle
+                // ring: one-shot bursts never arm). Burst 1 closes 7
+                // narrowing 15 s candles; burst 2 breaks the setup high.
+                int[] price = {10_000};
                 // One base for both bursts: a 15 s boundary between them
                 // must not shift burst 2 into unintended windows.
                 long base = (System.currentTimeMillis() / 15_000L) * 15_000L - 90_000L;
@@ -217,37 +217,40 @@ class B4SignalIntentE2ETest {
         }
     }
 
-    // ---- crafted raw stream (two bursts): 7 rising 15 s windows + a flush tick ----
+    // ---- crafted raw stream (two bursts): 7 narrowing 15 s windows + a breakout ----
     // Burst 1: windows 0..6 in full plus the first two ticks of window 7.
-    // The window-7 ticks push the watermark (maxTs-5000) past the end of
-    // window 6, so all seven closed candles form and the detector's rings
-    // fill. Prices rise monotonically throughout (shared price box).
+    // Window i has range (7 - i) paise on a rising base, so the N7 ring is
+    // strictly narrowing and window 6 arms the setup. The window-7 ticks
+    // push the watermark (maxTs-5000) past the end of window 6, so all
+    // seven closed candles form and the host strategy's rings fill.
     private static void writeBurst1(Connection conn, long token, String symbol, int[] price, long base)
             throws Exception {
         Table raw = conn.getTable(TablePath.of("default", "raw_table_1"));
         AppendWriter w = raw.newAppend().createWriter();
         for (int win = 0; win < 7; win++) {
-            for (int t = 0; t < 3; t++) {
-                long eventTime = base + win * 15_000L + 4_000L + t * 2_000L;
-                price[0] += 10 + t;
-                w.append(rawRow(token, symbol, eventTime, price[0]))
-                        .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-            }
+            int low = price[0] + win * 10;
+            int high = low + (7 - win);
+            long eventTime = base + win * 15_000L + 4_000L;
+            w.append(rawRow(token, symbol, eventTime, low))
+                    .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            w.append(rawRow(token, symbol, eventTime + 2_000L, high))
+                    .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            w.append(rawRow(token, symbol, eventTime + 4_000L, low + 1))
+                    .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
         }
+        price[0] += 70;
         for (int t = 0; t < 2; t++) {
             long eventTime = base + 7 * 15_000L + 4_000L + t * 2_000L;
-            price[0] += 10 + t;
-            w.append(rawRow(token, symbol, eventTime, price[0]))
+            w.append(rawRow(token, symbol, eventTime, price[0] + t))
                     .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
         }
         w.flush();
     }
 
-    // Block until the token owns `want` closed candles (proves the detector's
-    // rings can only be warm: every closed candle whose window ended before
-    // the current forming window is admitted, and 7 closed candles always
-    // leave >= 5 in the lookback-5 rings). Fails fast instead of letting the
-    // smoke loop burn its budget on a burst the detector cannot evaluate.
+    // Block until the token owns `want` closed FIFTEEN_S candles (proves the
+    // N7 ring can only be warm: every closed candle whose window ended before
+    // the current forming window is admitted). Fails fast instead of letting
+    // the smoke loop burn its budget on a burst the strategy cannot evaluate.
     private static void awaitCandles(Connection conn, long token, int want) throws Exception {
         long deadline = System.currentTimeMillis() + 60_000L;
         int n = 0;
@@ -263,21 +266,22 @@ class B4SignalIntentE2ETest {
                 + " token=" + token + "): rows are not reaching the candle leg");
     }
 
-    // Burst 2: final tick of window 7 plus a flush tick 10 s into window 8,
-    // still rising. The detector's rings are warm by construction now, so
-    // these forming bars evaluate the breakout rule and fire deterministi-
-    // cally (close exceeds every ring high on a monotonic rise).
+    // Burst 2: window 7 closes with a high above the window-6 setup high,
+    // plus a flush tick 10 s into window 8. The N7 ring is warm by
+    // construction now, so the window-7 close fires deterministically
+    // (BUY: closed high breaks the armed setup high).
     private static void writeBurst2(Connection conn, long token, String symbol, int[] price, long base)
             throws Exception {
         Table raw = conn.getTable(TablePath.of("default", "raw_table_1"));
         AppendWriter w = raw.newAppend().createWriter();
+        // Setup high is the window-6 high (price + 60 + 1 after burst 1):
+        // break it by a clear margin.
+        int breakout = price[0] + 60 + 1 + 10;
         long eventTime = base + 7 * 15_000L + 4_000L + 2 * 2_000L;
-        price[0] += 12;
-        w.append(rawRow(token, symbol, eventTime, price[0]))
+        w.append(rawRow(token, symbol, eventTime, breakout))
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
         // Flush tick 10 s into window 8: closes window 7 behind it.
-        price[0] += 1;
-        w.append(rawRow(token, symbol, base + 8 * 15_000L + 10_000L, price[0]))
+        w.append(rawRow(token, symbol, base + 8 * 15_000L + 10_000L, breakout))
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
         w.flush();
     }
@@ -299,7 +303,7 @@ class B4SignalIntentE2ETest {
                 // B4 symbols absent from the entire job output).
                 bs(EVENT_DAY_FMT.format(Instant.ofEpochMilli(eventTime))),
                 bs(fingerprint), bs("v2"), bs("e2e"), 1L, token,
-                bs("NSE"), bs(symbol), eventTime, eventTime, eventTime, bs("T"),
+                bs("NSE"), bs(symbol), eventTime, eventTime, eventTime, bs("TRADE"),
                 (long) price, 1L, new byte[] {1, 2}, bs("h-" + fingerprint),
                 bs("1"), bs("v1"), bs("VALID"), bs("FRESH"), bs("3"));
     }
@@ -318,11 +322,11 @@ class B4SignalIntentE2ETest {
         return n[0];
     }
 
-    // Smoke milestone: closed candles for the token (KV prefix lookup —
-    // feature_candles_15s PK starts with instrument_token). One RPC, no
+    // Smoke milestone: closed FIFTEEN_S candles for the token (KV prefix
+    // lookup — candle_closed PK starts with instrument_token). One RPC, no
     // full-table scan, so the smoke loop can afford it every 5th sample.
     private static int countCandles(Connection conn, long token) throws Exception {
-        Table candles = conn.getTable(TablePath.of("default", "feature_candles_15s"));
+        Table candles = conn.getTable(TablePath.of("default", "candle_closed"));
         Lookuper lookuper =
                 candles.newLookup().lookupBy("instrument_token").createLookuper();
         LookupResult res = lookuper.lookup(GenericRow.of(token))
@@ -332,7 +336,8 @@ class B4SignalIntentE2ETest {
         }
         int n = 0;
         for (Object row : res.getRowList()) {
-            if (row != null) {
+            if (row instanceof InternalRow r && !r.isNullAt(CandleClosedColumns.TF)
+                    && "FIFTEEN_S".equals(r.getString(CandleClosedColumns.TF).toString())) {
                 n++;
             }
         }
@@ -375,8 +380,8 @@ class B4SignalIntentE2ETest {
     }
 
     private static void requirePlatformTables(Connection conn) throws Exception {
-        String[] names = {"raw_table_1", "feature_candles_15s", "forming_bar",
-                "Signal_Candidates", "Signal_Candidates_current", "Position_State",
+        String[] names = {"raw_table_1", "candle_live", "candle_closed",
+                "Signal_Candidates", "Signal_Candidates_current",
                 "Trade_Decisions", "Execution_Intent"};
         for (String n : names) {
             conn.getTable(TablePath.of("default", n));
@@ -415,7 +420,10 @@ class B4SignalIntentE2ETest {
         e.put("FLUSS_BOOTSTRAP_SERVERS", bootstrap);
         e.put("FLUSS_DATABASE", "default");
         e.put("RAW_TABLE", "raw_table_1");
-        e.put("CANDLE_TABLE", "feature_candles_15s");
+        e.put("MULTITF_ENABLED", "true");
+        e.put("MULTITF_SESSION_BYPASS", "true");
+        e.put("STRATEGY_HOST_ENABLED", "true");
+        e.put("STRATEGIES", "n7-range-breakout-v1");
         e.put("SIGNAL_CANDIDATES_TABLE", "Signal_Candidates");
         e.put("SIGNAL_CURRENT_TABLE", "Signal_Candidates_current");
         e.put("DEDUP_TTL_MS", "60000");
@@ -427,9 +435,9 @@ class B4SignalIntentE2ETest {
         // backlog (see run: the series is written after the job is RUNNING).
         e.put("CHECKPOINT_DIR",
                 "file:///tmp/b4-signal-intent-e2e-checkpoints-" + System.nanoTime());
-        for (String k : new String[] {"FORMING_RULE_ID", "FORMING_BAR_TABLE",
+        for (String k : new String[] {
                 "TRADE_DECISIONS_TABLE", "SIGNAL_STRATEGY_ID", "SIGNAL_STRATEGY_VERSION",
-                "FORMING_BAR_WRITE_BATCH_MS", "STATE_BACKEND",
+                "STATE_BACKEND",
                 "STATE_BACKEND_LOCAL_DIRS", "TASK_MANAGER_MEMORY_MANAGED_SIZE",
                 "TASK_MANAGER_NETWORK_MEMORY_MAX", "PARALLELISM", "OTEL_COLLECTOR_HOST"}) {
             String v = System.getenv().get(k);

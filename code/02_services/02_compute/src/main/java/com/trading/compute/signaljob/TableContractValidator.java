@@ -184,8 +184,8 @@ public final class TableContractValidator {
      * Candle closed KV (multi-TF aggregator Phase 0, 2026-09-05): PK exactly
      * [instrument_token, tf, window_start], instrument_token routing, exact
      * 15-column v1 schema. Immutable closed history, first-write-wins;
-     * Iceberg offloaded (7d, 5min freshness, auto-compaction). Not wired
-     * into {@code SignalJob#preflightTableContracts} until Phase 4.
+     * Iceberg offloaded (7d, 5min freshness, auto-compaction). Wired into
+     * {@code SignalJob#preflightTableContracts} behind MULTITF_ENABLED.
      */
     public static void validateCandleClosedTable(TableInfo info) {
         List<String> expectedPk = List.of(

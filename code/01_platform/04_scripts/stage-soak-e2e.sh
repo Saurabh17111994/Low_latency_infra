@@ -83,19 +83,12 @@ fi
 echo "SOAK-E2E: loadgen image fresh (stamp ${LIB_LOADGEN_STAMP:0:12})"
 # --- fresh tables ---
 pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/02_raw_table_1.sql" raw || fatal "raw purge failed"
-pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/03_feature_candles_15s.sql" candle || fatal "candle purge failed"
-pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/30_feature_candles_15s_preview.sql" preview || fatal "preview purge failed"
-pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/04_forming_bar.sql" forming || fatal "forming purge failed"
 pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/05_signal_candidates.sql" signals || fatal "signal purge failed"
-pipeline_ensure_tentative_markers_table || fatal "tentative-markers ensure failed"
-# Phase 5 (2026-09-05): when MULTITF_ENABLED=true the job preflights +
-# writes candle_live/candle_closed. PURGE both (drop+recreate, same as the
-# old tables): they are LOG-append tables, so a run that only "ensures"
-# accumulates every prior run's rows and the side-by-side gate (which must
-# compare this run's new-15s rows against this run's old-15s rows) reads
-# stale cross-run rows. Observed 2026-09-05: attempts 2/3/4 data piled up
-# in candle_closed (we=15:30 pre-fix rows from attempt 3 polluting the
-# attempt 4 gate) until a purge was added.
+# Cutover (2026-09-05): the job preflights + writes candle_live/candle_closed.
+# PURGE both (drop+recreate): they are LOG-append tables, so a run that only
+# "ensures" accumulates every prior run's rows. The old-chain tables (03
+# feature_candles_15s, 30 preview, 04 forming_bar, 31 tentative markers) are
+# deleted — the job no longer reads or writes them, so no purge remains.
 if [ "${MULTITF_ENABLED:-false}" = "true" ]; then
   pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" candle_closed \
     || fatal "candle_closed purge failed"
@@ -169,31 +162,32 @@ if [ "${STATE_BACKEND:-rocksdb}" = "rocksdb" ]; then
   echo "SOAK-E2E: G24 OK"
 fi
 TOK12="$(tail -n +2 "$NSE" | head -2 | cut -d, -f4 | paste -sd, -)"
-# Phase 5 (2026-09-05): the side-by-side gate compares a SPREAD token sample
-# (~every 60th token, bounded ~40) — the old table is purged pre-run so all
-# its rows are this run's; a spread sample bounds the verify read while still
-# crossing all 16 Fluss buckets (bucket key = instrument_token hash).
-VERIFY_TOKENS="$(python3 - "$NSE" <<'PYEOF'
-import csv, sys
-with open(sys.argv[1]) as f:
-    toks = [row["Token"].strip() for row in csv.DictReader(f) if row.get("Token")]
-print(",".join(toks[::60][:60]))
-PYEOF
-)"
 JOB_ID="$JOB_ID" DURATION_S="$DURATION_S" INGESTION_JAVA_OUT="$OUT/j1-0/java.out" \
   FLUSS_PROBE_CP="$CP" OUT_DIR="$PHASE_OUT/stages" PROBE_TOKENS="$TOK12" \
 bash "$SCRIPT_DIR/stage-capture.sh" || fatal "stage capture failed"
 echo "SOAK-E2E: capture complete — evidence at $PHASE_OUT"
-# Phase 5 (2026-09-05): side-by-side verify — new 15s closed candles must be
-# bit-identical (minus output_ts/version cols) to the old chain's, the live
-# leg must show sane 1s upsert cadence, and multi-TF signals must appear.
+# Cutover (2026-09-05): host-N7 signal gate. The old chain is deleted, so no
+# side-by-side comparison remains. The run passes its signal leg when this
+# run's rows include host N7 candidates in both the LOG and the current KV
+# table. FlussRuleCounter prints "rule=<id> count=<n>" per rule id.
 if [ "${MULTITF_ENABLED:-false}" = "true" ]; then
-  echo "SOAK-E2E: MULTITF_ENABLED=true — running side-by-side 15s gate"
-  FLUSS_PROBE_CP="$CP" PROBE_TOKENS="$VERIFY_TOKENS" \
-    WINDOW_START_MS=0 WINDOW_END_MS=0 DURATION_S="$DURATION_S" \
-    python3 "$SCRIPT_DIR/multitf_soak_verify.py" \
-    || fatal "multitf side-by-side gate FAILED (see above)"
-  echo "SOAK-E2E: multitf side-by-side gate PASS"
+  echo "SOAK-E2E: MULTITF_ENABLED=true — running host-N7 signal gate"
+  GATE_BIN="$PHASE_OUT/stages/probes"
+  mkdir -p "$GATE_BIN"
+  javac -cp "$CP" -d "$GATE_BIN" "$SCRIPT_DIR/fluss-probes/FlussRuleCounter.java" \
+    > "$PHASE_OUT/stages/javac-FlussRuleCounter.log" 2>&1 \
+    || fatal "host-N7 gate: FlussRuleCounter compile failed"
+  for gate_table in Signal_Candidates Signal_Candidates_current; do
+    gate_out="$(java --add-opens=java.base/java.nio=ALL-UNNAMED -Dlog.dir=/tmp/fluss-probe-logs \
+      -cp "$GATE_BIN:$CP" FlussRuleCounter "$gate_table" "${PROBE_BOOTSTRAP:-localhost:9123}" 2>/dev/null)" \
+      || fatal "host-N7 gate: census of $gate_table failed"
+    echo "$gate_out" > "$PHASE_OUT/stages/n7-gate-$gate_table.txt"
+    gate_n="$(echo "$gate_out" | grep -E '^rule=n7-range-breakout-v1 count=' | cut -d= -f3)"
+    [ -n "$gate_n" ] && [ "$gate_n" -ge 1 ] \
+      || fatal "host-N7 gate: no n7-range-breakout-v1 rows in $gate_table (see stages/n7-gate-$gate_table.txt)"
+    echo "SOAK-E2E: host-N7 gate $gate_table has $gate_n n7 rows"
+  done
+  echo "SOAK-E2E: host-N7 signal gate PASS"
 fi
 # Tick-count losslessness leg (2026-09-04): the per-container emitted-tick
 # counts are THE authoritative feed-side throughput/loss evidence (Flink
