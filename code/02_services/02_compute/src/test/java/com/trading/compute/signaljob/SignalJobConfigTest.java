@@ -6,7 +6,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.trading.common.config.PlatformConfig;
-import com.trading.common.schema.CandlePreviewTableSchema;
 import com.trading.common.schema.CandleTableSchema;
 import java.util.HashMap;
 import java.util.Map;
@@ -729,36 +728,8 @@ class SignalJobConfigTest {
         assertEquals("file:///tmp/savepoints", cfg.savepointDir());
     }
 
-    @Test
-    void previewEnabledDefaultsTrueWith1sIntervalAnd60sTtl() {
-        Map<String, String> env = env();
-        SignalJobConfig cfg = SignalJobConfig.from(env);
-        assertTrue(cfg.previewEnabled(), "preview visibility must default ON");
-        assertEquals(1_000L, cfg.previewIntervalMs(), "preview cadence must default to 1s");
-        assertEquals(60_000L, cfg.previewTtlMs(), "preview TTL must default to 60s");
-        assertEquals("2", cfg.previewSchemaVersion(), "preview schema version must be v2 (last_event_ts)");
-    }
 
-    @Test
-    void honorsPreviewOverrides() {
-        Map<String, String> env = env();
-        env.put("PREVIEW_ENABLED", "false");
-        env.put("PREVIEW_INTERVAL_MS", "500");
-        env.put("PREVIEW_TTL_MS", "30000");
-        SignalJobConfig cfg = SignalJobConfig.from(env);
-        assertFalse(cfg.previewEnabled());
-        assertEquals(500L, cfg.previewIntervalMs());
-        assertEquals(30_000L, cfg.previewTtlMs());
-    }
 
-    @Test
-    void rejectsNonPositivePreviewInterval() {
-        Map<String, String> env = env();
-        env.put("PREVIEW_INTERVAL_MS", "0");
-        IllegalStateException e = assertThrows(IllegalStateException.class,
-                () -> SignalJobConfig.from(env));
-        assertTrue(e.getMessage().contains("PREVIEW_INTERVAL_MS"), e.getMessage());
-    }
 
     @Test
     void writerRetriesDefaultsAndOverrides() {
@@ -782,16 +753,6 @@ class SignalJobConfigTest {
         assertTrue(e2.getMessage().contains("integer"), e2.getMessage());
     }
 
-    @Test
-    void previewTableDefaultsAndOverrides() {
-        // K3 (2026-08-29): PREVIEW_TABLE env, default from CandlePreviewTableSchema.
-        assertEquals(CandlePreviewTableSchema.TABLE,
-                SignalJobConfig.from(env()).previewTable());
-
-        Map<String, String> env = env();
-        env.put("PREVIEW_TABLE", "preview_custom");
-        assertEquals("preview_custom", SignalJobConfig.from(env).previewTable());
-    }
 
     // ── Phase 4 multi-TF config (2026-09-05) ──────────────────────────────
 

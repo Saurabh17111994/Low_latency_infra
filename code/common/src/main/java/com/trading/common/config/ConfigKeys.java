@@ -103,10 +103,6 @@ public final class ConfigKeys {
     public static final String PENDING_MAX_RECORDS = "PENDING_MAX_RECORDS";
     public static final String PENDING_WARNING_PERCENT = "PENDING_WARNING_PERCENT";
     public static final String POSITION_STATE_TABLE = "POSITION_STATE_TABLE";
-    public static final String PREVIEW_ENABLED = "PREVIEW_ENABLED";
-    public static final String PREVIEW_INTERVAL_MS = "PREVIEW_INTERVAL_MS";
-    public static final String PREVIEW_TABLE = "PREVIEW_TABLE";
-    public static final String PREVIEW_TTL_MS = "PREVIEW_TTL_MS";
     public static final String PROFILE = "PROFILE";
     public static final String QUARANTINE_TABLE = "QUARANTINE_TABLE";
     public static final String R2_ENDPOINT = "R2_ENDPOINT";

@@ -1,6 +1,5 @@
 package com.trading.compute.signaljob;
 
-import com.trading.common.schema.CandlePreviewTableSchema;
 import com.trading.common.schema.CandleTableSchema;
 import java.util.Arrays;
 import java.util.List;
@@ -92,33 +91,6 @@ public final class TableContractValidator {
                 "15-column v2 candle", CANDLE_CONTRACT);
         validateRouting(info, CandleTableSchema.BUCKET_KEY, CandleTableSchema.BUCKET_COUNT,
                 CANDLE_CONTRACT);
-    }
-
-    /**
-     * Preview table contract (low-latency candles Phase 1, 2026-08-29):
-     * KV, PK (instrument_token, window_start) — same as the final candle, so
-     * an upsert overwrites the same row each 1s tick; exact 14-column schema
-     * per {@link CandlePreviewTableSchema}; bucket key instrument_token.
-     */
-    public static void validatePreviewTable(TableInfo info) {
-        List<String> expectedPk = CandlePreviewTableSchema.PRIMARY_KEY_COLUMNS;
-        if (!info.hasPrimaryKey()) {
-            throw new ContractViolation(
-                    "KV table " + info.getTablePath() + " must carry primary key exactly "
-                            + expectedPk + " (one row per in-progress window per instrument), "
-                            + "but has NO primary key (" + CANDLE_CONTRACT + ")");
-        }
-        if (!expectedPk.equals(info.getPrimaryKeys())) {
-            throw new ContractViolation(
-                    "KV table " + info.getTablePath() + " must carry primary key exactly "
-                            + expectedPk + " (one row per in-progress window per instrument), got "
-                            + info.getPrimaryKeys() + " (" + CANDLE_CONTRACT + ")");
-        }
-        validateSchema(info, CandlePreviewTableSchema.COLUMNS,
-                CandlePreviewTableSchema.COLUMN_TYPE_ROOTS,
-                "15-column v2 candle preview (last_event_ts for e2e latency)", CANDLE_CONTRACT);
-        validateRouting(info, CandlePreviewTableSchema.BUCKET_KEY,
-                CandlePreviewTableSchema.BUCKET_COUNT, CANDLE_CONTRACT);
     }
 
     /** Signal LOG: append-only, no primary key, instrument_token routing, exact 22-col schema. */

@@ -67,13 +67,8 @@ class SignalJobOperatorUidTest {
         // request no managed window state). Restoring an old checkpoint
         // fails closed — clean start required (plan §2).
         EXPECTED_OPERATORS.put("candle-15s-v2", "candle-15s");
-        // NOTE (review 2026-09-03, updated 2026-09-05): NO preview entries here
-        // on purpose. env() pins PREVIEW_ENABLED=false so the preview branch is
-        // excluded from this contract deterministically (the dev cluster has the
-        // preview table, so a default-enabled preview would join the graph and
-        // make the pinned set environment-dependent). The preview uids
-        // (candle-preview-15s-v2 / feature-candles-15s-preview-sink) are covered
-        // by HeapPreviewFunctionTest + the proof-run topology dump instead.
+        // NOTE (cutover 2026-09-05, batch 3): the 1s preview path is retired —
+        // candle_live serves evolving candles — so no preview uids exist.
         EXPECTED_OPERATORS.put("candle-late-drop-counter", "candle-late-drop-counter");
         // Streaming-3000 T5 (decision 25): KV first-write-wins guard between
         // the window operator and the candle sink.
@@ -365,11 +360,6 @@ class SignalJobOperatorUidTest {
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");
         env.put("MAX_CONCURRENT_CHECKPOINTS", "1");
         env.put("ALLOW_FULL_REPLAY", "true");
-        // The preview branch is a separately-pinned feature (HeapPreview
-        // FunctionTest + proof-run dump); excluding it keeps this contract's
-        // baseline graph deterministic regardless of whether the dev cluster
-        // happens to have the preview table (see NOTE on EXPECTED_OPERATORS).
-        env.put("PREVIEW_ENABLED", "false");
         return env;
     }
 }

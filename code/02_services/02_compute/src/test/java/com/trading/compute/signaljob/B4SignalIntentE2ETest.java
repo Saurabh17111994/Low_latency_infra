@@ -7,6 +7,9 @@ import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -19,6 +22,8 @@ import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
+import org.apache.fluss.client.lookup.LookupResult;
+import org.apache.fluss.client.lookup.Lookuper;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.scanner.log.LogScanner;
 import org.apache.fluss.client.table.scanner.log.ScanRecords;
@@ -60,6 +65,10 @@ import org.slf4j.LoggerFactory;
 class B4SignalIntentE2ETest {
     private static final Logger LOG = LoggerFactory.getLogger(B4SignalIntentE2ETest.class);
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
+    // IST day bucket: matches the ingestion contract (event_day from
+    // event_time, Asia/Kolkata) and the auto-partition naming rule.
+    private static final DateTimeFormatter EVENT_DAY_FMT =
+            DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneId.of("Asia/Kolkata"));
 
     @Test
     @DisplayName("B4-SIGNAL-INTENT-001: enabled -> Signal_Candidates + immutable Execution_Intent")
@@ -88,7 +97,6 @@ class B4SignalIntentE2ETest {
         conf.setString("bootstrap.servers", bootstrap);
         try (Connection conn = ConnectionFactory.createConnection(conf)) {
             requirePlatformTables(conn);          // preflight parity: what the job will validate
-            writeRisingRawSeries(conn, token, symbol);
 
             Map<String, String> env = jobEnv(bootstrap);
             if (intentsEnabled) {
@@ -114,10 +122,53 @@ class B4SignalIntentE2ETest {
                             }
                         },
                         "SignalJob reaches RUNNING", 90);
+                // Write AFTER the job runs: default startup is LATEST, so the
+                // source snapshots the log end at startup and only rows
+                // appended after that flow through. (ALLOW_FULL_REPLAY would
+                // force a full-log drain first — tens of millions of rows on
+                // a lived-in cluster — and the tail never arrives in budget.
+                // Replay semantics belong to RawSourceOffsetSelectionTest.)
+                // Two-burst write (the detector only evaluates forming bars
+                // against WARM rings: one-shot bursts race closed candles
+                // and never fire). Burst 1 closes 7 candles; burst 2 fires.
+                int[] price = {1_000};
+                // One base for both bursts: a 15 s boundary between them
+                // must not shift burst 2 into unintended windows.
+                long base = (System.currentTimeMillis() / 15_000L) * 15_000L - 90_000L;
+                writeBurst1(conn, token, symbol, price, base);
+                awaitCandles(conn, token, 7);
+                writeBurst2(conn, token, symbol, price, base);
                 int candidates = 0;
                 int intents = 0;
                 List<GenericRow> intentRows = new ArrayList<>();
-                for (int i = 0; i < 60; i++) {
+                // Phase 1 — smoke (90 s): the crafted series must yield at
+                // least one candidate fast. A failure here names the dead
+                // leg instead of burning the full soak budget: candles == 0
+                // means the rows never reached the candle leg (partition,
+                // offsets, validation); candles > 0 with no candidates
+                // means the detector/canonical leg dropped them.
+                int candles = 0;
+                boolean smoked = false;
+                for (int i = 0; i < 30; i++) {
+                    Thread.sleep(3000);
+                    candidates = countLogRows(conn, token, "Signal_Candidates",
+                            SignalCandidatesTableColumns.INSTRUMENT_TOKEN,
+                            SignalCandidatesTableColumns.DETECTION_TS, runStart);
+                    if (i % 5 == 4) {
+                        candles = countCandles(conn, token);
+                    }
+                    LOG.info("b4 smoke {}: candidates={} candles={}", i, candidates, candles);
+                    if (candidates > 0) {
+                        smoked = true;
+                        break;
+                    }
+                }
+                assertTrue(smoked,
+                        "smoke: no Signal_Candidates row for the crafted series in 90 s"
+                                + " (candles=" + candles + " for token=" + token + ")");
+                // Phase 2 — soak (90 s): intents + immutability on the rest
+                // of the budget. Only reached when the smoke passed.
+                for (int i = 0; i < 30; i++) {
                     Thread.sleep(3000);
                     candidates = countLogRows(conn, token, "Signal_Candidates",
                             SignalCandidatesTableColumns.INSTRUMENT_TOKEN,
@@ -125,7 +176,7 @@ class B4SignalIntentE2ETest {
                     intents = countLogRows(conn, token, "Execution_Intent",
                             ExecutionIntentTableColumns.INSTRUMENT_TOKEN,
                             ExecutionIntentTableColumns.CREATED_TS, runStart);
-                    LOG.info("b4 sample {}: candidates={} intents={}", i, candidates, intents);
+                    LOG.info("b4 soak {}: candidates={} intents={}", i, candidates, intents);
                     if (intentsEnabled && intents > 0) {
                         intentRows = readIntentRows(conn, token, runStart);
                     }
@@ -166,25 +217,67 @@ class B4SignalIntentE2ETest {
         }
     }
 
-    // ---- crafted raw stream: 7 rising 15 s windows + a flush tick ----
-    private static void writeRisingRawSeries(Connection conn, long token, String symbol)
+    // ---- crafted raw stream (two bursts): 7 rising 15 s windows + a flush tick ----
+    // Burst 1: windows 0..6 in full plus the first two ticks of window 7.
+    // The window-7 ticks push the watermark (maxTs-5000) past the end of
+    // window 6, so all seven closed candles form and the detector's rings
+    // fill. Prices rise monotonically throughout (shared price box).
+    private static void writeBurst1(Connection conn, long token, String symbol, int[] price, long base)
             throws Exception {
         Table raw = conn.getTable(TablePath.of("default", "raw_table_1"));
-        long base = (System.currentTimeMillis() / 15_000L) * 15_000L - 90_000L;
-        int price = 1_000;
         AppendWriter w = raw.newAppend().createWriter();
         for (int win = 0; win < 7; win++) {
             for (int t = 0; t < 3; t++) {
                 long eventTime = base + win * 15_000L + 4_000L + t * 2_000L;
-                price += 10 + t;
-                w.append(rawRow(token, symbol, eventTime, price))
+                price[0] += 10 + t;
+                w.append(rawRow(token, symbol, eventTime, price[0]))
                         .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
             }
         }
-        // Flush tick 10 s into window 7: the watermark (maxTs-5000) then
-        // passes the end of window 6, closing the candles the detector
-        // consumes. The flush tick's own window 7 candle also forms.
-        w.append(rawRow(token, symbol, base + 7 * 15_000L + 10_000L, price + 1))
+        for (int t = 0; t < 2; t++) {
+            long eventTime = base + 7 * 15_000L + 4_000L + t * 2_000L;
+            price[0] += 10 + t;
+            w.append(rawRow(token, symbol, eventTime, price[0]))
+                    .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        }
+        w.flush();
+    }
+
+    // Block until the token owns `want` closed candles (proves the detector's
+    // rings can only be warm: every closed candle whose window ended before
+    // the current forming window is admitted, and 7 closed candles always
+    // leave >= 5 in the lookback-5 rings). Fails fast instead of letting the
+    // smoke loop burn its budget on a burst the detector cannot evaluate.
+    private static void awaitCandles(Connection conn, long token, int want) throws Exception {
+        long deadline = System.currentTimeMillis() + 60_000L;
+        int n = 0;
+        while (System.currentTimeMillis() < deadline) {
+            n = countCandles(conn, token);
+            if (n >= want) {
+                LOG.info("b4 burst1: candles={} (want {})", n, want);
+                return;
+            }
+            Thread.sleep(3000);
+        }
+        fail("burst 1 never closed its candles (candles=" + n + " want=" + want
+                + " token=" + token + "): rows are not reaching the candle leg");
+    }
+
+    // Burst 2: final tick of window 7 plus a flush tick 10 s into window 8,
+    // still rising. The detector's rings are warm by construction now, so
+    // these forming bars evaluate the breakout rule and fire deterministi-
+    // cally (close exceeds every ring high on a monotonic rise).
+    private static void writeBurst2(Connection conn, long token, String symbol, int[] price, long base)
+            throws Exception {
+        Table raw = conn.getTable(TablePath.of("default", "raw_table_1"));
+        AppendWriter w = raw.newAppend().createWriter();
+        long eventTime = base + 7 * 15_000L + 4_000L + 2 * 2_000L;
+        price[0] += 12;
+        w.append(rawRow(token, symbol, eventTime, price[0]))
+                .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        // Flush tick 10 s into window 8: closes window 7 behind it.
+        price[0] += 1;
+        w.append(rawRow(token, symbol, base + 8 * 15_000L + 10_000L, price[0]))
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
         w.flush();
     }
@@ -192,10 +285,23 @@ class B4SignalIntentE2ETest {
     private static GenericRow rawRow(long token, String symbol, long eventTime, int price) {
         String fingerprint = "fp-" + token + "-" + eventTime;
         return GenericRow.of(
-                bs(fingerprint), bs("1"), bs("e2e"), 1L, token, bs("NSE"), bs(symbol),
-                eventTime, eventTime, eventTime, bs("T"), (long) price, 1L,
-                new byte[] {1, 2}, bs("h-" + fingerprint), bs("1"), bs("v1"),
-                bs("VALID"), bs("FRESH"), bs("2"));
+                // 21 columns, DDL order (RawTableColumns indices):
+                // event_day, event_fingerprint, fingerprint_version, connection_id,
+                // connection_epoch, instrument_token, exchange, symbol, event_time,
+                // ingest_ts, ack_ts, tick_type, last_price_paise, last_qty,
+                // raw_payload, payload_hash, decoder_version, protocol_version,
+                // validity_state, validity_reason, schema_version.
+                // event_day MUST be the IST yyyyMMdd of event_time: raw_table_1
+                // is auto-partitioned by event_day and a running source only
+                // tails partitions it discovered at startup. A stale literal
+                // (was "20260901") lands rows in an old partition the job
+                // never reads, so no candle ever forms (observed 2026-09-05:
+                // B4 symbols absent from the entire job output).
+                bs(EVENT_DAY_FMT.format(Instant.ofEpochMilli(eventTime))),
+                bs(fingerprint), bs("v2"), bs("e2e"), 1L, token,
+                bs("NSE"), bs(symbol), eventTime, eventTime, eventTime, bs("T"),
+                (long) price, 1L, new byte[] {1, 2}, bs("h-" + fingerprint),
+                bs("1"), bs("v1"), bs("VALID"), bs("FRESH"), bs("3"));
     }
 
     // ---- fluss reads ----
@@ -210,6 +316,27 @@ class B4SignalIntentE2ETest {
             }
         });
         return n[0];
+    }
+
+    // Smoke milestone: closed candles for the token (KV prefix lookup —
+    // feature_candles_15s PK starts with instrument_token). One RPC, no
+    // full-table scan, so the smoke loop can afford it every 5th sample.
+    private static int countCandles(Connection conn, long token) throws Exception {
+        Table candles = conn.getTable(TablePath.of("default", "feature_candles_15s"));
+        Lookuper lookuper =
+                candles.newLookup().lookupBy("instrument_token").createLookuper();
+        LookupResult res = lookuper.lookup(GenericRow.of(token))
+                .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        if (res == null || res.getRowList() == null) {
+            return 0;
+        }
+        int n = 0;
+        for (Object row : res.getRowList()) {
+            if (row != null) {
+                n++;
+            }
+        }
+        return n;
     }
 
     private static List<GenericRow> readIntentRows(Connection conn, long token, long minTs)
@@ -296,7 +423,8 @@ class B4SignalIntentE2ETest {
         e.put("CHECKPOINT_INTERVAL_MS", "10000");
         e.put("CHECKPOINT_TIMEOUT_MS", "30000");
         e.put("MAX_CONCURRENT_CHECKPOINTS", "1");
-        e.put("ALLOW_FULL_REPLAY", "true");
+        // No ALLOW_FULL_REPLAY: default LATEST startup skips the live LOG
+        // backlog (see run: the series is written after the job is RUNNING).
         e.put("CHECKPOINT_DIR",
                 "file:///tmp/b4-signal-intent-e2e-checkpoints-" + System.nanoTime());
         for (String k : new String[] {"FORMING_RULE_ID", "FORMING_BAR_TABLE",

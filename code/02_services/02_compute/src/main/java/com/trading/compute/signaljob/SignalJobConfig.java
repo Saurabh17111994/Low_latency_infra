@@ -1,7 +1,6 @@
 package com.trading.compute.signaljob;
 
 import com.trading.common.config.PlatformConfig;
-import com.trading.common.schema.CandlePreviewTableSchema;
 import com.trading.common.schema.CandleTableSchema;
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -59,7 +58,6 @@ public record SignalJobConfig(
         String database,
         String rawTable,
         String candleTable,
-        String previewTable,
         String quarantineTable,
         String rawSchemaVersion,
         String algorithmVersion,
@@ -84,9 +82,6 @@ public record SignalJobConfig(
         long signalQuantity,
         String formingRuleId,
         int formingLookbackCandles,
-        boolean previewEnabled,
-        long previewIntervalMs,
-        long previewTtlMs,
         String formingBarTable,
         long formingBarWriteBatchMs,
         String positionStateTable,
@@ -144,7 +139,6 @@ public record SignalJobConfig(
             throw new IllegalStateException("Config CONFIGURATION_VERSION must be explicit when "
                     + "EXECUTION_INTENT_ENABLED=true — no implicit execution contract version");
         }
-        boolean previewEnabled = booleanValue(env, "PREVIEW_ENABLED", true);
         boolean multiTfEnabled = booleanValue(env, "MULTITF_ENABLED", false);
         String n7RuleId = env.getOrDefault("N7_RULE_ID",
                 SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID);
@@ -184,7 +178,6 @@ public record SignalJobConfig(
                 env.getOrDefault("FLUSS_DATABASE", "default"),
                 env.getOrDefault("RAW_TABLE", "raw_table_1"),
                 env.getOrDefault("CANDLE_TABLE", "feature_candles_15s"),
-                previewTable(env),
                 env.getOrDefault("QUARANTINE_TABLE", "ingestion_quarantine"),
                 env.getOrDefault("RAW_SCHEMA_VERSION", PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION),
                 requireCanonicalVersion(env, "ALGORITHM_VERSION",
@@ -222,9 +215,6 @@ public record SignalJobConfig(
                 env.getOrDefault("FORMING_RULE_ID",
                         SignalCandidatesTableColumns.CANONICAL_FORMING_RULE_ID),
                 formingLookbackCandles(env),
-                previewEnabled,
-                positiveLong(env, "PREVIEW_INTERVAL_MS", 1_000L),
-                positiveLong(env, "PREVIEW_TTL_MS", 60_000L),
                 env.getOrDefault("FORMING_BAR_TABLE", "forming_bar"),
                 positiveLong(env, "FORMING_BAR_WRITE_BATCH_MS", 250L),
                 env.getOrDefault("POSITION_STATE_TABLE", "Position_State"),
@@ -291,26 +281,6 @@ public record SignalJobConfig(
     @Override
     public StartupMode startupMode() {
         return startupMode;
-    }
-
-    /** Preview visibility enabled (low-latency candles Phase 1). */
-    public boolean previewEnabled() {
-        return previewEnabled;
-    }
-
-    /** Preview emission cadence (default 1s). */
-    public long previewIntervalMs() {
-        return previewIntervalMs;
-    }
-
-    /** Preview row TTL in the KV table (default 60s — auto-expiry). */
-    public long previewTtlMs() {
-        return previewTtlMs;
-    }
-
-    /** Preview table schema version (pinned from the shared contract). */
-    public String previewSchemaVersion() {
-        return CandlePreviewTableSchema.ROW_SCHEMA_VERSION;
     }
 
     /** Multi-timeframe aggregator enabled (Phase 4, default false). */
@@ -973,19 +943,6 @@ public record SignalJobConfig(
                     + v + " (production pins " + PlatformConfig.CANDLE_WINDOW_MS + ")");
         }
         return v;
-    }
-
-    /**
-     * Candle-preview table (K3, 2026-08-29). Default
-     * {@link CandlePreviewTableSchema#TABLE}; an override must be a
-     * non-blank identifier.
-     */
-    private static String previewTable(Map<String, String> env) {
-        String v = env.get("PREVIEW_TABLE");
-        if (v == null || v.isBlank()) {
-            return CandlePreviewTableSchema.TABLE;
-        }
-        return v.trim();
     }
 
     /**
