@@ -234,14 +234,15 @@ def main() -> int:
     # Gate 3: signal rows (count + any multi-TF rule id present).
     signal_rows = read_table(SIGNAL_TABLE, cp, tokens_csv, None, None)
     signal_count = len(signal_rows)
-    # Multi-TF signals are EXACTLY rule breakout-15-forming-trend
-    # (MultiTimeframeSignalProducer.RULE_ID). The old chain writes its own
-    # breakout-* rows (breakout-20-bullish-trend, breakout-5-forming-bar)
-    # into the SAME shared Signal_Candidates LOG — a substring "breakout"
-    # match conflates the two chains and the gate then blames the multi-TF
-    # leg for the old chain's (warm-up-free, expected) fires. Observed
-    # 2026-09-05: 4,440 old-chain rows misread as premature multi-TF fire.
-    MULTITF_RULE_ID = "breakout-15-forming-trend"
+    # Multi-TF signals are EXACTLY rule n7-range-breakout-v1
+    # (N7SignalFunction via config N7_RULE_ID default). The old chain writes
+    # its own breakout-* rows (breakout-20-bullish-trend,
+    # breakout-5-forming-bar) into the SAME shared Signal_Candidates LOG — a
+    # substring "breakout" match conflates the two chains and the gate then
+    # blames the multi-TF leg for the old chain's (warm-up-free, expected)
+    # fires. Observed 2026-09-05: 4,440 old-chain rows misread as premature
+    # multi-TF fire. N7 superseded the producer placeholder on 2026-09-05.
+    MULTITF_RULE_ID = "n7-range-breakout-v1"
     multitf_signals = [r for r in signal_rows
                        if str(r.get("rule_id", "")) == MULTITF_RULE_ID]
 
@@ -281,16 +282,17 @@ def main() -> int:
               f"upserts — the 1s overwrite must not append)", file=sys.stderr)
         ok = False
     # Gate 3: signals — warm-up aware (design §G + line 1165 warm-up table:
-    # the demo multi-TF rule needs 15 closed 15s candles (225s) before its
-    # ring is warm; a soak shorter than that MUST emit 0 signals (FAIL if
-    # early fire), and only a soak >= warm-up may demand signals. 180s =
-    # 12 candles, so the standard soak proves "no premature fire", not
-    # "signals fire". Forcing signals in 180s would mean weakening warm-up.
+    # N7 needs 7 closed candles per timeframe (7x15s = 105s at the 15s TF)
+    # before the first ring is warm; a soak shorter than that MUST emit 0
+    # signals (FAIL if early fire), and only a soak >= warm-up may demand
+    # signals. 180s = 12 candles, so the standard soak proves "no premature
+    # fire", not "signals fire". Forcing signals in 180s would mean weakening
+    # warm-up.
     try:
         duration_s = int(os.environ.get("DURATION_S", "") or 0)
     except ValueError:
         duration_s = 0
-    warmup_s = 15 * 15  # WARMUP_CLOSED (15) x 15s window (MultiTimeframeClosedRing.CAPACITY)
+    warmup_s = 7 * 15  # N7 RING_CAPACITY (7) x 15s window
     if duration_s < warmup_s:
         print(f"  signal leg: DURATION_S={duration_s}s < warm-up {warmup_s}s "
               f"(15x15s) — expecting 0 premature multi-TF signals")

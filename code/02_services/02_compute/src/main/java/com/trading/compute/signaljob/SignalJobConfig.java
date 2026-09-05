@@ -121,6 +121,7 @@ public record SignalJobConfig(
         String executionProductType,
         String executionTimeInForce,
         boolean executionIntentEnabled,
+        String n7RuleId,
         boolean multiTfEnabled,
         long liveSnapshotIntervalMs,
         boolean multiTfSessionBypass,
@@ -152,6 +153,8 @@ public record SignalJobConfig(
                     + "PREVIEW_ENABLED=true — the early-signal path consumes preview rows");
         }
         boolean multiTfEnabled = booleanValue(env, "MULTITF_ENABLED", false);
+        String n7RuleId = env.getOrDefault("N7_RULE_ID",
+                SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID);
         long liveSnapshotIntervalMs = positiveLong(env, "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS", 1_000L);
         // Phase 5 soak mode A (2026-09-05): lets the multi-TF aggregator run
         // against the 15s fake-broker feed OUTSIDE market hours (weekend /
@@ -160,11 +163,14 @@ public record SignalJobConfig(
         // the dedicated soak run; it does not touch the old 15s path.
         boolean multiTfSessionBypass = booleanValue(env, "MULTITF_SESSION_BYPASS", false);
         // Candle-phase soak switch (2026-09-05): when false the multi-TF
-        // aggregator skips the per-tick SIGNAL_TAG snapshot build (signal-job
-        // work, unused while the focus is ticks -> candles). Default true —
-        // production behavior unchanged; the candle soak sets it false.
+        // aggregator skips the per-tick SIGNAL_TAG snapshot build. The
+        // snapshot fed the retired MultiTimeframeSignalProducer, which N7
+        // superseded on 2026-09-05 — no job branch consumes SIGNAL_TAG now,
+        // so default false (default-on would deep-copy 6 forming + 6 closed
+        // rings on every tick into the void). The aggregator still supports
+        // the side-output for direct-construction tests and a future consumer.
         boolean multiTfSignalContextEnabled =
-                booleanValue(env, "MULTITF_SIGNAL_CONTEXT_ENABLED", true);
+                booleanValue(env, "MULTITF_SIGNAL_CONTEXT_ENABLED", false);
         String candleLiveTable = stringEnv(env, "CANDLE_LIVE_TABLE", "candle_live");
         String candleClosedTable = stringEnv(env, "CANDLE_CLOSED_TABLE", "candle_closed");
         return new SignalJobConfig(
@@ -255,6 +261,7 @@ public record SignalJobConfig(
                 executionProductType(env, executionIntentEnabled),
                 executionTimeInForce(env, executionIntentEnabled),
                 executionIntentEnabled,
+                n7RuleId,
                 multiTfEnabled,
                 liveSnapshotIntervalMs,
                 multiTfSessionBypass,
@@ -331,6 +338,11 @@ public record SignalJobConfig(
     /** Multi-timeframe aggregator enabled (Phase 4, default false). */
     public boolean multiTfEnabled() {
         return multiTfEnabled;
+    }
+
+    /** N7 range-breakout rule id (2026-09-05, default n7-range-breakout-v1). */
+    public String n7RuleId() {
+        return n7RuleId;
     }
 
     /** Live snapshot interval for the multi-TF aggregator (default 1000ms). */

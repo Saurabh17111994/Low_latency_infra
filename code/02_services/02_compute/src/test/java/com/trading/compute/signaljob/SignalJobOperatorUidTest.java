@@ -108,7 +108,11 @@ class SignalJobOperatorUidTest {
         EXPECTED_MULTITF_OPERATORS.put("candle-live-sink", "candle-live-sink");
         EXPECTED_MULTITF_OPERATORS.put("candle-closed-first-write-wins", "candle-closed-first-write-wins");
         EXPECTED_MULTITF_OPERATORS.put("candle-closed-sink", "candle-closed-sink");
-        EXPECTED_MULTITF_OPERATORS.put("multi-tf-signal-v1", "multi-tf-signal");
+        // N7 range-breakout (2026-09-05, n7-signal-design.md): supersedes the
+        // retired MultiTimeframeSignalProducer placeholder (uid
+        // multi-tf-signal-v1, removed). New uid so a checkpoint carrying the
+        // producer's MapState fails closed instead of attaching to N7.
+        EXPECTED_MULTITF_OPERATORS.put("n7-signal-v1", "n7-signal");
         EXPECTED_MULTITF_OPERATORS.put("multitf-signal-candidates-sink", "multitf-signal-candidates-sink");
         EXPECTED_MULTITF_OPERATORS.put("multitf-signal-candidates-current-sink", "multitf-signal-candidates-current-sink");
         // Note: canonical-signal-filter-multitf (the filter before the KV sink) is

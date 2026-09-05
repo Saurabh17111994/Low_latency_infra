@@ -843,6 +843,17 @@ class SignalJobConfigTest {
     }
 
     @Test
+    void n7RuleIdDefaultsToCanonicalN7Rule() {
+        assertEquals(SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID,
+                SignalJobConfig.from(env()).n7RuleId(),
+                "N7_RULE_ID must default to the pinned canonical N7 rule");
+
+        Map<String, String> env = env();
+        env.put("N7_RULE_ID", "n7-test-v2");
+        assertEquals("n7-test-v2", SignalJobConfig.from(env).n7RuleId());
+    }
+
+    @Test
     void honorsMultiTfEnabledTrue() {
         Map<String, String> env = env();
         env.put("MULTITF_ENABLED", "true");
@@ -950,10 +961,11 @@ class SignalJobConfigTest {
     }
 
     @Test
-    void multiTfSignalContextDefaultsToEnabled() {
+    void multiTfSignalContextDefaultsToDisabled() {
         SignalJobConfig cfg = SignalJobConfig.from(env());
-        assertTrue(cfg.multiTfSignalContextEnabled(),
-                "MULTITF_SIGNAL_CONTEXT_ENABLED defaults to true (production unchanged)");
+        assertFalse(cfg.multiTfSignalContextEnabled(),
+                "MULTITF_SIGNAL_CONTEXT_ENABLED defaults to false since N7 superseded "
+                        + "the producer (no job branch consumes SIGNAL_TAG)");
     }
 
     @Test

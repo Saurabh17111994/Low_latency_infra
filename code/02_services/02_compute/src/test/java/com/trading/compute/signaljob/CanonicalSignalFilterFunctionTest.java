@@ -93,6 +93,17 @@ class CanonicalSignalFilterFunctionTest {
         assertEquals(0L, filter.filteredCountForTest());
     }
 
+    @Test
+    @DisplayName("the N7 canonical rule id passes (2026-09-05 dual-sink admission)")
+    void n7RuleIdPasses() throws Exception {
+        GenericRowData row = canonicalRow();
+        row.setField(SignalCandidatesTableColumns.RULE_ID,
+                StringData.fromString(SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID));
+        process(row);
+        assertEquals(1, harness.getOutput().size(), "N7 rule id must pass");
+        assertEquals(0L, filter.filteredCountForTest());
+    }
+
     private void process(GenericRowData row) throws Exception {
         harness.processElement(new StreamRecord<>(row, 1_700_000_000_000L));
     }

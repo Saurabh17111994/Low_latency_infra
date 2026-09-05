@@ -54,6 +54,10 @@ public final class SignalCandidatesTableColumns {
      *  that failed at window end is CANCEL-led (auditable, never silent). */
     public static final String ACTION_CANCEL = "CANCEL";
     public static final String SIDE_BUY = "BUY";
+    /** Short-entry side (N7 range-breakout, 2026-09-05): a close below the
+     *  setup low emits a SELL entry candidate. The MVP 20-candle rule was
+     *  long-only; the DDL column is a free string so no contract changes. */
+    public static final String SIDE_SELL = "SELL";
     public static final String ORDER_TYPE_MARKET = "MARKET";
     public static final String VALIDITY_REASON_VALID = "VALID";
     /** Early-signal lifecycle reasons (Phase 2, 2026-08-29). */
@@ -85,6 +89,15 @@ public final class SignalCandidatesTableColumns {
      * identity — the real strategy replaces it without pipeline changes.
      */
     public static final String CANONICAL_FORMING_RULE_ID = "breakout-5-forming-bar";
+
+    /**
+     * Third pinned canonical rule id (N7 range-contraction entry, 2026-09-05):
+     * the N7 operator's rule. The KV current-state filter admits this id too
+     * (design {@code docs/plans/2026-09-05-n7-signal-design.md}) so N7
+     * candidates reach the KV current-state projection like the forming-bar
+     * rule's. Same canonical strategy identity; the LOG keeps every signal.
+     */
+    public static final String CANONICAL_N7_RULE_ID = "n7-range-breakout-v1";
 
     /**
      * Fluss {@code DataTypeRoot} name per column, DDL index order (frozen

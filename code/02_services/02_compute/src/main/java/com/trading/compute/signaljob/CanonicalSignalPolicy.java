@@ -70,6 +70,28 @@ public final class CanonicalSignalPolicy {
             String expectedStrategyVersion,
             String expectedRuleId,
             String alternateRuleId) {
+        return isCanonical(schemaVersion, strategyId, strategyVersion, ruleId,
+                expectedSchemaVersion, expectedStrategyId, expectedStrategyVersion,
+                expectedRuleId, alternateRuleId, null);
+    }
+
+    /**
+     * Three-rule form (N7, 2026-09-05): like the two-rule form but also
+     * admits a second alternate rule id. The N7 canonical rule
+     * ({@link SignalCandidatesTableColumns#CANONICAL_N7_RULE_ID}) joins the
+     * forming-bar rule as a second alternate of the same canonical strategy.
+     */
+    public static boolean isCanonical(
+            String schemaVersion,
+            String strategyId,
+            String strategyVersion,
+            String ruleId,
+            String expectedSchemaVersion,
+            String expectedStrategyId,
+            String expectedStrategyVersion,
+            String expectedRuleId,
+            String alternateRuleId,
+            String alternateRuleId2) {
         boolean identityMatch = expectedSchemaVersion != null
                 && expectedSchemaVersion.equals(schemaVersion)
                 && expectedStrategyId != null
@@ -80,6 +102,7 @@ public final class CanonicalSignalPolicy {
             return false;
         }
         return (expectedRuleId != null && expectedRuleId.equals(ruleId))
-                || (alternateRuleId != null && alternateRuleId.equals(ruleId));
+                || (alternateRuleId != null && alternateRuleId.equals(ruleId))
+                || (alternateRuleId2 != null && alternateRuleId2.equals(ruleId));
     }
 }

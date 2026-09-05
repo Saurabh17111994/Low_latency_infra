@@ -251,8 +251,6 @@ public final class SignalJob {
         // — checkpoint-restore rebuilds from live ticks, no RocksDB touch.
         SingleOutputStreamOperator<RowData> multiTfClosed = null;
         DataStream<RowData> multiTfLive = null;
-        DataStream<MultiTimeframeSignalContext> multiTfSignalContexts = null;
-        DataStream<RowData> multiTfSignals = null;
         if (config.multiTfEnabled()) {
             SingleOutputStreamOperator<RowData> aggregator = monitored
                     .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
@@ -264,23 +262,31 @@ public final class SignalJob {
                     .uid("multi-tf-aggregator-v1");
             multiTfClosed = aggregator;
             multiTfLive = aggregator.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TAG);
-            multiTfSignalContexts = aggregator.getSideOutput(MultiTimeframeAggregateFunction.SIGNAL_TAG);
 
             // Closed rows: first-write-wins filter + KV sink
             MultiTimeframeSinks.sinkClosed(multiTfClosed, config, config.candleClosedTable());
             // Live rows: KV upsert sink (1s overwrite)
             MultiTimeframeSinks.sinkLive(multiTfLive, config, config.candleLiveTable());
 
-            // Signal contexts -> RowData via MultiTimeframeSignalProducer, then dual-sink
-            // (LOG append + KV current) exactly mirrored from the existing signal path
-            multiTfSignals = multiTfSignalContexts
-                    .keyBy(ctx -> ctx.instrumentToken())
-                    .process(new MultiTimeframeSignalProducer())
+            // N7 range-breakout operator (design 2026-09-05-n7-signal-design.md,
+            // approved 2026-09-05): supersedes the placeholder
+            // MultiTimeframeSignalProducer. Input 1 = live forming candles
+            // (LIVE_TAG side output, 1s cadence), input 2 = completed candles
+            // (main output). Emits Signal_Candidates rows (LOG + KV current,
+            // exactly mirrored from the retired producer's dual-sink).
+            DataStream<RowData> n7Signals = multiTfLive
+                    .connect(multiTfClosed)
+                    .keyBy(
+                            live -> live.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
+                            closed -> closed.getLong(CandleClosedColumns.INSTRUMENT_TOKEN))
+                    .process(new N7SignalFunction(config))
                     .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
-                    .name("multi-tf-signal")
-                    .uid("multi-tf-signal-v1");
+                    .name("n7-signal")
+                    // New uid: the retired producer's managed MapState must
+                    // never attach to this operator (G-CHAIN-3 fail-closed).
+                    .uid("n7-signal-v1");
 
-            multiTfSignals
+            n7Signals
                     .sinkTo(FlussSink.<RowData>builder()
                                     .setBootstrapServers(config.bootstrapServers())
                                     .setDatabase(config.database())
@@ -293,7 +299,7 @@ public final class SignalJob {
                     .name("multitf-signal-candidates-sink")
                     .uid("multitf-signal-candidates-sink");
 
-            multiTfSignals
+            n7Signals
                     .filter(new CanonicalSignalFilterFunction())
                     .name("canonical-signal-filter-multitf")
                     .uid("canonical-signal-filter-multitf")

@@ -58,8 +58,10 @@ public class CanonicalSignalFilterFunction extends RichFilterFunction<RowData> {
                 // Slice 2.2 (Phase C): the forming-bar placeholder rule is
                 // the second pinned canonical rule id — its candidates reach
                 // the KV current-state like candle candidates (REQ-SS-003 +
-                // DEC-035 dual-sink). Everything else stays filtered.
-                SignalCandidatesTableColumns.CANONICAL_FORMING_RULE_ID);
+                // DEC-035 dual-sink). N7 (2026-09-05): the N7 range-breakout
+                // rule is the third admitted id (n7-signal-design.md).
+                SignalCandidatesTableColumns.CANONICAL_FORMING_RULE_ID,
+                SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID);
         if (!canonical) {
             nonCanonical.inc();
             LOG.warn("signal-canonical-filter: dropping non-canonical signal from the KV "
