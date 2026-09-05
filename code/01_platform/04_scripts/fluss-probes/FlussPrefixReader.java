@@ -22,13 +22,16 @@ import java.util.concurrent.TimeUnit;
  * FlussPrefixReader — Phase 5 side-by-side soak reader.
  *
  * Reads every row of a KV table whose bucket key is {@code instrument_token}
- * by prefix lookup (the client's {@code lookupBy("instrument_token")} —
- * see org.apache.fluss.client.table.Table#newLookup docs; the PK columns of
- * the read table must START with instrument_token, which is true for
- * feature_candles_15s (PK token,window_start), candle_closed and candle_live
- * (PK token,tf,window_start)). For a LOG table (no primary key, e.g.
- * Signal_Candidates) a prefix lookup is illegal — the reader instead scans
- * the log from the beginning across every bucket.
+ * by lookup (see org.apache.fluss.client.table.Table#newLookup docs; the PK
+ * columns of the read table must START with instrument_token, which is true
+ * for feature_candles_15s (PK token,window_start), candle_closed and
+ * candle_live (PK token,tf,window_start)). When instrument_token is the WHOLE
+ * primary key (e.g. the single-column Signal_Candidates_current), a prefix
+ * lookup is illegal — the reader falls back to a full PK lookup instead
+ * (fix 2026-09-05: prefix lookup there threw and callers saw a misleading
+ * empty read). For a LOG table (no primary key, e.g. Signal_Candidates) a
+ * lookup is illegal — the reader instead scans the log from the beginning
+ * across every bucket.
  *
  * Emits one JSON object per row (column name -> scalar value), then the
  * sentinel line {@code __END__ <count>}. Column names/types come from the
@@ -59,11 +62,21 @@ public class FlussPrefixReader {
             List<DataType> colTypes = rowType.getFieldTypes();
             int total = 0;
             if (t.getTableInfo().hasPrimaryKey()) {
-                // Lookup by the token prefix only (bucket key =
-                // instrument_token is the first PK column on all three
-                // candle tables).
-                Lookuper prefix =
-                        t.newLookup().lookupBy("instrument_token").createLookuper();
+                List<String> primaryKeys = t.getTableInfo().getPrimaryKeys();
+                // Prefix lookup (lookupBy) is only legal when the lookup
+                // columns are a STRICT SUBSET of the primary key. When
+                // instrument_token is the whole PK (e.g. the single-column
+                // Signal_Candidates_current), lookupBy("instrument_token")
+                // throws "lookup columns equal the physical primary keys" —
+                // and the throw was silently swallowed by callers' 2>/dev/null,
+                // producing a misleading __END__ 0 (observed 2026-09-05:
+                // N7 KV-current probe read 0 while a full bucket scan found
+                // 2433 rows). Use plain PK lookup in that case.
+                boolean fullPkLookup = primaryKeys.size() == 1
+                        && "instrument_token".equals(primaryKeys.get(0));
+                Lookuper prefix = fullPkLookup
+                        ? t.newLookup().createLookuper()
+                        : t.newLookup().lookupBy("instrument_token").createLookuper();
                 for (String tokRaw : toks) {
                     long token = Long.parseLong(tokRaw.trim());
                     LookupResult res = prefix.lookup(
