@@ -53,6 +53,9 @@ class SignalJobOperatorUidTest {
         EXPECTED_OPERATORS.put("raw-table-1", "Source: raw-table-1");
         EXPECTED_OPERATORS.put("raw-validation", "raw-validation");
         EXPECTED_OPERATORS.put("fingerprint-dedup-v2", "fingerprint-dedup");
+        // Per-tick ingest->monitor age observability (2026-09-03, 2aef756):
+        // non-keyed identity map on the deduped stream, no state. Unconditional.
+        EXPECTED_OPERATORS.put("ingest-latency-monitor", "ingest-latency-monitor");
         // G-DEDUP-3 (2026-09-03 redesign): uid bumped so pre-redesign
         // checkpointed MapState can never silently attach to the heap-window
         // operator (which requests no managed state). Restoring an old
@@ -64,13 +67,13 @@ class SignalJobOperatorUidTest {
         // request no managed window state). Restoring an old checkpoint
         // fails closed — clean start required (plan §2).
         EXPECTED_OPERATORS.put("candle-15s-v2", "candle-15s");
-        // NOTE (review 2026-09-03): NO preview entries here on purpose. This
-        // test creates no preview scratch table and preflightTableContracts
-        // fails closed on a missing preview table whenever previews are on —
-        // so the preview branch is absent from the graph this contract
-        // pins (17 operators, unchanged by this redesign). The preview uid
-        // bump (candle-preview-15s-v2) is covered by HeapPreviewFunctionTest
-        // + the proof-run topology dump instead.
+        // NOTE (review 2026-09-03, updated 2026-09-05): NO preview entries here
+        // on purpose. env() pins PREVIEW_ENABLED=false so the preview branch is
+        // excluded from this contract deterministically (the dev cluster has the
+        // preview table, so a default-enabled preview would join the graph and
+        // make the pinned set environment-dependent). The preview uids
+        // (candle-preview-15s-v2 / feature-candles-15s-preview-sink) are covered
+        // by HeapPreviewFunctionTest + the proof-run topology dump instead.
         EXPECTED_OPERATORS.put("candle-late-drop-counter", "candle-late-drop-counter");
         // Streaming-3000 T5 (decision 25): KV first-write-wins guard between
         // the window operator and the candle sink.
@@ -90,6 +93,10 @@ class SignalJobOperatorUidTest {
         EXPECTED_OPERATORS.put("forming-bar-detection-v2", "forming-bar-detection");
         EXPECTED_OPERATORS.put("forming-bar-writer-v2", "forming-bar-writer");
         EXPECTED_OPERATORS.put("forming-bar-sink", "forming-bar-sink");
+        // Position_State KV source for the max-one-active handshake
+        // (2026-08-18, 404945f): unconditional source feeding
+        // active-signal-feedback.
+        EXPECTED_OPERATORS.put("position-state", "Source: position-state");
         EXPECTED_OPERATORS.put("active-signal-feedback", "active-signal-feedback");
         EXPECTED_OPERATORS.put("signal-candidates-sink", "signal-candidates-sink");
         EXPECTED_OPERATORS.put("canonical-signal-filter", "canonical-signal-filter");
@@ -159,10 +166,39 @@ class SignalJobOperatorUidTest {
     @Test
     @DisplayName("multitf branch adds its pinned UIDs when MULTITF_ENABLED=true (Phase 4)")
     void multitfBranchAddsPinnedUidsWhenEnabled() throws Exception {
-        assertTopology(true);
+        assertTopology(true, false);
+    }
+
+    /**
+     * Strategy-host branch UIDs (2026-09-05) — present only when
+     * MULTITF_ENABLED=true (the host reads the multi-TF streams) AND
+     * STRATEGY_HOST_ENABLED=true. Pinned so a rename fails closed; absent
+     * otherwise so the graph stays byte-identical.
+     */
+    private static final Map<String, String> EXPECTED_STRATEGY_HOST_OPERATORS =
+            new LinkedHashMap<>();
+    static {
+        EXPECTED_STRATEGY_HOST_OPERATORS.put("strategy-host-v1", "strategy-host");
+        EXPECTED_STRATEGY_HOST_OPERATORS.put(
+                "strategy-host-candidates-sink", "strategy-host-candidates-sink");
+        EXPECTED_STRATEGY_HOST_OPERATORS.put(
+                "strategy-host-candidates-current-sink", "strategy-host-candidates-current-sink");
+        // Note: canonical-signal-filter-strategy-host (the filter before the
+        // KV sink) follows the multitf precedent — asserted present via
+        // containsKey, not pinned in the required set.
+    }
+
+    @Test
+    @DisplayName("strategy-host branch adds its pinned UIDs when STRATEGY_HOST_ENABLED=true")
+    void strategyHostBranchAddsPinnedUidsWhenEnabled() throws Exception {
+        assertTopology(true, true);
     }
 
     private void assertTopology(boolean multiTfEnabled) throws Exception {
+        assertTopology(multiTfEnabled, false);
+    }
+
+    private void assertTopology(boolean multiTfEnabled, boolean hostEnabled) throws Exception {
         String suffix = String.valueOf(System.nanoTime());
         String candleName = "p6_uid_" + suffix + "_candle";
         String signalName = "p6_uid_" + suffix + "_sig";
@@ -203,6 +239,10 @@ class SignalJobOperatorUidTest {
             cfg.put("CANDLE_LIVE_TABLE", liveName);
             cfg.put("CANDLE_CLOSED_TABLE", closedName);
         }
+        if (hostEnabled) {
+            cfg.put("STRATEGY_HOST_ENABLED", "true");
+            cfg.put("STRATEGIES", StubSmokeStrategy.RULE_ID);
+        }
         StreamExecutionEnvironment senv = SignalJob.buildTopology(SignalJobConfig.from(cfg));
         StreamGraph graph = senv.getStreamGraph();
 
@@ -235,6 +275,10 @@ class SignalJobOperatorUidTest {
             }
             assertEquals(EXPECTED_OPERATORS.size(), uidToName.size(),
                     "MULTITF_ENABLED=false: graph carries operators outside the pinned UID set");
+            for (String hostUid : EXPECTED_STRATEGY_HOST_OPERATORS.keySet()) {
+                assertTrue(!uidToName.containsKey(hostUid),
+                        "MULTITF_ENABLED=false: host UID '" + hostUid + "' must be absent");
+            }
         } else {
             for (Map.Entry<String, String> expected : EXPECTED_MULTITF_OPERATORS.entrySet()) {
                 String actualName = uidToName.get(expected.getKey());
@@ -250,6 +294,28 @@ class SignalJobOperatorUidTest {
             assertTrue(uidToName.containsKey("candle-closed-first-write-wins"),
                     "MULTITF_ENABLED=true: closed first-write-wins must be present");
             int expectedTotal = EXPECTED_OPERATORS.size() + EXPECTED_MULTITF_OPERATORS.size() + 1; // +1 for canonical-signal-filter-multitf
+            if (hostEnabled) {
+                for (Map.Entry<String, String> expected : EXPECTED_STRATEGY_HOST_OPERATORS.entrySet()) {
+                    String actualName = uidToName.get(expected.getKey());
+                    assertNotNull(actualName,
+                            "STRATEGY_HOST_ENABLED=true: host UID '" + expected.getKey() + "' is missing");
+                    assertTrue(actualName.startsWith(expected.getValue()),
+                            "STRATEGY_HOST_ENABLED=true: UID '" + expected.getKey() + "' on unexpected operator '"
+                                    + actualName + "'");
+                }
+                assertTrue(uidToName.containsKey("canonical-signal-filter-strategy-host"),
+                        "STRATEGY_HOST_ENABLED=true: expected host KV filter UID "
+                                + "'canonical-signal-filter-strategy-host'");
+                expectedTotal += EXPECTED_STRATEGY_HOST_OPERATORS.size() + 1; // +1 for the host KV filter
+            } else {
+                for (String hostUid : EXPECTED_STRATEGY_HOST_OPERATORS.keySet()) {
+                    assertTrue(!uidToName.containsKey(hostUid),
+                            "STRATEGY_HOST_ENABLED=false: host UID '" + hostUid + "' must be absent — "
+                                    + "topology must be byte-identical to baseline");
+                }
+                assertTrue(!uidToName.containsKey("canonical-signal-filter-strategy-host"),
+                        "STRATEGY_HOST_ENABLED=false: host KV filter must be absent");
+            }
             assertEquals(expectedTotal, uidToName.size(),
                     "MULTITF_ENABLED=true: graph UID set must be exactly baseline + multi-TF branch");
         }
@@ -304,6 +370,11 @@ class SignalJobOperatorUidTest {
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");
         env.put("MAX_CONCURRENT_CHECKPOINTS", "1");
         env.put("ALLOW_FULL_REPLAY", "true");
+        // The preview branch is a separately-pinned feature (HeapPreview
+        // FunctionTest + proof-run dump); excluding it keeps this contract's
+        // baseline graph deterministic regardless of whether the dev cluster
+        // happens to have the preview table (see NOTE on EXPECTED_OPERATORS).
+        env.put("PREVIEW_ENABLED", "false");
         return env;
     }
 }
