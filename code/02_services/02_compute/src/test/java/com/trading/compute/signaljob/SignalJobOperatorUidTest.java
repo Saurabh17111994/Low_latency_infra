@@ -114,17 +114,9 @@ class SignalJobOperatorUidTest {
         EXPECTED_MULTITF_OPERATORS.put("candle-live-sink", "candle-live-sink");
         EXPECTED_MULTITF_OPERATORS.put("candle-closed-first-write-wins", "candle-closed-first-write-wins");
         EXPECTED_MULTITF_OPERATORS.put("candle-closed-sink", "candle-closed-sink");
-        // N7 range-breakout (2026-09-05, n7-signal-design.md): supersedes the
-        // retired MultiTimeframeSignalProducer placeholder (uid
-        // multi-tf-signal-v1, removed). New uid so a checkpoint carrying the
-        // producer's MapState fails closed instead of attaching to N7.
-        EXPECTED_MULTITF_OPERATORS.put("n7-signal-v1", "n7-signal");
-        EXPECTED_MULTITF_OPERATORS.put("multitf-signal-candidates-sink", "multitf-signal-candidates-sink");
-        EXPECTED_MULTITF_OPERATORS.put("multitf-signal-candidates-current-sink", "multitf-signal-candidates-current-sink");
-        // Note: canonical-signal-filter-multitf (the filter before the KV sink) is
-        // intentionally not listed in the required set — it is an extra operator
-        // that the job creates but the pin contract only covers the sink UIDs.
-        // It is still asserted to be present when enabled via the containsKey check below.
+        // N7 retired (2026-09-05 cutover, batch 2): n7-signal-v1, the
+        // multitf-*-sinks, and canonical-signal-filter-multitf are gone —
+        // N7 runs ONLY as a host strategy with identical candidate ids.
     }
 
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
@@ -241,7 +233,7 @@ class SignalJobOperatorUidTest {
         }
         if (hostEnabled) {
             cfg.put("STRATEGY_HOST_ENABLED", "true");
-            cfg.put("STRATEGIES", StubSmokeStrategy.RULE_ID);
+            cfg.put("STRATEGIES", N7RangeBreakoutStrategy.RULE_ID);
         }
         StreamExecutionEnvironment senv = SignalJob.buildTopology(SignalJobConfig.from(cfg));
         StreamGraph graph = senv.getStreamGraph();
@@ -288,12 +280,15 @@ class SignalJobOperatorUidTest {
                         "MULTITF_ENABLED=true: UID '" + expected.getKey() + "' on unexpected operator '"
                                 + actualName + "'");
             }
-            // Also check the extra filter operator is present
-            assertTrue(uidToName.containsKey("canonical-signal-filter-multitf"),
-                    "MULTITF_ENABLED=true: expected multitf KV filter UID 'canonical-signal-filter-multitf'");
+            assertTrue(!uidToName.containsKey("n7-signal-v1"),
+                    "n7-signal-v1 is retired — N7 runs only on the host");
+            assertTrue(!uidToName.containsKey("multitf-signal-candidates-sink"),
+                    "multitf-*-sinks are retired with n7-signal-v1");
+            assertTrue(!uidToName.containsKey("canonical-signal-filter-multitf"),
+                    "canonical-signal-filter-multitf is retired with n7-signal-v1");
             assertTrue(uidToName.containsKey("candle-closed-first-write-wins"),
                     "MULTITF_ENABLED=true: closed first-write-wins must be present");
-            int expectedTotal = EXPECTED_OPERATORS.size() + EXPECTED_MULTITF_OPERATORS.size() + 1; // +1 for canonical-signal-filter-multitf
+            int expectedTotal = EXPECTED_OPERATORS.size() + EXPECTED_MULTITF_OPERATORS.size();
             if (hostEnabled) {
                 for (Map.Entry<String, String> expected : EXPECTED_STRATEGY_HOST_OPERATORS.entrySet()) {
                     String actualName = uidToName.get(expected.getKey());

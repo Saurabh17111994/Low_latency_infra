@@ -4,7 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.ProcessFunctionTestHarnesses;
@@ -36,8 +38,19 @@ class StrategyHostFunctionTest {
         }
     }
 
+    private static Map<String, String> env() {
+        Map<String, String> env = new HashMap<>();
+        env.put("DEDUP_WINDOW_ENTRIES", "2000");
+        env.put("CANDLE_WINDOW_MS", "15000");
+        env.put("CHECKPOINT_INTERVAL_MS", "10000");
+        env.put("CHECKPOINT_TIMEOUT_MS", "30000");
+        env.put("MAX_CONCURRENT_CHECKPOINTS", "1");
+        env.put("ALLOW_FULL_REPLAY", "true");
+        return env;
+    }
+
     private void open(String... strategyIds) throws Exception {
-        function = new StrategyHostFunction(List.of(strategyIds));
+        function = new StrategyHostFunction(SignalJobConfig.from(env()), List.of(strategyIds));
         harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
                 function,
                 r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
@@ -182,8 +195,8 @@ class StrategyHostFunctionTest {
      * registry.
      */
     static {
-        Strategies.registerForTest(Repeater.RULE_ID, Repeater::new);
-        Strategies.registerForTest(BlankEmitter.RULE_ID, BlankEmitter::new);
+        Strategies.registerForTest(Repeater.RULE_ID, (config, metrics) -> new Repeater());
+        Strategies.registerForTest(BlankEmitter.RULE_ID, (config, metrics) -> new BlankEmitter());
     }
 
     @Test
@@ -237,12 +250,55 @@ class StrategyHostFunctionTest {
     }
 
     @Test
-    @DisplayName("N7 id is not a host strategy — registering it would double-emit")
-    void n7IdNotRegistered() {
-        assertTrue(!Strategies.knownIds().contains(
-                SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID),
-                "n7-range-breakout-v1 must stay on n7-signal-v1, never the host");
-        assertThrows(IllegalStateException.class,
-                () -> Strategies.create(SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID));
+    @DisplayName("N7 id resolves to the ported strategy (batch 2 cutover)")
+    void n7IdRegistered() {
+        assertTrue(Strategies.knownIds().contains(
+                SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID));
+        SignalStrategy n7 = Strategies.create(
+                SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID,
+                SignalJobConfig.from(env()),
+                (name, n) -> {});
+        assertTrue(n7 instanceof N7RangeBreakoutStrategy);
+    }
+
+    @Test
+    @DisplayName("host runs the real N7 end to end: arm on closed, fire on live")
+    void hostRunsN7EndToEnd() throws Exception {
+        open(N7RangeBreakoutStrategy.RULE_ID);
+        long token = 999L;
+        int[] ranges = {7, 6, 5, 4, 3, 2, 1};
+        for (int i = 0; i < 7; i++) {
+            long high = 10_000L + i;
+            long ws = i * 15_000L;
+            GenericRowData c = new GenericRowData(CandleClosedColumns.FIELD_COUNT);
+            c.setField(CandleClosedColumns.INSTRUMENT_TOKEN, token);
+            c.setField(CandleClosedColumns.EXCHANGE, StringData.fromString("NSE"));
+            c.setField(CandleClosedColumns.SYMBOL, StringData.fromString("TEST"));
+            c.setField(CandleClosedColumns.TF,
+                    StringData.fromString(Timeframe.FIFTEEN_S.code()));
+            c.setField(CandleClosedColumns.WINDOW_START, ws);
+            c.setField(CandleClosedColumns.WINDOW_END, ws + 15_000L);
+            c.setField(CandleClosedColumns.OPEN_PAISE, high - ranges[i]);
+            c.setField(CandleClosedColumns.HIGH_PAISE, high);
+            c.setField(CandleClosedColumns.LOW_PAISE, high - ranges[i]);
+            c.setField(CandleClosedColumns.CLOSE_PAISE, high - ranges[i]);
+            c.setField(CandleClosedColumns.VOLUME, 100L);
+            c.setField(CandleClosedColumns.TICK_COUNT, 5);
+            c.setField(CandleClosedColumns.LAST_EVENT_TIME, ws + 1_000L);
+            c.setField(CandleClosedColumns.LAST_EVENT_FINGERPRINT,
+                    StringData.fromString("fp"));
+            c.setField(CandleClosedColumns.SCHEMA_VERSION, StringData.fromString("1"));
+            harness.processElement2(c, ws + 1_000L);
+        }
+        // Setup armed (high 10006): breach it with a live tick.
+        harness.processElement1(live(token, Timeframe.FIFTEEN_S, 0L, 10_007L), 200_000L);
+
+        assertEquals(1, harness.getOutput().size());
+        assertEquals(1L, function.emittedForTest());
+        // Same setup breaching again hits the strategy's fire-once latch
+        // before the host: nothing new forwarded, nothing to dedup.
+        harness.processElement1(live(token, Timeframe.FIFTEEN_S, 0L, 10_008L), 200_001L);
+        assertEquals(1, harness.getOutput().size());
+        assertEquals(0L, function.suppressedForTest());
     }
 }

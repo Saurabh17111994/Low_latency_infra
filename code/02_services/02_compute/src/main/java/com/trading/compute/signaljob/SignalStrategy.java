@@ -16,8 +16,7 @@ import org.apache.flink.util.Collector;
  *
  * <p>One instance serves exactly one instrument: the host creates a fresh
  * instance per {@code (token, ruleId)} on first sight (heap, intentional
- * amnesia — a restore rebuilds from replayed candles, exactly like
- * {@link N7SignalFunction}'s slots). Instances must therefore be cheap to
+ * amnesia — a restore rebuilds from replayed candles, exactly like the retired N7 operator's slots). Instances must therefore be cheap to
  * construct and must keep per-instrument state in plain fields.
  *
  * <p>Emitted rows must be full 22-column {@code Signal_Candidates} rows
@@ -27,6 +26,16 @@ import org.apache.flink.util.Collector;
  * unkeyed rows would defeat exactly-once.
  */
 public interface SignalStrategy extends Serializable {
+
+    /**
+     * Metrics handle the host hands to each strategy instance at
+     * construction. Per-rule scope ({@code strategy/<ruleId>}) — a new
+     * strategy is observable with no dashboard change. Implementations must
+     * tolerate a handle that only counts on the heap (unit harnesses).
+     */
+    interface Metrics extends Serializable {
+        void inc(String name, long n);
+    }
 
     /** Rule id stamped on emitted rows; unique across registered strategies. */
     String ruleId();

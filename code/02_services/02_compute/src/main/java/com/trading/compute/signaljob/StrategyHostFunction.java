@@ -21,7 +21,7 @@ import org.apache.flink.util.Preconditions;
  * and filter wiring never change per strategy.
  *
  * <p><b>Operator shape.</b> {@code KeyedCoProcessFunction} keyed by
- * {@code instrument_token}, mirroring {@link N7SignalFunction}'s inputs:
+ * {@code instrument_token} (same inputs the retired N7 operator used):
  * input 1 = live forming candles ({@link CandleLiveColumns}, 1s cadence),
  * input 2 = completed candles ({@link CandleClosedColumns}). Each input
  * fans out to every registered strategy of that instrument, in registration
@@ -53,6 +53,9 @@ public class StrategyHostFunction
     /** Validated strategy ids, registration order (from config). */
     private final List<String> strategyIds;
 
+    /** Job config handed to strategy constructors (rule identity, quantities). */
+    private final SignalJobConfig config;
+
     /** Per-instrument heap slots — intentional amnesia, not checkpointed. */
     private final Map<Long, HostSlot> slots = new HashMap<>();
 
@@ -64,7 +67,8 @@ public class StrategyHostFunction
     private transient long emittedHeap;
     private transient long suppressedHeap;
 
-    public StrategyHostFunction(List<String> strategyIds) {
+    public StrategyHostFunction(SignalJobConfig config, List<String> strategyIds) {
+        this.config = Preconditions.checkNotNull(config, "config");
         this.strategyIds = List.copyOf(Preconditions.checkNotNull(strategyIds, "strategyIds"));
     }
 
@@ -80,7 +84,7 @@ public class StrategyHostFunction
         emittedByRule = new HashMap<>();
         for (String id : strategyIds) {
             // Resolve eagerly: unknown ids fail here at startup, never mid-stream.
-            Strategies.create(id);
+            Strategies.create(id, config, new HostMetrics(id));
             emittedByRule.put(id, getRuntimeContext().getMetricGroup()
                     .addGroup("strategy", id).counter("emitted"));
         }
@@ -111,7 +115,7 @@ public class StrategyHostFunction
         if (slot == null) {
             slot = new HostSlot();
             for (String id : strategyIds) {
-                slot.strategies.put(id, Strategies.create(id));
+                slot.strategies.put(id, Strategies.create(id, config, new HostMetrics(id)));
             }
             slots.put(key, slot);
             Preconditions.checkState(slots.size() <= GLOBAL_SLOT_CAP,
@@ -124,6 +128,33 @@ public class StrategyHostFunction
     /** One slot per instrument: one strategy instance per registered id. */
     static final class HostSlot {
         final Map<String, SignalStrategy> strategies = new LinkedHashMap<>();
+    }
+
+    /**
+     * Per-rule metrics scope ({@code strategy/<ruleId>}): strategy callbacks
+     * report here; the host's own forward/dedup counters stay separate.
+     * Counters create lazily so strategies that never report cost nothing.
+     */
+    private final class HostMetrics implements SignalStrategy.Metrics {
+        private static final long serialVersionUID = 1L;
+
+        private final String ruleId;
+        private final transient Map<String, Counter> counters = new HashMap<>();
+
+        HostMetrics(String ruleId) {
+            this.ruleId = ruleId;
+        }
+
+        @Override
+        public void inc(String name, long n) {
+            Counter c = counters.get(name);
+            if (c == null) {
+                c = getRuntimeContext().getMetricGroup()
+                        .addGroup("strategy", ruleId).counter(name);
+                counters.put(name, c);
+            }
+            c.inc(n);
+        }
     }
 
     /**

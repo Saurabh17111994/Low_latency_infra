@@ -269,68 +269,31 @@ public final class SignalJob {
             // Live rows: KV upsert sink (1s overwrite)
             MultiTimeframeSinks.sinkLive(multiTfLive, config, config.candleLiveTable());
 
-            // N7 range-breakout operator (design 2026-09-05-n7-signal-design.md,
-            // approved 2026-09-05): supersedes the placeholder
-            // MultiTimeframeSignalProducer. Input 1 = live forming candles
-            // (LIVE_TAG side output, 1s cadence), input 2 = completed candles
-            // (main output). Emits Signal_Candidates rows (LOG + KV current,
-            // exactly mirrored from the retired producer's dual-sink).
-            DataStream<RowData> n7Signals = multiTfLive
-                    .connect(multiTfClosed)
-                    .keyBy(
-                            live -> live.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
-                            closed -> closed.getLong(CandleClosedColumns.INSTRUMENT_TOKEN))
-                    .process(new N7SignalFunction(config))
-                    .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
-                    .name("n7-signal")
-                    // New uid: the retired producer's managed MapState must
-                    // never attach to this operator (G-CHAIN-3 fail-closed).
-                    .uid("n7-signal-v1");
-
-            n7Signals
-                    .sinkTo(FlussSink.<RowData>builder()
-                                    .setBootstrapServers(config.bootstrapServers())
-                                    .setDatabase(config.database())
-                                    .setTable(config.signalCandidatesTable())
-                                    .setSerializationSchema(new RowDataSerializationSchema(true, true))
-                                    .setOption("client.request-timeout",
-                                            config.sinkWriteStallTimeoutMs() + "ms")
-                                    .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                                    .build())
-                    .name("multitf-signal-candidates-sink")
-                    .uid("multitf-signal-candidates-sink");
-
-            n7Signals
-                    .filter(new CanonicalSignalFilterFunction())
-                    .name("canonical-signal-filter-multitf")
-                    .uid("canonical-signal-filter-multitf")
-                    .sinkTo(FlussSink.<RowData>builder()
-                                    .setBootstrapServers(config.bootstrapServers())
-                                    .setDatabase(config.database())
-                                    .setTable(config.signalCurrentTable())
-                                    .setSerializationSchema(new RowDataSerializationSchema(false, false))
-                                    .setOption("client.request-timeout",
-                                            config.sinkWriteStallTimeoutMs() + "ms")
-                                    .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                                    .build())
-                    .name("multitf-signal-candidates-current-sink")
-                    .uid("multitf-signal-candidates-current-sink");
+            // N7 retired (2026-09-05 cutover, batch 2): the range-breakout
+            // rule runs ONLY as a host strategy (N7RangeBreakoutStrategy,
+            // STRATEGIES id n7-range-breakout-v1) with the same deterministic
+            // candidate ids, so the KV current-state converges across the
+            // cutover. The n7-signal-v1 operator, its managed n7-emitted-ids
+            // state, and the multitf-* sinks are gone: restoring a checkpoint
+            // carrying them fails closed instead of double-emitting. Never
+            // re-add an emitter beside the host.
 
             // Strategy host (plug-and-play strategies, 2026-09-05): one fixed
             // operator runs every STRATEGIES-listed SignalStrategy for every
             // instrument. Gated by STRATEGY_HOST_ENABLED (default false) so
             // the topology stays byte-identical until switched on — adding a
             // strategy later is one file + one config id, never a wiring
-            // change. Shares the multi-TF live/closed streams with n7-signal
-            // (read-only fan-out); emits to the same LOG + KV dual-sink
-            // shape. The stub smoke id is LOG-only by filter design.
+            // change. Reads the multi-TF live/closed streams (read-only
+            // fan-out); emits to the same LOG + KV dual-sink shape the
+            // retired n7-signal branch used. The stub smoke id is LOG-only
+            // by filter design.
             if (config.strategyHostEnabled()) {
                 DataStream<RowData> strategySignals = multiTfLive
                         .connect(multiTfClosed)
                         .keyBy(
                                 live -> live.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
                                 closed -> closed.getLong(CandleClosedColumns.INSTRUMENT_TOKEN))
-                        .process(new StrategyHostFunction(config.strategyIds()))
+                        .process(new StrategyHostFunction(config, config.strategyIds()))
                         .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
                         .name("strategy-host")
                         .uid("strategy-host-v1");
