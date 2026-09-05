@@ -1,5 +1,7 @@
 package com.trading.compute.signaljob;
 
+import java.util.Collection;
+
 /**
  * Canonical-signal policy (DEC-035, tracker 14 re-scoped P2 —
  * SIGNAL-SCHEMA-001; extended Slice 2.2 forming-bar handoff, Phase C).
@@ -104,5 +106,31 @@ public final class CanonicalSignalPolicy {
         return (expectedRuleId != null && expectedRuleId.equals(ruleId))
                 || (alternateRuleId != null && alternateRuleId.equals(ruleId))
                 || (alternateRuleId2 != null && alternateRuleId2.equals(ruleId));
+    }
+
+    /**
+     * Registry form (strategy-host design, 2026-09-05): canonical iff the
+     * schema/strategy/version equal the pinned expected identity AND the
+     * rule id is a member of {@code admittedRuleIds}. Lets the filter admit
+     * config-registered strategy ids without a code change per strategy —
+     * the same strictness as the pinned forms, with the rule set supplied
+     * by configuration instead of constants.
+     */
+    public static boolean isCanonicalIn(
+            String schemaVersion,
+            String strategyId,
+            String strategyVersion,
+            String ruleId,
+            String expectedSchemaVersion,
+            String expectedStrategyId,
+            String expectedStrategyVersion,
+            Collection<String> admittedRuleIds) {
+        boolean identityMatch = expectedSchemaVersion != null
+                && expectedSchemaVersion.equals(schemaVersion)
+                && expectedStrategyId != null
+                && expectedStrategyId.equals(strategyId)
+                && expectedStrategyVersion != null
+                && expectedStrategyVersion.equals(strategyVersion);
+        return identityMatch && admittedRuleIds != null && admittedRuleIds.contains(ruleId);
     }
 }

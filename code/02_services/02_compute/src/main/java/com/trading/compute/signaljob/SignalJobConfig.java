@@ -4,6 +4,8 @@ import com.trading.common.config.PlatformConfig;
 import com.trading.common.schema.CandlePreviewTableSchema;
 import com.trading.common.schema.CandleTableSchema;
 import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -122,7 +124,9 @@ public record SignalJobConfig(
         boolean multiTfSignalContextEnabled,
         String candleLiveTable,
         String candleClosedTable,
-        StartupMode startupMode) implements Serializable {
+        StartupMode startupMode,
+        boolean strategyHostEnabled,
+        List<String> strategyIds) implements Serializable {
 
     public static SignalJobConfig fromEnv() {
         // G1 (2026-08-29): every declared config key must actually be read.
@@ -162,6 +166,19 @@ public record SignalJobConfig(
                 booleanValue(env, "MULTITF_SIGNAL_CONTEXT_ENABLED", false);
         String candleLiveTable = stringEnv(env, "CANDLE_LIVE_TABLE", "candle_live");
         String candleClosedTable = stringEnv(env, "CANDLE_CLOSED_TABLE", "candle_closed");
+        // Strategy host (plug-and-play strategies, 2026-09-05): comma-separated
+        // rule ids the strategy-host operator runs. Unknown ids, duplicates,
+        // and host-on-with-empty-list all fail startup fast — a topology that
+        // silently drops a requested strategy is forbidden. Host off (default)
+        // leaves the topology byte-identical; a non-empty list with host off
+        // only warns at wiring time (SignalJob), never here.
+        boolean strategyHostEnabled = booleanValue(env, "STRATEGY_HOST_ENABLED", false);
+        List<String> strategyIds = parseStrategyIds(env.getOrDefault("STRATEGIES", ""));
+        if (strategyHostEnabled && strategyIds.isEmpty()) {
+            throw new IllegalStateException("Config STRATEGY_HOST_ENABLED=true requires a "
+                    + "non-empty STRATEGIES list (comma-separated rule ids, known: "
+                    + Strategies.knownIds() + ")");
+        }
         return new SignalJobConfig(
                 bootstrapServers(env),
                 env.getOrDefault("FLUSS_DATABASE", "default"),
@@ -245,7 +262,9 @@ public record SignalJobConfig(
                 multiTfSignalContextEnabled,
                 candleLiveTable,
                 candleClosedTable,
-                mode);
+                mode,
+                strategyHostEnabled,
+                strategyIds);
     }
 
     /**
@@ -1028,6 +1047,34 @@ public record SignalJobConfig(
                     + "(case-insensitive), got '" + trimmed + "'");
         }
         return Boolean.parseBoolean(trimmed);
+    }
+
+    /**
+     * Parses the comma-separated {@code STRATEGIES} list into validated rule
+     * ids (trimmed, blanks dropped, order kept). Unknown ids and duplicates
+     * fail fast — silently running a subset of the requested strategies is
+     * forbidden. Package-visible for direct unit testing.
+     */
+    static List<String> parseStrategyIds(String raw) {
+        List<String> ids = new ArrayList<>();
+        if (raw != null) {
+            for (String part : raw.split(",")) {
+                String id = part.trim();
+                if (!id.isEmpty()) {
+                    if (ids.contains(id)) {
+                        throw new IllegalStateException("Config STRATEGIES lists '" + id
+                                + "' twice — refusing an ambiguous strategy set");
+                    }
+                    if (!Strategies.isKnown(id)) {
+                        throw new IllegalStateException("Config STRATEGIES lists unknown "
+                                + "strategy id '" + id + "' (known: " + Strategies.knownIds()
+                                + ") — refusing to run a topology that silently drops it");
+                    }
+                    ids.add(id);
+                }
+            }
+        }
+        return List.copyOf(ids);
     }
 
     private static String executionAccountScopeId(Map<String, String> env, boolean enabled) {

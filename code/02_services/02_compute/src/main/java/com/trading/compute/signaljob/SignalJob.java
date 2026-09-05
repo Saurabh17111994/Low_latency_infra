@@ -5,6 +5,7 @@ import com.trading.common.schema.CandleTableSchema;
 import org.apache.flink.util.OutputTag;
 import com.trading.compute.telemetry.ComputeAlertLogs;
 import java.time.Duration;
+import java.util.Set;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.configuration.CheckpointingOptions;
@@ -314,6 +315,60 @@ public final class SignalJob {
                                     .build())
                     .name("multitf-signal-candidates-current-sink")
                     .uid("multitf-signal-candidates-current-sink");
+
+            // Strategy host (plug-and-play strategies, 2026-09-05): one fixed
+            // operator runs every STRATEGIES-listed SignalStrategy for every
+            // instrument. Gated by STRATEGY_HOST_ENABLED (default false) so
+            // the topology stays byte-identical until switched on — adding a
+            // strategy later is one file + one config id, never a wiring
+            // change. Shares the multi-TF live/closed streams with n7-signal
+            // (read-only fan-out); emits to the same LOG + KV dual-sink
+            // shape. The stub smoke id is LOG-only by filter design.
+            if (config.strategyHostEnabled()) {
+                DataStream<RowData> strategySignals = multiTfLive
+                        .connect(multiTfClosed)
+                        .keyBy(
+                                live -> live.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
+                                closed -> closed.getLong(CandleClosedColumns.INSTRUMENT_TOKEN))
+                        .process(new StrategyHostFunction(config.strategyIds()))
+                        .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
+                        .name("strategy-host")
+                        .uid("strategy-host-v1");
+
+                strategySignals
+                        .sinkTo(FlussSink.<RowData>builder()
+                                        .setBootstrapServers(config.bootstrapServers())
+                                        .setDatabase(config.database())
+                                        .setTable(config.signalCandidatesTable())
+                                        .setSerializationSchema(new RowDataSerializationSchema(true, true))
+                                        .setOption("client.request-timeout",
+                                                config.sinkWriteStallTimeoutMs() + "ms")
+                                        .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
+                                        .build())
+                        .name("strategy-host-candidates-sink")
+                        .uid("strategy-host-candidates-sink");
+
+                strategySignals
+                        .filter(new CanonicalSignalFilterFunction(
+                                Set.copyOf(config.strategyIds())))
+                        .name("canonical-signal-filter-strategy-host")
+                        .uid("canonical-signal-filter-strategy-host")
+                        .sinkTo(FlussSink.<RowData>builder()
+                                        .setBootstrapServers(config.bootstrapServers())
+                                        .setDatabase(config.database())
+                                        .setTable(config.signalCurrentTable())
+                                        .setSerializationSchema(new RowDataSerializationSchema(false, false))
+                                        .setOption("client.request-timeout",
+                                                config.sinkWriteStallTimeoutMs() + "ms")
+                                        .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
+                                        .build())
+                        .name("strategy-host-candidates-current-sink")
+                        .uid("strategy-host-candidates-current-sink");
+            } else if (!config.strategyIds().isEmpty()) {
+                LOG.warn("signal-job: STRATEGIES is set ({}) but STRATEGY_HOST_ENABLED=false — "
+                        + "no strategy-host branch wired; listed strategies will NOT run",
+                        config.strategyIds());
+            }
         }
 
         // Chain-heap redesign (2026-09-03 plan, OP4): the tumbling window +

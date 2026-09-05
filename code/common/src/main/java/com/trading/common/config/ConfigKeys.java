@@ -140,6 +140,8 @@ public final class ConfigKeys {
     public static final String MULTITF_SESSION_BYPASS = "MULTITF_SESSION_BYPASS";
     public static final String MULTITF_SIGNAL_CONTEXT_ENABLED = "MULTITF_SIGNAL_CONTEXT_ENABLED";
     public static final String N7_RULE_ID = "N7_RULE_ID";
+    public static final String STRATEGY_HOST_ENABLED = "STRATEGY_HOST_ENABLED";
+    public static final String STRATEGIES = "STRATEGIES";
     public static final String CANDLE_LIVE_TABLE = "CANDLE_LIVE_TABLE";
     public static final String CANDLE_CLOSED_TABLE = "CANDLE_CLOSED_TABLE";
     public static final String UNCERTAINTY_JOURNAL_PATH = "UNCERTAINTY_JOURNAL_PATH";

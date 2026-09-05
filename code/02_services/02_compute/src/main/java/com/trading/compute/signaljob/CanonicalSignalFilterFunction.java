@@ -4,6 +4,8 @@ import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFilterFunction;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.table.data.RowData;
+import java.util.HashSet;
+import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -35,6 +37,28 @@ public class CanonicalSignalFilterFunction extends RichFilterFunction<RowData> {
 
     private static final Logger LOG = LoggerFactory.getLogger(CanonicalSignalFilterFunction.class);
 
+    /**
+     * Extra admitted rule ids from the {@code STRATEGIES} config (strategy-host
+     * design, 2026-09-05). Empty by default: today's behavior, pins only. A
+     * strategy-host branch passes the configured ids so its rows reach the KV
+     * current-state with no code change per strategy. The stub smoke id is
+     * never admitted — it must stay LOG-only.
+     */
+    private final Set<String> extraRuleIds;
+
+    public CanonicalSignalFilterFunction() {
+        this(Set.of());
+    }
+
+    public CanonicalSignalFilterFunction(Set<String> extraRuleIds) {
+        Set<String> admitted = new HashSet<>(extraRuleIds);
+        // The stub smoke id is LOG-only by construction: even if a config
+        // lists it, its rows must never reach the KV current-state (it is a
+        // counter, not a signal). Refuse it here, not just at the wiring.
+        admitted.remove(StubSmokeStrategy.RULE_ID);
+        this.extraRuleIds = Set.copyOf(admitted);
+    }
+
     private transient Counter nonCanonical;
 
     @Override
@@ -61,7 +85,13 @@ public class CanonicalSignalFilterFunction extends RichFilterFunction<RowData> {
                 // DEC-035 dual-sink). N7 (2026-09-05): the N7 range-breakout
                 // rule is the third admitted id (n7-signal-design.md).
                 SignalCandidatesTableColumns.CANONICAL_FORMING_RULE_ID,
-                SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID);
+                SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID)
+                || (!extraRuleIds.isEmpty() && CanonicalSignalPolicy.isCanonicalIn(
+                        schemaVersion, strategyId, strategyVersion, ruleId,
+                        SignalCandidatesTableColumns.SCHEMA_VERSION_V2,
+                        SignalCandidatesTableColumns.CANONICAL_STRATEGY_ID,
+                        SignalCandidatesTableColumns.CANONICAL_STRATEGY_VERSION,
+                        extraRuleIds));
         if (!canonical) {
             nonCanonical.inc();
             LOG.warn("signal-canonical-filter: dropping non-canonical signal from the KV "
