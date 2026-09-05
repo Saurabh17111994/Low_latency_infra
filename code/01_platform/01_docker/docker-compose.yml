@@ -240,6 +240,10 @@ networks:
     driver: bridge
 
 volumes:
+  # 2026-09-05: the Fluss catalog (ZooKeeper) must survive compose down —
+  # without it the tablet data volumes orphan on restart (see zookeeper svc).
+  zookeeper-data:
+  zookeeper-datalog:
   fluss-data:
   # P3.2: lake-snapshot offsets files must be readable by whichever server
   # serves the getLakeSnapshot RPC (coordinator OR tablet) — keep them on a
@@ -281,6 +285,13 @@ services:
     image: zookeeper:3.9.2
     networks: [trading-net]
     ports: ["2181:2181"]
+    # 2026-09-05: ZK holds the Fluss CATALOG (table list + schemas). It had
+    # no named volume, so compose down deleted the catalog while the tablet
+    # data volumes survived — next up orphaned every table dir (soak
+    # preflight "fluss not ready", 2026-09-05). Keep both persistent.
+    volumes:
+      - zookeeper-data:/data
+      - zookeeper-datalog:/datalog
 
   # ---- Fluss: streaming bus + storage + lake tier -------------------------
   fluss-coordinator:
@@ -643,7 +654,7 @@ services:
       # auto-shard path covers 3000 via N=3.
       ARROW_INSTRUMENT_MANIFESTS: ${ARROW_INSTRUMENT_MANIFESTS:-}
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
-      ALLOW_RUNTIME_DDL: "false"
+      ALLOW_RUNTIME_DDL: ${ALLOW_RUNTIME_DDL:-false}
       # Single-manifest fallback — env-driven with default to the N=1 approved
       # 1024 CSV. Overridable via host env for 3000 single-CSV sharding.
       INSTRUMENT_MANIFEST_PATH: ${INSTRUMENT_MANIFEST_PATH:-/instruments/NSE_CM_EQUITY.csv}
