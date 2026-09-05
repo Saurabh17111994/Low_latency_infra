@@ -16,34 +16,6 @@
       "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
-      "table_name": "feature_candles_15s",
-      "ddl_path": "03_feature_candles_15s.sql",
-      "ddl_sha256": "ca0d9c35965e54c0b9c359a0b9698208b91c90e3c33cf993fe0007cd0e8802c9",
-      "table_kind": "KV",
-      "primary_key": "instrument_token, window_start",
-      "bucket_key": null,
-      "compatibility_class": "UNKNOWN",
-      "validated_matrix": "VM-FLUSS-CONN-007",
-      "schema_version": "2",
-      "writer_owner": "Signal job",
-      "retention_policy": "7d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
-    },
-    {
-      "table_name": "forming_bar",
-      "ddl_path": "04_forming_bar.sql",
-      "ddl_sha256": "3c9c166a26b2f90d0b908933bb4eb2d9a861c9ae43a71269e8f5b6556a23ac18",
-      "table_kind": "KV",
-      "primary_key": "instrument_token",
-      "bucket_key": null,
-      "compatibility_class": "UNKNOWN",
-      "validated_matrix": "VM-FLUSS-SRV-005",
-      "schema_version": "1",
-      "writer_owner": "Signal job",
-      "retention_policy": "7d",
-      "lake_policy": "off"
-    },
-    {
       "table_name": "Signal_Candidates",
       "ddl_path": "05_signal_candidates.sql",
       "ddl_sha256": "be17c643173f496a508799d872382a4eabe702d35f88c9c000f9e2d71f100435",
@@ -378,34 +350,6 @@
       "writer_owner": "Execution Gateway (Nautilus) \u2014 sole writer",
       "retention_policy": "7d",
       "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
-    },
-    {
-      "table_name": "feature_candles_15s_preview",
-      "ddl_path": "30_feature_candles_15s_preview.sql",
-      "ddl_sha256": "afb01ad964823a50c9163d296cf247edf8416d29c133bccac4017771488e6173",
-      "table_kind": "KV",
-      "primary_key": "instrument_token, window_start",
-      "bucket_key": null,
-      "compatibility_class": "UNKNOWN",
-      "validated_matrix": "VM-FLUSS-CONN-007",
-      "schema_version": "2",
-      "writer_owner": "Signal job",
-      "retention_policy": "60s",
-      "lake_policy": "enabled=false"
-    },
-    {
-      "table_name": "Signal_Tentative_Markers",
-      "ddl_path": "31_signal_tentative_markers.sql",
-      "ddl_sha256": "b605ef3bc311341fa2a6922c259464b9c5a9c32c017ede19f7f6ef8f27ff9ad1",
-      "table_kind": "KV",
-      "primary_key": "candidate_id",
-      "bucket_key": null,
-      "compatibility_class": "UNKNOWN",
-      "validated_matrix": "VM-FLUSS-SRV-005",
-      "schema_version": "1",
-      "writer_owner": "Signal job (sole writer)",
-      "retention_policy": "2d",
-      "lake_policy": "off"
     },
     {
       "table_name": "candle_live",
