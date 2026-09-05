@@ -18,8 +18,8 @@ import java.util.List;
  * {@code 30_feature_candles_15s_preview.sql} exactly. This table is NOT the
  * frozen v3 candle table; it is a separate, ephemeral, visibility-only
  * surface. Signal detection must never consume previews (partial candles
- * would corrupt its lookback) — the early-signal path (Phase 2) reads the
- * same {@code highs/closes} state but only suggests tentatives.
+ * would corrupt its lookback). The early-signal path that consumed previews
+ * was deleted 2026-09-05 with the 20-candle breakout rule.
  */
 public final class CandlePreviewTableSchema {
 

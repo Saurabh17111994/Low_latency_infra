@@ -311,7 +311,7 @@ public final class DdlBootstrap {
     /**
      * Full 22-column LOG schema for Signal_Candidates matching the v3 DDL
      * (05_signal_candidates.sql, DEC-035). Written by the compute job's
-     * signal-detection slice (DEC-034) as append-only audit — one row per
+     * signal producers (forming-bar/N7, DEC-034/2026-09-05) as append-only audit — one row per
      * fired signal, never updated. Current-state consumers read the KV
      * projection {@link #SIGNAL_CANDIDATES_CURRENT_SCHEMA}.
      */

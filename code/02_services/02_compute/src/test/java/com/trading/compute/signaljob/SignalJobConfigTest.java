@@ -57,8 +57,6 @@ class SignalJobConfigTest {
         assertEquals("Signal_Candidates_current", cfg.signalCurrentTable());
         assertEquals("simple-breakout", cfg.signalStrategyId());
         assertEquals("1.0.0", cfg.signalStrategyVersion());
-        assertEquals("breakout-20-bullish-trend", cfg.signalRuleId());
-        assertEquals(20, cfg.signalLookbackCandles());
         assertEquals(1L, cfg.signalQuantity());
         // Slice 2.2 forming-bar placeholder defaults (Phase C)
         assertEquals("breakout-5-forming-bar", cfg.formingRuleId());
@@ -275,8 +273,6 @@ class SignalJobConfigTest {
         env.put("SIGNAL_CURRENT_TABLE", "Signal_Candidates_current_dev");
         env.put("SIGNAL_STRATEGY_ID", "my-strategy");
         env.put("SIGNAL_STRATEGY_VERSION", "2.1.0");
-        env.put("SIGNAL_RULE_ID", "my-rule");
-        env.put("SIGNAL_LOOKBACK_CANDLES", "5");
         env.put("SIGNAL_QUANTITY", "3");
         env.put("FORMING_RULE_ID", "my-forming-rule");
         env.put("FORMING_LOOKBACK_CANDLES", "8");
@@ -296,8 +292,6 @@ class SignalJobConfigTest {
         assertEquals("Signal_Candidates_current_dev", cfg.signalCurrentTable());
         assertEquals("my-strategy", cfg.signalStrategyId());
         assertEquals("2.1.0", cfg.signalStrategyVersion());
-        assertEquals("my-rule", cfg.signalRuleId());
-        assertEquals(5, cfg.signalLookbackCandles());
         assertEquals(3L, cfg.signalQuantity());
         assertEquals("my-forming-rule", cfg.formingRuleId());
         assertEquals(8, cfg.formingLookbackCandles());
@@ -500,13 +494,6 @@ class SignalJobConfigTest {
     void rejectsBlankCanonicalVersion() {
         Map<String, String> env = env();
         env.put("CONFIGURATION_VERSION", "  ");
-        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
-    }
-
-    @Test
-    void rejectsLookbackBelowTwo() {
-        Map<String, String> env = env();
-        env.put("SIGNAL_LOOKBACK_CANDLES", "1");
         assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
     }
 
@@ -756,8 +743,6 @@ class SignalJobConfigTest {
     void honorsPreviewOverrides() {
         Map<String, String> env = env();
         env.put("PREVIEW_ENABLED", "false");
-        // Early signals consume previews — disable them too (validated pair).
-        env.put("EARLY_SIGNAL_ENABLED", "false");
         env.put("PREVIEW_INTERVAL_MS", "500");
         env.put("PREVIEW_TTL_MS", "30000");
         SignalJobConfig cfg = SignalJobConfig.from(env);
@@ -773,29 +758,6 @@ class SignalJobConfigTest {
         IllegalStateException e = assertThrows(IllegalStateException.class,
                 () -> SignalJobConfig.from(env));
         assertTrue(e.getMessage().contains("PREVIEW_INTERVAL_MS"), e.getMessage());
-    }
-
-    @Test
-    void earlySignalDefaultsEnabledWithCanonicalRule() {
-        SignalJobConfig cfg = SignalJobConfig.from(env());
-        assertTrue(cfg.earlySignalEnabled());
-        assertEquals(SignalCandidatesTableColumns.CANONICAL_RULE_ID, cfg.earlySignalRuleId());
-    }
-
-    @Test
-    void earlySignalHonorsOverrideAndRequiresPreviews() {
-        Map<String, String> env = env();
-        env.put("EARLY_SIGNAL_RULE", "breakout-20-bullish-trend");
-        SignalJobConfig cfg = SignalJobConfig.from(env);
-        assertEquals("breakout-20-bullish-trend", cfg.earlySignalRuleId());
-
-        // Early signals consume preview rows — disabling previews without
-        // disabling early signals is a config contract violation (fail-fast).
-        Map<String, String> bad = env();
-        bad.put("PREVIEW_ENABLED", "false");
-        IllegalStateException e = assertThrows(IllegalStateException.class,
-                () -> SignalJobConfig.from(bad));
-        assertTrue(e.getMessage().contains("EARLY_SIGNAL_ENABLED"), e.getMessage());
     }
 
     @Test

@@ -42,9 +42,10 @@ import org.slf4j.LoggerFactory;
  *  broker, no market hours: raw ticks are written directly to raw_table_1 with
  *  event-time timestamps that force the pinned 15 s event-time candle windows
  *  to close (the ingestion leg itself is SIGNAL-CHAIN-E2E's domain), and a
- *  rising price series deterministically fires the rule-v1 breakout signal
- *  detector (SIGNAL_LOOKBACK_CANDLES pinned to 2 so the run stays short). The
- *  real SignalJob topology then produces Signal_Candidates and -- only with
+ *  rising price series deterministically fires the forming-bar breakout rule
+ *  (breakout-5-forming-bar, the sole 15s-chain signal producer since the
+ *  20-candle rule was deleted 2026-09-05). The real SignalJob topology then
+ *  produces Signal_Candidates and -- only with
  *  EXECUTION_INTENT_ENABLED=true -- immutable Execution_Intent LOG rows.
  *
  *  Tests:
@@ -298,10 +299,9 @@ class B4SignalIntentE2ETest {
         e.put("ALLOW_FULL_REPLAY", "true");
         e.put("CHECKPOINT_DIR",
                 "file:///tmp/b4-signal-intent-e2e-checkpoints-" + System.nanoTime());
-        e.put("SIGNAL_LOOKBACK_CANDLES", "2");
         for (String k : new String[] {"FORMING_RULE_ID", "FORMING_BAR_TABLE",
                 "TRADE_DECISIONS_TABLE", "SIGNAL_STRATEGY_ID", "SIGNAL_STRATEGY_VERSION",
-                "SIGNAL_RULE_ID", "FORMING_BAR_WRITE_BATCH_MS", "STATE_BACKEND",
+                "FORMING_BAR_WRITE_BATCH_MS", "STATE_BACKEND",
                 "STATE_BACKEND_LOCAL_DIRS", "TASK_MANAGER_MEMORY_MANAGED_SIZE",
                 "TASK_MANAGER_NETWORK_MEMORY_MAX", "PARALLELISM", "OTEL_COLLECTOR_HOST"}) {
             String v = System.getenv().get(k);

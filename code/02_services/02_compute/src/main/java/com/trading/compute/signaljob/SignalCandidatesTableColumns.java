@@ -71,10 +71,10 @@ public final class SignalCandidatesTableColumns {
      * SIGNAL-SCHEMA-001): the only {@code (schema_version, strategy_id,
      * strategy_version, rule_id)} combination allowed into the
      * {@code Signal_Candidates_current} KV projection. The config defaults
-     * for {@code SIGNAL_STRATEGY_ID}/{@code SIGNAL_STRATEGY_VERSION}/
-     * {@code SIGNAL_RULE_ID} are exactly these values (the default IS the
-     * canonical identity, mirroring the candle pair policy); the LOG sink
-     * keeps every emitted signal regardless.
+     * for {@code SIGNAL_STRATEGY_ID}/{@code SIGNAL_STRATEGY_VERSION} are
+     * exactly these values (mirroring the candle pair policy); each rule
+     * producer pins its own rule id (forming bar, N7 — both admitted as
+     * alternates below). The LOG sink keeps every emitted signal regardless.
      */
     public static final String CANONICAL_STRATEGY_ID = "simple-breakout";
     public static final String CANONICAL_STRATEGY_VERSION = "1.0.0";

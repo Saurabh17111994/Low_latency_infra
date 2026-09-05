@@ -33,7 +33,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  * <p>Why this test exists: the 2026-08-13 rescope JobGraphDump proved that
  * hash-derived operator IDs drift whenever a chained operator is added or
  * removed (baseline {@code candle-15s -> canonical-candle-filter} chaining,
- * then {@code signal-detection -> canonical-signal-filter} chaining) — and
+ * then {@code forming-bar-detection -> canonical-signal-filter} chaining) — and
  * the drift propagates downstream transitively. Only explicit UIDs make the
  * stateful anchors durable across such topology changes. Removing a
  * {@code .uid(...)} from the graph — or renaming one — must fail here.
@@ -82,16 +82,15 @@ class SignalJobOperatorUidTest {
         // they have no pre-existing state).
         EXPECTED_OPERATORS.put("candle-invalid-quarantine", "candle-invalid-quarantine");
         EXPECTED_OPERATORS.put("candle-invalid-quarantine-sink", "candle-invalid-quarantine-sink");
-        EXPECTED_OPERATORS.put("signal-detection", "signal-detection");
         // Forming-bar branch (Slice 2.2, 2026-08-16): builder -> detection ->
-        // writer -> sink carry pinned UIDs; added to the contract 2026-08-18
-        // (CHG-029) — the topology grew 10 -> 14 operators when forming-bar
-        // landed (04-signal-job.md JobGraphDump proof), but the pinned set
-        // was never extended, so the contract test failed on first live run.
+        // writer -> sink carry pinned UIDs. Since the 20-candle breakout rule
+        // was deleted (signal-detection, 2026-09-05) the forming-bar rule is
+        // the sole 15s-chain signal producer feeding the dual-sink.
         EXPECTED_OPERATORS.put("forming-bar-builder-v2", "forming-bar-builder");
         EXPECTED_OPERATORS.put("forming-bar-detection-v2", "forming-bar-detection");
         EXPECTED_OPERATORS.put("forming-bar-writer-v2", "forming-bar-writer");
         EXPECTED_OPERATORS.put("forming-bar-sink", "forming-bar-sink");
+        EXPECTED_OPERATORS.put("active-signal-feedback", "active-signal-feedback");
         EXPECTED_OPERATORS.put("signal-candidates-sink", "signal-candidates-sink");
         EXPECTED_OPERATORS.put("canonical-signal-filter", "canonical-signal-filter");
         EXPECTED_OPERATORS.put("signal-candidates-current-sink", "signal-candidates-current-sink");

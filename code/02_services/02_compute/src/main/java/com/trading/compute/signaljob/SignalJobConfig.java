@@ -34,7 +34,7 @@ import java.util.Map;
  * append-only LOG; {@code SIGNAL_CURRENT_TABLE} (default
  * {@code Signal_Candidates_current}) is the KV current-state projection. The
  * canonical identity — {@code SIGNAL_STRATEGY_ID},
- * {@code SIGNAL_STRATEGY_VERSION}, {@code SIGNAL_RULE_ID} — defaults to the
+ * {@code SIGNAL_STRATEGY_VERSION} — defaults to the
  * pinned {@link SignalCandidatesTableColumns} canonical constants, so the
  * default config emits rows the KV filter accepts; an override changes the
  * identity and those rows are filtered from the KV sink (LOG keeps them) and
@@ -79,20 +79,14 @@ public record SignalJobConfig(
         String signalCurrentTable,
         String signalStrategyId,
         String signalStrategyVersion,
-        String signalRuleId,
-        int signalLookbackCandles,
         long signalQuantity,
         String formingRuleId,
         int formingLookbackCandles,
         boolean previewEnabled,
         long previewIntervalMs,
         long previewTtlMs,
-        boolean earlySignalEnabled,
-        String earlySignalRuleId,
-        long earlySignalConfirmAfterMs,
         String formingBarTable,
         long formingBarWriteBatchMs,
-        String tentativeMarkersTable,
         String positionStateTable,
         String otelCollectorHost,
         String stateRecoveryPath,
@@ -146,12 +140,7 @@ public record SignalJobConfig(
             throw new IllegalStateException("Config CONFIGURATION_VERSION must be explicit when "
                     + "EXECUTION_INTENT_ENABLED=true — no implicit execution contract version");
         }
-        boolean earlySignalEnabled = booleanValue(env, "EARLY_SIGNAL_ENABLED", true);
         boolean previewEnabled = booleanValue(env, "PREVIEW_ENABLED", true);
-        if (earlySignalEnabled && !previewEnabled) {
-            throw new IllegalStateException("Config EARLY_SIGNAL_ENABLED=true requires "
-                    + "PREVIEW_ENABLED=true — the early-signal path consumes preview rows");
-        }
         boolean multiTfEnabled = booleanValue(env, "MULTITF_ENABLED", false);
         String n7RuleId = env.getOrDefault("N7_RULE_ID",
                 SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID);
@@ -212,9 +201,6 @@ public record SignalJobConfig(
                         SignalCandidatesTableColumns.CANONICAL_STRATEGY_ID),
                 env.getOrDefault("SIGNAL_STRATEGY_VERSION",
                         SignalCandidatesTableColumns.CANONICAL_STRATEGY_VERSION),
-                env.getOrDefault("SIGNAL_RULE_ID",
-                        SignalCandidatesTableColumns.CANONICAL_RULE_ID),
-                signalLookbackCandles(env),
                 signalQuantity(env),
                 env.getOrDefault("FORMING_RULE_ID",
                         SignalCandidatesTableColumns.CANONICAL_FORMING_RULE_ID),
@@ -222,17 +208,8 @@ public record SignalJobConfig(
                 previewEnabled,
                 positiveLong(env, "PREVIEW_INTERVAL_MS", 1_000L),
                 positiveLong(env, "PREVIEW_TTL_MS", 60_000L),
-                earlySignalEnabled,
-                env.getOrDefault("EARLY_SIGNAL_RULE",
-                        SignalCandidatesTableColumns.CANONICAL_RULE_ID),
-                positiveLong(env, "EARLY_SIGNAL_CONFIRM_AFTER_MS", 4_000L),
                 env.getOrDefault("FORMING_BAR_TABLE", "forming_bar"),
                 positiveLong(env, "FORMING_BAR_WRITE_BATCH_MS", 250L),
-                // CHG-121 (2026-09-01): durable tentative-marker table for F4
-                // crash reconciliation. Empty string DISABLES markers (the
-                // pre-CHG-121 behavior — embedded tests, legacy runs).
-                env.getOrDefault("SIGNAL_TENTATIVE_MARKERS_TABLE",
-                        "Signal_Tentative_Markers"),
                 env.getOrDefault("POSITION_STATE_TABLE", "Position_State"),
                 env.getOrDefault("OTEL_COLLECTOR_HOST", "otel-collector:4318"),
                 stateRecoveryPath(env),
@@ -310,24 +287,6 @@ public record SignalJobConfig(
     /** Preview row TTL in the KV table (default 60s — auto-expiry). */
     public long previewTtlMs() {
         return previewTtlMs;
-    }
-
-    /** Early-signal path enabled (low-latency candles Phase 2 — requires previews). */
-    public boolean earlySignalEnabled() {
-        return earlySignalEnabled;
-    }
-
-    /** Early-signal rule identity (defaults to the canonical breakout rule —
-     *  consistent with detection; the supersession chain stays coherent). */
-    public String earlySignalRuleId() {
-        return earlySignalRuleId;
-    }
-
-    /** Confirm-window shortening threshold (Phase 3): after this much
-     *  sustained preview hold, the tentative is confirmed early (default 4s —
-     *  4 consecutive 1s previews). */
-    public long earlySignalConfirmAfterMs() {
-        return earlySignalConfirmAfterMs;
     }
 
     /** Preview table schema version (pinned from the shared contract). */
@@ -438,15 +397,6 @@ public record SignalJobConfig(
     private static String stateRecoveryPath(Map<String, String> env) {
         String raw = env.get("STATE_RECOVERY_PATH");
         return raw == null ? null : raw.trim();
-    }
-
-    private static int signalLookbackCandles(Map<String, String> env) {
-        int value = intValue(env, "SIGNAL_LOOKBACK_CANDLES", 20);
-        if (value < 2) {
-            throw new IllegalStateException("Config SIGNAL_LOOKBACK_CANDLES must be >= 2 "
-                    + "(the rule compares against the previous completed candles), got " + value);
-        }
-        return value;
     }
 
     private static long signalQuantity(Map<String, String> env) {

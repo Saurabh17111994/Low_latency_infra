@@ -62,9 +62,6 @@ public final class ConfigKeys {
     /** Compose env-file deployments set this marker; SecretGuard respects it. */
     public static final String SECRETS_VIA_ENV_FILE = "SECRETS_VIA_ENV_FILE";
     public static final String DRAIN_DEADLINE_SECONDS = "DRAIN_DEADLINE_SECONDS";
-    public static final String EARLY_SIGNAL_CONFIRM_AFTER_MS = "EARLY_SIGNAL_CONFIRM_AFTER_MS";
-    public static final String EARLY_SIGNAL_ENABLED = "EARLY_SIGNAL_ENABLED";
-    public static final String EARLY_SIGNAL_RULE = "EARLY_SIGNAL_RULE";
     public static final String EOD_MASTER_KEY = "EOD_MASTER_KEY";
     public static final String ERROR = "ERROR";
     public static final String EXECUTION_INTENT_ENABLED = "EXECUTION_INTENT_ENABLED";
@@ -123,9 +120,7 @@ public final class ConfigKeys {
     public static final String SAVEPOINT_DIR = "SAVEPOINT_DIR";
     public static final String SIGNAL_CANDIDATES_TABLE = "SIGNAL_CANDIDATES_TABLE";
     public static final String SIGNAL_CURRENT_TABLE = "SIGNAL_CURRENT_TABLE";
-    public static final String SIGNAL_LOOKBACK_CANDLES = "SIGNAL_LOOKBACK_CANDLES";
     public static final String SIGNAL_QUANTITY = "SIGNAL_QUANTITY";
-    public static final String SIGNAL_RULE_ID = "SIGNAL_RULE_ID";
     public static final String SIGNAL_STRATEGY_ID = "SIGNAL_STRATEGY_ID";
     public static final String SIGNAL_STRATEGY_VERSION = "SIGNAL_STRATEGY_VERSION";
     public static final String SINK_WRITE_STALL_TIMEOUT_MS = "SINK_WRITE_STALL_TIMEOUT_MS";

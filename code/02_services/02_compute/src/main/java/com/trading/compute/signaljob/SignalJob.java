@@ -341,11 +341,10 @@ public final class SignalJob {
         // ephemeral feature_candles_15s_preview KV table (TTL 60s). The final
         // candle path above is byte-identical (same accumulator, same emit).
         // The preview window is intentionally separate: it must NOT run the
-        // CandleInvariantCheck (partial OHLCV), must NOT touch the
+        // CandleInvariantCheck (partial OHLCV) and must NOT touch the
         // CandleKvFirstWriteWinsFunction (previews are upserts, not
-        // emissions), and must NOT feed signal detection (partial candles
-        // would corrupt its lookback). The previews stream is hoisted out of
-        // the guard so Phase 2's EarlySignalFunction can consume it.
+        // emissions). The previews stream is hoisted out of the guard so the
+        // KV preview sink stays independent of the candle emit path.
         DataStream<RowData> previews = null;
         if (config.previewEnabled()) {
             // Chain-heap redesign (2026-09-03 plan, OP5): the second window
@@ -460,29 +459,6 @@ public final class SignalJob {
                 .name("candle-invalid-quarantine-sink")
                 .uid("candle-invalid-quarantine-sink");
 
-        // Slice 2.1 (DEC-034): closed candles -> MVP signal detection ->
-        // signal dual-sink (DEC-035, tracker 14 re-scoped P2).
-        //
-        // (a) Signal_Candidates LOG: append-only RowDataSerializationSchema
-        // (true, true) — every emitted signal is an immutable audit row.
-        // (b) Signal_Candidates_current KV: the canonical-signal filter keeps
-        // only the pinned canonical identity (schema_version +
-        // strategy_id + strategy_version + rule_id) and the
-        // RowDataSerializationSchema(false, false) maps INSERT RowKinds to
-        // UPSERTs; the writer (Append vs Upsert) is chosen from the live
-        // table metadata fetched by FlussSink.build() — fail-fast startup if
-        // the table is missing or is not a KV table.
-        //
-        // Plain FlussSinks (CHG-023 item 4): the StallGuardedSink watchdog is
-        // removed — the native checkpoint timeout + fixed-delay restart fail
-        // the job on a stalled sink, never hang it.
-        DataStream<RowData> signals = candles
-                .keyBy(row -> row.getLong(CandleTableColumns.INSTRUMENT_TOKEN))
-                .process(new SignalDetectionFunction(config))
-                .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
-                .name("signal-detection")
-                .uid("signal-detection");
-
         // Slice 2.2 forming-bar handoff (REQ-FC-007/AC-FC-014, REQ-FC-013):
         // the LIVE forming bar forks off the SAME deduped tick stream (the
         // candle window's input), updated in-process on every accepted tick
@@ -507,9 +483,8 @@ public final class SignalJob {
                 .uid("forming-bar-builder-v2");
 
         // The detector co-locates both inputs by instrument key: the live
-        // forming-bar events (input 1) and the completed candles (input 2,
-        // the same stream SignalDetectionFunction consumes — the lookback
-        // history). Candidate rows union into the existing signal sinks.
+        // forming-bar events (input 1) and the completed candles (input 2).
+        // Candidate rows feed the signal dual-sink below.
         DataStream<RowData> formingSignals = formingBars
                 .connect(candles)
                 .keyBy(
@@ -559,53 +534,17 @@ public final class SignalJob {
                 .name("forming-bar-sink")
                 .uid("forming-bar-sink");
 
-        // Both candidate producers feed the SAME dual-sink (candle rule +
-        // forming-bar rule). The canonical filter admits the pinned forming-
-        // bar rule id into the KV current-state; the LOG keeps everything.
+        // The forming-bar rule (breakout-5-forming-bar) is the sole
+        // completed-candle signal producer after the 20-candle breakout rule
+        // (signal-detection, 2026-09-05) was deleted — N7 on the multi-TF
+        // chain (multi-tf branch above) supersedes it as the entry method.
         // Active-signal indefinite + CLOSED handshake (max-one-active, Option B
         // strict, 2026-08-18): if instrument already ACTIVE, drop new candidate
         // — wait till Position_State(status=CLOSED or ADMIN_CLEAR) from
         // Nautilus/Execution Gateway. No TTL — block survives restarts
         // (checkpointed ValueState) and is cleared only on explicit CLOSED.
         // Stuck ACTIVE never auto-frees — needs CLOSED or admin clear.
-        DataStream<RowData> allSignals = signals.union(formingSignals);
-
-        // --- Low-latency candles Phase 2 (2026-08-29): early-signal path ---
-        // EarlySignalFunction consumes (previews, finals) keyed by instrument:
-        // previews → TENTATIVE candidate (once per window); finals → update
-        // the shared completed-candle lookback + settle the tentative with a
-        // CONFIRM (rule held) or CANCEL (rule failed) row superseding it.
-        //
-        // CRITICAL: early rows (tentative/confirm/cancel) bypass
-        // ActiveSignalFeedbackFunction — the max-one-active gate must not
-        // swallow the CONFIRM because a TENTATIVE set ACTIVE first. They also
-        // bypass the KV current-state sink (CanonicalSignalFilterFunction):
-        // only finals are authoritative for position-opening. Early rows go
-        // to the LOG candidates sink ONLY (auditable supersession chain).
-        DataStream<RowData> earlySignals = null;
-        if (config.earlySignalEnabled() && previews != null) {
-            // CHG-121 (2026-09-01): durable tentative markers for F4 crash
-            // reconciliation — the hook lazily opens the marker store on the
-            // task side; blank table name disables markers (legacy behavior).
-            EarlySignalFunction.TentativeMarkerHook markerHook = null;
-            if (config.tentativeMarkersTable() != null
-                    && !config.tentativeMarkersTable().isEmpty()) {
-                markerHook = new FlussTentativeMarkerHook(
-                        config.bootstrapServers(),
-                        config.database(),
-                        config.tentativeMarkersTable(),
-                        java.time.Duration.ofSeconds(5));
-            }
-            earlySignals = previews
-                    .connect(candles)
-                    .keyBy(
-                            row -> row.getLong(CandlePreviewColumns.INSTRUMENT_TOKEN),
-                            row -> row.getLong(CandleTableColumns.INSTRUMENT_TOKEN))
-                    .process(new EarlySignalFunction(config, markerHook))
-                    .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
-                    .name("early-signal")
-                    .uid("early-signal");
-        }
+        DataStream<RowData> allSignals = formingSignals;
 
         FlussSource<RowData> positionStateSource = FlussSource.<RowData>builder()
                 .setBootstrapServers(config.bootstrapServers())
@@ -655,25 +594,6 @@ public final class SignalJob {
                                 .build())
                 .name("signal-candidates-current-sink")
                 .uid("signal-candidates-current-sink");
-
-        // Early-signal rows → LOG candidates sink ONLY (bypasses the
-        // active-signal gate + KV current filter — see the Phase 2 comment
-        // above). Tentative/confirm/cancel are an auditable supersession
-        // chain; the authoritative position trigger stays the gated finals.
-        if (earlySignals != null) {
-            earlySignals
-                    .sinkTo(FlussSink.<RowData>builder()
-                                    .setBootstrapServers(config.bootstrapServers())
-                                    .setDatabase(config.database())
-                                    .setTable(config.signalCandidatesTable())
-                                    .setSerializationSchema(new RowDataSerializationSchema(true, true))
-                                    .setOption("client.request-timeout",
-                                            config.sinkWriteStallTimeoutMs() + "ms")
-                                    .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                                    .build())
-                    .name("early-signal-candidates-sink")
-                    .uid("early-signal-candidates-sink");
-        }
 
         // Execution intent is a separate, explicitly disabled-by-default
         // branch. It consumes the immutable candidate stream but does not

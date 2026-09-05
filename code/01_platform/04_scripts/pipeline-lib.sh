@@ -2,10 +2,10 @@
 # =============================================================================
 # pipeline-lib.sh — shared orchestration for the pipeline harness scripts.
 #
-# Sourced (never executed directly) by loadtest-preview.sh and
-# holistic-measure.sh. Provides ONE battle-tested bring-up/teardown/metric
-# path so gate scripts and measurement scripts cannot drift apart
-# (decision 2026-08-30).
+# Sourced (never executed directly) by holistic-measure.sh (and formerly
+# loadtest-preview.sh, deleted 2026-09-05 with the early-signal rule it
+# drove). Provides ONE battle-tested bring-up/teardown/metric path so gate
+# scripts and measurement scripts cannot drift apart (decision 2026-08-30).
 #
 # Contract with the sourcing script:
 #   - The source script MUST define, BEFORE sourcing this file:
@@ -877,8 +877,6 @@ pipeline_submit_job() {
     -e WATERMARK_OUT_OF_ORDER_MS="${WATERMARK_OUT_OF_ORDER_MS:-500}" \
     -e CHECKPOINT_INTERVAL_MS="${CHECKPOINT_INTERVAL_MS:-60000}" -e CHECKPOINT_TIMEOUT_MS="${CHECKPOINT_TIMEOUT_MS:-30000}" -e MAX_CONCURRENT_CHECKPOINTS=1 \
     -e PREVIEW_ENABLED=true -e PREVIEW_INTERVAL_MS="${PREVIEW_INTERVAL_MS:-500}" \
-    -e EARLY_SIGNAL_ENABLED=true -e EARLY_SIGNAL_CONFIRM_AFTER_MS=4000 \
-    -e SIGNAL_LOOKBACK_CANDLES=2 \
     -e RESTART_MAX_ATTEMPTS="${RESTART_MAX_ATTEMPTS:-3}" \
     -e RESTART_DELAY_MS="${RESTART_DELAY_MS:-30000}" \
     -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 \
