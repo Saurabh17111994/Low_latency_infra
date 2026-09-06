@@ -149,8 +149,8 @@ Harness: `code/01_platform/04_scripts/stage-capture.sh` + `stage_capture_parse.p
 (unit-tested, `tests/test_stage_capture_parse.py`, 5/5). Evidence:
 `logs/tracker-14/stage-capture-20260901-224849` (15 min, 5 s sampling, 10 Hz
 feed = 10,240/s, cp 30 s/60 s) and `...-230629` (90 s with real
-busyTimeMsPerSecond). Plan:
-`docs/plans/2026-09-01-stage-throughput-latency-detection-plan.md`.
+busyTimeMsPerSecond). Harness provenance: this report's stage-capture design (the standalone plan
+doc was removed in the 2026-09-06 closed-plan sweep).
 
 ### Measured
 

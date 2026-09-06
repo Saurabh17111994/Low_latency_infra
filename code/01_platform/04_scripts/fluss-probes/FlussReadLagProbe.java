@@ -15,7 +15,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * FlussReadLagProbe — B2 CP3-side passive sampler (plan
- * docs/plans/2026-09-01-stage-throughput-latency-detection-plan.md, Stage B2).
+ * docs/Investigations_and_Reports/2026-09-01-throughput-degradation.md, Stage B2).
  *
  * Prints the Fluss LOG log-end offsets (admin.listOffsets with LatestSpec)
  * for one table, summed across EVERY partition and bucket, one line per

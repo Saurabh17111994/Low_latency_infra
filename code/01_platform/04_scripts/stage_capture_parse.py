@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """stage_capture_parse.py — offline analysis for stage-capture.sh outputs.
 
-Computes, per operator and per time window, the divergence metrics named in
-docs/plans/2026-09-01-stage-throughput-latency-detection-plan.md:
+Computes, per operator and per time window, the divergence metrics of the
+stage-capture harness (see docs/Investigations_and_Reports/2026-09-01-throughput-degradation.md):
 
   - in_rate / out_rate (records/s, from consecutive samples of the summed
     counters)

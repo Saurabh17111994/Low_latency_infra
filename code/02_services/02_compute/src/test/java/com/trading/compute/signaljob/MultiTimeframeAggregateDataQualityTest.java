@@ -33,7 +33,7 @@ import org.junit.jupiter.api.Test;
 /**
  * Phase 2 DATA-QUALITY verifier for the multi-timeframe candle aggregator.
  * Independent, black-box, pinned-API only — does NOT read operator internals.
- * Design doc: docs/plans/2026-09-05-multitimeframe-candle-aggregator-design.md
+ * Design: multi-timeframe candle aggregator (2026-09-05, implemented Phases 0-5 + cutover).
  * §G (battery), §D (bucket math), §E (event flow), §F (output contracts).
  *
  * Pinned API:

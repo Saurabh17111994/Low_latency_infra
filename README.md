@@ -13,8 +13,7 @@ Fills are captured independently by a separate Action Capture service.
 > **Branch context (read before any work):** all work happens directly on `main`
 > (single-branch workflow; the old two-branch split is retired). Verify with
 > `git branch --show-current` before changing code; see `AGENTS.md` → "Branch Context"
-> and the implementation contract `docs/plans/2026-08-27-low-latency-ingestion-contract.md`
-> (its §6 T1–T9 are the sanctioned implementation steps).
+> and the ingestion dossier `docs/08_implementation/03-ingestion.md`.
 
 ---
 

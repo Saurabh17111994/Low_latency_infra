@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# stage-capture.sh — aligned per-stage latency/throughput capture (plan:
-# docs/plans/2026-09-01-stage-throughput-latency-detection-plan.md, Stage A).
+# stage-capture.sh — aligned per-stage latency/throughput capture (harness of
+# docs/Investigations_and_Reports/2026-09-01-throughput-degradation.md).
 #
 # Samples, every CAPTURE_INTERVAL_S (default 5), ALL stages of the RUNNING
 # SignalJob on one timeline:
@@ -42,8 +42,8 @@ OUT_DIR="${OUT_DIR:-logs/tracker-14/stage-capture-$(date +%Y%m%d-%H%M%S)}"
 # the ingestion JVM's OTLP metrics payloads (java.out) into ingestion.tsv and
 # runs the two passive Fluss probes (read-lag.tsv = log-end offsets; the Flink
 # consumed side is offline from stages.tsv; consumer-read.tsv = KV preview
-# lookups). All probes are read-only admin/KV calls (<= 1/s); see
-# docs/plans/2026-09-01-stage-throughput-latency-detection-plan.md Stage B2.
+# lookups). All probes are read-only admin/KV calls (<= 1/s); Stage B2 of the
+# throughput-degradation investigation (same report as above).
 # Enabled-but-broken FAILS FAST (see probe_* below) — a silent gap in the
 # measurement timeline is worse than no capture.
 INGESTION_JAVA_OUT="${INGESTION_JAVA_OUT:-}"

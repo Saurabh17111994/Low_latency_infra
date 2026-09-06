@@ -83,7 +83,7 @@ public class CanonicalSignalFilterFunction extends RichFilterFunction<RowData> {
                 // the second pinned canonical rule id — its candidates reach
                 // the KV current-state like candle candidates (REQ-SS-003 +
                 // DEC-035 dual-sink). N7 (2026-09-05): the N7 range-breakout
-                // rule is the third admitted id (n7-signal-design.md).
+                // rule is the third admitted id.
                 SignalCandidatesTableColumns.CANONICAL_FORMING_RULE_ID,
                 SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID)
                 || (!extraRuleIds.isEmpty() && CanonicalSignalPolicy.isCanonicalIn(

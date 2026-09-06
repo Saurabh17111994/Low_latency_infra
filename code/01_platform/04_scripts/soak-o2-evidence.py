@@ -36,20 +36,18 @@ QUERIES = [
      'sum(flink_taskmanager_job_task_numrecordsinpersecond{task_name="multi_tf_aggregator"})'),
     ("source_in_per_s",
      'sum(flink_taskmanager_job_task_numrecordsinpersecond{task_name="Source:_raw_table_1____raw_validation"})'),
-    ("old_closed_sink_per_s",
-     'sum(flink_taskmanager_job_task_numrecordsinpersecond{task_name="feature_candles_15s_sink:_Writer"})'),
     ("new_closed_sink_per_s",
      'sum(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_closed_sink:_Writer"})'),
     ("new_live_sink_per_s",
      'sum(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_live_sink:_Writer"})'),
     ("multitf_signal_emitted",
-     "max(flink_taskmanager_job_task_operator_compute_multitf_signal_emitted)"),
+     'sum by (strategy) (flink_taskmanager_job_task_operator_strategy_emitted)'),
     ("multitf_signal_suppressed",
-     "max(flink_taskmanager_job_task_operator_compute_multitf_signal_suppressed)"),
+     'sum by (strategy) (flink_taskmanager_job_task_operator_strategy_suppressed)'),
     ("multitf_duplicate_window",
      "max(flink_taskmanager_job_task_operator_compute_candles_multitf_duplicate_window)"),
     ("new_signal_sink_per_s",
-     'sum(flink_taskmanager_job_task_numrecordsinpersecond{task_name="multitf_signal_candidates_sink:_Writer"})'),
+     'sum(flink_taskmanager_job_task_numrecordsinpersecond{task_name="strategy_host_candidates_current_sink:_Writer"})'),
 ]
 
 

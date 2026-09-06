@@ -1,5 +1,5 @@
-"""Unit tests for stage_capture_parse.py (Stage A harness, plan:
-docs/plans/2026-09-01-stage-throughput-latency-detection-plan.md).
+"""Unit tests for stage_capture_parse.py (Stage A harness of the
+throughput-degradation investigation).
 
 Fixture-based — no live Flink dependency.
 """

@@ -87,8 +87,10 @@ when behavior, schemas, or interfaces change.
 - **Before starting any task, verify the current branch:**
   `git branch --show-current` — it MUST be `main`. If it is not, do NOT edit code;
   switch first (or ask the operator).
-- The low-latency implementation contract is `docs/plans/2026-08-27-low-latency-ingestion-contract.md`.
-  Its §6 T1–T9 are the ONLY sanctioned implementation steps for this work.
+- The low-latency ingestion rewrite is **complete and contract-closed** (2026-08-31;
+  its implementation contract was deleted as part of the 2026-09-06 closed-plan sweep).
+  The ingestion dossier `docs/08_implementation/03-ingestion.md` is the current source
+  of truth for the ingestion services.
 - The legacy `streaming_project` repository (old `main` line, gateway/compute/EOD
   history) is archived/retired. The full platform history is reachable from this
   repository's `main` (old `main` is an ancestor of the current line).

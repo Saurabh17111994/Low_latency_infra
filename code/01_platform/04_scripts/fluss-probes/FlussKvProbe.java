@@ -12,7 +12,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * FlussKvProbe — B2 CP9-&gt;CP10 passive sampler (plan
- * docs/plans/2026-09-01-stage-throughput-latency-detection-plan.md, Stage B2).
+ * docs/Investigations_and_Reports/2026-09-01-throughput-degradation.md, Stage B2).
  *
  * KV point-lookup probe: looks up candle rows by PK
  * (instrument_token, tf, window_start) for the CURRENT 15s window of a small

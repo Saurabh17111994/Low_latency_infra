@@ -103,7 +103,7 @@ KNOWN_COMMAND_LIVE_STREAMS = {
     "flink_jobmanager_numregisteredtaskmanagers",
     "flink_jobmanager_job_numberoffailedcheckpoints",
     "flink_taskmanager_job_task_numrecordsinpersecond",
-    "flink_taskmanager_job_task_operator_compute_multitf_signal_emitted",
+    "flink_taskmanager_job_task_operator_strategy_emitted",
     "otelcol_exporter_send_failed_metric_points",
     "node_filesystem_avail_bytes",
     "bridge_connection_epoch",
@@ -409,19 +409,19 @@ DASHBOARDS = [
     },
     {
         "title": "COMPUTE - Candle Health",
-        "description": "Candle KV sink health (user requirement 2026-08-13: candle tables are KV-only, no LOG+KV twin — the LOG-vs-KV divergence view was removed with the KV twin). Upserts = feature_candles_15s sink numRecordsIn (one upsert per closed window).",
+        "description": "Candle KV sink health (user requirement 2026-08-13: candle tables are KV-only, no LOG+KV twin — the LOG-vs-KV divergence view was removed with the KV twin). Upserts = candle_closed sink numRecordsIn (one upsert per closed window).",
         "folder": "COMPUTE",
         "panels": [
             (
                 "Candle sink upserts (total)",
                 "promql",
-                'max(flink_taskmanager_job_task_numrecordsin{task_name="feature_candles_15s_sink:_Writer"})',
+                'max(flink_taskmanager_job_task_numrecordsin{task_name="candle_closed_sink:_Writer"})',
                 "flink_taskmanager_job_task_numrecordsin",
             ),
             (
                 "Candle sink rate (upserts/s)",
                 "promql",
-                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="feature_candles_15s_sink:_Writer"})',
+                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_closed_sink:_Writer"})',
                 "flink_taskmanager_job_task_numrecordsinpersecond",
             ),
             (
@@ -641,13 +641,13 @@ DASHBOARDS = [
         # 2026-09-04: post_close 3.3M -> 11.4M visible in O2 query_range;
         # task_name labels multi_tf_aggregator / *_sink:_Writer confirmed).
         "title": "COMPUTE - Multi-Timeframe",
-        "description": "Multi-TF side-by-side branch health (Phase 5): branch throughput old-vs-new, aggregator input, session-filter drops, closed/live sink rates, signal emitted vs suppressed (design doc docs/plans/2026-09-05-multitimeframe-candle-aggregator-design.md).",
+        "description": "Multi-TF side-by-side branch health (Phase 5): branch throughput old-vs-new, aggregator input, session-filter drops, closed/live sink rates, signal emitted vs suppressed (multi-TF aggregator chain).",
         "folder": "COMPUTE",
         "panels": [
             (
                 "Branch throughput old vs new (records/s)",
                 "promql",
-                'sum by (task_name) (flink_taskmanager_job_task_numrecordsinpersecond{task_name=~"multi_tf_aggregator|candle_closed_first_write_wins|candle_15s_____candle_late_drop_counter__candle_invalid_quarantine_"})',
+                'sum by (task_name) (flink_taskmanager_job_task_numrecordsinpersecond{task_name=~"multi_tf_aggregator|candle_closed_sink:_Writer|candle_live_sink:_Writer|strategy_host_candidates_current_sink:_Writer"})',
                 "flink_taskmanager_job_task_numrecordsinpersecond",
             ),
             (
@@ -681,27 +681,21 @@ DASHBOARDS = [
                 "flink_taskmanager_job_task_numrecordsinpersecond",
             ),
             (
-                "Old closed-sink rate (upserts/s)",
+                "Strategy signals emitted (cumulative, per rule)",
                 "promql",
-                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="feature_candles_15s_sink:_Writer"})',
-                "flink_taskmanager_job_task_numrecordsinpersecond",
+                'max by (strategy) (flink_taskmanager_job_task_operator_strategy_emitted)',
+                "flink_taskmanager_job_task_operator_strategy_emitted",
             ),
             (
-                "Multi-TF signals emitted (cumulative)",
+                "Strategy dedup-suppressed emissions (cumulative)",
                 "promql",
-                "max(flink_taskmanager_job_task_operator_compute_multitf_signal_emitted)",
-                "flink_taskmanager_job_task_operator_compute_multitf_signal_emitted",
-            ),
-            (
-                "Multi-TF signals suppressed by latch (cumulative)",
-                "promql",
-                "max(flink_taskmanager_job_task_operator_compute_multitf_signal_suppressed)",
-                "flink_taskmanager_job_task_operator_compute_multitf_signal_suppressed",
+                'max by (strategy) (flink_taskmanager_job_task_operator_strategy_suppressed)',
+                "flink_taskmanager_job_task_operator_strategy_suppressed",
             ),
             (
                 "New signal-sink rate (rows/s)",
                 "promql",
-                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="multitf_signal_candidates_sink:_Writer"})',
+                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="strategy_host_candidates_current_sink:_Writer"})',
                 "flink_taskmanager_job_task_numrecordsinpersecond",
             ),
             (
@@ -843,8 +837,8 @@ DASHBOARDS = [
             (
                 "New trade ideas so far (total)",
                 "promql",
-                "max(flink_taskmanager_job_task_operator_compute_multitf_signal_emitted)",
-                "flink_taskmanager_job_task_operator_compute_multitf_signal_emitted",
+                'sum by (strategy) (flink_taskmanager_job_task_operator_strategy_emitted)',
+                "flink_taskmanager_job_task_operator_strategy_emitted",
                 "ideas",
                 "Cumulative signal count.",
             ),
@@ -1125,7 +1119,7 @@ ALERTS = [
         name="SIGNAL-warn-candle-sink-zero",
         stream="flink_taskmanager_job_task_numrecordsinpersecond",
         conditions=[
-            ("task_name", "=", "feature_candles_15s_sink:_Writer"),
+            ("task_name", "=", "candle_closed_sink:_Writer"),
             ("value", "=", 0),
         ],
         period=2,
@@ -1243,7 +1237,7 @@ ALERTS = [
         desc="[Warning/compute] Source consuming < 5,000 rec/s (50% of design rate) for 5 min while the job runs: partial feed degradation (broker throttle / partial subscription); recovery = rate recovers (quiesced dev feeds false-fire by design)",
     ),
     # --- 2026-09-05 Phase 5 multi-TF side-by-side (design doc
-    # docs/plans/2026-09-05-multitimeframe-candle-aggregator-design.md).
+    # multi-TF chain (Phase 5 of the multi-timeframe aggregator work).
     # All three series are registered by the new operators
     # (MultiTimeframeAggregateFunction / MultiTimeframeSignalProducer) and
     # flow to O2 on the existing Flink->Prometheus->remote-write path with
@@ -1273,8 +1267,8 @@ ALERTS = [
     ),
     dict(
         name="SIGNAL-warn-multitf-signal-suppressed",
-        stream="flink_taskmanager_job_task_operator_compute_multitf_signal_suppressed",
-        promql="sum(increase(flink_taskmanager_job_task_operator_compute_multitf_signal_suppressed[600s]))",
+        stream="flink_taskmanager_job_task_operator_strategy_suppressed",
+        promql="sum(increase(flink_taskmanager_job_task_operator_strategy_suppressed[600s]))",
         promql_condition=(">", 1000),
         period=1,
         desc="[Warning/compute] Multi-TF fire-once latch suppressing >1000 candidate signals / 10 min: rule stuck true on forming candles or latch not clearing at boundaries; recovery = suppression rate falls",

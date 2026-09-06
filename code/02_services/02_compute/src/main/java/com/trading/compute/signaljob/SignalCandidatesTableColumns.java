@@ -93,7 +93,7 @@ public final class SignalCandidatesTableColumns {
     /**
      * Third pinned canonical rule id (N7 range-contraction entry, 2026-09-05):
      * the N7 operator's rule. The KV current-state filter admits this id too
-     * (design {@code docs/plans/2026-09-05-n7-signal-design.md}) so N7
+     * so N7
      * candidates reach the KV current-state projection like the forming-bar
      * rule's. Same canonical strategy identity; the LOG keeps every signal.
      */
