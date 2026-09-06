@@ -15,13 +15,13 @@ MVN := mvn $(MVN_FLAGS)
 # with a clear message if the current branch is wrong.
 branch-check:
 	@branch=$$(git branch --show-current); \
-	if [ "$$branch" != "low-latency-ingestion-based-project" ]; then \
-		echo "ERROR: on branch '$$branch' — low-latency work is ONLY allowed on"; \
-		echo "       'low-latency-ingestion-based-project'. Switch first or ask the operator."; \
+	if [ "$$branch" != "main" ]; then \
+		echo "ERROR: on branch '$$branch' — work is ONLY allowed on"; \
+		echo "       'main'. Switch first or ask the operator."; \
 		echo "       (AGENTS.md 'Branch Context'; contract §header)."; \
 		exit 1; \
 	fi; \
-	echo "OK: on low-latency-ingestion-based-project"
+	echo "OK: on main"
 
 # Regenerate protobuf code (T1). Requires protoc + protoc-gen-go on PATH.
 # Outputs: go-bridge/marketdata/market_data.pb.go + Java transport classes.

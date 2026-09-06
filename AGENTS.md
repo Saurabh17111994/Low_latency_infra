@@ -80,16 +80,15 @@ when behavior, schemas, or interfaces change.
 
 ## Branch Context (read this before ANY change)
 
-- **Active low-latency work lives on branch `low-latency-ingestion-based-project`.** All
-  commits for the low-latency ingestion rewrite (contract, proto, Go batcher, Java
-  writer, integration, perf) go ONLY to that branch.
-- **`main` is the stable production branch.** Never commit low-latency work to `main`;
-  never merge this branch into `main` without explicit operator sign-off.
+- **The `Low_latency_infra` repository's `main` branch is the single working branch.**
+  All work (low-latency ingestion rewrite and the rest of the platform) happens
+  directly on `main`. The old two-branch split is retired: `main` now contains the
+  low-latency history (contract, proto, Go batcher, Java writer, integration, perf).
 - **Before starting any task, verify the current branch:**
-  `git branch --show-current` — if it is NOT `low-latency-ingestion-based-project`, do
-  NOT edit code; switch first (or ask the operator).
+  `git branch --show-current` — it MUST be `main`. If it is not, do NOT edit code;
+  switch first (or ask the operator).
 - The low-latency implementation contract is `docs/plans/2026-08-27-low-latency-ingestion-contract.md`.
   Its §6 T1–T9 are the ONLY sanctioned implementation steps for this work.
-- Do not confuse the low-latency branch with `main`: `main` contains the pre-existing
-  platform (gateway, compute, EOD, DDL tools). Low-latency files (proto/, batch.go,
-  BoundedQueue.java, WriterWorker.java) are new files created by THIS branch's tasks.
+- The legacy `streaming_project` repository (old `main` line, gateway/compute/EOD
+  history) is archived/retired. The full platform history is reachable from this
+  repository's `main` (old `main` is an ancestor of the current line).

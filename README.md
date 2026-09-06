@@ -10,12 +10,11 @@ Fills are captured independently by a separate Action Capture service.
 > Repository layout follows a **Spec-Driven Development (SDD)** structure.
 > This README is a discoverability map — see each directory's docs for detail.
 
-> **Branch context (read before any work):** the **low-latency ingestion rewrite** is
-> implemented exclusively on branch `low-latency-ingestion-based-project` — never on
-> `main`. `main` is the stable production branch. Verify with `git branch --show-current`
-> before changing code; see `AGENTS.md` → "Branch Context" and the implementation
-> contract `docs/plans/2026-08-27-low-latency-ingestion-contract.md` (its §6 T1–T9 are
-> the sanctioned implementation steps).
+> **Branch context (read before any work):** all work happens directly on `main`
+> (single-branch workflow; the old two-branch split is retired). Verify with
+> `git branch --show-current` before changing code; see `AGENTS.md` → "Branch Context"
+> and the implementation contract `docs/plans/2026-08-27-low-latency-ingestion-contract.md`
+> (its §6 T1–T9 are the sanctioned implementation steps).
 
 ---
 
