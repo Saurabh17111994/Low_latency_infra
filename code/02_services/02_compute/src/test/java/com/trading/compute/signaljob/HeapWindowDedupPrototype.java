@@ -10,8 +10,7 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.util.Collector;
 
 /**
- * Step-0 prototype for the dedup redesign (plan
- * {@code docs/plans/2026-09-03-dedup-redesign-plan.md}). Operator-local
+ * Step-0 prototype for the heap-window dedup redesign (2026-09-03). Operator-local
  * count-windowed repeat filter. TEST TREE ONLY — not production code. The Step
  * 1 implementation will be modeled on this after the speed decision.
  *
