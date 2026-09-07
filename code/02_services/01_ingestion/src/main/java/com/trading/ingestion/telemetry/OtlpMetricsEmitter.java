@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -75,6 +76,13 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
     private final boolean localLogEnabled;
     private final ScheduledExecutorService scheduler;
     private volatile boolean closed;
+    // P1-099: single-flight flush guard + idempotent close. A periodic flush
+    // in-flight during close() previously overlapped the final flush (split
+    // ring windows across two POSTs / duplicate POSTs) and the scheduler
+    // thread lingered (no awaitTermination).
+    private final AtomicBoolean flushing = new AtomicBoolean(false);
+    private final AtomicBoolean closeStarted = new AtomicBoolean(false);
+    private final AtomicBoolean startStarted = new AtomicBoolean(false);
 
     // ---- Counters ----
     private final AtomicLong tickCount = new AtomicLong(0);
@@ -211,17 +219,54 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
 
     /** Start periodic flush (every 10s). Call once after wiring all recording sites. */
     public void start() {
+        // P1-258: second start() is a wiring bug — ignore with a warn instead
+        // of scheduling a duplicate 10s POST loop.
+        if (!startStarted.compareAndSet(false, true)) {
+            LOG.warn("otlp-metrics: start() called twice — ignoring repeat start");
+            return;
+        }
         scheduler.scheduleAtFixedRate(this::flush, 10, 10, TimeUnit.SECONDS);
         LOG.info("otlp-metrics: started (collector={}, interval=10s)", collectorUrl);
     }
 
     @Override
     public void close() {
+        // Idempotent: only the first closer runs the shutdown sequence.
+        if (!closeStarted.compareAndSet(false, true)) return;
         // R-035: the final flush must run BEFORE the closed flag is set —
         // flush() returns immediately when closed, so setting it first would
         // silently discard up to 10s of buffered metrics on every shutdown.
         scheduler.shutdown();
-        flush(); // final flush before shutdown
+        try {
+            if (!scheduler.awaitTermination(6, TimeUnit.SECONDS)) {
+                LOG.warn("otlp-metrics: scheduler did not stop in 6s; forcing");
+                scheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            scheduler.shutdownNow();
+        }
+        // Final flush with explicit single-flight acquisition (bounded 5s
+        // wait): never overlaps a straggler periodic flush, never skipped
+        // silently — a still-running periodic flush POSTs its own window, so
+        // worst case the final POST is redundant, never lost AND never torn.
+        // Residual: if the guard never frees within 5s the final POST is
+        // skipped with a loud warn (accepted — pathological 11s+ stall).
+        long deadline = System.nanoTime()
+                + TimeUnit.SECONDS.toNanos(5);
+        while (!flushing.compareAndSet(false, true)) {
+            if (System.nanoTime() >= deadline) {
+                LOG.warn("otlp-metrics: final flush skipped (periodic flush stuck)");
+                closed = true;
+                return;
+            }
+            Thread.yield();
+        }
+        try {
+            flushInternal();
+        } finally {
+            flushing.set(false);
+        }
         closed = true;
         LOG.info("otlp-metrics: closed");
     }
@@ -270,14 +315,26 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
     public void setManifestVersion(long v) { manifestVersion = v; }
     public void incrementDecodeError(String reason) {
         decodeErrors.incrementAndGet();
+        // P1-100: normalize null/blank to "unknown" FIRST — ConcurrentHashMap
+        // rejects null keys, so the old containsKey(null) threw NPE even
+        // though the downstream scrubber is null-tolerant.
+        String key = (reason == null || reason.isBlank()) ? "unknown" : reason;
         // R-258: bounded reason map — beyond 32 distinct reasons everything
         // aggregates into "other" so a long-running process cannot grow the
-        // map without bound.
-        if (decodeReasonCounters.size() >= 32 && !decodeReasonCounters.containsKey(reason)) {
-            decodeReasonCounters.computeIfAbsent("other", k -> new AtomicLong(0)).incrementAndGet();
+        // map without bound. Fast path for known keys; the check+insert is
+        // atomic under the map lock (the old check-then-act could overshoot
+        // 32 under concurrency and was the NPE site for nulls).
+        if (decodeReasonCounters.containsKey(key)) {
+            decodeReasonCounters.get(key).incrementAndGet();
             return;
         }
-        decodeReasonCounters.computeIfAbsent(reason, k -> new AtomicLong(0)).incrementAndGet();
+        synchronized (decodeReasonCounters) {
+            if (decodeReasonCounters.size() >= 32 && !decodeReasonCounters.containsKey(key)) {
+                decodeReasonCounters.computeIfAbsent("other", k -> new AtomicLong(0)).incrementAndGet();
+            } else {
+                decodeReasonCounters.computeIfAbsent(key, k -> new AtomicLong(0)).incrementAndGet();
+            }
+        }
     }
     public void incrementFingerprint() { fingerprintCount.incrementAndGet(); }
     public void setClockOffsetMs(long v) { clockOffsetMs = v; }
@@ -308,6 +365,12 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
 
     /** Capacity used percent for a slot (plan ING-CAP-001). */
     public void setSlotCapacityUsedPercent(String slotId, double percent) {
+        // P1-259: one NaN/Inf gauge poisons the whole 10s POST (invalid JSON
+        // numbers) — reject non-finite, keep the previous value.
+        if (!Double.isFinite(percent)) {
+            LOG.warn("otlp-metrics: rejecting non-finite slot gauge {}={}", slotId, percent);
+            return;
+        }
         SlotMetricState s = slotStates.computeIfAbsent(slotId, ignored -> new SlotMetricState());
         s.capacityUsedPercent = percent;
     }
@@ -343,7 +406,14 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
     public void setChildProcessAlive(boolean v) { childProcessAlive = v ? 1 : 0; }
     public void setProcessOpenFds(long v) { processOpenFds = v; }
     public void setProcessFdLimit(long v) { processFdLimit = v; }
-    public void setProcessFdUsagePercent(double v) { processFdUsagePercent = v; }
+    public void setProcessFdUsagePercent(double v) {
+        // P1-259: same NaN/Inf guard as the slot gauges — keep previous value.
+        if (!Double.isFinite(v)) {
+            LOG.warn("otlp-metrics: rejecting non-finite fd-usage gauge {}", v);
+            return;
+        }
+        processFdUsagePercent = v;
+    }
     public void setProcessRssBytes(long v) { processRssBytes = v; }
     public void setGoGoroutines(long v) { goGoroutines = v; }
     public void setJvmThreadsLive(long v) { jvmThreadsLive = v; }
@@ -358,6 +428,18 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
 
     private void flush() {
         if (closed) return;
+        // P1-099 single-flight: concurrent periodic/forced flushes collapse
+        // to one POST instead of interleaving (split windows/duplicates).
+        if (!flushing.compareAndSet(false, true)) return;
+        try {
+            flushInternal();
+        } finally {
+            flushing.set(false);
+        }
+    }
+
+    /** Flush body — caller must hold the single-flight guard (or be close()). */
+    private void flushInternal() {
         try {
             String json = buildMetricsJson();
             if (json == null) return;

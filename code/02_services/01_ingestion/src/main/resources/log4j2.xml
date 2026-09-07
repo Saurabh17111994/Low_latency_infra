@@ -17,7 +17,8 @@
          container recreate). Launchers override via -Dlog.dir or LOG_DIR. -->
     <Property name="LOG_DIR">${sys:log.dir:-${env:LOG_DIR:-/data/ingestion/logs}}</Property>
     <Property name="HOST">${env:HOSTNAME:-${env:COMPUTERNAME:-unknown}}</Property>
-    <Property name="ENV">${env:DEPLOY_ENV:-dev}</Property>
+    <!-- P1-077: canonical DEPLOYMENT_ENV first (DEPLOY_ENV alias), same rule as IngestionConfig. -->
+    <Property name="ENV">${env:DEPLOYMENT_ENV:-${env:DEPLOY_ENV:-dev}}</Property>
     <Property name="VM_ID">${env:VM_ID:-vm0}</Property>
 
     <!-- R-119: render the MDC correlation_id exactly ONCE (the old pattern
@@ -37,17 +38,24 @@
     <!-- File — JSON structured log, rolling daily + size-based           -->
     <!-- Matches the OpenObserve contract: docs/04_contracts/openobserve.md -->
     <!-- ================================================================ -->
+    <!-- P1-132: HOST+VM_ID in the name — LOG_DIR lives on a volume shared
+         with the collector (and any second replica), so a fixed ingestion.json
+         would interleave/corrupt across writers. The collector tails
+         *.json (verified) and the Delete glob below still matches. -->
     <RollingFile name="JSON_FILE"
-                 fileName="${LOG_DIR}/ingestion.json"
-                 filePattern="${LOG_DIR}/ingestion-%d{yyyy-MM-dd}-%i.json.gz"
+                 fileName="${LOG_DIR}/ingestion-${HOST}-${VM_ID}.json"
+                 filePattern="${LOG_DIR}/ingestion-${HOST}-${VM_ID}-%d{yyyy-MM-dd}-%i.json.gz"
                  immediateFlush="true">
       <JsonLayout compact="true" eventEol="true" properties="true"
                   includeStacktrace="true" stacktraceAsString="true">
         <!-- R-161: JsonLayout properties=true serializes only the ThreadContext
              (MDC) map — configuration <Property> values are NOT emitted.
              KeyValuePair adds the operator-visible host/env/vm_id fields. -->
+        <!-- P1-134: contract §F requires `environment`, not `env`.
+             (service/component/subsystem static enrichment rides with the
+             P1-133 template decision — no invented taxonomy here.) -->
         <KeyValuePair key="host" value="${HOST}"/>
-        <KeyValuePair key="env" value="${ENV}"/>
+        <KeyValuePair key="environment" value="${ENV}"/>
         <KeyValuePair key="vm_id" value="${VM_ID}"/>
       </JsonLayout>
       <Policies>

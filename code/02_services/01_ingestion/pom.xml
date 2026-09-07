@@ -72,6 +72,18 @@
 
     <!-- Zstd decompression moved to Go arrow-bridge (official Arrow SDK). -->
 
+    <!-- OpenTelemetry API for 3 hand-placed batch-level spans (phase 2).
+         Version 1.44.1 pairs with the v2.9.0 javaagent in the image (its
+         SDK implements these exact 1.x interfaces; 1.x is backward-stable).
+         API-only: no SDK/exporter bundled — with the agent present,
+         GlobalOpenTelemetry resolves to the agent's SDK and spans export via
+         the collector; without it (tests, bare JVM) every call is a no-op. -->
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-api</artifactId>
+      <version>1.44.1</version>
+    </dependency>
+
     <!-- Test -->
     <dependency>
       <groupId>org.junit.jupiter</groupId>
@@ -92,13 +104,36 @@
             <phase>package</phase>
             <goals><goal>shade</goal></goals>
             <configuration>
+              <!-- P1-052: fluss-client bundles a full slf4j-api 1.7 copy
+                   (org/slf4j/**, verified in fluss-client-0.9.1). Declaration
+                   order only affects the test classpath — the shaded fat jar
+                   needs a structural exclusion or 1.7 classes collide with
+                   our 2.x API (NoSuchMethodError/LinkageError, not just NOP).
+                   Kept minimal: filter only (no enforcer plugin — no new
+                   build deps, nothing else duplicates today). -->
+              <filters>
+                <filter>
+                  <artifact>org.apache.fluss:fluss-client</artifact>
+                  <excludes>
+                    <exclude>org/slf4j/**</exclude>
+                  </excludes>
+                </filter>
+              </filters>
               <transformers>
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <mainClass>com.trading.ingestion.IngestionService</mainClass>
                 </transformer>
                 <!-- R-060: merge META-INF/services provider files (Fluss client,
-                     Arrow) and Log4j2 plugin metadata instead of last-wins, so
-                     ServiceLoader-based providers survive shading. -->
+                     Arrow) instead of last-wins, so ServiceLoader-based
+                     providers survive shading.
+                     P1-053 correction: ServicesResourceTransformer does NOT
+                     merge Log4j2's binary plugin cache (Log4j2Plugins.dat) —
+                     the old comment claimed it did. The dedicated
+                     Log4j2PluginsCacheFileTransformer is absent from the
+                     pinned log4j-core 2.25.4 build (full .m2 scan), so adding
+                     it breaks packaging. Safe today: only log4j-core
+                     contributes a .dat (fluss-client ships none, verified).
+                     Revisit if a second plugin contributor arrives. -->
                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
               </transformers>
             </configuration>

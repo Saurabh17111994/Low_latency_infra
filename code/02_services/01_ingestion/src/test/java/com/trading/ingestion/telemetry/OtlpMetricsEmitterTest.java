@@ -12,8 +12,13 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import com.sun.net.httpserver.HttpServer;
+import java.net.InetSocketAddress;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.core.Layout;
 import org.apache.logging.log4j.core.LogEvent;
@@ -232,6 +237,149 @@ class OtlpMetricsEmitterTest {
             assertEquals(true, seen.get(), "health callback must fire on flush");
         } finally {
             emitter.close();
+        }
+    }
+
+    @Test
+    @DisplayName("P1-100: null/blank decode reasons count as unknown instead of NPE-ing")
+    void nullReasonCountedAsUnknown() {
+        OtlpMetricsEmitter emitter = new OtlpMetricsEmitter("127.0.0.1:1", "test-instance");
+        try {
+            // Old code: containsKey(null) on a ConcurrentHashMap throws NPE.
+            emitter.incrementDecodeError(null);
+            emitter.incrementDecodeError(null);
+            emitter.incrementDecodeError("   ");
+            String json = emitter.buildMetricsJson();
+            assertTrue(json.contains("unknown"),
+                    "null/blank reasons must aggregate under unknown");
+        } finally {
+            emitter.close();
+        }
+    }
+
+    @Test
+    @DisplayName("P1-100: reason map stays bounded via other (R-258 regression pin)")
+    void reasonMapBoundedViaOther() {
+        OtlpMetricsEmitter emitter = new OtlpMetricsEmitter("127.0.0.1:1", "test-instance");
+        try {
+            for (int i = 0; i < 40; i++) {
+                emitter.incrementDecodeError("reason-" + i);
+            }
+            // Single-threaded bound held on old code too — regression pin
+            // that the synchronized rewrite did not break R-258 (the
+            // overshoot race it fixes is nondeterministic by nature: closed
+            // by inspection, same precedent as P1-080).
+            assertTrue(emitter.buildMetricsJson().contains("other"),
+                    "reasons beyond 32 must aggregate into other");
+        } finally {
+            emitter.close();
+        }
+    }
+
+    /** Stub collector: counts POSTs and tracks max concurrent POSTs. */
+    static final class CountingCollector implements AutoCloseable {
+        final HttpServer server;
+        final AtomicInteger posts = new AtomicInteger();
+        final AtomicInteger inFlight = new AtomicInteger();
+        final AtomicInteger maxInFlight = new AtomicInteger();
+        final int delayMs;
+
+        CountingCollector(int delayMs) throws Exception {
+            this.delayMs = delayMs;
+            server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            // P1-099: a thread pool is LOAD-BEARING here — the default
+            // executor handles requests sequentially, which would cap
+            // maxInFlight at 1 even with overlapping client POSTs and blind
+            // the overlap assertion. Daemon threads so idle workers never
+            // hold the forked test JVM open.
+            server.setExecutor(java.util.concurrent.Executors.newCachedThreadPool(r -> {
+                Thread th = new Thread(r, "stub-collector");
+                th.setDaemon(true);
+                return th;
+            }));
+            server.createContext("/v1/metrics", ex -> {
+                int cur = inFlight.incrementAndGet();
+                maxInFlight.accumulateAndGet(cur, Math::max);
+                try {
+                    ex.getRequestBody().readAllBytes();
+                    Thread.sleep(delayMs);
+                    byte[] ok = "{}".getBytes();
+                    ex.sendResponseHeaders(200, ok.length);
+                    ex.getResponseBody().write(ok);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    inFlight.decrementAndGet();
+                    ex.close();
+                }
+                posts.incrementAndGet();
+            });
+            server.start();
+        }
+
+        String hostPort() {
+            return "127.0.0.1:" + server.getAddress().getPort();
+        }
+
+        @Override
+        public void close() {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    @DisplayName("P1-099: concurrent flushes collapse to one POST (single-flight)")
+    void concurrentFlushesSingleFlight() throws Exception {
+        try (CountingCollector collector = new CountingCollector(300)) {
+            OtlpMetricsEmitter emitter =
+                    new OtlpMetricsEmitter(collector.hostPort(), "test-instance");
+            try {
+                int threads = 4;
+                CountDownLatch ready = new CountDownLatch(threads);
+                CountDownLatch go = new CountDownLatch(1);
+                Thread[] ts = new Thread[threads];
+                for (int i = 0; i < threads; i++) {
+                    ts[i] = new Thread(() -> {
+                        ready.countDown();
+                        try {
+                            go.await(5, TimeUnit.SECONDS);
+                        } catch (InterruptedException ie) {
+                            Thread.currentThread().interrupt();
+                        }
+                        emitter.forceFlush();
+                    });
+                    ts[i].start();
+                }
+                assertTrue(ready.await(5, TimeUnit.SECONDS), "flushers ready");
+                go.countDown(); // release all 4 into the 300ms POST window
+                for (Thread th : ts) th.join(10_000);
+                // Old code: 4 overlapping POSTs. New: exactly one; the rest
+                // see the guard held and skip (cumulative counters make the
+                // single POST lossless — rings are complementary, never torn).
+                assertEquals(1, collector.posts.get(),
+                        "single-flight must collapse concurrent flushes to one POST");
+                assertEquals(1, collector.maxInFlight.get(),
+                        "POSTs must never overlap");
+            } finally {
+                emitter.close();
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("P1-099: close() never overlaps an in-flight flush")
+    void closeNeverOverlapsInflightFlush() throws Exception {
+        try (CountingCollector collector = new CountingCollector(300)) {
+            OtlpMetricsEmitter emitter =
+                    new OtlpMetricsEmitter(collector.hostPort(), "test-instance");
+            Thread flusher = new Thread(emitter::forceFlush);
+            flusher.start();
+            Thread.sleep(50); // ensure the slow POST holds the guard
+            emitter.close(); // must wait for the guard, then final-flush alone
+            flusher.join(10_000);
+            assertEquals(2, collector.posts.get(), "in-flight + final POST");
+            assertEquals(1, collector.maxInFlight.get(),
+                    "close final flush must not overlap the periodic one (old: 2)");
         }
     }
 
@@ -519,6 +667,51 @@ class OtlpMetricsEmitterTest {
                     collectAttributeKeys(child, out);
                 }
             }
+        }
+    }
+
+    @Test
+    @DisplayName("P1-258: double start() schedules only one periodic flush")
+    void doubleStartSchedulesOneFlush() throws Exception {
+        CapturingAppender cap = attachLogCapture("doubleStartCapture");
+        OtlpMetricsEmitter emitter = new OtlpMetricsEmitter("127.0.0.1:1", "test-instance");
+        try {
+            emitter.start();
+            emitter.start();
+            // Old code: every start() queued another scheduleAtFixedRate task
+            // (duplicate 10s POST loops) and logged nothing. New: the repeat
+            // start is ignored with a warn.
+            assertTrue(cap.messages.stream().anyMatch(
+                            m -> m.contains("start() called twice")),
+                    "second start() must be ignored with a warn, not schedule a second flush loop (P1-258)");
+        } finally {
+            emitter.close();
+            detachLogCapture(cap);
+        }
+    }
+
+    @Test
+    @DisplayName("P1-259: non-finite gauges are rejected, export stays valid JSON")
+    void nonFiniteGaugesRejected() throws Exception {
+        OtlpMetricsEmitter emitter = new OtlpMetricsEmitter("127.0.0.1:1", "test-instance");
+        try {
+            emitter.setSlotCapacityUsedPercent("hft-0", 50.0);
+            emitter.setProcessFdUsagePercent(42.5);
+            // Old code: stored raw — the NaN/Inf literals below poisoned the
+            // whole 10s POST (invalid JSON numbers).
+            emitter.setSlotCapacityUsedPercent("hft-0", Double.NaN);
+            emitter.setSlotCapacityUsedPercent("hft-1", Double.POSITIVE_INFINITY);
+            emitter.setProcessFdUsagePercent(Double.NaN);
+            emitter.setProcessFdUsagePercent(Double.NEGATIVE_INFINITY);
+            assertEquals(50.0, emitter.slotState("hft-0").capacityUsedPercent, 0.001,
+                    "non-finite slot gauge must keep the previous value (P1-259)");
+            String json = emitter.buildMetricsJson();
+            assertFalse(json.contains("NaN"), "payload must not contain NaN (P1-259)");
+            assertFalse(json.contains("Infinity"), "payload must not contain Infinity (P1-259)");
+            assertNotNull(new ObjectMapper().readTree(json),
+                    "payload with rejected non-finite gauges must stay valid JSON (P1-259)");
+        } finally {
+            emitter.close();
         }
     }
 }
