@@ -231,7 +231,7 @@ func TestFaultInjectionDialBadHandshakeTriggersRefresh(t *testing.T) {
 	if refreshes < 2 {
 		t.Fatalf("expected a refresh after each failed dial (dials=%d refreshes=%d)", dials, refreshes)
 	}
-	if client.Config.Token == "stale-token" {
+	if client.GetToken() == "stale-token" {
 		t.Fatalf("client must hold a fresh session token after bad-handshake refresh")
 	}
 	events := eventsFrom(t, out)
