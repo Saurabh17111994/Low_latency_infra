@@ -268,7 +268,10 @@ class RealFlussRowConverter implements FlussRowConverter {
 
         return writer.append(row)
                 .thenApply(result -> {
-                    // Record ack timestamp
+                    // P1-223: Fluss 0.9.1 AppendResult is an empty ack (no offset/bucket
+                    // fields — verified via javap against fluss-client-0.9.1-incubating);
+                    // there is no server offset to propagate. tablePath is the table
+                    // identifier, not the event_day partition.
                     long appendCount = 0; // counter is external (in tracker)
                     return new RawTickWriter.AppendResult(appendCount, tablePath);
                 })

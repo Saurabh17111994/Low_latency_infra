@@ -61,7 +61,7 @@ message TickEvent {
   string feed = 29;            // "hft" (Go Tick.Feed, not persisted to row but carried for parity)
   int64  ts_ms = 4;            // exchange timestamp (source time, preserved — Q29)
   int64  received_ms = 5;      // T1 (Go receipt)
-  int64  feed_sequence_local = 6; // connection-local sequence (Q15: verify packet has real seq first)
+  int64  feed_sequence_local = 6; // P1-281: BEST-EFFORT connection-local provenance (gap evidence + logging only — FlussClientAdapter persists NO sequence column in the 21-col row; broker resets/duplicates must never be treated as authoritative downstream).
 
   // market data — prices are integer paise, never float (doc §28)
   int64  ltp_paise = 7;
