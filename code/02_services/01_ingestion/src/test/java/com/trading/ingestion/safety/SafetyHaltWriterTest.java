@@ -1,5 +1,6 @@
 package com.trading.ingestion.safety;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -33,6 +34,48 @@ class SafetyHaltWriterTest {
                 id1, "different reason → different id");
         assertNotEquals(SafetyHaltWriter.computeHaltRequestId("fp-abc", "hft-0", 4, "UNSAFE", "FEED_STALLED"),
                 id1, "different epoch → different id");
+    }
+
+    @Test
+    @DisplayName("P1-091: unsafe with null reason and blank slot fail fast; recovered-null is legal")
+    void requireWritableArgsContract() {
+        // Null state previously NPE'd deep in write() with no row written.
+        assertThrows(NullPointerException.class, () ->
+                SafetyHaltWriter.requireWritableArgs("hft-0",
+                        null, SafetyHaltWriter.ReasonCode.FEED_STALLED));
+        // Blank slotIds violate DDL NOT NULL — never reach the writer.
+        assertThrows(IllegalArgumentException.class, () ->
+                SafetyHaltWriter.requireWritableArgs("  ",
+                        SafetyHaltWriter.SafetyState.UNSAFE,
+                        SafetyHaltWriter.ReasonCode.FEED_STALLED));
+        // UNSAFE with null reasonCode previously wrote reason="" which the
+        // downstream parser rejects — an un-haltable halt.
+        assertThrows(IllegalArgumentException.class, () ->
+                SafetyHaltWriter.requireWritableArgs("hft-0",
+                        SafetyHaltWriter.SafetyState.UNSAFE, null));
+        // RECOVERED with a reason breaks the ID-tuple contract (empty reason).
+        assertThrows(IllegalArgumentException.class, () ->
+                SafetyHaltWriter.requireWritableArgs("hft-0",
+                        SafetyHaltWriter.SafetyState.RECOVERED,
+                        SafetyHaltWriter.ReasonCode.FEED_STALLED));
+        // Legal tuples pass: UNSAFE-with-reason, RECOVERED-with-null.
+        assertDoesNotThrow(() -> SafetyHaltWriter.requireWritableArgs("hft-0",
+                SafetyHaltWriter.SafetyState.UNSAFE,
+                SafetyHaltWriter.ReasonCode.FEED_STALLED));
+        assertDoesNotThrow(() -> SafetyHaltWriter.requireWritableArgs("hft-0",
+                SafetyHaltWriter.SafetyState.RECOVERED, null));
+    }
+
+    @Test
+    @DisplayName("P1-091: blank fingerprint/account fail at construction, before any Fluss dial")
+    void ctorRejectsBlankIdentity() {
+        // Fail-fast runs before ConnectionFactory — no network touched.
+        assertThrows(IllegalArgumentException.class, () ->
+                new SafetyHaltWriter("localhost:9123", "src", "  ", "acct"));
+        assertThrows(IllegalArgumentException.class, () ->
+                new SafetyHaltWriter("localhost:9123", "src", "fp", null));
+        assertThrows(IllegalArgumentException.class, () ->
+                new SafetyHaltWriter("localhost:9123", "src", null, "acct"));
     }
 
     @Test

@@ -32,7 +32,10 @@ public record BrokerQuarantine(
         if (slotId == null || slotId.isBlank()) throw new IllegalArgumentException("slot_id is required");
         if (connectionId == null || connectionId.isBlank()) throw new IllegalArgumentException("connection_id is required");
         if (connectionEpoch <= 0) throw new IllegalArgumentException("connection_epoch must be positive");
-        if (token <= 0) throw new IllegalArgumentException("token must be positive");
+        // P1-064: 0 = unknown token (R-010 convention, like ack_ts 0 = unknown).
+        // Bridge-quarantine ticks are undecodable by definition - no token exists.
+        // The old mapping stuffed receivedTsMs here, corrupting the column.
+        if (token < 0) throw new IllegalArgumentException("token must be non-negative");
         if (reason == null || !REASONS.contains(reason)) throw new IllegalArgumentException("unknown quarantine reason");
         if (rawPayload == null || rawPayload.length == 0) throw new IllegalArgumentException("raw_payload is required");
         if (payloadHash == null || !payloadHash.matches("[0-9a-f]{64}")) throw new IllegalArgumentException("payload_hash must be lowercase SHA-256");

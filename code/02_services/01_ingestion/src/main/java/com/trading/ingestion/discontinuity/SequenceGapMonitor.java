@@ -2,6 +2,7 @@ package com.trading.ingestion.discontinuity;
 
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * T7-F11: per-connection sequence-gap detection (contract §7.8 F11).
@@ -30,7 +31,10 @@ public final class SequenceGapMonitor {
 
     /** Last-seen sequence per connection key {@code slotId + "/" + epoch}. */
     private final ConcurrentMap<String, Long> lastSeqByConn = new ConcurrentHashMap<>();
-    private long gapCount;
+    // P1-078: LongAdder, not long/AtomicLong — onTick runs on the hot bridge
+    // reader path; LongAdder spreads uncontended increments across cells
+    // (Batch-3 #26 ruling; finding proposed AtomicLong).
+    private final LongAdder gapCount = new LongAdder();
 
     /**
      * Record one tick's sequence for a connection.
@@ -45,12 +49,25 @@ public final class SequenceGapMonitor {
         if (seq <= 0) {
             return false; // no baseline possible
         }
-        Long prev = lastSeqByConn.put(connectionKey, seq);
-        if (prev == null) {
-            return false; // first tick for this connection/epoch
-        }
-        if (seq > prev + 1) {
-            gapCount++;
+        // P1-079/P1-080: decide gap + advance high-water inside one
+        // compute() — never regress the baseline on duplicate/late ticks
+        // (1,2,1 then 3 is NOT a gap), and the check-then-act is atomic per
+        // key (concurrent onTick for one connection can't double-count).
+        boolean[] gap = new boolean[1];
+        lastSeqByConn.compute(connectionKey, (k, prev) -> {
+            if (prev == null) {
+                return seq; // first tick for this connection/epoch
+            }
+            if (seq <= prev) {
+                return prev; // duplicate/late delivery, not a gap
+            }
+            if (seq > prev + 1) {
+                gap[0] = true;
+            }
+            return seq;
+        });
+        if (gap[0]) {
+            gapCount.increment();
             return true;
         }
         return false;
@@ -58,6 +75,6 @@ public final class SequenceGapMonitor {
 
     /** Total gaps detected (monotonic; for metrics + evidence). */
     public long gapCount() {
-        return gapCount;
+        return gapCount.sum();
     }
 }

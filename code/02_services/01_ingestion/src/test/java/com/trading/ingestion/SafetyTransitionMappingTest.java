@@ -322,6 +322,7 @@ class SafetyTransitionMappingTest {
         // which STALE/FUTURE packets are quarantined but do NOT halt. The helper
         // is wall-clock based; pin its semantics via the armed-until field.
         java.util.Map<String, String> env = new java.util.HashMap<>();
+        env.put("DEPLOYMENT_ENV", "dev");
         env.put("ARROW_APP_ID", "test-app");
         env.put("ARROW_APP_SECRET", "test-secret");
         env.put("ARROW_USER_ID", "test-user");

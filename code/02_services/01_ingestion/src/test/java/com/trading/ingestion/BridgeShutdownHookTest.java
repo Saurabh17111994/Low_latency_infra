@@ -78,6 +78,8 @@ class BridgeShutdownHookTest {
                 "com.trading.ingestion.BridgeShutdownDriver");
         ProcessBuilder pb = new ProcessBuilder(cmd);
         pb.environment().put("ARROW_BRIDGE_BIN", bridge.toString());
+        // P1-077: child must declare its env — blank refuses startup.
+        pb.environment().put("DEPLOYMENT_ENV", "dev");
         pb.environment().put("ARROW_APP_ID", "test-app");
         pb.environment().put("ARROW_APP_SECRET", "test-secret");
         pb.environment().put("ARROW_USER_ID", "test-user");
@@ -96,7 +98,9 @@ class BridgeShutdownHookTest {
         pb.redirectError(tempDir.resolve("driver.stderr.log").toFile());
         Process proc = pb.start();
         try {
-            FileLog log = new FileLog(logDir.resolve("ingestion.json"));
+            // P1-132: the service names its log ingestion-${HOST}-${VM_ID}.json —
+            // resolve via glob, not the old fixed name.
+            FileLog log = new FileLog(findIngestionJson(logDir));
 
             // 2. Wait for the bridge's per-second tick reports (the service
             //    drains them from the bridge's stderr and re-logs them).
@@ -255,6 +259,23 @@ class BridgeShutdownHookTest {
     }
 
     /** Append-only view of a growing log file (same pattern as the E2E harness). */
+    /** P1-132: locate the service's JSON log (identity-bearing name). */
+    private static Path findIngestionJson(Path logDir) throws Exception {
+        long deadline = System.nanoTime()
+                + java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+        while (System.nanoTime() < deadline) {
+            try (java.util.stream.Stream<Path> s = Files.list(logDir)) {
+                java.util.Optional<Path> hit = s
+                        .filter(p -> p.getFileName().toString().startsWith("ingestion-")
+                                && p.getFileName().toString().endsWith(".json"))
+                        .findFirst();
+                if (hit.isPresent()) return hit.get();
+            }
+            Thread.sleep(200);
+        }
+        throw new AssertionError("service JSON log (ingestion-*.json) never appeared in " + logDir);
+    }
+
     private static final class FileLog {
         private final Path path;
         private final StringBuilder buffer = new StringBuilder();

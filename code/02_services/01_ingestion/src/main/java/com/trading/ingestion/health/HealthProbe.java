@@ -87,17 +87,26 @@ public final class HealthProbe {
     public boolean isSubscriptionComplete() { return this.subscriptionComplete.get(); }
     public void setLastFrameReceived(long nanoTime) {
         this.lastFrameReceivedNanos = nanoTime;
-        // R-031: per-slot frame recency must reflect real frame flow. The Go
-        // bridge emits no periodic lifecycle events while a slot is healthy —
-        // ticks arrive as proto events that only hit this global setter. Refresh
-        // every ACTIVE slot's lastFrameNanos so isDataReady() does not flip
-        // false ~15s after the last ACTIVE event during steady-state.
-        long now = nanoTime;
-        slots.forEach((id, slot) -> {
-            if ("ACTIVE".equals(slot.state) && slot.lastFrameNanos > 0) {
-                slot.lastFrameNanos = now;
-            }
-        });
+        // P1-081: no per-slot fan-out here — one slot's frames must never
+        // refresh another slot's recency (a frame from A kept silent B fresh
+        // forever, so isDataReady() stayed true with B missing). Per-slot
+        // recency advances only via setSlotFrameReceived(), called per tick
+        // with the tick's own slotId by IngestionService.processTickEvent
+        // (this preserves the R-031 steady-state property truthfully).
+    }
+
+    /**
+     * P1-081: record arrival evidence for ONE slot. Called per tick with the
+     * tick's own slotId — never fanned out across slots. Only touches an
+     * already-tracked slot: a tick for an unknown slot must not plant a
+     * TERMINAL entry that would veto readiness (the lifecycle event creates
+     * the slot via updateSlot).
+     */
+    public void setSlotFrameReceived(String slotId, long nanoTime) {
+        SlotHealth slot = slots.get(slotId);
+        if (slot != null) {
+            slot.lastFrameNanos = nanoTime;
+        }
     }
 
     /** OTLP collector reachability + last export success (plan: telemetry readiness). */
@@ -138,13 +147,16 @@ public final class HealthProbe {
      */
     public void setSlotUnsafe(String slotId, boolean unsafe) {
         SlotHealth slot = slot(slotId);
-        if (unsafe && !slot.unsafe) {
-            slot.unsafeSinceNanos = System.nanoTime();
+        // P1-082: stamp + flag written atomically (diagnostics reads both).
+        synchronized (slot) {
+            if (unsafe && !slot.unsafe) {
+                slot.unsafeSinceNanos = System.nanoTime();
+            }
+            if (!unsafe) {
+                slot.unsafeSinceNanos = 0;
+            }
+            slot.unsafe = unsafe;
         }
-        if (!unsafe) {
-            slot.unsafeSinceNanos = 0;
-        }
-        slot.unsafe = unsafe;
     }
 
     /** Remaining subscription capacity (connection limit − assigned). */
@@ -161,27 +173,49 @@ public final class HealthProbe {
      */
     public void resetSlotsToAuthenticating() {
         slots.forEach((id, slot) -> {
-            slot.state = "AUTHENTICATING";
-            slot.assigned = 0;
-            slot.acknowledged = 0;
-            slot.rejected = 0;
-            slot.lastFrameNanos = 0;
+            // P1-082: same tear class as updateSlot — compound write under lock.
+            synchronized (slot) {
+                slot.state = "AUTHENTICATING";
+                slot.assigned = 0;
+                slot.acknowledged = 0;
+                slot.rejected = 0;
+                slot.lastFrameNanos = 0;
+            }
         });
     }
 
     public void updateSlot(String slotId, String state, long epoch, int assigned, int acknowledged, int rejected, long frameNanos) {
         SlotHealth slot = slot(slotId);
-        slot.state = state; slot.epoch = epoch; slot.assigned = assigned;
-        slot.acknowledged = acknowledged; slot.rejected = rejected;
-        if (frameNanos > 0) slot.lastFrameNanos = frameNanos;
+        // P1-082: compound write under the per-slot lock — a concurrent
+        // isDataReady()/diagnostics() reader must never see new assigned
+        // with old acknowledged (false assigned!=acknowledged flap).
+        synchronized (slot) {
+            slot.state = state; slot.epoch = epoch; slot.assigned = assigned;
+            slot.acknowledged = acknowledged; slot.rejected = rejected;
+            if (frameNanos > 0) slot.lastFrameNanos = frameNanos;
+        }
     }
 
     public boolean isDataReady() {
         if (slots.isEmpty()) return false;
-        return slots.values().stream().allMatch(slot -> "ACTIVE".equals(slot.state)
-                && slot.assigned == slot.acknowledged && slot.rejected == 0
-                && slot.lastFrameNanos > 0
-                && System.nanoTime() - slot.lastFrameNanos < FRAME_STALE_TIMEOUT.toNanos());
+        // P1-082: snapshot each slot under its lock before judging —
+        // worst-slot-wins (Batch-3 #29), but on values from one write.
+        return slots.values().stream().allMatch(slot -> {
+            String state;
+            int assigned, acknowledged, rejected;
+            long frameNanos;
+            synchronized (slot) {
+                state = slot.state;
+                assigned = slot.assigned;
+                acknowledged = slot.acknowledged;
+                rejected = slot.rejected;
+                frameNanos = slot.lastFrameNanos;
+            }
+            return "ACTIVE".equals(state)
+                    && assigned == acknowledged && rejected == 0
+                    && frameNanos > 0
+                    && System.nanoTime() - frameNanos < FRAME_STALE_TIMEOUT.toNanos();
+        });
     }
 
     // ---- readiness ----
@@ -229,23 +263,38 @@ public final class HealthProbe {
         m.put("memory_blocked", memoryBlocked.get());
         m.put("memory_ready", !memoryBlocked.get());
         m.put("frame_recent", isFrameRecent());
-        long offsetMs = clockChecker != null ? clockChecker.lastOffsetMs() : 0;
-        boolean ok = isClockOk();
+        // P1-248: one atomic snapshot read — offset and ok always come from
+        // the SAME check (the writer publishes complete records; two
+        // separate getter calls could straddle an update and disagree).
+        NtpClockChecker.ClockSnapshot clockSnap =
+                clockChecker != null ? clockChecker.snapshot() : null;
+        long offsetMs = clockSnap != null ? clockSnap.offsetMs() : 0;
+        boolean ok = clockSnap != null ? clockSnap.passed() : true;
         m.put("clock_offset_ms", offsetMs);
         m.put("clock_ok", ok);
         m.put("ready", isReady());
         Map<String, Object> slotDiagnostics = new LinkedHashMap<>();
         slots.forEach((id, slot) -> {
+            // P1-082: read the slot's fields as one snapshot under its lock.
+            String state; long epoch; int assigned, acknowledged, rejected;
+            long frameNanos; boolean unsafe; long unsafeSinceNanos; long capacityRemaining;
+            synchronized (slot) {
+                state = slot.state; epoch = slot.epoch;
+                assigned = slot.assigned; acknowledged = slot.acknowledged;
+                rejected = slot.rejected; frameNanos = slot.lastFrameNanos;
+                unsafe = slot.unsafe; unsafeSinceNanos = slot.unsafeSinceNanos;
+                capacityRemaining = slot.capacityRemaining;
+            }
             Map<String, Object> values = new LinkedHashMap<>();
-            values.put("state", slot.state); values.put("epoch", slot.epoch);
-            values.put("assigned", slot.assigned); values.put("acknowledged", slot.acknowledged);
-            values.put("rejected", slot.rejected);
-            values.put("frame_age_ms", slot.lastFrameNanos == 0 ? -1 :
-                    Duration.ofNanos(Math.max(0, System.nanoTime() - slot.lastFrameNanos)).toMillis());
-            values.put("unsafe", slot.unsafe);
-            values.put("unsafe_duration_ms", slot.unsafeSinceNanos == 0 ? 0 :
-                    Duration.ofNanos(Math.max(0, System.nanoTime() - slot.unsafeSinceNanos)).toMillis());
-            values.put("capacity_remaining", slot.capacityRemaining);
+            values.put("state", state); values.put("epoch", epoch);
+            values.put("assigned", assigned); values.put("acknowledged", acknowledged);
+            values.put("rejected", rejected);
+            values.put("frame_age_ms", frameNanos == 0 ? -1 :
+                    Duration.ofNanos(Math.max(0, System.nanoTime() - frameNanos)).toMillis());
+            values.put("unsafe", unsafe);
+            values.put("unsafe_duration_ms", unsafeSinceNanos == 0 ? 0 :
+                    Duration.ofNanos(Math.max(0, System.nanoTime() - unsafeSinceNanos)).toMillis());
+            values.put("capacity_remaining", capacityRemaining);
             slotDiagnostics.put(id, values);
         });
         m.put("slots", slotDiagnostics);

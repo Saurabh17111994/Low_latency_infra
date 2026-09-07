@@ -101,6 +101,20 @@ class RawTickWriterTimeoutTest {
     }
 
     @Test
+    @DisplayName("UNCERTAIN outcome carries packet identity (P1-110/116)")
+    void uncertainCarriesIdentity() throws Exception {
+        Harness h = harness(Duration.ofMillis(50));
+        TickPacket packet = TickPacketFixtures.validTrade(7);
+        h.writer().write(packet);
+        RawTickWriter.AppendOutcome outcome = awaitOutcome(h);
+        assertEquals(RawTickWriter.Status.UNCERTAIN, outcome.status());
+        assertEquals(packet.eventFingerprint(), outcome.fingerprint(),
+                "UNCERTAIN must be correlatable to its row");
+        assertEquals(packet.instrumentToken(), outcome.instrumentToken());
+        assertEquals(packet.eventTime(), outcome.eventTime());
+    }
+
+    @Test
     @DisplayName("late completion of a timed-out append does not double-release")
     void lateCompletionDoesNotDoubleRelease() throws Exception {
         Harness h = harness(Duration.ofMillis(50));

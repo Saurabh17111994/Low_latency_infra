@@ -91,6 +91,54 @@ class IngestionServiceTest {
     }
 
     @Test
+    @DisplayName("P1-081: processed tick refreshes ONLY its own slot recency (R-031 wiring)")
+    void tickRefreshesOnlyItsOwnSlotRecency() throws Exception {
+        IngestionConfig config = buildConfig();
+        RecordingConverter converter = new RecordingConverter();
+        NtpClockChecker clock = new NtpClockChecker("127.0.0.1:9", 100, false);
+        IngestionService service = new IngestionService(
+                "ing-unit-081", instruments(), converter, config, clock,
+                noopQuarantine(), noopDiscontinuity(), noopSafety());
+
+        // Both slots ACTIVE with a 1s-old stamp (recent, but strictly older
+        // than anything the tick path will write).
+        long old = System.nanoTime() - 1_000_000_000L;
+        service.health().updateSlot("hft-0", "ACTIVE", 1, 2, 2, 0, old);
+        service.health().updateSlot("hft-1", "ACTIVE", 1, 2, 2, 0, old);
+
+        byte[] payload = "raw-bytes".getBytes(StandardCharsets.UTF_8);
+        long now = System.currentTimeMillis();
+        TickEvent ev = TickEvent.newBuilder()
+                .setSlotId("hft-0")
+                .setMode("full")
+                .setToken(3045)
+                .setFeed("hft")
+                .setTsMs(now)
+                .setReceivedMs(now)
+                .setFeedSequenceLocal(17)
+                .setLtpPaise(234500)
+                .setClosePaise(234200)
+                .setOpenPaise(233100)
+                .setHighPaise(235000)
+                .setLowPaise(233000)
+                .setVwapPaise(234100)
+                .setLtq(50)
+                .setVolume(125000)
+                .setOpenInterest(0)
+                .setRawPayload(ByteString.copyFrom(payload))
+                .setPayloadHash(ByteString.copyFrom(sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                .build();
+
+        service.processTickEvent(ev, "hft-0", 1L);
+        awaitDrain(converter, 1);
+
+        long after0 = service.health().slot("hft-0").lastFrameNanos;
+        long after1 = service.health().slot("hft-1").lastFrameNanos;
+        assertTrue(after0 > old, "hft-0 tick must advance hft-0 recency (R-031 wiring)");
+        assertEquals(old, after1, "hft-0 tick must not refresh hft-1 (P1-081 isolation)");
+    }
+
+    @Test
     @DisplayName("Classify bridge stderr lines per plan log4j2 rule")
     void classifyBridgeLines() {
         // Warning/error keywords → WARN.
@@ -159,6 +207,57 @@ class IngestionServiceTest {
         };
     }
 
+    @Test
+    @DisplayName("P1-092: failed safety-halt write evicts dedup so the next tick retries (slot still marked unsafe)")
+    void failedSafetyWriteRetriesOnNextTick() throws Exception {
+        IngestionConfig config = buildConfig();
+        RecordingConverter converter = new RecordingConverter();
+        NtpClockChecker clock = new NtpClockChecker("127.0.0.1:9", 100, false);
+        AtomicInteger writes = new AtomicInteger();
+        SafetySink failing = new SafetySink() {
+            public String write(String slotId, long connectionEpoch,
+                                SafetyHaltWriter.SafetyState state,
+                                SafetyHaltWriter.ReasonCode reasonCode, String assignedTokenHash,
+                                String evidenceReference, long detectedTsMs) {
+                writes.incrementAndGet();
+                throw new RuntimeException("simulated sync upsert failure");
+            }
+            public void close() {}
+        };
+        IngestionService service = new IngestionService(
+                "ing-unit-092", instruments(), converter, config, clock,
+                noopQuarantine(), noopDiscontinuity(), failing);
+
+        // Far-future broker timestamp → FUTURE_BROKER_TIMESTAMP quality-UNSAFE.
+        // No appends happen on this path (synchronous emit inside processTickEvent).
+        byte[] payload = "raw-bytes".getBytes(StandardCharsets.UTF_8);
+        long now = System.currentTimeMillis();
+        TickEvent ev = TickEvent.newBuilder()
+                .setSlotId("hft-0")
+                .setMode("full")
+                .setToken(3045)
+                .setFeed("hft")
+                // Broker stamp 60s ahead of the bridge receive clock = FUTURE
+                // (the skew gate compares tsMs against receive time, so
+                // receivedMs must stay at now).
+                .setTsMs(now + 60_000L)
+                .setReceivedMs(now)
+                .setFeedSequenceLocal(17)
+                .setLtpPaise(234500)
+                .setVolume(125000)
+                .setRawPayload(ByteString.copyFrom(payload))
+                .setPayloadHash(ByteString.copyFrom(sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                .build();
+
+        service.processTickEvent(ev, "hft-0", 1L);
+        service.processTickEvent(ev, "hft-0", 1L);
+        assertEquals(2, writes.get(),
+                "evicted dedup must let the second tick retry the halt write (old code: 1)");
+        assertTrue(service.health().slot("hft-0").unsafe,
+                "slot must be marked unsafe even though the halt write failed (old code: false)");
+        assertEquals(0, converter.appendCalls.get(), "FUTURE ticks never append");
+    }
+
     private static SafetySink noopSafety() {
         return new SafetySink() {
             public String write(String slotId, long connectionEpoch,
@@ -220,6 +319,7 @@ class IngestionServiceTest {
 
     private static IngestionConfig buildConfig() throws Exception {
         java.util.Map<String, String> env = new java.util.HashMap<>();
+        env.put("DEPLOYMENT_ENV", "dev");
         env.put("ARROW_APP_ID", "test-app");
         env.put("ARROW_APP_SECRET", "test-secret");
         env.put("ARROW_USER_ID", "test-user");
@@ -233,5 +333,234 @@ class IngestionServiceTest {
                 .getDeclaredMethod("validateFrom", java.util.Map.class);
         validateFrom.setAccessible(true);
         return (IngestionConfig) validateFrom.invoke(null, env);
+    }
+
+    // ---- P1-062: per-queue budgets are shares of the global total ----
+
+    private static IngestionConfig buildConfigWith(java.util.Map<String, String> extra)
+            throws Exception {
+        java.util.Map<String, String> env = new java.util.HashMap<>();
+        env.put("DEPLOYMENT_ENV", "dev");
+        env.put("ARROW_APP_ID", "test-app");
+        env.put("ARROW_APP_SECRET", "test-secret");
+        env.put("ARROW_USER_ID", "test-user");
+        env.put("ARROW_PASSWORD", "test-pass");
+        env.put("ARROW_TOTP_KEY", "JBSWY3DPEHPK3PXP");
+        env.put("FLUSS_BOOTSTRAP", "localhost:9123");
+        env.put("RAW_TABLE_NAME", "raw_table_1");
+        env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
+        env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
+        env.putAll(extra);
+        java.lang.reflect.Method validateFrom = IngestionConfig.class
+                .getDeclaredMethod("validateFrom", java.util.Map.class);
+        validateFrom.setAccessible(true);
+        return (IngestionConfig) validateFrom.invoke(null, env);
+    }
+
+    @Test
+    @DisplayName("P1-062: N writers split the pending budget (was: N x full budget)")
+    void queueBudgetsSplitAcrossWriters() throws Exception {
+        IngestionConfig config = buildConfigWith(java.util.Map.of(
+                "FLUSS_WRITERS", "2",
+                "MAX_PENDING_APPEND_RECORDS", "10000",
+                "MAX_PENDING_APPEND_BYTES", "67108864"));
+        IngestionService service = new IngestionService(
+                "ing-p1062", instruments(), new RecordingConverter(), config,
+                new NtpClockChecker("127.0.0.1:9", 100, false),
+                noopQuarantine(), noopDiscontinuity(), noopSafety());
+        try {
+            java.lang.reflect.Field qf = IngestionService.class.getDeclaredField("queues");
+            qf.setAccessible(true);
+            com.trading.ingestion.write.BoundedQueue[] queues =
+                    (com.trading.ingestion.write.BoundedQueue[]) qf.get(service);
+            assertEquals(2, queues.length, "two writers configured");
+            long totalBytes = 0;
+            long totalRecords = 0;
+            for (com.trading.ingestion.write.BoundedQueue q : queues) {
+                assertEquals(33554432L, q.maxBytes(), "each queue holds half the byte budget");
+                assertEquals(5000, q.maxRecords(), "each queue holds half the record budget");
+                totalBytes += q.maxBytes();
+                totalRecords += q.maxRecords();
+            }
+            assertTrue(totalBytes <= 67108864L, "queues combined must not exceed the global budget");
+            assertTrue(totalRecords <= 10000L, "queues combined must not exceed the global budget");
+        } finally {
+            invokeShutdown(service);
+        }
+    }
+
+    // ---- P1-064: broker_quarantine mapping carries token 0 + real hash ----
+
+    @Test
+    @DisplayName("P1-064: quarantine token is 0/unknown with a verifiable payload hash")
+    void brokerQuarantineMapsUnknownToken() {
+        byte[] raw = "<binary-frame-bytes>".getBytes(StandardCharsets.UTF_8);
+        long now = System.currentTimeMillis();
+        com.trading.ingestion.transport.ControlRecord cr =
+                com.trading.ingestion.transport.ControlRecord.newBuilder()
+                        .setSlotId("hft-0").setConnectionId("c1").setConnectionEpoch(7)
+                        .setReason("MALFORMED_JSON")
+                        .setRawPayload(com.google.protobuf.ByteString.copyFrom(raw))
+                        .setReceivedTsMs(now).build();
+        com.trading.ingestion.bridge.BrokerQuarantine record =
+                IngestionService.toBrokerQuarantine(cr);
+        assertEquals(0L, record.token(), "undecodable tick has no token (was: timestamp)");
+        assertEquals(now, record.detectedTsMs(), "timestamp preserved in its own column");
+        assertEquals(sha256Hex(raw), record.payloadHash(), "R-207 pin must verify");
+    }
+
+    @Test
+    @DisplayName("P1-064: quarantine record accepts token 0 (was: positive-only)")
+    void quarantineRecordAcceptsUnknownToken() {
+        byte[] raw = "<binary-frame-bytes>".getBytes(StandardCharsets.UTF_8);
+        com.trading.ingestion.bridge.BrokerQuarantine record =
+                new com.trading.ingestion.bridge.BrokerQuarantine(2, "hft-0", "c1", 7L, 0L,
+                        "MALFORMED_JSON", raw, sha256Hex(raw), System.currentTimeMillis());
+        assertEquals(0L, record.token());
+    }
+
+    // ---- P1-065/066: first-fatal-wins + full scheduler shutdown ----
+
+    private static void invokeShutdown(IngestionService service) throws Exception {
+        java.lang.reflect.Method m = IngestionService.class.getDeclaredMethod("shutdown");
+        m.setAccessible(true);
+        m.invoke(service);
+    }
+
+    @Test
+    @DisplayName("P1-065/066: first fatal wins; shutdown stops every scheduler")
+    void firstFatalWinsAndSchedulersStop() throws Exception {
+        IngestionConfig config = buildConfig();
+        IngestionService service = new IngestionService(
+                "ing-p1065", instruments(), new RecordingConverter(), config,
+                new NtpClockChecker("127.0.0.1:9", 100, false),
+                noopQuarantine(), noopDiscontinuity(), noopSafety());
+        java.lang.reflect.Method fatal =
+                IngestionService.class.getDeclaredMethod("requestFatalStop", String.class);
+        fatal.setAccessible(true);
+        fatal.invoke(service, "first");
+        fatal.invoke(service, "second"); // must be a no-op: first fatal wins
+        java.lang.reflect.Field ff = IngestionService.class.getDeclaredField("fatalStopReason");
+        ff.setAccessible(true);
+        Object holder = ff.get(service);
+        String reason = (String) ((java.util.concurrent.atomic.AtomicReference<?>) holder).get();
+        assertEquals("first", reason, "second FATAL must not overwrite the first");
+        for (String name : new String[]{"stalenessWatchdog", "clockMonitorScheduler",
+                "memoryMonitorScheduler"}) {
+            java.lang.reflect.Field sf = IngestionService.class.getDeclaredField(name);
+            sf.setAccessible(true);
+            java.util.concurrent.ScheduledExecutorService sched =
+                    (java.util.concurrent.ScheduledExecutorService) sf.get(service);
+            assertTrue(sched.isShutdown(), name + " must stop on shutdown (was: leaked)");
+        }
+    }
+
+    // ---- P1-225/246/249: shutdown killer, monotonic stamp, blank hash ----
+
+    @Test
+    @DisplayName("P1-225: kill helper still alive after the destroy race must not abort shutdown")
+    void killExitCodeToleratesLiveHelper() {
+        Process stillAlive = new Process() {
+            @Override public java.io.OutputStream getOutputStream() {
+                return new java.io.ByteArrayOutputStream();
+            }
+            @Override public java.io.InputStream getInputStream() {
+                return new java.io.ByteArrayInputStream(new byte[0]);
+            }
+            @Override public java.io.InputStream getErrorStream() {
+                return new java.io.ByteArrayInputStream(new byte[0]);
+            }
+            @Override public int waitFor() {
+                return 0;
+            }
+            @Override public int exitValue() {
+                throw new IllegalThreadStateException("still running");
+            }
+            @Override public void destroy() {
+            }
+        };
+        assertEquals(-1, IngestionService.killExitCode(stillAlive),
+                "a live kill helper must report unknown (-1), not throw past the shutdown catch");
+    }
+
+    @Test
+    @DisplayName("P1-246: NTP backward step must not move the heap-gate stamp backward")
+    void memorySampleClampsClockRegression() throws Exception {
+        IngestionConfig config = buildConfig();
+        IngestionService service = new IngestionService(
+                "ing-p1246", instruments(), new RecordingConverter(), config,
+                new NtpClockChecker("127.0.0.1:9", 100, false),
+                noopQuarantine(), noopDiscontinuity(), noopSafety());
+        try {
+            assertEquals(20_000L, service.monotonicMemorySampleMs(20_000L), "first stamp passes through");
+            assertEquals(20_000L, service.monotonicMemorySampleMs(19_000L),
+                    "regressed wall-clock must clamp to the last stamp (old code: 19000, stalling WARN_HEAP_HIGH)");
+            assertEquals(21_000L, service.monotonicMemorySampleMs(21_000L),
+                    "forward clock must pass through");
+        } finally {
+            invokeShutdown(service);
+        }
+    }
+
+    @Test
+    @DisplayName("P1-249: omitted Go payload hash quarantines instead of building a blank-hash RawTick")
+    void blankPayloadHashQuarantined() throws Exception {
+        IngestionConfig config = buildConfig();
+        RecordingConverter converter = new RecordingConverter();
+        RecordingQuarantine quarantine = new RecordingQuarantine();
+        NtpClockChecker clock = new NtpClockChecker("127.0.0.1:9", 100, false);
+        IngestionService service = new IngestionService(
+                "ing-p1249", instruments(), converter, config, clock,
+                quarantine, noopDiscontinuity(), noopSafety());
+        try {
+            byte[] payload = "raw-bytes".getBytes(StandardCharsets.UTF_8);
+            long now = System.currentTimeMillis();
+            TickEvent ev = TickEvent.newBuilder()
+                    .setSlotId("hft-0")
+                    .setMode("full")
+                    .setToken(3045)
+                    .setFeed("hft")
+                    .setTsMs(now)
+                    .setReceivedMs(now)
+                    .setFeedSequenceLocal(17)
+                    .setLtpPaise(234500)
+                    .setClosePaise(234200)
+                    .setOpenPaise(233100)
+                    .setHighPaise(235000)
+                    .setLowPaise(233000)
+                    .setVwapPaise(234100)
+                    .setLtq(50)
+                    .setVolume(125000)
+                    .setOpenInterest(0)
+                    .setRawPayload(ByteString.copyFrom(payload))
+                    .build();
+
+            service.processTickEvent(ev, "hft-0", 1L);
+            assertEquals(1, quarantine.reasons.size(),
+                    "blank hash must quarantine (old code: 0 writes, tick appended with \"\" hash)");
+            assertEquals(QuarantineWriter.Reason.INVALID_VALUES, quarantine.reasons.get(0));
+            assertEquals(0, converter.appendCalls.get(), "quarantined tick must never append");
+        } finally {
+            invokeShutdown(service);
+        }
+    }
+
+    static final class RecordingQuarantine implements QuarantineSink {
+        final List<QuarantineWriter.Reason> reasons = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void write(byte[] rawPayload, QuarantineWriter.Reason reason, String detail) {
+            reasons.add(reason);
+        }
+
+        @Override
+        public void write(byte[] rawPayload, QuarantineWriter.Reason reason, String detail,
+                          Long instrumentToken, String exchange, String symbol) {
+            reasons.add(reason);
+        }
+
+        @Override
+        public void close() {
+        }
     }
 }

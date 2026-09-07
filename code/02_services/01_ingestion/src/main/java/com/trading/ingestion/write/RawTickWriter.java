@@ -126,10 +126,13 @@ public final class RawTickWriter implements AutoCloseable {
      * @return ACCEPTED (submitted), or REJECTED/SKIPPED synchronously
      */
     public AppendOutcome write(TickPacket packet) {
-        // R-069: check-then-act on `closed` was racy — the entry check could
-        // pass, then a concurrent close() (e.g. the shutdown hook) runs and the
-        // append submits after the converter is closed. Serialize the closed
-        // check with the append submission.
+        // R-069 (P1-113/118): the entry closed-check can still race close() —
+        // by design NO monitor is held across submission (holding it across
+        // blocking converter I/O would serialize all writers). Instead every
+        // post-close failure mode converges: sync throws route via the R-297
+        // path, scheduler rejections via the RejectedExecutionException
+        // catches, and a write racing close() surfaces as FAILED/UNCERTAIN —
+        // never an escape, never a leaked reservation.
         if (isClosed()) {
             errorCount.incrementAndGet();
             return AppendOutcome.skipped("writer closed");
@@ -176,11 +179,19 @@ public final class RawTickWriter implements AutoCloseable {
         // Per-attempt timeout: cancel the in-flight append when the deadline
         // passes — R-037: the tracker release is deferred to the future's
         // actual completion (handleCompletion), never to the timeout itself.
-        scheduler.schedule(() -> {
-            if (!future.isDone()) {
-                future.cancel(true);
-            }
-        }, appendTimeout.toMillis(), TimeUnit.MILLISECONDS);
+        try {
+            scheduler.schedule(() -> {
+                if (!future.isDone()) {
+                    future.cancel(true);
+                }
+            }, appendTimeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.RejectedExecutionException shutdown) {
+            // P1-113/118: scheduler is shut down (close() raced submission).
+            // Cancel inline — the future's own completion then releases the
+            // slot and emits exactly one outcome via the normal path. Never
+            // let the rejection escape: the reservation would leak.
+            future.cancel(true);
+        }
 
         future.whenComplete((result, ex) ->
                 handleCompletion(packet, rowBytes, acceptTime, attempt, result, ex));
@@ -200,6 +211,13 @@ public final class RawTickWriter implements AutoCloseable {
 
         Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
 
+        // B125: never swallow an interrupt — restore the flag so the
+        // scheduler/callback thread observes the stop request. Routing
+        // stays via the classifier (interrupts classify FATAL there).
+        if (RetryClassifier.isInterruptCaused(cause)) {
+            Thread.currentThread().interrupt();
+        }
+
         if (cause instanceof CancellationException) {
             // Timeout → UNCERTAIN: we don't know if Fluss persisted the row.
             // Do NOT retry — the same row could already be durably stored.
@@ -212,7 +230,7 @@ public final class RawTickWriter implements AutoCloseable {
             uncertainCount.incrementAndGet();
             LOG.warn("raw-writer: append UNCERTAIN (table={}, fp={}, timeout={}ms, attempt={})",
                     tableName, fp12(packet), appendTimeout.toMillis(), attempt);
-            completeOutcome(AppendOutcome.uncertain(rowBytes, appendTimeout));
+            completeOutcome(AppendOutcome.uncertain(packet, acceptTime, rowBytes, appendTimeout));
             return;
         }
 
@@ -224,7 +242,7 @@ public final class RawTickWriter implements AutoCloseable {
             errorCount.incrementAndGet();
             LOG.error("raw-writer: FATAL append error (table={}, class={})",
                     tableName, cause.getClass().getSimpleName());
-            completeOutcome(AppendOutcome.fatal(rowBytes, cause));
+            completeOutcome(AppendOutcome.fatal(packet, acceptTime, rowBytes, cause));
             return;
         }
 
@@ -234,8 +252,23 @@ public final class RawTickWriter implements AutoCloseable {
             LOG.warn("raw-writer: append retryable (table={}, attempt={}/{}, backoff={}ms, class={})",
                     tableName, attempt, MAX_RETRY_ATTEMPTS, backoffMs,
                     cause.getClass().getSimpleName());
-            scheduler.schedule(() -> submitAppend(packet, rowBytes, acceptTime, attempt + 1),
-                    backoffMs, TimeUnit.MILLISECONDS);
+            try {
+                scheduler.schedule(() -> submitAppend(packet, rowBytes, acceptTime, attempt + 1),
+                        backoffMs, TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.RejectedExecutionException shutdown) {
+                // P1-113/118 + P1-114(b): scheduler is shut down — no retry
+                // can ever run. Release the slot and count the error NOW
+                // instead of leaking the reservation with no outcome. (The
+                // FAILED outcome itself is gated by completeOutcome: post-
+                // shutdown delivery would double-count against forceDrain.)
+                // Retrying into a dead scheduler is not an option, so the
+                // attempt count is moot.
+                tracker.onAppendFailure(rowBytes);
+                errorCount.incrementAndGet();
+                LOG.warn("raw-writer: retry impossible, scheduler shut down (table={})",
+                        tableName);
+                completeOutcome(AppendOutcome.failed(packet, acceptTime, rowBytes, shutdown));
+            }
             return;
         }
 
@@ -244,11 +277,24 @@ public final class RawTickWriter implements AutoCloseable {
         errorCount.incrementAndGet();
         LOG.warn("raw-writer: append failed after {} attempts (table={})",
                 MAX_RETRY_ATTEMPTS, tableName, cause);
-        completeOutcome(AppendOutcome.failed(rowBytes, cause));
+        completeOutcome(AppendOutcome.failed(packet, acceptTime, rowBytes, cause));
     }
 
     private void completeOutcome(AppendOutcome outcome) {
-        outcomeListener.onOutcome(outcome);
+        // P1-114: late completions landing after scheduler shutdown already
+        // had their slots forgiven by forceDrain — deliver only while the
+        // scheduler is alive, so a post-shutdown outcome can neither
+        // double-count nor resurrect a drained slot.
+        if (!scheduler.isShutdown()) {
+            // P1-273: contain listener exceptions — external listener code
+            // must never escape into Fluss completion or scheduler threads.
+            try {
+                outcomeListener.onOutcome(outcome);
+            } catch (Throwable t) {
+                LOG.warn("raw-writer: outcome listener threw (table={}): {}",
+                        tableName, t.toString());
+            }
+        }
     }
 
     private static String fp12(TickPacket packet) {
@@ -264,11 +310,23 @@ public final class RawTickWriter implements AutoCloseable {
     /**
      * Wait for pending appends to complete, up to the drain deadline.
      * Blocks the calling thread until {@code tracker.pendingRecords()} hits
-     * zero or the deadline elapses; on deadline expiry the exact tracked
-     * bytes are released (R-260) so the tracker never leaks.
+     * zero or the deadline elapses. On expiry the remainder is forgiven via
+     * {@link AppendTracker#forceDrain} (P1-115: never synthesize a bulk
+     * release through the per-record API — it frees 1 record against N
+     * bytes and double-releases racing completions). Forgiven slots are
+     * zeroed once; late completions release against the floor and their
+     * outcomes are gated (see {@link #completeOutcome}).
      */
     public void drain() {
-        long deadlineNanos = System.nanoTime() + drainDeadline.toNanos();
+        drain(drainDeadline);
+    }
+
+    /**
+     * Drain with an explicit budget (B130: the worker close passes its
+     * remaining single-budget share instead of a second full deadline).
+     */
+    public void drain(java.time.Duration budget) {
+        long deadlineNanos = System.nanoTime() + budget.toNanos();
         long pendingAtStart = tracker.pendingRecords();
 
         while (tracker.pendingRecords() > 0
@@ -283,13 +341,12 @@ public final class RawTickWriter implements AutoCloseable {
 
         long remaining = tracker.pendingRecords();
         if (remaining > 0) {
-            LOG.warn("raw-writer: drain incomplete — {} records still pending "
-                    + "(deadline={}, started={})",
-                    remaining, drainDeadline, pendingAtStart);
-            // R-260: release the exact tracked bytes instead of an arbitrary
-            // 512/record average — under- or over-counting here corrupts the
-            // uncertainty journal's byte totals.
-            tracker.onAppendFailure((int) tracker.pendingBytes());
+            long[] forgiven = tracker.forceDrain();
+            LOG.error("raw-writer: drain incomplete — forgave {} records / {} bytes "
+                    + "(deadline={}, started={}); late completions release "
+                    + "against the floor, no terminal outcome is emitted for "
+                    + "forgiven slots",
+                    forgiven[0], forgiven[1], budget, pendingAtStart);
         }
     }
 
@@ -299,6 +356,15 @@ public final class RawTickWriter implements AutoCloseable {
      */
     @Override
     public void close() {
+        close(drainDeadline);
+    }
+
+    /**
+     * Close with an explicit total budget for the drain phase (B130).
+     * A zero budget force-drains immediately — every forgiven slot is
+     * counted FAILED by the tracker, never silent.
+     */
+    public void close(java.time.Duration maxWait) {
         synchronized (this) {
             if (closed) {
                 return;
@@ -309,11 +375,19 @@ public final class RawTickWriter implements AutoCloseable {
 
         // Drain: wait for pending appends to complete (retry resubmissions
         // run on the scheduler while we wait — it is only shut down after).
-        drain();
+        drain(maxWait);
 
         // No new retries/timeouts can matter now — every in-flight append has
         // completed (tracker zero) and no more writes can be accepted.
-        scheduler.shutdownNow();
+        // P1-114(a): shutdownNow DISCARDS queued backoff/timeout tasks whose
+        // packets are captured in the Runnables and cannot be named — log the
+        // count (fail-loud) since no per-row outcome can be emitted for them.
+        java.util.List<Runnable> discarded = scheduler.shutdownNow();
+        if (!discarded.isEmpty()) {
+            LOG.error("raw-writer: shutdown discarded {} queued tasks "
+                    + "(table={}); their slots were forgiven by forceDrain",
+                    discarded.size(), tableName);
+        }
 
         // R-068: the FlussRowConverter owns the underlying Fluss Connection;
         // RawTickWriter.close() must close it or the connection leaks (and
@@ -369,24 +443,34 @@ public final class RawTickWriter implements AutoCloseable {
         }
 
         /** Append timed out — Fluss may have persisted the row. */
-        static AppendOutcome uncertain(int rowBytes, Duration timeout) {
-            return new AppendOutcome(Status.UNCERTAIN, null, null, null, rowBytes,
+        // P1-110/116: thread packet identity like success() — downstream
+        // correlates UNCERTAIN/FAILED/FATAL back to the row by fingerprint.
+        static AppendOutcome uncertain(TickPacket packet, Instant acceptTime,
+                                       int rowBytes, Duration timeout) {
+            return new AppendOutcome(Status.UNCERTAIN, packet.eventTime(), acceptTime, null, rowBytes,
                     "uncertain after " + timeout.toMillis() + "ms timeout; may be a duplicate",
-                    -1, -1, null, 0L, null, null);
+                    -1, -1, packet.eventFingerprint(), packet.instrumentToken(),
+                    packet.exchange(), packet.tradingSymbol());
         }
 
-        static AppendOutcome fatal(int rowBytes, Throwable e) {
+        // P1-111/117: same identity threading for FATAL ...
+        static AppendOutcome fatal(TickPacket packet, Instant acceptTime,
+                                   int rowBytes, Throwable e) {
             String msg = e.getMessage();
             if (msg == null) msg = e.getClass().getSimpleName();
-            return new AppendOutcome(Status.FATAL, null, null, null, rowBytes,
-                    "FATAL: " + msg, -1, -1, null, 0L, null, null);
+            return new AppendOutcome(Status.FATAL, packet.eventTime(), acceptTime, null, rowBytes,
+                    "FATAL: " + msg, -1, -1, packet.eventFingerprint(),
+                    packet.instrumentToken(), packet.exchange(), packet.tradingSymbol());
         }
 
-        static AppendOutcome failed(int rowBytes, Throwable e) {
+        // P1-112/117: ... and FAILED (retries-exhausted stays correlatable).
+        static AppendOutcome failed(TickPacket packet, Instant acceptTime,
+                                    int rowBytes, Throwable e) {
             String msg = e.getMessage();
             if (msg == null) msg = e.getClass().getSimpleName();
-            return new AppendOutcome(Status.FAILED, null, null, null, rowBytes,
-                    msg, -1, -1, null, 0L, null, null);
+            return new AppendOutcome(Status.FAILED, packet.eventTime(), acceptTime, null, rowBytes,
+                    msg, -1, -1, packet.eventFingerprint(),
+                    packet.instrumentToken(), packet.exchange(), packet.tradingSymbol());
         }
 
         static AppendOutcome rejected(long pendingRecs, long pendingBytes, String detail) {

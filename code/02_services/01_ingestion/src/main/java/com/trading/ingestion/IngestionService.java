@@ -22,7 +22,6 @@ import com.trading.ingestion.quarantine.QuarantineSink;
 import com.trading.ingestion.quarantine.QuarantineWriter;
 import com.trading.ingestion.safety.SafetySink;
 import com.trading.ingestion.shutdown.UncertaintyJournal;
-import com.trading.ingestion.telemetry.OtlpAlertLogs;
 import com.trading.ingestion.telemetry.OtlpMetricsEmitter;
 import com.trading.ingestion.write.AppendTracker;
 import com.trading.ingestion.write.BoundedQueue;
@@ -39,6 +38,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -74,7 +74,6 @@ public final class IngestionService {
     private static final String VERSION = "0.2.0";
     private static final String FINGERPRINT_ALGO = "SHA-256";
     private static final long FRAME_STALE_MS = 15_000L;
-    private static final long SUBSCRIPTION_COMPLETENESS_TIMEOUT_MS = 30_000L;
     /** Clock re-measurement cadence (ING-FAIL-007). NTP queries are cheap but
      *  not free; 60 s keeps the readiness clock dimension fresh without
      *  hammering the time servers. */
@@ -127,7 +126,10 @@ public final class IngestionService {
      *  progress) has been detected and the process must stop fail-fast so the
      *  container restart policy can revive it against fresh metadata. Read by
      *  the bridge loop to exit promptly instead of blocking on a wedged writer. */
-    private volatile String fatalStopReason;
+    // P1-065: first-fatal-wins via CAS - a volatile check-then-act let two
+    // concurrent FATAL outcomes (writer threads + zero-ack watchdog) both
+    // pass the null check and overwrite each other nondeterministically.
+    private final AtomicReference<String> fatalStopReason = new AtomicReference<>();
     private volatile boolean subscriptionPaused;
     /** Last wall-clock epoch (ms) a tick was ACCEPTED into a writer queue
      *  (i.e. handed to the writer path). Feed signal for the zero-ack watchdog:
@@ -136,6 +138,10 @@ public final class IngestionService {
     private volatile long lastAcceptedEpochMs = 0L;
     private volatile long lastFrameNanos;
     private volatile long lastResourceRefreshNanos;
+    /** P1-246: last wall-clock stamp fed to the heap gate — clamps NTP
+     *  backward steps so the gate's monotonic sustain timers keep working
+     *  (mirror of the P1-247 re-arm in JvmHeapReadinessGate). */
+    private volatile long lastMemoryMonitorNowMs = 0L;
 
     /** Watchdog for broker-staleness detection during feed outages (R-108). */
     private final java.util.concurrent.ScheduledExecutorService stalenessWatchdog =
@@ -270,10 +276,13 @@ public final class IngestionService {
         this.writerCount = Math.max(1, Math.min(config.flussWriters, 8));
         this.queues = new BoundedQueue[writerCount];
         this.writerWorkers = new WriterWorker[writerCount];
+        // P1-062: each queue gets a 1/writerCount SHARE of the global pending
+        // budget — a full copy per queue would let N queues hold N x the
+        // Q17 total (e.g. 384MiB for N=2). Floor division only undershoots.
         for (int i = 0; i < writerCount; i++) {
             this.queues[i] = new BoundedQueue(
-                    config.maxPendingBytes,
-                    (int) Math.min(config.maxPendingRecords, Integer.MAX_VALUE));
+                    config.maxPendingBytes / writerCount,
+                    (int) Math.min(config.maxPendingRecords / writerCount, Integer.MAX_VALUE));
             this.writerWorkers[i] = new WriterWorker(queues[i], writer, config.drainDeadline);
             this.writerWorkers[i].start();
         }
@@ -386,8 +395,13 @@ public final class IngestionService {
                 config.flussBootstrap, config.rawTableName);
 
         // 4. Load instrument manifest (D4) — validate version + fingerprint (SCH-22)
-        InstrumentManifestLoader.ManifestResult manifestResult =
-                InstrumentManifestLoader.loadDefault();
+        // Phase 2 (P1-133): lifecycle span — the manifest INFO log below lands
+        // inside it, so it carries a real trace_id in OpenObserve.
+        InstrumentManifestLoader.ManifestResult manifestResult;
+        try (com.trading.ingestion.telemetry.Tracing.TracedSpan ignored =
+                com.trading.ingestion.telemetry.Tracing.span("ingestion.manifest-load")) {
+            manifestResult = InstrumentManifestLoader.loadDefault();
+        }
         if (manifestResult.instruments().isEmpty()) {
             LOG.error("ingestion: FATAL — manifest load returned empty instrument set");
             System.exit(1);
@@ -422,7 +436,20 @@ public final class IngestionService {
             // Mark shuttingDown before shutdown() runs so an expected bridge
             // exit during shutdown is not recorded as a BRIDGE_EXIT halt.
             service.shuttingDown = true;
-            service.shutdown();
+            // Phase 2 (P1-133): lifecycle span — drain logs carry a real
+            // trace_id. Ended before LogManager.shutdown (agent exports on
+            // its own pipeline, but ending first is strictly safer).
+            try (com.trading.ingestion.telemetry.Tracing.TracedSpan ignored =
+                    com.trading.ingestion.telemetry.Tracing.span("ingestion.shutdown")) {
+                service.shutdown();
+            } finally {
+                // P1-131: stop the logging context AFTER the drain — buffered
+                // output and .gz rollover trailers would otherwise truncate
+                // (shutdownHook="disable" + no explicit stop). Deliberately
+                // here, not log4j's default hook, so no competing hook can
+                // close the appenders mid-drain (P1-067 ordering).
+                org.apache.logging.log4j.LogManager.shutdown();
+            }
         }));
 
         // 6. Launch Go arrow-bridge and read proto frames from its stdout (D7, I1, I6)
@@ -436,9 +463,9 @@ public final class IngestionService {
         // watchdog would lose the race to the JVM's natural exit(0). Main must
         // therefore be the single exit-code decision point: nonzero only when
         // a fatal stop was requested.
-        if (service.fatalStopReason != null) {
+        if (service.fatalStopReason.get() != null) {
             LOG.error("ingestion: exiting nonzero after FAIL-FAST ({}) — container restart policy revives us",
-                    service.fatalStopReason);
+                    service.fatalStopReason.get());
             System.exit(1);
         }
     }
@@ -550,10 +577,6 @@ public final class IngestionService {
             }, 1, 1, java.util.concurrent.TimeUnit.SECONDS);
         }
 
-        // ---- Subscription completeness tracking (ING-2) ----
-        java.util.Set<Long> seenTokens = java.util.concurrent.ConcurrentHashMap.newKeySet();
-        long lastSubscriptionWarningNanos = System.nanoTime();
-
         // ING-FAIL-007: periodic clock-offset re-measurement — a violation
         // crossing CLOCK_OFFSET_LIMIT_MS emits a TIME_JUMP discontinuity
         // (once per episode) and keeps the readiness clock dimension fresh.
@@ -571,7 +594,6 @@ public final class IngestionService {
 
         while (running && restartCount <= MAX_BRIDGE_RESTARTS) {
             long bridgeStartNanos = System.nanoTime();
-            lastSubscriptionWarningNanos = bridgeStartNanos;
 
             try {
                 bridgeProcess = startBridge(bridgeBinary);
@@ -593,12 +615,24 @@ public final class IngestionService {
                         new ProtoFrameReader.FrameHandler() {
                             @Override
                             public void onMarketBatch(com.trading.ingestion.transport.MarketDataBatch batch) {
-                                long frameReadMs = System.currentTimeMillis(); // T8: frame-read time
-                                long batchCreatedMs = batch.getCreatedMs();    // T8: Go batch creation
-                                for (com.trading.ingestion.transport.TickEvent ev : batch.getEventsList()) {
-                                    handleFrameArrival();
-                                    processTickEvent(ev, batch.getConnectionId(), batch.getConnectionEpoch(),
-                                            frameReadMs, batchCreatedMs);
+                                // Phase 2 (P1-133): THE batch-level marker — one span per
+                                // Go batch (never per tick). 1-in-N sampled inside
+                                // Tracing; errors recorded then rethrown unchanged.
+                                com.trading.ingestion.telemetry.Tracing.TracedSpan traced =
+                                        com.trading.ingestion.telemetry.Tracing.marketBatch(
+                                                batch.getEventsList().size(),
+                                                batch.getConnectionId(), batch.getConnectionEpoch());
+                                try (traced) {
+                                    long frameReadMs = System.currentTimeMillis(); // T8: frame-read time
+                                    long batchCreatedMs = batch.getCreatedMs();    // T8: Go batch creation
+                                    for (com.trading.ingestion.transport.TickEvent ev : batch.getEventsList()) {
+                                        handleFrameArrival();
+                                        processTickEvent(ev, batch.getConnectionId(), batch.getConnectionEpoch(),
+                                                frameReadMs, batchCreatedMs);
+                                    }
+                                } catch (Throwable th) {
+                                    traced.error(th);
+                                    throw th;
                                 }
                             }
 
@@ -650,10 +684,8 @@ public final class IngestionService {
                     }
                     // Reset slot states to AUTHENTICATING for the fresh process.
                     health.resetSlotsToAuthenticating();
-                    // R-110: the fresh bridge process must re-establish
-                    // subscription completeness from zero — tokens seen by the
-                    // previous process must not count toward the new one.
-                    seenTokens.clear();
+                    // P1-063: dead ING-2 token accounting removed — completeness
+                    // is driven solely by bridge ACTIVE events below.
                     health.setSubscriptionComplete(false);
                     metrics.setBridgeConnected(false);
                     break;
@@ -779,6 +811,20 @@ public final class IngestionService {
     }
 
     /**
+     * P1-225: read a kill-helper exit code without letting
+     * {@link IllegalThreadStateException} (helper still alive after the
+     * bounded wait + destroyForcibly race) escape past the shutdown catch
+     * and abort shutdown midway. -1 means unknown/failed delivery.
+     */
+    static int killExitCode(Process kill) {
+        try {
+            return kill.exitValue();
+        } catch (IllegalThreadStateException stillAlive) {
+            return -1;
+        }
+    }
+
+    /**
      * Signal the bridge process (SIGTERM) WITHOUT closing the parent-side
      * process pipes. {@link Process#destroy()} sends SIGTERM but on this JDK
      * also closes the parent's input streams for the child with
@@ -799,10 +845,15 @@ public final class IngestionService {
                     .redirectErrorStream(true).start();
             if (!kill.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
                 kill.destroyForcibly();
+                kill.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
             }
-            if (kill.exitValue() != 0) {
+            // P1-225: single exitValue() read via killExitCode — a still-alive
+            // helper reports -1 (fall back to destroy) instead of throwing
+            // IllegalThreadStateException past this catch and aborting shutdown.
+            int killExit = killExitCode(kill);
+            if (killExit != 0) {
                 LOG.warn("ingestion: kill -TERM failed (exit={}); falling back to Process.destroy()",
-                        kill.exitValue());
+                        killExit);
                 bridgeProcess.destroy();
             }
         } catch (java.io.IOException e) {
@@ -937,16 +988,7 @@ public final class IngestionService {
                     metrics.setGoGoroutines(m.goGoroutines());
                 }
                 case "broker_quarantine" -> {
-                    BrokerQuarantine record = new BrokerQuarantine(
-                            BrokerQuarantine.CONTRACT_VERSION,
-                            cr.getSlotId(),
-                            cr.getConnectionId(),
-                            cr.getConnectionEpoch(),
-                            cr.getRawPayload() == null ? 0L : cr.getReceivedTsMs(),
-                            cr.getReason(),
-                            cr.getRawPayload() == null ? new byte[0] : cr.getRawPayload().toByteArray(),
-                            "",
-                            cr.getReceivedTsMs());
+                    BrokerQuarantine record = toBrokerQuarantine(cr);
                     quarantineWriter.write(record.rawPayload(),
                             QuarantineWriter.Reason.valueOf(record.reason()),
                             "bridge broker quarantine (proto)",
@@ -1094,6 +1136,17 @@ public final class IngestionService {
                     ev.getAskPxCount() > 0 && ev.getAskPx(0) != 0 ? (long) ev.getAskPx(0) : 0L
             );
 
+            // P1-249: Go omits the hash as empty — the builder only
+            // requireNonNulls, so "" would sail through and break the SHA-256
+            // invariant. Fail fast here (quarantine, no recompute: p99).
+            if (ev.getPayloadHash().isEmpty()) {
+                quarantineWriter.write(packetBytes, QuarantineWriter.Reason.INVALID_VALUES,
+                        "missing payload hash (expected SHA-256 hex)",
+                        (long) ev.getToken(), null, null);
+                metrics.incrementDecodeError("MISSING_PAYLOAD_HASH");
+                return;
+            }
+
             RawTick raw = new RawTick.Builder()
                     .rawPayload(packetBytes)
                     .payloadHash(ev.getPayloadHash().isEmpty() ? "" : ev.getPayloadHash().toStringUtf8())
@@ -1140,7 +1193,13 @@ public final class IngestionService {
 
             metrics.recordTick(packetBytes.length);
             metrics.incrementFingerprint();
-            health.setLastFrameReceived(System.nanoTime());
+            // P1-081: per-slot arrival evidence with the tick's own slotId —
+            // without this, deleting the setLastFrameReceived fan-out would
+            // regress R-031 (steady-state readiness flapping false 15s after
+            // the last lifecycle event). Worst-slot-wins still governs.
+            long tickNanos = System.nanoTime();
+            health.setLastFrameReceived(tickNanos);
+            health.setSlotFrameReceived(ev.getSlotId(), tickNanos);
             metrics.setPendingRecords(tracker.pendingRecords());
             metrics.setPendingBytes(tracker.pendingBytes());
             metrics.setIngestionReady(health.isReady());
@@ -1171,6 +1230,37 @@ public final class IngestionService {
      * reflect a tick that was actually persisted; only SUCCESS completes
      * with an ack, so only SUCCESS updates the snapshot.
      */
+    /**
+     * P1-064: map a bridge broker_quarantine control record to quarantine
+     * evidence. Token is 0 (unknown): ControlRecord carries NO token field,
+     * and a quarantined tick is undecodable by definition - the old code
+     * stored receivedTsMs in the token column, corrupting both columns (the
+     * timestamp already has its own detectedTsMs slot).
+     */
+    static BrokerQuarantine toBrokerQuarantine(
+            com.trading.ingestion.transport.ControlRecord cr) {
+        byte[] raw = cr.getRawPayload() == null ? new byte[0] : cr.getRawPayload().toByteArray();
+        return new BrokerQuarantine(
+                BrokerQuarantine.CONTRACT_VERSION,
+                cr.getSlotId(),
+                cr.getConnectionId(),
+                cr.getConnectionEpoch(),
+                0L,
+                cr.getReason(),
+                raw,
+                sha256Hex(raw),
+                cr.getReceivedTsMs());
+    }
+
+    private static String sha256Hex(byte[] payload) {
+        try {
+            return java.util.HexFormat.of().formatHex(
+                    java.security.MessageDigest.getInstance("SHA-256").digest(payload));
+        } catch (Exception e) {
+            throw new IllegalStateException("SHA-256 unavailable", e);
+        }
+    }
+
     private void onAppendOutcome(RawTickWriter.AppendOutcome outcome) {
         long latencyMs = outcome.ackTime() != null
                 ? java.time.Duration.between(outcome.acceptTime(), outcome.ackTime()).toMillis()
@@ -1243,8 +1333,7 @@ public final class IngestionService {
      * exit(0).
      */
     private void requestFatalStop(String reason) {
-        if (fatalStopReason != null) return; // first fatal wins
-        fatalStopReason = reason;
+        if (!fatalStopReason.compareAndSet(null, reason)) return; // first fatal wins
         health.markNotAlive();
         metrics.setIngestionReady(false);
         updateReadinessFile();
@@ -1429,6 +1518,12 @@ public final class IngestionService {
     private void emitSafetyTransition(BridgeEvent event, boolean active) {
         if (safetyHaltWriter == null) return;
         String slotId = event.slotId();
+        // P1-091: a blank slotId can never produce a valid safety row (DDL
+        // NOT NULL) — skip loudly instead of throwing on the control path.
+        if (slotId == null || slotId.isBlank()) {
+            LOG.error("safety: refusing transition for blank slotId (event={})", event.event());
+            return;
+        }
         long epoch = event.connectionEpoch();
 
         com.trading.ingestion.safety.SafetyHaltWriter.ReasonCode unsafe =
@@ -1438,9 +1533,20 @@ public final class IngestionService {
             String id = com.trading.ingestion.safety.SafetyHaltWriter.computeHaltRequestId(
                     manifestFingerprint, slotId, epoch, "UNSAFE", unsafe.name());
             if (firstEmission(safetyEmitted, "UNSAFE", id)) {
-                safetyHaltWriter.write(slotId, epoch,
-                        com.trading.ingestion.safety.SafetyHaltWriter.SafetyState.UNSAFE,
-                        unsafe, assignedTokenSetHash, event.event(), System.currentTimeMillis());
+                try {
+                    safetyHaltWriter.write(slotId, epoch,
+                            com.trading.ingestion.safety.SafetyHaltWriter.SafetyState.UNSAFE,
+                            unsafe, assignedTokenSetHash, event.event(), System.currentTimeMillis());
+                } catch (RuntimeException e) {
+                    // P1-092: evict the dedup entry so the next event retries
+                    // (idempotent KV upsert); the slot is still unsafe —
+                    // markSlotUnsafe below still runs. Bare propagation would
+                    // skip it AND poison processTickEvent's catch into
+                    // double-quarantining the tick.
+                    safetyEmitted.remove("UNSAFE|" + id);
+                    LOG.error("safety: halt write failed, will retry (slot={}, halt={}): {}",
+                            slotId, id.substring(0, Math.min(8, id.length())), e.getMessage());
+                }
                 LOG.warn("safety: slot {} UNSAFE (reason={}, epoch={}, halt={})",
                         slotId, unsafe, epoch, id.substring(0, Math.min(8, id.length())));
             }
@@ -1450,9 +1556,16 @@ public final class IngestionService {
             String id = com.trading.ingestion.safety.SafetyHaltWriter.computeHaltRequestId(
                     manifestFingerprint, slotId, epoch, "RECOVERED", "");
             if (firstEmission(safetyEmitted, "RECOVERED", id)) {
-                safetyHaltWriter.write(slotId, epoch,
-                        com.trading.ingestion.safety.SafetyHaltWriter.SafetyState.RECOVERED,
-                        null, assignedTokenSetHash, event.event(), System.currentTimeMillis());
+                try {
+                    safetyHaltWriter.write(slotId, epoch,
+                            com.trading.ingestion.safety.SafetyHaltWriter.SafetyState.RECOVERED,
+                            null, assignedTokenSetHash, event.event(), System.currentTimeMillis());
+                } catch (RuntimeException e) {
+                    // P1-092: evict so the next event retries the RECOVERED row.
+                    safetyEmitted.remove("RECOVERED|" + id);
+                    LOG.error("safety: recovered write failed, will retry (slot={}, halt={}): {}",
+                            slotId, id.substring(0, Math.min(8, id.length())), e.getMessage());
+                }
                 LOG.info("safety: slot {} RECOVERED (epoch={}, halt={})",
                         slotId, epoch, id.substring(0, Math.min(8, id.length())));
             }
@@ -1483,10 +1596,20 @@ public final class IngestionService {
         String id = com.trading.ingestion.safety.SafetyHaltWriter.computeHaltRequestId(
                 manifestFingerprint, slotId, safeEpoch, "UNSAFE", code.name());
         if (firstEmission(safetyEmitted, "UNSAFE", id)) {
-            safetyHaltWriter.write(slotId, safeEpoch,
-                    com.trading.ingestion.safety.SafetyHaltWriter.SafetyState.UNSAFE,
-                    code, assignedTokenSetHash, quarantineReason.name(),
-                    System.currentTimeMillis());
+            try {
+                safetyHaltWriter.write(slotId, safeEpoch,
+                        com.trading.ingestion.safety.SafetyHaltWriter.SafetyState.UNSAFE,
+                        code, assignedTokenSetHash, quarantineReason.name(),
+                        System.currentTimeMillis());
+            } catch (RuntimeException e) {
+                // P1-092: evict so the next tick retries (idempotent upsert).
+                // Bare propagation would land in processTickEvent's catch and
+                // double-quarantine an already-quarantined tick as
+                // INTERNAL_ERROR while skipping markSlotUnsafe below.
+                safetyEmitted.remove("UNSAFE|" + id);
+                LOG.error("safety: halt write failed, will retry (slot={}, halt={}): {}",
+                        slotId, id.substring(0, Math.min(8, id.length())), e.getMessage());
+            }
             LOG.warn("safety: slot {} UNSAFE (reason={}, epoch={}, halt={})",
                     slotId, code, safeEpoch, id.substring(0, Math.min(8, id.length())));
         }
@@ -1607,6 +1730,19 @@ public final class IngestionService {
      * {@link ContainerMemoryGuard}'s contract. The alert is best-effort and off
      * the critical path (a dead collector can never fail the data path).
      */
+    /**
+     * P1-246: stamp one memory-monitor sample monotonically. The gate's
+     * breach/clear timers are documented monotonic but this stamp is
+     * wall-clock — an NTP backward step would stall WARN_HEAP_HIGH past its
+     * 60 s sustain, so clamp to the last stamp (mirror of the P1-247 re-arm
+     * in JvmHeapReadinessGate). Forward jumps pass through (gate-owned).
+     */
+    long monotonicMemorySampleMs(long wallNowMs) {
+        long nowMs = Math.max(wallNowMs, lastMemoryMonitorNowMs);
+        lastMemoryMonitorNowMs = nowMs;
+        return nowMs;
+    }
+
     private void startMemoryMonitor() {
         memoryMonitorScheduler.scheduleAtFixedRate(() -> {
             if (!running) return;
@@ -1616,7 +1752,8 @@ public final class IngestionService {
                 long used = ContainerMemoryGuard.readContainerMemoryUsedBytes();
                 if (used < 0) return;
                 JvmHeapReadinessGate.Signal signal =
-                        heapGate.observe(limit, used, System.currentTimeMillis());
+                        heapGate.observe(limit, used,
+                                monotonicMemorySampleMs(System.currentTimeMillis()));
                 health.setMemoryBlocked(heapGate.isBlocked());
                 refreshResourceMetrics();
                 if (signal == JvmHeapReadinessGate.Signal.WARN_HEAP_HIGH) {
@@ -1625,17 +1762,16 @@ public final class IngestionService {
                         + "the 85% alert threshold (limit={}B used={}B pct={}%); blocking readiness so "
                         + "the mis-sized JVM stops being a live-data source instead of OOM-ing.",
                         limit, used, ContainerMemoryGuard.utilizedPercent(limit, used));
-                    OtlpAlertLogs.emit(otelHost, "ingestion", "WARN",
-                        "SIGNAL-warn-jvm-heap-high",
-                        "container_memory_pct=" + ContainerMemoryGuard.utilizedPercent(limit, used));
+                    // (P1-133 native: the LOG.error above IS the alert now — the
+                    // javaagent ships it to the collector with severity + trace
+                    // id. Hand-rolled OtlpAlertLogs deleted 2026-09-07.)
                 } else if (signal == JvmHeapReadinessGate.Signal.INFO_HEAP_RECOVERED) {
                     LOG.info(
                         "ingestion: SIGNAL-info-jvm-heap-recovered — container memory back below the "
                         + "75% hysteresis setpoint; clearing the readiness block (limit={}B used={}B).",
                         limit, used);
-                    OtlpAlertLogs.emit(otelHost, "ingestion", "INFO",
-                        "SIGNAL-info-jvm-heap-recovered",
-                        "container_memory_pct=" + ContainerMemoryGuard.utilizedPercent(limit, used));
+                    // (P1-133 native: the LOG.info above IS the recovery signal
+                    // now — shipped by the agent. OtlpAlertLogs deleted.)
                 }
             } catch (Exception e) {
                 // A memory-probe failure must never take the data path down.
@@ -1723,6 +1859,8 @@ public final class IngestionService {
         // the memory monitor, and the zero-ack watchdog.
         stalenessWatchdog.shutdownNow();
         clockMonitorScheduler.shutdownNow();
+        // P1-066: was omitted - the daemon kept mutating health/readiness past shutdown.
+        memoryMonitorScheduler.shutdownNow();
         if (zeroAckWatchdog != null) zeroAckWatchdog.shutdownNow();
         if (readinessFile != null) {
             try { readinessFile.clear(); }
@@ -1734,7 +1872,10 @@ public final class IngestionService {
         // entry pins the EXACT bytes/records still pending at shutdown — the
         // drain (writer.close below) may time out on an un-acking Fluss, so
         // the journal must record what the drain was unable to flush.
-        journal.write(new UncertaintyJournal.Entry(
+        // P1-096: durability is reported, not assumed — if the journal did
+        // not persist, the post-restart baselines are gone; say so LOUDLY
+        // (retrying a disk-full/RO-remount this late in shutdown is pointless).
+        if (!journal.write(new UncertaintyJournal.Entry(
                 instanceId,
                 Instant.now(),
                 tracker.totalAccepted(),
@@ -1745,16 +1886,14 @@ public final class IngestionService {
                 tracker.pendingRecords(),
                 tracker.pendingBytes(),
                 "shutdown"
-        ));
+        ))) {
+            LOG.error("ingestion: UNCERTAINTY JOURNAL NOT PERSISTED — "
+                    + "post-restart counter baselines are lost (pending records/bytes unrecoverable)");
+        }
 
-        // Close metrics emitter (triggers final flush)
-        metrics.close();
-
-        // Close quarantine + discontinuity writers
-        if (quarantineWriter != null) quarantineWriter.close();
-        if (discontinuityWriter != null) discontinuityWriter.close();
-        if (safetyHaltWriter != null) safetyHaltWriter.close();
-
+        // P1-067: DRAIN FIRST - drain-time onAppendOutcome() still calls
+        // metrics.record* and requestFatalStop paths, so metrics/sinks must
+        // outlive the drain. Closing them first silently dropped drain telemetry.
         // J2: Drain pending writes with deadline — T6-3: close the queue
         // first (stops new offers), the worker drains everything queued,
         // then the writer closes (pending acks + drain deadline).
@@ -1764,6 +1903,14 @@ public final class IngestionService {
             }
         }
         if (writer != null) writer.close();
+
+        // Close metrics emitter (triggers final flush)
+        metrics.close();
+
+        // Close quarantine + discontinuity writers
+        if (quarantineWriter != null) quarantineWriter.close();
+        if (discontinuityWriter != null) discontinuityWriter.close();
+        if (safetyHaltWriter != null) safetyHaltWriter.close();
         // Join the main thread (bounded) when this is the shutdown hook and the
         // bridge loop was live: the loop logs the final "bridge loop ended
         // (ticks=…)" report after `running` flips false, and the JVM halts as
@@ -1890,10 +2037,17 @@ public final class IngestionService {
             String id = com.trading.ingestion.safety.SafetyHaltWriter.computeHaltRequestId(
                     manifestFingerprint, slotId, epoch, "UNSAFE", "RESOURCE_EXHAUSTED");
             if (firstEmission(safetyEmitted, "UNSAFE", id)) {
-                safetyHaltWriter.write(slotId, epoch,
-                        com.trading.ingestion.safety.SafetyHaltWriter.SafetyState.UNSAFE,
-                        com.trading.ingestion.safety.SafetyHaltWriter.ReasonCode.RESOURCE_EXHAUSTED,
-                        assignedTokenSetHash, "fd_usage_exhausted", System.currentTimeMillis());
+                try {
+                    safetyHaltWriter.write(slotId, epoch,
+                            com.trading.ingestion.safety.SafetyHaltWriter.SafetyState.UNSAFE,
+                            com.trading.ingestion.safety.SafetyHaltWriter.ReasonCode.RESOURCE_EXHAUSTED,
+                            assignedTokenSetHash, "fd_usage_exhausted", System.currentTimeMillis());
+                } catch (RuntimeException e) {
+                    // P1-092: evict so the next 5s re-check retries.
+                    safetyEmitted.remove("UNSAFE|" + id);
+                    LOG.error("safety: halt write failed, will retry (slot={}, halt={}): {}",
+                            slotId, id.substring(0, Math.min(8, id.length())), e.getMessage());
+                }
                 LOG.error("safety: slot {} UNSAFE (reason=RESOURCE_EXHAUSTED, fd_usage={}%, epoch={}, halt={})",
                         slotId, String.format("%.1f", fdUsagePercent), epoch,
                         id.substring(0, Math.min(8, id.length())));

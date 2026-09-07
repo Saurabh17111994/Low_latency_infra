@@ -90,7 +90,10 @@ public final class JvmHeapReadinessGate {
         if (pct <= clearAtPercent) {
             // entering/existing recovery accumulation
             breachSinceMs = null;
-            if (clearSinceMs == null) {
+            // P1-247: re-arm on clock regression — a backward nowMs step
+            // leaves nowMs - clearSinceMs negative indefinitely, stalling
+            // the sustained-recovery clear (symmetric to the breach timer).
+            if (clearSinceMs == null || nowMs < clearSinceMs) {
                 clearSinceMs = nowMs;
             }
             if (blocked && nowMs - clearSinceMs >= sustainWindowMs) {

@@ -113,11 +113,13 @@ final class TypedFlussRowConverter implements FlussRowConverter {
         row.symbol = packet.tradingSymbol();
         row.event_time = packet.eventTime().toEpochMilli();
         row.ingest_ts = now.toEpochMilli();
-        row.ack_ts = null; // 0 = unknown (R-010)
+        // P1-061: 0 = unknown (R-010), aligned with the generic path (0L) —
+        // NULL-vs-0 divergence broke IS NULL vs =0 queries across A/B modes.
+        row.ack_ts = 0L;
         row.tick_type = packet.validity() == com.trading.ingestion.model.ValidityClassification.VALID_NON_TRADE ? "QUOTE" : "TRADE";
         row.last_price_paise = packet.lastPricePaise();
         row.last_qty = packet.volume();
-        row.raw_payload = raw != null ? raw.rawPayloadUnsafe() : new byte[0];
+        row.raw_payload = raw != null ? raw.rawPayload() : new byte[0]; // P1-087: retained copy
         row.payload_hash = raw != null ? raw.payloadHash() : "";
         row.decoder_version = raw != null ? raw.decoderVersion() : "go-arrow-sdk";
         row.protocol_version = raw != null ? raw.protocolVersion() : "";
@@ -137,6 +139,17 @@ final class TypedFlussRowConverter implements FlussRowConverter {
                     // UNCERTAIN. R-190: ex.getCause() may be null (plain exception).
                     Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
                     LOG.warn("fluss: typed append failed (table={}): {}", tablePath, cause.getMessage());
+                    // P1-074: preserve cancellation identity — handleCompletion
+                    // unwraps ONE level for CancellationException→UNCERTAIN; a
+                    // fresh RuntimeException wrap would hide it and the timeout
+                    // would misclassify as FATAL (fail-closed halt) instead of
+                    // deferring dedup to Compute.
+                    if (cause instanceof java.util.concurrent.CancellationException ce) {
+                        throw ce;
+                    }
+                    if (cause instanceof RuntimeException re) {
+                        throw re;
+                    }
                     throw new RuntimeException("Fluss typed append failed", cause);
                 });
     }
@@ -144,12 +157,29 @@ final class TypedFlussRowConverter implements FlussRowConverter {
     @Override
     public int estimatedRowSize(TickPacket packet) {
         RawTick raw = packet.raw();
-        return (raw != null ? raw.rawPayloadUnsafe().length : 0) + 256;
+        return (raw != null ? raw.rawPayloadLength() : 0) + 256; // P1-087
     }
 
     @Override
     public void close() {
-        closed = true;
+        // P1-075: the TypedAppendWriter was never flushed/closed here —
+        // buffered batches were lost and the writer leaked. Flush first,
+        // then the connection. Idempotent: double-close flushes once.
+        // Residual append-vs-close races converge via the writer error
+        // paths (R-069 philosophy), never via a lock on the hot path.
+        // The check-and-set alone IS synchronized: concurrent closes must
+        // not double-flush/double-close. The I/O below stays outside it.
+        synchronized (this) {
+            if (closed) {
+                return;
+            }
+            closed = true;
+        }
+        try {
+            writer.flush();
+        } catch (Exception e) {
+            LOG.warn("fluss: typed converter flush failed: {}", e.getMessage());
+        }
         try {
             connection.close();
         } catch (Exception e) {

@@ -81,6 +81,14 @@ public final class SafetyHaltWriter implements SafetySink {
      */
     public SafetyHaltWriter(String bootstrapServers, String sourceInstance,
                             String manifestFingerprint, String accountScopeId) {
+        // P1-091: these land in DDL NOT NULL columns (manifest_fingerprint,
+        // account_scope_id) — fail at construction, not on the first write.
+        if (manifestFingerprint == null || manifestFingerprint.isBlank()) {
+            throw new IllegalArgumentException("manifestFingerprint must not be blank");
+        }
+        if (accountScopeId == null || accountScopeId.isBlank()) {
+            throw new IllegalArgumentException("accountScopeId must not be blank");
+        }
         this.sourceInstance = sourceInstance;
         this.manifestFingerprint = manifestFingerprint;
         this.accountScopeId = accountScopeId;
@@ -121,6 +129,11 @@ public final class SafetyHaltWriter implements SafetySink {
     public String write(String slotId, long connectionEpoch, SafetyState state,
                         ReasonCode reasonCode, String assignedTokenHash,
                         String evidenceReference, long detectedTsMs) {
+        // P1-091: fail fast — a null state NPE'd with no row written, an
+        // UNSAFE with null reasonCode produced reason="" which the downstream
+        // parser rejects (slot stays un-halted), and blank slotIds violate
+        // DDL NOT NULL. RECOVERED carries null reasonCode by contract.
+        requireWritableArgs(slotId, state, reasonCode);
         String reason = reasonCode != null ? reasonCode.name() : "";
         String haltRequestId = computeHaltRequestId(
                 manifestFingerprint, slotId, connectionEpoch, state.name(), reason);
@@ -158,10 +171,33 @@ public final class SafetyHaltWriter implements SafetySink {
             // is only logged after the write actually completes (R-034).
             observe(writer.upsert(row), haltRequestId, slotId, state, reason, connectionEpoch);
         } catch (Exception e) {
+            // P1-092: fail VISIBLY — returning the id after a swallowed sync
+            // failure made a lost UNSAFE halt indistinguishable from success
+            // (and the caller's dedup entry blocked any retry). Callers catch
+            // this, evict their dedup entry, and retry on the next tick
+            // (idempotent KV upsert makes retry safe).
             LOG.error("safety-halt-writer: append failed (id={}, reason={}): {}",
                     haltRequestId, reason, e.getMessage());
+            throw new RuntimeException("safety halt write failed (id=" + haltRequestId + ")", e);
         }
         return haltRequestId;
+    }
+
+    /**
+     * P1-091: argument contract (package-visible for direct unit testing —
+     * write() itself needs a live Fluss writer).
+     */
+    static void requireWritableArgs(String slotId, SafetyState state, ReasonCode reasonCode) {
+        java.util.Objects.requireNonNull(state, "state");
+        if (slotId == null || slotId.isBlank()) {
+            throw new IllegalArgumentException("slotId must not be blank");
+        }
+        if (state == SafetyState.UNSAFE && reasonCode == null) {
+            throw new IllegalArgumentException("UNSAFE requires a non-null reasonCode");
+        }
+        if (state == SafetyState.RECOVERED && reasonCode != null) {
+            throw new IllegalArgumentException("RECOVERED requires null reasonCode (empty reason in ID tuple)");
+        }
     }
 
     /**

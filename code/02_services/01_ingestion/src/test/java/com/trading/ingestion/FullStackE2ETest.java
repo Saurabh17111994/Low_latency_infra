@@ -174,6 +174,7 @@ class FullStackE2ETest {
             java.util.Map<String, String> env = new java.util.HashMap<>();
             env.put("ARROW_HFT_URL", fakeUrl);
             env.put("ARROW_BRIDGE_BIN", bridgeBin);
+            env.put("DEPLOYMENT_ENV", "dev");
             env.put("ARROW_APP_ID", "e2e");
             env.put("ARROW_APP_SECRET", "e2esecret");
             env.put("ARROW_USER_ID", "e2e-user");

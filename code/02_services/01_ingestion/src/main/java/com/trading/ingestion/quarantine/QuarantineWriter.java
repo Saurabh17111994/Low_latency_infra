@@ -141,21 +141,33 @@ public class QuarantineWriter implements QuarantineSink {
         String payloadHash = computePayloadHash(rawPayload);
         byte[] payload = rawPayload != null ? rawPayload : new byte[0];
 
+        // P1-090: a null reason previously NPE'd at reason.name() OUTSIDE the
+        // try, breaking the never-throws contract. Default to INTERNAL_ERROR
+        // (an unwitnessed quarantine cause IS an internal error) and build the
+        // row inside the try so NOTHING in this method throws.
+        String reasonName = safeReasonName(reason);
         String safeDetail = sanitizeDetail(detail);
-        GenericRow row = GenericRow.of(
-                bs(quarantineId), bs(reason.name()), instrumentToken,
-                bs(exchange), bs(symbol), payload, bs(payloadHash),
-                now.toEpochMilli(), bs(safeDetail), bs("v1"));
-
         try {
+            GenericRow row = GenericRow.of(
+                    bs(quarantineId), bs(reasonName), instrumentToken,
+                    bs(exchange), bs(symbol), payload, bs(payloadHash),
+                    now.toEpochMilli(), bs(safeDetail), bs("v1"));
             // Fluss appends are asynchronous: failures surface on the future,
             // not by throwing from append(). Observe it so async failures are
             // logged at ERROR and never silently swallowed (R-033).
-            observe(writer.append(row), quarantineId, reason.name());
+            observe(writer.append(row), quarantineId, reasonName);
         } catch (Exception e) {
             LOG.error("quarantine-writer: append failed (id={}, reason={}): {}",
-                    quarantineId, reason, e.getMessage());
+                    quarantineId, reasonName, e.getMessage());
         }
+    }
+
+    /**
+     * P1-090: null-safe reason mapping (package-visible for direct unit
+     * testing — write() itself needs a live Fluss writer).
+     */
+    static String safeReasonName(Reason reason) {
+        return reason != null ? reason.name() : Reason.INTERNAL_ERROR.name();
     }
 
     /**

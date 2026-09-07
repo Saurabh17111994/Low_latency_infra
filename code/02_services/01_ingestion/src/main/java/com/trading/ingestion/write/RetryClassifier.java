@@ -39,7 +39,9 @@ public final class RetryClassifier {
      * is the outcome RETRYABLE.
      */
     public static Classification classify(Throwable t) {
-        if (t == null) return Classification.RETRYABLE;
+        // P1-124: null is unknown, and unknown fails closed per R-285 below —
+        // a null here is a programming error, never a proven-transient fault.
+        if (t == null) return Classification.FATAL;
 
         // Walk the entire cause chain; a fatal cause anywhere wins.
         boolean sawRetryable = false;
@@ -64,10 +66,27 @@ public final class RetryClassifier {
         return sawRetryable ? Classification.RETRYABLE : Classification.FATAL;
     }
 
+    /**
+     * True when an interrupt drove the failure anywhere in the chain
+     * (B125: interrupts are FATAL at once, never retried — and the caller
+     * must restore the thread flag; see RawTickWriter.handleCompletion).
+     */
+    static boolean isInterruptCaused(Throwable t) {
+        for (Throwable cur = t; cur != null; cur = cur.getCause()) {
+            if (cur.getClass().getName().contains("Interrupted")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Recognized transient patterns — the Fluss client usually recovers. */
     private static boolean isRetryable(String name, String msg) {
-        if (name.contains("Timeout") || name.contains("Interrupted")
-                || name.contains("Connect")) {
+        // B125: bare contains("Connect") also matched manager/connector
+        // bookkeeping failures (non-transient) and contains("Interrupted")
+        // retried threads told to stop. Class-name matching is now failure
+        // nouns only; the message heuristics below stay the broad net.
+        if (name.contains("Timeout") || name.contains("ConnectException")) {
             return true;
         }
         if (msg != null) {
@@ -91,6 +110,11 @@ public final class RetryClassifier {
 
     /** Fatal patterns — return true if this link of the chain is fatal. */
     private static boolean isFatal(String name, String msg) {
+        // B125: interrupts fail at once — a thread told to stop must never
+        // spin the 3 bounded retries. Checked first; precedes everything.
+        if (name.contains("Interrupted")) {
+            return true;
+        }
         if (name.contains("Authentication")
                 || name.contains("AccessControl")
                 || name.contains("Security")) {

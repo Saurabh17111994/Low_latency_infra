@@ -172,4 +172,111 @@ class WriterWorkerTest {
         assertEquals(10, conv.appended.get());
         worker.close();
     }
+
+    @Test
+    @DisplayName("P1-127: sync SKIPPED after close is counted, not silently dropped")
+    void syncSkippedIsCounted() throws Exception {
+        CountingConverter conv = new CountingConverter();
+        AppendTracker tracker = new AppendTracker();
+        BoundedQueue queue = new BoundedQueue(1_000_000, 100_000);
+        RawTickWriter writer = makeWriter(conv, tracker);
+        WriterWorker worker = new WriterWorker(queue, writer, Duration.ofSeconds(5));
+        writer.close(); // every subsequent write() returns SKIPPED
+        assertTrue(queue.offer(TickPacketFixtures.validTrade(1), 100));
+        worker.start();
+        worker.close();
+        assertEquals(1, worker.syncDropCount(), "SKIPPED packet must be counted");
+        assertEquals(0, conv.appended.get(), "closed writer submits nothing");
+    }
+
+    @Test
+    @DisplayName("P1-129: write() throw is counted and drain continues (no poison loop)")
+    void writeThrowIsCountedAndDrainContinues() throws Exception {
+        // Converter whose size estimate throws once, then behaves.
+        FlussRowConverter flaky = new FlussRowConverter() {
+            final java.util.concurrent.atomic.AtomicBoolean first =
+                    new java.util.concurrent.atomic.AtomicBoolean(true);
+            final CountingConverter delegate = new CountingConverter();
+            @Override
+            public CompletableFuture<AppendResult> append(TickPacket packet) {
+                return delegate.append(packet);
+            }
+            @Override
+            public int estimatedRowSize(TickPacket packet) {
+                if (first.getAndSet(false)) {
+                    throw new RuntimeException("fake estimator bug");
+                }
+                return delegate.estimatedRowSize(packet);
+            }
+            @Override public void close() {}
+        };
+        AppendTracker tracker = new AppendTracker();
+        BoundedQueue queue = new BoundedQueue(1_000_000, 100_000);
+        WriterWorker worker = new WriterWorker(
+                queue, new RawTickWriter(flaky, tracker, "default.raw_table_1",
+                        Duration.ofSeconds(5), Duration.ofSeconds(30)),
+                Duration.ofSeconds(5));
+        worker.start();
+        assertTrue(queue.offer(TickPacketFixtures.validTrade(1), 100));
+        assertTrue(queue.offer(TickPacketFixtures.validTrade(2), 100));
+        worker.close();
+        assertEquals(1, worker.syncDropCount(), "thrown packet counted exactly once");
+        assertEquals(0, tracker.pendingRecords(), "no leaked reservation");
+    }
+
+    @Test
+    @DisplayName("B128: interrupt remainder-drain submits-or-counts every queued packet")
+    void interruptDrainLosesNothingSilently() {
+        CountingConverter conv = new CountingConverter();
+        AppendTracker tracker = new AppendTracker();
+        BoundedQueue queue = new BoundedQueue(1_000_000, 100_000);
+        // Short budget: the worker stays UNSTARTED (deterministic — the
+        // direct drain is the only consumer), so the trailing close() takes
+        // the timeout path and must cost ~0.2s, not 5s.
+        WriterWorker worker = new WriterWorker(queue, makeWriter(conv, tracker), Duration.ofMillis(200));
+        for (int i = 0; i < 50; i++) {
+            assertTrue(queue.offer(TickPacketFixtures.validTrade(i), 100), "offer " + i);
+        }
+        worker.drainRemainderAfterInterrupt();
+        assertEquals(50, conv.appended.get(), "every queued packet submitted");
+        assertEquals(0, queue.size(), "nothing left behind");
+        assertEquals(0, worker.interruptAbandoned(), "no silent abandon");
+        assertEquals(0, worker.syncDropCount(), "all ACCEPTED");
+        worker.close();
+    }
+
+    @Test
+    @DisplayName("B130: close on a wedged worker stays within ONE budget (not doubled wait)")
+    void closeStaysWithinSingleBudget() {
+        CountingConverter conv = new CountingConverter();
+        AppendTracker tracker = new AppendTracker();
+        assertTrue(tracker.tryAccept(100), "one pending record forces drain work");
+        BoundedQueue queue = new BoundedQueue(1_000_000, 100_000);
+        // Writer keeps its 30s deadline: old code waited worker-budget THEN
+        // the full writer deadline (30.2s); new code shares one 200ms budget.
+        WriterWorker worker = new WriterWorker(queue, makeWriter(conv, tracker), Duration.ofMillis(200));
+        for (int i = 0; i < 25; i++) {
+            queue.offer(TickPacketFixtures.validTrade(i), 100);
+        }
+        // NOTE: worker never started → stop latch never fires → timeout path.
+        long t0 = System.nanoTime();
+        worker.close();
+        long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0);
+        assertTrue(elapsedMs < 10_000, "single budget, not doubled wait (took " + elapsedMs + "ms)");
+        assertEquals(0, tracker.pendingRecords(), "force-drained to zero, counted FAILED");
+    }
+
+    @Test
+    @DisplayName("B130: close-timeout abandon is counted, not silent")
+    void closeAbandonIsCounted() {
+        CountingConverter conv = new CountingConverter();
+        AppendTracker tracker = new AppendTracker();
+        BoundedQueue queue = new BoundedQueue(1_000_000, 100_000);
+        WriterWorker worker = new WriterWorker(queue, makeWriter(conv, tracker), Duration.ofMillis(200));
+        for (int i = 0; i < 25; i++) {
+            queue.offer(TickPacketFixtures.validTrade(i), 100);
+        }
+        worker.close(); // never started → timeout path
+        assertEquals(25, worker.drainTimeoutAbandoned(), "all queued packets counted abandoned");
+    }
 }

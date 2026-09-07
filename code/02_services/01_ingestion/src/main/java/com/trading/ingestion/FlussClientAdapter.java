@@ -103,8 +103,12 @@ final class FlussClientAdapter {
         // ingestion pipeline. 30s converts that park into a sync EOFException.
         conf.setString("client.writer.buffer.wait-timeout", "30s");
 
-        // 2. Create connection
+        // 2. Create connection (P1-060: must be closed if later setup
+        // fails — getTable/getTableInfo/createWriter all throw with the
+        // background Sender/MetadataUpdater already running).
         Connection connection = ConnectionFactory.createConnection(conf);
+        boolean connected = false;
+        try {
 
         // 3. Parse table path "database.table_name"
         TablePath path = parseTablePath(tablePath);
@@ -124,21 +128,46 @@ final class FlussClientAdapter {
             TypedAppendWriter<TypedFlussRowConverter.TickRow> typedWriter =
                     table.newAppend().createTypedWriter(TypedFlussRowConverter.TickRow.class);
             LOG.info("fluss: connected (table={}, path={}, mode=TYPED)", tablePath, path);
-            return new TypedFlussRowConverter(typedWriter, connection, path.toString());
+            TypedFlussRowConverter converter =
+                    new TypedFlussRowConverter(typedWriter, connection, path.toString());
+            connected = true;
+            return converter;
         }
 
         AppendWriter appendWriter = table.newAppend().createWriter();
         LOG.info("fluss: connected (table={}, path={})", tablePath, path);
-        return new RealFlussRowConverter(appendWriter, connection, path.toString());
+        RealFlussRowConverter converter =
+                new RealFlussRowConverter(appendWriter, connection, path.toString());
+        connected = true;
+        return converter;
+        } finally {
+            if (!connected) {
+                try {
+                    connection.close();
+                } catch (Exception ignored) {
+                    // best-effort: we are already failing setup
+                }
+            }
+        }
     }
 
     private static TablePath parseTablePath(String tablePath) {
-        int dot = tablePath.indexOf('.');
-        if (dot > 0) {
-            return TablePath.of(tablePath.substring(0, dot), tablePath.substring(dot + 1));
+        // P1-221: reject bad input with a clear error instead of an NPE
+        // (null) or obscure downstream failure (multi-dot / empty parts).
+        if (tablePath == null || tablePath.isBlank()) {
+            throw new IllegalArgumentException("tablePath is required (expected database.table)");
         }
-        // default database
-        return TablePath.of("default", tablePath);
+        int first = tablePath.indexOf('.');
+        int last = tablePath.lastIndexOf('.');
+        if (first <= 0 || first != last || last == tablePath.length() - 1) {
+            if (first == -1) {
+                // default database
+                return TablePath.of("default", tablePath);
+            }
+            throw new IllegalArgumentException(
+                    "tablePath must be database.table, got '" + tablePath + "'");
+        }
+        return TablePath.of(tablePath.substring(0, first), tablePath.substring(first + 1));
     }
 }
 
@@ -218,7 +247,7 @@ class RealFlussRowConverter implements FlussRowConverter {
                 packet.lastPricePaise(),                            // last_price_paise BIGINT
                 packet.volume(),                                    // last_qty BIGINT
                 // payload preservation
-                raw != null ? raw.rawPayloadUnsafe() : new byte[0],       // raw_payload BYTES
+                raw != null ? raw.rawPayload() : new byte[0],               // raw_payload BYTES (P1-087: retained copy)
                 bs(raw != null ? raw.payloadHash() : ""),           // payload_hash STRING
                 bs(raw != null ? raw.decoderVersion() : "go-arrow-sdk"), // decoder_version STRING
                 bs(raw != null ? raw.protocolVersion() : ""),       // protocol_version STRING
@@ -248,8 +277,7 @@ class RealFlussRowConverter implements FlussRowConverter {
      */
     @Override
     public int estimatedRowSize(TickPacket packet) {
-        int payloadSize = (packet.raw() != null && packet.raw().rawPayloadUnsafe() != null)
-                ? packet.raw().rawPayloadUnsafe().length : 512;
+        int payloadSize = packet.raw() != null ? packet.raw().rawPayloadLength() : 512; // P1-087
         return 512 + payloadSize;
     }
 

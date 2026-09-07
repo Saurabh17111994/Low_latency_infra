@@ -12,6 +12,17 @@ import org.junit.jupiter.api.Test;
 
 class QuarantineWriterTest {
     @Test
+    void p1_090NullReasonDefaultsToInternalError() {
+        // P1-090: a null reason previously NPE'd at reason.name() OUTSIDE the
+        // try, breaking the never-throws contract.
+        assertEquals(QuarantineWriter.Reason.INTERNAL_ERROR.name(),
+                QuarantineWriter.safeReasonName(null));
+        for (QuarantineWriter.Reason r : QuarantineWriter.Reason.values()) {
+            assertEquals(r.name(), QuarantineWriter.safeReasonName(r));
+        }
+    }
+
+    @Test
     void sanitizesCredentialBearingDetailsAndBoundsLength() {
         String detail = "ARROW_TOKEN=secret Authorization:Bearer-secret " + "x".repeat(800);
         String safe = QuarantineWriter.sanitizeDetail(detail);

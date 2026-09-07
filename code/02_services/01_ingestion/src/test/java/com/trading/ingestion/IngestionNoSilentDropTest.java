@@ -61,14 +61,14 @@ import org.junit.jupiter.api.Test;
  * ledger is asserted from in-process state (append calls + decode-error
  * metrics); the sinks only need to accept the writes.
  */
-@DisplayName("ING-DQ-010: no-silent-drop — every line maps to exactly one outcome")
+@DisplayName("ING-DQ-010: no-silent-drop — every TickEvent maps to exactly one outcome")
 class IngestionNoSilentDropTest {
 
     private static final long TOKEN_A = 100_000L;
     private static final long TOKEN_B = 100_100L;
 
     @Test
-    @DisplayName("mixed corpus reconciles: appends + quarantines == lines fed, zero uncaught errors")
+    @DisplayName("mixed corpus reconciles: appends + quarantines == events fed, zero uncaught errors")
     void mixedCorpusNeverDropsSilently() throws Exception {
         IngestionConfig config = buildConfig("localhost:9123");
         CountingConverter converter = new CountingConverter();
@@ -143,6 +143,7 @@ class IngestionNoSilentDropTest {
 
     private static IngestionConfig buildConfig(String bootstrap) throws Exception {
         Map<String, String> env = new HashMap<>();
+        env.put("DEPLOYMENT_ENV", "dev");
         env.put("ARROW_APP_ID", "test-app");
         env.put("ARROW_APP_SECRET", "test-secret");
         env.put("ARROW_USER_ID", "test-user");

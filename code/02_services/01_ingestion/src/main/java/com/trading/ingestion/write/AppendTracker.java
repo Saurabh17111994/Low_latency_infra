@@ -88,6 +88,14 @@ public final class AppendTracker {
      * Caller MUST NOT submit the record on false — it was not counted.
      */
     public boolean tryAccept(int recordBytes) {
+        // P1-101: fail BEFORE counting — a non-positive size is a programming
+        // bug (all estimators floor >= 256), never a capacity signal. Throwing
+        // (not reject-false) so a broken converter cannot disguise itself as
+        // backpressure; negative input would otherwise corrupt the halt check.
+        if (recordBytes <= 0) {
+            throw new IllegalArgumentException(
+                    "recordBytes must be > 0, got: " + recordBytes);
+        }
         // R-195: check-then-act on `halted` was racy — a thread could pass the
         // check and then increment counters after a concurrent halt. Serialize
         // the accept gate with the halt transition.
@@ -103,11 +111,14 @@ public final class AppendTracker {
             // 100% halt — immediate, no negotiation
             if (recs > maxPendingRecords || byt > maxPendingBytes) {
                 halted = true;
-                pendingRecords.decrementAndGet();
-                pendingBytes.addAndGet(-recordBytes);
+                // P1-263: report the ROLLED-BACK counts, not the pre-rollback
+                // overflow (recs/byt total max+1 at trip time) — the alert
+                // payload must equal what the tracker actually holds.
+                long afterRecs = pendingRecords.decrementAndGet();
+                long afterBytes = pendingBytes.addAndGet(-recordBytes);
                 totalRejected.incrementAndGet();
                 listener.onEvent(BackpressureListener.Level.CRITICAL,
-                        recs, byt, maxPendingRecords, maxPendingBytes, Instant.now());
+                        afterRecs, afterBytes, maxPendingRecords, maxPendingBytes, Instant.now());
                 return false;
             }
 
@@ -135,16 +146,35 @@ public final class AppendTracker {
 
     /** MUST be called once per accepted record after Fluss acknowledges the append. */
     public void onAppendSuccess(int recordBytes) {
-        pendingRecords.decrementAndGet();
-        pendingBytes.addAndGet(-recordBytes);
+        // P1-115: floored — a late completion racing forceDrain must not
+        // drive the gauges negative (negative pending = over-admission).
+        pendingRecords.updateAndGet(v -> Math.max(0, v - 1));
+        pendingBytes.updateAndGet(v -> Math.max(0, v - recordBytes));
         totalAppended.incrementAndGet();
     }
 
     /** MUST be called once per accepted record when Fluss append fails. */
     public void onAppendFailure(int recordBytes) {
-        pendingRecords.decrementAndGet();
-        pendingBytes.addAndGet(-recordBytes);
+        // P1-115: same floor as success — see above.
+        pendingRecords.updateAndGet(v -> Math.max(0, v - 1));
+        pendingBytes.updateAndGet(v -> Math.max(0, v - recordBytes));
         totalFailed.incrementAndGet();
+    }
+
+    /**
+     * P1-115: forgive ALL pending slots at once (shutdown drain-expiry).
+     * Zeroes both gauges — floored, never negative — and returns what was
+     * forgiven {@code [records, bytes]} for the log. Forgiven records count
+     * as FAILED (R-260: they never acked — the journal already pinned them).
+     * This is the ONLY bulk path: never synthesize it through the per-record
+     * API (that frees 1 record against N bytes and double-releases racing
+     * completions).
+     */
+    public long[] forceDrain() {
+        long r = Math.max(0, pendingRecords.getAndSet(0));
+        long b = Math.max(0, pendingBytes.getAndSet(0));
+        totalFailed.addAndGet(r);
+        return new long[]{r, b};
     }
 
     // ---- health ----

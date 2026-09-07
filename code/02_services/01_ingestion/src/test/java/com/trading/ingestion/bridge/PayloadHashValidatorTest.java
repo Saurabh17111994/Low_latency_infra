@@ -38,6 +38,38 @@ class PayloadHashValidatorTest {
     }
 
     @Test
+    @DisplayName("P1-076: oversized raw_payload rejected BEFORE decode+hash (MALFORMED, not HASH_MISMATCH)")
+    void rejectsOversizedPayloadBeforeHash() {
+        byte[] big = new byte[4096];
+        new Random(7).nextBytes(big);
+        // Well-formed hex hash of OTHER content: passes the hash gate, so the
+        // old code decoded all 4KiB, hashed, and returned HASH_MISMATCH.
+        assertEquals(PayloadHashValidator.Result.MALFORMED_PAYLOAD,
+                PayloadHashValidator.validate(b64(big), sha256Hex(new byte[]{1})));
+    }
+
+    @Test
+    @DisplayName("P1-076: largest broker packet (540B response frame) still accepted")
+    void acceptsLargestBrokerPacket() {
+        byte[] packet = new byte[PayloadHashValidator.MAX_PACKET_BYTES];
+        new Random(11).nextBytes(packet);
+        assertEquals(PayloadHashValidator.Result.VALID,
+                PayloadHashValidator.validate(b64(packet), sha256Hex(packet)));
+        assertArrayEquals(packet, PayloadHashValidator.decodeValid(b64(packet), sha256Hex(packet)),
+                "decoded bytes must equal the original packet exactly");
+    }
+
+    @Test
+    @DisplayName("P1-076: one byte over the broker max is rejected even with a matching hash")
+    void rejectsJustOverBrokerMax() {
+        byte[] packet = new byte[PayloadHashValidator.MAX_PACKET_BYTES + 1];
+        new Random(13).nextBytes(packet);
+        // The hash MATCHES — the old code returned VALID (unbounded accept).
+        assertEquals(PayloadHashValidator.Result.MALFORMED_PAYLOAD,
+                PayloadHashValidator.validate(b64(packet), sha256Hex(packet)));
+    }
+
+    @Test
     @DisplayName("valid packet bytes pass")
     void validPayloadPasses() {
         byte[] packet = {1, 2, 3, 4, 5, 40, 0, 2, 0, 0};
@@ -120,14 +152,18 @@ class PayloadHashValidatorTest {
     }
 
     @Test
-    @DisplayName("ING-UNIT-015: multi-frame large payload validates and round-trips byte-exactly")
-    void largeMultiFramePayloadValidates() {
-        byte[] packet = new byte[65_536]; // a multi-frame packet far above the 40 B single-frame shape
+    @DisplayName("P1-076: 64KiB payload rejected even with a matching hash (no producer emits this)")
+    void largeMultiFramePayloadRejected() {
+        // P1-076 contract change (Batch-3 #25): raw_payload is EXACTLY one
+        // broker packet (proto contract, market_data.pb.go; producer
+        // ProtoEmitter.EmitTick passes one frame per tick; largest known
+        // packet is the 540B response frame). A 64KiB "multi-frame packet"
+        // has no producer — the old VALID verdict was unbounded acceptance.
+        byte[] packet = new byte[65_536];
         new Random(42L).nextBytes(packet);
-        assertEquals(PayloadHashValidator.Result.VALID,
+        assertEquals(PayloadHashValidator.Result.MALFORMED_PAYLOAD,
                 PayloadHashValidator.validate(b64(packet), sha256Hex(packet)));
-        assertArrayEquals(packet, PayloadHashValidator.decodeValid(b64(packet), sha256Hex(packet)),
-                "decoded bytes must equal the original packet exactly");
+        assertNull(PayloadHashValidator.decodeValid(b64(packet), sha256Hex(packet)));
     }
 
     @Test

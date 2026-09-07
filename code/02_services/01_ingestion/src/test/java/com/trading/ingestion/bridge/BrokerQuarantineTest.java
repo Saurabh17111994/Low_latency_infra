@@ -61,9 +61,11 @@ class BrokerQuarantineTest {
         assertThrows(IllegalArgumentException.class,
                 () -> new BrokerQuarantine(BrokerQuarantine.CONTRACT_VERSION, "hft-0", "hft-0",
                         0L, 3045L, "HASH_MISMATCH", payload, hash, 1700000000000L));
+        // P1-064: token 0 is now legal (unknown/undecodable, R-010 convention) -
+        // negatives are still rejected.
         assertThrows(IllegalArgumentException.class,
                 () -> new BrokerQuarantine(BrokerQuarantine.CONTRACT_VERSION, "hft-0", "hft-0",
-                        1L, 0L, "HASH_MISMATCH", payload, hash, 1700000000000L));
+                        1L, -1L, "HASH_MISMATCH", payload, hash, 1700000000000L));
         // Empty payload.
         assertThrows(IllegalArgumentException.class, () -> record("HASH_MISMATCH", new byte[0], hash));
         // Unsupported contract version.

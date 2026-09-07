@@ -22,9 +22,9 @@ import org.junit.jupiter.api.Test;
 class RetryClassifierTest {
 
     @Test
-    @DisplayName("null is RETRYABLE")
-    void nullIsRetryable() {
-        assertEquals(Classification.RETRYABLE, RetryClassifier.classify(null));
+    @DisplayName("null is FATAL (P1-124: unknown fails closed per R-285)")
+    void nullIsFatal() {
+        assertEquals(Classification.FATAL, RetryClassifier.classify(null));
     }
 
     @Test
@@ -139,5 +139,30 @@ class RetryClassifierTest {
         // retryable. Only the surfaced NotLeaderOrFollower TYPE is fatal.
         Throwable t = new RuntimeException("leader not available, re-electing");
         assertEquals(Classification.RETRYABLE, RetryClassifier.classify(t));
+    }
+
+    @Test
+    @DisplayName("B125: interrupt-cause is FATAL at once, never retried")
+    void interruptedIsFatal() {
+        assertEquals(Classification.FATAL, RetryClassifier.classify(
+                new java.util.concurrent.ExecutionException(
+                        new InterruptedException("sleep interrupted"))));
+        assertEquals(Classification.FATAL, RetryClassifier.classify(
+                new RuntimeException(new java.nio.channels.ClosedByInterruptException())));
+    }
+
+    /** Non-transient failure whose class name merely contains "Connect". */
+    static class ConnectorBugException extends RuntimeException {
+        ConnectorBugException() { super("worker bookkeeping bug"); }
+    }
+
+    @Test
+    @DisplayName("B125: Connect narrowed to failure nouns; genuine connection failures still retry")
+    void connectNarrowedToFailureNouns() {
+        assertEquals(Classification.FATAL, RetryClassifier.classify(new ConnectorBugException()),
+                "a non-transient Connector* failure must fail closed, not spin retries");
+        assertEquals(Classification.RETRYABLE, RetryClassifier.classify(
+                new java.net.ConnectException("Connection refused")),
+                "genuine connection failures still retry (bounded MAX=3 at the writer)");
     }
 }

@@ -37,10 +37,23 @@ public final class NtpClockChecker {
     private final String[] ntpServers;
     private final long offsetLimitMs;
     private final boolean required;
-    private volatile long lastOffsetMs;
-    private volatile Instant lastCheckTime;
-    private volatile boolean lastCheckPassed;
-    private volatile boolean verified;
+    // P1-248: ONE volatile snapshot instead of four — measureOffsetMs
+    // updated the four fields non-atomically, so HealthProbe.diagnostics()
+    // could read offset from check N with pass/fail from check N+1 (torn
+    // snapshot). Every update publishes a complete immutable record at
+    // once; readers take one reference and see a consistent check.
+    /** Immutable single-check outcome. Null checkTime = never checked. */
+    record ClockSnapshot(long offsetMs, Instant checkTime, boolean passed, boolean verified) {}
+    private volatile ClockSnapshot snapshot = new ClockSnapshot(0, null, false, false);
+
+    private void publish(long offsetMs, boolean passed, boolean verified) {
+        snapshot = new ClockSnapshot(offsetMs, Instant.now(), passed, verified);
+    }
+
+    /** The latest complete check outcome — a single atomic read (P1-248). */
+    ClockSnapshot snapshot() {
+        return snapshot;
+    }
 
     /** @param ntpServer      NTP server hostname (e.g. "pool.ntp.org")
      *  @param offsetLimitMs  maximum allowed clock offset in millis */
@@ -86,11 +99,8 @@ public final class NtpClockChecker {
         for (String server : ntpServers) {
             try {
                 long offset = queryNtp(server);
-                lastOffsetMs = offset;
-                lastCheckTime = Instant.now();
-                verified = true;
                 boolean passed = Math.abs(offset) <= offsetLimitMs;
-                lastCheckPassed = passed;
+                publish(offset, passed, true);
 
                 if (!passed) {
                     LOG.warn("ntp-clock: offset {}ms exceeds limit {}ms (server={})",
@@ -103,12 +113,9 @@ public final class NtpClockChecker {
             }
         }
 
-        lastCheckTime = Instant.now();
         if (required) {
             // Strict mode: an unreachable time source is a failure.
-            lastCheckPassed = false;
-            lastOffsetMs = 0;
-            verified = false;
+            publish(0, false, false);
             LOG.error("ntp-clock: all servers unreachable and CLOCK_CHECK_REQUIRED=true — clock check FAILED");
             throw lastError != null ? lastError : new NtpException("all NTP servers unreachable", null);
         }
@@ -119,39 +126,48 @@ public final class NtpClockChecker {
         // state is surfaced via isVerified().
         long now = System.currentTimeMillis();
         if (now < MIN_WALL_CLOCK_EPOCH_MS) {
-            lastCheckPassed = false;
-            lastOffsetMs = 0;
-            verified = false;
+            publish(0, false, false);
             LOG.error("ntp-clock: wall clock before {} — clock check FAILED",
                     Instant.ofEpochMilli(MIN_WALL_CLOCK_EPOCH_MS));
             throw lastError != null ? lastError : new NtpException("all NTP servers unreachable", null);
         }
-        lastOffsetMs = 0;
-        lastCheckPassed = false;   // fail-closed: unverified != within limit
-        verified = false;
+        publish(0, false, false);   // fail-closed: unverified != within limit
+        // P1-083: THROW instead of returning 0 — a 0 return masqueraded an
+        // unverified clock as perfect sync for return-value-only callers
+        // (Math.abs(measureOffsetMs()) <= limit). Fail-closed state is
+        // unchanged (isWithinLimit stays false, and HealthProbe readiness keys
+        // off isWithinLimit — so an unverified clock blocks readiness); this
+        // only makes the failure LOUD.
+        // Batch-1 #31 CLOSED 2026-09-07: all 3 default servers
+        // (ntp.ubuntu.com, time.google.com, in.pool.ntp.org) answer UDP/123
+        // from this host with valid 48-byte responses — no loud-degraded
+        // revisit needed. If a future network blocks NTP with
+        // CLOCK_CHECK_REQUIRED=false, startup still continues via the
+        // IngestionService catch (warn + wall-clock sanity); only readiness
+        // stays red until a server responds.
         LOG.error("ntp-clock: all servers unreachable and CLOCK_CHECK_REQUIRED=false — clock UNVERIFIED "
                 + "(fail-closed; readiness blocked until a server responds)");
-        return 0;
+        throw lastError != null ? lastError : new NtpException("all NTP servers unreachable", null);
     }
 
     /** True if the last check passed (offset within limit). Never true when unverified. */
     public boolean isWithinLimit() {
-        return lastCheckPassed;
+        return snapshot.passed();
     }
 
     /** True if the last offset was verified against a real NTP server response. */
     public boolean isVerified() {
-        return verified;
+        return snapshot.verified();
     }
 
     /** Offset in ms from last check. Positive = local ahead. */
     public long lastOffsetMs() {
-        return lastOffsetMs;
+        return snapshot.offsetMs();
     }
 
     /** When the last check happened, or null if never checked. */
     public Instant lastCheckTime() {
-        return lastCheckTime;
+        return snapshot.checkTime();
     }
 
     /** The configured limit in ms. */
@@ -175,6 +191,15 @@ public final class NtpClockChecker {
         long sendNanos;
         long receiveNanos;
 
+        // P1-084: snapshot the request BEFORE receive() overwrites the
+        // shared buffer — passing the same array as request+response made the
+        // origin-echo check dead code (any off-path mode-4 48-byte packet
+        // accepted). P1-085: validate the DATAGRAM length, not the backing
+        // array (always 48) — a truncated packet left stale request bytes
+        // (client Tx at 40-47) parsed as the server transmit timestamp,
+        // typically a near-zero offset false-pass.
+        byte[] requestBytes = buffer.clone();
+        int responseLength;
         try (DatagramSocket socket = new DatagramSocket()) {
             socket.setSoTimeout(SOCKET_TIMEOUT_MS);
             InetAddress address = InetAddress.getByName(host);
@@ -186,6 +211,7 @@ public final class NtpClockChecker {
 
             DatagramPacket response = new DatagramPacket(buffer, buffer.length);
             socket.receive(response);
+            responseLength = response.getLength();
             receiveNanos = System.nanoTime();
 
         } catch (Exception e) {
@@ -195,7 +221,7 @@ public final class NtpClockChecker {
         // R-064: validate the datagram is a genuine NTP server response before
         // trusting any timestamp: 48-byte packet, server mode (4), and the
         // origin timestamp echoing our transmit timestamp.
-        validateResponse(buffer);
+        validateResponse(requestBytes, buffer, responseLength);
 
         // Parse NTP response
         // Transmit timestamp: bytes 40-47 (seconds + fraction)
@@ -224,10 +250,10 @@ public final class NtpClockChecker {
      *
      * @throws NtpException if any check fails
      */
-    static void validateResponse(byte[] request, byte[] response) throws NtpException {
-        if (response == null || response.length != NTP_PACKET_SIZE) {
+    static void validateResponse(byte[] request, byte[] response, int length) throws NtpException {
+        if (response == null || length != NTP_PACKET_SIZE) {
             throw new NtpException("invalid NTP response: expected " + NTP_PACKET_SIZE
-                    + " bytes, got " + (response == null ? 0 : response.length), null);
+                    + " bytes, got " + length, null);
         }
         int mode = response[0] & 0x07;
         if (mode != 4) {
@@ -243,10 +269,6 @@ public final class NtpClockChecker {
                         + "the request transmit timestamp", null);
             }
         }
-    }
-
-    private static void validateResponse(byte[] response) throws NtpException {
-        validateResponse(null, response);
     }
 
     private static long readUint32(byte[] buf, int offset) {

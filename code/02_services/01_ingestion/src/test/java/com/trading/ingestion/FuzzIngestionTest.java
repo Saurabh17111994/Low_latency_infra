@@ -317,6 +317,7 @@ class FuzzIngestionTest {
 
     private static IngestionConfig buildConfig() throws Exception {
         Map<String, String> env = new HashMap<>();
+        env.put("DEPLOYMENT_ENV", "dev");
         env.put("ARROW_APP_ID", "test-app");
         env.put("ARROW_APP_SECRET", "test-secret");
         env.put("ARROW_USER_ID", "test-user");

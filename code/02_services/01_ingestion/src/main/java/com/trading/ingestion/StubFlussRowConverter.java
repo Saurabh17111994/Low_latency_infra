@@ -33,15 +33,16 @@ final class StubFlussRowConverter implements FlussRowConverter {
 
     @Override
     public int estimatedRowSize(TickPacket packet) {
-        int est = 512 + (packet.raw() != null && packet.raw().rawPayloadUnsafe() != null
-                ? packet.raw().rawPayloadUnsafe().length : 0);
+        int est = 512 + (packet.raw() != null ? packet.raw().rawPayloadLength() : 0); // P1-087
         return est;
     }
 
     @Override
-    public CompletableFuture<RawTickWriter.AppendResult> append(TickPacket packet) {
+    public synchronized CompletableFuture<RawTickWriter.AppendResult> append(TickPacket packet) {
         // R-113: the closed flag must have an effect — appends after close()
         // fail instead of silently acking.
+        // P1-234: synchronized with close() on the same monitor so no
+        // append can slip between the closed-check and the ack.
         if (closed) {
             return CompletableFuture.failedFuture(
                     new IllegalStateException("StubFlussRowConverter is closed"));
@@ -56,7 +57,7 @@ final class StubFlussRowConverter implements FlussRowConverter {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         closed = true;
     }
 }

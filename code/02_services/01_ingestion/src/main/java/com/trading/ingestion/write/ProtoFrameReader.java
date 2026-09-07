@@ -19,10 +19,10 @@ package com.trading.ingestion.write;
 import com.trading.ingestion.transport.ControlRecord;
 import com.trading.ingestion.transport.MarketDataBatch;
 import com.trading.ingestion.transport.TransportFrame;
+import java.io.BufferedInputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.PushbackInputStream;
 
 /**
  * Reads length-prefixed {@link TransportFrame} protobuf records.
@@ -42,18 +42,18 @@ public final class ProtoFrameReader {
         void onControl(ControlRecord control) throws IOException;
     }
 
-    private final PushbackInputStream in;
+    private final BufferedInputStream in;
     private final FrameHandler handler;
 
     public ProtoFrameReader(InputStream in, FrameHandler handler) {
-        this.in = new PushbackInputStream(in, 4);
+        this.in = new BufferedInputStream(in);
         this.handler = handler;
     }
 
     /**
-     * The buffered stream with any sniffed-then-pushed-back bytes restored.
+     * The buffered stream with any sniffed-then-restored bytes available.
      * After {@link #sniffProto()} returns false, the caller must read from
-     * THIS stream (not the raw input) — the sniff consumed up to 4 bytes.
+     * THIS stream (not the raw input) — the sniff consumed nothing net.
      */
     public InputStream stream() {
         return in;
@@ -67,43 +67,47 @@ public final class ProtoFrameReader {
      *         frame parses as a TransportFrame; false → not proto (bridge failure).
      */
     public boolean sniffProto() throws IOException {
+        // P1-107/108/109: mark BEFORE consuming anything. Every miss path
+        // resets to this mark, so hdr+BODY (up to 64 MiB) are restored for
+        // the stream() fallback — the old 4-byte pushback drained the body
+        // and corrupted any stream with a plausible length prefix.
+        // BufferedInputStream grows its buffer only for bytes actually read.
+        in.mark(4 + MAX_FRAME_LEN);
         byte[] hdr = new byte[4];
         int got = readFullyOrEof(hdr);
         if (got < 4) {
             // stream too short to be proto — could be an empty stream or a
             // trailing partial frame. Report not-proto (never auto-quarantine).
-            if (got > 0) {
-                in.unread(hdr, 0, got);
-            }
+            in.reset();
             return false;
         }
         long len = ((hdr[0] & 0xFFL)) | ((hdr[1] & 0xFFL) << 8)
                 | ((hdr[2] & 0xFFL) << 16) | ((hdr[3] & 0xFFL) << 24);
         if (len <= 0 || len > MAX_FRAME_LEN) {
-            in.unread(hdr);
+            in.reset();
             return false;
         }
         // Try to parse the first frame. If it fails, the stream is not proto —
-        // push back the header and report not-proto.
+        // reset (hdr+body restored) and report not-proto.
         byte[] body = new byte[(int) len];
         try {
             readFully(body);
         } catch (EOFException e) {
-            in.unread(hdr);
+            in.reset();
             return false;
         }
         try {
             TransportFrame frame = TransportFrame.parseFrom(body);
             if (frame.getProtocolVersion() != PROTOCOL_VERSION
                     || !(frame.hasMarketBatch() || frame.hasControl())) {
-                in.unread(hdr);
+                in.reset();
                 return false;
             }
             // The first frame is consumed — deliver it so no data is lost.
             deliver(frame);
             return true;
         } catch (com.google.protobuf.InvalidProtocolBufferException e) {
-            in.unread(hdr);
+            in.reset();
             return false;
         }
     }
@@ -115,8 +119,14 @@ public final class ProtoFrameReader {
         while (true) {
             byte[] hdr = new byte[4];
             int got = readFullyOrEof(hdr);
+            if (got == 0) {
+                return; // clean EOF at a frame boundary
+            }
             if (got < 4) {
-                return; // clean EOF (possibly trailing partial header — drop)
+                // P1-269: a 1-3 byte trailing header is truncation, never a
+                // clean exit — fail loud so a crashed/truncated bridge is
+                // not mistaken for a normal EOF.
+                throw new EOFException("stream ended mid-header (" + got + "/4 bytes)");
             }
             long len = ((hdr[0] & 0xFFL)) | ((hdr[1] & 0xFFL) << 8)
                     | ((hdr[2] & 0xFFL) << 16) | ((hdr[3] & 0xFFL) << 24);

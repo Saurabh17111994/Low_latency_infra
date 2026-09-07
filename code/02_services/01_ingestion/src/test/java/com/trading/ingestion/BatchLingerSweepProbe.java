@@ -116,7 +116,7 @@ class BatchLingerSweepProbe {
                 BinaryString.fromString("TRADE"),                      // tick_type
                 p.lastPricePaise(),                                    // last_price_paise
                 p.volume(),                                            // last_qty
-                raw != null ? raw.rawPayloadUnsafe() : new byte[0],    // raw_payload BYTES
+                raw != null ? raw.rawPayload() : new byte[0],            // raw_payload BYTES (P1-087)
                 BinaryString.fromString(raw != null ? raw.payloadHash() : ""), // payload_hash
                 BinaryString.fromString("probe"),                      // decoder_version
                 BinaryString.fromString("probe"),                      // protocol_version

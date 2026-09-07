@@ -90,6 +90,51 @@ class FailFastGuardsTest {
     }
 
     @Test
+    @DisplayName("FAILED and FATAL outcomes carry packet identity (P1-111/112/117)")
+    void terminalOutcomesCarryIdentity() throws Exception {
+        TickPacket failedPacket = TickPacketFixtures.validTrade(11);
+        Harness hFail = harness(new FailingConverter(
+                new java.io.IOException("connection reset")));
+        hFail.writer.write(failedPacket);
+        RawTickWriter.AppendOutcome failed = awaitOutcome(hFail);
+        assertEquals(RawTickWriter.Status.FAILED, failed.status());
+        assertEquals(failedPacket.eventFingerprint(), failed.fingerprint(),
+                "FAILED must be correlatable to its row");
+        assertEquals(failedPacket.instrumentToken(), failed.instrumentToken());
+        hFail.writer.close();
+
+        TickPacket fatalPacket = TickPacketFixtures.validTrade(12);
+        Harness hFatal = harness(new FailingConverter(
+                new RuntimeException("unrecognized transport failure")));
+        hFatal.writer.write(fatalPacket);
+        RawTickWriter.AppendOutcome fatal = awaitOutcome(hFatal);
+        assertEquals(RawTickWriter.Status.FATAL, fatal.status());
+        assertEquals(fatalPacket.eventFingerprint(), fatal.fingerprint(),
+                "FATAL must be correlatable to its row");
+        assertEquals(fatalPacket.eventTime(), fatal.eventTime());
+        hFatal.writer.close();
+    }
+
+    @Test
+    @DisplayName("B125: interrupt-cause surfaces FATAL with reservation released, never retried")
+    void interruptCauseIsFatal() throws Exception {
+        Harness h = harness(new FailingConverter(
+                new java.util.concurrent.ExecutionException(
+                        new InterruptedException("wedged sender"))));
+        h.writer.write(TickPacketFixtures.validTrade(21));
+        // An inline completion re-interrupts THIS thread (B125 flag
+        // restore) — clear before the latch await, which would otherwise
+        // throw on the set flag. Harmless if completion ran upstream.
+        Thread.interrupted();
+        RawTickWriter.AppendOutcome outcome = awaitOutcome(h);
+        assertEquals(RawTickWriter.Status.FATAL, outcome.status(),
+                "interrupt-cause must fail at once as FATAL, never spin retries");
+        assertEquals(0, h.tracker().pendingRecords(),
+                "reservation released at terminal outcome");
+        h.writer.close();
+    }
+
+    @Test
     @DisplayName("unknown append exception fails closed as FATAL, never fake success (A+R-285)")
     void unknownExceptionFailsClosed() throws Exception {
         // R-285: an unrecognized exception is FATAL (cannot prove retry is

@@ -41,7 +41,11 @@ public final class BoundedQueue {
     private final int maxRecords;
     private long queuedBytes;
     private boolean warningFired;
-    private boolean halted;
+    // P1-011/012: halted is an EPISODE flag (full right now), not a sticky
+    // latch. Rejection is decided by live fullness below; this only makes
+    // the CRITICAL alert fire once per saturation episode. Volatile: read
+    // outside the lock in isHalted(), written under it.
+    private volatile boolean halted;
     private volatile boolean closed;
     private volatile QueueListener listener = (l, r, b, mr, mb) -> {};
 
@@ -53,8 +57,26 @@ public final class BoundedQueue {
     }
 
     public BoundedQueue(long maxBytes, int maxRecords) {
+        // P1-103/105: fail fast on nonsense budgets — a zero/negative budget
+        // silently rejects everything (or corrupts accounting) downstream.
+        if (maxBytes <= 0) {
+            throw new IllegalArgumentException("maxBytes must be > 0: " + maxBytes);
+        }
+        if (maxRecords <= 0) {
+            throw new IllegalArgumentException("maxRecords must be > 0: " + maxRecords);
+        }
         this.maxBytes = maxBytes;
         this.maxRecords = maxRecords;
+    }
+
+    /** P1-062: expose configured budgets so queue-split policy is testable. */
+    public long maxBytes() {
+        return maxBytes;
+    }
+
+    /** P1-062: expose configured budgets so queue-split policy is testable. */
+    public int maxRecords() {
+        return maxRecords;
     }
 
     public void setListener(QueueListener l) {
@@ -63,41 +85,81 @@ public final class BoundedQueue {
 
     /**
      * Enqueue one packet. Returns true if accepted, false if the queue is at
-     * capacity (halt). Never silently drops — false is a visible REJECTED.
+     * capacity (halt). Rejects only while full — drains recover (P1-011/012).
+     * Never silently drops — false is a visible REJECTED.
      */
     public boolean offer(TickPacket packet, int rowBytes) {
+        // P1-103/105: validate BEFORE the lock — null defers an NPE to the
+        // writer, and rowBytes <= 0 corrupts queuedBytes math (negative
+        // values shrink newBytes and bypass the > maxBytes halt check).
+        if (packet == null) {
+            throw new NullPointerException("packet");
+        }
+        if (rowBytes <= 0) {
+            throw new IllegalArgumentException("rowBytes must be > 0: " + rowBytes);
+        }
+        // P1-104/106: transition under lock, listener fires AFTER unlock —
+        // slow/throwing/re-entrant listener code must never run while the
+        // lock is held. The snapshot travels out via locals, never fields.
+        final OfferResult result;
         lock.lock();
         try {
             if (closed) {
                 return false;
             }
-            if (halted) {
-                return false;
-            }
-            long newRecords = queue.size() + 1L;
-            long newBytes = queuedBytes + rowBytes;
-            // 100% halt — immediate, no negotiation. The queue fills to
-            // exactly 100% (accepted); the NEXT offer beyond 100% halts.
-            if (newRecords > maxRecords || newBytes > maxBytes) {
-                halted = true;
-                listener.onQueueEvent(QueueListener.Level.CRITICAL,
-                        queue.size(), queuedBytes, maxRecords, maxBytes);
-                return false;
-            }
-            queue.addLast(new Entry(packet, rowBytes));
-            queuedBytes = newBytes;
-            // 80% warn — fire once per saturation episode
-            if (!warningFired && (newBytes >= maxBytes * WARNING_PERCENT
-                    || newRecords >= maxRecords * WARNING_PERCENT)) {
-                warningFired = true;
-                listener.onQueueEvent(QueueListener.Level.WARNING,
-                        queue.size(), queuedBytes, maxRecords, maxBytes);
-            }
-            notEmpty.signal();
-            return true;
+            result = offerLocked(packet, rowBytes);
         } finally {
             lock.unlock();
         }
+        PendingEvent fire = result.event();
+        if (fire != null) {
+            // listener is volatile: the current callback, read off-lock.
+            // A throwing listener propagates AFTER state is committed and
+            // the lock released — the enqueue/reject stands either way.
+            listener.onQueueEvent(fire.level(), fire.records(), fire.bytes(),
+                    maxRecords, maxBytes);
+        }
+        return result.accepted();
+    }
+
+    /**
+     * P1-104/106: the state transition runs under lock, but the listener
+     * fires AFTER unlock (see {@link #offer}). Returns the event to fire, or
+     * null. Snapshot values are captured under lock so the callback sees a
+     * consistent picture even as the queue keeps moving.
+     */
+    private record PendingEvent(QueueListener.Level level, long records, long bytes) {}
+
+    private record OfferResult(boolean accepted, PendingEvent event) {}
+
+    private OfferResult offerLocked(TickPacket packet, int rowBytes) {
+        long newRecords = queue.size() + 1L;
+        long newBytes = queuedBytes + rowBytes;
+        // 100% halt — immediate, no negotiation. The queue fills to
+        // exactly 100% (accepted); offers beyond 100% are rejected while
+        // full. CRITICAL fires once per saturation episode (halted flag),
+        // not once per rejected offer.
+        if (newRecords > maxRecords || newBytes > maxBytes) {
+            if (!halted) {
+                halted = true;
+                return new OfferResult(false, new PendingEvent(
+                        QueueListener.Level.CRITICAL,
+                        queue.size(), queuedBytes));
+            }
+            return new OfferResult(false, null);
+        }
+        queue.addLast(new Entry(packet, rowBytes));
+        queuedBytes = newBytes;
+        notEmpty.signal();
+        // 80% warn — fire once per saturation episode
+        if (!warningFired && (newBytes >= maxBytes * WARNING_PERCENT
+                || newRecords >= maxRecords * WARNING_PERCENT)) {
+            warningFired = true;
+            return new OfferResult(true, new PendingEvent(
+                    QueueListener.Level.WARNING,
+                    queue.size(), queuedBytes));
+        }
+        return new OfferResult(true, null);
     }
 
     /** Block until an item is available. Returns null when closed and drained. */
@@ -112,10 +174,13 @@ public final class BoundedQueue {
             }
             Entry e = queue.removeFirst();
             queuedBytes -= e.rowBytes();
-            // reset warn latch when back under 80%
-            if (warningFired && (queuedBytes < maxBytes * WARNING_PERCENT
-                    && queue.size() < maxRecords * WARNING_PERCENT)) {
+            // reset warn + halt episode when back under 80% (P1-011/012: the
+            // halt clears here, so drains recover; hysteresis avoids alert
+            // flapping at the boundary)
+            if (queuedBytes < maxBytes * WARNING_PERCENT
+                    && queue.size() < maxRecords * WARNING_PERCENT) {
                 warningFired = false;
+                halted = false;
             }
             return e;
         } finally {
@@ -132,6 +197,12 @@ public final class BoundedQueue {
             }
             Entry e = queue.removeFirst();
             queuedBytes -= e.rowBytes();
+            // same episode reset as take(): polls drain too (P1-011/012)
+            if (queuedBytes < maxBytes * WARNING_PERCENT
+                    && queue.size() < maxRecords * WARNING_PERCENT) {
+                warningFired = false;
+                halted = false;
+            }
             return e;
         } finally {
             lock.unlock();

@@ -1,6 +1,7 @@
 package com.trading.ingestion.write;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.lang.reflect.Field;
@@ -165,6 +166,28 @@ class AppendTrackerTest {
         if (callCount[0] >= 2) { // at least one WARNING + one CRITICAL
             assertEquals(AppendTracker.BackpressureListener.Level.CRITICAL, lastLevel[0]);
         }
+    }
+
+    @Test
+    @DisplayName("P1-263: CRITICAL event reports POST-rollback counts, not max+1")
+    void criticalEventReportsRolledBackCounts() {
+        AppendTracker t = new AppendTracker(10, 10_000, 0.8);
+        final long[] seenPr = {-1}, seenPb = {-1};
+        t.setListener((level, pr, pb, mr, mb, now) -> {
+            if (level == AppendTracker.BackpressureListener.Level.CRITICAL) {
+                seenPr[0] = pr;
+                seenPb[0] = pb;
+            }
+        });
+
+        for (int i = 0; i < 10; i++) {
+            assertTrue(t.tryAccept(100), "record " + i + " must fit");
+        }
+        assertFalse(t.tryAccept(100), "11th record must trip the halt");
+
+        assertEquals(10, seenPr[0], "CRITICAL must carry the rolled-back record count (10), not 11");
+        assertEquals(1000, seenPb[0], "CRITICAL must carry the rolled-back byte count (1000), not 1100");
+        assertEquals(10, t.pendingRecords(), "tracker state must match the reported counts");
     }
 
     @Test
@@ -382,5 +405,19 @@ class AppendTrackerTest {
         assertEquals(acceptedBytes.get(), small.totalBytesAccepted(),
                 "accepted bytes must equal the sum of accepted record sizes");
         assertFalse(negativeSeen.get(), "pending counters must never go negative");
+    }
+
+    @Test
+    @DisplayName("P1-101: tryAccept rejects non-positive sizes without counting")
+    void rejectsNonPositiveRecordBytes() {
+        AppendTracker tracker = new AppendTracker();
+        assertThrows(IllegalArgumentException.class, () -> tracker.tryAccept(0));
+        assertThrows(IllegalArgumentException.class, () -> tracker.tryAccept(-5));
+        assertEquals(0, tracker.pendingRecords(), "rejected input must not reserve");
+        assertEquals(0, tracker.pendingBytes());
+        assertEquals(0, tracker.totalAccepted());
+        // tracker still usable after the throws
+        assertTrue(tracker.tryAccept(100));
+        assertEquals(1, tracker.pendingRecords());
     }
 }

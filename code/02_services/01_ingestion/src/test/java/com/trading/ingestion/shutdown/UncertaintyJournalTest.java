@@ -1,6 +1,8 @@
 package com.trading.ingestion.shutdown;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -95,6 +97,16 @@ class UncertaintyJournalTest {
     }
 
     @Test
+    @DisplayName("P1-256: journal path being a directory is refused at readiness, not at shutdown")
+    void directoryPathRefusedAtEnsureWritable() throws Exception {
+        Path dir = tempDir.resolve("not-a-file");
+        Files.createDirectory(dir);
+        UncertaintyJournal journal = new UncertaintyJournal(dir);
+        assertFalse(journal.ensureWritable(),
+                "existing-directory path must fail ensureWritable instead of sailing to shutdown");
+    }
+
+    @Test
     @DisplayName("Control characters are escaped so JSONL stays one line (R-194)")
     void jsonEscapesControlCharacters() {
         UncertaintyJournal.Entry entry = new UncertaintyJournal.Entry(
@@ -103,6 +115,67 @@ class UncertaintyJournalTest {
         String json = entry.toJson();
         assertTrue(!json.contains("\n"), "newline must be escaped — JSONL invariant (R-194)");
         assertTrue(json.contains("\\t"), "tab escaped as \\t");
+    }
+
+    @Test
+    @DisplayName("P1-095: null entry returns false instead of NPE-ing out of shutdown")
+    void nullEntryReturnsFalse() {
+        UncertaintyJournal journal =
+                new UncertaintyJournal(tempDir.resolve("j.jsonl"));
+        // Old code: entry.toJson() threw NullPointerException, which only
+        // IOException was caught for — the NPE aborted shutdown pre-drain.
+        assertFalse(assertDoesNotThrow(() -> journal.write(null)),
+                "null entry must be a loud skip, never a throw");
+    }
+
+    @Test
+    @DisplayName("P1-095: null shutdownTime returns false instead of throwing")
+    void nullShutdownTimeReturnsFalse() {
+        UncertaintyJournal journal =
+                new UncertaintyJournal(tempDir.resolve("j.jsonl"));
+        UncertaintyJournal.Entry entry = new UncertaintyJournal.Entry(
+                "i", null, 1, 1, 0, 0, 10, 0, 0, "x");
+        assertFalse(assertDoesNotThrow(() -> journal.write(entry)),
+                "null shutdownTime must be a loud skip, never a throw");
+    }
+
+    @Test
+    @DisplayName("P1-096: unwritable path returns false so the caller can escalate")
+    void unwritablePathReturnsFalse() throws Exception {
+        // A regular file where a directory is needed: createDirectories
+        // throws FileAlreadyExistsException (an IOException) — deterministic,
+        // no permission games, works as any user.
+        Path blocker = tempDir.resolve("blocker");
+        Files.write(blocker, new byte[]{1});
+        UncertaintyJournal journal =
+                new UncertaintyJournal(blocker.resolve("journal.jsonl"));
+        UncertaintyJournal.Entry entry = new UncertaintyJournal.Entry(
+                "i", Instant.now(), 1, 1, 0, 0, 10, 0, 0, "x");
+        assertFalse(journal.write(entry), "lost durability must be reported");
+    }
+
+    @Test
+    @DisplayName("P1-096: successful write returns true")
+    void successfulWriteReturnsTrue() {
+        UncertaintyJournal journal =
+                new UncertaintyJournal(tempDir.resolve("j.jsonl"));
+        assertTrue(journal.write(new UncertaintyJournal.Entry(
+                "i", Instant.now(), 1, 1, 0, 0, 10, 0, 0, "x")));
+    }
+
+    @Test
+    @DisplayName("P1-255: bare filename ensureWritable agrees with write (CWD)")
+    void bareFilenameEnsureWritableMatchesWrite() {
+        // UNCERTAINTY_JOURNAL_PATH=journal.jsonl has no parent: write()
+        // targets CWD and succeeds, so the FATAL gate must judge CWD
+        // writability — old code returned false while write() succeeded.
+        // Compared against live CWD state so the test holds even where
+        // CWD is not writable.
+        java.nio.file.Path cwd = java.nio.file.Paths.get("").toAbsolutePath();
+        UncertaintyJournal journal =
+                new UncertaintyJournal(java.nio.file.Paths.get("journal.jsonl"));
+        assertEquals(Files.isWritable(cwd), journal.ensureWritable(),
+                "bare filename must gate on CWD, not refuse a writable path");
     }
 
     @Test

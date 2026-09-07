@@ -86,6 +86,26 @@ class JvmHeapReadinessGateTest {
     }
 
     @Test
+    void clock_regression_rearms_recovery_timer_p1_247() {
+        // P1-247: nowMs stepping backward after clearSinceMs is armed must
+        // re-arm the recovery timer instead of stalling the clear forever
+        // (nowMs - clearSinceMs stays negative on the old code).
+        JvmHeapReadinessGate g = gate();
+        g.observe(LIMIT, BLOCK, 10_000);
+        assertEquals(JvmHeapReadinessGate.Signal.WARN_HEAP_HIGH,
+                g.observe(LIMIT, BLOCK, 10_000 + WINDOW));
+        assertTrue(g.isBlocked());
+        assertEquals(JvmHeapReadinessGate.Signal.NONE,
+                g.observe(LIMIT, CLEAR, 20_000)); // arm recovery timer
+        assertEquals(JvmHeapReadinessGate.Signal.NONE,
+                g.observe(LIMIT, CLEAR, 19_000)); // clock steps back: re-arm, no early clear
+        assertTrue(g.isBlocked(), "regression must re-arm, never clear early");
+        assertEquals(JvmHeapReadinessGate.Signal.INFO_HEAP_RECOVERED,
+                g.observe(LIMIT, CLEAR, 19_000 + WINDOW)); // sustained since re-armed stamp
+        assertFalse(g.isBlocked());
+    }
+
+    @Test
     void constructor_rejects_missing_hysteresis_and_nonpositive_window() {
         assertThrows(IllegalArgumentException.class, () -> new JvmHeapReadinessGate(85, 85, WINDOW));
         assertThrows(IllegalArgumentException.class, () -> new JvmHeapReadinessGate(85, 75, 0));

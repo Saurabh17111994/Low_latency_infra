@@ -46,6 +46,28 @@ class SequenceGapMonitorTest {
     }
 
     @Test
+    @DisplayName("P1-079: late tick never regresses the baseline — 1,2,1,3 is NOT a gap")
+    void lateTickNeverRegressesBaseline() {
+        SequenceGapMonitor m = new SequenceGapMonitor();
+        m.onTick("hft-0/1", 1);
+        m.onTick("hft-0/1", 2);
+        assertFalse(m.onTick("hft-0/1", 1), "late seq 1 must not move the baseline");
+        assertFalse(m.onTick("hft-0/1", 3), "3 follows baseline 2 — no loss occurred");
+        assertEquals(0, m.gapCount());
+    }
+
+    @Test
+    @DisplayName("P1-079: gap after duplicates still detected against the held baseline")
+    void gapAfterDuplicateStillDetected() {
+        SequenceGapMonitor m = new SequenceGapMonitor();
+        m.onTick("hft-0/1", 1);
+        m.onTick("hft-0/1", 2);
+        assertFalse(m.onTick("hft-0/1", 2), "duplicate is not a gap");
+        assertTrue(m.onTick("hft-0/1", 5), "5 still jumps the held baseline 2");
+        assertEquals(1, m.gapCount());
+    }
+
+    @Test
     @DisplayName("epoch bump resets baseline — restart is not a gap (T7-F2)")
     void epochResetNotGap() {
         SequenceGapMonitor m = new SequenceGapMonitor();

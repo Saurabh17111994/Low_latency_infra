@@ -64,10 +64,19 @@ public final class UncertaintyJournal {
     public boolean ensureWritable() {
         Path parent = journalPath.getParent();
         if (parent == null) {
-            LOG.error("uncertainty-journal: no parent directory for {}", journalPath);
-            return false;
+            // P1-255: a bare filename (no parent) writes to CWD — write()
+            // allows it — so gate the FATAL check on CWD writability
+            // instead of refusing a path that would succeed.
+            parent = Paths.get("").toAbsolutePath();
         }
         try {
+            // P1-256: the journal path itself being an existing DIRECTORY
+            // would sail this check and fail loud only at shutdown-write
+            // time — catch it here, at readiness.
+            if (Files.exists(journalPath) && Files.isDirectory(journalPath)) {
+                LOG.error("uncertainty-journal: path is a directory, not a file: {}", journalPath);
+                return false;
+            }
             Files.createDirectories(parent);
             if (!Files.isWritable(parent)) {
                 LOG.error("uncertainty-journal: parent directory not writable: {}", parent);
@@ -84,8 +93,24 @@ public final class UncertaintyJournal {
     /**
      * Write a shutdown entry with cumulative counters.
      * Creates parent directories and the journal file if they don't exist.
+     *
+     * <p>P1-095: null entry/shutdownTime previously NPE'd out of write()
+     * (only IOException was caught), aborting IngestionService.shutdown()
+     * BEFORE the drain — the journal must never break shutdown.
+     *
+     * <p>P1-096: returns durability — false means the uncertainty state was
+     * NOT persisted and the shutdown caller must escalate (disk-full, RO
+     * remount, perm change after ensureWritable). Retry is pointless that
+     * late, so the contract is report-loudly, not retry.
+     *
+     * @return true if the entry was appended, false if it was skipped or lost
      */
-    public void write(Entry entry) {
+    public boolean write(Entry entry) {
+        // P1-095: fail CLOSED without throwing — see javadoc.
+        if (entry == null || entry.shutdownTime == null) {
+            LOG.error("uncertainty-journal: skip null entry/time (never throw out of shutdown)");
+            return false;
+        }
         try {
             // R-117: a bare filename (e.g. UNCERTAINTY_JOURNAL_PATH=journal.jsonl)
             // has no parent — Files.createDirectories(null) would NPE. Guard it.
@@ -101,10 +126,15 @@ public final class UncertaintyJournal {
                     StandardOpenOption.APPEND);
 
             long count = entryCount.incrementAndGet();
-            LOG.info("uncertainty-journal: written (entries={}, path={})", count, journalPath);
+            // P1-257: sessionEntries — the counter resets per process and is
+            // NOT the file's total entry count (prior runs' entries live in
+            // the file too); the old label made incident readers misread it.
+            LOG.info("uncertainty-journal: written (sessionEntries={}, path={})", count, journalPath);
+            return true;
 
         } catch (IOException e) {
             LOG.error("uncertainty-journal: write failed (path={})", journalPath, e);
+            return false;
         }
     }
 
