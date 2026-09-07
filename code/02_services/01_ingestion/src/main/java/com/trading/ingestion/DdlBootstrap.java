@@ -513,6 +513,64 @@ public final class DdlBootstrap {
             .build();
 
     /**
+     * Full 15-column KV schema for candle_live matching DDL 32
+     * (32_candle_live.sql, schema v1): PK (instrument_token, tf,
+     * window_start) — live per-timeframe snapshots, upserted every 1s by the
+     * compute job's MultiTfAggregatorFunction; rows auto-expire via the 60s
+     * log TTL. Columns mirror
+     * {@code com.trading.compute.signaljob.CandleLiveColumns} — the shared
+     * contract the live sink serializes against. Registry-only
+     * (compute-owned, A4.4): existence-checked, never bootstrap-created.
+     */
+    private static final Schema CANDLE_LIVE_SCHEMA = Schema.newBuilder()
+            .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("exchange", org.apache.fluss.types.DataTypes.STRING())
+            .column("symbol", org.apache.fluss.types.DataTypes.STRING())
+            .column("tf", org.apache.fluss.types.DataTypes.STRING())
+            .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("window_end", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("open_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("high_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("low_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("close_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("volume", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("tick_count", org.apache.fluss.types.DataTypes.INT())
+            .column("last_event_time", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("last_event_fingerprint", org.apache.fluss.types.DataTypes.STRING())
+            .column("schema_version", org.apache.fluss.types.DataTypes.STRING())
+            .primaryKey("instrument_token", "tf", "window_start")
+            .build();
+
+    /**
+     * Full 15-column KV schema for candle_closed matching DDL 33
+     * (33_candle_closed.sql, schema v1): PK (instrument_token, tf,
+     * window_start) — immutable closed history, one row per non-empty bucket
+     * per timeframe per instrument, first-write-wins. Same 15 columns as
+     * candle_live in identical DDL order. Columns mirror
+     * {@code com.trading.compute.signaljob.CandleClosedColumns}.
+     * Registry-only (compute-owned, A4.4): existence-checked, never
+     * bootstrap-created.
+     */
+    private static final Schema CANDLE_CLOSED_SCHEMA = Schema.newBuilder()
+            .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("exchange", org.apache.fluss.types.DataTypes.STRING())
+            .column("symbol", org.apache.fluss.types.DataTypes.STRING())
+            .column("tf", org.apache.fluss.types.DataTypes.STRING())
+            .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("window_end", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("open_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("high_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("low_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("close_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("volume", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("tick_count", org.apache.fluss.types.DataTypes.INT())
+            .column("last_event_time", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("last_event_fingerprint", org.apache.fluss.types.DataTypes.STRING())
+            .column("schema_version", org.apache.fluss.types.DataTypes.STRING())
+            .primaryKey("instrument_token", "tf", "window_start")
+            .build();
+
+    /**
      * Minimal placeholder schema for platform tables whose owning service is
      * not built yet. These tables are only existence-checked at runtime — the
      * full DDL (applied by the offline DDL gate) is authoritative for their
@@ -573,6 +631,25 @@ public final class DdlBootstrap {
                             TableDescriptor.builder()
                                     .schema(FEATURE_CANDLES_PREVIEW_SCHEMA)
                                     .distributedBy(16, "instrument_token")
+                                    .build()),
+                    Map.entry("candle_live",
+                            TableDescriptor.builder()
+                                    .schema(CANDLE_LIVE_SCHEMA)
+                                    .distributedBy(16, "instrument_token")
+                                    .property("table.log.ttl", "60s")
+                                    .property("table.datalake.enabled", "false")
+                                    .property("table.kv.format-version", "2")
+                                    .build()),
+                    Map.entry("candle_closed",
+                            TableDescriptor.builder()
+                                    .schema(CANDLE_CLOSED_SCHEMA)
+                                    .distributedBy(16, "instrument_token")
+                                    .property("table.log.ttl", "7d")
+                                    .property("table.datalake.enabled", "true")
+                                    .property("table.datalake.format", "iceberg")
+                                    .property("table.datalake.freshness", "5min")
+                                    .property("table.datalake.auto-compaction", "true")
+                                    .property("table.kv.format-version", "2")
                                     .build()),
                     Map.entry("Signal_Candidates",
                             TableDescriptor.builder().schema(SIGNAL_CANDIDATES_SCHEMA).distributedBy(16, "instrument_token").build()),
