@@ -41,6 +41,15 @@ func TestClassifyAuthRefresh(t *testing.T) {
 	if got := classifyAuthRefresh(true, 3, errors.New("unauthorized")); got != authTerminalExhausted {
 		t.Fatalf("exhausted: got %v, want authTerminalExhausted", got)
 	}
+
+	// P1-028: an exhausted budget with no attempt this round reaches the
+	// classifier as (hasRefresh=false, nil err) — the caller folds budget
+	// state into hasRefresh — and must be terminal, never authResumed.
+	// Without the call-site fold this input arrives as (true, 2, nil) and
+	// wrongly resumes.
+	if got := classifyAuthRefresh(false, 2, nil); got != authTerminalExhausted {
+		t.Fatalf("exhausted budget, nil err (P1-028): got %v, want authTerminalExhausted", got)
+	}
 }
 
 // TestClassifySubscriptionResponse — plan §Integrations: SUCCESS with

@@ -66,6 +66,12 @@ func reportTickCounts() {
 		total += tickCounts[t]
 	}
 	lines := (len(keys) + tickCountChunkSize - 1) / tickCountChunkSize
+	// P1-048: never emit an empty report — zero keys must still produce the
+	// total=0 header line, or the file is truncated to 0 bytes with no stderr
+	// marker and the reconcile cannot tell "zero ticks" from "report lost".
+	if lines == 0 {
+		lines = 1
+	}
 	// Build the full report in memory first.
 	var buf strings.Builder
 	for c := 0; c < lines; c++ {

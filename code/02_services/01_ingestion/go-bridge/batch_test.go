@@ -6,6 +6,8 @@ package main
 
 import (
 	"crypto/sha256"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -237,8 +239,8 @@ func TestT2S1_Sequence(t *testing.T) {
 		t.Fatalf("last seq in epoch1 should be 5, got %d", got)
 	}
 
-	// new epoch: reset
-	b.ResetSeq("s")
+	// new epoch: the batcher restarts the sequence itself (P1-051 native:
+	// no ResetSeq API exists anymore — the epoch change alone restarts).
 	for i := 0; i < 3; i++ {
 		ev, raw := mkEvent(10)
 		if err := b.Add("s", "c", 2, ev, raw); err != nil {
@@ -310,4 +312,328 @@ func TestT2H_HashOncePerEvent(t *testing.T) {
 	if len(got) != sha256.Size || string(got) != string(want[:]) {
 		t.Fatalf("payload hash wrong: got %x want %x", got, want)
 	}
+}
+
+// T2-B5 — P1-001 fail-fast guard: one open batch must never mix
+// (ConnectionId, ConnectionEpoch). A conn or epoch change boundary-flushes
+// with the old header intact; per-connection BatchSeq advances independently.
+func TestT2B5_ConnEpochBoundary(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	limits := DefaultBatchLimits()
+	limits.MaxEvents = 1 << 30 // disable count flush
+	limits.MaxBytes = 1 << 30  // disable bytes flush
+	b, rec := newTestBatcher(limits, clock)
+
+	for i := 0; i < 2; i++ {
+		ev, raw := mkEvent(10)
+		if err := b.Add("s1", "connA", 1, ev, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(rec.batches) != 0 {
+		t.Fatalf("expected no flush before boundary, got %d", len(rec.batches))
+	}
+	// conn change — boundary flush of the connA batch
+	ev, raw := mkEvent(10)
+	if err := b.Add("s2", "connB", 1, ev, raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.batches) != 1 {
+		t.Fatalf("expected boundary flush on conn change, got %d", len(rec.batches))
+	}
+	if got := rec.batches[0].ConnectionId; got != "connA" {
+		t.Fatalf("batch 0 conn: got %q want connA", got)
+	}
+	if got := len(rec.batches[0].Events); got != 2 {
+		t.Fatalf("batch 0 events: got %d want 2", got)
+	}
+	// epoch bump on connB with an open batch — boundary flush again
+	ev, raw = mkEvent(10)
+	if err := b.Add("s2", "connB", 2, ev, raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.batches) != 2 {
+		t.Fatalf("expected boundary flush on epoch change, got %d", len(rec.batches))
+	}
+	if got := rec.batches[1].ConnectionId; got != "connB" {
+		t.Fatalf("batch 1 conn: got %q want connB", got)
+	}
+	if got := rec.batches[1].ConnectionEpoch; got != 1 {
+		t.Fatalf("batch 1 epoch: got %d want 1", got)
+	}
+	// drain: pending batch is connB epoch 2 with 1 event
+	if err := b.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.batches) != 3 {
+		t.Fatalf("expected 3 batches after drain, got %d", len(rec.batches))
+	}
+	last := rec.batches[2]
+	if last.ConnectionId != "connB" || last.ConnectionEpoch != 2 || len(last.Events) != 1 {
+		t.Fatalf("batch 2 wrong: conn=%q epoch=%d events=%d",
+			last.ConnectionId, last.ConnectionEpoch, len(last.Events))
+	}
+	// BatchSeq is per-connection: connA=1, connB=1,2
+	if rec.batches[0].BatchSeq != 1 || rec.batches[1].BatchSeq != 1 || rec.batches[2].BatchSeq != 2 {
+		t.Fatalf("batch seqs wrong: %d %d %d",
+			rec.batches[0].BatchSeq, rec.batches[1].BatchSeq, rec.batches[2].BatchSeq)
+	}
+}
+
+var errTestBoundary = errors.New("test boundary flush failure")
+
+// flakyFlush fails while fail is true, then records. Fail-fast helper for
+// P1-015/017 retry tests.
+type flakyFlush struct {
+	fail bool
+	rec  *recordingFlush
+}
+
+func (f *flakyFlush) Flush(batch *marketdata.MarketDataBatch) error {
+	if f.fail {
+		return errTestBoundary
+	}
+	return f.rec.Flush(batch)
+}
+
+// T2-B5-ERR — P1-001 + P1-015/017 guard: a failed boundary flush retains the
+// old batch and does NOT consume the current tick. The caller retries: the
+// old batch goes out first (same number), then the retried tick.
+func TestT2B5_BoundaryFlushErrorKeepsTick(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	limits := DefaultBatchLimits()
+	limits.MaxEvents = 1 << 30
+	limits.MaxBytes = 1 << 30
+	rec := &recordingFlush{}
+	flaky := &flakyFlush{fail: true, rec: rec}
+	b := NewBatcher(limits, flaky.Flush, clock.Now)
+
+	ev, raw := mkEvent(10)
+	if err := b.Add("s1", "connA", 1, ev, raw); err != nil {
+		t.Fatal(err)
+	}
+	// boundary send fails — error out, old batch retained, tick not consumed
+	ev2, raw2 := mkEvent(10)
+	if err := b.Add("s2", "connB", 1, ev2, raw2); err == nil {
+		t.Fatal("expected boundary flush error, got nil")
+	}
+	if len(rec.batches) != 0 {
+		t.Fatalf("failed flush must send nothing, got %d batches", len(rec.batches))
+	}
+	if b.FlushedBatches.Load() != 0 || b.FlushedEvents.Load() != 0 {
+		t.Fatalf("failed flush must count nothing, got batches=%d events=%d",
+			b.FlushedBatches.Load(), b.FlushedEvents.Load())
+	}
+	// transport recovers: retry delivers the retained connA batch first
+	flaky.fail = false
+	if err := b.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.batches) != 1 {
+		t.Fatalf("expected 1 batch after drain, got %d", len(rec.batches))
+	}
+	if got := rec.batches[0]; got.ConnectionId != "connA" || len(got.Events) != 1 {
+		t.Fatalf("retried batch wrong: conn=%q events=%d", got.ConnectionId, len(got.Events))
+	}
+	// now retry the connB tick — boundary is clean (cur is nil), no error
+	if err := b.Add("s2", "connB", 1, ev2, raw2); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.batches) != 2 {
+		t.Fatalf("expected 2 batches, got %d", len(rec.batches))
+	}
+	got := rec.batches[1]
+	if got.ConnectionId != "connB" || len(got.Events) != 1 {
+		t.Fatalf("retried tick batch wrong: conn=%q events=%d", got.ConnectionId, len(got.Events))
+	}
+	if b.FlushedBatches.Load() != 2 || b.FlushedEvents.Load() != 2 {
+		t.Fatalf("counters wrong: batches=%d events=%d", b.FlushedBatches.Load(), b.FlushedEvents.Load())
+	}
+}
+
+// T2-F1 — P1-015/017 guard: a failed limit flush retains the batch with a
+// stable number and counts nothing; the retry sends the same batch with the
+// same BatchSeq, counted exactly once.
+func TestT2F1_FailedFlushRetainsStableSeq(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	limits := DefaultBatchLimits()
+	limits.MaxEvents = 3 // 3rd Add triggers the limit flush
+	limits.MaxBytes = 1 << 30
+	rec := &recordingFlush{}
+	flaky := &flakyFlush{fail: true, rec: rec}
+	b := NewBatcher(limits, flaky.Flush, clock.Now)
+
+	for i := 0; i < 3; i++ {
+		ev, raw := mkEvent(10)
+		if i < 2 {
+			if err := b.Add("s", "c", 1, ev, raw); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if err := b.Add("s", "c", 1, ev, raw); err == nil {
+			t.Fatal("expected limit flush error, got nil")
+		}
+	}
+	if len(rec.batches) != 0 {
+		t.Fatalf("failed flush must send nothing, got %d", len(rec.batches))
+	}
+	if b.FlushedBatches.Load() != 0 || b.FlushedEvents.Load() != 0 || b.FlushedBytes.Load() != 0 {
+		t.Fatalf("failed flush must count nothing: %+v", b)
+	}
+	// recover and drain: same 3 events, first number, counted once
+	flaky.fail = false
+	if err := b.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.batches) != 1 {
+		t.Fatalf("expected 1 batch after retry, got %d", len(rec.batches))
+	}
+	if got := len(rec.batches[0].Events); got != 3 {
+		t.Fatalf("retried batch events: got %d want 3", got)
+	}
+	if got := rec.batches[0].BatchSeq; got != 1 {
+		t.Fatalf("retried batch seq: got %d want 1 (stable across retry)", got)
+	}
+	if b.FlushedBatches.Load() != 1 || b.FlushedEvents.Load() != 3 {
+		t.Fatalf("counters wrong after retry: batches=%d events=%d",
+			b.FlushedBatches.Load(), b.FlushedEvents.Load())
+	}
+	// next batch continues the numbering with no hole
+	for i := 0; i < 3; i++ {
+		ev, raw := mkEvent(10)
+		if err := b.Add("s", "c", 1, ev, raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(rec.batches) != 2 {
+		t.Fatalf("expected 2 batches, got %d", len(rec.batches))
+	}
+	if got := rec.batches[1].BatchSeq; got != 2 {
+		t.Fatalf("second batch seq: got %d want 2", got)
+	}
+}
+
+// T2-S3 — P1-014/016 guard: concurrent Adds on one slot must land in number
+// order. Number-take + field writes + append are one locked step; any future
+// split-lock regresses here regardless of goroutine scheduling.
+func TestT2S3_ConcurrentAddOrder(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	limits := DefaultBatchLimits()
+	limits.MaxEvents = 1 << 30 // disable count flush
+	limits.MaxBytes = 1 << 30  // disable bytes flush
+	b, rec := newTestBatcher(limits, clock)
+
+	const workers = 8
+	const perWorker = 50
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < perWorker; i++ {
+				ev, raw := mkEvent(10)
+				if err := b.Add("s", "c", 1, ev, raw); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if err := b.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.batches) != 1 {
+		t.Fatalf("expected 1 batch, got %d", len(rec.batches))
+	}
+	events := rec.batches[0].Events
+	if len(events) != workers*perWorker {
+		t.Fatalf("events: got %d want %d", len(events), workers*perWorker)
+	}
+	for i, e := range events {
+		if e.FeedSequenceLocal != int64(i+1) {
+			t.Fatalf("position %d has seq %d: order/number mismatch", i, e.FeedSequenceLocal)
+		}
+	}
+}
+
+// T2-R1 — P1-002/003 guard: Add carries raw onto a BARE event (copied).
+// The production caller pre-fills RawPayload, which masked this gap; a bare
+// tick must still arrive with its bytes, and the batch hash must cover them.
+func TestT2R1_AddCarriesRawPayload(t *testing.T) {
+	clock := &fakeClock{t: time.Unix(0, 0)}
+	limits := DefaultBatchLimits()
+	limits.MaxEvents = 1 << 30
+	limits.MaxBytes = 1 << 30
+	b, rec := newTestBatcher(limits, clock)
+
+	raw := []byte{1, 2, 3, 4, 5}
+	ev := &marketdata.TickEvent{Token: 1} // bare: no RawPayload set
+	if err := b.Add("s", "c", 1, ev, raw); err != nil {
+		t.Fatal(err)
+	}
+	// caller mutates its buffer after Add — stored copy must not change
+	for i := range raw {
+		raw[i] = 9
+	}
+	if err := b.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.batches) != 1 {
+		t.Fatalf("expected 1 batch, got %d", len(rec.batches))
+	}
+	got := rec.batches[0].Events[0].RawPayload
+	want := []byte{1, 2, 3, 4, 5}
+	if len(got) != len(want) {
+		t.Fatalf("RawPayload len: got %d want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("RawPayload[%d]: got %d want %d (not carried/copied)", i, got[i], want[i])
+		}
+	}
+	wantHash := sha256.Sum256(want)
+	if rec.batches[0].BatchPayloadHash == nil {
+		t.Fatal("BatchPayloadHash missing")
+	}
+	for i := range wantHash {
+		if rec.batches[0].BatchPayloadHash[i] != wantHash[i] {
+			t.Fatal("BatchPayloadHash does not cover the carried payload")
+		}
+	}
+}
+
+// TestT2D1_BatchLimitsZeroDefaultsMaxAge — P1-142/143: BatchLimits{} must not
+// flush on every Tick; MaxAge defaults to 1ms like the other limits.
+func TestT2D1_BatchLimitsZeroDefaultsMaxAge(t *testing.T) {
+	b := NewBatcher(BatchLimits{}, func(batch *marketdata.MarketDataBatch) error { return nil }, nil)
+	if b.limits.MaxAge <= 0 {
+		t.Fatalf("MaxAge not defaulted: %v", b.limits.MaxAge)
+	}
+}
+
+// TestT2D2_FlushedCountersRaceFree — P1-142/143: concurrent flushes and
+// counter reads must not race (run with -race).
+func TestT2D2_FlushedCountersRaceFree(t *testing.T) {
+	b := NewBatcher(DefaultBatchLimits(), func(batch *marketdata.MarketDataBatch) error { return nil }, nil)
+	var wg sync.WaitGroup
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < 50; i++ {
+				ev := Tick{Token: int32(w*1000 + i)}.toMarketTick().ToTickEvent(
+					"s", "c", 1, int64(i), 0, []byte{byte(i)})
+				_ = b.Add("s", "c", 1, ev, []byte{byte(i)})
+				_ = b.FlushedBatches.Load()
+				_ = b.FlushedEvents.Load()
+				_ = b.FlushedBytes.Load()
+			}
+		}(w)
+	}
+	wg.Wait()
 }

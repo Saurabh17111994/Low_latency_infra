@@ -15,6 +15,7 @@ import (
 	"os"
 	"errors"
 	"os/exec"
+	"sync"
 	"testing"
 	"time"
 
@@ -266,5 +267,83 @@ func TestInitBridgeEmitterRejectsNonProto(t *testing.T) {
 				t.Fatalf("TRANSPORT=%q: stderr must name FATAL + TRANSPORT, got %q", tc.env, out)
 			}
 		})
+	}
+}
+
+// lockedWriter models a pipe: each Write call is atomic, but a frame spans
+// two Writes (header + body), so frames interleave without emitter-level
+// locking. P1-005: that interleaving corrupted the Java length prefix.
+type lockedWriter struct {
+	mu  *sync.Mutex
+	buf *bytes.Buffer
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+// TestProtoEmitterConcurrentFraming — P1-005 guard: tick flushes racing
+// control frames must never interleave mid-frame. Storms one shared writer
+// through the REAL init path, then every byte must parse as length-prefixed
+// frames (readFrames fails the test on any corruption) with exact count.
+func TestProtoEmitterConcurrentFraming(t *testing.T) {
+	t.Setenv("TRANSPORT", "proto")
+	t.Setenv("BRIDGE_BATCH_MAX_EVENTS", "1") // every tick flushes
+	t.Setenv("BRIDGE_BATCH_MAX_AGE_MS", "1000")
+
+	var mu sync.Mutex
+	var buf bytes.Buffer
+	em := initBridgeEmitter(&lockedWriter{mu: &mu, buf: &buf})
+
+	const tickWorkers = 4
+	const ticksEach = 200
+	const ctlWorkers = 2
+	const ctlsEach = 100
+	var wg sync.WaitGroup
+	for w := 0; w < tickWorkers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < ticksEach; i++ {
+				tk := sampleTick()
+				tk.Token = int32(100001 + w)
+				if err := em.EmitTick(tk, "hft-0", "s", 1, time.UnixMilli(1_720_000_000_500), []byte{0x01, 0x02}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(w)
+	}
+	for w := 0; w < ctlWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < ctlsEach; i++ {
+				ev := BridgeEvent{Event: EventReconnect, SlotID: "s", ConnectionID: "hft-0", ConnectionEpoch: 1, State: string(SlotBackoff), ReceivedTsMs: 1}
+				if err := em.EmitEvent(ev); err != nil {
+					t.Error(err)
+					return
+				}
+				if err := em.EmitMetrics(BridgeMetrics{TsMs: 1, ActiveSockets: 1}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if err := em.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	data := append([]byte(nil), buf.Bytes()...)
+	mu.Unlock()
+	frames := readFrames(t, data)
+	want := tickWorkers*ticksEach + ctlWorkers*ctlsEach*2
+	if len(frames) != want {
+		t.Fatalf("frames: got %d want %d (lost or merged)", len(frames), want)
 	}
 }

@@ -45,7 +45,6 @@ type Transport interface {
 	EmitMetrics(m BridgeMetrics) error
 	SetManifestFingerprint(fp string)
 	SetSlotTokenHash(slotID, hash string)
-	ResetSeq(slotID string)
 	Flush() error // drain pending batched ticks (shutdown)
 	Close() error
 }
@@ -101,7 +100,7 @@ func (t Tick) toMarketTick() marketdata.Tick {
 }
 
 // EmitTick batches one tick into the batcher. The flush callback writes a
-// MarketDataBatch frame synchronously (batcher lock → writeFrame).
+// MarketDataBatch frame synchronously (batcher lock → e.mu → write).
 func (e *ProtoEmitter) EmitTick(t Tick, connectionID, slotID string, epoch uint64, received time.Time, rawPayload []byte) error {
 	if tickCountsOn {
 		recordTickCount(t.Token)
@@ -144,7 +143,11 @@ func (e *ProtoEmitter) controlFrame(recordType string, ev *BridgeEvent, m *Bridg
 	}
 }
 
-// EmitEvent writes a bridge_event control frame immediately (no batching).
+// EmitEvent writes a bridge_event control frame immediately (no batching),
+// but only after draining buffered ticks first (P1-050): a reconnect/epoch
+// event must never overtake ticks that were buffered earlier. The drain runs
+// BEFORE e.mu is taken — never nested — so the batcher→emitter lock order
+// from P1-005 holds and no new deadlock edge appears.
 func (e *ProtoEmitter) EmitEvent(event BridgeEvent) error {
 	event.RecordType = "bridge_event"
 	event.ContractVersion = ContractVersion
@@ -152,6 +155,9 @@ func (e *ProtoEmitter) EmitEvent(event BridgeEvent) error {
 	// R-097: validate BEFORE write — an invalid event must never reach the wire.
 	if err := validateBridgeEvent(event); err != nil {
 		return fmt.Errorf("bridge event rejected: %w", err)
+	}
+	if err := e.batcher.Flush(); err != nil {
+		return err
 	}
 	e.mu.Lock()
 	if event.ManifestFingerprint == "" {
@@ -166,12 +172,17 @@ func (e *ProtoEmitter) EmitEvent(event BridgeEvent) error {
 	return err
 }
 
-// EmitMetrics writes a bridge_metrics control frame immediately.
+// EmitMetrics writes a bridge_metrics control frame immediately, after the
+// same tick-drain as EmitEvent (P1-050): metrics must not overtake buffered
+// ticks either. Flush-before-lock, same ordering argument as above.
 func (e *ProtoEmitter) EmitMetrics(m BridgeMetrics) error {
 	m.RecordType = "bridge_metrics"
 	m.ContractVersion = ContractVersion
 	if m.TsMs <= 0 {
 		return fmt.Errorf("bridge metrics rejected: ts_ms must be positive")
+	}
+	if err := e.batcher.Flush(); err != nil {
+		return err
 	}
 	e.mu.Lock()
 	frame := e.controlFrame("bridge_metrics", nil, &m)
@@ -192,11 +203,6 @@ func (e *ProtoEmitter) SetSlotTokenHash(slotID, hash string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.tokenHashBySlot[slotID] = hash
-}
-
-// ResetSeq forwards to the batcher (per-slot seq reset on epoch, R-185).
-func (e *ProtoEmitter) ResetSeq(slotID string) {
-	e.batcher.ResetSeq(slotID)
 }
 
 // Flush drains the batcher (shutdown). Control frames are already written.
@@ -223,13 +229,24 @@ func initBridgeEmitter(w io.Writer) Transport {
 	case "proto", "grpc":
 		fmt.Fprintf(os.Stderr, "arrow-bridge: transport=proto frames (TRANSPORT=%s)\n", v)
 		// K1 (2026-08-29): batch limits are env-tunable; unset = O-2 defaults.
-		batcher := NewBatcher(batchLimitsFromEnv(func(format string, args ...any) {
+		// P1-005 fail-fast: the emitter exists BEFORE the batcher so the
+		// flush callback can serialize every wire write on e.mu. Lock order
+		// is always batcher -> emitter (this callback runs under b.mu);
+		// no path takes e.mu and then calls into the batcher, so this
+		// cannot deadlock. Control frames already hold e.mu in EmitEvent/
+		// EmitMetrics — without this, a tick flush and a control write
+		// interleave mid-frame and Java sees a bad length prefix.
+		e := &ProtoEmitter{w: w, tokenHashBySlot: map[string]string{}}
+		e.batcher = NewBatcher(batchLimitsFromEnv(func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "arrow-bridge: "+format+"\n", args...)
 		}), func(batch *marketdata.MarketDataBatch) error {
 			// synchronous flush under batcher lock — write the frame
+			// holding e.mu so header+body are atomic vs control frames.
+			e.mu.Lock()
+			defer e.mu.Unlock()
 			return protoWriteFrame(w, batch)
 		}, nil)
-		return NewProtoEmitter(w, batcher)
+		return e
 	default:
 		// TRANSPORT unset, "pipe", or unknown: fail loudly instead of
 		// silently falling back to a line transport. Proto is the only transport.

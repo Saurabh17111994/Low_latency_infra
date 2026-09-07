@@ -95,7 +95,12 @@ func sha256Hex(b []byte) string {
 // `Bearer <token>` (space-separated) is consumed before the name=value pattern
 // can eat only the literal `Bearer` and leave the real token exposed (e.g.
 // `Authorization=Bearer secretToken`).
-var secretPattern = regexp.MustCompile(`(?i)(ARROW_APP_SECRET|ARROW_PASSWORD|ARROW_TOTP_KEY|ARROW_TOKEN|access_token|authorization|appID|token)([=:][^&\s,}]+)`)
+// P1-024: the separator allows optional quotes/whitespace so quoted-JSON
+// diagnostics ("ARROW_TOKEN":"secret") match, and generic password/secret
+// names are covered. The value excludes quotes/brackets so JSON framing
+// survives redaction. Verified: plain prose ("token expired", "tokens=5",
+// "secretary=x") is untouched — only name+separator shapes redact.
+var secretPattern = regexp.MustCompile(`(?i)(ARROW_APP_SECRET|ARROW_PASSWORD|ARROW_TOTP_KEY|ARROW_TOKEN|ARROW_REQUEST_TOKEN|access_token|authorization|password|passwd|secret|appID|token)["']?\s*[=:]\s*["']?[^&\s,}"'\]]+`)
 var bearerPattern = regexp.MustCompile(`(?i)\bBearer[=:\s]+[^\s,}]+`)
 
 // sanitizeDiagnostic redacts secret-bearing values and bounds the result.

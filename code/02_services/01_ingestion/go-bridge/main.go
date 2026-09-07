@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -40,13 +41,17 @@ type Tick struct {
 	BTV    uint32 `json:"btv,omitempty"`
 	OI     int64  `json:"open_interest,omitempty"`
 	// unix epoch milliseconds
+	// P1-021: depth ladders are fixed [5] arrays — encoding/json omitempty
+	// NEVER omits arrays (Len>0 always), so the tags were a lie. Removed:
+	// LTP ticks always carry explicit zero ladders (wire-identical before
+	// and after — proven by byte-identical regenerated goldens).
 	TS      int64     `json:"ts_ms"`
-	BidPx   [5]int32  `json:"bid_px,omitempty"`
-	AskPx   [5]int32  `json:"ask_px,omitempty"`
-	BidSize [5]int32  `json:"bid_qty,omitempty"`
-	AskSize [5]int32  `json:"ask_qty,omitempty"`
-	BidOrd  [5]uint16 `json:"bid_orders,omitempty"`
-	AskOrd  [5]uint16 `json:"ask_orders,omitempty"`
+	BidPx   [5]int32  `json:"bid_px"`
+	AskPx   [5]int32  `json:"ask_px"`
+	BidSize [5]int32  `json:"bid_qty"`
+	AskSize [5]int32  `json:"ask_qty"`
+	BidOrd  [5]uint16 `json:"bid_orders"`
+	AskOrd  [5]uint16 `json:"ask_orders"`
 }
 
 // bridgeEmitter is the transport emitter. It is deliberately nil until main()
@@ -236,7 +241,7 @@ func main() {
 	// Emit the final per-token tick count synchronously HERE (before any
 	// further work or return) so the ING-TCP-001 shutdown report cannot be
 	// lost to a goroutine/main exit race.
-	finalTickCountReport.Do(reportTickCounts)
+	maybeReportFinalTickCounts()
 	// T6: drain any pending batched ticks BEFORE the shutdown marker so the
 	// Java reader sees the complete stream (proto mode: Flush writes the
 	// final MarketDataBatch frame).
@@ -245,6 +250,18 @@ func main() {
 	}
 	emitShutdownEvent()
 	_ = bridgeEmitter.Close()
+}
+
+// maybeReportFinalTickCounts emits the ING-TCP-001 shutdown report exactly
+// once, and only when tick counters are enabled (P1-209: the unconditional
+// finalTickCountReport.Do here ran reportTickCounts even with
+// ARROW_TICK_COUNTS unset, creating/truncating the counts file and writing
+// a stray stderr line on every disabled shutdown).
+func maybeReportFinalTickCounts() {
+	if !tickCountsOn {
+		return
+	}
+	finalTickCountReport.Do(reportTickCounts)
 }
 
 // isFakeBrokerMode reports the test-only fake-broker auth mode
@@ -377,9 +394,9 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 	terminalAuthFailure := false
 	readCtx, stopRead := context.WithCancel(ctx)
 	defer stopRead()
-	// R-185: a new connection epoch begins — restart the per-slot tick
-	// sequence so feed_sequence_local does not grow across reconnects.
-	bridgeEmitter.ResetSeq(slot.SlotID)
+	// R-185: a new connection epoch begins. The batcher restarts the
+	// per-slot tick sequence itself when it sees the new epoch — no reset
+	// call needed (P1-051: no external reset API, nothing to race).
 
 	// onDecoded fires immediately before each LTP/full tick dispatch in the
 	// same read goroutine, so lastDecoded holds the exact decompressed packet
@@ -389,16 +406,25 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 	go stream.ReadHFTWithFrame(readCtx,
 		func(t arrow.HFTLTPTick) {
 			lastFrameNanos.Store(time.Now().UnixNano())
-			_ = bridgeEmitter.EmitTick(Tick{
+			// P1-212: surface emit failures — an EmitTick error (batch
+			// flush / frame-too-large / transport write) must never
+			// silently drop ticks.
+			if err := bridgeEmitter.EmitTick(Tick{
 				Feed: "hft", Mode: "ltpc", Token: t.Token,
 				LTP: t.LTP, VWAP: t.VWAP, Volume: t.Volume,
 				ATV: t.ATV, BTV: t.BTV,
-				TS: int64(t.LTT / 1_000_000),
-			}, slot.ConnectionID, slot.SlotID, epoch, time.Now(), lastDecoded)
+				// P1-023: LTT is microseconds — /1e3 yields ms like the
+				// full path (TS ns /1e6). The old /1e6 emitted SECONDS,
+				// 1000x below every full tick's ts_ms.
+				TS: int64(t.LTT / 1_000),
+			}, slot.ConnectionID, slot.SlotID, epoch, time.Now(), lastDecoded); err != nil {
+				logf("HFT emit tick failed: %v", sanitizeDiagnostic(err.Error()))
+			}
 		},
 		func(t arrow.HFTFullTick) {
 			lastFrameNanos.Store(time.Now().UnixNano())
-			_ = bridgeEmitter.EmitTick(Tick{
+			// P1-212: surface emit failures — see the LTP path above.
+			if err := bridgeEmitter.EmitTick(Tick{
 				Feed: "hft", Mode: "full", Token: t.Token,
 				LTP: t.LTP, LTQ: t.LTQ, VWAP: t.VWAP,
 				Open: t.Open, High: t.High, Close: t.Close, Low: t.Low,
@@ -408,7 +434,9 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 				BidSize: t.BidSize, AskSize: t.AskSize,
 				BidOrd: t.BidOrd, AskOrd: t.AskOrd,
 				TS: int64(t.TS / 1_000_000),
-			}, slot.ConnectionID, slot.SlotID, epoch, time.Now(), lastDecoded)
+			}, slot.ConnectionID, slot.SlotID, epoch, time.Now(), lastDecoded); err != nil {
+				logf("HFT emit tick failed: %v", sanitizeDiagnostic(err.Error()))
+			}
 		},
 		func(r arrow.HFTResponsePacket) {
 			select {
@@ -433,7 +461,13 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 				}
 				// classifyAuthRefresh expects the prior count; authTries was
 				// already incremented above, so pass authTries-1.
-				switch classifyAuthRefresh(refreshAuth != nil, authTries-1, refreshErr) {
+				// P1-028: fold an already-exhausted budget into hasRefresh=false.
+				// Otherwise no refresh runs, refreshErr stays nil, and the
+				// classifier reads (true, n, nil) as authResumed — a bogus
+				// authentication_refreshed event plus a retry that never
+				// refreshes, looping forever (the shared budget persists across
+				// epochs). Exhausted now routes to authTerminalExhausted.
+				switch classifyAuthRefresh(refreshAuth != nil && authTries < maxAuthRefreshAttempts, authTries-1, refreshErr) {
 				case authResumed:
 					noteReconnect(slot.SlotID)
 					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "reconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: "authentication_refreshed", ReceivedTsMs: time.Now().UnixMilli()})
@@ -825,8 +859,17 @@ func loadTokensFromCSV(envKey, csvPath string) []int32 {
 	lineNum := 1
 	for {
 		record, err := reader.Read()
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
-			break // EOF or error
+			// P1-156: fail closed — a malformed row (notably
+			// csv.ErrFieldCount on ragged rows) must not be swallowed as
+			// clean end-of-input, silently truncating the manifest into a
+			// partial token plan. Startup MUST reject rather than ingest a
+			// subset.
+			fmt.Fprintf(os.Stderr, "arrow-bridge: FATAL: cannot parse CSV %s at line %d: %v; refusing to start with a partial token set\n", csvPath, lineNum+1, err)
+			os.Exit(exitFatalStart)
 		}
 		lineNum++
 		if len(record) <= tokenIdx {

@@ -12,9 +12,9 @@
 // Environment:
 //
 //	ARROW_APP_ID + ARROW_APP_SECRET       → client.Login token exchange
-//	ARROW_REQUEST_TOKEN (with ARROW_APP_SECRET) → device flow: Authenticate(requestToken)
-//	ARROW_USER_ID + ARROW_PASSWORD + ARROW_TOTP_KEY → client.AutoLogin
-//	ARROW_TOKEN (optional, overrides)     → use an existing token verbatim
+//	ARROW_USER_ID + ARROW_PASSWORD + ARROW_TOTP_KEY → client.AutoLogin (TOTP only)
+//	P1-019: the ARROW_REQUEST_TOKEN / ARROW_TOKEN device flows are removed —
+//	the mandatory TOTP gate below made them unreachable, and TOTP is authoritative.
 //	CAPTURE_HFT=1 (default)               → capture socket.arrow.trade
 //	CAPTURE_TOKENS=2885,1333,3045         → instrument ids (NSE tokens)
 //	CAPTURE_DURATION=20                   → seconds per feed
@@ -28,7 +28,7 @@
 //	{"kind":"response","feed":"hft","errorCode":"","successCount":5,...}
 //	{"kind":"error","feed":"hft","err":"..."}
 //	{"kind":"raw","feed":"hft","len":196,"hex":"..."}            (decoded payload)
-//	{"kind":"summary","hft":{...}}
+//	{"kind":"summary","hft":{...},"hftFrames":N}          (N counts every WS frame incl. keepalives; hft only decoded payloads)
 package main
 
 import (
@@ -50,30 +50,63 @@ type recorder struct {
 	mu   sync.Mutex
 	w    *bufio.Writer
 	file *os.File
+	// P1-020: evidence loss is counted, never swallowed — main exits
+	// non-zero when failed > 0 so a truncated capture can't pose as clean.
+	failed    int
+	lostBytes int64
 }
 
 func (r *recorder) emit(v any) error {
 	b, err := json.Marshal(v)
 	if err != nil {
+		r.mu.Lock()
+		r.failed++
+		r.mu.Unlock()
 		return err
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, err := r.w.Write(b); err != nil {
+		r.failed++
+		r.lostBytes += int64(len(b) + 1)
 		return err
 	}
 	return r.w.WriteByte('\n')
 }
 
+// stats reports evidence-write failures and estimated lost bytes.
+func (r *recorder) stats() (failed int, lostBytes int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.failed, r.lostBytes
+}
+
 func (r *recorder) close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.w.Flush()
+	// P1-020: bufio defers small writes to Flush — a flush failure loses
+	// buffered evidence, so count it here too (emit-time counting alone
+	// would miss it).
+	pending := r.w.Buffered()
+	if err := r.w.Flush(); err != nil {
+		r.failed++
+		r.lostBytes += int64(pending)
+		return err
+	}
+	return nil
 }
 
 type lenCounts map[int]int
 
 func (l lenCounts) add(n int) { l[n]++ }
+
+// P1-145: the summary record must carry the total WS frame count alongside
+// the decoded-length histogram — the emit once dropped HFTFrames, losing the
+// total from the JSONL. Note the denominators differ: hftFrames counts every
+// WS frame (incl. non-binary keepalives), hft only decoded LTP/full payloads.
+func summaryRecord(hft lenCounts, hftFrames int) map[string]any {
+	return map[string]any{"kind": "summary", "hft": hft, "hftFrames": hftFrames}
+}
 
 func envInt(name string, def int) int {
 	v := os.Getenv(name)
@@ -104,10 +137,6 @@ func envBool(name string, def bool) bool {
 func main() {
 	if os.Getenv("ARROW_APP_ID") == "" {
 		fmt.Fprintln(os.Stderr, "ARROW_APP_ID is required (see .env)")
-		os.Exit(2)
-	}
-	if os.Getenv("ARROW_REQUEST_TOKEN") != "" && os.Getenv("ARROW_APP_SECRET") == "" {
-		fmt.Fprintln(os.Stderr, "ARROW_REQUEST_TOKEN requires ARROW_APP_SECRET for the checksum exchange")
 		os.Exit(2)
 	}
 	if os.Getenv("ARROW_APP_SECRET") == "" {
@@ -150,20 +179,13 @@ func main() {
 
 	client := arrow.NewClient(os.Getenv("ARROW_APP_ID"), os.Getenv("ARROW_APP_SECRET"))
 
-	switch {
-	case os.Getenv("ARROW_REQUEST_TOKEN") != "":
-		if _, err := client.Authenticate(os.Getenv("ARROW_REQUEST_TOKEN")); err != nil {
-			fmt.Fprintf(os.Stderr, "Authenticate(requestToken) failed: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "Authenticate OK, token len %d\n", len(client.GetToken()))
-	default:
-		if err := client.AutoLogin(os.Getenv("ARROW_USER_ID"), os.Getenv("ARROW_PASSWORD"), os.Getenv("ARROW_TOTP_KEY")); err != nil {
-			fmt.Fprintf(os.Stderr, "AutoLogin failed: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "AutoLogin OK, token len %d\n", len(client.GetToken()))
+	// P1-019: TOTP-only — the request-token arm was dead (the gate above
+	// exits unless TOTP creds exist, so token-only setups never got here).
+	if err := client.AutoLogin(os.Getenv("ARROW_USER_ID"), os.Getenv("ARROW_PASSWORD"), os.Getenv("ARROW_TOTP_KEY")); err != nil {
+		fmt.Fprintf(os.Stderr, "AutoLogin failed: %v\n", err)
+		os.Exit(1)
 	}
+	fmt.Fprintf(os.Stderr, "AutoLogin OK, token len %d\n", len(client.GetToken()))
 
 	if !envBool("CAPTURE_HFT", true) {
 		fmt.Fprintln(os.Stderr, "CAPTURE_HFT=0 — nothing to capture")
@@ -178,7 +200,18 @@ func main() {
 
 	captureHFT(rec, client, tokens, duration, &summary, &smu)
 
-	_ = rec.emit(map[string]any{"kind": "summary", "hft": summary.HFT})
+	_ = rec.emit(summaryRecord(summary.HFT, summary.HFTFrames))
+	// P1-020 fail-loud: flush explicitly (os.Exit skips the deferred
+	// close) and refuse to report success when evidence was lost.
+	if err := rec.close(); err != nil {
+		fmt.Fprintf(os.Stderr, "capture: final flush failed: %v\n", err)
+		os.Exit(1)
+	}
+	if n, lost := rec.stats(); n > 0 {
+		fmt.Fprintf(os.Stderr, "capture: %d evidence writes failed (~%d bytes lost) -> %s is INCOMPLETE\n",
+			n, lost, outPath)
+		os.Exit(1)
+	}
 	fmt.Fprintf(os.Stderr, "capture complete: hft=%v -> %s\n", summary.HFT, outPath)
 }
 

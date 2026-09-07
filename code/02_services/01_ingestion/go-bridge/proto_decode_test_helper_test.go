@@ -150,6 +150,7 @@ func tickMapsFrom(t *testing.T, out string) []map[string]any {
 				"volume":           ev.GetVolume(),
 				"total_buy_qty":    ev.GetTotalBuyQty(),
 				"total_sell_qty":   ev.GetTotalSellQty(),
+				"open_interest":    ev.GetOpenInterest(),
 				"ts_ms":            ev.GetTsMs(),
 				"bid_px":           bidPx,
 				"ask_px":           askPx,

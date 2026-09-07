@@ -76,13 +76,45 @@ func runHFTSlotWithFactory(ctx context.Context, factory func() (hftStream, error
 	// which stops THIS slot only.
 	authRefreshes := 0
 	runReconnectLoop(ctx, func(epoch uint64) bool {
-		result := runHFTEpoch(ctx, factory, slot, latencyMs, responseTimeout, epoch, refreshAuth, &authRefreshes, logf)
+		// P1-157: a panic in the slot's main flow used to be swallowed by the
+		// outer recover with NO bridge event — Java never learned the slot
+		// died and kept reporting it healthy. Recover HERE, where the live
+		// epoch is in scope (a terminal event with epoch 0 would be rejected
+		// by the R-097 gate and emit nothing), emit slot_state TERMINAL with
+		// the real epoch, and convert the outcome to terminal. The outer
+		// recover in the supervisor goroutine stays as backstop for panics
+		// outside this callback (reconnect/sleep internals).
+		var panicked string
+		result := func() (r slotEpochResult) {
+			defer func() {
+				if p := recover(); p != nil {
+					panicked = fmt.Sprintf("%v", p)
+					logf("HFT slot %s panicked in epoch %d: %v", slot.SlotID, epoch, p)
+					_ = bridgeEmitter.EmitEvent(BridgeEvent{
+						Event:           EventSlotState,
+						SlotID:          slot.SlotID,
+						ConnectionID:    slot.ConnectionID,
+						ConnectionEpoch: epoch,
+						State:           string(SlotTerminal),
+						Reason:          "panic: " + panicked,
+						ReceivedTsMs:    time.Now().UnixMilli(),
+					})
+					r = epochTerminal
+				}
+			}()
+			return runHFTEpoch(ctx, factory, slot, latencyMs, responseTimeout, epoch, refreshAuth, &authRefreshes, logf)
+		}()
 		switch result {
 		case epochTerminal:
-			// Terminal: report and stop this slot (the epoch already emitted
-			// the TERMINAL event). No retry.
+			// Terminal: report and stop this slot. A normal terminal already
+			// emitted its TERMINAL event; a panic emitted slot_state TERMINAL
+			// above. No retry either way.
 			outcome.terminal = true
-			outcome.reason = "terminal"
+			if panicked != "" {
+				outcome.reason = "panic: " + panicked
+			} else {
+				outcome.reason = "terminal"
+			}
 			return true
 		case epochRecovered:
 			return true
@@ -150,7 +182,14 @@ func runHFTSupervisorWithFactory(ctx context.Context, makeFactory func(*arrow.Cl
 	// (reconnect_consecutive, active_sockets, go_goroutines) via the active
 	// transport (proto frames). Exits on cancel
 	// so a cancelled supervisor's goroutine count settles for ING-RES-001.
-	go bridgeMetricsTicker(ctx)
+	// P1-158: the ticker must not outlive the supervisor — after wg.Wait the
+	// manager flushes and emits bridge_shutdown as the last frame, so a
+	// still-live ticker could fire bridge_metrics after the drain marker
+	// (and leak a goroutine per invocation). A child context stops it the
+	// moment the supervisor returns.
+	metricsCtx, stopMetrics := context.WithCancel(ctx)
+	defer stopMetrics()
+	go bridgeMetricsTicker(metricsCtx)
 	wg.Wait()
 	terminal := 0
 	for _, o := range outcomes {

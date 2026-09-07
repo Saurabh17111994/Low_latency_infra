@@ -85,9 +85,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "faketool: -real-rate and -tick-interval-ms are mutually exclusive")
 		os.Exit(2)
 	}
-	if *realRate && 1000%*realRateHz != 0 {
-		fmt.Fprintf(os.Stderr, "faketool: -real-rate-hz %d must divide 1000\n", *realRateHz)
-		os.Exit(2)
+	// P1-025: validate before any modulo/ticker use — hz<=0 panics
+	// (divide-by-zero at 0, negative time.Duration in NewTicker).
+	if *realRate {
+		if err := validateRealRateHz(*realRateHz); err != nil {
+			fmt.Fprintf(os.Stderr, "faketool: %v\n", err)
+			os.Exit(2)
+		}
 	}
 
 	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -101,7 +105,6 @@ func main() {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
 		idx := int(connections.Add(1))
 		// R-213: one zstd encoder per connection — constructing and closing a
 		// fresh encoder (table initialization included) per frame was wasteful.
@@ -110,7 +113,31 @@ func main() {
 			fmt.Fprintln(os.Stderr, "zstd encoder init failed:", err)
 			return
 		}
-		defer enc.Close()
+		// P1-026: background senders (tickers, snapshot burst, injection)
+		// keep using enc/conn after the read loop returns. Stop them FIRST
+		// (done), unblock any in-flight send (conn.Close), wait for all
+		// EncodeAll calls to finish (wg.Wait), and only then Close the
+		// encoder — EncodeAll concurrent with / after Close is a data race
+		// and use-after-close. Order inside one deferred func (LIFO-safe).
+		done := make(chan struct{})
+		var wg sync.WaitGroup
+		defer func() {
+			close(done)
+			conn.Close()
+			wg.Wait()
+			enc.Close()
+		}()
+		// sleepOrDone reports false when the connection is tearing down,
+		// so paced loops (snapshot burst, injection rounds) exit promptly
+		// instead of sleeping through shutdown (wg.Wait would hang minutes).
+		sleepOrDone := func(d time.Duration) bool {
+			select {
+			case <-done:
+				return false
+			case <-time.After(d):
+				return true
+			}
+		}
 		logf := func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "faketool: conn=%d %s\n", idx, fmt.Sprintf(format, args...))
 		}
@@ -220,7 +247,11 @@ func main() {
 			// snapshot burst) so ticks flow continuously from subscription
 			// time; it exits via write errors once the connection closes.
 			// Real-rate mode (Phase 4) uses its own per-id cadence instead.
-			if !closePending && !tickerStarted && (*tickInterval > 0 || *realRate) {
+			// P1-151: start the ticker even for closePending connections —
+			// real-rate mode skips the snapshot burst below, so gating the ticker
+			// on !closePending served zero ticks here. The linger read-deadline
+			// close still terminates the ticker after the batch + first ticks.
+			if !tickerStarted && (*tickInterval > 0 || *realRate) {
 				tickerStarted = true
 				if *realRate {
 					logf("real-rate ticker start (hz=%d)", *realRateHz)
@@ -228,7 +259,9 @@ func main() {
 					// duplicate injection resends the exact bytes the bridge
 					// just accepted (identical fingerprint by construction).
 					var lastFrames sync.Map // token -> []byte
+					wg.Add(1)
 					go func() {
+						defer wg.Done()
 						interval := time.Duration(1000 / *realRateHz) * time.Millisecond
 						t := time.NewTicker(interval)
 						defer t.Stop()
@@ -243,7 +276,12 @@ func main() {
 						// above the trailing-20 high stays a ~1-2% tail event instead
 						// of a monotone drift that floods Signal_Candidates.
 						prices := make(map[uint32]int32)
-						for range t.C {
+						for {
+							select {
+							case <-done:
+								return
+							case <-t.C:
+							}
 							subMu.Lock()
 							ids := append([]uint32(nil), subscribed...)
 							subMu.Unlock()
@@ -253,7 +291,7 @@ func main() {
 								if !ok {
 									p = anchor
 								}
-								p += (anchor - p) / 20 // pull back toward the anchor
+								p += (anchor - p) / 20         // pull back toward the anchor
 								p += int32(rand.IntN(21) - 10) // ±10 paise noise
 								prices[tok] = p
 								// Every frame carries a real traded quantity: LTQ (12:16)
@@ -280,7 +318,9 @@ func main() {
 					// unique frames (late). Counts logged as INJECT lines —
 					// the harness parses them and asserts the counters match.
 					if *injectAfter > 0 && (*injectDups > 0 || *injectLate > 0) {
+						wg.Add(1)
 						go func() {
+							defer wg.Done()
 							// wait for at least one subscribed token with a
 							// captured frame
 							var tok uint32
@@ -299,13 +339,17 @@ func main() {
 										break
 									}
 								}
-								time.Sleep(50 * time.Millisecond)
+								if !sleepOrDone(50 * time.Millisecond) {
+									return
+								}
 							}
 							if last == nil {
 								logf("INJECT skipped — no captured frame before deadline")
 								return
 							}
-							time.Sleep(time.Until(deadline))
+							if d := time.Until(deadline); d > 0 && !sleepOrDone(d) {
+								return
+							}
 							for round := 1; ; round++ {
 								// refresh the captured frame each round so
 								// duplicates are always copies of a frame the
@@ -343,7 +387,9 @@ func main() {
 									logf("INJECT done — max rounds reached (%d)", *injectMaxRounds)
 									return
 								}
-								time.Sleep(*injectEvery)
+								if !sleepOrDone(*injectEvery) {
+									return
+								}
 							}
 						}()
 					}
@@ -357,10 +403,17 @@ func main() {
 					// Traded quantity so candles carry real volume/tick_count.
 					binary.LittleEndian.PutUint32(tickerFrame[12:16], 25)
 					binary.LittleEndian.PutUint64(tickerFrame[64:72], 25)
+					wg.Add(1)
 					go func() {
+						defer wg.Done()
 						t := time.NewTicker(time.Duration(*tickInterval) * time.Millisecond)
 						defer t.Stop()
-						for range t.C {
+						for {
+							select {
+							case <-done:
+								return
+							case <-t.C:
+							}
 							binary.LittleEndian.PutUint64(tickerFrame[180:188], uint64(time.Now().UnixNano()))
 							if err := send(tickerFrame); err != nil {
 								logf("ticker send failed: %v", err)
@@ -402,7 +455,9 @@ func main() {
 			// per-id frames (one per subscribed token per interval) are the
 			// subscription-completeness evidence.
 			if !*realRate {
+				wg.Add(1)
 				go func(ids []any) {
+					defer wg.Done()
 					full := make([]byte, hftSizeFull)
 					binary.LittleEndian.PutUint16(full[0:2], hftSizeFull)
 					full[2] = hftPktFull
@@ -426,7 +481,11 @@ func main() {
 						if !ok {
 							continue
 						}
-						time.Sleep(300 * time.Millisecond)
+						// P1-026: done-aware pacing — an unpaced Sleep here
+						// would hold wg.Wait() for minutes at teardown.
+						if !sleepOrDone(300 * time.Millisecond) {
+							return
+						}
 						binary.LittleEndian.PutUint32(full[4:8], uint32(int64(tok)))
 						// Per-token qty so every burst frame carries real volume.
 						qty := uint32(1 + rand.IntN(50))
@@ -456,4 +515,15 @@ func main() {
 
 func compressZstd(enc *zstd.Encoder, payload []byte) []byte {
 	return enc.EncodeAll(payload, nil)
+}
+
+// validateRealRateHz keeps flag validation pure and testable: the rate must
+// be positive and divide 1000 (millisecond-aligned ticker intervals). P1-025:
+// validating here (before any modulo/ticker use) turns hz<=0 from a panic
+// into a clean exit(2).
+func validateRealRateHz(hz int) error {
+	if hz <= 0 || 1000%hz != 0 {
+		return fmt.Errorf("-real-rate-hz %d must be positive and divide 1000", hz)
+	}
+	return nil
 }

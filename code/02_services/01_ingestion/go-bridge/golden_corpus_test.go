@@ -162,7 +162,7 @@ func TestGoldenCorpusBridgeDecodesGoldenFrames(t *testing.T) {
 	fullGolden := loadGoldenRecord(t, "full-tick")
 	for _, k := range []string{"feed", "mode", "token", "ltp_paise", "close_paise",
 		"open_paise", "high_paise", "low_paise", "vwap_paise", "ltq", "volume",
-		"total_buy_qty", "total_sell_qty", "ts_ms"} {
+		"total_buy_qty", "total_sell_qty", "open_interest", "ts_ms"} {
 		if !goldenEqual(fullTick[k], fullGolden[k]) {
 			t.Fatalf("full %s = %v, golden %v", k, fullTick[k], fullGolden[k])
 		}

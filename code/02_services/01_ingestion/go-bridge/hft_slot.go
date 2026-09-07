@@ -104,7 +104,13 @@ func NewHFTSlot(assignment SlotAssignment, config SlotConfig) (*HFTSlot, error) 
 func validateRequestUnion(assignment SlotAssignment) error {
 	seen := make(map[int32]int, len(assignment.Tokens))
 	for _, t := range assignment.Tokens {
-		seen[t]++
+		// P1-027: reject a duplicated assignment token outright. Counting
+		// up here lets Tokens=[1,1] pass when requests mirror it (2->1->0),
+		// violating the documented "no token repeated" invariant.
+		if _, dup := seen[t]; dup {
+			return fmt.Errorf("assignment token %d duplicated", t)
+		}
+		seen[t] = 1
 	}
 	for _, request := range assignment.Requests {
 		if len(request) == 0 || len(request) > MaxHFTTokensPerRequest {

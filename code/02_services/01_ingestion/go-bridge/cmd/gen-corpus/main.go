@@ -56,28 +56,31 @@ const (
 // match the Go bridge's EmitTick output shape (ndjson.go) so the .golden
 // files are the byte-for-byte decode contract.
 type golden struct {
-	Feed              string    `json:"feed"`
-	Mode              string    `json:"mode"`
-	Token             int32     `json:"token"`
-	LTP               int32     `json:"ltp_paise"`
-	Close             int32     `json:"close_paise,omitempty"`
-	Open              int32     `json:"open_paise,omitempty"`
-	High              int32     `json:"high_paise,omitempty"`
-	Low               int32     `json:"low_paise,omitempty"`
-	VWAP              int32     `json:"vwap_paise,omitempty"`
-	LTQ               int32     `json:"ltq,omitempty"`
-	Volume            int64     `json:"volume,omitempty"`
-	TBQ               int64     `json:"total_buy_qty,omitempty"`
-	TSQ               int64     `json:"total_sell_qty,omitempty"`
-	ATV               uint32    `json:"atv,omitempty"`
-	BTV               uint32    `json:"btv,omitempty"`
+	Feed   string `json:"feed"`
+	Mode   string `json:"mode"`
+	Token  int32  `json:"token"`
+	LTP    int32  `json:"ltp_paise"`
+	Close  int32  `json:"close_paise,omitempty"`
+	Open   int32  `json:"open_paise,omitempty"`
+	High   int32  `json:"high_paise,omitempty"`
+	Low    int32  `json:"low_paise,omitempty"`
+	VWAP   int32  `json:"vwap_paise,omitempty"`
+	LTQ    int32  `json:"ltq,omitempty"`
+	Volume int64  `json:"volume,omitempty"`
+	TBQ    int64  `json:"total_buy_qty,omitempty"`
+	TSQ    int64  `json:"total_sell_qty,omitempty"`
+	ATV    uint32 `json:"atv,omitempty"`
+	BTV    uint32 `json:"btv,omitempty"`
+	// P1-022: the wire carries OI and EmitTick emits open_interest — the
+	// golden must certify it. Scalar omitempty is honest (0 omits).
+	OI                int64     `json:"open_interest,omitempty"`
 	TS                int64     `json:"ts_ms"`
-	BidPx             [5]int32  `json:"bid_px,omitempty"`
-	AskPx             [5]int32  `json:"ask_px,omitempty"`
-	BidSize           [5]int32  `json:"bid_qty,omitempty"`
-	AskSize           [5]int32  `json:"ask_qty,omitempty"`
-	BidOrd            [5]uint16 `json:"bid_orders,omitempty"`
-	AskOrd            [5]uint16 `json:"ask_orders,omitempty"`
+	BidPx             [5]int32  `json:"bid_px"`
+	AskPx             [5]int32  `json:"ask_px"`
+	BidSize           [5]int32  `json:"bid_qty"`
+	AskSize           [5]int32  `json:"ask_qty"`
+	BidOrd            [5]uint16 `json:"bid_orders"`
+	AskOrd            [5]uint16 `json:"ask_orders"`
 	RecordType        string    `json:"record_type"`
 	ContractVersion   int       `json:"contract_version"`
 	ConnectionID      string    `json:"connection_id"`
@@ -210,7 +213,7 @@ func main() {
 				Feed: "hft", Mode: "full", Token: token,
 				LTP: 15050, Close: 15000, Open: 14900, High: 15100, Low: 14850,
 				VWAP: 15040, LTQ: 10, Volume: 100_000, TBQ: 1_000, TSQ: 2_000,
-				ATV: 1_000, BTV: 2_000, TS: 1_752_540_000_000,
+				ATV: 1_000, BTV: 2_000, OI: 500_000, TS: 1_752_540_000_000,
 				BidPx:      [5]int32{15000, 14990, 14980, 14970, 14960},
 				AskPx:      [5]int32{15010, 15020, 15030, 15040, 15050},
 				BidSize:    [5]int32{100, 200, 300, 400, 500},
@@ -229,7 +232,9 @@ func main() {
 			gold: &golden{
 				Feed: "hft", Mode: "ltpc", Token: token,
 				LTP: 15050, VWAP: 15040, Volume: 100_000,
-				ATV: 1_000, BTV: 2_000, TS: 1_752_540_000, // ltt µs / 1e6 → ms
+				// P1-023: ltt is µs — /1e3 yields ms (was /1e6 = seconds,
+				// 1000x below full ticks). 1_752_540_000_000_000 µs → ms.
+				ATV: 1_000, BTV: 2_000, TS: 1_752_540_000_000,
 				RecordType: "tick", ContractVersion: 2,
 				ConnectionID: "ingestion-local/hft-0", ConnectionEpoch: 1,
 				SlotID: "hft-0", FeedSequenceLocal: 2,

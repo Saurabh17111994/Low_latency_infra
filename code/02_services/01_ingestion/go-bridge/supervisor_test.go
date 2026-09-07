@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,6 +56,61 @@ func TestSupervisorKeepsHealthySlotAliveDuringPeerRetry(t *testing.T) {
 	// slot-0 emitted reconnect BACKOFF events — it kept retrying while peer stayed up.
 	if got := lastEventState(eventsFrom(t, out), "reconnect"); got != "BACKOFF" {
 		t.Fatalf("slot-0 must back off and retry, got %q\n%s", got, out)
+	}
+}
+
+// TestSupervisorPanicEmitsTerminalWithLiveEpoch — P1-157: a panic in the
+// slot's main flow must reach Java as a slot_state TERMINAL event carrying
+// the LIVE connection epoch (epoch 0 would be rejected by the R-097 gate),
+// not be swallowed by the outer recover with no event at all.
+func TestSupervisorPanicEmitsTerminalWithLiveEpoch(t *testing.T) {
+	makeFactory := func(_ *arrow.Client, _ int) func() (hftStream, error) {
+		return func() (hftStream, error) {
+			panic("simulated slot crash")
+		}
+	}
+	plan := SubscriptionPlan{Slots: []SlotAssignment{
+		{SlotID: "hft-0", ConnectionID: "hft-0", Tokens: []int32{1000}, Requests: [][]int32{{1000}}},
+	}}
+	client := arrow.NewClient("app", "secret")
+	client.SetToken("token")
+
+	// The factory panics on the first connect attempt, which terminates the
+	// slot on its own — no cancel() needed (a time.sleep-based cancel could
+	// fire before the goroutine schedules, making the test flaky). Cancel only
+	// after the supervisor returned, for cleanup.
+	ctx, cancel := context.WithCancel(context.Background())
+	var terminals int
+	out := captureBridge(t, func() {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			terminals = runHFTSupervisorWithFactory(ctx, makeFactory, client, plan, 50, 10*time.Second, nil, t.Logf)
+		}()
+		<-done
+		cancel()
+	})
+
+	if terminals != 1 {
+		t.Fatalf("supervisor must report 1 terminal slot, got %d", terminals)
+	}
+	events := eventsFrom(t, out)
+	var found bool
+	for _, e := range events {
+		if ev, _ := e["event"].(string); ev == "slot_state" {
+			if st, _ := e["state"].(string); st == "TERMINAL" {
+				found = true
+				if ep, _ := e["connection_epoch"].(int64); ep == 0 {
+					t.Fatalf("panic terminal event must carry a LIVE epoch (>0), got 0")
+				}
+				if r, _ := e["reason"].(string); !strings.Contains(r, "simulated slot crash") {
+					t.Fatalf("reason must name the panic, got %q", r)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no slot_state TERMINAL event emitted on panic\n%s", out)
 	}
 }
 

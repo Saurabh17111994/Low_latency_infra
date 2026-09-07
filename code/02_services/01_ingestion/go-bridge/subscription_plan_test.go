@@ -40,6 +40,30 @@ func TestSubscriptionPlanBoundaries(t *testing.T) {
 	}
 }
 
+// TestSlotForTokenSparseGaps — P1-029: sparse inputs keep gaps, and gap
+// values must map to -1, not to the slot whose bounds span them.
+func TestSlotForTokenSparseGaps(t *testing.T) {
+	plan, err := BuildSubscriptionPlan([]int32{1, 3}, 1, 1024, 512)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if got := SlotForToken(plan, 1); got != 0 {
+		t.Fatalf("SlotForToken(1) = %d, want 0", got)
+	}
+	if got := SlotForToken(plan, 3); got != 0 {
+		t.Fatalf("SlotForToken(3) = %d, want 0", got)
+	}
+	if got := SlotForToken(plan, 2); got != -1 {
+		t.Fatalf("SlotForToken(2) = %d, want -1 (gap value)", got)
+	}
+	if got := SlotForToken(plan, 0); got != -1 {
+		t.Fatalf("SlotForToken(0) = %d, want -1", got)
+	}
+	if got := SlotForToken(plan, 4); got != -1 {
+		t.Fatalf("SlotForToken(4) = %d, want -1", got)
+	}
+}
+
 // ING-CAP-001 — 512 and 1024 manifests report exact capacity (request chunks
 // and slots); an over-capacity manifest never starts.
 func TestIngCap001CapacityAccounting(t *testing.T) {
@@ -156,6 +180,12 @@ func TestIngRes002ValidateRequestUnionRejects(t *testing.T) {
 		{
 			name: "duplicate token across requests",
 			slot: SlotAssignment{Tokens: []int32{1, 2, 3}, Requests: [][]int32{{1, 2}, {2, 3}}},
+		},
+		{
+			// P1-027: duplicated ASSIGNMENT tokens used to pass when
+			// requests mirrored them (seen[1]: 2->1->0, sweep sees 0).
+			name: "duplicate token inside the assignment itself",
+			slot: SlotAssignment{Tokens: []int32{1, 1}, Requests: [][]int32{{1}, {1}}},
 		},
 		{
 			name: "duplicate token within one request",
