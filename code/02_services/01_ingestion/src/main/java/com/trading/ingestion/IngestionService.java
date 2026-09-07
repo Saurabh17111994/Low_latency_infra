@@ -1084,6 +1084,21 @@ public final class IngestionService {
                 }
             }
 
+            // P1-226: wire tokens are strictly positive int32 (manifest
+            // loader + Instrument R-115 enforce >0). A non-positive token is
+            // poisoned input — quarantine fail-closed here as a backstop so
+            // it can never reach the token % writerCount queue index below
+            // (negative % yields a negative index). Plain % stays: negatives
+            // never reach it, and floorMod would cost ops on every good tick.
+            if (ev.getToken() <= 0) {
+                quarantineWriter.write(packetBytes,
+                        QuarantineWriter.Reason.INVALID_VALUES,
+                        "non-positive token=" + ev.getToken() + " (expected positive int32)",
+                        (long) ev.getToken(), null, null);
+                metrics.incrementDecodeError("INVALID_TOKEN");
+                return;
+            }
+
             Instrument instr = instrumentMap.get((long) (long) ev.getToken());
             if (instr == null) {
                 LOG.warn("ingestion: missing instrument token={}", (long) ev.getToken());

@@ -563,4 +563,43 @@ class IngestionServiceTest {
         public void close() {
         }
     }
+
+    // ---- P1-226: non-positive wire token quarantines before the queue index ----
+
+    @Test
+    @DisplayName("P1-226: negative token quarantines INVALID_VALUES, never reaches queues")
+    void negativeTokenQuarantinedBeforeRouting() throws Exception {
+        IngestionConfig config = buildConfig();
+        RecordingConverter converter = new RecordingConverter();
+        RecordingQuarantine quarantine = new RecordingQuarantine();
+        NtpClockChecker clock = new NtpClockChecker("127.0.0.1:9", 100, false);
+        IngestionService service = new IngestionService(
+                "ing-p1226", instruments(), converter, config, clock,
+                quarantine, noopDiscontinuity(), noopSafety());
+        try {
+            byte[] payload = "raw-bytes".getBytes(StandardCharsets.UTF_8);
+            long now = System.currentTimeMillis();
+            TickEvent ev = TickEvent.newBuilder()
+                    .setSlotId("hft-0")
+                    .setMode("full")
+                    .setToken(-7)
+                    .setFeed("hft")
+                    .setTsMs(now)
+                    .setReceivedMs(now)
+                    .setFeedSequenceLocal(17)
+                    .setLtpPaise(234500)
+                    .setVolume(125000)
+                    .setRawPayload(ByteString.copyFrom(payload))
+                    .setPayloadHash(ByteString.copyFrom(sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                    .build();
+
+            service.processTickEvent(ev, "hft-0", 1L);
+            assertEquals(1, quarantine.reasons.size(),
+                    "negative token must quarantine (old code: map-miss only, index risk)");
+            assertEquals(QuarantineWriter.Reason.INVALID_VALUES, quarantine.reasons.get(0));
+            assertEquals(0, converter.appendCalls.get(), "quarantined tick must never append");
+        } finally {
+            invokeShutdown(service);
+        }
+    }
 }

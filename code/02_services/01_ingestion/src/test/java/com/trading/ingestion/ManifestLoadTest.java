@@ -357,4 +357,28 @@ class ManifestLoadTest {
         assertEquals("CM", r.instruments().get(0).segment());
     }
 
+    // ---- P1-226: non-positive tokens refuse the load (fail-closed) ----
+
+    @Test
+    @DisplayName("P1-226: negative token refuses the load (poisoned queue index)")
+    void negativeTokenRefusesLoad(@TempDir Path dir) throws Exception {
+        Path csv = dir.resolve("neg-token.csv");
+        Files.writeString(csv,
+                "Token,TradingSymbol,Exchange,LotSize\n3045,RELIANCE-EQ,NSE,1\n-7,POISON-EQ,NSE,1\n");
+        InstrumentManifestLoader.ManifestResult r =
+                InstrumentManifestLoader.loadFromPath(csv.toString());
+        assertFalse(r.approved(), "negative token must refuse the load, not poison the map");
+    }
+
+    @Test
+    @DisplayName("P1-226: zero token refuses the load (no default identity)")
+    void zeroTokenRefusesLoad(@TempDir Path dir) throws Exception {
+        Path csv = dir.resolve("zero-token.csv");
+        Files.writeString(csv,
+                "Token,TradingSymbol,Exchange,LotSize\n0,ZERO-EQ,NSE,1\n");
+        InstrumentManifestLoader.ManifestResult r =
+                InstrumentManifestLoader.loadFromPath(csv.toString());
+        assertFalse(r.approved(), "zero token must refuse the load");
+    }
+
 }

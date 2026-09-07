@@ -183,6 +183,15 @@ final class InstrumentManifestLoader {
                 try {
                     if (tokenIdx >= fields.size()) throw new NumberFormatException("missing Token field");
                     long token = Long.parseLong(fields.get(tokenIdx).trim());
+                    // P1-226: tokens are strictly positive int32 (Instrument
+                    // R-115 enforces >0) — a zero/negative row is poisoned
+                    // input, and a negative token would compute a negative
+                    // queue index downstream. Fail the load (fail-closed).
+                    if (token <= 0) {
+                        LOG.error("instrument-manifest: non-positive Token {} on line {} — refusing to load",
+                                token, lineNum);
+                        return emptyManifest();
+                    }
                     // P1-086: column presence proven above; a short row is
                     // malformed like a short token row (skip + count).
                     if (lotSizeIdx >= fields.size()) throw new NumberFormatException("missing LotSize field");
