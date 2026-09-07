@@ -170,6 +170,10 @@ public final class HealthProbe {
      * Safety evidence is deliberately NOT reset here: an unsafe slot stays
      * unsafe until a RECOVERED transition (full ACTIVE ack on a strictly
      * greater epoch), so a bridge restart cannot silently clear the flag.
+     * P1-245: epoch + capacityRemaining ARE reset (generation-unknown, no
+     * headroom claimed) — otherwise diagnostics mix old epoch (e.g. 5) with
+     * new AUTHENTICATING state and report stale headroom until the next
+     * bridge event overwrites them.
      */
     public void resetSlotsToAuthenticating() {
         slots.forEach((id, slot) -> {
@@ -180,6 +184,9 @@ public final class HealthProbe {
                 slot.acknowledged = 0;
                 slot.rejected = 0;
                 slot.lastFrameNanos = 0;
+                slot.epoch = 0;
+                slot.capacityRemaining = 0;
+                // unsafe/unsafeSinceNanos intentionally retained: only RECOVERED clears.
             }
         });
     }

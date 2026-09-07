@@ -77,6 +77,13 @@ public final class UncertaintyJournal {
                 LOG.error("uncertainty-journal: path is a directory, not a file: {}", journalPath);
                 return false;
             }
+            // P1-256 follow-up: existing read-only regular file must fail readiness —
+            // parent-writable alone would sail, then write() fails at shutdown.
+            if (Files.exists(journalPath) && !Files.isDirectory(journalPath)
+                    && !Files.isWritable(journalPath)) {
+                LOG.error("uncertainty-journal: file not writable: {}", journalPath);
+                return false;
+            }
             Files.createDirectories(parent);
             if (!Files.isWritable(parent)) {
                 LOG.error("uncertainty-journal: parent directory not writable: {}", parent);

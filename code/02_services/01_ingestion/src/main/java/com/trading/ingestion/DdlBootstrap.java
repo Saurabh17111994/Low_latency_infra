@@ -248,8 +248,9 @@ public final class DdlBootstrap {
             admin.createDatabase(name, DatabaseDescriptor.builder().build(), false).get();
             LOG.info("ddl-bootstrap: database '{}' created", name);
         } catch (Exception e) {
-            if (e.getMessage() != null
-                    && e.getMessage().toLowerCase().contains("already exist")) {
+            // P1-216: reuse isAlreadyExists (typed + cause-walk + message fallback),
+            // not a bare top-level message check — ExecutionException wraps the real cause.
+            if (isAlreadyExists(e)) {
                 LOG.info("ddl-bootstrap: database '{}' exists", name);
             } else {
                 throw e;

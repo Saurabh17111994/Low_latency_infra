@@ -107,6 +107,26 @@ class UncertaintyJournalTest {
     }
 
     @Test
+    @DisplayName("P1-256 follow-up: existing read-only file fails readiness")
+    void readOnlyFileRefusedAtEnsureWritable() throws Exception {
+        // Root can write regardless of permission bits (isWritable true), so
+        // this guard is only meaningful for non-root test runs.
+        org.junit.jupiter.api.Assumptions.assumeFalse("root".equals(System.getProperty("user.name")),
+                "skipped as root: permission bits do not restrict root writes");
+        Path file = tempDir.resolve("readonly.jsonl");
+        Files.write(file, "x\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertTrue(file.toFile().setWritable(false),
+                "test setup: could not make file read-only");
+        try {
+            UncertaintyJournal journal = new UncertaintyJournal(file);
+            assertFalse(journal.ensureWritable(),
+                    "read-only file must fail ensureWritable instead of sailing to shutdown write");
+        } finally {
+            file.toFile().setWritable(true);
+        }
+    }
+
+    @Test
     @DisplayName("Control characters are escaped so JSONL stays one line (R-194)")
     void jsonEscapesControlCharacters() {
         UncertaintyJournal.Entry entry = new UncertaintyJournal.Entry(

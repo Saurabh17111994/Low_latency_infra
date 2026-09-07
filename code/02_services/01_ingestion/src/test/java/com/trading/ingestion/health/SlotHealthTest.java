@@ -20,6 +20,8 @@ class SlotHealthTest {
     void resetSlotsReturnsToAuthenticatingAndZeroCoverage() {
         HealthProbe probe = new HealthProbe(new AppendTracker());
         probe.updateSlot("hft-0", "ACTIVE", 3, 1024, 1024, 0, System.nanoTime());
+        probe.setSlotCapacityRemaining("hft-0", 512);
+        probe.setSlotUnsafe("hft-0", true);
         assertTrue(probe.isDataReady());
         probe.resetSlotsToAuthenticating();
         assertFalse(probe.isDataReady(), "after restart reset, slot must not be ready");
@@ -28,6 +30,14 @@ class SlotHealthTest {
         org.junit.jupiter.api.Assertions.assertEquals(0, slot.assigned);
         org.junit.jupiter.api.Assertions.assertEquals(0, slot.acknowledged);
         org.junit.jupiter.api.Assertions.assertEquals(0, slot.rejected);
+        // P1-245: generation + headroom reset too — old epoch (3) must not mix
+        // with the fresh AUTHENTICATING state, and no headroom is claimed.
+        org.junit.jupiter.api.Assertions.assertEquals(0, slot.epoch);
+        org.junit.jupiter.api.Assertions.assertEquals(0, slot.capacityRemaining);
+        // Safety evidence MUST survive a bridge restart — only RECOVERED clears it,
+        // otherwise a restart would silently lift a halt.
+        org.junit.jupiter.api.Assertions.assertTrue(slot.unsafe);
+        org.junit.jupiter.api.Assertions.assertTrue(slot.unsafeSinceNanos > 0);
     }
 
     @Test
