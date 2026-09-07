@@ -88,7 +88,7 @@ class IngestionNoSilentDropTest {
         corpus.add(new Line(tick("hft", "ltpc", 999_999L, now, 100), Outcome.QUARANTINE_METRIC));   // missing instrument
         corpus.add(new Line(tick("hft", "ltpc", TOKEN_A, now, 0), Outcome.QUARANTINE_METRIC));      // invalid values
         corpus.add(new Line(tick("hft", "full", TOKEN_A, now - 10_000, 100), Outcome.QUARANTINE_METRIC)); // stale
-        corpus.add(new Line(tick("hft", "full", TOKEN_B, now + 10_000, 100), Outcome.QUARANTINE_NO_METRIC)); // future
+        corpus.add(new Line(tick("hft", "full", TOKEN_B, now + 10_000, 100), Outcome.QUARANTINE_METRIC)); // future (P1-305: FUTURE_BROKER_TIMESTAMP metric)
 
         for (Line line : corpus) {
             service.processTickEvent(line.event(), "hft-0", 1L);
@@ -111,8 +111,7 @@ class IngestionNoSilentDropTest {
         assertEquals(expectedMetricQuarantines + expectedNoMetricQuarantines,
                 corpus.size() - expectedAppends, "corpus classification sanity");
         assertEquals(expectedMetricQuarantines, decodeErrors(service),
-                "every metric-bumping quarantine class must fire its decode-error metric "
-                        + "(FUTURE is quarantined without a metric bump)");
+                "every metric-bumping quarantine class must fire its decode-error metric");
         assertEquals(0, service.tracker().pendingRecords(),
                 "writer pending must drain to zero (no leaked reservations)");
         assertEquals(0, service.tracker().pendingBytes());
@@ -130,9 +129,9 @@ class IngestionNoSilentDropTest {
     /** Expected outcome of one corpus line (the test's own classification). */
     private enum Outcome {
         APPEND,
-        /** Quarantined AND the decode-error metric is bumped (MALFORMED_JSON, UNKNOWN_VERSION, …). */
+        /** Quarantined AND the decode-error metric is bumped (incl. P1-305 FUTURE_BROKER_TIMESTAMP). */
         QUARANTINE_METRIC,
-        /** Quarantined but the decode-error metric is NOT bumped (FUTURE_BROKER_TIMESTAMP). */
+        /** Reserved: quarantine classes that intentionally skip the metric (none today — FUTURE now bumps since P1-305). */
         QUARANTINE_NO_METRIC
     }
 
