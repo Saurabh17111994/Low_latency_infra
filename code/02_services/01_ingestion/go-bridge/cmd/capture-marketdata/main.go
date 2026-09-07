@@ -236,8 +236,20 @@ func captureHFT(rec *recorder, client *arrow.Client, tokens []int32, dur time.Du
 	_ = rec.emit(map[string]any{"kind": "connect", "feed": "hft", "ok": true})
 
 	latency := envInt("ARROW_HFT_LATENCY_MS", 50)
+	// P1-177 own-side gate (mirrors validateSubscribeArgs in the bridge):
+	// out-of-range latency or an empty token set exits before touching the wire.
+	if latency < 50 || latency > 60000 {
+		fmt.Fprintf(os.Stderr, "ARROW_HFT_LATENCY_MS=%d out of range (must be 50..60000)\n", latency)
+		os.Exit(2)
+	}
+	if len(tokens) == 0 {
+		fmt.Fprintln(os.Stderr, "no instrument tokens to subscribe; refusing empty capture")
+		os.Exit(2)
+	}
 	for _, mode := range []string{"ltpc", "full"} {
-		err := hds.SubscribeHFTTokens(mode, 0, tokens, latency)
+		// P1-177 pin: mode from the fixed canonical list, exchSeg
+		// HFTExchNSECM (0, in vendored 0..3), latency range-gated above.
+		err := hds.SubscribeHFTTokens(mode, arrow.HFTExchNSECM, tokens, latency)
 		_ = rec.emit(map[string]any{"kind": "subscribe", "feed": "hft", "mode": mode, "ok": err == nil, "err": errStr(err)})
 		fmt.Fprintf(os.Stderr, "hft subscribe mode=%s ok=%v err=%v\n", mode, err == nil, err)
 	}

@@ -71,3 +71,25 @@ func TestToArrowMarketOrderDefaultsPriceToZero(t *testing.T) {
 		t.Fatalf("market price=%q, want 0", order.Price)
 	}
 }
+
+// P1-191: LMT/SL prices must be positive numbers (empty/zero/negative/
+// non-numeric never reach the broker).
+func TestValidateCommandRejectsNonPositivePrice(t *testing.T) {
+	for _, price := range []string{"", "0", "0.00", "00", "-5", "abc", "12.3.4", "1e4", "+5", "  "} {
+		for _, orderType := range []string{"LMT", "SL-LMT", "SL-MKT"} {
+			command := validPlaceCommand()
+			command.Order.OrderType = orderType
+			command.Order.Price = price
+			if err := validateCommand(command); err == nil {
+				t.Fatalf("order_type %s price %q must be rejected", orderType, price)
+			}
+		}
+	}
+	for _, price := range []string{"15050", "1", "0.01", "15050.25"} {
+		command := validPlaceCommand()
+		command.Order.Price = price
+		if err := validateCommand(command); err != nil {
+			t.Fatalf("LMT price %q must be accepted: %v", price, err)
+		}
+	}
+}

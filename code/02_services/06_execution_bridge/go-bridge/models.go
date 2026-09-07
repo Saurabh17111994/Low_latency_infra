@@ -160,8 +160,12 @@ func validateOrderCommand(o OrderCommand) error {
 	default:
 		return fmt.Errorf("unsupported order_type %q", o.OrderType)
 	}
-	if orderType == "LMT" && strings.TrimSpace(o.Price) == "" {
-		return fmt.Errorf("price is required for LMT")
+	// P1-191: LMT/SL prices must be positive numbers — empty, zero,
+	// negative, or non-numeric prices fail fast as REJECTED, never reach
+	// the broker. Canonical digits with one optional dot (exponent,
+	// sign, and separators rejected); at least one non-zero digit.
+	if (orderType == "LMT" || orderType == "SL-LMT" || orderType == "SL-MKT") && !priceIsPositive(o.Price) {
+		return fmt.Errorf("price must be a positive number for %s", orderType)
 	}
 	if orderType == "MKT" && strings.TrimSpace(o.Price) != "" && strings.TrimSpace(o.Price) != "0" {
 		return fmt.Errorf("MKT price must be empty or 0")
@@ -200,4 +204,29 @@ func fingerprint(v any) string {
 	}
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
+}
+
+func priceIsPositive(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	dots, digits, positive := 0, 0, false
+	for _, r := range s {
+		switch {
+		case r == '.':
+			dots++
+			if dots > 1 {
+				return false
+			}
+		case r >= '0' && r <= '9':
+			digits++
+			if r != '0' {
+				positive = true
+			}
+		default:
+			return false
+		}
+	}
+	return digits > 0 && positive
 }

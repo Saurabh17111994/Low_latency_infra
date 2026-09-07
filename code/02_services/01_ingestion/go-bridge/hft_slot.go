@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -209,4 +210,31 @@ func Backoff(attempt int) time.Duration {
 		return 30 * time.Second
 	}
 	return time.Second << attempt
+}
+
+// validateSubscribeArgs is the own-side pre-wire gate for HFT subscribes
+// (P1-177 — vendored SubscribeHFTTokens validates mode + non-empty ids only:
+// no exchSeg range, no latency bounds. Upstream Bundle C owns the SDK side).
+// Both live call sites pass through here, so an out-of-range segment or
+// latency fails fast locally and never reaches the broker wire. Bounds mirror
+// the broker contract: exchSeg 0..3 (HFTExchNSECM..HFTExchBSEFO,
+// hft_stream.go:22-25), latencyMs 50..60000 (same as SlotConfig.Validate and
+// the ARROW_HFT_LATENCY_MS hftRange). Mode accepts the vendored canonical set
+// (full/ltpc + single-letter aliases, cf. normalizeHFTMode).
+func validateSubscribeArgs(mode string, exchSeg int, ids []int32, latencyMs int) error {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "full", "f", "ltpc", "l":
+	default:
+		return fmt.Errorf("hft subscribe mode %q must be full or ltpc", mode)
+	}
+	if exchSeg < arrow.HFTExchNSECM || exchSeg > arrow.HFTExchBSEFO {
+		return fmt.Errorf("hft subscribe exchSeg %d out of range 0..3", exchSeg)
+	}
+	if len(ids) == 0 {
+		return fmt.Errorf("hft subscribe: empty ids")
+	}
+	if latencyMs < 50 || latencyMs > 60000 {
+		return fmt.Errorf("hft subscribe latency %d out of range 50..60000ms", latencyMs)
+	}
+	return nil
 }

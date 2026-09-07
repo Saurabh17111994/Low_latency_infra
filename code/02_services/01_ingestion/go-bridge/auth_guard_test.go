@@ -107,3 +107,40 @@ func TestSubscribeParamsPinned(t *testing.T) {
 		t.Fatalf("default slot config must validate: %v", err)
 	}
 }
+
+// P1-177 own-side pre-wire gate: mode/exchSeg/ids/latency validated before
+// touching vendored SubscribeHFTTokens (which checks mode + non-empty only).
+// Range assertions track the vendored constants, so an upstream segment-table
+// change forces this test to re-examine the pin.
+func TestValidateSubscribeArgs(t *testing.T) {
+	good := []int32{2885}
+	if err := validateSubscribeArgs("full", arrow.HFTExchNSECM, good, 50); err != nil {
+		t.Fatalf("canonical args must pass: %v", err)
+	}
+	if err := validateSubscribeArgs("ltpc", arrow.HFTExchBSEFO, good, 60000); err != nil {
+		t.Fatalf("boundary args must pass: %v", err)
+	}
+	cases := []struct {
+		name string
+		mode string
+		seg  int
+		ids  []int32
+		lat  int
+	}{
+		{"bad mode", "quote", 0, good, 50},
+		{"empty mode", "", 0, good, 50},
+		{"seg negative", "full", -1, good, 50},
+		{"seg above range", "full", arrow.HFTExchBSEFO + 1, good, 50},
+		{"empty ids", "full", 0, nil, 50},
+		{"latency low", "full", 0, good, 49},
+		{"latency high", "full", 0, good, 60001},
+		{"latency zero", "full", 0, good, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateSubscribeArgs(tc.mode, tc.seg, tc.ids, tc.lat); err == nil {
+				t.Fatalf("must reject mode=%q seg=%d ids=%v latency=%d", tc.mode, tc.seg, tc.ids, tc.lat)
+			}
+		})
+	}
+}

@@ -537,6 +537,14 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 	_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "slot_state", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotSubscribing), ReceivedTsMs: time.Now().UnixMilli()})
 	acknowledged := 0
 	for _, request := range slot.Requests {
+		// P1-177 own-side gate: invalid segment/latency is a config bug —
+		// fail TERMINAL (retry cannot fix args) before touching the wire.
+		if verr := validateSubscribeArgs("full", arrow.HFTExchNSECM, request, latencyMs); verr != nil {
+			_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotTerminal), AssignedTokens: len(tokens), AcknowledgedTokens: acknowledged, RejectedTokens: len(request), Reason: sanitizeDiagnostic(verr.Error()), ReceivedTsMs: time.Now().UnixMilli()})
+			logf("HFT subscribe args invalid: %v", verr)
+			signalEpochStop()
+			return epochTerminal
+		}
 		if err := stream.SubscribeHFTTokens("full", arrow.HFTExchNSECM, request, latencyMs); err != nil {
 			_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotPartial), AssignedTokens: len(tokens), AcknowledgedTokens: acknowledged, RejectedTokens: len(request), Reason: sanitizeDiagnostic(err.Error()), ReceivedTsMs: time.Now().UnixMilli()})
 			logf("HFT subscribe write failed: %v", err)
