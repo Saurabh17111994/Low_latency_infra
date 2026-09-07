@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/arrow-trade/go-arrow/arrow"
 	"context"
 	"strings"
 	"sync"
@@ -81,5 +82,27 @@ func TestSingleReaderRefusesSecond(t *testing.T) {
 	<-firstDone
 	if guardSingleReader(nil) != nil {
 		t.Fatal("guardSingleReader(nil) must pass nil through")
+	}
+}
+
+// P1-177 subscribe params pinned: own call site passes constant HFTExchNSECM
+// (0, in 0..3) + mode "full" + hftRange-clamped latency; SlotConfig.Validate
+// rejects out-of-range latency. If the call site ever parameterizes these,
+// this test names the contract that must move with it.
+func TestSubscribeParamsPinned(t *testing.T) {
+	if arrow.HFTExchNSECM < 0 || arrow.HFTExchNSECM > 3 {
+		t.Fatalf("HFTExchNSECM=%d out of vendored 0..3 range", arrow.HFTExchNSECM)
+	}
+	bad := baseSlotCfg()
+	bad.LatencyMs = 49
+	if err := bad.Validate(); err == nil {
+		t.Fatal("latency 49 must be rejected (50..60000)")
+	}
+	bad.LatencyMs = 60001
+	if err := bad.Validate(); err == nil {
+		t.Fatal("latency 60001 must be rejected (50..60000)")
+	}
+	if err := baseSlotCfg().Validate(); err != nil {
+		t.Fatalf("default slot config must validate: %v", err)
 	}
 }

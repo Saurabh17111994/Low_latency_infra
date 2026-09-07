@@ -37,6 +37,18 @@ func TestValidateCommandRejectsIndexAndMissingAttempt(t *testing.T) {
 	}
 }
 
+// P1-036: ValidityGTC exists in the vendored enum but the broker path only
+// accepts DAY|IOC — a GTC order must fail validation, never reach the broker.
+func TestValidateCommandRejectsGTCValidity(t *testing.T) {
+	for _, v := range []string{"GTC", "gtc", "FOK", ""} {
+		command := validPlaceCommand()
+		command.Order.Validity = v
+		if err := validateCommand(command); err == nil {
+			t.Fatalf("validity %q must be rejected (DAY|IOC only)", v)
+		}
+	}
+}
+
 func TestToArrowOrderMapsPlatformValues(t *testing.T) {
 	order, err := toArrowOrder(*validPlaceCommand().Order, "INS1234567890123")
 	if err != nil {
