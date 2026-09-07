@@ -1,13 +1,14 @@
 package main
 
 import (
-	"github.com/arrow-trade/go-arrow/arrow"
 	"context"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/arrow-trade/go-arrow/arrow"
 )
 
 // P1-031/P1-035 own-side shield: dials (RLock) and refresh (Lock) through
