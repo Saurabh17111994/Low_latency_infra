@@ -30,6 +30,7 @@ class TickPacketSchemaVersionTest {
                         .receiveTimeNanos(System.nanoTime())
                         .build())
                 .validity(ValidityClassification.VALID_TRADE)
+                .lastPricePaise(12345L) // P1-089: VALID_TRADE requires a positive price
                 .instrumentToken(100000L)
                 .tradingSymbol("SYM-EQ")
                 .exchange("NSE")

@@ -33,6 +33,25 @@ class IngestionConfigTest {
     }
 
     @Test
+    @DisplayName("DRAIN_DEADLINE_SECONDS default = 2s — B130 single total close budget")
+    void drainDeadlineDefaultTwoSeconds() {
+        java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
+        env.put("ARROW_APP_ID", "test-app");
+        env.put("DEPLOYMENT_ENV", "dev");
+        env.put("ARROW_APP_SECRET", "test-secret");
+        env.put("ARROW_USER_ID", "test-user");
+        env.put("ARROW_PASSWORD", "test-pass");
+        env.put("ARROW_TOTP_KEY", "JBSWY3DPEHPK3PXP");
+        env.put("FLUSS_BOOTSTRAP", "localhost:9123");
+        env.put("RAW_TABLE_NAME", "raw_table_1");
+        env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
+        env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
+        IngestionConfig cfg = IngestionConfig.validateFrom(env);
+        assertEquals(2, cfg.drainDeadline.getSeconds(),
+                "default close budget is 2s (operators can raise via env)");
+    }
+
+    @Test
     @DisplayName("CLOCK_OFFSET_LIMIT_MS = 2000ms (T10 2s gate)")
     void clockOffsetLimit() {
         assertEquals(2000L, IngestionConfig.CLOCK_OFFSET_LIMIT_MS);
@@ -59,6 +78,7 @@ class IngestionConfigTest {
     void hftPolicyDefaultsMatchPlan() {
         java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
         env.put("ARROW_APP_ID", "test-app");
+        env.put("DEPLOYMENT_ENV", "dev");
         env.put("ARROW_APP_SECRET", "test-secret");
         env.put("ARROW_USER_ID", "test-user");
         env.put("ARROW_PASSWORD", "test-pass");
@@ -120,6 +140,7 @@ class IngestionConfigTest {
     void ageAndSkewMustBePositive() {
         java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
         env.put("ARROW_APP_ID", "test-app");
+        env.put("DEPLOYMENT_ENV", "dev");
         env.put("ARROW_APP_SECRET", "test-secret");
         env.put("ARROW_USER_ID", "test-user");
         env.put("ARROW_PASSWORD", "test-pass");
@@ -147,6 +168,7 @@ class IngestionConfigTest {
     void pendingBytesFloorEnforced() {
         java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
         env.put("ARROW_APP_ID", "test-app");
+        env.put("DEPLOYMENT_ENV", "dev");
         env.put("ARROW_APP_SECRET", "test-secret");
         env.put("ARROW_USER_ID", "test-user");
         env.put("ARROW_PASSWORD", "test-pass");
@@ -168,6 +190,7 @@ class IngestionConfigTest {
     void tunableBackpressureEnvOverrides() {
         java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
         env.put("ARROW_APP_ID", "test-app");
+        env.put("DEPLOYMENT_ENV", "dev");
         env.put("ARROW_APP_SECRET", "test-secret");
         env.put("ARROW_USER_ID", "test-user");
         env.put("ARROW_PASSWORD", "test-pass");
@@ -214,5 +237,105 @@ class IngestionConfigTest {
         IngestionConfig c3k = IngestionConfig.validateFrom(env);
         assertEquals(150_000, c3k.maxPendingRecords);
         assertEquals(201_326_592L, c3k.maxPendingBytes);
+    }
+
+    @Test
+    @DisplayName("P1-077: blank deploy env refuses startup (fail-closed, no silent dev)")
+    void blankDeployEnvRefusesStartup() {
+        java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
+        env.put("ARROW_APP_ID", "test-app");
+        env.put("ARROW_APP_SECRET", "test-secret");
+        env.put("ARROW_USER_ID", "test-user");
+        env.put("ARROW_PASSWORD", "test-pass");
+        env.put("ARROW_TOTP_KEY", "JBSWY3DPEHPK3PXP");
+        env.put("FLUSS_BOOTSTRAP", "localhost:9123");
+        env.put("RAW_TABLE_NAME", "raw_table_1");
+        env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
+        env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
+        try {
+            IngestionConfig.validateFrom(env);
+            org.junit.jupiter.api.Assertions.fail("blank deploy env must refuse startup");
+        } catch (IllegalStateException e) {
+            org.junit.jupiter.api.Assertions.assertTrue(
+                    e.getMessage().contains("DEPLOYMENT_ENV/DEPLOY_ENV"), e.getMessage());
+        }
+    }
+
+    @Test
+    @DisplayName("P1-077: canonical DEPLOYMENT_ENV=production engages the prod gates")
+    void canonicalKeyEngagesProdGates() {
+        java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
+        env.put("DEPLOYMENT_ENV", "production");
+        env.put("ARROW_APP_ID", "test-app");
+        env.put("ARROW_APP_SECRET", "test-secret");
+        env.put("ARROW_USER_ID", "test-user");
+        env.put("ARROW_PASSWORD", "test-pass");
+        env.put("ARROW_TOTP_KEY", "JBSWY3DPEHPK3PXP");
+        env.put("FLUSS_BOOTSTRAP", "localhost:9123");
+        env.put("RAW_TABLE_NAME", "raw_table_1");
+        env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
+        env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
+        env.put("INGESTION_ALLOW_DEGRADED", "true");
+        try {
+            IngestionConfig.validateFrom(env);
+            org.junit.jupiter.api.Assertions.fail(
+                    "DEPLOYMENT_ENV=production must reject INGESTION_ALLOW_DEGRADED=true");
+        } catch (IllegalStateException e) {
+            org.junit.jupiter.api.Assertions.assertTrue(
+                    e.getMessage().contains("INGESTION_ALLOW_DEGRADED"), e.getMessage());
+        }
+    }
+
+    @Test
+    @DisplayName("P1-240: boolean typos fail closed instead of coercing to false")
+    void booleanTyposFailClosed() {
+        String[] keys = {
+            "ARROW_HFT_MULTI_CONNECTION_APPROVED",
+            "INGESTION_ALLOW_DEGRADED",
+            "ALLOW_RUNTIME_DDL",
+            "CLOCK_CHECK_REQUIRED"
+        };
+        for (String key : keys) {
+            java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
+            env.put("ARROW_APP_ID", "test-app");
+            env.put("DEPLOYMENT_ENV", "dev");
+            env.put("ARROW_APP_SECRET", "test-secret");
+            env.put("ARROW_USER_ID", "test-user");
+            env.put("ARROW_PASSWORD", "test-pass");
+            env.put("ARROW_TOTP_KEY", "JBSWY3DPEHPK3PXP");
+            env.put("FLUSS_BOOTSTRAP", "localhost:9123");
+            env.put("RAW_TABLE_NAME", "raw_table_1");
+            env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
+            env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
+            env.put(key, "ture");
+            IllegalStateException e = assertThrows(IllegalStateException.class,
+                    () -> IngestionConfig.validateFrom(env),
+                    key + "=ture must fail startup (fail-closed)");
+            assertTrue(e.getMessage().contains(key), e.getMessage());
+        }
+    }
+
+    @Test
+    @DisplayName("P1-241: toMap exposes the validated FLUSS_WRITER_* bench keys")
+    void toMapExposesWriterBenchKeys() {
+        java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
+        env.put("ARROW_APP_ID", "test-app");
+        env.put("DEPLOYMENT_ENV", "dev");
+        env.put("ARROW_APP_SECRET", "test-secret");
+        env.put("ARROW_USER_ID", "test-user");
+        env.put("ARROW_PASSWORD", "test-pass");
+        env.put("ARROW_TOTP_KEY", "JBSWY3DPEHPK3PXP");
+        env.put("FLUSS_BOOTSTRAP", "localhost:9123");
+        env.put("RAW_TABLE_NAME", "raw_table_1");
+        env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
+        env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
+        env.put("FLUSS_WRITER_MODE", "typed");
+        env.put("FLUSS_WRITERS", "4");
+        env.put("FLUSS_WRITER_BATCH_SIZE_BYTES", "65536");
+        IngestionConfig cfg = IngestionConfig.validateFrom(env);
+        Map<String, Object> map = cfg.toMap();
+        assertEquals("typed", map.get("FLUSS_WRITER_MODE"));
+        assertEquals(4, map.get("FLUSS_WRITERS"));
+        assertEquals(65536, map.get("FLUSS_WRITER_BATCH_SIZE_BYTES"));
     }
 }

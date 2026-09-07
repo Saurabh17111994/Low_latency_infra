@@ -237,8 +237,10 @@ public final class IngestionConfig {
         // ---- Timing ----
         int timeoutSec = intRange(env, "APPEND_TIMEOUT_SECONDS", 5, 1, 30, errors);
         b.appendTimeout = Duration.ofSeconds(timeoutSec);
+        // B130 (ruled 2s): the single total close budget — worker-stop
+        // wait + writer drain share it. Operators can still raise via env.
         b.drainDeadline = Duration.ofSeconds(
-                intRange(env, "DRAIN_DEADLINE_SECONDS", 30, 1, 300, errors));
+                intRange(env, "DRAIN_DEADLINE_SECONDS", 2, 1, 300, errors));
         // Zero-ack watchdog: 0 = disabled. Default 10s.
         b.zeroAckTimeoutMs = longRange(env, "INGESTION_ZERO_ACK_TIMEOUT_MS",
                 10_000L, 0L, 300_000L, errors);
@@ -259,13 +261,22 @@ public final class IngestionConfig {
         b.arrowHftReconnectMaxSeconds = exactInt(env, "ARROW_HFT_RECONNECT_MAX_SECONDS", 30, errors);
         b.arrowHftAuthRefreshAttempts = exactInt(env, "ARROW_HFT_AUTH_REFRESH_ATTEMPTS", 3, errors);
         b.arrowHftMinActiveSlots = exactInt(env, "ARROW_HFT_MIN_ACTIVE_SLOTS", 1, errors);
-        b.arrowHftMultiConnectionApproved = "true".equalsIgnoreCase(
-                env.getOrDefault("ARROW_HFT_MULTI_CONNECTION_APPROVED", "false"));
-        b.ingestionAllowDegraded = "true".equalsIgnoreCase(
-                env.getOrDefault("INGESTION_ALLOW_DEGRADED", "false"));
+        b.arrowHftMultiConnectionApproved =
+                boolEnv(env, "ARROW_HFT_MULTI_CONNECTION_APPROVED", false, errors);
+        b.ingestionAllowDegraded = boolEnv(env, "INGESTION_ALLOW_DEGRADED", false, errors);
 
         // Production rejects degraded mode and unapproved multi-connection.
-        String deployEnv = env.getOrDefault("DEPLOY_ENV", "dev");
+        // P1-077 (Batch-1 #8): canonical key is DEPLOYMENT_ENV, DEPLOY_ENV the
+        // alias — mirrors PlatformConfig.isProductionEnv. docker-stack.yml sets
+        // DEPLOYMENT_ENV=production for prod, so the old DEPLOY_ENV-only read
+        // silently took the dev path in prod (fail-open). Blank is fail-CLOSED:
+        // an unknown environment must not silently choose the lax path.
+        String deployEnv = env.getOrDefault("DEPLOYMENT_ENV", env.getOrDefault("DEPLOY_ENV", ""));
+        deployEnv = deployEnv == null ? "" : deployEnv.trim();
+        if (deployEnv.isBlank()) {
+            errors.add("DEPLOYMENT_ENV/DEPLOY_ENV is required but not set"
+                    + " (must be 'dev' or 'prod'/'production')");
+        }
         boolean production = "prod".equalsIgnoreCase(deployEnv)
                 || "production".equalsIgnoreCase(deployEnv);
         if (production) {
@@ -285,10 +296,8 @@ public final class IngestionConfig {
                 "v0.0.0-20260622-7cce1630");
 
         // ---- DDL & clock strictness ----
-        b.allowRuntimeDdl = "true".equalsIgnoreCase(
-                env.getOrDefault("ALLOW_RUNTIME_DDL", "false"));
-        b.clockCheckRequired = "true".equalsIgnoreCase(
-                env.getOrDefault("CLOCK_CHECK_REQUIRED", "false"));
+        b.allowRuntimeDdl = boolEnv(env, "ALLOW_RUNTIME_DDL", false, errors);
+        b.clockCheckRequired = boolEnv(env, "CLOCK_CHECK_REQUIRED", false, errors);
         b.uncertaintyJournalPath = optional(env, "UNCERTAINTY_JOURNAL_PATH");
 
         // ---- Standard derived values ----
@@ -324,6 +333,9 @@ public final class IngestionConfig {
         m.put("INGESTION_MAX_BATCH_RECORDS", maxBatchRecords);
         m.put("INGESTION_MAX_BATCH_WAIT_MS", maxBatchWaitMs);
         m.put("FLUSS_WRITER_BATCH_TIMEOUT_MS", flussWriterBatchTimeoutMs);
+        m.put("FLUSS_WRITER_MODE", flussWriterMode);
+        m.put("FLUSS_WRITERS", flussWriters);
+        m.put("FLUSS_WRITER_BATCH_SIZE_BYTES", flussWriterBatchSizeBytes);
         m.put("INGEST_VALIDATE_PAYLOAD_HASH", validatePayloadHash);
         m.put("MAX_PENDING_APPEND_RECORDS", maxPendingRecords);
         m.put("MAX_PENDING_APPEND_BYTES", maxPendingBytes);

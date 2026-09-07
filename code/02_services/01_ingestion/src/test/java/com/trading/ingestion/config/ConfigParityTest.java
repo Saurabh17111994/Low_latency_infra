@@ -57,6 +57,7 @@ class ConfigParityTest {
     /** Minimal valid base env — the parity keys are layered on top. */
     private static Map<String, String> baseEnv() {
         Map<String, String> env = new LinkedHashMap<>();
+        env.put("DEPLOYMENT_ENV", "dev");
         env.put("ARROW_APP_ID", "test-app");
         env.put("ARROW_APP_SECRET", "test-secret");
         env.put("ARROW_USER_ID", "test-user");

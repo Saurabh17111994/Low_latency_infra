@@ -77,7 +77,37 @@ final class InstrumentManifestLoader {
     }
 
     static ManifestResult loadFromPath(String path) {
-        return loadFromPath(path, 1);
+        return loadFromPath(path, System.getenv("INSTRUMENT_MANIFEST_VERSION"));
+    }
+
+    /** Version-aware variant (package-private for tests; null/blank = 1). */
+    static ManifestResult loadFromPath(String path, String manifestVersion) {
+        // P1-227: version from INSTRUMENT_MANIFEST_VERSION, not a hardcoded
+        // 1 — a refreshed daily CSV is a NEW approved version (R-247); the
+        // hardcode made the version check in isManifestApproved vacuous.
+        // Unset/blank keeps 1 (today's behavior); explicit garbage refuses
+        // the load fail-closed instead of silently versioning it as 1.
+        int version;
+        try {
+            version = parseManifestVersion(manifestVersion);
+        } catch (IllegalArgumentException e) {
+            LOG.error("instrument-manifest: {}", e.getMessage());
+            return emptyManifest();
+        }
+        return loadFromPath(path, version);
+    }
+
+    static int parseManifestVersion(String raw) {
+        if (raw == null || raw.isBlank()) return 1;
+        try {
+            int v = Integer.parseInt(raw.trim());
+            if (v <= 0) throw new IllegalArgumentException(
+                    "INSTRUMENT_MANIFEST_VERSION must be a positive integer, got: " + raw);
+            return v;
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    "INSTRUMENT_MANIFEST_VERSION must be a positive integer, got: " + raw);
+        }
     }
 
     /**
@@ -108,18 +138,38 @@ final class InstrumentManifestLoader {
             }
 
             // Parse Arrow CSV: Exchange,Segment,ExchSeg,Token,FullName,...
+            // P1-068: match case-insensitively and accept the documented
+            // FullName alias - the old exact-case TradingSymbol-only match left
+            // symbolIdx at -1 on real CSVs, failing every row downstream.
             List<String> columns = parseCsvRecord(header);
-            int tokenIdx = -1, symbolIdx = -1, exchangeIdx = -1, lotSizeIdx = -1;
+            int tokenIdx = -1, symbolIdx = -1, exchangeIdx = -1, lotSizeIdx = -1, segmentIdx = -1;
             for (int i = 0; i < columns.size(); i++) {
-                switch (columns.get(i).trim()) {
-                    case "Token" -> tokenIdx = i;
-                    case "TradingSymbol" -> symbolIdx = i;
-                    case "Exchange" -> exchangeIdx = i;
-                    case "LotSize" -> lotSizeIdx = i;
+                switch (columns.get(i).trim().toLowerCase(java.util.Locale.ROOT)) {
+                    case "token" -> tokenIdx = i;
+                    case "tradingsymbol", "fullname" -> symbolIdx = i;
+                    case "exchange" -> exchangeIdx = i;
+                    case "lotsize" -> lotSizeIdx = i;
+                    case "segment" -> segmentIdx = i;
                 }
             }
             if (tokenIdx < 0) {
                 LOG.error("instrument-manifest: CSV missing Token column");
+                return emptyManifest();
+            }
+            // P1-068 fail-fast: same outcome as before (every row failed the
+            // blank-symbol check and aborted the load per P1-069), but reported
+            // at the header with the true cause instead of row 2.
+            if (symbolIdx < 0) {
+                LOG.error("instrument-manifest: CSV missing symbol column "
+                        + "(want TradingSymbol or FullName); refusing to load");
+                return emptyManifest();
+            }
+            // P1-086 (Batch-1 #9): lotSize is load-bearing (quantity math,
+            // P1-070 hash input) and every live manifest carries it (all 3
+            // cash CSVs, 5,777 rows, zero blanks — checked 2026-09-07), so a
+            // missing column refuses the load instead of defaulting to 1.
+            if (lotSizeIdx < 0) {
+                LOG.error("instrument-manifest: CSV missing LotSize column; refusing to load");
                 return emptyManifest();
             }
 
@@ -133,15 +183,23 @@ final class InstrumentManifestLoader {
                 try {
                     if (tokenIdx >= fields.size()) throw new NumberFormatException("missing Token field");
                     long token = Long.parseLong(fields.get(tokenIdx).trim());
-                    int lotSize = lotSizeIdx >= 0 && lotSizeIdx < fields.size()
-                            ? parseLotSize(fields.get(lotSizeIdx)) : 1;
+                    // P1-086: column presence proven above; a short row is
+                    // malformed like a short token row (skip + count).
+                    if (lotSizeIdx >= fields.size()) throw new NumberFormatException("missing LotSize field");
+                    int lotSize = parseLotSize(fields.get(lotSizeIdx));
                     instruments.add(new Instrument.Builder()
                             .instrumentToken(token)
                             .tradingSymbol(symbolIdx >= 0 && symbolIdx < fields.size()
                                     ? fields.get(symbolIdx).trim() : "")
                             .exchange(exchangeIdx >= 0 && exchangeIdx < fields.size()
                                     ? fields.get(exchangeIdx).trim() : "NSE")
-                            .segment("CM")
+                            // P1-229: read the Segment column (live CSVs
+                            // carry Segment/ExchSeg) instead of hardcoding
+                            // "CM" — an FO file today would silently
+                            // misclassify every row. Absent/blank keeps "CM".
+                            .segment(segmentIdx >= 0 && segmentIdx < fields.size()
+                                    && !fields.get(segmentIdx).isBlank()
+                                    ? fields.get(segmentIdx).trim() : "CM")
                             .lotSize(lotSize)
                             .manifestVersion(version)
                             .build());
@@ -207,13 +265,19 @@ final class InstrumentManifestLoader {
 
     private static int parseLotSize(String field) {
         String trimmed = field.trim();
-        if (trimmed.isEmpty()) return 1;
-        try {
-            int val = Integer.parseInt(trimmed);
-            return val > 0 ? val : 1;
-        } catch (NumberFormatException e) {
-            return 1;
+        // P1-086: blank/non-positive lotSize is invalid CONTENT (like a blank
+        // symbol) — IAE aborts the load per the P1-069 fail-closed posture,
+        // instead of masking it as quantity 1. Garbage stays
+        // NumberFormatException so the existing skip-and-count path treats it
+        // like a bad token.
+        if (trimmed.isEmpty()) {
+            throw new IllegalArgumentException("lotSize must not be blank");
         }
+        int val = Integer.parseInt(trimmed);
+        if (val <= 0) {
+            throw new IllegalArgumentException("lotSize must be positive, got " + val);
+        }
+        return val;
     }
 
     private static ManifestResult emptyManifest() {
@@ -260,16 +324,21 @@ final class InstrumentManifestLoader {
     }
 
     /**
-     * Compute a deterministic SHA-256 fingerprint over all instrument tokens
-     * in sorted order. Used for manifest version validation.
+     * Compute a deterministic SHA-256 fingerprint over every load-bearing
+     * Instrument field in token-sorted order. Used for manifest version
+     * validation.
+     * P1-070: tokens-only let a same-tokens/different-symbols manifest pass
+     * approval. NOTE on Batch-2 #15 (expiry, tickSize): those fields do not
+     * exist on Instrument (writer-side ManifestEntry only) and the CSV cannot
+     * populate them, so the fingerprint covers the five fields that do.
      */
     static String computeFingerprint(List<Instrument> instruments) {
         MessageDigest md = sha256();
-        List<Long> sorted = instruments.stream()
-                .map(Instrument::instrumentToken)
-                .sorted()
+        List<Instrument> sorted = instruments.stream()
+                .sorted(java.util.Comparator.comparingLong(Instrument::instrumentToken))
                 .toList();
-        for (long token : sorted) {
+        for (Instrument in : sorted) {
+            long token = in.instrumentToken();
             md.update((byte) (token >>> 56));
             md.update((byte) (token >>> 48));
             md.update((byte) (token >>> 40));
@@ -278,6 +347,17 @@ final class InstrumentManifestLoader {
             md.update((byte) (token >>> 16));
             md.update((byte) (token >>> 8));
             md.update((byte) (token));
+            md.update(in.tradingSymbol().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            md.update((byte) 0);
+            md.update(in.exchange().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            md.update((byte) 0);
+            md.update(in.segment().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            md.update((byte) 0);
+            int lot = in.lotSize();
+            md.update((byte) (lot >>> 24));
+            md.update((byte) (lot >>> 16));
+            md.update((byte) (lot >>> 8));
+            md.update((byte) lot);
         }
         return HexFormat.of().formatHex(md.digest());
     }

@@ -35,13 +35,15 @@ public final class RawTick {
     public byte[] rawPayload() { return rawPayload.clone(); }
 
     /**
-     * R-216: the defensive clone in {@link #rawPayload()} is correct for
-     * external consumers but is called multiple times per tick on the
-     * ingestion hot path (estimatedRowSize + row conversion). This returns
-     * the internal array WITHOUT copying — callers MUST treat it as
-     * read-only. Only the write path inside this package uses it.
+     * P1-087: byte length WITHOUT copying and WITHOUT exposing the mutable
+     * array (for hot-path size estimates). The former
+     * {@code rawPayloadUnsafe()} is deleted: package-private visibility could
+     * not hold (the three cross-package hot-path callers need access), so the
+     * bug class is removed instead — retention points take a defensive copy
+     * via {@link #rawPayload()}, length probes use this (Batch-4 #34 accepts
+     * the copy cost: ~196 B/tick vs SHA-256 + append per tick).
      */
-    public byte[] rawPayloadUnsafe() { return rawPayload; }
+    public int rawPayloadLength() { return rawPayload.length; }
 
     public String payloadHash() { return payloadHash; }
     public String hashAlgorithm() { return hashAlgorithm; }
@@ -65,7 +67,11 @@ public final class RawTick {
         private Instant receiveTime;
         private long receiveTimeNanos;
 
-        public Builder rawPayload(byte[] v) { this.rawPayload = v; return this; }
+        // P1-088: defensive copy on input — the caller may mutate or reuse
+        // its buffer between rawPayload(v) and build() (TOCTOU against the
+        // separately supplied payloadHash). The ctor keeps its clone (belt
+        // and braces on the immutable contract; Batch-4 #34 accepts the cost).
+        public Builder rawPayload(byte[] v) { this.rawPayload = (v == null ? null : v.clone()); return this; }
         public Builder payloadHash(String v) { this.payloadHash = v; return this; }
         public Builder hashAlgorithm(String v) { this.hashAlgorithm = v; return this; }
         public Builder protocolVersion(String v) { this.protocolVersion = v; return this; }
@@ -89,10 +95,11 @@ public final class RawTick {
             Objects.requireNonNull(protocolVersion, "protocolVersion is required");
             Objects.requireNonNull(decoderVersion, "decoderVersion is required");
             Objects.requireNonNull(receiveTime, "receiveTime is required — a RawTick must be stamped");
-            if (receiveTimeNanos <= 0) {
+            // P1-250: System.nanoTime() has an arbitrary origin and per
+            // Javadoc may be negative — only 0 (unset) is suspect.
+            if (receiveTimeNanos == 0) {
                 throw new IllegalArgumentException(
-                        "receiveTimeNanos must be a positive monotonic instant, got "
-                                + receiveTimeNanos);
+                        "receiveTimeNanos is required — must be a System.nanoTime() instant");
             }
             return new RawTick(this);
         }

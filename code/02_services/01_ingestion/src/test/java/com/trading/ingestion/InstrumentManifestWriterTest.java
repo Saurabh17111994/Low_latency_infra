@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.trading.ingestion.InstrumentManifestWriter.ManifestEntry;
 import java.util.List;
+import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.InternalRow;
 import org.junit.jupiter.api.DisplayName;
@@ -117,5 +118,41 @@ class InstrumentManifestWriterTest {
         // Distinct versions of the same token are legal — R-090 version retention.
         List<ManifestEntry> ok = List.of(entry(1, 1), entry(1, 2), entry(2, 1));
         InstrumentManifestWriter.validate(ok);
+    }
+
+    @Test
+    @DisplayName("P1-232: null element fails closed with a clear IAE, not a bare NPE")
+    void validateRejectsNullElement() {
+        List<ManifestEntry> withNull = new java.util.ArrayList<>();
+        withNull.add(entry(1, 1));
+        withNull.add(null);
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> InstrumentManifestWriter.validate(withNull),
+                "null element must be refused with a context-carrying IAE");
+        assertTrue(ex.getMessage().contains("null manifest entry"),
+                "message must name the null entry, got: " + ex.getMessage());
+    }
+
+    // ── P1-231 kv.format-version gate ───────────────────────────────────────
+
+    @Test
+    @DisplayName("preflight accepts format-version 2")
+    void kvFormatVersionTwoPasses() {
+        TablePath path = TablePath.of("default", "instruments");
+        InstrumentManifestWriter.requireKvFormatVersion(path, "2");
+    }
+
+    @Test
+    @DisplayName("preflight refuses version 1 and a missing key (pre-key-era tables are v1)")
+    void kvFormatVersionOneOrMissingFailsFast() {
+        TablePath path = TablePath.of("default", "instruments");
+        IllegalStateException v1 = assertThrows(IllegalStateException.class,
+                () -> InstrumentManifestWriter.requireKvFormatVersion(path, "1"),
+                "a v1 table passes PK+bucket checks but dies later raw — refuse here");
+        assertTrue(v1.getMessage().contains("table.kv.format-version=1"));
+        IllegalStateException missing = assertThrows(IllegalStateException.class,
+                () -> InstrumentManifestWriter.requireKvFormatVersion(path, null),
+                "a missing key means a pre-key-era (v1) table — must fail, not sail through");
+        assertTrue(missing.getMessage().contains("must be 2"));
     }
 }

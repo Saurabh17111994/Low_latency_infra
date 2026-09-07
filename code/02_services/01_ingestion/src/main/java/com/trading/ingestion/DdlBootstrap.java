@@ -74,14 +74,19 @@ public final class DdlBootstrap {
                 TableDescriptor td = entry.getValue();
                 TablePath path = TablePath.of("default", name);
 
-                try {
-                    org.apache.fluss.metadata.TableInfo ti = c.getTable(path).getTableInfo();
+                try (org.apache.fluss.client.table.Table table = c.getTable(path)) {
+                    // P1-054: Table is AutoCloseable — the previous
+                    // c.getTable(path).getTableInfo() leaked the handle per
+                    // table per verify run.
+                    org.apache.fluss.metadata.TableInfo ti = table.getTableInfo();
                     if (OWNED_TABLES.contains(name)) {
-                        int existingCols = ti.getRowType().getFieldCount();
-                        int expectedCols = td.getSchema().getColumns().size();
-                        if (existingCols != expectedCols) {
-                            LOG.error("ddl-bootstrap: default.{} has {} cols, expected {} — schema mismatch",
-                                    name, existingCols, expectedCols);
+                        // P1-054: count-only checks pass silent renames /
+                        // retypes / reorders — compare names+types in order.
+                        java.util.Optional<String> mismatch =
+                                describeSchemaMismatch(td.getSchema(), ti.getRowType());
+                        if (mismatch.isPresent()) {
+                            LOG.error("ddl-bootstrap: default.{} schema mismatch — {}",
+                                    name, mismatch.get());
                             schemaMismatch++;
                         } else {
                             ok++;
@@ -105,6 +110,57 @@ public final class DdlBootstrap {
             LOG.error("ddl-bootstrap: connection failed — {}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Order-sensitive names+types comparison of the expected descriptor
+     * schema against the live row type. Empty = match; otherwise a
+     * one-line human description of the first divergence (fail-fast at
+     * startup instead of a row-converter serialization failure at runtime).
+     * Pure function — no RPC — so unit tests pin it without a cluster.
+     */
+    static java.util.Optional<String> describeSchemaMismatch(
+            org.apache.fluss.metadata.Schema expected, org.apache.fluss.types.RowType actual) {
+        java.util.List<String> wantNames = expected.getColumnNames();
+        java.util.List<String> haveNames = actual.getFieldNames();
+        if (!wantNames.equals(haveNames)) {
+            return java.util.Optional.of(
+                    "columns " + haveNames + ", expected " + wantNames);
+        }
+        for (int i = 0; i < wantNames.size(); i++) {
+            String wantType = expected.getColumn(wantNames.get(i))
+                    .getDataType().asSerializableString();
+            String haveType = actual.getTypeAt(i).asSerializableString();
+            if (!wantType.equals(haveType)) {
+                return java.util.Optional.of("column '" + wantNames.get(i)
+                        + "' is " + haveType + ", expected " + wantType);
+            }
+        }
+        return java.util.Optional.empty();
+    }
+
+    /**
+     * True when the failure is a concurrent-creator AlreadyExists anywhere
+     * in the cause chain. Typed exceptions first (immune to message
+     * rewording, locale, and wrapping); the message walk stays as fallback
+     * for server versions that surface it as text. Pure — unit-tested
+     * without a cluster.
+     */
+    static boolean isAlreadyExists(Throwable e) {
+        for (Throwable cur = e; cur != null; cur = cur.getCause()) {
+            // P1-216: match the Fluss typed exceptions, not just text — a
+            // reworded / localized "already exists" message used to sail
+            // past and fail bootstrap on a benign create race.
+            if (cur instanceof org.apache.fluss.exception.DatabaseAlreadyExistException
+                    || cur instanceof org.apache.fluss.exception.TableAlreadyExistException) {
+                return true;
+            }
+            String msg = cur.getMessage();
+            if (msg != null && msg.toLowerCase().contains("already exist")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean databaseExists(Admin admin, String name) {
@@ -159,7 +215,17 @@ public final class DdlBootstrap {
                         ok++;
                         continue;
                     }
-                    admin.createTable(path, td, false).get();
+                    try {
+                        admin.createTable(path, td, false).get();
+                    } catch (java.util.concurrent.ExecutionException concurrent) {
+                        // P1-055: parallel startup (multi-pod) — the loser of
+                        // the create race must count the table as ok, not failed.
+                        if (isAlreadyExists(concurrent)) {
+                            LOG.info("ddl-bootstrap: default.{} created concurrently", name);
+                        } else {
+                            throw concurrent;
+                        }
+                    }
                     LOG.info("ddl-bootstrap: ✓ default.{} created", name);
                     ok++;
                 } catch (Exception e) {
@@ -222,13 +288,22 @@ public final class DdlBootstrap {
         return b.build();
     }
 
-    /** Maps a {@code DataTypeRoot} name to the Fluss {@link org.apache.fluss.types.DataType}. */
-    private static org.apache.fluss.types.DataType toFlussType(String root) {
+    /**
+     * Maps a {@code DataTypeRoot} name to the Fluss {@link org.apache.fluss.types.DataType}.
+     * Package-private for DdlBootstrapTest. P1-056: INT was already used by
+     * sibling schemas in this file (contract_version) while this mapping —
+     * the choke point for every RawTableSchema evolution — rejected it.
+     */
+    static org.apache.fluss.types.DataType toFlussType(String root) {
         switch (root) {
             case "STRING":
                 return org.apache.fluss.types.DataTypes.STRING();
             case "BIGINT":
                 return org.apache.fluss.types.DataTypes.BIGINT();
+            case "INT":
+                return org.apache.fluss.types.DataTypes.INT();
+            case "BOOLEAN":
+                return org.apache.fluss.types.DataTypes.BOOLEAN();
             case "BYTES":
                 return org.apache.fluss.types.DataTypes.BYTES();
             default:
@@ -460,13 +535,6 @@ public final class DdlBootstrap {
                 .build();
     }
 
-    private static TableDescriptor kvTable(String... bucketKeys) {
-        return TableDescriptor.builder()
-                .schema(MINIMAL_SCHEMA)
-                .distributedBy(4, bucketKeys)
-                .build();
-    }
-
     /** Package-private accessor for tests (schema-agreement guard). */
     static Map<String, TableDescriptor> tableRegistry() {
         return ALL_TABLES;
@@ -527,12 +595,21 @@ public final class DdlBootstrap {
                             TableDescriptor.builder().schema(DISCONTINUITY_SCHEMA).distributedBy(4, "discontinuity_id").build()),
                     Map.entry("ingestion_quarantine",
                             TableDescriptor.builder().schema(INGESTION_QUARANTINE_SCHEMA).distributedBy(8, "quarantine_id").build()),
+                    // P1-057: LOG semantics (was kvTable — byte-identical twin
+                    // with no PK, i.e. silently LOG). KV/upsert is TBD when the
+                    // owning service lands; this registry is existence-check only.
                     Map.entry("forming_bar",
-                            kvTable("instrument_token")),
+                            logTable("instrument_token")),
+                    // P1-057: LOG semantics (was kvTable — byte-identical twin
+                    // with no PK, i.e. silently LOG). KV/upsert is TBD when the
+                    // owning service lands; this registry is existence-check only.
                     Map.entry("Order_Lifecycle",
-                            kvTable("account_scope_id")),
+                            logTable("account_scope_id")),
+                    // P1-057: LOG semantics (was kvTable — byte-identical twin
+                    // with no PK, i.e. silently LOG). KV/upsert is TBD when the
+                    // owning service lands; this registry is existence-check only.
                     Map.entry("Positions",
-                            kvTable("portfolio_id")),
+                            logTable("portfolio_id")),
                     Map.entry("Execution_Gate",
                             TableDescriptor.builder().schema(MINIMAL_SCHEMA).distributedBy(1, "execution_partition_id").build()),
                     Map.entry("Execution_Attempts",
@@ -540,17 +617,17 @@ public final class DdlBootstrap {
                     Map.entry("Order_Correlation",
                             TableDescriptor.builder().schema(MINIMAL_SCHEMA).distributedBy(1, "instruction_id").build()),
                     Map.entry("Portfolio_Reservations",
-                            kvTable("portfolio_id")),
+                            logTable("portfolio_id")),
                     Map.entry("Postback_Projection_Ledger",
                             TableDescriptor.builder().schema(MINIMAL_SCHEMA).distributedBy(1, "broker_order_id").build()),
                     Map.entry("instruments",
                             TableDescriptor.builder().schema(MINIMAL_SCHEMA).distributedBy(1, "instrument_token").build()),
                     Map.entry("fingerprint_dedup",
-                            kvTable("instrument_token")),
+                            logTable("instrument_token")),
                     Map.entry("trade_instruction_state",
-                            kvTable("instruction_id")),
+                            logTable("instruction_id")),
                     Map.entry("eod_offload_state",
-                            kvTable("record_id")),
+                            logTable("record_id")),
                     Map.entry("Position_State",
                             TableDescriptor.builder()
                                     .schema(MINIMAL_SCHEMA)

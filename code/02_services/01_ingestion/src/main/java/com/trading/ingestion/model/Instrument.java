@@ -79,7 +79,9 @@ public final class Instrument {
         private String tradingSymbol;
         private String exchange;
         private String segment;
-        private int lotSize = 1;
+        // P1-086: NO default — an omitted lotSize must fail the R-116 positive
+        // check (leave it 1 and omission silently passes as quantity 1).
+        private int lotSize;
         private long manifestVersion;
 
         public Builder instrumentToken(long v) { this.instrumentToken = v; return this; }

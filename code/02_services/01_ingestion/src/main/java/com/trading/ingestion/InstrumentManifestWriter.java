@@ -141,6 +141,11 @@ public final class InstrumentManifestWriter implements AutoCloseable {
                         + " must be [instrument_token] (single-field subset of the PK — "
                         + "the raw client's composite-PK path, kv.format-version=2)");
             }
+            // P1-231: the version gate — PK + bucket key alone can PASS on a
+            // v1 table that still dies later with the raw IcebergKeyEncoder
+            // error this preflight claims to prevent. A missing key means a
+            // pre-key-era (v1) table, which must also fail, not sail through.
+            requireKvFormatVersion(path, info.getProperties().toMap().get("table.kv.format-version"));
             this.table = connection.getTable(path);
             this.writer = table.newUpsert().createWriter();
             LOG.info("instrument-manifest-writer: connected (table={}, composite-PK KV preflight PASS)",
@@ -155,6 +160,16 @@ public final class InstrumentManifestWriter implements AutoCloseable {
         }
     }
 
+    // P1-231: pure version gate over the extracted property value, so the
+    // refusal is pinnable without a live cluster. Visible for testing.
+    static void requireKvFormatVersion(TablePath path, String kvFormat) {
+        if (!"2".equals(kvFormat)) {
+            throw new IllegalStateException("instrument-manifest-writer: " + path
+                    + " table.kv.format-version=" + kvFormat
+                    + " must be 2 (raw-client composite-PK path)");
+        }
+    }
+
     /**
      * Validate a manifest before any write: non-empty, no duplicate composite
      * keys. Fails closed — an operator never half-loads a broken manifest.
@@ -166,6 +181,12 @@ public final class InstrumentManifestWriter implements AutoCloseable {
         }
         Set<String> seen = new HashSet<>();
         for (ManifestEntry e : entries) {
+            // P1-232: null element — fail-closed with the documented
+            // IllegalArgumentException (a plain NPE carried no context).
+            if (e == null) {
+                throw new IllegalArgumentException(
+                        "instrument-manifest-writer: null manifest entry — refusing to write");
+            }
             String key = e.instrumentToken() + ":" + e.manifestVersion();
             if (!seen.add(key)) {
                 throw new IllegalArgumentException(
@@ -204,6 +225,10 @@ public final class InstrumentManifestWriter implements AutoCloseable {
      */
     public int write(List<ManifestEntry> entries) throws Exception {
         validate(entries);
+        // P1-071: NOT atomic - Fluss KV has no multi-row transaction. A mid-loop
+        // failure leaves a prefix persisted (idempotent per composite PK, so the
+        // caller must retry the full manifest to converge). Do not claim
+        // never-half-loads; the thrown exception carries the written prefix size.
         int written = 0;
         for (ManifestEntry e : entries) {
             writer.upsert(toRow(e)).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);

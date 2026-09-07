@@ -61,6 +61,7 @@ class ProtoTransportTest {
 
     private static IngestionConfig buildConfig(String bootstrap) throws Exception {
         Map<String, String> env = new HashMap<>();
+        env.put("DEPLOYMENT_ENV", "dev");
         env.put("ARROW_APP_ID", "test-app");
         env.put("ARROW_APP_SECRET", "test-secret");
         env.put("ARROW_USER_ID", "test-user");
@@ -344,6 +345,41 @@ class ProtoTransportTest {
         assertEquals("hft-0", controls.get(0).getSlotId());
         assertEquals("BACKOFF", controls.get(0).getState());
         assertTrue(batches.isEmpty(), "no market batches");
+    }
+
+    // ---- P1-107/108/109: plausible-length misses restore hdr+BODY ----
+
+    @Test
+    @DisplayName("T6: plausible-length garbage is rejected with all bytes intact")
+    void plausibleGarbageRestored() throws Exception {
+        // 10 random bytes: LE length 10 is plausible, body parses as nothing.
+        // Old code drained the 10 body bytes and pushed back only the header.
+        byte[] garbage = new byte[]{10, 0, 0, 0, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0};
+        ProtoFrameReader sniff = new ProtoFrameReader(new java.io.ByteArrayInputStream(garbage),
+                new ProtoFrameReader.FrameHandler() {
+                    @Override public void onMarketBatch(MarketDataBatch b) { }
+                    @Override public void onControl(ControlRecord c) { }
+                });
+        assertTrue(!sniff.sniffProto(), "garbage with plausible length is not proto");
+        byte[] back = sniff.stream().readAllBytes();
+        assertTrue(java.util.Arrays.equals(garbage, back),
+                "all 14 bytes must survive the miss, got " + back.length);
+    }
+
+    @Test
+    @DisplayName("T6: truncated body is rejected with consumed bytes intact")
+    void truncatedBodyRestored() throws Exception {
+        // Header claims 100 bytes, stream ends after 6: EOF path must restore.
+        byte[] partial = new byte[]{100, 0, 0, 0, 1, 2, 3, 4, 5, 6};
+        ProtoFrameReader sniff = new ProtoFrameReader(new java.io.ByteArrayInputStream(partial),
+                new ProtoFrameReader.FrameHandler() {
+                    @Override public void onMarketBatch(MarketDataBatch b) { }
+                    @Override public void onControl(ControlRecord c) { }
+                });
+        assertTrue(!sniff.sniffProto(), "truncated frame is not proto");
+        byte[] back = sniff.stream().readAllBytes();
+        assertTrue(java.util.Arrays.equals(partial, back),
+                "all 10 bytes must survive the EOF miss, got " + back.length);
     }
 
     // ---- T6-RB1: rollback ----

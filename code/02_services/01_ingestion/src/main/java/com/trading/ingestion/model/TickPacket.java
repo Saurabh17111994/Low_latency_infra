@@ -75,6 +75,22 @@ public final class TickPacket {
             throw new IllegalArgumentException(
                     "fingerprintVersion must be positive, got " + b.fingerprintVersion);
         }
+        // P1-089: monetary invariants hold for EVERY classification — quotes
+        // may be 0 (VALID_NON_TRADE), never negative; change is a pct, always
+        // finite. Corrupt values previously reached the Fluss append path.
+        if (b.lastPricePaise < 0 || b.ohlcOpenPaise < 0 || b.ohlcHighPaise < 0
+                || b.ohlcLowPaise < 0 || b.ohlcClosePaise < 0 || b.averagePricePaise < 0) {
+            throw new IllegalArgumentException("price fields must be >= 0");
+        }
+        if (b.volume < 0 || b.openInterest < 0) {
+            throw new IllegalArgumentException("volume/openInterest must be >= 0");
+        }
+        if (!Double.isFinite(b.change)) {
+            throw new IllegalArgumentException("change must be finite, got " + b.change);
+        }
+        if (b.validity == ValidityClassification.VALID_TRADE && b.lastPricePaise <= 0) {
+            throw new IllegalArgumentException("VALID_TRADE requires lastPricePaise > 0");
+        }
 
         this.raw = b.raw;
         this.validity = b.validity;

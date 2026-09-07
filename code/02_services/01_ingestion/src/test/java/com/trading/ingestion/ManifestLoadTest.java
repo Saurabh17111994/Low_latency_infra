@@ -3,13 +3,17 @@ package com.trading.ingestion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.trading.ingestion.model.Instrument;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -141,4 +145,216 @@ class ManifestLoadTest {
                 "expected 1024 instruments, got " + result.instrumentCount());
         assertEquals(1024, result.instruments().size());
     }
+
+    // ---- P1-068 header matching: case-insensitive + FullName alias ----
+
+    private static String writeTempCsv(String name, String content) throws Exception {
+        java.nio.file.Path p = java.nio.file.Files.createTempFile(name, ".csv");
+        java.nio.file.Files.writeString(p, content);
+        return p.toString();
+    }
+
+    @Test
+    @DisplayName("P1-068: documented FullName header loads symbols (was: every row blank)")
+    void fullNameHeaderLoadsSymbols() throws Exception {
+        String path = writeTempCsv("fullname",
+                "Exchange,Segment,ExchSeg,Token,FullName,LotSize\n"
+                        + "NSE,CM,NSE_CM,3045,RELIANCE-EQ,1\n"
+                        + "NSE,CM,NSE_CM,1333,HDFCBANK-EQ,1\n");
+        InstrumentManifestLoader.ManifestResult result =
+                InstrumentManifestLoader.loadFromPath(path, 1);
+        assertTrue(result.approved(), "FullName CSV must load");
+        assertEquals(2, result.instrumentCount());
+        assertTrue(result.instruments().stream()
+                .anyMatch(i -> "RELIANCE-EQ".equals(i.tradingSymbol())));
+    }
+
+    @Test
+    @DisplayName("P1-068: lowercase headers load (was: exact-case miss aborts file)")
+    void lowercaseHeadersLoad() throws Exception {
+        String path = writeTempCsv("lower",
+                "exchange,segment,exchseg,token,fullname,lotsize\n"
+                        + "NSE,CM,NSE_CM,3045,RELIANCE-EQ,1\n");
+        InstrumentManifestLoader.ManifestResult result =
+                InstrumentManifestLoader.loadFromPath(path, 1);
+        assertTrue(result.approved(), "lowercase headers must load");
+        assertEquals("RELIANCE-EQ", result.instruments().get(0).tradingSymbol());
+    }
+
+    @Test
+    @DisplayName("P1-068: missing symbol column fails fast at the header")
+    void missingSymbolColumnFailsFast() throws Exception {
+        String path = writeTempCsv("nosym",
+                "Exchange,Segment,Token,LotSize\nNSE,CM,3045,1\n");
+        InstrumentManifestLoader.ManifestResult result =
+                InstrumentManifestLoader.loadFromPath(path, 1);
+        assertEquals(0, result.instrumentCount(), "nothing loadable without a symbol column");
+    }
+
+    // ---- P1-070 fingerprint: every load-bearing field counts ----
+
+    private static Instrument inst(long token, String symbol, String exch, int lot) {
+        return new Instrument.Builder().instrumentToken(token).tradingSymbol(symbol)
+                .exchange(exch).segment("CM").lotSize(lot).manifestVersion(1).build();
+    }
+
+    @Test
+    @DisplayName("P1-070: same tokens different symbols fingerprint differently")
+    void fingerprintCoversTradingSymbol() {
+        String a = InstrumentManifestLoader.computeFingerprint(
+                List.of(inst(3045, "RELIANCE-EQ", "NSE", 1)));
+        String b = InstrumentManifestLoader.computeFingerprint(
+                List.of(inst(3045, "RELIANCE-BL", "NSE", 1)));
+        assertTrue(!a.equals(b), "symbol change must change the fingerprint");
+    }
+
+    @Test
+    @DisplayName("P1-070: same tokens different lotSize/exchange fingerprint differently")
+    void fingerprintCoversLotSizeAndExchange() {
+        String a = InstrumentManifestLoader.computeFingerprint(
+                List.of(inst(3045, "RELIANCE-EQ", "NSE", 1)));
+        String lot = InstrumentManifestLoader.computeFingerprint(
+                List.of(inst(3045, "RELIANCE-EQ", "NSE", 2)));
+        String exch = InstrumentManifestLoader.computeFingerprint(
+                List.of(inst(3045, "RELIANCE-EQ", "BSE", 1)));
+        assertTrue(!a.equals(lot), "lotSize change must change the fingerprint");
+        assertTrue(!a.equals(exch), "exchange change must change the fingerprint");
+    }
+
+    @Test
+    @DisplayName("P1-070: identical manifests fingerprint identically (determinism pin)")
+    void fingerprintDeterministic() {
+        String a = InstrumentManifestLoader.computeFingerprint(
+                List.of(inst(3045, "RELIANCE-EQ", "NSE", 1), inst(1333, "HDFCBANK-EQ", "NSE", 1)));
+        String b = InstrumentManifestLoader.computeFingerprint(
+                List.of(inst(1333, "HDFCBANK-EQ", "NSE", 1), inst(3045, "RELIANCE-EQ", "NSE", 1)));
+        assertEquals(a, b, "order-independent deterministic fingerprint");
+    }
+
+    @Test
+    @DisplayName("P1-086: omitted lotSize fails fast (no silent default 1)")
+    void omittedLotSizeFailsFast() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new Instrument.Builder().instrumentToken(3045)
+                        .tradingSymbol("RELIANCE-EQ").exchange("NSE")
+                        .segment("CM").manifestVersion(1).build(),
+                "an omitted lotSize must fail the R-116 positive check");
+    }
+
+    @Test
+    @DisplayName("P1-086: explicit lotSize 1 still legal (cash-equity truth)")
+    void explicitLotSizeOneIsLegal() {
+        Instrument in = inst(3045, "RELIANCE-EQ", "NSE", 1);
+        assertEquals(1, in.lotSize());
+    }
+
+    @Test
+    @DisplayName("P1-086: CSV without LotSize column refuses the load")
+    void missingLotSizeColumnRefusesLoad(@TempDir Path dir) throws Exception {
+        Path csv = dir.resolve("no-lot.csv");
+        Files.writeString(csv, "Token,TradingSymbol,Exchange\n3045,RELIANCE-EQ,NSE\n");
+        InstrumentManifestLoader.ManifestResult r =
+                InstrumentManifestLoader.loadFromPath(csv.toString());
+        assertFalse(r.approved(), "missing LotSize column must refuse the load, not default to 1");
+    }
+
+    @Test
+    @DisplayName("P1-086: blank lotSize cell aborts the load (fail-closed)")
+    void blankLotSizeCellAbortsLoad(@TempDir Path dir) throws Exception {
+        Path csv = dir.resolve("blank-lot.csv");
+        Files.writeString(csv,
+                "Token,TradingSymbol,Exchange,LotSize\n3045,RELIANCE-EQ,NSE,\n");
+        InstrumentManifestLoader.ManifestResult r =
+                InstrumentManifestLoader.loadFromPath(csv.toString());
+        assertFalse(r.approved(), "blank lotSize must abort the load, not mask as 1");
+    }
+
+    @Test
+    @DisplayName("P1-086: zero lotSize cell aborts the load (fail-closed)")
+    void zeroLotSizeCellAbortsLoad(@TempDir Path dir) throws Exception {
+        Path csv = dir.resolve("zero-lot.csv");
+        Files.writeString(csv,
+                "Token,TradingSymbol,Exchange,LotSize\n3045,RELIANCE-EQ,NSE,0\n");
+        InstrumentManifestLoader.ManifestResult r =
+                InstrumentManifestLoader.loadFromPath(csv.toString());
+        assertFalse(r.approved(), "zero lotSize must abort the load, not mask as 1");
+    }
+
+    // ---- P1-227: manifest version from env, not hardcoded 1 ---- 
+
+    @Test
+    @DisplayName("P1-227: INSTRUMENT_MANIFEST_VERSION=42 is honored on loadFromPath")
+    void manifestVersionFromEnv(@TempDir Path dir) throws Exception {
+        Path csv = dir.resolve("v42.csv");
+        Files.writeString(csv, "Token,TradingSymbol,Exchange,LotSize\n3045,RELIANCE-EQ,NSE,1\n");
+        InstrumentManifestLoader.ManifestResult lbd =
+                InstrumentManifestLoader.loadFromPath(csv.toString(), "42");
+        assertEquals(42, lbd.version(), "env version must replace hardcoded 1");
+        assertTrue(lbd.approved(), "valid CSV at version 42 must load");
+
+        InstrumentManifestLoader.ManifestResult explicit =
+                InstrumentManifestLoader.loadFromPath(csv.toString(), "7");
+        assertEquals(7, explicit.version(), "explicit version string must win");
+
+        // and the pure no-env entry point still defaults to 1
+        InstrumentManifestLoader.ManifestResult plain =
+                InstrumentManifestLoader.loadFromPath(csv.toString());
+        assertEquals(1, plain.version(), "blank env keeps today's version-1 behavior");
+    }
+
+    @Test
+    @DisplayName("P1-227: garbage INSTRUMENT_MANIFEST_VERSION refuses the load")
+    void garbageManifestVersionRefusesLoad(@TempDir Path dir) throws Exception {
+        Path csv = dir.resolve("garbage-version.csv");
+        Files.writeString(csv, "Token,TradingSymbol,Exchange,LotSize\n3045,RELIANCE-EQ,NSE,1\n");
+        InstrumentManifestLoader.ManifestResult r =
+                InstrumentManifestLoader.loadFromPath(csv.toString(), "not-a-number");
+        assertFalse(r.approved(), "garbage version must refuse the load, not sail as 1");
+    }
+
+    @Test
+    @DisplayName("P1-227: parseManifestVersion defaults 1, rejects blank/zero/negative/garbage")
+    void parseManifestVersionEdges() {
+        assertEquals(1, InstrumentManifestLoader.parseManifestVersion(null));
+        assertEquals(1, InstrumentManifestLoader.parseManifestVersion("  "));
+        assertEquals(3, InstrumentManifestLoader.parseManifestVersion("  3 "));
+        assertThrows(IllegalArgumentException.class,
+                () -> InstrumentManifestLoader.parseManifestVersion("0"));
+        assertThrows(IllegalArgumentException.class,
+                () -> InstrumentManifestLoader.parseManifestVersion("-2"));
+        assertThrows(IllegalArgumentException.class,
+                () -> InstrumentManifestLoader.parseManifestVersion("two"));
+    }
+
+    @Test
+    @DisplayName("P1-229: Segment column is honored; absent column falls back to CM")
+    void segmentColumnHonored(@TempDir Path dir) throws Exception {
+        Path csv = dir.resolve("seg.csv");
+        Files.writeString(csv,
+                "Exchange,Segment,ExchSeg,Token,TradingSymbol,LotSize\n"
+                        + "NSE,FO,NSE_FO,1001,RELIANCE-FUT,75\n"
+                        + "NSE,CM,NSE_CM,3045,RELIANCE-EQ,1\n");
+        InstrumentManifestLoader.ManifestResult r =
+                InstrumentManifestLoader.loadFromPath(csv.toString());
+        assertTrue(r.approved(), "Segment column CSV must load");
+        assertEquals(2, r.instrumentCount());
+        assertTrue(r.instruments().stream()
+                .anyMatch(i -> i.instrumentToken() == 1001 && "FO".equals(i.segment())),
+                "FO row must carry Segment=FO, not hardcoded CM");
+        assertTrue(r.instruments().stream()
+                .anyMatch(i -> i.instrumentToken() == 3045 && "CM".equals(i.segment())),
+                "CM row must carry Segment=CM");
+    }
+
+    @Test
+    @DisplayName("P1-229: missing Segment column still defaults to CM (behavior preserved)")
+    void segmentMissingDefaultsToCM(@TempDir Path dir) throws Exception {
+        Path csv = dir.resolve("no-seg.csv");
+        Files.writeString(csv, "Token,TradingSymbol,Exchange,LotSize\n3045,RELIANCE-EQ,NSE,1\n");
+        InstrumentManifestLoader.ManifestResult r =
+                InstrumentManifestLoader.loadFromPath(csv.toString());
+        assertTrue(r.approved(), "segment-less CSV must still load");
+        assertEquals("CM", r.instruments().get(0).segment());
+    }
+
 }
