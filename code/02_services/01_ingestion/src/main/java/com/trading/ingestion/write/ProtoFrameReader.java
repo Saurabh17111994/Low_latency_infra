@@ -33,8 +33,25 @@ public final class ProtoFrameReader {
     /** Framing protocol version (must match Go TransportVersion = 1). */
     public static final int PROTOCOL_VERSION = 1;
 
-    /** Max plausible frame length (64 MiB — matches Go maxFrameLen). */
+    /**
+     * Max frame length: 64 MiB — MUST equal Go {@code maxFrameLen}
+     * (transport.go {@code writeFrame} rejects anything larger post-marshal,
+     * so the wire can never legally exceed this). Single source of truth is
+     * the Go constant; this is its mirror (see also market_data.proto
+     * § bounds). P1-270: broker-controlled length prefix, never trust it
+     * past this gate.
+     */
     static final int MAX_FRAME_LEN = 64 << 20;
+
+    /**
+     * Max events per batch: 1M — MUST equal the Go
+     * {@code BRIDGE_BATCH_MAX_EVENTS} env ceiling (batch.go
+     * {@code batchLimitsFromEnv} FATALs anything outside 1..1000000).
+     * P1-270: fail-fast AFTER parse, BEFORE per-event work — a hostile
+     * batch with millions of events is log-dropped as one frame, not
+     * processed event by event.
+     */
+    static final int MAX_BATCH_EVENTS = 1_000_000;
 
     /** Callback for one decoded frame. */
     public interface FrameHandler {
@@ -89,6 +106,12 @@ public final class ProtoFrameReader {
         }
         // Try to parse the first frame. If it fails, the stream is not proto —
         // reset (hdr+body restored) and report not-proto.
+        // P1-270 note: this full-body read is REQUIRED here (not a bounded
+        // probe) — sniff consumes AND delivers frame 1 (see deliver below),
+        // and protobuf needs complete bytes to parse. The allocation is
+        // bounded by the length gate above (<=64MiB, mirroring the Go
+        // post-marshal gate), and the event-count gate in deliver() kills
+        // the million-tiny-events shape before any per-event work.
         byte[] body = new byte[(int) len];
         try {
             readFully(body);
@@ -104,6 +127,7 @@ public final class ProtoFrameReader {
                 return false;
             }
             // The first frame is consumed — deliver it so no data is lost.
+            // deliver() enforces MAX_BATCH_EVENTS before per-event work.
             deliver(frame);
             return true;
         } catch (com.google.protobuf.InvalidProtocolBufferException e) {
@@ -150,6 +174,15 @@ public final class ProtoFrameReader {
 
     private void deliver(TransportFrame frame) throws IOException {
         if (frame.hasMarketBatch()) {
+            // P1-270 fail-fast: hostile batch with millions of tiny events
+            // passes the 64MiB length gate but must die HERE as one frame,
+            // before any per-event work. Ceiling mirrors the Go
+            // BRIDGE_BATCH_MAX_EVENTS env max (batch.go batchLimitsFromEnv).
+            int n = frame.getMarketBatch().getEventsCount();
+            if (n > MAX_BATCH_EVENTS) {
+                throw new IOException(
+                        "batch exceeds max events: " + n + " > " + MAX_BATCH_EVENTS);
+            }
             handler.onMarketBatch(frame.getMarketBatch());
         } else if (frame.hasControl()) {
             handler.onControl(frame.getControl());

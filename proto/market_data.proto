@@ -26,6 +26,21 @@ option java_multiple_files = true;
 option java_outer_classname = "MarketDataProto";
 
 // ── Market data batch (the unit of transport) ────────────────────────────────
+//
+// SIZE BOUNDS (P1-320 — worst-case, not defaults):
+//   - raw_payload is BROKER-CONTROLLED bytes (bridge passes through; Java
+//     must treat every length/count as hostile until gated).
+//   - Defaults (batch.go DefaultBatchLimits): MAX_EVENTS=256, MAX_BYTES=64KiB
+//     — measured default-max frame is ~104KiB marshaled (256 full-tick
+//     events x ~404B; batcher curBytes estimate 256x(241+16) UNDERCOUNTS by
+//     ~1.6x — estimate is flush-trigger only, never a size proof).
+//   - ABSOLUTE worst-case: BRIDGE_BATCH_MAX_EVENTS=1000000 env ceiling —
+//     1M events x ~404B ≈ 404MB of event bytes, BUT the Go post-marshal
+//     gate (transport.go writeFrame: maxFrameLen=64MiB) DROPS anything
+//     larger, so the wire can never legally exceed 64MiB.
+//   - Java mirrors both gates (ProtoFrameReader.MAX_FRAME_LEN=64MiB length
+//     gate + MAX_BATCH_EVENTS=1M event-count gate, fail-fast per frame).
+//   - Control frames are small (no tick events); same 64MiB length gate.
 
 message MarketDataBatch {
   string connection_id = 1;    // "ingestion-local/hft-0"
@@ -68,6 +83,10 @@ message TickEvent {
   repeated uint32 ask_orders = 23;
 
   // payload preservation (Q3, Q6) — never base64
+  // P1-320: BROKER-CONTROLLED, max 241B (full-tick mode); broker packet
+  // bytes pass through the bridge ungated per-event (MaxBytes is a flush
+  // TARGET, not a cap — batch.go:29-30). Bounded only at frame level
+  // (64MiB post-marshal gate + 1M event-count gate, see above).
   bytes  raw_payload = 24;      // EXACT original broker packet bytes
   string fingerprint_version = 25;
   string event_fingerprint = 26; // computed in Java (Q19); Go does NOT compute
