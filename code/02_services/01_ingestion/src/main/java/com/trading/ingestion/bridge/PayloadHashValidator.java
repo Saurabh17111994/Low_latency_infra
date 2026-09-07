@@ -35,6 +35,17 @@ public final class PayloadHashValidator {
      */
     private static final Pattern SHA256_HEX = Pattern.compile("[0-9a-f]{64}");
 
+    // P1-076: reject oversized inputs BEFORE the Base64 decode + SHA-256 pass
+    // (a MiB-scale raw_payload forced a large contiguous allocation + hash on
+    // the hot path). Bound = the largest packet this broker emits:
+    // hftSizeResponse = 540 (go-bridge/third_party/go-arrow/arrow/hft_stream.go:35;
+    // tick frames are smaller — LTP 40 / full 196). Base64 ceiling =
+    // ceil(540/3)*4 = 720 chars. NOTE: this validator currently has no
+    // production caller (only tests) — the cap hardens the API before it is
+    // wired into the append path (Batch-3 #25 ruling).
+    static final int MAX_PACKET_BYTES = 540;
+    static final int MAX_RAW_PAYLOAD_B64_LEN = 720;
+
     private PayloadHashValidator() {}
 
     /**
@@ -53,13 +64,16 @@ public final class PayloadHashValidator {
         if (rawPayloadB64 == null || rawPayloadB64.isBlank()) {
             return Result.MALFORMED_PAYLOAD;
         }
+        if (rawPayloadB64.length() > MAX_RAW_PAYLOAD_B64_LEN) {
+            return Result.MALFORMED_PAYLOAD;
+        }
         byte[] packet;
         try {
             packet = Base64.getDecoder().decode(rawPayloadB64);
         } catch (IllegalArgumentException e) {
             return Result.MALFORMED_PAYLOAD;
         }
-        if (packet.length == 0) {
+        if (packet.length == 0 || packet.length > MAX_PACKET_BYTES) {
             return Result.MALFORMED_PAYLOAD;
         }
         String actual = HexFormat.of().formatHex(sha256(packet));
