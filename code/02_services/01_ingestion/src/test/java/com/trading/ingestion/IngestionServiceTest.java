@@ -162,7 +162,7 @@ class IngestionServiceTest {
                 .resolve("ready");
         IngestionService service = new IngestionService(
                 "ing-r209", java.util.List.of(), new StubFlussRowConverter("raw_table_1"),
-                config, clock, null, null, null);
+                config, clock, noopQuarantine(), noopDiscontinuity(), noopSafety());
         java.lang.reflect.Field rf = IngestionService.class.getDeclaredField("readinessFile");
         rf.setAccessible(true);
         rf.set(service, new ReadinessFile(ready));

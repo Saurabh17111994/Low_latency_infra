@@ -66,6 +66,12 @@ public final class BridgeShutdownDriver {
                 shutdown.invoke(service);
             } catch (Exception e) {
                 throw new RuntimeException("shutdown hook failed", e);
+            } finally {
+                // Mirror prod main() (IngestionService:451): stop the logging
+                // context AFTER the drain so buffered output + .gz rollover
+                // trailers flush (log4j2 shutdownHook="disable" + no explicit
+                // stop would otherwise truncate them).
+                org.apache.logging.log4j.LogManager.shutdown();
             }
         }));
 

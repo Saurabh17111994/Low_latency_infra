@@ -8,9 +8,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.trading.ingestion.bridge.BridgeEvent;
 import com.trading.ingestion.config.IngestionConfig;
+import com.trading.ingestion.discontinuity.DiscontinuitySink;
+import com.trading.ingestion.discontinuity.DiscontinuityWriter;
 import com.trading.ingestion.health.NtpClockChecker;
+import com.trading.ingestion.quarantine.QuarantineSink;
 import com.trading.ingestion.quarantine.QuarantineWriter;
 import com.trading.ingestion.safety.SafetyHaltWriter;
+import com.trading.ingestion.safety.SafetySink;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -339,7 +343,7 @@ class SafetyTransitionMappingTest {
         IngestionService service = new IngestionService(
                 "ing-a1", java.util.List.of(), new StubFlussRowConverter("raw_table_1"),
                 config, new NtpClockChecker("127.0.0.1:9", 100, false),
-                null, null, null);
+                noopQuarantine(), noopDiscontinuity(), noopSafety());
         java.lang.reflect.Field f = IngestionService.class.getDeclaredField("gracePeriodUntilMs");
         f.setAccessible(true);
         java.lang.reflect.Method m = IngestionService.class.getDeclaredMethod("inFreshnessGracePeriod");
@@ -353,5 +357,39 @@ class SafetyTransitionMappingTest {
         // Window expired → grace inactive again (original halt behavior resumes).
         f.setLong(service, System.currentTimeMillis() - 1L);
         assertFalse((Boolean) m.invoke(service), "after the window expires, grace must be inactive");
+    }
+    // ---- ING-DQ-010 seam: no live Fluss in unit tests ----
+    private static QuarantineSink noopQuarantine() {
+        return new QuarantineSink() {
+            public void write(byte[] rawPayload, QuarantineWriter.Reason reason, String detail) {}
+            public void write(byte[] rawPayload, QuarantineWriter.Reason reason, String detail,
+                              Long instrumentToken, String exchange, String symbol) {}
+            public void close() {}
+        };
+    }
+
+    private static DiscontinuitySink noopDiscontinuity() {
+        return new DiscontinuitySink() {
+            public void write(DiscontinuityWriter.Reason reason, String note,
+                              DiscontinuityWriter.LastTickSnapshot before) {}
+            public void write(DiscontinuityWriter.Reason reason, String note,
+                              DiscontinuityWriter.LastTickSnapshot before,
+                              Long instrumentToken, String exchange, String symbol) {}
+            public void writeBridgeEvent(com.trading.ingestion.bridge.BridgeEvent event,
+                                         DiscontinuityWriter.LastTickSnapshot before) {}
+            public void close() {}
+        };
+    }
+
+    private static SafetySink noopSafety() {
+        return new SafetySink() {
+            public String write(String slotId, long connectionEpoch,
+                                SafetyHaltWriter.SafetyState state,
+                                SafetyHaltWriter.ReasonCode reasonCode, String assignedTokenHash,
+                                String evidenceReference, long detectedTsMs) {
+                return "noop";
+            }
+            public void close() {}
+        };
     }
 }
