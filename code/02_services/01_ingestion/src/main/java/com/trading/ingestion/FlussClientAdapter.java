@@ -3,6 +3,7 @@ package com.trading.ingestion;
 import com.trading.ingestion.model.RawTick;
 import com.trading.ingestion.model.TickPacket;
 import com.trading.common.schema.EventDay;
+import com.trading.common.schema.RawTableSchema;
 import com.trading.ingestion.write.FlussRowConverter;
 import com.trading.ingestion.write.RawTickWriter;
 import java.time.Instant;
@@ -33,7 +34,8 @@ import org.slf4j.LoggerFactory;
  * </ol>
  *
  * <p>Each accepted tick is converted to a {@link GenericRow} matching the
- * 28-column {@code raw_table_1} DDL and appended individually (no batching).
+ * 21-column {@code raw_table_1} DDL (v3, see {@link com.trading.common.schema.RawTableSchema})
+ * and appended individually (no batching).
  *
  * <p>See {@code /home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/fluss}
  * for the upstream Fluss source (Apache 2.0 licensed).
@@ -201,8 +203,8 @@ class RealFlussRowConverter implements FlussRowConverter {
      * Convert a {@link TickPacket} to a {@link GenericRow} matching the
      * {@code raw_table_1} DDL column order, then append to Fluss.
      *
-     * <p>DDL column order (20 columns, schema v2 — R-054/R-231 removed the
-     * bid/ask and option-metadata columns that the bridge never populates):
+     * <p>DDL column order (21 columns, schema v3 — R-054/R-231 removed the
+     * bid/ask and option-metadata columns that the bridge never populates, v3 adds the event_day partition key):
      * <pre>{@code
      *   event_day, event_fingerprint, fingerprint_version, connection_id, connection_epoch,
      *   instrument_token, exchange, symbol, event_time, ingest_ts, ack_ts,
@@ -256,6 +258,13 @@ class RealFlussRowConverter implements FlussRowConverter {
                 bs(packet.validityReason() != null ? packet.validityReason() : ""), // validity_reason
                 bs(String.valueOf(packet.schemaVersion()))          // schema_version STRING
         );
+        // P1-220: fail loud on arity drift — mirrors TypedFlussRowConverter's
+        // static parity check (SC2) so a miscounted GenericRow.of edit fails
+        // here, not at runtime as a Fluss schema-mismatch.
+        if (row.getFieldCount() != RawTableSchema.FIELD_COUNT) {
+            throw new IllegalStateException("GenericRow arity " + row.getFieldCount()
+                    + " != RawTableSchema.FIELD_COUNT " + RawTableSchema.FIELD_COUNT + " (SC2)");
+        }
 
         return writer.append(row)
                 .thenApply(result -> {

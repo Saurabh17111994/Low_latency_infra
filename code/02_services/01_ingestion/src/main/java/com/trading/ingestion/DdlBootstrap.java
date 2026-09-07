@@ -10,7 +10,6 @@ import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import com.trading.common.schema.RawTableSchema;
-import java.util.ArrayList;
 import org.apache.fluss.metadata.TablePath;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -176,6 +175,10 @@ public final class DdlBootstrap {
     private static boolean databaseExists(Admin admin, String name) {
         try {
             return admin.listDatabases().get(ADMIN_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS).contains(name);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            LOG.warn("ddl-bootstrap: interrupted listing databases");
+            return false;
         } catch (Exception e) {
             LOG.warn("ddl-bootstrap: could not list databases: {}", e.getMessage());
             return false;

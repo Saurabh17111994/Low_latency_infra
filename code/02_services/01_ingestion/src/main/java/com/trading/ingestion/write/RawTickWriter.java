@@ -94,7 +94,7 @@ public final class RawTickWriter implements AutoCloseable {
         });
     }
 
-    /** Receives every terminal append outcome (SUCCESS, UNCERTAIN, FAILED, FATAL, TIMEOUT). */
+    /** Receives every terminal append outcome (SUCCESS, UNCERTAIN, FAILED, FATAL). */
     @FunctionalInterface
     public interface OutcomeListener {
         void onOutcome(AppendOutcome outcome);
@@ -418,7 +418,7 @@ public final class RawTickWriter implements AutoCloseable {
 
     // ---- outcome type ----
 
-    public enum Status { SUCCESS, UNCERTAIN, TIMEOUT, FAILED, FATAL, REJECTED, SKIPPED, ACCEPTED }
+    public enum Status { SUCCESS, UNCERTAIN, FAILED, FATAL, REJECTED, SKIPPED, ACCEPTED }
 
     public record AppendOutcome(
             Status status,

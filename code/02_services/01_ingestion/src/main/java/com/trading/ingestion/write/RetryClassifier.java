@@ -90,7 +90,7 @@ public final class RetryClassifier {
             return true;
         }
         if (msg != null) {
-            String lower = msg.toLowerCase();
+            String lower = msg.toLowerCase(java.util.Locale.ROOT);
             return lower.contains("timeout")
                     || lower.contains("connection")
                     || lower.contains("refused")
@@ -144,7 +144,7 @@ public final class RetryClassifier {
             return true;
         }
         if (msg != null) {
-            String lower = msg.toLowerCase();
+            String lower = msg.toLowerCase(java.util.Locale.ROOT);
             if (lower.contains("table") && lower.contains("not found")) {
                 return true;
             }

@@ -50,7 +50,7 @@ public final class BoundedQueue {
     private volatile QueueListener listener = (l, r, b, mr, mb) -> {};
 
     /** One queued packet + its byte size (for exact accounting). */
-    record Entry(TickPacket packet, int rowBytes) {}
+    public record Entry(TickPacket packet, int rowBytes) {}
 
     public BoundedQueue() {
         this(DEFAULT_MAX_BYTES, DEFAULT_MAX_RECORDS);
