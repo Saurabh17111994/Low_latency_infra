@@ -178,8 +178,11 @@ func (e *ProtoEmitter) EmitEvent(event BridgeEvent) error {
 func (e *ProtoEmitter) EmitMetrics(m BridgeMetrics) error {
 	m.RecordType = "bridge_metrics"
 	m.ContractVersion = ContractVersion
-	if m.TsMs <= 0 {
-		return fmt.Errorf("bridge metrics rejected: ts_ms must be positive")
+	// P1-286: source-gate validation BEFORE write and before the tick-drain
+	// flush (mirrors EmitEvent/R-097) — negative gauges must never reach
+	// ingestion gauges.
+	if err := validateBridgeMetrics(m); err != nil {
+		return fmt.Errorf("bridge metrics rejected: %w", err)
 	}
 	if err := e.batcher.Flush(); err != nil {
 		return err

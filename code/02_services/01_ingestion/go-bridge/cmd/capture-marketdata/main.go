@@ -176,6 +176,13 @@ func main() {
 		}
 	}
 	duration := time.Duration(envInt("CAPTURE_DURATION", 20)) * time.Second
+	// P1-285: fail fast on unvalidated CAPTURE_DURATION — <=0 makes
+	// context.WithTimeout expire immediately (an empty capture still
+	// reported "capture complete"), and huge values overflow time.Duration.
+	if duration <= 0 || duration > 10*time.Minute {
+		fmt.Fprintf(os.Stderr, "CAPTURE_DURATION=%v out of range (must be >0 and <=10m, e.g. 1..600s)\n", duration)
+		os.Exit(2)
+	}
 
 	client := arrow.NewClient(os.Getenv("ARROW_APP_ID"), os.Getenv("ARROW_APP_SECRET"))
 

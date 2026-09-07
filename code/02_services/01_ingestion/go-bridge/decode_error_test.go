@@ -33,6 +33,18 @@ func TestHFTAuthErrorClassification(t *testing.T) {
 	}
 }
 
+// P1-290 guard: only the WebSocket handshake is an auth signal — a bare TLS
+// "handshake failure" must not burn the bounded TOTP refresh budget, while
+// the R-301 broker rejection stays auth.
+func TestHFTAuthErrorWebSocketHandshake(t *testing.T) {
+	if !isHFTAuthError("websocket: bad handshake") {
+		t.Fatal("R-301 'websocket: bad handshake' must stay an auth failure")
+	}
+	if isHFTAuthError("remote error: tls: handshake failure") {
+		t.Fatal("TLS transport handshake failure must not be an auth failure")
+	}
+}
+
 // TestDecodeErrorBurstThreshold — plan §Error Handling: 100 errors in 10s
 // closes the slot (exceeded=true); 99 within the window does not; a window
 // older than 10s resets the count.

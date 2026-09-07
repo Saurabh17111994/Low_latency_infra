@@ -150,3 +150,24 @@ func validateBridgeEvent(event BridgeEvent) error {
 	}
 	return nil
 }
+
+// validateBridgeMetrics is the P1-286 source gate for BridgeMetrics,
+// symmetric with validateBridgeEvent: EmitMetrics validates before writing,
+// so an invalid metrics record never reaches the wire. Zero gauges are
+// valid (fresh slot / idle bridge) and must stay allowed; negatives would
+// poison ingestion gauges.
+func validateBridgeMetrics(m BridgeMetrics) error {
+	if m.RecordType != "bridge_metrics" {
+		return fmt.Errorf("invalid record_type")
+	}
+	if m.ContractVersion != ContractVersion {
+		return fmt.Errorf("unsupported contract_version %d", m.ContractVersion)
+	}
+	if m.TsMs <= 0 {
+		return fmt.Errorf("ts_ms must be positive")
+	}
+	if m.ReconnectConsecutive < 0 || m.ActiveSockets < 0 || m.GoGoroutines < 0 {
+		return fmt.Errorf("metrics gauges cannot be negative")
+	}
+	return nil
+}

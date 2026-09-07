@@ -615,7 +615,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 					// the feed_stalled emit was blocking on a full stdout pipe,
 					// so the epoch never stopped and the slot never reconnected.
 					signalEpochStop()
-					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "feed_stalled", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotStalled), Reason: "no_tick_for_15s", ReceivedTsMs: time.Now().UnixMilli()})
+					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "feed_stalled", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotStalled), Reason: fmt.Sprintf("no_tick_for_%ds", int(stallTimeout.Seconds())), ReceivedTsMs: time.Now().UnixMilli()})
 					return
 				}
 			case <-ctx.Done():
@@ -675,13 +675,18 @@ func isDecodeErrorBurst(priorCount int, windowStart time.Time, now time.Time) de
 
 func isHFTAuthError(message string) bool {
 	lower := strings.ToLower(message)
+	// P1-290: the bare "handshake" match also caught unrelated transport
+	// errors (e.g. "remote error: tls: handshake failure"), burning the
+	// bounded 3-attempt TOTP refresh budget on transient network issues.
+	// Require the WebSocket handshake signal; the R-301 broker rejection
+	// ("websocket: bad handshake") still matches both disjuncts below.
 	return strings.Contains(lower, "unauthorized") ||
 		strings.Contains(lower, "authentication") ||
 		strings.Contains(lower, "invalid token") ||
 		strings.Contains(lower, "token expired") ||
 		strings.Contains(lower, "401") ||
 		strings.Contains(lower, "bad handshake") ||
-		strings.Contains(lower, "handshake")
+		(strings.Contains(lower, "websocket") && strings.Contains(lower, "handshake"))
 }
 
 // authRefreshOutcome classifies one authentication-refresh step per the plan:

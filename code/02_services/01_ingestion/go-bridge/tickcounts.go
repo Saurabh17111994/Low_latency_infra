@@ -26,6 +26,12 @@ var (
 	tickCounts   map[int32]int64
 )
 
+// P1-211: serializes reportTickCounts file+stderr I/O across concurrent
+// interval vs final reports. A dedicated mutex — NOT tickCountsMu, which is
+// released before the I/O so the per-tick recordTickCount hot path never
+// blocks on a report.
+var tickReportMu sync.Mutex
+
 // finalTickCountReport guards the shutdown report so it is emitted exactly
 // once even though both the interval goroutine (on ctx.Done) and main (after
 // runHFT returns) may reach for it. main's synchronous call is authoritative:
@@ -64,6 +70,12 @@ func reportTickCounts() {
 		snapshot[t] = n
 	}
 	tickCountsMu.Unlock()
+	// P1-211: serialize file+stderr writes (see tickReportMu) — the
+	// interval ticker and the final Once report can run concurrently, and
+	// without this a stale interval write finishing last clobbers the
+	// authoritative final snapshot.
+	tickReportMu.Lock()
+	defer tickReportMu.Unlock()
 	keys := make([]int32, 0, len(snapshot))
 	for t := range snapshot {
 		keys = append(keys, t)

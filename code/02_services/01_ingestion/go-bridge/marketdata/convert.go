@@ -40,6 +40,12 @@ type Tick struct {
 
 // ToTickEvent maps a Tick to a proto TickEvent. Field-by-field, locked by
 // T1-P1. Prices stay integer paise — never float.
+//
+// P1-291: connID and epoch are intentionally ignored — TickEvent carries no
+// per-event connection fields; connection identity and epoch are stamped on
+// the MarketDataBatch header in Batcher.Add (batch.go). The parameters stay
+// so every EmitTick call site keeps passing provenance explicitly (dropping
+// them churns callers+tests for zero behavior gain).
 func (t Tick) ToTickEvent(slotID string, connID string, epoch uint64, receivedMs, seq int64, raw []byte) *TickEvent {
 	ev := &TickEvent{
 		SlotId:            slotID,
