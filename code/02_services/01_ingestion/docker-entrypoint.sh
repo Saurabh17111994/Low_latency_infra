@@ -12,15 +12,36 @@ echo "ingestion: starting (FLUSS_BOOTSTRAP=${FLUSS_BOOTSTRAP:-fluss-coordinator:
 # An explicit TRANSPORT env (compose/stack) wins; entrypoint default is proto.
 export TRANSPORT="${TRANSPORT:-proto}"
 echo "ingestion: transport=${TRANSPORT}"
+# P1-138: allowlist at the door — anything else is FATAL in the bridge,
+# so reject typos here with the entrypoint FATAL pattern, not late in Go.
+case "$TRANSPORT" in
+	proto|grpc) ;;
+	*) echo "ingestion: FATAL — TRANSPORT must be proto|grpc, got: $TRANSPORT" >&2; exit 2 ;;
+esac
+# P1-077: the service refuses startup without an explicit env (fail-closed) —
+# default ad-hoc runs to dev; compose/stack set this explicitly (prod for stack).
+export DEPLOYMENT_ENV="${DEPLOYMENT_ENV:-dev}"
+# Native phase 1 (P1-133): contract-named resource attributes, set ONCE here —
+# never per log call, never on the tick path. service.name comes from the
+# Dockerfile OTEL_SERVICE_NAME; host comes from the agent itself. An explicit
+# operator value wins (override hatch).
+export OTEL_RESOURCE_ATTRIBUTES="${OTEL_RESOURCE_ATTRIBUTES:-component=ticks-to-raw,subsystem=raw-append,environment=${DEPLOYMENT_ENV:-dev}}"
 
 if [[ -z "${FLUSS_BOOTSTRAP:-}" ]]; then
 	echo "ingestion: FATAL — FLUSS_BOOTSTRAP is required" >&2
 	exit 2
 fi
 
+# P1-139: two names, one manifest — divergent values mean config drift,
+# so refuse instead of silently letting the first name win.
+if [[ -n "${ARROW_INSTRUMENT_MANIFEST:-}" && -n "${INSTRUMENT_MANIFEST_PATH:-}" && "${ARROW_INSTRUMENT_MANIFEST}" != "${INSTRUMENT_MANIFEST_PATH}" ]]; then
+	echo "ingestion: FATAL — manifest vars diverge: ARROW_INSTRUMENT_MANIFEST=${ARROW_INSTRUMENT_MANIFEST} vs INSTRUMENT_MANIFEST_PATH=${INSTRUMENT_MANIFEST_PATH}" >&2
+	exit 2
+fi
 MANIFEST_PATH="${ARROW_INSTRUMENT_MANIFEST:-${INSTRUMENT_MANIFEST_PATH:-}}"
-if [[ -z "$MANIFEST_PATH" || ! -r "$MANIFEST_PATH" ]]; then
-	echo "ingestion: FATAL — readable instrument manifest is required: ${MANIFEST_PATH:-<unset>}" >&2
+# P1-139: -f (not just -r) — a directory is readable but is not a manifest.
+if [[ -z "$MANIFEST_PATH" || ! -f "$MANIFEST_PATH" || ! -r "$MANIFEST_PATH" ]]; then
+	echo "ingestion: FATAL — readable manifest FILE is required: ${MANIFEST_PATH:-<unset>}" >&2
 	exit 2
 fi
 # Normalize: both names resolve to the same manifest so the Go bridge
@@ -39,6 +60,13 @@ echo "ingestion: arrow-bridge binary OK ($BRIDGE_BIN)"
 
 if [[ ! -r /app/ingestion.jar ]]; then
 	echo "ingestion: FATAL — Java artifact not found: /app/ingestion.jar" >&2
+	exit 2
+fi
+
+# P1-141: same FATAL pattern for the agent — a missing jar otherwise dies
+# late with an obscure JVM Premain-Class error at exec time.
+if [[ ! -r /app/opentelemetry-javaagent.jar ]]; then
+	echo "ingestion: FATAL — OTEL javaagent not found: /app/opentelemetry-javaagent.jar" >&2
 	exit 2
 fi
 

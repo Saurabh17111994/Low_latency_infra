@@ -436,7 +436,7 @@ boundaries:
     compatibility_class: COMPATIBLE_WITH_LIMITATION
     evidence_owner: Operations
     evidence_method: >-
-      Runtime test: assert OTLP telemetry delivery via otel-collector:4317,
+      Runtime test: assert OTLP telemetry delivery via otel-collector:4318,
       basic-auth redaction, structured-JSON log contract, trading_alerts
       stream from AlertThresholds, and that OpenObserve outage cannot
       authorize orders or erase audit.

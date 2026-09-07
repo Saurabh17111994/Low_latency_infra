@@ -9,7 +9,7 @@ import java.util.Map;
  *
  * <p>Per the AI-agent rules, components emit OTLP via the collector and never
  * write observability data to local files except temporary buffering. This
- * class produces the record; forwarding to {@code otel-collector:4317} is done
+ * class produces the record; forwarding to {@code otel-collector:4318} is done
  * by the runtime (outside {@code common}).
  */
 public final class OtlpEmitter {

@@ -11,10 +11,13 @@ RUN mvn -q -f /workspace/pom.xml -pl 02_services/06_execution_gateway -am packag
 FROM eclipse-temurin:17-jre
 WORKDIR /app
 COPY --from=build /workspace/02_services/06_execution_gateway/target/execution-gateway.jar /app/execution-gateway.jar
-# 2026-08-22 single-pane: OTel Javaagent for JVM metrics (jvm.*) → collector:4317 (same as ingestion)
+# 2026-08-22 single-pane: OTel Javaagent for JVM metrics (jvm.*) → collector:4318 (same as ingestion)
 ADD --chmod=0444 https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v2.9.0/opentelemetry-javaagent.jar /app/opentelemetry-javaagent.jar
 ENV OTEL_SERVICE_NAME=execution-gateway
-ENV OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+# 2026-09-07 live-proven (ingestion pass): the javaagent defaults to OTLP/HTTP,
+# so this MUST be :4318. :4317 is gRPC-only and breaks every export with
+# 'unexpected end of stream'. Verified 12/12 + 20/20 records on ingestion's rig.
+ENV OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
 ENV OTEL_METRICS_EXPORTER=otlp
 ENV JAVA_TOOL_OPTIONS=-javaagent:/app/opentelemetry-javaagent.jar
 USER 10001:10001

@@ -60,5 +60,5 @@ COPY --from=java-builder /src/02_services/01_ingestion/target/ingestion.jar /app
 # pre-CHG-122 host launch, where OTEL_COLLECTOR_HOST=localhost:4319 pointed
 # at nothing and was a no-op.
 ENV OTEL_SERVICE_NAME=ingestion-loadgen \
-    OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+    OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
 RUN chmod +x /app/arrow-bridge /app/faketool

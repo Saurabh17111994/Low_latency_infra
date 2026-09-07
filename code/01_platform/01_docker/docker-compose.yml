@@ -624,6 +624,8 @@ services:
       # S3 (2026-08-29, decision A): secrets are delivered via env_file — the
       # SecretGuard skips its fail-closed check when this marker is present.
       SECRETS_VIA_ENV_FILE: "1"
+      # P1-077: explicit env — the service refuses startup without it.
+      DEPLOYMENT_ENV: ${DEPLOYMENT_ENV:-dev}
       # T6: proto is THE transport (CHG-115; NDJSON pipe removed 2026-08-29).
       # TRANSPORT=proto|grpc only; anything else is FATAL in the bridge.
       TRANSPORT: ${TRANSPORT:-proto}

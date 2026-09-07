@@ -37,7 +37,11 @@ COPY 02_services/01_ingestion/docker-entrypoint.sh /app/docker-entrypoint.sh
 # Agent is downloaded at build so image stays self-contained; same endpoint as gateway.
 ADD --chmod=0444 https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v2.9.0/opentelemetry-javaagent.jar /app/opentelemetry-javaagent.jar
 ENV OTEL_SERVICE_NAME=ingestion
-ENV OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+# 2026-09-07 live-proven: the javaagent defaults to OTLP/HTTP, so this
+# MUST be :4318 (HTTP). :4317 is gRPC-only — the agent POSTs HTTP there
+# and every export dies with 'unexpected end of stream' (no logs/metrics
+# reach OpenObserve; verified live 2026-09-07, 12/12 records).
+ENV OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
 ENV OTEL_METRICS_EXPORTER=otlp
 ENV OTEL_LOGS_EXPORTER=otlp
 # Arrow instrument CSV mounted as volume at runtime (see docker-compose)

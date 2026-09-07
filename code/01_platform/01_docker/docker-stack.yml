@@ -527,6 +527,8 @@ services:
       - arrow_password
       - arrow_totp_key
     environment:
+      # P1-077: stack is the prod deploy — prod gates engaged.
+      DEPLOYMENT_ENV: production
       # T6: proto is THE transport (CHG-115; NDJSON pipe removed 2026-08-29).
       # TRANSPORT=proto|grpc only; anything else is FATAL in the bridge.
       TRANSPORT: ${TRANSPORT:-proto}

@@ -275,6 +275,23 @@ processors:
           attributes["token"] != nil
           and not IsMatch(attributes["token"],
           "^${env:METRICS_TOP20_TOKENS_REGEX:-a^}$")
+  # Native phase 1 (P1-133): OTLP routing guards. The `otlp` receiver is
+  # SHARED — every pipeline listing it gets a copy of every OTLP record — so
+  # the two OTLP-log consumers split by service.name: ingestion keeps only its
+  # own, trading keeps everything except ingestion (SignalJob flow unchanged).
+  # With error_mode ignore, records lacking service.name are DROPPED from the
+  # ingestion pipeline (safe: unknown senders never leak into platform_logs)
+  # and KEPT in trading (today's unattributed flow is preserved exactly).
+  filter/ingestion-logs-only:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'resource.attributes["service.name"] != "ingestion"'
+  filter/drop-ingestion-logs:
+    error_mode: ignore
+    logs:
+      log_record:
+        - 'resource.attributes["service.name"] == "ingestion"'
 
 service:
   extensions: [health_check]
@@ -305,6 +322,15 @@ service:
         - transform/tick-sampling
         - probabilistic_sampler/tick
       exporters: [otlphttp/openobserve-logs]
+    # Native phase 1 (P1-133): ingestion agent logs (OTEL_LOGS_EXPORTER=otlp,
+    # Dockerfile) -> platform_logs stream. Dedicated pipeline, NOT the shared
+    # `logs` one: agent records carry no body[instant] seed so tick-sampling
+    # cannot apply, and service volume is lifecycle/warning-rate (no per-tick
+    # logging — verified in code), so no sampler. File path untouched.
+    logs/ingestion:
+      receivers: [otlp]
+      processors: [memory_limiter, filter/ingestion-logs-only, batch]
+      exporters: [otlphttp/openobserve-logs]
     # P8.2: flink file logs -> flink_logs stream.
     logs/flink:
       receivers: [filelog/flink]
@@ -320,7 +346,7 @@ service:
     # gRPC (4317); OTLP logs arriving on either route to this pipeline.
     logs/trading:
       receivers: [otlp]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, filter/drop-ingestion-logs, batch]
       exporters: [otlphttp/openobserve-trading-alerts]
     # 2026-08-22 single-pane: infra file logs -> infrastructure_logs stream.
     logs/infrastructure:
