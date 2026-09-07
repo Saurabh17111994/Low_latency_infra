@@ -14,6 +14,19 @@
   <artifactId>ingestion</artifactId>
   <packaging>jar</packaging>
 
+  <!-- P1-213: protobuf/log4j versions hoisted to in-file properties (single
+       edit point for this module). Moving them to parent dependencyManagement
+       (matching the slf4j/jackson pattern) is out of scope for this batch —
+       the parent currently standardizes on logback-classic, so that move
+       needs a deliberate parent-level decision. NOTE: execution-gateway
+       copy-pastes the 2.25.4 log4j triplet and additionally diverges by
+       omitting log4j-api — keep the two modules' log4j versions in sync
+       until centralization lands. -->
+  <properties>
+    <protobuf.version>3.25.5</protobuf.version>
+    <log4j2.version>2.25.4</log4j2.version>
+  </properties>
+
   <dependencies>
     <!-- slf4j-api declared FIRST so it precedes the Fluss client on the test
          classpath — the Fluss client bundles slf4j-api 1.7 classes inside its
@@ -41,7 +54,7 @@
     <dependency>
       <groupId>com.google.protobuf</groupId>
       <artifactId>protobuf-java</artifactId>
-      <version>3.25.5</version>
+      <version>${protobuf.version}</version>
     </dependency>
 
     <!-- Platform common types -->
@@ -57,17 +70,17 @@
     <dependency>
       <groupId>org.apache.logging.log4j</groupId>
       <artifactId>log4j-slf4j2-impl</artifactId>
-      <version>2.25.4</version>
+      <version>${log4j2.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.logging.log4j</groupId>
       <artifactId>log4j-core</artifactId>
-      <version>2.25.4</version>
+      <version>${log4j2.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.logging.log4j</groupId>
       <artifactId>log4j-api</artifactId>
-      <version>2.25.4</version>
+      <version>${log4j2.version}</version>
     </dependency>
 
     <!-- Zstd decompression moved to Go arrow-bridge (official Arrow SDK). -->

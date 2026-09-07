@@ -6,7 +6,7 @@
 # logs. Bridge crash → discontinuity → shutdown.
 set -euo pipefail
 
-echo "ingestion: starting (FLUSS_BOOTSTRAP=${FLUSS_BOOTSTRAP:-fluss-coordinator:9123})"
+echo "ingestion: starting (FLUSS_BOOTSTRAP=${FLUSS_BOOTSTRAP:-<unset>})"
 
 # T6/CHG-115: proto is THE transport (NDJSON pipe removed 2026-08-29).
 # An explicit TRANSPORT env (compose/stack) wins; entrypoint default is proto.
@@ -98,6 +98,9 @@ fi
 export ARROW_BRIDGE_BIN="$BRIDGE_BIN"
 
 MAIN_CLASS="${INGESTION_MAIN_CLASS:-com.trading.ingestion.IngestionService}"
+if [[ "$MAIN_CLASS" != "com.trading.ingestion.IngestionService" ]]; then
+  echo "ingestion: WARNING — custom MAIN_CLASS=$MAIN_CLASS bypasses verified bridge-supervision path" >&2
+fi
 # --add-opens is required by the Fluss client's shaded Arrow (MemoryUtil
 # touches java.nio internals on JDK 17+) — must match the host launchers and
 # surefire so container behaviour equals the verified host run path.
@@ -107,4 +110,4 @@ MAIN_CLASS="${INGESTION_MAIN_CLASS:-com.trading.ingestion.IngestionService}"
 exec java -javaagent:/app/opentelemetry-javaagent.jar \
 	--add-opens=java.base/java.nio=ALL-UNNAMED \
 	-Dlog.dir="${LOG_DIR:-/data/ingestion/logs}" \
-	-cp /app/ingestion.jar "${MAIN_CLASS}"
+	-cp /app/ingestion.jar "${MAIN_CLASS}" "$@"

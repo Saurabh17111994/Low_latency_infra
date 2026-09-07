@@ -26,7 +26,7 @@ COPY common ./common
 COPY 02_services/01_ingestion/pom.xml ./02_services/01_ingestion/pom.xml
 COPY 02_services/06_execution_gateway/pom.xml ./02_services/06_execution_gateway/pom.xml
 # Download deps first for layer caching
-RUN mvn -q dependency:go-offline 2>/dev/null || true
+RUN mvn -q dependency:go-offline -pl 02_services/01_ingestion -am 2>/dev/null || true
 COPY 02_services/01_ingestion/src ./02_services/01_ingestion/src
 RUN mvn -q -DskipTests package -pl 02_services/01_ingestion -am
 
