@@ -47,6 +47,21 @@ public final class TickPacket {
     // --- schema ---
     private final int schemaVersion;
 
+    // P1-251: parsed once (not per-Builder on the hot path); a malformed
+    // constant fails fast with context instead of a bare NumberFormatException
+    // during unrelated packet construction.
+    private static final int DEFAULT_SCHEMA_VERSION = parseSchemaVersion();
+
+    private static int parseSchemaVersion() {
+        try {
+            return Integer.parseInt(PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION);
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException(
+                    "PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION is not an int: "
+                            + PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION, e);
+        }
+    }
+
     private TickPacket(Builder b) {
         // R-227: "All typed fields are verified and normalized before
         // construction" was a lie — build() validated nothing. Fail fast on
@@ -74,6 +89,11 @@ public final class TickPacket {
         if (b.fingerprintVersion <= 0) {
             throw new IllegalArgumentException(
                     "fingerprintVersion must be positive, got " + b.fingerprintVersion);
+        }
+        // P1-251: schema label must be positive — 0/-1 would persist corrupt.
+        if (b.schemaVersion <= 0) {
+            throw new IllegalArgumentException(
+                    "schemaVersion must be positive, got " + b.schemaVersion);
         }
         // P1-089: monetary invariants hold for EVERY classification — quotes
         // may be 0 (VALID_NON_TRADE), never negative; change is a pct, always
@@ -131,6 +151,7 @@ public final class TickPacket {
     public String exchange() { return exchange; }
     public Instant eventTime() { return eventTime; }
     public Instant ingestTs() { return ingestTs; }
+    /** Local time of append ack, or {@code null} until the Fluss ack completes. */
     public Instant appendAckTs() { return appendAckTs; }
     public long lastPricePaise() { return lastPricePaise; }
     public long volume() { return volume; }
@@ -149,7 +170,7 @@ public final class TickPacket {
     public int schemaVersion() { return schemaVersion; }
 
     public boolean isTradeEligible() {
-        return validity == ValidityClassification.VALID_TRADE && eventTime != null;
+        return validity == ValidityClassification.VALID_TRADE;
     }
 
     @Override
@@ -185,7 +206,7 @@ public final class TickPacket {
          * Default = shared raw_table_1 contract version; IngestionService no longer
          * overrides it, so the persisted label cannot drift from the consumer default.
          */
-        int schemaVersion = Integer.parseInt(PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION);
+        int schemaVersion = DEFAULT_SCHEMA_VERSION;
 
         public Builder raw(RawTick v) { this.raw = v; return this; }
         public Builder validity(ValidityClassification v) { this.validity = v; return this; }

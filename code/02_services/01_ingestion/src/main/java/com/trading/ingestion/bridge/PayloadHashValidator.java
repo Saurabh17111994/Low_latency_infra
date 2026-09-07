@@ -49,8 +49,9 @@ public final class PayloadHashValidator {
     private PayloadHashValidator() {}
 
     /**
-     * Decode and validate. On {@link Result#VALID} returns the exact packet
-     * bytes; otherwise returns {@code null} (caller handles quarantine).
+     * Decode and validate. Returns {@link Result#VALID} if the packet bytes
+     * verify; otherwise returns the quarantine reason (caller handles
+     * quarantine). Use {@link #decodeValid} to obtain the decoded bytes.
      *
      * <p>R-248: the previous signature took a caller-owned {@code Result[] out}
      * and dereferenced {@code out[0]} in every branch without a precondition —

@@ -226,13 +226,13 @@ public final class IngestionConfig {
         // (pendingWarningPercent) → readiness false; 100% → halt (hard fail-closed).
         b.maxPendingRecords = intRangeWithAlias(env,
                 "MAX_PENDING_APPEND_RECORDS", "PENDING_MAX_RECORDS",
-                150_000, 100, 1_000_000, errors);
+                (int) MAX_PENDING_RECORDS, 100, 1_000_000, errors);
         b.maxPendingBytes = longRangeWithAlias(env,
                 "MAX_PENDING_APPEND_BYTES", "PENDING_MAX_BYTES",
-                201_326_592L, 1_048_576L, Long.MAX_VALUE, errors);
+                MAX_PENDING_BYTES, 1_048_576L, Long.MAX_VALUE, errors);
         b.pendingWarningPercent = doubleRangeWithAlias(env,
                 "PENDING_APPEND_WARNING_PERCENT", "PENDING_WARNING_PERCENT",
-                0.80, 0.10, 0.99, errors);
+                WARNING_PERCENT, 0.10, 0.99, errors);
 
         // ---- Timing ----
         int timeoutSec = intRange(env, "APPEND_TIMEOUT_SECONDS", 5, 1, 30, errors);
@@ -245,7 +245,7 @@ public final class IngestionConfig {
         b.zeroAckTimeoutMs = longRange(env, "INGESTION_ZERO_ACK_TIMEOUT_MS",
                 10_000L, 0L, 300_000L, errors);
         b.clockOffsetLimitMs = longRange(env, "CLOCK_OFFSET_LIMIT_MS",
-                2000L, 10L, 60_000L, errors);
+                CLOCK_OFFSET_LIMIT_MS, 10L, 60_000L, errors);
         b.arrowMaxEventAgeMs = requiredLong(env, "ARROW_MAX_EVENT_AGE_MS", errors);
         b.arrowMaxFutureEventSkewMs = requiredLong(env, "ARROW_MAX_FUTURE_EVENT_SKEW_MS", errors);
 
@@ -601,13 +601,13 @@ public final class IngestionConfig {
         String flussBootstrap = "fluss-coordinator:9123";
         String rawTableName = "raw_table_1";
         int maxBatchRecords = 1, maxBatchWaitMs;
-        int maxPendingRecords = 150_000;
-        long maxPendingBytes = 201_326_592L; // 192 MiB — T2 3k default
-        double pendingWarningPercent = 0.80;
+        int maxPendingRecords = (int) MAX_PENDING_RECORDS;
+        long maxPendingBytes = MAX_PENDING_BYTES; // 192 MiB — T2 3k default
+        double pendingWarningPercent = WARNING_PERCENT;
         Duration appendTimeout = Duration.ofSeconds(5);
         Duration drainDeadline = Duration.ofSeconds(30);
         long zeroAckTimeoutMs = 10_000L; // zero-ack watchdog (0 = disabled)
-        long clockOffsetLimitMs = 2000L; // T10: 2s default
+        long clockOffsetLimitMs = CLOCK_OFFSET_LIMIT_MS; // T10: 2s default
         long arrowMaxEventAgeMs;
         long arrowMaxFutureEventSkewMs;
         String goArrowSdkVersion = "v0.0.0-20260622-7cce1630";

@@ -15,8 +15,10 @@ import org.slf4j.LoggerFactory;
  * Persists ingestion uncertainty counters to a local journal file before
  * shutdown so they survive process restart.
  *
- * <p>Format: one JSON line per shutdown event (append-only).
- * On restart, the last entry can be read to resume counter baselines.
+ * <p>Format: one JSON line per shutdown event (append-only, write-only —
+ * no read-back API; implementing a resume path is out of scope. On restart
+ * counter baselines are NOT restored — IngestionService logs the loss at
+ * shutdown when the journal write itself fails).
  *
  * <p>Journal path: {@code /data/ingestion/uncertainty-journal.jsonl}
  * (configurable via {@code UNCERTAINTY_JOURNAL_PATH} env).

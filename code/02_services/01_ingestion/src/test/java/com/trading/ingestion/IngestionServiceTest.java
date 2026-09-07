@@ -208,6 +208,38 @@ class IngestionServiceTest {
     }
 
     @Test
+    @DisplayName("P1-305: FUTURE quarantine increments the FUTURE_BROKER_TIMESTAMP decode-error metric")
+    void futureQuarantineIncrementsMetric() throws Exception {
+        IngestionConfig config = buildConfig();
+        RecordingConverter converter = new RecordingConverter();
+        NtpClockChecker clock = new NtpClockChecker("127.0.0.1:9", 100, false);
+        IngestionService service = new IngestionService(
+                "ing-p1305", instruments(), converter, config, clock,
+                noopQuarantine(), noopDiscontinuity(), noopSafety());
+
+        byte[] payload = "raw-bytes".getBytes(StandardCharsets.UTF_8);
+        long now = System.currentTimeMillis();
+        TickEvent ev = TickEvent.newBuilder()
+                .setSlotId("hft-0")
+                .setMode("full")
+                .setToken(3045)
+                .setFeed("hft")
+                .setTsMs(now + 60_000L)
+                .setReceivedMs(now)
+                .setFeedSequenceLocal(17)
+                .setLtpPaise(234500)
+                .setVolume(125000)
+                .setRawPayload(ByteString.copyFrom(payload))
+                .setPayloadHash(ByteString.copyFrom(sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                .build();
+
+        service.processTickEvent(ev, "hft-0", 1L);
+        assertTrue(service.metrics().buildMetricsJson().contains("FUTURE_BROKER_TIMESTAMP"),
+                "FUTURE quarantine must be visible to decode-error dashboards (was: metric missing)");
+        assertEquals(0, converter.appendCalls.get(), "FUTURE ticks never append");
+    }
+
+    @Test
     @DisplayName("P1-092: failed safety-halt write evicts dedup so the next tick retries (slot still marked unsafe)")
     void failedSafetyWriteRetriesOnNextTick() throws Exception {
         IngestionConfig config = buildConfig();

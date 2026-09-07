@@ -70,6 +70,13 @@ class TickPacketValidationTest {
     }
 
     @Test
+    @DisplayName("P1-251: non-positive schemaVersion rejected")
+    void rejectsNonPositiveSchemaVersion() {
+        assertThrows(IllegalArgumentException.class, () -> valid().schemaVersion(0).build());
+        assertThrows(IllegalArgumentException.class, () -> valid().schemaVersion(-1).build());
+    }
+
+    @Test
     @DisplayName("zero price stays legal for non-trade quotes")
     void zeroPriceLegalForNonTrade() {
         assertDoesNotThrow(() -> valid()

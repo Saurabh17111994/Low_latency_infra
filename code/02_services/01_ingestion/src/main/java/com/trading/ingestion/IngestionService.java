@@ -1075,6 +1075,9 @@ public final class IngestionService {
             if (fd == FreshnessDecision.FUTURE) {
                 quarantineWriter.write(packetBytes, QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP,
                         "event timestamp exceeds receive time", (long) ev.getToken(), null, null);
+                // P1-305: mirror the STALE path — FUTURE quarantine must also be
+                // visible to decode-error dashboards (future-timestamp drift).
+                metrics.incrementDecodeError("FUTURE_BROKER_TIMESTAMP");
                 if (!inFreshnessGracePeriod()) {
                     emitQualityUnsafe(ev.getSlotId(), batchConnectionEpoch,
                             QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP);
@@ -1303,8 +1306,6 @@ public final class IngestionService {
         }
 
         switch (outcome.status()) {
-            case TIMEOUT -> LOG.warn("ingestion: append timeout (rowBytes={})",
-                    outcome.rowBytes());
             case UNCERTAIN -> {
                 LOG.warn("ingestion: append UNCERTAIN — Fluss may have persisted (rowBytes={}, detail={})",
                         outcome.rowBytes(), outcome.detail());

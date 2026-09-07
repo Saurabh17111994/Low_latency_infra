@@ -1,7 +1,5 @@
 package com.trading.ingestion.quarantine;
 
-import com.trading.ingestion.model.ValidityClassification;
-import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -158,7 +156,7 @@ public class QuarantineWriter implements QuarantineSink {
             observe(writer.append(row), quarantineId, reasonName);
         } catch (Exception e) {
             LOG.error("quarantine-writer: append failed (id={}, reason={}): {}",
-                    quarantineId, reasonName, e.getMessage());
+                    quarantineId, reasonName, e.getMessage(), e);
         }
     }
 
@@ -187,7 +185,7 @@ public class QuarantineWriter implements QuarantineSink {
             if (ex != null) {
                 Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
                 LOG.error("quarantine-writer: append failed (id={}, detail={}): {}",
-                        id, detail, cause.getMessage());
+                        id, detail, cause.getMessage(), cause);
             } else {
                 LOG.debug("quarantine-writer: wrote {} (detail={})", id, detail);
             }
@@ -206,7 +204,7 @@ public class QuarantineWriter implements QuarantineSink {
             writer.flush();
             // AppendWriter (TableWriter) does not have close() in Fluss 0.9.1-incubating
         } catch (Exception e) {
-            LOG.warn("quarantine-writer: close failed: {}", e.getMessage());
+            LOG.warn("quarantine-writer: close failed: {}", e.getMessage(), e);
         }
         closeQuietly();
     }

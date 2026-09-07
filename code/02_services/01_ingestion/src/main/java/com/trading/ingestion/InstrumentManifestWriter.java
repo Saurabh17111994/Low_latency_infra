@@ -150,6 +150,10 @@ public final class InstrumentManifestWriter implements AutoCloseable {
             this.writer = table.newUpsert().createWriter();
             LOG.info("instrument-manifest-writer: connected (table={}, composite-PK KV preflight PASS)",
                     path);
+        } catch (InterruptedException ie) {
+            closeQuietly();
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Cannot create InstrumentManifestWriter (interrupted)", ie);
         } catch (Exception e) {
             closeQuietly();
             if (e instanceof IllegalStateException ise) {

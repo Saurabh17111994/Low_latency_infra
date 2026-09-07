@@ -136,7 +136,7 @@ public final class HealthProbe {
     public SlotHealth slot(String slotId) { return slots.computeIfAbsent(slotId, ignored -> new SlotHealth()); }
 
     /** Slots currently tracked (used to fan safety evidence across slots). */
-    public java.util.Set<String> slotIds() { return slots.keySet(); }
+    public java.util.Set<String> slotIds() { return java.util.Set.copyOf(slots.keySet()); }
 
     /**
      * Slot safety evidence (plan Amendment). The first safe→unsafe transition

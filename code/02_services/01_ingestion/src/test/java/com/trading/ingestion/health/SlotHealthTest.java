@@ -17,6 +17,20 @@ class SlotHealthTest {
     }
 
     @Test
+    void slotIdsReturnsSnapshotNotLiveView() {
+        // P1-243: callers must not mutate probe state via the returned set,
+        // nor observe weakly-consistent iteration.
+        HealthProbe probe = new HealthProbe(new AppendTracker());
+        probe.updateSlot("hft-0", "ACTIVE", 2, 10, 10, 0, System.nanoTime());
+        java.util.Set<String> ids = probe.slotIds();
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of("hft-0"), ids);
+        org.junit.jupiter.api.Assertions.assertThrows(
+                UnsupportedOperationException.class, () -> ids.remove("hft-0"));
+        org.junit.jupiter.api.Assertions.assertTrue(probe.isDataReady(),
+                "mutating the returned set must not affect probe state");
+    }
+
+    @Test
     void resetSlotsReturnsToAuthenticatingAndZeroCoverage() {
         HealthProbe probe = new HealthProbe(new AppendTracker());
         probe.updateSlot("hft-0", "ACTIVE", 3, 1024, 1024, 0, System.nanoTime());
