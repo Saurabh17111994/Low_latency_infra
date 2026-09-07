@@ -50,6 +50,30 @@ fi
 export ARROW_INSTRUMENT_MANIFEST="$MANIFEST_PATH"
 export INSTRUMENT_MANIFEST_PATH="$MANIFEST_PATH"
 
+# P1-137 follow-up: fail fast as the runtime user, not late in Java.
+# LOG_DIR (R-171 JSON logs) and the journal PARENT (UncertaintyJournal
+# default /data/ingestion/uncertainty-journal.jsonl, or UNCERTAINTY_JOURNAL_PATH
+# parent) must be writable by uid 65532 NOW — a root-owned pre-P1-137 named
+# volume masks the image chown and would otherwise boot-loop on the Java
+# FATAL gate (IngestionService:424) with a less actionable message.
+# Probes use touch (create+delete), never leftovers.
+probe_writable_dir() {
+	_probe_dir="$1"
+	_probe_label="$2"
+	if ! mkdir -p "$_probe_dir" 2>/dev/null; then
+		echo "ingestion: FATAL — ${_probe_label} not creatable: ${_probe_dir} (run as $(id -u):$(id -g); pre-P1-137 root-owned volume? see Dockerfile NOTE)" >&2
+		exit 2
+	fi
+	if ! touch "${_probe_dir}/.writetest" 2>/dev/null || ! rm -f "${_probe_dir}/.writetest" 2>/dev/null; then
+		echo "ingestion: FATAL — ${_probe_label} not writable: ${_probe_dir} (run as $(id -u):$(id -g); pre-P1-137 root-owned volume? see Dockerfile NOTE)" >&2
+		exit 2
+	fi
+}
+probe_writable_dir "${LOG_DIR:-/data/ingestion/logs}" "LOG_DIR"
+_JOURNAL_FILE="${UNCERTAINTY_JOURNAL_PATH:-/data/ingestion/uncertainty-journal.jsonl}"
+probe_writable_dir "$(dirname "$_JOURNAL_FILE")" "uncertainty-journal parent"
+unset _probe_dir _probe_label _JOURNAL_FILE
+
 # Validate Go bridge binary (D6) — still checked for early failure
 BRIDGE_BIN="${ARROW_BRIDGE_BIN:-/app/arrow-bridge}"
 if [[ ! -x "$BRIDGE_BIN" ]]; then

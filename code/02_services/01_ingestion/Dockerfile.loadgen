@@ -18,7 +18,8 @@
 #   java -cp /app/ingestion.jar com.trading.ingestion.IngestionService
 
 # Stage 1: Go arrow-bridge + faketool (SDK vendored in-repo)
-FROM golang:1.24-alpine AS go-builder
+# P1-135: pinned — same digest as Dockerfile (2026-09-08, imagetools inspect).
+FROM golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS go-builder
 WORKDIR /src
 COPY 02_services/01_ingestion/go-bridge/go.mod 02_services/01_ingestion/go-bridge/go.sum ./
 COPY 02_services/01_ingestion/go-bridge/third_party ./third_party
@@ -31,7 +32,8 @@ COPY 02_services/01_ingestion/go-bridge/faketool ./faketool
 RUN CGO_ENABLED=0 go build -tags faketool -o /faketool ./faketool
 
 # Stage 2: Java ingestion (full reactor: parent + common + ingestion)
-FROM maven:3.9-eclipse-temurin-17 AS java-builder
+# P1-135: pinned — same digest as Dockerfile (2026-09-08).
+FROM maven:3.9-eclipse-temurin-17@sha256:a8746f15d5bb26b5b8bacb056cc76211553850f4c71d16aff845cfa004cbc197 AS java-builder
 WORKDIR /src
 COPY pom.xml .
 COPY common ./common
@@ -48,7 +50,8 @@ RUN mvn -q -DskipTests package -pl 02_services/01_ingestion -am
 # its sources is STALE and a run would measure old code. Content-based:
 # git checkout/touch with unchanged content does NOT false-positive
 # (the mtime-based first draft did, proven live 2026-09-02).
-FROM eclipse-temurin:17-jre
+# P1-135: pinned — same digest as Dockerfile (2026-09-08).
+FROM eclipse-temurin:17-jre@sha256:13cc28a6cc72a38ce1f00c906be3580c1a3e604b8984d694f369a96742abc93b
 ARG BUILD_STAMP=none
 WORKDIR /app
 RUN echo "$BUILD_STAMP" > /app/build-stamp

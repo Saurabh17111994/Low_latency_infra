@@ -54,11 +54,18 @@ ENV OTEL_LOGS_EXPORTER=otlp
 # Arrow instrument CSV mounted as volume at runtime (see docker-compose)
 # COPY removed — CSV lives at Arrow_broker/instruments/cash_stocks/ on host
 RUN chmod +x /app/arrow-bridge /app/docker-entrypoint.sh
-# P1-137: drop root. Runtime needs write ONLY to LOG_DIR
-# (/data/ingestion/logs, named volume) — instruments mounts are read-only,
+# P1-137: drop root. Runtime writes to LOG_DIR (/data/ingestion/logs,
+# named volume) AND the journal FILE /data/ingestion/uncertainty-journal.jsonl
+# (UncertaintyJournal default) — so the PARENT /data/ingestion must be owned
+# too, not just the logs child. Instruments mounts are read-only,
 # /tmp/ingestion.ready is world-writable. chmod stays in the root build
-# stage above; the chown gives the runtime user its log dir.
+# stage above.
+# NOTE (existing volumes): a pre-P1-137 ingestion-logs volume created by a
+# root-era run mounts root-owned content OVER this chown — first deploy
+# after this change needs `docker compose down -v` (dev data only) or a
+# one-time `chown -R 65532:65532` on the volume. The entrypoint probes
+# below fail fast with the fix if the mount is still root-owned.
 RUN groupadd -r -g 65532 appuser && useradd -r -g appuser -u 65532 -d /app -s /usr/sbin/nologin appuser \
-    && mkdir -p /data/ingestion/logs && chown -R 65532:65532 /data/ingestion/logs /app
+    && mkdir -p /data/ingestion/logs && chown -R 65532:65532 /data/ingestion /app
 USER 65532:65532
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
