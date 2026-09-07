@@ -55,15 +55,23 @@ func recordTickCount(token int32) {
 var tickCountChunkSize = 20
 
 func reportTickCounts() {
+	// P1-210: snapshot under the lock, sort + format AFTER unlock — the
+	// report must never stall the per-tick recordTickCount hot path
+	// (ProtoEmitter.EmitTick) while sorting/formatting thousands of lines.
 	tickCountsMu.Lock()
-	keys := make([]int32, 0, len(tickCounts))
-	for t := range tickCounts {
+	snapshot := make(map[int32]int64, len(tickCounts))
+	for t, n := range tickCounts {
+		snapshot[t] = n
+	}
+	tickCountsMu.Unlock()
+	keys := make([]int32, 0, len(snapshot))
+	for t := range snapshot {
 		keys = append(keys, t)
 	}
 	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	total := int64(0)
 	for _, t := range keys {
-		total += tickCounts[t]
+		total += snapshot[t]
 	}
 	lines := (len(keys) + tickCountChunkSize - 1) / tickCountChunkSize
 	// P1-048: never emit an empty report — zero keys must still produce the
@@ -81,11 +89,10 @@ func reportTickCounts() {
 			hi = len(keys)
 		}
 		for _, t := range keys[lo:hi] {
-			fmt.Fprintf(&buf, " t=%d:n=%d", t, tickCounts[t])
+			fmt.Fprintf(&buf, " t=%d:n=%d", t, snapshot[t])
 		}
 		buf.WriteByte('\n')
 	}
-	tickCountsMu.Unlock()
 	// Persist to a file FIRST (while stderr is still open). The parent JVM
 	// closes the child's pipe streams as soon as its own shutdown begins, so
 	// a stderr write after that point dies with SIGPIPE (exit 141) and the

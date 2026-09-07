@@ -88,6 +88,13 @@ class DdlBootstrapTest {
     }
 
     @Test
+    @DisplayName("P1-215: admin RPCs bounded — 30s timeout contract pinned")
+    void adminTimeoutPinned() {
+        assertEquals(java.time.Duration.ofSeconds(30), DdlBootstrap.ADMIN_TIMEOUT,
+                "P1-215: coordinator must fail bootstrap in 30s, never hang startup");
+    }
+
+    @Test
     @DisplayName("P1-057: former kvTable entries are LOG (no PK) until deliberately changed")
     void formerKvEntriesHaveNoPrimaryKey() {
         for (String name : new String[] {"forming_bar", "Order_Lifecycle", "Positions",

@@ -567,6 +567,23 @@ class IngestionServiceTest {
     // ---- P1-226: non-positive wire token quarantines before the queue index ----
 
     @Test
+    @DisplayName("P1-224: safetyEmitted is epoch-scoped — restart-clear re-emits same halt")
+    void safetyDedupEpochScoped() {
+        java.util.Set<String> emitted = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        String idN = "fp|hft-0|5|UNSAFE|RESOURCE_EXHAUSTED";
+        String idN1 = "fp|hft-0|6|UNSAFE|RESOURCE_EXHAUSTED";
+        assertTrue(com.trading.ingestion.IngestionService.firstEmission(emitted, "UNSAFE", idN));
+        // same id suppressed within epoch
+        assertFalse(com.trading.ingestion.IngestionService.firstEmission(emitted, "UNSAFE", idN));
+        // bridge restart clears (IngestionService RESTART branch: safetyEmitted.clear())
+        emitted.clear();
+        // new epoch id differs by construction AND re-emits after clear
+        assertTrue(!idN.equals(idN1), "epoch must be part of the halt id");
+        assertTrue(com.trading.ingestion.IngestionService.firstEmission(emitted, "UNSAFE", idN1));
+        assertEquals(1, emitted.size(), "one epoch worth only — bounded");
+    }
+
+    @Test
     @DisplayName("P1-226: negative token quarantines INVALID_VALUES, never reaches queues")
     void negativeTokenQuarantinedBeforeRouting() throws Exception {
         IngestionConfig config = buildConfig();

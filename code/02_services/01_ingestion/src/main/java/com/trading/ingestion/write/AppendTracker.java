@@ -88,6 +88,13 @@ public final class AppendTracker {
      * Caller MUST NOT submit the record on false — it was not counted.
      */
     public boolean tryAccept(int recordBytes) {
+        // P1-262 snapshot slots — assigned under the lock, fired after it.
+        BackpressureListener.Level emitLevel = null;
+        long emitRecs = 0;
+        long emitBytes = 0;
+        Instant emitAt = null;
+        BackpressureListener emitListener = null;
+        boolean emit = false;
         // P1-101: fail BEFORE counting — a non-positive size is a programming
         // bug (all estimators floor >= 256), never a capacity signal. Throwing
         // (not reject-false) so a broken converter cannot disguise itself as
@@ -117,10 +124,16 @@ public final class AppendTracker {
                 long afterRecs = pendingRecords.decrementAndGet();
                 long afterBytes = pendingBytes.addAndGet(-recordBytes);
                 totalRejected.incrementAndGet();
-                listener.onEvent(BackpressureListener.Level.CRITICAL,
-                        afterRecs, afterBytes, maxPendingRecords, maxPendingBytes, Instant.now());
-                return false;
-            }
+                // P1-262: snapshot, never call out under the accept-gate lock —
+                // a slow/throwing listener must not stall tryAccept at 50k/s.
+                // Micros-only (Instant.now().truncatedTo(MICROS), never nanos);
+                // the gate stays counter-compare, time is payload-only.
+                emitLevel = BackpressureListener.Level.CRITICAL;
+                emitRecs = afterRecs;
+                emitBytes = afterBytes;
+                emitAt = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+                emit = true;
+            } else {
 
             // R-196: counters and totals must be consistent BEFORE the
             // warning listener fires — it reads pending + totals.
@@ -132,16 +145,43 @@ public final class AppendTracker {
             double bytPct = (double) byt / maxPendingBytes;
             if (recPct >= warningPercent || bytPct >= warningPercent) {
                 warningCount.incrementAndGet();
-                Instant now = Instant.now();
+                // P1-262: micros-only, once, inside the lock; the listener
+                // ref + lastWarningAt update stay under the lock, the CALL
+                // goes outside (see below).
+                Instant now = Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MICROS);
                 // throttle: emit warning at most once per 30 s
                 if (lastWarningAt == null || lastWarningAt.plusSeconds(30).isBefore(now)) {
                     lastWarningAt = now;
-                    listener.onEvent(BackpressureListener.Level.WARNING,
-                            recs, byt, maxPendingRecords, maxPendingBytes, now);
+                    emitLevel = BackpressureListener.Level.WARNING;
+                    emitRecs = recs;
+                    emitBytes = byt;
+                    emitAt = now;
+                    emit = true;
                 }
             }
-            return true;
+            } // close the P1-262 else opened at the halt site
+            // ---- P1-262: fire outside the accept-gate lock ----
+            // Snapshot the listener ref under the lock (setListener can swap
+            // it concurrently); a throwing listener must not break the
+            // tryAccept true/false contract — caught and logged, never thrown.
+            if (emit) {
+                emitListener = listener;
+            }
+        } // end synchronized
+        if (emit) {
+            try {
+                emitListener.onEvent(emitLevel, emitRecs, emitBytes,
+                        maxPendingRecords, maxPendingBytes, emitAt);
+            } catch (Throwable th) {
+                org.slf4j.LoggerFactory.getLogger(AppendTracker.class)
+                        .warn("append-tracker: backpressure listener threw ({}), ignored",
+                                th.toString());
+            }
+            if (emitLevel == BackpressureListener.Level.CRITICAL) {
+                return false;
+            }
         }
+        return true;
     }
 
     /** MUST be called once per accepted record after Fluss acknowledges the append. */

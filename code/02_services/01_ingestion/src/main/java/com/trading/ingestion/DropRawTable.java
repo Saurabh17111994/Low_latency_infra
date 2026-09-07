@@ -83,18 +83,23 @@ public final class DropRawTable {
             System.exit(2);
             return;
         }
+        // P1-217: ensure dispatches BEFORE opening a connection —
+        // DdlBootstrap.ensureTables opens its own, so the outer one was
+        // wasted resources + a spurious failure mode (ensure failing on
+        // the unused outer connection). Drop needs the connection; ensure
+        // must not pay for it.
+        if ("ensure".equals(mode)) {
+            boolean ok = com.trading.ingestion.DdlBootstrap.ensureTables(bootstrap);
+            System.out.println("ensureTables: " + (ok ? "OK" : "FAILED"));
+            System.exit(ensureExitCode(ok));
+            return;
+        }
         Configuration conf = new Configuration();
         conf.setString("bootstrap.servers", bootstrap);
 
         TablePath path = TablePath.of("default", "raw_table_1");
         try (Connection c = ConnectionFactory.createConnection(conf);
              Admin admin = c.getAdmin()) {
-            if ("ensure".equals(mode)) {
-                boolean ok = com.trading.ingestion.DdlBootstrap.ensureTables(bootstrap);
-                System.out.println("ensureTables: " + (ok ? "OK" : "FAILED"));
-                System.exit(ensureExitCode(ok));
-                return;
-            }
             // P1-059: ignoreIfNotExists=true already handles the absent
             // table — no exists pre-check (avoids TOCTOU with a concurrent
             // bootstrap recreating the table between the two RPCs).

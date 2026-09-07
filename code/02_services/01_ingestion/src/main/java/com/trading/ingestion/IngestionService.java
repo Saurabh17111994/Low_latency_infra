@@ -684,6 +684,14 @@ public final class IngestionService {
                     }
                     // Reset slot states to AUTHENTICATING for the fresh process.
                     health.resetSlotsToAuthenticating();
+                    // P1-224: clear the safety dedup set on restart. Halt IDs
+                    // embed the connection epoch (computeHaltRequestId: slot +
+                    // epoch + state + reason), so every pre-restart entry is
+                    // dead weight — the new epoch can never re-emit an old
+                    // ID, and a same-logical halt in the new epoch MUST
+                    // re-emit (otherwise a restart would silently suppress a
+                    // live halt). Bounds the set to one epoch's worth.
+                    safetyEmitted.clear();
                     // P1-063: dead ING-2 token accounting removed — completeness
                     // is driven solely by bridge ACTIVE events below.
                     health.setSubscriptionComplete(false);

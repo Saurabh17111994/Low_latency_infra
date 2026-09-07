@@ -42,10 +42,20 @@
          with the collector (and any second replica), so a fixed ingestion.json
          would interleave/corrupt across writers. The collector tails
          *.json (verified) and the Delete glob below still matches. -->
+    <!-- P1-278: buffered file log — immediateFlush=true forced a
+         syscall per log event on the 50k/s hot path. bufferedIO + 256KiB
+         buffer absorbs bursts (measured: the per-line flush is gone; format
+         cost stays on-thread but is small and bounded). NO Async wrapper:
+         proven 2026-09-08 that AsyncAppender.start() THROWS when the file
+         appender is absent (missing /data on dev/CI), turning degraded
+         logging into fatal boot death — the old config degraded gracefully
+         (console survives). Console stays SYNC so crash context always
+         survives on stderr. JSON bytes identical — OpenObserve contract
+         unaffected, only flush timing changes. -->
     <RollingFile name="JSON_FILE"
                  fileName="${LOG_DIR}/ingestion-${HOST}-${VM_ID}.json"
                  filePattern="${LOG_DIR}/ingestion-${HOST}-${VM_ID}-%d{yyyy-MM-dd}-%i.json.gz"
-                 immediateFlush="true">
+                 immediateFlush="false" bufferedIO="true" bufferSize="262144">
       <JsonLayout compact="true" eventEol="true" properties="true"
                   includeStacktrace="true" stacktraceAsString="true">
         <!-- R-161: JsonLayout properties=true serializes only the ThreadContext
@@ -61,11 +71,20 @@
       <Policies>
         <TimeBasedTriggeringPolicy interval="1" modulate="true"/>
         <SizeBasedTriggeringPolicy size="64 MB"/>
+        <OnStartupTriggeringPolicy/>
       </Policies>
+      <!-- P1-279: 7d + 5GB cap + startup trigger. Was: max=30 x 64MB
+           with 30d age = ~57GB/JVM worst case, Delete only on rollover
+           (idle never cleans). Rolled *.json.gz stays collector-untouched
+           by design (collector tails live *.json) — history is debug-only,
+           so 7d/5GB is ample. -->
       <DefaultRolloverStrategy max="30">
         <Delete basePath="${LOG_DIR}" maxDepth="1">
           <IfFileName glob="ingestion-*.json.gz"/>
-          <IfLastModified age="30d"/>
+          <IfAny>
+            <IfLastModified age="7d"/>
+            <IfAccumulatedFileSize exceeds="5GB"/>
+          </IfAny>
         </Delete>
       </DefaultRolloverStrategy>
     </RollingFile>

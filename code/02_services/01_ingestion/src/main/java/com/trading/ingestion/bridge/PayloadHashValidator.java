@@ -86,19 +86,54 @@ public final class PayloadHashValidator {
     /**
      * Decode-and-validate returning the packet bytes on {@link Result#VALID}.
      * Kept for callers that need the decoded payload.
+     *
+     * <p>P1-238: single-pass — the old body called validate() (which decodes
+     * internally) then decoded a SECOND time: 2x Base64 on every valid tick.
+     * This body decodes once and returns the same buffer. Zero live gain
+     * today (no production caller — test-only) but correct for the 60k gate.
      */
     public static byte[] decodeValid(String rawPayloadB64, String payloadHash) {
-        if (validate(rawPayloadB64, payloadHash) != Result.VALID) {
+        if (payloadHash == null || !SHA256_HEX.matcher(payloadHash).matches()) {
             return null;
         }
-        return Base64.getDecoder().decode(rawPayloadB64);
+        if (rawPayloadB64 == null || rawPayloadB64.isBlank()) {
+            return null;
+        }
+        if (rawPayloadB64.length() > MAX_RAW_PAYLOAD_B64_LEN) {
+            return null;
+        }
+        byte[] packet;
+        try {
+            packet = Base64.getDecoder().decode(rawPayloadB64);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+        if (packet.length == 0 || packet.length > MAX_PACKET_BYTES) {
+            return null;
+        }
+        String actual = HexFormat.of().formatHex(sha256(packet));
+        if (!actual.equals(payloadHash)) {
+            return null;
+        }
+        return packet;
     }
 
-    private static byte[] sha256(byte[] data) {
+    /**
+     * P1-239: per-thread digest — MessageDigest is not thread-safe but
+     * getInstance does a provider lookup + alloc per call; at 50k ticks/s
+     * that is 50k wasted allocs/s. ThreadLocal pays it once per thread.
+     */
+    private static final ThreadLocal<MessageDigest> SHA256_DIGEST = ThreadLocal.withInitial(() -> {
         try {
-            return MessageDigest.getInstance("SHA-256").digest(data);
-        } catch (Exception e) {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (java.security.NoSuchAlgorithmException e) {
             throw new IllegalStateException("SHA-256 unavailable", e);
         }
+    });
+
+    private static byte[] sha256(byte[] data) {
+        MessageDigest md = SHA256_DIGEST.get();
+        md.reset();
+        return md.digest(data);
     }
 }

@@ -42,6 +42,16 @@ public final class DdlBootstrap {
 
     private static final Logger LOG = LoggerFactory.getLogger(DdlBootstrap.class);
 
+    /**
+     * P1-215: bound every admin RPC — an unresponsive coordinator must fail
+     * bootstrap in 30s, not hang startup forever. Mirrors
+     * {@code DropRawTable.ADMIN_TIMEOUT} (same value, cross-cited; not
+     * imported — different class, no dependency). P1-055 create-race catch
+     * still matches ExecutionException(already-exists); a TimeoutException
+     * is NOT already-exists and propagates as failure.
+     */
+    static final java.time.Duration ADMIN_TIMEOUT = java.time.Duration.ofSeconds(30);
+
     private DdlBootstrap() {}
 
     /**
@@ -165,7 +175,7 @@ public final class DdlBootstrap {
 
     private static boolean databaseExists(Admin admin, String name) {
         try {
-            return admin.listDatabases().get().contains(name);
+            return admin.listDatabases().get(ADMIN_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS).contains(name);
         } catch (Exception e) {
             LOG.warn("ddl-bootstrap: could not list databases: {}", e.getMessage());
             return false;
@@ -210,13 +220,13 @@ public final class DdlBootstrap {
                 TablePath path = TablePath.of("default", name);
 
                 try {
-                    if (admin.tableExists(path).get()) {
+                    if (admin.tableExists(path).get(ADMIN_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS)) {
                         LOG.debug("ddl-bootstrap: default.{} already exists", name);
                         ok++;
                         continue;
                     }
                     try {
-                        admin.createTable(path, td, false).get();
+                        admin.createTable(path, td, false).get(ADMIN_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
                     } catch (java.util.concurrent.ExecutionException concurrent) {
                         // P1-055: parallel startup (multi-pod) — the loser of
                         // the create race must count the table as ok, not failed.
@@ -245,7 +255,7 @@ public final class DdlBootstrap {
 
     private static void ensureDatabase(Admin admin, String name) throws Exception {
         try {
-            admin.createDatabase(name, DatabaseDescriptor.builder().build(), false).get();
+            admin.createDatabase(name, DatabaseDescriptor.builder().build(), false).get(ADMIN_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS);
             LOG.info("ddl-bootstrap: database '{}' created", name);
         } catch (Exception e) {
             // P1-216: reuse isAlreadyExists (typed + cause-walk + message fallback),
