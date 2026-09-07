@@ -118,12 +118,12 @@ func main() {
 			// Fatal auth failure → status 2 (plan §main.go).
 			os.Exit(exitFatalStart)
 		}
-		refreshAuth = func(ctx context.Context) error {
+		refreshAuth = wrapRefreshAuth(func(ctx context.Context) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 			return client.AutoLogin(userID, password, totpKey)
-		}
+		})
 		logf("auto-login user=%s", userID)
 		if err := client.AutoLogin(userID, password, totpKey); err != nil {
 			fmt.Fprintf(os.Stderr, "arrow-bridge: AutoLogin failed: %v\n", err)
@@ -332,9 +332,15 @@ func runReconnectLoop(ctx context.Context, run func(uint64) bool, onRetry func(u
 
 func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotAssignment, latencyMs int, responseTimeout time.Duration, epoch uint64, refreshAuth func(context.Context) error, authRefreshes *int, logf func(string, ...any)) slotEpochResult {
 	tokens := slot.Tokens
-	stream, err := streamFactory()
+	// P1-031/P1-035: dial reads Config.Token inside vendored code — hold RLock
+	// so a concurrent slot refresh (Lock) cannot interleave the read.
+	stream, err := guardedDial(streamFactory)
+	if err == nil && stream != nil {
+		// P1-037: structural single-reader — our epoch starts exactly one
+		// read loop; a second start reports via onError instead of racing.
+		stream = guardSingleReader(stream)
+	}
 	if err != nil {
-		_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "disconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: sanitizeDiagnostic(err.Error()), ReceivedTsMs: time.Now().UnixMilli()})
 		logf("HFT connect failed: %v", err)
 		// R-301: a dial failure carrying an auth signal (e.g. the broker
 		// rejecting the WebSocket upgrade because the AutoLogin session token
