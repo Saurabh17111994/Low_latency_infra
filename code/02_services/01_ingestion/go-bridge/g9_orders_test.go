@@ -139,3 +139,31 @@ func TestG9NullBooksReturnEmpty(t *testing.T) {
 	}
 	var _ = json.Marshal
 }
+
+// G9 guard: wire-code IsValid helpers accept canonicals, reject typos (P1-173).
+func TestG9WireCodeIsValid(t *testing.T) {
+	if !arrow.ProductCNC.IsValid() || !arrow.ProductMIS.IsValid() || !arrow.ProductNRML.IsValid() {
+		t.Fatal("G9/P1-173: canonical products must be valid")
+	}
+	if arrow.Product("CNC").IsValid() || arrow.Product("c:").IsValid() || arrow.Product("").IsValid() {
+		t.Fatal("G9/P1-173: long-form/garbage/empty product must be invalid")
+	}
+	if !arrow.TransactionTypeBuy.IsValid() || !arrow.TransactionTypeSell.IsValid() {
+		t.Fatal("G9/P1-173: B/S must be valid")
+	}
+	if arrow.TransactionType("BUY").IsValid() {
+		t.Fatal("G9/P1-173: long-form BUY must be invalid (wire code is B)")
+	}
+	if !arrow.OrderTypeSLLMT.IsValid() || !arrow.OrderTypeSL.IsValid() {
+		t.Fatal("G9/P1-173: canonical + alias SL encodings must be valid")
+	}
+	if arrow.OrderType("SL-LMT-X").IsValid() {
+		t.Fatal("G9/P1-173: garbage order type must be invalid")
+	}
+	if !arrow.ValidityDAY.IsValid() || arrow.Validity("YEAR").IsValid() {
+		t.Fatal("G9/P1-173: DAY valid, YEAR invalid")
+	}
+	if !arrow.ExchangeNSE.IsValid() || arrow.Exchange("NYSE").IsValid() {
+		t.Fatal("G9/P1-173: NSE valid, NYSE invalid")
+	}
+}
