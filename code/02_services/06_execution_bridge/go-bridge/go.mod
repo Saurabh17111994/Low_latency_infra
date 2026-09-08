@@ -3,7 +3,7 @@ module github.com/trading/execution-arrow-bridge
 go 1.24.5
 
 require (
-	github.com/arrow-trade/go-arrow v0.0.0-20260622-7cce1630
+	github.com/arrow-trade/go-arrow v0.2.0
 	github.com/gorilla/websocket v1.5.3
 )
 

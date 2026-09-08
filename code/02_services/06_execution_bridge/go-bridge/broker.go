@@ -194,7 +194,15 @@ func classifySDKError(err error) BrokerResult {
 		}
 	}
 	// No HTTP status envelope: transport failure, malformed error wrapper, or timeout.
-	if strings.Contains(strings.ToLower(message), "timeout") {
+	// WAVE9-F: preserve the SDK's semantic order errors (validation + empty-OrderNo
+	// P1-043) — collapsing them to "ambiguous" broke
+	// TestArrowBrokerTreatsMalformedSuccessAsUnknown, which pins
+	// malformed_success_response for success-without-OrderNo.
+	lower := strings.ToLower(message)
+	if strings.Contains(lower, "empty orderno") || strings.Contains(lower, "missing orderno") {
+		return unknownResult(err)
+	}
+	if strings.Contains(lower, "timeout") {
 		return unknownResult(fmt.Errorf("timeout: %s", message))
 	}
 	return unknownResult(errors.New("ambiguous Arrow response"))
@@ -240,7 +248,7 @@ func sanitizeReason(err error) string {
 		return "broker_auth_failure"
 	case strings.Contains(message, "forbidden") || strings.Contains(message, "status 403"):
 		return "broker_forbidden"
-	case strings.Contains(message, "missing orderno"):
+	case strings.Contains(message, "missing orderno") || strings.Contains(message, "empty orderno"):
 		return "malformed_success_response"
 	case strings.Contains(message, "ambiguous"):
 		return "ambiguous_broker_response"

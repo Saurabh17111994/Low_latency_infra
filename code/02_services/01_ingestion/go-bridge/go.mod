@@ -2,13 +2,14 @@ module github.com/trading/arrow-bridge
 
 go 1.24.5
 
-// go-arrow is pinned to the upstream base commit 7cce1630
-// (2026-06-22, https://github.com/Saurabh17111994/go-arrow) with in-repo
-// patches R-101..R-243 applied (see open_code_review_reports/
+// go-arrow is pinned to upstream tag v0.2.0 (tag object 67bc0b0 ->
+// merge commit 1390d40, https://github.com/Saurabh17111994/go-arrow) =
+// base 7cce1630 (2026-06-22) + Wave9 bundles A-D,F,G (E deferred),
+// with in-repo patches R-101..R-243 merged on top (commit d6804e3; see
 // CODE_REVIEW_REMEDIATION.md). The vendored replace makes the build
 // self-contained; the require version is the upstream identity label and
 // never resolves through the module proxy.
-require github.com/arrow-trade/go-arrow v0.0.0-20260622-7cce1630
+require github.com/arrow-trade/go-arrow v0.2.0
 
 require (
 	github.com/gorilla/websocket v1.5.3

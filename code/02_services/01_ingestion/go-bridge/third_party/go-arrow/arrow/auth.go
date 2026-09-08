@@ -2,6 +2,7 @@
 package arrow
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -39,6 +40,11 @@ type AuthResponse struct {
 // Returns:
 //   - A SHA256 checksum string.
 func GenerateChecksum(appID, appSecret, requestToken string) string {
+	// WAVE9-B (P1-294): an empty secret/token yields a checksum over
+	// attacker-known input — callers must refuse "" before sending.
+	if appSecret == "" || requestToken == "" {
+		return ""
+	}
 	data := fmt.Sprintf("%s:%s:%s", appID, appSecret, requestToken)
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:])
@@ -55,7 +61,20 @@ func GenerateChecksum(appID, appSecret, requestToken string) string {
 //   - A string containing the authentication token if successful.
 //   - An error if authentication fails.
 func (c *Client) Authenticate(requestToken string) (string, error) {
-	checksum := GenerateChecksum(c.Config.AppID, c.Config.AppSecret, requestToken)
+	// WAVE9-B (P1-161): never authenticate with an empty token.
+	if requestToken == "" {
+		return "", fmt.Errorf("authenticate: empty request token")
+	}
+	// WAVE9-A: snapshot credentials under RLock; token write below takes Lock.
+	c.mu.RLock()
+	authAppID, authSecret := c.Config.AppID, c.Config.AppSecret
+	c.mu.RUnlock()
+	if authSecret == "" {
+		// WAVE9-B (P1-294): empty secret yields an unusable checksum —
+		// refuse before sending a doomed request.
+		return "", fmt.Errorf("authenticate: missing app credentials")
+	}
+	checksum := GenerateChecksum(authAppID, authSecret, requestToken)
 
 	// R-099: build the JSON body with json.Marshal — raw fmt.Sprintf
 	// interpolation produced invalid JSON when credentials contained quotes,
@@ -66,7 +85,7 @@ func (c *Client) Authenticate(requestToken string) (string, error) {
 		Token    string `json:"token"`
 		AppID    string `json:"appID"`
 	}{
-		CheckSum: checksum, Checksum: checksum, Token: requestToken, AppID: c.Config.AppID,
+		CheckSum: checksum, Checksum: checksum, Token: requestToken, AppID: authAppID,
 	}
 	payload, err := json.Marshal(payloadBody)
 	if err != nil {
@@ -76,13 +95,14 @@ func (c *Client) Authenticate(requestToken string) (string, error) {
 	responseBody, err := c.request("/auth/app/authenticate-token", "POST", payload)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to authenticate")
-		return "", err
+		// WAVE9-B (P1-166): endpoint context on transport errors.
+		return "", fmt.Errorf("authenticate /auth/app/authenticate-token: %w", err)
 	}
 
 	var authResponse AuthResponse
 	if err := json.Unmarshal(responseBody, &authResponse); err != nil {
 		log.Error().Err(err).Msg("Failed to parse authentication response")
-		return "", err
+		return "", fmt.Errorf("authenticate /auth/app/authenticate-token decode: %w", err)
 	}
 
 	// R-100: a "success" status without a token is NOT a successful
@@ -93,11 +113,13 @@ func (c *Client) Authenticate(requestToken string) (string, error) {
 			authResponse.Status, authResponse.Data.Token == "")
 	}
 
-	// Update client token after authentication
+	// Update client token after authentication (WAVE9-A Lock: orders vs readers).
+	c.mu.Lock()
 	c.Config.Token = authResponse.Data.Token
 	if authResponse.Data.RefreshToken != "" {
 		c.Config.RefreshToken = authResponse.Data.RefreshToken
 	}
+	c.mu.Unlock()
 
 	c.debugf("Authentication successful", func(e *zerolog.Event) {
 		e.Str("userID", authResponse.Data.UserID)
@@ -112,8 +134,16 @@ func (c *Client) Authenticate(requestToken string) (string, error) {
 //
 // R-239: returns an error so automated flows can branch on failure instead of
 // assuming the interactive login succeeded.
+//
+// WARNING (WAVE9-B, P1-162): this function OWNS stdin — it blocks on
+// fmt.Scanln with no timeout. Never call it from a service/bridge process;
+// use AutoLogin (TOTP) or Authenticate with a request token obtained
+// out-of-band. Services calling Login hang forever on stdin EOF/retry.
 func (c *Client) Login() error {
-	loginURL := fmt.Sprintf("https://app.arrow.trade/app/login?appId=%s", c.Config.AppID)
+	c.mu.RLock()
+	loginAppID := c.Config.AppID
+	c.mu.RUnlock()
+	loginURL := fmt.Sprintf("https://app.arrow.trade/app/login?appId=%s", loginAppID)
 	fmt.Println("Please visit the following URL to log in and retrieve your request token:")
 	fmt.Println(loginURL)
 	fmt.Println("After logging in, enter the request token below:")
@@ -134,6 +164,20 @@ func (c *Client) Login() error {
 	return nil
 }
 
+// LoginContext authenticates a caller-supplied request token with
+// cancellation: unlike Login it touches stdin never — a cancelled context
+// aborts before the Authenticate step. Prefer AutoLogin for automated flows.
+// (WAVE9-B, P1-162.)
+func (c *Client) LoginContext(ctx context.Context, requestToken string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := c.Authenticate(requestToken); err != nil {
+		return err
+	}
+	return nil
+}
+
 // AutoLogin handles the entire authentication flow automatically using credentials.
 //
 // This function logs in a user programmatically by sending the credentials,
@@ -150,6 +194,11 @@ func (c *Client) Login() error {
 func (c *Client) AutoLogin(username, password, totpSecret string) error {
 	loginURL := "https://api.arrow.trade/auth/app/login"
 
+	// WAVE9-A: snapshot AppID under RLock.
+	c.mu.RLock()
+	autoAppID := c.Config.AppID
+	c.mu.RUnlock()
+
 	// Step 1: Send Login Request (R-099: json.Marshal, never raw interpolation)
 	loginBody := struct {
 		UserID       string `json:"userID"`
@@ -160,7 +209,7 @@ func (c *Client) AutoLogin(username, password, totpSecret string) error {
 		IsAppLogin   bool   `json:"isAppLogin"`
 	}{
 		UserID: username, Password: password, CaptchaID: nil,
-		AppID: c.Config.AppID, IsAppLogin: true,
+		AppID: autoAppID, IsAppLogin: true,
 	}
 	loginPayload, err := json.Marshal(loginBody)
 	if err != nil {
@@ -169,7 +218,7 @@ func (c *Client) AutoLogin(username, password, totpSecret string) error {
 	resp, err := c.rawRequest(loginURL, "POST", loginPayload)
 	if err != nil {
 		log.Error().Err(err).Msg("Login request failed")
-		return err
+		return &AuthError{Stage: "login", Err: err}
 	}
 
 	var loginResp struct {
@@ -180,18 +229,18 @@ func (c *Client) AutoLogin(username, password, totpSecret string) error {
 
 	if err := json.Unmarshal(resp, &loginResp); err != nil {
 		log.Error().Err(err).Msg("Failed to parse login response")
-		return err
+		return &AuthError{Stage: "login", Err: err}
 	}
 	// R-100: a missing requestId would send a broken 2FA request — fail fast.
 	if loginResp.Data.RequestID == "" {
-		return fmt.Errorf("auto-login: empty requestId from login response")
+		return &AuthError{Stage: "login", Err: fmt.Errorf("auto-login: empty requestId from login response")}
 	}
 
 	// Step 2: Generate TOTP Code
 	passcode, err := generateTOTP(totpSecret)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to generate TOTP code")
-		return err
+		return &AuthError{Stage: "totp", Err: err}
 	}
 
 	// Step 3: Validate 2FA (R-099: json.Marshal)
@@ -206,10 +255,10 @@ func (c *Client) AutoLogin(username, password, totpSecret string) error {
 	if err != nil {
 		return fmt.Errorf("marshal 2fa payload: %w", err)
 	}
-	resp, err = c.rawRequest("https://api.arrow.trade/auth/validate-2fa", "POST", totpPayload)
+	resp, err = c.rawRequest("https://edge.arrow.trade/auth/validate-2fa", "POST", totpPayload)
 	if err != nil {
 		log.Error().Err(err).Msg("2FA validation failed")
-		return err
+		return &AuthError{Stage: "totp", Err: err}
 	}
 
 	var totpResp struct {
@@ -220,31 +269,43 @@ func (c *Client) AutoLogin(username, password, totpSecret string) error {
 
 	if err := json.Unmarshal(resp, &totpResp); err != nil {
 		log.Error().Err(err).Msg("Failed to parse 2FA response")
-		return err
+		return &AuthError{Stage: "redirect", Err: err}
 	}
 
 	// Step 4: Extract Request Token from Redirect URL
 	parsedURL, err := url.Parse(totpResp.Data.RedirectURL)
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to parse redirect URL")
-		return err
+		return &AuthError{Stage: "redirect", Err: err}
 	}
 
 	requestToken := parsedURL.Query().Get("request-token")
 	// R-100: never authenticate with an empty token — the old code silently
 	// proceeded and the Authenticate call failed opaquely.
 	if requestToken == "" {
-		return fmt.Errorf("auto-login: no request-token in redirect URL")
+		return &AuthError{Stage: "redirect", Err: fmt.Errorf("auto-login: no request-token in redirect URL")}
 	}
 
 	// Step 5: Authenticate and Get Access Token
 	if _, err := c.Authenticate(requestToken); err != nil {
 		log.Error().Err(err).Msg("Authentication failed")
-		return err
+		return &AuthError{Stage: "authenticate", Err: err}
 	}
 	fmt.Fprintln(os.Stderr, "arrow-auth: AutoLogin successful.")
 	return nil
 }
+
+// AuthError distinguishes AutoLogin failure stages (WAVE9-B, P1-163/164):
+// bad-creds ("login"), bad-TOTP ("totp"), network/redirect ("redirect"),
+// broker rejection ("authenticate"). Callers switch on Stage instead of
+// parsing message text.
+type AuthError struct {
+	Stage string
+	Err   error
+}
+
+func (e *AuthError) Error() string { return "autologin " + e.Stage + ": " + e.Err.Error() }
+func (e *AuthError) Unwrap() error { return e.Err }
 
 // generateTOTP generates a TOTP (Time-based One-Time Password) code using a given secret.
 //
