@@ -292,10 +292,13 @@ func ParseMarketTick(data []byte) (MarketTick, error) {
 	switch len(data) {
 	case 13, 17, 93, 241, 249:
 		// Base payloads: LTP / LTPC / QUOTE / FULL (legacy 241 / current 249).
-	case 29, 33, 109, 265:
+	case 29, 33, 109, 257, 265:
 		// Closing Auction Session: base payload + 16-byte trailer
 		// (imbalance_qty i64, indicative_close i32, ref_price i32) appended
 		// after ~15:15 IST (pyarrow_client sockets.py).
+		// P1-200: 257 is legacy full (241) + trailer; 265 is current
+		// full (249) + trailer. Stripped base reuses the same inner
+		// dispatch (241->parseFull(base,101)), so no new parse path.
 		base, cas = data[:len(data)-16], data[len(data)-16:]
 	default:
 		return MarketTick{}, fmt.Errorf("unsupported market tick payload size: %d", len(data))
@@ -312,6 +315,10 @@ func ParseMarketTick(data []byte) (MarketTick, error) {
 		tick = parseFull(base, 101) // legacy layout: depth immediately after limits
 	case 249:
 		tick = parseFull(base, 109) // current wire: 8 reserved bytes after limits
+	default:
+		// P1-200: unreachable today (outer table gates sizes), but a
+		// future table edit must fail closed — never a silent zero tick.
+		return MarketTick{}, fmt.Errorf("unsupported market tick base size: %d (frame %d)", len(base), len(data))
 	}
 	if len(cas) == 16 {
 		tick.ImbalanceQty = beI64(cas[0:8])
