@@ -55,6 +55,11 @@ public final class EodController {
      * rewrite in {@link EodControllerTool#extend}.
      */
     public static boolean isDeleteBlocked(EodPlanner.Plan plan) {
+        // P4-113: a noDays table plans null — nothing on file, nothing to
+        // protect. Dereferencing blindly NPEs and defeats the guard.
+        if (plan == null) {
+            return false;
+        }
         return plan.requiresExtension();
     }
 
@@ -110,7 +115,12 @@ public final class EodController {
         return plans;
     }
 
-    /** Overall status from the per-table plans. */
+    /** Overall status from the per-table plans.
+     *  P4-339: safetyFloor is intentionally unused — the per-table margin vs
+     *  floor decision already happened inside EodPlanner.plan (each plan
+     *  carries requiresExtension); re-checking a single floor here would
+     *  contradict per-table live TTLs. The parameter is kept for API symmetry
+     *  with planTables so callers pass one floor consistently. */
     public static Status statusOf(List<TablePlan> plans, Duration safetyFloor) {
         for (TablePlan p : plans) {
             if (!p.noDays() && p.plan().requiresExtension()) {
@@ -137,8 +147,14 @@ public final class EodController {
             long nowMs) {
         return days.stream().filter(d -> {
             LocalDate date = d.tradingDateAsLocalDate();
+            // P4-271: gate every non-terminal state by runDate — a
+            // future-dated in-flight or retryable day must wait for its EOD
+            // boundary, not advance early.
+            if (date.isAfter(runDate)) {
+                return false;
+            }
             return switch (d.state()) {
-                case PENDING -> !date.isAfter(runDate);
+                case PENDING -> true;
                 case WRITING, COMMITTED, VERIFYING -> true;
                 case FAILED_RETRYABLE -> d.nextRetryAtMs() <= nowMs;
                 case FAILED_MANUAL, VERIFIED -> false;
@@ -168,8 +184,14 @@ public final class EodController {
             }
         }
         days = store.readAll(); // re-read after creating the run-date records
+        // P4-272: scope the drive like reconcile() does — a store holding
+        // other tables' days must not have them mutated by an unrelated run.
+        Set<String> scope = Set.copyOf(tables);
         List<RunOutcome> outcomes = new ArrayList<>();
         for (EodOffloadRecord day : dueDays(days, runDate, nowMs)) {
+            if (!scope.contains(day.tableName())) {
+                continue;
+            }
             outcomes.add(advance(store, executor, day, nowMs));
         }
         return outcomes;
@@ -199,7 +221,19 @@ public final class EodController {
 
     private static RunOutcome afterOffload(EodStateStore store, EodOffloadExecutor executor,
             EodOffloadRecord writing, EodControllerState from, long nowMs) throws Exception {
-        OffloadResult result = executor.offload(writing);
+        OffloadResult result;
+        try {
+            result = executor.offload(writing);
+        } catch (Exception e) {
+            // Throw == returned failure (executor contract): FAILED_RETRYABLE
+            // with backoff, never VERIFIED — and the loop continues with the
+            // remaining due days.
+            result = OffloadResult.failure("offload threw: "
+                    + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+        }
+        if (result == null) {
+            result = OffloadResult.failure("offload returned null");
+        }
         if (result.success()) {
             EodOffloadRecord content = withContent(writing, result);
             EodOffloadRecord committed = content.transition(EodControllerState.COMMITTED, nowMs);
@@ -223,10 +257,15 @@ public final class EodController {
             store.upsert(verifying);
         }
         boolean ok;
+        // P4-273: keep the root cause — a bare ok=false makes retryable vs
+        // manual failures indistinguishable in alerts.
+        String verifyError = "verify failed (copy did not reconcile)";
         try {
             ok = executor.verify(verifying);
         } catch (Exception e) {
             ok = false;
+            verifyError = "verify threw: "
+                    + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
         }
         if (ok) {
             EodOffloadRecord verified = verifying.transition(EodControllerState.VERIFIED, nowMs);
@@ -238,7 +277,7 @@ public final class EodController {
         store.upsert(failed);
         return new RunOutcome(failed.tradingDate(), failed.tableName(),
                 committedOrVerifying.state(), EodControllerState.FAILED_RETRYABLE, false,
-                "verify failed (copy did not reconcile)");
+                verifyError);
     }
 
     // ── reconcile / reset ─────────────────────────────────────────────────

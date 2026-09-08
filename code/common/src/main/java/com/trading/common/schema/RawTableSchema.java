@@ -29,11 +29,23 @@ public final class RawTableSchema {
     /** Immutable LOG table holding every accepted market tick. */
     public static final String TABLE = "raw_table_1";
 
+    /** Table kind — LOG (no primary key). */
+    public static final String TABLE_KIND = "LOG";
+
+    /** Live log retention (DDL {@code table.log.ttl}). */
+    public static final String LOG_TTL = "9d";
+
+    /** Live partition retention (DDL {@code table.auto-partition.num-retention}). */
+    public static final String PARTITION_RETENTION = "9";
+
     /** The table routes by instrument_token (16 buckets). */
     public static final String BUCKET_KEY = "instrument_token";
 
     /** The table uses 16 buckets (DDL bucket.num = '16'). */
     public static final int BUCKET_COUNT = 16;
+
+    /** Partition key — must be COLUMNS.get(0) for the v3 daily-partition migration. */
+    public static final String PARTITION_KEY = "event_day";
 
     /**
      * The 21 raw columns in DDL index order (v3, daily-partition migration). Physical
@@ -100,4 +112,32 @@ public final class RawTableSchema {
 
     /** Column count — must equal {@code COLUMNS.size()}; mirrors the DDL. */
     public static final int FIELD_COUNT = COLUMNS.size();
+
+    private static final java.util.Set<String> ALLOWED_TYPE_ROOTS =
+            java.util.Set.of("STRING", "BIGINT", "BYTES");
+
+    static {
+        if (COLUMN_TYPE_ROOTS.size() != COLUMNS.size()) {
+            throw new IllegalStateException("COLUMNS(" + COLUMNS.size()
+                    + ") != COLUMN_TYPE_ROOTS(" + COLUMN_TYPE_ROOTS.size() + ")");
+        }
+        if (FIELD_COUNT != COLUMNS.size()) {
+            throw new IllegalStateException("FIELD_COUNT drift");
+        }
+        if (!COLUMNS.contains(BUCKET_KEY)) {
+            throw new IllegalStateException("BUCKET_KEY not in COLUMNS: " + BUCKET_KEY);
+        }
+        if (!PARTITION_KEY.equals(COLUMNS.get(0))) {
+            throw new IllegalStateException("PARTITION_KEY must be COLUMNS.get(0)");
+        }
+        // Allowed vocabulary is intentionally narrow: DdlText.type() accepts a
+        // wider forward-cover set (TIMESTAMP/DATE/DECIMAL/...), but today's
+        // raw corpus is STRING/BIGINT/BYTES only — a wider root here means a
+        // DDL/bootstrap mismatch, so fail at class-load.
+        for (String root : COLUMN_TYPE_ROOTS) {
+            if (!ALLOWED_TYPE_ROOTS.contains(root)) {
+                throw new IllegalStateException("Unsupported type root: " + root);
+            }
+        }
+    }
 }

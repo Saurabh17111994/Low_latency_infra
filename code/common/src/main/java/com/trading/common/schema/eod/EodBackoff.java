@@ -37,8 +37,11 @@ public final class EodBackoff {
             throw new IllegalArgumentException("rng must not be null");
         }
         long exponent = Math.min(Math.max(retryCount, 0), 20);
-        long expBackoff = baseMs * (1L << exponent);
-        long capped = Math.min(expBackoff, maxMs);
+        // P4-270: saturate before multiplying — baseMs * (1L << exponent)
+        // overflows to negative for huge tuned baseMs, and min(negative, max)
+        // returns the negative (tight retry loop via past nextRetryAtMs).
+        long shift = 1L << exponent;
+        long capped = baseMs > maxMs / shift ? maxMs : baseMs * shift;
         double jitter = 0.8 + 0.4 * rng.nextDouble(); // [0.8, 1.2)
         return Math.min((long) (capped * jitter), maxMs);
     }

@@ -54,12 +54,22 @@ public final class ExecutionGateColumns {
             false, false, false, false, true, true, true, true, true, false,
             true, true, true, true, true, true, false);
 
-    /** DDL column names in index order (diagnostics + agreement pin). */
-    public static final String[] NAMES = {
+    /** DDL column names in index order (diagnostics + agreement pin). Immutable. */
+    public static final List<String> NAMES = List.of(
             "execution_partition_id", "account_scope_id", "state", "epoch",
             "reason", "detection_time", "evidence_hash", "approval_1",
             "approval_2", "transition_ts", "owner_instance_id", "fence_token",
             "fence_acquired_ts", "lease_expires_ts", "fence_lost_ts",
-            "approved_evidence_hash", "schema_version"
-    };
+            "approved_evidence_hash", "schema_version");
+
+    static {
+        if (NAMES.size() != FIELD_COUNT
+                || TYPE_ROOTS.size() != FIELD_COUNT
+                || COLUMN_NULLABLE_IN_DDL.size() != FIELD_COUNT) {
+            throw new ExceptionInInitializerError("ExecutionGateColumns drift: FIELD_COUNT="
+                    + FIELD_COUNT + " NAMES=" + NAMES.size()
+                    + " TYPE_ROOTS=" + TYPE_ROOTS.size()
+                    + " NULLABLE=" + COLUMN_NULLABLE_IN_DDL.size());
+        }
+    }
 }

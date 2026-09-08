@@ -146,6 +146,57 @@ class EodControllerTest {
         assertThat(due).doesNotContain(pendingFuture, retryFuture, manual, verifiedDay(D1));
     }
 
+    @Test
+    void futureDatedInFlightDaysWaitForTheirBoundary() {
+        // P4-271: a future WRITING day (clock skew / pre-seeded) must not
+        // advance before its EOD boundary, even though it is in-flight.
+        EodOffloadRecord futureWriting = EodOffloadRecord.initial(D2.plusDays(1), TABLE, "2", NOW_MS)
+                .transition(EodControllerState.WRITING, NOW_MS);
+        List<EodOffloadRecord> due = EodController.dueDays(
+                List.of(futureWriting), D2, NOW_MS);
+        assertThat(due).isEmpty();
+    }
+
+    @Test
+    void verifyThrowSurfacesRootCause() throws Exception {
+        // P4-273: a throwing verify must land FAILED_RETRYABLE with the cause
+        // in the note, not a generic "did not reconcile".
+        InMemoryEodStateStore store = new InMemoryEodStateStore();
+        EodOffloadExecutor throwing = new EodOffloadExecutor() {
+            @Override
+            public OffloadResult offload(EodOffloadRecord record) {
+                return new OffloadResult(true, 0, 0, 1, 1, "s", "t", "snap", null);
+            }
+
+            @Override
+            public boolean verify(EodOffloadRecord committedOrVerifying) {
+                throw new IllegalStateException("R2 SigV4 timeout");
+            }
+        };
+        store.upsert(EodOffloadRecord.initial(D1, TABLE, "2", NOW_MS));
+        List<EodController.RunOutcome> outcomes = EodController.runOnce(
+                store, throwing, D1, List.of(TABLE), "2", NOW);
+        assertThat(outcomes).hasSize(1);
+        assertThat(outcomes.get(0).to()).isEqualTo(EodControllerState.FAILED_RETRYABLE);
+        assertThat(outcomes.get(0).note()).contains("R2 SigV4 timeout");
+    }
+
+    @Test
+    void runOnceIgnoresOutOfScopeTables() throws Exception {
+        // P4-272: a store holding another table's due day must not have it
+        // mutated by this run.
+        InMemoryEodStateStore store = new InMemoryEodStateStore();
+        store.upsert(EodOffloadRecord.initial(D1, "OTHER_TABLE", "2", NOW_MS));
+        MockEodOffloadExecutor executor = new MockEodOffloadExecutor(true, true);
+        List<EodController.RunOutcome> outcomes = EodController.runOnce(
+                store, executor, D1, List.of(TABLE), "2", NOW);
+        assertThat(outcomes).extracting(EodController.RunOutcome::table)
+                .doesNotContain("OTHER_TABLE");
+        assertThat(store.raw().get(EodOffloadStateColumns.recordId(
+                D1.toString(), "OTHER_TABLE")).state())
+                .isEqualTo(EodControllerState.PENDING);
+    }
+
     // ── run drive ──────────────────────────────────────────────────────────
 
     @Test
@@ -267,6 +318,42 @@ class EodControllerTest {
     }
 
     // ── reconcile / reset ──────────────────────────────────────────────────
+
+    @Test
+    void throwingExecutorFailsClosedToRetryable() throws Exception {
+        EodOffloadExecutor throwing = new EodOffloadExecutor() {
+            @Override
+            public OffloadResult offload(EodOffloadRecord record) throws Exception {
+                throw new java.io.IOException("lake unreachable");
+            }
+
+            @Override
+            public boolean verify(EodOffloadRecord committedOrVerifying) {
+                return true;
+            }
+        };
+        InMemoryEodStateStore store = new InMemoryEodStateStore();
+        store.upsert(EodOffloadRecord.initial(D2, TABLE, "2", NOW_MS));
+        java.util.List<EodController.RunOutcome> outcomes = EodController.runOnce(
+                store, throwing, D2, List.of(TABLE), "2", NOW);
+        assertThat(outcomes).hasSize(1);
+        assertThat(outcomes.get(0).to()).isEqualTo(EodControllerState.FAILED_RETRYABLE);
+        assertThat(outcomes.get(0).note()).contains("lake unreachable");
+        assertThat(store.raw().get(EodOffloadStateColumns.recordId(D2.toString(), TABLE)).state())
+                .isEqualTo(EodControllerState.FAILED_RETRYABLE);
+    }
+
+    @Test
+    void offloadResultInvariantsFailFast() {
+        assertThatThrownBy(() -> OffloadResult.failure("  "))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new OffloadResult(true, 0, 1, 1, 1, "s", "t", "snap", "boom"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new OffloadResult(false, 0, 1, 1, 1, "s", "t", "snap", ""))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new OffloadResult(true, 2, 1, 1, 1, "s", "t", "snap", null))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 
     @Test
     void reconcileVerifiesCommittedDay() throws Exception {

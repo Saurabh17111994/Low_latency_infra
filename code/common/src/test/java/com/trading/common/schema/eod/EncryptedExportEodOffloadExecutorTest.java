@@ -33,6 +33,17 @@ class EncryptedExportEodOffloadExecutorTest {
                 Long.MAX_VALUE, 1_700_000_000_000L);
     }
 
+    /** Mirror the controller's withContent: the committed record carries the
+     *  offload's evidence, which verify() binds against (P4-112). */
+    private static EodOffloadRecord committedFrom(OffloadResult r) {
+        EodOffloadRecord base = record();
+        return new EodOffloadRecord(base.tradingDate(), base.tableName(), base.schemaVersion(),
+                r.sourceOffsetStart(), r.sourceOffsetEnd(), r.rowCount(), r.byteCount(),
+                r.sourceHash(), r.targetHash(), r.icebergSnapshotId(), base.state(),
+                base.retryCount(), base.nextRetryAtMs(), base.earliestAllowedSourceExpiryMs(),
+                base.updatedAtMs());
+    }
+
     private static byte[] key() {
         byte[] k = new byte[32];
         for (int i = 0; i < k.length; i++) {
@@ -58,6 +69,7 @@ class EncryptedExportEodOffloadExecutorTest {
 
         OffloadResult r = ex.offload(record());
         assertThat(r.success()).isTrue();
+        EodOffloadRecord committed = committedFrom(r);
         assertThat(r.rowCount()).isEqualTo(42L);
         assertThat(r.byteCount()).isEqualTo("payload-rows-for-the-day".length());
         assertThat(r.sourceHash()).isNotBlank();
@@ -74,7 +86,7 @@ class EncryptedExportEodOffloadExecutorTest {
         assertThat(new String(sealed, StandardCharsets.ISO_8859_1))
                 .doesNotContain("payload-rows-for-the-day");
 
-        assertThat(ex.verify(record())).isTrue();
+        assertThat(ex.verify(committed)).isTrue();
     }
 
     @Test
@@ -127,7 +139,8 @@ class EncryptedExportEodOffloadExecutorTest {
         // Rotate: the store retains v1 and adds v2 as current.
         EncryptedExportEodOffloadExecutor rotated =
                 executor(MasterKeyStore.of(Map.of(1, v1, 2, v2)), src, staging, 1L);
-        assertThat(rotated.verify(record())).isTrue(); // v1 bundle still verifies
+        OffloadResult vr = v1Store.offload(record());
+        assertThat(rotated.verify(committedFrom(vr))).isTrue(); // v1 bundle still verifies
 
         Files.writeString(src.resolve("2026-08-14__Trade_Decisions.plain"), "payload-v2");
         assertThat(rotated.offload(record()).success()).isTrue();
@@ -191,5 +204,38 @@ class EncryptedExportEodOffloadExecutorTest {
         } catch (Exception expected) {
             // expected — AEAD rejects the wrong AAD
         }
+    }
+
+    @Test
+    void perRecordRowCountsAreStamped() throws Exception {
+        Path src = Files.createDirectories(tmp.resolve("src2"));
+        Path staging = Files.createDirectories(tmp.resolve("staging2"));
+        Files.writeString(src.resolve("2026-08-14__Trade_Decisions.plain"), "payload");
+        EncryptedExportEodOffloadExecutor ex = new EncryptedExportEodOffloadExecutor(
+                staging, MasterKeyStore.of(Map.of(1, key())), new FileBundleSource(src),
+                record -> record.tableName().equals("Trade_Decisions") ? 7L : 99L);
+        OffloadResult r = ex.offload(record());
+        assertThat(r.success()).isTrue();
+        assertThat(r.rowCount()).isEqualTo(7L);
+        assertThat(ex.verify(committedFrom(r))).isTrue();
+    }
+
+    @Test
+    void swappedManifestFailsVerify() throws Exception {
+        Path src = Files.createDirectories(tmp.resolve("src3"));
+        Path staging = Files.createDirectories(tmp.resolve("staging3"));
+        Files.writeString(src.resolve("2026-08-14__Trade_Decisions.plain"), "payload");
+        EncryptedExportEodOffloadExecutor ex = executor(
+                MasterKeyStore.of(Map.of(1, key())), src, staging, 1L);
+        OffloadResult r = ex.offload(record());
+        assertThat(r.success()).isTrue();
+        EodOffloadRecord committed = committedFrom(r);
+
+        // Attacker rewrites the manifest with self-consistent hashes for a
+        // different payload — must fail against the committed evidence.
+        Path manifest = staging.resolve("2026-08-14__Trade_Decisions.manifest.json");
+        String json = Files.readString(manifest).replace("\"byte_count\":7", "\"byte_count\":8");
+        Files.writeString(manifest, json);
+        assertThat(ex.verify(committed)).isFalse();
     }
 }

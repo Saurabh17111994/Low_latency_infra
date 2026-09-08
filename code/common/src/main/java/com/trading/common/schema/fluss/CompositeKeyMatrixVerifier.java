@@ -100,8 +100,13 @@ public final class CompositeKeyMatrixVerifier {
             for (int i = 0; i < MATRIX.size(); i++) {
                 CellSpec spec = MATRIX.get(i);
                 String name = base + "_cell" + (i + 1);
-                Table table = createCompositeTable(admin, connection, name, spec, timeout);
-                created.add(name);
+                Table table;
+                try {
+                    table = createCompositeTable(admin, connection, name, spec, timeout);
+                } finally {
+                    // createTable succeeded server-side even if getTable failed
+                    created.add(name);
+                }
                 String outcome = runCell(table, timeout);
                 boolean matched = spec.matches(outcome);
                 cells.add(new CellResult(spec.label(), spec.bucketKeys(), spec.kvFormatVersion(),
@@ -117,6 +122,9 @@ public final class CompositeKeyMatrixVerifier {
                 try {
                     admin.dropTable(TablePath.of("default", name), false)
                             .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
                 } catch (Exception e) {
                     // Best-effort drop — a leftover scratch table is a nuisance,
                     // not a matrix failure.
@@ -132,8 +140,11 @@ public final class CompositeKeyMatrixVerifier {
         TableDescriptor.Builder tb = TableDescriptor.builder()
                 .schema(COMPOSITE_SCHEMA)
                 // Iceberg key encoding is triggered by the (cluster-inherited)
-                // datalake format; the table also declares it explicitly so the
-                // matrix does not depend on cluster defaults.
+                // datalake format; the table also declares format=iceberg
+                // explicitly so the matrix does not depend on cluster defaults.
+                // enabled stays false (pinned evidence 2026-08-15 shows the
+                // IcebergKeyEncoder failure fires with format alone) — enabling
+                // tiering on scratch tables risks real lake writes on dev.
                 .property("table.datalake.enabled", "false")
                 .property("table.datalake.format", "iceberg")
                 .distributedBy(4, spec.bucketKeys().toArray(new String[0]));
@@ -151,14 +162,23 @@ public final class CompositeKeyMatrixVerifier {
      * failure message (never throws) — the caller asserts the expected outcome.
      */
     private static String runCell(Table table, Duration timeout) {
+        // NOTE (P4-145): UpsertWriter/Lookuper are NOT Closeable in this Fluss
+        // version (only Table is AutoCloseable) — flush is the release path,
+        // guarded below so it cannot mask the upsert outcome. Table lifecycle
+        // stays with the caller (verify drops scratch tables in finally).
+        UpsertWriter writer = table.newUpsert().createWriter();
         try {
-            UpsertWriter writer = table.newUpsert().createWriter();
             try {
                 writer.upsert(GenericRow.of(
                                 BinaryString.fromString("a"), BinaryString.fromString("b"), 7L))
                         .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             } finally {
-                writer.flush();
+                try {
+                    writer.flush();
+                } catch (Exception flushEx) {
+                    // do not mask an in-flight upsert failure; runCell reports
+                    // the upsert outcome, cleanup failures must not replace it
+                }
             }
             Lookuper lookuper = table.newLookup().createLookuper();
             InternalRow found = lookuper.lookup(
@@ -169,8 +189,15 @@ public final class CompositeKeyMatrixVerifier {
             }
             return found.getLong(2) == 7L ? "PASS" : "unexpected value " + found.getLong(2);
         } catch (Exception e) {
-            String msg = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
-            return msg.split("\n")[0];
+            StringBuilder chained = new StringBuilder();
+            for (Throwable t = e; t != null; t = t.getCause()) {
+                if (t.getMessage() != null) {
+                    chained.append(t.getMessage()).append(" | ");
+                } else {
+                    chained.append(t.getClass().getSimpleName()).append(" | ");
+                }
+            }
+            return chained.toString().split("\n")[0];
         }
     }
 }

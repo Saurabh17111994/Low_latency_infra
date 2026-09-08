@@ -43,10 +43,13 @@ import org.slf4j.LoggerFactory;
  * payload_hash        STRING   — SHA-256 hex
  * detected_ts         BIGINT   — epoch ms
  * detail              STRING   — scrubbed operator detail
- * schema_version      STRING   — v1
+ * schema_version      STRING   — "1" (header/manifest v1; P4-330)
  * </pre>
  */
 public class QuarantineWriter implements QuarantineSink {
+
+    /** Row schema version — must match the DDL header + manifest (P4-330). */
+    static final String SCHEMA_VERSION = "1";
 
     private static final Logger LOG = LoggerFactory.getLogger(QuarantineWriter.class);
 
@@ -149,7 +152,7 @@ public class QuarantineWriter implements QuarantineSink {
             GenericRow row = GenericRow.of(
                     bs(quarantineId), bs(reasonName), instrumentToken,
                     bs(exchange), bs(symbol), payload, bs(payloadHash),
-                    now.toEpochMilli(), bs(safeDetail), bs("v1"));
+                    now.toEpochMilli(), bs(safeDetail), bs(SCHEMA_VERSION));
             // Fluss appends are asynchronous: failures surface on the future,
             // not by throwing from append(). Observe it so async failures are
             // logged at ERROR and never silently swallowed (R-033).
@@ -221,15 +224,26 @@ public class QuarantineWriter implements QuarantineSink {
         }
     }
 
-    /** Best-effort SHA-256 hash of payload bytes. */
-    private static String computePayloadHash(byte[] data) {
-        if (data == null || data.length == 0) return "";
+    /**
+     * Best-effort SHA-256 hash of payload bytes (P4-222: missing payloads
+     * hash their actual bytes — never "" — so every stored row's
+     * payload_hash validates its raw_payload and no two distinct causes
+     * share one sentinel).
+     */
+    static String computePayloadHash(byte[] data) {
+        if (data == null) {
+            data = new byte[0];
+        }
+        return sha256Hex(data);
+    }
+
+    private static String sha256Hex(byte[] data) {
         try {
             MessageDigest md = MessageDigest.getInstance("SHA-256");
             byte[] hash = md.digest(data);
             return HexFormat.of().formatHex(hash);
         } catch (NoSuchAlgorithmException e) {
-            return ""; // unreachable
+            throw new IllegalStateException("SHA-256 unavailable", e);
         }
     }
 

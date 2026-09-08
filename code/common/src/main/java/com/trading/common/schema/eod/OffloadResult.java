@@ -18,8 +18,29 @@ public record OffloadResult(
         String targetHash,
         String icebergSnapshotId,
         String error) {
+    public OffloadResult {
+        if (rowCount < 0 || byteCount < 0) {
+            throw new IllegalArgumentException("rowCount/byteCount must be >= 0");
+        }
+        if (sourceOffsetStart != -1 && sourceOffsetEnd != -1 && sourceOffsetStart > sourceOffsetEnd) {
+            throw new IllegalArgumentException("sourceOffsetStart > sourceOffsetEnd");
+        }
+        sourceHash = sourceHash == null ? "" : sourceHash;
+        targetHash = targetHash == null ? "" : targetHash;
+        icebergSnapshotId = icebergSnapshotId == null ? "" : icebergSnapshotId;
+        if (success) {
+            if (error != null && !error.isEmpty()) {
+                throw new IllegalArgumentException("success result must not carry error");
+            }
+        } else if (error == null || error.isBlank()) {
+            throw new IllegalArgumentException("failure result requires non-blank error");
+        }
+    }
 
     public static OffloadResult failure(String error) {
+        if (error == null || error.isBlank()) {
+            throw new IllegalArgumentException("failure requires non-blank error");
+        }
         return new OffloadResult(false, -1, -1, 0, 0, "", "", "", error);
     }
 }

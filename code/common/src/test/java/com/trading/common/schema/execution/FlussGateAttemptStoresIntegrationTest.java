@@ -152,11 +152,11 @@ class FlussGateAttemptStoresIntegrationTest {
     @DisplayName("WP-3: PREPARED-before-bridge + exactly-one + gate fence/approval durable")
     void preparedBeforeBridgeAndExactlyOneCommandOnDurableStore() throws Exception {
         String gateT = createTable(PREFIX + "g" + System.nanoTime(),
-                schemaFromOwnership(ExecutionGateColumns.NAMES,
+                schemaFromOwnership(ExecutionGateColumns.NAMES.toArray(new String[0]),
                         ExecutionGateColumns.TYPE_ROOTS, "execution_partition_id"),
                 4, "execution_partition_id");
         String attT = createTable(PREFIX + "a" + System.nanoTime(),
-                schemaFromOwnership(ExecutionAttemptsColumns.NAMES,
+                schemaFromOwnership(ExecutionAttemptsColumns.NAMES.toArray(new String[0]),
                         ExecutionAttemptsColumns.TYPE_ROOTS, "execution_attempt_id"),
                 8, "execution_attempt_id");
         String partition = "p-1";
@@ -230,11 +230,11 @@ class FlussGateAttemptStoresIntegrationTest {
     @DisplayName("WP-3: cross-restart — a fresh instance re-derives prior state and refuses a duplicate")
     void crossRestartHydrationSeesPriorStateAndRejectsDuplicate() throws Exception {
         String gateT = createTable(PREFIX + "g" + System.nanoTime(),
-                schemaFromOwnership(ExecutionGateColumns.NAMES,
+                schemaFromOwnership(ExecutionGateColumns.NAMES.toArray(new String[0]),
                         ExecutionGateColumns.TYPE_ROOTS, "execution_partition_id"),
                 4, "execution_partition_id");
         String attT = createTable(PREFIX + "a" + System.nanoTime(),
-                schemaFromOwnership(ExecutionAttemptsColumns.NAMES,
+                schemaFromOwnership(ExecutionAttemptsColumns.NAMES.toArray(new String[0]),
                         ExecutionAttemptsColumns.TYPE_ROOTS, "execution_attempt_id"),
                 8, "execution_attempt_id");
         String partition = "p-1";

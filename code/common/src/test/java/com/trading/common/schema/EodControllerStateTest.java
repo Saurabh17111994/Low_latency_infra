@@ -38,4 +38,26 @@ class EodControllerStateTest {
     assertThat(EodControllerState.PENDING.isRetryable()).isFalse();
     assertThat(EodControllerState.VERIFIED.isRetryable()).isFalse();
   }
+
+  @Test
+  void transitionTableMatchesOffloadRecord() {
+    for (EodControllerState from : EodControllerState.values()) {
+      for (EodControllerState to : EodControllerState.values()) {
+        assertThat(from.canTransitionTo(to))
+            .as(from + " -> " + to)
+            .isEqualTo(com.trading.common.schema.eod.EodOffloadRecord
+                .isLegalTransition(from, to));
+      }
+    }
+  }
+
+  @Test
+  void illegalJumpsRejectedAtSource() {
+    assertThat(EodControllerState.PENDING.canTransitionTo(EodControllerState.VERIFIED)).isFalse();
+    assertThat(EodControllerState.VERIFIED.canTransitionTo(EodControllerState.PENDING)).isFalse();
+    assertThat(EodControllerState.VERIFIED.canTransitionTo(EodControllerState.VERIFIED)).isFalse();
+    assertThat(EodControllerState.PENDING.canTransitionTo(EodControllerState.WRITING)).isTrue();
+    assertThat(EodControllerState.VERIFYING.canTransitionTo(EodControllerState.VERIFIED)).isTrue();
+    assertThat(EodControllerState.FAILED_MANUAL.canTransitionTo(EodControllerState.PENDING)).isTrue();
+  }
 }

@@ -81,9 +81,9 @@ class FlussProjectionWriterIntegrationTest {
             assertThat(readString(conn, db, "Positions",
                     new String[]{"pos-proj-1"}, 12)).isEqualTo("pb-proj-1");
             // Position_State handshake (Option B): per-instrument OPEN/CLOSED
-            // Positions OPEN -> Position_State status OPEN, PK instrument_token.
-            assertThat(readPositionStateLong(conn, db, 12345L, 0)).isEqualTo(12345L);
-            assertThat(readPositionStateString(conn, db, 12345L, 1)).isEqualTo("OPEN");
+            // Positions OPEN -> Position_State status OPEN, PK (account, token).
+            assertThat(readPositionStateLong(conn, db, 12345L, 1)).isEqualTo(12345L);
+            assertThat(readPositionStateString(conn, db, 12345L, 2)).isEqualTo("OPEN");
             // Order_Lifecycle PK = (account_scope_id, broker_order_id); col 1 = broker_order_id.
             assertThat(readString(conn, db, "Order_Lifecycle",
                     new String[]{ACCOUNT, "broker-proj-1"}, 1)).isEqualTo("broker-proj-1");
@@ -151,7 +151,7 @@ class FlussProjectionWriterIntegrationTest {
     private static Long readPositionStateLong(Connection conn, String db, long token, int colIndex) throws Exception {
         Table t = conn.getTable(TablePath.of(db, "Position_State"));
         Lookuper lookuper = t.newLookup().createLookuper();
-        InternalRow r = lookuper.lookup(GenericRow.of(token))
+        InternalRow r = lookuper.lookup(GenericRow.of(BinaryString.fromString(ACCOUNT), token))
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow();
         if (r == null || r.isNullAt(colIndex)) return null;
         return r.getLong(colIndex);
@@ -160,7 +160,7 @@ class FlussProjectionWriterIntegrationTest {
     private static String readPositionStateString(Connection conn, String db, long token, int colIndex) throws Exception {
         Table t = conn.getTable(TablePath.of(db, "Position_State"));
         Lookuper lookuper = t.newLookup().createLookuper();
-        InternalRow r = lookuper.lookup(GenericRow.of(token))
+        InternalRow r = lookuper.lookup(GenericRow.of(BinaryString.fromString(ACCOUNT), token))
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow();
         if (r == null || r.isNullAt(colIndex)) return null;
         return r.getString(colIndex).toString();
@@ -269,14 +269,16 @@ class FlussProjectionWriterIntegrationTest {
 
     private static void createPositionState(Admin admin, String db) throws Exception {
         Schema s = Schema.newBuilder()
+                .column("account_scope_id", DataTypes.STRING())
                 .column("instrument_token", DataTypes.BIGINT())
                 .column("status", DataTypes.STRING())
                 .column("position_id", DataTypes.STRING())
                 .column("updated_ts", DataTypes.BIGINT())
                 .column("closed_ts", DataTypes.BIGINT())
                 .column("closed_reason", DataTypes.STRING())
+                .column("source_version", DataTypes.BIGINT())
                 .column("schema_version", DataTypes.STRING())
-                .primaryKey("instrument_token")
+                .primaryKey("account_scope_id", "instrument_token")
                 .build();
         admin.createTable(TablePath.of(db, "Position_State"),
                 TableDescriptor.builder().schema(s).distributedBy(16, "instrument_token").build(), false)

@@ -11,6 +11,35 @@
 --   an order-lifecycle or position state machine.
 -- Scope: account_scope_id, execution_partition_id
 -- Schema version: 1
+--
+-- Domain contract (P4-081/P4-082/P4-083/P4-084/P4-235/P4-236 — LOG takes no
+-- PK; Fluss has no CHECK/DEFAULT/GRANT; enforced in running code, not here):
+--   idempotency (P4-081): instruction_id globally unique per intent; LOG has
+--     no PK BY DESIGN (a PK would flip to KV and destroy the audit trail).
+--     Readers MUST deduplicate on (instruction_id, request_hash): same id +
+--     same hash = replay (skip), same id + different hash = contract
+--     violation (quarantine + halt). Enforcers: IntentReader (documented
+--     single-writer) + DurableIntentDispatcher.classify + putIfAbsent commit
+--     (P4-004, pinned by IntentDeduplicatorTest).
+--   order fields (P4-082): enforced in ExecutionIntentBuilder.validate
+--     (fail-closed throw): quantity > 0; LIMIT <=> limit_price_paise present
+--     and > 0; MARKET must not carry a price; side/order_type/product_type/
+--     time_in_force non-blank. Free-form STRING in DDL is storage, not truth.
+--   expiry (P4-083, enforced): created_ts/expiry_ts epoch-millis UTC;
+--     builder rejects expiry_ts <= created_ts; readers MUST drop expired rows.
+--     Supersede chain (UNWITNESSED): supersedes_instruction_id dangling/self/
+--     cyclic guards exist nowhere — future writer work, not DDL.
+--   TTL guard (P4-084): 7d TTL must not expire any offset whose Iceberg
+--     manifest is not VERIFIED — block-delete-unverified guard + EOD extend
+--     + critical alert (see Retention above). Offload lag beyond 7d pages
+--     before data ages out; TTL value intentionally unchanged.
+--   sole writer (P4-235): Signal job sole writer (IntentReader single-writer
+--     loop downstream; Nautilus/Executor read-only). Fluss has no GRANTs —
+--     column ownership matrix is the authority, not a phantom ACL link.
+--   request_hash (P4-236): SHA-256 lowercase hex over the builder's '|'
+--     -joined length-prefixed canonical field list (ExecutionIntentBuilder
+--     join/sha256); writers MUST NOT truncate; readers compare exact string
+--     equality.
 
 CREATE TABLE Execution_Intent (
     instruction_id             STRING      NOT NULL,

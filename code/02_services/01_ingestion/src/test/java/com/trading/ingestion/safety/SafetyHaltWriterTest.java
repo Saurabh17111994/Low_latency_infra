@@ -96,6 +96,12 @@ class SafetyHaltWriterTest {
     }
 
     @Test
+    @DisplayName("row schema version matches DDL header v3 (bare numeric, not contract_version)")
+    void schemaVersionMatchesHeader() {
+        assertEquals("3", SafetyHaltWriter.SCHEMA_VERSION);
+    }
+
+    @Test
     @DisplayName("observe() propagates async append failures (R-034)")
     void observePropagatesAsyncAppendFailures() {
         CompletableFuture<AppendResult> failed =

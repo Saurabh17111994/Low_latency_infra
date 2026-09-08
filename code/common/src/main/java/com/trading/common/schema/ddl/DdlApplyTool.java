@@ -131,11 +131,9 @@ public final class DdlApplyTool {
         }
 
         // Dev capability: drop every live table whose name starts with the
-        // prefix (leftovers from interrupted prefixed runs).
+        // prefix (leftovers from interrupted prefixed runs). No manifest or
+        // ddl-dir needed — list + drop by prefix only.
         if (opts.cleanupPrefix != null) {
-            Path ddlDir = opts.ddlDir.toAbsolutePath();
-            Path manifestPath = ddlDir.resolve("schema_manifest.json");
-            SchemaManifest manifest = JSON.readValue(manifestPath.toFile(), SchemaManifest.class);
             Connection connection = null;
             Admin admin = null;
             try {
@@ -177,6 +175,24 @@ public final class DdlApplyTool {
             System.err.println("ddl-apply: manifest carries no tables");
             return 2;
         }
+        List<String> manifestErrors = new ArrayList<>();
+        for (SchemaManifestEntry entry : manifest.tables) {
+            if (entry == null) {
+                manifestErrors.add("null manifest entry");
+                continue;
+            }
+            try {
+                entry.validate();
+                entry.validateRouting();
+            } catch (IllegalArgumentException bad) {
+                manifestErrors.add(bad.getMessage());
+            }
+        }
+        if (!manifestErrors.isEmpty()) {
+            System.err.println("ddl-apply: MANIFEST VALIDATION FAILED:");
+            manifestErrors.forEach(f -> System.err.println("  - " + f));
+            return 2;
+        }
 
         // Step 2 — manifest/DDL checksums.
         List<String> checksumFailures = new ArrayList<>();
@@ -188,7 +204,8 @@ public final class DdlApplyTool {
                 continue;
             }
             byte[] bytes = Files.readAllBytes(ddl);
-            if (!entry.ddlSha256.equals(sha256Hex(bytes))) {
+            String actual = sha256Hex(bytes);
+            if (entry.ddlSha256 == null || !entry.ddlSha256.equalsIgnoreCase(actual)) {
                 checksumFailures.add(entry.ddlPath + " checksum mismatch (manifest vs DDL)");
                 continue;
             }
@@ -291,10 +308,13 @@ public final class DdlApplyTool {
                                         : e.getMessage())));
             }
             if (!matrix.passed()) {
-                System.err.println("ddl-apply: COMPAT-FLUSS-005 MATRIX FAILED (in-band):");
-                matrix.deviations().forEach(d -> System.err.println("  - " + d));
+                // Contract: refuse the apply BEFORE any table is created
+                // (catalog stays empty) — record matrix evidence and return
+                // before the Step 4 create loop.
                 failures.add("COMPAT-FLUSS-005 matrix in-band failed");
                 matrix.deviations().forEach(failures::add);
+                writeMatrixRefusedEvidence(opts, manifestPath, matrix, failures);
+                return 1;
             }
 
             // Step 4 — apply in deterministic order.
@@ -451,7 +471,10 @@ public final class DdlApplyTool {
             }
 
             if (opts.evidenceOut != null) {
-                Files.createDirectories(opts.evidenceOut.getParent());
+                Path parent = opts.evidenceOut.getParent();
+                if (parent != null) {
+                    Files.createDirectories(parent);
+                }
                 JSON.writeValue(opts.evidenceOut.toFile(), evidence);
             }
 
@@ -619,7 +642,7 @@ public final class DdlApplyTool {
     private static void ensureDatabase(Admin admin, String name) throws Exception {
         try {
             admin.createDatabase(name, org.apache.fluss.metadata.DatabaseDescriptor.builder()
-                    .build(), false).get();
+                    .build(), false).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
             System.out.println("ddl-apply: created database '" + name
                     + "' (catalog was absent)");
         } catch (Exception e) {
@@ -679,7 +702,8 @@ public final class DdlApplyTool {
                 out.add(label + ": effective PK " + info.getPrimaryKeys() + " != DDL "
                         + ddl.primaryKey());
             }
-            List<String> wantBucket = List.of(ddl.bucketKey().split(","));
+            List<String> wantBucket = Arrays.stream(ddl.bucketKey().split(","))
+                    .map(String::trim).filter(s -> !s.isEmpty()).toList();
             if (!info.getBucketKeys().equals(wantBucket)) {
                 out.add(label + ": KV bucket key " + info.getBucketKeys() + " != DDL "
                         + wantBucket);
@@ -783,19 +807,27 @@ public final class DdlApplyTool {
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    /** Scans every bucket and returns the total row count (fast 250 ms polls). */
+    /** Scans every bucket and returns the total row count (drain loop — slow appends included). */
     private static long scanCount(Table table, TableInfo info) throws Exception {
         long count = 0;
         for (int b = 0; b < info.getNumBuckets(); b++) {
             TableBucket tb = new TableBucket(info.getTableId(), b);
             try (BatchScanner scanner = table.newScan()
                          .limit(Integer.MAX_VALUE)
-                         .createBatchScanner(tb);
-                 CloseableIterator<InternalRow> it =
-                         scanner.pollBatch(Duration.ofMillis(250))) {
-                while (it.hasNext()) {
-                    it.next();
-                    count++;
+                         .createBatchScanner(tb)) {
+                while (true) {
+                    try (CloseableIterator<InternalRow> it =
+                            scanner.pollBatch(Duration.ofMillis(250))) {
+                        boolean any = false;
+                        while (it != null && it.hasNext()) {
+                            it.next();
+                            count++;
+                            any = true;
+                        }
+                        if (!any) {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -821,6 +853,22 @@ public final class DdlApplyTool {
             case BYTES -> new byte[] {(byte) (index + 1), 2};
             case DOUBLE -> 1.0d + index;
             case BOOLEAN -> true;
+            // Forward-cover arms (no TIMESTAMP/DATE/DECIMAL/CHAR column exists
+            // in today's 27 DDLs; DdlText.type() maps them for future DDLs):
+            // values must match what isSmokeFixtureRow/copyFieldValue expect.
+            case TIMESTAMP_WITHOUT_TIME_ZONE -> org.apache.fluss.row.TimestampNtz
+                    .fromLocalDateTime(java.time.LocalDateTime.of(2026, 1, 1, 0, 0)
+                            .plusSeconds(index));
+            case TIMESTAMP_WITH_LOCAL_TIME_ZONE -> org.apache.fluss.row.TimestampLtz
+                    .fromEpochMillis(1767225600000L + index * 1000L);
+            case DATE -> (int) java.time.LocalDate.of(2026, 1, 1).plusDays(index).toEpochDay();
+            case DECIMAL -> org.apache.fluss.row.Decimal.fromBigDecimal(
+                    java.math.BigDecimal.valueOf(1L + index), 38, 18);
+            case CHAR -> BinaryString.fromString("s" + index);
+            case TINYINT -> (byte) (1 + index);
+            case SMALLINT -> (short) (1 + index);
+            case FLOAT -> 1.0f + index;
+            case TIME_WITHOUT_TIME_ZONE -> (int) (index * 1000L);
             default -> throw new IllegalArgumentException("no smoke default for " + root);
         };
     }
@@ -833,6 +881,53 @@ public final class DdlApplyTool {
             sb.append(String.format("%02x", b));
         }
         return sb.toString();
+    }
+
+    /**
+     * Matrix-refused evidence: the apply stopped before creating any table,
+     * so the record carries zero tables plus the matrix FAIL cells.
+     */
+    private static void writeMatrixRefusedEvidence(Options opts, Path manifestPath,
+            CompositeKeyMatrixVerifier.Result matrix, List<String> failures) throws Exception {
+        System.err.println("ddl-apply: COMPAT-FLUSS-005 MATRIX FAILED (in-band):");
+        matrix.deviations().forEach(d -> System.err.println("  - " + d));
+        ObjectNode evidence = JSON.createObjectNode();
+        evidence.put("record_id", "ddl-apply-" + Instant.now());
+        evidence.put("applied_manifest_id", sha256Hex(Files.readAllBytes(manifestPath)));
+        evidence.put("status", "FAIL");
+        evidence.put("timestamp", Instant.now().toString());
+        evidence.put("bootstrap", opts.bootstrap);
+        evidence.put("table_prefix", opts.prefix);
+        evidence.put("tables_applied", 0);
+        evidence.putArray("tables");
+        ArrayNode fail = evidence.putArray("failures");
+        failures.forEach(fail::add);
+        ObjectNode matrixNode = evidence.putObject("matrix");
+        matrixNode.put("status", "FAIL");
+        ArrayNode matrixCells = matrixNode.putArray("cells");
+        for (CompositeKeyMatrixVerifier.CellResult c : matrix.cells()) {
+            ObjectNode cell = matrixCells.addObject();
+            cell.put("label", c.label());
+            cell.put("bucket_key", String.join(",", c.bucketKeys()));
+            cell.put("kv_format_version", c.kvFormatVersion() == null
+                    ? "absent" : c.kvFormatVersion());
+            cell.put("expected", c.expectedPass() ? "PASS" : "FAIL");
+            cell.put("outcome", c.outcome());
+            cell.put("matched", c.matched());
+        }
+        writeEvidenceFile(opts, evidence);
+        System.err.println("ddl-apply: RESULT=FAIL EXIT=1 TABLES=0 (matrix refused before create)");
+    }
+
+    /** Evidence file write with null-parent guard (bare `--evidence-out x.json`). */
+    private static void writeEvidenceFile(Options opts, ObjectNode evidence) throws Exception {
+        if (opts.evidenceOut != null) {
+            Path parent = opts.evidenceOut.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            JSON.writeValue(opts.evidenceOut.toFile(), evidence);
+        }
     }
 
     // ── options / record types ────────────────────────────────────────────
@@ -905,25 +1000,57 @@ public final class DdlApplyTool {
                         return false;
                     }
                 }
+                case TIMESTAMP_WITHOUT_TIME_ZONE -> {
+                    if (!want.equals(row.getTimestampNtz(i, 6))) {
+                        return false;
+                    }
+                }
+                case TIMESTAMP_WITH_LOCAL_TIME_ZONE -> {
+                    if (!want.equals(row.getTimestampLtz(i, 6))) {
+                        return false;
+                    }
+                }
+                case DATE -> {
+                    if (row.getInt(i) != ((Number) want).intValue()) {
+                        return false;
+                    }
+                }
+                case DECIMAL -> {
+                    if (!want.equals(row.getDecimal(i, 38, 18))) {
+                        return false;
+                    }
+                }
+                case CHAR -> {
+                    if (!want.equals(row.getChar(i, 1))) {
+                        return false;
+                    }
+                }
+                case TINYINT -> {
+                    if (row.getByte(i) != ((Number) want).byteValue()) {
+                        return false;
+                    }
+                }
+                case SMALLINT -> {
+                    if (row.getShort(i) != ((Number) want).shortValue()) {
+                        return false;
+                    }
+                }
+                case FLOAT -> {
+                    if (row.getFloat(i) != ((Number) want).floatValue()) {
+                        return false;
+                    }
+                }
+                case TIME_WITHOUT_TIME_ZONE -> {
+                    if (row.getInt(i) != ((Number) want).intValue()) {
+                        return false;
+                    }
+                }
                 default -> {
                     return false;
                 }
             }
         }
         return true;
-    }
-
-    private static Object fieldValue(InternalRow row, RowType rowType, int index) {
-        DataTypeRoot root = rowType.getFields().get(index).getType().getTypeRoot();
-        return switch (root) {
-            case STRING -> row.getString(index);
-            case BIGINT -> row.getLong(index);
-            case INTEGER -> row.getInt(index);
-            case DOUBLE -> row.getDouble(index);
-            case BOOLEAN -> row.getBoolean(index);
-            case BYTES -> row.getBytes(index);
-            default -> throw new IllegalArgumentException("unsupported row type " + root);
-        };
     }
 
     private static int indexByName(RowType rowType, String name) {
@@ -935,28 +1062,40 @@ public final class DdlApplyTool {
         throw new IllegalArgumentException("column not found: " + name);
     }
 
-    /** Full scan (drain loop — the CHG-099 contention lesson) collecting fixture rows. */
-    private static List<InternalRow> scanFixtures(Table table, TableInfo info)
+    /** Full scan (drain loop — the CHG-099 contention lesson) collecting fixture PKs. */
+    private static List<Object[]> scanFixtures(Table table, TableInfo info)
             throws Exception {
-        List<InternalRow> matches = new ArrayList<>();
+        List<String> pks = info.getPrimaryKeys();
+        int[] idx = new int[pks.size()];
+        for (int k = 0; k < pks.size(); k++) {
+            idx[k] = indexByName(info.getRowType(), pks.get(k));
+        }
+        // PK field values copied per row — InternalRow objects may be reused
+        // across polls/after scanner close, so never retain the row itself.
+        List<Object[]> matches = new ArrayList<>();
         for (int b = 0; b < info.getNumBuckets(); b++) {
             TableBucket tb = new TableBucket(info.getTableId(), b);
             try (BatchScanner scanner = table.newScan()
                     .limit(Integer.MAX_VALUE)
                     .createBatchScanner(tb)) {
                 while (true) {
-                    CloseableIterator<InternalRow> it =
-                            scanner.pollBatch(Duration.ofMillis(250));
-                    boolean any = false;
-                    while (it != null && it.hasNext()) {
-                        InternalRow row = it.next();
-                        any = true;
-                        if (isSmokeFixtureRow(row, info.getRowType())) {
-                            matches.add(row);
+                    try (CloseableIterator<InternalRow> it =
+                            scanner.pollBatch(Duration.ofMillis(250))) {
+                        boolean any = false;
+                        while (it != null && it.hasNext()) {
+                            InternalRow row = it.next();
+                            any = true;
+                            if (isSmokeFixtureRow(row, info.getRowType())) {
+                                Object[] key = new Object[info.getRowType().getFieldCount()];
+                                for (int k = 0; k < idx.length; k++) {
+                                    key[idx[k]] = copyFieldValue(row, info.getRowType(), idx[k]);
+                                }
+                                matches.add(key);
+                            }
                         }
-                    }
-                    if (!any) {
-                        break;
+                        if (!any) {
+                            break;
+                        }
                     }
                 }
             }
@@ -964,25 +1103,41 @@ public final class DdlApplyTool {
         return matches;
     }
 
+    /** Copy one field value out of a row (BinaryString/byte[] are copied, never aliased). */
+    private static Object copyFieldValue(InternalRow row, RowType rowType, int index) {
+        DataType type = rowType.getFields().get(index).getType();
+        DataTypeRoot root = type.getTypeRoot();
+        return switch (root) {
+            case STRING -> BinaryString.fromString(row.getString(index).toString());
+            case BIGINT -> row.getLong(index);
+            case INTEGER -> row.getInt(index);
+            case DOUBLE -> row.getDouble(index);
+            case BOOLEAN -> row.getBoolean(index);
+            case BYTES -> row.getBytes(index).clone();
+            case TIMESTAMP_WITHOUT_TIME_ZONE ->
+                row.getTimestampNtz(index, 6);
+            case TIMESTAMP_WITH_LOCAL_TIME_ZONE ->
+                row.getTimestampLtz(index, 6);
+            case DATE -> row.getInt(index);
+            case DECIMAL -> row.getDecimal(index, 38, 18);
+            case CHAR -> row.getChar(index, 1).copy();
+            case TINYINT -> row.getByte(index);
+            case SMALLINT -> row.getShort(index);
+            case FLOAT -> row.getFloat(index);
+            case TIME_WITHOUT_TIME_ZONE -> row.getInt(index);
+            default -> throw new IllegalArgumentException("unsupported row type " + root);
+        };
+    }
+
     /** Delete KV fixture rows by primary key (LOG rows are undeletable). */
     private static int deleteKvFixtures(Table table, TableInfo info,
-            List<InternalRow> rows) throws Exception {
-        List<String> pks = info.getPrimaryKeys();
-        int[] idx = new int[pks.size()];
-        int fullArity = info.getRowType().getFieldCount();
-        for (int k = 0; k < pks.size(); k++) {
-            idx[k] = indexByName(info.getRowType(), pks.get(k));
-        }
+            List<Object[]> rows) throws Exception {
         int deleted = 0;
         UpsertWriter writer = table.newUpsert().createWriter();
         try {
-            for (InternalRow row : rows) {
+            for (Object[] key : rows) {
                 // The delete writer validates arity against the FULL schema;
                 // only the PK fields are used to identify the row.
-                Object[] key = new Object[fullArity];
-                for (int k = 0; k < idx.length; k++) {
-                    key[idx[k]] = fieldValue(row, info.getRowType(), idx[k]);
-                }
                 writer.delete(GenericRow.of(key))
                         .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
                 deleted++;
@@ -1019,7 +1174,7 @@ public final class DdlApplyTool {
             }
             Table table = connection.getTable(TablePath.of("default", name));
             scanned++;
-            List<InternalRow> matches = scanFixtures(table, info);
+            List<Object[]> matches = scanFixtures(table, info);
             if (matches.isEmpty()) {
                 continue;
             }
@@ -1073,27 +1228,38 @@ public final class DdlApplyTool {
             List<String> ackLimitations = new ArrayList<>();
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
-                    case "--ddl-dir" -> ddlDir = args[++i];
-                    case "--bootstrap" -> bootstrap = args[++i];
-                    case "--evidence-out" -> evidenceOut = args[++i];
-                    case "--table-prefix" -> prefix = args[++i];
-                    case "--cleanup-prefix" -> cleanupPrefix = args[++i];
-                    case "--flink-version" -> flinkVersion = args[++i];
-                    case "--fluss-version" -> flussVersion = args[++i];
+                    case "--ddl-dir" -> { ddlDir = needValue(args, i, "--ddl-dir"); i++; }
+                    case "--bootstrap" -> { bootstrap = needValue(args, i, "--bootstrap"); i++; }
+                    case "--evidence-out" -> {
+                        evidenceOut = needValue(args, i, "--evidence-out"); i++;
+                    }
+                    case "--table-prefix" -> { prefix = needValue(args, i, "--table-prefix"); i++; }
+                    case "--cleanup-prefix" -> {
+                        cleanupPrefix = needValue(args, i, "--cleanup-prefix"); i++;
+                    }
+                    case "--flink-version" -> {
+                        flinkVersion = needValue(args, i, "--flink-version"); i++;
+                    }
+                    case "--fluss-version" -> {
+                        flussVersion = needValue(args, i, "--fluss-version"); i++;
+                    }
                     case "--skip-smoke" -> skipSmoke = true;
                     case "--sweep" -> sweepOnly = true;
                     case "--sweep-fix-kv" -> sweepFixKv = true;
                     case "--allow-live-smoke" -> allowLiveSmoke = true;
-                    case "--sweep-table" -> sweepTables.add(args[++i]);
+                    case "--sweep-table" -> {
+                        sweepTables.add(needValue(args, i, "--sweep-table")); i++;
+                    }
                     // "auto" = confirm-only: the tool fills the composite-PK
                     // tables detected from the manifest (no name guessing).
                     case "--ack-limitations" -> {
-                        for (String t : args[++i].split(",")) {
+                        for (String t : needValue(args, i, "--ack-limitations").split(",")) {
                             String trimmed = t.trim();
                             if (!trimmed.isEmpty()) {
                                 ackLimitations.add(trimmed);
                             }
                         }
+                        i++;
                     }
                     default -> throw new IllegalArgumentException("unknown option " + args[i]);
                 }
@@ -1112,6 +1278,14 @@ public final class DdlApplyTool {
                     cleanupPrefix, flinkVersion, flussVersion, skipSmoke,
                     sweepOnly, sweepFixKv, allowLiveSmoke,
                     List.copyOf(sweepTables), List.copyOf(ackLimitations));
+        }
+
+        /** Value-taking option must have a following value (usage error, not AIOOBE). */
+        private static String needValue(String[] args, int i, String flag) {
+            if (i + 1 >= args.length) {
+                throw new IllegalArgumentException(flag + " requires a value");
+            }
+            return args[i + 1];
         }
     }
 

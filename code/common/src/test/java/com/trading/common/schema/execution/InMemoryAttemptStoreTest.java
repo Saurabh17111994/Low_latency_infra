@@ -323,7 +323,7 @@ class InMemoryAttemptStoreTest {
         // load-bearing on every mutation, not decorative.
         ColumnOwnership drifted = new ColumnOwnership(
                 ExecutionAttemptsColumnOwnership.TABLE_NAME, "2", "executor",
-                ExecutionAttemptsColumns.NAMES,
+                ExecutionAttemptsColumns.NAMES.toArray(new String[0]),
                 new int[] {ExecutionAttemptsColumns.EXECUTION_ATTEMPT_ID,
                         ExecutionAttemptsColumns.ACCOUNT_SCOPE_ID,
                         ExecutionAttemptsColumns.INSTRUCTION_ID,

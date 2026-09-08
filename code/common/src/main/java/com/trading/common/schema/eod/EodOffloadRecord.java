@@ -2,7 +2,6 @@ package com.trading.common.schema.eod;
 
 import com.trading.common.schema.EodControllerState;
 import java.time.LocalDate;
-import java.util.Map;
 
 /**
  * Durable per-day per-table offload record for the EOD controller (SCH-23;
@@ -61,20 +60,35 @@ public record EodOffloadRecord(
         long earliestAllowedSourceExpiryMs,
         long updatedAtMs) {
 
+    // P4-286/288: fail fast in the canonical record — a durable expiry-gate
+    // record must not accept null identity/state, malformed dates, or
+    // negative counts only to NPE far from the write site. Evidence presence
+    // (hashes/snapshot) is deliberately NOT gated here: the R2 tiering path
+    // legitimately carries "" (read-only check, P4-302), and P4-129/130's
+    // transition-time evidence gate is refused (it would break that path —
+    // evidence stays executor-side via verify-against-committed).
+    public EodOffloadRecord {
+        java.util.Objects.requireNonNull(tradingDate, "tradingDate");
+        java.util.Objects.requireNonNull(tableName, "tableName");
+        java.util.Objects.requireNonNull(schemaVersion, "schemaVersion");
+        java.util.Objects.requireNonNull(sourceHash, "sourceHash");
+        java.util.Objects.requireNonNull(targetHash, "targetHash");
+        java.util.Objects.requireNonNull(icebergSnapshotId, "icebergSnapshotId");
+        java.util.Objects.requireNonNull(state, "state");
+        parseTradingDate(tradingDate); // fail fast on malformed date
+        if (rowCount < 0 || byteCount < 0 || retryCount < 0) {
+            throw new IllegalArgumentException(
+                    "counts must be >= 0: row=" + rowCount + " byte=" + byteCount
+                            + " retry=" + retryCount);
+        }
+    }
+
     private static final long NEVER = Long.MAX_VALUE;
 
-    /** Legal transition map (state machine in 02-schema-storage.md). */
-    private static final Map<EodControllerState, java.util.Set<EodControllerState>> LEGAL = Map.of(
-            EodControllerState.PENDING, java.util.Set.of(EodControllerState.WRITING),
-            EodControllerState.WRITING, java.util.Set.of(EodControllerState.COMMITTED,
-                    EodControllerState.FAILED_RETRYABLE, EodControllerState.FAILED_MANUAL),
-            EodControllerState.COMMITTED, java.util.Set.of(EodControllerState.VERIFYING,
-                    EodControllerState.FAILED_RETRYABLE, EodControllerState.FAILED_MANUAL),
-            EodControllerState.VERIFYING, java.util.Set.of(EodControllerState.VERIFIED,
-                    EodControllerState.FAILED_RETRYABLE, EodControllerState.FAILED_MANUAL),
-            EodControllerState.FAILED_RETRYABLE, java.util.Set.of(EodControllerState.WRITING,
-                    EodControllerState.VERIFYING, EodControllerState.FAILED_MANUAL),
-            EodControllerState.FAILED_MANUAL, java.util.Set.of(EodControllerState.PENDING));
+    /** True when {@code from -> to} is a legal transition of the state machine. */
+    public static boolean isLegalTransition(EodControllerState from, EodControllerState to) {
+        return from.canTransitionTo(to);
+    }
 
     /**
      * New PENDING record for a trading day/table. Earliest allowed source
@@ -86,11 +100,6 @@ public record EodOffloadRecord(
             String schemaVersion, long nowMs) {
         return new EodOffloadRecord(formatTradingDate(tradingDate), tableName, schemaVersion,
                 -1, -1, 0, 0, "", "", "", EodControllerState.PENDING, 0, 0, NEVER, nowMs);
-    }
-
-    /** True when {@code from -> to} is a legal transition of the state machine. */
-    public static boolean isLegalTransition(EodControllerState from, EodControllerState to) {
-        return LEGAL.getOrDefault(from, java.util.Set.of()).contains(to);
     }
 
     /**
@@ -105,10 +114,27 @@ public record EodOffloadRecord(
      *       controller reschedules when the retry fails again);</li>
      *   <li>reaching VERIFIED: earliestAllowedSourceExpiryMs = now — from this
      *       instant the day's data may expire under the retention policy
-     *       (permitsSourceExpiry), and the retry state clears.</li>
-     * </ul>
+     *       (permitsSourceExpiry), and the retry schedule clears
+     *       (nextRetryAtMs = 0). retryCount is intentionally RETAINED as
+     *       monotonic per-day history, not a per-attempt budget (P4-341/345):
+     *       the record is terminal here, so no future backoff can consume it;</li>
+     *   <li>FAILED_MANUAL → PENDING (manual reset): retryCount AND nextRetryAtMs
+     *       reset to 0 (P4-341/345) — the next failure after a manual reset
+     *       backs off from a clean slate, not from the pre-reset count.</li>
      */
     public EodOffloadRecord transition(EodControllerState next, long nowMs) {
+        return transition(next, nowMs, EodBackoff.DEFAULT_BASE_MS, EodBackoff.DEFAULT_MAX_MS,
+                EodBackoff.rng());
+    }
+
+    /**
+     * Validate and apply a transition with explicit backoff tuning (P4-342/344:
+     * deterministic tests pass a seeded rng; operators tune base/max without
+     * editing the record). The 2-arg form delegates with the governed
+     * defaults. Side effects are identical to {@link #transition(EodControllerState, long)}.
+     */
+    public EodOffloadRecord transition(EodControllerState next, long nowMs, long baseMs,
+            long maxMs, java.util.Random rng) {
         if (!isLegalTransition(state, next)) {
             throw new IllegalStateException("illegal EOD transition " + state + " -> " + next
                     + " for " + tableName + " " + tradingDate);
@@ -118,10 +144,13 @@ public record EodOffloadRecord(
         long earliestAllowed = this.earliestAllowedSourceExpiryMs;
         if (next == EodControllerState.FAILED_RETRYABLE) {
             retryCount += 1;
-            nextRetryAtMs = EodBackoff.nextRetryAtMs(nowMs, retryCount,
-                    EodBackoff.DEFAULT_BASE_MS, EodBackoff.DEFAULT_MAX_MS, EodBackoff.rng());
+            nextRetryAtMs = EodBackoff.nextRetryAtMs(nowMs, retryCount, baseMs, maxMs, rng);
         } else if (next == EodControllerState.VERIFIED) {
             earliestAllowed = nowMs;
+            nextRetryAtMs = 0;
+        } else if (next == EodControllerState.PENDING
+                && state == EodControllerState.FAILED_MANUAL) {
+            retryCount = 0;
             nextRetryAtMs = 0;
         } else if (state == EodControllerState.FAILED_RETRYABLE) {
             // retrying: the schedule is recomputed on the next failure
@@ -132,7 +161,11 @@ public record EodOffloadRecord(
                 next, retryCount, nextRetryAtMs, earliestAllowed, nowMs);
     }
 
-    /** Source may expire only when the manifest is VERIFIED. */
+    /** Source may expire only when the manifest is VERIFIED. The
+     *  earliestAllowedSourceExpiryMs timestamp is informational-only
+     *  (P4-343/346): the planner derives expiry bounds from
+     *  EodRetentionPolicy, never from this field — a deserialized row's
+     *  timestamp is never read for decisions. */
     public boolean permitsSourceExpiry() {
         return state.permitsSourceExpiry();
     }

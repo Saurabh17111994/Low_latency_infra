@@ -73,6 +73,52 @@ class EodOffloadRecordTest {
     }
 
     @Test
+    void manualResetClearsRetryBudgetButVerifiedKeepsHistory() {
+        // P4-341/345: FAILED_MANUAL → PENDING resets retryCount + schedule
+        // (next failure backs off from a clean slate); VERIFIED retains the
+        // count as monotonic per-day history (terminal — no future backoff).
+        EodOffloadRecord failed = EodOffloadRecord.initial(DAY, "feature_candles_15s", "2", NOW)
+                .transition(EodControllerState.WRITING, NOW)
+                .transition(EodControllerState.FAILED_RETRYABLE, NOW);
+        assertThat(failed.retryCount()).isEqualTo(1);
+        EodOffloadRecord reset = failed
+                .transition(EodControllerState.WRITING, NOW)
+                .transition(EodControllerState.FAILED_MANUAL, NOW)
+                .transition(EodControllerState.PENDING, NOW);
+        assertThat(reset.retryCount()).isZero();
+        assertThat(reset.nextRetryAtMs()).isZero();
+        EodOffloadRecord refailed = reset
+                .transition(EodControllerState.WRITING, NOW)
+                .transition(EodControllerState.FAILED_RETRYABLE, NOW);
+        assertThat(refailed.retryCount()).isEqualTo(1);
+
+        EodOffloadRecord verified = EodOffloadRecord.initial(DAY, "feature_candles_15s", "2", NOW)
+                .transition(EodControllerState.WRITING, NOW)
+                .transition(EodControllerState.FAILED_RETRYABLE, NOW)
+                .transition(EodControllerState.WRITING, NOW)
+                .transition(EodControllerState.COMMITTED, NOW)
+                .transition(EodControllerState.VERIFYING, NOW)
+                .transition(EodControllerState.VERIFIED, NOW);
+        assertThat(verified.retryCount()).isEqualTo(1);
+        assertThat(verified.nextRetryAtMs()).isZero();
+    }
+
+    @Test
+    void tunedTransitionOverloadIsDeterministic() {
+        // P4-342/344: explicit base/max/rng — a seeded rng replays exactly.
+        java.util.Random seedA = new java.util.Random(7);
+        java.util.Random seedB = new java.util.Random(7);
+        EodOffloadRecord base = EodOffloadRecord.initial(DAY, "feature_candles_15s", "2", NOW)
+                .transition(EodControllerState.WRITING, NOW);
+        EodOffloadRecord first = base.transition(
+                EodControllerState.FAILED_RETRYABLE, NOW, 1_000L, 300_000L, seedA);
+        EodOffloadRecord second = base.transition(
+                EodControllerState.FAILED_RETRYABLE, NOW, 1_000L, 300_000L, seedB);
+        assertThat(first.nextRetryAtMs()).isEqualTo(second.nextRetryAtMs());
+        assertThat(first.nextRetryAtMs() - NOW).isBetween(1_600L, 2_399L);
+    }
+
+    @Test
     void illegalAndRegressiveTransitionsThrow() {
         EodOffloadRecord r = EodOffloadRecord.initial(DAY, "feature_candles_15s", "2", NOW);
         assertThatThrownBy(() -> r.transition(EodControllerState.COMMITTED, NOW))
@@ -103,6 +149,29 @@ class EodOffloadRecordTest {
                 EodControllerState.PENDING)).isTrue();
         assertThat(EodOffloadRecord.isLegalTransition(EodControllerState.VERIFIED,
                 EodControllerState.PENDING)).isFalse();
+    }
+
+    @Test
+    void retryReEntersWritingOnly() {
+        // P4-287/289: the FAILED_RETRYABLE -> VERIFYING bypass is cut — a
+        // WRITING failure must re-commit before it can verify.
+        assertThat(EodOffloadRecord.isLegalTransition(EodControllerState.FAILED_RETRYABLE,
+                EodControllerState.VERIFYING)).isFalse();
+    }
+
+    @Test
+    void compactCtorFailsFast() {
+        // P4-286/288: null identity/state, malformed date, negative counts.
+        EodOffloadRecord good = EodOffloadRecord.initial(DAY, "feature_candles_15s", "2", NOW);
+        assertThatThrownBy(() -> new EodOffloadRecord(null, good.tableName(),
+                good.schemaVersion(), -1, -1, 0, 0, "", "", "", good.state(), 0, 0, 0, NOW))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> new EodOffloadRecord("2026/08/31", good.tableName(),
+                good.schemaVersion(), -1, -1, 0, 0, "", "", "", good.state(), 0, 0, 0, NOW))
+                .isInstanceOf(java.time.DateTimeException.class);
+        assertThatThrownBy(() -> new EodOffloadRecord(good.tradingDate(), good.tableName(),
+                good.schemaVersion(), -1, -1, -1, 0, "", "", "", good.state(), 0, 0, 0, NOW))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

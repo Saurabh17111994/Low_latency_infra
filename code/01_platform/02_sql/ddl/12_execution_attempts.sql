@@ -21,6 +21,36 @@
 -- token or epoch observed after restart fails closed before any bridge call.
 -- Pinned immediately before the trailing schema_version so earlier column
 -- indexes are untouched.
+--
+-- Domain contract (P4-042/P4-043/P4-044/P4-193/P4-194/P4-195 — Fluss has no
+-- CHECK/DEFAULT; enforced in running code, not here):
+--   fence null (P4-042): v3 declares gate_fence_token NOT NULL; a null row is
+--     legacy/pre-v3 — FlussAttemptStore.fromRow fails closed (throws) rather
+--     than decode fence 0 (pinned by FlussAttemptStoreFromRowTest). Tokens
+--     originate from the Java fence sequence (signed-63); the Rust u64 range
+--     never crosses this path, so no overflow guard. Migration: clean-start
+--     per CHG-044, no backfill.
+--   CAS, not PK (P4-043): PRIMARY KEY NOT ENFORCED is engine reality; ordering
+--     is InMemoryAttemptStore.transition phase_epoch CAS (stale epoch rejects
+--     without mutation) + terminal-phase lock + hydrate-then-delegate in
+--     FlussAttemptStore, so every durable write passes the CAS. Single-writer
+--     premise: two live executors racing is a deployment violation, not a
+--     store defect — no conditional-write surgery.
+--   retention split (P4-044): 'table.log.ttl' 30d is the HOT changelog only;
+--     1-year history lives in the Iceberg lake (datalake enabled, audit
+--     carrier). Lake readers miss ~last-5min (freshness) — crash recovery
+--     MUST use KV, never the lake.
+--   phase/epoch (P4-193): AttemptPhase enum + legalTargets matrix +
+--     transition (stale-epoch reject, terminal lock, +1 increments) is the
+--     writer-side enforcer — free-form STRING in DDL is storage, not truth.
+--   types/units (P4-194): schema_version writer-pinned '3'
+--     (ExecutionAttemptsColumns.SCHEMA_VERSION_V3 + agreement test);
+--     timestamps epoch-millis UTC by convention; retry_attempt non-negative
+--     by writer; broker_response_summary unbounded — truncation is a future
+--     writer change, not DDL.
+--   bucket key (P4-195): 'bucket.key' = execution_attempt_id is point-lookup
+--     optimal (the hot path); account/partition-scoped reconciliation fans out
+--     across 8 buckets — accepted cost until the multi-account milestone.
 
 CREATE TABLE Execution_Attempts (
     execution_attempt_id    STRING      NOT NULL,

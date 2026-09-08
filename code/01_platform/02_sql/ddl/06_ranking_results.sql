@@ -11,6 +11,29 @@
 -- Lake: EOD Iceberg offload
 -- Scope: portfolio_id
 -- Schema version: 2
+--
+-- Writer contract (P4-019/020/021 — the ranking feed does not exist yet as a
+-- live writer; these bind the future writer, enforced in writer code + a
+-- validation job, never in DDL — Fluss has no CHECK/UNIQUE):
+--   uniqueness: UNIQUE(evaluation_id, candidate_id) expected; writer
+--     dedups retries, readers defend via dedup-by-(evaluation_id,candidate_id).
+--   outcome: rank >= 1, UNIQUE(evaluation_id, rank); exactly one
+--     selected=true per evaluation_id; selected=true => rejection_reason
+--     IS NULL; selected=false => rejection_reason NOT NULL.
+--   reproducibility: selected=true => reservation_snapshot/version/hash +
+--     tie_break_data NOT NULL; unselected rows carry rejection_reason.
+-- Blobs (P4-176): normalized_scores/reservation_snapshot/tie_break_data are
+--   JSON shown as STRING (frozen layout) — shape pinned by the payload schema
+--   registry; malformed JSON fails in writer validation, not in storage.
+-- Version (P4-177): schema_version writer-stamps "2" (bare numeric);
+--   evaluation_ts epoch-millis UTC.
+-- Retention guard (P4-022): 7d log TTL + 5min tiering is the transport, not
+--   the VERIFIED gate — EOD offload extends/blocks expiry on lag/failure via
+--   the controller extend path (critical alert), same guard as siblings.
+-- Bucketing (P4-178): bucket.key=evaluation_id colocates one evaluation's
+--   rows for single-bucket reads; bursty per-evaluation writes hotspot one
+--   bucket by design (evaluations are small; 8 buckets). Revisit only on
+--   measured skew — no guessed rebucket.
 
 CREATE TABLE Ranking_Results (
     evaluation_id           STRING      NOT NULL,

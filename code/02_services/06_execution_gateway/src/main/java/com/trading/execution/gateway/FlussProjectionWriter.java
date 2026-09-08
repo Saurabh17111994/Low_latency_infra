@@ -193,22 +193,35 @@ public final class FlussProjectionWriter implements ProjectionWriter {
 
     /**
      * Position_State handshake (Option B, max-one-active): per-instrument
-     * lifecycle signal for Flink's ActiveSignalFeedbackFunction. Sole writer is
-     * this gateway (Nautilus feedback). Maps Positions state to OPEN/CLOSED:
-     * FLAT/CLOSED -> CLOSED, else OPEN. No TTL — Flink clears only on CLOSED.
+     * lifecycle signal for Flink's ActiveSignalFeedbackFunction. Sole
+     * steady-state writer is this gateway (Nautilus feedback); ops ADMIN_CLEAR
+     * break-glass (runbook) is the only authorized second writer (P4-238).
+     * Maps Positions state to OPEN/CLOSED: FLAT/CLOSED -> CLOSED, else OPEN.
+     * No TTL — Flink clears only on CLOSED/ADMIN_CLEAR.
+     *
+     * <p>P4-088: unknown Positions states are NOT defaulted to OPEN (a typo
+     * must not block an instrument forever) — the caller must quarantine +
+     * halt. This method throws on any state outside OPEN/CLOSED/FLAT (the
+     * gateway's known vocabulary); ADMIN_CLEAR never originates here.
      */
     private GenericRow positionStateRow(NormalizedExecutionEvent e) {
         var p = e.position();
-        String state = p.state() == null ? "OPEN" : p.state().trim().toUpperCase();
-        boolean isClosed = "CLOSED".equals(state) || "FLAT".equals(state);
+        String raw = p.state() == null ? null : p.state().trim().toUpperCase();
+        if (!"OPEN".equals(raw) && !"CLOSED".equals(raw) && !"FLAT".equals(raw)) {
+            throw new IllegalArgumentException(
+                    "Position_State: unknown Positions state '" + p.state()
+                            + "' — quarantine + halt, never default to OPEN (P4-088)");
+        }
+        boolean isClosed = "CLOSED".equals(raw) || "FLAT".equals(raw);
         String status = isClosed ? "CLOSED" : "OPEN";
         Long closedTs = isClosed ? p.lastUpdateTs() : null;
-        String closedReason = isClosed ? state : null;
+        String closedReason = isClosed ? raw : null;
         // GenericRow.of with boxed Long nulls needs explicit null handling: use Object[] path
         // For Fluss GenericRow, null boxed is okay — upsert handles nullable BIGINT.
-        return GenericRow.of(p.instrumentToken(),
+        // P4-005 v2: (account_scope_id, instrument_token, ...) — PK prefix first.
+        return GenericRow.of(bs(e.accountScopeId()), p.instrumentToken(),
                 bs(status), bs(p.positionId()), p.lastUpdateTs(),
-                closedTs, bs(closedReason), bs("1"));
+                closedTs, bs(closedReason), p.sourceVersion(), bs("2"));
     }
     private static String nullable(NormalizedExecutionEvent.Correlation c, boolean instruction) {
         return c == null ? null : c.instructionId();

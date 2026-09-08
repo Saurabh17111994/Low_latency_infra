@@ -29,10 +29,11 @@ public final class InMemoryLifecycleStore implements LifecycleStore {
         return rows.size();
     }
 
-    /** All rows sorted by broker order id (deterministic introspection). */
+    /** All rows sorted by broker order id, then account scope (deterministic introspection). */
     public List<OrderLifecycleSnapshot> all() {
         return rows.values().stream()
-                .sorted(Comparator.comparing(OrderLifecycleSnapshot::brokerOrderId))
+                .sorted(Comparator.comparing(OrderLifecycleSnapshot::brokerOrderId)
+                        .thenComparing(OrderLifecycleSnapshot::accountScopeId))
                 .toList();
     }
 }

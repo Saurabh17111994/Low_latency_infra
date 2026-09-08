@@ -25,8 +25,14 @@ import org.slf4j.LoggerFactory;
  * an upsert no-op. The caller additionally dedups so it never emits a second
  * state transition. The request never contains credentials, raw payload bytes,
  * token lists, symbol lists, or free-form SDK exceptions.
+ *
+ * <p>Row schema version {@code "3"} (DDL header v3; contract_version stays 2 —
+ * the parser gates on contract_version, not schema_version).
  */
 public final class SafetyHaltWriter implements SafetySink {
+
+    /** Row schema version — must match the DDL header (P4-213 class: writer/header drift). */
+    static final String SCHEMA_VERSION = "3";
 
     private static final Logger LOG = LoggerFactory.getLogger(SafetyHaltWriter.class);
 
@@ -152,7 +158,7 @@ public final class SafetyHaltWriter implements SafetySink {
                 bs(assignedTokenHash),                  // evidence_hash
                 bs("OPEN"),                             // application_result
                 null,                                   // applied_ts
-                bs("v2"),                               // schema_version
+                bs(SCHEMA_VERSION),                     // schema_version
                 bs(slotId),                             // slot_id
                 connectionEpoch,                        // connection_epoch
                 bs(manifestFingerprint),                // manifest_fingerprint

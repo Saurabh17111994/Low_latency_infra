@@ -15,4 +15,10 @@ class IntentDeduplicatorTest {
         IntentDeduplicator d = new IntentDeduplicator(); d.commit("i", "h1");
         assertThat(d.classify("i", "h2")).isEqualTo(IntentDeduplicator.Outcome.HASH_VIOLATION);
     }
+    @Test void reCommitNeverOverwritesFirstHash() {
+        IntentDeduplicator d = new IntentDeduplicator(); d.commit("i", "h1");
+        d.commit("i", "h2");
+        assertThat(d.classify("i", "h1")).isEqualTo(IntentDeduplicator.Outcome.DUPLICATE);
+        assertThat(d.classify("i", "h2")).isEqualTo(IntentDeduplicator.Outcome.HASH_VIOLATION);
+    }
 }

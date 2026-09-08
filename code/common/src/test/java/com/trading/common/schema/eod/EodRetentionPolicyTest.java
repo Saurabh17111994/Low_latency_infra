@@ -54,6 +54,30 @@ class EodRetentionPolicyTest {
     }
 
     @Test
+    void safetyGatesFailFastOnNull() {
+        // P4-348/349/350: mis-wired callers get a named argument error at the
+        // gate, not a bare NPE deep in java.time.
+        assertThatThrownBy(() -> EodRetentionPolicy.sourceExpiryBound(null, KOLKATA, TWO_DAYS))
+                .isInstanceOf(NullPointerException.class).hasMessageContaining("tradingDate");
+        assertThatThrownBy(() -> EodRetentionPolicy.sourceExpiryBound(
+                LocalDate.of(2026, 8, 14), null, TWO_DAYS))
+                .isInstanceOf(NullPointerException.class).hasMessageContaining("zone");
+        assertThatThrownBy(() -> EodRetentionPolicy.sourceExpiryBound(
+                LocalDate.of(2026, 8, 14), KOLKATA, null))
+                .isInstanceOf(NullPointerException.class).hasMessageContaining("liveTtl");
+        assertThatThrownBy(() -> EodRetentionPolicy.marginMs(null,
+                Instant.parse("2026-08-16T18:30:00Z")))
+                .isInstanceOf(NullPointerException.class).hasMessageContaining("now");
+        assertThatThrownBy(() -> EodRetentionPolicy.marginMs(
+                Instant.parse("2026-08-13T12:00:00Z"), null))
+                .isInstanceOf(NullPointerException.class).hasMessageContaining("protectedExpiryBound");
+        assertThatThrownBy(() -> EodRetentionPolicy.extendedTtl(null, Duration.ofDays(30)))
+                .isInstanceOf(NullPointerException.class).hasMessageContaining("baseLiveTtl");
+        assertThatThrownBy(() -> EodRetentionPolicy.extendedTtl(TWO_DAYS, null))
+                .isInstanceOf(NullPointerException.class).hasMessageContaining("extension");
+    }
+
+    @Test
     void parseTtlHandlesFlussOptionUnits() {
         assertThat(EodRetentionPolicy.parseTtl("2d")).isEqualTo(Duration.ofDays(2));
         assertThat(EodRetentionPolicy.parseTtl("7d")).isEqualTo(Duration.ofDays(7));
@@ -61,6 +85,16 @@ class EodRetentionPolicyTest {
         assertThat(EodRetentionPolicy.parseTtl("30m")).isEqualTo(Duration.ofMinutes(30));
         assertThat(EodRetentionPolicy.parseTtl("15s")).isEqualTo(Duration.ofSeconds(15));
         assertThat(EodRetentionPolicy.parseTtl("5000ms")).isEqualTo(Duration.ofMillis(5000));
+    }
+
+    @Test
+    void parseTtlIsCaseInsensitiveButRejectsCompounds() {
+        // P4-351: live metadata variants like "7D" parse; compound "1d12h"
+        // stays unsupported (documented, rejected — never silently defaulted).
+        assertThat(EodRetentionPolicy.parseTtl("7D")).isEqualTo(Duration.ofDays(7));
+        assertThat(EodRetentionPolicy.parseTtl("1H")).isEqualTo(Duration.ofHours(1));
+        assertThatThrownBy(() -> EodRetentionPolicy.parseTtl("1d12h"))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

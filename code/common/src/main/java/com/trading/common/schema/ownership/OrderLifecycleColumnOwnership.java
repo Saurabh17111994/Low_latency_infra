@@ -35,7 +35,7 @@ public final class OrderLifecycleColumnOwnership {
             TABLE_NAME,
             OrderLifecycleColumns.SCHEMA_VERSION_V2,
             OWNER,
-            OrderLifecycleColumns.NAMES,
+            OrderLifecycleColumns.NAMES.toArray(new String[0]),
             IDENTITY,
             new ColumnOwnership.Writer(WRITER_LIFECYCLE_PROJECTOR,
                     OrderLifecycleColumns.NORMALIZED_STATE,

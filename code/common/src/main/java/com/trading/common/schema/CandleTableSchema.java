@@ -47,10 +47,10 @@ public final class CandleTableSchema {
     public static final String BUCKET_KEY = "instrument_token";
 
     /**
-     * The 15 candle columns in DDL index order (v2, R-012). Physical writer
-     * layouts ({@code CandleTableColumns}) MUST derive from this list so the
-     * LOG sink, the preflight metadata validator, and the DDL cannot drift
-     * apart.
+     * The 15 candle columns in DDL index order (v2, R-012). The KV sink row
+     * builder MUST derive from this list so the sink, the preflight metadata
+     * validator, and the DDL cannot drift apart. (P4-337: this table is
+     * KV-only — no LOG twin — so every "sink" below means the KV sink.)
      */
     public static final List<String> COLUMNS = List.of(
             "instrument_token",
@@ -103,7 +103,7 @@ public final class CandleTableSchema {
      * DDL nullability intent per column (all NOT NULL in the DDL).
      *
      * <p><b>Enforcement caveat (tracker 14 P1):</b> Fluss does not carry DDL
-     * NOT NULL into live metadata — a live LOG table reports every column
+     * NOT NULL into live metadata — a live KV table reports every column
      * nullable (verified against the dev cluster 2026-08-10). The validator
      * therefore does not enforce nullability; this list is the DDL intent
      * used for the evidence report.
@@ -117,15 +117,39 @@ public final class CandleTableSchema {
      * CANDLE-CANONICAL-001). A candle row passes validation only when BOTH
      * version columns equal these values exactly ({@code CanonicalCandlePolicy});
      * any other combination is non-canonical and must be excluded — emitted
-     * candle LOG rows carry the canonical pair as part of their row identity
+     * candle KV rows carry the canonical pair as part of their row identity
      * for replay evidence. The pair is pinned here as the single source of
      * truth so {@code SignalJobConfig} (startup gate) and the validation
      * filter cannot drift. Changing the pair is a governed change, not a
-     * tuning knob.
+     * tuning knob. (P4-337: stale "LOG rows" wording from the retired
+     * LOG+KV twin era fixed — the table is KV-only.)
      */
     public static final String CANONICAL_ALGORITHM_VERSION = "candle-15s-v1";
     public static final String CANONICAL_CONFIGURATION_VERSION = "1.0.0";
 
     /** Column count — must equal {@code COLUMNS.size()}; mirrors the DDL. */
-    public static final int FIELD_COUNT = COLUMNS.size();
+    public static final int FIELD_COUNT = 15;
+
+    static {
+        // P4-248: literal FIELD_COUNT so the size guard can catch drift
+        // (deriving from COLUMNS would trivially pass). P4-247: Fluss needs
+        // BUCKET_KEY in PRIMARY_KEY_COLUMNS in COLUMNS with BUCKET_COUNT > 0.
+        if (COLUMNS.size() != FIELD_COUNT
+                || COLUMN_TYPE_ROOTS.size() != FIELD_COUNT
+                || COLUMN_NULLABLE_IN_DDL.size() != FIELD_COUNT) {
+            throw new ExceptionInInitializerError(
+                    "CandleTableSchema drift: COLUMNS=" + COLUMNS.size()
+                            + " TYPE_ROOTS=" + COLUMN_TYPE_ROOTS.size()
+                            + " NULLABLE=" + COLUMN_NULLABLE_IN_DDL.size()
+                            + " expected " + FIELD_COUNT);
+        }
+        if (!COLUMNS.containsAll(PRIMARY_KEY_COLUMNS)
+                || !PRIMARY_KEY_COLUMNS.contains(BUCKET_KEY)
+                || !COLUMNS.contains(BUCKET_KEY)
+                || BUCKET_COUNT <= 0) {
+            throw new ExceptionInInitializerError(
+                    "Invalid PK/bucket contract: pk=" + PRIMARY_KEY_COLUMNS
+                            + " bucketKey=" + BUCKET_KEY + " buckets=" + BUCKET_COUNT);
+        }
+    }
 }

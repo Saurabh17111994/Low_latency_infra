@@ -22,7 +22,14 @@ public final class RoutingKeyRule {
 
     public static List<Violation> check(List<SchemaManifestEntry> entries) {
         List<Violation> violations = new ArrayList<>();
+        if (entries == null) {
+            return violations;
+        }
         for (SchemaManifestEntry e : entries) {
+            if (e == null) {
+                violations.add(new Violation(null, "null schema entry"));
+                continue;
+            }
             if ("LOG".equalsIgnoreCase(e.tableKind)) {
                 if (e.bucketKey == null || e.bucketKey.isBlank()) {
                     violations.add(new Violation(e.tableName,

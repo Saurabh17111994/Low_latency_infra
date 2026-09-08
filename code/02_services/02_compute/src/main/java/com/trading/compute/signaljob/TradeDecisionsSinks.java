@@ -1,7 +1,17 @@
 package com.trading.compute.signaljob;
 
+import java.time.Duration;
+import org.apache.flink.api.common.functions.OpenContext;
+import org.apache.flink.api.common.state.StateTtlConfig;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.java.functions.KeySelector;
+import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.util.Collector;
 import org.apache.fluss.flink.sink.FlussSink;
 import org.apache.fluss.flink.sink.serializer.RowDataSerializationSchema;
 
@@ -31,8 +41,22 @@ import org.apache.fluss.flink.sink.serializer.RowDataSerializationSchema;
  * survive topology changes (CHECKPOINT-RESTORE-001 habit). Partial visibility
  * between the two sinks is reconciled by {@code instruction_id}
  * (SIG-INT-002 pattern).
+ *
+ * <p>Instructions are immutable: the same {@code instruction_id} may be
+ * re-emitted only by a replay after checkpoint-restore, never by a second
+ * publication (single-writer premise, REQ-FLS-008). The KV index is
+ * therefore protected by a keyed first-write-wins filter (P4-076 — same
+ * pattern as {@code MultiTimeframeClosedFirstWriteWinsFunction}): only the
+ * first emission of an id reaches {@link TradeDecisionIndexMapper} and the
+ * index sink; a replay after restore is dropped before it can overwrite the
+ * canonical hash or {@code first_written_ts} (a divergent-hash replay would
+ * silently destroy the violation evidence the instruction-feed protocol
+ * checks; the LOG twin preserves forensics either way).
  */
 public final class TradeDecisionsSinks {
+
+    private static final String INDEX_FILTER_NAME = "trade-instruction-state-first-write-wins";
+    private static final String INDEX_FILTER_UID = "trade-instruction-state-first-write-wins";
 
     private TradeDecisionsSinks() {}
 
@@ -55,8 +79,14 @@ public final class TradeDecisionsSinks {
                 .name("trade-decisions-sink")
                 .uid("trade-decisions-sink");
 
-        // (b) instruction-hash KV index — upsert, canonical hash recomputed
+        // (b) instruction-hash KV index — keyed first-write-wins filter, then
+        // upsert with canonical hash recomputed (P4-076)
         decisions
+                .keyBy(InstructionStateFirstWriteWinsFunction.keySelector(), Types.STRING)
+                .process(new InstructionStateFirstWriteWinsFunction())
+                .returns(TradeDecisionsTableColumns.ROW_TYPE_INFO)
+                .name(INDEX_FILTER_NAME)
+                .uid(INDEX_FILTER_UID)
                 .map(new TradeDecisionIndexMapper())
                 .name("trade-instruction-index-map")
                 .uid("trade-instruction-index-map")
@@ -71,5 +101,86 @@ public final class TradeDecisionsSinks {
                                 .build())
                 .name("trade-instruction-state-sink")
                 .uid("trade-instruction-state-sink");
+    }
+
+    // ── first-write-wins filter — keyed by instruction_id (KV PK) ──────
+
+    /**
+     * KV-level first-write-wins guard for the {@code trade_instruction_state}
+     * index sink (P4-076, 2026-09-09 — closes the open gap recorded in
+     * {@code 25_trade_instruction_state.sql}: the sink path previously had no
+     * read-before-write, so a divergent-hash replay upsert could silently
+     * overwrite {@code canonical_hash} + {@code first_written_ts}).
+     *
+     * <p>Keyed by the table primary key {@code instruction_id} (DDL 25 v1,
+     * 8 buckets). Forwards the first emission of an id and drops + counts any
+     * second emission via {@code compute.trade_decisions.duplicate_instruction}
+     * — instructions are immutable and published once (single-writer premise
+     * REQ-FLS-008), so any re-arrival is a restore replay and must not
+     * overwrite the first write. Empty input produces no elements.
+     *
+     * <p>TTL/boundedness mirrors {@code MultiTimeframeClosedFirstWriteWinsFunction}:
+     * marker is {@code ValueState<Boolean>} with native {@code StateTtlConfig}
+     * TTL 24 h (one trading day), {@code OnCreateAndWrite} +
+     * {@code NeverReturnExpired}. State contract: exactly one Boolean per
+     * emitted instruction id, no timers, no payload.
+     */
+    public static class InstructionStateFirstWriteWinsFunction
+            extends KeyedProcessFunction<String, RowData, RowData> {
+
+        private static final long serialVersionUID = 1L;
+
+        private static final String WRITTEN_STATE_NAME = "trade-instruction-state-written";
+
+        private static final long WRITTEN_MARK_TTL_HOURS = 24L;
+
+        /**
+         * Written-marker retention: one trading day. Covers restore-replay
+         * lateness and same-day savepoint rollback with wide margin while
+         * bounding marker state (mirror of
+         * {@code MultiTimeframeClosedFirstWriteWinsFunction.WRITTEN_MARK_TTL}).
+         * Package-visible so TTL-expiry test can advance the harness clock.
+         */
+        static final Duration WRITTEN_MARK_TTL = Duration.ofHours(WRITTEN_MARK_TTL_HOURS);
+
+        private transient ValueState<Boolean> written;
+        private transient Counter duplicateInstructions;
+
+        /** The index-stream key selector: PK of trade_instruction_state. */
+        public static KeySelector<RowData, String> keySelector() {
+            return row -> row.getString(TradeDecisionsTableColumns.INSTRUCTION_ID).toString();
+        }
+
+        @Override
+        public void open(OpenContext openContext) throws Exception {
+            ValueStateDescriptor<Boolean> descriptor =
+                    new ValueStateDescriptor<>(WRITTEN_STATE_NAME, Types.BOOLEAN);
+            descriptor.enableTimeToLive(StateTtlConfig.newBuilder(WRITTEN_MARK_TTL)
+                    .setStateVisibility(StateTtlConfig.StateVisibility.NeverReturnExpired)
+                    .setUpdateType(StateTtlConfig.UpdateType.OnCreateAndWrite)
+                    .build());
+            written = getRuntimeContext().getState(descriptor);
+
+            // P4-076: every replay arrival of the same instruction id is
+            // counted here — mirror of the candle_closed duplicate counter.
+            duplicateInstructions = getRuntimeContext().getMetricGroup()
+                    .counter("compute.trade_decisions.duplicate_instruction");
+        }
+
+        @Override
+        public void processElement(RowData row, Context ctx, Collector<RowData> out)
+                throws Exception {
+            if (written.value() != null) {
+                duplicateInstructions.inc();
+                return;
+            }
+            written.update(true);
+            out.collect(row);
+        }
+
+        /** Counter-source accessor (tests): the MetricGroup counter value. */
+        long duplicateInstructionCountForTest() {
+            return duplicateInstructions == null ? 0L : duplicateInstructions.getCount();
+        }
     }
 }

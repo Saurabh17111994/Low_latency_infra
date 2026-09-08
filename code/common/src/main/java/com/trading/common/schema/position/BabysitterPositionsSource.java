@@ -33,6 +33,13 @@ public final class BabysitterPositionsSource {
 
     /** Returns true if the Positions changelog source is configured (offline). */
     public static boolean isConfigured() {
+        // P4-310 honesty note: POSITIONS_TABLE is a compile-time constant, so
+        // this is an offline wiring-intent affirmation, NOT a live health
+        // check — it can never detect a missing/unwired Fluss source. Real
+        // readiness is the babysitter/Flink job health path, not this method.
+        // Callers (BabysitterContractTest) asserting it prove wiring intent
+        // only; do not promote this to a readiness gate without resolving it
+        // from real configuration (SignalJobConfig / catalog lookup).
         return POSITIONS_TABLE != null && !POSITIONS_TABLE.isEmpty();
     }
 }

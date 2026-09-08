@@ -57,6 +57,12 @@ public final class EodOffloadStateColumns {
     public static final String LEASE_TRADING_DATE = "LEASE";
     public static final String LEASE_TABLE_NAME = "controller_lease";
 
+    /** Lease-row predicate (P4-347): every data-plane read MUST exclude the
+     *  lease row — filter by this, never by decomposing record_id. */
+    public static boolean isLeaseRecordId(String recordId) {
+        return LEASE_RECORD_ID.equals(recordId);
+    }
+
     /** Fluss {@code DataTypeRoot} name per column, DDL index order. */
     public static final List<String> TYPE_ROOTS = List.of(
             "STRING", "STRING", "STRING", "STRING", "BIGINT", "BIGINT", "BIGINT", "BIGINT",
@@ -69,16 +75,29 @@ public final class EodOffloadStateColumns {
             false, false, false, false, false, false, false);
 
     /** DDL column names in index order (diagnostics + agreement pin). */
-    public static final String[] NAMES = {
+    public static final List<String> NAMES = List.of(
         "record_id", "trading_date", "table_name", "schema_version",
         "source_offset_start", "source_offset_end", "row_count", "byte_count",
         "source_hash", "target_hash", "iceberg_snapshot_id", "state",
         "retry_count", "next_retry_at_ms", "earliest_allowed_source_expiry_ms",
         "updated_at_ms", "state_schema_version"
-    };
+    );
 
-    /** Deterministic record identity: {@code trading_date|table_name}. */
+    /** Deterministic record identity: {@code trading_date|table_name}.
+     *  Writer-side guard (P4-233/P4-291): rejects null, embedded '|'
+     *  (parse ambiguity), and collision with the reserved lease identity. */
     public static String recordId(String tradingDate, String tableName) {
-        return tradingDate + "|" + tableName;
+        java.util.Objects.requireNonNull(tradingDate, "tradingDate");
+        java.util.Objects.requireNonNull(tableName, "tableName");
+        if (tradingDate.contains("|") || tableName.contains("|")) {
+            throw new IllegalArgumentException(
+                    "tradingDate/tableName must not contain '|': " + tradingDate + "|" + tableName);
+        }
+        String id = tradingDate + "|" + tableName;
+        if (LEASE_RECORD_ID.equals(id)) {
+            throw new IllegalArgumentException(
+                    "recordId collides with reserved lease identity: " + id);
+        }
+        return id;
     }
 }

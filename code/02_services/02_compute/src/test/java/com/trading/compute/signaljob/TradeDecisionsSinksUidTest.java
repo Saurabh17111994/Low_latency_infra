@@ -80,10 +80,13 @@ class TradeDecisionsSinksUidTest {
                             + node.getOperatorName() + "'");
         }
 
-        assertEquals(4, uidToName.size(),
-                "attach must wire exactly the source + LOG sink + index mapper + KV index sink");
+        assertEquals(5, uidToName.size(),
+                "attach must wire exactly the source + LOG sink + FWW filter + index mapper + KV index sink");
         assertTrue(uidToName.get("trade-decisions-sink").startsWith("trade-decisions-sink"),
                 "LOG sink UID must anchor the immutable instruction sink");
+        assertTrue(uidToName.get("trade-instruction-state-first-write-wins")
+                        .startsWith("trade-instruction-state-first-write-wins"),
+                "FWW filter UID must anchor the instruction-state replay guard");
         assertTrue(uidToName.get("trade-instruction-index-map").startsWith("trade-instruction-index-map"),
                 "index mapper UID must anchor the hash-recompute operator");
         assertTrue(uidToName.get("trade-instruction-state-sink").startsWith("trade-instruction-state-sink"),

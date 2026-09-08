@@ -33,11 +33,33 @@ COPY code/02_services/01_ingestion/pom.xml /src/code/02_services/01_ingestion/po
 COPY code/02_services/06_execution_gateway/pom.xml /src/code/02_services/06_execution_gateway/pom.xml
 # Best-effort dependency pre-fetch (layer cache). go-offline also resolves
 # test-scoped transitives of fluss-client's pom, which flaky networks can
-# truncate — tolerate that; `package` below fetches exactly what common needs.
-RUN cd code && (mvn -q -pl common dependency:go-offline -DskipTests || true)
+# truncate — tolerate that (P4-324: warn, never silent), since `package`
+# below fetches exactly what common needs.
+RUN cd code && (mvn -q -pl common dependency:go-offline -DskipTests || echo "WARN: go-offline pre-fetch incomplete — package below re-resolves (P4-324)")
 # Engine sources.
 COPY code/common /src/code/common
+# P4-325: gate the shipped engine — DDL-contract unit tests only (all
+# cluster-free: DdlApplyTool status/twin-sweep-unit/DdlText x2, matrix pin,
+# manifest serialization). The two live halves (DdlSmokeTwinSweepTest,
+# CompatFluss*IntegrationTest) stay out: they need FLUSS_BOOTSTRAP.
+RUN cd code && mvn -q -pl common test -Dtest='DdlApplyToolStatusTest,DdlSmokeTwinSweepUnitTest,DdlTextFailFastTest,DdlTextPartitionTest,CompositeKeyMatrixVerifierTest,SchemaManifestSerializationTest' -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false
 RUN cd code && mvn -q -pl common package -DskipTests
+# P4-158: jar-source guard — the five COPYs below hardcode
+# fluss-client/jackson/slf4j versions that MUST match code/pom.xml
+# (fluss.version) + ddl_apply.py (JACKSON_VERSION/SLF4J_VERSION) + versions.pin
+# (FLUSS_VERSION). A bump anywhere without the others breaks the COPY with a
+# confusing "file not found" — fail here with the real cause instead. The
+# jars are already resolved in the builder m2, so this is a pure path assert.
+ARG EXPECT_FLUSS=0.9.1-incubating
+ARG EXPECT_JACKSON=2.16.1
+ARG EXPECT_SLF4J=2.0.9
+RUN POM_FLUSS="$(sed -n 's/.*<fluss.version>\([^<]*\)<\/fluss.version>.*/\1/p' /src/code/pom.xml)" \
+ && POM_JACKSON="$(sed -n 's/.*<jackson.version>\([^<]*\)<\/jackson.version>.*/\1/p' /src/code/pom.xml)" \
+ && POM_SLF4J="$(sed -n 's/.*<slf4j.version>\([^<]*\)<\/slf4j.version>.*/\1/p' /src/code/pom.xml)" \
+ && [ -n "$POM_FLUSS" ] && [ "$POM_FLUSS" = "$EXPECT_FLUSS" ] \
+ && [ -n "$POM_JACKSON" ] && [ "$POM_JACKSON" = "$EXPECT_JACKSON" ] \
+ && [ -n "$POM_SLF4J" ] && [ "$POM_SLF4J" = "$EXPECT_SLF4J" ] \
+ || { echo "P4-158 jar-source drift: Dockerfile EXPECT_* ($EXPECT_FLUSS/$EXPECT_JACKSON/$EXPECT_SLF4J) != code/pom.xml ($POM_FLUSS/$POM_JACKSON/$POM_SLF4J) — bump all four (Dockerfile ARGs, pom, ddl_apply.py, versions.pin) together"; exit 1; }
 
 # ── Stage 2: runtime — Python 3.11 (official python:3.11-slim — currently
 #    3.11.16 on Debian trixie) + JRE 21 headless (engine is precompiled; Java

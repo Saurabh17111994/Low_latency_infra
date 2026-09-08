@@ -59,6 +59,40 @@ class InstrumentManifestWriterTest {
                 "blank schemaVersion must fail");
     }
 
+    @Test
+    @DisplayName("P4-066: tick/expiry/option coherence fails fast at the loader")
+    void entryValidationRejectsIncoherentOptionFields() {
+        // Non-positive tick size propagates to sizing — refuse.
+        assertThrows(IllegalArgumentException.class,
+                () -> new ManifestEntry(1, "NIFTY", "NSE", "CM", "EQUITY",
+                        75, 0L, null, null, null, 1, true, 1L, "3"),
+                "non-positive tickSizePaise must fail");
+        // Bad option code.
+        assertThrows(IllegalArgumentException.class,
+                () -> new ManifestEntry(1, "NIFTY", "NSE", "OPT", "OPT",
+                        75, 500L, null, 1_700_000_000_000L, "XX", 1, true, 1L, "3"),
+                "optionType outside CE/PE must fail");
+        // OPT without CE/PE.
+        assertThrows(IllegalArgumentException.class,
+                () -> new ManifestEntry(1, "NIFTY", "NSE", "OPT", "OPT",
+                        75, 500L, null, 1_700_000_000_000L, null, 1, true, 1L, "3"),
+                "OPT without optionType must fail");
+        // optionType on non-OPT.
+        assertThrows(IllegalArgumentException.class,
+                () -> new ManifestEntry(1, "NIFTY", "NSE", "CM", "EQUITY",
+                        75, 500L, null, null, "CE", 1, true, 1L, "3"),
+                "optionType on EQUITY must fail");
+        // EQUITY with expiry.
+        assertThrows(IllegalArgumentException.class,
+                () -> new ManifestEntry(1, "NIFTY", "NSE", "CM", "EQUITY",
+                        75, 500L, null, 1_700_000_000_000L, null, 1, true, 1L, "3"),
+                "expiry on EQUITY must fail");
+        // Coherent OPT passes.
+        ManifestEntry opt = new ManifestEntry(1, "NIFTY", "NSE", "OPT", "OPT",
+                75, 500L, null, 1_700_000_000_000L, "CE", 1, true, 1L, "3");
+        assertTrue(opt.optionType().equals("CE"));
+    }
+
     // ── DDL-order row mapping ───────────────────────────────────────────────
 
     @Test

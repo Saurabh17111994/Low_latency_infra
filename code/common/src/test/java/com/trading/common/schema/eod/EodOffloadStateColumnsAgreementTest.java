@@ -62,8 +62,8 @@ class EodOffloadStateColumnsAgreementTest {
     void ddlDeclares17ColumnsInPinnedOrder() throws IOException {
         List<Column> cols = parseColumns();
         assertThat(cols).hasSize(EodOffloadStateColumns.FIELD_COUNT);
-        assertThat(cols.stream().map(Column::name).toArray(String[]::new))
-                .containsExactly(EodOffloadStateColumns.NAMES);
+        assertThat(cols.stream().map(Column::name).toList())
+                .containsExactlyElementsOf(EodOffloadStateColumns.NAMES);
     }
 
     @Test
@@ -99,5 +99,21 @@ class EodOffloadStateColumnsAgreementTest {
         assertThat(EodOffloadStateColumns.recordId("2026-08-14", "feature_candles_15s"))
                 .isEqualTo("2026-08-14|feature_candles_15s");
         assertThat(EodOffloadStateColumns.LEASE_RECORD_ID).isEqualTo("lease|controller");
+    }
+
+    @Test
+    void recordIdRejectsPipeCollisionAndLeaseMasquerade() {
+        try {
+            EodOffloadStateColumns.recordId("2026-08-14", "a|b");
+            throw new AssertionError("expected IllegalArgumentException for embedded pipe");
+        } catch (IllegalArgumentException expected) {
+            assertThat(expected.getMessage()).contains("'|'");
+        }
+        try {
+            EodOffloadStateColumns.recordId("lease", "controller");
+            throw new AssertionError("expected IllegalStateException-free rejection of lease collision");
+        } catch (IllegalArgumentException expected) {
+            assertThat(expected.getMessage()).contains("lease");
+        }
     }
 }

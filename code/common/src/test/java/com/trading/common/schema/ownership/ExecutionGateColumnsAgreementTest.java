@@ -57,8 +57,8 @@ class ExecutionGateColumnsAgreementTest {
     void ddlDeclares17ColumnsInPinnedOrder() throws IOException {
         List<Column> cols = parseColumns();
         assertThat(cols).hasSize(ExecutionGateColumns.FIELD_COUNT);
-        assertThat(cols.stream().map(Column::name).toArray(String[]::new))
-                .containsExactly(ExecutionGateColumns.NAMES);
+        assertThat(cols.stream().map(Column::name).toList())
+                .containsExactlyElementsOf(ExecutionGateColumns.NAMES);
     }
 
     @Test

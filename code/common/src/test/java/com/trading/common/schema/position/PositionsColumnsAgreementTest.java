@@ -53,8 +53,8 @@ class PositionsColumnsAgreementTest {
     void ddlDeclares17ColumnsInPinnedOrder() throws IOException {
         List<Column> cols = parseColumns();
         assertThat(cols).hasSize(PositionsColumns.FIELD_COUNT);
-        assertThat(cols.stream().map(Column::name).toArray(String[]::new))
-                .containsExactly(PositionsColumns.NAMES);
+        assertThat(cols.stream().map(Column::name).toList())
+                .containsExactlyElementsOf(PositionsColumns.NAMES);
     }
 
     @Test

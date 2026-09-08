@@ -88,6 +88,30 @@ public final class InstrumentManifestWriter implements AutoCloseable {
             if (lotSize <= 0) {
                 throw new IllegalArgumentException("lotSize must be positive, got " + lotSize);
             }
+            // P4-066: tick/expiry/option coherence — invalid ticks/lots must
+            // fail at the loader, never propagate to sizing and risk.
+            if (tickSizePaise != null && tickSizePaise <= 0) {
+                throw new IllegalArgumentException(
+                        "tickSizePaise must be positive, got " + tickSizePaise);
+            }
+            boolean isOpt = "OPT".equals(instrumentType);
+            boolean isEquity = "EQUITY".equals(instrumentType);
+            if (optionType != null && !(optionType.equals("CE") || optionType.equals("PE"))) {
+                throw new IllegalArgumentException(
+                        "optionType must be CE/PE, got " + optionType);
+            }
+            if (isOpt && optionType == null) {
+                throw new IllegalArgumentException(
+                        "optionType (CE/PE) required when instrumentType=OPT");
+            }
+            if (!isOpt && optionType != null) {
+                throw new IllegalArgumentException(
+                        "optionType must be null unless instrumentType=OPT, got " + optionType);
+            }
+            if (isEquity && expiry != null) {
+                throw new IllegalArgumentException(
+                        "expiry must be null for EQUITY (non-expiring)");
+            }
             if (manifestVersion <= 0) {
                 throw new IllegalArgumentException(
                         "manifestVersion must be positive, got " + manifestVersion);

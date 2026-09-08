@@ -41,7 +41,7 @@ public final class PositionsColumnOwnership {
             TABLE_NAME,
             com.trading.common.schema.position.PositionsColumns.SCHEMA_VERSION_V2,
             OWNER,
-            com.trading.common.schema.position.PositionsColumns.NAMES,
+            com.trading.common.schema.position.PositionsColumns.NAMES.toArray(String[]::new),
             IDENTITY,
             new ColumnOwnership.Writer(WRITER_POSITION_PROJECTOR,
                     com.trading.common.schema.position.PositionsColumns.STATE,

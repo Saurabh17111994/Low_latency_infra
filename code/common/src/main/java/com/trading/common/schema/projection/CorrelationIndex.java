@@ -7,7 +7,7 @@ import java.util.Optional;
  * sources: broker-order-id, echoed client-order-ref, and the approved
  * reconciliation result (05-execution-core.md correlation contract). A single
  * source is authoritative; multiple matches are ambiguous and go to
- * {@link Postback_Quarantine} (see {@link PostbackCorrelator}).
+ * {@code Postback_Quarantine} (see {@link PostbackCorrelator}).
  */
 public interface CorrelationIndex {
 
@@ -19,7 +19,11 @@ public interface CorrelationIndex {
 
     /**
      * Approved reconciliation result (lowest precedence) — only consulted when
-     * the order produced no broker id and no echoed client ref.
+     * broker_order_id is present but has no direct match in
+     * {@link #byBrokerOrderId} (P4-314: the old "no broker id" wording
+     * contradicted the sole caller — PostbackCorrelator.correlate calls this
+     * only on the present-but-unmatched path). Both arguments are required
+     * and must be non-blank.
      */
     Optional<AttemptRef> approvedReconciliation(String accountScopeId, String brokerOrderId);
 }

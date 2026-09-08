@@ -54,8 +54,8 @@ class ExecutionAttemptsColumnsAgreementTest {
     void ddlDeclares20ColumnsInPinnedOrder() throws IOException {
         List<Column> cols = parseColumns();
         assertThat(cols).hasSize(ExecutionAttemptsColumns.FIELD_COUNT);
-        assertThat(cols.stream().map(Column::name).toArray(String[]::new))
-                .containsExactly(ExecutionAttemptsColumns.NAMES);
+        assertThat(cols.stream().map(Column::name).toList())
+                .containsExactlyElementsOf(ExecutionAttemptsColumns.NAMES);
     }
 
     @Test

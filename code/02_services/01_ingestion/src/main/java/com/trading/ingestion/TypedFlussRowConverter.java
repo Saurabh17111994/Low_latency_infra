@@ -103,7 +103,7 @@ final class TypedFlussRowConverter implements FlussRowConverter {
         RawTick raw = packet.raw();
 
         TickRow row = new TickRow();
-        row.event_day = EventDay.of(packet.eventTime());
+        row.event_day = EventDay.ofValidated(packet.eventTime());
         row.event_fingerprint = packet.eventFingerprint();
         row.fingerprint_version = String.valueOf(packet.fingerprintVersion());
         row.connection_id = packet.connectionId();

@@ -54,12 +54,18 @@ public final class DdlText {
     /** One column: name + Fluss type (nullability is not expressible in the client schema). */
     public record Column(String name, DataType type) {}
 
-    private static final Pattern CREATE_TABLE = Pattern.compile("CREATE TABLE\\s+(\\w+)");
-    private static final Pattern PRIMARY_KEY = Pattern.compile("PRIMARY KEY\\s*\\(([^)]+)\\)");
+    private static final Pattern CREATE_TABLE = Pattern.compile(
+            "CREATE TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?[`\"\\[]?([\\w.]+)[`\"\\]]?",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern PRIMARY_KEY = Pattern.compile("PRIMARY KEY\\s*\\(([^)]+)\\)",
+            Pattern.CASE_INSENSITIVE);
     private static final Pattern PARTITIONED_BY =
             Pattern.compile("PARTITIONED\\s+BY\\s*\\(([^)]+)\\)", Pattern.CASE_INSENSITIVE);
-    private static final Pattern COLUMN_LINE =
-            Pattern.compile("^\\s*([a-zA-Z0-9_]+)\\s+([A-Z]+)\\s*(?:NOT\\s+NULL|NULL)?\\s*,?\\s*$");
+    private static final Pattern COLUMN_LINE = Pattern.compile(
+            "^\\s*([a-zA-Z0-9_]+)\\s+([a-zA-Z]+(?:\\s*\\([^)]*\\))?)\\s*(?:NOT\\s+NULL|NULL)?\\s*,?\\s*$",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern WITH_CLAUSE =
+            Pattern.compile("\\)\\s*WITH\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern OPTION =
             Pattern.compile("'([a-zA-Z0-9_.-]+)'\\s*=\\s*'([^']*)'");
 
@@ -71,12 +77,37 @@ public final class DdlText {
         }
         String tableName = create.group(1);
         int bodyStart = text.indexOf('(', create.end());
-        int withIdx = text.indexOf(") WITH", bodyStart);
+        Matcher with = WITH_CLAUSE.matcher(text);
+        int withIdx = -1;
+        int searchFrom = Math.max(bodyStart, 0);
+        while (with.find(searchFrom)) {
+            int candidate = with.start();
+            String between = text.substring(bodyStart + 1, candidate);
+            if (parenDepth(between) == 0) {
+                withIdx = candidate;
+                break;
+            }
+            searchFrom = with.end();
+        }
         int bodyEnd = withIdx >= 0 ? withIdx : text.lastIndexOf(')');
         if (bodyStart < 0 || bodyEnd < bodyStart) {
             throw new IllegalArgumentException(sourcePath + ": cannot delimit column block");
         }
         String body = text.substring(bodyStart + 1, bodyEnd);
+        Matcher partitionAnywhere = PARTITIONED_BY.matcher(text);
+        if (partitionAnywhere.find()) {
+            String keys = partitionAnywhere.group(1);
+            int cut = body.toUpperCase(java.util.Locale.ROOT)
+                    .indexOf("PARTITIONED BY (".concat(keys).toUpperCase(java.util.Locale.ROOT));
+            if (cut < 0) {
+                cut = body.toUpperCase(java.util.Locale.ROOT).indexOf("PARTITIONED BY");
+            }
+            if (cut >= 0) {
+                body = body.substring(0, cut);
+            }
+        }
+        String partitionClause = partitionAnywhere.reset().find()
+                ? partitionAnywhere.group(0) : "";
 
         List<Column> columns = new ArrayList<>();
         for (String line : body.split("\\n")) {
@@ -88,33 +119,61 @@ public final class DdlText {
             // ack_ts, which failed ingestion DdlBootstrap's 20-col expectation).
             String bare = line.indexOf("--") >= 0
                     ? line.substring(0, line.indexOf("--")) : line;
-            if (bare.trim().startsWith("PRIMARY KEY")) {
+            if (bare.trim().isEmpty() || bare.trim().equals("(") || bare.trim().equals(")")) {
+                continue;
+            }
+            if (bare.trim().regionMatches(true, 0, "PRIMARY KEY", 0, "PRIMARY KEY".length())) {
                 continue;
             }
             Matcher col = COLUMN_LINE.matcher(bare);
             if (col.matches()) {
-                columns.add(new Column(col.group(1), type(col.group(2))));
+                columns.add(new Column(col.group(1), type(col.group(2), sourcePath)));
+            } else {
+                throw new IllegalArgumentException(
+                        sourcePath + ": unparsable column line: " + line.trim());
             }
         }
         if (columns.isEmpty()) {
             throw new IllegalArgumentException(sourcePath + ": no columns parsed");
+        }
+        java.util.Set<String> columnNames = new java.util.HashSet<>();
+        for (Column c : columns) {
+            if (!columnNames.add(c.name().toLowerCase(java.util.Locale.ROOT))) {
+                throw new IllegalArgumentException(sourcePath + ": duplicate column " + c.name());
+            }
         }
 
         Matcher pk = PRIMARY_KEY.matcher(body);
         List<String> primaryKey = new ArrayList<>();
         if (pk.find()) {
             for (String part : pk.group(1).split(",")) {
-                primaryKey.add(part.trim());
+                String key = part.trim();
+                if (key.isEmpty()) {
+                    throw new IllegalArgumentException(sourcePath + ": empty primary-key entry");
+                }
+                if (!columnNames.contains(key.toLowerCase(java.util.Locale.ROOT))) {
+                    throw new IllegalArgumentException(
+                            sourcePath + ": primary key not a column: " + key);
+                }
+                if (primaryKey.contains(key)) {
+                    throw new IllegalArgumentException(
+                            sourcePath + ": duplicate primary-key entry: " + key);
+                }
+                primaryKey.add(key);
             }
         }
 
         List<String> partitionKeys = new ArrayList<>();
-        Matcher partition = PARTITIONED_BY.matcher(text);
+        Matcher partition = PARTITIONED_BY.matcher(partitionClause);
         if (partition.find()) {
             for (String part : partition.group(1).split(",")) {
                 String key = part.trim();
                 if (key.isEmpty()) {
                     throw new IllegalArgumentException(sourcePath + ": empty partition key");
+                }
+                if (!columnNames.contains(key.toLowerCase(java.util.Locale.ROOT))) {
+                    throw new IllegalArgumentException(
+                            sourcePath + ": partition key not a column: " + key);
                 }
                 partitionKeys.add(key);
             }
@@ -137,13 +196,38 @@ public final class DdlText {
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException(sourcePath + ": bad bucket.num", e);
         }
+        if (bucketCount <= 0) {
+            throw new IllegalArgumentException(
+                    sourcePath + ": bucket.num must be positive, got " + bucketCount);
+        }
+        List<String> bucketColumns = new ArrayList<>();
+        for (String part : bucketKey.split(",")) {
+            String key = part.trim();
+            if (key.isEmpty()) {
+                throw new IllegalArgumentException(sourcePath + ": empty bucket-key entry");
+            }
+            if (!columnNames.contains(key.toLowerCase(java.util.Locale.ROOT))) {
+                throw new IllegalArgumentException(
+                        sourcePath + ": bucket key not a column: " + key);
+            }
+            bucketColumns.add(key);
+        }
         return new ParsedDdl(tableName, List.copyOf(columns), List.copyOf(primaryKey),
-                bucketCount, bucketKey, Map.copyOf(options), sourcePath,
+                bucketCount, String.join(",", bucketColumns), Map.copyOf(options), sourcePath,
                 List.copyOf(partitionKeys));
     }
 
     /** Build the admin-API descriptor that applies the parsed DDL to Fluss. */
     public static TableDescriptor toDescriptor(ParsedDdl ddl) {
+        return toDescriptor(ddl, true);
+    }
+
+    /**
+     * Build the descriptor, optionally forcing {@code table.datalake.enabled=false}
+     * (the dev-cluster deviation; callers with a lake-wired cluster pass {@code false}
+     * to honor the blueprint).
+     */
+    public static TableDescriptor toDescriptor(ParsedDdl ddl, boolean forceDatalakeDisabled) {
         Schema.Builder sb = Schema.newBuilder();
         for (Column c : ddl.columns()) {
             sb.column(c.name(), c.type());
@@ -164,7 +248,7 @@ public final class DdlText {
                 return;
             }
             if (key.equals("table.datalake.enabled")) {
-                tb.property(key, "false"); // dev deviation — see class javadoc
+                tb.property(key, forceDatalakeDisabled ? "false" : value); // dev deviation — see class javadoc
             } else {
                 tb.property(key, value);
             }
@@ -172,15 +256,46 @@ public final class DdlText {
         return tb.build();
     }
 
-    private static DataType type(String name) {
-        return switch (name) {
+    private static DataType type(String name, String sourcePath) {
+        String base = name.replaceAll("\\s*\\(.*\\)$", "").toUpperCase(java.util.Locale.ROOT);
+        return switch (base) {
             case "STRING" -> DataTypes.STRING();
             case "BIGINT" -> DataTypes.BIGINT();
             case "INT" -> DataTypes.INT();
             case "BYTES" -> DataTypes.BYTES();
             case "DOUBLE" -> DataTypes.DOUBLE();
             case "BOOLEAN" -> DataTypes.BOOLEAN();
-            default -> throw new IllegalArgumentException("unknown DDL type " + name);
+            case "TIMESTAMP", "TIMESTAMP_LTZ" -> DataTypes.TIMESTAMP_LTZ();
+            case "DATE" -> DataTypes.DATE();
+            case "DECIMAL" -> {
+                Matcher params = Pattern.compile("\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)")
+                        .matcher(name);
+                if (params.find()) {
+                    yield DataTypes.DECIMAL(Integer.parseInt(params.group(1)),
+                            Integer.parseInt(params.group(2)));
+                }
+                yield DataTypes.DECIMAL(38, 18);
+            }
+            case "VARCHAR", "CHAR" -> DataTypes.STRING();
+            case "TINYINT" -> DataTypes.TINYINT();
+            case "SMALLINT" -> DataTypes.SMALLINT();
+            case "FLOAT" -> DataTypes.FLOAT();
+            case "TIME" -> DataTypes.TIME();
+            default -> throw new IllegalArgumentException(
+                    sourcePath + ": unknown DDL type " + name);
         };
+    }
+
+    private static int parenDepth(String text) {
+        int depth = 0;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '(') {
+                depth++;
+            } else if (c == ')') {
+                depth--;
+            }
+        }
+        return depth;
     }
 }

@@ -48,11 +48,31 @@ public final class PositionsColumns {
             false, true, true, false, false, false, false, false);
 
     /** DDL column names in index order (diagnostics + agreement pin). */
-    public static final String[] NAMES = {
+    public static final List<String> NAMES = List.of(
             "position_id", "trade_context_id", "account_scope_id",
             "instrument_token", "exchange", "symbol", "side", "state",
             "open_quantity", "closed_quantity", "average_entry_paise",
             "average_exit_paise", "source_event_id", "source_version",
-            "created_ts", "last_update_ts", "schema_version"
-    };
+            "created_ts", "last_update_ts", "schema_version");
+
+    // P4-313: parallel structures (17 int ordinals + NAMES + TYPE_ROOTS +
+    // COLUMN_NULLABLE_IN_DDL + FIELD_COUNT) must agree — fail fast at
+    // class-load so a swapped ordinal or unbumped count breaks loudly
+    // instead of silently misplacing projector reads/writes.
+    static {
+        if (NAMES.size() != FIELD_COUNT
+                || TYPE_ROOTS.size() != FIELD_COUNT
+                || COLUMN_NULLABLE_IN_DDL.size() != FIELD_COUNT) {
+            throw new IllegalStateException("PositionsColumns drift: FIELD_COUNT=" + FIELD_COUNT
+                    + " NAMES=" + NAMES.size() + " TYPE_ROOTS=" + TYPE_ROOTS.size()
+                    + " NULLABLE=" + COLUMN_NULLABLE_IN_DDL.size());
+        }
+        if (!NAMES.get(POSITION_ID).equals("position_id")
+                || !NAMES.get(INSTRUMENT_TOKEN).equals("instrument_token")
+                || !NAMES.get(OPEN_QUANTITY).equals("open_quantity")
+                || !NAMES.get(SCHEMA_VERSION).equals("schema_version")) {
+            throw new IllegalStateException(
+                    "PositionsColumns drift: ordinal does not match NAMES index");
+        }
+    }
 }

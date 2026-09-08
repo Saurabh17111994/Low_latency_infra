@@ -41,10 +41,13 @@ import org.slf4j.LoggerFactory;
  * last_tick_exchange         STRING  — null for connection-wide
  * last_tick_symbol           STRING  — null for connection-wide
  * detected_ts                BIGINT  — epoch ms when gap was detected
- * schema_version             STRING  — v1
+ * schema_version             STRING  — "2" (header/manifest v2; P4-213)
  * </pre>
  */
 public class DiscontinuityWriter implements DiscontinuitySink {
+
+    /** Row schema version — must match the DDL header + manifest (P4-213). */
+    static final String SCHEMA_VERSION = "2";
 
     private static final Logger LOG = LoggerFactory.getLogger(DiscontinuityWriter.class);
 
@@ -219,7 +222,7 @@ public class DiscontinuityWriter implements DiscontinuitySink {
                 before != null ? bs(before.exchange) : null,
                 before != null ? bs(before.symbol) : null,
                 now.toEpochMilli(),
-                bs("v1")
+                bs(SCHEMA_VERSION)
         );
         try {
             observe(writer.append(row), discontinuityId,
@@ -259,7 +262,7 @@ public class DiscontinuityWriter implements DiscontinuitySink {
                 bs(exch),
                 bs(sym),
                 now.toEpochMilli(),
-                bs("v1")
+                bs(SCHEMA_VERSION)
         );
 
         try {

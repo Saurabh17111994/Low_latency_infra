@@ -10,7 +10,7 @@ public final class InMemoryProjectionAuditStore implements ProjectionAuditStore 
 
     @Override
     public void append(ProjectionAuditRecord record) {
-        records.add(record);
+        records.add(java.util.Objects.requireNonNull(record, "record"));
     }
 
     @Override

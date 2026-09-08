@@ -9,6 +9,33 @@
 -- Lake: execution audit links retained under approved policy (one-year minimum target)
 -- Scope: portfolio_id, account_scope_id
 -- Schema version: 2
+--
+-- Domain contract (P4-023/P4-024/P4-025/P4-026/P4-027/P4-179/P4-180/P4-328 —
+-- LOG takes no PK; Fluss has no CHECK/DEFAULT/GRANT; enforced in code):
+--   sole writer (P4-023): Signal job sole writer via TradeDecisionsSinks
+--     (pinned UIDs). Fluss has no GRANTs — column ownership matrix is the
+--     authority, not a phantom REVOKE/GRANT block.
+--   dedup (P4-024): LOG has no PK BY DESIGN (a PK would destroy the feed).
+--     instruction_id = ins-v1- + SHA-256 of executable identity
+--     (TradeDecisionBuilder); downstream authority is the KV index +
+--     TradeInstructionFeedProtocol.verify (ACCEPTED/DUPLICATE/VIOLATION).
+--   domain checks (P4-025): enforced in TradeDecisionBuilder.requireValid
+--     (fail-closed throw): quantity/instrument/created positive, finite
+--     composite_score, positive-when-present price, all non-blank. GAPS
+--     (future builder hardening, not DDL): side/order_type not closed-enum
+--     checked; LIMIT/MARKET-price coupling absent here (cf. intent builder).
+--   superseded_by (P4-026): write-once-at-emit, resolved read-side; nothing
+--     UPDATEs it through the append-only sink (serialization (true,true)).
+--     DROP would be a recreate + columns/mapper cascade for zero runtime
+--     effect — rejected.
+--   retention split (P4-027): 7d hot changelog + block-delete-unverified
+--     guard + EOD extend + alert (see above); 1-year history in the lake
+--     (admin-owned lifecycle; no lake-retention property in Fluss DDL).
+--   ts/units (P4-179/P4-180): created_ts/expiry_ts epoch-millis UTC;
+--     builder pins created>0, expiry>0-when-present; NULL expiry = GTC/
+--     session default; readers MUST drop expired rows.
+--   version (P4-328): schema_version writer-pinned '2'; no DEFAULT/CHECK in
+--     Fluss — drift breaks downstream branching, writer owns it.
 
 CREATE TABLE Trade_Decisions (
     instruction_id          STRING      NOT NULL,

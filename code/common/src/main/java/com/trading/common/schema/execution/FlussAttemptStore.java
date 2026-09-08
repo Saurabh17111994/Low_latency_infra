@@ -90,6 +90,13 @@ public final class FlussAttemptStore implements AttemptStore, AutoCloseable {
         String summary = r.isNullAt(ExecutionAttemptsColumns.BROKER_RESPONSE_SUMMARY)
                 ? null : r.getString(ExecutionAttemptsColumns.BROKER_RESPONSE_SUMMARY).toString();
         int retry = r.getInt(ExecutionAttemptsColumns.RETRY_ATTEMPT);
+        // P4-042 fail-closed: v3 declares gate_fence_token NOT NULL, so a null
+        // here is a legacy/pre-v3 row — fail rather than decode fence 0 (every
+        // other nullable column above guards with isNullAt; this one must not
+        // silently mint a never-acquired fence).
+        if (r.isNullAt(ExecutionAttemptsColumns.GATE_FENCE_TOKEN)) {
+            throw new IllegalStateException("legacy Execution_Attempts row without gate_fence_token: " + aid);
+        }
         long fence = r.getLong(ExecutionAttemptsColumns.GATE_FENCE_TOKEN);
         String sv = r.getString(ExecutionAttemptsColumns.SCHEMA_VERSION).toString();
         return new AttemptRecord(aid, acct, instr, action, part, reqHash, cref, fence, brokerId,

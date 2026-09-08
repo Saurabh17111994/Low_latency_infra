@@ -47,12 +47,22 @@ public final class OrderLifecycleColumns {
             false, false, true, true, true, false, false, false, true, false,
             false, true, false, false, false);
 
-    /** DDL column names in index order (diagnostics + agreement pin). */
-    public static final String[] NAMES = {
+    /** DDL column names in index order (diagnostics + agreement pin). Immutable. */
+    public static final List<String> NAMES = List.of(
             "account_scope_id", "broker_order_id", "instruction_id",
             "execution_attempt_id", "trade_context_id", "normalized_state",
             "cumulative_qty", "pending_qty", "average_fill_price_paise",
             "source_event_id", "source_version", "source_event_time",
-            "last_receive_time", "correlation_state", "schema_version"
-    };
+            "last_receive_time", "correlation_state", "schema_version");
+
+    static {
+        if (TYPE_ROOTS.size() != FIELD_COUNT
+                || COLUMN_NULLABLE_IN_DDL.size() != FIELD_COUNT
+                || NAMES.size() != FIELD_COUNT) {
+            throw new ExceptionInInitializerError("OrderLifecycleColumns metadata out of sync: FIELD_COUNT=" + FIELD_COUNT
+                    + " TYPE_ROOTS=" + TYPE_ROOTS.size()
+                    + " NULLABLE=" + COLUMN_NULLABLE_IN_DDL.size()
+                    + " NAMES=" + NAMES.size());
+        }
+    }
 }

@@ -225,7 +225,7 @@ class RealFlussRowConverter implements FlussRowConverter {
 
         GenericRow row = GenericRow.of(
                 // partition (v3: daily yyyyMMdd IST — order MUST match DDL)
-                bs(EventDay.of(packet.eventTime())),                // event_day STRING (partition key)
+                bs(EventDay.ofValidated(packet.eventTime())),            // event_day STRING (partition key)
                 // identity and routing
                 bs(packet.eventFingerprint()),                      // event_fingerprint STRING
                 bs(String.valueOf(packet.fingerprintVersion())),   // fingerprint_version STRING

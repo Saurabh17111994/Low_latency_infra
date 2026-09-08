@@ -24,7 +24,37 @@ public enum EodControllerState {
     FAILED_RETRYABLE,    // offload/verify failed; retry with backoff (extends retention)
     FAILED_MANUAL;       // offload/verify failed; requires manual reconciliation
 
-    /** Source retention may only expire once VERIFIED. */
+    /**
+     * True when {@code this -> next} is a legal transition of the state machine.
+     * Single source of truth for the transition table (mirrors the machine in
+     * 02-schema-storage.md); {@code EodOffloadRecord.isLegalTransition}
+     * delegates here.
+     */
+    public boolean canTransitionTo(EodControllerState next) {
+        return switch (this) {
+            case PENDING -> next == WRITING;
+            case WRITING -> next == COMMITTED
+                    || next == FAILED_RETRYABLE || next == FAILED_MANUAL;
+            case COMMITTED -> next == VERIFYING
+                    || next == FAILED_RETRYABLE || next == FAILED_MANUAL;
+            case VERIFYING -> next == VERIFIED
+                    || next == FAILED_RETRYABLE || next == FAILED_MANUAL;
+            // P4-287/289: retry re-enters WRITING only. The old VERIFYING edge
+            // let a WRITING failure (no content committed) skip COMMITTED and
+            // go straight to verification — EodController.advance never takes
+            // it (retries always re-enter WRITING), so it was a latent bypass.
+            case FAILED_RETRYABLE -> next == WRITING
+                    || next == FAILED_MANUAL;
+            case FAILED_MANUAL -> next == PENDING;
+            case VERIFIED -> false;
+        };
+    }
+
+    /**
+     * Necessary but NOT sufficient for source expiry: caller must also
+     * enforce the 3-live-day floor (see EodPlanner/EodRetentionPolicy).
+     * Only true for VERIFIED; VERIFIED alone does not permit expiry.
+     */
     public boolean permitsSourceExpiry() {
         return this == VERIFIED;
     }

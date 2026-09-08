@@ -48,10 +48,11 @@ public final class CandlePreviewTableSchema {
     public static final String BUCKET_KEY = "instrument_token";
 
     /**
-     * The 15 preview columns in DDL index order (v2). Physical writer
-     * layouts ({@code CandlePreviewColumns}) MUST derive from this list so
-     * the sink, the preflight metadata validator, and the DDL cannot drift
-     * apart.
+     * The 15 preview columns in DDL index order (v2). The preview sink row
+     * builder MUST derive from this list so the sink, the preflight metadata
+     * validator, and the DDL cannot drift apart. (P4-336: the writers live in
+     * DdlBootstrap + ddl_apply.py, not in a CandlePreviewColumns class —
+     * there is none — and the SQL file is 32_candle_live.sql.)
      */
     public static final List<String> COLUMNS = List.of(
             "instrument_token",
@@ -99,5 +100,29 @@ public final class CandlePreviewTableSchema {
             false, false, false, false, false, false);
 
     /** Column count — must equal {@code COLUMNS.size()}; mirrors the DDL. */
-    public static final int FIELD_COUNT = COLUMNS.size();
+    public static final int FIELD_COUNT = 15;
+
+    static {
+        // P4-095: FIELD_COUNT is a literal so this guard can actually catch
+        // drift (COLUMNS.size() would trivially pass). P4-246: Fluss needs
+        // bucketKey in PK in COLUMNS — a typo otherwise surfaces only as a
+        // runtime upsert/routing failure.
+        if (COLUMNS.size() != FIELD_COUNT
+                || COLUMN_TYPE_ROOTS.size() != FIELD_COUNT
+                || COLUMN_NULLABLE_IN_DDL.size() != FIELD_COUNT) {
+            throw new ExceptionInInitializerError(
+                    "CandlePreviewTableSchema drift: COLUMNS=" + COLUMNS.size()
+                            + " TYPE_ROOTS=" + COLUMN_TYPE_ROOTS.size()
+                            + " NULLABLE=" + COLUMN_NULLABLE_IN_DDL.size()
+                            + " expected " + FIELD_COUNT);
+        }
+        if (!COLUMNS.containsAll(PRIMARY_KEY_COLUMNS)) {
+            throw new ExceptionInInitializerError(
+                    "PK not subset of COLUMNS: " + PRIMARY_KEY_COLUMNS);
+        }
+        if (!PRIMARY_KEY_COLUMNS.contains(BUCKET_KEY)) {
+            throw new ExceptionInInitializerError(
+                    "BUCKET_KEY must be subset of PK (Fluss pk superset bucketKey): " + BUCKET_KEY);
+        }
+    }
 }

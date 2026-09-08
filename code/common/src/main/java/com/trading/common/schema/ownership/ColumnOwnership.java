@@ -100,7 +100,14 @@ public final class ColumnOwnership {
         for (int idx : identityColumns) {
             identitySet.add(idx);
         }
+        java.util.Set<String> seenWriterNames = new java.util.HashSet<>();
         for (Writer w : writers) {
+            if (w == null) {
+                throw new IllegalArgumentException("writers contains a null entry");
+            }
+            if (!seenWriterNames.add(w.name())) {
+                throw new IllegalArgumentException("duplicate writer name: " + w.name());
+            }
             int[] cols = validateUniqueInRange(w.columns(), columnNames.length, "writer " + w.name());
             for (int idx : cols) {
                 if (identitySet.contains(idx)) {

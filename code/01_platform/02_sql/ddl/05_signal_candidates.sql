@@ -3,9 +3,23 @@
 -- Type: LOG (no primary key)
 -- Bucket key: instrument_token
 -- Retention: ≤7 calendar days via table.log.ttl
--- Lake: EOD Iceberg offload
--- Scope: portfolio_id
+-- Lake: 5-min tiering to Iceberg (datalake.freshness=5min); EOD VERIFIED guard
+--   via the EodControllerTool extend path when this table is included explicitly
+--   (not in DEFAULT_TABLES — pass --tables Signal_Candidates; P4-018: header
+--   previously claimed EOD offload while the property is 5-min tiering)
+-- Scope: none (global pre-portfolio signal; portfolio scoping starts at
+--   Trade_Decisions — P4-016: header previously claimed portfolio_id with no column)
 -- Schema version: 3
+--
+-- Domain contract (P4-174 — Fluss has no CHECK/DEFAULT; enforced in job code):
+--   detection_ts/evaluation_ts epoch-millis UTC, evaluation_ts >= detection_ts;
+--   quantity > 0; action ENTRY|CANCEL, side BUY|SELL, order_type MARKET|LIMIT
+--   (LIMIT requires limit_price_paise — enforced in ExecutionIntentBuilder.validate
+--   + TradeDecisionBuilder.requireValid); schema_version writer-set '3'.
+-- Dedup authority (P4-017): candidate_id is the logical identity; producer
+--   retries reuse the same id and StrategyHostFunction.emittedIds (checkpointed
+--   MapState keyed by candidate_id) suppresses re-emission before either sink;
+--   downstream joins/offload must still DEDUP BY candidate_id.
 --
 -- v2 (2026-08-03, review R-084): was LOG; converted to KV keyed on
 -- candidate_id so the supersede chain could update appended rows.
@@ -14,6 +28,11 @@
 -- the KV projection Signal_Candidates_current (23_signal_candidates_current.sql)
 -- keyed by instrument_token — so this table can stay append-only audit.
 -- Supersede columns are retained for audit linkage (22-column layout frozen).
+--
+-- Forward link (P4-175): superseded_by_candidate_id is ALWAYS NULL on this
+-- LOG — rows are never backfilled. Forward linkage lives ONLY in the KV
+-- projection (upsertable) or via self-join on supersedes_candidate_id.
+-- Readers must never filter WHERE superseded_by_candidate_id IS NOT NULL here.
 
 CREATE TABLE Signal_Candidates (
     candidate_id            STRING      NOT NULL,

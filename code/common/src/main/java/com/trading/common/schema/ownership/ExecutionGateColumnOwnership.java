@@ -52,7 +52,7 @@ public final class ExecutionGateColumnOwnership {
             TABLE_NAME,
             ExecutionGateColumns.SCHEMA_VERSION_V3,
             OWNER,
-            ExecutionGateColumns.NAMES,
+            ExecutionGateColumns.NAMES.toArray(new String[0]),
             IDENTITY,
             new ColumnOwnership.Writer(WRITER_GATE_TRANSITION,
                     ExecutionGateColumns.STATE,

@@ -111,6 +111,12 @@ class DiscontinuityReasonMappingTest {
     }
 
     @Test
+    @DisplayName("P4-213: row schema version matches DDL header + manifest (v2, bare numeric)")
+    void schemaVersionMatchesHeader() {
+        assertEquals("2", DiscontinuityWriter.SCHEMA_VERSION);
+    }
+
+    @Test
     @DisplayName("observe() propagates async append failures (R-030)")
     void observePropagatesAsyncFailure() {
         CompletableFuture<AppendResult> failed =

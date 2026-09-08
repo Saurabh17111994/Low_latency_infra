@@ -17,9 +17,6 @@ def find_token_idx(header):
     for i, h in enumerate(header):
         if h.strip().lower() in ("token", "instrument_token", "exchtoken", "exch_token"):
             return i
-    # fallback: 3rd column (NSE format) is Token
-    if len(header) > 3 and header[3].strip().lower() == "token":
-        return 3
     return None
 
 def main():
@@ -47,10 +44,17 @@ def main():
         print(f"warn: rows={len(rows)} != sum(chunks)={total}; will chunk contiguously by order", file=sys.stderr)
     token_idx = find_token_idx(header)
     if token_idx is not None:
-        try:
-            rows.sort(key=lambda row: int(row[token_idx]) if token_idx < len(row) and row[token_idx].strip() else 0)
-        except Exception:
-            pass  # keep original order if parse fails
+        # P4-244: per-row fallback — one bad token sorts last with a warning
+        # instead of silently cancelling the whole sort (was except: pass).
+        def sort_key(row):
+            if token_idx < len(row) and row[token_idx].strip():
+                try:
+                    return (0, int(row[token_idx].strip().replace(",", "")))
+                except (ValueError, TypeError):
+                    print(f"warn: non-numeric token {row[token_idx]!r}; sorting last",
+                          file=sys.stderr)
+            return (1, 0)
+        rows.sort(key=sort_key)
     offset = 0
     for i, size in enumerate(chunks):
         end = min(offset + size, len(rows))
@@ -65,7 +69,12 @@ def main():
         if offset >= len(rows):
             break
     if offset < len(rows):
-        print(f"warn: {len(rows)-offset} rows unassigned after chunks", file=sys.stderr)
+        # P4-245: dropping instruments (highest tokens, post-sort) must fail
+        # the run — a warn+exit-0 goes unnoticed downstream in per-slot lists.
+        print(f"error: {len(rows)-offset} rows unassigned after chunks "
+              f"(rows={len(rows)} != sum(chunks)={total}); refusing to drop instruments",
+              file=sys.stderr)
+        sys.exit(1)
     print(f"done: input rows={len(rows)} chunks={chunks}")
 
 if __name__ == "__main__":

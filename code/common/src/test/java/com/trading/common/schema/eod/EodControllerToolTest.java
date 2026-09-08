@@ -70,4 +70,21 @@ class EodControllerToolTest {
         assertThat(EodControllerTool.ttlOption(Duration.ofMinutes(90))).isEqualTo("90m");
         assertThat(EodControllerTool.ttlOption(Duration.ofSeconds(15))).isEqualTo("15000ms");
     }
+
+    @Test
+    void trailingFlagIsUsageErrorNotAioobe() {
+        // P4-274/283: `run --bootstrap` with no value must name the flag
+        // (caught as exit-4 usage), not ArrayIndexOutOfBoundsException.
+        assertThatThrownBy(() -> EodControllerTool.Options.parse(
+                new String[] {"run", "--bootstrap"}))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("--bootstrap");
+    }
+
+    @Test
+    void badParseSurfacesAsUsageExit4() throws Exception {
+        // P4-276/280: run() maps parse failures to usage() (exit 4).
+        assertThat(EodControllerTool.run(new String[] {"run", "--bogus"})).isEqualTo(4);
+        assertThat(EodControllerTool.run(new String[] {})).isEqualTo(4);
+    }
 }

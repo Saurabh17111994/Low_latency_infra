@@ -103,7 +103,16 @@ public final class EodControllerTool {
                 return usage();
             }
         }
-        Options opts = Options.parse(args);
+        // P4-276/280: parse/validation errors are usage errors (exit 4), not
+        // FATAL exit 1 — the documented exit=4 contract covers bad flags,
+        // bad values, and missing subcommand.
+        Options opts;
+        try {
+            opts = Options.parse(args);
+        } catch (IllegalArgumentException e) {
+            System.err.println("eod-controller: " + e.getMessage());
+            return usage();
+        }
         ZoneId zone = ZoneId.of(opts.zone);
         Instant now = Instant.now();
         LocalDate runDate = opts.runDate != null ? LocalDate.parse(opts.runDate)
@@ -115,23 +124,32 @@ public final class EodControllerTool {
         try (Connection connection = ConnectionFactory.createConnection(conf);
              Admin admin = connection.getAdmin()) {
 
-            // Live TTLs — the controller plans against each table's ACTUAL
-            // create-time TTL, with a documented fallback when metadata lacks it.
-            // T8 G1/G4 block-guard (G4): before any Fluss TTL delete is allowed,
-            // the iceberg manifest for that day must be VERIFIED; if unverified,
-            // delete is BLOCKED and retention is extended (requiresExtension).
-            // See EodController / EodPlanner protectedExpiryBound + the
-            // unverified-block alert below.
+            // Live TTLs — resolved lazily per subcommand that needs them
+            // (status/extend, P4-275/281): run/reconcile/reset never use
+            // liveTtls, so resolving eagerly here paid TABLES*admin-RPC cost
+            // (up to 30s each) plus spurious fallback warnings on write paths.
             Map<String, Duration> liveTtls = new LinkedHashMap<>();
-            for (String table : opts.tables) {
-                liveTtls.put(table, liveTtl(admin, opts.database, table, opts.ttlDefault));
-            }
+            java.util.function.Function<String, Map<String, Duration>> liveTtlsFor =
+                    sub -> {
+                        if (!liveTtls.isEmpty()) {
+                            return liveTtls;
+                        }
+                        if (!sub.equals("status") && !sub.equals("extend")) {
+                            return liveTtls; // write paths plan without live TTLs
+                        }
+                        for (String table : opts.tables) {
+                            liveTtls.put(table,
+                                    liveTtl(admin, opts.database, table, opts.ttlDefault));
+                        }
+                        return liveTtls;
+                    };
 
             return switch (opts.subcommand) {
-                case "status" -> status(opts, liveTtls, zone, now);
-                case "run" -> run(opts, liveTtls, zone, runDate, now, nowMs);
-                case "extend" -> extend(opts, connection, admin, liveTtls, zone, now);
-                case "reconcile" -> reconcile(opts, liveTtls, now);
+                case "status" -> status(opts, liveTtlsFor.apply("status"), zone, now);
+                case "run" -> run(opts, liveTtlsFor.apply("run"), zone, runDate, now, nowMs);
+                case "extend" -> extend(opts, connection, admin, liveTtlsFor.apply("extend"),
+                        zone, now);
+                case "reconcile" -> reconcile(opts, liveTtlsFor.apply("reconcile"), now);
                 case "reset" -> reset(opts, now);
                 default -> usage();
             };
@@ -240,6 +258,21 @@ public final class EodControllerTool {
             Map<String, Duration> liveTtls, ZoneId zone, Instant now) throws Exception {
         try (FlussEodStateStore store = FlussEodStateStore.open(opts.bootstrap, opts.database,
                 opts.stateTable, TIMEOUT)) {
+            // P4-121/122: extend --apply mutates state (shadow create + bulk
+            // copy) — it must hold the single-writer lease like run/reconcile,
+            // or a concurrent run races the shadow check-then-create.
+            if (opts.apply && !opts.dryRun) {
+                String myToken = token();
+                Lease lease = store.acquireLease(myToken, now.toEpochMilli(),
+                        opts.leaseTtl.toMillis());
+                if (!lease.isHeldBy(myToken, now.toEpochMilli())) {
+                    System.err.println("eod-controller: lease held by " + lease.token()
+                            + " — refusing extend --apply");
+                    System.out.println("eod-controller: RESULT=LEASED EXIT=5 TABLES="
+                            + opts.tables.size() + " DAYS=0");
+                    return 5;
+                }
+            }
             List<EodOffloadRecord> days = store.readAll();
             List<EodController.TablePlan> plans = EodController.planTables(
                     days, opts.tables, liveTtls, zone, opts.safetyFloor, now);
@@ -329,6 +362,18 @@ public final class EodControllerTool {
         }
         try (FlussEodStateStore store = FlussEodStateStore.open(opts.bootstrap, opts.database,
                 opts.stateTable, TIMEOUT)) {
+            // P4-121/122: reset mutates state (FAILED_MANUAL -> PENDING) —
+            // same lease rule as extend --apply above.
+            String myToken = token();
+            Lease lease = store.acquireLease(myToken, now.toEpochMilli(),
+                    opts.leaseTtl.toMillis());
+            if (!lease.isHeldBy(myToken, now.toEpochMilli())) {
+                System.err.println("eod-controller: lease held by " + lease.token()
+                        + " — refusing reset");
+                System.out.println("eod-controller: RESULT=LEASED EXIT=5 TABLES="
+                        + opts.tables.size() + " DAYS=0");
+                return 5;
+            }
             int reset = EodController.resetManual(store, now, opts.runDate, opts.singleTable);
             System.out.println("eod-controller: reset " + reset
                     + " FAILED_MANUAL day(s) -> PENDING");
@@ -380,8 +425,18 @@ public final class EodControllerTool {
             System.err.println("eod-controller: shadow " + shadow + " already exists — "
                     + "drop it (or rename) before re-running the drill");
             return false;
-        } catch (Exception e) {
+        } catch (ExecutionException e) {
+            // P4-118/123: proceed ONLY on not-exists. A bare catch(Exception)
+            // mistook timeouts/auth failures for "absent" and built the copy
+            // on a lie.
+            if (!(e.getCause() instanceof org.apache.fluss.exception.TableNotExistException)) {
+                throw new RuntimeException("eod-controller: shadow existence check failed for "
+                        + shadow, e);
+            }
             // shadow absent — proceed
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw e;
         }
 
         Schema schema = live.getSchema();
@@ -442,15 +497,27 @@ public final class EodControllerTool {
                     () -> copyBucket(liveTable, shadowTable, info, schema, bucketId, timeoutMs)));
         }
         long copied = 0;
+        // P4-119/124: one shared deadline across buckets (not timeout*buckets
+        // stacked), cancel on failure, shutdownNow + await — the old
+        // sequential f.get(timeout*4) could block buckets*timeout (hours) and
+        // the bare shutdown() leaked workers on failure.
+        long deadlineNanos = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(timeoutMs * 4);
         try {
             for (Future<Long> f : futures) {
-                copied += f.get(timeoutMs * 4, TimeUnit.MILLISECONDS);
+                long remaining = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
+                copied += f.get(Math.max(1, remaining), TimeUnit.MILLISECONDS);
             }
-        } catch (ExecutionException e) {
-            Throwable cause = e.getCause() != null ? e.getCause() : e;
+        } catch (ExecutionException | java.util.concurrent.TimeoutException e) {
+            for (Future<Long> f : futures) {
+                f.cancel(true);
+            }
+            Throwable cause = (e instanceof ExecutionException && e.getCause() != null)
+                    ? e.getCause() : e;
             throw new RuntimeException("eod-controller: bucket copy failed: " + cause, cause);
         } finally {
-            pool.shutdown();
+            pool.shutdownNow();
+            pool.awaitTermination(30, TimeUnit.SECONDS);
         }
         return copied;
     }
@@ -458,6 +525,10 @@ public final class EodControllerTool {
     private static long copyBucket(Table liveTable, Table shadowTable, TableInfo info,
             Schema schema, int bucketId, long timeoutMs) throws Exception {
         TableBucket bucket = new TableBucket(info.getTableId(), bucketId);
+        // P4-279/282 note: the writer is flush()-only in Fluss 0.9.1 (no
+        // AutoCloseable — verified by decompile in Group F), so the
+        // flush-in-finally stays; it cannot mask the copy exception because
+        // awaitBatch already propagated any ack failure before we get here.
         UpsertWriter writer = shadowTable.newUpsert().createWriter();
         long copied = 0;
         try {
@@ -499,10 +570,14 @@ public final class EodControllerTool {
 
     private static void awaitBatch(List<CompletableFuture<?>> batch, long timeoutMs)
             throws Exception {
-        for (CompletableFuture<?> f : batch) {
-            f.get(timeoutMs, TimeUnit.MILLISECONDS);
+        // P4-120/125: one timeout for the whole batch (allOf), not
+        // batch-size × timeout sequential — a slow ack stalled everything.
+        try {
+            CompletableFuture.allOf(batch.toArray(CompletableFuture[]::new))
+                    .get(timeoutMs, TimeUnit.MILLISECONDS);
+        } finally {
+            batch.clear();
         }
-        batch.clear();
     }
 
     /** Row → Object[] in schema order (raw-client upsert values). */
@@ -515,32 +590,62 @@ public final class EodControllerTool {
                 continue;
             }
             DataType type = columns.get(i).getDataType();
+                // P4-117/126: map the full Fluss TypeRoot set — the old 7-type
+            // switch threw mid-copy AFTER the shadow was created (partial
+            // shadow + failed drill) on any TIMESTAMP/DATE/DECIMAL table.
+            // Complex nests (ARRAY/MAP/ROW) ride a FieldGetter passthrough.
+            org.apache.fluss.row.InternalRow.FieldGetter nested =
+                    org.apache.fluss.row.InternalRow.createFieldGetter(type, i);
             out[i] = switch (type.getTypeRoot()) {
-                case STRING -> row.getString(i);
-                case BIGINT -> row.getLong(i);
-                case INTEGER -> row.getInt(i);
-                case BYTES -> row.getBytes(i);
-                case DOUBLE -> row.getDouble(i);
+                case CHAR, STRING -> row.getString(i);
                 case BOOLEAN -> row.getBoolean(i);
+                case BINARY, BYTES -> row.getBytes(i);
+                case DECIMAL -> row.getDecimal(i,
+                        ((org.apache.fluss.types.DecimalType) type).getPrecision(),
+                        ((org.apache.fluss.types.DecimalType) type).getScale());
+                case TINYINT -> row.getByte(i);
+                case SMALLINT -> row.getShort(i);
+                case INTEGER -> row.getInt(i);
+                case BIGINT -> row.getLong(i);
                 case FLOAT -> row.getFloat(i);
-                default -> throw new IllegalStateException(
-                        "rewrite copy: unsupported type " + type + " at column " + i);
+                case DOUBLE -> row.getDouble(i);
+                case DATE -> row.getInt(i);
+                case TIME_WITHOUT_TIME_ZONE -> row.getInt(i);
+                case TIMESTAMP_WITHOUT_TIME_ZONE -> row.getTimestampNtz(i, 6);
+                case TIMESTAMP_WITH_LOCAL_TIME_ZONE -> row.getTimestampLtz(i, 6);
+                default -> nested.getFieldOrNull(row);
             };
         }
         return out;
     }
 
     private static long scanCount(Table table, TableInfo info, long timeoutMs) throws Exception {
+        // P4-116/127: drain like copyBucket — one pollBatch is one batch, not
+        // the bucket. The old single-poll undercounted (false EXTEND_FAILED
+        // parity failure) and NPEd on it.hasNext() when pollBatch returned
+        // null for an empty/exhausted bucket.
+        // P4-278 note: copy-then-count has no snapshot isolation — live writes
+        // between copy and count flake exact parity on hot tables. The drill
+        // requires a quiesced source (hold the lease / pause writers first).
         long count = 0;
         for (int b = 0; b < info.getNumBuckets(); b++) {
             TableBucket bucket = new TableBucket(info.getTableId(), b);
             try (BatchScanner scanner = table.newScan()
                          .limit(Integer.MAX_VALUE)
-                         .createBatchScanner(bucket);
-                 CloseableIterator<InternalRow> it = scanner.pollBatch(Duration.ofMillis(250))) {
-                while (it.hasNext()) {
-                    it.next();
-                    count++;
+                         .createBatchScanner(bucket)) {
+                while (true) {
+                    boolean any = false;
+                    try (CloseableIterator<InternalRow> it =
+                            scanner.pollBatch(Duration.ofMillis(250))) {
+                        while (it != null && it.hasNext()) {
+                            it.next();
+                            count++;
+                            any = true;
+                        }
+                    }
+                    if (!any) {
+                        break;
+                    }
                 }
             }
         }
@@ -667,26 +772,31 @@ public final class EodControllerTool {
             List<String> tableArgs = new ArrayList<>();
             for (int i = 1; i < args.length; i++) {
                 switch (args[i]) {
-                    case "--bootstrap" -> bootstrap = args[++i];
-                    case "--database" -> database = args[++i];
-                    case "--state-table" -> stateTable = args[++i];
+                    case "--bootstrap" -> bootstrap = nextArg(args, ++i, "--bootstrap");
+                    case "--database" -> database = nextArg(args, ++i, "--database");
+                    case "--state-table" -> stateTable = nextArg(args, ++i, "--state-table");
                     case "--tables" -> {
-                        for (String t : args[++i].split(",")) {
+                        for (String t : nextArg(args, ++i, "--tables").split(",")) {
                             String trimmed = t.trim();
                             if (!trimmed.isEmpty()) {
                                 tableArgs.add(trimmed);
                             }
                         }
                     }
-                    case "--ttl" -> ttlDefault = EodRetentionPolicy.parseTtl(args[++i]);
-                    case "--safety-floor" -> safetyFloor = EodRetentionPolicy.parseTtl(args[++i]);
-                    case "--extension" -> extension = EodRetentionPolicy.parseTtl(args[++i]);
-                    case "--lease-ttl" -> leaseTtl = EodRetentionPolicy.parseTtl(args[++i]);
-                    case "--zone" -> zone = args[++i];
-                    case "--run-date" -> runDate = args[++i];
-                    case "--schema-version" -> schemaVersion = args[++i];
-                    case "--offload" -> offloadMode = args[++i];
-                    case "--table" -> singleTable = args[++i];
+                    case "--ttl" -> ttlDefault = EodRetentionPolicy.parseTtl(
+                            nextArg(args, ++i, "--ttl"));
+                    case "--safety-floor" -> safetyFloor = EodRetentionPolicy.parseTtl(
+                            nextArg(args, ++i, "--safety-floor"));
+                    case "--extension" -> extension = EodRetentionPolicy.parseTtl(
+                            nextArg(args, ++i, "--extension"));
+                    case "--lease-ttl" -> leaseTtl = EodRetentionPolicy.parseTtl(
+                            nextArg(args, ++i, "--lease-ttl"));
+                    case "--zone" -> zone = nextArg(args, ++i, "--zone");
+                    case "--run-date" -> runDate = nextArg(args, ++i, "--run-date");
+                    case "--schema-version" -> schemaVersion =
+                            nextArg(args, ++i, "--schema-version");
+                    case "--offload" -> offloadMode = nextArg(args, ++i, "--offload");
+                    case "--table" -> singleTable = nextArg(args, ++i, "--table");
                     case "--apply" -> apply = true;
                     case "--dry-run" -> dryRun = true;
                     case "--approve" -> approve = true;
@@ -701,12 +811,34 @@ public final class EodControllerTool {
             if (runDate != null && !runDate.matches("\\d{4}-\\d{2}-\\d{2}")) {
                 throw new IllegalArgumentException("--run-date must be yyyy-MM-dd, got " + runDate);
             }
-            List<String> tables = tableArgs.isEmpty() && tablesRaw != null
-                    ? List.of(tablesRaw.split(","))
-                    : tableArgs.isEmpty() ? DEFAULT_TABLES : List.copyOf(tableArgs);
+            List<String> tables;
+            if (!tableArgs.isEmpty()) {
+                tables = List.copyOf(tableArgs);
+            } else if (tablesRaw != null) {
+                // P4-277/284: normalize the env path exactly like the flag
+                // path — "a, b" yielded table " b" (lookup miss) and empty env
+                // yielded [""] instead of DEFAULT_TABLES.
+                tables = java.util.Arrays.stream(tablesRaw.split(","))
+                        .map(String::trim).filter(s -> !s.isEmpty()).toList();
+                if (tables.isEmpty()) {
+                    tables = DEFAULT_TABLES;
+                }
+            } else {
+                tables = DEFAULT_TABLES;
+            }
             return new Options(subcommand, bootstrap, database, stateTable, tables,
                     ttlDefault, safetyFloor, extension, leaseTtl, zone, runDate, schemaVersion,
                     offloadMode, singleTable, apply, dryRun, approve);
+        }
+
+        // P4-274/283: a trailing flag (e.g. `run --bootstrap`) threw
+        // ArrayIndexOutOfBoundsException → FATAL exit 1. Fail as a usage
+        // error (exit 4) with the flag named.
+        private static String nextArg(String[] args, int i, String flag) {
+            if (i >= args.length) {
+                throw new IllegalArgumentException(flag + " requires a value");
+            }
+            return args[i];
         }
 
         private static Duration parseEnvTtl(String key, Duration fallback) {

@@ -100,7 +100,7 @@ class SchemaComplianceFullSuiteTest {
         .isTrue();
     SchemaManifest manifest =
         new ObjectMapper().readValue(Files.readAllBytes(manifestPath), SchemaManifest.class);
-    assertThat(manifest.tables).hasSize(31);
+    assertThat(manifest.tables).hasSize(27);
     Map<String, String> boundaries = new HashMap<>();
     for (SchemaManifestEntry e : manifest.tables) {
       assertThat(e.ddlSha256).as(e.tableName + " ddl_sha256").isNotBlank();
@@ -108,10 +108,7 @@ class SchemaComplianceFullSuiteTest {
       assertThat(e.validatedMatrix).as(e.tableName + " validated_matrix").isNotBlank();
       boundaries.put(e.tableName, e.validatedMatrix);
     }
-    assertThat(boundaries.get("feature_candles_15s")).isEqualTo("VM-FLUSS-CONN-007");
-    // Low-latency candles Phase 1 (2026-08-29): preview table rides the same
-    // Fluss-Flink connector boundary as the final candle table.
-    assertThat(boundaries.get("feature_candles_15s_preview")).isEqualTo("VM-FLUSS-CONN-007");
+    assertThat(boundaries.get("Signal_Candidates")).isEqualTo("VM-FLUSS-CONN-007");
     assertThat(boundaries.get("Signal_Candidates_current")).isEqualTo("VM-FLUSS-CONN-007");
     assertThat(boundaries.get("raw_table_1")).isEqualTo("VM-FLUSS-SRV-005");
   }

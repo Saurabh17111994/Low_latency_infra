@@ -13,6 +13,34 @@
 -- account; two accounts can produce the same broker_order_id and the KV
 -- projection would silently overwrite one account's order state. The composite
 -- key (account_scope_id, broker_order_id) makes the projection account-safe.
+--
+-- Domain contract (P4-032/P4-033/P4-034/P4-185/P4-186 — NOT ENFORCED is
+-- engine reality; Fluss has no CHECK; enforced in running code, not here):
+--   ordering (P4-032): enforced in OrderLifecycleProjector (wired by
+--     PostbackProjectionDriver): stale version rejected (audited, no write),
+--     same-version-different-content -> CONFLICT quarantine, terminal
+--     regression -> quarantine + halt, exact duplicate -> no-op. Writer rule:
+--     apply only if (source_version, source_event_time, source_event_id) >
+--     stored tuple; never regress cumulative_qty / normalized_state.
+--   key discipline (P4-033): sole upsert/read key is the FULL composite
+--     (account_scope_id, broker_order_id) — NEVER broker_order_id alone.
+--     Offline audit: GROUP BY broker_order_id HAVING COUNT(DISTINCT
+--     account_scope_id) > 1 must return zero rows.
+--   TTL limits (P4-034, stated honestly): 2d bounds the changelog only;
+--     quiescent multi-day open orders (GTT, no events >2d) lose changelog
+--     cover, and Fills-rebuild restores FILL states only — non-fill states
+--     (OPEN/REJECTED/CANCELLED/EXPIRED with no fills) and average-price
+--     semantics are unrecoverable past the window. Retain-until-terminal is
+--     a retention-policy + projector change, not a DDL value edit — no TTL
+--     bump (moves the cliff without removing it).
+--   enums/units (P4-185): normalized_state/correlation_state closed sets
+--     live in OrderLifecycleState + projector; quantities >= 0 enforced at
+--     the NormalizedPostback boundary; average_fill_price NULL iff
+--     cumulative_qty = 0.
+--   bucket key (P4-186): account-only bucketing is single-account-deployment
+--     optimal today; per-account hotspot is theoretical until multi-account
+--     scale. Re-bucketing reshuffles live distribution — load-test before
+--     any change; perf validation is follow-up, not this batch.
 
 CREATE TABLE Order_Lifecycle (
     account_scope_id        STRING      NOT NULL,

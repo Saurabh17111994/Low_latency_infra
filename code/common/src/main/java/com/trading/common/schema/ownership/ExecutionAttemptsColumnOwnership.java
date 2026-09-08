@@ -57,7 +57,7 @@ public final class ExecutionAttemptsColumnOwnership {
             TABLE_NAME,
             ExecutionAttemptsColumns.SCHEMA_VERSION_V3,
             OWNER,
-            ExecutionAttemptsColumns.NAMES,
+            ExecutionAttemptsColumns.NAMES.toArray(new String[0]),
             IDENTITY,
             new ColumnOwnership.Writer(WRITER_ATTEMPT_STORE,
                     ExecutionAttemptsColumns.PHASE,

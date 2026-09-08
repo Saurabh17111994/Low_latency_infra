@@ -61,6 +61,24 @@ class QuarantineWriterTest {
     }
 
     @Test
+    void p4_330SchemaVersionMatchesHeader() {
+        // Header/manifest say 1 (bare numeric); the writer previously wrote "v1".
+        assertEquals("1", QuarantineWriter.SCHEMA_VERSION);
+    }
+
+    @Test
+    void p4_222EmptyPayloadHashesItsBytesNeverBlank() {
+        // Missing payloads previously all shared payload_hash="" — collide.
+        String nullHash = QuarantineWriter.computePayloadHash(null);
+        String emptyHash = QuarantineWriter.computePayloadHash(new byte[0]);
+        assertEquals(64, nullHash.length(), "SHA-256 hex, not blank");
+        assertEquals(nullHash, emptyHash, "null coerces to empty bytes, same digest");
+        String realHash = QuarantineWriter.computePayloadHash(new byte[] {1, 2, 3});
+        assertEquals(64, realHash.length());
+        assertFalse(realHash.equals(nullHash), "distinct bytes, distinct hash");
+    }
+
+    @Test
     void observePropagatesAsyncAppendFailures() {
         // R-033: a discarded append future silently loses quarantine evidence.
         CompletableFuture<AppendResult> failed =

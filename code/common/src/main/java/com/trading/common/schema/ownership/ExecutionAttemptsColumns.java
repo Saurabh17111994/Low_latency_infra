@@ -55,13 +55,26 @@ public final class ExecutionAttemptsColumns {
             false, false, false, true, false, false, false, true, false, false,
             false, true, true, false, true, true, true, false, false, false);
 
-    /** DDL column names in index order (diagnostics + agreement pin). */
-    public static final String[] NAMES = {
+    /** DDL column names in index order (diagnostics + agreement pin). Immutable. */
+    public static final List<String> NAMES = List.of(
             "execution_attempt_id", "account_scope_id", "instruction_id",
             "action_id", "execution_partition_id", "request_hash",
             "client_order_ref", "broker_order_id", "gate_epoch", "phase",
             "phase_epoch", "outcome", "outcome_detail", "prepared_ts",
             "submitted_ts", "terminal_ts", "broker_response_summary",
-            "retry_attempt", "gate_fence_token", "schema_version"
-    };
+            "retry_attempt", "gate_fence_token", "schema_version");
+
+    static {
+        if (NAMES.size() != FIELD_COUNT
+                || TYPE_ROOTS.size() != FIELD_COUNT
+                || COLUMN_NULLABLE_IN_DDL.size() != FIELD_COUNT) {
+            throw new ExceptionInInitializerError(
+                    "ExecutionAttemptsColumns drift: NAMES/TYPE_ROOTS/NULLABLE size != FIELD_COUNT");
+        }
+        if (SCHEMA_VERSION != FIELD_COUNT - 1
+                || GATE_FENCE_TOKEN != SCHEMA_VERSION - 1) {
+            throw new ExceptionInInitializerError(
+                    "ExecutionAttemptsColumns drift: gate_fence_token must sit immediately before trailing schema_version");
+        }
+    }
 }

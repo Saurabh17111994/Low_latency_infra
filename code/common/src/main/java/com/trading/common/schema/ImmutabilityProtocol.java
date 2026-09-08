@@ -18,6 +18,7 @@ public final class ImmutabilityProtocol {
     public enum Outcome { ACCEPTED, DUPLICATE, VIOLATION }
 
     public static String canonicalHash(byte[] canonicalContent) {
+        java.util.Objects.requireNonNull(canonicalContent, "canonicalContent is required");
         try {
             MessageDigest d = MessageDigest.getInstance("SHA-256");
             return HexFormat.of().formatHex(d.digest(canonicalContent));
@@ -27,10 +28,12 @@ public final class ImmutabilityProtocol {
     }
 
     public static String canonicalHash(String canonicalContent) {
+        java.util.Objects.requireNonNull(canonicalContent, "canonicalContent is required");
         return canonicalHash(canonicalContent.getBytes(StandardCharsets.UTF_8));
     }
 
     public static Outcome evaluate(String existingHash, String incomingHash) {
+        java.util.Objects.requireNonNull(incomingHash, "incomingHash is required");
         if (existingHash == null) {
             return Outcome.ACCEPTED;
         }

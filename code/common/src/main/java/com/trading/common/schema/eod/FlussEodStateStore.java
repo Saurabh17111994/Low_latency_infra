@@ -76,24 +76,48 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
         Map<String, InternalRow> rows = new LinkedHashMap<>();
         for (int b = 0; b < info.getNumBuckets(); b++) {
             TableBucket tb = new TableBucket(info.getTableId(), b);
-            try (BatchScanner scanner = table.newScan()
-                         .limit(Integer.MAX_VALUE)
-                         .createBatchScanner(tb);
-                 CloseableIterator<InternalRow> it =
-                         scanner.pollBatch(Duration.ofMillis(250))) {
-                while (it.hasNext()) {
-                    InternalRow row = it.next();
-                    rows.put(row.getString(EodOffloadStateColumns.RECORD_ID).toString(), row);
+            // P4-133: drain until null — one pollBatch is one batch, not the
+            // bucket; a single poll silently truncates large/slow scans (the
+            // controller then re-drives completed work or misses failures).
+            // Bounded by timeoutMs, null-guarded (empty/exhausted bucket).
+            try (BatchScanner scanner = table.newScan().createBatchScanner(tb)) {
+                while (true) {
+                    CloseableIterator<InternalRow> batch =
+                            scanner.pollBatch(Duration.ofMillis(timeoutMs));
+                    if (batch == null) {
+                        break;
+                    }
+                    try (CloseableIterator<InternalRow> it = batch) {
+                        boolean any = false;
+                        while (it.hasNext()) {
+                            any = true;
+                            InternalRow row = it.next();
+                            rows.put(row.getString(EodOffloadStateColumns.RECORD_ID).toString(),
+                                    row);
+                        }
+                        if (!any) {
+                            break;
+                        }
+                    }
                 }
             }
         }
         List<EodOffloadRecord> out = new ArrayList<>();
         for (InternalRow row : rows.values()) {
             String recordId = row.getString(EodOffloadStateColumns.RECORD_ID).toString();
-            if (EodOffloadStateColumns.LEASE_RECORD_ID.equals(recordId)) {
+            if (EodOffloadStateColumns.isLeaseRecordId(recordId)) {
                 continue; // the lease row is not an offload record
             }
-            out.add(toRecord(row));
+            // P4-137: one corrupt/evolved row must not fail the whole scan
+            // (a VERIFIED day disappearing from readAll looks like permission
+            // to expire its source). Skip-and-log, fail-safe: skipped rows are
+            // treated as missing, never as verified.
+            try {
+                out.add(toRecord(row));
+            } catch (RuntimeException corrupt) {
+                System.err.println("eod-state: skipping corrupt row " + recordId + ": "
+                        + corrupt.getMessage());
+            }
         }
         return out;
     }
@@ -122,9 +146,15 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
         values[EodOffloadStateColumns.UPDATED_AT_MS] = record.updatedAtMs();
         values[EodOffloadStateColumns.STATE_SCHEMA_VERSION] =
                 BinaryString.fromString(EodOffloadStateColumns.STATE_SCHEMA_VERSION_V1);
+        // P4-134: get() before flush() risks hanging to timeout (buffered
+        // upsert needs flush to make progress). No try-with-resources:
+        // UpsertWriter/TableWriter is flush-only in Fluss 0.9.1 (verified by
+        // decompile in Group F) — same shape as the positions store.
         UpsertWriter writer = table.newUpsert().createWriter();
+        java.util.concurrent.CompletableFuture<?> f = writer.upsert(GenericRow.of(values));
         try {
-            writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
+            writer.flush();
+            f.get(timeoutMs, TimeUnit.MILLISECONDS);
         } finally {
             writer.flush();
         }
@@ -132,6 +162,13 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
 
     @Override
     public Lease acquireLease(String token, long nowMs, long leaseTtlMs) throws Exception {
+        // P4-294 note: Lookuper is a bare interface in Fluss 0.9.1 (no
+        // AutoCloseable — verified by decompile in Group F), so there is
+        // nothing to close; the per-call creation holds no releasable handle.
+        // P4-135: check-then-act has no atomic CAS in the raw client — two
+        // controllers racing an expired lease can both acquire. Best-effort
+        // fencing only (see EodStateStore.acquireLease contract); callers
+        // must re-check isHeldBy before committing VERIFIED.
         Lookuper lookuper = table.newLookup().createLookuper();
         InternalRow found = lookuper.lookup(GenericRow.of(BinaryString.fromString(
                         EodOffloadStateColumns.LEASE_RECORD_ID)))
@@ -174,15 +211,22 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
         values[EodOffloadStateColumns.UPDATED_AT_MS] = acquiredAtMs;
         values[EodOffloadStateColumns.STATE_SCHEMA_VERSION] =
                 BinaryString.fromString(EodOffloadStateColumns.STATE_SCHEMA_VERSION_V1);
+        // P4-136: same reorder as upsert() — flush before get; no
+        // try-with-resources (UpsertWriter is flush-only in 0.9.1).
         UpsertWriter writer = table.newUpsert().createWriter();
+        java.util.concurrent.CompletableFuture<?> f = writer.upsert(GenericRow.of(values));
         try {
-            writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
+            writer.flush();
+            f.get(timeoutMs, TimeUnit.MILLISECONDS);
         } finally {
             writer.flush();
         }
     }
 
     private static EodOffloadRecord toRecord(InternalRow r) {
+        // P4-137 (decode half): the compact ctor now fails fast on null/
+        // malformed fields, and readAll() skips-and-logs corrupt rows — a
+        // corrupt row never fails the scan or masquerades as verified.
         return new EodOffloadRecord(
                 r.getString(EodOffloadStateColumns.TRADING_DATE).toString(),
                 r.getString(EodOffloadStateColumns.TABLE_NAME).toString(),

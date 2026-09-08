@@ -60,6 +60,10 @@ public final class FlussPositionsStateStore implements PositionsStateStore, Auto
 
     @Override
     public PositionSnapshot lookup(String positionId) throws Exception {
+        // P4-311 note: Lookuper is a bare interface in Fluss 0.9.1 (no
+        // AutoCloseable, no close()) — per-lookup creation holds no
+        // releasable handle; nothing to close. Documented so the next audit
+        // does not re-raise the leak.
         Lookuper lookuper = table.newLookup().createLookuper();
         InternalRow found = lookuper.lookup(GenericRow.of(BinaryString.fromString(positionId)))
                 .get(timeoutMs, TimeUnit.MILLISECONDS).getSingletonRow();
@@ -91,6 +95,10 @@ public final class FlussPositionsStateStore implements PositionsStateStore, Auto
         try {
             writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
         } finally {
+            // P4-150 note: UpsertWriter/TableWriter is flush()-only in Fluss
+            // 0.9.1 (no AutoCloseable, no close()) — same shape as the
+            // gateway's FlussProjectionLedgerStore. Nothing to close beyond
+            // flush; documented so the next audit does not re-raise the leak.
             writer.flush();
         }
     }
@@ -100,6 +108,13 @@ public final class FlussPositionsStateStore implements PositionsStateStore, Auto
     }
 
     private static PositionSnapshot toSnapshot(InternalRow r) {
+        // P4-352: avg prices are nullable in DDL (NULL iff matching qty is 0
+        // per the 10_positions header contract) — decode NULL as 0L, the
+        // record's absent-value, instead of crashing on getLong.
+        long avgEntry = r.isNullAt(PositionsColumns.AVERAGE_ENTRY_PAISE)
+                ? 0L : r.getLong(PositionsColumns.AVERAGE_ENTRY_PAISE);
+        long avgExit = r.isNullAt(PositionsColumns.AVERAGE_EXIT_PAISE)
+                ? 0L : r.getLong(PositionsColumns.AVERAGE_EXIT_PAISE);
         return new PositionSnapshot(
                 r.getString(PositionsColumns.POSITION_ID).toString(),
                 r.getString(PositionsColumns.TRADE_CONTEXT_ID).toString(),
@@ -111,8 +126,8 @@ public final class FlussPositionsStateStore implements PositionsStateStore, Auto
                 PositionState.valueOf(r.getString(PositionsColumns.STATE).toString()),
                 r.getLong(PositionsColumns.OPEN_QUANTITY),
                 r.getLong(PositionsColumns.CLOSED_QUANTITY),
-                r.getLong(PositionsColumns.AVERAGE_ENTRY_PAISE),
-                r.getLong(PositionsColumns.AVERAGE_EXIT_PAISE),
+                avgEntry,
+                avgExit,
                 r.getString(PositionsColumns.SOURCE_EVENT_ID).toString(),
                 r.getLong(PositionsColumns.SOURCE_VERSION),
                 r.getLong(PositionsColumns.CREATED_TS),

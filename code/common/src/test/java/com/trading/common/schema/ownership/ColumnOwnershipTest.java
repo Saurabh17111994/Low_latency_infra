@@ -113,6 +113,25 @@ class ColumnOwnershipTest {
     }
 
     @Test
+    void duplicateWriterNameRejected() {
+        assertThatThrownBy(() -> new ColumnOwnership("t", "1", "svc",
+                new String[] {"id", "a", "b", "c"}, new int[] {0},
+                new ColumnOwnership.Writer("svc:w1", 1, 2),
+                new ColumnOwnership.Writer("svc:w1", 3)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("duplicate writer name");
+    }
+
+    @Test
+    void nullWriterEntryRejected() {
+        assertThatThrownBy(() -> new ColumnOwnership("t", "1", "svc",
+                new String[] {"id", "a", "b", "c"}, new int[] {0},
+                new ColumnOwnership.Writer("svc:w1", 1, 2, 3), null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("null entry");
+    }
+
+    @Test
     void duplicateWithinWriterRejected() {
         assertThatThrownBy(() -> new ColumnOwnership("t", "1", "svc",
                 new String[] {"id", "a", "b", "c"}, new int[] {0},

@@ -54,8 +54,8 @@ class OrderLifecycleColumnsAgreementTest {
     void ddlDeclares15ColumnsInPinnedOrder() throws IOException {
         List<Column> cols = parseColumns();
         assertThat(cols).hasSize(OrderLifecycleColumns.FIELD_COUNT);
-        assertThat(cols.stream().map(Column::name).toArray(String[]::new))
-                .containsExactly(OrderLifecycleColumns.NAMES);
+        assertThat(cols.stream().map(Column::name).toList())
+                .containsExactlyElementsOf(OrderLifecycleColumns.NAMES);
     }
 
     @Test

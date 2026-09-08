@@ -30,10 +30,22 @@ public final class KvStateUpdateProtocol {
         if (incomingVersion < currentVersion) {
             return contentMatches ? Outcome.STALE : Outcome.REGRESSION;
         }
+        // Forward versions are version-clean only; value-level regression
+        // (terminal/quantity moving backward) is NOT checked here and must
+        // be validated by the caller even when APPLIED is returned.
         return Outcome.APPLIED;
     }
 
-    /** A non-clean outcome requires halt + quarantine. */
+    /**
+     * A non-clean outcome requires halt + quarantine.
+     *
+     * <p>Note: production halt semantics live at the call sites, which switch
+     * on {@link Outcome} directly ({@code PositionProjector},
+     * {@code PositionProjectionWriter}, {@code OrderLifecycleProjector},
+     * {@code PositionsObservationOperator}) — every one of them already treats
+     * STALE as a non-halting soft reject. Keep this method consistent with
+     * those switches if it gains callers.
+     */
     public static boolean requiresHalt(Outcome o) {
         return o != Outcome.APPLIED && o != Outcome.DUPLICATE;
     }
