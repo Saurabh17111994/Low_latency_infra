@@ -112,7 +112,10 @@ class TradeDecisionBuilderTest {
                         d.supersedesInstructionId(), d.supersededByInstructionId());
                 case "order_type" -> new TradeDecision(d.candidateId(), d.tradeContextId(),
                         d.instrumentToken(), d.exchange(), d.symbol(), d.side(), d.quantity(),
-                        m[1], d.productType(), d.limitPricePaise(), d.portfolioId(),
+                        m[1], d.productType(),
+                        TradeDecisionsTableColumns.ORDER_TYPE_LIMIT.equals(m[1])
+                                ? 10_000L : d.limitPricePaise(),
+                        d.portfolioId(),
                         d.accountScopeId(), d.strategyId(), d.strategyVersion(),
                         d.configurationVersion(), d.evaluationId(), d.compositeScore(),
                         d.reservationId(), d.reservationVersion(), d.createdTs(), d.expiryTs(),
@@ -141,13 +144,15 @@ class TradeDecisionBuilderTest {
                 "instruction_id must change when quantity changes (REQ-SS-004)");
         TradeDecision price = mutate(sampleDecision(), d -> new TradeDecision(d.candidateId(),
                 d.tradeContextId(), d.instrumentToken(), d.exchange(), d.symbol(), d.side(),
-                d.quantity(), d.orderType(), d.productType(), 10_000L, d.portfolioId(),
+                d.quantity(), TradeDecisionsTableColumns.ORDER_TYPE_LIMIT, d.productType(),
+                10_000L, d.portfolioId(),
                 d.accountScopeId(), d.strategyId(), d.strategyVersion(), d.configurationVersion(),
                 d.evaluationId(), d.compositeScore(), d.reservationId(), d.reservationVersion(),
                 d.createdTs(), d.expiryTs(), d.supersedesInstructionId(),
                 d.supersededByInstructionId()));
         assertTrue(!TradeDecisionBuilder.instructionId(price).equals(base),
-                "instruction_id must change when the limit price changes (REQ-SS-004)");
+                "instruction_id must change when order_type LIMIT with a changed limit price "
+                        + "changes (REQ-SS-004)");
         TradeDecision token = mutate(sampleDecision(), d -> new TradeDecision(d.candidateId(),
                 d.tradeContextId(), d.instrumentToken() + 1, d.exchange(), d.symbol(), d.side(),
                 d.quantity(), d.orderType(), d.productType(), d.limitPricePaise(), d.portfolioId(),
@@ -306,5 +311,61 @@ class TradeDecisionBuilderTest {
                         d.reservationVersion(), d.createdTs(), d.expiryTs(),
                         d.supersedesInstructionId(), d.supersededByInstructionId()))),
                 "negative limit_price_paise must be rejected");
+        // P4-025: unknown side — closed BUY/SELL enum
+        assertThrows(IllegalArgumentException.class, () -> TradeDecisionBuilder.build(
+                mutate(sampleDecision(), d -> new TradeDecision(d.candidateId(), d.tradeContextId(),
+                        d.instrumentToken(), d.exchange(), d.symbol(), "HOLD", d.quantity(),
+                        d.orderType(), d.productType(), d.limitPricePaise(), d.portfolioId(),
+                        d.accountScopeId(), d.strategyId(), d.strategyVersion(),
+                        d.configurationVersion(), d.evaluationId(), d.compositeScore(),
+                        d.reservationId(), d.reservationVersion(), d.createdTs(), d.expiryTs(),
+                        d.supersedesInstructionId(), d.supersededByInstructionId()))),
+                "side outside {BUY, SELL} must be rejected (P4-025 closed enum)");
+        // P4-025: unknown order_type — closed MARKET/LIMIT enum
+        assertThrows(IllegalArgumentException.class, () -> TradeDecisionBuilder.build(
+                mutate(sampleDecision(), d -> new TradeDecision(d.candidateId(), d.tradeContextId(),
+                        d.instrumentToken(), d.exchange(), d.symbol(), d.side(), d.quantity(),
+                        "STOP", d.productType(), d.limitPricePaise(), d.portfolioId(),
+                        d.accountScopeId(), d.strategyId(), d.strategyVersion(),
+                        d.configurationVersion(), d.evaluationId(), d.compositeScore(),
+                        d.reservationId(), d.reservationVersion(), d.createdTs(), d.expiryTs(),
+                        d.supersedesInstructionId(), d.supersededByInstructionId()))),
+                "order_type outside {MARKET, LIMIT} must be rejected (P4-025 closed enum)");
+        // P4-025: LIMIT without a positive limit price — coupling
+        assertThrows(IllegalArgumentException.class, () -> TradeDecisionBuilder.build(
+                mutate(sampleDecision(), d -> new TradeDecision(d.candidateId(), d.tradeContextId(),
+                        d.instrumentToken(), d.exchange(), d.symbol(), d.side(), d.quantity(),
+                        TradeDecisionsTableColumns.ORDER_TYPE_LIMIT, d.productType(), null,
+                        d.portfolioId(), d.accountScopeId(), d.strategyId(), d.strategyVersion(),
+                        d.configurationVersion(), d.evaluationId(), d.compositeScore(),
+                        d.reservationId(), d.reservationVersion(), d.createdTs(), d.expiryTs(),
+                        d.supersedesInstructionId(), d.supersededByInstructionId()))),
+                "LIMIT order without a positive limit_price_paise must be rejected (P4-025)");
+        // P4-025: MARKET carrying a limit price — coupling
+        assertThrows(IllegalArgumentException.class, () -> TradeDecisionBuilder.build(
+                mutate(sampleDecision(), d -> new TradeDecision(d.candidateId(), d.tradeContextId(),
+                        d.instrumentToken(), d.exchange(), d.symbol(), d.side(), d.quantity(),
+                        TradeDecisionsTableColumns.ORDER_TYPE_MARKET, d.productType(), 10_000L,
+                        d.portfolioId(), d.accountScopeId(), d.strategyId(), d.strategyVersion(),
+                        d.configurationVersion(), d.evaluationId(), d.compositeScore(),
+                        d.reservationId(), d.reservationVersion(), d.createdTs(), d.expiryTs(),
+                        d.supersedesInstructionId(), d.supersededByInstructionId()))),
+                "MARKET order with a limit_price_paise must be rejected (P4-025)");
+    }
+
+    @Test
+    @DisplayName("LIMIT decision with a positive price builds and carries the price (P4-025 coupling)")
+    void limitDecisionWithPriceBuilds() {
+        TradeDecision d = mutate(sampleDecision(), x -> new TradeDecision(x.candidateId(),
+                x.tradeContextId(), x.instrumentToken(), x.exchange(), x.symbol(), x.side(),
+                x.quantity(), TradeDecisionsTableColumns.ORDER_TYPE_LIMIT, x.productType(),
+                10_000L, x.portfolioId(), x.accountScopeId(), x.strategyId(), x.strategyVersion(),
+                x.configurationVersion(), x.evaluationId(), x.compositeScore(), x.reservationId(),
+                x.reservationVersion(), x.createdTs(), x.expiryTs(),
+                x.supersedesInstructionId(), x.supersededByInstructionId()));
+        RowData row = TradeDecisionBuilder.build(d);
+        assertEquals("LIMIT", row.getString(TradeDecisionsTableColumns.ORDER_TYPE).toString());
+        assertEquals(10_000L, row.getLong(TradeDecisionsTableColumns.LIMIT_PRICE_PAISE),
+                "LIMIT order must carry its positive limit price");
     }
 }

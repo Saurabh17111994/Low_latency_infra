@@ -21,9 +21,11 @@
 --     TradeInstructionFeedProtocol.verify (ACCEPTED/DUPLICATE/VIOLATION).
 --   domain checks (P4-025): enforced in TradeDecisionBuilder.requireValid
 --     (fail-closed throw): quantity/instrument/created positive, finite
---     composite_score, positive-when-present price, all non-blank. GAPS
---     (future builder hardening, not DDL): side/order_type not closed-enum
---     checked; LIMIT/MARKET-price coupling absent here (cf. intent builder).
+--     composite_score, all non-blank. FIXED (FOLLOW-2, 2026-09-09): side is
+--     closed to BUY/SELL, order_type closed to MARKET/LIMIT, and the
+--     LIMIT/MARKET-price coupling matches IntentValidator (LIMIT requires
+--     positive limit_price_paise; MARKET must not carry one) — an unroutable
+--     decision now fails at the builder, never reaching the gateway.
 --   superseded_by (P4-026): write-once-at-emit, resolved read-side; nothing
 --     UPDATEs it through the append-only sink (serialization (true,true)).
 --     DROP would be a recreate + columns/mapper cascade for zero runtime

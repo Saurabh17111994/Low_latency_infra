@@ -20,6 +20,14 @@ package com.trading.common.schema.projection;
  * versioned content fingerprint (see {@link PostbackFingerprint}); a
  * mismatch is quarantined as {@link QuarantineReason#FINGERPRINT_MISMATCH}.
  *
+ * <p>Fill semantics (P4-029): a postback with {@code fillQty == 0} is a
+ * status/heartbeat update — pure order bookkeeping that must not carry a
+ * price. A postback with {@code fillQty > 0} is a fill event (partial while
+ * {@code pendingQty > 0}, complete at {@code pendingQty == 0}) and must
+ * carry a strictly positive {@code fillPricePaise}. The fill's identity for
+ * duplicate/conflict checks is {@code sourceEventId}, which this envelope
+ * always requires — this envelope does not model a separate broker fill id.
+ *
  * @param mappingVersion fingerprint/mapping release, e.g. {@code "1"}
  */
 public record NormalizedPostback(
@@ -65,6 +73,12 @@ public record NormalizedPostback(
         }
         if (fillQty == 0 && fillPricePaise != 0) {
             throw new IllegalArgumentException("non-fill row must not carry a fill price");
+        }
+        // P4-029 FOLLOW-3: fill-present-requires-price. A fill without a
+        // positive price would corrupt average_fill_price_paise downstream
+        // (0 is this envelope's sentinel for "no price").
+        if (fillQty > 0 && fillPricePaise <= 0) {
+            throw new IllegalArgumentException("fill row must carry a positive fill price");
         }
         if (side != null && !SIDE_BUY.equals(side) && !SIDE_SELL.equals(side)) {
             throw new IllegalArgumentException("side must be BUY or SELL, got " + side);

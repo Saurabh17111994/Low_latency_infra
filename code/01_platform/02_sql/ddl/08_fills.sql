@@ -20,9 +20,11 @@
 --     but replays that SUM fill_qty MUST dedup first or double-count.
 --   fill invariants (P4-029): enforced in NormalizedPostback compact ctor
 --     (fail-closed throw): quantities >= 0, non-fill must not carry a price,
---     side BUY/SELL-closed. GAP (FOLLOW-3): fill-present-requires-price+id
---     (fill_qty>0 with NULL price passes today) + heartbeat-vs-partial
---     semantic — future decoder hardening, not DDL.
+--     fill-present-requires-price (fill_qty>0 ⇒ price>0; FIXED in FOLLOW-3),
+--     side BUY/SELL-closed. Fill id at this layer is sourceEventId (always
+--     required). Heartbeat-vs-partial (FOLLOW-3): fill_qty=0 is a
+--     status/heartbeat update (no price); fill_qty>0 is a fill event
+--     (partial while pending_qty>0, complete at pending_qty=0).
 --   payload (P4-030): original_payload retained for forensics; hot-path
 --     joins use payload_hash. Fluss has no GRANT/RLS/masking — readers
 --     predicate on account_scope_id; lake encryption admin-owned.

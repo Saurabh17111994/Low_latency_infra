@@ -60,7 +60,7 @@
     {
       "table_name": "Fills",
       "ddl_path": "08_fills.sql",
-      "ddl_sha256": "c59a09bf4759bf0d3c87491bf833970228c3c2eb4641191ade878c9d5b4a813b",
+      "ddl_sha256": "45e64319389656142b0f6d21e81c3a0adc6f736a540b8ce7aeeb5adb07035e5e",
       "table_kind": "LOG",
       "bucket_key": "postback_event_id",
       "primary_key": null,

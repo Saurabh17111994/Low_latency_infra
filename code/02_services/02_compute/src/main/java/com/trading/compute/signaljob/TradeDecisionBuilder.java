@@ -189,8 +189,19 @@ public final class TradeDecisionBuilder {
         requireNonBlank(d.tradeContextId(), "trade_context_id");
         requireNonBlank(d.exchange(), "exchange");
         requireNonBlank(d.symbol(), "symbol");
-        requireNonBlank(d.side(), "side");
-        requireNonBlank(d.orderType(), "order_type");
+        // P4-025: closed enums — a decision with an unknown side/order_type is
+        // unroutable and must fail here, never reach the gateway (mirror of
+        // IntentValidator's closure).
+        if (!TradeDecisionsTableColumns.SIDE_BUY.equals(d.side())
+                && !TradeDecisionsTableColumns.SIDE_SELL.equals(d.side())) {
+            throw new IllegalArgumentException("side must be BUY or SELL, got "
+                    + d.side());
+        }
+        if (!TradeDecisionsTableColumns.ORDER_TYPE_MARKET.equals(d.orderType())
+                && !TradeDecisionsTableColumns.ORDER_TYPE_LIMIT.equals(d.orderType())) {
+            throw new IllegalArgumentException("order_type must be MARKET or LIMIT, got "
+                    + d.orderType());
+        }
         requireNonBlank(d.productType(), "product_type");
         requireNonBlank(d.portfolioId(), "portfolio_id");
         requireNonBlank(d.accountScopeId(), "account_scope_id");
@@ -215,9 +226,18 @@ public final class TradeDecisionBuilder {
             throw new IllegalArgumentException("composite_score must be null or finite, got "
                     + d.compositeScore());
         }
-        if (d.limitPricePaise() != null && d.limitPricePaise() <= 0) {
-            throw new IllegalArgumentException("limit_price_paise must be null or positive, got "
-                    + d.limitPricePaise());
+        // P4-025: LIMIT/MARKET-price coupling (mirror of IntentValidator) —
+        // LIMIT requires a positive limit price; MARKET must not carry one.
+        boolean limit = TradeDecisionsTableColumns.ORDER_TYPE_LIMIT.equals(d.orderType());
+        boolean market = TradeDecisionsTableColumns.ORDER_TYPE_MARKET.equals(d.orderType());
+        if (limit && (d.limitPricePaise() == null || d.limitPricePaise() <= 0)) {
+            throw new IllegalArgumentException(
+                    "limit order requires positive limit_price_paise, got " + d.limitPricePaise());
+        }
+        if (market && d.limitPricePaise() != null) {
+            throw new IllegalArgumentException(
+                    "market order must not carry limit_price_paise, got "
+                            + d.limitPricePaise());
         }
         if (d.expiryTs() != null && d.expiryTs() <= 0) {
             throw new IllegalArgumentException("expiry_ts must be null or positive, got "
