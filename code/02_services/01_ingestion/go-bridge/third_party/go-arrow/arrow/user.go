@@ -48,9 +48,11 @@ type UserData struct {
 
 // User represents the complete API response structure for user details.
 // This follows Arrow API's standard response format with data and status fields.
+// (WAVE9-F: P1-204 — Data is a pointer so a `data:null` body decodes to nil
+// instead of a zero struct; helpers above are nil-safe.)
 type User struct {
-	Data   UserData `json:"data"`   // The actual user profile data
-	Status string   `json:"status"` // API response status ("success" or "error")
+	Data   *UserData `json:"data"`   // The actual user profile data
+	Status string    `json:"status"` // API response status ("success" or "error")
 }
 
 // GetUserDetails fetches comprehensive user profile details from the Arrow API.
@@ -90,7 +92,7 @@ func (c *Client) GetUserDetails() (*User, error) {
 			Err(err).
 			Str("endpoint", endpoint).
 			Msg("Failed to parse user profile response JSON")
-		return nil, fmt.Errorf("failed to parse user profile response: %w", err)
+		return nil, fmt.Errorf("user profile: decode: %w (body=%.200s)", err, string(resp))
 	}
 
 	// Check if the API response status indicates success.
@@ -118,14 +120,12 @@ func (c *Client) GetUserDetails() (*User, error) {
 	return &result, nil
 }
 
-// HasDefaultBankAccount checks if the user has configured a default bank account.
-//
-// This is a convenience method to quickly determine if the user has set up
-// their banking details for transactions.
-//
-// Returns:
-//   - bool: true if a default bank account exists, false otherwise
+// (WAVE9-F: P1-204 — every helper below is nil-receiver safe; a nil *User or
+// a User with nil Data no longer panics.)
 func (u *User) HasDefaultBankAccount() bool {
+	if u == nil || u.Data == nil {
+		return false
+	}
 	for _, bank := range u.Data.BankDetails {
 		if bank.IsDefault {
 			return true
@@ -138,10 +138,17 @@ func (u *User) HasDefaultBankAccount() bool {
 //
 // Returns:
 //   - *BankDetail: pointer to the default bank account, or nil if none exists
+//
+// (WAVE9-F: P1-204/205 — nil-safe; returns a copy so the caller cannot alias
+// or mutate the interior slice element.)
 func (u *User) GetDefaultBankAccount() *BankDetail {
-	for i, bank := range u.Data.BankDetails {
+	if u == nil || u.Data == nil {
+		return nil
+	}
+	for _, bank := range u.Data.BankDetails {
 		if bank.IsDefault {
-			return &u.Data.BankDetails[i]
+			cp := bank
+			return &cp
 		}
 	}
 	return nil
@@ -155,6 +162,10 @@ func (u *User) GetDefaultBankAccount() *BankDetail {
 // Returns:
 //   - bool: true if the user has access to the specified exchange
 func (u *User) HasExchangeAccess(exchange string) bool {
+	// P1-204: nil-receiver safe like the bank helpers above.
+	if u == nil || u.Data == nil {
+		return false
+	}
 	for _, ex := range u.Data.Exchanges {
 		if ex == exchange {
 			return true
@@ -168,5 +179,9 @@ func (u *User) HasExchangeAccess(exchange string) bool {
 // Returns:
 //   - bool: true if TOTP/2FA is enabled for the user account
 func (u *User) IsTotpEnabled() bool {
+	// P1-204: nil-receiver safe like the bank helpers above.
+	if u == nil || u.Data == nil {
+		return false
+	}
 	return u.Data.TotpEnabled
 }
