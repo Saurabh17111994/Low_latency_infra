@@ -3,25 +3,27 @@
 ## What was prepared
 
 - Working clone: `/tmp/go-arrow-upstream` (HEAD `7cce1630`, = pin).
-- Patch: `/tmp/wave9-v020.patch` (598 lines, 7 files, +267/−37).
+- Patch: `/tmp/wave9-v020.patch` (7 files, +313/−47).
 - Clean-room verified: fresh clone @ `7cce1630` → `git apply` → `go mod tidy` →
   `go build ./...` ok → `go vet ./arrow/` ok → `go test ./...` ok (no test
   files upstream) → `gofmt -l` shows only pre-existing
   (`constants.go`, `limits.go`, `market.go` — untouched by this patch).
-- Throwaway `-race` verification (deleted after run): Bundle A lock round-trip,
-  Bundle C range rejections, Bundle F validate matrix, Bundle B checksum —
-  4/4 PASS.
+- Throwaway `-race` verification (deleted after run): Bundle A lock +
+  8-goroutine SetToken/GetToken race, Bundle C ranges + single-reader
+  refusal, Bundle F validate matrix, Bundle B checksum — 6/6 PASS.
 
 ## Bundles in the patch (E deferred per accepted approach — money stays float)
 
 - A `arrow/client.go`: `SetToken` Lock; `GetToken`/`GetRefreshToken` RLock;
-  `request` copies BaseURL/AppID/Token under RLock; headers use the copies.
+  `request` + `rawRequestAuth` copy BaseURL/AppID/Token under RLock; headers use the copies.
 - B `arrow/auth.go`: `Authenticate` empty-token guard + endpoint-context
   errors; `GenerateChecksum` returns `""` on empty secret/token; `Login`
   documents stdin ownership + returns error + new `LoginContext(ctx, token)`;
   `AutoLogin` typed `AuthError{Stage}` (login/totp/redirect/authenticate),
   empty-requestId/redirect guards, token-length print removed (P1-292).
-- C `arrow/hft_stream.go`: `reading atomic.Bool` field; `sort` import;
+- C `arrow/hft_stream.go`: `reading atomic.Bool` field WIRED into `ReadHFT`
+  (CompareAndSwap refusal + `nil` guard); `ConnectHFTDataStream` snapshots
+  auth under RLock + host-only dial error; `sort` import;
   `decodeHFTPayload` nil-before-lock; `SubscribeHFTTokens` exchSeg 0..3 +
   latency 50..60000; `SubscribeHFTBySegment` latency range + sorted keys +
   per-seg range; `writeJSON` marshal/deadline/write wrap + 10s write
@@ -39,11 +41,14 @@
   added (file itself NOT created — create it before tagging); `*.log` kept,
   `build/**/*.log` narrowed.
 
-## Before tagging — 2 open items
+## Before tagging — 3 open items
 
-1. Dual `checkSum`/`checksum` (`auth.go:73-74`) kept as-is: needs Arrow's
+1. Dual `checkSum`/`checksum` (`auth.go`) kept as-is: needs Arrow's
    canonical key before dropping one (broker unknown #1).
 2. `config.example` referenced in `.gitignore` but not created — add it.
+3. `Authenticate` token write takes `mu.Lock`; `Login`/`AutoLogin` AppID
+   reads snapshot under RLock — full `c.Config` audit: every remaining
+   read/write sits inside RLock/Lock windows (verified by window scan).
 
 ## Push commands (run these, NOT the agent — no GitHub auth here)
 
