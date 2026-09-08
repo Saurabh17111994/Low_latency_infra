@@ -5,7 +5,7 @@ go 1.24.5
 // go-arrow is pinned to upstream tag v0.2.0 (tag object 67bc0b0 ->
 // merge commit 1390d40, https://github.com/Saurabh17111994/go-arrow) =
 // base 7cce1630 (2026-06-22) + Wave9 bundles A-D,F,G (E deferred),
-// with in-repo patches R-101..R-243 merged on top (commit d6804e3; see
+// with in-repo patches R-101..R-243 merged on top (see
 // CODE_REVIEW_REMEDIATION.md). The vendored replace makes the build
 // self-contained; the require version is the upstream identity label and
 // never resolves through the module proxy.

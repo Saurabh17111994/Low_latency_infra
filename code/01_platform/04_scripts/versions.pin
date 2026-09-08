@@ -23,7 +23,7 @@ ZOOKEEPER_VERSION=3.9.2
 # image drifted to 3.14.4 (apt default on the temurin base); the image now
 # installs python3.11 explicitly to match. Host tooling may run a newer 3.11.x.
 PYTHON_VERSION=3.11.9
-BROKER_PROTOCOL=go-arrow-v0.2.0 (module:github.com/arrow-trade/go-arrow, upstream tag v0.2.0 merge 1390d40/tag-commit 67bc0b0 = base 7cce1630 + Wave9 A-D,F,G, in-repo patches R-101..R-243 merged d935e14, vendored third_party/go-arrow replace, tree sha256:1ea24cd66aed0d020c5b4cb3e97082aafba511a670c53925c00a46cae6ddf460) PINNED
+BROKER_PROTOCOL=go-arrow-v0.2.0 (module:github.com/arrow-trade/go-arrow, upstream tag v0.2.0 merge 1390d40/tag-commit 67bc0b0 = base 7cce1630 + Wave9 A-D,F,G, in-repo patches R-101..R-243 merged, vendored third_party/go-arrow replace, tree sha256:1ea24cd66aed0d020c5b4cb3e97082aafba511a670c53925c00a46cae6ddf460) PINNED
 ARROW_API_CONTRACT=v2026-05 (captured from Arrow_broker repo, docs/04_contracts/arrow_broker.md)
 SCHEMA_LIFECYCLE=v1 (all 6 schema-state classes + 5 evolution classes implemented)
 
