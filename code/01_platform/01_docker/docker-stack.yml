@@ -645,14 +645,15 @@ services:
       ARROW_TICK_COUNTS_FILE: ${ARROW_TICK_COUNTS_FILE:-/tmp/arrow-tick-counts.txt}
       ARROW_HFT_LATENCY_MS: ${ARROW_HFT_LATENCY_MS:-50}
       # T0 3-slot (streaming-3000): env-driven slot count N=1..3. Default 1
-      # keeps single-socket 1024 working; N=3 shards 3000 as 1024+1024+952
-      # via BuildSubscriptionPlan contiguous chunks. List enables per-slot
-      # CSVs without code rewrite; single 3000-row CSV also auto-shards.
-      # Go/Java both enforce 1..3 (hftRange/intRange). Swarm image must
-      # bake manifests under /instruments; for N=3 bake slot1/2/3.csv or
-      # the single 3000-row CSV and set the corresponding env.
+      # keeps single-socket 1024 working; N=3 shards a single CSV (3000 rows)
+      # as 1024+1024+952 via BuildSubscriptionPlan contiguous chunks.
+      # Go/Java both enforce 1..3 (hftRange/intRange). Swarm image must bake
+      # manifests under /instruments; for N=3 bake the single 3000-row CSV
+      # and set ARROW_HFT_CONNECTIONS=3 (auto-shard). A per-slot CSV list
+      # env (the plural form of ARROW_INSTRUMENT_MANIFEST) was an unbuilt
+      # T1 alternative — removed 2026-09-09, P5-012 (no reader;
+      # auto-shard supersedes).
       ARROW_HFT_CONNECTIONS: ${ARROW_HFT_CONNECTIONS:-1}
-      ARROW_INSTRUMENT_MANIFESTS: ${ARROW_INSTRUMENT_MANIFESTS:-}
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       INSTRUMENT_MANIFEST_PATH: ${INSTRUMENT_MANIFEST_PATH:-/instruments/NSE_CM_EQUITY.csv}
       ARROW_INSTRUMENT_MANIFEST: ${ARROW_INSTRUMENT_MANIFEST:-/instruments/NSE_CM_EQUITY.csv}

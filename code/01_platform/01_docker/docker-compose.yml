@@ -18,13 +18,15 @@
 
 # Operational live manifest (1,024 instruments, Jul 31) — 1024 tokens/connection
 # cap stays the per-connection contract (ARROW_HFT_MAX_TOKENS_PER_CONNECTION) —
-# T0 3-slot ready. Default N=1 (1024) via ARROW_HFT_CONNECTIONS=1. Premium N=3 shards
-# 3000 as 1024+1024+952 without code rewrite — set ARROW_HFT_CONNECTIONS=3
-# and ARROW_INSTRUMENT_MANIFESTS=/instruments/host/slot1.csv,/instruments/host/slot2.csv,/instruments/host/slot3.csv
-# (or a single 3000-row CSV auto-sharded by BuildSubscriptionPlan at
+# T0 3-slot ready. Default N=1 (1024) via ARROW_HFT_CONNECTIONS=1. Premium N=3
+# shards a single 3000-row CSV as 1024+1024+952 without code rewrite — set
+# ARROW_HFT_CONNECTIONS=3 (auto-sharded by BuildSubscriptionPlan at
 # INSTRUMENT_MANIFEST_PATH). The single-manifest anchor below remains the
 # N=1 default; the directory mount in the ingestion service exposes all host
-# manifests for N=3.
+# manifests for N=3. (A per-slot CSV list env — the plural form of
+# ARROW_INSTRUMENT_MANIFEST — was an unbuilt T1 alternative; removed
+# 2026-09-09, P5-012: no reader ever existed and the auto-shard path
+# supersedes it.)
 # Host paths are env-driven with defaults to the approved 1024 CSV/dir.
 x-manifest: &manifest "${INSTRUMENT_MANIFEST_HOST_PATH:-/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv}"
 x-manifest-dir: &manifest-dir "${INSTRUMENT_MANIFESTS_HOST_DIR:-/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/Arrow_broker/instruments/cash_stocks}"
@@ -644,17 +646,10 @@ services:
       ARROW_TICK_COUNTS_FILE: ${ARROW_TICK_COUNTS_FILE:-/tmp/arrow-tick-counts.txt}
       ARROW_HFT_LATENCY_MS: ${ARROW_HFT_LATENCY_MS:-50}
       # T0 3-slot (streaming-3000): env-driven slot count N=1..3. Default 1
-      # keeps single-socket 1024 working; N=3 shards 3000 as 1024+1024+952
-      # via BuildSubscriptionPlan contiguous chunks. Manifest list enables
-      # per-slot CSVs without code rewrite; single CSV (3000 rows) also
-      # auto-shards when N=3. Go/ Java both enforce 1..3 (hftRange/intRange).
+      # keeps single-socket 1024 working; N=3 shards a single CSV (3000 rows)
+      # as 1024+1024+952 via BuildSubscriptionPlan contiguous chunks.
+      # Go/Java both enforce 1..3 (hftRange/intRange).
       ARROW_HFT_CONNECTIONS: ${ARROW_HFT_CONNECTIONS:-1}
-      # Comma-separated container paths for 3-slot manifests, e.g.
-      # /instruments/host/slot1.csv,/instruments/host/slot2.csv,/instruments/host/slot3.csv
-      # Empty = use single manifest path below (N=1 default). T1 will wire
-      # the loader/bridge to consume this list; until then the single-CSV
-      # auto-shard path covers 3000 via N=3.
-      ARROW_INSTRUMENT_MANIFESTS: ${ARROW_INSTRUMENT_MANIFESTS:-}
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       ALLOW_RUNTIME_DDL: ${ALLOW_RUNTIME_DDL:-false}
       # Single-manifest fallback — env-driven with default to the N=1 approved
@@ -690,12 +685,10 @@ services:
       start_period: 20s
     volumes:
       # T0: default N=1 single-file mount (backward compatible) + directory
-      # mount exposing the host manifest directory for N=3 candidate. The
-      # directory mount at /instruments/host allows
-      # ARROW_INSTRUMENT_MANIFESTS list members
-      # (/instruments/host/slot*.csv) to resolve without extra binds. Both
-      # mounts are read-only; the file mount serves the default single-CSV
-      # path, the dir mount satisfies the list path.
+      # mount exposing the host manifest directory for N=3: a single 3000-row
+      # CSV placed in the host dir auto-shards via ARROW_HFT_CONNECTIONS=3.
+      # Both mounts are read-only; the file mount serves the default
+      # single-CSV path, the dir mount serves the multi-manifest case.
       - type: bind
         source: *manifest
         target: /instruments/NSE_CM_EQUITY.csv
