@@ -64,6 +64,15 @@ class PositionsObservationOperatorTest {
                 .collect(Collectors.toList());
     }
 
+    /** Stale side-output rows (empty when nothing stale arrived). */
+    private List<PositionSnapshot> staleRows() {
+        var q = harness.getSideOutput(PositionsObservationOperator.STALE);
+        if (q == null) {
+            return List.of();
+        }
+        return q.stream().map(StreamRecord::getValue).collect(Collectors.toList());
+    }
+
     @Test
     @DisplayName("clean newer versions are applied (APPLIED) with zero main output")
     void appliesNewerVersion() throws Exception {
@@ -127,6 +136,43 @@ class PositionsObservationOperatorTest {
         assertEquals(List.of(KvStateUpdateProtocol.Outcome.APPLIED,
                 KvStateUpdateProtocol.Outcome.REGRESSION), dispositions());
         assertTrue(harness.getOutput().isEmpty());
+    }
+
+    @Test
+    @DisplayName("P2-006: first-seen negative version is UNKNOWN, key stays recoverable")
+    void firstSeenNegativeVersionIsUnknown() throws Exception {
+        PositionsObservationOperator op = new PositionsObservationOperator();
+        openHarness(op);
+        process(snap("POS-1", "ev-bad", -1L, 10, 0, 2_000L));
+        assertEquals(List.of(KvStateUpdateProtocol.Outcome.UNKNOWN), dispositions());
+
+        // Key was never poisoned: a clean v1 applies afterwards.
+        process(snap("POS-1", "ev-1", 1L, 10, 0, 3_000L));
+        assertEquals(List.of(KvStateUpdateProtocol.Outcome.UNKNOWN,
+                KvStateUpdateProtocol.Outcome.APPLIED), dispositions());
+        assertTrue(harness.getOutput().isEmpty());
+    }
+
+    @Test
+    @DisplayName("P2-114: stale arrival is side-output when beyond the threshold")
+    void staleArrivalSignalled() throws Exception {
+        PositionsObservationOperator op = new PositionsObservationOperator(60_000L);
+        openHarness(op);
+        harness.setProcessingTime(200_000L);
+        // lastUpdate 2_000 vs now 200_000: stale by 198s > 60s threshold.
+        process(snap("POS-1", "ev-1", 1L, 10, 0, 2_000L));
+        assertEquals(List.of(snap("POS-1", "ev-1", 1L, 10, 0, 2_000L)), staleRows());
+        assertTrue(harness.getOutput().isEmpty());
+    }
+
+    @Test
+    @DisplayName("P2-114: fresh arrival stays silent on the stale channel")
+    void freshArrivalSilent() throws Exception {
+        PositionsObservationOperator op = new PositionsObservationOperator(60_000L);
+        openHarness(op);
+        harness.setProcessingTime(10_000L);
+        process(snap("POS-1", "ev-1", 1L, 10, 0, 2_000L));
+        assertTrue(staleRows().isEmpty());
     }
 
     @Test

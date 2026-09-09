@@ -35,6 +35,14 @@ public final class SafetyHaltRowDataBridge {
 
     private SafetyHaltRowDataBridge() {}
 
+    /** P2-012: DDL v3 width — any add/reorder must fail loud, never mis-map. */
+    private static final int EXPECTED_ARITY = 21;
+
+    /** P2-014: null becomes null (parser throws ParseException), never NPE. */
+    private static String textOrNull(RowData row, int idx) {
+        return row.isNullAt(idx) ? null : row.getString(idx).toString();
+    }
+
     /**
      * @param row a current-value changelog row ({@link RowKind#INSERT} or
      *            {@link RowKind#UPDATE_AFTER}); BEFORE/DELETE rows are not
@@ -42,27 +50,44 @@ public final class SafetyHaltRowDataBridge {
      * @throws SafetyHaltRequestParser.ParseException on any contract violation
      */
     public static SlotSafetyRequest toRequest(RowData row) {
+        // P2-013: the bridge enforces its own documented contract — the
+        // upstream filter is one refactor away from disappearing.
+        if (row == null) {
+            throw new SafetyHaltRequestParser.ParseException("row must not be null");
+        }
+        RowKind kind = row.getRowKind();
+        if (kind != RowKind.INSERT && kind != RowKind.UPDATE_AFTER) {
+            throw new SafetyHaltRequestParser.ParseException(
+                    "non-current-value RowKind: " + kind);
+        }
+        // P2-012: brittle positional mapping must fail loud on DDL drift.
+        if (row.getArity() != EXPECTED_ARITY) {
+            throw new SafetyHaltRequestParser.ParseException(
+                    "expected arity " + EXPECTED_ARITY + ", got " + row.getArity());
+        }
         Map<String, Object> map = new LinkedHashMap<>();
         map.put(SafetyHaltRequestParser.COL_HALT_REQUEST_ID,
-                row.getString(IDX_HALT_REQUEST_ID).toString());
+                textOrNull(row, IDX_HALT_REQUEST_ID));
         map.put(SafetyHaltRequestParser.COL_SOURCE_COMPONENT,
-                row.getString(IDX_SOURCE_COMPONENT).toString());
+                textOrNull(row, IDX_SOURCE_COMPONENT));
         map.put(SafetyHaltRequestParser.COL_SLOT_ID,
-                row.getString(IDX_SLOT_ID).toString());
+                textOrNull(row, IDX_SLOT_ID));
+        // P2-015: null flows into readLong/readInt -> ParseException as
+        // designed, never an uncaught NPE or a silent epoch-0.
         map.put(SafetyHaltRequestParser.COL_CONNECTION_EPOCH,
-                row.getLong(IDX_CONNECTION_EPOCH));
+                row.isNullAt(IDX_CONNECTION_EPOCH) ? null : row.getLong(IDX_CONNECTION_EPOCH));
         map.put(SafetyHaltRequestParser.COL_STATE,
-                row.getString(IDX_STATE).toString());
+                textOrNull(row, IDX_STATE));
         map.put(SafetyHaltRequestParser.COL_REASON_CODE,
-                row.getString(IDX_REASON_CODE).toString());
+                textOrNull(row, IDX_REASON_CODE));
         map.put(SafetyHaltRequestParser.COL_MANIFEST_FINGERPRINT,
-                row.getString(IDX_MANIFEST_FINGERPRINT).toString());
+                textOrNull(row, IDX_MANIFEST_FINGERPRINT));
         map.put(SafetyHaltRequestParser.COL_ASSIGNED_TOKEN_SET_HASH,
-                row.getString(IDX_ASSIGNED_TOKEN_SET_HASH).toString());
+                textOrNull(row, IDX_ASSIGNED_TOKEN_SET_HASH));
         map.put(SafetyHaltRequestParser.COL_DETECTION_TIME,
-                row.getLong(IDX_DETECTION_TIME));
+                row.isNullAt(IDX_DETECTION_TIME) ? null : row.getLong(IDX_DETECTION_TIME));
         map.put(SafetyHaltRequestParser.COL_CONTRACT_VERSION,
-                row.getInt(IDX_CONTRACT_VERSION));
+                row.isNullAt(IDX_CONTRACT_VERSION) ? null : row.getInt(IDX_CONTRACT_VERSION));
         return SafetyHaltRequestParser.parse(map);
     }
 }

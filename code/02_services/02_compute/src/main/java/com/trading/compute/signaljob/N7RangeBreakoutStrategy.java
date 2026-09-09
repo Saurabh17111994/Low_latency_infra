@@ -187,6 +187,13 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
         if (side == null || setup.firedSide != null) {
             return;
         }
+        if ((!SignalCandidatesTableColumns.SIDE_BUY.equals(side)
+                && !SignalCandidatesTableColumns.SIDE_SELL.equals(side))
+                || price < 0
+                || config.signalQuantity() <= 0) {
+            metrics.inc("rejected_invalid", 1);
+            return;
+        }
         setup.firedSide = side;
         out.collect(buildRow(tf, setup, side, price, tradeTime));
     }

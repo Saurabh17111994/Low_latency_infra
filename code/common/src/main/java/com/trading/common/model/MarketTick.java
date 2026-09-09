@@ -57,15 +57,21 @@ public record MarketTick(
         return rawPayload == null ? null : rawPayload.clone();
     }
 
+    /** Zero-copy view for internal hot paths (Fluss/quarantine) — caller must not mutate. */
+    public byte[] rawPayloadUnsafe() {
+        return rawPayload;
+    }
+
     public boolean isTrade() { return "TRADE".equals(tickType); }
 
     /**
      * R-128: the ingestion pipeline writes the {@code ValidityClassification}
      * enum name (VALID_TRADE / VALID_NON_TRADE) into {@code validity_state};
-     * the literal "VALID" never occurs. Accept any VALID-prefixed value.
+     * the literal "VALID" never occurs. Fail closed on any other value —
+     * a future VALID-prefixed state must not leak into signal logic.
      */
     public boolean isValid() {
-        return validityState != null && validityState.startsWith("VALID");
+        return "VALID_TRADE".equals(validityState) || "VALID_NON_TRADE".equals(validityState);
     }
 
     public boolean isValidTrade() { return isTrade() && isValid(); }

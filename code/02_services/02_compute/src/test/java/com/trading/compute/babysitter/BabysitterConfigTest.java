@@ -52,4 +52,17 @@ class BabysitterConfigTest {
         assertEquals(60_000L, c.checkpointIntervalMs());
         assertEquals(false, c.actionEnabled());
     }
+
+    @Test
+    @DisplayName("P2-113: blank database/table rejected, blank paths normalize to null")
+    void blankDbAndPathsHandledInCtor() {
+        assertThrows(IllegalStateException.class, () -> new BabysitterConfig(
+                "localhost:9123", "  ", "Positions", null, 60_000L, 60_000L, false, null));
+        assertThrows(IllegalStateException.class, () -> new BabysitterConfig(
+                "localhost:9123", "default", "", null, 60_000L, 60_000L, false, null));
+        BabysitterConfig c = new BabysitterConfig(
+                "localhost:9123", "default", "Positions", "  ", 60_000L, 60_000L, false, "\t");
+        assertEquals(null, c.checkpointDir());
+        assertEquals(null, c.stateRecoveryPath());
+    }
 }

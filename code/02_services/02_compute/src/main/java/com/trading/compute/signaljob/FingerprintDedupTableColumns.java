@@ -46,11 +46,17 @@ public final class FingerprintDedupTableColumns {
     public static final List<Boolean> COLUMN_NULLABLE_IN_DDL = List.of(
             false, false, false, false, false, false);
 
-    /** DDL column names in index order (diagnostics + agreement pin). */
-    public static final String[] NAMES = {
+    /** DDL column names in index order (diagnostics + agreement pin). Do not expose mutably. */
+    private static final String[] NAMES_INTERNAL = {
         "instrument_token", "fingerprint_version", "event_fingerprint",
         "first_seen_ms", "expiry_ms", "schema_version"
     };
+
+    public static final List<String> NAMES = List.of(NAMES_INTERNAL);
+
+    public static String[] names() {
+        return NAMES_INTERNAL.clone();
+    }
 
     /** Stream type info for emitted dedup rows, derived from the v1 DDL order. */
     public static final TypeInformation<RowData> ROW_TYPE_INFO = InternalTypeInfo.ofFields(
@@ -62,5 +68,5 @@ public final class FingerprintDedupTableColumns {
                 new BigIntType(),                        // expiry_ms
                 new VarCharType(VarCharType.MAX_LENGTH)  // schema_version
             },
-            NAMES);
+            NAMES_INTERNAL);
 }

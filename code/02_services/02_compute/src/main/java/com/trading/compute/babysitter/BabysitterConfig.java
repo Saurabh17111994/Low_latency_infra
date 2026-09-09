@@ -42,6 +42,20 @@ public record BabysitterConfig(
                     FLUSS_BOOTSTRAP_SERVERS + " is required; the Babysitter must fail "
                             + "closed rather than default to a live source");
         }
+        // P2-113: fail closed at construction, not just in fromEnv() — blank
+        // database/table are rejected, blank optional paths normalize to null.
+        if (database == null || database.isBlank()) {
+            throw new IllegalStateException(FLUSS_DATABASE + " must be non-blank");
+        }
+        if (table == null || table.isBlank()) {
+            throw new IllegalStateException(FLUSS_TABLE + " must be non-blank");
+        }
+        database = database.trim();
+        table = table.trim();
+        checkpointDir = (checkpointDir == null || checkpointDir.isBlank())
+                ? null : checkpointDir.trim();
+        stateRecoveryPath = (stateRecoveryPath == null || stateRecoveryPath.isBlank())
+                ? null : stateRecoveryPath.trim();
         if (checkpointIntervalMs <= 0) {
             throw new IllegalStateException(CHECKPOINT_INTERVAL_MS + " must be positive, got "
                     + checkpointIntervalMs);

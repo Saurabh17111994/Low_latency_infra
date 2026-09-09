@@ -111,7 +111,14 @@ public class FingerprintDedupFunction extends KeyedProcessFunction<Long, RowData
     @Override
     public void processElement(RowData row, Context ctx, Collector<RowData> out) throws Exception {
         // Identity contract (unchanged): version + fingerprint, scoped by the
-        // keyBy key (instrument token) via the per-key window.
+        // keyBy key (instrument token) via the per-key window. Upstream
+        // RawValidationFunction rejects blank version/fingerprint (root cause);
+        // fail loud here so a bypassed gate cannot collapse keys silently.
+        if (row.isNullAt(RawTableColumns.FINGERPRINT_VERSION)
+                || row.isNullAt(RawTableColumns.EVENT_FINGERPRINT)) {
+            throw new IllegalStateException(
+                    "dedup identity column null: fingerprint_version/event_fingerprint");
+        }
         String fp = row.getString(RawTableColumns.FINGERPRINT_VERSION).toString()
                 + "|" + row.getString(RawTableColumns.EVENT_FINGERPRINT).toString();
         // Cheap-dedup (A): get+put instead of computeIfAbsent — same logic,
@@ -130,7 +137,9 @@ public class FingerprintDedupFunction extends KeyedProcessFunction<Long, RowData
         // G-DEDUP-1: the bound is structural — an overgrown window means
         // trimming broke. Fail loud here, never grow into an OOM later.
         // Cheap-dedup (A): plain if+throw — the message is built only on
-        // failure, not on every tick.
+        // failure, not on every tick. Regression canary: removeEldestEntry
+        // trims on every put so this should never trip; it exists to shout
+        // if LinkedHashMap behaviour ever changes.
         if (w.size() > max) {
             throw new IllegalStateException(
                     "dedup window overgrew bound: size=" + w.size() + " max=" + max);

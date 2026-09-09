@@ -1,6 +1,7 @@
 package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -42,7 +43,7 @@ class TableContractValidatorTest {
     private static final List<String> EXECUTION_INTENT_NAMES =
             Arrays.asList(ExecutionIntentTableColumns.NAMES);
     private static final List<String> EXECUTION_INTENT_TYPES = ExecutionIntentTableColumns.TYPE_ROOTS;
-    private static final List<String> DEDUP_NAMES = Arrays.asList(FingerprintDedupTableColumns.NAMES);
+    private static final List<String> DEDUP_NAMES = FingerprintDedupTableColumns.NAMES;
     private static final List<String> DEDUP_TYPES = FingerprintDedupTableColumns.TYPE_ROOTS;
 
     private static final String TRADE_LOG = "Trade_Decisions";
@@ -123,6 +124,15 @@ class TableContractValidatorTest {
     void signalCurrentKvExactPasses() {
         assertDoesNotThrow(() -> TableContractValidator.validateSignalCurrentKvTable(
                 signal(SIGNAL_CURRENT, List.of(TOKEN), List.of(TOKEN), 16)));
+    }
+
+    @Test
+    @DisplayName("signal routing constants stay equal to the candle routing (accidental-split guard)")
+    void signalRoutingMatchesCandleRouting() {
+        assertEquals(com.trading.common.schema.CandleTableSchema.BUCKET_KEY,
+                SignalCandidatesTableColumns.BUCKET_KEY);
+        assertEquals(com.trading.common.schema.CandleTableSchema.BUCKET_COUNT,
+                SignalCandidatesTableColumns.BUCKET_COUNT);
     }
 
     @Test

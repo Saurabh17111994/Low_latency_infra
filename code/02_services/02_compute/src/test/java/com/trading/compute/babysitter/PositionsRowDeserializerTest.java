@@ -77,7 +77,28 @@ class PositionsRowDeserializerTest {
         GenericRowData r = (GenericRowData) TestPositionsRows.row(
                 "POS-1", "ev-1", 1L, "OPEN", 10, 0);
         r.setField(PositionsColumns.SOURCE_EVENT_ID, null);
-        assertThrows(NullPointerException.class,
+        assertThrows(IllegalArgumentException.class,
+                () -> PositionsRowDeserializer.toSnapshot(r));
+    }
+
+    @Test
+    @DisplayName("P2-008: short-arity rows fail as malformed, not IndexOutOfBounds")
+    void shortArityRowRejected() {
+        GenericRowData r = new GenericRowData(3);
+        r.setField(0, StringData.fromString("POS-1"));
+        r.setField(1, StringData.fromString("tc-1"));
+        r.setField(2, StringData.fromString("acct-1"));
+        assertThrows(IllegalArgumentException.class,
+                () -> PositionsRowDeserializer.toSnapshot(r));
+    }
+
+    @Test
+    @DisplayName("P2-009: null non-nullable long is rejected, never silent 0")
+    void nullQuantityRejected() {
+        GenericRowData r = (GenericRowData) TestPositionsRows.row(
+                "POS-1", "ev-1", 1L, "OPEN", 10, 0);
+        r.setField(PositionsColumns.OPEN_QUANTITY, null);
+        assertThrows(IllegalArgumentException.class,
                 () -> PositionsRowDeserializer.toSnapshot(r));
     }
 }

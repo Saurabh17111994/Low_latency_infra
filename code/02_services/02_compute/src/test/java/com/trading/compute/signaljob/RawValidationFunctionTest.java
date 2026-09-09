@@ -2,6 +2,7 @@ package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import java.util.Map;
 import org.apache.flink.table.data.RowData;
@@ -42,6 +43,24 @@ class RawValidationFunctionTest {
     void rejectsInvalidValidityState() {
         RowData row = TestRawRows.row(2885L, 1_750_000_000_000L, "fp-1", "TRADE", 100, 5);
         assertEquals("validity-state", fn.invalidReason(TestRawRows.withValidity(row, "INVALID_VALUES")));
+    }
+
+    @Test
+    void rejectsFutureValidPrefixedState() {
+        RowData row = TestRawRows.row(2885L, 1_750_000_000_000L, "fp-1", "TRADE", 100, 5);
+        assertEquals("validity-state", fn.invalidReason(TestRawRows.withValidity(row, "VALID_QUARANTINED")));
+        assertEquals("validity-state", fn.invalidReason(TestRawRows.withValidity(row, "VALID")));
+    }
+
+    @Test
+    void rejectsBlankFingerprintVersion() {
+        RowData row = TestRawRows.row(2885L, 1_750_000_000_000L, "fp-1", "TRADE", 100, 5);
+        ((org.apache.flink.table.data.GenericRowData) row).setField(RawTableColumns.FINGERPRINT_VERSION, null);
+        assertEquals("blank-fingerprint-version", fn.invalidReason(row));
+        ((org.apache.flink.table.data.GenericRowData) row).setField(
+                RawTableColumns.FINGERPRINT_VERSION,
+                org.apache.flink.table.data.StringData.fromString("   "));
+        assertEquals("blank-fingerprint-version", fn.invalidReason(row));
     }
 
     @Test
@@ -86,9 +105,6 @@ class RawValidationFunctionTest {
 
     @Test
     void rejectsNonPositiveEventTime() {
-        // Tracker 14 P6.3: a non-positive epoch-millis event time would keep the
-        // bounded-out-of-orderness watermark near Long.MIN_VALUE and fire windows
-        // early. Zero (null-field read) and negatives must reject.
         RowData row = TestRawRows.row(2885L, 1_750_000_000_000L, "fp-1", "TRADE", 100, 5);
         assertEquals("non-positive-event-time",
                 fn.invalidReason(TestRawRows.withEventTime(row, 0L)));
@@ -96,6 +112,20 @@ class RawValidationFunctionTest {
                 fn.invalidReason(TestRawRows.withEventTime(row, -1L)));
         assertEquals("non-positive-event-time",
                 fn.invalidReason(TestRawRows.withEventTime(row, Long.MIN_VALUE)));
+    }
+
+    @Test
+    void rejectsNullEventTimeWithoutThrowing() {
+        RowData row = TestRawRows.row(2885L, 1_750_000_000_000L, "fp-1", "TRADE", 100, 5);
+        ((org.apache.flink.table.data.GenericRowData) row).setField(RawTableColumns.EVENT_TIME, null);
+        assertEquals("non-positive-event-time", fn.invalidReason(row));
+    }
+
+    @Test
+    void rejectsOutOfRangeNameIndex() {
+        assertThrows(IllegalArgumentException.class, () -> RawTableColumns.name(-1));
+        assertThrows(IllegalArgumentException.class,
+                () -> RawTableColumns.name(RawTableColumns.FIELD_COUNT));
     }
 
     @Test

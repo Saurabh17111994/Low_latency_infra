@@ -75,7 +75,7 @@ class FingerprintDedupTableColumnsAgreementTest {
                 "24_fingerprint_dedup.sql must declare exactly 6 columns (v1); got " + cols.size()
                         + " — if the DDL changed deliberately, update FingerprintDedupTableColumns "
                         + "in the same change (cross-boundary pin habit)");
-        assertArrayEquals(FingerprintDedupTableColumns.NAMES,
+        assertArrayEquals(FingerprintDedupTableColumns.names(),
                 cols.stream().map(Column::name).toArray(String[]::new),
                 "column names/order must match the code layout in DDL order");
     }
@@ -122,7 +122,7 @@ class FingerprintDedupTableColumnsAgreementTest {
     @Test
     @DisplayName("index constants are pairwise distinct, in range, and point at the pinned names")
     void indexConstantsMatchNames() {
-        String[] names = FingerprintDedupTableColumns.NAMES;
+        String[] names = FingerprintDedupTableColumns.names();
         int[] idx = {
             FingerprintDedupTableColumns.INSTRUMENT_TOKEN,
             FingerprintDedupTableColumns.FINGERPRINT_VERSION,
@@ -151,7 +151,7 @@ class FingerprintDedupTableColumnsAgreementTest {
                         FingerprintDedupTableColumns.ROW_TYPE_INFO;
         assertEquals(FingerprintDedupTableColumns.FIELD_COUNT, info.toRowSize(),
                 "ROW_TYPE_INFO must declare one field per DDL column");
-        assertArrayEquals(FingerprintDedupTableColumns.NAMES, info.toRowFieldNames(),
+        assertArrayEquals(FingerprintDedupTableColumns.names(), info.toRowFieldNames(),
                 "ROW_TYPE_INFO field names must follow the pinned DDL order");
     }
 }

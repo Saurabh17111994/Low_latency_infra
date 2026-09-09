@@ -28,12 +28,29 @@ class MarketTickTest {
     @Test
     @DisplayName("validity_state carries the enum name, not the literal VALID (R-128)")
     void validitySemantics() {
-        // Ingestion writes ValidityClassification.name() into validity_state.
         assertTrue(tick("VALID_TRADE", null).isValid());
         assertTrue(tick("VALID_NON_TRADE", null).isValid());
         assertTrue(tick("VALID_TRADE", null).isValidTrade());
         assertFalse(tick("INVALID_VALUES", null).isValid());
         assertFalse(tick(null, null).isValid());
+    }
+
+    @Test
+    @DisplayName("future VALID-prefixed states fail closed (P2-097)")
+    void futureValidPrefixedStatesRejected() {
+        assertFalse(tick("VALID_QUARANTINED", null).isValid());
+        assertFalse(tick("VALIDATION_PENDING", null).isValid());
+        assertFalse(tick("VALID", null).isValid());
+    }
+
+    @Test
+    @DisplayName("rawPayloadUnsafe exposes the live array without copying (P2-211)")
+    void rawPayloadUnsafeIsZeroCopy() {
+        byte[] a = {1, 2, 3};
+        MarketTick t = tick("VALID_TRADE", a);
+        assertNotSame(a, t.rawPayload());
+        t.rawPayloadUnsafe()[0] = 99;
+        assertArrayEquals(new byte[]{99, 2, 3}, t.rawPayload());
     }
 
     @Test

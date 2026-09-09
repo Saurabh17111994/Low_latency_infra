@@ -8,7 +8,6 @@ import com.trading.common.safety.SlotSafetyRequest;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.functions.RichFlatMapFunction;
-import org.apache.flink.configuration.Configuration;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -53,8 +52,7 @@ import java.util.List;
  */
 public final class SafetyHaltJob {
 
-    private static final Logger LOG = LoggerFactory.getLogger(SafetyHaltJob.class);
-
+    // P2-219: no outer logger — logging lives in SafetyHaltApplyFunction.LOG.
     private SafetyHaltJob() {
         // utility class
     }
@@ -63,7 +61,12 @@ public final class SafetyHaltJob {
         String bootstrap = envOr("FLUSS_BOOTSTRAP_SERVERS", "localhost:9123");
         String database = envOr("FLUSS_DATABASE", "default");
         String table = envOr("FLUSS_TABLE", "Safety_Halt_Requests");
-        long checkpointIntervalMs = Long.parseLong(envOr("SAFETY_CHECKPOINT_INTERVAL_MS", "60000"));
+        long checkpointIntervalMs = parseLongEnv("SAFETY_CHECKPOINT_INTERVAL_MS", "60000");
+        if (checkpointIntervalMs <= 0) {
+            throw new IllegalStateException(
+                    "SAFETY_CHECKPOINT_INTERVAL_MS must be positive, got '" + checkpointIntervalMs
+                            + "'");
+        }
         SlotAssignment assignment = loadAssignment();
 
         StreamExecutionEnvironment env =
@@ -81,9 +84,9 @@ public final class SafetyHaltJob {
         DataStream<RowData> haltRequests = env.fromSource(
                 source, WatermarkStrategy.noWatermarks(), "safety-halt-requests");
 
+        // P2-220: single RowKind path — the flatMap guard counts every drop
+        // in rows.skipped; the upstream filter dropped rows uncounted.
         haltRequests
-                .filter(SafetyHaltJob::isCurrentValueRow)
-                .name("safety-halt-rowkind-filter")
                 .flatMap(new SafetyHaltApplyFunction(assignment))
                 .name("safety-halt-tracker");
 
@@ -109,13 +112,54 @@ public final class SafetyHaltJob {
                 "SAFETY_MANIFEST_TOKENS is required (comma-separated instrument tokens); "
                 + "the production job loads the manifest file instead");
         }
+        // P2-116: split(-1) keeps trailing empties; blank tokens and bare
+        // NumberFormatException become startup errors naming var + value.
         List<Long> tokens = new ArrayList<>();
-        for (String part : tokensValue.split(",")) {
-            tokens.add(Long.parseLong(part.trim()));
+        for (String part : tokensValue.split(",", -1)) {
+            String t = part.trim();
+            if (t.isEmpty()) {
+                throw new IllegalStateException(
+                        "SAFETY_MANIFEST_TOKENS contains blank token: '" + tokensValue + "'");
+            }
+            try {
+                tokens.add(Long.parseLong(t));
+            } catch (NumberFormatException e) {
+                throw new IllegalStateException(
+                        "SAFETY_MANIFEST_TOKENS invalid token '" + t + "': '" + tokensValue + "'",
+                        e);
+            }
         }
-        int slots = Integer.parseInt(envOr("SAFETY_SLOTS", "1"));
-        int connectionLimit = Integer.parseInt(envOr("SAFETY_CONNECTION_LIMIT", "1024"));
+        int slots = parseIntEnv("SAFETY_SLOTS", "1");
+        int connectionLimit = parseIntEnv("SAFETY_CONNECTION_LIMIT", "1024");
+        int checkpointInterval = parseIntEnv("SAFETY_CHECKPOINT_INTERVAL_MS", "60000");
+        if (checkpointInterval <= 0) {
+            throw new IllegalStateException(
+                    "SAFETY_CHECKPOINT_INTERVAL_MS must be positive, got '" + checkpointInterval
+                            + "'");
+        }
         return SlotAssignmentResolver.of(tokens, slots, connectionLimit);
+    }
+
+    /** P2-116: numeric env parses fail with var name + offending value. */
+    static int parseIntEnv(String name, String def) {
+        String value = envOr(name, def);
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException(
+                    name + " must be an integer, got '" + value + "'", e);
+        }
+    }
+
+    /** P2-116: same for longs (checkpoint interval). */
+    static long parseLongEnv(String name, String def) {
+        String value = envOr(name, def);
+        try {
+            return Long.parseLong(value.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException(
+                    name + " must be an integer, got '" + value + "'", e);
+        }
     }
 
     static String envOr(String name, String def) {
@@ -166,13 +210,36 @@ public final class SafetyHaltJob {
                 malformed.inc();
                 LOG.warn("safety: malformed Safety_Halt_Requests row skipped: {}", e.getMessage());
                 return;
+            } catch (RuntimeException e) {
+                // P2-010 backstop: bridge NPE/arity/cast failures must be a
+                // counted skip, never a task-killing poison pill on full()
+                // replay. Bridge null-safety (P2-014/015) is the cure.
+                malformed.inc();
+                LOG.warn("safety: unexpected Safety_Halt_Requests row skipped: {}: {}",
+                        e.getClass().getSimpleName(), e.getMessage());
+                return;
             }
             SafetyStateTracker.ApplyResult result = tracker.apply(request);
-            applied.inc();
-            LOG.info("safety: slot {} {} -> {} (epoch {}, reason '{}')",
-                    request.slotId(), request.status(), result,
-                    request.connectionEpoch(), request.reasonCode());
-            out.collect(request);
+            // P2-011+P2-117: only real transitions move forward and count as
+            // applied; IGNORED_* (replays, trust-gate rejections) count as
+            // skipped and stay at DEBUG so full() replays don't flood INFO or
+            // masquerade as new halts — and distrusted rows never reach the
+            // decision operators when the broadcast pipeline lands.
+            switch (result) {
+                case NEW_UNSAFE, RECOVERED -> {
+                    applied.inc();
+                    LOG.info("safety: slot {} {} -> {} (epoch {}, reason '{}')",
+                            request.slotId(), request.status(), result,
+                            request.connectionEpoch(), request.reasonCode());
+                    out.collect(request);
+                }
+                default -> {
+                    skipped.inc();
+                    LOG.debug("safety: slot {} {} ignored: {} (epoch {})",
+                            request.slotId(), request.status(), result,
+                            request.connectionEpoch());
+                }
+            }
         }
     }
 }

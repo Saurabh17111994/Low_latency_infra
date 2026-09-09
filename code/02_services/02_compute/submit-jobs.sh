@@ -130,6 +130,19 @@ wait_for_checkpoint() {
 	return 1
 }
 
+# P2-086 idempotency probe: true when a job with the Flink-side name is
+# already RUNNING. Field-order tolerant like rollout-savepoint.sh (this
+# Flink's /jobs/overview omits isStoppable; see CHG-105).
+job_already_running() {
+	local expected="$1"
+	local overview
+	overview=$(curl -fsS "http://${JM}/jobs/overview" 2>/dev/null) || return 1
+	printf '%s' "${overview}" \
+		| grep -oE '\{"jid":"[0-9a-f]{32}".*?"state":"(RUNNING|[A-Z_]+)"' \
+		| grep -F "\"name\":\"${expected}\"" \
+		| grep -q '"state":"RUNNING"'
+}
+
 submit_job() {
 	local job_name="$1"
 	local entry_class="$2"
@@ -160,16 +173,44 @@ submit_job() {
 		return 1
 	fi
 
-	echo "compute: submitting ${job_name} (${entry_class})"
+	# P2-086 idempotency: never submit a second instance while one is
+	# RUNNING — restarts must reuse, not duplicate (observed 16-job slot
+	# exhaustion). /jobs/overview carries the Flink job name
+	# (env.execute), not the entry class, so map it here.
+	local flink_name=""
+	case "${entry_class}" in
+		*signaljob.SignalJob*) flink_name="signal-job-compute" ;;
+		*babysitter.BabysitterJob*) flink_name="Babysitter Positions observer" ;;
+		*safetyhalt.SafetyHaltJob*) flink_name="Safety-halt consumer" ;;
+	esac
+	if [ -n "${flink_name}" ] && job_already_running "${flink_name}"; then
+		echo "compute: SKIP ${job_name} — '${flink_name}' already RUNNING (idempotent restart, no duplicate submit)"
+		return 0
+	fi
+
+	# P2-002: forward the restore path to Flink, not just check it — the
+	# F005 guard above is hollow without this (the job still starts fresh /
+	# offset-0 even when STATE_RECOVERY_PATH is set). Body fields are the
+	# version-stable contract for /jars/:jarid/run; allowNonRestoredState
+	# stays false (STARTUP-GATE-001: a state mismatch fails loud, never
+	# silently drops state).
+	local run_body="{\"entryClass\":\"${entry_class}\""
 	if [ -n "${parallelism}" ]; then
-		run_response=$(curl -fsS -X POST "http://${JM}/jars/${jar_id}/run" \
-			-H "Content-Type: application/json" \
-			-d "{\"entryClass\":\"${entry_class}\",\"parallelism\":${parallelism}}")
-	else
+		run_body="${run_body},\"parallelism\":${parallelism}"
+	fi
+	if [ "${entry_class}" = "com.trading.compute.signaljob.SignalJob" ] \
+		&& [ -n "${STATE_RECOVERY_PATH:-}" ]; then
+		local sp_esc
+		sp_esc=$(printf '%s' "${STATE_RECOVERY_PATH}" | sed 's/\\/\\\\/g; s/"/\\"/g')
+		run_body="${run_body},\"savepointPath\":\"${sp_esc}\",\"allowNonRestoredState\":false"
+		echo "compute: restoring ${job_name} from STATE_RECOVERY_PATH=${STATE_RECOVERY_PATH}"
+	fi
+	run_body="${run_body}}"
+
+	echo "compute: submitting ${job_name} (${entry_class})"
 	run_response=$(curl -fsS -X POST "http://${JM}/jars/${jar_id}/run" \
 		-H "Content-Type: application/json" \
-		-d "{\"entryClass\":\"${entry_class}\"}")
-	fi
+		-d "${run_body}")
 	job_id=$(printf '%s' "${run_response}" \
 		| sed -n 's/.*"jobid":"\([^"]*\)".*/\1/p')
 
@@ -195,8 +236,13 @@ submit_job() {
 # rows). COMPUTE_SUBMIT_SIGNAL=1 opts the launcher in (fresh deploy with no
 # existing job; F005 guard still applies — needs STATE_RECOVERY_PATH or
 # COMPUTE_ALLOW_REPLAY=1).
+# P2-087: degraded-launch tracking — a skipped/failed required job flips
+# this; the launcher exits non-zero at the end so alerting fires. Safe
+# only with the P2-086 idempotency above (else exit-1 + restart policy =
+# resubmit loop).
+failed=0
 if [ "${COMPUTE_SUBMIT_SIGNAL:-0}" = "1" ]; then
-	submit_job "signal-job-compute" "com.trading.compute.signaljob.SignalJob"
+	submit_job "signal-job-compute" "com.trading.compute.signaljob.SignalJob" || failed=1
 else
 	echo "compute: SKIP signal-job (COMPUTE_SUBMIT_SIGNAL != 1) — managed by make rollout-savepoint"
 fi
@@ -206,7 +252,12 @@ fi
 # Parallelism pinned to 1: it is a slot-scoped observer; inheriting the
 # cluster PARALLELISM=8 would require 8 slots (impossible alongside signal-job
 # p=8 on the single-VM taskmanager).
-submit_job "Babysitter MVP no-op job" "com.trading.compute.babysitter.BabysitterJob" 1 1
+# P2-086: a babysitter hiccup must not kill the launcher before
+# SafetyHaltJob — nonfatal, but tracked for the final exit code (P2-087).
+if ! submit_job "Babysitter MVP no-op job" "com.trading.compute.babysitter.BabysitterJob" 1 1; then
+	echo "compute: WARN — babysitter submission/readiness failed; continuing to SafetyHaltJob (nonfatal job)" >&2
+	failed=1
+fi
 
 # SafetyHaltJob — the slot-scoped safety-halt consumer (SAFETY-INT-001).
 # Requires SAFETY_MANIFEST_TOKENS (comma-separated instrument tokens); without
@@ -227,11 +278,23 @@ if [ -n "${SAFETY_MANIFEST_TOKENS:-}" ]; then
 		# warning the operator investigates, not a reason to resubmit.
 		echo "compute: WARN — SafetyHaltJob checkpoint gate failed; container exits cleanly, NO resubmit" >&2
 		echo "compute: WARN — inspect running SafetyHaltJob jobs before restarting this container" >&2
+		failed=1
 	fi
 else
+	# P2-003: production must fail closed without the safety consumer —
+	# a prod deploy with no SafetyHaltJob is trading with no safety cover.
+	if [ "${DEPLOYMENT_ENV:-dev}" = "production" ]; then
+		echo "compute: FATAL — SAFETY_MANIFEST_TOKENS is required in DEPLOYMENT_ENV=production (safety consumer must not be skipped)" >&2
+		exit 1
+	fi
 	echo "compute: WARN — SAFETY_MANIFEST_TOKENS unset; SafetyHaltJob NOT submitted (safety consumer skipped in dev; set it in production)"
 	echo "compute: submitted jobs done (signal-job managed by rollout; babysitter no-op)"
 fi
 
+# P2-087: report degraded launches — compose/K8s finally sees them.
+if [ "${failed}" -ne 0 ]; then
+	echo "compute: launcher finished with degraded readiness (see WARN above)" >&2
+	exit 1
+fi
 echo "compute: launcher finished — jobs submitted (readiness gate: see per-job WARN/FATAL above)"
 exit 0

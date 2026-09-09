@@ -45,7 +45,9 @@ public final class PositionsRowDeserializer
         observed.inc();
         try {
             out.collect(toSnapshot(row));
-        } catch (IllegalArgumentException | NullPointerException ex) {
+        } catch (RuntimeException ex) {
+            // P2-008: any structural failure (arity, cast, NPE, validation)
+            // is a non-fatal counted skip, never a task-killing poison pill.
             malformed.inc();
             LOG.warn("babysitter: malformed Positions row skipped (no action): {}", ex.getMessage());
         }
@@ -58,35 +60,66 @@ public final class PositionsRowDeserializer
      * violation (validated by the {@link PositionSnapshot} constructor).
      */
     static PositionSnapshot toSnapshot(RowData row) {
-        String schemaVersion = row.getString(PositionsColumns.SCHEMA_VERSION).toString();
+        // P2-008: explicit arity gate — a short row must fail as a counted
+        // malformed skip, not an uncaught IndexOutOfBounds restart loop.
+        if (row.getArity() < PositionsColumns.FIELD_COUNT) {
+            throw new IllegalArgumentException(
+                    "Positions row arity " + row.getArity()
+                            + ", expected " + PositionsColumns.FIELD_COUNT);
+        }
+        String schemaVersion = requireText(row, PositionsColumns.SCHEMA_VERSION);
         if (!PositionsColumns.SCHEMA_VERSION_V2.equals(schemaVersion)) {
             throw new IllegalArgumentException(
                     "unsupported Positions schema_version '" + schemaVersion + "'");
         }
-        PositionState state = PositionState.valueOf(
-                row.getString(PositionsColumns.STATE).toString());
+        PositionState state;
+        try {
+            state = PositionState.valueOf(requireText(row, PositionsColumns.STATE));
+        } catch (IllegalArgumentException ex) {
+            throw new IllegalArgumentException("unknown Positions state", ex);
+        }
         long avgEntry = row.isNullAt(PositionsColumns.AVERAGE_ENTRY_PAISE)
                 ? 0L : row.getLong(PositionsColumns.AVERAGE_ENTRY_PAISE);
         long avgExit = row.isNullAt(PositionsColumns.AVERAGE_EXIT_PAISE)
                 ? 0L : row.getLong(PositionsColumns.AVERAGE_EXIT_PAISE);
         // Constructor validates position_id non-blank + open >= closed >= 0.
+        // P2-009: every non-nullable long/string is guarded — BinaryRowData
+        // reads null as silent 0, so unguarded reads invent valid snapshots.
         return new PositionSnapshot(
-                row.getString(PositionsColumns.POSITION_ID).toString(),
-                row.getString(PositionsColumns.TRADE_CONTEXT_ID).toString(),
-                row.getString(PositionsColumns.ACCOUNT_SCOPE_ID).toString(),
-                row.getLong(PositionsColumns.INSTRUMENT_TOKEN),
-                row.getString(PositionsColumns.EXCHANGE).toString(),
-                row.getString(PositionsColumns.SYMBOL).toString(),
-                row.getString(PositionsColumns.SIDE).toString(),
+                requireText(row, PositionsColumns.POSITION_ID),
+                requireText(row, PositionsColumns.TRADE_CONTEXT_ID),
+                requireText(row, PositionsColumns.ACCOUNT_SCOPE_ID),
+                requireLong(row, PositionsColumns.INSTRUMENT_TOKEN),
+                requireText(row, PositionsColumns.EXCHANGE),
+                requireText(row, PositionsColumns.SYMBOL),
+                requireText(row, PositionsColumns.SIDE),
                 state,
-                row.getLong(PositionsColumns.OPEN_QUANTITY),
-                row.getLong(PositionsColumns.CLOSED_QUANTITY),
+                requireLong(row, PositionsColumns.OPEN_QUANTITY),
+                requireLong(row, PositionsColumns.CLOSED_QUANTITY),
                 avgEntry,
                 avgExit,
-                row.getString(PositionsColumns.SOURCE_EVENT_ID).toString(),
-                row.getLong(PositionsColumns.SOURCE_VERSION),
-                row.getLong(PositionsColumns.CREATED_TS),
-                row.getLong(PositionsColumns.LAST_UPDATE_TS),
+                requireText(row, PositionsColumns.SOURCE_EVENT_ID),
+                requireLong(row, PositionsColumns.SOURCE_VERSION),
+                requireLong(row, PositionsColumns.CREATED_TS),
+                requireLong(row, PositionsColumns.LAST_UPDATE_TS),
                 schemaVersion);
+    }
+
+    /** P2-009: null becomes a named IllegalArgumentException, never silent 0/NPE. */
+    private static long requireLong(RowData row, int idx) {
+        if (row.isNullAt(idx)) {
+            throw new IllegalArgumentException(
+                    "Positions column null: " + PositionsColumns.NAMES.get(idx));
+        }
+        return row.getLong(idx);
+    }
+
+    /** P2-009: same for strings — explicit name instead of bare NPE. */
+    private static String requireText(RowData row, int idx) {
+        if (row.isNullAt(idx)) {
+            throw new IllegalArgumentException(
+                    "Positions column null: " + PositionsColumns.NAMES.get(idx));
+        }
+        return row.getString(idx).toString();
     }
 }

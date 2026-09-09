@@ -1,6 +1,5 @@
 package com.trading.compute.signaljob;
 
-import com.trading.common.schema.CandleTableSchema;
 import java.util.Arrays;
 import java.util.List;
 import org.apache.fluss.metadata.Schema;
@@ -57,13 +56,10 @@ public final class TableContractValidator {
     }
 
     private static final String SIGNAL_CONTRACT = "tracker 14 re-scoped P2, SIGNAL-SCHEMA-001";
-    private static final String CANDLE_CONTRACT = "tracker 14 P1, CANDLE-SCHEMA-002";
     private static final String TRADE_CONTRACT = "SCH-19, TRADE-SCHEMA-001";
     private static final String EXECUTION_INTENT_CONTRACT =
             "REQ-EXE-004, EXECUTION-INTENT-SCHEMA-001";
     private static final String DEDUP_CONTRACT = "DEC-038, DEDUP-SCHEMA-001";
-    private static final String FORMING_BAR_CONTRACT = "DEC-038, FORMING-BAR-SCHEMA-001";
-    private static final String POSITION_STATE_CONTRACT = "Option-B, POSITION-STATE-SCHEMA-001";
     private static final String MULTITF_CANDLE_CONTRACT =
             "2026-09-05 multi-TF aggregator Phase 0, CANDLE-MULTITF-001";
 
@@ -75,8 +71,8 @@ public final class TableContractValidator {
         requireNoPrimaryKey(info, "append-only signal LOG", SIGNAL_CONTRACT);
         validateSchema(info, signalNames(), SignalCandidatesTableColumns.TYPE_ROOTS,
                 "22-column v3 signal", SIGNAL_CONTRACT);
-        validateRouting(info, CandleTableSchema.BUCKET_KEY, CandleTableSchema.BUCKET_COUNT,
-                SIGNAL_CONTRACT);
+        validateRouting(info, SignalCandidatesTableColumns.BUCKET_KEY,
+                SignalCandidatesTableColumns.BUCKET_COUNT, SIGNAL_CONTRACT);
     }
 
     /**
@@ -125,11 +121,11 @@ public final class TableContractValidator {
      */
     public static void validateFingerprintDedupTable(TableInfo info) {
         List<String> expectedPk = List.of(
-                FingerprintDedupTableColumns.NAMES[FingerprintDedupTableColumns.INSTRUMENT_TOKEN],
-                FingerprintDedupTableColumns.NAMES[FingerprintDedupTableColumns.FINGERPRINT_VERSION],
-                FingerprintDedupTableColumns.NAMES[FingerprintDedupTableColumns.EVENT_FINGERPRINT]);
+                FingerprintDedupTableColumns.NAMES.get(FingerprintDedupTableColumns.INSTRUMENT_TOKEN),
+                FingerprintDedupTableColumns.NAMES.get(FingerprintDedupTableColumns.FINGERPRINT_VERSION),
+                FingerprintDedupTableColumns.NAMES.get(FingerprintDedupTableColumns.EVENT_FINGERPRINT));
         requireExactPrimaryKey(info, expectedPk, DEDUP_CONTRACT);
-        validateSchema(info, Arrays.asList(FingerprintDedupTableColumns.NAMES),
+        validateSchema(info, FingerprintDedupTableColumns.NAMES,
                 FingerprintDedupTableColumns.TYPE_ROOTS, "6-column v1 dedup state",
                 DEDUP_CONTRACT);
         validateRouting(info, "instrument_token", 16, DEDUP_CONTRACT);
@@ -141,22 +137,11 @@ public final class TableContractValidator {
     public static void validateSignalCurrentKvTable(TableInfo info) {
         List<String> expectedPk = List.of(SignalCandidatesTableColumns.NAMES[
                 SignalCandidatesTableColumns.INSTRUMENT_TOKEN]);
-        if (!info.hasPrimaryKey()) {
-            throw new ContractViolation(
-                    "KV table " + info.getTablePath() + " must carry primary key exactly "
-                            + expectedPk + " (per-ticker current state), but has NO primary key ("
-                            + SIGNAL_CONTRACT + ")");
-        }
-        if (!expectedPk.equals(info.getPrimaryKeys())) {
-            throw new ContractViolation(
-                    "KV table " + info.getTablePath() + " must carry primary key exactly "
-                            + expectedPk + " (per-ticker current state), got "
-                            + info.getPrimaryKeys() + " (" + SIGNAL_CONTRACT + ")");
-        }
+        requireExactPrimaryKey(info, expectedPk, SIGNAL_CONTRACT);
         validateSchema(info, signalNames(), SignalCandidatesTableColumns.TYPE_ROOTS,
                 "22-column v3 signal", SIGNAL_CONTRACT);
-        validateRouting(info, CandleTableSchema.BUCKET_KEY, CandleTableSchema.BUCKET_COUNT,
-                SIGNAL_CONTRACT);
+        validateRouting(info, SignalCandidatesTableColumns.BUCKET_KEY,
+                SignalCandidatesTableColumns.BUCKET_COUNT, SIGNAL_CONTRACT);
     }
 
     /**

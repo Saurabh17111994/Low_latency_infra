@@ -48,6 +48,10 @@ public final class SignalCandidatesTableColumns {
 
     public static final int FIELD_COUNT = 22;
 
+    /** Bucket routing for the signal LOG + KV pair: per-ticker colocation, 16 buckets. */
+    public static final String BUCKET_KEY = "instrument_token";
+    public static final int BUCKET_COUNT = 16;
+
     /** Fixed candidate values written by the MVP detection operator (DEC-034). */
     public static final String ACTION_ENTRY = "ENTRY";
     /** Early-signal supersession action (Phase 2, 2026-08-29): a tentative

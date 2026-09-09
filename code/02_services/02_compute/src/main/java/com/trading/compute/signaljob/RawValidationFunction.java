@@ -131,12 +131,17 @@ public class RawValidationFunction extends RichFlatMapFunction<RowData, RowData>
                 || row.getString(RawTableColumns.EVENT_FINGERPRINT).toString().isBlank()) {
             return "blank-fingerprint";
         }
+        if (row.isNullAt(RawTableColumns.FINGERPRINT_VERSION)
+                || row.getString(RawTableColumns.FINGERPRINT_VERSION).toString().isBlank()) {
+            return "blank-fingerprint-version";
+        }
         if (row.isNullAt(RawTableColumns.SCHEMA_VERSION)
                 || !config.rawSchemaVersion().equals(row.getString(RawTableColumns.SCHEMA_VERSION).toString())) {
             return "schema-version";
         }
         if (row.isNullAt(RawTableColumns.VALIDITY_STATE)
-                || !row.getString(RawTableColumns.VALIDITY_STATE).toString().startsWith("VALID")) {
+                || (!"VALID_TRADE".equals(row.getString(RawTableColumns.VALIDITY_STATE).toString())
+                        && !"VALID_NON_TRADE".equals(row.getString(RawTableColumns.VALIDITY_STATE).toString()))) {
             return "validity-state";
         }
         if (row.isNullAt(RawTableColumns.LAST_PRICE_PAISE)
@@ -150,7 +155,10 @@ public class RawValidationFunction extends RichFlatMapFunction<RowData, RowData>
         // Tracker 14 P6.3: keep event_time inside the window arithmetic range.
         // windowEnd + allowedLateness must not overflow Long (EventTimeTrigger),
         // and the bounded-out-of-orderness watermark must not underflow.
-        // getLong on a null field yields 0 -> rejected by the <= 0 check.
+        // GenericRowData.getLong on a null field throws NPE, so guard first.
+        if (row.isNullAt(RawTableColumns.EVENT_TIME)) {
+            return "non-positive-event-time";
+        }
         long eventTime = row.getLong(RawTableColumns.EVENT_TIME);
         if (eventTime <= 0) {
             return "non-positive-event-time";

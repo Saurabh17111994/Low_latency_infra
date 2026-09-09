@@ -146,7 +146,7 @@ public final class BabysitterJob {
                 .name("babysitter-position-deserialize")
                 .uid("babysitter-position-deserialize")
                 .keyBy(PositionSnapshot::positionId)
-                .process(new PositionsObservationOperator())
+                .process(new PositionsObservationOperator(config.freshnessThresholdMs()))
                 .name("babysitter-position-observation")
                 .uid("babysitter-position-observation")
                 .addSink(new BabysitterDiscardSink())
