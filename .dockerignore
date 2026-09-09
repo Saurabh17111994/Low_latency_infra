@@ -1,16 +1,27 @@
-# Repo-root .dockerignore — read only by builds whose CONTEXT IS THE REPO ROOT
-# (the ddl-apply contract image; the ingestion/compute builds use context code/
-# and read code/.dockerignore instead). Keeps the context lean: git, build
-# output, and logs (except the schema-compat matrix evidence the image bakes).
+# Repo-root .dockerignore — read ONLY by builds whose CONTEXT IS THE REPO ROOT
+# (the ddl-apply + eod-controller images, context: ../../..). The ingestion/
+# compute/gateway/bridge builds use context code/ and read code/.dockerignore
+# instead — keep the two files in sync (P5-015). Keeps the context lean: git,
+# build output, and logs. The schema-compat matrix evidence is gitignored
+# (R-051) and RUNTIME-ONLY per ddl-apply/Dockerfile ("no image COPY is
+# needed") — nothing under logs/ is re-included (P5-003/004).
 .git
 .freebuff
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*_rsa
+**/*_dsa
+**/credentials*
+**/secrets/
 **/target
 **/node_modules
 **/__pycache__
 **/*.pyc
-.idea
-.vscode
-*.iml
-logs/*
-!logs/schema-compat/
-!logs/schema-compat/composite-pk-raw-client-20260815.md
+**/.idea/
+**/.vscode/
+**/*.iml
+**/.DS_Store
+**/*.log
+**/logs/

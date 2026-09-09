@@ -1,0 +1,10 @@
+# Build-context hygiene for the executor (Rust) — context: ../../02_services/04_executor
+# (docker-compose.yml nautilus service). P5-020: code/.dockerignore does NOT
+# apply to this context root; keep credentials, logs, git, and build artifacts
+# out of the Docker build context.
+**/.env
+**/.env.*
+**/*.log
+**/logs/
+**/.git/
+target/

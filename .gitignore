@@ -12,8 +12,16 @@ venv/
 node_modules/
 
 # Secrets / local env
+# P5-005: full .env coverage — root + any depth + dot-variants; .env.example
+# stays visible (tracked; the ! keeps future untracked examples findable).
+.env
+.env.*
+**/.env
+**/.env.*
+!**/.env.example
 docker/.env
 config/*.local.*
+**/config/*.local.*
 *.secret.*
 
 # IDE / OS
@@ -32,13 +40,19 @@ logs
 **/logs/*.json
 **/logs/*.json.gz
 **/logs/soak/
-*.log
-*.tsv
+**/logs/*.log
+**/logs/*.tsv
 logs/ingestion.log
+# P5-017: logs/glob scoped to generated evidence dirs — bare *.log/*.tsv
+# swallowed intentional fixtures repo-wide. Re-allow if real testdata appears:
+# !**/testdata/**/*.tsv
+# !**/testdata/**/*.log
 
 # Local agent/runtime junk — never pushed (2026-08-14):
 # Agent-behavior symlinks at repo root, tool caches, sandbox state.
-/Cu*
+# P5-006: no /Cu* entry exists — name exact symlinks (root CLAUDE.md is
+# anchored at /CLAUDE.md below) instead of a wildcard that swallows future
+# legitimate Cu* sources.
 .token-savior-cache.json
 .pi/
 
@@ -58,15 +72,18 @@ logs/ingestion.log
 **/faketool/faketool
 
 # Eclipse/IDE metadata generated on this host.
-*.project
-*.classpath
+# P5-024: dotfile names only — *.project matched any foo.project file.
+.project
+.classpath
 **/.settings/
 
 # Actively maintained signal-replay tracker (git-tracked; kept out of new-file scans).
 docs/08_implementation/14-candle-log-kv-replay-safety_2.md
 
 *.factorypath
-.freebuff/
-CLAUDE.md
-TASK_CONTEXT.md
+# P5-019: root-local agent copies only; nested shared CLAUDE.md/TASK_CONTEXT.md
+# stay tracked (gitignore never affects tracked files anyway).
+/.freebuff/
+/CLAUDE.md
+/TASK_CONTEXT.md
 code/01_platform/01_docker/secrets.env

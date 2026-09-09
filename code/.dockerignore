@@ -8,3 +8,9 @@
 **/*.log
 **/.git/
 **/node_modules/
+**/__pycache__/
+**/*.pyc
+**/.idea/
+**/.vscode/
+**/*.iml
+**/.DS_Store
