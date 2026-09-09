@@ -52,39 +52,52 @@ secrets:
     external: true
 
 # ---- Shared service fragments (YAML anchors) --------------------------------
+# P5-011: YAML merge keys are SHALLOW. A service that merges
+# `<<: *common_workload` and then defines its own `deploy:` used to REPLACE
+# the anchor's whole deploy map — silently dropping restart_policy.window,
+# update_config.parallelism/delay/monitor/max_failure_ratio, rollback_config,
+# and the default resources. The deploy defaults now live in their own anchor
+# so every service merges deploy SUB-KEYS explicitly:
+#     deploy:
+#       <<: *deploy_workload   # inherits the policies below
+#       replicas: ...          # + service-specific overrides
+# Sub-map overrides (restart_policy/update_config/placement) still replace
+# those maps wholesale — override only what actually differs.
+x-deploy-workload: &deploy_workload
+  placement:
+    constraints: [node.labels.role == worker]
+  restart_policy:
+    condition: any
+    delay: 5s
+    max_attempts: 4
+    window: 120s
+  update_config:
+    order: start-first
+    parallelism: 1
+    delay: 10s
+    failure_action: rollback
+    monitor: 30s
+    max_failure_ratio: 0.2
+  rollback_config:
+    order: stop-first
+    parallelism: 1
+    delay: 10s
+  resources:
+    # Explicit reservations/limits — protects manager headroom in v1 (the
+    # 2 CPU / 2 GB per-VM manager reservation is enforced by node sizing +
+    # these per-container limits, never exceeded past the 85% capacity alert).
+    reservations:
+      cpus: "0.25"
+      memory: 512M
+    limits:
+      cpus: "4"
+      memory: 8G
+
 x-common-workload: &common_workload
   # Workload services run on role=worker nodes. v1: M1-3 carry role=worker
   # (they are Manager+Worker). v2: only W1-3 (+W4...) carry role=worker, so
   # workloads automatically leave the (drained) managers.
-  deploy:
-    placement:
-      constraints: [node.labels.role == worker]
-    restart_policy:
-      condition: any
-      delay: 5s
-      max_attempts: 4
-      window: 120s
-    update_config:
-      order: start-first
-      parallelism: 1
-      delay: 10s
-      failure_action: rollback
-      monitor: 30s
-      max_failure_ratio: 0.2
-    rollback_config:
-      order: stop-first
-      parallelism: 1
-      delay: 10s
-    resources:
-      # Explicit reservations/limits — protects manager headroom in v1 (the
-      # 2 CPU / 2 GB per-VM manager reservation is enforced by node sizing +
-      # these per-container limits, never exceeded past the 85% capacity alert).
-      reservations:
-        cpus: "0.25"
-        memory: 512M
-      limits:
-        cpus: "4"
-        memory: 8G
+  deploy: *deploy_workload
 
 # ---- Networks: encrypted overlay, internal control plane -------------------
 # 09 § Security: `trading-net` and `execution-net` SHALL be encrypted overlays.
@@ -117,7 +130,9 @@ volumes:
   zk-data-3:
   fluss-data:
   fluss-remote-data:
-  fluss-tablet-data:
+  fluss-tablet-data-1:
+  fluss-tablet-data-2:
+  fluss-tablet-data-3:
   flink-checkpoints:
   flink-logs:
   fluss-logs:
@@ -229,16 +244,8 @@ services:
       retries: 5
       start_period: 20s
     deploy:
+      <<: *deploy_workload
       replicas: 1
-      placement:
-        constraints: [node.labels.role == worker]
-      restart_policy:
-        condition: any
-        delay: 5s
-        max_attempts: 4
-      update_config:
-        order: start-first
-        failure_action: rollback
       resources:
         reservations:
           cpus: "1"
@@ -276,7 +283,20 @@ services:
       - fluss-remote-data:/tmp/fluss/remote-data
       - fluss-logs:/opt/fluss/log
 
-  fluss-tablet:
+  # ---- Fluss tablet servers (P5-001) ----------------------------------------
+  # CRITICAL fix: a single `fluss-tablet` service with replicas: 3 shared ONE
+  # service spec — all three tablet servers booted with identical identity
+  # (tablet-server.id: 0, bind/advertised listeners on hostname fluss-tablet),
+  # breaking log replication/failover (server identity must be unique, like
+  # zookeeper-1/2/3). Split into three pinned services with distinct ids
+  # (1/2/3) and listener hostnames. Data volumes are per-server (a shared
+  # fluss-tablet-data would corrupt); fluss-data/fluss-remote-data stay shared
+  # (lake-snapshot offset contract, PROD-013).
+  # Residue: co-location — tablet-1/2/3 each allow any worker (max_replicas_
+  # per_node is per-service), so two tablets MAY share a node; the hard
+  # guarantee is pinning via node.labels.fluss_tablet == N constraints once
+  # nodes are labeled (same out-of-band model as role/observability labels).
+  fluss-tablet-1:
     <<: *common_workload
     image: ${FLUSS_IMAGE:?set FLUSS_IMAGE to an immutable digest}
     networks: [trading-net]
@@ -287,17 +307,11 @@ services:
       retries: 5
       start_period: 20s
     deploy:
-      replicas: 3                      # Fluss LOG replication >= 2 across VMs
+      <<: *deploy_workload
+      replicas: 1
       placement:
         constraints: [node.labels.role == worker]
         max_replicas_per_node: 1
-        # anti-co-location: spread replicas across distinct workers
-        preferences:
-          - spread: node.labels.role
-      restart_policy: {condition: any}
-      update_config:
-        order: start-first
-        failure_action: rollback
       resources:
         reservations: {cpus: "1", memory: 2G}
         limits: {cpus: "4", memory: 6G}
@@ -307,13 +321,13 @@ services:
     environment:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       FLUSS_COORDINATOR_HOST: fluss-coordinator
-      FLUSS_TABLET_HOST: fluss-tablet
+      FLUSS_TABLET_HOST: fluss-tablet-1
       FLUSS_PROPERTIES: |
         zookeeper.address: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
-        bind.listeners: INTERNAL://fluss-tablet:0, CLIENT://fluss-tablet:9124
-        advertised.listeners: CLIENT://fluss-tablet:9124
+        bind.listeners: INTERNAL://fluss-tablet-1:0, CLIENT://fluss-tablet-1:9124
+        advertised.listeners: CLIENT://fluss-tablet-1:9124
         internal.listener.name: INTERNAL
-        tablet-server.id: 0
+        tablet-server.id: 1
         kv.snapshot.interval: 0s
         data.dir: /tmp/fluss/data
         remote.data.dir: /tmp/fluss/remote-data
@@ -330,7 +344,109 @@ services:
     volumes:
       - fluss-data:/data
       - fluss-remote-data:/tmp/fluss/remote-data
-      - fluss-tablet-data:/tmp/fluss/data
+      - fluss-tablet-data-1:/tmp/fluss/data
+      - fluss-logs:/opt/fluss/log
+
+  fluss-tablet-2:
+    <<: *common_workload
+    image: ${FLUSS_IMAGE:?set FLUSS_IMAGE to an immutable digest}
+    networks: [trading-net]
+    healthcheck:
+      test: ["CMD-SHELL","(echo > /dev/tcp/127.0.0.1/9124) >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    deploy:
+      <<: *deploy_workload
+      replicas: 1
+      placement:
+        constraints: [node.labels.role == worker]
+        max_replicas_per_node: 1
+      resources:
+        reservations: {cpus: "1", memory: 2G}
+        limits: {cpus: "4", memory: 6G}
+    secrets:
+      - aws_access_key_id
+      - aws_secret_access_key
+    environment:
+      FLUSS_BOOTSTRAP: fluss-coordinator:9123
+      FLUSS_COORDINATOR_HOST: fluss-coordinator
+      FLUSS_TABLET_HOST: fluss-tablet-2
+      FLUSS_PROPERTIES: |
+        zookeeper.address: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+        bind.listeners: INTERNAL://fluss-tablet-2:0, CLIENT://fluss-tablet-2:9124
+        advertised.listeners: CLIENT://fluss-tablet-2:9124
+        internal.listener.name: INTERNAL
+        tablet-server.id: 2
+        kv.snapshot.interval: 0s
+        data.dir: /tmp/fluss/data
+        remote.data.dir: /tmp/fluss/remote-data
+        datalake.format: ${DATALAKE_FORMAT:-iceberg}
+        datalake.iceberg.type: hadoop
+        datalake.iceberg.warehouse: ${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH for lake tiering}
+        datalake.iceberg.iceberg.hadoop.fs.s3a.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for lake tiering}
+        datalake.iceberg.iceberg.hadoop.fs.s3a.endpoint.region: ${AWS_REGION:-auto}
+        datalake.iceberg.iceberg.hadoop.fs.s3a.path.style.access: "true"
+        datalake.iceberg.iceberg.hadoop.fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+        datalake.iceberg.iceberg.hadoop.fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+        datalake.iceberg.iceberg.hadoop.fs.s3a.connection.timeout: 30000
+        datalake.iceberg.iceberg.hadoop.fs.s3a.connection.establish.timeout: 30000
+    volumes:
+      - fluss-data:/data
+      - fluss-remote-data:/tmp/fluss/remote-data
+      - fluss-tablet-data-2:/tmp/fluss/data
+      - fluss-logs:/opt/fluss/log
+
+  fluss-tablet-3:
+    <<: *common_workload
+    image: ${FLUSS_IMAGE:?set FLUSS_IMAGE to an immutable digest}
+    networks: [trading-net]
+    healthcheck:
+      test: ["CMD-SHELL","(echo > /dev/tcp/127.0.0.1/9124) >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    deploy:
+      <<: *deploy_workload
+      replicas: 1
+      placement:
+        constraints: [node.labels.role == worker]
+        max_replicas_per_node: 1
+      resources:
+        reservations: {cpus: "1", memory: 2G}
+        limits: {cpus: "4", memory: 6G}
+    secrets:
+      - aws_access_key_id
+      - aws_secret_access_key
+    environment:
+      FLUSS_BOOTSTRAP: fluss-coordinator:9123
+      FLUSS_COORDINATOR_HOST: fluss-coordinator
+      FLUSS_TABLET_HOST: fluss-tablet-3
+      FLUSS_PROPERTIES: |
+        zookeeper.address: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
+        bind.listeners: INTERNAL://fluss-tablet-3:0, CLIENT://fluss-tablet-3:9124
+        advertised.listeners: CLIENT://fluss-tablet-3:9124
+        internal.listener.name: INTERNAL
+        tablet-server.id: 3
+        kv.snapshot.interval: 0s
+        data.dir: /tmp/fluss/data
+        remote.data.dir: /tmp/fluss/remote-data
+        datalake.format: ${DATALAKE_FORMAT:-iceberg}
+        datalake.iceberg.type: hadoop
+        datalake.iceberg.warehouse: ${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH for lake tiering}
+        datalake.iceberg.iceberg.hadoop.fs.s3a.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for lake tiering}
+        datalake.iceberg.iceberg.hadoop.fs.s3a.endpoint.region: ${AWS_REGION:-auto}
+        datalake.iceberg.iceberg.hadoop.fs.s3a.path.style.access: "true"
+        datalake.iceberg.iceberg.hadoop.fs.s3.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+        datalake.iceberg.iceberg.hadoop.fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
+        datalake.iceberg.iceberg.hadoop.fs.s3a.connection.timeout: 30000
+        datalake.iceberg.iceberg.hadoop.fs.s3a.connection.establish.timeout: 30000
+    volumes:
+      - fluss-data:/data
+      - fluss-remote-data:/tmp/fluss/remote-data
+      - fluss-tablet-data-3:/tmp/fluss/data
       - fluss-logs:/opt/fluss/log
 
   # ---- Flink: compute (signal + babysitter jobs) ----------------------------
@@ -353,16 +469,13 @@ services:
       retries: 5
       start_period: 20s
     deploy:
+      <<: *deploy_workload
       replicas: 2                      # standby JM; one promoted on failure
       placement:
         constraints: [node.labels.role == worker]
         max_replicas_per_node: 1
         preferences:
           - spread: node.labels.role
-      restart_policy: {condition: any}
-      update_config:
-        order: start-first
-        failure_action: rollback
       resources:
         reservations: {cpus: "1", memory: 2G}
         limits: {cpus: "4", memory: 4G}
@@ -447,6 +560,7 @@ services:
     image: ${FLINK_IMAGE:?set FLINK_IMAGE to an immutable digest}
     networks: [trading-net]
     deploy:
+      <<: *deploy_workload
       replicas: 3                      # one TM per worker in v2; scales with W4+
       placement:
         constraints: [node.labels.role == worker]
@@ -454,10 +568,6 @@ services:
         preferences:
           - spread: node.labels.role
       # Future workers: add W4+ labels, increase replicas — no stack rewrite.
-      restart_policy: {condition: any}
-      update_config:
-        order: start-first
-        failure_action: rollback
       resources:
         reservations: {cpus: "1", memory: 3G}
         limits: {cpus: "6", memory: 12G}
@@ -513,13 +623,8 @@ services:
     image: ${INGESTION_IMAGE:?set INGESTION_IMAGE to an immutable digest}
     networks: [trading-net]
     deploy:
+      <<: *deploy_workload
       replicas: 1
-      placement:
-        constraints: [node.labels.role == worker]
-      restart_policy: {condition: any}
-      update_config:
-        order: start-first
-        failure_action: rollback
       resources:
         limits: {cpus: "4", memory: 4G}
     secrets:
@@ -582,10 +687,8 @@ services:
     image: ${EXECUTION_BRIDGE_IMAGE:?set EXECUTION_BRIDGE_IMAGE to an immutable digest}
     networks: [execution-net, arrow-egress]
     deploy:
+      <<: *deploy_workload
       replicas: 1
-      placement:
-        constraints: [node.labels.role == worker]
-      restart_policy: {condition: any}
       resources:
         limits: {cpus: "1", memory: 1G}
     secrets:
@@ -740,10 +843,12 @@ services:
       ALERT_CONSUMER_PORT: "9999"
       ALERT_BIND: "0.0.0.0"
     deploy:
+      # P5-011 residue fix: stateful (alert-store volume) — inherit the
+      # common update/rollback policies; placement stays observability-pinned.
+      <<: *deploy_workload
       replicas: 1
       placement:
         constraints: [node.labels.observability == true]
-      restart_policy: {condition: any}
       resources:
         limits: {cpus: "1", memory: 512M}
     command: ["python3", "/app/alert-consumer.py"]

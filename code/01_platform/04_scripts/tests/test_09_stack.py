@@ -26,7 +26,7 @@ STACK = ROOT / "code/01_platform/01_docker/docker-stack.yml"
 # Workload services: must place on role==worker, never pinned to a hostname.
 WORKLOAD = [
     "zookeeper-1", "zookeeper-2", "zookeeper-3",
-    "fluss-coordinator", "fluss-tablet",
+    "fluss-coordinator", "fluss-tablet-1", "fluss-tablet-2", "fluss-tablet-3",
     "flink-jobmanager", "flink-taskmanager", "ingestion",
     "execution-bridge", "execution-gateway", "nautilus",
 ]
@@ -140,17 +140,36 @@ class TestVolumes:
     def test_durable_volumes_declared(self):
         d = _load()
         vols = set(d.get("volumes", {}))
-        for v in ("fluss-data", "fluss-remote-data", "fluss-tablet-data",
+        # P5-001: per-server tablet data volumes (a shared one would corrupt)
+        for v in ("fluss-data", "fluss-remote-data",
+                  "fluss-tablet-data-1", "fluss-tablet-data-2", "fluss-tablet-data-3",
                   "flink-checkpoints", "flink-logs", "fluss-logs",
                   "openobserve-data", "ingestion-logs"):
             assert v in vols, f"durable volume {v} missing from stack"
 
     def test_replicas_scale_for_workers(self):
         # v2 target: replicated stateful compute spread across >=3 workers.
+        # P5-001: tablets split into fluss-tablet-1/2/3 (Swarm replicas share
+        # one spec — identical tablet-server.id broke replication), one
+        # replica each = 3 tablet servers total.
         d = _load()
-        for name, want in (("fluss-tablet", 3), ("flink-taskmanager", 3)):
+        tablets = sorted(n for n in d["services"] if n.startswith("fluss-tablet-"))
+        assert tablets == ["fluss-tablet-1", "fluss-tablet-2", "fluss-tablet-3"], \
+            f"expected the P5-001 split services, got {tablets}"
+        server_ids = []
+        for t in tablets:
+            props = d["services"][t]["environment"]["FLUSS_PROPERTIES"]
+            id_line = next(l for l in props.splitlines()
+                           if l.strip().startswith("tablet-server.id:"))
+            server_ids.append(id_line.split(":", 1)[1].strip())
+        assert len(set(server_ids)) == 3, \
+            f"tablet-server.id must be distinct per member, got {server_ids}"
+        for name, want in (("flink-taskmanager", 3),):
             got = d["services"][name]["deploy"]["replicas"]
             assert got == want, f"{name}: expected replicas {want} (per-worker spread), got {got}"
+        for t in tablets:
+            got = d["services"][t]["deploy"]["replicas"]
+            assert got == 1, f"{t}: split service must be single-replica, got {got}"
 
 
 class TestHealthAndUpdate:
@@ -160,7 +179,8 @@ class TestHealthAndUpdate:
 
     def test_update_rollback_policy_on_stateful(self):
         d = _load()
-        for name in ("fluss-coordinator", "fluss-tablet", "flink-jobmanager"):
+        for name in ("fluss-coordinator", "fluss-tablet-1", "fluss-tablet-2",
+                     "fluss-tablet-3", "flink-jobmanager"):
             uc = d["services"][name]["deploy"].get("update_config", {})
             assert uc.get("failure_action") == "rollback", f"{name}: update must rollback on failure"
 
@@ -180,7 +200,8 @@ class TestTier1ProductionConfig:
         # Fluss + Flink clients must point at the full ensemble, not a single node
         ens = "zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181"
         assert ens in d["services"]["fluss-coordinator"]["environment"]["FLUSS_PROPERTIES"]
-        assert ens in d["services"]["fluss-tablet"]["environment"]["FLUSS_PROPERTIES"]
+        for t in ("fluss-tablet-1", "fluss-tablet-2", "fluss-tablet-3"):
+            assert ens in d["services"][t]["environment"]["FLUSS_PROPERTIES"]
         assert ens in d["services"]["flink-jobmanager"]["environment"]["FLINK_PROPERTIES"]
 
     def test_zookeeper_members_anti_colocated(self):
@@ -190,7 +211,8 @@ class TestTier1ProductionConfig:
             assert dep["placement"].get("max_replicas_per_node") == 1, \
                 f"zookeeper-{i}: must anti-co-locate (max_replicas_per_node: 1)"
         # Fluss tablet + Flink products must also anti-co-locate
-        for n in ("fluss-tablet", "flink-jobmanager", "flink-taskmanager"):
+        for n in ("fluss-tablet-1", "fluss-tablet-2", "fluss-tablet-3",
+                  "flink-jobmanager", "flink-taskmanager"):
             assert d["services"][n]["deploy"]["placement"].get("max_replicas_per_node") == 1, \
                 f"{n}: must anti-co-locate (max_replicas_per_node: 1)"
 

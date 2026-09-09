@@ -165,6 +165,51 @@ class TestHttpSurface(unittest.TestCase):
         code, _ = self._req("/whatever")
         self.assertEqual(code, 404)
 
+    def test_p5_021_malformed_content_length_is_400(self):
+        """P5-021: non-numeric Content-Length must 400, not kill the thread."""
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/noop", method="POST",
+            data=b"{}", headers={"Content-Length": "not-a-number"})
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            self.fail("expected 400")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+        # worker survives
+        code, body = self._req("/healthz")
+        self.assertEqual((code, '"ok": true' in body), (200, True))
+
+    def test_p5_021_oversized_body_is_413(self):
+        """P5-021: huge Content-Length refused before buffering (1 MiB cap)."""
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.port}/noop", method="POST",
+            data=b"{}", headers={"Content-Length": str(ac.MAX_BODY_BYTES + 1)})
+        try:
+            urllib.request.urlopen(req, timeout=10)
+            self.fail("expected 413")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 413)
+
+    def test_p5_022_non_numeric_limit_is_400(self):
+        """P5-022: ?limit=abc must 400, not kill the request thread."""
+        code, body = self._req("/alerts?limit=abc")
+        self.assertEqual(code, 400)
+        self.assertIn("invalid limit", body)
+
+    def test_p5_022_limit_clamped_to_1_1000(self):
+        """P5-022: limit=0 returns ONE record (not the whole tail), negative
+        clamps to 1, and 100000 clamps to 1000."""
+        # seed 3 records
+        for i in range(3):
+            self._req("/noop", "POST",
+                      f'{{"alert": {{"name": "SIGNAL-warn-n{i}"}}}}')
+        code, body = self._req("/alerts?limit=0")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(json.loads(body)["alerts"]), 1)
+        code, body = self._req("/alerts?limit=-5")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(json.loads(body)["alerts"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

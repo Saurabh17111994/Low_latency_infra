@@ -905,6 +905,13 @@ services:
       # platform + launcher only; the jar is the mount point.
       - ../../02_services/02_compute/target/compute.jar:/opt/flink-jobs/compute.jar:ro
     environment:
+      # P5-007: merge the anchor — a bare environment: map REPLACED
+      # &flink-common-env wholesale, so the launcher lost FLUSS_BOOTSTRAP,
+      # CHECKPOINT_DIR/SAVEPOINT_DIR, STATE_BACKEND*, PARALLELISM,
+      # FLUSS_PROPERTIES... and its submit scripts connected to
+      # localhost:9123 instead of fluss-coordinator:9123 (same failure mode
+      # as the TM note on the anchor itself).
+      <<: *flink-common-env
       # SafetyHaltJob requires SAFETY_MANIFEST_TOKENS (comma-separated
       # instrument tokens). Dev default: empty → submit-jobs.sh skips the
       # safety consumer with a warning (signal + babysitter still deploy).
@@ -934,6 +941,10 @@ services:
       - /sys:/host/sys:ro
       - /:/rootfs:ro
     command:
+      # P5-026: --path.rootfs — without it the /:/rootfs mount is dead
+      # config: the filesystem/diskstat/textfile collectors scan the
+      # container's own overlay root instead of the host.
+      - --path.rootfs=/rootfs
       - --path.procfs=/host/proc
       - --path.sysfs=/host/sys
       - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($|/)

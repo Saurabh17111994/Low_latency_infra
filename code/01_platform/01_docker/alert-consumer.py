@@ -48,6 +48,9 @@ BIND = os.environ.get("ALERT_BIND", "127.0.0.1")
 # Tail-read cap: the /alerts endpoint reads at most this many bytes from the
 # end of the file, so a large history cannot make the endpoint slow.
 TAIL_BYTES = 512 * 1024
+# P5-021: POST body cap — alert payloads are a few hundred bytes; 1 MiB is
+# already ~1000x headroom. Larger Content-Length is refused before reading.
+MAX_BODY_BYTES = 1 << 20
 
 _write_lock = threading.Lock()
 
@@ -143,7 +146,21 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self) -> None:
-        length = int(self.headers.get("Content-Length") or 0)
+        # P5-021: Content-Length is client-controlled — a malformed value
+        # must 400 (not kill the worker thread with ValueError), and a huge
+        # value must 413 before self.rfile.read(length) buffers it in memory
+        # (memory-exhaustion vector when bound to 0.0.0.0 in swarm mode).
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send(400, {"ok": False, "error": "invalid Content-Length"})
+            return
+        if length < 0:
+            self._send(400, {"ok": False, "error": "invalid Content-Length"})
+            return
+        if length > MAX_BODY_BYTES:
+            self._send(413, {"ok": False, "error": "payload too large"})
+            return
         raw = self.rfile.read(length).decode("utf-8", "replace") if length else ""
         try:
             record = build_record(raw)
@@ -184,7 +201,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path == "/alerts":
             q = parse_qs(url.query)
-            limit = min(int(q.get("limit", ["50"])[0]), 1000)
+            # P5-022: non-numeric limit must 400 (was an unhandled ValueError
+            # that killed the request thread), and the clamp must be
+            # [1, 1000] — min() alone let limit=0 return the whole tail and
+            # negative limits slice from the wrong end (records[-(-5):]).
+            try:
+                limit = int(q.get("limit", ["50"])[0])
+            except ValueError:
+                self._send(400, {"ok": False, "error": "invalid limit"})
+                return
+            limit = max(1, min(limit, 1000))
             severity = q.get("severity", [None])[0]
             cls = q.get("class", [None])[0]
             self._send(200, {"alerts": read_records(limit, severity, cls)})
