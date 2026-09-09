@@ -306,3 +306,16 @@ class TestTier2Hardening:
             assert uc.get("failure_action") == "rollback", (
                 f"{name}: stateful/executor must set update_config.failure_action=rollback"
             )
+
+    def test_bridge_auth_secret_wired_to_env(self):
+        """P5-013: the bridge secret must reach the binary — a Swarm secret
+        is a FILE; the service must point the _FILE env at it or the bridge
+        exits at startup (authToken empty) and replication of this wiring
+        silently regresses."""
+        svc = _load()["services"]["execution-bridge"]
+        assert "EXECUTION_BRIDGE_AUTH_TOKEN_FILE" in svc["environment"], (
+            "execution-bridge must resolve the token from the secret file")
+        assert svc["environment"]["EXECUTION_BRIDGE_AUTH_TOKEN_FILE"] == \
+            "/run/secrets/execution_bridge_auth_token"
+        assert "execution_bridge_auth_token" in svc.get("secrets", []), (
+            "the secret must stay mounted")

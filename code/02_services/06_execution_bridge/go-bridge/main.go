@@ -14,9 +14,9 @@ import (
 )
 
 func main() {
-	authToken := strings.TrimSpace(os.Getenv("EXECUTION_BRIDGE_AUTH_TOKEN"))
-	if authToken == "" {
-		fmt.Fprintln(os.Stderr, "execution-bridge: EXECUTION_BRIDGE_AUTH_TOKEN is required")
+	authToken, err := authTokenFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "execution-bridge: %v\n", err)
 		os.Exit(2)
 	}
 	mode := strings.ToLower(strings.TrimSpace(envOrDefault("EXECUTION_BRIDGE_MODE", "disabled")))
@@ -54,6 +54,32 @@ func main() {
 		fmt.Fprintf(os.Stderr, "execution-bridge: server failed: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// authTokenFromEnv resolves the private-bridge auth token (P5-013). Docker
+// and Swarm secrets are FILES, so secret-based deployments mount the token
+// and point EXECUTION_BRIDGE_AUTH_TOKEN_FILE at it (the idiomatic _FILE
+// pattern, same as the official postgres/redis images). Direct
+// EXECUTION_BRIDGE_AUTH_TOKEN env still works for plain `docker run -e` and
+// tests. A named-but-unreadable or empty file fails LOUD — the bridge must
+// never silently fall back to running unauthenticated.
+func authTokenFromEnv() (string, error) {
+	if path := strings.TrimSpace(os.Getenv("EXECUTION_BRIDGE_AUTH_TOKEN_FILE")); path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("EXECUTION_BRIDGE_AUTH_TOKEN_FILE=%s unreadable: %w", path, err)
+		}
+		token := strings.TrimSpace(string(b))
+		if token == "" {
+			return "", fmt.Errorf("EXECUTION_BRIDGE_AUTH_TOKEN_FILE=%s is empty", path)
+		}
+		return token, nil
+	}
+	token := strings.TrimSpace(os.Getenv("EXECUTION_BRIDGE_AUTH_TOKEN"))
+	if token == "" {
+		return "", fmt.Errorf("EXECUTION_BRIDGE_AUTH_TOKEN (or _FILE) is required")
+	}
+	return token, nil
 }
 
 func brokerFromEnvironment(mode string) (Broker, *arrow.Client, error) {

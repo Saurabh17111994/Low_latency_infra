@@ -695,6 +695,11 @@ services:
     secrets:
       - execution_bridge_auth_token
     environment:
+      # P5-013: the secret is a FILE — the bridge resolves it natively via
+      # the _FILE pattern (main.go authTokenFromEnv; direct env still works
+      # for non-secret deploys). /healthz stays unauthenticated by design —
+      # only /command and /events require the Bearer token.
+      EXECUTION_BRIDGE_AUTH_TOKEN_FILE: /run/secrets/execution_bridge_auth_token
       EXECUTION_BRIDGE_MODE: ${EXECUTION_BRIDGE_MODE:-disabled}
       EXECUTION_BRIDGE_LISTEN_ADDR: 0.0.0.0:8787
     healthcheck:
@@ -756,11 +761,12 @@ services:
       EXECUTOR_LISTEN_ADDR: 0.0.0.0:9190
       BRIDGE_ENDPOINT: http://execution-bridge:8787
       # CHG-079 (2026-08-21): BRIDGE_ENDPOINT now selects the production HttpBridgeClient
-      # transport. When this stack is rectified to the secret-injected token (see bridge
-      # service: the Go binary requires EXECUTION_BRIDGE_AUTH_TOKEN env, currently only the
-      # secret file is mounted -> both services need the same injected value), set
-      # BRIDGE_AUTH_TOKEN here from the same source. Gate stays HALTED (EXECUTION_ENABLED
-      # false) so no command ever flows; without a token the healthz probe would 401.
+      # transport. Bridge side is wired (P5-013): the bridge reads the Swarm
+      # secret via EXECUTION_BRIDGE_AUTH_TOKEN_FILE. THIS service still needs
+      # BRIDGE_AUTH_TOKEN from the same secret before execution can be enabled —
+      # the Rust executor reads plain env only, so it needs its own _FILE (or
+      # wrapper) support; open P3 work. Gate stays HALTED (EXECUTION_ENABLED
+      # false) so no command ever flows meanwhile.
       GATEWAY_ENDPOINT: http://execution-gateway:9180
       GATEWAY_PROTOCOL_VERSION: execution-gateway.v1
 
