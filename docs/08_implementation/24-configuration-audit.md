@@ -41,7 +41,7 @@ The biggest gaps are not "missing env vars" but **fragmentation** (config split 
 | M23 | `INSTRUMENT_MANIFEST_HOST_PATH` (absolute path) | `start-all.sh`, `docker-compose.yml` | Manifest CSV location | Hardcoded absolute path `/home/saurabh/.../NSE_CM_EQUITY (1024).csv` — machine-specific! |
 | M24 | `localhost:9123`, `fluss-coordinator:9123` | many files | Fluss bootstrap | Repeated everywhere; see D3 |
 | M25 | `bucket.num=16`, `table.log.ttl=7d`, `freshness=5min` | DDL `02_raw_table_1.sql` | Table storage params | Hardcoded in SQL; the DdlBootstrap Java mirror has them too (D2) |
-| M26 | `bucket.num=8` | `fluss.properties`, DDL | Cluster bucketing | `8` in `fluss.properties`, `16` in DDL — conflicting (D4) |
+| M26 | `bucket.num=8` | `fluss.properties`, DDL | Cluster bucketing | `8` in `fluss.properties`, `16` in DDL — conflicting (D4). **Resolved 2026-09-09 (P5-014/023/029/030): `fluss.properties` deleted — never wired into any image/mount/script (single-commit MVP artifact); the Fluss server config is the `FLUSS_PROPERTIES` env block in docker-compose.yml/docker-stack.yml. bucket.num exists only as per-table DDL options.** |
 | M27 | `RATE_HZ` default `10`, `LIVE_THRESHOLD_RATE=500` | `loadtest-preview.sh:39`, `loadtest-collect.sh:32` | Loadtest rates | Operational test params; RATE_HZ is env-overridable but THRESHOLD is a literal |
 | M28 | `DURATION_S=300`, `INTERVAL_S=30` | `loadtest-preview.sh:33-34` | Test duration | CLI-arg-driven, fine |
 | M29 | `-port 8899` faketool | `loadtest-preview.sh:119` | Mock feed port | Hardcoded port |
@@ -100,7 +100,7 @@ The biggest gaps are not "missing env vars" but **fragmentation** (config split 
 | D1 | `MAX_PENDING_APPEND_RECORDS/BYTES`, `PENDING_WARNING_PERCENT` | `IngestionConfig.java:28-30` (150k/192MiB/0.80) + `PlatformConfig.java:33` (80) + `.env` (150000/201326592/0.80) | **Yes — 3 definitions.** IngestionConfig is authoritative; PlatformConfig.PENDING_APPEND_WARNING_PERCENT=80 (percent) vs IngestionConfig 0.80 (fraction) — inconsistent units, and PlatformConfig's is dead code (IngestionConfig wins). |
 | D2 | `RAW_TABLE_1_SCHEMA_VERSION="2"` | `PlatformConfig.java:42` + `SignalJobConfig.java:149` default + DDL comment | **Yes — 3 sources.** PlatformConfig is marked authoritative; SignalJobConfig derives from it — OK, but DDL comment can drift. |
 | D3 | `FLUSS_BOOTSTRAP` | `.env`, `SignalJobConfig.bootstrapServers`, `GatewayConfig`, `Python executor`, scripts | Duplication, not conflict (same value) |
-| D4 | `bucket.num` | `fluss.properties:8` vs DDL `02_raw_table_1.sql:16` | **Yes — 8 vs 16.** Cluster default vs table override; may be intentional (table overrides cluster) but undocumented as such |
+| D4 | `bucket.num` | `fluss.properties:8` vs DDL `02_raw_table_1.sql:16` | **Yes — 8 vs 16.** Cluster default vs table override; may be intentional (table overrides cluster) but undocumented as such. **Dissolved 2026-09-09: `fluss.properties` deleted (never wired — P5); bucket.num is per-table DDL only.** |
 | D5 | `feature_candles_15s_preview` table name | `SignalJob.java:263` literal + DDL + config default | Duplication, drift risk |
 | D6 | `O2_AUTH_BASIC` (base64) vs `O2_USER`+`O2_PASSWORD` | `.env` | Same secret in 2 forms — the base64 is redundant |
 

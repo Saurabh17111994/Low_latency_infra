@@ -190,5 +190,19 @@ class ProdHardeningTest(unittest.TestCase):
         self.assertIn("gate:", make)
         self.assertIn("run-monday-gates.sh", make)
 
+    def test_PROD_019_no_orphan_fluss_properties_file(self):
+        """PROD-019 (P5-014/023/029/030): the Fluss server config is the
+        FLUSS_PROPERTIES env block in compose/stack — the MVP-era
+        03_fluss/fluss.properties was never wired (no COPY/mount/script ref)
+        and its content was stale (ap-south-1 region, empty endpoint,
+        non-canonical tablet.host). It must not drift back: an unwired
+        properties file reads as authoritative while silently doing nothing."""
+        orphan = ROOT / "code/01_platform/03_fluss/fluss.properties"
+        self.assertFalse(orphan.exists(),
+                         "orphan fluss.properties resurrected — wire it into the "
+                         "images or delete it; never keep dead server config")
+        self.assertIn("FLUSS_PROPERTIES:", compose_text(),
+                      "the live server-config source must stay in compose")
+
 if __name__ == "__main__":
     unittest.main()
