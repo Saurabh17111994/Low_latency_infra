@@ -15,14 +15,10 @@
   <modules>
     <!-- Reactor scope (R-272): 02_services/02_compute and 05_mock_arrow declare
          this parent but are not built yet — their source trees are scaffolds.
-         Add them to the reactor when their owning phase builds them.
-         02_services/03_action_capture joined 2026-09-10 (P2 8.4): its image
-         build needs the standard `-pl ... -am` pattern, which requires the
-         module to be selectable in the reactor (a `-f` build cannot select it). -->
+         Add them to the reactor when their owning phase builds them. -->
     <module>common</module>
     <module>02_services/01_ingestion</module>
     <module>02_services/06_execution_gateway</module>
-    <module>02_services/03_action_capture</module>
   </modules>
 
   <properties>

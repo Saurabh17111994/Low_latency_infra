@@ -58,6 +58,27 @@ creation/closure, rejected/cancelled/unknown status, and approved-policy audit r
 pass. Bridge order-updates decode and external-order adoption into the Nautilus OMS require
 dedicated adapter tests (canonical IDs in `11-testing-and-release.md` §Action Capture).
 
+## Pinned canonical postback fingerprint form (bridge parity)
+
+The platform postback fingerprint is SHA-256 (lowercase hex) over the canonical identity map
+serialized exactly as Go's `encoding/json` serializes `map[string]string`: keys sorted, `"k":"v"`
+with no whitespace, and Go default HTML escaping (`<` `>` `&` as `\u003c` `\u003e` `\u0026`;
+quote/backslash/control characters escaped the same way). Any independent implementation that
+must reproduce a bridge-computed digest has to match this byte for byte — two SHA-256s over
+differently serialized inputs never agree.
+
+Exactly seven identity keys participate (`id`, `remarks`, `status`, `report_type`, `fill_shares`,
+`average_price`, `exchange_update_time`); extra keys are ignored, values are trimmed, and absent
+values serialize as `""`. An all-empty identity is a contract violation: fail closed rather than
+collapsing every bad postback onto `sha256("")`.
+
+Known-good vectors (Go-computed, pinned 2026-09-10):
+
+| Input (7-key map) | SHA-256 |
+| --- | --- |
+| `id=BRK-1, remarks=REF-1, status=COMPLETE, report_type=Fill, fill_shares=2, average_price=15050, exchange_update_time=2026-08-19T10:00:00Z` | `01fc1cd7d1ffd97cc763a067669077e82415d947981a4c9f5beb1ef5069ca8ac` |
+| `id=BRK<2>, remarks=A&B "Q" \Z, status="", report_type="", fill_shares="", average_price="", exchange_update_time=""` (pins `<>&` + quote/backslash escaping) | `3934d20619eddb30f04849a1bf1e4ebd953d3a9eda951f8f973814d692623510` |
+
 ## Requirement traceability
 
 - Functional: `REQ-AC-001` through `REQ-AC-013`

@@ -65,8 +65,10 @@ Spec-driven repo: `docs/` is the spec, `code/` is the implementation.
   verifies. Never add casual network attachments.
 - Service status varies — check the dossier before assuming behavior exists:
   `01_ingestion` implemented+validated; `02_compute` Slice 1 + 2.1 only;
-  `03_action_capture` scaffold (archive); `04_executor` (Rust Nautilus) +
-  `06_execution_bridge` + `06_execution_gateway` implemented offline, flag-gated.
+  `04_executor` (Rust Nautilus) + `06_execution_bridge` + `06_execution_gateway`
+  implemented offline, flag-gated. (`03_action_capture` retired 2026-09-10 —
+  capture path runs in the Execution Core: go-arrow bridge + executor + `common`
+  projection + gateway.)
 - Canonical data facts (DEC-039): feed modes `ltpc` (40 B) + `full` (196 B);
   timestamps are epoch milliseconds. No other formats.
 - `logs/tracker-14/` holds dated evidence records — append new dated files, never edit

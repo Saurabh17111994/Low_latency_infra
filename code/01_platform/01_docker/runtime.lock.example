@@ -18,7 +18,6 @@ FLUSS_IMAGE=apache/fluss:0.9.1-incubating
 FLINK_IMAGE=flink:2.2.1-scala_2.12-java17
 OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64
 # INGESTION_IMAGE=  # built from code/02_services/01_ingestion — pin digest
-# ACTION_CAPTURE_IMAGE=  # built from code/02_services/03_action_capture — pin digest
 # COMPUTE_IMAGE=  # built from code/02_services/02_compute — pin digest
 # EXECUTOR_IMAGE=  # built from code/02_services/04_executor — pin digest
 

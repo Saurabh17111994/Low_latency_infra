@@ -65,7 +65,6 @@ code/
 └── 02_services/
     ├── 01_ingestion/            implemented & validated (Phase 2)
     ├── 02_compute/              Signal job Slice 1 + Slice 2.1 implemented; ranking/reservations pending
-    ├── 03_action_capture/       scaffold (capture path → Execution Core dossier)
     ├── 04_executor/             scaffold (order path → Execution Core dossier)
     ├── 05_mock_arrow/           Mock Arrow broker (per-instrument, deterministic)
     ├── 06_execution_bridge/     Go Arrow execution bridge (AutoLogin auth, REST + WS)

@@ -9,7 +9,7 @@
 # dev-only. Production v1 (4 VMs Manager+Worker) and v2 (7 VMs Manager ONLY + Workers) live in docs/08_implementation/09-production-swarm.md; Swarm stack is code/01_platform/01_docker/docker-stack.yml (Option B single branch).
 #
 # Services: fluss (coordinator + tablet), flink (jobmanager + taskmanager),
-# ingestion, action-capture, compute, executor, otel-collector, openobserve.
+# ingestion, compute, executor, otel-collector, openobserve.
 #
 # Direct Arrow Trade integration — no intermediate OpenAlgo or Kite layer.
 # Secrets are NOT committed; copy .env.example to .env and fill values locally.
@@ -872,20 +872,6 @@ services:
     command: ["python3", "/app/code/01_platform/04_scripts/eod_controller.py"]
 
   # ── Disabled services (uncomment as each phase is built) ────────────────
-  #
-  # action-capture:
-  #   <<: *fluss-common
-  #   build:
-  #     # P2 8.4: reactor-root context — the module's parent POM (../../pom.xml)
-  #     # and the sibling `common` module must be inside the build context; a
-  #     # service-dir context fails with UnresolvableModelException. Same shape
-  #     # as ingestion/execution_bridge/execution_gateway.
-  #     context: ../..
-  #     dockerfile: 02_services/03_action_capture/Dockerfile
-  #   depends_on: [fluss-coordinator, fluss-tablet]
-  #   environment:
-  #     ARROW_ORDER_UPDATES_URL: ${ARROW_ORDER_UPDATES_URL}
-  #     ARROW_APP_ID: ${ARROW_APP_ID}
   #
   #
   compute:
