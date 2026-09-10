@@ -63,18 +63,29 @@ public final class PostbackCorrelator {
          */
         public boolean register(AttemptIndex attempt) {
             Objects.requireNonNull(attempt, "attempt");
+            Objects.requireNonNull(attempt.attemptId(), "attemptId");
             // broker bijective: if brokerOrderId present, it must be unique
             if (attempt.brokerOrderId() != null && !attempt.brokerOrderId().isEmpty()) {
                 AttemptIndex existing = byBroker.get(attempt.brokerOrderId());
-                if (existing != null && !existing.attemptId().equals(attempt.attemptId())) {
+                if (existing != null && !Objects.equals(existing.attemptId(), attempt.attemptId())) {
                     return false;
                 }
             }
             // clientRef bijective: clientRef must be unique per attempt
             if (attempt.clientOrderRef() != null && !attempt.clientOrderRef().isEmpty()) {
                 AttemptIndex existing = byClientRef.get(attempt.clientOrderRef());
-                if (existing != null && !existing.attemptId().equals(attempt.attemptId())) {
+                if (existing != null && !Objects.equals(existing.attemptId(), attempt.attemptId())) {
                     return false;
+                }
+            }
+            // Re-register of the same attempt: drop stale secondary keys before repointing.
+            AttemptIndex prev = byAttemptId.get(attempt.attemptId());
+            if (prev != null) {
+                if (prev.brokerOrderId() != null && !prev.brokerOrderId().equals(attempt.brokerOrderId())) {
+                    byBroker.remove(prev.brokerOrderId());
+                }
+                if (prev.clientOrderRef() != null && !prev.clientOrderRef().equals(attempt.clientOrderRef())) {
+                    byClientRef.remove(prev.clientOrderRef());
                 }
             }
             byAttemptId.put(attempt.attemptId(), attempt);
@@ -95,6 +106,11 @@ public final class PostbackCorrelator {
         public AttemptIndex lookupByClientRef(String clientRef) {
             if (clientRef == null || clientRef.isEmpty()) return null;
             return byClientRef.get(clientRef);
+        }
+
+        public AttemptIndex lookupByAttemptId(String attemptId) {
+            if (attemptId == null || attemptId.isEmpty()) return null;
+            return byAttemptId.get(attemptId);
         }
 
         public int size() { return byAttemptId.size(); }
@@ -124,15 +140,10 @@ public final class PostbackCorrelator {
         if (brokerOrderId != null && !brokerOrderId.isEmpty()) {
             AttemptIndex byBroker = index.lookupByBroker(brokerOrderId);
             if (byBroker != null) {
-                // Bijective check: ensure clientRef if present matches the same attempt
                 if (clientRef != null && !clientRef.isEmpty()
                         && !clientRef.equals(byBroker.clientOrderRef())) {
-                    // broker points to attempt A but remarks points elsewhere → ambiguous
-                    AttemptIndex byClient = index.lookupByClientRef(clientRef);
-                    if (byClient != null && !byClient.attemptId().equals(byBroker.attemptId())) {
-                        return new CorrelationResult(CorrelationStatus.AMBIGUOUS_CORRELATION,
-                                null, null, "broker_order_id and client_ref point to different attempts");
-                    }
+                    return new CorrelationResult(CorrelationStatus.AMBIGUOUS_CORRELATION,
+                            null, null, "broker_order_id and client_ref mismatch");
                 }
                 return new CorrelationResult(CorrelationStatus.CORRELATED,
                         byBroker.attemptId(), byBroker.instructionId(), "via broker_order_id");
@@ -150,6 +161,10 @@ public final class PostbackCorrelator {
 
         // Step 3: reconciliation query (caller must have resolved to single attempt)
         if (reconciliationAttempt != null) {
+            if (reconciliationAttempt.attemptId() == null || reconciliationAttempt.instructionId() == null
+                    || index.lookupByAttemptId(reconciliationAttempt.attemptId()) == null) {
+                return new CorrelationResult(CorrelationStatus.NOT_FOUND, null, null, "invalid reconciliation attempt");
+            }
             return new CorrelationResult(CorrelationStatus.CORRELATED,
                     reconciliationAttempt.attemptId(), reconciliationAttempt.instructionId(),
                     "via reconciliation");

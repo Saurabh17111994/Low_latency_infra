@@ -48,14 +48,20 @@ class ActionCaptureContractTest {
     void acUnit003_correlationPriorityAndAmbiguity() {
         var idx = new PostbackCorrelator.InMemoryCorrelationIndex();
         idx.register(new PostbackCorrelator.AttemptIndex("A-1", "I-1", "H-1", "C-REF-1", "B-1"));
+        var p0 = PostbackDecoder.decode(Map.of("id", "B-1", "remarks", "C-REF-1"));
+        var r0 = PostbackCorrelator.correlate(p0, idx);
+        assertEquals(PostbackCorrelator.CorrelationStatus.CORRELATED, r0.status());
+        assertEquals("A-1", r0.attemptId());
+        // P2-091: broker hit + mismatched (even unknown) clientRef → fail-closed AMBIGUOUS.
         var p1 = PostbackDecoder.decode(Map.of("id", "B-1", "remarks", "WRONG"));
         var r1 = PostbackCorrelator.correlate(p1, idx);
-        assertEquals(PostbackCorrelator.CorrelationStatus.CORRELATED, r1.status());
-        assertEquals("A-1", r1.attemptId());
+        assertEquals(PostbackCorrelator.CorrelationStatus.AMBIGUOUS_CORRELATION, r1.status());
         var p2 = PostbackDecoder.decode(Map.of("id", "", "remarks", "C-REF-1"));
         var r2 = PostbackCorrelator.correlate(p2, idx);
         assertEquals(PostbackCorrelator.CorrelationStatus.CORRELATED, r2.status());
-        var p3 = PostbackDecoder.decode(Map.of("id", "", "remarks", ""));
+        // Identity present but unknown to the index → NOT_FOUND (P2-205 now
+        // forbids constructing an identity-less postback via decode).
+        var p3 = PostbackDecoder.decode(Map.of("id", "B-UNKNOWN", "remarks", "R-UNKNOWN"));
         var r3 = PostbackCorrelator.correlate(p3, idx);
         assertEquals(PostbackCorrelator.CorrelationStatus.NOT_FOUND, r3.status());
     }
@@ -107,7 +113,7 @@ class ActionCaptureContractTest {
     // AC-FAIL-003: missing/ambiguous mapping quarantined + halt
     @Test
     void acFail003_missingAmbiguousQuarantined() {
-        var p = PostbackDecoder.decode(Map.of("id", "", "remarks", ""));
+        var p = PostbackDecoder.decode(Map.of("id", "B-UNKNOWN", "remarks", "R-UNKNOWN"));
         var idx = new PostbackCorrelator.InMemoryCorrelationIndex();
         var r = PostbackCorrelator.correlate(p, idx);
         assertEquals(PostbackCorrelator.CorrelationStatus.NOT_FOUND, r.status());
