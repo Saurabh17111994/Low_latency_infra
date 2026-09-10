@@ -876,8 +876,12 @@ services:
   # action-capture:
   #   <<: *fluss-common
   #   build:
-  #     context: ../../02_services/03_action_capture
-  #     dockerfile: Dockerfile
+  #     # P2 8.4: reactor-root context — the module's parent POM (../../pom.xml)
+  #     # and the sibling `common` module must be inside the build context; a
+  #     # service-dir context fails with UnresolvableModelException. Same shape
+  #     # as ingestion/execution_bridge/execution_gateway.
+  #     context: ../..
+  #     dockerfile: 02_services/03_action_capture/Dockerfile
   #   depends_on: [fluss-coordinator, fluss-tablet]
   #   environment:
   #     ARROW_ORDER_UPDATES_URL: ${ARROW_ORDER_UPDATES_URL}
