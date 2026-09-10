@@ -1,12 +1,18 @@
 package com.trading.compute.telemetry;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.io.InputStream;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
 
@@ -106,6 +112,134 @@ class ComputeAlertLogsTest {
     void oddConfigureCallFails() {
         assertThatThrownBy(() -> ComputeAlertLogs.configureResourceAttributes("key.only"))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @DisplayName("null severity/event/detail/extras degrade to defaults, never throw (P2-069/P2-070)")
+    void nullArgsDegradeToDefaults() {
+        try {
+            ComputeAlertLogs.configureResourceAttributes("nullable.key", null);
+            String json = ComputeAlertLogs.buildLogsJson(null, null, null);
+            assertThat(json).contains("\"severityText\":\"INFO\"");
+            assertThat(json).contains("\"severityNumber\":9");
+            assertThat(json).contains("\"key\":\"event\",\"value\":{\"stringValue\":\"unknown\"}");
+            assertThat(json).contains("\"key\":\"nullable.key\",\"value\":{\"stringValue\":\"\"}");
+            parseJson(json); // must still be strict valid JSON
+        } finally {
+            ComputeAlertLogs.resetResourceAttributesForTest();
+        }
+        // The full emit path (build + POST) with nulls against a refused
+        // collector must also honor the never-fail contract.
+        assertThatCode(() -> ComputeAlertLogs.emitAlertLog("127.0.0.1:1", null, null, null))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("injection-shaped collector input is skipped without throwing (P2-191)")
+    void injectionShapedCollectorIsSkipped() {
+        // Path/authority smuggling (?/#/ @ //) and null/empty fail the
+        // host:port gate and return before any socket is opened.
+        assertThatCode(() -> {
+            ComputeAlertLogs.emitAlertLog("collector:4318/evil", "INFO", "startup-mode", "x");
+            ComputeAlertLogs.emitAlertLog("collector@evil:4318", "INFO", "startup-mode", "x");
+            ComputeAlertLogs.emitAlertLog("host?x=1", "INFO", "startup-mode", "x");
+            ComputeAlertLogs.emitAlertLog("host#frag", "INFO", "startup-mode", "x");
+            ComputeAlertLogs.emitAlertLog(null, "INFO", "startup-mode", "x");
+            ComputeAlertLogs.emitAlertLog("", "INFO", "startup-mode", "x");
+        }).doesNotThrowAnyException();
+    }
+
+    @Test
+    @DisplayName("stalled collector is bounded by short timeouts, two emits well under old ~10s (P2-192)")
+    void stalledCollectorIsBounded() throws Exception {
+        // Black-hole server: accepts and reads, never replies — the emit must
+        // give up at the 2s read timeout, not stall startup.
+        try (ServerSocket server = new ServerSocket(0)) {
+            Thread holder = new Thread(() -> {
+                try {
+                    for (int i = 0; i < 2; i++) {
+                        try (Socket s = server.accept()) {
+                            s.setSoTimeout(15_000);
+                            s.getInputStream().readNBytes(1);
+                            Thread.sleep(30_000); // never reply
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // Server socket closed at test end; client timeouts land here.
+                }
+            });
+            holder.setDaemon(true);
+            holder.start();
+            String hp = "127.0.0.1:" + server.getLocalPort();
+            long start = System.nanoTime();
+            assertThatCode(() -> {
+                ComputeAlertLogs.emitAlertLog(hp, "INFO", "startup-mode", "x");
+                ComputeAlertLogs.emitAlertLog(hp, "INFO", "startup-mode", "y");
+            }).doesNotThrowAnyException();
+            long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+            // 2 emits x 2s read timeout = ~4s; the old 5s/5s needed ~10s.
+            assertThat(elapsedMs).isLessThan(8_000L);
+        }
+    }
+
+    @Test
+    @DisplayName("HTTP 500 responses are drained without throwing, both emits land (P2-193)")
+    void errorResponsesAreDrained() throws Exception {
+        AtomicInteger hits = new AtomicInteger();
+        try (ServerSocket server = new ServerSocket(0)) {
+            Thread responder = new Thread(() -> {
+                try {
+                    for (int i = 0; i < 2; i++) {
+                        try (Socket s = server.accept()) {
+                            s.setSoTimeout(10_000);
+                            InputStream in = s.getInputStream();
+                            int contentLength = contentLengthOf(readHeaders(in));
+                            in.readNBytes(contentLength);
+                            hits.incrementAndGet();
+                            byte[] body = "oops".getBytes(StandardCharsets.UTF_8);
+                            String head = "HTTP/1.1 500 Internal Error\r\nContent-Type: text/plain\r\n"
+                                    + "Content-Length: " + body.length + "\r\n"
+                                    + "Connection: close\r\n\r\n";
+                            s.getOutputStream().write(head.getBytes(StandardCharsets.US_ASCII));
+                            s.getOutputStream().write(body);
+                            s.getOutputStream().flush();
+                        }
+                    }
+                } catch (Exception ignored) {
+                    // Server socket closed at test end.
+                }
+            });
+            responder.setDaemon(true);
+            responder.start();
+            String hp = "127.0.0.1:" + server.getLocalPort();
+            assertThatCode(() -> {
+                ComputeAlertLogs.emitAlertLog(hp, "ERROR", "schema-preflight-failed", "boom");
+                ComputeAlertLogs.emitAlertLog(hp, "INFO", "startup-mode", "x");
+            }).doesNotThrowAnyException();
+            responder.join(10_000);
+            assertThat(hits.get()).isEqualTo(2);
+        }
+    }
+
+    private static String readHeaders(InputStream in) throws Exception {
+        StringBuilder sb = new StringBuilder();
+        int b;
+        while ((b = in.read()) != -1) {
+            sb.append((char) b);
+            if (sb.length() >= 4 && sb.substring(sb.length() - 4).equals("\r\n\r\n")) {
+                break;
+            }
+        }
+        return sb.toString();
+    }
+
+    private static int contentLengthOf(String headers) {
+        for (String line : headers.split("\r\n")) {
+            if (line.regionMatches(true, 0, "Content-Length:", 0, 15)) {
+                return Integer.parseInt(line.substring(15).trim());
+            }
+        }
+        return 0;
     }
 
     /**

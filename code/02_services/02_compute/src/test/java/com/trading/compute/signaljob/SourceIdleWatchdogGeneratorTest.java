@@ -2,6 +2,7 @@ package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.concurrent.atomic.AtomicLong;
@@ -19,10 +20,11 @@ import org.junit.jupiter.api.Test;
  * 2026-09-01 CHG-120): the watchdog marks the split idle after
  * SOURCE_IDLE_MS of WALL-CLOCK silence (the withIdleness pausable clock is
  * frozen by backpressure under load — the CHG-120 zero-emission root cause),
- * reactivates it on the first record (markActive covers a non-advancing
- * first record), never alters the DELEGATE's watermark emission (pure
- * pass-through), and logs ONE alert per idle EPISODE (not per periodic
- * tick).
+ * reactivates it only on the first ADVANCING record (P2-170 — a stale first
+ * record stays excluded so the combined minimum never regresses), never alters
+ * the DELEGATE's watermark emission (pure pass-through), and logs ONE alert per
+ * idle EPISODE against the job-wide last-record clock (P2-055 — quiet splits
+ * never false-alarm while records flow anywhere).
  *
  * <p>CHG-023 item 1 (2026-08-17): the client-side {@code compute.source.idle.
  * at.tail} DELTA mirror was removed with ComputeOtlpEmitter — the episode
@@ -198,21 +200,41 @@ class SourceIdleWatchdogGeneratorTest {
     }
 
     @Test
-    void firstRecordAfterIdleMarkReactivatesSplit() {
+    void staleRecordAfterIdleMarkStaysExcluded() {
         RecordingOutput output = new RecordingOutput();
         generator.onEvent(null, 10_000L, output);
         clock.set(clock.get() + 15_000L);
         generator.onPeriodicEmit(output);
         assertEquals(1, output.idleCalls);
 
-        // First record after idle: markActive is REQUIRED alongside the
-        // delegate's watermark because a non-advancing (stale) record emits
-        // nothing — without markActive the split would stay excluded from
-        // the combined minimum while delivering data again.
+        // P2-170: a STALE record (older than the running max) makes the bounded
+        // delegate emit NO watermark — reactivating now would re-add a split
+        // whose last watermark is old and drag the combined minimum backwards.
         clock.set(clock.get() + 1_000L);
-        // STALE record (older than the running max): the bounded delegate
-        // emits NO watermark, so only markActive re-includes the split.
         generator.onEvent(null, 9_000L, output);
+        assertEquals(0, output.activeCalls,
+                "a non-advancing first record must NOT reactivate the split");
+
+        // Still excluded: the next periodic tick must not re-mark either
+        // (edge semantics) and emits no markActive.
+        clock.set(clock.get() + 200L);
+        generator.onPeriodicEmit(output);
+        assertEquals(1, output.idleCalls, "no re-mark inside the idle episode");
+        assertEquals(0, output.activeCalls, "still excluded while stale");
+    }
+
+    @Test
+    void advancingRecordAfterIdleMarkReactivatesSplit() {
+        RecordingOutput output = new RecordingOutput();
+        generator.onEvent(null, 10_000L, output);
+        clock.set(clock.get() + 15_000L);
+        generator.onPeriodicEmit(output);
+        assertEquals(1, output.idleCalls);
+
+        // P2-170: only an ADVANCING record proves the split fresh and rejoins
+        // it to the combined minimum (delegate emits 15_000 > 4_999).
+        clock.set(clock.get() + 1_000L);
+        generator.onEvent(null, 20_000L, output);
         assertEquals(1, output.activeCalls,
                 "the first record after an idle-mark must reactivate the split");
 
@@ -231,6 +253,116 @@ class SourceIdleWatchdogGeneratorTest {
         generator.onPeriodicEmit(output);
         assertEquals(1, output.idleCalls,
                 "a never-data split must be marked idle after SOURCE_IDLE_MS from open");
+    }
+
+    // ------------------------------------------------------------------
+    // P2-055: the idle-at-tail alert runs on the job-wide last-record clock.
+    // A permanently-quiet split (or the event-less main instance) must not
+    // false-alarm while records flow on other splits; a fully quiet job must
+    // still alert. (The cheaper !idleMarked && hadEvent guard was rejected:
+    // alertMs > idleMs means idleMarked is always true at alert time, so that
+    // guard would suppress every alert including the frozen-tail one.)
+    // ------------------------------------------------------------------
+
+    @Test
+    void quietSplitDoesNotAlertWhileJobFlows() {
+        WatermarkGenerator<RowData> live =
+                new SourceIdleWatchdogGenerator(
+                        CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L),
+                        15_000L,
+                        60_000L,
+                        clock::get);
+        WatermarkGenerator<RowData> quiet =
+                new SourceIdleWatchdogGenerator(
+                        CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L),
+                        15_000L,
+                        60_000L,
+                        clock::get);
+        RecordingOutput liveOut = new RecordingOutput();
+        RecordingOutput quietOut = new RecordingOutput();
+
+        // 70 s of healthy traffic on the live split; the quiet split only ticks.
+        live.onEvent(null, 10_000L, liveOut);
+        for (int i = 0; i < 7; i++) {
+            clock.set(clock.get() + 10_000L);
+            live.onEvent(null, 11_000L + i, liveOut);
+            quiet.onPeriodicEmit(quietOut);
+            assertFalse(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+                    "a quiet split must not alert while records flow anywhere (tick " + i + ")");
+        }
+        // Per-split idle marking still applies — only the job-wide alert is gated.
+        assertEquals(1, quietOut.idleCalls, "quiet split still marks itself idle per-split");
+
+        // The feed then stops everywhere: the same quiet split must alert.
+        clock.set(clock.get() + 61_000L);
+        quiet.onPeriodicEmit(quietOut);
+        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+                "full-job silence must still alert from a quiet split");
+    }
+
+    // ------------------------------------------------------------------
+    // P2-171: backward wall-clock steps resync instead of computing negative
+    // idle gaps that silently miss both thresholds.
+    // ------------------------------------------------------------------
+
+    @Test
+    void backwardClockJumpResyncsAndSkipsTick() {
+        RecordingOutput output = new RecordingOutput();
+        generator.onEvent(null, 10_000L, output);
+
+        // NTP/step adjustment moves the wall clock backwards 30 s.
+        clock.set(clock.get() - 30_000L);
+        generator.onPeriodicEmit(output);
+        assertEquals(0, output.idleCalls, "a backward step must not mark idle");
+        assertFalse(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+                "a backward step must not alert");
+
+        // Normal operation resumes from the resynced stamp: both thresholds
+        // fire again after their full silence elapses.
+        clock.set(clock.get() + 91_000L);
+        generator.onPeriodicEmit(output);
+        assertEquals(1, output.idleCalls, "idle marking recovers after resync");
+        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+                "alerting recovers after resync");
+    }
+
+    // ------------------------------------------------------------------
+    // P2-235: bad wiring/timeouts fail at construction, not as a first-tick
+    // idle storm. P2-169: a fresh job re-arms the first-episode alert.
+    // ------------------------------------------------------------------
+
+    @Test
+    void constructorRejectsBadTimeouts() {
+        WatermarkGenerator<RowData> delegate =
+                CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L);
+        assertThrows(IllegalArgumentException.class,
+                () -> new SourceIdleWatchdogGenerator(delegate, 0, 60_000L, clock::get));
+        assertThrows(IllegalArgumentException.class,
+                () -> new SourceIdleWatchdogGenerator(delegate, -1, 60_000L, clock::get));
+        assertThrows(IllegalArgumentException.class,
+                () -> new SourceIdleWatchdogGenerator(delegate, 15_000L, 0, clock::get));
+        assertThrows(IllegalArgumentException.class,
+                () -> new SourceIdleWatchdogGenerator(delegate, 15_000L, -1, clock::get));
+        assertThrows(NullPointerException.class,
+                () -> new SourceIdleWatchdogGenerator(null, 15_000L, 60_000L, clock::get));
+    }
+
+    @Test
+    void constructorRearmsEpisodeLatch() {
+        generator.onEvent(null, 10_000L, new RecordingOutput());
+        clock.set(clock.get() + 61_000L);
+        generator.onPeriodicEmit(new RecordingOutput());
+        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest());
+
+        // A fresh job (new generator, e.g. restart in a reused JVM) must report
+        // its first idle episode instead of inheriting the set latch.
+        new SourceIdleWatchdogGenerator(
+                CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L),
+                15_000L,
+                60_000L,
+                clock::get);
+        assertFalse(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+                "construction must re-arm the first-episode alert");
     }
 
     private static final class RecordingOutput implements WatermarkOutput {

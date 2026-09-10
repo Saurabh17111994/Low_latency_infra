@@ -19,7 +19,8 @@ import java.nio.file.Path;
  * <p>Failure contract: any missing/unreadable/unparseable file returns
  * {@code null} (callers then simply do not register the gauges — a metric
  * gap, never a crash). A cgroup v2 limit of the literal {@code "max"} means
- * unlimited and is reported as {@link Snapshot#limitBytes()} = -1.
+ * unlimited and is reported as {@link Snapshot#limitBytes()} = -1; a cgroup v1
+ * unlimited sentinel (huge value near Long.MAX_VALUE) is normalized to -1 too.
  *
  * <p>Static factory for the real filesystem paths; package-visible
  * {@link #read(Path, Path, Path, Path)} accepts injected paths for tests.
@@ -37,6 +38,17 @@ public final class ContainerMemory {
 
     /** Immutable snapshot of a successful container-memory read. */
     public record Snapshot(long usageBytes, long limitBytes) {
+        public Snapshot {
+            // P2-131: malformed becomes loud here; read() converts it to null
+            // (metric gap, never a crash) instead of divide-by-zero/nonsense.
+            if (usageBytes < 0) {
+                throw new IllegalArgumentException("usageBytes must be >= 0, got " + usageBytes);
+            }
+            if (limitBytes != -1 && limitBytes <= 0) {
+                throw new IllegalArgumentException(
+                        "limitBytes must be > 0 or -1, got " + limitBytes);
+            }
+        }
 
         /** -1 marks an unlimited cgroup v2 limit ("max"). */
         public boolean unlimited() {
@@ -56,17 +68,29 @@ public final class ContainerMemory {
      */
     static Snapshot read(Path v2Current, Path v2Max, Path v1Usage, Path v1Limit) {
         try {
-            Long usageV2 = readLong(v2Current);
-            String maxRaw = readTrimmed(v2Max);
-            if (usageV2 != null && maxRaw != null) {
-                if ("max".equals(maxRaw)) {
-                    return new Snapshot(usageV2, -1L);
+            // P2-132: v2 failure — missing files AND corrupt content — falls
+            // through to the v1 fallback instead of returning metric-blind.
+            try {
+                Long usageV2 = readLong(v2Current);
+                String maxRaw = readTrimmed(v2Max);
+                if (usageV2 != null && maxRaw != null) {
+                    if ("max".equals(maxRaw)) {
+                        return new Snapshot(usageV2, -1L);
+                    }
+                    return new Snapshot(usageV2, Long.parseLong(maxRaw));
                 }
-                return new Snapshot(usageV2, Long.parseLong(maxRaw));
+            } catch (IOException | RuntimeException e) {
+                // Corrupt v2 files: try v1 below.
             }
             Long usageV1 = readLong(v1Usage);
             Long limitV1 = readLong(v1Limit);
             if (usageV1 != null && limitV1 != null) {
+                // P2-028: cgroup v1 has no "max" string — unlimited is a huge
+                // sentinel near Long.MAX_VALUE (PAGE_COUNTER_MAX). Normalize to
+                // -1 like v2 so unlimited() and usage/limit ratios stay honest.
+                if (limitV1 < 0 || limitV1 >= (1L << 60)) {
+                    return new Snapshot(usageV1, -1L);
+                }
                 return new Snapshot(usageV1, limitV1);
             }
         } catch (IOException | RuntimeException e) {

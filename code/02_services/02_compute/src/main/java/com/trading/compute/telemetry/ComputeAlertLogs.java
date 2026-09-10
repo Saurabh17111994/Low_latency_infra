@@ -78,26 +78,52 @@ public final class ComputeAlertLogs {
      */
     public static void emitAlertLog(String collectorHostPort, String severity,
             String event, String detail) {
-        String json = buildLogsJson(severity, event, detail);
         try {
+            // P2-069: the payload build runs inside the best-effort guard — the
+            // never-fail contract covers the build itself, not just the POST.
+            String json = buildLogsJson(severity, event, detail);
+            // P2-191: fail closed on injection-shaped input — an unvalidated
+            // host:port can smuggle a path/authority override (?/#/@//) into
+            // the URL and forces cleartext HTTP.
+            if (collectorHostPort == null
+                    || !collectorHostPort.matches("[A-Za-z0-9._-]+(:\\d+)?")) {
+                LOG.warn("compute-otlp: invalid collectorHostPort '{}', event={} skipped",
+                        collectorHostPort, event);
+                return;
+            }
+            // TODO: support https:// collector endpoint for production (P2-191).
             URL url = URI.create("http://" + collectorHostPort + "/v1/logs").toURL();
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");
             conn.setDoOutput(true);
-            conn.setConnectTimeout(5_000);
-            conn.setReadTimeout(5_000);
+            // P2-192: 2s/2s — a dead collector stalls startup ~4s per event,
+            // not ~10s (async is overkill for the 3 pre-execute events).
+            conn.setConnectTimeout(2_000);
+            conn.setReadTimeout(2_000);
             try (OutputStream os = conn.getOutputStream()) {
                 os.write(json.getBytes(StandardCharsets.UTF_8));
             }
-            int code = conn.getResponseCode();
-            if (code >= 400) {
-                // Collector down must never fail the job — telemetry is off
-                // the critical path (observability dossier contract).
-                LOG.warn("compute-otlp: alert log HTTP {} (collector={}, event={})",
-                        code, collectorHostPort, event);
+            // P2-193: always disconnect, and drain the body so keep-alive
+            // connections are reusable instead of leaking sockets per outage.
+            try {
+                int code = conn.getResponseCode();
+                try (var in = code >= 400 ? conn.getErrorStream() : conn.getInputStream()) {
+                    if (in != null) {
+                        in.transferTo(OutputStream.nullOutputStream());
+                    }
+                } catch (Exception ignored) {
+                    // Draining is best-effort; the status code is what matters.
+                }
+                if (code >= 400) {
+                    // Collector down must never fail the job — telemetry is off
+                    // the critical path (observability dossier contract).
+                    LOG.warn("compute-otlp: alert log HTTP {} (collector={}, event={})",
+                            code, collectorHostPort, event);
+                }
+            } finally {
+                conn.disconnect();
             }
-            conn.disconnect();
         } catch (Exception e) {
             LOG.debug("compute-otlp: alert log emit failed (collector unreachable?): {}",
                     e.getMessage());
@@ -109,10 +135,17 @@ public final class ComputeAlertLogs {
      * and detail plus the same resource attributes as the metrics payload used
      * to carry (service.name/instance.id + configured extras). Package-visible
      * for the payload-shape tests.
+     *
+     * <p>Null-safe by contract (P2-070): pre-execute callers pass unvalidated
+     * args, so null severity/event/detail (or a null extras pair) degrades to
+     * defaults instead of throwing — the sink function guards, not the callers.
      */
     static String buildLogsJson(String severity, String event, String detail) {
         long now = System.currentTimeMillis() * 1_000_000L; // epoch nanos
-        int severityNumber = switch (severity) {
+        String safeSeverity = severity == null ? "INFO" : severity;
+        String safeEvent = event == null ? "unknown" : event;
+        String safeDetail = detail == null ? "" : detail;
+        int severityNumber = switch (safeSeverity) {
             case "INFO" -> 9;
             case "WARN" -> 13;
             case "ERROR" -> 17;
@@ -129,12 +162,12 @@ public final class ComputeAlertLogs {
         sb.setLength(sb.length() - 1); // drop trailing comma after last attribute
         sb.append("]},\"scopeLogs\":[{\"scope\":{\"name\":\"compute\"},\"logRecords\":[")
           .append("{\"timeUnixNano\":\"").append(now).append("\",")
-          .append("\"severityText\":\"").append(escapeJson(severity)).append("\",")
+          .append("\"severityText\":\"").append(escapeJson(safeSeverity)).append("\",")
           .append("\"severityNumber\":").append(severityNumber).append(",")
-          .append("\"body\":{\"stringValue\":\"").append(escapeJson(detail)).append("\"},")
+          .append("\"body\":{\"stringValue\":\"").append(escapeJson(safeDetail)).append("\"},")
           .append("\"attributes\":[");
-        appendAttr(sb, "event", event);
-        appendAttr(sb, "severity", severity);
+        appendAttr(sb, "event", safeEvent);
+        appendAttr(sb, "severity", safeSeverity);
         sb.setLength(sb.length() - 1); // drop trailing comma
         sb.append("]}]}]}]}");
         return sb.toString();
@@ -149,8 +182,14 @@ public final class ComputeAlertLogs {
      * Minimal JSON string escaping (quotes, backslash, control chars) — the
      * configured extras may carry hostnames/env values; an unescaped quote
      * would corrupt the whole OTLP payload.
+     *
+     * <p>Null-safe (P2-070 extension): a null extras value degrades to ""
+     * instead of NPE-ing the whole payload.
      */
     private static String escapeJson(String s) {
+        if (s == null) {
+            return "";
+        }
         StringBuilder out = null;
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);

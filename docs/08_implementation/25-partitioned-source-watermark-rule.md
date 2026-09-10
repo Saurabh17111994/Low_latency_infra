@@ -85,9 +85,13 @@ If you add a new Flink streaming source over a partitioned Fluss table:
    the generator goes inside `SourceIdleWatchdogGenerator`, which adds the
    wall-clock idle marking.
 3. Keep `SOURCE_IDLE_MS` configurable per job; 15000 is the current default.
+   Size it >> the max expected backpressure stall (P2-054): the wall-clock
+   marking is unconditional by design (CHG-120), so too small a timeout
+   converts backpressure into systematic lateness — watch the G7c late-drop
+   counters for the cost.
 4. Add a unit test with an injectable clock that proves: quiet split goes
-   idle at the threshold, flowing split never goes idle, first record after
-   idle reactivates. Copy the shape from `SourceIdleWatchdogGeneratorTest`.
+  idle at the threshold, flowing split never goes idle, first record after
+  idle reactivates. Copy the shape from `SourceIdleWatchdogGeneratorTest`.
 
 If your source reads a table with NO partitions, the rule does not apply —
 splits without data cannot exist there.

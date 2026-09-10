@@ -48,9 +48,13 @@ import org.slf4j.LoggerFactory;
  * job-wide, not per periodic tick and not per split: the first generator
  * (any bucket) to cross the threshold reports once via a static episode latch;
  * the latch clears when ANY record arrives (any split), so a resumed feed
- * logs INFO and the next idle episode reports again. The latch is a JVM-wide
- * static — exact for the embedded dev run (single process, parallelism 1),
- * the documented scope of the other ComputeOtlpEmitter statics.
+ * logs INFO and the next idle episode reports again. The threshold is evaluated
+ * against a job-wide last-record clock (every instance's {@code onEvent} stamps
+ * it), so permanently-quiet splits (empty future-day partitions) and the
+ * event-less main instance never fire it while records flow anywhere (P2-055).
+ * The latch is a JVM-wide static — exact for the embedded dev run (single
+ * process, parallelism 1), the documented scope of the other
+ * ComputeOtlpEmitter statics.
  *
  * <p><b>Wall-clock idle marking (CHG-120 zero-emission fix).</b> The
  * {@code withIdleness(SOURCE_IDLE_MS)} wrapper measures split silence with a
@@ -113,6 +117,16 @@ final class SourceIdleWatchdogGenerator implements WatermarkGenerator<RowData> {
     private static final java.util.concurrent.atomic.AtomicBoolean EPISODE_REPORTED =
             new java.util.concurrent.atomic.AtomicBoolean(false);
 
+    /**
+     * Job-wide last-record wall clock (P2-055): stamped by every instance's
+     * {@code onEvent} and at construction (source open). The idle-at-tail alert
+     * is evaluated against this clock instead of the per-split silence, so a
+     * quiet split only reports when the whole job is quiet. Same JVM-wide
+     * scope limitation as {@link #EPISODE_REPORTED}.
+     */
+    private static final java.util.concurrent.atomic.AtomicLong JOB_LAST_EVENT_WALL_CLOCK_MS =
+            new java.util.concurrent.atomic.AtomicLong(System.currentTimeMillis());
+
     private final WatermarkGenerator<RowData> delegate;
     /** Wall-clock silence after which the split is marked idle (SOURCE_IDLE_MS). */
     private final long sourceIdleMs;
@@ -121,6 +135,10 @@ final class SourceIdleWatchdogGenerator implements WatermarkGenerator<RowData> {
     private long lastEventWallClockMs;
     /** Per-split idle-marking edge state: true while this split is wall-clock marked idle. */
     private boolean idleMarked;
+    /** Highest watermark timestamp observed from the delegate (P2-170). */
+    private long lastEmittedWatermark = Long.MIN_VALUE;
+    /** Reusable forwarding output tracking delegate emissions without per-event allocation. */
+    private final TrackingOutput trackingOutput = new TrackingOutput();
 
     SourceIdleWatchdogGenerator(
             WatermarkGenerator<RowData> delegate, long sourceIdleMs, long sourceIdleAlertMs) {
@@ -133,7 +151,16 @@ final class SourceIdleWatchdogGenerator implements WatermarkGenerator<RowData> {
             long sourceIdleMs,
             long sourceIdleAlertMs,
             LongSupplier clock) {
-        this.delegate = delegate;
+        // P2-235: fail fast on bad wiring/timeouts at construction, not on the
+        // first periodic tick as an idle storm.
+        this.delegate = java.util.Objects.requireNonNull(delegate, "delegate");
+        if (sourceIdleMs <= 0) {
+            throw new IllegalArgumentException("sourceIdleMs must be > 0, got " + sourceIdleMs);
+        }
+        if (sourceIdleAlertMs <= 0) {
+            throw new IllegalArgumentException(
+                    "sourceIdleAlertMs must be > 0, got " + sourceIdleAlertMs);
+        }
         this.sourceIdleMs = sourceIdleMs;
         this.sourceIdleAlertMs = sourceIdleAlertMs;
         this.clock = clock;
@@ -141,6 +168,12 @@ final class SourceIdleWatchdogGenerator implements WatermarkGenerator<RowData> {
         // tail has no events, so the first periodic tick after the threshold
         // correctly measures "idle since source start".
         this.lastEventWallClockMs = clock.getAsLong();
+        // P2-169: a fresh job re-arms the first-episode alert instead of
+        // inheriting EPISODE_REPORTED=true from a previous job in this JVM.
+        EPISODE_REPORTED.set(false);
+        // P2-055: a fresh source counts as "just had an event" job-wide, so a
+        // restart does not instantly alert on the inherited job clock.
+        JOB_LAST_EVENT_WALL_CLOCK_MS.set(lastEventWallClockMs);
     }
 
     @Override
@@ -148,22 +181,31 @@ final class SourceIdleWatchdogGenerator implements WatermarkGenerator<RowData> {
         // REQ-FC-010 source throughput: covered natively by the FLIP-27 source
         // operator's numRecordsOut / numRecordsOutPerSecond metrics (CHG-023
         // item 1 removed the client-side ComputeOtlpEmitter mirror).
-        delegate.onEvent(event, eventTimestamp, output);
-        if (idleMarked) {
-            // The delegate just emitted an ADVANCING watermark (which clears
-            // the split's idle flag inside PartialWatermark.setWatermark) in
-            // the common case; markActive covers a non-advancing first record
-            // after idle so the split is never left excluded from the
-            // combined minimum while it is again delivering data.
-            idleMarked = false;
-            output.markActive();
-            LOG.info("signal-job: source split reactivated after wall-clock idle — records "
-                    + "flowing again");
-        }
+        long watermarkBefore = lastEmittedWatermark;
+        trackingOutput.attach(output);
+        delegate.onEvent(event, eventTimestamp, trackingOutput);
         long now = clock.getAsLong();
+        // P2-055: every record anywhere refreshes the job-wide clock.
+        JOB_LAST_EVENT_WALL_CLOCK_MS.set(now);
+        if (idleMarked) {
+            // P2-170: reactivate only when the delegate actually advanced the
+            // watermark. A stale/non-advancing first record emits nothing, so
+            // re-adding the split would drag the combined minimum backwards
+            // (its last watermark may be Long.MIN_VALUE/old) and stall windows
+            // that already advanced past it. The split stays excluded until an
+            // advancing record proves it fresh.
+            if (lastEmittedWatermark > watermarkBefore) {
+                idleMarked = false;
+                output.markActive();
+                LOG.info("signal-job: source split reactivated after wall-clock idle — records "
+                        + "flowing again");
+            }
+        }
         if (EPISODE_REPORTED.getAndSet(false)) {
             LOG.info("signal-job: source resumed after {} ms idle at the tail — records flowing "
-                    + "again (feed resumed or restore caught up)", now - lastEventWallClockMs);
+                    + "again (feed resumed or restore caught up)",
+                    // P2-171: never log a negative gap after a backward clock step.
+                    Math.max(0L, now - lastEventWallClockMs));
         }
         lastEventWallClockMs = now;
     }
@@ -173,13 +215,26 @@ final class SourceIdleWatchdogGenerator implements WatermarkGenerator<RowData> {
         // REQ-FC-010 watermark lag: covered natively by the source operator's
         // currentOutputWatermark gauge (lag = now - watermark at scrape time)
         // — CHG-023 item 1 removed the client-side ComputeOtlpEmitter gauge.
-        delegate.onPeriodicEmit(output);
+        trackingOutput.attach(output);
+        delegate.onPeriodicEmit(trackingOutput);
         long now = clock.getAsLong();
+        // P2-171: the wall clock is not monotonic (NTP/step). A negative idle
+        // would silently miss both thresholds for the length of the step, so
+        // resync and skip this tick instead.
+        if (now < lastEventWallClockMs) {
+            lastEventWallClockMs = now;
+            return;
+        }
         long idleMs = now - lastEventWallClockMs;
         // Wall-clock idle marking (edge-triggered, once per idle episode):
         // unblocks the combined watermark when withIdleness's PausableRelativeClock
         // is frozen by backpressure. Idempotent with the wrapper's own
         // markIdle — both target the same PartialWatermark.
+        // P2-054: the unconditional wall-clock marking is deliberate (CHG-120
+        // live-verified fix — gating on buffered-record evidence reintroduces
+        // the total stall). Size sourceIdleMs >> max expected backpressure
+        // stall (see runbook); the G7c late-drop counters monitor the cost of
+        // a backpressured split marked idle while holding buffered records.
         if (idleMs >= sourceIdleMs && !idleMarked) {
             idleMarked = true;
             output.markIdle();
@@ -190,13 +245,16 @@ final class SourceIdleWatchdogGenerator implements WatermarkGenerator<RowData> {
         }
         // Edge-triggered: report once per idle episode (compareAndSet wins for
         // exactly one generator even if several splits cross together).
-        if (idleMs >= sourceIdleAlertMs && EPISODE_REPORTED.compareAndSet(false, true)) {
+        // P2-055: evaluated on the job-wide clock — quiet splits and the
+        // event-less main instance stay silent while records flow anywhere.
+        long jobIdleMs = now - JOB_LAST_EVENT_WALL_CLOCK_MS.get();
+        if (jobIdleMs >= sourceIdleAlertMs && EPISODE_REPORTED.compareAndSet(false, true)) {
             LOG.warn("signal-job: source idle at the tail — no records consumed for {} ms "
                     + "(>= SOURCE_IDLE_ALERT_MS={} ms). This is EXPECTED idle-tail behavior when "
                     + "the feed is stopped or a restored source sits at a frozen log end (NOT a "
                     + "stall; probe-verified 2026-08-13 — verify with a raw-scanner probe "
                     + "subscribing at the tail). Investigate only if the feed should be live.",
-                    idleMs, sourceIdleAlertMs);
+                    jobIdleMs, sourceIdleAlertMs);
             // The old compute.source.idle.at.tail DELTA metric was removed with
             // the emitter (CHG-023 item 1): the native idle signal is the source
             // operator's numRecordsOutPerSecond meter dropping to 0 + the
@@ -214,5 +272,37 @@ final class SourceIdleWatchdogGenerator implements WatermarkGenerator<RowData> {
     /** TEST-ONLY: current episode-latch state (package-visible for tests). */
     static boolean episodeReportedForTest() {
         return EPISODE_REPORTED.get();
+    }
+
+    /**
+     * Forwards to the real output while tracking the highest watermark
+     * timestamp the delegate emits (P2-170). Reused per generator instance —
+     * Flink calls a generator from a single thread, so no allocation and no
+     * synchronization on the hot path.
+     */
+    private final class TrackingOutput implements WatermarkOutput {
+        private WatermarkOutput target;
+
+        void attach(WatermarkOutput target) {
+            this.target = target;
+        }
+
+        @Override
+        public void emitWatermark(Watermark watermark) {
+            if (watermark.getTimestamp() > lastEmittedWatermark) {
+                lastEmittedWatermark = watermark.getTimestamp();
+            }
+            target.emitWatermark(watermark);
+        }
+
+        @Override
+        public void markIdle() {
+            target.markIdle();
+        }
+
+        @Override
+        public void markActive() {
+            target.markActive();
+        }
     }
 }

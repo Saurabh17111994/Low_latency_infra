@@ -60,7 +60,13 @@ public final class SignalJob {
 
     public static void main(String[] args) throws Exception {
         SignalJobConfig config = SignalJobConfig.fromEnv();
-        LOG.info("signal-job: starting compute path with {}", config);
+        // P2-071 (sibling of the JobGraphDump instance): never log the whole
+        // config record — record toString() prints s3AccessKey/s3SecretKey.
+        LOG.info("signal-job: starting compute path (startupMode={} parallelism={} backend={} "
+                        + "liveTable={} closedTable={} signalTables={}/{})",
+                config.startupMode(), config.parallelism(), config.stateBackend(),
+                config.candleLiveTable(), config.candleClosedTable(),
+                config.signalCandidatesTable(), config.signalCurrentTable());
         run(config);
     }
 
@@ -147,6 +153,14 @@ public final class SignalJob {
                     "schema-preflight-failed",
                     String.valueOf(e.getMessage()));
             throw e;
+        } catch (RuntimeException e) {
+            // P2-159: an unreachable cluster (IllegalStateException from the
+            // preflight) fails closed too — and must be equally visible in
+            // OpenObserve, not just in the submitter's stderr.
+            ComputeAlertLogs.emitAlertLog(config.otelCollectorHost(), "ERROR",
+                    "schema-preflight-failed",
+                    String.valueOf(e.getMessage()));
+            throw e;
         }
 
         // Flink 2.x configures restart strategies declaratively via Configuration —
@@ -163,7 +177,10 @@ public final class SignalJob {
         // in the dist). Flink 2.2.1 removed CheckpointConfig.setCheckpointStorage; the
         // declarative Configuration route is the only way to point local/dev runs at a
         // durable directory instead of the 5 MiB-capped JobManager-heap default.
-        if (config.checkpointDir() != null) {
+        // P2-160: blank env injection (CHECKPOINT_DIR=${VAR:-} -> "") is not
+        // null — a blank path fails validation or restores unpredictably, so
+        // skip blank like null on all three path setters.
+        if (config.checkpointDir() != null && !config.checkpointDir().isBlank()) {
             flinkConfig.set(CheckpointingOptions.CHECKPOINTS_DIRECTORY, config.checkpointDir());
         }
         // State restore (STATE_RECOVERY_PATH): without an explicit restore the
@@ -173,7 +190,7 @@ public final class SignalJob {
         // from the last checkpoint of the previous run. Restore-from-checkpoint
         // works with the same path key as savepoints (StreamGraphGenerator reads
         // StateRecoveryOptions.SAVEPOINT_PATH -> SavepointRestoreSettings).
-        if (config.stateRecoveryPath() != null) {
+        if (config.stateRecoveryPath() != null && !config.stateRecoveryPath().isBlank()) {
             flinkConfig.set(StateRecoveryOptions.SAVEPOINT_PATH, config.stateRecoveryPath());
         }
         // Production runtime options (tracker 14 P4.1/P4.2): state backend,
@@ -375,6 +392,13 @@ public final class SignalJob {
                             .build())
                     .name("execution-intent-sink")
                     .uid("execution-intent-sink");
+        } else if (config.executionIntentEnabled()) {
+            // P2-161: intent enabled but no upstream signals — nothing is
+            // wired (multiTf/strategy-host off?). Silent no-op hides the
+            // misconfiguration; mirrors the STRATEGIES-without-host WARN.
+            LOG.warn("signal-job: EXECUTION_INTENT_ENABLED=true but strategySignals is null "
+                    + "(multiTfEnabled={}, strategyHostEnabled={}) — no execution-intent branch wired",
+                    config.multiTfEnabled(), config.strategyHostEnabled());
         }
 
         return env;
@@ -479,7 +503,7 @@ public final class SignalJob {
                 ? config.taskManagerNetworkMemoryMax() : "256m";
         flinkConfig.setString("taskmanager.memory.network.max", netMax);
         flinkConfig.setString("taskmanager.memory.network.min", netMax);
-        if (config.savepointDir() != null) {
+        if (config.savepointDir() != null && !config.savepointDir().isBlank()) {
             flinkConfig.set(CheckpointingOptions.SAVEPOINT_DIRECTORY, config.savepointDir());
         }
         // Native OpenTelemetry metric reporter (CHG-023 item 1, 2026-08-17):
@@ -519,7 +543,7 @@ public final class SignalJob {
         // Tracker 14 P4.2 — object-store (S3/R2) checkpoint access. The
         // endpoint/credentials/region go into the Flink Configuration ONLY
         // when a checkpoint/savepoint URI is an object-store URI (config
-        // validation in SignalJobConfig.s3Endpoint already failed closed
+        // validation in SignalJobConfig (single-resolve S3 triple) already failed closed
         // otherwise). Credentials come from secret injection via env — never
         // committed files — and the effective-backend log below prints URI
         // schemes only, never the endpoint path or keys.
@@ -546,16 +570,28 @@ public final class SignalJob {
         // with StringIndexOutOfBoundsException(0, -1) on every submit.
         String cpDir = config.checkpointDir();
         String spDir = config.savepointDir();
-        String cpScheme = (cpDir == null || cpDir.isEmpty()) ? "none"
-                : cpDir.substring(0, cpDir.indexOf(':'));
-        String spScheme = (spDir == null || spDir.isEmpty()) ? "none"
-                : spDir.substring(0, spDir.indexOf(':'));
+        // P2-051: scheme-less local paths (e.g. /tmp/checkpoints) have no ':'
+        // — the old substring(indexOf) blew up at (0,-1) before the job ran.
+        String cpScheme = schemeOf(cpDir);
+        String spScheme = schemeOf(spDir);
         LOG.info("signal-job: effective state backend = {} (dev={}, incremental={}), "
                 + "checkpoint URI class = {}, savepoint URI class = {}, parallelism = {}",
                 config.stateBackend(), config.deploymentEnv(),
                 "rocksdb".equals(config.stateBackend())
                         && flinkConfig.get(CheckpointingOptions.INCREMENTAL_CHECKPOINTS),
                 cpScheme, spScheme, config.parallelism());
+    }
+
+    /**
+     * P2-051: URI scheme for the effective-backend log line, never the full
+     * path (credentials may be embedded in S3 URIs). Scheme-less local paths
+     * and null/blank all map to {@code "none"}.
+     */
+    static String schemeOf(String dir) {
+        if (dir == null || dir.isBlank() || dir.indexOf(':') < 0) {
+            return "none";
+        }
+        return dir.substring(0, dir.indexOf(':'));
     }
 
     /**
