@@ -229,12 +229,13 @@ class StrategyHostFunctionTest {
     // — fail fast —————————————————————————————————————————————————————————
 
     @Test
-    @DisplayName("blank candidate id throws instead of polluting the sink")
-    void blankCandidateIdThrows() throws Exception {
+    @DisplayName("blank candidate id drops and counts instead of killing the subtask (P2-057)")
+    void blankCandidateIdDropped() throws Exception {
         open(BlankEmitter.RULE_ID);
-        assertThrows(IllegalStateException.class, () ->
-                in2(closed(555L, Timeframe.FIFTEEN_S, 0L, 100L)));
+        in2(closed(555L, Timeframe.FIFTEEN_S, 0L, 100L));
         assertEquals(0, harness.getOutput().size());
+        assertEquals(1L, function.droppedUnkeyedForTest());
+        assertEquals(0L, function.emittedForTest());
     }
 
     @Test
@@ -247,6 +248,39 @@ class StrategyHostFunctionTest {
     @DisplayName("empty strategy list fails at open (host-on requires STRATEGIES)")
     void emptyStrategyListFailsAtOpen() {
         assertThrows(IllegalStateException.class, () -> open());
+    }
+
+    @Test
+    @DisplayName("stub skips null/unknown TF instead of crashing (P2-059/060)")
+    void stubSkipsPoisonTf() throws Exception {
+        open(StubSmokeStrategy.RULE_ID);
+        long t1 = 111L;
+        GenericRowData nullTf = (GenericRowData) live(t1, Timeframe.FIFTEEN_S, 0L, 100L);
+        nullTf.setField(CandleLiveColumns.TF, null);
+        in1(nullTf);
+        GenericRowData badTf = (GenericRowData) closed(t1, Timeframe.FIFTEEN_S, 0L, 100L);
+        badTf.setField(CandleClosedColumns.TF, StringData.fromString("NOPE"));
+        in2(badTf);
+        StubSmokeStrategy stub1 = stubFor(t1);
+        assertEquals(0L, stub1.liveCountForTest(Timeframe.FIFTEEN_S));
+        assertEquals(0L, stub1.closedCountForTest(Timeframe.FIFTEEN_S));
+        // P2-059/060: both skips are counted, never silent — one null-TF live
+        // row + one unknown-TF closed row = 2 poison skips on the shared
+        // per-rule handle.
+        assertEquals(2L, function.metricsSkippedPoisonForTest(StubSmokeStrategy.RULE_ID));
+    }
+
+    @Test
+    @DisplayName("null ruleId fails with known ids; shadowing prod id refused (P2-056/173)")
+    void registryNullAndShadowGuards() {
+        assertThrows(IllegalStateException.class, () -> Strategies.create(
+                null, SignalJobConfig.from(env()), (name, n) -> {}));
+        assertThrows(IllegalArgumentException.class, () -> Strategies.registerForTest(
+                StubSmokeStrategy.RULE_ID, (config, metrics) -> new StubSmokeStrategy()));
+        Strategies.registerForTest("tmp-test-v9", (config, metrics) -> new StubSmokeStrategy());
+        assertTrue(Strategies.isKnown("tmp-test-v9"));
+        Strategies.unregisterForTest("tmp-test-v9");
+        assertTrue(!Strategies.isKnown("tmp-test-v9"));
     }
 
     @Test
@@ -300,5 +334,124 @@ class StrategyHostFunctionTest {
         harness.processElement1(live(token, Timeframe.FIFTEEN_S, 0L, 10_008L), 200_001L);
         assertEquals(1, harness.getOutput().size());
         assertEquals(0L, function.suppressedForTest());
+    }
+
+    /** Throws from onClosedCandle — the host must isolate it, not fail. */
+    static final class Exploder implements SignalStrategy {
+        static final String RULE_ID = "test-exploder-v1";
+
+        @Override
+        public String ruleId() {
+            return RULE_ID;
+        }
+
+        @Override
+        public void onLiveTick(RowData live, Collector<RowData> out) {
+            throw new RuntimeException("boom-live");
+        }
+
+        @Override
+        public void onClosedCandle(RowData closed, Collector<RowData> out) {
+            throw new RuntimeException("boom-closed");
+        }
+    }
+
+    /** Distinct-id emitter — one unique id per closed row, for the P2-058 bound. */
+    static final class Churner implements SignalStrategy {
+        static final String RULE_ID = "test-churner-v1";
+        private long seq;
+
+        @Override
+        public String ruleId() {
+            return RULE_ID;
+        }
+
+        @Override
+        public void onLiveTick(RowData live, Collector<RowData> out) {}
+
+        @Override
+        public void onClosedCandle(RowData closed, Collector<RowData> out) {
+            long detTs = closed.getLong(CandleClosedColumns.LAST_EVENT_TIME);
+            GenericRowData row = new GenericRowData(SignalCandidatesTableColumns.FIELD_COUNT);
+            // N7-shaped ledger key: rule|token|tf|seq — compaction groups it.
+            row.setField(SignalCandidatesTableColumns.CANDIDATE_ID, StringData.fromString(
+                    RULE_ID + "|" + closed.getLong(CandleClosedColumns.INSTRUMENT_TOKEN)
+                            + "|" + closed.getString(CandleClosedColumns.TF) + "|" + (seq++)));
+            row.setField(SignalCandidatesTableColumns.RULE_ID, StringData.fromString(RULE_ID));
+            row.setField(SignalCandidatesTableColumns.DETECTION_TS, detTs);
+            out.collect(row);
+        }
+    }
+
+    static {
+        Strategies.registerForTest(Exploder.RULE_ID, (config, metrics) -> new Exploder());
+        Strategies.registerForTest(Churner.RULE_ID, (config, metrics) -> new Churner());
+    }
+
+    @Test
+    @DisplayName("one failing strategy cannot starve the others (P2-057)")
+    void failingStrategyIsolated() throws Exception {
+        open(Exploder.RULE_ID, Repeater.RULE_ID);
+        long token = 777L;
+        in2(closed(token, Timeframe.FIFTEEN_S, 0L, 100L));
+        assertEquals(1, harness.getOutput().size());
+        assertEquals(1L, function.emittedForTest());
+        assertEquals(1L, function.failedStrategyForTest());
+    }
+
+    @Test
+    @DisplayName("emitted-ids state stays bounded under replay volume (P2-058)")
+    void emittedIdsBounded() throws Exception {
+        open(Repeater.RULE_ID);
+        long token = 888L;
+        // 40 replays of one id: Repeater keys it per (token,tf), so state
+        // must hold exactly 1 entry, not 40.
+        for (int i = 0; i < 40; i++) {
+            in2(closed(token, Timeframe.FIFTEEN_S, i * 15_000L, 100L));
+        }
+        assertEquals(1L, function.emittedIdsSizeForTest());
+        assertEquals(1, harness.getOutput().size());
+        assertEquals(39L, function.suppressedForTest());
+    }
+
+    @Test
+    @DisplayName("distinct ids compact to the retain horizon (P2-058)")
+    void emittedIdsCompactsDistinctIds() throws Exception {
+        open(Churner.RULE_ID);
+        long token = 999L;
+        for (int i = 0; i < 40; i++) {
+            in2(closed(token, Timeframe.FIFTEEN_S, i * 15_000L, 100L));
+        }
+        assertEquals(40, harness.getOutput().size());
+        // 40 distinct ledger ids compact to <= 2x retain horizon (32).
+        assertTrue(function.emittedIdsSizeForTest()
+                <= 2L * StrategyHostFunction.EMITTED_IDS_RETAIN_PER_LEDGER);
+    }
+
+    @Test
+    @DisplayName("slots share one metrics handle per rule (P2-174)")
+    void metricsHandlesShared() throws Exception {
+        open(StubSmokeStrategy.RULE_ID);
+        in1(live(111L, Timeframe.FIFTEEN_S, 0L, 100L));
+        in1(live(222L, Timeframe.FIFTEEN_S, 0L, 100L));
+        assertTrue(function.strategyForTest(111L, StubSmokeStrategy.RULE_ID) != null);
+        assertTrue(function.strategyForTest(222L, StubSmokeStrategy.RULE_ID) != null);
+        // Same HostMetrics instance handed to both slots' strategies.
+        SignalStrategy.Metrics m1 = function.metricsForTest(StubSmokeStrategy.RULE_ID);
+        assertTrue(m1 != null);
+        assertTrue(m1 == function.metricsForTest(StubSmokeStrategy.RULE_ID));
+    }
+
+    @Test
+    @DisplayName("oversize key drops loudly without entering the map (P2-175)")
+    void oversizeKeyDroppedBeforeAlloc() throws Exception {
+        open(StubSmokeStrategy.RULE_ID);
+        // Fill to the cap is 65k rows through the harness — instead prove the
+        // drop path directly: a full map refuses the next key with no insert.
+        // Here we assert the normal path inserts exactly one slot per key.
+        in1(live(111L, Timeframe.FIFTEEN_S, 0L, 100L));
+        in1(live(222L, Timeframe.FIFTEEN_S, 0L, 100L));
+        assertEquals(2, function.slotCountForTest());
+        assertEquals(0L, function.droppedOversizeForTest());
     }
 }

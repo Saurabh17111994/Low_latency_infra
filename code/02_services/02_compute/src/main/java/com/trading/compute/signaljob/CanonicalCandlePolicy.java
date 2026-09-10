@@ -37,8 +37,10 @@ public final class CanonicalCandlePolicy {
             String expectedAlgorithm,
             String expectedConfiguration) {
         return expectedAlgorithm != null
+                && !expectedAlgorithm.isBlank()
                 && expectedAlgorithm.equals(algorithmVersion)
                 && expectedConfiguration != null
+                && !expectedConfiguration.isBlank()
                 && expectedConfiguration.equals(configurationVersion);
     }
 }

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.Test;
@@ -31,8 +32,8 @@ class MultiTimeframeStateTest {
                     "forming " + tf + " fresh lastEventTime should be MIN");
             assertEquals(0L, acc.volume);
             assertEquals(0L, acc.tickCount);
-            assertNull(acc.firstFingerprint);
-            assertNull(acc.lastFingerprint);
+            assertEquals("", acc.firstFingerprint);
+            assertEquals("", acc.lastFingerprint);
         }
         // Also verify named fields are non-null
         assertNotNull(state.formingFifteenS);
@@ -151,20 +152,24 @@ class MultiTimeframeStateTest {
         state.formingFifteenM.closePaise = 777L;
 
         // Fill some closed rings
-        ClosedCandle c1 = new ClosedCandle(1000L, 1010L, 1005L, 995L, 1002L, 50L, 2L, 1010L, "fp-1");
-        ClosedCandle c2 = new ClosedCandle(2000L, 2010L, 2005L, 1995L, 2002L, 60L, 3L, 2010L, "fp-2");
+        ClosedCandle c1 = new ClosedCandle(1000L, 1000L + 15_000L, 1010L, 1005L, 995L, 1002L, 50L, 2L, 1010L, "fp-1");
+        ClosedCandle c2 = new ClosedCandle(2000L, 2000L + 15_000L, 2010L, 2005L, 1995L, 2002L, 60L, 3L, 2010L, "fp-2");
         state.closed(Timeframe.FIFTEEN_S).add(c1);
         state.closed(Timeframe.ONE_M).add(c2);
         assertEquals(1, state.closedFifteenS.size());
         assertEquals(1, state.closedOneM.size());
 
-        // Capture ring identities before reset
+        // Capture ring + forming identities before reset
         MultiTimeframeClosedRing ringFifteenSBefore = state.closedFifteenS;
         MultiTimeframeClosedRing ringOneMBefore = state.closedOneM;
+        CandleAccumulator accBefore = state.formingFifteenS;
 
-        state.resetForming();
+        state.resetForming(999_000L, true);
 
-        // Forming should be fresh (new instances, zeroed fields)
+        // P2-151: in-place clear — same object identity, zeroed fields.
+        assertSame(accBefore, state.formingFifteenS,
+                "resetForming must preserve forming(tf) identity (in-place clear)");
+        // Forming should be fresh (cleared fields)
         assertNotSame(ringFifteenSBefore, null); // sanity
         for (Timeframe tf : Timeframe.values()) {
             CandleAccumulator acc = state.forming(tf);
@@ -196,19 +201,36 @@ class MultiTimeframeStateTest {
     }
 
     @Test
-    void quoteAndDiscontinuitySurviveReset() {
+    void resetFormingAdvancesGateAndSetsDiscontinuityAtomically() {
+        MultiTimeframeState state = new MultiTimeframeState();
+        state.lastEventTime = 100L;
+        state.discontinuityPending = false;
+
+        // Gap-drop: sets pending + advances gate in one call (P2-152).
+        state.resetForming(200L, true);
+        assertTrue(state.discontinuityPending);
+        assertEquals(200L, state.lastDiscontinuityEventTime);
+        assertEquals(200L, state.lastEventTime);
+
+        // Overnight: clears a stale pending, still advances gate.
+        state.resetForming(300L, false);
+        assertFalse(state.discontinuityPending);
+        assertEquals(300L, state.lastEventTime);
+    }
+
+    @Test
+    void quoteSnapshotSurvivesResetGateAdvancesExplicitly() {
         MultiTimeframeState state = new MultiTimeframeState();
         state.lastBidPaise = 1000L;
         state.lastAskPaise = 1010L;
         state.lastBidSize = 5L;
         state.lastAskSize = 7L;
         state.lastQuoteEventTime = 123456789L;
-        state.discontinuityPending = true;
-        state.lastDiscontinuityEventTime = 987654321L;
-        state.lastEventTime = 555L;
         state.lastFingerprint = "fp-xyz";
 
-        state.resetForming();
+        // P2-152: gate + marker are explicit params now — gap-drop sets,
+        // overnight clears; quote snapshot always survives.
+        state.resetForming(555L, true);
 
         assertEquals(1000L, state.lastBidPaise);
         assertEquals(1010L, state.lastAskPaise);
@@ -216,7 +238,7 @@ class MultiTimeframeStateTest {
         assertEquals(7L, state.lastAskSize);
         assertEquals(123456789L, state.lastQuoteEventTime);
         assertTrue(state.discontinuityPending);
-        assertEquals(987654321L, state.lastDiscontinuityEventTime);
+        assertEquals(555L, state.lastDiscontinuityEventTime);
         assertEquals(555L, state.lastEventTime);
         assertEquals("fp-xyz", state.lastFingerprint);
     }
@@ -229,7 +251,7 @@ class MultiTimeframeStateTest {
         }
         // Fill 15 for ONE_M only
         for (int i = 0; i < 15; i++) {
-            state.closedOneM.add(new ClosedCandle(i * 1000L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "fp-" + i));
+            state.closedOneM.add(new ClosedCandle(i * 1000L, i * 1000L + 60_000L, 0L, 0L, 0L, 0L, 0L, 0L, 0L, "fp-" + i));
         }
         assertTrue(state.isWarm(Timeframe.ONE_M), "ONE_M should be warm after 15");
         assertFalse(state.isWarm(Timeframe.FIFTEEN_S), "other TF should still be cold");

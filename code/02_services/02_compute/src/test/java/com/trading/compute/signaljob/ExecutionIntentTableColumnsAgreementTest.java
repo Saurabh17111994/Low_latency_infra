@@ -50,7 +50,7 @@ class ExecutionIntentTableColumnsAgreementTest {
     void ddlNamesAndTypesMatchJavaLayout() throws IOException {
         List<Column> columns = columns(ddl());
         assertEquals(ExecutionIntentTableColumns.FIELD_COUNT, columns.size());
-        assertArrayEquals(ExecutionIntentTableColumns.NAMES,
+        assertArrayEquals(ExecutionIntentTableColumns.namesCopy(),
                 columns.stream().map(Column::name).toArray(String[]::new));
         for (int i = 0; i < columns.size(); i++) {
             assertEquals(ExecutionIntentTableColumns.TYPE_ROOTS.get(i), columns.get(i).type(),
@@ -74,12 +74,12 @@ class ExecutionIntentTableColumnsAgreementTest {
         var info = (org.apache.flink.table.runtime.typeutils.InternalTypeInfo<RowData>)
                 ExecutionIntentTableColumns.ROW_TYPE_INFO;
         assertEquals(ExecutionIntentTableColumns.FIELD_COUNT, info.toRowSize());
-        assertArrayEquals(ExecutionIntentTableColumns.NAMES, info.toRowFieldNames());
+        assertArrayEquals(ExecutionIntentTableColumns.namesCopy(), info.toRowFieldNames());
     }
 
     @Test
     void layoutContainsNoMutableExecutionFields() {
-        String joined = String.join(",", ExecutionIntentTableColumns.NAMES);
+        String joined = String.join(",", ExecutionIntentTableColumns.namesCopy());
         assertFalse(joined.contains("client_order_ref"));
         assertFalse(joined.contains("broker_order_id"));
         assertFalse(joined.contains("execution_status"));

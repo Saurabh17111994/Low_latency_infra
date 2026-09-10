@@ -27,6 +27,11 @@ public final class ExecutionIntentContextResolver {
         }
         String candidateId = required(candidate, SignalCandidatesTableColumns.CANDIDATE_ID,
                 "candidate_id");
+        // P2-033: same NPE-escapes-IAE-catch as P2-031 — resolveEntry runs
+        // inside flatMap's IAE-only catch, so a null token must reject, not NPE.
+        if (candidate.isNullAt(SignalCandidatesTableColumns.INSTRUMENT_TOKEN)) {
+            throw new IllegalArgumentException("instrument_token must be present in the candidate");
+        }
         long instrumentToken = candidate.getLong(SignalCandidatesTableColumns.INSTRUMENT_TOKEN);
         if (instrumentToken <= 0) {
             throw new IllegalArgumentException("instrument_token must be positive");

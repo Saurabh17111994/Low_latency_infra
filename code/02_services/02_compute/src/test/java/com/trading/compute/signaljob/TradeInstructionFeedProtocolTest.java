@@ -88,6 +88,31 @@ class TradeInstructionFeedProtocolTest {
     }
 
     @Test
+    @DisplayName("null/blank inputs fail closed, empty stored hash is first-write (P2-067/068/187/188)")
+    void nullAndEmptyInputsFailClosed() {
+        // P2-067: record construction rejects nulls outright.
+        assertThrows(NullPointerException.class, () ->
+                new TradeInstructionFeedProtocol.Verification(null, INSTRUCTION, HASH_A, TS));
+        assertThrows(NullPointerException.class, () ->
+                new TradeInstructionFeedProtocol.Verification(
+                        ImmutabilityProtocol.Outcome.ACCEPTED, null, HASH_A, TS));
+        // P2-068: blank id/incoming reject; "" existing normalizes to first-write.
+        assertThrows(IllegalArgumentException.class, () ->
+                TradeInstructionFeedProtocol.verify("  ", null, HASH_A, TS));
+        assertThrows(IllegalArgumentException.class, () ->
+                TradeInstructionFeedProtocol.verify(INSTRUCTION, null, "   ", TS));
+        TradeInstructionFeedProtocol.Verification v =
+                TradeInstructionFeedProtocol.verify(INSTRUCTION, "", HASH_A, TS);
+        assertTrue(v.accepted(), "KV twin '' for missing is first-write, not VIOLATION");
+        assertFalse(TradeInstructionFeedProtocol.requiresHalt(v));
+        // P2-187/188 asymmetric nulls: halt-decision fails closed, event fails loud.
+        assertTrue(TradeInstructionFeedProtocol.requiresHalt(null),
+                "unknown verification must halt live-money flow");
+        assertThrows(IllegalArgumentException.class, () ->
+                TradeInstructionFeedProtocol.enforcementEvent(null));
+    }
+
+    @Test
     @DisplayName("protocol is pure: the stored hash is never mutated by a check")
     void protocolNeverMutatesStoredHash() {
         String stored = HASH_A;

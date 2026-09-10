@@ -73,7 +73,7 @@ class TradeInstructionStateColumnsAgreementTest {
                 "25_trade_instruction_state.sql must declare exactly 4 columns (v1); got "
                         + cols.size() + " — if the DDL changed deliberately, update "
                         + "TradeInstructionStateColumns in the same change (cross-boundary pin habit)");
-        assertArrayEquals(TradeInstructionStateColumns.NAMES,
+        assertArrayEquals(TradeInstructionStateColumns.namesCopy(),
                 cols.stream().map(Column::name).toArray(String[]::new),
                 "column names/order must match the code layout in DDL order");
     }
@@ -123,7 +123,7 @@ class TradeInstructionStateColumnsAgreementTest {
     @Test
     @DisplayName("index constants are pairwise distinct, in range, and point at the pinned names")
     void indexConstantsMatchNames() {
-        String[] names = TradeInstructionStateColumns.NAMES;
+        String[] names = TradeInstructionStateColumns.namesCopy();
         int[] idx = {
             TradeInstructionStateColumns.INSTRUCTION_ID,
             TradeInstructionStateColumns.CANONICAL_HASH,
@@ -150,7 +150,19 @@ class TradeInstructionStateColumnsAgreementTest {
                         TradeInstructionStateColumns.ROW_TYPE_INFO;
         assertEquals(TradeInstructionStateColumns.FIELD_COUNT, info.toRowSize(),
                 "ROW_TYPE_INFO must declare one field per DDL column");
-        assertArrayEquals(TradeInstructionStateColumns.NAMES, info.toRowFieldNames(),
+        assertArrayEquals(TradeInstructionStateColumns.namesCopy(), info.toRowFieldNames(),
                 "ROW_TYPE_INFO field names must follow the pinned DDL order");
+    }
+
+    @Test
+    @DisplayName("stream types are non-nullable, mirroring the all-NOT-NULL DDL (P2-190)")
+    void rowTypeInfoIsNonNullable() {
+        org.apache.flink.table.runtime.typeutils.InternalTypeInfo<RowData> info =
+                (org.apache.flink.table.runtime.typeutils.InternalTypeInfo<RowData>)
+                        TradeInstructionStateColumns.ROW_TYPE_INFO;
+        for (int i = 0; i < TradeInstructionStateColumns.FIELD_COUNT; i++) {
+            assertFalse(info.toRowFieldTypes()[i].isNullable(),
+                    "column " + i + " must be non-nullable in the stream type");
+        }
     }
 }

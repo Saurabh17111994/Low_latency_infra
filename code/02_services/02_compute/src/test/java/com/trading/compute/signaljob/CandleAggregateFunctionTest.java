@@ -118,6 +118,57 @@ class CandleAggregateFunctionTest {
         assertEquals(9_000_000L, merged.lastIngestTs); // newer partial wins
     }
 
+    @Test
+    void nullFingerprintExchangeSymbolAreSkippedNotCrashing() {
+        CandleAccumulator acc = agg.createAccumulator();
+        RowData nullFp = TestRawRows.withFingerprint(trade(T0 + 1000, "fp-a", 100, 1), null);
+        agg.add(nullFp, acc);
+        assertEquals(true, acc.isEmpty());
+        RowData nullEx = trade(T0 + 1000, "fp-a", 100, 1);
+        ((org.apache.flink.table.data.GenericRowData) nullEx).setField(RawTableColumns.EXCHANGE, null);
+        agg.add(nullEx, acc);
+        assertEquals(true, acc.isEmpty());
+        RowData nullSym = trade(T0 + 1000, "fp-a", 100, 1);
+        ((org.apache.flink.table.data.GenericRowData) nullSym).setField(RawTableColumns.SYMBOL, null);
+        agg.add(nullSym, acc);
+        assertEquals(true, acc.isEmpty());
+    }
+
+    @Test
+    void nullTickTypeIsNonTradeNotNpe() {
+        CandleAccumulator acc = agg.createAccumulator();
+        RowData nullTick = trade(T0 + 1000, "fp-a", 100, 5);
+        ((org.apache.flink.table.data.GenericRowData) nullTick).setField(RawTableColumns.TICK_TYPE, null);
+        agg.add(nullTick, acc);
+        assertEquals(100, acc.openPaise); // OHLC still ingested
+        assertEquals(0, acc.volume); // null tick_type never counts volume
+        assertEquals(0, acc.tickCount);
+    }
+
+    @Test
+    void mergeWithEmptyPartialKeepsValidSide() {
+        CandleAccumulator a = agg.createAccumulator();
+        agg.add(trade(T0 + 1000, "fp-a", 100, 1), a);
+        agg.add(trade(T0 + 5000, "fp-b", 105, 2), a);
+
+        CandleAccumulator empty = agg.createAccumulator();
+        CandleAccumulator mergedA = agg.merge(a, empty);
+        assertEquals(100, mergedA.openPaise);
+        assertEquals(105, mergedA.highPaise);
+        assertEquals(100, mergedA.lowPaise);
+        assertEquals(105, mergedA.closePaise);
+
+        CandleAccumulator emptyFirst = agg.createAccumulator();
+        CandleAccumulator b = agg.createAccumulator();
+        agg.add(trade(T0 + 3000, "fp-c", 103, 3), b);
+        CandleAccumulator mergedB = agg.merge(emptyFirst, b);
+        assertEquals(103, mergedB.openPaise);
+        assertEquals(103, mergedB.highPaise);
+        assertEquals(103, mergedB.lowPaise);
+        assertEquals(103, mergedB.closePaise);
+        assertEquals(3, mergedB.volume);
+    }
+
     private static RowData trade(long eventTime, String fp, long price, long qty) {
         return TestRawRows.row(2885L, eventTime, fp, "TRADE", price, qty);
     }

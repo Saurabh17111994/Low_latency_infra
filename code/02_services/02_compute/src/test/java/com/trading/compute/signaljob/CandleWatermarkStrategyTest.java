@@ -42,6 +42,29 @@ class CandleWatermarkStrategyTest {
                 () -> RawTableColumns.validateSchemaContract(20, List.of("event_time")));
     }
 
+    @Test
+    void poisonTimestampsNeverAdvanceWatermark() {
+        long ceiling = Long.MAX_VALUE - 15_000L - 5_000L - 1;
+        WatermarkGenerator<RowData> generator =
+                CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L, ceiling);
+        RecordingOutput output = new RecordingOutput();
+
+        generator.onEvent(null, 10_000L, output);
+        generator.onEvent(null, Long.MAX_VALUE - 1, output); // poison: ignored
+        generator.onEvent(null, -5L, output); // poison: ignored
+        generator.onEvent(null, 0L, output); // poison: ignored
+        generator.onEvent(null, 10_002L, output);
+        generator.onPeriodicEmit(output);
+
+        assertEquals(List.of(4_999L, 5_001L), output.timestamps);
+    }
+
+    @Test
+    void negativeOutOfOrderFailsFast() {
+        assertThrows(IllegalArgumentException.class,
+                () -> CandleWatermarkStrategy.boundedOutOfOrderGenerator(-5L));
+    }
+
     private static final class RecordingOutput implements WatermarkOutput {
         private final List<Long> timestamps = new ArrayList<>();
 

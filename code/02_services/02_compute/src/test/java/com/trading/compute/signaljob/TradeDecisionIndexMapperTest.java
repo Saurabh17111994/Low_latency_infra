@@ -2,6 +2,7 @@ package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.apache.flink.table.data.RowData;
@@ -89,5 +90,37 @@ class TradeDecisionIndexMapperTest {
         assertEquals(d.tradeContextId(), back.tradeContextId());
         assertEquals(d.candidateId(), back.candidateId());
         assertEquals(d.createdTs(), back.createdTs());
+    }
+
+    @Test
+    @DisplayName("null in a NOT NULL column fails with the column name (P2-064)")
+    void nullNotNullColumnNamesItself() {
+        TradeDecision d = TradeDecisionBuilderTest.sampleDecision();
+        org.apache.flink.table.data.GenericRowData log =
+                (org.apache.flink.table.data.GenericRowData) TradeDecisionBuilder.build(d);
+        log.setField(TradeDecisionsTableColumns.SYMBOL, null);
+        IllegalArgumentException e = assertThrows(IllegalArgumentException.class,
+                () -> mapper.map(log));
+        assertTrue(e.getMessage().contains("symbol"),
+                "must name the corrupt column, got: " + e.getMessage());
+    }
+
+    @Test
+    @DisplayName("wrong arity and tampered instruction_id fail loud (P2-184)")
+    void arityAndIdDriftFailLoud() {
+        TradeDecision d = TradeDecisionBuilderTest.sampleDecision();
+        org.apache.flink.table.data.GenericRowData log =
+                (org.apache.flink.table.data.GenericRowData) TradeDecisionBuilder.build(d);
+        org.apache.flink.table.data.GenericRowData shortRow =
+                new org.apache.flink.table.data.GenericRowData(3);
+        shortRow.setField(0, log.getString(0));
+        shortRow.setField(1, log.getString(1));
+        shortRow.setField(2, log.getString(2));
+        assertThrows(IllegalArgumentException.class, () -> mapper.map(shortRow));
+        org.apache.flink.table.data.GenericRowData tampered =
+                (org.apache.flink.table.data.GenericRowData) TradeDecisionBuilder.build(d);
+        tampered.setField(TradeDecisionsTableColumns.INSTRUCTION_ID,
+                org.apache.flink.table.data.StringData.fromString("ins-v1-tampered"));
+        assertThrows(IllegalStateException.class, () -> mapper.map(tampered));
     }
 }

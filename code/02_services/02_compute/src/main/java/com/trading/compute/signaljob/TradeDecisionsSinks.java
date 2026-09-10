@@ -1,6 +1,7 @@
 package com.trading.compute.signaljob;
 
 import java.time.Duration;
+import java.util.Objects;
 import org.apache.flink.api.common.functions.OpenContext;
 import org.apache.flink.api.common.state.StateTtlConfig;
 import org.apache.flink.api.common.state.ValueState;
@@ -65,6 +66,10 @@ public final class TradeDecisionsSinks {
      * is consumed twice (fan-out).
      */
     public static void attach(DataStream<RowData> decisions, SignalJobConfig config) {
+        // P2-242: wiring mistakes must fail at graph-build, not as an opaque
+        // NPE inside the builder chain (mirrors MultiTimeframeSinks).
+        Objects.requireNonNull(decisions, "decisions");
+        Objects.requireNonNull(config, "config");
         // (a) immutable instruction LOG — append-only
         decisions
                 .sinkTo(FlussSink.<RowData>builder()
@@ -74,13 +79,21 @@ public final class TradeDecisionsSinks {
                                 .setSerializationSchema(new RowDataSerializationSchema(true, true))
                                 .setOption("client.request-timeout",
                                         config.sinkWriteStallTimeoutMs() + "ms")
-                                .setOption("client.writer.retries", "2")
+                                // P2-185: governed retry budget — same knob as
+                                // MultiTimeframeSinks, LOG and index stay consistent.
+                                .setOption("client.writer.retries",
+                                        String.valueOf(config.writerRetries()))
                                 .build())
                 .name("trade-decisions-sink")
                 .uid("trade-decisions-sink");
 
         // (b) instruction-hash KV index — keyed first-write-wins filter, then
         // upsert with canonical hash recomputed (P4-076)
+        //
+        // NOTE (P2-065): LOG + index are two independent at-least-once sinks
+        // with no atomic commit. LOG duplicates on timeout-retry/restore-replay
+        // are expected; downstream must dedup by instruction_id and tolerate
+        // LOG-without-index windows (SIG-INT-002). Do not assume 1:1 visibility.
         decisions
                 .keyBy(InstructionStateFirstWriteWinsFunction.keySelector(), Types.STRING)
                 .process(new InstructionStateFirstWriteWinsFunction())
@@ -97,7 +110,11 @@ public final class TradeDecisionsSinks {
                                 .setSerializationSchema(new RowDataSerializationSchema(false, false))
                                 .setOption("client.request-timeout",
                                         config.sinkWriteStallTimeoutMs() + "ms")
-                                .setOption("client.writer.retries", "2")
+                                // P2-186: same governed retry budget as the LOG
+                                // sink (P2-185) — consistent timeout+retry vs
+                                // checkpoint-timeout/restart behavior.
+                                .setOption("client.writer.retries",
+                                        String.valueOf(config.writerRetries()))
                                 .build())
                 .name("trade-instruction-state-sink")
                 .uid("trade-instruction-state-sink");

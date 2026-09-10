@@ -61,6 +61,33 @@ class ExecutionIntentProducerSamplerTest {
     }
 
     @Test
+    void latencyMathCapsInsaneValues() {
+        // P2-136: s-vs-ms mixup (~1.7T ms) and ancient ts drop, never pollute.
+        assertEquals(-1, ExecutionIntentProducerFunction.latencyOrNegative(
+                1_752_000_000_000L, 1_000_000_000L));
+        assertEquals(-1, ExecutionIntentProducerFunction.latencyOrNegative(
+                1_752_000_000_000L, 1_752_000_000_000L - 25L * 60 * 60 * 1_000));
+        assertEquals(60_000, ExecutionIntentProducerFunction.latencyOrNegative(
+                1_752_000_000_000L, 1_752_000_000_000L - 60_000));
+    }
+
+    @Test
+    void poisonRowsRejectWithoutFailing() throws Exception {
+        // P2-034: NPE/ClassCast/arity poison becomes a counted drop, not a
+        // task failover — output stays empty, harness stays alive.
+        GenericRowData nullToken = candidate(System.currentTimeMillis() - 50,
+                System.currentTimeMillis() - 10);
+        nullToken.setField(SignalCandidatesTableColumns.INSTRUMENT_TOKEN, null);
+        harness.processElement(nullToken, 0);
+        harness.processElement(new GenericRowData(3), 0);
+        assertEquals(0, harness.getOutput().size());
+        // …and the operator still serves valid rows afterwards.
+        harness.processElement(
+                candidate(System.currentTimeMillis() - 50, System.currentTimeMillis() - 10), 0);
+        assertEquals(1, harness.getOutput().size());
+    }
+
+    @Test
     void samplerNeverDropsValidCandidates() throws Exception {
         long now = System.currentTimeMillis();
         // 1001 rows cross two sample points (0 and 1000); the null-eval row

@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.apache.flink.api.common.functions.OpenContext;
+import org.apache.flink.streaming.api.TimeDomain;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.table.data.GenericRowData;
@@ -120,6 +121,9 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         long nextLiveEventTimer = Long.MIN_VALUE;
         long nextLiveProcTimer = Long.MIN_VALUE;
         long sessionCloseTimer = Long.MIN_VALUE;
+        /** P2-144: last watermark the per-tick emitted scan ran at — skip the
+         * 6×64 scan when the watermark hasn't moved (steady-state O(1)). */
+        long lastEvictedWatermark = Long.MIN_VALUE;
 
         Slot() {
             for (int i = 0; i < windowStarts.length; i++) {
@@ -167,11 +171,15 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     private Slot slotFor(long key) {
         Slot s = slots.get(key);
         if (s == null) {
+            // P2-037: check-before-insert — an oversize slot must never enter
+            // the map, or an amnesia restart re-triggers the same oversize
+            // failure as a restart loop. Loud drop, no throw from data path.
+            if (slots.size() >= GLOBAL_SLOT_CAP) {
+                if (lateDroppedCounter != null) lateDroppedCounter.inc();
+                return null;
+            }
             s = new Slot();
             slots.put(key, s);
-            Preconditions.checkState(slots.size() <= GLOBAL_SLOT_CAP,
-                    "heap multi-TF slots %s exceeded cap %s — refusing silent eviction",
-                    slots.size(), GLOBAL_SLOT_CAP);
         }
         return s;
     }
@@ -186,29 +194,6 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             case FIFTEEN_M: slot.state.formingFifteenM = acc; break;
             default: throw new IllegalArgumentException("unknown tf " + tf);
         }
-    }
-
-    private static CandleAccumulator copyAccumulator(CandleAccumulator src) {
-        CandleAccumulator dst = new CandleAccumulator();
-        dst.exchange = src.exchange;
-        dst.symbol = src.symbol;
-        dst.openPaise = src.openPaise;
-        dst.highPaise = src.highPaise;
-        dst.lowPaise = src.lowPaise;
-        dst.closePaise = src.closePaise;
-        dst.volume = src.volume;
-        dst.tickCount = src.tickCount;
-        dst.firstEventTime = src.firstEventTime;
-        dst.firstFingerprint = src.firstFingerprint;
-        dst.lastEventTime = src.lastEventTime;
-        dst.lastFingerprint = src.lastFingerprint;
-        dst.lastIngestTs = src.lastIngestTs;
-        return dst;
-    }
-
-    private static ClosedCandle copyClosed(ClosedCandle src) {
-        return new ClosedCandle(src.windowStart, src.windowEnd, src.openPaise, src.highPaise,
-                src.lowPaise, src.closePaise, src.volume, src.tickCount, src.lastEventTime, src.lastFingerprint);
     }
 
     private static GenericRowData buildClosedRow(long token, Timeframe tf, long windowStart, long windowEnd,
@@ -260,10 +245,20 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         long eventTime = tick.getLong(RawTableColumns.EVENT_TIME);
         long key = ctx.getCurrentKey();
         Slot slot = slotFor(key);
+        if (slot == null) {
+            // P2-037: slot cap exceeded — counted loud drop, side-output for
+            // debuggability, never a throw from the data path.
+            if (lateDroppedCounter != null) lateDroppedCounter.inc();
+            ctx.output(LATE_DROPPED_TAG, tick);
+            return;
+        }
 
-        // Evict old emitted entries beyond lateness if watermark available (structural bound G-CHAIN-1)
+        // P2-144: lazy eviction — scan the 6×64 emitted maps only when the
+        // watermark advanced since the last tick (steady-state O(1) per tick
+        // at 60k/s: one long compare instead of up to 384 map entries).
         long watermark = ctx.timerService().currentWatermark();
-        if (watermark != Long.MIN_VALUE) {
+        if (watermark != Long.MIN_VALUE && watermark != slot.lastEvictedWatermark) {
+            slot.lastEvictedWatermark = watermark;
             long allowedLatenessMs = 5_000L; // matches SignalJobConfig.ALLOWED_LATENESS_MS default
             for (Timeframe tf : Timeframe.values()) {
                 int ord = tf.ordinal();
@@ -309,12 +304,11 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         boolean isTrade = "TRADE".equals(tickTypeStr) && qty > 0;
 
         if (!isTrade) {
-            // Quote-only / zero-qty TRADE: update monotonic gate and quote snapshot side, but never OHLC
-            // Quote snapshot in state is minimal (lastBid/lastAsk fields not populated from raw v2 ticks — park anyway)
-            // Update lastEventTime/fingerprint so monotonic gate advances for quote ticks as well? Spec §E.2.2 says
-            // quote-only still emits signal context, but task bullet 8 says SIGNAL per TRADE tick only. For minimal
-            // smoke we advance the gate for all in-session ticks to keep event-time ordering consistent.
-            slot.state.lastEventTime = eventTime;
+            // Quote-only / zero-qty TRADE: quote snapshot side, but never OHLC.
+            // P2-036: quotes must NOT advance the monotonic gate — they carry
+            // no window movement, and advancing lastEventTime here drops a
+            // slightly delayed TRADE that the per-TF lateness handling below
+            // was designed to fold. Quote ticks still emit no signal.
             if (!tick.isNullAt(RawTableColumns.EVENT_FINGERPRINT)) {
                 slot.state.lastFingerprint = tick.getString(RawTableColumns.EVENT_FINGERPRINT).toString();
             }
@@ -331,15 +325,33 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                 long prevOpen = TimeframeBucket.sessionOpenMs(slot.state.lastEventTime);
                 long curOpen = TimeframeBucket.sessionOpenMs(eventTime);
                 if (prevOpen != curOpen) {
-                    // Overnight / session-boundary gap — expected, not a discontinuity (§D example 4)
-                    // Drop stale forming for all TFs without marking discontinuity; keep pending to emit before drop? For overnight, pending should have been emitted at session close, so clear is safe but retain for safety if not.
+                    // Overnight / session-boundary gap — expected, not a discontinuity (§D example 4).
+                    // P2-141: expire prior-session pendings BEFORE resetting forming —
+                    // if session-close was missed (watermark stalled) stale pendings
+                    // would otherwise emit into the new day. Emit what's complete,
+                    // count-drop what's not (never silently carry across days).
+                    // P2-152: gate + marker advance atomically via resetForming.
                     for (Timeframe tf : Timeframe.values()) {
                         int ord = tf.ordinal();
+                        var pit = slot.pending[ord].entrySet().iterator();
+                        while (pit.hasNext()) {
+                            var e = pit.next();
+                            if (e.getKey() < curOpen) {
+                                CandleAccumulator pacc = e.getValue();
+                                pit.remove();
+                                if (pacc != null && pacc.firstEventTime != Long.MAX_VALUE
+                                        && !slot.emitted[ord].containsKey(e.getKey())) {
+                                    slot.emitted[ord].put(e.getKey(), Boolean.TRUE);
+                                    if (emittedCounter != null) emittedCounter.inc();
+                                } else if (lateDroppedCounter != null) {
+                                    lateDroppedCounter.inc();
+                                }
+                            }
+                        }
                         slot.windowStarts[ord] = Long.MIN_VALUE;
                         setForming(tf, new CandleAccumulator(), slot);
-                        // Do not blindly clear pending that might contain last session's buckets still awaiting timer; let timers drain
                     }
-                    slot.state.discontinuityPending = false;
+                    slot.state.resetForming(eventTime, false);
                     // Do NOT set isGap for overnight; treat as fresh start next session
                 } else {
                     // Same session gap > threshold → discontinuity
@@ -375,6 +387,12 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         if (!sessionBypass) {
             long sessClose = TimeframeBucket.sessionCloseMs(eventTime);
             if (slot.sessionCloseTimer == Long.MIN_VALUE || slot.sessionCloseTimer != sessClose) {
+                // P2-142: delete the old-day 15:30 timer before rescheduling —
+                // otherwise it fires under the new value and closes/duplicates
+                // the wrong window.
+                if (slot.sessionCloseTimer != Long.MIN_VALUE && slot.sessionCloseTimer != sessClose) {
+                    ctx.timerService().deleteEventTimeTimer(slot.sessionCloseTimer);
+                }
                 // Only schedule if this sessClose is in the future relative to eventTime (it will be, since in-session eventTime < sessClose)
                 ctx.timerService().registerEventTimeTimer(sessClose);
                 slot.sessionCloseTimer = sessClose;
@@ -429,9 +447,14 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                     }
                     CandleAccumulator older = new CandleAccumulator();
                     aggregate.add(tick, older);
-                    Preconditions.checkState(slot.pending[ord].size() < MAX_PENDING_CLOSES,
-                            "heap multi-TF pending closes %s exceeded cap %s for tf %s key %s — watermark stuck or wild reorder",
-                            slot.pending[ord].size(), MAX_PENDING_CLOSES, tf, key);
+                    if (slot.pending[ord].size() >= MAX_PENDING_CLOSES) {
+                        // P2-038: watermark stuck or wild reorder — refuse the
+                        // 65th window instead of forgetting dedup (never-re-emit
+                        // holds). Counted loud drop, no throw from data path.
+                        if (lateDroppedCounter != null) lateDroppedCounter.inc();
+                        ctx.output(LATE_DROPPED_TAG, tick);
+                        return;
+                    }
                     slot.pending[ord].put(newStart, older);
                     ctx.timerService().registerEventTimeTimer(windowEnd);
                     anyAccepted = true;
@@ -441,9 +464,12 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                     // Still open older window: hold as pending
                     CandleAccumulator older = new CandleAccumulator();
                     aggregate.add(tick, older);
-                    Preconditions.checkState(slot.pending[ord].size() < MAX_PENDING_CLOSES,
-                            "heap multi-TF pending closes %s exceeded cap %s for tf %s key %s — watermark stuck or wild reorder",
-                            slot.pending[ord].size(), MAX_PENDING_CLOSES, tf, key);
+                    if (slot.pending[ord].size() >= MAX_PENDING_CLOSES) {
+                        // P2-038: same block-new discipline as above.
+                        if (lateDroppedCounter != null) lateDroppedCounter.inc();
+                        ctx.output(LATE_DROPPED_TAG, tick);
+                        return;
+                    }
                     slot.pending[ord].put(newStart, older);
                     ctx.timerService().registerEventTimeTimer(windowEnd);
                     anyAccepted = true;
@@ -451,9 +477,12 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                 } else if (watermark2 == Long.MIN_VALUE) {
                     CandleAccumulator older = new CandleAccumulator();
                     aggregate.add(tick, older);
-                    Preconditions.checkState(slot.pending[ord].size() < MAX_PENDING_CLOSES,
-                            "heap multi-TF pending closes %s exceeded cap %s for tf %s key %s — watermark stuck or wild reorder",
-                            slot.pending[ord].size(), MAX_PENDING_CLOSES, tf, key);
+                    if (slot.pending[ord].size() >= MAX_PENDING_CLOSES) {
+                        // P2-038: same block-new discipline as above.
+                        if (lateDroppedCounter != null) lateDroppedCounter.inc();
+                        ctx.output(LATE_DROPPED_TAG, tick);
+                        return;
+                    }
                     slot.pending[ord].put(newStart, older);
                     ctx.timerService().registerEventTimeTimer(windowEnd);
                     anyAccepted = true;
@@ -472,9 +501,13 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                     if (newStart != currStart) {
                         // Previous bucket complete before gap — preserve it into pending
                         if (acc.firstEventTime != Long.MAX_VALUE) {
-                            Preconditions.checkState(slot.pending[ord].size() < MAX_PENDING_CLOSES,
-                                    "heap multi-TF pending closes %s exceeded cap %s for tf %s key %s — watermark stuck or wild reorder",
-                                    slot.pending[ord].size(), MAX_PENDING_CLOSES, tf, key);
+                            if (slot.pending[ord].size() >= MAX_PENDING_CLOSES) {
+                                // P2-038: block-new, same discipline — counted
+                                // loud drop instead of a data-path throw.
+                                if (lateDroppedCounter != null) lateDroppedCounter.inc();
+                                ctx.output(LATE_DROPPED_TAG, tick);
+                                return;
+                            }
                             slot.pending[ord].put(currStart, acc);
                         }
                         CandleAccumulator fresh = new CandleAccumulator();
@@ -514,10 +547,12 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                 // Normal bucket roll (no gap) — pend current forming until its event-time close
                 // Only pend if current forming has data
                 if (acc.firstEventTime != Long.MAX_VALUE) {
-                    // Check pending cap
-                    Preconditions.checkState(slot.pending[ord].size() < MAX_PENDING_CLOSES,
-                            "heap multi-TF pending closes %s exceeded cap %s for tf %s key %s — watermark stuck or wild reorder",
-                            slot.pending[ord].size(), MAX_PENDING_CLOSES, tf, key);
+                    // P2-038: block-new — counted loud drop, no data-path throw.
+                    if (slot.pending[ord].size() >= MAX_PENDING_CLOSES) {
+                        if (lateDroppedCounter != null) lateDroppedCounter.inc();
+                        ctx.output(LATE_DROPPED_TAG, tick);
+                        return;
+                    }
                     slot.pending[ord].put(currStart, acc);
                 }
                 // Fresh accumulator for new bucket
@@ -533,17 +568,9 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             anyAccepted = true;
         }
 
-        // If no TF accepted this tick (fully late duplicate for all TFs), count as late and do not emit SIGNAL
-        // (mirrors Heap's emitted duplicate no-op). Monotonic gate already advanced earlier?
-        // We still advance lastEventTime for fully late? No — fully late tick should not advance monotonic gate,
-        // otherwise it would block slightly later in-order tick. Heap's emitted path returns early before updating lastEventTime.
-        // Our per-TF late path currently would still reach here and advance lastEventTime, which is wrong.
-        // Guard: if !anyAccepted, treat as late drop and return without emitting SIGNAL (and without advancing lastEventTime beyond? keep as is for now but do not emit signal).
-        if (!anyAccepted && slot.state.lastEventTime != Long.MIN_VALUE) {
-            // Check if at least one TF had fresh/roll path that would have set anyAccepted; if not, this tick is fully late for all TFs.
-            // We already handled global monotonic late above; per-TF fully late should not emit signal.
-            // Return early without signal and without advancing lastEventTime? Keep advancing to avoid stall? For now keep advancing but skip signal.
-            // Actually to mirror Heap, we should not advance lastEventTime for fully late; so revert? We'll keep lastEventTime unchanged for fully late.
+        // P2-143: a tick dropped on EVERY TF must never advance the gate or
+        // emit an empty SIGNAL — bare !anyAccepted return, fresh slot or not.
+        if (!anyAccepted) {
             if (lateDroppedCounter != null) lateDroppedCounter.inc();
             ctx.output(LATE_DROPPED_TAG, tick);
             return;
@@ -563,34 +590,13 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             String exchange = tick.isNullAt(RawTableColumns.EXCHANGE) ? null : tick.getString(RawTableColumns.EXCHANGE).toString();
             String symbol = tick.isNullAt(RawTableColumns.SYMBOL) ? null : tick.getString(RawTableColumns.SYMBOL).toString();
             for (Timeframe tf : Timeframe.values()) {
-                CandleAccumulator formingCopy = copyAccumulator(slot.state.forming(tf));
-                List<ClosedCandle> closedView = slot.state.closed(tf).snapshotNewestFirst();
-                List<ClosedCandle> closedCopy = new ArrayList<>(closedView.size());
-                for (ClosedCandle c : closedView) {
-                    closedCopy.add(copyClosed(c));
-                }
-                frames.add(new MultiTimeframeSignalContext.TimeframeContext(tf, formingCopy, closedCopy));
+                // P2-044/045/046: pass live refs — the single defensive copy
+                // lives inside the type (one copy per tick, not two).
+                frames.add(new MultiTimeframeSignalContext.TimeframeContext(
+                        tf, slot.state.forming(tf), slot.state.closed(tf).snapshotNewestFirst()));
             }
             MultiTimeframeSignalContext signalCtx = new MultiTimeframeSignalContext(key, exchange, symbol, eventTime, frames);
             ctx.output(SIGNAL_TAG, signalCtx);
-        }
-    }
-
-    private void emitLiveForSlot(Slot slot, long token, KeyedProcessFunction<Long, RowData, RowData>.Context ctx) throws Exception {
-        for (Timeframe tf : Timeframe.values()) {
-            int ord = tf.ordinal();
-            long ws = slot.windowStarts[ord];
-            if (ws == Long.MIN_VALUE) {
-                continue;
-            }
-            CandleAccumulator acc = slot.state.forming(tf);
-            if (acc.firstEventTime == Long.MAX_VALUE) {
-                continue; // no data yet in this forming window
-            }
-            long we = ws + tf.windowMs();
-            GenericRowData row = buildLiveRow(token, tf, ws, we, acc);
-            ctx.output(LIVE_TAG, row);
-            if (liveEmittedCounter != null) liveEmittedCounter.inc();
         }
     }
 
@@ -618,11 +624,24 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                 acc.lowPaise, acc.closePaise, acc.volume, acc.tickCount, acc.lastEventTime, acc.lastFingerprint);
         slot.state.closed(tf).add(cc);
         slot.emitted[tf.ordinal()].put(windowStart, Boolean.TRUE);
-        // Bound emitted map size (keep last 64 per TF to avoid unbounded growth)
-        if (slot.emitted[tf.ordinal()].size() > 64) {
-            var it = slot.emitted[tf.ordinal()].entrySet().iterator();
-            it.next();
-            it.remove();
+        // P2-038: bound the emitted map (keep last 64 per TF) by evicting the
+        // smallest windowStart that is safely expired — never blind FIFO by
+        // insertion order. Under a stuck watermark a still-needed key is NOT
+        // forgotten (never-re-emit holds); the block-new path in
+        // processElement refuses the 65th live window instead.
+        while (slot.emitted[tf.ordinal()].size() > 64) {
+            long watermark3 = ctx.timerService().currentWatermark();
+            Long minKey = null;
+            for (Long k : slot.emitted[tf.ordinal()].keySet()) {
+                if (minKey == null || k < minKey) minKey = k;
+            }
+            if (minKey == null) break;
+            if (watermark3 != Long.MIN_VALUE
+                    && minKey + tf.windowMs() + 5_000L < watermark3) {
+                slot.emitted[tf.ordinal()].remove(minKey);
+            } else {
+                break;
+            }
         }
         GenericRowData row = buildClosedRow(token, tf, windowStart, windowEnd, acc);
         out.collect(row);
@@ -638,9 +657,14 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             return;
         }
 
-        boolean isLiveEvent = timestamp == slot.nextLiveEventTimer;
-        boolean isLiveProc = timestamp == slot.nextLiveProcTimer;
-        boolean isSessionClose = timestamp == slot.sessionCloseTimer;
+        // P2-039: demultiplex on TimeDomain first, then timestamp — event-time
+        // boundary, event-time live, processing-time live and session-close
+        // share one namespace, and a live tick aligned with a boundary fired
+        // both (live emit before close) plus rescheduled both live timers.
+        TimeDomain domain = ctx.timeDomain();
+        boolean isLiveEvent = domain == TimeDomain.EVENT_TIME && timestamp == slot.nextLiveEventTimer;
+        boolean isLiveProc = domain == TimeDomain.PROCESSING_TIME && timestamp == slot.nextLiveProcTimer;
+        boolean isSessionClose = domain == TimeDomain.EVENT_TIME && timestamp == slot.sessionCloseTimer;
 
         // Session bypass (soak mode A): never run the session-close forced
         // roll — there is no session boundary to force (see the scheduling
@@ -681,13 +705,10 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                 if (slot.emitted[ord].containsKey(ws)) {
                     continue;
                 }
-                // Also check pending? Session close pending windows already have timers; the forming window's timer equals sessClose (since windowEnd == sessClose for last bucket), so normal path would fire too.
-                // But we force emit now even if windowEnd != sessClose for epoch windows with truncated tail — though alignment says they equal.
+                // P2-140: fixed span — ws+tfMs is the end; the aligned last
+                // bucket already has ws+tfMs == sessClose (no-op), misaligned
+                // buckets keep their span instead of a truncated short candle.
                 long we = ws + tf.windowMs();
-                // If we > sessClose (should not happen for in-session bucket), truncate
-                if (we > timestamp) {
-                    we = timestamp;
-                }
                 // Also clear any pending for this TF that belong to same session but not yet closed? We keep pending to be closed via normal timers, but session close should close them too.
                 // First drain pending that are still before sessClose
                 // Copy pending keys to avoid concurrent modification
@@ -696,12 +717,17 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                     CandleAccumulator pacc = slot.pending[ord].remove(pws);
                     if (pacc == null || pacc.firstEventTime == Long.MAX_VALUE) continue;
                     if (slot.emitted[ord].containsKey(pws)) continue;
+                    // P2-140: never persist a truncated span — full windowMs
+                    // end; aligned last bucket already has ws+tfMs == sessClose
+                    // so this is a no-op there, and misaligned buckets keep
+                    // their fixed span instead of a short candle.
                     long pwe = pws + tf.windowMs();
-                    if (pwe > timestamp) pwe = timestamp;
                     closeAndEmit(key, tf, pws, pwe, pacc, ctx, out, slot);
                 }
+                // P2-140: same fixed-span rule for the forming window — never
+                // min(ws+tfMs, sessClose). A truncated end would persist
+                // permanently (later boundary timer noops on the emitted hit).
                 long weForForming = ws + tf.windowMs();
-                if (weForForming > timestamp) weForForming = timestamp;
                 closeAndEmit(key, tf, ws, weForForming, acc, ctx, out, slot);
                 slot.windowStarts[ord] = Long.MIN_VALUE;
                 setForming(tf, new CandleAccumulator(), slot);

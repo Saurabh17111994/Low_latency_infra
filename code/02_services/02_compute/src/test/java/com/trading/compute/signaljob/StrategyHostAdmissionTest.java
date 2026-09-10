@@ -2,8 +2,10 @@ package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.HashSet;
 import java.util.Set;
 import org.apache.flink.api.common.serialization.SerializerConfigImpl;
 import org.apache.flink.streaming.api.operators.StreamFilter;
@@ -135,5 +137,53 @@ class StrategyHostAdmissionTest {
                 new StreamRecord<>(rowWithRule(StubSmokeStrategy.RULE_ID), 1L));
         assertTrue(harness.getOutput().isEmpty(),
                 "stub rows must never reach the KV current-state");
+    }
+
+    @Test
+    @DisplayName("null token on a dropped row logs null instead of NPE (P2-025)")
+    void nullTokenDropDoesNotNpe() throws Exception {
+        CanonicalSignalFilterFunction filter = new CanonicalSignalFilterFunction();
+        openWith(filter);
+        GenericRowData row = rowWithRule("unlisted-v1");
+        row.setField(SignalCandidatesTableColumns.INSTRUMENT_TOKEN, null);
+        harness.processElement(new StreamRecord<>(row, 1L));
+        assertTrue(harness.getOutput().isEmpty());
+        assertEquals(1L, filter.filteredCountForTest());
+    }
+
+    @Test
+    @DisplayName("direct filter() without open() drops without NPE (P2-129)")
+    void filterWithoutOpenDoesNotNpe() {
+        CanonicalSignalFilterFunction filter = new CanonicalSignalFilterFunction();
+        assertFalse(filter.filter(rowWithRule("unlisted-v1")));
+    }
+
+    @Test
+    @DisplayName("null/blank ctor set and blank ruleId fail fast or closed (P2-026/221)")
+    void nullBlankAdmissionHardening() {
+        assertThrows(NullPointerException.class,
+                () -> new CanonicalSignalFilterFunction(null));
+        Set<String> withBlank = new HashSet<>(Set.of(CUSTOM_RULE));
+        withBlank.add("  ");
+        assertThrows(IllegalArgumentException.class,
+                () -> new CanonicalSignalFilterFunction(withBlank));
+        assertFalse(CanonicalSignalPolicy.isCanonicalIn(
+                SignalCandidatesTableColumns.SCHEMA_VERSION_V2,
+                SignalCandidatesTableColumns.CANONICAL_STRATEGY_ID,
+                SignalCandidatesTableColumns.CANONICAL_STRATEGY_VERSION,
+                "  ",
+                SignalCandidatesTableColumns.SCHEMA_VERSION_V2,
+                SignalCandidatesTableColumns.CANONICAL_STRATEGY_ID,
+                SignalCandidatesTableColumns.CANONICAL_STRATEGY_VERSION,
+                Set.of("  ")));
+        assertFalse(CanonicalSignalPolicy.isCanonicalIn(
+                SignalCandidatesTableColumns.SCHEMA_VERSION_V2,
+                SignalCandidatesTableColumns.CANONICAL_STRATEGY_ID,
+                SignalCandidatesTableColumns.CANONICAL_STRATEGY_VERSION,
+                null,
+                SignalCandidatesTableColumns.SCHEMA_VERSION_V2,
+                SignalCandidatesTableColumns.CANONICAL_STRATEGY_ID,
+                SignalCandidatesTableColumns.CANONICAL_STRATEGY_VERSION,
+                new HashSet<>()));
     }
 }

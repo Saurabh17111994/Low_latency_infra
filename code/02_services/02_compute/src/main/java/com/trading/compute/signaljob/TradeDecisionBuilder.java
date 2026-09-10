@@ -42,13 +42,19 @@ public final class TradeDecisionBuilder {
     /** Version tag of the instruction_id encoding — bump on any encoding change. */
     static final String INSTRUCTION_ID_PREFIX = "ins-v1-";
 
-    /** Version tag of the executable-identity serialization. */
-    static final String IDENTITY_SERIALIZATION_VERSION = "tdi-v1";
+    /**
+     * Version tag of the executable-identity serialization (P2-183: v1 was
+     * unescaped pipe-joined; v2 is length-prefixed + escaped, unambiguous).
+     */
+    static final String IDENTITY_SERIALIZATION_VERSION = "tdi-v2";
 
-    /** Version tag of the canonical-content serialization. */
-    static final String CONTENT_SERIALIZATION_VERSION = "tdc-v1";
+    /**
+     * Version tag of the canonical-content serialization (P2-062: v1 omitted
+     * superseded_by; P2-183: v1 was unescaped — v2 fixes both together).
+     */
+    static final String CONTENT_SERIALIZATION_VERSION = "tdc-v2";
 
-    private static final String NULL_TOKEN = "null";
+    private static final String NULL_TOKEN = "\\0";
 
     private TradeDecisionBuilder() {}
 
@@ -136,55 +142,67 @@ public final class TradeDecisionBuilder {
      * Versioned executable-identity serialization — the ONLY input to
      * {@code instruction_id}. Fields: instrument, symbol, trade context, side,
      * quantity, price, order type, product type, strategy version (the exact
-     * REQ-SS-004 set). Provenance never enters the identity.
+     * REQ-SS-004 set, authoritative in {@link TradeDecision}). Provenance
+     * never enters the identity.
+     *
+     * <p>P2-183: every String field is length-prefixed + escaped
+     * ({@code len:escaped}), nulls encode as {@code \0} — a field containing
+     * {@code |} or a literal {@code "null"} can never collide with a field
+     * boundary or a null marker the way the v1 bare pipe-join could.
      */
     static String executableIdentity(TradeDecision d) {
         return IDENTITY_SERIALIZATION_VERSION + "|"
                 + d.instrumentToken() + "|"
-                + d.symbol() + "|"
-                + d.tradeContextId() + "|"
-                + d.side() + "|"
+                + field(d.symbol()) + "|"
+                + field(d.tradeContextId()) + "|"
+                + field(d.side()) + "|"
                 + d.quantity() + "|"
                 + token(d.limitPricePaise()) + "|"
-                + d.orderType() + "|"
-                + d.productType() + "|"
-                + d.strategyVersion();
+                + field(d.orderType()) + "|"
+                + field(d.productType()) + "|"
+                + field(d.strategyVersion());
     }
 
     /**
      * Versioned canonical-content serialization — the input to
      * {@link #canonicalHash}. Covers the complete execution request: the
      * executable identity plus provenance (candidate, evaluation, strategy,
-     * configuration, scope) and reservation evidence (reservation id/version).
+     * configuration, scope) and reservation evidence (reservation id/version)
+     * plus lifecycle linkage (P2-062: BOTH supersedes AND superseded_by —
+     * omitting either blinds the duplicate-vs-violation distinction).
      */
     private static String canonicalContent(TradeDecision d) {
         return CONTENT_SERIALIZATION_VERSION + "|"
                 + d.instrumentToken() + "|"
-                + d.symbol() + "|"
-                + d.tradeContextId() + "|"
-                + d.side() + "|"
+                + field(d.symbol()) + "|"
+                + field(d.tradeContextId()) + "|"
+                + field(d.side()) + "|"
                 + d.quantity() + "|"
                 + token(d.limitPricePaise()) + "|"
-                + d.orderType() + "|"
-                + d.productType() + "|"
-                + d.strategyVersion() + "|"
-                + d.candidateId() + "|"
-                + d.evaluationId() + "|"
-                + d.exchange() + "|"
-                + d.strategyId() + "|"
-                + d.configurationVersion() + "|"
+                + field(d.orderType()) + "|"
+                + field(d.productType()) + "|"
+                + field(d.strategyVersion()) + "|"
+                + field(d.candidateId()) + "|"
+                + field(d.evaluationId()) + "|"
+                + field(d.exchange()) + "|"
+                + field(d.strategyId()) + "|"
+                + field(d.configurationVersion()) + "|"
                 + token(d.compositeScore()) + "|"
-                + d.portfolioId() + "|"
-                + d.accountScopeId() + "|"
-                + d.reservationId() + "|"
-                + d.reservationVersion() + "|"
+                + field(d.portfolioId()) + "|"
+                + field(d.accountScopeId()) + "|"
+                + field(d.reservationId()) + "|"
+                + field(d.reservationVersion()) + "|"
                 + d.createdTs() + "|"
                 + token(d.expiryTs()) + "|"
-                + token(d.supersedesInstructionId());
+                + field(d.supersedesInstructionId()) + "|"
+                + field(d.supersededByInstructionId());
     }
 
     /** Validation that fails closed before ANY row is produced. */
     private static void requireValid(TradeDecision d) {
+        if (d == null) {
+            throw new IllegalArgumentException("TradeDecision must not be null");
+        }
         requireNonBlank(d.candidateId(), "candidate_id");
         requireNonBlank(d.tradeContextId(), "trade_context_id");
         requireNonBlank(d.exchange(), "exchange");
@@ -243,6 +261,23 @@ public final class TradeDecisionBuilder {
             throw new IllegalArgumentException("expiry_ts must be null or positive, got "
                     + d.expiryTs());
         }
+        // P2-063 remainder: an already-expired instruction must never reach
+        // the immutable LOG (unretractable once appended).
+        if (d.expiryTs() != null && d.expiryTs() <= d.createdTs()) {
+            throw new IllegalArgumentException("expiry_ts must be > created_ts, got "
+                    + d.expiryTs() + " <= " + d.createdTs());
+        }
+        if (d.supersedesInstructionId() != null && d.supersedesInstructionId().isBlank()) {
+            throw new IllegalArgumentException(
+                    "supersedes_instruction_id must be null or non-blank");
+        }
+        // P2-182 strict: non-null superseded_by at build forges forward
+        // lifecycle state through the append-only LOG — fail closed.
+        if (d.supersededByInstructionId() != null) {
+            throw new IllegalArgumentException(
+                    "superseded_by_instruction_id must be null at emission (append-only LOG), got '"
+                            + d.supersededByInstructionId() + "'");
+        }
     }
 
     private static void requireNonBlank(String value, String column) {
@@ -260,8 +295,12 @@ public final class TradeDecisionBuilder {
         return value == null ? NULL_TOKEN : String.valueOf(value);
     }
 
-    private static String token(String value) {
-        return value == null ? NULL_TOKEN : value;
+    /** P2-183: length-prefixed + escaped String field — unambiguous under '|'. */
+    private static String field(String value) {
+        if (value == null) {
+            return NULL_TOKEN;
+        }
+        return value.length() + ":" + value.replace("\\", "\\\\").replace("|", "\\|");
     }
 
     private static String sha256Hex(String content) {

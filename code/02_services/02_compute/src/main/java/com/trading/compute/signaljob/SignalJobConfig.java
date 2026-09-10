@@ -118,8 +118,12 @@ public record SignalJobConfig(
 
     public static SignalJobConfig fromEnv() {
         // G1 (2026-08-29): every declared config key must actually be read.
+        // P2-162: read first, THEN assert — the guard scans the source tree
+        // for the key literals, so asserting before the read it verifies
+        // checks stale state (or trivially passes on first start).
+        SignalJobConfig cfg = from(System.getenv());
         com.trading.common.config.ConfigGuard.assertAllKeysRead();
-        return from(System.getenv());
+        return cfg;
     }
 
     /** Builds a validated config from an environment map (production: {@code System.getenv()}). */
@@ -166,6 +170,11 @@ public record SignalJobConfig(
                     + "non-empty STRATEGIES list (comma-separated rule ids, known: "
                     + Strategies.knownIds() + ")");
         }
+        // P2-166/167: single-resolve the S3 triple once — endpoint + both
+        // secrets from the same read, null unless an s3:// URI is actually
+        // in use. One read kills the transient-IO inconsistency window and
+        // the stray-creds-on-local triple by construction.
+        S3Credentials s3 = s3Credentials(env);
         return new SignalJobConfig(
                 bootstrapServers(env),
                 env.getOrDefault("FLUSS_DATABASE", "default"),
@@ -186,8 +195,8 @@ public record SignalJobConfig(
                 // (measured 2026-08-30: 5s default produced p95=5.7s e2e,
                 // with the last-preview p50=6.5s ≈ the wait itself).
                 longValue(env, "WATERMARK_OUT_OF_ORDER_MS", 500L),
-                longValue(env, "ALLOWED_LATENESS_MS", 5_000L),
-                longValue(env, "SOURCE_IDLE_MS", 15_000L),
+                allowedLatenessMs(env),
+                sourceIdleMs(env),
                 sourceIdleAlertMs(env),
                 checkpointIntervalMs(env),
                 checkpointTimeoutMs(env),
@@ -213,9 +222,9 @@ public record SignalJobConfig(
                 taskManagerMemoryManagedSize(env),
                 taskManagerNetworkMemoryMax(env),
                 parallelism(env),
-                s3Endpoint(env),
-                s3AccessKey(env),
-                s3SecretKey(env),
+                s3.endpoint(),
+                s3.accessKey(),
+                s3.secretKey(),
                 s3Region(env),
                 s3PathStyle(env),
                 sinkWriteStallTimeoutMs(env),
@@ -359,8 +368,16 @@ public record SignalJobConfig(
         if (!hasPath && !replay) {
             // No restore, no explicit replay: start from LATEST. This is NOT a
             // silent offset-0 replay (the original F005 concern) — the source
-            // skips the accumulated LOG backlog entirely. Safe for clean runs;
-            // production restarts still require STATE_RECOVERY_PATH (RESTORE).
+            // skips the accumulated LOG backlog entirely. Safe for clean runs.
+            // P2-052: production restarts still require STATE_RECOVERY_PATH
+            // (RESTORE) or an explicit break-glass ALLOW_FULL_REPLAY=true —
+            // silently skipping the backlog in prod is forbidden
+            // (CANDLE-KV-REPLAY-001 A3.3).
+            if (isProduction(env)) {
+                throw new IllegalStateException("[F005] Config STATE_RECOVERY_PATH is required in "
+                        + "DEPLOYMENT_ENV=production (or explicit ALLOW_FULL_REPLAY=true); refusing "
+                        + "silent LATEST skip (CANDLE-KV-REPLAY-001 A3.3)");
+            }
             return StartupMode.LATEST;
         }
         return hasPath ? StartupMode.RESTORE : StartupMode.FULL_REPLAY;
@@ -469,7 +486,15 @@ public record SignalJobConfig(
             throw new IllegalStateException("Missing required config " + key
                     + " (pinned to " + pinned + ") — no unsafe default may be substituted");
         }
-        long value = Long.parseLong(raw.trim());
+        // P2-168: parse here too — a blank/malformed pin must fail with the
+        // key named, not a bare NumberFormatException.
+        long value;
+        try {
+            value = Long.parseLong(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException(
+                    "Config " + key + " must be an integer, got '" + raw + "'", e);
+        }
         if (value != pinned) {
             throw new IllegalStateException("Config " + key + " must equal " + pinned
                     + " (fixed scope), got " + value);
@@ -572,7 +597,10 @@ public record SignalJobConfig(
         if (envRaw == null) {
             backend = isProduction(env) ? "rocksdb" : "hashmap";
         } else {
-            backend = envRaw.trim();
+            // P2-234: normalize case + whitespace like deploymentEnv() —
+            // 'RocksDB'/'ROCKSDB' must not fatally reject a harmless variant,
+            // and the error below echoes the raw value for triage.
+            backend = envRaw.trim().toLowerCase(java.util.Locale.ROOT);
         }
         if (backend.isEmpty()) {
             throw new IllegalStateException("Config STATE_BACKEND is present but blank — "
@@ -580,7 +608,7 @@ public record SignalJobConfig(
         }
         if (!"rocksdb".equals(backend) && !"hashmap".equals(backend)) {
             throw new IllegalStateException("Config STATE_BACKEND must be 'rocksdb' (production "
-                    + "pin) or 'hashmap' (dev only), got '" + backend + "' — no unsafe default "
+                    + "pin) or 'hashmap' (dev only), got '" + envRaw + "' — no unsafe default "
                     + "may be substituted");
         }
         String envName = deploymentEnv(env);
@@ -612,6 +640,11 @@ public record SignalJobConfig(
     private static String checkpointDir(Map<String, String> env) {
         String raw = env.get("CHECKPOINT_DIR");
         String dir = raw == null ? null : raw.trim();
+        // P2-053: dev keeps the documented local default instead of null —
+        // downstream setup expecting a non-null URI NPEs or misconfigures.
+        if ((dir == null || dir.isEmpty()) && !isProduction(env)) {
+            return "file:///checkpoints";
+        }
         if (isProduction(env)) {
             if (dir == null || dir.isEmpty()) {
                 throw new IllegalStateException("Config CHECKPOINT_DIR is required in "
@@ -755,22 +788,30 @@ public record SignalJobConfig(
     }
 
     /**
-     * Object-store checkpoint/savepoint endpoint (tracker 14 P4.2). Non-null
-     * ONLY when CHECKPOINT_DIR or SAVEPOINT_DIR is an S3 object-store URI
-     * ({@code s3://}/{@code s3a://}). Fail-closed: an object-store URI without
-     * an endpoint + credentials is rejected at startup — credentials come from
-     * secret injection via env (never committed files, never logged). The
-     * endpoint comes from {@code S3_ENDPOINT}, with {@code R2_ENDPOINT} as the
-     * Cloudflare-R2 fallback (R2 speaks the S3 API; the endpoint is the
-     * jurisdiction URL, e.g. {@code https://<account>.r2.cloudflarestorage.com}).
+     * Object-store checkpoint/savepoint credentials (tracker 14 P4.2).
+     * Resolved ONCE in {@link #from(Map)} — endpoint + both secrets from the
+     * same read. Non-null ONLY when CHECKPOINT_DIR or SAVEPOINT_DIR is an S3
+     * object-store URI ({@code s3://}/{@code s3a://}); a local-checkpoint run
+     * carries no endpoint and no credentials even if stray {@code AWS_*} env
+     * vars are set (P2-167). Fail-closed: an object-store URI without an
+     * endpoint + credentials is rejected at startup (P2-165: an unreadable
+     * secret file reports itself, never 'not set').
      */
-    private static String s3Endpoint(Map<String, String> env) {
+    private record S3Credentials(String endpoint, String accessKey, String secretKey) {}
+
+    private static S3Credentials s3Credentials(Map<String, String> env) {
+        // P2-164: trim before the prefix test — checkpointDir() trims, so
+        // ' s3://bucket/...' must detect the same string enforcement sees.
         String cp = env.get("CHECKPOINT_DIR");
         String sp = env.get("SAVEPOINT_DIR");
-        boolean objectStore = (cp != null && (cp.startsWith("s3://") || cp.startsWith("s3a://")))
-                || (sp != null && (sp.startsWith("s3://") || sp.startsWith("s3a://")));
+        String cpTrimmed = cp == null ? null : cp.trim();
+        String spTrimmed = sp == null ? null : sp.trim();
+        boolean objectStore = (cpTrimmed != null
+                        && (cpTrimmed.startsWith("s3://") || cpTrimmed.startsWith("s3a://")))
+                || (spTrimmed != null
+                        && (spTrimmed.startsWith("s3://") || spTrimmed.startsWith("s3a://")));
         if (!objectStore) {
-            return null;
+            return new S3Credentials(null, null, null);
         }
         String endpoint = env.get("S3_ENDPOINT");
         if (endpoint == null || endpoint.trim().isEmpty()) {
@@ -789,7 +830,7 @@ public record SignalJobConfig(
                     + "from secret injection, never committed files (tracker 14 P4.2). "
                     + "Provide via env or Swarm secrets (AWS_ACCESS_KEY_ID_FILE=/run/secrets/aws_access_key_id, AWS_SECRET_ACCESS_KEY_FILE=/run/secrets/aws_secret_access_key)");
         }
-        return endpoint.trim();
+        return new S3Credentials(endpoint.trim(), access, secret);
     }
 
     /**
@@ -803,28 +844,19 @@ public record SignalJobConfig(
         }
         String filePath = env.get(fileKey);
         if (filePath != null && !filePath.trim().isEmpty()) {
+            // P2-165: a present-but-unreadable secret file is an IO failure,
+            // not 'credentials not set' — report the path, never misdirect.
             try {
                 String content = java.nio.file.Files.readString(java.nio.file.Path.of(filePath.trim())).trim();
                 if (!content.isEmpty()) {
                     return content;
                 }
             } catch (java.io.IOException e) {
-                // Fall through to null — caller will emit actionable missing-credential message
+                throw new IllegalStateException("Config secret file '" + filePath.trim()
+                        + "' for " + directKey + " could not be read (" + e.getMessage() + ")", e);
             }
         }
         return null;
-    }
-
-    /** Static access key, present only when {@link #s3Endpoint(Map)} returned non-null. */
-    private static String s3AccessKey(Map<String, String> env) {
-        String resolved = resolveSecret(env, "AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID_FILE");
-        return resolved;
-    }
-
-    /** Static secret key, present only when {@link #s3Endpoint(Map)} returned non-null. */
-    private static String s3SecretKey(Map<String, String> env) {
-        String resolved = resolveSecret(env, "AWS_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY_FILE");
-        return resolved;
     }
 
     /**
@@ -1076,11 +1108,55 @@ public record SignalJobConfig(
 
     private static long longValue(Map<String, String> env, String key, long defaultValue) {
         String raw = env.get(key);
-        return raw == null ? defaultValue : Long.parseLong(raw.trim());
+        if (raw == null) {
+            return defaultValue;
+        }
+        // P2-168: fail closed with the key named — a bare
+        // NumberFormatException on a blank/malformed tuning value names
+        // nothing and breaks the file's key-context convention.
+        try {
+            return Long.parseLong(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException(
+                    "Config " + key + " must be an integer, got '" + raw + "'", e);
+        }
     }
 
     private static int intValue(Map<String, String> env, String key, int defaultValue) {
         String raw = env.get(key);
-        return raw == null ? defaultValue : Integer.parseInt(raw.trim());
+        if (raw == null) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException(
+                    "Config " + key + " must be an integer, got '" + raw + "'", e);
+        }
+    }
+
+    /**
+     * P2-163: the two knobs that can corrupt watermark/idleness semantics
+     * when non-positive (negative out-of-orderness overflows the MIN-seeded
+     * max to near-MAX per P2-023; non-positive idle marks every split idle
+     * per P2-128). Both ctor gates exist — this fails at config parse, the
+     * first layer. Zero lateness stays valid (no tolerance).
+     */
+    private static long allowedLatenessMs(Map<String, String> env) {
+        long value = longValue(env, "ALLOWED_LATENESS_MS", 5_000L);
+        if (value < 0) {
+            throw new IllegalStateException(
+                    "Config ALLOWED_LATENESS_MS must be >= 0, got " + value);
+        }
+        return value;
+    }
+
+    private static long sourceIdleMs(Map<String, String> env) {
+        long value = longValue(env, "SOURCE_IDLE_MS", 15_000L);
+        if (value <= 0) {
+            throw new IllegalStateException(
+                    "Config SOURCE_IDLE_MS must be > 0, got " + value);
+        }
+        return value;
     }
 }

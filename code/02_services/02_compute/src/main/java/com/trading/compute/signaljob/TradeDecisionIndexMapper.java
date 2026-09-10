@@ -27,7 +27,24 @@ public final class TradeDecisionIndexMapper implements MapFunction<RowData, RowD
 
     @Override
     public RowData map(RowData decision) {
+        // P2-184: arity check + stored-vs-recomputed id equality — a column
+        // reorder/addition or a toDecision/hash-input omission must surface
+        // loud instead of an orphan index entry defeating REQ-FLS-015.
+        if (decision == null) {
+            throw new IllegalArgumentException("Trade_Decisions row must not be null");
+        }
+        if (decision.getArity() != TradeDecisionsTableColumns.FIELD_COUNT) {
+            throw new IllegalArgumentException("Trade_Decisions row arity " + decision.getArity()
+                    + " != " + TradeDecisionsTableColumns.FIELD_COUNT);
+        }
         TradeDecision d = toDecision(decision);
+        String storedId = decision.isNullAt(TradeDecisionsTableColumns.INSTRUCTION_ID) ? null
+                : decision.getString(TradeDecisionsTableColumns.INSTRUCTION_ID).toString();
+        String recomputedId = TradeDecisionBuilder.instructionId(d);
+        if (!recomputedId.equals(storedId)) {
+            throw new IllegalStateException("recomputed instruction_id " + recomputedId
+                    + " != LOG row " + storedId + " — toDecision/hash drift");
+        }
         GenericRowData index = new GenericRowData(TradeInstructionStateColumns.FIELD_COUNT);
         index.setField(TradeInstructionStateColumns.INSTRUCTION_ID,
                 StringData.fromString(TradeDecisionBuilder.instructionId(d)));
@@ -41,34 +58,64 @@ public final class TradeDecisionIndexMapper implements MapFunction<RowData, RowD
 
     /** Rebuild the typed decision from the 25-column row (all inputs are in the row). */
     static TradeDecision toDecision(RowData row) {
+        // P2-064: column-named IAE on every NOT NULL column — a corrupt
+        // backfill / schema-evolution null must name its column instead of
+        // an NPE deep in the index-map branch (P2-009 convention).
         return new TradeDecision(
-                row.getString(TradeDecisionsTableColumns.CANDIDATE_ID).toString(),
-                row.getString(TradeDecisionsTableColumns.TRADE_CONTEXT_ID).toString(),
-                row.getLong(TradeDecisionsTableColumns.INSTRUMENT_TOKEN),
-                row.getString(TradeDecisionsTableColumns.EXCHANGE).toString(),
-                row.getString(TradeDecisionsTableColumns.SYMBOL).toString(),
-                row.getString(TradeDecisionsTableColumns.SIDE).toString(),
-                row.getLong(TradeDecisionsTableColumns.QUANTITY),
-                row.getString(TradeDecisionsTableColumns.ORDER_TYPE).toString(),
-                row.getString(TradeDecisionsTableColumns.PRODUCT_TYPE).toString(),
+                requireNonNullString(row, TradeDecisionsTableColumns.CANDIDATE_ID, "candidate_id"),
+                requireNonNullString(
+                        row, TradeDecisionsTableColumns.TRADE_CONTEXT_ID, "trade_context_id"),
+                requireNonNullLong(
+                        row, TradeDecisionsTableColumns.INSTRUMENT_TOKEN, "instrument_token"),
+                requireNonNullString(row, TradeDecisionsTableColumns.EXCHANGE, "exchange"),
+                requireNonNullString(row, TradeDecisionsTableColumns.SYMBOL, "symbol"),
+                requireNonNullString(row, TradeDecisionsTableColumns.SIDE, "side"),
+                requireNonNullLong(row, TradeDecisionsTableColumns.QUANTITY, "quantity"),
+                requireNonNullString(row, TradeDecisionsTableColumns.ORDER_TYPE, "order_type"),
+                requireNonNullString(
+                        row, TradeDecisionsTableColumns.PRODUCT_TYPE, "product_type"),
                 row.isNullAt(TradeDecisionsTableColumns.LIMIT_PRICE_PAISE) ? null
                         : row.getLong(TradeDecisionsTableColumns.LIMIT_PRICE_PAISE),
-                row.getString(TradeDecisionsTableColumns.PORTFOLIO_ID).toString(),
-                row.getString(TradeDecisionsTableColumns.ACCOUNT_SCOPE_ID).toString(),
-                row.getString(TradeDecisionsTableColumns.STRATEGY_ID).toString(),
-                row.getString(TradeDecisionsTableColumns.STRATEGY_VERSION).toString(),
-                row.getString(TradeDecisionsTableColumns.CONFIGURATION_VERSION).toString(),
-                row.getString(TradeDecisionsTableColumns.EVALUATION_ID).toString(),
+                requireNonNullString(
+                        row, TradeDecisionsTableColumns.PORTFOLIO_ID, "portfolio_id"),
+                requireNonNullString(
+                        row, TradeDecisionsTableColumns.ACCOUNT_SCOPE_ID, "account_scope_id"),
+                requireNonNullString(
+                        row, TradeDecisionsTableColumns.STRATEGY_ID, "strategy_id"),
+                requireNonNullString(
+                        row, TradeDecisionsTableColumns.STRATEGY_VERSION, "strategy_version"),
+                requireNonNullString(
+                        row, TradeDecisionsTableColumns.CONFIGURATION_VERSION,
+                        "configuration_version"),
+                requireNonNullString(
+                        row, TradeDecisionsTableColumns.EVALUATION_ID, "evaluation_id"),
                 row.isNullAt(TradeDecisionsTableColumns.COMPOSITE_SCORE) ? null
                         : row.getDouble(TradeDecisionsTableColumns.COMPOSITE_SCORE),
-                row.getString(TradeDecisionsTableColumns.RESERVATION_ID).toString(),
-                row.getString(TradeDecisionsTableColumns.RESERVATION_VERSION).toString(),
-                row.getLong(TradeDecisionsTableColumns.CREATED_TS),
+                requireNonNullString(
+                        row, TradeDecisionsTableColumns.RESERVATION_ID, "reservation_id"),
+                requireNonNullString(
+                        row, TradeDecisionsTableColumns.RESERVATION_VERSION,
+                        "reservation_version"),
+                requireNonNullLong(row, TradeDecisionsTableColumns.CREATED_TS, "created_ts"),
                 row.isNullAt(TradeDecisionsTableColumns.EXPIRY_TS) ? null
                         : row.getLong(TradeDecisionsTableColumns.EXPIRY_TS),
                 row.isNullAt(TradeDecisionsTableColumns.SUPERSEDES_INSTRUCTION_ID) ? null
                         : row.getString(TradeDecisionsTableColumns.SUPERSEDES_INSTRUCTION_ID).toString(),
                 row.isNullAt(TradeDecisionsTableColumns.SUPERSEDED_BY_INSTRUCTION_ID) ? null
                         : row.getString(TradeDecisionsTableColumns.SUPERSEDED_BY_INSTRUCTION_ID).toString());
+    }
+
+    private static String requireNonNullString(RowData row, int pos, String column) {
+        if (row.isNullAt(pos)) {
+            throw new IllegalArgumentException(column + " must not be null at pos " + pos);
+        }
+        return row.getString(pos).toString();
+    }
+
+    private static long requireNonNullLong(RowData row, int pos, String column) {
+        if (row.isNullAt(pos)) {
+            throw new IllegalArgumentException(column + " must not be null at pos " + pos);
+        }
+        return row.getLong(pos);
     }
 }

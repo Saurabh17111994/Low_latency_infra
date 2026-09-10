@@ -1,6 +1,7 @@
 package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.api.java.tuple.Tuple3;
@@ -90,6 +91,35 @@ class MultiTimeframeSinksTest {
 
     private void emit(long token, Timeframe tf, long windowStart) throws Exception {
         harness.processElement(new StreamRecord<>(closedRow(token, tf, windowStart)));
+    }
+
+    @Test
+    @DisplayName("null PK field fails fast with field name (P2-230)")
+    void nullPkFailsFast() throws Exception {
+        var selector = MultiTimeframeSinks.MultiTimeframeClosedFirstWriteWinsFunction.keySelector();
+        GenericRowData nullToken = closedRow(2885L, Timeframe.ONE_M, T0);
+        nullToken.setField(CandleClosedColumns.INSTRUMENT_TOKEN, null);
+        assertThrows(IllegalArgumentException.class, () -> selector.getKey(nullToken));
+        GenericRowData nullTf = closedRow(2885L, Timeframe.ONE_M, T0);
+        nullTf.setField(CandleClosedColumns.TF, null);
+        assertThrows(IllegalArgumentException.class, () -> selector.getKey(nullTf));
+        GenericRowData nullWs = closedRow(2885L, Timeframe.ONE_M, T0);
+        nullWs.setField(CandleClosedColumns.WINDOW_START, null);
+        assertThrows(IllegalArgumentException.class, () -> selector.getKey(nullWs));
+    }
+
+    @Test
+    @DisplayName("timeframe code contract: code==name, unique, fromCode round-trips (P2-178)")
+    void timeframeCodeContract() {
+        Timeframe[] tfs = Timeframe.values();
+        long prevMs = -1L;
+        for (Timeframe tf : tfs) {
+            assertEquals(tf.name(), tf.code());
+            assertEquals(tf, Timeframe.fromCode(tf.code()));
+            assertEquals(true, tf.windowMs() > prevMs, "values() must stay ascending windowMs");
+            prevMs = tf.windowMs();
+        }
+        assertThrows(IllegalArgumentException.class, () -> Timeframe.fromCode("NOPE"));
     }
 
     private long forwardedCount() {

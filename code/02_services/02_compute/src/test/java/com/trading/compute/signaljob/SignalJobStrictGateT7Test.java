@@ -117,4 +117,52 @@ class SignalJobStrictGateT7Test {
         SignalJobConfig cfg = SignalJobConfig.from(env);
         assertEquals("file:///tmp/chk", cfg.stateRecoveryPath());
     }
+
+    @Test
+    void productionWithoutRestoreOrReplayFailsWithF005() {
+        // P2-052: prod must restore or explicitly break glass — a silent
+        // LATEST backlog skip in production is forbidden (🔥 KILL).
+        Map<String, String> env = baseEnv();
+        env.put("DEPLOYMENT_ENV", "production");
+        env.put("DEDUP_WINDOW_ENTRIES", "200");
+        env.put("CANDLE_WINDOW_MS", "15000");
+        env.put("RESTART_MAX_ATTEMPTS", "3");
+        env.put("RESTART_DELAY_MS", "30000");
+        env.put("CHECKPOINT_DIR", "s3://signal-checkpoints/prod");
+        env.put("S3_ENDPOINT", "https://signal-test.r2.cloudflarestorage.com");
+        env.put("AWS_ACCESS_KEY_ID", "r2accesskey000000000000");
+        env.put("AWS_SECRET_ACCESS_KEY", "r2s3cr3tvalue000000000000");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(env));
+        assertTrue(e.getMessage().contains("F005"), e.getMessage());
+    }
+
+    @Test
+    void productionWithExplicitReplayPasses() {
+        Map<String, String> env = baseEnv();
+        env.put("DEPLOYMENT_ENV", "production");
+        // Production pins (must equal PlatformConfig values, like SignalJobConfigTest base env).
+        env.put("DEDUP_WINDOW_ENTRIES", "200");
+        env.put("CANDLE_WINDOW_MS", "15000");
+        env.put("RESTART_MAX_ATTEMPTS", "3");
+        env.put("RESTART_DELAY_MS", "30000");
+        env.put("CHECKPOINT_DIR", "s3://signal-checkpoints/prod");
+        env.put("S3_ENDPOINT", "https://signal-test.r2.cloudflarestorage.com");
+        env.put("AWS_ACCESS_KEY_ID", "r2accesskey000000000000");
+        env.put("AWS_SECRET_ACCESS_KEY", "r2s3cr3tvalue000000000000");
+        env.put("ALLOW_FULL_REPLAY", "true");
+        assertEquals(SignalJobConfig.StartupMode.FULL_REPLAY,
+                SignalJobConfig.from(env).startupMode());
+    }
+
+    @Test
+    void schemeOfHandlesSchemeLessNullAndBlank() {
+        // P2-051: local paths and blank must map to "none", never throw.
+        assertEquals("none", SignalJob.schemeOf(null));
+        assertEquals("none", SignalJob.schemeOf(""));
+        assertEquals("none", SignalJob.schemeOf("   "));
+        assertEquals("none", SignalJob.schemeOf("/tmp/checkpoints"));
+        assertEquals("s3", SignalJob.schemeOf("s3://bucket/checkpoints"));
+        assertEquals("file", SignalJob.schemeOf("file:///tmp/chk"));
+    }
 }

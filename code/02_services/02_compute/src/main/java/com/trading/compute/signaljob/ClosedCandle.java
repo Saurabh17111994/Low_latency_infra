@@ -68,21 +68,4 @@ public class ClosedCandle implements Serializable {
         this.lastFingerprint = lastFingerprint;
     }
 
-    /**
-     * Convenience ctor when windowEnd is derived as start+tfMs or not needed.
-     * Delegates to the full ctor with windowEnd = windowStart.
-     */
-    public ClosedCandle(
-            long windowStart,
-            long openPaise,
-            long highPaise,
-            long lowPaise,
-            long closePaise,
-            long volume,
-            long tickCount,
-            long lastEventTime,
-            String lastFingerprint) {
-        this(windowStart, windowStart, openPaise, highPaise, lowPaise, closePaise,
-                volume, tickCount, lastEventTime, lastFingerprint);
-    }
 }

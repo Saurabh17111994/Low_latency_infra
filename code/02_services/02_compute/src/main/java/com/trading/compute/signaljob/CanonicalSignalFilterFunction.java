@@ -51,6 +51,15 @@ public class CanonicalSignalFilterFunction extends RichFilterFunction<RowData> {
     }
 
     public CanonicalSignalFilterFunction(Set<String> extraRuleIds) {
+        // P2-221: fail fast with a named culprit instead of a raw JDK NPE;
+        // blank entries can never match (policy contract) so reject at build.
+        java.util.Objects.requireNonNull(extraRuleIds, "extraRuleIds");
+        for (String id : extraRuleIds) {
+            if (id == null || id.isBlank()) {
+                throw new IllegalArgumentException(
+                        "extraRuleIds must not contain null/blank entries");
+            }
+        }
         Set<String> admitted = new HashSet<>(extraRuleIds);
         // The stub smoke id is LOG-only by construction: even if a config
         // lists it, its rows must never reach the KV current-state (it is a
@@ -93,11 +102,18 @@ public class CanonicalSignalFilterFunction extends RichFilterFunction<RowData> {
                         SignalCandidatesTableColumns.CANONICAL_STRATEGY_VERSION,
                         extraRuleIds));
         if (!canonical) {
-            nonCanonical.inc();
+            // P2-129: direct unit-test invocation without open() must not NPE.
+            if (nonCanonical != null) {
+                nonCanonical.inc();
+            }
+            // P2-025: a benign drop must never become a task-killing NPE —
+            // guard the token like every other identity column.
+            Object instrumentToken = row.isNullAt(SignalCandidatesTableColumns.INSTRUMENT_TOKEN)
+                    ? null : row.getLong(SignalCandidatesTableColumns.INSTRUMENT_TOKEN);
             LOG.warn("signal-canonical-filter: dropping non-canonical signal from the KV "
                     + "current-state (instrument={}, schema={}, strategy={}:{}, rule={}) — the "
                     + "LOG twin keeps every signal",
-                    row.getLong(SignalCandidatesTableColumns.INSTRUMENT_TOKEN),
+                    instrumentToken,
                     schemaVersion, strategyId, strategyVersion, ruleId);
         }
         return canonical;

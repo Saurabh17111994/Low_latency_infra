@@ -41,6 +41,14 @@ public final class TradeInstructionFeedProtocol {
             String instructionId,
             String contentHash,
             long timestampMs) {
+        // P2-067: construction-time fail-closed — a null outcome would make
+        // accepted()/duplicate()/violation() all false and requiresHalt()
+        // silently return false (fail-open on the live-money halt path).
+        public Verification {
+            java.util.Objects.requireNonNull(outcome, "outcome");
+            java.util.Objects.requireNonNull(instructionId, "instructionId");
+            java.util.Objects.requireNonNull(contentHash, "contentHash");
+        }
 
         public boolean accepted() {
             return outcome == ImmutabilityProtocol.Outcome.ACCEPTED;
@@ -71,8 +79,20 @@ public final class TradeInstructionFeedProtocol {
      */
     public static Verification verify(String instructionId, String existingHash,
                                       String incomingHash, long timestampMs) {
+        // P2-068: upstream evaluate() already requireNonNulls incomingHash —
+        // the hole here is the EMPTY string: a KV twin returning "" for
+        // missing must normalize to first-write (ACCEPTED), and blank
+        // id/incoming must fail loud instead of a silent misclassify.
+        if (instructionId == null || instructionId.isBlank()) {
+            throw new IllegalArgumentException("instructionId must be non-blank");
+        }
+        if (incomingHash == null || incomingHash.isBlank()) {
+            throw new IllegalArgumentException("incomingHash must be non-blank");
+        }
+        String normalizedExisting =
+                (existingHash != null && existingHash.isEmpty()) ? null : existingHash;
         ImmutabilityProtocol.Outcome outcome =
-                ImmutabilityProtocol.evaluate(existingHash, incomingHash);
+                ImmutabilityProtocol.evaluate(normalizedExisting, incomingHash);
         return new Verification(outcome, instructionId, incomingHash, timestampMs);
     }
 
@@ -81,6 +101,11 @@ public final class TradeInstructionFeedProtocol {
      * accepted first write and an idempotent duplicate are both clean.
      */
     public static boolean requiresHalt(Verification verification) {
+        // P2-187: fail-closed — unknown verification must halt live-money
+        // flow, never skip via a swallowed NPE.
+        if (verification == null) {
+            return true;
+        }
         return verification.violation();
     }
 
@@ -90,6 +115,12 @@ public final class TradeInstructionFeedProtocol {
      * a duplicate or a first write.
      */
     public static EnforcementViolation enforcementEvent(Verification verification) {
+        // P2-188: fail LOUD (asymmetric with P2-187 by design) — event
+        // construction on the quarantine path must name its cause, not NPE.
+        if (verification == null) {
+            throw new IllegalArgumentException(
+                    "verification must not be null on quarantine path");
+        }
         if (!verification.violation()) {
             throw new IllegalStateException(
                     "enforcement event only for VIOLATION, got " + verification.outcome()

@@ -22,7 +22,10 @@ import org.apache.flink.util.Collector;
  * <p>Emitted rows must be full 22-column {@code Signal_Candidates} rows
  * ({@link SignalCandidatesTableColumns}) with a deterministic
  * {@code candidate_id} that is unique per logical signal — the host dedups
- * on it across restores. A null or blank id fails the emission fast: silent
+ * on it across restores. The id MUST embed {@code instrument_token}
+ * (P2-176): host dedup state is keyed state partitioned by token, so only a
+ * token-bearing id makes per-key dedup equivalent to global dedup. A null
+ * or blank id is dropped and counted by the host, never failed: silent
  * unkeyed rows would defeat exactly-once.
  */
 public interface SignalStrategy extends Serializable {

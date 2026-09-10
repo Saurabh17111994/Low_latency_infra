@@ -59,17 +59,48 @@ class ExecutionIntentBuilderTest {
 
     @Test
     void invalidIntentFailsBeforeRowCreation() {
-        ExecutionIntent marketWithPrice = new ExecutionIntent(
+        assertThrows(IllegalArgumentException.class, () -> new ExecutionIntent(
                 "ignored", "candidate", "context", "acct", "partition", 1L, "NSE", "ABC",
                 "BUY", 1L, "MARKET", 100L, "CNC", "DAY", "strategy", "1", "config", CREATED,
-                null, null);
-        assertThrows(IllegalArgumentException.class,
-                () -> ExecutionIntentBuilder.build(marketWithPrice));
-        assertThrows(IllegalArgumentException.class,
-                () -> ExecutionIntentBuilder.build(new ExecutionIntent(
-                        "ignored", "candidate", "context", "acct", "partition", 1L, "NSE", "ABC",
+                null, null));
+        assertThrows(IllegalArgumentException.class, () -> new ExecutionIntent(
+                "ignored", "candidate", "context", "acct", "partition", 1L, "NSE", "ABC",
                 "BUY", 1L, "LIMIT", null, "CNC", "DAY", "strategy", "1", "config",
-                        CREATED, null, null)));
+                CREATED, null, null));
+    }
+
+    @Test
+    void recordRejectsInvalidAtConstruction() {
+        // P2-029: direct construction enforces the contract — no build() needed.
+        assertThrows(IllegalArgumentException.class, () -> new ExecutionIntent(
+                null, null, "context", "acct", "partition", 1L, "NSE", "ABC", "BUY", 1L,
+                "MARKET", null, "CNC", "DAY", "strategy", "1", "config", CREATED, null,
+                null));
+        assertThrows(IllegalArgumentException.class, () -> new ExecutionIntent(
+                null, "candidate", "context", "acct", "partition", 0L, "NSE", "ABC", "BUY",
+                1L, "MARKET", null, "CNC", "DAY", "strategy", "1", "config", CREATED, null,
+                null));
+        assertThrows(IllegalArgumentException.class, () -> new ExecutionIntent(
+                null, "candidate", "context", "acct", "partition", 1L, "NSE", "ABC", "BUY",
+                1L, "MARKET", null, "CNC", "DAY", "strategy", "1", "config", CREATED,
+                CREATED, null));
+    }
+
+    @Test
+    void unknownSideAndOrderTypeFailClosed() {
+        // P2-030/134 (Option A, no enums): HOLD/STOP never reach the log.
+        assertThrows(IllegalArgumentException.class, () -> new ExecutionIntent(
+                null, "candidate", "context", "acct", "partition", 1L, "NSE", "ABC",
+                "HOLD", 1L, "MARKET", null, "CNC", "DAY", "strategy", "1", "config",
+                CREATED, null, null));
+        assertThrows(IllegalArgumentException.class, () -> new ExecutionIntent(
+                null, "candidate", "context", "acct", "partition", 1L, "NSE", "ABC",
+                "BUY", 1L, "STOP", null, "CNC", "DAY", "strategy", "1", "config",
+                CREATED, null, null));
+        assertThrows(IllegalArgumentException.class, () -> new ExecutionIntent(
+                null, "candidate", "context", "acct", "partition", 1L, "NSE", "ABC",
+                "BUY", 1L, "STOP", 100L, "CNC", "DAY", "strategy", "1", "config",
+                CREATED, null, null));
     }
 
     @Test
@@ -91,6 +122,47 @@ class ExecutionIntentBuilderTest {
         assertEquals("MARKET", intent.orderType());
         assertEquals(null, intent.limitPricePaise());
         assertEquals(null, intent.supersedesInstructionId());
+    }
+
+    @Test
+    void nullLongColumnsRejectInsteadOfNpe() {
+        // P2-031: null DETECTION_TS/TOKEN/QUANTITY must be IAE (counted
+        // reject), never NPE out of fromCandidate.
+        GenericRowData noTs = candidate("context-1");
+        noTs.setField(SignalCandidatesTableColumns.DETECTION_TS, null);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ExecutionIntentBuilder.fromCandidate(
+                        noTs, "acct", "partition", "CNC", "DAY", "config", "context-1"));
+        GenericRowData noToken = candidate("context-1");
+        noToken.setField(SignalCandidatesTableColumns.INSTRUMENT_TOKEN, null);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ExecutionIntentBuilder.fromCandidate(
+                        noToken, "acct", "partition", "CNC", "DAY", "config", "context-1"));
+        GenericRowData noQty = candidate("context-1");
+        noQty.setField(SignalCandidatesTableColumns.QUANTITY, null);
+        org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> ExecutionIntentBuilder.fromCandidate(
+                        noQty, "acct", "partition", "CNC", "DAY", "config", "context-1"));
+    }
+
+    @Test
+    void venueIsPartOfIdentity() {
+        // P2-032: same token/symbol on two venues must mint distinct ids,
+        // or the protocol misreads a venue difference as a VIOLATION.
+        ExecutionIntent nse = sample();
+        ExecutionIntent bse = new ExecutionIntent(null, nse.candidateId(), nse.tradeContextId(),
+                nse.accountScopeId(), nse.executionPartitionId(), nse.instrumentToken(), "BSE",
+                nse.symbol(), nse.side(), nse.quantity(), nse.orderType(), nse.limitPricePaise(),
+                nse.productType(), nse.timeInForce(), nse.strategyId(), nse.strategyVersion(),
+                nse.configurationVersion(), nse.createdTs(), nse.expiryTs(),
+                nse.supersedesInstructionId());
+        org.junit.jupiter.api.Assertions.assertNotEquals(
+                ExecutionIntentBuilder.instructionId(nse),
+                ExecutionIntentBuilder.instructionId(bse));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                ExecutionIntentBuilder.instructionId(nse).startsWith("ei-v1-"));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                ExecutionIntentBuilder.identityContent(nse).contains("ei-id-v2"));
     }
 
     private static GenericRowData candidate(String tradeContextId) {

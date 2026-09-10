@@ -220,9 +220,12 @@ class MultiTimeframeAggregateFunctionTest {
 
         // Signal rings after close: next trade should see closedNewestFirst size 1 for that TF
         long t4 = T0 + 65_000L; // next 1m bucket [10:01:00,10:02:00)
+        // P2-036: a quote between trades must not eat the next TRADE —
+        // quotes no longer advance the monotonic gate.
+        harness.processElement(quote(T0 + 64_000L, "fp-q", 100_50L), T0 + 64_000L);
         harness.processElement(trade(t4, "fp-d", 102_00L, 7L), t4);
         List<MultiTimeframeSignalContext> signalsAfter = signalRows();
-        assertEquals(4, signalsAfter.size(), "next trade after close should emit signal");
+        assertEquals(4, signalsAfter.size(), "quote + next trade: quote emits no signal, trade emits one");
         MultiTimeframeSignalContext sigAfter = signalsAfter.get(3);
         var oneMAfter = sigAfter.frames().stream().filter(ff -> ff.tf() == Timeframe.ONE_M).findFirst().orElseThrow();
         assertEquals(1, oneMAfter.closedNewestFirst().size(), "after 1 close, ONE_M ring should have 1 entry newest-first");

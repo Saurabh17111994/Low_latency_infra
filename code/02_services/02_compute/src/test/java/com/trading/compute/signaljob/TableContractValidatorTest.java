@@ -36,12 +36,12 @@ class TableContractValidatorTest {
 
     private static final List<String> SIGNAL_NAMES = Arrays.asList(SignalCandidatesTableColumns.NAMES);
     private static final List<String> SIGNAL_TYPES = SignalCandidatesTableColumns.TYPE_ROOTS;
-    private static final List<String> TRADE_NAMES = Arrays.asList(TradeDecisionsTableColumns.NAMES);
+    private static final List<String> TRADE_NAMES = TradeDecisionsTableColumns.COLUMN_NAMES;
     private static final List<String> TRADE_TYPES = TradeDecisionsTableColumns.TYPE_ROOTS;
-    private static final List<String> INSTRUCTION_NAMES = Arrays.asList(TradeInstructionStateColumns.NAMES);
+    private static final List<String> INSTRUCTION_NAMES = TradeInstructionStateColumns.COLUMN_NAMES;
     private static final List<String> INSTRUCTION_TYPES = TradeInstructionStateColumns.TYPE_ROOTS;
     private static final List<String> EXECUTION_INTENT_NAMES =
-            Arrays.asList(ExecutionIntentTableColumns.NAMES);
+            ExecutionIntentTableColumns.COLUMN_NAMES;
     private static final List<String> EXECUTION_INTENT_TYPES = ExecutionIntentTableColumns.TYPE_ROOTS;
     private static final List<String> DEDUP_NAMES = FingerprintDedupTableColumns.NAMES;
     private static final List<String> DEDUP_TYPES = FingerprintDedupTableColumns.TYPE_ROOTS;
@@ -377,9 +377,9 @@ class TableContractValidatorTest {
 
     // ── candle_live KV (2026-09-05 multi-TF aggregator Phase 0, CANDLE-MULTITF-001) ──
 
-    private static final List<String> CANDLE_LIVE_NAMES = java.util.Arrays.asList(CandleLiveColumns.NAMES);
+    private static final List<String> CANDLE_LIVE_NAMES = CandleLiveColumns.COLUMN_NAMES;
     private static final List<String> CANDLE_LIVE_TYPES = CandleLiveColumns.TYPE_ROOTS;
-    private static final List<String> CANDLE_CLOSED_NAMES = java.util.Arrays.asList(CandleClosedColumns.NAMES);
+    private static final List<String> CANDLE_CLOSED_NAMES = CandleClosedColumns.COLUMN_NAMES;
     private static final List<String> CANDLE_CLOSED_TYPES = CandleClosedColumns.TYPE_ROOTS;
     private static final String CANDLE_LIVE_TABLE = "candle_live";
     private static final String CANDLE_CLOSED_TABLE = "candle_closed";

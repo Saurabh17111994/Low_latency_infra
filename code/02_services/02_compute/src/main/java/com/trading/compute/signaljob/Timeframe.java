@@ -5,6 +5,12 @@ import java.io.Serializable;
 /**
  * Canonical set of candle timeframes for the multi-timeframe aggregator.
  *
+ * <p>Declaration order is part of the contract: ascending {@link #windowMs()}
+ * (15s, 30s, 1m, 3m, 5m, 15m). Do not reorder or insert out of order —
+ * callers iterate {@code values()} assuming ascending window size for
+ * priority/selection, and reordering would silently change strategy
+ * behavior (P2-241).
+ *
  * <p>Six timeframes cover both epoch-aligned (wall-clock) and session-aligned
  * (NSE cash 09:15 IST open anchor) bucketing per design Decisions 3–5 and §D.
  * Each constant carries its window length in epoch-millis, its alignment mode,
@@ -97,9 +103,42 @@ public enum Timeframe implements Serializable {
      * Matches Track A codes exactly: {@code FIFTEEN_S}, {@code THIRTY_S},
      * {@code ONE_M}, {@code THREE_M}, {@code FIVE_M}, {@code FIFTEEN_M}.
      *
-     * @return tf code — equals {@link #name()} by contract
+     * @return tf code — equals {@link #name()} by contract (enforced below)
      */
     public String code() {
         return code;
+    }
+
+    static {
+        // P2-178: fail fast in-class — a typo'd code would silently break the
+        // PK join with Track A / Fluss DDL, and valueOf(code) lookups
+        // elsewhere would throw far from the cause.
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        for (Timeframe tf : values()) {
+            if (!tf.code.equals(tf.name())) {
+                throw new IllegalStateException("Timeframe code must equal name(): " + tf.name());
+            }
+            if (!seen.add(tf.code)) {
+                throw new IllegalStateException("Duplicate Timeframe code: " + tf.code);
+            }
+        }
+    }
+
+    /**
+     * Parse a {@code tf} discriminator back to the enum with a clear error
+     * (asymmetric paths today: {@code code()} out, {@code valueOf()} in).
+     *
+     * @param code tf code (e.g. {@code ONE_M})
+     * @return matching timeframe
+     * @throws IllegalArgumentException on unknown code
+     */
+    public static Timeframe fromCode(String code) {
+        for (Timeframe tf : values()) {
+            if (tf.code.equals(code)) {
+                return tf;
+            }
+        }
+        throw new IllegalArgumentException("Unknown Timeframe code: " + code
+                + " (expected one of " + java.util.Arrays.toString(values()) + ")");
     }
 }

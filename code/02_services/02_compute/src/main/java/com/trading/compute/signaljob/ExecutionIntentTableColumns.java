@@ -60,13 +60,36 @@ public final class ExecutionIntentTableColumns {
             false, false, false, false, false, false, false, false, false, false, false, true,
             false, false, false, false, false, false, true, false, true, false);
 
-    public static final String[] NAMES = {
+    /** DDL column names in index order (diagnostics + agreement pin). */
+    private static final String[] NAMES_INTERNAL = {
         "instruction_id", "candidate_id", "trade_context_id", "account_scope_id",
         "execution_partition_id", "instrument_token", "exchange", "symbol", "side", "quantity",
         "order_type", "limit_price_paise", "product_type", "time_in_force", "strategy_id",
         "strategy_version", "configuration_version", "created_ts", "expiry_ts", "request_hash",
         "supersedes_instruction_id", "schema_version"
     };
+
+    /**
+     * Immutable DDL column names in index order (P2-035: the array above is
+     * private — this is the only public view, so no caller can mutate the
+     * shared projection).
+     */
+    public static final List<String> COLUMN_NAMES = List.of(
+        "instruction_id", "candidate_id", "trade_context_id", "account_scope_id",
+        "execution_partition_id", "instrument_token", "exchange", "symbol", "side", "quantity",
+        "order_type", "limit_price_paise", "product_type", "time_in_force", "strategy_id",
+        "strategy_version", "configuration_version", "created_ts", "expiry_ts", "request_hash",
+        "supersedes_instruction_id", "schema_version");
+
+    /**
+     * @deprecated Use {@link #COLUMN_NAMES} — retained only for source
+     * compatibility; returns a fresh copy per call so mutation cannot corrupt
+     * the shared projection.
+     */
+    @Deprecated
+    public static String[] NAMES() {
+        return NAMES_INTERNAL.clone();
+    }
 
     public static final TypeInformation<RowData> ROW_TYPE_INFO = InternalTypeInfo.ofFields(
             new LogicalType[] {
@@ -93,5 +116,58 @@ public final class ExecutionIntentTableColumns {
                 new VarCharType(VarCharType.MAX_LENGTH), // supersedes_instruction_id
                 new VarCharType(VarCharType.MAX_LENGTH)  // schema_version
             },
-            NAMES);
+            NAMES_INTERNAL.clone());
+
+    static {
+        // P2-137 drift gate (same class as P2-127/P2-243): every layout
+        // constant must agree on FIELD_COUNT, or class-load fails loud even
+        // when tests are skipped. Last column must be schema_version.
+        if (COLUMN_NAMES.size() != FIELD_COUNT
+                || TYPE_ROOTS.size() != FIELD_COUNT
+                || COLUMN_NULLABLE_IN_DDL.size() != FIELD_COUNT
+                || SCHEMA_VERSION != FIELD_COUNT - 1
+                || ((org.apache.flink.table.runtime.typeutils.InternalTypeInfo<RowData>)
+                                ROW_TYPE_INFO)
+                        .toRowSize()
+                        != FIELD_COUNT) {
+            throw new IllegalStateException(
+                    "Execution_Intent layout drift: FIELD_COUNT/NAMES/TYPE_ROOTS/"
+                            + "nullability/ROW_TYPE_INFO out of sync");
+        }
+        checkIndex(INSTRUCTION_ID, "instruction_id");
+        checkIndex(CANDIDATE_ID, "candidate_id");
+        checkIndex(TRADE_CONTEXT_ID, "trade_context_id");
+        checkIndex(ACCOUNT_SCOPE_ID, "account_scope_id");
+        checkIndex(EXECUTION_PARTITION_ID, "execution_partition_id");
+        checkIndex(INSTRUMENT_TOKEN, "instrument_token");
+        checkIndex(EXCHANGE, "exchange");
+        checkIndex(SYMBOL, "symbol");
+        checkIndex(SIDE, "side");
+        checkIndex(QUANTITY, "quantity");
+        checkIndex(ORDER_TYPE, "order_type");
+        checkIndex(LIMIT_PRICE_PAISE, "limit_price_paise");
+        checkIndex(PRODUCT_TYPE, "product_type");
+        checkIndex(TIME_IN_FORCE, "time_in_force");
+        checkIndex(STRATEGY_ID, "strategy_id");
+        checkIndex(STRATEGY_VERSION, "strategy_version");
+        checkIndex(CONFIGURATION_VERSION, "configuration_version");
+        checkIndex(CREATED_TS, "created_ts");
+        checkIndex(EXPIRY_TS, "expiry_ts");
+        checkIndex(REQUEST_HASH, "request_hash");
+        checkIndex(SUPERSEDES_INSTRUCTION_ID, "supersedes_instruction_id");
+        checkIndex(SCHEMA_VERSION, "schema_version");
+    }
+
+    private static void checkIndex(int index, String expected) {
+        if (!NAMES_INTERNAL[index].equals(expected)) {
+            throw new IllegalStateException(
+                    "Execution_Intent layout drift: index " + index + " must be '"
+                            + expected + "', got '" + NAMES_INTERNAL[index] + "'");
+        }
+    }
+
+    /** Defensive copy of the DDL column names (callers must not retain the array). */
+    public static String[] namesCopy() {
+        return NAMES_INTERNAL.clone();
+    }
 }

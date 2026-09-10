@@ -1,6 +1,7 @@
 package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -50,7 +51,7 @@ class CandleLiveColumnsAgreementTest {
     void ddlDeclares15ColumnsInPinnedOrder() throws IOException {
         List<Column> cols = parseColumns();
         assertEquals(CandleLiveColumns.FIELD_COUNT, cols.size());
-        assertEquals(List.of(CandleLiveColumns.NAMES),
+        assertEquals(CandleLiveColumns.COLUMN_NAMES,
                 cols.stream().map(Column::name).toList());
     }
 
@@ -71,6 +72,19 @@ class CandleLiveColumnsAgreementTest {
                     cols.get(i).nullableInDdl(),
                     "column " + i + " (" + cols.get(i).name() + ") nullability");
         }
+    }
+
+    @Test
+    void liveLayoutHardeningMatchesClosedConvention() {
+        assertEquals(CandleLiveColumns.FIELD_COUNT, CandleLiveColumns.COLUMN_NAMES.size());
+        assertEquals(CandleLiveColumns.FIELD_COUNT, CandleLiveColumns.TYPE_ROOTS.size());
+        assertEquals(CandleLiveColumns.FIELD_COUNT, CandleLiveColumns.COLUMN_NULLABLE_IN_DDL.size());
+        assertEquals(CandleLiveColumns.FIELD_COUNT, CandleLiveColumns.ROW_TYPE_INFO.toRowSize());
+        String[] a = CandleLiveColumns.namesCopy();
+        String[] b = CandleLiveColumns.namesCopy();
+        assertNotSame(a, b);
+        assertEquals(java.util.Arrays.asList(a), java.util.Arrays.asList(b));
+        assertEquals(CandleLiveColumns.COLUMN_NAMES, java.util.Arrays.asList(a));
     }
 
     @Test

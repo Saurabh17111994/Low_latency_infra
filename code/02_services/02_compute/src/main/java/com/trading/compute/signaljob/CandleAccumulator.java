@@ -22,6 +22,9 @@ public class CandleAccumulator implements Serializable {
 
     private static final long serialVersionUID = 1L;
 
+    /** Public no-arg ctor required for Flink POJO extraction — must stay. */
+    public CandleAccumulator() {}
+
     public String exchange;
     public String symbol;
 
@@ -32,13 +35,18 @@ public class CandleAccumulator implements Serializable {
     public long volume;
     public long tickCount;
 
+    /** True when no tick has been ingested (firstEventTime sentinel). Do not emit or merge OHLC when true. */
+    public boolean isEmpty() {
+        return firstEventTime == Long.MAX_VALUE;
+    }
+
     /** Order key of the window's earliest event; open = its price. */
     public long firstEventTime = Long.MAX_VALUE;
-    public String firstFingerprint;
+    public String firstFingerprint = "";
 
     /** Order key of the window's latest event; close = its price. */
     public long lastEventTime = Long.MIN_VALUE;
-    public String lastFingerprint;
+    public String lastFingerprint = "";
 
     /**
      * Ingest wall-clock (raw {@code ingest_ts}) of the tick that set the
@@ -48,6 +56,26 @@ public class CandleAccumulator implements Serializable {
      * chain so a sink-side monitor can report
      * {@code output_now - lastIngestTs} = age of the newest tick that formed
      * the candle.
+     *
+     * <p>Unset sentinel: no close-setting tick with a non-null ingest_ts seen
+     * yet. Monitors must treat this as unknown, not 1970.
      */
-    public long lastIngestTs;
+    public long lastIngestTs = Long.MIN_VALUE;
+
+    /** Reset to sentinel defaults, preserving object identity. */
+    public void clear() {
+        exchange = null;
+        symbol = null;
+        openPaise = 0L;
+        highPaise = 0L;
+        lowPaise = 0L;
+        closePaise = 0L;
+        volume = 0L;
+        tickCount = 0L;
+        firstEventTime = Long.MAX_VALUE;
+        firstFingerprint = "";
+        lastEventTime = Long.MIN_VALUE;
+        lastFingerprint = "";
+        lastIngestTs = Long.MIN_VALUE;
+    }
 }

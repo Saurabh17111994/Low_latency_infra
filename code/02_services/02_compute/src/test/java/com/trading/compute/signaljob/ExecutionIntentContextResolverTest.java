@@ -38,6 +38,16 @@ class ExecutionIntentContextResolverTest {
                 () -> ExecutionIntentContextResolver.resolveEntry(candidate, "account-a"));
     }
 
+    @Test
+    void nullTokenRejectsInsteadOfNpe() {
+        // P2-033: null INSTRUMENT_TOKEN must be IAE (counted reject), never
+        // NPE out of resolveEntry.
+        GenericRowData candidate = candidate("candidate-1", 123L);
+        candidate.setField(SignalCandidatesTableColumns.INSTRUMENT_TOKEN, null);
+        assertThrows(IllegalArgumentException.class,
+                () -> ExecutionIntentContextResolver.resolveEntry(candidate, "account-a"));
+    }
+
     private static GenericRowData candidate(String id, long instrumentToken) {
         GenericRowData row = new GenericRowData(SignalCandidatesTableColumns.FIELD_COUNT);
         row.setField(SignalCandidatesTableColumns.CANDIDATE_ID, StringData.fromString(id));

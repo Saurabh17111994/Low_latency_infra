@@ -33,7 +33,7 @@ import org.apache.fluss.flink.sink.serializer.RowDataSerializationSchema;
  *       via {@link MultiTimeframeClosedFirstWriteWinsFunction} keyed by the
  *       composite {@code (instrument_token, tf, window_start)} so a re-emitted
  *       closed candle after restore never overwrites the already-written row
- *       (mirror of {@link CandleKvFirstWriteWinsFunction}, design Decision 12).</li>
+ *       (retired single-TF first-write-wins predecessor, design Decision 12).</li>
  * </ul>
  *
  * <p>Builder pattern mirrors {@code SignalJob.java} candle-live/closed sinks
@@ -107,15 +107,7 @@ public final class MultiTimeframeSinks {
         Objects.requireNonNull(liveStream, "liveStream");
         Objects.requireNonNull(config, "config");
         Objects.requireNonNull(liveTableName, "liveTableName");
-        liveStream.sinkTo(FlussSink.<RowData>builder()
-                        .setBootstrapServers(config.bootstrapServers())
-                        .setDatabase(config.database())
-                        .setTable(liveTableName)
-                        .setSerializationSchema(new RowDataSerializationSchema(false, false))
-                        .setOption("client.request-timeout",
-                                config.sinkWriteStallTimeoutMs() + "ms")
-                        .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                        .build())
+        liveStream.sinkTo(flussUpsertSink(config, liveTableName))
                 .name(LIVE_SINK_NAME)
                 .uid(LIVE_SINK_UID);
         return liveStream;
@@ -139,7 +131,7 @@ public final class MultiTimeframeSinks {
      * composite PK {@code (instrument_token, tf, window_start)} and passed
      * through {@link MultiTimeframeClosedFirstWriteWinsFunction} so a
      * re-emitted closed candle after checkpoint-restore never overwrites the
-     * already-written row (Decision 12, mirror of {@link CandleKvFirstWriteWinsFunction}).
+     * already-written row (Decision 12, retired single-TF predecessor).
      *
      * <p>Filtered rows are then sunk with the same KV upsert builder as
      * {@link #sinkLive} but against the closed table (DDL 33 v1, 7 d + lake).
@@ -168,15 +160,7 @@ public final class MultiTimeframeSinks {
                 .returns(CandleClosedColumns.ROW_TYPE_INFO)
                 .name(CLOSED_FILTER_NAME)
                 .uid(CLOSED_FILTER_UID);
-        filtered.sinkTo(FlussSink.<RowData>builder()
-                        .setBootstrapServers(config.bootstrapServers())
-                        .setDatabase(config.database())
-                        .setTable(closedTableName)
-                        .setSerializationSchema(new RowDataSerializationSchema(false, false))
-                        .setOption("client.request-timeout",
-                                config.sinkWriteStallTimeoutMs() + "ms")
-                        .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                        .build())
+        filtered.sinkTo(flussUpsertSink(config, closedTableName))
                 .name(CLOSED_SINK_NAME)
                 .uid(CLOSED_SINK_UID);
         return filtered;
@@ -192,12 +176,30 @@ public final class MultiTimeframeSinks {
         return sinkClosed(closedStream, config, DEFAULT_CLOSED_TABLE);
     }
 
+    // ── shared KV upsert builder (P2-229: one place for timeout/retry tuning) ──
+
+    /**
+     * Shared Fluss KV upsert sink builder for both candle projections.
+     * Mirrors {@code SignalJob.java} candle-live/closed sinks exactly.
+     */
+    private static FlussSink<RowData> flussUpsertSink(SignalJobConfig config, String table) {
+        return FlussSink.<RowData>builder()
+                .setBootstrapServers(config.bootstrapServers())
+                .setDatabase(config.database())
+                .setTable(table)
+                .setSerializationSchema(new RowDataSerializationSchema(false, false))
+                .setOption("client.request-timeout",
+                        config.sinkWriteStallTimeoutMs() + "ms")
+                .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
+                .build();
+    }
+
     // ── first-write-wins filter — composite key (instrument, tf, window_start) ──────
 
     /**
      * KV-level first-write-wins guard for the {@code candle_closed} sink
-     * (Phase 3 Track A, Decision 12 — composite-key generalisation of
-     * {@link CandleKvFirstWriteWinsFunction}).
+     * (Phase 3 Track A, Decision 12 — composite-key generalisation of the
+     * retired single-TF predecessor).
      *
      * <p>Keyed by the candle_closed primary key
      * {@code (instrument_token, tf, window_start)} (DDLs 32/33 v1, 16 buckets).
@@ -207,7 +209,7 @@ public final class MultiTimeframeSinks {
      * immutable closed row (no correction rows, R-012 + Decision 12). Empty
      * windows produce no elements, so nothing is emitted.
      *
-     * <p>TTL/boundedness mirrors {@link CandleKvFirstWriteWinsFunction}: marker
+     * <p>TTL/boundedness mirrors the retired single-TF predecessor: marker
      * is {@code ValueState<Boolean>} with native {@code StateTtlConfig} TTL
      * 24 h (one trading day), {@code OnCreateAndWrite} + {@code NeverReturnExpired}.
      * State contract: exactly one Boolean per emitted composite key, no timers,
@@ -237,13 +239,24 @@ public final class MultiTimeframeSinks {
         /** The closed-stream key selector: PK of candle_closed. */
         public static KeySelector<RowData, Tuple3<Long, String, Long>> keySelector() {
             return row -> {
-                String tf = null;
-                if (!row.isNullAt(CandleClosedColumns.TF)) {
-                    tf = row.getString(CandleClosedColumns.TF).toString();
+                // P2-230: fail fast on ALL THREE PK fields — a null here is a
+                // contract violation, never a null key element (which would
+                // collide corrupt rows into one first-write-wins key).
+                if (row.isNullAt(CandleClosedColumns.INSTRUMENT_TOKEN)) {
+                    throw new IllegalArgumentException(
+                            "candle_closed PK violation: instrument_token is null");
+                }
+                if (row.isNullAt(CandleClosedColumns.TF)) {
+                    throw new IllegalArgumentException(
+                            "candle_closed PK violation: tf is null");
+                }
+                if (row.isNullAt(CandleClosedColumns.WINDOW_START)) {
+                    throw new IllegalArgumentException(
+                            "candle_closed PK violation: window_start is null");
                 }
                 return Tuple3.of(
                         row.getLong(CandleClosedColumns.INSTRUMENT_TOKEN),
-                        tf,
+                        row.getString(CandleClosedColumns.TF).toString(),
                         row.getLong(CandleClosedColumns.WINDOW_START));
             };
         }
@@ -260,7 +273,7 @@ public final class MultiTimeframeSinks {
 
             // Decision 12 (multi-TF Track A): every second emission of the same
             // (instrument_token, tf, window_start) is counted here — composite-key
-            // generalisation of CandleKvFirstWriteWinsFunction's counter.
+            // generalisation of the retired single-TF predecessor's counter.
             duplicateWindows = getRuntimeContext().getMetricGroup()
                     .counter("compute.candles.multitf.duplicate_window");
         }

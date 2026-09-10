@@ -81,7 +81,7 @@ public final class TableContractValidator {
      */
     public static void validateTradeDecisionsLogTable(TableInfo info) {
         requireNoPrimaryKey(info, "immutable instruction LOG", TRADE_CONTRACT);
-        validateSchema(info, Arrays.asList(TradeDecisionsTableColumns.NAMES),
+        validateSchema(info, TradeDecisionsTableColumns.COLUMN_NAMES,
                 TradeDecisionsTableColumns.TYPE_ROOTS, "25-column v2 trade decision",
                 TRADE_CONTRACT);
         validateRouting(info, "instruction_id", 8, TRADE_CONTRACT);
@@ -93,10 +93,10 @@ public final class TableContractValidator {
      * COMPAT-FLUSS-005 matrix), exact 4-col v1 schema (SCH-19 index).
      */
     public static void validateTradeInstructionStateKvTable(TableInfo info) {
-        List<String> expectedPk = List.of(TradeInstructionStateColumns.NAMES[
-                TradeInstructionStateColumns.INSTRUCTION_ID]);
+        List<String> expectedPk = List.of(TradeInstructionStateColumns.COLUMN_NAMES.get(
+                TradeInstructionStateColumns.INSTRUCTION_ID));
         requireExactPrimaryKey(info, expectedPk, TRADE_CONTRACT);
-        validateSchema(info, Arrays.asList(TradeInstructionStateColumns.NAMES),
+        validateSchema(info, TradeInstructionStateColumns.COLUMN_NAMES,
                 TradeInstructionStateColumns.TYPE_ROOTS, "4-column v1 instruction index",
                 TRADE_CONTRACT);
         validateRouting(info, "instruction_id", 8, TRADE_CONTRACT);
@@ -105,7 +105,7 @@ public final class TableContractValidator {
     /** Execution_Intent LOG: immutable request feed, no primary key, instruction routing. */
     public static void validateExecutionIntentLogTable(TableInfo info) {
         requireNoPrimaryKey(info, "append-only execution-intent LOG", EXECUTION_INTENT_CONTRACT);
-        validateSchema(info, Arrays.asList(ExecutionIntentTableColumns.NAMES),
+        validateSchema(info, ExecutionIntentTableColumns.COLUMN_NAMES,
                 ExecutionIntentTableColumns.TYPE_ROOTS, "22-column v1 execution intent",
                 EXECUTION_INTENT_CONTRACT);
         validateRouting(info, "instruction_id", 8, EXECUTION_INTENT_CONTRACT);
@@ -153,15 +153,15 @@ public final class TableContractValidator {
      */
     public static void validateCandleLiveTable(TableInfo info) {
         List<String> expectedPk = List.of(
-                CandleLiveColumns.NAMES[CandleLiveColumns.INSTRUMENT_TOKEN],
-                CandleLiveColumns.NAMES[CandleLiveColumns.TF],
-                CandleLiveColumns.NAMES[CandleLiveColumns.WINDOW_START]);
+                CandleLiveColumns.COLUMN_NAMES.get(CandleLiveColumns.INSTRUMENT_TOKEN),
+                CandleLiveColumns.COLUMN_NAMES.get(CandleLiveColumns.TF),
+                CandleLiveColumns.COLUMN_NAMES.get(CandleLiveColumns.WINDOW_START));
         requireExactPrimaryKey(info, expectedPk, MULTITF_CANDLE_CONTRACT);
-        validateSchema(info, Arrays.asList(CandleLiveColumns.NAMES),
+        validateSchema(info, CandleLiveColumns.COLUMN_NAMES,
                 CandleLiveColumns.TYPE_ROOTS, "15-column v1 candle_live",
                 MULTITF_CANDLE_CONTRACT);
         validateRouting(info,
-                CandleLiveColumns.NAMES[CandleLiveColumns.INSTRUMENT_TOKEN],
+                CandleLiveColumns.COLUMN_NAMES.get(CandleLiveColumns.INSTRUMENT_TOKEN),
                 16, MULTITF_CANDLE_CONTRACT);
     }
 
@@ -174,15 +174,15 @@ public final class TableContractValidator {
      */
     public static void validateCandleClosedTable(TableInfo info) {
         List<String> expectedPk = List.of(
-                CandleClosedColumns.NAMES[CandleClosedColumns.INSTRUMENT_TOKEN],
-                CandleClosedColumns.NAMES[CandleClosedColumns.TF],
-                CandleClosedColumns.NAMES[CandleClosedColumns.WINDOW_START]);
+                CandleClosedColumns.COLUMN_NAMES.get(CandleClosedColumns.INSTRUMENT_TOKEN),
+                CandleClosedColumns.COLUMN_NAMES.get(CandleClosedColumns.TF),
+                CandleClosedColumns.COLUMN_NAMES.get(CandleClosedColumns.WINDOW_START));
         requireExactPrimaryKey(info, expectedPk, MULTITF_CANDLE_CONTRACT);
-        validateSchema(info, Arrays.asList(CandleClosedColumns.NAMES),
+        validateSchema(info, CandleClosedColumns.COLUMN_NAMES,
                 CandleClosedColumns.TYPE_ROOTS, "15-column v1 candle_closed",
                 MULTITF_CANDLE_CONTRACT);
         validateRouting(info,
-                CandleClosedColumns.NAMES[CandleClosedColumns.INSTRUMENT_TOKEN],
+                CandleClosedColumns.COLUMN_NAMES.get(CandleClosedColumns.INSTRUMENT_TOKEN),
                 16, MULTITF_CANDLE_CONTRACT);
     }
 

@@ -1,7 +1,6 @@
 package com.trading.compute.signaljob;
 
 import java.util.List;
-import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.runtime.typeutils.InternalTypeInfo;
 import org.apache.flink.table.types.logical.BigIntType;
@@ -60,7 +59,7 @@ public final class CandleLiveColumns {
             false, false, false, true, false);
 
     /** DDL column names in index order (diagnostics + agreement pin). */
-    public static final String[] NAMES = {
+    private static final String[] NAMES = {
             "instrument_token", "exchange", "symbol", "tf",
             "window_start", "window_end",
             "open_paise", "high_paise", "low_paise", "close_paise",
@@ -68,24 +67,71 @@ public final class CandleLiveColumns {
             "last_event_time", "last_event_fingerprint", "schema_version"
     };
 
+    /** Immutable DDL column names in index order (diagnostics + agreement pin). */
+    public static final List<String> COLUMN_NAMES = List.of(
+            "instrument_token", "exchange", "symbol", "tf",
+            "window_start", "window_end",
+            "open_paise", "high_paise", "low_paise", "close_paise",
+            "volume", "tick_count",
+            "last_event_time", "last_event_fingerprint", "schema_version");
+
     /** Stream type info for emitted candle_live rows (v1 DDL order). */
-    public static final TypeInformation<RowData> ROW_TYPE_INFO = InternalTypeInfo.ofFields(
+    public static final InternalTypeInfo<RowData> ROW_TYPE_INFO = InternalTypeInfo.ofFields(
             new LogicalType[] {
-                new BigIntType(),                        // instrument_token
-                new VarCharType(VarCharType.MAX_LENGTH), // exchange (nullable)
-                new VarCharType(VarCharType.MAX_LENGTH), // symbol (nullable)
-                new VarCharType(VarCharType.MAX_LENGTH), // tf
-                new BigIntType(),                        // window_start
-                new BigIntType(),                        // window_end
-                new BigIntType(),                        // open_paise
-                new BigIntType(),                        // high_paise
-                new BigIntType(),                        // low_paise
-                new BigIntType(),                        // close_paise
-                new BigIntType(),                        // volume
-                new IntType(),                           // tick_count
-                new BigIntType(),                        // last_event_time
-                new VarCharType(VarCharType.MAX_LENGTH), // last_event_fingerprint (nullable)
-                new VarCharType(VarCharType.MAX_LENGTH)  // schema_version
+                new BigIntType(false),                       // instrument_token (NOT NULL)
+                new VarCharType(VarCharType.MAX_LENGTH),     // exchange (nullable)
+                new VarCharType(VarCharType.MAX_LENGTH),     // symbol (nullable)
+                new VarCharType(false, VarCharType.MAX_LENGTH), // tf (NOT NULL)
+                new BigIntType(false),                       // window_start (NOT NULL)
+                new BigIntType(false),                       // window_end (NOT NULL)
+                new BigIntType(false),                       // open_paise (NOT NULL)
+                new BigIntType(false),                       // high_paise (NOT NULL)
+                new BigIntType(false),                       // low_paise (NOT NULL)
+                new BigIntType(false),                       // close_paise (NOT NULL)
+                new BigIntType(false),                       // volume (NOT NULL)
+                new IntType(false),                          // tick_count (NOT NULL)
+                new BigIntType(false),                       // last_event_time (NOT NULL)
+                new VarCharType(VarCharType.MAX_LENGTH),     // last_event_fingerprint (nullable)
+                new VarCharType(false, VarCharType.MAX_LENGTH) // schema_version (NOT NULL)
             },
-            NAMES);
+            NAMES.clone());
+
+    static {
+        if (COLUMN_NAMES.size() != FIELD_COUNT
+                || TYPE_ROOTS.size() != FIELD_COUNT
+                || COLUMN_NULLABLE_IN_DDL.size() != FIELD_COUNT
+                || ROW_TYPE_INFO.toRowSize() != FIELD_COUNT) {
+            throw new IllegalStateException(
+                    "CandleLiveColumns drift: COLUMN_NAMES/TYPE_ROOTS/COLUMN_NULLABLE_IN_DDL/ROW_TYPE_INFO"
+                            + " must all have FIELD_COUNT=" + FIELD_COUNT);
+        }
+        checkIndex(INSTRUMENT_TOKEN, "instrument_token");
+        checkIndex(EXCHANGE, "exchange");
+        checkIndex(SYMBOL, "symbol");
+        checkIndex(TF, "tf");
+        checkIndex(WINDOW_START, "window_start");
+        checkIndex(WINDOW_END, "window_end");
+        checkIndex(OPEN_PAISE, "open_paise");
+        checkIndex(HIGH_PAISE, "high_paise");
+        checkIndex(LOW_PAISE, "low_paise");
+        checkIndex(CLOSE_PAISE, "close_paise");
+        checkIndex(VOLUME, "volume");
+        checkIndex(TICK_COUNT, "tick_count");
+        checkIndex(LAST_EVENT_TIME, "last_event_time");
+        checkIndex(LAST_EVENT_FINGERPRINT, "last_event_fingerprint");
+        checkIndex(SCHEMA_VERSION, "schema_version");
+    }
+
+    private static void checkIndex(int index, String expected) {
+        if (!NAMES[index].equals(expected)) {
+            throw new IllegalStateException(
+                    "CandleLiveColumns drift: index " + index + " must be '"
+                            + expected + "', got '" + NAMES[index] + "'");
+        }
+    }
+
+    /** Defensive copy of the DDL column names (callers must not retain the array). */
+    public static String[] namesCopy() {
+        return NAMES.clone();
+    }
 }

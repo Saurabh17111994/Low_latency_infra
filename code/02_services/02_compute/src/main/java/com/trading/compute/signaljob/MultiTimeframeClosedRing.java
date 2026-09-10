@@ -3,7 +3,6 @@ package com.trading.compute.signaljob;
 import java.io.Serializable;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
 /**

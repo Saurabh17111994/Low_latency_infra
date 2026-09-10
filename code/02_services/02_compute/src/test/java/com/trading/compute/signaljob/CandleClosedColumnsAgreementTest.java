@@ -50,7 +50,7 @@ class CandleClosedColumnsAgreementTest {
     void ddlDeclares15ColumnsInPinnedOrder() throws IOException {
         List<Column> cols = parseColumns();
         assertEquals(CandleClosedColumns.FIELD_COUNT, cols.size());
-        assertEquals(List.of(CandleClosedColumns.NAMES),
+        assertEquals(CandleClosedColumns.COLUMN_NAMES,
                 cols.stream().map(Column::name).toList());
     }
 

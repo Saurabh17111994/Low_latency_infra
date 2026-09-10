@@ -72,7 +72,7 @@ class TradeDecisionsTableColumnsAgreementTest {
                 "07_trade_decisions.sql must declare exactly 25 columns (v2); got " + cols.size()
                         + " — if the DDL changed deliberately, update TradeDecisionsTableColumns "
                         + "in the same change (cross-boundary pin habit)");
-        assertArrayEquals(TradeDecisionsTableColumns.NAMES,
+        assertArrayEquals(TradeDecisionsTableColumns.namesCopy(),
                 cols.stream().map(Column::name).toArray(String[]::new),
                 "column names/order must match the code layout in DDL order");
     }
@@ -120,7 +120,7 @@ class TradeDecisionsTableColumnsAgreementTest {
     @Test
     @DisplayName("index constants are pairwise distinct, in range, and point at the pinned names")
     void indexConstantsMatchNames() {
-        String[] names = TradeDecisionsTableColumns.NAMES;
+        String[] names = TradeDecisionsTableColumns.namesCopy();
         int[] idx = {
             TradeDecisionsTableColumns.INSTRUCTION_ID, TradeDecisionsTableColumns.CANDIDATE_ID,
             TradeDecisionsTableColumns.TRADE_CONTEXT_ID, TradeDecisionsTableColumns.INSTRUMENT_TOKEN,
@@ -159,14 +159,15 @@ class TradeDecisionsTableColumnsAgreementTest {
                         TradeDecisionsTableColumns.ROW_TYPE_INFO;
         assertEquals(TradeDecisionsTableColumns.FIELD_COUNT, info.toRowSize(),
                 "ROW_TYPE_INFO must declare one field per DDL column");
-        assertArrayEquals(TradeDecisionsTableColumns.NAMES, info.toRowFieldNames(),
+        assertArrayEquals(TradeDecisionsTableColumns.namesCopy(), info.toRowFieldNames(),
                 "ROW_TYPE_INFO field names must follow the pinned DDL order");
     }
 
     @Test
     @DisplayName("layout carries no Executor-assigned fields (REQ-FLS-008)")
     void noExecutorAssignedFields() {
-        String joined = String.join(",", TradeDecisionsTableColumns.NAMES).toLowerCase(Locale.ROOT);
+        String joined =
+                String.join(",", TradeDecisionsTableColumns.namesCopy()).toLowerCase(Locale.ROOT);
         assertFalse(joined.contains("client_order_ref"),
                 "Trade_Decisions SHALL NOT contain client_order_ref (REQ-FLS-008)");
         assertFalse(joined.contains("broker_order_id"),

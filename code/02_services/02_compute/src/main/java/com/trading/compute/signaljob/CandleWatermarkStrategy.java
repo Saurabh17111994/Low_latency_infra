@@ -22,6 +22,12 @@ public final class CandleWatermarkStrategy {
     private CandleWatermarkStrategy() {}
 
     public static WatermarkStrategy<RowData> of(SignalJobConfig config) {
+        // P2-128: fail fast on a non-positive idle timeout — negative/zero
+        // silently marks every split idle (or stalls windows forever).
+        if (config.sourceIdleMs() <= 0) {
+            throw new IllegalArgumentException(
+                    "sourceIdleMs must be > 0, got " + config.sourceIdleMs());
+        }
         // SourceIdleWatchdogGenerator wraps the bounded generator INSIDE the
         // source operator (FLIP-27 per-split generator): zero graph nodes
         // added, so StreamGraphHasherV2 operator IDs are bit-identical and
@@ -32,15 +38,26 @@ public final class CandleWatermarkStrategy {
         // pinned the combined watermark at Long.MIN_VALUE behind the
         // daily-partition table's permanently-empty future-day splits
         // (CHG-120, live-reproduced 2026-09-01).
+        // P2-022: the exact poison ceiling mirrors RawValidationFunction —
+        // a row the gate would reject must never reach the watermark first.
+        long maxSafeEventTime = Long.MAX_VALUE
+                - config.candleWindowMs() - config.allowedLatenessMs() - 1;
         return WatermarkStrategy.<RowData>forGenerator(
                         context ->
                                 new SourceIdleWatchdogGenerator(
-                                        boundedOutOfOrderGenerator(config.outOfOrderMs()),
+                                        boundedOutOfOrderGenerator(
+                                                config.outOfOrderMs(), maxSafeEventTime),
                                         config.sourceIdleMs(),
                                         config.sourceIdleAlertMs()))
                 .withIdleness(Duration.ofMillis(config.sourceIdleMs()))
-                .withTimestampAssigner(
-                        (row, timestamp) -> row.getLong(RawTableColumns.EVENT_TIME));
+                .withTimestampAssigner((row, timestamp) -> {
+                    // P2-022: null event_time never poisons the watermark —
+                    // MIN_VALUE is ignored by the max() inside onEvent.
+                    if (row == null || row.isNullAt(RawTableColumns.EVENT_TIME)) {
+                        return Long.MIN_VALUE;
+                    }
+                    return row.getLong(RawTableColumns.EVENT_TIME);
+                });
     }
 
     /**
@@ -52,22 +69,41 @@ public final class CandleWatermarkStrategy {
      * inactive source splits idle.
      */
     static WatermarkGenerator<RowData> boundedOutOfOrderGenerator(long outOfOrderMs) {
-        return new BoundedOutOfOrdernessOnEventGenerator(outOfOrderMs);
+        return new BoundedOutOfOrdernessOnEventGenerator(outOfOrderMs, Long.MAX_VALUE);
+    }
+
+    static WatermarkGenerator<RowData> boundedOutOfOrderGenerator(long outOfOrderMs, long maxSafeEventTime) {
+        return new BoundedOutOfOrdernessOnEventGenerator(outOfOrderMs, maxSafeEventTime);
     }
 
     private static final class BoundedOutOfOrdernessOnEventGenerator
             implements WatermarkGenerator<RowData> {
         private final long outOfOrderMs;
+        private final long maxSafeEventTime;
         private long maxTimestamp;
         private long lastEmittedWatermark = Long.MIN_VALUE;
 
-        private BoundedOutOfOrdernessOnEventGenerator(long outOfOrderMs) {
+        private BoundedOutOfOrdernessOnEventGenerator(long outOfOrderMs, long maxSafeEventTime) {
+            // P2-023: a negative tolerance overflows the MIN_VALUE-seeded max
+            // to near-MAX at startup — fail fast instead of emitting a
+            // near-MAX watermark that drops the whole stream as late.
+            if (outOfOrderMs < 0) {
+                throw new IllegalArgumentException(
+                        "outOfOrderMs must be >= 0, got " + outOfOrderMs);
+            }
             this.outOfOrderMs = outOfOrderMs;
+            this.maxSafeEventTime = maxSafeEventTime;
             this.maxTimestamp = Long.MIN_VALUE + outOfOrderMs + 1;
         }
 
         @Override
         public void onEvent(RowData event, long eventTimestamp, WatermarkOutput output) {
+            // P2-022: ignore poison timestamps the validation gate would
+            // reject — a single huge event_time must never pin maxTimestamp
+            // near MAX (watermarks are monotonic, no recovery).
+            if (eventTimestamp <= 0 || eventTimestamp > maxSafeEventTime) {
+                return;
+            }
             maxTimestamp = Math.max(maxTimestamp, eventTimestamp);
             long nextWatermark = maxTimestamp - outOfOrderMs - 1;
             if (nextWatermark > lastEmittedWatermark) {

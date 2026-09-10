@@ -5,11 +5,19 @@ import java.io.Serializable;
 /**
  * One composite state entry per instrument (design §C.1).
  *
- * <p>Heap-managed, checkpointed as one {@code ValueState<MultiTimeframeState>}
- * per instrument_token. Holds six forming {@link CandleAccumulator}s, six
- * {@link MultiTimeframeClosedRing}s (15 each), quote snapshot, discontinuity
- * marker, and monotonic gate fields. Plain {@link Serializable} with D1 public
- * fields for Flink POJO extraction — same rule as {@link CandleAccumulator}.
+ * <p>Heap-managed ONLY — held in the operator's plain {@code HashMap<Long,Slot>},
+ * never as Flink managed {@code ValueState} (intentional amnesia: a restore
+ * restarts empty and rebuilds from live ticks). Holds six forming
+ * {@link CandleAccumulator}s, six {@link MultiTimeframeClosedRing}s (15 each),
+ * quote snapshot, discontinuity marker, and monotonic gate fields. Plain
+ * {@link Serializable} with D1 public fields for Flink POJO extraction — same
+ * rule as {@link CandleAccumulator}.
+ *
+ * <p>P2-047: the six ring fields intentionally resolve to GenericTypeInfo/Kryo
+ * (ring is a plain Serializable ArrayDeque wrapper, not a POJO) — zero cost
+ * while state stays heap-only, but do NOT convert this to ValueState without
+ * POJO-ifying the ring first (plus JDK17 final-field risk). Pinned by
+ * {@code MultiTimeframeStatePojoTest}.
  *
  * <p>Six named public fields per dimension (not Map/array) is the POJO-safe
  * choice: maps/arrays as POJO fields confuse Flink's type extractor in some
@@ -137,16 +145,31 @@ public class MultiTimeframeState implements Serializable {
 
     /**
      * Reset all forming accumulators to fresh (empty) state, keeping closed
-     * rings and other snapshot fields intact. Useful after a gap drop where
-     * the stale forming candle is discarded but history must survive.
+     * rings and quote snapshot intact.
+     *
+     * <p>P2-151: in-place {@code clear()} — preserves {@code forming(tf)}
+     * reference identity, so previously returned live refs stay valid. No
+     * new objects per reset (less GC on gap/overnight path).
+     *
+     * <p>P2-152: gate + marker advance atomically in the same call — the
+     * caller cannot forget the second half. Overnight/session-boundary
+     * reset passes {@code isDiscontinuity=false} (clears a stale pending);
+     * gap-drop passes {@code true} (sets it with the gap time).
+     *
+     * @param gapEventTime event_time to advance the monotonic gate to
+     * @param isDiscontinuity true for same-session gap-drop, false for overnight fresh start
      */
-    public void resetForming() {
-        formingFifteenS = new CandleAccumulator();
-        formingThirtyS = new CandleAccumulator();
-        formingOneM = new CandleAccumulator();
-        formingThreeM = new CandleAccumulator();
-        formingFiveM = new CandleAccumulator();
-        formingFifteenM = new CandleAccumulator();
+    public void resetForming(long gapEventTime, boolean isDiscontinuity) {
+        for (Timeframe tf : Timeframe.values()) {
+            forming(tf).clear();
+        }
+        lastEventTime = gapEventTime;
+        if (isDiscontinuity) {
+            discontinuityPending = true;
+            lastDiscontinuityEventTime = gapEventTime;
+        } else {
+            discontinuityPending = false;
+        }
     }
 
     /**

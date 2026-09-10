@@ -109,12 +109,12 @@ public final class CanonicalSignalPolicy {
     }
 
     /**
-     * Registry form (strategy-host design, 2026-09-05): canonical iff the
-     * schema/strategy/version equal the pinned expected identity AND the
-     * rule id is a member of {@code admittedRuleIds}. Lets the filter admit
-     * config-registered strategy ids without a code change per strategy —
-     * the same strictness as the pinned forms, with the rule set supplied
-     * by configuration instead of constants.
+     * Registry form (strategy-host design, 2026-09-05): multi-rule, not
+     * multi-strategy — canonical iff the schema/strategy/version equal the
+     * pinned expected identity AND the rule id is a member of
+     * {@code admittedRuleIds}. Lets the filter admit config-registered rule ids of the same canonical strategy without a
+     * code change per rule — the same strictness as the pinned forms, with
+     * the rule set supplied by configuration instead of constants.
      */
     public static boolean isCanonicalIn(
             String schemaVersion,
@@ -131,6 +131,9 @@ public final class CanonicalSignalPolicy {
                 && expectedStrategyId.equals(strategyId)
                 && expectedStrategyVersion != null
                 && expectedStrategyVersion.equals(strategyVersion);
-        return identityMatch && admittedRuleIds != null && admittedRuleIds.contains(ruleId);
+        // P2-026: a null/blank ruleId can never be canonical — guard before
+        // contains() so a dirty set entry can't admit and sorted sets can't NPE.
+        return identityMatch && ruleId != null && !ruleId.isBlank()
+                && admittedRuleIds != null && admittedRuleIds.contains(ruleId);
     }
 }

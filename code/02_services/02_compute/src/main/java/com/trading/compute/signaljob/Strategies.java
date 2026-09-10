@@ -39,12 +39,14 @@ public final class Strategies {
     private static Map<String, BiFunction<SignalJobConfig, SignalStrategy.Metrics, SignalStrategy>> buildAll() {
         Map<String, BiFunction<SignalJobConfig, SignalStrategy.Metrics, SignalStrategy>> m =
                 new LinkedHashMap<>();
-        m.put(StubSmokeStrategy.RULE_ID, (config, metrics) -> new StubSmokeStrategy());
+        m.put(StubSmokeStrategy.RULE_ID, StubSmokeStrategy::new);
         m.put(N7RangeBreakoutStrategy.RULE_ID, N7RangeBreakoutStrategy::new);
         return Collections.unmodifiableMap(m);
     }
 
-    /** Ids the host accepts in {@code STRATEGIES} (fail-fast reference). */
+    /** Ids the host accepts in {@code STRATEGIES} (fail-fast reference).
+     * Production-only view: test ids registered via {@link #registerForTest}
+     * are intentionally excluded — validate those with {@link #isKnown}. */
     public static Set<String> knownIds() {
         return ALL.keySet();
     }
@@ -58,9 +60,24 @@ public final class Strategies {
     public static void registerForTest(
             String ruleId,
             BiFunction<SignalJobConfig, SignalStrategy.Metrics, SignalStrategy> factory) {
-        TEST_OVERRIDES.put(
-                java.util.Objects.requireNonNull(ruleId),
-                java.util.Objects.requireNonNull(factory));
+        java.util.Objects.requireNonNull(ruleId);
+        java.util.Objects.requireNonNull(factory);
+        // P2-173: a test must never hijack a production id for the JVM lifetime.
+        if (ALL.containsKey(ruleId)) {
+            throw new IllegalArgumentException(
+                    "refusing to shadow production strategy id '" + ruleId + "'");
+        }
+        TEST_OVERRIDES.put(ruleId, factory);
+    }
+
+    /** Remove one test registration (test isolation). */
+    static void unregisterForTest(String ruleId) {
+        TEST_OVERRIDES.remove(ruleId);
+    }
+
+    /** Remove all test registrations (test isolation). */
+    static void clearForTest() {
+        TEST_OVERRIDES.clear();
     }
 
     /**
@@ -79,6 +96,13 @@ public final class Strategies {
      */
     public static SignalStrategy create(
             String ruleId, SignalJobConfig config, SignalStrategy.Metrics metrics) {
+        // P2-056: null hits ConcurrentHashMap.get with a bare NPE — refuse
+        // with the known-ids message instead.
+        if (ruleId == null) {
+            throw new IllegalStateException("unknown strategy id 'null'"
+                    + " (known: " + ALL.keySet() + ") — refusing to run a "
+                    + "topology that silently drops a requested strategy");
+        }
         BiFunction<SignalJobConfig, SignalStrategy.Metrics, SignalStrategy> f =
                 TEST_OVERRIDES.get(ruleId);
         if (f == null) {

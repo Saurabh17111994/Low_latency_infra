@@ -69,4 +69,31 @@ class MultiTimeframeStatePojoTest {
         // TypeInformation resolves (not null) and is not mistakenly rejected.
         assertTrue(ti != null, "TypeInformation for MultiTimeframeClosedRing must resolve");
     }
+
+    @Test
+    void ringFieldsResolveToGenericTypeHeapOnlyTripwire() {
+        // P2-047 tripwire: the six ring fields intentionally resolve to
+        // GenericTypeInfo/Kryo while state stays heap-only (probe-verified
+        // 2026-09-10: forming* -> PojoTypeInfo, closed* -> GenericTypeInfo,
+        // RING -> GenericTypeInfo). If a future change converts this state to
+        // ValueState, this test documents the Kryo-per-checkpoint cost that
+        // must be fixed first (POJO-ify the ring + JDK17 final-field risk).
+        org.apache.flink.api.common.typeinfo.TypeInformation<MultiTimeframeState> ti =
+                org.apache.flink.api.common.typeinfo.TypeInformation.of(MultiTimeframeState.class);
+        assertTrue(ti instanceof PojoTypeInfo,
+                "outer state must stay POJO, got " + ti.getClass().getSimpleName());
+        PojoTypeInfo<MultiTimeframeState> pojo = (PojoTypeInfo<MultiTimeframeState>) ti;
+        int ringFields = 0;
+        for (int i = 0; i < pojo.getArity(); i++) {
+            String name = pojo.getPojoFieldAt(i).getField().getName();
+            if (name.startsWith("closed")) {
+                ringFields++;
+                assertTrue(
+                        pojo.getPojoFieldAt(i).getTypeInformation() instanceof GenericTypeInfo,
+                        "ring field " + name + " must stay GenericType (heap-only by design) — "
+                                + "converting to ValueState requires POJO-ifying the ring first");
+            }
+        }
+        assertTrue(ringFields == 6, "expected 6 closed* ring fields, got " + ringFields);
+    }
 }

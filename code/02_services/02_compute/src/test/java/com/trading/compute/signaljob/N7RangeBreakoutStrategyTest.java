@@ -112,6 +112,13 @@ class N7RangeBreakoutStrategyTest {
         return r;
     }
 
+    private static RowData liveWithFp(Timeframe tf, long price, long tradeTime, String fp) {
+        GenericRowData r = (GenericRowData) live(tf, price, tradeTime);
+        r.setField(CandleLiveColumns.LAST_EVENT_FINGERPRINT,
+                fp == null ? null : StringData.fromString(fp));
+        return r;
+    }
+
     /**
      * Feed 7 closed candles where the LAST is the strict N7 (range 1, all
      * prior ranges 2..7). Candle i covers [ws0 + i*step, +tfMs), high = baseH
@@ -257,6 +264,114 @@ class N7RangeBreakoutStrategyTest {
         strategy.onLiveTick(live(Timeframe.FIFTEEN_S, 10_003L, 200_002L), out);
 
         assertEquals(1, out.rows.size());
+    }
+
+    @Test
+    @DisplayName("same-ms different-fingerprint re-evaluates; same fingerprint skips (P2-048)")
+    void sameMsFingerprintDedup() throws Exception {
+        open();
+        feedSevenClosedWithStrictN7Last(Timeframe.FIFTEEN_S);
+        // Same tradeTime, different fingerprint, breaching price: must evaluate.
+        strategy.onLiveTick(liveWithFp(Timeframe.FIFTEEN_S, 10_007L, 200_000L, "fp-1"), out);
+        assertEquals(1, out.rows.size());
+        // Same tradeTime + same fingerprint: replay, skip even at new price.
+        strategy.onLiveTick(liveWithFp(Timeframe.FIFTEEN_S, 10_009L, 200_000L, "fp-1"), out);
+        assertEquals(1, out.rows.size());
+    }
+
+    @Test
+    @DisplayName("inverted high<low candle is skipped and counted (P2-153)")
+    void invertedCandleSkipped() throws Exception {
+        open();
+        strategy.onClosedCandle(closed(Timeframe.FIFTEEN_S, 0L, 100L, 200L), out);
+        assertEquals(0, strategy.ringSizeForTest(Timeframe.FIFTEEN_S));
+        assertEquals(1L, metrics.get("rejected_invalid"));
+    }
+
+    @Test
+    @DisplayName("ws gap clears ring and armed setup (P2-154)")
+    void gapInvalidatesRingAndArmed() throws Exception {
+        open();
+        feedSevenClosedWithStrictN7Last(Timeframe.FIFTEEN_S);
+        assertNotNull(strategy.armedForTest(Timeframe.FIFTEEN_S));
+        // Jump two windows past the last ws (6*step -> 8*step skips 7*step).
+        long step = Timeframe.FIFTEEN_S.windowMs();
+        strategy.onClosedCandle(closed(Timeframe.FIFTEEN_S, 8 * step, 10_010L, 10_009L), out);
+        assertNull(strategy.armedForTest(Timeframe.FIFTEEN_S));
+        assertEquals(1, strategy.ringSizeForTest(Timeframe.FIFTEEN_S));
+        assertEquals(1L, metrics.get("invalidated_gap"));
+    }
+
+    @Test
+    @DisplayName("arm-time edge obeys highest-TF-wins (P2-049)")
+    void armTimeHighestTfWins() throws Exception {
+        open();
+        // Arm ONE_M first with levels the trade breaches.
+        feedSevenClosedWithStrictN7Last(Timeframe.ONE_M);
+        // Live trade newer than the FIFTEEN_S arming candle's window end.
+        strategy.onLiveTick(live(Timeframe.FIFTEEN_S, 10_007L, 500_000L), out);
+        assertEquals(1, out.rows.size());
+        assertTrue(field(out.rows.get(0), SignalCandidatesTableColumns.FORMATION_SNAPSHOT_REF)
+                .startsWith("n7:ONE_M:"));
+        // Now the FIFTEEN_S 7th candle arms — same breached price, but ONE_M
+        // already holds the higher breach, so no second emit.
+        long step = Timeframe.FIFTEEN_S.windowMs();
+        int[] ranges = {7, 6, 5, 4, 3, 2};
+        for (int i = 0; i < 6; i++) {
+            long high = 10_000L + i;
+            strategy.onClosedCandle(
+                    closed(Timeframe.FIFTEEN_S, i * step, high, high - ranges[i]), out);
+        }
+        int before = out.rows.size();
+        strategy.onClosedCandle(closed(Timeframe.FIFTEEN_S, 6 * step, 10_006L, 10_005L), out);
+        assertEquals(before, out.rows.size());
+    }
+
+    @Test
+    @DisplayName("arm-time emit stamps closed-row identity (P2-231)")
+    void armTimeEmitUsesClosedIdentity() throws Exception {
+        open();
+        long step = Timeframe.FIFTEEN_S.windowMs();
+        int[] ranges = {7, 6, 5, 4, 3, 2};
+        for (int i = 0; i < 6; i++) {
+            long high = 10_000L + i;
+            strategy.onClosedCandle(
+                    closed(Timeframe.FIFTEEN_S, i * step, high, high - ranges[i]), out);
+        }
+        // Breaching trade newer than the arming candle's window end.
+        strategy.onLiveTick(live(Timeframe.FIFTEEN_S, 10_007L, 500_000L), out);
+        out.rows.clear();
+        strategy.onClosedCandle(closed(Timeframe.FIFTEEN_S, 6 * step, 10_006L, 10_005L), out);
+        assertEquals(1, out.rows.size());
+        RowData row = out.rows.get(0);
+        assertEquals("NSE", field(row, SignalCandidatesTableColumns.EXCHANGE));
+        assertEquals("TEST", field(row, SignalCandidatesTableColumns.SYMBOL));
+    }
+
+    @Test
+    @DisplayName("null/unknown tf fails with a clear error (P2-156)")
+    void nullUnknownTfFailsClear() {
+        open();
+        GenericRowData nullTf = (GenericRowData) closed(Timeframe.FIFTEEN_S, 0L, 10L, 9L);
+        nullTf.setField(CandleClosedColumns.TF, null);
+        try {
+            strategy.onClosedCandle(nullTf, out);
+            assertTrue(false, "null tf must throw");
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage().contains("missing tf"));
+        } catch (Exception e) {
+            assertTrue(false, "wrong exception: " + e);
+        }
+        GenericRowData badTf = (GenericRowData) closed(Timeframe.FIFTEEN_S, 0L, 10L, 9L);
+        badTf.setField(CandleClosedColumns.TF, StringData.fromString("NOPE"));
+        try {
+            strategy.onClosedCandle(badTf, out);
+            assertTrue(false, "unknown tf must throw");
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage().contains("Unknown Timeframe code"));
+        } catch (Exception e) {
+            assertTrue(false, "wrong exception: " + e);
+        }
     }
 
     @Test

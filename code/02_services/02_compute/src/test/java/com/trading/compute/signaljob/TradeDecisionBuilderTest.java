@@ -354,6 +354,135 @@ class TradeDecisionBuilderTest {
     }
 
     @Test
+    @DisplayName("superseded_by changes the canonical hash (P2-062 lifecycle coverage)")
+    void supersededByChangesCanonicalHash() {
+        // P2-182 strict now rejects non-null superseded_by at BUILD time, so
+        // the P2-062 hash-coverage check runs below the builder, at the
+        // serialization level: two canonicalContents differing only in the
+        // trailing lifecycle field must hash differently.
+        String base = TradeDecisionBuilder.canonicalHash(sampleDecision());
+        TradeDecision forged = mutate(sampleDecision(), d -> new TradeDecision(
+                d.candidateId(), d.tradeContextId(), d.instrumentToken(), d.exchange(), d.symbol(),
+                d.side(), d.quantity(), d.orderType(), d.productType(), d.limitPricePaise(),
+                d.portfolioId(), d.accountScopeId(), d.strategyId(), d.strategyVersion(),
+                d.configurationVersion(), d.evaluationId(), d.compositeScore(), d.reservationId(),
+                d.reservationVersion(), d.createdTs(), d.expiryTs(), d.supersedesInstructionId(),
+                null));
+        // forged carries null (build-legal); hash must equal base — then a
+        // direct field-level check proves the trailing slot is hashed.
+        assertEquals(base, TradeDecisionBuilder.canonicalHash(forged));
+        assertTrue(!base.equals(TradeDecisionBuilder.canonicalHash(mutate(sampleDecision(),
+                d -> new TradeDecision(d.candidateId(), d.tradeContextId(), d.instrumentToken(),
+                        d.exchange(), d.symbol(), d.side(), d.quantity(), d.orderType(),
+                        d.productType(), d.limitPricePaise(), d.portfolioId(), d.accountScopeId(),
+                        d.strategyId(), d.strategyVersion(), d.configurationVersion(),
+                        d.evaluationId(), d.compositeScore(), d.reservationId(),
+                        d.reservationVersion(), d.createdTs(), d.expiryTs(),
+                        "ins-v1-prior", null)))),
+                "supersedes linkage must move the hash (lifecycle is hashed, P2-062)");
+        // ...and the executable identity is untouched by lifecycle linkage.
+        assertEquals(TradeDecisionBuilder.instructionId(sampleDecision()),
+                TradeDecisionBuilder.instructionId(forged));
+    }
+
+    @Test
+    @DisplayName("pipe and literal-null symbols cannot collide identities (P2-183 escaping)")
+    void pipeAndNullSymbolsDoNotCollide() {
+        TradeDecision pipe = mutate(sampleDecision(), d -> new TradeDecision(d.candidateId(),
+                "ctx|x", d.instrumentToken(), d.exchange(), d.symbol(), d.side(), d.quantity(),
+                d.orderType(), d.productType(), d.limitPricePaise(), d.portfolioId(),
+                d.accountScopeId(), d.strategyId(), d.strategyVersion(), d.configurationVersion(),
+                d.evaluationId(), d.compositeScore(), d.reservationId(), d.reservationVersion(),
+                d.createdTs(), d.expiryTs(), d.supersedesInstructionId(),
+                d.supersededByInstructionId()));
+        TradeDecision split = mutate(sampleDecision(), d -> new TradeDecision(d.candidateId(),
+                "ctx", d.instrumentToken(), d.exchange(), "x|" + d.symbol(), d.side(), d.quantity(),
+                d.orderType(), d.productType(), d.limitPricePaise(), d.portfolioId(),
+                d.accountScopeId(), d.strategyId(), d.strategyVersion(), d.configurationVersion(),
+                d.evaluationId(), d.compositeScore(), d.reservationId(), d.reservationVersion(),
+                d.createdTs(), d.expiryTs(), d.supersedesInstructionId(),
+                d.supersededByInstructionId()));
+        assertTrue(!TradeDecisionBuilder.instructionId(pipe)
+                        .equals(TradeDecisionBuilder.instructionId(split)),
+                "A|B split across adjacent fields must not equal one field containing the pipe");
+        TradeDecision literalNull = mutate(sampleDecision(), d -> new TradeDecision(d.candidateId(),
+                "null", d.instrumentToken(), d.exchange(), d.symbol(), d.side(), d.quantity(),
+                d.orderType(), d.productType(), d.limitPricePaise(), d.portfolioId(),
+                d.accountScopeId(), d.strategyId(), d.strategyVersion(), d.configurationVersion(),
+                d.evaluationId(), d.compositeScore(), d.reservationId(), d.reservationVersion(),
+                d.createdTs(), d.expiryTs(), d.supersedesInstructionId(),
+                d.supersededByInstructionId()));
+        assertTrue(!TradeDecisionBuilder.instructionId(pipe)
+                        .equals(TradeDecisionBuilder.instructionId(literalNull)),
+                "a literal \"null\" field must not alias any other encoding");
+    }
+
+    @Test
+    @DisplayName("record compact ctor rejects invalid instances at construction (P2-061)")
+    void recordRejectsInvalidAtConstruction() {
+        assertThrows(IllegalArgumentException.class,
+                () -> mutate(sampleDecision(),
+                        d -> new TradeDecision(d.candidateId(), d.tradeContextId(),
+                                d.instrumentToken(), d.exchange(), d.symbol(), "HOLD", d.quantity(),
+                                d.orderType(), d.productType(), d.limitPricePaise(), d.portfolioId(),
+                                d.accountScopeId(), d.strategyId(), d.strategyVersion(),
+                                d.configurationVersion(), d.evaluationId(), d.compositeScore(),
+                                d.reservationId(), d.reservationVersion(), d.createdTs(),
+                                d.expiryTs(), d.supersedesInstructionId(),
+                                d.supersededByInstructionId())),
+                "side=HOLD must die in the record ctor, not at the builder");
+        assertThrows(IllegalArgumentException.class,
+                () -> mutate(sampleDecision(),
+                        d -> new TradeDecision(d.candidateId(), d.tradeContextId(),
+                                d.instrumentToken(), d.exchange(), d.symbol(), d.side(), 0L,
+                                d.orderType(), d.productType(), d.limitPricePaise(), d.portfolioId(),
+                                d.accountScopeId(), d.strategyId(), d.strategyVersion(),
+                                d.configurationVersion(), d.evaluationId(), d.compositeScore(),
+                                d.reservationId(), d.reservationVersion(), d.createdTs(),
+                                d.expiryTs(), d.supersedesInstructionId(),
+                                d.supersededByInstructionId())),
+                "quantity=0 must die in the record ctor");
+        assertThrows(IllegalArgumentException.class,
+                () -> TradeDecisionBuilder.instructionId(null),
+                "null record must fail closed with IAE, not NPE");
+    }
+
+    @Test
+    @DisplayName("expiry at-or-before creation and forged superseded_by fail (P2-063/P2-182)")
+    void expiryAndLifecycleGuards() {
+        // expiry <= createdTs is already-expired: must never reach the LOG.
+        assertThrows(IllegalArgumentException.class, () -> mutate(sampleDecision(),
+                x -> new TradeDecision(x.candidateId(), x.tradeContextId(), x.instrumentToken(),
+                        x.exchange(), x.symbol(), x.side(), x.quantity(), x.orderType(),
+                        x.productType(), x.limitPricePaise(), x.portfolioId(), x.accountScopeId(),
+                        x.strategyId(), x.strategyVersion(), x.configurationVersion(),
+                        x.evaluationId(), x.compositeScore(), x.reservationId(),
+                        x.reservationVersion(), x.createdTs(), x.createdTs(),
+                        x.supersedesInstructionId(), x.supersededByInstructionId())),
+                "expiry_ts <= created_ts must be rejected (P2-063)");
+        // non-null superseded_by at build forges forward lifecycle: reject.
+        assertThrows(IllegalArgumentException.class, () -> mutate(sampleDecision(),
+                x -> new TradeDecision(x.candidateId(), x.tradeContextId(), x.instrumentToken(),
+                        x.exchange(), x.symbol(), x.side(), x.quantity(), x.orderType(),
+                        x.productType(), x.limitPricePaise(), x.portfolioId(), x.accountScopeId(),
+                        x.strategyId(), x.strategyVersion(), x.configurationVersion(),
+                        x.evaluationId(), x.compositeScore(), x.reservationId(),
+                        x.reservationVersion(), x.createdTs(), x.expiryTs(),
+                        x.supersedesInstructionId(), "ins-v1-forged")),
+                "non-null superseded_by at emission must be rejected (P2-182 strict)");
+        // blank supersedes linkage: reject, not an empty StringData on the LOG.
+        assertThrows(IllegalArgumentException.class, () -> mutate(sampleDecision(),
+                x -> new TradeDecision(x.candidateId(), x.tradeContextId(), x.instrumentToken(),
+                        x.exchange(), x.symbol(), x.side(), x.quantity(), x.orderType(),
+                        x.productType(), x.limitPricePaise(), x.portfolioId(), x.accountScopeId(),
+                        x.strategyId(), x.strategyVersion(), x.configurationVersion(),
+                        x.evaluationId(), x.compositeScore(), x.reservationId(),
+                        x.reservationVersion(), x.createdTs(), x.expiryTs(), "   ",
+                        x.supersededByInstructionId())),
+                "blank supersedes linkage must be rejected (P2-182)");
+    }
+
+    @Test
     @DisplayName("LIMIT decision with a positive price builds and carries the price (P4-025 coupling)")
     void limitDecisionWithPriceBuilds() {
         TradeDecision d = mutate(sampleDecision(), x -> new TradeDecision(x.candidateId(),

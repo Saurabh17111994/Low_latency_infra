@@ -496,6 +496,27 @@ class SignalJobConfigTest {
         assertEquals(8, cfg.parallelism());
         assertTrue(cfg.stateBackendManagedMemory());
         assertEquals(null, cfg.savepointDir());
+        // P2-053: dev checkpoint dir keeps the documented local default.
+        assertEquals("file:///checkpoints", cfg.checkpointDir());
+    }
+
+    @Test
+    void rejectsTimingKnobOutOfRangeAndMalformedNumbers() {
+        // P2-163: nonsense watermark/idleness fails at parse; P2-168: the key
+        // is named instead of a bare NumberFormatException.
+        Map<String, String> env = env();
+        env.put("ALLOWED_LATENESS_MS", "-1");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(env));
+        assertTrue(e.getMessage().contains("ALLOWED_LATENESS_MS"), e.getMessage());
+        env.put("ALLOWED_LATENESS_MS", "1000");
+        env.put("SOURCE_IDLE_MS", "0");
+        e = assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
+        assertTrue(e.getMessage().contains("SOURCE_IDLE_MS"), e.getMessage());
+        env.put("SOURCE_IDLE_MS", "15000");
+        env.put("WATERMARK_OUT_OF_ORDER_MS", "abc");
+        e = assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
+        assertTrue(e.getMessage().contains("WATERMARK_OUT_OF_ORDER_MS"), e.getMessage());
     }
 
     @Test
@@ -557,6 +578,52 @@ class SignalJobConfigTest {
     }
 
     @Test
+    void strayAwsVarsOnLocalCheckpointStayNull() {
+        // P2-167: stray creds with no s3:// URI must not populate the record.
+        Map<String, String> env = env();
+        env.put("DEPLOYMENT_ENV", "dev");
+        env.put("CHECKPOINT_DIR", "/tmp/signaljob-checkpoints");
+        env.put("AWS_ACCESS_KEY_ID", "stray-key");
+        env.put("AWS_SECRET_ACCESS_KEY", "stray-secret");
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertEquals(null, cfg.s3Endpoint());
+        assertEquals(null, cfg.s3AccessKey());
+        assertEquals(null, cfg.s3SecretKey());
+    }
+
+    @Test
+    void paddedS3CheckpointStillDetectsObjectStore() {
+        // P2-164: ' s3://...' must detect like the trimmed enforcement string.
+        Map<String, String> env = env();
+        env.put("DEPLOYMENT_ENV", "dev");
+        env.put("CHECKPOINT_DIR", "  s3://signal-checkpoints/dev");
+        env.put("S3_ENDPOINT", "https://signal-test.r2.cloudflarestorage.com");
+        env.put("AWS_ACCESS_KEY_ID", "r2accesskey000000000000");
+        env.put("AWS_SECRET_ACCESS_KEY", "r2s3cr3tvalue000000000000");
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertEquals("https://signal-test.r2.cloudflarestorage.com", cfg.s3Endpoint());
+    }
+
+    @Test
+    void unreadableSecretFileReportsPathNotMissing() throws Exception {
+        // P2-165: present-but-unreadable must name the path, not 'not set'.
+        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("s3sec");
+        java.nio.file.Path missing = dir.resolve("no-such-secret");
+        Map<String, String> env = env();
+        env.put("DEPLOYMENT_ENV", "dev");
+        env.put("CHECKPOINT_DIR", "s3://signal-checkpoints/dev");
+        env.put("S3_ENDPOINT", "https://signal-test.r2.cloudflarestorage.com");
+        env.put("AWS_ACCESS_KEY_ID_FILE", missing.toString());
+        env.put("AWS_SECRET_ACCESS_KEY", "r2s3cr3tvalue000000000000");
+        IllegalStateException e = org.junit.jupiter.api.Assertions.assertThrows(
+                IllegalStateException.class, () -> SignalJobConfig.from(env));
+        org.junit.jupiter.api.Assertions.assertTrue(
+                e.getMessage().contains("could not be read"), e.getMessage());
+        org.junit.jupiter.api.Assertions.assertTrue(
+                e.getMessage().contains("AWS_ACCESS_KEY_ID"), e.getMessage());
+    }
+
+    @Test
     void rejectsHeapStateInProduction() {
         Map<String, String> env = env();
         env.put("DEPLOYMENT_ENV", "production");
@@ -564,6 +631,11 @@ class SignalJobConfigTest {
         env.put("RESTART_DELAY_MS", "30000");
         env.put("STATE_BACKEND", "hashmap");
         env.put("CHECKPOINT_DIR", "s3://signal-checkpoints/prod");
+        // Valid S3 triple so the failure under test is the backend, not creds
+        // (single-resolve runs before the backend check in from()).
+        env.put("S3_ENDPOINT", "https://signal-test.r2.cloudflarestorage.com");
+        env.put("AWS_ACCESS_KEY_ID", "r2accesskey000000000000");
+        env.put("AWS_SECRET_ACCESS_KEY", "r2s3cr3tvalue000000000000");
         IllegalStateException e = assertThrows(IllegalStateException.class,
                 () -> SignalJobConfig.from(env));
         assertTrue(e.getMessage().contains("STATE_BACKEND=hashmap is forbidden"),
@@ -644,6 +716,16 @@ class SignalJobConfigTest {
         IllegalStateException e = assertThrows(IllegalStateException.class,
                 () -> SignalJobConfig.from(env));
         assertTrue(e.getMessage().contains("STATE_BACKEND must be"), e.getMessage());
+    }
+
+    @Test
+    void stateBackendIsCaseInsensitive() {
+        // P2-234: 'RocksDB' must parse like 'rocksdb'; stray whitespace too.
+        Map<String, String> env = env();
+        env.put("STATE_BACKEND", "  RocksDB  ");
+        assertEquals("rocksdb", SignalJobConfig.from(env).stateBackend());
+        env.put("STATE_BACKEND", "HASHMAP");
+        assertEquals("hashmap", SignalJobConfig.from(env).stateBackend());
     }
 
     @Test

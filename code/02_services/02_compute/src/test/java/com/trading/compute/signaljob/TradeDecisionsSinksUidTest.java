@@ -2,6 +2,7 @@ package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -91,6 +92,20 @@ class TradeDecisionsSinksUidTest {
                 "index mapper UID must anchor the hash-recompute operator");
         assertTrue(uidToName.get("trade-instruction-state-sink").startsWith("trade-instruction-state-sink"),
                 "KV index sink UID must anchor the instruction-state upsert");
+    }
+
+    @Test
+    @DisplayName("attach rejects null wiring at graph-build (P2-242)")
+    void attachRejectsNullWiring() {
+        SignalJobConfig config = SignalJobConfig.from(env());
+        StreamExecutionEnvironment env2 =
+                StreamExecutionEnvironment.getExecutionEnvironment();
+        DataStream<RowData> decisions = env2.fromCollection(
+                List.<RowData>of(), TradeDecisionsTableColumns.ROW_TYPE_INFO);
+        assertThrows(NullPointerException.class,
+                () -> TradeDecisionsSinks.attach(null, config));
+        assertThrows(NullPointerException.class,
+                () -> TradeDecisionsSinks.attach(decisions, null));
     }
 
     private static Map<String, String> env() {

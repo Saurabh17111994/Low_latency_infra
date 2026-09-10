@@ -70,6 +70,9 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
     /** Last trade time evaluated against every armed setup. */
     private long lastEvalTime = Long.MIN_VALUE;
 
+    /** Last trade fingerprint evaluated (P2-048 same-ms dedup key half). */
+    private String lastEvalFingerprint;
+
     /** Last trade price seen (used for the arm-time ordering edge). */
     private long lastEvalPrice = 0L;
 
@@ -103,30 +106,58 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
         token = live.getLong(CandleLiveColumns.INSTRUMENT_TOKEN);
         exchange = stringAt(live, CandleLiveColumns.EXCHANGE);
         symbol = stringAt(live, CandleLiveColumns.SYMBOL);
-        if (tradeTime <= lastEvalTime) {
-            return; // no new trade since the last evaluation — price is identical
+        // P2-048: dedup on (tradeTime, fingerprint) — same-ms trades with
+        // different prices are distinct events, not replays. Time-only fast
+        // path when the fingerprint is null (no decode on the common path).
+        String fp = stringAt(live, CandleLiveColumns.LAST_EVENT_FINGERPRINT);
+        if (tradeTime < lastEvalTime
+                || (tradeTime == lastEvalTime
+                        && (fp == null || fp.equals(lastEvalFingerprint)))) {
+            return;
         }
         long price = live.getLong(CandleLiveColumns.CLOSE_PAISE);
         evaluate(price, tradeTime, out);
         lastEvalPrice = price;
         lastEvalTime = tradeTime;
+        lastEvalFingerprint = fp;
     }
 
     /** Completed candle: maintain the N7 ring, arm setups. */
     @Override
     public void onClosedCandle(RowData closed, Collector<RowData> out) throws Exception {
         token = closed.getLong(CandleClosedColumns.INSTRUMENT_TOKEN);
+        // P2-231: refresh identity from closed rows too — arm-time emits
+        // before any live tick must carry the closed row's identity, not
+        // NSE/UNKNOWN fallbacks.
+        exchange = stringAt(closed, CandleClosedColumns.EXCHANGE);
+        symbol = stringAt(closed, CandleClosedColumns.SYMBOL);
         Timeframe tf = parseTimeframe(closed);
         long ws = closed.getLong(CandleClosedColumns.WINDOW_START);
         long we = closed.getLong(CandleClosedColumns.WINDOW_END);
         long high = closed.getLong(CandleClosedColumns.HIGH_PAISE);
         long low = closed.getLong(CandleClosedColumns.LOW_PAISE);
+        // P2-153: inverted high<low yields a negative range that corrupts the
+        // strict-N7 comparison — skip and count before ring entry.
+        if (high < low) {
+            metrics.inc("rejected_invalid", 1);
+            return;
+        }
 
         Deque<RingCandle> ring = rings[tf.ordinal()];
         // Monotonic guard: closed candles arrive in windowStart order per tf.
         // A duplicate/replayed window (same ws) must not double-enter the ring.
         if (!ring.isEmpty() && ws <= ring.peekLast().windowStart) {
             return;
+        }
+        // P2-154: a ws jump over a whole window means a gap (outage) — the
+        // ring is non-contiguous and the armed setup fires on stale levels.
+        // Invalidate both structurally instead of arming on a false sequence.
+        if (!ring.isEmpty() && ws - ring.peekLast().windowStart > tf.windowMs()) {
+            ring.clear();
+            if (armed[tf.ordinal()] != null) {
+                armed[tf.ordinal()] = null;
+                metrics.inc("invalidated_gap", 1);
+            }
         }
         ring.addLast(new RingCandle(ws, high, low));
         while (ring.size() > RING_CAPACITY) {
@@ -139,11 +170,33 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
             armedHeap++;
             metrics.inc("armed", 1);
             // Cross-stream ordering edge: if a trade newer than this candle's
-            // window already breached the fresh levels, fire now.
-            if (lastEvalTime > we) {
+            // window already breached the fresh levels, fire now — but only
+            // when this TF is the highest breached (P2-049: same D-006 rule
+            // as the live path, otherwise arm-time double-emits).
+            if (lastEvalTime > we && isHighestBreached(tf, lastEvalPrice)) {
                 evaluateArmedSetup(tf, setup, lastEvalPrice, lastEvalTime, out);
             }
         }
+    }
+
+    /** True when no higher-TF armed setup also breaches at this price (D-006).
+     * Levels-based on purpose: an already-fired higher setup still claimed
+     * this price, so a newly-armed lower setup must wait for fresh-price
+     * confirmation on the live path instead of emitting on stale replay. */
+    private boolean isHighestBreached(Timeframe tf, long price) {
+        for (Timeframe other : Timeframe.values()) {
+            if (other.windowMs() <= tf.windowMs()) {
+                continue;
+            }
+            ArmedSetup setup = armed[other.ordinal()];
+            if (setup == null) {
+                continue;
+            }
+            if (sideFor(price, setup.highPaise, setup.lowPaise) != null) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** Check every armed setup at one price; emit the highest breached TF only. */
@@ -161,10 +214,13 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
                 continue;
             }
             breachCount++;
-            // Timeframe.values() is ascending window size, so the last breach
-            // seen is the highest timeframe (D-006).
-            winnerTf = tf;
-            winner = setup;
+            // P2-155: explicit windowMs compare — never rely on values()
+            // declaration order for the D-006 winner (P2-241 documents it,
+            // this code must not depend on it).
+            if (winnerTf == null || tf.windowMs() > winnerTf.windowMs()) {
+                winnerTf = tf;
+                winner = setup;
+            }
         }
         if (winner == null) {
             return;
@@ -268,7 +324,12 @@ public class N7RangeBreakoutStrategy implements SignalStrategy {
     }
 
     private static Timeframe parseTimeframe(RowData row) {
-        return Timeframe.valueOf(row.getString(CandleClosedColumns.TF).toString());
+        // P2-156: null guard + Part C fromCode() — one good error path for a
+        // poison tf instead of an NPE / bare valueOf throw killing the host.
+        if (row == null || row.isNullAt(CandleClosedColumns.TF)) {
+            throw new IllegalArgumentException("closed candle missing tf");
+        }
+        return Timeframe.fromCode(row.getString(CandleClosedColumns.TF).toString());
     }
 
     private static String stringAt(RowData row, int idx) {

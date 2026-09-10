@@ -12,7 +12,7 @@ import org.apache.flink.table.data.StringData;
 /** Pure deterministic builder for the v1 {@code Execution_Intent} contract. */
 public final class ExecutionIntentBuilder {
 
-    private static final String IDENTITY_VERSION = "ei-id-v1";
+    private static final String IDENTITY_VERSION = "ei-id-v2";
     private static final String REQUEST_VERSION = "ei-request-v1";
 
     private ExecutionIntentBuilder() {}
@@ -20,6 +20,15 @@ public final class ExecutionIntentBuilder {
     /**
      * Maps one validated signal candidate into an execution intent without
      * performing I/O or assigning any broker/executor identity.
+     *
+     * <p>MVP: every intent from this path carries null {@code expiry_ts} and
+     * null {@code supersedes_instruction_id} — i.e. never-expiring intents
+     * (P2-133). There is no candidate validity window to derive a TTL from
+     * ({@code VALIDITY_REASON} is status, not a window); TTL enforcement
+     * belongs to the Java execution gateway (T2), which owns durable
+     * quarantine. If a bounded TTL is ever required, derive
+     * {@code expiryTs} here and thread {@code supersedesInstructionId}
+     * through instead of hardcoding null.
      *
      * <p>This overload deliberately requires the candidate to carry a
      * non-null {@code trade_context_id}. The MVP producer uses the overload
@@ -59,6 +68,15 @@ public final class ExecutionIntentBuilder {
         String action = required(candidate, SignalCandidatesTableColumns.ACTION, "action");
         if (!SignalCandidatesTableColumns.ACTION_ENTRY.equals(action)) {
             throw new IllegalArgumentException("only ENTRY candidates can become intents: " + action);
+        }
+        // P2-031: unguarded getLong auto-unboxes null → NPE escapes flatMap
+        // (only IAE is caught) → task failover on one malformed row. Fail as
+        // a counted reject instead.
+        if (candidate.isNullAt(SignalCandidatesTableColumns.DETECTION_TS)
+                || candidate.isNullAt(SignalCandidatesTableColumns.INSTRUMENT_TOKEN)
+                || candidate.isNullAt(SignalCandidatesTableColumns.QUANTITY)) {
+            throw new IllegalArgumentException(
+                    "detection_ts, instrument_token and quantity must be present");
         }
         long createdTs = candidate.getLong(SignalCandidatesTableColumns.DETECTION_TS);
         return new ExecutionIntent(
@@ -134,8 +152,12 @@ public final class ExecutionIntentBuilder {
     }
 
     static String identityContent(ExecutionIntent intent) {
+        // P2-032: venue is executable routing scope — it MUST be in the
+        // identity. Without it, two venues sharing token/symbol mint the same
+        // instructionId with different requestHashes → false VIOLATION.
         return join(IDENTITY_VERSION, intent.accountScopeId(), intent.executionPartitionId(),
-                intent.instrumentToken(), intent.symbol(), intent.tradeContextId(), intent.side(),
+                intent.instrumentToken(), intent.exchange(), intent.symbol(),
+                intent.tradeContextId(), intent.side(),
                 intent.quantity(), token(intent.limitPricePaise()), intent.orderType(),
                 intent.productType(), intent.timeInForce(), intent.strategyId(),
                 intent.strategyVersion());
@@ -189,45 +211,11 @@ public final class ExecutionIntentBuilder {
     }
 
     private static void validate(ExecutionIntent intent) {
+        // P2-134: single enforcement point is the P2-029 compact ctor — the
+        // builder delegates (mirrors the P2-063/P2-181 fold), keeping only
+        // the null-record guard the record itself cannot express.
         if (intent == null) {
             throw new IllegalArgumentException("execution intent must not be null");
-        }
-        requireText(intent.candidateId(), "candidate_id");
-        requireText(intent.tradeContextId(), "trade_context_id");
-        requireText(intent.accountScopeId(), "account_scope_id");
-        requireText(intent.executionPartitionId(), "execution_partition_id");
-        requireText(intent.exchange(), "exchange");
-        requireText(intent.symbol(), "symbol");
-        requireText(intent.side(), "side");
-        requireText(intent.orderType(), "order_type");
-        requireText(intent.productType(), "product_type");
-        requireText(intent.timeInForce(), "time_in_force");
-        requireText(intent.strategyId(), "strategy_id");
-        requireText(intent.strategyVersion(), "strategy_version");
-        requireText(intent.configurationVersion(), "configuration_version");
-        if (intent.instrumentToken() <= 0 || intent.quantity() <= 0 || intent.createdTs() <= 0) {
-            throw new IllegalArgumentException(
-                    "instrument_token, quantity, and created_ts must be positive");
-        }
-        if (intent.limitPricePaise() != null && intent.limitPricePaise() <= 0) {
-            throw new IllegalArgumentException("limit_price_paise must be positive when present");
-        }
-        if (intent.expiryTs() != null && intent.expiryTs() <= intent.createdTs()) {
-            throw new IllegalArgumentException("expiry_ts must be after created_ts");
-        }
-        if (ExecutionIntentTableColumns.ORDER_TYPE_LIMIT.equals(intent.orderType())
-                && intent.limitPricePaise() == null) {
-            throw new IllegalArgumentException("LIMIT intent requires limit_price_paise");
-        }
-        if (ExecutionIntentTableColumns.ORDER_TYPE_MARKET.equals(intent.orderType())
-                && intent.limitPricePaise() != null) {
-            throw new IllegalArgumentException("MARKET intent must not carry limit_price_paise");
-        }
-    }
-
-    private static void requireText(String value, String field) {
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(field + " must be non-blank");
         }
     }
 }
