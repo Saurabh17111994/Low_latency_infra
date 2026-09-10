@@ -14,7 +14,25 @@
   <artifactId>compute</artifactId>
   <packaging>jar</packaging>
 
+  <properties>
+    <!-- log4j2.version comes from the parent (P2-218 centralization). -->
+    <!-- P2-112: argLine as a PROPERTY, not just plugin config — surefire's
+         @{argLine} late replacement reads this property, so an injected
+         agent (JaCoCo -javaagent) that prepends to it survives, and the
+         placeholder is always defined (a bare @{argLine} with no property
+         is passed to the JVM literally and breaks the fork). -->
+    <argLine>--add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED</argLine>
+  </properties>
+
   <dependencies>
+    <!-- slf4j-api declared FIRST (ingestion R-025 pattern): on the test
+         classpath the Fluss client's bundled slf4j-api 1.7 must not win over
+         2.x — if it does, the log4j-slf4j2-impl ServiceLoader provider is
+         never consulted and logging silently goes NOP. Version from parent. -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+    </dependency>
     <dependency>
       <groupId>org.apache.flink</groupId>
       <artifactId>flink-streaming-java</artifactId>
@@ -106,13 +124,21 @@
     <dependency>
       <groupId>org.apache.logging.log4j</groupId>
       <artifactId>log4j-slf4j2-impl</artifactId>
-      <version>2.25.4</version>
+      <version>${log4j2.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- P2-110: explicit log4j-api pin matching core/slf4j2-impl (parent has
+         no log4j DM yet — transitivity would otherwise mediate the version). -->
+    <dependency>
+      <groupId>org.apache.logging.log4j</groupId>
+      <artifactId>log4j-core</artifactId>
+      <version>${log4j2.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.logging.log4j</groupId>
-      <artifactId>log4j-core</artifactId>
-      <version>2.25.4</version>
+      <artifactId>log4j-api</artifactId>
+      <version>${log4j2.version}</version>
       <scope>test</scope>
     </dependency>
     <!-- The Flink image supplies the Fluss connector and client in
@@ -140,19 +166,36 @@
          artifact is a SHADED fat jar (the OTel SDK 1.30.1 + OTLP exporters are
          bundled inside — verified in flink-metrics-otel-2.2.1.jar, 984
          io/opentelemetry classes; the published pom declares no OTel deps).
-         Compile scope: the shaded compute.jar carries it on the embedded /
-         dev / MiniCluster classpath so ServiceLoader discovers
-         OpenTelemetryMetricReporterFactory from the job's own jar; the
-         distributed dist still needs the jar under /opt/flink/plugins/ (see
-         CHG-023 deployment note) for the TaskManager metric registry. -->
+         Delivery vehicle is the dist plugin dir ONLY: the jar must be under
+         /opt/flink/plugins/ (see CHG-023 deployment note) for the TaskManager
+         metric registry. It is NOT shaded into compute.jar (P2-109) — that
+         duplicated the reporter + OTel SDK class universe. -->
     <dependency>
       <groupId>org.apache.flink</groupId>
       <artifactId>flink-metrics-otel</artifactId>
       <version>${flink.version}</version>
+      <scope>provided</scope>
+      <!-- P2-109 (firm review choice): provided + /opt/flink/plugins/ only.
+           Compile-scope shaded the reporter + the whole bundled OTel SDK
+           (984 io/opentelemetry classes) into compute.jar, duplicating the
+           plugin class universe (child-first vs job classloader, duplicated
+           GlobalOpenTelemetry static state) and risking ClassCastException /
+           double-reporting. Provided keeps it on the compile/test classpath
+           (string-config + ServiceLoader tests still pass) without shipping
+           a second OTel copy. -->
     </dependency>
     <dependency>
       <groupId>com.trading</groupId>
       <artifactId>common</artifactId>
+    </dependency>
+    <!-- P2-111: parent dependencyManagement already forces assertj-core to
+         test scope (verified: dependency:tree shows :test, nothing shaded),
+         but an explicit override here keeps that guarantee local — a future
+         parent-DM cleanup must not silently re-inherit it compile-scoped. -->
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>
@@ -172,6 +215,15 @@
           <execution>
             <phase>package</phase>
             <goals><goal>shade</goal></goals>
+            <configuration>
+              <!-- P2-005: without ServicesResourceTransformer, META-INF/
+                   services files from multiple shaded jars merge last-wins
+                   and ServiceLoader discovery for the OTel metric reporter
+                   factory can be silently dropped. Matches ingestion. -->
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+              </transformers>
+            </configuration>
           </execution>
         </executions>
       </plugin>
@@ -184,7 +236,12 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <configuration>
-          <argLine>-Dlog4j2.configurationFile=${project.build.testOutputDirectory}/log4j2.xml --add-opens=java.base/java.nio=ALL-UNNAMED --add-opens=java.base/java.util=ALL-UNNAMED --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED</argLine>
+          <!-- P2-112: @{argLine} late-replacement placeholder first — an
+               injected agent (JaCoCo -javaagent, …) prepends to the argLine
+               property and must not be silently discarded. The add-opens
+               flags live in the property (see <properties>), so they land
+               via the placeholder and agents compose in front of them. -->
+          <argLine>@{argLine} -Dlog4j2.configurationFile=${project.build.testOutputDirectory}/log4j2.xml</argLine>
         </configuration>
       </plugin>
     </plugins>

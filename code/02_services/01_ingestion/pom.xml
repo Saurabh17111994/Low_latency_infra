@@ -24,7 +24,7 @@
        until centralization lands. -->
   <properties>
     <protobuf.version>3.25.5</protobuf.version>
-    <log4j2.version>2.25.4</log4j2.version>
+    <!-- log4j2.version now comes from the parent (P2-218 centralization). -->
   </properties>
 
   <dependencies>

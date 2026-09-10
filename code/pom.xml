@@ -35,6 +35,11 @@
     <jackson.version>2.16.1</jackson.version>
     <junit.version>5.10.1</junit.version>
     <assertj.version>3.25.3</assertj.version>
+    <!-- P2-218: single source for the log4j2 test-logging triplet — modules
+         must NOT re-declare their own (was duplicated in compute + ingestion;
+         execution-gateway also copy-pastes the versions — swept next pass).
+         Flink-artifact dependencyManagement entries remain a follow-up. -->
+    <log4j2.version>2.25.4</log4j2.version>
   </properties>
 
   <dependencyManagement>

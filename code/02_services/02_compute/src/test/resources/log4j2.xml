@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- P2-196: shutdownHook=disable KEPT (surefire hang protection) — durable
+     capture comes from immediateFlush=true on the rolling file instead. -->
 <Configuration status="WARN" shutdownHook="disable">
   <!--
     Test-scope log4j2 config for the compute module: makes MiniCluster /
@@ -6,49 +8,46 @@
     provider, Flink falls back to NOP and checkpoint-write failures (e.g. the
     tracker-14 P4.2 R2 proof) are silent.
     SLF4J bridge: log4j-slf4j2-impl 2.25.4 (test scope) → Log4j2 2.25.4.
+    P2-075: all TEMP DEBUG PROBE loggers (smoke-8/10/15, 2026-08-17) were
+    removed — shaded-netty channel DEBUG flooded console+file and buried the
+    checkpoint errors this config exists to surface. Re-diagnose by adding a
+    logger back deliberately, or gate behind ${sys:flink.debug:-INFO}.
   -->
   <Properties>
-    <Property name="CONSOLE_PATTERN">%d{HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n</Property>
+    <!-- P2-076: %throwable suffix — the pattern omitting it dropped stack
+         traces for exactly the checkpoint failures this file must surface. -->
+    <Property name="CONSOLE_PATTERN">%d{HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n%throwable</Property>
   </Properties>
   <Appenders>
-    <Console name="CONSOLE" target="SYSTEM_ERR">
+    <!-- P2-197: SYSTEM_OUT — surefire's fork swallows SYSTEM_ERR, so console
+         diagnostics were invisible in exactly the scenario the FILE appender
+         was added for. -->
+    <Console name="CONSOLE" target="SYSTEM_OUT">
       <PatternLayout pattern="${CONSOLE_PATTERN}"/>
     </Console>
     <!-- Tracker 14 P6.3 (2026-08-12): durable capture — surefire's fork
          swallows SYSTEM_ERR, so the stall-guard diagnostics were invisible.
          Written to the workspace mount (logs/tracker-14/) so container runs
          keep the Flink log after the container exits. -->
-    <File name="FILE" fileName="${sys:test.log.dir:-target}/p63-flink.log">
+    <!-- P2-077: RollingFile — the plain File appender could grow without
+         bound; 50MB x 5 (gz) caps disk. P2-196: immediateFlush keeps the
+         diagnostics durable despite the disabled shutdown hook. -->
+    <RollingFile name="FILE"
+        fileName="${sys:test.log.dir:-target}/p63-flink.log"
+        filePattern="${sys:test.log.dir:-target}/p63-flink-%i.log.gz"
+        immediateFlush="true" append="false">
       <PatternLayout pattern="${CONSOLE_PATTERN}"/>
-    </File>
+      <Policies>
+        <SizeBasedTriggeringPolicy size="50 MB"/>
+      </Policies>
+      <DefaultRolloverStrategy max="5"/>
+    </RollingFile>
   </Appenders>
   <Loggers>
     <!-- S3A is verbose at INFO (retries, region probes); keep at WARN so the
          P4.2 checkpoint proof surfaces real errors, not noise. -->
     <Logger name="org.apache.hadoop.fs.s3a" level="WARN"/>
     <Logger name="org.apache.flink" level="INFO"/>
-    <!-- TEMP DEBUG PROBE (smoke-8, checkpoint-1 zero-ack diagnosis 2026-08-17):
-         per-task ack/decline lines, task-side trigger handling, source
-         coordinator handshake, StreamTask checkpoint entry. Revert after. -->
-    <Logger name="org.apache.flink.runtime.checkpoint.CheckpointCoordinator" level="DEBUG"/>
-    <Logger name="org.apache.flink.runtime.checkpoint.CheckpointFailureManager" level="DEBUG"/>
-    <Logger name="org.apache.flink.runtime.checkpoint.CheckpointRequestDecider" level="DEBUG"/>
-    <Logger name="org.apache.flink.runtime.checkpoint.CheckpointPlanCalculator" level="DEBUG"/>
-    <Logger name="org.apache.flink.runtime.taskmanager.Task" level="DEBUG"/>
-    <Logger name="org.apache.flink.streaming.runtime.tasks.StreamTask" level="DEBUG"/>
-    <Logger name="org.apache.flink.runtime.source.coordinator.SourceCoordinator" level="DEBUG"/>
-    <Logger name="org.apache.flink.runtime.operators.coordination.OperatorCoordinatorHolder" level="DEBUG"/>
-    <!-- TEMP DEBUG PROBE (smoke-10, fluss-client connection lifecycle 2026-08-17):
-         NettyClient/ServerConnection state transitions, lookup sender, write
-         sender, metadata leader resolution. Revert after. -->
-    <Logger name="org.apache.fluss.rpc.netty.client" level="DEBUG"/>
-    <Logger name="org.apache.fluss.client.lookup" level="DEBUG"/>
-    <Logger name="org.apache.fluss.client.write" level="DEBUG"/>
-    <Logger name="org.apache.fluss.client.metadata" level="DEBUG"/>
-    <Logger name="org.apache.fluss.client.table.scanner.log" level="DEBUG"/>
-    <!-- TEMP DEBUG PROBE (smoke-15, netty channel read/write events 2026-08-17):
-         proves whether lookup responses arrive at the job's netty. Revert after. -->
-    <Logger name="org.apache.fluss.shaded.netty4.io.netty.channel" level="DEBUG"/>
     <Logger name="com.trading" level="INFO"/>
     <Root level="INFO">
       <AppenderRef ref="CONSOLE"/>

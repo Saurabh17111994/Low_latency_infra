@@ -13,12 +13,20 @@ set -euo pipefail
 case "${DEPLOYMENT_ENV:-dev}" in
 	dev) ;;
 	production)
-		if [ "${STATE_BACKEND:-rocksdb}" = "hashmap" ]; then
-			echo "compute: FATAL — STATE_BACKEND=hashmap is forbidden in DEPLOYMENT_ENV=production (tracker 14 P4.1); use rocksdb" >&2
-			exit 1
-		fi
+		# P2-198: allow-list, not deny-one — HashMap/HASHMAP/other variants
+		# used to slip past the `= "hashmap"` equality gate. Lowercased trim
+		# mirrors SignalJobConfig.stateBackend(); only rocksdb is safe in prod.
+		case "$(printf '%s' "${STATE_BACKEND:-rocksdb}" | tr '[:upper:]' '[:lower:]')" in
+			rocksdb) ;;
+			*)
+				echo "compute: FATAL — STATE_BACKEND must be 'rocksdb' in DEPLOYMENT_ENV=production, got '${STATE_BACKEND:-}' (tracker 14 P4.1)" >&2
+				exit 1
+				;;
+		esac
 		case "${CHECKPOINT_DIR:-}" in
-			s3://* | s3a://*) ;;
+			# P2-198: `s3://?*` rejects the bare scheme (no bucket/path) that
+			# the old `s3://*` accepted.
+			s3://?* | s3a://?*) ;;
 			*)
 				echo "compute: FATAL — CHECKPOINT_DIR must be an S3 object-store URI in DEPLOYMENT_ENV=production (tracker 14 P4.2)" >&2
 				exit 1
@@ -38,19 +46,35 @@ case "${DEPLOYMENT_ENV:-dev}" in
 		fi
 		;;
 	*)
-		echo "compute: FATAL — DEPLOYMENT_ENV must be 'dev' or 'production', got '${DEPLOYMENT_ENV}' (tracker 14 P4.1)" >&2
+		# P2-198: ${DEPLOYMENT_ENV:-} — a set-but-weird value must not die on
+		# an unbound-variable expansion inside the diagnostic.
+		echo "compute: FATAL — DEPLOYMENT_ENV must be 'dev' or 'production', got '${DEPLOYMENT_ENV:-}' (tracker 14 P4.1)" >&2
 		exit 1
 		;;
 esac
 
-JM="${FLINK_JOBMANAGER:-flink-jobmanager}:8081"
-JAR=/opt/flink-jobs/compute.jar
+# P2-199: FLINK_JOBMANAGER may carry a scheme and/or port — appending :8081
+# unconditionally produced flink-jobmanager:8081:8081 and broke every REST
+# call. Strip scheme + trailing slash, append the default port only when bare.
+JM_RAW="${FLINK_JOBMANAGER:-flink-jobmanager}"
+JM_RAW="${JM_RAW#http://}"
+JM_RAW="${JM_RAW#https://}"
+JM_RAW="${JM_RAW%/}"
+case "${JM_RAW}" in
+	*:*) JM="${JM_RAW}" ;;
+	*) JM="${JM_RAW}:8081" ;;
+esac
+# COMPUTE_JAR override is a test seam (tests/test-submit-jobs.sh points it
+# at a dummy jar); production default unchanged (P2-108 mount check below).
+JAR="${COMPUTE_JAR:-/opt/flink-jobs/compute.jar}"
 
 echo "compute: waiting for JobManager at ${JM}"
 ready=0
 # SC2034: loop counter is unused — the loop is a bounded retry-wait.
 for _ in $(seq 1 30); do
-	if curl -fsS "http://${JM}/v1/config" >/dev/null 2>&1; then
+	# P2-200: timeouts on every curl — a hung JM must not wedge the bounded
+	# wait forever (the seq/sleep bound was illusory without them).
+	if curl -fsS --connect-timeout 5 --max-time 15 "http://${JM}/v1/config" >/dev/null 2>&1; then
 		ready=1
 		break
 	fi
@@ -63,15 +87,24 @@ if [ "${ready}" -ne 1 ]; then
 fi
 
 if [ ! -r "${JAR}" ]; then
-	echo "compute: FATAL — compute jar is not readable: ${JAR}" >&2
+	# P2-108: sharpen the mount check — a missing/misnamed volume is the
+	# usual cause, and the old message left the operator guessing.
+	echo "compute: FATAL — compute jar not found/readable at ${JAR}" >&2
+	echo "compute:   check the compute.jar volume mount (host target/compute.jar -> ${JAR}) or build it first (mvn package)" >&2
 	exit 1
 fi
 
 echo "compute: uploading ${JAR}"
-upload_response=$(curl -fsS -X POST "http://${JM}/jars/upload" \
-	-F "jarfile=@${JAR}")
-uploaded_filename=$(printf '%s' "${upload_response}" \
-	| sed -n 's/.*"filename":"\([^"]*\)".*/\1/p')
+# P2-080/P2-201: bare curl-assign under set -e aborted with no FATAL, and
+# greedy sed broke on field reorder/whitespace/pretty-print. Guarded curl
+# (FATAL on failure) + jq parse. Upload is the one large transfer: 60s cap.
+if ! upload_response=$(curl -fsS --connect-timeout 5 --max-time 60 -X POST "http://${JM}/jars/upload" \
+	-F "jarfile=@${JAR}"); then
+	echo "compute: FATAL — jar upload to ${JM} failed" >&2
+	exit 1
+fi
+# Flink nests the path under data.filename; flat .filename kept as fallback.
+uploaded_filename=$(printf '%s' "${upload_response}" | jq -r '.data.filename // .filename // empty' 2>/dev/null || true)
 jar_id=${uploaded_filename##*/}
 
 if [ -z "${jar_id}" ] || [ "${jar_id}" = "${uploaded_filename}" ]; then
@@ -85,15 +118,26 @@ wait_for_running() {
 	local state=""
 
 	for _ in $(seq 1 30); do
-		state=$(curl -fsS "http://${JM}/jobs/${job_id}" \
-			| sed -n 's/.*"state":"\([^"]*\)".*/\1/p')
+		# P2-081: poll curl must not abort the retry loop under set -e —
+		# transient failure sleeps and retries; jq replaces greedy sed
+		# (spacing/case/pretty-print proof).
+		set +e
+		resp=$(curl -fsS --connect-timeout 5 --max-time 15 "http://${JM}/jobs/${job_id}" 2>/dev/null)
+		cc=$?
+		set -e
+		[ $cc -ne 0 ] && { sleep 2; continue; }
+		state=$(printf '%s' "$resp" | jq -r '.state // empty' 2>/dev/null || true)
 		case "${state}" in
 			RUNNING)
 				echo "compute: ${job_name} is RUNNING (${job_id})"
 				return 0
 				;;
-			FAILED|CANCELED|CANCELING|SUSPENDED|RECONCILING)
-				echo "compute: FATAL — ${job_name} entered terminal/failed state ${state} (${job_id})" >&2
+			# P2-082: terminal-only — RECONCILING/CANCELING/SUSPENDED are
+			# transient (failover, leader change, restart); declaring them
+			# FATAL killed the launcher during normal recovery. Only truly
+			# terminal states stop the poll; everything else keeps waiting.
+			FAILED|CANCELED|FINISHED)
+				echo "compute: FATAL — ${job_name} entered terminal state ${state} (${job_id})" >&2
 				return 1
 				;;
 		esac
@@ -117,8 +161,15 @@ wait_for_checkpoint() {
 	local completed=""
 
 	for _ in $(seq 1 30); do
-		completed=$(curl -fsS "http://${JM}/jobs/${job_id}/checkpoints" 2>/dev/null \
-			| sed -n 's/.*"counts":{[^}]*"completed":\([0-9][0-9]*\).*/\1/p')
+		# P2-083: same no-abort poll pattern as wait_for_running. Keep
+		# // 0 (review correction): empty-string fallback would break the
+		# -gt test under set -e.
+		set +e
+		resp=$(curl -fsS --connect-timeout 5 --max-time 15 "http://${JM}/jobs/${job_id}/checkpoints" 2>/dev/null)
+		cc=$?
+		set -e
+		[ $cc -ne 0 ] && { sleep 2; continue; }
+		completed=$(printf '%s' "$resp" | jq -r '.counts.completed // 0' 2>/dev/null || true)
 		if [ -n "${completed}" ] && [ "${completed}" -gt 0 ]; then
 			echo "compute: ${job_name} completed ${completed} checkpoint(s) (${job_id})"
 			return 0
@@ -136,7 +187,8 @@ wait_for_checkpoint() {
 job_already_running() {
 	local expected="$1"
 	local overview
-	overview=$(curl -fsS "http://${JM}/jobs/overview" 2>/dev/null) || return 1
+	# P2-200: timeouts here too — a hung overview must not wedge idempotency.
+	overview=$(curl -fsS --connect-timeout 5 --max-time 15 "http://${JM}/jobs/overview" 2>/dev/null) || return 1
 	printf '%s' "${overview}" \
 		| grep -oE '\{"jid":"[0-9a-f]{32}".*?"state":"(RUNNING|[A-Z_]+)"' \
 		| grep -F "\"name\":\"${expected}\"" \
@@ -208,18 +260,27 @@ submit_job() {
 	run_body="${run_body}}"
 
 	echo "compute: submitting ${job_name} (${entry_class})"
-	run_response=$(curl -fsS -X POST "http://${JM}/jars/${jar_id}/run" \
+	# P2-085/P2-201: guarded submit (FATAL, not silent abort) + jq jobid
+	# parse tolerating the jobId case variant.
+	if ! run_response=$(curl -fsS --connect-timeout 5 --max-time 15 -X POST "http://${JM}/jars/${jar_id}/run" \
 		-H "Content-Type: application/json" \
-		-d "${run_body}")
-	job_id=$(printf '%s' "${run_response}" \
-		| sed -n 's/.*"jobid":"\([^"]*\)".*/\1/p')
+		-d "${run_body}"); then
+		echo "compute: FATAL — ${job_name} submit failed" >&2
+		return 1
+	fi
+	job_id=$(printf '%s' "${run_response}" | jq -r '.jobid // .jobId // empty' 2>/dev/null || true)
 
 	if [ -z "${job_id}" ]; then
 		echo "compute: FATAL — ${job_name} submission returned no job id: ${run_response}" >&2
 		return 1
 	fi
 
-	wait_for_running "${job_id}" "${job_name}"
+	# P2-082: submit_job runs from `if ! submit_job ...` — bash exempts a
+	# function's whole body from set -e when the call site is an errexit-
+	# ignored context, so a FAILED wait_for_running was silently swallowed
+	# and the launcher exited 0 believing the job was fine. Propagate
+	# explicitly — a terminal state must reach the failed flag.
+	wait_for_running "${job_id}" "${job_name}" || return 1
 	if ! wait_for_checkpoint "${job_id}" "${job_name}"; then
 		if [ "${nonfatal}" = "1" ]; then
 			echo "compute: WARN — ${job_name} checkpoint gate failed; continuing (nonfatal job)" >&2

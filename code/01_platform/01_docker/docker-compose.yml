@@ -226,6 +226,13 @@ x-flink-common: &flink-common
     # flink-common anchor, not just the compute service. Dev default: empty →
     # submit-jobs.sh skips the safety consumer; production MUST set it.
     SAFETY_MANIFEST_TOKENS: ${SAFETY_MANIFEST_TOKENS:-}
+    # P2-079: SignalJob's F005 gate reads STATE_RECOVERY_PATH via
+    # System.getenv in the JobManager JVM — the REST savepointPath the
+    # launcher forwards is invisible to the job's own config, so a production
+    # restore run failed closed at [F005] ("STATE_RECOVERY_PATH is required")
+    # despite a valid savepoint. Same value on the anchor keeps the launcher
+    # gate and the job's gate consistent. No default: unset stays unset.
+    STATE_RECOVERY_PATH: ${STATE_RECOVERY_PATH:-}
 
 networks:
   trading-net:
@@ -888,8 +895,11 @@ services:
     # is Flink's job (restart strategies on the JM).
     restart: "no"
     build:
-      context: ../../
-      dockerfile: 02_services/02_compute/Dockerfile
+      # P2-107: build from the service dir as context — the Dockerfile's COPY
+      # is now context-relative (submit-jobs.sh), so a bare repo-root context
+      # would break the build.
+      context: ../../02_services/02_compute
+      dockerfile: Dockerfile
     depends_on: [flink-jobmanager, flink-taskmanager]
     volumes:
       - flink-checkpoints:/checkpoints
