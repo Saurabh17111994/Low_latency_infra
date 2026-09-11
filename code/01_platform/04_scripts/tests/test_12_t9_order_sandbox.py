@@ -102,7 +102,14 @@ def test_bieq_payload_schema_matches_nautilus_client():
         "order_type", "limit_price_paise", "product_type", "time_in_force",
         "request_hash", "schema_version",
     ]
-    assert p["symbol"] == "BI-EQ" and p["instrument_token"] == 762583
+    # Pin the LIVE sample instrument. The original INPUT-11 sample (BILCARE,
+    # token 762583) is DELISTED and the order API rejects it with 400 "invalid
+    # trading symbol", so t9 replaced it with RCF (token 2866, TradingSymbol
+    # "RCF-EQ", verified live 2026-08-25). Pinning both the literals and the
+    # payload-vs-constant agreement means drift on either side fails here.
+    assert t9.BIEQ_SYMBOL == "RCF-EQ" and t9.BIEQ_INSTRUMENT_TOKEN == 2866
+    assert p["symbol"] == t9.BIEQ_SYMBOL
+    assert p["instrument_token"] == t9.BIEQ_INSTRUMENT_TOKEN
     assert p["quantity"] == 1  # T9 safe instrument INPUT-11
 
 

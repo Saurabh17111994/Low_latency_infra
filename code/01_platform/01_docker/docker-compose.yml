@@ -52,8 +52,16 @@ x-flink-common: &flink-common
   environment: &flink-common-env
     # Lake tiering service (Flink job): S3A credentials for R2 via env only
     # (same contract as fluss-coordinator — never in FLUSS_PROPERTIES).
-    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID for lake tiering}
-    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY for lake tiering}
+    # Dev default is minioadmin, matching the minio service below (which has
+    # always used ${AWS_ACCESS_KEY_ID:-minioadmin}). These were `:?` here, i.e.
+    # hard-required, which contradicted the rest of this DEV-ONLY file: the
+    # documented setup is "copy .env.example to .env", and .env.example ships
+    # these two EMPTY, so compose could not interpolate at all (`config` fails
+    # before profile filtering) and t9's offline compose check failed. Real R2
+    # credentials still override via .env; production keeps the hard `:?`
+    # requirement in docker-stack.yml, where that is the right contract.
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
     # Restore-only default (2026-08-28, #3 hardening): normal launches must
     # carry STATE_RECOVERY_PATH and restore. A missing restore path fails
     # closed at startup ([F005]) unless the operator deliberately overrides
@@ -331,8 +339,8 @@ services:
       FLUSS_COORDINATOR_HOST: fluss-coordinator
       FLUSS_TABLET_HOST: fluss-tablet
       # S3A credentials via env only (never in FLUSS_PROPERTIES — see below).
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID for lake tiering}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY for lake tiering}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
       FLUSS_PROPERTIES: |
         zookeeper.address: zookeeper:2181
         bind.listeners: INTERNAL://fluss-coordinator:0,CLIENT://fluss-coordinator:9123
@@ -414,8 +422,8 @@ services:
       FLUSS_ENV_JAVA_OPTS_TS: >-
         -XX:StartFlightRecording=settings=profile,duration=900s,filename=/opt/fluss/log/tablet-diag.jfr,maxsize=1g
       # S3A credentials via env only (never in FLUSS_PROPERTIES — see below).
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:?set AWS_ACCESS_KEY_ID for lake tiering}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:?set AWS_SECRET_ACCESS_KEY for lake tiering}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-minioadmin}
       FLUSS_PROPERTIES: |
         zookeeper.address: zookeeper:2181
         bind.listeners: INTERNAL://fluss-tablet:0, CLIENT://fluss-tablet:9124
