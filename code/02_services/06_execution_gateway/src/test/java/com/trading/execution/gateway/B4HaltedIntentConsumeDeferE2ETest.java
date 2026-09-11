@@ -3,6 +3,7 @@ package com.trading.execution.gateway;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
+import com.trading.common.schema.ownership.ExecutionGateColumns;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -24,6 +25,7 @@ import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalRow;
+import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.utils.CloseableIterator;
 import org.junit.jupiter.api.Tag;
@@ -129,7 +131,10 @@ class B4HaltedIntentConsumeDeferE2ETest {
                     }
                 } finally {
                     try {
-                        admin.dropDatabase(db, false, false)
+                        // cascade=true: the scratch DB holds tables, and a
+                        // non-cascading drop throws DatabaseNotEmptyException —
+                        // swallowed below, which leaked the DB on every run.
+                        admin.dropDatabase(db, false, true)
                                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
                     } catch (Exception ignored) {
                         // best-effort scratch cleanup
@@ -209,30 +214,47 @@ class B4HaltedIntentConsumeDeferE2ETest {
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    /** Execution_Gate KV — created EMPTY (no row): the HALTED default. */
+    /**
+     * Execution_Gate KV — created EMPTY (no row): the HALTED default.
+     *
+     * <p>The schema is derived from {@link ExecutionGateColumns} rather than hand-written. It used
+     * to be a hand-written 15-column list with {@code transition_ts} at index 7 and no
+     * {@code approval_1}/{@code approval_2} at all — so this test created a table that does not
+     * match the production Execution_Gate shape (17 columns), and would have kept passing while
+     * the real schema moved underneath it. Deriving it makes a column add/rename/reorder fail
+     * here loudly instead of silently testing a table nobody deploys.
+     */
     private static void createExecutionGate(Admin admin, Connection conn, String db) throws Exception {
-        Schema schema = Schema.newBuilder()
-                .column("execution_partition_id", DataTypes.STRING())
-                .column("account_scope_id", DataTypes.STRING())
-                .column("state", DataTypes.STRING())
-                .column("epoch", DataTypes.BIGINT())
-                .column("reason", DataTypes.STRING())
-                .column("detection_time", DataTypes.BIGINT())
-                .column("evidence_hash", DataTypes.STRING())
-                .column("transition_ts", DataTypes.BIGINT())
-                .column("owner_instance_id", DataTypes.STRING())
-                .column("fence_token", DataTypes.BIGINT())
-                .column("fence_acquired_ts", DataTypes.BIGINT())
-                .column("lease_expires_ts", DataTypes.BIGINT())
-                .column("fence_lost_ts", DataTypes.BIGINT())
-                .column("approved_evidence_hash", DataTypes.STRING())
-                .column("schema_version", DataTypes.STRING())
-                .primaryKey("execution_partition_id")
-                .build();
+        Schema schema = executionGateSchema();
         TableDescriptor td = TableDescriptor.builder()
                 .schema(schema).distributedBy(8, "execution_partition_id").build();
         admin.createTable(TablePath.of(db, "Execution_Gate"), td, false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    /** The production Execution_Gate shape, built from the single canonical column definition. */
+    private static Schema executionGateSchema() {
+        Schema.Builder builder = Schema.newBuilder();
+        for (int i = 0; i < ExecutionGateColumns.FIELD_COUNT; i++) {
+            builder.column(ExecutionGateColumns.NAMES.get(i),
+                    dataTypeFor(ExecutionGateColumns.TYPE_ROOTS.get(i)));
+        }
+        return builder
+                .primaryKey(ExecutionGateColumns.NAMES.get(ExecutionGateColumns.EXECUTION_PARTITION_ID))
+                .build();
+    }
+
+    private static DataType dataTypeFor(String typeRoot) {
+        switch (typeRoot) {
+            case "STRING":
+                return DataTypes.STRING();
+            case "BIGINT":
+                return DataTypes.BIGINT();
+            default:
+                // Fail loud: an unmapped new column type must not silently become something else.
+                throw new IllegalArgumentException(
+                        "unmapped Execution_Gate type root: " + typeRoot);
+        }
     }
 
     /** Execution_Attempts KV — EMPTY; nothing may be written while HALTED. */
