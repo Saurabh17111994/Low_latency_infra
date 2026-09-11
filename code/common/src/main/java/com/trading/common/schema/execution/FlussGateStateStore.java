@@ -292,18 +292,20 @@ public final class FlussGateStateStore implements GateStateStore, AutoCloseable 
         }
     }
 
-    @Override public synchronized GateRow revoke(String partitionId, String ownerInstanceId, long nowTs) {
+    @Override public synchronized RevokeResult revoke(String partitionId, String ownerInstanceId, long nowTs) {
         // Durable-first like acquire/renew (P3-013): the durable row decides, so the revoke
         // carries the current ordering version and a stale process cannot clear a fence it
         // does not hold.
         GateRow durable = lookupGateOrThrow(partitionId);
         if (durable != null) delegate.hydrate(durable);
         GateRow before = delegate.read(partitionId);
-        GateRow res = delegate.revoke(partitionId, ownerInstanceId, nowTs);
-        if (res != null && res != before) {
-            persistOrRollback(res, before);
+        RevokeResult res = delegate.revoke(partitionId, ownerInstanceId, nowTs);
+        // P3-150: persist on the OUTCOME, not on reference identity. ALREADY_CLEAR and NOT_OWNER
+        // both hand back an unchanged row, and only REVOKED mutated durable state.
+        if (res.revoked()) {
+            persistOrRollback(res.row(), before);
             // A newer token means another owner took the fence: the revoke is moot, not lost.
-            verifyPersisted(partitionId, res, true);
+            verifyPersisted(partitionId, res.row(), true);
         }
         return res;
     }

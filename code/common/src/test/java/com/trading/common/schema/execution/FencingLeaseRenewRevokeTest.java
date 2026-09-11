@@ -105,7 +105,7 @@ class FencingLeaseRenewRevokeTest {
 
         // revoke by holder at 2000
         long revokeAt = 2000L;
-        GateRow revoked = store.revoke("p1", "owner1", revokeAt);
+        GateRow revoked = store.revoke("p1", "owner1", revokeAt).row();
         assertNotNull(revoked);
         assertNull(revoked.ownerInstanceId(), "owner must be cleared");
         assertEquals(token1, revoked.fenceToken(),
@@ -168,7 +168,7 @@ class FencingLeaseRenewRevokeTest {
         long token = acquired.row().fenceToken();
 
         // non-holder tries revoke
-        GateRow after = store.revoke("p1", "owner2", now + 100);
+        GateRow after = store.revoke("p1", "owner2", now + 100).row();
         // should not clear
         assertEquals("owner1", after.ownerInstanceId());
         assertEquals(token, after.fenceToken());
@@ -284,7 +284,7 @@ class FencingLeaseRenewRevokeTest {
         long now = 1000L;
         long held = store.acquire("p1", "owner1", LEASE_MS, now).token();
         // P3-377: explicit nowTs only — the wall-clock revoke()/release() aliases are gone.
-        GateRow revoked = store.revoke("p1", "owner1", 2000L);
+        GateRow revoked = store.revoke("p1", "owner1", 2000L).row();
         assertNull(revoked.ownerInstanceId());
         assertEquals(held, revoked.fenceToken(), "revoke retains the token as the ordering version");
         // after revoke, new acquire works
@@ -306,7 +306,7 @@ class FencingLeaseRenewRevokeTest {
         long t2 = store.renew("p1", "owner1", t1, LEASE_MS, now + 100).token();
         assertEquals(t1, t2, "renew must not bump the token");
 
-        GateRow revoked = store.revoke("p1", "owner1", now + 200);
+        GateRow revoked = store.revoke("p1", "owner1", now + 200).row();
         assertEquals(t1, revoked.fenceToken(), "revoke retains the token rather than resetting to 0");
 
         // Restart: a fresh process hydrating the durable revoked row must mint ABOVE it,
@@ -318,5 +318,47 @@ class FencingLeaseRenewRevokeTest {
 
         long t4 = restarted.halt("p1", restarted.read("p1"), "halt", "h", now + 400).fenceToken();
         assertTrue(t4 > t3, "halt must mint forward, never reuse or reset");
+    }
+
+    @Test
+    void revokeReportsAnOutcomeInsteadOfAnAmbiguousRow() {
+        InMemoryGateStateStore store = freshStore();
+        store.acquire("p1", "owner1", LEASE_MS, 1000L);
+
+        // A non-holder is refused, and the holder's fence is untouched.
+        GateStateStore.RevokeResult refused = store.revoke("p1", "owner2", 2000L);
+        assertSame(GateStateStore.RevokeOutcome.NOT_OWNER, refused.outcome());
+        assertFalse(refused.revoked(), "a refusal must never read as success");
+        assertFalse(refused.fenceIsClear());
+        GateRow stillHeld = store.read("p1");
+        assertTrue(stillHeld.fenceValidFor("owner1", stillHeld.fenceToken(), 2001L),
+                "a refused revoke must not clear the holder's fence");
+
+        // The holder revokes — the only outcome that mutated durable state.
+        GateStateStore.RevokeResult revoked = store.revoke("p1", "owner1", 3000L);
+        assertSame(GateStateStore.RevokeOutcome.REVOKED, revoked.outcome());
+        assertTrue(revoked.revoked());
+        assertTrue(revoked.fenceIsClear());
+        assertNull(revoked.row().ownerInstanceId());
+
+        // Revoking again is idempotent: a DIFFERENT outcome from the refusal above, even though
+        // both hand back a row. Before P3-150 the two were indistinguishable — and neither could
+        // be told apart from success without re-reading and re-deriving the fence state.
+        GateStateStore.RevokeResult again = store.revoke("p1", "owner1", 4000L);
+        assertSame(GateStateStore.RevokeOutcome.ALREADY_CLEAR, again.outcome());
+        assertFalse(again.revoked(), "an idempotent revoke mutated nothing");
+        assertTrue(again.fenceIsClear());
+    }
+
+    @Test
+    void revokeOnAMissingPartitionIsNotFoundNotSuccess() {
+        InMemoryGateStateStore store = freshStore();
+
+        GateStateStore.RevokeResult res = store.revoke("nope", "owner1", 1000L);
+
+        assertSame(GateStateStore.RevokeOutcome.NOT_FOUND, res.outcome());
+        assertFalse(res.revoked());
+        assertFalse(res.fenceIsClear());
+        assertNull(res.row(), "there is no row to report");
     }
 }

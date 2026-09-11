@@ -106,19 +106,56 @@ public interface GateStateStore {
      */
     FenceResult renew(String partitionId, String ownerInstanceId, long fenceToken, long leaseMs, long nowTs);
 
+    /** P3-150: what a revoke actually did. It must never be inferred from the returned row. */
+    enum RevokeOutcome {
+        /** The fence was cleared by this call. */
+        REVOKED,
+        /** The fence was already clear (no owner) — idempotent, no mutation. */
+        ALREADY_CLEAR,
+        /** A different owner holds the fence — refused, no mutation (offline fencing constraint). */
+        NOT_OWNER,
+        /** No row exists for the partition at all (P3-376). */
+        NOT_FOUND
+    }
+
     /**
-     * Revoke (release) the fence, clearing owner, token, lease fields.
-     * Only the current holder may revoke; others are rejected (no mutation).
+     * P3-150: the outcome of a {@link #revoke}, with the row as it stands after the call.
+     *
+     * <p>{@code row} is null only for {@link RevokeOutcome#NOT_FOUND}. Every other outcome carries
+     * a row, so "a row came back" says nothing about whether the revoke was applied — that is what
+     * {@link #revoked()} is for. {@link RevokeOutcome#REVOKED} is the only outcome that mutated
+     * durable state; {@code ALREADY_CLEAR} and {@code NOT_OWNER} both return an unchanged row and
+     * were previously indistinguishable from each other and from success.
+     */
+    record RevokeResult(RevokeOutcome outcome, GateRow row) {
+        /** Whether THIS call cleared the fence. */
+        public boolean revoked() {
+            return outcome == RevokeOutcome.REVOKED;
+        }
+
+        /** Whether the fence is now clear for this partition (revoked now, or already clear). */
+        public boolean fenceIsClear() {
+            return outcome == RevokeOutcome.REVOKED || outcome == RevokeOutcome.ALREADY_CLEAR;
+        }
+    }
+
+    /**
+     * Revoke (release) the fence, clearing owner and lease fields and recording fenceLostTs.
+     * Only the current holder may revoke; others are refused with no mutation.
      * HALT path uses {@link #halt} which clears unconditionally.
-     * Sets fenceToken to 0 and lease fields to null, records fenceLostTs.
-     * Returns {@code null} when no row exists for the partition (P3-376).
+     *
+     * <p>P3-374: the {@code fenceToken} is <b>retained</b> rather than reset to 0. It is the
+     * durable write-ordering version (VERSIONED merge engine), so a 0 would make the revoke
+     * version-droppable, and "no fence" is already expressed by {@code ownerInstanceId == null}.
      *
      * <p>P3-377: every caller supplies an explicit {@code nowTs} — the wall-clock
      * convenience overloads and the {@code release} alias were removed, so no
      * hidden {@code System.currentTimeMillis()} can enter fenceLostTs/lease
      * horizons (crash-window replay and TTL tests stay deterministic).
+     *
+     * <p>P3-150: returns an explicit outcome; never a bare row (see {@link RevokeResult}).
      */
-    /* @Nullable */ GateRow revoke(String partitionId, String ownerInstanceId, long nowTs);
+    RevokeResult revoke(String partitionId, String ownerInstanceId, long nowTs);
 
     /**
      * Register the single required approval for the exact

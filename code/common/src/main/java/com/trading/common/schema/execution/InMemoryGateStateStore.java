@@ -142,24 +142,26 @@ public final class InMemoryGateStateStore implements GateStateStore {
     }
 
     @Override
-    public synchronized GateRow revoke(String partitionId, String ownerInstanceId, long nowTs) {
+    public synchronized RevokeResult revoke(String partitionId, String ownerInstanceId, long nowTs) {
         GateRow row = rows.get(partitionId);
         if (row == null) {
-            return null;
+            // P3-376: nothing to release — reported explicitly, never a silent success.
+            return new RevokeResult(RevokeOutcome.NOT_FOUND, null);
         }
         if (row.ownerInstanceId() == null) {
-            // already cleared — idempotent
-            return row;
+            // Already cleared — idempotent, and distinguishable from a refusal (P3-150).
+            return new RevokeResult(RevokeOutcome.ALREADY_CLEAR, row);
         }
         if (!row.ownerInstanceId().equals(ownerInstanceId)) {
-            // not holder — fail closed, no mutation (offline fencing constraint)
-            return row;
+            // Not the holder — fail closed, no mutation (offline fencing constraint). This used
+            // to be indistinguishable from the idempotent case: both returned the bare row.
+            return new RevokeResult(RevokeOutcome.NOT_OWNER, row);
         }
         GateRow cleared = row.withFenceCleared(nowTs);
         rows.put(partitionId, cleared);
         audit(new AuditRecord(partitionId, "FENCE_REVOKE", nowTs, cleared.epoch(), cleared.fenceToken(),
                 "owner=" + ownerInstanceId, null));
-        return cleared;
+        return new RevokeResult(RevokeOutcome.REVOKED, cleared);
     }
 
     @Override

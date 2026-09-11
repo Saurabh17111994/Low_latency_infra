@@ -47,7 +47,7 @@ class ExecutionCommandGateHaltVerificationTest {
         @Override public FenceResult renew(String p, String o, long tok, long l, long t) {
             return delegate.renew(p, o, tok, l, t);
         }
-        @Override public GateRow revoke(String p, String o, long t) { return delegate.revoke(p, o, t); }
+        @Override public RevokeResult revoke(String p, String o, long t) { return delegate.revoke(p, o, t); }
         @Override public ApprovalResult approve(String p, String pr, long e, String h, long t) {
             return delegate.approve(p, pr, e, h, t);
         }
