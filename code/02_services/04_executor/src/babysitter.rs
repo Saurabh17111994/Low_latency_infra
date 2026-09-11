@@ -9,11 +9,24 @@ use std::collections::HashMap;
 
 use crate::projection::{PositionSnapshot, PositionState};
 
+/// P3-181: fixed no-op reason key per state — `&'static str`, so observing a
+/// snapshot performs no allocation. Exhaustive: a new `PositionState` variant
+/// fails to compile until it has a key. `no_op_count` still matches substrings.
+fn no_op_reason(state: PositionState) -> &'static str {
+    match state {
+        PositionState::Flat => "no-op: state=FLAT",
+        PositionState::Open => "no-op: state=OPEN",
+        PositionState::Reducing => "no-op: state=REDUCING",
+        PositionState::Closed => "no-op: state=CLOSED",
+        PositionState::Unknown => "no-op: state=UNKNOWN",
+    }
+}
+
 /// No-op babysitter observer — observation only, never emits trade actions.
 #[derive(Debug, Default)]
 pub struct NoOpPositionObserver {
     positions_by_state: HashMap<PositionState, usize>,
-    no_op_decisions: HashMap<String, usize>,
+    no_op_decisions: HashMap<&'static str, usize>,
 }
 
 impl NoOpPositionObserver {
@@ -33,19 +46,17 @@ impl NoOpPositionObserver {
         let c = self.positions_by_state.entry(snapshot.state).or_insert(0);
         *c += 1;
         // No trade action emitted — record no-op by reason for audit.
-        // P3-181 won't-fix: the format! alloc is noise on this cold
-        // observation-only path, and &'static str keys would break the
-        // no_op_count(substring) audit API the tests rely on.
-        let reason = format!("no-op: state={:?}", snapshot.state);
-        *self.no_op_decisions.entry(reason).or_insert(0) += 1;
+        // P3-181: static key — no per-snapshot format!/String allocation.
+        *self
+            .no_op_decisions
+            .entry(no_op_reason(snapshot.state))
+            .or_insert(0) += 1;
     }
 
     /// Observe without a snapshot (e.g. FLAT with no open position) — still no-op.
     pub fn observe_empty(&mut self) {
-        *self
-            .no_op_decisions
-            .entry("no-op: flat".to_string())
-            .or_insert(0) += 1;
+        // P3-181: static key, no per-call String allocation.
+        *self.no_op_decisions.entry("no-op: flat").or_insert(0) += 1;
     }
 
     pub fn positions_by_state(&self, state: PositionState) -> usize {
