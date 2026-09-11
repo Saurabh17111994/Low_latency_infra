@@ -95,7 +95,10 @@ class FlussProjectionWriterIntegrationTest {
                     new String[]{"pos-proj-1"}, 12)).isEqualTo("pb-proj-1");
         } finally {
             if (admin != null) {
-                try { admin.dropDatabase(db, false, false).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS); }
+                // cascade=true: the scratch DB holds tables, and a non-cascading
+                // drop throws DatabaseNotEmptyException — swallowed below, which
+                // leaked the database on every run.
+                try { admin.dropDatabase(db, false, true).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS); }
                 catch (Exception ignored) { }
             }
             if (conn != null) conn.close();

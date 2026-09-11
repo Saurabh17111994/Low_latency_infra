@@ -28,6 +28,9 @@ public final class FlussIntentDedupStore implements IntentDedupStore {
         try {
             Configuration c = new Configuration();
             c.setString("bootstrap.servers", config.flussBootstrap());
+            // D1: money path — the dedup commit gates the intent disposition, so
+            // use the 1ms linger rather than Fluss's 100ms default.
+            com.trading.common.schema.fluss.FlussWriteProfiles.moneyPath(c);
             Connection connection = ConnectionFactory.createConnection(c);
             try {
                 Table table = connection.getTable(TablePath.of(config.flussDatabase(), TABLE));
@@ -72,16 +75,21 @@ public final class FlussIntentDedupStore implements IntentDedupStore {
     }
 
     @Override public void record(String instructionId, String requestHash, Long logOffset) throws Exception {
-        // P3-279: per-call writer is intentional, not a leak — UpsertWriter is
-        // flush-only in Fluss 0.9.1 (javap: TableWriter exposes only flush(),
-        // not Closeable), and a shared writer would be an unsynchronized
-        // cross-call hazard (no single-thread contract on this store).
+        // D2: per-call writer is intentional, not a leak — see FlussWriteProfiles.
+        // D1: no per-record flush — see FlussWriteProfiles. A pre-ack flush measures
+        // ~1ms faster here, but it awaits unboundedly and would run before the
+        // bounded get() below, moving the worst case outside the commit budget.
+        // Must match Execution_Intent_Processed exactly
+        // (28_execution_intent_processed.sql): instruction_id, request_hash,
+        // handed_off_ts, source_log_offset, schema_version — all five values, in
+        // that order. A short row still compiles here and only fails at the
+        // server, which is how a dropped handed_off_ts silently disabled the
+        // durable dedup (replayed intents re-forwarded after restart).
         GenericRow row = GenericRow.of(BinaryString.fromString(instructionId),
                 BinaryString.fromString(requestHash), System.currentTimeMillis(),
                 logOffset == null ? null : logOffset, BinaryString.fromString("1"));
         UpsertWriter writer = table.newUpsert().createWriter();
-        try { writer.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS); }
-        finally { writer.flush(); }
+        writer.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
     }
 
     // P3-280: collect, don't abort — table failure must not leak the connection.

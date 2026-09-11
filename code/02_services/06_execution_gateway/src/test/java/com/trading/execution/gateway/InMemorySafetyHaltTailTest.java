@@ -21,6 +21,22 @@ class InMemorySafetyHaltTailTest {
         assertNotEquals(a,c);
     }
 
+    @Test void deterministicIdRejectsDelimiterAmbiguity(){
+        // P3-387: the canonical tuple is joined on '|' — an embedded delimiter lets
+        // two different tuples collide on one PK, so an id is never minted for it.
+        assertThrows(IllegalArgumentException.class, () ->
+                SafetyHaltRequest.deterministicId("a|b","c","signal-job","RISK",1000L,1L,"h1","v3"));
+        assertThrows(IllegalArgumentException.class, () ->
+                SafetyHaltRequest.deterministicId("acct-1","b|c","signal-job","RISK",1000L,1L,"h1","v3"));
+        assertThrows(IllegalArgumentException.class, () ->
+                SafetyHaltRequest.deterministicId("acct-1","p-1","signal|job","RISK",1000L,1L,"h1","v3"));
+        // idValid() is a predicate over decoded rows: an ambiguous form is reported
+        // invalid — it must not escape as an exception.
+        String id=SafetyHaltRequest.deterministicId("acct-1","p-1","signal-job","RISK",1000L,1L,"h1","v3");
+        SafetyHaltRequest ambiguous=new SafetyHaltRequest(id,"a|b","p-1","signal-job","i-1","RISK","detail",1000L,1L,"h1","v3",null,0L,null,null);
+        assertFalse(ambiguous.idValid());
+    }
+
     @Test void idempotentDuplicateNoSecondEpoch(){
         InMemoryGateStateStore gates=new InMemoryGateStateStore();
         gates.init(boot("p-1","acct-1"));

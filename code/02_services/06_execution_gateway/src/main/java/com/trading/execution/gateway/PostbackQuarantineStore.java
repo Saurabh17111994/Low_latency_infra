@@ -56,6 +56,8 @@ public interface PostbackQuarantineStore {
         public static Fluss open(String bootstrap, String database, String tableName, Duration timeout) throws Exception {
             Configuration conf = new Configuration();
             conf.setString("bootstrap.servers", bootstrap);
+            // D1: bulk-path linger via FlussWriteProfiles (quarantine appends are not order-critical).
+            com.trading.common.schema.fluss.FlussWriteProfiles.bulkPath(conf);
             Connection conn = ConnectionFactory.createConnection(conf);
             try {
                 Table t = conn.getTable(TablePath.of(database, tableName));
@@ -93,22 +95,17 @@ public interface PostbackQuarantineStore {
             v[10] = now;
             v[11] = null;
             v[12] = BinaryString.fromString("2");
+            // D2: per-append writer is intentional — see FlussWriteProfiles.
             AppendWriter writer = table.newAppend().createWriter();
+            // P3-318: restore the interrupt flag — get() clears it, and a
+            // swallowed interrupt stalls shutdown of the quarantine path.
+            // D1: no per-record flush — see FlussWriteProfiles; .get() still returns
+            // only on a durable ack.
             try {
-                // P3-318: restore the interrupt flag — get() clears it, and a
-                // swallowed interrupt stalls shutdown of the quarantine path.
-                try {
-                    writer.append(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw ie;
-                }
-                writer.flush();
-            } catch (Exception e) {
-                // Never let flush mask the append outcome (fail-closed diagnosis
-                // needs the original Timeout/ExecutionException).
-                try { writer.flush(); } catch (Exception suppressed) { e.addSuppressed(suppressed); }
-                throw e;
+                writer.append(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw ie;
             }
         }
 

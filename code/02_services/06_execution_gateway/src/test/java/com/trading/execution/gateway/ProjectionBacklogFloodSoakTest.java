@@ -79,19 +79,28 @@ class ProjectionBacklogFloodSoakTest {
         // Signed EXECUTION_EVENT envelope; payload hash must match canonical bytes.
         GatewayProtocol proto = new GatewayProtocol("secret1234567890123456");
         var payload = M.createObjectNode().put("instruction_id", "i-flood");
-        String signed = proto.encode(new GatewayProtocol.Envelope(
-                "execution-gateway.v1", "EXECUTION_EVENT", "req-flood-1", "acct1", "p1",
-                GatewayProtocol.sha256(M.writeValueAsBytes(payload)), 1L, "fence-1",
-                System.currentTimeMillis() + 60_000, payload, null));
 
         // Flood 16 concurrent posts while every apply blocks on the latch.
+        // P3-078: the replay cache keys on (request_id, payload_hash), so each
+        // POST mints its own envelope — sharing one signed body 16x would be a
+        // verbatim replay (401 "duplicate request"), not backpressure.
         HttpClient client = HttpClient.newHttpClient();
+        java.util.concurrent.atomic.AtomicInteger seq = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.function.Supplier<String> freshEnvelope = () -> {
+            try {
+                int i = seq.incrementAndGet();
+                return proto.encode(new GatewayProtocol.Envelope(
+                        "execution-gateway.v1", "EXECUTION_EVENT", "req-flood-" + i, "acct1", "p1",
+                        GatewayProtocol.sha256(M.writeValueAsBytes(payload)), 1L, "fence-1",
+                        System.currentTimeMillis() + 60_000, payload, null));
+            } catch (Exception e) { throw new RuntimeException(e); }
+        };
         List<Future<HttpResponse<String>>> futures = new ArrayList<>();
         for (int i = 0; i < 16; i++) {
             futures.add(pool.submit(() -> client.send(HttpRequest.newBuilder(
                             URI.create(base + "/v1/events"))
                     .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(signed)).build(),
+                    .POST(HttpRequest.BodyPublishers.ofString(freshEnvelope.get())).build(),
                     HttpResponse.BodyHandlers.ofString())));
         }
         // Give the flood time to peak, then assert MID-FLOOD: the accepted
@@ -129,7 +138,7 @@ class ProjectionBacklogFloodSoakTest {
         // Intake resumes: a fresh post is accepted again.
         var resumed = client.send(HttpRequest.newBuilder(URI.create(base + "/v1/events"))
                         .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(signed)).build(),
+                        .POST(HttpRequest.BodyPublishers.ofString(freshEnvelope.get())).build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(202, resumed.statusCode(), resumed.body());
     }

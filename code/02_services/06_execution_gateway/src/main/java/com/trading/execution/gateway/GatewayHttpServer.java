@@ -133,6 +133,15 @@ public final class GatewayHttpServer implements AutoCloseable {
                     gateStore.halt(partitionId, fresh, "unauthorized "+principal, evidenceHash, now);
                 reply(x, 403, "{\"error\":\"unauthorized\",\"outcome\":\"UNAUTHORIZED\"}");
             }
+            case EVIDENCE_MISMATCH -> {
+                // P3-151: the approval carried evidence the gate has not bound —
+                // a stale/unauthorized package. Halt (fail closed) and surface the
+                // mismatch; it must never be recorded as APPLIED.
+                GateRow fresh = gateStore.read(partitionId);
+                if (fresh != null && fresh.state() != GateState.HALTED)
+                    gateStore.halt(partitionId, fresh, "evidence mismatch approve", evidenceHash, now);
+                reply(x, 409, "{\"error\":\"evidence mismatch\",\"outcome\":\"EVIDENCE_MISMATCH\"}");
+            }
             case SAME_PRINCIPAL -> reply(x, 409, "{\"error\":\"same principal already approved\",\"outcome\":\"SAME_PRINCIPAL\"}");
             case NOT_FOUND -> reply(x, 404, "{\"error\":\"no gate row\",\"outcome\":\"NOT_FOUND\"}");
             default -> reply(x, 409, mapper.writeValueAsString(Map.of("error",res.reason()==null?"rejected":res.reason(),"outcome",res.outcome().name())));

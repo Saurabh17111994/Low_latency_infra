@@ -19,13 +19,13 @@ public final class InMemoryControlStateStore implements ControlStateStore {
     }
     /**
      * Test helper: inject a pre-built InternalRow directly (e.g. tampered id).
-     * P3-303: intentionally bypasses the idValid() check so tests can pin the
-     * fail-closed INVALID_ID path in SafetyHaltTailProcessor.apply(InternalRow).
-     * No production consumer trusts the store — decode always re-validates —
-     * so this stays public for same-package tests without risk.
+     * P3-303: intentionally bypasses the idValid() check so same-package tests
+     * can pin the fail-closed INVALID_ID path in
+     * SafetyHaltTailProcessor.apply(InternalRow). Package-private so production
+     * code cannot bypass the deterministic-id check that add() enforces.
      */
     private final List<InternalRow> rawRows = new ArrayList<>();
-    public void addRawRow(InternalRow row){ rawRows.add(java.util.Objects.requireNonNull(row)); }
+    void addRawRow(InternalRow row){ rawRows.add(java.util.Objects.requireNonNull(row)); }
 
     @Override public Lookup lookup(String t, List<Object> k){
         // P3-304: serve halt-table point reads from byId so the index is live
