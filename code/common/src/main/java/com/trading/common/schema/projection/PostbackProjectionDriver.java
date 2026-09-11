@@ -43,12 +43,6 @@ public final class PostbackProjectionDriver {
     // concurrent project() calls this races; confinement (above) is the rule.
     private final Set<String> haltedScopeIds =
             java.util.Collections.synchronizedSet(new LinkedHashSet<>());
-    private String lastAppliedPositionId;
-    // P3-171: lastAppliedPositionId is only ever assigned on APPLIED — but as a
-    // retained field it leaks across project() calls: a non-fill postback (or a
-    // DUPLICATE fill) would report a previous, unrelated postback's id, and
-    // repeated calls are no longer deterministic. Reset per call; the APPLIED
-    // branch sets it. Also a data race under concurrent consumers (see above).
 
     public PostbackProjectionDriver(CorrelationIndex correlationIndex,
             LifecycleStore lifecycleStore, PositionsStateStore positionStore,
@@ -82,8 +76,9 @@ public final class PostbackProjectionDriver {
      */
     public ProjectionResult project(NormalizedPostback postback, long nowMs) {
         Objects.requireNonNull(postback, "postback");
-        // P3-171: per-call position id — never the previous postback's.
-        lastAppliedPositionId = null;
+        // P3-171: per-call local — a retained field leaked a previous postback's
+        // position id into non-fill/DUPLICATE results and broke determinism.
+        String appliedPositionId = null;
 
         // --- Fingerprint integrity ------------------------------------------
         if (!PostbackFingerprint.matches(postback)) {
@@ -168,7 +163,7 @@ public final class PostbackProjectionDriver {
             switch (pw.outcome()) {
                 case APPLIED -> {
                     upsertPosition(pw.snapshot());
-                    lastAppliedPositionId = pw.snapshot().positionId();
+                    appliedPositionId = pw.snapshot().positionId();
                 }
                 case DUPLICATE -> { /* already reflected */ }
                 case STALE -> {
@@ -190,9 +185,8 @@ public final class PostbackProjectionDriver {
                 PostbackProjectionLedger.State.COMPLETE,
                 Long.valueOf(nowMs));
 
-        String positionId = lastAppliedPositionId;
         return new ProjectionResult(Outcome.APPLIED, postback.postbackEventId(),
-                positionId, null, null);
+                appliedPositionId, null, null);
     }
 
     // --- helpers -------------------------------------------------------------

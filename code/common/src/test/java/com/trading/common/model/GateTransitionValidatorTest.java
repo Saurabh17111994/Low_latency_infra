@@ -90,6 +90,29 @@ class GateTransitionValidatorTest {
         assertThat(AttemptPhase.isLegal(AttemptPhase.UNKNOWN, AttemptPhase.PREPARED)).isFalse();
     }
 
+    @Test
+    void reconciliationTargetsAreTerminalAndExcludeSubmission() {
+        // P3-378 / P3-492 / P3-494: the reconciliation allowlist is pinned to
+        // terminal exits — UNKNOWN -> SUBMITTING can never be routed through
+        // resolveUnknown, even if the canonical matrix ever admitted that edge.
+        for (AttemptPhase to : AttemptPhase.UNKNOWN.legalTargets()) {
+            assertThat(to.isTerminal()).as("UNKNOWN->%s terminal", to).isTrue();
+            assertThat(GateTransitionValidator.isReconciliationOnly(AttemptPhase.UNKNOWN, to))
+                    .as("UNKNOWN->%s is reconciliation-only", to).isTrue();
+            assertThat(GateTransitionValidator.isSubmissionLegal(AttemptPhase.UNKNOWN, to))
+                    .as("UNKNOWN->%s is not a submission route", to).isFalse();
+        }
+        assertThat(GateTransitionValidator.isReconciliationOnly(
+                AttemptPhase.UNKNOWN, AttemptPhase.SUBMITTING)).isFalse();
+        assertThat(GateTransitionValidator.isReconciliationOnly(
+                AttemptPhase.UNKNOWN, AttemptPhase.PREPARED)).isFalse();
+        assertThat(GateTransitionValidator.isReconciliationOnly(
+                AttemptPhase.UNKNOWN, null)).isFalse();
+        assertThat(GateTransitionValidator.isReconciliationOnly(null, null)).isFalse();
+        assertThat(GateTransitionValidator.isReconciliationOnly(
+                AttemptPhase.PREPARED, AttemptPhase.SUBMITTING)).isFalse();
+    }
+
     // ---- gate matrix (single source of truth) ----
 
     @Test
@@ -119,6 +142,36 @@ class GateTransitionValidatorTest {
                 GateState.APPROVAL_PENDING, GateState.HALTED, 2, 3).allowed()).isTrue();
     }
 
+    @Test
+    void forwardEpochGapIsRejectedAndSingleStepAdvanceIsLegal() {
+        // P3-118/P3-119: every accepted transition advances the epoch by exactly
+        // one, so a request claiming a further generation is out of sync with the
+        // gate (lost lease / stale owner / replayed message) and must be rejected.
+        assertThat(GateTransitionValidator.validateGateTransition(
+                GateState.RECONCILING, GateState.APPROVAL_PENDING, 1, 100).allowed()).isFalse();
+        assertThat(GateTransitionValidator.validateGateTransition(
+                GateState.RECONCILING, GateState.APPROVAL_PENDING, 1, 100).detail())
+                .contains("forward epoch gap");
+
+        // Exactly +1 is the sanctioned advance; same-generation is the no-gap case.
+        assertThat(GateTransitionValidator.validateGateTransition(
+                GateState.RECONCILING, GateState.APPROVAL_PENDING, 1, 2).allowed()).isTrue();
+        assertThat(GateTransitionValidator.validateGateTransition(
+                GateState.RECONCILING, GateState.APPROVAL_PENDING, 1, 1).allowed()).isTrue();
+
+        // The gap rule is total — it is not bypassable via the idempotent branch.
+        assertThat(GateTransitionValidator.validateGateTransition(
+                GateState.ENABLED, GateState.ENABLED, 1, 50).allowed()).isFalse();
+
+        // ...but a safety halt still lands on any epoch (P3-120).
+        assertThat(GateTransitionValidator.validateGateTransition(
+                GateState.ENABLED, GateState.HALTED, 1, 50).allowed()).isTrue();
+
+        // Stale epochs keep their own rejection.
+        assertThat(GateTransitionValidator.validateGateTransition(
+                GateState.RECONCILING, GateState.APPROVAL_PENDING, 5, 4).allowed()).isFalse();
+    }
+
     // ---- validator/store agreement on the corrected transitions ----
 
     @Test
@@ -146,6 +199,10 @@ class GateTransitionValidatorTest {
         assertThat(s2.transition("a-1", 1, AttemptRecord.PHASE_UNKNOWN).outcome())
                 .isEqualTo(AttemptStore.TransitionOutcome.APPLIED);
         assertThat(s2.transition("a-1", 2, AttemptRecord.PHASE_SUBMITTING).outcome())
+                .isEqualTo(AttemptStore.TransitionOutcome.ILLEGAL_TRANSITION);
+        // P3-378: the reconciliation path rejects a submission target too — the
+        // no-auto-retry invariant is pinned on both routes.
+        assertThat(s2.resolveUnknown("a-1", 2, AttemptRecord.PHASE_SUBMITTING).outcome())
                 .isEqualTo(AttemptStore.TransitionOutcome.ILLEGAL_TRANSITION);
         assertThat(s2.resolveUnknown("a-1", 2, AttemptRecord.PHASE_ACCEPTED).outcome())
                 .isEqualTo(AttemptStore.TransitionOutcome.APPLIED);

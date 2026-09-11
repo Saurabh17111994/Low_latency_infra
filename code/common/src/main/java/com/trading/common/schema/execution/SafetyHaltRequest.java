@@ -37,21 +37,14 @@ public record SafetyHaltRequest(
 
     /**
      * Validated factory (P3-385): derives the deterministic id so callers
-     * cannot construct a row with a mismatched key. Tuple fields must not
-     * contain '|' (P3-387 precondition — the canonical form joins on '|').
+     * cannot construct a row with a mismatched key. Tuple fields must be
+     * '|'-free — enforced inside {@link #deterministicId} (P3-387), the one
+     * place the canonical form is built.
      */
     public static SafetyHaltRequest createValidated(String accountScopeId, String executionPartitionId,
             String sourceComponent, String sourceInstance, String reasonCode, String reasonDetail,
             long detectionTime, long sourceEpoch, String evidenceHash, String schemaVersion,
             String slotId, long connectionEpoch, String manifestFingerprint, String state) {
-        noDelim(accountScopeId, "accountScopeId");
-        noDelim(sourceComponent, "sourceComponent");
-        noDelim(reasonCode, "reasonCode");
-        noDelim(evidenceHash, "evidenceHash");
-        noDelim(schemaVersion, "schemaVersion");
-        if (executionPartitionId != null) {
-            noDelim(executionPartitionId, "executionPartitionId");
-        }
         String id = deterministicId(accountScopeId, executionPartitionId, sourceComponent,
                 reasonCode, detectionTime, sourceEpoch, evidenceHash, schemaVersion);
         return new SafetyHaltRequest(id, accountScopeId, executionPartitionId, sourceComponent,
@@ -61,9 +54,10 @@ public record SafetyHaltRequest(
 
     /**
      * P3-387: canonical form joins on '|', so tuple fields must be '|'-free
-     * for the PK to be unambiguous. Enforced at the factory (the only path
-     * that mints new ids) — the canonical form and existing ids are untouched,
-     * so no migration and no audit break.
+     * for the PK to be unambiguous. Enforced in {@link #deterministicId} — the
+     * one place the canonical tuple is joined — so every path (factory, direct
+     * call, idValid) rejects an ambiguous form. Existing ids are untouched, so
+     * no migration and no audit break.
      */
     private static String noDelim(String v, String name) {
         Objects.requireNonNull(v, name);
@@ -78,13 +72,19 @@ public record SafetyHaltRequest(
         // P3-386: named fail-closed errors, not a raw String.join NPE.
         // P3-388: null partition = global scope; "" is rejected (it would
         // hash identically to null and collide two distinct rows on upsert).
-        Objects.requireNonNull(accountScopeId, "accountScopeId");
-        Objects.requireNonNull(sourceComponent, "sourceComponent");
-        Objects.requireNonNull(reasonCode, "reasonCode");
-        Objects.requireNonNull(evidenceHash, "evidenceHash");
-        Objects.requireNonNull(schemaVersion, "schemaVersion");
+        // P3-387: no joined field may contain '|' — otherwise accountScopeId
+        // "a|b" + partition "c" and accountScopeId "a" + partition "b|c" would
+        // produce the same canonical tuple (same PK) and enable spoofing.
+        noDelim(accountScopeId, "accountScopeId");
+        noDelim(sourceComponent, "sourceComponent");
+        noDelim(reasonCode, "reasonCode");
+        noDelim(evidenceHash, "evidenceHash");
+        noDelim(schemaVersion, "schemaVersion");
         if (executionPartitionId != null && executionPartitionId.isEmpty()) {
             throw new IllegalArgumentException("executionPartitionId must not be empty; use null for global scope");
+        }
+        if (executionPartitionId != null) {
+            noDelim(executionPartitionId, "executionPartitionId");
         }
         String canonical = String.join("|",
                 accountScopeId, executionPartitionId == null ? "" : executionPartitionId,
@@ -103,6 +103,17 @@ public record SafetyHaltRequest(
         return deterministicId(r.accountScopeId(), r.executionPartitionId(), r.sourceComponent(),
                 r.reasonCode(), r.detectionTime(), r.sourceEpoch(), r.evidenceHash(), r.schemaVersion());
     }
-    /** Verifies supplied haltRequestId matches canonical — fail-closed on mismatch. */
-    public boolean idValid(){ return haltRequestId != null && haltRequestId.equals(deterministicId(this)); }
+    /**
+     * Verifies supplied haltRequestId matches canonical — fail-closed on mismatch.
+     * P3-387: an ambiguous canonical form (a tuple field containing '|') cannot
+     * match any valid id, so it is reported invalid rather than thrown — this is
+     * a predicate over decoded wire rows and must not escape as an exception.
+     */
+    public boolean idValid(){
+        try {
+            return haltRequestId != null && haltRequestId.equals(deterministicId(this));
+        } catch (IllegalArgumentException ambiguousOrEmpty) {
+            return false;
+        }
+    }
 }

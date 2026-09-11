@@ -1,5 +1,6 @@
 package com.trading.common.schema.execution;
 
+import com.trading.common.schema.fluss.FlussWriteProfiles;
 import com.trading.common.schema.ownership.ExecutionAttemptsColumns;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
@@ -19,6 +20,11 @@ import org.apache.fluss.row.InternalRow;
  * Delegates protocol to {@link InMemoryAttemptStore} and persists rows to Fluss. Offline
  * crash-window tests run against the InMemory store; this writer shares the same column
  * mapping (20 cols, schema_version v3, gate_fence_token persisted at PREPARED).
+ *
+ * <p>Resource note (P3-136/P3-138, D1/D2): per-call Lookuper/UpsertWriter instances are
+ * intentional, not a leak, and writes carry no per-record flush — see
+ * {@link FlussWriteProfiles} for both rationales. This class is
+ * {@link AutoCloseable} to release the owned {@link Connection}.
  */
 public final class FlussAttemptStore implements AttemptStore, AutoCloseable {
     private final Connection connection;
@@ -36,6 +42,8 @@ public final class FlussAttemptStore implements AttemptStore, AutoCloseable {
     public static FlussAttemptStore open(String bootstrap, String database, String tableName, Duration timeout, Runnable haltCallback) throws Exception {
         Configuration conf = new Configuration();
         conf.setString("bootstrap.servers", bootstrap);
+        // D1: money path — 1ms linger instead of the 100ms default (see FlussWriteProfiles).
+        FlussWriteProfiles.moneyPath(conf);
         Connection conn = ConnectionFactory.createConnection(conf);
         try {
             Table t = conn.getTable(TablePath.of(database, tableName));
@@ -45,19 +53,34 @@ public final class FlussAttemptStore implements AttemptStore, AutoCloseable {
 
     @Override public void close() throws Exception { connection.close(); }
 
-    /** Raw durable lookup by the deterministic execution_attempt_id. */
+    /**
+     * P3-135: raw durable lookup by the deterministic execution_attempt_id.
+     * Returns null ONLY when the row is genuinely absent; a timeout, unavailable
+     * cluster, or lookup failure throws instead — otherwise hydrateIfAbsent would
+     * read "unavailable" as "absent" and mint a duplicate PREPARED attempt (or
+     * report NOT_FOUND for a row that exists durably). Decode failures from
+     * {@link #fromRow} propagate for the same reason.
+     */
     private AttemptRecord lookup(String executionAttemptId) {
+        InternalRow r;
         try {
             Lookuper lookuper = table.newLookup().createLookuper();
-            InternalRow r = lookuper.lookup(GenericRow.of(BinaryString.fromString(executionAttemptId)))
+            r = lookuper.lookup(GenericRow.of(BinaryString.fromString(executionAttemptId)))
                     .get(timeoutMs, TimeUnit.MILLISECONDS).getSingletonRow();
-            return r == null ? null : fromRow(r);
-        } catch (Exception e) { return null; }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("attempt lookup interrupted for " + executionAttemptId, e);
+        } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
+            throw new IllegalStateException("attempt lookup failed for " + executionAttemptId, e);
+        }
+        return r == null ? null : fromRow(r);
     }
 
     /** If the durable store already holds this attempt but this process has not seen it,
-     *  hydrate it so identity / duplicate / transition checks observe it. */
-    private void hydrateIfAbsent(String executionAttemptId) {
+     *  hydrate it so identity / duplicate / transition checks observe it.
+     *  P3-137: synchronized with the mutating methods so the hydrate-then-act sequence is
+     *  atomic — the delegate's prepare/transition are not safe to interleave. */
+    private synchronized void hydrateIfAbsent(String executionAttemptId) {
         if (delegate.attemptById(executionAttemptId) == null) {
             AttemptRecord durable = lookup(executionAttemptId);
             if (durable != null) delegate.hydrate(durable);
@@ -104,7 +127,7 @@ public final class FlussAttemptStore implements AttemptStore, AutoCloseable {
                 terminalTs, summary, retry, sv);
     }
 
-    @Override public PrepareResult prepare(PrepareRequest request) {
+    @Override public synchronized PrepareResult prepare(PrepareRequest request) {
         // Restart-refresh: if this (deterministic) attempt already persisted durably, hydrate it
         // first so a restarted process rebuilds its duplicate index and returns DUPLICATE instead
         // of minting a second PREPARED (the crash-window exactly-once guarantee on the durable store).
@@ -113,48 +136,77 @@ public final class FlussAttemptStore implements AttemptStore, AutoCloseable {
         if (r.status() == AttemptStore.Status.CREATED) persist(r.record());
         return r;
     }
-    @Override public TransitionResult transition(String id, long epoch, String phase) {
+    @Override public synchronized TransitionResult transition(String id, long epoch, String phase) {
         hydrateIfAbsent(id);
         TransitionResult r = delegate.transition(id, epoch, phase);
         if (r.outcome() == AttemptStore.TransitionOutcome.APPLIED) persist(r.record());
         return r;
     }
-    @Override public TransitionResult resolveUnknown(String id, long epoch, String phase) {
+    @Override public synchronized TransitionResult resolveUnknown(String id, long epoch, String phase) {
         hydrateIfAbsent(id);
         TransitionResult r = delegate.resolveUnknown(id, epoch, phase);
         if (r.outcome() == AttemptStore.TransitionOutcome.APPLIED) persist(r.record());
         return r;
     }
 
+    /**
+     * P3-008: fail closed — a swallowed durable-write failure acknowledged
+     * CREATED/APPLIED while the Fluss row was lost, breaking the class-level
+     * crash-window exactly-once guarantee. The interrupt status is restored so
+     * cancellation is observable.
+     *
+     * <p>D1: no per-record {@code flush()} — it is a connection-wide sync point (it
+     * marks every bucket on this connection sendable, then awaits all incomplete
+     * batches with no timeout), so it is not a per-record primitive and would move
+     * the worst case outside this call's bounded budget. See
+     * {@link FlussWriteProfiles}; the 1ms money-path linger bounds the send delay and
+     * {@code .get()} still returns only on a durable ack.
+     */
     private void persist(AttemptRecord rec) {
+        Object[] v = new Object[ExecutionAttemptsColumns.FIELD_COUNT];
+        v[ExecutionAttemptsColumns.EXECUTION_ATTEMPT_ID] = BinaryString.fromString(rec.executionAttemptId());
+        v[ExecutionAttemptsColumns.ACCOUNT_SCOPE_ID] = BinaryString.fromString(rec.accountScopeId());
+        v[ExecutionAttemptsColumns.INSTRUCTION_ID] = BinaryString.fromString(rec.instructionId());
+        v[ExecutionAttemptsColumns.ACTION_ID] = rec.actionId() == null ? null : BinaryString.fromString(rec.actionId());
+        v[ExecutionAttemptsColumns.EXECUTION_PARTITION_ID] = BinaryString.fromString(rec.executionPartitionId());
+        v[ExecutionAttemptsColumns.REQUEST_HASH] = BinaryString.fromString(rec.requestHash());
+        v[ExecutionAttemptsColumns.CLIENT_ORDER_REF] = BinaryString.fromString(rec.clientOrderRef());
+        v[ExecutionAttemptsColumns.BROKER_ORDER_ID] = rec.brokerOrderId() == null ? null : BinaryString.fromString(rec.brokerOrderId());
+        v[ExecutionAttemptsColumns.GATE_EPOCH] = rec.gateEpoch();
+        v[ExecutionAttemptsColumns.PHASE] = BinaryString.fromString(rec.phase());
+        v[ExecutionAttemptsColumns.PHASE_EPOCH] = rec.phaseEpoch();
+        v[ExecutionAttemptsColumns.OUTCOME] = rec.outcome() == null ? null : BinaryString.fromString(rec.outcome());
+        v[ExecutionAttemptsColumns.OUTCOME_DETAIL] = rec.outcomeDetail() == null ? null : BinaryString.fromString(rec.outcomeDetail());
+        v[ExecutionAttemptsColumns.PREPARED_TS] = rec.preparedTs();
+        v[ExecutionAttemptsColumns.SUBMITTED_TS] = rec.submittedTs() == null ? null : rec.submittedTs();
+        v[ExecutionAttemptsColumns.TERMINAL_TS] = rec.terminalTs() == null ? null : rec.terminalTs();
+        v[ExecutionAttemptsColumns.BROKER_RESPONSE_SUMMARY] = rec.brokerResponseSummary() == null ? null : BinaryString.fromString(rec.brokerResponseSummary());
+        v[ExecutionAttemptsColumns.RETRY_ATTEMPT] = rec.retryAttempt();
+        v[ExecutionAttemptsColumns.GATE_FENCE_TOKEN] = rec.gateFenceToken();
+        v[ExecutionAttemptsColumns.SCHEMA_VERSION] = BinaryString.fromString(ExecutionAttemptsColumns.SCHEMA_VERSION_V3);
+        UpsertWriter w = table.newUpsert().createWriter();
         try {
-            Object[] v = new Object[ExecutionAttemptsColumns.FIELD_COUNT];
-            v[ExecutionAttemptsColumns.EXECUTION_ATTEMPT_ID] = BinaryString.fromString(rec.executionAttemptId());
-            v[ExecutionAttemptsColumns.ACCOUNT_SCOPE_ID] = BinaryString.fromString(rec.accountScopeId());
-            v[ExecutionAttemptsColumns.INSTRUCTION_ID] = BinaryString.fromString(rec.instructionId());
-            v[ExecutionAttemptsColumns.ACTION_ID] = rec.actionId() == null ? null : BinaryString.fromString(rec.actionId());
-            v[ExecutionAttemptsColumns.EXECUTION_PARTITION_ID] = BinaryString.fromString(rec.executionPartitionId());
-            v[ExecutionAttemptsColumns.REQUEST_HASH] = BinaryString.fromString(rec.requestHash());
-            v[ExecutionAttemptsColumns.CLIENT_ORDER_REF] = BinaryString.fromString(rec.clientOrderRef());
-            v[ExecutionAttemptsColumns.BROKER_ORDER_ID] = rec.brokerOrderId() == null ? null : BinaryString.fromString(rec.brokerOrderId());
-            v[ExecutionAttemptsColumns.GATE_EPOCH] = rec.gateEpoch();
-            v[ExecutionAttemptsColumns.PHASE] = BinaryString.fromString(rec.phase());
-            v[ExecutionAttemptsColumns.PHASE_EPOCH] = rec.phaseEpoch();
-            v[ExecutionAttemptsColumns.OUTCOME] = rec.outcome() == null ? null : BinaryString.fromString(rec.outcome());
-            v[ExecutionAttemptsColumns.OUTCOME_DETAIL] = rec.outcomeDetail() == null ? null : BinaryString.fromString(rec.outcomeDetail());
-            v[ExecutionAttemptsColumns.PREPARED_TS] = rec.preparedTs();
-            v[ExecutionAttemptsColumns.SUBMITTED_TS] = rec.submittedTs() == null ? null : rec.submittedTs();
-            v[ExecutionAttemptsColumns.TERMINAL_TS] = rec.terminalTs() == null ? null : rec.terminalTs();
-            v[ExecutionAttemptsColumns.BROKER_RESPONSE_SUMMARY] = rec.brokerResponseSummary() == null ? null : BinaryString.fromString(rec.brokerResponseSummary());
-            v[ExecutionAttemptsColumns.RETRY_ATTEMPT] = rec.retryAttempt();
-            v[ExecutionAttemptsColumns.GATE_FENCE_TOKEN] = rec.gateFenceToken();
-            v[ExecutionAttemptsColumns.SCHEMA_VERSION] = BinaryString.fromString(ExecutionAttemptsColumns.SCHEMA_VERSION_V3);
-            UpsertWriter w = table.newUpsert().createWriter();
-            try { w.upsert(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS); } finally { w.flush(); }
-        } catch (Exception ignored) {}
+            w.upsert(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(
+                    "Fluss attempt persist interrupted for " + rec.executionAttemptId(), e);
+        } catch (java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
+            throw new IllegalStateException(
+                    "Fluss attempt persist failed for " + rec.executionAttemptId(), e);
+        }
     }
 
-    // Delegated test seams
-    public AttemptRecord attemptById(String id) { return delegate.attemptById(id); }
-    public int size() { return delegate.size(); }
+    /**
+     * P3-363: read seam that hydrates from the durable row first. Previously this
+     * returned the in-memory delegate only, so after a restart a persisted attempt
+     * read as null until some mutating call happened to hydrate that id.
+     */
+    public synchronized AttemptRecord attemptById(String id) {
+        hydrateIfAbsent(id);
+        return delegate.attemptById(id);
+    }
+
+    /** Hydrated-subset count, NOT the durable row count (P3-363). */
+    public synchronized int size() { return delegate.size(); }
 }

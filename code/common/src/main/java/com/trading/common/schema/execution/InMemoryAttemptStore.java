@@ -76,6 +76,15 @@ public final class InMemoryAttemptStore implements AttemptStore {
         for (AttemptPhase from : AttemptPhase.values()) {
             Set<String> targets = new HashSet<>();
             for (AttemptPhase to : from.legalTargets()) {
+                // P3-378: the reconciliation filter is the derived routing from the
+                // single canonical matrix (CHG-044), not a second hand-kept
+                // allowlist. The target allowlist is pinned by routing through
+                // GateTransitionValidator.isReconciliationOnly, which requires a
+                // terminal target (P3-492/P3-494) — so even if the canonical matrix
+                // ever added UNKNOWN → SUBMITTING, it could not be admitted here and
+                // re-enter submission (no-auto-retry invariant, DEC-011/030).
+                // Pinned by GateTransitionValidatorTest.
+                // reconciliationTargetsAreTerminalAndExcludeSubmission.
                 boolean submitLegal = GateTransitionValidator.isSubmissionLegal(from, to);
                 boolean reconcileOnly = GateTransitionValidator.isReconciliationOnly(from, to);
                 if (reconciliation ? reconcileOnly : submitLegal) {
@@ -114,23 +123,53 @@ public final class InMemoryAttemptStore implements AttemptStore {
     }
 
     @Override
-    public PrepareResult prepare(PrepareRequest request) {
+    public synchronized PrepareResult prepare(PrepareRequest request) {
+        // P3-379: PrepareRequest's compact constructor already rejects null/blank
+        // executionAttemptId/instructionId/requestHash, so no replayKey can form
+        // from a null and no "null" identity can be minted. Only the request
+        // itself needs the local guard.
         Objects.requireNonNull(request, "request");
         String replayKey = replayKey(request.instructionId(), request.requestHash());
         String replayAttemptId = instructionHashToAttemptId.get(replayKey);
         if (replayAttemptId != null) {
             // Duplicate (instruction_id, request_hash): return the existing
             // PREPARED attempt untouched — identity is never rewritten.
-            return PrepareResult.duplicate(byAttemptId.get(replayAttemptId));
+            // P3-153: the secondary index may diverge from byId (reuse, hydrate
+            // policy, corruption); fail closed instead of handing back null.
+            AttemptRecord existing = byAttemptId.get(replayAttemptId);
+            if (existing == null) {
+                haltCallback.run();
+                return PrepareResult.contractViolation(null,
+                        "secondary index diverged for replay key: " + request.instructionId());
+            }
+            return PrepareResult.duplicate(existing);
         }
         String existingAttemptId = instructionToAttemptId.get(request.instructionId());
         if (existingAttemptId != null) {
             // Same instruction_id, different request_hash: a modified decision
             // under an existing instruction identity. Contract violation — halt
             // and do not mutate anything.
+            // P3-380: resolve the returned record through a local — a diverged
+            // index yields null (legal per P3-360), never a stale wrong-instruction
+            // row.
             haltCallback.run();
-            return PrepareResult.contractViolation(byAttemptId.get(existingAttemptId),
+            AttemptRecord conflicting = byAttemptId.get(existingAttemptId);
+            return PrepareResult.contractViolation(conflicting,
                     "modified decision under existing instruction_id: " + request.instructionId());
+        }
+
+        // P3-154: an execution_attempt_id is minted exactly once. Reusing it under
+        // a different instruction silently rebound the primary row while leaving the
+        // old instruction→id index pointing at the overwritten attempt.
+        AttemptRecord clashing = byAttemptId.get(request.executionAttemptId());
+        if (clashing != null) {
+            if (clashing.instructionId().equals(request.instructionId())
+                    && clashing.requestHash().equals(request.requestHash())) {
+                return PrepareResult.duplicate(clashing);
+            }
+            haltCallback.run();
+            return PrepareResult.contractViolation(clashing,
+                    "execution_attempt_id already bound: " + request.executionAttemptId());
         }
 
         AttemptRecord created = AttemptRecord.prepared(
@@ -155,28 +194,29 @@ public final class InMemoryAttemptStore implements AttemptStore {
 
     /**
      * Restart-refresh: install an attempt recovered from the durable Execution_Attempts row so a
-     * restarted process rebuilds its duplicate/contract-violation index. First-writer wins for
-     * the secondary indexes (a replayed identity must not overwrite a newer durable mapping);
-     * the by-id map always reflects the latest durable row for that id.
+     * restarted process rebuilds its duplicate/contract-violation index. All three maps are
+     * overwritten together (P3-381) — a mixed win-policy (latest-wins {@code byId}, first-wins
+     * secondaries) left the indexes pointing at an older identity than {@code byId} served, so a
+     * later prepare could miss the new replay key or resolve to the stale record.
      */
     public synchronized void hydrate(AttemptRecord rec) {
         Objects.requireNonNull(rec, "rec");
         byAttemptId.put(rec.executionAttemptId(), rec);
-        instructionToAttemptId.putIfAbsent(rec.instructionId(), rec.executionAttemptId());
-        instructionHashToAttemptId.putIfAbsent(
+        instructionToAttemptId.put(rec.instructionId(), rec.executionAttemptId());
+        instructionHashToAttemptId.put(
                 replayKey(rec.instructionId(), rec.requestHash()), rec.executionAttemptId());
     }
 
     @Override
-    public TransitionResult transition(String executionAttemptId, long expectedPhaseEpoch,
-                                       String newPhase) {
+    public synchronized TransitionResult transition(String executionAttemptId, long expectedPhaseEpoch,
+                                                    String newPhase) {
         return applyTransition(executionAttemptId, expectedPhaseEpoch, newPhase,
                 SUBMIT_TRANSITIONS, "illegal transition (submission path)");
     }
 
     @Override
-    public TransitionResult resolveUnknown(String executionAttemptId, long expectedPhaseEpoch,
-                                           String resolvedPhase) {
+    public synchronized TransitionResult resolveUnknown(String executionAttemptId, long expectedPhaseEpoch,
+                                                        String resolvedPhase) {
         return applyTransition(executionAttemptId, expectedPhaseEpoch, resolvedPhase,
                 RESOLVE_TRANSITIONS, "resolveUnknown requires an UNKNOWN attempt and a terminal phase");
     }
@@ -193,7 +233,17 @@ public final class InMemoryAttemptStore implements AttemptStore {
             return TransitionResult.rejected(TransitionOutcome.NOT_FOUND, null,
                     "no attempt " + executionAttemptId);
         }
-        if (AttemptRecord.TERMINAL_PHASES.contains(current.phase())) {
+        // P3-499: derive terminality from the canonical AttemptPhase enum
+        // (isTerminal) instead of the hand-maintained AttemptRecord.TERMINAL_PHASES
+        // string set, so the terminal gate and the legal-target gate cannot split.
+        final AttemptPhase currentPhase;
+        try {
+            currentPhase = AttemptPhase.valueOf(current.phase());
+        } catch (IllegalArgumentException e) {
+            return TransitionResult.rejected(TransitionOutcome.ILLEGAL_TRANSITION, current,
+                    "unknown phase " + current.phase());
+        }
+        if (currentPhase.isTerminal()) {
             return TransitionResult.rejected(TransitionOutcome.TERMINAL, current,
                     "terminal phase " + current.phase() + " cannot transition");
         }
@@ -237,11 +287,14 @@ public final class InMemoryAttemptStore implements AttemptStore {
         byAttemptId.put(Objects.requireNonNull(record, "record").executionAttemptId(), record);
     }
 
-    public AttemptRecord attemptById(String executionAttemptId) {
+    // P3-155: every access to the shared maps is synchronized — hydrate alone
+    // holding the monitor provided no mutual exclusion against the writers, and
+    // the Fluss wrapper drives prepare/transition from a pooled executor.
+    public synchronized AttemptRecord attemptById(String executionAttemptId) {
         return byAttemptId.get(executionAttemptId);
     }
 
-    public int size() {
+    public synchronized int size() {
         return byAttemptId.size();
     }
 }

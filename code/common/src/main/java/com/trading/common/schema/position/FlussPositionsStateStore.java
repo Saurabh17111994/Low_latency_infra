@@ -41,6 +41,8 @@ public final class FlussPositionsStateStore implements PositionsStateStore, Auto
             String tableName, Duration timeout) throws Exception {
         Configuration conf = new Configuration();
         conf.setString("bootstrap.servers", bootstrap);
+        // D1: bulk-path linger via FlussWriteProfiles (position snapshots are projection-side).
+        com.trading.common.schema.fluss.FlussWriteProfiles.bulkPath(conf);
         Connection connection = ConnectionFactory.createConnection(conf);
         try {
             TableInfo info = connection.getAdmin().getTableInfo(TablePath.of(database, tableName))
@@ -91,16 +93,15 @@ public final class FlussPositionsStateStore implements PositionsStateStore, Auto
         values[PositionsColumns.CREATED_TS] = s.createdTs();
         values[PositionsColumns.LAST_UPDATE_TS] = s.lastUpdateTs();
         values[PositionsColumns.SCHEMA_VERSION] = BinaryString.fromString(s.schemaVersion());
+        // D2 (P4-150): per-call writer is intentional, not a leak — see FlussWriteProfiles.
         UpsertWriter writer = table.newUpsert().createWriter();
         try {
             writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
-        } finally {
-            // P4-150 note: UpsertWriter/TableWriter is flush()-only in Fluss
-            // 0.9.1 (no AutoCloseable, no close()) — same shape as the
-            // gateway's FlussProjectionLedgerStore. Nothing to close beyond
-            // flush; documented so the next audit does not re-raise the leak.
-            writer.flush();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("position persist interrupted", e);
         }
+        // D1: no per-record flush — see FlussWriteProfiles.
     }
 
     private static BinaryString bs(String s) {

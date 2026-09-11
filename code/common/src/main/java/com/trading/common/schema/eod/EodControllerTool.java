@@ -525,46 +525,49 @@ public final class EodControllerTool {
     private static long copyBucket(Table liveTable, Table shadowTable, TableInfo info,
             Schema schema, int bucketId, long timeoutMs) throws Exception {
         TableBucket bucket = new TableBucket(info.getTableId(), bucketId);
-        // P4-279/282 note: the writer is flush()-only in Fluss 0.9.1 (no
-        // AutoCloseable — verified by decompile in Group F), so the
-        // flush-in-finally stays; it cannot mask the copy exception because
-        // awaitBatch already propagated any ack failure before we get here.
+        // P4-279/282 note: the writer is flush()-only in Fluss 0.9.1 (no AutoCloseable
+        // — verified by decompile in Group F), so there is nothing to close.
+        // 2026-09-11: the flush-in-finally that used to be here is removed. Its old
+        // justification ("cannot mask the copy exception because awaitBatch already
+        // propagated any ack failure") held only on the success path — and there the
+        // flush was a no-op, since awaitBatch had already awaited every future. On the
+        // timeout path it was the opposite of harmless: the futures are still in the
+        // accumulator, so flush() awaited them with no timeout and the TimeoutException
+        // never propagated (see FlussWriteProfiles for why that wait is unbounded).
+        // Written-through is unchanged: the last awaitBatch below still runs, and it is
+        // what makes every row durable before this method returns.
         UpsertWriter writer = shadowTable.newUpsert().createWriter();
         long copied = 0;
-        try {
-            List<CompletableFuture<?>> batch = new ArrayList<>();
-            try (BatchScanner scanner = liveTable.newScan()
-                         .limit(Integer.MAX_VALUE)
-                         .createBatchScanner(bucket)) {
-                // pollBatch returns one time-bounded batch; repeat until empty
-                // (a null/empty batch = scan of this bucket exhausted) —
-                // measured 2026-08-24: a single pollBatch under 16-way
-                // write contention yielded only ~6.8% of the rows (uniform
-                // sample), while the drain loop reads the full bucket.
-                while (true) {
-                    boolean any = false;
-                    try (CloseableIterator<InternalRow> it =
-                            scanner.pollBatch(Duration.ofMillis(250))) {
-                        while (it != null && it.hasNext()) {
-                            InternalRow row = it.next();
-                            batch.add(writer.upsert(GenericRow.of(toValues(row, schema))));
-                            if (batch.size() == COPY_WRITE_BATCH) {
-                                awaitBatch(batch, timeoutMs);
-                            }
-                            copied++;
-                            any = true;
+        List<CompletableFuture<?>> batch = new ArrayList<>();
+        try (BatchScanner scanner = liveTable.newScan()
+                     .limit(Integer.MAX_VALUE)
+                     .createBatchScanner(bucket)) {
+            // pollBatch returns one time-bounded batch; repeat until empty
+            // (a null/empty batch = scan of this bucket exhausted) —
+            // measured 2026-08-24: a single pollBatch under 16-way
+            // write contention yielded only ~6.8% of the rows (uniform
+            // sample), while the drain loop reads the full bucket.
+            while (true) {
+                boolean any = false;
+                try (CloseableIterator<InternalRow> it =
+                        scanner.pollBatch(Duration.ofMillis(250))) {
+                    while (it != null && it.hasNext()) {
+                        InternalRow row = it.next();
+                        batch.add(writer.upsert(GenericRow.of(toValues(row, schema))));
+                        if (batch.size() == COPY_WRITE_BATCH) {
+                            awaitBatch(batch, timeoutMs);
                         }
-                    }
-                    if (!any) {
-                        break;
+                        copied++;
+                        any = true;
                     }
                 }
+                if (!any) {
+                    break;
+                }
             }
-            awaitBatch(batch, timeoutMs);
-            System.out.println("eod-controller: copy bucket=" + bucketId + " rows=" + copied);
-        } finally {
-            writer.flush();
         }
+        awaitBatch(batch, timeoutMs);
+        System.out.println("eod-controller: copy bucket=" + bucketId + " rows=" + copied);
         return copied;
     }
 

@@ -25,9 +25,11 @@ package com.trading.common.model;
  *       advisory; the durable boundary is the authority;</li>
  *   <li>fence ownership/lease liveness (see {@code fenceValidFor} at the gate
  *       boundary, checked again immediately before any bridge call);</li>
- *   <li>forward-epoch gaps ({@code requestEpoch > currentEpoch}) are surfaced
- *       in the result detail for restart/hydrate/replay callers — the caller
- *       that owns epoch bookkeeping decides.</li>
+ *   <li>forward-epoch gaps of exactly one generation are surfaced in the result
+ *       detail for restart/hydrate/replay callers. A gap of <b>more than one</b>
+ *       is rejected outright (P3-118/P3-119) — it means the caller's epoch
+ *       bookkeeping is out of sync, so the caller that owns epoch bookkeeping must
+ *       reconcile rather than proceed.</li>
  * </ul>
  *
  * <p>The legal matrices are not defined here: {@link AttemptPhase#legalTargets}
@@ -40,6 +42,14 @@ package com.trading.common.model;
  * only the forward steps; {@code enable} requires epoch + authorized approval
  * + bound evidence); it is a same-rules re-implementation, not a table shared
  * with this file.
+ *
+ * <p>Known epoch-parity asymmetry (P3-118/P3-119): this validator tolerates a
+ * forward epoch of <b>exactly one</b> generation and rejects larger gaps, while
+ * the Rust {@code enable} requires the supplied epoch to match the declared gate
+ * epoch exactly. The Rust rule is the stricter of the two, so the asymmetry
+ * cannot authorize a money-moving call this validator would refuse — but the two
+ * are not identical, and the Rust side remains the authority for enablement.
+ * Do not cite this validator as proof of the Rust gate's epoch rule.
  *
  * <p>Corrected vs the pre-T5 matrix: ACCEPTED &rarr; REJECTED is now rejected
  * (ACCEPTED is terminal per the attempt-store's TERMINAL_PHASES); terminal
@@ -102,6 +112,24 @@ public final class GateTransitionValidator {
                             + "; epoch mismatch may indicate a lost lease or delayed message");
         }
 
+        // 1b. Forward-epoch gap (P3-118/P3-119) — a jump of more than one
+        // generation is rejected. Every accepted transition increments the epoch
+        // by exactly one, so a gap means the caller's epoch bookkeeping is out of
+        // sync with the gate (lost lease, stale owner, replayed message); allowing
+        // it would let one request claim an arbitrary future generation and risk
+        // split-brain execution. Exactly +1 stays legal (the normal advance), and
+        // a HALTED target is already exempt via step 0 above — a delayed safety
+        // halt must fence the gate on any epoch.
+        //
+        // Lease/fence liveness is deliberately NOT checked here: this validator is
+        // topology-only and has no lease inputs. The gate boundary re-validates the
+        // live fence immediately before any bridge call (fenceValidFor).
+        if (requestEpoch > currentEpoch + 1) {
+            return GateResult.rejected(currentState, targetState,
+                    "forward epoch gap: request=" + requestEpoch
+                            + " > current+1=" + (currentEpoch + 1));
+        }
+
         // 2. Same-state idempotent — no-op
         if (currentState == targetState) {
             return GateResult.allowed(currentState, targetState,
@@ -115,10 +143,8 @@ public final class GateTransitionValidator {
                     "illegal transition: " + currentState + " → " + targetState);
         }
 
-        // 4. Forward-epoch gap (requestEpoch > currentEpoch)
-        // Allowed but logged — the caller owns epoch management.
-        // The executor fencing lease must still be valid.
-
+        // 4. Legal topology. A forward epoch of exactly +1 is the sanctioned
+        // advance, surfaced in the detail for restart/hydrate/replay callers.
         return GateResult.allowed(currentState, targetState,
                 "legal transition: " + currentState + " → " + targetState
                         + (requestEpoch > currentEpoch
@@ -190,9 +216,17 @@ public final class GateTransitionValidator {
      * the submission path from reconciliation (the attempt-store writer, the
      * durable command gate) use this to route UNKNOWN exits through
      * {@code resolveUnknown} instead of the submission path.
+     *
+     * <p>P3-492/P3-494: the target must be terminal — a reconciliation exit is a
+     * declared final outcome for the attempt. Without this check a future
+     * non-terminal UNKNOWN edge (e.g. UNKNOWN &rarr; SUBMITTING retry) would be
+     * silently routed through {@code resolveUnknown} and re-enter submission,
+     * exactly the auto-retry the no-auto-retry invariant forbids. (The null
+     * guard also keeps {@code legalTargets().contains(null)} off the NPE path.)
      */
     public static boolean isReconciliationOnly(AttemptPhase from, AttemptPhase to) {
-        return from != null && from.isReconciliationSource()
+        return from != null && to != null && to.isTerminal()
+                && from.isReconciliationSource()
                 && from.legalTargets().contains(to);
     }
 

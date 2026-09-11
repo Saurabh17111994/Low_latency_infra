@@ -163,23 +163,25 @@ public final class CompositeKeyMatrixVerifier {
      */
     private static String runCell(Table table, Duration timeout) {
         // NOTE (P4-145): UpsertWriter/Lookuper are NOT Closeable in this Fluss
-        // version (only Table is AutoCloseable) — flush is the release path,
-        // guarded below so it cannot mask the upsert outcome. Table lifecycle
-        // stays with the caller (verify drops scratch tables in finally).
-        UpsertWriter writer = table.newUpsert().createWriter();
+        // version (only Table is AutoCloseable), so there is nothing to release
+        // and no close() to call — the bounded get() below IS the whole write.
+        // The flush that used to sit in a finally here was removed 2026-09-11:
+        // it was a no-op on success (the ack had already been awaited) and
+        // unbounded on failure, so it masked the very timeout it read as
+        // guarding — a catch() cannot rescue an awaited latch (see
+        // flush_guard.sh). Table lifecycle stays with the caller (verify drops
+        // scratch tables in finally).
         try {
-            try {
-                writer.upsert(GenericRow.of(
-                                BinaryString.fromString("a"), BinaryString.fromString("b"), 7L))
-                        .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-            } finally {
-                try {
-                    writer.flush();
-                } catch (Exception flushEx) {
-                    // do not mask an in-flight upsert failure; runCell reports
-                    // the upsert outcome, cleanup failures must not replace it
-                }
-            }
+            // createWriter() is INSIDE the guard on purpose: the bucket key's
+            // IcebergKeyEncoder is constructed here, not at upsert time, so the
+            // documented composite-bucket-key cells (cells 1-2) throw at this
+            // line. Left outside the guard, that throw escaped runCell entirely
+            // and aborted the whole matrix as "matrix verification failed"
+            // instead of being recorded as the cell's expected outcome.
+            UpsertWriter writer = table.newUpsert().createWriter();
+            writer.upsert(GenericRow.of(
+                            BinaryString.fromString("a"), BinaryString.fromString("b"), 7L))
+                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             Lookuper lookuper = table.newLookup().createLookuper();
             InternalRow found = lookuper.lookup(
                             GenericRow.of(BinaryString.fromString("a"), BinaryString.fromString("b")))

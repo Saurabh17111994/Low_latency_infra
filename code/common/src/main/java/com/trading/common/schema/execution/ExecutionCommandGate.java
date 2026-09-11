@@ -52,6 +52,11 @@ public final class ExecutionCommandGate {
             Objects.requireNonNull(executionAttemptId, "executionAttemptId");
             Objects.requireNonNull(accountScopeId, "accountScopeId");
             Objects.requireNonNull(instructionId, "instructionId");
+            // P3-362: actionId + evidenceHash are as mandatory as the other
+            // identities — a null evidenceHash would silently BLOCK the command
+            // (approvedEvidenceHash.equals(null) == false) and persist null
+            // evidence on halt/audit, breaking the evidence chain.
+            Objects.requireNonNull(actionId, "actionId");
             Objects.requireNonNull(executionPartitionId, "executionPartitionId");
             Objects.requireNonNull(requestHash, "requestHash");
             Objects.requireNonNull(clientOrderRef, "clientOrderRef");
@@ -162,9 +167,9 @@ public final class ExecutionCommandGate {
                 cmd.actionId(), cmd.executionPartitionId(), cmd.requestHash(),
                 cmd.clientOrderRef(), cmd.gateFenceToken(), cmd.gateEpoch(), now));
         if (pr.status() == AttemptStore.Status.CONTRACT_VIOLATION) {
-            halt(cmd, row, pr.reason(), cmd.evidenceHash());
-            return new Result(Outcome.CONTRACT_VIOLATION, pr.record(), gateStore.read(
-                    cmd.executionPartitionId()), pr.reason(), bridgeCallsFor(cmd));
+            GateRow halted = halt(cmd, row, pr.reason(), cmd.evidenceHash());
+            return new Result(Outcome.CONTRACT_VIOLATION, pr.record(), halted,
+                    pr.reason(), bridgeCallsFor(cmd));
         }
         AttemptRecord attempt = pr.record();
 
@@ -283,20 +288,7 @@ public final class ExecutionCommandGate {
     }
 
     private Result unknownAndHalt(Command cmd, AttemptRecord attempt, GateRow row, String reason) {
-        halt(cmd, row, reason, cmd.evidenceHash());
-        GateRow halted = gateStore.read(cmd.executionPartitionId());
-        // P3-134: fail closed without crashing — if the halt did not land durably
-        // HALTED (lost CAS race, concurrent re-enable), report the unverified
-        // state in the reason so callers never believe a live gate is halted.
-        // Throwing here would turn the safety path into a crash path and deny
-        // reconciliation; returning the truth keeps the process alive to reconcile.
-        if (halted == null || halted.state() != GateState.HALTED) {
-            return new Result(Outcome.UNKNOWN_HALTED, attempt, halted, reason
-                    + " [halt unverified: gate is "
-                    + (halted == null ? "missing" : halted.state().name())
-                    + " — treat as live, reconcile before retry]",
-                    bridgeCallsFor(cmd));
-        }
+        GateRow halted = halt(cmd, row, reason, cmd.evidenceHash());
         return new Result(Outcome.UNKNOWN_HALTED, attempt, halted, reason, bridgeCallsFor(cmd));
     }
 
@@ -304,9 +296,32 @@ public final class ExecutionCommandGate {
         return new Result(Outcome.BLOCKED, null, row, reason, bridgeCallsFor(cmd));
     }
 
-    private void halt(Command cmd, GateRow row, String reason, String evidenceHash) {
-        gateStore.halt(cmd.executionPartitionId(), row, reason, evidenceHash, clock.getAsLong());
+    /**
+     * Raise and durably VERIFY the safety halt (P3-134). The {@code expected}
+     * witness can be stale (CAS rejection) or the halt can lose a race, so on an
+     * unconfirmed result escalate to an unconditional halt (null expected = halt
+     * regardless of generation, per the {@link GateStateStore#halt} contract) and
+     * confirm the durable row is HALTED before returning.
+     *
+     * <p>Throwing on an unconfirmed halt is the fail-closed choice: reporting
+     * {@code UNKNOWN_HALTED} while the gate could still be ENABLED would let the
+     * next {@code execute()} pass the ENABLED check and place a second order.
+     * Returning the VERIFIED row also means callers never record a gate state the
+     * durable store does not hold.
+     */
+    private GateRow halt(Command cmd, GateRow row, String reason, String evidenceHash) {
+        String partitionId = cmd.executionPartitionId();
+        GateRow halted = gateStore.halt(partitionId, row, reason, evidenceHash, clock.getAsLong());
         haltObserver.run();
+        if (halted == null || halted.state() != GateState.HALTED) {
+            halted = gateStore.halt(partitionId, null, reason, evidenceHash, clock.getAsLong());
+        }
+        GateRow verified = halted != null ? halted : gateStore.read(partitionId);
+        if (verified == null || verified.state() != GateState.HALTED) {
+            throw new IllegalStateException("halt not durably HALTED for " + partitionId
+                    + " — refusing to report UNKNOWN_HALTED");
+        }
+        return verified;
     }
 
     private void auditOutcome(Command cmd, AttemptRecord sub, BridgeCaller.BridgeOutcome o) {

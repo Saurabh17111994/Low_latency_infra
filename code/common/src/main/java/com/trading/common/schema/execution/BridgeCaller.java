@@ -1,5 +1,7 @@
 package com.trading.common.schema.execution;
 
+import java.util.Objects;
+
 /**
  * The broker bridge boundary for exactly one place request per attempt.
  *
@@ -23,8 +25,26 @@ public interface BridgeCaller {
         UNKNOWN
     }
 
-    /** Result of one place call. {@code UNKNOWN} never carries a broker order id. */
+    /**
+     * Result of one place call. {@code UNKNOWN} never carries a broker order id.
+     * P3-006: the invariants are enforced at construction, never assumed — a null
+     * {@code kind} made {@link #ambiguous()} false and let the gate classify an
+     * ambiguous result as REJECTED (deciding by assumption, an order-safety
+     * violation); ACCEPTED without an id claimed verifiable success without
+     * evidence; and a REJECTED/UNKNOWN carrying an id confused reconciliation.
+     */
     record BridgeOutcome(OutcomeKind kind, String brokerOrderId, String detail) {
+        public BridgeOutcome {
+            Objects.requireNonNull(kind, "kind");
+            boolean hasId = brokerOrderId != null && !brokerOrderId.isBlank();
+            if (kind == OutcomeKind.ACCEPTED && !hasId) {
+                throw new IllegalArgumentException("ACCEPTED requires non-blank brokerOrderId");
+            }
+            if (kind != OutcomeKind.ACCEPTED && hasId) {
+                throw new IllegalArgumentException(kind + " must not carry brokerOrderId");
+            }
+        }
+
         public boolean ambiguous() {
             return kind == OutcomeKind.UNKNOWN;
         }

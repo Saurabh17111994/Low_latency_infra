@@ -49,14 +49,12 @@ class ArrowOrderRequestResponseTest {
 
     @Test
     void rejectsOverlongClientOrderRef() {
-        ClientOrderRef tooLong = new ClientOrderRef("INV20250721TOOLONG"); // > 16
-        assertThatThrownBy(() -> new ArrowOrderRequest(
-            new ExchangeId("NSECM"), "RELIANCE-EQ", new InstrumentToken(26009), 10,
-            ArrowOrderRequest.TransactionType.B, ArrowOrderRequest.OrderType.LMT,
-            ArrowOrderRequest.Product.I, "2975.10", ArrowOrderRequest.Validity.DAY,
-            0, tooLong, false))
+        // P3-110: the 16-char cap now fails fast at the ClientOrderRef
+        // constructor (fail-fast identity), not late at the Arrow boundary —
+        // the broker check below stays as defense in depth.
+        assertThatThrownBy(() -> new ClientOrderRef("INV20250721TOOLONG")) // > 16
             .isInstanceOf(IllegalArgumentException.class)
-            .hasMessageContaining("remarks");
+            .hasMessageContaining("16");
     }
 
     @Test

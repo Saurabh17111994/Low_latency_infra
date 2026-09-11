@@ -28,6 +28,8 @@ import org.apache.fluss.client.table.scanner.batch.BatchScanner;
 import org.apache.fluss.client.table.writer.AppendWriter;
 import org.apache.fluss.client.table.writer.UpsertWriter;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.metadata.PartitionInfo;
+import org.apache.fluss.metadata.ResolvedPartitionSpec;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableInfo;
@@ -92,6 +94,9 @@ public final class DdlApplyTool {
             .enable(SerializationFeature.INDENT_OUTPUT);
 
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
+
+    /** Bound on waiting for a partitioned table's auto-created partitions (normally well under 1s). */
+    private static final Duration AUTO_PARTITION_WAIT = Duration.ofSeconds(30);
 
     private DdlApplyTool() {}
 
@@ -765,29 +770,40 @@ public final class DdlApplyTool {
     private static String smokeRoundTrip(Connection connection, Admin admin, String name,
             DdlText.ParsedDdl ddl) throws Exception {
         Table table = connection.getTable(TablePath.of("default", name));
+        // A partitioned table routes on the partition values carried IN the row
+        // (AbstractTableWriter's partitionFieldGetter), so the fixture must name
+        // a partition the table actually has. defaultValue() would write the
+        // generic "smoke-0" STRING, which is not a real partition of a
+        // PARTITIONED BY (event_day) table: the append resolves to no live
+        // bucket and dies with "Leader not found after retry 3 times ...". Read
+        // the twin's own auto-created partition instead of deriving the day —
+        // no date math, so this holds for any time-zone/retention/precreate
+        // configuration the DDL declares.
+        PartitionInfo partition = ddl.partitionKeys().isEmpty()
+                ? null : awaitAutoPartition(admin, name, ddl);
         Object[] values = new Object[ddl.columns().size()];
         for (int c = 0; c < ddl.columns().size(); c++) {
             values[c] = defaultValue(ddl.columns().get(c).type(), c);
         }
+        if (partition != null) {
+            applyPartitionValues(ddl, partition, values);
+        }
         if (ddl.primaryKey().isEmpty()) {
             AppendWriter writer = table.newAppend().createWriter();
-            try {
-                writer.append(GenericRow.of(values)).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-            } finally {
-                writer.flush();
-            }
-            long seen = scanCount(table, info(admin, name));
+            // No flush in a finally here (2026-09-11): flush() is unbounded in Fluss
+            // 0.9.1 and in that slot masked the bounded get()'s timeout instead of
+            // cleaning anything up — see flush_guard.sh.
+            writer.append(GenericRow.of(values)).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            long seen = scanCount(table, info(admin, name),
+                    partition == null ? null : partition.getPartitionId());
             if (seen < 1) {
                 return "LOG append not readable back (scan count " + seen + ")";
             }
             return null;
         }
         UpsertWriter writer = table.newUpsert().createWriter();
-        try {
-            writer.upsert(GenericRow.of(values)).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-        } finally {
-            writer.flush();
-        }
+        // Same shape as the LOG branch above — one bounded await, no flush.
+        writer.upsert(GenericRow.of(values)).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
         Object[] key = new Object[ddl.primaryKey().size()];
         for (int k = 0; k < ddl.primaryKey().size(); k++) {
             int colIndex = columnIndex(ddl, ddl.primaryKey().get(k));
@@ -807,11 +823,69 @@ public final class DdlApplyTool {
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    /** Scans every bucket and returns the total row count (drain loop — slow appends included). */
-    private static long scanCount(Table table, TableInfo info) throws Exception {
+    /**
+     * Waits for a freshly created partitioned table's auto-created partitions and returns one.
+     * Auto-partitioning is asynchronous (the coordinator's AutoPartitionManager creates the DAY
+     * partitions after the create), so the smoke polls briefly rather than assuming they exist, and
+     * fails closed with a clear message instead of falling through to the confusable "Leader not
+     * found" that a write to a non-existent partition raises.
+     */
+    private static PartitionInfo awaitAutoPartition(Admin admin, String name, DdlText.ParsedDdl ddl)
+            throws Exception {
+        TablePath path = TablePath.of("default", name);
+        long deadline = System.currentTimeMillis() + AUTO_PARTITION_WAIT.toMillis();
+        while (true) {
+            List<PartitionInfo> partitions = admin.listPartitionInfos(path)
+                    .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            if (!partitions.isEmpty()) {
+                return partitions.get(0);
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                throw new IllegalStateException(ddl.sourcePath() + ": partitioned table " + name
+                        + " has no partitions after " + AUTO_PARTITION_WAIT.toSeconds()
+                        + "s — auto-partition created none, so the smoke cannot target one");
+            }
+            Thread.sleep(200);
+        }
+    }
+
+    /** Overrides the fixture's partition columns with an existing partition's own values. */
+    private static void applyPartitionValues(DdlText.ParsedDdl ddl, PartitionInfo partition,
+            Object[] values) {
+        ResolvedPartitionSpec spec = partition.getResolvedPartitionSpec();
+        List<String> keys = spec.getPartitionKeys();
+        List<String> partitionValues = spec.getPartitionValues();
+        for (int k = 0; k < keys.size(); k++) {
+            int idx = columnIndex(ddl, keys.get(k));
+            values[idx] = partitionValue(ddl.columns().get(idx).type(), partitionValues.get(k),
+                    ddl, keys.get(k));
+        }
+    }
+
+    /**
+     * Converts a partition value (Fluss carries partition values as strings) into the column's
+     * runtime type. Only STRING partition columns exist in today's DDLs ({@code event_day}); any
+     * other type fails closed rather than writing a wrongly-typed fixture.
+     */
+    private static Object partitionValue(DataType type, String raw, DdlText.ParsedDdl ddl,
+            String key) {
+        if (type.getTypeRoot() == DataTypeRoot.STRING) {
+            return BinaryString.fromString(raw);
+        }
+        throw new IllegalStateException(ddl.sourcePath() + ": smoke cannot build a "
+                + type.getTypeRoot() + " fixture for partition column '" + key + "'");
+    }
+
+    /**
+     * Scans every bucket and returns the total row count (drain loop — slow appends included).
+     * {@code partitionId} is null for a non-partitioned table; a partitioned table's buckets exist
+     * only inside a partition, so the read-back must target the partition the fixture was written
+     * to or it sees nothing.
+     */
+    private static long scanCount(Table table, TableInfo info, Long partitionId) throws Exception {
         long count = 0;
         for (int b = 0; b < info.getNumBuckets(); b++) {
-            TableBucket tb = new TableBucket(info.getTableId(), b);
+            TableBucket tb = new TableBucket(info.getTableId(), partitionId, b);
             try (BatchScanner scanner = table.newScan()
                          .limit(Integer.MAX_VALUE)
                          .createBatchScanner(tb)) {
@@ -1134,16 +1208,12 @@ public final class DdlApplyTool {
             List<Object[]> rows) throws Exception {
         int deleted = 0;
         UpsertWriter writer = table.newUpsert().createWriter();
-        try {
-            for (Object[] key : rows) {
-                // The delete writer validates arity against the FULL schema;
-                // only the PK fields are used to identify the row.
-                writer.delete(GenericRow.of(key))
-                        .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-                deleted++;
-            }
-        } finally {
-            writer.flush();
+        for (Object[] key : rows) {
+            // The delete writer validates arity against the FULL schema;
+            // only the PK fields are used to identify the row.
+            writer.delete(GenericRow.of(key))
+                    .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            deleted++;
         }
         return deleted;
     }

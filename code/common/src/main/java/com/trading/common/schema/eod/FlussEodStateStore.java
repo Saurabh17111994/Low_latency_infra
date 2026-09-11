@@ -1,6 +1,7 @@
 package com.trading.common.schema.eod;
 
 import com.trading.common.schema.EodControllerState;
+import com.trading.common.schema.fluss.FlussWriteProfiles;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -53,6 +54,11 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
             Duration timeout) throws Exception {
         Configuration conf = new Configuration();
         conf.setString("bootstrap.servers", bootstrap);
+        // D1 (2026-09-11): without a linger this connection waited on Fluss's 100ms
+        // default for every write — which is what the per-record flush() here used to
+        // mask. See FlussWriteProfiles for the value, the measurement, and why the
+        // flush was removed in favour of this.
+        FlussWriteProfiles.bulkPath(conf);
         Connection connection = ConnectionFactory.createConnection(conf);
         try {
             TablePath path = TablePath.of(database, stateTable);
@@ -80,7 +86,15 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
             // bucket; a single poll silently truncates large/slow scans (the
             // controller then re-drives completed work or misses failures).
             // Bounded by timeoutMs, null-guarded (empty/exhausted bucket).
-            try (BatchScanner scanner = table.newScan().createBatchScanner(tb)) {
+            // limit() is REQUIRED by Fluss 0.9.1 for a BatchScanner
+            // (TableScan.createBatchScanner throws UnsupportedOperationException
+            // without it), so readAll — and therefore `status` — failed outright
+            // until this was added (2026-09-11, found by running the controller
+            // against the live cluster). MAX_VALUE is the "no effective limit"
+            // spelling used by the other two scan sites in EodControllerTool;
+            // the drain loop below is what terminates the scan.
+            try (BatchScanner scanner = table.newScan().limit(Integer.MAX_VALUE)
+                    .createBatchScanner(tb)) {
                 while (true) {
                     CloseableIterator<InternalRow> batch =
                             scanner.pollBatch(Duration.ofMillis(timeoutMs));
@@ -146,18 +160,17 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
         values[EodOffloadStateColumns.UPDATED_AT_MS] = record.updatedAtMs();
         values[EodOffloadStateColumns.STATE_SCHEMA_VERSION] =
                 BinaryString.fromString(EodOffloadStateColumns.STATE_SCHEMA_VERSION_V1);
-        // P4-134: get() before flush() risks hanging to timeout (buffered
-        // upsert needs flush to make progress). No try-with-resources:
-        // UpsertWriter/TableWriter is flush-only in Fluss 0.9.1 (verified by
-        // decompile in Group F) — same shape as the positions store.
+        // P4-134 (final, 2026-09-11): no per-record flush, and the earlier note that
+        // get()-before-flush() "risks hanging to timeout" is backwards — it is the
+        // flush that is unbounded (see FlussWriteProfiles). This write used to flush
+        // before and in a finally; open() set no linger, so the flush was forcing the
+        // batch out past Fluss's 100ms default. bulkPath() now bounds the send delay,
+        // and the finally flush is gone because in that slot it awaited an unsendable
+        // batch and swallowed the TimeoutException instead of propagating it.
+        // No try-with-resources: UpsertWriter/TableWriter is flush-only in Fluss 0.9.1
+        // (see FlussWriteProfiles for the D2 rationale — same shape as the positions store).
         UpsertWriter writer = table.newUpsert().createWriter();
-        java.util.concurrent.CompletableFuture<?> f = writer.upsert(GenericRow.of(values));
-        try {
-            writer.flush();
-            f.get(timeoutMs, TimeUnit.MILLISECONDS);
-        } finally {
-            writer.flush();
-        }
+        writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -211,16 +224,12 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
         values[EodOffloadStateColumns.UPDATED_AT_MS] = acquiredAtMs;
         values[EodOffloadStateColumns.STATE_SCHEMA_VERSION] =
                 BinaryString.fromString(EodOffloadStateColumns.STATE_SCHEMA_VERSION_V1);
-        // P4-136: same reorder as upsert() — flush before get; no
-        // try-with-resources (UpsertWriter is flush-only in 0.9.1).
+        // P4-136: same shape as upsert() — one bounded get(), no flush (see there
+        // and FlussWriteProfiles); no try-with-resources (UpsertWriter is
+        // flush-only in 0.9.1). A lease write that cannot be acked must fail loudly
+        // here rather than hang, since acquireLease is the mutual-exclusion path.
         UpsertWriter writer = table.newUpsert().createWriter();
-        java.util.concurrent.CompletableFuture<?> f = writer.upsert(GenericRow.of(values));
-        try {
-            writer.flush();
-            f.get(timeoutMs, TimeUnit.MILLISECONDS);
-        } finally {
-            writer.flush();
-        }
+        writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
     }
 
     private static EodOffloadRecord toRecord(InternalRow r) {

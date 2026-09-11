@@ -1,5 +1,7 @@
 package com.trading.common.schema.execution;
 
+import java.util.Objects;
+
 /**
  * Attempt lifecycle store (docs/08_implementation/05-execution-core.md &rarr;
  * "Attempt rules"): mints exactly one PREPARED attempt per
@@ -36,13 +38,28 @@ public interface AttemptStore {
     enum Status {
         /** A new PREPARED attempt was minted. */
         CREATED,
-        /** (instruction_id, request_hash) already exists — existing attempt returned. */
+        /**
+         * (instruction_id, request_hash) already exists — the existing attempt is
+         * returned. Caller-supplied {@code executionAttemptId}/{@code clientOrderRef}
+         * in the duplicate request are ignored and MUST NOT overwrite the stored
+         * identity (P3-357).
+         */
         DUPLICATE,
-        /** Same instruction_id, different request_hash — identity cannot be rebound. */
+        /**
+         * Same instruction_id, different request_hash — identity cannot be rebound.
+         * The returned {@code record} is the existing attempt bound to that
+         * instruction_id (or {@code null} if the store's index has diverged); the
+         * store requests a halt and mutates nothing (P3-357).
+         */
         CONTRACT_VIOLATION
     }
 
-    /** All identities and creation inputs are caller-supplied (deterministic). */
+    /**
+     * All identities and creation inputs are caller-supplied (deterministic).
+     * The three deterministic identities are mandatory and non-blank: a null or
+     * blank value must fail fast at construction rather than mint a corrupt
+     * {@code "null"}-keyed attempt (P3-358, mirrors {@code ExecutionCommandGate.Command}).
+     */
     record PrepareRequest(
             String executionAttemptId,
             String accountScopeId,
@@ -53,9 +70,34 @@ public interface AttemptStore {
             String clientOrderRef,
             long gateFenceToken,
             long gateEpoch,
-            long nowTs) {}
+            long nowTs) {
+        public PrepareRequest {
+            requireIdentity(executionAttemptId, "executionAttemptId");
+            requireIdentity(instructionId, "instructionId");
+            requireIdentity(requestHash, "requestHash");
+        }
+    }
 
+    private static String requireIdentity(String value, String field) {
+        Objects.requireNonNull(value, field);
+        if (value.isBlank()) {
+            throw new IllegalArgumentException(field + " must be non-blank");
+        }
+        return value;
+    }
+
+    /**
+     * Outcome of {@link #prepare}. {@code record} is non-null for CREATED and
+     * DUPLICATE (the minted / existing attempt); on CONTRACT_VIOLATION it is the
+     * conflicting attempt or null when the store's index has diverged (P3-360).
+     */
     record PrepareResult(Status status, AttemptRecord record, String reason) {
+        public PrepareResult {
+            Objects.requireNonNull(status, "status");
+            if ((status == Status.CREATED || status == Status.DUPLICATE) && record == null) {
+                throw new IllegalArgumentException("record must be non-null on " + status);
+            }
+        }
 
         public static PrepareResult created(AttemptRecord record) {
             return new PrepareResult(Status.CREATED, record, null);
@@ -83,7 +125,19 @@ public interface AttemptStore {
         NOT_FOUND
     }
 
+    /**
+     * Outcome of {@link #transition}/{@link #resolveUnknown}. {@code record} is
+     * non-null on APPLIED and on rejections that name the current row; it is null
+     * only for NOT_FOUND and for a blank-phase ILLEGAL_TRANSITION, where no attempt
+     * was resolved (P3-360).
+     */
     record TransitionResult(TransitionOutcome outcome, AttemptRecord record, String reason) {
+        public TransitionResult {
+            Objects.requireNonNull(outcome, "outcome");
+            if (outcome == TransitionOutcome.APPLIED && record == null) {
+                throw new IllegalArgumentException("record must be non-null on APPLIED");
+            }
+        }
 
         public static TransitionResult applied(AttemptRecord record) {
             return new TransitionResult(TransitionOutcome.APPLIED, record, null);
@@ -95,6 +149,25 @@ public interface AttemptStore {
         }
     }
 
+    /**
+     * Mints, or returns, the single attempt for {@code (instruction_id, request_hash)}.
+     *
+     * <p>Atomicity (P3-131): implementations MUST linearize concurrent {@code prepare}
+     * calls on the same replay key — exactly one CREATED, the rest DUPLICATE — and MUST
+     * apply {@link #transition}/{@link #resolveUnknown} as a compare-and-set on
+     * {@code (execution_attempt_id, phase_epoch)}. An implementation MAY be single-writer
+     * (documented as such, like {@link InMemoryAttemptStore}) or thread-safe; it MUST NOT
+     * be silently neither.
+     *
+     * <p>Contract violation (P3-130): a modified decision under an existing
+     * {@code instruction_id} (same id, different {@code request_hash}) returns
+     * {@link Status#CONTRACT_VIOLATION}; the implementation MUST request a halt (e.g. via
+     * a constructor-injected callback) and MUST NOT mutate state. Callers MUST treat this
+     * result as must-halt even if the store already halted (the halt must be idempotent).
+     *
+     * @throws NullPointerException/IllegalArgumentException if the request identities are
+     *         null or blank (see {@link PrepareRequest})
+     */
     PrepareResult prepare(PrepareRequest request);
 
     /**
@@ -107,7 +180,15 @@ public interface AttemptStore {
      * @param expectedPhaseEpoch  caller's view of the current phase_epoch; a
      *                            mismatch rejects the update as stale without
      *                            mutation
-     * @param newPhase            the phase to move to
+     * @param newPhase            the phase to move to; one of the
+     *                            {@link AttemptRecord#PHASE_PREPARED} /
+     *                            {@code PHASE_*} constants (equivalently
+     *                            {@link com.trading.common.model.AttemptPhase#name()}).
+     *                            Kept as {@code String} for durable/Fluss and
+     *                            cross-language interop (P3-361). A null, blank, or
+     *                            unknown value is rejected without mutation, and
+     *                            {@code UNKNOWN} must never be passed here — use
+     *                            {@link #resolveUnknown}.
      */
     TransitionResult transition(String executionAttemptId, long expectedPhaseEpoch,
                                 String newPhase);

@@ -63,7 +63,7 @@ class ExecutionCommandGateCrashWindowTest {
     }
 
     private static Command cmd(String attemptId) {
-        return new Command(attemptId, "acc", "ins-1", null, PARTITION, "h-1",
+        return new Command(attemptId, "acc", "ins-1", "act-" + attemptId, PARTITION, "h-1",
                 "E-" + attemptId, 5, 7, "ev-1");
     }
 
