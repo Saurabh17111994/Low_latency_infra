@@ -1,6 +1,7 @@
 package com.trading.common.schema.execution;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.trading.common.model.GateState;
 import com.trading.common.schema.execution.BridgeCaller.OutcomeKind;
@@ -75,7 +76,7 @@ class ExecutionCommandGateProtocolTest {
 
     private static Command cmd(String attemptId, String instruction, String hash,
                                long epoch, long token, String ev) {
-        return new Command(attemptId, "acc", instruction, null, PARTITION, hash,
+        return new Command(attemptId, "acc", instruction, "act-" + attemptId, PARTITION, hash,
                 "E-" + attemptId, epoch, token, ev);
     }
     private static Command cmd(String attemptId, String instruction, String hash) {
@@ -117,12 +118,26 @@ class ExecutionCommandGateProtocolTest {
         assertThat(rig.bridge.total).isEqualTo(1); // exactly once, never twice
     }
 
+    @Test
+    void commandRejectsNullActionIdAndEvidenceHash() {
+        // P3-362: both are mandatory — a null evidenceHash would silently BLOCK
+        // (never fail fast) and a null actionId would persist a null identity.
+        assertThatThrownBy(() -> new Command("a-1", "acc", "ins-1", null, PARTITION, "h-1",
+                "E-a-1", 5, 7, "ev-1"))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("actionId");
+        assertThatThrownBy(() -> new Command("a-1", "acc", "ins-1", "act-a-1", PARTITION, "h-1",
+                "E-a-1", 5, 7, null))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessageContaining("evidenceHash");
+    }
+
     // ---- gate / epoch / fence / approval rejection (no broker call) ----
 
     @Test
     void gateNotEnabledRejectsWithNoCall() {
         InMemoryAttemptStore attempts = new InMemoryAttemptStore(new AtomicInteger()::incrementAndGet);
-        InMemoryGateStateStore gates = new InMemoryGateStateStore(Set.of());
+        InMemoryGateStateStore gates = InMemoryGateStateStore.anyApprover();
         gates.install(new GateRow(PARTITION, "acc", GateState.HALTED, 5, "halted", "ev-1",
                 "saurabh", null, "ev-1", "worker-1", 7, NOW - 1000, NOW + 100_000, null));
         ExecutionCommandGate g = new ExecutionCommandGate(attempts, gates, new FakeBridge(),
@@ -154,7 +169,7 @@ class ExecutionCommandGateProtocolTest {
     @Test
     void expiredLeaseRejectsWithNoCall() {
         InMemoryAttemptStore attempts = new InMemoryAttemptStore(new AtomicInteger()::incrementAndGet);
-        InMemoryGateStateStore gates = new InMemoryGateStateStore(Set.of());
+        InMemoryGateStateStore gates = InMemoryGateStateStore.anyApprover();
         FakeBridge bridge = new FakeBridge();
         // lease expired at NOW-1
         gates.install(new GateRow(PARTITION, "acc", GateState.ENABLED, 5, "enabled", "ev-1",
@@ -170,7 +185,7 @@ class ExecutionCommandGateProtocolTest {
     @Test
     void wrongOwnerRejectsWithNoCall() {
         InMemoryAttemptStore attempts = new InMemoryAttemptStore(new AtomicInteger()::incrementAndGet);
-        InMemoryGateStateStore gates = new InMemoryGateStateStore(Set.of());
+        InMemoryGateStateStore gates = InMemoryGateStateStore.anyApprover();
         gates.install(enabledRow()); // fence owned by worker-1
         ExecutionCommandGate g = new ExecutionCommandGate(attempts, gates, new FakeBridge(),
                 "worker-2", () -> NOW, null); // different instance claims ownership
@@ -203,7 +218,7 @@ class ExecutionCommandGateProtocolTest {
     @Test
     void crossScopeRejectsWithNoCall() {
         Rig rig = Rig.enabled();
-        Command cross = new Command("a-1", "other-account", "ins-1", null, PARTITION,
+        Command cross = new Command("a-1", "other-account", "ins-1", "act-a-1", PARTITION,
                 "h-1", "E-a-1", 5, 7, "ev-1");
         ExecutionCommandGate.Result r = rig.gate.execute(cross);
         assertThat(r.outcome()).isEqualTo(Outcome.BLOCKED);
@@ -279,6 +294,28 @@ class ExecutionCommandGateProtocolTest {
         gates.install(bootHalted());
         assertThat(gates.approve(PARTITION, "mallory", 0, "ev-1", NOW).outcome())
                 .isEqualTo(ApprovalOutcome.UNAUTHORIZED);
+    }
+
+    @Test
+    void approvalWithMismatchedEvidenceIsRejectedWithEvidenceMismatch() {
+        // P3-151: an approval must cover the exact evidence package the gate holds.
+        // Approving a different (stale/unauthorized) package must not be recorded.
+        InMemoryGateStateStore gates = new InMemoryGateStateStore(Set.of("saurabh"));
+        gates.install(new GateRow(PARTITION, "acc", GateState.APPROVAL_PENDING, 4, "recon", "ev-1",
+                null, null, null, null, 0L, null, null, null));
+
+        assertThat(gates.approve(PARTITION, "saurabh", 4, "ev-2", NOW).outcome())
+                .isEqualTo(ApprovalOutcome.EVIDENCE_MISMATCH);
+
+        // No mutation: no approval and no approved evidence recorded.
+        GateRow after = gates.read(PARTITION);
+        assertThat(after.approval1()).isNull();
+        assertThat(after.approvedEvidenceHash()).isNull();
+        assertThat(after.approvalsComplete()).isFalse();
+
+        // The exact package still approves, so the guard is targeted, not a blanket block.
+        assertThat(gates.approve(PARTITION, "saurabh", 4, "ev-1", NOW).outcome())
+                .isEqualTo(ApprovalOutcome.APPLIED);
     }
 
     @Test

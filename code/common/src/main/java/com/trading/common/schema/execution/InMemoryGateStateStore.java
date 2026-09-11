@@ -27,15 +27,42 @@ public final class InMemoryGateStateStore implements GateStateStore {
     private final Map<String, GateRow> rows = new LinkedHashMap<>();
     private final List<AuditRecord> audit = new ArrayList<>();
     private final AtomicLong fenceSequence = new AtomicLong();
-    /** Authorized approvers; empty set means "any principal" (test seam). */
+    /**
+     * Authorized approvers. An empty set means "any principal" and is reachable only through the
+     * explicitly-named {@link #anyApprover()} seam.
+     */
     private final Set<String> authorizedApprovers;
 
+    /**
+     * Test/live seam: no approver allow-list, so ANY principal may approve.
+     *
+     * <p>P3-142/P3-143: this behaviour is opt-in <i>by name</i>. The set-taking constructor
+     * rejects an empty set, so a missing or misconfigured allow-list can no longer silently turn
+     * the approver check off — it fails at construction instead.
+     */
+    public static InMemoryGateStateStore anyApprover() {
+        return new InMemoryGateStateStore(Set.of(), true);
+    }
+
     public InMemoryGateStateStore() {
-        this(Set.of());
+        this(Set.of(), true);
     }
 
     public InMemoryGateStateStore(Set<String> authorizedApprovers) {
-        this.authorizedApprovers = Set.copyOf(Objects.requireNonNull(authorizedApprovers, "authorizedApprovers"));
+        this(authorizedApprovers, false);
+    }
+
+    /** Internal seam: {@code anyPrincipalAllowed} is only ever set by {@link #anyApprover()}. */
+    InMemoryGateStateStore(Set<String> authorizedApprovers, boolean anyPrincipalAllowed) {
+        Objects.requireNonNull(authorizedApprovers, "authorizedApprovers");
+        if (authorizedApprovers.isEmpty() && !anyPrincipalAllowed) {
+            throw new IllegalArgumentException(
+                    "authorizedApprovers must not be empty: an empty allow-list accepts ANY "
+                            + "principal as an approver (P3-142/P3-143). If any-principal behaviour "
+                            + "is genuinely intended, request it by name with "
+                            + "InMemoryGateStateStore.anyApprover().");
+        }
+        this.authorizedApprovers = Set.copyOf(authorizedApprovers);
     }
 
     @Override

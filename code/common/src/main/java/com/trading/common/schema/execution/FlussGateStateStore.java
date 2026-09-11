@@ -67,16 +67,22 @@ public final class FlussGateStateStore implements GateStateStore, AutoCloseable 
     private Lookuper lookuper;
     private UpsertWriter upsertWriter;
 
-    private FlussGateStateStore(Connection connection, Table table, long timeoutMs, Set<String> authorizedApprovers) {
+    private FlussGateStateStore(Connection connection, Table table, long timeoutMs,
+            Set<String> authorizedApprovers, boolean anyPrincipalAllowed) {
         this.connection = connection;
         this.table = table;
         this.timeoutMs = timeoutMs;
-        this.delegate = new InMemoryGateStateStore(authorizedApprovers);
+        this.delegate = new InMemoryGateStateStore(authorizedApprovers, anyPrincipalAllowed);
         this.lookuper = table.newLookup().createLookuper();
         this.upsertWriter = table.newUpsert().createWriter();
     }
 
     public static FlussGateStateStore open(String bootstrap, String database, String tableName, Duration timeout, Set<String> authorizedApprovers) throws Exception {
+        return open(bootstrap, database, tableName, timeout, authorizedApprovers, false);
+    }
+
+    private static FlussGateStateStore open(String bootstrap, String database, String tableName, Duration timeout,
+            Set<String> authorizedApprovers, boolean anyPrincipalAllowed) throws Exception {
         Configuration conf = new Configuration();
         conf.setString("bootstrap.servers", bootstrap);
         // D1: money path — 1ms linger instead of the 100ms default, replacing the
@@ -85,7 +91,7 @@ public final class FlussGateStateStore implements GateStateStore, AutoCloseable 
         Connection connection = ConnectionFactory.createConnection(conf);
         try {
             Table table = connection.getTable(TablePath.of(database, tableName));
-            return new FlussGateStateStore(connection, table, timeout.toMillis(), authorizedApprovers);
+            return new FlussGateStateStore(connection, table, timeout.toMillis(), authorizedApprovers, anyPrincipalAllowed);
         } catch (Exception e) {
             connection.close();
             throw e;
@@ -93,14 +99,16 @@ public final class FlussGateStateStore implements GateStateStore, AutoCloseable 
     }
 
     /**
-     * Test/live-drill overload: single-operator authorization stays OFF
-     * (empty set = any principal, same as InMemoryGateStateStore). Production
-     * bootstraps must use the 5-arg overload with a non-empty set — an empty
-     * set here used to silently disable approval checks for callers like
-     * ExecutionGatewayMain (P3-142/P3-143).
+     * Test/live-drill overload: single-operator authorization is OFF on purpose (any principal may
+     * approve), same as {@link InMemoryGateStateStore#anyApprover()}.
+     *
+     * <p>P3-142/P3-143: this any-principal behaviour is now requested by choosing <i>this</i>
+     * overload rather than by passing an empty set. The 5-arg overload rejects an empty allow-list
+     * at construction, so a missing or misconfigured approver set on a production bootstrap (e.g.
+     * ExecutionGatewayMain) fails loudly instead of silently accepting any principal.
      */
     public static FlussGateStateStore open(String bootstrap, String database, String tableName, Duration timeout) throws Exception {
-        return open(bootstrap, database, tableName, timeout, Set.of());
+        return open(bootstrap, database, tableName, timeout, Set.of(), true);
     }
 
     @Override public synchronized void close() throws Exception {
