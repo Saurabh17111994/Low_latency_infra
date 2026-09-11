@@ -66,11 +66,18 @@ public interface PostbackQuarantineStore {
             }
         }
 
-        @Override public void close() throws Exception { connection.close(); }
+        @Override public void close() throws Exception { try { table.close(); } finally { connection.close(); } }
 
         @Override
         public void quarantine(String postbackEventId, String reason, String evidenceSummary, byte[] rawPayload) throws Exception {
-            String quarantineId = "q-" + postbackEventId;
+            // P3-096: fail fast — "q-null" masks null as a colliding key while
+            // v[1] stays null, and null reason violates reason NOT NULL only at
+            // the server. P3-317: deterministic "q-"+id collides on retry
+            // (same bucket key, confusing disposition) — UUID suffix.
+            if (postbackEventId == null || postbackEventId.isBlank())
+                throw new IllegalArgumentException("postbackEventId required");
+            if (reason == null || reason.isBlank()) throw new IllegalArgumentException("reason required");
+            String quarantineId = "q-" + postbackEventId + "-" + java.util.UUID.randomUUID();
             long now = System.currentTimeMillis();
             Object[] v = new Object[13];
             v[0] = bs(quarantineId);
@@ -88,9 +95,20 @@ public interface PostbackQuarantineStore {
             v[12] = BinaryString.fromString("2");
             AppendWriter writer = table.newAppend().createWriter();
             try {
-                writer.append(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS);
-            } finally {
+                // P3-318: restore the interrupt flag — get() clears it, and a
+                // swallowed interrupt stalls shutdown of the quarantine path.
+                try {
+                    writer.append(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw ie;
+                }
                 writer.flush();
+            } catch (Exception e) {
+                // Never let flush mask the append outcome (fail-closed diagnosis
+                // needs the original Timeout/ExecutionException).
+                try { writer.flush(); } catch (Exception suppressed) { e.addSuppressed(suppressed); }
+                throw e;
             }
         }
 

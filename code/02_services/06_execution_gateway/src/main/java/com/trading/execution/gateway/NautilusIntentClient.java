@@ -9,6 +9,8 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.UUID;
 import org.apache.fluss.row.InternalRow;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Private gateway-to-Nautilus client. It has no Arrow dependency or credential.
@@ -24,6 +26,7 @@ import org.apache.fluss.row.InternalRow;
  * as not executable and returns {@link IntentSink.Result#DEFERRED}.
  */
 public final class NautilusIntentClient implements IntentSink {
+    private static final Logger LOG = LoggerFactory.getLogger(NautilusIntentClient.class);
     private final GatewayConfig config;
     private final ControlStateStore controls;
     private final GatewayProtocol protocol;
@@ -51,13 +54,17 @@ public final class NautilusIntentClient implements IntentSink {
      *       {@link ExecutionGateColumns} v3 layout (mirrors
      *       {@code FlussGateStateStore.fromRow}). If {@code state != ENABLED},
      *       returns {@code DEFERRED} without touching the fence.</li>
+     *   <li>Requires a live fence: {@code ownerInstanceId} must be present (P3-374 —
+     *       the unfenced marker is a null OWNER, because the token is retained
+     *       across revoke/halt as the durable write-ordering version, so a revoked
+     *       row still carries a non-zero token), and {@code leaseExpiresTs} must be
+     *       present and not expired (a null lease is never-acquired/revoked/lost/
+     *       halt-cleared, not "unconstrained").</li>
      *   <li>Extracts {@code epoch} and {@code fenceToken}. Validates
-     *       {@code fenceToken != null/blank} (treats absent or {@code 0} as unavailable
-     *       — a never-acquired fence) and that the lease has not expired:
-     *       when {@code leaseExpiresTs != null}, requires
-     *       {@code System.currentTimeMillis() <= leaseExpiresTs}. On any fence
-     *       invalidity, marks {@code readiness.protocol(false,
-     *       "fence token unavailable or expired")} and returns {@code DEFERRED}.</li>
+     *       {@code fenceToken != null} and non-{@code 0} (0 means only a
+     *       never-acquired row). On any fence invalidity, marks
+     *       {@code readiness.protocol(false, "fence token unavailable or expired")}
+     *       and returns {@code DEFERRED}.</li>
      *   <li>Otherwise delegates to {@link #sendWithFence(IntentRecord, long, String)}
      *       with the durable {@code epoch} and {@code String.valueOf(fenceToken)}.</li>
      * </ol>
@@ -78,11 +85,8 @@ public final class NautilusIntentClient implements IntentSink {
             readiness.fluss(false, gate.detail());
             return Result.DEFERRED;
         }
+        // P3-271: Lookup ctor now guarantees FOUND ⇒ non-null row, so no null-check needed here.
         InternalRow row = gate.row();
-        if (row == null) {
-            readiness.fluss(false, "gate row is null");
-            return Result.DEFERRED;
-        }
 
         // Decode state — Execution_Gate v3 column 2. Mirrors FlussGateStateStore.fromRow.
         String state;
@@ -90,8 +94,15 @@ public final class NautilusIntentClient implements IntentSink {
             if (row.isNullAt(ExecutionGateColumns.STATE)) {
                 return Result.DEFERRED;
             }
+            // P3-314 (corrected): row.getString returns a Fluss BinaryString, so
+            // .toString() is required to compare against "ENABLED" — not redundant.
             state = row.getString(ExecutionGateColumns.STATE).toString();
         } catch (Exception e) {
+            // P3-314: keep fail-closed DEFERRED, but surface the real failure
+            // instead of silently deferring every intent behind a constant string.
+            readiness.protocol(false, "gate row state decode failed: " + e);
+            LOG.warn("Execution_Gate state decode failed for partition {}",
+                    config.executionPartitionId(), e);
             return Result.DEFERRED;
         }
         if (!"ENABLED".equals(state)) {
@@ -103,7 +114,25 @@ public final class NautilusIntentClient implements IntentSink {
         try {
             epoch = row.getLong(ExecutionGateColumns.EPOCH);
         } catch (Exception e) {
-            readiness.protocol(false, "fence token unavailable or expired");
+            readiness.protocol(false, "gate row epoch decode failed: " + e);
+            LOG.warn("Execution_Gate epoch decode failed for partition {}",
+                    config.executionPartitionId(), e);
+            return Result.DEFERRED;
+        }
+
+        // P3-374: the unfenced marker is a NULL owner, NOT a zero token. The token is now
+        // RETAINED across revoke/halt as the durable write-ordering version (VERSIONED merge
+        // engine), so a revoked row still carries token > 0 while holding no fence. Checking
+        // the token alone would let a revoked gate through — fail closed on a missing owner.
+        try {
+            if (row.isNullAt(ExecutionGateColumns.OWNER_INSTANCE_ID)) {
+                readiness.protocol(false, "fence owner absent (unfenced row)");
+                return Result.DEFERRED;
+            }
+        } catch (Exception e) {
+            readiness.protocol(false, "gate row owner decode failed: " + e);
+            LOG.warn("Execution_Gate owner decode failed for partition {}",
+                    config.executionPartitionId(), e);
             return Result.DEFERRED;
         }
 
@@ -120,28 +149,35 @@ public final class NautilusIntentClient implements IntentSink {
                 readiness.protocol(false, "fence token unavailable or expired");
                 return Result.DEFERRED;
             }
+            // P3-488: String.valueOf(long) can never be blank, so the former
+            // isBlank() branch was unreachable and only implied a check that
+            // could not fail.
             fenceToken = String.valueOf(ft);
-            if (fenceToken.isBlank()) {
+        } catch (Exception e) {
+            readiness.protocol(false, "gate row fence decode failed: " + e);
+            LOG.warn("Execution_Gate fence decode failed for partition {}",
+                    config.executionPartitionId(), e);
+            return Result.DEFERRED;
+        }
+
+        // Validate the lease (column 13, BIGINT nullable). P3-374: a NULL lease is NOT
+        // "no constraint to check" — every live fence carries a non-null lease (GateRow
+        // withFence and withRenewedLease both set it), so a null lease means never-acquired,
+        // revoked, fence-lost, or halt-cleared. Fail closed instead of skipping the check.
+        try {
+            if (row.isNullAt(ExecutionGateColumns.LEASE_EXPIRES_TS)) {
+                readiness.protocol(false, "fence lease absent (unfenced row)");
+                return Result.DEFERRED;
+            }
+            long leaseExpiresTs = row.getLong(ExecutionGateColumns.LEASE_EXPIRES_TS);
+            if (System.currentTimeMillis() > leaseExpiresTs) {
                 readiness.protocol(false, "fence token unavailable or expired");
                 return Result.DEFERRED;
             }
         } catch (Exception e) {
-            readiness.protocol(false, "fence token unavailable or expired");
-            return Result.DEFERRED;
-        }
-
-        // Validate lease has not expired (column 13, BIGINT nullable). If leaseExpiresTs
-        // is present, the fence is only live while System.currentTimeMillis() <= leaseExpiresTs.
-        try {
-            if (!row.isNullAt(ExecutionGateColumns.LEASE_EXPIRES_TS)) {
-                long leaseExpiresTs = row.getLong(ExecutionGateColumns.LEASE_EXPIRES_TS);
-                if (System.currentTimeMillis() > leaseExpiresTs) {
-                    readiness.protocol(false, "fence token unavailable or expired");
-                    return Result.DEFERRED;
-                }
-            }
-        } catch (Exception e) {
-            readiness.protocol(false, "fence token unavailable or expired");
+            readiness.protocol(false, "gate row lease decode failed: " + e);
+            LOG.warn("Execution_Gate lease decode failed for partition {}",
+                    config.executionPartitionId(), e);
             return Result.DEFERRED;
         }
 

@@ -46,7 +46,7 @@
     {
       "table_name": "Trade_Decisions",
       "ddl_path": "07_trade_decisions.sql",
-      "ddl_sha256": "582b47bd987c1a30ba3ad8d3fb802607754991e28c872bc58a02651baa4fcabe",
+      "ddl_sha256": "7b53c1ab33706f071a550b08a0aad32020f10ec4c11a48b8b243fd96b2a7bfb9",
       "table_kind": "LOG",
       "bucket_key": "instruction_id",
       "primary_key": null,
@@ -102,7 +102,7 @@
     {
       "table_name": "Execution_Gate",
       "ddl_path": "11_execution_gate.sql",
-      "ddl_sha256": "b635443185d6e1eb716a383fdd2551232489488d4be46fbec84923385c466539",
+      "ddl_sha256": "bca67903cf61190dea64f90bfda1c99dec4643b75c4c96082f53c2399793ea49",
       "table_kind": "KV",
       "primary_key": "execution_partition_id",
       "bucket_key": null,

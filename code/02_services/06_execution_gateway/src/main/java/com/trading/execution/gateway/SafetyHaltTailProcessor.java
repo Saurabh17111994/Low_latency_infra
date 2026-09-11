@@ -36,34 +36,51 @@ public final class SafetyHaltTailProcessor {
     private final Set<String> appliedIds = new HashSet<>();
     public SafetyHaltTailProcessor(GateStateStore gates){ this.gates=gates; }
     public ApplyResult apply(SafetyHaltRequest req, long nowTs){
-        if(!req.idValid()) return ApplyResult.INVALID_ID;
-        if(!appliedIds.add(req.haltRequestId())) return ApplyResult.DUPLICATE;
+        // P3-105: fail closed on nulls — NPE or a null-key Fluss lookup hides
+        // the true outcome; INVALID_ID / NOT_FOUND name it instead.
+        if (req == null || !req.idValid()) return ApplyResult.INVALID_ID;
+        // P3-005: check-then-add, never add-then-check — a NOT_FOUND / thrown
+        // halt must not poison the set (retry would read DUPLICATE and the
+        // halt would be silently dropped).
+        if (appliedIds.contains(req.haltRequestId())) return ApplyResult.DUPLICATE;
+        if (req.executionPartitionId() == null) return ApplyResult.NOT_FOUND;
         GateRow row = gates.read(req.executionPartitionId());
         if(row==null) return ApplyResult.NOT_FOUND;
-        if(!row.accountScopeId().equals(req.accountScopeId())) {
-            appliedIds.remove(req.haltRequestId());
+        if(req.accountScopeId() == null || !req.accountScopeId().equals(row.accountScopeId())) {
             return ApplyResult.CROSS_SCOPE_REJECT;
         }
-        gates.halt(req.executionPartitionId(), row, req.reasonCode()+":"+req.reasonDetail(), req.evidenceHash(), nowTs);
+        GateRow next = gates.halt(req.executionPartitionId(), row, req.reasonCode()+":"+req.reasonDetail(), req.evidenceHash(), nowTs);
+        if (next == null) return ApplyResult.NOT_FOUND;
+        appliedIds.add(req.haltRequestId());
         return ApplyResult.APPLIED;
     }
     /**
-     * Live Fluss path: decode InternalRow (21-col DDL order) \u2192 SafetyHaltRequest, validate
+     * Live Fluss path: decode InternalRow (21-col DDL order) → SafetyHaltRequest, validate
      * deterministicId via idValid(), then delegate to typed apply. Any decode failure or
      * id mismatch fail-closes to INVALID_ID.
      */
     public ApplyResult apply(InternalRow row, long nowTs) {
         if (row == null) return ApplyResult.INVALID_ID;
+        // P3-106: narrow the try to decode+idValid — the delegated apply does
+        // gates.read()/halt(), and a transient store failure misclassified as
+        // INVALID_ID would hide outages and break retry/alerting.
+        final SafetyHaltRequest req;
         try {
-            SafetyHaltRequest req = decodeRow(row);
-            if (!req.idValid()) return ApplyResult.INVALID_ID;
-            return apply(req, nowTs);
+            req = decodeRow(row);
         } catch (Exception e) {
             return ApplyResult.INVALID_ID;
         }
+        if (!req.idValid()) return ApplyResult.INVALID_ID;
+        return apply(req, nowTs);
     }
 
     private static SafetyHaltRequest decodeRow(InternalRow r) {
+        // P3-327: hardcoded IDX_* positions must stay in sync with
+        // 18_safety_halt_requests.sql/DdlBootstrap — a schema add/reorder
+        // would otherwise mis-decode scope/evidence/id into wrong fields
+        // (wrong scope check, wrong deterministicId). Fail to INVALID_ID
+        // instead of failing open.
+        if (r.getFieldCount() != 21) throw new IllegalArgumentException("expected 21 cols, got " + r.getFieldCount());
         String haltId = getRequiredString(r, IDX_HALT_REQUEST_ID);
         String acct = getRequiredString(r, IDX_ACCOUNT_SCOPE_ID);
         String partition = getNullableString(r, IDX_EXECUTION_PARTITION_ID);

@@ -56,9 +56,19 @@ public final class PostbackProjectionLedger {
     }
 
     private static boolean isLegal(State current, State requested) {
-        if (terminal(requested)) {
-            // Any forward state may quarantine/fail/complete.
-            return true;
+        // P3-172: a terminal requested from a terminal current must fail —
+        // without the !terminal(current) guard COMPLETE could regress to
+        // FAILED (silent durable-status regression).
+        if (requested == State.QUARANTINED || requested == State.FAILED) {
+            // Any forward state may quarantine/fail; terminal states cannot advance.
+            return !terminal(current);
+        }
+        // P3-409: COMPLETE only from POSITION_APPLIED_OR_NOT_REQUIRED — a jump
+        // straight from RECEIVED would skip every table acknowledgement the
+        // COMPLETE invariant promises ("never COMPLETE until every required
+        // table acknowledgement is observed").
+        if (requested == State.COMPLETE) {
+            return current == State.POSITION_APPLIED_OR_NOT_REQUIRED;
         }
         return switch (current) {
             case RECEIVED -> requested == State.CORRELATED;

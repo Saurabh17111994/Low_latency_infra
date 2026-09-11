@@ -57,13 +57,47 @@ public final class PositionProjectionWriter {
                     "Nautilus event violates quantity/state invariants");
         }
 
+        // P3-509: null-safe — a null sourceEventId in a stored row must route
+        // to the version gate (quarantine path), not NPE past it.
         boolean contentMatches = current != null
-                && current.sourceEventId().equals(event.sourceEventId());
-        long currentVersion = current == null ? 0L : current.sourceVersion();
+                && Objects.equals(current.sourceEventId(), event.sourceEventId());
+        // P3-170: the "empty slot" sentinel 0 collides with a genuine first
+        // version 0 (sourceSequence >= 0 is legal) — a brand-new position's
+        // first update at 0 would evaluate(0,0,false)=CONFLICT and quarantine
+        // legitimate startup data. A null row can never be a collision.
+        if (current == null) {
+            return PositionWriteResult.applied(new PositionSnapshot(
+                    event.positionId(),
+                    event.tradeContextId(),
+                    event.accountScopeId(),
+                    event.instrumentToken(),
+                    event.exchange(),
+                    event.symbol(),
+                    event.side(),
+                    event.state(),
+                    event.openQuantity(),
+                    event.closedQuantity(),
+                    event.averageEntryPaise(),
+                    event.averageExitPaise(),
+                    event.sourceEventId(),
+                    event.sourceSequence(),
+                    nowMs,
+                    nowMs,
+                    PositionsColumns.SCHEMA_VERSION_V2));
+        }
+        long currentVersion = current.sourceVersion();
         switch (KvStateUpdateProtocol.evaluate(currentVersion, event.sourceSequence(),
                 contentMatches)) {
             case DUPLICATE -> { return PositionWriteResult.duplicate(current); }
-            case STALE, REGRESSION -> { return PositionWriteResult.stale(current); }
+            // P3-405: REGRESSION (older version, different content — the stored
+            // row conflicts with a stale write, possible divergence) is not a
+            // benign STALE replay — surface it as a violation with its own
+            // reason so quarantine/diagnostics keep the distinction.
+            case STALE -> { return PositionWriteResult.stale(current); }
+            case REGRESSION -> {
+                return PositionWriteResult.violation(QuarantineReason.TERMINAL_REGRESSION,
+                        "position version regression for " + event.positionId());
+            }
             case CONFLICT, UNKNOWN -> {
                 return PositionWriteResult.violation(QuarantineReason.POSITION_VIOLATION,
                         "version check for position " + event.positionId());

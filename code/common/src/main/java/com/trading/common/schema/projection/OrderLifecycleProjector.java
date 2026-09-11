@@ -90,11 +90,33 @@ public final class OrderLifecycleProjector {
         }
 
         boolean contentMatches = current != null
-                && current.sourceEventId().equals(p.sourceEventId())
+                && Objects.equals(current.sourceEventId(), p.sourceEventId())
                 && current.normalizedState() == state
                 && current.cumulativeQty() == p.cumulativeQty()
                 && current.pendingQty() == p.pendingQty();
-        long currentVersion = current == null ? 0L : current.sourceVersion();
+        // P3-402: same sentinel collision as P3-170 — current==null uses 0L
+        // while sourceSequence 0 is legal, so a first row at 0 evaluates
+        // (0,0,false)=CONFLICT and quarantines legitimate startup data.
+        // A null row can never be a collision.
+        if (current == null) {
+            return LifecycleResult.applied(new OrderLifecycleSnapshot(
+                    ref.accountScopeId(),
+                    p.brokerOrderId(),
+                    ref.instructionId(),
+                    ref.executionAttemptId(),
+                    ref.tradeContextId(),
+                    state,
+                    p.cumulativeQty(),
+                    p.pendingQty(),
+                    p.isFill() && p.fillPricePaise() > 0 ? p.fillPricePaise() : 0L,
+                    p.sourceEventId(),
+                    p.sourceSequence(),
+                    p.eventTimeMs(),
+                    p.receiveTimeMs(),
+                    "CORRELATED",
+                    com.trading.common.schema.ownership.OrderLifecycleColumns.SCHEMA_VERSION_V2));
+        }
+        long currentVersion = current.sourceVersion();
 
         // --- Source-version gate (SCH-09 KvStateUpdateProtocol semantics) ----
         switch (KvStateUpdateProtocol.evaluate(currentVersion, p.sourceSequence(),
@@ -110,6 +132,13 @@ public final class OrderLifecycleProjector {
         }
 
         // --- Terminal regression check ---------------------------------------
+        // P3-403: monotonicity was enforced only when the CURRENT state was
+        // terminal — a forward move (PARTIAL->FILLED) carrying a SMALLER
+        // cumulative (PARTIAL(5,5)->FILLED(2,0)) passed every branch and wrote
+        // a backward quantity. Guard decreasing cumulative generally.
+        if (current != null && p.cumulativeQty() < current.cumulativeQty()) {
+            return LifecycleResult.regression(current);
+        }
         if (current != null && isTerminal(current.normalizedState())) {
             if (state != current.normalizedState()) {
                 return LifecycleResult.regression(current);
@@ -117,16 +146,25 @@ public final class OrderLifecycleProjector {
             if (p.cumulativeQty() < current.cumulativeQty()) {
                 return LifecycleResult.regression(current);
             }
-        } else if (current != null && isTerminal(state) && rank(state) < rank(current.normalizedState())) {
-            return LifecycleResult.regression(current);
         } else if (current != null && rank(state) < rank(current.normalizedState())
                 && !isTerminal(state)) {
             return LifecycleResult.regression(current);
         }
+        // P3-505: dead branch removed — terminal states sit at max rank 5, so
+        // rank(state) < rank(current) can never hold for a terminal state
+        // (and a terminal current is handled above). Quantity regressions are
+        // covered by the general decreasing-cumulative guard.
 
         long avgFillPaise = current == null ? 0L : current.averageFillPricePaise();
         if (p.isFill() && p.fillPricePaise() > 0) {
-            avgFillPaise = p.fillPricePaise();
+            // P3-404: quantity-weighted average, not last-fill-wins — across
+            // legs at different prices the persisted "average" must reflect
+            // every leg. Zero-guard for the first fill (no division by zero).
+            avgFillPaise = (current == null || current.cumulativeQty() == 0)
+                    ? p.fillPricePaise()
+                    : (current.cumulativeQty() * current.averageFillPricePaise()
+                            + p.fillQty() * p.fillPricePaise())
+                            / (current.cumulativeQty() + p.fillQty());
         }
         OrderLifecycleSnapshot next = new OrderLifecycleSnapshot(
                 current == null ? ref.accountScopeId() : current.accountScopeId(),

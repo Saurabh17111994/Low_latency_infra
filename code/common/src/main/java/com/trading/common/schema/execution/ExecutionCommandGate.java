@@ -3,7 +3,6 @@ package com.trading.common.schema.execution;
 import com.trading.common.model.GateState;
 import com.trading.common.schema.execution.BridgeCaller.OutcomeKind;
 import com.trading.common.schema.execution.GateStateStore.AuditRecord;
-import java.util.HashSet;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.LongSupplier;
@@ -56,6 +55,7 @@ public final class ExecutionCommandGate {
             Objects.requireNonNull(executionPartitionId, "executionPartitionId");
             Objects.requireNonNull(requestHash, "requestHash");
             Objects.requireNonNull(clientOrderRef, "clientOrderRef");
+            Objects.requireNonNull(evidenceHash, "evidenceHash");
         }
     }
 
@@ -93,7 +93,11 @@ public final class ExecutionCommandGate {
     private final LongSupplier clock;
     private final Runnable haltObserver;
     private final CrashHooks crashHooks;
-    private final Set<String> issuedAttempts = new HashSet<>();
+    // P3-132: exactly-once issuance guard — concurrent execute() calls share one
+    // engine, so the set must be thread-safe. Unbounded by design (one entry per
+    // attempt id, same cardinality as the attempt store); entries are never
+    // evicted because a late duplicate must still be recognized as issued.
+    private final Set<String> issuedAttempts = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public ExecutionCommandGate(AttemptStore attempts, GateStateStore gateStore,
                                 BridgeCaller bridge, String ownerInstanceId,
@@ -127,6 +131,7 @@ public final class ExecutionCommandGate {
      * reconciliation of the UNKNOWN attempt may progress.
      */
     public Result execute(Command cmd) {
+        Objects.requireNonNull(cmd, "cmd");
         long now = clock.getAsLong();
         GateRow row = gateStore.read(cmd.executionPartitionId());
         if (row == null) {
@@ -189,6 +194,17 @@ public final class ExecutionCommandGate {
         }
         crashHooks.afterSubmitting();
 
+        // P3-007: re-validate immediately before the money-moving call with a
+        // fresh read + fresh clock — PREPARED + SUBMITTING writes take arbitrary
+        // time and an expired lease, concurrent halt, epoch bump, or fence steal
+        // in that window must not issue an order.
+        GateRow fresh = gateStore.read(cmd.executionPartitionId());
+        long freshNow = clock.getAsLong();
+        String staleReason = revalidationReason(cmd, fresh, freshNow);
+        if (staleReason != null) {
+            return unknownAndHalt(cmd, sub.record(), fresh == null ? row : fresh,
+                    staleReason);
+        }
         // 4. Exactly one bridge call, guarded against duplicate issuance.
         if (!issuedAttempts.add(cmd.executionAttemptId())) {
             throw new IllegalStateException(
@@ -209,6 +225,12 @@ public final class ExecutionCommandGate {
         if (outcome.ambiguous()) {
             AttemptStore.TransitionResult unk = attempts.transition(cmd.executionAttemptId(),
                     sub.record().phaseEpoch(), AttemptRecord.PHASE_UNKNOWN);
+            // P3-133: a rejected UNKNOWN transition leaves durable SUBMITTING —
+            // never report an outcome the durable row does not hold.
+            if (unk.outcome() != AttemptStore.TransitionOutcome.APPLIED) {
+                return unknownAndHalt(cmd, unk.record() == null ? sub.record() : unk.record(), row,
+                        "UNKNOWN persist failed (" + unk.reason() + ") — halted, no assumed outcome");
+            }
             return unknownAndHalt(cmd, unk.record() == null ? sub.record() : unk.record(), row,
                     "ambiguous bridge outcome: " + outcome.detail());
         }
@@ -216,6 +238,12 @@ public final class ExecutionCommandGate {
                 ? AttemptRecord.PHASE_ACCEPTED : AttemptRecord.PHASE_REJECTED;
         AttemptStore.TransitionResult finalRec = attempts.transition(cmd.executionAttemptId(),
                 sub.record().phaseEpoch(), terminal);
+        // P3-133: STALE_EPOCH/ILLEGAL/NOT_FOUND leaves durable SUBMITTING while
+        // the caller would hear ACCEPTED — halt instead of diverging.
+        if (finalRec.outcome() != AttemptStore.TransitionOutcome.APPLIED) {
+            return unknownAndHalt(cmd, finalRec.record() == null ? sub.record() : finalRec.record(), row,
+                    "terminal persist failed (" + finalRec.reason() + ") — halted, no assumed outcome");
+        }
         return new Result(outcome.kind() == OutcomeKind.ACCEPTED ? Outcome.ACCEPTED : Outcome.REJECTED,
                 finalRec.record() == null ? sub.record() : finalRec.record(),
                 row, outcome.detail(), bridgeCallsFor(cmd));
@@ -226,9 +254,49 @@ public final class ExecutionCommandGate {
         return gateStore.acquire(partitionId, ownerInstanceId, leaseMs, clock.getAsLong());
     }
 
+    /**
+     * Pre-bridge re-check (P3-007): the same gate/fence/approval rules as entry,
+     * evaluated on a fresh read with a fresh clock. Returns null when the call
+     * may proceed, else the halt reason.
+     */
+    private String revalidationReason(Command cmd, GateRow fresh, long freshNow) {
+        if (fresh == null) {
+            return "gate row vanished before bridge — no call";
+        }
+        if (!fresh.accountScopeId().equals(cmd.accountScopeId())) {
+            return "cross-scope changed before bridge — no call";
+        }
+        if (fresh.state() != GateState.ENABLED) {
+            return "gate no longer ENABLED (state=" + fresh.state() + ") before bridge — no call";
+        }
+        if (fresh.epoch() != cmd.gateEpoch()) {
+            return "epoch moved before bridge: command " + cmd.gateEpoch()
+                    + " != gate epoch " + fresh.epoch() + " — no call";
+        }
+        if (!fresh.fenceValidFor(ownerInstanceId, cmd.gateFenceToken(), freshNow)) {
+            return "fence invalid immediately before the call: owner/token/lease — no call";
+        }
+        if (!fresh.approvalsComplete() || !fresh.approvalsCover(cmd.evidenceHash())) {
+            return "approval missing or for a different evidence package before bridge — no call";
+        }
+        return null;
+    }
+
     private Result unknownAndHalt(Command cmd, AttemptRecord attempt, GateRow row, String reason) {
         halt(cmd, row, reason, cmd.evidenceHash());
         GateRow halted = gateStore.read(cmd.executionPartitionId());
+        // P3-134: fail closed without crashing — if the halt did not land durably
+        // HALTED (lost CAS race, concurrent re-enable), report the unverified
+        // state in the reason so callers never believe a live gate is halted.
+        // Throwing here would turn the safety path into a crash path and deny
+        // reconciliation; returning the truth keeps the process alive to reconcile.
+        if (halted == null || halted.state() != GateState.HALTED) {
+            return new Result(Outcome.UNKNOWN_HALTED, attempt, halted, reason
+                    + " [halt unverified: gate is "
+                    + (halted == null ? "missing" : halted.state().name())
+                    + " — treat as live, reconcile before retry]",
+                    bridgeCallsFor(cmd));
+        }
         return new Result(Outcome.UNKNOWN_HALTED, attempt, halted, reason, bridgeCallsFor(cmd));
     }
 

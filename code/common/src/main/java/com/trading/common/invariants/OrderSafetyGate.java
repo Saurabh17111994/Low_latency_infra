@@ -23,6 +23,11 @@ public final class OrderSafetyGate {
     }
 
     public static GateDecision decide(Set<GateCheck> passed) {
+        // P3-115: null is ambiguity — fail closed to HALTED, never NPE on the
+        // pre-money-call path.
+        if (passed == null) {
+            return GateDecision.HALTED;
+        }
         if (passed.containsAll(EnumSet.allOf(GateCheck.class))) {
             return GateDecision.PROCEED;
         }

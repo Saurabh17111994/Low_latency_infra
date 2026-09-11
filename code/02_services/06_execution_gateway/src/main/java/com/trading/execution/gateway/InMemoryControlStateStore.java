@@ -13,13 +13,29 @@ public final class InMemoryControlStateStore implements ControlStateStore {
     private final Map<String,SafetyHaltRequest> byId = new LinkedHashMap<>();
     public void add(SafetyHaltRequest r){
         if(!r.idValid()) throw new IllegalArgumentException("halt_request_id != deterministic SHA256");
-        halts.add(r); byId.putIfAbsent(r.haltRequestId(), r);
+        // P3-302: KV upsert semantics — duplicate ids are a no-op, matching
+        // the PK on halt_request_id (DDL 18_safety_halt_requests.sql).
+        if (byId.putIfAbsent(r.haltRequestId(), r) == null) halts.add(r);
     }
-    /** Test helper: inject a pre-built InternalRow directly (e.g. tampered id). */
+    /**
+     * Test helper: inject a pre-built InternalRow directly (e.g. tampered id).
+     * P3-303: intentionally bypasses the idValid() check so tests can pin the
+     * fail-closed INVALID_ID path in SafetyHaltTailProcessor.apply(InternalRow).
+     * No production consumer trusts the store — decode always re-validates —
+     * so this stays public for same-package tests without risk.
+     */
     private final List<InternalRow> rawRows = new ArrayList<>();
-    public void addRawRow(InternalRow row){ rawRows.add(row); }
+    public void addRawRow(InternalRow row){ rawRows.add(java.util.Objects.requireNonNull(row)); }
 
-    @Override public Lookup lookup(String t, List<Object> k){ return new Lookup(Status.NOT_FOUND,null,"offline"); }
+    @Override public Lookup lookup(String t, List<Object> k){
+        // P3-304: serve halt-table point reads from byId so the index is live
+        // (written AND read); anything else stays NOT_FOUND offline.
+        if ("Safety_Halt_Requests".equals(t) && k != null && k.size() == 1 && k.get(0) != null) {
+            SafetyHaltRequest r = byId.get(String.valueOf(k.get(0)));
+            if (r != null) return new Lookup(Status.FOUND, toRow(r), "ok");
+        }
+        return new Lookup(Status.NOT_FOUND,null,"offline");
+    }
 
     @Override public void replaySafetyHalts(Consumer<InternalRow> c){
         // Emit typed halts as 21-col DDL rows (offline Fluss wire), then any raw rows
@@ -31,7 +47,14 @@ public final class InMemoryControlStateStore implements ControlStateStore {
     public void replaySafetyHaltsTyped(Consumer<SafetyHaltRequest> c){ List.copyOf(halts).forEach(c); }
     @Override public void close(){}
 
-    /** Encode SafetyHaltRequest → 21-col Safety_Halt_Requests DDL row (DdlBootstrap order). */
+    /**
+     * Encode SafetyHaltRequest → 21-col Safety_Halt_Requests DDL row (DdlBootstrap order).
+     *
+     * <p>P3-305: test-only placeholder — v[17] (assigned_token_set_hash) reuses
+     * evidenceHash because SafetyHaltRequest carries no assigned-hash field.
+     * Do not feed these rows to slot-identity validation (it requires a real
+     * assigned hash); the gateway decoder ignores cols 11,12,17,19,20.
+     */
     public static InternalRow toRow(SafetyHaltRequest r) {
         Object[] v = new Object[21];
         v[0] = BinaryString.fromString(r.haltRequestId());
@@ -51,7 +74,7 @@ public final class InMemoryControlStateStore implements ControlStateStore {
         v[14] = r.slotId() == null ? null : BinaryString.fromString(r.slotId());
         v[15] = r.connectionEpoch();
         v[16] = r.manifestFingerprint() == null ? null : BinaryString.fromString(r.manifestFingerprint());
-        v[17] = r.evidenceHash() == null ? null : BinaryString.fromString(r.evidenceHash()); // assigned_token_set_hash placeholder
+        v[17] = BinaryString.fromString(r.evidenceHash()); // assigned_token_set_hash placeholder (see javadoc)
         v[18] = r.state() == null ? null : BinaryString.fromString(r.state());
         v[19] = null; // evidence_reference
         v[20] = 2; // contract_version

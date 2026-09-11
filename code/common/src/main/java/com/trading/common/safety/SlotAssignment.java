@@ -19,21 +19,23 @@ import java.util.List;
  */
 public interface SlotAssignment extends Serializable {
 
-    /** All slot ids, e.g. {@code ["hft-0", "hft-1"]}. */
+    /** All slot ids, e.g. {@code ["hft-0", "hft-1"]} in slot order (P3-350: unmodifiable, non-null — shared Flink-operator state). */
     List<String> slotIds();
 
     /**
      * Slot that owns {@code token}, or {@code null} if the token is not part
      * of this assignment (not subscribed under the manifest).
+     * P3-351: null means unassigned — callers must null-check before map use.
      */
-    String slotIdOf(long token);
+    /* @Nullable */ String slotIdOf(long token);
 
     /**
      * {@code TokenSetHash} of the tokens assigned to {@code slotId}, or
-     * {@code null} for an unknown slot.
+     * {@code null} for an unknown slot (including null input — never throws, P3-124).
+     * Callers must null-check (safety-trust path).
      */
-    String tokenSetHashOf(String slotId);
+    /* @Nullable */ String tokenSetHashOf(/* @Nullable */ String slotId);
 
-    /** {@code TokenSetHash} of the full manifest token set. */
-    String manifestFingerprint();
+    /** {@code TokenSetHash} of the full manifest token set (P3-352: never null). */
+    /* @NonNull */ String manifestFingerprint();
 }

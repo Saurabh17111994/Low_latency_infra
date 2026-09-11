@@ -61,6 +61,52 @@ Existing positions may remain monitored, but no new money-moving call is permitt
 10. Require the single-operator (Saurabh, DEC-044) authenticated authorized approval of that same hash/epoch.
 11. Transition to `ENABLED` only after that approval.
 
+## Execution_Gate recreate (v4 merge engine, CHG-122)
+
+**Trigger**: applying CHG-122 — adopting `table.merge-engine=versioned` on `fence_token`.
+`DdlApplyTool` only ever CREATEs and refuses a non-empty catalog, and Fluss 0.9.1 has no
+ALTER, so an options change requires drop + create.
+
+**Scope and severity**: planned maintenance. Gate KV fence/lease state is destroyed; the
+audit carrier is not (Iceberg lake + the store's immutable audit log). Live money must
+already be `HALTED` (DEC-044) before starting.
+
+**Preconditions and safety posture**:
+
+- Gate is `HALTED` for every partition scope and no money-moving call is in flight.
+- The DDL declares the merge engine — `GateTableAdmin show` must print
+  `table.merge-engine = versioned`, `table.merge-engine.versioned.ver-column = fence_token`
+  and `table.delete.behavior = ignore`.
+- `schema_manifest.json` is regenerated (`ddl_apply.py --force`) so apply-parity agrees.
+
+**Procedure**:
+
+1. Archive the lake prefix aside first — a recreate against a stale iceberg dir throws
+   `LakeTableAlreadyExistException`:
+   `bash code/01_platform/04_scripts/r2-move-prefix.sh lake/default/Execution_Gate/ lake/_stale-<date>/Execution_Gate/`
+2. Confirm the descriptor the tool will apply:
+   `java -cp "code/common/target/classes:<cp.txt>" GateTableAdmin show`
+3. Drop and recreate from the DDL descriptor:
+   `java -cp "code/common/target/classes:<cp.txt>" GateTableAdmin recreate <bootstrap>`
+   The tool refuses to touch the cluster if the DDL no longer declares
+   `merge-engine=versioned` with `ver-column=fence_token`.
+4. Re-apply through the offline contract so manifest and parity agree:
+   `make ddl APPLY=1 EVIDENCE=<file>`
+
+**Validation and closure evidence**:
+
+- Table options match the DDL (apply-parity + `CompatFlussDdlParityIntegrationTest`).
+- A stale-token write is dropped and surfaces as an error, never as silent success.
+- A halt still lands under a concurrent stale token.
+- No table or database leak; the reactor is clean.
+
+**Rollback / abort criteria**: recreate with the pre-CHG-122 WITH block and regenerate the
+manifest. The v3 row contract is unchanged, so existing rows stay readable. Rolling back
+reinstates the stale-writer clobber window — it is not correctness-neutral, so abort only
+on a failed parity check, never merely on fence state being gone.
+
+**Escalation and owner**: Platform Team.
+
 Automatic resume and approval reuse across epochs are prohibited.
 
 ## Unknown execution outcome

@@ -23,7 +23,14 @@ final class DurableIntentDispatcher {
 
     /** Called after a durably-successful handoff: update local + durable state. */
     void committed(String instructionId, String requestHash, Long logOffset) throws Exception {
-        dedup.commit(instructionId, requestHash);
+        // P3-059/P3-089/P3-092: durable-first — commit() is pure in-memory while
+        // record() can throw (network/timeout). Local-first diverges: the guard
+        // would report DUPLICATE for the rest of this run with nothing durable,
+        // and restart replay would re-forward (duplicate side effect). A crash
+        // between record and commit errs to at-most-one-extra replay, which the
+        // hydrated guard plus idempotent forward absorbs; the reverse errs to a
+        // silent drop. Callers must still treat a throw as unproven (fail closed).
         store.record(instructionId, requestHash, logOffset);
+        dedup.commit(instructionId, requestHash);
     }
 }

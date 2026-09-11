@@ -58,11 +58,21 @@ public record GateRow(
         if (!ownerInstanceId.equals(owner)) {
             return false; // a different (stale) instance claims to own the partition
         }
-        if (token < fenceToken) {
-            return false; // monotonically increasing sequence: a lower token is a stale owner
+        // P3-014: an explicitly recorded fence loss fails closed — a lost fence
+        // never authorizes again until re-acquired via withFence.
+        if (fenceLostTs != null) {
+            return false;
         }
-        if (leaseExpiresTs != null && nowTs > leaseExpiresTs) {
-            return false; // lease expired — fail closed on lease loss
+        // P3-146: the token must exactly match the issued fenceToken — a future
+        // token was never granted and a past token is a stale owner.
+        if (token != fenceToken) {
+            return false;
+        }
+        // P3-147: expiry is inclusive and a held lease without an expiry is
+        // corrupt — both fail closed (a null lease with an owner must never
+        // read as an infinite lease).
+        if (leaseExpiresTs == null || nowTs >= leaseExpiresTs) {
+            return false;
         }
         return true;
     }
@@ -72,8 +82,8 @@ public record GateRow(
         return leaseExpiresTs != null && nowTs > leaseExpiresTs;
     }
 
-    /** Copy with a new gate state and a freshly incremented epoch (transition_ts). */
-    public GateRow withState(GateState newState, String newReason, String hash, long ts) {
+    /** Copy with a new gate state and a freshly incremented epoch. */
+    public GateRow withState(GateState newState, String newReason, String hash) {
         return new GateRow(partitionId, accountScopeId, newState, epoch + 1, newReason, hash,
                 approval1, approval2, approvedEvidenceHash, ownerInstanceId, fenceToken,
                 fenceAcquiredTs, leaseExpiresTs, fenceLostTs);
@@ -86,26 +96,65 @@ public record GateRow(
                 acquiredTs + leaseMs, null);
     }
 
-    /** Copy that records fence loss (lease lost) and returns the gate to a halted/failed-closed state. */
+    /**
+     * Copy that records fence loss (lease lost) and fails closed: the lease is
+     * cleared so {@link #fenceValidFor} can never pass on a lost fence, while
+     * owner/token are kept as loss evidence (P3-014).
+     */
     public GateRow withFenceLost(long lostTs) {
         return new GateRow(partitionId, accountScopeId, state, epoch, reason, evidenceHash,
                 approval1, approval2, approvedEvidenceHash, ownerInstanceId, fenceToken,
-                fenceAcquiredTs, leaseExpiresTs, lostTs);
+                fenceAcquiredTs, null, lostTs);
     }
 
-    /** Copy that extends the lease for the current holder without changing fenceToken. */
+    /**
+     * Copy that extends the lease for the current holder without changing fenceToken.
+     *
+     * <p>P3-148: renewing a fence that is not live fails closed instead of
+     * resurrecting it. Without these guards the copy unconditionally cleared
+     * {@code fenceLostTs} and pushed {@code leaseExpiresTs} forward, so a caller
+     * that renewed after loss/expiry re-armed a dead fence without going through
+     * {@link #withFence} — bypassing the loss enforcement that
+     * {@link #fenceValidFor} relies on. A lost or expired fence must re-acquire.
+     */
     public GateRow withRenewedLease(long nowTs, long leaseMs) {
+        if (ownerInstanceId == null) {
+            throw new IllegalStateException("cannot renew a fence that was never acquired; acquire via withFence");
+        }
+        if (fenceLostTs != null) {
+            throw new IllegalStateException("cannot renew a lost fence (lost at " + fenceLostTs
+                    + "); re-acquire via withFence");
+        }
+        if (leaseExpiresTs == null || nowTs >= leaseExpiresTs) {
+            throw new IllegalStateException("cannot renew an expired/absent lease (expires "
+                    + leaseExpiresTs + ", now " + nowTs + "); re-acquire via withFence");
+        }
         return new GateRow(partitionId, accountScopeId, state, epoch, reason, evidenceHash,
                 approval1, approval2, approvedEvidenceHash, ownerInstanceId, fenceToken,
                 fenceAcquiredTs, nowTs + leaseMs, null);
     }
 
-    /** Copy that clears the fence (owner, token, lease) and records revocation/loss at clearedTs. */
+    /**
+     * Copy that clears the fence OWNER and lease and records revocation/loss at clearedTs,
+     * while RETAINING {@code fenceToken} as the write-ordering version (P3-374).
+     *
+     * <p>The token is deliberately NOT reset to 0. The durable gate table orders writes by
+     * {@code fence_token} (VERSIONED merge engine, P3-010/P3-012/P3-013), so a write that
+     * reset the version to 0 would be dropped by the tablet instead of clearing the fence.
+     * The "no fence" marker is {@code ownerInstanceId == null}, which {@link #fenceValidFor}
+     * already requires as its first check.
+     *
+     * <p>Retention is also what keeps the version strictly non-decreasing across a restart:
+     * the store seeds its sequence from the durable token via {@code hydrate}, so a durable 0
+     * would let the next acquire mint token 1 again — REUSING a token that was already issued
+     * and is still held as evidence by a stale holder.
+     */
     public GateRow withFenceCleared(long clearedTs) {
-        if (ownerInstanceId == null && fenceToken == 0L && fenceAcquiredTs == null && leaseExpiresTs == null) {
+        if (ownerInstanceId == null && fenceAcquiredTs == null && leaseExpiresTs == null
+                && Objects.equals(fenceLostTs, clearedTs)) {
             return this;
         }
         return new GateRow(partitionId, accountScopeId, state, epoch, reason, evidenceHash,
-                approval1, approval2, approvedEvidenceHash, null, 0L, null, null, clearedTs);
+                approval1, approval2, approvedEvidenceHash, null, fenceToken, null, null, clearedTs);
     }
 }

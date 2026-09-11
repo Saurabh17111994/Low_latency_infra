@@ -59,9 +59,17 @@ public record SlotSafetyRequest(
         if (contractVersion < 1) {
             throw new IllegalArgumentException("contractVersion must be >= 1");
         }
+        // P3-126: reasonCode is never null ("" for RECOVERED) and RECOVERED
+        // must carry empty — matches SafetyHaltWriter v2 (null→"" on wire).
+        if (reasonCode == null) {
+            throw new IllegalArgumentException("reasonCode must not be null (use \"\" for RECOVERED)");
+        }
         // Mirrors SafetyHaltWriter: UNSAFE requires a reason, RECOVERED does not.
-        if (status == SlotSafetyStatus.UNSAFE && (reasonCode == null || reasonCode.isBlank())) {
+        if (status == SlotSafetyStatus.UNSAFE && reasonCode.isBlank()) {
             throw new IllegalArgumentException("UNSAFE requires a reasonCode");
+        }
+        if (status == SlotSafetyStatus.RECOVERED && !reasonCode.isEmpty()) {
+            throw new IllegalArgumentException("RECOVERED must carry empty reasonCode");
         }
     }
 

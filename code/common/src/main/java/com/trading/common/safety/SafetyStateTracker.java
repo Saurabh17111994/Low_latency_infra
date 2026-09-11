@@ -3,6 +3,7 @@ package com.trading.common.safety;
 import java.util.Collections;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Slot-scoped safety state machine (plan.md &sect; "Slot-scoped safety
@@ -68,13 +69,19 @@ public final class SafetyStateTracker {
         return assignment;
     }
 
-    /** Current state for {@code slotId}, or {@code null} if never seen. */
+    /** Current state for {@code slotId}, or {@code null} if never seen (P3-347: null in → null out, never NPE). */
     public SlotSafetyState stateOf(String slotId) {
+        if (slotId == null) {
+            return null;
+        }
         return states.get(slotId);
     }
 
-    /** True while the slot is in the UNSAFE (suppressed) window. */
+    /** True while the slot is in the UNSAFE (suppressed) window (P3-348: null → false, unknown slots never suppressed). */
     public boolean isUnsafe(String slotId) {
+        if (slotId == null) {
+            return false;
+        }
         SlotSafetyState s = states.get(slotId);
         return s != null && s.status() == SlotSafetyStatus.UNSAFE;
     }
@@ -99,6 +106,11 @@ public final class SafetyStateTracker {
      * {@link ApplyResult#RECOVERED}.
      */
     public ApplyResult apply(SlotSafetyRequest row) {
+        // P3-349: explicit fail-fast — the Flink path only catches
+        // ParseException, so a raw NPE here would be fatal, not counted/skipped.
+        if (row == null) {
+            throw new IllegalArgumentException("row must not be null");
+        }
         if (!SlotSafetyRequest.SOURCE_COMPONENT_INGESTION.equals(row.sourceComponent())) {
             return ApplyResult.IGNORED_SOURCE_COMPONENT;
         }
@@ -116,42 +128,60 @@ public final class SafetyStateTracker {
             return ApplyResult.IGNORED_HASH_MISMATCH;
         }
 
-        SlotSafetyState current = states.get(row.slotId());
-        return row.status() == SlotSafetyStatus.UNSAFE
-                ? applyUnsafe(row, current)
-                : applyRecovered(row, current);
+        // P3-122: epoch check + state replacement must be atomic per key —
+        // a get/put pair lets a stale interleaving overwrite a newer epoch.
+        AtomicReference<ApplyResult> result = new AtomicReference<>();
+        states.compute(row.slotId(), (slot, current) ->
+                row.status() == SlotSafetyStatus.UNSAFE
+                        ? computeUnsafe(row, current, result)
+                        : computeRecovered(row, current, result));
+        return result.get();
     }
 
-    private ApplyResult applyUnsafe(SlotSafetyRequest row, SlotSafetyState current) {
-        if (current == null || current.status() == SlotSafetyStatus.RECOVERED) {
-            put(unsafeState(row));
-            return ApplyResult.NEW_UNSAFE;
+    private SlotSafetyState computeUnsafe(SlotSafetyRequest row, SlotSafetyState current,
+                                          AtomicReference<ApplyResult> result) {
+        if (current == null) {
+            result.set(ApplyResult.NEW_UNSAFE);
+            return unsafeState(row);
+        }
+        // P3-123: a stale UNSAFE after RECOVERED must not regress the epoch —
+        // only a strictly newer connection generation re-opens the window.
+        if (current.status() == SlotSafetyStatus.RECOVERED) {
+            if (row.connectionEpoch() <= current.connectionEpoch()) {
+                result.set(row.connectionEpoch() == current.connectionEpoch()
+                        ? ApplyResult.IGNORED_DUPLICATE
+                        : ApplyResult.IGNORED_STALE_EPOCH);
+                return current;
+            }
+            result.set(ApplyResult.NEW_UNSAFE);
+            return unsafeState(row);
         }
         if (row.connectionEpoch() < current.connectionEpoch()) {
-            return ApplyResult.IGNORED_STALE_EPOCH;
+            result.set(ApplyResult.IGNORED_STALE_EPOCH);
+            return current;
         }
         if (row.connectionEpoch() == current.connectionEpoch()) {
-            return ApplyResult.IGNORED_DUPLICATE;
+            result.set(ApplyResult.IGNORED_DUPLICATE);
+            return current;
         }
-        put(unsafeState(row));
-        return ApplyResult.NEW_UNSAFE;
+        result.set(ApplyResult.NEW_UNSAFE);
+        return unsafeState(row);
     }
 
-    private ApplyResult applyRecovered(SlotSafetyRequest row, SlotSafetyState current) {
+    private SlotSafetyState computeRecovered(SlotSafetyRequest row, SlotSafetyState current,
+                                             AtomicReference<ApplyResult> result) {
         if (current == null || current.status() == SlotSafetyStatus.RECOVERED) {
-            return ApplyResult.IGNORED_NO_PRIOR_UNSAFE;
+            result.set(ApplyResult.IGNORED_NO_PRIOR_UNSAFE);
+            return current;
         }
         // Recovery must be strictly newer than the unsafe it clears.
         if (row.connectionEpoch() <= current.connectionEpoch()) {
-            return ApplyResult.IGNORED_STALE_EPOCH;
+            result.set(ApplyResult.IGNORED_STALE_EPOCH);
+            return current;
         }
-        put(new SlotSafetyState(row.slotId(), row.connectionEpoch(), SlotSafetyStatus.RECOVERED,
-                "", row.detectionTimeMs(), current.tokenSetHash()));
-        return ApplyResult.RECOVERED;
-    }
-
-    private void put(SlotSafetyState state) {
-        states.put(state.slotId(), state);
+        result.set(ApplyResult.RECOVERED);
+        return new SlotSafetyState(row.slotId(), row.connectionEpoch(), SlotSafetyStatus.RECOVERED,
+                "", row.detectionTimeMs(), current.tokenSetHash());
     }
 
     private SlotSafetyState unsafeState(SlotSafetyRequest row) {

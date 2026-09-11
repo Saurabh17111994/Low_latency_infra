@@ -6,10 +6,18 @@ import java.util.Objects;
 /** Fail-closed validation performed before an intent can cross the private boundary. */
 public final class IntentValidator {
     private IntentValidator() {}
+    // P3-485: precompiled — String.matches() recompiles per intent on this hot path.
+    private static final java.util.regex.Pattern REQUEST_HASH =
+            java.util.regex.Pattern.compile("[0-9a-fA-F]{64}");
+    private static final java.util.regex.Pattern INSTRUCTION_ID =
+            java.util.regex.Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
 
-    public static String validate(IntentRecord i, String accountScope, String partition, long nowMs) {
+    public static void validate(IntentRecord i, String accountScope, String partition, long nowMs) {
         Objects.requireNonNull(i, "intent");
         required(i.instructionId(), "instruction_id"); required(i.requestHash(), "request_hash");
+        // P3-094: instruction_id was non-blank-only while supersedes enforced
+        // the allowlist — malformed ids break dedup/idempotency downstream.
+        if (!INSTRUCTION_ID.matcher(i.instructionId()).matches()) throw invalid("invalid instruction_id");
         required(i.accountScopeId(), "account_scope_id"); required(i.executionPartitionId(), "execution_partition_id");
         required(i.tradeContextId(), "trade_context_id"); required(i.candidateId(), "candidate_id");
         required(i.exchange(), "exchange"); required(i.symbol(), "symbol"); required(i.side(), "side");
@@ -26,14 +34,17 @@ public final class IntentValidator {
             throw invalid("limit order requires positive limit_price_paise");
         }
         if (i.expiryTs() != null && i.expiryTs() <= nowMs) throw invalid("intent expired");
-        if (!i.requestHash().matches("(?i)[0-9a-f]{64}")) throw invalid("request_hash must be hex sha256");
-        if (i.supersedesInstructionId() != null && !i.supersedesInstructionId().isBlank()) {
+        if (!REQUEST_HASH.matcher(i.requestHash()).matches()) throw invalid("request_hash must be hex sha256");
+        // P3-313: whitespace-only supersedes failed the !isBlank guard and was
+        // silently treated as absent — reject explicitly instead.
+        if (i.supersedesInstructionId() != null) {
+            if (i.supersedesInstructionId().isBlank()) throw invalid("invalid supersedes_instruction_id");
             if (i.supersedesInstructionId().equals(i.instructionId())) throw invalid("self-supersede not allowed");
-            if (!i.supersedesInstructionId().matches("^[A-Za-z0-9_-]{1,64}$")) throw invalid("invalid supersedes_instruction_id");
+            if (!INSTRUCTION_ID.matcher(i.supersedesInstructionId()).matches()) throw invalid("invalid supersedes_instruction_id");
         }
         if (i.orderType().equals("MARKET") && i.limitPricePaise() != null) throw invalid("market order must not have limit_price_paise");
-        if (i.strategyId().isBlank() || i.strategyVersion().isBlank() || i.configurationVersion().isBlank()) throw invalid("strategy fields must not be blank");
-        return "accepted";
+        // P3-486: required() above already guarantees non-blank (record is
+        // immutable, cannot become blank later) — dead check removed.
     }
 
     public static void validate(IntentRecord i, String accountScope, String partition) {

@@ -129,17 +129,21 @@ class GatewayProtocolParityTest {
                 tamperedHash, GATE_EPOCH, FENCE_TOKEN, DEADLINE_EPOCH_MS, tamperedPayload, null);
         String correctEncoded = p.encode(correct);
         com.fasterxml.jackson.databind.JsonNode correctNode = m.readTree(correctEncoded);
-        // inject stale hash
+        // 2) hash-mismatch path: stale payload_hash + stale auth over the new
+        // payload_json (P3-296: encode refuses to sign a mismatched pair, so the
+        // stale-auth bytes are crafted via raw HMAC here, not via encode).
+        // canonical layout: version\ntype\nrequest\nscope\npartition\nhash\nepoch\nfence\ndeadline\npayload_json
+        String tamperedPayloadJson = m.writeValueAsString(tamperedPayload);
+        String staleCanonical = String.join("\n", PROTOCOL_VERSION, MESSAGE_TYPE, REQUEST_ID,
+                ACCOUNT_SCOPE_ID, EXECUTION_PARTITION_ID, FIXED_PAYLOAD_HASH,
+                Long.toString(GATE_EPOCH), FENCE_TOKEN, Long.toString(DEADLINE_EPOCH_MS),
+                tamperedPayloadJson);
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new javax.crypto.spec.SecretKeySpec(
+                FIXED_SECRET.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
+        String staleAuth = java.util.HexFormat.of().formatHex(
+                mac.doFinal(staleCanonical.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
         ((ObjectNode) correctNode).put("payload_hash", FIXED_PAYLOAD_HASH);
-        // recompute stale auth: HMAC over canonical with stale hash but new payload_json
-        // re-use GatewayProtocol internals by constructing stale envelope and encoding?
-        // Instead craft canonical manually and sign via new instance with stale hash.
-        GatewayProtocol.Envelope stale = new GatewayProtocol.Envelope(
-                PROTOCOL_VERSION, MESSAGE_TYPE, REQUEST_ID, ACCOUNT_SCOPE_ID, EXECUTION_PARTITION_ID,
-                FIXED_PAYLOAD_HASH, GATE_EPOCH, FENCE_TOKEN, DEADLINE_EPOCH_MS, tamperedPayload, null);
-        String staleToken = p.encode(stale);
-        com.fasterxml.jackson.databind.JsonNode staleNode = m.readTree(staleToken);
-        String staleAuth = staleNode.get("authentication").asText();
         ((ObjectNode) correctNode).put("authentication", staleAuth);
         String mismatchJson = m.writeValueAsString(correctNode);
         GatewayProtocol.Verification v2 = p.verify(mismatchJson, PROTOCOL_VERSION, NOW_MS);

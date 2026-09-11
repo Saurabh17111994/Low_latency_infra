@@ -1,8 +1,13 @@
 package com.trading.execution.gateway;
 
+import com.trading.common.schema.fluss.FlussHandlePool;
+
 import java.time.Duration;
-import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
@@ -19,12 +24,24 @@ public final class FlussProjectionWriter implements ProjectionWriter {
     private final Connection connection;
     private final GatewayConfig config;
     private final Duration timeout;
-    private final Map<String, Table> tables = new HashMap<>();
+    // P3-070: ConcurrentHashMap — the public ProjectionWriter API has no
+    // single-thread confinement; GatewayHttpServer drives concurrent applies.
+    private final Map<String, Table> tables = new ConcurrentHashMap<>();
     private final PostbackQuarantineStore quarantineStore;
+    // P3-071: in-run guard for Fills append idempotency — retry after a crash
+    // between the Fills append and the ledger put must not duplicate the LOG
+    // row. Fluss LOG has no PK, so dedup by fingerprint before re-appending.
+    private final Set<String> appendedFingerprints = ConcurrentHashMap.newKeySet();
+    // P3-072: per-table pools of reusable writers. Same concurrent reasoning as `tables`
+    // (P3-070) — a single cached writer would be a cross-call hazard on this path.
+    private final Map<String, FlussHandlePool<AppendWriter>> appendPools = new ConcurrentHashMap<>();
+    private final Map<String, FlussHandlePool<UpsertWriter>> upsertPools = new ConcurrentHashMap<>();
 
     public static FlussProjectionWriter open(GatewayConfig config) {
         try {
             Configuration c = new Configuration(); c.setString("bootstrap.servers", config.flussBootstrap());
+            // D1: bulk-path linger via FlussWriteProfiles (throughput-leaning, not order-critical).
+            com.trading.common.schema.fluss.FlussWriteProfiles.bulkPath(c);
             return new FlussProjectionWriter(ConnectionFactory.createConnection(c), config,
                     config.requestTimeout());
         } catch (Exception e) { throw new IllegalStateException("cannot open projection writer", e); }
@@ -33,6 +50,8 @@ public final class FlussProjectionWriter implements ProjectionWriter {
     public static FlussProjectionWriter open(GatewayConfig config, PostbackQuarantineStore quarantineStore) {
         try {
             Configuration c = new Configuration(); c.setString("bootstrap.servers", config.flussBootstrap());
+            // D1: bulk-path linger via FlussWriteProfiles (throughput-leaning, not order-critical).
+            com.trading.common.schema.fluss.FlussWriteProfiles.bulkPath(c);
             return new FlussProjectionWriter(ConnectionFactory.createConnection(c), config,
                     config.requestTimeout(), quarantineStore);
         } catch (Exception e) { throw new IllegalStateException("cannot open projection writer", e); }
@@ -52,7 +71,16 @@ public final class FlussProjectionWriter implements ProjectionWriter {
         if (e.audit() != null) append("Execution_Audit", auditRow(e));
     }
     @Override public void writeLifecycle(NormalizedExecutionEvent e) throws Exception {
-        if (e.fill() != null) append("Fills", fillRow(e));
+        // P3-071: Fills is an append-only LOG with no PK — re-appending after the
+        // ledger put failed would duplicate the row on retry. Skip when this
+        // writer already appended this fingerprint in-run; cross-restart replay
+        // is absorbed downstream by fingerprint-version dedup on Fills.
+        if (e.fill() != null && e.fill().postbackFingerprint() != null
+                && !appendedFingerprints.add(e.fill().postbackFingerprint())) {
+            // Already appended this run — still apply the idempotent upserts.
+        } else if (e.fill() != null) {
+            append("Fills", fillRow(e));
+        }
         if (e.lifecycle() != null) upsert("Order_Lifecycle", lifecycleRow(e));
         if (e.correlation() != null) upsert("Order_Correlation", correlationRow(e));
     }
@@ -73,7 +101,12 @@ public final class FlussProjectionWriter implements ProjectionWriter {
      * otherwise uses the same inline Fluss append pattern as {@link #writeAudit}.
      */
     public void writeQuarantine(NormalizedExecutionEvent e, String reason) throws Exception {
-        String evidenceSummary = reason;
+        Objects.requireNonNull(e.postbackEventId(), "postbackEventId");
+        Objects.requireNonNull(reason, "reason");
+        // P3-284: keep the human evidence, not the machine reason — the store
+        // contract expects distinct (reason, evidenceSummary) fields.
+        String evidenceSummary = e.audit() != null && e.audit().evidenceSummary() != null
+                ? e.audit().evidenceSummary() : reason;
         byte[] rawPayload = e.fill() != null && e.fill().originalPayload() != null
                 ? e.fill().originalPayload() : new byte[0];
         if (quarantineStore != null) {
@@ -89,6 +122,10 @@ public final class FlussProjectionWriter implements ProjectionWriter {
      * Postback_Quarantine via the same Fluss append path when no store is wired.
      */
     public void writeQuarantine(String postbackEventId, String reason, String evidenceSummary, byte[] rawPayload) throws Exception {
+        // P3-285: fail fast — "q-null" masks null as a colliding key and null
+        // reason violates Postback_Quarantine.reason NOT NULL only at the server.
+        Objects.requireNonNull(postbackEventId, "postbackEventId");
+        Objects.requireNonNull(reason, "reason");
         if (quarantineStore != null) {
             quarantineStore.quarantine(postbackEventId, reason, evidenceSummary, rawPayload);
             return;
@@ -106,19 +143,30 @@ public final class FlussProjectionWriter implements ProjectionWriter {
     }
 
     private void append(String name, GenericRow row) throws Exception {
-        AppendWriter writer = table(name).newAppend().createWriter();
-        try { writer.append(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS); }
-        finally { writer.flush(); }
+        // Note this connection holds a Map<String,Table> (projection + quarantine + others),
+        // so a per-record flush here would also force and await its sibling tables'.
+        // D1: no per-record flush — see FlussWriteProfiles.
+        // P3-072: pooled per-table writer instead of one per call. Writers are @NotThreadSafe
+        // with no single-thread contract here, so a single cached field would be a cross-call
+        // hazard; the pool lends one per caller and drops a handle whose call failed.
+        appendPools.computeIfAbsent(name, n -> new FlussHandlePool<>(() -> table(n).newAppend().createWriter()))
+                .with(writer -> {
+                    writer.append(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+                    return null;
+                });
     }
     private void upsert(String name, GenericRow row) throws Exception {
-        UpsertWriter writer = table(name).newUpsert().createWriter();
-        try { writer.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS); }
-        finally { writer.flush(); }
+        // P3-072: pooled per-table writer — see append().
+        upsertPools.computeIfAbsent(name, n -> new FlussHandlePool<>(() -> table(n).newUpsert().createWriter()))
+                .with(writer -> {
+                    writer.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+                    return null;
+                });
     }
 
     private GenericRow auditRow(NormalizedExecutionEvent e) {
         var a = e.audit();
-        return GenericRow.of(bs(a.auditEventId()), bs(e.eventType()), bs(nullable(e.correlation(), true)),
+        return GenericRow.of(bs(a.auditEventId()), bs(e.eventType()), bs(nullableInstruction(e.correlation())),
                 bs(nullableAttempt(e)), bs(e.executionPartitionId()), bs(e.accountScopeId()), e.gateEpoch(),
                 bs(e.actorId()), bs(a.evidenceHash()), bs(a.evidenceSummary()), e.eventTs(), bs("2"));
     }
@@ -157,7 +205,11 @@ public final class FlussProjectionWriter implements ProjectionWriter {
      * Uses BinaryString for STRING cols and BYTES for payload, same pattern as auditRow/fillRow.
      */
     private GenericRow quarantineRow(NormalizedExecutionEvent e, String reason, String evidenceSummary, byte[] rawPayload) {
-        String quarantineId = "q-" + e.postbackEventId();
+        // P3-285: fail fast here too — this row builder is also reachable from
+        // the (event, reason) overload, not only the guarded 4-arg overload.
+        Objects.requireNonNull(e.postbackEventId(), "postbackEventId");
+        Objects.requireNonNull(reason, "reason");
+        String quarantineId = "q-" + e.postbackEventId() + "-" + java.util.UUID.randomUUID();
         String payloadHash = null;
         String brokerOrderId = null;
         String instructionId = null;
@@ -206,6 +258,10 @@ public final class FlussProjectionWriter implements ProjectionWriter {
      */
     private GenericRow positionStateRow(NormalizedExecutionEvent e) {
         var p = e.position();
+        // P3-286: already fail-closed — unknown Positions states throw here
+        // (quarantine + halt upstream) instead of defaulting to OPEN, which
+        // would let a typo block Flink signals forever (no TTL). Pinned, not
+        // re-fixed.
         String raw = p.state() == null ? null : p.state().trim().toUpperCase();
         if (!"OPEN".equals(raw) && !"CLOSED".equals(raw) && !"FLAT".equals(raw)) {
             throw new IllegalArgumentException(
@@ -223,7 +279,10 @@ public final class FlussProjectionWriter implements ProjectionWriter {
                 bs(status), bs(p.positionId()), p.lastUpdateTs(),
                 closedTs, bs(closedReason), p.sourceVersion(), bs("2"));
     }
-    private static String nullable(NormalizedExecutionEvent.Correlation c, boolean instruction) {
+    // P3-287: single-purpose accessor — the old (c, boolean) selector ignored
+    // its flag and always returned instructionId, so a future false-call would
+    // silently map the wrong column. Only call site needs instruction_id.
+    private static String nullableInstruction(NormalizedExecutionEvent.Correlation c) {
         return c == null ? null : c.instructionId();
     }
     private static String nullableAttempt(NormalizedExecutionEvent e) {
@@ -232,5 +291,26 @@ public final class FlussProjectionWriter implements ProjectionWriter {
     private static BinaryString bs(String s) { return s == null ? null : BinaryString.fromString(s); }
     private Table table(String name) { return tables.computeIfAbsent(name,
             n -> connection.getTable(TablePath.of(config.flussDatabase(), n))); }
-    @Override public void close() throws Exception { for (Table t : tables.values()) t.close(); connection.close(); }
+    // P3-288: collect, don't abort — snapshot under concurrency (P3-070),
+    // always close the connection, and clear so close is idempotent.
+    @Override public void close() throws Exception {
+        // P3-072: drop pooled writers first — TableWriter is not Closeable (only flush()),
+        // so there is nothing to close, but holding them past the table close would leave
+        // dead references behind.
+        appendPools.values().forEach(FlussHandlePool::clear);
+        appendPools.clear();
+        upsertPools.values().forEach(FlussHandlePool::clear);
+        upsertPools.clear();
+        Exception failure = null;
+        for (Table t : List.copyOf(tables.values())) {
+            try { t.close(); } catch (Exception e) {
+                if (failure == null) failure = e; else failure.addSuppressed(e);
+            }
+        }
+        tables.clear();
+        try { connection.close(); } catch (Exception e) {
+            if (failure == null) failure = e; else failure.addSuppressed(e);
+        }
+        if (failure != null) throw failure;
+    }
 }

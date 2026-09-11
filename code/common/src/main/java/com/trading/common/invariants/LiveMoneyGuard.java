@@ -243,7 +243,14 @@ public final class LiveMoneyGuard {
                 boolean liveMoneyAllowed,
                 Set<LiveMoneyStopCondition> triggeredConditions) {
             this.liveMoneyAllowed = liveMoneyAllowed;
-            this.triggeredConditions = triggeredConditions;
+            // P3-113: defensive copy — the caller-owned EnumSet must not stay
+            // reachable, or a later clear()/add() breaks allowed==empty.
+            if (triggeredConditions.isEmpty()) {
+                this.triggeredConditions = java.util.Collections.emptySet();
+            } else {
+                this.triggeredConditions = java.util.Collections.unmodifiableSet(
+                        EnumSet.copyOf(triggeredConditions));
+            }
         }
 
         /** Human-readable halt reason joining all triggered descriptions. */

@@ -14,8 +14,6 @@ use crate::projection::{PositionSnapshot, PositionState};
 pub struct NoOpPositionObserver {
     positions_by_state: HashMap<PositionState, usize>,
     no_op_decisions: HashMap<String, usize>,
-    #[allow(dead_code)]
-    enabled: bool,
 }
 
 impl NoOpPositionObserver {
@@ -25,10 +23,9 @@ impl NoOpPositionObserver {
         if position_actions_enabled {
             return Err("POSITION_ACTIONS_ENABLED must be false for MVP no-op babysitter");
         }
-        Ok(Self {
-            enabled: position_actions_enabled,
-            ..Default::default()
-        })
+        // P3-419: no enabled field — it could only ever hold false (new()
+        // errs on true), so the fail-closed invariant lives in this check.
+        Ok(Self::default())
     }
 
     /// Observe a position snapshot — counts by state, never emits an action.
@@ -36,6 +33,9 @@ impl NoOpPositionObserver {
         let c = self.positions_by_state.entry(snapshot.state).or_insert(0);
         *c += 1;
         // No trade action emitted — record no-op by reason for audit.
+        // P3-181 won't-fix: the format! alloc is noise on this cold
+        // observation-only path, and &'static str keys would break the
+        // no_op_count(substring) audit API the tests rely on.
         let reason = format!("no-op: state={:?}", snapshot.state);
         *self.no_op_decisions.entry(reason).or_insert(0) += 1;
     }

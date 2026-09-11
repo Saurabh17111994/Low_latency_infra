@@ -83,7 +83,7 @@ public record NormalizedPostback(
         if (side != null && !SIDE_BUY.equals(side) && !SIDE_SELL.equals(side)) {
             throw new IllegalArgumentException("side must be BUY or SELL, got " + side);
         }
-        if (instrumentToken != 0 && instrumentToken < 0) {
+        if (instrumentToken < 0) {
             throw new IllegalArgumentException("instrumentToken must be positive when present");
         }
     }
@@ -93,7 +93,7 @@ public record NormalizedPostback(
         return fillQty > 0;
     }
 
-    /** True when no broker order id is present (correlation must fall back). */
+    /** True when a broker order id is present (correlation can use it directly). */
     public boolean hasBrokerOrderId() {
         return brokerOrderId != null && !brokerOrderId.isBlank();
     }

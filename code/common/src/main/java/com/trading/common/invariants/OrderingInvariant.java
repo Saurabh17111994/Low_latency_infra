@@ -25,7 +25,10 @@ public final class OrderingInvariant {
         public Record(long instrumentToken, long eventTime, String eventFingerprint) {
             this.instrumentToken = instrumentToken;
             this.eventTime = eventTime;
-            this.eventFingerprint = eventFingerprint;
+            // P3-116/P3-340: fail fast at creation — a null fingerprint would
+            // NPE mid-sort and break the deterministic replay sequence. No
+            // nullsFirst: silently ordering corrupt records is fail-open.
+            this.eventFingerprint = java.util.Objects.requireNonNull(eventFingerprint, "eventFingerprint");
         }
     }
 }

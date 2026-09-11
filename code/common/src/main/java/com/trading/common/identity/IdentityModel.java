@@ -1,7 +1,5 @@
 package com.trading.common.identity;
 
-import java.util.Objects;
-
 /**
  * Canonical platform identity model.
  *
@@ -32,9 +30,18 @@ public final class IdentityModel {
 
     /** Deterministic broker-facing attempt reference (max 16 chars for Arrow remarks). */
     public static final class ClientOrderRef {
+        // P3-110: the cap is the contract — ArrowOrderRequest re-checks at the
+        // broker boundary, but fail-fast belongs here (every non-Arrow path
+        // that mints a ref gets the same guarantee).
+        public static final int MAX_LENGTH = 16;
         private final String value;
         public ClientOrderRef(String value) {
-            this.value = requireValue("ClientOrderRef", value);
+            String v = requireValue("ClientOrderRef", value);
+            if (v.length() > MAX_LENGTH) {
+                throw new IllegalArgumentException(
+                        "ClientOrderRef value must be <= " + MAX_LENGTH + " chars, got length " + v.length());
+            }
+            this.value = v;
         }
         public String value() { return value; }
         @Override public String toString() { return value; }
@@ -230,6 +237,8 @@ public final class IdentityModel {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(kind + " value must not be null or blank");
         }
-        return value;
+        // P3-339: join/idempotency keys compare by value — 'ABC' vs ' ABC '
+        // must be the same identity, never two map keys / two submissions.
+        return value.strip();
     }
 }

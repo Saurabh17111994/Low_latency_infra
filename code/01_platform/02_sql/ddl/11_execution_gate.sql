@@ -26,6 +26,23 @@
 -- (approval_1/approval_2/approved_evidence_hash). See
 -- ExecutionGateColumnOwnership (SCH-15).
 --
+-- v4 (2026-09-11, CHG-122, P3-010/P3-012/P3-013) — OPTIONS-ONLY change: the column
+-- set, order and indices are unchanged, so the ROW contract stays v3 and the header
+-- above is not bumped. Adopted the VERSIONED merge engine on `fence_token`, which
+-- makes the tablet the write-ordering authority and DROPS a stale-token write
+-- instead of letting it clobber the live owner. Three writer obligations follow and
+-- are enforced in code, not here:
+--   (a) fence_token is RETAINED across revoke/halt as the ordering version — 0 marks
+--       only a never-acquired row, and `owner_instance_id IS NULL` is the unfenced
+--       marker (P3-374). Resetting the token to 0 would make the clearing write
+--       version-dropped.
+--   (b) every mutator re-reads and confirms its own write landed, because a
+--       version-dropped write still returns SUCCESS — Fluss 0.9.1 carries no
+--       "ignored" result on UpsertResult, so dropping is otherwise undetectable.
+--   (c) halt mints a STRICTLY GREATER token, so a safety halt can never be dropped.
+-- Residual (unchanged): equal versions are accepted, so two hosts minting the same
+-- next token both win — single-active-owner remains deployment-owned (ASM-EXE-005).
+--
 -- Domain contract (P4-037/P4-038/P4-039/P4-040 — Fluss has no CHECK/DEFAULT/
 -- FK; enforced in running code, not here):
 --   state/epoch/fence (P4-037): state is the GateState enum, transitions gated
@@ -38,11 +55,15 @@
 --     principals and GatewayHttpServer halts the gate on either. Principal is
 --     the DEC-044 single-operator placeholder — rotate via the store's
 --     authorizedApprovers set, not via schema.
---   fence nullability (P4-039): NULL owner/token/lease = unfenced BY DESIGN
---     (a HALTED/never-fenced row holds no lease); every bridge command
---     re-validates immediately before execution — NautilusIntentClient.forward
---     DEFERS on missing row, non-ENABLED state, null/zero fence, or expired
---     lease (same rule in GateRow.fenceValidFor).
+--   fence nullability (P4-039/P3-374): NULL owner = unfenced BY DESIGN (a
+--     HALTED/never-fenced/revoked row holds no owner and no lease).
+--     fence_token is RETAINED across revoke/halt as the durable write-ordering
+--     version (the VERSIONED merge engine orders writes by it), so 0 marks ONLY
+--     a never-acquired row — a revoked row keeps its last token. Every bridge
+--     command re-validates immediately before execution —
+--     NautilusIntentClient.forward DEFERS on missing row, non-ENABLED state,
+--     null owner, null/zero fence, or absent/expired lease (same rule in
+--     GateRow.fenceValidFor).
 --   PK (P4-040): NOT ENFORCED is mandatory Flink syntax; uniqueness is the KV
 --     upsert key + single-writer + store init never-clobber. (execution_
 --     partition_id, account_scope_id) composite waits on the multi-account
@@ -88,6 +109,17 @@ CREATE TABLE Execution_Gate (
     'bucket.num' = '4',
     'bucket.key' = 'execution_partition_id',
     'table.log.ttl' = '30d',
+    -- P3-010/P3-012/P3-013: durable write-ordering on fence_token. The VERSIONED merge
+    -- engine makes the tablet DROP a write whose fence_token is LOWER than the stored
+    -- row's — the server-side conditional write 0.9.1 was said not to have — so a stale
+    -- or zombie executor can no longer clobber the live owner's row. The gate store has
+    -- exactly one write site, writes full rows, and never deletes, which is what makes
+    -- VERSIONED applicable. delete.behavior is declared as 'ignore' because VERSIONED
+    -- rejects 'allow' (the coordinator would otherwise inject it, and the apply-parity
+    -- step compares every option the DDL declares against the live table).
+    'table.merge-engine' = 'versioned',
+    'table.merge-engine.versioned.ver-column' = 'fence_token',
+    'table.delete.behavior' = 'ignore',
     'table.datalake.enabled' = 'true',
     'table.datalake.format' = 'iceberg',
     'table.datalake.freshness' = '5min',

@@ -91,6 +91,24 @@ pub fn encode_envelope(secret: &str, e: &Envelope) -> Result<String, String> {
     if secret.is_empty() {
         return Err("secret required".to_string());
     }
+    // P3-079 (Java parity): the canonical form joins fields with a bare
+    // newline, so a request_id of "a\nb" plus scope "c" signs identically to
+    // "a" plus "b\nc" (cross-field shift, valid HMAC, wrong binding). Reject
+    // newline-bearing identity fields before signing — same rule as Java
+    // requireNoNewlines.
+    for part in [
+        e.protocol_version.as_str(),
+        e.message_type.as_str(),
+        e.request_id.as_str(),
+        e.account_scope_id.as_str(),
+        e.execution_partition_id.as_str(),
+        e.payload_hash.as_str(),
+        e.fence_token.as_str(),
+    ] {
+        if part.contains('\n') || part.contains('\r') {
+            return Err("identity field must not contain newline".to_string());
+        }
+    }
     // payload_json must be the compact encoding the Java ObjectMapper would produce.
     // We use serde_json::to_string which is compact; Java's default is also compact
     // for the payload node (no pretty). For cross-language fidelity the test vectors
@@ -182,6 +200,22 @@ pub fn verify(json: &str, secret: &str, expected_version: &str, now_ms: i64) -> 
     }
     if e.deadline_epoch_ms < now_ms {
         return reject("deadline expired");
+    }
+    // P3-079 (Java parity): verify what was signed — the signer refuses
+    // newline-bearing identity fields, so a hand-crafted envelope carrying one
+    // (valid HMAC over a shifted canonical) must not verify.
+    for part in [
+        e.protocol_version.as_str(),
+        e.message_type.as_str(),
+        e.request_id.as_str(),
+        e.account_scope_id.as_str(),
+        e.execution_partition_id.as_str(),
+        e.payload_hash.as_str(),
+        e.fence_token.as_str(),
+    ] {
+        if part.contains('\n') || part.contains('\r') {
+            return reject("malformed envelope");
+        }
     }
     // Recompute canonical + HMAC using the same payload_json the sender used.
     // The sender's payload_json is the compact encoding of the payload node.
@@ -300,6 +334,22 @@ mod tests {
         let vr2 = verify(&enc2, "s3cr3t", "execution-gateway.v1", 1_000_000);
         assert!(!vr2.accepted);
         assert_eq!(vr2.reason, "payload hash mismatch");
+    }
+    #[test]
+    fn p3_079_newline_identity_rejected_on_encode_and_verify() {
+        // P3-079: "a\nb"+"c" and "a"+"b\nc" sign identically under a bare-\n
+        // join — both sides must refuse newline-bearing identity fields.
+        let mut e = envelope(json!({"x":1}));
+        e.request_id = "a\nb".to_string();
+        assert!(encode_envelope("s3cr3t", &e).is_err());
+        // Hand-crafted wire bytes (bypasses encode): verify must still refuse.
+        let good = envelope(json!({"x":1}));
+        let encoded = encode_envelope("s3cr3t", &good).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        v["request_id"] = serde_json::Value::String("a\nb".to_string());
+        let s = serde_json::to_string(&v).unwrap();
+        let vr = verify(&s, "s3cr3t", "execution-gateway.v1", 1_000_000);
+        assert!(!vr.accepted);
     }
     #[test]
     fn deadline_boundary_at_now_is_valid_not_expired() {

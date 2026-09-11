@@ -30,21 +30,25 @@ public interface GateStateStore {
     }
 
     record ApprovalResult(ApprovalOutcome outcome, GateRow row, String reason) {
+        // P3-150: never a null reason — callers (GatewayHttpServer) must not
+        // paper over a missing audit detail with a fallback string.
         public static ApprovalResult applied(GateRow row) {
-            return new ApprovalResult(ApprovalOutcome.APPLIED, row, null);
+            return new ApprovalResult(ApprovalOutcome.APPLIED, row, "approval recorded");
         }
         public static ApprovalResult of(ApprovalOutcome o, GateRow row, String reason) {
-            return new ApprovalResult(o, row, reason);
+            return new ApprovalResult(o, row, reason == null ? o.name() : reason);
         }
     }
 
-    /** Fence acquisition result. */
-    record FenceResult(GateRow row, String owner, long token, boolean conflict) {
+    /** Fence acquisition result. A conflict always carries the reason (P3-149) —
+     * "live lease held by X" vs "token mismatch" vs "expired" is what tells a
+     * split-brain from a stale lease, so it must never be dropped. */
+    record FenceResult(GateRow row, String owner, long token, boolean conflict, String reason) {
         public static FenceResult acquired(GateRow row, String owner, long token) {
-            return new FenceResult(row, owner, token, false);
+            return new FenceResult(row, owner, token, false, null);
         }
         public static FenceResult conflict(GateRow row, String reason) {
-            return new FenceResult(row, null, 0L, true);
+            return new FenceResult(row, null, 0L, true, reason);
         }
     }
 
@@ -58,10 +62,17 @@ public interface GateStateStore {
             String detail,
             String evidenceHash) {}
 
-    /** Current durable snapshot, or {@code null} if no row exists for the partition. */
+    /**
+     * Current durable snapshot, or {@code null} if no row exists for the partition.
+     * A null key returns null (P3-375); lookup failures throw — never null-as-absent.
+     */
     GateRow read(String partitionId);
 
-    /** Create (or recreate) a gate row — boot state HALTED, epoch 0, no fence/approvals. */
+    /**
+     * Create a gate row if absent, else return the existing row untouched.
+     * Never clobbers a fenced gate (P3-151): "recreate" here means
+     * return-existing, not reset. Null boot throws NullPointerException.
+     */
     GateRow init(GateRow haltedBootRow);
 
     /**
@@ -85,6 +96,10 @@ public interface GateStateStore {
      * Only the current holder may revoke; others are rejected (no mutation).
      * HALT path uses {@link #halt} which clears unconditionally.
      * Sets fenceToken to 0 and lease fields to null, records fenceLostTs.
+     *
+     * <p>Naming (P3-152): {@code revoke} is canonical; {@code release} is the
+     * same op under the voluntary-release name — kept so call sites read
+     * naturally, not a second code path.
      */
     GateRow revoke(String partitionId, String ownerInstanceId, long nowTs);
 
@@ -112,8 +127,25 @@ public interface GateStateStore {
                            long nowTs);
 
     /**
+     * P3-075: atomic approve-then-enable. Registers the approval exactly like
+     * {@link #approve} and, when it completes the gate, promotes the SAME row
+     * to ENABLED in one state transition — callers must not do read-approve-then-separate-write
+     * (two synchronized calls let a concurrent halt() land between them and be
+     * overwritten, and a non-InMemory impl has no way to receive the ENABLED write).
+     * Default delegates to approve() and returns without ENABLED promotion
+     * (promotion only where the impl overrides) — the caller replies with the
+     * returned row's actual state, never an assumed "ENABLED".
+     */
+    default ApprovalResult approveAndEnableIfComplete(String partitionId, String principal,
+            long epoch, String evidenceHash, long nowTs) {
+        return approve(partitionId, principal, epoch, evidenceHash, nowTs);
+    }
+
+    /**
      * Raise a safety halt: move the gate to HALTED and increment the epoch by
-     * exactly one, from {@code expected}. Idempotent (already HALTED) halts
+     * exactly one, from {@code expected}. A null expected halts unconditionally
+     * (P3-376) — the safety paths that cannot name a generation (unauthorized /
+     * epoch-mismatch halts) rely on this. Idempotent (already HALTED) halts
      * record evidence without a second epoch increment. HALTED default is
      * fenced-off: halt clears the fence (owner null, fenceToken 0, lease null).
      */
@@ -122,6 +154,11 @@ public interface GateStateStore {
     /** Append an immutable audit/evidence event. */
     void audit(AuditRecord record);
 
-    /** The immutable audit log, in append order (crash-window reconstruction). */
+    /**
+     * The immutable audit log, in append order (crash-window reconstruction).
+     * In-memory by design and unbounded (P3-377): this is the evidence a
+     * post-crash reconcile reads — evicting it would silently drop what
+     * reconciliation needs. Durable implementations page at the backing store.
+     */
     List<AuditRecord> auditLog();
 }

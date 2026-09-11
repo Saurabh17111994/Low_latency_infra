@@ -23,7 +23,7 @@ public final class ExecutionGatewayMain {
                 // prior fences/attempts after a restart (crash-window zero-duplicate).
                 FlussGateStateStore gates = FlussGateStateStore.open(
                         config.flussBootstrap(), config.flussDatabase(), config.gateTable(),
-                        config.requestTimeout());
+                        config.requestTimeout(), java.util.Set.of("saurabh"));
                 FlussAttemptStore attempts = FlussAttemptStore.open(
                         config.flussBootstrap(), config.flussDatabase(), config.attemptsTable(),
                         config.requestTimeout(),

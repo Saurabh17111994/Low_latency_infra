@@ -30,10 +30,9 @@ public final class SuppressionGate {
      * Context of an in-flight decision (the compute pipeline does not exist
      * yet, so the consumer supplies this when it has one).
      *
-     * @param createdTsMs  decision creation time, epoch milliseconds
      * @param published    true once the decision was emitted downstream
      */
-    public record InFlightDecision(long createdTsMs, boolean published) {}
+    public record InFlightDecision(boolean published) {}
 
     /**
      * @param tracker    tracker holding per-slot safety state
@@ -58,8 +57,14 @@ public final class SuppressionGate {
             return inFlight.published() ? Verdict.ALLOW : Verdict.DISCARD_INFLIGHT;
         }
         // RECOVERED: admit only post-recovery input (newer connection epoch).
+        // P3-127: the stale case mirrors the UNSAFE branch — an unpublished
+        // stale in-flight must DISCARD (callers branch on it), and a published
+        // one is ALLOW (published decisions are never retracted).
         if (inputEpoch < state.connectionEpoch()) {
-            return Verdict.SUPPRESS_NEW;
+            if (inFlight == null) {
+                return Verdict.SUPPRESS_NEW;
+            }
+            return inFlight.published() ? Verdict.ALLOW : Verdict.DISCARD_INFLIGHT;
         }
         return Verdict.ALLOW;
     }

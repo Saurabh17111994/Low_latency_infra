@@ -52,16 +52,20 @@ public final class CorrelationResolver {
         // --- 1) Direct key checks (attemptId as key) ---
         if (a != null && existingCorrelation.containsKey(a)) {
             String mappedBroker = existingCorrelation.get(a);
+            // P3-056: broker-less partial key must not fall through to
+            // CORRELATED without verification — fail closed to MISSING.
+            if (b == null) {
+                return Resolution.MISSING;
+            }
             // null-valued mapping is inconsistent if caller supplied a broker
-            if (b != null && !Objects.equals(b, mappedBroker)) {
+            if (!Objects.equals(b, mappedBroker)) {
                 return Resolution.AMBIGUOUS;
             }
             // Bijective: no other attempt may map to the same broker
-            if (b != null) {
-                for (Map.Entry<String, String> e : existingCorrelation.entrySet()) {
-                    if (!e.getKey().equals(a) && b.equals(e.getValue())) {
-                        return Resolution.AMBIGUOUS;
-                    }
+            for (Map.Entry<String, String> e : existingCorrelation.entrySet()) {
+                // P3-274: null-safe — a null map key must not NPE the guard.
+                if (!Objects.equals(e.getKey(), a) && b.equals(e.getValue())) {
+                    return Resolution.AMBIGUOUS;
                 }
             }
             // Also check clientRef bijective if present: clientRef as key -> attempt
@@ -69,6 +73,15 @@ public final class CorrelationResolver {
                 String mappedAttempt = existingCorrelation.get(c);
                 if (!a.equals(mappedAttempt)) {
                     return Resolution.AMBIGUOUS;
+                }
+            }
+            // P3-057: clientRef bound elsewhere slips past the key check above
+            // (early return skips sections 4-6) — scan values for hijack.
+            if (c != null) {
+                for (Map.Entry<String, String> e : existingCorrelation.entrySet()) {
+                    if (c.equals(e.getValue()) && !a.equals(e.getKey())) {
+                        return Resolution.AMBIGUOUS;
+                    }
                 }
             }
             return Resolution.CORRELATED;
@@ -81,18 +94,11 @@ public final class CorrelationResolver {
                 return Resolution.AMBIGUOUS;
             }
             // Bijective reverse: broker already mapped from different attempt key
-            // (handled above). Also ensure no other key points to same attempt
-            // with different broker.
-            if (a != null) {
-                for (Map.Entry<String, String> e : existingCorrelation.entrySet()) {
-                    if (!e.getKey().equals(b) && a.equals(e.getValue()) && !b.equals(e.getKey())) {
-                        // attempt as value from different key with different mapping — ambiguous
-                        // Only flag if that other entry's key != b and value == a but its value's broker != b
-                        // Keep conservative: if attempt appears as value under different key, it's ambiguous
-                        return Resolution.AMBIGUOUS;
-                    }
-                }
-            }
+            // (handled above). Ambiguity on this path is decided by the
+            // mappedAttempt mismatch above — no attempt-as-value scan here:
+            // P3-058 the combined view legitimately stores b1->a1 alongside
+            // c1->a1/a1->b1, so scanning for attempt-as-value under other keys
+            // false-AMBIGUOUSes healthy rows into quarantine+halt.
             return Resolution.CORRELATED;
         }
 
@@ -105,7 +111,8 @@ public final class CorrelationResolver {
             // Bijective: no other clientRef may map to same attempt with different value
             if (a != null) {
                 for (Map.Entry<String, String> e : existingCorrelation.entrySet()) {
-                    if (!e.getKey().equals(c) && a.equals(e.getValue())) {
+                    // P3-274: null-safe key comparison.
+                    if (!Objects.equals(e.getKey(), c) && a.equals(e.getValue())) {
                         return Resolution.AMBIGUOUS;
                     }
                 }
@@ -114,6 +121,8 @@ public final class CorrelationResolver {
         }
 
         // --- 4) Value scans: brokerOrderId as value (attempt -> broker) ---
+        // Reaching here implies b is not a key (section 2 returned otherwise),
+        // so the old b-as-key branch here was unreachable (P3-477) — removed.
         if (b != null) {
             for (Map.Entry<String, String> e : existingCorrelation.entrySet()) {
                 if (b.equals(e.getValue())) {
@@ -122,9 +131,6 @@ public final class CorrelationResolver {
                         return Resolution.AMBIGUOUS;
                     }
                     return Resolution.CORRELATED;
-                }
-                if (b.equals(e.getKey()) && a != null && !a.equals(e.getValue())) {
-                    return Resolution.AMBIGUOUS;
                 }
             }
         }
@@ -143,17 +149,14 @@ public final class CorrelationResolver {
             }
         }
 
-        // --- 6) Value scans: clientRef as value or key ---
+        // --- 6) Value scans: clientRef as value ---
+        // Reaching here implies c is not a key (section 3 returned otherwise),
+        // so the old c-as-key branch here was unreachable (P3-478) — removed.
+        // The c-as-value scan below stands: clientRef-as-value is a supported shape.
         if (c != null) {
             for (Map.Entry<String, String> e : existingCorrelation.entrySet()) {
                 if (c.equals(e.getValue())) {
                     if (a != null && !a.equals(e.getKey())) {
-                        return Resolution.AMBIGUOUS;
-                    }
-                    return Resolution.CORRELATED;
-                }
-                if (c.equals(e.getKey())) {
-                    if (a != null && !a.equals(e.getValue())) {
                         return Resolution.AMBIGUOUS;
                     }
                     return Resolution.CORRELATED;

@@ -1,6 +1,7 @@
 package com.trading.common.schema.execution;
 
 import com.trading.common.model.AttemptPhase;
+import com.trading.common.model.GateTransitionValidator;
 import com.trading.common.schema.ownership.ColumnOwnership;
 import com.trading.common.schema.ownership.ExecutionAttemptsColumnOwnership;
 import com.trading.common.schema.ownership.ExecutionAttemptsColumns;
@@ -54,6 +55,7 @@ import java.util.Set;
  *
  * <p>Since T5 (CHG-044) the legal matrices are no longer hand-maintained maps:
  * they are derived from the canonical {@link AttemptPhase#legalTargets} matrix
+ * via {@link GateTransitionValidator} (submission vs reconciliation routing)
  * so the validator, this store, and the Rust gate can never disagree again.
  * The submission path keeps UNKNOWN's exits out (they are reconciliation-only).
  */
@@ -63,7 +65,7 @@ public final class InMemoryAttemptStore implements AttemptStore {
     private static final String WRITER = ExecutionAttemptsColumnOwnership.WRITER_ATTEMPT_STORE;
 
     /** Submission-path legal transitions (dossier). Derived from the canonical
-     * matrix, minus the reconciliation-only UNKNOWN exits. */
+     * matrix via the validator, minus the reconciliation-only UNKNOWN exits. */
     private static final Map<String, Set<String>> SUBMIT_TRANSITIONS = deriveTransitions(false);
 
     /** Reconciliation-path legal transitions (explicit result only). */
@@ -74,8 +76,9 @@ public final class InMemoryAttemptStore implements AttemptStore {
         for (AttemptPhase from : AttemptPhase.values()) {
             Set<String> targets = new HashSet<>();
             for (AttemptPhase to : from.legalTargets()) {
-                boolean onlyReconcile = from.isReconciliationSource();
-                if (onlyReconcile == reconciliation) {
+                boolean submitLegal = GateTransitionValidator.isSubmissionLegal(from, to);
+                boolean reconcileOnly = GateTransitionValidator.isReconciliationOnly(from, to);
+                if (reconciliation ? reconcileOnly : submitLegal) {
                     targets.add(to.name());
                 }
             }

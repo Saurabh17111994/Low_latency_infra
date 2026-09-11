@@ -32,8 +32,23 @@ public final class PostbackProjectionDriver {
     private final NautilusPositionAuthority positionAuthority;
     private final String actorId;
     private final long gateEpoch;
-    private final Set<String> haltedScopeIds = new LinkedHashSet<>();
+    /**
+     * T6 projection orchestrator (CHG-045). Single-threaded by contract —
+     * retained fields ({@code haltedScopeIds}, see below) are unsynchronized;
+     * concurrent consumers must use one driver per thread or external locking.
+     * Halts are sticky: once a scope halts it stays halted for the process
+     * lifetime (no eviction — a halted scope must never silently un-halt).
+     */
+    // P3-408: LinkedHashSet is not thread-safe and Set.copyOf iterates — under
+    // concurrent project() calls this races; confinement (above) is the rule.
+    private final Set<String> haltedScopeIds =
+            java.util.Collections.synchronizedSet(new LinkedHashSet<>());
     private String lastAppliedPositionId;
+    // P3-171: lastAppliedPositionId is only ever assigned on APPLIED — but as a
+    // retained field it leaks across project() calls: a non-fill postback (or a
+    // DUPLICATE fill) would report a previous, unrelated postback's id, and
+    // repeated calls are no longer deterministic. Reset per call; the APPLIED
+    // branch sets it. Also a data race under concurrent consumers (see above).
 
     public PostbackProjectionDriver(CorrelationIndex correlationIndex,
             LifecycleStore lifecycleStore, PositionsStateStore positionStore,
@@ -67,6 +82,8 @@ public final class PostbackProjectionDriver {
      */
     public ProjectionResult project(NormalizedPostback postback, long nowMs) {
         Objects.requireNonNull(postback, "postback");
+        // P3-171: per-call position id — never the previous postback's.
+        lastAppliedPositionId = null;
 
         // --- Fingerprint integrity ------------------------------------------
         if (!PostbackFingerprint.matches(postback)) {
@@ -129,7 +146,17 @@ public final class PostbackProjectionDriver {
 
         // --- Position (serialize Nautilus-computed result, no arithmetic) ---
         if (postback.isFill()) {
-            Optional<NautilusPositionEvent> event = positionAuthority.apply(postback);
+            // P3-399: an authority throwing IAE (impossible Nautilus event —
+            // ctor invariants) must quarantine + halt like any other
+            // POSITION_VIOLATION, not escape as an unchecked exception past
+            // the quarantine path the NautilusPositionEvent docs describe.
+            final Optional<NautilusPositionEvent> event;
+            try {
+                event = positionAuthority.apply(postback);
+            } catch (IllegalArgumentException impossible) {
+                return quarantine(postback, nowMs, QuarantineReason.POSITION_VIOLATION,
+                        "Nautilus event violates quantity/state invariants: " + impossible.getMessage(), ref);
+            }
             if (event.isEmpty()) {
                 return quarantine(postback, nowMs, QuarantineReason.UNKNOWN_POSTBACK_TYPE,
                         "fill produced no Nautilus position event", ref);
@@ -171,9 +198,12 @@ public final class PostbackProjectionDriver {
     // --- helpers -------------------------------------------------------------
 
     private ProjectionResult finishStale(NormalizedPostback p, long nowMs) {
-        transition(p.postbackEventId(), nowMs,
-                PostbackProjectionLedger.State.POSITION_APPLIED_OR_NOT_REQUIRED,
-                PostbackProjectionLedger.State.COMPLETE, null);
+        // P3-514: record the real completion time (not null) and the true prior
+        // state at each call site — POSITION_APPLIED_OR_NOT_REQUIRED here is
+        // only valid for the position-STALE branch, not lifecycle-STALE.
+        PostbackProjectionLedger.State prior = ledgerPrior(p.postbackEventId(), nowMs);
+        transition(p.postbackEventId(), nowMs, prior,
+                PostbackProjectionLedger.State.COMPLETE, Long.valueOf(nowMs));
         return new ProjectionResult(Outcome.STALE, p.postbackEventId(), null, null,
                 "stale evidence rejected");
     }
@@ -248,6 +278,11 @@ public final class PostbackProjectionDriver {
         } catch (Exception e) {
             throw new RuntimeException("ledger read failed", e);
         }
+    }
+
+    private PostbackProjectionLedger.State ledgerPrior(String id, long nowMs) {
+        return lookupLedger(id).map(e -> e.projectionState())
+                .orElse(PostbackProjectionLedger.State.RECEIVED);
     }
 
     private Optional<OrderLifecycleSnapshot> lookupLifecycle(AttemptRef ref, NormalizedPostback p) {

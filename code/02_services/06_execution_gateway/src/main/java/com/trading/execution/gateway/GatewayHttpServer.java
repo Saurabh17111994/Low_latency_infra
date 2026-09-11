@@ -17,6 +17,12 @@ import java.util.function.Consumer;
 /** Minimal private endpoint; no Arrow route or broker client exists in this JVM. */
 public final class GatewayHttpServer implements AutoCloseable {
     private static final String SINGLE_OPERATOR = "saurabh";
+    /**
+     * P3-290: inbound HTTP bodies are attacker-controlled — an unbounded
+     * readAllBytes() lets one large POST OOM the gateway before auth/validation.
+     * Both handlers share this cap; oversized bodies fail 413 before parsing.
+     */
+    static final int MAX_BODY_BYTES = 256 * 1024;
     private final HttpServer server;
     private final GatewayProtocol protocol;
     private final GatewayConfig config;
@@ -64,11 +70,29 @@ public final class GatewayHttpServer implements AutoCloseable {
     // POST /control/approve {principal,executionPartitionId,epoch,evidenceHash}
     private void approve(HttpExchange x) throws IOException {
         if (!"POST".equalsIgnoreCase(x.getRequestMethod())) { reply(x, 405, "{\"error\":\"method not allowed\"}"); return; }
-        String body = new String(x.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        // P3-291: the events path fails closed when EXECUTION_ENABLED=false —
+        // approve must too, or a caller enables the durable gate the events
+        // path will never serve (fail-closed HALTED default contradicted).
+        if (!config.executionEnabled()) { reply(x, 503, "{\"error\":\"execution disabled via EXECUTION_ENABLED\"}"); return; }
+        // P3-004: the principal is transport identity, not body content — a
+        // self-asserted {"principal":"saurabh"} drove HALTED->ENABLED with no
+        // secret check, and anyone could force a safety HALT by sending a wrong
+        // principal/epoch. Require the shared-secret bearer before touching
+        // any store. P3-290: cap first — unauthenticated bytes are the DoS leg.
+        String bearer = x.getRequestHeaders().getFirst("Authorization");
+        if (!protocol.authorizedBearer(bearer)) {
+            // No store access on auth failure: no halt side effect for probes
+            // (the old wrong-principal halt was itself an unauthenticated DoS).
+            reply(x, 401, "{\"error\":\"missing or invalid authorization\"}"); return;
+        }
+        String body = readCapped(x);
+        if (body == null) return;
         JsonNode n;
         try { n = mapper.readTree(body); } catch (Exception e) { reply(x, 400, "{\"error\":\"malformed json\"}"); return; }
         String principal = n.path("principal").asText("");
-        String partitionId = n.path("executionPartitionId").asText(config.executionPartitionId());
+        // P3-292: no default fallback — approving the configured partition by
+        // omitting the field made the "required" 400 below unreachable.
+        String partitionId = n.path("executionPartitionId").asText("");
         long epoch = n.path("epoch").isNumber() ? n.path("epoch").asLong() : Long.MIN_VALUE;
         String evidenceHash = n.path("evidenceHash").asText("");
         if (principal.isBlank() || evidenceHash.isBlank() || epoch == Long.MIN_VALUE || partitionId.isBlank()) {
@@ -78,32 +102,35 @@ public final class GatewayHttpServer implements AutoCloseable {
         GateRow cur = gateStore.read(partitionId);
         if (cur == null) { reply(x, 404, "{\"error\":\"no gate row for partition\"}"); return; }
         if (!SINGLE_OPERATOR.equals(principal)) {
-            if (cur.state() != GateState.HALTED) gateStore.halt(partitionId, cur, "unauthorized approver "+principal, evidenceHash, now);
+            // Bearer already proved shared-secret possession; store-level
+            // authorization still decides, and a wrong principal halts.
+            haltUnlessHalted(partitionId, "unauthorized approver "+principal, evidenceHash, now);
             reply(x, 403, "{\"error\":\"single-operator saurabh only\",\"outcome\":\"UNAUTHORIZED\"}"); return;
         }
-        GateStateStore.ApprovalResult res = gateStore.approve(partitionId, principal, epoch, evidenceHash, now);
+        // P3-075: one atomic store transition — never approve() then a
+        // separate instanceof+install() (concurrent halt() between the two was
+        // overwritten, and non-InMemory impls no-op'd while we replied ENABLED).
+        GateStateStore.ApprovalResult res = gateStore.approveAndEnableIfComplete(
+                partitionId, principal, epoch, evidenceHash, now);
         switch (res.outcome()) {
             case APPLIED -> {
                 GateRow approved = res.row();
-                if (approved.state() == GateState.APPROVAL_PENDING && approved.approvalsComplete()) {
-                    GateRow enabled = new GateRow(approved.partitionId(), approved.accountScopeId(), GateState.ENABLED,
-                            approved.epoch(), "approved "+evidenceHash, evidenceHash,
-                            approved.approval1(), approved.approval2(), approved.approvedEvidenceHash(),
-                            approved.ownerInstanceId(), approved.fenceToken(), approved.fenceAcquiredTs(),
-                            approved.leaseExpiresTs(), approved.fenceLostTs());
-                    if (gateStore instanceof InMemoryGateStateStore mem) mem.install(enabled);
-                    reply(x, 200, mapper.writeValueAsString(Map.of("status","ENABLED","epoch",enabled.epoch(),"outcome","APPLIED")));
-                } else {
-                    reply(x, 200, mapper.writeValueAsString(Map.of("status",approved.state().name(),"epoch",approved.epoch(),"outcome","APPLIED")));
-                }
+                reply(x, 200, mapper.writeValueAsString(Map.of("status",approved.state().name(),"epoch",approved.epoch(),"outcome","APPLIED")));
             }
             case ALREADY_APPLIED -> reply(x, 200, mapper.writeValueAsString(Map.of("status",res.row().state().name(),"epoch",res.row().epoch(),"outcome","ALREADY_APPLIED")));
             case EPOCH_MISMATCH -> {
-                if (cur.state() != GateState.HALTED) gateStore.halt(partitionId, cur, "epoch mismatch approve "+epoch+" != "+cur.epoch(), evidenceHash, now);
+                // P3-293: never halt on the stale pre-approve read — re-read
+                // fresh so a concurrent approve/halt between is not clobbered
+                // via a stale expected (P3-157 CAS witness semantics).
+                GateRow fresh = gateStore.read(partitionId);
+                if (fresh != null && fresh.state() != GateState.HALTED)
+                    gateStore.halt(partitionId, fresh, "epoch mismatch approve "+epoch+" != "+fresh.epoch(), evidenceHash, now);
                 reply(x, 409, "{\"error\":\"epoch mismatch\",\"outcome\":\"EPOCH_MISMATCH\"}");
             }
             case UNAUTHORIZED -> {
-                if (cur.state() != GateState.HALTED) gateStore.halt(partitionId, cur, "unauthorized "+principal, evidenceHash, now);
+                GateRow fresh = gateStore.read(partitionId);
+                if (fresh != null && fresh.state() != GateState.HALTED)
+                    gateStore.halt(partitionId, fresh, "unauthorized "+principal, evidenceHash, now);
                 reply(x, 403, "{\"error\":\"unauthorized\",\"outcome\":\"UNAUTHORIZED\"}");
             }
             case SAME_PRINCIPAL -> reply(x, 409, "{\"error\":\"same principal already approved\",\"outcome\":\"SAME_PRINCIPAL\"}");
@@ -111,14 +138,37 @@ public final class GatewayHttpServer implements AutoCloseable {
             default -> reply(x, 409, mapper.writeValueAsString(Map.of("error",res.reason()==null?"rejected":res.reason(),"outcome",res.outcome().name())));
         }
     }
+
+    /** P3-293 helper: halt only when the FRESH row is not already HALTED. */
+    private void haltUnlessHalted(String partitionId, String reason, String evidenceHash, long now) {
+        GateRow fresh = gateStore.read(partitionId);
+        if (fresh != null && fresh.state() != GateState.HALTED)
+            gateStore.halt(partitionId, fresh, reason, evidenceHash, now);
+    }
+
+    /** P3-290: one capped read for both handlers; 413 before JSON/verify. */
+    private String readCapped(HttpExchange x) throws IOException {
+        byte[] raw = x.getRequestBody().readNBytes(MAX_BODY_BYTES + 1);
+        if (raw.length > MAX_BODY_BYTES) {
+            reply(x, 413, "{\"error\":\"payload too large\"}");
+            return null;
+        }
+        return new String(raw, StandardCharsets.UTF_8);
+    }
     private void events(HttpExchange x) throws IOException {
         if (!"POST".equalsIgnoreCase(x.getRequestMethod())) { reply(x, 405, "method not allowed"); return; }
         // Fail-closed: when execution is disabled the bridge is disabled and the gateway remains HALTED.
         // Offline, no FLUSS_BOOTSTRAP / Arrow deps are required to evaluate this gate.
         if (!config.executionEnabled()) { reply(x, 503, "execution disabled via EXECUTION_ENABLED"); return; }
-        String body = new String(x.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+        // P3-290: same cap as approve — the 401 HMAC below must never see
+        // unbounded bytes (single large POST OOMs before validation).
+        String body = readCapped(x);
+        if (body == null) return;
         GatewayProtocol.Verification v = protocol.verify(body, config.protocolVersion(), System.currentTimeMillis());
-        if (!v.accepted()) { readiness.protocol(false, v.reason()); reply(x, 401, v.reason()); return; }
+        // P3-076: a per-request auth failure is request state, not service
+        // state — flipping protocolReady=false here bricked intake for every
+        // later valid envelope until restart (one probe = global DoS).
+        if (!v.accepted()) { reply(x, 401, v.reason()); return; }
         GatewayReadiness.Snapshot ready = readiness.snapshot();
         if (!ready.healthy() || !ready.flussReady() || !ready.protocolReady() || !ready.durableWriteReady()) {
             reply(x, 503, "gateway not ready"); return;
@@ -138,12 +188,20 @@ public final class GatewayHttpServer implements AutoCloseable {
             }
             eventConsumer.accept(v.envelope().payload());
             reply(x, 202, "accepted");
+        } catch (Exception consumerFailure) {
+            // P3-077: production wiring throws IllegalStateException on
+            // applier failure — without this catch the exception escapes the
+            // HttpExchange handler and the client sees an aborted exchange.
+            readiness.durableWrites(false, String.valueOf(consumerFailure.getMessage()));
+            reply(x, 500, "{\"error\":\"projection failed\"}");
         } finally {
-            // Restore only on FULL drain: while any apply is in flight past a
-            // flagged bound the gateway stays conservatively not-ready.
-            if (projectionInFlight.decrementAndGet() == 0
-                    && !readiness.snapshot().durableWriteReady()) {
-                readiness.durableWrites(true, "projection backlog drained");
+            // P3-294: the decrement-then-separate-snapshot-then-set is a
+            // cross-atomic check-then-act — a concurrent shed can set false
+            // after our snapshot, and this blind set(true) clears a live
+            // backlog. Restore via the atomic readiness gate instead.
+            if (projectionInFlight.decrementAndGet() == 0) {
+                readiness.restoreIfDrained(projectionInFlight::get,
+                        "projection backlog drained");
             }
         }
     }
@@ -153,5 +211,12 @@ public final class GatewayHttpServer implements AutoCloseable {
         x.sendResponseHeaders(code, bytes.length);
         try (var out = x.getResponseBody()) { out.write(bytes); }
     }
-    @Override public void close() { server.stop(0); }
+    // P3-295: caller-owned pool, server-owned lifecycle — a pooled executor
+    // outlives server.stop(0), leaking non-daemon threads after close (the
+    // flood soak passes a cached pool). Shut it down here; a non-service
+    // Executor (e.g. direct) is untouched.
+    @Override public void close() {
+        server.stop(0);
+        if (httpExecutor instanceof java.util.concurrent.ExecutorService es) es.shutdownNow();
+    }
 }

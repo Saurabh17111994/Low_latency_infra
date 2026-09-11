@@ -1,6 +1,7 @@
 package com.trading.execution.gateway;
 
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThat;
 import org.junit.jupiter.api.Test;
 
@@ -11,7 +12,7 @@ class IntentValidatorTest {
                 "MARKET", null, "MIS", "DAY", "s", "1", "cfg", 1, 10_000L, VALID_HASH, null, "1", 0);
     }
     @Test void acceptsMatchingScopeAndRejectsExpiredOrWrongScope() {
-        assertThat(IntentValidator.validate(valid(), "acct", "part", 100)).isEqualTo("accepted");
+        assertThatCode(() -> IntentValidator.validate(valid(), "acct", "part", 100)).doesNotThrowAnyException();
         assertThatThrownBy(() -> IntentValidator.validate(valid(), "other", "part", 100))
                 .hasMessage("account scope mismatch");
         assertThatThrownBy(() -> IntentValidator.validate(valid(), "acct", "part", 10_001))
@@ -94,16 +95,16 @@ class IntentValidatorTest {
     @Test void acceptsNullSupersedeAndNullExpiry() {
         IntentRecord nullExp = new IntentRecord("i", "c", "t", "acct", "part", 1, "NSE", "ABC", "BUY", 2,
                 "MARKET", null, "MIS", "DAY", "s", "1", "cfg", 1, null, VALID_HASH, null, "1", 0);
-        assertThat(IntentValidator.validate(nullExp, "acct", "part", 100)).isEqualTo("accepted");
+        assertThatCode(() -> IntentValidator.validate(nullExp, "acct", "part", 100)).doesNotThrowAnyException();
         IntentRecord nullSup = new IntentRecord("i", "c", "t", "acct", "part", 1, "NSE", "ABC", "BUY", 2,
                 "MARKET", null, "MIS", "DAY", "s", "1", "cfg", 1, 10_000L, VALID_HASH, null, "1", 0);
-        assertThat(IntentValidator.validate(nullSup, "acct", "part", 100)).isEqualTo("accepted");
+        assertThatCode(() -> IntentValidator.validate(nullSup, "acct", "part", 100)).doesNotThrowAnyException();
     }
     @Test void rejectsUppercaseHashStillAcceptedLowercaseOnly() {
         String upper = VALID_HASH.toUpperCase();
         IntentRecord i = new IntentRecord("i", "c", "t", "acct", "part", 1, "NSE", "ABC", "BUY", 2,
                 "MARKET", null, "MIS", "DAY", "s", "1", "cfg", 1, 10_000L, upper, null, "1", 0);
-        assertThat(IntentValidator.validate(i, "acct", "part", 100)).isEqualTo("accepted");
+        assertThatCode(() -> IntentValidator.validate(i, "acct", "part", 100)).doesNotThrowAnyException();
     }
     @Test void rejectsNegativeLimitPrice() {
         IntentRecord i = new IntentRecord("i", "c", "t", "acct", "part", 1, "NSE", "ABC", "BUY", 2,

@@ -44,6 +44,13 @@ public final class SlotAssignmentResolver implements SlotAssignment {
         if (tokens == null || tokens.isEmpty()) {
             throw new IllegalArgumentException("instrument token input must not be empty");
         }
+        // P3-125: fail fast with a named error — Long::longValue unboxing
+        // would otherwise throw a bare NPE callers can't catch as IAE.
+        for (Long t : tokens) {
+            if (t == null) {
+                throw new IllegalArgumentException("instrument token input must not contain null");
+            }
+        }
         if (slots <= 0 || slots > MAX_SLOTS) {
             throw new IllegalArgumentException("slot count must be between 1 and " + MAX_SLOTS);
         }
@@ -60,8 +67,11 @@ public final class SlotAssignmentResolver implements SlotAssignment {
         // R-188 parity: duplicate or non-positive tokens fail plan construction.
         Set<Long> seen = new HashSet<>();
         for (long t : sorted) {
-            if (t <= 0) {
-                throw new IllegalArgumentException("token " + t + " is invalid (must be positive)");
+            // P3-353: Go takes []int32 — anything above int32 hashes
+            // divergently (full 64-bit putLong vs Go sign-extension), so
+            // reject it here instead of producing a hash Go can never match.
+            if (t <= 0 || t > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("token " + t + " is invalid (must be positive int32)");
             }
             if (!seen.add(t)) {
                 throw new IllegalArgumentException("duplicate token " + t);
@@ -87,6 +97,11 @@ public final class SlotAssignmentResolver implements SlotAssignment {
 
     /** Varargs convenience overload (unsorted input is sorted internally). */
     public static SlotAssignmentResolver of(int slots, int connectionLimit, long... tokens) {
+        // P3-496: explicit null array would NPE on tokens.length — same IAE
+        // contract as the List overload's null/empty check.
+        if (tokens == null) {
+            throw new IllegalArgumentException("instrument token input must not be null");
+        }
         List<Long> list = new ArrayList<>(tokens.length);
         for (long t : tokens) {
             list.add(t);

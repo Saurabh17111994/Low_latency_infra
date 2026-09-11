@@ -10,25 +10,28 @@ package com.trading.common.invariants;
  * / CI) supplies the actual facts.
  */
 public enum LiveMoneyStopCondition {
-    CRITICAL_RISK_OPEN("A critical risk is open"),
-    BROKER_IDENTITY_UNVERIFIED(
+    CRITICAL_RISK_OPEN("critical-risk-open", "A critical risk is open"),
+    BROKER_IDENTITY_UNVERIFIED("broker-identity-unverified",
             "A broker/protocol identity or response behavior is unverified"),
-    FLUSS_FLINK_CAPABILITY_UNVERIFIED(
+    FLUSS_FLINK_CAPABILITY_UNVERIFIED("fluss-flink-capability-unverified",
             "A Fluss/Flink capability is assumed but not version-tested"),
-    DDL_REQUIREMENTS_DISAGREE("DDL and requirements disagree"),
-    EXECUTOR_STATE_INVALID(
+    DDL_REQUIREMENTS_DISAGREE("ddl-requirements-disagree", "DDL and requirements disagree"),
+    EXECUTOR_STATE_INVALID("executor-state-invalid",
             "Executor state is missing, corrupt, unfenced, or not auditable"),
-    ATTEMPT_OUTCOME_UNRESOLVED("An attempt has an unresolved outcome"),
-    CHANGELOG_CHECKPOINT_UNKNOWN(
+    ATTEMPT_OUTCOME_UNRESOLVED("attempt-outcome-unresolved", "An attempt has an unresolved outcome"),
+    CHANGELOG_CHECKPOINT_UNKNOWN("changelog-checkpoint-unknown",
             "Changelog continuity or checkpoint health is unknown"),
-    SAFE_HALT_RESUME_UNPROVEN("Safe-halt or single-operator (Saurabh, DEC-044) resume is unproven"),
-    OBSERVABILITY_UNAVAILABLE("Required observability is unavailable"),
-    EOD_AUDIT_RETENTION_UNVERIFIED(
+    SAFE_HALT_RESUME_UNPROVEN("safe-halt-resume-unproven", "Safe-halt or single-operator (Saurabh, DEC-044) resume is unproven"),
+    OBSERVABILITY_UNAVAILABLE("observability-unavailable", "Required observability is unavailable"),
+    EOD_AUDIT_RETENTION_UNVERIFIED("eod-audit-retention-unverified",
             "EOD data or audit retention is unverified");
 
+    // P3-114: stable id, independent of the Java name — never rename once persisted.
+    private final String stableId;
     private final String description;
 
-    LiveMoneyStopCondition(String description) {
+    LiveMoneyStopCondition(String stableId, String description) {
+        this.stableId = stableId;
         this.description = description;
     }
 
@@ -37,8 +40,8 @@ public enum LiveMoneyStopCondition {
         return description;
     }
 
-    /** Stable id used in audit / halt records. */
+    /** Stable id used in audit / halt records — independent of the Java name, never rename once persisted. */
     public String conditionId() {
-        return name();
+        return stableId;
     }
 }

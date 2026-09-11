@@ -43,10 +43,34 @@ class PositionProjectionWriterTest {
     void staleVersionRejected() {
         NautilusPositionEvent newer = event(2L, "BUY", 10, 0, PositionState.OPEN);
         PositionProjectionWriter.PositionWriteResult first = PositionProjectionWriter.apply(null, newer, NOW);
-        NautilusPositionEvent older = event(1L, "BUY", 5, 0, PositionState.OPEN);
+        // Same content (same source event id) at an older version: benign replay.
+        NautilusPositionEvent older = new NautilusPositionEvent(
+                "pos-1", "tc-1", "acc-1", 1001L, "CME", "wti", "BUY",
+                PositionState.OPEN, 10, 0, 1000L, 900L, "evt-2", 1L, NOW);
         PositionProjectionWriter.PositionWriteResult stale = PositionProjectionWriter.apply(
                 first.snapshot(), older, NOW);
         assertThat(stale.outcome()).isEqualTo(PositionProjectionWriter.Outcome.STALE);
+    }
+
+    @Test
+    void regressionVersionIsViolation() {
+        // P3-405: older version with different content is divergence, not a
+        // benign stale replay — distinct outcome and reason.
+        NautilusPositionEvent newer = event(2L, "BUY", 10, 0, PositionState.OPEN);
+        PositionProjectionWriter.PositionWriteResult first = PositionProjectionWriter.apply(null, newer, NOW);
+        NautilusPositionEvent older = event(1L, "BUY", 5, 0, PositionState.OPEN);
+        PositionProjectionWriter.PositionWriteResult r = PositionProjectionWriter.apply(
+                first.snapshot(), older, NOW);
+        assertThat(r.outcome()).isEqualTo(PositionProjectionWriter.Outcome.VIOLATION);
+        assertThat(r.reason()).isEqualTo(QuarantineReason.TERMINAL_REGRESSION);
+    }
+
+    @Test
+    void firstRowAtVersionZeroIsApplied() {
+        // P3-170: sourceSequence 0 is legal — a null row is never a collision.
+        NautilusPositionEvent e = event(0L, "BUY", 10, 0, PositionState.OPEN);
+        PositionProjectionWriter.PositionWriteResult r = PositionProjectionWriter.apply(null, e, NOW);
+        assertThat(r.outcome()).isEqualTo(PositionProjectionWriter.Outcome.APPLIED);
     }
 
     @Test

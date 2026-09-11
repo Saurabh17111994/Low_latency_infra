@@ -17,8 +17,18 @@ public final class PostbackCorrelator {
 
     public sealed interface CorrelationResult {
         Outcome outcome();
+        /**
+         * The correlated attempt. Non-null on CORRELATED; on QUARANTINED it is
+         * the best-known ref or null when no candidate exists (missing-id
+         * paths) — P3-510: always branch on outcome() before calling ref().
+         */
         AttemptRef ref();
+        /**
+         * Quarantine reason. Null on CORRELATED (no failure); non-null on
+         * QUARANTINED. P3-510: nullability follows the outcome, not the type.
+         */
         QuarantineReason reason();
+        /** Human detail. Null on CORRELATED; non-null on QUARANTINED. */
         String detail();
     }
 
@@ -63,7 +73,23 @@ public final class PostbackCorrelator {
                         "broker_order_id " + p.brokerOrderId() + " has no match and no approved "
                         + "reconciliation", null);
             }
-            return new Correlated(reconciled.get());
+            // P3-406: same echoed-ref contradiction check as the broker-match
+            // branch below — a postback reconciled to attempt X while its echo
+            // resolves to attempt Y is the same conflicting-match condition.
+            AttemptRef reconciledRef = reconciled.get();
+            if (p.echoedClientOrderRef() != null && !p.echoedClientOrderRef().isBlank()) {
+                Optional<AttemptRef> byRef = index.byEchoedClientOrderRef(p.echoedClientOrderRef());
+                // P3-511: an UNRESOLVABLE echo alongside a valid reconciliation
+                // is tolerated (echo is advisory, reconciliation authoritative —
+                // broker rotations drop stale echoes); only a CONTRADICTION
+                // quarantines. Documented, not an oversight.
+                if (byRef.isPresent() && !byRef.get().equals(reconciledRef)) {
+                    return new Quarantined(QuarantineReason.AMBIGUOUS_CORRELATION,
+                            "broker_order_id and echoed client_order_ref resolve to different attempts",
+                            reconciledRef);
+                }
+            }
+            return new Correlated(reconciledRef);
         }
 
         AttemptRef ref = byBroker.get();

@@ -30,8 +30,24 @@ public final class TokenSetHash {
 
     /** Lowercase SHA-256 hex over the sorted 8-byte-big-endian encoding. */
     public static String of(Collection<Long> tokens) {
+        // P3-498: explicit null contract — never a bare ArrayList(null) NPE.
+        java.util.Objects.requireNonNull(tokens, "tokens");
         List<Long> ordered = new ArrayList<>(tokens);
+        // P3-354: domain validation before hashing — Go takes []int32 and
+        // rejects duplicates/non-positive, so anything outside that domain
+        // would produce a hash Go can never match. Fail here, not silently.
+        for (Long t : ordered) {
+            java.util.Objects.requireNonNull(t, "token element");
+            if (t <= 0 || t > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("token out of positive-int32 domain: " + t);
+            }
+        }
         ordered.sort(Comparator.naturalOrder());
+        for (int i = 1; i < ordered.size(); i++) {
+            if (ordered.get(i).equals(ordered.get(i - 1))) {
+                throw new IllegalArgumentException("duplicate token " + ordered.get(i));
+            }
+        }
         MessageDigest sha256;
         try {
             sha256 = MessageDigest.getInstance("SHA-256");

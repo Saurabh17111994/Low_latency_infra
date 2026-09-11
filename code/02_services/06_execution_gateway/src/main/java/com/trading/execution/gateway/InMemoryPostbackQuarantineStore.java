@@ -13,25 +13,38 @@ public final class InMemoryPostbackQuarantineStore implements PostbackQuarantine
             String postbackEventId,
             String reason,
             String evidenceSummary,
-            byte[] rawPayload) {}
+            byte[] rawPayload) {
+        // P3-306: clone-on-write was defeated on read — the accessor exposed
+        // the live array, so all().get(i).rawPayload()[j]=... mutated stored
+        // audit evidence. Copy in and out.
+        public QuarantineRecord {
+            rawPayload = rawPayload == null ? new byte[0] : rawPayload.clone();
+        }
+        @Override public byte[] rawPayload() { return rawPayload.clone(); }
+    }
 
-    private final List<QuarantineRecord> rows = new ArrayList<>();
+    // P3-083: ArrayList is hit from concurrent HTTP request threads
+    // (GatewayHttpServer pool + flood soak) — guard every path on the monitor.
+    private final List<QuarantineRecord> rows =
+            java.util.Collections.synchronizedList(new ArrayList<>());
 
     @Override
     public void quarantine(String postbackEventId, String reason, String evidenceSummary, byte[] rawPayload) {
-        rows.add(new QuarantineRecord(postbackEventId, reason, evidenceSummary,
-                rawPayload == null ? new byte[0] : rawPayload.clone()));
+        synchronized (rows) {
+            rows.add(new QuarantineRecord(postbackEventId, reason, evidenceSummary,
+                    rawPayload == null ? new byte[0] : rawPayload.clone()));
+        }
     }
 
     public List<QuarantineRecord> all() {
-        return List.copyOf(rows);
+        synchronized (rows) { return List.copyOf(rows); }
     }
 
     public int size() {
-        return rows.size();
+        synchronized (rows) { return rows.size(); }
     }
 
     public void clear() {
-        rows.clear();
+        synchronized (rows) { rows.clear(); }
     }
 }

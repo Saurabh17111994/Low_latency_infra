@@ -43,11 +43,11 @@ class SuppressionGateTest {
                 SuppressionGate.evaluate(tracker, 2L, 5L, null));
         assertEquals(SuppressionGate.Verdict.DISCARD_INFLIGHT,
                 SuppressionGate.evaluate(tracker, 2L, 5L,
-                        new SuppressionGate.InFlightDecision(4_000L, false)));
+                        new SuppressionGate.InFlightDecision(false)));
         // Published decisions are never retracted.
         assertEquals(SuppressionGate.Verdict.ALLOW,
                 SuppressionGate.evaluate(tracker, 2L, 5L,
-                        new SuppressionGate.InFlightDecision(4_000L, true)));
+                        new SuppressionGate.InFlightDecision(true)));
         // Healthy slot is untouched.
         assertEquals(SuppressionGate.Verdict.ALLOW,
                 SuppressionGate.evaluate(tracker, 5L, 5L, null));

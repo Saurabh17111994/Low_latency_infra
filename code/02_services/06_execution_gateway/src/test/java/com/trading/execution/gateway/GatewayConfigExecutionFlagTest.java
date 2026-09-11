@@ -133,12 +133,12 @@ class GatewayConfigExecutionFlagTest {
             @Override
             public Lookup lookup(String table, List<Object> keys) {
                 called.set(true);
-                return new Lookup(Status.FOUND, null, "ok");
+                return new Lookup(Status.NOT_FOUND, null, "ok");
             }
             @Override
             public Lookup lookup(String table, Object... keys) {
                 called.set(true);
-                return new Lookup(Status.FOUND, null, "ok");
+                return new Lookup(Status.NOT_FOUND, null, "ok");
             }
             @Override public void replaySafetyHalts(java.util.function.Consumer<InternalRow> c) {}
             @Override public void close() {}

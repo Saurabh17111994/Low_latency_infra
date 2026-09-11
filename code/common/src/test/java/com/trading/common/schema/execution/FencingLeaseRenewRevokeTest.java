@@ -108,7 +108,9 @@ class FencingLeaseRenewRevokeTest {
         GateRow revoked = store.revoke("p1", "owner1", revokeAt);
         assertNotNull(revoked);
         assertNull(revoked.ownerInstanceId(), "owner must be cleared");
-        assertEquals(0L, revoked.fenceToken(), "token must be 0 after revoke");
+        assertEquals(token1, revoked.fenceToken(),
+                "token must be RETAINED as the durable write-ordering version (P3-374) — "
+                        + "resetting it to 0 would make the revoke write version-dropped");
         assertNull(revoked.leaseExpiresTs(), "lease must be null after revoke");
         assertNull(revoked.fenceAcquiredTs(), "acquired ts must be null after revoke");
         assertEquals(revokeAt, revoked.fenceLostTs(), "lost ts must be revoke time");
@@ -202,7 +204,9 @@ class FencingLeaseRenewRevokeTest {
         GateRow halted = store.halt("p1", store.read("p1"), "test-halt", "h1", 2000L);
         assertEquals(GateState.HALTED, halted.state());
         assertNull(halted.ownerInstanceId(), "HALT must clear owner");
-        assertEquals(0L, halted.fenceToken(), "HALT must clear fenceToken to 0");
+        assertTrue(halted.fenceToken() > token,
+                "HALT must mint a strictly GREATER fence token (P3-374) so the safety halt "
+                        + "cannot be version-dropped by the durable table");
         assertNull(halted.leaseExpiresTs(), "HALT must clear lease");
         assertNull(halted.fenceAcquiredTs(), "HALT must clear acquiredTs");
         assertNotNull(halted.fenceLostTs(), "HALT must record fenceLostTs");
@@ -223,7 +227,45 @@ class FencingLeaseRenewRevokeTest {
         GateRow secondHalt = store.halt("p1", store.read("p1"), "again", "h2", 3000L);
         assertEquals(epochAfterFirstHalt, secondHalt.epoch(), "HALTED halt must not increment epoch");
         assertNull(secondHalt.ownerInstanceId());
-        assertEquals(0L, secondHalt.fenceToken());
+        assertTrue(secondHalt.fenceToken() > reacquire.token(),
+                "each halt mints forward so the write can never be version-dropped");
+    }
+
+    @Test
+    void withRenewedLeaseRejectsLostExpiredAndNeverAcquiredFence() {
+        // P3-148: renewing a fence that is not live must fail closed rather than
+        // re-arm it. withFenceLost clears the lease, so without the fenceLostTs
+        // guard a lost fence could be renewed straight back into validity.
+        GateRow neverAcquired = new GateRow("p1", "acct1", GateState.HALTED, 0, "boot", "h0",
+                null, null, null, null, 0L, null, null, null);
+        assertThrows(IllegalStateException.class,
+                () -> neverAcquired.withRenewedLease(1000L, LEASE_MS),
+                "a fence that was never acquired must not be renewable");
+
+        GateRow live = neverAcquired.withFence("owner1", 1L, 1000L, LEASE_MS);
+        // inclusive horizon: renewing exactly at expiry is too late
+        assertThrows(IllegalStateException.class,
+                () -> live.withRenewedLease(1000L + LEASE_MS, LEASE_MS),
+                "an expired lease must not be renewed");
+
+        GateRow lost = live.withFenceLost(2000L);
+        assertThrows(IllegalStateException.class,
+                () -> lost.withRenewedLease(2500L, LEASE_MS),
+                "a lost fence must not be resurrected by renew");
+
+        // A held fence with no expiry is corrupt — fail closed, never treat as infinite.
+        GateRow noExpiry = new GateRow("p1", "acct1", GateState.ENABLED, 1, "enabled", "h0",
+                null, null, null, "owner1", 5L, 1000L, null, null);
+        assertThrows(IllegalStateException.class,
+                () -> noExpiry.withRenewedLease(2000L, LEASE_MS),
+                "a lease without an expiry must not be renewable");
+
+        // The guard is not a blanket rejection: a live fence still renews.
+        GateRow renewed = live.withRenewedLease(2000L, LEASE_MS);
+        assertEquals(2000L + LEASE_MS, renewed.leaseExpiresTs());
+        assertNull(renewed.fenceLostTs());
+        assertEquals(live.fenceToken(), renewed.fenceToken(), "renew must not change the token");
+        assertTrue(renewed.fenceValidFor("owner1", renewed.fenceToken(), 2000L));
     }
 
     @Test
@@ -237,15 +279,44 @@ class FencingLeaseRenewRevokeTest {
     }
 
     @Test
-    void releaseAliasClearsFence() {
+    void revokeClearsFenceAndAllowsReacquire() {
         InMemoryGateStateStore store = freshStore();
         long now = 1000L;
-        store.acquire("p1", "owner1", LEASE_MS, now);
-        GateRow viaRelease = store.release("p1", "owner1", 2000L);
-        assertNull(viaRelease.ownerInstanceId());
-        assertEquals(0L, viaRelease.fenceToken());
-        // after release, new acquire works
+        long held = store.acquire("p1", "owner1", LEASE_MS, now).token();
+        // P3-377: explicit nowTs only — the wall-clock revoke()/release() aliases are gone.
+        GateRow revoked = store.revoke("p1", "owner1", 2000L);
+        assertNull(revoked.ownerInstanceId());
+        assertEquals(held, revoked.fenceToken(), "revoke retains the token as the ordering version");
+        // after revoke, new acquire works
         var reacq = store.acquire("p1", "owner2", LEASE_MS, 2001L);
         assertFalse(reacq.conflict());
+    }
+
+    @Test
+    void fenceTokenIsStrictlyNonDecreasingAndNeverReusedAcrossRestart() {
+        // P3-374: the token is the durable WRITE-ORDERING version (the gate table is a
+        // VERSIONED merge table on fence_token), so it must never go backwards and must
+        // never be reissued. Resetting it to 0 on revoke/halt would (a) make the clearing
+        // write version-dropped and (b) let a restarted process mint 1 again — reusing a
+        // token a stale holder still holds as loss evidence.
+        InMemoryGateStateStore store = freshStore();
+        long now = 1000L;
+
+        long t1 = store.acquire("p1", "owner1", LEASE_MS, now).token();
+        long t2 = store.renew("p1", "owner1", t1, LEASE_MS, now + 100).token();
+        assertEquals(t1, t2, "renew must not bump the token");
+
+        GateRow revoked = store.revoke("p1", "owner1", now + 200);
+        assertEquals(t1, revoked.fenceToken(), "revoke retains the token rather than resetting to 0");
+
+        // Restart: a fresh process hydrating the durable revoked row must mint ABOVE it,
+        // not restart from 1.
+        InMemoryGateStateStore restarted = new InMemoryGateStateStore(Set.of("saurabh"));
+        restarted.hydrate(revoked);
+        long t3 = restarted.acquire("p1", "owner2", LEASE_MS, now + 300).token();
+        assertTrue(t3 > t1, "token must exceed every token already issued durably");
+
+        long t4 = restarted.halt("p1", restarted.read("p1"), "halt", "h", now + 400).fenceToken();
+        assertTrue(t4 > t3, "halt must mint forward, never reuse or reset");
     }
 }
