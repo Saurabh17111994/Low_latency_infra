@@ -1,22 +1,19 @@
 package com.trading.common.schema.projection;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
 import org.apache.fluss.client.admin.Admin;
-import org.apache.fluss.client.table.Table;
-import org.apache.fluss.client.table.scanner.ScanRecord;
-import org.apache.fluss.client.table.scanner.log.LogScanner;
-import org.apache.fluss.client.table.scanner.log.ScanRecords;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.DatabaseDescriptor;
 import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.metadata.TablePath;
-import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.types.DataTypes;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
@@ -61,32 +58,55 @@ class FlussPostbackQuarantineStoreIntegrationTest {
             try (FlussPostbackQuarantineStore store =
                          FlussPostbackQuarantineStore.open(bootstrap, db, "Postback_Quarantine", TIMEOUT)) {
                 store.append(q);
-            }
 
-            // Read the appended row back from Fluss's LOG via a scanner (durability proof).
-            Table t = conn.getTable(TablePath.of(db, "Postback_Quarantine"));
-            boolean found = false;
-            try (LogScanner scanner = t.newScan().createLogScanner()) {
-                for (int b = 0; b < BUCKETS; b++) scanner.subscribeFromBeginning(b);
+                // P3-410/P3-169: read back THROUGH the store's own bounded scan rather than a
+                // hand-rolled scanner, so this covers the real read path. Comparing the whole
+                // record also pins that decode() is the exact inverse of append() — a column
+                // written in one order and read in another would fail here, not in production.
+                List<QuarantinedPostback> found = List.of();
                 long deadline = System.currentTimeMillis() + 15_000;
-                while (System.currentTimeMillis() < deadline && !found) {
-                    ScanRecords recs = scanner.poll(Duration.ofMillis(250));
-                    for (ScanRecord sr : recs) {
-                        InternalRow row = sr.getRow();
-                        if (row != null && row.getString(0) != null
-                                && "quar-1".equals(row.getString(0).toString())) {
-                            assertThat(row.getString(2).toString()).isEqualTo("AMBIGUOUS_CORRELATION");
-                            assertThat(row.getString(8).toString()).isEqualTo("OPEN");
-                            found = true;
-                            break;
-                        }
-                    }
+                while (System.currentTimeMillis() < deadline && found.isEmpty()) {
+                    found = store.scan(10).stream()
+                            .filter(r -> "quar-1".equals(r.quarantineId()))
+                            .toList();
+                    if (found.isEmpty()) Thread.sleep(200);
                 }
+
+                assertThat(found).as("quarantine row 'quar-1' readable via store.scan").isNotEmpty();
+                assertThat(found.get(0))
+                        .as("decode() must invert append() exactly, field for field")
+                        .isEqualTo(q);
+                assertThatThrownBy(() -> store.scan(0))
+                        .as("limit is bounded by contract — zero is rejected, not silently empty")
+                        .isInstanceOf(IllegalArgumentException.class);
+
+                // P3-410: the read is BOUNDED — the whole point, since the LOG grows without
+                // limit while a caller's memory budget does not. Append two more and prove the
+                // page never exceeds the limit even when more rows are durable.
+                store.append(new QuarantinedPostback("quar-2", "pb-2",
+                        QuarantineReason.MISSING_BROKER_ID, new byte[]{7}, "ph-2", null, "instr-2",
+                        null, "OPEN", null, 1_700_000_000_001L, null, "2"));
+                store.append(new QuarantinedPostback("quar-3", "pb-3",
+                        QuarantineReason.MISSING_BROKER_ID, new byte[]{8}, "ph-3", null, "instr-3",
+                        null, "OPEN", null, 1_700_000_000_002L, null, "2"));
+
+                // Wait for all three to be visible before asserting the bound, so the small page
+                // is genuinely smaller than what is readable rather than merely what is visible.
+                long visibleDeadline = System.currentTimeMillis() + 15_000;
+                while (System.currentTimeMillis() < visibleDeadline && store.scan(10).size() < 3) {
+                    Thread.sleep(200);
+                }
+                assertThat(store.scan(10)).as("three appended rows").hasSize(3);
+                assertThat(store.scan(2))
+                        .as("a bounded read must never exceed the caller's limit")
+                        .hasSize(2);
             }
-            assertThat(found).as("quarantine row 'quar-1' readable from Fluss log").isTrue();
         } finally {
             if (admin != null) {
-                try { admin.dropDatabase(db, false, false).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS); }
+                // cascade=true: the scratch DB holds tables, and a non-cascading
+                // drop throws DatabaseNotEmptyException — swallowed below, which
+                // leaked the database on every run.
+                try { admin.dropDatabase(db, false, true).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS); }
                 catch (Exception ignored) { }
             }
             if (conn != null) conn.close();

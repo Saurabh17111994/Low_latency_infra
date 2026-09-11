@@ -16,11 +16,16 @@ public final class InMemoryPostbackQuarantineStore implements PostbackQuarantine
     }
 
     @Override
-    public List<QuarantinedPostback> all() {
+    public List<QuarantinedPostback> scan(int limit) {
+        // P3-410: bounded, like the durable implementation — an unbounded read of an
+        // append-only LOG is a heap-growth bug, and the offline store should not
+        // advertise a shape the durable one refuses to offer.
+        if (limit <= 0) throw new IllegalArgumentException("limit must be positive, got " + limit);
         // P3-398: List.copyOf is shallow — deep-copy payload bytes so readers
         // cannot corrupt stored evidence through the shared array.
-        List<QuarantinedPostback> snapshot = new ArrayList<>(rows.size());
-        for (QuarantinedPostback r : rows) snapshot.add(copy(r));
+        int n = Math.min(limit, rows.size());
+        List<QuarantinedPostback> snapshot = new ArrayList<>(n);
+        for (QuarantinedPostback r : rows.subList(0, n)) snapshot.add(copy(r));
         return List.copyOf(snapshot);
     }
 
