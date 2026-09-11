@@ -498,8 +498,7 @@ mod tests {
     // the only difference is the canonical form — a divergence between Java/Rust/Python surfaces
     // here as a wrong HMAC rather than as a subtle mis-binding.
     const PARITY_V2_CANONICAL: &str = "20:execution-gateway.v216:EXECUTION_INTENT15:parity-req-000115:parity-acct-00118:parity-partition-164:bceb5c2c5139f412f53bf7d27178ea551f68d333566d52485fc5d705e3d06e712:4222:parity-fence-token-xyz13:200000000000034:{\"zulu\":\"z\",\"alpha\":\"a\",\"qty\":100}";
-    const PARITY_V2_AUTH: &str =
-        "655eba65b51e57c79ce50e620511da371722f430266d32e6a7e44cb425b0e9f0";
+    const PARITY_V2_AUTH: &str = "655eba65b51e57c79ce50e620511da371722f430266d32e6a7e44cb425b0e9f0";
 
     fn parity_envelope_v2() -> Envelope {
         let mut e = parity_envelope();
@@ -512,7 +511,10 @@ mod tests {
         let e = parity_envelope_v2();
         let payload_json = serde_json::to_string(&e.payload).unwrap();
         let canon = canonical(&e, &payload_json);
-        assert_eq!(canon, PARITY_V2_CANONICAL, "v2 canonical bytes must match the vector");
+        assert_eq!(
+            canon, PARITY_V2_CANONICAL,
+            "v2 canonical bytes must match the vector"
+        );
         assert_eq!(
             hmac_hex(PARITY_SECRET, &canon),
             PARITY_V2_AUTH,
@@ -523,34 +525,64 @@ mod tests {
     #[test]
     fn p3_079_length_prefixing_is_injective_where_v1_is_not() {
         // The exact ambiguity P3-079 describes: two DIFFERENT field splits, one v1 string.
-        assert_eq!(["a\nb", "c"].join("\n"), ["a", "b\nc"].join("\n"),
-            "v1 is ambiguous across a field boundary");
+        assert_eq!(
+            ["a\nb", "c"].join("\n"),
+            ["a", "b\nc"].join("\n"),
+            "v1 is ambiguous across a field boundary"
+        );
         assert_ne!(
             length_prefixed(&["a\nb", "c"]),
             length_prefixed(&["a", "b\nc"]),
             "v2 must keep the same two fields distinct"
         );
         // Byte length, not char length: 'e-acute' is 2 UTF-8 bytes but 1 char.
-        assert_eq!(length_prefixed(&["\u{e9}"]), "2:\u{e9}",
-            "v2 must count UTF-8 bytes or the three languages disagree off-ASCII");
+        assert_eq!(
+            length_prefixed(&["\u{e9}"]),
+            "2:\u{e9}",
+            "v2 must count UTF-8 bytes or the three languages disagree off-ASCII"
+        );
     }
 
     #[test]
     fn p3_079_v2_round_trips_and_v1_fixture_is_untouched() {
         let e = parity_envelope_v2();
         let encoded = encode_envelope(PARITY_SECRET, &e).expect("v2 encode");
-        assert!(encoded.contains(PARITY_V2_AUTH), "encoded v2 envelope must carry the v2 HMAC");
+        assert!(
+            encoded.contains(PARITY_V2_AUTH),
+            "encoded v2 envelope must carry the v2 HMAC"
+        );
         // The v1 fixture still verifies byte-for-byte — the change is additive.
-        let v1 = verify(PARITY_ENVELOPE_JSON, PARITY_SECRET, PARITY_PROTOCOL_VERSION, PARITY_NOW_MS);
+        let v1 = verify(
+            PARITY_ENVELOPE_JSON,
+            PARITY_SECRET,
+            PARITY_PROTOCOL_VERSION,
+            PARITY_NOW_MS,
+        );
         assert!(v1.accepted, "v1 fixture must still verify: {}", v1.reason);
         // A v1-only config refuses v2; a dual-accept config takes both, each under its own form.
-        let refused = verify(&encoded, PARITY_SECRET, PARITY_PROTOCOL_VERSION, PARITY_NOW_MS);
-        assert!(!refused.accepted, "a v1-only config must refuse a v2 envelope");
+        let refused = verify(
+            &encoded,
+            PARITY_SECRET,
+            PARITY_PROTOCOL_VERSION,
+            PARITY_NOW_MS,
+        );
+        assert!(
+            !refused.accepted,
+            "a v1-only config must refuse a v2 envelope"
+        );
         let dual = format!("{},{}", PROTOCOL_V1, PROTOCOL_V2);
         let v2_dual = verify(&encoded, PARITY_SECRET, &dual, PARITY_NOW_MS);
-        assert!(v2_dual.accepted, "dual-accept must take v2: {}", v2_dual.reason);
+        assert!(
+            v2_dual.accepted,
+            "dual-accept must take v2: {}",
+            v2_dual.reason
+        );
         let v1_dual = verify(PARITY_ENVELOPE_JSON, PARITY_SECRET, &dual, PARITY_NOW_MS);
-        assert!(v1_dual.accepted, "dual-accept must still take v1: {}", v1_dual.reason);
+        assert!(
+            v1_dual.accepted,
+            "dual-accept must still take v1: {}",
+            v1_dual.reason
+        );
     }
 
     #[test]
@@ -560,12 +592,18 @@ mod tests {
         // v2: the encoding is injective, so a newline is a non-issue.
         let encoded = encode_envelope(PARITY_SECRET, &e).expect("v2 must accept a newline field");
         let v = verify(&encoded, PARITY_SECRET, PROTOCOL_V2, PARITY_NOW_MS);
-        assert!(v.accepted, "v2 must verify what v1 had to refuse: {}", v.reason);
+        assert!(
+            v.accepted,
+            "v2 must verify what v1 had to refuse: {}",
+            v.reason
+        );
         // v1: still refused — the backstop tracks the FORM, not the literal version.
         let mut legacy = e.clone();
         legacy.protocol_version = "v1".to_string();
-        assert!(encode_envelope(PARITY_SECRET, &legacy).is_err(),
-            "a custom version still gets the legacy join and still needs the backstop");
+        assert!(
+            encode_envelope(PARITY_SECRET, &legacy).is_err(),
+            "a custom version still gets the legacy join and still needs the backstop"
+        );
     }
 
     fn parity_envelope() -> Envelope {
