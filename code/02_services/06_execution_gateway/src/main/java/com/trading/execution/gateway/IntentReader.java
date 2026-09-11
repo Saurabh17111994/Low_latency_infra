@@ -18,6 +18,9 @@ import org.slf4j.LoggerFactory;
 /** Bounded, replayable single-writer reader for the Execution_Intent LOG. */
 public final class IntentReader implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(IntentReader.class);
+    // D4: bounded in-run defer tolerance — see forwardWithBoundedDefer.
+    private static final int DEFER_MAX_ATTEMPTS = 3;
+    private static final long DEFER_RETRY_DELAY_MS = 200L;
     private final Connection connection;
     private final Table table;
     private final LogScanner scanner;
@@ -83,13 +86,15 @@ public final class IntentReader implements AutoCloseable {
     /**
      * Process one bounded poll. The caller owns the single-writer loop.
      *
-     * <p>Redelivery contract (P3-086/P3-091): an intent whose handoff throws
-     * or returns DEFERRED/REJECTED is NOT committed and NOT retried in-run —
-     * the LOG cursor already advanced. Uncommitted intents are recovered by
-     * replay from offset zero after restart (durable dedup keeps committed
-     * ones FIRST-free). REJECTED goes to the violation handler (audit), DEFERRED
-     * is logged by id for ops visibility. No in-run queue: under a sustained
-     * HALTED gate it would grow unbounded.
+     * <p>Redelivery contract (P3-086/P3-091, D4): an intent whose handoff returns
+     * {@code DEFERRED} is retried in-run within a bounded budget
+     * ({@link #forwardWithBoundedDefer}); if it is still deferred it is NOT committed and is
+     * logged — a not-ENABLED gate deferring a valid intent is the designed fail-closed outcome,
+     * not a violation — while {@code REJECTED} and a sink that throws past the budget ARE
+     * reported to the violation handler. Uncommitted intents are recovered by replay
+     * from offset zero after restart (durable dedup keeps committed ones
+     * FIRST-free). There is no in-run queue — the retry holds at most one in-flight
+     * intent, so a sustained HALTED gate cannot grow memory.
      */
     public int poll(Duration timeout) {
         ScanRecords records = scanner.poll(timeout);
@@ -108,10 +113,12 @@ public final class IntentReader implements AutoCloseable {
                 if (outcome == DurableIntentDispatcher.Verdict.FIRST) {
                     IntentSink.Result result;
                     try {
-                        result = forwarder.forward(intent);
+                        result = forwardWithBoundedDefer(intent);
                     } catch (Exception deferred) {
-                        LOG.warn("intent handoff deferred (instruction_id={}): {}",
-                                intent.instructionId(), deferred.getMessage());
+                        // D4: budget exhausted with a throwing sink — explicit
+                        // rejection, never a silent defer.
+                        safeViolation("intent handoff deferred past budget: "
+                                + intent.instructionId() + " — " + deferred.getMessage());
                         lastSeenOffset.set(record.logOffset());
                         continue;
                     }
@@ -120,11 +127,17 @@ public final class IntentReader implements AutoCloseable {
                         safeViolation("intent rejected: " + intent.instructionId());
                     } else if (result == IntentSink.Result.FORWARDED) {
                         try {
-                            // DEV P3-310/P3-311: per-record commit is intentional —
-                            // exact per-intent fail-closed audit and local/durable
-                            // alignment. Batching would invent durability semantics
-                            // for partial batch failures; replay is a one-time
-                            // single-writer boot cost.
+                            // DEV P3-310/P3-311: per-record commit is intentional and
+                            // RETAINED. The N+1 is real — one blocking durable RPC per
+                            // FORWARDED intent (FlussIntentDedupStore.record awaits its
+                            // upsert ack), and D1's linger does NOT coalesce it: writes
+                            // serialize on that await, so linger only bounds the send
+                            // delay rather than batching. Batching was declined because a
+                            // partially-failed batch has no honest accounting: it either
+                            // drops uncommitted intents silently or re-forwards them on
+                            // replay (a duplicate money side effect). Cost is bounded and
+                            // one-time (boot replay, single-writer), and durable-first
+                            // ordering keeps a throw "unproven → fail closed".
                             dispatcher.committed(intent.instructionId(), intent.requestHash(),
                                     record.logOffset());
                             accepted++;
@@ -136,7 +149,17 @@ public final class IntentReader implements AutoCloseable {
                                     + intent.instructionId() + " — " + commitFailed.getMessage());
                         }
                     } else {
-                        LOG.warn("intent handoff deferred (instruction_id={})", intent.instructionId());
+                        // D4/P3-091: DEFERRED past the bounded budget is LOGGED,
+                        // not routed to the violation handler. A not-ENABLED gate
+                        // deferring a valid intent is the designed fail-closed
+                        // outcome; the violation channel carries invalid intents,
+                        // explicit REJECTEDs and durable-commit failures, so
+                        // alarming here would make a planned HALT look like bad
+                        // data (B4.2 asserts a valid deferred intent must not
+                        // violate). The intent stays uncommitted and is recovered
+                        // by replay from offset zero.
+                        LOG.warn("intent handoff deferred past budget (instruction_id={}, "
+                                + "max_attempts={})", intent.instructionId(), DEFER_MAX_ATTEMPTS);
                     }
                     lastSeenOffset.set(record.logOffset());
                     continue;
@@ -162,6 +185,63 @@ public final class IntentReader implements AutoCloseable {
     private void safeViolation(String message) {
         try { violationHandler.accept(message); }
         catch (Exception handlerFailure) { LOG.warn("violation handler failed: {}", handlerFailure.getMessage()); }
+    }
+
+    /**
+     * D4: bounded in-run defer tolerance. A {@code DEFERRED} handoff used to be
+     * dropped on the first attempt (recovered only by replay-from-zero after a
+     * restart). Instead the single-writer loop blocks and retries within a bounded
+     * budget — that stall <i>is</i> the backpressure signal (the LOG cursor stops
+     * advancing, so the broker/intent producer is slowed rather than ignored), and
+     * it costs O(1) memory: one in-flight intent, never an unbounded queue. When
+     * the budget is exhausted the caller stops retrying and logs at WARN (never the
+     * violation channel — see {@link #poll}), so a sustained HALTED gate stays
+     * observable without being mistaken for invalid data.
+     *
+     * <p>Blocking is bounded by {@code DEFER_MAX_ATTEMPTS × DEFER_RETRY_DELAY_MS},
+     * so a permanently-deferred intent cannot stall the loop indefinitely.
+     */
+    private IntentSink.Result forwardWithBoundedDefer(IntentRecord intent) throws Exception {
+        return retryWhileDeferred(forwarder, intent, DEFER_MAX_ATTEMPTS, DEFER_RETRY_DELAY_MS);
+    }
+
+    /**
+     * D4 (P3-086/P3-091): the bounded in-run defer retry policy itself.
+     *
+     * <p>Extracted from {@link #forwardWithBoundedDefer} so the policy can be tested directly
+     * without a Fluss connection — the retry is what keeps a {@code DEFERRED} money-moving intent
+     * from being dropped until a restart, so it needs coverage of its own (attempts, budget
+     * exhaustion, and the throwing-sink path).
+     *
+     * <p>Returns the first non-{@code DEFERRED} result. A sink that keeps throwing is retried to
+     * the same budget and then rethrows; a sink that stays {@code DEFERRED} returns {@code DEFERRED}
+     * once the budget is spent, which the caller logs (never the violation channel).
+     */
+    static IntentSink.Result retryWhileDeferred(IntentSink forwarder, IntentRecord intent,
+            int maxAttempts, long retryDelayMs) throws Exception {
+        for (int attempt = 1; ; attempt++) {
+            try {
+                IntentSink.Result result = forwarder.forward(intent);
+                if (result != IntentSink.Result.DEFERRED || attempt >= maxAttempts) {
+                    return result;
+                }
+            } catch (Exception e) {
+                if (attempt >= maxAttempts) {
+                    throw e;
+                }
+            }
+            sleepBeforeRetry(intent, retryDelayMs);
+        }
+    }
+
+    private static void sleepBeforeRetry(IntentRecord intent, long retryDelayMs) {
+        try {
+            Thread.sleep(retryDelayMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(
+                    "interrupted while retrying deferred intent " + intent.instructionId(), e);
+        }
     }
 
     public long lastSeenOffset() { return lastSeenOffset.get(); }
