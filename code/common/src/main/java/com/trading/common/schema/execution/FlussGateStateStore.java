@@ -341,14 +341,14 @@ public final class FlussGateStateStore implements GateStateStore, AutoCloseable 
         return res;
     }
 
-    @Override public synchronized GateRow halt(String partitionId, GateRow expected, String reason, String evidenceHash, long nowTs) {
+    @Override public synchronized GateRow halt(String partitionId, GateRow expected, String reason, String evidenceHash, long nowTs, Long detectedTs) {
         // Durable-first: the halt mints strictly ABOVE the durable token (see the delegate),
         // which requires the local sequence to be synced from durable first — otherwise the
         // safety halt would be version-dropped and silently lost.
         GateRow durable = lookupGateOrThrow(partitionId);
         if (durable != null) delegate.hydrate(durable);
         GateRow before = delegate.read(partitionId);
-        GateRow r = delegate.halt(partitionId, expected, reason, evidenceHash, nowTs);
+        GateRow r = delegate.halt(partitionId, expected, reason, evidenceHash, nowTs, detectedTs);
         if (r != null && r != before) {
             persistOrRollback(r, before);
             // Never allowSuperseded: a halt that did not land is a safety failure.
@@ -404,20 +404,19 @@ public final class FlussGateStateStore implements GateStateStore, AutoCloseable 
         v[ExecutionGateColumns.STATE] = BinaryString.fromString(r.state().name());
         v[ExecutionGateColumns.EPOCH] = r.epoch();
         v[ExecutionGateColumns.REASON] = r.reason() == null ? null : BinaryString.fromString(r.reason());
-        // P3-364/P3-369: GateRow has no detection source — leave the nullable
-        // DETECTION_TIME null with this documented gap, never fake it from
-        // fenceAcquiredTs (downstream SQL readers would see corrupted semantics).
-        v[ExecutionGateColumns.DETECTION_TIME] = null;
+        // P3-364/P3-369: the real detection time, when the halt was raised from safety-path
+        // evidence (SafetyHaltRequest.detectionTime). Null when the transition recorded no
+        // detection — the column is nullable, so null is honest; it is never re-interpreted
+        // from fenceAcquiredTs or from the transition time.
+        v[ExecutionGateColumns.DETECTION_TIME] = r.detectionTs();
         v[ExecutionGateColumns.EVIDENCE_HASH] = r.evidenceHash() == null ? null : BinaryString.fromString(r.evidenceHash());
         v[ExecutionGateColumns.APPROVAL_1] = r.approval1() == null ? null : BinaryString.fromString(r.approval1());
         v[ExecutionGateColumns.APPROVAL_2] = r.approval2() == null ? null : BinaryString.fromString(r.approval2());
-        // P3-370: TRANSITION_TS is NOT NULL in DDL but GateRow carries no
-        // transition source (withState drops its ts param — see GateRow). Until a
-        // transition ts is threaded through, fenceAcquiredTs is the closest real
-        // event time; a null would violate NOT NULL, 0L would fake epoch time.
-        // Prefer the real event over 0L — SQL readers must treat "equals
-        // fence_acquired_ts" as "transition time unknown".
-        v[ExecutionGateColumns.TRANSITION_TS] = r.fenceAcquiredTs() == null ? 0L : r.fenceAcquiredTs();
+        // P3-370: a real transition time, stamped by the mutating event itself (see the
+        // GateRow.with* copies). It is no longer re-interpreted from fenceAcquiredTs, so
+        // "transition time unknown" is no longer inferred by comparing against an unrelated
+        // column — only a synthetic row (not built through with*) writes 0.
+        v[ExecutionGateColumns.TRANSITION_TS] = r.transitionTs();
         v[ExecutionGateColumns.OWNER_INSTANCE_ID] = r.ownerInstanceId() == null ? null : BinaryString.fromString(r.ownerInstanceId());
         v[ExecutionGateColumns.FENCE_TOKEN] = r.fenceToken();
         v[ExecutionGateColumns.FENCE_ACQUIRED_TS] = r.fenceAcquiredTs();
@@ -465,6 +464,13 @@ public final class FlussGateStateStore implements GateStateStore, AutoCloseable 
         Long acq = r.isNullAt(ExecutionGateColumns.FENCE_ACQUIRED_TS) ? null : r.getLong(ExecutionGateColumns.FENCE_ACQUIRED_TS);
         Long lease = r.isNullAt(ExecutionGateColumns.LEASE_EXPIRES_TS) ? null : r.getLong(ExecutionGateColumns.LEASE_EXPIRES_TS);
         Long lost = r.isNullAt(ExecutionGateColumns.FENCE_LOST_TS) ? null : r.getLong(ExecutionGateColumns.FENCE_LOST_TS);
-        return new GateRow(pid, acct, st, epoch, reason, ev, a1, a2, approvedEv, owner, fenceToken, acq, lease, lost);
+        // TRANSITION_TS is NOT NULL in the DDL, so it reads back as a real value.
+        long transitionTs = r.getLong(ExecutionGateColumns.TRANSITION_TS);
+        // DETECTION_TIME is nullable: null means no detection was recorded for this row.
+        Long detectionTs = r.isNullAt(ExecutionGateColumns.DETECTION_TIME)
+                ? null
+                : r.getLong(ExecutionGateColumns.DETECTION_TIME);
+        return new GateRow(pid, acct, st, epoch, reason, ev, a1, a2, approvedEv, owner, fenceToken, acq, lease, lost,
+                transitionTs, detectionTs);
     }
 }

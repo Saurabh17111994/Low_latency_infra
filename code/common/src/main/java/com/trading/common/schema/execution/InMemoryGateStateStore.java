@@ -253,7 +253,7 @@ public final class InMemoryGateStateStore implements GateStateStore {
 
     @Override
     public synchronized GateRow halt(String partitionId, GateRow expected, String reason,
-                                     String evidenceHash, long nowTs) {
+                                     String evidenceHash, long nowTs, Long detectedTs) {
         GateRow row = rows.get(partitionId);
         if (row == null) {
             return null;
@@ -284,14 +284,17 @@ public final class InMemoryGateStateStore implements GateStateStore {
                     evidenceHash != null ? evidenceHash : c.evidenceHash(),
                     c.approval1(), c.approval2(), c.approvedEvidenceHash(),
                     c.ownerInstanceId(), c.fenceToken(), c.fenceAcquiredTs(),
-                    c.leaseExpiresTs(), nowTs);
+                    c.leaseExpiresTs(), nowTs, nowTs, detectedTs);
         } else {
             cleared = row.withState(GateState.HALTED, reason, evidenceHash == null
-                    ? row.evidenceHash() : evidenceHash).withFenceCleared(nowTs);
+                    ? row.evidenceHash() : evidenceHash, nowTs).withFenceCleared(nowTs);
         }
+        // P3-364/P3-369: detection_time is the safety path's detection event, which is genuinely
+        // earlier than nowTs (the evidence is detected, then replayed into the gate).
         GateRow next = new GateRow(cleared.partitionId(), cleared.accountScopeId(), cleared.state(),
                 cleared.epoch(), cleared.reason(), cleared.evidenceHash(), cleared.approval1(),
-                cleared.approval2(), cleared.approvedEvidenceHash(), null, haltToken, null, null, nowTs);
+                cleared.approval2(), cleared.approvedEvidenceHash(), null, haltToken, null, null, nowTs,
+                nowTs, detectedTs);
         rows.put(partitionId, next);
         audit(new AuditRecord(partitionId, "HALT", nowTs, next.epoch(), next.fenceToken(),
                 reason, evidenceHash));

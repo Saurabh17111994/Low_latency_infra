@@ -49,7 +49,7 @@ public final class SafetyHaltTailProcessor {
         if(req.accountScopeId() == null || !req.accountScopeId().equals(row.accountScopeId())) {
             return ApplyResult.CROSS_SCOPE_REJECT;
         }
-        GateRow next = gates.halt(req.executionPartitionId(), row, req.reasonCode()+":"+req.reasonDetail(), req.evidenceHash(), nowTs);
+        GateRow next = gates.halt(req.executionPartitionId(), row, req.reasonCode()+":"+req.reasonDetail(), req.evidenceHash(), nowTs, req.detectionTime());
         if (next == null) return ApplyResult.NOT_FOUND;
         appliedIds.add(req.haltRequestId());
         return ApplyResult.APPLIED;

@@ -32,7 +32,28 @@ public record GateRow(
         long fenceToken,
         Long fenceAcquiredTs,
         Long leaseExpiresTs,
-        Long fenceLostTs) {
+        Long fenceLostTs,
+        long transitionTs,
+        Long detectionTs) {
+
+    /**
+     * P3-370/P3-364: constructor for rows with neither a recorded transition time nor a detection
+     * time (the original 14-field shape, still used by tests and synthetic rows).
+     *
+     * <p>There is deliberately no 15-field convenience overload: with the canonical constructor's
+     * transition time being a primitive {@code long} and the detection time a boxed {@code Long},
+     * a 15-argument call site could pass {@code null} for the detection time and have it silently
+     * unboxed into the transition slot — an NPE, or worse, a plausible-looking wrong value. Both
+     * times are always named explicitly.
+     */
+    public GateRow(String partitionId, String accountScopeId, GateState state, long epoch,
+            String reason, String evidenceHash, String approval1, String approval2,
+            String approvedEvidenceHash, String ownerInstanceId, long fenceToken,
+            Long fenceAcquiredTs, Long leaseExpiresTs, Long fenceLostTs) {
+        this(partitionId, accountScopeId, state, epoch, reason, evidenceHash, approval1, approval2,
+                approvedEvidenceHash, ownerInstanceId, fenceToken, fenceAcquiredTs, leaseExpiresTs,
+                fenceLostTs, 0L, null);
+    }
 
     public GateRow {
         Objects.requireNonNull(partitionId, "partitionId");
@@ -82,18 +103,39 @@ public record GateRow(
         return leaseExpiresTs != null && nowTs > leaseExpiresTs;
     }
 
-    /** Copy with a new gate state and a freshly incremented epoch. */
-    public GateRow withState(GateState newState, String newReason, String hash) {
+    /**
+     * Copy with a new gate state and a freshly incremented epoch.
+     *
+     * <p>P3-370: the state change is stamped with the caller's {@code nowTs} as the row's
+     * {@link #transitionTs}. The transition <i>is</i> the event, so this time must come from the
+     * transition itself — it used to be dropped, and the durable writer then re-interpreted
+     * {@code fenceAcquiredTs} as the transition time.
+     */
+    public GateRow withState(GateState newState, String newReason, String hash, long nowTs) {
         return new GateRow(partitionId, accountScopeId, newState, epoch + 1, newReason, hash,
                 approval1, approval2, approvedEvidenceHash, ownerInstanceId, fenceToken,
-                fenceAcquiredTs, leaseExpiresTs, fenceLostTs);
+                fenceAcquiredTs, leaseExpiresTs, fenceLostTs, nowTs, null);
+    }
+
+    /**
+     * Copy that records when the condition being acted on was DETECTED (P3-364/P3-369).
+     *
+     * <p>Distinct from {@link #transitionTs}, and genuinely so: a safety halt is raised from
+     * evidence detected on the safety path and replayed into the gate later, so detection and
+     * application are different events. Null means "no detection recorded" (the column is nullable
+     * in Execution_Gate) — it must never be re-interpreted from an unrelated timestamp column.
+     */
+    public GateRow withDetection(Long detectedTs) {
+        return new GateRow(partitionId, accountScopeId, state, epoch, reason, evidenceHash,
+                approval1, approval2, approvedEvidenceHash, ownerInstanceId, fenceToken,
+                fenceAcquiredTs, leaseExpiresTs, fenceLostTs, transitionTs, detectedTs);
     }
 
     /** Copy that records a fence acquisition (owner, monotonic token, lease horizon, acquired ts). */
     public GateRow withFence(String owner, long newToken, long acquiredTs, long leaseMs) {
         return new GateRow(partitionId, accountScopeId, state, epoch, reason, evidenceHash,
                 approval1, approval2, approvedEvidenceHash, owner, newToken, acquiredTs,
-                acquiredTs + leaseMs, null);
+                acquiredTs + leaseMs, null, acquiredTs, detectionTs);
     }
 
     /**
@@ -104,7 +146,7 @@ public record GateRow(
     public GateRow withFenceLost(long lostTs) {
         return new GateRow(partitionId, accountScopeId, state, epoch, reason, evidenceHash,
                 approval1, approval2, approvedEvidenceHash, ownerInstanceId, fenceToken,
-                fenceAcquiredTs, null, lostTs);
+                fenceAcquiredTs, null, lostTs, lostTs, detectionTs);
     }
 
     /**
@@ -131,7 +173,7 @@ public record GateRow(
         }
         return new GateRow(partitionId, accountScopeId, state, epoch, reason, evidenceHash,
                 approval1, approval2, approvedEvidenceHash, ownerInstanceId, fenceToken,
-                fenceAcquiredTs, nowTs + leaseMs, null);
+                fenceAcquiredTs, nowTs + leaseMs, null, nowTs, detectionTs);
     }
 
     /**
@@ -155,6 +197,7 @@ public record GateRow(
             return this;
         }
         return new GateRow(partitionId, accountScopeId, state, epoch, reason, evidenceHash,
-                approval1, approval2, approvedEvidenceHash, null, fenceToken, null, null, clearedTs);
+                approval1, approval2, approvedEvidenceHash, null, fenceToken, null, null, clearedTs,
+                clearedTs, detectionTs);
     }
 }

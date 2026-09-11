@@ -25,11 +25,14 @@ public interface GateStateStore {
         UNAUTHORIZED,
         /** The approval is for a gate epoch that no longer matches the current row epoch. */
         EPOCH_MISMATCH,
+        /** The approval's evidence hash does not match the row's bound evidence package (P3-151). */
+        EVIDENCE_MISMATCH,
         /** No gate row exists for the partition. */
         NOT_FOUND
     }
 
-    record ApprovalResult(ApprovalOutcome outcome, GateRow row, String reason) {
+    /** P3-376: {@code row} is null only when no gate row exists for the partition (NOT_FOUND). */
+    record ApprovalResult(ApprovalOutcome outcome, /* @Nullable */ GateRow row, String reason) {
         // P3-150: never a null reason — callers (GatewayHttpServer) must not
         // paper over a missing audit detail with a fallback string.
         public static ApprovalResult applied(GateRow row) {
@@ -40,10 +43,12 @@ public interface GateStateStore {
         }
     }
 
-    /** Fence acquisition result. A conflict always carries the reason (P3-149) —
+    /** Fence acquisition result. A conflict always carries the reason (P3-375) —
      * "live lease held by X" vs "token mismatch" vs "expired" is what tells a
-     * split-brain from a stale lease, so it must never be dropped. */
-    record FenceResult(GateRow row, String owner, long token, boolean conflict, String reason) {
+     * split-brain from a stale lease, so it must never be dropped.
+     * P3-376: {@code row} is null only when no gate row exists for the partition. */
+    record FenceResult(/* @Nullable */ GateRow row, String owner, long token, boolean conflict,
+            String reason) {
         public static FenceResult acquired(GateRow row, String owner, long token) {
             return new FenceResult(row, owner, token, false, null);
         }
@@ -65,8 +70,9 @@ public interface GateStateStore {
     /**
      * Current durable snapshot, or {@code null} if no row exists for the partition.
      * A null key returns null (P3-375); lookup failures throw — never null-as-absent.
+     * P3-376: implementations return an immutable snapshot, never a live view.
      */
-    GateRow read(String partitionId);
+    /* @Nullable */ GateRow read(String partitionId);
 
     /**
      * Create a gate row if absent, else return the existing row untouched.
@@ -80,6 +86,15 @@ public interface GateStateStore {
      * on a live lease held by a different owner (concurrent-owner rejection),
      * mirroring the monotonic fencing sequence: the returned token is always
      * strictly greater than any prior fence token for the partition.
+     *
+     * <p>P3-149: implementations MUST execute the live-lease check and the token
+     * bump + durable persist atomically (linearizable per partition) — concurrent
+     * acquirers must not both succeed. This operation is check-then-act, so a
+     * caller-visible interleaving between the check and the persist would violate
+     * the strictly-greater-token contract; where the backing store cannot express
+     * that natively, the implementation must exclude it (the in-memory engine
+     * synchronizes; the Fluss writer additionally re-reads and fails closed if the
+     * durable row no longer carries its owner+token).
      */
     FenceResult acquire(String partitionId, String ownerInstanceId, long leaseMs, long nowTs);
 
@@ -96,32 +111,27 @@ public interface GateStateStore {
      * Only the current holder may revoke; others are rejected (no mutation).
      * HALT path uses {@link #halt} which clears unconditionally.
      * Sets fenceToken to 0 and lease fields to null, records fenceLostTs.
+     * Returns {@code null} when no row exists for the partition (P3-376).
      *
-     * <p>Naming (P3-152): {@code revoke} is canonical; {@code release} is the
-     * same op under the voluntary-release name — kept so call sites read
-     * naturally, not a second code path.
+     * <p>P3-377: every caller supplies an explicit {@code nowTs} — the wall-clock
+     * convenience overloads and the {@code release} alias were removed, so no
+     * hidden {@code System.currentTimeMillis()} can enter fenceLostTs/lease
+     * horizons (crash-window replay and TTL tests stay deterministic).
      */
-    GateRow revoke(String partitionId, String ownerInstanceId, long nowTs);
-
-    /** Convenience revoke using current time for fenceLostTs. */
-    default GateRow revoke(String partitionId, String ownerInstanceId) {
-        return revoke(partitionId, ownerInstanceId, System.currentTimeMillis());
-    }
-
-    /** Alias for revoke — explicit release naming. */
-    default GateRow release(String partitionId, String ownerInstanceId, long nowTs) {
-        return revoke(partitionId, ownerInstanceId, nowTs);
-    }
-
-    /** Alias for revoke using current time. */
-    default GateRow release(String partitionId, String ownerInstanceId) {
-        return revoke(partitionId, ownerInstanceId, System.currentTimeMillis());
-    }
+    /* @Nullable */ GateRow revoke(String partitionId, String ownerInstanceId, long nowTs);
 
     /**
      * Register the single required approval for the exact
      * {@code (epoch, evidenceHash)} by the authorized operator (Saurabh). A
      * changed epoch invalidates pending approvals. (DEC-044 single-operator).
+     *
+     * <p>P3-151 evidence binding: {@code evidenceHash} must be non-null and must
+     * equal the row's bound {@code evidenceHash} — otherwise the approval would
+     * record stale/unauthorized evidence as APPLIED. A mismatch returns
+     * {@link ApprovalOutcome#EVIDENCE_MISMATCH} with no mutation. A null hash is a
+     * caller defect and is rejected fail-fast (never stored as a never-complete
+     * approval). A row with no evidence bound yet (boot/HALTED) is the one
+     * exception: the first approval defines the binding.
      */
     ApprovalResult approve(String partitionId, String principal, long epoch, String evidenceHash,
                            long nowTs);
@@ -148,17 +158,43 @@ public interface GateStateStore {
      * epoch-mismatch halts) rely on this. Idempotent (already HALTED) halts
      * record evidence without a second epoch increment. HALTED default is
      * fenced-off: halt clears the fence (owner null, fenceToken 0, lease null).
+     * Returns {@code null} when no row exists for the partition (P3-376).
+     *
+     * <p>P3-152 CAS semantics: {@code expected} is a compare-and-set witness, not
+     * advisory. When {@code expected} is non-null and its epoch differs from the
+     * current row's, the halt is <b>not</b> applied and the current (unchanged) row
+     * is returned — no mutation, no epoch bump — so a stale caller cannot
+     * unconditionally halt/increment a newer generation. Callers that must
+     * distinguish "halted" from "stale witness rejected" re-read the row or
+     * compare the returned row's epoch; the safety path therefore passes the
+     * freshest row it has (or null when it cannot name a generation).
+     *
+     * <p>P3-364/P3-369: {@code detectedTs} records when the condition being acted on was
+     * <b>detected</b>. For a safety halt that is genuinely earlier than {@code nowTs} — the
+     * evidence is detected on the safety path and only replayed into the gate afterwards — so it
+     * is persisted separately in the nullable Execution_Gate {@code detection_time} column. Null
+     * means no detection was recorded for this transition.
      */
-    GateRow halt(String partitionId, GateRow expected, String reason, String evidenceHash, long nowTs);
+    /* @Nullable */ GateRow halt(String partitionId, GateRow expected, String reason,
+            String evidenceHash, long nowTs, Long detectedTs);
+
+    /** As {@link #halt(String, GateRow, String, String, long, Long)} with no detection recorded. */
+    default GateRow halt(String partitionId, GateRow expected, String reason,
+            String evidenceHash, long nowTs) {
+        return halt(partitionId, expected, reason, evidenceHash, nowTs, null);
+    }
 
     /** Append an immutable audit/evidence event. */
     void audit(AuditRecord record);
 
     /**
      * The immutable audit log, in append order (crash-window reconstruction).
-     * In-memory by design and unbounded (P3-377): this is the evidence a
-     * post-crash reconcile reads — evicting it would silently drop what
-     * reconciliation needs. Durable implementations page at the backing store.
+     * Implementations MUST return an unmodifiable snapshot copy (P3-376) — a
+     * live list could be reordered or mutated after the read, defeating the
+     * crash-window reconstruction the log exists for. In-memory by design and
+     * unbounded: this is the evidence a post-crash reconcile reads — evicting it
+     * would silently drop what reconciliation needs. Durable implementations
+     * page at the backing store.
      */
     List<AuditRecord> auditLog();
 }
