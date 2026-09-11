@@ -126,14 +126,45 @@ def _sha256_hex(data):
     return hashlib.sha256(data).hexdigest()
 
 
+PROTOCOL_V1 = "execution-gateway.v1"
+PROTOCOL_V2 = "execution-gateway.v2"
+
+
+def canonical_v2(*fields):
+    """P3-079: length-prefixed canonical form — injective by construction.
+
+    Must match Java `GatewayProtocol.lengthPrefixed` and Rust
+    `gateway_protocol::canonical_v2` byte for byte: for each field, append
+    decimal(UTF-8 byte length) + ':' + the field, concatenated with no separator.
+    Byte length, not char length — a field leaving ASCII would otherwise make
+    this disagree with the other two languages.
+    """
+    out = []
+    for f in fields:
+        s = "" if f is None else str(f)
+        out.append(str(len(s.encode("utf-8"))))
+        out.append(":")
+        out.append(s)
+    return "".join(out)
+
+
 def canonical(protocol_version, message_type, request_id, account_scope_id,
               execution_partition_id, payload_hash, gate_epoch, fence_token,
               deadline_epoch_ms, payload_json):
-    return "\n".join([
-        protocol_version, message_type, request_id, account_scope_id,
-        execution_partition_id, payload_hash, str(gate_epoch), fence_token,
-        str(deadline_epoch_ms), payload_json,
-    ])
+    """Picks the canonical form from the version — deterministic, never a guess (P3-079).
+
+    v1 is the original newline-joined form, retained byte-for-byte so existing peers
+    keep verifying; v2 is length-prefixed and strictly opt-in by name. Every other
+    version (including a custom generation string) keeps the legacy join, so nothing
+    that signed before v2 existed signs differently now — the only requirement is
+    that the version-to-form mapping is total and stable.
+    """
+    fields = (protocol_version, message_type, request_id, account_scope_id,
+              execution_partition_id, payload_hash, str(gate_epoch), fence_token,
+              str(deadline_epoch_ms), payload_json)
+    if protocol_version == PROTOCOL_V2:
+        return canonical_v2(*fields)
+    return "\n".join(fields)
 
 
 def sign(secret, canon):

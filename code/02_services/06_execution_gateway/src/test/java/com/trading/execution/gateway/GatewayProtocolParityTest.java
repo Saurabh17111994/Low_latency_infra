@@ -170,4 +170,156 @@ class GatewayProtocolParityTest {
         com.fasterxml.jackson.databind.JsonNode parsed = m.readTree(encoded);
         assertThat(parsed.get("authentication").asText()).isEqualTo(FIXED_AUTH);
     }
+
+    // ---- P3-079 v2 (length-prefixed canonical form) ----
+
+    /**
+     * Cross-language v2 conformance vector. The field values are identical to the v1 fixture above,
+     * so the only difference is the canonical form — which makes a divergence between the three
+     * implementations show up as a wrong HMAC rather than as a subtle mis-binding.
+     *
+     * <p>Derived from the Python implementation and reproduced by Rust; all three must agree.
+     */
+    static final String FIXED_V2_CANONICAL =
+            "20:execution-gateway.v216:EXECUTION_INTENT15:parity-req-000115:parity-acct-001"
+                    + "18:parity-partition-164:bceb5c2c5139f412f53bf7d27178ea551f68d333566d52485fc5d705e3d06e71"
+                    + "2:4222:parity-fence-token-xyz13:200000000000034:{\"zulu\":\"z\",\"alpha\":\"a\",\"qty\":100}";
+    static final String FIXED_V2_AUTH =
+            "655eba65b51e57c79ce50e620511da371722f430266d32e6a7e44cb425b0e9f0";
+
+    private GatewayProtocol.Envelope fixedEnvelopeV2(ObjectMapper m) throws Exception {
+        return new GatewayProtocol.Envelope(
+                GatewayProtocol.PROTOCOL_V2, MESSAGE_TYPE, REQUEST_ID, ACCOUNT_SCOPE_ID,
+                EXECUTION_PARTITION_ID, FIXED_PAYLOAD_HASH, GATE_EPOCH, FENCE_TOKEN,
+                DEADLINE_EPOCH_MS, fixedPayload(m), null);
+    }
+
+    @Test
+    void v2LengthPrefixingIsInjectiveWhereV1IsNot() {
+        // The rule itself: decimal UTF-8 byte length, ':', field, no separator.
+        assertThat(GatewayProtocol.lengthPrefixed("a", "bc")).isEqualTo("1:a2:bc");
+
+        // v1's ambiguity, demonstrated on the exact pair P3-079 describes: these two DIFFERENT
+        // field splits produce ONE v1 string, so a v1 HMAC cannot distinguish them.
+        String v1ShiftA = String.join("\n", "a\nb", "c");
+        String v1ShiftB = String.join("\n", "a", "b\nc");
+        assertThat(v1ShiftA).as("v1 is ambiguous across a field boundary").isEqualTo(v1ShiftB);
+
+        // v2 keeps them distinct — this is the fix, and it holds with no newline backstop.
+        assertThat(GatewayProtocol.lengthPrefixed("a\nb", "c"))
+                .as("v2 must not collapse the same-field split that v1 collapses")
+                .isNotEqualTo(GatewayProtocol.lengthPrefixed("a", "b\nc"));
+
+        // Byte length, not char length: 'é' is 2 UTF-8 bytes but 1 char. Counting chars would
+        // make Java disagree with Rust/Python the moment a field left ASCII.
+        assertThat(GatewayProtocol.lengthPrefixed("é")).isEqualTo("2:é");
+    }
+
+    @Test
+    void v2EncodeReproducesCrossLanguageVectorAndVerifies() throws Exception {
+        ObjectMapper m = new ObjectMapper();
+        GatewayProtocol p = new GatewayProtocol(FIXED_SECRET);
+        // Pin the canonical bytes with the fields written out longhand, so a field-order change is
+        // caught here rather than only showing up as a mysterious HMAC mismatch.
+        assertThat(GatewayProtocol.lengthPrefixed(
+                GatewayProtocol.PROTOCOL_V2, MESSAGE_TYPE, REQUEST_ID, ACCOUNT_SCOPE_ID,
+                EXECUTION_PARTITION_ID, FIXED_PAYLOAD_HASH, Long.toString(GATE_EPOCH),
+                FENCE_TOKEN, Long.toString(DEADLINE_EPOCH_MS), FIXED_PAYLOAD_JSON))
+                .as("v2 canonical bytes must match the cross-language vector")
+                .isEqualTo(FIXED_V2_CANONICAL);
+        String encoded = p.encode(fixedEnvelopeV2(m));
+        com.fasterxml.jackson.databind.JsonNode parsed = m.readTree(encoded);
+        assertThat(parsed.get("authentication").asText())
+                .as("v2 HMAC must equal the Rust/Python conformance vector")
+                .isEqualTo(FIXED_V2_AUTH);
+        assertThat(parsed.get("protocol_version").asText())
+                .isEqualTo(GatewayProtocol.PROTOCOL_V2);
+        GatewayProtocol.Verification v =
+                p.verify(encoded, GatewayProtocol.PROTOCOL_V2, NOW_MS);
+        assertThat(v.accepted()).as("v2 round trip, reason: " + v.reason()).isTrue();
+        assertThat(v.envelope().payloadHash()).isEqualTo(FIXED_PAYLOAD_HASH);
+    }
+
+    @Test
+    void versionSelectsTheFormAndDualAcceptIsTheMigrationPath() throws Exception {
+        ObjectMapper m = new ObjectMapper();
+        String encodedV2 = new GatewayProtocol(FIXED_SECRET).encode(fixedEnvelopeV2(m));
+        String dual = GatewayProtocol.PROTOCOL_V1 + "," + GatewayProtocol.PROTOCOL_V2;
+
+        // A fresh instance per verify: verify() records (request_id, payload_hash) in its replay
+        // window, so re-verifying the same fixture on one instance is a duplicate, not a re-test.
+        // v1 fixture is untouched by the v2 change — the whole point of dual-accept.
+        assertThat(new GatewayProtocol(FIXED_SECRET)
+                .verify(EXPECTED_ENVELOPE_JSON, PROTOCOL_VERSION, NOW_MS).accepted())
+                .as("v1 fixture must still verify").isTrue();
+        // A v1-only server refuses v2 (no accidental cross-acceptance)...
+        assertThat(new GatewayProtocol(FIXED_SECRET)
+                .verify(encodedV2, PROTOCOL_VERSION, NOW_MS).accepted())
+                .as("a v1-only config must refuse a v2 envelope").isFalse();
+        // ...and a dual-accept config takes both, with each verified under its OWN form.
+        assertThat(new GatewayProtocol(FIXED_SECRET).verify(encodedV2, dual, NOW_MS).accepted())
+                .as("dual-accept must take v2").isTrue();
+        assertThat(new GatewayProtocol(FIXED_SECRET)
+                .verify(EXPECTED_ENVELOPE_JSON, dual, NOW_MS).accepted())
+                .as("dual-accept must still take v1").isTrue();
+    }
+
+    @Test
+    void v2AllowsNewlineFieldsWhileV1StillRefusesThem() throws Exception {
+        ObjectMapper m = new ObjectMapper();
+        GatewayProtocol p = new GatewayProtocol(FIXED_SECRET);
+        ObjectNode payload = fixedPayload(m);
+        String hash = GatewayProtocol.sha256(m.writeValueAsBytes(payload));
+
+        // v1: still refused (the backstop is retained for v1 peers).
+        GatewayProtocol.Envelope v1Nl = new GatewayProtocol.Envelope(
+                GatewayProtocol.PROTOCOL_V1, MESSAGE_TYPE, "req-\n-shift", ACCOUNT_SCOPE_ID,
+                EXECUTION_PARTITION_ID, hash, GATE_EPOCH, FENCE_TOKEN, DEADLINE_EPOCH_MS,
+                payload, null);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> p.encode(v1Nl))
+                .as("v1 must still refuse a newline-bearing identity field")
+                .isInstanceOf(IllegalArgumentException.class);
+
+        // v2: allowed, because the encoding no longer depends on newlines being absent.
+        GatewayProtocol.Envelope v2Nl = new GatewayProtocol.Envelope(
+                GatewayProtocol.PROTOCOL_V2, MESSAGE_TYPE, "req-\n-shift", ACCOUNT_SCOPE_ID,
+                EXECUTION_PARTITION_ID, hash, GATE_EPOCH, FENCE_TOKEN, DEADLINE_EPOCH_MS,
+                payload, null);
+        String encoded = p.encode(v2Nl);
+        assertThat(p.verify(encoded, GatewayProtocol.PROTOCOL_V2, NOW_MS).accepted())
+                .as("v2 must accept what v1 had to refuse").isTrue();
+    }
+
+    @Test
+    void unrecognisedVersionKeepsTheLegacyFormInsteadOfBreaking() throws Exception {
+        ObjectMapper m = new ObjectMapper();
+        // A custom generation string is not "guessed at" — it deterministically gets the legacy
+        // form, so a deployment using one keeps signing exactly what it signed before v2 existed.
+        GatewayProtocol.Envelope custom = new GatewayProtocol.Envelope(
+                "v1", MESSAGE_TYPE, REQUEST_ID, ACCOUNT_SCOPE_ID, EXECUTION_PARTITION_ID,
+                FIXED_PAYLOAD_HASH, GATE_EPOCH, FENCE_TOKEN, DEADLINE_EPOCH_MS, fixedPayload(m), null);
+        String encodedCustom = new GatewayProtocol(FIXED_SECRET).encode(custom);
+
+        // Prove the LEGACY join was used, by reproducing that canonical by hand.
+        String legacyCanonical = String.join("\n", "v1", MESSAGE_TYPE, REQUEST_ID, ACCOUNT_SCOPE_ID,
+                EXECUTION_PARTITION_ID, FIXED_PAYLOAD_HASH, Long.toString(GATE_EPOCH), FENCE_TOKEN,
+                Long.toString(DEADLINE_EPOCH_MS), FIXED_PAYLOAD_JSON);
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        mac.init(new javax.crypto.spec.SecretKeySpec(
+                FIXED_SECRET.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
+        String expectedLegacyAuth = java.util.HexFormat.of().formatHex(
+                mac.doFinal(legacyCanonical.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        assertThat(m.readTree(encodedCustom).get("authentication").asText())
+                .as("an unrecognised version must use the legacy join, byte for byte")
+                .isEqualTo(expectedLegacyAuth);
+
+        // ...and it round-trips under its own configured version.
+        assertThat(new GatewayProtocol(FIXED_SECRET).verify(encodedCustom, "v1", NOW_MS).accepted())
+                .as("a custom version string must still round-trip").isTrue();
+        // A config that does not name the presented version refuses it — that is the real guard.
+        GatewayProtocol.Verification refused = new GatewayProtocol(FIXED_SECRET)
+                .verify(encodedCustom, GatewayProtocol.PROTOCOL_V2, NOW_MS);
+        assertThat(refused.accepted()).isFalse();
+        assertThat(refused.reason()).isEqualTo("unsupported version");
+    }
 }

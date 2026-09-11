@@ -53,7 +53,31 @@ fn hmac_hex(secret: &str, value: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// Canonical-form generations (P3-079). v1 joins fields with a bare newline; v2 length-prefixes
+/// them. Both are accepted — the version field selects the form, so an upgrade never has to be
+/// atomic across the gateway, the executor and the sandbox client. Must match the Java
+/// `GatewayProtocol.PROTOCOL_V1` / `PROTOCOL_V2`.
+pub const PROTOCOL_V1: &str = "execution-gateway.v1";
+pub const PROTOCOL_V2: &str = "execution-gateway.v2";
+
+/// Picks the canonical form from the envelope's version — deterministic, never a guess.
+///
+/// v2 is strictly opt-in by name. Every other version (including a custom generation string) keeps
+/// the legacy newline join byte for byte, so nothing that signed or verified before this change
+/// signs or verifies differently now; the only requirement is that the version-to-form mapping is
+/// total and stable, which it is.
 fn canonical(e: &Envelope, payload_json: &str) -> String {
+    if e.protocol_version == PROTOCOL_V2 {
+        canonical_v2(e, payload_json)
+    } else {
+        canonical_v1(e, payload_json)
+    }
+}
+
+/// v1: fields joined by a bare newline. Ambiguous across field boundaries — a `request_id` of
+/// "a\nb" with scope "c" signs identically to "a" with "b\nc" — which is why the newline backstop
+/// exists. Retained byte-for-byte so existing peers keep verifying.
+fn canonical_v1(e: &Envelope, payload_json: &str) -> String {
     [
         e.protocol_version.as_str(),
         e.message_type.as_str(),
@@ -67,6 +91,68 @@ fn canonical(e: &Envelope, payload_json: &str) -> String {
         payload_json,
     ]
     .join("\n")
+}
+
+/// v2 (P3-079): length-prefixed, so the encoding is injective by construction — no field content
+/// can forge a boundary. Must match Java `GatewayProtocol.lengthPrefixed` and Python
+/// `canonical_v2` byte for byte: for each field, `decimal(utf8 byte length)` + ':' + field,
+/// concatenated with no separator.
+///
+/// `str::len()` is the UTF-8 byte length in Rust, which is what the other two count.
+fn canonical_v2(e: &Envelope, payload_json: &str) -> String {
+    length_prefixed(&[
+        e.protocol_version.as_str(),
+        e.message_type.as_str(),
+        e.request_id.as_str(),
+        e.account_scope_id.as_str(),
+        e.execution_partition_id.as_str(),
+        e.payload_hash.as_str(),
+        &e.gate_epoch.to_string(),
+        e.fence_token.as_str(),
+        &e.deadline_epoch_ms.to_string(),
+        payload_json,
+    ])
+}
+
+/// THE canonical v2 rule, as a standalone helper so it can be tested directly. `str::len()` is the
+/// UTF-8 byte length in Rust, which is what Java's `getBytes(UTF_8).length` and Python's
+/// `len(s.encode("utf-8"))` also produce.
+fn length_prefixed(fields: &[&str]) -> String {
+    let mut out = String::new();
+    for field in fields {
+        out.push_str(&field.len().to_string());
+        out.push(':');
+        out.push_str(field);
+    }
+    out
+}
+
+/// Identity fields that v1's newline join cannot keep unambiguous. v2 is injective, so this is
+/// applied to v1 envelopes only.
+fn v1_has_newline_boundary(e: &Envelope) -> bool {
+    [
+        e.protocol_version.as_str(),
+        e.message_type.as_str(),
+        e.request_id.as_str(),
+        e.account_scope_id.as_str(),
+        e.execution_partition_id.as_str(),
+        e.payload_hash.as_str(),
+        e.fence_token.as_str(),
+    ]
+    .iter()
+    .any(|p| p.contains('\n') || p.contains('\r'))
+}
+
+/// P3-079 rollout, matching Java `acceptsVersion`: the configured version may name more than one
+/// accepted generation ("execution-gateway.v1,execution-gateway.v2") so a mixed fleet migrates
+/// without a flag day. A single value behaves exactly as before.
+///
+/// Deliberately does NOT whitelist the known generation literals — pinning them would reject an
+/// operator's custom version string that verified perfectly well before v2 existed, and it would buy
+/// no security, because `canonical` maps a version to its form deterministically (no form for a peer
+/// to guess at) and the accepted set is the operator's config, which a peer cannot influence.
+fn accepts_version(configured: &str, presented: &str) -> bool {
+    configured.split(',').any(|c| c.trim() == presented)
 }
 
 fn text(v: &serde_json::Value, field: &str) -> String {
@@ -91,23 +177,14 @@ pub fn encode_envelope(secret: &str, e: &Envelope) -> Result<String, String> {
     if secret.is_empty() {
         return Err("secret required".to_string());
     }
-    // P3-079 (Java parity): the canonical form joins fields with a bare
+    // P3-079 (Java parity): v1's canonical form joins fields with a bare
     // newline, so a request_id of "a\nb" plus scope "c" signs identically to
     // "a" plus "b\nc" (cross-field shift, valid HMAC, wrong binding). Reject
     // newline-bearing identity fields before signing — same rule as Java
-    // requireNoNewlines.
-    for part in [
-        e.protocol_version.as_str(),
-        e.message_type.as_str(),
-        e.request_id.as_str(),
-        e.account_scope_id.as_str(),
-        e.execution_partition_id.as_str(),
-        e.payload_hash.as_str(),
-        e.fence_token.as_str(),
-    ] {
-        if part.contains('\n') || part.contains('\r') {
-            return Err("identity field must not contain newline".to_string());
-        }
+    // requireNoNewlines. v2 is length-prefixed and needs no such guard, so this
+    // is applied to v1 envelopes only.
+    if e.protocol_version != PROTOCOL_V2 && v1_has_newline_boundary(e) {
+        return Err("identity field must not contain newline".to_string());
     }
     // payload_json must be the compact encoding the Java ObjectMapper would produce.
     // We use serde_json::to_string which is compact; Java's default is also compact
@@ -187,7 +264,7 @@ pub fn verify(json: &str, secret: &str, expected_version: &str, now_ms: i64) -> 
         payload: payload.clone(),
         authentication: text(&v, "authentication"),
     };
-    if e.protocol_version != expected_version {
+    if !accepts_version(&expected_version, &e.protocol_version) {
         return reject("unsupported version");
     }
     if e.request_id.is_empty()
@@ -202,20 +279,11 @@ pub fn verify(json: &str, secret: &str, expected_version: &str, now_ms: i64) -> 
         return reject("deadline expired");
     }
     // P3-079 (Java parity): verify what was signed — the signer refuses
-    // newline-bearing identity fields, so a hand-crafted envelope carrying one
-    // (valid HMAC over a shifted canonical) must not verify.
-    for part in [
-        e.protocol_version.as_str(),
-        e.message_type.as_str(),
-        e.request_id.as_str(),
-        e.account_scope_id.as_str(),
-        e.execution_partition_id.as_str(),
-        e.payload_hash.as_str(),
-        e.fence_token.as_str(),
-    ] {
-        if part.contains('\n') || part.contains('\r') {
-            return reject("malformed envelope");
-        }
+    // newline-bearing identity fields, so a hand-crafted v1 envelope carrying one
+    // (valid HMAC over a shifted canonical) must not verify. v2 is length-prefixed,
+    // so a newline there is unambiguous and must NOT be rejected.
+    if e.protocol_version != PROTOCOL_V2 && v1_has_newline_boundary(&e) {
+        return reject("malformed envelope");
     }
     // Recompute canonical + HMAC using the same payload_json the sender used.
     // The sender's payload_json is the compact encoding of the payload node.
@@ -425,6 +493,80 @@ mod tests {
     const PARITY_AUTH: &str = "ae9003e44be67518aafd38be98d9cb6132120890925bc1dc713fc2708fa0e9ba";
     const PARITY_ENVELOPE_JSON: &str = r#"{"protocol_version":"execution-gateway.v1","message_type":"EXECUTION_INTENT","request_id":"parity-req-0001","account_scope_id":"parity-acct-001","execution_partition_id":"parity-partition-1","payload_hash":"bceb5c2c5139f412f53bf7d27178ea551f68d333566d52485fc5d705e3d06e71","gate_epoch":42,"fence_token":"parity-fence-token-xyz","deadline_epoch_ms":2000000000000,"payload":{"zulu":"z","alpha":"a","qty":100},"authentication":"ae9003e44be67518aafd38be98d9cb6132120890925bc1dc713fc2708fa0e9ba"}"#;
     const PARITY_NOW_MS: i64 = 1_000_000_000_000; // well before deadline
+
+    // P3-079: cross-language v2 conformance vector. Same field values as the v1 fixture above, so
+    // the only difference is the canonical form — a divergence between Java/Rust/Python surfaces
+    // here as a wrong HMAC rather than as a subtle mis-binding.
+    const PARITY_V2_CANONICAL: &str = "20:execution-gateway.v216:EXECUTION_INTENT15:parity-req-000115:parity-acct-00118:parity-partition-164:bceb5c2c5139f412f53bf7d27178ea551f68d333566d52485fc5d705e3d06e712:4222:parity-fence-token-xyz13:200000000000034:{\"zulu\":\"z\",\"alpha\":\"a\",\"qty\":100}";
+    const PARITY_V2_AUTH: &str =
+        "655eba65b51e57c79ce50e620511da371722f430266d32e6a7e44cb425b0e9f0";
+
+    fn parity_envelope_v2() -> Envelope {
+        let mut e = parity_envelope();
+        e.protocol_version = PROTOCOL_V2.to_string();
+        e
+    }
+
+    #[test]
+    fn p3_079_v2_canonical_matches_cross_language_vector() {
+        let e = parity_envelope_v2();
+        let payload_json = serde_json::to_string(&e.payload).unwrap();
+        let canon = canonical(&e, &payload_json);
+        assert_eq!(canon, PARITY_V2_CANONICAL, "v2 canonical bytes must match the vector");
+        assert_eq!(
+            hmac_hex(PARITY_SECRET, &canon),
+            PARITY_V2_AUTH,
+            "v2 HMAC must match the Java/Python vector"
+        );
+    }
+
+    #[test]
+    fn p3_079_length_prefixing_is_injective_where_v1_is_not() {
+        // The exact ambiguity P3-079 describes: two DIFFERENT field splits, one v1 string.
+        assert_eq!(["a\nb", "c"].join("\n"), ["a", "b\nc"].join("\n"),
+            "v1 is ambiguous across a field boundary");
+        assert_ne!(
+            length_prefixed(&["a\nb", "c"]),
+            length_prefixed(&["a", "b\nc"]),
+            "v2 must keep the same two fields distinct"
+        );
+        // Byte length, not char length: 'e-acute' is 2 UTF-8 bytes but 1 char.
+        assert_eq!(length_prefixed(&["\u{e9}"]), "2:\u{e9}",
+            "v2 must count UTF-8 bytes or the three languages disagree off-ASCII");
+    }
+
+    #[test]
+    fn p3_079_v2_round_trips_and_v1_fixture_is_untouched() {
+        let e = parity_envelope_v2();
+        let encoded = encode_envelope(PARITY_SECRET, &e).expect("v2 encode");
+        assert!(encoded.contains(PARITY_V2_AUTH), "encoded v2 envelope must carry the v2 HMAC");
+        // The v1 fixture still verifies byte-for-byte — the change is additive.
+        let v1 = verify(PARITY_ENVELOPE_JSON, PARITY_SECRET, PARITY_PROTOCOL_VERSION, PARITY_NOW_MS);
+        assert!(v1.accepted, "v1 fixture must still verify: {}", v1.reason);
+        // A v1-only config refuses v2; a dual-accept config takes both, each under its own form.
+        let refused = verify(&encoded, PARITY_SECRET, PARITY_PROTOCOL_VERSION, PARITY_NOW_MS);
+        assert!(!refused.accepted, "a v1-only config must refuse a v2 envelope");
+        let dual = format!("{},{}", PROTOCOL_V1, PROTOCOL_V2);
+        let v2_dual = verify(&encoded, PARITY_SECRET, &dual, PARITY_NOW_MS);
+        assert!(v2_dual.accepted, "dual-accept must take v2: {}", v2_dual.reason);
+        let v1_dual = verify(PARITY_ENVELOPE_JSON, PARITY_SECRET, &dual, PARITY_NOW_MS);
+        assert!(v1_dual.accepted, "dual-accept must still take v1: {}", v1_dual.reason);
+    }
+
+    #[test]
+    fn p3_079_v2_allows_newline_fields_that_v1_must_refuse() {
+        let mut e = parity_envelope_v2();
+        e.request_id = "req-\n-shift".to_string();
+        // v2: the encoding is injective, so a newline is a non-issue.
+        let encoded = encode_envelope(PARITY_SECRET, &e).expect("v2 must accept a newline field");
+        let v = verify(&encoded, PARITY_SECRET, PROTOCOL_V2, PARITY_NOW_MS);
+        assert!(v.accepted, "v2 must verify what v1 had to refuse: {}", v.reason);
+        // v1: still refused — the backstop tracks the FORM, not the literal version.
+        let mut legacy = e.clone();
+        legacy.protocol_version = "v1".to_string();
+        assert!(encode_envelope(PARITY_SECRET, &legacy).is_err(),
+            "a custom version still gets the legacy join and still needs the backstop");
+    }
 
     fn parity_envelope() -> Envelope {
         // Use from_str to preserve the exact FIXED key order; json! with preserve_order
