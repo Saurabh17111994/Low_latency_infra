@@ -79,9 +79,17 @@ public final class FlussProjectionLedgerStore implements ProjectionLedgerStore {
             return null;
         });
     }
-    @Override public List<Entry> incomplete() throws Exception {
-        List<Entry> out = new ArrayList<>();
+    @Override public IncompletePage incomplete(int limit) throws Exception {
+        // P3-102: bounded page. Collecting stops at `limit`, but the scan cannot stop with it —
+        // there is no cursor for this table (see the interface javadoc), and this read drives
+        // recovery, so a page that quietly omitted work would skip it forever (until TTL). The
+        // scan therefore runs on only as far as one further recoverable entry, which makes
+        // `truncated` exact rather than an inference from a full page.
+        if (limit <= 0) throw new IllegalArgumentException("limit must be positive, got " + limit);
+        List<Entry> out = new ArrayList<>(Math.min(limit, 1024));
+        boolean truncated = false;
         var info = table.getTableInfo();
+        scan:
         for (int b = 0; b < info.getNumBuckets(); b++) {
             // P3-003: pollBatch returns one time-bounded page, not the bucket —
             // a single poll truncates wide ledgers (recoverable entries silently
@@ -93,15 +101,18 @@ public final class FlussProjectionLedgerStore implements ProjectionLedgerStore {
                     try (CloseableIterator<InternalRow> it = scanner.pollBatch(timeout)) {
                         while (it != null && it.hasNext()) {
                             Entry e = decode(it.next());
-                            if (ProjectionLedger.recoverable(e.state())) out.add(e);
                             any = true;
+                            if (!ProjectionLedger.recoverable(e.state())) continue;
+                            if (out.size() < limit) { out.add(e); continue; }
+                            truncated = true;
+                            break scan;
                         }
                     }
                     if (!any) break;
                 }
             }
         }
-        return out;
+        return new IncompletePage(out, truncated);
     }
     private static Entry decode(InternalRow r) {
         // P3-069: one corrupt/unknown-state row must not abort the whole

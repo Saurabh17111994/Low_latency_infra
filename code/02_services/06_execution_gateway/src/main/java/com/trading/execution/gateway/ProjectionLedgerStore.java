@@ -62,13 +62,41 @@ public interface ProjectionLedgerStore extends AutoCloseable {
      */
     void put(Entry entry) throws Exception;
     /**
-     * Every recoverable entry. Unbounded full-ledger scan by contract.
+     * A bounded page of recoverable work, plus whether more remains.
      *
-     * <p>DEV P3-102: no pagination/streaming here — the Fluss impl does
-     * limit(MAX) per bucket into one ArrayList (O(ledger) restart cost).
-     * Prefer a paged variant (e.g. incomplete(limit, afterEventId)) plus a
-     * retention contract before production volume.
+     * <p>Truncation is <b>reported</b> rather than left to be inferred. This read drives recovery,
+     * so a caller that mistook a full page for the entire set would silently skip recoverable
+     * work — the same class of bug as the unbounded scan it replaces, just quieter.
      */
-    java.util.List<Entry> incomplete() throws Exception;
+    record IncompletePage(List<Entry> entries, boolean truncated) {
+        public IncompletePage {
+            entries = List.copyOf(entries);
+        }
+    }
+
+    /**
+     * At most {@code limit} recoverable entries, with truncation made explicit — bounded by
+     * contract (P3-102).
+     *
+     * <p>Replaces an unbounded {@code incomplete()} that materialized every recoverable entry of
+     * the ledger into one list. What this bounds is <b>memory</b>. It does <b>not</b> bound time,
+     * and that is deliberate rather than overlooked: no sound cursor exists for this table.
+     * {@code postback_event_id} is the KV primary key and {@code bucket.key} is
+     * {@code postback_event_id}, so rows are ordered <i>within</i> a bucket only, and Fluss 0.9.1's
+     * {@code BatchScanner} cannot seek to a key. An {@code afterEventId} parameter would therefore
+     * re-scan and skip client-side — the same scan cost plus more code and a false promise of
+     * pagination. It should not be added until a caller needs it and the cost is understood.
+     *
+     * <p>Retention is already contracted: {@code table.log.ttl = '2d'} on this table bounds how far
+     * back recovery can be asked to look.
+     *
+     * <p>{@code truncated} is computed exactly, not guessed: the scan continues past a full page
+     * only as far as one further recoverable entry, so it is true iff more work exists — not merely
+     * when the page happens to be full. A false positive would cost one wasted page; a false
+     * negative would skip recovery.
+     *
+     * @throws IllegalArgumentException if {@code limit} is not positive
+     */
+    IncompletePage incomplete(int limit) throws Exception;
     @Override void close() throws Exception;
 }

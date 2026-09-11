@@ -60,7 +60,10 @@ class GatewayFlussDurableReplayIntegrationTest {
 
                     // Feed one source Execution_Intent.
                     String id = "instr-R-1";
-                    String hash = "hash-R-1";
+                    // request_hash must be a 64-hex sha256 (IntentValidator:37); a
+                    // human-readable placeholder here is rejected as an invalid
+                    // Execution_Intent, so the reader would never hand it off.
+                    String hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
                     Table intent = conn.getTable(TablePath.of(db, "Execution_Intent"));
                     AppendWriter w = intent.newAppend().createWriter();
                     try {
@@ -94,7 +97,10 @@ class GatewayFlussDurableReplayIntegrationTest {
                     assertThat(durableRecord(conn, admin, db, id)).contains(hash);
                 } finally {
                     try {
-                        admin.dropDatabase(db, false, false)
+                        // cascade=true: the scratch DB holds tables, and a
+                        // non-cascading drop throws DatabaseNotEmptyException —
+                        // swallowed below, which leaked the DB on every run.
+                        admin.dropDatabase(db, false, true)
                                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
                     } catch (Exception ignored) {
                         // best-effort scratch cleanup
@@ -157,7 +163,81 @@ class GatewayFlussDurableReplayIntegrationTest {
                     }
                 } finally {
                     try {
-                        admin.dropDatabase(db, false, false)
+                        // cascade=true: the scratch DB holds tables, and a
+                        // non-cascading drop throws DatabaseNotEmptyException —
+                        // swallowed below, which leaked the DB on every run.
+                        admin.dropDatabase(db, false, true)
+                                .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                    } catch (Exception ignored) {
+                        // best-effort scratch cleanup
+                    }
+                }
+            }
+        });
+    }
+
+    /**
+     * Live P3-102 proof: the recovery read is a BOUNDED page and its truncation flag is exact.
+     *
+     * <p>The flag is the safety-critical part. This read drives recovery, so a page that quietly
+     * omitted work would skip it until TTL — which is why truncation is reported rather than
+     * inferred, and why the interesting case is a FULL page that is not truncated (exactly as much
+     * work as the limit, nothing beyond). A naive "page is full ⇒ truncated" implementation passes
+     * every other case here and fails only that one.
+     */
+    @Test void incompletePageIsBoundedAndReportsTruncationExactly() {
+        String bootstrap = System.getenv("FLUSS_BOOTSTRAP");
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                bootstrap != null && !bootstrap.isBlank(),
+                "set FLUSS_BOOTSTRAP for live P3-102 bounded-recovery-page evidence");
+        assertTimeoutPreemptively(Duration.ofSeconds(90), () -> {
+            String db = "gateway_page_" + System.nanoTime();
+            Configuration conf = new Configuration();
+            conf.setString("bootstrap.servers", bootstrap);
+            try (Connection conn = ConnectionFactory.createConnection(conf);
+                 Admin admin = conn.getAdmin()) {
+                admin.createDatabase(db, DatabaseDescriptor.EMPTY, false)
+                        .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                try {
+                    createProjectionLedgerKv(admin, conn, db);
+                    try (FlussProjectionLedgerStore ledger =
+                                 FlussProjectionLedgerStore.open(config(db))) {
+                        long now = System.currentTimeMillis();
+                        for (int i = 0; i < 3; i++) {
+                            ledger.put(new ProjectionLedgerStore.Entry("pg-" + i,
+                                    ProjectionLedger.State.RECEIVED, null, 0, null, null, now, null));
+                        }
+                        // Terminal work is not recoverable and must not occupy the page.
+                        ledger.put(new ProjectionLedgerStore.Entry("pg-done",
+                                ProjectionLedger.State.COMPLETE, null, 0, null, null, now, now));
+
+                        // Bounded: fewer than the limit available.
+                        ProjectionLedgerStore.IncompletePage small = ledger.incomplete(2);
+                        assertThat(small.entries()).as("page size").hasSize(2);
+                        assertThat(small.truncated()).as("3 recoverable exist, page holds 2").isTrue();
+
+                        // EXACTNESS: a full page with no further work is NOT truncated.
+                        ProjectionLedgerStore.IncompletePage exact = ledger.incomplete(3);
+                        assertThat(exact.entries()).hasSize(3);
+                        assertThat(exact.truncated())
+                                .as("a full page that exhausts the work must not claim truncation")
+                                .isFalse();
+
+                        // Room to spare: everything, untruncated, terminal row excluded.
+                        ProjectionLedgerStore.IncompletePage all = ledger.incomplete(50);
+                        assertThat(all.entries()).hasSize(3);
+                        assertThat(all.entries()).allMatch(
+                                e -> ProjectionLedger.recoverable(e.state()));
+                        assertThat(all.entries()).noneMatch(e -> "pg-done".equals(e.eventId()));
+                        assertThat(all.truncated()).isFalse();
+
+                        // No unbounded escape hatch: a non-positive limit is rejected.
+                        org.assertj.core.api.Assertions.assertThatThrownBy(() -> ledger.incomplete(0))
+                                .isInstanceOf(IllegalArgumentException.class);
+                    }
+                } finally {
+                    try {
+                        admin.dropDatabase(db, false, true)
                                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
                     } catch (Exception ignored) {
                         // best-effort scratch cleanup

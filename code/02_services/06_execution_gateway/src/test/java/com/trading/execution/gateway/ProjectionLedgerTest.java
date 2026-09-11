@@ -46,7 +46,14 @@ class ProjectionLedgerTest {
         ProjectionLedgerStore.Entry entry;
         public Entry lookup(String id) { return entry; }
         public void put(Entry e) { entry = e; }
-        public List<Entry> incomplete() { return entry == null ? List.of() : new ArrayList<>(List.of(entry)); }
+        public IncompletePage incomplete(int limit) {
+            // Same contract as the durable impl — a fake that accepts what the real store
+            // rejects would let a bad call site pass here and fail only in production.
+            if (limit <= 0) throw new IllegalArgumentException("limit must be positive, got " + limit);
+            return entry == null
+                    ? new IncompletePage(List.of(), false)
+                    : new IncompletePage(List.of(entry), false);
+        }
         public void close() {}
     }
 }
