@@ -88,7 +88,7 @@ BIEQ_INSTRUMENT_TOKEN = 2866
 BIEQ_QUANTITY = 1
 APPROVED_OPERATOR = "saurabh"
 
-PROTOCOL_VERSION = "execution-gateway.v1"
+PROTOCOL_VERSION = "execution-gateway.v2"
 EXECUTION_INTENT_MSG = "EXECUTION_INTENT"
 
 # ---------------------------------------------------------------------------

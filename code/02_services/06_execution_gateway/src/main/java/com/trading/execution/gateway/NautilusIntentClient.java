@@ -200,7 +200,7 @@ public final class NautilusIntentClient implements IntentSink {
         payload.put("product_type", i.productType()); payload.put("time_in_force", i.timeInForce());
         payload.put("request_hash", i.requestHash()); payload.put("schema_version", i.schemaVersion());
         String hash = GatewayProtocol.sha256(mapper.writeValueAsBytes(payload));
-        var envelope = new GatewayProtocol.Envelope(config.protocolVersion(), "EXECUTION_INTENT",
+        var envelope = new GatewayProtocol.Envelope(config.emittedProtocolVersion(), "EXECUTION_INTENT",
                 UUID.randomUUID().toString(), i.accountScopeId(), i.executionPartitionId(), hash, epoch,
                 fenceToken, System.currentTimeMillis() + config.requestTimeout().toMillis(), payload, null);
         HttpRequest request = HttpRequest.newBuilder(URI.create(config.nautilusEndpoint()))

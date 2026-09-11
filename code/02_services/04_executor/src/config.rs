@@ -74,7 +74,7 @@ impl ServiceConfig {
                 .to_string(),
             gateway_shared_secret: get("GATEWAY_SHARED_SECRET").unwrap_or("").to_string(),
             protocol_version: get("GATEWAY_PROTOCOL_VERSION")
-                .unwrap_or("execution-gateway.v1")
+                .unwrap_or("execution-gateway.v2")
                 .to_string(),
             clock_offset_limit_ms: get("CLOCK_OFFSET_LIMIT_MS")
                 .map(|v| v.parse::<i64>())
@@ -148,7 +148,9 @@ mod tests {
         assert!(c.is_halted_default());
         assert_eq!(c.listen_addr, "127.0.0.1:8787");
         assert!(c.gateway_shared_secret.is_empty());
-        assert_eq!(c.protocol_version, "execution-gateway.v1");
+        // P3-079: v2 (length-prefixed canonical form) is the default — the fix is native, not
+        // opt-in. The env-override test below still pins v1, proving the default is not hardcoded.
+        assert_eq!(c.protocol_version, "execution-gateway.v2");
     }
 
     #[test]

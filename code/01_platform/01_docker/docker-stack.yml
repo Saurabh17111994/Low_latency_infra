@@ -732,7 +732,7 @@ services:
       GATEWAY_BIND_HOST: 0.0.0.0
       GATEWAY_BIND_PORT: "9180"
       NAUTILUS_PRIVATE_ENDPOINT: http://nautilus:9190/v1/intents
-      GATEWAY_PROTOCOL_VERSION: execution-gateway.v1
+      GATEWAY_PROTOCOL_VERSION: execution-gateway.v2
       ACCOUNT_SCOPE_ID: ${ACCOUNT_SCOPE_ID:-prod-scope}
       EXECUTION_PARTITION_ID: ${EXECUTION_PARTITION_ID:-prod-partition}
       GATEWAY_REQUEST_TIMEOUT_MS: "2000"
@@ -768,7 +768,7 @@ services:
       # wrapper) support; open P3 work. Gate stays HALTED (EXECUTION_ENABLED
       # false) so no command ever flows meanwhile.
       GATEWAY_ENDPOINT: http://execution-gateway:9180
-      GATEWAY_PROTOCOL_VERSION: execution-gateway.v1
+      GATEWAY_PROTOCOL_VERSION: execution-gateway.v2
 
   # ---- Observability (VM4 / O1: outside Swarm, not a scheduling dependency) -
   # In production O1 is a dedicated host (not part of the manager quorum). If O1

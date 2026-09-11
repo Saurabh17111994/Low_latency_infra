@@ -125,7 +125,7 @@ public record GatewayConfig(
                 Map.entry("GATEWAY_BIND_HOST", env("GATEWAY_BIND_HOST", "127.0.0.1")),
                 Map.entry("GATEWAY_BIND_PORT", env("GATEWAY_BIND_PORT", "9180")),
                 Map.entry("NAUTILUS_PRIVATE_ENDPOINT", env("NAUTILUS_PRIVATE_ENDPOINT", "http://127.0.0.1:9190/v1/intents")),
-                Map.entry("GATEWAY_PROTOCOL_VERSION", env("GATEWAY_PROTOCOL_VERSION", "execution-gateway.v1")),
+                Map.entry("GATEWAY_PROTOCOL_VERSION", env("GATEWAY_PROTOCOL_VERSION", "execution-gateway.v2")),
                 Map.entry("GATEWAY_SHARED_SECRET", requiredEnv("GATEWAY_SHARED_SECRET")),
                 Map.entry("GATEWAY_REQUEST_TIMEOUT_MS", env("GATEWAY_REQUEST_TIMEOUT_MS", "2000")),
                 Map.entry("GATEWAY_POLL_TIMEOUT_MS", env("GATEWAY_POLL_TIMEOUT_MS", "250")),
@@ -155,6 +155,23 @@ public record GatewayConfig(
     private static boolean parseExecutionEnabled(String value) {
         if (value == null || value.isBlank()) return false;
         return Boolean.parseBoolean(value.trim());
+    }
+
+    /**
+     * The generation this gateway SIGNS with — the first of the accepted set.
+     *
+     * <p>P3-079: {@link #protocolVersion()} may name several accepted generations
+     * ({@code "execution-gateway.v1,execution-gateway.v2"}) so a mixed fleet can migrate without a
+     * flag day, but that list is a <b>verification</b> setting. Stamping it into an outbound
+     * envelope would send a peer the literal {@code "execution-gateway.v1,execution-gateway.v2"}
+     * as its version — a string no peer accepts and no canonical form matches. Emitting the first
+     * entry instead keeps a multi-value config usable on both paths.
+     */
+    public String emittedProtocolVersion() {
+        String configured = protocolVersion();
+        if (configured == null) return null;
+        int comma = configured.indexOf(',');
+        return comma < 0 ? configured.trim() : configured.substring(0, comma).trim();
     }
 
     private static String env(String key, String fallback) {
