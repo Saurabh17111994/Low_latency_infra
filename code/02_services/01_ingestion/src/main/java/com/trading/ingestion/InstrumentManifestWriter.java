@@ -1,5 +1,6 @@
 package com.trading.ingestion;
 
+import com.trading.ingestion.shutdown.BoundedClose;
 import java.time.Duration;
 import java.util.HashSet;
 import java.util.List;
@@ -272,7 +273,10 @@ public final class InstrumentManifestWriter implements AutoCloseable {
             f.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
             written++;
         }
-        writer.flush();
+        // No flush here (2026-09-12): every future above was awaited, so it is a
+        // no-op on the success path, and on the failure path f.get() throws before
+        // reaching this line — it was unreachable, never load-bearing. See
+        // BoundedClose for why a bare flush() is not a free call anyway.
         LOG.info("instrument-manifest-writer: upserted {} rows into {} "
                 + "(composite-PK raw-client path)", written, tableName);
         return written;
@@ -280,12 +284,19 @@ public final class InstrumentManifestWriter implements AutoCloseable {
 
     @Override
     public void close() {
-        try {
-            writer.flush();
-        } catch (Exception e) {
-            LOG.warn("instrument-manifest-writer: final flush failed: {}", e.getMessage());
-        }
-        closeQuietly();
+        // Bounded release (2026-09-12): RETAINED here (unlike the write-path flush
+        // above), because on the mid-loop failure path this is the only thing that
+        // gives the un-awaited stragglers a chance to land — load-bearing, so it is
+        // bounded rather than deleted (flush() and Connection.close() are both
+        // unbounded in Fluss 0.9.1; see BoundedClose).
+        BoundedClose.run("instrument-manifest-writer", () -> {
+            try {
+                writer.flush();
+            } catch (Exception e) {
+                LOG.warn("instrument-manifest-writer: final flush failed: {}", e.getMessage());
+            }
+            closeQuietly();
+        });
     }
 
     /** R-141: release the Fluss Connection + Table held since construction. */

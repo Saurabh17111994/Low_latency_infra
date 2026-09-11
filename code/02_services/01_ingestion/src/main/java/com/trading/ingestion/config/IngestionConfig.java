@@ -605,7 +605,7 @@ public final class IngestionConfig {
         long maxPendingBytes = MAX_PENDING_BYTES; // 192 MiB — T2 3k default
         double pendingWarningPercent = WARNING_PERCENT;
         Duration appendTimeout = Duration.ofSeconds(5);
-        Duration drainDeadline = Duration.ofSeconds(30);
+        Duration drainDeadline = Duration.ofSeconds(2);
         long zeroAckTimeoutMs = 10_000L; // zero-ack watchdog (0 = disabled)
         long clockOffsetLimitMs = CLOCK_OFFSET_LIMIT_MS; // T10: 2s default
         long arrowMaxEventAgeMs;

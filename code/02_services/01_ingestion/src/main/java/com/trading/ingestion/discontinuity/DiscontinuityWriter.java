@@ -1,6 +1,7 @@
 package com.trading.ingestion.discontinuity;
 
 import com.trading.ingestion.bridge.BridgeEvent;
+import com.trading.ingestion.shutdown.BoundedClose;
 import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -306,20 +307,26 @@ public class DiscontinuityWriter implements DiscontinuitySink {
 
     @Override
     public void close() {
-        try {
-            writer.flush();
-            // AppendWriter (TableWriter) does not have close() in Fluss 0.9.1-incubating.
-        } catch (Exception e) {
-            LOG.warn("discontinuity-writer: close failed: {}", e.getMessage());
-        }
-        // R-062: close the Connection + Table this writer created.
-        try {
-            if (table != null) table.close();
-        } catch (Exception ignored) {
-        }
-        try {
-            if (connection != null) connection.close();
-        } catch (Exception ignored) {
-        }
+        // Bounded release (2026-09-12): flush() AND the Connection/Table close are
+        // both unbounded in Fluss 0.9.1, so the whole release sits inside the
+        // deadline — see BoundedClose. The flush is kept: it is what gives an
+        // un-acked discontinuity row a chance to land before close discards it.
+        BoundedClose.run("discontinuity-writer", () -> {
+            try {
+                writer.flush();
+                // AppendWriter (TableWriter) does not have close() in Fluss 0.9.1-incubating.
+            } catch (Exception e) {
+                LOG.warn("discontinuity-writer: close failed: {}", e.getMessage());
+            }
+            // R-062: close the Connection + Table this writer created.
+            try {
+                if (table != null) table.close();
+            } catch (Exception ignored) {
+            }
+            try {
+                if (connection != null) connection.close();
+            } catch (Exception ignored) {
+            }
+        });
     }
 }

@@ -32,6 +32,7 @@ import com.trading.ingestion.write.WriterWorker;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -99,7 +100,11 @@ public final class IngestionService {
      *  soon as every hook returns and does not wait for the main thread, so the
      *  final {@code bridge loop ended} report (logged by main as it unwinds)
      *  could race the halt. Join long enough for the unwind to flush it. */
-    private static final long SHUTDOWN_MAIN_JOIN_MS = 10_000L;
+    /** Bounded join for the main thread on the shutdown-hook path. */
+    static final long SHUTDOWN_MAIN_JOIN_MS = 10_000L;
+
+    /** Bounded reap of a late-respawned bridge process before the JVM halts. */
+    static final long LATE_BRIDGE_REAP_MS = 3_000L;
 
     private final String instanceId;
     private final AppendTracker tracker;
@@ -1921,20 +1926,36 @@ public final class IngestionService {
         // J2: Drain pending writes with deadline — T6-3: close the queue
         // first (stops new offers), the worker drains everything queued,
         // then the writer closes (pending acks + drain deadline).
+        // B130 lifted (2026-09-12): ONE shared deadline across every worker
+        // instead of a fresh full budget each — the phase used to scale with
+        // FLUSS_WRITERS (N x drainDeadline), which no stop grace period covered.
         if (writerWorkers != null) {
+            long drainDeadlineNanos = System.nanoTime() + config.drainDeadline.toNanos();
             for (WriterWorker w : writerWorkers) {
-                if (w != null) w.close();
+                if (w != null) {
+                    w.close(Duration.ofNanos(
+                            Math.max(0, drainDeadlineNanos - System.nanoTime())));
+                }
             }
         }
         if (writer != null) writer.close();
 
-        // Close metrics emitter (triggers final flush)
-        metrics.close();
-
-        // Close quarantine + discontinuity writers
+        // Evidence writers BEFORE metrics (2026-09-12 ordering fix). These three
+        // hold safety-critical pending evidence (a pending UNSAFE halt, a
+        // quarantine row, a discontinuity marker) and each release is bounded.
+        // metrics.close() can consume up to 11s on its own (6s scheduler
+        // awaitTermination + 5s final-flush single-flight), so with the writers
+        // left after it a container SIGKILL at the stop grace period would land
+        // first and the pending safety-halt evidence would never be flushed.
+        // P1-067's constraint still holds: metrics outlive the DRAIN, which is
+        // already complete above — nothing here writes telemetry.
         if (quarantineWriter != null) quarantineWriter.close();
         if (discontinuityWriter != null) discontinuityWriter.close();
         if (safetyHaltWriter != null) safetyHaltWriter.close();
+
+        // Close metrics emitter (triggers final flush)
+        metrics.close();
+
         // Join the main thread (bounded) when this is the shutdown hook and the
         // bridge loop was live: the loop logs the final "bridge loop ended
         // (ticks=…)" report after `running` flips false, and the JVM halts as
@@ -1960,7 +1981,7 @@ public final class IngestionService {
             LOG.warn("ingestion: reaping late bridge (pid={}) spawned during shutdown", latest.pid());
             signalBridge(latest);
             try {
-                if (!latest.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)) {
+                if (!latest.waitFor(LATE_BRIDGE_REAP_MS, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                     latest.destroyForcibly();
                 }
             } catch (InterruptedException ie) {

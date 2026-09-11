@@ -44,6 +44,23 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(OtlpMetricsEmitter.class);
 
+    /**
+     * Bounded close budget, part 1: how long the periodic-flush scheduler gets
+     * to stop before it is forced.
+     *
+     * <p>Public because this is a budget fact the shutdown accounting needs:
+     * {@code ShutdownBudgetGraceTest} sums it against the container stop grace
+     * period. Changing it without the grace period is what that test catches.
+     */
+    public static final long SHUTDOWN_SCHEDULER_WAIT_SECONDS = 6;
+
+    /**
+     * Bounded close budget, part 2: how long the final flush waits for the
+     * single-flight guard before giving up (loudly) on a stuck periodic flush.
+     * See {@link #SHUTDOWN_SCHEDULER_WAIT_SECONDS} for why it is public.
+     */
+    public static final long FINAL_FLUSH_WAIT_SECONDS = 5;
+
     // G6 (ING-UNIT-021): the OTLP export body must never carry credentials or
     // raw payloads. The only caller-supplied strings that reach the payload
     // are the decode-error reason labels, so they are scrubbed with the same
@@ -237,7 +254,7 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
         // silently discard up to 10s of buffered metrics on every shutdown.
         scheduler.shutdown();
         try {
-            if (!scheduler.awaitTermination(6, TimeUnit.SECONDS)) {
+            if (!scheduler.awaitTermination(SHUTDOWN_SCHEDULER_WAIT_SECONDS, TimeUnit.SECONDS)) {
                 LOG.warn("otlp-metrics: scheduler did not stop in 6s; forcing");
                 scheduler.shutdownNow();
             }
@@ -252,7 +269,7 @@ public final class OtlpMetricsEmitter implements AutoCloseable {
         // Residual: if the guard never frees within 5s the final POST is
         // skipped with a loud warn (accepted — pathological 11s+ stall).
         long deadline = System.nanoTime()
-                + TimeUnit.SECONDS.toNanos(5);
+                + TimeUnit.SECONDS.toNanos(FINAL_FLUSH_WAIT_SECONDS);
         while (!flushing.compareAndSet(false, true)) {
             if (System.nanoTime() >= deadline) {
                 LOG.warn("otlp-metrics: final flush skipped (periodic flush stuck)");

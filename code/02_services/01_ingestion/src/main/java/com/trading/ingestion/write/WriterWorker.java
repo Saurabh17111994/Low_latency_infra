@@ -159,8 +159,21 @@ public final class WriterWorker implements AutoCloseable {
      */
     @Override
     public void close() {
+        close(closeBudget);
+    }
+
+    /**
+     * Close with an explicit budget, so a caller releasing SEVERAL workers can
+     * share one deadline instead of granting each a fresh full one (B130's
+     * lesson applied one level up: the shutdown path used to hand N workers N
+     * sequential full budgets, so the drain phase scaled with FLUSS_WRITERS).
+     *
+     * @param budget remaining time for the whole worker-stop wait plus the
+     *               writer close; zero means "abandon now and count it"
+     */
+    public void close(Duration budget) {
         queue.close();
-        long deadlineNanos = System.nanoTime() + closeBudget.toNanos();
+        long deadlineNanos = System.nanoTime() + budget.toNanos();
         try {
             long remaining = deadlineNanos - System.nanoTime();
             if (remaining <= 0

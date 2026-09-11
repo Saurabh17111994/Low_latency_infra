@@ -629,6 +629,23 @@ services:
     # gate on otel health via the OTLP endpoint.
     restart: on-failure:3
     depends_on: [fluss-coordinator, fluss-tablet, otel-collector]
+    # 2026-09-12: explicit stop grace period. Docker's default is 10s, but
+    # ingestion's shutdown sequence is deliberately allowed to take longer than
+    # that (the uncertainty journal is persisted BEFORE the drain, and the
+    # evidence writers each release under a bounded budget), so a SIGKILL at 10s
+    # would land mid-sequence and discard pending safety-halt / quarantine /
+    # discontinuity evidence. Worst case is the sum of the bounded steps:
+    #   drain phase            ~2s   (DRAIN_DEADLINE_SECONDS, one shared budget)
+    #   evidence writers       6s    (3 x BoundedClose 2s)
+    #   metrics final flush   11s    (6s scheduler awaitTermination + 5s single-flight)
+    #   main-thread join      10s    (SHUTDOWN_MAIN_JOIN_MS)
+    #   late-bridge reap       3s
+    #   ------------------------------------
+    #   ~32s, so 40s leaves headroom. Healthy shutdowns take milliseconds; this
+    #   bound only applies to a wedged cluster. Raising DRAIN_DEADLINE_SECONDS
+    #   past its 2s default eats into the headroom — keep the sum under 40s
+    #   (pinned by ShutdownBudgetGraceTest).
+    stop_grace_period: 40s
     environment:
       # S3 (2026-08-29, decision A): secrets are delivered via env_file — the
       # SecretGuard skips its fail-closed check when this marker is present.

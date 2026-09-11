@@ -4,6 +4,7 @@ import com.trading.common.schema.RawTableSchema;
 import com.trading.ingestion.model.RawTick;
 import com.trading.common.schema.EventDay;
 import com.trading.ingestion.model.TickPacket;
+import com.trading.ingestion.shutdown.BoundedClose;
 import com.trading.ingestion.write.FlussRowConverter;
 import com.trading.ingestion.write.RawTickWriter;
 import java.time.Instant;
@@ -175,15 +176,24 @@ final class TypedFlussRowConverter implements FlussRowConverter {
             }
             closed = true;
         }
-        try {
-            writer.flush();
-        } catch (Exception e) {
-            LOG.warn("fluss: typed converter flush failed: {}", e.getMessage());
-        }
-        try {
-            connection.close();
-        } catch (Exception e) {
-            LOG.warn("fluss: typed converter close failed: {}", e.getMessage());
-        }
+        // Bounded release (2026-09-12): append() is fire-and-forget from this
+        // writer's side (it hands back a future without awaiting it), so the
+        // flush is load-bearing — it is what gives buffered batches a chance to
+        // land — and it is retained rather than deleted. flush() and
+        // connection.close() are both unbounded in Fluss 0.9.1; the whole
+        // release is bounded here so a wedged cluster cannot hang shutdown.
+        // See BoundedClose.
+        BoundedClose.run("typed-fluss-converter", () -> {
+            try {
+                writer.flush();
+            } catch (Exception e) {
+                LOG.warn("fluss: typed converter flush failed: {}", e.getMessage());
+            }
+            try {
+                connection.close();
+            } catch (Exception e) {
+                LOG.warn("fluss: typed converter close failed: {}", e.getMessage());
+            }
+        });
     }
 }

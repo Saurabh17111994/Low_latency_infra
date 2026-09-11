@@ -1,5 +1,6 @@
 package com.trading.ingestion.quarantine;
 
+import com.trading.ingestion.shutdown.BoundedClose;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
@@ -203,13 +204,19 @@ public class QuarantineWriter implements QuarantineSink {
 
     @Override
     public void close() {
-        try {
-            writer.flush();
-            // AppendWriter (TableWriter) does not have close() in Fluss 0.9.1-incubating
-        } catch (Exception e) {
-            LOG.warn("quarantine-writer: close failed: {}", e.getMessage(), e);
-        }
-        closeQuietly();
+        // Bounded release (2026-09-12): flush() AND Connection.close() are both
+        // unbounded in Fluss 0.9.1 — see BoundedClose. The flush is kept: it is
+        // what gives an un-acked quarantine row a chance to land before close
+        // discards it.
+        BoundedClose.run("quarantine-writer", () -> {
+            try {
+                writer.flush();
+                // AppendWriter (TableWriter) does not have close() in Fluss 0.9.1-incubating
+            } catch (Exception e) {
+                LOG.warn("quarantine-writer: close failed: {}", e.getMessage(), e);
+            }
+            closeQuietly();
+        });
     }
 
     /** R-253: release the Fluss Connection + Table held since construction. */

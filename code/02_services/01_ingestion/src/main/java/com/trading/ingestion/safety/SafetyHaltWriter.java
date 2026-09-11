@@ -1,5 +1,6 @@
 package com.trading.ingestion.safety;
 
+import com.trading.ingestion.shutdown.BoundedClose;
 import java.security.MessageDigest;
 import java.util.HexFormat;
 import java.util.concurrent.CompletableFuture;
@@ -273,12 +274,20 @@ public final class SafetyHaltWriter implements SafetySink {
 
     @Override
     public void close() {
-        try {
-            writer.flush();
-        } catch (Exception e) {
-            LOG.warn("safety-halt-writer: close failed: {}", e.getMessage());
-        }
-        closeQuietly();
+        // Bounded release (2026-09-12): flush() AND Connection.close() are both
+        // unbounded in Fluss 0.9.1, so both sit inside the deadline — bounding
+        // only the flush would still leave shutdown wedged on the connection
+        // release. The flush is kept (not deleted): RecordAccumulator.close()
+        // discards pending records without completing their futures, so it is
+        // what gives an un-acked halt request a chance to land. See BoundedClose.
+        BoundedClose.run("safety-halt-writer", () -> {
+            try {
+                writer.flush();
+            } catch (Exception e) {
+                LOG.warn("safety-halt-writer: close failed: {}", e.getMessage());
+            }
+            closeQuietly();
+        });
     }
 
     /** R-141: release the Fluss Connection + Table held since construction. */
