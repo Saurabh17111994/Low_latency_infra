@@ -12,6 +12,9 @@ package com.trading.common.schema.position;
  */
 public record FillEvent(
         String positionId,
+        // nullable by design: FillEventMapper passes null when TRADE_CONTEXT_ID is null, and
+        // FlussPositionsStateStore reads it through the null-tolerant bs() helper — so this field is
+        // deliberately unchecked here (P3-389).
         String tradeContextId,
         String accountScopeId,
         long instrumentToken,
@@ -30,6 +33,24 @@ public record FillEvent(
     public FillEvent {
         if (positionId == null || positionId.isBlank()) {
             throw new IllegalArgumentException("position_id is required");
+        }
+        // P3-389: the direct-feed path (FillEvent -> PositionProjectorDriver.feed) bypasses
+        // FillContext, so these caller-resolved identity fields went unchecked: a null
+        // account/exchange/symbol NPE'd later in FlussPositionsStateStore.upsert
+        // (BinaryString.fromString) and a 0/negative instrumentToken corrupted position correlation.
+        // Checked at the one construction point every path shares, with FillContext's rules.
+        if (accountScopeId == null || accountScopeId.isBlank()) {
+            throw new IllegalArgumentException("account_scope_id is required");
+        }
+        if (instrumentToken <= 0) {
+            throw new IllegalArgumentException("instrument_token must be positive, got "
+                    + instrumentToken);
+        }
+        if (exchange == null || exchange.isBlank()) {
+            throw new IllegalArgumentException("exchange is required");
+        }
+        if (symbol == null || symbol.isBlank()) {
+            throw new IllegalArgumentException("symbol is required");
         }
         if (fillQty <= 0) {
             throw new IllegalArgumentException("fill_qty must be positive, got " + fillQty);

@@ -12,6 +12,11 @@ import org.junit.jupiter.api.Test;
  * dereferenced by {@link PositionProjector} and by
  * {@code FlussPositionsStateStore.upsert}, so a null/blank one is rejected at
  * construction rather than surfacing as an NPE mid-projection.
+ *
+ * <p>P3-389 adds the caller-resolved identity fields: the direct-feed path
+ * ({@code FillEvent} → {@code PositionProjectorDriver.feed}) bypasses
+ * {@link FillContext}, so {@code accountScopeId}/{@code instrumentToken}/{@code exchange}/
+ * {@code symbol} are checked here too — while {@code tradeContextId} stays nullable by design.
  */
 class FillEventTest {
 
@@ -63,5 +68,49 @@ class FillEventTest {
         assertThat(rebound.fillQty()).isEqualTo(10L);
         assertThat(rebound.fillPricePaise()).isEqualTo(10050L);
         assertThat(rebound.side()).isEqualTo(FillEvent.SIDE_BUY);
+    }
+
+    @Test
+    void rejectsNullOrBlankAccountScopeId() {
+        // P3-389: the direct-feed path bypassed FillContext, so a null account reached
+        // FlussPositionsStateStore.upsert and NPE'd in BinaryString.fromString.
+        assertThatThrownBy(() -> new FillEvent("pos-1", "tc-1", null, 123L, "NSE", "RELIANCE",
+                FillEvent.SIDE_BUY, 10L, 10050L, "pb-1", 1L, 0L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("account_scope_id");
+        assertThatThrownBy(() -> new FillEvent("pos-1", "tc-1", "   ", 123L, "NSE", "RELIANCE",
+                FillEvent.SIDE_BUY, 10L, 10050L, "pb-1", 1L, 0L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("account_scope_id");
+    }
+
+    @Test
+    void rejectsNonPositiveInstrumentToken() {
+        // P3-389: the token is part of the position key, so 0/negative corrupted correlation.
+        assertThatThrownBy(() -> new FillEvent("pos-1", "tc-1", "acc-1", 0L, "NSE", "RELIANCE",
+                FillEvent.SIDE_BUY, 10L, 10050L, "pb-1", 1L, 0L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("instrument_token must be positive");
+    }
+
+    @Test
+    void rejectsNullOrBlankExchangeOrSymbol() {
+        // P3-389: same bypass — blank exchange/symbol reaches the store and mis-keys the position.
+        assertThatThrownBy(() -> new FillEvent("pos-1", "tc-1", "acc-1", 123L, null, "RELIANCE",
+                FillEvent.SIDE_BUY, 10L, 10050L, "pb-1", 1L, 0L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("exchange is required");
+        assertThatThrownBy(() -> new FillEvent("pos-1", "tc-1", "acc-1", 123L, "NSE", " ",
+                FillEvent.SIDE_BUY, 10L, 10050L, "pb-1", 1L, 0L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("symbol is required");
+    }
+
+    @Test
+    void nullTradeContextIdStaysAcceptedByDesign() {
+        // P3-389 fix block: FillEventMapper passes null when TRADE_CONTEXT_ID is null and the
+        // store's bs() is null-tolerant, so this field must stay unchecked and documented as such.
+        assertThatCode(() -> new FillEvent("pos-1", null, "acc-1", 123L, "NSE", "RELIANCE",
+                FillEvent.SIDE_BUY, 10L, 10050L, "pb-1", 1L, 0L)).doesNotThrowAnyException();
     }
 }
