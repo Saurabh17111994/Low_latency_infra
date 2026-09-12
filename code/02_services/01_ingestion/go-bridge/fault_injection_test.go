@@ -88,8 +88,20 @@ func TestFaultInjectionDecodeBurstRecovers(t *testing.T) {
 	// an ACTIVE ack returned immediately instead: epoch 1 emits one before the
 	// burst, so the slot was cancelled before the reconnect was emitted and the
 	// BACKOFF event never reached the capture (2 of 6 full-suite runs).
+	// Two conditions, not one. attempts counts factory calls, so it reaches 2 when
+	// the reconnect DIALS -- before the new epoch has subscribed, and before
+	// main.go:601 emits its ACTIVE ack. Cancelling on the dial alone therefore
+	// killed epoch 2 mid-subscribe and the assertion below raced its own cancel:
+	// green standalone, red under the gate's full -race run (attempt 14, step 5,
+	// 2026-09-13: capture held 1 subscribe and 1 ack, both epoch 1's). Wait for
+	// the ack this test asserts; the deadline stays the failure bound, not the
+	// pass path (measured: the dial lands ~1.0 s in, its ack ms later).
 	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) && attempts.Load() < 2 {
+	for time.Now().Before(deadline) {
+		flushTestEmitter() // the emitter batches; poll flushed frames only
+		if attempts.Load() >= 2 && countSubscriptionAcks(t, capture.String()) >= 2 {
+			break
+		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	cancel()
@@ -105,12 +117,7 @@ func TestFaultInjectionDecodeBurstRecovers(t *testing.T) {
 	// epoch 1's ACTIVE (emitted *before* the burst). Epoch 1 emits exactly one
 	// ack, so >=2 acks prove the second epoch reached ACTIVE - the recovery this
 	// test claims to pin.
-	acks := 0
-	for _, e := range events {
-		if e["event"] == "subscription_ack" {
-			acks++
-		}
-	}
+	acks := countSubscriptionAcks(t, out)
 	if got := lastEventState(events, "subscription_ack"); got != "ACTIVE" || acks < 2 {
 		t.Fatalf("slot must recover to a second ACTIVE ack after the decode burst, got %q with %d ack(s)\n%s", got, acks, out)
 	}

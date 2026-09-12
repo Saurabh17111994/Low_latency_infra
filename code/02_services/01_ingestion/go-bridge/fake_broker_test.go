@@ -141,6 +141,21 @@ func lastEventState(events []map[string]any, event string) string {
 	return ""
 }
 
+// countSubscriptionAcks counts subscription_ack events in a captured proto
+// stream. eventsFrom skips frames it cannot decode, so this is safe to call
+// while the slot is still running and the newest frame is only half-written:
+// TestFaultInjectionDecodeBurstRecovers polls it to wait for the ack it asserts.
+func countSubscriptionAcks(t *testing.T, output string) int {
+	t.Helper()
+	n := 0
+	for _, e := range eventsFrom(t, output) {
+		if e["event"] == "subscription_ack" {
+			n++
+		}
+	}
+	return n
+}
+
 // TestFakeBrokerSubscriptionSuccess — a healthy fake broker: one subscription
 // response, one tick, then idle. runHFTEpoch must reach ACTIVE and emit a tick.
 func TestFakeBrokerSubscriptionSuccess(t *testing.T) {
