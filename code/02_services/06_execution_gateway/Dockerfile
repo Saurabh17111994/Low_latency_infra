@@ -1,12 +1,17 @@
+# BuildKit cache mounts on the maven layers (2026-09-12): the local repo is a
+# cross-build cache, not an image input -- the runtime stage copies only the jar.
+# Consequence to know: /root/.m2 is empty INSIDE these layers, so do not add a
+# COPY --from=build /root/.m2/... here; ddl-apply does exactly that and therefore
+# deliberately has no cache mount.
 FROM maven:3.9.9-eclipse-temurin-17 AS build
 WORKDIR /workspace
 COPY pom.xml /workspace/pom.xml
 COPY common /workspace/common
 COPY 02_services/01_ingestion /workspace/02_services/01_ingestion
 COPY 02_services/06_execution_gateway/pom.xml /workspace/02_services/06_execution_gateway/pom.xml
-RUN mvn -q -f /workspace/pom.xml -pl 02_services/06_execution_gateway -am dependency:go-offline -DskipTests || true
+RUN --mount=type=cache,target=/root/.m2 mvn -q -f /workspace/pom.xml -pl 02_services/06_execution_gateway -am dependency:go-offline -DskipTests || true
 COPY 02_services/06_execution_gateway/src /workspace/02_services/06_execution_gateway/src
-RUN mvn -q -f /workspace/pom.xml -pl 02_services/06_execution_gateway -am package -DskipTests
+RUN --mount=type=cache,target=/root/.m2 mvn -q -f /workspace/pom.xml -pl 02_services/06_execution_gateway -am package -DskipTests
 
 FROM eclipse-temurin:17-jre
 WORKDIR /app

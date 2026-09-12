@@ -1,3 +1,6 @@
+# BuildKit cache mounts on the go/maven layers (2026-09-12): the module, build and
+# local-repo caches are cross-build caches, not image inputs -- the runtime stage
+# copies only /arrow-bridge and ingestion.jar out of the builder stages.
 # Ingestion image — build context MUST be the Maven reactor root `code/`
 # (docker build -f 02_services/01_ingestion/Dockerfile . from code/), so the
 # parent POM, common module, and ingestion module are all present.
@@ -10,12 +13,12 @@ WORKDIR /src
 COPY 02_services/01_ingestion/go-bridge/go.mod 02_services/01_ingestion/go-bridge/go.sum ./
 COPY 02_services/01_ingestion/go-bridge/third_party ./third_party
 # In-repo SDK (relative replace in go.mod) — self-contained, reproducible.
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build go mod download
 COPY 02_services/01_ingestion/go-bridge/*.go ./
 # Generated proto package (market_data.pb.go + convert.go) — imported by
 # batch.go; the top-level *.go glob above does not descend into subdirs.
 COPY 02_services/01_ingestion/go-bridge/marketdata ./marketdata
-RUN CGO_ENABLED=0 go build -o /arrow-bridge .
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=0 go build -o /arrow-bridge .
 
 # Stage 2: Build Java ingestion (full reactor: parent + common + ingestion)
 # P1-135: pinned (2026-09-08, imagetools inspect).
@@ -26,9 +29,9 @@ COPY common ./common
 COPY 02_services/01_ingestion/pom.xml ./02_services/01_ingestion/pom.xml
 COPY 02_services/06_execution_gateway/pom.xml ./02_services/06_execution_gateway/pom.xml
 # Download deps first for layer caching
-RUN mvn -q dependency:go-offline -pl 02_services/01_ingestion -am 2>/dev/null || true
+RUN --mount=type=cache,target=/root/.m2 mvn -q dependency:go-offline -pl 02_services/01_ingestion -am 2>/dev/null || true
 COPY 02_services/01_ingestion/src ./02_services/01_ingestion/src
-RUN mvn -q -DskipTests package -pl 02_services/01_ingestion -am
+RUN --mount=type=cache,target=/root/.m2 mvn -q -DskipTests package -pl 02_services/01_ingestion -am
 
 # Stage 3: Runtime
 # P1-135: pinned (2026-09-08, imagetools inspect).
