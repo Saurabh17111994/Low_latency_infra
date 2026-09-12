@@ -65,11 +65,17 @@ pub fn lifecycle_event_value(
         .order_status
         .clone()
         .unwrap_or_else(|| default_state.to_string());
-    let pending_qty = place
-        .order
-        .as_ref()
-        .and_then(|o| o.quantity.parse::<i64>().ok())
-        .unwrap_or(0);
+    // P3-442: keyed on the normalized state rather than the leg — a cancel the broker refused
+    // leaves the order live, so its pending quantity is real and must not be zeroed.
+    let pending_qty = if normalized_state == "CANCELED" {
+        0
+    } else {
+        place
+            .order
+            .as_ref()
+            .and_then(|o| o.quantity.parse::<i64>().ok())
+            .unwrap_or(0)
+    };
     serde_json::json!({
         "postbackEventId": postback_event_id,
         "accountScopeId": account_scope_id,
@@ -195,6 +201,62 @@ mod tests {
             request_id: "req-1".into(),
             ..Default::default()
         }
+    }
+
+    fn cancel_env_with_echoed_order(quantity: &str) -> CommandEnvelope {
+        // P3-442: the real cancel leg echoes the original order node; the older cancel
+        // fixture carries none, so its pending-quantity assertion passed vacuously.
+        let order = OrderCommand::new("NSE", "BI-EQ")
+            .with_quantity(quantity)
+            .with_side(crate::bridge::protocol::TransactionType::Buy)
+            .with_order_type(crate::bridge::protocol::OrderType::Lmt)
+            .with_product(crate::bridge::protocol::Product::Cash)
+            .with_validity(crate::bridge::protocol::Validity::Day)
+            .with_price("5050");
+        let mut env = CommandEnvelope::new(Command::Cancel, "req-2");
+        env.instruction_id = "T9-SB-0001".into();
+        env.execution_attempt_id = "att-0002".into();
+        env.client_order_ref = "b1b2c3d4e5f6a7b8".into();
+        env.broker_order_id = "BRK-0001".into();
+        env.order = Some(order);
+        env
+    }
+
+    #[test]
+    fn cancel_ack_with_echoed_order_reports_zero_pending() {
+        // P3-442: CANCELED beside a non-zero pending quantity is a self-contradicting record.
+        let mut rep = report();
+        rep.order_status = None; // a sync cancel ack carries no status -> normalized CANCELED
+        let v = lifecycle_event_value(
+            &rep,
+            &cancel_env_with_echoed_order("100"),
+            "s",
+            "p",
+            1,
+            "tc",
+            5,
+        );
+        assert_eq!(v["lifecycle"]["normalizedState"], "CANCELED");
+        assert_eq!(v["lifecycle"]["pendingQty"], 0);
+    }
+
+    #[test]
+    fn cancel_ack_that_did_not_take_effect_keeps_its_pending_quantity() {
+        // The other half of P3-442: zeroing must follow the normalized state, not the leg.
+        // A cancel the broker refused leaves the order live, so its pending quantity is real.
+        let mut rep = report();
+        rep.order_status = Some("REJECTED".into());
+        let v = lifecycle_event_value(
+            &rep,
+            &cancel_env_with_echoed_order("100"),
+            "s",
+            "p",
+            1,
+            "tc",
+            5,
+        );
+        assert_eq!(v["lifecycle"]["normalizedState"], "REJECTED");
+        assert_eq!(v["lifecycle"]["pendingQty"], 100);
     }
 
     #[test]
