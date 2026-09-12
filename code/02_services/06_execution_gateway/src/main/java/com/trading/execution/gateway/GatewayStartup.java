@@ -74,6 +74,24 @@ public final class GatewayStartup {
     }
 
     /**
+     * C1: warms the projection tables before readiness is reported, so the first request-path
+     * write does not pay the post-CREATE window on a user request.
+     *
+     * <p>Failure here fails startup: a gateway that cannot complete a row-free handle warm-up
+     * cannot serve, and advertising ready for it is the same class of lie {@code /control/approve}
+     * used to tell. Opens its own short-lived writer on the {@code probeAuthorityTables}
+     * pattern - retaining it for the process lifetime would buy nothing, since the request path
+     * opens its own (P3-275).
+     */
+    public static void prewarmTables(GatewayConfig config) throws Exception {
+        try (FlussProjectionWriter writer = FlussProjectionWriter.open(config)) {
+            writer.prewarm();
+        }
+        LOG.info("projection tables pre-warmed; the first request-path write is no longer the "
+                + "one that pays the post-CREATE window (C1)");
+    }
+
+    /**
      * Applies the startup readiness wiring for the enabled/disabled branch.
      *
      * <p>The enabled branch reports ONE fluss dimension for both the table open and the authority

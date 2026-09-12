@@ -105,7 +105,7 @@ class FlussProjectionWriterIntegrationTest {
         }
     }
 
-    private static GatewayConfig config(String bootstrap, String db) {
+    static GatewayConfig config(String bootstrap, String db) {
         Map<String, String> m = new HashMap<>();
         m.put("FLUSS_BOOTSTRAP", bootstrap);
         m.put("FLUSS_DATABASE", db);
@@ -169,7 +169,7 @@ class FlussProjectionWriterIntegrationTest {
         return r.getString(colIndex).toString();
     }
 
-    private static NormalizedExecutionEvent event(String eventId) {
+    static NormalizedExecutionEvent event(String eventId) {
         long now = System.currentTimeMillis();
         return new NormalizedExecutionEvent(eventId, ACCOUNT, PARTITION, 0L, "actor-1",
                 "FILL", now,
@@ -189,7 +189,7 @@ class FlussProjectionWriterIntegrationTest {
 
     /* ---- scratch DDL mirrors (column order == FlussProjectionWriter row order) ---- */
 
-    private static void createFills(Admin admin, String db) throws Exception {
+    static void createFills(Admin admin, String db) throws Exception {
         Schema s = Schema.newBuilder()
                 .column("postback_event_id", DataTypes.STRING())
                 .column("postback_fingerprint", DataTypes.STRING())
@@ -220,7 +220,7 @@ class FlussProjectionWriterIntegrationTest {
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    private static void createOrderLifecycle(Admin admin, String db) throws Exception {
+    static void createOrderLifecycle(Admin admin, String db) throws Exception {
         Schema s = Schema.newBuilder()
                 .column("account_scope_id", DataTypes.STRING())
                 .column("broker_order_id", DataTypes.STRING())
@@ -244,7 +244,7 @@ class FlussProjectionWriterIntegrationTest {
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    private static void createPositions(Admin admin, String db) throws Exception {
+    static void createPositions(Admin admin, String db) throws Exception {
         Schema s = Schema.newBuilder()
                 .column("position_id", DataTypes.STRING())
                 .column("trade_context_id", DataTypes.STRING())
@@ -270,7 +270,7 @@ class FlussProjectionWriterIntegrationTest {
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    private static void createPositionState(Admin admin, String db) throws Exception {
+    static void createPositionState(Admin admin, String db) throws Exception {
         Schema s = Schema.newBuilder()
                 .column("account_scope_id", DataTypes.STRING())
                 .column("instrument_token", DataTypes.BIGINT())
@@ -288,7 +288,7 @@ class FlussProjectionWriterIntegrationTest {
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    private static void createOrderCorrelation(Admin admin, String db) throws Exception {
+    static void createOrderCorrelation(Admin admin, String db) throws Exception {
         Schema s = Schema.newBuilder()
                 .column("instruction_id", DataTypes.STRING())
                 .column("execution_attempt_id", DataTypes.STRING())
@@ -308,7 +308,7 @@ class FlussProjectionWriterIntegrationTest {
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     }
 
-    private static void createExecutionAudit(Admin admin, String db) throws Exception {
+    static void createExecutionAudit(Admin admin, String db) throws Exception {
         Schema s = Schema.newBuilder()
                 .column("audit_event_id", DataTypes.STRING())
                 .column("event_type", DataTypes.STRING())

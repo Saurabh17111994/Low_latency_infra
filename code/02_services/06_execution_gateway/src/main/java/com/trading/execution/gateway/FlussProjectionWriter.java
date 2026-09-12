@@ -316,6 +316,63 @@ public final class FlussProjectionWriter implements ProjectionWriter {
     private static BinaryString bs(String s) { return s == null ? null : BinaryString.fromString(s); }
     private Table table(String name) { return tables.computeIfAbsent(name,
             n -> connection.getTable(TablePath.of(config.flussDatabase(), n))); }
+
+    /** Log tables this writer appends to. Mirrors the {@code append(...)} call sites below. */
+    private static final List<String> APPEND_TABLES =
+            List.of("Fills", "Execution_Audit");
+
+    /** Keyed tables this writer upserts into. Mirrors the {@code upsert(...)} call sites below. */
+    private static final List<String> UPSERT_TABLES =
+            List.of("Positions", "Position_State", "Order_Lifecycle", "Order_Correlation");
+
+    /**
+     * C1: pay the post-CREATE window HERE, at startup, instead of on the first user request.
+     *
+     * <p>Row-free by construction. Resolving each table's handle and minting its writer is
+     * everything the request path does before it touches a row, so this warms exactly the work
+     * the first request would otherwise pay for, and writes nothing: pre-warm must not put
+     * probe rows into authoritative tables.
+     *
+     * <p>Measured basis: the first write to a freshly created table costs 2.2-3.7s against the
+     * caller's 2s bound, while steady state is ~120ms and every write after the first is
+     * 9-29ms. That window is why the retry in {@link BoundedRetry} is load-bearing on the
+     * request path; moving the cost to startup is what lets it go back to being insurance.
+     *
+     * <p>A table added to the append/upsert call sites without being added to the lists above
+     * is simply not pre-warmed - a missed optimisation, not a correctness gap.
+     */
+    public void prewarm() throws Exception {
+        for (String name : APPEND_TABLES) {
+            appendPools.computeIfAbsent(name,
+                    n -> new FlussHandlePool<>(() -> table(n).newAppend().createWriter()))
+                    .with(writer -> null);
+        }
+        for (String name : UPSERT_TABLES) {
+            upsertPools.computeIfAbsent(name,
+                    n -> new FlussHandlePool<>(() -> table(n).newUpsert().createWriter()))
+                    .with(writer -> null);
+        }
+        // Handle warming alone leaves a residual: the window is consumed by the first RPC that
+        // actually reaches the bucket, and a read does that as well as a write (C1 probe:
+        // read 507-510ms then a 109ms write, on the same fresh shape). One row-free lookup of a
+        // key that cannot exist is therefore part of the warm-up - it writes nothing.
+        //
+        // Retried deliberately: a read that FAILS returns in ~100ms and consumes nothing, so an
+        // unretried pre-warm can report success having warmed nothing at all (same probe, 3/8
+        // iterations). BoundedRetry is the existing tool for exactly that transient.
+        Table kv = table("Positions");
+        // Lookuper is not Closeable in Fluss 0.9.1 (FlussProjectionLedgerStore notes the same),
+        // so there is no handle to close - this is a one-shot startup read.
+        BoundedRetry.run(() -> kv.newLookup().createLookuper()
+                .lookup(GenericRow.of(BinaryString.fromString(ABSENT_PREWARM_KEY)))
+                .get(timeout.toMillis(), TimeUnit.MILLISECONDS));
+    }
+
+    /**
+     * Cannot collide with a real projection row: positions are keyed by ids minted downstream,
+     * and this lookup is a read - the value returned (null) is discarded.
+     */
+    private static final String ABSENT_PREWARM_KEY = "__prewarm_absent_key__";
     // P3-288: collect, don't abort — snapshot under concurrency (P3-070),
     // always close the connection, and clear so close is idempotent.
     @Override public void close() throws Exception {

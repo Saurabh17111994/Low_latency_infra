@@ -78,6 +78,9 @@ public final class ExecutionGatewayMain {
                 }
             })) {
                 reader.subscribeFromBeginning();
+                // C1: pay the post-CREATE window before readiness claims Fluss is usable and
+                // before the port opens, so a user request is never the first writer to a table.
+                GatewayStartup.prewarmTables(config);
                 GatewayStartup.applyStartupReadiness(readiness, true);
                 ObjectMapper mapper = new ObjectMapper();
                 try (GatewayHttpServer server = new GatewayHttpServer(config, readiness,
