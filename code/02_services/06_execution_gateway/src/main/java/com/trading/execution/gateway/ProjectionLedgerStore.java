@@ -2,7 +2,18 @@ package com.trading.execution.gateway;
 
 import java.util.List;
 
-/** Durable store for the cross-table projection workflow. */
+/**
+ * Durable store for the cross-table projection workflow.
+ *
+ * <p><b>Deployment contract: one writer process per {@code eventId}.</b> {@link #put} is an
+ * unconditional last-write-wins upsert, so two processes writing the same {@code eventId} can
+ * lost-update each other and nothing in this interface detects it. Inside one process the
+ * {@code ProjectionApplier} stripe serialises a single stream's steps; across processes nothing
+ * does. The deployed shape is what makes the contract hold: the stack declares
+ * {@code execution-gateway} with {@code deploy.replicas: 1}
+ * ({@code 01_docker/docker-stack.yml}). Scaling the gateway horizontally therefore needs the
+ * versioned conditional write that {@link #put} documents and defers (P3-326).
+ */
 public interface ProjectionLedgerStore extends AutoCloseable {
     record Entry(String eventId, ProjectionLedger.State state, String expectedPriorState,
                  int retryCount, String lastError, String disposition, long stepTs, Long completedTs) {
