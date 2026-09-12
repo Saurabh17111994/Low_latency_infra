@@ -84,6 +84,18 @@ public final class PositionProjectorDriver {
      */
     private static final String UNRESOLVED_POSITION_ID = "pos-unresolved";
 
+    /**
+     * P3-501: the driver retains closure state for the life of the process — it never evicts a
+     * retired (fully CLOSED) position. The bound is the run's position universe, not the fill
+     * volume: {@code active} holds one entry per account/instrument/side key, {@code cycles} one
+     * counter per such key (incremented once per minted cycle), and {@code snapshots} one entry per
+     * position id ever minted. Retention is deliberate (the closed snapshot is history —
+     * {@code reEntryAfterCloseMintsNewPositionId} pins that the driver tracks 2 positions after a
+     * close and re-entry), so this is a documented contract rather than a leak. If a process is ever
+     * expected to outlive its position universe — a multi-day single process, or ids minted without
+     * bound — add an eviction/compaction policy here for retired positions once the caller has
+     * confirmed or archived them, and update that test with it.
+     */
     private final Map<PositionKey, String> active = new HashMap<>();
     private final Map<PositionKey, Integer> cycles = new HashMap<>();
     private final Map<String, PositionSnapshot> snapshots = new HashMap<>();
