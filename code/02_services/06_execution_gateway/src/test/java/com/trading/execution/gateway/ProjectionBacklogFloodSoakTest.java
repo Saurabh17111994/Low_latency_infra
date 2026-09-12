@@ -144,6 +144,62 @@ class ProjectionBacklogFloodSoakTest {
         assertEquals(202, resumed.statusCode(), resumed.body());
     }
 
+    /**
+     * P3-063: a projection failure must not be cleared by the drain. The finally in
+     * {@code GatewayHttpServer.events} used to restore durableWrites unconditionally, so the very
+     * request that failed — in-flight back to 0 in that same finally — flipped the dimension back
+     * to ready milliseconds later: /readyz hid the failure and a persistent failure flapped the
+     * flag on every request. Only the shed path's own false is the drain's to undo.
+     */
+    @Test
+    void consumerFailureIsNotClearedByTheDrain() throws Exception {
+        GatewayConfig cfg = new GatewayConfig(
+                "localhost:9123", "default", "Execution_Intent", "Execution_Gate",
+                "Execution_Attempts", "Order_Correlation", "Postback_Projection_Ledger",
+                "Safety_Halt_Requests", "127.0.0.1", 0, "http://127.0.0.1:9190/v1/intents",
+                "execution-gateway.v1", "secret1234567890123456",
+                Duration.ofMillis(2000), Duration.ofMillis(250), "acct1", "p1",
+                /* executionEnabled */ true, /* maxPendingProjectionRecords */ 4,
+                GatewayConfig.defaultRequestBudget(Duration.ofMillis(2000)));
+        GatewayReadiness readiness = new GatewayReadiness();
+        readiness.fluss(true, "ok");
+        readiness.protocol(true, "ok");
+        readiness.durableWrites(true, "ok");
+
+        Consumer<JsonNode> failingConsumer = n -> {
+            throw new IllegalStateException("applier exploded");
+        };
+        InMemoryGateStateStore gates = new InMemoryGateStateStore(Set.of("saurabh"));
+        gates.init(new GateRow("p1", "acct1", GateState.HALTED, 0, "boot", "h0",
+                null, null, null, null, 0L, null, null, null));
+        ExecutorService pool = Executors.newCachedThreadPool();
+        server = new GatewayHttpServer(cfg, readiness, failingConsumer, gates, pool, true);
+        server.start();
+        String base = "http://127.0.0.1:" + serverPort(server);
+
+        GatewayProtocol proto = new GatewayProtocol("secret1234567890123456");
+        var payload = M.createObjectNode().put("instruction_id", "i-fail");
+        String envelope = proto.encode(new GatewayProtocol.Envelope(
+                "execution-gateway.v1", "EXECUTION_EVENT", "req-fail-1", "acct1", "p1",
+                GatewayProtocol.sha256(M.writeValueAsBytes(payload)), 1L, "fence-1",
+                System.currentTimeMillis() + 60_000, payload, null));
+
+        HttpResponse<String> response = HttpClient.newHttpClient().send(HttpRequest.newBuilder(
+                        URI.create(base + "/v1/events"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(envelope)).build(),
+                HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(500, response.statusCode(), response.body());
+        assertTrue(readiness.snapshot().reason().contains("applier exploded"),
+                "the projection cause must survive; reason=" + readiness.snapshot().reason());
+        // The request's finally has already run (in-flight is back to 0), which is exactly the
+        // window where the unconditional restore used to resurrect the flag.
+        assertTrue(!readiness.snapshot().durableWriteReady(),
+                "a consumer failure must stay latched after the drain (P3-063); reason="
+                        + readiness.snapshot().reason());
+    }
+
     private int serverPort(GatewayHttpServer s) throws Exception {
         var f = s.getClass().getDeclaredField("server");
         f.setAccessible(true);

@@ -33,6 +33,14 @@ public final class GatewayHttpServer implements AutoCloseable {
     /** Concurrent in-flight projection applies (WP-2 MAX_PENDING_PROJECTION_RECORDS). */
     private final java.util.concurrent.atomic.AtomicInteger projectionInFlight =
             new java.util.concurrent.atomic.AtomicInteger();
+    /**
+     * P3-063: whether the current durableWrites=false is this server's own shed. Only that false is
+     * the drain's to undo — an unreadable reason ("backlog drained") overwriting a projection
+     * failure is how /readyz hid the failure, and a persistent failure flapped the flag on every
+     * request. Any other writer of false clears this, so the drain can no longer clear their state.
+     */
+    private final java.util.concurrent.atomic.AtomicBoolean shedActive =
+            new java.util.concurrent.atomic.AtomicBoolean();
     private final java.util.concurrent.Executor httpExecutor;
 
     /**
@@ -256,6 +264,7 @@ public final class GatewayHttpServer implements AutoCloseable {
         int maxPending = config.maxPendingProjectionRecords();
         try {
             if (inFlightNow > maxPending) {
+                shedActive.set(true);
                 readiness.durableWrites(false,
                         "projection backlog " + inFlightNow + " > " + maxPending);
                 reply(x, 503, "projection backlog exceeds MAX_PENDING_PROJECTION_RECORDS");
@@ -276,13 +285,18 @@ public final class GatewayHttpServer implements AutoCloseable {
             // applier failure — without this catch the exception escapes the
             // HttpExchange handler and the client sees an aborted exchange.
             readiness.durableWrites(false, String.valueOf(consumerFailure.getMessage()));
+            // P3-063: the failing write owns this false, not the shed.
+            shedActive.set(false);
             reply(x, 500, "{\"error\":\"projection failed\"}");
         } finally {
             // P3-294: the decrement-then-separate-snapshot-then-set is a
             // cross-atomic check-then-act — a concurrent shed can set false
             // after our snapshot, and this blind set(true) clears a live
             // backlog. Restore via the atomic readiness gate instead.
-            if (projectionInFlight.decrementAndGet() == 0) {
+            // P3-063: and only OUR false is restorable. The compareAndSet makes "was this
+            // ours?" atomic with the drain; without it a consumer failure was cleared by the
+            // same finally that ran for the failing request.
+            if (projectionInFlight.decrementAndGet() == 0 && shedActive.compareAndSet(true, false)) {
                 readiness.restoreIfDrained(projectionInFlight::get,
                         "projection backlog drained");
             }
