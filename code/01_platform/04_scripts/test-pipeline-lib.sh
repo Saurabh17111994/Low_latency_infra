@@ -74,8 +74,6 @@ fi
 # A '#' comment inside the continuation splits it into fragments; grep'ing
 # for the FINAL token (compute.jar) on the SAME logical line as the first
 # (-e ALLOW_FULL_REPLAY) proves the continuation chain is intact.
-# shellcheck disable=SC2034  # superseded by the `body` extraction below; kept (dead) pending a cleanup call
-submit_block="$(sed -n '/submit_out="\$(\$COMPOSE exec -T \\/,/"\$SUBMIT/p;/submit_out="\$(\$COMPOSE exec -T \\/,/compute.jar/p' "$LIB" 2>/dev/null)"
 # Simpler + robust: extract the function body and join continuations.
 body="$(declare -f pipeline_submit_job | sed 's/\\$//' | tr -d '\n')"
 for needle in '-e ALLOW_FULL_REPLAY' '-e WATERMARK_OUT_OF_ORDER_MS' \
