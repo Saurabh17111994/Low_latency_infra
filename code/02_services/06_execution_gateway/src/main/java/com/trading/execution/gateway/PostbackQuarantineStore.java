@@ -1,6 +1,5 @@
 package com.trading.execution.gateway;
 
-import com.trading.common.schema.fluss.BoundedRetry;
 
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
@@ -107,7 +106,7 @@ public interface PostbackQuarantineStore {
             // acceptable here because quarantine records are detectable evidence rather than
             // order state (contrast Fills, left un-retried until its dedup is verified).
             try {
-                BoundedRetry.await(() -> {
+                RequestBudget.await(() -> {
                     writer.append(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS);
                     return null;
                 });

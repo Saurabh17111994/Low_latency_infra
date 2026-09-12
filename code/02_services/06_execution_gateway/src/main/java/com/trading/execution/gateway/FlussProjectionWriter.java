@@ -171,7 +171,7 @@ public final class FlussProjectionWriter implements ProjectionWriter {
         // C5: ride out the first-write-after-CREATE window (2.2-3.7s measured; see BoundedRetry)
         // rather than failing on the caller's 2s budget. The pool drops a failed handle, so
         // each attempt gets a fresh writer.
-        BoundedRetry.run(() -> pool.with(writer -> {
+        RequestBudget.run(() -> pool.with(writer -> {
             writer.append(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             return null;
         }));
@@ -183,7 +183,7 @@ public final class FlussProjectionWriter implements ProjectionWriter {
         // P3-268: KV upserts are idempotent by primary key, so a retry cannot duplicate state.
         // C5: this is what lets a first write to a freshly created table ride out the measured
         // 2.2-3.7s window (see BoundedRetry) instead of failing on the caller's 2s budget.
-        BoundedRetry.run(() -> pool.with(writer -> {
+        RequestBudget.run(() -> pool.with(writer -> {
             writer.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             return null;
         }));
@@ -363,7 +363,7 @@ public final class FlussProjectionWriter implements ProjectionWriter {
         Table kv = table("Positions");
         // Lookuper is not Closeable in Fluss 0.9.1 (FlussProjectionLedgerStore notes the same),
         // so there is no handle to close - this is a one-shot startup read.
-        BoundedRetry.run(() -> kv.newLookup().createLookuper()
+        RequestBudget.run(() -> kv.newLookup().createLookuper()
                 .lookup(GenericRow.of(BinaryString.fromString(ABSENT_PREWARM_KEY)))
                 .get(timeout.toMillis(), TimeUnit.MILLISECONDS));
     }

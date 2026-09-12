@@ -1,6 +1,5 @@
 package com.trading.execution.gateway;
 
-import com.trading.common.schema.fluss.BoundedRetry;
 import com.trading.common.schema.fluss.FlussHandlePool;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -60,7 +59,7 @@ public final class FlussProjectionLedgerStore implements ProjectionLedgerStore {
         // Closeable in Fluss 0.9.1, so there is no handle to close, only one to reuse.
         // C5 guard: same transient-lookup retry as FlussControlStateStore (first write after
         // CREATE, 2.2-3.7s measured, vs the 2s timeout).
-        InternalRow r = lookupers.with(l -> BoundedRetry.run(() -> l.lookup(GenericRow.of(bs(eventId)))
+        InternalRow r = lookupers.with(l -> RequestBudget.run(() -> l.lookup(GenericRow.of(bs(eventId)))
                 .get(timeout.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow()));
         return r == null ? null : decode(r);
     }
@@ -74,7 +73,7 @@ public final class FlussProjectionLedgerStore implements ProjectionLedgerStore {
         // C5 guard: transient upsert-ack timeouts are retried with the same bounded budget;
         // upsert is idempotent by eventId (last-write-wins), so a retried write is safe.
         writers.with(w -> {
-            BoundedRetry.run(() -> {
+            RequestBudget.run(() -> {
                 w.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
                 return null;
             });

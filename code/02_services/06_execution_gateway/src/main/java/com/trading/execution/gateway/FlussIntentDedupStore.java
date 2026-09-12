@@ -1,6 +1,5 @@
 package com.trading.execution.gateway;
 
-import com.trading.common.schema.fluss.BoundedRetry;
 
 import java.time.Duration;
 import java.util.HashMap;
@@ -96,7 +95,7 @@ public final class FlussIntentDedupStore implements IntentDedupStore {
         // handler escalates to fail() — latching the whole gateway HALTED until restart.
         // That is far more disruptive than the transient it reacted to. A fresh writer per
         // attempt mirrors FlussHandlePool's rule that a failed handle may be poisoned.
-        BoundedRetry.run(() -> {
+        RequestBudget.run(() -> {
             UpsertWriter attempt = table.newUpsert().createWriter();
             attempt.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             return null;

@@ -1,5 +1,7 @@
 package com.trading.execution.gateway;
 
+import com.trading.common.schema.fluss.BoundedRetry;
+
 import java.time.Duration;
 import java.util.Map;
 
@@ -23,7 +25,8 @@ public record GatewayConfig(
         String accountScopeId,
         String executionPartitionId,
         boolean executionEnabled,
-        int maxPendingProjectionRecords) {
+        int maxPendingProjectionRecords,
+        Duration requestBudget) {
 
     public GatewayConfig {
         require(flussBootstrap, "FLUSS_BOOTSTRAP");
@@ -48,6 +51,32 @@ public record GatewayConfig(
         // executionEnabled is a fail-closed flag; no extra validation beyond boolean parsing
         if (maxPendingProjectionRecords <= 0) throw new IllegalArgumentException(
                 "MAX_PENDING_PROJECTION_RECORDS must be positive");
+        if (requestBudget.isZero() || requestBudget.isNegative()) {
+            throw new IllegalArgumentException("GATEWAY_REQUEST_BUDGET_MS must be positive");
+        }
+        // C2: the request budget must fit at least one attempt plus the backoff that follows it.
+        // Below that it cannot retry anything, and truncated to zero it would shed every call
+        // after a single attempt with no backoff applied at all - the same "the wait never
+        // actually happened" shape as P3-023. Refuse it at startup, naming both numbers.
+        Duration minimumBudget = requestTimeout.plusMillis(BoundedRetry.BACKOFF_MILLIS);
+        if (requestBudget.compareTo(minimumBudget) < 0) {
+            throw new IllegalArgumentException(
+                    "GATEWAY_REQUEST_BUDGET_MS (" + requestBudget.toMillis()
+                            + "ms) must be at least GATEWAY_REQUEST_TIMEOUT_MS plus backoff ("
+                            + minimumBudget.toMillis() + "ms)");
+        }
+    }
+
+    /**
+     * The default request budget: one site's full retry budget, granted to the whole request
+     * instead of to each of the eleven Fluss calls inside it (C2). Derived from the configured
+     * timeout rather than hardcoded so that changing {@code GATEWAY_REQUEST_TIMEOUT_MS} cannot
+     * leave the request budget behind, and referenced from {@link BoundedRetry} so the two
+     * arithmetic definitions cannot drift apart.
+     */
+    public static Duration defaultRequestBudget(Duration requestTimeout) {
+        return Duration.ofMillis(BoundedRetry.ATTEMPTS * requestTimeout.toMillis()
+                + (BoundedRetry.ATTEMPTS - 1) * BoundedRetry.BACKOFF_MILLIS);
     }
 
     /** Dossier staleness bound default (WP-2): flood beyond this flips readiness false. */
@@ -66,7 +95,8 @@ public record GatewayConfig(
         this(flussBootstrap, flussDatabase, intentTable, gateTable, attemptsTable,
                 correlationTable, ledgerTable, haltTable, bindHost, bindPort, nautilusEndpoint,
                 protocolVersion, sharedSecret, requestTimeout, pollTimeout, accountScopeId,
-                executionPartitionId, executionEnabled, DEFAULT_MAX_PENDING_PROJECTION_RECORDS);
+                executionPartitionId, executionEnabled, DEFAULT_MAX_PENDING_PROJECTION_RECORDS,
+                defaultRequestBudget(requestTimeout));
     }
 
     /**
@@ -128,6 +158,9 @@ public record GatewayConfig(
                 Map.entry("GATEWAY_PROTOCOL_VERSION", env("GATEWAY_PROTOCOL_VERSION", "execution-gateway.v2")),
                 Map.entry("GATEWAY_SHARED_SECRET", requiredEnv("GATEWAY_SHARED_SECRET")),
                 Map.entry("GATEWAY_REQUEST_TIMEOUT_MS", env("GATEWAY_REQUEST_TIMEOUT_MS", "2000")),
+                // Blank (the default) means "derive from GATEWAY_REQUEST_TIMEOUT_MS" - see
+                // defaultRequestBudget. Listed here so the whole env surface stays in one place.
+                Map.entry("GATEWAY_REQUEST_BUDGET_MS", env("GATEWAY_REQUEST_BUDGET_MS", "")),
                 Map.entry("GATEWAY_POLL_TIMEOUT_MS", env("GATEWAY_POLL_TIMEOUT_MS", "250")),
                 Map.entry("ACCOUNT_SCOPE_ID", requiredEnv("ACCOUNT_SCOPE_ID")),
                 Map.entry("EXECUTION_PARTITION_ID", requiredEnv("EXECUTION_PARTITION_ID")),
@@ -137,19 +170,25 @@ public record GatewayConfig(
     }
 
     static GatewayConfig from(Map<String, String> e) {
+        Duration requestTimeout = Duration.ofMillis(longValue(e, "GATEWAY_REQUEST_TIMEOUT_MS"));
+        String budgetValue = e.get("GATEWAY_REQUEST_BUDGET_MS");
+        Duration requestBudget = budgetValue == null || budgetValue.isBlank()
+                ? defaultRequestBudget(requestTimeout)
+                : Duration.ofMillis(longValue(e, "GATEWAY_REQUEST_BUDGET_MS"));
         return new GatewayConfig(
                 e.get("FLUSS_BOOTSTRAP"), e.get("FLUSS_DATABASE"), e.get("EXECUTION_INTENT_TABLE"),
                 e.get("EXECUTION_GATE_TABLE"), e.get("EXECUTION_ATTEMPTS_TABLE"),
                 e.get("ORDER_CORRELATION_TABLE"), e.get("PROJECTION_LEDGER_TABLE"), e.get("SAFETY_HALT_TABLE"),
                 e.get("GATEWAY_BIND_HOST"), integer(e, "GATEWAY_BIND_PORT"), e.get("NAUTILUS_PRIVATE_ENDPOINT"),
                 e.get("GATEWAY_PROTOCOL_VERSION"),
-                e.get("GATEWAY_SHARED_SECRET"), Duration.ofMillis(longValue(e, "GATEWAY_REQUEST_TIMEOUT_MS")),
+                e.get("GATEWAY_SHARED_SECRET"), requestTimeout,
                 Duration.ofMillis(longValue(e, "GATEWAY_POLL_TIMEOUT_MS")),
                 e.get("ACCOUNT_SCOPE_ID"), e.get("EXECUTION_PARTITION_ID"),
                 parseExecutionEnabled(e.get("EXECUTION_ENABLED")),
                 e.get("MAX_PENDING_PROJECTION_RECORDS") == null
                         ? DEFAULT_MAX_PENDING_PROJECTION_RECORDS
-                        : integer(e, "MAX_PENDING_PROJECTION_RECORDS"));
+                        : integer(e, "MAX_PENDING_PROJECTION_RECORDS"),
+                requestBudget);
     }
 
     private static boolean parseExecutionEnabled(String value) {

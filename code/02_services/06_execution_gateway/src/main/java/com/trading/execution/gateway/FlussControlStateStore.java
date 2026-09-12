@@ -1,6 +1,5 @@
 package com.trading.execution.gateway;
 
-import com.trading.common.schema.fluss.BoundedRetry;
 import com.trading.common.schema.fluss.FlussHandlePool;
 import java.time.Duration;
 import java.util.List;
@@ -82,7 +81,7 @@ public final class FlussControlStateStore implements ControlStateStore {
             // vs the 2s timeout) previously surfaced as intermittent TimeoutException /
             // UNAVAILABLE even though the RPC would have recovered; retry a bounded budget,
             // fail fast after.
-            InternalRow row = pool.with(lookuper -> BoundedRetry.run(() -> lookuper.lookup(GenericRow.of(key))
+            InternalRow row = pool.with(lookuper -> RequestBudget.run(() -> lookuper.lookup(GenericRow.of(key))
                     .get(timeout.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow()));
             return row == null ? new Lookup(Status.NOT_FOUND, null, "key not found")
                     : new Lookup(Status.FOUND, row, "ok");

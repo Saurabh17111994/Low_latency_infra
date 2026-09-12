@@ -55,6 +55,15 @@ class BoundedRetryGuardTest {
     private static final int LOOKBACK = 4;
 
     /**
+     * Receivers that count as the shared retry path. {@code RequestBudget} is the execution
+     * gateway's request-deadline front door: it delegates to this class ({@code run}/{@code await},
+     * or the budgeted {@code runWithin}/{@code awaitWithin}), so a site routed through it has not
+     * bypassed anything - it has narrowed the budget, which is the point (C2). A raw
+     * {@code .get(...)} is still a bypass either way.
+     */
+    private static final List<String> RETRY_RECEIVERS = List.of("BoundedRetry.", "RequestBudget.");
+
+    /**
      * Burn-down list of bypasses found when this guard was first switched on. Now EMPTY:
      * the two runtime sites it listed were wrapped, and the four harness sites are covered
      * by a {@code retry-exempt-file:} marker instead. Do not add entries — wrap the site, or
@@ -107,7 +116,8 @@ class BoundedRetryGuardTest {
                         boolean covered = false;
                         for (int j = Math.max(0, i - LOOKBACK); j <= i && !covered; j++) {
                             String line = lines.get(j);
-                            if (line.contains("BoundedRetry.") || line.contains(EXEMPT)) {
+                            if (RETRY_RECEIVERS.stream().anyMatch(line::contains)
+                                    || line.contains(EXEMPT)) {
                                 covered = true;
                             }
                         }
@@ -128,7 +138,8 @@ class BoundedRetryGuardTest {
 
         assertTrue(bypasses.isEmpty(),
                 "Fluss awaits bypassing the shared retry policy. Wrap them in "
-                        + "BoundedRetry.await(...), or add a `" + EXEMPT + " <reason>` comment "
+                        + "BoundedRetry.await(...) or RequestBudget.await(...), or add a `"
+                        + EXEMPT + " <reason>` comment "
                         + "on the site:\n  " + String.join("\n  ", bypasses));
     }
 }

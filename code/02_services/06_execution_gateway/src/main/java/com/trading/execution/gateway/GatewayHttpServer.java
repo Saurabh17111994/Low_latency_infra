@@ -68,6 +68,21 @@ public final class GatewayHttpServer implements AutoCloseable {
      * Full constructor. {@code httpExecutor} {@code null} keeps the platform default
      * (serial handler dispatch); a pool is how the flood soak drives real concurrency.
      * {@code gateStoreAuthoritative} false makes {@code /control/approve} fail closed.
+     *
+     * <p><b>Recorded debt - production dispatch is serial.</b> Production passes no executor, so
+     * the platform runs each handler on the dispatcher thread: one request at a time, and a request
+     * that holds also holds {@code /healthz}. Measured on the dev cluster (2026-09-12): with two
+     * {@code /v1/events} in flight (6019ms and 3051ms - queued, not overlapped), {@code /healthz},
+     * which answers in 45ms idle, took 5620ms. C2 bounds how long one request may hold its thread
+     * (one retry budget across all eleven Fluss calls, instead of one per call); it does not remove
+     * the serialisation itself.
+     *
+     * <p>Concurrency is not a one-line change here. The projection ledger advances as a per-event
+     * state machine (RECEIVED -> writeAudit -> AUDIT_WRITTEN -> writeLifecycle -> LIFECYCLE_APPLIED
+     * -> writePosition), so a pool needs an ordering analysis first: two events applying at once
+     * must not interleave steps on one stream, and the backlog counter's shed path assumes in-flight
+     * applies past the bound are safe to reject. Until that analysis exists, keep the thread count
+     * at one and keep the hold bounded.
      */
     public GatewayHttpServer(GatewayConfig config, GatewayReadiness readiness,
             Consumer<JsonNode> eventConsumer, GateStateStore gateStore,
@@ -231,7 +246,15 @@ public final class GatewayHttpServer implements AutoCloseable {
                 reply(x, 503, "projection backlog exceeds MAX_PENDING_PROJECTION_RECORDS");
                 return;
             }
-            eventConsumer.accept(v.envelope().payload());
+            // C2: the request's retry budget starts here and covers every Fluss call the
+            // consumer makes, instead of each of those calls getting its own. Cleared in a
+            // finally because this thread will serve the next request too.
+            RequestBudget.begin(config.requestBudget());
+            try {
+                eventConsumer.accept(v.envelope().payload());
+            } finally {
+                RequestBudget.clear();
+            }
             reply(x, 202, "accepted");
         } catch (Exception consumerFailure) {
             // P3-077: production wiring throws IllegalStateException on

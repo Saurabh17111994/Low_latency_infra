@@ -156,8 +156,20 @@ public final class BoundedRetry {
      */
     public static <T> T await(Callable<T> action)
             throws InterruptedException, ExecutionException, TimeoutException {
+        return awaitWithin(action, Long.MAX_VALUE);
+    }
+
+    /**
+     * {@link #await}'s narrow-throws contract with {@link #runWithin}'s budget, for callers whose
+     * own deadline must bound the retry. The translation is shared with {@link #await} so a budgeted
+     * call site needs exactly the same catch arms as an unbudgeted one.
+     *
+     * @param totalBudgetMillis wall-clock budget across all attempts, including backoff
+     */
+    public static <T> T awaitWithin(Callable<T> action, long totalBudgetMillis)
+            throws InterruptedException, ExecutionException, TimeoutException {
         try {
-            return run(action);
+            return runWithin(action, totalBudgetMillis);
         } catch (InterruptedException | ExecutionException | TimeoutException e) {
             throw e;
         } catch (RuntimeException e) {

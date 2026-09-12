@@ -47,7 +47,8 @@ class ProjectionBacklogFloodSoakTest {
                 "Safety_Halt_Requests", "127.0.0.1", 0, "http://127.0.0.1:9190/v1/intents",
                 "execution-gateway.v1", "secret1234567890123456",
                 Duration.ofMillis(2000), Duration.ofMillis(250), "acct1", "p1",
-                /* executionEnabled */ true, /* maxPendingProjectionRecords */ 4);
+                /* executionEnabled */ true, /* maxPendingProjectionRecords */ 4,
+                GatewayConfig.defaultRequestBudget(Duration.ofMillis(2000)));
         GatewayReadiness readiness = new GatewayReadiness();
         // Main arms these once tables open; the soak isolates durableWrites dynamics.
         readiness.fluss(true, "ok");
