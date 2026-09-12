@@ -42,7 +42,7 @@ unless a command says otherwise.
 
 | Action | Command | What it does |
 |---|---|---|
-| Full Monday gate (13 checks) | `make gate` | The big verification gate (`run-monday-gates.sh`) |
+| Full Monday gate | `make gate` | The big verification gate (`run-monday-gates.sh`): static/compose/python/entrypoint/Go/E2E-build/docker-smoke/image-staleness/java+drills/doc-audit/DDL-smoke/schema-perf/SIGTERM-drain plus the execution-gateway, compute and Rust module suites. Prints "N/M verified" and counts a skipped step as unverified, not green |
 | Rebuild images with content stamps | `make images` | Rebuilds every `build:` image with its `com.trading.build-stamp` (sha256 of its inputs, CHG-124) and re-verifies with `check-image-stale` |
 | Implementation-order gate | `make gate-order` | 7 tasks in mandatory sequence; first failure blocks downstream |
 | Full doc audit | `make full-audit` | Docs-vs-code truth check (3 gates + beyond-scanner sweeps) |
