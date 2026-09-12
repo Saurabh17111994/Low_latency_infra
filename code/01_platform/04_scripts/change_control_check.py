@@ -27,6 +27,13 @@ name under docs/08_implementation/ or docs/); every path-shaped artifact token
 (pruning target/.git/node_modules). A value of `none`/`N/A`/`-` needs no
 reference. Reconciliation records cannot cite phantom tasks or artifacts.
 
+A record may legitimately name an artifact that has since been deleted — the
+record was accurate when filed, and rewriting it would erase what the change
+touched. Such a token is accepted when immediately followed by
+`(retired by <sha>)`, and only when that commit really removed the path (present
+in its parent, absent in it, which also means a rename does not qualify: point
+at the live path instead). The claim is therefore evidence, not a silencer.
+
 Usage:
     python3 code/01_platform/04_scripts/change_control_check.py
     python3 code/01_platform/04_scripts/change_control_check.py --dir <dir>
@@ -39,6 +46,7 @@ missing entirely).
 import glob
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(
@@ -81,6 +89,14 @@ ARTIFACT_EXTENSIONS = {
 }
 NONE_RE = re.compile(r"^(?:none|n/a|na|-|\s)+$", re.I)
 SKIP_DIRS = {"target", ".git", "node_modules", ".m2"}
+
+# A record may name an artifact that has since been deleted. That is not drift to
+# paper over: the record was accurate when filed, and deleting the path from it
+# would erase what the change touched. `(retired by <sha>)` keeps the path, adds
+# the evidence, and is only accepted when the named commit really removed it —
+# see retirement_verified() — so the annotation cannot work as a silencer.
+ARTIFACT_RETIRED_RE = re.compile(r"^\(retired by ([0-9a-f]{7,40})\)", re.I)
+_RETIREMENT_CACHE = {}
 
 
 def parse_record(text):
@@ -181,14 +197,45 @@ def plan_task_issues(value, records_dir):
     return issues
 
 
+def _git_has_path(rev, ref):
+    """Is `ref` present in revision `rev`? False whenever git cannot answer."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", ROOT, "cat-file", "-e", f"{rev}:{ref}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
+def retirement_verified(ref, sha):
+    """Did `sha` really delete `ref`?
+
+    True only when the path is present in the commit's parent and gone in the
+    commit itself. A rename therefore does NOT verify — a moved file should be
+    re-pointed at its live path, not marked retired. Fails closed when git is
+    unavailable: an unverifiable claim of removal is not evidence.
+    """
+    key = (ref, sha)
+    if key not in _RETIREMENT_CACHE:
+        _RETIREMENT_CACHE[key] = _git_has_path(f"{sha}^", ref) and not _git_has_path(
+            sha, ref
+        )
+    return _RETIREMENT_CACHE[key]
+
+
 def artifact_issues(value, records_dir):
     """Issues for an affected_artifacts value whose path-shaped tokens do not
     resolve to an existing file. Prose descriptions (no path shape, no known
-    extension) are ignored."""
+    extension) are ignored; a dead path is accepted only when immediately
+    followed by a verified `(retired by <sha>)` annotation."""
     if not value or NONE_RE.match(value):
         return []
     issues, seen = [], set()
-    for tok in ARTIFACT_TOKEN_RE.findall(value):
+    for match in ARTIFACT_TOKEN_RE.finditer(value):
+        tok = match.group(0)
         ext = tok.rsplit(".", 1)[1].lower()
         if ext not in ARTIFACT_EXTENSIONS:
             continue
@@ -196,8 +243,18 @@ def artifact_issues(value, records_dir):
         if ref in seen:
             continue
         seen.add(ref)
-        if not resolve_artifact_ref(ref, records_dir):
+        if resolve_artifact_ref(ref, records_dir):
+            continue
+        annotation = ARTIFACT_RETIRED_RE.match(value[match.end() :].lstrip())
+        if annotation is None:
             issues.append(f"affected_artifacts references unknown artifact '{ref}'")
+        elif not retirement_verified(ref, annotation.group(1)):
+            issues.append(
+                f"affected_artifacts marks '{ref}' retired by {annotation.group(1)},"
+                " which did not remove it — annotate with `(retired by <sha>)`"
+                " naming the commit that deleted the path, or point at the live"
+                " path if it only moved"
+            )
     return issues
 
 

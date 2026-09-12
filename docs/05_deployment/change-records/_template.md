@@ -23,3 +23,19 @@ test_updates: <test IDs added or changed, or "none" with justification>
 rollback_behavior: <rollback path and state-readability>
 plan_tasks: <plan or tracker task references — `tracker-<n>` must match docs/08_implementation/<n>-*.md; `.md` paths must resolve (repo-relative, record-dir-relative, or a bare dossier name); or `none`>
 ```
+
+## Artifacts that no longer exist
+
+`affected_artifacts` must resolve against the live tree. If an artifact the
+change really touched has since been deleted, do not delete it from the record
+and do not leave a dead path: annotate it in place with the commit that removed
+it —
+
+```text
+affected_artifacts: code/02_services/02_compute/src/main/java/com/trading/compute/signaljob/FormingBarDetectionFunction.java (retired by 0f3e595), docs/08_implementation/01-foundation.md
+```
+
+C14 accepts a dead path only with that annotation, and verifies it: the named
+commit must contain the path in its parent and not contain it itself. A renamed
+file does not qualify — point at the live path instead. An annotation naming a
+commit that did not remove the path fails the audit.
