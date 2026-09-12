@@ -49,6 +49,8 @@ class ArrowOrderUpdateTest {
             .isInstanceOf(IllegalStateException.class).hasMessageContaining("fillQuantity");
         assertThatThrownBy(() -> fill().fillPrice(0).build())
             .isInstanceOf(IllegalStateException.class).hasMessageContaining("fillPrice");
+        assertThatThrownBy(() -> fill().fillTime(0).build())
+            .isInstanceOf(IllegalStateException.class).hasMessageContaining("fillTime");
     }
 
     @Test

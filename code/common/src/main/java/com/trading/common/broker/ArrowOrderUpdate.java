@@ -94,6 +94,12 @@ public final class ArrowOrderUpdate {
                 if (fillPrice <= 0) {
                     throw new IllegalStateException("fillPrice must be > 0 when reportType==FILL");
                 }
+                // P3-109 follow-up: fillTime is the Fills row's broker_event_time (see the
+                // class javadoc and ddl/08_fills.sql), so a zero value writes 1970-01-01
+                // into the event-time column of an otherwise complete fill row.
+                if (fillTime <= 0) {
+                    throw new IllegalStateException("fillTime must be > 0 when reportType==FILL");
+                }
             }
             return new ArrowOrderUpdate(this);
         }
