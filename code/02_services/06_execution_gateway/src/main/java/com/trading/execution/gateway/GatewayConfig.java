@@ -237,4 +237,30 @@ public record GatewayConfig(
     private static void require(String value, String name) {
         if (value == null || value.isBlank()) throw new IllegalArgumentException(name + " is required");
     }
+
+    /**
+     * P3-073: the record's synthesized {@code toString()} includes every component, so a startup
+     * dump or an error context would print the gateway's HMAC secret in plaintext.
+     *
+     * <p>Hand-written on purpose — a record cannot call the synthesized form — which also fails
+     * closed for the future: a newly added component is absent from the dump until someone includes
+     * it here, rather than leaking the moment it is declared.
+     */
+    @Override
+    public String toString() {
+        return "GatewayConfig[flussBootstrap=" + flussBootstrap + ", flussDatabase=" + flussDatabase
+                + ", intentTable=" + intentTable + ", gateTable=" + gateTable
+                + ", attemptsTable=" + attemptsTable + ", correlationTable=" + correlationTable
+                + ", ledgerTable=" + ledgerTable + ", haltTable=" + haltTable
+                + ", bindHost=" + bindHost + ", bindPort=" + bindPort
+                + ", nautilusEndpoint=" + nautilusEndpoint + ", protocolVersion=" + protocolVersion
+                + ", sharedSecret=***"
+                + ", requestTimeout=" + requestTimeout + ", pollTimeout=" + pollTimeout
+                + ", accountScopeId=" + accountScopeId
+                + ", executionPartitionId=" + executionPartitionId
+                + ", executionEnabled=" + executionEnabled
+                + ", maxPendingProjectionRecords=" + maxPendingProjectionRecords
+                + ", requestBudget=" + requestBudget + "]";
+    }
+
 }

@@ -67,4 +67,16 @@ class GatewayConfigTest {
         assertThatThrownBy(() -> GatewayConfig.from(m))
                 .hasMessageContaining("GATEWAY_REQUEST_BUDGET_MS must be positive");
     }
+    /**
+     * P3-073: the record's synthesized toString() includes every component, so the gateway's HMAC
+     * secret went into any startup dump or error context. The dump must stay useful without it.
+     */
+    @Test void toStringDoesNotPrintTheSharedSecret() {
+        Map<String, String> m = values();
+        m.put("GATEWAY_SHARED_SECRET", "s3cr3t-sentinel-9f2a");
+        GatewayConfig c = GatewayConfig.from(m);
+        assertThat(c.toString()).doesNotContain("s3cr3t-sentinel-9f2a");
+        assertThat(c.toString()).contains("fluss:9123").contains("127.0.0.1").contains("***");
+    }
+
 }
