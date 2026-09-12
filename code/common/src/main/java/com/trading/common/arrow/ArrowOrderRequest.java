@@ -46,7 +46,8 @@ public final class ArrowOrderRequest {
         Objects.requireNonNull(order, "order");
         Objects.requireNonNull(product, "product");
         Objects.requireNonNull(validity, "validity");
-        if (symbol == null || symbol.isEmpty()) {
+        // P3-328: isBlank, not isEmpty — "   " is not a TradingSymbol.
+        if (symbol == null || symbol.isBlank()) {
             throw new IllegalArgumentException("symbol required");
         }
         if (quantity <= 0) {
@@ -55,6 +56,11 @@ public final class ArrowOrderRequest {
         // R-197: a negative disclosed quantity is never valid for Arrow.
         if (disclosedQty < 0) {
             throw new IllegalArgumentException("disclosedQty must be >= 0");
+        }
+        // P3-329: disclosing more than the order size is not expressible.
+        if (disclosedQty > quantity) {
+            throw new IllegalArgumentException(
+                    "disclosedQty must be <= quantity, got: " + disclosedQty + " > " + quantity);
         }
         // R-121: null-check the ref BEFORE calling .value() — the old code
         // dereferenced clientOrderRef.value() first, NPE-ing on a null ref.
@@ -76,7 +82,7 @@ public final class ArrowOrderRequest {
         this.transactionType = transactionType;
         this.order = order;
         this.product = product;
-        this.price = price;
+        this.price = price.trim(); // P3-331: store what was validated, not the raw string
         this.validity = validity;
         this.disclosedQty = disclosedQty;
         this.clientOrderRef = clientOrderRef;
@@ -96,10 +102,11 @@ public final class ArrowOrderRequest {
                 throw new IllegalArgumentException(
                         "limit order price must be numeric, got: " + price);
             }
-            // NaN never satisfies <= 0, so it must be rejected explicitly.
-            if (!(v > 0)) {
+            // P3-332: NaN and +Infinity both satisfy "v > 0" in some way (Infinity
+            // does outright: "1e309" parses to Inf), so finiteness is checked first.
+            if (!Double.isFinite(v) || v <= 0) {
                 throw new IllegalArgumentException(
-                        "limit order price must be > 0, got: " + price);
+                        "limit order price must be a finite value > 0, got: " + price);
             }
         } else {
             // MKT / SL_MKT — the broker expects "0".

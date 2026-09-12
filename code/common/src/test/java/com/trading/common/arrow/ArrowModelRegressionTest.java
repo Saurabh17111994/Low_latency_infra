@@ -84,6 +84,50 @@ class ArrowModelRegressionTest {
     }
 
     @Test
+    @DisplayName("whitespace-only symbol is not a TradingSymbol (P3-328)")
+    void symbolMustNotBeBlank() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new ArrowOrderRequest(
+                        new ExchangeId("NSECM"), "   ", new InstrumentToken(1), 1,
+                        ArrowOrderRequest.TransactionType.B, ArrowOrderRequest.OrderType.LMT,
+                        ArrowOrderRequest.Product.I, "100", ArrowOrderRequest.Validity.DAY,
+                        0, new ClientOrderRef("REF"), false));
+    }
+
+    @Test
+    @DisplayName("disclosedQty may not exceed quantity (P3-329)")
+    void disclosedQtyWithinQuantity() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new ArrowOrderRequest(
+                        new ExchangeId("NSECM"), "SYM", new InstrumentToken(1), 10,
+                        ArrowOrderRequest.TransactionType.B, ArrowOrderRequest.OrderType.LMT,
+                        ArrowOrderRequest.Product.I, "100", ArrowOrderRequest.Validity.DAY,
+                        11, new ClientOrderRef("REF"), false));
+    }
+
+    @Test
+    @DisplayName("the stored price is the validated, trimmed price (P3-331)")
+    void priceIsStoredTrimmed() {
+        ArrowOrderRequest padded = new ArrowOrderRequest(
+                new ExchangeId("NSECM"), "SYM", new InstrumentToken(1), 1,
+                ArrowOrderRequest.TransactionType.B, ArrowOrderRequest.OrderType.LMT,
+                ArrowOrderRequest.Product.I, " 100 ", ArrowOrderRequest.Validity.DAY,
+                0, new ClientOrderRef("REF"), false);
+        assertEquals("100", padded.price());
+    }
+
+    @Test
+    @DisplayName("a limit price must be finite, not merely > 0 (P3-332)")
+    void limitPriceMustBeFinite() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new ArrowOrderRequest(
+                        new ExchangeId("NSECM"), "SYM", new InstrumentToken(1), 1,
+                        ArrowOrderRequest.TransactionType.B, ArrowOrderRequest.OrderType.LMT,
+                        ArrowOrderRequest.Product.I, "1e309", ArrowOrderRequest.Validity.DAY,
+                        0, new ClientOrderRef("REF"), false));
+    }
+
+    @Test
     @DisplayName("fromJson guards null data and missing/non-numeric requestTime (R-124/198)")
     void fromJsonGuards() {
         assertThrows(IllegalArgumentException.class,
