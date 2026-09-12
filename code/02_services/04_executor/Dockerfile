@@ -18,10 +18,18 @@
 FROM rust:1.97.1 AS builder
 WORKDIR /build
 
-# Layer-cache dependencies first, then copy source and build the service binary.
+# Dependencies are cached across builds by BuildKit cache mounts rather than by a
+# dummy-source layer: the registry/git mounts keep the downloads, and the target
+# mount keeps the compiled dependency rlibs, so a source-only rebuild recompiles
+# just the service crate. The binary is copied OUT of the mounted target into the
+# layer, because cache-mount contents are not part of the image.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY src ./src
-RUN cargo build --release --locked --bin nautilus-execution-service
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --locked --bin nautilus-execution-service \
+ && cp /build/target/release/nautilus-execution-service /build/nautilus-execution-service
 
 # --- Runtime: slim, non-root, fail-closed -----------------------------------------------------
 FROM debian:bookworm-slim AS runtime
@@ -31,7 +39,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/target/release/nautilus-execution-service /usr/local/bin/nautilus-execution-service
+COPY --from=builder /build/nautilus-execution-service /usr/local/bin/nautilus-execution-service
 
 # Fail closed by default: the service always boots HALTED and is never trading-ready.
 ENV EXECUTION_ENABLED=false \
