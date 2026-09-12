@@ -14,3 +14,14 @@
 **/.vscode/
 **/*.iml
 **/.DS_Store
+# Host-local, git-ignored build outputs (Go binaries in go-bridge/) and
+# Eclipse/JDT metadata: this context is COPY-heavy (the gateway and bridge
+# images take code/ wholesale), so without these the host's build outputs and
+# IDE state ride into the builder context. Keep in sync with the repo-root
+# .dockerignore (P5-015) — both are stamp inputs now.
+**/arrow-bridge
+**/faketool/faketool
+**/.classpath
+**/.project
+**/.factorypath
+**/.settings/

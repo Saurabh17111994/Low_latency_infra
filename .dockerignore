@@ -25,3 +25,15 @@
 **/.DS_Store
 **/*.log
 **/logs/
+# Host-local, git-ignored build outputs (Go binaries in go-bridge/) and
+# Eclipse/JDT metadata: neither is a build input for any image, and both churn
+# or grow the context for no benefit. Keep in sync with code/.dockerignore
+# (P5-015) and with the stamp inputs — image_staleness_check.py now treats the
+# context's .dockerignore as an image input, so editing this file relabels.
+**/arrow-bridge
+**/faketool/faketool
+**/.classpath
+**/.project
+**/.factorypath
+**/.settings/
+**/dependency-reduced-pom.xml
