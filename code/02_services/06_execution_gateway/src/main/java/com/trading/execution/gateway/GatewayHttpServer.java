@@ -35,24 +35,48 @@ public final class GatewayHttpServer implements AutoCloseable {
             new java.util.concurrent.atomic.AtomicInteger();
     private final java.util.concurrent.Executor httpExecutor;
 
+    /**
+     * Whether {@code /control/approve} may mutate {@link #gateStore}. False means the store is
+     * a placeholder rather than durable authority, and the endpoint fails closed instead of
+     * reporting a success it did not achieve.
+     */
+    private final boolean gateStoreAuthoritative;
+
+    /**
+     * Production default: no durable gate store is wired, so the server runs against a
+     * per-process placeholder. {@code /control/approve} therefore FAILS CLOSED — it used to
+     * return {@code 200 APPLIED} against state that approves nothing, which is worse than a
+     * refusal because it reads as success.
+     */
     public GatewayHttpServer(GatewayConfig config, GatewayReadiness readiness,
             Consumer<JsonNode> eventConsumer) throws IOException {
-        this(config, readiness, eventConsumer, new InMemoryGateStateStore(java.util.Set.of(SINGLE_OPERATOR)));
+        this(config, readiness, eventConsumer,
+                new InMemoryGateStateStore(java.util.Set.of(SINGLE_OPERATOR)), null, false);
     }
+    /**
+     * Authority is a REQUIRED declaration, never inferred: a caller that wires a gate store
+     * must also state whether it is durable authority. There is deliberately no overload that
+     * supplies this silently — that implicit default was itself the defect, because it meant
+     * the same constructor produced different answers in tests and in production.
+     */
     public GatewayHttpServer(GatewayConfig config, GatewayReadiness readiness,
-            Consumer<JsonNode> eventConsumer, GateStateStore gateStore) throws IOException {
-        this(config, readiness, eventConsumer, gateStore, null);
+            Consumer<JsonNode> eventConsumer, GateStateStore gateStore,
+            boolean gateStoreAuthoritative) throws IOException {
+        this(config, readiness, eventConsumer, gateStore, null, gateStoreAuthoritative);
     }
     /**
      * Full constructor. {@code httpExecutor} {@code null} keeps the platform default
      * (serial handler dispatch); a pool is how the flood soak drives real concurrency.
+     * {@code gateStoreAuthoritative} false makes {@code /control/approve} fail closed.
      */
     public GatewayHttpServer(GatewayConfig config, GatewayReadiness readiness,
             Consumer<JsonNode> eventConsumer, GateStateStore gateStore,
-            java.util.concurrent.Executor httpExecutor) throws IOException {
+            java.util.concurrent.Executor httpExecutor, boolean gateStoreAuthoritative)
+            throws IOException {
         this.config = config; this.readiness = readiness; this.eventConsumer = eventConsumer;
         this.gateStore = java.util.Objects.requireNonNull(gateStore, "gateStore");
         this.httpExecutor = httpExecutor;
+        this.gateStoreAuthoritative = gateStoreAuthoritative;
         this.protocol = new GatewayProtocol(config.sharedSecret());
         this.server = HttpServer.create(new InetSocketAddress(config.bindHost(), config.bindPort()), 16);
         if (httpExecutor != null) server.setExecutor(httpExecutor);
@@ -74,6 +98,18 @@ public final class GatewayHttpServer implements AutoCloseable {
         // approve must too, or a caller enables the durable gate the events
         // path will never serve (fail-closed HALTED default contradicted).
         if (!config.executionEnabled()) { reply(x, 503, "{\"error\":\"execution disabled via EXECUTION_ENABLED\"}"); return; }
+        // Readiness honesty: with no durable gate store wired (the 3-arg production form),
+        // this endpoint used to return 200 APPLIED against a per-process map — a success
+        // response that approves nothing. That is the most dangerous answer available,
+        // because an operator reads it as "the gate is now open for business" and the
+        // durable gate the events path consults is untouched. Refuse instead. 501 is
+        // deliberately distinct from the 503 above (a deployment choice, reversible) and
+        // from 200 (actually done).
+        if (!gateStoreAuthoritative) {
+            reply(x, 501, "{\"error\":\"no durable gate store wired; approvals are not "
+                    + "available in this deployment\"}");
+            return;
+        }
         // P3-004: the principal is transport identity, not body content — a
         // self-asserted {"principal":"saurabh"} drove HALTED->ENABLED with no
         // secret check, and anyone could force a safety HALT by sending a wrong

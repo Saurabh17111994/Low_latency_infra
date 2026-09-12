@@ -71,7 +71,7 @@ class ProjectionBacklogFloodSoakTest {
         gates.init(new GateRow("p1", "acct1", GateState.HALTED, 0, "boot", "h0",
                 null, null, null, null, 0L, null, null, null));
         ExecutorService pool = Executors.newCachedThreadPool();
-        server = new GatewayHttpServer(cfg, readiness, blockedConsumer, gates, pool);
+        server = new GatewayHttpServer(cfg, readiness, blockedConsumer, gates, pool, true);
         server.start();
         int port = serverPort(server);
         String base = "http://127.0.0.1:" + port;

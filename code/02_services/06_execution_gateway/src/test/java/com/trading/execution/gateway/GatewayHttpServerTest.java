@@ -28,7 +28,7 @@ class GatewayHttpServerTest {
         // the reconciled package "h1" is what the approve tests must present.
         gates.install(new GateRow("p1","acct1",GateState.APPROVAL_PENDING,1,"reconciled","h1",null,null,null,"owner1",1L,1000L, 900000L,null));
         cfg = new GatewayConfig("localhost:9123","default","Execution_Intent","Execution_Gate","Execution_Attempts","Order_Correlation","Postback_Projection_Ledger","Safety_Halt_Requests","127.0.0.1",0,"http://127.0.0.1:9190/v1/intents","execution-gateway.v1","secret1234567890123456",Duration.ofMillis(2000),Duration.ofMillis(250),"acct1","p1", true);
-        server = new GatewayHttpServer(cfg,new GatewayReadiness(), n-> {}, gates);
+        server = new GatewayHttpServer(cfg,new GatewayReadiness(), n-> {}, gates, true);
         server.start();
         int port = serverPort(server);
         base = "http://127.0.0.1:"+port;
