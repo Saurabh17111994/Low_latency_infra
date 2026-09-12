@@ -4,8 +4,15 @@
 # Asserts the documented exit codes AND messages for the three pre-Java
 # FATAL gates of code/02_services/01_ingestion/docker-entrypoint.sh:
 #   missing FLUSS_BOOTSTRAP          → exit 2  "FLUSS_BOOTSTRAP is required"
-#   missing/unreadable manifest      → exit 2  "readable instrument manifest is required"
+#   missing/unreadable manifest      → exit 2  "readable manifest FILE is required"
+#   unwritable LOG_DIR               → exit 2  "LOG_DIR not creatable"        (P1-137)
 #   missing/non-executable bridge    → exit 1  "arrow-bridge binary not found or not executable"
+#
+# The guard ORDER is part of the contract: the manifest check runs before the
+# P1-137 writability probes, which run before the bridge check. Each case must
+# satisfy every earlier guard, or it asserts a later guard's message — which is
+# exactly how case 3 rotted when 093d5e5 added the probes (2026-09-08) and case
+# 2 when 255da20 reworded the manifest message (2026-09-07).
 #
 # Pure bash + POSIX tools; no dependencies. Run directly:
 #   bash test_docker_entrypoint.sh
@@ -79,16 +86,32 @@ assert_contains "$ENTRY_OUT" "FLUSS_BOOTSTRAP is required" "missing-FLUSS_BOOTST
 echo "=== ING-INT-006 case 2: missing manifest ==="
 split_run "$(run_entrypoint FLUSS_BOOTSTRAP=localhost:9123)"
 assert_eq "$ENTRY_EXIT" 2 "missing manifest exits 2"
-assert_contains "$ENTRY_OUT" "readable instrument manifest is required" "missing-manifest message"
+assert_contains "$ENTRY_OUT" "readable manifest FILE is required" "missing-manifest message"
 
 # ── Case 3: missing bridge binary → exit 1 ───────────────────────────────────
 echo "=== ING-INT-006 case 3: missing bridge binary ==="
+# The P1-137 probes sit between the manifest and bridge checks, so this case
+# must give them writable paths or the entrypoint stops there with exit 2.
 split_run "$(run_entrypoint \
 	FLUSS_BOOTSTRAP=localhost:9123 \
 	ARROW_INSTRUMENT_MANIFEST="$MANIFEST" \
+	LOG_DIR="$TMP/logs" \
+	UNCERTAINTY_JOURNAL_PATH="$TMP/journal/uncertainty-journal.jsonl" \
 	ARROW_BRIDGE_BIN="$BOGUS_BIN")"
 assert_eq "$ENTRY_EXIT" 1 "missing bridge binary exits 1"
 assert_contains "$ENTRY_OUT" "arrow-bridge binary not found or not executable" "missing-bridge message"
+
+# ── Case 4: unwritable LOG_DIR → exit 2 (P1-137 probe) ───────────────────────
+echo "=== ING-INT-006 case 4: unwritable LOG_DIR ==="
+# A LOG_DIR whose parent is a regular file: mkdir -p cannot succeed, and the
+# failure needs no root or chmod assumptions.
+split_run "$(run_entrypoint \
+	FLUSS_BOOTSTRAP=localhost:9123 \
+	ARROW_INSTRUMENT_MANIFEST="$MANIFEST" \
+	LOG_DIR="$MANIFEST/logs" \
+	UNCERTAINTY_JOURNAL_PATH="$TMP/journal/uncertainty-journal.jsonl")"
+assert_eq "$ENTRY_EXIT" 2 "unwritable LOG_DIR exits 2"
+assert_contains "$ENTRY_OUT" "LOG_DIR not creatable" "unwritable-LOG_DIR message"
 
 # ── Verdict ───────────────────────────────────────────────────────────────────
 if [ "$FAILED" = 1 ]; then
