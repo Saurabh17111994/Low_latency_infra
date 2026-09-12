@@ -1,6 +1,6 @@
 //! Nautilus custom execution client.
 //!
-//! This module contains the custom [`ExecutionClient`] implementation, `BridgeExecutionClient`,
+//! This module contains the custom `ExecutionClient` implementation, [`BridgeExecutionClient`],
 //! which is the long-lived execution/position authority of the service. It is pinned to the
 //! audited Nautilus Rust APIs (`ExecutionClientCore` + `ExecutionEventEmitter`), boots into the
 //! safety gate `HALTED` state, connects to the in-process `FakeBridge`, and drives the order
