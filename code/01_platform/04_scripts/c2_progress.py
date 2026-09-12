@@ -110,10 +110,27 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("progress_file", type=Path)
     parser.add_argument("phase")
+    parser.add_argument(
+        "--min-samples",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "fail unless the phase holds at least N samples; a sampler that polls on a "
+            "fixed interval yields one sample per interval, so fewer means the window "
+            "was not observed end to end"
+        ),
+    )
     args = parser.parse_args()
     summary = summarize_phase(args.progress_file, args.phase)
     if summary is None:
         parser.error(f"no numeric samples found for phase {args.phase!r}")
+    if args.min_samples is not None and summary.samples < args.min_samples:
+        parser.error(
+            f"phase {args.phase!r} was sampled {summary.samples} time(s), fewer than the "
+            f"{args.min_samples} that one sample per poll interval implies: the window was "
+            "cut short"
+        )
     print(summary.as_tsv())
     return 0
 

@@ -630,12 +630,14 @@ wait_new_checkpoint "$NEW_CP_TIMEOUT_S" "$KILL_MS"
 # snapshot before the phase with one after it.
 run_load_phase post-kill "$POST_KILL_S"
 POST_PROGRESS="$(python3 "$SCRIPT_DIR/c2_progress.py" \
+  --min-samples "$(( (POST_KILL_S + POLL_S - 1) / POLL_S ))" \
   "$OUT/metric-progress.tsv" post-kill 2>/dev/null)" \
-  || fatal "post-recovery metric phase had no numeric samples"
+  || fatal "post-recovery metric phase failed validation: no numeric samples, or the window was sampled too thinly (POLL_S=${POLL_S})"
 # The trailing sample count lands in `_` instead of a named variable: the field keeps the
-# positions aligned with c2_progress.py's as_tsv() and is deliberately not asserted (the phase
-# above already fails when it has no numeric samples). Dropping the field entirely would spill
-# the count into POST_WRITE_RESETS, which the checks below do read.
+# positions aligned with c2_progress.py's as_tsv(), and its value is already checked by the
+# --min-samples argument above (the sampler captures once per poll interval, so a window that
+# ran to completion holds ceil(POST_KILL_S / POLL_S) samples). Dropping the field entirely
+# would spill the count into POST_WRITE_RESETS, which the checks below do read.
 IFS=$'\t' read -r POST_START_READ POST_END_READ POST_READ_DELTA POST_READ_INCREASES \
   POST_START_WRITE POST_END_WRITE POST_WRITE_DELTA POST_WRITE_INCREASES \
   POST_READ_RESETS POST_WRITE_RESETS _ <<< "$POST_PROGRESS"
