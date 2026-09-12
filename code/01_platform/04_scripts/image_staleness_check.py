@@ -78,6 +78,17 @@ SERVICE_SOURCES: dict[str, list[str]] = {
         "code/02_services/01_ingestion",
     ],
     "nautilus": ["code/02_services/04_executor"],
+    # CHG-122 loadgen (2026-09-02): built from the reactor root with
+    # Dockerfile.loadgen, which compiles the Go bridge and the ingestion sources
+    # into the image, so those are its real COPY inputs. Without this entry the
+    # compose-derived fallback hands git compose-relative strings ("../..") as
+    # if they were repo-relative, and the service reports NO-HISTORY however
+    # fresh its image is.
+    "loadgen": [
+        "code/pom.xml", "code/common",
+        "code/02_services/01_ingestion",
+        "code/02_services/06_execution_gateway/pom.xml",
+    ],
     # Native split: the compute image is the PLATFORM + launcher only — the
     # jar is a host artifact (mounted/submitted at runtime). Sources are the
     # Dockerfile + submit-jobs.sh; the 02_services job code is deliberately
