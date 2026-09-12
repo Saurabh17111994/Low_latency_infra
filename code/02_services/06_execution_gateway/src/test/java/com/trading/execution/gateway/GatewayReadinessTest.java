@@ -121,4 +121,31 @@ class GatewayReadinessTest {
         assertThat(new GatewayReadiness.Snapshot(true, true, true, true, "   ").reason())
                 .isEqualTo("unknown");
     }
+
+    // --- One shared reason slot must still name the real blocker (P3-301) ------------------------
+
+    @Test void aReadyDimensionDoesNotMaskAnotherDimensionsCause() {
+        GatewayReadiness r = new GatewayReadiness();
+        r.fluss(false, "fluss down");
+        r.protocol(true, "private protocol configured");
+        GatewayReadiness.Snapshot s = r.snapshot();
+        assertThat(s.flussReady()).isFalse();
+        assertThat(s.protocolReady()).isTrue();
+        assertThat(s.reason())
+                .as("an unrelated success must not become the visible reason")
+                .isEqualTo("fluss down");
+    }
+
+    @Test void theAllClearAdoptsTheFinalReason() {
+        GatewayReadiness r = new GatewayReadiness();
+        r.fluss(false, "fluss down");
+        r.protocol(true, "protocol ok");
+        r.durableWrites(true, "durable ok");
+        assertThat(r.snapshot().executionReady()).isFalse();
+        assertThat(r.snapshot().reason()).isEqualTo("fluss down");
+        // Completing readiness is the all-clear, where the last success is the honest summary.
+        r.fluss(true, "fluss recovered");
+        assertThat(r.snapshot().executionReady()).isTrue();
+        assertThat(r.snapshot().reason()).isEqualTo("fluss recovered");
+    }
 }

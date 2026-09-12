@@ -42,11 +42,11 @@ public final class GatewayReadiness {
 
     public Snapshot snapshot() { return state.get(); }
     public void fluss(boolean ready, String reason) { update(s -> new Snapshot(s.healthy(), ready,
-            s.protocolReady(), s.durableWriteReady(), reason)); }
+            s.protocolReady(), s.durableWriteReady(), reason), ready); }
     public void protocol(boolean ready, String reason) { update(s -> new Snapshot(s.healthy(),
-            s.flussReady(), ready, s.durableWriteReady(), reason)); }
+            s.flussReady(), ready, s.durableWriteReady(), reason), ready); }
     public void durableWrites(boolean ready, String reason) { update(s -> new Snapshot(s.healthy(),
-            s.flussReady(), s.protocolReady(), ready, reason)); }
+            s.flussReady(), s.protocolReady(), ready, reason), ready); }
     /**
      * P3-294: atomic full-drain restore. Sets durableWriteReady=true only when
      * {@code inFlight.getAsInt()==0} still holds INSIDE the updateAndGet —
@@ -56,7 +56,7 @@ public final class GatewayReadiness {
     public void restoreIfDrained(java.util.function.IntSupplier inFlight, String reason) {
         update(s -> inFlight.getAsInt() == 0 && !s.durableWriteReady()
                 ? new Snapshot(s.healthy(), s.flussReady(), s.protocolReady(), true, reason)
-                : s);
+                : s, true);
     }
 
     /**
@@ -73,10 +73,27 @@ public final class GatewayReadiness {
      * repeat of itself.
      */
     public void fail(String reason) {
-        update(s -> new Snapshot(false, false, false, false, reason));
+        update(s -> new Snapshot(false, false, false, false, reason), false);
     }
 
-    private void update(java.util.function.UnaryOperator<Snapshot> fn) {
-        state.updateAndGet(s -> s.healthy() ? fn.apply(s) : s);
+    private void update(java.util.function.UnaryOperator<Snapshot> fn, boolean writeReady) {
+        state.updateAndGet(s -> {
+            if (!s.healthy()) {
+                return s;
+            }
+            Snapshot next = fn.apply(s);
+            // P3-301: a dimension BECOMING ready must not erase the reason another dimension is not.
+            // With one shared reason slot, `fluss(false, "fluss down")` followed by an unrelated
+            // `protocol(true, "ok")` used to leave /readyz reporting "ok" while flussReady was false,
+            // and a success message could be the visible reason while executionReady was still
+            // false — actively misleading during an incident. The new reason is adopted when the
+            // write is itself a failure/not-ready, or when it completes readiness (the all-clear,
+            // where the last success is the honest summary).
+            if (writeReady && !next.executionReady()) {
+                return new Snapshot(next.healthy(), next.flussReady(), next.protocolReady(),
+                        next.durableWriteReady(), s.reason());
+            }
+            return next;
+        });
     }
 }

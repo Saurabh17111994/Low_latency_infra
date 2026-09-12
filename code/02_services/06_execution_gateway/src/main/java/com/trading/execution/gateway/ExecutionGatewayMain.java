@@ -64,8 +64,19 @@ public final class ExecutionGatewayMain {
             // P3-277: the reader is owned by try-with-resources so a throw from
             // subscribeFromBeginning() or the readiness wiring can no longer leak its connection,
             // table and dedup store — it used to be closed only by the inner server's finally.
-            try (IntentReader reader = IntentReader.open(config, outbound,
-                    reason -> { readiness.fail(reason); LOG.error("execution intent halted: {}", reason); })) {
+            // P3-061: a malformed row reaches this handler on EVERY poll, so the previous
+            // unconditional LOG.error produced hundreds of identical lines for one incident (566 in
+            // an observed live run) and buried the original cause in its own repeats. The latch
+            // keeps the first reason, so report the transition once and drop repeats to debug.
+            AtomicBoolean haltReported = new AtomicBoolean(false);
+            try (IntentReader reader = IntentReader.open(config, outbound, reason -> {
+                readiness.fail(reason);
+                if (haltReported.compareAndSet(false, true)) {
+                    LOG.error("execution intent halted; gateway HALTED until restart: {}", reason);
+                } else {
+                    LOG.debug("execution intent already halted: {}", reason);
+                }
+            })) {
                 reader.subscribeFromBeginning();
                 GatewayStartup.applyStartupReadiness(readiness, true);
                 ObjectMapper mapper = new ObjectMapper();
