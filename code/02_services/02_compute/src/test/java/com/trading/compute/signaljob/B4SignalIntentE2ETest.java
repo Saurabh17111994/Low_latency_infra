@@ -301,11 +301,20 @@ class B4SignalIntentE2ETest {
                 // (was "20260901") lands rows in an old partition the job
                 // never reads, so no candle ever forms (observed 2026-09-05:
                 // B4 symbols absent from the entire job output).
+                //
+                // validity_state MUST be the MarketTick enum name, never the
+                // literal "VALID": MarketTick.isValid() (common/model) and the
+                // raw validation gate both fail closed on anything outside
+                // {VALID_TRADE, VALID_NON_TRADE}, and the drop is counted, not
+                // logged. A stale "VALID" here made every burst row vanish at
+                // raw-validation, so candle_live/candle_closed stayed empty and
+                // this test failed with "rows are not reaching the candle leg"
+                // (observed 2026-09-12; the pipeline itself was healthy).
                 bs(EVENT_DAY_FMT.format(Instant.ofEpochMilli(eventTime))),
                 bs(fingerprint), bs("v2"), bs("e2e"), 1L, token,
                 bs("NSE"), bs(symbol), eventTime, eventTime, eventTime, bs("TRADE"),
                 (long) price, 1L, new byte[] {1, 2}, bs("h-" + fingerprint),
-                bs("1"), bs("v1"), bs("VALID"), bs("FRESH"), bs("3"));
+                bs("1"), bs("v1"), bs("VALID_TRADE"), bs("FRESH"), bs("3"));
     }
 
     // ---- fluss reads ----
