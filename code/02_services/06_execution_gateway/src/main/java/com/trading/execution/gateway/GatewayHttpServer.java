@@ -77,12 +77,27 @@ public final class GatewayHttpServer implements AutoCloseable {
      * (one retry budget across all eleven Fluss calls, instead of one per call); it does not remove
      * the serialisation itself.
      *
-     * <p>Concurrency is not a one-line change here. The projection ledger advances as a per-event
-     * state machine (RECEIVED -> writeAudit -> AUDIT_WRITTEN -> writeLifecycle -> LIFECYCLE_APPLIED
-     * -> writePosition), so a pool needs an ordering analysis first: two events applying at once
-     * must not interleave steps on one stream, and the backlog counter's shed path assumes in-flight
-     * applies past the bound are safe to reject. Until that analysis exists, keep the thread count
-     * at one and keep the hold bounded.
+     * <p><b>Ordering analysis (2026-09-13): a same-process pool is admissible — concurrency is
+     * gated on operations, not on ordering.</b> Both questions this javadoc used to leave open are
+     * answered by inspection. <i>Interleaving:</i> {@code ProjectionApplier.apply} takes a
+     * {@code ReentrantLock} stripe keyed on {@code postbackEventId} before it walks
+     * RECEIVED -> writeAudit -> AUDIT_WRITTEN -> writeLifecycle -> LIFECYCLE_APPLIED ->
+     * writePosition, so one stream's steps are serialised, and distinct eventIds are independent by
+     * design. <i>The shed path:</i> {@code projectionInFlight} is incremented and the bound checked
+     * before {@code eventConsumer.accept(...)}, so a rejected request has written nothing, and the
+     * decrement runs in a {@code finally} guarded by {@code readiness.restoreIfDrained}, so it
+     * cannot clear a live backlog.
+     *
+     * <p>What actually gates a pool is elsewhere. {@code MAX_PENDING_PROJECTION_RECORDS} is
+     * unreachable in production today — one dispatcher thread keeps in-flight at 1 — so enabling a
+     * pool turns shedding (503 plus {@code durableWrites(false)}) into a real intake behaviour
+     * instead of a soak-only path, and that is a decision to take deliberately rather than inherit.
+     * And the ledger's last-writer-wins is safe only under the single-writer-per-{@code eventId}
+     * deployment contract: the stripe fences that inside one process, and nothing fences it across
+     * processes — {@link ProjectionLedgerStore} names that gap. That gap blocks horizontal scaling,
+     * not this pool. Until the shed bound's production value is chosen and a test proves two
+     * distinct eventIds apply concurrently without touching each other's steps, keep the thread
+     * count at one and keep the hold bounded.
      */
     public GatewayHttpServer(GatewayConfig config, GatewayReadiness readiness,
             Consumer<JsonNode> eventConsumer, GateStateStore gateStore,
