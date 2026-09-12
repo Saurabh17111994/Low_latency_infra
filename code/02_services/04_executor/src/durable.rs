@@ -1,4 +1,5 @@
-//! Durable write path — four permanent clients behind feature flags (plan Task B7 / CHG-065).
+//! Durable write path — four permanent clients and their (not-yet-wired) enablement flags
+//! (plan Task B7 / CHG-065).
 //!
 //! The Nautilus service currently keeps its duplicate-send guard in-process
 //! (`InMemoryAttemptStore` / `InMemoryGateStateStore`). Four durable clients are
@@ -15,12 +16,18 @@
 //! 4. **Audit sink** — durable audit/OTel feed (Fluss `Execution_Audit` LOG in
 //!    production, memory in the offline slice).
 //!
-//! Each client is behind a dedicated env flag defaulting to OFF. When OFF the
-//! behavior is bit-identical to today (in-memory, no durable I/O). When ON the
-//! offline slice uses the same in-memory stores (proving the flag-gated path), and
-//! the live slice (Workstream D) swaps in Fluss-backed / file / R2 / OTel
-//! implementations behind the same traits — identical to the `clockwatch` swap
-//! pattern. Enabling the flags in compose requires explicit user approval (B7.5).
+//! Each client is behind a dedicated env flag defaulting to OFF.
+//!
+//! **Wiring status (P3-192, verified by inspection):** the flags are recorded on
+//! [`DurableClients`] and read by nothing — `new_in_memory` builds all four in-memory stores
+//! unconditionally, so an all-ON client is behavior-identical to an all-OFF client *by
+//! construction*, not merely because a branch happens to agree. No `flags.*` branch exists yet
+//! and [`DurableFlags::any_on`] has no caller: the flags are the seam for the swap below, never
+//! evidence that a durable path is active. Pin the inertness with the `*_flag_off_*` tests.
+//!
+//! When the swap lands, the live slice (Workstream D) plugs Fluss-backed / file / R2 / OTel
+//! implementations in behind the same traits — identical to the `clockwatch` swap pattern.
+//! Enabling the flags in compose requires explicit user approval (B7.5).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -55,6 +62,7 @@ impl DurableFlags {
             audit: true,
         }
     }
+    /// True when any flag is on. No caller yet (P3-192) — kept as the B7 wiring seam.
     pub fn any_on(&self) -> bool {
         self.gate || self.attempts || self.journal || self.audit
     }
@@ -160,6 +168,8 @@ impl AuditSink for InMemoryAuditSink {
 /// The four durable clients. Each handle is `Rc`-shared so multiple `ExecutionGate`
 /// instances (simulating restarts) share the same durable memory.
 pub struct DurableClients {
+    /// Parsed enablement flags. Stored for the B7 swap; **no code branches on them yet**
+    /// (P3-192) — see the module header. Reading them is not evidence of a durable path.
     pub flags: DurableFlags,
     pub gate_store: Rc<dyn GateStateStore>,
     pub attempt_store: Rc<dyn AttemptStore>,
@@ -173,6 +183,8 @@ pub struct DurableClients {
 }
 
 impl DurableClients {
+    /// Builds the four in-memory clients. `flags` is stored verbatim and branched on by
+    /// nothing (P3-192): every flag combination yields the same in-memory stores.
     pub fn new_in_memory(flags: DurableFlags) -> Self {
         let gate_mem = Rc::new(InMemoryGateStateStore::new());
         let attempt_mem = Rc::new(InMemoryAttemptStore::new());
