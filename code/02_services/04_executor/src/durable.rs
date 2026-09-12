@@ -79,6 +79,11 @@ pub struct JournalEntry {
 
 pub trait JournalStore {
     fn append(&self, payload: &[u8]) -> u64;
+    /// Point-in-time snapshot of every entry (P3-436).
+    ///
+    /// This is an O(n) copy — the in-memory implementation clones the whole journal — meant for
+    /// verification and inspection (tests, tooling). Do not call it per append: a loop that
+    /// writes and inspects each time copies the journal once per entry.
     fn entries(&self) -> Vec<JournalEntry>;
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
@@ -126,6 +131,9 @@ pub struct AuditRecord {
 
 pub trait AuditSink {
     fn record(&self, kind: &str, payload: &[u8]) -> u64;
+    /// Point-in-time snapshot of every record — an O(n) clone with the same contract as
+    /// [`JournalStore::entries`] (P3-436): inspection only, never per append. The audit feed is
+    /// never read back for correctness decisions.
     fn records(&self) -> Vec<AuditRecord>;
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
