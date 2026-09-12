@@ -227,6 +227,14 @@ def scenario_container_bad_ownership(compose_file, bootstrap, classpath):
             "-e", "DDL_APPLY_EVIDENCE_DIR=/bad",
             "-e", f"DDL_APPLY_TABLE_PREFIX={prefix}",
             "-e", "DDL_APPLY_ACK_LIMITATIONS=auto",
+            # The dispatcher's own default (/app/logs/schema-compat/...) is a
+            # host mount that the operator flow never creates; catalog-guard.sh
+            # defaults to the in-image manifest instead. Without this the apply
+            # exits 2 ("matrix evidence not found") before the in-band ownership
+            # gate can flip the exit, so the drill measured an unmet env
+            # precondition instead of the contract (gate step 11, attempt 8).
+            "-e", "DDL_APPLY_MATRIX_EVIDENCE="
+                  "/app/code/01_platform/02_sql/ddl/schema_manifest.json",
             "ddl-apply", "apply",
         ]
         try:
