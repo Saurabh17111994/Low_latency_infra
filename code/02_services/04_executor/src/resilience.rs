@@ -16,8 +16,19 @@
 //! store decision (including UNKNOWN / ambiguous) is terminal and must fail closed, never
 //! auto-retry.
 //!
-//! Delay/time are injected (`now` closures / explicit ms), so nothing here depends on a
-//! wall clock or sleeps — cooldowns and budgets are fully deterministically testable.
+//! Wall-clock reads are injected (`now` closures), so breaker cooldowns stay deterministically
+//! testable, and [`Backoff`] remains a pure function verified on its own (RESILIENCE-002).
+//!
+//! **Backoff pacing is applied for real** (P3-023). The retry loop sleeps `next_delay_ms()`
+//! between transient attempts: `std::thread::sleep` in [`RetryOrchestrator::execute`],
+//! `tokio::time::sleep` in [`RetryOrchestrator::execute_async`]. Tests stay cheap because
+//! they configure millisecond-scale `base_backoff_ms`/`cap_backoff_ms`; before this the loop
+//! computed the delay and discarded it, so a "backed-off" retry was actually immediate.
+//!
+//! **The retry budget is per logical call** (P3-022), not per orchestrator lifetime. One
+//! orchestrator is built per client and lives for the process, so a shared budget meant a
+//! single exhausted call bricked every later call. Cross-call storm containment is the
+//! circuit breaker's role — it is the stateful, shared guard.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -208,7 +219,8 @@ pub struct RetryConfig {
 
 /// Composes budget + backoff + breaker + idempotency guard for one logical call.
 pub struct RetryOrchestrator {
-    budget: RetryBudget,
+    /// P3-022: a per-call bound, not a lifetime one — see the module doc.
+    max_attempts: u32,
     breaker: CircuitBreaker,
     backoff: Backoff,
     guard: IdempotencyGuard,
@@ -217,7 +229,7 @@ pub struct RetryOrchestrator {
 impl RetryOrchestrator {
     pub fn new(cfg: RetryConfig) -> Self {
         Self {
-            budget: RetryBudget::new(cfg.max_attempts),
+            max_attempts: cfg.max_attempts,
             breaker: CircuitBreaker::new(cfg.breaker_threshold, cfg.breaker_cooldown_ms),
             backoff: Backoff::new(cfg.base_backoff_ms, cfg.cap_backoff_ms),
             guard: IdempotencyGuard::new(),
@@ -247,13 +259,17 @@ impl RetryOrchestrator {
             return Err(RetryError::Duplicate);
         }
 
+        // P3-022: bound THIS call, not the orchestrator's lifetime.
+        let mut budget = RetryBudget::new(self.max_attempts);
         let mut attempts: u32 = 0;
         loop {
-            if !self.budget.try_allow() {
-                return Err(RetryError::Exhausted { attempts });
-            }
+            // Breaker before budget: a short-circuited call never reaches the dependency, so
+            // it must not consume a budget unit either.
             if !self.breaker.allow_call(now()) {
                 return Err(RetryError::BreakerOpen);
+            }
+            if !budget.try_allow() {
+                return Err(RetryError::Exhausted { attempts });
             }
             attempts += 1;
             match attempt() {
@@ -268,12 +284,12 @@ impl RetryOrchestrator {
                 }
                 Err(AttemptError::Transient(_)) => {
                     self.breaker.record_failure(now());
-                    if self.budget.exhausted() || self.breaker.is_open() {
+                    if budget.exhausted() || self.breaker.is_open() {
                         return Err(RetryError::Exhausted { attempts });
                     }
-                    // In production the caller would sleep `next_delay_ms()`; the delay is
-                    // consumed here so backoff pacing stays exercised deterministically.
-                    let _ = self.backoff.next_delay_ms();
+                    // P3-023: apply the backoff, don't just compute it.
+                    let delay_ms = self.backoff.next_delay_ms();
+                    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
                 }
             }
         }
@@ -300,13 +316,17 @@ impl RetryOrchestrator {
         F: FnMut() -> Fut,
         Fut: Future<Output = Result<T, AttemptError>>,
     {
+        // P3-022: bound THIS call, not the orchestrator's lifetime.
+        let mut budget = RetryBudget::new(self.max_attempts);
         let mut attempts: u32 = 0;
         loop {
-            if !self.budget.try_allow() {
-                return Err(RetryError::Exhausted { attempts });
-            }
+            // Breaker before budget: a short-circuited call never reaches the dependency, so
+            // it must not consume a budget unit either.
             if !self.breaker.allow_call(now()) {
                 return Err(RetryError::BreakerOpen);
+            }
+            if !budget.try_allow() {
+                return Err(RetryError::Exhausted { attempts });
             }
             attempts += 1;
             match attempt().await {
@@ -317,12 +337,13 @@ impl RetryOrchestrator {
                 Err(AttemptError::Terminal(_)) => return Err(RetryError::Terminal),
                 Err(AttemptError::Transient(_)) => {
                     self.breaker.record_failure(now());
-                    if self.budget.exhausted() || self.breaker.is_open() {
+                    if budget.exhausted() || self.breaker.is_open() {
                         return Err(RetryError::Exhausted { attempts });
                     }
-                    // Production would sleep `next_delay_ms()`; it is consumed here so the
-                    // backoff pacing stays exercised deterministically (injected time).
-                    let _ = self.backoff.next_delay_ms();
+                    // P3-023: apply the backoff. This is the live bridge path — a discarded
+                    // delay meant a retry storm against a struggling transport.
+                    let delay_ms = self.backoff.next_delay_ms();
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
             }
         }
@@ -554,5 +575,100 @@ mod tests {
         let r = o.execute_async(|| 0, &mut attempt).await;
         assert_eq!(r, Err(RetryError::Exhausted { attempts: 4 }));
         assert_eq!(attempts.get(), 4, "bounded: never retries past the budget");
+    }
+
+    // --- P3-022: the budget bounds one call, not the orchestrator's lifetime ---
+    #[test]
+    fn p3_022_exhausted_call_does_not_brick_later_calls() {
+        let mut o = RetryOrchestrator::new(RetryConfig {
+            max_attempts: 2,
+            base_backoff_ms: 1,
+            cap_backoff_ms: 1,
+            breaker_threshold: 100, // keep the breaker out of the way
+            breaker_cooldown_ms: 1000,
+        });
+        // The first logical call burns its entire budget on a permanent outage.
+        let mut always_fail = || Err::<(), AttemptError>(AttemptError::Transient("down".into()));
+        assert_eq!(
+            o.execute("k1", || 0, &mut always_fail),
+            Err(RetryError::Exhausted { attempts: 2 })
+        );
+        // A later, unrelated call must still be attempted. Against the old shared budget this
+        // returned Exhausted { attempts: 0 } WITHOUT touching the dependency, for the rest of
+        // the process's life (one orchestrator is built per client).
+        let mut ok = || Ok::<i64, AttemptError>(7);
+        let (v, n) = o.execute("k2", || 0, &mut ok).unwrap();
+        assert_eq!(v, 7);
+        assert_eq!(n, 1, "a fresh key gets a fresh budget, not the drained one");
+    }
+
+    // --- P3-022: a breaker short-circuit must not consume budget ---
+    #[test]
+    fn p3_022_breaker_short_circuit_does_not_consume_budget() {
+        let mut o = RetryOrchestrator::new(RetryConfig {
+            max_attempts: 2,
+            base_backoff_ms: 1,
+            cap_backoff_ms: 1,
+            breaker_threshold: 1, // opens on the first failure
+            breaker_cooldown_ms: 10_000,
+        });
+        let mut always_fail = || Err::<(), AttemptError>(AttemptError::Transient("down".into()));
+        let _ = o.execute("k1", || 0, &mut always_fail); // opens the breaker
+        assert_eq!(o.breaker_state(), BreakerState::Open);
+        // Short-circuited: reported as BreakerOpen, not Exhausted, because no budget unit
+        // was spent on a call that never reached the dependency.
+        let mut ok = || Ok::<i64, AttemptError>(1);
+        assert_eq!(o.execute("k2", || 0, &mut ok), Err(RetryError::BreakerOpen));
+    }
+
+    // --- P3-023: the backoff delay is actually applied between attempts ---
+    #[test]
+    fn p3_023_backoff_is_applied_between_attempts() {
+        use std::time::{Duration, Instant};
+        let mut o = RetryOrchestrator::new(RetryConfig {
+            max_attempts: 3,
+            base_backoff_ms: 40,
+            cap_backoff_ms: 40,
+            breaker_threshold: 100,
+            breaker_cooldown_ms: 1000,
+        });
+        let started = Instant::now();
+        let mut fail = || Err::<(), AttemptError>(AttemptError::Transient("down".into()));
+        assert_eq!(
+            o.execute("k1", || 0, &mut fail),
+            Err(RetryError::Exhausted { attempts: 3 })
+        );
+        // Two gaps of 40ms. Before the fix the loop computed and discarded each delay, so
+        // this returned in microseconds — the "backoff" was a hot retry storm.
+        assert!(
+            started.elapsed() >= Duration::from_millis(80),
+            "backoff must actually be applied, elapsed={:?}",
+            started.elapsed()
+        );
+    }
+
+    // --- P3-023: ...on the LIVE async bridge path too ---
+    #[tokio::test(flavor = "current_thread")]
+    async fn p3_023_async_backoff_is_applied_between_attempts() {
+        use std::time::{Duration, Instant};
+        let mut o = RetryOrchestrator::new(RetryConfig {
+            max_attempts: 3,
+            base_backoff_ms: 30,
+            cap_backoff_ms: 30,
+            breaker_threshold: 100,
+            breaker_cooldown_ms: 1000,
+        });
+        let started = Instant::now();
+        let mut fail =
+            || async { Err::<i64, AttemptError>(AttemptError::Transient("down".into())) };
+        assert_eq!(
+            o.execute_async(|| 0, &mut fail).await,
+            Err(RetryError::Exhausted { attempts: 3 })
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(60),
+            "async backoff must actually be applied, elapsed={:?}",
+            started.elapsed()
+        );
     }
 }
