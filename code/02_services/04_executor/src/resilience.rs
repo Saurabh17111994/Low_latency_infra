@@ -30,7 +30,7 @@
 //! single exhausted call bricked every later call. Cross-call storm containment is the
 //! circuit breaker's role — it is the stateful, shared guard.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 
 /// Exponential backoff: `base_ms << attempt` per step, capped at `cap_ms`.
@@ -188,12 +188,27 @@ pub enum RetryError {
 
 /// Idempotency guard (RESILIENCE-007): once a key reaches a terminal/done outcome it is
 /// memoized, and a duplicate logical call returns without re-invoking the dependency.
+///
+/// P3-216: the memo is bounded (FIFO). A long-lived executor sees arbitrarily many distinct
+/// logical keys, so without a bound this map grows for the lifetime of the process. Eviction
+/// is the weaker of the two outcomes — a re-admitted key re-invokes the dependency — which is
+/// why [`IdempotencyGuard::MEMO_CAPACITY`] is sized to never evict anything that could still
+/// be retried.
 #[derive(Debug, Default)]
 pub struct IdempotencyGuard {
     memo: HashMap<String, ()>,
+    /// Insertion order, used only to know which memoized key is the oldest.
+    order: VecDeque<String>,
 }
 
 impl IdempotencyGuard {
+    /// Retained keys. Any key still inside the retry/ack window must survive here — evicting
+    /// one early re-admits a duplicate and re-invokes the dependency, which is the failure
+    /// this guard exists to prevent. The bound is therefore generous; it exists to stop
+    /// unbounded growth over a long-lived process, not to trim aggressively.
+    /// Tripwire: revisit if distinct logical keys per gate epoch can approach this.
+    pub const MEMO_CAPACITY: usize = 4096;
+
     pub fn new() -> Self {
         Self::default()
     }
@@ -202,8 +217,17 @@ impl IdempotencyGuard {
         self.memo.contains_key(key)
     }
 
+    /// Marks the key done, evicting the oldest keys beyond `MEMO_CAPACITY` (P3-216).
     pub fn mark(&mut self, key: &str) {
-        self.memo.entry(key.to_string()).or_insert(());
+        if self.memo.insert(key.to_string(), ()).is_some() {
+            return; // already known: keep its original place in the eviction order
+        }
+        self.order.push_back(key.to_string());
+        while self.order.len() > Self::MEMO_CAPACITY {
+            if let Some(oldest) = self.order.pop_front() {
+                self.memo.remove(&oldest);
+            }
+        }
     }
 }
 
@@ -670,5 +694,37 @@ mod tests {
             "async backoff must actually be applied, elapsed={:?}",
             started.elapsed()
         );
+    }
+
+    // --- P3-216: the idempotency memo is bounded, so a long-lived executor cannot grow it
+    // forever with distinct logical keys ---
+    #[test]
+    fn memo_is_bounded_and_evicts_the_oldest_key() {
+        let mut guard = IdempotencyGuard::new();
+        let total = IdempotencyGuard::MEMO_CAPACITY + 1;
+        for i in 0..total {
+            guard.mark(&format!("key-{i}"));
+        }
+        assert!(!guard.done("key-0"), "the oldest key must be evicted");
+        assert!(
+            guard.done(&format!("key-{}", total - 1)),
+            "the newest key stays"
+        );
+        let retained = (0..total).filter(|i| guard.done(&format!("key-{i}"))).count();
+        assert_eq!(
+            retained,
+            IdempotencyGuard::MEMO_CAPACITY,
+            "the memo is capped"
+        );
+    }
+
+    #[test]
+    fn a_key_inside_the_window_is_never_re_admitted() {
+        let mut guard = IdempotencyGuard::new();
+        guard.mark("first");
+        for i in 0..(IdempotencyGuard::MEMO_CAPACITY - 1) {
+            guard.mark(&format!("filler-{i}"));
+        }
+        assert!(guard.done("first"), "a key still inside the window survives");
     }
 }
