@@ -13,6 +13,13 @@ public final class ArrowOrderStatus {
     /** orderStatus values returned by GET /user/orders and the postback stream. */
     public enum OrderStatus {
         PENDING,
+        /**
+         * P3-108: accepted but not yet triggered (stop orders). The Go bridge
+         * whitelists this value (postback.go:220) and the executor contract names
+         * it, so it must not collapse into PENDING — that would lose the broker's
+         * distinction exactly as mapping FILL onto COMPLETE did (P3-107).
+         */
+        TRIGGER_PENDING,
         OPEN,
         COMPLETE,
         CANCELLED,
@@ -31,6 +38,7 @@ public final class ArrowOrderStatus {
             String v = s.trim().toUpperCase(Locale.ROOT);
             switch (v) {
                 case "PENDING": return PENDING;
+                case "TRIGGER_PENDING": return TRIGGER_PENDING;
                 case "OPEN": return OPEN;
                 case "COMPLETE":
                 case "FILLED": return COMPLETE;
@@ -44,7 +52,7 @@ public final class ArrowOrderStatus {
                 default:
                     throw new IllegalArgumentException(
                             "unknown orderStatus: " + s
-                            + " (expected one of PENDING, OPEN, COMPLETE, CANCELLED, REJECTED)");
+                            + " (expected one of " + java.util.Arrays.toString(values()) + ")");
             }
         }
     }

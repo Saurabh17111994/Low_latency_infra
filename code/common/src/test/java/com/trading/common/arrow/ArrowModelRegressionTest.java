@@ -108,6 +108,9 @@ class ArrowModelRegressionTest {
         assertEquals(OrderStatus.CANCELLED, OrderStatus.from("cancelled"));
         // P3-107: "FILL" is not the broker's terminal spelling.
         assertThrows(IllegalArgumentException.class, () -> OrderStatus.from("FILL"));
+        // P3-108: a stop order that has not triggered yet is its own state.
+        assertEquals(OrderStatus.TRIGGER_PENDING, OrderStatus.from("TRIGGER_PENDING"));
+        assertEquals(OrderStatus.TRIGGER_PENDING, OrderStatus.from("trigger_pending"));
         assertThrows(IllegalArgumentException.class, () -> OrderStatus.from("NOT_A_STATUS"));
         assertThrows(IllegalArgumentException.class, () -> OrderStatus.from(null));
     }
