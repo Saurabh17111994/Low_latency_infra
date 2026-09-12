@@ -81,6 +81,12 @@ public final class ArrowOrderStatus {
                 return UNKNOWN;
             }
             String v = s.trim();
+            // P3-336: the broker writes "Canceled" in some payloads and "Cancelled"
+            // in others; a double L matches neither the wire string nor the enum name,
+            // so it silently became UNKNOWN and the cancel was never classified.
+            if (v.equalsIgnoreCase("cancelled")) {
+                return CANCELED;
+            }
             for (ReportType r : values()) {
                 if (r == UNKNOWN) continue;
                 if (r.wire.equalsIgnoreCase(v) || r.name().equalsIgnoreCase(v)) {

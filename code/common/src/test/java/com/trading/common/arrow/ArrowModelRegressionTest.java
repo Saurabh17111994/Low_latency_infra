@@ -119,6 +119,10 @@ class ArrowModelRegressionTest {
     @DisplayName("ReportType maps unrecognized wire values to UNKNOWN (R-126)")
     void reportTypeUnknown() {
         assertEquals(ReportType.FILL, ReportType.from("Fill"));
+        // P3-336: the broker also spells it with a double L.
+        assertEquals(ReportType.CANCELED, ReportType.from("Cancelled"));
+        assertEquals(ReportType.CANCELED, ReportType.from("CANCELLED"));
+        assertEquals(ReportType.CANCELED, ReportType.from("cancelled"));
         assertEquals(ReportType.UNKNOWN, ReportType.from("SomeFutureEventKind"));
         assertEquals(ReportType.UNKNOWN, ReportType.from(null));
         assertEquals(ReportType.UNKNOWN, ReportType.from(""));
