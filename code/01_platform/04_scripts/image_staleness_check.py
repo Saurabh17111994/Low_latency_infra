@@ -111,7 +111,9 @@ def load_compose(path: Path) -> dict:
 
 
 def build_services(compose: dict) -> dict[str, dict]:
-    """Return {service: {context, dockerfile, profile}} for build: services."""
+    """Return {service: {context, dockerfile, profile, image}} for build:
+    services. `image` is compose's own declaration, or None when compose will
+    tag the build with its default <project>-<service> name."""
     out: dict[str, dict] = {}
     for name, svc in compose["services"].items():
         build = svc.get("build") if isinstance(svc, dict) else None
@@ -120,8 +122,21 @@ def build_services(compose: dict) -> dict[str, dict]:
                 "context": build.get("context", "."),
                 "dockerfile": build.get("dockerfile", "Dockerfile"),
                 "profile": svc.get("profiles"),
+                "image": svc.get("image"),
             }
     return out
+
+
+def image_ref(project: str, service: str, entry: dict | None = None) -> str:
+    """Image reference this service is inspected under.
+
+    A compose `image:` declaration wins: a service that pins one (loadgen ->
+    pipeline-loadgen:1.0.0) is never tagged with compose's <project>-<service>
+    default, so looking up the default reports a false MISSING. Absent a
+    declaration, the default is exactly what compose itself builds.
+    """
+    declared = (entry or {}).get("image")
+    return declared or f"{project}-{service}"
 
 
 def _run_git(git_root: Path, args: list[str]) -> subprocess.CompletedProcess:
@@ -266,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
     failures = 0
     warn = 0
     for name in sorted(services):
-        image = f"{project}-{name}"
+        image = image_ref(project, name, services[name])
         result = check_service(name, image, git_root, services)
         status = result["status"]
         mark = "OK " if status == "FRESH" else ("WARN" if status == "DIRTY-WARN"

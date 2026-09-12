@@ -64,6 +64,35 @@ class BuildServicesTest(unittest.TestCase):
             isc.load_compose(Path("/dev/null"))
 
 
+class DeclaredImageTest(unittest.TestCase):
+    """A compose `image:` declaration must be the reference the checker
+    inspects. Regression: loadgen declares pipeline-loadgen:1.0.0, so the
+    derived default 01_docker-loadgen never exists and a built, fresh image
+    was reported MISSING (gate step 8 could not pass)."""
+
+    def test_build_services_captures_declared_image(self):
+        compose = {"services": {
+            "loadgen": {"build": {"context": "../.."},
+                        "image": "pipeline-loadgen:1.0.0",
+                        "profiles": ["loadgen"]},
+            "plain": {"build": {"context": "."}},
+        }}
+        services = isc.build_services(compose)
+        self.assertEqual(services["loadgen"]["image"], "pipeline-loadgen:1.0.0")
+        self.assertIsNone(services["plain"]["image"], "absent declaration -> None")
+
+    def test_declared_image_wins_over_derived_default(self):
+        self.assertEqual(
+            isc.image_ref("01_docker", "loadgen", {"image": "pipeline-loadgen:1.0.0"}),
+            "pipeline-loadgen:1.0.0")
+
+    def test_derived_default_when_no_declaration(self):
+        self.assertEqual(isc.image_ref("01_docker", "ingestion", {"image": None}),
+                         "01_docker-ingestion")
+        self.assertEqual(isc.image_ref("01_docker", "ingestion"),
+                         "01_docker-ingestion")
+
+
 class VerdictTest(unittest.TestCase):
     def test_fresh_when_image_newer(self):
         status, _ = isc.verdict(EPOCH_B, EPOCH_A, dirty=False)
@@ -164,6 +193,29 @@ class CheckServiceTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
+    def test_declared_image_is_the_reference_checked(self):
+        """End-to-end through main(): a declared image is the only reference
+        inspected — it must never fall back to the derived default."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_repo(Path(td), filename="Dockerfile")
+            compose = Path(td) / "compose.yml"
+            compose.write_text(textwrap.dedent("""\
+                services:
+                  custom:
+                    build: {context: ".", dockerfile: "Dockerfile"}
+                    image: pipeline-loadgen:1.0.0
+                """), encoding="utf-8")
+            asked: list[str] = []
+
+            def fake_epoch(image: str):
+                asked.append(image)
+                return EPOCH_B
+
+            with mock.patch.object(isc, "image_created_epoch", fake_epoch):
+                rc = isc.main(["--git-root", str(repo), "--compose", str(compose)])
+            self.assertEqual(rc, 0, "a fresh declared image must pass")
+            self.assertEqual(asked, ["pipeline-loadgen:1.0.0"])
+
     def test_unknown_service_fails_usage(self):
         with tempfile.TemporaryDirectory() as td:
             repo = make_repo(Path(td))
