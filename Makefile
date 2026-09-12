@@ -212,7 +212,10 @@ check-image-stale:
 # bridge suite and every module suite except MODULE=<module> do not run here, and
 # image staleness covers ddl-apply only. Releases, market sessions and soak runs
 # require `make gate`; that is the only thing that certifies a tree.
+# Static DDL-manifest check first: a DDL byte change (even a comment-only edit) with no
+# manifest refresh fails here in seconds instead of at gate step 9 an hour later.
 gate-fast:
+	@$(MAKE) --no-print-directory ddl
 	@echo "GATE-FAST: NOT A RELEASE CERTIFICATE — no live drills, no DDL apply smoke, no doc audit, no Go suite; images beyond ddl-apply unchecked."
 	@$(MAKE) --no-print-directory static-check
 	@$(MAKE) --no-print-directory test-audit-r2
