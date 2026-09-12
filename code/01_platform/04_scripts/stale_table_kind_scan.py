@@ -6,7 +6,13 @@ contradict the re-scope and reports the hits that are NOT already annotated
 as historical/superseded:
 
   * feature_candles_15s described as a LOG       -> it is the KV upsert table
-                                                    (PK (instrument_token, window_start))
+                                                    (PK (instrument_token, window_start));
+                                                    the table is now candle_live
+                                                    (DDL 32_candle_live.sql) with its
+                                                    twin candle_closed
+                                                    (DDL 33_candle_closed.sql). The old
+                                                    name stays a rule on purpose: dossiers
+                                                    written before the rename still use it
   * Signal_Candidates described as a KV table    -> it is the append-only LOG;
                                                     Signal_Candidates_current is the KV
   * feature_candles_15s_current mentioned at all -> the table is deleted (DDL 22 removed)
