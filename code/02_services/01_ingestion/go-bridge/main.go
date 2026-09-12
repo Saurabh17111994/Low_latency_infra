@@ -331,6 +331,14 @@ func runReconnectLoop(ctx context.Context, run func(uint64) bool, onRetry func(u
 }
 
 func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotAssignment, latencyMs int, responseTimeout time.Duration, epoch uint64, refreshAuth func(context.Context) error, authRefreshes *int, logf func(string, ...any)) slotEpochResult {
+	// Snapshot the transport for this epoch: reading the package-level
+	// bridgeEmitter from the epoch's own goroutines races a test that swaps the
+	// capture, because an abandoned reader outlives the epoch (it blocks inside
+	// ReadHFTWithFrame, so it cannot be joined). Production sets the emitter
+	// once before any epoch starts and the tests install their capture before
+	// starting the epoch, so a snapshot is equivalent — and it makes -race
+	// report real findings instead of this swap.
+	emitter := bridgeEmitter
 	tokens := slot.Tokens
 	// P1-031/P1-035: dial reads Config.Token inside vendored code — hold RLock
 	// so a concurrent slot refresh (Lock) cannot interleave the read.
@@ -359,7 +367,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 			if rerr := refreshAuth(ctx); rerr != nil {
 				logf("HFT auth refresh failed on dial failure: %v", sanitizeDiagnostic(rerr.Error()))
 			} else {
-				_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "reconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: "authentication_refreshed", ReceivedTsMs: time.Now().UnixMilli()})
+				_ = emitter.EmitEvent(BridgeEvent{Event: "reconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: "authentication_refreshed", ReceivedTsMs: time.Now().UnixMilli()})
 				logf("HFT auth refreshed after dial failure")
 			}
 		}
@@ -379,7 +387,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 	signalEpochStop := func() {
 		epochStopOnce.Do(func() { close(epochStop) })
 	}
-	_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "slot_state", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotConnecting), ReceivedTsMs: time.Now().UnixMilli()})
+	_ = emitter.EmitEvent(BridgeEvent{Event: "slot_state", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotConnecting), ReceivedTsMs: time.Now().UnixMilli()})
 	responses := make(chan arrow.HFTResponsePacket, 1)
 	lastFrameNanos := atomic.Int64{}
 	decodeErrors := 0
@@ -415,7 +423,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 			// P1-212: surface emit failures — an EmitTick error (batch
 			// flush / frame-too-large / transport write) must never
 			// silently drop ticks.
-			if err := bridgeEmitter.EmitTick(Tick{
+			if err := emitter.EmitTick(Tick{
 				Feed: "hft", Mode: "ltpc", Token: t.Token,
 				LTP: t.LTP, VWAP: t.VWAP, Volume: t.Volume,
 				ATV: t.ATV, BTV: t.BTV,
@@ -430,7 +438,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 		func(t arrow.HFTFullTick) {
 			lastFrameNanos.Store(time.Now().UnixNano())
 			// P1-212: surface emit failures — see the LTP path above.
-			if err := bridgeEmitter.EmitTick(Tick{
+			if err := emitter.EmitTick(Tick{
 				Feed: "hft", Mode: "full", Token: t.Token,
 				LTP: t.LTP, LTQ: t.LTQ, VWAP: t.VWAP,
 				Open: t.Open, High: t.High, Close: t.Close, Low: t.Low,
@@ -476,7 +484,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 				switch classifyAuthRefresh(refreshAuth != nil && authTries < maxAuthRefreshAttempts, authTries-1, refreshErr) {
 				case authResumed:
 					noteReconnect(slot.SlotID)
-					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "reconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: "authentication_refreshed", ReceivedTsMs: time.Now().UnixMilli()})
+					_ = emitter.EmitEvent(BridgeEvent{Event: "reconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: "authentication_refreshed", ReceivedTsMs: time.Now().UnixMilli()})
 					signalEpochStop()
 					return
 				case authRetry:
@@ -499,7 +507,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 					// blocks on a full stdout pipe, and the stop must never wait
 					// behind a write that cannot complete.
 					signalEpochStop()
-					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "auth_failure", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotTerminal), Reason: reason, ReceivedTsMs: time.Now().UnixMilli()})
+					_ = emitter.EmitEvent(BridgeEvent{Event: "auth_failure", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotTerminal), Reason: reason, ReceivedTsMs: time.Now().UnixMilli()})
 					logf("HFT authentication failed; refresh exhausted")
 					// T1: auth exhaustion is terminal for THIS slot only. The
 					// shared process context is deliberately NOT cancelled, so
@@ -522,31 +530,31 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 					// EmitEvent blocks on a full stdout pipe, and the stop must
 					// never wait behind a write that cannot complete.
 					signalEpochStop()
-					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "feed_stalled", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotStalled), Reason: "decode_error_burst", ReceivedTsMs: time.Now().UnixMilli()})
+					_ = emitter.EmitEvent(BridgeEvent{Event: "feed_stalled", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotStalled), Reason: "decode_error_burst", ReceivedTsMs: time.Now().UnixMilli()})
 				}
 				return
 			}
 			// R-297 wedge fix: signal the epoch stop BEFORE the emit — a
 			// disconnect event must not block the reconnect behind a full pipe.
 			signalEpochStop()
-			_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "disconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: sanitizeDiagnostic(err.Error()), ReceivedTsMs: time.Now().UnixMilli()})
+			_ = emitter.EmitEvent(BridgeEvent{Event: "disconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: sanitizeDiagnostic(err.Error()), ReceivedTsMs: time.Now().UnixMilli()})
 			logf("HFT stream ended: %v", err)
 		},
 	)
 
-	_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "slot_state", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotSubscribing), ReceivedTsMs: time.Now().UnixMilli()})
+	_ = emitter.EmitEvent(BridgeEvent{Event: "slot_state", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotSubscribing), ReceivedTsMs: time.Now().UnixMilli()})
 	acknowledged := 0
 	for _, request := range slot.Requests {
 		// P1-177 own-side gate: invalid segment/latency is a config bug —
 		// fail TERMINAL (retry cannot fix args) before touching the wire.
 		if verr := validateSubscribeArgs("full", arrow.HFTExchNSECM, request, latencyMs); verr != nil {
-			_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotTerminal), AssignedTokens: len(tokens), AcknowledgedTokens: acknowledged, RejectedTokens: len(request), Reason: sanitizeDiagnostic(verr.Error()), ReceivedTsMs: time.Now().UnixMilli()})
+			_ = emitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotTerminal), AssignedTokens: len(tokens), AcknowledgedTokens: acknowledged, RejectedTokens: len(request), Reason: sanitizeDiagnostic(verr.Error()), ReceivedTsMs: time.Now().UnixMilli()})
 			logf("HFT subscribe args invalid: %v", verr)
 			signalEpochStop()
 			return epochTerminal
 		}
 		if err := stream.SubscribeHFTTokens("full", arrow.HFTExchNSECM, request, latencyMs); err != nil {
-			_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotPartial), AssignedTokens: len(tokens), AcknowledgedTokens: acknowledged, RejectedTokens: len(request), Reason: sanitizeDiagnostic(err.Error()), ReceivedTsMs: time.Now().UnixMilli()})
+			_ = emitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotPartial), AssignedTokens: len(tokens), AcknowledgedTokens: acknowledged, RejectedTokens: len(request), Reason: sanitizeDiagnostic(err.Error()), ReceivedTsMs: time.Now().UnixMilli()})
 			logf("HFT subscribe write failed: %v", err)
 			signalEpochStop()
 			return epochRetryable
@@ -557,18 +565,18 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 			case subAccepted:
 				acknowledged += int(r.SuccessCount)
 			case subTerminal:
-				_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotTerminal), AssignedTokens: len(tokens), AcknowledgedTokens: acknowledged + int(r.SuccessCount), RejectedTokens: int(r.ErrorCount), Reason: sanitizeDiagnostic(r.ErrorMsg), ReceivedTsMs: time.Now().UnixMilli()})
+				_ = emitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotTerminal), AssignedTokens: len(tokens), AcknowledgedTokens: acknowledged + int(r.SuccessCount), RejectedTokens: int(r.ErrorCount), Reason: sanitizeDiagnostic(r.ErrorMsg), ReceivedTsMs: time.Now().UnixMilli()})
 				logf("HFT subscription invalid: code=%s success=%d errors=%d", r.ErrorCode, r.SuccessCount, r.ErrorCount)
 				signalEpochStop()
 				return epochTerminal
 			default: // subPartial
-				_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotPartial), AssignedTokens: len(tokens), AcknowledgedTokens: acknowledged + int(r.SuccessCount), RejectedTokens: int(r.ErrorCount), Reason: sanitizeDiagnostic(r.ErrorMsg), ReceivedTsMs: time.Now().UnixMilli()})
+				_ = emitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotPartial), AssignedTokens: len(tokens), AcknowledgedTokens: acknowledged + int(r.SuccessCount), RejectedTokens: int(r.ErrorCount), Reason: sanitizeDiagnostic(r.ErrorMsg), ReceivedTsMs: time.Now().UnixMilli()})
 				logf("HFT subscription rejected: code=%s success=%d errors=%d", r.ErrorCode, r.SuccessCount, r.ErrorCount)
 				signalEpochStop()
 				return epochRetryable
 			}
 		case <-time.After(responseTimeout):
-			_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotTerminal), AssignedTokens: len(tokens), RejectedTokens: len(tokens), Reason: "subscription_response_timeout", ReceivedTsMs: time.Now().UnixMilli()})
+			_ = emitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotTerminal), AssignedTokens: len(tokens), RejectedTokens: len(tokens), Reason: "subscription_response_timeout", ReceivedTsMs: time.Now().UnixMilli()})
 			signalEpochStop()
 			return epochTerminal
 		case <-epochStop:
@@ -590,7 +598,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 	logf("HFT subscribed %d tokens (latency=%dms)", len(tokens), latencyMs)
 	lastFrameNanos.Store(time.Now().UnixNano())
 	noteRecovered(slot.SlotID)
-	_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotActive), AssignedTokens: len(tokens), AcknowledgedTokens: len(tokens), ReceivedTsMs: time.Now().UnixMilli()})
+	_ = emitter.EmitEvent(BridgeEvent{Event: "subscription_ack", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotActive), AssignedTokens: len(tokens), AcknowledgedTokens: len(tokens), ReceivedTsMs: time.Now().UnixMilli()})
 
 	// R-059: heartbeat and watchdog goroutines must stop when the epoch ends
 	// (epochStop), not just on the process context — otherwise a dead epoch's
@@ -606,7 +614,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 					// EmitEvent blocks on a full stdout pipe, and the stop must
 					// never wait behind a write that cannot complete.
 					signalEpochStop()
-					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "heartbeat_failed", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: sanitizeDiagnostic(err.Error()), ReceivedTsMs: time.Now().UnixMilli()})
+					_ = emitter.EmitEvent(BridgeEvent{Event: "heartbeat_failed", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotBackoff), Reason: sanitizeDiagnostic(err.Error()), ReceivedTsMs: time.Now().UnixMilli()})
 					logf("HFT heartbeat failed: %v", err)
 					return
 				}
@@ -629,7 +637,7 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 					// the feed_stalled emit was blocking on a full stdout pipe,
 					// so the epoch never stopped and the slot never reconnected.
 					signalEpochStop()
-					_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "feed_stalled", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotStalled), Reason: fmt.Sprintf("no_tick_for_%ds", int(stallTimeout.Seconds())), ReceivedTsMs: time.Now().UnixMilli()})
+					_ = emitter.EmitEvent(BridgeEvent{Event: "feed_stalled", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: epoch, State: string(SlotStalled), Reason: fmt.Sprintf("no_tick_for_%ds", int(stallTimeout.Seconds())), ReceivedTsMs: time.Now().UnixMilli()})
 					return
 				}
 			case <-ctx.Done():
