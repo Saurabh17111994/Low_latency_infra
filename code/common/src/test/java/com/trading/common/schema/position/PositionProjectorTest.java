@@ -221,4 +221,36 @@ class PositionProjectorTest {
         assertThat(r.outcome()).isEqualTo(PositionProjector.Outcome.VIOLATION);
         assertThat(r.reason()).contains("illegal transition");
     }
+
+    // --- P3-392 / P3-394: version-gate and arithmetic boundaries ---
+
+    @Test
+    void firstFillWithVersionZeroIsApplied() {
+        // With no prior snapshot there is nothing to compare against, so the version gate must not
+        // run: a first fill carrying version 0 used to evaluate CONFLICT -> VIOLATION, rejecting a
+        // legitimate first write and mislabelling it for quarantine triage.
+        PositionProjector.ProjectionResult r =
+                PositionProjector.apply(null, buy(10, 100, 0, "f0"), NOW);
+        assertThat(r.outcome()).isEqualTo(PositionProjector.Outcome.APPLIED);
+        assertThat(r.snapshot().sourceVersion()).isZero();
+    }
+
+    @Test
+    void negativeFirstVersionIsStillViolation() {
+        // The P3-392 fix must not launder a negative first version into a clean write.
+        PositionProjector.ProjectionResult r =
+                PositionProjector.apply(null, buy(10, 100, -1, "f-1"), NOW);
+        assertThat(r.outcome()).isEqualTo(PositionProjector.Outcome.VIOLATION);
+    }
+
+    @Test
+    void overflowIsViolationNotAWrappedAverage() {
+        // P3-394: `open` is cumulative across cycles and the average multiplies price by quantity,
+        // so a saturated fill wrapped silently and corrupted avgEntry/avgExit — or threw from the
+        // snapshot invariant out of a never-throws path. Exact arithmetic makes it a VIOLATION.
+        PositionProjector.ProjectionResult r = PositionProjector.apply(null,
+                buy(Long.MAX_VALUE, Long.MAX_VALUE, 1, "f-big"), NOW);
+        assertThat(r.outcome()).isEqualTo(PositionProjector.Outcome.VIOLATION);
+        assertThat(r.reason()).contains("overflow");
+    }
 }

@@ -34,8 +34,12 @@ public record FillEvent(
         if (fillQty <= 0) {
             throw new IllegalArgumentException("fill_qty must be positive, got " + fillQty);
         }
-        if (fillPricePaise < 0) {
-            throw new IllegalArgumentException("fill_price_paise must be >= 0, got "
+        // P3-390: only `< 0` was rejected while fillQty required > 0, so a zero-price fill flowed
+        // through FillEventMapper into weightedAverage and diluted averageEntryPaise /
+        // averageExitPaise — corrupting cost basis. Zero is not a traded price in paise. Kept in
+        // parity with FillEventMapper.isFill and the Rust port's `validate`.
+        if (fillPricePaise <= 0) {
+            throw new IllegalArgumentException("fill_price_paise must be positive, got "
                     + fillPricePaise);
         }
         if (!SIDE_BUY.equals(side) && !SIDE_SELL.equals(side)) {

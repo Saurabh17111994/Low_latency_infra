@@ -90,9 +90,12 @@ impl FillEvent {
         if self.fill_qty <= 0 {
             return Err(format!("fill_qty must be positive, got {}", self.fill_qty));
         }
-        if self.fill_price_paise < 0 {
+        // P3-390: zero was accepted while fill_qty required > 0, so a zero-price fill reached
+        // `weighted_average` and diluted the entry/exit averages. Kept in parity with Java
+        // `FillEvent`'s constructor and `FillEventMapper.isFill`.
+        if self.fill_price_paise <= 0 {
             return Err(format!(
-                "fill_price_paise must be >= 0, got {}",
+                "fill_price_paise must be positive, got {}",
                 self.fill_price_paise
             ));
         }
@@ -252,80 +255,104 @@ impl Projection {
         fill: &FillEvent,
         now_ms: i64,
     ) -> ProjectionResult {
-        let current_version = current.map_or(0, |c| c.source_version);
-
-        // Version gate (SCH-09).
-        let content_matches = current
-            .map(|c| c.source_event_id == fill.source_event_id)
-            .unwrap_or(false);
-        let v = VersionGate::evaluate(current_version, fill.source_sequence, content_matches);
-        match v {
-            VersionGate::Duplicate => {
-                return ProjectionResult {
-                    outcome: ProjectionOutcome::Duplicate,
-                    snapshot: current.cloned(),
-                    reason: None,
-                };
+        // Version gate (SCH-09). P3-392 mirror: the gate only runs when there IS a prior. Forcing
+        // the current version to 0 for a first fill made an incoming version 0 evaluate
+        // Conflict -> Violation — rejecting a legitimate first write and labelling it "CONFLICT".
+        if let Some(c) = current {
+            let content_matches = c.source_event_id == fill.source_event_id;
+            let v = VersionGate::evaluate(c.source_version, fill.source_sequence, content_matches);
+            match v {
+                VersionGate::Duplicate => {
+                    return ProjectionResult {
+                        outcome: ProjectionOutcome::Duplicate,
+                        snapshot: current.cloned(),
+                        reason: None,
+                    };
+                }
+                VersionGate::Stale => {
+                    return ProjectionResult {
+                        outcome: ProjectionOutcome::Stale,
+                        snapshot: current.cloned(),
+                        reason: Some(format!("stale fill version {}", c.source_version)),
+                    };
+                }
+                VersionGate::Regression | VersionGate::Conflict | VersionGate::Unknown => {
+                    return ProjectionResult {
+                        outcome: ProjectionOutcome::Violation,
+                        snapshot: None,
+                        reason: Some(format!(
+                            "version check {:?} for fill {}",
+                            v, fill.source_event_id
+                        )),
+                    };
+                }
+                VersionGate::Applied => {} // fall through
             }
-            VersionGate::Stale => {
-                return ProjectionResult {
-                    outcome: ProjectionOutcome::Stale,
-                    snapshot: current.cloned(),
-                    reason: Some(format!("stale fill version {}", current_version)),
-                };
-            }
-            VersionGate::Regression | VersionGate::Conflict | VersionGate::Unknown => {
-                return ProjectionResult {
-                    outcome: ProjectionOutcome::Violation,
-                    snapshot: None,
-                    reason: Some(format!(
-                        "version check {:?} for fill {}",
-                        v, fill.source_event_id
-                    )),
-                };
-            }
-            VersionGate::Applied => {} // fall through
+        } else if fill.source_sequence < 0 {
+            // Nothing to conflict with, but a negative first version is ambiguous, not clean.
+            return ProjectionResult {
+                outcome: ProjectionOutcome::Violation,
+                snapshot: None,
+                reason: Some(format!(
+                    "version check Unknown for fill {}",
+                    fill.source_event_id
+                )),
+            };
         }
 
-        let open = current.map_or(0, |c| c.open_quantity);
-        let closed = current.map_or(0, |c| c.closed_quantity);
-        let avg_entry = current.map_or(0, |c| c.average_entry_paise);
-        let avg_exit = current.map_or(0, |c| c.average_exit_paise);
+        let mut open = current.map_or(0, |c| c.open_quantity);
+        let mut closed = current.map_or(0, |c| c.closed_quantity);
+        let mut avg_entry = current.map_or(0, |c| c.average_entry_paise);
+        let mut avg_exit = current.map_or(0, |c| c.average_exit_paise);
 
-        let (open, closed, avg_entry, avg_exit) =
-            match fill.side {
-                Side::Buy => {
-                    let current_open_before = open - closed;
-                    let new_open = open + fill.fill_qty;
-                    let new_avg = weighted_average(
-                        avg_entry,
-                        current_open_before,
-                        fill.fill_price_paise,
-                        fill.fill_qty,
-                    );
-                    (new_open, closed, new_avg, avg_exit)
-                }
-                Side::Sell => {
-                    let next_closed = closed + fill.fill_qty;
-                    if next_closed > open {
-                        return ProjectionResult {
-                            outcome: ProjectionOutcome::Violation,
-                            snapshot: None,
-                            reason: Some(format!(
+        // P3-394 mirror: exact arithmetic. These accumulations previously wrapped — this port
+        // deliberately mirrored Java's silent `long` wraparound — which corrupted the averages
+        // instead of failing closed. Overflow is now a VIOLATION on both sides.
+        match fill.side {
+            Side::Buy => {
+                let current_open_before = open - closed;
+                let Some(new_open) = open.checked_add(fill.fill_qty) else {
+                    return overflow_violation(fill);
+                };
+                let Some(new_avg) = weighted_average(
+                    avg_entry,
+                    current_open_before,
+                    fill.fill_price_paise,
+                    fill.fill_qty,
+                ) else {
+                    return overflow_violation(fill);
+                };
+                open = new_open;
+                avg_entry = new_avg;
+            }
+            Side::Sell => {
+                let Some(next_closed) = closed.checked_add(fill.fill_qty) else {
+                    return overflow_violation(fill);
+                };
+                if next_closed > open {
+                    return ProjectionResult {
+                        outcome: ProjectionOutcome::Violation,
+                        snapshot: None,
+                        reason: Some(format!(
                             "sell overshoots open quantity: open={} sell={} (would close to {})",
-                            open, fill.fill_qty, open - next_closed
+                            open,
+                            fill.fill_qty,
+                            open - next_closed
                         )),
-                        };
-                    }
-                    let new_avg = weighted_average(
-                        avg_exit,
-                        next_closed - fill.fill_qty,
-                        fill.fill_price_paise,
-                        fill.fill_qty,
-                    );
-                    (open, next_closed, avg_entry, new_avg)
+                    };
                 }
-            };
+                let Some(new_avg) = weighted_average(
+                    avg_exit,
+                    next_closed - fill.fill_qty,
+                    fill.fill_price_paise,
+                    fill.fill_qty,
+                ) else {
+                    return overflow_violation(fill);
+                };
+                closed = next_closed;
+                avg_exit = new_avg;
+            }
+        }
 
         let prior_state = current.map_or(PositionState::Flat, |c| c.state);
         let next_state = next_state(prior_state, open, closed, fill.side);
@@ -382,16 +409,37 @@ fn next_state(prior: PositionState, open: i64, closed: i64, side: Side) -> Posit
     PositionState::Reducing
 }
 
+/// A VIOLATION for an accumulation that overflowed `i64` (P3-394).
+fn overflow_violation(fill: &FillEvent) -> ProjectionResult {
+    ProjectionResult {
+        outcome: ProjectionOutcome::Violation,
+        snapshot: None,
+        reason: Some(format!(
+            "arithmetic overflow projecting fill {}",
+            fill.source_event_id
+        )),
+    }
+}
+
 /// Weighted average across the existing notional and the new fill (integer, truncating).
-/// Uses wrapping arithmetic to mirror Java `long` silent wraparound on overflow.
-fn weighted_average(existing_avg: i64, existing_qty: i64, new_price: i64, new_qty: i64) -> i64 {
-    if existing_qty + new_qty == 0 {
-        return 0;
+///
+/// P3-394 mirror: `checked_*` rather than `wrapping_*` — an overflow returns `None` so the caller
+/// can fail closed. Wrapping silently corrupted the average, which is the value the desk prices
+/// the position from.
+fn weighted_average(
+    existing_avg: i64,
+    existing_qty: i64,
+    new_price: i64,
+    new_qty: i64,
+) -> Option<i64> {
+    let total_qty = existing_qty.checked_add(new_qty)?;
+    if total_qty == 0 {
+        return Some(0);
     }
     let numerator = existing_avg
-        .wrapping_mul(existing_qty)
-        .wrapping_add(new_price.wrapping_mul(new_qty));
-    numerator / (existing_qty + new_qty)
+        .checked_mul(existing_qty)?
+        .checked_add(new_price.checked_mul(new_qty)?)?;
+    Some(numerator / total_qty)
 }
 
 /// Account/instrument/side uniqueness key (dossier position protocol).
@@ -887,7 +935,7 @@ mod tests {
         assert!(np
             .validate()
             .unwrap_err()
-            .contains("fill_price_paise must be >= 0"));
+            .contains("fill_price_paise must be positive"));
         let mut eid = fill(1, Side::Buy, 10, 1000);
         eid.position_id = String::new();
         assert!(eid
@@ -1252,5 +1300,46 @@ mod tests {
         let after = driver.snapshot("pos-acc-1-1001-BUY-1").unwrap();
         assert_eq!(after.state, PositionState::Closed);
         assert_eq!((after.open_quantity, after.closed_quantity), (10, 10));
+    }
+
+    // --- P3-390 / P3-392 / P3-394: numeric boundaries, Java-parity ---
+
+    #[test]
+    fn zero_price_is_rejected_in_parity_with_java() {
+        // Only `< 0` used to be rejected, so a zero-price fill diluted the weighted average.
+        assert!(fill(1, Side::Buy, 10, 0)
+            .validate()
+            .unwrap_err()
+            .contains("fill_price_paise must be positive"));
+        assert!(fill(1, Side::Buy, 10, 1000).validate().is_ok());
+    }
+
+    #[test]
+    fn first_fill_with_version_zero_is_applied() {
+        // P3-392: with no prior there is nothing to conflict with. Forcing the current version to
+        // 0 made version 0 evaluate Conflict -> Violation and rejected a legitimate first write.
+        let r = Projection::apply(None, &fill(0, Side::Buy, 10, 1000), NOW);
+        assert_eq!(r.outcome, ProjectionOutcome::Applied);
+        assert_eq!(r.snapshot.unwrap().open_quantity, 10);
+    }
+
+    #[test]
+    fn negative_first_version_is_still_a_violation() {
+        // The P3-392 fix must not turn a negative version into a clean first write.
+        let r = Projection::apply(None, &fill(-1, Side::Buy, 10, 1000), NOW);
+        assert_eq!(r.outcome, ProjectionOutcome::Violation);
+    }
+
+    #[test]
+    fn overflow_is_a_violation_not_a_wrapped_average() {
+        // P3-394: `wrapping_mul` silently produced a corrupted average; exact arithmetic fails
+        // closed instead. MAX * MAX overflows on the first fill.
+        let huge = fill(1, Side::Buy, i64::MAX, i64::MAX);
+        let r = Projection::apply(None, &huge, NOW);
+        assert_eq!(r.outcome, ProjectionOutcome::Violation);
+        assert!(
+            r.reason.unwrap().contains("overflow"),
+            "the reason must name the overflow"
+        );
     }
 }

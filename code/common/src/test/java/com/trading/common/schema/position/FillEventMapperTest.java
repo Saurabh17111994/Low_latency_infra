@@ -83,12 +83,16 @@ class FillEventMapperTest {
     }
 
     @Test
-    void skipsRowWithMissingOrNegativePrice() {
+    void skipsRowWithMissingNegativeOrZeroPrice() {
         assertThat(FillEventMapper.mapIfFill(
                 fillsRow("pb-1", "acc-1", "tc-9", 100L, null, 1L, 2L), POSITION_ID, ctx()))
                 .isEmpty();
         assertThat(FillEventMapper.mapIfFill(
                 fillsRow("pb-1", "acc-1", "tc-9", 100L, -5L, 1L, 2L), POSITION_ID, ctx()))
+                .isEmpty();
+        // P3-390: a zero price is not a fill — it would have diluted the weighted average.
+        assertThat(FillEventMapper.mapIfFill(
+                fillsRow("pb-1", "acc-1", "tc-9", 100L, 0L, 1L, 2L), POSITION_ID, ctx()))
                 .isEmpty();
     }
 

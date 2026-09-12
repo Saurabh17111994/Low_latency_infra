@@ -32,7 +32,7 @@ public final class FillEventMapper {
 
     /**
      * Is this row a fill at all? A status-only postback (missing/non-positive
-     * {@code fill_qty}, or missing/negative {@code fill_price_paise}) is not.
+     * {@code fill_qty}, or missing/non-positive {@code fill_price_paise}) is not.
      *
      * <p>Split out of {@link #mapIfFill} so the driver can decide fill-ness
      * BEFORE resolving a position id (P3-395): minting for a status-only row
@@ -45,13 +45,15 @@ public final class FillEventMapper {
                 || row.getLong(FillsColumns.FILL_QTY) <= 0) {
             return false;
         }
+        // P3-390: `>= 0` let a zero-price row through as a fill. Parity with FillEvent's
+        // constructor and the Rust port.
         return !row.isNullAt(FillsColumns.FILL_PRICE_PAISE)
-                && row.getLong(FillsColumns.FILL_PRICE_PAISE) >= 0;
+                && row.getLong(FillsColumns.FILL_PRICE_PAISE) > 0;
     }
 
     /**
      * @return the {@link FillEvent}, or empty when the row is not a fill
-     *         (fill_qty missing/non-positive or price missing/negative)
+     *         (fill_qty missing/non-positive or price missing/non-positive)
      */
     public static Optional<FillEvent> mapIfFill(GenericRow row, String positionId,
             FillContext ctx) {

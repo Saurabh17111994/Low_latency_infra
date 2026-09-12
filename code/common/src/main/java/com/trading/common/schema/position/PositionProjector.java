@@ -71,30 +71,40 @@ public final class PositionProjector {
      */
     public static ProjectionResult apply(PositionSnapshot current, FillEvent fill, long nowMs) {
         Objects.requireNonNull(fill, "fill");
-        long currentVersion = current == null ? 0L : current.sourceVersion();
 
         // Version gate (SCH-09 KvStateUpdateProtocol semantics).
-        // P3-165: `fill.sourceEventId().equals(current.sourceEventId())` NPEs when the snapshot's
-        // event id is null — PositionSnapshot does not reject one, so a snapshot hydrated from a
-        // corrupt store broke the never-throws contract instead of yielding a controlled outcome.
-        boolean contentMatches = current != null
-                && Objects.equals(fill.sourceEventId(), current.sourceEventId());
-        KvStateUpdateProtocol.Outcome v = KvStateUpdateProtocol.evaluate(
-                currentVersion, fill.sourceVersion(), contentMatches);
-        switch (v) {
-            case DUPLICATE -> {
-                return ProjectionResult.duplicate(current);
+        // P3-392: the gate only runs when there IS a prior to compare against. Forcing
+        // `currentVersion = 0` for a first fill made an incoming version 0 evaluate
+        // CONFLICT -> VIOLATION: a legitimate first write was rejected, and mislabelled
+        // "CONFLICT" for quarantine triage where nothing could have conflicted.
+        if (current != null) {
+            // P3-165: `fill.sourceEventId().equals(current.sourceEventId())` NPEs when the
+            // snapshot's event id is null — PositionSnapshot does not reject one, so a snapshot
+            // hydrated from a corrupt store broke the never-throws contract instead of yielding a
+            // controlled outcome.
+            boolean contentMatches =
+                    Objects.equals(fill.sourceEventId(), current.sourceEventId());
+            KvStateUpdateProtocol.Outcome v = KvStateUpdateProtocol.evaluate(
+                    current.sourceVersion(), fill.sourceVersion(), contentMatches);
+            switch (v) {
+                case DUPLICATE -> {
+                    return ProjectionResult.duplicate(current);
+                }
+                case STALE -> {
+                    return ProjectionResult.stale(current);
+                }
+                case REGRESSION, CONFLICT, UNKNOWN -> {
+                    return ProjectionResult.violation("version check " + v
+                            + " for fill " + fill.sourceEventId());
+                }
+                case APPLIED -> {
+                    // fall through
+                }
             }
-            case STALE -> {
-                return ProjectionResult.stale(current);
-            }
-            case REGRESSION, CONFLICT, UNKNOWN -> {
-                return ProjectionResult.violation("version check " + v
-                        + " for fill " + fill.sourceEventId());
-            }
-            case APPLIED -> {
-                // fall through
-            }
+        } else if (fill.sourceVersion() < 0) {
+            // Nothing to conflict with, but a negative first version is ambiguous, not clean.
+            return ProjectionResult.violation("version check UNKNOWN for fill "
+                    + fill.sourceEventId());
         }
 
         long open = current == null ? 0L : current.openQuantity();
@@ -102,26 +112,47 @@ public final class PositionProjector {
         long avgEntry = current == null ? 0L : current.averageEntryPaise();
         long avgExit = current == null ? 0L : current.averageExitPaise();
 
-        if (FillEvent.SIDE_BUY.equals(fill.side())) {
-            long currentOpenBefore = open - closed;
-            open += fill.fillQty();
-            // Average entry weights over the CURRENT open units (open - closed),
-            // not the cumulative buys: units exited are no longer part of the
-            // position, so a fresh re-entry after a full close starts a new
-            // average.
-            avgEntry = weightedAverage(avgEntry, currentOpenBefore,
-                    fill.fillPricePaise(), fill.fillQty());
-        } else {
-            long nextClosed = closed + fill.fillQty();
-            if (nextClosed > open) {
-                return ProjectionResult.violation("sell overshoots open quantity: open="
-                        + open + " sell=" + fill.fillQty() + " (would close to "
-                        + (open - nextClosed) + ")");
+        // P3-394: these accumulations are unchecked. `open` is cumulative across cycles and the
+        // average multiplies price by quantity, so overflow is reachable; wrapping silently
+        // corrupted avgEntry/avgExit, and reaching the PositionSnapshot invariant check threw
+        // IllegalArgumentException out of a never-throws path. Exact arithmetic now turns it into
+        // a VIOLATION.
+        long nextOpen;
+        long nextClosed;
+        long nextAvgEntry;
+        long nextAvgExit;
+        try {
+            if (FillEvent.SIDE_BUY.equals(fill.side())) {
+                long currentOpenBefore = open - closed;
+                // Average entry weights over the CURRENT open units (open - closed),
+                // not the cumulative buys: units exited are no longer part of the
+                // position, so a fresh re-entry after a full close starts a new
+                // average.
+                nextOpen = Math.addExact(open, fill.fillQty());
+                nextClosed = closed;
+                nextAvgEntry = weightedAverage(avgEntry, currentOpenBefore,
+                        fill.fillPricePaise(), fill.fillQty());
+                nextAvgExit = avgExit;
+            } else {
+                nextClosed = Math.addExact(closed, fill.fillQty());
+                if (nextClosed > open) {
+                    return ProjectionResult.violation("sell overshoots open quantity: open="
+                            + open + " sell=" + fill.fillQty() + " (would close to "
+                            + (open - nextClosed) + ")");
+                }
+                nextOpen = open;
+                nextAvgEntry = avgEntry;
+                nextAvgExit = weightedAverage(avgExit, nextClosed - fill.fillQty(),
+                        fill.fillPricePaise(), fill.fillQty());
             }
-            closed = nextClosed;
-            avgExit = weightedAverage(avgExit, closed - fill.fillQty(),
-                    fill.fillPricePaise(), fill.fillQty());
+        } catch (ArithmeticException e) {
+            return ProjectionResult.violation("arithmetic overflow projecting fill "
+                    + fill.sourceEventId() + ": " + e.getMessage());
         }
+        open = nextOpen;
+        closed = nextClosed;
+        avgEntry = nextAvgEntry;
+        avgExit = nextAvgExit;
 
         // P3-393: PositionSnapshot does not reject a null state, so a snapshot hydrated from a
         // corrupt store arrives with one. Passing it straight to isLegalTransition(null, next)
@@ -180,13 +211,15 @@ public final class PositionProjector {
         return PositionState.REDUCING;
     }
 
-    /** Weighted average across the existing notional and the new fill. */
+    /** Weighted average across the existing notional and the new fill (exact arithmetic). */
     private static long weightedAverage(long existingAvg, long existingQty,
             long newPrice, long newQty) {
-        if (existingQty + newQty == 0) {
+        long totalQty = Math.addExact(existingQty, newQty);
+        if (totalQty == 0) {
             return 0L;
         }
-        long numerator = existingAvg * existingQty + newPrice * newQty;
-        return numerator / (existingQty + newQty);
+        long numerator = Math.addExact(Math.multiplyExact(existingAvg, existingQty),
+                Math.multiplyExact(newPrice, newQty));
+        return numerator / totalQty;
     }
 }

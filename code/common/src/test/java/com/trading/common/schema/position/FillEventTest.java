@@ -43,6 +43,15 @@ class FillEventTest {
     }
 
     @Test
+    void rejectsZeroFillPrice() {
+        // P3-390: only `< 0` was rejected, so a zero-price fill diluted the weighted average.
+        assertThatThrownBy(() -> new FillEvent("pos-acc-1-123-BUY-1", "tc-1", "acc-1", 123L,
+                "NSE", "RELIANCE", FillEvent.SIDE_BUY, 10L, 0L, "pb-1", 1L, 0L))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("fill_price_paise must be positive");
+    }
+
+    @Test
     void withPositionIdRebindsOnlyThePositionId() {
         FillEvent rebound = fill("pb-1", 7L).withPositionId("pos-acc-1-123-BUY-2");
 
