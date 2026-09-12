@@ -55,13 +55,45 @@ public final class FillsColumns {
             true, false, false);
 
     /** DDL column names in index order (diagnostics + agreement pin). */
-    public static final String[] NAMES = {
+    public static final List<String> NAMES = List.of(
             "postback_event_id", "postback_fingerprint", "fingerprint_version",
             "account_scope_id", "broker_order_id", "instruction_id",
             "execution_attempt_id", "trade_context_id", "order_status",
             "cumulative_qty", "pending_qty", "fill_qty", "fill_price_paise",
             "fill_id", "broker_event_time", "receive_time", "ingest_ts",
             "original_payload", "payload_hash", "correlation_state",
-            "correlation_reason", "decoder_version", "schema_version"
-    };
+            "correlation_reason", "decoder_version", "schema_version");
+
+    // P3-163 note: NAMES was a `public static final String[]`, where `final` binds only the
+    // reference — any caller could write through it (`FillsColumns.NAMES[0] = "x"`,
+    // `Arrays.sort(NAMES)`) and silently corrupt this shared agreement pin JVM-wide, or race a
+    // concurrent reader. It is now an immutable List, matching TYPE_ROOTS and
+    // COLUMN_NULLABLE_IN_DDL.
+    //
+    // P3-391: the parallel structures (23 int ordinals + NAMES + TYPE_ROOTS +
+    // COLUMN_NULLABLE_IN_DDL + FIELD_COUNT + SCHEMA_VERSION) must stay in lockstep, but drift was
+    // only caught if FillsColumnsAgreementTest happened to run — a one-sided edit (a renamed or
+    // added column with a missed list entry) would silently misalign projector indexing in
+    // production. This fails at class-load instead. Mirrors the guard PositionsColumns already
+    // carries (P4-313).
+    static {
+        if (NAMES.size() != FIELD_COUNT
+                || TYPE_ROOTS.size() != FIELD_COUNT
+                || COLUMN_NULLABLE_IN_DDL.size() != FIELD_COUNT) {
+            throw new IllegalStateException("FillsColumns drift: FIELD_COUNT=" + FIELD_COUNT
+                    + " NAMES=" + NAMES.size() + " TYPE_ROOTS=" + TYPE_ROOTS.size()
+                    + " NULLABLE=" + COLUMN_NULLABLE_IN_DDL.size());
+        }
+        if (SCHEMA_VERSION != FIELD_COUNT - 1) {
+            throw new IllegalStateException("FillsColumns drift: SCHEMA_VERSION=" + SCHEMA_VERSION
+                    + " must be FIELD_COUNT-1=" + (FIELD_COUNT - 1));
+        }
+        if (!NAMES.get(POSTBACK_EVENT_ID).equals("postback_event_id")
+                || !NAMES.get(ACCOUNT_SCOPE_ID).equals("account_scope_id")
+                || !NAMES.get(FILL_QTY).equals("fill_qty")
+                || !NAMES.get(SCHEMA_VERSION).equals("schema_version")) {
+            throw new IllegalStateException(
+                    "FillsColumns drift: ordinal does not match NAMES index");
+        }
+    }
 }

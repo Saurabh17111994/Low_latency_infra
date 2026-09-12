@@ -1,6 +1,7 @@
 package com.trading.common.schema.position;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -51,8 +52,23 @@ class FillsColumnsAgreementTest {
     void ddlDeclares23ColumnsInPinnedOrder() throws IOException {
         List<Column> cols = parseColumns();
         assertThat(cols).hasSize(FillsColumns.FIELD_COUNT);
-        assertThat(cols.stream().map(Column::name).toArray(String[]::new))
-                .containsExactly(FillsColumns.NAMES);
+        assertThat(cols.stream().map(Column::name).toList())
+                .containsExactlyElementsOf(FillsColumns.NAMES);
+    }
+
+    @Test
+    void namesIsImmutableAndConsistentWithFieldCount() {
+        // P3-163: NAMES was a mutable String[] — `final` bound only the reference, so any caller
+        // could write through it (`NAMES[0] = "x"`, `Arrays.sort(NAMES)`) and corrupt this shared
+        // agreement pin JVM-wide. It is now an immutable List.
+        assertThatThrownBy(() -> FillsColumns.NAMES.set(0, "corrupted"))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> FillsColumns.NAMES.add("extra"))
+                .isInstanceOf(UnsupportedOperationException.class);
+        // The class-load guard (P3-391) asserts this too; this pins the invariant from the test
+        // side. The guard itself cannot be unit-tested without provoking drift at load time.
+        assertThat(FillsColumns.NAMES).hasSize(FillsColumns.FIELD_COUNT);
+        assertThat(FillsColumns.NAMES.get(FillsColumns.FILL_QTY)).isEqualTo("fill_qty");
     }
 
     @Test
