@@ -355,12 +355,16 @@ TIER_RANK = {"LIVE-STALE": 0, "UNANNOTATED": 1, "SECTION-ANNOTATED": 2,
 # ---------------------------------------------------------------------------
 # DDL + manifest verification (--ddl): the 2026-08-13 re-scope table kinds as
 # carried by code/01_platform/02_sql/ddl/*.sql and schema_manifest.json.
+# The candle KV pair replaced feature_candles_15s when a329247 retired that DDL
+# (multi-TF aggregator Phase 0): the re-scope's KV current-state kind now lives
+# on candle_live, with candle_closed as its immutable closed-history twin.
 # ---------------------------------------------------------------------------
 DEFAULT_DDL_DIR = ROOT / "code" / "01_platform" / "02_sql" / "ddl"
 
 # Expected kind and exact primary key per re-scope table.
 DDL_INVARIANTS = {
-    "feature_candles_15s": {"kind": "KV", "pk": ["instrument_token", "window_start"]},
+    "candle_live": {"kind": "KV", "pk": ["instrument_token", "tf", "window_start"]},
+    "candle_closed": {"kind": "KV", "pk": ["instrument_token", "tf", "window_start"]},
     "Signal_Candidates": {"kind": "LOG", "pk": []},
     "Signal_Candidates_current": {"kind": "KV", "pk": ["instrument_token"]},
 }
@@ -417,7 +421,7 @@ def run_ddl_check(ddl_dir: Path) -> int:
         if p["name"]:
             parsed[p["name"]] = (f, p)
 
-    # Invariants B-D: the three re-scope tables carry the exact current kind.
+    # Invariants B-E: the four re-scope tables carry the exact current kind.
     for tname, want in DDL_INVARIANTS.items():
         if tname not in parsed:
             checks.append((False, f"{tname}: DDL file missing"))
