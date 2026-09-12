@@ -200,6 +200,24 @@ class StampTest(unittest.TestCase):
             self.assertIsNotNone(before, "the Dockerfile alone is an input")
             self.assertNotEqual(before, after)
 
+    def test_context_dockerignore_is_an_input(self):
+        """The context's .dockerignore decides which files enter the build, so
+        editing it must move the stamp even though no COPY names it. Without
+        this the step-8 verdict reads FRESH while an image lags a context
+        change (the git-ignored go-bridge binaries are one such case)."""
+        with tempfile.TemporaryDirectory() as td:
+            root = self._tree(Path(td))
+            (root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+            entry = {"context": ".", "dockerfile": "Dockerfile"}
+            with mock.patch.dict(isc.SERVICE_SOURCES, {}, clear=True):
+                before = isc.input_stamp(root, "probe", entry, root)
+                (root / ".dockerignore").write_text("**/arrow-bridge\n",
+                                                    encoding="utf-8")
+                after = isc.input_stamp(root, "probe", entry, root)
+                listed = isc.stamp_inputs(root, "probe", entry, root)
+            self.assertIn(".dockerignore", listed)
+            self.assertNotEqual(before, after)
+
     def test_stamp_is_none_when_nothing_can_be_hashed(self):
         with tempfile.TemporaryDirectory() as td:
             root = self._tree(Path(td))

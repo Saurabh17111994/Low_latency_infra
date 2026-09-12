@@ -232,18 +232,22 @@ def stamp_inputs(git_root: Path, service: str, entry: dict | None = None,
     """Repo-relative files whose contents define this service's image.
 
     SERVICE_SOURCES is the curated COPY-input list; the compose-declared
-    Dockerfile is added on top, because a Dockerfile change is an image change
-    even when the file sits outside a listed subtree.
+    Dockerfile and the build context's .dockerignore are added on top. Both
+    change the image even though they sit outside the listed subtrees: a
+    Dockerfile edit changes the build, and a .dockerignore edit changes which
+    files enter the context at all (e.g. ignoring the git-ignored go-bridge
+    binaries changes what a `COPY code/...` stage sees).
     """
     sources = list(SERVICE_SOURCES.get(service) or [])
     entry = entry or {}
     context, dockerfile = entry.get("context"), entry.get("dockerfile")
     if context and dockerfile and compose_dir is not None:
-        try:
-            abs_dockerfile = (compose_dir / context / dockerfile).resolve()
-            sources.append(str(abs_dockerfile.relative_to(git_root.resolve())))
-        except ValueError:
-            pass  # context outside the repo: timestamp fallback covers it
+        for rel in (dockerfile, ".dockerignore"):
+            try:
+                abs_path = (compose_dir / context / rel).resolve()
+                sources.append(str(abs_path.relative_to(git_root.resolve())))
+            except ValueError:
+                pass  # context outside the repo: timestamp fallback covers it
     files: set[str] = set()
     for rel_path in sources:
         _add_stamp_files(git_root, rel_path, files)
