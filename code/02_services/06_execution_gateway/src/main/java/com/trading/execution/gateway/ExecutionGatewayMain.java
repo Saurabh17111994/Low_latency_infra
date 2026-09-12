@@ -12,6 +12,45 @@ public final class ExecutionGatewayMain {
     private static final Logger LOG = LoggerFactory.getLogger(ExecutionGatewayMain.class);
     private ExecutionGatewayMain() {}
 
+    /**
+     * The reader step the poll loop performs. {@code Throwable} is deliberate: the P3-064 contract
+     * is about an {@code Error}, not only a RuntimeException.
+     */
+    @FunctionalInterface
+    interface ReaderPoll {
+        void poll() throws Throwable;
+    }
+
+    /**
+     * The reader loop's failure contract, extracted from the thread body so a test can drive it
+     * with a poll that throws (P3-064 regression pin).
+     *
+     * <p>Any {@code Throwable} must mark the gateway failed and stop the loop; the caller then
+     * releases the drain latch and {@code main} exits non-zero, so an orchestrator restarts a
+     * gateway whose execution path would otherwise be silently gone.
+     *
+     * @return true when the loop stopped because the reader failed, false when interrupted
+     */
+    static boolean runReaderLoop(ReaderPoll poll, GatewayReadiness readiness,
+                                 AtomicBoolean readerFailed) {
+        while (!Thread.currentThread().isInterrupted()) {
+            try {
+                poll.poll();
+            } catch (Throwable e) {
+                // P3-064: this caught only RuntimeException, so an Error killed the thread
+                // silently — no fail(), no restart, /readyz still green. Reproduced live: an
+                // ExceptionInInitializerError from Arrow killed the reader while /readyz kept
+                // answering 200. Any Throwable now marks the gateway failed and releases the
+                // drain latch; main then exits non-zero so an orchestrator restarts it.
+                readerFailed.set(true);
+                readiness.fail(String.valueOf(e.getMessage()));
+                LOG.error("intent reader stopped", e);
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static void main(String[] args) throws Exception {
         GatewayConfig config = GatewayConfig.fromEnvironment();
         GatewayReadiness readiness = new GatewayReadiness();
@@ -90,21 +129,7 @@ public final class ExecutionGatewayMain {
                         })) {
                     LOG.warn("execution-gateway started; execution readiness still depends on Execution_Gate=ENABLED");
                     Thread readerThread = new Thread(() -> {
-                        while (!Thread.currentThread().isInterrupted()) {
-                            try { reader.poll(config.pollTimeout()); }
-                            catch (Throwable e) {
-                                // P3-064: this caught only RuntimeException, so an Error killed the
-                                // thread silently — no fail(), no restart, /readyz still green. I
-                                // reproduced that live: an ExceptionInInitializerError from Arrow
-                                // killed the reader while /readyz kept answering 200. Any Throwable
-                                // now marks the gateway failed and releases the drain latch; main
-                                // then exits non-zero so an orchestrator restarts it.
-                                readerFailed.set(true);
-                                readiness.fail(String.valueOf(e.getMessage()));
-                                LOG.error("intent reader stopped", e);
-                                break;
-                            }
-                        }
+                        runReaderLoop(() -> reader.poll(config.pollTimeout()), readiness, readerFailed);
                         stop.countDown();
                     }, "execution-intent-reader");
                     readerThread.setDaemon(true);
