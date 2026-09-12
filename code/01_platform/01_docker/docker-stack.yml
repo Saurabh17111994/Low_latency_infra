@@ -716,6 +716,10 @@ services:
     image: ${EXECUTION_GATEWAY_IMAGE:?set EXECUTION_GATEWAY_IMAGE to an immutable digest}
     networks: [trading-net, execution-net]
     deploy:
+      # Single-writer deployment contract: the projection ledger's put is an
+      # unconditional last-write-wins upsert, so a second gateway replica can
+      # lost-update the same eventId. Raising this needs the versioned conditional
+      # write deferred in ProjectionLedgerStore (P3-326) — not a retry.
       replicas: 1
       placement:
         constraints: [node.labels.role == worker]
