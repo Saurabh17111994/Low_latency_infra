@@ -83,7 +83,7 @@ help:
 	@echo "              without a historical/superseded annotation (2026-08-13 re-scope),"
 	@echo "              a stale phase-status claim, or a drifted count (21 tables vs 24,"
 	@echo "              151 acceptance IDs vs 152, common/ingestion/compute test counts"
-	@echo "              and docs-audit C6 line N/N/N citations vs the truth 469/247/387)"
+	@echo "              and docs-audit C6 line N/N/N citations vs the truth line in 01-foundation.md)"
 	@echo "              (forming-bar postponed, ranking/reservation postponed,"
 	@echo "              Trade_Decisions active) without a status marker"
 	@echo "  full-audit  run the whole doc audit in one command: the three gates (stale-tables,"
