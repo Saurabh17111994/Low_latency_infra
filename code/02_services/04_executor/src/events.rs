@@ -51,12 +51,13 @@ pub fn lifecycle_event_value(
             format!("v1|{}|{}", place.instruction_id, place.execution_attempt_id).as_bytes()
         )
     );
-    // Evidence names the leg honestly: a routed cancel ack is not a place ack.
     let is_cancel = place.command() == Some(crate::bridge::protocol::Command::Cancel);
-    let verification_evidence = if is_cancel {
-        "sync-cancel-ack"
-    } else {
-        "sync-place-ack"
+    // P3-441: the evidence label names the leg that was actually routed, so a Modify ack is
+    // not reported as a place ack. `None` means the command name matched no known leg
+    // (Command::from_str), which keeps the pre-existing place-ack path.
+    let verification_evidence = match place.command() {
+        Some(command) => format!("sync-{}-ack", command.as_str()),
+        None => "sync-place-ack".to_string(),
     };
     // Default state per leg: a cancel ack without an explicit status normalizes
     // to CANCELED (never ACCEPTED — that would misstate the lifecycle).
@@ -257,6 +258,15 @@ mod tests {
         );
         assert_eq!(v["lifecycle"]["normalizedState"], "REJECTED");
         assert_eq!(v["lifecycle"]["pendingQty"], 100);
+    }
+
+    #[test]
+    fn modify_ack_is_evidenced_as_modify_not_place() {
+        // P3-441: the evidence label must name the leg that was actually routed.
+        let mut env = place_env();
+        env.command = Command::Modify.as_str().into();
+        let v = lifecycle_event_value(&report(), &env, "s", "p", 1, "tc", 5);
+        assert_eq!(v["correlation"]["verificationEvidence"], "sync-modify-ack");
     }
 
     #[test]
