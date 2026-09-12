@@ -67,12 +67,11 @@ class GatewayStartupTest {
     }
 
     @Test
-    void disabledBranchCannotClearAPriorFailButClobbersItsReason() {
-        // Characterization of two things at once:
-        //   - the disabled branch writes dimension flags while PRESERVING `healthy`, so it can
-        //     neither clear nor set a fail() latch (the latch semantics are P3-081/P3-082);
-        //   - it does overwrite the stored reason, so the original failure cause is lost — the
-        //     shared-reason problem filed as P3-301.
+    void disabledBranchCannotClearAPriorFailAndNoLongerClobbersItsReason() {
+        // Deliberate change, made by G5's latch-until-restart policy: `update` is now a no-op once
+        // unhealthy, so the disabled branch can neither clear a `fail()` latch NOR overwrite the
+        // original cause. G1 pinned the old clobbering behaviour on purpose; preserving the first
+        // failure reason is the improvement (the shared-reason problem is P3-301).
         GatewayReadiness readiness = new GatewayReadiness();
         readiness.fail("poison row");
 
@@ -82,7 +81,7 @@ class GatewayStartupTest {
         assertThat(s.healthy()).isFalse();
         assertThat(s.executionReady()).isFalse();
         assertThat(s.reason())
-                .as("the fail reason is clobbered by a dimension update (P3-301)")
-                .isEqualTo("execution disabled via EXECUTION_ENABLED=false");
+                .as("the original failure cause survives a later dimension update")
+                .isEqualTo("poison row");
     }
 }
