@@ -267,11 +267,21 @@ def _is_gated_class(test_src_dir, report_path):
 
 
 def surefire_total(module_dir, test_src_dir=None):
+    # Only classes the plain `mvn test` would select may be counted. A report
+    # whose class surefire never picks up (an *IT held for a targeted run)
+    # otherwise sits in the total until someone notices: that is how a
+    # 2026-09-05 report for DedupRocksDbThroughputMemoryIT made compute read
+    # 539 against a 538-test run. No module here overrides the defaults
+    # (Test*, *Test, *Tests, *TestCase); nested classes report under their outer.
+    plain_includes = re.compile(r"^(?:Test.*|.*Tests?|.*TestCase)$")
     total = 0
     for p in glob.glob(
         os.path.join(module_dir, "target", "surefire-reports", "TEST-*.xml")
     ):
         if _is_gated_class(test_src_dir, p):
+            continue
+        simple = os.path.basename(p)[len("TEST-") : -len(".xml")].rsplit(".", 1)[-1]
+        if not plain_includes.match(simple.split("$", 1)[0]):
             continue
         try:
             root = ET.parse(p).getroot()
