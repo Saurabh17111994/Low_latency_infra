@@ -2,27 +2,32 @@
 # run-monday-gates.sh — ONE command to run the full Monday verification gate.
 #
 # Orchestrates Workstream A from the Monday soak plan:
-#   1. Go bridge suite (no deps)
-#   2. Pre-build the E2E test binaries the Java suite execs (R-016): the
-#      FullStackE2ETest launches `go-bridge/faketool/faketool` (behind the
-#      `faketool` build tag) and `go-bridge/arrow-bridge`; `go test` builds
-#      neither, so a clean checkout would fail the E2E gate.
-#   3. Full Java suite with ALL integration flags (needs local Fluss up)
-#   3b. CHG-015 SIGTERM-drain regression explicit (ING-UNIT-023/024) — the
-#      bridge's final tick-count report drained from stderr after the graceful
-#      SIGTERM path, pinned by name so the regression is a NAMED gate (both
-#      tests are default-run, but an explicit pin fails CI loudly if a future
-#      pom/surefire change silently drops or env-gates them)
-#   4. Python unit suites (tests/ — incl. the ING-TCP-002 reconcile-compare
-#      comparator suite) + the full doc audit (make full-audit: stale-claim
-#      scanner --upstream, docs-audit all C-checks incl. C16 env-key drift,
-#      DDL/manifest parity, beyond-scanner sweeps, dossier-trio coherence)
-#   4b. Entrypoint harness (ING-INT-006: test_docker_entrypoint.sh)
-#   5. Report PASS/FAIL with evidence file paths and a terminal status marker
+# The step list is deliberately NOT enumerated here: the script prints
+# `[N/13] <step>` as it runs and writes the authoritative verdicts to
+# $OUT_DIR/SUMMARY.txt. A hand-maintained copy only drifts — this header
+# claimed five steps while the script ran thirteen.
+#
+# Coverage: static checks, compose config, Python unit suites, entrypoint
+# harness, Go bridge suite (-race), E2E test binaries, docker build smoke,
+# image staleness, the full Java gate + live Fluss drills, the full doc audit,
+# the DDL apply smoke + evidence-ownership check, the schema/perf certification
+# gates, and the CHG-015 SIGTERM-drain regression. The E2E-binary and the
+# SIGTERM-drain steps are explicit because `go test` builds neither E2E binary
+# (R-016) and a pom/surefire change could silently drop or env-gate the drain
+# tests (ING-UNIT-023/024), so `make full-audit` and the Java suite alone would
+# not notice.
 #
 # Usage:  ./run-monday-gates.sh
 #   - The script FAILS (exit != 0) if any suite fails, so you can wire it
 #     into CI or a cron.
+#
+# Repair runs: do NOT re-run the whole gate once per fix. Run the failing step
+# standalone with the same env — copy its block from this file, its log lands in
+# $OUT_DIR — falsify the fix against the pre-fix code, and only then re-run the
+# full gate. A fix touching image sources needs `make images` FIRST: step 8
+# compares the images against the tree, so an un-rebuilt tree fails there (or,
+# worse, passes against a stale image). Probing several never-run steps in one
+# batch beats one gate cycle per step.
 #
 # Prereqs: Fluss up (docker compose up -d), local ~/.m2 warm, Go 1.24+, JDK 17.
 
