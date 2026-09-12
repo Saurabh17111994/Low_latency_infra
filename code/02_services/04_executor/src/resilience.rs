@@ -710,7 +710,9 @@ mod tests {
             guard.done(&format!("key-{}", total - 1)),
             "the newest key stays"
         );
-        let retained = (0..total).filter(|i| guard.done(&format!("key-{i}"))).count();
+        let retained = (0..total)
+            .filter(|i| guard.done(&format!("key-{i}")))
+            .count();
         assert_eq!(
             retained,
             IdempotencyGuard::MEMO_CAPACITY,
@@ -725,6 +727,9 @@ mod tests {
         for i in 0..(IdempotencyGuard::MEMO_CAPACITY - 1) {
             guard.mark(&format!("filler-{i}"));
         }
-        assert!(guard.done("first"), "a key still inside the window survives");
+        assert!(
+            guard.done("first"),
+            "a key still inside the window survives"
+        );
     }
 }

@@ -274,7 +274,7 @@ mod tests {
         assert!(DurableFlags::all_on().any_on());
     }
 
-    // ── Gate store: write through the trait object, read back through a second handle 
+    // ── Gate store: write through the trait object, read back through a second handle
 
     #[test]
     fn gate_state_is_shared_across_handles() {
@@ -319,7 +319,7 @@ mod tests {
         }
     }
 
-    // ── Attempt store: write through the trait object, read back through a second handle 
+    // ── Attempt store: write through the trait object, read back through a second handle
 
     #[test]
     fn attempt_state_is_shared_across_handles() {
@@ -333,7 +333,7 @@ mod tests {
         assert!(restarted.has_duplicate("ins-1", "h-1"));
     }
 
-    // ── Journal: append through the trait object, read back through a second handle 
+    // ── Journal: append through the trait object, read back through a second handle
 
     #[test]
     fn journal_state_is_shared_across_handles() {
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(clients.journal.len(), 1);
     }
 
-    // ── Audit sink: record through the trait object, read back through a second handle 
+    // ── Audit sink: record through the trait object, read back through a second handle
 
     #[test]
     fn audit_state_is_shared_across_handles() {
