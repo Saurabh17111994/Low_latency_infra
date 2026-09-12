@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,10 +53,10 @@ func TestFaultInjectionDecodeBurstRecovers(t *testing.T) {
 	healthy.onFullTick = arrow.HFTFullTick{Token: 1000, LTP: 15051}
 
 	// The slot factory yields the burst stream once, then healthy forever.
-	attempts := 0
+	// Atomic: the supervisor goroutine dials while the test goroutine polls.
+	var attempts atomic.Int32
 	factory := func() (hftStream, error) {
-		attempts++
-		if attempts == 1 {
+		if attempts.Add(1) == 1 {
 			return burst, nil
 		}
 		return healthy, nil
@@ -79,14 +80,16 @@ func TestFaultInjectionDecodeBurstRecovers(t *testing.T) {
 		defer close(done)
 		runHFTSlotWithFactory(ctx, factory, slot, 50, 10*time.Second, nil, t.Logf)
 	}()
-	// Poll for the recovered ACTIVE ack instead of a fixed 300ms sleep —
-	// under `go test -race` full-suite load the burst + reconnect can take
-	// longer than 300ms, which made this assertion flaky.
+	// Wait for the reconnect dial instead of a fixed 300ms sleep — under
+	// `go test -race` full-suite load the burst + reconnect can take longer
+	// than 300ms. The factory's first attempt is the burst stream, so attempt 2
+	// exists only after the burst killed epoch 1, and the supervisor emits the
+	// reconnect BACKOFF event before that dial (supervisor.go:126). Waiting on
+	// an ACTIVE ack returned immediately instead: epoch 1 emits one before the
+	// burst, so the slot was cancelled before the reconnect was emitted and the
+	// BACKOFF event never reached the capture (2 of 6 full-suite runs).
 	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		if containsAny(eventsAsStrings(t, capture.String()), "event=subscription_ack state=ACTIVE") {
-			break
-		}
+	for time.Now().Before(deadline) && attempts.Load() < 2 {
 		time.Sleep(20 * time.Millisecond)
 	}
 	cancel()
