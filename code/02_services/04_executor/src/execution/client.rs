@@ -315,11 +315,38 @@ impl BridgeExecutionClient {
     /// drains any asynchronous bridge reports (fills, cancellations).
     pub async fn process_pending(&mut self) -> Result<()> {
         let jobs = std::mem::take(&mut *self.pending.get_mut());
+        // P3-017: never drop the jobs behind a failing one. The `take` above detaches the whole
+        // batch, so the old `self.execute_job(job).await?` discarded the remainder on the first
+        // `Err` — silently: not sent to the bridge, not counted via
+        // `abort_pending_as_unresolved`, no denial/rejection event. A `Place` followed by
+        // `Modify`/`Cancel` therefore lost the trailing commands while the underlying order
+        // stayed live at the broker.
+        //
+        // Every queued job is now attempted. Each failure is recorded as an unresolved attempt
+        // (it reached the queue but never the broker, so it must never be auto-retried after a
+        // restart — see `abort_pending_as_unresolved`), and the first error is still surfaced so
+        // a caller cannot mistake a partial batch for success. `drain_reports` runs regardless,
+        // so fills belonging to the jobs that *did* succeed are not stranded in the queue.
+        let mut first_error: Option<anyhow::Error> = None;
+        let mut failed: u64 = 0;
         for job in jobs {
-            self.execute_job(job).await?;
+            if let Err(e) = self.execute_job(job).await {
+                failed += 1;
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+        if failed > 0 {
+            crate::telemetry::METRICS
+                .unresolved_attempt
+                .fetch_add(failed, Ordering::Relaxed);
         }
         self.drain_reports();
-        Ok(())
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Single-threaded invariant: only the pump touches the bridge, so holding the `RefCell`
@@ -1198,5 +1225,94 @@ mod tests {
             client.position(&order.instrument_id()),
             rust_decimal::Decimal::from(0)
         );
+    }
+
+    /// P3-017: a failing job must not drop the jobs queued behind it.
+    ///
+    /// Queues Place (scripted to time out, so its single attempt exhausts and `execute_job`
+    /// returns `Err`) followed by Modify. The old loop propagated that first `Err` with `?` and
+    /// discarded the Modify — which `std::mem::take` had already detached from `pending`, so it
+    /// could not even be reached by `abort_pending_as_unresolved`. It never reached the bridge.
+    ///
+    /// The Modify is scripted to `Reject`, so `METRICS.order_rejected` is the observable proof
+    /// that the trailing job was actually attempted: under the old behaviour it stays at zero.
+    #[tokio::test(flavor = "current_thread")]
+    async fn failing_job_does_not_drop_the_jobs_behind_it() {
+        use nautilus_common::clients::ExecutionClient;
+
+        let scripts = vec![
+            crate::bridge::CommandScript::Timeout, // place: exhausts its one attempt
+            crate::bridge::CommandScript::Reject("trailing modify rejected".into()),
+        ];
+        let (client, instrument_id, client_order_id, order) =
+            roundtrip_fixture(crate::bridge::FakeBridge::new(), &scripts);
+        let mut client = client.with_resilience_config(crate::resilience::RetryConfig {
+            max_attempts: 1, // the place fails outright rather than retrying
+            base_backoff_ms: 1,
+            cap_backoff_ms: 1,
+            breaker_threshold: 100, // keep the breaker from short-circuiting job 2
+            breaker_cooldown_ms: 1000,
+        });
+        client.connect().await.expect("connect");
+        enable_gate(&client);
+
+        let rejected_before = crate::telemetry::METRICS
+            .order_rejected
+            .load(Ordering::Relaxed);
+        let unresolved_before = crate::telemetry::METRICS
+            .unresolved_attempt
+            .load(Ordering::Relaxed);
+
+        let submit = SubmitOrder::from_order(
+            &order,
+            TraderId::from("TRADER-001"),
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+        );
+        client.submit_order(submit).expect("place enqueued");
+        let modify = ModifyOrder::new(
+            TraderId::from("TRADER-001"),
+            None,
+            StrategyId::from("S-001"),
+            instrument_id,
+            client_order_id,
+            Some(VenueOrderId::new("BRK-0001")),
+            Some(Quantity::from(10)),
+            Some(Price::from("99")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        );
+        client.modify_order(modify).expect("modify enqueued");
+        assert_eq!(client.pending_count(), 2, "both jobs queue for one pump");
+
+        let result = client.process_pending().await;
+
+        // The failure still surfaces — a partial batch must not read as success.
+        assert!(result.is_err(), "the failed job must surface an error");
+        // ...but the job behind it WAS attempted. Old code never sent it (delta 0).
+        assert!(
+            crate::telemetry::METRICS
+                .order_rejected
+                .load(Ordering::Relaxed)
+                - rejected_before
+                >= 1,
+            "the job queued behind a failure must still reach the bridge"
+        );
+        // ...and the failed job is accounted rather than silently lost.
+        assert!(
+            crate::telemetry::METRICS
+                .unresolved_attempt
+                .load(Ordering::Relaxed)
+                - unresolved_before
+                >= 1,
+            "a job that reached the queue but not the broker is an unresolved attempt"
+        );
+        assert_eq!(client.pending_count(), 0, "the batch drains completely");
+        drop(client);
     }
 }
