@@ -28,16 +28,16 @@ class C2ProgressTest(unittest.TestCase):
         self.assertIsNotNone(summary)
         assert summary is not None
         self.assertEqual((summary.read_resets, summary.write_resets), (1, 1))
-        self.assertTrue(summary.has_progress())
 
-    def test_reset_without_a_later_increase_fails_closed(self):
+    def test_reset_alone_does_not_count_as_an_increase(self):
         summary = self._summary(
             "1\tpost-kill\t0\tRUNNING\t100\t200\n"
             "2\tpost-kill\t5\tRUNNING\t0\t0\n"
         )
         self.assertIsNotNone(summary)
         assert summary is not None
-        self.assertFalse(summary.has_progress())
+        self.assertEqual((summary.read_resets, summary.read_increases), (1, 0))
+        self.assertEqual((summary.write_resets, summary.write_increases), (1, 0))
 
 
 if __name__ == "__main__":

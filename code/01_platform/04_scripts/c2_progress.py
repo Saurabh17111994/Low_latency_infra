@@ -22,15 +22,6 @@ class PhaseProgress:
     write_resets: int
     samples: int
 
-    def has_progress(self) -> bool:
-        """Require an actual post-reset increase, not only a counter reset."""
-        return (
-            self.read_delta > 0
-            and self.read_increases > 0
-            and self.write_delta > 0
-            and self.write_increases > 0
-        )
-
     def as_tsv(self) -> str:
         return "\t".join(
             str(value)
