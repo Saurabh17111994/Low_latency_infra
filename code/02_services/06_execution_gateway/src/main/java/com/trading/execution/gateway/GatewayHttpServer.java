@@ -106,6 +106,17 @@ public final class GatewayHttpServer implements AutoCloseable {
      * not this pool. Until the shed bound's production value is chosen and a test proves two
      * distinct eventIds apply concurrently without touching each other's steps, keep the thread
      * count at one and keep the hold bounded.
+     *
+     * <p>Verified 2026-09-13: that is not an accident of this class. {@link ExecutionGatewayMain}
+     * builds the server through the constructors that pass {@code null} for the executor, and no
+     * pool is constructed anywhere in this service's main sources, so the platform default (the
+     * thread created by {@code start()}, per {@code HttpServer.setExecutor}) serves every request
+     * and in-flight stays at 1. The deployed value is the default 1000 — neither the compose file
+     * nor the stack sets {@code MAX_PENDING_PROJECTION_RECORDS}.
+     *
+     * <p>Decision 2026-09-13 (B12-ii): keep that default and keep the single-threaded dispatch the
+     * closing sentence above already requires — the change that wires an executor owns both the
+     * value and that concurrency test.
      */
     public GatewayHttpServer(GatewayConfig config, GatewayReadiness readiness,
             Consumer<JsonNode> eventConsumer, GateStateStore gateStore,
