@@ -4,7 +4,7 @@
     {
       "table_name": "raw_table_1",
       "ddl_path": "02_raw_table_1.sql",
-      "ddl_sha256": "b4213e40f3b6706763d901f72149805c0bd15c2b87894b7865ae9682c1e19859",
+      "ddl_sha256": "d4d4292b74ae42520d361979b51e4b9c382fd1a9279d381afb3fc03d67353e07",
       "table_kind": "LOG",
       "bucket_key": "instrument_token",
       "primary_key": null,
