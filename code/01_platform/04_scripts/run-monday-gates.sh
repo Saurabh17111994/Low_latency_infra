@@ -221,8 +221,17 @@ fi
 # step 9 therefore proved nothing about the live store paths; the drill block at
 # the end of this step runs them.
 echo "=== [9/13] Java full gate (FLUSS+MANIFEST+PERF+E2E) + live Fluss drills ===" | tee -a "$SUMMARY"
+	# FLUSS_BOOTSTRAP is deliberately unset for the plain Java run: common's ten
+	# FLUSS_BOOTSTRAP-gated live classes would otherwise execute into the plain
+	# target/surefire-reports and rewrite their XMLs from 0 to real counts
+	# (627 -> 649, measured 2026-09-12), so the doc audit two steps later would
+	# disagree with the documented triple. Those classes belong to the drill step
+	# below, which supplies the bootstrap itself and writes to the isolated drills
+	# dir. Ingestion's live classes are unaffected: they gate on the
+	# INGESTION_INT_TEST_* flags and resolve FLUSS_BOOTSTRAP_SERVERS (default
+	# localhost:9123).
 	if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
-	INGESTION_INT_TEST_E2E=true INGESTION_INT_TEST_FLUSS=true \
+	env -u FLUSS_BOOTSTRAP INGESTION_INT_TEST_E2E=true INGESTION_INT_TEST_FLUSS=true \
 	INGESTION_INT_TEST_MANIFEST=true INGESTION_INT_TEST_PERF=true \
 	mvn -o test -pl 02_services/01_ingestion -am" >"$JAVA_LOG" 2>&1; then
 	echo "FAIL: Java suite failed or timed out — see $JAVA_LOG" | tee -a "$SUMMARY"
