@@ -9,7 +9,8 @@
 #
 # Coverage: static checks, compose config, Python unit suites, entrypoint
 # harness, Go bridge suite (-race), E2E test binaries, docker build smoke,
-# image staleness, the full Java gate + live Fluss drills, the full doc audit,
+# image staleness (scoped to ddl-apply, the one service image the gate starts),
+# the full Java gate + live Fluss drills, the full doc audit,
 # the DDL apply smoke + evidence-ownership check, the schema/perf certification
 # gates, and the CHG-015 SIGTERM-drain regression. The E2E-binary and the
 # SIGTERM-drain steps are explicit because `go test` builds neither E2E binary
@@ -219,15 +220,23 @@ fi
 # ── 5b. CHG-101: stale-image guard — no compose build: image may be older
 # than the last change to the source it packages (2026-08-24 gateway/bridge
 # incident: 08-20 images vs 08-24 source went unnoticed until a readyz probe).
-echo "=== [8/14] image staleness (compose build: images vs source) ===" | tee -a "$SUMMARY"
+echo "=== [8/14] image staleness (the service image this gate runs) ===" | tee -a "$SUMMARY"
 IMAGE_LOG="$OUT_DIR/image-staleness.log"
 if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ]; then
+	# Scope (2026-09-12): ddl-apply is the only *service* image the gate starts
+	# (step 11). Step 7 builds ingestion under the throwaway
+	# ingestion-gate-smoke:local tag, so it never touches a compose image.
+	# Demanding all 8 current meant a full rebuild before every gate for images
+	# this run never starts. The other 7 are not left unguarded: `make images`
+	# ends with the full --require-stamps check, and the runbook requires
+	# `make check-image-stale` before any enable.
 	if ! timeout 120 python3 "$SCRIPT_DIR/image_staleness_check.py" \
-		--git-root "$PROJECT_ROOT" --compose "$COMPOSE_FILE" >"$IMAGE_LOG" 2>&1; then
-		echo "FAIL: stale/missing build images (CHG-101) — see $IMAGE_LOG" | tee -a "$SUMMARY"
+		--git-root "$PROJECT_ROOT" --compose "$COMPOSE_FILE" --service ddl-apply >"$IMAGE_LOG" 2>&1; then
+		echo "FAIL: stale/missing ddl-apply image (CHG-101) — see $IMAGE_LOG" | tee -a "$SUMMARY"
 		gate_fail
 	fi
-	echo "PASS: image staleness (compose build: images current)" | tee -a "$SUMMARY"
+	echo "PASS: image staleness (ddl-apply — the service image this gate runs)" | tee -a "$SUMMARY"
+	echo "NOTE: the other 7 compose images are checked by 'make images' (--require-stamps) and by 'make check-image-stale' at release, not by this gate." | tee -a "$SUMMARY"
 else
 	note_skip 8
 	echo "SKIP: image staleness (no docker/compose) — unverified, not green" | tee -a "$SUMMARY"
