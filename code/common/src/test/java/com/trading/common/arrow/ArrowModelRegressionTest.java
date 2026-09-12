@@ -149,6 +149,20 @@ class ArrowModelRegressionTest {
     }
 
     @Test
+    @DisplayName("a non-finite requestTime is rejected, not mapped to Long.MAX_VALUE")
+    void requestTimeRejectsNonFiniteNumbers() {
+        // Found while implementing P3-489: Double.POSITIVE_INFINITY.longValue() is
+        // Long.MAX_VALUE and Math.rint(+Inf) is +Inf, so +Infinity satisfied both the
+        // integrality guard and the later > 0 check and was accepted as an epoch-ms.
+        assertThrows(IllegalArgumentException.class,
+                () -> ArrowOrderResponse.fromJson(
+                        Map.of("orderNo", "123", "requestTime", Double.POSITIVE_INFINITY)));
+        assertThrows(IllegalArgumentException.class,
+                () -> ArrowOrderResponse.fromJson(
+                        Map.of("orderNo", "123", "requestTime", Float.POSITIVE_INFINITY)));
+    }
+
+    @Test
     @DisplayName("orderNo must be a non-blank String or Number, never coerced (P3-335)")
     void orderNoTypeGuards() {
         // A boolean has no order number: String.valueOf turned it into "true" and

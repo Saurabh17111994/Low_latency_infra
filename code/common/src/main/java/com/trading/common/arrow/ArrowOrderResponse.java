@@ -52,16 +52,14 @@ public final class ArrowOrderResponse {
         final long time;
         if (rt instanceof Number) {
             Number n = (Number) rt;
-            // P3-489: a fractional epoch-ms is malformed, not something to truncate.
-            // 1752539000.9 as a Double and 1752539000.5f as a Float were both being
-            // silently cut to 1752539000, which reads as a plausible timestamp.
-            // ponytail: Infinity still arrives as Long.MAX_VALUE via longValue() —
-            // reported, not fixed here, because no finding covers it.
-            if (n instanceof Double && n.doubleValue() != Math.rint(n.doubleValue())) {
-                throw new IllegalArgumentException(
-                        "requestTime must be an integral epoch-ms, got: " + rt);
-            }
-            if (n instanceof Float && n.doubleValue() != Math.rint(n.doubleValue())) {
+            // P3-489: an epoch-ms must be whole and finite. A fractional value is
+            // malformed, not something to truncate: 1752539000.9 as a Double and
+            // 1752539000.5f as a Float were both being silently cut to 1752539000.
+            // Infinity was worse — Math.rint(+Inf) is +Inf, so the integrality test
+            // alone let it through, and longValue() turned it into Long.MAX_VALUE, a
+            // positive, plausible-looking epoch-ms.
+            if ((n instanceof Double || n instanceof Float)
+                    && !isIntegralEpochMs(n.doubleValue())) {
                 throw new IllegalArgumentException(
                         "requestTime must be an integral epoch-ms, got: " + rt);
             }
@@ -98,5 +96,13 @@ public final class ArrowOrderResponse {
             throw new IllegalArgumentException("orderNo missing or blank in Arrow response");
         }
         return new ArrowOrderResponse(new BrokerOrderId(orderNo), time);
+    }
+
+    /**
+     * P3-489: an epoch-ms must be finite and whole. {@code Math.rint(+Inf)} is
+     * {@code +Inf}, so the integrality test cannot stand on its own.
+     */
+    private static boolean isIntegralEpochMs(double v) {
+        return Double.isFinite(v) && v == Math.rint(v);
     }
 }
