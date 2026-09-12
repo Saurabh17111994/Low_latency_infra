@@ -48,7 +48,7 @@ unless a command says otherwise.
 | Full doc audit | `make full-audit` | Docs-vs-code truth check (3 gates + beyond-scanner sweeps) |
 | Doc audit | `make docs-audit` | Manifest/ownership/test-count checks + cargo clippy/fmt + go vet |
 | Unit tests (common + ingestion) | `make test` | Maven tests |
-| Live Fluss drills (common + gateway) | `make drill-live` | The `FLUSS_BOOTSTRAP`-gated classes — `make test` records them as 0 tests; runs inside `make gate` step 9 |
+| Live Fluss drills (common + gateway + compute B4) | `make drill-live` | The `FLUSS_BOOTSTRAP`-gated classes — `make test` records them as 0 tests; runs inside `make gate` step 9. The compute leg runs from its own pom (R-272 keeps 02_compute out of the reactor) |
 | All local-compose checks | `make test-all` | L0–L11 pytest suites |
 | Pin discipline | `make pin-check` | Version pin audit (matrix shape, SNAPSHOT ban) |
 | Static script hygiene | `make static-check` | `bash -n` + shellcheck on every repo shell script |

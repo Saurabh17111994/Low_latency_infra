@@ -160,9 +160,14 @@ test-ingestion:
 # the Monday gate's Java step record these as 0 tests (the gate exports only the
 # INGESTION_INT_TEST_* flags), and the gateway module is outside that step's scope
 # (-pl 02_services/01_ingestion -am, which rides on common only as a dependency),
-# so these are live paths nothing else runs. Compute's Fluss drills are NOT here:
-# they also require COMPUTE_INT_TEST (a Flink job harness) and belong to the
-# compute and chaos targets.
+# so these are live paths nothing else runs. The gate arms them now (it defaults
+# FLUSS_BOOTSTRAP for its DDL smoke), which is why this target exists: it is the
+# cheap loop for what the gate only checks once every 16 min (measured 2026-09-13:
+# 387 s total, 88 s of it compute's B4 leg). Compute's harness
+# drills (tablet-kill, chaos, object-store checkpoint) still need their own flags
+# and belong to the compute/chaos targets; its B4 signal-to-intent E2E gates on
+# FLUSS_BOOTSTRAP alone, so it runs here too -- from compute's own pom (R-272
+# keeps 02_compute out of the code/pom.xml reactor).
 # The drill-reports profile (code/pom.xml) sends the reports to
 # target/surefire-reports-drills on purpose: docs-audit C6 sums
 # target/surefire-reports against the documented plain-suite triple, and a live
@@ -174,7 +179,10 @@ drill-live:
 	else \
 		cd code && $(MVN) test -Pdrill-reports -pl common,02_services/06_execution_gateway \
 			-Dtest='EodBucketCopyIntegrationTest,FlussGateAttemptStoresIntegrationTest,FlussPositionsStateStoreIntegrationTest,FlussPostbackQuarantineStoreIntegrationTest,CompatFlussIntegrationTest,CompatFlussCompositeKeyIntegrationTest,CompatFlussDdlParityIntegrationTest,DdlSmokeTwinSweepTest,GateMergeEngineDrillIntegrationTest,GatewayFlussIntegrationTest,GatewayFlussDurableReplayIntegrationTest,B4HaltedIntentConsumeDeferE2ETest,GatewayStartupPrewarmTest,FlussProjectionWriterIntegrationTest' \
-			-Dsurefire.failIfNoSpecifiedTests=false; \
+			-Dsurefire.failIfNoSpecifiedTests=false \
+			&& cd 02_services/02_compute && $(MVN) test -Pdrill-reports \
+				-Dtest='B4SignalIntentE2ETest' \
+				-Dsurefire.failIfNoSpecifiedTests=false; \
 	fi
 
 # audit_r2.py unit tests (stdlib unittest — SigV4 golden vector, config
