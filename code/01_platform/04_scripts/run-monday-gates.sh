@@ -157,7 +157,9 @@ echo "PASS: entrypoint harness (exit codes + messages)" | tee -a "$SUMMARY"
 
 # ── 1. Go suite with race detector (Phase 8: go test -race) ──────────────────
 echo "=== [5/13] Go bridge suite (-race) ===" | tee -a "$SUMMARY"
-if ! timeout "$GO_TIMEOUT_SEC" bash -c "cd '$BRIDGE_DIR' && go test -race -count=1 ./..."; then
+# The output goes to $GO_LOG: the FAIL message below points there (and the
+# final evidence list advertises it), plus the race reports are large.
+if ! timeout "$GO_TIMEOUT_SEC" bash -c "cd '$BRIDGE_DIR' && go test -race -count=1 ./..." >"$GO_LOG" 2>&1; then
 	echo "FAIL: Go suite failed or timed out — see $GO_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -165,9 +167,11 @@ echo "PASS: Go suite (-race)" | tee -a "$SUMMARY"
 
 # ── 2. Build E2E test binaries (R-016) + docker build smoke ───────────────
 echo "=== [6/13] Building E2E test binaries (faketool + arrow-bridge) ===" | tee -a "$SUMMARY"
+# Appends to the same log: gate_fail exits, so a Go-suite failure never reaches
+# here, and the advertised Go evidence keeps both records.
 if ! (cd "$BRIDGE_DIR" &&
 	go build -tags faketool -o faketool/faketool ./faketool &&
-	go build -o arrow-bridge .); then
+	go build -o arrow-bridge .) >>"$GO_LOG" 2>&1; then
 	echo "FAIL: could not build E2E test binaries — see $GO_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
