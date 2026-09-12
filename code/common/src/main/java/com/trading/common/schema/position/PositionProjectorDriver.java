@@ -112,11 +112,14 @@ public final class PositionProjectorDriver {
             // carries no exposure, so it can never create a position.
             return FeedResult.notAFill(null);
         }
-        String accountScopeId = fillsRow.getString(FillsColumns.ACCOUNT_SCOPE_ID).toString();
-        PositionKey key = new PositionKey(accountScopeId, ctx.instrumentToken(), ctx.side());
         FillEvent mapped = FillEventMapper.mapIfFill(fillsRow, UNRESOLVED_POSITION_ID, ctx)
                 .orElseThrow(() -> new IllegalStateException(
                         "isFill() accepted a row that mapIfFill() rejected"));
+        // The key is built from the MAPPED fill: reading ACCOUNT_SCOPE_ID off the row here as well
+        // would NPE ahead of the mapper's guard (P3-161), so identity validation lives in exactly
+        // one place and its diagnostic rejection is the only path.
+        PositionKey key = new PositionKey(mapped.accountScopeId(), ctx.instrumentToken(),
+                ctx.side());
         return feed(mapped.withPositionId(resolvePositionId(key, mapped)), nowMs);
     }
 

@@ -61,6 +61,13 @@ public final class FillEventMapper {
         if (!isFill(row)) {
             return Optional.empty();
         }
+        // P3-160: receive_time seeds BOTH sourceVersion and the event-time fallback. It was read
+        // with a bare getLong while broker_event_time was guarded — an absent value either threw a
+        // raw NPE from the unboxing or, if an implementation returned 0, silently pinned version 0
+        // and corrupted STALE/DUPLICATE gating.
+        if (row.isNullAt(FillsColumns.RECEIVE_TIME)) {
+            throw new IllegalArgumentException("receive_time is required");
+        }
         long receiveTime = row.getLong(FillsColumns.RECEIVE_TIME);
         long eventTime = row.isNullAt(FillsColumns.BROKER_EVENT_TIME)
                 ? receiveTime
@@ -68,18 +75,36 @@ public final class FillEventMapper {
         String tradeContextId = row.isNullAt(FillsColumns.TRADE_CONTEXT_ID)
                 ? null
                 : row.getString(FillsColumns.TRADE_CONTEXT_ID).toString();
+        // P3-161/P3-162: identity fields are required. Dereferencing them via getString(...).toString()
+        // threw a raw NPE that bypassed the driver's quarantine path, instead of rejecting the row
+        // with the column identity. The DDL's NOT NULL does not protect a GenericRow built from an
+        // external postback — the mapper already guards the nullable TRADE_CONTEXT_ID the same way.
+        String accountScopeId = requiredString(row, FillsColumns.ACCOUNT_SCOPE_ID,
+                "account_scope_id");
+        String sourceEventId = requiredString(row, FillsColumns.POSTBACK_EVENT_ID,
+                "postback_event_id");
         return Optional.of(new FillEvent(
                 positionId,
                 tradeContextId,
-                row.getString(FillsColumns.ACCOUNT_SCOPE_ID).toString(),
+                accountScopeId,
                 ctx.instrumentToken(),
                 ctx.exchange(),
                 ctx.symbol(),
                 ctx.side(),
                 row.getLong(FillsColumns.FILL_QTY),
                 row.getLong(FillsColumns.FILL_PRICE_PAISE),
-                row.getString(FillsColumns.POSTBACK_EVENT_ID).toString(),
+                sourceEventId,
                 receiveTime,
                 eventTime));
+    }
+
+    /**
+     * Reads a required STRING column, failing with the column identity rather than a raw NPE.
+     */
+    private static String requiredString(GenericRow row, int index, String field) {
+        if (row.isNullAt(index)) {
+            throw new IllegalArgumentException(field + " is required");
+        }
+        return row.getString(index).toString();
     }
 }

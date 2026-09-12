@@ -1,6 +1,7 @@
 package com.trading.common.schema.position;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.trading.common.model.PositionState;
 import org.junit.jupiter.api.Test;
@@ -165,5 +166,36 @@ class PositionProjectorTest {
         PositionProjector.ProjectionResult r =
                 PositionProjector.apply(null, buy(10, 100, -1, "f-1"), NOW);
         assertThat(r.outcome()).isEqualTo(PositionProjector.Outcome.VIOLATION);
+    }
+
+    // --- P3-165: the never-throws contract must survive a null identity / null fill ---
+
+    @Test
+    void nullFillIsRejectedAsAContractViolation() {
+        // Exact message, not `contains("fill")`: the JVM's helpful NullPointerException text also
+        // mentions the variable name, so a loose assertion would pass even without the guard.
+        assertThatThrownBy(() -> PositionProjector.apply(null, null, NOW))
+                .isInstanceOf(NullPointerException.class)
+                .hasMessage("fill");
+    }
+
+    @Test
+    void nullSnapshotEventIdYieldsControlledConflictNotNpe() {
+        PositionSnapshot first =
+                PositionProjector.apply(null, buy(10, 100, 5, "f5"), NOW).snapshot();
+        // A snapshot hydrated from a corrupt store — the record does not reject a null event id,
+        // so the content check must not assume one side is non-null.
+        PositionSnapshot corrupt = new PositionSnapshot(
+                first.positionId(), first.tradeContextId(), first.accountScopeId(),
+                first.instrumentToken(), first.exchange(), first.symbol(), first.side(),
+                first.state(), first.openQuantity(), first.closedQuantity(),
+                first.averageEntryPaise(), first.averageExitPaise(),
+                null, 5L, first.createdTs(), first.lastUpdateTs(), first.schemaVersion());
+
+        // Same version, and content cannot match a null -> CONFLICT -> VIOLATION, not an NPE.
+        PositionProjector.ProjectionResult r =
+                PositionProjector.apply(corrupt, buy(10, 100, 5, "f5"), NOW);
+        assertThat(r.outcome()).isEqualTo(PositionProjector.Outcome.VIOLATION);
+        assertThat(r.reason()).contains("CONFLICT");
     }
 }

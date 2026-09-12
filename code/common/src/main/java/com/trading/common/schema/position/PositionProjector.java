@@ -2,6 +2,7 @@ package com.trading.common.schema.position;
 
 import com.trading.common.model.PositionState;
 import com.trading.common.schema.KvStateUpdateProtocol;
+import java.util.Objects;
 
 /**
  * Pure-JVM core of the SCH-20 position projector: projects a {@link FillEvent}
@@ -69,11 +70,15 @@ public final class PositionProjector {
      * Never mutates {@code current} — returns a new snapshot or a rejection.
      */
     public static ProjectionResult apply(PositionSnapshot current, FillEvent fill, long nowMs) {
+        Objects.requireNonNull(fill, "fill");
         long currentVersion = current == null ? 0L : current.sourceVersion();
 
         // Version gate (SCH-09 KvStateUpdateProtocol semantics).
+        // P3-165: `fill.sourceEventId().equals(current.sourceEventId())` NPEs when the snapshot's
+        // event id is null — PositionSnapshot does not reject one, so a snapshot hydrated from a
+        // corrupt store broke the never-throws contract instead of yielding a controlled outcome.
         boolean contentMatches = current != null
-                && fill.sourceEventId().equals(current.sourceEventId());
+                && Objects.equals(fill.sourceEventId(), current.sourceEventId());
         KvStateUpdateProtocol.Outcome v = KvStateUpdateProtocol.evaluate(
                 currentVersion, fill.sourceVersion(), contentMatches);
         switch (v) {

@@ -114,4 +114,38 @@ class FillEventMapperTest {
                 fillsRow("pb-1", "acc-1", "tc-9", 100L, 10050L, 1L, 2L), " ", ctx()))
                 .isInstanceOf(IllegalArgumentException.class);
     }
+
+    // --- P3-160/161/162: required columns fail fast with the column identity, not a raw NPE ---
+
+    /** A 23-column fills row with exactly one column explicitly null. */
+    private static GenericRow fillsRowWithNullAt(int nullIndex) {
+        Object[] cols = {
+                bs("pb-1"), bs("fp-1"), bs("1"), bs("acc-1"), bs("bro-1"), bs("ins-1"),
+                bs("att-1"), bs("tc-1"), bs("FILLED"), 1L, 0L, 100L, 10050L, bs("f-1"),
+                1_700_000_000_100L, 1_700_000_000_150L, 1_700_000_000_150L, new byte[] {1},
+                bs("h-1"), bs("CORRELATED"), bs(""), bs("1"), bs("2")
+        };
+        cols[nullIndex] = null;
+        return GenericRow.of(cols);
+    }
+
+    @Test
+    void rejectsNullIdentityColumnsWithTheColumnName() {
+        // account_scope_id feeds the position key; postback_event_id IS the fill identity; both
+        // were dereferenced unguarded, so a null threw a raw NPE past the quarantine path.
+        assertThatThrownBy(() -> FillEventMapper.mapIfFill(
+                fillsRowWithNullAt(FillsColumns.ACCOUNT_SCOPE_ID), POSITION_ID, ctx()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("account_scope_id");
+        assertThatThrownBy(() -> FillEventMapper.mapIfFill(
+                fillsRowWithNullAt(FillsColumns.POSTBACK_EVENT_ID), POSITION_ID, ctx()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("postback_event_id");
+        // receive_time seeds BOTH sourceVersion and the event-time fallback, so a silent 0 would
+        // corrupt STALE/DUPLICATE gating rather than merely failing.
+        assertThatThrownBy(() -> FillEventMapper.mapIfFill(
+                fillsRowWithNullAt(FillsColumns.RECEIVE_TIME), POSITION_ID, ctx()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("receive_time");
+    }
 }

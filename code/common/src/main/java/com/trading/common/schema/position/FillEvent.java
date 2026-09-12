@@ -41,6 +41,17 @@ public record FillEvent(
         if (!SIDE_BUY.equals(side) && !SIDE_SELL.equals(side)) {
             throw new IllegalArgumentException("side must be BUY or SELL, got " + side);
         }
+        // P3-159: sourceEventId is the fill identity for the duplicate/conflict content check,
+        // and it is dereferenced by PositionProjector and by FlussPositionsStateStore.upsert
+        // (BinaryString.fromString). Failing fast here keeps a null identity from surfacing as an
+        // NPE deep in the projection, and keeps blank from silently defeating DUPLICATE vs
+        // CONFLICT discrimination.
+        if (sourceEventId == null || sourceEventId.isBlank()) {
+            throw new IllegalArgumentException("source_event_id is required");
+        }
+        // sourceVersion is deliberately NOT range-checked here: a negative version must flow to
+        // PositionProjector / KvStateUpdateProtocol, which maps it to UNKNOWN -> VIOLATION
+        // (pinned by PositionProjectorTest.negativeVersionIsUnknownViolation).
     }
 
     /**
