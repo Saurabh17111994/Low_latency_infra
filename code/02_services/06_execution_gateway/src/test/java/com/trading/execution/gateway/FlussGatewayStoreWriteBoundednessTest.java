@@ -32,6 +32,12 @@ class FlussGatewayStoreWriteBoundednessTest {
 
     private static final Duration WRITE_TIMEOUT = Duration.ofMillis(250);
 
+    /**
+     * Short attempt timeout for the request-budget cases: 3 attempts + 2 backoffs is then ~700ms
+     * and one attempt ~100ms, so "did the budget stop it" is a wide, non-flaky separation.
+     */
+    private static final Duration SHORT_WRITE_TIMEOUT = Duration.ofMillis(100);
+
     /** Hang detector. Must comfortably exceed the budget (and BoundedRetry's 3 attempts). */
     private static final Duration TEST_BUDGET = Duration.ofSeconds(10);
 
@@ -104,6 +110,87 @@ class FlussGatewayStoreWriteBoundednessTest {
         });
 
         assertThat(writer.flushCalls()).isZero();
+    }
+
+    /**
+     * C2, the third link in the chain: {@code RequestBudgetTest} proves the budget arithmetic and
+     * {@code RequestBudgetWiringTest} proves the handler sets it - this proves the <b>store sites
+     * actually spend from it</b>. Without this case a site could quietly go back to
+     * {@code BoundedRetry.run} and every other test would still pass.
+     */
+    @Test
+    @DisplayName("an exhausted request budget sheds the ledger write before touching Fluss")
+    void exhaustedRequestBudgetShedsBeforeWriting() throws Exception {
+        FaultFlussStubs.FaultWriter writer = new FaultFlussStubs.FaultWriter();
+        FlussProjectionLedgerStore ledger = new FlussProjectionLedgerStore(
+                null, new FaultFlussStubs.FaultTable(writer), SHORT_WRITE_TIMEOUT);
+
+        RequestBudget.begin(Duration.ofMillis(1));
+        sleep(15);
+        long elapsedMs;
+        try {
+            long start = System.nanoTime();
+            assertThatThrownBy(() -> ledger.put(entry()))
+                    .as("a spent budget must shed the write, not grant it another attempt")
+                    .isInstanceOf(RequestBudget.Exhausted.class);
+            elapsedMs = elapsedMsSince(start);
+        } finally {
+            RequestBudget.clear();
+        }
+
+        assertThat(elapsedMs)
+                .as("shedding must not first wait out the writer's own attempt timeout")
+                .isLessThan(200L);
+        assertThat(writer.flushCalls()).isZero();
+    }
+
+    @Test
+    @DisplayName("a request budget shortens the ledger hold below the site's own retry budget")
+    void requestBudgetShortensTheHoldVersusThePerSiteRetry() throws Exception {
+        // Baseline: no request in flight, so the site keeps its own budget.
+        FlussProjectionLedgerStore unbudgeted = new FlussProjectionLedgerStore(
+                null, new FaultFlussStubs.FaultTable(new FaultFlussStubs.FaultWriter()),
+                SHORT_WRITE_TIMEOUT);
+        long unbudgetedStart = System.nanoTime();
+        assertThatThrownBy(() -> unbudgeted.put(entry())).isInstanceOf(TimeoutException.class);
+        long unbudgetedMs = elapsedMsSince(unbudgetedStart);
+
+        // Budgeted: one attempt plus the backoff fits in 250ms, the second attempt does not.
+        FlussProjectionLedgerStore budgeted = new FlussProjectionLedgerStore(
+                null, new FaultFlussStubs.FaultTable(new FaultFlussStubs.FaultWriter()),
+                SHORT_WRITE_TIMEOUT);
+        long budgetedMs;
+        RequestBudget.begin(Duration.ofMillis(250));
+        try {
+            long budgetedStart = System.nanoTime();
+            assertThatThrownBy(() -> budgeted.put(entry())).isInstanceOf(TimeoutException.class);
+            budgetedMs = elapsedMsSince(budgetedStart);
+        } finally {
+            RequestBudget.clear();
+        }
+
+        assertThat(unbudgetedMs)
+                .as("baseline: 3 attempts of the site timeout plus 2 backoffs")
+                .isGreaterThanOrEqualTo(600L);
+        assertThat(budgetedMs)
+                .as("a 250ms request budget must stop after the first attempt; "
+                        + budgetedMs + "ms budgeted vs " + unbudgetedMs + "ms unbudgeted")
+                .isLessThan(400L);
+        // The measured pair, printed so the hold C2 bounds is visible on every run rather than
+        // inferred from a green tick. Same arithmetic as production, where the attempt timeout is
+        // GATEWAY_REQUEST_TIMEOUT_MS: 3 x 2000ms + 2 x 200ms = 6400ms unbudgeted.
+        System.out.println("[request-budget] site timeout " + SHORT_WRITE_TIMEOUT.toMillis()
+                + "ms: unbudgeted=" + unbudgetedMs + "ms (3 attempts + 2 backoffs), "
+                + "under a 250ms request budget=" + budgetedMs + "ms (1 attempt, no backoff)");
+    }
+
+    private static void sleep(long millis) {
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(ie);
+        }
     }
 
     private static long elapsedMsSince(long startNanos) {
