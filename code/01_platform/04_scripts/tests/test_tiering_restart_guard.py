@@ -20,10 +20,15 @@ class TieringRestartGuardTest(unittest.TestCase):
         script = (ROOT / "code" / "01_platform" / "04_scripts" / "tm-kill-full-load.sh").read_text()
         self.assertIn('C2_MODE="${C2_MODE:-main}"', script)
         self.assertIn('C2_MODE=smoke', script)
-        self.assertIn("smoke gate — no TaskManager kill", script)
-        self.assertIn("smoke gate completed only", script)
-        self.assertIn("smoke source did not advance", script)
-        self.assertIn("smoke output did not advance", script)
+        # 2026-09-02 rework (doctrine comment at the top of the drill; CHG-120):
+        # smoke is the SAME drill compressed WITH the real SIGKILL. The no-kill
+        # smoke was removed because it was blind to the post-kill catch-up
+        # restart it exists to catch, so these four assertions pin the current
+        # contract instead of the retired no-kill one.
+        self.assertIn("smoke = compressed main drill (kill INCLUDED)", script)
+        self.assertIn("PASS — smoke drill green", script)
+        self.assertIn("source did not advance after recovery", script)
+        self.assertIn("SignalJob output did not advance after recovery", script)
         self.assertIn("flock -n 9", script)
         self.assertIn("multiple Fluss Lake Tiering jobs detected", script)
         self.assertIn("cancel_preflight_tiering", script)
