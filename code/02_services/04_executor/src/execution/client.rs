@@ -870,7 +870,9 @@ impl ExecutionClient for BridgeExecutionClient {
         // Batch submission (`OrderList` over `OrderInitialized`) is not part of T4's fake-bridge
         // scope; individual orders are driven through `Self::submit_order`.
         let _ = cmd;
-        Ok(())
+        // P3-200: fail loudly — a silent Ok would report a batch as submitted that never reached
+        // the bridge.
+        bail!("submit_order_list is not implemented in this client (T4 fake-bridge scope); submit individual orders")
     }
 
     fn modify_order(&self, cmd: ModifyOrder) -> Result<()> {
@@ -957,7 +959,8 @@ impl ExecutionClient for BridgeExecutionClient {
         // T4 scope: cancelling a specific order. All-orders cancellation for a venue is a
         // later-phase bridge feature.
         let _ = cmd;
-        Ok(())
+        // P3-200: fail loudly — a silent Ok here drops a venue-wide cancel.
+        bail!("cancel_all_orders is not implemented in this client (T4 scope); cancel per order")
     }
 
     fn batch_cancel_orders(&self, cmd: BatchCancelOrders) -> Result<()> {
@@ -969,7 +972,8 @@ impl ExecutionClient for BridgeExecutionClient {
 
     fn query_account(&self, cmd: QueryAccount) -> Result<()> {
         let _ = cmd;
-        Ok(())
+        // P3-200: fail loudly — an empty Ok tells the caller the account holds nothing.
+        bail!("query_account is not implemented in this client; no account data is available")
     }
 
     fn query_order(&self, cmd: QueryOrder) -> Result<()> {
@@ -997,6 +1001,9 @@ impl ExecutionClient for BridgeExecutionClient {
         &self,
         cmd: &GenerateOrderStatusReports,
     ) -> Result<Vec<OrderStatusReport>> {
+        // P3-200 note: unlike the five stubs beside it this method IS implemented — it just
+        // ignores the command's filters (instrument / time window) and reports every order this
+        // client knows about. Narrowing the filter is separate work; it is not an error path.
         let _ = cmd;
         let known: Vec<ClientOrderId> = self.orders.borrow().keys().cloned().collect();
         let mut reports = Vec::new();
@@ -1010,6 +1017,12 @@ impl ExecutionClient for BridgeExecutionClient {
 
     async fn generate_fill_reports(&self, cmd: GenerateFillReports) -> Result<Vec<FillReport>> {
         let _ = cmd;
+        // P3-200: still a stub, and deliberately NOT an error. The Nautilus runtime's periodic
+        // mass-status reconciliation calls this on every loop tick: returning Err here kills the
+        // node loop before it can handle a stop request (engine.rs's runtime_hosted_run_loop_*
+        // tests fail with "Failed to get mass status from exec"). The silent empty history is the
+        // real defect — it is fixed by serving fills from a durable source (B7 / Workstream D),
+        // not by failing a loop that cannot act on the failure.
         Ok(Vec::new())
     }
 
@@ -1018,6 +1031,8 @@ impl ExecutionClient for BridgeExecutionClient {
         cmd: &GeneratePositionStatusReports,
     ) -> Result<Vec<PositionStatusReport>> {
         let _ = cmd;
+        // P3-200: same contract as generate_fill_reports — the runtime's mass-status path calls
+        // this per tick, so it must not Err. Empty positions is the stub's risk, not a claim.
         Ok(Vec::new())
     }
 }
