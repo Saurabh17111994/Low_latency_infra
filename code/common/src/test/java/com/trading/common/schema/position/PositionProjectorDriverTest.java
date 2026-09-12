@@ -51,6 +51,24 @@ class PositionProjectorDriverTest {
     }
 
     @Test
+    void staleFeedReasonNamesTheRejectedFill() {
+        // P3-500 sibling: the driver rebuilt the stale wording from the current version alone,
+        // dropping the rejected fill's identity that PositionProjector's reason now carries.
+        // Both feeds use the direct path so the fill identity is explicit (the operator path derives
+        // it from the row): same source_event_id at an older version is STALE, a different one would
+        // be REGRESSION.
+        PositionProjectorDriver.FeedResult first = driver.feed(
+                fill("pos-acc-1-123-BUY-1", FillEvent.SIDE_BUY, 100L, 10050L, 2L, "f-1"), NOW);
+        PositionProjectorDriver.FeedResult stale =
+                driver.feed(fill("pos-acc-1-123-BUY-1", FillEvent.SIDE_BUY, 100L, 10050L, 1L, "f-1"),
+                        NOW);
+
+        assertThat(first.outcome()).isEqualTo(PositionProjectorDriver.FeedOutcome.APPLIED);
+        assertThat(stale.outcome()).isEqualTo(PositionProjectorDriver.FeedOutcome.STALE);
+        assertThat(stale.reason()).contains("f-1").contains("current version 2");
+    }
+
+    @Test
     void mintsDeterministicPositionIdOnFirstBuy() {
         PositionProjectorDriver.FeedResult r = driver.feed(row("pb-1", 100L, 10050L, 1L),
                 ctx(FillEvent.SIDE_BUY), NOW);

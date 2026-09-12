@@ -49,6 +49,10 @@ class OrderLifecycleProjectorTest {
         OrderLifecycleProjector.LifecycleResult stale =
                 OrderLifecycleProjector.apply(newer.snapshot(), p1, REF, NOW);
         assertThat(stale.outcome()).isEqualTo(OrderLifecycleProjector.Outcome.STALE);
+        // P3-500 sibling: the detail names the rejected event's version and the current one.
+        assertThat(stale.detail())
+                .contains("older source version 1")
+                .contains("current version 2");
     }
 
     @Test

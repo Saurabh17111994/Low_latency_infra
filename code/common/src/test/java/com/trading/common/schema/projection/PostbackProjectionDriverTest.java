@@ -131,6 +131,8 @@ class PostbackProjectionDriverTest {
         NormalizedPostback p1 = TestPostbacks.fill(1L, "b-1", "BUY", 10, 0, 10, 1000L, NOW);
         PostbackProjectionDriver.ProjectionResult r = h.driver().project(p1, NOW + 5);
         assertThat(r.outcome()).isEqualTo(PostbackProjectionDriver.Outcome.STALE);
+        // P3-500 sibling: the stale detail names the rejected postback.
+        assertThat(r.detail()).contains(r.postbackEventId());
         assertThat(h.quarantine().size()).isZero();
         assertThat(h.driver().haltedScopeIds()).isEmpty();
         // Lifecycle still reflects the newer version.

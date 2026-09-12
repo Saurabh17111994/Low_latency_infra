@@ -62,9 +62,13 @@ public final class PositionProjectorDriver {
             return new FeedResult(FeedOutcome.DUPLICATE, s, positionId, null);
         }
 
-        public static FeedResult stale(PositionSnapshot current, String positionId) {
-            return new FeedResult(FeedOutcome.STALE, current, positionId,
-                    "stale fill version " + current.sourceVersion());
+        /**
+         * P3-500 sibling: the reason is the projector's, passed through rather than rebuilt — the
+         * same shape the VIOLATION arm uses below, so the rejected fill is named in exactly one
+         * place and cannot drift from it.
+         */
+        public static FeedResult stale(PositionSnapshot current, String positionId, String reason) {
+            return new FeedResult(FeedOutcome.STALE, current, positionId, reason);
         }
 
         public static FeedResult violation(String positionId, String reason) {
@@ -153,7 +157,7 @@ public final class PositionProjectorDriver {
         return switch (r.outcome()) {
             case APPLIED -> FeedResult.applied(r.snapshot(), positionId);
             case DUPLICATE -> FeedResult.duplicate(r.snapshot(), positionId);
-            case STALE -> FeedResult.stale(r.snapshot(), positionId);
+            case STALE -> FeedResult.stale(r.snapshot(), positionId, r.reason());
             case VIOLATION -> FeedResult.violation(positionId, r.reason());
         };
     }

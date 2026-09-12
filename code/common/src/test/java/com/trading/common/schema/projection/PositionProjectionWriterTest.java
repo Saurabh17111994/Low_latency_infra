@@ -50,6 +50,11 @@ class PositionProjectionWriterTest {
         PositionProjectionWriter.PositionWriteResult stale = PositionProjectionWriter.apply(
                 first.snapshot(), older, NOW);
         assertThat(stale.outcome()).isEqualTo(PositionProjectionWriter.Outcome.STALE);
+        // P3-500 sibling: the detail names the rejected write, not only the current version.
+        assertThat(stale.detail())
+                .contains("pos-1")
+                .contains("version 1")
+                .contains("current version 2");
     }
 
     @Test

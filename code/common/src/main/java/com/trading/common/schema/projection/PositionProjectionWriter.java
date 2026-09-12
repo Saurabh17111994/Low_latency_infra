@@ -31,9 +31,12 @@ public final class PositionProjectionWriter {
         public static PositionWriteResult duplicate(PositionSnapshot s) {
             return new PositionWriteResult(Outcome.DUPLICATE, s, null, null);
         }
-        public static PositionWriteResult stale(PositionSnapshot s) {
-            return new PositionWriteResult(Outcome.STALE, s, QuarantineReason.STALE_EVENT,
-                    "stale position version " + s.sourceVersion());
+        /**
+         * P3-500 sibling: {@code detail} names the rejected write and both versions. The caller
+         * holds the event, and the violation arm below takes its detail the same way.
+         */
+        public static PositionWriteResult stale(PositionSnapshot s, String detail) {
+            return new PositionWriteResult(Outcome.STALE, s, QuarantineReason.STALE_EVENT, detail);
         }
         public static PositionWriteResult violation(QuarantineReason r, String detail) {
             return new PositionWriteResult(Outcome.VIOLATION, null, r, detail);
@@ -93,7 +96,11 @@ public final class PositionProjectionWriter {
             // row conflicts with a stale write, possible divergence) is not a
             // benign STALE replay — surface it as a violation with its own
             // reason so quarantine/diagnostics keep the distinction.
-            case STALE -> { return PositionWriteResult.stale(current); }
+            case STALE -> {
+                return PositionWriteResult.stale(current, "stale position write "
+                        + event.positionId() + " version " + event.sourceSequence()
+                        + " (current version " + current.sourceVersion() + ")");
+            }
             case REGRESSION -> {
                 return PositionWriteResult.violation(QuarantineReason.TERMINAL_REGRESSION,
                         "position version regression for " + event.positionId());

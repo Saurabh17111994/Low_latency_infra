@@ -199,7 +199,7 @@ public final class PostbackProjectionDriver {
         transition(p.postbackEventId(), nowMs, prior,
                 PostbackProjectionLedger.State.COMPLETE, Long.valueOf(nowMs));
         return new ProjectionResult(Outcome.STALE, p.postbackEventId(), null, null,
-                "stale evidence rejected");
+                "stale evidence rejected for postback " + p.postbackEventId());
     }
 
     private ProjectionResult quarantine(NormalizedPostback p, long nowMs,

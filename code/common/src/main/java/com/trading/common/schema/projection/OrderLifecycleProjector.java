@@ -45,9 +45,12 @@ public final class OrderLifecycleProjector {
         public static LifecycleResult duplicate(OrderLifecycleSnapshot s) {
             return new LifecycleResult(Outcome.DUPLICATE, s, null, null);
         }
-        public static LifecycleResult stale(OrderLifecycleSnapshot current) {
-            return new LifecycleResult(Outcome.STALE, current, QuarantineReason.STALE_EVENT,
-                    "older source version " + current.sourceVersion());
+        /**
+         * P3-500 sibling: {@code detail} names the rejected event and both versions, so halt triage
+         * sees what lost as well as what it lost to.
+         */
+        public static LifecycleResult stale(OrderLifecycleSnapshot current, String detail) {
+            return new LifecycleResult(Outcome.STALE, current, QuarantineReason.STALE_EVENT, detail);
         }
         public static LifecycleResult conflict(OrderLifecycleSnapshot current) {
             return new LifecycleResult(Outcome.CONFLICT, current,
@@ -122,7 +125,11 @@ public final class OrderLifecycleProjector {
         switch (KvStateUpdateProtocol.evaluate(currentVersion, p.sourceSequence(),
                 contentMatches)) {
             case DUPLICATE -> { return LifecycleResult.duplicate(current); }
-            case STALE, REGRESSION -> { return LifecycleResult.stale(current); }
+            case STALE, REGRESSION -> {
+                return LifecycleResult.stale(current, "older source version " + p.sourceSequence()
+                        + " for postback " + p.postbackEventId()
+                        + " (current version " + current.sourceVersion() + ")");
+            }
             case CONFLICT -> { return LifecycleResult.conflict(current); }
             case UNKNOWN -> {
                 return LifecycleResult.unknown(QuarantineReason.STALE_EVENT,
