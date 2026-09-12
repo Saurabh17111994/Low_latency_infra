@@ -49,11 +49,36 @@ public final class ArrowOrderResponse {
         if (no == null) {
             throw new IllegalArgumentException("orderNo missing in Arrow response");
         }
-        if (!(rt instanceof Number)) {
+        final long time;
+        if (rt instanceof Number) {
+            Number n = (Number) rt;
+            // P3-489: a fractional epoch-ms is malformed, not something to truncate.
+            // 1752539000.9 as a Double and 1752539000.5f as a Float were both being
+            // silently cut to 1752539000, which reads as a plausible timestamp.
+            // ponytail: Infinity still arrives as Long.MAX_VALUE via longValue() —
+            // reported, not fixed here, because no finding covers it.
+            if (n instanceof Double && n.doubleValue() != Math.rint(n.doubleValue())) {
+                throw new IllegalArgumentException(
+                        "requestTime must be an integral epoch-ms, got: " + rt);
+            }
+            if (n instanceof Float && n.doubleValue() != Math.rint(n.doubleValue())) {
+                throw new IllegalArgumentException(
+                        "requestTime must be an integral epoch-ms, got: " + rt);
+            }
+            time = n.longValue();
+        } else if (rt instanceof String && !((String) rt).trim().isEmpty()) {
+            // P3-334: Arrow has been observed to quote requestTime. A numeric string
+            // is the same value, so it is parsed rather than rejected as non-numeric.
+            try {
+                time = Long.parseLong(((String) rt).trim());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                        "requestTime not numeric in Arrow response; got: " + rt, e);
+            }
+        } else {
             throw new IllegalArgumentException(
                     "requestTime missing or not numeric in Arrow response; got: " + rt);
         }
-        long time = ((Number) rt).longValue();
         if (time <= 0) {
             throw new IllegalArgumentException(
                     "requestTime must be a positive epoch-ms, got: " + time);

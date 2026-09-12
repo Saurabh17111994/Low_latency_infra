@@ -137,10 +137,37 @@ class ArrowModelRegressionTest {
         assertThrows(IllegalArgumentException.class,
                 () -> ArrowOrderResponse.fromJson(
                         Map.of("orderNo", "123", "requestTime", "1_752_539_000")));
+        // Same branch, spelled out: the string is non-numeric, not merely unparseable
+        // because of its underscores (P3-334 makes numeric strings valid).
+        assertThrows(IllegalArgumentException.class,
+                () -> ArrowOrderResponse.fromJson(
+                        Map.of("orderNo", "123", "requestTime", "not-a-number")));
         ArrowOrderResponse ok = ArrowOrderResponse.fromJson(
                 Map.of("orderNo", "123", "requestTime", 1_752_539_000L));
         assertEquals(new BrokerOrderId("123"), ok.brokerOrderId());
         assertEquals(1_752_539_000L, ok.requestTime());
+    }
+
+    @Test
+    @DisplayName("a quoted numeric requestTime is accepted (P3-334)")
+    void requestTimeAcceptsNumericStrings() {
+        ArrowOrderResponse fromString = ArrowOrderResponse.fromJson(
+                Map.of("orderNo", "123", "requestTime", "1752539000"));
+        assertEquals(1_752_539_000L, fromString.requestTime());
+    }
+
+    @Test
+    @DisplayName("a fractional requestTime is rejected, not truncated (P3-489)")
+    void requestTimeRejectsFractionalNumbers() {
+        assertThrows(IllegalArgumentException.class,
+                () -> ArrowOrderResponse.fromJson(
+                        Map.of("orderNo", "123", "requestTime", 1_752_539_000.9)));
+        // The float must be small enough for a fraction to survive float precision:
+        // at 1.7e9 a float's precision is about 128, so 1_752_539_000.5f is already
+        // integral before any code here sees it. 1234567.5f is exactly representable.
+        assertThrows(IllegalArgumentException.class,
+                () -> ArrowOrderResponse.fromJson(
+                        Map.of("orderNo", "123", "requestTime", 1_234_567.5f)));
     }
 
     @Test
