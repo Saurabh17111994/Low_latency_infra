@@ -53,8 +53,13 @@
 -- validity invariant (P4-173): the converters write "" (empty, not NULL)
 -- when no reason; NULL arises only from legacy/generic paths. Readers MUST
 -- treat NULL and "" identically:
---   invalid <=> validity_state <> 'VALID' (reason may be "" when unset —
---   writer SHOULD set it, but its absence never flips the verdict).
+--   invalid <=> validity_state NOT IN ('VALID_TRADE','VALID_NON_TRADE')
+--   (reason may be "" when unset — writer SHOULD set it, but its absence never
+--   flips the verdict).
+-- Corrected 2026-09-13: this said <> 'VALID', which no writer has ever emitted —
+-- MarketTick.isValid() and ValidityClassification stamp only the two names
+-- above, and compute's RawValidationFunction rejects every other value, so a
+-- reader trusting the old text would have dropped all real rows.
 -- schema_version column (P4-327): per-row BRIDGE payload version (converters
 -- stamp packet.schemaVersion), NOT the DDL header version (table layout v3).
 -- Same name, different domains by design — frozen name; rename needs a
