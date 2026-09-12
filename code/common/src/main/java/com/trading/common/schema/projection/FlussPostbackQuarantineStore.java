@@ -1,5 +1,7 @@
 package com.trading.common.schema.projection;
 
+import com.trading.common.schema.fluss.BoundedRetry;
+
 import com.trading.common.schema.fluss.FlussHandlePool;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -97,10 +99,14 @@ public final class FlussPostbackQuarantineStore implements PostbackQuarantineSto
         // the pool never lends the same handle to two callers.
         // D1: no per-record flush — see FlussWriteProfiles; .get() still returns only
         // on a durable ack.
-        appenders.with(writer -> {
+        // C5: retry the quarantine append. This is a LOG append, so a retry CAN duplicate a
+        // row — acceptable here because quarantine records are detectable evidence rather
+        // than order state (contrast Fills, deliberately left un-retried until its claimed
+        // downstream fingerprint dedup is verified).
+        BoundedRetry.await(() -> appenders.with(writer -> {
             writer.append(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS);
             return null;
-        });
+        }));
     }
 
     private static BinaryString bs(String s) { return s == null ? null : BinaryString.fromString(s); }

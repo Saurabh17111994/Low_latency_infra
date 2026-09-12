@@ -1,5 +1,7 @@
 package com.trading.common.schema.execution;
 
+import com.trading.common.schema.fluss.BoundedRetry;
+
 import com.trading.common.schema.fluss.FlussWriteProfiles;
 import com.trading.common.schema.ownership.ExecutionAttemptsColumns;
 import java.time.Duration;
@@ -65,8 +67,14 @@ public final class FlussAttemptStore implements AttemptStore, AutoCloseable {
         InternalRow r;
         try {
             Lookuper lookuper = table.newLookup().createLookuper();
-            r = lookuper.lookup(GenericRow.of(BinaryString.fromString(executionAttemptId)))
-                    .get(timeoutMs, TimeUnit.MILLISECONDS).getSingletonRow();
+            // C5/P3-268: retry the attempt read. Point read by execution_attempt_id, so
+            // idempotent. This path previously had NO retry against a 2s budget that sits
+            // below the first-write-after-CREATE window (2.2-3.7s measured; see BoundedRetry).
+            // await() declares only the types the catches below already handle, so no extra
+            // catch arm is needed.
+            r = BoundedRetry.await(() -> lookuper
+                    .lookup(GenericRow.of(BinaryString.fromString(executionAttemptId)))
+                    .get(timeoutMs, TimeUnit.MILLISECONDS).getSingletonRow());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("attempt lookup interrupted for " + executionAttemptId, e);
@@ -186,7 +194,12 @@ public final class FlussAttemptStore implements AttemptStore, AutoCloseable {
         v[ExecutionAttemptsColumns.SCHEMA_VERSION] = BinaryString.fromString(ExecutionAttemptsColumns.SCHEMA_VERSION_V3);
         UpsertWriter w = table.newUpsert().createWriter();
         try {
-            w.upsert(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS);
+            // C5/P3-268: retry the attempt write. KV upsert keyed by execution_attempt_id,
+            // so idempotent by construction and safe to repeat.
+            BoundedRetry.await(() -> {
+                w.upsert(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS);
+                return null;
+            });
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException(

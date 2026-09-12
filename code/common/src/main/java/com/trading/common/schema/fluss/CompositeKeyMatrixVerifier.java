@@ -1,5 +1,10 @@
 package com.trading.common.schema.fluss;
 
+// retry-exempt-file: verification harness (P4-145), NOT a runtime path. It must observe RAW
+// Fluss behaviour — each cell records whether a composite-key write/lookup actually succeeds
+// on this cluster. Retrying its calls would mask exactly the failures the matrix exists to
+// detect, turning a real incompatibility into a green cell. Deliberately un-retried.
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;

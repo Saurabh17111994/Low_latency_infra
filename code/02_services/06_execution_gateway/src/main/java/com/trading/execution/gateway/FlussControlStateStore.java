@@ -1,5 +1,6 @@
 package com.trading.execution.gateway;
 
+import com.trading.common.schema.fluss.BoundedRetry;
 import com.trading.common.schema.fluss.FlussHandlePool;
 import java.time.Duration;
 import java.util.List;
@@ -77,9 +78,10 @@ public final class FlussControlStateStore implements ControlStateStore {
             // lookup. Steady-state reuse; the pool never hands the same handle to two callers.
             FlussHandlePool<Lookuper> pool = lookuperPools.computeIfAbsent(tableName,
                     n -> new FlussHandlePool<>(() -> table.newLookup().createLookuper()));
-            // C5 guard: transient Fluss lookups (leader-election settle ~5s vs 2s timeout)
-            // previously surfaced as intermittent TimeoutException / UNAVAILABLE even
-            // though the RPC would have recovered; retry a bounded budget, fail fast after.
+            // C5 guard: transient Fluss lookups (first write after CREATE, 2.2-3.7s measured,
+            // vs the 2s timeout) previously surfaced as intermittent TimeoutException /
+            // UNAVAILABLE even though the RPC would have recovered; retry a bounded budget,
+            // fail fast after.
             InternalRow row = pool.with(lookuper -> BoundedRetry.run(() -> lookuper.lookup(GenericRow.of(key))
                     .get(timeout.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow()));
             return row == null ? new Lookup(Status.NOT_FOUND, null, "key not found")

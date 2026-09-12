@@ -1,5 +1,6 @@
 package com.trading.execution.gateway;
 
+import com.trading.common.schema.fluss.BoundedRetry;
 import com.trading.common.schema.fluss.FlussHandlePool;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -57,7 +58,8 @@ public final class FlussProjectionLedgerStore implements ProjectionLedgerStore {
         // P3-068: borrow a pooled Lookuper — reuse without an unsynchronized cross-call hazard
         // (Lookuper is @NotThreadSafe and this store has no single-thread contract). It is not
         // Closeable in Fluss 0.9.1, so there is no handle to close, only one to reuse.
-        // C5 guard: same transient-lookup retry as FlussControlStateStore (5s settle vs 2s timeout).
+        // C5 guard: same transient-lookup retry as FlussControlStateStore (first write after
+        // CREATE, 2.2-3.7s measured, vs the 2s timeout).
         InternalRow r = lookupers.with(l -> BoundedRetry.run(() -> l.lookup(GenericRow.of(bs(eventId)))
                 .get(timeout.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow()));
         return r == null ? null : decode(r);

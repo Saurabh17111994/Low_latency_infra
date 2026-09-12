@@ -1,5 +1,7 @@
 package com.trading.execution.gateway;
 
+import com.trading.common.schema.fluss.BoundedRetry;
+
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
@@ -88,8 +90,17 @@ public final class FlussIntentDedupStore implements IntentDedupStore {
         GenericRow row = GenericRow.of(BinaryString.fromString(instructionId),
                 BinaryString.fromString(requestHash), System.currentTimeMillis(),
                 logOffset == null ? null : logOffset, BinaryString.fromString("1"));
-        UpsertWriter writer = table.newUpsert().createWriter();
-        writer.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        // C5/P3-268: retry the durable dedup commit. This is a KV upsert keyed by
+        // instruction_id, so idempotent by construction and safe to repeat. Without retry a
+        // single transient timeout here fails the commit, which the reader's violation
+        // handler escalates to fail() — latching the whole gateway HALTED until restart.
+        // That is far more disruptive than the transient it reacted to. A fresh writer per
+        // attempt mirrors FlussHandlePool's rule that a failed handle may be poisoned.
+        BoundedRetry.run(() -> {
+            UpsertWriter attempt = table.newUpsert().createWriter();
+            attempt.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            return null;
+        });
     }
 
     // P3-280: collect, don't abort — table failure must not leak the connection.

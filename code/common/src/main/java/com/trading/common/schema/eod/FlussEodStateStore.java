@@ -1,5 +1,7 @@
 package com.trading.common.schema.eod;
 
+import com.trading.common.schema.fluss.BoundedRetry;
+
 import com.trading.common.schema.EodControllerState;
 import com.trading.common.schema.fluss.FlussWriteProfiles;
 import java.time.Duration;
@@ -62,8 +64,10 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
         Connection connection = ConnectionFactory.createConnection(conf);
         try {
             TablePath path = TablePath.of(database, stateTable);
-            TableInfo info = connection.getAdmin().getTableInfo(path)
-                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            // C5: retry the table-metadata read. Idempotent, and this runs inside open() —
+            // a transient here fails the whole store rather than one operation.
+            TableInfo info = BoundedRetry.await(() -> connection.getAdmin().getTableInfo(path)
+                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS));
             Table table = connection.getTable(path);
             return new FlussEodStateStore(connection, table, info, timeout.toMillis());
         } catch (Exception e) {
@@ -170,7 +174,14 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
         // No try-with-resources: UpsertWriter/TableWriter is flush-only in Fluss 0.9.1
         // (see FlussWriteProfiles for the D2 rationale — same shape as the positions store).
         UpsertWriter writer = table.newUpsert().createWriter();
-        writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
+        // C5/P3-268: retry the EOD state write. KV upsert keyed by the state table's
+        // primary key, so idempotent by construction and safe to repeat. await()
+        // declares the same three types Future.get() does, so the enclosing handling
+        // is unchanged (no new catch arm).
+        BoundedRetry.await(() -> {
+            writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
+            return null;
+        });
     }
 
     @Override
@@ -183,9 +194,11 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
         // fencing only (see EodStateStore.acquireLease contract); callers
         // must re-check isHeldBy before committing VERIFIED.
         Lookuper lookuper = table.newLookup().createLookuper();
-        InternalRow found = lookuper.lookup(GenericRow.of(BinaryString.fromString(
+        // C5/P3-268: retry the lease read. Point read by lease_record_id, so idempotent.
+        InternalRow found = BoundedRetry.await(() -> lookuper
+                .lookup(GenericRow.of(BinaryString.fromString(
                         EodOffloadStateColumns.LEASE_RECORD_ID)))
-                .get(timeoutMs, TimeUnit.MILLISECONDS).getSingletonRow();
+                .get(timeoutMs, TimeUnit.MILLISECONDS).getSingletonRow());
         if (found != null) {
             long expiry = found.getLong(EodOffloadStateColumns.SOURCE_OFFSET_START);
             String holder = found.getString(EodOffloadStateColumns.SOURCE_HASH).toString();
@@ -229,7 +242,14 @@ public final class FlussEodStateStore implements EodStateStore, AutoCloseable {
         // flush-only in 0.9.1). A lease write that cannot be acked must fail loudly
         // here rather than hang, since acquireLease is the mutual-exclusion path.
         UpsertWriter writer = table.newUpsert().createWriter();
-        writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
+        // C5/P3-268: retry the EOD state write. KV upsert keyed by the state table's
+        // primary key, so idempotent by construction and safe to repeat. await()
+        // declares the same three types Future.get() does, so the enclosing handling
+        // is unchanged (no new catch arm).
+        BoundedRetry.await(() -> {
+            writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
+            return null;
+        });
     }
 
     private static EodOffloadRecord toRecord(InternalRow r) {

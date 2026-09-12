@@ -1,5 +1,6 @@
 package com.trading.execution.gateway;
 
+import com.trading.common.schema.fluss.BoundedRetry;
 import com.trading.common.schema.fluss.FlussHandlePool;
 
 import java.time.Duration;
@@ -149,19 +150,43 @@ public final class FlussProjectionWriter implements ProjectionWriter {
         // P3-072: pooled per-table writer instead of one per call. Writers are @NotThreadSafe
         // with no single-thread contract here, so a single cached field would be a cross-call
         // hazard; the pool lends one per caller and drops a handle whose call failed.
-        appendPools.computeIfAbsent(name, n -> new FlussHandlePool<>(() -> table(n).newAppend().createWriter()))
-                .with(writer -> {
-                    writer.append(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-                    return null;
-                });
+        var pool = appendPools.computeIfAbsent(name,
+                n -> new FlussHandlePool<>(() -> table(n).newAppend().createWriter()));
+        if ("Fills".equals(name)) {
+            // retry-exempt: P3-268 Fills is deliberately NOT retried. It is a LOG table whose
+            // only duplicate guard is the in-process appendedFingerprints set; the claimed
+            // downstream
+            // fingerprint-version dedup is UNVERIFIED in this repo, so a retry after a
+            // TimeoutException could duplicate a fill. Retrying Execution_Audit and
+            // Postback_Quarantine is acceptable — duplicates there are detectable evidence
+            // records, not order state.
+            pool.with(writer -> {
+                // retry-exempt: see the P3-268 note above — Fills duplicates are not
+                // tolerably deduped yet, so this site must NOT be retried.
+                writer.append(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+                return null;
+            });
+            return;
+        }
+        // C5: ride out the first-write-after-CREATE window (2.2-3.7s measured; see BoundedRetry)
+        // rather than failing on the caller's 2s budget. The pool drops a failed handle, so
+        // each attempt gets a fresh writer.
+        BoundedRetry.run(() -> pool.with(writer -> {
+            writer.append(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            return null;
+        }));
     }
     private void upsert(String name, GenericRow row) throws Exception {
         // P3-072: pooled per-table writer — see append().
-        upsertPools.computeIfAbsent(name, n -> new FlussHandlePool<>(() -> table(n).newUpsert().createWriter()))
-                .with(writer -> {
-                    writer.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
-                    return null;
-                });
+        var pool = upsertPools.computeIfAbsent(name,
+                n -> new FlussHandlePool<>(() -> table(n).newUpsert().createWriter()));
+        // P3-268: KV upserts are idempotent by primary key, so a retry cannot duplicate state.
+        // C5: this is what lets a first write to a freshly created table ride out the measured
+        // 2.2-3.7s window (see BoundedRetry) instead of failing on the caller's 2s budget.
+        BoundedRetry.run(() -> pool.with(writer -> {
+            writer.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            return null;
+        }));
     }
 
     private GenericRow auditRow(NormalizedExecutionEvent e) {

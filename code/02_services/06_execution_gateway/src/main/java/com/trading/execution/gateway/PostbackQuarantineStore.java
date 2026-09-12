@@ -1,5 +1,7 @@
 package com.trading.execution.gateway;
 
+import com.trading.common.schema.fluss.BoundedRetry;
+
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 import org.apache.fluss.client.Connection;
@@ -101,8 +103,14 @@ public interface PostbackQuarantineStore {
             // swallowed interrupt stalls shutdown of the quarantine path.
             // D1: no per-record flush — see FlussWriteProfiles; .get() still returns
             // only on a durable ack.
+            // C5: retry the quarantine append. LOG append, so a retry can duplicate a row —
+            // acceptable here because quarantine records are detectable evidence rather than
+            // order state (contrast Fills, left un-retried until its dedup is verified).
             try {
-                writer.append(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS);
+                BoundedRetry.await(() -> {
+                    writer.append(GenericRow.of(v)).get(timeoutMs, TimeUnit.MILLISECONDS);
+                    return null;
+                });
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw ie;

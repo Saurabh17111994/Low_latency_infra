@@ -1,5 +1,7 @@
 package com.trading.common.schema.execution;
 
+import com.trading.common.schema.fluss.BoundedRetry;
+
 import com.trading.common.model.GateState;
 import com.trading.common.schema.fluss.FlussWriteProfiles;
 import com.trading.common.schema.ownership.ExecutionGateColumns;
@@ -153,8 +155,12 @@ public final class FlussGateStateStore implements GateStateStore, AutoCloseable 
         try {
             // P3-365: reuse the monitor-confined Lookuper (see the field javadoc) instead
             // of minting one per lookup on the money path.
-            r = lookuper.lookup(GenericRow.of(BinaryString.fromString(partitionId)))
-                    .get(timeoutMs, TimeUnit.MILLISECONDS).getSingletonRow();
+            // C5: retry the fence read. A 2s budget sits BELOW the first-write-after-CREATE
+            // window (2.2-3.7s measured; see BoundedRetry), so without this a transient
+            // surfaces as a hard "gate lookup failed" on the money path. Point read — idempotent.
+            r = BoundedRetry.await(() -> lookuper
+                    .lookup(GenericRow.of(BinaryString.fromString(partitionId)))
+                    .get(timeoutMs, TimeUnit.MILLISECONDS).getSingletonRow());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("gate lookup interrupted for " + partitionId, e);
@@ -390,7 +396,14 @@ public final class FlussGateStateStore implements GateStateStore, AutoCloseable 
         try {
             // P3-367/P3-371: reuse the monitor-confined UpsertWriter (see the field javadoc).
             // Every caller is synchronized, so one writer is never shared concurrently.
-            upsertWriter.upsert(GenericRow.of(encode(r))).get(timeoutMs, TimeUnit.MILLISECONDS);
+            // C5/P3-268: retry the fence write. KV upsert keyed by execution_partition_id,
+            // so idempotent by construction and safe to repeat. The cached handle is reused
+            // deliberately (P3-367/P3-371); a genuine handle fault is non-transient and
+            // still fails fast rather than retrying.
+            BoundedRetry.await(() -> {
+                upsertWriter.upsert(GenericRow.of(encode(r))).get(timeoutMs, TimeUnit.MILLISECONDS);
+                return null;
+            });
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new RuntimeException("gate persist interrupted for " + r.partitionId(), e);

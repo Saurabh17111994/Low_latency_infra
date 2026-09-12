@@ -1,5 +1,7 @@
 package com.trading.common.schema.position;
 
+import com.trading.common.schema.fluss.BoundedRetry;
+
 import com.trading.common.model.PositionState;
 import java.time.Duration;
 import java.util.Objects;
@@ -45,8 +47,11 @@ public final class FlussPositionsStateStore implements PositionsStateStore, Auto
         com.trading.common.schema.fluss.FlussWriteProfiles.bulkPath(conf);
         Connection connection = ConnectionFactory.createConnection(conf);
         try {
-            TableInfo info = connection.getAdmin().getTableInfo(TablePath.of(database, tableName))
-                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            // C5: retry the table-metadata read. Idempotent, and this runs inside open() —
+            // a transient here fails the whole store rather than one operation.
+            TableInfo info = BoundedRetry.await(() -> connection.getAdmin()
+                    .getTableInfo(TablePath.of(database, tableName))
+                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS));
             Table table = connection.getTable(TablePath.of(database, tableName));
             return new FlussPositionsStateStore(connection, table, timeout.toMillis());
         } catch (Exception e) {
@@ -67,8 +72,13 @@ public final class FlussPositionsStateStore implements PositionsStateStore, Auto
         // releasable handle; nothing to close. Documented so the next audit
         // does not re-raise the leak.
         Lookuper lookuper = table.newLookup().createLookuper();
-        InternalRow found = lookuper.lookup(GenericRow.of(BinaryString.fromString(positionId)))
-                .get(timeoutMs, TimeUnit.MILLISECONDS).getSingletonRow();
+        // C5/P3-268: retry the position read. Point read by position_id, so idempotent — and
+        // without retry a transient on a 2s budget below the first-write-after-CREATE window
+        // (2.2-3.7s measured; see BoundedRetry) surfaced as a hard failure. await() declares
+        // the same three types Future.get() does, so the enclosing handling is unchanged.
+        InternalRow found = BoundedRetry.await(() -> lookuper
+                .lookup(GenericRow.of(BinaryString.fromString(positionId)))
+                .get(timeoutMs, TimeUnit.MILLISECONDS).getSingletonRow());
         return found == null ? null : toSnapshot(found);
     }
 
@@ -96,7 +106,12 @@ public final class FlussPositionsStateStore implements PositionsStateStore, Auto
         // D2 (P4-150): per-call writer is intentional, not a leak — see FlussWriteProfiles.
         UpsertWriter writer = table.newUpsert().createWriter();
         try {
-            writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
+            // C5/P3-268: retry the position write. KV upsert keyed by position_id, so
+            // idempotent by construction and safe to repeat.
+            BoundedRetry.await(() -> {
+                writer.upsert(GenericRow.of(values)).get(timeoutMs, TimeUnit.MILLISECONDS);
+                return null;
+            });
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("position persist interrupted", e);
