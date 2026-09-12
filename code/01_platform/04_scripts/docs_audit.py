@@ -25,7 +25,8 @@ Checks:
       durability / LOG-control / ledger-skipped claims outside the dated
       decisions index; HFT frame sizes 40/196 B and ltpc+full-only mode switch;
       bridge ns->ms conversion; ledger + halt tables KV in manifest and DDL;
-      ledger live-in-dev evidence; 24 DDLs on file incl. the DEC-038 dedup DDL
+      ledger live-in-dev evidence; 27 DDLs on file (29 minus the four retired by
+      a329247, plus the two candle KV DDLs 32/33) incl. the DEC-038 dedup DDL
       (24_fingerprint_dedup.sql) + SCH-19 instruction-index DDL
       (25_trade_instruction_state.sql) + SCH-23 EOD offload-state DDL
       (26_eod_offload_state.sql)
@@ -109,13 +110,42 @@ def safe_read_json(path):
         return None
 
 
+def _ddl_table_name(filename):
+    """`29_position_state.sql` -> `position_state`.
+
+    The manifest keys tables by name, the DDL directory by ordinal prefix; this
+    is the one mapping between the two that both C1 and C9 rely on.
+    """
+    base = filename[:-4]
+    head, sep, rest = base.partition("_")
+    return (rest if sep and head.isdigit() else base).lower()
+
+
 def c1_manifest():
     p = os.path.join(DDL_DIR, "schema_manifest.json")
     m = safe_read_json(p)
     if m is None:
         return check("C1 manifest readable", False, p)
     tables = m.get("tables", [])
-    check("C1 manifest has 29 tables", len(tables) == 29, f"got {len(tables)}")
+    # 27 since a329247 retired four signal-cutover DDLs (03, 04, 30, 31) and the
+    # two candle KV tables (32, 33) landed. The pin is deliberate and is NOT made
+    # redundant by the agreement checks below: only the pin notices a table being
+    # dropped from BOTH lists at once.
+    check("C1 manifest has 27 tables", len(tables) == 27, f"got {len(tables)}")
+    # The literal above went stale (29 held for four retired tables) because
+    # nothing tied the manifest to the DDL directory. These two do.
+    ddl_names = {_ddl_table_name(f) for f in os.listdir(DDL_DIR) if f.endswith(".sql")}
+    manifest_names = {t["table_name"].lower() for t in tables}
+    check(
+        "C1 every manifest table has a DDL file",
+        not (manifest_names - ddl_names),
+        f"{sorted(manifest_names - ddl_names)}",
+    )
+    check(
+        "C1 every DDL file has a manifest table",
+        not (ddl_names - manifest_names),
+        f"{sorted(ddl_names - manifest_names)}",
+    )
     bad_sha = [t["table_name"] for t in tables if not t.get("ddl_sha256")]
     bad_compat = [t["table_name"] for t in tables if not t.get("compatibility_class")]
     bad_routing = [
@@ -604,7 +634,8 @@ def c9_dec039_invariants():
 
     # --- DEC-038 dedup + SCH-19 index + SCH-23 EOD + REQ-EXE-004 intent DDL; 26 DDLs ---
     sqls = sorted(f for f in os.listdir(DDL_DIR) if f.endswith(".sql"))
-    check("C9 DDL count = 29", len(sqls) == 29, f"got {len(sqls)}")
+    # 27: see the C1 pin. Both numbers are the same fact counted from either side.
+    check("C9 DDL count = 27", len(sqls) == 27, f"got {len(sqls)}")
     check(
         "C9 dedup DDL on file",
         os.path.exists(os.path.join(DDL_DIR, "24_fingerprint_dedup.sql")),
