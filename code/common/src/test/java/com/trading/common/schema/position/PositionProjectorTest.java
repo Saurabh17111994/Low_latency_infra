@@ -29,6 +29,24 @@ class PositionProjectorTest {
     }
 
     @Test
+    void staleReasonNamesTheRejectedFillAndBothVersions() {
+        // P3-500: the reason used to carry only the current version, so quarantine triage could not
+        // tell which fill was rejected without an extra lookup. STALE = older version, same fill
+        // identity (KvStateUpdateProtocol.evaluate), reached here by replaying an older version.
+        PositionSnapshot current =
+                PositionProjector.apply(null, buy(10, 100, 2, "f1"), NOW).snapshot();
+
+        PositionProjector.ProjectionResult r =
+                PositionProjector.apply(current, buy(10, 100, 1, "f1"), NOW);
+
+        assertThat(r.outcome()).isEqualTo(PositionProjector.Outcome.STALE);
+        assertThat(r.reason())
+                .contains("f1")
+                .contains("version 1")
+                .contains("current version 2");
+    }
+
+    @Test
     void firstBuyOpensPosition() {
         PositionProjector.ProjectionResult r =
                 PositionProjector.apply(null, buy(10, 100, 1, "f1"), NOW);

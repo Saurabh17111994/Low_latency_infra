@@ -55,9 +55,14 @@ public final class PositionProjector {
             return new ProjectionResult(Outcome.DUPLICATE, s, null);
         }
 
-        public static ProjectionResult stale(PositionSnapshot current) {
+        /**
+         * P3-500: the reason names the REJECTED fill as well as the current version. An operator
+         * triaging quarantine needs to see which fill lost, not only what it lost to.
+         */
+        public static ProjectionResult stale(PositionSnapshot current, FillEvent fill) {
             return new ProjectionResult(Outcome.STALE, current,
-                    "stale fill version " + current.sourceVersion());
+                    "stale fill " + fill.sourceEventId() + " version " + fill.sourceVersion()
+                            + " (current version " + current.sourceVersion() + ")");
         }
 
         public static ProjectionResult violation(String reason) {
@@ -91,7 +96,7 @@ public final class PositionProjector {
                     return ProjectionResult.duplicate(current);
                 }
                 case STALE -> {
-                    return ProjectionResult.stale(current);
+                    return ProjectionResult.stale(current, fill);
                 }
                 case REGRESSION, CONFLICT, UNKNOWN -> {
                     return ProjectionResult.violation("version check " + v
