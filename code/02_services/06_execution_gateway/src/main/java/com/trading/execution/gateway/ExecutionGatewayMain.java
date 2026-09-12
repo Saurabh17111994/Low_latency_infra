@@ -3,8 +3,6 @@ package com.trading.execution.gateway;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Process entry point. Startup is intentionally HALTED until Fluss and protocol are proven ready. */
@@ -55,24 +53,12 @@ public final class ExecutionGatewayMain {
         GatewayConfig config = GatewayConfig.fromEnvironment();
         GatewayReadiness readiness = new GatewayReadiness();
 
-        // P3-276: park on a latch, not `Thread.currentThread().join()` (a self-join that only
-        // returned if the join call itself was interrupted, left the interrupt status unrestored,
-        // and gave a SIGTERM nothing to release). `stop` is the drain signal; `cleaned` lets the
-        // hook wait for the try-with-resources below to finish closing the reader and the Fluss
-        // stores, because the JVM halts once every hook returns regardless of what main is doing.
-        CountDownLatch stop = new CountDownLatch(1);
-        CountDownLatch cleaned = new CountDownLatch(1);
+        // P3-276: the drain contract -- a park SIGTERM can release, a bounded cleanup wait, and a
+        // reader join before the stores close -- lives in GatewayShutdown, so it is test-pinned
+        // instead of being reachable only through a live SIGTERM.
+        GatewayShutdown shutdown = new GatewayShutdown();
         AtomicBoolean readerFailed = new AtomicBoolean(false);
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            stop.countDown();
-            try {
-                if (!cleaned.await(15, TimeUnit.SECONDS)) {
-                    LOG.warn("gateway cleanup did not finish within 15s of shutdown");
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }, "gateway-shutdown"));
+        shutdown.installHook();
 
         if (!config.executionEnabled()) {
             // P3-060: the gate now precedes EVERY Fluss call, so a disabled gateway genuinely boots
@@ -88,9 +74,9 @@ public final class ExecutionGatewayMain {
                 server.start();
                 LOG.warn("execution-gateway started DISABLED (fail-closed, offline); serving "
                         + "/healthz + /readyz only");
-                stop.await();
+                shutdown.parkUntilStop();
             }
-            cleaned.countDown();
+            shutdown.markCleaned();
             return;
         }
 
@@ -130,12 +116,12 @@ public final class ExecutionGatewayMain {
                     LOG.warn("execution-gateway started; execution readiness still depends on Execution_Gate=ENABLED");
                     Thread readerThread = new Thread(() -> {
                         runReaderLoop(() -> reader.poll(config.pollTimeout()), readiness, readerFailed);
-                        stop.countDown();
+                        shutdown.signalStop();
                     }, "execution-intent-reader");
                     readerThread.setDaemon(true);
                     readerThread.start();
                     server.start();
-                    stop.await();
+                    shutdown.parkUntilStop();
                     // The poll thread must be STOPPED AND JOINED before the try-with-resources
                     // closes the reader. Fluss's LogScanner is not safe for multithreaded access,
                     // so closing it while the poll loop is still inside it throws
@@ -148,19 +134,14 @@ public final class ExecutionGatewayMain {
                     // indistinguishable from "main never woke and the JVM just halted", which is
                     // exactly the ambiguity these two lines exist to remove.
                     System.err.println("execution-gateway draining: stopping the intent reader");
-                    readerThread.interrupt();
-                    try {
-                        readerThread.join(TimeUnit.SECONDS.toMillis(10));
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
+                    shutdown.drainReader(readerThread, GatewayShutdown.READER_JOIN_MILLIS);
                     System.err.println("execution-gateway draining: closing intent reader and Fluss stores");
                 }
             }
         }
         // Every try-with-resources above has now closed (reader, then stores) before the hook stops
         // waiting, so a SIGTERM drains rather than being cut off mid-close.
-        cleaned.countDown();
+        shutdown.markCleaned();
         if (readerFailed.get()) {
             // P3-064: a dead reader must not present as a clean shutdown, or an orchestrator will
             // leave a gateway whose execution path is silently gone. Exiting non-zero after cleanup

@@ -20,8 +20,9 @@ import org.junit.jupiter.api.Test;
  * <p>The loop runs on its own thread here, exactly as {@code main} runs it, so a regression is an
  * assertion failure rather than an exception escaping the test body.
  *
- * <p>P3-276 is not pinned here: the drain latch and the shutdown park around this loop still live
- * inline in {@code main}, so testing them needs its own extraction.
+ * <p>P3-276 (the drain latch, the shutdown park, the bounded cleanup wait and the reader join)
+ * moved out of {@code main} into {@link GatewayShutdown} and is pinned by
+ * {@link GatewayShutdownTest}.
  */
 class ExecutionGatewayMainReaderLoopTest {
 
