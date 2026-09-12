@@ -92,8 +92,12 @@ TASKS = [
             },
             {
                 "type": "file",
-                "path": "code/02_services/02_compute/src/main/java/com/trading/compute/signaljob/CandleEmitFunction.java",
-                "desc": "OHLCV-only candle state (CandleEmitFunction)",
+                # CandleEmitFunction was retired by 0f3e595 (15s candle path);
+                # CandleAccumulator carries the same pin today — its own header
+                # calls it "the ONLY candle state that exists", deliberately
+                # compact (OHLCV plus identity columns).
+                "path": "code/02_services/02_compute/src/main/java/com/trading/compute/signaljob/CandleAccumulator.java",
+                "desc": "OHLCV-only candle state (CandleAccumulator)",
             },
             # 02_compute is also standalone; common must be resolvable (installed
             # in ~/.m2 or built first).
