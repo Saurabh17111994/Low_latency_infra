@@ -175,6 +175,13 @@ class FullStackE2ETest {
             env.put("ARROW_HFT_URL", fakeUrl);
             env.put("ARROW_BRIDGE_BIN", bridgeBin);
             env.put("DEPLOYMENT_ENV", "dev");
+            // This test is the deployment surface for the fake credentials below,
+            // so it declares the env-file mechanism exactly as the sibling
+            // harnesses do (pipeline-lib.sh, stage-soak-e2e.sh, tiering-smoke.sh,
+            // loadtest-run.sh). Without it SecretGuard fails closed on any
+            // secret key present in the env map (S3, 2026-08-29 decision A) and
+            // the service refuses to start — which is what step 9 hit.
+            env.put("SECRETS_VIA_ENV_FILE", "1");
             env.put("ARROW_APP_ID", "e2e");
             env.put("ARROW_APP_SECRET", "e2esecret");
             env.put("ARROW_USER_ID", "e2e-user");
