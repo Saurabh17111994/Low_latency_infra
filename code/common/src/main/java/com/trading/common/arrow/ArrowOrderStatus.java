@@ -1,8 +1,5 @@
 package com.trading.common.arrow;
 
-import com.trading.common.identity.IdentityModel.BrokerOrderId;
-import com.trading.common.identity.IdentityModel.ClientOrderRef;
-import com.trading.common.identity.IdentityModel.InstrumentToken;
 import java.util.Locale;
 
 /** Arrow order-status vocabulary from rest-api/orders (order book / trade book). */
@@ -97,30 +94,4 @@ public final class ArrowOrderStatus {
         }
     }
 
-    /** Lifecycle event from the postback stream or order book row. */
-    public static final class OrderUpdate {
-        public final BrokerOrderId brokerOrderId;
-        public final ClientOrderRef clientOrderRef; // Arrow "remarks"
-        public final InstrumentToken instrumentToken; // Arrow "token"
-        public final OrderStatus status;
-        public final ReportType reportType;
-        public final long fillQuantity;
-        public final long averagePrice; // paise
-        public final String exchangeOrderId;
-        public final String rejectReason;
-
-        public OrderUpdate(BrokerOrderId brokerOrderId, ClientOrderRef clientOrderRef,
-                           InstrumentToken instrumentToken, OrderStatus status, ReportType reportType,
-                           long fillQuantity, long averagePrice, String exchangeOrderId, String rejectReason) {
-            this.brokerOrderId = brokerOrderId;
-            this.clientOrderRef = clientOrderRef;
-            this.instrumentToken = instrumentToken;
-            this.status = status;
-            this.reportType = reportType;
-            this.fillQuantity = fillQuantity;
-            this.averagePrice = averagePrice;
-            this.exchangeOrderId = exchangeOrderId;
-            this.rejectReason = rejectReason;
-        }
-    }
 }
