@@ -282,10 +282,39 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let server = tokio::spawn(async move {
             let (mut s, _) = listener.accept().await.unwrap();
+            // P3-444: one read() may return a partial request, and the client keeps the socket
+            // open for the reply, so there is no EOF to wait for. Read the headers, then the
+            // body length they announce, under a timeout so a silent client fails fast.
             let mut buf = Vec::new();
             let mut chunk = [0u8; 4096];
-            let n = s.read(&mut chunk).await.unwrap();
-            buf.extend_from_slice(&chunk[..n]);
+            let mut expected: Option<usize> = None;
+            loop {
+                let n = tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut chunk))
+                    .await
+                    .expect("timed out reading the request")
+                    .unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if expected.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                        let len = head
+                            .split("content-length:")
+                            .nth(1)
+                            .and_then(|v| v.trim().split(' ').next())
+                            .and_then(|d| d.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        expected = Some(pos + 4 + len);
+                    }
+                }
+                if let Some(end) = expected {
+                    if buf.len() >= end {
+                        break;
+                    }
+                }
+            }
             let text = String::from_utf8_lossy(&buf);
             tx.send(text.to_string()).unwrap();
             s.write_all(
@@ -325,6 +354,11 @@ mod tests {
             "request contains event body"
         );
         assert!(request.contains("LIFECYCLE"), "request contains event type");
+        // P3-444: the capture must hold the whole body, not just the first TCP segment.
+        assert!(
+            request.trim_end().ends_with('}'),
+            "request body was truncated: {request}"
+        );
         server.await.unwrap();
     }
 }
