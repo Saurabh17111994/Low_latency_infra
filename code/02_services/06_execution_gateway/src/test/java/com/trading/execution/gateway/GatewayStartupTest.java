@@ -46,18 +46,24 @@ class GatewayStartupTest {
     }
 
     @Test
-    void enabledBranchLosesTheFlussTablesReasonToTheGateStoresReason() {
-        // P3-479 pinned: the enabled branch calls fluss(true, ...) TWICE, and a dimension update
-        // simply replaces the shared reason. The operator therefore never sees the distinct
-        // "Fluss tables opened" state. When P3-479 is fixed this assertion must change — that is
-        // exactly what pinning it is for.
+    void enabledBranchNoLongerLetsARedundantFlussWriteDominateTheReason() {
+        // P3-479 fixed: the enabled branch used to set the `fluss` dimension TWICE, and because
+        // GatewayReadiness keeps ONE shared reason slot, that redundant write also moved the final
+        // reason — the operator ended on the gate-stores message instead of the last dimension
+        // actually updated. With the duplicate gone the reason ends on durableWrites.
+        //
+        // Note the reason slot being shared at all is P3-301, not this finding; this assertion pins
+        // only the removal of the redundant write. G1 pinned the pre-fix reason deliberately, so
+        // this is the deliberate change fixing it required.
         GatewayReadiness readiness = new GatewayReadiness();
 
         GatewayStartup.applyStartupReadiness(readiness, true);
 
         assertThat(readiness.snapshot().reason())
-                .isEqualTo("Execution_Gate / Execution_Attempts stores opened (WP-3)")
-                .isNotEqualTo("Fluss tables opened");
+                .isEqualTo("projection ledger opened")
+                .isNotEqualTo("Execution_Gate / Execution_Attempts stores opened (WP-3)");
+        assertThat(readiness.snapshot().flussReady()).isTrue();
+        assertThat(readiness.snapshot().executionReady()).isTrue();
     }
 
     @Test

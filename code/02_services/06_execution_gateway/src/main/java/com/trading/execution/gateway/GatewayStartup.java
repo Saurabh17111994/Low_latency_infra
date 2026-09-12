@@ -9,11 +9,9 @@ import org.slf4j.LoggerFactory;
 /**
  * Testable startup seam for {@link ExecutionGatewayMain}.
  *
- * <p>Extracted with <b>no behaviour change</b> (G1): {@link #openStores} is exactly the store-open
- * block that was inline in {@code main()}, and {@link #applyStartupReadiness} is exactly the
- * enabled/disabled readiness branch. Both were previously unreachable from a test because they sat
- * inside a single {@code main(String[])} that talks to Fluss the moment it starts, which is why the
- * gateway's startup ordering had no characterization coverage at all.
+ * <p>Extracted so the startup sequence can be pinned by a test without a Fluss cluster: opening the
+ * durable stores, probing the durable authority tables, and applying the readiness wiring for the
+ * enabled/disabled branch.
  */
 public final class GatewayStartup {
     private static final Logger LOG = LoggerFactory.getLogger(GatewayStartup.class);
@@ -21,17 +19,18 @@ public final class GatewayStartup {
     private GatewayStartup() {}
 
     /**
-     * The durable stores the process holds open for its lifetime, closed in reverse open order.
+     * The stores the running process actually uses, held open for its lifetime and closed in
+     * reverse open order.
+     *
+     * <p>Deliberately does NOT include the gate/attempt stores: no code path reads them, so holding
+     * those handles idle for the process lifetime was misleading beside the hydration comment
+     * (P3-275). They are proven to exist by {@link #probeAuthorityTables} and closed immediately.
      */
     public record Stores(FlussControlStateStore controls,
                          FlussProjectionWriter projections,
-                         FlussProjectionLedgerStore ledger,
-                         FlussGateStateStore gates,
-                         FlussAttemptStore attempts) implements AutoCloseable {
+                         FlussProjectionLedgerStore ledger) implements AutoCloseable {
         @Override
         public void close() throws Exception {
-            attempts.close();
-            gates.close();
             ledger.close();
             projections.close();
             controls.close();
@@ -39,43 +38,56 @@ public final class GatewayStartup {
     }
 
     /**
-     * Opens the durable Fluss stores. The only place startup talks to Fluss, and the single point
-     * a later change has to branch on to keep a disabled gateway offline (P3-060).
+     * Opens the durable Fluss stores. The only place the running gateway talks to Fluss, and the
+     * single point the executionEnabled gate has to precede to keep a disabled gateway offline
+     * (P3-060).
      */
     public static Stores openStores(GatewayConfig config) throws Exception {
         return new Stores(
                 FlussControlStateStore.open(config),
                 FlussProjectionWriter.open(config),
-                FlussProjectionLedgerStore.open(config),
-                // WP-3: the durable gate/attempt backplane. Open fails fast if Execution_Gate /
-                // Execution_Attempts (v3 DDL) are absent or unreachable, so the gateway is never
-                // "ready" without its durable authority tables. Hydration on read/prepare
-                // re-derives prior fences/attempts after a restart (crash-window zero-duplicate).
-                FlussGateStateStore.open(
-                        config.flussBootstrap(), config.flussDatabase(), config.gateTable(),
-                        config.requestTimeout(), Set.of("saurabh")),
-                FlussAttemptStore.open(
+                FlussProjectionLedgerStore.open(config));
+    }
+
+    /**
+     * Fail-fast existence probe for the durable gate/attempt backplane (WP-3).
+     *
+     * <p>Open fails fast if Execution_Gate / Execution_Attempts (v3 DDL) are absent or unreachable,
+     * so the gateway is never "ready" without its durable authority tables. The handles are then
+     * closed: crash-window zero-duplicate depends on {@code IntentReader}'s dedup store and
+     * {@code NautilusIntentClient}'s controls lookup, not on these connections, so retaining them
+     * for the process lifetime bought nothing (P3-275).
+     */
+    public static void probeAuthorityTables(GatewayConfig config) throws Exception {
+        try (FlussGateStateStore gates = FlussGateStateStore.open(
+                config.flussBootstrap(), config.flussDatabase(), config.gateTable(),
+                config.requestTimeout(), Set.of("saurabh"));
+                FlussAttemptStore attempts = FlussAttemptStore.open(
                         config.flussBootstrap(), config.flussDatabase(), config.attemptsTable(),
                         config.requestTimeout(),
                         () -> LOG.warn(
-                                "execution attempt contract violation -> request a safety halt")));
+                                "execution attempt contract violation -> request a safety halt"))) {
+            // Opened as an existence probe only; nothing is read from them here.
+            LOG.info("durable authority tables present: gate={} attempts={}",
+                    config.gateTable(), config.attemptsTable());
+        }
     }
 
     /**
      * Applies the startup readiness wiring for the enabled/disabled branch.
      *
-     * <p>The enabled branch calls {@code fluss(true, ...)} twice — the second call targets the same
-     * dimension and only replaces the reason, so the operator loses the distinction between "tables
-     * opened" and "gate/attempt stores opened" (P3-479). That is preserved verbatim here, and pinned
-     * by the characterization test, so the later fix is a deliberate and visible change rather than
-     * a silent drift.
+     * <p>The enabled branch reports ONE fluss dimension for both the table open and the authority
+     * probe — previously it called {@code fluss(true, ...)} twice, and since a dimension update
+     * replaces the shared reason the operator only ever saw the second (P3-479). The disabled
+     * branch keeps every dimension false so {@code executionReady()} stays false, intents defer,
+     * and the bridge remains disabled.
      */
     public static void applyStartupReadiness(GatewayReadiness readiness, boolean executionEnabled) {
         if (executionEnabled) {
-            readiness.fluss(true, "Fluss tables opened");
+            readiness.fluss(true,
+                    "Fluss tables + Execution_Gate / Execution_Attempts stores opened (WP-3)");
             readiness.protocol(true, "private protocol configured");
             readiness.durableWrites(true, "projection ledger opened");
-            readiness.fluss(true, "Execution_Gate / Execution_Attempts stores opened (WP-3)");
         } else {
             // Fail-closed HALTED default when execution is disabled: keep all readiness dimensions
             // false so executionReady stays false, intents defer, and bridge remains disabled.
