@@ -84,10 +84,10 @@ if ! curl -fsS --max-time 5 "$FLINK_REST_URL/overview" >/dev/null 2>&1; then
 fi
 echo "STAGE-A2: Flink up"
 
-# --- Canonical preflight: sets CP + LIB_MANIFEST_SLICE, validates jars/
-# bridge/manifest/ports, waits for Fluss, restarts the TM fresh (B3 guard),
-# waits for TM registration (B5 guard). Required before purge/submit —
-# without it CP and LIB_MANIFEST_SLICE are unbound and ingestion fails.
+# --- Canonical preflight: sets CP, validates jars/bridge/manifest/ports,
+# waits for Fluss, restarts the TM fresh (B3 guard), waits for TM
+# registration (B5 guard). Required before purge/submit — without it CP is
+# unset and the ingestion launch fails.
 pipeline_preflight || fatal "pipeline preflight failed"
 
 # --- Fresh tables (no backlog replay → measures steady state only) ---

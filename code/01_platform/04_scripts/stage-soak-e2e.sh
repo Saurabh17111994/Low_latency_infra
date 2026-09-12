@@ -2,7 +2,7 @@
 # stage-soak-e2e.sh — end-to-end soak at 2433 NSE stocks x RATE_HZ (no INJECT).
 # NEW file for the 48k/s e2e (does NOT modify pipeline-lib.sh / stage scripts).
 # Reuses pipeline-lib primitives; differs from stage-a2-baseline.sh in:
-#   - no 1024-token slice (LIB_MANIFEST_SLICE = full NSE file)
+#   - the full NSE file, not pipeline-lib.sh's 1024-token slice
 #   - 3 ingestion containers x 811 tokens (bridge single-socket policy)
 #   - DURATION_S passed in (120 smoke / 900 main)
 # Usage: DURATION_S=120 bash stage-soak-e2e.sh
@@ -55,8 +55,6 @@ cleanup() {
 trap cleanup EXIT
 echo "SOAK-E2E: rate=${RATE_HZ}Hz stocks=2433 duration=${DURATION_S}s out=$PHASE_OUT"
 [ -r "$NSE" ] || fatal "NSE manifest not readable: $NSE"
-# shellcheck disable=SC2034  # lib contract output; nothing expands it in-tree (verified 2026-09-12)
-LIB_MANIFEST_SLICE="$NSE"
 # --- TM fresh (B3) + registration wait (B5), Fluss ready ---
 docker exec 01_docker-fluss-coordinator-1 sh -c 'exit 0' 2>/dev/null || fatal "fluss-coordinator not up"
 CP="$(cat "$LIB_CP_FILE")"; [ -n "$CP" ] || fatal "empty CP"

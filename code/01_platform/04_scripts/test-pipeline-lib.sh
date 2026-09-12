@@ -289,7 +289,7 @@ fi
 rm -rf "$G16DIR"
 
 # ---- G19 (2026-09-02): preflight-state guard. Launch-phase functions that
-# depend on pipeline_preflight's setup (CP, LIB_MANIFEST_SLICE, fresh TM,
+# depend on pipeline_preflight's setup (CP, fresh TM,
 # Fluss readiness) must fail fast with a clear message when preflight has
 # NOT run — the stage-a2-baseline "unbound variable deep inside ingestion"
 # failure class. Runtime negative tests + wiring greps (drift-proof).

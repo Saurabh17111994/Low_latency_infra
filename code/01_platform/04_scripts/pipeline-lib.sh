@@ -18,10 +18,10 @@
 #   - Functions print diagnostics and `return 1` on failure — the caller
 #     decides fail-fast (gate script) vs warn-and-continue (measurement).
 #   - pipeline_install_cleanup_trap() installs the EXIT trap that removes
-#     the loadgen containers and cancels the job. State vars
-#     (FAKETOOL_LOG_PID, INGESTION_LOG_PID, JOB_ID) live here; faketool +
-#     ingestion are CONTAINERS (CHG-122), the *_LOG_PID vars are only the
-#     `docker logs -f` mirror processes.
+#     the loadgen containers and cancels the job. JOB_ID lives here; faketool
+#     + ingestion are CONTAINERS (CHG-122) whose stdout a `docker logs -f`
+#     mirror copies into the evidence dir (it exits with its container, so it
+#     needs no handle).
 #
 # Bugs this lib exists to prevent (each observed live, 2026-08-29/30):
 #   B1. `docker compose -f` without BOTH --env-file flags: required
@@ -55,7 +55,7 @@ LIB_COMPOSE_FILE="$ROOT/code/01_platform/01_docker/docker-compose.yml"
 COMPOSE="docker compose -f $LIB_COMPOSE_FILE --env-file $ROOT/code/01_platform/01_docker/.env --env-file $ROOT/code/01_platform/01_docker/secrets.env"
 
 # Preflight-state guard (2026-09-02): launch-phase functions require
-# pipeline_preflight to have run — it populates CP, LIB_MANIFEST_SLICE,
+# pipeline_preflight to have run — it populates CP,
 # restarts the TM fresh, and waits for Fluss/TM registration. A caller that
 # skips it (stage-a2-baseline.sh first attempt) previously got "unbound
 # variable" deep inside ingestion and a broken JVM launch. Guarded functions
@@ -64,7 +64,7 @@ PIPELINE_PREFLIGHT_OK=0
 pipeline_require_preflight() {
   local caller="${FUNCNAME[1]:-unknown-caller}"
   [ "${PIPELINE_PREFLIGHT_OK:-0}" -eq 1 ] || {
-    pipeline_fail "pipeline_preflight not run — refusing $caller (run pipeline_preflight first; it sets CP + LIB_MANIFEST_SLICE and restarts the TM)"
+    pipeline_fail "pipeline_preflight not run — refusing $caller (run pipeline_preflight first; it sets CP and restarts the TM)"
     return 1
   }
 }
@@ -88,11 +88,8 @@ FLUSS_TABLET_CONTAINER="${FLUSS_TABLET_CONTAINER:-01_docker-fluss-tablet-1}"
 FLUSS_READY_TIMEOUT_S="${FLUSS_READY_TIMEOUT_S:-180}"
 FLUSS_READY_TABLE="${FLUSS_READY_TABLE:-raw_table_1}"
 
-# Run state (owned by the lib; teardown reads these). CHG-122: the data
-# path is containers; the *_LOG_PID vars are `docker logs -f` mirrors that
-# die with their container.
-FAKETOOL_LOG_PID=""
-INGESTION_LOG_PID=""
+# Run state (owned by the lib; teardown reads JOB_ID). CHG-122: the data path
+# is containers; the `docker logs -f` mirrors die with theirs.
 JOB_ID=""
 
 pipeline_log() { echo "[pipeline $(date +%H:%M:%S)] $*"; }
@@ -441,8 +438,6 @@ pipeline_preflight() {
   local ntok
   ntok=$(tail -n +2 "$slice" | grep -c .)
   [ "$ntok" -eq 1024 ] || { pipeline_fail "expected exactly 1024 tokens in slice, got $ntok"; return 1; }
-  # shellcheck disable=SC2034  # lib output: the caller reads it in this shell
-  LIB_MANIFEST_SLICE="$slice"
   # shellcheck disable=SC2034  # deprecated but kept: callers still reference it
   TOKENS=""   # deprecated: kept as empty for callers that still reference it
 
@@ -530,8 +525,6 @@ pipeline_start_faketool() {
   # Mirror container stdout into the evidence dir continuously; `docker
   # logs -f` exits when the container is removed at cleanup.
   docker logs -f "$LIB_FAKETOOL_CONTAINER" > "$OUT/faketool.log" 2>&1 &
-  # shellcheck disable=SC2034  # run handle for log/cleanup inspection; no in-tree reader
-  FAKETOOL_LOG_PID=$!
 
   # Readiness: faketool prints real_rate=true once serving. Poll the
   # mirrored log + container liveness (B2: alive after start).
@@ -601,8 +594,6 @@ pipeline_start_ingestion() {
   # Mirror stdout (OTLP feed->ack payloads) — stage-capture parses this
   # file for ingestion.tsv. Dies with the container at cleanup.
   docker logs -f "$LIB_INGESTION_CONTAINER" > "$OUT/j1/java.out" 2>&1 &
-  # shellcheck disable=SC2034  # run handle for log/cleanup inspection; no in-tree reader
-  INGESTION_LOG_PID=$!
 
   # Readiness = marker file via the /run bind mount + bridge subscription.
   local ready=0 i running
