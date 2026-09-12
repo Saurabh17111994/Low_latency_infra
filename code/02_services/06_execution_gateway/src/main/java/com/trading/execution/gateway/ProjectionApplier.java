@@ -1,8 +1,6 @@
 package com.trading.execution.gateway;
 
 import java.time.Clock;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -12,10 +10,27 @@ public final class ProjectionApplier {
     private final ProjectionLedgerStore ledger;
     private final Clock clock;
     // P3-319: per-eventId striped locks — method-level synchronized serialized
-    // independent eventIds while still not fencing cross-instance races. Stripes
-    // bound the lock count; the Fluss last-write-wins put has no CAS, so the
-    // single-writer-per-eventId assumption is documented on apply().
-    private final Map<String, Lock> stripes = new ConcurrentHashMap<>();
+    // independent eventIds while still not fencing cross-instance races. The array
+    // is sized once, so the lock count is bounded by construction; the map this
+    // replaced kept one lock per distinct eventId for the life of the process
+    // while this comment already claimed the count was bounded. The Fluss
+    // last-write-wins put has no CAS, so the single-writer-per-eventId assumption
+    // is documented on apply().
+    static final int STRIPE_COUNT = 64;
+    private final Lock[] stripes = newStripes();
+
+    private static Lock[] newStripes() {
+        Lock[] locks = new Lock[STRIPE_COUNT];
+        for (int i = 0; i < locks.length; i++) {
+            locks[i] = new ReentrantLock();
+        }
+        return locks;
+    }
+
+    /** Package-visible seam for the ordering/bound test: one stable stripe per eventId. */
+    Lock stripeFor(String eventId) {
+        return stripes[Math.floorMod(eventId.hashCode(), stripes.length)];
+    }
 
     public ProjectionApplier(ProjectionWriter writer, ProjectionLedgerStore ledger) {
         this(writer, ledger, Clock.systemUTC());
@@ -30,7 +45,7 @@ public final class ProjectionApplier {
      * last-write-wins with no CAS on expectedPriorState).
      */
     public boolean apply(NormalizedExecutionEvent event) throws Exception {
-        Lock stripe = stripes.computeIfAbsent(event.postbackEventId(), k -> new ReentrantLock());
+        Lock stripe = stripeFor(event.postbackEventId());
         stripe.lock();
         try {
             return applyLocked(event);
