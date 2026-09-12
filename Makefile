@@ -8,7 +8,7 @@ COMPOSE := docker compose --env-file code/01_platform/01_docker/.env --env-file 
 # fails obscurely). Set MVN_FLAGS=-o when the local cache is warm.
 MVN := mvn $(MVN_FLAGS)
 
-.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite check-image-stale branch-check proto
+.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite check-image-stale branch-check proto
 
 # Branch guard: low-latency work must happen on the low-latency branch.
 # Any agent (human or AI) MUST run this before editing code. Fails (exit 1)
@@ -65,6 +65,10 @@ help:
 	@echo "  test        run unit tests (common + ingestion)"
 	@echo "  test-ingestion  run only the ingestion module tests"
 	@echo "  test-audit-r2   run audit_r2.py unit tests (stdlib unittest, no R2 access needed)"
+	@echo "  drill-live  LIVE Fluss drills (common + gateway): the classes gated on"
+	@echo "         FLUSS_BOOTSTRAP that make test and the Monday Java step record as 0"
+	@echo "         tests. SKIPPED when FLUSS_BOOTSTRAP is unset; reports land in"
+	@echo "         target/surefire-reports-drills (docs-audit C6 counts the plain suite)"
 	@echo "  execution-network-check  verify resolved Compose execution-net/Arrow-egress isolation"
 	@echo "  gate        run the full Monday verification gate (static + compose + go + java + schema/perf)"
 	@echo "  gate-order  mandatory implementation order gate (01-foundation.md): 7 tasks in sequence,"
@@ -146,6 +150,27 @@ test:
 # Run only the ingestion module tests.
 test-ingestion:
 	cd code && $(MVN) -q test -pl 02_services/01_ingestion -am
+
+# Live Fluss drills — every test class gated on FLUSS_BOOTSTRAP. `make test` and
+# the Monday gate's Java step record these as 0 tests (the gate exports only the
+# INGESTION_INT_TEST_* flags), and the gateway module is outside that step's scope
+# (-pl 02_services/01_ingestion -am, which rides on common only as a dependency),
+# so these are live paths nothing else runs. Compute's Fluss drills are NOT here:
+# they also require COMPUTE_INT_TEST (a Flink job harness) and belong to the
+# compute and chaos targets.
+# The drill-reports profile (code/pom.xml) sends the reports to
+# target/surefire-reports-drills on purpose: docs-audit C6 sums
+# target/surefire-reports against the documented plain-suite triple, and a live
+# run rewrites those same class XMLs with real (non-zero) test counts.
+# Env-gated: SKIPPED (exit 0) when FLUSS_BOOTSTRAP is unset.
+drill-live:
+	@if [ -z "$$FLUSS_BOOTSTRAP" ]; then \
+		echo "SKIP: drill-live (no FLUSS_BOOTSTRAP) — export FLUSS_BOOTSTRAP=<host:port>"; \
+	else \
+		cd code && $(MVN) test -Pdrill-reports -pl common,02_services/06_execution_gateway \
+			-Dtest='EodBucketCopyIntegrationTest,FlussGateAttemptStoresIntegrationTest,FlussPositionsStateStoreIntegrationTest,FlussPostbackQuarantineStoreIntegrationTest,CompatFlussIntegrationTest,CompatFlussCompositeKeyIntegrationTest,CompatFlussDdlParityIntegrationTest,DdlSmokeTwinSweepTest,GateMergeEngineDrillIntegrationTest,GatewayFlussIntegrationTest,GatewayFlussDurableReplayIntegrationTest,B4HaltedIntentConsumeDeferE2ETest,GatewayStartupPrewarmTest,FlussProjectionWriterIntegrationTest' \
+			-Dsurefire.failIfNoSpecifiedTests=false; \
+	fi
 
 # audit_r2.py unit tests (stdlib unittest — SigV4 golden vector, config
 # parsing, provisioning/validation against an in-memory fake client).

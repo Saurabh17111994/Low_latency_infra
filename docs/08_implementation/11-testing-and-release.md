@@ -38,6 +38,16 @@ Use this file after each phase to track all tests, map requirements to proof, an
 
 This catalog is the single authoritative home for detailed test inputs, actions, pass results, and evidence. Component dossiers define the system to build and link here for verification; they do not duplicate test procedures.
 
+**How the live half runs.** Rows marked *env-gated on `FLUSS_BOOTSTRAP`* are skipped
+— recorded as 0 tests — by `make test` and by the Monday gate's Java step, which
+exports only the `INGESTION_INT_TEST_*` flags and does not set the variable; the
+gateway's drills were additionally outside that step's module scope. `make
+drill-live` runs them against the local stack, and the Monday gate runs it at the
+end of step 9; their surefire reports land in `target/surefire-reports-drills/` so
+the C6 test counts keep counting the plain suite only. Compute's Fluss drills are
+not in that target: they also require `COMPUTE_INT_TEST` (a Flink job harness) and
+run with the compute and chaos targets.
+
 | Area | Test-scope link |
 | --- | --- |
 | Mock broker and workload generator | [Foundation and workload](#foundation-and-workload) |

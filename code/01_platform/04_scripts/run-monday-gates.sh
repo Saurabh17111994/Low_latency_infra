@@ -41,7 +41,7 @@ GO_TIMEOUT_SEC="${GO_TIMEOUT_SEC:-1800}"
 JAVA_TIMEOUT_SEC="${JAVA_TIMEOUT_SEC:-3600}"
 
 # ── Preflight: required tooling + paths (R-150) ──────────────────────────────
-for tool in go mvn java; do
+for tool in go mvn java make; do
 	if ! command -v "$tool" >/dev/null 2>&1; then
 		echo "FATAL: required tool '$tool' not found on PATH" >&2
 		exit 1
@@ -214,8 +214,13 @@ else
 	echo "PASS: image staleness SKIPPED (no docker/compose)" | tee -a "$SUMMARY"
 fi
 
-# ── 3. Full Java gate with ALL integration flags ──────────────────────────────
-echo "=== [9/13] Java full gate (FLUSS+MANIFEST+PERF+E2E) ===" | tee -a "$SUMMARY"
+# ── 3. Full Java gate with ALL integration flags + the LIVE Fluss drills ──────
+# The module scope below is ingestion (common rides along as a dependency), so the
+# gateway's drills were outside it, and neither the flags nor the surrounding env
+# export FLUSS_BOOTSTRAP — every class gated on it records 0 tests here. A green
+# step 9 therefore proved nothing about the live store paths; the drill block at
+# the end of this step runs them.
+echo "=== [9/13] Java full gate (FLUSS+MANIFEST+PERF+E2E) + live Fluss drills ===" | tee -a "$SUMMARY"
 	if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
 	INGESTION_INT_TEST_E2E=true INGESTION_INT_TEST_FLUSS=true \
 	INGESTION_INT_TEST_MANIFEST=true INGESTION_INT_TEST_PERF=true \
@@ -224,6 +229,21 @@ echo "=== [9/13] Java full gate (FLUSS+MANIFEST+PERF+E2E) ===" | tee -a "$SUMMAR
 	gate_fail
 fi
 echo "PASS: Java suite" | tee -a "$SUMMARY"
+
+# Live Fluss drills (make drill-live: common + gateway classes gated on
+# FLUSS_BOOTSTRAP). Reports go to target/surefire-reports-drills, so the C6 test
+# counts in the next step still see the plain suite: a live run rewrites the same
+# class XMLs with real (non-zero) test counts and would otherwise make C6 disagree
+# with the documented triple. Bootstrap defaults to the local stack — the Java step
+# above already requires it up (INGESTION_INT_TEST_FLUSS=true).
+DRILL_LOG="$OUT_DIR/drill-live.log"
+DRILL_BOOTSTRAP="${FLUSS_BOOTSTRAP:-localhost:9123}"
+if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$PROJECT_ROOT' && \
+	FLUSS_BOOTSTRAP='$DRILL_BOOTSTRAP' MVN_FLAGS=-o make drill-live" >"$DRILL_LOG" 2>&1; then
+	echo "FAIL: live Fluss drills (bootstrap $DRILL_BOOTSTRAP — is the stack up?) — see $DRILL_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+echo "PASS: live Fluss drills (common + gateway, bootstrap $DRILL_BOOTSTRAP)" | tee -a "$SUMMARY"
 
 # ── 3b. Full doc audit (make full-audit: scanners + sweeps + trio) ──────────
 # Runs AFTER the Java gate so Layer 1b's docs-audit C6 (test counts vs surefire

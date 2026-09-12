@@ -159,4 +159,28 @@
       </plugins>
     </pluginManagement>
   </build>
+
+  <!-- Live-drill reporting (make drill-live): the classes gated on FLUSS_BOOTSTRAP
+       record 0 tests under the plain suite and their real counts under a live run,
+       and both runs write the same per-class XMLs. A live run into
+       target/surefire-reports would therefore make docs-audit C6 (which sums those
+       XMLs against the documented plain-suite triple) depend on which mode ran
+       last. This profile sends the drill run to its own directory instead.
+       Activate with -Pdrill-reports. -->
+  <profiles>
+    <profile>
+      <id>drill-reports</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <reportsDirectory>${project.build.directory}/surefire-reports-drills</reportsDirectory>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>
