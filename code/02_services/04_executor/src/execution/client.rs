@@ -143,7 +143,7 @@ use crate::{
     bridge::{
         protocol::{
             Command, CommandEnvelope, OrderCommand, OrderType as BridgeOrderType, Product,
-            ReportEnvelope, ReportOutcome, TransactionType, Validity,
+            ReportEnvelope, TransactionType, Validity,
         },
         BridgeClient, BridgeReportStream,
     },
@@ -420,8 +420,12 @@ impl BridgeExecutionClient {
             }
         };
 
-        match reply.outcome() {
-            Some(ReportOutcome::Success) => match job.command {
+        // P3-195: classify through the same pure function the rest of the code uses, so a
+        // `Success` carrying an EMPTY `broker_order_id` is UNKNOWN (ambiguous) and fails closed.
+        // Accepting it unconditionally recorded a `VenueOrderId::new("")` and emitted
+        // `order_accepted` for a response that cannot be correlated to any real broker order.
+        match classify_bridge_report(&reply) {
+            BridgeOutcome::Accepted => match job.command {
                 Command::Place => {
                     let venue_order_id = VenueOrderId::new(&reply.broker_order_id);
                     self.emitter.emit_order_submitted(&order);
@@ -433,8 +437,20 @@ impl BridgeExecutionClient {
                 }
                 Command::Modify => {
                     let venue_order_id = VenueOrderId::new(&reply.broker_order_id);
-                    let new_qty = order.quantity();
-                    let new_px = order.price();
+                    // P3-196: report what was actually SENT — the envelope's target values — not
+                    // the cache's pre-modify values, so a modify 100 -> 99 no longer emits 100.
+                    let (new_qty, new_px) = match job.envelope.order.as_ref() {
+                        Some(spec) => {
+                            // A market order carries no price; keep it `None` rather than
+                            // fabricating one from an empty string.
+                            let px = match spec.price.trim() {
+                                "" => None,
+                                p => Some(Price::from(p)),
+                            };
+                            (Quantity::from(spec.quantity.as_str()), px)
+                        }
+                        None => (order.quantity(), order.price()),
+                    };
                     self.emitter.emit_order_updated(
                         &order,
                         venue_order_id,
@@ -451,15 +467,16 @@ impl BridgeExecutionClient {
                 }
                 _ => {}
             },
-            Some(ReportOutcome::Rejected) => {
+            BridgeOutcome::Rejected => {
                 self.emitter
                     .emit_order_rejected(&order, &reply.reason, ts_event, false);
                 crate::telemetry::METRICS
                     .order_rejected
                     .fetch_add(1, Ordering::Relaxed);
             }
-            Some(ReportOutcome::Unknown) | None => {
-                // Ambiguous outcome: fail closed and halt.
+            BridgeOutcome::Unknown => {
+                // Ambiguous outcome — including a `Success` with no usable broker order id: fail
+                // closed and halt.
                 self.gate.borrow_mut().safety_halt();
                 self.emitter.emit_order_rejected(
                     &order,
@@ -487,18 +504,35 @@ impl BridgeExecutionClient {
             .fetch_add(1, Ordering::Relaxed);
         // Deterministic `client_order_ref` (14-char hash) is the broker echo; map via `client_refs` to the
         // Nautilus `ClientOrderId` (which may be RND-xxx in tests, deterministic in prod).
-        let client_order_id = if let Some(mapped) = self
+        //
+        // P3-197: a report we cannot correlate to a known order is AMBIGUOUS, not droppable. This
+        // used to fall back to treating the raw ref as a `ClientOrderId`, which on the production
+        // path is never in the cache — so the `get_order` below failed and the report was
+        // discarded in silence: no fill event, no position update, no halt. A dropped fill is a
+        // position the desk does not know it holds, so both paths now halt instead.
+        let mapped = self
             .client_refs
             .borrow()
             .get(&report.client_order_ref)
-            .cloned()
-        {
-            mapped
-        } else {
-            // Fallback for legacy/fake reports where remarks == client_order_id directly.
-            ClientOrderId::new(&report.client_order_ref)
+            .cloned();
+        let Some(client_order_id) = mapped else {
+            tracing::warn!(
+                "uncorrelated bridge report (ref={:?}, type={:?}, broker_order_id={:?}): \
+                 safety-halting rather than dropping it",
+                report.client_order_ref,
+                report.report_type,
+                report.broker_order_id
+            );
+            self.gate.borrow_mut().safety_halt();
+            return;
         };
         let Ok(order) = self.core.get_order(&client_order_id) else {
+            tracing::warn!(
+                "bridge report maps to {} which is not in the order cache: safety-halting \
+                 rather than dropping it",
+                client_order_id
+            );
+            self.gate.borrow_mut().safety_halt();
             return;
         };
         let ts_event = self.clock.get_time_ns();
@@ -514,6 +548,23 @@ impl BridgeExecutionClient {
         }
     }
 
+    /// Parses a bridge-supplied numeric field, rejecting anything that is not a strictly positive
+    /// decimal. Bridge input is protocol data from outside the process, not trusted internal
+    /// state, so it is validated before it is turned into a quantity or a price (P3-198).
+    fn bridge_positive_decimal(field: &str, value: &str) -> Result<rust_decimal::Decimal> {
+        let raw = value.trim();
+        if raw.is_empty() {
+            bail!("{field} is missing");
+        }
+        let parsed: rust_decimal::Decimal = raw
+            .parse()
+            .map_err(|_| anyhow::anyhow!("{field} is not a number: {raw:?}"))?;
+        if parsed <= rust_decimal::Decimal::ZERO {
+            bail!("{field} must be > 0, got {raw:?}");
+        }
+        Ok(parsed)
+    }
+
     fn handle_fill(&self, order: &OrderAny, report: &ReportEnvelope, ts_event: UnixNanos) {
         let venue_order_id = VenueOrderId::new(&report.broker_order_id);
         let trade_id = if report.postback_event_id.is_empty() {
@@ -521,8 +572,25 @@ impl BridgeExecutionClient {
         } else {
             TradeId::new(&report.postback_event_id)
         };
-        let last_qty = Quantity::from(report.fill_quantity.as_deref().unwrap_or("0"));
-        let last_px = Price::from(report.fill_price.as_deref().unwrap_or("0"));
+        // P3-198: never fabricate a fill. A missing `fill_quantity`/`fill_price` used to become a
+        // zero-quantity/zero-price fill — an `order_filled` event for nothing, booked against the
+        // position — while a malformed string could panic inside the `From<&str>` parse. An
+        // unusable payload now halts instead of inventing a fill.
+        let qty_str = report.fill_quantity.as_deref().unwrap_or("");
+        let px_str = report.fill_price.as_deref().unwrap_or("");
+        if let Err(e) = Self::bridge_positive_decimal("fill_quantity", qty_str)
+            .and_then(|_| Self::bridge_positive_decimal("fill_price", px_str))
+        {
+            tracing::warn!(
+                "rejecting order_filled for {}: {e}; safety-halting rather than booking a \
+                 fabricated fill",
+                order.client_order_id()
+            );
+            self.gate.borrow_mut().safety_halt();
+            return;
+        }
+        let last_qty = Quantity::from(qty_str.trim());
+        let last_px = Price::from(px_str.trim());
         let quote_currency = self
             .core
             .cache()
@@ -532,10 +600,20 @@ impl BridgeExecutionClient {
 
         // Update net position from the fill.
         let qty = last_qty.as_decimal();
+        // Unfiled finding of the same class as P3-199: an unrecognised side used to book the fill
+        // as a POSITIVE delta, inventing exposure in the wrong direction.
         let signed = match order.order_side() {
             OrderSide::Buy => qty,
             OrderSide::Sell => -qty,
-            _ => qty,
+            other => {
+                tracing::warn!(
+                    "order_filled for {} has unsupported side {other:?}: safety-halting rather \
+                     than booking the fill in an unknown direction",
+                    order.client_order_id()
+                );
+                self.gate.borrow_mut().safety_halt();
+                return;
+            }
         };
         *self
             .positions
@@ -557,27 +635,59 @@ impl BridgeExecutionClient {
         );
     }
 
-    /// Builds a bridge [`CommandEnvelope`] for an order.
-    fn build_order_envelope(&self, command: Command, order: &OrderAny) -> CommandEnvelope {
+    /// Maps an order's side / type / time-in-force onto the bridge vocabulary.
+    ///
+    /// P3-199: these were `_ =>` catch-alls, so an unrecognised side silently became `Buy`, an
+    /// unrecognised type `Lmt`, and any other policy `Day`. A wrong **side** sent to a real broker
+    /// is executed against real money, so every arm is now explicit and an unmappable variant is
+    /// rejected instead of guessed.
+    fn bridge_order_spec(order: &OrderAny) -> Result<(TransactionType, BridgeOrderType, Validity)> {
         let side = match order.order_side() {
             OrderSide::Buy => TransactionType::Buy,
             OrderSide::Sell => TransactionType::Sell,
-            _ => TransactionType::Buy,
+            other => bail!("unsupported order side {other:?}: refusing to guess a direction"),
         };
-        let bridge_type = match order.order_type() {
+        let order_type = match order.order_type() {
             NautilusOrderType::Market => BridgeOrderType::Mkt,
             NautilusOrderType::Limit => BridgeOrderType::Lmt,
             NautilusOrderType::StopMarket => BridgeOrderType::SlMkt,
             NautilusOrderType::StopLimit => BridgeOrderType::SlLmt,
-            _ => BridgeOrderType::Lmt,
+            other => bail!("unsupported order type {other:?}: no bridge equivalent"),
         };
+        // The bridge exposes only DAY and IOC. GTC is day-scoped for this venue so it maps to DAY;
+        // anything else (FOK, GTD, auction policies) has no equivalent and is rejected rather than
+        // silently rewritten into a different order.
         let validity = match order.time_in_force() {
             TimeInForce::Ioc => Validity::Ioc,
-            _ => Validity::Day,
+            TimeInForce::Day | TimeInForce::Gtc => Validity::Day,
+            other => bail!("unsupported time-in-force {other:?}: no bridge equivalent"),
+        };
+        Ok((side, order_type, validity))
+    }
+
+    /// Builds a bridge [`CommandEnvelope`] for an order.
+    ///
+    /// `quantity`/`price` are passed in rather than read from the cache so a `Modify` can send its
+    /// **target** values: reading `order.quantity()`/`order.price()` here sent the pre-modify
+    /// values, which made the modify a no-op at the broker (P3-196).
+    ///
+    /// `strict_spec` is false only for a Cancel: that command is identified by `broker_order_id`
+    /// and its order block is never executed, so an unmappable variant must not be the reason a
+    /// live order cannot be cancelled.
+    fn build_order_envelope(
+        &self,
+        command: Command,
+        order: &OrderAny,
+        quantity: &str,
+        price: &str,
+        strict_spec: bool,
+    ) -> Result<CommandEnvelope> {
+        let (side, bridge_type, validity) = match Self::bridge_order_spec(order) {
+            Ok(spec) => spec,
+            Err(_) if !strict_spec => (TransactionType::Buy, BridgeOrderType::Lmt, Validity::Day),
+            Err(e) => return Err(e),
         };
         let symbol = order.instrument_id().symbol.to_string();
-        let quantity = order.quantity().to_string();
-        let price = order.price().map(|p| p.to_string()).unwrap_or_default();
 
         let mut envelope = CommandEnvelope::new(command, &UUID4::new().to_string());
         // Separate identities per the bridge contract: `instruction_id` is a stable,
@@ -598,13 +708,13 @@ impl BridgeExecutionClient {
         envelope.order = Some(
             OrderCommand::new(self.core.venue.as_str(), &symbol)
                 .with_side(side)
-                .with_quantity(&quantity)
+                .with_quantity(quantity)
                 .with_order_type(bridge_type)
                 .with_product(Product::Intraday)
                 .with_validity(validity)
-                .with_price(&price),
+                .with_price(price),
         );
-        envelope
+        Ok(envelope)
     }
 
     fn order_status_report(&self, order: &OrderAny) -> OrderStatusReport {
@@ -738,7 +848,13 @@ impl ExecutionClient for BridgeExecutionClient {
         let Some(order) = self.core.get_order(&cmd.client_order_id).ok() else {
             bail!("order {} not in cache", cmd.client_order_id);
         };
-        let envelope = self.build_order_envelope(Command::Place, &order);
+        let envelope = self.build_order_envelope(
+            Command::Place,
+            &order,
+            &order.quantity().to_string(),
+            &order.price().map(|p| p.to_string()).unwrap_or_default(),
+            true,
+        )?;
         self.pending.borrow_mut().push_back(PendingJob {
             command: Command::Place,
             client_order_id: cmd.client_order_id,
@@ -772,7 +888,18 @@ impl ExecutionClient for BridgeExecutionClient {
         let Some(order) = self.core.get_order(&cmd.client_order_id).ok() else {
             bail!("order {} not in cache", cmd.client_order_id);
         };
-        let mut envelope = self.build_order_envelope(Command::Modify, &order);
+        // P3-196: send the *target* values. The envelope (and therefore the modify itself) used to
+        // carry the cached pre-modify quantity/price, so a modify 100 -> 99 told the broker 100 —
+        // a no-op — and the emitted `order_updated` reported the same stale values.
+        let new_qty = cmd.quantity.unwrap_or_else(|| order.quantity());
+        let new_px = cmd.price.or_else(|| order.price());
+        let mut envelope = self.build_order_envelope(
+            Command::Modify,
+            &order,
+            &new_qty.to_string(),
+            &new_px.map(|p| p.to_string()).unwrap_or_default(),
+            true,
+        )?;
         envelope.broker_order_id = cmd
             .venue_order_id
             .map(|v| v.to_string())
@@ -807,7 +934,13 @@ impl ExecutionClient for BridgeExecutionClient {
         let Some(order) = self.core.get_order(&cmd.client_order_id).ok() else {
             bail!("order {} not in cache", cmd.client_order_id);
         };
-        let mut envelope = self.build_order_envelope(Command::Cancel, &order);
+        let mut envelope = self.build_order_envelope(
+            Command::Cancel,
+            &order,
+            &order.quantity().to_string(),
+            &order.price().map(|p| p.to_string()).unwrap_or_default(),
+            false,
+        )?;
         envelope.broker_order_id = cmd
             .venue_order_id
             .map(|v| v.to_string())
@@ -1314,5 +1447,213 @@ mod tests {
         );
         assert_eq!(client.pending_count(), 0, "the batch drains completely");
         drop(client);
+    }
+
+    /// P3-195: `Success` with no usable broker order id is ambiguous, not an acceptance.
+    ///
+    /// `classify_bridge_report` has always treated an empty `broker_order_id` as UNKNOWN; the live
+    /// path bypassed it and matched on `reply.outcome()` directly, so such a response recorded
+    /// `VenueOrderId::new("")` and emitted `order_accepted`. Exercised here through the same
+    /// function the live path now calls.
+    #[test]
+    fn p3_195_success_without_a_broker_order_id_is_unknown() {
+        let empty_id = ReportEnvelope {
+            outcome: crate::bridge::protocol::ReportOutcome::Success
+                .as_str()
+                .to_string(),
+            broker_order_id: String::new(),
+            ..ReportEnvelope::default()
+        };
+        assert_eq!(
+            classify_bridge_report(&empty_id),
+            BridgeOutcome::Unknown,
+            "an uncorrelatable success is ambiguous and must fail closed"
+        );
+
+        // ...and a real id is still accepted, so the guard is not a blanket refusal.
+        let usable = ReportEnvelope {
+            outcome: crate::bridge::protocol::ReportOutcome::Success
+                .as_str()
+                .to_string(),
+            broker_order_id: "BRK-1".to_string(),
+            ..ReportEnvelope::default()
+        };
+        assert_eq!(classify_bridge_report(&usable), BridgeOutcome::Accepted);
+        assert!(unknown_halts_never_retries(BridgeOutcome::Unknown));
+    }
+
+    /// P3-196: a Modify must send — and report — its TARGET values, not the cached pre-modify ones.
+    /// The cached order stays 10 @ 100; the modify asks for 7 @ 123.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p3_196_modify_sends_the_target_values_not_the_cached_ones() {
+        use nautilus_common::clients::ExecutionClient;
+
+        let (client, instrument_id, client_order_id, order) =
+            roundtrip_fixture(crate::bridge::FakeBridge::new(), &[]);
+        let mut client = client;
+        client.connect().await.expect("connect");
+        enable_gate(&client);
+
+        let submit = SubmitOrder::from_order(
+            &order,
+            TraderId::from("TRADER-001"),
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+        );
+        client.submit_order(submit).expect("place enqueued");
+        // Inspect only the modify, so drop the queued place.
+        client.pending.borrow_mut().clear();
+
+        let modify = ModifyOrder::new(
+            TraderId::from("TRADER-001"),
+            None,
+            StrategyId::from("S-001"),
+            instrument_id,
+            client_order_id,
+            Some(VenueOrderId::new("BRK-0001")),
+            Some(Quantity::from(7)),
+            Some(Price::from("123")),
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+            None,
+            None,
+        );
+        client.modify_order(modify).expect("modify enqueued");
+
+        assert_eq!(
+            order.quantity(),
+            Quantity::from(10),
+            "cache is still pre-modify"
+        );
+        let jobs = client.pending.borrow();
+        let job = jobs.back().expect("modify queued");
+        assert_eq!(job.command, Command::Modify);
+        let spec = job.envelope.order.as_ref().expect("order spec");
+        assert_eq!(
+            spec.quantity, "7",
+            "the broker must be told the target quantity, not the cached 10"
+        );
+        assert_eq!(
+            spec.price, "123",
+            "the broker must be told the target price, not the cached 100"
+        );
+        drop(jobs);
+        drop(client);
+    }
+
+    /// P3-197: a report that cannot be correlated to a known order must halt, not vanish.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p3_197_uncorrelated_report_halts_instead_of_being_dropped() {
+        let (client, instrument_id, _client_order_id, _order) =
+            roundtrip_fixture(crate::bridge::FakeBridge::new(), &[]);
+        let client = client;
+        enable_gate(&client);
+        assert!(client.gate.borrow().can_execute());
+
+        // A fill for a ref that `client_refs` has never seen — the old code fell back to treating
+        // the raw ref as a ClientOrderId, failed `get_order`, and returned in silence.
+        let report = ReportEnvelope {
+            client_order_ref: "NO-SUCH-REF".to_string(),
+            report_type: Some("order_filled".to_string()),
+            broker_order_id: "BRK-1".to_string(),
+            fill_quantity: Some("10".to_string()),
+            fill_price: Some("100".to_string()),
+            ..ReportEnvelope::default()
+        };
+        client.handle_report(report);
+
+        assert_eq!(
+            client.gate_state(),
+            ExecState::Halted,
+            "an uncorrelatable report is ambiguous and must halt the gate"
+        );
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(0),
+            "and must not book a fill it cannot attribute"
+        );
+    }
+
+    /// P3-198: a fill with an unusable payload must halt, not become a zero fill.
+    #[tokio::test(flavor = "current_thread")]
+    async fn p3_198_unusable_fill_payload_halts_instead_of_fabricating_one() {
+        let (client, instrument_id, _client_order_id, order) =
+            roundtrip_fixture(crate::bridge::FakeBridge::new(), &[]);
+        let client = client;
+        enable_gate(&client);
+        let ts = client.clock.get_time_ns();
+
+        // Quantity missing, price present: previously became a 0-quantity/0-ish fill that still
+        // emitted `order_filled`.
+        let missing_qty = ReportEnvelope {
+            broker_order_id: "BRK-1".to_string(),
+            fill_price: Some("100".to_string()),
+            ..ReportEnvelope::default()
+        };
+        client.handle_fill(&order, &missing_qty, ts);
+        assert_eq!(
+            client.gate_state(),
+            ExecState::Halted,
+            "a fill with no usable payload must halt"
+        );
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(0)
+        );
+
+        // Malformed (non-numeric) quantity must not reach the `From<&str>` parse.
+        let client2 = roundtrip_fixture(crate::bridge::FakeBridge::new(), &[]).0;
+        enable_gate(&client2);
+        let malformed = ReportEnvelope {
+            broker_order_id: "BRK-1".to_string(),
+            fill_quantity: Some("not-a-number".to_string()),
+            fill_price: Some("100".to_string()),
+            ..ReportEnvelope::default()
+        };
+        client2.handle_fill(&order, &malformed, ts);
+        assert_eq!(client2.gate_state(), ExecState::Halted);
+        assert_eq!(
+            client2.position(&instrument_id),
+            rust_decimal::Decimal::from(0)
+        );
+    }
+
+    /// P3-199: an unmappable order spec is rejected, never silently rewritten.
+    #[test]
+    fn p3_199_unsupported_order_spec_is_rejected_not_guessed() {
+        let build = |tif: TimeInForce, side: OrderSide, cid: &str| {
+            OrderTestBuilder::new(OrderType::Limit)
+                .instrument_id(InstrumentId::new(Symbol::from("NIFTY"), Venue::from("NFO")))
+                .side(side)
+                .quantity(Quantity::from(1))
+                .price(Price::from("100"))
+                .time_in_force(tif)
+                .client_order_id(ClientOrderId::from(cid))
+                .build()
+        };
+
+        // FOK has no bridge equivalent: previously it was silently rewritten to DAY.
+        let fok = build(TimeInForce::Fok, OrderSide::Buy, "RND-0002");
+        let err = BridgeExecutionClient::bridge_order_spec(&fok)
+            .expect_err("an unmappable time-in-force must be rejected, not substituted");
+        assert!(
+            format!("{err}").contains("unsupported time-in-force"),
+            "got: {err}"
+        );
+
+        // ...while the supported mappings still work, and the side is not guessed.
+        let gtc = build(TimeInForce::Gtc, OrderSide::Sell, "RND-0003");
+        let (side, order_type, validity) =
+            BridgeExecutionClient::bridge_order_spec(&gtc).expect("GTC maps to DAY");
+        assert_eq!(
+            side,
+            TransactionType::Sell,
+            "side must follow the order, not default to Buy"
+        );
+        assert_eq!(order_type, BridgeOrderType::Lmt);
+        assert_eq!(validity, Validity::Day);
     }
 }
