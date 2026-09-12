@@ -173,8 +173,10 @@ impl AuditSink for InMemoryAuditSink {
 
 // ── Bundle: the four clients as a unit ──────────────────────────────────────
 
-/// The four durable clients. Each handle is `Rc`-shared so multiple `ExecutionGate`
-/// instances (simulating restarts) share the same durable memory.
+/// The four durable clients. Handles onto one of these are `Rc`-shared, so two
+/// `ExecutionGate` instances built from the same bundle see the same store — an aliasing
+/// property, deliberately *not* a modelled process restart (P3-438; no durable store impl
+/// exists yet, see the module header).
 pub struct DurableClients {
     /// Parsed enablement flags. Stored for the B7 swap; **no code branches on them yet**
     /// (P3-192) — see the module header. Reading them is not evidence of a durable path.
@@ -226,7 +228,7 @@ impl DurableClients {
         Self::new_in_memory(DurableFlags::all_off())
     }
 
-    // Introspection for tests (prove restart recovery).
+    // Introspection for tests: read back what a second handle onto the same store sees.
     #[cfg(test)]
     pub fn gate_mem(&self) -> &Rc<InMemoryGateStateStore> {
         &self.gate_mem
@@ -249,6 +251,12 @@ impl DurableClients {
 mod tests {
     use super::*;
     use crate::executiongate::{Attempt, AttemptPhase, GateRow, GateState};
+
+    // GAP (P3-438): no durable (file- or Fluss-backed) store implementation exists in this
+    // crate, so these tests cannot model a process restart. They write through the trait object
+    // and read through a SECOND handle onto the same Rc, which proves handle-sharing — not
+    // recovery after a crash. Real restart recovery is unverified until the B7 swap lands; the
+    // names below say what they actually cover.
     // ── Flag defaults ───────────────────────────────────────────────────────
 
     #[test]
@@ -266,10 +274,10 @@ mod tests {
         assert!(DurableFlags::all_on().any_on());
     }
 
-    // ── Gate store: write → restart → recovered ─────────────────────────────
+    // ── Gate store: write through the trait object, read back through a second handle 
 
     #[test]
-    fn gate_write_restart_recovered() {
+    fn gate_state_is_shared_across_handles() {
         let clients = DurableClients::new_in_memory(DurableFlags::all_on());
         // Write via first handle.
         clients
@@ -282,7 +290,7 @@ mod tests {
                 fence_token: 7,
             })
             .unwrap();
-        // Simulate restart: new bundle sharing the SAME underlying memory.
+        // A second handle onto the SAME memory (an Rc alias — not a process restart).
         let restarted_gate: Rc<dyn GateStateStore> =
             clients.gate_mem.clone() as Rc<dyn GateStateStore>;
         let row = restarted_gate.read("p").unwrap();
@@ -311,24 +319,24 @@ mod tests {
         }
     }
 
-    // ── Attempt store: write → restart → recovered ──────────────────────────
+    // ── Attempt store: write through the trait object, read back through a second handle 
 
     #[test]
-    fn attempt_write_restart_recovered() {
+    fn attempt_state_is_shared_across_handles() {
         let clients = DurableClients::new_in_memory(DurableFlags::all_on());
         let a = Attempt::new("a-1", "ins-1", "h-1", "E-a-1", AttemptPhase::Prepared);
         clients.attempt_store.put(&a).unwrap();
-        // Restart reading same attempt.
+        // Second handle reading the same attempt.
         let restarted: Rc<dyn AttemptStore> = clients.attempt_mem.clone() as Rc<dyn AttemptStore>;
         let got = restarted.get("a-1").unwrap();
         assert_eq!(got.phase, AttemptPhase::Prepared);
         assert!(restarted.has_duplicate("ins-1", "h-1"));
     }
 
-    // ── Journal: append → restart → recovered ───────────────────────────────
+    // ── Journal: append through the trait object, read back through a second handle 
 
     #[test]
-    fn journal_append_restart_recovered() {
+    fn journal_state_is_shared_across_handles() {
         let clients = DurableClients::new_in_memory(DurableFlags::all_on());
         clients.journal.append(b"event-1");
         clients.journal.append(b"event-2");
@@ -347,10 +355,10 @@ mod tests {
         assert_eq!(clients.journal.len(), 1);
     }
 
-    // ── Audit sink: record → restart → recovered ────────────────────────────
+    // ── Audit sink: record through the trait object, read back through a second handle 
 
     #[test]
-    fn audit_record_restart_recovered() {
+    fn audit_state_is_shared_across_handles() {
         let clients = DurableClients::new_in_memory(DurableFlags::all_on());
         clients.audit.record("order_accepted", b"{\"id\":\"a-1\"}");
         let restarted: Rc<dyn AuditSink> = clients.audit_mem.clone() as Rc<dyn AuditSink>;
