@@ -264,7 +264,7 @@ pub fn verify(json: &str, secret: &str, expected_version: &str, now_ms: i64) -> 
         payload: payload.clone(),
         authentication: text(&v, "authentication"),
     };
-    if !accepts_version(&expected_version, &e.protocol_version) {
+    if !accepts_version(expected_version, &e.protocol_version) {
         return reject("unsupported version");
     }
     if e.request_id.is_empty()
