@@ -67,6 +67,7 @@ class GatewayConfigTest {
         assertThatThrownBy(() -> GatewayConfig.from(m))
                 .hasMessageContaining("GATEWAY_REQUEST_BUDGET_MS must be positive");
     }
+
     /**
      * P3-073: the record's synthesized toString() includes every component, so the gateway's HMAC
      * secret went into any startup dump or error context. The dump must stay useful without it.
@@ -114,4 +115,38 @@ class GatewayConfigTest {
                 .hasMessageContaining("private-only");
     }
 
+    /**
+     * P3-289: the canonical record constructor is the fail-fast boundary, so a null Duration must
+     * raise an IllegalArgumentException naming the setting instead of a NullPointerException from
+     * the first dereference — which is what a direct constructor call used to get.
+     */
+    @Test void nullTimeoutsAreRefusedWithAnIllegalArgumentNotAnNpe() {
+        assertThatThrownBy(() -> new GatewayConfig(
+                "fluss:9123", "default", "Execution_Intent", "Execution_Gate", "Execution_Attempts",
+                "Order_Correlation", "Postback_Projection_Ledger", "Safety_Halt_Requests",
+                "127.0.0.1", 9180, "http://127.0.0.1:9190/v1/intents", "execution-gateway.v1",
+                "private", null, Duration.ofMillis(250), "acct", "part", false, 1000,
+                Duration.ofMillis(6600)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("GATEWAY_REQUEST_TIMEOUT_MS");
+        assertThatThrownBy(() -> new GatewayConfig(
+                "fluss:9123", "default", "Execution_Intent", "Execution_Gate", "Execution_Attempts",
+                "Order_Correlation", "Postback_Projection_Ledger", "Safety_Halt_Requests",
+                "127.0.0.1", 9180, "http://127.0.0.1:9190/v1/intents", "execution-gateway.v1",
+                "private", Duration.ofMillis(2000), null, "acct", "part", false, 1000,
+                Duration.ofMillis(6600)))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("GATEWAY_POLL_TIMEOUT_MS");
+        assertThatThrownBy(() -> new GatewayConfig(
+                "fluss:9123", "default", "Execution_Intent", "Execution_Gate", "Execution_Attempts",
+                "Order_Correlation", "Postback_Projection_Ledger", "Safety_Halt_Requests",
+                "127.0.0.1", 9180, "http://127.0.0.1:9190/v1/intents", "execution-gateway.v1",
+                "private", Duration.ofMillis(2000), Duration.ofMillis(250), "acct", "part", false,
+                1000, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("GATEWAY_REQUEST_BUDGET_MS");
+        assertThatThrownBy(() -> GatewayConfig.defaultRequestBudget(null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("GATEWAY_REQUEST_TIMEOUT_MS");
+    }
 }

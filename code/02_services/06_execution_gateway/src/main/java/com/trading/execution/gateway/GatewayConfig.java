@@ -45,6 +45,14 @@ public record GatewayConfig(
         require(accountScopeId, "ACCOUNT_SCOPE_ID");
         require(executionPartitionId, "EXECUTION_PARTITION_ID");
         if (bindPort < 0 || bindPort > 65535) throw new IllegalArgumentException("invalid bind port");
+        // P3-289: guard BEFORE the first dereference. This constructor is the fail-fast boundary, so
+        // a direct call with a null Duration must name the setting it is missing rather than throw
+        // the NullPointerException that requestTimeout.isZero() produced. requestBudget has the same
+        // shape and is guarded here too.
+        if (requestTimeout == null || pollTimeout == null || requestBudget == null) {
+            throw new IllegalArgumentException("GATEWAY_REQUEST_TIMEOUT_MS, GATEWAY_POLL_TIMEOUT_MS"
+                    + " and GATEWAY_REQUEST_BUDGET_MS are required");
+        }
         if (requestTimeout.isZero() || requestTimeout.isNegative()
                 || pollTimeout.isZero() || pollTimeout.isNegative()) {
             throw new IllegalArgumentException("timeouts must be positive");
@@ -76,6 +84,9 @@ public record GatewayConfig(
      * arithmetic definitions cannot drift apart.
      */
     public static Duration defaultRequestBudget(Duration requestTimeout) {
+        if (requestTimeout == null) {
+            throw new IllegalArgumentException("GATEWAY_REQUEST_TIMEOUT_MS is required");
+        }
         return Duration.ofMillis(BoundedRetry.ATTEMPTS * requestTimeout.toMillis()
                 + (BoundedRetry.ATTEMPTS - 1) * BoundedRetry.BACKOFF_MILLIS);
     }
