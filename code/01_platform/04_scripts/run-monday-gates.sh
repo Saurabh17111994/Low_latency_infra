@@ -411,22 +411,9 @@ if ! grep -q "BUILD SUCCESS" "$GATEWAY_LOG"; then
 fi
 echo "PASS: execution gateway suite ($(grep -aoE 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' "$GATEWAY_LOG" | tail -1))" | tee -a "$SUMMARY"
 
-echo "=== [15/16] Compute module suite (Fluss/fingerprint/candle unit + integration) ===" | tee -a "$SUMMARY"
-COMPUTE_LOG="$OUT_DIR/compute-suite.log"
-# 02_services/02_compute is deliberately NOT in the code/pom.xml reactor (R-272),
-# so it is tested from its own pom; common/ingestion resolve from ~/.m2 like the
-# gateway suite does.
-if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$COMPUTE_DIR' && mvn -o test" >"$COMPUTE_LOG" 2>&1; then
-	echo "FAIL: compute suite — see $COMPUTE_LOG" | tee -a "$SUMMARY"
-	gate_fail
-fi
-if ! grep -q "BUILD SUCCESS" "$COMPUTE_LOG"; then
-	echo "FAIL: compute suite did not report BUILD SUCCESS — see $COMPUTE_LOG" | tee -a "$SUMMARY"
-	gate_fail
-fi
-echo "PASS: compute suite ($(grep -aoE 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' "$COMPUTE_LOG" | tail -1))" | tee -a "$SUMMARY"
-
-echo "=== [16/16] Nautilus (Rust executor) suite — offline against the pinned lockfile ===" | tee -a "$SUMMARY"
+# Cheap suite first: nautilus is ~51 s, compute ~3 min, so a red compute no longer
+# hides the Rust verdict from this run (both still gate the verdict).
+echo "=== [15/16] Nautilus (Rust executor) suite — offline against the pinned lockfile ===" | tee -a "$SUMMARY"
 NAUTILUS_LOG="$OUT_DIR/nautilus-suite.log"
 # --offline is this repo's documented form (docs/plans/2026-08-25-live-readiness-
 # unified-plan.md): it proves Cargo.lock resolves from the cached registry. On a
@@ -443,6 +430,21 @@ if [ "$NAUTILUS_FAILED" -ne 0 ] || [ "$NAUTILUS_PASSED" -eq 0 ]; then
 	gate_fail
 fi
 echo "PASS: nautilus Rust suite ($NAUTILUS_PASSED passed, 0 failed)" | tee -a "$SUMMARY"
+
+echo "=== [16/16] Compute module suite (Fluss/fingerprint/candle unit + integration) ===" | tee -a "$SUMMARY"
+COMPUTE_LOG="$OUT_DIR/compute-suite.log"
+# 02_services/02_compute is deliberately NOT in the code/pom.xml reactor (R-272),
+# so it is tested from its own pom; common/ingestion resolve from ~/.m2 like the
+# gateway suite does.
+if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$COMPUTE_DIR' && mvn -o test" >"$COMPUTE_LOG" 2>&1; then
+	echo "FAIL: compute suite — see $COMPUTE_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+if ! grep -q "BUILD SUCCESS" "$COMPUTE_LOG"; then
+	echo "FAIL: compute suite did not report BUILD SUCCESS — see $COMPUTE_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+echo "PASS: compute suite ($(grep -aoE 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' "$COMPUTE_LOG" | tail -1))" | tee -a "$SUMMARY"
 
 STEPS_RUN="$(grep -cE "^=== \[[0-9]+/$GATE_TOTAL\] " "$SUMMARY" || true)"
 if [ "$STEPS_RUN" -ne "$GATE_TOTAL" ]; then
