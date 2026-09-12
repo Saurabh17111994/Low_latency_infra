@@ -33,7 +33,7 @@ mkdir -p "$OUT/j1" "$OUT/bin"
 echo "=== tiering-smoke start $(date -Iseconds) t=${SMOKE_T}s rate=${RATE_HZ}Hz x ${NTOK} ==="
 
 # ---- preflight: fluss up + jar + manifest slice ----
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   timeout 3 bash -c "echo > /dev/tcp/localhost/9123" 2>/dev/null && break; sleep 2
 done
 timeout 3 bash -c "echo > /dev/tcp/localhost/9123" 2>/dev/null \
@@ -106,7 +106,7 @@ echo "baseline fresh raw_table_1 R2 objects: ${BASELINE_R2:-0}"
 "$LIB_BRIDGE_DIR/faketool/faketool" -port "$FAKETOOL_PORT" -real-rate -real-rate-hz "$RATE_HZ" \
   > "$OUT/faketool.log" 2>&1 &
 FAKETOOL_PID=$!
-for i in $(seq 1 30); do timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/$FAKETOOL_PORT" 2>/dev/null && break; sleep 1; done
+for _ in $(seq 1 30); do timeout 2 bash -c "echo > /dev/tcp/127.0.0.1/$FAKETOOL_PORT" 2>/dev/null && break; sleep 1; done
 
 LOG_DIR="$OUT/j1" READINESS_FILE_PATH="/tmp/ingestion.tiering.ready" \
 ARROW_HFT_URL="ws://127.0.0.1:$FAKETOOL_PORT" ARROW_BRIDGE_BIN="$LIB_BRIDGE_DIR/arrow-bridge" \
@@ -126,9 +126,9 @@ java --add-opens=java.base/java.nio=ALL-UNNAMED \
 JVM_PID=$!
 
 READY=0
-for i in $(seq 1 60); do [ -f /tmp/ingestion.tiering.ready ] && { READY=1; break; }; sleep 2; done
+for _ in $(seq 1 60); do [ -f /tmp/ingestion.tiering.ready ] && { READY=1; break; }; sleep 2; done
 [ "$READY" = 1 ] || { echo "!! ingestion JVM not ready:"; tail -5 "$OUT/j1/java.out"; exit 1; }
-for i in $(seq 1 30); do grep -q "HFT subscribed" "$OUT/j1/java.out" && break; sleep 1; done
+for _ in $(seq 1 30); do grep -q "HFT subscribed" "$OUT/j1/java.out" && break; sleep 1; done
 grep -q "HFT subscribed" "$OUT/j1/java.out" || { echo "!! bridge never subscribed"; exit 1; }
 echo "feed + ingestion ready (${RATE_HZ}Hz x ${NTOK} = $((RATE_HZ * NTOK))/s)"
 

@@ -576,6 +576,7 @@ sample_probes() {
 }
 
 START=$(date +%s)
+# shellcheck disable=SC2034  # kept for a checkpoint-count check; nothing reads it (verified 2026-09-12)
 LAST_CP_COUNT=0
 
 # Host per-op disk latency probe (2026-09-02 decline hunt): 2s-cadence

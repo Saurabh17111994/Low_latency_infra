@@ -632,6 +632,9 @@ run_load_phase post-kill "$POST_KILL_S"
 POST_PROGRESS="$(python3 "$SCRIPT_DIR/c2_progress.py" \
   "$OUT/metric-progress.tsv" post-kill 2>/dev/null)" \
   || fatal "post-recovery metric phase had no numeric samples"
+# shellcheck disable=SC2034  # the summary TSV's trailing sample count: parsed to keep field
+# positions aligned with c2_progress.py's as_tsv(), deliberately not asserted (the phase already
+# fails when it has no numeric samples).
 IFS=$'\t' read -r POST_START_READ POST_END_READ POST_READ_DELTA POST_READ_INCREASES \
   POST_START_WRITE POST_END_WRITE POST_WRITE_DELTA POST_WRITE_INCREASES \
   POST_READ_RESETS POST_WRITE_RESETS POST_SAMPLES <<< "$POST_PROGRESS"

@@ -75,7 +75,7 @@ if ! curl -fsS --max-time 5 "$FLINK_REST_URL/overview" >/dev/null 2>&1; then
   echo "STAGE-A2: Flink REST down — starting flink containers"
   ( cd "$COMPOSE_DIR" && docker compose --env-file .env --env-file secrets.env up -d flink-jobmanager flink-taskmanager ) \
     || fatal "cannot start flink containers"
-  for i in $(seq 1 40); do
+  for _ in $(seq 1 40); do
     curl -fsS --max-time 5 "$FLINK_REST_URL/overview" >/dev/null 2>&1 && break
     sleep 5
   done
@@ -106,7 +106,7 @@ pipeline_submit_job || fatal "SignalJob submission failed"
 
 # --- Wait RUNNING (fail-closed; stage-capture.sh re-checks) ---
 state=""
-for i in $(seq 1 40); do
+for _ in $(seq 1 40); do
   state="$(curl -fsS --max-time 5 "$FLINK_REST_URL/jobs/$JOB_ID" 2>/dev/null \
     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state",""))' 2>/dev/null)"
   [ "$state" = "RUNNING" ] && break
@@ -125,7 +125,7 @@ echo "STAGE-A2: job $JOB_ID RUNNING — capturing ${DURATION_S}s"
 # they must appear under /tmp/flink-rocksdb (the named volume mount).
 if [ "${STATE_BACKEND:-rocksdb}" = "rocksdb" ]; then
   rocks_ok=""
-  for i in $(seq 1 12); do
+  for _ in $(seq 1 12); do
     if $COMPOSE exec -T flink-taskmanager \
         sh -c "ls -d /tmp/flink-rocksdb/job_${JOB_ID}_op_* >/dev/null 2>&1"; then
       rocks_ok=1; break

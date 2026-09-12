@@ -74,6 +74,7 @@ fi
 # A '#' comment inside the continuation splits it into fragments; grep'ing
 # for the FINAL token (compute.jar) on the SAME logical line as the first
 # (-e ALLOW_FULL_REPLAY) proves the continuation chain is intact.
+# shellcheck disable=SC2034  # superseded by the `body` extraction below; kept (dead) pending a cleanup call
 submit_block="$(sed -n '/submit_out="\$(\$COMPOSE exec -T \\/,/"\$SUBMIT/p;/submit_out="\$(\$COMPOSE exec -T \\/,/compute.jar/p' "$LIB" 2>/dev/null)"
 # Simpler + robust: extract the function body and join continuations.
 body="$(declare -f pipeline_submit_job | sed 's/\\$//' | tr -d '\n')"
@@ -255,6 +256,7 @@ else
     bad "G14 valid compute artifact rejected"
 fi
 printf 'truncated jar\n' > "$G14DIR/truncated-compute.jar"
+# shellcheck disable=SC2034  # overrides the lib's LIB_JAR for this case; read by pipeline-lib.sh
 LIB_JAR="$G14DIR/truncated-compute.jar"
 if pipeline_validate_compute_jar >/dev/null 2>&1; then
     bad "G14 corrupt compute artifact was accepted — B6 guard did not fail closed"
@@ -297,9 +299,11 @@ PL="$SCRIPT_DIR/pipeline-lib.sh"
 bash -n "$PL" || { bad "G19 lib syntax invalid"; exit 1; }
 
 # (a) runtime: guarded functions refuse BEFORE launching anything
+# shellcheck disable=SC2034  # lib knobs: FAKETOOL_PORT and RATE_HZ are read by pipeline-lib.sh
 OUT="$(mktemp -d)" FAKETOOL_PORT=8899 RATE_HZ=10
 # shellcheck source=pipeline-lib.sh
 source "$PL"
+# shellcheck disable=SC2034  # lib state: read by pipeline-lib.sh's preflight guard
 PIPELINE_PREFLIGHT_OK=0
 msg="$(pipeline_start_faketool 2>&1 || true)"
 case "$msg" in

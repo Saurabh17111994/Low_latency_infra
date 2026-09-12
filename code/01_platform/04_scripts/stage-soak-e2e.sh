@@ -26,6 +26,7 @@ exec > >(tee -a "$PHASE_OUT/run.log") 2>&1
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/pipeline-lib.sh"
 JOB_ID=""
+# shellcheck disable=SC2034  # lib input: pipeline-lib.sh reads it when managing the faketool
 LIB_FAKETOOL_CONTAINER="e2e-faketool"
 NSE="/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv"
 fatal() { echo "SOAK-E2E: FAIL — $*" >&2; printf 'FAIL\n%s\n' "$*" > "$PHASE_OUT/FAILURE.txt"; exit 1; }
@@ -54,6 +55,7 @@ cleanup() {
 trap cleanup EXIT
 echo "SOAK-E2E: rate=${RATE_HZ}Hz stocks=2433 duration=${DURATION_S}s out=$PHASE_OUT"
 [ -r "$NSE" ] || fatal "NSE manifest not readable: $NSE"
+# shellcheck disable=SC2034  # lib contract output; nothing expands it in-tree (verified 2026-09-12)
 LIB_MANIFEST_SLICE="$NSE"
 # --- TM fresh (B3) + registration wait (B5), Fluss ready ---
 docker exec 01_docker-fluss-coordinator-1 sh -c 'exit 0' 2>/dev/null || fatal "fluss-coordinator not up"
@@ -69,6 +71,7 @@ reg="" && for i in $(seq 1 12); do
   [ "${reg:-0}" -ge 1 ] && break; sleep 5
 done
 [ "${reg:-0}" -ge 1 ] || fatal "TM never registered (B5)"
+# shellcheck disable=SC2034  # lib state: read by pipeline-lib.sh's preflight guard
 PIPELINE_PREFLIGHT_OK=1
 # --- image-freshness gate (soak skips pipeline_preflight, so G27b never ran
 # --- and a stale loadgen image measured OLD code on 2026-09-03/04). The
@@ -135,7 +138,7 @@ for i in 0 1 2; do
   docker logs -f "e2e-ingestion-$i" > "$OUT/j1-$i/java.out" 2>&1 &
 done
 for i in 0 1 2; do
-  ok="" && for j in $(seq 1 60); do
+  ok="" && for _ in $(seq 1 60); do
     [ -f "$OUT/ingestion-$i.loadtest.ready" ] && { ok=1; break; }; sleep 2
   done
   [ -n "$ok" ] || fatal "ingestion-$i not ready in 120s"
@@ -267,7 +270,7 @@ ls "$PHASE_OUT/stages" | head -8
 # the scorecard's O2 section is built from this file, so "what O2 saw" is
 # evidence, not a screenshot. Best-effort BY DESIGN (the stages/ TSVs remain
 # raw truth): a failed leg warns but never fails the run.
-RUN_START_UTC="$(date -u -d @$(stat -c %Y "$PHASE_OUT/stages/run-meta.txt" 2>/dev/null || date +%s) +%Y-%m-%dT%H:%M:%SZ)"
+RUN_START_UTC="$(date -u -d "@$(stat -c %Y "$PHASE_OUT/stages/run-meta.txt" 2>/dev/null || date +%s)" +%Y-%m-%dT%H:%M:%SZ)"
 RUN_END_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 RUN_ID="$(basename "$PHASE_OUT")"
 if python3 "$SCRIPT_DIR/soak-o2-evidence.py" --start "$RUN_START_UTC" --end "$RUN_END_UTC" \

@@ -378,8 +378,8 @@ pipeline_preflight() {
   # NOTE: /taskmanagers returns {"taskmanagers":[...]} — parse JSON and assert
   # on a non-empty array (the first pass grepped a nonexistent numRegisteredTMs
   # field and a later pass was whitespace-sensitive).
-  local tm_ok=0 tm_i
-  for tm_i in $(seq 1 30); do
+  local tm_ok=0
+  for _ in $(seq 1 30); do
     if curl -fsS --max-time 3 http://localhost:8081/taskmanagers 2>/dev/null \
         | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("taskmanagers") else 1)' \
         >/dev/null 2>&1; then
@@ -441,7 +441,9 @@ pipeline_preflight() {
   local ntok
   ntok=$(tail -n +2 "$slice" | grep -c .)
   [ "$ntok" -eq 1024 ] || { pipeline_fail "expected exactly 1024 tokens in slice, got $ntok"; return 1; }
+  # shellcheck disable=SC2034  # lib output: the caller reads it in this shell
   LIB_MANIFEST_SLICE="$slice"
+  # shellcheck disable=SC2034  # deprecated but kept: callers still reference it
   TOKENS=""   # deprecated: kept as empty for callers that still reference it
 
   mkdir -p "$OUT" "$OUT/bin" "$OUT/j1"
@@ -528,6 +530,7 @@ pipeline_start_faketool() {
   # Mirror container stdout into the evidence dir continuously; `docker
   # logs -f` exits when the container is removed at cleanup.
   docker logs -f "$LIB_FAKETOOL_CONTAINER" > "$OUT/faketool.log" 2>&1 &
+  # shellcheck disable=SC2034  # run handle for log/cleanup inspection; no in-tree reader
   FAKETOOL_LOG_PID=$!
 
   # Readiness: faketool prints real_rate=true once serving. Poll the
@@ -598,6 +601,7 @@ pipeline_start_ingestion() {
   # Mirror stdout (OTLP feed->ack payloads) — stage-capture parses this
   # file for ingestion.tsv. Dies with the container at cleanup.
   docker logs -f "$LIB_INGESTION_CONTAINER" > "$OUT/j1/java.out" 2>&1 &
+  # shellcheck disable=SC2034  # run handle for log/cleanup inspection; no in-tree reader
   INGESTION_LOG_PID=$!
 
   # Readiness = marker file via the /run bind mount + bridge subscription.
