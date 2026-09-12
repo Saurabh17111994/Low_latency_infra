@@ -100,8 +100,19 @@ func TestFaultInjectionDecodeBurstRecovers(t *testing.T) {
 	// The burst epoch must have produced an error, then a reconnect, and the
 	// second epoch must reach ACTIVE — the fault was survived.
 	events := eventsFrom(t, out)
-	if got := lastEventState(events, "subscription_ack"); got != "ACTIVE" {
-		t.Fatalf("slot must recover to ACTIVE after decode burst, got %q\n%s", got, out)
+	// Two acks, not one: `lastEventState` alone passed trivially whenever the
+	// post-reconnect epoch never acked, because the last ack was then still
+	// epoch 1's ACTIVE (emitted *before* the burst). Epoch 1 emits exactly one
+	// ack, so >=2 acks prove the second epoch reached ACTIVE - the recovery this
+	// test claims to pin.
+	acks := 0
+	for _, e := range events {
+		if e["event"] == "subscription_ack" {
+			acks++
+		}
+	}
+	if got := lastEventState(events, "subscription_ack"); got != "ACTIVE" || acks < 2 {
+		t.Fatalf("slot must recover to a second ACTIVE ack after the decode burst, got %q with %d ack(s)\n%s", got, acks, out)
 	}
 	if got := lastEventState(events, "reconnect"); got != "BACKOFF" {
 		t.Fatalf("expected reconnect BACKOFF after burst, got %q\n%s", got, out)
