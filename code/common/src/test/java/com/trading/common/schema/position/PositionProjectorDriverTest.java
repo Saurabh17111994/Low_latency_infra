@@ -204,4 +204,55 @@ class PositionProjectorDriverTest {
         assertThat(s.createdTs()).isEqualTo(NOW);
         assertThat(s.lastUpdateTs()).isEqualTo(NOW);
     }
+
+    // --- P3-166: re-entry must not be minted from the prior state alone ---
+
+    @Test
+    void redeliveredOpeningFillAfterCloseIsNotAppliedAsAPhantomReopen() {
+        driver.feed(row("pb-1", 100L, 10050L, 1L), ctx(FillEvent.SIDE_BUY), NOW);
+        String firstId = driver.positionIdFor(key(FillEvent.SIDE_BUY));
+        driver.feed(fill(firstId, FillEvent.SIDE_SELL, 100L, 12000L, 2L, "pb-2"), NOW);
+        assertThat(driver.snapshot(firstId).state()).isEqualTo(PositionState.CLOSED);
+
+        // A redelivered/out-of-order copy of the ORIGINAL opening fill (same event "pb-1",
+        // older version 1) arrives on the row path. Minting a fresh cycle id here gave that id
+        // no snapshot, so the version gate compared against version 0 and APPLIED it — a phantom
+        // OPEN position on pos-...-BUY-2 that bypassed the STALE/DUPLICATE guarantee entirely.
+        PositionProjectorDriver.FeedResult r = driver.feed(
+                row("pb-1", 100L, 10050L, 1L), ctx(FillEvent.SIDE_BUY), NOW);
+
+        // It is now rejected against the closed snapshot (older version, different event ->
+        // REGRESSION) instead of being applied as fresh exposure.
+        assertThat(r.outcome()).isEqualTo(PositionProjectorDriver.FeedOutcome.VIOLATION);
+        assertThat(r.positionId()).isEqualTo(firstId);
+        // No new cycle, no phantom position, no fabricated exposure.
+        assertThat(driver.size()).isEqualTo(1);
+        assertThat(driver.positionIdFor(key(FillEvent.SIDE_BUY))).isEqualTo(firstId);
+        assertThat(driver.snapshot("pos-acc-1-123-BUY-2")).isNull();
+        assertThat(driver.snapshot(firstId).state()).isEqualTo(PositionState.CLOSED);
+        assertThat(driver.snapshot(firstId).openQuantity()).isEqualTo(100L);
+        assertThat(driver.snapshot(firstId).closedQuantity()).isEqualTo(100L);
+    }
+
+    // --- P3-395: a status-only row must not mint an id or displace `active` ---
+
+    @Test
+    void statusOnlyRowDoesNotMintOrDisplaceTheActiveId() {
+        driver.feed(row("pb-1", 100L, 10050L, 1L), ctx(FillEvent.SIDE_BUY), NOW);
+        String closedId = driver.positionIdFor(key(FillEvent.SIDE_BUY));
+        driver.feed(fill(closedId, FillEvent.SIDE_SELL, 100L, 12000L, 2L, "pb-2"), NOW);
+        assertThat(driver.snapshot(closedId).state()).isEqualTo(PositionState.CLOSED);
+
+        // A status-only postback on the CLOSED key. Resolving the id before checking fill-ness
+        // minted pos-...-BUY-2 and pointed `active` at it — an id holding no snapshot, reachable
+        // by positionIdFor(key), and permanently displacing the closed position.
+        PositionProjectorDriver.FeedResult r = driver.feed(
+                row("pb-3", 0L, 10050L, 3L), ctx(FillEvent.SIDE_BUY), NOW);
+
+        assertThat(r.outcome()).isEqualTo(PositionProjectorDriver.FeedOutcome.NOT_A_FILL);
+        assertThat(r.positionId()).isNull();
+        assertThat(driver.positionIdFor(key(FillEvent.SIDE_BUY))).isEqualTo(closedId);
+        assertThat(driver.snapshot("pos-acc-1-123-BUY-2")).isNull();
+        assertThat(driver.size()).isEqualTo(1);
+    }
 }

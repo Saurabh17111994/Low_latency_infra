@@ -4,7 +4,6 @@ import com.trading.common.model.PositionState;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import org.apache.fluss.row.GenericRow;
 
 /**
@@ -78,22 +77,47 @@ public final class PositionProjectorDriver {
         }
     }
 
+    /**
+     * Placeholder bound while mapping a row before its position id is known
+     * (see {@link #feed(GenericRow, FillContext, long)}). Never persisted and
+     * never returned to callers.
+     */
+    private static final String UNRESOLVED_POSITION_ID = "pos-unresolved";
+
     private final Map<PositionKey, String> active = new HashMap<>();
     private final Map<PositionKey, Integer> cycles = new HashMap<>();
     private final Map<String, PositionSnapshot> snapshots = new HashMap<>();
 
-    /** Operator path: resolve/mint the position id, map, and project. */
+    /**
+     * Operator path: decide fill-ness, map, resolve/mint the position id, and project.
+     *
+     * <p>The order here is pinned by two findings:
+     * <ul>
+     *   <li><b>P3-395</b> — fill-ness is decided BEFORE the id is resolved.
+     *       Resolving first minted an id for a status-only row, so
+     *       {@code positionIdFor(key)} returned an id holding no snapshot and a
+     *       status-only row on a CLOSED key displaced {@code active} off the
+     *       closed position.</li>
+     *   <li><b>P3-166</b> — the row is mapped before the id is resolved, because
+     *       a re-entry may only mint a new cycle when the incoming fill is
+     *       genuinely newer than the closed snapshot (see
+     *       {@link #resolvePositionId(PositionKey, FillEvent)}).</li>
+     * </ul>
+     */
     public FeedResult feed(GenericRow fillsRow, FillContext ctx, long nowMs) {
         Objects.requireNonNull(fillsRow, "fillsRow");
         Objects.requireNonNull(ctx, "ctx");
+        if (!FillEventMapper.isFill(fillsRow)) {
+            // No id is minted and `active` is untouched: a status-only postback
+            // carries no exposure, so it can never create a position.
+            return FeedResult.notAFill(null);
+        }
         String accountScopeId = fillsRow.getString(FillsColumns.ACCOUNT_SCOPE_ID).toString();
         PositionKey key = new PositionKey(accountScopeId, ctx.instrumentToken(), ctx.side());
-        String positionId = resolvePositionId(key);
-        Optional<FillEvent> fill = FillEventMapper.mapIfFill(fillsRow, positionId, ctx);
-        if (fill.isEmpty()) {
-            return FeedResult.notAFill(positionId);
-        }
-        return feed(fill.get(), nowMs);
+        FillEvent mapped = FillEventMapper.mapIfFill(fillsRow, UNRESOLVED_POSITION_ID, ctx)
+                .orElseThrow(() -> new IllegalStateException(
+                        "isFill() accepted a row that mapIfFill() rejected"));
+        return feed(mapped.withPositionId(resolvePositionId(key, mapped)), nowMs);
     }
 
     /** Direct path for callers that already hold a resolved {@link FillEvent}. */
@@ -124,15 +148,29 @@ public final class PositionProjectorDriver {
      * mints a NEW id (dossier: "re-entry (new position_id after closure)") —
      * only for a BUY re-open; a SELL against a CLOSED position stays on the
      * closed id and is rejected as an oversell.
+     *
+     * <p><b>P3-166:</b> re-entry requires the incoming fill to be genuinely
+     * newer than the closed snapshot, and not the event already reflected
+     * there. Deciding from the prior state alone minted a fresh id whose
+     * snapshot was null, so {@link PositionProjector} evaluated the version gate
+     * against version 0 and returned APPLIED for any version &gt; 0 — applying a
+     * redelivered older opening fill as a phantom OPEN position and bypassing
+     * the STALE/DUPLICATE guarantee entirely. Anything not strictly newer stays
+     * on the closed id, where the version gate rejects it.
      */
-    private String resolvePositionId(PositionKey key) {
+    private String resolvePositionId(PositionKey key, FillEvent fill) {
         String currentId = active.get(key);
         if (currentId == null) {
             return mint(key);
         }
         PositionSnapshot current = snapshots.get(currentId);
-        if (current != null && current.state() == PositionState.CLOSED
-                && FillEvent.SIDE_BUY.equals(key.side())) {
+        if (current == null) {
+            return currentId;
+        }
+        if (current.state() == PositionState.CLOSED
+                && FillEvent.SIDE_BUY.equals(key.side())
+                && fill.sourceVersion() > current.sourceVersion()
+                && !fill.sourceEventId().equals(current.sourceEventId())) {
             return mint(key);
         }
         return currentId;

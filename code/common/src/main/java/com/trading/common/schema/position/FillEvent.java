@@ -42,4 +42,17 @@ public record FillEvent(
             throw new IllegalArgumentException("side must be BUY or SELL, got " + side);
         }
     }
+
+    /**
+     * A copy of this fill bound to {@code positionId}.
+     *
+     * <p>The driver maps a row before it can resolve the position id — the
+     * re-entry decision needs the fill's {@code sourceVersion}/{@code sourceEventId}
+     * (P3-166) — so the id is bound on afterwards rather than guessed up front.
+     */
+    public FillEvent withPositionId(String positionId) {
+        return new FillEvent(positionId, tradeContextId, accountScopeId, instrumentToken,
+                exchange, symbol, side, fillQty, fillPricePaise, sourceEventId, sourceVersion,
+                eventTimeMs);
+    }
 }

@@ -482,9 +482,9 @@ impl PositionProjectorDriver {
     }
 
     /// Resolve or mint the position id for a key, then feed `fill` onto that position.
-    /// Mirrors the operator path (`feed(GenericRow, ctx, nowMs)` -> resolve -> project).
+    /// Mirrors the operator path (`feed(GenericRow, ctx, nowMs)` -> map -> resolve -> project).
     pub fn feed_on_key(&mut self, key: &PositionKey, fill: &FillEvent, now_ms: i64) -> FeedResult {
-        let position_id = self.resolve_position_id(key);
+        let position_id = self.resolve_position_id(key, fill);
         let mut positioned = fill.clone();
         positioned.position_id = position_id.clone();
         let r = self.feed_fill(&positioned, now_ms);
@@ -492,20 +492,29 @@ impl PositionProjectorDriver {
         FeedResult { position_id, ..r }
     }
 
-    fn resolve_position_id(&mut self, key: &PositionKey) -> String {
-        let current_id = self.active.get(key).cloned();
-        match current_id {
-            None => self.mint(key),
-            Some(id) => {
-                let current = self.snapshots.get(&id).cloned();
-                if let Some(c) = current {
-                    if c.state == PositionState::Closed && key.side == Side::Buy {
-                        return self.mint(key);
-                    }
-                }
-                id
-            }
+    /// Mint or reuse the position id for a key. Mirrors
+    /// `PositionProjectorDriver.resolvePositionId`, including the P3-166 guard.
+    ///
+    /// A re-entry cycle is minted only for a strictly newer, different event. Deciding from the
+    /// prior state alone (CLOSED + BUY) gave the fresh id no snapshot, so the version gate compared
+    /// against version 0 and returned APPLIED for any incoming version > 0 — a redelivered older
+    /// opening fill was applied as a phantom OPEN position, bypassing STALE/DUPLICATE entirely.
+    /// Anything not strictly newer stays on the closed id, where the gate rejects it.
+    fn resolve_position_id(&mut self, key: &PositionKey, fill: &FillEvent) -> String {
+        let Some(current_id) = self.active.get(key).cloned() else {
+            return self.mint(key);
+        };
+        let Some(current) = self.snapshots.get(&current_id).cloned() else {
+            return current_id;
+        };
+        if current.state == PositionState::Closed
+            && key.side == Side::Buy
+            && fill.source_sequence > current.source_version
+            && fill.source_event_id != current.source_event_id
+        {
+            return self.mint(key);
         }
+        current_id
     }
 
     fn mint(&mut self, key: &PositionKey) -> String {
@@ -1180,5 +1189,68 @@ mod tests {
             interrupted.snapshot(POSITION_ID).unwrap(),
             "interrupted rebuild must resume to the uninterrupted state (DR-008/EOD-003)"
         );
+    }
+
+    // --- P3-166: re-entry mints a new cycle, but ONLY for a genuinely newer event ---
+
+    #[test]
+    fn reentry_after_close_mints_a_new_cycle_for_a_newer_event() {
+        let mut driver = PositionProjectorDriver::new();
+        let key = PositionKey {
+            account_scope_id: "acc-1".into(),
+            instrument_token: 1001,
+            side: Side::Buy,
+        };
+        driver.feed_on_key(&key, &fill(1, Side::Buy, 10, 1000), NOW);
+        assert_eq!(
+            driver.position_id_for(&key).unwrap(),
+            "pos-acc-1-1001-BUY-1"
+        );
+        driver.feed_on_key(&key, &fill(2, Side::Sell, 10, 1100), NOW);
+        assert_eq!(
+            driver.snapshot("pos-acc-1-1001-BUY-1").unwrap().state,
+            PositionState::Closed
+        );
+
+        // A genuinely newer event (seq 3 > 2, different event id) on a fresh BUY opens a new
+        // cycle — the guard must not disable legitimate re-entry.
+        let r = driver.feed_on_key(&key, &fill(3, Side::Buy, 5, 1200), NOW);
+        assert_eq!(r.outcome, FeedOutcome::Applied);
+        assert_eq!(r.position_id, "pos-acc-1-1001-BUY-2");
+        assert_eq!(r.snapshot.unwrap().state, PositionState::Open);
+        assert_eq!(driver.size(), 2);
+    }
+
+    #[test]
+    fn redelivered_opening_fill_after_close_is_not_a_phantom_reopen() {
+        let mut driver = PositionProjectorDriver::new();
+        let key = PositionKey {
+            account_scope_id: "acc-1".into(),
+            instrument_token: 1001,
+            side: Side::Buy,
+        };
+        driver.feed_on_key(&key, &fill(1, Side::Buy, 10, 1000), NOW);
+        driver.feed_on_key(&key, &fill(2, Side::Sell, 10, 1100), NOW);
+        assert_eq!(
+            driver.snapshot("pos-acc-1-1001-BUY-1").unwrap().state,
+            PositionState::Closed
+        );
+
+        // The ORIGINAL opening fill (seq 1, evt-1) is redelivered out of order. Minting a new
+        // cycle gave that id no snapshot, so the version gate compared against version 0 and
+        // APPLIED it — a phantom OPEN position on pos-...-BUY-2 that bypassed STALE/DUPLICATE.
+        let r = driver.feed_on_key(&key, &fill(1, Side::Buy, 10, 1000), NOW);
+
+        assert_eq!(r.outcome, FeedOutcome::Violation);
+        assert_eq!(r.position_id, "pos-acc-1-1001-BUY-1");
+        assert_eq!(driver.size(), 1, "no phantom cycle was minted");
+        assert_eq!(
+            driver.position_id_for(&key).unwrap(),
+            "pos-acc-1-1001-BUY-1"
+        );
+        assert!(driver.snapshot("pos-acc-1-1001-BUY-2").is_none());
+        let after = driver.snapshot("pos-acc-1-1001-BUY-1").unwrap();
+        assert_eq!(after.state, PositionState::Closed);
+        assert_eq!((after.open_quantity, after.closed_quantity), (10, 10));
     }
 }

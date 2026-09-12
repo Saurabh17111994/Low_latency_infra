@@ -31,20 +31,34 @@ public final class FillEventMapper {
     private FillEventMapper() {}
 
     /**
+     * Is this row a fill at all? A status-only postback (missing/non-positive
+     * {@code fill_qty}, or missing/negative {@code fill_price_paise}) is not.
+     *
+     * <p>Split out of {@link #mapIfFill} so the driver can decide fill-ness
+     * BEFORE resolving a position id (P3-395): minting for a status-only row
+     * created an id with no snapshot and displaced {@code active} off a closed
+     * position.
+     */
+    public static boolean isFill(GenericRow row) {
+        Objects.requireNonNull(row, "row");
+        if (row.isNullAt(FillsColumns.FILL_QTY)
+                || row.getLong(FillsColumns.FILL_QTY) <= 0) {
+            return false;
+        }
+        return !row.isNullAt(FillsColumns.FILL_PRICE_PAISE)
+                && row.getLong(FillsColumns.FILL_PRICE_PAISE) >= 0;
+    }
+
+    /**
      * @return the {@link FillEvent}, or empty when the row is not a fill
-     *         (fill_qty missing/non-positive or price missing)
+     *         (fill_qty missing/non-positive or price missing/negative)
      */
     public static Optional<FillEvent> mapIfFill(GenericRow row, String positionId,
             FillContext ctx) {
         Objects.requireNonNull(row, "row");
         Objects.requireNonNull(positionId, "positionId");
         Objects.requireNonNull(ctx, "ctx");
-        if (row.isNullAt(FillsColumns.FILL_QTY)
-                || row.getLong(FillsColumns.FILL_QTY) <= 0) {
-            return Optional.empty();
-        }
-        if (row.isNullAt(FillsColumns.FILL_PRICE_PAISE)
-                || row.getLong(FillsColumns.FILL_PRICE_PAISE) < 0) {
+        if (!isFill(row)) {
             return Optional.empty();
         }
         long receiveTime = row.getLong(FillsColumns.RECEIVE_TIME);
