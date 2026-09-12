@@ -201,12 +201,16 @@ check-image-stale:
 # (which is unsound: an image built from committed content just before the
 # commit looks STALE forever, and a cache-hit rebuild never clears it).
 # Fail-closed: no stamps computed => build nothing.
+# Content-addressed rebuild (CHG-124). The stamps must ride on the build
+# command's own environment (`env VAR=... compose build`): `eval`ing them would
+# set shell-only variables that the compose child never sees, every image would
+# stay unlabelled and the checker would pass by clock — the exact no-op caught
+# on 2026-09-12. --require-stamps keeps that failure loud instead of silent.
 images:
 	@stamps="$$(python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --print-stamps-env)" || exit 1; \
 	[ -n "$$stamps" ] || { echo "images: no build stamps computed — refusing to build unstamped images"; exit 1; }; \
-	eval "$$stamps"; \
-	$(COMPOSE) build $$(python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --print-services) && \
-	python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --compose code/01_platform/01_docker/docker-compose.yml
+	env $$stamps $(COMPOSE) build $$(python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --print-services) && \
+	python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --compose code/01_platform/01_docker/docker-compose.yml --require-stamps
 
 # 08 Local Compose Phase A — L0-L4 (offline + gated container probes)
 test-local:

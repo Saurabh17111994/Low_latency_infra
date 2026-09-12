@@ -34,13 +34,22 @@ DIRTY WARN (the image cannot include them) but do not fail the gate — the
 monday gate runs the committed truth; rebuild images with `make images`
 (computes every stamp, builds, then re-verifies).
 
-Exit: 0 = all fresh; 1 = STALE/MISSING; 2 = config/usage error.
+Exit: 0 = all fresh; 1 = STALE/MISSING (or unstamped under --require-stamps);
+2 = config/usage error.
 
 Usage:
   image_staleness_check.py [--compose <docker-compose.yml>]
                            [--git-root <repo root>] [--project <name>]
                            [--service <name> [--service ...]]
                            [--print-services | --print-stamps-env]
+                           [--require-stamps]
+
+The stamp is only as good as its transport: `--print-stamps-env` must be applied
+to the build command itself (`env $(... --print-stamps-env) docker compose
+build`). `eval`ing it without `export` leaves compose reading the default
+`${VAR:-none}` and every image silently unlabelled, so `make images` re-verifies
+with --require-stamps instead of trusting a build to have stamped anything (that
+exact no-op shipped and was caught on 2026-09-12).
 
 Matches the pytest pattern of prod_node_check.py: pure helpers + injected
 values so unit tests need no docker.
@@ -386,7 +395,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the build services (space separated) and exit")
     parser.add_argument("--print-stamps-env", action="store_true",
                         help="print <SERVICE>_BUILD_STAMP=<sha256> lines for the "
-                             "services and exit (eval before `compose build`)")
+                             "services and exit (apply to the build command: "
+                             "env $(... --print-stamps-env) docker compose build)")
+    parser.add_argument("--require-stamps", action="store_true",
+                        help="fail on an image without a %s label — a missing "
+                             "label means the stamps never reached docker "
+                             "compose, and the timestamp fallback would then "
+                             "pass by clock" % STAMP_LABEL)
     args = parser.parse_args(argv)
 
     git_root = args.git_root.resolve()
@@ -433,16 +448,24 @@ def main(argv: list[str] | None = None) -> int:
         result = check_service(name, image, git_root, services,
                                compose_path.parent)
         status = result["status"]
+        detail = result["detail"]
+        if args.require_stamps and result["stamp_image"] is None:
+            # No label = the stamps never reached docker compose. The timestamp
+            # fallback below would report FRESH by clock, which is the guesswork
+            # the stamp exists to remove; fail instead of passing by accident.
+            status = "NO-STAMP"
+            detail = ("image carries no build stamp — the stamps env did not "
+                      "reach docker compose (rebuild: make images)")
         mark = "OK " if status == "FRESH" else ("WARN" if status == "DIRTY-WARN"
                                                 else "FAIL")
-        if status in ("STALE", "MISSING"):
+        if status in ("STALE", "MISSING", "NO-STAMP"):
             failures += 1
         elif status == "DIRTY-WARN":
             warn += 1
-        print(f"image-stale: [{mark}] {name} ({image}) {status}: {result['detail']}")
+        print(f"image-stale: [{mark}] {name} ({image}) {status}: {detail}")
 
     if failures:
-        print(f"image-stale: FAIL — {failures} stale/missing "
+        print(f"image-stale: FAIL — {failures} stale/missing/unstamped "
               f"(rebuild: make images)")
         return 1
     if warn:

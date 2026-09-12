@@ -384,6 +384,107 @@ class MainTest(unittest.TestCase):
             self.assertEqual(rc, 2)
 
 
+class RequireStampsTest(unittest.TestCase):
+    """--require-stamps turns a missing build label into a failure; without the
+    flag the timestamp proxy still decides, so pre-CHG-124 images stay
+    checkable. It exists because a build can succeed while nothing was stamped:
+    on 2026-09-12 the stamps were eval'ed inside the recipe's shell, docker
+    compose therefore read the default `${VAR:-none}` for all eight services,
+    and the checker still said PASS — by clock."""
+
+    @staticmethod
+    def _repo_and_compose(td: str):
+        repo = make_repo(Path(td), filename="Dockerfile")
+        # The compose file lives inside the repo so the declared Dockerfile
+        # resolves against git_root and the fixture yields a real stamp.
+        compose = repo / "compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              ing: {build: {context: ".", dockerfile: "Dockerfile"}}
+            """), encoding="utf-8")
+        return repo, compose
+
+    def _run(self, repo: Path, compose: Path, stamp_image, extra: list[str]):
+        with mock.patch.object(isc, "image_created_epoch",
+                               lambda image: EPOCH_B), \
+                mock.patch.object(isc, "image_label",
+                                  lambda image, key=isc.STAMP_LABEL: stamp_image):
+            return isc.main(["--git-root", str(repo), "--compose", str(compose)]
+                            + extra)
+
+    def test_missing_label_fails_under_require_stamps(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, compose = self._repo_and_compose(td)
+            rc = self._run(repo, compose, None, ["--require-stamps"])
+        self.assertEqual(rc, 1, "an unlabelled image must fail --require-stamps")
+
+    def test_missing_label_passes_without_the_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, compose = self._repo_and_compose(td)
+            rc = self._run(repo, compose, None, [])
+        self.assertEqual(rc, 0, "pre-stamp images stay checkable via the proxy")
+
+    def test_matching_label_passes_under_require_stamps(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo, compose = self._repo_and_compose(td)
+            stamp = isc.input_stamp(
+                repo, "ing", {"context": ".", "dockerfile": "Dockerfile"},
+                compose.parent)
+            self.assertIsNotNone(stamp, "the fixture must produce a stamp")
+            rc = self._run(repo, compose, stamp, ["--require-stamps"])
+        self.assertEqual(rc, 0, "a matching stamp must pass")
+
+
+class MakeImagesRecipeTest(unittest.TestCase):
+    """Guard the transport the 2026-09-12 no-op broke: the stamps must be handed
+    to the build command itself. `eval` sets shell-only variables that the
+    compose child never inherits — every image stayed unlabelled and the checker
+    passed by clock, which is the failure this whole change exists to remove."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repo_root = Path(__file__).resolve().parents[4]
+        cls.makefile = (cls.repo_root / "Makefile").read_text(encoding="utf-8")
+
+    def _recipe(self) -> str:
+        parts = self.makefile.split("\nimages:\n", 1)
+        self.assertEqual(len(parts), 2, "Makefile must define an `images:` target")
+        return parts[1].split("\n\n", 1)[0]
+
+    def test_stamps_are_applied_to_the_build_command(self):
+        self.assertIn(
+            "env $$stamps", self._recipe(),
+            "the stamps must ride on the build command's environment "
+            "(env VAR=... compose build), not be eval'ed into the recipe shell")
+
+    def test_recipe_does_not_eval_the_stamps(self):
+        self.assertNotIn("eval", self._recipe(),
+                         "eval sets shell-only variables: docker compose, a "
+                         "child process, never sees them")
+
+    def test_recipe_reverifies_with_require_stamps(self):
+        self.assertIn("--require-stamps", self._recipe(),
+                      "make images must fail loudly if an image ends up "
+                      "unlabelled")
+
+    def test_printed_stamps_are_bare_and_applyable_with_env(self):
+        """`env $(... --print-stamps-env)` works only for bare VAR=value lines:
+        an `export ` prefix would be taken as the program name by env."""
+        out = subprocess.run(
+            [sys.executable,
+             str(self.repo_root / "code" / "01_platform" / "04_scripts"
+                 / "image_staleness_check.py"),
+             "--git-root", str(self.repo_root), "--print-stamps-env"],
+            capture_output=True, text=True, check=True).stdout
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        self.assertTrue(lines, "the checker must print one line per build service")
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertFalse(line.startswith("export "),
+                                 "`env $(...)` cannot consume an export prefix")
+                self.assertRegex(line, r"^[A-Z0-9_]+_BUILD_STAMP=([0-9a-f]{64}|none)$")
+
+
 class NativeSplitGuardTest(unittest.TestCase):
     """Guard the native Flink split: the compute image is the platform only,
     the jar is a host artifact. These tests fail if someone re-bakes the jar
