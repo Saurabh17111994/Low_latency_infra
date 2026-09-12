@@ -8,7 +8,7 @@ COMPOSE := docker compose --env-file code/01_platform/01_docker/.env --env-file 
 # fails obscurely). Set MVN_FLAGS=-o when the local cache is warm.
 MVN := mvn $(MVN_FLAGS)
 
-.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite check-image-stale branch-check proto
+.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite check-image-stale images branch-check proto
 
 # Branch guard: low-latency work must happen on the low-latency branch.
 # Any agent (human or AI) MUST run this before editing code. Fails (exit 1)
@@ -91,6 +91,8 @@ help:
 	@echo "              reservation claims, stale 'pending implementation' prose) + the"
 	@echo "              dossier-trio coherence checks (04-signal-job / 13 / 14 agree on the"
 	@echo "              re-scope, DEC-038 landing, and P11 status) — exit 0 only when all green"
+	@echo "  images      rebuild every build: image WITH its content stamp (sha256 of its"
+	@echo "              inputs, baked in as build.labels) and verify with check-image-stale"
 	@echo "  pin-check   pin discipline (foundation L548/553/554): matrix shape, corpus integrity,"
 	@echo "              external-SNAPSHOT ban, platform version pins"
 	@echo "  test-09     offline static validation of docker-stack.yml (no swarm/VM needed):"
@@ -192,6 +194,19 @@ execution-network-check:
 # any enable (T8/T9) or Monday-gate step.
 check-image-stale:
 	@python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --compose code/01_platform/01_docker/docker-compose.yml
+
+# Rebuild every build: image WITH its content stamp (CHG-124). The stamp is
+# sha256 over the image's inputs; compose bakes it into build.labels, so
+# check-image-stale can verify freshness by content instead of by timestamp
+# (which is unsound: an image built from committed content just before the
+# commit looks STALE forever, and a cache-hit rebuild never clears it).
+# Fail-closed: no stamps computed => build nothing.
+images:
+	@stamps="$$(python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --print-stamps-env)" || exit 1; \
+	[ -n "$$stamps" ] || { echo "images: no build stamps computed — refusing to build unstamped images"; exit 1; }; \
+	eval "$$stamps"; \
+	$(COMPOSE) build $$(python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --print-services) && \
+	python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --compose code/01_platform/01_docker/docker-compose.yml
 
 # 08 Local Compose Phase A — L0-L4 (offline + gated container probes)
 test-local:

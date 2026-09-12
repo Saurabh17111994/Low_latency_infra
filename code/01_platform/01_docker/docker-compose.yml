@@ -626,6 +626,12 @@ services:
       # root (code/ = ../.. from 01_docker/), not the ingestion directory.
       context: ../..
       dockerfile: 02_services/01_ingestion/Dockerfile
+      # Content-addressed freshness (the G27b pattern, generalised in CHG-124):
+      # `make images` computes sha256 over this image's inputs and compose bakes
+      # it in here; image_staleness_check.py reads it back and compares it with
+      # the tree. An image-config label only, so it never invalidates a layer.
+      labels:
+        com.trading.build-stamp: ${INGESTION_BUILD_STAMP:-none}
     env_file:
       - .env
       - secrets.env
@@ -750,6 +756,9 @@ services:
       # LOADGEN_BUILD_STAMP (sha256 of all build inputs) before building.
       args:
         BUILD_STAMP: ${LOADGEN_BUILD_STAMP:-nostamp}
+      # The same stamp, exposed as the label the gate's staleness check reads.
+      labels:
+        com.trading.build-stamp: ${LOADGEN_BUILD_STAMP:-none}
     image: pipeline-loadgen:1.0.0
     networks: [trading-net]
     profiles: ["loadgen"]
@@ -765,6 +774,8 @@ services:
       # matching the ingestion image build context above.
       context: ../..
       dockerfile: 02_services/06_execution_bridge/Dockerfile
+      labels:
+        com.trading.build-stamp: ${EXECUTION_BRIDGE_BUILD_STAMP:-none}
     env_file:
       - .env
       - secrets.env
@@ -804,6 +815,8 @@ services:
     build:
       context: ../..
       dockerfile: 02_services/06_execution_gateway/Dockerfile
+      labels:
+        com.trading.build-stamp: ${EXECUTION_GATEWAY_BUILD_STAMP:-none}
     networks: [trading-net, execution-net]
     restart: unless-stopped
     depends_on: [fluss-coordinator, fluss-tablet]
@@ -827,6 +840,8 @@ services:
     build:
       context: ../../02_services/04_executor
       dockerfile: Dockerfile
+      labels:
+        com.trading.build-stamp: ${NAUTILUS_BUILD_STAMP:-none}
     networks: [execution-net]
     depends_on: [execution-gateway, execution-bridge]
     environment:
@@ -855,6 +870,8 @@ services:
       # this compose file), mirroring the ingestion build-context rule (R-002).
       context: ../../..
       dockerfile: code/01_platform/01_docker/ddl-apply/Dockerfile
+      labels:
+        com.trading.build-stamp: ${DDL_APPLY_BUILD_STAMP:-none}
     networks: [trading-net]
     depends_on: [fluss-coordinator, fluss-tablet]
     environment:
@@ -888,6 +905,8 @@ services:
     build:
       context: ../../..
       dockerfile: code/01_platform/01_docker/ddl-apply/Dockerfile
+      labels:
+        com.trading.build-stamp: ${EOD_CONTROLLER_BUILD_STAMP:-none}
     entrypoint: []
     networks: [trading-net]
     depends_on: [fluss-coordinator, fluss-tablet]
@@ -915,6 +934,8 @@ services:
       # would break the build.
       context: ../../02_services/02_compute
       dockerfile: Dockerfile
+      labels:
+        com.trading.build-stamp: ${COMPUTE_BUILD_STAMP:-none}
     depends_on: [flink-jobmanager, flink-taskmanager]
     volumes:
       - flink-checkpoints:/checkpoints

@@ -43,6 +43,7 @@ unless a command says otherwise.
 | Action | Command | What it does |
 |---|---|---|
 | Full Monday gate (13 checks) | `make gate` | The big verification gate (`run-monday-gates.sh`) |
+| Rebuild images with content stamps | `make images` | Rebuilds every `build:` image with its `com.trading.build-stamp` (sha256 of its inputs, CHG-124) and re-verifies with `check-image-stale` |
 | Implementation-order gate | `make gate-order` | 7 tasks in mandatory sequence; first failure blocks downstream |
 | Full doc audit | `make full-audit` | Docs-vs-code truth check (3 gates + beyond-scanner sweeps) |
 | Doc audit | `make docs-audit` | Manifest/ownership/test-count checks + cargo clippy/fmt + go vet |

@@ -93,6 +93,112 @@ class DeclaredImageTest(unittest.TestCase):
                          "01_docker-ingestion")
 
 
+class StampTest(unittest.TestCase):
+    """The content stamp must move on content — never on clocks, layout, or
+    build outputs. That is the whole point of replacing the timestamp proxy
+    (proven unsound live on 2026-09-02 and again 2026-09-12)."""
+
+    @staticmethod
+    def _tree(td: Path) -> Path:
+        root = td / "root"
+        for name in ("a.txt", "sub/b.txt", "sub/deep/c.txt"):
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"content of {name}\n", encoding="utf-8")
+        return root
+
+    def test_touch_and_identical_rewrite_do_not_move_the_stamp(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._tree(Path(td))
+            with mock.patch.dict(isc.SERVICE_SOURCES, {"probe": ["."]}):
+                before = isc.input_stamp(root, "probe")
+                (root / "a.txt").write_text("content of a.txt\n", encoding="utf-8")
+                # The clock change must be the LAST mutation: an earlier utime
+                # would be overwritten by the rewrite, and on a coarse-grained
+                # filesystem a clock-dependent implementation could then slip
+                # through this guard (caught while falsifying it, 2026-09-12).
+                os.utime(root / "a.txt", (1, 1))
+                self.assertEqual(isc.input_stamp(root, "probe"), before,
+                                 "mtime-only changes must be invisible")
+
+    def test_one_byte_edit_moves_the_stamp(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._tree(Path(td))
+            with mock.patch.dict(isc.SERVICE_SOURCES, {"probe": ["."]}):
+                before = isc.input_stamp(root, "probe")
+                (root / "sub" / "deep" / "c.txt").write_text("x\n", encoding="utf-8")
+                self.assertNotEqual(isc.input_stamp(root, "probe"), before)
+
+    def test_build_outputs_are_not_inputs(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._tree(Path(td))
+            with mock.patch.dict(isc.SERVICE_SOURCES, {"probe": ["."]}):
+                before = isc.input_stamp(root, "probe")
+                for junk in ("target/classes/A.class", "sub/__pycache__/a.pyc",
+                             "node_modules/pkg/index.js", ".git/HEAD"):
+                    path = root / junk
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text("junk\n", encoding="utf-8")
+                self.assertEqual(isc.input_stamp(root, "probe"), before,
+                                 "build outputs must not move the stamp")
+
+    def test_stamp_is_independent_of_the_absolute_path(self):
+        with tempfile.TemporaryDirectory() as one, tempfile.TemporaryDirectory() as two:
+            left, right = self._tree(Path(one)), self._tree(Path(two))
+            with mock.patch.dict(isc.SERVICE_SOURCES, {"probe": ["."]}):
+                self.assertEqual(isc.input_stamp(left, "probe"),
+                                 isc.input_stamp(right, "probe"))
+
+    def test_compose_dockerfile_is_an_input(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._tree(Path(td))
+            dockerfile = root / "Dockerfile"
+            dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+            entry = {"context": ".", "dockerfile": "Dockerfile"}
+            with mock.patch.dict(isc.SERVICE_SOURCES, {}, clear=True):
+                before = isc.input_stamp(root, "probe", entry, root)
+                dockerfile.write_text("FROM scratch\nLABEL x=y\n", encoding="utf-8")
+                after = isc.input_stamp(root, "probe", entry, root)
+            self.assertIsNotNone(before, "the Dockerfile alone is an input")
+            self.assertNotEqual(before, after)
+
+    def test_stamp_is_none_when_nothing_can_be_hashed(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._tree(Path(td))
+            self.assertIsNone(isc.input_stamp(root, "unmapped-service"))
+
+    def test_stamp_is_a_sha256_hex(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = self._tree(Path(td))
+            with mock.patch.dict(isc.SERVICE_SOURCES, {"probe": ["."]}):
+                stamp = isc.input_stamp(root, "probe")
+            self.assertRegex(stamp, r"^[0-9a-f]{64}$")
+
+    def test_env_var_name_matches_compose_interpolation(self):
+        self.assertEqual(isc.env_var_name("execution-gateway"),
+                         "EXECUTION_GATEWAY_BUILD_STAMP")
+        self.assertEqual(isc.env_var_name("loadgen"), "LOADGEN_BUILD_STAMP")
+
+
+class StampCheckServiceTest(unittest.TestCase):
+    def test_a_matching_stamp_beats_a_missing_timestamp(self):
+        """The stamp is the primary signal: an image with no readable Created
+        epoch (would be MISSING) is FRESH when its stamp matches the tree."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_repo(Path(td), filename="Dockerfile")
+            entry = {"context": ".", "dockerfile": "Dockerfile"}
+            with mock.patch.dict(isc.SERVICE_SOURCES, {"probe": ["Dockerfile"]}):
+                stamp = isc.input_stamp(repo, "probe", entry, repo)
+                with mock.patch.object(isc, "image_created_epoch", lambda image: None), \
+                        mock.patch.object(isc, "image_label",
+                                          lambda image, key=isc.STAMP_LABEL: stamp):
+                    result = isc.check_service("probe", "probe:1", repo,
+                                               {"probe": entry}, repo)
+            self.assertEqual(result["status"], "FRESH")
+            self.assertEqual(result["stamp_image"], stamp)
+            self.assertEqual(result["stamp_sources"], stamp)
+
+
 class VerdictTest(unittest.TestCase):
     def test_fresh_when_image_newer(self):
         status, _ = isc.verdict(EPOCH_B, EPOCH_A, dirty=False)
@@ -114,6 +220,30 @@ class VerdictTest(unittest.TestCase):
     def test_dirty_wins_over_stale(self):
         status, _ = isc.verdict(EPOCH_A, EPOCH_B, dirty=True)
         self.assertEqual(status, "DIRTY-WARN")
+
+    def test_matching_stamp_is_fresh_without_any_timestamps(self):
+        status, detail = isc.verdict(None, None, dirty=False,
+                                     stamp_image="a" * 64, stamp_sources="a" * 64)
+        self.assertEqual(status, "FRESH")
+        self.assertIn("matches the sources", detail)
+
+    def test_stamp_mismatch_is_stale_even_when_the_image_looks_newer(self):
+        status, detail = isc.verdict(EPOCH_B, EPOCH_A, dirty=False,
+                                     stamp_image="a" * 64, stamp_sources="b" * 64)
+        self.assertEqual(status, "STALE", "content decides, not the clock")
+        self.assertIn("make images", detail)
+
+    def test_without_a_stamp_the_timestamp_proxy_still_decides(self):
+        status, detail = isc.verdict(EPOCH_B, EPOCH_A, dirty=False)
+        self.assertEqual(status, "FRESH")
+        self.assertIn("timestamp proxy", detail)
+
+    def test_dirty_beats_a_matching_stamp(self):
+        status, _ = isc.verdict(EPOCH_B, EPOCH_A, dirty=True,
+                                stamp_image="a" * 64, stamp_sources="a" * 64)
+        self.assertEqual(status, "DIRTY-WARN",
+                         "the gate runs committed truth: an uncommitted tree is "
+                         "reported even when the image matches the working copy")
 
 
 class GitEpochTest(unittest.TestCase):
@@ -190,6 +320,30 @@ class CheckServiceTest(unittest.TestCase):
                 self.assertTrue((repo_root / path).exists(),
                                 f"{service}: {path} missing")
             self.assertGreaterEqual(len(paths), 1, service)
+
+
+class ComposeStampLabelTest(unittest.TestCase):
+    """Every build: service in the real compose must declare the content-stamp
+    label, so a new service cannot silently inherit the (unsound) timestamp
+    proxy. Guarded here rather than in review, because the failure mode is a
+    false verdict months later, not a broken build today."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repo_root = Path(__file__).resolve().parents[4]
+        cls.compose_path = (cls.repo_root / "code" / "01_platform" / "01_docker"
+                            / "docker-compose.yml")
+
+    def test_every_build_service_declares_the_stamp_label(self):
+        services = isc.build_services(isc.load_compose(self.compose_path))
+        self.assertGreaterEqual(len(services), 8, "expected the 8 build services")
+        for name, entry in sorted(services.items()):
+            with self.subTest(service=name):
+                declared = (entry.get("labels") or {}).get(isc.STAMP_LABEL)
+                self.assertEqual(
+                    declared, "${%s:-none}" % isc.env_var_name(name),
+                    f"{name}: build.labels.{isc.STAMP_LABEL} must interpolate "
+                    f"${{{isc.env_var_name(name)}}} so `make images` can stamp it")
 
 
 class MainTest(unittest.TestCase):
