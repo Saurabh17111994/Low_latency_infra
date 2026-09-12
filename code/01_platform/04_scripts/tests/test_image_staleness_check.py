@@ -142,6 +142,44 @@ class StampTest(unittest.TestCase):
                 self.assertEqual(isc.input_stamp(root, "probe"), before,
                                  "build outputs must not move the stamp")
 
+    def test_git_ignored_build_outputs_are_not_inputs(self):
+        """Host build outputs inside a hashed subtree must not move the stamp.
+
+        Gate step 6 builds the E2E test binaries into
+        go-bridge/{arrow-bridge,faketool/faketool} while step 8 hashes that
+        subtree; both are git-ignored, so hashing them reported ingestion,
+        loadgen and execution-gateway STALE although no source had changed
+        (2026-09-12, gate attempt 7).
+        """
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_repo(Path(td))
+            (repo / ".gitignore").write_text("artifacts/\nhost-binary\n",
+                                             encoding="utf-8")
+            env = dict(os.environ,
+                       GIT_AUTHOR_DATE=f"@{EPOCH_B} +0000",
+                       GIT_COMMITTER_DATE=f"@{EPOCH_B} +0000",
+                       GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+            subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True,
+                           env=env, capture_output=True)
+            subprocess.run(["git", "commit", "-q", "-m", "ignore"], cwd=repo,
+                           check=True, env=env, capture_output=True)
+            with mock.patch.dict(isc.SERVICE_SOURCES, {"probe": ["."]}):
+                before = isc.input_stamp(repo, "probe")
+                (repo / "host-binary").write_bytes(b"built\n")
+                self.assertEqual(isc.input_stamp(repo, "probe"), before,
+                                 "an ignored build output must not move the stamp")
+                (repo / "artifacts").mkdir()
+                (repo / "artifacts" / "test.bin").write_bytes(b"x")
+                self.assertEqual(isc.input_stamp(repo, "probe"), before,
+                                 "an ignored directory must not move the stamp")
+                # Boundary: untracked but NOT ignored is still a real input —
+                # a new source file would be copied into the image.
+                (repo / "new-source.go").write_text("package main\n",
+                                                    encoding="utf-8")
+                self.assertNotEqual(isc.input_stamp(repo, "probe"), before,
+                                    "an untracked source file must move the stamp")
+
     def test_stamp_is_independent_of_the_absolute_path(self):
         with tempfile.TemporaryDirectory() as one, tempfile.TemporaryDirectory() as two:
             left, right = self._tree(Path(one)), self._tree(Path(two))

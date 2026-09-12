@@ -175,14 +175,45 @@ _STAMP_SKIP_DIRS = frozenset(
 _STAMP_SKIP_SUFFIXES = (".pyc", ".class", ".jar", ".so", ".o", ".swp")
 
 
+def _ignored_paths(git_root: Path, rel_paths: list[str]) -> set[str]:
+    """Of `rel_paths`, the ones git ignores. Empty outside a git worktree.
+
+    Git-ignored paths are the repo's own declaration of generated or
+    host-local files: the host-built Go test binaries (arrow-bridge,
+    faketool/faketool), dependency-reduced-pom.xml, IDE metadata. They sit
+    inside hashed subtrees without ever entering an image, so hashing them
+    moved the stamp on every `go build` — gate step 8 reported ingestion,
+    loadgen and execution-gateway STALE on a tree with no source change
+    (2026-09-12, gate attempt 7).
+    """
+    if not rel_paths:
+        return set()
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-z", "--stdin"], cwd=str(git_root),
+            input="\0".join(rel_paths), capture_output=True, text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if result.returncode not in (0, 1):  # 1 = nothing ignored; 128 = not a repo
+        return set()
+    return {path for path in result.stdout.split("\0") if path}
+
+
 def _add_stamp_files(git_root: Path, rel_path: str, files: set[str]) -> None:
-    """Add one source path (file or whole subtree) to `files`."""
+    """Add one source path (file or whole subtree) to `files`.
+
+    Git-ignored files are skipped — see _ignored_paths.
+    """
     abs_path = git_root / rel_path
     if abs_path.is_file():
-        files.add(rel_path)
+        if not _ignored_paths(git_root, [rel_path]):
+            files.add(rel_path)
         return
     if not abs_path.is_dir():
         return
+    candidates: list[str] = []
     for child in abs_path.rglob("*"):
         if not child.is_file():
             continue
@@ -191,7 +222,9 @@ def _add_stamp_files(git_root: Path, rel_path: str, files: set[str]) -> None:
             continue
         if child.suffix in _STAMP_SKIP_SUFFIXES:
             continue
-        files.add(str(child.relative_to(git_root)))
+        candidates.append(str(child.relative_to(git_root)))
+    ignored = _ignored_paths(git_root, candidates)
+    files.update(path for path in candidates if path not in ignored)
 
 
 def stamp_inputs(git_root: Path, service: str, entry: dict | None = None,
