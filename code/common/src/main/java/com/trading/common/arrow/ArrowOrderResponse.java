@@ -83,6 +83,20 @@ public final class ArrowOrderResponse {
             throw new IllegalArgumentException(
                     "requestTime must be a positive epoch-ms, got: " + time);
         }
-        return new ArrowOrderResponse(new BrokerOrderId(String.valueOf(no)), time);
+        final String orderNo;
+        if (no instanceof String) {
+            orderNo = ((String) no).trim();
+        } else if (no instanceof Number) {
+            // P3-335: String.valueOf on a Double yields "1.75253900075E9", which is not
+            // the broker's order number; a numeric id converts through longValue().
+            orderNo = String.valueOf(((Number) no).longValue());
+        } else {
+            throw new IllegalArgumentException(
+                    "orderNo must be a String or Number in Arrow response; got: " + no);
+        }
+        if (orderNo.isBlank()) {
+            throw new IllegalArgumentException("orderNo missing or blank in Arrow response");
+        }
+        return new ArrowOrderResponse(new BrokerOrderId(orderNo), time);
     }
 }

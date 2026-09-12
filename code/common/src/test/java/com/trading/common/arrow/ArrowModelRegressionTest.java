@@ -149,6 +149,23 @@ class ArrowModelRegressionTest {
     }
 
     @Test
+    @DisplayName("orderNo must be a non-blank String or Number, never coerced (P3-335)")
+    void orderNoTypeGuards() {
+        // A boolean has no order number: String.valueOf turned it into "true" and
+        // BrokerOrderId accepted that as a broker identity.
+        assertThrows(IllegalArgumentException.class,
+                () -> ArrowOrderResponse.fromJson(
+                        Map.of("orderNo", true, "requestTime", 1_752_539_000L)));
+        // A Double orderNo's String.valueOf is "1.75253900075E9" — not an order number.
+        ArrowOrderResponse numeric = ArrowOrderResponse.fromJson(
+                Map.of("orderNo", 1752539000.75, "requestTime", 1_752_539_000L));
+        assertEquals(new BrokerOrderId("1752539000"), numeric.brokerOrderId());
+        ArrowOrderResponse padded = ArrowOrderResponse.fromJson(
+                Map.of("orderNo", " 123 ", "requestTime", 1_752_539_000L));
+        assertEquals(new BrokerOrderId("123"), padded.brokerOrderId());
+    }
+
+    @Test
     @DisplayName("a quoted numeric requestTime is accepted (P3-334)")
     void requestTimeAcceptsNumericStrings() {
         ArrowOrderResponse fromString = ArrowOrderResponse.fromJson(
