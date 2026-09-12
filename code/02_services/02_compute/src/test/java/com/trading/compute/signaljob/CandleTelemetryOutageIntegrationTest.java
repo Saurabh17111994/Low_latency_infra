@@ -256,7 +256,7 @@ class CandleTelemetryOutageIntegrationTest {
         return GenericRow.of(
                 bs(fingerprint), bs("v2"), bs("p82-conn"), 1L, token, bs("NSE"), bs("TEST"),
                 eventTime, eventTime, eventTime, bs(tickType), price, qty, null,
-                bs("h-" + fingerprint), bs("v2"), bs("1.0"), bs("VALID_TRADE"), null, bs("2"));
+                bs("h-" + fingerprint), bs("v2"), bs("1.0"), bs("VALID_TRADE"), null, bs("3"));
     }
 
     // ── reads ─────────────────────────────────────────────────────────────

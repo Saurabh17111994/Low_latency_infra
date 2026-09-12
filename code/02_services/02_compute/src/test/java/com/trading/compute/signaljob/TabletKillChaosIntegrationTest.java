@@ -159,7 +159,7 @@ class TabletKillChaosIntegrationTest {
         return false;
     }
 
-    // Column indexes of the schema-v2 row builder below (DDL order).
+    // Column indexes of the schema-v3 row builder below (DDL order).
     private static final int COL_FINGERPRINT = 0;
     private static final int COL_TOKEN = 4;
 
@@ -168,7 +168,7 @@ class TabletKillChaosIntegrationTest {
     }
 
     /**
-     * Schema-v2 raw row, same shape as the B4.2 E2E's proven live writer
+     * Schema-v3 raw row, same shape as the B4.2 E2E's proven live writer
      * (20 columns, DDL order). Fingerprint and token are unique per run.
      */
     private static GenericRow rawRow(long token, long eventTime, String fingerprint,
@@ -177,7 +177,7 @@ class TabletKillChaosIntegrationTest {
                 bs(fingerprint), bs("1"), bs("tbl-kill-chaos"), 1L, token, bs("NSE"),
                 bs("CHKILL"), eventTime, eventTime, eventTime, bs("T"), (long) pricePaise, 1L,
                 new byte[] {1, 2}, bs("h-" + fingerprint), bs("1"), bs("v1"),
-                bs("VALID"), bs("FRESH"), bs("2"));
+                bs("VALID_TRADE"), bs("FRESH"), bs("3"));
     }
 
     /** One-pass scan result: full-log streaming count + kept window. */
