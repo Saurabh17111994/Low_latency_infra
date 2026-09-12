@@ -79,4 +79,39 @@ class GatewayConfigTest {
         assertThat(c.toString()).contains("fluss:9123").contains("127.0.0.1").contains("***");
     }
 
+    /**
+     * P3-074: the class promises a private-only bind, but a wildcard host passed validation
+     * silently — a bare-metal launch could expose the gateway on every interface. Containers
+     * genuinely need the wildcard (the executor is a peer container and no host port is published
+     * for the gateway), so the exception is explicit and opt-in via GATEWAY_ALLOW_WILDCARD_BIND.
+     */
+    @Test void wildcardBindHostIsRefusedUnlessExplicitlyAllowed() {
+        for (String wildcard : new String[] {"0.0.0.0", "::", "*", "[::]", " 0.0.0.0 "}) {
+            Map<String, String> m = values(); m.put("GATEWAY_BIND_HOST", wildcard);
+            assertThatThrownBy(() -> GatewayConfig.from(m))
+                    .as("GATEWAY_BIND_HOST=%s", wildcard)
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("GATEWAY_BIND_HOST")
+                    .hasMessageContaining("private-only");
+        }
+        Map<String, String> local = values(); local.put("GATEWAY_BIND_HOST", "localhost");
+        assertThat(GatewayConfig.from(local).bindHost()).isEqualTo("localhost");
+    }
+
+    /**
+     * P3-074: the opt-in is the ONLY thing that lets a wildcard through. The production path reads
+     * it from the environment; this pins the parameterised seam, because a regression that made the
+     * opt-in unconditional would re-open exactly the exposure the finding describes — and no test
+     * of the rejection path would notice.
+     */
+    @Test void wildcardBindIsAllowedOnlyByTheExplicitOptIn() {
+        GatewayConfig.requirePrivateBind("0.0.0.0", true);   // the container case: no throw
+        assertThatThrownBy(() -> GatewayConfig.requirePrivateBind("0.0.0.0", false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("private-only");
+        assertThatThrownBy(() -> GatewayConfig.requirePrivateBind("0:0:0:0:0:0:0:0", false))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("private-only");
+    }
+
 }

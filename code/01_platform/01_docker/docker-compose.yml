@@ -822,6 +822,10 @@ services:
     depends_on: [fluss-coordinator, fluss-tablet]
     environment:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
+      # P3-074: the wildcard is required and deliberate here — the executor POSTs /v1/events from a
+      # peer container, and this service publishes no host port (T8 gate 3), so the bind never
+      # leaves execution-net. A bare-metal run keeps the private-only default with no opt-in.
+      GATEWAY_ALLOW_WILDCARD_BIND: "true"
       GATEWAY_BIND_HOST: 0.0.0.0
       GATEWAY_BIND_PORT: "9180"
       NAUTILUS_PRIVATE_ENDPOINT: http://nautilus:9190/v1/intents

@@ -38,6 +38,7 @@ public record GatewayConfig(
         require(ledgerTable, "PROJECTION_LEDGER_TABLE");
         require(haltTable, "SAFETY_HALT_TABLE");
         require(bindHost, "GATEWAY_BIND_HOST");
+        requirePrivateBind(bindHost);
         require(nautilusEndpoint, "NAUTILUS_PRIVATE_ENDPOINT");
         require(protocolVersion, "GATEWAY_PROTOCOL_VERSION");
         require(sharedSecret, "GATEWAY_SHARED_SECRET");
@@ -263,4 +264,31 @@ public record GatewayConfig(
                 + ", requestBudget=" + requestBudget + "]";
     }
 
+    /**
+     * P3-074: the class promises a private-only bind, but a wildcard host used to pass validation
+     * silently — a bare-metal launch on a host with a public interface would answer the internet.
+     *
+     * <p>Containers genuinely need the wildcard: the executor posts to the gateway from a peer
+     * container, and neither {@code docker-compose.yml} nor {@code docker-stack.yml} publishes a
+     * host port for the gateway, so the wildcard never leaves the private network. That case is
+     * therefore an explicit opt-in ({@code GATEWAY_ALLOW_WILDCARD_BIND=true}) rather than
+     * something the validator guesses.
+     */
+    static void requirePrivateBind(String bindHost) {
+        requirePrivateBind(bindHost, Boolean.parseBoolean(System.getenv("GATEWAY_ALLOW_WILDCARD_BIND")));
+    }
+
+    /** Parameterised for tests: the opt-in is read from the environment only here. */
+    static void requirePrivateBind(String bindHost, boolean allowWildcard) {
+        if (allowWildcard) return;
+        String host = bindHost.trim();
+        if (host.startsWith("[") && host.endsWith("]")) host = host.substring(1, host.length() - 1);
+        boolean wildcard = host.equals("0.0.0.0") || host.equals("::") || host.equals("*")
+                || host.equals("0:0:0:0:0:0:0:0");
+        if (wildcard) {
+            throw new IllegalArgumentException("GATEWAY_BIND_HOST must be private-only (got \""
+                    + bindHost + "\"); set GATEWAY_ALLOW_WILDCARD_BIND=true to bind every interface"
+                    + " deliberately (the containers do — no host port is published for them)");
+        }
+    }
 }

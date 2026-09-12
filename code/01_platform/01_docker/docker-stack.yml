@@ -729,6 +729,9 @@ services:
       - gateway_shared_secret
     environment:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
+      # P3-074: deliberate wildcard — the executor is a peer service/task and no host port is
+      # published for the gateway, so the bind stays inside the private network.
+      GATEWAY_ALLOW_WILDCARD_BIND: "true"
       GATEWAY_BIND_HOST: 0.0.0.0
       GATEWAY_BIND_PORT: "9180"
       NAUTILUS_PRIVATE_ENDPOINT: http://nautilus:9190/v1/intents

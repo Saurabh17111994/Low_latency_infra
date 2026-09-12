@@ -30,7 +30,7 @@ The biggest gaps are not "missing env vars" but **fragmentation** (config split 
 | M12 | `MAX_PENDING_APPEND_RECORDS/BYTES`, `PENDING_APPEND_WARNING_PERCENT` | `IngestionConfig.java:28-30`, `PlatformConfig.java:28-30` | Backpressure | Duplicated between IngestionConfig and PlatformConfig (see D1) |
 | M13 | `APPEND_TIMEOUT_SECONDS=5`, `DRAIN_DEADLINE_SECONDS=30` | `IngestionConfig.java` | Append/drain | Env-overridable but defaults in code; DRAIN was previously hardcoded (fixed 2026-08-15) |
 | M14 | `MOCK_ARROW_PORT=8888`, `MOCK_ARROW_PROFILE=baseline`, `MOCK_ARROW_INSTRUMENTS=50` | `MockArrowServer.java:253-264` | Mock broker | env-overridable but defaults in code; the mock's tick-generation params (`volume` base 1000, qty base 100) are hardcoded literals |
-| M15 | `GATEWAY_BIND_HOST=127.0.0.1`, `GATEWAY_BIND_PORT=9180` | `GatewayConfig.java:125-126` | Gateway bind | env-overridable, defaults fine |
+| M15 | `GATEWAY_BIND_HOST=127.0.0.1`, `GATEWAY_BIND_PORT=9180` | `GatewayConfig.java:125-126` | Gateway bind | env-overridable, defaults fine; a wildcard host (`0.0.0.0` / `::` / `*` / `[::]` / `0:0:0:0:0:0:0:0`) is refused unless `GATEWAY_ALLOW_WILDCARD_BIND=true` (P3-074), which only the two compose files set — neither publishes a host port for the gateway |
 | M16 | `EXECUTION_BRIDGE_LISTEN_ADDR=127.0.0.1:8787` | `06_execution_bridge/go-bridge/main.go:44` | Bridge listen | env-overridable |
 | M17 | `commandTimeout=10s` | `06_execution_bridge/go-bridge/server.go:50` | Command timeout | Hardcoded, no env |
 | M18 | `healthPath=/healthz`, `readyPath=/readyz`, `commandPath=/v1/commands` | `06_execution_bridge/go-bridge/server.go:19-22` | HTTP API paths | Paths are a wire contract, but versioning `/v1` should be env if the API evolves |
