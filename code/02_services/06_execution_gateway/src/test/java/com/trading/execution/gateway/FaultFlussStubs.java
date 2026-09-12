@@ -90,9 +90,16 @@ final class FaultFlussStubs {
     static final class FaultTable implements Table {
 
         private final FaultWriter writer;
+        private final TableInfo tableInfo;
 
         FaultTable(FaultWriter writer) {
+            this(writer, null);
+        }
+
+        /** With a {@link TableInfo} the table also reports its deployed kind, for pre-warm. */
+        FaultTable(FaultWriter writer, TableInfo tableInfo) {
             this.writer = writer;
+            this.tableInfo = tableInfo;
         }
 
         @Override
@@ -170,6 +177,9 @@ final class FaultFlussStubs {
 
         @Override
         public TableInfo getTableInfo() {
+            if (tableInfo != null) {
+                return tableInfo;
+            }
             throw new UnsupportedOperationException("not used by the write paths");
         }
 
@@ -190,7 +200,11 @@ final class FaultFlussStubs {
         private final FaultTable table;
 
         FaultConnection(FaultWriter writer) {
-            this.table = new FaultTable(writer);
+            this(new FaultTable(writer));
+        }
+
+        FaultConnection(FaultTable table) {
+            this.table = table;
         }
 
         @Override

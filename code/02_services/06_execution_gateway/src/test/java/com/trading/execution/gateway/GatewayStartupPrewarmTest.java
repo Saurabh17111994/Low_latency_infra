@@ -1,7 +1,9 @@
 package com.trading.execution.gateway;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -9,6 +11,10 @@ import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
 import org.apache.fluss.client.admin.Admin;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.metadata.Schema;
+import org.apache.fluss.metadata.TableInfo;
+import org.apache.fluss.metadata.TablePath;
+import org.apache.fluss.types.DataTypes;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
@@ -105,5 +111,38 @@ class GatewayStartupPrewarmTest {
                 .as("pre-warm must leave no request-path write paying the post-CREATE window; "
                         + "samples (ms): " + firstWriteMillis)
                 .isZero();
+    }
+
+    /**
+     * The check that would have stopped the A5 misdiagnosis. Needs no cluster: the kind is read off
+     * the table handle, and a stub carrying a PRIMARY KEY stands in for the shape that matters - a
+     * table whose deployed kind contradicts the list this code keeps.
+     */
+    @Test
+    @DisplayName("a table of the wrong kind fails pre-warm by name and kind, not at the first write")
+    void wrongTableKindFailsPrewarmWithTheTableNamed() {
+        Schema primaryKeySchema = Schema.newBuilder()
+                .column("id", DataTypes.STRING())
+                .primaryKey("id")
+                .build();
+        TableInfo primaryKeyInfo = new TableInfo(
+                TablePath.of("kind_check_db", "Fills"), 1L, 1, primaryKeySchema,
+                List.of(), List.of(), 1, new Configuration(), new Configuration(), null, 0L, 0L);
+
+        // Fills is the first APPEND_TABLES entry, so the contradiction is hit before any writer is
+        // minted - which is why nothing here needs closing.
+        FlussProjectionWriter writer = new FlussProjectionWriter(
+                new FaultFlussStubs.FaultConnection(
+                        new FaultFlussStubs.FaultTable(new FaultFlussStubs.FaultWriter(),
+                                primaryKeyInfo)),
+                FlussProjectionWriterIntegrationTest.config("localhost:9123", "kind_check_db"),
+                Duration.ofMillis(250));
+
+        assertThatThrownBy(writer::prewarm)
+                .as("an operator must be told which table contradicts which call site")
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Fills")
+                .hasMessageContaining("PRIMARY KEY (KV)")
+                .hasMessageContaining("newAppend()");
     }
 }

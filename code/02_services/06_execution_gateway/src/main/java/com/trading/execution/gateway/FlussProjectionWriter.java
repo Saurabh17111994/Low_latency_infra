@@ -343,11 +343,13 @@ public final class FlussProjectionWriter implements ProjectionWriter {
      */
     public void prewarm() throws Exception {
         for (String name : APPEND_TABLES) {
+            requireLogTable(name);
             appendPools.computeIfAbsent(name,
                     n -> new FlussHandlePool<>(() -> table(n).newAppend().createWriter()))
                     .with(writer -> null);
         }
         for (String name : UPSERT_TABLES) {
+            requirePrimaryKeyTable(name);
             upsertPools.computeIfAbsent(name,
                     n -> new FlussHandlePool<>(() -> table(n).newUpsert().createWriter()))
                     .with(writer -> null);
@@ -373,6 +375,36 @@ public final class FlussProjectionWriter implements ProjectionWriter {
      * and this lookup is a read - the value returned (null) is discarded.
      */
     private static final String ABSENT_PREWARM_KEY = "__prewarm_absent_key__";
+
+    /**
+     * The append/upsert lists above describe the <em>deployed</em> schema, so the two can drift out
+     * of step, and Fluss does not report that drift as what it is: calling {@code newAppend()} on a
+     * primary-key table is rejected immediately, with a message that reads like any other failed
+     * write. A probe doing exactly that recorded its own usage error as a run of write timeouts
+     * (A5), which pointed the investigation at the retry policy instead of at the probe.
+     *
+     * <p>Checked once at startup, not per write: this gates a deployment, and a per-write
+     * {@code getTableInfo()} would be a metadata round trip on the request path.
+     */
+    private void requireLogTable(String name) {
+        requireKind(name, false);
+    }
+
+    private void requirePrimaryKeyTable(String name) {
+        requireKind(name, true);
+    }
+
+    private void requireKind(String name, boolean expectPrimaryKey) {
+        boolean actualPrimaryKey = table(name).getTableInfo().hasPrimaryKey();
+        if (actualPrimaryKey != expectPrimaryKey) {
+            throw new IllegalStateException("table " + name + " is a "
+                    + (actualPrimaryKey ? "PRIMARY KEY (KV)" : "LOG")
+                    + " table, but this writer treats it as a "
+                    + (expectPrimaryKey ? "PRIMARY KEY (KV)" : "LOG")
+                    + " table and will call " + (expectPrimaryKey ? "newUpsert()" : "newAppend()")
+                    + " on it, which Fluss rejects at the first write");
+        }
+    }
     // P3-288: collect, don't abort — snapshot under concurrency (P3-070),
     // always close the connection, and clear so close is idempotent.
     @Override public void close() throws Exception {
