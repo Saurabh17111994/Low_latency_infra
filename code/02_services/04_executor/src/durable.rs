@@ -183,10 +183,16 @@ pub struct DurableClients {
     pub attempt_store: Rc<dyn AttemptStore>,
     pub journal: Rc<dyn JournalStore>,
     pub audit: Rc<dyn AuditSink>,
-    // Keep concrete handles for test introspection (restart recovery assertions).
+    // Concrete in-memory handles, kept for test introspection only (P3-437): `#[cfg(test)]`
+    // keeps production code from reaching in and sharing these stores across handles — the
+    // trait-object fields above are the production surface.
+    #[cfg(test)]
     gate_mem: Rc<InMemoryGateStateStore>,
+    #[cfg(test)]
     attempt_mem: Rc<InMemoryAttemptStore>,
+    #[cfg(test)]
     journal_mem: Rc<InMemoryJournalStore>,
+    #[cfg(test)]
     audit_mem: Rc<InMemoryAuditSink>,
 }
 
@@ -204,9 +210,13 @@ impl DurableClients {
             attempt_store: attempt_mem.clone() as Rc<dyn AttemptStore>,
             journal: journal_mem.clone() as Rc<dyn JournalStore>,
             audit: audit_mem.clone() as Rc<dyn AuditSink>,
+            #[cfg(test)]
             gate_mem,
+            #[cfg(test)]
             attempt_mem,
+            #[cfg(test)]
             journal_mem,
+            #[cfg(test)]
             audit_mem,
         }
     }
@@ -217,15 +227,19 @@ impl DurableClients {
     }
 
     // Introspection for tests (prove restart recovery).
+    #[cfg(test)]
     pub fn gate_mem(&self) -> &Rc<InMemoryGateStateStore> {
         &self.gate_mem
     }
+    #[cfg(test)]
     pub fn attempt_mem(&self) -> &Rc<InMemoryAttemptStore> {
         &self.attempt_mem
     }
+    #[cfg(test)]
     pub fn journal_mem(&self) -> &Rc<InMemoryJournalStore> {
         &self.journal_mem
     }
+    #[cfg(test)]
     pub fn audit_mem(&self) -> &Rc<InMemoryAuditSink> {
         &self.audit_mem
     }
