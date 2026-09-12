@@ -106,6 +106,8 @@ class ArrowModelRegressionTest {
         assertEquals(OrderStatus.COMPLETE, OrderStatus.from("FILLED"));
         assertEquals(OrderStatus.CANCELLED, OrderStatus.from("CANCELED"));
         assertEquals(OrderStatus.CANCELLED, OrderStatus.from("cancelled"));
+        // P3-107: "FILL" is not the broker's terminal spelling.
+        assertThrows(IllegalArgumentException.class, () -> OrderStatus.from("FILL"));
         assertThrows(IllegalArgumentException.class, () -> OrderStatus.from("NOT_A_STATUS"));
         assertThrows(IllegalArgumentException.class, () -> OrderStatus.from(null));
     }

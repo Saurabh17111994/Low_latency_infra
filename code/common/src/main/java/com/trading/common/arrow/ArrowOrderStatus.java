@@ -33,8 +33,11 @@ public final class ArrowOrderStatus {
                 case "PENDING": return PENDING;
                 case "OPEN": return OPEN;
                 case "COMPLETE":
-                case "FILLED":
-                case "FILL": return COMPLETE;
+                case "FILLED": return COMPLETE;
+                // P3-107: "FILL" is not a status the broker sends — the Go bridge's
+                // knownOrderStatus whitelist (postback.go:220) has no such arm, and a
+                // partial fill arrives as reportType=Fill with status OPEN. Mapping it
+                // to the terminal COMPLETE hid a live position behind a finished one.
                 case "CANCELLED":
                 case "CANCELED": return CANCELLED;
                 case "REJECTED": return REJECTED;
