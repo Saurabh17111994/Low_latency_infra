@@ -2,6 +2,7 @@ package com.trading.common.arrow;
 
 import com.trading.common.identity.IdentityModel.BrokerOrderId;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * Arrow {@code POST /order/regular} success response.
@@ -16,7 +17,14 @@ public final class ArrowOrderResponse {
     private final long requestTime; // epoch ms from Arrow
 
     public ArrowOrderResponse(BrokerOrderId brokerOrderId, long requestTime) {
-        this.brokerOrderId = brokerOrderId;
+        // P3-333: the constructor is public, so it enforces what fromJson enforces.
+        // Otherwise a hand-built response carries exactly the corruption R-124 exists
+        // to prevent — requestTime 0 is 1970-01-01, not a missing value.
+        this.brokerOrderId = Objects.requireNonNull(brokerOrderId, "brokerOrderId");
+        if (requestTime <= 0) {
+            throw new IllegalArgumentException(
+                    "requestTime must be a positive epoch-ms, got: " + requestTime);
+        }
         this.requestTime = requestTime;
     }
 

@@ -144,6 +144,17 @@ class ArrowModelRegressionTest {
     }
 
     @Test
+    @DisplayName("the response constructor enforces what fromJson enforces (P3-333)")
+    void constructorGuards() {
+        assertThrows(NullPointerException.class,
+                () -> new ArrowOrderResponse(null, 1_752_539_000L));
+        assertThrows(IllegalArgumentException.class,
+                () -> new ArrowOrderResponse(new BrokerOrderId("123"), 0));
+        assertThrows(IllegalArgumentException.class,
+                () -> new ArrowOrderResponse(new BrokerOrderId("123"), -1));
+    }
+
+    @Test
     @DisplayName("OrderStatus parses broker variants leniently (R-125)")
     void orderStatusLenient() {
         assertEquals(OrderStatus.COMPLETE, OrderStatus.from("COMPLETE"));
