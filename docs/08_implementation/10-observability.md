@@ -191,6 +191,10 @@ rate, multi-TF signals emitted vs latch-suppressed (cumulative), new
 signal-sink rate, duplicate-window guard hits. Every series is registered by
 `MultiTimeframeAggregateFunction` / `MultiTimeframeSignalProducer` and flows
 on the existing Flink->Prometheus->remote-write path — no new plumbing.
+The new legs persist to the `candle_live` table (KV current-state — live candle
+snapshots per timeframe) and the `candle_closed` table (KV immutable closed
+history per timeframe), created by DDL `32_candle_live.sql` /
+`33_candle_closed.sql`.
 Verified live 2026-09-05: dashboard present with 11 panels; all 11 panel
 queries return points over the 2026-09-04 soak window via O2 `query_range`
 (aggregator ~48.9k/s in, old closed-sink ~162-203/s, new legs 0 — the
