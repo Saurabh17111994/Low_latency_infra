@@ -124,7 +124,11 @@ pub async fn emit_event(
     if gateway_endpoint.is_empty() {
         return Err("event emission disabled (no GATEWAY_ENDPOINT)".to_string());
     }
-    let payload_hash = sha256_hex(serde_json::to_string(value).unwrap().as_bytes());
+    // P3-443: the function contract is Result, so the emit path must not unwrap. (Serializing a
+    // serde_json::Value cannot actually fail — this removes the panic-inside-Result inconsistency.)
+    let payload_json = serde_json::to_string(value)
+        .map_err(|e| format!("event payload serialization failed: {e}"))?;
+    let payload_hash = sha256_hex(payload_json.as_bytes());
     let envelope = crate::gateway_protocol::Envelope {
         protocol_version: protocol_version.to_string(),
         message_type: EVENT_MESSAGE_TYPE.to_string(),
