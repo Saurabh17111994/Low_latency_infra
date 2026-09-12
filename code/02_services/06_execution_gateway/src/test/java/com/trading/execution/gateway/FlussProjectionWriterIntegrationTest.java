@@ -31,6 +31,16 @@ import org.junit.jupiter.api.Test;
  * {@link FlussProjectionWriter} into Fluss scratch tables and reads the KV projections back.
  * This closes the step-1 gap: the existing durable-replay test uses a fake writer; here the actual
  * FlussProjectionWriter is exercised end-to-end against a live cluster (no arithmetic in JVM).
+ *
+ * <p>Stability note: filed at ~40% flaky in {@code fd993fa} (2026-09-12), always the same shape --
+ * a bounded-append timeout inside {@link FlussProjectionWriter}, never an assertion: the bound was
+ * applied to a COLD append, and the first write after table CREATE settles in 2.2-3.7s (see the C5
+ * comment there). {@link FlussProjectionWriter} now rides that window out with its retry budget
+ * (RequestBudget), and the 2026-09-12 re-measurement was 10/10 green. Raw logs:
+ * {@code logs/soak/flake-measurement-20260912/}; rerun with {@code mvn -o -Pdrill-reports
+ * -pl 02_services/06_execution_gateway test
+ * -Dtest='FlussProjectionWriterIntegrationTest#projectionWritesReachFlussAndKvUpsertIsIdempotent'
+ * -Dsurefire.failIfNoSpecifiedTests=false} in a loop.
  */
 @Tag("fluss")
 class FlussProjectionWriterIntegrationTest {
