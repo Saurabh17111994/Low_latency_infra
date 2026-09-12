@@ -14,8 +14,9 @@
 
   <modules>
     <!-- Reactor scope (R-272): 02_services/02_compute and 05_mock_arrow declare
-         this parent but are not built yet — their source trees are scaffolds.
-         Add them to the reactor when their owning phase builds them. -->
+         this parent but stay outside the reactor on purpose. 02_compute carries
+         its own suite — 538 tests, run by `make gate` step 16 and by
+         `make drill-live` — so it is built and tested, just not from here. -->
     <module>common</module>
     <module>02_services/01_ingestion</module>
     <module>02_services/06_execution_gateway</module>
