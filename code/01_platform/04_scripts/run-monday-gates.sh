@@ -3,7 +3,7 @@
 #
 # Orchestrates Workstream A from the Monday soak plan:
 # The step list is deliberately NOT enumerated here: the script prints
-# `[N/13] <step>` as it runs and writes the authoritative verdicts to
+# `[N/14] <step>` as it runs and writes the authoritative verdicts to
 # $OUT_DIR/SUMMARY.txt. A hand-maintained copy only drifts — this header
 # claimed five steps while the script ran thirteen.
 #
@@ -64,6 +64,15 @@ GO_LOG="$OUT_DIR/go-suite.log"
 JAVA_LOG="$OUT_DIR/java-suite.log"
 SUMMARY="$OUT_DIR/SUMMARY.txt"
 
+# Verification accounting: a step that never ran must not read as a pass. The
+# verdict below prints the count, so "14/14" and "13/14 + 1 skipped" can never be
+# confused. Gate attempt 11 skipped step 11 (no FLUSS_BOOTSTRAP in its shell)
+# while the verdict still read a bare PASS.
+GATE_TOTAL=14   # keep in step with the [N/14] labels
+GATE_SKIPS=0
+SKIPPED_STEPS=""
+note_skip() { GATE_SKIPS=$((GATE_SKIPS + 1)); SKIPPED_STEPS="$SKIPPED_STEPS $1"; }
+
 echo "run-monday-gates: output → $OUT_DIR"
 echo "run-monday-gates: go timeout=${GO_TIMEOUT_SEC}s, java timeout=${JAVA_TIMEOUT_SEC}s"
 
@@ -73,7 +82,7 @@ gate_fail() {
 }
 
 # ── 0. Static checks: bash -n + shellcheck on every script (Phase 8 G4) ─────
-echo "=== [1/13] Static checks (bash -n, shellcheck) ===" | tee -a "$SUMMARY"
+echo "=== [1/14] Static checks (bash -n, shellcheck) ===" | tee -a "$SUMMARY"
 STATIC_LOG="$OUT_DIR/static-checks.log"
 : >"$STATIC_LOG"
 STATIC_FAIL=0
@@ -116,7 +125,7 @@ fi
 echo "PASS: static checks (${#SCRIPTS[@]} scripts bash -n + shellcheck clean)" | tee -a "$SUMMARY"
 
 # ── 0b. Compose config validation (G4) ────────────────────────────────────────
-echo "=== [2/13] docker compose config ===" | tee -a "$SUMMARY"
+echo "=== [2/14] docker compose config ===" | tee -a "$SUMMARY"
 COMPOSE_FILE="$CODE_DIR/01_platform/01_docker/docker-compose.yml"
 if [ -f "$COMPOSE_FILE" ]; then
 	if ! docker compose -f "$COMPOSE_FILE" config >/dev/null 2>>"$STATIC_LOG"; then
@@ -133,7 +142,7 @@ fi
 # could silently pass a reconcile. No cluster needed — synthetic fixtures only.
 # docs-audit C16 (env-key drift) runs inside the full doc audit step after the
 # Java gate.
-echo "=== [3/13] Python unit suites (reconcile-compare ING-TCP-002 + gate helpers) ===" | tee -a "$SUMMARY"
+echo "=== [3/14] Python unit suites (reconcile-compare ING-TCP-002 + gate helpers) ===" | tee -a "$SUMMARY"
 PY_LOG="$OUT_DIR/python-tests.log"
 if ! timeout 300 python3 -m unittest discover -s "$SCRIPT_DIR/tests" -p "test_*.py" \
 	>"$PY_LOG" 2>&1; then
@@ -152,7 +161,7 @@ echo "PASS: python unit suites ($(grep -oE 'Ran [0-9]+ tests' "$PY_LOG" | head -
 # match the documented contract. Runs the entrypoint under env -i so a
 # polluted gate environment cannot mask a FATAL; bash -n + shellcheck on
 # this file run in the static stage above.
-echo "=== [4/13] Entrypoint harness (ING-INT-006) ===" | tee -a "$SUMMARY"
+echo "=== [4/14] Entrypoint harness (ING-INT-006) ===" | tee -a "$SUMMARY"
 ENTRYPOINT_LOG="$OUT_DIR/entrypoint.log"
 if ! bash "$SCRIPT_DIR/tests/test_docker_entrypoint.sh" >"$ENTRYPOINT_LOG" 2>&1; then
 	echo "FAIL: entrypoint harness — see $ENTRYPOINT_LOG" | tee -a "$SUMMARY"
@@ -161,7 +170,7 @@ fi
 echo "PASS: entrypoint harness (exit codes + messages)" | tee -a "$SUMMARY"
 
 # ── 1. Go suite with race detector (Phase 8: go test -race) ──────────────────
-echo "=== [5/13] Go bridge suite (-race) ===" | tee -a "$SUMMARY"
+echo "=== [5/14] Go bridge suite (-race) ===" | tee -a "$SUMMARY"
 # The output goes to $GO_LOG: the FAIL message below points there (and the
 # final evidence list advertises it), plus the race reports are large.
 if ! timeout "$GO_TIMEOUT_SEC" bash -c "cd '$BRIDGE_DIR' && go test -race -count=1 ./..." >"$GO_LOG" 2>&1; then
@@ -171,7 +180,7 @@ fi
 echo "PASS: Go suite (-race)" | tee -a "$SUMMARY"
 
 # ── 2. Build E2E test binaries (R-016) + docker build smoke ───────────────
-echo "=== [6/13] Building E2E test binaries (faketool + arrow-bridge) ===" | tee -a "$SUMMARY"
+echo "=== [6/14] Building E2E test binaries (faketool + arrow-bridge) ===" | tee -a "$SUMMARY"
 # Appends to the same log: gate_fail exits, so a Go-suite failure never reaches
 # here, and the advertised Go evidence keeps both records.
 if ! (cd "$BRIDGE_DIR" &&
@@ -183,7 +192,7 @@ fi
 echo "PASS: E2E binaries built (faketool/faketool, arrow-bridge)" | tee -a "$SUMMARY"
 
 # ── 5. Docker build smoke (G4): ingestion image must build from the reactor root ──
-echo "=== [7/13] docker build smoke (ingestion image) ===" | tee -a "$SUMMARY"
+echo "=== [7/14] docker build smoke (ingestion image) ===" | tee -a "$SUMMARY"
 if command -v docker >/dev/null 2>&1 && [ -f "$CODE_DIR/02_services/01_ingestion/Dockerfile" ]; then
 	# The build needs network (base images + go/maven deps). Offline runs must
 	# not fail the gate on the network — but WITH images present, a build
@@ -210,7 +219,7 @@ fi
 # ── 5b. CHG-101: stale-image guard — no compose build: image may be older
 # than the last change to the source it packages (2026-08-24 gateway/bridge
 # incident: 08-20 images vs 08-24 source went unnoticed until a readyz probe).
-echo "=== [8/13] image staleness (compose build: images vs source) ===" | tee -a "$SUMMARY"
+echo "=== [8/14] image staleness (compose build: images vs source) ===" | tee -a "$SUMMARY"
 IMAGE_LOG="$OUT_DIR/image-staleness.log"
 if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ]; then
 	if ! timeout 120 python3 "$SCRIPT_DIR/image_staleness_check.py" \
@@ -220,7 +229,8 @@ if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ]; then
 	fi
 	echo "PASS: image staleness (compose build: images current)" | tee -a "$SUMMARY"
 else
-	echo "PASS: image staleness SKIPPED (no docker/compose)" | tee -a "$SUMMARY"
+	note_skip 8
+	echo "SKIP: image staleness (no docker/compose) — unverified, not green" | tee -a "$SUMMARY"
 fi
 
 # ── 3. Full Java gate with ALL integration flags + the LIVE Fluss drills ──────
@@ -229,7 +239,7 @@ fi
 # export FLUSS_BOOTSTRAP — every class gated on it records 0 tests here. A green
 # step 9 therefore proved nothing about the live store paths; the drill block at
 # the end of this step runs them.
-echo "=== [9/13] Java full gate (FLUSS+MANIFEST+PERF+E2E) + live Fluss drills ===" | tee -a "$SUMMARY"
+echo "=== [9/14] Java full gate (FLUSS+MANIFEST+PERF+E2E) + live Fluss drills ===" | tee -a "$SUMMARY"
 	# FLUSS_BOOTSTRAP is deliberately unset for the plain Java run: common's ten
 	# FLUSS_BOOTSTRAP-gated live classes would otherwise execute into the plain
 	# target/surefire-reports and rewrite their XMLs from 0 to real counts
@@ -273,7 +283,7 @@ echo "PASS: live Fluss drills (common + gateway, bootstrap $DRILL_BOOTSTRAP)" | 
 # master-dossier trio coherence. Wired here so the beyond-scanner sweeps can't
 # rot undetected — they silently drifted at HEAD once (CHG-026/027 era) because
 # only the machine gates were ever run in CI.
-echo "=== [10/13] full doc audit (make full-audit: scanners + sweeps + trio coherence) ===" | tee -a "$SUMMARY"
+echo "=== [10/14] full doc audit (make full-audit: scanners + sweeps + trio coherence) ===" | tee -a "$SUMMARY"
 AUDIT_LOG="$OUT_DIR/full-audit.log"
 if ! timeout 300 bash "$SCRIPT_DIR/full_audit.sh" >"$AUDIT_LOG" 2>&1; then
 	echo "FAIL: full doc audit — see $AUDIT_LOG" | tee -a "$SUMMARY"
@@ -286,18 +296,34 @@ fi
 echo "PASS: full doc audit (stale claims + doc↔code truth + DDL parity + sweeps + trio, incl. C16 env-key drift)" | tee -a "$SUMMARY"
 
 # ── 3c. DDL apply exit-code contract smoke (scratch catalogs) ────────────────
-echo "=== [11/13] DDL apply exit-code smoke ===" | tee -a "$SUMMARY"
+echo "=== [11/14] DDL apply exit-code smoke ===" | tee -a "$SUMMARY"
 DDL_SMOKE_LOG="$OUT_DIR/ddl-smoke.log"
 DDL_SMOKE_TIMEOUT_SEC="${DDL_SMOKE_TIMEOUT_SEC:-1800}"
-# Env-gated: SKIPPED (exit 0) when FLUSS_BOOTSTRAP is unset; any deviation from
-# the 0/6/1 contract, the sentinels, or the evidence record FAILS the gate.
+# Env-gated: the smoke reports itself SKIPPED when it gets no bootstrap; any
+# deviation from the 0/6/1 contract, the sentinels, or the evidence record FAILS
+# the gate. The bootstrap defaults to the same local stack the drills use, so a
+# missing export can no longer turn this step into an invisible skip. A skip now
+# also needs the explicit GATE_ALLOW_NO_FLUSS=1 opt-out for a host without a
+# cluster, and it is counted in the verdict either way.
+if [ "${GATE_ALLOW_NO_FLUSS:-0}" = "1" ]; then
+	echo "note: GATE_ALLOW_NO_FLUSS=1 — the DDL smoke may report itself skipped" | tee -a "$SUMMARY"
+else
+	: "${FLUSS_BOOTSTRAP:=localhost:9123}"
+	export FLUSS_BOOTSTRAP
+fi
 if ! timeout "$DDL_SMOKE_TIMEOUT_SEC" python3 \
 	"$SCRIPT_DIR/ddl_apply_smoke.py" >"$DDL_SMOKE_LOG" 2>&1; then
 	echo "FAIL: DDL apply exit-code smoke — see $DDL_SMOKE_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
 if grep -q "ddl-apply-smoke: SKIPPED" "$DDL_SMOKE_LOG"; then
-	echo "SKIP: DDL apply smoke (no FLUSS_BOOTSTRAP) — see $DDL_SMOKE_LOG" | tee -a "$SUMMARY"
+	if [ "${GATE_ALLOW_NO_FLUSS:-0}" = "1" ]; then
+		note_skip 11
+		echo "SKIP: DDL apply smoke (no Fluss; GATE_ALLOW_NO_FLUSS=1) — see $DDL_SMOKE_LOG" | tee -a "$SUMMARY"
+	else
+		echo "FAIL: DDL apply smoke skipped with no opt-out — set GATE_ALLOW_NO_FLUSS=1 to allow that" | tee -a "$SUMMARY"
+		gate_fail
+	fi
 else
 	echo "PASS: DDL apply exit-code smoke (0/6/1 + sentinels)" | tee -a "$SUMMARY"
 fi
@@ -313,7 +339,7 @@ fi
 echo "PASS: evidence ownership check (container-written records group-writable)" | tee -a "$SUMMARY"
 
 # ── 4. Schema agreement + perf certification explicit gates (G5) ─────────────
-echo "=== [12/13] SchemaAgreementTest + PerfBaselineTest explicit ===" | tee -a "$SUMMARY"
+echo "=== [12/14] SchemaAgreementTest + PerfBaselineTest explicit ===" | tee -a "$SUMMARY"
 SCHEMA_PERF_LOG="$OUT_DIR/schema-perf.log"
 if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
 	INGESTION_INT_TEST_PERF=true \
@@ -339,7 +365,7 @@ echo "PASS: SchemaAgreementTest + PerfBaselineTest (certification gates)" | tee 
 # change that silently drops or env-gates them now fails CI instead of quietly
 # shrinking the plain suite. Cluster-free: scripted fake bridge, no Fluss, no
 # Go binaries (runs on a bare checkout). POSIX-only (SIGTERM semantics).
-echo "=== [13/13] SIGTERM-drain regression explicit (ING-UNIT-023/024, CHG-015) ===" | tee -a "$SUMMARY"
+echo "=== [13/14] SIGTERM-drain regression explicit (ING-UNIT-023/024, CHG-015) ===" | tee -a "$SUMMARY"
 SHUTDOWN_LOG="$OUT_DIR/shutdown-regression.log"
 if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
 	mvn -o test -pl 02_services/01_ingestion -am \
@@ -354,8 +380,31 @@ if ! grep -q "BUILD SUCCESS" "$SHUTDOWN_LOG"; then
 fi
 echo "PASS: SIGTERM-drain regression (ING-UNIT-023 in-process + ING-UNIT-024 real hook)" | tee -a "$SUMMARY"
 
+# ── 4b. Execution gateway module suite (unit + regression) ─────────────────
+# Step 9's module scope is ingestion (common rides along as a dependency) and the
+# drill block names 14 classes, so this module's other tests — readiness, HTTP
+# approval authority, halt tails and the reader-death pin (P3-064) — ran in no
+# gate step at all. ~40 s offline; it needs no cluster.
+echo "=== [14/14] Execution gateway module suite (unit + regression) ===" | tee -a "$SUMMARY"
+GATEWAY_LOG="$OUT_DIR/gateway-suite.log"
+if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
+	mvn -o test -pl 02_services/06_execution_gateway" >"$GATEWAY_LOG" 2>&1; then
+	echo "FAIL: execution gateway suite — see $GATEWAY_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+if ! grep -q "BUILD SUCCESS" "$GATEWAY_LOG"; then
+	echo "FAIL: execution gateway suite did not report BUILD SUCCESS — see $GATEWAY_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+echo "PASS: execution gateway suite ($(grep -aoE 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' "$GATEWAY_LOG" | tail -1))" | tee -a "$SUMMARY"
+
 echo "=== ALL GATES PASSED ===" | tee -a "$SUMMARY"
-echo "GATE RESULT: PASS" | tee -a "$SUMMARY"
+if [ "$GATE_SKIPS" -gt 0 ]; then
+	echo "GATE RESULT: PASS — $((GATE_TOTAL - GATE_SKIPS))/$GATE_TOTAL verified, $GATE_SKIPS skipped (steps:$SKIPPED_STEPS)" | tee -a "$SUMMARY"
+	echo "Not a clean pass: a skipped step is unverified, not green." | tee -a "$SUMMARY"
+else
+	echo "GATE RESULT: PASS — $GATE_TOTAL/$GATE_TOTAL verified, 0 skipped" | tee -a "$SUMMARY"
+fi
 echo "Evidence:" | tee -a "$SUMMARY"
 echo "  Static: $STATIC_LOG" | tee -a "$SUMMARY"
 echo "  Python suites: $PY_LOG" | tee -a "$SUMMARY"
@@ -367,3 +416,4 @@ echo "  Image staleness: $IMAGE_LOG" | tee -a "$SUMMARY"
 echo "  DDL smoke: $DDL_SMOKE_LOG" | tee -a "$SUMMARY"
 echo "  Schema/Perf: $SCHEMA_PERF_LOG" | tee -a "$SUMMARY"
 echo "  SIGTERM-drain: $SHUTDOWN_LOG" | tee -a "$SUMMARY"
+echo "  Gateway suite: $GATEWAY_LOG" | tee -a "$SUMMARY"
