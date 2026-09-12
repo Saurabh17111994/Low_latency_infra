@@ -52,6 +52,20 @@ class ArrowOrderUpdateTest {
     }
 
     @Test
+    void clientOrderRefIsAbsentWhenTheBrokerOmitsRemarks() {
+        // P3-338 guard, not a falsification: the field is optional by contract, and
+        // this pins the documented behaviour so it cannot be tightened by accident
+        // without also changing the bridge that produces such events.
+        ArrowOrderUpdate noRemarks = ArrowOrderUpdate.builder()
+            .brokerOrderId(new BrokerOrderId("2600090003"))
+            .instrumentToken(new InstrumentToken(1594))
+            .status(ArrowOrderStatus.OrderStatus.OPEN)
+            .reportType(ArrowOrderStatus.ReportType.NEW_ACK)
+            .build();
+        assertThat(noRemarks.clientOrderRef()).isNull();
+    }
+
+    @Test
     void mapsPostbackIdentityAndFills() {
         // Sample postback (abridged) for orderNo 2600090001, token 26009.
         // R-262: named-parameter builder (the old 11-param positional ctor

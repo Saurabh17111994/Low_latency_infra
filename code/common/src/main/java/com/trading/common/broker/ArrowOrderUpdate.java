@@ -100,7 +100,16 @@ public final class ArrowOrderUpdate {
     }
 
     public BrokerOrderId brokerOrderId() { return brokerOrderId; }
-    public ClientOrderRef clientOrderRef() { return clientOrderRef; }
+    /**
+     * P3-338: Arrow's {@code remarks} — the platform round-trip ref.
+     *
+     * <p>Absent when the broker omits remarks. That is not hypothetical: the Go
+     * bridge reads the field with {@code stringField(update, "remarks")}
+     * (postback.go:198), which yields an empty string instead of failing, so such
+     * events do reach this model. Consumers must treat an absent ref as unjoinable
+     * — never as a match — because the platform correlates fills back through it.
+     */
+    public /* @Nullable */ ClientOrderRef clientOrderRef() { return clientOrderRef; }
     public InstrumentToken instrumentToken() { return instrumentToken; }
     public ArrowOrderStatus.OrderStatus status() { return status; }
     public ArrowOrderStatus.ReportType reportType() { return reportType; }
