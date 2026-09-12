@@ -3,6 +3,7 @@ package com.trading.execution.gateway;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Process entry point. Startup is intentionally HALTED until Fluss and protocol are proven ready. */
@@ -41,12 +42,31 @@ public final class ExecutionGatewayMain {
                 // answering 200. Any Throwable now marks the gateway failed and releases the
                 // drain latch; main then exits non-zero so an orchestrator restarts it.
                 readerFailed.set(true);
-                readiness.fail(String.valueOf(e.getMessage()));
+                readiness.fail(String.valueOf(e));
                 LOG.error("intent reader stopped", e);
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * P3-063: the projection handler's failure contract, extracted from the server lambda so a test
+     * can drive it with a message-less exception, the same way {@link #runReaderLoop} pins the loop
+     * contract.
+     *
+     * <p>Both the readiness reason and the wrapper's message go through {@code String.valueOf(e)}:
+     * {@code e.getMessage()} is null for any no-message throwable (an NPE, a no-arg
+     * {@code IllegalStateException}), which P3-300 normalises to the literal reason "unknown" and
+     * leaves an operator unable to tell a projection bug from a Fluss outage.
+     */
+    static void applyProjection(Callable<Void> action, GatewayReadiness readiness) {
+        try {
+            action.call();
+        } catch (Exception e) {
+            readiness.durableWrites(false, String.valueOf(e));
+            throw new IllegalStateException(String.valueOf(e), e);
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -109,10 +129,10 @@ public final class ExecutionGatewayMain {
                 GatewayStartup.applyStartupReadiness(readiness, true);
                 ObjectMapper mapper = new ObjectMapper();
                 try (GatewayHttpServer server = new GatewayHttpServer(config, readiness,
-                        payload -> {
-                            try { applier.apply(mapper.treeToValue(payload, NormalizedExecutionEvent.class)); }
-                            catch (Exception e) { readiness.durableWrites(false, e.getMessage()); throw new IllegalStateException(e); }
-                        })) {
+                        payload -> applyProjection(() -> {
+                            applier.apply(mapper.treeToValue(payload, NormalizedExecutionEvent.class));
+                            return null;
+                        }, readiness))) {
                     LOG.warn("execution-gateway started; execution readiness still depends on Execution_Gate=ENABLED");
                     Thread readerThread = new Thread(() -> {
                         runReaderLoop(() -> reader.poll(config.pollTimeout()), readiness, readerFailed);
