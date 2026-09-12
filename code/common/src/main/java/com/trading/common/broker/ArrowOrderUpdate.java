@@ -82,6 +82,19 @@ public final class ArrowOrderUpdate {
             Objects.requireNonNull(instrumentToken, "instrumentToken");
             Objects.requireNonNull(status, "status");
             Objects.requireNonNull(reportType, "reportType");
+            // P3-109: a FILL without its trade identity or amounts is not a Fill row.
+            // Scoped to FILL on purpose: the other report types carry no fill payload.
+            if (reportType == ArrowOrderStatus.ReportType.FILL) {
+                if (fillId == null || fillId.isBlank()) {
+                    throw new IllegalStateException("fillId required when reportType==FILL");
+                }
+                if (fillQuantity <= 0) {
+                    throw new IllegalStateException("fillQuantity must be > 0 when reportType==FILL");
+                }
+                if (fillPrice <= 0) {
+                    throw new IllegalStateException("fillPrice must be > 0 when reportType==FILL");
+                }
+            }
             return new ArrowOrderUpdate(this);
         }
     }

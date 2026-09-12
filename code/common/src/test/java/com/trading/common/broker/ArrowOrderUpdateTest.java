@@ -8,6 +8,7 @@ import com.trading.common.identity.IdentityModel.InstrumentToken;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Capability-evidence scaffold for VM-BROKER-PBK-009 (Arrow postback stream,
@@ -20,6 +21,35 @@ import static org.assertj.core.api.Assertions.assertThat;
  * independently of the Signal/Executor path.
  */
 class ArrowOrderUpdateTest {
+
+    /** A complete Fill: every field the Fill mapping depends on is present. */
+    private ArrowOrderUpdate.Builder fill() {
+        return ArrowOrderUpdate.builder()
+            .brokerOrderId(new BrokerOrderId("2600090001"))
+            .clientOrderRef(new ClientOrderRef("INV20250721"))
+            .instrumentToken(new InstrumentToken(26009))
+            .status(ArrowOrderStatus.OrderStatus.COMPLETE)
+            .reportType(ArrowOrderStatus.ReportType.FILL)
+            .fillId("F1")
+            .fillQuantity(10)
+            .fillPrice(297510L)
+            .fillTime(1_752_539_000_000L);
+    }
+
+    @Test
+    void fillIsNotBuildableWithoutTheFieldsTheFillRowNeeds() {
+        // Control: a complete Fill still builds — the guards below are FILL-scoped.
+        assertThat(fill().build().isFill()).isTrue();
+
+        assertThatThrownBy(() -> fill().fillId(null).build())
+            .isInstanceOf(IllegalStateException.class).hasMessageContaining("fillId");
+        assertThatThrownBy(() -> fill().fillId("   ").build())
+            .isInstanceOf(IllegalStateException.class).hasMessageContaining("fillId");
+        assertThatThrownBy(() -> fill().fillQuantity(0).build())
+            .isInstanceOf(IllegalStateException.class).hasMessageContaining("fillQuantity");
+        assertThatThrownBy(() -> fill().fillPrice(0).build())
+            .isInstanceOf(IllegalStateException.class).hasMessageContaining("fillPrice");
+    }
 
     @Test
     void mapsPostbackIdentityAndFills() {
