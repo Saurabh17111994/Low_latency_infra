@@ -198,4 +198,27 @@ class PositionProjectorTest {
         assertThat(r.outcome()).isEqualTo(PositionProjector.Outcome.VIOLATION);
         assertThat(r.reason()).contains("CONFLICT");
     }
+
+    // --- P3-393: a null prior state must be rejected, not thrown from ---
+
+    @Test
+    void nullSnapshotStateYieldsViolationNotNpe() {
+        PositionSnapshot first =
+                PositionProjector.apply(null, buy(10, 100, 5, "f5"), NOW).snapshot();
+        // PositionSnapshot does not reject a null state, so a corrupt store can supply one.
+        PositionSnapshot corrupt = new PositionSnapshot(
+                first.positionId(), first.tradeContextId(), first.accountScopeId(),
+                first.instrumentToken(), first.exchange(), first.symbol(), first.side(),
+                null, first.openQuantity(), first.closedQuantity(),
+                first.averageEntryPaise(), first.averageExitPaise(),
+                first.sourceEventId(), 5L, first.createdTs(), first.lastUpdateTs(),
+                first.schemaVersion());
+
+        // A newer version passes the gate, so the run reaches the lifecycle check — where
+        // isLegalTransition(null, OPEN) used to throw. A null prior now poisons like UNKNOWN.
+        PositionProjector.ProjectionResult r =
+                PositionProjector.apply(corrupt, buy(10, 100, 6, "f6"), NOW);
+        assertThat(r.outcome()).isEqualTo(PositionProjector.Outcome.VIOLATION);
+        assertThat(r.reason()).contains("illegal transition");
+    }
 }

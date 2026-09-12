@@ -40,6 +40,14 @@ public final class PositionLifecycle {
      * legal; impossible jumps are not.
      */
     public static boolean isLegalTransition(PositionState from, PositionState to) {
+        // P3-164: null must poison like UNKNOWN. Prior state is sourced from
+        // PositionSnapshot.state(), which the record does not reject, so a corrupted/hydrated
+        // null reached `switch (from)` and threw — an uncontrolled exception instead of the
+        // controlled `false` -> VIOLATION. `isLegalTransition(null, null)` also returned true via
+        // the `from == to` shortcut, validating a transition between two absent states.
+        if (from == null || to == null) {
+            return false;
+        }
         if (from == PositionState.UNKNOWN || to == PositionState.UNKNOWN) {
             return false;
         }

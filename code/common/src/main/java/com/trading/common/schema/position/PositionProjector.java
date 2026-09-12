@@ -123,9 +123,13 @@ public final class PositionProjector {
                     fill.fillPricePaise(), fill.fillQty());
         }
 
+        // P3-393: PositionSnapshot does not reject a null state, so a snapshot hydrated from a
+        // corrupt store arrives with one. Passing it straight to isLegalTransition(null, next)
+        // threw from the switch; a null prior state now poisons like UNKNOWN, so the lifecycle
+        // check rejects the transition and the projector returns VIOLATION as it must.
         PositionState priorState = current == null
                 ? PositionState.FLAT
-                : current.state();
+                : (current.state() == null ? PositionState.UNKNOWN : current.state());
         // Cycle-aware state: a fresh BUY after a FULL close starts a new open
         // cycle (CLOSED -> OPEN) even though the cumulative closed_quantity is
         // still positive — the quantity-only derive() cannot see the cycle

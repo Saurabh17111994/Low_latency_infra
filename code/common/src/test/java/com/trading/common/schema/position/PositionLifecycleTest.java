@@ -72,4 +72,15 @@ class PositionLifecycleTest {
         assertThat(PositionLifecycle.derive(10, 0, true)).isEqualTo(PositionState.OPEN);
     }
 
+    @Test
+    void nullStatesPoisonLikeUnknown() {
+        // P3-164: (null, null) returned TRUE through the `from == to` shortcut — validating a
+        // transition between two absent states — while (null, OPEN) threw from `switch (from)`.
+        // Both are now the controlled `false` the contract promises.
+        assertThat(PositionLifecycle.isLegalTransition(null, null)).isFalse();
+        assertThat(PositionLifecycle.isLegalTransition(null, PositionState.OPEN)).isFalse();
+        assertThat(PositionLifecycle.isLegalTransition(PositionState.FLAT, null)).isFalse();
+        assertThat(PositionLifecycle.isLegalTransition(PositionState.OPEN, null)).isFalse();
+    }
+
 }
