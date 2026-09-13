@@ -90,6 +90,11 @@ async fn http_request(
                 break;
             }
             buf.extend_from_slice(&chunk[..n]);
+            // P3-189: stop as soon as the response is complete; `Connection: close` is a
+            // request, and a keep-alive peer would otherwise hold this read until the timeout.
+            if response_is_complete(&buf) {
+                break;
+            }
         }
         Ok::<_, io::Error>(())
     })
@@ -162,16 +167,48 @@ fn parse_http_response(raw: &[u8]) -> Result<HttpResponse> {
         == "chunked";
     let body = if let Some(len) = header("content-length") {
         let len: usize = len.trim().parse()?;
-        raw_body
-            .get(..len.min(raw_body.len()))
-            .unwrap_or(raw_body)
-            .to_vec()
+        // P3-189: slicing to `len.min(raw_body.len())` reported a truncated body as a complete
+        // shorter one, so callers acted on half a reply and failed later with a misleading
+        // parse error. A body shorter than its own Content-Length is a framing error.
+        anyhow::ensure!(
+            raw_body.len() >= len,
+            "truncated HTTP body: got {} of {len} bytes",
+            raw_body.len()
+        );
+        raw_body[..len].to_vec()
     } else if chunked {
         parse_chunked_body(raw_body)?
     } else {
         raw_body.to_vec()
     };
     Ok(HttpResponse { status, body })
+}
+
+/// True when `buf` already holds a complete HTTP/1.1 response, so a reader need not wait for a
+/// connection the peer keeps open.
+///
+/// P3-189: `Connection: close` is a request, not a promise — a keep-alive peer left the bridge
+/// waiting for an EOF that never came, until its own timeout fired. Only Content-Length-framed
+/// responses are detected here; a chunked body (which the Go bridge does not emit for its JSON
+/// replies) still ends at EOF, keeping the previous behaviour for that case.
+fn response_is_complete(buf: &[u8]) -> bool {
+    let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let Ok(head) = std::str::from_utf8(&buf[..head_end]) else {
+        return false;
+    };
+    let declared = head.split("\r\n").skip(1).find_map(|line| {
+        let (k, v) = line.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case("content-length")
+            .then(|| v.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    match declared {
+        Some(len) => buf.len() - (head_end + 4) >= len,
+        None => false,
+    }
 }
 
 /// Decodes a chunked transfer body.
