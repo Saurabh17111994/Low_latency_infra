@@ -52,6 +52,16 @@ func (f *FakeBroker) result(ctx context.Context, command string, c CommandEnvelo
 	}
 	f.mu.Unlock()
 	if ok {
+		// P3-243: a preset is an offline shortcut, not a licence to publish a shape
+		// the live broker cannot produce. ArrowBroker digests the payload it returns,
+		// so Data with no digest would pass here and fail in resultToReport live.
+		if result.Data != nil && result.Fingerprint == "" {
+			fp, err := fingerprint(result.Data)
+			if err != nil {
+				return unknownResult(err)
+			}
+			result.Fingerprint = fp
+		}
 		return result
 	}
 	result = BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: c.BrokerOrderID}
