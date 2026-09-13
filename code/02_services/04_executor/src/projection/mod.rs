@@ -675,16 +675,20 @@ impl ProjectionEmitter {
             source_sequence,
             event_time_ms: report.received_ts_ms,
         };
-        // Validate the lift inputs; position_id is resolved by feed_on_key below.
+        // Validate the lift inputs. The rules mirror `FillEvent::validate` exactly
+        // (`price > 0`, `qty > 0` — the P3-390 lesson), stated here rather than by calling
+        // `validate()` because `position_id` is still empty at this point (it is resolved by
+        // `feed_on_key` below) and `validate()` requires it. `feed_fill` stays a clean parity
+        // port of Java `feed` with no Rust-only validation inside.
         if fill.fill_qty <= 0 {
             return Err(format!(
                 "fill_quantity must be positive, got {}",
                 fill.fill_qty
             ));
         }
-        if fill.fill_price_paise < 0 {
+        if fill.fill_price_paise <= 0 {
             return Err(format!(
-                "fill_price must be >= 0, got {}",
+                "fill_price_paise must be positive, got {}",
                 fill.fill_price_paise
             ));
         }
@@ -864,6 +868,73 @@ mod tests {
         assert_eq!(s.source_event_id, "pb-1");
         assert_eq!(s.open_quantity, 10);
         assert_eq!(s.state, PositionState::Open);
+    }
+
+    fn envelope_with_price(price: &str) -> (ReportEnvelope, EmitterContext) {
+        let envelope = ReportEnvelope {
+            record_type: "report".into(),
+            contract_version: 2,
+            request_id: "rq-1".into(),
+            command: "P".into(),
+            outcome: "SUCCESS".into(),
+            reason: String::new(),
+            instruction_id: "instr-1".into(),
+            execution_attempt_id: "att-1".into(),
+            client_order_ref: "co-1".into(),
+            broker_order_id: "b-1".into(),
+            exchange_order_id: "e-1".into(),
+            postback_event_id: "pb-1".into(),
+            order_status: Some("FILLED".into()),
+            report_type: Some("order_filled".into()),
+            fill_shares: "10".into(),
+            average_price: price.into(),
+            fill_price: Some(price.into()),
+            fill_quantity: Some("10".into()),
+            fill_time: "now".into(),
+            instrument_token: "1001".into(),
+            received_ts_ms: NOW,
+            response_fingerprint: String::new(),
+            data: None,
+        };
+        let ctx = EmitterContext {
+            trade_context_id: "tc-1".into(),
+            account_scope_id: "acc-1".into(),
+            instrument_token: 1001,
+            exchange: "CME".into(),
+            symbol: "wti".into(),
+            side: Side::Buy,
+        };
+        (envelope, ctx)
+    }
+
+    /// P3-214: the seam must enforce the model's own rule (`FillEvent::validate` demands
+    /// `price > 0`). Only `< 0` used to be rejected, so a zero-price fill reached the
+    /// projector and diluted the weighted average — the P3-390 failure shape, one layer up.
+    #[test]
+    fn zero_price_fill_is_rejected_at_the_lift_seam() {
+        // First: the red. With the old `< 0` check the same report was APPLIED.
+        let (envelope, ctx) = envelope_with_price("0");
+        let mut emitter = ProjectionEmitter::new();
+        let err = emitter.emit_fill(&envelope, &ctx, 7, NOW).unwrap_err();
+        assert!(
+            err.contains("fill_price_paise must be positive"),
+            "unexpected error: {err}"
+        );
+        // Nothing was projected: a failed lift consumes nothing — no snapshot row, no
+        // minted id, no version consumed. A retry at the correct price applies cleanly.
+        assert_eq!(emitter.driver.size(), 0);
+        assert!(emitter
+            .driver
+            .position_id_for(&PositionKey {
+                account_scope_id: "acc-1".into(),
+                instrument_token: 1001,
+                side: Side::Buy,
+            })
+            .is_none());
+        let (good, good_ctx) = envelope_with_price("1000");
+        let r = emitter.emit_fill(&good, &good_ctx, 7, NOW).unwrap();
+        assert_eq!(r.outcome, FeedOutcome::Applied);
+        assert_eq!(r.snapshot.unwrap().open_quantity, 10);
     }
     // --------------------------------------------------------------------------
     // STATE-* / CORR-004 / CORR-011 — offline validation matrix (pure functions).
