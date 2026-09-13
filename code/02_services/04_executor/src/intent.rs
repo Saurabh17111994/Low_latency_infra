@@ -158,10 +158,13 @@ fn order_command_from_payload(payload: &serde_json::Value) -> Result<OrderComman
         return Err("limit_price_paise not allowed for MARKET/SL-MARKET".to_string());
     }
     if matches!(order_type, OrderType::Lmt | OrderType::SlLmt) {
-        let price_paise = payload
-            .get("limit_price_paise")
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| "limit_price_paise required for LIMIT".to_string())?;
+        let price_paise = match payload.get("limit_price_paise").filter(|v| !v.is_null()) {
+            None => return Err("limit_price_paise required for LIMIT/SL-LIMIT".to_string()),
+            // P3-455: a supplied price that is not an integer is a type error, not a missing one.
+            Some(v) => v
+                .as_i64()
+                .ok_or_else(|| "limit_price_paise must be an integer".to_string())?,
+        };
         order = order.with_price(&price_paise.to_string());
     }
     Ok(order)
@@ -408,5 +411,51 @@ mod p3_210_tests {
             .expect_err("priced SL-MARKET must be rejected, not accepted with the price dropped");
         assert!(err.contains("limit_price_paise"), "err: {err}");
         assert!(err.contains("not allowed"), "err: {err}");
+    }
+}
+
+#[cfg(test)]
+mod p3_455_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A minimal order payload; `price` is omitted when `None`.
+    fn limit_payload(order_type: &str, price: Option<serde_json::Value>) -> serde_json::Value {
+        let mut p = json!({
+            "instruction_id": "T9-SB-0001",
+            "symbol": "BI-EQ",
+            "exchange": "NSE",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": order_type,
+            "product_type": "CNC",
+            "time_in_force": "DAY",
+        });
+        if let Some(price) = price {
+            p["limit_price_paise"] = price;
+        }
+        p
+    }
+
+    #[test]
+    fn missing_price_error_names_both_limit_types() {
+        let err = place_envelope_from_payload(&limit_payload("SL-LIMIT", None)).unwrap_err();
+        assert!(
+            err.contains("limit_price_paise required for LIMIT/SL-LIMIT"),
+            "err: {err}"
+        );
+    }
+
+    #[test]
+    fn non_integer_price_reports_type_not_missing() {
+        // Digit string and beyond-i64 number: both are supplied but not an integer.
+        for price in [json!("5050"), json!(9_223_372_036_854_775_808u64)] {
+            let err = place_envelope_from_payload(&limit_payload("LIMIT", Some(price.clone())))
+                .unwrap_err();
+            assert!(
+                err.contains("limit_price_paise must be an integer"),
+                "price {price}: err: {err}"
+            );
+        }
     }
 }
