@@ -2,7 +2,8 @@
 //!
 //! [`Runtime::init`] constructs the fail-closed boot surface: a gate that always starts `HALTED`,
 //! a health snapshot that never implies `ENABLED`, and the shared [`ServerState`] the health
-//! server reads. `main` calls `init` and then serves health until a shutdown signal arrives.
+//! server reads. `main` calls `init` and then serves health until a shutdown signal arrives;
+//! shutdown halts the gate before draining (see [`Runtime::begin_shutdown`]).
 
 use anyhow::{ensure, Result};
 
@@ -76,8 +77,14 @@ impl Runtime {
         monitor.enforce(&mut self.gate)
     }
 
-    /// Starts graceful shutdown: `/readyz` returns 503 while draining.
-    pub fn begin_shutdown(&self) {
+    /// Starts graceful shutdown: the gate is safety-halted **first** (clearing approvals and the
+    /// bound evidence, so no new broker command can be emitted) and then `/readyz` returns 503.
+    /// The order is deliberate (P3-185): a draining service must never still be armed to execute.
+    pub fn begin_shutdown(&mut self) {
+        self.gate.safety_halt();
+        // The shared snapshot is the surface `/v1/intents` checks, so halting `self.gate` alone
+        // would leave the live intent route forwarding while we drain.
+        self.state.safety_halt("service shutdown");
         self.state.set_draining(true);
     }
 }
@@ -120,10 +127,49 @@ mod tests {
 
     #[test]
     fn begin_shutdown_marks_draining() {
-        let rt = Runtime::init(halted_config()).unwrap();
+        let mut rt = Runtime::init(halted_config()).unwrap();
         assert!(!rt.health_json()["draining"].as_bool().unwrap());
         rt.begin_shutdown();
         assert!(rt.health_json()["draining"].as_bool().unwrap());
+    }
+
+    /// Drives the runtime's authoritative `Gate` through the sanctioned enablement path:
+    /// authorized operator + declared epoch + approval bound to the evidence hash.
+    fn enable_runtime_gate(rt: &mut Runtime) {
+        rt.gate.add_authorized("saurabh");
+        rt.gate.transition(ExecState::Reconciling).unwrap();
+        rt.gate.transition(ExecState::ApprovalPending).unwrap();
+        rt.gate.set_epoch(1).unwrap();
+        rt.gate.record_approval("saurabh", "ev-shutdown").unwrap();
+        rt.gate.enable(1).unwrap();
+    }
+
+    #[test]
+    fn begin_shutdown_halts_the_gate_before_draining() {
+        // P3-185: a draining service must never still be armed to execute. Shutdown used to
+        // only flip the draining flag, so an ENABLED gate kept accepting `/v1/intents` through
+        // the shared snapshot while `/readyz` reported 503 — a fail-open drain.
+        let mut rt = Runtime::init(halted_config()).unwrap();
+        enable_runtime_gate(&mut rt);
+        // The served snapshot is the surface the intent route checks; enable it too so the test
+        // covers the live approval path, not just the in-process gate.
+        rt.state.approve("saurabh", "ev-shutdown").unwrap();
+        assert_eq!(rt.gate_state(), ExecState::Enabled);
+        assert_eq!(rt.health_json()["gate_state"], "ENABLED");
+
+        rt.begin_shutdown();
+
+        let h = rt.health_json();
+        assert!(
+            !rt.gate.can_execute(),
+            "shutdown must halt the gate, not only flag draining"
+        );
+        assert_eq!(rt.gate_state(), ExecState::Halted);
+        assert_eq!(
+            h["gate_state"], "HALTED",
+            "the served snapshot must stop accepting intents on shutdown"
+        );
+        assert!(h["draining"].as_bool().unwrap());
     }
 
     #[test]
