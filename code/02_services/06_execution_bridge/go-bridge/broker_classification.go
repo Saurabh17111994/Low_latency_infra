@@ -21,6 +21,7 @@
 //	| 400,409,422 | status:"error" + message nonblank          | REJECTED  | — (terminal)|
 //	| 400,409,422 | empty message or status:"success"          | UNKNOWN   | HALT       |
 //	| 401,403,408,429,5xx, transport, empty, malformed, other| UNKNOWN   | HALT       |
+//	| both signals present and disagreeing (e.g. status:"success" + success:false)| UNKNOWN | HALT |
 //
 // Never returns SUCCESS from the error path; UNKNOWN is always HALT without retry.
 package main
@@ -91,6 +92,15 @@ func ClassifyBrokerResponse(statusCode int, body interface{}) string {
 		return OutcomeUnknown
 	}
 
+	// P3-040: a self-contradictory envelope — explicit status and explicit success
+	// flag that disagree — is malformed per the table above, so it resolves to
+	// UNKNOWN/HALT rather than to either terminal outcome. Trusting the success
+	// side would let a rejection read as acceptance; trusting the error side would
+	// let an accepted order read as rejected, which invites a duplicate placement.
+	if signalsContradict(env) {
+		return OutcomeUnknown
+	}
+
 	// 200 → ACCEPTED only when success + orderNo nonblank.
 	if statusCode == 200 {
 		if !isSuccessEnvelope(env) {
@@ -126,6 +136,23 @@ func isSuccessEnvelope(env classificationEnvelope) bool {
 		return true
 	}
 	return false
+}
+
+// signalsContradict reports whether the envelope carries both an explicit status
+// and an explicit success flag that disagree. A single signal, an unfamiliar
+// status wording, or an absent field is not a contradiction.
+func signalsContradict(env classificationEnvelope) bool {
+	if env.Success == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(env.Status)) {
+	case "success":
+		return !*env.Success
+	case "error":
+		return *env.Success
+	default:
+		return false
+	}
 }
 
 func isErrorEnvelope(env classificationEnvelope) bool {

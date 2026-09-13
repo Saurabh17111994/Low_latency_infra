@@ -71,3 +71,55 @@ func TestBridgeAcceptanceRequiresOrderNo(t *testing.T) {
 		})
 	}
 }
+
+// P3-040: a self-contradictory envelope — explicit status and explicit success
+// flag that disagree — is malformed per the header table and must be
+// AMBIGUOUS/UNKNOWN (HALT). Resolving the conflict toward either terminal
+// outcome risks a duplicate placement (false REJECTED) or a missed rejection
+// (false ACCEPTED).
+func TestClassifyBrokerResponseContradictorySignalsHalt(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+		body string
+		want string
+	}{
+		{
+			name: "200 success status + success:false -> UNKNOWN",
+			code: 200,
+			body: `{"status":"success","success":false,"data":{"orderNo":"BRK-1"}}`,
+			want: OutcomeUnknown,
+		},
+		{
+			name: "400 error status + success:true -> UNKNOWN",
+			code: 400,
+			body: `{"status":"error","success":true,"message":"bad quantity"}`,
+			want: OutcomeUnknown,
+		},
+		{
+			name: "200 success status + success:true (agree) -> ACCEPTED",
+			code: 200,
+			body: `{"status":"success","success":true,"data":{"orderNo":"BRK-1"}}`,
+			want: OutcomeSuccess,
+		},
+		{
+			name: "400 error status + success:false (agree) -> REJECTED",
+			code: 400,
+			body: `{"status":"error","success":false,"message":"bad quantity"}`,
+			want: OutcomeRejected,
+		},
+		{
+			name: "single signal only is not a contradiction",
+			code: 200,
+			body: `{"status":"success","data":{"orderNo":"BRK-1"}}`,
+			want: OutcomeSuccess,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyBrokerResponse(tc.code, tc.body); got != tc.want {
+				t.Fatalf("ClassifyBrokerResponse(%d, %s)=%s want %s", tc.code, tc.body, got, tc.want)
+			}
+		})
+	}
+}
