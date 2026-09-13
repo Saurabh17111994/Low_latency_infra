@@ -2,10 +2,15 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arrow-trade/go-arrow/arrow"
 )
@@ -101,5 +106,64 @@ func TestStartupLoginPreservesTheCause(t *testing.T) {
 	var authErr *arrow.AuthError
 	if !errors.As(err, &authErr) || authErr.Stage != "login" {
 		t.Errorf("errors.As on %v did not recover the AuthError stage used for triage", err)
+	}
+}
+
+// P3-472 — the private order path had only ReadHeaderTimeout: the body read
+// (MaxBytesReader + JSON decode, before the command context exists) and the
+// response write were unbounded, so one slow client could hold a handler
+// goroutine and its connection open indefinitely.
+func TestHTTPServerBoundsReadsWritesAndIdleConnections(t *testing.T) {
+	commandTimeout := 10 * time.Second
+	server := newHTTPServer("127.0.0.1:0", http.NotFoundHandler(), commandTimeout)
+
+	if server.ReadHeaderTimeout <= 0 {
+		t.Errorf("ReadHeaderTimeout=%s: a client dribbling headers pins the connection", server.ReadHeaderTimeout)
+	}
+	if server.ReadTimeout <= 0 {
+		t.Errorf("ReadTimeout=%s: a client that stalls a body after its headers pins the handler", server.ReadTimeout)
+	}
+	if server.WriteTimeout <= commandTimeout {
+		t.Errorf("WriteTimeout=%s must exceed the command timeout %s: an operator raising EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS would otherwise have legal slow replies cut off mid-write",
+			server.WriteTimeout, commandTimeout)
+	}
+	if server.IdleTimeout <= 0 {
+		t.Errorf("IdleTimeout=%s: idle keep-alive connections accumulate", server.IdleTimeout)
+	}
+}
+
+// The bounds above must actually fire, not just be set: this drives a real
+// connection that sends headers and then stalls the body.
+func TestHTTPServerDropsAStalledRequestBody(t *testing.T) {
+	server := newHTTPServer("127.0.0.1:0", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body) // never completes against a stalled client
+	}), 200*time.Millisecond)
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = server.Serve(listener) }()
+	defer server.Close()
+
+	conn, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := fmt.Fprintf(conn, "POST /command HTTP/1.1\r\nHost: bridge\r\nContent-Length: 100000\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte("partial")); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	// Any of a response, EOF or a reset means the handler was released; only
+	// silence past the deadline means it is still pinned on the body read.
+	if _, err := conn.Read(make([]byte, 1)); err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			t.Fatalf("a stalled body held the connection open past ReadTimeout: the handler is pinned by a slow client")
+		}
 	}
 }

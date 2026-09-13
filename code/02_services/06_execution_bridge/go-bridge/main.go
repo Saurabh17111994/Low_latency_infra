@@ -42,7 +42,7 @@ func main() {
 	}
 
 	addr := envOrDefault("EXECUTION_BRIDGE_LISTEN_ADDR", "127.0.0.1:8787")
-	httpServer := &http.Server{Addr: addr, Handler: server.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	httpServer := newHTTPServer(addr, server.Handler(), server.commandTimeout)
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -141,6 +141,33 @@ func startupLogin(login func() error) error {
 	}
 	return nil
 }
+
+// newHTTPServer builds the bridge's HTTP server. Its timeouts are the only
+// bound on a client that dribbles a body or reads a reply slowly (P3-472).
+//
+// Both bounds are derived, not fixed: Go resets WriteTimeout when the request
+// header is read, so it spans the whole command including a venue call that is
+// allowed to take commandTimeout, and a flat value would cut off legal slow
+// replies for an operator who raised EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS. Read
+// only needs a small margin over the command because the body is 128KB and
+// always precedes the handler (defaults: read 11s, write 15s).
+func newHTTPServer(addr string, handler http.Handler, commandTimeout time.Duration) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       commandTimeout + httpReadTimeoutMargin,
+		WriteTimeout:      commandTimeout + httpWriteTimeoutMargin,
+		IdleTimeout:       httpIdleTimeout,
+	}
+}
+
+const (
+	httpReadHeaderTimeout  = 5 * time.Second
+	httpReadTimeoutMargin  = 1 * time.Second
+	httpWriteTimeoutMargin = 5 * time.Second
+	httpIdleTimeout        = 60 * time.Second
+)
 
 func envOrDefault(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
