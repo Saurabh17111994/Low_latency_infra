@@ -30,7 +30,7 @@
 # 180s preflight hang or a silent "tablet not ready" (observed 2026-09-02:
 # torn tails in 6 of 26 tables after one power cut; each surfaced one at a
 # time — Signal_Candidates_current, then feature_candles_15s_preview, then
-# forming_bar — because recovery loads tables in order).
+# forming_bar (both retired 2026-09-05) — because recovery loads tables in order).
 #
 # Full runbook: docs/08_implementation/11-testing-and-release.md (ING-E2E-001
 # cluster-health runbook section).

@@ -490,7 +490,7 @@ def b2_consumer_read_report(capture_dir: str | Path,
 
 def b2_closed_read_report(capture_dir: str | Path,
                           windows: list[tuple[int, int]]) -> str:
-    """Closed feature-candle leg (feature_candles_15s): per-window p50/p95 of
+    """Closed feature-candle leg (candle_closed): per-window p50/p95 of
     (probe wallclock read - row output_ts) = closed-row visibility staleness.
 
     The closed table carries no last_event_ts column; FlussKvProbe reports

@@ -2,7 +2,7 @@
 #
 # run-signal-chain-e2e.sh (DRAFT)
 #
-# Full-chain live E2E: broker -> raw_table_1 -> SignalJob -> feature_candles_15s
+# Full-chain live E2E: broker -> raw_table_1 -> SignalJob -> candle_live / candle_closed
 # for E2E_RUN_MINUTES (default 30). See the SignalChainLiveE2ETest javadoc for
 # the full env contract. This script builds the bridge/faketool binaries and
 # the ingestion classpath, then runs the env-gated test module-locally

@@ -92,16 +92,8 @@ pipeline_preflight || fatal "pipeline preflight failed"
 
 # --- Fresh tables (no backlog replay → measures steady state only) ---
 pipeline_purge_raw_table || fatal "raw table purge failed"
-# CHG-121 table (2026-09-02 catalog-wipe recovery): the DDL apply contract
-# deliberately skips Signal_Tentative_Markers (job is sole writer; the
-# runner owns creation). tm-kill-full-load.sh always ensured it; this
-# runner relied on it surviving in ZK forever — true until the first
-# full-stack bounce wiped the catalog and the job crash-looped on
-# TableNotExist at open. Ensure it here, same designed create-if-absent.
-pipeline_ensure_tentative_markers_table || fatal "tentative-markers table ensure failed"
 pipeline_start_faketool || fatal "faketool start failed"
 pipeline_start_ingestion || fatal "ingestion start failed"
-pipeline_purge_preview_table || fatal "preview table purge failed"
 pipeline_submit_job || fatal "SignalJob submission failed"
 
 # --- Wait RUNNING (fail-closed; stage-capture.sh re-checks) ---

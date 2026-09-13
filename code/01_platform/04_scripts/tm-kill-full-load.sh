@@ -545,8 +545,6 @@ if [ "$TIERING_REQUIRED" -eq 1 ]; then
 fi
 pipeline_start_faketool || fatal "faketool start failed"
 pipeline_start_ingestion || fatal "ingestion start failed"
-pipeline_purge_preview_table || fatal "strict preview table purge failed"
-pipeline_ensure_tentative_markers_table || fatal "tentative-markers table ensure failed"
 pipeline_submit_job || fatal "SignalJob submission failed"
 [ -n "$JOB_ID" ] || fatal "SignalJob submission returned an empty job id"
 flink_wait_state RUNNING 90 || fatal "SignalJob did not reach RUNNING after submission"

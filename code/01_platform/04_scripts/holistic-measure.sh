@@ -91,7 +91,6 @@ run_phase() {
   pipeline_purge_raw_table || true
   pipeline_start_faketool || return 1
   pipeline_start_ingestion || return 1
-  pipeline_purge_preview_table || true
   pipeline_submit_job || return 1
   flink_wait_state RUNNING 60 || return 1
 

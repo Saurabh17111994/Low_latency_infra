@@ -690,73 +690,15 @@ JAVAEOF
   fi
 }
 
-pipeline_purge_preview_table() {
-  pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/30_feature_candles_15s_preview.sql" preview
-}
-
 pipeline_purge_raw_table() {
-  # Raw must be purged BEFORE pipeline_start_ingestion (the ingestion JVM
-  # writes it; preview is only written by the job, so it purges later).
+  # Raw must be purged BEFORE pipeline_start_ingestion (the ingestion JVM writes it).
   pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/02_raw_table_1.sql" raw
-}
-
-pipeline_ensure_tentative_markers_table() {
-  pipeline_require_preflight || return 1
-  # CHG-121 (2026-09-01): create Signal_Tentative_Markers if absent (no
-  # drop — markers must SURVIVE phases; a drop would erase exactly the crash
-  # reconciliation state the table exists to hold). Uses the same
-  # create-if-absent path as the purge helper's drop+recreate, minus drop.
-  pipeline_log "ensuring tentative-markers table exists"
-  cat > /tmp/TableEnsure.java <<'JAVAEOF'
-import com.trading.common.schema.ddl.DdlText;
-import org.apache.fluss.client.Connection;
-import org.apache.fluss.client.ConnectionFactory;
-import org.apache.fluss.client.admin.Admin;
-import org.apache.fluss.config.Configuration;
-import org.apache.fluss.metadata.TablePath;
-
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.concurrent.TimeUnit;
-
-public class TableEnsure {
-    public static void main(String[] args) throws Exception {
-        String ddl = Files.readString(Path.of(args[0]));
-        DdlText.ParsedDdl parsed = DdlText.parse(ddl, args[0]);
-        TablePath tp = TablePath.of("default", parsed.tableName());
-        Configuration conf = new Configuration();
-        conf.setString("bootstrap.servers", "localhost:9123");
-        try (Connection c = ConnectionFactory.createConnection(conf);
-             Admin admin = c.getAdmin()) {
-            try {
-                admin.getTableInfo(tp).get(10, TimeUnit.SECONDS);
-                System.out.println("EXISTS " + tp);
-            } catch (Exception notFound) {
-                admin.createTable(tp, DdlText.toDescriptor(parsed), false)
-                        .get(60, TimeUnit.SECONDS);
-                System.out.println("CREATED " + tp);
-            }
-        }
-    }
-}
-JAVAEOF
-  local ensure_out
-  ensure_out="$(cd /tmp && javac -cp "$CP" -d /tmp TableEnsure.java 2>&1 \
-      && java --add-opens=java.base/java.lang=ALL-UNNAMED \
-       --add-opens=java.base/java.nio=ALL-UNNAMED \
-       -cp "/tmp:$CP" TableEnsure "$ROOT/code/01_platform/02_sql/ddl/31_signal_tentative_markers.sql" 2>&1)" || true
-  rm -f /tmp/TableEnsure.java /tmp/TableEnsure.class
-  if echo "$ensure_out" | grep -qE "EXISTS|CREATED"; then
-    pipeline_log "tentative-markers table ready ($(echo "$ensure_out" | grep -oE 'EXISTS|CREATED'))"
-  else
-    pipeline_fail "tentative-markers table ensure failed: $(echo "$ensure_out" | tail -2)"
-    return 1
-  fi
 }
 
 # Ensure the multi-timeframe candle tables exist (cutover: the strategy host
 # reads candle_live/candle_closed, DDLs 32/33). Create-if-absent, never drop.
-# Uses the same TableEnsure pattern as the retired tentative-markers ensure.
+# Uses the same create-if-absent TableEnsure pattern as pipeline_purge_table's
+# drop+recreate.
 pipeline_ensure_candle_tables() {
   pipeline_require_preflight || return 1
   local ddl_file="$1" label="$2"

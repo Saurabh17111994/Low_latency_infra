@@ -308,7 +308,7 @@ case "$msg" in
   *"pipeline_preflight not run"*) ok "G19 start_faketool refuses without preflight" ;;
   *) bad "G19 start_faketool did not refuse: $msg" ;;
 esac
-msg="$(pipeline_purge_preview_table 2>&1 || true)"
+msg="$(pipeline_purge_raw_table 2>&1 || true)"
 case "$msg" in
   *"pipeline_preflight not run"*) ok "G19 purge refuses without preflight" ;;
   *) bad "G19 purge did not refuse: $msg" ;;
@@ -327,7 +327,7 @@ rm -rf "$OUT"
 
 # (b) wiring: every launch-phase function carries the guard; preflight sets
 # the OK flag only on success (reset at entry, set before the OK log).
-for fn in pipeline_purge_table pipeline_ensure_tentative_markers_table \
+for fn in pipeline_purge_table pipeline_purge_raw_table \
           pipeline_start_faketool pipeline_start_ingestion pipeline_submit_job; do
   if grep -q 'pipeline_require_preflight || return 1' "$PL"; then
     ok "G19 guard wired in $fn"
