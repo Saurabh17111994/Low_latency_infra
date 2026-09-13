@@ -47,6 +47,16 @@ const postbackReaderJoinTimeout = 5 * time.Second
 
 // RunPostbackLoop reconnects after a dropped order-update socket. It does not
 // retry a place command; it only restores observation of broker reports.
+//
+// publish is called synchronously, in the same goroutine that watches for
+// cancellation, so it must not block and must never wait on a consumer that may not
+// be reading (P3-256). While this loop is inside publish it is not looking at
+// ctx.Done, and a blocked function call cannot be preempted, so a publish that waits
+// stalls reconnect and shutdown together — and back-pressures the reader once the
+// sixteen-slot buffer fills. The production publish satisfies this: EventHub.Publish
+// hands each subscriber a non-blocking send and removes the subscriber when its queue
+// is full (server.go:371). Its mutex is the one thing this loop can wait on, so no
+// holder of it may block on a subscriber.
 func RunPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, error), publish func(ReportEnvelope) error, onError func(error)) {
 	runPostbackLoop(ctx, connect, publish, onError, time.Second, 30*time.Second)
 }
