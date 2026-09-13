@@ -8,6 +8,10 @@
 //! chain hashes the scenario vector content, not live broker transitions.
 
 use anyhow::Result;
+use nautilus_core::{
+    datetime::{add_n_years_nanos, unix_nanos_to_iso8601},
+    UnixNanos,
+};
 use nautilus_execution_service::t9paper::{
     assert_no_secrets, audit_offload_and_restore, count_outcome, finalize_evidence, order_json,
     reconciliation_snapshot, scenario_for_idx, shadow_position, write_json, Run, Scenario,
@@ -40,9 +44,11 @@ fn main() -> Result<()> {
     let unknown = count_outcome(&orders, Scenario::Unknown);
     let disconnect = count_outcome(&orders, Scenario::Disconnect);
 
+    // P3-183: the retention deadline belongs to *this* run, not to a frozen literal.
+    let blocked_until = deletion_blocked_until(run_start_unix_seconds(&run))?;
     let deletion_governance = json!({
         "legal_hold": false,
-        "deletion_blocked_until": "2027-08-19 (1y)",
+        "deletion_blocked_until": blocked_until,
         "policy": RETENTION_POLICY,
     });
 
@@ -113,4 +119,113 @@ fn main() -> Result<()> {
         evidence["evidence_hash"].as_str().unwrap(),
     );
     Ok(())
+}
+
+/// Unix second the evidence run started at, read from the run id (`<kind>-<unix>` — `Run` exposes
+/// no separate timestamp). An unrecognised run id fails loudly rather than freezing the retention
+/// date (P3-183).
+fn run_start_unix_seconds(run: &Run) -> u64 {
+    run.run_id
+        .rsplit('-')
+        .next()
+        .and_then(|secs| secs.parse().ok())
+        .expect("run id must end with the unix start second")
+}
+
+/// Retention deadline for this bundle: the run start plus one year, as
+/// `"<YYYY-MM-DD> (1y from run <YYYY-MM-DD>)"` (P3-183).
+///
+/// # Errors
+///
+/// Returns an error if the deadline leaves the representable timestamp range.
+fn deletion_blocked_until(run_start_unix: u64) -> anyhow::Result<String> {
+    let start = UnixNanos::from_seconds(run_start_unix);
+    let blocked = add_n_years_nanos(start, 1)?;
+    Ok(format!(
+        "{} (1y from run {})",
+        iso_date(blocked),
+        iso_date(start)
+    ))
+}
+
+/// `YYYY-MM-DD` (UTC) of a timestamp, taken from the crate's ISO 8601 formatter prefix.
+fn iso_date(timestamp: UnixNanos) -> String {
+    unix_nanos_to_iso8601(timestamp)[..10].to_string()
+}
+
+#[cfg(test)]
+mod p3_183_tests {
+    use super::*;
+    use nautilus_execution_service::t9paper::evidence_root;
+
+    /// The retention deadline is only observable in the bundle `main` writes, so this drives the
+    /// harness end to end (it is offline: no broker round-trip, no network).
+    #[test]
+    fn bundle_retention_date_is_derived_from_the_run_timestamp() {
+        let root = evidence_root();
+        let pre_existing = run_dirs(&root);
+
+        main().expect("harness run succeeds");
+
+        let run_dir = run_dirs(&root)
+            .into_iter()
+            .find(|dir| !pre_existing.contains(dir))
+            .expect("harness created exactly one run directory");
+        let raw =
+            std::fs::read_to_string(run_dir.join("evidence.json")).expect("evidence.json written");
+        let evidence: Value = serde_json::from_str(&raw).expect("evidence is JSON");
+
+        let run_unix: u64 = evidence["run_id"]
+            .as_str()
+            .expect("run id present")
+            .rsplit('-')
+            .next()
+            .and_then(|secs| secs.parse().ok())
+            .expect("run id ends with the unix start second");
+        let start = UnixNanos::from_seconds(run_unix);
+        let run_date = date_of(start);
+        let expiry = date_of(add_n_years_nanos(start, 1).expect("one year is representable"));
+
+        let blocked = evidence["deletion_governance"]["deletion_blocked_until"]
+            .as_str()
+            .expect("deletion_blocked_until is a string");
+        assert!(
+            blocked.starts_with(&expiry),
+            "retention must expire one year after the run date ({expiry}), got `{blocked}`"
+        );
+        assert!(
+            blocked.contains(&run_date),
+            "retention must name the run date ({run_date}), got `{blocked}`"
+        );
+
+        let _ = std::fs::remove_dir_all(&run_dir);
+        if pre_existing.is_empty() {
+            let _ = std::fs::remove_dir(&root);
+        }
+    }
+
+    /// Independent oracle for the rendered deadline: a fixed timestamp, no shared arithmetic.
+    #[test]
+    fn retention_deadline_is_one_year_after_the_run_date() {
+        assert_eq!(
+            deletion_blocked_until(0).expect("the epoch is representable"),
+            "1971-01-01 (1y from run 1970-01-01)"
+        );
+    }
+
+    /// `YYYY-MM-DD` prefix of the audited crate formatter, kept out of the assertions' path.
+    fn date_of(timestamp: UnixNanos) -> String {
+        unix_nanos_to_iso8601(timestamp)[..10].to_string()
+    }
+
+    fn run_dirs(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(root)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| entry.ok())
+                    .map(|entry| entry.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
