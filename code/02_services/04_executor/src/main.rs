@@ -104,7 +104,7 @@ async fn main() -> anyhow::Result<()> {
         .server_state()
         .with_forwarder(route_forwarder)
         .with_gateway_endpoint(gateway_endpoint);
-    let server = tokio::spawn(http::serve(addr, state));
+    let mut server = tokio::spawn(http::serve(addr, state));
 
     // B8 clock-drift safety: the offline slice samples a fixed zero offset (no NTP on the
     // laptop dev box — a real NTP/chrony source is a Workstream-D/prod concern behind the
@@ -146,12 +146,58 @@ async fn main() -> anyhow::Result<()> {
                 let status = runtime.enforce_clock_drift(&mut drift_monitor);
                 tracing::debug!(status = ?status, "periodic clock-drift enforcement");
             }
+            result = &mut server => {
+                // P3-212: an HTTP task exit leaves the service with no health/readiness
+                // surface; surface it as fatal instead of swallowing it.
+                return Err(http_server_exit_error(result));
+            }
         }
     }
     runtime.begin_shutdown();
     server.abort();
     let _ = server.await;
     Ok(())
+}
+
+/// Classifies an HTTP server task exit as the fatal error it is (P3-212). The old shutdown
+/// path dropped this result with `let _ = server.await`, so a failed bind left the service
+/// running with no health/readiness endpoints and no trace of the cause.
+fn http_server_exit_error(
+    result: Result<anyhow::Result<()>, tokio::task::JoinError>,
+) -> anyhow::Error {
+    match result {
+        Ok(Ok(())) => anyhow::anyhow!("http server exited unexpectedly"),
+        Ok(Err(e)) => anyhow::anyhow!("http server failed: {e:#}"),
+        Err(join) => anyhow::anyhow!("http server task failed: {join:?}"),
+    }
+}
+
+#[cfg(test)]
+mod p3_212_http_server_exit_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_http_server_handle_is_surfaced_as_fatal_not_discarded() {
+        // P3-212: a bind failure must reach the operator with its cause; the old
+        // `let _ = server.await` dropped both the join outcome and the serve error.
+        let failed = tokio::spawn(async {
+            Err::<(), anyhow::Error>(anyhow::anyhow!(
+                "bind health server 127.0.0.1:9: address in use"
+            ))
+        });
+        let err = http_server_exit_error(failed.await);
+        assert!(
+            format!("{err:#}").contains("address in use"),
+            "the joined server error must be surfaced with its cause, got: {err:#}"
+        );
+
+        let panicked = tokio::spawn(async { panic!("bind panicked") });
+        let err = http_server_exit_error(panicked.await);
+        assert!(
+            format!("{err}").contains("http server task failed"),
+            "a panicked server task must still be surfaced as fatal, got: {err}"
+        );
+    }
 }
 
 #[cfg(unix)]
