@@ -278,15 +278,18 @@ func TestValidateMarketOrderPriceForms(t *testing.T) {
 			t.Fatalf("non-zero MKT price %q must be rejected", price)
 		}
 	}
-	// P1-191 decision, deliberately unchanged: a stop-loss market order carries
-	// its trigger in `price` (the request has no separate trigger field), so an
-	// empty or zero trigger stays rejected.
+	// Stop-loss types are refused before the price rules can apply (P3-043), so this
+	// loop now pins the interaction and attributes the outcome to that rule.
 	for _, price := range []string{"", "0", "0.00"} {
 		command := validPlaceCommand()
 		command.Order.OrderType = "SL-MKT"
 		command.Order.Price = price
-		if err := validateCommand(command); err == nil {
+		err := validateCommand(command)
+		if err == nil {
 			t.Fatalf("SL-MKT price %q must stay rejected", price)
+		}
+		if !strings.Contains(err.Error(), "stop trigger") {
+			t.Fatalf("SL-MKT price %q must be refused for the missing trigger, got %v", price, err)
 		}
 	}
 }
@@ -459,5 +462,40 @@ func TestFingerprintReportsMarshalFailure(t *testing.T) {
 	}
 	if distinct == first {
 		t.Fatalf("different commands must not share a digest (%q)", first)
+	}
+}
+
+// P3-043: arrow.OrderRequest documents TriggerPrice as the "Trigger price for SL
+// orders" (third_party/go-arrow/arrow/orders.go:27), OrderCommand has no field to
+// carry one and toArrowOrder sets none — so an SL order this bridge accepted used
+// to reach the venue with no trigger at all.
+func TestValidateCommandRejectsStopLossWithoutTriggerSupport(t *testing.T) {
+	var accepted []string
+	for _, orderType := range []string{"SL-LMT", "SL-MKT", "sl-lmt"} {
+		command := validPlaceCommand()
+		command.Order.OrderType = orderType
+		command.Order.Price = "15050"
+		err := validateCommand(command)
+		if err == nil {
+			accepted = append(accepted, orderType)
+			continue
+		}
+		if !strings.Contains(err.Error(), "stop trigger") {
+			t.Fatalf("order_type %s must be refused for the missing trigger, got %v", orderType, err)
+		}
+	}
+	if len(accepted) > 0 {
+		t.Fatalf("stop-loss order types accepted without a trigger: %v", accepted)
+	}
+	// The omission that motivates the rule: nothing the bridge builds carries a
+	// trigger, so an accepted stop-loss order would be forwarded without one. If this
+	// ever fails, the bridge can express a trigger and stop-loss support can return.
+	command := validPlaceCommand()
+	order, err := toArrowOrder(*command.Order, command.ClientOrderRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.TriggerPrice != "" {
+		t.Fatalf("request carries trigger %q — revisit stop-loss support", order.TriggerPrice)
 	}
 }

@@ -217,6 +217,15 @@ func validateOrderCommand(o OrderCommand) error {
 	default:
 		return fmt.Errorf("unsupported order_type %q", o.OrderType)
 	}
+	// P3-043: this bridge cannot express a stop trigger — OrderCommand has no such
+	// field and toArrowOrder never sets arrow.OrderRequest.TriggerPrice, which the SDK
+	// documents as the "Trigger price for SL orders" (orders.go:27). An SL order
+	// therefore reached the venue with no trigger at all, where it is rejected or, worse,
+	// interpreted as a different instruction. Refuse it here until a trigger can be
+	// carried on both sides of the protocol.
+	if orderType == "SL-LMT" || orderType == "SL-MKT" {
+		return fmt.Errorf("order_type %s needs a stop trigger this bridge cannot carry", orderType)
+	}
 	// P1-191: LMT/SL prices must be positive numbers — empty, zero,
 	// negative, or non-numeric prices fail fast as REJECTED, never reach
 	// the broker. Canonical digits with one optional dot (exponent,
