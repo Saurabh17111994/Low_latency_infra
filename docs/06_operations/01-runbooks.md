@@ -221,27 +221,23 @@ Environment: the distributed SignalJob runs on the compose Flink cluster as a
 | `CHECKPOINT_TIMEOUT_MS` | `30000` | checkpoint timeout |
 | `MAX_CONCURRENT_CHECKPOINTS` | `1` | no concurrent checkpoints |
 
-Additional required envs: `RAW_TABLE`, `CANDLE_TABLE`, `CANDLE_CURRENT_TABLE`,
-`SIGNAL_CANDIDATES_TABLE`, `FLUSS_BOOTSTRAP_SERVERS` (coordinator port `9123` —
+Additional required envs: `RAW_TABLE`, `CANDLE_LIVE_TABLE`, `CANDLE_CLOSED_TABLE`,
+`SIGNAL_CANDIDATES_TABLE`, `SIGNAL_CURRENT_TABLE`, `FLUSS_BOOTSTRAP_SERVERS` (coordinator port `9123` —
 the tablet's client port is `9124` and `9123` on a tablet is nothing),
 `CHECKPOINT_DIR` (MUST include a scheme: `file:///tmp/p8-checkpoints`; a bare
 path throws `StringIndexOutOfBoundsException` at `SignalJob.java:310`).
-**Early-signal / preview path envs (2026-08-29 low-latency work, CHG-121
-validated 2026-09-02 — defaults shown; markers default-ON, empty string
-DISABLES markers for legacy runs):**
-
-| Env | Default | Meaning |
-| --- | --- | --- |
-| `PREVIEW_TABLE` | `feature_candles_15s_preview` | 1s preview LOG table |
-| `PREVIEW_ENABLED` | `true` | preview emission toggle |
-| `PREVIEW_INTERVAL_MS` | `1000` | preview cadence |
-| `PREVIEW_TTL_MS` | `60000` | preview table TTL |
-| `EARLY_SIGNAL_ENABLED` | `true` | tentative/confirm/cancel path (requires `PREVIEW_ENABLED=true`; the job fails closed on the illegal combo) |
-| `EARLY_SIGNAL_RULE` | canonical rule id | rule id stamped on candidate rows |
-| `EARLY_SIGNAL_CONFIRM_AFTER_MS` | `4000` | early-confirm window |
-| `SIGNAL_TENTATIVE_MARKERS_TABLE` | `Signal_Tentative_Markers` | tentative-marker KV (PK candidate_id, 2d TTL); empty string disables |
-| `FORMING_BAR_TABLE` | `forming_bar` | forming-bar KV |
-
+**RETIRED (candle-era, 2026-09-05 multi-timeframe cutover) — early-signal / preview path envs.**
+The job no longer reads any of these keys (verified by literal census of
+`SignalJobConfig.java`: zero `EARLY_SIGNAL_*`/`PREVIEW_*`/`FORMING_BAR_TABLE` reads):
+`PREVIEW_TABLE`, `PREVIEW_ENABLED`, `PREVIEW_INTERVAL_MS`, `PREVIEW_TTL_MS`,
+`EARLY_SIGNAL_ENABLED`, `EARLY_SIGNAL_RULE`, `EARLY_SIGNAL_CONFIRM_AFTER_MS`,
+`SIGNAL_TENTATIVE_MARKERS_TABLE`, `FORMING_BAR_TABLE`. Their tables
+(`feature_candles_15s_preview`, `forming_bar`, `Signal_Tentative_Markers`) were deleted
+with DDLs 30/04/31. Preview-cadence work now rides the multi-timeframe path as live
+snapshots in `candle_live` (DDL 32); the authoritative env surface is the
+`SignalJobConfig` literal set (`CANDLE_LIVE_TABLE`, `CANDLE_CLOSED_TABLE`,
+`MULTITF_ENABLED`, `MULTITF_LIVE_SNAPSHOT_INTERVAL_MS`, `MULTITF_SESSION_BYPASS`,
+`MULTITF_SIGNAL_CONTEXT_ENABLED`) — defaults are deliberately not restated here.
 `STATE_RECOVERY_PATH`/`ALLOW_FULL_REPLAY` are runtime-only and absent from
 `.env`; the fail-closed A3.3 gate governs both (no normal launch path supplies
 `ALLOW_FULL_REPLAY=true`).

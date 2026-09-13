@@ -169,7 +169,9 @@ secrets:       (separate, git-ignored) ARROW_APP_SECRET, ARROW_PASSWORD, ARROW_T
 8. ✅ Go batch limits (M1): add `BRIDGE_BATCH_MAX_AGE_MS / MAX_EVENTS / MAX_BYTES` env with the O-2 values as defaults (defaults stay locked; override allowed with validation).
 9. Compute: `WATERMARK_OUT_OF_ORDER_MS`, `ALLOWED_LATENESS_MS`, `SOURCE_IDLE_MS` already env — document them; make `PARALLELISM` required-in-prod (M4).
 10. ✅ `client.writer.retries` (M9) → env `FLUSS_WRITER_RETRIES`.
-11. ✅ Preview table name (M8) → env `PREVIEW_TABLE` (align with `CANDLE_TABLE`).
+11. RETIRED 2026-09-05 (M8) — `PREVIEW_TABLE` no longer exists: preview rows are the
+    multi-timeframe live snapshots in `candle_live` (DDL 32); the env key was dropped
+    with the candle-era env surface (see runbooks §RETIRED early-signal/preview envs).
 12. ✅ Exec bridge: `commandTimeout` (M17) → env `EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS`.
 
 **Phase 5 — relax over-pinning (judgment):**
