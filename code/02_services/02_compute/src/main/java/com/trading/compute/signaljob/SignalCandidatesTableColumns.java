@@ -65,7 +65,6 @@ public final class SignalCandidatesTableColumns {
     public static final String ORDER_TYPE_MARKET = "MARKET";
     public static final String VALIDITY_REASON_VALID = "VALID";
     /** Early-signal lifecycle reasons (Phase 2, 2026-08-29). */
-    public static final String VALIDITY_REASON_TENTATIVE = "TENTATIVE";
     public static final String VALIDITY_REASON_CONFIRMED = "CONFIRMED";
     public static final String VALIDITY_REASON_SUPERSEDED = "SUPERSEDED";
     public static final String SCHEMA_VERSION_V2 = "2";

@@ -11,12 +11,11 @@ import org.apache.fluss.metadata.TableInfo;
  * deployed tables match the contracts the write paths rely on.
  *
  * <ul>
- *   <li>{@code feature_candles_15s} — candle KV current-state table
- *       (user requirement 2026-08-13: candle tables are KV-only, no LOG+KV
- *       twin): primary key exactly {@code [instrument_token, window_start]},
- *       bucket.key exactly {@code instrument_token} (a subset of the PK, so
- *       per-ticker colocation holds), 16 buckets, exact 15-column v2 schema
- *       (tracker 14 P1 — CANDLE-SCHEMA-002).</li>
+ *   <li>{@code candle_live} / {@code candle_closed} — the multi-timeframe
+ *       candle KV tables (DDL 32/33, cutover 2026-09-05; contracts pinned by
+ *       {@code CandleLiveColumns} / {@code CandleClosedColumns}, P4-334):
+ *       exact per-table column schema and bucket routing, enforced by
+ *       {@code validateCandleLiveTable} / {@code validateCandleClosedTable}.</li>
  *   <li>{@code Signal_Candidates} — immutable signal LOG (DEC-035, v3):
  *       <b>no</b> primary key, bucket.key exactly {@code instrument_token},
  *       16 buckets, exact 22-column schema.</li>
@@ -191,9 +190,9 @@ public final class TableContractValidator {
      * column name, live type root, live nullability, DDL intent, and a
      * divergence marker where the DDL's NOT NULL is not carried into live
      * metadata. {@code nullableInDdl.get(i)} is {@code true} when the DDL
-     * declares column {@code i} nullable (same semantic as
-     * {@link CandleTableSchema#COLUMN_NULLABLE_IN_DDL}). Never throws — the
-     * strict checks are {@code validate*Table}.
+     * declares column {@code i} nullable (same semantic as the DDL-nullability
+     * list passed by the caller). Never throws — the strict checks are
+     * {@code validate*Table}.
      */
     public static String schemaReport(TableInfo info, List<Boolean> nullableInDdl) {
         StringBuilder sb = new StringBuilder(512);

@@ -32,7 +32,7 @@ final class ScratchTables {
 
     private ScratchTables() {}
 
-    /** 15-column candle KV schema (mirrors feature_candles_15s, DDL 03). */
+    /** 15-column candle KV scratch schema (retired single-TF row shape, DDL 03). */
     static Schema candleSchema() {
         return Schema.newBuilder()
                 .column("instrument_token", DataTypes.BIGINT())
@@ -117,7 +117,7 @@ final class ScratchTables {
         TableDescriptor td = TableDescriptor.builder()
                 .schema(schema)
                 // LOG tables: instrument_token routing (mirrors raw_table_1 /
-                // feature_candles_15s). KV tables: bucket key must be a subset
+                // candle_closed). KV tables: bucket key must be a subset
                 // of the PK — the current-state KV uses instrument_token (DDL 23).
                 .distributedBy(bucketCount, pk == null ? "instrument_token" : pk.get(0))
                 .build();

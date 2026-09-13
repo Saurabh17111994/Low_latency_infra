@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Test;
  * Phase 0 multi-TF aggregator contract: {@link CandleLiveColumns} must mirror
  * {@code code/01_platform/02_sql/ddl/32_candle_live.sql} v1 (15 columns,
  * DDL order, types, nullability, PK instrument_token/tf/window_start)
- * — same pattern as {@link FormingBarTableColumnsAgreementTest}.
+ * — same pattern as {@link CandleClosedColumnsAgreementTest}.
  */
 class CandleLiveColumnsAgreementTest {
 

@@ -257,7 +257,6 @@ class SignalJobConfigTest {
         env.put("RESTART_DELAY_MS", "45000");
         env.put("FLUSS_BOOTSTRAP_SERVERS", "fluss:9123");
         env.put("RAW_TABLE", "raw_table_1");
-        env.put("CANDLE_TABLE", "feature_candles_15s");
         env.put("SIGNAL_CANDIDATES_TABLE", "Signal_Candidates_dev");
         env.put("SIGNAL_CURRENT_TABLE", "Signal_Candidates_current_dev");
         env.put("SIGNAL_STRATEGY_ID", "my-strategy");
@@ -265,7 +264,6 @@ class SignalJobConfigTest {
         env.put("SIGNAL_QUANTITY", "3");
         env.put("FORMING_RULE_ID", "my-forming-rule");
         env.put("FORMING_LOOKBACK_CANDLES", "8");
-        env.put("FORMING_BAR_TABLE", "forming_bar_dev");
         env.put("FORMING_BAR_WRITE_BATCH_MS", "100");
         env.put("TRADE_DECISIONS_TABLE", "Trade_Decisions_dev");
         env.put("TRADE_INSTRUCTION_STATE_TABLE", "trade_instruction_state_dev");

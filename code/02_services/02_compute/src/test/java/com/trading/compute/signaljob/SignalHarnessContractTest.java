@@ -60,19 +60,12 @@ class SignalHarnessContractTest {
     // SIG-INT-001: pinned Fluss source/sink boundary — single-VM Fluss 0.9.1 endpoints
     @Test
     void sigInt001_pinnedFlussSourceSinkBoundary() {
-        // Pinned table names for signal job
-        String rawTable = "raw_table_1";
-        String dedupTable = "fingerprint_dedup";
-        String candleTable = "feature_candles_15s";
-        String formingBarTable = "forming_bar";
-        assertEquals("raw_table_1", rawTable);
-        assertEquals("fingerprint_dedup", dedupTable);
-        // Fluss bootstrap pinned single-VM
-        String bootstrap = "fluss-coordinator:9123";
-        assertEquals("fluss-coordinator:9123", bootstrap);
-        // Source is raw_table_1 LOG, sink is feature_candles_15s KV — not swapped
-        assertTrue(rawTable.startsWith("raw"));
-        assertTrue(candleTable.contains("candle"));
-        assertTrue(formingBarTable.equals("forming_bar"));
+        // Live canon after the multi-timeframe cutover (2026-09-05): the retired
+        // single-TF candle KV and forming_bar KV are gone; the signal job writes
+        // candle_live (KV) and candle_closed (KV).
+        assertEquals("candle_live", MultiTimeframeSinks.DEFAULT_LIVE_TABLE);
+        assertEquals("candle_closed", MultiTimeframeSinks.DEFAULT_CLOSED_TABLE);
+        // Source is raw_table_1 LOG, sink is candle_live KV — never swapped.
+        assertNotEquals("raw_table_1", MultiTimeframeSinks.DEFAULT_LIVE_TABLE);
     }
 }

@@ -127,15 +127,6 @@ class TableContractValidatorTest {
     }
 
     @Test
-    @DisplayName("signal routing constants stay equal to the candle routing (accidental-split guard)")
-    void signalRoutingMatchesCandleRouting() {
-        assertEquals(com.trading.common.schema.CandleTableSchema.BUCKET_KEY,
-                SignalCandidatesTableColumns.BUCKET_KEY);
-        assertEquals(com.trading.common.schema.CandleTableSchema.BUCKET_COUNT,
-                SignalCandidatesTableColumns.BUCKET_COUNT);
-    }
-
-    @Test
     @DisplayName("signal KV without a primary key is rejected (current-state contract)")
     void signalCurrentKvNoPkRejected() {
         assertThrows(TableContractValidator.ContractViolation.class,

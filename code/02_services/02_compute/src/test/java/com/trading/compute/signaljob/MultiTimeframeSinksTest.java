@@ -27,7 +27,7 @@ import org.junit.jupiter.api.Test;
  *
  * <p>Integration test using a live Fluss sink against a scratch
  * {@code candle_live}/{@code candle_closed} table (scratch-table pattern of
- * {@link FormingBarRehydrationIntegrationTest} / {@code ScratchTables}) is
+ * {@link MultiTimeframeAggregateFunctionTest} / {@code ScratchTables}) is
  * <b>not run</b> here: that pattern needs an externally provisioned Fluss
  * cluster (or docker/compose) and is gated by
  * {@code COMPUTE_INT_TEST_FORMING_BAR_REHYDRATE=true} / {@code FLUSS_BOOTSTRAP}
