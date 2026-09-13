@@ -54,6 +54,21 @@ fn paper_25_summary(orders: &[Value]) -> Value {
     summary
 }
 
+/// First `checks` entry: the scenario distribution rendered from the counts actually present in
+/// the bundle, so the prose cannot drift from the vectors it describes. Ported from the sibling
+/// `t9_paper_25_full` bin, which computes the same line the same way (P3-423 there, D6 here).
+fn scenario_distribution_line(
+    filled: usize,
+    partial: usize,
+    rejected: usize,
+    unknown: usize,
+    disconnect: usize,
+) -> String {
+    format!(
+        "scenario vectors: {filled} FILLED / {partial} PARTIAL / {rejected} REJECT / {unknown} UNKNOWN / {disconnect} DISCONNECT (expectations, not observed)"
+    )
+}
+
 fn main() -> Result<()> {
     let run = Run::start("t9-paper-25")?;
 
@@ -68,6 +83,13 @@ fn main() -> Result<()> {
     let shadow_positions: Vec<Value> = (0..PAPER_INSTRUMENTS.len()).map(shadow_position).collect();
 
     let summary = paper_25_summary(&orders);
+    let scenario_line = scenario_distribution_line(
+        count_outcome(&orders, Scenario::Filled),
+        count_outcome(&orders, Scenario::PartialFill),
+        count_outcome(&orders, Scenario::Rejected),
+        count_outcome(&orders, Scenario::Unknown),
+        count_outcome(&orders, Scenario::Disconnect),
+    );
 
     let evidence = finalize_evidence(run.evidence(
         "paper-25",
@@ -78,7 +100,7 @@ fn main() -> Result<()> {
             "shadow_positions": shadow_positions,
             "unknowns": unknowns,
             "checks": [
-                "scenario vectors: 10 FILLED / 5 PARTIAL / 5 REJECT / 3 UNKNOWN / 2 DISCONNECT (expectations, not observed)",
+                scenario_line,
                 "UNKNOWN rows demand explicit reconciliation, no auto-retry",
                 "shadow positions projected from scripted outcomes (expected_match)",
                 "shadow: 0 new broker commands emitted while gate HALTED",
@@ -147,5 +169,20 @@ mod p3_182_tests {
         let mut orders = scripted_orders();
         orders[0]["outcome"] = json!(Scenario::Rejected.as_str());
         paper_25_summary(&orders);
+    }
+
+    #[test]
+    fn scenario_prose_follows_the_counts() {
+        // D6: the first `checks` entry used to be a hardcoded literal, so it could drift from the
+        // scripted vectors. It is now rendered from the counts, like the sibling full-25 bin.
+        assert_eq!(
+            scenario_distribution_line(1, 2, 3, 4, 5),
+            "scenario vectors: 1 FILLED / 2 PARTIAL / 3 REJECT / 4 UNKNOWN / 5 DISCONNECT (expectations, not observed)"
+        );
+        assert_eq!(
+            scenario_distribution_line(10, 5, 5, 3, 2),
+            "scenario vectors: 10 FILLED / 5 PARTIAL / 5 REJECT / 3 UNKNOWN / 2 DISCONNECT (expectations, not observed)",
+            "the documented contract must render exactly as the literal it replaces did"
+        );
     }
 }
