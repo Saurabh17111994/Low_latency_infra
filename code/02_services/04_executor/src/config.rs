@@ -8,6 +8,18 @@ pub const FENCING_LEASE_PROFILE: &str = "30s";
 pub const CORRELATION_POLICY_VERSION: &str = "corr.v1";
 pub const GATE_FENCE_TOKEN_BITS: u32 = 64;
 
+/// Strictly parses a boolean env value (P3-434): only `true`/`false` are accepted, case-insensitive
+/// and with surrounding whitespace ignored. Any other spelling is a hard error instead of a silent
+/// `false` — an operator's failed attempt to enable a durable flag must not pass unnoticed, and an
+/// unparseable value must fail closed rather than be guessed at.
+fn parse_bool_env(key: &str, raw: &str) -> Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => bail!("{key} must be \"true\" or \"false\", got {raw:?}"),
+    }
+}
+
 /// Strict service configuration — HALTED default, fail-closed.
 ///
 /// Endpoints (gateway/bridge) are optional at boot so the service can start health-only and
@@ -73,10 +85,16 @@ impl ServiceConfig {
         let map: std::collections::HashMap<String, String> = kv.into_iter().collect();
         let get = |k: &str| map.get(k).map(String::as_str);
 
+        // Single strict bool reader for every boolean env (P3-434); absent means `false`.
+        let bool_env = |key: &str| -> Result<bool> {
+            match get(key) {
+                Some(raw) => parse_bool_env(key, raw),
+                None => Ok(false),
+            }
+        };
+
         // Fail closed: execution may never be enabled at boot.
-        let enabled = get("EXECUTION_ENABLED")
-            .map(|v| v.parse::<bool>().unwrap_or(false))
-            .unwrap_or(false);
+        let enabled = bool_env("EXECUTION_ENABLED")?;
         if enabled {
             bail!("EXECUTION_ENABLED must not be true at boot — service always starts HALTED");
         }
@@ -112,18 +130,10 @@ impl ServiceConfig {
                 .unwrap_or("execution-gateway.v2")
                 .to_string(),
             clock_offset_limit_ms,
-            durable_gate_enabled: get("DURABLE_GATE_ENABLED")
-                .map(|v| v == "true")
-                .unwrap_or(false),
-            durable_attempts_enabled: get("DURABLE_ATTEMPTS_ENABLED")
-                .map(|v| v == "true")
-                .unwrap_or(false),
-            durable_journal_enabled: get("DURABLE_JOURNAL_ENABLED")
-                .map(|v| v == "true")
-                .unwrap_or(false),
-            durable_audit_enabled: get("DURABLE_AUDIT_ENABLED")
-                .map(|v| v == "true")
-                .unwrap_or(false),
+            durable_gate_enabled: bool_env("DURABLE_GATE_ENABLED")?,
+            durable_attempts_enabled: bool_env("DURABLE_ATTEMPTS_ENABLED")?,
+            durable_journal_enabled: bool_env("DURABLE_JOURNAL_ENABLED")?,
+            durable_audit_enabled: bool_env("DURABLE_AUDIT_ENABLED")?,
         })
     }
 
@@ -307,6 +317,43 @@ mod tests {
                 "value {bad:?} must be rejected with the key named, got: {err}"
             );
         }
+    }
+
+    /// P3-434: a boolean flag must be spelled `true`/`false` (case-insensitive, surrounding
+    /// whitespace ignored). Any other spelling is a hard error, never a silent `false`.
+    #[test]
+    fn rejects_non_boolean_flag_spellings() {
+        for (key, bad) in [
+            ("EXECUTION_ENABLED", "1"),
+            ("DURABLE_GATE_ENABLED", "yes"),
+            ("DURABLE_ATTEMPTS_ENABLED", "on"),
+            ("DURABLE_JOURNAL_ENABLED", "0"),
+            ("DURABLE_AUDIT_ENABLED", "enabled"),
+        ] {
+            let err = ServiceConfig::from_iter(kv(&[(key, bad)])).unwrap_err();
+            assert!(
+                err.to_string().contains(key),
+                "{key}={bad:?} must be rejected with the key named, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn boolean_flags_accept_only_true_false_spellings() {
+        for (raw, expected) in [
+            ("true", true),
+            ("TRUE", true),
+            (" True ", true),
+            ("false", false),
+            ("FALSE", false),
+            (" false ", false),
+        ] {
+            let c = ServiceConfig::from_iter(kv(&[("DURABLE_GATE_ENABLED", raw)])).unwrap();
+            assert_eq!(c.durable_gate_enabled, expected, "raw value {raw:?}");
+        }
+        // The executor Dockerfile's only real assignment (`ENV EXECUTION_ENABLED=false`) still boots.
+        let c = ServiceConfig::from_iter(kv(&[("EXECUTION_ENABLED", "false")])).unwrap();
+        assert!(!c.execution_enabled);
     }
 
     #[test]
