@@ -611,57 +611,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    #[test]
-    fn order_command_round_trips_through_json() {
-        let o = OrderCommand::new("NFO", "NIFTY")
-            .with_quantity("10")
-            .with_side(TransactionType::Buy)
-            .with_order_type(OrderType::Lmt)
-            .with_product(Product::Cash)
-            .with_validity(Validity::Day)
-            .with_price("100");
-        o.validate().unwrap();
-        let v = serde_json::to_value(&o).unwrap();
-        assert_eq!(v["exchange"], "NFO");
-        assert_eq!(v["transaction_type"], "BUY");
-        assert_eq!(v["order_type"], "LMT");
-        assert_eq!(v["product"], "C");
-        assert_eq!(v["validity"], "DAY");
-        // MKT with a price is invalid
-        let bad = OrderCommand::new("NFO", "NIFTY")
-            .with_quantity("10")
-            .with_side(TransactionType::Buy)
-            .with_order_type(OrderType::Mkt)
-            .with_product(Product::Cash)
-            .with_validity(Validity::Day)
-            .with_price("100");
-        assert!(bad.validate().is_err(), "MKT must not carry a price");
-    }
-
-    #[test]
-    fn command_envelope_validation_matches_go() {
-        // place requires instruction_id, execution_attempt_id, order
-        let env = CommandEnvelope::new(Command::Place, "req-1");
-        assert!(env.validate().is_err());
-
-        let env = CommandEnvelope {
-            instruction_id: "inst-1".into(),
-            execution_attempt_id: "att-1".into(),
-            client_order_ref: "CLIENT-1".into(),
-            order: Some(
-                OrderCommand::new("NFO", "NIFTY")
-                    .with_quantity("10")
-                    .with_side(TransactionType::Buy)
-                    .with_order_type(OrderType::Lmt)
-                    .with_product(Product::Cash)
-                    .with_validity(Validity::Day)
-                    .with_price("100"),
-            ),
-            ..env
-        };
-        assert!(env.validate().is_ok());
-    }
-
     // P3-429: `deny_unknown_fields` is stricter than the Go bridge this mirrors —
     // Go's json.Unmarshal ignores unknown fields, and the protocol is gated by
     // contract_version, so a field added on the Go side must not become a serde error
@@ -891,6 +840,57 @@ mod tests {
             "{} case(s) diverge from the Go bridge: {wrong:#?}",
             wrong.len()
         );
+    }
+
+    #[test]
+    fn order_command_round_trips_through_json() {
+        let o = OrderCommand::new("NFO", "NIFTY")
+            .with_quantity("10")
+            .with_side(TransactionType::Buy)
+            .with_order_type(OrderType::Lmt)
+            .with_product(Product::Cash)
+            .with_validity(Validity::Day)
+            .with_price("100");
+        o.validate().unwrap();
+        let v = serde_json::to_value(&o).unwrap();
+        assert_eq!(v["exchange"], "NFO");
+        assert_eq!(v["transaction_type"], "BUY");
+        assert_eq!(v["order_type"], "LMT");
+        assert_eq!(v["product"], "C");
+        assert_eq!(v["validity"], "DAY");
+        // MKT with a price is invalid
+        let bad = OrderCommand::new("NFO", "NIFTY")
+            .with_quantity("10")
+            .with_side(TransactionType::Buy)
+            .with_order_type(OrderType::Mkt)
+            .with_product(Product::Cash)
+            .with_validity(Validity::Day)
+            .with_price("100");
+        assert!(bad.validate().is_err(), "MKT must not carry a price");
+    }
+
+    #[test]
+    fn command_envelope_validation_matches_go() {
+        // place requires instruction_id, execution_attempt_id, order
+        let env = CommandEnvelope::new(Command::Place, "req-1");
+        assert!(env.validate().is_err());
+
+        let env = CommandEnvelope {
+            instruction_id: "inst-1".into(),
+            execution_attempt_id: "att-1".into(),
+            client_order_ref: "CLIENT-1".into(),
+            order: Some(
+                OrderCommand::new("NFO", "NIFTY")
+                    .with_quantity("10")
+                    .with_side(TransactionType::Buy)
+                    .with_order_type(OrderType::Lmt)
+                    .with_product(Product::Cash)
+                    .with_validity(Validity::Day)
+                    .with_price("100"),
+            ),
+            ..env
+        };
+        assert!(env.validate().is_ok());
     }
 
     #[test]

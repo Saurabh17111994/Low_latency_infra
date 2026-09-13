@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context as _};
 use async_trait::async_trait;
 use tracing::debug;
 
-use super::client::{BridgeClient, BridgeReportStream};
+use super::client::{BridgeClient, BridgeReportStream, BRIDGE_REPORT_BUFFER};
 use super::protocol::{Command, CommandEnvelope, ReportEnvelope, RECORD_REPORT};
 
 /// Scripted synchronous reply for the next command.
@@ -65,7 +65,7 @@ pub struct OrderRecord {
 /// The in-process fake bridge.
 pub struct FakeBridge {
     connected: bool,
-    reports_tx: Option<tokio::sync::mpsc::UnboundedSender<ReportEnvelope>>,
+    reports_tx: Option<tokio::sync::mpsc::Sender<ReportEnvelope>>,
     reports_rx: Option<BridgeReportStream>,
     orders: HashMap<String, OrderRecord>,
     counter: u64,
@@ -164,9 +164,9 @@ impl FakeBridge {
         }
     }
 
-    fn push_report(&self, report: ReportEnvelope) {
+    async fn push_report(&self, report: ReportEnvelope) {
         if let Some(tx) = &self.reports_tx {
-            let _ = tx.send(report);
+            let _ = tx.send(report).await;
         }
     }
 }
@@ -186,7 +186,7 @@ impl BridgeClient for FakeBridge {
     async fn connect(&mut self) -> anyhow::Result<()> {
         self.connected = true;
         if self.reports_tx.is_none() {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, rx) = tokio::sync::mpsc::channel(BRIDGE_REPORT_BUFFER);
             self.reports_tx = Some(tx);
             self.reports_rx = Some(rx);
         }
@@ -274,7 +274,7 @@ impl BridgeClient for FakeBridge {
             CommandScript::Accept => self.handle_accept(cmd, envelope).await,
             CommandScript::AcceptThenFill => {
                 let report = self.handle_accept(cmd, envelope.clone()).await?;
-                self.emit_fill(&envelope);
+                self.emit_fill(&envelope).await;
                 Ok(report)
             }
         }
@@ -343,7 +343,8 @@ impl FakeBridge {
                     order_status: Some(FakeOrderStatus::Canceled.as_str().to_string()),
                     report_type: Some("order_canceled".to_string()),
                     ..ReportEnvelope::default()
-                });
+                })
+                .await;
                 Ok(self.make_success(Command::Cancel, &envelope, &envelope.broker_order_id))
             }
             Command::QueryOrder => {
@@ -481,7 +482,8 @@ impl FakeBridge {
                 order.price.clone()
             }),
             ..ReportEnvelope::default()
-        });
+        })
+        .await;
     }
 }
 

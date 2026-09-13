@@ -26,10 +26,10 @@ use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
-use super::client::{BridgeClient, BridgeReportStream};
+use super::client::{BridgeClient, BridgeReportStream, BRIDGE_REPORT_BUFFER};
 use super::protocol::{CommandEnvelope, ReportEnvelope};
 
 // --- RFC 6455 opcodes (subset we speak: text, ping, pong, close). ---
@@ -478,7 +478,7 @@ async fn ws_handshake(
 async fn ws_stream_once(
     url: &str,
     auth_token: &str,
-    tx: &UnboundedSender<ReportEnvelope>,
+    tx: &Sender<ReportEnvelope>,
     read_timeout: Duration,
 ) -> Result<()> {
     let (host, port, path) = parse_ws_url(url)?;
@@ -504,7 +504,7 @@ async fn ws_stream_once(
         match frame.opcode {
             OP_TEXT => {
                 if let Ok(envelope) = serde_json::from_slice::<ReportEnvelope>(&frame.payload) {
-                    if tx.send(envelope).is_err() {
+                    if tx.send(envelope).await.is_err() {
                         return Ok(()); // caller dropped the receiver (shutdown)
                     }
                 }
@@ -534,7 +534,7 @@ async fn ws_stream_once(
 async fn report_intake_loop(
     url: String,
     auth_token: String,
-    tx: UnboundedSender<ReportEnvelope>,
+    tx: Sender<ReportEnvelope>,
     reconnect_min: Duration,
     reconnect_max: Duration,
     read_timeout: Duration,
@@ -562,7 +562,7 @@ pub struct HttpBridgeClient {
     base_url: String,
     auth_token: String,
     connected: bool,
-    reports_tx: Option<UnboundedSender<ReportEnvelope>>,
+    reports_tx: Option<Sender<ReportEnvelope>>,
     intake: Option<JoinHandle<()>>,
     reconnect_min: Duration,
     reconnect_max: Duration,
@@ -644,7 +644,7 @@ impl BridgeClient for HttpBridgeClient {
         if self.reports_tx.is_some() {
             return None; // the stream has already been taken
         }
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(BRIDGE_REPORT_BUFFER);
         let url = format!("{}/v1/events", self.base_url.trim_end_matches('/'));
         let token = self.auth_token.clone();
         let min = self.reconnect_min;
