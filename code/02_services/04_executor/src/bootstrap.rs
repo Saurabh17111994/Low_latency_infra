@@ -61,7 +61,9 @@ impl Runtime {
         })
     }
 
-    /// Current gate state (always `HALTED` at boot; monotonic from there).
+    /// Current gate state. `HALTED` at boot and again after any safety halt; **not** monotonic:
+    /// the sanctioned enablement path advances it, and `Gate::safety_halt` (clock drift, operator
+    /// halt, shutdown) restores `HALTED` from any state. Booting `HALTED` is the guarantee.
     pub fn gate_state(&self) -> ExecState {
         self.gate.state()
     }
