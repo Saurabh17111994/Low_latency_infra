@@ -117,12 +117,15 @@ public class MockArrowServer {
     private record ClientSession(Socket socket, BufferedWriter writer, long connectedAt) {}
 
     private void handleClient(Socket client) {
-        var session = new ClientSession(client, null, System.currentTimeMillis());
+        // P3-469: only the timestamp was ever read from the throwaway
+        // ClientSession; keep it as a plain value instead of constructing a
+        // null-writer session that was never registered in `clients`.
+        long connectedAt = System.currentTimeMillis();
         try {
             var writer = new BufferedWriter(
                 new OutputStreamWriter(client.getOutputStream(), StandardCharsets.UTF_8));
-            var realSession = new ClientSession(client, writer, session.connectedAt);
-            clients.add(realSession);
+            var session = new ClientSession(client, writer, connectedAt);
+            clients.add(session);
         } catch (IOException e) {
             // R-180: never leak the accepted socket on writer setup failure.
             log.error("Failed to setup client writer — closing socket", e);
