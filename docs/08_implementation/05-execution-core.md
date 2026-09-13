@@ -995,6 +995,7 @@ python t8_sandbox_contract_check.py                                             
 - **T9** live-Arrow order-path evidence (real `RCF-EQ x1`, broker id `26082501010305` + `remarks` — place proven 2026-08-25, `MARGIN ERROR` pending funded re-run).
 - **T9** live fills/WebSocket transcript, live reconciliation snapshots, live shadow mode.
 - **T3** real sandbox authentication / auto re-auth.
+- **T3** stop-loss carriage (`SL-LMT`/`SL-MKT`) — refused fail-closed, not an IP-gate item: the command envelope and fingerprint carry no stop trigger, so an SL order is rejected outright rather than submitted with its trigger silently dropped (P3-043, `8216307`). Revisit when a caller needs SL orders through the bridge; the change moves the wire contract on both sides, so it needs a coordinated deploy (envelope + fingerprint + Rust protocol + mapping).
 - Full-path **real** runtime evidence over live Arrow.
 
 Each of these was gated on the broker's static-IP acceptance (gate **accepted 2026-08-21**) and the
