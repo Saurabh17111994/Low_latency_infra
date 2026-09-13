@@ -388,6 +388,54 @@ async fn write_client_ws_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8
     Ok(())
 }
 
+/// P3-433: the reply to the upgrade request must be a 101 (see the call site); the
+/// header checks live here so they can be exercised without a socket.
+fn check_upgrade_reply(reply: &[u8]) -> Result<()> {
+    anyhow::ensure!(
+        reply.starts_with(b"HTTP/1.1 101"),
+        "websocket upgrade rejected: {}",
+        String::from_utf8_lossy(&reply[..reply.len().min(120)])
+    );
+    let head = std::str::from_utf8(&reply[..reply.len().min(16_384)]).unwrap_or_default();
+    let header = |name: &str| {
+        head.split("\r\n").skip(1).find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            (k.trim().eq_ignore_ascii_case(name)).then(|| v.trim().to_string())
+        })
+    };
+    // A bare 101 is not an upgrade: the peer must confirm the protocol switch itself.
+    let upgrade = header("upgrade").unwrap_or_default();
+    anyhow::ensure!(
+        upgrade.eq_ignore_ascii_case("websocket"),
+        "websocket upgrade rejected: Upgrade: {upgrade:?}"
+    );
+    let connection = header("connection").unwrap_or_default();
+    anyhow::ensure!(
+        connection
+            .split(',')
+            .any(|t| t.trim().eq_ignore_ascii_case("upgrade")),
+        "websocket upgrade rejected: Connection: {connection:?}"
+    );
+    // RFC 6455's accept value is `base64(sha1(key + GUID))`. Verifying it needs a SHA-1
+    // implementation this crate does not depend on, so only the shape is checked here: a
+    // value-shaped forgery still passes. Recorded as a residual gap in the wave handoff.
+    let accept = header("sec-websocket-accept").unwrap_or_default();
+    anyhow::ensure!(
+        is_base64_sha1_digest(&accept),
+        "websocket upgrade rejected: Sec-WebSocket-Accept: {accept:?}"
+    );
+    Ok(())
+}
+
+/// A base64-encoded SHA-1 digest: 28 base64 characters with a single `=` pad.
+fn is_base64_sha1_digest(value: &str) -> bool {
+    value.len() == 28
+        && value.ends_with('=')
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+}
+
 /// Performs the RFC 6455 upgrade on an established TCP stream.
 ///
 /// Mirrors the Go bridge's expectations exactly: `Authorization: Bearer <token>` (the server
@@ -422,12 +470,7 @@ async fn ws_handshake(
         }
         reply.push(byte[0]);
     }
-    anyhow::ensure!(
-        reply.starts_with(b"HTTP/1.1 101"),
-        "websocket upgrade rejected: {}",
-        String::from_utf8_lossy(&reply[..reply.len().min(120)])
-    );
-    Ok(())
+    check_upgrade_reply(&reply)
 }
 
 /// Runs one lifeline of the `/v1/events` stream, returning when the socket closes, times out,
