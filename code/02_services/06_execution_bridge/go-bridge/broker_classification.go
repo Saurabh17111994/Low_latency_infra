@@ -34,8 +34,8 @@ import (
 
 // classificationEnvelope captures the minimal JSON fields needed for the dossier
 // table. It intentionally covers both string status and boolean success shapes,
-// and both message / errorMessage variants, plus top-level and data-wrapped
-// order identifiers.
+// and both message / errorMessage variants. Order identity is read only from the
+// data object (P3-041): a top-level echo is not a documented acceptance shape.
 type classificationEnvelope struct {
 	Status       string          `json:"status"`
 	Success      *bool           `json:"success"`
@@ -43,19 +43,12 @@ type classificationEnvelope struct {
 	ErrorMessage string          `json:"errorMessage"`
 	ErrorMsgAlt  string          `json:"error_message"`
 	Data         json.RawMessage `json:"data"`
-	// Some brokers echo orderNo at top level; accept either location.
-	OrderNo       string `json:"orderNo"`
-	BrokerOrderId string `json:"brokerOrderId"`
-	BrokerOrderID string `json:"broker_order_id"`
 }
 
 type classificationData struct {
 	OrderNo       flexString `json:"orderNo"`
 	BrokerOrderId flexString `json:"brokerOrderId"`
 	BrokerOrderID flexString `json:"broker_order_id"`
-	OrderNoAlt    flexString `json:"order_no"`
-	OrderId       flexString `json:"orderId"`
-	OrderIDAlt    flexString `json:"order_id"`
 }
 
 // flexString accepts a JSON string or number. Brokers differ on whether order
@@ -199,59 +192,26 @@ func isErrorEnvelope(env classificationEnvelope) bool {
 	return false
 }
 
+// extractOrderNo reads the order identity from the documented data fields only:
+// data.orderNo, data.brokerOrderId, and data.broker_order_id (the repo-canonical
+// spelling of that identity — docs/02_requirements/04-data.md ASM-DATA-006).
+//
+// Top-level echoes, the generic orderId/order_id/order_no aliases and a bare
+// string `data` are deliberately not identities (P3-041): accepting them lets a
+// payload that carries no documented identity read as ACCEPTED, and the repo's
+// own doctrine prohibits a generic order_id in code
+// (docs/08_implementation/01-foundation.md).
 func extractOrderNo(env classificationEnvelope) string {
-	// Top-level shortcuts (some SDKs echo orderNo at top level).
-	if s := strings.TrimSpace(env.OrderNo); s != "" {
-		return s
-	}
-	if s := strings.TrimSpace(env.BrokerOrderId); s != "" {
-		return s
-	}
-	if s := strings.TrimSpace(env.BrokerOrderID); s != "" {
-		return s
-	}
 	if len(env.Data) == 0 || string(env.Data) == "null" {
 		return ""
 	}
-	// Data is typically an object; try typed unmarshal first.
 	var d classificationData
-	if err := json.Unmarshal(env.Data, &d); err == nil {
-		if s := d.OrderNo.trimmed(); s != "" {
-			return s
-		}
-		if s := d.BrokerOrderId.trimmed(); s != "" {
-			return s
-		}
-		if s := d.BrokerOrderID.trimmed(); s != "" {
-			return s
-		}
-		if s := d.OrderNoAlt.trimmed(); s != "" {
-			return s
-		}
-		if s := d.OrderId.trimmed(); s != "" {
-			return s
-		}
-		if s := d.OrderIDAlt.trimmed(); s != "" {
-			return s
-		}
+	if err := json.Unmarshal(env.Data, &d); err != nil {
+		return ""
 	}
-	// Fallback generic map for unknown key variants.
-	var m map[string]interface{}
-	if err := json.Unmarshal(env.Data, &m); err == nil {
-		for _, k := range []string{"orderNo", "brokerOrderId", "broker_order_id", "order_no", "orderId", "order_id"} {
-			if v, ok := m[k]; ok {
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					return strings.TrimSpace(s)
-				}
-			}
-		}
-	}
-	// Data may itself be a quoted string containing JSON (defensive).
-	trimmed := strings.TrimSpace(string(env.Data))
-	if len(trimmed) >= 2 && trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"' {
-		var inner string
-		if err := json.Unmarshal(env.Data, &inner); err == nil && strings.TrimSpace(inner) != "" {
-			return strings.TrimSpace(inner)
+	for _, candidate := range []flexString{d.OrderNo, d.BrokerOrderId, d.BrokerOrderID} {
+		if s := candidate.trimmed(); s != "" {
+			return s
 		}
 	}
 	return ""

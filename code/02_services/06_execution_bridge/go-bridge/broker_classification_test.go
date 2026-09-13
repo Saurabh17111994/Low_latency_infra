@@ -150,3 +150,37 @@ func TestClassifyBrokerResponseAcceptsNumericOrderIdentifiers(t *testing.T) {
 		})
 	}
 }
+
+// P3-041: acceptance may only come from the dossier identity fields
+// (data.orderNo, data.brokerOrderId, and the repo-canonical data.broker_order_id).
+// Top-level echoes, the generic orderId/order_id/order_no aliases and a bare
+// string `data` are not order identities and must not yield ACCEPTED — a false
+// acceptance is reconciled against the wrong order. The repo's own identity
+// doctrine prohibits a generic order_id in code as well
+// (docs/08_implementation/01-foundation.md).
+func TestClassifyBrokerResponseIgnoresNonDossierIdentifiers(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "top-level orderNo echo only", body: `{"status":"success","orderNo":"BRK-1"}`, want: OutcomeUnknown},
+		{name: "top-level brokerOrderId echo only", body: `{"status":"success","brokerOrderId":"BRK-1"}`, want: OutcomeUnknown},
+		{name: "top-level broker_order_id echo only", body: `{"status":"success","broker_order_id":"BRK-1"}`, want: OutcomeUnknown},
+		{name: "generic data.orderId", body: `{"status":"success","data":{"orderId":"BRK-1"}}`, want: OutcomeUnknown},
+		{name: "generic data.order_id", body: `{"status":"success","data":{"order_id":"BRK-1"}}`, want: OutcomeUnknown},
+		{name: "alias data.order_no", body: `{"status":"success","data":{"order_no":"BRK-1"}}`, want: OutcomeUnknown},
+		{name: "bare string data", body: `{"status":"success","data":"BRK-1"}`, want: OutcomeUnknown},
+		{name: "quoted-json string data", body: `{"status":"success","data":"{\"orderNo\":\"BRK-1\"}"}`, want: OutcomeUnknown},
+		{name: "dossier data.orderNo", body: `{"status":"success","data":{"orderNo":"BRK-1"}}`, want: OutcomeSuccess},
+		{name: "dossier data.brokerOrderId", body: `{"status":"success","data":{"brokerOrderId":"BRK-9"}}`, want: OutcomeSuccess},
+		{name: "repo-canonical data.broker_order_id", body: `{"status":"success","data":{"broker_order_id":"BRK-9"}}`, want: OutcomeSuccess},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyBrokerResponse(200, tc.body); got != tc.want {
+				t.Fatalf("ClassifyBrokerResponse(200, %s)=%s want %s", tc.body, got, tc.want)
+			}
+		})
+	}
+}

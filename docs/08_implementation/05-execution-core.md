@@ -486,7 +486,9 @@ only the latest version in Babysitter state.
   nonblank `data.orderNo` → acceptance; HTTP 400/409/422 + `status:"error"` + nonblank `message`
   → rejection; HTTP 401/403/408/429/5xx, transport failure, missing body, a self-contradictory
   envelope (`status` and `success` disagree — `P3-040`), or any other combination →
-  `AMBIGUOUS`/`UNKNOWN` — never rejection, never retry.
+  `AMBIGUOUS`/`UNKNOWN` — never rejection, never retry. Order identity is read only from the
+  documented `data` object; a top-level echo, a generic `orderId`/`order_id` alias, or a bare
+  string `data` is not an identity and never yields acceptance (`P3-041`).
 - `client_order_ref` is deterministic and replay-safe: the same attempt always yields the same
   reference (canonical hash of `format_version|instruction_id|execution_attempt_id`, 14 ASCII
   chars, fits Arrow's 16-char `remarks`), so correlation and duplicate suppression never depend on
