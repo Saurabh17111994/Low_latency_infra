@@ -41,7 +41,13 @@ func (r *ReauthBroker) markDisabled() {
 
 func (r *ReauthBroker) doWithReauth(ctx context.Context, fn func() BrokerResult) BrokerResult {
 	result := fn()
-	if result.Reason != "broker_auth_failure" {
+	// P3-241: the retry is guarded by the outcome as well as the reason. Reauth
+	// re-submits the command, which is only ever acceptable for an outcome that is
+	// unknown — never for a terminal REJECTED, whatever reason it arrived with. The
+	// reason alone was not enough: any producer of a BrokerResult can pair a terminal
+	// outcome with an auth-failure reason, and re-submitting an order the venue has
+	// already refused is worse than any auth failure it would fix.
+	if result.Outcome == OutcomeRejected || result.Reason != "broker_auth_failure" {
 		return result
 	}
 	// First auth failure: attempt exactly one re-auth.
@@ -58,7 +64,7 @@ func (r *ReauthBroker) doWithReauth(ctx context.Context, fn func() BrokerResult)
 	}
 	// Re-auth succeeded: retry the command exactly once, no further re-auth.
 	retry := fn()
-	if retry.Reason == "broker_auth_failure" {
+	if retry.Outcome != OutcomeRejected && retry.Reason == "broker_auth_failure" {
 		r.markDisabled()
 		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
 	}

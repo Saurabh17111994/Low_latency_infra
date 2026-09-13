@@ -151,3 +151,71 @@ func (c *countingBroker) ReconcileTrades(ctx context.Context, ce CommandEnvelope
 func (c *countingBroker) ReconcilePositions(ctx context.Context, ce CommandEnvelope) BrokerResult {
 	return c.fn(ctx, ce)
 }
+
+// P3-241: a terminal REJECTED must never be retried. sanitizeReason scans the error
+// text for retry-shaped words, and for a rejection that text is the broker's own
+// free-form message, so a rejection reading "unauthorized symbol for this account"
+// used to come back as broker_auth_failure — the exact category doWithReauth treats
+// as a reason to re-authenticate and re-submit the command.
+//
+// Two guards, two tests: the category a rejection carries, and the retry decision
+// itself, which must refuse a terminal outcome even when it arrives paired with an
+// auth-failure category.
+func TestRejectedOutcomeReasonIsNotRetryShaped(t *testing.T) {
+	for _, brokerMessage := range []string{
+		"unauthorized symbol for this account",
+		"request timeout while matching",
+		"forbidden by exchange rules",
+	} {
+		result := rejectedResult(errors.New(brokerMessage))
+		if result.Outcome != OutcomeRejected {
+			t.Fatalf("fixture: %q produced %s", brokerMessage, result.Outcome)
+		}
+		switch result.Reason {
+		case "broker_auth_failure", "broker_timeout", "broker_forbidden":
+			t.Fatalf("terminal rejection %q carries retry-shaped reason %q", brokerMessage, result.Reason)
+		}
+	}
+}
+
+func TestRejectedOutcomesAreNeverRetried(t *testing.T) {
+	// The retry decision is independent of how the reason was derived: a rejection
+	// paired with the auth-failure category is refused rather than re-submitted.
+	paired := NewFakeBroker()
+	paired.SetResult(CommandPlace, BrokerResult{Outcome: OutcomeRejected, Reason: "broker_auth_failure"})
+	pairedReauthCalls := 0
+	pairedBroker := NewReauthBroker(paired, func(context.Context) error {
+		pairedReauthCalls++
+		return nil
+	})
+	pairedResult := pairedBroker.Place(context.Background(), validPlaceCommand())
+	if pairedReauthCalls != 0 {
+		t.Fatalf("re-authenticated %d times for a rejection paired with an auth reason", pairedReauthCalls)
+	}
+	if pairedResult.Outcome != OutcomeRejected {
+		t.Fatalf("paired outcome=%s reason=%s, want REJECTED", pairedResult.Outcome, pairedResult.Reason)
+	}
+	if calls := paired.Calls(CommandPlace); calls != 1 {
+		t.Fatalf("broker called %d times for a terminal rejection, want 1", calls)
+	}
+
+	// End to end with the real derivation: a broker whose rejection message reads
+	// like an auth failure is refused once and not re-submitted.
+	inner := NewFakeBroker()
+	inner.SetResult(CommandPlace, rejectedResult(errors.New("unauthorized symbol for this account")))
+	reauthCalls := 0
+	broker := NewReauthBroker(inner, func(context.Context) error {
+		reauthCalls++
+		return nil
+	})
+	result := broker.Place(context.Background(), validPlaceCommand())
+	if calls := inner.Calls(CommandPlace); calls != 1 {
+		t.Fatalf("broker called %d times for a terminal rejection, want 1", calls)
+	}
+	if reauthCalls != 0 {
+		t.Fatalf("re-authenticated %d times for a terminal rejection", reauthCalls)
+	}
+	if result.Outcome != OutcomeRejected {
+		t.Fatalf("outcome=%s reason=%s, want REJECTED", result.Outcome, result.Reason)
+	}
+}

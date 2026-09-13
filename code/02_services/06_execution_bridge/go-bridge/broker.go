@@ -320,7 +320,26 @@ func documentedRejectionMessage(body string) string {
 }
 
 func rejectedResult(err error) BrokerResult {
-	return BrokerResult{Outcome: OutcomeRejected, Reason: sanitizeReason(err)}
+	return BrokerResult{Outcome: OutcomeRejected, Reason: rejectedReason(err)}
+}
+
+// rejectedReason keeps the bounded category a terminal rejection carries away from
+// the categories the retry path acts on (P3-241). sanitizeReason scans the error text
+// for retry-shaped words, and for a rejection that text is the broker's own free-form
+// message: a rejection reading "unauthorized symbol for this account" came back as
+// broker_auth_failure, which doWithReauth treats as a reason to re-authenticate and
+// re-submit the command. Re-submitting an order the venue has already refused is the
+// worst possible response to it. The only signals that legitimately produce those
+// categories come from the HTTP status code, and a status that maps to one of them
+// (401/403/408/429/5xx) is classified UNKNOWN, never REJECTED — so a rejection can
+// never carry one of them by a legitimate route.
+func rejectedReason(err error) string {
+	switch sanitizeReason(err) {
+	case "broker_auth_failure", "broker_timeout", "broker_forbidden":
+		return "broker_rejected"
+	default:
+		return sanitizeReason(err)
+	}
 }
 
 func unknownResult(err error) BrokerResult {
