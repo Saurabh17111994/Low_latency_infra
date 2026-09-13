@@ -239,3 +239,47 @@ func TestPostbackEventIDDistinguishesFillIdentity(t *testing.T) {
 		t.Fatalf("replayed update changed identity: %q != %q", replay, baseID)
 	}
 }
+
+// P3-254/P3-258: a stream that connects and drops without ever publishing a report
+// proves nothing about the broker's health, so the reconnect schedule must keep
+// escalating instead of resetting every time — otherwise a flap reconnects once a
+// second forever and hammers the broker and the logs.
+func TestRunPostbackLoopEscalatesBackoffWithoutDeliveredReports(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	var stamps []time.Time
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPostbackLoop(ctx, func() (OrderUpdateSource, error) {
+			mu.Lock()
+			stamps = append(stamps, time.Now())
+			attempts := len(stamps)
+			mu.Unlock()
+			if attempts >= 5 {
+				cancel()
+			}
+			// Connects, reads nothing, returns after onUpdate was never called.
+			return &returningOrderSource{}, nil
+		}, func(ReportEnvelope) error { return nil }, nil, time.Millisecond, 64*time.Millisecond)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("postback loop never stopped")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(stamps) < 4 {
+		t.Fatalf("only %d connect attempts, need at least 4 to observe the schedule", len(stamps))
+	}
+	first := stamps[1].Sub(stamps[0])
+	last := stamps[len(stamps)-1].Sub(stamps[len(stamps)-2])
+	if last < 2*first {
+		t.Fatalf("reconnect gaps did not escalate: first=%v last=%v", first, last)
+	}
+}

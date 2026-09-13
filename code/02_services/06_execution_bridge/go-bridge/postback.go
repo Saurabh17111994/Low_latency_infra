@@ -72,12 +72,9 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 			backoff = nextBackoff(backoff, maxBackoff)
 			continue
 		}
-		// Reset after a healthy connect. Reset to the caller-supplied initial
-		// backoff (production passes time.Second; deterministic tests pass a
-		// millisecond) rather than a hard-coded one second, so the reconnect
-		// interval honours the configured value instead of racing callers that
-		// intentionally shrink it for reproducible lifecycle tests.
-		backoff = initialBackoff
+		// P3-254/P3-258: whether this connection proved itself healthy. Only a
+		// connection that publishes a report resets the reconnect schedule.
+		delivered := false
 		updates := make(chan map[string]any, 16)
 		errors := make(chan error, 1)
 		readDone := make(chan struct{})
@@ -102,8 +99,12 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 			select {
 			case update := <-updates:
 				report := NormalizeOrderUpdate(update)
-				if err := publish(report); err != nil && onError != nil {
-					onError(err)
+				if err := publish(report); err != nil {
+					if onError != nil {
+						onError(err)
+					}
+				} else {
+					delivered = true
 				}
 			case err := <-errors:
 				if err != nil && onError != nil {
@@ -118,8 +119,12 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 					select {
 					case drained := <-updates:
 						dreport := NormalizeOrderUpdate(drained)
-						if err := publish(dreport); err != nil && onError != nil {
-							onError(err)
+						if err := publish(dreport); err != nil {
+							if onError != nil {
+								onError(err)
+							}
+						} else {
+							delivered = true
 						}
 					default:
 						closed = true
@@ -136,8 +141,12 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 					select {
 					case drained := <-updates:
 						dreport := NormalizeOrderUpdate(drained)
-						if err := publish(dreport); err != nil && onError != nil {
-							onError(err)
+						if err := publish(dreport); err != nil {
+							if onError != nil {
+								onError(err)
+							}
+						} else {
+							delivered = true
 						}
 					default:
 						closed = true
@@ -153,11 +162,21 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 		}
 		cancel()
 		_ = source.Close()
+		// P3-254/P3-258: only a connection that published a report proves the stream
+		// was healthy, and only that one resets the schedule — to the caller-supplied
+		// initial backoff (production passes a second; deterministic tests pass a
+		// millisecond), never to a hard-coded value. A stream that connects and drops
+		// immediately keeps escalating towards maxBackoff instead of reconnecting
+		// every initial backoff forever.
+		if delivered {
+			backoff = initialBackoff
+		} else {
+			backoff = nextBackoff(backoff, maxBackoff)
+		}
 		if ctx.Err() == nil {
 			if !sleepContext(ctx, backoff) {
 				return
 			}
-			backoff = nextBackoff(backoff, maxBackoff)
 		}
 	}
 }
