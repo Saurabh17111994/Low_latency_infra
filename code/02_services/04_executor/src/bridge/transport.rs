@@ -21,7 +21,6 @@
 
 use std::io;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -299,22 +298,18 @@ fn base64_encode(input: &[u8]) -> String {
     out
 }
 
-/// Deterministic-per-process xorshift* filled from wall-clock + pid. Sufficient for the
-/// Sec-WebSocket-Key nonce and frame masks (the Go server performs no entropy check).
+/// CSPRNG-backed random bytes for the `Sec-WebSocket-Key` nonce and the frame masks.
+///
+/// P3-431: this used to be an xorshift seeded from the wall clock and the pid — a predictable
+/// keystream for the one handshake value RFC 6455 requires to be unpredictable. `uuid` is
+/// already a dependency and its v4 bytes come from the OS CSPRNG.
 fn ws_random_bytes(n: usize) -> Vec<u8> {
-    let mut seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0xa2ba40bc2e01u64)
-        ^ ((std::process::id() as u64) << 32);
-    (0..n)
-        .map(|_| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed as u8
-        })
-        .collect()
+    let mut out = Vec::with_capacity(n + 16);
+    while out.len() < n {
+        out.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    }
+    out.truncate(n);
+    out
 }
 
 /// Reads one complete WebSocket frame. Applies the mask when the peer masked the payload
