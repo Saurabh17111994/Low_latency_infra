@@ -1,5 +1,5 @@
 {
-  "version": 9,
+  "version": 8,
   "title": "Dedup State — Design B (Flink keyed MapState, native TTL)",
   "description": "Design-B fingerprint dedup (CHG-022/023, 2026-08-17): the 1-minute dedup set is authoritative Flink keyed MapState with native StateTtlConfig (DEDUP_TTL_MS=60000, ProcessingTime, OnCreateAndWrite). No Fluss dedup table, no cache, no cleanup backlog, no rehydration (the DEC-038 Fluss store is removed). Gauges: compute.dedup.state.count (live entries, TTL-resynced), compute.dedup.state.bytes.estimate (RocksDB). Counters: compute.dedup.first (accepted), compute.dedup.duplicates (dropped). Source: FingerprintDedupFunction -> flink-metrics-otel -> otel-collector:4318 -> metrics.",
   "folder_id": "default",
