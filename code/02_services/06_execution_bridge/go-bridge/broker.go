@@ -231,7 +231,19 @@ func toArrowOrder(o OrderCommand, ref string) (arrow.OrderRequest, error) {
 	}, nil
 }
 
-var statusErrorPattern = regexp.MustCompile(`request failed with status ([0-9]{3}):\s*(.*)$`)
+// statusErrorPattern extracts the HTTP status and body from the SDK's error string.
+// The SDK reports a failed request as `request failed with status <code>: <body>`,
+// so this is a string protocol rather than a typed error (P3-035, P3-039).
+//
+// (?s) lets the body span lines and the trailing \s*$ absorbs the newline a
+// pretty-printed or re-wrapped error carries. The previous pattern used `.` and an
+// end-of-text `$` on a single line, so a body containing a newline did not match at
+// all and fell through to the generic branch, where a terminal REJECTED became an
+// ambiguous UNKNOWN (a HALT on a decision the venue had already made).
+//
+// Interim hardening: the durable fix is a typed error (code + body) from the SDK's
+// request path, checked with errors.As, so classification never parses text.
+var statusErrorPattern = regexp.MustCompile(`(?s)request failed with status\s*([0-9]{3})\s*:\s*(.*?)\s*$`)
 
 func classifySDKError(err error) BrokerResult {
 	if err == nil {

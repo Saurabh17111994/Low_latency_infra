@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -134,5 +135,37 @@ func TestArrowBrokerStopsWaitingWhenContextExpires(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Place did not return within 2s of its 50ms context deadline")
+	}
+}
+
+// P3-035/P3-039: the HTTP status envelope is parsed out of the SDK's error string,
+// so it has to survive the shapes those errors actually take — a pretty-printed JSON
+// body, a trailing newline, and the SDK error wrapped by its caller. The old
+// single-line, end-anchored pattern matched none of the multi-line shapes and fell
+// through to the generic branch, turning a terminal REJECTED into an ambiguous
+// UNKNOWN, which halts a decision the venue had already made.
+func TestClassifySDKErrorReadsMultiLineStatusEnvelopes(t *testing.T) {
+	pretty := "{\n  \"status\": \"error\",\n  \"message\": \"price outside the allowed band\"\n}"
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"single line", fmt.Errorf("request failed with status 400: %s",
+			`{"status":"error","message":"price outside the allowed band"}`)},
+		{"pretty printed body", fmt.Errorf("request failed with status 422: %s", pretty)},
+		{"trailing newline", fmt.Errorf("request failed with status 409: %s\n",
+			`{"status":"error","message":"duplicate client order id"}`)},
+		{"wrapped by the caller", fmt.Errorf("place order: %w",
+			fmt.Errorf("request failed with status 400: %s", `{"status":"error","message":"unknown symbol"}`))},
+	}
+	var missed []string
+	for _, tc := range cases {
+		result := classifySDKError(tc.err)
+		if result.Outcome != OutcomeRejected {
+			missed = append(missed, fmt.Sprintf("%s -> %s/%s", tc.name, result.Outcome, result.Reason))
+		}
+	}
+	if len(missed) > 0 {
+		t.Fatalf("%d of %d status envelopes were not classified as REJECTED: %v", len(missed), len(cases), missed)
 	}
 }
