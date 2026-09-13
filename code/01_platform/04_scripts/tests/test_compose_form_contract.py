@@ -120,9 +120,9 @@ SITES: list[tuple[str, str, str, str]] = [
     ("code/01_platform/04_scripts/pipeline-lib.sh", "$COMPOSE exec -T  -e ALLOW_FULL_REPLAY", "VAR", ""),
     ("code/01_platform/04_scripts/pipeline-lib.sh", "$COMPOSE exec -T flink-jobmanager flink cancel", "VAR", ""),
     ("code/01_platform/04_scripts/rollout-savepoint.sh", "DRY: docker compose -f $COMPOSE_FILE", "TEXT", "dry-run log text"),
-    ("code/01_platform/04_scripts/run-full-suite.sh", "docker compose build ingestion)", "DIVERGENT", "no env files"),
-    ("code/01_platform/04_scripts/run-full-suite.sh", "docker-compose.soak.yml up -d ingestion", "DIVERGENT", "no env files"),
-    ("code/01_platform/04_scripts/run-full-suite.sh", "docker-compose.soak.yml stop ingestion", "DIVERGENT", "no env files"),
+    ("code/01_platform/04_scripts/run-full-suite.sh", "secrets.env build ingestion)", "FLAGS_DIR", ""),
+    ("code/01_platform/04_scripts/run-full-suite.sh", "docker-compose.soak.yml up -d ingestion", "FLAGS_DIR", "soak override"),
+    ("code/01_platform/04_scripts/run-full-suite.sh", "docker-compose.soak.yml stop ingestion", "FLAGS_DIR", "soak override"),
     ("code/01_platform/04_scripts/run-monday-gates.sh", "config >/dev/null 2>>\"$STATIC_LOG\"", "FLAGS", "gate step 2"),
     ("code/01_platform/04_scripts/stage-a2-baseline.sh", "secrets.env up -d flink-jobmanager", "FLAGS_DIR", ""),
     ("code/01_platform/04_scripts/stage-a2-baseline.sh", "$COMPOSE exec -T flink-taskmanager", "VAR", ""),
@@ -135,7 +135,7 @@ SITES: list[tuple[str, str, str, str]] = [
     ("code/01_platform/04_scripts/tests/test_08_local_compose_l0.py", "config must not leak secret values", "TEXT", "docstring"),
     ("code/01_platform/04_scripts/tests/test_08_local_compose_l2.py", "invocation, and", "TEXT", "comment in docstring"),
     ("code/01_platform/04_scripts/tests/test_gate_preflight.py", "The preflight's compose form must stay identical", "TEXT", "docstring"),
-    ("start-all.sh", "docker compose up -d zookeeper", "DIVERGENT", "no env files"),
+    ("start-all.sh", "secrets.env up -d zookeeper", "FLAGS_DIR", ""),
     ("start-all.sh", "check docker compose logs", "TEXT", "error message"),
 ]
 
@@ -147,16 +147,12 @@ DEFS: list[tuple[str, str, str]] = [
 ]
 
 COMPOSE_DEBT = """
-Compose-form debt (registered, not fixed — none of these are on the monday gate):
-  run-full-suite.sh  docker compose build ingestion / -f docker-compose.yml
-                     -f docker-compose.soak.yml up -d|stop ingestion  — bare form
-                     (no --env-file), so the soak path interpolates differently from
-                     the stack it drives. Fix = add both --env-file flags.
-  start-all.sh       docker compose up -d zookeeper fluss-coordinator fluss-tablet —
-                     bare form in the compose dir; loads .env but not secrets.env.
-  rollout-savepoint.sh logs a bare `docker compose -f $COMPOSE_FILE ...` DRY line
-                     while its real wrapper (compose(), ~line 200) passes both env
-                     files — the log text does not match the command it describes.
+Compose-form debt: none. The four bare-form sites listed here until 2026-09-13
+(run-full-suite.sh x3, start-all.sh) now carry both --env-file flags, so the soak
+path interpolates the same config as the stack it drives. The registry stays for
+both directions: a DIVERGENT row asserts the site is still divergent, and a
+canonical row asserts the site still carries both flags — so this cannot silently
+come back either.
 """
 
 

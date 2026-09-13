@@ -393,7 +393,7 @@ echo "marathon evidence: journal=$MARATHON_JOURNAL/ingestion.json monitor=$OUT/m
 # ── Stage 3: container runtime run ────────────────────────────────────────────
 echo "=== Stage 3: container runtime run — $(now)"
 echo "-- docker compose build ingestion"
-(cd "$DOCKER_DIR" && docker compose build ingestion) > "$OUT/gates/docker-build.log" 2>&1 \
+(cd "$DOCKER_DIR" && docker compose --env-file .env --env-file secrets.env build ingestion) > "$OUT/gates/docker-build.log" 2>&1 \
 	|| { stage_fail 3 "docker build failed — see $OUT/gates/docker-build.log"; RESULT="FAIL"; exit 1; }
 
 SOAK_JOURNAL="$OUT/soak/journal"
@@ -408,7 +408,7 @@ STAGE3_FAKETOOL_PID=$!
 for _ in $(seq 1 30); do port_open 127.0.0.1 8899 && break; sleep 1; done
 echo "-- compose up ingestion (soak override)"
 (cd "$DOCKER_DIR" && SOAK_JOURNAL_DIR="$SOAK_JOURNAL" \
-	docker compose -f docker-compose.yml -f docker-compose.soak.yml up -d ingestion) \
+	docker compose --env-file .env --env-file secrets.env -f docker-compose.yml -f docker-compose.soak.yml up -d ingestion) \
 	|| { stage_fail 3 "compose up failed"; RESULT="FAIL"; exit 1; }
 
 CONTAINER_HEALTH="none"
@@ -570,7 +570,7 @@ kill "$MONITOR_PID" 2>/dev/null || true
 wait "$FAKETOOL_PID" 2>/dev/null || true
 wait "$MONITOR_PID" 2>/dev/null || true
 (cd "$DOCKER_DIR" && SOAK_JOURNAL_DIR="$SOAK_JOURNAL" \
-	docker compose -f docker-compose.yml -f docker-compose.soak.yml stop ingestion) \
+	docker compose --env-file .env --env-file secrets.env -f docker-compose.yml -f docker-compose.soak.yml stop ingestion) \
 	|| echo "!! compose stop ingestion failed (check manually)"
 
 # ── Stage verdicts ─────────────────────────────────────────────────────────────

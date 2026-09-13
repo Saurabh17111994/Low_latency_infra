@@ -123,7 +123,8 @@ if ! fluss_up; then
 	log "Fluss not running — starting zookeeper + coordinator + tablet..."
 	# The .env supplies FLUSS_IMAGE etc.; fail loudly if it's missing.
 	[ -f "$COMPOSE_DIR/.env" ] || die "missing $COMPOSE_DIR/.env (copy from Arrow_broker/.env and fill in FLUSS_IMAGE)"
-	(cd "$COMPOSE_DIR" && docker compose up -d zookeeper fluss-coordinator fluss-tablet)
+	[ -f "$COMPOSE_DIR/secrets.env" ] || die "missing $COMPOSE_DIR/secrets.env — the canonical compose form needs both env files"
+	(cd "$COMPOSE_DIR" && docker compose --env-file .env --env-file secrets.env up -d zookeeper fluss-coordinator fluss-tablet)
 	log "waiting for Fluss coordinator on $FLUSS_BOOTSTRAP..."
 	for i in $(seq 1 30); do
 		if fluss_up; then break; fi
