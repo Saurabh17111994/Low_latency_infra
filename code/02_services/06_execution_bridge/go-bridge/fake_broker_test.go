@@ -85,3 +85,36 @@ func TestFakeBrokerGivesEveryPlacementItsOwnOrderID(t *testing.T) {
 		seen[got.BrokerOrderID] = true
 	}
 }
+
+// P3-246: the default must not invent a digest for a payload-less result, and a
+// query default must carry a payload at all. Live: Cancel answers with no Data
+// and no digest, QueryOrder with the venue's payload and its digest.
+func TestFakeBrokerDoesNotFabricateFingerprintsOrQueryPayloads(t *testing.T) {
+	ctx := t.Context()
+	order := validPlaceCommand()
+	order.Command = CommandCancel
+	order.Order = nil
+	order.BrokerOrderID = "BRK-1"
+
+	got := NewFakeBroker().Cancel(ctx, order)
+	if got.Outcome != OutcomeSuccess {
+		t.Fatalf("cancel outcome=%s reason=%s, want SUCCESS", got.Outcome, got.Reason)
+	}
+	if got.Fingerprint != "" {
+		t.Errorf("cancel fingerprint=%q, want empty: the live broker sends no digest for a result with no payload",
+			got.Fingerprint)
+	}
+
+	query := NewFakeBroker().QueryOrder(ctx, order)
+	if query.Data == nil {
+		t.Errorf("query data=nil, want a payload: the live broker always returns the venue's order details")
+	}
+	want, err := fingerprint(query.Data)
+	if err != nil {
+		t.Fatalf("fingerprint the query payload: %v", err)
+	}
+	if query.Fingerprint != want {
+		t.Errorf("query fingerprint=%q, want %q: the digest must cover the payload the fake returns",
+			query.Fingerprint, want)
+	}
+}

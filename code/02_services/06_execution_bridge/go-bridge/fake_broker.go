@@ -80,6 +80,11 @@ func (f *FakeBroker) result(ctx context.Context, command string, c CommandEnvelo
 		// keeps runs comparable (the first id is still fake-broker-order-1).
 		result.BrokerOrderID = "fake-broker-order-" + strconv.FormatUint(f.seq.Add(1), 10)
 	}
+	if command == CommandQueryOrder {
+		// P3-246: the live broker answers a query with the venue's payload, so the
+		// default carries one instead of Data==nil with a digest of "null".
+		result.Data = []map[string]string{{"id": c.BrokerOrderID, "orderStatus": "OPEN"}}
+	}
 	if command == CommandReconcileOrders {
 		result.Data = []map[string]string{{"id": "fake-broker-order-1", "orderStatus": "OPEN"}}
 	}
@@ -89,12 +94,17 @@ func (f *FakeBroker) result(ctx context.Context, command string, c CommandEnvelo
 	if command == CommandReconcilePosition {
 		result.Data = []map[string]string{}
 	}
-	fp, err := fingerprint(result.Data)
-	if err != nil {
-		// P3-474: the fake must not publish an empty idempotency digest either.
-		return unknownResult(err)
+	// P3-246: no payload, no digest. The live Cancel answers with an empty
+	// Fingerprint, while fingerprint(nil) is sha256("null") — a digest of nothing
+	// that still read as a verified payload downstream.
+	if result.Data != nil {
+		fp, err := fingerprint(result.Data)
+		if err != nil {
+			// P3-474: the fake must not publish an empty idempotency digest either.
+			return unknownResult(err)
+		}
+		result.Fingerprint = fp
 	}
-	result.Fingerprint = fp
 	return result
 }
 
