@@ -287,7 +287,10 @@ func TestRunPostbackLoopEscalatesBackoffWithoutDeliveredReports(t *testing.T) {
 type stubbornReadSource struct {
 	updates  []map[string]any
 	finished chan struct{}
-	hold     time.Duration
+	// queued, when set, is closed once every update has been handed to onUpdate, so a
+	// test can wait until the loop's buffer is certainly full before it acts.
+	queued chan struct{}
+	hold   time.Duration
 }
 
 // Read deliberately ignores ctx and Close: only the join keeps it from outliving the
@@ -295,6 +298,9 @@ type stubbornReadSource struct {
 func (s *stubbornReadSource) Read(_ context.Context, onUpdate func(map[string]any), _ func(error)) {
 	for _, update := range s.updates {
 		onUpdate(update)
+	}
+	if s.queued != nil {
+		close(s.queued)
 	}
 	time.Sleep(s.hold)
 	close(s.finished)
@@ -327,5 +333,70 @@ func TestRunPostbackLoopJoinsReaderBeforeReturning(t *testing.T) {
 	case <-source.finished:
 	default:
 		t.Fatal("loop returned while the reader was still inside Read")
+	}
+}
+
+// P3-259: shutdown must not be the one exit that discards reports the reader already
+// sequenced. Which ready case the select takes is a coin flip, so the scenario runs
+// repeatedly and every run has to publish all five.
+func TestRunPostbackLoopDrainsBufferedPostbacksOnShutdown(t *testing.T) {
+	const runs = 20
+	for run := 0; run < runs; run++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		updates := make([]map[string]any, 0, 5)
+		for i := 0; i < 5; i++ {
+			updates = append(updates, map[string]any{
+				"id": fmt.Sprintf("BRK-%d-%d", run, i), "orderStatus": "OPEN",
+			})
+		}
+		source := &stubbornReadSource{
+			updates: updates, finished: make(chan struct{}),
+			queued: make(chan struct{}), hold: 50 * time.Millisecond,
+		}
+		release := make(chan struct{})
+		firstPublish := make(chan struct{})
+		var mu sync.Mutex
+		var published []string
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			runPostbackLoop(ctx, func() (OrderUpdateSource, error) { return source, nil },
+				func(report ReportEnvelope) error {
+					mu.Lock()
+					n := len(published)
+					published = append(published, report.BrokerOrderID)
+					mu.Unlock()
+					if n == 0 {
+						close(firstPublish) // hold the loop inside the first publish
+						<-release
+					}
+					return nil
+				}, nil, time.Millisecond, time.Millisecond)
+		}()
+
+		select {
+		case <-firstPublish:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("run %d: loop never started publishing", run)
+		}
+		select {
+		case <-source.queued: // all five are in the buffer, four of them untouched
+		case <-time.After(5 * time.Second):
+			t.Fatalf("run %d: reader never queued its reports", run)
+		}
+		cancel()       // shutdown with four reports still buffered
+		close(release) // let the in-flight publish return
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("run %d: loop did not stop after shutdown", run)
+		}
+
+		mu.Lock()
+		got := len(published)
+		mu.Unlock()
+		if got != 5 {
+			t.Fatalf("run %d: shutdown dropped buffered postbacks: published %d of 5", run, got)
+		}
 	}
 }

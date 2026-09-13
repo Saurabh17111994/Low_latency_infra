@@ -100,6 +100,30 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 		}()
 
 		closed := false
+		// drain publishes every report the reader has already sequenced into
+		// `updates`, then marks the attempt finished. Shared by all three exits — the
+		// broker error, the clean close and shutdown — so a report that arrived before
+		// the socket ended is never discarded (P3-046, P3-047, P3-259) and the three
+		// paths cannot drift apart. It publishes what is buffered; it never waits for
+		// more, so shutdown cannot be held open by a stream that is still delivering.
+		drain := func() {
+			for {
+				select {
+				case queued := <-updates:
+					report := NormalizeOrderUpdate(queued)
+					if err := publish(report); err != nil {
+						if onError != nil {
+							onError(err)
+						}
+					} else {
+						delivered = true
+					}
+				default:
+					closed = true
+					return
+				}
+			}
+		}
 		for !closed && ctx.Err() == nil {
 			select {
 			case update := <-updates:
@@ -120,51 +144,23 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 				// sequenced those reports into `updates` before it signalled the
 				// termination, so drain them here rather than drop a valid
 				// postback merely because the close arrived in the same select.
-				for ctx.Err() == nil {
-					select {
-					case drained := <-updates:
-						dreport := NormalizeOrderUpdate(drained)
-						if err := publish(dreport); err != nil {
-							if onError != nil {
-								onError(err)
-							}
-						} else {
-							delivered = true
-						}
-					default:
-						closed = true
-					}
-					if closed {
-						break
-					}
-				}
+				drain()
 			case <-readDone:
 				// Reader returned without an explicit error (clean close).
 				// Drain any queued postbacks that were sequenced before the
 				// return, then trigger a reconnect.
-				for {
-					select {
-					case drained := <-updates:
-						dreport := NormalizeOrderUpdate(drained)
-						if err := publish(dreport); err != nil {
-							if onError != nil {
-								onError(err)
-							}
-						} else {
-							delivered = true
-						}
-					default:
-						closed = true
-						break
-					}
-					if closed {
-						break
-					}
-				}
+				drain()
 			case <-ctx.Done():
-				closed = true
+				// P3-259: shutdown must not be the one path that throws away queued
+				// broker reports; publish what the reader already sequenced.
+				drain()
 			}
 		}
+		// The loop can also end at the top of the `for` — cancellation noticed while
+		// this goroutine was inside a publish — without ever reaching the select, so the
+		// drain runs once more here. It is a no-op when an exit path already emptied the
+		// queue, and it is what makes the shutdown promise hold on both routes out.
+		drain()
 		cancel()
 		_ = source.Close()
 		// P3-257: do not move on while the reader is still inside Read. Cancelling the
