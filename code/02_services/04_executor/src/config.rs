@@ -85,6 +85,18 @@ impl ServiceConfig {
         let gateway = get("GATEWAY_ENDPOINT").unwrap_or("").to_string();
         let bridge = get("BRIDGE_ENDPOINT").unwrap_or("").to_string();
         let bridge_auth_token = get("BRIDGE_AUTH_TOKEN").unwrap_or("").to_string();
+        // Fail closed (P3-191): the B8 drift monitor uses this as its safety-halt bound, so a
+        // non-positive limit would trip the watchdog immediately or disable it outright.
+        let clock_offset_limit_ms = get("CLOCK_OFFSET_LIMIT_MS")
+            .map(|v| v.parse::<i64>())
+            .transpose()?
+            .unwrap_or(200);
+        if clock_offset_limit_ms <= 0 {
+            bail!(
+                "CLOCK_OFFSET_LIMIT_MS must be > 0 (got {clock_offset_limit_ms}) — it bounds the B8 \
+                 drift-monitor safety-halt"
+            );
+        }
 
         Ok(Self {
             gateway_endpoint: gateway,
@@ -99,10 +111,7 @@ impl ServiceConfig {
             protocol_version: get("GATEWAY_PROTOCOL_VERSION")
                 .unwrap_or("execution-gateway.v2")
                 .to_string(),
-            clock_offset_limit_ms: get("CLOCK_OFFSET_LIMIT_MS")
-                .map(|v| v.parse::<i64>())
-                .transpose()?
-                .unwrap_or(200),
+            clock_offset_limit_ms,
             durable_gate_enabled: get("DURABLE_GATE_ENABLED")
                 .map(|v| v == "true")
                 .unwrap_or(false),
@@ -285,6 +294,19 @@ mod tests {
         assert_eq!(c.clock_offset_limit_ms, 200);
         let c = ServiceConfig::from_iter(kv(&[("CLOCK_OFFSET_LIMIT_MS", "350")])).unwrap();
         assert_eq!(c.clock_offset_limit_ms, 350);
+    }
+
+    /// P3-191: the limit gates the B8 drift-monitor safety-halt, so a non-positive value (which
+    /// would permanently trip or silently disable the watchdog) must fail at boot, not parse `Ok`.
+    #[test]
+    fn rejects_non_positive_clock_offset_limit() {
+        for bad in ["0", "-1", "-200"] {
+            let err = ServiceConfig::from_iter(kv(&[("CLOCK_OFFSET_LIMIT_MS", bad)])).unwrap_err();
+            assert!(
+                err.to_string().contains("CLOCK_OFFSET_LIMIT_MS"),
+                "value {bad:?} must be rejected with the key named, got: {err}"
+            );
+        }
     }
 
     #[test]
