@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -170,11 +172,24 @@ func validateOrderCommand(o OrderCommand) error {
 	if exchange == "" || strings.EqualFold(exchange, "INDEX") {
 		return fmt.Errorf("execution exchange must be non-empty and not INDEX")
 	}
-	if strings.TrimSpace(o.Symbol) == "" || strings.TrimSpace(o.Quantity) == "" {
-		return fmt.Errorf("order symbol and quantity are required")
+	// P3-252: the symbol is forwarded verbatim, so whitespace and unbounded
+	// length used to reach Arrow as part of an otherwise well-formed order.
+	if o.Symbol == "" || containsSpace(o.Symbol) {
+		return fmt.Errorf("order symbol is required and must not contain whitespace")
+	}
+	if len(o.Symbol) > maxSymbolLength {
+		return fmt.Errorf("order symbol is limited to %d characters", maxSymbolLength)
+	}
+	if strings.TrimSpace(o.Quantity) == "" {
+		return fmt.Errorf("order quantity is required")
 	}
 	if !allDigits(o.Quantity) || strings.TrimLeft(o.Quantity, "0") == "" {
 		return fmt.Errorf("quantity must be a positive integer string")
+	}
+	// P3-252: a quantity the bridge cannot represent must fail here rather than
+	// after a venue round trip.
+	if _, err := strconv.ParseInt(o.Quantity, 10, 64); err != nil {
+		return fmt.Errorf("quantity is out of range")
 	}
 	switch strings.ToUpper(strings.TrimSpace(o.TransactionType)) {
 	case "B", "S", "BUY", "SELL":
@@ -257,3 +272,15 @@ func priceIsPositive(s string) bool {
 	}
 	return digits > 0 && positive
 }
+
+// containsSpace reports whether the value contains any whitespace character
+// (Unicode-aware). Several order fields are upper-cased without trimming and
+// exchange/symbol are forwarded verbatim, so whitespace that passes validation
+// reaches Arrow unchanged (P3-252, P3-253).
+func containsSpace(s string) bool {
+	return strings.ContainsFunc(s, unicode.IsSpace)
+}
+
+// maxSymbolLength bounds the order symbol so an oversized value fails here
+// instead of at the venue (P3-252).
+const maxSymbolLength = 64

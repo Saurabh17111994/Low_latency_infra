@@ -209,3 +209,44 @@ func TestValidateCommandRejectsPaddedIndexExchange(t *testing.T) {
 		t.Fatalf("NSE must stay valid: %v", err)
 	}
 }
+
+// P3-252: an unbounded symbol or quantity reached Arrow as a well-formed order,
+// so a local caller bug became a venue round trip (and, for quantity, a value the
+// bridge cannot represent). Every accepted-beyond-bound shape is collected so one
+// run reports all of them.
+func TestValidateCommandRejectsUnboundedSymbolAndQuantity(t *testing.T) {
+	var accepted []string
+	for _, tc := range []struct {
+		label  string
+		mutate func(*OrderCommand)
+	}{
+		{"padded symbol", func(o *OrderCommand) { o.Symbol = " SBIN " }},
+		{"symbol with internal whitespace", func(o *OrderCommand) { o.Symbol = "SB IN" }},
+		{"65-character symbol", func(o *OrderCommand) { o.Symbol = strings.Repeat("A", 65) }},
+		{"20-digit quantity", func(o *OrderCommand) { o.Quantity = strings.Repeat("9", 20) }},
+		{"padded quantity", func(o *OrderCommand) { o.Quantity = " 5 " }},
+	} {
+		command := validPlaceCommand()
+		tc.mutate(command.Order)
+		if err := validateCommand(command); err == nil {
+			accepted = append(accepted, tc.label)
+		}
+	}
+	if len(accepted) > 0 {
+		t.Fatalf("order shapes accepted beyond their bounds: %v", accepted)
+	}
+	for _, tc := range []struct {
+		label  string
+		mutate func(*OrderCommand)
+	}{
+		{"64-character symbol", func(o *OrderCommand) { o.Symbol = strings.Repeat("A", 64) }},
+		{"max int64 quantity", func(o *OrderCommand) { o.Quantity = "9223372036854775807" }},
+		{"ordinary order", func(o *OrderCommand) {}},
+	} {
+		command := validPlaceCommand()
+		tc.mutate(command.Order)
+		if err := validateCommand(command); err != nil {
+			t.Fatalf("%s must stay valid: %v", tc.label, err)
+		}
+	}
+}
