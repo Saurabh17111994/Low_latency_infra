@@ -10,8 +10,8 @@ unless a command says otherwise.
 | # | Action | Command |
 |---|---|---|
 | 1 | Starts everything | `make up --profile execution-t3` |
-| 2 | Enables trading | `curl -X POST http://localhost:9190/v1/approve -d "saurabh"` |
-| 3 | Disables trading | `curl -X POST http://localhost:9190/v1/halt -d "saurabh"` |
+| 2 | Enables trading | `POST /v1/approve` with a signed `GATE_APPROVE` envelope — recipe in §B (**not** a bare body: an unsigned request is 401) |
+| 3 | Disables trading | `POST /v1/halt` with a signed `GATE_HALT` envelope — recipe in §B |
 | 4 | Stops everything | `make down` |
 
 ---
@@ -32,11 +32,40 @@ unless a command says otherwise.
 
 | Action | Command | What it does |
 |---|---|---|
-| **Enable trading** | `curl -X POST http://localhost:9190/v1/approve -d "saurabh"` | Gate HALTED → ENABLED — the single human unlock (DEC-044). The operator name doubles as the evidence marker for the sandbox run (`http.rs`). |
-| **Disable trading (kill-switch)** | `curl -X POST http://localhost:9190/v1/halt -d "saurabh"` | Gate → HALTED instantly; all orders refused. Also fires on any unauthorized approve attempt (tripwire). |
+| **Enable trading** | `POST /v1/approve` with a signed envelope — recipe below | Gate HALTED → ENABLED — the single human unlock (DEC-044). Authenticated since P3-020: the signed payload carries `operator` + `evidence`, and `gate_epoch` must match `/healthz`. A bare `-d "saurabh"` body is refused with 401. |
+| **Disable trading (kill-switch)** | `POST /v1/halt` with a signed envelope — recipe below | Gate → HALTED instantly; all orders refused. Same authentication as approve (`message_type: GATE_HALT`); the signed `reason` is the halt note recorded in the log. |
 | Place sandbox order + cancel (round-trip proof) | `python3 code/01_platform/04_scripts/t9_order_sandbox.py --live` | The live order harness: place → poll → assert → cancel against the broker sandbox. Needs funded margin. Exit 0 = full round-trip; 3 = chain unwired; 1 = real failure; 2 = blocked. |
 | Offline order contract check | `python3 code/01_platform/04_scripts/t9_order_sandbox.py` | 12/12 static checks, no containers (reuses `t8_sandbox_contract_check.py`) |
 | Execution topology check | `make execution-network-check` | Verifies execution-net/arrow-egress isolation (T8 gate 3) |
+
+### Approve / halt the gate (P3-020: both routes are authenticated)
+
+`POST /v1/approve` and `POST /v1/halt` accept only a `gateway_protocol` HMAC envelope whose signed
+payload carries `operator` and `evidence` (halt: optional `reason`). An unsigned request — including
+the older `curl -d "saurabh"` form — is answered 401, and the envelope's `gate_epoch` must equal the
+epoch on `/healthz` (every gate transition advances it, so a captured envelope cannot be replayed).
+
+```python
+# approve; use "GATE_HALT" for the kill-switch. Signs with the same port the live harness uses.
+import json, sys, time, urllib.request
+sys.path.insert(0, "code/01_platform/04_scripts")
+from t9_order_sandbox import PROTOCOL_VERSION, encode_envelope
+
+SECRET = "local-dev-only"   # must equal GATEWAY_SHARED_SECRET of the nautilus service
+BASE = "http://localhost:9190"
+epoch = json.load(urllib.request.urlopen(f"{BASE}/healthz"))["gate_epoch"]
+payload = {"operator": "saurabh", "evidence": "the ticket or note you keep"}
+envelope, _, _ = encode_envelope(SECRET, PROTOCOL_VERSION, "GATE_APPROVE", "manual-1",
+                                 "dev-scope", "dev-partition", payload, epoch,
+                                 "manual-fence-1", int(time.time() * 1000) + 60_000)
+req = urllib.request.Request(f"{BASE}/v1/approve", data=envelope.encode(),
+                             headers={"Content-Type": "application/json"})
+print(urllib.request.urlopen(req).read().decode())   # {"approved":true,"gate_state":"ENABLED",...}
+```
+
+A 401 means the envelope (or its `gate_epoch`) was rejected; a 403 means the signed `operator` is not
+the configured one (`T9_APPROVED_BY`). The gate state is on `/healthz` (`gate_state`), and the epoch a
+new envelope must name is `/healthz` `gate_epoch`.
 
 ## C. Testing & verification gates
 
