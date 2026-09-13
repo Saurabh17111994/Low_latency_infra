@@ -17,7 +17,7 @@ public final class SchemaCheck {
 
         String[] tables = {
             "raw_table_1", "Postback_Quarantine", "suspected_discontinuities",
-            "feature_candles_15s", "Signal_Candidates"
+            "candle_live", "Signal_Candidates"
         };
 
         try (Connection c = ConnectionFactory.createConnection(conf)) {

@@ -97,7 +97,7 @@ class DdlBootstrapTest {
     @Test
     @DisplayName("P1-057: former kvTable entries are LOG (no PK) until deliberately changed")
     void formerKvEntriesHaveNoPrimaryKey() {
-        for (String name : new String[] {"forming_bar", "Order_Lifecycle", "Positions",
+        for (String name : new String[] {"Order_Lifecycle", "Positions",
                 "Portfolio_Reservations", "fingerprint_dedup", "trade_instruction_state",
                 "eod_offload_state"}) {
             assertTrue(DdlBootstrap.tableRegistry().containsKey(name), name);

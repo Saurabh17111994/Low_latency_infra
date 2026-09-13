@@ -193,7 +193,7 @@ public final class DdlBootstrap {
      * built yet; {@code ensureTables} must never bootstrap-create those —
      * their creation is the offline DDL gate's job (schema reconciliation is
      * owned by {@code ddl_apply.py} / {@code schema_manifest.json}). The
-     * compute tables ({@code feature_candles_15s}, {@code
+     * compute tables ({@code candle_live}, {@code candle_closed}, {@code
      * Signal_Candidates}, {@code
      * Signal_Candidates_current}, …) are
      * provisioned out-of-band; this method only ever creates
@@ -464,68 +464,6 @@ public final class DdlBootstrap {
             .build();
 
     /**
-     * Full 15-column KV schema for feature_candles_15s matching DDL 03
-     * (03_feature_candles_15s.sql, schema v2): PK
-     * (instrument_token, window_start) — the storage layer enforces one row
-     * per closed window per instrument, so a replay/restart re-emits the same
-     * key as an idempotent upsert instead of a duplicate LOG append (user
-     * requirement 2026-08-13: candle tables are KV-only, no LOG+KV twin).
-     * Bucket key instrument_token is a strict subset of the PK (Fluss
-     * requires pk ⊇ bucketKey), keeping per-ticker colocation. Written by the
-     * compute job's candle slice; column names/order mirror
-     * {@code com.trading.common.schema.CandleTableSchema} — the shared
-     * contract the candle sink serializes against.
-     */
-    private static final Schema FEATURE_CANDLES_SCHEMA = Schema.newBuilder()
-            .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("exchange", org.apache.fluss.types.DataTypes.STRING())
-            .column("symbol", org.apache.fluss.types.DataTypes.STRING())
-            .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("window_end", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("open_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("high_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("low_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("close_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("volume", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("tick_count", org.apache.fluss.types.DataTypes.INT())
-            .column("algorithm_version", org.apache.fluss.types.DataTypes.STRING())
-            .column("configuration_version", org.apache.fluss.types.DataTypes.STRING())
-            .column("output_ts", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("schema_version", org.apache.fluss.types.DataTypes.STRING())
-            .primaryKey("instrument_token", "window_start")
-            .build();
-
-    /**
-     * 14-column KV schema for feature_candles_15s_preview (low-latency candles
-     * Phase 1, 2026-08-29): live OHLCV of in-progress 15s windows, overwritten
-     * every 1s by CandlePreviewEmitFunction (compute job). PK
-     * (instrument_token, window_start) — same as the final candle table, so an
-     * upsert overwrites the same row each tick (the row "grows" live) and the
-     * row auto-expires after the 60s TTL. Columns mirror
-     * {@code com.trading.common.schema.CandlePreviewTableSchema} — the shared
-     * contract the preview sink serializes against. is_preview is always TRUE
-     * here (the marker exists so consumers can distinguish preview rows from
-     * final candles without joining tables).
-     */
-    private static final Schema FEATURE_CANDLES_PREVIEW_SCHEMA = Schema.newBuilder()
-            .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("exchange", org.apache.fluss.types.DataTypes.STRING())
-            .column("symbol", org.apache.fluss.types.DataTypes.STRING())
-            .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("window_end", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("open_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("high_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("low_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("close_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("volume", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("tick_count", org.apache.fluss.types.DataTypes.INT())
-            .column("is_preview", org.apache.fluss.types.DataTypes.BOOLEAN())
-            .column("output_ts", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("schema_version", org.apache.fluss.types.DataTypes.STRING())
-            .primaryKey("instrument_token", "window_start")
-            .build();
-
-    /**
      * Full 15-column KV schema for candle_live matching DDL 32
      * (32_candle_live.sql, schema v1): PK (instrument_token, tf,
      * window_start) — live per-timeframe snapshots, upserted every 1s by the
@@ -635,16 +573,6 @@ public final class DdlBootstrap {
                                     .property("table.datalake.freshness", "5min")
                                     .property("table.datalake.auto-compaction", "true")
                                     .build()),
-                    Map.entry("feature_candles_15s",
-                            TableDescriptor.builder()
-                                    .schema(FEATURE_CANDLES_SCHEMA)
-                                    .distributedBy(16, "instrument_token")
-                                    .build()),
-                    Map.entry("feature_candles_15s_preview",
-                            TableDescriptor.builder()
-                                    .schema(FEATURE_CANDLES_PREVIEW_SCHEMA)
-                                    .distributedBy(16, "instrument_token")
-                                    .build()),
                     Map.entry("candle_live",
                             TableDescriptor.builder()
                                     .schema(CANDLE_LIVE_SCHEMA)
@@ -686,11 +614,6 @@ public final class DdlBootstrap {
                             TableDescriptor.builder().schema(DISCONTINUITY_SCHEMA).distributedBy(4, "discontinuity_id").build()),
                     Map.entry("ingestion_quarantine",
                             TableDescriptor.builder().schema(INGESTION_QUARANTINE_SCHEMA).distributedBy(8, "quarantine_id").build()),
-                    // P1-057: LOG semantics (was kvTable — byte-identical twin
-                    // with no PK, i.e. silently LOG). KV/upsert is TBD when the
-                    // owning service lands; this registry is existence-check only.
-                    Map.entry("forming_bar",
-                            logTable("instrument_token")),
                     // P1-057: LOG semantics (was kvTable — byte-identical twin
                     // with no PK, i.e. silently LOG). KV/upsert is TBD when the
                     // owning service lands; this registry is existence-check only.

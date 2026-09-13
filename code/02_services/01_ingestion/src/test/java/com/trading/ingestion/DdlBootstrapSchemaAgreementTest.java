@@ -131,7 +131,7 @@ class DdlBootstrapSchemaAgreementTest {
     @DisplayName("compute tables are never owned by the ingestion bootstrap (A4.4)")
     void computeTablesAreNotOwned() {
         for (String computeTable : List.of(
-                "feature_candles_15s",
+                "candle_live", "candle_closed",
                 "Signal_Candidates", "Signal_Candidates_current",
                 "Ranking_Results", "Trade_Decisions",
                 "Portfolio_Reservations")) {
@@ -142,21 +142,24 @@ class DdlBootstrapSchemaAgreementTest {
     }
 
     @Test
-    @DisplayName("feature_candles_15s registry entry carries the real 15-column KV schema (no placeholder)")
+    @DisplayName("retired candle/forming-bar entries are gone; candle_live carries the real schema")
     void candleRegistryEntriesUseRealSchemas() {
-        TableDescriptor candle = DdlBootstrap.tableRegistry().get("feature_candles_15s");
-        assertNotNull(candle, "registry missing feature_candles_15s");
-        assertFalse(DdlBootstrap.tableRegistry().containsKey("feature_candles_15s_current"),
-                "registry must NOT contain feature_candles_15s_current — the LOG+KV candle twin "
-                        + "was retired (user requirement 2026-08-13: candle tables are KV-only)");
-        assertEquals(15, candle.getSchema().getColumns().size(),
-                "candle table must carry the real 15-column candle schema, not the MINIMAL_SCHEMA placeholder");
-        assertEquals(List.of("instrument_token", "window_start"),
-                candle.getSchema().getPrimaryKeyColumnNames(),
-                "candle table PK must be exactly (instrument_token, window_start)");
+        for (String retired : List.of("feature_candles_15s", "feature_candles_15s_preview",
+                "feature_candles_15s_current", "forming_bar")) {
+            assertFalse(DdlBootstrap.tableRegistry().containsKey(retired),
+                    "registry must NOT contain " + retired + " — retired by the multi-timeframe "
+                            + "cutover (2026-09-05); candle_live/candle_closed are the live tables");
+        }
+        TableDescriptor live = DdlBootstrap.tableRegistry().get("candle_live");
+        assertNotNull(live, "registry missing candle_live");
+        assertEquals(List.of("instrument_token", "tf", "window_start"),
+                live.getSchema().getPrimaryKeyColumnNames(),
+                "candle_live PK must be exactly (instrument_token, tf, window_start)");
         assertEquals(List.of("instrument_token"),
-                candle.getBucketKeys(),
-                "candle table must be distributed by instrument_token (per-ticker colocation)");
+                live.getBucketKeys(),
+                "candle_live must be distributed by instrument_token (per-ticker colocation)");
+        assertNotNull(DdlBootstrap.tableRegistry().get("candle_closed"),
+                "registry missing candle_closed");
     }
 
     // ---- helpers ----
