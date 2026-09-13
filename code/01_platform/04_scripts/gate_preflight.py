@@ -121,6 +121,31 @@ def tree_verdict(head: str, dirty: list[str], certifying: bool) -> tuple[list[st
                 f"the fingerprint covers the working state: {listed}")
 
 
+def image_freshness(git_root: str) -> str:
+    """Empty when the ddl-apply image matches the sources it was built from.
+
+    Step 8 checks this too, but only after ~10 minutes of gate, and the recreate
+    check above only sees an image the *containers* no longer match. Editing a
+    ddl-apply source and forgetting to rebuild leaves both silent: the container
+    still matches its image, and only the stamp knows the sources moved on.
+    """
+    script = os.path.join(git_root, "code", "01_platform", "04_scripts",
+                          "image_staleness_check.py")
+    if not os.path.isfile(script):
+        return ""
+    result = run([sys.executable, script, "--git-root", PROJECT_ROOT,
+                  "--compose", COMPOSE_FILE, "--service", "ddl-apply"])
+    if result.returncode == 0:
+        return ""
+    lines = (result.stdout or result.stderr).strip().splitlines()
+    # Prefer the per-image reason ("STALE: stamp a != sources b") to the summary
+    # line, so the drift item says *why* rather than just that something is wrong.
+    detail = next((line for line in lines if "[FAIL]" in line),
+                  lines[-1] if lines else "no output")
+    return (f"ddl-apply image is not current: {detail} "
+            "(rebuild: make ddl-image, or make images for every service)")
+
+
 def stack_containers() -> list[dict]:
     """`compose ps` for this project under the canonical form (tolerant of both
     the JSON-array and the JSON-lines output compose versions use)."""
@@ -191,6 +216,14 @@ def main(certifying: bool = True) -> int:
             if recreate:
                 drift.append("compose would RECREATE " + ", ".join(recreate) +
                              " — run `make up` (canonical form) before the gate")
+            image_state = image_freshness(PROJECT_ROOT)
+            if image_state:
+                if dirty:
+                    # A dirty tree is *supposed* to move the stamp; that is
+                    # information for the repair loop, not drift.
+                    print(f"  WARN  {image_state} (expected while the tree is dirty)")
+                else:
+                    drift.append(image_state)
             else:
                 print("  OK    no recreation under the canonical compose form")
 

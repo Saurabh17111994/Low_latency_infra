@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -126,6 +127,27 @@ class TreeVerdictTest(unittest.TestCase):
 
     def test_worktree_digest_is_deterministic(self):
         self.assertEqual(gate_preflight.worktree_digest(), gate_preflight.worktree_digest())
+
+
+class ImageFreshnessTest(unittest.TestCase):
+    """The ddl-apply image is the one service image the gate starts (step 11). A
+    source edit without a rebuild must reach the preflight, not step 8 ten
+    minutes later."""
+
+    def test_fresh_image_produces_no_drift(self):
+        fake = mock.Mock(returncode=0, stdout="image-stale: PASS — 1 image(s) current", stderr="")
+        with mock.patch.object(gate_preflight, "run", return_value=fake):
+            self.assertEqual(gate_preflight.image_freshness(gate_preflight.PROJECT_ROOT), "")
+
+    def test_stale_image_names_the_remedy(self):
+        out = ("image-stale: [FAIL] ddl-apply (01_docker-ddl-apply) STALE: stamp a != sources b\n"
+               "image-stale: FAIL — 1 stale/missing/unstamped (rebuild: make images)")
+        fake = mock.Mock(returncode=1, stdout=out, stderr="")
+        with mock.patch.object(gate_preflight, "run", return_value=fake):
+            msg = gate_preflight.image_freshness(gate_preflight.PROJECT_ROOT)
+        self.assertIn("ddl-apply", msg)
+        self.assertIn("STALE", msg)
+        self.assertIn("make ddl-image", msg)
 
 
 if __name__ == "__main__":
