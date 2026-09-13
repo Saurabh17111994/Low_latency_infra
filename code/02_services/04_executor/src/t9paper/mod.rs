@@ -14,6 +14,7 @@
 //! canonical serialized evidence body (minus its own self-referential field), so "evidence
 //! HASHED" means what it claims.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -527,12 +528,27 @@ pub fn finalize_evidence(mut evidence: Value) -> Value {
 
 /// Writes `value` as pretty JSON to `dir/name`, returning the written path.
 ///
+/// The file content and its parent directory entry are fsynced before returning: a retained
+/// evidence artifact must be durable once the harness reports success.
+///
 /// # Errors
 ///
-/// Returns an error if serialization or the write fails.
+/// Returns an error if serialization, the write, or either sync fails.
 pub fn write_json(dir: &Path, name: &str, value: &Value) -> anyhow::Result<PathBuf> {
     let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(value)?)?;
+    let body = serde_json::to_string_pretty(value)?;
+    let mut file = std::fs::File::create(&path)
+        .with_context(|| format!("create evidence file {}", path.display()))?;
+    file.write_all(body.as_bytes())
+        .with_context(|| format!("write evidence file {}", path.display()))?;
+    // P3-462: `std::fs::write` stops at the page cache, so a crash after the harness reports
+    // success could leave this retained artifact truncated or missing.
+    file.sync_all()
+        .with_context(|| format!("sync evidence file {}", path.display()))?;
+    // The file is durable, but its new directory entry is not until the parent is synced too.
+    std::fs::File::open(dir)
+        .and_then(|handle| handle.sync_all())
+        .with_context(|| format!("sync evidence dir {}", dir.display()))?;
     Ok(path)
 }
 
