@@ -181,7 +181,10 @@ impl fmt::Display for OrderCommandError {
 impl std::error::Error for OrderCommandError {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+// P3-429: no `deny_unknown_fields` — the Go bridge it mirrors ignores unknown fields
+// (json.Unmarshal), and the two sides are versioned by `contract_version`, so a field
+// added on the Go side must reach validate() instead of failing to decode.
+#[serde(rename_all = "snake_case")]
 pub struct OrderCommand {
     pub exchange: String,
     pub symbol: String,
@@ -300,7 +303,8 @@ fn all_digits(s: &str) -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+// P3-429: same leniency as OrderCommand above, for the same reason.
+#[serde(rename_all = "snake_case")]
 pub struct CommandEnvelope {
     #[serde(default)]
     pub record_type: String,
@@ -539,6 +543,237 @@ mod tests {
             ..env
         };
         assert!(env.validate().is_ok());
+    }
+
+    // P3-429: `deny_unknown_fields` is stricter than the Go bridge this mirrors —
+    // Go's json.Unmarshal ignores unknown fields, and the protocol is gated by
+    // contract_version, so a field added on the Go side must not become a serde error
+    // before validate() can report the controlled version verdict.
+    #[test]
+    fn unknown_fields_are_ignored_like_the_go_bridge() {
+        let raw = json!({
+            "record_type": "execution_command",
+            "contract_version": 1,
+            "request_id": "req-1",
+            "command": "place",
+            "instruction_id": "inst-1",
+            "execution_attempt_id": "att-1",
+            "client_order_ref": "CLIENT-1",
+            "order": {
+                "exchange": "NFO",
+                "symbol": "NIFTY",
+                "quantity": "10",
+                "transaction_type": "BUY",
+                "order_type": "LMT",
+                "product": "I",
+                "validity": "DAY",
+                "price": "100",
+                "future_field": "added on the Go side after this port"
+            },
+            "future_envelope_field": 7
+        });
+        let env: CommandEnvelope = serde_json::from_value(raw).expect(
+            "an unknown field must not fail decoding: Go ignores it, and version skew is contract_version's job",
+        );
+        assert_eq!(env.request_id, "req-1");
+        assert!(
+            env.validate().is_ok(),
+            "lenient decoding must not weaken validation"
+        );
+    }
+
+    /// P3-188: accept/reject parity with the Go bridge's hardened `validateOrderCommand`
+    /// (models.go). The Rust port predates those rules, so it accepted padded symbols,
+    /// `INDEX` spellings, stop-loss types, non-numeric prices and out-of-range quantities —
+    /// and refused zero spellings the Go side canonicalises. Every case is reported, so one
+    /// divergence cannot hide the next.
+    #[test]
+    fn order_validation_matches_the_go_bridge() {
+        let base = || {
+            OrderCommand::new("NFO", "NIFTY")
+                .with_quantity("10")
+                .with_side(TransactionType::Buy)
+                .with_order_type(OrderType::Lmt)
+                .with_product(Product::Cash)
+                .with_validity(Validity::Day)
+                .with_price("100")
+        };
+        let mkt = |price: &str| OrderCommand {
+            order_type: "MKT".into(),
+            price: price.into(),
+            ..base()
+        };
+        let cases: Vec<(&str, OrderCommand, bool)> = vec![
+            (
+                "padded INDEX exchange",
+                OrderCommand {
+                    exchange: " INDEX ".into(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "padded exchange",
+                OrderCommand {
+                    exchange: "NFO ".into(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "symbol with whitespace",
+                OrderCommand {
+                    symbol: "NIF TY".into(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "oversized symbol",
+                OrderCommand {
+                    symbol: "N".repeat(65),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "quantity out of i64 range",
+                OrderCommand {
+                    quantity: "99999999999999999999".into(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "stop-loss order type",
+                OrderCommand {
+                    order_type: "SL-LMT".into(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "LMT price not a number",
+                OrderCommand {
+                    price: "abc".into(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "LMT price zero",
+                OrderCommand {
+                    price: "0".into(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "LMT price negative",
+                OrderCommand {
+                    price: "-5".into(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "LMT price with two dots",
+                OrderCommand {
+                    price: "1.2.3".into(),
+                    ..base()
+                },
+                false,
+            ),
+            ("LMT canonical price", base(), true),
+            (
+                "LMT price with leading zeros",
+                OrderCommand {
+                    price: "0100".into(),
+                    ..base()
+                },
+                true,
+            ),
+            ("MKT price 0.0", mkt("0.0"), true),
+            ("MKT price 00", mkt("00"), true),
+            ("MKT price empty", mkt(""), true),
+            ("MKT price 1", mkt("1"), false),
+            (
+                "transaction_type padded",
+                OrderCommand {
+                    transaction_type: " buy ".into(),
+                    ..base()
+                },
+                true,
+            ),
+            (
+                "product lowercase",
+                OrderCommand {
+                    product: "i".into(),
+                    ..base()
+                },
+                true,
+            ),
+            (
+                "validity lowercase",
+                OrderCommand {
+                    validity: "ioc".into(),
+                    ..base()
+                },
+                true,
+            ),
+            (
+                "validity GTC",
+                OrderCommand {
+                    validity: "GTC".into(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "bare INDEX",
+                OrderCommand {
+                    exchange: "INDEX".into(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "quantity zero",
+                OrderCommand {
+                    quantity: "0".into(),
+                    ..base()
+                },
+                false,
+            ),
+            (
+                "quantity with leading zeros",
+                OrderCommand {
+                    quantity: "007".into(),
+                    ..base()
+                },
+                true,
+            ),
+            (
+                "quantity padded",
+                OrderCommand {
+                    quantity: " 10".into(),
+                    ..base()
+                },
+                false,
+            ),
+        ];
+        let mut wrong: Vec<String> = Vec::new();
+        for (name, cmd, want_ok) in cases {
+            let got = cmd.validate();
+            if got.is_ok() != want_ok {
+                wrong.push(format!("{name}: got {got:?}"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} case(s) diverge from the Go bridge: {wrong:#?}",
+            wrong.len()
+        );
     }
 
     #[test]
