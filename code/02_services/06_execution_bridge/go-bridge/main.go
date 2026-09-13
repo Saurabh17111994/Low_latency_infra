@@ -112,7 +112,7 @@ func brokerFromEnvironment(mode string) (Broker, *arrow.Client, error) {
 			if user == "" || password == "" || totp == "" {
 				return fmt.Errorf("missing AutoLogin credentials for re-auth")
 			}
-			return client.AutoLogin(user, password, totp)
+			return loginWithinContext(ctx, func() error { return client.AutoLogin(user, password, totp) })
 		})
 		return broker, client, nil
 	default:
@@ -159,6 +159,23 @@ func newHTTPServer(addr string, handler http.Handler, commandTimeout time.Durati
 		ReadTimeout:       commandTimeout + httpReadTimeoutMargin,
 		WriteTimeout:      commandTimeout + httpWriteTimeoutMargin,
 		IdleTimeout:       httpIdleTimeout,
+	}
+}
+
+// loginWithinContext runs an AutoLogin-shaped call under the caller's context
+// (P3-248). AutoLogin takes no context and makes up to three sequential venue
+// calls at 15s each, so without this a stalled auth outlives the command
+// deadline and holds the dispatch goroutine in ReauthBroker.doWithReauth. The
+// abandoned call runs to completion like brokerCall's, and its result is
+// buffered so the goroutine cannot leak by blocking on the send.
+func loginWithinContext(ctx context.Context, login func() error) error {
+	result := make(chan error, 1)
+	go func() { result <- login() }()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-result:
+		return err
 	}
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -165,5 +166,40 @@ func TestHTTPServerDropsAStalledRequestBody(t *testing.T) {
 		if errors.As(err, &netErr) && netErr.Timeout() {
 			t.Fatalf("a stalled body held the connection open past ReadTimeout: the handler is pinned by a slow client")
 		}
+	}
+}
+
+// P3-248 — the re-auth callback accepts the caller's command context but
+// AutoLogin takes none, and it makes up to three sequential venue calls at 15s
+// each. Unbounded, a stalled auth outlives the command deadline and pins the
+// dispatch goroutine in ReauthBroker.doWithReauth.
+func TestLoginWithinContextHonoursTheCallerDeadline(t *testing.T) {
+	blocked := make(chan struct{})
+	defer close(blocked)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+
+	returned := make(chan error, 1)
+	go func() {
+		returned <- loginWithinContext(ctx, func() error { <-blocked; return nil })
+	}()
+
+	select {
+	case err := <-returned:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("loginWithinContext returned %v, want the caller's deadline error", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("loginWithinContext did not return within 2s: the login call ignores ctx and would hold the dispatch goroutine for the venue's full 3-step timeout")
+	}
+}
+
+func TestLoginWithinContextReturnsTheLoginResult(t *testing.T) {
+	cause := errors.New("bad totp")
+	if err := loginWithinContext(t.Context(), func() error { return cause }); !errors.Is(err, cause) {
+		t.Errorf("loginWithinContext returned %v, want the login failure %v", err, cause)
+	}
+	if err := loginWithinContext(t.Context(), func() error { return nil }); err != nil {
+		t.Errorf("loginWithinContext returned %v for a successful login", err)
 	}
 }
