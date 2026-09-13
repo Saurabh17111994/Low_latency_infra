@@ -2,15 +2,19 @@ package main
 
 import (
 	"context"
+	"strconv"
 	"sync"
+	"sync/atomic"
 )
 
 // FakeBroker is an offline-only broker double. It records command counts and
 // lets tests force SUCCESS, REJECTED, or UNKNOWN outcomes deterministically.
 type FakeBroker struct {
-	mu      sync.Mutex
-	results map[string]BrokerResult
-	calls   map[string]int
+	mu            sync.Mutex
+	results       map[string]BrokerResult
+	defaultResult *BrokerResult
+	calls         map[string]int
+	seq           atomic.Uint64
 }
 
 func NewFakeBroker() *FakeBroker {
@@ -21,6 +25,16 @@ func (f *FakeBroker) SetResult(command string, result BrokerResult) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.results[command] = result
+}
+
+// SetDefaultResult answers every command without a preset. It exists so the
+// disabled-mode fake can be fail-closed (P3-249): its deny list only names the
+// commands known today, and the fake otherwise reports SUCCESS, so a command
+// added later would report success while health says "UP disabled"/not-ready.
+func (f *FakeBroker) SetDefaultResult(result BrokerResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.defaultResult = &result
 }
 
 func (f *FakeBroker) Calls(command string) int {
@@ -36,13 +50,40 @@ func (f *FakeBroker) result(ctx context.Context, command string, c CommandEnvelo
 	f.mu.Lock()
 	f.calls[command]++
 	result, ok := f.results[command]
+	if !ok && f.defaultResult != nil {
+		result, ok = *f.defaultResult, true
+	}
 	f.mu.Unlock()
 	if ok {
+		// P3-243: a preset is an offline shortcut, not a licence to publish a shape
+		// the live broker cannot produce. ArrowBroker digests the payload it returns,
+		// so Data with no digest would pass here and fail in resultToReport live.
+		if result.Data != nil && result.Fingerprint == "" {
+			fp, err := fingerprint(result.Data)
+			if err != nil {
+				return unknownResult(err)
+			}
+			result.Fingerprint = fp
+		}
 		return result
+	}
+	// P3-244: the HTTP boundary validates the envelope before dispatch, but a test
+	// that drives the broker directly bypasses it. ArrowBroker dereferences c.Order
+	// on place/modify and forwards the id on cancel/query, so refuse the same
+	// envelopes instead of answering SUCCESS for one the venue would never see.
+	if err := validateCommand(c); err != nil {
+		return rejectedResult(err)
 	}
 	result = BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: c.BrokerOrderID}
 	if command == CommandPlace {
-		result.BrokerOrderID = "fake-broker-order-1"
+		// P3-245: unique per placement so two orders cannot share an id; the counter
+		// keeps runs comparable (the first id is still fake-broker-order-1).
+		result.BrokerOrderID = "fake-broker-order-" + strconv.FormatUint(f.seq.Add(1), 10)
+	}
+	if command == CommandQueryOrder {
+		// P3-246: the live broker answers a query with the venue's payload, so the
+		// default carries one instead of Data==nil with a digest of "null".
+		result.Data = []map[string]string{{"id": c.BrokerOrderID, "orderStatus": "OPEN"}}
 	}
 	if command == CommandReconcileOrders {
 		result.Data = []map[string]string{{"id": "fake-broker-order-1", "orderStatus": "OPEN"}}
@@ -53,7 +94,17 @@ func (f *FakeBroker) result(ctx context.Context, command string, c CommandEnvelo
 	if command == CommandReconcilePosition {
 		result.Data = []map[string]string{}
 	}
-	result.Fingerprint = fingerprint(result.Data)
+	// P3-246: no payload, no digest. The live Cancel answers with an empty
+	// Fingerprint, while fingerprint(nil) is sha256("null") — a digest of nothing
+	// that still read as a verified payload downstream.
+	if result.Data != nil {
+		fp, err := fingerprint(result.Data)
+		if err != nil {
+			// P3-474: the fake must not publish an empty idempotency digest either.
+			return unknownResult(err)
+		}
+		result.Fingerprint = fp
+	}
 	return result
 }
 

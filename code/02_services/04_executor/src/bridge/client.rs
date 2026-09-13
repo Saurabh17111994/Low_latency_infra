@@ -6,7 +6,13 @@ use async_trait::async_trait;
 use super::protocol::{CommandEnvelope, ReportEnvelope};
 
 /// An asynchronous report stream produced by a bridge (fills, order-state updates, rejections).
-pub type BridgeReportStream = tokio::sync::mpsc::UnboundedReceiver<ReportEnvelope>;
+/// The bridge's report stream. Bounded (see [`BRIDGE_REPORT_BUFFER`]) so a stalled consumer
+/// applies backpressure to the producer instead of letting it queue reports without limit.
+pub type BridgeReportStream = tokio::sync::mpsc::Receiver<ReportEnvelope>;
+
+/// Capacity of the bridge's report channel: headroom for a burst of reports while the consumer
+/// drains, and a hard bound on what a stalled consumer can accumulate.
+pub const BRIDGE_REPORT_BUFFER: usize = 4096;
 
 /// A client of the Go bridge.
 ///

@@ -484,8 +484,11 @@ only the latest version in Babysitter state.
   acceptance or verified rejection is terminal; anything else is `UNKNOWN` → halt + reconcile.
   Verified shapes (bridge `PlaceOrder` response envelope): HTTP 200 + `status:"success"` +
   nonblank `data.orderNo` → acceptance; HTTP 400/409/422 + `status:"error"` + nonblank `message`
-  → rejection; HTTP 401/403/408/429/5xx, transport failure, missing body, or any other
-  combination → `AMBIGUOUS`/`UNKNOWN` — never rejection, never retry.
+  → rejection; HTTP 401/403/408/429/5xx, transport failure, missing body, a self-contradictory
+  envelope (`status` and `success` disagree — `P3-040`), or any other combination →
+  `AMBIGUOUS`/`UNKNOWN` — never rejection, never retry. Order identity is read only from the
+  documented `data` object; a top-level echo, a generic `orderId`/`order_id` alias, or a bare
+  string `data` is not an identity and never yields acceptance (`P3-041`).
 - `client_order_ref` is deterministic and replay-safe: the same attempt always yields the same
   reference (canonical hash of `format_version|instruction_id|execution_attempt_id`, 14 ASCII
   chars, fits Arrow's 16-char `remarks`), so correlation and duplicate suppression never depend on
@@ -992,6 +995,7 @@ python t8_sandbox_contract_check.py                                             
 - **T9** live-Arrow order-path evidence (real `RCF-EQ x1`, broker id `26082501010305` + `remarks` — place proven 2026-08-25, `MARGIN ERROR` pending funded re-run).
 - **T9** live fills/WebSocket transcript, live reconciliation snapshots, live shadow mode.
 - **T3** real sandbox authentication / auto re-auth.
+- **T3** stop-loss carriage (`SL-LMT`/`SL-MKT`) — refused fail-closed, not an IP-gate item: the command envelope and fingerprint carry no stop trigger, so an SL order is rejected outright rather than submitted with its trigger silently dropped (P3-043, `8216307`). Revisit when a caller needs SL orders through the bridge; the change moves the wire contract on both sides, so it needs a coordinated deploy (envelope + fingerprint + Rust protocol + mapping).
 - Full-path **real** runtime evidence over live Arrow.
 
 Each of these was gated on the broker's static-IP acceptance (gate **accepted 2026-08-21**) and the

@@ -40,8 +40,23 @@ func NewArrowOrderUpdateSource(client *arrow.Client) (OrderUpdateSource, error) 
 	return &arrowOrderUpdateSource{stream: stream}, nil
 }
 
+// postbackReaderJoinTimeout bounds how long an attempt waits for its reader to leave
+// Read before reconnecting anyway. The value is the one named by P3-257; it is not a
+// tuning knob, and a reader that respects ctx never reaches it.
+const postbackReaderJoinTimeout = 5 * time.Second
+
 // RunPostbackLoop reconnects after a dropped order-update socket. It does not
 // retry a place command; it only restores observation of broker reports.
+//
+// publish is called synchronously, in the same goroutine that watches for
+// cancellation, so it must not block and must never wait on a consumer that may not
+// be reading (P3-256). While this loop is inside publish it is not looking at
+// ctx.Done, and a blocked function call cannot be preempted, so a publish that waits
+// stalls reconnect and shutdown together — and back-pressures the reader once the
+// sixteen-slot buffer fills. The production publish satisfies this: EventHub.Publish
+// hands each subscriber a non-blocking send and removes the subscriber when its queue
+// is full (server.go:371). Its mutex is the one thing this loop can wait on, so no
+// holder of it may block on a subscriber.
 func RunPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, error), publish func(ReportEnvelope) error, onError func(error)) {
 	runPostbackLoop(ctx, connect, publish, onError, time.Second, 30*time.Second)
 }
@@ -54,6 +69,14 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 	backoff := initialBackoff
 	for ctx.Err() == nil {
 		source, err := connect()
+		// P3-047/P3-046: a connect that reports success while yielding no source is
+		// a connect failure, not a readable stream. source.Read/source.Close would
+		// panic on the nil interface inside the reader goroutine and nothing
+		// recovers it — the loop runs as a bare `go RunPostbackLoop` in main.go, so
+		// that panic takes the whole bridge process down.
+		if err == nil && source == nil {
+			err = fmt.Errorf("postback connect returned no order-update source")
+		}
 		if err != nil {
 			if onError != nil {
 				onError(err)
@@ -64,12 +87,9 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 			backoff = nextBackoff(backoff, maxBackoff)
 			continue
 		}
-		// Reset after a healthy connect. Reset to the caller-supplied initial
-		// backoff (production passes time.Second; deterministic tests pass a
-		// millisecond) rather than a hard-coded one second, so the reconnect
-		// interval honours the configured value instead of racing callers that
-		// intentionally shrink it for reproducible lifecycle tests.
-		backoff = initialBackoff
+		// P3-254/P3-258: whether this connection proved itself healthy. Only a
+		// connection that publishes a report resets the reconnect schedule.
+		delivered := false
 		updates := make(chan map[string]any, 16)
 		errors := make(chan error, 1)
 		readDone := make(chan struct{})
@@ -90,12 +110,40 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 		}()
 
 		closed := false
+		// drain publishes every report the reader has already sequenced into
+		// `updates`, then marks the attempt finished. Shared by all three exits — the
+		// broker error, the clean close and shutdown — so a report that arrived before
+		// the socket ended is never discarded (P3-046, P3-047, P3-259) and the three
+		// paths cannot drift apart. It publishes what is buffered; it never waits for
+		// more, so shutdown cannot be held open by a stream that is still delivering.
+		drain := func() {
+			for {
+				select {
+				case queued := <-updates:
+					report := NormalizeOrderUpdate(queued)
+					if err := publish(report); err != nil {
+						if onError != nil {
+							onError(err)
+						}
+					} else {
+						delivered = true
+					}
+				default:
+					closed = true
+					return
+				}
+			}
+		}
 		for !closed && ctx.Err() == nil {
 			select {
 			case update := <-updates:
 				report := NormalizeOrderUpdate(update)
-				if err := publish(report); err != nil && onError != nil {
-					onError(err)
+				if err := publish(report); err != nil {
+					if onError != nil {
+						onError(err)
+					}
+				} else {
+					delivered = true
 				}
 			case err := <-errors:
 				if err != nil && onError != nil {
@@ -106,50 +154,53 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 				// sequenced those reports into `updates` before it signalled the
 				// termination, so drain them here rather than drop a valid
 				// postback merely because the close arrived in the same select.
-				for ctx.Err() == nil {
-					select {
-					case drained := <-updates:
-						dreport := NormalizeOrderUpdate(drained)
-						if err := publish(dreport); err != nil && onError != nil {
-							onError(err)
-						}
-					default:
-						closed = true
-					}
-					if closed {
-						break
-					}
-				}
+				drain()
 			case <-readDone:
 				// Reader returned without an explicit error (clean close).
 				// Drain any queued postbacks that were sequenced before the
 				// return, then trigger a reconnect.
-				for {
-					select {
-					case drained := <-updates:
-						dreport := NormalizeOrderUpdate(drained)
-						if err := publish(dreport); err != nil && onError != nil {
-							onError(err)
-						}
-					default:
-						closed = true
-						break
-					}
-					if closed {
-						break
-					}
-				}
+				drain()
 			case <-ctx.Done():
-				closed = true
+				// P3-259: shutdown must not be the one path that throws away queued
+				// broker reports; publish what the reader already sequenced.
+				drain()
 			}
 		}
+		// The loop can also end at the top of the `for` — cancellation noticed while
+		// this goroutine was inside a publish — without ever reaching the select, so the
+		// drain runs once more here. It is a no-op when an exit path already emptied the
+		// queue, and it is what makes the shutdown promise hold on both routes out.
+		drain()
 		cancel()
 		_ = source.Close()
+		// P3-257: do not move on while the reader is still inside Read. Cancelling the
+		// read context and closing the source are both advisory — the SDK read can sit
+		// on its own deadline and an implementation may ignore both — and an abandoned
+		// reader keeps running past this attempt, holds the old updates channel and
+		// leaves I/O in flight past shutdown. Bounded so a wedged read cannot stall
+		// recovery for ever, and reported when the bound is hit.
+		select {
+		case <-readDone:
+		case <-time.After(postbackReaderJoinTimeout):
+			if onError != nil {
+				onError(fmt.Errorf("postback reader did not stop within %s", postbackReaderJoinTimeout))
+			}
+		}
+		// P3-254/P3-258: only a connection that published a report proves the stream
+		// was healthy, and only that one resets the schedule — to the caller-supplied
+		// initial backoff (production passes a second; deterministic tests pass a
+		// millisecond), never to a hard-coded value. A stream that connects and drops
+		// immediately keeps escalating towards maxBackoff instead of reconnecting
+		// every initial backoff forever.
+		if delivered {
+			backoff = initialBackoff
+		} else {
+			backoff = nextBackoff(backoff, maxBackoff)
+		}
 		if ctx.Err() == nil {
 			if !sleepContext(ctx, backoff) {
 				return
 			}
-			backoff = nextBackoff(backoff, maxBackoff)
 		}
 	}
 }
@@ -206,12 +257,29 @@ func NormalizeOrderUpdate(update map[string]any) ReportEnvelope {
 		FillTime:        stringField(update, "fillTime"),
 		InstrumentToken: stringField(update, "token"), ReceivedTsMs: nowMs(),
 	}
-	report.PostbackEventID = fingerprint(map[string]string{
+	// P3-255/P3-260: the id is the fill's identity downstream — the executor keys
+	// source_event_id on it and will not project a fill it has already seen — so it
+	// has to cover the whole fill. Two partial fills agreeing on shares and average
+	// but differing in price, quantity, time or exchange order id used to collapse
+	// into one id and the second was silently dropped. A replayed update still hashes
+	// equally because every field matches.
+	// P3-474: json.Marshal cannot fail on map[string]string, but the error is handled
+	// explicitly rather than collapsed — this id is the upstream dedup key, so a
+	// report that cannot carry one is never published as a success.
+	eventID, err := fingerprint(map[string]string{
 		"id": report.BrokerOrderID, "remarks": report.ClientOrderRef,
 		"status": report.OrderStatus, "report_type": report.ReportType,
 		"fill_shares": report.FillShares, "average_price": report.AveragePrice,
+		"fill_price": report.FillPrice, "fill_quantity": report.FillQuantity,
+		"fill_time": report.FillTime, "exchange_order_id": report.ExchangeOrderID,
 		"exchange_update_time": stringField(update, "exchangeUpdateTime"),
 	})
+	if err != nil {
+		report.Outcome = OutcomeUnknown
+		report.Reason = "postback_event_id_unavailable"
+		return report
+	}
+	report.PostbackEventID = eventID
 	return report
 }
 

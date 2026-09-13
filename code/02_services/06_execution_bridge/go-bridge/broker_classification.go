@@ -21,19 +21,21 @@
 //	| 400,409,422 | status:"error" + message nonblank          | REJECTED  | — (terminal)|
 //	| 400,409,422 | empty message or status:"success"          | UNKNOWN   | HALT       |
 //	| 401,403,408,429,5xx, transport, empty, malformed, other| UNKNOWN   | HALT       |
+//	| both signals present and disagreeing (e.g. status:"success" + success:false)| UNKNOWN | HALT |
 //
 // Never returns SUCCESS from the error path; UNKNOWN is always HALT without retry.
 package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
 // classificationEnvelope captures the minimal JSON fields needed for the dossier
 // table. It intentionally covers both string status and boolean success shapes,
-// and both message / errorMessage variants, plus top-level and data-wrapped
-// order identifiers.
+// and both message / errorMessage variants. Order identity is read only from the
+// data object (P3-041): a top-level echo is not a documented acceptance shape.
 type classificationEnvelope struct {
 	Status       string          `json:"status"`
 	Success      *bool           `json:"success"`
@@ -41,20 +43,46 @@ type classificationEnvelope struct {
 	ErrorMessage string          `json:"errorMessage"`
 	ErrorMsgAlt  string          `json:"error_message"`
 	Data         json.RawMessage `json:"data"`
-	// Some brokers echo orderNo at top level; accept either location.
-	OrderNo       string `json:"orderNo"`
-	BrokerOrderId string `json:"brokerOrderId"`
-	BrokerOrderID string `json:"broker_order_id"`
 }
 
 type classificationData struct {
-	OrderNo       string `json:"orderNo"`
-	BrokerOrderId string `json:"brokerOrderId"`
-	BrokerOrderID string `json:"broker_order_id"`
-	OrderNoAlt    string `json:"order_no"`
-	OrderId       string `json:"orderId"`
-	OrderIDAlt    string `json:"order_id"`
+	OrderNo       flexString `json:"orderNo"`
+	BrokerOrderId flexString `json:"brokerOrderId"`
+	BrokerOrderID flexString `json:"broker_order_id"`
 }
+
+// flexString accepts a JSON string or number. Brokers differ on whether order
+// identifiers arrive quoted, and a numeric identifier is a present identifier —
+// reading it as missing halts a valid fill (P3-242). The literal text is kept
+// (no float conversion, so no precision or exponent surprises for identifiers).
+// null and absent are the empty string; any other JSON type fails the unmarshal
+// so the envelope is treated as malformed (UNKNOWN) instead of guessed at.
+type flexString string
+
+func (f *flexString) UnmarshalJSON(b []byte) error {
+	trimmed := strings.TrimSpace(string(b))
+	if trimmed == "" || trimmed == "null" {
+		*f = ""
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*f = flexString(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("order identifier must be a string or a number: %w", err)
+	}
+	*f = flexString(n.String())
+	return nil
+}
+
+// trimmed returns the identifier without surrounding whitespace.
+func (f flexString) trimmed() string { return strings.TrimSpace(string(f)) }
 
 // ClassifyBrokerResponse is a pure, offline classifier for Arrow broker HTTP responses.
 // statusCode is the HTTP status (0 means transport failure / no response).
@@ -88,6 +116,15 @@ func ClassifyBrokerResponse(statusCode int, body interface{}) string {
 	// Strict JSON: malformed JSON is UNKNOWN.
 	var env classificationEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
+		return OutcomeUnknown
+	}
+
+	// P3-040: a self-contradictory envelope — explicit status and explicit success
+	// flag that disagree — is malformed per the table above, so it resolves to
+	// UNKNOWN/HALT rather than to either terminal outcome. Trusting the success
+	// side would let a rejection read as acceptance; trusting the error side would
+	// let an accepted order read as rejected, which invites a duplicate placement.
+	if signalsContradict(env) {
 		return OutcomeUnknown
 	}
 
@@ -128,6 +165,23 @@ func isSuccessEnvelope(env classificationEnvelope) bool {
 	return false
 }
 
+// signalsContradict reports whether the envelope carries both an explicit status
+// and an explicit success flag that disagree. A single signal, an unfamiliar
+// status wording, or an absent field is not a contradiction.
+func signalsContradict(env classificationEnvelope) bool {
+	if env.Success == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(env.Status)) {
+	case "success":
+		return !*env.Success
+	case "error":
+		return *env.Success
+	default:
+		return false
+	}
+}
+
 func isErrorEnvelope(env classificationEnvelope) bool {
 	if strings.EqualFold(strings.TrimSpace(env.Status), "error") {
 		return true
@@ -138,59 +192,26 @@ func isErrorEnvelope(env classificationEnvelope) bool {
 	return false
 }
 
+// extractOrderNo reads the order identity from the documented data fields only:
+// data.orderNo, data.brokerOrderId, and data.broker_order_id (the repo-canonical
+// spelling of that identity — docs/02_requirements/04-data.md ASM-DATA-006).
+//
+// Top-level echoes, the generic orderId/order_id/order_no aliases and a bare
+// string `data` are deliberately not identities (P3-041): accepting them lets a
+// payload that carries no documented identity read as ACCEPTED, and the repo's
+// own doctrine prohibits a generic order_id in code
+// (docs/08_implementation/01-foundation.md).
 func extractOrderNo(env classificationEnvelope) string {
-	// Top-level shortcuts (some SDKs echo orderNo at top level).
-	if s := strings.TrimSpace(env.OrderNo); s != "" {
-		return s
-	}
-	if s := strings.TrimSpace(env.BrokerOrderId); s != "" {
-		return s
-	}
-	if s := strings.TrimSpace(env.BrokerOrderID); s != "" {
-		return s
-	}
 	if len(env.Data) == 0 || string(env.Data) == "null" {
 		return ""
 	}
-	// Data is typically an object; try typed unmarshal first.
 	var d classificationData
-	if err := json.Unmarshal(env.Data, &d); err == nil {
-		if s := strings.TrimSpace(d.OrderNo); s != "" {
-			return s
-		}
-		if s := strings.TrimSpace(d.BrokerOrderId); s != "" {
-			return s
-		}
-		if s := strings.TrimSpace(d.BrokerOrderID); s != "" {
-			return s
-		}
-		if s := strings.TrimSpace(d.OrderNoAlt); s != "" {
-			return s
-		}
-		if s := strings.TrimSpace(d.OrderId); s != "" {
-			return s
-		}
-		if s := strings.TrimSpace(d.OrderIDAlt); s != "" {
-			return s
-		}
+	if err := json.Unmarshal(env.Data, &d); err != nil {
+		return ""
 	}
-	// Fallback generic map for unknown key variants.
-	var m map[string]interface{}
-	if err := json.Unmarshal(env.Data, &m); err == nil {
-		for _, k := range []string{"orderNo", "brokerOrderId", "broker_order_id", "order_no", "orderId", "order_id"} {
-			if v, ok := m[k]; ok {
-				if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-					return strings.TrimSpace(s)
-				}
-			}
-		}
-	}
-	// Data may itself be a quoted string containing JSON (defensive).
-	trimmed := strings.TrimSpace(string(env.Data))
-	if len(trimmed) >= 2 && trimmed[0] == '"' && trimmed[len(trimmed)-1] == '"' {
-		var inner string
-		if err := json.Unmarshal(env.Data, &inner); err == nil && strings.TrimSpace(inner) != "" {
-			return strings.TrimSpace(inner)
+	for _, candidate := range []flexString{d.OrderNo, d.BrokerOrderId, d.BrokerOrderID} {
+		if s := candidate.trimmed(); s != "" {
+			return s
 		}
 	}
 	return ""

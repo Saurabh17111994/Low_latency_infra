@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -139,6 +141,48 @@ func TestRunPostbackLoopReconnectsAfterReaderReturns(t *testing.T) {
 	}
 }
 
+// P3-047/P3-046: connect() can report success while yielding no source. The loop
+// must treat that as a connect error (report + backoff retry) instead of calling
+// Read/Close on a nil source, which panics inside the reader goroutine and takes
+// the whole bridge process down — the loop runs as a bare `go RunPostbackLoop`,
+// so nothing recovers it.
+func TestRunPostbackLoopTreatsNilSourceAsConnectError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	var seen []error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPostbackLoop(ctx,
+			func() (OrderUpdateSource, error) { return nil, nil },
+			func(ReportEnvelope) error { return nil },
+			func(err error) {
+				mu.Lock()
+				seen = append(seen, err)
+				mu.Unlock()
+				cancel() // stop the loop after the first classified failure
+			},
+			time.Nanosecond, time.Nanosecond)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("postback loop did not exit after a nil-source connect error")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) == 0 {
+		t.Fatal("a nil source must surface as a connect error, not as a usable stream")
+	}
+	if seen[0] == nil {
+		t.Fatal("connect error must be non-nil")
+	}
+}
+
 func TestNextBackoffClampsInvalidAndOverflowingValues(t *testing.T) {
 	if got := nextBackoff(0, time.Second); got != 2*time.Nanosecond {
 		t.Fatalf("nextBackoff(0, 1s)=%v, want 2ns", got)
@@ -148,5 +192,211 @@ func TestNextBackoffClampsInvalidAndOverflowingValues(t *testing.T) {
 	}
 	if got := nextBackoff(time.Second, time.Second); got != time.Second {
 		t.Fatalf("nextBackoff(1s, 1s)=%v, want 1s", got)
+	}
+}
+
+// P3-255/P3-260: the event id is the fill's identity downstream — the executor keys
+// source_event_id on it and will not project a fill whose id it has already seen
+// (04_executor/src/projection/mod.rs:651, compared at :262 and :561) — so two
+// distinct partial fills must never carry the same one. The digest used to ignore
+// fillPrice, fillQuantity, fillTime and exchangeOrderID.
+func TestPostbackEventIDDistinguishesFillIdentity(t *testing.T) {
+	base := map[string]any{
+		"orderStatus": "EXECUTED", "reportType": "Fill", "id": "BRK-77",
+		"remarks": "c-77", "fillShares": "10", "averagePrice": "150.5",
+		"fillPrice": "15050", "fillQuantity": "10",
+		"fillTime": "2026-09-13T09:15:00", "exchangeOrderID": "EX-1",
+	}
+	baseID := NormalizeOrderUpdate(base).PostbackEventID
+	if baseID == "" {
+		t.Fatal("base update produced no event id")
+	}
+	seen := map[string]string{baseID: "base"}
+	var collisions []string
+	for _, variant := range []struct{ field, value string }{
+		{"fillPrice", "15051"},
+		{"fillQuantity", "11"},
+		{"fillTime", "2026-09-13T09:15:01"},
+		{"exchangeOrderID", "EX-2"},
+	} {
+		clone := map[string]any{}
+		for k, v := range base {
+			clone[k] = v
+		}
+		clone[variant.field] = variant.value
+		id := NormalizeOrderUpdate(clone).PostbackEventID
+		if other, ok := seen[id]; ok {
+			collisions = append(collisions, fmt.Sprintf("%s collides with %s", variant.field, other))
+			continue
+		}
+		seen[id] = variant.field
+	}
+	if len(collisions) > 0 {
+		t.Fatalf("distinct fills share one postback event id, so downstream dedup drops them: %v", collisions)
+	}
+	// A replayed update must still hash equally, or every reconnect re-projects a fill.
+	if replay := NormalizeOrderUpdate(base).PostbackEventID; replay != baseID {
+		t.Fatalf("replayed update changed identity: %q != %q", replay, baseID)
+	}
+}
+
+// P3-254/P3-258: a stream that connects and drops without ever publishing a report
+// proves nothing about the broker's health, so the reconnect schedule must keep
+// escalating instead of resetting every time — otherwise a flap reconnects once a
+// second forever and hammers the broker and the logs.
+func TestRunPostbackLoopEscalatesBackoffWithoutDeliveredReports(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	var stamps []time.Time
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPostbackLoop(ctx, func() (OrderUpdateSource, error) {
+			mu.Lock()
+			stamps = append(stamps, time.Now())
+			attempts := len(stamps)
+			mu.Unlock()
+			if attempts >= 5 {
+				cancel()
+			}
+			// Connects, reads nothing, returns after onUpdate was never called.
+			return &returningOrderSource{}, nil
+		}, func(ReportEnvelope) error { return nil }, nil, time.Millisecond, 64*time.Millisecond)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("postback loop never stopped")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(stamps) < 4 {
+		t.Fatalf("only %d connect attempts, need at least 4 to observe the schedule", len(stamps))
+	}
+	first := stamps[1].Sub(stamps[0])
+	last := stamps[len(stamps)-1].Sub(stamps[len(stamps)-2])
+	if last < 2*first {
+		t.Fatalf("reconnect gaps did not escalate: first=%v last=%v", first, last)
+	}
+}
+
+type stubbornReadSource struct {
+	updates  []map[string]any
+	finished chan struct{}
+	// queued, when set, is closed once every update has been handed to onUpdate, so a
+	// test can wait until the loop's buffer is certainly full before it acts.
+	queued chan struct{}
+	hold   time.Duration
+}
+
+// Read deliberately ignores ctx and Close: only the join keeps it from outliving the
+// loop attempt.
+func (s *stubbornReadSource) Read(_ context.Context, onUpdate func(map[string]any), _ func(error)) {
+	for _, update := range s.updates {
+		onUpdate(update)
+	}
+	if s.queued != nil {
+		close(s.queued)
+	}
+	time.Sleep(s.hold)
+	close(s.finished)
+}
+func (s *stubbornReadSource) Close() error { return nil }
+
+// P3-257: the attempt must not reconnect or return while the previous reader is still
+// inside Read — the abandoned goroutine holds the old updates channel and leaves broker
+// I/O in flight past shutdown.
+func TestRunPostbackLoopJoinsReaderBeforeReturning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	source := &stubbornReadSource{finished: make(chan struct{}), hold: 100 * time.Millisecond}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPostbackLoop(ctx, func() (OrderUpdateSource, error) {
+			cancel() // stop the loop while the reader is still inside Read
+			return source, nil
+		}, func(ReportEnvelope) error { return nil }, nil, time.Millisecond, time.Millisecond)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("postback loop did not stop")
+	}
+	select {
+	case <-source.finished:
+	default:
+		t.Fatal("loop returned while the reader was still inside Read")
+	}
+}
+
+// P3-259: shutdown must not be the one exit that discards reports the reader already
+// sequenced. Which ready case the select takes is a coin flip, so the scenario runs
+// repeatedly and every run has to publish all five.
+func TestRunPostbackLoopDrainsBufferedPostbacksOnShutdown(t *testing.T) {
+	const runs = 20
+	for run := 0; run < runs; run++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		updates := make([]map[string]any, 0, 5)
+		for i := 0; i < 5; i++ {
+			updates = append(updates, map[string]any{
+				"id": fmt.Sprintf("BRK-%d-%d", run, i), "orderStatus": "OPEN",
+			})
+		}
+		source := &stubbornReadSource{
+			updates: updates, finished: make(chan struct{}),
+			queued: make(chan struct{}), hold: 50 * time.Millisecond,
+		}
+		release := make(chan struct{})
+		firstPublish := make(chan struct{})
+		var mu sync.Mutex
+		var published []string
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			runPostbackLoop(ctx, func() (OrderUpdateSource, error) { return source, nil },
+				func(report ReportEnvelope) error {
+					mu.Lock()
+					n := len(published)
+					published = append(published, report.BrokerOrderID)
+					mu.Unlock()
+					if n == 0 {
+						close(firstPublish) // hold the loop inside the first publish
+						<-release
+					}
+					return nil
+				}, nil, time.Millisecond, time.Millisecond)
+		}()
+
+		select {
+		case <-firstPublish:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("run %d: loop never started publishing", run)
+		}
+		select {
+		case <-source.queued: // all five are in the buffer, four of them untouched
+		case <-time.After(5 * time.Second):
+			t.Fatalf("run %d: reader never queued its reports", run)
+		}
+		cancel()       // shutdown with four reports still buffered
+		close(release) // let the in-flight publish return
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("run %d: loop did not stop after shutdown", run)
+		}
+
+		mu.Lock()
+		got := len(published)
+		mu.Unlock()
+		if got != 5 {
+			t.Fatalf("run %d: shutdown dropped buffered postbacks: published %d of 5", run, got)
+		}
 	}
 }

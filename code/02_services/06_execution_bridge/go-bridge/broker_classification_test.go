@@ -71,3 +71,116 @@ func TestBridgeAcceptanceRequiresOrderNo(t *testing.T) {
 		})
 	}
 }
+
+// P3-040: a self-contradictory envelope — explicit status and explicit success
+// flag that disagree — is malformed per the header table and must be
+// AMBIGUOUS/UNKNOWN (HALT). Resolving the conflict toward either terminal
+// outcome risks a duplicate placement (false REJECTED) or a missed rejection
+// (false ACCEPTED).
+func TestClassifyBrokerResponseContradictorySignalsHalt(t *testing.T) {
+	tests := []struct {
+		name string
+		code int
+		body string
+		want string
+	}{
+		{
+			name: "200 success status + success:false -> UNKNOWN",
+			code: 200,
+			body: `{"status":"success","success":false,"data":{"orderNo":"BRK-1"}}`,
+			want: OutcomeUnknown,
+		},
+		{
+			name: "400 error status + success:true -> UNKNOWN",
+			code: 400,
+			body: `{"status":"error","success":true,"message":"bad quantity"}`,
+			want: OutcomeUnknown,
+		},
+		{
+			name: "200 success status + success:true (agree) -> ACCEPTED",
+			code: 200,
+			body: `{"status":"success","success":true,"data":{"orderNo":"BRK-1"}}`,
+			want: OutcomeSuccess,
+		},
+		{
+			name: "400 error status + success:false (agree) -> REJECTED",
+			code: 400,
+			body: `{"status":"error","success":false,"message":"bad quantity"}`,
+			want: OutcomeRejected,
+		},
+		{
+			name: "single signal only is not a contradiction",
+			code: 200,
+			body: `{"status":"success","data":{"orderNo":"BRK-1"}}`,
+			want: OutcomeSuccess,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyBrokerResponse(tc.code, tc.body); got != tc.want {
+				t.Fatalf("ClassifyBrokerResponse(%d, %s)=%s want %s", tc.code, tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// P3-242: brokers differ on whether order identifiers are quoted. A numeric
+// identifier is a present identifier, not a missing one — classifying it as
+// UNKNOWN halts a valid fill. Absent/blank/non-identifier types stay fail-closed.
+func TestClassifyBrokerResponseAcceptsNumericOrderIdentifiers(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "numeric data.orderNo", body: `{"status":"success","data":{"orderNo":12345}}`, want: OutcomeSuccess},
+		{name: "numeric data.brokerOrderId", body: `{"status":"success","data":{"brokerOrderId":987654}}`, want: OutcomeSuccess},
+		{name: "numeric data.broker_order_id", body: `{"status":"success","data":{"broker_order_id":42}}`, want: OutcomeSuccess},
+		{name: "quoted numeric identifier", body: `{"status":"success","data":{"orderNo":"12345"}}`, want: OutcomeSuccess},
+		{name: "null identifier is blank", body: `{"status":"success","data":{"orderNo":null}}`, want: OutcomeUnknown},
+		{name: "empty data object", body: `{"status":"success","data":{}}`, want: OutcomeUnknown},
+		{name: "boolean is not an identifier", body: `{"status":"success","data":{"orderNo":true}}`, want: OutcomeUnknown},
+		{name: "numeric identifier with error status still REJECTED", body: `{"status":"error","message":"bad price"}`, want: OutcomeUnknown},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyBrokerResponse(200, tc.body); got != tc.want {
+				t.Fatalf("ClassifyBrokerResponse(200, %s)=%s want %s", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+// P3-041: acceptance may only come from the dossier identity fields
+// (data.orderNo, data.brokerOrderId, and the repo-canonical data.broker_order_id).
+// Top-level echoes, the generic orderId/order_id/order_no aliases and a bare
+// string `data` are not order identities and must not yield ACCEPTED — a false
+// acceptance is reconciled against the wrong order. The repo's own identity
+// doctrine prohibits a generic order_id in code as well
+// (docs/08_implementation/01-foundation.md).
+func TestClassifyBrokerResponseIgnoresNonDossierIdentifiers(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "top-level orderNo echo only", body: `{"status":"success","orderNo":"BRK-1"}`, want: OutcomeUnknown},
+		{name: "top-level brokerOrderId echo only", body: `{"status":"success","brokerOrderId":"BRK-1"}`, want: OutcomeUnknown},
+		{name: "top-level broker_order_id echo only", body: `{"status":"success","broker_order_id":"BRK-1"}`, want: OutcomeUnknown},
+		{name: "generic data.orderId", body: `{"status":"success","data":{"orderId":"BRK-1"}}`, want: OutcomeUnknown},
+		{name: "generic data.order_id", body: `{"status":"success","data":{"order_id":"BRK-1"}}`, want: OutcomeUnknown},
+		{name: "alias data.order_no", body: `{"status":"success","data":{"order_no":"BRK-1"}}`, want: OutcomeUnknown},
+		{name: "bare string data", body: `{"status":"success","data":"BRK-1"}`, want: OutcomeUnknown},
+		{name: "quoted-json string data", body: `{"status":"success","data":"{\"orderNo\":\"BRK-1\"}"}`, want: OutcomeUnknown},
+		{name: "dossier data.orderNo", body: `{"status":"success","data":{"orderNo":"BRK-1"}}`, want: OutcomeSuccess},
+		{name: "dossier data.brokerOrderId", body: `{"status":"success","data":{"brokerOrderId":"BRK-9"}}`, want: OutcomeSuccess},
+		{name: "repo-canonical data.broker_order_id", body: `{"status":"success","data":{"broker_order_id":"BRK-9"}}`, want: OutcomeSuccess},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyBrokerResponse(200, tc.body); got != tc.want {
+				t.Fatalf("ClassifyBrokerResponse(200, %s)=%s want %s", tc.body, got, tc.want)
+			}
+		})
+	}
+}

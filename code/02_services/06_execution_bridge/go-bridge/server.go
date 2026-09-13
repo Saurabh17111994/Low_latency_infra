@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -34,10 +35,27 @@ type BridgeServer struct {
 	requests       map[string]*requestState
 }
 
+// maxTrackedRequests bounds the request-identity cache (P3-053). The caller
+// supplies the key, so the cache needs a ceiling that does not depend on caller
+// behaviour; 4096 identities is far more than a retry window needs in one
+// process, and the cache is only an optimisation over durable reconciliation.
+const maxTrackedRequests = 4096
+
+// maxEventFrameBytes bounds one inbound events frame (P3-055). The endpoint is
+// control-only: the bridge discards every client frame, it never acts on one, so
+// the limit only has to leave room for keepalive text, not for payloads.
+const maxEventFrameBytes = 4096
+
+// maxEventSubscribers caps concurrent events clients (P3-055). Each connection
+// costs a subscription, a read goroutine and a ping ticker, and the endpoint is
+// authenticated but not otherwise rate-limited.
+const maxEventSubscribers = 64
+
 type requestState struct {
 	fingerprint string
 	done        chan struct{}
 	report      ReportEnvelope
+	finishedAt  time.Time // zero while the request is still in flight
 }
 
 func NewBridgeServer(broker Broker, authToken, mode string) (*BridgeServer, error) {
@@ -129,46 +147,137 @@ func (s *BridgeServer) handleCommand(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "invalid_command: "+err.Error())
 		return
 	}
-	state, owner, conflict := s.beginRequest(command)
+	state, owner, conflict, err := s.beginRequest(command)
+	if err != nil {
+		// P3-474: a command that cannot be digested cannot be deduplicated safely,
+		// so it never reaches the broker.
+		s.writeError(w, http.StatusInternalServerError, "fingerprint_failed")
+		return
+	}
 	if conflict {
 		s.writeError(w, http.StatusConflict, "request_id_reuse_violation")
 		return
 	}
 	if !owner {
-		<-state.done
-		s.writeJSON(w, http.StatusOK, state.report)
+		// P3-051: never pin this goroutine — and this client's connection — on a
+		// request whose owner is slow or may never finish.
+		select {
+		case <-state.done:
+			s.writeJSON(w, http.StatusOK, state.report)
+		case <-r.Context().Done():
+		}
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.commandTimeout)
 	defer cancel()
-	result := s.dispatch(ctx, command)
-	report := resultToReport(command, result)
-	s.finishRequest(state, report)
-	s.writeJSON(w, http.StatusOK, report)
+	// P3-052: run the dispatch on its own goroutine and answer at the deadline.
+	// The venue's calls take no context, so nothing else can enforce
+	// commandTimeout — a stalled Arrow request used to hold this handler, and its
+	// caller, well past the deadline.
+	//
+	// The goroutine owns the dedup state (P3-051): it always completes it, panic
+	// included, and it stores the venue's real answer even when this reply has
+	// already gone out as UNKNOWN.
+	reports := make(chan ReportEnvelope, 1)
+	go func() {
+		report := func() (report ReportEnvelope) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					// net/http used to absorb a dispatch panic on the handler
+					// goroutine; on this one it would take the process down. Keep
+					// the operator's log line and fail the command closed.
+					log.Printf("execution bridge: dispatch panicked: %v", rec)
+					report = resultToReport(command, unknownResult(errDispatchPanicked))
+				}
+			}()
+			return resultToReport(command, s.dispatch(ctx, command))
+		}()
+		s.finishRequest(state, report)
+		reports <- report
+	}()
+	select {
+	case report := <-reports:
+		s.writeJSON(w, http.StatusOK, report)
+	case <-ctx.Done():
+		// Prefer an answer that is already in hand over a spurious UNKNOWN, then
+		// fail closed. The deadline reply is not stored: only the venue's own
+		// answer completes the dedup state, so a later reuse of this RequestID
+		// learns more than this caller did.
+		select {
+		case report := <-reports:
+			s.writeJSON(w, http.StatusOK, report)
+		default:
+			s.writeJSON(w, http.StatusOK, resultToReport(command, unknownResult(ctx.Err())))
+		}
+	}
 }
 
-func (s *BridgeServer) beginRequest(command CommandEnvelope) (*requestState, bool, bool) {
-	fp := fingerprint(command)
+// errDispatchPanicked is the fixed cause for the fail-closed report written when
+// dispatch panics. It is deliberately not the panic value: a stable cause keeps
+// the reason token from depending on whatever text the panic carried, while the
+// value itself goes to the log.
+var errDispatchPanicked = errors.New("dispatch panicked")
+
+func (s *BridgeServer) beginRequest(command CommandEnvelope) (*requestState, bool, bool, error) {
+	fp, err := fingerprint(command)
+	if err != nil {
+		return nil, false, false, err
+	}
 	s.requestMu.Lock()
 	defer s.requestMu.Unlock()
 	if existing, ok := s.requests[command.RequestID]; ok {
 		if existing.fingerprint != fp {
-			return nil, false, true
+			return nil, false, true, nil
 		}
-		return existing, false, false
+		return existing, false, false, nil
 	}
 	state := &requestState{fingerprint: fp, done: make(chan struct{})}
+	// P3-053: bound the cache. A new identity may evict completed ones, oldest
+	// completion first; an in-flight identity is never dropped, because
+	// forgetting one would let its RequestID dispatch the same order again.
+	if len(s.requests) >= maxTrackedRequests {
+		s.evictCompletedLocked(len(s.requests) - maxTrackedRequests + 1)
+	}
 	s.requests[command.RequestID] = state
-	return state, true, false
+	return state, true, false, nil
+}
+
+// evictCompletedLocked drops up to n completed identities, oldest completion
+// first, and leaves every in-flight identity in place. It must be called with
+// requestMu held.
+//
+// ponytail: one linear scan per eviction. It only runs once the cache is at its
+// cap, and the map is 4096 entries, so the scan is not worth a linked list yet —
+// replace it with an LRU list if the cap grows or the scan shows up in profiles.
+func (s *BridgeServer) evictCompletedLocked(n int) {
+	for n > 0 {
+		oldestID := ""
+		var oldestAt time.Time
+		for id, state := range s.requests {
+			if state.finishedAt.IsZero() {
+				continue // in flight: its RequestID must stay deduplicated
+			}
+			if oldestID == "" || state.finishedAt.Before(oldestAt) {
+				oldestID, oldestAt = id, state.finishedAt
+			}
+		}
+		if oldestID == "" {
+			return // everything left is in flight: the cap cannot be honoured yet
+		}
+		delete(s.requests, oldestID)
+		n--
+	}
 }
 
 func (s *BridgeServer) finishRequest(state *requestState, report ReportEnvelope) {
 	s.requestMu.Lock()
 	state.report = report
+	state.finishedAt = time.Now()
 	close(state.done)
-	// Retain completed request identities for this process lifetime. A restart
-	// deliberately loses this cache; durable attempt reconciliation remains the
+	// Retain completed request identities until the cache reaches its cap
+	// (P3-053), which bounds both cardinality and key size. A restart still loses
+	// this cache deliberately: durable attempt reconciliation remains the
 	// authority for crash recovery.
 	s.requestMu.Unlock()
 }
@@ -213,9 +322,21 @@ func resultToReport(c CommandEnvelope, result BrokerResult) ReportEnvelope {
 		ReceivedTsMs: nowMs(), ResponseFingerprint: result.Fingerprint,
 	}
 	if result.Data != nil {
-		if data, err := json.Marshal(result.Data); err == nil {
-			report.Data = data
+		data, err := json.Marshal(result.Data)
+		if err != nil {
+			// P3-264: a payload the bridge cannot serialize must not become a
+			// SUCCESS with Data quietly missing — downstream reconcile would read
+			// the gap as "nothing to reconcile". Fail closed and keep the
+			// correlation fields, so the failure is still reconcilable.
+			return ReportEnvelope{
+				RecordType: RecordReport, ContractVersion: ProtocolVersion,
+				RequestID: c.RequestID, Command: c.Command,
+				Outcome: OutcomeUnknown, Reason: "ambiguous_broker_response",
+				InstructionID: c.InstructionID, ExecutionAttemptID: c.ExecutionAttemptID,
+				ClientOrderRef: c.ClientOrderRef, ReceivedTsMs: nowMs(),
+			}
 		}
+		report.Data = data
 	}
 	return report
 }
@@ -246,9 +367,10 @@ func (s *BridgeServer) writeHealth(w http.ResponseWriter, readiness bool) {
 		}
 	}
 	status := http.StatusOK
-	if value["status"] == "UP disabled" {
-		status = http.StatusServiceUnavailable
-	} else if readiness && s.mode == "disabled" {
+	// P3-054: only readiness may fail on a disabled broker. A disabled bridge is
+	// alive and answers liveness — failing /healthz restarted it, and a restart
+	// cannot restore a token that needs a TOTP re-auth, so it restarted forever.
+	if readiness && (value["status"] == "UP disabled" || s.mode == "disabled") {
 		status = http.StatusServiceUnavailable
 	}
 	s.writeJSON(w, status, value)
@@ -283,7 +405,16 @@ func (s *BridgeServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	// P3-055: bound what a single frame can cost. The read loop below
+	// discards everything it reads, so the limit protects memory, not semantics.
+	conn.SetReadLimit(maxEventFrameBytes)
 	sub := s.hub.Subscribe()
+	if sub == nil {
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "subscriber limit reached"),
+			time.Now().Add(time.Second))
+		return
+	}
 	defer sub.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPongHandler(func(string) error {
@@ -337,9 +468,15 @@ type EventSubscription struct {
 
 func NewEventHub() *EventHub { return &EventHub{subscribers: map[uint64]*EventSubscription{}} }
 
+// Subscribe registers a new events client, or returns nil when the hub already
+// holds maxEventSubscribers clients (P3-055). A nil return means the caller must
+// refuse the connection: the hub never grows without bound.
 func (h *EventHub) Subscribe() *EventSubscription {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if len(h.subscribers) >= maxEventSubscribers {
+		return nil
+	}
 	h.nextID++
 	sub := &EventSubscription{Events: make(chan []byte, 32), hub: h, id: h.nextID}
 	h.subscribers[sub.id] = sub

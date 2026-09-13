@@ -10,7 +10,7 @@ use anyhow::{anyhow, Context as _};
 use async_trait::async_trait;
 use tracing::debug;
 
-use super::client::{BridgeClient, BridgeReportStream};
+use super::client::{BridgeClient, BridgeReportStream, BRIDGE_REPORT_BUFFER};
 use super::protocol::{Command, CommandEnvelope, ReportEnvelope, RECORD_REPORT};
 
 /// Scripted synchronous reply for the next command.
@@ -65,7 +65,7 @@ pub struct OrderRecord {
 /// The in-process fake bridge.
 pub struct FakeBridge {
     connected: bool,
-    reports_tx: Option<tokio::sync::mpsc::UnboundedSender<ReportEnvelope>>,
+    reports_tx: Option<tokio::sync::mpsc::Sender<ReportEnvelope>>,
     reports_rx: Option<BridgeReportStream>,
     orders: HashMap<String, OrderRecord>,
     counter: u64,
@@ -164,9 +164,9 @@ impl FakeBridge {
         }
     }
 
-    fn push_report(&self, report: ReportEnvelope) {
+    async fn push_report(&self, report: ReportEnvelope) {
         if let Some(tx) = &self.reports_tx {
-            let _ = tx.send(report);
+            let _ = tx.send(report).await;
         }
     }
 }
@@ -186,7 +186,7 @@ impl BridgeClient for FakeBridge {
     async fn connect(&mut self) -> anyhow::Result<()> {
         self.connected = true;
         if self.reports_tx.is_none() {
-            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let (tx, rx) = tokio::sync::mpsc::channel(BRIDGE_REPORT_BUFFER);
             self.reports_tx = Some(tx);
             self.reports_rx = Some(rx);
         }
@@ -268,42 +268,13 @@ impl BridgeClient for FakeBridge {
                 broker_order_id: envelope.broker_order_id.clone(),
                 ..ReportEnvelope::default()
             }),
-            CommandScript::ReconcileSnapshot(snapshot) => {
-                for rec in &snapshot {
-                    self.push_report(ReportEnvelope {
-                        record_type: RECORD_REPORT.to_string(),
-                        contract_version: 1,
-                        request_id: envelope.request_id.clone(),
-                        command: cmd.as_str().to_string(),
-                        outcome: "SUCCESS".to_string(),
-                        client_order_ref: rec.client_order_ref.clone(),
-                        broker_order_id: rec.broker_order_id.clone(),
-                        order_status: Some(rec.status.as_str().to_string()),
-                        report_type: Some("order_status".to_string()),
-                        ..ReportEnvelope::default()
-                    });
-                }
-                Ok(ReportEnvelope {
-                    record_type: RECORD_REPORT.to_string(),
-                    contract_version: 1,
-                    request_id: envelope.request_id.clone(),
-                    command: cmd.as_str().to_string(),
-                    outcome: "SUCCESS".to_string(),
-                    client_order_ref: envelope.client_order_ref.clone(),
-                    broker_order_id: envelope.broker_order_id.clone(),
-                    order_status: Some(if snapshot.is_empty() {
-                        "NO_OPEN_ORDERS".to_string()
-                    } else {
-                        "OPEN_SNAPSHOT".to_string()
-                    }),
-                    report_type: Some("reconcile_snapshot".to_string()),
-                    ..ReportEnvelope::default()
-                })
-            }
+            CommandScript::ReconcileSnapshot(snapshot) => Ok(self
+                .emit_reconcile_snapshot(cmd, &envelope, &snapshot)
+                .await),
             CommandScript::Accept => self.handle_accept(cmd, envelope).await,
             CommandScript::AcceptThenFill => {
                 let report = self.handle_accept(cmd, envelope.clone()).await?;
-                self.emit_fill(&envelope);
+                self.emit_fill(&envelope).await;
                 Ok(report)
             }
         }
@@ -339,14 +310,19 @@ impl FakeBridge {
                 Ok(self.make_success(Command::Place, &envelope, &broker_order_id))
             }
             Command::Modify => {
-                // Re-record the referenced order; report success with the same broker id.
+                // P3-428: re-record every field a modify may change, and refuse a
+                // body-less modify the way the live bridge does (validateCommand requires
+                // the order body) instead of reporting SUCCESS with no state change.
+                let order = envelope
+                    .order
+                    .as_ref()
+                    .context("modify requires an order")?;
                 let record = self
                     .orders
                     .get_mut(&envelope.broker_order_id)
                     .context("modify references unknown order")?;
-                if let Some(order) = &envelope.order {
-                    record.price = order.price.clone();
-                }
+                record.price = order.price.clone();
+                record.quantity = order.quantity.clone();
                 Ok(self.make_success(Command::Modify, &envelope, &envelope.broker_order_id))
             }
             Command::Cancel => {
@@ -367,7 +343,8 @@ impl FakeBridge {
                     order_status: Some(FakeOrderStatus::Canceled.as_str().to_string()),
                     report_type: Some("order_canceled".to_string()),
                     ..ReportEnvelope::default()
-                });
+                })
+                .await;
                 Ok(self.make_success(Command::Cancel, &envelope, &envelope.broker_order_id))
             }
             Command::QueryOrder => {
@@ -422,53 +399,66 @@ impl FakeBridge {
             }
             Command::ReconcileOrders | Command::ReconcileTrades | Command::ReconcilePositions => {
                 let snap = self.open_orders_snapshot();
-                for rec in &snap {
-                    self.push_report(ReportEnvelope {
-                        record_type: RECORD_REPORT.to_string(),
-                        contract_version: 1,
-                        request_id: envelope.request_id.clone(),
-                        command: cmd.as_str().to_string(),
-                        outcome: "SUCCESS".to_string(),
-                        client_order_ref: rec.client_order_ref.clone(),
-                        broker_order_id: rec.broker_order_id.clone(),
-                        order_status: Some(rec.status.as_str().to_string()),
-                        report_type: Some("order_status".to_string()),
-                        ..ReportEnvelope::default()
-                    });
-                }
-                Ok(ReportEnvelope {
-                    record_type: RECORD_REPORT.to_string(),
-                    contract_version: 1,
-                    request_id: envelope.request_id.clone(),
-                    command: cmd.as_str().to_string(),
-                    outcome: "SUCCESS".to_string(),
-                    client_order_ref: envelope.client_order_ref.clone(),
-                    broker_order_id: envelope.broker_order_id.clone(),
-                    order_status: Some(if snap.is_empty() {
-                        "NO_OPEN_ORDERS".to_string()
-                    } else {
-                        "OPEN_SNAPSHOT".to_string()
-                    }),
-                    report_type: Some("reconcile_snapshot".to_string()),
-                    ..ReportEnvelope::default()
-                })
+                Ok(self.emit_reconcile_snapshot(cmd, &envelope, &snap).await)
             }
         }
     }
-    fn emit_fill(&self, envelope: &CommandEnvelope) {
+
+    /// P3-427: the scripted snapshot and the reconcile commands used to carry two
+    /// near-identical copies of this emission (one report per record plus the summary),
+    /// which would drift as the fake grows. One emitter, one shape.
+    async fn emit_reconcile_snapshot(
+        &self,
+        cmd: Command,
+        envelope: &CommandEnvelope,
+        records: &[OrderRecord],
+    ) -> ReportEnvelope {
+        for rec in records {
+            self.push_report(ReportEnvelope {
+                record_type: RECORD_REPORT.to_string(),
+                contract_version: 1,
+                request_id: envelope.request_id.clone(),
+                command: cmd.as_str().to_string(),
+                outcome: "SUCCESS".to_string(),
+                client_order_ref: rec.client_order_ref.clone(),
+                broker_order_id: rec.broker_order_id.clone(),
+                order_status: Some(rec.status.as_str().to_string()),
+                report_type: Some("order_status".to_string()),
+                ..ReportEnvelope::default()
+            })
+            .await;
+        }
+        ReportEnvelope {
+            record_type: RECORD_REPORT.to_string(),
+            contract_version: 1,
+            request_id: envelope.request_id.clone(),
+            command: cmd.as_str().to_string(),
+            outcome: "SUCCESS".to_string(),
+            client_order_ref: envelope.client_order_ref.clone(),
+            broker_order_id: envelope.broker_order_id.clone(),
+            order_status: Some(if records.is_empty() {
+                "NO_OPEN_ORDERS".to_string()
+            } else {
+                "OPEN_SNAPSHOT".to_string()
+            }),
+            report_type: Some("reconcile_snapshot".to_string()),
+            ..ReportEnvelope::default()
+        }
+    }
+
+    async fn emit_fill(&self, envelope: &CommandEnvelope) {
         let Some(order) = envelope.order.as_ref() else {
             return;
         };
+        // P3-187: `orders` is keyed by broker_order_id, so a lookup by client_order_ref
+        // in that map resolves to an unrelated order whenever a client ref collides with
+        // another order's broker id (a client ref of "BRK-0002" is valid). Match on the
+        // field that actually carries the client ref.
         let broker_order_id = self
             .orders
-            .get(&envelope.client_order_ref)
-            .map(|r| r.broker_order_id.clone())
-            .or_else(|| {
-                self.orders
-                    .iter()
-                    .find(|(_, r)| r.client_order_ref == envelope.client_order_ref)
-                    .map(|(id, _)| id.clone())
-            })
+            .iter()
+            .find(|(_, r)| r.client_order_ref == envelope.client_order_ref)
+            .map(|(id, _)| id.clone())
             .unwrap_or_default();
         if broker_order_id.is_empty() {
             return;
@@ -492,7 +482,8 @@ impl FakeBridge {
                 order.price.clone()
             }),
             ..ReportEnvelope::default()
-        });
+        })
+        .await;
     }
 }
 
@@ -533,6 +524,204 @@ mod tests {
         assert!(!rep.broker_order_id.is_empty());
         b.disconnect().await.unwrap();
         assert!(!b.is_connected());
+    }
+
+    // P3-187: `orders` is keyed by broker_order_id, so looking a fill up by the
+    // envelope's client_order_ref in that map attributes the fill to an unrelated
+    // order whenever a client ref collides with another order's broker id.
+    #[tokio::test]
+    async fn fill_is_attributed_to_the_order_that_owns_the_client_ref() {
+        let mut b = FakeBridge::new();
+        b.connect().await.unwrap();
+        b.script(CommandScript::Accept);
+        b.script(CommandScript::AcceptThenFill);
+
+        let mut first = place_env();
+        first.command = Command::Place.as_str().to_string();
+        let first_id = b.send_command(first).await.unwrap().broker_order_id;
+        assert!(!first_id.is_empty());
+
+        // A second order whose *client ref* equals the first order's broker id: the
+        // collision the wrongly-keyed lookup mis-resolves.
+        let mut second = place_env();
+        second.command = Command::Place.as_str().to_string();
+        second.request_id = "req-2".into();
+        second.client_order_ref = first_id.clone();
+        let second_id = b.send_command(second).await.unwrap().broker_order_id;
+        assert_ne!(
+            first_id, second_id,
+            "the fake must mint a distinct id per order"
+        );
+
+        let mut reports = b.take_reports().expect("report stream");
+        let fill = reports
+            .try_recv()
+            .expect("a fill report for the second order");
+        assert_eq!(
+            fill.broker_order_id, second_id,
+            "fill attributed to {} (another order's broker id) instead of {}",
+            fill.broker_order_id, second_id
+        );
+        assert_eq!(fill.client_order_ref, first_id);
+    }
+
+    // P3-428 (first half): a modify must record what it claims to record. Quantity is
+    // as mutable as price, and the old code updated only price.
+    #[tokio::test]
+    async fn modify_records_the_whole_order_body() {
+        let mut b = FakeBridge::new();
+        b.connect().await.unwrap();
+        b.script(CommandScript::Accept); // place
+        b.script(CommandScript::Accept); // modify with a body
+
+        let mut place = place_env();
+        place.command = Command::Place.as_str().to_string();
+        let id = b.send_command(place).await.unwrap().broker_order_id;
+
+        let mut modify = CommandEnvelope::new(Command::Modify, "req-2");
+        modify.client_order_ref = "CLIENT-1".into();
+        modify.instruction_id = "inst-1".into();
+        modify.execution_attempt_id = "att-1".into();
+        modify.broker_order_id = id.clone();
+        modify.order = Some(
+            OrderCommand::new("NFO", "NIFTY")
+                .with_quantity("7")
+                .with_side(TransactionType::Buy)
+                .with_order_type(OrderType::Lmt)
+                .with_product(Product::Cash)
+                .with_validity(Validity::Day)
+                .with_price("99"),
+        );
+        assert!(b.send_command(modify).await.unwrap().is_success());
+        let record = b.orders.get(&id).expect("the placed order is recorded");
+        assert_eq!(record.price, "99");
+        assert_eq!(
+            record.quantity, "7",
+            "modify re-recorded the price but left the old quantity"
+        );
+    }
+
+    // P3-428 (second half): a body-less modify must fail rather than report
+    // SUCCESS-with-no-change. The envelope validator normally catches it first, so the
+    // fake must not rely on that and must refuse it on the direct path too.
+    #[tokio::test]
+    async fn modify_refuses_a_missing_order_body() {
+        let mut b = FakeBridge::new();
+        b.connect().await.unwrap();
+        b.script(CommandScript::Accept); // place
+        b.script(CommandScript::Accept); // modify without a body
+
+        let mut place = place_env();
+        place.command = Command::Place.as_str().to_string();
+        let id = b.send_command(place).await.unwrap().broker_order_id;
+
+        let mut no_body = CommandEnvelope::new(Command::Modify, "req-3");
+        no_body.client_order_ref = "CLIENT-1".into();
+        no_body.instruction_id = "inst-1".into();
+        no_body.execution_attempt_id = "att-1".into();
+        no_body.broker_order_id = id.clone();
+        no_body.order = None;
+        assert!(
+            b.send_command(no_body).await.is_err(),
+            "a modify with no order body must fail, not report SUCCESS: the live bridge rejects it"
+        );
+
+        // The envelope validator catches that first, so pin the guard in handle_accept
+        // too: a direct caller must not get SUCCESS-with-no-change either.
+        let mut direct = CommandEnvelope::new(Command::Modify, "req-4");
+        direct.broker_order_id = id.clone();
+        direct.order = None;
+        assert!(
+            b.handle_accept(Command::Modify, direct).await.is_err(),
+            "handle_accept must refuse a body-less modify rather than report SUCCESS"
+        );
+    }
+
+    // P3-427: the scripted snapshot and the reconcile-command snapshot are one emitter
+    // after the dedupe; pin the shape both paths promise (one order_status report per
+    // record plus one summary) so a later edit to either cannot drift unnoticed.
+    #[tokio::test]
+    async fn reconcile_snapshot_shape_is_pinned_for_both_paths() {
+        let mut b = FakeBridge::new();
+        b.connect().await.unwrap();
+        b.script(CommandScript::ReconcileSnapshot(vec![
+            OrderRecord {
+                broker_order_id: "BRK-1".into(),
+                client_order_ref: "c-1".into(),
+                symbol: "NIFTY".into(),
+                quantity: "10".into(),
+                status: FakeOrderStatus::Open,
+                filled_qty: "0".into(),
+                price: "100".into(),
+            },
+            OrderRecord {
+                broker_order_id: "BRK-2".into(),
+                client_order_ref: "c-2".into(),
+                symbol: "NIFTY".into(),
+                quantity: "5".into(),
+                status: FakeOrderStatus::PartialFill,
+                filled_qty: "2".into(),
+                price: "101".into(),
+            },
+        ]));
+
+        let mut env = CommandEnvelope::new(Command::ReconcileOrders, "req-rec");
+        env.command = Command::ReconcileOrders.as_str().to_string();
+        let summary = b.send_command(env).await.unwrap();
+        assert_eq!(summary.order_status.as_deref(), Some("OPEN_SNAPSHOT"));
+        assert_eq!(summary.report_type.as_deref(), Some("reconcile_snapshot"));
+
+        let mut reports = b.take_reports().expect("report stream");
+        for want in ["BRK-1", "BRK-2"] {
+            let rec = reports
+                .try_recv()
+                .expect("one order_status report per record");
+            assert_eq!(rec.broker_order_id, want);
+            assert_eq!(rec.report_type.as_deref(), Some("order_status"));
+            assert_eq!(rec.outcome, "SUCCESS");
+        }
+        assert!(
+            reports.try_recv().is_err(),
+            "no report beyond the records and the summary"
+        );
+
+        // Empty snapshot: the summary says so, and nothing is pushed.
+        b.script(CommandScript::ReconcileSnapshot(vec![]));
+        let mut empty_env = CommandEnvelope::new(Command::ReconcileOrders, "req-empty");
+        empty_env.command = Command::ReconcileOrders.as_str().to_string();
+        let empty = b.send_command(empty_env).await.unwrap();
+        assert_eq!(empty.order_status.as_deref(), Some("NO_OPEN_ORDERS"));
+        assert!(b.take_reports().is_none(), "the stream is taken once");
+    }
+
+    // P3-186: the report channel is bounded. With a stalled consumer the producer must stop
+    // (backpressure) instead of queueing reports without limit.
+    #[tokio::test]
+    async fn report_channel_is_bounded_and_applies_backpressure() {
+        let mut b = FakeBridge::new();
+        b.connect().await.unwrap();
+        let _rx = b.take_reports().expect("report stream"); // held, never drained
+        let mut sent = 0usize;
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            // Three times the buffer: an unbounded channel swallows every one of them.
+            while sent < 3 * BRIDGE_REPORT_BUFFER {
+                let mut env = place_env();
+                env.command = Command::Place.as_str().to_string();
+                env.request_id = format!("req-{sent}");
+                b.script(CommandScript::AcceptThenFill);
+                b.send_command(env).await.unwrap();
+                sent += 1;
+            }
+        })
+        .await;
+        assert!(
+            outcome.is_err(),
+            "the producer ran {sent} commands without ever stalling: the report channel is unbounded"
+        );
+        assert!(
+            sent <= BRIDGE_REPORT_BUFFER,
+            "the producer got {sent} commands past a {BRIDGE_REPORT_BUFFER}-report buffer"
+        );
     }
 
     #[tokio::test]

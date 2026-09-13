@@ -21,16 +21,16 @@
 
 use std::io;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
+use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
-use super::client::{BridgeClient, BridgeReportStream};
+use super::client::{BridgeClient, BridgeReportStream, BRIDGE_REPORT_BUFFER};
 use super::protocol::{CommandEnvelope, ReportEnvelope};
 
 // --- RFC 6455 opcodes (subset we speak: text, ping, pong, close). ---
@@ -90,6 +90,11 @@ async fn http_request(
                 break;
             }
             buf.extend_from_slice(&chunk[..n]);
+            // P3-189: stop as soon as the response is complete; `Connection: close` is a
+            // request, and a keep-alive peer would otherwise hold this read until the timeout.
+            if response_is_complete(&buf) {
+                break;
+            }
         }
         Ok::<_, io::Error>(())
     })
@@ -162,16 +167,48 @@ fn parse_http_response(raw: &[u8]) -> Result<HttpResponse> {
         == "chunked";
     let body = if let Some(len) = header("content-length") {
         let len: usize = len.trim().parse()?;
-        raw_body
-            .get(..len.min(raw_body.len()))
-            .unwrap_or(raw_body)
-            .to_vec()
+        // P3-189: slicing to `len.min(raw_body.len())` reported a truncated body as a complete
+        // shorter one, so callers acted on half a reply and failed later with a misleading
+        // parse error. A body shorter than its own Content-Length is a framing error.
+        anyhow::ensure!(
+            raw_body.len() >= len,
+            "truncated HTTP body: got {} of {len} bytes",
+            raw_body.len()
+        );
+        raw_body[..len].to_vec()
     } else if chunked {
         parse_chunked_body(raw_body)?
     } else {
         raw_body.to_vec()
     };
     Ok(HttpResponse { status, body })
+}
+
+/// True when `buf` already holds a complete HTTP/1.1 response, so a reader need not wait for a
+/// connection the peer keeps open.
+///
+/// P3-189: `Connection: close` is a request, not a promise — a keep-alive peer left the bridge
+/// waiting for an EOF that never came, until its own timeout fired. Only Content-Length-framed
+/// responses are detected here; a chunked body (which the Go bridge does not emit for its JSON
+/// replies) still ends at EOF, keeping the previous behaviour for that case.
+fn response_is_complete(buf: &[u8]) -> bool {
+    let Some(head_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+        return false;
+    };
+    let Ok(head) = std::str::from_utf8(&buf[..head_end]) else {
+        return false;
+    };
+    let declared = head.split("\r\n").skip(1).find_map(|line| {
+        let (k, v) = line.split_once(':')?;
+        k.trim()
+            .eq_ignore_ascii_case("content-length")
+            .then(|| v.trim().parse::<usize>().ok())
+            .flatten()
+    });
+    match declared {
+        Some(len) => buf.len() - (head_end + 4) >= len,
+        None => false,
+    }
 }
 
 /// Decodes a chunked transfer body.
@@ -183,9 +220,11 @@ fn parse_chunked_body(data: &[u8]) -> Result<Vec<u8>> {
             Some(i) => pos + i,
             None => anyhow::bail!("malformed chunked body"),
         };
-        let size_str = std::str::from_utf8(&data[pos..line_end])?
-            .trim()
-            .trim_end_matches(';'); // ignore chunk extensions
+        // P3-430: the chunk header is `<hex size>[;ext=value]...` — the size ends at the first
+        // `;`. `trim_end_matches(';')` only strips a *trailing* semicolon, so `5;ext=abc` was
+        // handed to `from_str_radix` whole and every extended chunk failed to parse.
+        let raw_size = std::str::from_utf8(&data[pos..line_end])?;
+        let size_str = raw_size.split(';').next().unwrap_or_default().trim();
         let size = usize::from_str_radix(size_str, 16)
             .map_err(|e| anyhow::anyhow!("bad chunk size: {e}"))?;
         if size == 0 {
@@ -260,22 +299,18 @@ fn base64_encode(input: &[u8]) -> String {
     out
 }
 
-/// Deterministic-per-process xorshift* filled from wall-clock + pid. Sufficient for the
-/// Sec-WebSocket-Key nonce and frame masks (the Go server performs no entropy check).
+/// CSPRNG-backed random bytes for the `Sec-WebSocket-Key` nonce and the frame masks.
+///
+/// P3-431: this used to be an xorshift seeded from the wall clock and the pid — a predictable
+/// keystream for the one handshake value RFC 6455 requires to be unpredictable. `uuid` is
+/// already a dependency and its v4 bytes come from the OS CSPRNG.
 fn ws_random_bytes(n: usize) -> Vec<u8> {
-    let mut seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0xa2ba40bc2e01u64)
-        ^ ((std::process::id() as u64) << 32);
-    (0..n)
-        .map(|_| {
-            seed ^= seed << 13;
-            seed ^= seed >> 7;
-            seed ^= seed << 17;
-            seed as u8
-        })
-        .collect()
+    let mut out = Vec::with_capacity(n + 16);
+    while out.len() < n {
+        out.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    }
+    out.truncate(n);
+    out
 }
 
 /// Reads one complete WebSocket frame. Applies the mask when the peer masked the payload
@@ -290,10 +325,27 @@ async fn read_ws_frame(stream: &mut TcpStream) -> Result<WsFrame> {
         let mut b = [0u8; 2];
         stream.read_exact(&mut b).await?;
         len = u16::from_be_bytes(b) as u64;
+        // P3-432: RFC 6455 §5.2 requires the minimal length encoding — 126 means "at least 126".
+        anyhow::ensure!(
+            len >= 126,
+            "websocket frame length {len} must not use the 16-bit form"
+        );
     } else if len == 127 {
         let mut b = [0u8; 8];
         stream.read_exact(&mut b).await?;
+        // P3-432: the 64-bit form's top bit is reserved and must be zero, and the form is legal
+        // only for lengths the 16-bit form cannot express. (An absurd length is refused by the
+        // size guard below either way; these checks make the verdict about the encoding rather
+        // than about MAX_WS_FRAME.)
+        anyhow::ensure!(
+            b[0] & 0x80 == 0,
+            "websocket frame length has the reserved bit set"
+        );
         len = u64::from_be_bytes(b);
+        anyhow::ensure!(
+            len > 0xFFFF,
+            "websocket frame length {len} must not use the 64-bit form"
+        );
     }
     anyhow::ensure!(len as usize <= MAX_WS_FRAME, "websocket frame too large");
     let mask = if masked {
@@ -337,6 +389,53 @@ async fn write_client_ws_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8
     Ok(())
 }
 
+/// P3-433: the reply to the upgrade request must be a 101 (see the call site); the
+/// header checks live here so they can be exercised without a socket.
+fn check_upgrade_reply(reply: &[u8], key: &str) -> Result<()> {
+    anyhow::ensure!(
+        reply.starts_with(b"HTTP/1.1 101"),
+        "websocket upgrade rejected: {}",
+        String::from_utf8_lossy(&reply[..reply.len().min(120)])
+    );
+    let head = std::str::from_utf8(&reply[..reply.len().min(16_384)]).unwrap_or_default();
+    let header = |name: &str| {
+        head.split("\r\n").skip(1).find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            (k.trim().eq_ignore_ascii_case(name)).then(|| v.trim().to_string())
+        })
+    };
+    // A bare 101 is not an upgrade: the peer must confirm the protocol switch itself.
+    let upgrade = header("upgrade").unwrap_or_default();
+    anyhow::ensure!(
+        upgrade.eq_ignore_ascii_case("websocket"),
+        "websocket upgrade rejected: Upgrade: {upgrade:?}"
+    );
+    let connection = header("connection").unwrap_or_default();
+    anyhow::ensure!(
+        connection
+            .split(',')
+            .any(|t| t.trim().eq_ignore_ascii_case("upgrade")),
+        "websocket upgrade rejected: Connection: {connection:?}"
+    );
+    // RFC 6455 §4.1: the accept value is `base64(sha1(key + GUID))`, so it is verified against
+    // the key we actually sent — a shape-only check accepted a value-shaped forgery.
+    let accept = header("sec-websocket-accept").unwrap_or_default();
+    let expected = accept_key(key);
+    anyhow::ensure!(
+        accept == expected,
+        "websocket upgrade rejected: Sec-WebSocket-Accept: {accept:?}, expected {expected:?}"
+    );
+    Ok(())
+}
+
+/// The GUID RFC 6455 §4.1 appends to the client's key before hashing.
+const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// The `Sec-WebSocket-Accept` value this client expects for `key`: `base64(sha1(key + GUID))`.
+fn accept_key(key: &str) -> String {
+    base64_encode(&Sha1::digest(format!("{key}{WS_ACCEPT_GUID}").as_bytes()))
+}
+
 /// Performs the RFC 6455 upgrade on an established TCP stream.
 ///
 /// Mirrors the Go bridge's expectations exactly: `Authorization: Bearer <token>` (the server
@@ -371,12 +470,7 @@ async fn ws_handshake(
         }
         reply.push(byte[0]);
     }
-    anyhow::ensure!(
-        reply.starts_with(b"HTTP/1.1 101"),
-        "websocket upgrade rejected: {}",
-        String::from_utf8_lossy(&reply[..reply.len().min(120)])
-    );
-    Ok(())
+    check_upgrade_reply(&reply, &key)
 }
 
 /// Runs one lifeline of the `/v1/events` stream, returning when the socket closes, times out,
@@ -384,7 +478,7 @@ async fn ws_handshake(
 async fn ws_stream_once(
     url: &str,
     auth_token: &str,
-    tx: &UnboundedSender<ReportEnvelope>,
+    tx: &Sender<ReportEnvelope>,
     read_timeout: Duration,
 ) -> Result<()> {
     let (host, port, path) = parse_ws_url(url)?;
@@ -410,7 +504,7 @@ async fn ws_stream_once(
         match frame.opcode {
             OP_TEXT => {
                 if let Ok(envelope) = serde_json::from_slice::<ReportEnvelope>(&frame.payload) {
-                    if tx.send(envelope).is_err() {
+                    if tx.send(envelope).await.is_err() {
                         return Ok(()); // caller dropped the receiver (shutdown)
                     }
                 }
@@ -440,7 +534,7 @@ async fn ws_stream_once(
 async fn report_intake_loop(
     url: String,
     auth_token: String,
-    tx: UnboundedSender<ReportEnvelope>,
+    tx: Sender<ReportEnvelope>,
     reconnect_min: Duration,
     reconnect_max: Duration,
     read_timeout: Duration,
@@ -468,7 +562,7 @@ pub struct HttpBridgeClient {
     base_url: String,
     auth_token: String,
     connected: bool,
-    reports_tx: Option<UnboundedSender<ReportEnvelope>>,
+    reports_tx: Option<Sender<ReportEnvelope>>,
     intake: Option<JoinHandle<()>>,
     reconnect_min: Duration,
     reconnect_max: Duration,
@@ -550,7 +644,7 @@ impl BridgeClient for HttpBridgeClient {
         if self.reports_tx.is_some() {
             return None; // the stream has already been taken
         }
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::channel(BRIDGE_REPORT_BUFFER);
         let url = format!("{}/v1/events", self.base_url.trim_end_matches('/'));
         let token = self.auth_token.clone();
         let min = self.reconnect_min;
@@ -582,10 +676,157 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    const WS_101: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\n\
-Upgrade: websocket\r\n\
-Connection: Upgrade\r\n\
-Sec-WebSocket-Accept: x\r\n\r\n";
+    /// The in-test server's 101 reply. The accept value is computed from the key in the request
+    /// head, because the client verifies it now (P3-433) — a fixed value would be a forgery.
+    fn ws_101_reply(head: &str) -> String {
+        let key = head
+            .split("\r\n")
+            .skip(1)
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                k.trim()
+                    .eq_ignore_ascii_case("sec-websocket-key")
+                    .then(|| v.trim())
+            })
+            .expect("the client sends Sec-WebSocket-Key");
+        format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {}\r\n\r\n",
+            accept_key(key)
+        )
+    }
+
+    /// RFC 6455 §1.3's example key, whose expected accept value is the one in `WS_101`.
+    const RFC_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+
+    // P3-430: a chunk extension (`;name=value`) is part of the chunk header, not of the size.
+    #[test]
+    fn chunked_body_accepts_chunk_extensions() {
+        let body =
+            parse_chunked_body(b"5;ext=abc\r\nhello\r\n6;x=1\r\n world\r\n0\r\n\r\n").unwrap();
+        assert_eq!(body, b"hello world");
+    }
+
+    // P3-189 (first half): a body shorter than Content-Length is a truncated response and
+    // must surface as an error, not as a silently shorter body.
+    #[test]
+    fn truncated_http_body_is_an_error_not_a_shorter_body() {
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nshort";
+        let err = match parse_http_response(raw) {
+            Ok(_) => panic!("a body shorter than Content-Length must not be masked"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err}").contains("truncated"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // P3-189 (second half): `Connection: close` is a request, not a promise. A complete
+    // response whose peer keeps the connection open must return, not wait for EOF.
+    #[tokio::test]
+    async fn http_post_returns_once_the_declared_body_is_complete() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+            )
+            .await
+            .unwrap();
+            sock.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await; // keep-alive: never closes
+        });
+        let resp = tokio::time::timeout(
+            Duration::from_secs(3),
+            http_post(&format!("http://{addr}/v1/commands"), "tok", b"{}"),
+        )
+        .await
+        .expect("http_post must not wait for EOF once the declared body is complete")
+        .unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, b"ok");
+    }
+
+    // P3-432: RFC 6455 requires the minimal length encoding. A frame that declares the
+    // 8-byte form for a payload that fits in 125 bytes is malformed and must be refused.
+    #[tokio::test]
+    async fn ws_frame_length_must_use_the_minimal_encoding() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // FIN + text, unmasked (server->client), 64-bit length for a 4-byte payload.
+            let frame = [0x81u8, 127, 0, 0, 0, 0, 0, 0, 0, 4, b't', b'e', b's', b't'];
+            sock.write_all(&frame).await.unwrap();
+            sock.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), read_ws_frame(&mut stream)).await;
+        assert!(
+            result.is_ok() && result.unwrap().is_err(),
+            "a non-minimally-encoded frame must be refused"
+        );
+    }
+
+    // P3-433: a bare 101 is not an upgrade, and the accept value must be the digest of the key
+    // we sent (RFC 6455 §4.1) — a shape-only check accepted a value-shaped forgery.
+    #[test]
+    fn upgrade_reply_must_be_a_websocket_upgrade() {
+        let bare = b"HTTP/1.1 101 Switching Protocols\r\n\r\n";
+        assert!(
+            check_upgrade_reply(bare, RFC_KEY).is_err(),
+            "a bare 101 that is not an upgrade must be refused"
+        );
+        let wrong_upgrade =
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n";
+        assert!(
+            check_upgrade_reply(wrong_upgrade, RFC_KEY).is_err(),
+            "Upgrade: h2c is not a websocket upgrade"
+        );
+        let bad_key = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: short\r\n\r\n";
+        assert!(
+            check_upgrade_reply(bad_key, RFC_KEY).is_err(),
+            "a malformed accept key must be refused"
+        );
+        let good = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+        assert!(
+            check_upgrade_reply(good, RFC_KEY).is_ok(),
+            "a well-formed upgrade reply must be accepted"
+        );
+        let lower = b"HTTP/1.1 101 Switching Protocols\r\nupgrade: WebSocket\r\nconnection: keep-alive, Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+        assert!(
+            check_upgrade_reply(lower, RFC_KEY).is_ok(),
+            "header names and tokens are case-insensitive: {:?}",
+            check_upgrade_reply(lower, RFC_KEY)
+        );
+    }
+
+    // P3-433 (second half): a well-formed accept value that is not the digest of the key we
+    // sent must be refused. The shape-only check accepted this.
+    #[test]
+    fn upgrade_reply_accept_key_must_match_the_request() {
+        let wrong = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: AAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n";
+        assert!(
+            check_upgrade_reply(wrong, RFC_KEY).is_err(),
+            "a well-formed accept value that does not match the key we sent must be refused"
+        );
+    }
+
+    // The accept value is bound to the key: RFC 6455's own vector is a forgery against any
+    // other key, so a fixed reply cannot satisfy the check.
+    #[test]
+    fn upgrade_reply_accept_key_is_bound_to_the_key_we_sent() {
+        let rfc_vector = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+        assert!(
+            check_upgrade_reply(rfc_vector, "AAAAAAAAAAAAAAAAAAAAAA==").is_err(),
+            "an accept value computed for another key must be refused"
+        );
+    }
 
     /// Reads an HTTP head (up to CRLFCRLF) from the raw socket — used by the in-test server.
     async fn read_http_head(stream: &mut TcpStream) -> String {
@@ -656,7 +897,10 @@ Sec-WebSocket-Accept: x\r\n\r\n";
                 !head.contains("\r\nOrigin:"),
                 "CheckOrigin forbids Origin header"
             );
-            stream.write_all(WS_101).await.unwrap();
+            stream
+                .write_all(ws_101_reply(&head).as_bytes())
+                .await
+                .unwrap();
             write_server_frame(
                 &mut stream,
                 OP_TEXT,
@@ -690,8 +934,8 @@ Sec-WebSocket-Accept: x\r\n\r\n";
         let server = tokio::spawn(async move {
             // Lifeline 1: deliver one fill, then slam the door.
             let (mut s1, _) = listener.accept().await.unwrap();
-            read_http_head(&mut s1).await;
-            s1.write_all(WS_101).await.unwrap();
+            let head2 = read_http_head(&mut s1).await;
+            s1.write_all(ws_101_reply(&head2).as_bytes()).await.unwrap();
             write_server_frame(
                 &mut s1,
                 OP_TEXT,
@@ -707,7 +951,7 @@ Sec-WebSocket-Accept: x\r\n\r\n";
                 head2.starts_with("GET /v1/events HTTP/1.1"),
                 "reconnect handshake: {head2}"
             );
-            s2.write_all(WS_101).await.unwrap();
+            s2.write_all(ws_101_reply(&head2).as_bytes()).await.unwrap();
             write_server_frame(
                 &mut s2,
                 OP_TEXT,
@@ -750,8 +994,11 @@ Sec-WebSocket-Accept: x\r\n\r\n";
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            read_http_head(&mut stream).await;
-            stream.write_all(WS_101).await.unwrap();
+            let head4 = read_http_head(&mut stream).await;
+            stream
+                .write_all(ws_101_reply(&head4).as_bytes())
+                .await
+                .unwrap();
             // The Go bridge pings every 20 s; the client must answer with a masked pong.
             write_server_frame(&mut stream, OP_PING, b"hb")
                 .await

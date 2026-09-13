@@ -47,49 +47,95 @@ func NewArrowBroker(client *arrow.Client) (*ArrowBroker, error) {
 	return &ArrowBroker{client: client}, nil
 }
 
+// errBrokerCallAbandoned marks a broker call the bridge stopped waiting for
+// because the caller's context was done, while the SDK call itself keeps running.
+var errBrokerCallAbandoned = errors.New("broker call abandoned after cancellation")
+
+// brokerCall bounds a blocking SDK call by the caller's context (P3-034, P3-037).
+// The pinned go-arrow client takes no context and sets no per-request deadline, so
+// without this the bridge waits as long as the venue does: a stalled endpoint holds
+// the command past its commandTimeout and the HTTP handler blocks beyond it.
+//
+// The SDK call cannot be cancelled, so the goroutine is left to finish on its own
+// and the channel is buffered so that it can always deliver and exit. The call may
+// therefore still complete at the broker after abandonment, which is why callers
+// must report an abandoned call as UNKNOWN rather than as a rejection.
+func brokerCall(ctx context.Context, call func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- call() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %v", errBrokerCallAbandoned, ctx.Err())
+	}
+}
+
 func (b *ArrowBroker) Place(ctx context.Context, c CommandEnvelope) BrokerResult {
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
+	}
+	// P3-036/P3-032: Broker is an exported interface wrapped by ReauthBroker, so a
+	// direct caller can pass an envelope with no Order — validateCommand only
+	// guards the HTTP path. Dereferencing it would panic the whole bridge process
+	// instead of returning a terminal client error.
+	if c.Order == nil {
+		return rejectedResult(errors.New("order is required"))
 	}
 	req, err := toArrowOrder(*c.Order, c.ClientOrderRef)
 	if err != nil {
 		return rejectedResult(err)
 	}
-	resp, err := b.client.PlaceOrder("regular", req)
-	if err != nil {
+	var resp *arrow.OrderResponse
+	if err := brokerCall(ctx, func() error {
+		var callErr error
+		resp, callErr = b.client.PlaceOrder("regular", req)
+		return callErr
+	}); err != nil {
 		return classifySDKError(err)
 	}
 	if resp == nil || strings.TrimSpace(resp.Data.OrderNo) == "" {
 		return unknownResult(errors.New("place response missing orderNo"))
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: resp.Data.OrderNo,
-		Data: resp, Fingerprint: fingerprint(resp)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess,
+		BrokerOrderID: resp.Data.OrderNo, Data: resp}, resp)
 }
 
 func (b *ArrowBroker) Modify(ctx context.Context, c CommandEnvelope) BrokerResult {
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
+	// P3-038/P3-033: same totality requirement as Place — a nil Order from a
+	// direct caller must be a terminal REJECTED, never a process-killing panic.
+	if c.Order == nil {
+		return rejectedResult(errors.New("order is required"))
+	}
 	req, err := toArrowOrder(*c.Order, c.ClientOrderRef)
 	if err != nil {
 		return rejectedResult(err)
 	}
-	resp, err := b.client.ModifyOrder("regular", c.BrokerOrderID, req)
-	if err != nil {
+	var resp *arrow.OrderResponse
+	if err := brokerCall(ctx, func() error {
+		var callErr error
+		resp, callErr = b.client.ModifyOrder("regular", c.BrokerOrderID, req)
+		return callErr
+	}); err != nil {
 		return classifySDKError(err)
 	}
 	if resp == nil || strings.TrimSpace(resp.Data.OrderNo) == "" {
 		return unknownResult(errors.New("modify response missing orderNo"))
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: resp.Data.OrderNo,
-		Data: resp, Fingerprint: fingerprint(resp)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess,
+		BrokerOrderID: resp.Data.OrderNo, Data: resp}, resp)
 }
 
 func (b *ArrowBroker) Cancel(ctx context.Context, c CommandEnvelope) BrokerResult {
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
-	if err := b.client.CancelOrder("regular", c.BrokerOrderID); err != nil {
+	if err := brokerCall(ctx, func() error {
+		return b.client.CancelOrder("regular", c.BrokerOrderID)
+	}); err != nil {
 		return classifySDKError(err)
 	}
 	return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: c.BrokerOrderID}
@@ -99,45 +145,64 @@ func (b *ArrowBroker) QueryOrder(ctx context.Context, c CommandEnvelope) BrokerR
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
-	resp, err := b.client.GetOrder(c.BrokerOrderID)
-	if err != nil {
+	var resp *arrow.OrderDetailsResponse
+	if err := brokerCall(ctx, func() error {
+		var callErr error
+		resp, callErr = b.client.GetOrder(c.BrokerOrderID)
+		return callErr
+	}); err != nil {
 		return classifySDKError(err)
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: c.BrokerOrderID,
-		Data: resp, Fingerprint: fingerprint(resp)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess,
+		BrokerOrderID: c.BrokerOrderID, Data: resp}, resp)
 }
 
 func (b *ArrowBroker) ReconcileOrders(ctx context.Context, _ CommandEnvelope) BrokerResult {
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
-	data, err := b.client.GetOrderBook()
-	if err != nil {
+	var data []arrow.OrderDetails
+	if err := brokerCall(ctx, func() error {
+		var callErr error
+		data, callErr = b.client.GetOrderBook()
+		return callErr
+	}); err != nil {
 		return classifySDKError(err)
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, Data: data, Fingerprint: fingerprint(data)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess, Data: data}, data)
 }
 
 func (b *ArrowBroker) ReconcileTrades(ctx context.Context, _ CommandEnvelope) BrokerResult {
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
-	data, err := b.client.GetTradeBook()
-	if err != nil {
+	var data []arrow.Trade
+	if err := brokerCall(ctx, func() error {
+		var callErr error
+		data, callErr = b.client.GetTradeBook()
+		return callErr
+	}); err != nil {
 		return classifySDKError(err)
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, Data: data, Fingerprint: fingerprint(data)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess, Data: data}, data)
 }
 
 func (b *ArrowBroker) ReconcilePositions(ctx context.Context, _ CommandEnvelope) BrokerResult {
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
-	data, err := b.client.GetPositions()
-	if err != nil {
+	// Positions is the one endpoint the pinned SDK exposes a context-aware call
+	// for. That variant only checks ctx before the round-trip ("honoring ctx
+	// cancellation before the round-trip", arrow/positions.go), so it still needs
+	// brokerCall to bound the request itself; the pre-flight check is kept for the
+	// cancelled-command case it already answers.
+	var data []arrow.Position
+	if err := brokerCall(ctx, func() error {
+		return b.client.GetPositionsContext(ctx, &data)
+	}); err != nil {
 		return classifySDKError(err)
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, Data: data, Fingerprint: fingerprint(data)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess, Data: data}, data)
 }
 
 func toArrowOrder(o OrderCommand, ref string) (arrow.OrderRequest, error) {
@@ -151,7 +216,11 @@ func toArrowOrder(o OrderCommand, ref string) (arrow.OrderRequest, error) {
 		transaction = "S"
 	}
 	price := strings.TrimSpace(o.Price)
-	if strings.EqualFold(o.OrderType, "MKT") && price == "" {
+	// P3-045: arrow_broker.md documents "0" for market orders. Every accepted zero
+	// form is canonicalised so the request bytes do not depend on the caller's
+	// spelling of zero; a non-zero price is passed through untouched rather than
+	// silently rewritten.
+	if strings.EqualFold(strings.TrimSpace(o.OrderType), "MKT") && priceIsZero(price) {
 		price = "0"
 	}
 	return arrow.OrderRequest{
@@ -162,11 +231,30 @@ func toArrowOrder(o OrderCommand, ref string) (arrow.OrderRequest, error) {
 	}, nil
 }
 
-var statusErrorPattern = regexp.MustCompile(`request failed with status ([0-9]{3}):\s*(.*)$`)
+// statusErrorPattern extracts the HTTP status and body from the SDK's error string.
+// The SDK reports a failed request as `request failed with status <code>: <body>`,
+// so this is a string protocol rather than a typed error (P3-035, P3-039).
+//
+// (?s) lets the body span lines and the trailing \s*$ absorbs the newline a
+// pretty-printed or re-wrapped error carries. The previous pattern used `.` and an
+// end-of-text `$` on a single line, so a body containing a newline did not match at
+// all and fell through to the generic branch, where a terminal REJECTED became an
+// ambiguous UNKNOWN (a HALT on a decision the venue had already made).
+//
+// Interim hardening: the durable fix is a typed error (code + body) from the SDK's
+// request path, checked with errors.As, so classification never parses text.
+var statusErrorPattern = regexp.MustCompile(`(?s)request failed with status\s*([0-9]{3})\s*:\s*(.*?)\s*$`)
 
 func classifySDKError(err error) BrokerResult {
 	if err == nil {
 		return unknownResult(errors.New("missing broker error"))
+	}
+	// P3-034/P3-037: the call was abandoned because the caller's context was done.
+	// The request may still complete at the broker, so the outcome is unknowable and
+	// must not be read as an SDK rejection (which is terminal). Handled before the
+	// status envelope so the classification does not depend on the wrapped cause.
+	if errors.Is(err, errBrokerCallAbandoned) {
+		return unknownResult(err)
 	}
 	message := strings.TrimSpace(err.Error())
 	if matches := statusErrorPattern.FindStringSubmatch(message); len(matches) == 3 {
@@ -188,7 +276,7 @@ func classifySDKError(err error) BrokerResult {
 		default:
 			if status == http.StatusUnauthorized || status == http.StatusForbidden ||
 				status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500 {
-				return unknownResult(fmt.Errorf("arrow status %d", status))
+				return unknownResult(statusReason{code: status})
 			}
 			return unknownResult(errors.New("ambiguous Arrow response"))
 		}
@@ -208,26 +296,60 @@ func classifySDKError(err error) BrokerResult {
 	return unknownResult(errors.New("ambiguous Arrow response"))
 }
 
+// documentedRejectionMessage returns the broker's own rejection message for a body
+// the classifier has already called REJECTED. It used to re-derive the envelope shape
+// locally — accepting only status:"error" and only the message/errorMessage keys — so
+// a rejection the classifier recognised through success:false or error_message came
+// back with no message and was demoted to an ambiguous UNKNOWN, escalating a terminal
+// venue decision to a manual halt (P3-240).
+//
+// The shape is not re-listed here: the classifier's envelope type, error test and
+// message extraction are reused so the two readers cannot drift apart again.
+// statusReason carries an Arrow HTTP status whose outcome is retry-ambiguous, so the
+// bounded reason a result reports can be named from the code itself (P3-237) instead
+// of being re-derived by matching text afterwards. Only codes the classifier resolves
+// to UNKNOWN reach it: 400/409/422 without a usable body, or a status with no
+// envelope at all. UNKNOWN is HALT without retry, so these categories are for the
+// operator — telling a rate limit apart from an outage — not for a retry decision.
+type statusReason struct{ code int }
+
+func (e statusReason) Error() string { return fmt.Sprintf("arrow status %d", e.code) }
+
 func documentedRejectionMessage(body string) string {
-	var value struct {
-		Message      string `json:"message"`
-		ErrorMessage string `json:"errorMessage"`
-		Status       string `json:"status"`
-	}
-	if json.Unmarshal([]byte(body), &value) != nil {
+	if strings.TrimSpace(body) == "" {
 		return ""
 	}
-	if strings.EqualFold(value.Status, "error") {
-		if strings.TrimSpace(value.Message) != "" {
-			return strings.TrimSpace(value.Message)
-		}
-		return strings.TrimSpace(value.ErrorMessage)
+	var env classificationEnvelope
+	if json.Unmarshal([]byte(body), &env) != nil {
+		return ""
 	}
-	return ""
+	if !isErrorEnvelope(env) {
+		return ""
+	}
+	return extractRejectionMessage(env)
 }
 
 func rejectedResult(err error) BrokerResult {
-	return BrokerResult{Outcome: OutcomeRejected, Reason: sanitizeReason(err)}
+	return BrokerResult{Outcome: OutcomeRejected, Reason: rejectedReason(err)}
+}
+
+// rejectedReason keeps the bounded category a terminal rejection carries away from
+// the categories the retry path acts on (P3-241). sanitizeReason scans the error text
+// for retry-shaped words, and for a rejection that text is the broker's own free-form
+// message: a rejection reading "unauthorized symbol for this account" came back as
+// broker_auth_failure, which doWithReauth treats as a reason to re-authenticate and
+// re-submit the command. Re-submitting an order the venue has already refused is the
+// worst possible response to it. The only signals that legitimately produce those
+// categories come from the HTTP status code, and a status that maps to one of them
+// (401/403/408/429/5xx) is classified UNKNOWN, never REJECTED — so a rejection can
+// never carry one of them by a legitimate route.
+func rejectedReason(err error) string {
+	switch sanitizeReason(err) {
+	case "broker_auth_failure", "broker_timeout", "broker_forbidden":
+		return "broker_rejected"
+	default:
+		return sanitizeReason(err)
+	}
 }
 
 func unknownResult(err error) BrokerResult {
@@ -238,8 +360,31 @@ func sanitizeReason(err error) string {
 	if err == nil {
 		return "unknown broker outcome"
 	}
+	// P3-237: a status the classifier could not resolve is reported by code, so its
+	// category comes from the code rather than from the sentence around it. Before
+	// this, 408, 429 and every 5xx collapsed into the generic broker_error and an
+	// operator could not tell a rate limit from an outage.
+	var status statusReason
+	if errors.As(err, &status) {
+		switch {
+		case status.code == http.StatusRequestTimeout:
+			return "broker_timeout"
+		case status.code == http.StatusTooManyRequests:
+			return "broker_rate_limited"
+		case status.code >= 500:
+			return "broker_unavailable"
+		case status.code == http.StatusUnauthorized:
+			return "broker_auth_failure"
+		case status.code == http.StatusForbidden:
+			return "broker_forbidden"
+		}
+	}
 	// Never return SDK error bodies verbatim: a body may contain request
 	// metadata or credentials. The protocol carries a bounded category only.
+	// The text matches below remain for errors the SDK raises without a status
+	// envelope (its own transport and auth-layer messages). They cannot mislabel a
+	// rejection: rejectedReason keeps the retry-shaped categories off a REJECTED
+	// result, so text matching cannot reach the retry path (P3-241).
 	message := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(message, "timeout"):

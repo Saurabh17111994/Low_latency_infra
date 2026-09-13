@@ -42,7 +42,7 @@ func main() {
 	}
 
 	addr := envOrDefault("EXECUTION_BRIDGE_LISTEN_ADDR", "127.0.0.1:8787")
-	httpServer := &http.Server{Addr: addr, Handler: server.Handler(), ReadHeaderTimeout: 5 * time.Second}
+	httpServer := newHTTPServer(addr, server.Handler(), server.commandTimeout)
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -99,8 +99,8 @@ func brokerFromEnvironment(mode string) (Broker, *arrow.Client, error) {
 		if user == "" || password == "" || totp == "" {
 			return nil, nil, fmt.Errorf("live mode requires ARROW_USER_ID+PASSWORD+TOTP_KEY (ARROW_TOKEN removed 2026-08-24)")
 		}
-		if err := client.AutoLogin(user, password, totp); err != nil {
-			return nil, nil, fmt.Errorf("Arrow authentication failed")
+		if err := startupLogin(func() error { return client.AutoLogin(user, password, totp) }); err != nil {
+			return nil, nil, err
 		}
 		inner, err := NewArrowBroker(client)
 		if err != nil {
@@ -112,7 +112,7 @@ func brokerFromEnvironment(mode string) (Broker, *arrow.Client, error) {
 			if user == "" || password == "" || totp == "" {
 				return fmt.Errorf("missing AutoLogin credentials for re-auth")
 			}
-			return client.AutoLogin(user, password, totp)
+			return loginWithinContext(ctx, func() error { return client.AutoLogin(user, password, totp) })
 		})
 		return broker, client, nil
 	default:
@@ -122,13 +122,67 @@ func brokerFromEnvironment(mode string) (Broker, *arrow.Client, error) {
 
 func NewFakeBrokerWithDisabledResult() *FakeBroker {
 	fake := NewFakeBroker()
-	disabled := BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
-	for _, command := range []string{CommandPlace, CommandModify, CommandCancel, CommandQueryOrder,
-		CommandReconcileOrders, CommandReconcileTrades, CommandReconcilePosition} {
-		fake.SetResult(command, disabled)
-	}
+	// A catch-all, not a deny list: an allow-by-omission list silently reports
+	// SUCCESS for any command it predates while mode=disabled (P3-249).
+	fake.SetDefaultResult(BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"})
 	return fake
 }
+
+// startupLogin is the mode=live boot login. It is a named seam so the cause
+// handling is testable without posting to the venue (P3-247).
+func startupLogin(login func() error) error {
+	if err := login(); err != nil {
+		// stderr here is operator-only, not the sanitized client boundary, so the
+		// SDK's stage (login/totp/redirect/authenticate) and its cause are kept:
+		// during a live outage "failed" alone forces blind reproduction.
+		return fmt.Errorf("Arrow authentication failed: %w", err)
+	}
+	return nil
+}
+
+// newHTTPServer builds the bridge's HTTP server. Its timeouts are the only
+// bound on a client that dribbles a body or reads a reply slowly (P3-472).
+//
+// Both bounds are derived, not fixed: Go resets WriteTimeout when the request
+// header is read, so it spans the whole command including a venue call that is
+// allowed to take commandTimeout, and a flat value would cut off legal slow
+// replies for an operator who raised EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS. Read
+// only needs a small margin over the command because the body is 128KB and
+// always precedes the handler (defaults: read 11s, write 15s).
+func newHTTPServer(addr string, handler http.Handler, commandTimeout time.Duration) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       commandTimeout + httpReadTimeoutMargin,
+		WriteTimeout:      commandTimeout + httpWriteTimeoutMargin,
+		IdleTimeout:       httpIdleTimeout,
+	}
+}
+
+// loginWithinContext runs an AutoLogin-shaped call under the caller's context
+// (P3-248). AutoLogin takes no context and makes up to three sequential venue
+// calls at 15s each, so without this a stalled auth outlives the command
+// deadline and holds the dispatch goroutine in ReauthBroker.doWithReauth. The
+// abandoned call runs to completion like brokerCall's, and its result is
+// buffered so the goroutine cannot leak by blocking on the send.
+func loginWithinContext(ctx context.Context, login func() error) error {
+	result := make(chan error, 1)
+	go func() { result <- login() }()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-result:
+		return err
+	}
+}
+
+const (
+	httpReadHeaderTimeout  = 5 * time.Second
+	httpReadTimeoutMargin  = 1 * time.Second
+	httpWriteTimeoutMargin = 5 * time.Second
+	httpIdleTimeout        = 60 * time.Second
+)
 
 func envOrDefault(key, fallback string) string {
 	if value := strings.TrimSpace(os.Getenv(key)); value != "" {

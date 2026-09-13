@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -32,6 +34,15 @@ const (
 // CommandEnvelope is the private protocol between Nautilus and this bridge.
 // It deliberately carries platform identities separately; broker_order_id is
 // only present after Arrow has assigned it.
+//
+// Identity requiredness is scoped to the command, not to the struct tag
+// (P3-250): place/modify require instruction_id, execution_attempt_id and
+// client_order_ref, cancel/query-order require only broker_order_id, and the
+// reconcile commands require none of them. The empty=>absent wire shape is
+// deliberate and symmetric with the executor's Rust peer, which declares the
+// same fields with skip_serializing_if = "String::is_empty" and re-checks
+// requiredness per command. omitempty therefore describes the wire, not
+// optionality.
 type CommandEnvelope struct {
 	RecordType         string        `json:"record_type"`
 	ContractVersion    int           `json:"contract_version"`
@@ -95,6 +106,11 @@ func validateClientOrderRef(ref string) error {
 	return nil
 }
 
+// maxRequestIDLength bounds the client-supplied request identity: it keys the
+// bridge's dedup cache, so an unbounded key is an unbounded map entry (P3-053).
+// The executor sends a UUID; 128 leaves room for any future scheme.
+const maxRequestIDLength = 128
+
 func validateCommand(c CommandEnvelope) error {
 	if c.RecordType != RecordCommand {
 		return fmt.Errorf("record_type must be %q", RecordCommand)
@@ -104,6 +120,11 @@ func validateCommand(c CommandEnvelope) error {
 	}
 	if strings.TrimSpace(c.RequestID) == "" {
 		return fmt.Errorf("request_id is required")
+	}
+	// P3-053: the identity keys the bridge's dedup cache, so its size is bounded
+	// at the same place its presence is checked.
+	if len(c.RequestID) > maxRequestIDLength {
+		return fmt.Errorf("request_id must be at most %d characters, got %d", maxRequestIDLength, len(c.RequestID))
 	}
 	switch c.Command {
 	case CommandPlace, CommandModify:
@@ -119,8 +140,10 @@ func validateCommand(c CommandEnvelope) error {
 		if c.Command == CommandPlace && strings.TrimSpace(c.BrokerOrderID) != "" {
 			return fmt.Errorf("broker_order_id is not allowed for place")
 		}
-		if c.Command == CommandModify && strings.TrimSpace(c.BrokerOrderID) == "" {
-			return fmt.Errorf("broker_order_id is required for modify")
+		if c.Command == CommandModify {
+			if err := validateBrokerOrderID(c.BrokerOrderID, c.Command); err != nil {
+				return err
+			}
 		}
 		if err := validateOrderCommand(*c.Order); err != nil {
 			return err
@@ -129,10 +152,24 @@ func validateCommand(c CommandEnvelope) error {
 			return err
 		}
 	case CommandCancel, CommandQueryOrder:
-		if strings.TrimSpace(c.BrokerOrderID) == "" {
-			return fmt.Errorf("broker_order_id is required for %s", c.Command)
+		if err := validateBrokerOrderID(c.BrokerOrderID, c.Command); err != nil {
+			return err
+		}
+		// P3-473: an order body on a broker_order_id-keyed command is a caller
+		// mistake (typically a payload meant for place). Reject it instead of
+		// silently ignoring the field.
+		if c.Order != nil {
+			return fmt.Errorf("order is not allowed for %s", c.Command)
 		}
 	case CommandReconcileOrders, CommandReconcileTrades, CommandReconcilePosition:
+		// P3-473: reconciles correlate by platform identity only; an order body or a
+		// broker order id here means the caller mismatched the command.
+		if c.Order != nil {
+			return fmt.Errorf("order is not allowed for %s", c.Command)
+		}
+		if strings.TrimSpace(c.BrokerOrderID) != "" {
+			return fmt.Errorf("broker_order_id is not allowed for %s", c.Command)
+		}
 	default:
 		return fmt.Errorf("unsupported command %q", c.Command)
 	}
@@ -140,14 +177,44 @@ func validateCommand(c CommandEnvelope) error {
 }
 
 func validateOrderCommand(o OrderCommand) error {
-	if strings.TrimSpace(o.Exchange) == "" || strings.EqualFold(o.Exchange, "INDEX") {
+	// P3-044: compare the trimmed value — comparing the raw string let " INDEX "
+	// pass the emptiness check and then fail EqualFold, so an index slipped through
+	// as executable.
+	exchange := strings.TrimSpace(o.Exchange)
+	if exchange == "" || strings.EqualFold(exchange, "INDEX") {
 		return fmt.Errorf("execution exchange must be non-empty and not INDEX")
 	}
-	if strings.TrimSpace(o.Symbol) == "" || strings.TrimSpace(o.Quantity) == "" {
-		return fmt.Errorf("order symbol and quantity are required")
+	// P3-253: validation matched these fields case-insensitively after trimming,
+	// but the adapter upper-cases them without trimming and forwards the exchange
+	// verbatim — so a padded value passed validation and reached Arrow padded.
+	for _, field := range []struct{ name, value string }{
+		{"exchange", o.Exchange},
+		{"order_type", o.OrderType},
+		{"product", o.Product},
+		{"validity", o.Validity},
+	} {
+		if containsSpace(field.value) {
+			return fmt.Errorf("%s must not contain whitespace", field.name)
+		}
+	}
+	// P3-252: the symbol is forwarded verbatim, so whitespace and unbounded
+	// length used to reach Arrow as part of an otherwise well-formed order.
+	if o.Symbol == "" || containsSpace(o.Symbol) {
+		return fmt.Errorf("order symbol is required and must not contain whitespace")
+	}
+	if len(o.Symbol) > maxSymbolLength {
+		return fmt.Errorf("order symbol is limited to %d characters", maxSymbolLength)
+	}
+	if strings.TrimSpace(o.Quantity) == "" {
+		return fmt.Errorf("order quantity is required")
 	}
 	if !allDigits(o.Quantity) || strings.TrimLeft(o.Quantity, "0") == "" {
 		return fmt.Errorf("quantity must be a positive integer string")
+	}
+	// P3-252: a quantity the bridge cannot represent must fail here rather than
+	// after a venue round trip.
+	if _, err := strconv.ParseInt(o.Quantity, 10, 64); err != nil {
+		return fmt.Errorf("quantity is out of range")
 	}
 	switch strings.ToUpper(strings.TrimSpace(o.TransactionType)) {
 	case "B", "S", "BUY", "SELL":
@@ -160,6 +227,15 @@ func validateOrderCommand(o OrderCommand) error {
 	default:
 		return fmt.Errorf("unsupported order_type %q", o.OrderType)
 	}
+	// P3-043: this bridge cannot express a stop trigger — OrderCommand has no such
+	// field and toArrowOrder never sets arrow.OrderRequest.TriggerPrice, which the SDK
+	// documents as the "Trigger price for SL orders" (orders.go:27). An SL order
+	// therefore reached the venue with no trigger at all, where it is rejected or, worse,
+	// interpreted as a different instruction. Refuse it here until a trigger can be
+	// carried on both sides of the protocol.
+	if orderType == "SL-LMT" || orderType == "SL-MKT" {
+		return fmt.Errorf("order_type %s needs a stop trigger this bridge cannot carry", orderType)
+	}
 	// P1-191: LMT/SL prices must be positive numbers — empty, zero,
 	// negative, or non-numeric prices fail fast as REJECTED, never reach
 	// the broker. Canonical digits with one optional dot (exponent,
@@ -167,8 +243,11 @@ func validateOrderCommand(o OrderCommand) error {
 	if (orderType == "LMT" || orderType == "SL-LMT" || orderType == "SL-MKT") && !priceIsPositive(o.Price) {
 		return fmt.Errorf("price must be a positive number for %s", orderType)
 	}
-	if orderType == "MKT" && strings.TrimSpace(o.Price) != "" && strings.TrimSpace(o.Price) != "0" {
-		return fmt.Errorf("MKT price must be empty or 0")
+	// P3-045: Arrow documents price "0" for market orders, so every zero spelling
+	// ("", "0", "00", "0.0") is the same valid value and is canonicalised by the
+	// adapter; a non-zero market price stays a caller error.
+	if orderType == "MKT" && !priceIsZero(o.Price) {
+		return fmt.Errorf("MKT price must be empty or zero")
 	}
 	switch strings.ToUpper(strings.TrimSpace(o.Product)) {
 	case "I", "C", "M":
@@ -197,13 +276,30 @@ func allDigits(s string) bool {
 
 func nowMs() int64 { return time.Now().UnixMilli() }
 
-func fingerprint(v any) string {
+// fingerprint returns a stable digest of a payload. A marshal failure is returned
+// rather than collapsed into the empty string (P3-474): the digest is the
+// idempotency key compared in server.beginRequest, so one shared sentinel for every
+// unmarshalable payload would make two different commands carrying the same
+// request_id look like a retry of each other instead of a reuse violation.
+func fingerprint(v any) (string, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:])
+	return hex.EncodeToString(h[:]), nil
+}
+
+// withFingerprint attaches a response digest to a successful broker result, or
+// reports UNKNOWN when the payload cannot be digested (P3-474) — a broker result
+// is never published with an empty idempotency digest.
+func withFingerprint(result BrokerResult, payload any) BrokerResult {
+	fp, err := fingerprint(payload)
+	if err != nil {
+		return unknownResult(err)
+	}
+	result.Fingerprint = fp
+	return result
 }
 
 func priceIsPositive(s string) bool {
@@ -229,4 +325,62 @@ func priceIsPositive(s string) bool {
 		}
 	}
 	return digits > 0 && positive
+}
+
+// containsSpace reports whether the value contains any whitespace character
+// (Unicode-aware). Several order fields are upper-cased without trimming and
+// exchange/symbol are forwarded verbatim, so whitespace that passes validation
+// reaches Arrow unchanged (P3-252, P3-253).
+func containsSpace(s string) bool {
+	return strings.ContainsFunc(s, unicode.IsSpace)
+}
+
+// maxSymbolLength bounds the order symbol so an oversized value fails here
+// instead of at the venue (P3-252).
+const maxSymbolLength = 64
+
+// priceIsZero reports whether the price is an absent or semantically-zero value
+// (optional single dot, digits only, no non-zero digit). Arrow documents
+// `price: "0"` for market orders, so every zero spelling a caller might send is
+// accepted and canonicalised to "0" before the request leaves the bridge
+// (P3-045).
+func priceIsZero(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return true
+	}
+	dots, digits := 0, 0
+	for _, r := range s {
+		switch {
+		case r == '.':
+			dots++
+			if dots > 1 {
+				return false
+			}
+		case r >= '0' && r <= '9':
+			digits++
+			if r != '0' {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return digits > 0
+}
+
+// validateBrokerOrderID fails closed on a missing or whitespace-carrying broker
+// order id (P3-251). The id is assigned by Arrow and this bridge does not own its
+// grammar, so no charset is imposed beyond "no whitespace": the SDK already
+// refuses path-hostile ids and escapes the segment
+// (third_party/go-arrow/arrow/orders.go:337-357, :430-438), and a charset the
+// bridge invented could reject a legitimate id the venue issued.
+func validateBrokerOrderID(id, command string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("broker_order_id is required for %s", command)
+	}
+	if containsSpace(id) {
+		return fmt.Errorf("broker_order_id must not contain whitespace")
+	}
+	return nil
 }
