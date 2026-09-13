@@ -319,6 +319,8 @@ impl LiveNodeRuntime {
 
 /// Offline mass-status reconciliation (Tier 11). Iterates UNKNOWN attempts, read-only via bridge, never re-issues Place.
 pub mod reconcile {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use crate::bridge::protocol::{Command, CommandEnvelope, ReportEnvelope};
     use crate::bridge::BridgeClient;
     use crate::execution::client::{classify_bridge_report, BridgeOutcome};
@@ -334,6 +336,32 @@ pub mod reconcile {
         /// sweep (P3-194). Carries the transport error, which is per-COR and not interchangeable.
         TransportFailure(String),
     }
+
+    /// Outcome of one mass-reconciliation pass: the per-COR decisions plus the trailing
+    /// mass-snapshot command's own envelope id and outcome (P3-440).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ReconcileReport {
+        /// One decision per requested COR, in the order the refs were given.
+        pub orders: Vec<(String, ReconcileDecision)>,
+        /// Envelope id used for the trailing `ReconcileOrders` snapshot.
+        pub mass_envelope_id: String,
+        /// Outcome of the trailing `ReconcileOrders` snapshot.
+        pub mass: ReconcileDecision,
+    }
+
+    /// Keeps the per-COR decisions directly indexable/sliceable for existing callers.
+    impl std::ops::Deref for ReconcileReport {
+        type Target = Vec<(String, ReconcileDecision)>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.orders
+        }
+    }
+
+    /// Monotonic sequence for mass-snapshot envelope ids (P3-440): a fixed id reused on every
+    /// invocation can be suppressed as a duplicate by an OMS guard, which would silently skip
+    /// the snapshot. Not a timestamp — that is nondeterministic under test and can collide.
+    static MASS_ENVELOPE_SEQ: AtomicU64 = AtomicU64::new(0);
 
     /// Maps a bridge reply to a decision; a failed round-trip keeps its own error instead of
     /// being flattened into a fabricated `UNKNOWN` report (P3-194).
@@ -351,7 +379,7 @@ pub mod reconcile {
     pub async fn reconcile_execution_mass_status<B: BridgeClient>(
         bridge: &mut B,
         unknown_client_order_refs: &[String],
-    ) -> anyhow::Result<Vec<(String, ReconcileDecision)>> {
+    ) -> anyhow::Result<ReconcileReport> {
         if !bridge.is_connected() {
             bridge.connect().await?;
         }
@@ -386,9 +414,17 @@ pub mod reconcile {
                 reasons.join("; ")
             );
         }
-        let mass = CommandEnvelope::new(Command::ReconcileOrders, "reconcile-mass-1");
-        let _ = bridge.send_command(mass).await;
-        Ok(orders)
+        let mass_envelope_id = format!(
+            "reconcile-mass-{}",
+            MASS_ENVELOPE_SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let mass = CommandEnvelope::new(Command::ReconcileOrders, &mass_envelope_id);
+        let mass = classify_or_transport(bridge.send_command(mass).await);
+        Ok(ReconcileReport {
+            orders,
+            mass_envelope_id,
+            mass,
+        })
     }
 }
 
@@ -797,5 +833,56 @@ mod tests {
             reconcile::ReconcileDecision::TransportFailure("bridge unreachable".to_string())
         );
         assert_eq!(report[1].1, reconcile::ReconcileDecision::Accepted);
+        assert_eq!(report.mass, reconcile::ReconcileDecision::Accepted);
+    }
+
+    /// P3-440: each invocation must use a fresh mass-snapshot envelope id — a fixed id repeated
+    /// across runs can be dropped as a duplicate by an OMS guard, silently skipping the snapshot.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_mass_envelope_id_is_unique_per_call() {
+        let mut bridge = ProbeBridge::new();
+        for _ in 0..2 {
+            bridge.script(Ok(probe_reply("SUCCESS"))); // COR
+            bridge.script(Ok(probe_reply("SUCCESS"))); // mass snapshot
+        }
+        let refs = vec!["REF-A".to_string()];
+
+        let _ = reconcile::reconcile_execution_mass_status(&mut bridge, &refs)
+            .await
+            .expect("first reconcile");
+        let _ = reconcile::reconcile_execution_mass_status(&mut bridge, &refs)
+            .await
+            .expect("second reconcile");
+
+        let ids = bridge.mass_ids();
+        assert_eq!(ids.len(), 2, "one mass snapshot per call");
+        assert_ne!(
+            ids[0], ids[1],
+            "mass envelope ids must not repeat across calls"
+        );
+    }
+
+    /// P3-440: the mass snapshot's envelope id and outcome must reach the caller — its result
+    /// used to be discarded, so a failed mass reconcile was invisible.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_report_surfaces_the_mass_snapshot_outcome() {
+        let mut bridge = ProbeBridge::new();
+        bridge.script(Ok(probe_reply("SUCCESS"))); // REF-A
+        bridge.script_bridge_error("mass bridge unreachable");
+        let refs = vec!["REF-A".to_string()];
+
+        let report = reconcile::reconcile_execution_mass_status(&mut bridge, &refs)
+            .await
+            .expect("a failed mass snapshot is reported, not fatal to the COR sweep");
+        assert_eq!(report[0].1, reconcile::ReconcileDecision::Accepted);
+        assert_eq!(
+            report.mass,
+            reconcile::ReconcileDecision::TransportFailure("mass bridge unreachable".to_string())
+        );
+        assert_eq!(
+            report.mass_envelope_id,
+            bridge.mass_ids()[0],
+            "the reported id must be the id that was sent"
+        );
     }
 }
