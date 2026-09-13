@@ -248,6 +248,23 @@ require_tests_run() { # $1 = maven log, $2 = step label
 	fi
 }
 
+# Go prints one "ok <pkg>" line per package that actually ran tests and
+# "?  <pkg> [no test files]" for packages that have none. A run where every test
+# file is excluded — a build tag, a rename, the wrong module directory — still
+# exits 0, so the step asserts both directions: packages really ran, and the tree
+# still holds tests. (The Rust step has required a non-zero passed count since the
+# nautilus suite landed; this is the same guard for Go.)
+require_go_suite_evidence() { # $1 = go test log, $2 = module dir, $3 = step label
+	local ok_pkgs files
+	ok_pkgs="$(grep -cE '^ok[[:space:]]' "$1" 2>/dev/null || true)"
+	files="$(grep -rlE '^func Test' --include='*_test.go' "$2" 2>/dev/null | wc -l | tr -d ' ')"
+	if [ "${ok_pkgs:-0}" -lt 1 ] || [ "${files:-0}" -lt 1 ]; then
+		echo "FAIL: $3 — ${ok_pkgs:-0} packages reported ok against ${files:-0} test files: a suite that ran nothing is not a pass — see $1" | tee -a "$SUMMARY"
+		gate_fail
+	fi
+	echo "PASS: Go suite (-race; $ok_pkgs packages ok, $files test files)" | tee -a "$SUMMARY"
+}
+
 
 # ── 0. Preflight: environment drift must fail in seconds, not at step 9 or 11 ─
 # Attempts 22/24/26 (2026-09-13) each spent ~10 minutes of gate before hitting
@@ -482,7 +499,7 @@ if ! timeout "$GO_TIMEOUT_SEC" bash -c "cd '$BRIDGE_DIR' && go test -race -count
 	echo "FAIL: Go suite failed or timed out — see $GO_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
-echo "PASS: Go suite (-race)" | tee -a "$SUMMARY"
+	require_go_suite_evidence "$GO_LOG" "$BRIDGE_DIR" "Go suite"
 
 # ── 2. Build E2E test binaries (R-016) + docker build smoke ───────────────
 fi
