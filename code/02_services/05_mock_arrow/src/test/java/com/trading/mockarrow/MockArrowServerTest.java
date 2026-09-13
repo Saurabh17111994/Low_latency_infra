@@ -2,6 +2,7 @@ package com.trading.mockarrow;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -9,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.lang.reflect.Modifier;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -75,6 +77,24 @@ class MockArrowServerTest {
             }
             server.stop();
         }
+    }
+
+    /**
+     * P3-030: the delivery pool must exist before start() hands it to the tick
+     * scheduler or the accept thread, and it must be final so those threads
+     * cannot observe a null/stale reference. The losing interleaving is not
+     * deterministically reproducible, so this pins the two construction
+     * invariants the fix establishes.
+     */
+    @Test
+    void deliveryPoolExistsBeforeStartAndIsFinal() throws Exception {
+        var poolField = MockArrowServer.class.getDeclaredField("deliveryPool");
+        assertTrue(Modifier.isFinal(poolField.getModifiers()),
+                "P3-030: deliveryPool must be final so tick/accept threads cannot see a stale pool");
+        poolField.setAccessible(true);
+        var server = new MockArrowServer(freePort(), 20, List.of(100000L), 7L);
+        assertNotNull(poolField.get(server),
+                "P3-030: deliveryPool must be created before start() schedules ticks or accepts clients");
     }
 
     /** Bounded read: never blocks past the socket read timeout, never hangs the suite. */

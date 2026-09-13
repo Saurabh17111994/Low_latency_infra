@@ -45,7 +45,7 @@ public class MockArrowServer {
     private ScheduledExecutorService tickScheduler;
 
     /** R-142: decoupled per-client delivery — a stalled client can never stall tick pacing. */
-    private java.util.concurrent.ExecutorService deliveryPool;
+    private final ExecutorService deliveryPool;
 
     // Per-instrument price state for realistic walks (in paise)
     private final Map<Long, Long> prices = new ConcurrentHashMap<>();
@@ -69,6 +69,19 @@ public class MockArrowServer {
             basePrices.put(inst, base);
             prices.put(inst, base);
         }
+
+        // R-142 + P3-030: worker pool for per-client delivery (bounded: one
+        // task per client per tick batch). Created here, before any thread can
+        // run: the accept thread and the 0-delay tick scheduler both touch it,
+        // so a late assignment could be seen as null — and a throwing periodic
+        // task is permanently suppressed by the scheduler. final also
+        // guarantees safe publication.
+        this.deliveryPool = Executors.newFixedThreadPool(
+                Math.max(4, Runtime.getRuntime().availableProcessors()), r -> {
+                    Thread t = new Thread(r, "mock-arrow-delivery");
+                    t.setDaemon(true);
+                    return t;
+                });
     }
 
     public void start() throws IOException {
@@ -96,15 +109,6 @@ public class MockArrowServer {
         long intervalMs = 10;
         tickScheduler = Executors.newSingleThreadScheduledExecutor();
         tickScheduler.scheduleAtFixedRate(this::generateTicks, 0, intervalMs, TimeUnit.MILLISECONDS);
-
-        // R-142: worker pool for per-client delivery (bounded: one task per
-        // client per tick batch). Delivery never blocks tick generation.
-        deliveryPool = Executors.newFixedThreadPool(
-                Math.max(4, Runtime.getRuntime().availableProcessors()), r -> {
-                    Thread t = new Thread(r, "mock-arrow-delivery");
-                    t.setDaemon(true);
-                    return t;
-                });
     }
 
     // Connected clients
