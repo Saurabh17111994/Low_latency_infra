@@ -103,6 +103,17 @@ impl ServiceConfig {
         let gateway = get("GATEWAY_ENDPOINT").unwrap_or("").to_string();
         let bridge = get("BRIDGE_ENDPOINT").unwrap_or("").to_string();
         let bridge_auth_token = get("BRIDGE_AUTH_TOKEN").unwrap_or("").to_string();
+        let gateway_shared_secret = get("GATEWAY_SHARED_SECRET").unwrap_or("").to_string();
+
+        // Fail closed (P3-435): a configured gateway endpoint with no usable secret would boot
+        // credential-less and then attempt authenticated communication with the gateway.
+        if !gateway.trim().is_empty() && gateway_shared_secret.trim().is_empty() {
+            bail!(
+                "GATEWAY_SHARED_SECRET must be non-empty when GATEWAY_ENDPOINT is configured \
+                 (blank secret would boot without a gateway credential)"
+            );
+        }
+
         // Fail closed (P3-191): the B8 drift monitor uses this as its safety-halt bound, so a
         // non-positive limit would trip the watchdog immediately or disable it outright.
         let clock_offset_limit_ms = get("CLOCK_OFFSET_LIMIT_MS")
@@ -125,7 +136,7 @@ impl ServiceConfig {
             listen_addr: get("EXECUTOR_LISTEN_ADDR")
                 .unwrap_or("127.0.0.1:8787")
                 .to_string(),
-            gateway_shared_secret: get("GATEWAY_SHARED_SECRET").unwrap_or("").to_string(),
+            gateway_shared_secret,
             protocol_version: get("GATEWAY_PROTOCOL_VERSION")
                 .unwrap_or("execution-gateway.v2")
                 .to_string(),
@@ -354,6 +365,40 @@ mod tests {
         // The executor Dockerfile's only real assignment (`ENV EXECUTION_ENABLED=false`) still boots.
         let c = ServiceConfig::from_iter(kv(&[("EXECUTION_ENABLED", "false")])).unwrap();
         assert!(!c.execution_enabled);
+    }
+
+    /// P3-435: a configured gateway endpoint with no usable secret would boot without a
+    /// credential — fail closed instead.
+    #[test]
+    fn rejects_gateway_endpoint_without_secret() {
+        for pairs in [
+            vec![("GATEWAY_ENDPOINT", "http://gw:8080")],
+            vec![
+                ("GATEWAY_ENDPOINT", "http://gw:8080"),
+                ("GATEWAY_SHARED_SECRET", ""),
+            ],
+            vec![
+                ("GATEWAY_ENDPOINT", "http://gw:8080"),
+                ("GATEWAY_SHARED_SECRET", "   "),
+            ],
+        ] {
+            let err = ServiceConfig::from_iter(kv(&pairs)).unwrap_err();
+            assert!(
+                err.to_string().contains("GATEWAY_SHARED_SECRET"),
+                "missing/blank secret must name GATEWAY_SHARED_SECRET, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_gateway_endpoint_with_non_blank_secret() {
+        // compose/stack default is `local-dev-only` (docker-compose.yml) — never blank.
+        let c = ServiceConfig::from_iter(kv(&[
+            ("GATEWAY_ENDPOINT", "http://execution-gateway:9180"),
+            ("GATEWAY_SHARED_SECRET", "local-dev-only"),
+        ]))
+        .unwrap();
+        assert_eq!(c.gateway_shared_secret, "local-dev-only");
     }
 
     #[test]
