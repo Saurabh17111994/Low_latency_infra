@@ -31,9 +31,40 @@
 # worse, passes against a stale image). Probing several never-run steps in one
 # batch beats one gate cycle per step.
 #
+# Modes (a repair loop does not have to pay for all 16 steps, or for one failure
+# at a time; the certifying run below stays fail-fast and unchanged):
+#   --steps LIST  run only those steps, e.g. `--steps 12-16` or `--steps 9,11`.
+#                 SUBSET mode: SUMMARY ends with SUBSET RESULT, never GATE RESULT,
+#                 so a scoped green can not be quoted as a certificate.
+#   --sweep       run the selection to the end past failing steps (each failure is
+#                 recorded and the run resumes at the next step) and report every
+#                 failure as SWEEP RESULT. Non-certifying.
+# The certificate is this script with no arguments: 16/16, fail-fast.
+#
+
 # Prereqs: Fluss up (docker compose up -d), local ~/.m2 warm, Go 1.24+, JDK 17.
 
 set -euo pipefail
+
+# ── Arguments (see Modes in the header) ──────────────────────────────────────
+STEP_SELECTION=""
+SWEEP=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--steps)
+			[ $# -ge 2 ] || { echo "FATAL: --steps needs a list, e.g. --steps 12-16" >&2; exit 2; }
+			STEP_SELECTION="$2"; shift 2 ;;
+		--steps=*) STEP_SELECTION="${1#--steps=}"; shift ;;
+		--sweep) SWEEP=1; shift ;;
+		--help|-h)
+			echo "usage: $(basename "$0") [--steps LIST] [--sweep]"
+			echo "  --steps 9,11,12-16  run only those steps (subset: never certifies)"
+			echo "  --sweep             run the selection, continue past failures, report all"
+			exit 0 ;;
+		*) echo "FATAL: unknown argument '$1' (try --help)" >&2; exit 2 ;;
+	esac
+done
+
 
 # ── Config (override via env; defaults derived from the script location) ─────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -44,6 +75,8 @@ COMPUTE_DIR="$CODE_DIR/02_services/02_compute"
 EXECUTOR_DIR="$CODE_DIR/02_services/04_executor"
 INGESTION_DIR="${INGESTION_DIR:-$CODE_DIR/02_services/01_ingestion}"
 OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/logs/soak/monday-gates-$(date +%Y%m%d-%H%M%S)}"
+# Written by a failing sweep child, read by the driver (must exist in both).
+SWEEP_FAILED_FILE="$OUT_DIR/sweep-failed.txt"
 
 # Suite timeouts (R-281) — a stuck JVM/Fluss must not block the gate forever.
 GO_TIMEOUT_SEC="${GO_TIMEOUT_SEC:-1800}"
@@ -78,14 +111,75 @@ GATE_SKIPS=0
 SKIPPED_STEPS=""
 note_skip() { GATE_SKIPS=$((GATE_SKIPS + 1)); SKIPPED_STEPS="$SKIPPED_STEPS $1"; }
 
+# --steps parsing: a set of step numbers, empty = every step. Ranges are checked
+# against GATE_TOTAL so a typo can not silently run fewer steps than the caller
+# believes; the banner count at the end re-verifies the outcome.
+STEPS_SET=""
+if [ -n "$STEP_SELECTION" ]; then
+	for token in ${STEP_SELECTION//,/ }; do
+		case "$token" in
+			*-*) lo="${token%%-*}"; hi="${token##*-}" ;;
+			*) lo="$token"; hi="$token" ;;
+		esac
+		case "${lo}${hi}" in
+			''|*[!0-9]*) echo "FATAL: bad --steps entry '$token' (use N or N-M)" >&2; exit 2 ;;
+		esac
+		if [ "$lo" -lt 1 ] || [ "$hi" -gt "$GATE_TOTAL" ] || [ "$lo" -gt "$hi" ]; then
+			echo "FATAL: --steps '$token' is outside 1-$GATE_TOTAL" >&2; exit 2
+		fi
+		n="$lo"
+		while [ "$n" -le "$hi" ]; do STEPS_SET="$STEPS_SET $n"; n=$((n + 1)); done
+	done
+	# Ascending and deduplicated: the --sweep resume point is a numeric floor, so
+	# an out-of-order or repeated selection would otherwise be skipped in silence.
+STEPS_SET="$(printf '%s\n' $STEPS_SET | sort -n -u | tr '\n' ' ' | sed 's/ *$//')"
+fi
+
+# step_active <n>: is this step selected for THIS run (--steps, and not before the
+# --sweep resume point)? Also names CURRENT_STEP so gate_fail can record which
+# step aborted, which is how the sweep driver knows where to resume.
+CURRENT_STEP=""
+step_active() {
+	[ "$1" -ge "${GATE_SWEEP_FROM:-1}" ] || return 1
+	if [ -n "$STEPS_SET" ]; then
+		case " $STEPS_SET " in *" $1 "*) : ;; *) return 1 ;; esac
+	fi
+	CURRENT_STEP="$1"
+	return 0
+}
+SELECTED_COUNT=0
+for _n in $(seq 1 "$GATE_TOTAL"); do
+	step_active "$_n" && SELECTED_COUNT=$((SELECTED_COUNT + 1)) || true
+done
+CURRENT_STEP=""
+# Fixed before any step runs: gate_fail prints this label, so a scoped or swept
+# run can never fail under the certificate's name.
+if [ "$SWEEP" -eq 1 ]; then
+	VERDICT_LABEL="SWEEP RESULT"
+	VERDICT_NOTE=" (non-certifying run)"
+elif [ -n "$STEPS_SET" ]; then
+	VERDICT_LABEL="SUBSET RESULT"
+	VERDICT_NOTE=" (subset run — not a certificate; run with no arguments for that)"
+else
+	VERDICT_LABEL="GATE RESULT"
+	VERDICT_NOTE=""
+fi
+
+
 echo "run-monday-gates: output → $OUT_DIR"
 echo "run-monday-gates: go timeout=${GO_TIMEOUT_SEC}s, java timeout=${JAVA_TIMEOUT_SEC}s, cargo timeout=${CARGO_TIMEOUT_SEC}s"
 
 gate_fail() {
-	echo "GATE RESULT: FAIL" | tee -a "$SUMMARY"
+	# A sweep child records its step and exits 3 so the driver can resume after it;
+	# only the driver prints a verdict for a sweep. Everything else fails here.
+	if [ "${SWEEP:-0}" = "1" ] && [ -n "${GATE_SWEEP_CHILD:-}" ]; then
+		echo "SWEEP: step ${CURRENT_STEP:-unknown} failed — recorded; the sweep continues" | tee -a "$SUMMARY"
+		echo "${CURRENT_STEP:-unknown}" >>"$SWEEP_FAILED_FILE"
+		exit 3
+	fi
+	echo "$VERDICT_LABEL: FAIL" | tee -a "$SUMMARY"
 	exit 1
 }
-# ── Vacuity guard (P3): "BUILD SUCCESS" with zero tests is not a pass ─────────
 # Steps 12/13/14/16 pin test classes or a module, and they pass
 # -Dsurefire.failIfNoSpecifiedTests=false, so a renamed or moved class makes
 # surefire run nothing while maven still reports BUILD SUCCESS. Assert a
@@ -111,7 +205,17 @@ require_tests_run() { # $1 = maven log, $2 = step label
 # the step-11 apply. Read-only — it reports drift and prints the remedy
 # (`make up`, the canonical compose form). A missing prerequisite is recorded as
 # a SKIP, never a pass, so the verdict line stays honest about what was verified.
-echo "MODE=gate (certifying: frozen tree, fail-fast, 16/16 steps)" >>"$SUMMARY"
+# The sweep driver runs the preflight once for the whole sweep, so a child skips
+# it: a drifting stack must stop the driver, not each step.
+if [ -z "${GATE_SWEEP_CHILD:-}" ]; then
+if [ "${SWEEP:-0}" = "1" ]; then
+	MODE="sweep (non-certifying: continues past failures; SWEEP RESULT is the only verdict)"
+elif [ -n "$STEPS_SET" ]; then
+	MODE="subset (steps: ${STEPS_SET:-1-16} — non-certifying; run with no arguments for the certificate)"
+else
+	MODE="gate (certifying: frozen tree, fail-fast, $GATE_TOTAL/$GATE_TOTAL steps)"
+fi
+echo "MODE=$MODE" >>"$SUMMARY"
 echo "=== [preflight] environment drift (tree, compose convergence, catalog, stack) ===" | tee -a "$SUMMARY"
 PREFLIGHT_LOG="$OUT_DIR/preflight.log"
 PREFLIGHT_RC=0
@@ -127,6 +231,69 @@ else
 fi
 
 # ── 0. Static checks: bash -n + shellcheck on every script (Phase 8 G4) ─────
+fi
+
+# ── Sweep driver: --sweep must discover every failing step, not just the first ─
+# A failing step calls gate_fail, which ends a run; that is right for the
+# certificate and wrong for a repair loop. So in --sweep mode the driver re-execs
+# this script once per step (GATE_SWEEP_FROM), sharing OUT_DIR, and each failure is
+# recorded in $OUT_DIR/sweep-failed.txt. Steps that already passed are not re-run,
+# and the children print no verdict of their own: the SWEEP RESULT below is the
+# only one, and it never says GATE RESULT.
+if [ "${SWEEP:-0}" = "1" ] && [ -z "${GATE_SWEEP_CHILD:-}" ]; then
+	: >"$SWEEP_FAILED_FILE"
+	SWEEP_FROM=1
+	SWEEP_ITER=0
+	SWEEP_ARGS=( --sweep )
+	[ -n "$STEP_SELECTION" ] && SWEEP_ARGS+=( --steps "$STEP_SELECTION" )
+	while [ "$SWEEP_FROM" -le "$GATE_TOTAL" ]; do
+		SWEEP_ITER=$((SWEEP_ITER + 1))
+		if [ "$SWEEP_ITER" -gt "$GATE_TOTAL" ]; then
+			echo "SWEEP: aborting — more than $GATE_TOTAL resumptions (a step fails without recording itself)" >&2
+			exit 1
+		fi
+		echo "SWEEP: running from step $SWEEP_FROM"
+		SWEEP_RC=0
+		GATE_SWEEP_CHILD=1 GATE_SWEEP_FROM="$SWEEP_FROM" OUT_DIR="$OUT_DIR" \
+			"$0" "${SWEEP_ARGS[@]}" || SWEEP_RC=$?
+		if [ "$SWEEP_RC" -eq 0 ]; then
+			SWEEP_FROM=$((GATE_TOTAL + 1))
+		elif [ "$SWEEP_RC" -eq 3 ]; then
+			SWEEP_LAST="$(tail -1 "$SWEEP_FAILED_FILE" 2>/dev/null || true)"
+			case "$SWEEP_LAST" in
+				''|*[!0-9]*) echo "SWEEP: aborting — a step failed without recording its number" >&2; exit 1 ;;
+			esac
+			if [ "$SWEEP_LAST" -lt "$SWEEP_FROM" ]; then
+				echo "SWEEP: aborting — recorded step $SWEEP_LAST is before the resume point $SWEEP_FROM" >&2
+				exit 1
+			fi
+			SWEEP_FROM=$((SWEEP_LAST + 1))
+		else
+			echo "SWEEP: aborting — a failure outside the step blocks (exit $SWEEP_RC)" >&2
+			exit "$SWEEP_RC"
+		fi
+	done
+	SWEEP_FAILED="$(sort -n -u "$SWEEP_FAILED_FILE" | tr '\n' ' ' | sed 's/ *$//')"
+	# Only the driver sees the whole run, so it checks that every selected step
+	# produced a banner: a missing one was skipped, not passed.
+	SWEEP_BANNERS="$(grep -cE "^=== \[[0-9]+/$GATE_TOTAL\] " "$SUMMARY" || true)"
+	if [ "$SWEEP_BANNERS" -ne "$SELECTED_COUNT" ]; then
+		echo "SWEEP: aborting — SUMMARY.txt holds $SWEEP_BANNERS step banner(s) but $SELECTED_COUNT step(s) were selected: the sweep did not attempt every selected step" | tee -a "$SUMMARY"
+		exit 1
+	fi
+	echo "=== SWEEP COMPLETE ===" | tee -a "$SUMMARY"
+	if [ -n "$SWEEP_FAILED" ]; then
+		echo "SWEEP RESULT: FAIL (non-certifying) — $SELECTED_COUNT selected step(s), failed: ${SWEEP_FAILED% }" | tee -a "$SUMMARY"
+		echo "Fix the failing step(s) and re-run with --steps <numbers> before the certificate." | tee -a "$SUMMARY"
+		exit 1
+	fi
+	echo "SWEEP RESULT: PASS (non-certifying) — $SELECTED_COUNT selected step(s) passed: ${STEPS_SET:-1-16}" | tee -a "$SUMMARY"
+	echo "A sweep green is not a certificate: run this script with no arguments for that." | tee -a "$SUMMARY"
+	exit 0
+fi
+
+
+if step_active 1; then
 echo "=== [1/16] Static checks (bash -n, shellcheck) ===" | tee -a "$SUMMARY"
 STATIC_LOG="$OUT_DIR/static-checks.log"
 : >"$STATIC_LOG"
@@ -170,6 +337,8 @@ fi
 echo "PASS: static checks (${#SCRIPTS[@]} scripts bash -n + shellcheck clean)" | tee -a "$SUMMARY"
 
 # ── 0b. Compose config validation (G4) ────────────────────────────────────────
+fi
+if step_active 2; then
 echo "=== [2/16] docker compose config ===" | tee -a "$SUMMARY"
 COMPOSE_FILE="$CODE_DIR/01_platform/01_docker/docker-compose.yml"
 if [ -f "$COMPOSE_FILE" ]; then
@@ -187,6 +356,8 @@ fi
 # could silently pass a reconcile. No cluster needed — synthetic fixtures only.
 # docs-audit C16 (env-key drift) runs inside the full doc audit step after the
 # Java gate.
+fi
+if step_active 3; then
 echo "=== [3/16] Python unit suites (reconcile-compare ING-TCP-002 + gate helpers) ===" | tee -a "$SUMMARY"
 PY_LOG="$OUT_DIR/python-tests.log"
 if ! timeout 300 python3 -m unittest discover -s "$SCRIPT_DIR/tests" -p "test_*.py" \
@@ -206,6 +377,8 @@ echo "PASS: python unit suites ($(grep -oE 'Ran [0-9]+ tests' "$PY_LOG" | head -
 # match the documented contract. Runs the entrypoint under env -i so a
 # polluted gate environment cannot mask a FATAL; bash -n + shellcheck on
 # this file run in the static stage above.
+fi
+if step_active 4; then
 echo "=== [4/16] Entrypoint harness (ING-INT-006) ===" | tee -a "$SUMMARY"
 ENTRYPOINT_LOG="$OUT_DIR/entrypoint.log"
 if ! bash "$SCRIPT_DIR/tests/test_docker_entrypoint.sh" >"$ENTRYPOINT_LOG" 2>&1; then
@@ -215,6 +388,8 @@ fi
 echo "PASS: entrypoint harness (exit codes + messages)" | tee -a "$SUMMARY"
 
 # ── 1. Go suite with race detector (Phase 8: go test -race) ──────────────────
+fi
+if step_active 5; then
 echo "=== [5/16] Go bridge suite (-race) ===" | tee -a "$SUMMARY"
 # The output goes to $GO_LOG: the FAIL message below points there (and the
 # final evidence list advertises it), plus the race reports are large.
@@ -225,6 +400,8 @@ fi
 echo "PASS: Go suite (-race)" | tee -a "$SUMMARY"
 
 # ── 2. Build E2E test binaries (R-016) + docker build smoke ───────────────
+fi
+if step_active 6; then
 echo "=== [6/16] Building E2E test binaries (faketool + arrow-bridge) ===" | tee -a "$SUMMARY"
 # Appends to the same log: gate_fail exits, so a Go-suite failure never reaches
 # here, and the advertised Go evidence keeps both records.
@@ -237,6 +414,8 @@ fi
 echo "PASS: E2E binaries built (faketool/faketool, arrow-bridge)" | tee -a "$SUMMARY"
 
 # ── 5. Docker build smoke (G4): ingestion image must build from the reactor root ──
+fi
+if step_active 7; then
 echo "=== [7/16] docker build smoke (ingestion image) ===" | tee -a "$SUMMARY"
 if command -v docker >/dev/null 2>&1 && [ -f "$CODE_DIR/02_services/01_ingestion/Dockerfile" ]; then
 	# The build needs network (base images + go/maven deps). Offline runs must
@@ -264,6 +443,8 @@ fi
 # ── 5b. CHG-101: stale-image guard — no compose build: image may be older
 # than the last change to the source it packages (2026-08-24 gateway/bridge
 # incident: 08-20 images vs 08-24 source went unnoticed until a readyz probe).
+fi
+if step_active 8; then
 echo "=== [8/16] image staleness (the service image this gate runs) ===" | tee -a "$SUMMARY"
 IMAGE_LOG="$OUT_DIR/image-staleness.log"
 if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ]; then
@@ -292,6 +473,8 @@ fi
 # export FLUSS_BOOTSTRAP — every class gated on it records 0 tests here. A green
 # step 9 therefore proved nothing about the live store paths; the drill block at
 # the end of this step runs them.
+fi
+if step_active 9; then
 echo "=== [9/16] Java full gate (FLUSS+MANIFEST+PERF+E2E) + live Fluss drills ===" | tee -a "$SUMMARY"
 	# FLUSS_BOOTSTRAP is deliberately unset for the plain Java run: common's ten
 	# FLUSS_BOOTSTRAP-gated live classes would otherwise execute into the plain
@@ -336,6 +519,8 @@ echo "PASS: live Fluss drills (common + gateway, bootstrap $DRILL_BOOTSTRAP)" | 
 # master-dossier trio coherence. Wired here so the beyond-scanner sweeps can't
 # rot undetected — they silently drifted at HEAD once (CHG-026/027 era) because
 # only the machine gates were ever run in CI.
+fi
+if step_active 10; then
 echo "=== [10/16] full doc audit (make full-audit: scanners + sweeps + trio coherence) ===" | tee -a "$SUMMARY"
 AUDIT_LOG="$OUT_DIR/full-audit.log"
 if ! timeout 300 bash "$SCRIPT_DIR/full_audit.sh" >"$AUDIT_LOG" 2>&1; then
@@ -349,6 +534,8 @@ fi
 echo "PASS: full doc audit (stale claims + doc↔code truth + DDL parity + sweeps + trio, incl. C16 env-key drift)" | tee -a "$SUMMARY"
 
 # ── 3c. DDL apply exit-code contract smoke (scratch catalogs) ────────────────
+fi
+if step_active 11; then
 echo "=== [11/16] DDL apply exit-code smoke ===" | tee -a "$SUMMARY"
 DDL_SMOKE_LOG="$OUT_DIR/ddl-smoke.log"
 DDL_SMOKE_TIMEOUT_SEC="${DDL_SMOKE_TIMEOUT_SEC:-1800}"
@@ -392,6 +579,8 @@ fi
 echo "PASS: evidence ownership check (container-written records group-writable)" | tee -a "$SUMMARY"
 
 # ── 4. Schema agreement + perf certification explicit gates (G5) ─────────────
+fi
+if step_active 12; then
 echo "=== [12/16] SchemaAgreementTest + PerfBaselineTest explicit ===" | tee -a "$SUMMARY"
 SCHEMA_PERF_LOG="$OUT_DIR/schema-perf.log"
 if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
@@ -419,6 +608,8 @@ echo "PASS: SchemaAgreementTest + PerfBaselineTest (certification gates)" | tee 
 # change that silently drops or env-gates them now fails CI instead of quietly
 # shrinking the plain suite. Cluster-free: scripted fake bridge, no Fluss, no
 # Go binaries (runs on a bare checkout). POSIX-only (SIGTERM semantics).
+fi
+if step_active 13; then
 echo "=== [13/16] SIGTERM-drain regression explicit (ING-UNIT-023/024, CHG-015) ===" | tee -a "$SUMMARY"
 SHUTDOWN_LOG="$OUT_DIR/shutdown-regression.log"
 if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
@@ -440,6 +631,8 @@ echo "PASS: SIGTERM-drain regression (ING-UNIT-023 in-process + ING-UNIT-024 rea
 # drill block names 14 classes, so this module's other tests — readiness, HTTP
 # approval authority, halt tails and the reader-death pin (P3-064) — ran in no
 # gate step at all. ~40 s offline; it needs no cluster.
+fi
+if step_active 14; then
 echo "=== [14/16] Execution gateway module suite (unit + regression) ===" | tee -a "$SUMMARY"
 GATEWAY_LOG="$OUT_DIR/gateway-suite.log"
 if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
@@ -456,6 +649,8 @@ echo "PASS: execution gateway suite ($(grep -aoE 'Tests run: [0-9]+, Failures: [
 
 # Cheap suite first: nautilus is ~51 s, compute ~3 min, so a red compute no longer
 # hides the Rust verdict from this run (both still gate the verdict).
+fi
+if step_active 15; then
 echo "=== [15/16] Nautilus (Rust executor) suite — offline against the pinned lockfile ===" | tee -a "$SUMMARY"
 NAUTILUS_LOG="$OUT_DIR/nautilus-suite.log"
 # --offline is this repo's documented form (docs/plans/2026-08-25-live-readiness-
@@ -473,7 +668,9 @@ if [ "$NAUTILUS_FAILED" -ne 0 ] || [ "$NAUTILUS_PASSED" -eq 0 ]; then
 	gate_fail
 fi
 echo "PASS: nautilus Rust suite ($NAUTILUS_PASSED passed, 0 failed)" | tee -a "$SUMMARY"
+fi
 
+if step_active 16; then
 echo "=== [16/16] Compute module suite (Fluss/fingerprint/candle unit + integration) ===" | tee -a "$SUMMARY"
 COMPUTE_LOG="$OUT_DIR/compute-suite.log"
 # 02_services/02_compute is deliberately NOT in the code/pom.xml reactor (R-272),
@@ -489,30 +686,37 @@ if ! grep -q "BUILD SUCCESS" "$COMPUTE_LOG"; then
 fi
 require_tests_run "$COMPUTE_LOG" "step 16 (compute suite)"
 echo "PASS: compute suite ($(grep -aoE 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' "$COMPUTE_LOG" | tail -1))" | tee -a "$SUMMARY"
+fi
+
+# A --sweep child stops here: a verdict from a partial run must never be quoted.
+if [ -n "${GATE_SWEEP_CHILD:-}" ]; then
+	exit 0
+fi
 
 STEPS_RUN="$(grep -cE "^=== \[[0-9]+/$GATE_TOTAL\] " "$SUMMARY" || true)"
-if [ "$STEPS_RUN" -ne "$GATE_TOTAL" ]; then
-	echo "FAIL: SUMMARY.txt holds $STEPS_RUN step banners but GATE_TOTAL=$GATE_TOTAL — the [N/$GATE_TOTAL] labels and the total have drifted apart" | tee -a "$SUMMARY"
+if [ "$STEPS_RUN" -ne "$SELECTED_COUNT" ]; then
+	echo "FAIL: SUMMARY.txt holds $STEPS_RUN step banners but $SELECTED_COUNT step(s) were selected (--steps '${STEP_SELECTION:-all}') — the labels and the selection have drifted apart" | tee -a "$SUMMARY"
 	gate_fail
 fi
-echo "=== ALL GATES PASSED ===" | tee -a "$SUMMARY"
+echo "=== $([ -n "$STEPS_SET" ] && echo 'ALL SELECTED STEPS' || echo 'ALL GATES') PASSED ===" | tee -a "$SUMMARY"
+
 if [ "$GATE_SKIPS" -gt 0 ]; then
-	echo "GATE RESULT: PASS — $((GATE_TOTAL - GATE_SKIPS))/$GATE_TOTAL verified, $GATE_SKIPS skipped (steps:$SKIPPED_STEPS)" | tee -a "$SUMMARY"
+	echo "$VERDICT_LABEL: PASS — $((SELECTED_COUNT - GATE_SKIPS))/$SELECTED_COUNT verified, $GATE_SKIPS skipped (steps:$SKIPPED_STEPS)$VERDICT_NOTE" | tee -a "$SUMMARY"
 	echo "Not a clean pass: a skipped step is unverified, not green." | tee -a "$SUMMARY"
 else
-	echo "GATE RESULT: PASS — $GATE_TOTAL/$GATE_TOTAL verified, 0 skipped" | tee -a "$SUMMARY"
+	echo "$VERDICT_LABEL: PASS — $SELECTED_COUNT/$SELECTED_COUNT verified, 0 skipped$VERDICT_NOTE" | tee -a "$SUMMARY"
 fi
 echo "Evidence:" | tee -a "$SUMMARY"
-echo "  Static: $STATIC_LOG" | tee -a "$SUMMARY"
-echo "  Python suites: $PY_LOG" | tee -a "$SUMMARY"
-echo "  Entrypoint: $ENTRYPOINT_LOG" | tee -a "$SUMMARY"
-echo "  Go:   $GO_LOG" | tee -a "$SUMMARY"
-echo "  Java: $JAVA_LOG" | tee -a "$SUMMARY"
-echo "  full doc audit: $AUDIT_LOG" | tee -a "$SUMMARY"
-echo "  Image staleness: $IMAGE_LOG" | tee -a "$SUMMARY"
-echo "  DDL smoke: $DDL_SMOKE_LOG" | tee -a "$SUMMARY"
-echo "  Schema/Perf: $SCHEMA_PERF_LOG" | tee -a "$SUMMARY"
-echo "  SIGTERM-drain: $SHUTDOWN_LOG" | tee -a "$SUMMARY"
-echo "  Gateway suite: $GATEWAY_LOG" | tee -a "$SUMMARY"
-echo "  Compute suite: $COMPUTE_LOG" | tee -a "$SUMMARY"
-echo "  Nautilus suite: $NAUTILUS_LOG" | tee -a "$SUMMARY"
+echo "  Static: ${STATIC_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Python suites: ${PY_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Entrypoint: ${ENTRYPOINT_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Go:   ${GO_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Java: ${JAVA_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  full doc audit: ${AUDIT_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Image staleness: ${IMAGE_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  DDL smoke: ${DDL_SMOKE_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Schema/Perf: ${SCHEMA_PERF_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  SIGTERM-drain: ${SHUTDOWN_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Gateway suite: ${GATEWAY_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Compute suite: ${COMPUTE_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Nautilus suite: ${NAUTILUS_LOG:-not-run}" | tee -a "$SUMMARY"
