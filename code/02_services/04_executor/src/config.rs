@@ -13,7 +13,10 @@ pub const GATE_FENCE_TOKEN_BITS: u32 = 64;
 /// Endpoints (gateway/bridge) are optional at boot so the service can start health-only and
 /// HALTED without a broker being reachable; they are consumed only when a connection is actually
 /// needed (later work packages). The service **never** reads `ARROW_*` variables.
-#[derive(Debug, Clone)]
+// NOTE: no `Debug` derive — this struct carries `BRIDGE_AUTH_TOKEN` and the gateway shared
+// secret. The manual impl below redacts both (P3-193 sibling); the `bridge_auth_token` field
+// comment's "never logged" promise depends on it.
+#[derive(Clone)]
 pub struct ServiceConfig {
     pub gateway_endpoint: String,
     pub bridge_endpoint: String,
@@ -34,6 +37,26 @@ pub struct ServiceConfig {
     /// Max |host-clock offset vs UTC| in ms before the drift monitor safety-halts (B8).
     /// Mirrors compose `CLOCK_OFFSET_LIMIT_MS` (ingestion default 200 — see CHG-064).
     pub clock_offset_limit_ms: i64,
+}
+
+impl std::fmt::Debug for ServiceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceConfig")
+            .field("gateway_endpoint", &self.gateway_endpoint)
+            .field("bridge_endpoint", &self.bridge_endpoint)
+            .field("bridge_auth_token", &"<redacted>")
+            .field("log_level", &self.log_level)
+            .field("execution_enabled", &self.execution_enabled)
+            .field("listen_addr", &self.listen_addr)
+            .field("gateway_shared_secret", &"<redacted>")
+            .field("protocol_version", &self.protocol_version)
+            .field("durable_gate_enabled", &self.durable_gate_enabled)
+            .field("durable_attempts_enabled", &self.durable_attempts_enabled)
+            .field("durable_journal_enabled", &self.durable_journal_enabled)
+            .field("durable_audit_enabled", &self.durable_audit_enabled)
+            .field("clock_offset_limit_ms", &self.clock_offset_limit_ms)
+            .finish()
+    }
 }
 
 impl ServiceConfig {
@@ -187,6 +210,44 @@ mod tests {
         .unwrap();
         assert_eq!(c.gateway_shared_secret, "s3cr3t");
         assert_eq!(c.protocol_version, "execution-gateway.v1");
+    }
+
+    /// P3-193 sibling (follow-on commit): `ServiceConfig` carries `BRIDGE_AUTH_TOKEN` and the
+    /// gateway shared secret, so its `Debug` must never print them. The field comment already
+    /// promises "never logged" — the derived `Debug` would break that promise.
+    #[test]
+    fn service_config_debug_never_prints_secrets() {
+        let c = ServiceConfig::from_iter(kv(&[
+            ("BRIDGE_ENDPOINT", "http://bridge:8787"),
+            ("BRIDGE_AUTH_TOKEN", "tok_live_9f4c2a7e88b1"),
+            ("GATEWAY_SHARED_SECRET", "gw_live_deadbeef01"),
+        ]))
+        .unwrap();
+        let dbg = format!("{c:?}");
+        assert!(
+            dbg.contains("http://bridge:8787"),
+            "endpoint should stay readable: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "redaction should be visible: {dbg}"
+        );
+        assert!(
+            !dbg.contains("tok_live"),
+            "bridge token prefix leaked: {dbg}"
+        );
+        assert!(
+            !dbg.contains("9f4c2a7e88b1"),
+            "bridge token suffix leaked: {dbg}"
+        );
+        assert!(
+            !dbg.contains("gw_live"),
+            "gateway secret prefix leaked: {dbg}"
+        );
+        assert!(
+            !dbg.contains("deadbeef01"),
+            "gateway secret suffix leaked: {dbg}"
+        );
     }
 
     #[test]

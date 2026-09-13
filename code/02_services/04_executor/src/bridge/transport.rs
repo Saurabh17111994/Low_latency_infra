@@ -557,7 +557,8 @@ async fn report_intake_loop(
 }
 
 /// Production HTTP/WS [`BridgeClient`] targeting the Go execution bridge.
-#[derive(Debug)]
+// NOTE: no `Debug` derive — this struct holds the bearer token (P3-193 sibling). The manual
+// impl below redacts it.
 pub struct HttpBridgeClient {
     base_url: String,
     auth_token: String,
@@ -567,6 +568,16 @@ pub struct HttpBridgeClient {
     reconnect_min: Duration,
     reconnect_max: Duration,
     read_timeout: Duration,
+}
+
+impl std::fmt::Debug for HttpBridgeClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpBridgeClient")
+            .field("base_url", &self.base_url)
+            .field("auth_token", &"<redacted>")
+            .field("connected", &self.connected)
+            .finish()
+    }
 }
 
 impl HttpBridgeClient {
@@ -720,6 +731,27 @@ mod tests {
             format!("{err}").contains("truncated"),
             "unexpected error: {err}"
         );
+    }
+
+    /// P3-193 sibling (follow-on commit): `HttpBridgeClient` holds the bearer token, so its
+    /// `Debug` must never print it.
+    #[test]
+    fn http_bridge_client_debug_never_prints_the_auth_token() {
+        let client = HttpBridgeClient::new(
+            "http://bridge:8787".to_string(),
+            "tok_live_9f4c2a7e88b1".to_string(),
+        );
+        let dbg = format!("{client:?}");
+        assert!(
+            dbg.contains("http://bridge:8787"),
+            "endpoint should stay readable: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "redaction should be visible: {dbg}"
+        );
+        assert!(!dbg.contains("tok_live"), "token prefix leaked: {dbg}");
+        assert!(!dbg.contains("9f4c2a7e88b1"), "token suffix leaked: {dbg}");
     }
 
     // P3-189 (second half): `Connection: close` is a request, not a promise. A complete
