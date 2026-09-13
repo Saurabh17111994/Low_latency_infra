@@ -9,8 +9,6 @@
 | File | Logical object |
 | --- | --- |
 | `02_raw_table_1.sql` | `raw_table_1` — immutable raw packet/tick LOG |
-| `03_feature_candles_15s.sql` | `feature_candles_15s` — final 15-second candle LOG (immutable evidence trail) |
-| `04_forming_bar.sql` | `forming_bar` — per-ticker forming-bar KV |
 | `05_signal_candidates.sql` | `Signal_Candidates` — candidate audit LOG v3 (2026-08-13, DEC-035): append-only, one row per fired signal, never updated, `bucket.key=instrument_token`; supersede columns retained for audit linkage |
 | `06_ranking_results.sql` | `Ranking_Results` — immutable ranking audit LOG |
 | `07_trade_decisions.sql` | `Trade_Decisions` — immutable instruction feed LOG |
@@ -35,6 +33,8 @@
 | `27_execution_intent.sql` | `Execution_Intent` — trade-intent feed LOG |
 | `28_execution_intent_processed.sql` | `Execution_Intent_Processed` — processed-intent KV |
 | `29_position_state.sql` | `Position_State` — active-position feedback KV |
+| `32_candle_live.sql` | `candle_live` — live per-timeframe candle KV (6 TFs, upserted every 1s, 60s TTL) |
+| `33_candle_closed.sql` | `candle_closed` — closed per-timeframe candle KV (immutable, 7d TTL) |
 
 ## Validation required before application
 
