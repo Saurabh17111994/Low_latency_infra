@@ -128,16 +128,23 @@ async fn main() -> anyhow::Result<()> {
         "clock-drift monitor armed (fixed zero-offset source; NTP in Workstream D)"
     );
 
+    // The hosted run future must be pinned once and polled by `&mut`: `run_forever` consumes
+    // the runner, so re-creating it on every drift tick would abort the service and cancel
+    // in-flight node work each pass (P3-021). The stop handle is taken first because the
+    // pinned future holds the mutable borrow of `node`.
+    let node_handle = node.handle();
+    let mut node_run = Box::pin(node.run_forever());
+
     // Run until a shutdown signal or the node loop ends; the periodic drift check is a
     // non-terminal branch (a drift halt is enforced on the gate, the process keeps serving).
     loop {
         tokio::select! {
             _ = wait_for_shutdown_signal() => {
                 tracing::info!("shutdown signal received; stopping LiveNode, draining (readyz -> 503)");
-                node.request_shutdown();
+                node_handle.stop();
                 break;
             }
-            result = node.run_forever() => {
+            result = &mut node_run => {
                 // The loop must not end on its own in normal operation (node stays HALTED).
                 result?;
                 break;
