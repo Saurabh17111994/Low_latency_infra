@@ -487,3 +487,82 @@ func TestOverlongRequestIDIsRefusedBeforeTheBroker(t *testing.T) {
 		t.Errorf("broker calls=%d want 0: an over-long id must not reach the venue", calls)
 	}
 }
+
+// P3-055 first half — the events endpoint is control-only and its read loop
+// discards whatever arrives, but each frame was buffered whole before being
+// discarded, so one authenticated client could OOM the bridge with one frame.
+func TestEventsEndpointRejectsOversizedFrames(t *testing.T) {
+	_, server := startTestServer(t, &countingBroker{fn: func(context.Context, CommandEnvelope) BrokerResult {
+		return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: "BRK-1"}
+	}})
+	url := "ws" + strings.TrimPrefix(server.URL, "http") + eventsPath
+	conn, _, err := websocket.DefaultDialer.Dial(url, http.Header{"Authorization": []string{"Bearer internal-secret"}})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, make([]byte, maxEventFrameBytes*4)); err != nil {
+		t.Fatalf("write oversized frame: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, err = conn.ReadMessage()
+	if !websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
+		t.Fatalf("read after an oversized frame returned %v, want a %d close: the frame is buffered whole before being discarded",
+			err, websocket.CloseMessageTooBig)
+	}
+}
+
+// P3-055 second half — every events connection costs a subscription, a read
+// goroutine and a ping ticker, and nothing capped how many one authenticated
+// client could open.
+func TestEventsSubscribersAreCapped(t *testing.T) {
+	bridge, server := startTestServer(t, &countingBroker{fn: func(context.Context, CommandEnvelope) BrokerResult {
+		return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: "BRK-1"}
+	}})
+	url := "ws" + strings.TrimPrefix(server.URL, "http") + eventsPath
+	header := http.Header{"Authorization": []string{"Bearer internal-secret"}}
+
+	conns := make([]*websocket.Conn, 0, maxEventSubscribers+1)
+	defer func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+	for i := 0; i < maxEventSubscribers; i++ {
+		conn, _, err := websocket.DefaultDialer.Dial(url, header)
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		conns = append(conns, conn)
+		waitForSubscribers(t, bridge, i+1)
+	}
+
+	over, _, err := websocket.DefaultDialer.Dial(url, header)
+	if err != nil {
+		return // a refused upgrade is a refusal too
+	}
+	conns = append(conns, over)
+	_ = over.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, _, err := over.ReadMessage(); !websocket.IsCloseError(err, websocket.CloseTryAgainLater) {
+		t.Fatalf("subscriber %d read %v, want a %d close: subscribers are unbounded",
+			maxEventSubscribers+1, err, websocket.CloseTryAgainLater)
+	}
+}
+
+// waitForSubscribers waits until the hub holds at least want subscribers: the
+// handler subscribes just after the handshake, so a dial can return first.
+func waitForSubscribers(t *testing.T, bridge *BridgeServer, want int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		bridge.hub.mu.Lock()
+		have := len(bridge.hub.subscribers)
+		bridge.hub.mu.Unlock()
+		if have >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("the hub never reached %d subscribers", want)
+}

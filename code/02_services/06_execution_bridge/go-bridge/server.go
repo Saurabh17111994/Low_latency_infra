@@ -41,6 +41,16 @@ type BridgeServer struct {
 // process, and the cache is only an optimisation over durable reconciliation.
 const maxTrackedRequests = 4096
 
+// maxEventFrameBytes bounds one inbound events frame (P3-055). The endpoint is
+// control-only: the bridge discards every client frame, it never acts on one, so
+// the limit only has to leave room for keepalive text, not for payloads.
+const maxEventFrameBytes = 4096
+
+// maxEventSubscribers caps concurrent events clients (P3-055). Each connection
+// costs a subscription, a read goroutine and a ping ticker, and the endpoint is
+// authenticated but not otherwise rate-limited.
+const maxEventSubscribers = 64
+
 type requestState struct {
 	fingerprint string
 	done        chan struct{}
@@ -395,7 +405,16 @@ func (s *BridgeServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	// P3-055: bound what a single frame can cost. The read loop below
+	// discards everything it reads, so the limit protects memory, not semantics.
+	conn.SetReadLimit(maxEventFrameBytes)
 	sub := s.hub.Subscribe()
+	if sub == nil {
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "subscriber limit reached"),
+			time.Now().Add(time.Second))
+		return
+	}
 	defer sub.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 	conn.SetPongHandler(func(string) error {
@@ -449,9 +468,15 @@ type EventSubscription struct {
 
 func NewEventHub() *EventHub { return &EventHub{subscribers: map[uint64]*EventSubscription{}} }
 
+// Subscribe registers a new events client, or returns nil when the hub already
+// holds maxEventSubscribers clients (P3-055). A nil return means the caller must
+// refuse the connection: the hub never grows without bound.
 func (h *EventHub) Subscribe() *EventSubscription {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if len(h.subscribers) >= maxEventSubscribers {
+		return nil
+	}
 	h.nextID++
 	sub := &EventSubscription{Events: make(chan []byte, 32), hub: h, id: h.nextID}
 	h.subscribers[sub.id] = sub
