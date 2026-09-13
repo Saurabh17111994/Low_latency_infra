@@ -279,7 +279,7 @@ impl LiveNodeRuntime {
 
 /// Offline mass-status reconciliation (Tier 11). Iterates UNKNOWN attempts, read-only via bridge, never re-issues Place.
 pub mod reconcile {
-    use crate::bridge::protocol::{Command, CommandEnvelope};
+    use crate::bridge::protocol::{Command, CommandEnvelope, ReportEnvelope};
     use crate::bridge::BridgeClient;
     use crate::execution::client::{classify_bridge_report, BridgeOutcome};
 
@@ -288,7 +288,26 @@ pub mod reconcile {
         Accepted,
         Rejected,
         StillUnknownHalted,
+        /// The bridge round-trip for this COR failed (unreachable, HTTP failure, parse error).
+        /// Distinct from [`Self::StillUnknownHalted`], which is a *successful* reply saying the
+        /// state is still unknown — an availability failure must not read as a clean "no change"
+        /// sweep (P3-194). Carries the transport error, which is per-COR and not interchangeable.
+        TransportFailure(String),
     }
+
+    /// Maps a bridge reply to a decision; a failed round-trip keeps its own error instead of
+    /// being flattened into a fabricated `UNKNOWN` report (P3-194).
+    fn classify_or_transport(result: anyhow::Result<ReportEnvelope>) -> ReconcileDecision {
+        match result {
+            Ok(rep) => match classify_bridge_report(&rep) {
+                BridgeOutcome::Accepted => ReconcileDecision::Accepted,
+                BridgeOutcome::Rejected => ReconcileDecision::Rejected,
+                BridgeOutcome::Unknown => ReconcileDecision::StillUnknownHalted,
+            },
+            Err(e) => ReconcileDecision::TransportFailure(e.to_string()),
+        }
+    }
+
     pub async fn reconcile_execution_mass_status<B: BridgeClient>(
         bridge: &mut B,
         unknown_client_order_refs: &[String],
@@ -296,35 +315,50 @@ pub mod reconcile {
         if !bridge.is_connected() {
             bridge.connect().await?;
         }
-        let mut out = Vec::new();
+        let mut orders = Vec::new();
         for cor in unknown_client_order_refs {
             let mut q = CommandEnvelope::new(Command::QueryOrder, &format!("reconcile-q-{}", cor));
             q.client_order_ref = cor.clone();
-            let rep = bridge.send_command(q).await.unwrap_or_else(|e| {
-                crate::bridge::protocol::ReportEnvelope {
-                    outcome: "UNKNOWN".into(),
-                    reason: e.to_string(),
-                    client_order_ref: cor.clone(),
-                    ..Default::default()
-                }
-            });
-            let dec = match classify_bridge_report(&rep) {
-                BridgeOutcome::Accepted => ReconcileDecision::Accepted,
-                BridgeOutcome::Rejected => ReconcileDecision::Rejected,
-                BridgeOutcome::Unknown => ReconcileDecision::StillUnknownHalted,
-            };
-            out.push((cor.clone(), dec));
+            orders.push((
+                cor.clone(),
+                classify_or_transport(bridge.send_command(q).await),
+            ));
+        }
+        // Every COR failed at transport level: the bridge is unreachable, so this sweep is an
+        // availability failure, not a "found nothing" result. Return non-OK with each COR's own
+        // reason rather than one generic error (P3-194). A mixed sweep still returns `Ok` with
+        // per-COR markers. The mass snapshot is skipped — it would dial the same dead bridge.
+        if !orders.is_empty()
+            && orders
+                .iter()
+                .all(|(_, d)| matches!(d, ReconcileDecision::TransportFailure(_)))
+        {
+            let reasons: Vec<String> = orders
+                .iter()
+                .filter_map(|(cor, d)| match d {
+                    ReconcileDecision::TransportFailure(reason) => Some(format!("{cor}: {reason}")),
+                    _ => None,
+                })
+                .collect();
+            anyhow::bail!(
+                "bridge transport failed for all {} UNKNOWN COR(s); no status could be read: {}",
+                reasons.len(),
+                reasons.join("; ")
+            );
         }
         let mass = CommandEnvelope::new(Command::ReconcileOrders, "reconcile-mass-1");
         let _ = bridge.send_command(mass).await;
-        Ok(out)
+        Ok(orders)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::protocol::CommandEnvelope;
+    use crate::bridge::{BridgeClient, BridgeReportStream, ReportEnvelope};
     use nautilus_common::{cache::Cache, enums::Environment};
+    use std::collections::VecDeque;
     use std::time::Duration;
     use std::{cell::RefCell, rc::Rc};
 
@@ -563,5 +597,130 @@ mod tests {
             second.is_err(),
             "a second run must fail (runner consumed) — fail-closed restart guard"
         );
+    }
+
+    // ---------- P3-194 / P3-440: reconcile transport failures and the mass snapshot ----------
+
+    /// Test bridge double: records every envelope id and answers from a scripted queue, so
+    /// per-COR transport failures and ids can be observed deterministically.
+    struct ProbeBridge {
+        connected: bool,
+        sent_ids: Vec<String>,
+        replies: VecDeque<anyhow::Result<ReportEnvelope>>,
+    }
+
+    impl ProbeBridge {
+        fn new() -> Self {
+            Self {
+                connected: false,
+                sent_ids: Vec::new(),
+                replies: VecDeque::new(),
+            }
+        }
+
+        fn script(&mut self, reply: anyhow::Result<ReportEnvelope>) {
+            self.replies.push_back(reply);
+        }
+
+        fn script_bridge_error(&mut self, reason: &str) {
+            self.script(Err(anyhow::anyhow!(reason.to_string())));
+        }
+
+        /// Envelope ids of the trailing mass snapshots sent so far.
+        fn mass_ids(&self) -> Vec<String> {
+            self.sent_ids
+                .iter()
+                .filter(|id| id.starts_with("reconcile-mass-"))
+                .cloned()
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BridgeClient for ProbeBridge {
+        fn is_connected(&self) -> bool {
+            self.connected
+        }
+
+        async fn connect(&mut self) -> anyhow::Result<()> {
+            self.connected = true;
+            Ok(())
+        }
+
+        async fn disconnect(&mut self) -> anyhow::Result<()> {
+            self.connected = false;
+            Ok(())
+        }
+
+        async fn send_command(
+            &mut self,
+            envelope: CommandEnvelope,
+        ) -> anyhow::Result<ReportEnvelope> {
+            self.sent_ids.push(envelope.request_id.clone());
+            match self.replies.pop_front() {
+                Some(reply) => reply,
+                None => Err(anyhow::anyhow!("probe bridge: no scripted reply")),
+            }
+        }
+
+        fn take_reports(&mut self) -> Option<BridgeReportStream> {
+            None
+        }
+    }
+
+    /// Bridge reply for the given outcome; a broker id makes `SUCCESS` classify as accepted.
+    fn probe_reply(outcome: &str) -> ReportEnvelope {
+        ReportEnvelope {
+            outcome: outcome.to_string(),
+            broker_order_id: "BRK-0001".to_string(),
+            ..ReportEnvelope::default()
+        }
+    }
+
+    /// P3-194: when every COR round-trip fails at transport level the sweep must not return `Ok`
+    /// with all-`StillUnknownHalted` — an unreachable bridge is an availability failure, and each
+    /// COR's own reason must survive in the error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_all_cors_unreachable_is_not_ok() {
+        let mut bridge = ProbeBridge::new();
+        bridge.script_bridge_error("bridge unreachable");
+        bridge.script_bridge_error("bridge unreachable");
+        let refs = vec!["REF-A".to_string(), "REF-B".to_string()];
+
+        let err = reconcile::reconcile_execution_mass_status(&mut bridge, &refs)
+            .await
+            .expect_err("all-COR transport failure must not read as a clean no-change sweep");
+        let msg = err.to_string();
+        for cor in &refs {
+            assert!(msg.contains(cor), "per-COR reason missing for {cor}: {msg}");
+        }
+        assert!(
+            msg.contains("bridge unreachable"),
+            "transport reason missing from the error: {msg}"
+        );
+        assert!(
+            bridge.mass_ids().is_empty(),
+            "no mass snapshot should be dialled against an unreachable bridge"
+        );
+    }
+
+    /// P3-194: a mixed sweep stays `Ok` and keeps the transport failure distinct from a genuine
+    /// still-unknown answer, so callers can see which CORs could not be read.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_mixed_transport_failure_is_marked_per_cor() {
+        let mut bridge = ProbeBridge::new();
+        bridge.script_bridge_error("bridge unreachable");
+        bridge.script(Ok(probe_reply("SUCCESS"))); // REF-B
+        bridge.script(Ok(probe_reply("SUCCESS"))); // mass snapshot
+        let refs = vec!["REF-A".to_string(), "REF-B".to_string()];
+
+        let report = reconcile::reconcile_execution_mass_status(&mut bridge, &refs)
+            .await
+            .expect("a partially readable sweep still returns Ok");
+        assert_eq!(
+            report[0].1,
+            reconcile::ReconcileDecision::TransportFailure("bridge unreachable".to_string())
+        );
+        assert_eq!(report[1].1, reconcile::ReconcileDecision::Accepted);
     }
 }
