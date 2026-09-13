@@ -150,5 +150,28 @@ class ImageFreshnessTest(unittest.TestCase):
         self.assertIn("make ddl-image", msg)
 
 
+class RecreateVerdictTest(unittest.TestCase):
+    """Refusing over services no step touches cost two certificate runs in a row:
+    the shared stack re-runs its one-shot jobs and flink containers on their own."""
+
+    def test_fluss_cluster_recreation_is_drift(self):
+        drift, churn = gate_preflight.recreate_verdict(
+            ["01_docker-fluss-coordinator-1", "01_docker-fluss-tablet-1", "01_docker-zookeeper-1"])
+        self.assertEqual(len(drift), 3)
+        self.assertEqual(churn, [])
+
+    def test_one_shot_jobs_are_only_churn(self):
+        drift, churn = gate_preflight.recreate_verdict(
+            ["01_docker-flink-jobmanager-1", "01_docker-flink-taskmanager-1", "01_docker-compute-1"])
+        self.assertEqual(drift, [])
+        self.assertEqual(len(churn), 3)
+
+    def test_mixed_plan_keeps_both_halves(self):
+        drift, churn = gate_preflight.recreate_verdict(
+            ["01_docker-compute-1", "01_docker-fluss-tablet-1"])
+        self.assertEqual(drift, ["01_docker-fluss-tablet-1"])
+        self.assertEqual(churn, ["01_docker-compute-1"])
+
+
 if __name__ == "__main__":
     unittest.main()

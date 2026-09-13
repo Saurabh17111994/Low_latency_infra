@@ -146,6 +146,20 @@ def image_freshness(git_root: str) -> str:
             "(rebuild: make ddl-image, or make images for every service)")
 
 
+def recreate_verdict(recreated: list[str]) -> tuple[list[str], list[str]]:
+    """Split a recreate plan into what the gate's verdicts depend on and what they
+    do not.
+
+    Step 11 applies DDL against the Fluss cluster, so a coordinator/tablet/
+    zookeeper mid-recreation is real drift and must refuse. flink-jobmanager,
+    flink-taskmanager and compute are not touched by any step (compute is a
+    one-shot job that exited hours before the gate), and re-running them is
+    ordinary stack churn that would otherwise refuse a certificate for nothing.
+    """
+    drift = [c for c in recreated if any(s in c for s in REQUIRED_SERVICES)]
+    return drift, [c for c in recreated if c not in drift]
+
+
 def stack_containers() -> list[dict]:
     """`compose ps` for this project under the canonical form (tolerant of both
     the JSON-array and the JSON-lines output compose versions use)."""
@@ -214,8 +228,13 @@ def main(certifying: bool = True) -> int:
         else:
             recreate = recreate_services(dry.stdout + dry.stderr)
             if recreate:
-                drift.append("compose would RECREATE " + ", ".join(recreate) +
-                             " — run `make up` (canonical form) before the gate")
+                rec_drift, rec_churn = recreate_verdict(recreate)
+                if rec_drift:
+                    drift.append("compose would RECREATE " + ", ".join(rec_drift) +
+                                 " — run `make up` (canonical form) before the gate")
+                if rec_churn:
+                    print("  WARN  compose would recreate " + ", ".join(rec_churn) +
+                          " — no gate step uses them (advisory)")
             image_state = image_freshness(PROJECT_ROOT)
             if image_state:
                 if dirty:
