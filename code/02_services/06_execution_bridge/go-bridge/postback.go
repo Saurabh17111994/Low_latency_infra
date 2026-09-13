@@ -54,6 +54,14 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 	backoff := initialBackoff
 	for ctx.Err() == nil {
 		source, err := connect()
+		// P3-047/P3-046: a connect that reports success while yielding no source is
+		// a connect failure, not a readable stream. source.Read/source.Close would
+		// panic on the nil interface inside the reader goroutine and nothing
+		// recovers it — the loop runs as a bare `go RunPostbackLoop` in main.go, so
+		// that panic takes the whole bridge process down.
+		if err == nil && source == nil {
+			err = fmt.Errorf("postback connect returned no order-update source")
+		}
 		if err != nil {
 			if onError != nil {
 				onError(err)

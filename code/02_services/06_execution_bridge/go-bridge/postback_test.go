@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -136,6 +137,48 @@ func TestRunPostbackLoopReconnectsAfterReaderReturns(t *testing.T) {
 	}
 	if connects != 2 {
 		t.Fatalf("connect attempts=%d, want 2", connects)
+	}
+}
+
+// P3-047/P3-046: connect() can report success while yielding no source. The loop
+// must treat that as a connect error (report + backoff retry) instead of calling
+// Read/Close on a nil source, which panics inside the reader goroutine and takes
+// the whole bridge process down — the loop runs as a bare `go RunPostbackLoop`,
+// so nothing recovers it.
+func TestRunPostbackLoopTreatsNilSourceAsConnectError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	var seen []error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPostbackLoop(ctx,
+			func() (OrderUpdateSource, error) { return nil, nil },
+			func(ReportEnvelope) error { return nil },
+			func(err error) {
+				mu.Lock()
+				seen = append(seen, err)
+				mu.Unlock()
+				cancel() // stop the loop after the first classified failure
+			},
+			time.Nanosecond, time.Nanosecond)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("postback loop did not exit after a nil-source connect error")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(seen) == 0 {
+		t.Fatal("a nil source must surface as a connect error, not as a usable stream")
+	}
+	if seen[0] == nil {
+		t.Fatal("connect error must be non-nil")
 	}
 }
 
