@@ -283,3 +283,49 @@ func TestRunPostbackLoopEscalatesBackoffWithoutDeliveredReports(t *testing.T) {
 		t.Fatalf("reconnect gaps did not escalate: first=%v last=%v", first, last)
 	}
 }
+
+type stubbornReadSource struct {
+	updates  []map[string]any
+	finished chan struct{}
+	hold     time.Duration
+}
+
+// Read deliberately ignores ctx and Close: only the join keeps it from outliving the
+// loop attempt.
+func (s *stubbornReadSource) Read(_ context.Context, onUpdate func(map[string]any), _ func(error)) {
+	for _, update := range s.updates {
+		onUpdate(update)
+	}
+	time.Sleep(s.hold)
+	close(s.finished)
+}
+func (s *stubbornReadSource) Close() error { return nil }
+
+// P3-257: the attempt must not reconnect or return while the previous reader is still
+// inside Read — the abandoned goroutine holds the old updates channel and leaves broker
+// I/O in flight past shutdown.
+func TestRunPostbackLoopJoinsReaderBeforeReturning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	source := &stubbornReadSource{finished: make(chan struct{}), hold: 100 * time.Millisecond}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runPostbackLoop(ctx, func() (OrderUpdateSource, error) {
+			cancel() // stop the loop while the reader is still inside Read
+			return source, nil
+		}, func(ReportEnvelope) error { return nil }, nil, time.Millisecond, time.Millisecond)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("postback loop did not stop")
+	}
+	select {
+	case <-source.finished:
+	default:
+		t.Fatal("loop returned while the reader was still inside Read")
+	}
+}

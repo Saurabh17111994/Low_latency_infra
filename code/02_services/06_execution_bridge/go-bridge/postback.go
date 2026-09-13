@@ -40,6 +40,11 @@ func NewArrowOrderUpdateSource(client *arrow.Client) (OrderUpdateSource, error) 
 	return &arrowOrderUpdateSource{stream: stream}, nil
 }
 
+// postbackReaderJoinTimeout bounds how long an attempt waits for its reader to leave
+// Read before reconnecting anyway. The value is the one named by P3-257; it is not a
+// tuning knob, and a reader that respects ctx never reaches it.
+const postbackReaderJoinTimeout = 5 * time.Second
+
 // RunPostbackLoop reconnects after a dropped order-update socket. It does not
 // retry a place command; it only restores observation of broker reports.
 func RunPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, error), publish func(ReportEnvelope) error, onError func(error)) {
@@ -162,6 +167,19 @@ func runPostbackLoop(ctx context.Context, connect func() (OrderUpdateSource, err
 		}
 		cancel()
 		_ = source.Close()
+		// P3-257: do not move on while the reader is still inside Read. Cancelling the
+		// read context and closing the source are both advisory — the SDK read can sit
+		// on its own deadline and an implementation may ignore both — and an abandoned
+		// reader keeps running past this attempt, holds the old updates channel and
+		// leaves I/O in flight past shutdown. Bounded so a wedged read cannot stall
+		// recovery for ever, and reported when the bound is hit.
+		select {
+		case <-readDone:
+		case <-time.After(postbackReaderJoinTimeout):
+			if onError != nil {
+				onError(fmt.Errorf("postback reader did not stop within %s", postbackReaderJoinTimeout))
+			}
+		}
 		// P3-254/P3-258: only a connection that published a report proves the stream
 		// was healthy, and only that one resets the schedule — to the caller-supplied
 		// initial backoff (production passes a second; deterministic tests pass a
