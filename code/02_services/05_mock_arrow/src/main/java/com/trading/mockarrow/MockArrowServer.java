@@ -191,10 +191,11 @@ public class MockArrowServer {
     /** Write one batch to one session; removes and closes it on I/O failure. */
     private void deliver(ClientSession session, String json) {
         try {
-            // R-040: the wire contract is one JSON object per line — write the
-            // whole batch as N lines, not one JSON array line.
+            // R-040: the wire contract is one JSON object per line — the
+            // batch string already ends every tick with '\n', so no extra
+            // separator (e.g. newLine()) may be appended here; it would put a
+            // blank line between batches.
             session.writer.write(json);
-            session.writer.newLine();
             session.writer.flush();
         } catch (IOException e) {
             clients.remove(session);
