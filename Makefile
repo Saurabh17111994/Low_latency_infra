@@ -4,6 +4,10 @@
 # S2 (2026-08-29): secrets live in secrets.env (git-ignored); both env files are
 # loaded at parse time so ${VAR} interpolation sees the secrets.
 COMPOSE := docker compose --env-file code/01_platform/01_docker/.env --env-file code/01_platform/01_docker/secrets.env -f code/01_platform/01_docker/docker-compose.yml
+
+# Every target that mutates the shared stack takes the gate's lock first:
+# one stack, two writers — see code/01_platform/04_scripts/stack-lock.sh.
+STACK_LOCK := bash code/01_platform/04_scripts/stack-lock.sh
 # R-143: default to ONLINE maven (a fresh checkout has an empty ~/.m2 and -o
 # fails obscurely). Set MVN_FLAGS=-o when the local cache is warm.
 MVN := mvn $(MVN_FLAGS)
@@ -125,12 +129,12 @@ ddl:
 	@echo "(Plain 'make ddl' only validates; run 'make ddl APPLY=1 EVIDENCE=<file>' to execute the contract.)"
 
 up:
-	$(COMPOSE) up -d
+	$(STACK_LOCK) $(COMPOSE) up -d
 	@bash code/01_platform/04_scripts/catalog-guard.sh \
 		|| echo "!!! catalog-guard: catalog NOT healthy — see messages above. Fix before trading."
 
 down:
-	$(COMPOSE) down
+	$(STACK_LOCK) $(COMPOSE) down
 
 logs:
 	$(COMPOSE) logs -f
@@ -242,7 +246,7 @@ check-image-stale-fast:
 images:
 	@stamps="$$(python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --print-stamps-env)" || exit 1; \
 	[ -n "$$stamps" ] || { echo "images: no build stamps computed — refusing to build unstamped images"; exit 1; }; \
-	env $$stamps $(COMPOSE) build $$(python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --print-services) && \
+	$(STACK_LOCK) env $$stamps $(COMPOSE) build $$(python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --print-services) && \
 	python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --compose code/01_platform/01_docker/docker-compose.yml --require-stamps
 
 # 08 Local Compose Phase A — L0-L4 (offline + gated container probes)
@@ -383,7 +387,7 @@ eod-controller:
 ddl-image:
 	@stamps="$$(python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --print-stamps-env)" || exit 1; \
 	[ -n "$$stamps" ] || { echo "ddl-image: no build stamps computed — refusing to build unstamped images"; exit 1; }; \
-	env $$stamps $(COMPOSE) build ddl-apply && \
+	$(STACK_LOCK) env $$stamps $(COMPOSE) build ddl-apply && \
 	python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --compose code/01_platform/01_docker/docker-compose.yml --service ddl-apply --require-stamps
 
 # Non-root ownership contract gate (evidence_ownership_check.py): every
@@ -508,4 +512,4 @@ pin-check:
 	@bash code/01_platform/04_scripts/pin-check.sh
 
 clean:
-	$(COMPOSE) down -v
+	$(STACK_LOCK) $(COMPOSE) down -v

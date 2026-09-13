@@ -309,6 +309,9 @@ if [ -z "${GATE_SWEEP_CHILD:-}" ]; then
 	fi
 	# We hold the lock, so rewriting the pid record by name cannot race.
 	printf '%s\n' "$$" >"$GATE_LOCK_FILE"
+	# Our children may legitimately mutate the stack (they are inside this locked
+	# section); stack-lock.sh passes them through instead of contending with us.
+	export STACK_LOCK_HELD=1
 fi
 
 # A certifying run needs a frozen commit. --steps/--sweep are repair-loop runs:
