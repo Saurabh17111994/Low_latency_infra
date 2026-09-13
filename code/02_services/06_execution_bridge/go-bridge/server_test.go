@@ -218,3 +218,112 @@ func TestUnserializableReportDataFailsClosed(t *testing.T) {
 			report.RequestID, report.InstructionID, report.ExecutionAttemptID)
 	}
 }
+
+// postCommandWithContext is postCommand with a caller-controlled request
+// context, so a test can make one client disconnect while another is in flight.
+// It reports through t.Error rather than t.Fatal: callers use it from
+// goroutines, where Fatal only stops that goroutine (go vet flags the pattern)
+// and can hang the test.
+func postCommandWithContext(t *testing.T, handler http.Handler, ctx context.Context, command CommandEnvelope, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(command)
+	if err != nil {
+		t.Error(err)
+		return httptest.NewRecorder()
+	}
+	req := httptest.NewRequest(http.MethodPost, commandPath, strings.NewReader(string(body))).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// P3-051 first half — a duplicate command whose venue call is still in flight
+// makes the follower wait on the owner. The follower used to wait with no
+// select, pinning its goroutine and its connection even after its own client had
+// gone.
+func TestFollowerStopsWaitingWhenItsClientDisconnects(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	broker := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-release // hold the venue call open for the whole test
+		return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: "BRK-1"}
+	}}
+	bridge, err := NewBridgeServer(broker, "internal-secret", "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := bridge.Handler()
+	command := validPlaceCommand()
+
+	owner := make(chan struct{})
+	go func() {
+		defer close(owner)
+		postCommandWithContext(t, handler, context.Background(), command, "internal-secret")
+	}()
+	<-entered // the owner is inside the broker call
+	defer close(release)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		postCommandWithContext(t, handler, ctx, command, "internal-secret")
+	}()
+	time.Sleep(50 * time.Millisecond) // let the follower reach the wait
+	cancel()                          // its client disconnects
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the follower is still pinned after its client disconnected: it waits on state.done with no ctx select")
+	}
+}
+
+// P3-051 second half — the owner must complete the dedup state on every path. A
+// panic in dispatch (no recover in handleCommand) used to leave the state
+// unfinished forever, so that RequestID made every later caller a follower of a
+// request that would never finish.
+func TestFollowerUnblocksWhenTheOwnerPanics(t *testing.T) {
+	broker := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		panic("venue adapter exploded")
+	}}
+	bridge, err := NewBridgeServer(broker, "internal-secret", "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := bridge.Handler()
+	command := validPlaceCommand()
+
+	// The owner panics. net/http recovers this in production; the harness does it
+	// here so the panic does not take the test binary down.
+	ownerDone := make(chan struct{})
+	go func() {
+		defer close(ownerDone)
+		defer func() { _ = recover() }()
+		postCommandWithContext(t, handler, context.Background(), command, "internal-secret")
+	}()
+	<-ownerDone
+
+	// A later reuse of that RequestID must answer, not wait forever. Its context
+	// never expires, so only a completed state can release it.
+	done := make(chan struct{})
+	var report ReportEnvelope
+	go func() {
+		defer close(done)
+		rec := postCommandWithContext(t, handler, context.Background(), command, "internal-secret")
+		_ = json.Unmarshal(rec.Body.Bytes(), &report)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the dedup state was never completed: this RequestID is blocked for the process lifetime")
+	}
+	if report.Outcome != OutcomeUnknown || report.Reason == "" {
+		t.Fatalf("report=%+v want a fail-closed UNKNOWN with a reason", report)
+	}
+}

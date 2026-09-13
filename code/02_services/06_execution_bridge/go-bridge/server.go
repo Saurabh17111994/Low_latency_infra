@@ -141,18 +141,39 @@ func (s *BridgeServer) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !owner {
-		<-state.done
-		s.writeJSON(w, http.StatusOK, state.report)
+		// P3-051: never pin this goroutine — and this client's connection — on a
+		// request whose owner is slow or may never finish.
+		select {
+		case <-state.done:
+			s.writeJSON(w, http.StatusOK, state.report)
+		case <-r.Context().Done():
+		}
 		return
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.commandTimeout)
 	defer cancel()
+	// P3-051: the owner completes the dedup state on every path, panic included.
+	// A state left unfinished turns that RequestID into a follower of a request
+	// that never finishes, for the lifetime of the process.
+	finished := false
+	defer func() {
+		if !finished {
+			s.finishRequest(state, resultToReport(command, unknownResult(errDispatchPanicked)))
+		}
+	}()
 	result := s.dispatch(ctx, command)
 	report := resultToReport(command, result)
+	finished = true
 	s.finishRequest(state, report)
 	s.writeJSON(w, http.StatusOK, report)
 }
+
+// errDispatchPanicked is the fixed cause for the fail-closed report an owner
+// writes when dispatch panics. It is deliberately not the panic value: the value
+// reaches the server log through the re-panic, and a stable cause keeps the
+// reason token from depending on whatever text the panic carried.
+var errDispatchPanicked = errors.New("dispatch panicked")
 
 func (s *BridgeServer) beginRequest(command CommandEnvelope) (*requestState, bool, bool, error) {
 	fp, err := fingerprint(command)
