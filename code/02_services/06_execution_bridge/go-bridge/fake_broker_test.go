@@ -65,3 +65,23 @@ func TestFakeBrokerRefusesEnvelopesTheRealBrokerWould(t *testing.T) {
 		t.Errorf("valid place: outcome=%s reason=%s, want SUCCESS: the guard must not reject valid envelopes", got.Outcome, got.Reason)
 	}
 }
+
+// P3-245: every placement gets its own id. One fixed id makes two orders
+// indistinguishable, so a test cannot catch a conflated or swapped id.
+func TestFakeBrokerGivesEveryPlacementItsOwnOrderID(t *testing.T) {
+	fake := NewFakeBroker()
+	ctx := t.Context()
+
+	first := fake.Place(ctx, validPlaceCommand())
+	if first.BrokerOrderID != "fake-broker-order-1" {
+		t.Errorf("first place id=%q, want fake-broker-order-1: the counter keeps runs comparable", first.BrokerOrderID)
+	}
+	seen := map[string]bool{first.BrokerOrderID: true}
+	for i := 2; i <= 5; i++ {
+		got := fake.Place(ctx, validPlaceCommand())
+		if seen[got.BrokerOrderID] {
+			t.Errorf("place %d reused id %q: two placements must not share an id", i, got.BrokerOrderID)
+		}
+		seen[got.BrokerOrderID] = true
+	}
+}

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"strconv"
 	"sync"
+	"sync/atomic"
 )
 
 // FakeBroker is an offline-only broker double. It records command counts and
@@ -12,6 +14,7 @@ type FakeBroker struct {
 	results       map[string]BrokerResult
 	defaultResult *BrokerResult
 	calls         map[string]int
+	seq           atomic.Uint64
 }
 
 func NewFakeBroker() *FakeBroker {
@@ -73,7 +76,9 @@ func (f *FakeBroker) result(ctx context.Context, command string, c CommandEnvelo
 	}
 	result = BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: c.BrokerOrderID}
 	if command == CommandPlace {
-		result.BrokerOrderID = "fake-broker-order-1"
+		// P3-245: unique per placement so two orders cannot share an id; the counter
+		// keeps runs comparable (the first id is still fake-broker-order-1).
+		result.BrokerOrderID = "fake-broker-order-" + strconv.FormatUint(f.seq.Add(1), 10)
 	}
 	if command == CommandReconcileOrders {
 		result.Data = []map[string]string{{"id": "fake-broker-order-1", "orderStatus": "OPEN"}}
