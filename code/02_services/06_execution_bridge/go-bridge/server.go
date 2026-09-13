@@ -35,10 +35,17 @@ type BridgeServer struct {
 	requests       map[string]*requestState
 }
 
+// maxTrackedRequests bounds the request-identity cache (P3-053). The caller
+// supplies the key, so the cache needs a ceiling that does not depend on caller
+// behaviour; 4096 identities is far more than a retry window needs in one
+// process, and the cache is only an optimisation over durable reconciliation.
+const maxTrackedRequests = 4096
+
 type requestState struct {
 	fingerprint string
 	done        chan struct{}
 	report      ReportEnvelope
+	finishedAt  time.Time // zero while the request is still in flight
 }
 
 func NewBridgeServer(broker Broker, authToken, mode string) (*BridgeServer, error) {
@@ -216,16 +223,51 @@ func (s *BridgeServer) beginRequest(command CommandEnvelope) (*requestState, boo
 		return existing, false, false, nil
 	}
 	state := &requestState{fingerprint: fp, done: make(chan struct{})}
+	// P3-053: bound the cache. A new identity may evict completed ones, oldest
+	// completion first; an in-flight identity is never dropped, because
+	// forgetting one would let its RequestID dispatch the same order again.
+	if len(s.requests) >= maxTrackedRequests {
+		s.evictCompletedLocked(len(s.requests) - maxTrackedRequests + 1)
+	}
 	s.requests[command.RequestID] = state
 	return state, true, false, nil
+}
+
+// evictCompletedLocked drops up to n completed identities, oldest completion
+// first, and leaves every in-flight identity in place. It must be called with
+// requestMu held.
+//
+// ponytail: one linear scan per eviction. It only runs once the cache is at its
+// cap, and the map is 4096 entries, so the scan is not worth a linked list yet —
+// replace it with an LRU list if the cap grows or the scan shows up in profiles.
+func (s *BridgeServer) evictCompletedLocked(n int) {
+	for n > 0 {
+		oldestID := ""
+		var oldestAt time.Time
+		for id, state := range s.requests {
+			if state.finishedAt.IsZero() {
+				continue // in flight: its RequestID must stay deduplicated
+			}
+			if oldestID == "" || state.finishedAt.Before(oldestAt) {
+				oldestID, oldestAt = id, state.finishedAt
+			}
+		}
+		if oldestID == "" {
+			return // everything left is in flight: the cap cannot be honoured yet
+		}
+		delete(s.requests, oldestID)
+		n--
+	}
 }
 
 func (s *BridgeServer) finishRequest(state *requestState, report ReportEnvelope) {
 	s.requestMu.Lock()
 	state.report = report
+	state.finishedAt = time.Now()
 	close(state.done)
-	// Retain completed request identities for this process lifetime. A restart
-	// deliberately loses this cache; durable attempt reconciliation remains the
+	// Retain completed request identities until the cache reaches its cap
+	// (P3-053), which bounds both cardinality and key size. A restart still loses
+	// this cache deliberately: durable attempt reconciliation remains the
 	// authority for crash recovery.
 	s.requestMu.Unlock()
 }

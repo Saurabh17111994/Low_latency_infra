@@ -106,6 +106,11 @@ func validateClientOrderRef(ref string) error {
 	return nil
 }
 
+// maxRequestIDLength bounds the client-supplied request identity: it keys the
+// bridge's dedup cache, so an unbounded key is an unbounded map entry (P3-053).
+// The executor sends a UUID; 128 leaves room for any future scheme.
+const maxRequestIDLength = 128
+
 func validateCommand(c CommandEnvelope) error {
 	if c.RecordType != RecordCommand {
 		return fmt.Errorf("record_type must be %q", RecordCommand)
@@ -115,6 +120,11 @@ func validateCommand(c CommandEnvelope) error {
 	}
 	if strings.TrimSpace(c.RequestID) == "" {
 		return fmt.Errorf("request_id is required")
+	}
+	// P3-053: the identity keys the bridge's dedup cache, so its size is bounded
+	// at the same place its presence is checked.
+	if len(c.RequestID) > maxRequestIDLength {
+		return fmt.Errorf("request_id must be at most %d characters, got %d", maxRequestIDLength, len(c.RequestID))
 	}
 	switch c.Command {
 	case CommandPlace, CommandModify:

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -409,4 +410,80 @@ func TestLateVenueResultReachesTheDedupState(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("the venue's late SUCCESS never reached the dedup state")
+}
+
+// P3-053 first half — the dedup map is keyed by client-supplied RequestID and
+// used to be retained for the process lifetime, so authenticated traffic could
+// grow it without bound. Completed entries are evicted oldest-first at the cap;
+// an in-flight entry must survive, because forgetting one would let its
+// RequestID dispatch the same order a second time.
+func TestDedupMapIsBoundedAndKeepsInFlightRequests(t *testing.T) {
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	broker := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		if c.RequestID == "req-stall" {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release
+		}
+		return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: "BRK-" + c.RequestID}
+	}}
+	bridge, err := NewBridgeServer(broker, "internal-secret", "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := bridge.Handler()
+	ctx := context.Background()
+
+	stalled := validPlaceCommand()
+	stalled.RequestID = "req-stall"
+	go postCommandWithContext(t, handler, ctx, stalled, "internal-secret")
+	<-entered
+
+	for i := 0; i < maxTrackedRequests+50; i++ {
+		command := validPlaceCommand()
+		command.RequestID = fmt.Sprintf("req-%d", i)
+		if rec := postCommandWithContext(t, handler, ctx, command, "internal-secret"); rec.Code != http.StatusOK {
+			t.Fatalf("request %d code=%d want 200", i, rec.Code)
+		}
+	}
+
+	bridge.requestMu.Lock()
+	size := len(bridge.requests)
+	_, stalledStillTracked := bridge.requests["req-stall"]
+	bridge.requestMu.Unlock()
+	close(release)
+
+	if size > maxTrackedRequests {
+		t.Errorf("dedup map holds %d identities with a cap of %d: it grows without bound", size, maxTrackedRequests)
+	}
+	if !stalledStillTracked {
+		t.Error("an in-flight identity was evicted: its RequestID could dispatch a second order")
+	}
+}
+
+// P3-053 second half — the RequestID is a client-supplied map key, so its length
+// is bounded with the key set it feeds.
+func TestOverlongRequestIDIsRefusedBeforeTheBroker(t *testing.T) {
+	calls := 0
+	broker := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		calls++
+		return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: "BRK-1"}
+	}}
+	_, server := startTestServer(t, broker)
+	command := validPlaceCommand()
+	command.RequestID = strings.Repeat("r", maxRequestIDLength+1)
+
+	code, report := postCommand(t, server.URL, command, "internal-secret")
+	if code != http.StatusBadRequest {
+		t.Errorf("code=%d want 400 for a %d-character request_id", code, len(command.RequestID))
+	}
+	if !strings.Contains(report.Reason, "request_id") {
+		t.Errorf("reason=%q want it to name request_id", report.Reason)
+	}
+	if calls != 0 {
+		t.Errorf("broker calls=%d want 0: an over-long id must not reach the venue", calls)
+	}
 }
