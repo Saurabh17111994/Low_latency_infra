@@ -880,6 +880,19 @@ services:
     depends_on: [fluss-coordinator, fluss-tablet]
     environment:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
+      # A DEDICATED subdir, not the mounted evidence root: the root still holds
+      # legacy host-owned records from before the uid-10001 ownership contract
+      # (P4-161/P4-163), and the entrypoint refuses to write when any top-level
+      # entry under the evidence dir is not engine-owned — which made every
+      # service run (default CMD `validate`, started by `make up`) exit 1 on an
+      # established host. Dedicated subdirs are the entrypoint's documented
+      # remedy; catalog-guard.sh redirects its own runs the same way.
+      DDL_APPLY_EVIDENCE_DIR: ${DDL_APPLY_EVIDENCE_DIR:-/app/logs/ddl-apply/service}
+      # The dispatcher's compiled-in default (/app/logs/schema-compat/...md) is a
+      # host-side path that no operator flow mounts, so the in-container default
+      # must point at a file the image actually carries: the DDL manifest. Same
+      # choice catalog-guard.sh and ddl_apply_smoke.py's drill make.
+      DDL_APPLY_MATRIX_EVIDENCE: ${DDL_APPLY_MATRIX_EVIDENCE:-/app/code/01_platform/02_sql/ddl/schema_manifest.json}
     volumes:
       # Evidence lands on the host at repo-root logs/ddl-apply (same dir the
       # host-side contract writes), so host automation can read the records.

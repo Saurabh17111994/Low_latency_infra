@@ -28,7 +28,7 @@
 # recovery (2026-09-05).
 #
 # Usage:   catalog-guard.sh            # probe only? no — probe + auto-apply
-# Env:     EXPECTED_TABLES=31          # default 31 (schema_manifest.json)
+# Env:     EXPECTED_TABLES=<n>         # default = schema_manifest.json table count
 #          DDL_APPLY_MATRIX_EVIDENCE   # path inside ddl-apply container
 #          COMPOSE_PROJECT_DIR         # where docker-compose.yml lives
 #          DRY_RUN=1                   # probe only, never apply
@@ -40,7 +40,22 @@ set -u
 # ── Config ────────────────────────────────────────────────────────────────
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 COMPOSE_DIR="${COMPOSE_PROJECT_DIR:-$ROOT/code/01_platform/01_docker}"
-EXPECTED_TABLES="${EXPECTED_TABLES:-31}"
+# Default = the manifest's table count (was a hardcoded 31 while the candle-era
+# DDLs 03/04/30/31 still existed; the 2026-09-05 retirement left 27 entries, so a
+# hardcoded count drifts on every DDL change and makes a repaired catalog look
+# incomplete). Env override wins; an unreadable manifest fails closed.
+if [ -z "${EXPECTED_TABLES:-}" ]; then
+    _guard_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+    EXPECTED_TABLES="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))["tables"]))' "$_guard_root/code/01_platform/02_sql/ddl/schema_manifest.json" 2>/dev/null)" \
+        || EXPECTED_TABLES=""
+    [ -n "$EXPECTED_TABLES" ] || fail "cannot read the table count from code/01_platform/02_sql/ddl/schema_manifest.json (set EXPECTED_TABLES to override)" 5
+fi
+# Matrix evidence for the apply. The dispatcher (ddl-apply-run.sh, P4-167) owns
+# this flag: it REFUSES --matrix-evidence/--apply-verified on the command line
+# and reads DDL_APPLY_MATRIX_EVIDENCE only. Default = the in-image manifest,
+# matching ddl_apply_smoke.py's own drill invocation; the schema-compat markdown
+# the host-side `make ddl APPLY=1 EVIDENCE=<md>` uses lives under logs/ on the
+# host and is not part of the image, so it cannot be the container default.
 MATRIX_EVIDENCE="${DDL_APPLY_MATRIX_EVIDENCE:-/app/code/01_platform/02_sql/ddl/schema_manifest.json}"
 COMPOSE=(docker compose --env-file "$COMPOSE_DIR/.env" --env-file "$COMPOSE_DIR/secrets.env" -f "$COMPOSE_DIR/docker-compose.yml")
 ZK_CONTAINER="$(docker ps --filter "name=zookeeper" --format '{{.Names}}' | head -1)"
@@ -107,9 +122,20 @@ if [ "${DRY_RUN:-0}" = "1" ]; then
 fi
 
 log "catalog EMPTY — applying DDL contract"
-"${COMPOSE[@]}" run --rm ddl-apply apply \
-    --apply-verified \
-    --matrix-evidence "$MATRIX_EVIDENCE"
+# The evidence ROOT (logs/ddl-apply) can hold legacy host-owned dirs from
+# runs before the uid-10001 ownership contract (P4-161/P4-163), and the
+# entrypoint refuses to write when ANY top-level entry under the evidence
+# dir is not engine-owned. Its documented remedy is a DEDICATED subdir:
+# redirect this run's records there and leave the old evidence untouched.
+GUARD_EVIDENCE_DIR="${DDL_APPLY_EVIDENCE_DIR:-/app/logs/ddl-apply/guard-repair-$(date -u +%Y%m%dT%H%M%SZ)}"
+# Both knobs go through the environment: the dispatcher rejects the equivalent
+# CLI flags as duplicated state (P4-167), and `apply` already implies
+# --apply-verified. Passing them on the command line made every recovery run
+# exit 2 on the flag check even once the evidence file was reachable.
+"${COMPOSE[@]}" run --rm \
+    -e "DDL_APPLY_EVIDENCE_DIR=$GUARD_EVIDENCE_DIR" \
+    -e "DDL_APPLY_MATRIX_EVIDENCE=$MATRIX_EVIDENCE" \
+    ddl-apply apply
 rc=$?
 if [ "$rc" -ne 0 ]; then
     # A failed smoke on a freshly-created table (leader election race) makes
