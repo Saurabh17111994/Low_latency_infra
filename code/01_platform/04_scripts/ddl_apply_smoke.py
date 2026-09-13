@@ -120,6 +120,35 @@ def cleanup_prefix(prefix, classpath, bootstrap):
         pass  # best-effort only
 
 
+def _compose_cmd(compose_file):
+    """`docker compose` argv prefix for this stack — env files included.
+
+    The Makefile always invokes compose as
+    `docker compose --env-file <dir>/.env --env-file <dir>/secrets.env -f ...`.
+    compose auto-loads `.env` beside the compose file but NOT `secrets.env`, so
+    a bare `-f` invocation resolves a DIFFERENT config for the services that
+    interpolate secrets: `docker compose config --hash=*` returns different
+    hashes for fluss-coordinator and fluss-tablet with and without these files
+    (verified 2026-09-13; ddl-apply's hash is identical). Compose then treats
+    the running containers as out of date and RECREATES them on the next
+    `run`/`up`, so this drill used to restart the Fluss cluster immediately
+    before applying against it — the apply died on "CoordinatorEventProcessor
+    is not initialized yet", the `ddl-apply: RESULT=PASS EXIT=0` sentinel never
+    printed, and the scenario failed against a cluster that the gate's step 9
+    had already warmed (2026-09-13, gate attempts 24 and 26). Passing the same
+    env files keeps both forms in agreement, so nothing is recreated.
+    Missing files are skipped here; compose then fails its own required-variable
+    validation, which is the accurate error for that state.
+    """
+    env_dir = os.path.dirname(os.path.abspath(compose_file))
+    cmd = ["docker", "compose"]
+    for name in (".env", "secrets.env"):
+        path = os.path.join(env_dir, name)
+        if os.path.isfile(path):
+            cmd += ["--env-file", path]
+    return cmd + ["-f", compose_file]
+
+
 def _docker_smoke_available(compose_file):
     """Return (image_ref, skip_reason) for the containerized S4 drill.
 
@@ -132,7 +161,7 @@ def _docker_smoke_available(compose_file):
         return None, "docker CLI not found on this host"
     if not os.path.isfile(compose_file):
         return None, f"compose file not found: {compose_file}"
-    if subprocess.run(["docker", "compose", "-f", compose_file, "config"],
+    if subprocess.run(_compose_cmd(compose_file) + ["config"],
                       capture_output=True, text=True).returncode != 0:
         return None, ("docker compose config invalid "
                       "(missing required .env vars?)")
@@ -221,8 +250,12 @@ def scenario_container_bad_ownership(compose_file, bootstrap, classpath):
             print("  FAIL: could not seed the bad-ownership record "
                   "(root helper container failed)")
             return False
-        cmd = [
-            "docker", "compose", "-f", compose_file, "run", "--rm",
+        # Invoked through _compose_cmd so the resolved config matches the
+        # running containers (see the docstring there): a mismatched form makes
+        # `run` recreate fluss-coordinator/fluss-tablet and the apply then races
+        # their startup.
+        cmd = _compose_cmd(compose_file) + [
+            "run", "--rm",
             "-v", f"{seed_dir}:/bad",
             "-e", "DDL_APPLY_EVIDENCE_DIR=/bad",
             "-e", f"DDL_APPLY_TABLE_PREFIX={prefix}",
