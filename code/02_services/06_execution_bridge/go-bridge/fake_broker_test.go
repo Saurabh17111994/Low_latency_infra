@@ -37,3 +37,31 @@ func TestFakeBrokerPresetCarriesTheFingerprintOfItsData(t *testing.T) {
 			got.Fingerprint)
 	}
 }
+
+// P3-244: the HTTP boundary validates the envelope before dispatch, but a test
+// that drives the broker directly bypasses it. ArrowBroker dereferences c.Order
+// on place/modify and forwards the id on cancel/query, so the double must refuse
+// the same envelopes instead of answering SUCCESS for one the venue never sees.
+func TestFakeBrokerRefusesEnvelopesTheRealBrokerWould(t *testing.T) {
+	fake := NewFakeBroker()
+	ctx := t.Context()
+
+	noOrder := validPlaceCommand()
+	noOrder.Order = nil
+	if got := fake.Place(ctx, noOrder); got.Outcome != OutcomeRejected {
+		t.Errorf("place with no order: outcome=%s, want REJECTED: the live broker would never send it", got.Outcome)
+	}
+
+	noID := validPlaceCommand()
+	noID.Command = CommandCancel
+	noID.Order = nil
+	noID.BrokerOrderID = ""
+	if got := fake.Cancel(ctx, noID); got.Outcome != OutcomeRejected {
+		t.Errorf("cancel with no broker_order_id: outcome=%s, want REJECTED: the live broker would forward an empty id", got.Outcome)
+	}
+
+	// The guard must reject the invalid envelopes only, never every command.
+	if got := fake.Place(ctx, validPlaceCommand()); got.Outcome != OutcomeSuccess {
+		t.Errorf("valid place: outcome=%s reason=%s, want SUCCESS: the guard must not reject valid envelopes", got.Outcome, got.Reason)
+	}
+}

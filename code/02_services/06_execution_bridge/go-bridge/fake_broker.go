@@ -64,6 +64,13 @@ func (f *FakeBroker) result(ctx context.Context, command string, c CommandEnvelo
 		}
 		return result
 	}
+	// P3-244: the HTTP boundary validates the envelope before dispatch, but a test
+	// that drives the broker directly bypasses it. ArrowBroker dereferences c.Order
+	// on place/modify and forwards the id on cancel/query, so refuse the same
+	// envelopes instead of answering SUCCESS for one the venue would never see.
+	if err := validateCommand(c); err != nil {
+		return rejectedResult(err)
+	}
 	result = BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: c.BrokerOrderID}
 	if command == CommandPlace {
 		result.BrokerOrderID = "fake-broker-order-1"
