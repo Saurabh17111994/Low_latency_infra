@@ -141,8 +141,9 @@ async fn main() -> anyhow::Result<()> {
         tokio::select! {
             _ = wait_for_shutdown_signal() => {
                 tracing::info!("shutdown signal received; stopping LiveNode, draining (readyz -> 503)");
+                // Keep the loop alive so the pinned run future is polled to its clean return
+                // instead of being dropped mid-shutdown (P3-211).
                 node_handle.stop();
-                break;
             }
             result = &mut node_run => {
                 // The loop must not end on its own in normal operation (node stays HALTED).
@@ -161,8 +162,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     runtime.begin_shutdown();
-    server.abort();
-    let _ = server.await;
+    drain_http_server(&mut server, Duration::from_secs(5)).await;
     Ok(())
 }
 
@@ -222,4 +222,69 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
 async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
     tokio::signal::ctrl_c().await?;
     Ok(())
+}
+
+/// Bounded drain of the HTTP server task after `/readyz` flips to 503 (P3-211): in-flight
+/// requests get up to `grace` to finish before the task is aborted and reaped. The old
+/// shutdown aborted immediately, cancelling every in-flight request instead of draining.
+async fn drain_http_server(
+    server: &mut tokio::task::JoinHandle<anyhow::Result<()>>,
+    grace: Duration,
+) {
+    match tokio::time::timeout(grace, &mut *server).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => {
+            tracing::error!(error = ?e, "http server exited with an error while draining")
+        }
+        Ok(Err(join)) => {
+            tracing::error!(error = ?join, "http server task failed while draining")
+        }
+        Err(_) => {
+            tracing::warn!(
+                grace_s = grace.as_secs(),
+                "http server drain window elapsed; aborting the server task"
+            );
+            server.abort();
+            if let Err(join) = server.await {
+                tracing::debug!(error = ?join, "http server task reaped after abort");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod p3_211_http_server_drain_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn drain_waits_out_the_grace_window_then_aborts_a_hung_server() {
+        // P3-211: the old shutdown aborted the server immediately, so in-flight work was
+        // cancelled instead of being allowed to finish against the draining surface.
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let mut completes_soon = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            flag.store(true, Ordering::SeqCst);
+            Ok::<(), anyhow::Error>(())
+        });
+        drain_http_server(&mut completes_soon, Duration::from_secs(1)).await;
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "in-flight work must get the grace window instead of an immediate abort"
+        );
+
+        let mut hangs = tokio::spawn(async { std::future::pending::<anyhow::Result<()>>().await });
+        let started = std::time::Instant::now();
+        drain_http_server(&mut hangs, Duration::from_millis(40)).await;
+        assert!(
+            hangs.is_finished(),
+            "a hung server must still be aborted and reaped"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the drain must be bounded by the grace window, elapsed {:?}",
+            started.elapsed()
+        );
+    }
 }
