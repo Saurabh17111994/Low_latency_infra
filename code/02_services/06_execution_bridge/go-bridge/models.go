@@ -172,6 +172,19 @@ func validateOrderCommand(o OrderCommand) error {
 	if exchange == "" || strings.EqualFold(exchange, "INDEX") {
 		return fmt.Errorf("execution exchange must be non-empty and not INDEX")
 	}
+	// P3-253: validation matched these fields case-insensitively after trimming,
+	// but the adapter upper-cases them without trimming and forwards the exchange
+	// verbatim — so a padded value passed validation and reached Arrow padded.
+	for _, field := range []struct{ name, value string }{
+		{"exchange", o.Exchange},
+		{"order_type", o.OrderType},
+		{"product", o.Product},
+		{"validity", o.Validity},
+	} {
+		if containsSpace(field.value) {
+			return fmt.Errorf("%s must not contain whitespace", field.name)
+		}
+	}
 	// P3-252: the symbol is forwarded verbatim, so whitespace and unbounded
 	// length used to reach Arrow as part of an otherwise well-formed order.
 	if o.Symbol == "" || containsSpace(o.Symbol) {

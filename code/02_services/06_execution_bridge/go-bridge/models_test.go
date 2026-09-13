@@ -314,3 +314,62 @@ func TestToArrowMarketOrderCanonicalisesZeroPriceForms(t *testing.T) {
 		t.Fatalf("LMT price forwarded as %q, want 15050.25", order.Price)
 	}
 }
+
+// P3-253: validation trimmed (or ignored) whitespace on these fields while the
+// adapter upper-cases them without trimming and forwards exchange verbatim, so a
+// padded value passed validation and then reached Arrow padded.
+func TestValidateCommandRejectsPaddedForwardedFields(t *testing.T) {
+	var accepted []string
+	for _, tc := range []struct {
+		label  string
+		mutate func(*OrderCommand)
+	}{
+		{"padded exchange", func(o *OrderCommand) { o.Exchange = " NSE " }},
+		{"padded order_type", func(o *OrderCommand) { o.OrderType = " lmt " }},
+		{"padded product", func(o *OrderCommand) { o.Product = " c " }},
+		{"padded validity", func(o *OrderCommand) { o.Validity = " ioc " }},
+		{"order_type with internal whitespace", func(o *OrderCommand) { o.OrderType = "L MT" }},
+		{"validity with internal whitespace", func(o *OrderCommand) { o.Validity = "I OC" }},
+	} {
+		command := validPlaceCommand()
+		tc.mutate(command.Order)
+		if err := validateCommand(command); err == nil {
+			accepted = append(accepted, tc.label)
+		}
+	}
+	if len(accepted) > 0 {
+		t.Fatalf("padded fields accepted and forwarded: %v", accepted)
+	}
+
+	// Case stays tolerated where the adapter upper-cases the field, and the
+	// adapter's output is canonical for a valid order.
+	for _, tc := range []struct {
+		label  string
+		mutate func(*OrderCommand)
+	}{
+		{"lowercase order_type", func(o *OrderCommand) { o.OrderType = "lmt" }},
+		{"lowercase product", func(o *OrderCommand) { o.Product = "c" }},
+		{"lowercase validity", func(o *OrderCommand) { o.Validity = "day" }},
+		{"lowercase transaction_type", func(o *OrderCommand) { o.TransactionType = "buy" }},
+	} {
+		command := validPlaceCommand()
+		tc.mutate(command.Order)
+		if err := validateCommand(command); err != nil {
+			t.Fatalf("%s must stay valid: %v", tc.label, err)
+		}
+		order, err := toArrowOrder(*command.Order, command.ClientOrderRef)
+		if err != nil {
+			t.Fatalf("%s must be convertible: %v", tc.label, err)
+		}
+		for _, field := range []struct{ name, value string }{
+			{"exchange", order.Exchange},
+			{"order_type", order.OrderType},
+			{"product", order.Product},
+			{"validity", order.Validity},
+		} {
+			if strings.TrimSpace(field.value) != field.value {
+				t.Fatalf("%s forwarded padded as %q", field.name, field.value)
+			}
+		}
+	}
+}
