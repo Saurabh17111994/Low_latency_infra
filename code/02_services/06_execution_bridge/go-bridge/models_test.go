@@ -146,3 +146,44 @@ func TestCommandEnvelopeIdentityRequirednessAndWireShape(t *testing.T) {
 		}
 	}
 }
+
+// P3-473: commands that correlate by broker_order_id (or by nothing at all) must
+// not silently accept payloads meant for place — a cancel carrying an order body
+// is a caller bug, not a field to ignore. Every accepted-but-invalid shape is
+// collected so one run reports all of them.
+func TestValidateCommandRejectsSemanticExtras(t *testing.T) {
+	order := validPlaceCommand().Order
+	var accepted []string
+	expectRejected := func(label string, c CommandEnvelope) {
+		if err := validateCommand(c); err == nil {
+			accepted = append(accepted, label)
+		}
+	}
+	for _, command := range []string{CommandCancel, CommandQueryOrder} {
+		expectRejected(command+" with order body", CommandEnvelope{
+			RecordType: RecordCommand, ContractVersion: ProtocolVersion,
+			RequestID: "req-1", Command: command, BrokerOrderID: "BRK-1", Order: order,
+		})
+	}
+	for _, command := range []string{CommandReconcileOrders, CommandReconcileTrades, CommandReconcilePosition} {
+		base := CommandEnvelope{RecordType: RecordCommand, ContractVersion: ProtocolVersion,
+			RequestID: "req-1", Command: command}
+		if err := validateCommand(base); err != nil {
+			t.Fatalf("%s without extras must stay valid: %v", command, err)
+		}
+		withOrder := base
+		withOrder.Order = order
+		expectRejected(command+" with order body", withOrder)
+		withBrokerID := base
+		withBrokerID.BrokerOrderID = "BRK-1"
+		expectRejected(command+" with broker_order_id", withBrokerID)
+	}
+	if len(accepted) > 0 {
+		t.Fatalf("accepted command shapes that must be rejected: %v", accepted)
+	}
+	legit := CommandEnvelope{RecordType: RecordCommand, ContractVersion: ProtocolVersion,
+		RequestID: "req-1", Command: CommandCancel, BrokerOrderID: "BRK-1"}
+	if err := validateCommand(legit); err != nil {
+		t.Fatalf("cancel with broker_order_id must stay valid: %v", err)
+	}
+}

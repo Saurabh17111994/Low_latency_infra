@@ -141,7 +141,21 @@ func validateCommand(c CommandEnvelope) error {
 		if strings.TrimSpace(c.BrokerOrderID) == "" {
 			return fmt.Errorf("broker_order_id is required for %s", c.Command)
 		}
+		// P3-473: an order body on a broker_order_id-keyed command is a caller
+		// mistake (typically a payload meant for place). Reject it instead of
+		// silently ignoring the field.
+		if c.Order != nil {
+			return fmt.Errorf("order is not allowed for %s", c.Command)
+		}
 	case CommandReconcileOrders, CommandReconcileTrades, CommandReconcilePosition:
+		// P3-473: reconciles correlate by platform identity only; an order body or a
+		// broker order id here means the caller mismatched the command.
+		if c.Order != nil {
+			return fmt.Errorf("order is not allowed for %s", c.Command)
+		}
+		if strings.TrimSpace(c.BrokerOrderID) != "" {
+			return fmt.Errorf("broker_order_id is not allowed for %s", c.Command)
+		}
 	default:
 		return fmt.Errorf("unsupported command %q", c.Command)
 	}
