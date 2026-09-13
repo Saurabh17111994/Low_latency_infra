@@ -187,3 +187,25 @@ func TestValidateCommandRejectsSemanticExtras(t *testing.T) {
 		t.Fatalf("cancel with broker_order_id must stay valid: %v", err)
 	}
 }
+
+// P3-044: the INDEX guard compared the raw value, so padding (" INDEX ",
+// "index\t") satisfied the emptiness check and then failed the EqualFold
+// comparison — an index/underlying slipped through as executable.
+func TestValidateCommandRejectsPaddedIndexExchange(t *testing.T) {
+	var accepted []string
+	for _, exchange := range []string{"INDEX", "index", " INDEX ", "index\t", "\tInDeX\n", " index "} {
+		command := validPlaceCommand()
+		command.Order.Exchange = exchange
+		if err := validateCommand(command); err == nil {
+			accepted = append(accepted, exchange)
+		}
+	}
+	if len(accepted) > 0 {
+		t.Fatalf("index exchanges accepted as executable: %q", accepted)
+	}
+	command := validPlaceCommand()
+	command.Order.Exchange = "NSE"
+	if err := validateCommand(command); err != nil {
+		t.Fatalf("NSE must stay valid: %v", err)
+	}
+}

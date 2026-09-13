@@ -163,7 +163,11 @@ func validateCommand(c CommandEnvelope) error {
 }
 
 func validateOrderCommand(o OrderCommand) error {
-	if strings.TrimSpace(o.Exchange) == "" || strings.EqualFold(o.Exchange, "INDEX") {
+	// P3-044: compare the trimmed value — comparing the raw string let " INDEX "
+	// pass the emptiness check and then fail EqualFold, so an index slipped through
+	// as executable.
+	exchange := strings.TrimSpace(o.Exchange)
+	if exchange == "" || strings.EqualFold(exchange, "INDEX") {
 		return fmt.Errorf("execution exchange must be non-empty and not INDEX")
 	}
 	if strings.TrimSpace(o.Symbol) == "" || strings.TrimSpace(o.Quantity) == "" {
