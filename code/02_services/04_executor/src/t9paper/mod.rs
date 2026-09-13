@@ -14,6 +14,7 @@
 //! canonical serialized evidence body (minus its own self-referential field), so "evidence
 //! HASHED" means what it claims.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -281,6 +282,13 @@ impl Scenario {
 }
 
 /// Returns the scripted scenario for instrument slot `idx` of [`PAPER_INSTRUMENTS`].
+///
+/// # Panics
+///
+/// Panics for a slot outside [`PAPER_INSTRUMENTS`]: the sibling helpers (`order_json`,
+/// `shadow_position`, `reconciliation_snapshot`) index the same table and panic for such a
+/// slot, so a wildcard default here would silently record an out-of-range row as `DISCONNECT`
+/// whenever the table grows without the classifier following (P3-218).
 #[must_use]
 pub fn scenario_for_idx(idx: usize) -> Scenario {
     match idx {
@@ -288,7 +296,12 @@ pub fn scenario_for_idx(idx: usize) -> Scenario {
         10..=14 => Scenario::PartialFill,
         15..=19 => Scenario::Rejected,
         20..=22 => Scenario::Unknown,
-        _ => Scenario::Disconnect,
+        23..=24 => Scenario::Disconnect,
+        _ => panic!(
+            "scenario slot {idx} is outside PAPER_INSTRUMENTS ({} slots, valid 0..{})",
+            PAPER_INSTRUMENTS.len(),
+            PAPER_INSTRUMENTS.len() - 1
+        ),
     }
 }
 
@@ -382,13 +395,14 @@ pub fn evidence_root() -> PathBuf {
 
 impl Run {
     /// Boots the safety gate (must be `HALTED`, health must not imply ENABLED) and prepares a
-    /// fresh run directory. Fails fast so no evidence is written under a non-halted gate.
+    /// fresh run directory. Fails fast so no evidence is written under a non-halted gate and an
+    /// existing run directory is never reused.
     ///
     /// `kind` prefixes the run id and directory, e.g. `"t9-paper-25"`.
     ///
     /// # Errors
     ///
-    /// Returns an error if the evidence directory cannot be created.
+    /// Returns an error if the evidence directory cannot be created or already exists.
     pub fn start(kind: &str) -> anyhow::Result<Self> {
         let gate = Gate::new();
         assert_eq!(gate.state().to_string(), "HALTED", "T9 must start HALTED");
@@ -403,9 +417,19 @@ impl Run {
             .expect("system clock before unix epoch")
             .as_secs();
         let run_id = format!("{kind}-{now}");
-        let output_dir = evidence_root().join(&run_id);
-        std::fs::create_dir_all(&output_dir)
-            .with_context(|| format!("create evidence dir {}", output_dir.display()))?;
+        let root = evidence_root();
+        std::fs::create_dir_all(&root)
+            .with_context(|| format!("create evidence root {}", root.display()))?;
+        let output_dir = root.join(&run_id);
+        // P3-219: the run id only has whole-second resolution, so create the run directory
+        // exclusively - a restart inside the same second must fail loudly instead of adopting
+        // the earlier run's directory and overwriting its retained evidence.
+        std::fs::create_dir(&output_dir).with_context(|| {
+            format!(
+                "create evidence dir {} (a run with this id already exists; refusing to overwrite retained evidence)",
+                output_dir.display()
+            )
+        })?;
 
         Ok(Self {
             run_id,
@@ -504,12 +528,27 @@ pub fn finalize_evidence(mut evidence: Value) -> Value {
 
 /// Writes `value` as pretty JSON to `dir/name`, returning the written path.
 ///
+/// The file content and its parent directory entry are fsynced before returning: a retained
+/// evidence artifact must be durable once the harness reports success.
+///
 /// # Errors
 ///
-/// Returns an error if serialization or the write fails.
+/// Returns an error if serialization, the write, or either sync fails.
 pub fn write_json(dir: &Path, name: &str, value: &Value) -> anyhow::Result<PathBuf> {
     let path = dir.join(name);
-    std::fs::write(&path, serde_json::to_string_pretty(value)?)?;
+    let body = serde_json::to_string_pretty(value)?;
+    let mut file = std::fs::File::create(&path)
+        .with_context(|| format!("create evidence file {}", path.display()))?;
+    file.write_all(body.as_bytes())
+        .with_context(|| format!("write evidence file {}", path.display()))?;
+    // P3-462: `std::fs::write` stops at the page cache, so a crash after the harness reports
+    // success could leave this retained artifact truncated or missing.
+    file.sync_all()
+        .with_context(|| format!("sync evidence file {}", path.display()))?;
+    // The file is durable, but its new directory entry is not until the parent is synced too.
+    std::fs::File::open(dir)
+        .and_then(|handle| handle.sync_all())
+        .with_context(|| format!("sync evidence dir {}", dir.display()))?;
     Ok(path)
 }
 
@@ -743,6 +782,64 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("sha256:"));
+    }
+
+    #[test]
+    fn disconnect_box_is_the_last_two_slots() {
+        assert_eq!(scenario_for_idx(23), Scenario::Disconnect);
+        assert_eq!(scenario_for_idx(24), Scenario::Disconnect);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside PAPER_INSTRUMENTS")]
+    fn out_of_range_slot_is_rejected_not_defaulted() {
+        // P3-218: the classifier must reject slots the instrument table does not have rather
+        // than silently labelling them DISCONNECT (the sibling helpers index the table and
+        // panic for the same slot).
+        let _ = scenario_for_idx(PAPER_INSTRUMENTS.len());
+    }
+
+    #[test]
+    fn start_refuses_a_pre_existing_run_dir() {
+        // P3-219: the run id has whole-second resolution, so a second start inside the same
+        // second must not adopt (and overwrite) the first run's retained evidence directory.
+        // Occupy the ids of the seconds around the current one so a clock tick between the
+        // steps cannot dodge the guard.
+        const KIND: &str = "t9-paper-219-test";
+        let root = evidence_root();
+        std::fs::create_dir_all(&root).expect("create evidence root");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after the epoch")
+            .as_secs();
+        let occupied: Vec<PathBuf> = [now.saturating_sub(1), now, now + 1]
+            .iter()
+            .map(|secs| root.join(format!("{KIND}-{secs}")))
+            .collect();
+        for dir in &occupied {
+            std::fs::create_dir_all(dir).expect("occupy run dir");
+        }
+
+        let started = Run::start(KIND);
+
+        for dir in &occupied {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        if let Ok(run) = &started {
+            let _ = std::fs::remove_dir_all(&run.output_dir);
+        }
+        let err = started.expect_err("a pre-existing run dir must not be adopted");
+        assert!(
+            err.to_string().contains("refusing to overwrite"),
+            "unexpected error: {err}"
+        );
+        if root
+            .read_dir()
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false)
+        {
+            let _ = std::fs::remove_dir(&root);
+        }
     }
 
     #[test]

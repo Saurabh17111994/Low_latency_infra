@@ -37,6 +37,39 @@ fn build_route_forwarder(selection: &BridgeSelection) -> Box<dyn BridgeClient + 
     }
 }
 
+/// Resolves the clock-drift check interval from `CLOCK_DRIFT_CHECK_INTERVAL_S` (P3-456).
+/// Zero must never reach `tokio::time::interval` (it panics on a zero period), so a bad or
+/// missing value falls back to the 30 s default. Pure + env-free so the parse is testable.
+fn parse_drift_interval(raw: Option<&str>) -> Duration {
+    Duration::from_secs(
+        raw.and_then(|v| v.parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
+            .unwrap_or(30),
+    )
+}
+
+#[cfg(test)]
+mod p3_456_drift_interval_tests {
+    use super::*;
+
+    #[test]
+    fn zero_clock_drift_check_interval_is_rejected_before_tokio_interval() {
+        // P3-456: `tokio::time::interval(Duration::ZERO)` panics; a 0-second config must
+        // fall back to the default instead of aborting the service at boot.
+        assert_eq!(
+            parse_drift_interval(Some("0")),
+            Duration::from_secs(30),
+            "a 0-second interval must not reach tokio::time::interval"
+        );
+        assert_eq!(parse_drift_interval(Some("45")), Duration::from_secs(45));
+        assert_eq!(parse_drift_interval(None), Duration::from_secs(30));
+        assert_eq!(
+            parse_drift_interval(Some("nonsense")),
+            Duration::from_secs(30)
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = ServiceConfig::from_env()?;
@@ -71,18 +104,17 @@ async fn main() -> anyhow::Result<()> {
         .server_state()
         .with_forwarder(route_forwarder)
         .with_gateway_endpoint(gateway_endpoint);
-    let server = tokio::spawn(http::serve(addr, state));
+    let mut server = tokio::spawn(http::serve(addr, state));
 
     // B8 clock-drift safety: the offline slice samples a fixed zero offset (no NTP on the
     // laptop dev box — a real NTP/chrony source is a Workstream-D/prod concern behind the
     // same OffsetSource trait, see clockwatch.rs). The monitor enforces CLOCK_OFFSET_LIMIT_MS
     // on the gate: |offset| beyond the limit (or an unmeasurable probe) fails closed to
     // HALTED; recovery is only ever the sanctioned reconcile -> approval -> enable path.
-    let drift_interval = Duration::from_secs(
+    let drift_interval = parse_drift_interval(
         std::env::var("CLOCK_DRIFT_CHECK_INTERVAL_S")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30),
+            .as_deref(),
     );
     let mut drift_monitor = DriftMonitor::new(
         runtime.config.clock_offset_limit_ms,
@@ -96,16 +128,24 @@ async fn main() -> anyhow::Result<()> {
         "clock-drift monitor armed (fixed zero-offset source; NTP in Workstream D)"
     );
 
+    // The hosted run future must be pinned once and polled by `&mut`: `run_forever` consumes
+    // the runner, so re-creating it on every drift tick would abort the service and cancel
+    // in-flight node work each pass (P3-021). The stop handle is taken first because the
+    // pinned future holds the mutable borrow of `node`.
+    let node_handle = node.handle();
+    let mut node_run = Box::pin(node.run_forever());
+
     // Run until a shutdown signal or the node loop ends; the periodic drift check is a
     // non-terminal branch (a drift halt is enforced on the gate, the process keeps serving).
     loop {
         tokio::select! {
             _ = wait_for_shutdown_signal() => {
                 tracing::info!("shutdown signal received; stopping LiveNode, draining (readyz -> 503)");
-                node.request_shutdown();
-                break;
+                // Keep the loop alive so the pinned run future is polled to its clean return
+                // instead of being dropped mid-shutdown (P3-211).
+                node_handle.stop();
             }
-            result = node.run_forever() => {
+            result = &mut node_run => {
                 // The loop must not end on its own in normal operation (node stays HALTED).
                 result?;
                 break;
@@ -114,12 +154,57 @@ async fn main() -> anyhow::Result<()> {
                 let status = runtime.enforce_clock_drift(&mut drift_monitor);
                 tracing::debug!(status = ?status, "periodic clock-drift enforcement");
             }
+            result = &mut server => {
+                // P3-212: an HTTP task exit leaves the service with no health/readiness
+                // surface; surface it as fatal instead of swallowing it.
+                return Err(http_server_exit_error(result));
+            }
         }
     }
     runtime.begin_shutdown();
-    server.abort();
-    let _ = server.await;
+    drain_http_server(&mut server, Duration::from_secs(5)).await;
     Ok(())
+}
+
+/// Classifies an HTTP server task exit as the fatal error it is (P3-212). The old shutdown
+/// path dropped this result with `let _ = server.await`, so a failed bind left the service
+/// running with no health/readiness endpoints and no trace of the cause.
+fn http_server_exit_error(
+    result: Result<anyhow::Result<()>, tokio::task::JoinError>,
+) -> anyhow::Error {
+    match result {
+        Ok(Ok(())) => anyhow::anyhow!("http server exited unexpectedly"),
+        Ok(Err(e)) => anyhow::anyhow!("http server failed: {e:#}"),
+        Err(join) => anyhow::anyhow!("http server task failed: {join:?}"),
+    }
+}
+
+#[cfg(test)]
+mod p3_212_http_server_exit_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_http_server_handle_is_surfaced_as_fatal_not_discarded() {
+        // P3-212: a bind failure must reach the operator with its cause; the old
+        // `let _ = server.await` dropped both the join outcome and the serve error.
+        let failed = tokio::spawn(async {
+            Err::<(), anyhow::Error>(anyhow::anyhow!(
+                "bind health server 127.0.0.1:9: address in use"
+            ))
+        });
+        let err = http_server_exit_error(failed.await);
+        assert!(
+            format!("{err:#}").contains("address in use"),
+            "the joined server error must be surfaced with its cause, got: {err:#}"
+        );
+
+        let panicked = tokio::spawn(async { panic!("bind panicked") });
+        let err = http_server_exit_error(panicked.await);
+        assert!(
+            format!("{err}").contains("http server task failed"),
+            "a panicked server task must still be surfaced as fatal, got: {err}"
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -137,4 +222,69 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
 async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
     tokio::signal::ctrl_c().await?;
     Ok(())
+}
+
+/// Bounded drain of the HTTP server task after `/readyz` flips to 503 (P3-211): in-flight
+/// requests get up to `grace` to finish before the task is aborted and reaped. The old
+/// shutdown aborted immediately, cancelling every in-flight request instead of draining.
+async fn drain_http_server(
+    server: &mut tokio::task::JoinHandle<anyhow::Result<()>>,
+    grace: Duration,
+) {
+    match tokio::time::timeout(grace, &mut *server).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => {
+            tracing::error!(error = ?e, "http server exited with an error while draining")
+        }
+        Ok(Err(join)) => {
+            tracing::error!(error = ?join, "http server task failed while draining")
+        }
+        Err(_) => {
+            tracing::warn!(
+                grace_s = grace.as_secs(),
+                "http server drain window elapsed; aborting the server task"
+            );
+            server.abort();
+            if let Err(join) = server.await {
+                tracing::debug!(error = ?join, "http server task reaped after abort");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod p3_211_http_server_drain_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[tokio::test]
+    async fn drain_waits_out_the_grace_window_then_aborts_a_hung_server() {
+        // P3-211: the old shutdown aborted the server immediately, so in-flight work was
+        // cancelled instead of being allowed to finish against the draining surface.
+        let finished = Arc::new(AtomicBool::new(false));
+        let flag = finished.clone();
+        let mut completes_soon = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            flag.store(true, Ordering::SeqCst);
+            Ok::<(), anyhow::Error>(())
+        });
+        drain_http_server(&mut completes_soon, Duration::from_secs(1)).await;
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "in-flight work must get the grace window instead of an immediate abort"
+        );
+
+        let mut hangs = tokio::spawn(async { std::future::pending::<anyhow::Result<()>>().await });
+        let started = std::time::Instant::now();
+        drain_http_server(&mut hangs, Duration::from_millis(40)).await;
+        assert!(
+            hangs.is_finished(),
+            "a hung server must still be aborted and reaped"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the drain must be bounded by the grace window, elapsed {:?}",
+            started.elapsed()
+        );
+    }
 }

@@ -257,6 +257,17 @@ impl Projection {
         fill: &FillEvent,
         now_ms: i64,
     ) -> ProjectionResult {
+        Self::apply_with_id(current, fill, &fill.position_id, now_ms)
+    }
+
+    /// Body of [`Self::apply`] with the row identity supplied separately (P3-459): `feed_on_key`
+    /// resolves the id itself and must not clone the whole fill just to rewrite `position_id`.
+    fn apply_with_id(
+        current: Option<&PositionSnapshot>,
+        fill: &FillEvent,
+        position_id: &str,
+        now_ms: i64,
+    ) -> ProjectionResult {
         // Version gate (SCH-09). P3-392 mirror: the gate only runs when there IS a prior. Forcing
         // the current version to 0 for a first fill made an incoming version 0 evaluate
         // Conflict -> Violation — rejecting a legitimate first write and labelling it "CONFLICT".
@@ -370,7 +381,7 @@ impl Projection {
         }
 
         let snapshot = PositionSnapshot {
-            position_id: fill.position_id.clone(),
+            position_id: position_id.to_string(),
             trade_context_id: fill.trade_context_id.clone(),
             account_scope_id: fill.account_scope_id.clone(),
             instrument_token: fill.instrument_token,
@@ -518,33 +529,40 @@ impl PositionProjectorDriver {
 
     /// Feed a fully resolved fill. Mirrors `PositionProjectorDriver.feed(FillEvent, nowMs)`.
     pub fn feed_fill(&mut self, fill: &FillEvent, now_ms: i64) -> FeedResult {
+        self.feed_fill_at(&fill.position_id, fill, now_ms)
+    }
+
+    /// Shared body of [`Self::feed_fill`] and [`Self::feed_on_key`] (P3-459). Taking the resolved
+    /// id as a parameter lets `feed_on_key` feed the caller's fill directly instead of cloning
+    /// the whole event just to rewrite `position_id`.
+    fn feed_fill_at(&mut self, resolved_id: &str, fill: &FillEvent, now_ms: i64) -> FeedResult {
         // Retired ids are not in `snapshots` anymore, so without this check the fill below
         // would take the first-fill path and mint a phantom row for a closed cycle (P3-458).
-        if let Some(&last) = self.retired.get(&fill.position_id) {
+        if let Some(&last) = self.retired.get(resolved_id) {
             if fill.source_sequence <= last {
                 return FeedResult {
                     outcome: FeedOutcome::Stale,
                     snapshot: None,
-                    position_id: fill.position_id.clone(),
+                    position_id: resolved_id.to_string(),
                     reason: Some(format!(
                         "fill for retired position {} at or below watermark {}",
-                        fill.position_id, last
+                        resolved_id, last
                     )),
                 };
             }
             return FeedResult {
                 outcome: FeedOutcome::Violation,
                 snapshot: None,
-                position_id: fill.position_id.clone(),
+                position_id: resolved_id.to_string(),
                 reason: Some(format!(
                     "fill for retired position {} above watermark {}",
-                    fill.position_id, last
+                    resolved_id, last
                 )),
             };
         }
-        let current = self.snapshots.get(&fill.position_id);
-        let r = Projection::apply(current, fill, now_ms);
-        let position_id = fill.position_id.clone();
+        let current = self.snapshots.get(resolved_id);
+        let r = Projection::apply_with_id(current, fill, resolved_id, now_ms);
+        let position_id = resolved_id.to_string();
         match r.outcome {
             ProjectionOutcome::Applied => {
                 if let Some(s) = r.snapshot.clone() {
@@ -583,9 +601,9 @@ impl PositionProjectorDriver {
     /// Mirrors the operator path (`feed(GenericRow, ctx, nowMs)` -> map -> resolve -> project).
     pub fn feed_on_key(&mut self, key: &PositionKey, fill: &FillEvent, now_ms: i64) -> FeedResult {
         let position_id = self.resolve_position_id(key, fill);
-        let mut positioned = fill.clone();
-        positioned.position_id = position_id.clone();
-        let r = self.feed_fill(&positioned, now_ms);
+        // P3-459: feed the caller's fill through the resolved id instead of cloning the whole
+        // event (six Strings) to rewrite one field; `feed_fill_at` borrows every lookup.
+        let r = self.feed_fill_at(&position_id, fill, now_ms);
         // Preserve the resolved id on the result.
         FeedResult { position_id, ..r }
     }
@@ -602,14 +620,15 @@ impl PositionProjectorDriver {
         let Some(current_id) = self.active.get(key).cloned() else {
             return self.mint(key);
         };
-        let Some(current) = self.snapshots.get(&current_id).cloned() else {
-            return current_id;
-        };
-        if current.state == PositionState::Closed
-            && key.side == Side::Buy
-            && fill.source_sequence > current.source_version
-            && fill.source_event_id != current.source_event_id
-        {
+        // P3-459: borrow the snapshot to read `state`; cloning the row copied seven Strings on
+        // the feed path for one field.
+        let reopen = self.snapshots.get(&current_id).is_some_and(|current| {
+            current.state == PositionState::Closed
+                && key.side == Side::Buy
+                && fill.source_sequence > current.source_version
+                && fill.source_event_id != current.source_event_id
+        });
+        if reopen {
             return self.mint(key);
         }
         current_id

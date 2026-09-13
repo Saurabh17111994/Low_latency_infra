@@ -2,7 +2,8 @@
 //!
 //! [`Runtime::init`] constructs the fail-closed boot surface: a gate that always starts `HALTED`,
 //! a health snapshot that never implies `ENABLED`, and the shared [`ServerState`] the health
-//! server reads. `main` calls `init` and then serves health until a shutdown signal arrives.
+//! server reads. `main` calls `init` and then serves health until a shutdown signal arrives;
+//! shutdown halts the gate before draining (see [`Runtime::begin_shutdown`]).
 
 use anyhow::{ensure, Result};
 
@@ -25,7 +26,13 @@ impl Runtime {
     /// Builds the boot surface and asserts the fail-closed invariants:
     /// gate `HALTED` and health does not imply `ENABLED`.
     pub fn init(config: ServiceConfig) -> Result<Self> {
-        // Offline `LiveNode` construction probe (compile + path verification only).
+        // Deliberate boot-time smoke test of the pinned `nautilus-live` wiring (P3-424). It runs
+        // on every boot rather than only under `#[cfg(test)]` because `LiveNodeBuilder::from_config`
+        // and `add_exec_client` report their failures at runtime (both return `Result`); a
+        // compile-time/type check cannot see those, and a test-only check never runs against the
+        // deployed binary. Failing here aborts the boot before the service advertises health, so a
+        // broken constructor or exec-client registration surfaces as a failed start — not at the
+        // first order.
         EngineFactory::verify_construction_path()?;
 
         let gate = Gate::new();
@@ -54,7 +61,9 @@ impl Runtime {
         })
     }
 
-    /// Current gate state (always `HALTED` at boot; monotonic from there).
+    /// Current gate state. `HALTED` at boot and again after any safety halt; **not** monotonic:
+    /// the sanctioned enablement path advances it, and `Gate::safety_halt` (clock drift, operator
+    /// halt, shutdown) restores `HALTED` from any state. Booting `HALTED` is the guarantee.
     pub fn gate_state(&self) -> ExecState {
         self.gate.state()
     }
@@ -72,12 +81,30 @@ impl Runtime {
     /// Samples clock drift and enforces it on the gate (B8): `Beyond`/`Unmeasurable`
     /// trigger `safety_halt()`; recovery is only ever via the sanctioned human path.
     /// The live NTP source is wired in Workstream D behind `OffsetSource`.
+    ///
+    /// Halting `self.gate` alone is not enough (D4): `/v1/intents` and `/healthz` read the shared
+    /// `ServerState` snapshot, so a drift halt must halt that surface too — otherwise the live
+    /// intent route keeps forwarding after the gate has been halted (fail-open), while health
+    /// still reports ENABLED. Same shape P3-185 fixed for shutdown.
     pub fn enforce_clock_drift(&mut self, monitor: &mut DriftMonitor) -> DriftStatus {
-        monitor.enforce(&mut self.gate)
+        let status = monitor.enforce(&mut self.gate);
+        if matches!(
+            status,
+            DriftStatus::Beyond(_) | DriftStatus::Unmeasurable(_)
+        ) {
+            self.state.safety_halt("clock drift beyond limit");
+        }
+        status
     }
 
-    /// Starts graceful shutdown: `/readyz` returns 503 while draining.
-    pub fn begin_shutdown(&self) {
+    /// Starts graceful shutdown: the gate is safety-halted **first** (clearing approvals and the
+    /// bound evidence, so no new broker command can be emitted) and then `/readyz` returns 503.
+    /// The order is deliberate (P3-185): a draining service must never still be armed to execute.
+    pub fn begin_shutdown(&mut self) {
+        self.gate.safety_halt();
+        // The shared snapshot is the surface `/v1/intents` checks, so halting `self.gate` alone
+        // would leave the live intent route forwarding while we drain.
+        self.state.safety_halt("service shutdown");
         self.state.set_draining(true);
     }
 }
@@ -120,10 +147,49 @@ mod tests {
 
     #[test]
     fn begin_shutdown_marks_draining() {
-        let rt = Runtime::init(halted_config()).unwrap();
+        let mut rt = Runtime::init(halted_config()).unwrap();
         assert!(!rt.health_json()["draining"].as_bool().unwrap());
         rt.begin_shutdown();
         assert!(rt.health_json()["draining"].as_bool().unwrap());
+    }
+
+    /// Drives the runtime's authoritative `Gate` through the sanctioned enablement path:
+    /// authorized operator + declared epoch + approval bound to the evidence hash.
+    fn enable_runtime_gate(rt: &mut Runtime) {
+        rt.gate.add_authorized("saurabh");
+        rt.gate.transition(ExecState::Reconciling).unwrap();
+        rt.gate.transition(ExecState::ApprovalPending).unwrap();
+        rt.gate.set_epoch(1).unwrap();
+        rt.gate.record_approval("saurabh", "ev-shutdown").unwrap();
+        rt.gate.enable(1).unwrap();
+    }
+
+    #[test]
+    fn begin_shutdown_halts_the_gate_before_draining() {
+        // P3-185: a draining service must never still be armed to execute. Shutdown used to
+        // only flip the draining flag, so an ENABLED gate kept accepting `/v1/intents` through
+        // the shared snapshot while `/readyz` reported 503 — a fail-open drain.
+        let mut rt = Runtime::init(halted_config()).unwrap();
+        enable_runtime_gate(&mut rt);
+        // The served snapshot is the surface the intent route checks; enable it too so the test
+        // covers the live approval path, not just the in-process gate.
+        rt.state.approve("saurabh", "ev-shutdown").unwrap();
+        assert_eq!(rt.gate_state(), ExecState::Enabled);
+        assert_eq!(rt.health_json()["gate_state"], "ENABLED");
+
+        rt.begin_shutdown();
+
+        let h = rt.health_json();
+        assert!(
+            !rt.gate.can_execute(),
+            "shutdown must halt the gate, not only flag draining"
+        );
+        assert_eq!(rt.gate_state(), ExecState::Halted);
+        assert_eq!(
+            h["gate_state"], "HALTED",
+            "the served snapshot must stop accepting intents on shutdown"
+        );
+        assert!(h["draining"].as_bool().unwrap());
     }
 
     #[test]
@@ -157,6 +223,32 @@ mod tests {
             rt.gate_state(),
             ExecState::Halted,
             "fail-closed: never leaves HALTED"
+        );
+    }
+
+    #[test]
+    fn drift_halt_also_halts_the_served_snapshot() {
+        // D4: `enforce_clock_drift` halted only the in-process gate, while `/v1/intents` checks
+        // the shared snapshot. A drift halt therefore left the live intent route forwarding and
+        // `/healthz` reporting ENABLED — fail-open, the same shape P3-185 fixed for shutdown.
+        let mut rt = Runtime::init(halted_config()).unwrap();
+        enable_runtime_gate(&mut rt);
+        rt.state.approve("saurabh", "ev-drift").unwrap();
+        assert_eq!(rt.gate_state(), ExecState::Enabled);
+        assert_eq!(rt.health_json()["gate_state"], "ENABLED");
+
+        let mut beyond = DriftMonitor::new(200, Box::new(FixedOffsetSource(500)));
+        assert_eq!(
+            rt.enforce_clock_drift(&mut beyond),
+            DriftStatus::Beyond(500)
+        );
+
+        assert!(!rt.gate.can_execute(), "a drift halt must halt the gate");
+        assert_eq!(rt.gate_state(), ExecState::Halted);
+        assert_eq!(
+            rt.health_json()["gate_state"],
+            "HALTED",
+            "the served snapshot must stop accepting intents on a drift halt"
         );
     }
 }

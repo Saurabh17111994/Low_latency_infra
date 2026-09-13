@@ -39,7 +39,11 @@ impl Metrics {
         self.restart.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A consistent point-in-time snapshot of every counter.
+    /// An approximate point-in-time snapshot of every counter: each counter is read with a
+    /// single `Relaxed` load (individually consistent), but the eight loads happen in sequence,
+    /// so a concurrent `fetch_add` can land between two of them and the returned values need not
+    /// correspond to any single instant. Benign for monotonic OTLP counters, which only ever
+    /// grow and are never compared against each other.
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
             order_submitted: self.order_submitted.load(Ordering::Relaxed),

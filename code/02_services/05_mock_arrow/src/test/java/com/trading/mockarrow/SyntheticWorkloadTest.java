@@ -62,6 +62,38 @@ class SyntheticWorkloadTest {
         }
     }
 
+    /**
+     * P3-233: same-millisecond ticks must drain in instrument-index order, not
+     * in whatever order the heap happens to hold equal keys. startMs staggering
+     * is modulo 1000 ms, so with more instruments than slots the initial offsets
+     * collide and ties are common.
+     */
+    @Test
+    void equalEventTimesDrainInInstrumentIndexOrder() {
+        int instrumentCount = 3_000; // > 1000 stagger slots: initial offsets collide
+        List<Long> instruments = java.util.stream.LongStream.range(0, instrumentCount)
+                .map(i -> 900000L + i).boxed().toList();
+        var workload = new SyntheticWorkload(new SyntheticWorkload.Config(
+                instruments, 5L, SyntheticWorkload.Profile.BASELINE, 1_700_000_000_000L));
+
+        Map<Long, Integer> indexByToken = new java.util.HashMap<>();
+        for (int i = 0; i < instruments.size(); i++) indexByToken.put(instruments.get(i), i);
+
+        List<SyntheticWorkload.Tick> ticks = workload.sample(instrumentCount + 500);
+        for (int i = 1; i < ticks.size(); i++) {
+            SyntheticWorkload.Tick prev = ticks.get(i - 1);
+            SyntheticWorkload.Tick cur = ticks.get(i);
+            boolean ordered = prev.eventTimeMs() < cur.eventTimeMs()
+                    || (prev.eventTimeMs() == cur.eventTimeMs()
+                        && indexByToken.get(prev.instrumentToken()) < indexByToken.get(cur.instrumentToken()));
+            int at = i;
+            assertTrue(ordered, () -> String.format(
+                    "P3-233: tick %d (token %d, t=%d) must precede %d (token %d, t=%d)",
+                    at - 1, prev.instrumentToken(), prev.eventTimeMs(),
+                    at, cur.instrumentToken(), cur.eventTimeMs()));
+        }
+    }
+
     @Test
     void invalidWorkloadConfigurationIsRejected() {
         assertThrows(IllegalArgumentException.class, () -> new SyntheticWorkload(

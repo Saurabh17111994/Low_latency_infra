@@ -15,7 +15,7 @@
 //! swaps the Fluss-backed stores (Workstream D) behind the same traits.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -240,7 +240,7 @@ impl ExecutionGate {
                 }
                 // Same instruction but different request hash → contract violation: quarantine, halt, no call.
                 if self.attempts.has_instruction(&cmd.instruction_id) {
-                    self.halt(cmd);
+                    self.halt(cmd)?;
                     return Ok(Outcome::ContractViolation);
                 }
                 // Fresh attempt: persist PREPARED durably before any bridge call.
@@ -260,7 +260,7 @@ impl ExecutionGate {
                 AttemptPhase::Prepared => {}
                 // The bridge may or may not have been reached: halt, never a second call.
                 AttemptPhase::Submitting | AttemptPhase::Unknown => {
-                    self.halt(cmd);
+                    self.halt(cmd)?;
                     return Ok(Outcome::UnknownHalted);
                 }
                 AttemptPhase::Accepted => return Ok(Outcome::Accepted),
@@ -289,7 +289,7 @@ impl ExecutionGate {
                     && g.fence_token == cmd.gate_fence_token
         );
         if !gate_ok {
-            self.halt(cmd);
+            self.halt(cmd)?;
             return Ok(Outcome::Blocked);
         }
 
@@ -325,6 +325,13 @@ impl ExecutionGate {
             anyhow::bail!("crash at AFTER_BRIDGE");
         }
 
+        // A bridge UNKNOWN leaves the order's fate ambiguous: persist the durable halt
+        // before reporting UnknownHalted, so no other instruction on this partition can
+        // reach the bridge while the attempt awaits reconciliation (P3-018).
+        if terminal == AttemptPhase::Unknown {
+            self.halt(cmd)?;
+        }
+
         Ok(match terminal {
             AttemptPhase::Accepted => Outcome::Accepted,
             AttemptPhase::Rejected => Outcome::Rejected,
@@ -332,16 +339,17 @@ impl ExecutionGate {
         })
     }
 
-    fn halt(&self, cmd: &Command) {
+    fn halt(&self, cmd: &Command) -> Result<()> {
         if let Some(g) = self.gates.read(&cmd.execution_partition_id) {
-            let _ = self.gates.write(&GateRow {
+            self.gates.write(&GateRow {
                 partition: g.partition,
                 owner: g.owner,
                 state: GateState::Halted,
                 epoch: g.epoch,
                 fence_token: g.fence_token,
-            });
+            })?;
         }
+        Ok(())
     }
 }
 
@@ -349,7 +357,9 @@ impl ExecutionGate {
 #[derive(Debug, Default, Clone)]
 pub struct InMemoryAttemptStore {
     by_id: RefCell<HashMap<String, Attempt>>,
-    dup: RefCell<HashMap<(String, String), ()>>,
+    // instruction_id -> request hashes. Nested so both lookups borrow (`&str`), keeping
+    // the hot `has_duplicate` path allocation-free (P3-446).
+    dup: RefCell<HashMap<String, HashSet<String>>>,
     by_instruction: RefCell<HashMap<String, ()>>,
 }
 
@@ -367,10 +377,11 @@ impl AttemptStore for InMemoryAttemptStore {
         self.by_id
             .borrow_mut()
             .insert(attempt.attempt_id.clone(), attempt.clone());
-        self.dup.borrow_mut().insert(
-            (attempt.instruction_id.clone(), attempt.request_hash.clone()),
-            (),
-        );
+        self.dup
+            .borrow_mut()
+            .entry(attempt.instruction_id.clone())
+            .or_default()
+            .insert(attempt.request_hash.clone());
         self.by_instruction
             .borrow_mut()
             .insert(attempt.instruction_id.clone(), ());
@@ -379,7 +390,8 @@ impl AttemptStore for InMemoryAttemptStore {
     fn has_duplicate(&self, instruction_id: &str, request_hash: &str) -> bool {
         self.dup
             .borrow()
-            .contains_key(&(instruction_id.to_string(), request_hash.to_string()))
+            .get(instruction_id)
+            .is_some_and(|hashes| hashes.contains(request_hash))
     }
     fn has_instruction(&self, instruction_id: &str) -> bool {
         self.by_instruction.borrow().contains_key(instruction_id)
@@ -414,6 +426,44 @@ impl GateStateStore for InMemoryGateStateStore {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// P3-446: thread-local allocation counter, so the `has_duplicate` test can prove the
+    /// duplicate lookup allocates nothing without interference from parallel tests. Calling
+    /// threads count their own `alloc` calls; everything delegates to the system allocator.
+    struct CountingAlloc;
+
+    thread_local! {
+        static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn allocations() -> usize {
+        ALLOCATIONS.with(Cell::get)
+    }
+
+    // SAFETY: a delegating wrapper around the system allocator; it only counts calls.
+    unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            ALLOCATIONS.with(|n| n.set(n.get() + 1));
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(
+            &self,
+            ptr: *mut u8,
+            layout: std::alloc::Layout,
+            new_size: usize,
+        ) -> *mut u8 {
+            unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+            unsafe { std::alloc::System.alloc_zeroed(layout) }
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING_ALLOC: CountingAlloc = CountingAlloc;
 
     const PARTITION: &str = "p-1";
 
@@ -632,6 +682,43 @@ mod tests {
         assert_eq!(total_handle.get(), 1);
     }
 
+    // P3-446: the duplicate index is consulted on every fresh `execute` that reaches the
+    // claim path; has_duplicate must borrow the command strings rather than build owned
+    // tuple keys per call.
+    #[test]
+    fn duplicate_lookup_performs_no_heap_allocation() {
+        let store = InMemoryAttemptStore::new();
+        store
+            .put(&Attempt::new(
+                "a-1",
+                "ins-1",
+                "h-1",
+                "E-a-1",
+                AttemptPhase::Prepared,
+            ))
+            .unwrap();
+
+        let before = allocations();
+        let duplicate = store.has_duplicate("ins-1", "h-1");
+        let after = allocations();
+        assert!(duplicate, "the stored pair must still be detected");
+        assert_eq!(
+            after - before,
+            0,
+            "has_duplicate must not allocate per call (P3-446)"
+        );
+
+        let before = allocations();
+        let other = store.has_duplicate("ins-2", "h-1");
+        let after = allocations();
+        assert!(!other, "an unseen instruction must not be a duplicate");
+        assert_eq!(
+            after - before,
+            0,
+            "has_duplicate must not allocate per call (P3-446)"
+        );
+    }
+
     #[test]
     fn changed_request_hash_for_same_instruction_halts_and_never_calls_bridge() {
         let total_handle = Rc::new(Cell::new(0usize));
@@ -666,6 +753,60 @@ mod tests {
             gates.read(PARTITION).unwrap().state,
             GateState::Halted,
             "gate must be halted for reconciliation on contract violation"
+        );
+    }
+
+    /// Gate store whose durable write always fails — models the store being unreachable
+    /// exactly when the gate must be halted.
+    struct FailingGateWriteStore {
+        row: GateRow,
+    }
+
+    impl GateStateStore for FailingGateWriteStore {
+        fn read(&self, partition: &str) -> Option<GateRow> {
+            (partition == self.row.partition).then(|| self.row.clone())
+        }
+        fn write(&self, _row: &GateRow) -> Result<()> {
+            anyhow::bail!("durable gate write unavailable")
+        }
+    }
+
+    // P3-202: `halt` must not swallow a failed durable write. If the HALT cannot be
+    // persisted, the caller must see the error instead of a clean Blocked/ContractViolation/
+    // UnknownHalted that implies the partition is fenced when it is still ENABLED.
+    #[test]
+    fn durable_halt_write_failure_is_propagated_not_swallowed() {
+        let total_handle = Rc::new(Cell::new(0usize));
+        let counter = Rc::new(CountingBridge::new(Rc::clone(&total_handle), false));
+        let attempts: Rc<dyn AttemptStore> = Rc::new(InMemoryAttemptStore::new());
+        let gates: Rc<dyn GateStateStore> = Rc::new(FailingGateWriteStore { row: enabled_row() });
+        let bridge: Rc<dyn BridgeCaller> = counter.clone();
+
+        let mut g = ExecutionGate::new(attempts.clone(), gates, bridge);
+        assert_eq!(
+            g.execute(&cmd("a-1"), CrashHooks::default()).unwrap(),
+            Outcome::Accepted
+        );
+        assert_eq!(total_handle.get(), 1);
+
+        // Same instruction, changed hash: the contract violation must halt the gate, but
+        // the durable write fails. The failure must surface, not be silently dropped.
+        let mutated = Command {
+            execution_attempt_id: "a-2".into(),
+            request_hash: "h-2-changed".into(),
+            ..cmd("a-2")
+        };
+        let err = g
+            .execute(&mutated, CrashHooks::default())
+            .expect_err("a failed durable halt must surface, not be reported as a clean outcome");
+        assert!(
+            err.to_string().contains("durable gate write unavailable"),
+            "the durable-halt failure must be the propagated error, got: {err}"
+        );
+        assert_eq!(
+            total_handle.get(),
+            1,
+            "the contract-violation path must still never invoke the bridge"
         );
     }
     // --------------------------------------------------------------------------
@@ -829,6 +970,43 @@ mod tests {
             total_handle.get(),
             1,
             "broker UNKNOWN must never be auto-retried (CRASH-ORDER-009/005)"
+        );
+    }
+
+    // P3-018: a bridge UNKNOWN is ambiguous, so `execute` must persist the durable HALT
+    // before it returns `UnknownHalted` — otherwise the partition stays ENABLED and any
+    // other instruction can still reach the bridge while reconciliation is pending.
+    #[test]
+    fn unknown_outcome_persists_the_durable_halt_before_returning() {
+        let total_handle = Rc::new(Cell::new(0usize));
+        let counter = Rc::new(UnknownBridgeCount::new(Rc::clone(&total_handle)));
+        let attempts: Rc<dyn AttemptStore> = Rc::new(InMemoryAttemptStore::new());
+        let gates = shared_gates();
+        let bridge: Rc<dyn BridgeCaller> = counter.clone();
+
+        let mut g = ExecutionGate::new(attempts.clone(), gates.clone(), bridge.clone());
+        assert_eq!(
+            g.execute(&cmd("a-unk-halt"), CrashHooks::default())
+                .unwrap(),
+            Outcome::UnknownHalted
+        );
+        assert_eq!(total_handle.get(), 1);
+        assert_eq!(
+            gates.read(PARTITION).unwrap().state,
+            GateState::Halted,
+            "a bridge UNKNOWN must persist the durable halt before UnknownHalted is returned"
+        );
+
+        // The ambiguous attempt fences its partition for every other instruction until reconcile.
+        assert_eq!(
+            g.execute(&cmd_uid("a-unk-other", "other"), CrashHooks::default())
+                .unwrap(),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            total_handle.get(),
+            1,
+            "no other instruction may reach the bridge while the ambiguous attempt awaits reconciliation"
         );
     }
 

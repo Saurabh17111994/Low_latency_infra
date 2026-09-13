@@ -71,7 +71,9 @@ impl DriftMonitor {
     /// Samples once and classifies against the limit (symmetric in sign).
     pub fn check(&mut self) -> DriftStatus {
         match self.source.sample_offset_ms() {
-            Ok(offset) if offset.abs() > self.limit_ms => DriftStatus::Beyond(offset),
+            Ok(offset) if offset.unsigned_abs() > self.limit_ms as u64 => {
+                DriftStatus::Beyond(offset)
+            }
             Ok(offset) => DriftStatus::Within(offset),
             Err(e) => DriftStatus::Unmeasurable(e.to_string()),
         }
@@ -137,10 +139,19 @@ mod tests {
     }
 
     #[test]
+    fn p3_190_i64_min_offset_is_beyond_not_panic() {
+        // P3-190: `offset.abs()` overflows on `i64::MIN` (panics in debug,
+        // wraps fail-open to Within in release). `i64::MIN` is so far beyond
+        // any sane limit that it must classify as Beyond - fail closed.
+        let mut m = DriftMonitor::new(200, Box::new(FixedOffsetSource(i64::MIN)));
+        assert_eq!(m.check(), DriftStatus::Beyond(i64::MIN));
+    }
+
+    #[test]
     fn beyond_limit_halts_gate_and_clears_approvals() {
         let mut g = Gate::new();
         g.add_authorized("saurabh");
-        g.set_epoch(5);
+        g.set_epoch(5).unwrap();
         // Drive the sanctioned path to ENABLED.
         g.transition(ExecState::Reconciling).unwrap();
         g.transition(ExecState::ApprovalPending).unwrap();
@@ -189,7 +200,7 @@ mod tests {
     fn drift_halt_recovers_only_via_sanctioned_path() {
         let mut g = Gate::new();
         g.add_authorized("saurabh");
-        g.set_epoch(5);
+        g.set_epoch(5).unwrap();
         let mut m = monitor(-1000); // large negative drift
         m.enforce(&mut g);
         assert_eq!(g.state(), ExecState::Halted);
@@ -200,14 +211,16 @@ mod tests {
         let mut healthy = monitor(1);
         healthy.enforce(&mut g);
         assert_eq!(g.state(), ExecState::Halted, "no automatic recovery");
-        // Only the sanctioned human path recovers.
+        // Only the sanctioned human path recovers: the drift halt cleared the declared term
+        // (P3-450), so the term must be re-declared for the new session before enable.
         g.transition(ExecState::Reconciling).unwrap();
         g.transition(ExecState::ApprovalPending).unwrap();
+        g.set_epoch(5).unwrap();
         g.record_approval("saurabh", "drift-resolved-evidence")
             .unwrap();
         g.record_approval("saurabh", "drift-resolved-evidence-2")
             .unwrap();
-        g.enable(g.epoch()).unwrap();
+        g.enable(5).unwrap();
         assert_eq!(g.state(), ExecState::Enabled);
     }
 

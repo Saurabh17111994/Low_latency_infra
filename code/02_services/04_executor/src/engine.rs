@@ -33,10 +33,12 @@ use nautilus_model::{
     enums::{AccountType, OmsType},
     identifiers::{AccountId, ClientId, TraderId, Venue},
 };
+use std::{cell::Cell, rc::Rc};
 
 use crate::bridge::{FakeBridge, HttpBridgeClient};
 use crate::config::ServiceConfig;
 use crate::execution::BridgeExecutionClient;
+use crate::gate::ExecState;
 
 /// Marker configuration accepted by the bridge exec client.
 #[derive(Debug, Default, Clone)]
@@ -45,6 +47,26 @@ pub struct BridgeClientConfig;
 impl ClientConfig for BridgeClientConfig {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+/// Gate state the bridge exec client actually booted into, recorded by the factory when the
+/// builder constructs the client and read back by [`LiveNodeRuntime`] (P3-439).
+///
+/// The client lives inside the node, so the runtime cannot query it after construction; the
+/// factory records what `BridgeExecutionClient::gate_state` reports at construction instead of
+/// letting the runtime assert a hardcoded `true`. A gate that was never observed does **not**
+/// count as halted (fail-closed).
+#[derive(Debug, Clone, Default)]
+struct BootGate(Rc<Cell<Option<ExecState>>>);
+
+impl BootGate {
+    fn record(&self, state: ExecState) {
+        self.0.set(Some(state));
+    }
+
+    fn was_halted(&self) -> bool {
+        self.0.get() == Some(ExecState::Halted)
     }
 }
 
@@ -58,13 +80,22 @@ impl ClientConfig for BridgeClientConfig {
 #[derive(Debug, Clone)]
 pub struct BridgeExecutionClientFactory {
     selection: BridgeSelection,
+    /// Receives the boot gate of the client `create` constructs (P3-439).
+    boot_gate: BootGate,
+}
+
+impl BridgeExecutionClientFactory {
+    fn new(selection: BridgeSelection) -> Self {
+        Self {
+            selection,
+            boot_gate: BootGate::default(),
+        }
+    }
 }
 
 impl Default for BridgeExecutionClientFactory {
     fn default() -> Self {
-        Self {
-            selection: BridgeSelection::Fake,
-        }
+        Self::new(BridgeSelection::Fake)
     }
 }
 
@@ -156,6 +187,9 @@ impl ExecutionClientFactory for BridgeExecutionClientFactory {
             } => Box::new(HttpBridgeClient::new(base_url.clone(), auth_token.clone())),
         };
         let client = BridgeExecutionClient::new(core, bridge);
+        // Observe the gate the client actually booted into: the runtime's fail-closed report is
+        // derived from this observation, not from a constant (P3-439).
+        self.boot_gate.record(client.gate_state());
         Ok(Box::new(client))
     }
 
@@ -214,7 +248,8 @@ impl EngineFactory {
 pub struct LiveNodeRuntime {
     node: LiveNode,
     handle: LiveNodeHandle,
-    gate_halted_at_boot: bool,
+    /// Boot gate recorded when the bridge exec client was constructed (P3-439).
+    boot_gate: BootGate,
 }
 
 impl LiveNodeRuntime {
@@ -228,9 +263,13 @@ impl LiveNodeRuntime {
     pub fn build_with_bridge(selection: BridgeSelection) -> Result<Self> {
         let cfg = EngineFactory::build_node_config();
         let builder = LiveNodeBuilder::from_config(cfg)?;
+        let boot_gate = BootGate::default();
         let builder = builder.add_exec_client(
             Some("exec".to_string()),
-            Box::new(BridgeExecutionClientFactory { selection }),
+            Box::new(BridgeExecutionClientFactory {
+                selection,
+                boot_gate: boot_gate.clone(),
+            }),
             Box::new(BridgeClientConfig),
         )?;
         let node = builder.build()?;
@@ -238,9 +277,7 @@ impl LiveNodeRuntime {
         Ok(Self {
             node,
             handle,
-            // `BridgeExecutionClient::new` always boots the gate `HALTED`; the factory path is
-            // covered by `factory_create_succeeds_with_fake_bridge` + `client_boots_into_halted`.
-            gate_halted_at_boot: true,
+            boot_gate,
         })
     }
 
@@ -257,9 +294,12 @@ impl LiveNodeRuntime {
     }
 
     /// The fail-closed boot invariant (gate `HALTED`, health never implies `ENABLED`).
+    ///
+    /// Derived from the gate state the factory observed on the constructed client (P3-439):
+    /// a client that booted elsewhere — or was never constructed — does not report `true`.
     #[must_use]
     pub fn gate_was_halted_at_boot(&self) -> bool {
-        self.gate_halted_at_boot
+        self.boot_gate.was_halted()
     }
 
     /// Runs the node in hosted mode: nautilus does **not** touch our shutdown signals; the
@@ -279,7 +319,9 @@ impl LiveNodeRuntime {
 
 /// Offline mass-status reconciliation (Tier 11). Iterates UNKNOWN attempts, read-only via bridge, never re-issues Place.
 pub mod reconcile {
-    use crate::bridge::protocol::{Command, CommandEnvelope};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::bridge::protocol::{Command, CommandEnvelope, ReportEnvelope};
     use crate::bridge::BridgeClient;
     use crate::execution::client::{classify_bridge_report, BridgeOutcome};
 
@@ -288,43 +330,111 @@ pub mod reconcile {
         Accepted,
         Rejected,
         StillUnknownHalted,
+        /// The bridge round-trip for this COR failed (unreachable, HTTP failure, parse error).
+        /// Distinct from [`Self::StillUnknownHalted`], which is a *successful* reply saying the
+        /// state is still unknown — an availability failure must not read as a clean "no change"
+        /// sweep (P3-194). Carries the transport error, which is per-COR and not interchangeable.
+        TransportFailure(String),
     }
-    pub async fn reconcile_execution_mass_status<B: BridgeClient>(
-        bridge: &mut B,
-        unknown_client_order_refs: &[String],
-    ) -> anyhow::Result<Vec<(String, ReconcileDecision)>> {
-        if !bridge.is_connected() {
-            bridge.connect().await?;
+
+    /// Outcome of one mass-reconciliation pass: the per-COR decisions plus the trailing
+    /// mass-snapshot command's own envelope id and outcome (P3-440).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ReconcileReport {
+        /// One decision per requested COR, in the order the refs were given.
+        pub orders: Vec<(String, ReconcileDecision)>,
+        /// Envelope id used for the trailing `ReconcileOrders` snapshot.
+        pub mass_envelope_id: String,
+        /// Outcome of the trailing `ReconcileOrders` snapshot.
+        pub mass: ReconcileDecision,
+    }
+
+    /// Keeps the per-COR decisions directly indexable/sliceable for existing callers.
+    impl std::ops::Deref for ReconcileReport {
+        type Target = Vec<(String, ReconcileDecision)>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.orders
         }
-        let mut out = Vec::new();
-        for cor in unknown_client_order_refs {
-            let mut q = CommandEnvelope::new(Command::QueryOrder, &format!("reconcile-q-{}", cor));
-            q.client_order_ref = cor.clone();
-            let rep = bridge.send_command(q).await.unwrap_or_else(|e| {
-                crate::bridge::protocol::ReportEnvelope {
-                    outcome: "UNKNOWN".into(),
-                    reason: e.to_string(),
-                    client_order_ref: cor.clone(),
-                    ..Default::default()
-                }
-            });
-            let dec = match classify_bridge_report(&rep) {
+    }
+
+    /// Monotonic sequence for mass-snapshot envelope ids (P3-440): a fixed id reused on every
+    /// invocation can be suppressed as a duplicate by an OMS guard, which would silently skip
+    /// the snapshot. Not a timestamp — that is nondeterministic under test and can collide.
+    static MASS_ENVELOPE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// Maps a bridge reply to a decision; a failed round-trip keeps its own error instead of
+    /// being flattened into a fabricated `UNKNOWN` report (P3-194).
+    fn classify_or_transport(result: anyhow::Result<ReportEnvelope>) -> ReconcileDecision {
+        match result {
+            Ok(rep) => match classify_bridge_report(&rep) {
                 BridgeOutcome::Accepted => ReconcileDecision::Accepted,
                 BridgeOutcome::Rejected => ReconcileDecision::Rejected,
                 BridgeOutcome::Unknown => ReconcileDecision::StillUnknownHalted,
-            };
-            out.push((cor.clone(), dec));
+            },
+            Err(e) => ReconcileDecision::TransportFailure(e.to_string()),
         }
-        let mass = CommandEnvelope::new(Command::ReconcileOrders, "reconcile-mass-1");
-        let _ = bridge.send_command(mass).await;
-        Ok(out)
+    }
+
+    pub async fn reconcile_execution_mass_status<B: BridgeClient>(
+        bridge: &mut B,
+        unknown_client_order_refs: &[String],
+    ) -> anyhow::Result<ReconcileReport> {
+        if !bridge.is_connected() {
+            bridge.connect().await?;
+        }
+        let mut orders = Vec::new();
+        for cor in unknown_client_order_refs {
+            let mut q = CommandEnvelope::new(Command::QueryOrder, &format!("reconcile-q-{}", cor));
+            q.client_order_ref = cor.clone();
+            orders.push((
+                cor.clone(),
+                classify_or_transport(bridge.send_command(q).await),
+            ));
+        }
+        // Every COR failed at transport level: the bridge is unreachable, so this sweep is an
+        // availability failure, not a "found nothing" result. Return non-OK with each COR's own
+        // reason rather than one generic error (P3-194). A mixed sweep still returns `Ok` with
+        // per-COR markers. The mass snapshot is skipped — it would dial the same dead bridge.
+        if !orders.is_empty()
+            && orders
+                .iter()
+                .all(|(_, d)| matches!(d, ReconcileDecision::TransportFailure(_)))
+        {
+            let reasons: Vec<String> = orders
+                .iter()
+                .filter_map(|(cor, d)| match d {
+                    ReconcileDecision::TransportFailure(reason) => Some(format!("{cor}: {reason}")),
+                    _ => None,
+                })
+                .collect();
+            anyhow::bail!(
+                "bridge transport failed for all {} UNKNOWN COR(s); no status could be read: {}",
+                reasons.len(),
+                reasons.join("; ")
+            );
+        }
+        let mass_envelope_id = format!(
+            "reconcile-mass-{}",
+            MASS_ENVELOPE_SEQ.fetch_add(1, Ordering::Relaxed)
+        );
+        let mass = CommandEnvelope::new(Command::ReconcileOrders, &mass_envelope_id);
+        let mass = classify_or_transport(bridge.send_command(mass).await);
+        Ok(ReconcileReport {
+            orders,
+            mass_envelope_id,
+            mass,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::protocol::CommandEnvelope;
+    use crate::bridge::{BridgeClient, BridgeReportStream, ReportEnvelope};
     use nautilus_common::{cache::Cache, enums::Environment};
+    use std::collections::VecDeque;
     use std::time::Duration;
     use std::{cell::RefCell, rc::Rc};
 
@@ -353,12 +463,10 @@ mod tests {
         assert!(!dbg.contains(token), "full token leaked: {dbg}");
 
         // The factory holds the selection; its derived `Debug` must inherit the redaction.
-        let factory = BridgeExecutionClientFactory {
-            selection: BridgeSelection::Http {
-                base_url: "http://bridge:8080".to_string(),
-                auth_token: token.to_string(),
-            },
-        };
+        let factory = BridgeExecutionClientFactory::new(BridgeSelection::Http {
+            base_url: "http://bridge:8080".to_string(),
+            auth_token: token.to_string(),
+        });
         let fdbg = format!("{factory:?}");
         assert!(
             !fdbg.contains(token),
@@ -435,12 +543,10 @@ mod tests {
         // can be exercised fully offline — the production transport is wired but never dials
         // a broker here.
         let cache = CacheView::new(Rc::new(RefCell::new(Cache::default())));
-        let factory = BridgeExecutionClientFactory {
-            selection: BridgeSelection::Http {
-                base_url: "http://127.0.0.1:9".to_string(),
-                auth_token: "devtest".to_string(),
-            },
-        };
+        let factory = BridgeExecutionClientFactory::new(BridgeSelection::Http {
+            base_url: "http://127.0.0.1:9".to_string(),
+            auth_token: "devtest".to_string(),
+        });
         let res = factory.create("exec", &BridgeClientConfig, cache);
         assert!(
             res.is_ok(),
@@ -562,6 +668,221 @@ mod tests {
         assert!(
             second.is_err(),
             "a second run must fail (runner consumed) — fail-closed restart guard"
+        );
+    }
+
+    // ---------- P3-439: the boot gate is observed from the client, not a constant ----------
+
+    /// P3-439: the reported boot gate follows the observed client state — an unobserved gate is
+    /// not halted (fail-closed), and a client that booted `ENABLED` must not answer `true`.
+    #[test]
+    fn boot_gate_is_derived_from_the_observed_client_state() {
+        let gate = BootGate::default();
+        assert!(
+            !gate.was_halted(),
+            "an unobserved boot gate must not claim halted"
+        );
+        gate.record(ExecState::Halted);
+        assert!(gate.was_halted(), "a client that booted HALTED is halted");
+        gate.record(ExecState::Enabled);
+        assert!(
+            !gate.was_halted(),
+            "a client that booted ENABLED must not report halted at boot"
+        );
+    }
+
+    /// P3-439: the factory must record what the constructed client actually reports, so the
+    /// runtime's answer is evidence from the client rather than a hardcoded `true`.
+    #[test]
+    fn factory_records_the_constructed_clients_boot_gate() {
+        let cache = CacheView::new(Rc::new(RefCell::new(Cache::default())));
+        let boot_gate = BootGate::default();
+        let factory = BridgeExecutionClientFactory {
+            selection: BridgeSelection::Fake,
+            boot_gate: boot_gate.clone(),
+        };
+        let _client = factory
+            .create("exec", &BridgeClientConfig, cache)
+            .expect("factory should create the client");
+        assert!(
+            boot_gate.was_halted(),
+            "the factory must record the constructed client's boot gate"
+        );
+    }
+
+    // ---------- P3-194 / P3-440: reconcile transport failures and the mass snapshot ----------
+
+    /// Test bridge double: records every envelope id and answers from a scripted queue, so
+    /// per-COR transport failures and ids can be observed deterministically.
+    struct ProbeBridge {
+        connected: bool,
+        sent_ids: Vec<String>,
+        replies: VecDeque<anyhow::Result<ReportEnvelope>>,
+    }
+
+    impl ProbeBridge {
+        fn new() -> Self {
+            Self {
+                connected: false,
+                sent_ids: Vec::new(),
+                replies: VecDeque::new(),
+            }
+        }
+
+        fn script(&mut self, reply: anyhow::Result<ReportEnvelope>) {
+            self.replies.push_back(reply);
+        }
+
+        fn script_bridge_error(&mut self, reason: &str) {
+            self.script(Err(anyhow::anyhow!(reason.to_string())));
+        }
+
+        /// Envelope ids of the trailing mass snapshots sent so far.
+        fn mass_ids(&self) -> Vec<String> {
+            self.sent_ids
+                .iter()
+                .filter(|id| id.starts_with("reconcile-mass-"))
+                .cloned()
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BridgeClient for ProbeBridge {
+        fn is_connected(&self) -> bool {
+            self.connected
+        }
+
+        async fn connect(&mut self) -> anyhow::Result<()> {
+            self.connected = true;
+            Ok(())
+        }
+
+        async fn disconnect(&mut self) -> anyhow::Result<()> {
+            self.connected = false;
+            Ok(())
+        }
+
+        async fn send_command(
+            &mut self,
+            envelope: CommandEnvelope,
+        ) -> anyhow::Result<ReportEnvelope> {
+            self.sent_ids.push(envelope.request_id.clone());
+            match self.replies.pop_front() {
+                Some(reply) => reply,
+                None => Err(anyhow::anyhow!("probe bridge: no scripted reply")),
+            }
+        }
+
+        fn take_reports(&mut self) -> Option<BridgeReportStream> {
+            None
+        }
+    }
+
+    /// Bridge reply for the given outcome; a broker id makes `SUCCESS` classify as accepted.
+    fn probe_reply(outcome: &str) -> ReportEnvelope {
+        ReportEnvelope {
+            outcome: outcome.to_string(),
+            broker_order_id: "BRK-0001".to_string(),
+            ..ReportEnvelope::default()
+        }
+    }
+
+    /// P3-194: when every COR round-trip fails at transport level the sweep must not return `Ok`
+    /// with all-`StillUnknownHalted` — an unreachable bridge is an availability failure, and each
+    /// COR's own reason must survive in the error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_all_cors_unreachable_is_not_ok() {
+        let mut bridge = ProbeBridge::new();
+        bridge.script_bridge_error("bridge unreachable");
+        bridge.script_bridge_error("bridge unreachable");
+        let refs = vec!["REF-A".to_string(), "REF-B".to_string()];
+
+        let err = reconcile::reconcile_execution_mass_status(&mut bridge, &refs)
+            .await
+            .expect_err("all-COR transport failure must not read as a clean no-change sweep");
+        let msg = err.to_string();
+        for cor in &refs {
+            assert!(msg.contains(cor), "per-COR reason missing for {cor}: {msg}");
+        }
+        assert!(
+            msg.contains("bridge unreachable"),
+            "transport reason missing from the error: {msg}"
+        );
+        assert!(
+            bridge.mass_ids().is_empty(),
+            "no mass snapshot should be dialled against an unreachable bridge"
+        );
+    }
+
+    /// P3-194: a mixed sweep stays `Ok` and keeps the transport failure distinct from a genuine
+    /// still-unknown answer, so callers can see which CORs could not be read.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_mixed_transport_failure_is_marked_per_cor() {
+        let mut bridge = ProbeBridge::new();
+        bridge.script_bridge_error("bridge unreachable");
+        bridge.script(Ok(probe_reply("SUCCESS"))); // REF-B
+        bridge.script(Ok(probe_reply("SUCCESS"))); // mass snapshot
+        let refs = vec!["REF-A".to_string(), "REF-B".to_string()];
+
+        let report = reconcile::reconcile_execution_mass_status(&mut bridge, &refs)
+            .await
+            .expect("a partially readable sweep still returns Ok");
+        assert_eq!(
+            report[0].1,
+            reconcile::ReconcileDecision::TransportFailure("bridge unreachable".to_string())
+        );
+        assert_eq!(report[1].1, reconcile::ReconcileDecision::Accepted);
+        assert_eq!(report.mass, reconcile::ReconcileDecision::Accepted);
+    }
+
+    /// P3-440: each invocation must use a fresh mass-snapshot envelope id — a fixed id repeated
+    /// across runs can be dropped as a duplicate by an OMS guard, silently skipping the snapshot.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_mass_envelope_id_is_unique_per_call() {
+        let mut bridge = ProbeBridge::new();
+        for _ in 0..2 {
+            bridge.script(Ok(probe_reply("SUCCESS"))); // COR
+            bridge.script(Ok(probe_reply("SUCCESS"))); // mass snapshot
+        }
+        let refs = vec!["REF-A".to_string()];
+
+        let _ = reconcile::reconcile_execution_mass_status(&mut bridge, &refs)
+            .await
+            .expect("first reconcile");
+        let _ = reconcile::reconcile_execution_mass_status(&mut bridge, &refs)
+            .await
+            .expect("second reconcile");
+
+        let ids = bridge.mass_ids();
+        assert_eq!(ids.len(), 2, "one mass snapshot per call");
+        assert_ne!(
+            ids[0], ids[1],
+            "mass envelope ids must not repeat across calls"
+        );
+    }
+
+    /// P3-440: the mass snapshot's envelope id and outcome must reach the caller — its result
+    /// used to be discarded, so a failed mass reconcile was invisible.
+    #[tokio::test(flavor = "current_thread")]
+    async fn reconcile_report_surfaces_the_mass_snapshot_outcome() {
+        let mut bridge = ProbeBridge::new();
+        bridge.script(Ok(probe_reply("SUCCESS"))); // REF-A
+        bridge.script_bridge_error("mass bridge unreachable");
+        let refs = vec!["REF-A".to_string()];
+
+        let report = reconcile::reconcile_execution_mass_status(&mut bridge, &refs)
+            .await
+            .expect("a failed mass snapshot is reported, not fatal to the COR sweep");
+        assert_eq!(report[0].1, reconcile::ReconcileDecision::Accepted);
+        assert_eq!(
+            report.mass,
+            reconcile::ReconcileDecision::TransportFailure("mass bridge unreachable".to_string())
+        );
+        assert_eq!(
+            report.mass_envelope_id,
+            bridge.mass_ids()[0],
+            "the reported id must be the id that was sent"
         );
     }
 }

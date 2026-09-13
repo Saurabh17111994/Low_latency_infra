@@ -45,7 +45,7 @@ public class MockArrowServer {
     private ScheduledExecutorService tickScheduler;
 
     /** R-142: decoupled per-client delivery — a stalled client can never stall tick pacing. */
-    private java.util.concurrent.ExecutorService deliveryPool;
+    private final ExecutorService deliveryPool;
 
     // Per-instrument price state for realistic walks (in paise)
     private final Map<Long, Long> prices = new ConcurrentHashMap<>();
@@ -69,12 +69,25 @@ public class MockArrowServer {
             basePrices.put(inst, base);
             prices.put(inst, base);
         }
+
+        // R-142 + P3-030: worker pool for per-client delivery (bounded: one
+        // task per client per tick batch). Created here, before any thread can
+        // run: the accept thread and the 0-delay tick scheduler both touch it,
+        // so a late assignment could be seen as null — and a throwing periodic
+        // task is permanently suppressed by the scheduler. final also
+        // guarantees safe publication.
+        this.deliveryPool = Executors.newFixedThreadPool(
+                Math.max(4, Runtime.getRuntime().availableProcessors()), r -> {
+                    Thread t = new Thread(r, "mock-arrow-delivery");
+                    t.setDaemon(true);
+                    return t;
+                });
     }
 
     public void start() throws IOException {
         serverSocket = new ServerSocket(port);
         running = true;
-        log.info("Mock Arrow WebSocket server started on ws://0.0.0.0:{} ({} instruments, {} ticks/s)",
+        log.info("Mock Arrow TCP server started on tcp://0.0.0.0:{} ({} instruments, {} ticks/s, NDJSON)",
                  port, instruments.size(), tickRatePerSec);
 
         // Accept connections in background
@@ -96,15 +109,6 @@ public class MockArrowServer {
         long intervalMs = 10;
         tickScheduler = Executors.newSingleThreadScheduledExecutor();
         tickScheduler.scheduleAtFixedRate(this::generateTicks, 0, intervalMs, TimeUnit.MILLISECONDS);
-
-        // R-142: worker pool for per-client delivery (bounded: one task per
-        // client per tick batch). Delivery never blocks tick generation.
-        deliveryPool = Executors.newFixedThreadPool(
-                Math.max(4, Runtime.getRuntime().availableProcessors()), r -> {
-                    Thread t = new Thread(r, "mock-arrow-delivery");
-                    t.setDaemon(true);
-                    return t;
-                });
     }
 
     // Connected clients
@@ -113,12 +117,15 @@ public class MockArrowServer {
     private record ClientSession(Socket socket, BufferedWriter writer, long connectedAt) {}
 
     private void handleClient(Socket client) {
-        var session = new ClientSession(client, null, System.currentTimeMillis());
+        // P3-469: only the timestamp was ever read from the throwaway
+        // ClientSession; keep it as a plain value instead of constructing a
+        // null-writer session that was never registered in `clients`.
+        long connectedAt = System.currentTimeMillis();
         try {
             var writer = new BufferedWriter(
                 new OutputStreamWriter(client.getOutputStream(), StandardCharsets.UTF_8));
-            var realSession = new ClientSession(client, writer, session.connectedAt);
-            clients.add(realSession);
+            var session = new ClientSession(client, writer, connectedAt);
+            clients.add(session);
         } catch (IOException e) {
             // R-180: never leak the accepted socket on writer setup failure.
             log.error("Failed to setup client writer — closing socket", e);

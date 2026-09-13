@@ -4,10 +4,26 @@
 //! inbound; 503 while draining). And `POST /v1/intents` (private gateway envelope,
 //! verified via `gateway_protocol` HMAC + payload hash, fail-closed while gate HALTED).
 //!
+//! `POST /v1/approve` + `POST /v1/halt` are the DEC-044 control plane (P3-020) and are
+//! authenticated with the same [`gateway_protocol`] HMAC envelope the intent route uses — the
+//! body is NOT a bare operator name. The operator mints (with the gateway shared secret) an
+//! envelope whose SIGNED payload carries the identity and the evidence:
+//!
+//! ```text
+//! { "protocol_version": <GATEWAY_PROTOCOL_VERSION>, "message_type": "GATE_APPROVE"|"GATE_HALT",
+//!   "request_id": <unique>, "account_scope_id": <scope>, "execution_partition_id": <partition>,
+//!   "payload_hash": hex(sha256(compact payload JSON)), "gate_epoch": <current, from /healthz>,
+//!   "fence_token": <token>, "deadline_epoch_ms": <future epoch ms>,
+//!   "payload": { "operator": <T9_APPROVED_BY>, "evidence": <evidence hash>, "reason": <halt only> },
+//!   "authentication": hex(hmacSha256(secret, canonical)) }
+//! ```
+//!
 //! Like the bridge transport it is a deliberately small `tokio` HTTP/1.1 server — no web-framework
-//! dependency — because the surface is two static health responses plus one private POST read from
-//! a shared snapshot. Safety invariant: health never implies ENABLED; intents never execute while
-//! HALTED (503) and never log the shared secret.
+//! dependency — because the surface is five small routes: two health reads, the authenticated
+//! intent POST above, and the two authenticated control POSTs. Safety invariant: health never
+//! implies ENABLED; intents never execute while HALTED (503); an unsigned, wrong-key, wrong-type
+//! or stale-epoch control request performs no control action; and nothing here ever logs the
+//! shared secret.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -22,6 +38,26 @@ use crate::events;
 use crate::gate::ExecState;
 use crate::gateway_protocol;
 use crate::intent;
+
+/// Control-plane message type for `POST /v1/approve` (P3-020). `message_type` is part of the
+/// signed canonical string, so it is the domain separator: a signature minted for an
+/// `EXECUTION_INTENT` — or for the sibling control endpoint — cannot be replayed on this route.
+const APPROVE_MESSAGE_TYPE: &str = "GATE_APPROVE";
+
+/// Control-plane message type for `POST /v1/halt` (P3-020).
+const HALT_MESSAGE_TYPE: &str = "GATE_HALT";
+
+/// DEC-044 single operator (P3-020): the authorized identity when `T9_APPROVED_BY` — the same
+/// env key the T9 placement gate uses — is not configured. The env value, when present, wins.
+const DEFAULT_OPERATOR: &str = "saurabh";
+
+/// P3-209: production idle deadline for the request READ phase of one connection. Generous for
+/// a live operator (three tiny request shapes) and useless to a stalled client.
+const CONNECTION_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// P3-209: cap on concurrently served connections. A connection that cannot get a permit is
+/// answered 503 and dropped immediately — never queued, never spawned as another task.
+const MAX_CONNECTIONS: usize = 64;
 
 /// Shared bridge transport used by the ENABLED sync forward (T4a). `tokio::sync::Mutex` is
 /// required because `BridgeClient::send_command` takes `&mut self` across an await point; the
@@ -63,6 +99,16 @@ struct Snapshot {
     approved_by: Option<String>,
     /// Evidence hash bound to the approval (fail-closed: re-enable always re-approves).
     enabled_evidence: Option<String>,
+    /// P3-020: the authorized DEC-044 operator identity, resolved once at construction from
+    /// `T9_APPROVED_BY` (default `saurabh`). A signed control request naming any other identity
+    /// is refused before any control action happens.
+    authorized_operator: String,
+    /// P3-020: the current control-plane epoch, exposed as `gate_epoch` on `/healthz` and inside
+    /// the signed control envelope. It starts at 1 (0 is never current) and every gate transition
+    /// bumps it, so an envelope captured before the transition names a stale epoch and is refused.
+    control_epoch: u64,
+    /// P3-209: idle deadline for the request read phase; production pins 5 s, tests shrink it.
+    connection_timeout: std::time::Duration,
 }
 
 impl ServerState {
@@ -81,6 +127,9 @@ impl ServerState {
                 operator_review_required: false,
                 approved_by: None,
                 enabled_evidence: None,
+                authorized_operator: Self::operator_from_env(),
+                control_epoch: 1,
+                connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
         }
@@ -89,6 +138,17 @@ impl ServerState {
     /// Production escalation window for an unresolved UNKNOWN outcome (dossier
     /// WP-2 §UNKNOWN: 15 s global halt timer + operator review hook).
     pub const UNKNOWN_ESCALATION: std::time::Duration = std::time::Duration::from_secs(15);
+
+    /// P3-020: the authorized operator identity — `T9_APPROVED_BY` when it is set and non-blank,
+    /// otherwise the DEC-044 default. Resolved once per `ServerState` so a request can never be
+    /// judged against an identity that changed mid-flight.
+    fn operator_from_env() -> String {
+        std::env::var("T9_APPROVED_BY")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| DEFAULT_OPERATOR.to_string())
+    }
 
     /// With private gateway auth (shared secret + expected protocol version) for POST /v1/intents.
     pub fn with_gateway_auth(
@@ -109,9 +169,31 @@ impl ServerState {
                 operator_review_required: false,
                 approved_by: None,
                 enabled_evidence: None,
+                authorized_operator: Self::operator_from_env(),
+                control_epoch: 1,
+                connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
         }
+    }
+
+    /// Pins the authorized operator (tests only — production resolves it from `T9_APPROVED_BY`
+    /// at construction, so a test never depends on ambient process env).
+    #[cfg(test)]
+    fn with_authorized_operator(self, operator: &str) -> Self {
+        if let Ok(mut s) = self.inner.lock() {
+            s.authorized_operator = operator.to_string();
+        }
+        self
+    }
+
+    /// Shrinks the request-read idle deadline (tests only — production keeps 5 s).
+    #[cfg(test)]
+    fn with_connection_timeout(self, d: std::time::Duration) -> Self {
+        if let Ok(mut s) = self.inner.lock() {
+            s.connection_timeout = d;
+        }
+        self
     }
 
     /// Shrinks the UNKNOWN escalation window (tests only — production keeps 15 s).
@@ -149,19 +231,20 @@ impl ServerState {
     }
 
     /// The sanctioned DEC-044 approval: advances the gate to `ENABLED` only when the
-    /// approver is the authorized single operator (`T9_APPROVED_BY`) and an evidence
-    /// hash is supplied. Fail-closed: any other approver, a missing evidence hash, or an
+    /// approver is the authorized single operator (`T9_APPROVED_BY`, default `saurabh`) and an
+    /// evidence hash is supplied. Fail-closed: any other approver, a missing evidence hash, or an
     /// operator-review flag already raised → refused (gate stays HALTED).
     ///
     /// Mirrors `gate.rs::record_approval` + `enable` semantics for the runtime snapshot
     /// (the full `Gate` state machine is exercised in tests; the server surface is
-    /// HALTED-until-sanctioned-approval).
+    /// HALTED-until-sanctioned-approval). Callers on the HTTP surface pass an identity that
+    /// `verify_control` already checked against the signature-covered payload.
     pub fn approve(&self, approver: &str, evidence_hash: &str) -> Result<(), String> {
         let mut s = match self.inner.lock() {
             Ok(s) => s,
             Err(_) => return Err("snapshot lock poisoned".to_string()),
         };
-        if approver.is_empty() || approver != "saurabh" {
+        if approver.is_empty() || approver != s.authorized_operator {
             return Err(format!(
                 "approver {approver:?} is not the authorized operator"
             ));
@@ -181,6 +264,13 @@ impl ServerState {
             return Err(format!("cannot approve from {}", s.gate.as_str()));
         }
         s.gate = ExecState::Enabled;
+        // P3-019: a new approval epoch re-arms the UNKNOWN watchdog — without this,
+        // `unknown_first_seen` from the previous epoch makes `record_unknown_outcome`
+        // early-return forever and the escalation silently stops working.
+        s.unknown_first_seen = None;
+        // P3-020: spend the epoch the envelope named. A copy of that approve envelope now
+        // names a stale epoch and is refused instead of re-enabling the gate.
+        s.bump_control_epoch();
         s.approved_by = Some(approver.to_string());
         s.enabled_evidence = Some(evidence_hash.to_string());
         tracing::info!(
@@ -197,6 +287,8 @@ impl ServerState {
             s.approved_by = None;
             s.enabled_evidence = None;
             s.operator_review_required = false;
+            // P3-020: a halt is a transition — envelopes minted before it are spent.
+            s.bump_control_epoch();
             tracing::warn!("gate safety-halted: {reason}");
         }
     }
@@ -214,6 +306,9 @@ impl ServerState {
             operator_review_required: true,
             approved_by: None,
             enabled_evidence: None,
+            authorized_operator: Self::operator_from_env(),
+            control_epoch: 1,
+            connection_timeout: CONNECTION_READ_TIMEOUT,
         })
     }
 
@@ -255,12 +350,25 @@ impl ServerState {
         if s.gate != ExecState::Halted {
             // Forced safety halt from any state (gate invariant: uncertain → HALTED).
             s.gate = ExecState::Halted;
+            // P3-020: a forced halt is a transition — spend the epoch too, so no envelope
+            // minted while the gate was ENABLED can be presented afterwards.
+            s.bump_control_epoch();
         }
         s.operator_review_required = true;
         tracing::error!(
             "UNKNOWN bridge outcome unresolved for >= {:?}: gate force-HALTED, operator review required before re-enable",
             s.unknown_escalation
         );
+    }
+}
+
+impl Snapshot {
+    /// P3-020: spends the current control-plane epoch. Called on every gate transition, so a
+    /// signed control envelope (which carries the epoch it was minted for) is single-shot: after
+    /// the transition it names a stale epoch and `verify_control` refuses it. Cheap and
+    /// unbounded-in-theory (2^64 transitions) rather than a nonce store.
+    fn bump_control_epoch(&mut self) {
+        self.control_epoch += 1;
     }
 }
 
@@ -278,6 +386,9 @@ impl Clone for Snapshot {
             operator_review_required: self.operator_review_required,
             approved_by: self.approved_by.clone(),
             enabled_evidence: self.enabled_evidence.clone(),
+            authorized_operator: self.authorized_operator.clone(),
+            control_epoch: self.control_epoch,
+            connection_timeout: self.connection_timeout,
         }
     }
 }
@@ -296,6 +407,8 @@ pub fn health_json(state: &ServerState) -> serde_json::Value {
         "operator_review_required": s.operator_review_required,
         "approved_by": s.approved_by,
         "enabled_evidence": s.enabled_evidence,
+        // P3-020: the epoch a signed approve/halt envelope must name (see the module doc).
+        "gate_epoch": s.control_epoch,
     })
 }
 
@@ -325,6 +438,115 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// P3-454: an accepted `gateway_protocol::verify` that carries no decoded envelope is a contract
+/// violation on the sibling crate's side (a change there cannot be seen from here). It must not
+/// panic the connection task — that would drop the response entirely — so the request boundary
+/// turns it into a clean 500 the operator can see.
+fn envelope_or_500(
+    ver: gateway_protocol::Verification,
+) -> Result<gateway_protocol::Envelope, Vec<u8>> {
+    match ver.envelope {
+        Some(envelope) => Ok(envelope),
+        None => Err(json(
+            500,
+            &serde_json::json!({
+                "accepted": false,
+                "reason": "internal error: verified envelope missing",
+            }),
+        )),
+    }
+}
+
+/// A verified DEC-044 control request (P3-020), decoded from the signed envelope's payload.
+struct ControlRequest {
+    operator: String,
+    evidence: String,
+    reason: String,
+}
+
+/// Reads a trimmed string field from a signed control payload; absent, wrong-typed or blank → "".
+fn payload_str(payload: &serde_json::Value, field: &str) -> String {
+    payload
+        .get(field)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+/// P3-020: verify a control-plane request with the same `gateway_protocol` HMAC path
+/// `/v1/intents` uses, and decode the identity/evidence the signature covers. Fail closed — every
+/// rejection answers the caller and performs NO control action:
+///
+/// - secret, protocol version, required identity fields, deadline and MAC (inside `verify`);
+/// - `message_type` must be this route's type — the type is a field of the signed canonical, so
+///   an intent signature (or the sibling control endpoint's) cannot be replayed here;
+/// - `gate_epoch` must equal the current control epoch — a captured envelope names a stale one;
+/// - `payload.operator` must be the configured operator, and `payload.evidence` must be present.
+///   Both are covered by the MAC: `payload_hash` and `payload_json` are canonical fields, so a
+///   signature cannot be lifted onto a payload with different content.
+fn verify_control(
+    body: &str,
+    snap: &Snapshot,
+    expected_message_type: &str,
+    now_ms: i64,
+) -> Result<ControlRequest, Vec<u8>> {
+    let ver = gateway_protocol::verify(body, &snap.shared_secret, &snap.protocol_version, now_ms);
+    if !ver.accepted {
+        // Same fail-closed shape as /v1/intents: 401 for auth/hash/version/deadline.
+        return Err(json(
+            401,
+            &serde_json::json!({ "accepted": false, "reason": ver.reason }),
+        ));
+    }
+    let envelope = envelope_or_500(ver)?;
+    if envelope.message_type != expected_message_type {
+        return Err(json(
+            401,
+            &serde_json::json!({
+                "accepted": false,
+                "reason": "control message type not accepted on this route",
+            }),
+        ));
+    }
+    if envelope.gate_epoch != snap.control_epoch as i64 {
+        // Stale (or forged) epoch: the envelope was not minted for the current gate epoch.
+        return Err(json(
+            401,
+            &serde_json::json!({
+                "accepted": false,
+                "reason": "stale gate epoch",
+                "gate_epoch": snap.control_epoch,
+            }),
+        ));
+    }
+    let operator = payload_str(&envelope.payload, "operator");
+    let evidence = payload_str(&envelope.payload, "evidence");
+    if operator.is_empty() || evidence.is_empty() {
+        return Err(json(
+            401,
+            &serde_json::json!({
+                "accepted": false,
+                "reason": "payload operator and evidence required",
+            }),
+        ));
+    }
+    if operator != snap.authorized_operator {
+        return Err(json(
+            403,
+            &serde_json::json!({
+                "accepted": false,
+                "reason": format!("operator {operator:?} is not the authorized operator"),
+            }),
+        ));
+    }
+    Ok(ControlRequest {
+        operator,
+        evidence,
+        reason: payload_str(&envelope.payload, "reason"),
+    })
 }
 
 async fn route(state: &ServerState, method: &str, path: &str, body: &str) -> Vec<u8> {
@@ -381,9 +603,11 @@ async fn route(state: &ServerState, method: &str, path: &str, body: &str) -> Vec
                     }),
                 );
             };
-            let envelope = ver
-                .envelope
-                .expect("accepted verification carries the decoded envelope");
+            // P3-454: a guarded decode — no `expect` in the request path.
+            let envelope = match envelope_or_500(ver) {
+                Ok(envelope) => envelope,
+                Err(resp) => return resp,
+            };
             // Optional `action` field: absent → "place" (back-compatible with the
             // pinned schema-v1 payload bytes); "cancel" → cancel mapping (requires
             // broker_order_id); "amend" → modify mapping (requires broker_order_id
@@ -516,17 +740,24 @@ async fn route(state: &ServerState, method: &str, path: &str, body: &str) -> Vec
         (m, "/healthz") | (m, "/readyz") if m != "GET" => text(405, "method_not_allowed"),
         (_, "/v1/intents") if method != "POST" => text(405, "method_not_allowed"),
         // Sanctioned DEC-044 approval + safety halt (A2.2/T9 operator surface).
-        // The body is the authorized operator identity ("saurabh") — the DEC-044
-        // single-operator marker doubles as the evidence marker for the sandbox run.
+        // P3-020: both are authenticated with the same `gateway_protocol` HMAC envelope the
+        // private `/v1/intents` route uses — the operator identity and the evidence value live
+        // INSIDE the signed payload (see the module doc for the wire shape), so an unsigned,
+        // wrong-key, wrong-type or stale-epoch request never reaches a control action.
         ("POST", "/v1/approve") => {
-            let approver = body.trim().to_string();
-            match state.approve(&approver, &approver) {
+            let snap = state.snapshot();
+            let req = match verify_control(body, &snap, APPROVE_MESSAGE_TYPE, now_ms()) {
+                Ok(req) => req,
+                Err(resp) => return resp,
+            };
+            match state.approve(&req.operator, &req.evidence) {
                 Ok(()) => json(
                     200,
                     &serde_json::json!({
                         "approved": true,
                         "gate_state": state.snapshot().gate.as_str(),
-                        "approved_by": approver,
+                        "approved_by": req.operator,
+                        "gate_epoch": state.snapshot().control_epoch,
                     }),
                 ),
                 Err(reason) => json(
@@ -540,12 +771,26 @@ async fn route(state: &ServerState, method: &str, path: &str, body: &str) -> Vec
             }
         }
         ("POST", "/v1/halt") => {
-            state.safety_halt(body);
+            let snap = state.snapshot();
+            let req = match verify_control(body, &snap, HALT_MESSAGE_TYPE, now_ms()) {
+                Ok(req) => req,
+                Err(resp) => return resp,
+            };
+            // The signed `reason` is the operator's halt note; fall back to the evidence hash
+            // so the audit line always names something the signature covers.
+            let reason = if req.reason.is_empty() {
+                req.evidence
+            } else {
+                req.reason
+            };
+            state.safety_halt(&reason);
             json(
                 200,
                 &serde_json::json!({
                     "halted": true,
                     "gate_state": state.snapshot().gate.as_str(),
+                    "halted_by": req.operator,
+                    "gate_epoch": state.snapshot().control_epoch,
                 }),
             )
         }
@@ -559,13 +804,30 @@ pub async fn serve(addr: SocketAddr, state: ServerState) -> Result<()> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind health server {addr}"))?;
+    serve_on(listener, state).await
+}
+
+/// The accept loop over an already-bound listener (separated from [`serve`] so a test can drive
+/// the production path — permit gate included — on an ephemeral port).
+async fn serve_on(listener: TcpListener, state: ServerState) -> Result<()> {
+    // P3-209: bound the number of connections in flight, so a flood cannot spawn unbounded
+    // tasks. Over the cap the peer gets an immediate 503 and the connection is dropped — never
+    // queued (nothing here is worth making a client wait for).
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(x) => x,
             Err(_) => continue,
         };
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            let mut stream = stream;
+            let _ = stream.write_all(&text(503, "too_many_connections")).await;
+            let _ = stream.flush().await;
+            continue;
+        };
         let st = state.clone();
         tokio::spawn(async move {
+            let _permit = permit; // held for the connection's lifetime
             if let Err(e) = handle_conn(stream, st).await {
                 tracing::debug!("health connection closed: {e}");
             }
@@ -573,23 +835,56 @@ pub async fn serve(addr: SocketAddr, state: ServerState) -> Result<()> {
     }
 }
 
+/// The request line + body of one connection (P3-209 read phase output).
+struct HttpRequest {
+    method: String,
+    path: String,
+    body: String,
+}
+
+/// One parsed request. `Ok(None)` from [`read_request`] means there is nothing to answer: the
+/// client closed first, or the request was refused there (413) and the refusal was written.
 async fn handle_conn(mut stream: TcpStream, state: ServerState) -> Result<()> {
-    // Read headers + optional body. We support Content-Length only (no chunked).
+    // P3-209: bound only the READ phase. A slowloris client that sends a partial header — or
+    // promises a `Content-Length` body it never sends — must not pin this task forever. The
+    // deadline deliberately does NOT cover routing: the ENABLED `/v1/intents` path forwards
+    // synchronously to the bridge (which has its own, longer timeouts), and killing a live order
+    // submit mid-flight would turn a valid order into a lost ack.
+    let deadline = state.snapshot().connection_timeout;
+    let request = match tokio::time::timeout(deadline, read_request(&mut stream)).await {
+        Ok(Ok(Some(request))) => request,
+        Ok(Ok(None)) => return Ok(()),
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "request read idle timeout after {deadline:?}"
+            ))
+        }
+    };
+
+    let resp = route(&state, &request.method, &request.path, &request.body).await;
+    let _ = stream.write_all(&resp).await;
+    let _ = stream.flush().await;
+    Ok(())
+}
+
+/// One request line + body (headers + Content-Length; we support Content-Length only — no chunked).
+async fn read_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let header_end = loop {
         match stream.read(&mut chunk).await {
-            Ok(0) => return Ok(()),
+            Ok(0) => return Ok(None),
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
                 if let Some(idx) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                     break idx + 4;
                 }
                 if buf.len() > 64 * 1024 {
-                    return Ok(());
+                    return Ok(None);
                 }
             }
-            Err(_) => return Ok(()),
+            Err(_) => return Ok(None),
         }
     };
     let h_end = header_end;
@@ -615,7 +910,7 @@ async fn handle_conn(mut stream: TcpStream, state: ServerState) -> Result<()> {
                     let resp = text(413, "payload_too_large");
                     let _ = stream.write_all(&resp).await;
                     let _ = stream.flush().await;
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         }
@@ -635,10 +930,7 @@ async fn handle_conn(mut stream: TcpStream, state: ServerState) -> Result<()> {
     body_bytes.truncate(content_length);
     let body = String::from_utf8_lossy(&body_bytes).to_string();
 
-    let resp = route(&state, &method, &path, &body).await;
-    let _ = stream.write_all(&resp).await;
-    let _ = stream.flush().await;
-    Ok(())
+    Ok(Some(HttpRequest { method, path, body }))
 }
 
 #[cfg(test)]
@@ -680,15 +972,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    continue;
-                };
-                let st = state.clone();
-                tokio::spawn(async move {
-                    let _ = handle_conn(stream, st).await;
-                });
-            }
+            // Drive the production accept loop — P3-209 permit gate included — instead of a
+            // copy of it, so these tests cover the code the service actually runs.
+            let _ = serve_on(listener, state).await;
         });
         addr
     }
@@ -917,6 +1203,58 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
+    /// Bounded wait for the UNKNOWN watchdog to raise the operator-review flag and force
+    /// the gate HALTED. Asserts instead of falling through, so a watchdog that never
+    /// escalates fails the test rather than hanging it.
+    async fn wait_for_unknown_escalation(state: &ServerState) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let s = state.snapshot();
+            if s.operator_review_required {
+                assert_eq!(s.gate, ExecState::Halted, "watchdog must force HALT");
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "UNKNOWN watchdog never escalated (gate={})",
+                s.gate.as_str()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn p3_019_reapproval_rearms_the_unknown_watchdog() {
+        // P3-019. After an UNKNOWN escalation forces HALT + operator review, the DEC-044
+        // recovery path is operator halt → re-approve, which opens a new approval epoch.
+        // The watchdog must re-arm for that epoch so the NEXT unresolved UNKNOWN still
+        // escalates. Before the fix `unknown_first_seen` was never cleared, so
+        // `record_unknown_outcome` early-returned for the rest of the process lifetime
+        // and the force-HALT + operator-review property was silently dead.
+        let state = ServerState::new(ExecState::Enabled)
+            .with_authorized_operator("saurabh")
+            .with_unknown_escalation(std::time::Duration::from_millis(40));
+
+        // Epoch 1: an unresolved UNKNOWN escalates to force-HALT + operator review.
+        state.record_unknown_outcome();
+        wait_for_unknown_escalation(&state).await;
+
+        // DEC-044 recovery: the operator halts, then re-approves (gate HALTED → ENABLED).
+        state.safety_halt("operator halt after UNKNOWN");
+        state
+            .approve("saurabh", "evidence-epoch-2")
+            .expect("re-approval in the new epoch");
+        assert_eq!(
+            state.snapshot().gate,
+            ExecState::Enabled,
+            "re-approval must enable the gate"
+        );
+
+        // Epoch 2: a fresh UNKNOWN must arm a fresh escalation.
+        state.record_unknown_outcome();
+        wait_for_unknown_escalation(&state).await;
+    }
+
     #[tokio::test]
     async fn intents_enabled_bridge_rejected_returns_409() {
         let state = enabled_state(fake_forwarder(CommandScript::Reject(
@@ -1108,15 +1446,65 @@ mod tests {
 
     // ---- DEC-044 approval / safety-halt surface (A2.2/T9) ----
 
+    /// A control-plane state with known gateway auth and a pinned operator, so no test depends
+    /// on ambient `T9_APPROVED_BY` (P3-020 resolves it from the process env at construction).
+    fn control_state(gate: ExecState) -> ServerState {
+        ServerState::with_gateway_auth(gate, "s3cr3t".into(), "execution-gateway.v1".into())
+            .with_authorized_operator("saurabh")
+    }
+
+    /// The signed-payload convention for a control request (P3-020): identity + evidence.
+    fn control_payload(operator: &str, evidence: &str) -> serde_json::Value {
+        serde_json::json!({ "operator": operator, "evidence": evidence })
+    }
+
+    /// Mints a control envelope exactly as the operator's signer must: the payload is hashed
+    /// (`payload_hash`) and carried inside the HMAC canonical (P3-020).
+    fn signed_control(
+        secret: &str,
+        message_type: &str,
+        payload: serde_json::Value,
+        gate_epoch: i64,
+    ) -> String {
+        use crate::gateway_protocol::{encode_envelope, sha256_hex, Envelope};
+        let payload_json = serde_json::to_string(&payload).unwrap();
+        let env = Envelope {
+            protocol_version: "execution-gateway.v1".into(),
+            message_type: message_type.into(),
+            request_id: format!("ctl-{message_type}-{gate_epoch}"),
+            account_scope_id: "acc-1".into(),
+            execution_partition_id: "part-1".into(),
+            payload_hash: sha256_hex(payload_json.as_bytes()),
+            gate_epoch,
+            fence_token: "fence-ctl".into(),
+            deadline_epoch_ms: 9_999_999_999_999,
+            payload,
+            authentication: String::new(),
+        };
+        encode_envelope(secret, &env).unwrap()
+    }
+
+    /// The HTTP framing for a control body.
+    fn control_request(path: &str, body: &str) -> String {
+        format!(
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
     #[tokio::test]
     async fn approve_with_authorized_operator_enables_gate() {
-        let state = ServerState::new(ExecState::Halted);
+        let state = control_state(ExecState::Halted);
         let addr = spawn_server(state.clone()).await;
-        let (s, b) = raw_request(
-            addr,
-            "POST /v1/approve HTTP/1.1\r\nHost: x\r\nContent-Length: 7\r\n\r\nsaurabh",
-        )
-        .await;
+        let epoch = state.snapshot().control_epoch as i64;
+        let envelope = signed_control(
+            "s3cr3t",
+            APPROVE_MESSAGE_TYPE,
+            control_payload("saurabh", "evidence-1"),
+            epoch,
+        );
+        let (s, b) = raw_request(addr, &control_request("/v1/approve", &envelope)).await;
         assert_eq!(s, 200, "body: {b}");
         assert!(b.contains("\"approved\":true"), "body: {b}");
         assert!(b.contains("\"gate_state\":\"ENABLED\""), "body: {b}");
@@ -1124,54 +1512,83 @@ mod tests {
         assert_eq!(hs, 200);
         assert!(hb.contains("\"gate_state\":\"ENABLED\""), "body: {hb}");
         assert!(hb.contains("\"approved_by\":\"saurabh\""), "body: {hb}");
+        assert!(
+            hb.contains("\"enabled_evidence\":\"evidence-1\""),
+            "the signed evidence must be the one bound to the approval: {hb}"
+        );
+        // The approval spent the epoch it named (P3-020): health advertises the next one.
+        assert_eq!(
+            health_json(&state)["gate_epoch"],
+            serde_json::json!(epoch + 1),
+            "approval must advance the control epoch"
+        );
     }
 
     #[tokio::test]
     async fn approve_with_unauthorized_operator_refused() {
-        let state = ServerState::new(ExecState::Halted);
-        let addr = spawn_server(state).await;
-        let (s, b) = raw_request(
-            addr,
-            "POST /v1/approve HTTP/1.1\r\nHost: x\r\nContent-Length: 7\r\n\r\nmallory",
-        )
-        .await;
+        let state = control_state(ExecState::Halted);
+        let addr = spawn_server(state.clone()).await;
+        let epoch = state.snapshot().control_epoch as i64;
+        let envelope = signed_control(
+            "s3cr3t",
+            APPROVE_MESSAGE_TYPE,
+            control_payload("mallory", "evidence-1"),
+            epoch,
+        );
+        let (s, b) = raw_request(addr, &control_request("/v1/approve", &envelope)).await;
         assert_eq!(s, 403, "body: {b}");
-        assert!(b.contains("\"approved\":false"), "body: {b}");
-        assert!(b.contains("\"gate_state\":\"HALTED\""), "body: {b}");
+        assert!(b.contains("not the authorized operator"), "body: {b}");
+        assert_eq!(
+            state.snapshot().gate,
+            ExecState::Halted,
+            "an unauthorized (but properly signed) approve must not enable the gate"
+        );
     }
 
     #[tokio::test]
     async fn approve_refused_after_operator_review() {
-        let state = ServerState::new(ExecState::Halted);
+        let state = control_state(ExecState::Halted);
         // Simulate the UNKNOWN escalation raising the review flag.
         state.inner.lock().unwrap().operator_review_required = true;
-        let addr = spawn_server(state).await;
-        let (s, b) = raw_request(
-            addr,
-            "POST /v1/approve HTTP/1.1\r\nHost: x\r\nContent-Length: 7\r\n\r\nsaurabh",
-        )
-        .await;
+        let addr = spawn_server(state.clone()).await;
+        let envelope = signed_control(
+            "s3cr3t",
+            APPROVE_MESSAGE_TYPE,
+            control_payload("saurabh", "evidence-1"),
+            state.snapshot().control_epoch as i64,
+        );
+        let (s, b) = raw_request(addr, &control_request("/v1/approve", &envelope)).await;
         assert_eq!(s, 403, "body: {b}");
         assert!(b.contains("operator review required"), "body: {b}");
     }
 
     #[tokio::test]
     async fn halt_returns_gate_to_halted_and_invalidates_approval() {
-        let state = ServerState::new(ExecState::Halted);
+        let state = control_state(ExecState::Halted);
         let addr = spawn_server(state.clone()).await;
-        let (s, _) = raw_request(
-            addr,
-            "POST /v1/approve HTTP/1.1\r\nHost: x\r\nContent-Length: 7\r\n\r\nsaurabh",
-        )
-        .await;
+        let approve = signed_control(
+            "s3cr3t",
+            APPROVE_MESSAGE_TYPE,
+            control_payload("saurabh", "evidence-1"),
+            state.snapshot().control_epoch as i64,
+        );
+        let (s, _) = raw_request(addr, &control_request("/v1/approve", &approve)).await;
         assert_eq!(s, 200);
-        let (s, b) = raw_request(
-            addr,
-            "POST /v1/halt HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nuser",
-        )
-        .await;
+
+        let halt = signed_control(
+            "s3cr3t",
+            HALT_MESSAGE_TYPE,
+            serde_json::json!({
+                "operator": "saurabh",
+                "evidence": "evidence-halt",
+                "reason": "operator kill switch",
+            }),
+            state.snapshot().control_epoch as i64,
+        );
+        let (s, b) = raw_request(addr, &control_request("/v1/halt", &halt)).await;
         assert_eq!(s, 200, "body: {b}");
         assert!(b.contains("\"halted\":true"), "body: {b}");
+        assert!(b.contains("\"halted_by\":\"saurabh\""), "body: {b}");
         let (hs, hb) = raw_get(addr, "GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n").await;
         assert_eq!(hs, 200);
         assert!(hb.contains("\"gate_state\":\"HALTED\""), "body: {hb}");
@@ -1184,5 +1601,215 @@ mod tests {
         let addr = spawn_server(state).await;
         let (s, _) = raw_get(addr, "GET /v1/approve HTTP/1.1\r\nHost: x\r\n\r\n").await;
         assert_eq!(s, 405);
+    }
+
+    #[tokio::test]
+    async fn p3_020_unsigned_control_requests_are_refused() {
+        // The pre-P3-020 wire format (the bare operator name) is now just an unsigned request:
+        // it must be refused — and never downgraded to "allowed but unauthenticated".
+        let halted = control_state(ExecState::Halted);
+        let addr = spawn_server(halted.clone()).await;
+        let (s, b) = raw_request(addr, &control_request("/v1/approve", "saurabh")).await;
+        assert_eq!(s, 401, "unsigned approve must be refused; body: {b}");
+        assert!(b.contains("\"accepted\":false"), "body: {b}");
+        assert_eq!(
+            halted.snapshot().gate,
+            ExecState::Halted,
+            "an unsigned approve must not enable the gate"
+        );
+
+        // The kill switch is authenticated too: an attacker who can reach the port must not be
+        // able to halt trading (nor restart the watchdog) with an unsigned request.
+        let enabled = control_state(ExecState::Enabled);
+        let addr = spawn_server(enabled.clone()).await;
+        let (s, b) = raw_request(addr, &control_request("/v1/halt", "saurabh")).await;
+        assert_eq!(s, 401, "unsigned halt must be refused; body: {b}");
+        assert_eq!(
+            enabled.snapshot().gate,
+            ExecState::Enabled,
+            "an unsigned halt must not stop the service"
+        );
+    }
+
+    #[tokio::test]
+    async fn p3_020_wrong_key_wrong_type_and_lifted_signature_are_refused() {
+        let state = control_state(ExecState::Halted);
+        let addr = spawn_server(state.clone()).await;
+        let epoch = state.snapshot().control_epoch as i64;
+        let payload = control_payload("saurabh", "evidence-1");
+
+        // Wrong key: the MAC cannot be verified.
+        let wrong_key = signed_control(
+            "not-the-secret",
+            APPROVE_MESSAGE_TYPE,
+            payload.clone(),
+            epoch,
+        );
+        let (s, b) = raw_request(addr, &control_request("/v1/approve", &wrong_key)).await;
+        assert_eq!(s, 401, "wrong-key approve must be refused; body: {b}");
+        assert!(b.contains("authentication failed"), "body: {b}");
+
+        // A signature minted for a different message type: the type is inside the signed
+        // canonical, so it cannot be replayed on the control plane.
+        let wrong_type = signed_control("s3cr3t", "EXECUTION_INTENT", payload.clone(), epoch);
+        let (s, b) = raw_request(addr, &control_request("/v1/approve", &wrong_type)).await;
+        assert_eq!(
+            s, 401,
+            "intent signature replayed on the control plane; body: {b}"
+        );
+        assert!(b.contains("control message type"), "body: {b}");
+
+        // A signature lifted onto different content, with `payload_hash` recomputed so only the
+        // HMAC can catch it (payload_json is a canonical field): the evidence stays unforgeable.
+        use crate::gateway_protocol::sha256_hex;
+        let mut lifted: serde_json::Value = serde_json::from_str(&signed_control(
+            "s3cr3t",
+            APPROVE_MESSAGE_TYPE,
+            payload,
+            epoch,
+        ))
+        .unwrap();
+        let forged = control_payload("saurabh", "forged-evidence");
+        let forged_json = serde_json::to_string(&forged).unwrap();
+        lifted["payload"] = forged;
+        lifted["payload_hash"] = serde_json::json!(sha256_hex(forged_json.as_bytes()));
+        let lifted = serde_json::to_string(&lifted).unwrap();
+        let (s, b) = raw_request(addr, &control_request("/v1/approve", &lifted)).await;
+        assert_eq!(s, 401, "lifted signature must be refused; body: {b}");
+        assert!(b.contains("authentication failed"), "body: {b}");
+
+        assert_eq!(
+            state.snapshot().gate,
+            ExecState::Halted,
+            "no rejected control request may change the gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn p3_020_replayed_approve_envelope_is_refused_after_a_transition() {
+        let state = control_state(ExecState::Halted);
+        let addr = spawn_server(state.clone()).await;
+        let approve = signed_control(
+            "s3cr3t",
+            APPROVE_MESSAGE_TYPE,
+            control_payload("saurabh", "evidence-1"),
+            state.snapshot().control_epoch as i64,
+        );
+        let (s, b) = raw_request(addr, &control_request("/v1/approve", &approve)).await;
+        assert_eq!(s, 200, "body: {b}");
+
+        // The operator halts (signed) — a transition, so the approve epoch is spent.
+        let halt = signed_control(
+            "s3cr3t",
+            HALT_MESSAGE_TYPE,
+            control_payload("saurabh", "evidence-halt"),
+            state.snapshot().control_epoch as i64,
+        );
+        let (s, b) = raw_request(addr, &control_request("/v1/halt", &halt)).await;
+        assert_eq!(s, 200, "body: {b}");
+
+        // Replay the captured approve bytes: a valid MAC for a stale epoch must not re-enable.
+        let (s, b) = raw_request(addr, &control_request("/v1/approve", &approve)).await;
+        assert_eq!(s, 401, "replayed approve must be refused; body: {b}");
+        assert!(b.contains("stale gate epoch"), "body: {b}");
+        assert_eq!(
+            state.snapshot().gate,
+            ExecState::Halted,
+            "a replayed approval must not re-enable the gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn p3_209_stalled_request_is_closed_by_the_read_deadline() {
+        // Slowloris: a header that never terminates, with a shrunk deadline so the test is fast.
+        let state = ServerState::new(ExecState::Halted)
+            .with_connection_timeout(std::time::Duration::from_millis(150));
+        let addr = spawn_server(state).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+        let mut buf = [0u8; 64];
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf)).await;
+        assert!(
+            matches!(outcome, Ok(Ok(0))),
+            "stalled connection must be closed by the read deadline, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn p3_209_serve_bounds_concurrent_connections() {
+        // The accept loop must cap connections in flight: `MAX_CONNECTIONS` idle sockets hold
+        // every permit, so the next connection is answered 503 and dropped instead of being
+        // accepted as yet another task. The held sockets are answered only by the read deadline.
+        let state = ServerState::new(ExecState::Halted)
+            .with_connection_timeout(std::time::Duration::from_millis(1000));
+        let addr = spawn_server(state).await;
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            held.push(stream);
+        }
+        // A permit frees only when a held connection hits its deadline; ask until the cap is
+        // visibly reached (a 200 means the server had not yet accepted every held socket).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let (s, b) = raw_request(addr, "GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n").await;
+            if s == 503 {
+                assert!(b.contains("too_many_connections"), "body: {b}");
+                break;
+            }
+            assert_eq!(s, 200, "unexpected status above the cap: {b}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "connection cap never reached (MAX_CONNECTIONS={MAX_CONNECTIONS})"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        drop(held);
+    }
+
+    #[test]
+    fn p3_454_accepted_verification_without_envelope_answers_500() {
+        use crate::gateway_protocol::{sha256_hex, Envelope, Verification};
+        // The panic this guards (accepted but no decoded envelope) is a sibling-crate contract
+        // violation that cannot be produced through `gateway_protocol`, so the boundary guard is
+        // pinned directly: it must answer 500 — never panic the connection task into no response.
+        let missing = Verification {
+            accepted: true,
+            reason: "accepted".into(),
+            envelope: None,
+        };
+        let resp = envelope_or_500(missing).expect_err("a missing envelope must not be Ok");
+        let resp = String::from_utf8_lossy(&resp).to_string();
+        assert!(resp.starts_with("HTTP/1.1 500"), "got: {resp}");
+        assert!(resp.contains("verified envelope missing"), "got: {resp}");
+
+        // The happy path still hands the decoded envelope through untouched.
+        let payload = serde_json::json!({ "x": 1 });
+        let payload_json = serde_json::to_string(&payload).unwrap();
+        let envelope = Envelope {
+            protocol_version: "execution-gateway.v1".into(),
+            message_type: "EXECUTION_INTENT".into(),
+            request_id: "req-454".into(),
+            account_scope_id: "acc-1".into(),
+            execution_partition_id: "part-1".into(),
+            payload_hash: sha256_hex(payload_json.as_bytes()),
+            gate_epoch: 1,
+            fence_token: "fence-1".into(),
+            deadline_epoch_ms: 9_999_999_999_999,
+            payload,
+            authentication: "00".into(),
+        };
+        let ok = envelope_or_500(Verification {
+            accepted: true,
+            reason: "accepted".into(),
+            envelope: Some(envelope),
+        })
+        .expect("a present envelope must pass through");
+        assert_eq!(ok.request_id, "req-454");
     }
 }
