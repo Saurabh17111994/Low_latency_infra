@@ -10,12 +10,20 @@ import (
 // once, and surfaces the retry result. If reauth itself fails, the broker is
 // marked disabled, subsequent health reflects UP disabled, and subsequent
 // commands are refused locally without touching the venue. Never loops.
+//
+// P3-050/P3-262: reauth is called at most once per auth-failure generation and
+// never concurrently. A burst of 401s shares one (typically slow, TOTP-backed)
+// refresh instead of churning the token of the shared SDK client, so the
+// closure must be safe to call from the command path but never has to be
+// re-entrant.
 type ReauthBroker struct {
 	mu          sync.Mutex
 	inner       Broker
 	reauth      func(context.Context) error
 	disabled    bool
 	reauthCalls int
+	gen         int        // bumped by every successful re-auth; the election token
+	reauthMu    sync.Mutex // serializes the election: at most one re-auth in flight
 }
 
 func NewReauthBroker(inner Broker, reauth func(context.Context) error) *ReauthBroker {
@@ -46,7 +54,10 @@ func (r *ReauthBroker) doWithReauth(ctx context.Context, fn func() BrokerResult)
 	// another TOTP re-auth. The flag used to be read only by the health handler,
 	// so every later command still called the broker and re-authenticated again
 	// on its next broker_auth_failure.
-	if r.IsDisabled() {
+	r.mu.Lock()
+	disabled, gen := r.disabled, r.gen
+	r.mu.Unlock()
+	if disabled {
 		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
 	}
 	result := fn()
@@ -72,22 +83,53 @@ func (r *ReauthBroker) doWithReauth(ctx context.Context, fn func() BrokerResult)
 	if ctx.Err() != nil {
 		return result
 	}
-	// First auth failure: attempt exactly one re-auth.
+	// First auth failure: attempt exactly one re-auth — but only one across all
+	// the commands that are failing at the same time.
 	if r.reauth == nil {
 		r.markDisabled()
 		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
 	}
+	// P3-050/P3-262: elect one re-auth per generation. A command that loses the
+	// election waits here, then finds the generation already bumped and retries
+	// on the token someone else refreshed, instead of running its own AutoLogin.
+	r.reauthMu.Lock()
+	r.mu.Lock()
+	disabled, current := r.disabled, r.gen
+	r.mu.Unlock()
+	if disabled {
+		r.reauthMu.Unlock()
+		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
+	}
+	if current != gen {
+		r.reauthMu.Unlock()
+		return r.retryOnce(ctx, fn, result)
+	}
 	r.mu.Lock()
 	r.reauthCalls++
 	r.mu.Unlock()
-	if err := r.reauth(ctx); err != nil {
+	err := r.reauth(ctx)
+	if err == nil {
+		r.mu.Lock()
+		r.gen++
+		r.mu.Unlock()
+	}
+	r.reauthMu.Unlock()
+	if err != nil {
 		r.markDisabled()
 		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
 	}
+	return r.retryOnce(ctx, fn, result)
+}
+
+// retryOnce re-issues the command on the token the election produced and
+// applies the post-retry verdict. It never re-enters re-auth ("never loops"),
+// and it honours P3-261: a caller that has gone by now keeps its original auth
+// failure rather than provoking a venue call nobody is waiting for.
+func (r *ReauthBroker) retryOnce(ctx context.Context, fn func() BrokerResult, original BrokerResult) BrokerResult {
 	// P3-261: the re-auth may have taken the caller past its deadline. Retrying
 	// then spends a venue round trip nobody is waiting for.
 	if ctx.Err() != nil {
-		return result
+		return original
 	}
 	// Re-auth succeeded: retry the command exactly once, no further re-auth.
 	retry := fn()

@@ -6,7 +6,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestSandboxAutoReauth: fake clock expiry → exactly one re-auth → success;
@@ -343,5 +345,70 @@ func TestContextDeadAfterReauthSkipsTheRetry(t *testing.T) {
 	}
 	if rb.IsDisabled() {
 		t.Fatal("a caller that went away must not disable the broker")
+	}
+}
+
+// P3-050/P3-262 — the SDK client is shared, so N concurrent broker_auth_failure
+// results must not each run their own TOTP AutoLogin: that churns the token,
+// risks rate-limiting, and contradicts the "calls reauth once" contract.
+func TestConcurrentAuthFailuresShareOneReauth(t *testing.T) {
+	const workers = 8
+	ctx := t.Context()
+
+	// The venue rejects every command until the token has been refreshed.
+	var mu sync.Mutex
+	refreshed := false
+	inner := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		mu.Lock()
+		ok := refreshed
+		mu.Unlock()
+		if !ok {
+			return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_auth_failure"}
+		}
+		return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: "BRK-SHARED-1"}
+	}}
+
+	// The re-auth is deliberately slow so that parallel AutoLogins would overlap.
+	reauthCalls, inFlight, maxInFlight := 0, 0, 0
+	rb := NewReauthBroker(inner, func(ctx context.Context) error {
+		mu.Lock()
+		reauthCalls++
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		refreshed = true
+		inFlight--
+		mu.Unlock()
+		return nil
+	})
+
+	start := make(chan struct{})
+	results := make([]BrokerResult, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i] = rb.Place(ctx, validPlaceCommand())
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, res := range results {
+		if res.Outcome != OutcomeSuccess {
+			t.Fatalf("worker %d: %+v want SUCCESS once the shared token was refreshed", i, res)
+		}
+	}
+	if reauthCalls != 1 {
+		t.Fatalf("re-authenticated %d times for %d concurrent auth failures, want 1", reauthCalls, workers)
+	}
+	if maxInFlight != 1 {
+		t.Fatalf("max concurrent re-auths=%d want 1 (AutoLogin must never run in parallel)", maxInFlight)
 	}
 }
