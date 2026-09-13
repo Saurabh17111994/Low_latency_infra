@@ -214,15 +214,21 @@ func NormalizeOrderUpdate(update map[string]any) ReportEnvelope {
 		FillTime:        stringField(update, "fillTime"),
 		InstrumentToken: stringField(update, "token"), ReceivedTsMs: nowMs(),
 	}
-	// P3-474: the digest input is unchanged, so ids already issued for earlier
-	// updates keep deduplicating. json.Marshal cannot fail on map[string]string,
-	// but the error is handled explicitly rather than collapsed: this id is the
-	// upstream dedup key for the event, so a report that cannot carry one is never
-	// published as a success.
+	// P3-255/P3-260: the id is the fill's identity downstream — the executor keys
+	// source_event_id on it and will not project a fill it has already seen — so it
+	// has to cover the whole fill. Two partial fills agreeing on shares and average
+	// but differing in price, quantity, time or exchange order id used to collapse
+	// into one id and the second was silently dropped. A replayed update still hashes
+	// equally because every field matches.
+	// P3-474: json.Marshal cannot fail on map[string]string, but the error is handled
+	// explicitly rather than collapsed — this id is the upstream dedup key, so a
+	// report that cannot carry one is never published as a success.
 	eventID, err := fingerprint(map[string]string{
 		"id": report.BrokerOrderID, "remarks": report.ClientOrderRef,
 		"status": report.OrderStatus, "report_type": report.ReportType,
 		"fill_shares": report.FillShares, "average_price": report.AveragePrice,
+		"fill_price": report.FillPrice, "fill_quantity": report.FillQuantity,
+		"fill_time": report.FillTime, "exchange_order_id": report.ExchangeOrderID,
 		"exchange_update_time": stringField(update, "exchangeUpdateTime"),
 	})
 	if err != nil {

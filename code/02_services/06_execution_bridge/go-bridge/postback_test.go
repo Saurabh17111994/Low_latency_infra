@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -191,5 +192,50 @@ func TestNextBackoffClampsInvalidAndOverflowingValues(t *testing.T) {
 	}
 	if got := nextBackoff(time.Second, time.Second); got != time.Second {
 		t.Fatalf("nextBackoff(1s, 1s)=%v, want 1s", got)
+	}
+}
+
+// P3-255/P3-260: the event id is the fill's identity downstream — the executor keys
+// source_event_id on it and will not project a fill whose id it has already seen
+// (04_executor/src/projection/mod.rs:651, compared at :262 and :561) — so two
+// distinct partial fills must never carry the same one. The digest used to ignore
+// fillPrice, fillQuantity, fillTime and exchangeOrderID.
+func TestPostbackEventIDDistinguishesFillIdentity(t *testing.T) {
+	base := map[string]any{
+		"orderStatus": "EXECUTED", "reportType": "Fill", "id": "BRK-77",
+		"remarks": "c-77", "fillShares": "10", "averagePrice": "150.5",
+		"fillPrice": "15050", "fillQuantity": "10",
+		"fillTime": "2026-09-13T09:15:00", "exchangeOrderID": "EX-1",
+	}
+	baseID := NormalizeOrderUpdate(base).PostbackEventID
+	if baseID == "" {
+		t.Fatal("base update produced no event id")
+	}
+	seen := map[string]string{baseID: "base"}
+	var collisions []string
+	for _, variant := range []struct{ field, value string }{
+		{"fillPrice", "15051"},
+		{"fillQuantity", "11"},
+		{"fillTime", "2026-09-13T09:15:01"},
+		{"exchangeOrderID", "EX-2"},
+	} {
+		clone := map[string]any{}
+		for k, v := range base {
+			clone[k] = v
+		}
+		clone[variant.field] = variant.value
+		id := NormalizeOrderUpdate(clone).PostbackEventID
+		if other, ok := seen[id]; ok {
+			collisions = append(collisions, fmt.Sprintf("%s collides with %s", variant.field, other))
+			continue
+		}
+		seen[id] = variant.field
+	}
+	if len(collisions) > 0 {
+		t.Fatalf("distinct fills share one postback event id, so downstream dedup drops them: %v", collisions)
+	}
+	// A replayed update must still hash equally, or every reconnect re-projects a fill.
+	if replay := NormalizeOrderUpdate(base).PostbackEventID; replay != baseID {
+		t.Fatalf("replayed update changed identity: %q != %q", replay, baseID)
 	}
 }
