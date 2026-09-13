@@ -53,7 +53,12 @@ func (f *FakeBroker) result(ctx context.Context, command string, c CommandEnvelo
 	if command == CommandReconcilePosition {
 		result.Data = []map[string]string{}
 	}
-	result.Fingerprint = fingerprint(result.Data)
+	fp, err := fingerprint(result.Data)
+	if err != nil {
+		// P3-474: the fake must not publish an empty idempotency digest either.
+		return unknownResult(err)
+	}
+	result.Fingerprint = fp
 	return result
 }
 

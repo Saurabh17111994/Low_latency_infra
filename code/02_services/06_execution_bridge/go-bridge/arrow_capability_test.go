@@ -73,7 +73,10 @@ func TestArrowRestCapability(t *testing.T) {
 		cmd := validPlaceCommand()
 		cmd.RequestID = "cap-req-1"
 		// Idempotency is enforced by beginRequest, not by dispatch.
-		state1, owner1, conflict1 := server.beginRequest(cmd)
+		state1, owner1, conflict1, err1 := server.beginRequest(cmd)
+		if err1 != nil {
+			t.Fatalf("beginRequest must digest the command: %v", err1)
+		}
 		if conflict1 || !owner1 {
 			t.Fatalf("first beginRequest owner=%v conflict=%v want owner true", owner1, conflict1)
 		}
@@ -81,7 +84,10 @@ func TestArrowRestCapability(t *testing.T) {
 		server.finishRequest(state1, ReportEnvelope{RequestID: cmd.RequestID})
 		// Same RequestID + same fingerprint (idempotent) — second handler coalesces.
 		fakeCallsBefore := fake.Calls(CommandPlace)
-		state2, owner2, conflict2 := server.beginRequest(cmd)
+		state2, owner2, conflict2, err2 := server.beginRequest(cmd)
+		if err2 != nil {
+			t.Fatalf("beginRequest must digest the command: %v", err2)
+		}
 		if conflict2 {
 			t.Fatal("same fingerprint should not conflict")
 		}
@@ -95,7 +101,10 @@ func TestArrowRestCapability(t *testing.T) {
 		// Same RequestID + different fingerprint → request_id_reuse_violation.
 		mutated := cmd
 		mutated.Order.Quantity = "999"
-		_, _, conflict3 := server.beginRequest(mutated)
+		_, _, conflict3, err3 := server.beginRequest(mutated)
+		if err3 != nil {
+			t.Fatalf("beginRequest must digest the mutated command: %v", err3)
+		}
 		if !conflict3 {
 			t.Fatal("different fingerprint with same RequestID should be reuse violation")
 		}

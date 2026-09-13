@@ -129,7 +129,13 @@ func (s *BridgeServer) handleCommand(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "invalid_command: "+err.Error())
 		return
 	}
-	state, owner, conflict := s.beginRequest(command)
+	state, owner, conflict, err := s.beginRequest(command)
+	if err != nil {
+		// P3-474: a command that cannot be digested cannot be deduplicated safely,
+		// so it never reaches the broker.
+		s.writeError(w, http.StatusInternalServerError, "fingerprint_failed")
+		return
+	}
 	if conflict {
 		s.writeError(w, http.StatusConflict, "request_id_reuse_violation")
 		return
@@ -148,19 +154,22 @@ func (s *BridgeServer) handleCommand(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, http.StatusOK, report)
 }
 
-func (s *BridgeServer) beginRequest(command CommandEnvelope) (*requestState, bool, bool) {
-	fp := fingerprint(command)
+func (s *BridgeServer) beginRequest(command CommandEnvelope) (*requestState, bool, bool, error) {
+	fp, err := fingerprint(command)
+	if err != nil {
+		return nil, false, false, err
+	}
 	s.requestMu.Lock()
 	defer s.requestMu.Unlock()
 	if existing, ok := s.requests[command.RequestID]; ok {
 		if existing.fingerprint != fp {
-			return nil, false, true
+			return nil, false, true, nil
 		}
-		return existing, false, false
+		return existing, false, false, nil
 	}
 	state := &requestState{fingerprint: fp, done: make(chan struct{})}
 	s.requests[command.RequestID] = state
-	return state, true, false
+	return state, true, false, nil
 }
 
 func (s *BridgeServer) finishRequest(state *requestState, report ReportEnvelope) {

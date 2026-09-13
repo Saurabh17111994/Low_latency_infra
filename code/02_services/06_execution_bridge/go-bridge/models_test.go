@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -422,5 +423,41 @@ func TestValidateCommandRejectsWhitespaceInBrokerOrderID(t *testing.T) {
 		if err := validateCommand(commandWithID(CommandCancel, id)); err != nil {
 			t.Fatalf("broker_order_id %q must stay valid: %v", id, err)
 		}
+	}
+}
+
+// P3-474: an unmarshalable payload must fail loudly instead of collapsing into the
+// empty sentinel that server.beginRequest uses as its idempotency key.
+func TestFingerprintReportsMarshalFailure(t *testing.T) {
+	for _, payload := range []any{math.Inf(1), make(chan int), func() {}} {
+		digest, err := fingerprint(payload)
+		if err == nil {
+			t.Fatalf("payload %T must report a marshal error, got digest %q", payload, digest)
+		}
+		if digest != "" {
+			t.Fatalf("a failed fingerprint must not return a digest, got %q", digest)
+		}
+	}
+	// The key stays stable for an identical command and distinguishing for a
+	// different one — otherwise the idempotency table would collide on its own.
+	first, err := fingerprint(validPlaceCommand())
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := fingerprint(validPlaceCommand())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != again {
+		t.Fatalf("identical commands must share a digest: %q vs %q", first, again)
+	}
+	other := validPlaceCommand()
+	other.RequestID = "req-2"
+	distinct, err := fingerprint(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if distinct == first {
+		t.Fatalf("different commands must not share a digest (%q)", first)
 	}
 }

@@ -214,12 +214,23 @@ func NormalizeOrderUpdate(update map[string]any) ReportEnvelope {
 		FillTime:        stringField(update, "fillTime"),
 		InstrumentToken: stringField(update, "token"), ReceivedTsMs: nowMs(),
 	}
-	report.PostbackEventID = fingerprint(map[string]string{
+	// P3-474: the digest input is unchanged, so ids already issued for earlier
+	// updates keep deduplicating. json.Marshal cannot fail on map[string]string,
+	// but the error is handled explicitly rather than collapsed: this id is the
+	// upstream dedup key for the event, so a report that cannot carry one is never
+	// published as a success.
+	eventID, err := fingerprint(map[string]string{
 		"id": report.BrokerOrderID, "remarks": report.ClientOrderRef,
 		"status": report.OrderStatus, "report_type": report.ReportType,
 		"fill_shares": report.FillShares, "average_price": report.AveragePrice,
 		"exchange_update_time": stringField(update, "exchangeUpdateTime"),
 	})
+	if err != nil {
+		report.Outcome = OutcomeUnknown
+		report.Reason = "postback_event_id_unavailable"
+		return report
+	}
+	report.PostbackEventID = eventID
 	return report
 }
 

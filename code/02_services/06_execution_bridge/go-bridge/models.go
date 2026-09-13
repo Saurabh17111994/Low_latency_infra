@@ -257,13 +257,30 @@ func allDigits(s string) bool {
 
 func nowMs() int64 { return time.Now().UnixMilli() }
 
-func fingerprint(v any) string {
+// fingerprint returns a stable digest of a payload. A marshal failure is returned
+// rather than collapsed into the empty string (P3-474): the digest is the
+// idempotency key compared in server.beginRequest, so one shared sentinel for every
+// unmarshalable payload would make two different commands carrying the same
+// request_id look like a retry of each other instead of a reuse violation.
+func fingerprint(v any) (string, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:])
+	return hex.EncodeToString(h[:]), nil
+}
+
+// withFingerprint attaches a response digest to a successful broker result, or
+// reports UNKNOWN when the payload cannot be digested (P3-474) — a broker result
+// is never published with an empty idempotency digest.
+func withFingerprint(result BrokerResult, payload any) BrokerResult {
+	fp, err := fingerprint(payload)
+	if err != nil {
+		return unknownResult(err)
+	}
+	result.Fingerprint = fp
+	return result
 }
 
 func priceIsPositive(s string) bool {

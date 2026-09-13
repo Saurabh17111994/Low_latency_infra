@@ -69,8 +69,8 @@ func (b *ArrowBroker) Place(ctx context.Context, c CommandEnvelope) BrokerResult
 	if resp == nil || strings.TrimSpace(resp.Data.OrderNo) == "" {
 		return unknownResult(errors.New("place response missing orderNo"))
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: resp.Data.OrderNo,
-		Data: resp, Fingerprint: fingerprint(resp)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess,
+		BrokerOrderID: resp.Data.OrderNo, Data: resp}, resp)
 }
 
 func (b *ArrowBroker) Modify(ctx context.Context, c CommandEnvelope) BrokerResult {
@@ -93,8 +93,8 @@ func (b *ArrowBroker) Modify(ctx context.Context, c CommandEnvelope) BrokerResul
 	if resp == nil || strings.TrimSpace(resp.Data.OrderNo) == "" {
 		return unknownResult(errors.New("modify response missing orderNo"))
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: resp.Data.OrderNo,
-		Data: resp, Fingerprint: fingerprint(resp)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess,
+		BrokerOrderID: resp.Data.OrderNo, Data: resp}, resp)
 }
 
 func (b *ArrowBroker) Cancel(ctx context.Context, c CommandEnvelope) BrokerResult {
@@ -115,8 +115,8 @@ func (b *ArrowBroker) QueryOrder(ctx context.Context, c CommandEnvelope) BrokerR
 	if err != nil {
 		return classifySDKError(err)
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: c.BrokerOrderID,
-		Data: resp, Fingerprint: fingerprint(resp)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess,
+		BrokerOrderID: c.BrokerOrderID, Data: resp}, resp)
 }
 
 func (b *ArrowBroker) ReconcileOrders(ctx context.Context, _ CommandEnvelope) BrokerResult {
@@ -127,7 +127,7 @@ func (b *ArrowBroker) ReconcileOrders(ctx context.Context, _ CommandEnvelope) Br
 	if err != nil {
 		return classifySDKError(err)
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, Data: data, Fingerprint: fingerprint(data)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess, Data: data}, data)
 }
 
 func (b *ArrowBroker) ReconcileTrades(ctx context.Context, _ CommandEnvelope) BrokerResult {
@@ -138,7 +138,7 @@ func (b *ArrowBroker) ReconcileTrades(ctx context.Context, _ CommandEnvelope) Br
 	if err != nil {
 		return classifySDKError(err)
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, Data: data, Fingerprint: fingerprint(data)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess, Data: data}, data)
 }
 
 func (b *ArrowBroker) ReconcilePositions(ctx context.Context, _ CommandEnvelope) BrokerResult {
@@ -149,7 +149,7 @@ func (b *ArrowBroker) ReconcilePositions(ctx context.Context, _ CommandEnvelope)
 	if err != nil {
 		return classifySDKError(err)
 	}
-	return BrokerResult{Outcome: OutcomeSuccess, Data: data, Fingerprint: fingerprint(data)}
+	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess, Data: data}, data)
 }
 
 func toArrowOrder(o OrderCommand, ref string) (arrow.OrderRequest, error) {
