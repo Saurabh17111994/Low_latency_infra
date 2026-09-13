@@ -310,14 +310,19 @@ impl FakeBridge {
                 Ok(self.make_success(Command::Place, &envelope, &broker_order_id))
             }
             Command::Modify => {
-                // Re-record the referenced order; report success with the same broker id.
+                // P3-428: re-record every field a modify may change, and refuse a
+                // body-less modify the way the live bridge does (validateCommand requires
+                // the order body) instead of reporting SUCCESS with no state change.
+                let order = envelope
+                    .order
+                    .as_ref()
+                    .context("modify requires an order")?;
                 let record = self
                     .orders
                     .get_mut(&envelope.broker_order_id)
                     .context("modify references unknown order")?;
-                if let Some(order) = &envelope.order {
-                    record.price = order.price.clone();
-                }
+                record.price = order.price.clone();
+                record.quantity = order.quantity.clone();
                 Ok(self.make_success(Command::Modify, &envelope, &envelope.broker_order_id))
             }
             Command::Cancel => {
