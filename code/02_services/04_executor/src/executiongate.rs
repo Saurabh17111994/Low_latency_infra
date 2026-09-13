@@ -80,6 +80,21 @@ impl Attempt {
 }
 
 /// Durable per-attempt store (interior mutability; identically consistent across gate restarts).
+///
+/// **Atomicity contract (P3-201).** The claim path is `get` →
+/// `has_duplicate`/`has_instruction` → `put` in [`ExecutionGate::execute`]. That sequence is
+/// safe only while this store has a single actor: two actors sharing one store can both observe
+/// "nothing durable for this `(instruction_id, request_hash)`" and both call the bridge,
+/// breaking exactly-once. Any store reachable by more than one actor — a durable/remote store
+/// shared between executors, or a restarted process running alongside its predecessor — MUST
+/// make classify-and-claim atomic for one `(instruction_id, request_hash)`.
+///
+/// When such a store is wired, this trait must grow a single atomic claim entry point
+/// (classify + insert in one call: claimed / duplicate / contract-violation) and `execute` must
+/// call it instead of the check-then-act pair. A contract stated only in this comment does not
+/// bind a remote implementation, and the two lookups as they stand (resume by `attempt_id`,
+/// duplicate by `instruction_id` + `request_hash`) are a key-design decision that the durable
+/// implementation has to make deliberately.
 pub trait AttemptStore {
     fn get(&self, attempt_id: &str) -> Option<Attempt>;
     /// Persists create/update and returns `Ok` only after the durable acknowledgement.
