@@ -37,6 +37,39 @@ fn build_route_forwarder(selection: &BridgeSelection) -> Box<dyn BridgeClient + 
     }
 }
 
+/// Resolves the clock-drift check interval from `CLOCK_DRIFT_CHECK_INTERVAL_S` (P3-456).
+/// Zero must never reach `tokio::time::interval` (it panics on a zero period), so a bad or
+/// missing value falls back to the 30 s default. Pure + env-free so the parse is testable.
+fn parse_drift_interval(raw: Option<&str>) -> Duration {
+    Duration::from_secs(
+        raw.and_then(|v| v.parse::<u64>().ok())
+            .filter(|secs| *secs > 0)
+            .unwrap_or(30),
+    )
+}
+
+#[cfg(test)]
+mod p3_456_drift_interval_tests {
+    use super::*;
+
+    #[test]
+    fn zero_clock_drift_check_interval_is_rejected_before_tokio_interval() {
+        // P3-456: `tokio::time::interval(Duration::ZERO)` panics; a 0-second config must
+        // fall back to the default instead of aborting the service at boot.
+        assert_eq!(
+            parse_drift_interval(Some("0")),
+            Duration::from_secs(30),
+            "a 0-second interval must not reach tokio::time::interval"
+        );
+        assert_eq!(parse_drift_interval(Some("45")), Duration::from_secs(45));
+        assert_eq!(parse_drift_interval(None), Duration::from_secs(30));
+        assert_eq!(
+            parse_drift_interval(Some("nonsense")),
+            Duration::from_secs(30)
+        );
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = ServiceConfig::from_env()?;
@@ -78,11 +111,10 @@ async fn main() -> anyhow::Result<()> {
     // same OffsetSource trait, see clockwatch.rs). The monitor enforces CLOCK_OFFSET_LIMIT_MS
     // on the gate: |offset| beyond the limit (or an unmeasurable probe) fails closed to
     // HALTED; recovery is only ever the sanctioned reconcile -> approval -> enable path.
-    let drift_interval = Duration::from_secs(
+    let drift_interval = parse_drift_interval(
         std::env::var("CLOCK_DRIFT_CHECK_INTERVAL_S")
             .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(30),
+            .as_deref(),
     );
     let mut drift_monitor = DriftMonitor::new(
         runtime.config.clock_offset_limit_ms,
