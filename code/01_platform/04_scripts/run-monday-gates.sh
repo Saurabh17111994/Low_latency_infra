@@ -269,6 +269,31 @@ fi
 echo "MODE=$MODE" >>"$SUMMARY"
 echo "=== [preflight] environment drift (tree, compose convergence, catalog, stack) ===" | tee -a "$SUMMARY"
 PREFLIGHT_RC=0
+# --- one gate at a time on this tree -------------------------------------------
+# Two gates on one tree fight over the same containers and images, and every
+# stack_generation either of them printed would describe a stack the other one was
+# mutating. flock releases on process exit, so a killed run leaves no stale lock.
+# The sweep driver holds it; its children inherit the right to run.
+if [ -z "${GATE_SWEEP_CHILD:-}" ]; then
+	if ! command -v flock >/dev/null 2>&1; then
+		GATE_DECIDED=1
+		echo "HARNESS: the flock(1) utility is missing — refusing to run a gate that cannot lock this tree." >&2
+		exit 4
+	fi
+	GATE_LOCK_FILE="$PROJECT_ROOT/logs/.monday-gates.lock"
+	mkdir -p "$(dirname "$GATE_LOCK_FILE")"
+	exec 9<>"$GATE_LOCK_FILE"
+	if ! flock -n 9; then
+		holder=$(cat "$GATE_LOCK_FILE" 2>/dev/null || true)
+		echo "GATE BUSY — another gate run holds $GATE_LOCK_FILE${holder:+ (pid $holder)}." >&2
+		echo "  It is mutating this tree's stack; wait for it to finish, then re-run. Nothing was touched." >&2
+		GATE_DECIDED=1
+		exit 4
+	fi
+	# We hold the lock, so rewriting the pid record by name cannot race.
+	printf '%s\n' "$$" >"$GATE_LOCK_FILE"
+fi
+
 # A certifying run needs a frozen commit. --steps/--sweep are repair-loop runs:
 # they may run a dirty tree, and the preflight records the working state in the
 # fingerprint instead of blocking them.
