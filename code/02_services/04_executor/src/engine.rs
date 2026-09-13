@@ -33,10 +33,12 @@ use nautilus_model::{
     enums::{AccountType, OmsType},
     identifiers::{AccountId, ClientId, TraderId, Venue},
 };
+use std::{cell::Cell, rc::Rc};
 
 use crate::bridge::{FakeBridge, HttpBridgeClient};
 use crate::config::ServiceConfig;
 use crate::execution::BridgeExecutionClient;
+use crate::gate::ExecState;
 
 /// Marker configuration accepted by the bridge exec client.
 #[derive(Debug, Default, Clone)]
@@ -45,6 +47,26 @@ pub struct BridgeClientConfig;
 impl ClientConfig for BridgeClientConfig {
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+/// Gate state the bridge exec client actually booted into, recorded by the factory when the
+/// builder constructs the client and read back by [`LiveNodeRuntime`] (P3-439).
+///
+/// The client lives inside the node, so the runtime cannot query it after construction; the
+/// factory records what `BridgeExecutionClient::gate_state` reports at construction instead of
+/// letting the runtime assert a hardcoded `true`. A gate that was never observed does **not**
+/// count as halted (fail-closed).
+#[derive(Debug, Clone, Default)]
+struct BootGate(Rc<Cell<Option<ExecState>>>);
+
+impl BootGate {
+    fn record(&self, state: ExecState) {
+        self.0.set(Some(state));
+    }
+
+    fn was_halted(&self) -> bool {
+        self.0.get() == Some(ExecState::Halted)
     }
 }
 
@@ -58,13 +80,22 @@ impl ClientConfig for BridgeClientConfig {
 #[derive(Debug, Clone)]
 pub struct BridgeExecutionClientFactory {
     selection: BridgeSelection,
+    /// Receives the boot gate of the client `create` constructs (P3-439).
+    boot_gate: BootGate,
+}
+
+impl BridgeExecutionClientFactory {
+    fn new(selection: BridgeSelection) -> Self {
+        Self {
+            selection,
+            boot_gate: BootGate::default(),
+        }
+    }
 }
 
 impl Default for BridgeExecutionClientFactory {
     fn default() -> Self {
-        Self {
-            selection: BridgeSelection::Fake,
-        }
+        Self::new(BridgeSelection::Fake)
     }
 }
 
@@ -156,6 +187,9 @@ impl ExecutionClientFactory for BridgeExecutionClientFactory {
             } => Box::new(HttpBridgeClient::new(base_url.clone(), auth_token.clone())),
         };
         let client = BridgeExecutionClient::new(core, bridge);
+        // Observe the gate the client actually booted into: the runtime's fail-closed report is
+        // derived from this observation, not from a constant (P3-439).
+        self.boot_gate.record(client.gate_state());
         Ok(Box::new(client))
     }
 
@@ -214,7 +248,8 @@ impl EngineFactory {
 pub struct LiveNodeRuntime {
     node: LiveNode,
     handle: LiveNodeHandle,
-    gate_halted_at_boot: bool,
+    /// Boot gate recorded when the bridge exec client was constructed (P3-439).
+    boot_gate: BootGate,
 }
 
 impl LiveNodeRuntime {
@@ -228,9 +263,13 @@ impl LiveNodeRuntime {
     pub fn build_with_bridge(selection: BridgeSelection) -> Result<Self> {
         let cfg = EngineFactory::build_node_config();
         let builder = LiveNodeBuilder::from_config(cfg)?;
+        let boot_gate = BootGate::default();
         let builder = builder.add_exec_client(
             Some("exec".to_string()),
-            Box::new(BridgeExecutionClientFactory { selection }),
+            Box::new(BridgeExecutionClientFactory {
+                selection,
+                boot_gate: boot_gate.clone(),
+            }),
             Box::new(BridgeClientConfig),
         )?;
         let node = builder.build()?;
@@ -238,9 +277,7 @@ impl LiveNodeRuntime {
         Ok(Self {
             node,
             handle,
-            // `BridgeExecutionClient::new` always boots the gate `HALTED`; the factory path is
-            // covered by `factory_create_succeeds_with_fake_bridge` + `client_boots_into_halted`.
-            gate_halted_at_boot: true,
+            boot_gate,
         })
     }
 
@@ -257,9 +294,12 @@ impl LiveNodeRuntime {
     }
 
     /// The fail-closed boot invariant (gate `HALTED`, health never implies `ENABLED`).
+    ///
+    /// Derived from the gate state the factory observed on the constructed client (P3-439):
+    /// a client that booted elsewhere — or was never constructed — does not report `true`.
     #[must_use]
     pub fn gate_was_halted_at_boot(&self) -> bool {
-        self.gate_halted_at_boot
+        self.boot_gate.was_halted()
     }
 
     /// Runs the node in hosted mode: nautilus does **not** touch our shutdown signals; the
@@ -387,12 +427,10 @@ mod tests {
         assert!(!dbg.contains(token), "full token leaked: {dbg}");
 
         // The factory holds the selection; its derived `Debug` must inherit the redaction.
-        let factory = BridgeExecutionClientFactory {
-            selection: BridgeSelection::Http {
-                base_url: "http://bridge:8080".to_string(),
-                auth_token: token.to_string(),
-            },
-        };
+        let factory = BridgeExecutionClientFactory::new(BridgeSelection::Http {
+            base_url: "http://bridge:8080".to_string(),
+            auth_token: token.to_string(),
+        });
         let fdbg = format!("{factory:?}");
         assert!(
             !fdbg.contains(token),
@@ -469,12 +507,10 @@ mod tests {
         // can be exercised fully offline — the production transport is wired but never dials
         // a broker here.
         let cache = CacheView::new(Rc::new(RefCell::new(Cache::default())));
-        let factory = BridgeExecutionClientFactory {
-            selection: BridgeSelection::Http {
-                base_url: "http://127.0.0.1:9".to_string(),
-                auth_token: "devtest".to_string(),
-            },
-        };
+        let factory = BridgeExecutionClientFactory::new(BridgeSelection::Http {
+            base_url: "http://127.0.0.1:9".to_string(),
+            auth_token: "devtest".to_string(),
+        });
         let res = factory.create("exec", &BridgeClientConfig, cache);
         assert!(
             res.is_ok(),
@@ -596,6 +632,45 @@ mod tests {
         assert!(
             second.is_err(),
             "a second run must fail (runner consumed) — fail-closed restart guard"
+        );
+    }
+
+    // ---------- P3-439: the boot gate is observed from the client, not a constant ----------
+
+    /// P3-439: the reported boot gate follows the observed client state — an unobserved gate is
+    /// not halted (fail-closed), and a client that booted `ENABLED` must not answer `true`.
+    #[test]
+    fn boot_gate_is_derived_from_the_observed_client_state() {
+        let gate = BootGate::default();
+        assert!(
+            !gate.was_halted(),
+            "an unobserved boot gate must not claim halted"
+        );
+        gate.record(ExecState::Halted);
+        assert!(gate.was_halted(), "a client that booted HALTED is halted");
+        gate.record(ExecState::Enabled);
+        assert!(
+            !gate.was_halted(),
+            "a client that booted ENABLED must not report halted at boot"
+        );
+    }
+
+    /// P3-439: the factory must record what the constructed client actually reports, so the
+    /// runtime's answer is evidence from the client rather than a hardcoded `true`.
+    #[test]
+    fn factory_records_the_constructed_clients_boot_gate() {
+        let cache = CacheView::new(Rc::new(RefCell::new(Cache::default())));
+        let boot_gate = BootGate::default();
+        let factory = BridgeExecutionClientFactory {
+            selection: BridgeSelection::Fake,
+            boot_gate: boot_gate.clone(),
+        };
+        let _client = factory
+            .create("exec", &BridgeClientConfig, cache)
+            .expect("factory should create the client");
+        assert!(
+            boot_gate.was_halted(),
+            "the factory must record the constructed client's boot gate"
         );
     }
 
