@@ -156,18 +156,84 @@ mod tests {
         }
     }
 
-    // EXE-FAIL-003: missing/corrupt state blocks calls
+    // EXE-FAIL-003: missing/corrupt state blocks calls.
+    //
+    // "Missing" is an empty gate store — nothing durable vouches for the partition. "Corrupt"
+    // is a durable row whose identity does not match the command (a generation-old epoch). Both
+    // must be refused with zero bridge calls, and the second must leave the partition halted so
+    // the refusal is sticky until reconciliation.
     #[test]
     fn exe_fail_003_missing_corrupt_blocks_calls() {
-        let gate = Gate::new();
-        assert_eq!(gate.state(), ExecState::Halted);
-        assert!(!gate.can_execute());
-        let store = InMemoryAttemptStore::new();
-        assert!(!store.has_instruction("missing"));
-        let mut g2 = Gate::new();
-        let stayed = g2.enter_reconciling_if_needed(false).unwrap();
-        assert!(!stayed);
-        assert_eq!(g2.state(), ExecState::Halted);
+        let calls = Rc::new(Cell::new(0usize));
+        let bridge: Rc<dyn BridgeCaller> = Rc::new(CountingBridge::new(Rc::clone(&calls)));
+        let attempts: Rc<dyn AttemptStore> = Rc::new(InMemoryAttemptStore::new());
+
+        // Missing: no durable gate row at all.
+        let empty = Rc::new(InMemoryGateStateStore::new());
+        let empty_handle: Rc<dyn GateStateStore> = empty.clone();
+        let mut no_row = ExecutionGate::new(Rc::clone(&attempts), empty_handle, Rc::clone(&bridge));
+        assert_eq!(
+            no_row
+                .execute(&cmd("a-no-row"), CrashHooks::default())
+                .unwrap(),
+            Outcome::Blocked,
+            "a missing gate row must block"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "a missing gate row must never reach the bridge"
+        );
+        assert!(
+            empty.read(PARTITION).is_none(),
+            "there was no row to halt, and none may be invented"
+        );
+
+        // Corrupt: a durable row one epoch behind the command.
+        let stale = Rc::new(InMemoryGateStateStore::new());
+        stale
+            .write(&GateRow {
+                partition: PARTITION.into(),
+                owner: "worker-1".into(),
+                state: GateState::Enabled,
+                epoch: 4,
+                fence_token: 7,
+            })
+            .unwrap();
+        let stale_handle: Rc<dyn GateStateStore> = stale.clone();
+        // Its own attempt store: this scenario is about corrupt gate state, and the shared one
+        // already carries `ins-1`/`h-1`, which would classify this command as Duplicate.
+        let stale_attempts: Rc<dyn AttemptStore> = Rc::new(InMemoryAttemptStore::new());
+        let mut stale_gate =
+            ExecutionGate::new(Rc::clone(&stale_attempts), stale_handle, Rc::clone(&bridge));
+        assert_eq!(
+            stale_gate
+                .execute(&cmd("a-stale"), CrashHooks::default())
+                .unwrap(),
+            Outcome::Blocked,
+            "a generation-old gate row must block"
+        );
+        assert_eq!(
+            calls.get(),
+            0,
+            "a stale-epoch command must never reach the bridge"
+        );
+        assert_eq!(
+            stale.read(PARTITION).unwrap().state,
+            GateState::Halted,
+            "a blocked partition must be halted for reconciliation"
+        );
+
+        // The halt sticks: the same partition refuses a well-formed command too.
+        let mut fresh = cmd("a-fresh");
+        fresh.instruction_id = "ins-2".into();
+        fresh.request_hash = "h-2".into();
+        assert_eq!(
+            stale_gate.execute(&fresh, CrashHooks::default()).unwrap(),
+            Outcome::Blocked,
+            "a halted partition must stay refused until reconciliation"
+        );
+        assert_eq!(calls.get(), 0, "still zero bridge calls");
     }
 
     // EXE-FAIL-006: mapping quarantine blocks unsafe (ambiguous correlation → quarantine + halt)
