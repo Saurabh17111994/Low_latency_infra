@@ -281,6 +281,13 @@ impl Scenario {
 }
 
 /// Returns the scripted scenario for instrument slot `idx` of [`PAPER_INSTRUMENTS`].
+///
+/// # Panics
+///
+/// Panics for a slot outside [`PAPER_INSTRUMENTS`]: the sibling helpers (`order_json`,
+/// `shadow_position`, `reconciliation_snapshot`) index the same table and panic for such a
+/// slot, so a wildcard default here would silently record an out-of-range row as `DISCONNECT`
+/// whenever the table grows without the classifier following (P3-218).
 #[must_use]
 pub fn scenario_for_idx(idx: usize) -> Scenario {
     match idx {
@@ -288,7 +295,12 @@ pub fn scenario_for_idx(idx: usize) -> Scenario {
         10..=14 => Scenario::PartialFill,
         15..=19 => Scenario::Rejected,
         20..=22 => Scenario::Unknown,
-        _ => Scenario::Disconnect,
+        23..=24 => Scenario::Disconnect,
+        _ => panic!(
+            "scenario slot {idx} is outside PAPER_INSTRUMENTS ({} slots, valid 0..{})",
+            PAPER_INSTRUMENTS.len(),
+            PAPER_INSTRUMENTS.len() - 1
+        ),
     }
 }
 
@@ -743,6 +755,21 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("sha256:"));
+    }
+
+    #[test]
+    fn disconnect_box_is_the_last_two_slots() {
+        assert_eq!(scenario_for_idx(23), Scenario::Disconnect);
+        assert_eq!(scenario_for_idx(24), Scenario::Disconnect);
+    }
+
+    #[test]
+    #[should_panic(expected = "outside PAPER_INSTRUMENTS")]
+    fn out_of_range_slot_is_rejected_not_defaulted() {
+        // P3-218: the classifier must reject slots the instrument table does not have rather
+        // than silently labelling them DISCONNECT (the sibling helpers index the table and
+        // panic for the same slot).
+        let _ = scenario_for_idx(PAPER_INSTRUMENTS.len());
     }
 
     #[test]
