@@ -295,7 +295,7 @@ mod tests {
             ("attempt-1", "instr-1", "hash-1", "C-1"),
             ("attempt-2", "instr-2", "hash-2", "C-2"),
         ];
-        let rebuild = |j: &Vec<(&str, &str, &str, &str)>| {
+        let rebuild = |j: &[(&str, &str, &str, &str)]| {
             let s = InMemoryAttemptStore::new();
             for (att, instr, hash, cref) in j {
                 let a = Attempt::new(att, instr, hash, cref, AttemptPhase::Prepared);
@@ -311,5 +311,14 @@ mod tests {
         assert!(r2.has_duplicate("instr-2", "hash-2"));
         // both stores see same instruction set
         assert!(r1.has_instruction("instr-1") && r2.has_instruction("instr-1"));
+        // P3-447: the same builder must accept a borrowed array/slice, not only `Vec` (the
+        // previous `&Vec<...>` parameter rejected this call).
+        let array = [
+            ("attempt-1", "instr-1", "hash-1", "C-1"),
+            ("attempt-2", "instr-2", "hash-2", "C-2"),
+        ];
+        let r3 = rebuild(&array);
+        assert!(r3.has_duplicate("instr-1", "hash-1"));
+        assert!(r3.has_instruction("instr-2"));
     }
 }
