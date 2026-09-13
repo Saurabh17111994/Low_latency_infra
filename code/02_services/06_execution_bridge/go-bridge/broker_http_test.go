@@ -169,3 +169,47 @@ func TestClassifySDKErrorReadsMultiLineStatusEnvelopes(t *testing.T) {
 		t.Fatalf("%d of %d status envelopes were not classified as REJECTED: %v", len(missed), len(cases), missed)
 	}
 }
+
+// P3-240: the two readers of a rejection body have to agree. ClassifyBrokerResponse
+// recognises a rejection through status:"error" or success:false and through any of
+// message, errorMessage and error_message; documentedRejectionMessage only knew the
+// first status and the first two keys. Every shape the classifier calls REJECTED at a
+// terminal status must therefore come back REJECTED from classifySDKError, not
+// demoted to an ambiguous UNKNOWN — UNKNOWN is HALT without retry, so a demotion
+// turns a decision the venue already made into manual work.
+func TestClassifySDKErrorAgreesWithClassifierOnRejectionShapes(t *testing.T) {
+	const message = "price outside the allowed band"
+	bodies := []string{
+		`{"status":"error","message":"` + message + `"}`,
+		`{"status":"error","errorMessage":"` + message + `"}`,
+		`{"status":"error","error_message":"` + message + `"}`,
+		`{"success":false,"message":"` + message + `"}`,
+		`{"success":false,"errorMessage":"` + message + `"}`,
+		`{"success":false,"error_message":"` + message + `"}`,
+	}
+	statuses := []int{http.StatusBadRequest, http.StatusConflict, http.StatusUnprocessableEntity}
+	// Pin the table size: the assertion below counts mismatches, so a table that
+	// silently shrank would pass without testing anything.
+	if len(bodies)*len(statuses) != 18 {
+		t.Fatalf("fixture: %d body/status pairs, want 18", len(bodies)*len(statuses))
+	}
+
+	var mismatched []string
+	for _, body := range bodies {
+		for _, status := range statuses {
+			// Fixture guard: this test is only meaningful for shapes the classifier
+			// itself refuses to demote.
+			if got := ClassifyBrokerResponse(status, body); got != OutcomeRejected {
+				t.Fatalf("fixture: classifier calls %s at %d %s, not REJECTED", body, status, got)
+			}
+			result := classifySDKError(fmt.Errorf("request failed with status %d: %s", status, body))
+			if result.Outcome != OutcomeRejected {
+				mismatched = append(mismatched, fmt.Sprintf("%d %s -> %s/%s", status, body, result.Outcome, result.Reason))
+			}
+		}
+	}
+	if len(mismatched) > 0 {
+		t.Fatalf("%d of %d recognised rejections were demoted by classifySDKError: %v",
+			len(mismatched), len(bodies)*len(statuses), mismatched)
+	}
+}

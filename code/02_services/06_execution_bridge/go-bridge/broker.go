@@ -296,22 +296,27 @@ func classifySDKError(err error) BrokerResult {
 	return unknownResult(errors.New("ambiguous Arrow response"))
 }
 
+// documentedRejectionMessage returns the broker's own rejection message for a body
+// the classifier has already called REJECTED. It used to re-derive the envelope shape
+// locally — accepting only status:"error" and only the message/errorMessage keys — so
+// a rejection the classifier recognised through success:false or error_message came
+// back with no message and was demoted to an ambiguous UNKNOWN, escalating a terminal
+// venue decision to a manual halt (P3-240).
+//
+// The shape is not re-listed here: the classifier's envelope type, error test and
+// message extraction are reused so the two readers cannot drift apart again.
 func documentedRejectionMessage(body string) string {
-	var value struct {
-		Message      string `json:"message"`
-		ErrorMessage string `json:"errorMessage"`
-		Status       string `json:"status"`
-	}
-	if json.Unmarshal([]byte(body), &value) != nil {
+	if strings.TrimSpace(body) == "" {
 		return ""
 	}
-	if strings.EqualFold(value.Status, "error") {
-		if strings.TrimSpace(value.Message) != "" {
-			return strings.TrimSpace(value.Message)
-		}
-		return strings.TrimSpace(value.ErrorMessage)
+	var env classificationEnvelope
+	if json.Unmarshal([]byte(body), &env) != nil {
+		return ""
 	}
-	return ""
+	if !isErrorEnvelope(env) {
+		return ""
+	}
+	return extractRejectionMessage(env)
 }
 
 func rejectedResult(err error) BrokerResult {
