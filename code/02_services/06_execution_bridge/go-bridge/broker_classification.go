@@ -28,6 +28,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -49,13 +50,46 @@ type classificationEnvelope struct {
 }
 
 type classificationData struct {
-	OrderNo       string `json:"orderNo"`
-	BrokerOrderId string `json:"brokerOrderId"`
-	BrokerOrderID string `json:"broker_order_id"`
-	OrderNoAlt    string `json:"order_no"`
-	OrderId       string `json:"orderId"`
-	OrderIDAlt    string `json:"order_id"`
+	OrderNo       flexString `json:"orderNo"`
+	BrokerOrderId flexString `json:"brokerOrderId"`
+	BrokerOrderID flexString `json:"broker_order_id"`
+	OrderNoAlt    flexString `json:"order_no"`
+	OrderId       flexString `json:"orderId"`
+	OrderIDAlt    flexString `json:"order_id"`
 }
+
+// flexString accepts a JSON string or number. Brokers differ on whether order
+// identifiers arrive quoted, and a numeric identifier is a present identifier —
+// reading it as missing halts a valid fill (P3-242). The literal text is kept
+// (no float conversion, so no precision or exponent surprises for identifiers).
+// null and absent are the empty string; any other JSON type fails the unmarshal
+// so the envelope is treated as malformed (UNKNOWN) instead of guessed at.
+type flexString string
+
+func (f *flexString) UnmarshalJSON(b []byte) error {
+	trimmed := strings.TrimSpace(string(b))
+	if trimmed == "" || trimmed == "null" {
+		*f = ""
+		return nil
+	}
+	if trimmed[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*f = flexString(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return fmt.Errorf("order identifier must be a string or a number: %w", err)
+	}
+	*f = flexString(n.String())
+	return nil
+}
+
+// trimmed returns the identifier without surrounding whitespace.
+func (f flexString) trimmed() string { return strings.TrimSpace(string(f)) }
 
 // ClassifyBrokerResponse is a pure, offline classifier for Arrow broker HTTP responses.
 // statusCode is the HTTP status (0 means transport failure / no response).
@@ -182,22 +216,22 @@ func extractOrderNo(env classificationEnvelope) string {
 	// Data is typically an object; try typed unmarshal first.
 	var d classificationData
 	if err := json.Unmarshal(env.Data, &d); err == nil {
-		if s := strings.TrimSpace(d.OrderNo); s != "" {
+		if s := d.OrderNo.trimmed(); s != "" {
 			return s
 		}
-		if s := strings.TrimSpace(d.BrokerOrderId); s != "" {
+		if s := d.BrokerOrderId.trimmed(); s != "" {
 			return s
 		}
-		if s := strings.TrimSpace(d.BrokerOrderID); s != "" {
+		if s := d.BrokerOrderID.trimmed(); s != "" {
 			return s
 		}
-		if s := strings.TrimSpace(d.OrderNoAlt); s != "" {
+		if s := d.OrderNoAlt.trimmed(); s != "" {
 			return s
 		}
-		if s := strings.TrimSpace(d.OrderId); s != "" {
+		if s := d.OrderId.trimmed(); s != "" {
 			return s
 		}
-		if s := strings.TrimSpace(d.OrderIDAlt); s != "" {
+		if s := d.OrderIDAlt.trimmed(); s != "" {
 			return s
 		}
 	}

@@ -123,3 +123,30 @@ func TestClassifyBrokerResponseContradictorySignalsHalt(t *testing.T) {
 		})
 	}
 }
+
+// P3-242: brokers differ on whether order identifiers are quoted. A numeric
+// identifier is a present identifier, not a missing one — classifying it as
+// UNKNOWN halts a valid fill. Absent/blank/non-identifier types stay fail-closed.
+func TestClassifyBrokerResponseAcceptsNumericOrderIdentifiers(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "numeric data.orderNo", body: `{"status":"success","data":{"orderNo":12345}}`, want: OutcomeSuccess},
+		{name: "numeric data.brokerOrderId", body: `{"status":"success","data":{"brokerOrderId":987654}}`, want: OutcomeSuccess},
+		{name: "numeric data.broker_order_id", body: `{"status":"success","data":{"broker_order_id":42}}`, want: OutcomeSuccess},
+		{name: "quoted numeric identifier", body: `{"status":"success","data":{"orderNo":"12345"}}`, want: OutcomeSuccess},
+		{name: "null identifier is blank", body: `{"status":"success","data":{"orderNo":null}}`, want: OutcomeUnknown},
+		{name: "empty data object", body: `{"status":"success","data":{}}`, want: OutcomeUnknown},
+		{name: "boolean is not an identifier", body: `{"status":"success","data":{"orderNo":true}}`, want: OutcomeUnknown},
+		{name: "numeric identifier with error status still REJECTED", body: `{"status":"error","message":"bad price"}`, want: OutcomeUnknown},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyBrokerResponse(200, tc.body); got != tc.want {
+				t.Fatalf("ClassifyBrokerResponse(200, %s)=%s want %s", tc.body, got, tc.want)
+			}
+		})
+	}
+}
