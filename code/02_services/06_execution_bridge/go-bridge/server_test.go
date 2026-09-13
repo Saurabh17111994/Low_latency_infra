@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -184,5 +185,36 @@ func TestCommandTimeoutFromEnv(t *testing.T) {
 		if _, err := commandTimeoutFromEnv(); err == nil {
 			t.Fatalf("%s: expected error, got nil", bad)
 		}
+	}
+}
+
+// P3-264 — a payload the bridge cannot serialize must not be reported as a
+// SUCCESS with Data silently dropped: downstream reads the missing payload as
+// "nothing to reconcile" and never asks again.
+func TestUnserializableReportDataFailsClosed(t *testing.T) {
+	broker := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		return BrokerResult{
+			Outcome: OutcomeSuccess, BrokerOrderID: "BRK-UNSERIALIZABLE",
+			Data: make(chan int), // json.Marshal cannot represent a channel
+		}
+	}}
+	_, server := startTestServer(t, broker)
+	code, report := postCommand(t, server.URL, validPlaceCommand(), "internal-secret")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d want 200", code)
+	}
+	if report.Outcome != OutcomeUnknown {
+		t.Errorf("outcome=%s want UNKNOWN: a payload that cannot be serialized is not a success", report.Outcome)
+	}
+	if report.Data != nil {
+		t.Errorf("data=%s want omitted", report.Data)
+	}
+	if report.Reason == "" {
+		t.Error("the failing report must carry a reason token")
+	}
+	// The correlation fields are what make the failure reconcilable.
+	if report.RequestID != "req-1" || report.InstructionID != "instruction-1" || report.ExecutionAttemptID != "attempt-1" {
+		t.Errorf("correlation lost: request=%s instruction=%s attempt=%s",
+			report.RequestID, report.InstructionID, report.ExecutionAttemptID)
 	}
 }

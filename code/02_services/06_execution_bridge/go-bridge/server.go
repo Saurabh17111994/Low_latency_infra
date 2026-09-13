@@ -222,9 +222,21 @@ func resultToReport(c CommandEnvelope, result BrokerResult) ReportEnvelope {
 		ReceivedTsMs: nowMs(), ResponseFingerprint: result.Fingerprint,
 	}
 	if result.Data != nil {
-		if data, err := json.Marshal(result.Data); err == nil {
-			report.Data = data
+		data, err := json.Marshal(result.Data)
+		if err != nil {
+			// P3-264: a payload the bridge cannot serialize must not become a
+			// SUCCESS with Data quietly missing — downstream reconcile would read
+			// the gap as "nothing to reconcile". Fail closed and keep the
+			// correlation fields, so the failure is still reconcilable.
+			return ReportEnvelope{
+				RecordType: RecordReport, ContractVersion: ProtocolVersion,
+				RequestID: c.RequestID, Command: c.Command,
+				Outcome: OutcomeUnknown, Reason: "ambiguous_broker_response",
+				InstructionID: c.InstructionID, ExecutionAttemptID: c.ExecutionAttemptID,
+				ClientOrderRef: c.ClientOrderRef, ReceivedTsMs: nowMs(),
+			}
 		}
+		report.Data = data
 	}
 	return report
 }
