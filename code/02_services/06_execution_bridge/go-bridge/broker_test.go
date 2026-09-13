@@ -47,6 +47,13 @@ func TestArrowBrokerNilOrderIsTerminalRejection(t *testing.T) {
 		}
 	})
 
+	t.Run("modify", func(t *testing.T) {
+		got := broker.Modify(context.Background(), CommandEnvelope{ClientOrderRef: "ref-1", BrokerOrderID: "BRK-1"})
+		if got.Outcome != OutcomeRejected {
+			t.Fatalf("Modify(nil order) outcome=%s want %s (%+v)", got.Outcome, OutcomeRejected, got)
+		}
+	})
+
 	t.Run("cancelled context still wins", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()

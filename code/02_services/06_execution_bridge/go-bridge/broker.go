@@ -77,6 +77,11 @@ func (b *ArrowBroker) Modify(ctx context.Context, c CommandEnvelope) BrokerResul
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
+	// P3-038/P3-033: same totality requirement as Place — a nil Order from a
+	// direct caller must be a terminal REJECTED, never a process-killing panic.
+	if c.Order == nil {
+		return rejectedResult(errors.New("order is required"))
+	}
 	req, err := toArrowOrder(*c.Order, c.ClientOrderRef)
 	if err != nil {
 		return rejectedResult(err)
