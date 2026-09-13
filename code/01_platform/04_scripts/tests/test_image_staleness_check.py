@@ -608,5 +608,38 @@ class NativeSplitGuardTest(unittest.TestCase):
                              f"the build output (jar is a host artifact)")
 
 
+class GateStepEightTest(unittest.TestCase):
+    """The gate's own step 8 must demand a stamp, not accept the clock.
+
+    Measured hole (2026-09-13): with the flag absent, an image built without
+    stamps reported `FRESH (timestamp proxy: no build stamp)` and exited 0 —
+    the exact shape of the 2026-08-24 incident, where 08-20 images ran against
+    08-24 sources unnoticed.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.repo_root = Path(__file__).resolve().parents[4]
+        cls.gate = (cls.repo_root / "code" / "01_platform" / "04_scripts" /
+                    "run-monday-gates.sh").read_text(encoding="utf-8")
+
+    def _step_eight(self) -> str:
+        parts = self.gate.split("[8/16] image staleness", 1)
+        self.assertEqual(len(parts), 2, "the gate must have a step 8 banner")
+        return parts[1].split("\nelse\n", 1)[0]
+
+    def test_step_eight_demands_stamps(self):
+        body = self._step_eight()
+        self.assertIn("--require-stamps", body,
+                      "step 8 must refuse an image whose only evidence is its "
+                      "build clock (the timestamp proxy)")
+        self.assertIn("--service ddl-apply", body,
+                      "step 8 stays scoped to the one service image the gate starts")
+
+    def test_step_eight_says_the_proxy_is_not_accepted(self):
+        self.assertIn("timestamp proxy", self._step_eight(),
+                      "the step must state why a stamp is required, not only enforce it")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -556,13 +556,17 @@ if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ]; then
 	# this run never starts. The other 7 are not left unguarded: `make images`
 	# ends with the full --require-stamps check, and the runbook requires
 	# `make check-image-stale` before any enable.
+	# --require-stamps (2026-09-13): without it a stamp-less image passes as
+	# "FRESH (timestamp proxy)" — the clock is not evidence that the image
+	# contains the sources, which is the whole point of CHG-101.
 	if ! timeout 120 python3 "$SCRIPT_DIR/image_staleness_check.py" \
-		--git-root "$PROJECT_ROOT" --compose "$COMPOSE_FILE" --service ddl-apply >"$IMAGE_LOG" 2>&1; then
-		echo "FAIL: stale/missing ddl-apply image (CHG-101) — see $IMAGE_LOG" | tee -a "$SUMMARY"
+		--git-root "$PROJECT_ROOT" --compose "$COMPOSE_FILE" --service ddl-apply \
+		--require-stamps >"$IMAGE_LOG" 2>&1; then
+		echo "FAIL: stale, unstamped or missing ddl-apply image (CHG-101) — see $IMAGE_LOG" | tee -a "$SUMMARY"
 		gate_fail
 	fi
 	echo "PASS: image staleness (ddl-apply — the service image this gate runs)" | tee -a "$SUMMARY"
-	echo "NOTE: the other 7 compose images are checked by 'make images' (--require-stamps) and by 'make check-image-stale' at release, not by this gate." | tee -a "$SUMMARY"
+	echo "NOTE: this check (and 'make images') demands a real build stamp — an image whose only evidence is its build clock is refused. The other 7 compose images are checked by 'make images' and by 'make check-image-stale' at release, not by this gate." | tee -a "$SUMMARY"
 else
 	note_skip 8
 	echo "SKIP: image staleness (no docker/compose) — unverified, not green" | tee -a "$SUMMARY"
