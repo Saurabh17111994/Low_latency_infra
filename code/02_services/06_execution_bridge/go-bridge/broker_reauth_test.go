@@ -412,3 +412,35 @@ func TestConcurrentAuthFailuresShareOneReauth(t *testing.T) {
 		t.Fatalf("max concurrent re-auths=%d want 1 (AutoLogin must never run in parallel)", maxInFlight)
 	}
 }
+
+// P3-263 — a retry that still sees 401 describes the token *it* was issued
+// with. If a newer re-auth landed while that retry was in flight, the 401 says
+// nothing about the fresh token, and latching disabled here would halt a
+// healthy bridge until the process is restarted.
+func TestRetryAuthFailureFromAStaleTokenDoesNotDisable(t *testing.T) {
+	calls := 0
+	var rb *ReauthBroker
+	inner := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		calls++
+		if calls == 2 {
+			// Another request completes a newer re-auth while this retry is in
+			// flight, so the 401 below is judged against a superseded token.
+			rb.mu.Lock()
+			rb.gen++
+			rb.mu.Unlock()
+		}
+		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_auth_failure"}
+	}}
+	rb = NewReauthBroker(inner, func(ctx context.Context) error { return nil })
+
+	result := rb.Place(t.Context(), validPlaceCommand())
+	if rb.IsDisabled() {
+		t.Error("a 401 from a superseded token disabled a broker that holds a fresh one")
+	}
+	if result.Reason != "broker_auth_failure" {
+		t.Fatalf("result=%+v want the retry's own auth failure returned", result)
+	}
+	if calls != 2 {
+		t.Fatalf("inner calls=%d want 2 (original + one retry)", calls)
+	}
+}

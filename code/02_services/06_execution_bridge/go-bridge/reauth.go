@@ -102,15 +102,17 @@ func (r *ReauthBroker) doWithReauth(ctx context.Context, fn func() BrokerResult)
 	}
 	if current != gen {
 		r.reauthMu.Unlock()
-		return r.retryOnce(ctx, fn, result)
+		return r.retryOnce(ctx, fn, result, current)
 	}
 	r.mu.Lock()
 	r.reauthCalls++
 	r.mu.Unlock()
 	err := r.reauth(ctx)
+	ourGen := gen
 	if err == nil {
 		r.mu.Lock()
 		r.gen++
+		ourGen = r.gen
 		r.mu.Unlock()
 	}
 	r.reauthMu.Unlock()
@@ -118,14 +120,14 @@ func (r *ReauthBroker) doWithReauth(ctx context.Context, fn func() BrokerResult)
 		r.markDisabled()
 		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
 	}
-	return r.retryOnce(ctx, fn, result)
+	return r.retryOnce(ctx, fn, result, ourGen)
 }
 
-// retryOnce re-issues the command on the token the election produced and
-// applies the post-retry verdict. It never re-enters re-auth ("never loops"),
-// and it honours P3-261: a caller that has gone by now keeps its original auth
-// failure rather than provoking a venue call nobody is waiting for.
-func (r *ReauthBroker) retryOnce(ctx context.Context, fn func() BrokerResult, original BrokerResult) BrokerResult {
+// retryOnce re-issues the command on the token generation the election produced
+// and applies the post-retry verdict. It never re-enters re-auth ("never
+// loops"), and it honours P3-261: a caller that has gone by now keeps its
+// original auth failure rather than provoking a venue call nobody waits for.
+func (r *ReauthBroker) retryOnce(ctx context.Context, fn func() BrokerResult, original BrokerResult, gen int) BrokerResult {
 	// P3-261: the re-auth may have taken the caller past its deadline. Retrying
 	// then spends a venue round trip nobody is waiting for.
 	if ctx.Err() != nil {
@@ -134,6 +136,17 @@ func (r *ReauthBroker) retryOnce(ctx context.Context, fn func() BrokerResult, or
 	// Re-auth succeeded: retry the command exactly once, no further re-auth.
 	retry := fn()
 	if retry.Outcome != OutcomeRejected && retry.Reason == "broker_auth_failure" {
+		// P3-263: this 401 describes the token the retry was issued with. If a
+		// newer re-auth landed while the retry was in flight, the fresh token has
+		// not been disproved, and latching disabled here would halt a bridge that
+		// is holding a good token until the process is restarted. Only the
+		// generation that owns the token may fail the broker closed.
+		r.mu.Lock()
+		superseded := r.gen != gen
+		r.mu.Unlock()
+		if superseded {
+			return retry
+		}
 		r.markDisabled()
 		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
 	}
