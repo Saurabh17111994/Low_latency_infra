@@ -77,7 +77,10 @@ impl ShutdownCoordinator {
     ///    unresolved attempt (an in-flight attempt that never reached the broker).
     /// 3. **Flush** — drain remaining asynchronous reports so event evidence is emitted.
     /// 4. **Complete** — report the terminal state; the service is no longer trading-ready.
-    pub async fn shutdown(&mut self, client: &mut BridgeExecutionClient) -> Result<ShutdownReport> {
+    ///
+    /// Synchronous by design (P3-217): every step below is a local gate/queue operation with no
+    /// await point, so callers should not have to thread an async executor through shutdown.
+    pub fn shutdown(&mut self, client: &mut BridgeExecutionClient) -> Result<ShutdownReport> {
         // 1. Stop ingress + release the fence: the gate returns to HALTED.
         client.safety_halt();
         self.phase = ShutdownPhase::Draining;
@@ -188,7 +191,7 @@ mod tests {
     async fn fresh_shutdown_halts_gate_and_is_not_trading_ready() {
         let (mut client, _order) = base_client();
         let mut coord = ShutdownCoordinator::new();
-        let report = coord.shutdown(&mut client).await.unwrap();
+        let report = coord.shutdown(&mut client).unwrap();
 
         assert!(coord.is_closed());
         assert_eq!(report.phase, ShutdownPhase::Complete);
@@ -208,7 +211,7 @@ mod tests {
         assert_eq!(client.pending_count(), 1);
 
         let mut coord = ShutdownCoordinator::new();
-        let report = coord.shutdown(&mut client).await.unwrap();
+        let report = coord.shutdown(&mut client).unwrap();
 
         assert_eq!(report.unresolved_attempts, 1);
         assert_eq!(report.gate_state, ExecState::Halted);
@@ -223,7 +226,7 @@ mod tests {
         enable(&mut c1);
         submit_place(&c1, &order1);
         let mut coord = ShutdownCoordinator::new();
-        let report = coord.shutdown(&mut c1).await.unwrap();
+        let report = coord.shutdown(&mut c1).unwrap();
         assert_eq!(report.unresolved_attempts, 1);
         assert!(verify_restart_safe(c1.gate_state()));
 
