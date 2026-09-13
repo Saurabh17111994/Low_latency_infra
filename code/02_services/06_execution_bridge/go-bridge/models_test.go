@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -370,6 +371,56 @@ func TestValidateCommandRejectsPaddedForwardedFields(t *testing.T) {
 			if strings.TrimSpace(field.value) != field.value {
 				t.Fatalf("%s forwarded padded as %q", field.name, field.value)
 			}
+		}
+	}
+}
+
+// P3-251: the finding feared path injection through broker_order_id. The SDK
+// refuses path-hostile ids and escapes the segment before interpolation
+// (third_party/go-arrow/arrow/orders.go:337-357 and :430-438), so no charset is
+// invented here; the bridge fails closed only on whitespace, which no legitimate
+// broker-assigned id carries.
+func TestValidateCommandRejectsWhitespaceInBrokerOrderID(t *testing.T) {
+	// Built from the fully valid place command so only the command shape and the
+	// broker order id differ — otherwise a rejection could come from an unrelated
+	// check and the assertion below would pass vacuously. cancel/query-order carry
+	// no order body (P3-473), modify requires one.
+	commandWithID := func(command, id string) CommandEnvelope {
+		c := validPlaceCommand()
+		c.Command = command
+		c.BrokerOrderID = id
+		if command != CommandModify {
+			c.Order = nil
+		}
+		return c
+	}
+	var accepted, wrongReason []string
+	for _, id := range []string{" BRK-1 ", "BRK 1", "BRK\t1", "BRK\n1"} {
+		for _, command := range []string{CommandCancel, CommandQueryOrder, CommandModify} {
+			err := validateCommand(commandWithID(command, id))
+			if err == nil {
+				accepted = append(accepted, command+" "+strconv.Quote(id))
+				continue
+			}
+			// Attribute the rejection: it must come from the broker_order_id check,
+			// not from an unrelated rule.
+			if !strings.Contains(err.Error(), "broker_order_id") {
+				wrongReason = append(wrongReason, fmt.Sprintf("%s %s -> %v", command, strconv.Quote(id), err))
+			}
+		}
+	}
+	if len(accepted) > 0 {
+		t.Fatalf("whitespace broker order ids accepted: %v", accepted)
+	}
+	if len(wrongReason) > 0 {
+		t.Fatalf("rejected for a reason other than broker_order_id: %v", wrongReason)
+	}
+	// Path-hostile shapes stay expressible: the SDK's guard plus url.PathEscape is
+	// the control, pinned so a future charset guess cannot silently start rejecting
+	// venue-issued ids.
+	for _, id := range []string{"BRK-1", "a/b", "../x", "x?y=1"} {
+		if err := validateCommand(commandWithID(CommandCancel, id)); err != nil {
+			t.Fatalf("broker_order_id %q must stay valid: %v", id, err)
 		}
 	}
 }

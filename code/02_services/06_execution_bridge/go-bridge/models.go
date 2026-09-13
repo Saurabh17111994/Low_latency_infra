@@ -130,8 +130,10 @@ func validateCommand(c CommandEnvelope) error {
 		if c.Command == CommandPlace && strings.TrimSpace(c.BrokerOrderID) != "" {
 			return fmt.Errorf("broker_order_id is not allowed for place")
 		}
-		if c.Command == CommandModify && strings.TrimSpace(c.BrokerOrderID) == "" {
-			return fmt.Errorf("broker_order_id is required for modify")
+		if c.Command == CommandModify {
+			if err := validateBrokerOrderID(c.BrokerOrderID, c.Command); err != nil {
+				return err
+			}
 		}
 		if err := validateOrderCommand(*c.Order); err != nil {
 			return err
@@ -140,8 +142,8 @@ func validateCommand(c CommandEnvelope) error {
 			return err
 		}
 	case CommandCancel, CommandQueryOrder:
-		if strings.TrimSpace(c.BrokerOrderID) == "" {
-			return fmt.Errorf("broker_order_id is required for %s", c.Command)
+		if err := validateBrokerOrderID(c.BrokerOrderID, c.Command); err != nil {
+			return err
 		}
 		// P3-473: an order body on a broker_order_id-keyed command is a caller
 		// mistake (typically a payload meant for place). Reject it instead of
@@ -329,4 +331,20 @@ func priceIsZero(s string) bool {
 		}
 	}
 	return digits > 0
+}
+
+// validateBrokerOrderID fails closed on a missing or whitespace-carrying broker
+// order id (P3-251). The id is assigned by Arrow and this bridge does not own its
+// grammar, so no charset is imposed beyond "no whitespace": the SDK already
+// refuses path-hostile ids and escapes the segment
+// (third_party/go-arrow/arrow/orders.go:337-357, :430-438), and a charset the
+// bridge invented could reject a legitimate id the venue issued.
+func validateBrokerOrderID(id, command string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("broker_order_id is required for %s", command)
+	}
+	if containsSpace(id) {
+		return fmt.Errorf("broker_order_id must not contain whitespace")
+	}
+	return nil
 }
