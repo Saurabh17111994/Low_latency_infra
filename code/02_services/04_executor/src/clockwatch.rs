@@ -200,14 +200,16 @@ mod tests {
         let mut healthy = monitor(1);
         healthy.enforce(&mut g);
         assert_eq!(g.state(), ExecState::Halted, "no automatic recovery");
-        // Only the sanctioned human path recovers.
+        // Only the sanctioned human path recovers: the drift halt cleared the declared term
+        // (P3-450), so the term must be re-declared for the new session before enable.
         g.transition(ExecState::Reconciling).unwrap();
         g.transition(ExecState::ApprovalPending).unwrap();
+        g.set_epoch(5).unwrap();
         g.record_approval("saurabh", "drift-resolved-evidence")
             .unwrap();
         g.record_approval("saurabh", "drift-resolved-evidence-2")
             .unwrap();
-        g.enable(g.epoch()).unwrap();
+        g.enable(5).unwrap();
         assert_eq!(g.state(), ExecState::Enabled);
     }
 

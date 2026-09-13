@@ -24,8 +24,8 @@
 //!
 //! This makes INVARIANT-003 ("no ENABLED gate without an authenticated single-operator approval
 //! bound to the evidence hash") structurally enforced rather than conventional. A safety halt
-//! (fail-closed) clears the approval and the bound evidence, so re-enabling always requires a
-//! fresh approval round (CONTROL-006).
+//! (fail-closed) clears the approval, the bound evidence and the declared epoch, so re-enabling
+//! always requires a fresh approval round **and** a fresh epoch declaration (CONTROL-006).
 
 use std::fmt;
 
@@ -348,13 +348,16 @@ impl Gate {
     }
 
     /// Raises a safety halt, returning the gate to `HALTED` from any state and invalidating the
-    /// approval and the bound evidence (fail-closed), so re-enabling always re-approves.
+    /// approval, the bound evidence and the declared epoch (fail-closed), so re-enabling always
+    /// re-approves **and** re-declares the control-plane term (CONTROL-006): a stale/old term
+    /// cannot enable again after a halt.
     pub fn safety_halt(&mut self) {
         if self.state != ExecState::Halted {
             self.safety_halt_count += 1;
         }
         self.approval_a = None;
         self.enabled_evidence = None;
+        self.epoch = 0;
         self.state = ExecState::Halted;
     }
 }
@@ -559,6 +562,27 @@ mod tests {
     }
 
     #[test]
+    fn control006_safety_halt_requires_fresh_epoch_declaration() {
+        let mut g = authorized();
+        to_approval_pending(&mut g);
+        g.set_epoch(7).unwrap();
+        g.record_approval("saurabh", "h1").unwrap();
+        g.enable(7).unwrap();
+        assert!(g.can_execute());
+        // A safety halt ends the enablement session.
+        g.safety_halt();
+        assert_eq!(g.epoch(), 0, "the declared term is cleared by a halt");
+        to_approval_pending(&mut g);
+        g.record_approval("saurabh", "h2").unwrap();
+        // The old term must not enable again without a fresh set_epoch declaration.
+        assert_eq!(g.enable(7), Err(EnableError::EpochUnset));
+        // Only a fresh epoch declaration enables.
+        g.set_epoch(8).unwrap();
+        g.enable(8).unwrap();
+        assert!(g.can_execute());
+    }
+
+    #[test]
     fn control006_safety_halt_invalidates_approvals_require_reapproval() {
         let mut g = authorized();
         to_approval_pending(&mut g);
@@ -569,8 +593,11 @@ mod tests {
         // Rollback/during-active-gate -> safety halt clears approvals (fail-closed).
         g.safety_halt();
         assert!(!g.can_execute());
-        // Old approvals are gone; re-enabling requires a fresh approval round.
+        // Old approvals and the old term are gone; re-enabling requires a fresh epoch
+        // declaration and a fresh approval round.
         to_approval_pending(&mut g);
+        assert_eq!(g.enable(1), Err(EnableError::EpochUnset));
+        g.set_epoch(1).unwrap();
         assert_eq!(g.enable(1), Err(EnableError::RequiresApproval));
         g.record_approval("saurabh", "h1").unwrap();
         g.enable(1).unwrap();
