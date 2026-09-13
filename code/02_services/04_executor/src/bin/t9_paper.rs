@@ -53,7 +53,10 @@ fn main() -> Result<()> {
 
     let evidence_path = write_json(&run.output_dir, "evidence.json", &evidence)?;
     assert_no_secrets(&evidence);
-    assert_eq!(evidence["shadow_mode"]["new_broker_commands"], 0);
+    // P3-420: `shadow_mode.new_broker_commands: 0` above is a scripted scenario placeholder,
+    // not an observation — the offline harness has no shadow emitter to query
+    // (`harness.engine_exercised: false`). Asserting that literal against itself would be
+    // tautological, so the placeholder is stated here instead of checked.
 
     println!(
         "T9 paper-trading evidence written to {}",
