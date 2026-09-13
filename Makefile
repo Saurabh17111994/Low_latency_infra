@@ -378,7 +378,7 @@ eod-controller:
 # DDL corpus + manifest, and the matrix evidence. One-shot run inside the
 # compose network: docker compose run --rm ddl-apply {validate|apply|smoke|self-test}.
 ddl-image:
-	@docker compose -f code/01_platform/01_docker/docker-compose.yml build ddl-apply
+	@$(COMPOSE) build ddl-apply
 
 # Non-root ownership contract gate (evidence_ownership_check.py): every
 # apply.json the ddl-apply container wrote (owner == DDL_APPLY_UID) must be

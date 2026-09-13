@@ -341,14 +341,17 @@ fi
 if step_active 2; then
 echo "=== [2/16] docker compose config ===" | tee -a "$SUMMARY"
 COMPOSE_FILE="$CODE_DIR/01_platform/01_docker/docker-compose.yml"
-if [ -f "$COMPOSE_FILE" ]; then
-	if ! docker compose -f "$COMPOSE_FILE" config >/dev/null 2>>"$STATIC_LOG"; then
+COMPOSE_ENV_DIR="$(dirname "$COMPOSE_FILE")"
+# Same form as `make up` (see the Makefile COMPOSE variable): a bare `-f`
+# resolves a different config, so this step would validate the wrong stack.
+if [ -f "$COMPOSE_FILE" ] && [ -f "$COMPOSE_ENV_DIR/.env" ] && [ -f "$COMPOSE_ENV_DIR/secrets.env" ]; then
+	if ! docker compose --env-file "$COMPOSE_ENV_DIR/.env" --env-file "$COMPOSE_ENV_DIR/secrets.env" -f "$COMPOSE_FILE" config >/dev/null 2>>"$STATIC_LOG"; then
 		echo "FAIL: docker compose config invalid — see $STATIC_LOG" | tee -a "$SUMMARY"
 		gate_fail
 	fi
 	echo "PASS: docker compose config" | tee -a "$SUMMARY"
 else
-	echo "WARN: compose file not found at $COMPOSE_FILE — skipping compose config" | tee -a "$SUMMARY"
+	echo "WARN: compose file or env files missing ($COMPOSE_ENV_DIR) — skipping compose config" | tee -a "$SUMMARY"
 fi
 
 # ── 0c. Python unit suites (tests/ — incl. ING-TCP-002 reconcile-compare) ────
