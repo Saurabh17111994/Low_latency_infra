@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn restart_does_not_auto_retry_unresolved_attempt() {
+    async fn restart_boots_halted_and_refuses_the_queued_order() {
         // Shut down a client that had one unresolved in-flight attempt.
         let (mut c1, order1) = base_client();
         enable(&mut c1);
@@ -227,13 +227,20 @@ mod tests {
         assert_eq!(report.unresolved_attempts, 1);
         assert!(verify_restart_safe(c1.gate_state()));
 
-        // Restart: a fresh process boots HALTED and must not re-emit the abandoned attempt.
+        // What follows is a *fresh* client (`base_client()`), not a restore of `c1`:
+        // no order/job identity crosses over. All this test proves is that a fresh boot
+        // comes up HALTED and refuses the queued order, which never reaches the bridge.
+        // The durable half (a restarted process must not re-issue the attempt abandoned by
+        // `c1`) lives at the gate level, exercised by
+        // `crash_after_submitting_halts_with_zero_duplicate_calls` in `src/executiongate.rs`,
+        // because the live client does not yet consume the durable ExecutionGate stores —
+        // the persisted gate is where a cross-process restore can actually be replayed.
         let (mut fresh, order2) = base_client();
         assert_eq!(fresh.gate_state(), ExecState::Halted);
         assert!(verify_restart_safe(fresh.gate_state()));
         assert!(!fresh.gate().borrow().can_execute());
 
-        // A forced retry of the same order while HALTED is denied and never reaches the bridge.
+        // A submit while HALTED is denied and never reaches the bridge.
         submit_place(&fresh, &order2);
         fresh.process_pending().await.expect("no bridge job ran");
         assert_eq!(fresh.gate_state(), ExecState::Halted);
