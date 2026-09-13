@@ -9,8 +9,10 @@
 //! differential parity test proves Rust == Java oracle for the same fill sequence.
 //!
 //! Semantics mirrored exactly (see the Java sources in `code/common/.../schema/`):
-//!   - i64 arithmetic identical to Java `long` (truncating division, wrapping ops) —
-//!     required for bit-identical differential parity;
+//!   - i64 arithmetic identical to Java `long` (truncating division) — required for
+//!     bit-identical differential parity. Overflow is **not** wrapped: accumulations use
+//!     checked arithmetic and fail closed as a `Violation` on both sides (P3-394), because a
+//!     wrapped quantity would slip past the overshoot guard;
 //!   - version gate (`KvStateUpdateProtocol`): APPLIED / DUPLICATE / STALE / REGRESSION /
 //!     CONFLICT / UNKNOWN;
 //!   - lifecycle (`PositionLifecycle`): FLAT -> OPEN -> REDUCING -> CLOSED with
@@ -1303,6 +1305,89 @@ mod tests {
     }
 
     // --- P3-390 / P3-392 / P3-394: numeric boundaries, Java-parity ---
+
+    // --- P3-213: accumulation overflow fails closed (the Rust mirror of P3-394) ---
+    //
+    // Each of the three tests below pins one `checked_*` site. Every one was shown
+    // non-vacuous by reverting its own site to the unchecked `+`/`*` and watching exactly
+    // that test fail — a wrapped quantity would otherwise slip past the overshoot guard.
+
+    #[test]
+    fn buy_quantity_overflow_is_a_violation_not_a_wrapped_open() {
+        let mut driver = PositionProjectorDriver::new();
+        let key = PositionKey {
+            account_scope_id: "acc-1".into(),
+            instrument_token: 1001,
+            side: Side::Buy,
+        };
+        // open == i64::MAX at price 1: the weighted average stays exact (1 * i64::MAX fits).
+        let first = driver.feed_on_key(&key, &fill(1, Side::Buy, i64::MAX, 1), NOW);
+        assert_eq!(first.outcome, FeedOutcome::Applied);
+        assert_eq!(first.snapshot.as_ref().unwrap().open_quantity, i64::MAX);
+
+        // One more unit cannot be represented. Wrapping would have stored a large negative
+        // open, which then passes the `next_closed > open` overshoot guard on the next sell.
+        let r = driver.feed_on_key(&key, &fill(2, Side::Buy, 1, 1), NOW);
+        assert_eq!(r.outcome, FeedOutcome::Violation);
+        assert!(
+            r.reason.as_deref().unwrap_or_default().contains("overflow"),
+            "reason was {:?}",
+            r.reason
+        );
+    }
+
+    #[test]
+    fn sell_quantity_overflow_is_a_violation_not_an_overshoot_bypass() {
+        let mut driver = PositionProjectorDriver::new();
+        let key = PositionKey {
+            account_scope_id: "acc-1".into(),
+            instrument_token: 1001,
+            side: Side::Buy,
+        };
+        driver.feed_on_key(&key, &fill(1, Side::Buy, i64::MAX, 1), NOW);
+        // closed == 1, so the next sell cannot be added without overflowing.
+        let opened = driver.feed_on_key(&key, &fill(2, Side::Sell, 1, 1), NOW);
+        assert_eq!(opened.outcome, FeedOutcome::Applied);
+
+        // Wrapped: 1 + i64::MAX -> i64::MIN, which is <= open, so the overshoot guard passed
+        // and a negative closed_quantity was stored.
+        let r = driver.feed_on_key(&key, &fill(3, Side::Sell, i64::MAX, 1), NOW);
+        assert_eq!(r.outcome, FeedOutcome::Violation);
+        assert!(
+            r.reason.as_deref().unwrap_or_default().contains("overflow"),
+            "reason was {:?}",
+            r.reason
+        );
+        // The refused fill left the stored snapshot untouched.
+        assert_eq!(driver.snapshot(POSITION_ID).unwrap().closed_quantity, 1);
+    }
+
+    #[test]
+    fn weighted_average_numerator_sum_overflow_is_a_violation() {
+        const P: i64 = i64::MAX / 2;
+        let mut driver = PositionProjectorDriver::new();
+        let key = PositionKey {
+            account_scope_id: "acc-1".into(),
+            instrument_token: 1001,
+            side: Side::Buy,
+        };
+        // 2 lots at P fit exactly (2 * P == i64::MAX - 1), so the quantity guard is not the
+        // one under test here — the numerator of the average is. `overflow_is_a_violation_not_a_
+        // wrapped_average` pins the single-product overflow (MAX * MAX on a first fill); this
+        // pins the other guard: each product fits, their sum does not.
+        let first = driver.feed_on_key(&key, &fill(1, Side::Buy, 2, P), NOW);
+        assert_eq!(first.outcome, FeedOutcome::Applied);
+        assert_eq!(first.snapshot.as_ref().unwrap().average_entry_paise, P);
+
+        // A second 2-lot buy at the same price needs 2*P + 2*P in the numerator.
+        let r = driver.feed_on_key(&key, &fill(2, Side::Buy, 2, P), NOW);
+        assert_eq!(r.outcome, FeedOutcome::Violation);
+        assert!(
+            r.reason.as_deref().unwrap_or_default().contains("overflow"),
+            "reason was {:?}",
+            r.reason
+        );
+    }
 
     #[test]
     fn zero_price_is_rejected_in_parity_with_java() {
