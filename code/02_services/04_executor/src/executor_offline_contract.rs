@@ -1,5 +1,10 @@
 //! Offline contract for 11-testing EXE-* (Executor) — deterministic, no market/4VM.
-//! Covers EXE-FAIL-001/003/006 + EXE-AUDIT-001 via in-memory gate/attempt store.
+//!
+//! EXE-FAIL-001/003/006 drive the real durable seam ([`ExecutionGate::execute`] over injected
+//! stores and a counting bridge), the way a restarted process sees it: two gate instances, one
+//! durable store pair, one cumulative bridge call count. Asserting store primitives alone would
+//! not verify those acceptance criteria — a regression inside `execute` would leave every
+//! primitive intact. EXE-AUDIT-001 stays a journal-replay property of the store itself.
 
 #[cfg(test)]
 mod tests {
@@ -11,7 +16,6 @@ mod tests {
         ExecutionGate, GateRow, GateState, GateStateStore, InMemoryAttemptStore,
         InMemoryGateStateStore, Outcome, OutcomeKind,
     };
-    use crate::gate::{ExecState, Gate};
 
     const PARTITION: &str = "p-exe";
 
@@ -236,23 +240,52 @@ mod tests {
         assert_eq!(calls.get(), 0, "still zero bridge calls");
     }
 
-    // EXE-FAIL-006: mapping quarantine blocks unsafe (ambiguous correlation → quarantine + halt)
+    // EXE-FAIL-006: mapping quarantine blocks unsafe (ambiguous correlation → quarantine + halt).
+    //
+    // The ambiguous correlation is a second attempt at an instruction the store already knows
+    // with a *different* request hash. It must quarantine the partition (durable HALT) with no
+    // bridge call, and the quarantine must stick: a later well-formed command is refused too.
     #[test]
     fn exe_fail_006_mapping_quarantine_blocks_unsafe() {
-        let store = InMemoryAttemptStore::new();
-        let a = Attempt::new(
-            "attempt-1",
-            "instr-1",
-            "hash-1",
-            "C-REF-1",
-            AttemptPhase::Prepared,
+        let calls = Rc::new(Cell::new(0usize));
+        let bridge: Rc<dyn BridgeCaller> = Rc::new(CountingBridge::new(Rc::clone(&calls)));
+        let attempts: Rc<dyn AttemptStore> = Rc::new(InMemoryAttemptStore::new());
+        let gates = enabled_gates();
+        let mut gate =
+            ExecutionGate::new(Rc::clone(&attempts), Rc::clone(&gates), Rc::clone(&bridge));
+
+        // Establish the instruction/mapping first, so the next attempt is a remap, not a first write.
+        assert_eq!(
+            gate.execute(&cmd("a-1"), CrashHooks::default()).unwrap(),
+            Outcome::Accepted
         );
-        store.put(&a).unwrap();
-        assert!(store.has_instruction("instr-1"));
-        assert!(!store.has_instruction("instr-2"));
-        let gate = Gate::new();
-        assert_eq!(gate.state(), ExecState::Halted);
-        assert!(!gate.can_execute());
+        assert_eq!(calls.get(), 1);
+
+        // Same instruction, different request hash: ambiguous — quarantine, never call.
+        let mut ambiguous = cmd("a-2");
+        ambiguous.request_hash = "h-changed".into();
+        assert_eq!(
+            gate.execute(&ambiguous, CrashHooks::default()).unwrap(),
+            Outcome::ContractViolation,
+            "a remap of a known instruction must be quarantined"
+        );
+        assert_eq!(calls.get(), 1, "quarantine must never reach the bridge");
+        assert_eq!(
+            gates.read(PARTITION).unwrap().state,
+            GateState::Halted,
+            "the partition must be durably quarantined"
+        );
+
+        // The quarantine is sticky: even a well-formed, unseen mapping is refused.
+        let mut fresh = cmd("a-3");
+        fresh.instruction_id = "ins-2".into();
+        fresh.request_hash = "h-2".into();
+        assert_eq!(
+            gate.execute(&fresh, CrashHooks::default()).unwrap(),
+            Outcome::Blocked,
+            "a quarantined partition must stay refused until reconciliation"
+        );
+        assert_eq!(calls.get(), 1, "a quarantined partition issues no calls");
     }
 
     // EXE-AUDIT-001: audit reconstruction — journal replay yields same state
