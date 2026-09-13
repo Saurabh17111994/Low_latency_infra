@@ -204,6 +204,11 @@ pub fn encode_envelope(secret: &str, e: &Envelope) -> Result<String, String> {
     // for the payload node (no pretty). For cross-language fidelity the test vectors
     // use the same compact form.
     let payload_json = serde_json::to_string(&e.payload).map_err(|e| e.to_string())?;
+    // P3-451: fail fast on a stale/mismatched caller-supplied hash instead of
+    // signing a self-inconsistent envelope that only fails later at the receiver.
+    if sha256_hex(payload_json.as_bytes()) != e.payload_hash {
+        return Err("payload_hash does not match payload".to_string());
+    }
     let canon = canonical(e, &payload_json);
     let auth = hmac_hex(secret, &canon);
     let mut node = serde_json::Map::new();
@@ -428,6 +433,19 @@ mod tests {
     }
 
     #[test]
+    fn p3_451_encode_rejects_stale_payload_hash() {
+        // P3-451: encode must fail fast when the caller-supplied payload_hash
+        // does not match the payload, instead of signing a self-inconsistent
+        // envelope that can only fail later at the receiver.
+        let good = envelope(json!({"x": 1}));
+        let mut stale = envelope(json!({"x": 2}));
+        stale.payload_hash = good.payload_hash.clone(); // stale hash for this payload
+        let err =
+            encode_envelope("s3cr3t", &stale).expect_err("stale hash must fail fast at encode");
+        assert_eq!(err, "payload_hash does not match payload");
+    }
+
+    #[test]
     fn payload_hash_mismatch() {
         let e = envelope(json!({"x":1}));
         let mut encoded = encode_envelope("s3cr3t", &e).unwrap();
@@ -441,12 +459,47 @@ mod tests {
             "tampered payload should fail auth: {}",
             vr.reason
         );
-        // Auth will fail first; but if we recompute auth for tampered payload, hash mismatches.
-        // To test hash path, re-encode with correct auth for new payload but keep old hash.
-        let mut e2 = envelope(json!({"x":2}));
-        e2.payload_hash = e.payload_hash.clone(); // keep old hash
-        let enc2 = encode_envelope("s3cr3t", &e2).unwrap();
-        let vr2 = verify(&enc2, "s3cr3t", "execution-gateway.v1", 1_000_000);
+        // Auth will fail first; the receiver-side hash path is reached only via
+        // hand-crafted wire bytes that bypass encode (P3-451: encode now refuses
+        // a stale hash at the call site — see p3_451_encode_rejects_stale_payload_hash).
+        // Correct auth for the new payload under the OLD hash, paired with the new body.
+        let new_payload = json!({"x":2});
+        let new_payload_json = serde_json::to_string(&new_payload).unwrap();
+        let stale_canon = [
+            "execution-gateway.v1",
+            "EXECUTION_INTENT",
+            "req-1",
+            "acc-1",
+            "part-1",
+            e.payload_hash.as_str(),
+            "7",
+            "fence-abc",
+            "9999999999999",
+            &new_payload_json,
+        ]
+        .join("\n");
+        let mut mac = HmacSha256::new_from_slice("s3cr3t".as_bytes()).unwrap();
+        mac.update(stale_canon.as_bytes());
+        let stale_auth = hex::encode(mac.finalize().into_bytes());
+        let wire = serde_json::json!({
+            "protocol_version": "execution-gateway.v1",
+            "message_type": "EXECUTION_INTENT",
+            "request_id": "req-1",
+            "account_scope_id": "acc-1",
+            "execution_partition_id": "part-1",
+            "payload_hash": e.payload_hash,
+            "gate_epoch": 7,
+            "fence_token": "fence-abc",
+            "deadline_epoch_ms": 9999999999999i64,
+            "payload": new_payload,
+            "authentication": stale_auth,
+        });
+        let vr2 = verify(
+            &serde_json::to_string(&wire).unwrap(),
+            "s3cr3t",
+            "execution-gateway.v1",
+            1_000_000,
+        );
         assert!(!vr2.accepted);
         assert_eq!(vr2.reason, "payload hash mismatch");
     }
