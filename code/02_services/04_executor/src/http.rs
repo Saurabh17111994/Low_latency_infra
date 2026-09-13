@@ -51,6 +51,14 @@ const HALT_MESSAGE_TYPE: &str = "GATE_HALT";
 /// env key the T9 placement gate uses — is not configured. The env value, when present, wins.
 const DEFAULT_OPERATOR: &str = "saurabh";
 
+/// P3-209: production idle deadline for the request READ phase of one connection. Generous for
+/// a live operator (three tiny request shapes) and useless to a stalled client.
+const CONNECTION_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// P3-209: cap on concurrently served connections. A connection that cannot get a permit is
+/// answered 503 and dropped immediately — never queued, never spawned as another task.
+const MAX_CONNECTIONS: usize = 64;
+
 /// Shared bridge transport used by the ENABLED sync forward (T4a). `tokio::sync::Mutex` is
 /// required because `BridgeClient::send_command` takes `&mut self` across an await point; the
 /// `Send` bound is required by the spawned server task (the trait object is used only here,
@@ -99,6 +107,8 @@ struct Snapshot {
     /// the signed control envelope. It starts at 1 (0 is never current) and every gate transition
     /// bumps it, so an envelope captured before the transition names a stale epoch and is refused.
     control_epoch: u64,
+    /// P3-209: idle deadline for the request read phase; production pins 5 s, tests shrink it.
+    connection_timeout: std::time::Duration,
 }
 
 impl ServerState {
@@ -119,6 +129,7 @@ impl ServerState {
                 enabled_evidence: None,
                 authorized_operator: Self::operator_from_env(),
                 control_epoch: 1,
+                connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
         }
@@ -160,6 +171,7 @@ impl ServerState {
                 enabled_evidence: None,
                 authorized_operator: Self::operator_from_env(),
                 control_epoch: 1,
+                connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
         }
@@ -171,6 +183,15 @@ impl ServerState {
     fn with_authorized_operator(self, operator: &str) -> Self {
         if let Ok(mut s) = self.inner.lock() {
             s.authorized_operator = operator.to_string();
+        }
+        self
+    }
+
+    /// Shrinks the request-read idle deadline (tests only — production keeps 5 s).
+    #[cfg(test)]
+    fn with_connection_timeout(self, d: std::time::Duration) -> Self {
+        if let Ok(mut s) = self.inner.lock() {
+            s.connection_timeout = d;
         }
         self
     }
@@ -287,6 +308,7 @@ impl ServerState {
             enabled_evidence: None,
             authorized_operator: Self::operator_from_env(),
             control_epoch: 1,
+            connection_timeout: CONNECTION_READ_TIMEOUT,
         })
     }
 
@@ -366,6 +388,7 @@ impl Clone for Snapshot {
             enabled_evidence: self.enabled_evidence.clone(),
             authorized_operator: self.authorized_operator.clone(),
             control_epoch: self.control_epoch,
+            connection_timeout: self.connection_timeout,
         }
     }
 }
@@ -781,13 +804,30 @@ pub async fn serve(addr: SocketAddr, state: ServerState) -> Result<()> {
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind health server {addr}"))?;
+    serve_on(listener, state).await
+}
+
+/// The accept loop over an already-bound listener (separated from [`serve`] so a test can drive
+/// the production path — permit gate included — on an ephemeral port).
+async fn serve_on(listener: TcpListener, state: ServerState) -> Result<()> {
+    // P3-209: bound the number of connections in flight, so a flood cannot spawn unbounded
+    // tasks. Over the cap the peer gets an immediate 503 and the connection is dropped — never
+    // queued (nothing here is worth making a client wait for).
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     loop {
         let (stream, _) = match listener.accept().await {
             Ok(x) => x,
             Err(_) => continue,
         };
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            let mut stream = stream;
+            let _ = stream.write_all(&text(503, "too_many_connections")).await;
+            let _ = stream.flush().await;
+            continue;
+        };
         let st = state.clone();
         tokio::spawn(async move {
+            let _permit = permit; // held for the connection's lifetime
             if let Err(e) = handle_conn(stream, st).await {
                 tracing::debug!("health connection closed: {e}");
             }
@@ -795,23 +835,56 @@ pub async fn serve(addr: SocketAddr, state: ServerState) -> Result<()> {
     }
 }
 
+/// The request line + body of one connection (P3-209 read phase output).
+struct HttpRequest {
+    method: String,
+    path: String,
+    body: String,
+}
+
+/// One parsed request. `Ok(None)` from [`read_request`] means there is nothing to answer: the
+/// client closed first, or the request was refused there (413) and the refusal was written.
 async fn handle_conn(mut stream: TcpStream, state: ServerState) -> Result<()> {
-    // Read headers + optional body. We support Content-Length only (no chunked).
+    // P3-209: bound only the READ phase. A slowloris client that sends a partial header — or
+    // promises a `Content-Length` body it never sends — must not pin this task forever. The
+    // deadline deliberately does NOT cover routing: the ENABLED `/v1/intents` path forwards
+    // synchronously to the bridge (which has its own, longer timeouts), and killing a live order
+    // submit mid-flight would turn a valid order into a lost ack.
+    let deadline = state.snapshot().connection_timeout;
+    let request = match tokio::time::timeout(deadline, read_request(&mut stream)).await {
+        Ok(Ok(Some(request))) => request,
+        Ok(Ok(None)) => return Ok(()),
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            return Err(anyhow::anyhow!(
+                "request read idle timeout after {deadline:?}"
+            ))
+        }
+    };
+
+    let resp = route(&state, &request.method, &request.path, &request.body).await;
+    let _ = stream.write_all(&resp).await;
+    let _ = stream.flush().await;
+    Ok(())
+}
+
+/// One request line + body (headers + Content-Length; we support Content-Length only — no chunked).
+async fn read_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 4096];
     let header_end = loop {
         match stream.read(&mut chunk).await {
-            Ok(0) => return Ok(()),
+            Ok(0) => return Ok(None),
             Ok(n) => {
                 buf.extend_from_slice(&chunk[..n]);
                 if let Some(idx) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                     break idx + 4;
                 }
                 if buf.len() > 64 * 1024 {
-                    return Ok(());
+                    return Ok(None);
                 }
             }
-            Err(_) => return Ok(()),
+            Err(_) => return Ok(None),
         }
     };
     let h_end = header_end;
@@ -837,7 +910,7 @@ async fn handle_conn(mut stream: TcpStream, state: ServerState) -> Result<()> {
                     let resp = text(413, "payload_too_large");
                     let _ = stream.write_all(&resp).await;
                     let _ = stream.flush().await;
-                    return Ok(());
+                    return Ok(None);
                 }
             }
         }
@@ -857,10 +930,7 @@ async fn handle_conn(mut stream: TcpStream, state: ServerState) -> Result<()> {
     body_bytes.truncate(content_length);
     let body = String::from_utf8_lossy(&body_bytes).to_string();
 
-    let resp = route(&state, &method, &path, &body).await;
-    let _ = stream.write_all(&resp).await;
-    let _ = stream.flush().await;
-    Ok(())
+    Ok(Some(HttpRequest { method, path, body }))
 }
 
 #[cfg(test)]
@@ -902,15 +972,9 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else {
-                    continue;
-                };
-                let st = state.clone();
-                tokio::spawn(async move {
-                    let _ = handle_conn(stream, st).await;
-                });
-            }
+            // Drive the production accept loop — P3-209 permit gate included — instead of a
+            // copy of it, so these tests cover the code the service actually runs.
+            let _ = serve_on(listener, state).await;
         });
         addr
     }
@@ -1653,6 +1717,59 @@ mod tests {
             ExecState::Halted,
             "a replayed approval must not re-enable the gate"
         );
+    }
+
+    #[tokio::test]
+    async fn p3_209_stalled_request_is_closed_by_the_read_deadline() {
+        // Slowloris: a header that never terminates, with a shrunk deadline so the test is fast.
+        let state = ServerState::new(ExecState::Halted)
+            .with_connection_timeout(std::time::Duration::from_millis(150));
+        let addr = spawn_server(state).await;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\n")
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+        let mut buf = [0u8; 64];
+        let outcome =
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut buf)).await;
+        assert!(
+            matches!(outcome, Ok(Ok(0))),
+            "stalled connection must be closed by the read deadline, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn p3_209_serve_bounds_concurrent_connections() {
+        // The accept loop must cap connections in flight: `MAX_CONNECTIONS` idle sockets hold
+        // every permit, so the next connection is answered 503 and dropped instead of being
+        // accepted as yet another task. The held sockets are answered only by the read deadline.
+        let state = ServerState::new(ExecState::Halted)
+            .with_connection_timeout(std::time::Duration::from_millis(1000));
+        let addr = spawn_server(state).await;
+        let mut held = Vec::new();
+        for _ in 0..MAX_CONNECTIONS {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            held.push(stream);
+        }
+        // A permit frees only when a held connection hits its deadline; ask until the cap is
+        // visibly reached (a 200 means the server had not yet accepted every held socket).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            let (s, b) = raw_request(addr, "GET /healthz HTTP/1.1\r\nHost: x\r\n\r\n").await;
+            if s == 503 {
+                assert!(b.contains("too_many_connections"), "body: {b}");
+                break;
+            }
+            assert_eq!(s, 200, "unexpected status above the cap: {b}");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "connection cap never reached (MAX_CONNECTIONS={MAX_CONNECTIONS})"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        drop(held);
     }
 
     #[test]
