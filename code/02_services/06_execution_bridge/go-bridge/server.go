@@ -255,9 +255,10 @@ func (s *BridgeServer) writeHealth(w http.ResponseWriter, readiness bool) {
 		}
 	}
 	status := http.StatusOK
-	if value["status"] == "UP disabled" {
-		status = http.StatusServiceUnavailable
-	} else if readiness && s.mode == "disabled" {
+	// P3-054: only readiness may fail on a disabled broker. A disabled bridge is
+	// alive and answers liveness — failing /healthz restarted it, and a restart
+	// cannot restore a token that needs a TOTP re-auth, so it restarted forever.
+	if readiness && (value["status"] == "UP disabled" || s.mode == "disabled") {
 		status = http.StatusServiceUnavailable
 	}
 	s.writeJSON(w, status, value)

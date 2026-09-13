@@ -73,17 +73,25 @@ func TestSandboxAutoReauth(t *testing.T) {
 		}
 		// healthz must report UP disabled
 		server, _ := NewBridgeServer(rb, "test-token", "live")
-		for _, path := range []string{"/healthz", "/readyz"} {
+		// P3-054: this block used to require 503 from both paths, which is the
+		// defect — liveness must keep answering while only readiness fails.
+		for _, probe := range []struct {
+			path     string
+			wantCode int
+		}{
+			{"/healthz", http.StatusOK},
+			{"/readyz", http.StatusServiceUnavailable},
+		} {
 			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req := httptest.NewRequest(http.MethodGet, probe.path, nil)
 			server.Handler().ServeHTTP(rec, req)
 			var body map[string]any
 			_ = json.Unmarshal(rec.Body.Bytes(), &body)
 			if body["status"] != "UP disabled" {
-				t.Fatalf("%s status=%v want UP disabled", path, body["status"])
+				t.Fatalf("%s status=%v want UP disabled", probe.path, body["status"])
 			}
-			if rec.Code != http.StatusServiceUnavailable {
-				t.Fatalf("%s code=%d want 503", path, rec.Code)
+			if rec.Code != probe.wantCode {
+				t.Fatalf("%s code=%d want %d", probe.path, rec.Code, probe.wantCode)
 			}
 		}
 	})
@@ -442,5 +450,51 @@ func TestRetryAuthFailureFromAStaleTokenDoesNotDisable(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("inner calls=%d want 2 (original + one retry)", calls)
+	}
+}
+
+// P3-054 — a disabled broker is intentionally alive but not ready. Failing
+// liveness restarts a bridge whose only problem is a TOTP that the restart
+// cannot restore, while /readyz already carries the "no commands" verdict.
+func TestDisabledBrokerStaysLiveAndOnlyFailsReadiness(t *testing.T) {
+	inner := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_auth_failure"}
+	}}
+	rb := NewReauthBroker(inner, func(ctx context.Context) error {
+		return errors.New("totp rejected")
+	})
+	_ = rb.Place(t.Context(), validPlaceCommand())
+	if !rb.IsDisabled() {
+		t.Fatal("setup: the broker should be disabled after the re-auth failure")
+	}
+	server, err := NewBridgeServer(rb, "test-token", "live")
+	if err != nil {
+		t.Fatalf("NewBridgeServer: %v", err)
+	}
+
+	for _, tc := range []struct {
+		path     string
+		wantCode int
+	}{
+		{"/healthz", http.StatusOK},                // alive: the process can still serve and recover
+		{"/readyz", http.StatusServiceUnavailable}, // not ready: no broker commands without a token
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, tc.path, nil)
+		server.Handler().ServeHTTP(rec, req)
+		var body map[string]any
+		_ = json.Unmarshal(rec.Body.Bytes(), &body)
+		if body["status"] != "UP disabled" {
+			t.Errorf("%s status=%v want UP disabled", tc.path, body["status"])
+		}
+		if rec.Code != tc.wantCode {
+			t.Errorf("%s code=%d want %d (body=%s)", tc.path, rec.Code, tc.wantCode, rec.Body.String())
+		}
+		if _, present := body["ready"]; present != (tc.path == "/readyz") {
+			t.Errorf("%s ready key present=%v, want present only on /readyz", tc.path, present)
+		}
+		if tc.path == "/readyz" && body["ready"] != false {
+			t.Errorf("%s ready=%v want false", tc.path, body["ready"])
+		}
 	}
 }
