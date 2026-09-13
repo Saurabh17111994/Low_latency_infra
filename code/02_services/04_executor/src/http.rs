@@ -246,6 +246,7 @@ impl ServerState {
         // P3-019: a new approval epoch re-arms the UNKNOWN watchdog — without this,
         // `unknown_first_seen` from the previous epoch makes `record_unknown_outcome`
         // early-return forever and the escalation silently stops working.
+        s.unknown_first_seen = None;
         // P3-020: spend the epoch the envelope named. A copy of that approve envelope now
         // names a stale epoch and is refused instead of re-enabling the gate.
         s.bump_control_epoch();
@@ -1156,6 +1157,38 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
+    }
+
+    #[tokio::test]
+    async fn p3_019_reapproval_rearms_the_unknown_watchdog() {
+        // P3-019. After an UNKNOWN escalation forces HALT + operator review, the DEC-044
+        // recovery path is operator halt → re-approve, which opens a new approval epoch.
+        // The watchdog must re-arm for that epoch so the NEXT unresolved UNKNOWN still
+        // escalates. Before the fix `unknown_first_seen` was never cleared, so
+        // `record_unknown_outcome` early-returned for the rest of the process lifetime
+        // and the force-HALT + operator-review property was silently dead.
+        let state = ServerState::new(ExecState::Enabled)
+            .with_authorized_operator("saurabh")
+            .with_unknown_escalation(std::time::Duration::from_millis(40));
+
+        // Epoch 1: an unresolved UNKNOWN escalates to force-HALT + operator review.
+        state.record_unknown_outcome();
+        wait_for_unknown_escalation(&state).await;
+
+        // DEC-044 recovery: the operator halts, then re-approves (gate HALTED → ENABLED).
+        state.safety_halt("operator halt after UNKNOWN");
+        state
+            .approve("saurabh", "evidence-epoch-2")
+            .expect("re-approval in the new epoch");
+        assert_eq!(
+            state.snapshot().gate,
+            ExecState::Enabled,
+            "re-approval must enable the gate"
+        );
+
+        // Epoch 2: a fresh UNKNOWN must arm a fresh escalation.
+        state.record_unknown_outcome();
+        wait_for_unknown_escalation(&state).await;
     }
 
     #[tokio::test]
