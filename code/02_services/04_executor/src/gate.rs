@@ -141,6 +141,9 @@ pub enum ApprovalError {
     NotApprovalPending(ExecState),
     /// The operator is not in the authorized set.
     Unauthorized,
+    /// The supplied evidence hash is empty or whitespace-only: an approval must bind real
+    /// evidence, so the gate can never enable on a blank "hash".
+    InvalidEvidenceHash,
 }
 
 impl fmt::Display for ApprovalError {
@@ -148,6 +151,7 @@ impl fmt::Display for ApprovalError {
         match self {
             Self::NotApprovalPending(s) => write!(f, "approval not allowed in {s}"),
             Self::Unauthorized => write!(f, "approver is not authorized"),
+            Self::InvalidEvidenceHash => write!(f, "approval requires a non-empty evidence hash"),
         }
     }
 }
@@ -305,6 +309,10 @@ impl Gate {
         // required and not checked.
         if self.approval_a.is_some() {
             return Ok(());
+        }
+        // An empty or whitespace-only hash is not evidence: refuse to bind it.
+        if evidence_hash.trim().is_empty() {
+            return Err(ApprovalError::InvalidEvidenceHash);
         }
         self.approval_a = Some(approver.to_string());
         self.enabled_evidence = Some(evidence_hash.to_string());
@@ -526,6 +534,28 @@ mod tests {
             })
         );
         assert_eq!(g.epoch(), 7, "the declared term must not regress");
+    }
+
+    #[test]
+    fn invariant003_empty_or_blank_evidence_hash_cannot_bind() {
+        let mut g = authorized();
+        to_approval_pending(&mut g);
+        g.set_epoch(1).unwrap();
+        // A whitespace-only or empty "hash" is no evidence at all; never bind it, never enable
+        // on it.
+        assert_eq!(
+            g.record_approval("saurabh", "   "),
+            Err(ApprovalError::InvalidEvidenceHash)
+        );
+        assert_eq!(
+            g.record_approval("saurabh", ""),
+            Err(ApprovalError::InvalidEvidenceHash)
+        );
+        assert_eq!(g.enable(1), Err(EnableError::RequiresApproval));
+        // A real evidence hash still binds and enables.
+        g.record_approval("saurabh", "h1").unwrap();
+        g.enable(1).unwrap();
+        assert!(g.can_execute());
     }
 
     #[test]
