@@ -78,6 +78,24 @@ OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/logs/soak/monday-gates-$(date +%Y%m%d-%H%M%S)}
 # Written by a failing sweep child, read by the driver (must exist in both).
 SWEEP_FAILED_FILE="$OUT_DIR/sweep-failed.txt"
 
+# Per-run log paths, fixed up front: --steps may skip the step that writes one,
+# and the evidence list and the steps themselves reference them by name.
+GO_LOG="$OUT_DIR/go-suite.log"
+JAVA_LOG="$OUT_DIR/java-suite.log"
+PREFLIGHT_LOG="$OUT_DIR/preflight.log"
+STATIC_LOG="$OUT_DIR/static-checks.log"
+PY_LOG="$OUT_DIR/python-tests.log"
+ENTRYPOINT_LOG="$OUT_DIR/entrypoint.log"
+IMAGE_LOG="$OUT_DIR/image-staleness.log"
+DRILL_LOG="$OUT_DIR/drill-live.log"
+AUDIT_LOG="$OUT_DIR/full-audit.log"
+DDL_SMOKE_LOG="$OUT_DIR/ddl-smoke.log"
+SCHEMA_PERF_LOG="$OUT_DIR/schema-perf.log"
+SHUTDOWN_LOG="$OUT_DIR/shutdown-regression.log"
+GATEWAY_LOG="$OUT_DIR/gateway-suite.log"
+NAUTILUS_LOG="$OUT_DIR/nautilus-suite.log"
+COMPUTE_LOG="$OUT_DIR/compute-suite.log"
+
 # Suite timeouts (R-281) — a stuck JVM/Fluss must not block the gate forever.
 GO_TIMEOUT_SEC="${GO_TIMEOUT_SEC:-1800}"
 JAVA_TIMEOUT_SEC="${JAVA_TIMEOUT_SEC:-3600}"
@@ -98,8 +116,6 @@ for dir in "$CODE_DIR" "$BRIDGE_DIR" "$INGESTION_DIR"; do
 done
 
 mkdir -p "$OUT_DIR"
-GO_LOG="$OUT_DIR/go-suite.log"
-JAVA_LOG="$OUT_DIR/java-suite.log"
 SUMMARY="$OUT_DIR/SUMMARY.txt"
 
 # Verification accounting: a step that never ran must not read as a pass. The
@@ -217,7 +233,6 @@ else
 fi
 echo "MODE=$MODE" >>"$SUMMARY"
 echo "=== [preflight] environment drift (tree, compose convergence, catalog, stack) ===" | tee -a "$SUMMARY"
-PREFLIGHT_LOG="$OUT_DIR/preflight.log"
 PREFLIGHT_RC=0
 timeout 180 python3 "$SCRIPT_DIR/gate_preflight.py" >"$PREFLIGHT_LOG" 2>&1 || PREFLIGHT_RC=$?
 if [ "$PREFLIGHT_RC" -eq 2 ]; then
@@ -295,7 +310,6 @@ fi
 
 if step_active 1; then
 echo "=== [1/16] Static checks (bash -n, shellcheck) ===" | tee -a "$SUMMARY"
-STATIC_LOG="$OUT_DIR/static-checks.log"
 : >"$STATIC_LOG"
 STATIC_FAIL=0
 # Every repo shell script (excludes third_party vendored sources).
@@ -362,7 +376,6 @@ fi
 fi
 if step_active 3; then
 echo "=== [3/16] Python unit suites (reconcile-compare ING-TCP-002 + gate helpers) ===" | tee -a "$SUMMARY"
-PY_LOG="$OUT_DIR/python-tests.log"
 if ! timeout 300 python3 -m unittest discover -s "$SCRIPT_DIR/tests" -p "test_*.py" \
 	>"$PY_LOG" 2>&1; then
 	echo "FAIL: python unit suites — see $PY_LOG" | tee -a "$SUMMARY"
@@ -383,7 +396,6 @@ echo "PASS: python unit suites ($(grep -oE 'Ran [0-9]+ tests' "$PY_LOG" | head -
 fi
 if step_active 4; then
 echo "=== [4/16] Entrypoint harness (ING-INT-006) ===" | tee -a "$SUMMARY"
-ENTRYPOINT_LOG="$OUT_DIR/entrypoint.log"
 if ! bash "$SCRIPT_DIR/tests/test_docker_entrypoint.sh" >"$ENTRYPOINT_LOG" 2>&1; then
 	echo "FAIL: entrypoint harness — see $ENTRYPOINT_LOG" | tee -a "$SUMMARY"
 	gate_fail
@@ -449,7 +461,6 @@ fi
 fi
 if step_active 8; then
 echo "=== [8/16] image staleness (the service image this gate runs) ===" | tee -a "$SUMMARY"
-IMAGE_LOG="$OUT_DIR/image-staleness.log"
 if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ]; then
 	# Scope (2026-09-12): ddl-apply is the only *service* image the gate starts
 	# (step 11). Step 7 builds ingestion under the throwaway
@@ -503,7 +514,6 @@ echo "PASS: Java suite" | tee -a "$SUMMARY"
 # class XMLs with real (non-zero) test counts and would otherwise make C6 disagree
 # with the documented triple. Bootstrap defaults to the local stack — the Java step
 # above already requires it up (INGESTION_INT_TEST_FLUSS=true).
-DRILL_LOG="$OUT_DIR/drill-live.log"
 DRILL_BOOTSTRAP="${FLUSS_BOOTSTRAP:-localhost:9123}"
 if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$PROJECT_ROOT' && \
 	FLUSS_BOOTSTRAP='$DRILL_BOOTSTRAP' MVN_FLAGS=-o make drill-live" >"$DRILL_LOG" 2>&1; then
@@ -525,7 +535,6 @@ echo "PASS: live Fluss drills (common + gateway, bootstrap $DRILL_BOOTSTRAP)" | 
 fi
 if step_active 10; then
 echo "=== [10/16] full doc audit (make full-audit: scanners + sweeps + trio coherence) ===" | tee -a "$SUMMARY"
-AUDIT_LOG="$OUT_DIR/full-audit.log"
 if ! timeout 300 bash "$SCRIPT_DIR/full_audit.sh" >"$AUDIT_LOG" 2>&1; then
 	echo "FAIL: full doc audit — see $AUDIT_LOG" | tee -a "$SUMMARY"
 	gate_fail
@@ -540,7 +549,6 @@ echo "PASS: full doc audit (stale claims + doc↔code truth + DDL parity + sweep
 fi
 if step_active 11; then
 echo "=== [11/16] DDL apply exit-code smoke ===" | tee -a "$SUMMARY"
-DDL_SMOKE_LOG="$OUT_DIR/ddl-smoke.log"
 DDL_SMOKE_TIMEOUT_SEC="${DDL_SMOKE_TIMEOUT_SEC:-1800}"
 # Env-gated: the smoke reports itself SKIPPED when it gets no bootstrap; any
 # deviation from the 0/6/1 contract, the sentinels, or the evidence record FAILS
@@ -585,7 +593,6 @@ echo "PASS: evidence ownership check (container-written records group-writable)"
 fi
 if step_active 12; then
 echo "=== [12/16] SchemaAgreementTest + PerfBaselineTest explicit ===" | tee -a "$SUMMARY"
-SCHEMA_PERF_LOG="$OUT_DIR/schema-perf.log"
 if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
 	INGESTION_INT_TEST_PERF=true \
 	mvn -o test -pl 02_services/01_ingestion -am \
@@ -614,7 +621,6 @@ echo "PASS: SchemaAgreementTest + PerfBaselineTest (certification gates)" | tee 
 fi
 if step_active 13; then
 echo "=== [13/16] SIGTERM-drain regression explicit (ING-UNIT-023/024, CHG-015) ===" | tee -a "$SUMMARY"
-SHUTDOWN_LOG="$OUT_DIR/shutdown-regression.log"
 if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
 	mvn -o test -pl 02_services/01_ingestion -am \
 	-Dtest='BridgeShutdownRegressionTest,BridgeShutdownHookTest' \
@@ -637,7 +643,6 @@ echo "PASS: SIGTERM-drain regression (ING-UNIT-023 in-process + ING-UNIT-024 rea
 fi
 if step_active 14; then
 echo "=== [14/16] Execution gateway module suite (unit + regression) ===" | tee -a "$SUMMARY"
-GATEWAY_LOG="$OUT_DIR/gateway-suite.log"
 if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
 	mvn -o test -pl 02_services/06_execution_gateway" >"$GATEWAY_LOG" 2>&1; then
 	echo "FAIL: execution gateway suite — see $GATEWAY_LOG" | tee -a "$SUMMARY"
@@ -655,7 +660,6 @@ echo "PASS: execution gateway suite ($(grep -aoE 'Tests run: [0-9]+, Failures: [
 fi
 if step_active 15; then
 echo "=== [15/16] Nautilus (Rust executor) suite — offline against the pinned lockfile ===" | tee -a "$SUMMARY"
-NAUTILUS_LOG="$OUT_DIR/nautilus-suite.log"
 # --offline is this repo's documented form (docs/plans/2026-08-25-live-readiness-
 # unified-plan.md): it proves Cargo.lock resolves from the cached registry. On a
 # cold ~/.cargo this FAILS loudly on purpose — run `cargo fetch` once, do not
@@ -675,7 +679,6 @@ fi
 
 if step_active 16; then
 echo "=== [16/16] Compute module suite (Fluss/fingerprint/candle unit + integration) ===" | tee -a "$SUMMARY"
-COMPUTE_LOG="$OUT_DIR/compute-suite.log"
 # 02_services/02_compute is deliberately NOT in the code/pom.xml reactor (R-272),
 # so it is tested from its own pom; common/ingestion resolve from ~/.m2 like the
 # gateway suite does.
