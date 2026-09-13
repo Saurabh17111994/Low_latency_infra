@@ -56,10 +56,11 @@ async fn main() -> anyhow::Result<()> {
     // (tracing-subscriber's tracing-log feature) and must therefore come SECOND —
     // otherwise the kernel errors "A non-Nautilus logger is already registered" and the
     // service aborts at boot. Tracing still works: set_global_default is a separate
-    // system; only the `log` bridge is skipped.
+    // system; only the `log` bridge is skipped. `init_logging` is infallible by design
+    // (no `Result`): "already installed" is the ordinary case on this boot path.
     let mut node = LiveNodeRuntime::build_with_bridge(selection)?;
 
-    telemetry::init_logging("info")?;
+    telemetry::init_logging("info");
     telemetry::METRICS.record_restart();
 
     tracing::info!(
