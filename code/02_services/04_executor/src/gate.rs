@@ -130,7 +130,13 @@ impl fmt::Display for ApprovalError {
 impl std::error::Error for ApprovalError {}
 
 /// The execution safety gate.
-#[derive(Debug, Clone)]
+///
+/// Deliberately **not** `Clone` (P3-448): an `ENABLED` gate holds an authenticated approval
+/// bound to an evidence hash, and a copy of it would be an independent object that keeps
+/// executing after the original is safety-halted — a copy of authority that never went
+/// through the single-operator ceremony. There is one gate per process; authority is
+/// re-earned through the ceremony, never duplicated.
+#[derive(Debug)]
 pub struct Gate {
     state: ExecState,
     safety_halt_count: u64,

@@ -97,8 +97,15 @@ impl TelemetrySink for NullSink {
 static TRACING_INIT: Once = Once::new();
 
 /// Initializes the `tracing` subscriber from `RUST_LOG` (falling back to `filter`, defaulting
-/// to `info`). Idempotent and safe to call multiple times.
-pub fn init_logging(filter: &str) -> anyhow::Result<()> {
+/// to `info`). Idempotent, safe to call multiple times, and deliberately infallible.
+///
+/// Not installing a subscriber is a normal outcome, not an error: another component may
+/// already own the process-global logger. In this service Nautilus's kernel registers it
+/// first and our subscriber must therefore come second (see the boot comment in `main`),
+/// so `try_init` reports "already set" on the ordinary boot path. That outcome is neither
+/// actionable nor distinguishable here, which is why there is no `Result` — callers must
+/// not treat logging bootstrap as fallible.
+pub fn init_logging(filter: &str) {
     TRACING_INIT.call_once(|| {
         let fallback = if filter.trim().is_empty() {
             "info".to_string()
@@ -116,7 +123,6 @@ pub fn init_logging(filter: &str) -> anyhow::Result<()> {
             .with_target(false)
             .try_init();
     });
-    Ok(())
 }
 
 #[cfg(test)]
@@ -143,8 +149,10 @@ mod tests {
 
     #[test]
     fn init_logging_is_idempotent() {
-        assert!(init_logging("info").is_ok());
-        assert!(init_logging("debug").is_ok());
+        // No assertion to make: the contract is "must not panic", also when called twice or
+        // when another component already owns the global logger (`try_init`, not `init`).
+        init_logging("info");
+        init_logging("debug");
     }
     #[test]
     fn obs_monotonic_counters_never_decrease() {

@@ -14,6 +14,9 @@ class SyntheticWorkloadTest {
     private static final List<Long> INSTRUMENTS = java.util.stream.LongStream.range(0, 100)
             .map(i -> 100000L + i).boxed().toList();
 
+    /** MOCK-UNIT-002: 20 ticks/s/instrument hard maximum = 50 ms between ticks. */
+    private static final long MIN_TICK_INTERVAL_MS = 50L;
+
     @Test
     void sameManifestSeedProfileAndClockAreReproducible() {
         var a = new SyntheticWorkload(new SyntheticWorkload.Config(
@@ -30,17 +33,33 @@ class SyntheticWorkloadTest {
         var baselineTicks = baseline.sample(20_000);
         long distinctTimes = baselineTicks.stream().map(SyntheticWorkload.Tick::eventTimeMs).distinct().count();
         assertTrue(distinctTimes > 100, "baseline must not use a fixed universal interval");
+        assertMinInterArrivalMs("baseline", baselineTicks);
 
         var peak = new SyntheticWorkload(new SyntheticWorkload.Config(
                 java.util.stream.LongStream.range(0, 3000).map(i -> 200000L + i).boxed().toList(),
                 11L, SyntheticWorkload.Profile.PEAK, 0L));
-        Map<Long, List<SyntheticWorkload.Tick>> byInstrument = peak.sample(90_000).stream()
+        assertMinInterArrivalMs("peak", peak.sample(90_000));
+    }
+
+    /**
+     * MOCK-UNIT-002: for every instrument, consecutive event times must be at
+     * least {@link #MIN_TICK_INTERVAL_MS} apart — the hard 20 ticks/s maximum.
+     * This subsumes the old average-rate check: an average can only stay under
+     * 20/s if no single interval drops below 50 ms.
+     */
+    private static void assertMinInterArrivalMs(String profile, List<SyntheticWorkload.Tick> ticks) {
+        Map<Long, List<SyntheticWorkload.Tick>> byInstrument = ticks.stream()
                 .collect(Collectors.groupingBy(SyntheticWorkload.Tick::instrumentToken));
-        byInstrument.values().forEach(ticks -> {
-            long first = ticks.stream().mapToLong(SyntheticWorkload.Tick::eventTimeMs).min().orElse(0L);
-            long last = ticks.stream().mapToLong(SyntheticWorkload.Tick::eventTimeMs).max().orElse(first);
-            if (last > first) assertTrue((ticks.size() - 1) * 1000L <= (last - first) * 20L);
-        });
+        for (var entry : byInstrument.entrySet()) {
+            long[] times = entry.getValue().stream()
+                    .mapToLong(SyntheticWorkload.Tick::eventTimeMs).sorted().toArray();
+            for (int i = 1; i < times.length; i++) {
+                long intervalMs = times[i] - times[i - 1];
+                assertTrue(intervalMs >= MIN_TICK_INTERVAL_MS, () -> String.format(
+                        "%s profile: instrument %d got consecutive ticks %d ms apart, below the %d ms floor (20 ticks/s)",
+                        profile, entry.getKey(), intervalMs, MIN_TICK_INTERVAL_MS));
+            }
+        }
     }
 
     @Test

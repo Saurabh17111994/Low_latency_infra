@@ -9,8 +9,10 @@
 //! differential parity test proves Rust == Java oracle for the same fill sequence.
 //!
 //! Semantics mirrored exactly (see the Java sources in `code/common/.../schema/`):
-//!   - i64 arithmetic identical to Java `long` (truncating division, wrapping ops) —
-//!     required for bit-identical differential parity;
+//!   - i64 arithmetic identical to Java `long` (truncating division) — required for
+//!     bit-identical differential parity. Overflow is **not** wrapped: accumulations use
+//!     checked arithmetic and fail closed as a `Violation` on both sides (P3-394), because a
+//!     wrapped quantity would slip past the overshoot guard;
 //!   - version gate (`KvStateUpdateProtocol`): APPLIED / DUPLICATE / STALE / REGRESSION /
 //!     CONFLICT / UNKNOWN;
 //!   - lifecycle (`PositionLifecycle`): FLAT -> OPEN -> REDUCING -> CLOSED with
@@ -470,11 +472,33 @@ pub struct FeedResult {
 
 /// Stateful driver holding the current snapshot per `position_id`; mints ids and projects fills
 /// through [`Projection`]. Port of `PositionProjectorDriver`.
+///
+/// Bounded retention (P3-458): `snapshots` never holds more than
+/// [`MAX_RETAINED_POSITIONS`] rows. On insert past the cap, rows that are closed and are not
+/// the live id of any key are retired — replaced by a watermark (`retired`) recording the last
+/// version seen for that id. A watermark is one small map entry, not a full
+/// `PositionSnapshot`, so the bound on *rows* also bounds memory; `cycles` is deliberately
+/// unbounded because reusing a minted id would let a late fill silently resurrect a retired
+/// cycle (the phantom row P3-166 chased). A redelivered fill for a retired id compares against
+/// the watermark instead of falling into the first-fill path, which has no prior to gate on.
 pub struct PositionProjectorDriver {
     active: HashMap<PositionKey, String>,
     cycles: HashMap<PositionKey, u32>,
     snapshots: HashMap<String, PositionSnapshot>,
+    /// Retired position ids mapped to the last projected version at retirement. A redelivered
+    /// fill at or below the watermark is `Stale`, never a fresh first write; above it is
+    /// `Violation` (a version nobody vouches for). Also capped
+    /// ([`MAX_RETIRED_WATERMARKS`]); the residual is stated on `retire_closed`.
+    retired: HashMap<String, i64>,
 }
+
+/// Maximum retained snapshot rows. Breathing room for the largest instrument/day the slice
+/// targets while keeping the retained set to tens of MB (`PositionSnapshot` is ~260 B plus
+/// small string payloads); raise only with a measured size.
+pub const MAX_RETAINED_POSITIONS: usize = 100_000;
+/// Maximum retired-id watermarks. Orders of magnitude above any single process lifetime's
+/// closed-cycle count; the cap is a backstop against unbounded growth, not a quota.
+pub const MAX_RETIRED_WATERMARKS: usize = 1_000_000;
 
 impl Default for PositionProjectorDriver {
     fn default() -> Self {
@@ -488,11 +512,36 @@ impl PositionProjectorDriver {
             active: HashMap::new(),
             cycles: HashMap::new(),
             snapshots: HashMap::new(),
+            retired: HashMap::new(),
         }
     }
 
     /// Feed a fully resolved fill. Mirrors `PositionProjectorDriver.feed(FillEvent, nowMs)`.
     pub fn feed_fill(&mut self, fill: &FillEvent, now_ms: i64) -> FeedResult {
+        // Retired ids are not in `snapshots` anymore, so without this check the fill below
+        // would take the first-fill path and mint a phantom row for a closed cycle (P3-458).
+        if let Some(&last) = self.retired.get(&fill.position_id) {
+            if fill.source_sequence <= last {
+                return FeedResult {
+                    outcome: FeedOutcome::Stale,
+                    snapshot: None,
+                    position_id: fill.position_id.clone(),
+                    reason: Some(format!(
+                        "fill for retired position {} at or below watermark {}",
+                        fill.position_id, last
+                    )),
+                };
+            }
+            return FeedResult {
+                outcome: FeedOutcome::Violation,
+                snapshot: None,
+                position_id: fill.position_id.clone(),
+                reason: Some(format!(
+                    "fill for retired position {} above watermark {}",
+                    fill.position_id, last
+                )),
+            };
+        }
         let current = self.snapshots.get(&fill.position_id);
         let r = Projection::apply(current, fill, now_ms);
         let position_id = fill.position_id.clone();
@@ -500,6 +549,7 @@ impl PositionProjectorDriver {
             ProjectionOutcome::Applied => {
                 if let Some(s) = r.snapshot.clone() {
                     self.snapshots.insert(position_id.clone(), s);
+                    self.retire_closed();
                 }
                 FeedResult {
                     outcome: FeedOutcome::Applied,
@@ -590,6 +640,62 @@ impl PositionProjectorDriver {
     pub fn size(&self) -> usize {
         self.snapshots.len()
     }
+
+    /// Number of retained watermarks (for the eviction test).
+    #[cfg(test)]
+    pub fn retired_len(&self) -> usize {
+        self.retired.len()
+    }
+
+    /// Drop retired-watermark ids that no longer gate anything, keeping `retired` bounded.
+    /// Called on feed: only when both maps are over budget, and only ids no snapshot cites.
+    fn retire_closed(&mut self) {
+        if self.snapshots.len() <= MAX_RETAINED_POSITIONS {
+            return;
+        }
+        self.retire_closed_below(MAX_RETAINED_POSITIONS);
+    }
+
+    /// Budget-parameterized eviction, split out so tests can drive the real path with a
+    /// 1-row budget instead of feeding 1e5 fills. `#[cfg(test)]` entry point below.
+    fn retire_closed_below(&mut self, budget: usize) {
+        if self.snapshots.len() <= budget {
+            return;
+        }
+        // Only ids that cannot mint a phantom row may leave: closed rows that are not the
+        // live id of any key. Everything else stays regardless of the cap — the bound is on
+        // retained *rows*, not on correctness (open rows must never be dropped).
+        let live: std::collections::HashSet<&String> = self.active.values().collect();
+        let mut evicted: Vec<(String, i64)> = Vec::new();
+        self.snapshots.retain(|id, snap| {
+            if snap.state == PositionState::Closed && !live.contains(id) {
+                evicted.push((id.clone(), snap.source_version));
+                return false;
+            }
+            true
+        });
+        for (id, version) in evicted {
+            self.retired.insert(id, version);
+        }
+        // Residual (stated, not hidden): past `MAX_RETIRED_WATERMARKS` the oldest watermarks
+        // are forgotten on a first-in basis. A duplicate arriving after its watermark is
+        // forgotten takes the first-fill path and mints a new row — accepted because the cap
+        // is ~1e6 closed cycles, far beyond any process lifetime the slice targets, and
+        // because bridge redelivery is bounded to recent events in practice.
+        while self.retired.len() > MAX_RETIRED_WATERMARKS {
+            if let Some(oldest) = self.retired.keys().next().cloned() {
+                self.retired.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Test-only entry point to the real eviction path with an explicit budget.
+    #[cfg(test)]
+    pub fn force_retire_for_test(&mut self, budget: usize) {
+        self.retire_closed_below(budget);
+    }
 }
 
 /// Context required to lift a bridge [`ReportEnvelope`] into a [`FillEvent`] — order/correlation
@@ -673,16 +779,20 @@ impl ProjectionEmitter {
             source_sequence,
             event_time_ms: report.received_ts_ms,
         };
-        // Validate the lift inputs; position_id is resolved by feed_on_key below.
+        // Validate the lift inputs. The rules mirror `FillEvent::validate` exactly
+        // (`price > 0`, `qty > 0` — the P3-390 lesson), stated here rather than by calling
+        // `validate()` because `position_id` is still empty at this point (it is resolved by
+        // `feed_on_key` below) and `validate()` requires it. `feed_fill` stays a clean parity
+        // port of Java `feed` with no Rust-only validation inside.
         if fill.fill_qty <= 0 {
             return Err(format!(
                 "fill_quantity must be positive, got {}",
                 fill.fill_qty
             ));
         }
-        if fill.fill_price_paise < 0 {
+        if fill.fill_price_paise <= 0 {
             return Err(format!(
-                "fill_price must be >= 0, got {}",
+                "fill_price_paise must be positive, got {}",
                 fill.fill_price_paise
             ));
         }
@@ -759,6 +869,74 @@ mod tests {
 
         // Differential-parity anchor: closed position, open == closed == 15.
         assert_eq!(s4.position_id, POSITION_ID);
+    }
+
+    /// P3-458 — the watermark, cap-independent. A redelivered fill for a row the driver has
+    /// already retired must stay `Stale` against the watermark instead of taking the
+    /// first-fill path (which has no prior to gate on) and minting a phantom position.
+    #[test]
+    fn redelivery_for_a_retired_cycle_is_stale_not_a_new_row() {
+        let mut driver = PositionProjectorDriver::new();
+        let key = PositionKey {
+            account_scope_id: "acc-closed".into(),
+            instrument_token: 2001,
+            side: Side::Buy,
+        };
+        let mut open = fill(1, Side::Buy, 10, 1000);
+        open.trade_context_id = "tc-closed".into();
+        open.account_scope_id = "acc-closed".into();
+        open.instrument_token = 2001;
+        // Close the cycle (BUY 10, then SELL 10 at sequence 2).
+        let r = driver.feed_on_key(&key, &open, NOW);
+        assert_eq!(r.outcome, FeedOutcome::Applied);
+        let mut close = open.clone();
+        close.source_sequence = 2;
+        close.source_event_id = "evt-2".into();
+        close.side = Side::Sell;
+        let r = driver.feed_on_key(&key, &close, NOW);
+        assert_eq!(r.snapshot.as_ref().unwrap().state, PositionState::Closed);
+        let closed_id = r.position_id.clone();
+        assert_eq!(driver.retired_len(), 0, "nothing retired yet");
+
+        // Remove the key from `active` the way production does when a key stops being
+        // tracked (so the test fails closed the same way). Then push the single closed row
+        // past a 0-row budget through the real `retire_closed` path — the unit under test,
+        // not a simulation of it.
+        driver.active.remove(&key);
+        driver.force_retire_for_test(0);
+        assert!(
+            driver.snapshot(&closed_id).is_none(),
+            "the closed row must be evicted"
+        );
+        assert_eq!(driver.position_id_for(&key), None);
+        assert_eq!(driver.retired_len(), 1);
+
+        // Redeliver the closing fill at the watermarked version: STALE, not a new row.
+        let mut redelivered = open.clone();
+        redelivered.position_id = closed_id.clone();
+        redelivered.source_sequence = 2;
+        redelivered.source_event_id = "evt-2".into();
+        let r = driver.feed_fill(&redelivered, NOW);
+        assert_eq!(r.outcome, FeedOutcome::Stale, "reason was {:?}", r.reason);
+        assert_eq!(driver.size(), 0, "no phantom row may be minted");
+        assert_eq!(
+            driver.retired_len(),
+            1,
+            "the watermark must survive the redelivery"
+        );
+
+        // A newer version than the watermark is a version nobody vouches for: Violation.
+        let mut future = redelivered.clone();
+        future.source_sequence = 9;
+        future.source_event_id = "evt-9".into();
+        let r = driver.feed_fill(&future, NOW);
+        assert_eq!(
+            r.outcome,
+            FeedOutcome::Violation,
+            "reason was {:?}",
+            r.reason
+        );
+        assert_eq!(driver.size(), 0, "no phantom row may be minted");
     }
 
     #[test]
@@ -862,6 +1040,73 @@ mod tests {
         assert_eq!(s.source_event_id, "pb-1");
         assert_eq!(s.open_quantity, 10);
         assert_eq!(s.state, PositionState::Open);
+    }
+
+    fn envelope_with_price(price: &str) -> (ReportEnvelope, EmitterContext) {
+        let envelope = ReportEnvelope {
+            record_type: "report".into(),
+            contract_version: 2,
+            request_id: "rq-1".into(),
+            command: "P".into(),
+            outcome: "SUCCESS".into(),
+            reason: String::new(),
+            instruction_id: "instr-1".into(),
+            execution_attempt_id: "att-1".into(),
+            client_order_ref: "co-1".into(),
+            broker_order_id: "b-1".into(),
+            exchange_order_id: "e-1".into(),
+            postback_event_id: "pb-1".into(),
+            order_status: Some("FILLED".into()),
+            report_type: Some("order_filled".into()),
+            fill_shares: "10".into(),
+            average_price: price.into(),
+            fill_price: Some(price.into()),
+            fill_quantity: Some("10".into()),
+            fill_time: "now".into(),
+            instrument_token: "1001".into(),
+            received_ts_ms: NOW,
+            response_fingerprint: String::new(),
+            data: None,
+        };
+        let ctx = EmitterContext {
+            trade_context_id: "tc-1".into(),
+            account_scope_id: "acc-1".into(),
+            instrument_token: 1001,
+            exchange: "CME".into(),
+            symbol: "wti".into(),
+            side: Side::Buy,
+        };
+        (envelope, ctx)
+    }
+
+    /// P3-214: the seam must enforce the model's own rule (`FillEvent::validate` demands
+    /// `price > 0`). Only `< 0` used to be rejected, so a zero-price fill reached the
+    /// projector and diluted the weighted average — the P3-390 failure shape, one layer up.
+    #[test]
+    fn zero_price_fill_is_rejected_at_the_lift_seam() {
+        // First: the red. With the old `< 0` check the same report was APPLIED.
+        let (envelope, ctx) = envelope_with_price("0");
+        let mut emitter = ProjectionEmitter::new();
+        let err = emitter.emit_fill(&envelope, &ctx, 7, NOW).unwrap_err();
+        assert!(
+            err.contains("fill_price_paise must be positive"),
+            "unexpected error: {err}"
+        );
+        // Nothing was projected: a failed lift consumes nothing — no snapshot row, no
+        // minted id, no version consumed. A retry at the correct price applies cleanly.
+        assert_eq!(emitter.driver.size(), 0);
+        assert!(emitter
+            .driver
+            .position_id_for(&PositionKey {
+                account_scope_id: "acc-1".into(),
+                instrument_token: 1001,
+                side: Side::Buy,
+            })
+            .is_none());
+        let (good, good_ctx) = envelope_with_price("1000");
+        let r = emitter.emit_fill(&good, &good_ctx, 7, NOW).unwrap();
+        assert_eq!(r.outcome, FeedOutcome::Applied);
+        assert_eq!(r.snapshot.unwrap().open_quantity, 10);
     }
     // --------------------------------------------------------------------------
     // STATE-* / CORR-004 / CORR-011 — offline validation matrix (pure functions).
@@ -1303,6 +1548,89 @@ mod tests {
     }
 
     // --- P3-390 / P3-392 / P3-394: numeric boundaries, Java-parity ---
+
+    // --- P3-213: accumulation overflow fails closed (the Rust mirror of P3-394) ---
+    //
+    // Each of the three tests below pins one `checked_*` site. Every one was shown
+    // non-vacuous by reverting its own site to the unchecked `+`/`*` and watching exactly
+    // that test fail — a wrapped quantity would otherwise slip past the overshoot guard.
+
+    #[test]
+    fn buy_quantity_overflow_is_a_violation_not_a_wrapped_open() {
+        let mut driver = PositionProjectorDriver::new();
+        let key = PositionKey {
+            account_scope_id: "acc-1".into(),
+            instrument_token: 1001,
+            side: Side::Buy,
+        };
+        // open == i64::MAX at price 1: the weighted average stays exact (1 * i64::MAX fits).
+        let first = driver.feed_on_key(&key, &fill(1, Side::Buy, i64::MAX, 1), NOW);
+        assert_eq!(first.outcome, FeedOutcome::Applied);
+        assert_eq!(first.snapshot.as_ref().unwrap().open_quantity, i64::MAX);
+
+        // One more unit cannot be represented. Wrapping would have stored a large negative
+        // open, which then passes the `next_closed > open` overshoot guard on the next sell.
+        let r = driver.feed_on_key(&key, &fill(2, Side::Buy, 1, 1), NOW);
+        assert_eq!(r.outcome, FeedOutcome::Violation);
+        assert!(
+            r.reason.as_deref().unwrap_or_default().contains("overflow"),
+            "reason was {:?}",
+            r.reason
+        );
+    }
+
+    #[test]
+    fn sell_quantity_overflow_is_a_violation_not_an_overshoot_bypass() {
+        let mut driver = PositionProjectorDriver::new();
+        let key = PositionKey {
+            account_scope_id: "acc-1".into(),
+            instrument_token: 1001,
+            side: Side::Buy,
+        };
+        driver.feed_on_key(&key, &fill(1, Side::Buy, i64::MAX, 1), NOW);
+        // closed == 1, so the next sell cannot be added without overflowing.
+        let opened = driver.feed_on_key(&key, &fill(2, Side::Sell, 1, 1), NOW);
+        assert_eq!(opened.outcome, FeedOutcome::Applied);
+
+        // Wrapped: 1 + i64::MAX -> i64::MIN, which is <= open, so the overshoot guard passed
+        // and a negative closed_quantity was stored.
+        let r = driver.feed_on_key(&key, &fill(3, Side::Sell, i64::MAX, 1), NOW);
+        assert_eq!(r.outcome, FeedOutcome::Violation);
+        assert!(
+            r.reason.as_deref().unwrap_or_default().contains("overflow"),
+            "reason was {:?}",
+            r.reason
+        );
+        // The refused fill left the stored snapshot untouched.
+        assert_eq!(driver.snapshot(POSITION_ID).unwrap().closed_quantity, 1);
+    }
+
+    #[test]
+    fn weighted_average_numerator_sum_overflow_is_a_violation() {
+        const P: i64 = i64::MAX / 2;
+        let mut driver = PositionProjectorDriver::new();
+        let key = PositionKey {
+            account_scope_id: "acc-1".into(),
+            instrument_token: 1001,
+            side: Side::Buy,
+        };
+        // 2 lots at P fit exactly (2 * P == i64::MAX - 1), so the quantity guard is not the
+        // one under test here — the numerator of the average is. `overflow_is_a_violation_not_a_
+        // wrapped_average` pins the single-product overflow (MAX * MAX on a first fill); this
+        // pins the other guard: each product fits, their sum does not.
+        let first = driver.feed_on_key(&key, &fill(1, Side::Buy, 2, P), NOW);
+        assert_eq!(first.outcome, FeedOutcome::Applied);
+        assert_eq!(first.snapshot.as_ref().unwrap().average_entry_paise, P);
+
+        // A second 2-lot buy at the same price needs 2*P + 2*P in the numerator.
+        let r = driver.feed_on_key(&key, &fill(2, Side::Buy, 2, P), NOW);
+        assert_eq!(r.outcome, FeedOutcome::Violation);
+        assert!(
+            r.reason.as_deref().unwrap_or_default().contains("overflow"),
+            "reason was {:?}",
+            r.reason
+        );
+    }
 
     #[test]
     fn zero_price_is_rejected_in_parity_with_java() {

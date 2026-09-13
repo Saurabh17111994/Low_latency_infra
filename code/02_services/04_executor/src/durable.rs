@@ -11,6 +11,11 @@
 //!    `executiongate::{GateStateStore, InMemoryGateStateStore}`.
 //! 2. **Attempt store** — durable `Attempt` (PREPARED→terminal), reuses
 //!    `executiongate::{AttemptStore, InMemoryAttemptStore}`.
+//!    **This is the store that must claim atomically (P3-201):** the `get` →
+//!    `has_duplicate` → `put` sequence in `ExecutionGate::execute` is only safe for a single
+//!    actor, so before two executors can share it the durable implementation needs an atomic
+//!    classify+claim entry point and the trait needs the matching method. The required shape
+//!    and the key-design consequence are stated on the trait's contract.
 //! 3. **Local journal** — append-only event journal (file-backed in production, memory
 //!    in the offline slice), used for engine history/replay.
 //! 4. **Audit sink** — durable audit/OTel feed (Fluss `Execution_Audit` LOG in

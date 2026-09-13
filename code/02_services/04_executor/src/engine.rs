@@ -74,13 +74,29 @@ impl Default for BridgeExecutionClientFactory {
 /// - [`BridgeSelection::Http`] — production `HttpBridgeClient` against the Go bridge
 ///   (`BRIDGE_ENDPOINT` + optional `BRIDGE_AUTH_TOKEN`). Constructing it performs no I/O;
 ///   the connection is established lazily by the run loop's connect path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// NOTE: no `Debug` derive — `Http` carries `BRIDGE_AUTH_TOKEN`. The manual impl below is the
+// only way to format a selection (P3-193); `BridgeExecutionClientFactory`'s derived `Debug`
+// prints it through that impl, so the redaction holds for every wrapper too.
+#[derive(Clone, PartialEq, Eq)]
 pub enum BridgeSelection {
     Fake,
     Http {
         base_url: String,
         auth_token: String,
     },
+}
+
+impl std::fmt::Debug for BridgeSelection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Fake => f.write_str("Fake"),
+            Self::Http { base_url, .. } => f
+                .debug_struct("Http")
+                .field("base_url", base_url)
+                .field("auth_token", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 impl BridgeSelection {
@@ -311,6 +327,47 @@ mod tests {
     use nautilus_common::{cache::Cache, enums::Environment};
     use std::time::Duration;
     use std::{cell::RefCell, rc::Rc};
+
+    /// P3-193: the selection carries `BRIDGE_AUTH_TOKEN`, so its `Debug` must never be able to
+    /// print it — `Debug` is what any wrapper, `unwrap_err`, panic payload, or startup log
+    /// reaches for. A distinctive prefix and suffix let this catch a partial leak (truncation,
+    /// first-N chars), not just the exact full token.
+    #[test]
+    fn bridge_selection_debug_never_prints_the_auth_token() {
+        let token = "tok_live_9f4c2a7e88b1";
+        let sel = BridgeSelection::Http {
+            base_url: "http://bridge:8080".to_string(),
+            auth_token: token.to_string(),
+        };
+        let dbg = format!("{sel:?}");
+        assert!(
+            dbg.contains("http://bridge:8080"),
+            "endpoint should stay readable: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "the redaction should be visible: {dbg}"
+        );
+        assert!(!dbg.contains("tok_live"), "token prefix leaked: {dbg}");
+        assert!(!dbg.contains("9f4c2a7e88b1"), "token suffix leaked: {dbg}");
+        assert!(!dbg.contains(token), "full token leaked: {dbg}");
+
+        // The factory holds the selection; its derived `Debug` must inherit the redaction.
+        let factory = BridgeExecutionClientFactory {
+            selection: BridgeSelection::Http {
+                base_url: "http://bridge:8080".to_string(),
+                auth_token: token.to_string(),
+            },
+        };
+        let fdbg = format!("{factory:?}");
+        assert!(
+            !fdbg.contains(token),
+            "factory Debug leaked the token: {fdbg}"
+        );
+
+        // `Fake` stays a plain, readable name.
+        assert_eq!(format!("{:?}", BridgeSelection::Fake), "Fake");
+    }
 
     #[test]
     fn node_config_defaults_to_live_environment() {
