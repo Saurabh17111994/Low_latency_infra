@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -248,5 +249,68 @@ func TestValidateCommandRejectsUnboundedSymbolAndQuantity(t *testing.T) {
 		if err := validateCommand(command); err != nil {
 			t.Fatalf("%s must stay valid: %v", tc.label, err)
 		}
+	}
+}
+
+// P3-045: Arrow documents `price: "0"` for market orders, so every spelling of
+// zero is the same valid MKT price. The guard accepted only "" and "0" exactly
+// and rejected the rest, which the adapter would then have forwarded verbatim.
+func TestValidateMarketOrderPriceForms(t *testing.T) {
+	var rejected []string
+	for _, price := range []string{"", "0", "00", "0.0", "0.00", "0.000", " 0 "} {
+		command := validPlaceCommand()
+		command.Order.OrderType = "MKT"
+		command.Order.Price = price
+		if err := validateCommand(command); err != nil {
+			rejected = append(rejected, fmt.Sprintf("%q (%v)", price, err))
+		}
+	}
+	if len(rejected) > 0 {
+		t.Fatalf("zero-valued market prices must be valid: %v", rejected)
+	}
+	for _, price := range []string{"1", "0.5", "15050", ".", "0.0.0", "-0", "00.1"} {
+		command := validPlaceCommand()
+		command.Order.OrderType = "MKT"
+		command.Order.Price = price
+		if err := validateCommand(command); err == nil {
+			t.Fatalf("non-zero MKT price %q must be rejected", price)
+		}
+	}
+	// P1-191 decision, deliberately unchanged: a stop-loss market order carries
+	// its trigger in `price` (the request has no separate trigger field), so an
+	// empty or zero trigger stays rejected.
+	for _, price := range []string{"", "0", "0.00"} {
+		command := validPlaceCommand()
+		command.Order.OrderType = "SL-MKT"
+		command.Order.Price = price
+		if err := validateCommand(command); err == nil {
+			t.Fatalf("SL-MKT price %q must stay rejected", price)
+		}
+	}
+}
+
+// P3-045: the adapter canonicalises every accepted zero form so the request bytes
+// do not depend on how the caller spelled zero.
+func TestToArrowMarketOrderCanonicalisesZeroPriceForms(t *testing.T) {
+	for _, price := range []string{"", "0", "00", "0.0", "0.000"} {
+		command := validPlaceCommand()
+		command.Order.OrderType = "MKT"
+		command.Order.Price = price
+		order, err := toArrowOrder(*command.Order, command.ClientOrderRef)
+		if err != nil {
+			t.Fatalf("MKT price %q must be accepted: %v", price, err)
+		}
+		if order.Price != "0" {
+			t.Fatalf("MKT price %q forwarded as %q, want 0", price, order.Price)
+		}
+	}
+	command := validPlaceCommand()
+	command.Order.Price = "15050.25"
+	order, err := toArrowOrder(*command.Order, command.ClientOrderRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.Price != "15050.25" {
+		t.Fatalf("LMT price forwarded as %q, want 15050.25", order.Price)
 	}
 }

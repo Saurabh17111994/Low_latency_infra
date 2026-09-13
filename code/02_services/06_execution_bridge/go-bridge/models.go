@@ -209,8 +209,11 @@ func validateOrderCommand(o OrderCommand) error {
 	if (orderType == "LMT" || orderType == "SL-LMT" || orderType == "SL-MKT") && !priceIsPositive(o.Price) {
 		return fmt.Errorf("price must be a positive number for %s", orderType)
 	}
-	if orderType == "MKT" && strings.TrimSpace(o.Price) != "" && strings.TrimSpace(o.Price) != "0" {
-		return fmt.Errorf("MKT price must be empty or 0")
+	// P3-045: Arrow documents price "0" for market orders, so every zero spelling
+	// ("", "0", "00", "0.0") is the same valid value and is canonicalised by the
+	// adapter; a non-zero market price stays a caller error.
+	if orderType == "MKT" && !priceIsZero(o.Price) {
+		return fmt.Errorf("MKT price must be empty or zero")
 	}
 	switch strings.ToUpper(strings.TrimSpace(o.Product)) {
 	case "I", "C", "M":
@@ -284,3 +287,33 @@ func containsSpace(s string) bool {
 // maxSymbolLength bounds the order symbol so an oversized value fails here
 // instead of at the venue (P3-252).
 const maxSymbolLength = 64
+
+// priceIsZero reports whether the price is an absent or semantically-zero value
+// (optional single dot, digits only, no non-zero digit). Arrow documents
+// `price: "0"` for market orders, so every zero spelling a caller might send is
+// accepted and canonicalised to "0" before the request leaves the bridge
+// (P3-045).
+func priceIsZero(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return true
+	}
+	dots, digits := 0, 0
+	for _, r := range s {
+		switch {
+		case r == '.':
+			dots++
+			if dots > 1 {
+				return false
+			}
+		case r >= '0' && r <= '9':
+			digits++
+			if r != '0' {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return digits > 0
+}

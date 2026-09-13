@@ -163,7 +163,11 @@ func toArrowOrder(o OrderCommand, ref string) (arrow.OrderRequest, error) {
 		transaction = "S"
 	}
 	price := strings.TrimSpace(o.Price)
-	if strings.EqualFold(o.OrderType, "MKT") && price == "" {
+	// P3-045: arrow_broker.md documents "0" for market orders. Every accepted zero
+	// form is canonicalised so the request bytes do not depend on the caller's
+	// spelling of zero; a non-zero price is passed through untouched rather than
+	// silently rewritten.
+	if strings.EqualFold(strings.TrimSpace(o.OrderType), "MKT") && priceIsZero(price) {
 		price = "0"
 	}
 	return arrow.OrderRequest{
