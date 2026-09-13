@@ -15,7 +15,7 @@
 //! swaps the Fluss-backed stores (Workstream D) behind the same traits.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -357,7 +357,9 @@ impl ExecutionGate {
 #[derive(Debug, Default, Clone)]
 pub struct InMemoryAttemptStore {
     by_id: RefCell<HashMap<String, Attempt>>,
-    dup: RefCell<HashMap<(String, String), ()>>,
+    // instruction_id -> request hashes. Nested so both lookups borrow (`&str`), keeping
+    // the hot `has_duplicate` path allocation-free (P3-446).
+    dup: RefCell<HashMap<String, HashSet<String>>>,
     by_instruction: RefCell<HashMap<String, ()>>,
 }
 
@@ -375,10 +377,11 @@ impl AttemptStore for InMemoryAttemptStore {
         self.by_id
             .borrow_mut()
             .insert(attempt.attempt_id.clone(), attempt.clone());
-        self.dup.borrow_mut().insert(
-            (attempt.instruction_id.clone(), attempt.request_hash.clone()),
-            (),
-        );
+        self.dup
+            .borrow_mut()
+            .entry(attempt.instruction_id.clone())
+            .or_default()
+            .insert(attempt.request_hash.clone());
         self.by_instruction
             .borrow_mut()
             .insert(attempt.instruction_id.clone(), ());
@@ -387,7 +390,8 @@ impl AttemptStore for InMemoryAttemptStore {
     fn has_duplicate(&self, instruction_id: &str, request_hash: &str) -> bool {
         self.dup
             .borrow()
-            .contains_key(&(instruction_id.to_string(), request_hash.to_string()))
+            .get(instruction_id)
+            .is_some_and(|hashes| hashes.contains(request_hash))
     }
     fn has_instruction(&self, instruction_id: &str) -> bool {
         self.by_instruction.borrow().contains_key(instruction_id)
@@ -422,6 +426,44 @@ impl GateStateStore for InMemoryGateStateStore {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// P3-446: thread-local allocation counter, so the `has_duplicate` test can prove the
+    /// duplicate lookup allocates nothing without interference from parallel tests. Calling
+    /// threads count their own `alloc` calls; everything delegates to the system allocator.
+    struct CountingAlloc;
+
+    thread_local! {
+        static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    fn allocations() -> usize {
+        ALLOCATIONS.with(Cell::get)
+    }
+
+    // SAFETY: a delegating wrapper around the system allocator; it only counts calls.
+    unsafe impl std::alloc::GlobalAlloc for CountingAlloc {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            ALLOCATIONS.with(|n| n.set(n.get() + 1));
+            unsafe { std::alloc::System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+        unsafe fn realloc(
+            &self,
+            ptr: *mut u8,
+            layout: std::alloc::Layout,
+            new_size: usize,
+        ) -> *mut u8 {
+            unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
+        }
+        unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
+            unsafe { std::alloc::System.alloc_zeroed(layout) }
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING_ALLOC: CountingAlloc = CountingAlloc;
 
     const PARTITION: &str = "p-1";
 
@@ -638,6 +680,43 @@ mod tests {
             Outcome::Duplicate
         );
         assert_eq!(total_handle.get(), 1);
+    }
+
+    // P3-446: the duplicate index is consulted on every fresh `execute` that reaches the
+    // claim path; has_duplicate must borrow the command strings rather than build owned
+    // tuple keys per call.
+    #[test]
+    fn duplicate_lookup_performs_no_heap_allocation() {
+        let store = InMemoryAttemptStore::new();
+        store
+            .put(&Attempt::new(
+                "a-1",
+                "ins-1",
+                "h-1",
+                "E-a-1",
+                AttemptPhase::Prepared,
+            ))
+            .unwrap();
+
+        let before = allocations();
+        let duplicate = store.has_duplicate("ins-1", "h-1");
+        let after = allocations();
+        assert!(duplicate, "the stored pair must still be detected");
+        assert_eq!(
+            after - before,
+            0,
+            "has_duplicate must not allocate per call (P3-446)"
+        );
+
+        let before = allocations();
+        let other = store.has_duplicate("ins-2", "h-1");
+        let after = allocations();
+        assert!(!other, "an unseen instruction must not be a duplicate");
+        assert_eq!(
+            after - before,
+            0,
+            "has_duplicate must not allocate per call (P3-446)"
+        );
     }
 
     #[test]
