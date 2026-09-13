@@ -68,11 +68,21 @@ if grep -q "real_rate=true" "$TMP_LOG"; then bad "G2: false positive on idle log
 rm -f "$TMP_LOG"
 
 echo "=== G4: canonical env block (all required vars present, once) ==="
-for var in ARROW_HFT_URL ARROW_BRIDGE_BIN ARROW_INSTRUMENT_TOKENS INSTRUMENT_MANIFEST_PATH \
+for var in ARROW_HFT_URL ARROW_BRIDGE_BIN INSTRUMENT_MANIFEST_PATH \
            ARROW_MAX_EVENT_AGE_MS FLUSS_BOOTSTRAP RAW_TABLE_NAME TRANSPORT; do
   n=$(grep -c "export $var=\|\b$var=" "$RUN")
   if [ "$n" -ge 1 ]; then ok "G4: $var present in canonical block"; else bad "G4: $var MISSING from run.sh"; fi
 done
+# ARROW_INSTRUMENT_TOKENS is deliberately ABSENT from the load-test env block:
+# G3 (2026-08-31) made Java the single source of truth for the token set (the
+# manifest slice goes to Java, Java hands the bridge the same set via the
+# child-env handoff) and explicitly stopped passing the old TOKENS env var to
+# the ingestion JVM. Pin the absence so a re-typed var cannot silently return.
+if grep -q "ARROW_INSTRUMENT_TOKENS" "$RUN"; then
+  bad "G4: ARROW_INSTRUMENT_TOKENS re-appeared in run.sh — G3 handoff owns the token set"
+else
+  ok "G4: ARROW_INSTRUMENT_TOKENS absent (G3 handoff owns the token set)"
+fi
 
 echo "=== G8: collector feed-liveness guard ==="
 # simulate: a snapshot line with feed_rate=0 must be INVALID; with 20000 VALID
