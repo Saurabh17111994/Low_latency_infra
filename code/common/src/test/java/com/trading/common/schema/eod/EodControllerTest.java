@@ -31,7 +31,7 @@ class EodControllerTest {
     private static final Instant NOW = Instant.parse("2026-08-14T15:00:00Z");
     private static final long NOW_MS = NOW.toEpochMilli();
 
-    private static final String TABLE = "feature_candles_15s";
+    private static final String TABLE = "candle_closed";
 
     private static EodOffloadRecord verifiedDay(LocalDate date) {
         return EodOffloadRecord.initial(date, TABLE, "2", NOW_MS)

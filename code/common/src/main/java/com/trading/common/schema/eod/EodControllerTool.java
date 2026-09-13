@@ -78,9 +78,13 @@ public final class EodControllerTool {
      * + block-delete-unverified guard: Fluss TTL delete is BLOCKED until the
      * iceberg manifest is VERIFIED; otherwise the controller extends retention
      * via the shadow-rewrite drill and fires a critical alert.
+     *
+     * <p>{@code candle_closed} (DDL 33) replaced the retired
+     * {@code feature_candles_15s} in the default scope (multi-timeframe
+     * cutover 2026-09-05) — same 7d TTL and same EOD Iceberg offload contract.
      */
     static final List<String> DEFAULT_TABLES = List.of(
-            "raw_table_1", "feature_candles_15s", "ingestion_quarantine",
+            "raw_table_1", "candle_closed", "ingestion_quarantine",
             "Order_Lifecycle", "suspected_discontinuities", "Postback_Quarantine",
             "Trade_Decisions", "Ranking_Results", "Portfolio_Reservations",
             "Postback_Projection_Ledger");

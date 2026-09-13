@@ -10,15 +10,15 @@
 #   - Leases live in eod_offload_state and PERSIST across process death
 #     (default TTL 30m). A second run/reconcile while a lease is live is
 #     refused with exit 5. => every subtest purges the state table first
-#     (drop+recreate, the same hygiene pattern as the preview purge) and
+#     (drop+recreate, the same hygiene pattern as pipeline_purge_table) and
 #     passes --lease-ttl explicitly.
 #   - `run --offload none` (fail-closed default) leaves the day record
 #     FAILED_RETRYABLE and exits non-zero — never VERIFIED.
 #   - A second mock run for an already-VERIFIED day is a no-op (DAYS=0).
 #   - extend/reconcile on a clean or fully-VERIFIED state exit 0.
-#   - The preview table (60s TTL < 7d safety floor) legitimately triggers
-#     EXTENSION_REQUIRED on extend; EOD protection is really about the
-#     durable candle table (7d TTL) — the test scope is feature_candles_15s.
+#   - EOD protection targets the durable closed-candle table `candle_closed`
+#     (7d TTL, DDL 33). The retired 15s preview table (60s TTL) that used to
+#     exercise the EXTENSION_REQUIRED path is gone (2026-09-05 cutover).
 #
 # Env: EOD_TEST_PHASE=guards|smoke|main|all (default all)
 #      EOD_SMOKE_S (120), EOD_MAIN_S (600), RUN_DATE (today Asia/Kolkata)
@@ -38,7 +38,7 @@ RUN_DATE="${RUN_DATE:-$(TZ=Asia/Kolkata date +%F)}"
 EOD_TEST_PHASE="${EOD_TEST_PHASE:-all}"
 EOD_SMOKE_S="${EOD_SMOKE_S:-120}"
 EOD_MAIN_S="${EOD_MAIN_S:-600}"
-EOD_TABLES="feature_candles_15s"   # 7d TTL durable table (see header note)
+EOD_TABLES="candle_closed"   # 7d TTL durable closed-candle table (see header note)
 
 pass=0; fail=0
 ok()   { printf 'ok    %s\n' "$*" | tee -a "$EVIDENCE"; pass=$((pass+1)); }

@@ -10,9 +10,9 @@ import org.junit.jupiter.api.Test;
 class EodControllerToolTest {
 
     @Test
-    void defaultScopeIsTheDocumentedTen2dTables() {
+    void defaultScopeIsTheDocumentedTenTables() {
         assertThat(EodControllerTool.DEFAULT_TABLES).hasSize(10)
-                .contains("raw_table_1", "feature_candles_15s", "Trade_Decisions");
+                .contains("raw_table_1", "candle_closed", "Trade_Decisions");
     }
 
     @Test
@@ -31,11 +31,11 @@ class EodControllerToolTest {
     @Test
     void parseHonorsTablesAndDurations() {
         EodControllerTool.Options opts = EodControllerTool.Options.parse(new String[] {
-                "run", "--tables", "raw_table_1,feature_candles_15s",
+                "run", "--tables", "raw_table_1,candle_closed",
                 "--safety-floor", "3d", "--extension", "45d",
                 "--lease-ttl", "5m", "--run-date", "2026-08-14", "--offload", "mock"
         });
-        assertThat(opts.tables()).containsExactly("raw_table_1", "feature_candles_15s");
+        assertThat(opts.tables()).containsExactly("raw_table_1", "candle_closed");
         assertThat(opts.safetyFloor()).isEqualTo(Duration.ofDays(3));
         assertThat(opts.extension()).isEqualTo(Duration.ofDays(45));
         assertThat(opts.leaseTtl()).isEqualTo(Duration.ofMinutes(5));
