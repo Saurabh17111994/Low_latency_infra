@@ -244,23 +244,60 @@ impl OrderCommand {
     }
 
     /// Validates the order command against the bridge's constraints.
+    ///
+    /// P3-188: ported field-for-field from the Go bridge's `validateOrderCommand`
+    /// (`06_execution_bridge/go-bridge/models.go`), which gained P3-044/252/253/043/045 after
+    /// this port was written. Both sides must reach the same accept/reject verdict for the same
+    /// envelope, so the rules and their order mirror the Go function.
     pub fn validate(&self) -> Result<(), OrderCommandError> {
-        if self.exchange.trim().is_empty() || self.exchange.eq_ignore_ascii_case("INDEX") {
+        // P3-044: compare the trimmed value — comparing the raw string let " INDEX " pass the
+        // emptiness check and then fail the fold, so an index slipped through as executable.
+        let exchange = self.exchange.trim();
+        if exchange.is_empty() || exchange.eq_ignore_ascii_case("INDEX") {
             return Err(OrderCommandError(
                 "execution exchange must be non-empty and not INDEX".to_string(),
             ));
         }
-        if self.symbol.trim().is_empty() || self.quantity.trim().is_empty() {
+        // P3-253: these fields are upper-cased without trimming downstream and the exchange is
+        // forwarded verbatim, so a padded value must fail here rather than reach the venue.
+        for (name, value) in [
+            ("exchange", &self.exchange),
+            ("order_type", &self.order_type),
+            ("product", &self.product),
+            ("validity", &self.validity),
+        ] {
+            if value.chars().any(char::is_whitespace) {
+                return Err(OrderCommandError(format!(
+                    "{name} must not contain whitespace"
+                )));
+            }
+        }
+        // P3-252: the symbol is forwarded verbatim, so whitespace and unbounded length used to
+        // reach the venue as part of an otherwise well-formed order.
+        if self.symbol.is_empty() || self.symbol.chars().any(char::is_whitespace) {
             return Err(OrderCommandError(
-                "order symbol and quantity are required".to_string(),
+                "order symbol is required and must not contain whitespace".to_string(),
             ));
+        }
+        if self.symbol.len() > MAX_SYMBOL_LENGTH {
+            return Err(OrderCommandError(format!(
+                "order symbol is limited to {MAX_SYMBOL_LENGTH} characters"
+            )));
+        }
+        if self.quantity.trim().is_empty() {
+            return Err(OrderCommandError("order quantity is required".to_string()));
         }
         if !all_digits(&self.quantity) || self.quantity.trim_start_matches('0').is_empty() {
             return Err(OrderCommandError(
                 "quantity must be a positive integer string".to_string(),
             ));
         }
-        match self.transaction_type.to_uppercase().as_str() {
+        // P3-252: a quantity the bridge cannot represent must fail here rather than after a
+        // venue round trip.
+        if self.quantity.parse::<i64>().is_err() {
+            return Err(OrderCommandError("quantity is out of range".to_string()));
+        }
+        match self.transaction_type.trim().to_uppercase().as_str() {
             "B" | "S" | "BUY" | "SELL" => {}
             _ => {
                 return Err(OrderCommandError(
@@ -268,19 +305,39 @@ impl OrderCommand {
                 ))
             }
         }
-        match self.order_type.to_uppercase().as_str() {
+        let order_type = self.order_type.trim().to_uppercase();
+        match order_type.as_str() {
             "LMT" | "MKT" | "SL-LMT" | "SL-MKT" => {}
-            _ => return Err(OrderCommandError("unsupported order_type".to_string())),
+            _ => {
+                return Err(OrderCommandError(format!(
+                    "unsupported order_type {:?}",
+                    self.order_type
+                )))
+            }
         }
-        if self.order_type.eq_ignore_ascii_case("LMT") && self.price.trim().is_empty() {
-            return Err(OrderCommandError("price is required for LMT".to_string()));
+        // P3-043: this bridge cannot express a stop trigger — OrderCommand has no such field and
+        // the adapter never sets the SDK's trigger price, so an SL order reached the venue with
+        // no trigger at all, where it is rejected or interpreted as a different instruction.
+        // Refuse it here until a trigger can be carried on both sides of the protocol.
+        if order_type == "SL-LMT" || order_type == "SL-MKT" {
+            return Err(OrderCommandError(format!(
+                "order_type {order_type} needs a stop trigger this bridge cannot carry"
+            )));
         }
-        if self.order_type.eq_ignore_ascii_case("MKT")
-            && !self.price.trim().is_empty()
-            && self.price.trim() != "0"
-        {
+        // P1-191: LMT prices must be positive numbers — empty, zero, negative or non-numeric
+        // prices fail fast as REJECTED and never reach the broker. Canonical digits with one
+        // optional dot; at least one non-zero digit.
+        if order_type == "LMT" && !price_is_positive(&self.price) {
+            return Err(OrderCommandError(format!(
+                "price must be a positive number for {order_type}"
+            )));
+        }
+        // P3-045: Arrow documents price "0" for market orders, so every zero spelling
+        // ("", "0", "00", "0.0") is the same valid value and is canonicalised downstream; a
+        // non-zero market price stays a caller error.
+        if order_type == "MKT" && !price_is_zero(&self.price) {
             return Err(OrderCommandError(
-                "MKT price must be empty or 0".to_string(),
+                "MKT price must be empty or zero".to_string(),
             ));
         }
         match self.product.to_uppercase().as_str() {
@@ -293,6 +350,66 @@ impl OrderCommand {
         }
         Ok(())
     }
+}
+
+/// Bounds the order symbol so an oversized value fails here instead of at the venue (P3-252),
+/// mirroring the Go bridge's `maxSymbolLength`.
+const MAX_SYMBOL_LENGTH: usize = 64;
+
+/// Mirrors the Go bridge's `priceIsPositive`: canonical digits with at most one dot and at least
+/// one non-zero digit (exponent, sign and separators are refused).
+fn price_is_positive(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let (mut dots, mut digits, mut positive) = (0u32, 0u32, false);
+    for c in s.chars() {
+        match c {
+            '.' => {
+                dots += 1;
+                if dots > 1 {
+                    return false;
+                }
+            }
+            '0'..='9' => {
+                digits += 1;
+                if c != '0' {
+                    positive = true;
+                }
+            }
+            _ => return false,
+        }
+    }
+    digits > 0 && positive
+}
+
+/// Mirrors the Go bridge's `priceIsZero`: an absent or semantically-zero price (optional single
+/// dot, digits only, no non-zero digit). Arrow documents "0" for market orders (P3-045).
+fn price_is_zero(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return true;
+    }
+    let (mut dots, mut digits) = (0u32, 0u32);
+    for c in s.chars() {
+        match c {
+            '.' => {
+                dots += 1;
+                if dots > 1 {
+                    return false;
+                }
+            }
+            '0'..='9' => {
+                digits += 1;
+                if c != '0' {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    digits > 0
 }
 
 fn all_digits(s: &str) -> bool {
