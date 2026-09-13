@@ -276,7 +276,7 @@ func classifySDKError(err error) BrokerResult {
 		default:
 			if status == http.StatusUnauthorized || status == http.StatusForbidden ||
 				status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status >= 500 {
-				return unknownResult(fmt.Errorf("arrow status %d", status))
+				return unknownResult(statusReason{code: status})
 			}
 			return unknownResult(errors.New("ambiguous Arrow response"))
 		}
@@ -305,6 +305,16 @@ func classifySDKError(err error) BrokerResult {
 //
 // The shape is not re-listed here: the classifier's envelope type, error test and
 // message extraction are reused so the two readers cannot drift apart again.
+// statusReason carries an Arrow HTTP status whose outcome is retry-ambiguous, so the
+// bounded reason a result reports can be named from the code itself (P3-237) instead
+// of being re-derived by matching text afterwards. Only codes the classifier resolves
+// to UNKNOWN reach it: 400/409/422 without a usable body, or a status with no
+// envelope at all. UNKNOWN is HALT without retry, so these categories are for the
+// operator — telling a rate limit apart from an outage — not for a retry decision.
+type statusReason struct{ code int }
+
+func (e statusReason) Error() string { return fmt.Sprintf("arrow status %d", e.code) }
+
 func documentedRejectionMessage(body string) string {
 	if strings.TrimSpace(body) == "" {
 		return ""
@@ -350,8 +360,31 @@ func sanitizeReason(err error) string {
 	if err == nil {
 		return "unknown broker outcome"
 	}
+	// P3-237: a status the classifier could not resolve is reported by code, so its
+	// category comes from the code rather than from the sentence around it. Before
+	// this, 408, 429 and every 5xx collapsed into the generic broker_error and an
+	// operator could not tell a rate limit from an outage.
+	var status statusReason
+	if errors.As(err, &status) {
+		switch {
+		case status.code == http.StatusRequestTimeout:
+			return "broker_timeout"
+		case status.code == http.StatusTooManyRequests:
+			return "broker_rate_limited"
+		case status.code >= 500:
+			return "broker_unavailable"
+		case status.code == http.StatusUnauthorized:
+			return "broker_auth_failure"
+		case status.code == http.StatusForbidden:
+			return "broker_forbidden"
+		}
+	}
 	// Never return SDK error bodies verbatim: a body may contain request
 	// metadata or credentials. The protocol carries a bounded category only.
+	// The text matches below remain for errors the SDK raises without a status
+	// envelope (its own transport and auth-layer messages). They cannot mislabel a
+	// rejection: rejectedReason keeps the retry-shaped categories off a REJECTED
+	// result, so text matching cannot reach the retry path (P3-241).
 	message := strings.ToLower(err.Error())
 	switch {
 	case strings.Contains(message, "timeout"):

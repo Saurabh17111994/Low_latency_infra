@@ -213,3 +213,36 @@ func TestClassifySDKErrorAgreesWithClassifierOnRejectionShapes(t *testing.T) {
 			len(mismatched), len(bodies)*len(statuses), mismatched)
 	}
 }
+
+// P3-237: a status the classifier cannot resolve is UNKNOWN, which is HALT without
+// retry, and the reason is what an operator reads to tell those cases apart. They all
+// used to arrive as the generic broker_error, so a rate limit was indistinguishable
+// from an outage. The category is now derived from the code the classifier saw, not
+// from matching text in the sentence around it.
+func TestUnknownStatusesCarryDistinctReasons(t *testing.T) {
+	cases := []struct {
+		status int
+		reason string
+	}{
+		{http.StatusUnauthorized, "broker_auth_failure"},
+		{http.StatusForbidden, "broker_forbidden"},
+		{http.StatusRequestTimeout, "broker_timeout"},
+		{http.StatusTooManyRequests, "broker_rate_limited"},
+		{http.StatusInternalServerError, "broker_unavailable"},
+		{http.StatusServiceUnavailable, "broker_unavailable"},
+	}
+	var wrong []string
+	for _, tc := range cases {
+		result := classifySDKError(fmt.Errorf("request failed with status %d: ", tc.status))
+		if result.Outcome != OutcomeUnknown {
+			wrong = append(wrong, fmt.Sprintf("%d -> %s, want UNKNOWN", tc.status, result.Outcome))
+			continue
+		}
+		if result.Reason != tc.reason {
+			wrong = append(wrong, fmt.Sprintf("%d -> %q, want %q", tc.status, result.Reason, tc.reason))
+		}
+	}
+	if len(wrong) > 0 {
+		t.Fatalf("%d of %d statuses carried the wrong reason: %v", len(wrong), len(cases), wrong)
+	}
+}
