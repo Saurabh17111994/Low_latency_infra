@@ -283,3 +283,65 @@ func TestDisabledSetDuringTheCallStopsReauth(t *testing.T) {
 		t.Fatalf("re-authenticated %d times after the broker was disabled mid-flight, want 0", reauthCalls)
 	}
 }
+
+// P3-261 — a caller that has already gone must not cost a TOTP re-auth and a
+// second venue round trip. The production re-auth closure (main.go) ignores ctx
+// entirely, so this is the only layer that can enforce it.
+func TestExpiredContextSkipsReauthAndRetry(t *testing.T) {
+	calls := 0
+	inner := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		calls++
+		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_auth_failure"}
+	}}
+	reauthCalls := 0
+	rb := NewReauthBroker(inner, func(ctx context.Context) error {
+		reauthCalls++
+		return nil
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // the caller disconnected before the first attempt even returned
+
+	result := rb.Place(ctx, validPlaceCommand())
+	if reauthCalls != 0 {
+		t.Fatalf("re-authenticated %d times for a caller that had already gone, want 0", reauthCalls)
+	}
+	if calls != 1 {
+		t.Fatalf("venue calls=%d want 1 (no retry with a dead context)", calls)
+	}
+	if result.Reason != "broker_auth_failure" {
+		t.Fatalf("result=%+v want the original broker_auth_failure surfaced", result)
+	}
+}
+
+// P3-261 second half — the context can also die while the re-auth itself runs
+// (a TOTP round trip is slow). Retrying then spends a venue call nobody is
+// waiting for, even though the re-auth genuinely happened.
+func TestContextDeadAfterReauthSkipsTheRetry(t *testing.T) {
+	calls := 0
+	inner := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		calls++
+		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_auth_failure"}
+	}}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	reauthCalls := 0
+	rb := NewReauthBroker(inner, func(ctx context.Context) error {
+		reauthCalls++
+		cancel() // the caller gives up while the token is being refreshed
+		return nil
+	})
+
+	result := rb.Place(ctx, validPlaceCommand())
+	if reauthCalls != 1 {
+		t.Fatalf("reauth calls=%d want 1 (the token was still refreshed)", reauthCalls)
+	}
+	if calls != 1 {
+		t.Fatalf("venue calls=%d want 1 (no retry after the caller died)", calls)
+	}
+	if result.Reason != "broker_auth_failure" {
+		t.Fatalf("result=%+v want the original broker_auth_failure surfaced", result)
+	}
+	if rb.IsDisabled() {
+		t.Fatal("a caller that went away must not disable the broker")
+	}
+}

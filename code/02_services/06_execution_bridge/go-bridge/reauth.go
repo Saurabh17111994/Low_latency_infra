@@ -65,6 +65,13 @@ func (r *ReauthBroker) doWithReauth(ctx context.Context, fn func() BrokerResult)
 	if r.IsDisabled() {
 		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
 	}
+	// P3-261: a caller that has already gone must not cost a TOTP re-auth. The
+	// production re-auth closure (main.go) ignores ctx entirely, so this layer is
+	// the only place the deadline can be honoured; the caller's own auth failure
+	// is surfaced unchanged rather than dressed up as a fresh verdict.
+	if ctx.Err() != nil {
+		return result
+	}
 	// First auth failure: attempt exactly one re-auth.
 	if r.reauth == nil {
 		r.markDisabled()
@@ -76,6 +83,11 @@ func (r *ReauthBroker) doWithReauth(ctx context.Context, fn func() BrokerResult)
 	if err := r.reauth(ctx); err != nil {
 		r.markDisabled()
 		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
+	}
+	// P3-261: the re-auth may have taken the caller past its deadline. Retrying
+	// then spends a venue round trip nobody is waiting for.
+	if ctx.Err() != nil {
+		return result
 	}
 	// Re-auth succeeded: retry the command exactly once, no further re-auth.
 	retry := fn()
