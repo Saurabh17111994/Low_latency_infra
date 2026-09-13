@@ -240,7 +240,7 @@ impl ExecutionGate {
                 }
                 // Same instruction but different request hash → contract violation: quarantine, halt, no call.
                 if self.attempts.has_instruction(&cmd.instruction_id) {
-                    self.halt(cmd);
+                    self.halt(cmd)?;
                     return Ok(Outcome::ContractViolation);
                 }
                 // Fresh attempt: persist PREPARED durably before any bridge call.
@@ -260,7 +260,7 @@ impl ExecutionGate {
                 AttemptPhase::Prepared => {}
                 // The bridge may or may not have been reached: halt, never a second call.
                 AttemptPhase::Submitting | AttemptPhase::Unknown => {
-                    self.halt(cmd);
+                    self.halt(cmd)?;
                     return Ok(Outcome::UnknownHalted);
                 }
                 AttemptPhase::Accepted => return Ok(Outcome::Accepted),
@@ -289,7 +289,7 @@ impl ExecutionGate {
                     && g.fence_token == cmd.gate_fence_token
         );
         if !gate_ok {
-            self.halt(cmd);
+            self.halt(cmd)?;
             return Ok(Outcome::Blocked);
         }
 
@@ -332,16 +332,17 @@ impl ExecutionGate {
         })
     }
 
-    fn halt(&self, cmd: &Command) {
+    fn halt(&self, cmd: &Command) -> Result<()> {
         if let Some(g) = self.gates.read(&cmd.execution_partition_id) {
-            let _ = self.gates.write(&GateRow {
+            self.gates.write(&GateRow {
                 partition: g.partition,
                 owner: g.owner,
                 state: GateState::Halted,
                 epoch: g.epoch,
                 fence_token: g.fence_token,
-            });
+            })?;
         }
+        Ok(())
     }
 }
 
@@ -666,6 +667,60 @@ mod tests {
             gates.read(PARTITION).unwrap().state,
             GateState::Halted,
             "gate must be halted for reconciliation on contract violation"
+        );
+    }
+
+    /// Gate store whose durable write always fails — models the store being unreachable
+    /// exactly when the gate must be halted.
+    struct FailingGateWriteStore {
+        row: GateRow,
+    }
+
+    impl GateStateStore for FailingGateWriteStore {
+        fn read(&self, partition: &str) -> Option<GateRow> {
+            (partition == self.row.partition).then(|| self.row.clone())
+        }
+        fn write(&self, _row: &GateRow) -> Result<()> {
+            anyhow::bail!("durable gate write unavailable")
+        }
+    }
+
+    // P3-202: `halt` must not swallow a failed durable write. If the HALT cannot be
+    // persisted, the caller must see the error instead of a clean Blocked/ContractViolation/
+    // UnknownHalted that implies the partition is fenced when it is still ENABLED.
+    #[test]
+    fn durable_halt_write_failure_is_propagated_not_swallowed() {
+        let total_handle = Rc::new(Cell::new(0usize));
+        let counter = Rc::new(CountingBridge::new(Rc::clone(&total_handle), false));
+        let attempts: Rc<dyn AttemptStore> = Rc::new(InMemoryAttemptStore::new());
+        let gates: Rc<dyn GateStateStore> = Rc::new(FailingGateWriteStore { row: enabled_row() });
+        let bridge: Rc<dyn BridgeCaller> = counter.clone();
+
+        let mut g = ExecutionGate::new(attempts.clone(), gates, bridge);
+        assert_eq!(
+            g.execute(&cmd("a-1"), CrashHooks::default()).unwrap(),
+            Outcome::Accepted
+        );
+        assert_eq!(total_handle.get(), 1);
+
+        // Same instruction, changed hash: the contract violation must halt the gate, but
+        // the durable write fails. The failure must surface, not be silently dropped.
+        let mutated = Command {
+            execution_attempt_id: "a-2".into(),
+            request_hash: "h-2-changed".into(),
+            ..cmd("a-2")
+        };
+        let err = g
+            .execute(&mutated, CrashHooks::default())
+            .expect_err("a failed durable halt must surface, not be reported as a clean outcome");
+        assert!(
+            err.to_string().contains("durable gate write unavailable"),
+            "the durable-halt failure must be the propagated error, got: {err}"
+        );
+        assert_eq!(
+            total_handle.get(),
+            1,
+            "the contract-violation path must still never invoke the bridge"
         );
     }
     // --------------------------------------------------------------------------
