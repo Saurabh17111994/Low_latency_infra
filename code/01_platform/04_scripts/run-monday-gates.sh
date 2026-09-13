@@ -269,7 +269,14 @@ fi
 echo "MODE=$MODE" >>"$SUMMARY"
 echo "=== [preflight] environment drift (tree, compose convergence, catalog, stack) ===" | tee -a "$SUMMARY"
 PREFLIGHT_RC=0
-timeout 180 python3 "$SCRIPT_DIR/gate_preflight.py" >"$PREFLIGHT_LOG" 2>&1 || PREFLIGHT_RC=$?
+# A certifying run needs a frozen commit. --steps/--sweep are repair-loop runs:
+# they may run a dirty tree, and the preflight records the working state in the
+# fingerprint instead of blocking them.
+PREFLIGHT_MODE=()
+if [ -n "$STEPS_SET" ] || [ "$SWEEP" = "1" ]; then
+	PREFLIGHT_MODE=( --allow-dirty )
+fi
+timeout 180 python3 "$SCRIPT_DIR/gate_preflight.py" "${PREFLIGHT_MODE[@]}" >"$PREFLIGHT_LOG" 2>&1 || PREFLIGHT_RC=$?
 if [ "$PREFLIGHT_RC" -eq 2 ]; then
 	note_skip preflight
 	echo "SKIP: preflight — prerequisite missing, so drift was NOT verified — see $PREFLIGHT_LOG" | tee -a "$SUMMARY"

@@ -103,5 +103,30 @@ def _flags(argv: list[str]) -> set[tuple[str, str]]:
     return pairs
 
 
+class TreeVerdictTest(unittest.TestCase):
+    """A dirty tree blocks a certificate and only a certificate: the round trip
+    that a repair loop paid when its own uncommitted fix read as drift."""
+
+    def test_certifying_run_refuses_a_dirty_tree(self):
+        drift, line = gate_preflight.tree_verdict("abc1234", [" M a.sh", "?? b.py"], certifying=True)
+        self.assertEqual(len(drift), 1)
+        self.assertIn("dirty", drift[0])
+        self.assertEqual(line, "", "the DRIFT line is printed by the caller, not here")
+
+    def test_repair_loop_warns_but_does_not_drift(self):
+        drift, line = gate_preflight.tree_verdict("abc1234", [" M a.sh"], certifying=False)
+        self.assertEqual(drift, [])
+        self.assertTrue(line.startswith("  WARN"))
+        self.assertIn("1 path(s)", line)
+
+    def test_clean_tree_line_is_unchanged(self):
+        drift, line = gate_preflight.tree_verdict("abc1234", [], certifying=True)
+        self.assertEqual(drift, [])
+        self.assertEqual(line, "  OK    tree clean at abc1234")
+
+    def test_worktree_digest_is_deterministic(self):
+        self.assertEqual(gate_preflight.worktree_digest(), gate_preflight.worktree_digest())
+
+
 if __name__ == "__main__":
     unittest.main()

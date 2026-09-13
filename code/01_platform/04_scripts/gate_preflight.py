@@ -91,6 +91,36 @@ def clean_tree() -> tuple[str, list[str]]:
     return head, [line for line in porcelain.splitlines() if line.strip()]
 
 
+def worktree_digest() -> str:
+    """Fingerprint of the *working* state. A dirty repair loop must not share a
+    stack_generation with the clean commit it started from, so the diff, the
+    status list and the contents of untracked files all go in."""
+    porcelain = run(["git", "-C", PROJECT_ROOT, "status", "--porcelain", "-uall"]).stdout
+    parts = [run(["git", "-C", PROJECT_ROOT, "diff", "--binary", "HEAD"]).stdout, porcelain]
+    for line in porcelain.splitlines():
+        if not line.startswith("??"):
+            continue
+        try:
+            with open(os.path.join(PROJECT_ROOT, line[3:].strip()), "rb") as fh:
+                parts.append(hashlib.sha256(fh.read()).hexdigest())
+        except OSError:
+            parts.append("unreadable")
+    return hashlib.sha256("".join(parts).encode()).hexdigest()[:16]
+
+
+def tree_verdict(head: str, dirty: list[str], certifying: bool) -> tuple[list[str], str]:
+    """Certifying runs need a frozen commit; a repair loop may run a dirty tree as
+    long as the fingerprint says so. Returns (drift items, line to print)."""
+    if not dirty:
+        return [], f"  OK    tree clean at {head}"
+    listed = "; ".join(dirty[:3]) + (" ..." if len(dirty) > 3 else "")
+    if certifying:
+        return ([f"working tree is dirty at {head}: {listed} (only a non-certifying "
+                 "--steps/--sweep run may proceed)"], "")
+    return [], (f"  WARN  tree dirty at {head} ({len(dirty)} path(s)) — non-certifying run, "
+                f"the fingerprint covers the working state: {listed}")
+
+
 def stack_containers() -> list[dict]:
     """`compose ps` for this project under the canonical form (tolerant of both
     the JSON-array and the JSON-lines output compose versions use)."""
@@ -133,7 +163,7 @@ def manifest_tables() -> int | None:
         return None
 
 
-def main() -> int:
+def main(certifying: bool = True) -> int:
     drift: list[str] = []
     prereq: list[str] = []
 
@@ -144,11 +174,11 @@ def main() -> int:
                       "the canonical compose form cannot resolve")
 
     head, dirty = clean_tree()
-    if dirty:
-        drift.append(f"working tree is dirty at {head}: "
-                     f"{'; '.join(dirty[:3])}{' ...' if len(dirty) > 3 else ''}")
-    else:
-        print(f"  OK    tree clean at {head}")
+    dirty_digest = worktree_digest() if dirty else ""
+    tree_drift, tree_line = tree_verdict(head, dirty, certifying)
+    drift.extend(tree_drift)
+    if tree_line:
+        print(tree_line)
 
     recreate: list[str] = []
     if not prereq:
@@ -190,6 +220,8 @@ def main() -> int:
             f"{s}:{(by_service.get(s) or {}).get('ID', '?')}:{(by_service.get(s) or {}).get('Image', '?')}"
             for s in REQUIRED_SERVICES)
         material += f"|catalog={live}|recreate={len(recreate)}|head={head}"
+        if dirty_digest:
+            material += f"|worktree={dirty_digest}"
         print(f"  OK    stack_generation={hashlib.sha256(material.encode()).hexdigest()[:16]} "
               f"(head {head}, catalog {live}, recreations {len(recreate)})")
 
@@ -208,4 +240,5 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # Fail closed: only an explicit --allow-dirty lets a dirty tree through.
+    sys.exit(main(certifying="--allow-dirty" not in sys.argv[1:]))
