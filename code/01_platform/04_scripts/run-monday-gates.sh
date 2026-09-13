@@ -77,6 +77,10 @@ INGESTION_DIR="${INGESTION_DIR:-$CODE_DIR/02_services/01_ingestion}"
 OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/logs/soak/monday-gates-$(date +%Y%m%d-%H%M%S)}"
 # Written by a failing sweep child, read by the driver (must exist in both).
 SWEEP_FAILED_FILE="$OUT_DIR/sweep-failed.txt"
+# Compose paths: constant for the whole run, so they live here and not inside
+# step 2 — `--steps 8` skips step 2 and read these under `set -u`.
+COMPOSE_FILE="$CODE_DIR/01_platform/01_docker/docker-compose.yml"
+COMPOSE_ENV_DIR="$(dirname "$COMPOSE_FILE")"
 
 # Per-run log paths, fixed up front: --steps may skip the step that writes one,
 # and the evidence list and the steps themselves reference them by name.
@@ -354,8 +358,8 @@ echo "PASS: static checks (${#SCRIPTS[@]} scripts bash -n + shellcheck clean)" |
 fi
 if step_active 2; then
 echo "=== [2/16] docker compose config ===" | tee -a "$SUMMARY"
-COMPOSE_FILE="$CODE_DIR/01_platform/01_docker/docker-compose.yml"
-COMPOSE_ENV_DIR="$(dirname "$COMPOSE_FILE")"
+# COMPOSE_FILE / COMPOSE_ENV_DIR come from the shared region above: this step
+# can be skipped by --steps while step 8 still needs them.
 # Same form as `make up` (see the Makefile COMPOSE variable): a bare `-f`
 # resolves a different config, so this step would validate the wrong stack.
 if [ -f "$COMPOSE_FILE" ] && [ -f "$COMPOSE_ENV_DIR/.env" ] && [ -f "$COMPOSE_ENV_DIR/secrets.env" ]; then
