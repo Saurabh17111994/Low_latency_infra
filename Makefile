@@ -377,8 +377,14 @@ eod-controller:
 # runtime carries the classes, the 5 pinned jars, the orchestrator/smoke, the
 # DDL corpus + manifest, and the matrix evidence. One-shot run inside the
 # compose network: docker compose run --rm ddl-apply {validate|apply|smoke|self-test}.
+# The stamps ride on the build command's own environment, exactly as `images`
+# does: without them the image carries no label, the staleness checker falls back
+# to its timestamp proxy, and an unstamped image reads FRESH by clock (CHG-124).
 ddl-image:
-	@$(COMPOSE) build ddl-apply
+	@stamps="$$(python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --print-stamps-env)" || exit 1; \
+	[ -n "$$stamps" ] || { echo "ddl-image: no build stamps computed — refusing to build unstamped images"; exit 1; }; \
+	env $$stamps $(COMPOSE) build ddl-apply && \
+	python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --compose code/01_platform/01_docker/docker-compose.yml --service ddl-apply --require-stamps
 
 # Non-root ownership contract gate (evidence_ownership_check.py): every
 # apply.json the ddl-apply container wrote (owner == DDL_APPLY_UID) must be
