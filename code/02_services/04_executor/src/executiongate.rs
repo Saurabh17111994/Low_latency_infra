@@ -325,6 +325,13 @@ impl ExecutionGate {
             anyhow::bail!("crash at AFTER_BRIDGE");
         }
 
+        // A bridge UNKNOWN leaves the order's fate ambiguous: persist the durable halt
+        // before reporting UnknownHalted, so no other instruction on this partition can
+        // reach the bridge while the attempt awaits reconciliation (P3-018).
+        if terminal == AttemptPhase::Unknown {
+            self.halt(cmd)?;
+        }
+
         Ok(match terminal {
             AttemptPhase::Accepted => Outcome::Accepted,
             AttemptPhase::Rejected => Outcome::Rejected,
@@ -884,6 +891,43 @@ mod tests {
             total_handle.get(),
             1,
             "broker UNKNOWN must never be auto-retried (CRASH-ORDER-009/005)"
+        );
+    }
+
+    // P3-018: a bridge UNKNOWN is ambiguous, so `execute` must persist the durable HALT
+    // before it returns `UnknownHalted` — otherwise the partition stays ENABLED and any
+    // other instruction can still reach the bridge while reconciliation is pending.
+    #[test]
+    fn unknown_outcome_persists_the_durable_halt_before_returning() {
+        let total_handle = Rc::new(Cell::new(0usize));
+        let counter = Rc::new(UnknownBridgeCount::new(Rc::clone(&total_handle)));
+        let attempts: Rc<dyn AttemptStore> = Rc::new(InMemoryAttemptStore::new());
+        let gates = shared_gates();
+        let bridge: Rc<dyn BridgeCaller> = counter.clone();
+
+        let mut g = ExecutionGate::new(attempts.clone(), gates.clone(), bridge.clone());
+        assert_eq!(
+            g.execute(&cmd("a-unk-halt"), CrashHooks::default())
+                .unwrap(),
+            Outcome::UnknownHalted
+        );
+        assert_eq!(total_handle.get(), 1);
+        assert_eq!(
+            gates.read(PARTITION).unwrap().state,
+            GateState::Halted,
+            "a bridge UNKNOWN must persist the durable halt before UnknownHalted is returned"
+        );
+
+        // The ambiguous attempt fences its partition for every other instruction until reconcile.
+        assert_eq!(
+            g.execute(&cmd_uid("a-unk-other", "other"), CrashHooks::default())
+                .unwrap(),
+            Outcome::Blocked
+        );
+        assert_eq!(
+            total_handle.get(),
+            1,
+            "no other instruction may reach the bridge while the ambiguous attempt awaits reconciliation"
         );
     }
 
