@@ -1654,4 +1654,45 @@ mod tests {
             "a replayed approval must not re-enable the gate"
         );
     }
+
+    #[test]
+    fn p3_454_accepted_verification_without_envelope_answers_500() {
+        use crate::gateway_protocol::{sha256_hex, Envelope, Verification};
+        // The panic this guards (accepted but no decoded envelope) is a sibling-crate contract
+        // violation that cannot be produced through `gateway_protocol`, so the boundary guard is
+        // pinned directly: it must answer 500 — never panic the connection task into no response.
+        let missing = Verification {
+            accepted: true,
+            reason: "accepted".into(),
+            envelope: None,
+        };
+        let resp = envelope_or_500(missing).expect_err("a missing envelope must not be Ok");
+        let resp = String::from_utf8_lossy(&resp).to_string();
+        assert!(resp.starts_with("HTTP/1.1 500"), "got: {resp}");
+        assert!(resp.contains("verified envelope missing"), "got: {resp}");
+
+        // The happy path still hands the decoded envelope through untouched.
+        let payload = serde_json::json!({ "x": 1 });
+        let payload_json = serde_json::to_string(&payload).unwrap();
+        let envelope = Envelope {
+            protocol_version: "execution-gateway.v1".into(),
+            message_type: "EXECUTION_INTENT".into(),
+            request_id: "req-454".into(),
+            account_scope_id: "acc-1".into(),
+            execution_partition_id: "part-1".into(),
+            payload_hash: sha256_hex(payload_json.as_bytes()),
+            gate_epoch: 1,
+            fence_token: "fence-1".into(),
+            deadline_epoch_ms: 9_999_999_999_999,
+            payload,
+            authentication: "00".into(),
+        };
+        let ok = envelope_or_500(Verification {
+            accepted: true,
+            reason: "accepted".into(),
+            envelope: Some(envelope),
+        })
+        .expect("a present envelope must pass through");
+        assert_eq!(ok.request_id, "req-454");
+    }
 }
