@@ -28,7 +28,8 @@ use crate::execution::client::deterministic_client_order_ref;
 /// - `order_type`: `LIMIT` | `MARKET` | `SL-LIMIT` | `SL-MARKET`;
 /// - `quantity`: positive integer (number or digit string);
 /// - `limit_price_paise` (integer, paise): required for `LIMIT`/`SL-LIMIT`, forbidden for
-///   `MARKET`/`SL-MARKET` (the bridge protocol rejects a priced market order);
+///   `MARKET`/`SL-MARKET` (a client-supplied price on a market order is a payload mistake,
+///   e.g. a limit order typo'd as market, so it is rejected here rather than dropped);
 /// - `product_type`: `CNC` | `MIS` | `MTM`;
 /// - `time_in_force`: `DAY` | `IOC`.
 pub fn place_envelope_from_payload(payload: &serde_json::Value) -> Result<CommandEnvelope, String> {
@@ -147,6 +148,15 @@ fn order_command_from_payload(payload: &serde_json::Value) -> Result<OrderComman
         .with_order_type(order_type)
         .with_product(product)
         .with_validity(validity);
+    // P3-210: a priced MARKET/SL-MARKET payload is a client mistake — reject it instead of
+    // silently dropping the price (an explicit JSON null counts as absent).
+    if matches!(order_type, OrderType::Mkt | OrderType::SlMkt)
+        && payload
+            .get("limit_price_paise")
+            .is_some_and(|v| !v.is_null())
+    {
+        return Err("limit_price_paise not allowed for MARKET/SL-MARKET".to_string());
+    }
     if matches!(order_type, OrderType::Lmt | OrderType::SlLmt) {
         let price_paise = payload
             .get("limit_price_paise")
@@ -263,15 +273,15 @@ mod tests {
     }
 
     #[test]
-    fn priced_market_payload_never_carries_price_to_bridge() {
+    fn priced_market_payload_is_rejected() {
         let mut p = bieq();
         p["order_type"] = json!("MARKET");
-        // A market payload with a leftover price must map to an UNPRICED MKT order: the
-        // bridge protocol rejects priced market orders, so the mapper drops the price
-        // (fail-closed on the wire, never a half-mapped order).
-        let env = place_envelope_from_payload(&p).expect("market payload maps");
-        let order = env.order.expect("order mapped");
-        assert!(order.price.is_empty(), "market price must be dropped");
+        // A leftover price on a market payload is a payload mistake (e.g. a typo'd limit order):
+        // the mapper rejects it instead of silently dropping the price.
+        let err = place_envelope_from_payload(&p)
+            .expect_err("priced MARKET must not map to an unpriced MKT order");
+        assert!(err.contains("limit_price_paise"), "err: {err}");
+        assert!(err.contains("not allowed"), "err: {err}");
     }
 
     #[test]
@@ -366,5 +376,37 @@ mod tests {
         p.as_object_mut().unwrap().remove("instruction_id");
         let err = amend_envelope_from_payload(&p).unwrap_err();
         assert!(err.contains("instruction_id"), "err: {err}");
+    }
+}
+
+/// P3-210: a payload must not carry a price for a market order. The plain `MARKET` case is
+/// covered by `tests::priced_market_payload_is_rejected` (the rewritten former drop-assert test);
+/// this module pins the `SL-MARKET` case, where the rejection must be the price error and not the
+/// downstream stop-trigger error.
+#[cfg(test)]
+mod p3_210_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn market_payload(order_type: &str, price: serde_json::Value) -> serde_json::Value {
+        json!({
+            "instruction_id": "T9-SB-0001",
+            "symbol": "BI-EQ",
+            "exchange": "NSE",
+            "side": "BUY",
+            "quantity": 1,
+            "order_type": order_type,
+            "limit_price_paise": price,
+            "product_type": "CNC",
+            "time_in_force": "DAY",
+        })
+    }
+
+    #[test]
+    fn rejects_priced_sl_market_payload() {
+        let err = place_envelope_from_payload(&market_payload("SL-MARKET", json!(5050)))
+            .expect_err("priced SL-MARKET must be rejected, not accepted with the price dropped");
+        assert!(err.contains("limit_price_paise"), "err: {err}");
+        assert!(err.contains("not allowed"), "err: {err}");
     }
 }
