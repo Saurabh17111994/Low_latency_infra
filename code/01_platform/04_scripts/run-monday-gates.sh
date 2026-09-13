@@ -85,6 +85,24 @@ gate_fail() {
 	echo "GATE RESULT: FAIL" | tee -a "$SUMMARY"
 	exit 1
 }
+# ── Vacuity guard (P3): "BUILD SUCCESS" with zero tests is not a pass ─────────
+# Steps 12/13/14/16 pin test classes or a module, and they pass
+# -Dsurefire.failIfNoSpecifiedTests=false, so a renamed or moved class makes
+# surefire run nothing while maven still reports BUILD SUCCESS. Assert a
+# non-zero test count instead of trusting the build status alone. (The Rust step
+# has its own passed>0 check, and the pytest step asserts ^OK.)
+tests_run_summary() { # $1 = maven log -> highest "Tests run: N" in it, or empty
+	grep -aoE 'Tests run: [0-9]+' "$1" 2>/dev/null | grep -oE '[0-9]+' | sort -n | tail -1 || true
+}
+require_tests_run() { # $1 = maven log, $2 = step label
+	local count
+	count="$(tests_run_summary "$1")"
+	if [ -z "$count" ] || [ "$count" -lt 1 ]; then
+		echo "FAIL: $2 ran 0 tests — a renamed/moved class is not a pass (surefire.failIfNoSpecifiedTests=false hides it) — see $1" | tee -a "$SUMMARY"
+		gate_fail
+	fi
+}
+
 
 # ── 0. Preflight: environment drift must fail in seconds, not at step 9 or 11 ─
 # Attempts 22/24/26 (2026-09-13) each spent ~10 minutes of gate before hitting
@@ -388,6 +406,7 @@ if ! grep -q "BUILD SUCCESS" "$SCHEMA_PERF_LOG"; then
 	echo "FAIL: schema/perf gate did not report BUILD SUCCESS — see $SCHEMA_PERF_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
+require_tests_run "$SCHEMA_PERF_LOG" "step 12 (schema agreement + perf baseline pins)"
 echo "PASS: SchemaAgreementTest + PerfBaselineTest (certification gates)" | tee -a "$SUMMARY"
 
 # ── 3d. CHG-015 SIGTERM-drain regression explicit (ING-UNIT-023/024) ────────
@@ -413,6 +432,7 @@ if ! grep -q "BUILD SUCCESS" "$SHUTDOWN_LOG"; then
 	echo "FAIL: SIGTERM-drain regression did not report BUILD SUCCESS — see $SHUTDOWN_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
+require_tests_run "$SHUTDOWN_LOG" "step 13 (SIGTERM-drain pins)"
 echo "PASS: SIGTERM-drain regression (ING-UNIT-023 in-process + ING-UNIT-024 real hook)" | tee -a "$SUMMARY"
 
 # ── 4b. Execution gateway module suite (unit + regression) ─────────────────
@@ -431,6 +451,7 @@ if ! grep -q "BUILD SUCCESS" "$GATEWAY_LOG"; then
 	echo "FAIL: execution gateway suite did not report BUILD SUCCESS — see $GATEWAY_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
+require_tests_run "$GATEWAY_LOG" "step 14 (execution gateway suite)"
 echo "PASS: execution gateway suite ($(grep -aoE 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' "$GATEWAY_LOG" | tail -1))" | tee -a "$SUMMARY"
 
 # Cheap suite first: nautilus is ~51 s, compute ~3 min, so a red compute no longer
@@ -466,6 +487,7 @@ if ! grep -q "BUILD SUCCESS" "$COMPUTE_LOG"; then
 	echo "FAIL: compute suite did not report BUILD SUCCESS — see $COMPUTE_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
+require_tests_run "$COMPUTE_LOG" "step 16 (compute suite)"
 echo "PASS: compute suite ($(grep -aoE 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' "$COMPUTE_LOG" | tail -1))" | tee -a "$SUMMARY"
 
 STEPS_RUN="$(grep -cE "^=== \[[0-9]+/$GATE_TOTAL\] " "$SUMMARY" || true)"
