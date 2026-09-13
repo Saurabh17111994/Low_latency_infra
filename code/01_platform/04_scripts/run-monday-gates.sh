@@ -88,6 +88,36 @@ GO_LOG="$OUT_DIR/go-suite.log"
 JAVA_LOG="$OUT_DIR/java-suite.log"
 PREFLIGHT_LOG="$OUT_DIR/preflight.log"
 STATIC_LOG="$OUT_DIR/static-checks.log"
+
+# ── Failure labelling ────────────────────────────────────────────────────────
+# A run that dies before committing to a verdict — a `set -u` abort, a SIGTERM,
+# an unexpected command failure — leaves a truncated SUMMARY that reads like a
+# broken repository. GATE_DECIDED is set wherever this script does commit to one
+# (a step failure, a refusal, the verdict lines), and GATE_RUN_LIVE once the steps
+# are actually being attempted, so the EXIT trap can tell "the harness broke"
+# apart from "a step failed". A successful sweep child exits 0 with no verdict of
+# its own, hence the non-zero exit requirement.
+GATE_DECIDED=0
+GATE_RUN_LIVE=0
+_harness_abort() {
+	rc=$?
+	if [ "$GATE_DECIDED" = 0 ] && [ "$GATE_RUN_LIVE" = 1 ] && [ "$rc" -ne 0 ]; then
+		# Plain redirects, not `tee`: this runs during exit and must not recurse.
+		echo "" >&2
+		echo "HARNESS ABORT — run-monday-gates.sh exited $rc without reaching a step decision." >&2
+		echo "  NOT a repository failure: no step reported FAIL and no verdict was printed." >&2
+		echo "  The last step banner above shows how far the run got; see $SUMMARY" >&2
+		{
+			echo ""
+			echo "HARNESS ABORT — exited $rc without reaching a step decision (no step FAIL, no verdict)."
+			echo "  This is the gate harness, not the repository. Last banner above shows the extent."
+		} >>"$SUMMARY" 2>/dev/null || true
+	fi
+}
+trap '_harness_abort' EXIT
+# A kill must say the same thing instead of leaving a truncated SUMMARY behind.
+trap 'exit 143' TERM
+trap 'exit 130' INT
 PY_LOG="$OUT_DIR/python-tests.log"
 ENTRYPOINT_LOG="$OUT_DIR/entrypoint.log"
 IMAGE_LOG="$OUT_DIR/image-staleness.log"
@@ -190,6 +220,7 @@ echo "run-monday-gates: output → $OUT_DIR"
 echo "run-monday-gates: go timeout=${GO_TIMEOUT_SEC}s, java timeout=${JAVA_TIMEOUT_SEC}s, cargo timeout=${CARGO_TIMEOUT_SEC}s"
 
 gate_fail() {
+	GATE_DECIDED=1
 	# A sweep child records its step and exits 3 so the driver can resume after it;
 	# only the driver prints a verdict for a sweep. Everything else fails here.
 	if [ "${SWEEP:-0}" = "1" ] && [ -n "${GATE_SWEEP_CHILD:-}" ]; then
@@ -302,16 +333,19 @@ if [ "${SWEEP:-0}" = "1" ] && [ -z "${GATE_SWEEP_CHILD:-}" ]; then
 	fi
 	echo "=== SWEEP COMPLETE ===" | tee -a "$SUMMARY"
 	if [ -n "$SWEEP_FAILED" ]; then
+		GATE_DECIDED=1
 		echo "SWEEP RESULT: FAIL (non-certifying) — $SELECTED_COUNT selected step(s), failed: ${SWEEP_FAILED% }" | tee -a "$SUMMARY"
 		echo "Fix the failing step(s) and re-run with --steps <numbers> before the certificate." | tee -a "$SUMMARY"
 		exit 1
 	fi
+	GATE_DECIDED=1
 	echo "SWEEP RESULT: PASS (non-certifying) — $SELECTED_COUNT selected step(s) passed: ${STEPS_SET:-1-16}" | tee -a "$SUMMARY"
 	echo "A sweep green is not a certificate: run this script with no arguments for that." | tee -a "$SUMMARY"
 	exit 0
 fi
 
 
+GATE_RUN_LIVE=1
 if step_active 1; then
 echo "=== [1/16] Static checks (bash -n, shellcheck) ===" | tee -a "$SUMMARY"
 : >"$STATIC_LOG"
@@ -711,9 +745,11 @@ fi
 echo "=== $([ -n "$STEPS_SET" ] && echo 'ALL SELECTED STEPS' || echo 'ALL GATES') PASSED ===" | tee -a "$SUMMARY"
 
 if [ "$GATE_SKIPS" -gt 0 ]; then
+	GATE_DECIDED=1
 	echo "$VERDICT_LABEL: PASS — $((SELECTED_COUNT - GATE_SKIPS))/$SELECTED_COUNT verified, $GATE_SKIPS skipped (steps:$SKIPPED_STEPS)$VERDICT_NOTE" | tee -a "$SUMMARY"
 	echo "Not a clean pass: a skipped step is unverified, not green." | tee -a "$SUMMARY"
 else
+	GATE_DECIDED=1
 	echo "$VERDICT_LABEL: PASS — $SELECTED_COUNT/$SELECTED_COUNT verified, 0 skipped$VERDICT_NOTE" | tee -a "$SUMMARY"
 fi
 echo "Evidence:" | tee -a "$SUMMARY"
