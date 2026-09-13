@@ -5,7 +5,7 @@
 //! sandbox engine yet (`harness.engine_exercised: false`), so the order row is a scripted
 //! scenario vector, not an observed broker transition.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use nautilus_execution_service::t9paper::{
     assert_no_secrets, finalize_evidence, write_json, Run, Scenario, BI,
 };
@@ -65,7 +65,9 @@ fn main() -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&evidence)?);
     println!(
         "T9 paper-trading OK: BI-EQ x1 scenario, gate HALTED, shadow 0 commands, evidence {}",
-        evidence["evidence_hash"].as_str().unwrap()
+        evidence["evidence_hash"]
+            .as_str()
+            .ok_or_else(|| anyhow!("evidence_hash missing from evidence"))?
     );
     Ok(())
 }
