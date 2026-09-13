@@ -1143,7 +1143,7 @@ mod tests {
         {
             let mut g = client.gate.borrow_mut();
             g.add_authorized("saurabh");
-            g.set_epoch(1);
+            g.set_epoch(1).unwrap();
             g.record_approval("saurabh", "h1").unwrap();
             g.enable(1).unwrap();
         }
@@ -1216,7 +1216,7 @@ mod tests {
         client.advance_gate(ExecState::ApprovalPending).unwrap();
         let mut g = client.gate.borrow_mut();
         g.add_authorized("saurabh");
-        g.set_epoch(1);
+        g.set_epoch(1).unwrap();
         g.record_approval("saurabh", "h1").unwrap();
         g.enable(1).unwrap();
     }

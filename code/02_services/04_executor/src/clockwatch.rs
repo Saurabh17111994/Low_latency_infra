@@ -140,7 +140,7 @@ mod tests {
     fn beyond_limit_halts_gate_and_clears_approvals() {
         let mut g = Gate::new();
         g.add_authorized("saurabh");
-        g.set_epoch(5);
+        g.set_epoch(5).unwrap();
         // Drive the sanctioned path to ENABLED.
         g.transition(ExecState::Reconciling).unwrap();
         g.transition(ExecState::ApprovalPending).unwrap();
@@ -189,7 +189,7 @@ mod tests {
     fn drift_halt_recovers_only_via_sanctioned_path() {
         let mut g = Gate::new();
         g.add_authorized("saurabh");
-        g.set_epoch(5);
+        g.set_epoch(5).unwrap();
         let mut m = monitor(-1000); // large negative drift
         m.enforce(&mut g);
         assert_eq!(g.state(), ExecState::Halted);

@@ -166,7 +166,7 @@ mod tests {
         // approval gate (INVARIANT-003).
         let mut g = client.gate().borrow_mut();
         g.add_authorized("saurabh");
-        g.set_epoch(1);
+        g.set_epoch(1).expect("epoch declared");
         g.record_approval("saurabh", "h1")
             .expect("saurabh approval");
         g.enable(1).expect("single-operator enable");

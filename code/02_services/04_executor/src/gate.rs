@@ -11,8 +11,9 @@
 //! a bare transition to `Enabled` is always rejected. The only route to `ENABLED` is
 //! [`Gate::enable`], which requires:
 //!
-//! - a **current gate epoch** declared via [`Gate::set_epoch`] — and the epoch passed to
-//!   `enable` must match it (a stale control-plane thread cannot enable on a mismatched/old term);
+//! - a **current gate epoch** declared via [`Gate::set_epoch`] (positive and non-decreasing; a
+//!   zeroed or regressed term is rejected) — and the epoch passed to `enable` must match it (a
+//!   stale control-plane thread cannot enable on a mismatched/old term);
 //! - **a single authenticated approval** ([`Gate::record_approval`]) from an **authorized**
 //!   operator (DEC-044: the authorized set is `{saurabh}`; provisioned via
 //!   [`Gate::add_authorized`] / [`Gate::new_with_authorized`]), bound to the **evidence hash**
@@ -72,6 +73,30 @@ impl fmt::Display for InvalidTransition {
 }
 
 impl std::error::Error for InvalidTransition {}
+
+/// Why [`Gate::set_epoch`] rejected the declared control-plane epoch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InvalidEpoch {
+    /// The `0` sentinel was supplied; `0` means "no term declared" and can never be declared.
+    Zero,
+    /// The declared epoch regressed below the currently declared one (a stale control-plane
+    /// thread must not be able to roll the term back).
+    Regression { current: u64, declared: u64 },
+}
+
+impl fmt::Display for InvalidEpoch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Zero => write!(f, "the gate epoch must be greater than zero"),
+            Self::Regression { current, declared } => write!(
+                f,
+                "gate epoch regression: current {current}, declared {declared}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for InvalidEpoch {}
 
 /// Why [`Gate::enable`] rejected moving to `Enabled`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,9 +220,24 @@ impl Gate {
         self.epoch
     }
 
-    /// Declares the current control-plane epoch. `enable` requires `epoch > 0`.
-    pub fn set_epoch(&mut self, epoch: u64) {
+    /// Declares the current control-plane epoch (a positive, non-decreasing term id).
+    ///
+    /// Rejects the `0` sentinel and any value below the currently declared epoch
+    /// ([`InvalidEpoch`]), so the API itself upholds the documented epoch invariant: a zeroed
+    /// epoch is never "declared", and a stale control-plane thread cannot roll the term back.
+    /// `enable` requires `epoch > 0` and an exact match with the declared term.
+    pub fn set_epoch(&mut self, epoch: u64) -> Result<(), InvalidEpoch> {
+        if epoch == 0 {
+            return Err(InvalidEpoch::Zero);
+        }
+        if epoch < self.epoch {
+            return Err(InvalidEpoch::Regression {
+                current: self.epoch,
+                declared: epoch,
+            });
+        }
         self.epoch = epoch;
+        Ok(())
     }
 
     /// Provisions an authorized operator identity. Only authorized operators may approve.
@@ -346,7 +386,7 @@ mod tests {
         // Bare transition to ENABLED is now rejected even from APPROVAL_PENDING
         // (INVARIANT-003 structural enforcement).
         assert!(g.transition(ExecState::Enabled).is_err());
-        g.set_epoch(1);
+        g.set_epoch(1).unwrap();
         g.record_approval("saurabh", "h1").unwrap();
         g.enable(1).unwrap();
         assert!(g.can_execute());
@@ -356,7 +396,7 @@ mod tests {
     fn safety_halt_returns_to_halted_from_any_state() {
         let mut g = authorized();
         to_approval_pending(&mut g);
-        g.set_epoch(1);
+        g.set_epoch(1).unwrap();
         g.record_approval("saurabh", "h1").unwrap();
         g.enable(1).unwrap();
         assert!(g.can_execute());
@@ -383,7 +423,7 @@ mod tests {
         assert!(g.transition(ExecState::Reconciling).is_err());
         // Bare ApprovalPending -> Enabled is rejected; enable requires an approval.
         assert!(g.transition(ExecState::Enabled).is_err());
-        g.set_epoch(1);
+        g.set_epoch(1).unwrap();
         g.record_approval("saurabh", "h1").unwrap();
         g.enable(1).unwrap();
         assert!(g.can_execute());
@@ -397,7 +437,7 @@ mod tests {
     fn invariant003_no_enabled_without_approval() {
         let mut g = authorized();
         to_approval_pending(&mut g);
-        g.set_epoch(1);
+        g.set_epoch(1).unwrap();
         // Zero approvals: enable rejected.
         assert_eq!(g.enable(1), Err(EnableError::RequiresApproval));
         // DEC-044: a single authenticated approval by an authorized operator enables.
@@ -410,7 +450,7 @@ mod tests {
     fn control001_unauthorized_operator_cannot_approve_or_enable() {
         let mut g = authorized();
         to_approval_pending(&mut g);
-        g.set_epoch(1);
+        g.set_epoch(1).unwrap();
         // "MALLORY" is not authorized -> rejected, and never enables.
         assert_eq!(
             g.record_approval("MALLORY", "h1"),
@@ -423,7 +463,7 @@ mod tests {
     fn dec044_second_approval_is_not_required_and_not_checked() {
         let mut g = authorized();
         to_approval_pending(&mut g);
-        g.set_epoch(1);
+        g.set_epoch(1).unwrap();
         // A single approval is sufficient to enable (DEC-044).
         g.record_approval("saurabh", "h1").unwrap();
         // A second approval, if supplied, is accepted but not checked: it never
@@ -442,7 +482,7 @@ mod tests {
         // Epoch never declared (0).
         g.record_approval("saurabh", "h1").unwrap();
         assert_eq!(g.enable(1), Err(EnableError::EpochUnset));
-        g.set_epoch(1);
+        g.set_epoch(1).unwrap();
         g.enable(1).unwrap();
         assert!(g.can_execute());
     }
@@ -451,7 +491,7 @@ mod tests {
     fn control002_mismatched_epoch_cannot_enable() {
         let mut g = authorized();
         to_approval_pending(&mut g);
-        g.set_epoch(5); // current control-plane epoch 5
+        g.set_epoch(5).unwrap(); // current control-plane epoch 5
         g.record_approval("saurabh", "h1").unwrap();
         // A stale control-plane thread carrying epoch 4 cannot enable.
         assert_eq!(
@@ -468,10 +508,31 @@ mod tests {
     }
 
     #[test]
+    fn control002_set_epoch_rejects_zero() {
+        let mut g = authorized();
+        assert_eq!(g.set_epoch(0), Err(InvalidEpoch::Zero));
+        assert_eq!(g.epoch(), 0, "0 must never become the declared term");
+    }
+
+    #[test]
+    fn control002_set_epoch_rejects_regressed_epoch() {
+        let mut g = authorized();
+        g.set_epoch(7).unwrap();
+        assert_eq!(
+            g.set_epoch(3),
+            Err(InvalidEpoch::Regression {
+                current: 7,
+                declared: 3
+            })
+        );
+        assert_eq!(g.epoch(), 7, "the declared term must not regress");
+    }
+
+    #[test]
     fn control006_safety_halt_invalidates_approvals_require_reapproval() {
         let mut g = authorized();
         to_approval_pending(&mut g);
-        g.set_epoch(1);
+        g.set_epoch(1).unwrap();
         g.record_approval("saurabh", "h1").unwrap();
         g.enable(1).unwrap();
         assert!(g.can_execute());
@@ -492,7 +553,7 @@ mod tests {
         // declared epoch it cannot enable until the operator approves again.
         let mut g = Gate::new_with_authorized(&["saurabh"]);
         to_approval_pending(&mut g);
-        g.set_epoch(1);
+        g.set_epoch(1).unwrap();
         assert_eq!(g.enable(1), Err(EnableError::RequiresApproval));
         g.record_approval("saurabh", "h1").unwrap();
         g.enable(1).unwrap();
@@ -508,7 +569,7 @@ mod tests {
             Err(ApprovalError::NotApprovalPending(ExecState::Halted))
         );
         to_approval_pending(&mut g);
-        g.set_epoch(1);
+        g.set_epoch(1).unwrap();
         g.record_approval("saurabh", "h1").unwrap();
         // Enable is only honored while APPROVAL_PENDING.
         g.safety_halt();
