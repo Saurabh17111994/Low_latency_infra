@@ -26,7 +26,13 @@ impl Runtime {
     /// Builds the boot surface and asserts the fail-closed invariants:
     /// gate `HALTED` and health does not imply `ENABLED`.
     pub fn init(config: ServiceConfig) -> Result<Self> {
-        // Offline `LiveNode` construction probe (compile + path verification only).
+        // Deliberate boot-time smoke test of the pinned `nautilus-live` wiring (P3-424). It runs
+        // on every boot rather than only under `#[cfg(test)]` because `LiveNodeBuilder::from_config`
+        // and `add_exec_client` report their failures at runtime (both return `Result`); a
+        // compile-time/type check cannot see those, and a test-only check never runs against the
+        // deployed binary. Failing here aborts the boot before the service advertises health, so a
+        // broken constructor or exec-client registration surfaces as a failed start — not at the
+        // first order.
         EngineFactory::verify_construction_path()?;
 
         let gate = Gate::new();
