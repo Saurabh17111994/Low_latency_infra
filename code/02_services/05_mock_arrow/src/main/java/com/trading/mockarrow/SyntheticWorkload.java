@@ -70,7 +70,10 @@ public final class SyntheticWorkload {
             // mean gave the old 30/s cap.
             return 51L + random.nextLong(4L);
         }
-        // 40..60 ms has a 50 ms mean: 20 ticks/s/instrument baseline average.
-        return 40L + random.nextLong(21L);
+        // 55..65 ms has a 60 ms mean: ≈16.7 ticks/s/instrument baseline
+        // average, and 55 ms worst case = 18.2 ticks/s, so no instrument can
+        // exceed the hard 20 ticks/s maximum (MOCK-UNIT-002; requirement:
+        // docs/02_requirements/02-functional/01-ingestion.md).
+        return 55L + random.nextLong(11L);
     }
 }
