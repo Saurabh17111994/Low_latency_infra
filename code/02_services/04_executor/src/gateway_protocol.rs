@@ -53,6 +53,19 @@ fn hmac_hex(secret: &str, value: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// P3-207: compare two hex MACs without leaking *which* digit differs.
+///
+/// The verifier compares a MAC it derived from the shared secret against one the caller
+/// supplied. A plain `==` on the hex strings short-circuits at the first difference, so the
+/// response time tells an attacker how many leading digits are right — a digit-by-digit
+/// forgery oracle on a secret-derived value. Hashing both sides first makes the two compared
+/// values fixed-length and unpredictable, so the position of the first difference carries no
+/// information about the expected MAC. `std` has no constant-time equality and this crate does
+/// not take a dependency for it (P3-207); `sha2` is already here.
+fn mac_matches(expected_hex: &str, presented_hex: &str) -> bool {
+    Sha256::digest(expected_hex.as_bytes()) == Sha256::digest(presented_hex.as_bytes())
+}
+
 /// Canonical-form generations (P3-079). v1 joins fields with a bare newline; v2 length-prefixes
 /// them. Both are accepted — the version field selects the form, so an upgrade never has to be
 /// atomic across the gateway, the executor and the sandbox client. Must match the Java
@@ -293,7 +306,7 @@ pub fn verify(json: &str, secret: &str, expected_version: &str, now_ms: i64) -> 
     };
     let canon = canonical(&e, &payload_json);
     let expected_auth = hmac_hex(secret, &canon);
-    if expected_auth != e.authentication {
+    if !mac_matches(&expected_auth, &e.authentication) {
         return reject("authentication failed");
     }
     let payload_hash = sha256_hex(payload_json.as_bytes());
@@ -345,6 +358,40 @@ mod tests {
         let v = verify(&encoded, "wrong", "execution-gateway.v1", 1_000_000);
         assert!(!v.accepted);
         assert_eq!(v.reason, "authentication failed");
+    }
+
+    #[test]
+    fn p3_207_mac_comparison_accepts_only_the_exact_mac() {
+        // P3-207. The defect was the *timing* of the comparison, which no unit test can
+        // observe: reverting the call site to `==` leaves every test green (verified once,
+        // recorded in the commit body). What is pinned here is the contract the guard must
+        // keep — exact match accepted, everything else rejected at any length — plus the
+        // helper being reachable, so stubbing it to a constant fails this test.
+        let expected = hmac_hex(PARITY_SECRET, "canonical");
+        assert!(mac_matches(&expected, &expected), "exact MAC accepted");
+
+        let first_flipped = format!(
+            "{}{}",
+            if expected.starts_with('0') { '1' } else { '0' },
+            &expected[1..]
+        );
+        assert!(
+            !mac_matches(&expected, &first_flipped),
+            "first digit differs"
+        );
+
+        let last_flipped = format!(
+            "{}{}",
+            &expected[..expected.len() - 1],
+            if expected.ends_with('0') { '1' } else { '0' }
+        );
+        assert!(!mac_matches(&expected, &last_flipped), "last digit differs");
+
+        assert!(!mac_matches(&expected, ""), "empty presented MAC");
+        assert!(
+            !mac_matches(&expected, &expected[..expected.len() - 1]),
+            "one digit short"
+        );
     }
 
     #[test]
