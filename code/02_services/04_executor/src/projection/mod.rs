@@ -472,11 +472,33 @@ pub struct FeedResult {
 
 /// Stateful driver holding the current snapshot per `position_id`; mints ids and projects fills
 /// through [`Projection`]. Port of `PositionProjectorDriver`.
+///
+/// Bounded retention (P3-458): `snapshots` never holds more than
+/// [`MAX_RETAINED_POSITIONS`] rows. On insert past the cap, rows that are closed and are not
+/// the live id of any key are retired — replaced by a watermark (`retired`) recording the last
+/// version seen for that id. A watermark is one small map entry, not a full
+/// `PositionSnapshot`, so the bound on *rows* also bounds memory; `cycles` is deliberately
+/// unbounded because reusing a minted id would let a late fill silently resurrect a retired
+/// cycle (the phantom row P3-166 chased). A redelivered fill for a retired id compares against
+/// the watermark instead of falling into the first-fill path, which has no prior to gate on.
 pub struct PositionProjectorDriver {
     active: HashMap<PositionKey, String>,
     cycles: HashMap<PositionKey, u32>,
     snapshots: HashMap<String, PositionSnapshot>,
+    /// Retired position ids mapped to the last projected version at retirement. A redelivered
+    /// fill at or below the watermark is `Stale`, never a fresh first write; above it is
+    /// `Violation` (a version nobody vouches for). Also capped
+    /// ([`MAX_RETIRED_WATERMARKS`]); the residual is stated on `retire_closed`.
+    retired: HashMap<String, i64>,
 }
+
+/// Maximum retained snapshot rows. Breathing room for the largest instrument/day the slice
+/// targets while keeping the retained set to tens of MB (`PositionSnapshot` is ~260 B plus
+/// small string payloads); raise only with a measured size.
+pub const MAX_RETAINED_POSITIONS: usize = 100_000;
+/// Maximum retired-id watermarks. Orders of magnitude above any single process lifetime's
+/// closed-cycle count; the cap is a backstop against unbounded growth, not a quota.
+pub const MAX_RETIRED_WATERMARKS: usize = 1_000_000;
 
 impl Default for PositionProjectorDriver {
     fn default() -> Self {
@@ -490,11 +512,36 @@ impl PositionProjectorDriver {
             active: HashMap::new(),
             cycles: HashMap::new(),
             snapshots: HashMap::new(),
+            retired: HashMap::new(),
         }
     }
 
     /// Feed a fully resolved fill. Mirrors `PositionProjectorDriver.feed(FillEvent, nowMs)`.
     pub fn feed_fill(&mut self, fill: &FillEvent, now_ms: i64) -> FeedResult {
+        // Retired ids are not in `snapshots` anymore, so without this check the fill below
+        // would take the first-fill path and mint a phantom row for a closed cycle (P3-458).
+        if let Some(&last) = self.retired.get(&fill.position_id) {
+            if fill.source_sequence <= last {
+                return FeedResult {
+                    outcome: FeedOutcome::Stale,
+                    snapshot: None,
+                    position_id: fill.position_id.clone(),
+                    reason: Some(format!(
+                        "fill for retired position {} at or below watermark {}",
+                        fill.position_id, last
+                    )),
+                };
+            }
+            return FeedResult {
+                outcome: FeedOutcome::Violation,
+                snapshot: None,
+                position_id: fill.position_id.clone(),
+                reason: Some(format!(
+                    "fill for retired position {} above watermark {}",
+                    fill.position_id, last
+                )),
+            };
+        }
         let current = self.snapshots.get(&fill.position_id);
         let r = Projection::apply(current, fill, now_ms);
         let position_id = fill.position_id.clone();
@@ -502,6 +549,7 @@ impl PositionProjectorDriver {
             ProjectionOutcome::Applied => {
                 if let Some(s) = r.snapshot.clone() {
                     self.snapshots.insert(position_id.clone(), s);
+                    self.retire_closed();
                 }
                 FeedResult {
                     outcome: FeedOutcome::Applied,
@@ -591,6 +639,62 @@ impl PositionProjectorDriver {
 
     pub fn size(&self) -> usize {
         self.snapshots.len()
+    }
+
+    /// Number of retained watermarks (for the eviction test).
+    #[cfg(test)]
+    pub fn retired_len(&self) -> usize {
+        self.retired.len()
+    }
+
+    /// Drop retired-watermark ids that no longer gate anything, keeping `retired` bounded.
+    /// Called on feed: only when both maps are over budget, and only ids no snapshot cites.
+    fn retire_closed(&mut self) {
+        if self.snapshots.len() <= MAX_RETAINED_POSITIONS {
+            return;
+        }
+        self.retire_closed_below(MAX_RETAINED_POSITIONS);
+    }
+
+    /// Budget-parameterized eviction, split out so tests can drive the real path with a
+    /// 1-row budget instead of feeding 1e5 fills. `#[cfg(test)]` entry point below.
+    fn retire_closed_below(&mut self, budget: usize) {
+        if self.snapshots.len() <= budget {
+            return;
+        }
+        // Only ids that cannot mint a phantom row may leave: closed rows that are not the
+        // live id of any key. Everything else stays regardless of the cap — the bound is on
+        // retained *rows*, not on correctness (open rows must never be dropped).
+        let live: std::collections::HashSet<&String> = self.active.values().collect();
+        let mut evicted: Vec<(String, i64)> = Vec::new();
+        self.snapshots.retain(|id, snap| {
+            if snap.state == PositionState::Closed && !live.contains(id) {
+                evicted.push((id.clone(), snap.source_version));
+                return false;
+            }
+            true
+        });
+        for (id, version) in evicted {
+            self.retired.insert(id, version);
+        }
+        // Residual (stated, not hidden): past `MAX_RETIRED_WATERMARKS` the oldest watermarks
+        // are forgotten on a first-in basis. A duplicate arriving after its watermark is
+        // forgotten takes the first-fill path and mints a new row — accepted because the cap
+        // is ~1e6 closed cycles, far beyond any process lifetime the slice targets, and
+        // because bridge redelivery is bounded to recent events in practice.
+        while self.retired.len() > MAX_RETIRED_WATERMARKS {
+            if let Some(oldest) = self.retired.keys().next().cloned() {
+                self.retired.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Test-only entry point to the real eviction path with an explicit budget.
+    #[cfg(test)]
+    pub fn force_retire_for_test(&mut self, budget: usize) {
+        self.retire_closed_below(budget);
     }
 }
 
@@ -765,6 +869,74 @@ mod tests {
 
         // Differential-parity anchor: closed position, open == closed == 15.
         assert_eq!(s4.position_id, POSITION_ID);
+    }
+
+    /// P3-458 — the watermark, cap-independent. A redelivered fill for a row the driver has
+    /// already retired must stay `Stale` against the watermark instead of taking the
+    /// first-fill path (which has no prior to gate on) and minting a phantom position.
+    #[test]
+    fn redelivery_for_a_retired_cycle_is_stale_not_a_new_row() {
+        let mut driver = PositionProjectorDriver::new();
+        let key = PositionKey {
+            account_scope_id: "acc-closed".into(),
+            instrument_token: 2001,
+            side: Side::Buy,
+        };
+        let mut open = fill(1, Side::Buy, 10, 1000);
+        open.trade_context_id = "tc-closed".into();
+        open.account_scope_id = "acc-closed".into();
+        open.instrument_token = 2001;
+        // Close the cycle (BUY 10, then SELL 10 at sequence 2).
+        let r = driver.feed_on_key(&key, &open, NOW);
+        assert_eq!(r.outcome, FeedOutcome::Applied);
+        let mut close = open.clone();
+        close.source_sequence = 2;
+        close.source_event_id = "evt-2".into();
+        close.side = Side::Sell;
+        let r = driver.feed_on_key(&key, &close, NOW);
+        assert_eq!(r.snapshot.as_ref().unwrap().state, PositionState::Closed);
+        let closed_id = r.position_id.clone();
+        assert_eq!(driver.retired_len(), 0, "nothing retired yet");
+
+        // Remove the key from `active` the way production does when a key stops being
+        // tracked (so the test fails closed the same way). Then push the single closed row
+        // past a 0-row budget through the real `retire_closed` path — the unit under test,
+        // not a simulation of it.
+        driver.active.remove(&key);
+        driver.force_retire_for_test(0);
+        assert!(
+            driver.snapshot(&closed_id).is_none(),
+            "the closed row must be evicted"
+        );
+        assert_eq!(driver.position_id_for(&key), None);
+        assert_eq!(driver.retired_len(), 1);
+
+        // Redeliver the closing fill at the watermarked version: STALE, not a new row.
+        let mut redelivered = open.clone();
+        redelivered.position_id = closed_id.clone();
+        redelivered.source_sequence = 2;
+        redelivered.source_event_id = "evt-2".into();
+        let r = driver.feed_fill(&redelivered, NOW);
+        assert_eq!(r.outcome, FeedOutcome::Stale, "reason was {:?}", r.reason);
+        assert_eq!(driver.size(), 0, "no phantom row may be minted");
+        assert_eq!(
+            driver.retired_len(),
+            1,
+            "the watermark must survive the redelivery"
+        );
+
+        // A newer version than the watermark is a version nobody vouches for: Violation.
+        let mut future = redelivered.clone();
+        future.source_sequence = 9;
+        future.source_event_id = "evt-9".into();
+        let r = driver.feed_fill(&future, NOW);
+        assert_eq!(
+            r.outcome,
+            FeedOutcome::Violation,
+            "reason was {:?}",
+            r.reason
+        );
+        assert_eq!(driver.size(), 0, "no phantom row may be minted");
     }
 
     #[test]
