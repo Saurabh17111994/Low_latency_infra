@@ -246,3 +246,92 @@ func TestUnknownStatusesCarryDistinctReasons(t *testing.T) {
 		t.Fatalf("%d of %d statuses carried the wrong reason: %v", len(wrong), len(cases), wrong)
 	}
 }
+
+// P3-238/P3-239 report that toArrowOrder forwards untrimmed Exchange, Symbol and
+// Quantity to Arrow and that an SL-MKT order carries an empty price. Both premises
+// are already closed by guards this test now pins, so it asserts the behaviour the
+// findings ask for rather than adding trims the request builder does not need:
+//
+//   - validateOrderCommand refuses whitespace in exchange, order_type, product and
+//     validity (P3-253) and in the symbol (P3-252); quantity must satisfy allDigits
+//     (P3-252). None of them can therefore reach the request builder padded.
+//   - SL-MKT is refused outright while the bridge cannot carry a stop trigger
+//     (P3-043, TestValidateCommandRejectsStopLossWithoutTriggerSupport), so it never
+//     reaches the price default at all.
+//
+// The assertion is on the wire, not on the struct: a padded field must either be
+// refused before any request is made, or arrive trimmed.
+func TestPaddedOrderFieldsNeverReachTheBroker(t *testing.T) {
+	var requests []arrow.OrderRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var got arrow.OrderRequest
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		requests = append(requests, got)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"orderNo":"BRK-1"}}`))
+	}))
+	defer server.Close()
+
+	client := arrow.NewClient("app", "secret")
+	client.SetToken("token")
+	client.Config.BaseURL = server.URL
+	broker, err := NewArrowBroker(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	refused := []struct {
+		field string
+		pad   func(*OrderCommand)
+	}{
+		{"exchange", func(o *OrderCommand) { o.Exchange = " NSE " }},
+		{"symbol", func(o *OrderCommand) { o.Symbol = " RELIANCE " }},
+		{"quantity", func(o *OrderCommand) { o.Quantity = " 100 " }},
+		{"product", func(o *OrderCommand) { o.Product = " CNC " }},
+		{"order_type", func(o *OrderCommand) { o.OrderType = " LMT " }},
+		{"validity", func(o *OrderCommand) { o.Validity = " DAY " }},
+	}
+	for _, tc := range refused {
+		command := validPlaceCommand()
+		tc.pad(command.Order)
+		if result := broker.Place(t.Context(), command); result.Outcome != OutcomeRejected {
+			t.Fatalf("padded %s: outcome=%s reason=%s, want REJECTED before any request",
+				tc.field, result.Outcome, result.Reason)
+		}
+	}
+	if len(requests) != 0 {
+		t.Fatalf("%d padded command(s) reached the broker", len(requests))
+	}
+
+	// The two fields the adapter normalises itself are accepted; the property under
+	// test is the value at the broker, not the outcome.
+	for _, tc := range []struct {
+		field string
+		pad   func(*OrderCommand)
+	}{
+		{"transaction_type", func(o *OrderCommand) { o.TransactionType = " BUY " }},
+		{"price", func(o *OrderCommand) { o.Price = " 15050 " }},
+	} {
+		command := validPlaceCommand()
+		tc.pad(command.Order)
+		if result := broker.Place(t.Context(), command); result.Outcome != OutcomeSuccess {
+			t.Fatalf("padded %s: outcome=%s reason=%s, want SUCCESS", tc.field, result.Outcome, result.Reason)
+		}
+	}
+	if len(requests) != 2 {
+		t.Fatalf("%d normalised requests reached the broker, want 2", len(requests))
+	}
+	for _, request := range requests {
+		for _, field := range []struct{ name, value string }{
+			{"exchange", request.Exchange}, {"symbol", request.Symbol}, {"quantity", request.Quantity},
+			{"product", request.Product}, {"order_type", request.OrderType}, {"validity", request.Validity},
+			{"transaction_type", request.TransactionType}, {"price", request.Price}, {"remarks", request.Remarks},
+		} {
+			if field.value != strings.TrimSpace(field.value) {
+				t.Fatalf("field %s reached the broker padded: %q", field.name, field.value)
+			}
+		}
+	}
+}
