@@ -268,14 +268,22 @@ def main(certifying: bool = True) -> int:
             drift.append(f"{service} is {state} (live steps need it up)")
 
     if not prereq:
+        tree_material = f"head={head}"
+        if dirty_digest:
+            tree_material += f"|worktree={dirty_digest}"
+        tree_hash = hashlib.sha256(tree_material.encode()).hexdigest()[:16]
         material = "|".join(
             f"{s}:{(by_service.get(s) or {}).get('ID', '?')}:{(by_service.get(s) or {}).get('Image', '?')}"
             for s in REQUIRED_SERVICES)
         material += f"|catalog={live}|recreate={len(recreate)}|head={head}"
         if dirty_digest:
             material += f"|worktree={dirty_digest}"
-        print(f"  OK    stack_generation={hashlib.sha256(material.encode()).hexdigest()[:16]} "
+        stack_generation = hashlib.sha256(material.encode()).hexdigest()[:16]
+        print(f"  OK    stack_generation={stack_generation} "
               f"(head {head}, catalog {live}, recreations {len(recreate)})")
+        # The fingerprint is the pair the replay memo keys on: this tree, on this
+        # stack. Same pair again -> the second green is a replay, not new evidence.
+        print(f"  OK    fingerprint={tree_hash}:{stack_generation}")
 
     if prereq:
         for reason in prereq:

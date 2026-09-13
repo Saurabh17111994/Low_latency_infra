@@ -49,6 +49,8 @@ set -euo pipefail
 # ── Arguments (see Modes in the header) ──────────────────────────────────────
 STEP_SELECTION=""
 SWEEP=0
+# note = print REPLAYED@<time> and keep going; refuse = --no-replay
+REPLAY_POLICY="note"
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--steps)
@@ -56,10 +58,12 @@ while [ $# -gt 0 ]; do
 			STEP_SELECTION="$2"; shift 2 ;;
 		--steps=*) STEP_SELECTION="${1#--steps=}"; shift ;;
 		--sweep) SWEEP=1; shift ;;
+		--no-replay) REPLAY_POLICY="refuse"; shift ;;
 		--help|-h)
-			echo "usage: $(basename "$0") [--steps LIST] [--sweep]"
+			echo "usage: $(basename "$0") [--steps LIST] [--sweep] [--no-replay]"
 			echo "  --steps 9,11,12-16  run only those steps (subset: never certifies)"
 			echo "  --sweep             run the selection, continue past failures, report all"
+			echo "  --no-replay         refuse to certify a (tree, stack) pair that was already certified"
 			exit 0 ;;
 		*) echo "FATAL: unknown argument '$1' (try --help)" >&2; exit 2 ;;
 	esac
@@ -284,6 +288,39 @@ else
 	MODE="gate (certifying: frozen tree, fail-fast, $GATE_TOTAL/$GATE_TOTAL steps)"
 fi
 echo "MODE=$MODE" >>"$SUMMARY"
+# ── Replay memo: a second green on the same (tree, stack) is not new evidence ──
+# A certificate is evidence about one frozen commit on one stack. Re-running the
+# same gate on the same pair produces a green that looks like new evidence and is
+# not. The preflight prints the pair as `fingerprint=<tree>:<stack>`; these two
+# functions read and write logs/.gate-memo.jsonl (logs/ is untracked, so
+# remembering cannot dirty the tree). A lookup failure is silent — no memo is not
+# a reason to refuse; a refusal is only ever --no-replay against a real record.
+GATE_MEMO_PY="$SCRIPT_DIR/gate_memo.py"
+
+gate_memo_check() { # $1 = fingerprint
+	[ -n "$1" ] || return 0
+	local seen
+	if seen=$(timeout 60 python3 "$GATE_MEMO_PY" --root "$PROJECT_ROOT" lookup "$1" 2>/dev/null); then
+		if [ "$REPLAY_POLICY" = "refuse" ]; then
+			GATE_DECIDED=1
+			echo "$seen" >&2
+			echo "  --no-replay: this tree on this stack has already been certified, so a second green here would not be new evidence." >&2
+			echo "  Nothing was run. Move the tree or the stack, or drop --no-replay to record the replay instead." >&2
+			exit 4
+		fi
+		echo "NOTE: $seen — this is a replay of an earlier certificate, not new evidence; the memo is left unchanged." | tee -a "$SUMMARY"
+	fi
+	return 0
+}
+
+gate_memo_record() { # $1 = fingerprint, $2 = run dir
+	[ -n "$1" ] || return 0
+	if ! timeout 60 python3 "$GATE_MEMO_PY" --root "$PROJECT_ROOT" record "$1" "$2" >/dev/null 2>&1; then
+		echo "HARNESS: could not record the replay memo — this certificate stands, but an identical re-run would not be flagged as a replay." >&2
+	fi
+	return 0
+}
+
 echo "=== [preflight] environment drift (tree, compose convergence, catalog, stack) ===" | tee -a "$SUMMARY"
 PREFLIGHT_RC=0
 # --- one gate at a time on this tree -------------------------------------------
@@ -330,6 +367,9 @@ elif [ "$PREFLIGHT_RC" -ne 0 ]; then
 	gate_fail
 else
 	echo "PASS: preflight ($(grep -o 'stack_generation=[0-9a-f]*' "$PREFLIGHT_LOG" | tail -1 || echo 'stack_generation=n/a'))" | tee -a "$SUMMARY"
+	GATE_FINGERPRINT="$(grep -o 'fingerprint=[0-9a-f:]*' "$PREFLIGHT_LOG" | tail -1 || true)"
+	GATE_FINGERPRINT="${GATE_FINGERPRINT#fingerprint=}"
+	gate_memo_check "$GATE_FINGERPRINT"
 fi
 
 # ── 0. Static checks: bash -n + shellcheck on every script (Phase 8 G4) ─────
@@ -807,6 +847,11 @@ if [ "$GATE_SKIPS" -gt 0 ]; then
 else
 	GATE_DECIDED=1
 	echo "$VERDICT_LABEL: PASS — $SELECTED_COUNT/$SELECTED_COUNT verified, 0 skipped$VERDICT_NOTE" | tee -a "$SUMMARY"
+	# Only a clean certificate is remembered: a scoped/swept run is never a
+	# certificate, and a pass with skips is not a clean one.
+	if [ "$VERDICT_LABEL" = "GATE RESULT" ]; then
+		gate_memo_record "$GATE_FINGERPRINT" "$OUT_DIR"
+	fi
 fi
 echo "Evidence:" | tee -a "$SUMMARY"
 echo "  Static: ${STATIC_LOG:-not-run}" | tee -a "$SUMMARY"
