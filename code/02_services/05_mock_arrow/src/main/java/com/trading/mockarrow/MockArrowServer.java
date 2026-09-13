@@ -87,7 +87,7 @@ public class MockArrowServer {
     public void start() throws IOException {
         serverSocket = new ServerSocket(port);
         running = true;
-        log.info("Mock Arrow WebSocket server started on ws://0.0.0.0:{} ({} instruments, {} ticks/s)",
+        log.info("Mock Arrow TCP server started on tcp://0.0.0.0:{} ({} instruments, {} ticks/s, NDJSON)",
                  port, instruments.size(), tickRatePerSec);
 
         // Accept connections in background

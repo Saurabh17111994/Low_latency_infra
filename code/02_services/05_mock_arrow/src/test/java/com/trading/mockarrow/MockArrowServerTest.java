@@ -5,6 +5,10 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.BufferedReader;
@@ -20,6 +24,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.LongStream;
 import org.junit.jupiter.api.Test;
+import org.slf4j.LoggerFactory;
 
 /**
  * Wire-contract integration test for R-040: the server writes strictly
@@ -95,6 +100,34 @@ class MockArrowServerTest {
         var server = new MockArrowServer(freePort(), 20, List.of(100000L), 7L);
         assertNotNull(poolField.get(server),
                 "P3-030: deliveryPool must be created before start() schedules ticks or accepts clients");
+    }
+
+    /**
+     * P3-468: the startup log must not advertise a WebSocket endpoint — the
+     * wire format is raw TCP NDJSON (R-039/R-040), so the log must say so.
+     */
+    @Test
+    void startupLogAdvertisesTcpNdjsonNotWebSocket() throws Exception {
+        var logger = (Logger) LoggerFactory.getLogger(MockArrowServer.class);
+        var events = new ListAppender<ILoggingEvent>();
+        events.start();
+        logger.addAppender(events);
+        var previousLevel = logger.getLevel();
+        logger.setLevel(Level.INFO);
+        var server = new MockArrowServer(freePort(), 20, List.of(100000L), 7L);
+        try {
+            server.start();
+        } finally {
+            server.stop();
+            logger.detachAppender(events);
+            logger.setLevel(previousLevel);
+        }
+        List<String> startup = events.list.stream()
+                .map(ILoggingEvent::getFormattedMessage).toList();
+        assertTrue(startup.stream().noneMatch(m -> m.contains("ws://") || m.contains("WebSocket")),
+                "P3-468: startup log advertises a WebSocket server: " + startup);
+        assertTrue(startup.stream().anyMatch(m -> m.contains("tcp://") && m.contains("NDJSON")),
+                "P3-468: startup log must advertise the raw-TCP NDJSON endpoint: " + startup);
     }
 
     /** Bounded read: never blocks past the socket read timeout, never hangs the suite. */
