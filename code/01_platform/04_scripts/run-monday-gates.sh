@@ -86,6 +86,28 @@ gate_fail() {
 	exit 1
 }
 
+# ── 0. Preflight: environment drift must fail in seconds, not at step 9 or 11 ─
+# Attempts 22/24/26 (2026-09-13) each spent ~10 minutes of gate before hitting
+# drift this detects in ~2s: a wiped Fluss catalog (surfaced at step 9) and a
+# compose-form divergence that recreated fluss-coordinator mid-run, underneath
+# the step-11 apply. Read-only — it reports drift and prints the remedy
+# (`make up`, the canonical compose form). A missing prerequisite is recorded as
+# a SKIP, never a pass, so the verdict line stays honest about what was verified.
+echo "MODE=gate (certifying: frozen tree, fail-fast, 16/16 steps)" >>"$SUMMARY"
+echo "=== [preflight] environment drift (tree, compose convergence, catalog, stack) ===" | tee -a "$SUMMARY"
+PREFLIGHT_LOG="$OUT_DIR/preflight.log"
+PREFLIGHT_RC=0
+timeout 180 python3 "$SCRIPT_DIR/gate_preflight.py" >"$PREFLIGHT_LOG" 2>&1 || PREFLIGHT_RC=$?
+if [ "$PREFLIGHT_RC" -eq 2 ]; then
+	note_skip preflight
+	echo "SKIP: preflight — prerequisite missing, so drift was NOT verified — see $PREFLIGHT_LOG" | tee -a "$SUMMARY"
+elif [ "$PREFLIGHT_RC" -ne 0 ]; then
+	echo "FAIL: preflight — environment drift, this run cannot certify anything — see $PREFLIGHT_LOG" | tee -a "$SUMMARY"
+	gate_fail
+else
+	echo "PASS: preflight ($(grep -o 'stack_generation=[0-9a-f]*' "$PREFLIGHT_LOG" | tail -1 || echo 'stack_generation=n/a'))" | tee -a "$SUMMARY"
+fi
+
 # ── 0. Static checks: bash -n + shellcheck on every script (Phase 8 G4) ─────
 echo "=== [1/16] Static checks (bash -n, shellcheck) ===" | tee -a "$SUMMARY"
 STATIC_LOG="$OUT_DIR/static-checks.log"
