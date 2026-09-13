@@ -83,6 +83,10 @@ impl ShutdownCoordinator {
     pub fn shutdown(&mut self, client: &mut BridgeExecutionClient) -> Result<ShutdownReport> {
         // 1. Stop ingress + release the fence: the gate returns to HALTED.
         client.safety_halt();
+        // P3-460: the invariant this step must establish is checked, never assumed. An armed gate
+        // means the fence was *not* released - draining queued jobs and reporting a clean
+        // `Complete` there is the fail-open outcome the sequence exists to prevent, so refuse.
+        ensure_fail_closed(client.gate_state())?;
         self.phase = ShutdownPhase::Draining;
 
         // 2. Abandon queued in-flight jobs as unresolved attempts (never sent / never retried).
@@ -110,6 +114,18 @@ impl ShutdownCoordinator {
 #[must_use]
 pub fn verify_restart_safe(gate_state: ExecState) -> bool {
     gate_state == ExecState::Halted
+}
+
+/// Fail-closed precondition of shutdown: a shutting-down service must never still be armed to
+/// execute (P3-185/P3-460). The observed state travels in the error, so an operator sees what the
+/// gate actually was instead of inferring it from a report that claims success.
+fn ensure_fail_closed(gate_state: ExecState) -> Result<()> {
+    if verify_restart_safe(gate_state) {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "shutdown refused: the safety halt did not reach HALTED (observed {gate_state:?})"
+    ))
 }
 
 #[cfg(test)]
@@ -251,6 +267,25 @@ mod tests {
         assert_eq!(
             fresh.position(&order2.instrument_id()),
             rust_decimal::Decimal::from(0)
+        );
+    }
+
+    #[test]
+    fn p3_460_a_gate_that_did_not_halt_is_refused_not_reported_as_complete() {
+        // P3-460: the fail-closed invariant of shutdown step 1 used to be *assumed* - a gate that
+        // stayed armed after `safety_halt()` still produced a clean `Complete` report. Checking it
+        // must surface that state (and name it) instead of silently reporting success.
+        assert!(ensure_fail_closed(ExecState::Halted).is_ok());
+        let err =
+            ensure_fail_closed(ExecState::Enabled).expect_err("an armed gate must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("did not reach HALTED"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("Enabled"),
+            "the observed state must be named: {msg}"
         );
     }
 }
