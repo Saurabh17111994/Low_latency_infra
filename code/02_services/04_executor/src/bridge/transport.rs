@@ -24,6 +24,7 @@ use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
+use sha1::{Digest, Sha1};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
@@ -390,7 +391,7 @@ async fn write_client_ws_frame(stream: &mut TcpStream, opcode: u8, payload: &[u8
 
 /// P3-433: the reply to the upgrade request must be a 101 (see the call site); the
 /// header checks live here so they can be exercised without a socket.
-fn check_upgrade_reply(reply: &[u8]) -> Result<()> {
+fn check_upgrade_reply(reply: &[u8], key: &str) -> Result<()> {
     anyhow::ensure!(
         reply.starts_with(b"HTTP/1.1 101"),
         "websocket upgrade rejected: {}",
@@ -416,24 +417,23 @@ fn check_upgrade_reply(reply: &[u8]) -> Result<()> {
             .any(|t| t.trim().eq_ignore_ascii_case("upgrade")),
         "websocket upgrade rejected: Connection: {connection:?}"
     );
-    // RFC 6455's accept value is `base64(sha1(key + GUID))`. Verifying it needs a SHA-1
-    // implementation this crate does not depend on, so only the shape is checked here: a
-    // value-shaped forgery still passes. Recorded as a residual gap in the wave handoff.
+    // RFC 6455 §4.1: the accept value is `base64(sha1(key + GUID))`, so it is verified against
+    // the key we actually sent — a shape-only check accepted a value-shaped forgery.
     let accept = header("sec-websocket-accept").unwrap_or_default();
+    let expected = accept_key(key);
     anyhow::ensure!(
-        is_base64_sha1_digest(&accept),
-        "websocket upgrade rejected: Sec-WebSocket-Accept: {accept:?}"
+        accept == expected,
+        "websocket upgrade rejected: Sec-WebSocket-Accept: {accept:?}, expected {expected:?}"
     );
     Ok(())
 }
 
-/// A base64-encoded SHA-1 digest: 28 base64 characters with a single `=` pad.
-fn is_base64_sha1_digest(value: &str) -> bool {
-    value.len() == 28
-        && value.ends_with('=')
-        && value
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '='))
+/// The GUID RFC 6455 §4.1 appends to the client's key before hashing.
+const WS_ACCEPT_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// The `Sec-WebSocket-Accept` value this client expects for `key`: `base64(sha1(key + GUID))`.
+fn accept_key(key: &str) -> String {
+    base64_encode(&Sha1::digest(format!("{key}{WS_ACCEPT_GUID}").as_bytes()))
 }
 
 /// Performs the RFC 6455 upgrade on an established TCP stream.
@@ -470,7 +470,7 @@ async fn ws_handshake(
         }
         reply.push(byte[0]);
     }
-    check_upgrade_reply(&reply)
+    check_upgrade_reply(&reply, &key)
 }
 
 /// Runs one lifeline of the `/v1/events` stream, returning when the socket closes, times out,
@@ -676,10 +676,28 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    const WS_101: &[u8] = b"HTTP/1.1 101 Switching Protocols\r\n\
-Upgrade: websocket\r\n\
-Connection: Upgrade\r\n\
-Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+    /// The in-test server's 101 reply. The accept value is computed from the key in the request
+    /// head, because the client verifies it now (P3-433) — a fixed value would be a forgery.
+    fn ws_101_reply(head: &str) -> String {
+        let key = head
+            .split("\r\n")
+            .skip(1)
+            .find_map(|line| {
+                let (k, v) = line.split_once(':')?;
+                k.trim()
+                    .eq_ignore_ascii_case("sec-websocket-key")
+                    .then(|| v.trim())
+            })
+            .expect("the client sends Sec-WebSocket-Key");
+        format!(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Accept: {}\r\n\r\n",
+            accept_key(key)
+        )
+    }
+
+    /// RFC 6455 §1.3's example key, whose expected accept value is the one in `WS_101`.
+    const RFC_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 
     // P3-430: a chunk extension (`;name=value`) is part of the chunk header, not of the size.
     #[test]
@@ -755,37 +773,58 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
         );
     }
 
-    // P3-433: a bare 101 is not an upgrade. (The first assertion is the finding's red; the
-    // rest pin the header handling the fix adds. The accept-key value is checked for shape
-    // only: verifying it needs SHA-1, which this crate does not depend on.)
+    // P3-433: a bare 101 is not an upgrade, and the accept value must be the digest of the key
+    // we sent (RFC 6455 §4.1) — a shape-only check accepted a value-shaped forgery.
     #[test]
     fn upgrade_reply_must_be_a_websocket_upgrade() {
         let bare = b"HTTP/1.1 101 Switching Protocols\r\n\r\n";
         assert!(
-            check_upgrade_reply(bare).is_err(),
+            check_upgrade_reply(bare, RFC_KEY).is_err(),
             "a bare 101 that is not an upgrade must be refused"
         );
         let wrong_upgrade =
             b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n";
         assert!(
-            check_upgrade_reply(wrong_upgrade).is_err(),
+            check_upgrade_reply(wrong_upgrade, RFC_KEY).is_err(),
             "Upgrade: h2c is not a websocket upgrade"
         );
         let bad_key = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: short\r\n\r\n";
         assert!(
-            check_upgrade_reply(bad_key).is_err(),
+            check_upgrade_reply(bad_key, RFC_KEY).is_err(),
             "a malformed accept key must be refused"
         );
         let good = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
         assert!(
-            check_upgrade_reply(good).is_ok(),
+            check_upgrade_reply(good, RFC_KEY).is_ok(),
             "a well-formed upgrade reply must be accepted"
         );
         let lower = b"HTTP/1.1 101 Switching Protocols\r\nupgrade: WebSocket\r\nconnection: keep-alive, Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
         assert!(
-            check_upgrade_reply(lower).is_ok(),
+            check_upgrade_reply(lower, RFC_KEY).is_ok(),
             "header names and tokens are case-insensitive: {:?}",
-            check_upgrade_reply(lower)
+            check_upgrade_reply(lower, RFC_KEY)
+        );
+    }
+
+    // P3-433 (second half): a well-formed accept value that is not the digest of the key we
+    // sent must be refused. The shape-only check accepted this.
+    #[test]
+    fn upgrade_reply_accept_key_must_match_the_request() {
+        let wrong = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: AAAAAAAAAAAAAAAAAAAAAAAAAAA=\r\n\r\n";
+        assert!(
+            check_upgrade_reply(wrong, RFC_KEY).is_err(),
+            "a well-formed accept value that does not match the key we sent must be refused"
+        );
+    }
+
+    // The accept value is bound to the key: RFC 6455's own vector is a forgery against any
+    // other key, so a fixed reply cannot satisfy the check.
+    #[test]
+    fn upgrade_reply_accept_key_is_bound_to_the_key_we_sent() {
+        let rfc_vector = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+        assert!(
+            check_upgrade_reply(rfc_vector, "AAAAAAAAAAAAAAAAAAAAAA==").is_err(),
+            "an accept value computed for another key must be refused"
         );
     }
 
@@ -858,7 +897,10 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
                 !head.contains("\r\nOrigin:"),
                 "CheckOrigin forbids Origin header"
             );
-            stream.write_all(WS_101).await.unwrap();
+            stream
+                .write_all(ws_101_reply(&head).as_bytes())
+                .await
+                .unwrap();
             write_server_frame(
                 &mut stream,
                 OP_TEXT,
@@ -892,8 +934,8 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
         let server = tokio::spawn(async move {
             // Lifeline 1: deliver one fill, then slam the door.
             let (mut s1, _) = listener.accept().await.unwrap();
-            read_http_head(&mut s1).await;
-            s1.write_all(WS_101).await.unwrap();
+            let head2 = read_http_head(&mut s1).await;
+            s1.write_all(ws_101_reply(&head2).as_bytes()).await.unwrap();
             write_server_frame(
                 &mut s1,
                 OP_TEXT,
@@ -909,7 +951,7 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
                 head2.starts_with("GET /v1/events HTTP/1.1"),
                 "reconnect handshake: {head2}"
             );
-            s2.write_all(WS_101).await.unwrap();
+            s2.write_all(ws_101_reply(&head2).as_bytes()).await.unwrap();
             write_server_frame(
                 &mut s2,
                 OP_TEXT,
@@ -952,8 +994,11 @@ Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            read_http_head(&mut stream).await;
-            stream.write_all(WS_101).await.unwrap();
+            let head4 = read_http_head(&mut stream).await;
+            stream
+                .write_all(ws_101_reply(&head4).as_bytes())
+                .await
+                .unwrap();
             // The Go bridge pings every 20 s; the client must answer with a masked pong.
             write_server_frame(&mut stream, OP_PING, b"hb")
                 .await
