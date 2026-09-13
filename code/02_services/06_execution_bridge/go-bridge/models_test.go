@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func validPlaceCommand() CommandEnvelope {
 	return CommandEnvelope{
@@ -90,6 +94,55 @@ func TestValidateCommandRejectsNonPositivePrice(t *testing.T) {
 		command.Order.Price = price
 		if err := validateCommand(command); err != nil {
 			t.Fatalf("LMT price %q must be accepted: %v", price, err)
+		}
+	}
+}
+
+// P3-250: identity requiredness is scoped to the command, and the wire shape is
+// deliberately "empty identity => key absent" on both sides of the contract
+// (the Rust peer declares these fields with skip_serializing_if =
+// "String::is_empty"). This pins both halves so neither drifts.
+func TestCommandEnvelopeIdentityRequirednessAndWireShape(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		drop func(*CommandEnvelope)
+	}{
+		{"instruction_id", func(c *CommandEnvelope) { c.InstructionID = "" }},
+		{"execution_attempt_id", func(c *CommandEnvelope) { c.ExecutionAttemptID = "" }},
+		{"client_order_ref", func(c *CommandEnvelope) { c.ClientOrderRef = "" }},
+	} {
+		command := validPlaceCommand()
+		tc.drop(&command)
+		if err := validateCommand(command); err == nil {
+			t.Fatalf("place without %s must fail validation", tc.name)
+		}
+	}
+
+	cancel := CommandEnvelope{
+		RecordType: RecordCommand, ContractVersion: ProtocolVersion,
+		RequestID: "req-2", Command: CommandCancel, BrokerOrderID: "BRK-1",
+	}
+	if err := validateCommand(cancel); err != nil {
+		t.Fatalf("cancel without platform identities must stay valid: %v", err)
+	}
+
+	emptyJSON, err := json.Marshal(cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"instruction_id", "execution_attempt_id", "client_order_ref"} {
+		if strings.Contains(string(emptyJSON), key) {
+			t.Fatalf("empty %s must stay omitted on the wire: %s", key, emptyJSON)
+		}
+	}
+
+	fullJSON, err := json.Marshal(validPlaceCommand())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"instruction_id", "execution_attempt_id", "client_order_ref"} {
+		if !strings.Contains(string(fullJSON), key) {
+			t.Fatalf("set %s must be present on the wire: %s", key, fullJSON)
 		}
 	}
 }

@@ -32,6 +32,15 @@ const (
 // CommandEnvelope is the private protocol between Nautilus and this bridge.
 // It deliberately carries platform identities separately; broker_order_id is
 // only present after Arrow has assigned it.
+//
+// Identity requiredness is scoped to the command, not to the struct tag
+// (P3-250): place/modify require instruction_id, execution_attempt_id and
+// client_order_ref, cancel/query-order require only broker_order_id, and the
+// reconcile commands require none of them. The empty=>absent wire shape is
+// deliberate and symmetric with the executor's Rust peer, which declares the
+// same fields with skip_serializing_if = "String::is_empty" and re-checks
+// requiredness per command. omitempty therefore describes the wire, not
+// optionality.
 type CommandEnvelope struct {
 	RecordType         string        `json:"record_type"`
 	ContractVersion    int           `json:"contract_version"`
