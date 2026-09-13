@@ -324,10 +324,27 @@ async fn read_ws_frame(stream: &mut TcpStream) -> Result<WsFrame> {
         let mut b = [0u8; 2];
         stream.read_exact(&mut b).await?;
         len = u16::from_be_bytes(b) as u64;
+        // P3-432: RFC 6455 §5.2 requires the minimal length encoding — 126 means "at least 126".
+        anyhow::ensure!(
+            len >= 126,
+            "websocket frame length {len} must not use the 16-bit form"
+        );
     } else if len == 127 {
         let mut b = [0u8; 8];
         stream.read_exact(&mut b).await?;
+        // P3-432: the 64-bit form's top bit is reserved and must be zero, and the form is legal
+        // only for lengths the 16-bit form cannot express. (An absurd length is refused by the
+        // size guard below either way; these checks make the verdict about the encoding rather
+        // than about MAX_WS_FRAME.)
+        anyhow::ensure!(
+            b[0] & 0x80 == 0,
+            "websocket frame length has the reserved bit set"
+        );
         len = u64::from_be_bytes(b);
+        anyhow::ensure!(
+            len > 0xFFFF,
+            "websocket frame length {len} must not use the 64-bit form"
+        );
     }
     anyhow::ensure!(len as usize <= MAX_WS_FRAME, "websocket frame too large");
     let mask = if masked {
