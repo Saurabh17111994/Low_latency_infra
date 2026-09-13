@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/arrow-trade/go-arrow/arrow"
 )
 
 // P5-013: the bridge must resolve its auth token from either a secret FILE
@@ -77,4 +80,26 @@ func TestAuthTokenFromEnv(t *testing.T) {
 			t.Fatalf("expected loud empty-file error, got %v", err)
 		}
 	})
+}
+
+// P3-247 — a mode=live boot posts to the venue, and "Arrow authentication
+// failed" without the cause is unactionable: a DNS failure, bad credentials, a
+// skewed TOTP and a contract change all read identically while the bridge is
+// down and the operator is reproducing blind.
+func TestStartupLoginPreservesTheCause(t *testing.T) {
+	cause := &arrow.AuthError{Stage: "login", Err: errors.New("dial tcp: lookup api.arrow.trade: no such host")}
+	err := startupLogin(func() error { return cause })
+	if err == nil {
+		t.Fatal("a failed login must not report success")
+	}
+	if !strings.Contains(err.Error(), "Arrow authentication failed") {
+		t.Errorf("message %q lost the startup context operators grep for", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Errorf("message %q does not wrap the cause: network, credential, TOTP and parsing failures read identically", err)
+	}
+	var authErr *arrow.AuthError
+	if !errors.As(err, &authErr) || authErr.Stage != "login" {
+		t.Errorf("errors.As on %v did not recover the AuthError stage used for triage", err)
+	}
 }

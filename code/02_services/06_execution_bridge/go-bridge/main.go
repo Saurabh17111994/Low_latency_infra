@@ -99,8 +99,8 @@ func brokerFromEnvironment(mode string) (Broker, *arrow.Client, error) {
 		if user == "" || password == "" || totp == "" {
 			return nil, nil, fmt.Errorf("live mode requires ARROW_USER_ID+PASSWORD+TOTP_KEY (ARROW_TOKEN removed 2026-08-24)")
 		}
-		if err := client.AutoLogin(user, password, totp); err != nil {
-			return nil, nil, fmt.Errorf("Arrow authentication failed")
+		if err := startupLogin(func() error { return client.AutoLogin(user, password, totp) }); err != nil {
+			return nil, nil, err
 		}
 		inner, err := NewArrowBroker(client)
 		if err != nil {
@@ -128,6 +128,18 @@ func NewFakeBrokerWithDisabledResult() *FakeBroker {
 		fake.SetResult(command, disabled)
 	}
 	return fake
+}
+
+// startupLogin is the mode=live boot login. It is a named seam so the cause
+// handling is testable without posting to the venue (P3-247).
+func startupLogin(login func() error) error {
+	if err := login(); err != nil {
+		// stderr here is operator-only, not the sanitized client boundary, so the
+		// SDK's stage (login/totp/redirect/authenticate) and its cause are kept:
+		// during a live outage "failed" alone forces blind reproduction.
+		return fmt.Errorf("Arrow authentication failed: %w", err)
+	}
+	return nil
 }
 
 func envOrDefault(key, fallback string) string {
