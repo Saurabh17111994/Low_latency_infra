@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/arrow-trade/go-arrow/arrow"
 )
@@ -85,5 +87,52 @@ func TestNoCredentialsAppearInSanitizedReasons(t *testing.T) {
 	reason := sanitizeReason(errors.New("token=secret-app-token"))
 	if strings.Contains(reason, "secret-app-token") {
 		t.Fatalf("secret leaked in reason %q", reason)
+	}
+}
+
+// P3-034/P3-037: the caller's context must bound the time the bridge spends
+// waiting on the broker. The pinned SDK takes no context for order calls and its
+// client sets no per-request deadline, so a stalled Arrow endpoint used to hold
+// the command past its own commandTimeout and the HTTP handler blocked for as
+// long as the venue took. The request may still reach the broker after the bridge
+// stops waiting, so the outcome must be UNKNOWN — never SUCCESS, and never a
+// terminal rejection or the auth failure the reauth wrapper retries.
+func TestArrowBrokerStopsWaitingWhenContextExpires(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-release // accept the request and never answer it
+	}))
+	// LIFO: release the stalled handler before Close waits for it, so the
+	// abandoned SDK call cannot outlive the test.
+	defer server.Close()
+	defer close(release)
+
+	client := arrow.NewClient("app", "secret")
+	client.SetToken("token")
+	client.Config.BaseURL = server.URL
+	broker, err := NewArrowBroker(client)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan BrokerResult, 1)
+	go func() { done <- broker.Place(ctx, validPlaceCommand()) }()
+
+	select {
+	case result := <-done:
+		t.Logf("abandoned call: outcome=%s reason=%s", result.Outcome, result.Reason)
+		if result.Outcome != OutcomeUnknown {
+			t.Fatalf("outcome=%s reason=%s, want UNKNOWN", result.Outcome, result.Reason)
+		}
+		if result.Reason == "" {
+			t.Fatalf("abandoned call reported no reason")
+		}
+		if result.Reason == "broker_auth_failure" {
+			t.Fatalf("abandoned call reported as an auth failure, which triggers a re-auth and a re-submit")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Place did not return within 2s of its 50ms context deadline")
 	}
 }

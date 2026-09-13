@@ -47,6 +47,30 @@ func NewArrowBroker(client *arrow.Client) (*ArrowBroker, error) {
 	return &ArrowBroker{client: client}, nil
 }
 
+// errBrokerCallAbandoned marks a broker call the bridge stopped waiting for
+// because the caller's context was done, while the SDK call itself keeps running.
+var errBrokerCallAbandoned = errors.New("broker call abandoned after cancellation")
+
+// brokerCall bounds a blocking SDK call by the caller's context (P3-034, P3-037).
+// The pinned go-arrow client takes no context and sets no per-request deadline, so
+// without this the bridge waits as long as the venue does: a stalled endpoint holds
+// the command past its commandTimeout and the HTTP handler blocks beyond it.
+//
+// The SDK call cannot be cancelled, so the goroutine is left to finish on its own
+// and the channel is buffered so that it can always deliver and exit. The call may
+// therefore still complete at the broker after abandonment, which is why callers
+// must report an abandoned call as UNKNOWN rather than as a rejection.
+func brokerCall(ctx context.Context, call func() error) error {
+	done := make(chan error, 1)
+	go func() { done <- call() }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %v", errBrokerCallAbandoned, ctx.Err())
+	}
+}
+
 func (b *ArrowBroker) Place(ctx context.Context, c CommandEnvelope) BrokerResult {
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
@@ -62,8 +86,12 @@ func (b *ArrowBroker) Place(ctx context.Context, c CommandEnvelope) BrokerResult
 	if err != nil {
 		return rejectedResult(err)
 	}
-	resp, err := b.client.PlaceOrder("regular", req)
-	if err != nil {
+	var resp *arrow.OrderResponse
+	if err := brokerCall(ctx, func() error {
+		var callErr error
+		resp, callErr = b.client.PlaceOrder("regular", req)
+		return callErr
+	}); err != nil {
 		return classifySDKError(err)
 	}
 	if resp == nil || strings.TrimSpace(resp.Data.OrderNo) == "" {
@@ -86,8 +114,12 @@ func (b *ArrowBroker) Modify(ctx context.Context, c CommandEnvelope) BrokerResul
 	if err != nil {
 		return rejectedResult(err)
 	}
-	resp, err := b.client.ModifyOrder("regular", c.BrokerOrderID, req)
-	if err != nil {
+	var resp *arrow.OrderResponse
+	if err := brokerCall(ctx, func() error {
+		var callErr error
+		resp, callErr = b.client.ModifyOrder("regular", c.BrokerOrderID, req)
+		return callErr
+	}); err != nil {
 		return classifySDKError(err)
 	}
 	if resp == nil || strings.TrimSpace(resp.Data.OrderNo) == "" {
@@ -101,7 +133,9 @@ func (b *ArrowBroker) Cancel(ctx context.Context, c CommandEnvelope) BrokerResul
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
-	if err := b.client.CancelOrder("regular", c.BrokerOrderID); err != nil {
+	if err := brokerCall(ctx, func() error {
+		return b.client.CancelOrder("regular", c.BrokerOrderID)
+	}); err != nil {
 		return classifySDKError(err)
 	}
 	return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: c.BrokerOrderID}
@@ -111,8 +145,12 @@ func (b *ArrowBroker) QueryOrder(ctx context.Context, c CommandEnvelope) BrokerR
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
-	resp, err := b.client.GetOrder(c.BrokerOrderID)
-	if err != nil {
+	var resp *arrow.OrderDetailsResponse
+	if err := brokerCall(ctx, func() error {
+		var callErr error
+		resp, callErr = b.client.GetOrder(c.BrokerOrderID)
+		return callErr
+	}); err != nil {
 		return classifySDKError(err)
 	}
 	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess,
@@ -123,8 +161,12 @@ func (b *ArrowBroker) ReconcileOrders(ctx context.Context, _ CommandEnvelope) Br
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
-	data, err := b.client.GetOrderBook()
-	if err != nil {
+	var data []arrow.OrderDetails
+	if err := brokerCall(ctx, func() error {
+		var callErr error
+		data, callErr = b.client.GetOrderBook()
+		return callErr
+	}); err != nil {
 		return classifySDKError(err)
 	}
 	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess, Data: data}, data)
@@ -134,8 +176,12 @@ func (b *ArrowBroker) ReconcileTrades(ctx context.Context, _ CommandEnvelope) Br
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
-	data, err := b.client.GetTradeBook()
-	if err != nil {
+	var data []arrow.Trade
+	if err := brokerCall(ctx, func() error {
+		var callErr error
+		data, callErr = b.client.GetTradeBook()
+		return callErr
+	}); err != nil {
 		return classifySDKError(err)
 	}
 	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess, Data: data}, data)
@@ -145,8 +191,15 @@ func (b *ArrowBroker) ReconcilePositions(ctx context.Context, _ CommandEnvelope)
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
-	data, err := b.client.GetPositions()
-	if err != nil {
+	// Positions is the one endpoint the pinned SDK exposes a context-aware call
+	// for. That variant only checks ctx before the round-trip ("honoring ctx
+	// cancellation before the round-trip", arrow/positions.go), so it still needs
+	// brokerCall to bound the request itself; the pre-flight check is kept for the
+	// cancelled-command case it already answers.
+	var data []arrow.Position
+	if err := brokerCall(ctx, func() error {
+		return b.client.GetPositionsContext(ctx, &data)
+	}); err != nil {
 		return classifySDKError(err)
 	}
 	return withFingerprint(BrokerResult{Outcome: OutcomeSuccess, Data: data}, data)
@@ -183,6 +236,13 @@ var statusErrorPattern = regexp.MustCompile(`request failed with status ([0-9]{3
 func classifySDKError(err error) BrokerResult {
 	if err == nil {
 		return unknownResult(errors.New("missing broker error"))
+	}
+	// P3-034/P3-037: the call was abandoned because the caller's context was done.
+	// The request may still complete at the broker, so the outcome is unknowable and
+	// must not be read as an SDK rejection (which is terminal). Handled before the
+	// status envelope so the classification does not depend on the wrapped cause.
+	if errors.Is(err, errBrokerCallAbandoned) {
+		return unknownResult(err)
 	}
 	message := strings.TrimSpace(err.Error())
 	if matches := statusErrorPattern.FindStringSubmatch(message); len(matches) == 3 {
