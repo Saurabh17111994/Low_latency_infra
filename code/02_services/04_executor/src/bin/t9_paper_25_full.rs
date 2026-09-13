@@ -80,7 +80,7 @@ fn main() -> Result<()> {
             "audit_restore": audit["audit_restore"],
             "deletion_governance": deletion_governance,
             "checks": [
-                "scenario vectors: 10 FILLED / 5 PARTIAL / 5 REJECT / 3 UNKNOWN / 2 DISCONNECT (expectations, not observed)",
+                scenario_distribution_line(filled, partial, rejected, unknown, disconnect),
                 "UNKNOWN reconciliation snapshots are templates (captured: false, expected_delay_ms 220)",
                 "audit offload encrypted with real SHA-256 integrity root; restore verified",
                 "legal hold / 1y deletion governance applied",
@@ -122,6 +122,20 @@ fn main() -> Result<()> {
         evidence["evidence_hash"].as_str().unwrap(),
     );
     Ok(())
+}
+
+/// First `checks` entry: the scripted scenario distribution rendered from the counts actually
+/// present in the bundle, so the prose cannot drift from the vectors it describes (P3-423).
+fn scenario_distribution_line(
+    filled: usize,
+    partial: usize,
+    rejected: usize,
+    unknown: usize,
+    disconnect: usize,
+) -> String {
+    format!(
+        "scenario vectors: {filled} FILLED / {partial} PARTIAL / {rejected} REJECT / {unknown} UNKNOWN / {disconnect} DISCONNECT (expectations, not observed)"
+    )
 }
 
 /// Unix second the evidence run started at, read from the run id (`<kind>-<unix>` — `Run` exposes
@@ -230,5 +244,20 @@ mod p3_183_tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod p3_423_tests {
+    use super::*;
+
+    /// The `checks` prose follows the counts: an off-plan vector set must show up verbatim rather
+    /// than leaving the documented 10/5/5/3/2 literal in place.
+    #[test]
+    fn checks_prose_follows_the_scenario_counts() {
+        assert_eq!(
+            scenario_distribution_line(1, 2, 3, 4, 5),
+            "scenario vectors: 1 FILLED / 2 PARTIAL / 3 REJECT / 4 UNKNOWN / 5 DISCONNECT (expectations, not observed)"
+        );
     }
 }
