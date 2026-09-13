@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"testing"
 )
@@ -28,6 +29,31 @@ func TestSDKErrorClassificationNeverTurnsAmbiguityIntoSuccess(t *testing.T) {
 			}
 		})
 	}
+}
+
+// P3-036/P3-032 (Place) and P3-038/P3-033 (Modify): Broker is exported and is
+// wrapped by ReauthBroker, so a direct caller can hand the method a
+// CommandEnvelope with no Order — the HTTP path's validateCommand does not
+// protect that caller. The method must stay total: a terminal REJECTED result,
+// never a nil dereference that takes the whole bridge process down.
+func TestArrowBrokerNilOrderIsTerminalRejection(t *testing.T) {
+	// No SDK client is needed: the guard must fire before any client use.
+	broker := &ArrowBroker{}
+
+	t.Run("place", func(t *testing.T) {
+		got := broker.Place(context.Background(), CommandEnvelope{ClientOrderRef: "ref-1"})
+		if got.Outcome != OutcomeRejected {
+			t.Fatalf("Place(nil order) outcome=%s want %s (%+v)", got.Outcome, OutcomeRejected, got)
+		}
+	})
+
+	t.Run("cancelled context still wins", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if got := broker.Place(ctx, CommandEnvelope{}); got.Outcome != OutcomeUnknown {
+			t.Fatalf("Place(cancelled ctx, nil order) outcome=%s want %s", got.Outcome, OutcomeUnknown)
+		}
+	})
 }
 
 func TestFakeBrokerRecordsOnlyOneAttempt(t *testing.T) {

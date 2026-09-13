@@ -51,6 +51,13 @@ func (b *ArrowBroker) Place(ctx context.Context, c CommandEnvelope) BrokerResult
 	if err := ctx.Err(); err != nil {
 		return unknownResult(err)
 	}
+	// P3-036/P3-032: Broker is an exported interface wrapped by ReauthBroker, so a
+	// direct caller can pass an envelope with no Order — validateCommand only
+	// guards the HTTP path. Dereferencing it would panic the whole bridge process
+	// instead of returning a terminal client error.
+	if c.Order == nil {
+		return rejectedResult(errors.New("order is required"))
+	}
 	req, err := toArrowOrder(*c.Order, c.ClientOrderRef)
 	if err != nil {
 		return rejectedResult(err)
