@@ -71,7 +71,9 @@ impl DriftMonitor {
     /// Samples once and classifies against the limit (symmetric in sign).
     pub fn check(&mut self) -> DriftStatus {
         match self.source.sample_offset_ms() {
-            Ok(offset) if offset.abs() > self.limit_ms => DriftStatus::Beyond(offset),
+            Ok(offset) if offset.unsigned_abs() > self.limit_ms as u64 => {
+                DriftStatus::Beyond(offset)
+            }
             Ok(offset) => DriftStatus::Within(offset),
             Err(e) => DriftStatus::Unmeasurable(e.to_string()),
         }
@@ -134,6 +136,15 @@ mod tests {
     fn unmeasurable_probe_fails_closed() {
         let mut m = DriftMonitor::new(200, Box::new(FailingSource));
         assert!(matches!(m.check(), DriftStatus::Unmeasurable(_)));
+    }
+
+    #[test]
+    fn p3_190_i64_min_offset_is_beyond_not_panic() {
+        // P3-190: `offset.abs()` overflows on `i64::MIN` (panics in debug,
+        // wraps fail-open to Within in release). `i64::MIN` is so far beyond
+        // any sane limit that it must classify as Beyond - fail closed.
+        let mut m = DriftMonitor::new(200, Box::new(FixedOffsetSource(i64::MIN)));
+        assert_eq!(m.check(), DriftStatus::Beyond(i64::MIN));
     }
 
     #[test]
