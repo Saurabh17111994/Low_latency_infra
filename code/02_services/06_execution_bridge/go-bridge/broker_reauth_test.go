@@ -219,3 +219,67 @@ func TestRejectedOutcomesAreNeverRetried(t *testing.T) {
 		t.Fatalf("outcome=%s reason=%s, want REJECTED", result.Outcome, result.Reason)
 	}
 }
+
+// P3-048/P3-049 — a disabled broker is fail-closed for commands, not just for
+// /healthz. Pre-fix the wrapper ran the inner broker first and consulted the
+// disabled flag only once a re-auth was already due, so a bridge that had
+// already given up kept sending orders to the venue and kept re-authenticating
+// on every later broker_auth_failure.
+func TestDisabledBrokerRefusesCommandsWithoutContactingTheVenue(t *testing.T) {
+	calls := 0
+	inner := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		calls++
+		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_auth_failure"}
+	}}
+	reauthCalls := 0
+	rb := NewReauthBroker(inner, func(ctx context.Context) error {
+		reauthCalls++
+		return errors.New("TOTP refresh failed")
+	})
+
+	// The first command drives the broker into the disabled state.
+	if first := rb.Place(t.Context(), validPlaceCommand()); first.Reason != "broker_disabled" {
+		t.Fatalf("first command after failed re-auth: %+v want broker_disabled", first)
+	}
+	if !rb.IsDisabled() {
+		t.Fatal("broker should be disabled after a failed re-auth")
+	}
+	venueCalls, reauths := calls, reauthCalls
+
+	second := rb.Place(t.Context(), validPlaceCommand())
+	if second.Outcome != OutcomeUnknown || second.Reason != "broker_disabled" {
+		t.Fatalf("disabled bridge served a command: %+v want UNKNOWN/broker_disabled", second)
+	}
+	if calls != venueCalls {
+		t.Fatalf("disabled bridge reached the venue: inner calls %d -> %d", venueCalls, calls)
+	}
+	if reauthCalls != reauths {
+		t.Fatalf("disabled bridge re-authenticated again: reauth calls %d -> %d", reauths, reauthCalls)
+	}
+}
+
+// P3-049 second half — the disabled flag can be set by another request while a
+// command is in flight. The re-auth decision must re-read it, or a bridge that
+// has already given up still spends a TOTP re-auth on the corpse of an old
+// request.
+func TestDisabledSetDuringTheCallStopsReauth(t *testing.T) {
+	reauthCalls := 0
+	var rb *ReauthBroker
+	inner := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		// Another in-flight request gives up while this one waits on the venue.
+		rb.markDisabled()
+		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_auth_failure"}
+	}}
+	rb = NewReauthBroker(inner, func(ctx context.Context) error {
+		reauthCalls++
+		return nil
+	})
+
+	result := rb.Place(t.Context(), validPlaceCommand())
+	if result.Outcome != OutcomeUnknown || result.Reason != "broker_disabled" {
+		t.Fatalf("command admitted while the broker was disabled mid-flight: %+v want UNKNOWN/broker_disabled", result)
+	}
+	if reauthCalls != 0 {
+		t.Fatalf("re-authenticated %d times after the broker was disabled mid-flight, want 0", reauthCalls)
+	}
+}

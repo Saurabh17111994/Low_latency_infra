@@ -8,7 +8,8 @@ import (
 // ReauthBroker wraps a Broker with automatic re-auth on 401/token_expired.
 // On the first broker_auth_failure it calls reauth once, retries the command
 // once, and surfaces the retry result. If reauth itself fails, the broker is
-// marked disabled and subsequent health reflects UP disabled. Never loops.
+// marked disabled, subsequent health reflects UP disabled, and subsequent
+// commands are refused locally without touching the venue. Never loops.
 type ReauthBroker struct {
 	mu          sync.Mutex
 	inner       Broker
@@ -40,6 +41,14 @@ func (r *ReauthBroker) markDisabled() {
 }
 
 func (r *ReauthBroker) doWithReauth(ctx context.Context, fn func() BrokerResult) BrokerResult {
+	// P3-048/P3-049: disabled is fail-closed for commands, not just for /healthz.
+	// A bridge that has given up must not reach the venue and must not spend
+	// another TOTP re-auth. The flag used to be read only by the health handler,
+	// so every later command still called the broker and re-authenticated again
+	// on its next broker_auth_failure.
+	if r.IsDisabled() {
+		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
+	}
 	result := fn()
 	// P3-241: the retry is guarded by the outcome as well as the reason. Reauth
 	// re-submits the command, which is only ever acceptable for an outcome that is
@@ -49,6 +58,12 @@ func (r *ReauthBroker) doWithReauth(ctx context.Context, fn func() BrokerResult)
 	// already refused is worse than any auth failure it would fix.
 	if result.Outcome == OutcomeRejected || result.Reason != "broker_auth_failure" {
 		return result
+	}
+	// P3-049: re-read the flag — another request may have disabled the broker
+	// while this command was in flight, and its re-auth failure is the verdict
+	// this one must obey.
+	if r.IsDisabled() {
+		return BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
 	}
 	// First auth failure: attempt exactly one re-auth.
 	if r.reauth == nil {
