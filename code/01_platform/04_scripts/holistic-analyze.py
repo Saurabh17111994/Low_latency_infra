@@ -490,15 +490,18 @@ def main():
 
     ms = lambda v: v  # clarity: all row timestamps are epoch-ms
 
-    # ---- previews: cadence + freshness (output_ts IS wall clock) ----
-    # NOTE: the preview table is purged (drop+recreate) at RUN START by
-    # pipeline-lib.sh (purge_preview_table) — never here, or the rows this
-    # read needs would be destroyed before reading them.
-    prev_rows = collect_rows("feature_candles_15s_preview", cp, out_dir)
-    if prev_rows is None:
-        failures.append("G6: preview table LOG read failed — latency "
-                        "measurement is unavailable")
-        prev_rows = []
+    # ---- previews: UNAVAILABLE after the 2026-09-05 multi-timeframe cutover ----
+    # The preview table (feature_candles_15s_preview, DDL 30) was retired with the
+    # candle-era schema, and its replacements (candle_live/candle_closed, DDLs
+    # 32/33) carry no landing-timestamp column (candle-era output_ts is gone), so
+    # preview write latency is not observable from the catalog at all. Report the
+    # leg as unavailable instead of reading a dropped table — the dead read also
+    # burned the reader's missing-table timeout on every drill run.
+    prev_rows = []
+    failures.append(
+        "G6: preview latency leg UNAVAILABLE — feature_candles_15s_preview retired "
+        "(DDL 30, 2026-09-05) and candle_live/candle_closed carry no landing "
+        "timestamp (output_ts), so preview write latency cannot be measured")
     # Row (v2): (token,NSE,symbol,window_start,window_end,o,h,l,c,vol,tick_count,
     #            is_preview,output_ts,last_event_ts,ver)
     prev_re = re.compile(
@@ -544,18 +547,18 @@ def main():
     print(f"- preview freshness at run end (staleness): p50={fmt_ms(pct(freshness,50))} "
           f"p95={fmt_ms(pct(freshness,95))} p99={fmt_ms(pct(freshness,99))} (n={len(freshness)})")
 
-    # ---- Final candle path (2026-08-30): window-close → committed latency ----
-    # feature_candles_15s (v2) has output_ts + window_end but no
-    # last_event_ts, so the measurable latency is output_ts - window_end:
-    # how long after a 15s window closed did its FINAL row land in the
-    # table. (For context: the last tick of the window typically arrives
-    # just before window_end, so broker→final-candle ≈ this value + tick
-    # lead-in. This is the broker→FEATURE-TABLE headline number.)
-    final_rows = collect_rows("feature_candles_15s", cp, out_dir)
-    if final_rows is None:
-        failures.append("G7c: final candle table LOG read failed — parity "
-                        "measurement is unavailable")
-        final_rows = []
+    # ---- Final candle path: UNAVAILABLE for the same reason as G6 ----
+    # The candle-era feature_candles_15s (DDL 03) that carried output_ts is gone;
+    # candle_closed (DDL 33) has window_end but no write timestamp, so
+    # "window-close → committed" latency cannot be computed from the catalog.
+    # Keep the leg fail-closed (never invent a number) instead of reading a
+    # dropped table. Reviving it needs a landing-timestamp column or a redefined
+    # metric — its own change, falsified on a live drill.
+    final_rows = []
+    failures.append(
+        "G7c: final-candle parity leg UNAVAILABLE — feature_candles_15s retired "
+        "(DDL 03, 2026-09-05); candle_closed carries no write timestamp, so the "
+        "window-close → committed latency is not observable")
     final_rows = list(dict.fromkeys(final_rows))  # same re-delivery dedupe
     close_lat = []
     for ln in final_rows:
@@ -1171,7 +1174,7 @@ def main():
               "latency-*.rows.txt for diagnosis")
 
     # ---- G6 ASSERTIVE GUARDS (2026-08-30) --------------------------------
-    # The tiering-off + preview-purge fixes are proven; these guards make a
+    # The tiering-off + raw-path fixes are proven; these guards make a
     # regression FAIL the run (non-zero exit) instead of printing a verdict
     # nobody reads. Failures collected here, exit code set at the end.
 
@@ -1217,8 +1220,9 @@ def main():
         print("- G6: LATENCY_GUARD_OFF=1 — latency guard SKIPPED (diagnostic run)")
     elif not e2e_lat:
         failures.append(
-            "G6: no preview e2e samples — preview measurement broken "
-            "(purge ran at run start? preview table recreated? sink alive?)")
+            "G6: no preview e2e samples — the preview leg is unavailable by design "
+            "(see the G6 note above: retired table, and the live candle pair has no "
+            "write-timestamp column)")
     else:
         p95 = pct(e2e_lat, 95)
         if p95 is not None and p95 > 1000:
