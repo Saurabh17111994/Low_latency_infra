@@ -203,3 +203,40 @@ func TestLoginWithinContextReturnsTheLoginResult(t *testing.T) {
 		t.Errorf("loginWithinContext returned %v for a successful login", err)
 	}
 }
+
+// P3-249 — the disabled-mode broker is fail-closed: health reports "UP
+// disabled" and readiness not-ready, so no command may report SUCCESS. The
+// deny list only names the commands known today, and the fake defaulted to
+// SUCCESS for anything else.
+func TestDisabledFakeBrokerNeverReportsSuccess(t *testing.T) {
+	fake := NewFakeBrokerWithDisabledResult()
+	ctx := t.Context()
+	command := validPlaceCommand()
+	calls := []struct {
+		name string
+		fn   func() BrokerResult
+	}{
+		{"Place", func() BrokerResult { return fake.Place(ctx, command) }},
+		{"Modify", func() BrokerResult { return fake.Modify(ctx, command) }},
+		{"Cancel", func() BrokerResult { return fake.Cancel(ctx, command) }},
+		{"QueryOrder", func() BrokerResult { return fake.QueryOrder(ctx, command) }},
+		{"ReconcileOrders", func() BrokerResult { return fake.ReconcileOrders(ctx, command) }},
+		{"ReconcileTrades", func() BrokerResult { return fake.ReconcileTrades(ctx, command) }},
+		{"ReconcilePositions", func() BrokerResult { return fake.ReconcilePositions(ctx, command) }},
+		// A command the deny list predates, i.e. any method added later: the
+		// default must be the disabled result, not the fake's SUCCESS.
+		{"future command", func() BrokerResult { return fake.result(ctx, "SOME_FUTURE_COMMAND", command) }},
+	}
+	for _, c := range calls {
+		got := c.fn()
+		if got.Outcome != OutcomeUnknown || got.Reason != "broker_disabled" {
+			t.Errorf("disabled mode, %s: outcome=%s reason=%s, want UNKNOWN/broker_disabled", c.name, got.Outcome, got.Reason)
+		}
+	}
+
+	// The catch-all is scoped to this instance: the plain offline fake must
+	// keep answering SUCCESS for commands tests did not preset.
+	if got := NewFakeBroker().Place(ctx, command); got.Outcome != OutcomeSuccess {
+		t.Errorf("mode=fake Place: outcome=%s, want SUCCESS: the disabled catch-all must not change the default fake", got.Outcome)
+	}
+}

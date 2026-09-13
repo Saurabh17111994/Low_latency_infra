@@ -8,9 +8,10 @@ import (
 // FakeBroker is an offline-only broker double. It records command counts and
 // lets tests force SUCCESS, REJECTED, or UNKNOWN outcomes deterministically.
 type FakeBroker struct {
-	mu      sync.Mutex
-	results map[string]BrokerResult
-	calls   map[string]int
+	mu            sync.Mutex
+	results       map[string]BrokerResult
+	defaultResult *BrokerResult
+	calls         map[string]int
 }
 
 func NewFakeBroker() *FakeBroker {
@@ -21,6 +22,16 @@ func (f *FakeBroker) SetResult(command string, result BrokerResult) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.results[command] = result
+}
+
+// SetDefaultResult answers every command without a preset. It exists so the
+// disabled-mode fake can be fail-closed (P3-249): its deny list only names the
+// commands known today, and the fake otherwise reports SUCCESS, so a command
+// added later would report success while health says "UP disabled"/not-ready.
+func (f *FakeBroker) SetDefaultResult(result BrokerResult) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.defaultResult = &result
 }
 
 func (f *FakeBroker) Calls(command string) int {
@@ -36,6 +47,9 @@ func (f *FakeBroker) result(ctx context.Context, command string, c CommandEnvelo
 	f.mu.Lock()
 	f.calls[command]++
 	result, ok := f.results[command]
+	if !ok && f.defaultResult != nil {
+		result, ok = *f.defaultResult, true
+	}
 	f.mu.Unlock()
 	if ok {
 		return result

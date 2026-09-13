@@ -122,11 +122,9 @@ func brokerFromEnvironment(mode string) (Broker, *arrow.Client, error) {
 
 func NewFakeBrokerWithDisabledResult() *FakeBroker {
 	fake := NewFakeBroker()
-	disabled := BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"}
-	for _, command := range []string{CommandPlace, CommandModify, CommandCancel, CommandQueryOrder,
-		CommandReconcileOrders, CommandReconcileTrades, CommandReconcilePosition} {
-		fake.SetResult(command, disabled)
-	}
+	// A catch-all, not a deny list: an allow-by-omission list silently reports
+	// SUCCESS for any command it predates while mode=disabled (P3-249).
+	fake.SetDefaultResult(BrokerResult{Outcome: OutcomeUnknown, Reason: "broker_disabled"})
 	return fake
 }
 
