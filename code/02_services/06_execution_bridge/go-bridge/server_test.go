@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -502,15 +504,33 @@ func TestEventsEndpointRejectsOversizedFrames(t *testing.T) {
 	}
 	defer conn.Close()
 
-	if err := conn.WriteMessage(websocket.TextMessage, make([]byte, maxEventFrameBytes*4)); err != nil {
-		t.Fatalf("write oversized frame: %v", err)
-	}
+	// The server enforces the limit from the frame header, so it can close —
+	// and therefore reset — the connection while this bounded write is still in
+	// flight (observed 12/20 runs under -race). A peer that hung up mid-frame is
+	// the limit working, not a test failure; the read below is the real gate.
+	writeErr := conn.WriteMessage(websocket.TextMessage, make([]byte, maxEventFrameBytes*4))
 	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, _, err = conn.ReadMessage()
-	if !websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
-		t.Fatalf("read after an oversized frame returned %v, want a %d close: the frame is buffered whole before being discarded",
-			err, websocket.CloseMessageTooBig)
+	if websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
+		return
 	}
+	// A 1009 close is the contract; a reset in its place is acceptable only when
+	// the write had actually failed (so the peer did hang up on this frame)
+	// rather than timing out with the frame still buffered. Without
+	// SetReadLimit the write succeeds and the read times out, which fails here.
+	var netErr net.Error
+	if writeErr != nil && !(errors.As(err, &netErr) && netErr.Timeout()) {
+		// Prove the server survived the oversize frame: the rejection must close
+		// this connection only, not the endpoint.
+		if conn2, _, dialErr := websocket.DefaultDialer.Dial(url, http.Header{"Authorization": []string{"Bearer internal-secret"}}); dialErr == nil {
+			conn2.Close()
+			return
+		}
+		t.Fatalf("read after an oversized frame returned %v (write: %v) and the endpoint no longer accepts connections: the frame is not being rejected on its header",
+			err, writeErr)
+	}
+	t.Fatalf("read after an oversized frame returned %v, want a %d close: the frame is buffered whole before being discarded",
+		err, websocket.CloseMessageTooBig)
 }
 
 // P3-055 second half — every events connection costs a subscription, a read
