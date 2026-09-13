@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -153,26 +154,52 @@ func (s *BridgeServer) handleCommand(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), s.commandTimeout)
 	defer cancel()
-	// P3-051: the owner completes the dedup state on every path, panic included.
-	// A state left unfinished turns that RequestID into a follower of a request
-	// that never finishes, for the lifetime of the process.
-	finished := false
-	defer func() {
-		if !finished {
-			s.finishRequest(state, resultToReport(command, unknownResult(errDispatchPanicked)))
-		}
+	// P3-052: run the dispatch on its own goroutine and answer at the deadline.
+	// The venue's calls take no context, so nothing else can enforce
+	// commandTimeout — a stalled Arrow request used to hold this handler, and its
+	// caller, well past the deadline.
+	//
+	// The goroutine owns the dedup state (P3-051): it always completes it, panic
+	// included, and it stores the venue's real answer even when this reply has
+	// already gone out as UNKNOWN.
+	reports := make(chan ReportEnvelope, 1)
+	go func() {
+		report := func() (report ReportEnvelope) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					// net/http used to absorb a dispatch panic on the handler
+					// goroutine; on this one it would take the process down. Keep
+					// the operator's log line and fail the command closed.
+					log.Printf("execution bridge: dispatch panicked: %v", rec)
+					report = resultToReport(command, unknownResult(errDispatchPanicked))
+				}
+			}()
+			return resultToReport(command, s.dispatch(ctx, command))
+		}()
+		s.finishRequest(state, report)
+		reports <- report
 	}()
-	result := s.dispatch(ctx, command)
-	report := resultToReport(command, result)
-	finished = true
-	s.finishRequest(state, report)
-	s.writeJSON(w, http.StatusOK, report)
+	select {
+	case report := <-reports:
+		s.writeJSON(w, http.StatusOK, report)
+	case <-ctx.Done():
+		// Prefer an answer that is already in hand over a spurious UNKNOWN, then
+		// fail closed. The deadline reply is not stored: only the venue's own
+		// answer completes the dedup state, so a later reuse of this RequestID
+		// learns more than this caller did.
+		select {
+		case report := <-reports:
+			s.writeJSON(w, http.StatusOK, report)
+		default:
+			s.writeJSON(w, http.StatusOK, resultToReport(command, unknownResult(ctx.Err())))
+		}
+	}
 }
 
-// errDispatchPanicked is the fixed cause for the fail-closed report an owner
-// writes when dispatch panics. It is deliberately not the panic value: the value
-// reaches the server log through the re-panic, and a stable cause keeps the
-// reason token from depending on whatever text the panic carried.
+// errDispatchPanicked is the fixed cause for the fail-closed report written when
+// dispatch panics. It is deliberately not the panic value: a stable cause keeps
+// the reason token from depending on whatever text the panic carried, while the
+// value itself goes to the log.
 var errDispatchPanicked = errors.New("dispatch panicked")
 
 func (s *BridgeServer) beginRequest(command CommandEnvelope) (*requestState, bool, bool, error) {

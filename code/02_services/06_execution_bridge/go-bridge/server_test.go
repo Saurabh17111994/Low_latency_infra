@@ -327,3 +327,86 @@ func TestFollowerUnblocksWhenTheOwnerPanics(t *testing.T) {
 		t.Fatalf("report=%+v want a fail-closed UNKNOWN with a reason", report)
 	}
 }
+
+// P3-052 — the venue calls take no context (only LoginContext and
+// GetPositionsContext do), so a command deadline can only be enforced here. A
+// stalled Arrow request used to hold the handler — and its caller — far past
+// commandTimeout.
+func TestCommandDeadlineIsEnforcedWhileTheVenueCallIsStalled(t *testing.T) {
+	t.Setenv("EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS", "150")
+	release := make(chan struct{})
+	broker := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		<-release // a stalled venue that never honours the deadline
+		return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: "BRK-LATE"}
+	}}
+	bridge, err := NewBridgeServer(broker, "internal-secret", "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer close(release)
+
+	done := make(chan ReportEnvelope, 1)
+	go func() {
+		rec := postCommandWithContext(t, bridge.Handler(), context.Background(), validPlaceCommand(), "internal-secret")
+		var report ReportEnvelope
+		_ = json.Unmarshal(rec.Body.Bytes(), &report)
+		done <- report
+	}()
+	select {
+	case report := <-done:
+		if report.Outcome != OutcomeUnknown || report.Reason == "" {
+			t.Fatalf("report=%+v want a fail-closed UNKNOWN at the deadline", report)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the handler is still blocked: commandTimeout was not enforced while the venue call stalled")
+	}
+}
+
+// P3-052 second half — the deadlined reply must not lose the venue's answer. The
+// stalled call still owns the dedup state, so a caller that reuses the
+// RequestID after the timeout gets the real outcome rather than UNKNOWN forever.
+// (No separate red state exists for this half: before the deadline is enforced
+// at all, the first reply never arrives and this test stops at that failure.)
+func TestLateVenueResultReachesTheDedupState(t *testing.T) {
+	t.Setenv("EXECUTION_BRIDGE_COMMAND_TIMEOUT_MS", "150")
+	release := make(chan struct{})
+	broker := &countingBroker{fn: func(ctx context.Context, c CommandEnvelope) BrokerResult {
+		<-release
+		return BrokerResult{Outcome: OutcomeSuccess, BrokerOrderID: "BRK-LATE"}
+	}}
+	bridge, err := NewBridgeServer(broker, "internal-secret", "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := bridge.Handler()
+	command := validPlaceCommand()
+
+	first := make(chan ReportEnvelope, 1)
+	go func() {
+		rec := postCommandWithContext(t, handler, context.Background(), command, "internal-secret")
+		var report ReportEnvelope
+		_ = json.Unmarshal(rec.Body.Bytes(), &report)
+		first <- report
+	}()
+	select {
+	case report := <-first:
+		if report.Outcome != OutcomeUnknown {
+			t.Fatalf("first reply=%+v want UNKNOWN at the deadline", report)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no reply at the deadline, so the late-result half cannot be checked")
+	}
+
+	close(release) // the venue finally answers
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		rec := postCommandWithContext(t, handler, context.Background(), command, "internal-secret")
+		var report ReportEnvelope
+		_ = json.Unmarshal(rec.Body.Bytes(), &report)
+		if report.Outcome == OutcomeSuccess && report.BrokerOrderID == "BRK-LATE" {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the venue's late SUCCESS never reached the dedup state")
+}
