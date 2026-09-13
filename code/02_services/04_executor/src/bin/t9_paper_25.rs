@@ -12,7 +12,6 @@ use nautilus_execution_service::t9paper::{
     assert_no_secrets, count_outcome, finalize_evidence, order_json, shadow_position, write_json,
     Run, Scenario, PAPER_INSTRUMENTS,
 };
-use nautilus_sandbox::config::SandboxExecutionClientConfig;
 use serde_json::{json, Value};
 
 /// The documented paper-25 scenario contract: 10 FILLED / 5 PARTIAL / 5 REJECTED /
@@ -56,7 +55,6 @@ fn paper_25_summary(orders: &[Value]) -> Value {
 }
 
 fn main() -> Result<()> {
-    let _sandbox_cfg = SandboxExecutionClientConfig::default();
     let run = Run::start("t9-paper-25")?;
 
     let orders: Vec<Value> = (0..PAPER_INSTRUMENTS.len())
