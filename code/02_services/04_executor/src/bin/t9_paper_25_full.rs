@@ -90,7 +90,8 @@ fn main() -> Result<()> {
         }),
     ));
 
-    let evidence_path = write_json(&run.output_dir, "evidence.json", &evidence)?;
+    // P3-184: every invariant must hold *before* anything is persisted, so a failing check can
+    // never leave a non-conforming evidence.json (claiming `no_secrets: true`) on disk.
     assert_no_secrets(&evidence);
     assert_eq!(unknown, 3, "UNKNOWN rows must be exactly 3");
     assert_eq!(
@@ -110,6 +111,8 @@ fn main() -> Result<()> {
             .all(|p| p["expected_match"] == true),
         "all shadow positions must expect a match"
     );
+
+    let evidence_path = write_json(&run.output_dir, "evidence.json", &evidence)?;
 
     println!("T9 full-25 evidence written to {}", evidence_path.display());
     println!("{}", serde_json::to_string_pretty(&evidence)?);
