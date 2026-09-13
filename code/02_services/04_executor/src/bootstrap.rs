@@ -81,8 +81,20 @@ impl Runtime {
     /// Samples clock drift and enforces it on the gate (B8): `Beyond`/`Unmeasurable`
     /// trigger `safety_halt()`; recovery is only ever via the sanctioned human path.
     /// The live NTP source is wired in Workstream D behind `OffsetSource`.
+    ///
+    /// Halting `self.gate` alone is not enough (D4): `/v1/intents` and `/healthz` read the shared
+    /// `ServerState` snapshot, so a drift halt must halt that surface too — otherwise the live
+    /// intent route keeps forwarding after the gate has been halted (fail-open), while health
+    /// still reports ENABLED. Same shape P3-185 fixed for shutdown.
     pub fn enforce_clock_drift(&mut self, monitor: &mut DriftMonitor) -> DriftStatus {
-        monitor.enforce(&mut self.gate)
+        let status = monitor.enforce(&mut self.gate);
+        if matches!(
+            status,
+            DriftStatus::Beyond(_) | DriftStatus::Unmeasurable(_)
+        ) {
+            self.state.safety_halt("clock drift beyond limit");
+        }
+        status
     }
 
     /// Starts graceful shutdown: the gate is safety-halted **first** (clearing approvals and the
@@ -211,6 +223,32 @@ mod tests {
             rt.gate_state(),
             ExecState::Halted,
             "fail-closed: never leaves HALTED"
+        );
+    }
+
+    #[test]
+    fn drift_halt_also_halts_the_served_snapshot() {
+        // D4: `enforce_clock_drift` halted only the in-process gate, while `/v1/intents` checks
+        // the shared snapshot. A drift halt therefore left the live intent route forwarding and
+        // `/healthz` reporting ENABLED — fail-open, the same shape P3-185 fixed for shutdown.
+        let mut rt = Runtime::init(halted_config()).unwrap();
+        enable_runtime_gate(&mut rt);
+        rt.state.approve("saurabh", "ev-drift").unwrap();
+        assert_eq!(rt.gate_state(), ExecState::Enabled);
+        assert_eq!(rt.health_json()["gate_state"], "ENABLED");
+
+        let mut beyond = DriftMonitor::new(200, Box::new(FixedOffsetSource(500)));
+        assert_eq!(
+            rt.enforce_clock_drift(&mut beyond),
+            DriftStatus::Beyond(500)
+        );
+
+        assert!(!rt.gate.can_execute(), "a drift halt must halt the gate");
+        assert_eq!(rt.gate_state(), ExecState::Halted);
+        assert_eq!(
+            rt.health_json()["gate_state"],
+            "HALTED",
+            "the served snapshot must stop accepting intents on a drift halt"
         );
     }
 }
