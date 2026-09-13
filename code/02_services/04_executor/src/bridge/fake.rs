@@ -449,16 +449,15 @@ impl FakeBridge {
         let Some(order) = envelope.order.as_ref() else {
             return;
         };
+        // P3-187: `orders` is keyed by broker_order_id, so a lookup by client_order_ref
+        // in that map resolves to an unrelated order whenever a client ref collides with
+        // another order's broker id (a client ref of "BRK-0002" is valid). Match on the
+        // field that actually carries the client ref.
         let broker_order_id = self
             .orders
-            .get(&envelope.client_order_ref)
-            .map(|r| r.broker_order_id.clone())
-            .or_else(|| {
-                self.orders
-                    .iter()
-                    .find(|(_, r)| r.client_order_ref == envelope.client_order_ref)
-                    .map(|(id, _)| id.clone())
-            })
+            .iter()
+            .find(|(_, r)| r.client_order_ref == envelope.client_order_ref)
+            .map(|(id, _)| id.clone())
             .unwrap_or_default();
         if broker_order_id.is_empty() {
             return;
