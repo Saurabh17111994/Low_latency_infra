@@ -27,7 +27,11 @@ public final class SyntheticWorkload {
 
     private final Config config;
     private final SplittableRandom random;
-    private final PriorityQueue<Due> due = new PriorityQueue<>(Comparator.comparingLong(Due::timeMs));
+    // P3-233: timeMs alone leaves same-millisecond polls in unspecified heap
+    // order, which perturbs the shared RNG assignment; instrumentIndex is the
+    // deterministic secondary key.
+    private final PriorityQueue<Due> due = new PriorityQueue<>(
+            Comparator.comparingLong(Due::timeMs).thenComparingInt(Due::instrumentIndex));
     private long sequence;
 
     public SyntheticWorkload(Config config) {
