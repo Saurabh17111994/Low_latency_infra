@@ -80,6 +80,13 @@ Spec-driven repo: `docs/` is the spec, `code/` is the implementation.
 Numbered read order `docs/01` → `09`. Update the relevant dossier in the same change
 when behavior, schemas, or interfaces change.
 
+## Context budget (standing user order, 2026-09-14 — no exceptions)
+
+- Auto-compact at ~200k tokens: when `/context` shows usage at or near 200k, run
+  `/compact` immediately (standing permission — do not ask first) and continue the task after.
+- Between compactions keep context lean: scope reads to the task, prefer `grep`/`glob`
+  over full-file reads, never re-read unchanged files.
+
 ## Branch Context (read this before ANY change)
 
 - **The `Low_latency_infra` repository's `main` branch is the single working branch.**
