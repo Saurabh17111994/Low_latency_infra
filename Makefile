@@ -212,19 +212,22 @@ check-image-stale:
 
 # Fast pre-gate confidence (2026-09-12): the subset that catches most of what an
 # ordinary edit breaks, in ~20 s measured (warm ~/.m2) instead of the gate's ~13 min. It is NOT a
-# certificate -- the live Fluss drills, the DDL apply smoke, the doc audit, the Go
-# bridge suite and every module suite except MODULE=<module> do not run here, and
-# image staleness covers ddl-apply only. Releases, market sessions and soak runs
-# require `make gate`; that is the only thing that certifies a tree.
+# certificate -- the live Fluss drills, the DDL apply smoke, the full doc audit (scanners/
+# sweeps/trio), the Go bridge suite and every module suite except MODULE=<module> do not run
+# here; the docs_audit.py script (C1-C16 doc<->code truth, ~1 s) does run. Image staleness
+# covers ddl-apply only. Releases, market sessions and soak runs require `make gate`; that
+# is the only thing that certifies a tree.
 # Static DDL-manifest check first: a DDL byte change (even a comment-only edit) with no
 # manifest refresh fails here in seconds instead of at gate step 9 an hour later.
 gate-fast:
 	@$(MAKE) --no-print-directory ddl
-	@echo "GATE-FAST: NOT A RELEASE CERTIFICATE — no live drills, no DDL apply smoke, no doc audit, no Go suite; images beyond ddl-apply unchecked."
+	@echo "GATE-FAST: NOT A RELEASE CERTIFICATE — no live drills, no DDL apply smoke, no full doc audit (scanners/sweeps/trio), no Go suite; images beyond ddl-apply unchecked."
 	@$(MAKE) --no-print-directory static-check
 	@$(MAKE) --no-print-directory test-audit-r2
 	@$(MAKE) --no-print-directory check-image-stale-fast
 	@if [ -n "$(MODULE)" ]; then cd code && $(MVN) test -pl $(MODULE); else echo "GATE-FAST: no MODULE= given — module suite skipped (e.g. make gate-fast MODULE=02_services/06_execution_gateway)"; fi
+	@echo "GATE-FAST: doc<->code truth audit (docs_audit.py, C1-C16)"
+	@python3 code/01_platform/04_scripts/docs_audit.py
 	@echo "GATE-FAST RESULT: subset green (run 'make gate' before a release)"
 
 # Twin of Monday-gate step [8/14]: the one service image that gate actually
