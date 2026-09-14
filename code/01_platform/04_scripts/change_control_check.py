@@ -79,7 +79,11 @@ FENCED_TEXT_RE = re.compile(r"```text\n(.*?)\n```", re.S)
 FIELD_RE = re.compile(r"^([a-z_]+):\s*(.+?)\s*$")
 
 # plan_tasks / affected_artifacts reference resolution (see module docstring).
-TRACKER_RE = re.compile(r"tracker[\s_-]*(\d+)", re.I)
+# A reference is a standalone `tracker-<n>` (optionally inside a path, e.g.
+# logs/tracker-14/). The lookbehind keeps words that merely end in "tracker"
+# out of the match: before it, "tasktracker-5", "non-tracker-5" and
+# "backTracker_3" all counted as tracker references (P6-716).
+TRACKER_RE = re.compile(r"(?<![A-Za-z0-9_-])tracker[\s_-]*(\d+)", re.I)
 MD_TOKEN_RE = re.compile(r"[A-Za-z0-9_./-]+\.md")
 ARTIFACT_TOKEN_RE = re.compile(r"[A-Za-z0-9_./-]+\.[A-Za-z0-9]+")
 ARTIFACT_EXTENSIONS = {
@@ -89,6 +93,12 @@ ARTIFACT_EXTENSIONS = {
 }
 NONE_RE = re.compile(r"^(?:none|n/a|na|-|\s)+$", re.I)
 SKIP_DIRS = {"target", ".git", "node_modules", ".m2"}
+
+# (basename -> relative path, sorted relative paths), built on first use. One
+# record names many artifacts, so the walk is paid once per process, not once
+# per token (P6-326). Sorted, so a name that repeats resolves the same way
+# every run.
+_REPO_INDEX = None
 
 # A record may name an artifact that has since been deleted. That is not drift to
 # paper over: the record was accurate when filed, and deleting the path from it
@@ -149,13 +159,37 @@ def _resolve_candidates(ref, records_dir):
     ]
 
 
+def _repo_index():
+    """Lazily walk the tree once: (by_basename, sorted relative paths)."""
+    global _REPO_INDEX
+    if _REPO_INDEX is None:
+        rel_paths = []
+        for root, dirs, files in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for name in files:
+                rel_paths.append(os.path.relpath(os.path.join(root, name), ROOT))
+        rel_paths.sort()
+        by_basename = {}
+        for rel in rel_paths:
+            by_basename.setdefault(os.path.basename(rel), rel)
+        _REPO_INDEX = (by_basename, tuple(rel_paths))
+    return _REPO_INDEX
+
+
 def find_basename(name):
-    """Repo-wide basename search, pruning build/vcs dirs."""
-    for root, dirs, files in os.walk(ROOT):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
-        if name in files:
-            return os.path.join(root, name)
-    return None
+    """Repo-wide fallback for a token the explicit candidates missed (P6-325).
+
+    A bare name matches that basename anywhere in the tree; a path-shaped token
+    matches the repo-relative path itself or any path ending in "/<token>", so
+    a record may name the full path or a suffix of it. None means genuinely
+    unresolved, which the caller reports as an issue — never as a pass.
+    """
+    by_basename, rel_paths = _repo_index()
+    if "/" in name:
+        tail = "/" + (name[2:] if name.startswith("./") else name)
+        return next((rel for rel in rel_paths if rel == name or rel.endswith(tail)), None)
+    rel = by_basename.get(name)
+    return os.path.join(ROOT, rel) if rel else None
 
 
 def resolve_md_ref(ref, records_dir):
@@ -168,7 +202,7 @@ def resolve_md_ref(ref, records_dir):
 
 def resolve_artifact_ref(ref, records_dir):
     """Resolve an artifact token: explicit candidates first, then a repo-wide
-    basename search (pruning build/vcs dirs)."""
+    search (cached index; basename or path suffix)."""
     hit = next(
         (c for c in _resolve_candidates(ref, records_dir) if os.path.isfile(c)),
         None,

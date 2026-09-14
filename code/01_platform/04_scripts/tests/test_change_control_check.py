@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import change_control_check as ccc
@@ -311,6 +312,54 @@ class CliTests(unittest.TestCase):
 
     def test_dir_flag_without_value_exits_two(self):
         self.assertEqual(ccc.main(["--dir"]), 2)
+
+
+class TrackerRegexTests(unittest.TestCase):
+    """A tracker reference is a standalone token, never a word ending in
+    "tracker" (P6-716)."""
+
+    def test_words_ending_in_tracker_are_not_references(self):
+        for text in ("tasktracker-5", "non-tracker-5.md", "backTracker_3"):
+            self.assertEqual(ccc.TRACKER_RE.findall(text), [], text)
+
+    def test_standalone_reference_still_matches(self):
+        self.assertEqual(ccc.TRACKER_RE.findall("tracker-14"), ["14"])
+        self.assertEqual(ccc.TRACKER_RE.findall("logs/tracker-14/ run"), ["14"])
+        self.assertEqual(ccc.TRACKER_RE.findall("(tracker 7)"), ["7"])
+
+
+class RepoIndexTests(unittest.TestCase):
+    """The repo-wide fallback resolves bare names and path suffixes, and pays
+    for the walk once per process (P6-325, P6-326)."""
+
+    def setUp(self):
+        ccc._REPO_INDEX = None
+        self.addCleanup(setattr, ccc, "_REPO_INDEX", None)
+
+    def test_path_suffix_resolves_to_the_real_file(self):
+        hit = ccc.find_basename("04_scripts/docs_audit.py")
+        self.assertTrue(hit and os.path.isfile(hit), hit)
+        self.assertTrue(hit.endswith("04_scripts/docs_audit.py"), hit)
+
+    def test_path_suffix_that_matches_nothing_stays_unresolved(self):
+        # Deliberately stricter than "fall back to the basename": a path-shaped
+        # token naming the wrong directory must not resolve to a same-named file
+        # elsewhere — a gate must not pass on a near match.
+        self.assertIsNone(ccc.find_basename("code/98_nope/docs_audit.py"))
+
+    def test_bare_name_resolves(self):
+        hit = ccc.find_basename("docs_audit.py")
+        self.assertTrue(hit and os.path.isfile(hit), hit)
+
+    def test_unresolved_token_is_none_not_a_guess(self):
+        self.assertIsNone(ccc.find_basename("definitely-not-in-the-tree.py"))
+
+    def test_one_walk_serves_every_lookup(self):
+        with mock.patch.object(ccc.os, "walk", wraps=os.walk) as walk:
+            ccc.find_basename("docs_audit.py")
+            ccc.find_basename("04_scripts/docs_audit.py")
+            ccc.find_basename("definitely-not-in-the-tree.py")
+        self.assertEqual(walk.call_count, 1)
 
 
 if __name__ == "__main__":
