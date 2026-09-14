@@ -81,6 +81,16 @@ class OrderingTests(unittest.TestCase):
         self.assertEqual(runner.calls, ["run", "file", "contains", "tree-contains"])
         self.assertTrue(any("task 3 FAILED" in line for line in captured))
 
+    def test_last_task_failure_does_not_claim_a_downstream_range(self):
+        """P6-745: seq 3 of 3 printed "downstream tasks 4..3 BLOCKED"."""
+        runner = FakeRunner([(True, "ok")] * 3 + [(False, "late failure")])
+        captured = []
+        gate.run_gate(FAKE_TASKS, runner, out=captured.append)
+        message = "\n".join(captured)
+        self.assertNotIn("4..3", message)
+        self.assertNotIn("downstream", message)
+        self.assertIn("final task", message)
+
 
 class RealRunnerTests(unittest.TestCase):
     def setUp(self):
@@ -126,6 +136,7 @@ class RealRunnerTests(unittest.TestCase):
 class TaskTableTests(unittest.TestCase):
     def test_seven_tasks_in_order(self):
         self.assertEqual([t["seq"] for t in gate.TASKS], [1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(len(gate.TASKS), 7)
         for task in gate.TASKS:
             self.assertTrue(task["title"])
             self.assertTrue(task["dossier"])
@@ -133,6 +144,19 @@ class TaskTableTests(unittest.TestCase):
             for chk in task["checks"]:
                 self.assertIn(chk["type"], ("run", "file", "contains", "tree-contains"))
                 self.assertTrue(chk["desc"])
+
+    def test_task_two_pins_the_no_batch_value_not_only_the_name(self):
+        """P6-416: a name-only needle stays green if the value drifts."""
+        checks = [c for t in gate.TASKS if t["seq"] == 2 for c in t["checks"]]
+        value_pins = [
+            c for c in checks
+            if c["type"] == "contains" and "INGESTION_MAX_BATCH_RECORDS = " in c["needle"]
+        ]
+        self.assertTrue(value_pins, [c["desc"] for c in checks])
+        for pin in value_pins:
+            self.assertEqual(pin["needle"].split("= ", 1)[1].strip(), "1")
+            ok, detail = gate.GateRunner(gate.ROOT).contains(pin["path"], pin["needle"])
+            self.assertTrue(ok, detail)
 
     def test_every_pinned_evidence_exists(self):
         """All file/contains pins must resolve against the real repo now, so a

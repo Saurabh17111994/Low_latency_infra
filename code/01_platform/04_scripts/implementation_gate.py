@@ -65,13 +65,24 @@ TASKS = [
                 "type": "contains",
                 "path": "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/config/IngestionConfig.java",
                 "needle": "INGESTION_MAX_BATCH_RECORDS",
-                "desc": "immediate no-batch pins (INGESTION_MAX_BATCH_RECORDS=1)",
+                "desc": "immediate no-batch env key wired (INGESTION_MAX_BATCH_RECORDS)",
+            },
+            {
+                # The key's presence is not the pin the task claims: the value
+                # lives in PlatformConfig, so a drift to 1000 kept the gate green
+                # while the name check still matched (P6-416).
+                "type": "contains",
+                "path": "code/common/src/main/java/com/trading/common/config/PlatformConfig.java",
+                "needle": "INGESTION_MAX_BATCH_RECORDS = 1",
+                "desc": "immediate no-batch pin (PlatformConfig.INGESTION_MAX_BATCH_RECORDS = 1)",
             },
             {
                 "type": "contains",
                 "path": "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/config/IngestionConfig.java",
                 "needle": "MAX_PENDING_APPEND_RECORDS",
-                "desc": "bounded-backpressure pins (MAX_PENDING_APPEND_RECORDS/BYTES)",
+                # The bound is a range, not one number, so the range itself is
+                # pinned by IngestionConfigTest; this check pins the wiring.
+                "desc": "bounded-backpressure env keys wired (MAX_PENDING_APPEND_RECORDS/BYTES)",
             },
             {
                 "type": "run",
@@ -316,6 +327,14 @@ def run_gate(tasks, runner, out=print):
         out(f"  -> task {task['seq']} acceptance green")
     if blocked:
         nxt = blocked["seq"] + 1
+        if nxt > len(tasks):
+            # The final task has no downstream: "tasks 8..7 BLOCKED" claimed a
+            # range that does not exist (P6-745).
+            out(
+                f"\nimplementation-gate: task {blocked['seq']} FAILED (final task) — "
+                f"fix task {blocked['seq']} evidence before proceeding."
+            )
+            return 1
         out(
             f"\nimplementation-gate: task {blocked['seq']} FAILED — downstream "
             f"tasks {nxt}..{len(tasks)} BLOCKED (not run); fix task {blocked['seq']} "
