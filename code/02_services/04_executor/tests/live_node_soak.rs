@@ -111,9 +111,13 @@ fn live_node_runtime_sustained_soak() {
             "loop never became running within {:?}; no liveness sample was taken for the {soak_secs}s soak",
             started.elapsed()
         );
+        // P3-466: the floor was `soak_secs / 2`, which integer division turns into 0 for a
+        // 1s soak, and it said nothing about the sampler's 500ms cadence. Half of the ideal
+        // cadence (2 samples/s) is the honest floor for a starved-sampler verdict.
+        let min_samples = soak_secs.saturating_mul(1000) / 500 / 2;
         assert!(
-            samples >= soak_secs / 2,
-            "liveness sampler starved (samples={samples} for {soak_secs}s) — event loop not responsive"
+            samples >= min_samples,
+            "liveness sampler starved (samples={samples} for {soak_secs}s, min={min_samples}) — event loop not responsive"
         );
 
         // Clean-stop leg.
