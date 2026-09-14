@@ -120,9 +120,13 @@ fn live_node_runtime_sustained_soak() {
             "liveness sampler starved (samples={samples} for {soak_secs}s, min={min_samples}) — event loop not responsive"
         );
 
-        // Clean-stop leg.
+        // Clean-stop leg. P3-026: the await is bounded — a loop that ignores `stop()` (or
+        // wedges holding the runtime thread) must fail the soak, not hang CI for the whole
+        // job, which matters most on the 30-minute evidence leg.
         handle.stop();
-        let outcome = (&mut run).await;
+        let outcome = tokio::time::timeout(Duration::from_secs(30), &mut run)
+            .await
+            .expect("clean stop timed out after 30s — the run loop ignored the stop request");
         assert!(outcome.is_ok(), "clean stop must return Ok, got {outcome:?}");
         assert!(
             !handle.is_running(),
