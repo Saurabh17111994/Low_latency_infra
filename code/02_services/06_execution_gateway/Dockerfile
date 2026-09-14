@@ -20,7 +20,13 @@ FROM eclipse-temurin:17-jre@sha256:c6f2875c05ea10f16398bdc5f73405c384991506f2f1e
 WORKDIR /app
 COPY --from=build /workspace/02_services/06_execution_gateway/target/execution-gateway.jar /app/execution-gateway.jar
 # 2026-08-22 single-pane: OTel Javaagent for JVM metrics (jvm.*) → collector:4318 (same as ingestion)
-ADD --chmod=0444 https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v2.9.0/opentelemetry-javaagent.jar /app/opentelemetry-javaagent.jar
+# `--checksum` makes BuildKit verify the artifact it fetched: a re-uploaded release, a hijacked
+# CDN or a MITM proxy can no longer substitute a different jar, because the layer fails instead.
+# The digest was taken from the v2.9.0 GitHub asset and independently confirmed against the
+# checksum Maven Central publishes for io.opentelemetry.javaagent:opentelemetry-javaagent:2.9.0
+# (identical bytes), so it is not merely trust-on-first-use of our own download (P3-267).
+ADD --chmod=0444 --checksum=sha256:fa039f86082b559e53283a863e03de5df7db4bdb4840c5cbb8bf38f292987d5b \
+    https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v2.9.0/opentelemetry-javaagent.jar /app/opentelemetry-javaagent.jar
 ENV OTEL_SERVICE_NAME=execution-gateway
 # 2026-09-07 live-proven (ingestion pass): the javaagent defaults to OTLP/HTTP,
 # so this MUST be :4318. :4317 is gRPC-only and breaks every export with
