@@ -135,7 +135,12 @@ fn live_node_runtime_sustained_soak() {
         drop(run); // release the &mut node_rt borrow held by the consumed runner
 
         // Duplicate-run guard leg: the runner was consumed; re-entry must fail closed.
-        let second = node_rt.run_forever().await;
+        // P3-221: bounded too — a duplicate-run guard that blocks instead of returning an
+        // error would hang the soak, and `.is_err()` below would then be satisfied by the
+        // timeout rather than by the guard. Only the guard's own error may reach the assert.
+        let second = tokio::time::timeout(Duration::from_secs(30), node_rt.run_forever())
+            .await
+            .expect("second run must return an error promptly, not hang");
         assert!(
             second.is_err(),
             "second run must fail (fail-closed duplicate-run guard)"
