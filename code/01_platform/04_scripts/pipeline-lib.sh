@@ -43,6 +43,15 @@
 #       reach RUNNING with a broken ServiceLoader (C2, 2026-09-01).
 # =============================================================================
 
+# Sourcing contract (P6-142): fail fast HERE instead of deriving paths from an
+# empty ROOT and failing deep inside a later step. OUT is not required at source
+# time: holistic-measure.sh assigns it per phase AFTER sourcing — preflight
+# enforces it at the point of use.
+[[ "${BASH_SOURCE[0]:-$0}" != "$0" ]] \
+  || { echo "pipeline-lib.sh must be sourced, not executed (it needs ROOT/RATE_HZ from the caller)" >&2; exit 1; }
+: "${ROOT:?caller must set ROOT before sourcing pipeline-lib.sh}"
+: "${RATE_HZ:?caller must set RATE_HZ before sourcing pipeline-lib.sh}"
+
 # Paths (derived from ROOT so callers only set ROOT + OUT)
 LIB_JAR="$ROOT/code/02_services/02_compute/target/compute.jar"
 LIB_ING_JAR="$ROOT/code/02_services/01_ingestion/target/ingestion.jar"
@@ -52,7 +61,13 @@ LIB_FAKETOOL_SRC="$LIB_BRIDGE_DIR/faketool/main.go"
 FAKETOOL_PORT="${FAKETOOL_PORT:-8899}"
 LIB_COMPOSE_FILE="$ROOT/code/01_platform/01_docker/docker-compose.yml"
 # B1 guard: always carry both env files.
-COMPOSE="docker compose -f $LIB_COMPOSE_FILE --env-file $ROOT/code/01_platform/01_docker/.env --env-file $ROOT/code/01_platform/01_docker/secrets.env"
+# P6-468: an ARRAY, not a space-joined string — a $ROOT containing spaces (or a
+# glob char) used to split -f/--env-file into bogus arguments. Call sites use
+# "${COMPOSE[@]}"; the failure-message sites use ${COMPOSE[*]}.
+COMPOSE=(docker compose -f "$LIB_COMPOSE_FILE" --env-file "$ROOT/code/01_platform/01_docker/.env" --env-file "$ROOT/code/01_platform/01_docker/secrets.env")
+# P6-146: the same git-ignored secrets file compose already uses. No credential
+# literals in this script.
+LIB_SECRETS_FILE="$ROOT/code/01_platform/01_docker/secrets.env"
 
 # Preflight-state guard (2026-09-02): launch-phase functions require
 # pipeline_preflight to have run — it populates CP,
@@ -89,8 +104,12 @@ FLUSS_READY_TIMEOUT_S="${FLUSS_READY_TIMEOUT_S:-180}"
 FLUSS_READY_TABLE="${FLUSS_READY_TABLE:-raw_table_1}"
 
 # Run state (owned by the lib; teardown reads JOB_ID). CHG-122: the data path
-# is containers; the `docker logs -f` mirrors die with theirs.
+# is containers; the `docker logs -f` mirrors die with theirs. P6-479: the
+# mirror PIDs are captured too — they survived `docker rm -f` and a second EXIT
+# re-cancelled a dead job with a stale id.
 JOB_ID=""
+FAKETOOL_LOG_PID=""
+INGESTION_LOG_PID=""
 
 pipeline_log() { echo "[pipeline $(date +%H:%M:%S)] $*"; }
 pipeline_fail() { echo "[pipeline FATAL] $*" >&2; return 1; }
@@ -153,16 +172,33 @@ pipeline_validate_rate() {
   [ $(( 1000 % 10#$hz )) -eq 0 ] || { echo "RATE_HZ=$hz is invalid: faketool -real-rate-hz must divide 1000" >&2; return 1; }
 }
 
+# P6-467/P6-469: one validator for the port values that flow into ss/awk, the
+# /dev/tcp probe and the docker command line. Extracted so it is callable from
+# the tests instead of being reachable only through a full preflight.
+pipeline_validate_port() {   # <value> <name>
+  local val="${1:-}" name="${2:-port}"
+  case "$val" in
+    ''|*[!0-9]*) pipeline_fail "$name='$val' must be an integer 1-65535"; return 1 ;;
+  esac
+  if [ "$val" -lt 1 ] || [ "$val" -gt 65535 ]; then
+    pipeline_fail "$name=$val out of range (1-65535)"; return 1
+  fi
+}
+
 # ---------- port availability (B2 guard) ----------
 pipeline_port_free() {
   local port="$1"
   if command -v ss >/dev/null 2>&1; then
     # Double quotes so $port expands; anchor the port at end of the
     # address column (ss prints *:8899 or 0.0.0.0:8899).
-    if ss -tln 2>/dev/null | awk 'NR>1 {print $4}' | grep -q ":$port"'$'; then return 1; fi
+    pipeline_validate_port "${port:-}" "pipeline_port_free port" || return 1
+    # NOTE: this is the HOST namespace only — the container-side bind is not
+    # covered (callers must handle `docker run --name` collisions themselves).
+    if ss -tln 2>/dev/null | awk 'NR>1 {print $4}' | grep -qE ":${port}$"; then return 1; fi
     return 0
   fi
-  if (exec 3<>/dev/tcp/127.0.0.1/$port) 2>/dev/null; then exec 3>&-; return 1; fi
+  pipeline_validate_port "${port:-}" "pipeline_port_free port" || return 1
+  if (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null; then exec 3>&-; return 1; fi
   return 0
 }
 
@@ -174,7 +210,9 @@ pipeline_port_free() {
 # containers to be running before any table drop/create or job submission.
 pipeline_fluss_port_open() {
   local host="$1" port="$2"
-  (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null
+  # P6-470: a filtered port makes the bare /dev/tcp connect block for the
+  # kernel's SYN timeout (tens of seconds) inside a 2s poll loop — bound it.
+  timeout 2 bash -c "(exec 3<>/dev/tcp/$host/$port)" 2>/dev/null
 }
 
 pipeline_compile_fluss_ready_probe() {
@@ -259,6 +297,17 @@ pipeline_wait_for_fluss_ready() {
 # exact set the Dockerfile COPYs). Sorted file list -> per-file sha ->
 # final digest, so any content change flips the stamp.
 pipeline_loadgen_input_stamp() {
+  # P6-143: the three explicitly listed inputs must EXIST. A deleted
+  # Dockerfile/pom contributed nothing to the file list and the stamp was then
+  # computed from whatever remained (fail-open). Ceiling: paths containing a
+  # NEWLINE are still unsupported (the list is newline-separated); spaces are
+  # safe because the list is piped to sha256sum NUL-separated below.
+  local f
+  for f in "$ROOT/code/02_services/01_ingestion/Dockerfile.loadgen" \
+           "$ROOT/code/02_services/01_ingestion/pom.xml" \
+           "$ROOT/code/02_services/06_execution_gateway/pom.xml"; do
+    [ -f "$f" ] || { pipeline_fail "loadgen build input missing: $f (the build stamp cannot be computed)"; return 1; }
+  done
   { # everything the Dockerfile COPYs from go-bridge (go/mod/sum, *.go,
     # marketdata, vendored third_party) EXCEPT the host-built arrow-bridge
     # binary and test binaries — they are build OUTPUTS on the host, not
@@ -271,16 +320,16 @@ pipeline_loadgen_input_stamp() {
       "$ROOT/code/02_services/01_ingestion/pom.xml" \
       "$ROOT/code/02_services/06_execution_gateway/pom.xml"
     find "$ROOT/code/common" -type f -name '*.java' -print 2>/dev/null
-  } | sort | grep -v '^$' | xargs -r sha256sum 2>/dev/null \
+  } | sort | grep -v '^$' | tr '\n' '\0' | xargs -0 -r sha256sum 2>/dev/null \
     | sha256sum | cut -d' ' -f1
 }
 
 pipeline_verify_loadgen_image() {
   # (a) contents: all three artifacts present + executables runnable
-  if ! docker run --rm --network none "$LIB_LOADGEN_IMAGE" \
+  if ! docker run --pull never --rm --network none "$LIB_LOADGEN_IMAGE" \
       sh -c 'test -x /app/faketool && test -x /app/arrow-bridge && test -f /app/ingestion.jar' \
       >/dev/null 2>&1; then
-    pipeline_fail "G27a: loadgen image $LIB_LOADGEN_IMAGE is missing its artifacts (/app/faketool, /app/arrow-bridge, /app/ingestion.jar) — a foreign or corrupt image was tagged with this name. Rebuild honestly: $COMPOSE build loadgen (and check no other image stole the tag: docker images pipeline-loadgen)"
+    pipeline_fail "G27a: loadgen image $LIB_LOADGEN_IMAGE is missing its artifacts (/app/faketool, /app/arrow-bridge, /app/ingestion.jar) — a foreign or corrupt image was tagged with this name. Rebuild honestly: ${COMPOSE[*]} build loadgen (and check no other image stole the tag: docker images pipeline-loadgen)"
     return 1
   fi
   # (b) freshness: content-addressed. The image carries a BUILD_STAMP
@@ -291,9 +340,10 @@ pipeline_verify_loadgen_image() {
   # (proven live 2026-09-02) and a fully-cached rebuild never bumps the
   # image Created time, so it could never clear again.
   local stamp_in_image
-  stamp_in_image="$(docker run --rm --network none "$LIB_LOADGEN_IMAGE" cat /app/build-stamp 2>/dev/null | tr -d '[:space:]')"
+  stamp_in_image="$(docker run --pull never --rm --network none "$LIB_LOADGEN_IMAGE" cat /app/build-stamp 2>/dev/null | tr -d '[:space:]')"
+  : "${LIB_LOADGEN_STAMP:?pipeline_preflight has not run — LIB_LOADGEN_STAMP (loadgen image build stamp) is unset}"
   if [ -z "$stamp_in_image" ] || [ "$stamp_in_image" != "$LIB_LOADGEN_STAMP" ]; then
-    pipeline_fail "G27b: loadgen image $LIB_LOADGEN_IMAGE is STALE — its build stamp ($stamp_in_image) does not match the current sources ($LIB_LOADGEN_STAMP). The run would measure OLD code (bogus baseline). Rebuild: $COMPOSE build loadgen (with LOADGEN_BUILD_STAMP exported — pipeline_preflight does this for you)"
+    pipeline_fail "G27b: loadgen image $LIB_LOADGEN_IMAGE is STALE — its build stamp ($stamp_in_image) does not match the current sources ($LIB_LOADGEN_STAMP). The run would measure OLD code (bogus baseline). Rebuild: ${COMPOSE[*]} build loadgen (with LOADGEN_BUILD_STAMP exported — pipeline_preflight does this for you)"
     return 1
   fi
   # (c) harness guards green: the run script's own guard suite must pass.
@@ -320,6 +370,12 @@ pipeline_preflight() {
   # faketool source is a BUILD INPUT of the loadgen image (Dockerfile.loadgen)
   [ -f "$LIB_FAKETOOL_SRC" ] || { pipeline_fail "faketool source missing: $LIB_FAKETOOL_SRC (build input of Dockerfile.loadgen - the loadgen image cannot be built without it)"; return 1; }
   [ -f "$LIB_MANIFEST" ] || { pipeline_fail "manifest CSV missing: $LIB_MANIFEST"; return 1; }
+  # P6-142 (deferred half): OUT is required from here on, not at source time.
+  : "${OUT:?pipeline_preflight needs OUT (the evidence directory) — set it before calling}"
+  # P6-467: FAKETOOL_PORT flows into ss/awk == /dev/tcp/docker args; an empty or
+  # non-numeric value used to fail with "integer expression expected" (or pass a
+  # regex-shaped value into the grep).
+  pipeline_validate_port "${FAKETOOL_PORT:-}" FAKETOOL_PORT || return 1
   pipeline_validate_rate "$RATE_HZ" || return 1
   pipeline_port_free "$FAKETOOL_PORT" || { pipeline_fail "port $FAKETOOL_PORT already in use — stale faketool/broker running (kill it or set FAKETOOL_PORT)"; return 1; }
 
@@ -333,7 +389,13 @@ pipeline_preflight() {
   # Stale loadgen containers from a crashed prior run would collide with
   # our docker run names and mix old/new feeds — fail with the reason.
   local stale_ct
-  stale_ct="$(docker ps -a --format '{{.Names}}' 2>/dev/null | grep -E '^(pipeline-faketool|pipeline-ingestion)$' || true)"
+  local _ps_out _ps_rc=0
+  _ps_out="$(docker ps -a --format '{{.Names}}' 2>"$OUT/docker-ps.err")" || _ps_rc=$?
+  if [ "$_ps_rc" -ne 0 ]; then
+    pipeline_fail "docker daemon unreachable — 'docker ps -a' failed (rc=$_ps_rc): $(tail -2 "$OUT/docker-ps.err" 2>/dev/null | tr '\n' ' ')"
+    return 1
+  fi
+  stale_ct="$(printf '%s\n' "$_ps_out" | grep -E '^(pipeline-faketool|pipeline-ingestion)$' || true)"
   [ -z "$stale_ct" ] || {
     pipeline_fail "G26: stale loadgen container(s) from a prior run exist: $(echo $stale_ct | tr '\n' ' ') — remove them first: docker rm -f pipeline-faketool pipeline-ingestion (they are leftovers of a crashed run; a name collision would abort our docker run mid-preflight)"
     return 1
@@ -365,7 +427,7 @@ pipeline_preflight() {
   pipeline_wait_for_fluss_ready || return 1
   # B3 guard: fresh TM for every run.
   pipeline_log "restarting flink-taskmanager for direct-buffer hygiene..."
-  $COMPOSE restart flink-taskmanager >/dev/null 2>&1 \
+  "${COMPOSE[@]}" restart flink-taskmanager >/dev/null 2>&1 \
     || { pipeline_fail "flink-taskmanager restart failed"; return 1; }
   sleep 12
   # B5 guard (2026-08-30): wait until the TM is REGISTERED with the JM before
@@ -415,8 +477,8 @@ pipeline_preflight() {
   LIB_LOADGEN_STAMP="$(pipeline_loadgen_input_stamp)"
   export LOADGEN_BUILD_STAMP="$LIB_LOADGEN_STAMP"
   pipeline_log "building loadgen image (cached): $LIB_LOADGEN_IMAGE (stamp ${LIB_LOADGEN_STAMP:0:12}...)"
-  $COMPOSE build loadgen >"$OUT/loadgen-build.log" 2>&1 \
-    || { pipeline_fail "G26: loadgen image build failed — see $OUT/loadgen-build.log (Dockerfile.loadgen at code/02_services/01_ingestion/; build with: $COMPOSE build loadgen)"; return 1; }
+  "${COMPOSE[@]}" build loadgen >"$OUT/loadgen-build.log" 2>&1 \
+    || { pipeline_fail "G26: loadgen image build failed — see $OUT/loadgen-build.log (Dockerfile.loadgen at code/02_services/01_ingestion/; build with: ${COMPOSE[*]} build loadgen)"; return 1; }
   docker image inspect "$LIB_LOADGEN_IMAGE" --format '{{.Id}}' >/dev/null 2>&1 \
     || { pipeline_fail "G26: loadgen image $LIB_LOADGEN_IMAGE not present after build — the compose service tagged a different image name; check the `image:` key of the loadgen service in docker-compose.yml"; return 1; }
   # G27 (2026-09-02): the image itself must be verified before ANY run
@@ -434,7 +496,20 @@ pipeline_preflight() {
   # fingerprint cross-check on every bridge event) is gone.
   local slice
   slice="$OUT/instruments-1024.csv"
-  head -1025 "$LIB_MANIFEST" > "$slice"
+  # P6-473: the old `head -1025` trusted the manifest's shape — a BOM/CRLF
+  # header, blank lines or a reordered manifest yielded a bad slice while the
+  # 1024-row count still passed. Require a comma-separated header with >=2
+  # fields and build the slice from real data rows only.
+  local hdr hdr_fields
+  hdr="$(head -1 "$LIB_MANIFEST" | tr -d '\r')"
+  case "$hdr" in
+    *","*) ;;
+    *) pipeline_fail "manifest header has no comma separator: '$hdr'"; return 1 ;;
+  esac
+  hdr_fields="$(printf '%s\n' "$hdr" | awk -F, '{print NF}')"
+  [ "$hdr_fields" -ge 2 ] || { pipeline_fail "manifest header has fewer than 2 fields: '$hdr'"; return 1; }
+  { printf '%s\n' "$hdr"
+    tail -n +2 "$LIB_MANIFEST" | tr -d '\r' | grep . | head -1024; } > "$slice"
   local ntok
   ntok=$(tail -n +2 "$slice" | grep -c .)
   [ "$ntok" -eq 1024 ] || { pipeline_fail "expected exactly 1024 tokens in slice, got $ntok"; return 1; }
@@ -461,7 +536,7 @@ pipeline_verify_tm_config() {
   local recreate_hint="recreate the containers (a plain 'docker compose restart' reuses the OLD config): cd code/01_platform/01_docker && docker compose --env-file .env --env-file secrets.env up -d --force-recreate flink-jobmanager flink-taskmanager"
 
   local cfg
-  cfg="$($COMPOSE exec -T flink-taskmanager cat /opt/flink/conf/config.yaml 2>/dev/null || true)"
+  cfg="$("${COMPOSE[@]}" exec -T flink-taskmanager cat /opt/flink/conf/config.yaml 2>/dev/null || true)"
   [ -n "$cfg" ] || { pipeline_fail "G23: cannot read flink-taskmanager /opt/flink/conf/config.yaml - is the container up (or crash-looping? check: docker logs 01_docker-flink-taskmanager-1)"; return 1; }
   if printf '%s\n' "$cfg" | head -1 | grep -q "ERROR"; then
     pipeline_fail "G23: TM config.yaml starts with '[ERROR]' - the docker-entrypoint config merge FAILED (FLINK_PROPERTIES key collision; see code/01_platform/04_scripts/check_flink_properties.py, guard G22). The TM will crash-loop. Fix the compose file, then $recreate_hint"
@@ -503,6 +578,16 @@ pipeline_start_faketool() {
   local inject_args=()
   # F2/F3 audit injection (2026-08-30): optional, from INJECT_* env vars.
   # See faketool main.go -inject-* flags for semantics.
+  # P6-474: these are interpolated into -inject-* flags as bare ms/rounds (code
+  # appends 'ms'). A non-integer used to fail as "integer expression expected"
+  # or as a faketool parse error hidden behind the 15s readiness timeout.
+  local _inj
+  for _inj in "${INJECT_AFTER_MS:-0}" "${INJECT_DUPS:-0}" "${INJECT_LATE:-0}" \
+              "${INJECT_LATE_MS:-90000}" "${INJECT_EVERY_MS:-0}" "${INJECT_MAX_ROUNDS:-0}"; do
+    case "$_inj" in
+      ''|*[!0-9]*) pipeline_fail "INJECT_AFTER_MS/DUPS/LATE/LATE_MS/EVERY_MS/MAX_ROUNDS must be non-negative integers (got '$_inj')"; return 1 ;;
+    esac
+  done
   if [ "${INJECT_AFTER_MS:-0}" -gt 0 ]; then
     inject_args=(
       -inject-after-ms "${INJECT_AFTER_MS}ms"
@@ -525,6 +610,7 @@ pipeline_start_faketool() {
   # Mirror container stdout into the evidence dir continuously; `docker
   # logs -f` exits when the container is removed at cleanup.
   docker logs -f "$LIB_FAKETOOL_CONTAINER" > "$OUT/faketool.log" 2>&1 &
+  FAKETOOL_LOG_PID=$!
 
   # Readiness: faketool prints real_rate=true once serving. Poll the
   # mirrored log + container liveness (B2: alive after start).
@@ -538,6 +624,10 @@ pipeline_start_faketool() {
   if [ "$ready" != 1 ]; then
     pipeline_fail "faketool container not ready in 15s (running=$running) — log tail (full log: $OUT/faketool.log):"
     tail -5 "$OUT/faketool.log" >&2 || true
+    # P6-145: no partial-start leak — without this the just-started container
+    # (and its orphaned log mirror) tripped G26 on the next run.
+    kill "$FAKETOOL_LOG_PID" 2>/dev/null || true
+    docker rm -f "$LIB_FAKETOOL_CONTAINER" >/dev/null 2>&1 || true
     return 1
   fi
   pipeline_log "faketool container $LIB_FAKETOOL_CONTAINER on :$FAKETOOL_PORT (${RATE_HZ}Hz x 1024 = $((RATE_HZ * 1024))/s), network $LIB_TRADING_NET, real-rate confirmed"
@@ -560,9 +650,16 @@ pipeline_start_ingestion() {
   # marker behind. Remove it before starting; otherwise the first poll
   # below can accept a dead process as ready (observed 2026-08-31).
   rm -f "$OUT/ingestion.loadtest.ready"
+  # P6-146: credentials are NOT literals here (they were visible via docker
+  # inspect/ps and committed). They come from the same git-ignored secrets.env
+  # that the compose commands in this repo already pass.
+  [ -f "$LIB_SECRETS_FILE" ] \
+    || { pipeline_fail "missing $LIB_SECRETS_FILE — ingestion credentials must come from it (ARROW_APP_SECRET, ARROW_PASSWORD, ARROW_TOTP_KEY)"; return 1; }
   docker run -d --name "$LIB_INGESTION_CONTAINER" \
     --network "$LIB_TRADING_NET" \
+    --env-file "$LIB_SECRETS_FILE" \
     -v "$OUT":/run -v "$OUT/j1":/logs \
+    --mount "type=bind,src=$OUT/instruments-1024.csv,dst=/run/instruments-1024.csv,readonly" \
     -e LOG_DIR=/logs \
     -e READINESS_FILE_PATH=/run/ingestion.loadtest.ready \
     -e ARROW_HFT_URL="ws://$LIB_FAKETOOL_CONTAINER:$FAKETOOL_PORT" \
@@ -570,9 +667,7 @@ pipeline_start_ingestion() {
     -e ARROW_FAKE_BROKER=1 \
     -e TRANSPORT=proto \
     -e SECRETS_VIA_ENV_FILE=1 \
-    -e ARROW_APP_ID=testd -e ARROW_APP_SECRET=testd \
-    -e ARROW_USER_ID=testd-user -e ARROW_PASSWORD=testd-pass \
-    -e ARROW_TOTP_KEY=JBSWY3DPEHPK3PXP \
+    -e "ARROW_APP_ID=${ARROW_APP_ID:-testd}" -e "ARROW_USER_ID=${ARROW_USER_ID:-testd-user}" \
     -e INSTRUMENT_MANIFEST_PATH=/run/instruments-1024.csv \
     -e FLUSS_BOOTSTRAP=fluss-coordinator:9123 \
     -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 \
@@ -594,6 +689,7 @@ pipeline_start_ingestion() {
   # Mirror stdout (OTLP feed->ack payloads) — stage-capture parses this
   # file for ingestion.tsv. Dies with the container at cleanup.
   docker logs -f "$LIB_INGESTION_CONTAINER" > "$OUT/j1/java.out" 2>&1 &
+  INGESTION_LOG_PID=$!
 
   # Readiness = marker file via the /run bind mount + bridge subscription.
   local ready=0 i running
@@ -606,12 +702,28 @@ pipeline_start_ingestion() {
   if [ "$ready" != 1 ]; then
     pipeline_fail "ingestion container not ready in 120s (running=$running) — log tail (full log: $OUT/j1/java.out):"
     tail -10 "$OUT/j1/java.out" >&2 || true
+    kill "$INGESTION_LOG_PID" 2>/dev/null || true
+    docker rm -f "$LIB_INGESTION_CONTAINER" >/dev/null 2>&1 || true
     return 1
   fi
   for i in $(seq 1 30); do grep -q "HFT subscribed" "$OUT/j1/java.out" 2>/dev/null && break; sleep 1; done
   grep -q "HFT subscribed" "$OUT/j1/java.out" 2>/dev/null \
-    || { pipeline_fail "bridge never subscribed — log tail (full log: $OUT/j1/java.out):"; tail -10 "$OUT/j1/java.out" >&2; return 1; }
+    || { pipeline_fail "bridge never subscribed — log tail (full log: $OUT/j1/java.out):"
+         tail -10 "$OUT/j1/java.out" >&2
+         kill "$INGESTION_LOG_PID" 2>/dev/null || true
+         docker rm -f "$LIB_INGESTION_CONTAINER" >/dev/null 2>&1 || true
+         return 1; }
   pipeline_log "ingestion container $LIB_INGESTION_CONTAINER ready + bridge subscribed (1024 tokens)"
+}
+
+# P6-478: container names carry the compose project prefix, which is derived
+# from the 01_docker directory name — resolve the live container id instead of
+# hardcoding "01_docker-flink-jobmanager-1" (breaks on any project rename).
+pipeline_compose_cid() {
+  local svc="$1" cid=""
+  cid="$("${COMPOSE[@]}" ps -q "$svc" 2>/dev/null | head -1 || true)"
+  [ -n "$cid" ] || { pipeline_fail "$svc container not found — is the stack up? (${COMPOSE[*]} ps)"; return 1; }
+  printf '%s\n' "$cid"
 }
 
 # ---------- SignalJob submit ----------
@@ -636,7 +748,14 @@ pipeline_purge_table() {
   # phase; reading all history would blow the analyzer's memory).
   local ddl_file="$1" label="$2"
   pipeline_log "purging $label table (drop + recreate)"
-  cat > /tmp/TablePurge.java <<'JAVAEOF'
+  # P6-147/P6-476: a private temp dir per call. The fixed /tmp/TablePurge.java
+  # and .class raced between concurrent runs, were predictable enough for a
+  # symlink attack on a world-writable /tmp, and left TablePurge$*.class
+  # behind — which -cp /tmp could then load as a stale inner class.
+  local tmpdir
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/tablepurge.XXXXXX")" \
+    || { pipeline_fail "cannot create a temp dir for the $label DDL helper"; return 1; }
+  cat > "$tmpdir/TablePurge.java" <<'JAVAEOF'
 import com.trading.common.schema.ddl.DdlText;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
@@ -670,11 +789,11 @@ public class TablePurge {
 }
 JAVAEOF
   local purge_out
-  purge_out="$(cd /tmp && javac -cp "$CP" -d /tmp TablePurge.java 2>&1 \
+  purge_out="$(cd "$tmpdir" && javac -cp "$CP" -d "$tmpdir" TablePurge.java 2>&1 \
       && java --add-opens=java.base/java.lang=ALL-UNNAMED \
        --add-opens=java.base/java.nio=ALL-UNNAMED \
-       -cp "/tmp:$CP" TablePurge "$ddl_file" 2>&1)" || true
-  rm -f /tmp/TablePurge.java /tmp/TablePurge.class
+       -cp "$tmpdir:$CP" TablePurge "$ddl_file" 2>&1)" || true
+  rm -rf "$tmpdir"
   if echo "$purge_out" | grep -q "PURGED"; then
     pipeline_log "$label table purged"
   else
@@ -685,6 +804,13 @@ JAVAEOF
     pipeline_log "WARN: $label purge output: $(echo "$purge_out" | tail -2)"
     if [ "${PURGE_STRICT:-false}" = "true" ]; then
       pipeline_fail "$label purge did not report PURGED — refusing to run a fault drill with stale data"
+      return 1
+    fi
+    # P6-148: continuing here replayed all prior phases' rows (raw) and the
+    # accumulated preview keys — the exact baseline corruption the purge exists
+    # to prevent. Accepting stale data is now an explicit caller decision.
+    if [ "${ALLOW_STALE_TABLE:-false}" != "true" ]; then
+      pipeline_fail "$label purge failed and ALLOW_STALE_TABLE!=true — refusing to measure on stale data (set ALLOW_STALE_TABLE=true to accept it deliberately)"
       return 1
     fi
   fi
@@ -703,7 +829,11 @@ pipeline_ensure_candle_tables() {
   pipeline_require_preflight || return 1
   local ddl_file="$1" label="$2"
   pipeline_log "ensuring $label table exists (create-if-absent)"
-  cat > /tmp/TableEnsureCandle.java <<'JAVAEOF'
+  # P6-147/P6-476: same fixed-/tmp race as pipeline_purge_table — private dir.
+  local tmpdir
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/tableensure.XXXXXX")" \
+    || { pipeline_fail "cannot create a temp dir for the $label DDL helper"; return 1; }
+  cat > "$tmpdir/TableEnsureCandle.java" <<'JAVAEOF'
 import com.trading.common.schema.ddl.DdlText;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
@@ -737,11 +867,11 @@ public class TableEnsureCandle {
 }
 JAVAEOF
   local ensure_out
-  ensure_out="$(cd /tmp && javac -cp "$CP" -d /tmp TableEnsureCandle.java 2>&1 \
+  ensure_out="$(cd "$tmpdir" && javac -cp "$CP" -d "$tmpdir" TableEnsureCandle.java 2>&1 \
       && java --add-opens=java.base/java.lang=ALL-UNNAMED \
        --add-opens=java.base/java.nio=ALL-UNNAMED \
-       -cp "/tmp:$CP" TableEnsureCandle "$ddl_file" 2>&1)" || true
-  rm -f /tmp/TableEnsureCandle.java /tmp/TableEnsureCandle.class
+       -cp "$tmpdir:$CP" TableEnsureCandle "$ddl_file" 2>&1)" || true
+  rm -rf "$tmpdir"
   if echo "$ensure_out" | grep -qE "EXISTS|CREATED"; then
     pipeline_log "$label table ready ($(echo "$ensure_out" | grep -oE 'EXISTS|CREATED'))"
   else
@@ -753,11 +883,19 @@ JAVAEOF
 pipeline_submit_job() {
   pipeline_require_preflight || return 1
   pipeline_log "deploying SignalJob (previews 1s, early signals on, confirm-after 4s)"
-  docker exec 01_docker-flink-jobmanager-1 mkdir -p /opt/flink/jobs 2>/dev/null \
+  # P6-149/150: clear FIRST — a failure while resolving the container or copying
+  # the jar used to leave the previous run's ID behind, so cleanup cancelled an
+  # unrelated job and the later polls queried it. (Found by the wave-17 test:
+  # the clear sat below the copy.)
+  JOB_ID=""
+  local jm_cid
+  jm_cid="$(pipeline_compose_cid flink-jobmanager)" || return 1
+  docker exec "$jm_cid" mkdir -p /opt/flink/jobs 2>/dev/null \
     || { pipeline_fail "mkdir /opt/flink/jobs in flink-jobmanager failed"; return 1; }
-  docker cp "$LIB_JAR" 01_docker-flink-jobmanager-1:/opt/flink/jobs/compute.jar \
+  docker cp "$LIB_JAR" "$jm_cid:/opt/flink/jobs/compute.jar" \
     || { pipeline_fail "jar copy to flink-jobmanager failed"; return 1; }
   local submit_out
+  local submit_rc=0
   # Single-timeline rule (2026-08-30): WATERMARK_OUT_OF_ORDER_MS is passed
   # explicitly so every run log shows the active value; default 500ms
   # matches the code default. NOTE: keep comments OUT of the continued
@@ -802,7 +940,7 @@ pipeline_submit_job() {
   if [ "${UNALIGNED_CHECKPOINTS:-false}" = "true" ]; then
     extra_flags+=(-Dexecution.checkpointing.unaligned=true)
   fi
-  submit_out="$($COMPOSE exec -T \
+  submit_out="$("${COMPOSE[@]}" exec -T \
     -e ALLOW_FULL_REPLAY="${ALLOW_FULL_REPLAY:-false}" \
     -e DEPLOYMENT_ENV=dev \
     -e CONFIGURATION_VERSION=1.0.0 \
@@ -831,10 +969,19 @@ pipeline_submit_job() {
     -e CANDLE_CLOSED_TABLE="${CANDLE_CLOSED_TABLE:-candle_closed}" \
     -e MULTITF_LIVE_SNAPSHOT_INTERVAL_MS="${MULTITF_LIVE_SNAPSHOT_INTERVAL_MS:-1000}" \
     flink-jobmanager flink run -d "${extra_flags[@]}" \
-      -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar 2>&1)"
-  JOB_ID="$(echo "$submit_out" | grep -oE 'JobID [a-f0-9]+' | awk '{print $2}' | head -1)"
+      -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar 2>&1)" || submit_rc=$?
+  if [ "$submit_rc" -ne 0 ]; then
+    # P6-149: without this a `set -e` caller exited before the empty-JOB_ID
+    # check ran, and the failure text was never shown.
+    echo "!! SignalJob submit command failed (rc=$submit_rc):" >&2
+    echo "$submit_out" >&2
+    return 1
+  fi
+  # P6-149: -i accepts the uppercase / "Job has been submitted with JobID ..."
+  # forms too (a miss left JOB_ID empty, or stale from the previous run).
+  JOB_ID="$(printf '%s\n' "$submit_out" | grep -oiE 'JobID [a-f0-9]+' | awk '{print $2}' | head -1)"
   if [ -z "$JOB_ID" ]; then
-    echo "!! SignalJob submit output:" >&2; echo "$submit_out" >&2
+    echo "!! SignalJob submit output (no JobID parsed):" >&2; echo "$submit_out" >&2
     return 1
   fi
   pipeline_log "SignalJob submitted: job_id=$JOB_ID"
@@ -842,17 +989,37 @@ pipeline_submit_job() {
 
 # ---------- teardown ----------
 pipeline_cleanup() {
-  # CHG-122: the data path is containers — remove them. The `docker logs -f`
-  # mirror processes exit when their container disappears.
+  # CHG-122: the data path is containers — remove them. P6-479: kill the
+  # `docker logs -f` mirrors explicitly (they outlived `docker rm -f`, and on a
+  # failed rm they spun) and clear JOB_ID so a second EXIT / timeout retry
+  # cannot re-cancel a dead job with a stale id.
+  kill "${FAKETOOL_LOG_PID:-}" "${INGESTION_LOG_PID:-}" 2>/dev/null || true
+  wait "${FAKETOOL_LOG_PID:-}" "${INGESTION_LOG_PID:-}" 2>/dev/null || true
+  FAKETOOL_LOG_PID=""; INGESTION_LOG_PID=""
+  local job="${JOB_ID:-}"
   docker rm -f "$LIB_INGESTION_CONTAINER" "$LIB_FAKETOOL_CONTAINER" >/dev/null 2>&1 || true
   rm -f "$OUT/ingestion.loadtest.ready"
-  if [ -n "$JOB_ID" ]; then
-    echo "cleanup: cancelling SignalJob $JOB_ID"
-    $COMPOSE exec -T flink-jobmanager flink cancel "$JOB_ID" >/dev/null 2>&1 || true
+  if [ -n "$job" ]; then
+    echo "cleanup: cancelling SignalJob $job"
+    "${COMPOSE[@]}" exec -T flink-jobmanager flink cancel "$job" >/dev/null 2>&1 || true
   fi
-  echo "cleanup: removed containers=$LIB_FAKETOOL_CONTAINER,$LIB_INGESTION_CONTAINER job=$JOB_ID"
+  JOB_ID=""
+  echo "cleanup: removed containers=$LIB_FAKETOOL_CONTAINER,$LIB_INGESTION_CONTAINER job=$job"
 }
-pipeline_install_cleanup_trap() { trap pipeline_cleanup EXIT; }
+pipeline_install_cleanup_trap() {
+  # P6-151: a bare `trap pipeline_cleanup EXIT` DISCARDED whatever EXIT trap the
+  # caller had already installed (evidence flush, its own teardown), and a
+  # second source of this lib discarded the first cleanup. Chain instead, and
+  # keep the first caller's trap when installed twice.
+  # The evaled string is the caller's OWN trap text, not operator input.
+  local prev=""
+  prev="$(trap -p EXIT | sed -E "s/^trap -- '(.*)' EXIT$/\1/")"
+  if [ -z "${PIPELINE_EXIT_TRAP_INSTALLED:-}" ]; then
+    PIPELINE_PREV_EXIT_TRAP="${prev:-}"
+    PIPELINE_EXIT_TRAP_INSTALLED=1
+  fi
+  trap 'pipeline_cleanup; eval "${PIPELINE_PREV_EXIT_TRAP:-:}"' EXIT
+}
 
 # ---------- checkpoint + GC telemetry (2026-08-30) ----------
 # The REST /jobs/<id>/checkpoints history is TRIMMED after job cancel, so
@@ -860,20 +1027,35 @@ pipeline_install_cleanup_trap() { trap pipeline_cleanup EXIT; }
 # the run is the only reliable record (observed: 10 of ~90 checkpoints
 # survived after cancel).
 capture_checkpoint_history() {
+  # P6-480: this helper used to run on $JOB_ID/$OUT directly — an empty JOB_ID
+  # produced curls to /jobs//checkpoints and wrote empty evidence.
+  pipeline_require_preflight || return 1
+  # `: "${JOB_ID:?...}"` exited the whole sourcing script from inside a function;
+  # fail the call instead so the sweeps' cleanup trap still runs.
+  [ -n "${JOB_ID:-}" ] || { pipeline_fail "capture_checkpoint_history: no job submitted — call pipeline_submit_job first"; return 1; }
   # One snapshot of the full checkpoint history → JSONL appended per poll.
   local dest="${1:-$OUT/checkpoints.jsonl}"
-  curl -s --max-time 10 "http://localhost:8081/jobs/$JOB_ID/checkpoints" \
-    | python3 -c "
+  # P6-152: the fetch is checked explicitly. Before this, `| python3 ... || true`
+  # plus `except: sys.exit(0)` meant a curl failure or non-JSON answer appended
+  # nothing and still exited 0 — an empty checkpoints.jsonl was then
+  # indistinguishable from "the job made zero checkpoints".
+  local slim_json
+  if ! slim_json="$(curl -fsS --max-time 10 "http://localhost:8081/jobs/$JOB_ID/checkpoints" 2>"$OUT/checkpoints-fetch.err")"; then
+    pipeline_fail "checkpoint history fetch failed (job=$JOB_ID): $(tail -2 "$OUT/checkpoints-fetch.err" 2>/dev/null | tr '\n' ' ')"
+    return 1
+  fi
+  printf '%s' "$slim_json" | python3 -c "
 import json, sys
 try:
     j = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
+except Exception as e:
+    print(f'checkpoint history parse failed: {e}', file=sys.stderr)
+    sys.exit(1)
 for c in j.get('history', []):
     print(json.dumps({'id': c.get('id'), 'trigger_ts': c.get('trigger_timestamp'),
                       'duration_ms': c.get('end_to_end_duration'),
                       'size': c.get('state_size'), 'status': c.get('status')}))
-" >> "$dest" 2>/dev/null || true
+" >> "$dest" || { pipeline_fail "checkpoint history parse failed — evidence NOT appended"; return 1; }
   # B5 Phase-0 (2026-08-31): the slim projection above cannot answer WHICH
   # phase of a checkpoint freezes emission (sync / async / alignment).
   # The per-task breakdown IS available live via the detail endpoint — the
@@ -881,13 +1063,14 @@ for c in j.get('history', []):
   # the run. Written to a separate file to keep the slim file's schema
   # stable for the existing analyzer paths.
   local detail_dest="${dest%.jsonl}-detail.jsonl"
-  curl -s --max-time 10 "http://localhost:8081/jobs/$JOB_ID/checkpoints" \
+  curl -fsS --max-time 10 "http://localhost:8081/jobs/$JOB_ID/checkpoints" \
     | python3 -c "
 import json, sys
 try:
     j = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
+except Exception as e:
+    print(f'checkpoint detail parse failed: {e}', file=sys.stderr)
+    sys.exit(1)
 # latest completed checkpoint only (poll runs every POLL_S seconds; the
 # detail endpoint returns the FULL tasks map per checkpoint — capturing all
 # history each poll would duplicate megabytes)
@@ -911,7 +1094,7 @@ if done:
                       'e2e_ms': c.get('end_to_end_duration'),
                       'alignment_buffered': c.get('alignment_buffered'),
                       'tasks': rows}))
-" >> "$detail_dest" 2>/dev/null || true
+" >> "$detail_dest" || pipeline_log "WARN: checkpoint-detail capture failed (parse error above) — the slim history file is unaffected"
   if [ -s "$detail_dest" ]; then
     local tmpd
     tmpd="$(mktemp)"
@@ -935,7 +1118,9 @@ if done:
 # into the evidence dir. Safe to call any time; empty if GC logging absent.
 harvest_tm_gc_log() {
   local dest="${1:-$OUT/tm-gc.log}"
-  docker exec 01_docker-flink-taskmanager-1 sh \
+  local tm_cid
+  tm_cid="$(pipeline_compose_cid flink-taskmanager 2>/dev/null)" || return 0
+  docker exec "$tm_cid" sh \
       -c 'cat /opt/flink/log/gc.log 2>/dev/null' > "$dest" 2>/dev/null || true
 }
 
@@ -949,7 +1134,16 @@ harvest_tm_gc_log() {
 flink_metric_dump() {
   local job="${1:-$JOB_ID}"
   local rest="${FLINK_REST_URL:-http://localhost:8081}"
-  curl -fsS --max-time 10 "$rest/jobs/$job" | \
+  local err="${OUT:-/tmp}/flink-metric-fetch.err"
+  # P6-481: the curl status is checked explicitly — a failed curl used to feed
+  # the python empty stdin, which exited 0 and printed an EMPTY dump that
+  # callers then parsed as "zero progress".
+  local job_json
+  if ! job_json="$(curl -fsS --max-time 10 "$rest/jobs/$job" 2>"$err")"; then
+    echo "flink_metric_dump: job fetch failed ($rest/jobs/$job) — see $err" >&2
+    return 1
+  fi
+  printf '%s' "$job_json" | \
     FLINK_METRIC_REST="$rest" FLINK_METRIC_JOB="$job" python3 -c '
 import json
 import os
@@ -958,8 +1152,9 @@ import urllib.request
 
 try:
     job = json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
+except Exception as e:
+    print(f"flink_metric_dump: job JSON parse failed: {e}", file=sys.stderr)
+    sys.exit(1)
 
 base = os.environ["FLINK_METRIC_REST"].rstrip("/")
 jid = os.environ["FLINK_METRIC_JOB"]
@@ -1039,11 +1234,23 @@ for vertex in job.get("vertices", []):
     # Priority: full-subtask sum > subtask-0 live > terminal job summary.
     # A terminal job may no longer expose live vertex metrics; the
     # accumulated summary then remains the evidence of record.
-    totals = live_subtask_sums(vertex_id) or live_subtask_zero(vertex_id) or summary
+    totals = live_subtask_sums(vertex_id)
+    source = "full-sum"
+    if totals is None:
+        totals = live_subtask_zero(vertex_id)
+        source = "subtask0"        # partial: 1 of N subtasks (8x under-report at P=8)
+    if totals is None:
+        totals = summary
+        source = "job-summary"     # terminal-job fallback; may be stale for a RUNNING job
+    # P6-482: which fallback served the numbers is now stated (stderr, so the
+    # stdout shape stays name|read|write for the existing parsers) instead of a
+    # subtask0-only view printing in the same shape as a full sum.
+    vname = vertex.get("name", "?")
+    print(f"flink_metric_dump: {vname} counters from {source}", file=sys.stderr)
     read = totals.get("numRecordsIn", totals.get("read-records", "-"))
     write = totals.get("numRecordsOut", totals.get("write-records", "-"))
     print(vertex.get("name", "?"), "|", read, "|", write)
-' 2>/dev/null
+' 2>>"$err"
 }
 
 # Return the cumulative counter used to prove that the raw feed is traversing
@@ -1084,10 +1291,21 @@ pipeline_metric_input_progress() {
 # Wait until the job reaches the given state (default RUNNING) or timeout.
 flink_wait_state() {
   local want="${1:-RUNNING}" timeout_s="${2:-60}" i state
-  for i in $(seq 1 "$timeout_s"); do
+  # P6-483: validate the timeout (a non-numeric or huge value expanded into
+  # millions of seq arguments) and abort on a TERMINAL state instead of waiting
+  # the whole timeout for a job that can never reach $want.
+  case "${timeout_s:-}" in
+    ''|*[!0-9]*|0) pipeline_fail "flink_wait_state: bad timeout '$timeout_s' (want a positive integer of seconds)"; return 1 ;;
+  esac
+  for ((i = 1; i <= timeout_s; i++)); do
     state="$(curl -s --max-time 5 "http://localhost:8081/jobs/$JOB_ID" | python3 -c "import json,sys
 try: print(json.load(sys.stdin).get('state',''))
 except Exception: print('')" 2>/dev/null)"
+    case "$state" in
+      FAILED|CANCELED|CANCELLED|FINISHED|SUSPENDED)
+        [ "$state" = "$want" ] || { pipeline_fail "job reached terminal state $state but $want was requested (job_id=$JOB_ID)"; return 1; }
+        ;;
+    esac
     [ "$state" = "$want" ] && { pipeline_log "job state=$want after ${i}s"; return 0; }
     sleep 1
   done

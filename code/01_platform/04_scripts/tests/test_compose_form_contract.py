@@ -112,14 +112,14 @@ SITES: list[tuple[str, str, str, str]] = [
     ("code/01_platform/04_scripts/image_staleness_check.py", "image not built (docker compose build", "TEXT", "message"),
     ("code/01_platform/04_scripts/image_staleness_check.py", "--print-stamps-env) docker compose", "TEXT", "message"),
     ("code/01_platform/04_scripts/image_staleness_check.py", "reach docker compose (rebuild: make images)", "TEXT", "message"),
-    ("code/01_platform/04_scripts/pipeline-lib.sh", "a foreign or corrupt image", "TEXT", "G27 message"),
-    ("code/01_platform/04_scripts/pipeline-lib.sh", "is STALE — its build stamp", "TEXT", "G27 message"),
-    ("code/01_platform/04_scripts/pipeline-lib.sh", "$COMPOSE restart flink-taskmanager", "VAR", ""),
-    ("code/01_platform/04_scripts/pipeline-lib.sh", "$COMPOSE build loadgen", "VAR", ""),
+    ("code/01_platform/04_scripts/pipeline-lib.sh", '"${COMPOSE[@]}" restart flink-taskmanager', "VAR", ""),
+    ("code/01_platform/04_scripts/pipeline-lib.sh", '"${COMPOSE[@]}" build loadgen', "VAR", ""),
     ("code/01_platform/04_scripts/pipeline-lib.sh", "recreate the containers (a plain", "TEXT", "hint text"),
-    ("code/01_platform/04_scripts/pipeline-lib.sh", "$COMPOSE exec -T flink-taskmanager", "VAR", ""),
-    ("code/01_platform/04_scripts/pipeline-lib.sh", "$COMPOSE exec -T  -e ALLOW_FULL_REPLAY", "VAR", ""),
-    ("code/01_platform/04_scripts/pipeline-lib.sh", "$COMPOSE exec -T flink-jobmanager flink cancel", "VAR", ""),
+    ("code/01_platform/04_scripts/pipeline-lib.sh", '"${COMPOSE[@]}" ps -q', "VAR",
+     "P6-478: container discovery via the compose array, not a hardcoded container name"),
+    ("code/01_platform/04_scripts/pipeline-lib.sh", '"${COMPOSE[@]}" exec -T flink-taskmanager', "VAR", ""),
+    ("code/01_platform/04_scripts/pipeline-lib.sh", '"${COMPOSE[@]}" exec -T  -e ALLOW_FULL_REPLAY', "VAR", ""),
+    ("code/01_platform/04_scripts/pipeline-lib.sh", '"${COMPOSE[@]}" exec -T flink-jobmanager flink cancel', "VAR", ""),
     ("code/01_platform/04_scripts/rollout-savepoint.sh", "DRY: docker compose -f $COMPOSE_FILE", "TEXT", "dry-run log text"),
     ("code/01_platform/04_scripts/run-full-suite.sh", "secrets.env build ingestion)", "FLAGS_DIR", ""),
     ("code/01_platform/04_scripts/run-full-suite.sh", "docker-compose.soak.yml up -d --force-recreate ingestion",
@@ -149,7 +149,7 @@ SITES: list[tuple[str, str, str, str]] = [
 DEFS: list[tuple[str, str, str]] = [
     ("Makefile", "COMPOSE := docker compose", "COMPOSE"),
     ("code/01_platform/04_scripts/catalog-guard.sh", "COMPOSE=(docker compose", "COMPOSE"),
-    ("code/01_platform/04_scripts/pipeline-lib.sh", 'COMPOSE="docker compose', "COMPOSE"),
+    ("code/01_platform/04_scripts/pipeline-lib.sh", "COMPOSE=(docker compose", "COMPOSE"),
 ]
 
 COMPOSE_DEBT = """

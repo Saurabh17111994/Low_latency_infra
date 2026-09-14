@@ -47,6 +47,10 @@ POLL_S="${POLL_S:-5}"
 RATE_HZ="${RATE_HZ:-10}"
 CHECKPOINT_TIMEOUT_MS="${CHECKPOINT_TIMEOUT_MS:-30000}"
 ALLOW_FULL_REPLAY="${ALLOW_FULL_REPLAY:-false}"
+# P6-148: a failed purge is non-fatal for this measurement script (the smoke
+# gate catches a failed CREATE), but it must now SAY so — pipeline_purge_table
+# refuses to continue on stale data unless this is set.
+export ALLOW_STALE_TABLE=true
 WARMUP_S="${WARMUP_S:-45}"
 
 # shellcheck source=pipeline-lib.sh

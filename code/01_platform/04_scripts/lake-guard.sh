@@ -36,7 +36,9 @@ fail() { printf '!! lake-guard FAIL: %s\n' "$*" >&2; exit 1; }
 bad()  { printf '!! lake-guard INPUT: %s\n' "$*" >&2; exit 2; }
 _ist() { TZ=Asia/Kolkata date "$@"; }
 
-TODAY="$(_ist +%Y%m%d)"
+# Test hook (like LAKE_GUARD_CHECK_DAY): the after-deadline check compares
+# against the real IST day, so a run that straddles midnight flakes. Tests pin it.
+TODAY="${LAKE_GUARD_TODAY:-$(_ist +%Y%m%d)}"
 YEST="${LAKE_GUARD_CHECK_DAY:-$(_ist -d 'yesterday' +%Y%m%d)}"
 MIN_MANIFESTS="${LAKE_GUARD_MIN_MANIFESTS:-2}"
 MAX_AGE_H="${LAKE_GUARD_MAX_MANIFEST_AGE_H:-48}"
@@ -49,6 +51,10 @@ _need_int() { case "$2" in ''|*[!0-9]*) bad "$1 must be a whole number, got '$2'
 case "$YEST" in
     [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
     *) bad "LAKE_GUARD_CHECK_DAY must be yyyyMMdd, got '$YEST'" ;;
+esac
+case "$TODAY" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) bad "LAKE_GUARD_TODAY must be yyyyMMdd, got '$TODAY'" ;;
 esac
 _need_int LAKE_GUARD_MIN_MANIFESTS "$MIN_MANIFESTS"
 _need_int LAKE_GUARD_MAX_MANIFEST_AGE_H "$MAX_AGE_H"

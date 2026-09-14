@@ -129,6 +129,10 @@ class FlinkMetricDumpTest(unittest.TestCase):
     def test_downstream_progress_proves_feed_when_raw_snapshot_is_zero(self) -> None:
         root = Path(__file__).resolve().parents[4]
         lib = root / "code/01_platform/04_scripts/pipeline-lib.sh"
+        # P6-142: the lib refuses to be sourced without ROOT/RATE_HZ.
+        env = os.environ.copy()
+        env["ROOT"] = str(root)
+        env["RATE_HZ"] = "10"
         dump = (
             "STATE RUNNING\n"
             "Source: raw-table-1 -> raw-validation | 0 | 0\n"
@@ -144,12 +148,17 @@ class FlinkMetricDumpTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
         self.assertEqual(result.stdout.strip(), "26071")
 
     def test_missing_raw_and_downstream_progress_fails_closed(self) -> None:
         root = Path(__file__).resolve().parents[4]
         lib = root / "code/01_platform/04_scripts/pipeline-lib.sh"
+        # P6-142: the lib refuses to be sourced without ROOT/RATE_HZ.
+        env = os.environ.copy()
+        env["ROOT"] = str(root)
+        env["RATE_HZ"] = "10"
         dump = (
             "STATE RUNNING\n"
             "Source: raw-table-1 -> raw-validation | 0 | 0\n"
@@ -164,6 +173,7 @@ class FlinkMetricDumpTest(unittest.TestCase):
             check=True,
             capture_output=True,
             text=True,
+            env=env,
         )
         self.assertEqual(result.stdout.strip(), "-1")
 

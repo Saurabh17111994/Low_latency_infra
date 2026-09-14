@@ -38,6 +38,13 @@ r2_list_lake() {
 """
 
 
+def _ist_day():
+    """The guard's own notion of "today" (IST), for tests that need the real day."""
+    import subprocess as _sp
+    return _sp.run(["date", "+%Y%m%d"], capture_output=True, text=True,
+                   env={**os.environ, "TZ": "Asia/Kolkata"}).stdout.strip()
+
+
 def _iso(delta_hours=0):
     now = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=delta_hours)
     return now.strftime("%Y-%m-%dT%H:%M:%S.000Z")
@@ -68,7 +75,12 @@ class LakeGuardTests(unittest.TestCase):
         self.tsv = self.dir / "objects.tsv"
 
     def run_guard(self, objects, *, env=None, check_day="20260913", after="9999",
-                  fail_prefix=None, r2_prefix=None, r2_load_rc=None):
+                  fail_prefix=None, r2_prefix=None, r2_load_rc=None,
+                  today="20260914"):
+        # P6-448: today is pinned (LAKE_GUARD_TODAY) — the after-deadline check
+        # reads the real IST day, so these two tests flaked at midnight.
+        if today is None:
+            today = _ist_day()
         self.tsv.write_text(tsv(*objects), encoding="utf-8")
         full = {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -77,6 +89,7 @@ class LakeGuardTests(unittest.TestCase):
             "STUB_CALLS": str(self.calls),
             "STUB_TSV": str(self.tsv),
             "LAKE_GUARD_CHECK_DAY": check_day,
+            "LAKE_GUARD_TODAY": today,
             "LAKE_GUARD_AFTER": after,
             "LC_ALL": "C",
         }
@@ -132,7 +145,7 @@ class LakeGuardTests(unittest.TestCase):
             day(2, "20260913")
             + [(MANIFEST, 4096, _iso()), (TABLE + "metadata/00002-def.avro", 2048, _iso())]
             + [(TABLE + "data/event_day=20260914/_SUCCESS", 0, _iso())],
-            after="0000",
+            after="0000", today="20260914",
         )
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("today data objects: 0", out.stdout)
@@ -150,7 +163,7 @@ class LakeGuardTests(unittest.TestCase):
     def test_after_the_deadline_today_is_listed_third(self):
         out = self.run_guard(day(1, "20260913") + day(1, "20260914")
                              + [(MANIFEST, 4096, _iso()), (MANIFEST, 4096, _iso())],
-                             after="0000")
+                             after="0000", today="20260914")
         self.assertEqual(out.returncode, 0, out.stderr + out.stdout)
         self.assertEqual(self.listed(), [
             f"{TABLE}data/event_day=20260913/",
