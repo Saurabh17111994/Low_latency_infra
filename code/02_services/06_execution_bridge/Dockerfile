@@ -19,7 +19,7 @@ COPY 02_services/06_execution_bridge/go-bridge/*.go ./
 ARG TARGETARCH=amd64
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -o /execution-bridge .
 
-FROM alpine:3.22
+FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
 RUN addgroup -S execution && adduser -S -G execution execution
 WORKDIR /app
 COPY --from=go-builder /execution-bridge /app/execution-bridge
