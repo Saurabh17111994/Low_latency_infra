@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -18,23 +20,64 @@ class ObservabilityRegressionTest {
     // ---- R-045: nested structures must not corrupt the outer separator ----
 
     @Test
-    void nestedBlocksPreserveOuterSeparator() {
-        String json = Json.build(w -> w.obj(o1 -> {
-            o1.kv("a", "1");
-            o1.obj(o2 -> o2.kv("b", "2"));
-            o1.kv("c", "3"); // after a nested obj, the separator must still be correct
-        }));
-        assertEquals("{\"a\":\"1\",{\"b\":\"2\"},\"c\":\"3\"}", json);
+    void nestedContainersProduceValidJson() throws Exception {
+        String json = Json.buildObj(o -> {
+            o.kv("a", "1");
+            o.obj("nested", o2 -> o2.kv("b", "2"));
+            o.kv("c", "3"); // after a nested obj, the separator must still be correct
+            o.arr("list", a -> {
+                a.value("x");
+                a.value(7L);
+                a.obj(e -> e.kv("d", "4"));
+            });
+        });
+        assertEquals("{\"a\":\"1\",\"nested\":{\"b\":\"2\"},\"c\":\"3\","
+                + "\"list\":[\"x\",7,{\"d\":\"4\"}]}", json);
+        // The separator logic is only correct if the document actually parses.
+        JsonNode root = new ObjectMapper().readTree(json);
+        assertEquals("1", root.get("a").asText());
+        assertEquals("2", root.get("nested").get("b").asText());
+        assertEquals("4", root.get("list").get(2).get("d").asText());
         // Outer obj must end with the kv, not a dangling comma.
         assertFalse(json.endsWith(","));
         assertFalse(json.contains(",}"));
+    }
+
+    @Test
+    void mixedMemberSyntaxIsRejectedInsteadOfSerialized() {
+        // The old API emitted {"a":"1",{"b":"2"}} for this — invalid JSON.
+        assertThrows(IllegalStateException.class,
+                () -> Json.buildObj(o -> o.obj(o2 -> o2.kv("b", "2"))));
+        assertThrows(IllegalStateException.class,
+                () -> Json.buildObj(o -> o.arr(a -> a.value("x"))));
+        // Mirror case: a keyed member inside an array.
+        assertThrows(IllegalStateException.class,
+                () -> Json.buildArr(a -> a.kv("k", "v")));
+    }
+
+    @Test
+    void nullOrBlankKeyIsRejected() {
+        assertThrows(IllegalArgumentException.class, () -> Json.buildObj(o -> o.kv(null, "v")));
+        assertThrows(IllegalArgumentException.class, () -> Json.buildObj(o -> o.kv("  ", "v")));
+        assertThrows(IllegalArgumentException.class,
+                () -> Json.buildObj(o -> o.obj(null, inner -> inner.kv("a", "1"))));
+    }
+
+    @Test
+    void emptyContainersAndNullElementsSerializeLegally() {
+        assertEquals("[]", Json.buildArr(a -> { }));
+        assertEquals("{}", Json.buildObj(o -> { }));
+        assertEquals("[\"a\",null]", Json.buildArr(a -> {
+            a.value("a");
+            a.value((String) null);
+        }));
     }
 
     // ---- R-077: null values serialize as JSON null ----
 
     @Test
     void nullValueSerializesAsNull() {
-        String json = Json.build(w -> w.obj(o -> o.kv("k", (String) null)));
+        String json = Json.buildObj(o -> o.kv("k", (String) null));
         assertEquals("{\"k\":null}", json);
     }
 
@@ -116,5 +159,25 @@ class ObservabilityRegressionTest {
         assertEquals("***REDACTED***", AuditLogger.redact("password", "abc"));
         assertEquals("plain", AuditLogger.redact("symbol", "plain"));
         assertEquals(null, AuditLogger.redact("symbol", null));
+    }
+
+    @Test
+    void genericCredentialNamesAreRedacted() {
+        // The concrete names normalize to "authtoken"/"apikey", so a field named
+        // exactly `token`/`key` matched nothing and leaked verbatim.
+        assertEquals("***REDACTED***", AuditLogger.redact("token", "abc"));
+        assertEquals("***REDACTED***", AuditLogger.redact("key", "abc"));
+        assertEquals("***REDACTED***", AuditLogger.redact("clientToken", "abc"));
+        assertEquals("***REDACTED***", AuditLogger.redact("accessKey", "abc"));
+        // Names that merely look similar stay readable.
+        assertEquals("plain", AuditLogger.redact("id", "plain"));
+        assertEquals("plain", AuditLogger.redact("symbol_count", "plain"));
+    }
+
+    @Test
+    void nullFieldNameFailsClosed() {
+        // Mandatory redaction: an unknown field name must not pass the value through.
+        assertEquals("***REDACTED***", AuditLogger.redact(null, "abc"));
+        assertEquals(null, AuditLogger.redact(null, null));
     }
 }
