@@ -80,7 +80,9 @@ stdin, never on the command line (`ps`/`/proc/<pid>/cmdline` is world-readable).
 
 ## Recovery: rollback the v3 migration (last resort)
 
-1. Drop v3 table (`fluss-repair/RawTableAdmin.java drop`).
+1. Drop v3 table (`fluss-repair/RawTableAdmin.java drop`). The bootstrap address is an
+   option — `RawTableAdmin add-partition 20260101 --bootstrap host:9123` — never a
+   positional argument; a non-`yyyyMMdd` partition is refused before connecting.
 2. Recreate the v2 non-partitioned shape.
 3. `r2-move-prefix.sh lake/_stale-20260831-v1/raw_table_1/ lake/default/raw_table_1/` back.
    (Post-migration rows are only re-derivable from upstream replay.)

@@ -19,23 +19,39 @@ import org.apache.fluss.types.DataTypes;
  *   create                   create v3 partitioned table (options mirror
  *                            code/01_platform/02_sql/ddl/02_raw_table_1.sql)
  *   partitions               print partition names, one per line
- *   add-partition <name>     createPartition(ignoreIfExists=true) fallback
+ *   add-partition <yyyyMMdd>  createPartition(ignoreIfExists=true) fallback
  *                            if client dynamic partitioning is ever disabled
  * Schema derives from RawTableSchema (single source of truth).
- * Usage: java -cp "<out>:$(cat code/02_services/01_ingestion/target/cp.txt)" RawTableAdmin <subcommand>
+ * Usage: java -cp "<out>:$(cat code/02_services/01_ingestion/target/cp.txt)" RawTableAdmin
+ *            <subcommand> [args] [--bootstrap HOST:PORT]
+ * The bootstrap address is an OPTION, never a positional argument (P6-004): the old
+ * `args[1]`-is-bootstrap rule meant `add-partition 20260101` dialled `20260101` and
+ * left no way to pass both a partition and a bootstrap address.
  */
 public class RawTableAdmin {
 
     private static final TablePath PATH = TablePath.of("default", RawTableSchema.TABLE);
+    private static final String DEFAULT_BOOTSTRAP = "localhost:9123";
+    private static final String USAGE =
+            "usage: RawTableAdmin <drop|create|partitions|add-partition <yyyyMMdd>> [--bootstrap HOST:PORT]";
 
     public static void main(String[] args) throws Exception {
-        String cmd = args.length > 0 ? args[0] : "partitions";
-        String bootstrap = args.length > 1 ? args[1] : "localhost:9123";
+        // P6-384: parse and validate BEFORE opening a connection, so a typo fails
+        // instantly instead of after a cluster round-trip.
+        Command cmd;
+        try {
+            cmd = parse(args);
+        } catch (IllegalArgumentException ex) {
+            System.err.println("ERROR: " + ex.getMessage());
+            System.err.println(USAGE);
+            System.exit(2);
+            return;
+        }
         Configuration conf = new Configuration();
-        conf.setString("bootstrap.servers", bootstrap);
+        conf.setString("bootstrap.servers", cmd.bootstrap());
         try (Connection conn = ConnectionFactory.createConnection(conf);
              Admin admin = conn.getAdmin()) {
-            switch (cmd) {
+            switch (cmd.name()) {
                 case "drop":
                     admin.dropTable(PATH, true).get();
                     System.out.println("DROP OK: " + PATH);
@@ -50,16 +66,66 @@ public class RawTableAdmin {
                     }
                     break;
                 case "add-partition":
-                    if (args.length < 2) { throw new IllegalArgumentException("usage: add-partition <name>"); }
                     admin.createPartition(PATH,
                             ResolvedPartitionSpec.fromPartitionName(
-                                    java.util.List.of("event_day"), args[1]).toPartitionSpec(),
+                                    java.util.List.of("event_day"), cmd.partition()).toPartitionSpec(),
                             true).get();
-                    System.out.println("PARTITION OK: " + args[1]);
+                    // P6-385: report the partition that was created, not argv[1].
+                    System.out.println("PARTITION OK: " + cmd.partition());
                     break;
                 default:
-                    throw new IllegalArgumentException("unknown subcommand: " + cmd);
+                    throw new IllegalStateException("parser accepted unknown subcommand: " + cmd.name());
             }
+        }
+    }
+
+    /** A fully validated invocation: nothing here needs a cluster to check. */
+    record Command(String name, String partition, String bootstrap) {}
+
+    static Command parse(String[] args) {
+        String name = args.length > 0 ? args[0] : "partitions";
+        String bootstrap = DEFAULT_BOOTSTRAP;
+        java.util.List<String> rest = new java.util.ArrayList<>();
+        for (int i = 1; i < args.length; i++) {
+            if ("--bootstrap".equals(args[i])) {
+                if (i + 1 >= args.length) {
+                    throw new IllegalArgumentException("--bootstrap needs HOST:PORT");
+                }
+                bootstrap = args[++i];
+            } else {
+                rest.add(args[i]);
+            }
+        }
+        String partition = null;
+        switch (name) {
+            case "drop", "create", "partitions":
+                if (!rest.isEmpty()) {
+                    throw new IllegalArgumentException(name + " takes no arguments, got: " + rest);
+                }
+                break;
+            case "add-partition":
+                if (rest.size() != 1) {
+                    throw new IllegalArgumentException("add-partition needs exactly one <yyyyMMdd>");
+                }
+                partition = rest.get(0);
+                requireDay(partition);
+                break;
+            default:
+                throw new IllegalArgumentException("unknown subcommand: " + name);
+        }
+        return new Command(name, partition, bootstrap);
+    }
+
+    /**
+     * P6-091: the partition name is a Fluss partition value, not free text. A wrong
+     * format silently creates a second, non-auto partition that nothing writes to,
+     * so the shape AND the calendar date are checked here.
+     */
+    static void requireDay(String value) {
+        try {
+            java.time.LocalDate.parse(value, java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
+        } catch (java.time.format.DateTimeParseException ex) {
+            throw new IllegalArgumentException("partition must be a real yyyyMMdd date, got: " + value);
         }
     }
 
