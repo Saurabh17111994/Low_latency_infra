@@ -166,7 +166,10 @@ class ProdHardeningTest(unittest.TestCase):
         # (T2 streaming-3000): warning percent 80% + bounded-halt defaults.
         ing_path = ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/config/IngestionConfig.java"
         ing_cfg = ing_path.read_text()
-        self.assertIn("WARNING_PERCENT = 0.80", ing_cfg)
+        # 80% is owned by AlertThresholds now (W2/CHG-139); the config derives 0.80.
+        thresholds = (ROOT / "code/common/src/main/java/com/trading/common/observability/AlertThresholds.java").read_text()
+        self.assertIn("PENDING_APPEND_WARNING_PERCENT = 80", thresholds)
+        self.assertIn("AlertThresholds.PENDING_APPEND_WARNING_PERCENT / 100.0", ing_cfg)
         self.assertIn("PENDING_APPEND_WARNING_PERCENT", ing_cfg)
         self.assertIn("150_000", ing_cfg)
         self.assertIn("reconnect", ing_cfg.lower())

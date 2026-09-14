@@ -149,7 +149,11 @@ class ExecutionL7Test(unittest.TestCase):
         # warning-percent pin and its env key live there now.
         ingestion_cfg = (ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/config/IngestionConfig.java").read_text()
         self.assertIn("PENDING_APPEND_WARNING_PERCENT", ingestion_cfg)
-        self.assertIn("WARNING_PERCENT = 0.80", ingestion_cfg)
+        # The 80% number is single-sourced in AlertThresholds (W2/CHG-139) and the
+        # config derives the 0.80 ratio, so pin both halves: value and derivation.
+        thresholds = (ROOT / "code/common/src/main/java/com/trading/common/observability/AlertThresholds.java").read_text()
+        self.assertIn("PENDING_APPEND_WARNING_PERCENT = 80", thresholds)
+        self.assertIn("AlertThresholds.PENDING_APPEND_WARNING_PERCENT / 100.0", ingestion_cfg)
 
     def test_EXEC_010_fill_stream_ordering(self):
         """EXEC-010: controlled update sequence → ordering rules hold."""
