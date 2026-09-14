@@ -70,12 +70,19 @@ for RATE in "${RATES[@]}"; do
   done
   [ -n "$LOAD_PID" ] && wait "$LOAD_PID" 2>/dev/null || true
 
-  # Sample per-container CPU for the stack.
-  CONTAINERS=$(docker ps -q --filter "name=$STACK_NAME" 2>/dev/null || true)
+  # Sample per-container CPU for the stack. `--filter name=` is a substring match, so an
+  # unrelated container whose name merely contains STACK_NAME used to be counted, and a
+  # filter that matched nothing produced a silent CPU=NA. Prefer the Swarm stack label,
+  # fall back to the Compose project label (the dev rig runs compose, not swarm), and say
+  # so when neither matches.
   CPU="NA"
+  CONTAINERS=$(docker ps -q --filter "label=com.docker.stack.namespace=$STACK_NAME" 2>/dev/null || true)
+  [ -n "$CONTAINERS" ] || CONTAINERS=$(docker ps -q --filter "label=com.docker.compose.project=$STACK_NAME" 2>/dev/null || true)
   if [ -n "$CONTAINERS" ]; then
     CPU=$(docker stats --no-stream --format '{{.CPUPerc}}' $CONTAINERS 2>/dev/null \
           | awk '{s+=$1; n++} END{if(n)printf "%.1f", s/n; else print "NA"}')
+  else
+    echo "  warning: no containers carry STACK_NAME=$STACK_NAME as a swarm stack namespace or compose project label" >&2
   fi
   read P50 P95 P99 PMAX < <(percentiles "$LAT")
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
