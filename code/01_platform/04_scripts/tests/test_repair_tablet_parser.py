@@ -16,7 +16,11 @@ class RepairTabletParserTest(unittest.TestCase):
         self.assertIn('sub(/: size=.*/, "", path)', script)
         self.assertIn('substr($0, index($0, "=") + 1)', script)
         self.assertNotIn('substr($0, 14)} "$SCAN_LOG"', script)
-        self.assertIn("unsafe truncation", script)
+        # The boundary/zero-tail check moved out of the truncate loop into the
+        # all-or-nothing pre-flight verifier (P6-098/P6-099); the script must call it.
+        verifier = REPAIR.parent / "verify-and-truncate.py"
+        self.assertIn("unsafe truncation", verifier.read_text())
+        self.assertIn("verify-and-truncate.py", script)
 
     def test_scan_output_extracts_full_offset_without_diagnostic_suffix(self):
         scan_output = (
