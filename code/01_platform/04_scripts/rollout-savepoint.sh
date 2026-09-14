@@ -79,6 +79,10 @@ JOB_NAME="${JOB_NAME:-signal-job-compute}"
 JOB_ID="${JOB_ID:-}"
 ENTRY_CLASS="${ENTRY_CLASS:-com.trading.compute.signaljob.SignalJob}"
 RECOVERY_PATH="${RECOVERY_PATH:-}"
+# P6-173: never inherit a stale SAVEPOINT_PATH from the environment — an
+# exported value would silently skip the savepoint/stop below. Initialised
+# empty here (not via := later) so set -u aborts on typos elsewhere.
+SAVEPOINT_PATH=""
 SAVEPOINT_DIR="${SAVEPOINT_DIR:-}"
 DEPLOYMENT_ENV="${DEPLOYMENT_ENV:-dev}"
 SAVEPOINT_TIMEOUT_S="${SAVEPOINT_TIMEOUT_S:-600}"
@@ -92,6 +96,11 @@ JAR_IN_CONTAINER="${JAR_IN_CONTAINER:-/opt/flink/jobs/compute.jar}"
 VERIFY_DEDUP_STATE="${VERIFY_DEDUP_STATE:-1}"
 PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9250/metrics}"
 HIT_SAMPLE_S="${HIT_SAMPLE_S:-30}"
+for _t in SAVEPOINT_TIMEOUT_S JOB_STOP_TIMEOUT_S START_TIMEOUT_S CHECKPOINT_TIMEOUT_S HIT_SAMPLE_S; do
+	# P6-501: these feed $((... + VAR)) and seq — reject non-numeric here
+	# with a clear message instead of a cryptic arithmetic abort under set -e.
+	case "${!_t}" in ''|*[!0-9]*) printf 'rollout: FATAL — invalid %s=%s\n' "$_t" "${!_t}" >&2; exit 1;; esac
+done
 DRY_RUN="${DRY_RUN:-0}"
 LOGDIR="${LOGDIR:-$ROOT/logs/rollout}"
 
@@ -110,9 +119,9 @@ OTEL_COLLECTOR_HOST INSTRUMENT_MANIFEST_PATH"
 TS="$(date +%Y%m%d-%H%M%S)"
 EVIDENCE="$LOGDIR/rollout-$JOB_NAME-$TS.log"
 
-log()  { printf 'rollout: %s\n' "$*" | tee -a "$EVIDENCE"; }
-warn() { printf 'rollout: WARN — %s\n' "$*" | tee -a "$EVIDENCE"; }
-die()  { printf 'rollout: FATAL — %s\n' "$*" | tee -a "$EVIDENCE" >&2; exit 1; }
+log()  { printf 'rollout: %s\n' "$*" | tee -a "$EVIDENCE" || true; }
+warn() { printf 'rollout: WARN — %s\n' "$*" | tee -a "$EVIDENCE" || true; }
+die()  { printf 'rollout: FATAL — %s\n' "$*" | tee -a "$EVIDENCE" >&2 || printf 'rollout: FATAL — %s\n' "$*" >&2; exit 1; }  # P6-502
 
 usage() {
 	cat <<'EOF'
@@ -174,24 +183,30 @@ api_send() { # method path [body-file]
 	fi
 }
 
-job_state() { # jobid -> job state
-	local jobid="$1"
-	api_get "/jobs/$jobid" | sed -n 's/.*"state":"\([A-Z]*\)".*/\1/p'
+job_state() { # jobid -> job state (top-level .state only — P6-167)
+	local jobid="$1" resp
+	resp="$(api_get "/jobs/$jobid")" || return 1
+	if command -v jq >/dev/null 2>&1; then
+		printf '%s' "$resp" | jq -r '.state // empty'
+	else
+		printf '%s' "$resp" | sed -n 's/^\s*"state"[[:space:]]*:[[:space:]]*"\([A-Z_]*\)".*/\1/p' | head -n 1
+	fi
 }
 
-wait_state() { # jobid expected-state timeout-s label
+wait_state() { # jobid expected-state timeout-s label (P6-168)
 	local jobid="$1" expected="$2" timeout_s="$3" label="$4"
 	local deadline state
+	case "$timeout_s" in ''|*[!0-9]*) die "$label: invalid timeout '$timeout_s'";; esac
 	deadline=$(( $(date +%s) + timeout_s ))
 	while [ "$(date +%s)" -lt "$deadline" ]; do
-		state="$(job_state "$jobid")"
+		state="$(job_state "$jobid" 2>/dev/null || true)"
 		if [ "$state" = "$expected" ]; then
 			log "$label: job $jobid reached $expected"
 			return 0
 		fi
-		if { [ "$state" = "FAILED" ] || [ "$state" = "CANCELED" ]; } && [ "$expected" != "$state" ]; then
-			die "$label: job $jobid entered terminal state $state (wanted $expected)"
-		fi
+		case "$state" in FAILED|CANCELED|FINISHED|SUSPENDED)
+			if [ "$state" != "$expected" ]; then die "$label: job $jobid entered terminal state $state (wanted $expected)"; fi;;
+		esac
 		sleep 3
 	done
 	die "$label: job $jobid did not reach $expected within ${timeout_s}s (last state: ${state:-unknown})"
@@ -203,10 +218,13 @@ compose() { # docker compose wrapper honoring file/project overrides
 	# AWS_SECRET_ACCESS_KEY from the EMPTY environment and aborts before
 	# running any command (observed 2026-08-30 recovery drill: deploy step
 	# failed with "required variable AWS_SECRET_ACCESS_KEY is missing").
-	local -a ef=(
-		--env-file "$(dirname "$COMPOSE_FILE")/.env"
-		--env-file "$(dirname "$COMPOSE_FILE")/secrets.env"
-	)
+	local -a ef=()
+	# P6-169: docker compose errors on a MISSING --env-file before running
+	# anything — a fresh checkout without secrets.env could never roll out.
+	local _f
+	for _f in "$(dirname "$COMPOSE_FILE")/.env" "$(dirname "$COMPOSE_FILE")/secrets.env"; do
+		[ -f "$_f" ] && ef+=(--env-file "$_f")
+	done
 	if [ -n "$COMPOSE_PROJECT" ]; then
 		docker compose -f "$COMPOSE_FILE" "${ef[@]}" -p "$COMPOSE_PROJECT" "$@"
 	else
@@ -230,13 +248,19 @@ sample_dedup() {
 	# (compute_dedup_firsts_cumulative) OR the OLD name
 	# (compute_dedup_state_count) so a pre/post comparison works across a
 	# redeploy that renames the gauge. Both are cumulative-firsts counters.
+	# P6-170: each pair must FAIL (empty) when its metric is absent — no
+	# `|| true` after grep (it would reset the pipe status and feed the raw
+	# body to awk, which then prints the label text). pipefail propagates
+	# grep's 1 on no-match; awk exits 1 on zero input rows. The trailing
+	# `|| var=""` keeps sampling best-effort under set -e, and awk's
+	# `print s` (never `s+0`) means present-but-zero prints 0, absent is "".
 	state="$(printf '%s\n' "$body" \
 		| grep -E '^flink_taskmanager_job_task_operator_compute_dedup_(firsts_cumulative|state_count)\{' \
-		| awk '{ s += $NF } END { print s + 0 }')"
+		| awk '{ s += $NF } END { if (NR==0) exit 1; print s }')" || state=""
 	first="$(printf '%s\n' "$body" | grep -E '^flink_taskmanager_job_task_operator_compute_dedup_first\{' \
-		| awk '{ s += $NF } END { print s + 0 }')"
+		| awk '{ s += $NF } END { if (NR==0) exit 1; print s }')" || first=""
 	dup="$(printf '%s\n' "$body" | grep -E '^flink_taskmanager_job_task_operator_compute_dedup_duplicates\{' \
-		| awk '{ s += $NF } END { print s + 0 }')"
+		| awk '{ s += $NF } END { if (NR==0) exit 1; print s }')" || dup=""
 	if [ -z "$state" ] && [ -z "$first" ]; then
 		echo ""
 	else
@@ -251,6 +275,12 @@ log "== rollout-savepoint: $JOB_NAME ($DEPLOYMENT_ENV) =="
 
 if ! command -v curl >/dev/null 2>&1; then
 	die "curl is required"
+fi
+# jq parses every REST answer on the evidence path (job state, overview,
+# checkpoints, savepoint trigger) — the sed fallbacks it replaces misread
+# single-line and pretty-printed JSON alike (P6-167/171/172/174).
+if ! command -v jq >/dev/null 2>&1; then
+	die "jq is required (REST answers are JSON)"
 fi
 if ! api_get "/v1/config" >/dev/null 2>&1; then
 	if [ "$DRY_RUN" = "1" ]; then
@@ -282,12 +312,15 @@ else
 		# each job object rather than demanding a fixed field sequence
 		# (2026-08-25: the old fixed-order regex never matched, breaking
 		# auto-resolve).
-		JOB_ID="$(printf '%s' "$overview" \
-			| grep -oE '\{"jid":"[0-9a-f]{32}".*?"state":"(RUNNING|[A-Z_]+)"' \
-			| grep -E "\"name\":\"$JOB_NAME\"" \
-			| grep -E "\"state\":\"RUNNING\"" \
-			| sed -n "s/.*\"jid\":\"\([0-9a-f]\{32\}\)\".*/\1/p" \
-			| head -n 1)"
+		# P6-171: the old grep -oE '.*?' SPANNED job objects (ERE has no
+		# lazy quantifier) and interpolated JOB_NAME raw as regex — a wrong
+		# jid was extracted when >1 job was listed. jq matches by exact name.
+		if command -v jq >/dev/null 2>&1; then
+			JOB_ID="$(printf '%s' "$overview" | jq -r --arg n "$JOB_NAME" '.jobs[] | select(.name==$n and .state=="RUNNING") | .jid' | head -n 1)"
+		else
+			# No object-spanning: [^}]* keeps each match inside one {...}.
+			JOB_ID="$(printf '%s' "$overview" | grep -oE '\{"jid":"[0-9a-f]{32}"[^}]*' | grep -F "\"name\":\"$JOB_NAME\"" | grep -F '"state":"RUNNING"' | sed -n 's/.*"jid":"\([0-9a-f]\{32\}\)".*/\1/p' | head -n 1)"
+		fi
 		[ -n "$JOB_ID" ] || die "no RUNNING job named '$JOB_NAME' in /jobs/overview (use JOB_ID=<jid> to target explicitly)"
 		log "resolved $JOB_NAME -> job $JOB_ID (RUNNING)"
 	else
@@ -327,8 +360,14 @@ if [ "$VERIFY_DEDUP_STATE" = "1" ]; then
 	# The trailing `|| true` inside the substitution covers both;
 	# STATE_BEFORE stays empty and the post-restore check degrades to a
 	# sanity check (by design for this mode).
+	# P6-172: greedy s/.*state_size/ on single-line JSON returns the OLDEST
+	# history entry, not the latest checkpoint — compare the wrong entries
+	# and the gate false-passes. jq reads .latest.completed first.
 	STATE_BEFORE="$( { [ -n "$JOB_ID" ] && api_get "/jobs/$JOB_ID/checkpoints" \
-		| sed -n 's/.*"state_size":\([0-9][0-9]*\).*/\1/p' | tail -1; } 2>/dev/null || true)"
+		| jq -r '.latest.completed.state_size // .history[-1].state_size // empty'; } 2>/dev/null || true)"
+	# jq is REQUIRED on the evidence path now (rollout refuses without it at
+	# preflight, so the jq-less sed tail cannot silently run here).
+	case "$STATE_BEFORE" in ''|*[!0-9]*) STATE_BEFORE="";; esac
 	before="$(sample_dedup)"
 	if [ -n "$STATE_BEFORE" ]; then
 		log "dedup evidence (pre): checkpoint_state_size=$STATE_BEFORE counters=$before"
@@ -345,8 +384,12 @@ if [ -z "${SAVEPOINT_PATH:-}" ]; then
 		log "DRY: POST $JM_URL/jobs/$JOB_ID/savepoints {\"target-directory\":\"$TARGET_DIR\",\"cancel-job\":false}"
 		SAVEPOINT_PATH="<fresh-savepoint>"
 	else
-		trigger="$(api_send POST "/jobs/$JOB_ID/savepoints" \
-			"{\"target-directory\":\"$TARGET_DIR\",\"cancel-job\":false}")"
+		# P6-503: TARGET_DIR interpolated raw breaks on quote/backslash;
+		# JOB_ID unvalidated lands in the REST path. jq encodes the body.
+		case "$JOB_ID" in ????????????????????????????????) :;; *) die "invalid JOB_ID '$JOB_ID' (want 32 hex chars)";; esac
+		case "$JOB_ID" in *[!0-9a-f]*) die "invalid JOB_ID '$JOB_ID' (want lowercase hex)";; esac
+		savepoint_body="$(jq -nc --arg d "$TARGET_DIR" '{"target-directory":$d,"cancel-job":false}')"
+		trigger="$(api_send POST "/jobs/$JOB_ID/savepoints" "$savepoint_body")"
 		REQ_ID="$(printf '%s' "$trigger" | sed -n 's/.*"request-id":"\([^"]*\)".*/\1/p')"
 		[ -n "$REQ_ID" ] || die "savepoint trigger returned no request-id: $trigger"
 		log "savepoint request $REQ_ID accepted"
@@ -354,7 +397,10 @@ if [ -z "${SAVEPOINT_PATH:-}" ]; then
 		deadline=$(( $(date +%s) + SAVEPOINT_TIMEOUT_S ))
 		status="PENDING"
 		while [ "$(date +%s)" -lt "$deadline" ]; do
-			response="$(api_get "/jobs/$JOB_ID/savepoints/$REQ_ID")"
+			# P6-504: one dropped connection in the 600s window must not
+			# kill a healthy rollout — retry until the deadline.
+			response="$(api_get "/jobs/$JOB_ID/savepoints/$REQ_ID" 2>/dev/null || true)"
+			[ -n "$response" ] || { sleep 5; continue; }
 			status="$(printf '%s' "$response" | sed -n 's/.*"status":{"id":"\([A-Z_]*\)".*/\1/p')"
 			if [ "$status" = "COMPLETED" ]; then
 				SAVEPOINT_PATH="$(printf '%s' "$response" \
@@ -439,7 +485,16 @@ else
 	# RFC3339 timestamps only (verified 2026-08-22), so compute the window.
 	restore_proven=0
 	for _ in $(seq 1 15); do
-		since_ts="$(date -u -d '-30 seconds' +%Y-%m-%dT%H:%M:%SZ)"
+		# P6-505: GNU date -d dies on BSD/macOS (tablet/dev) and set -e
+		# aborts the restore-proof loop. Prefer GNU, then BSD -v, then a
+		# duration string docker accepts as a last resort.
+		if since_ts="$(date -u -d '-30 seconds' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"; then
+			:
+		elif since_ts="$(date -u -v-30S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"; then
+			:
+		else
+			since_ts="2m"
+		fi
 		tm_restore="$(compose logs --since "$since_ts" --tail 800 flink-taskmanager 2>/dev/null \
 			| grep -E 'Restoring state for [0-9]+ split|Starting to restore from state handle' || true)"
 		if [ -n "$tm_restore" ]; then
@@ -467,8 +522,10 @@ wait_state "$NEW_JOB_ID" "RUNNING" "$START_TIMEOUT_S" "start"
 # for the quiet-market case, observed 2026-08-22).
 T0_DEDUP=""
 if [ "$VERIFY_DEDUP_STATE" = "1" ]; then
+	# P6-506: T0_DEDUP feeds the hit-rate evidence below, so the loop stays —
+	# but a transient curl failure must not abort the rollout under set -e.
 	for _ in $(seq 1 10); do
-		T0_DEDUP="$(sample_dedup)"
+		T0_DEDUP="$(sample_dedup || true)"
 		[ -n "$T0_DEDUP" ] && break
 		sleep 2
 	done
@@ -477,8 +534,10 @@ fi
 completed=""
 deadline=$(( $(date +%s) + CHECKPOINT_TIMEOUT_S ))
 while [ "$(date +%s)" -lt "$deadline" ]; do
-	completed="$(api_get "/jobs/$NEW_JOB_ID/checkpoints" 2>/dev/null \
-		| sed -n 's/.*"counts":{[^}]*"completed":\([0-9][0-9]*\).*/\1/p')"
+	# P6-174: sed is line-oriented — pretty-printed multi-line JSON never
+	# matched, so a healthy job timed out. Retry transient failures too.
+	completed="$(api_get "/jobs/$NEW_JOB_ID/checkpoints" 2>/dev/null | jq -r '.counts.completed // empty' 2>/dev/null || true)"
+	case "$completed" in ''|*[!0-9]*) completed="";; esac
 	if [ -n "$completed" ] && [ "$completed" -gt 0 ]; then
 		break
 	fi
@@ -498,12 +557,19 @@ if [ "$VERIFY_DEDUP_STATE" = "1" ]; then
 	# gate now compares latest-checkpoint state_size pre vs post restore.
 	# Prometheus counters remain as traffic/hit-rate evidence only.
 	log "== dedup continuity check (checkpoint state_size, ${HIT_SAMPLE_S}s sample) =="
-	# Post-restore: sample the new job's latest completed checkpoint state_size.
+	# P6-507: HIT_SAMPLE_S was advertised but never waited — the gate read
+	# the first post-restore checkpoint instead of sampling the window.
+	case "$HIT_SAMPLE_S" in ''|*[!0-9]*) die "invalid HIT_SAMPLE_S '$HIT_SAMPLE_S'";; esac
+	[ "$HIT_SAMPLE_S" -gt 0 ] && sleep "$HIT_SAMPLE_S"
+	# Post-restore: sample the new job's latest completed checkpoint state_size
+	# (same jq read as the pre baseline — P6-172's greedy sed|tail picked an
+	# arbitrary history entry here too).
 	state_after=""
 	deadline=$(( $(date +%s) + CHECKPOINT_TIMEOUT_S ))
 	while [ "$(date +%s)" -lt "$deadline" ]; do
 		state_after="$(api_get "/jobs/$NEW_JOB_ID/checkpoints" 2>/dev/null \
-			| sed -n 's/.*"state_size":\([0-9][0-9]*\).*/\1/p' | tail -1)"
+			| jq -r '.latest.completed.state_size // .history[-1].state_size // empty' 2>/dev/null || true)"
+		case "$state_after" in ''|*[!0-9]*) state_after="";; esac
 		[ -n "$state_after" ] && break
 		sleep 5
 	done
@@ -514,14 +580,25 @@ if [ "$VERIFY_DEDUP_STATE" = "1" ]; then
 	dup_after="$(printf '%s' "$after" | awk '{print $3}')"
 	log "dedup evidence (post): checkpoint_state_size=$state_after counters=$after"
 	if [ -n "$STATE_BEFORE" ] && [ -n "$state_after" ]; then
-		if [ "$state_after" -lt $(( STATE_BEFORE / 2 )) ]; then
+		# P6-508: empty/non-numeric sizes used to abort via [ -lt (exit 2)
+		# under set -e. Refuse to assert continuity instead; tiny states
+		# (STATE_BEFORE/2 truncating to 0) can never fire the gate either.
+		# NOTE: each side validated separately — the ':' separator would
+		# defeat a single [!0-9:] class over the joined string.
+		case "$state_after" in ''|*[!0-9]*) nonnum=1;; *) nonnum=0;; esac
+		case "$STATE_BEFORE" in ''|*[!0-9]*) nonnum=1;; esac
+		case "$nonnum" in 1)
+			warn "checkpoint state_size non-numeric (before='$STATE_BEFORE' after='$state_after') — continuity NOT asserted"
+		;; *)
+			if [ "$state_after" -lt $(( STATE_BEFORE / 2 )) ]; then
 			# TTL semantics: state naturally shrinks as entries expire, but a
 			# >50% drop in the FIRST post-restore checkpoint means the restore
 			# did NOT carry the state.
-			die "dedup checkpoint state_size after restore ($state_after) < 50% of pre-rollout ($STATE_BEFORE) — dedup state was NOT preserved; investigate before continuing"
-		else
-			log "dedup state preserved: checkpoint state_size $STATE_BEFORE -> $state_after (>= 50% gate passed)"
-		fi
+				die "dedup checkpoint state_size after restore ($state_after) < 50% of pre-rollout ($STATE_BEFORE) — dedup state was NOT preserved; investigate before continuing"
+			else
+				log "dedup state preserved: checkpoint state_size $STATE_BEFORE -> $state_after (>= 50% gate passed)"
+			fi
+		;; esac
 	elif [ -n "$state_after" ] && [ "$state_after" -gt 0 ]; then
 		log "post-restore sanity: checkpoint state_size = $state_after (> 0)"
 	else
