@@ -1,5 +1,12 @@
 # Pin the Nautilus execution-service build to the audited toolchain
 # (see versions.pin: NAUTILUS_RUST_TOOLCHAIN=1.97.1).
+#
+# P3-180: rustup resolves a toolchain from the *invocation* directory, not from
+# `--manifest-path`. Running `cargo ... --manifest-path
+# code/02_services/04_executor/Cargo.toml` from the repo root therefore silently
+# uses the machine's default toolchain and bypasses this pin. Invoke cargo from
+# inside this directory (the Makefile and the Monday gate both `cd` here first).
+# `cd code/02_services/04_executor && rustup show active-toolchain` is the check.
 [toolchain]
 channel = "1.97.1"
 components = ["rustfmt", "clippy"]
