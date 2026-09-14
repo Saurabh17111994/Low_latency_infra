@@ -40,6 +40,35 @@ for rate_arg in "${RATES[@]}"; do
   [ -n "$rate_arg" ] && [ "$rate_arg" -gt 0 ] \
     || { echo "FAIL: RATES_IN contains an empty or non-positive rate (got '$RATES_IN')" >&2; exit 2; }
 done
+# P3-227: the load generator and the CPU sampler are background children. Without a trap,
+# Ctrl-C (or any other signal that ends the harness) left them running, pushing load at the
+# stack after the run had stopped, and left the sample files behind. Best effort: kill the
+# load's children too, since the generator is a subshell whose own child may outlive it.
+cleanup() {
+  local rc=$?
+  # Bash inherits an EXIT trap into subshells, and the load generator *is* a subshell: an
+  # unguarded trap re-ran this cleanup there (killing only itself) and then aborted the
+  # top-level one. Only the top-level shell may clean up.
+  [ "${BASHPID:-$$}" = "$$" ] || return 0
+  # The traps fire mid-rung; a failed kill (already-dead child) must not abort the rest of
+  # the cleanup under `set -e`.
+  set +e
+  if [ -n "${LOAD_PID:-}" ]; then
+    # Children first: killing the generator can detach them before pkill sees them.
+    pkill -P "$LOAD_PID" 2>/dev/null
+    kill "$LOAD_PID" 2>/dev/null
+  fi
+  [ -n "${CPU_PID:-}" ] && kill "$CPU_PID" 2>/dev/null
+  [ -n "${LAT:-}" ] && rm -f "$LAT"
+  [ -n "${CPU_FILE:-}" ] && rm -f "$CPU_FILE"
+  exit "$rc"
+}
+# An interrupted run must not look successful: INT/TERM exit non-zero and the EXIT trap
+# then does the cleanup and preserves that status.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 OUT="scale_report_$(date +%Y%m%d_%H%M%S).tsv"
 printf 'rung\trate_per_s\tduration_s\tsamples\tp50_ms\tp95_ms\tp99_ms\tp_max_ms\tcpu_pct\n' > "$OUT"
 
