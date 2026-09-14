@@ -230,10 +230,18 @@ fn live_node_runtime_sustained_soak() {
 }
 
 /// Open-fd count for this process (Linux /proc); `None` when unavailable.
+///
+/// P3-225: the enumeration holds an fd on `/proc/self/fd` itself, so a raw `count()` reports one
+/// more fd than the process actually has, and it also counts entries that vanished between the
+/// readdir and the stat (which are not fds at all). Both halves are fixed here, so the `+8`
+/// allowance in the leak check means what it says instead of trailing a constant offset.
 fn probe_fd_count() -> Option<u64> {
-    std::fs::read_dir("/proc/self/fd")
-        .ok()
-        .map(|entries| entries.count() as u64)
+    std::fs::read_dir("/proc/self/fd").ok().map(|entries| {
+        entries
+            .filter_map(Result::ok)
+            .count()
+            .saturating_sub(1) as u64
+    })
 }
 
 /// Resident set size in kB from /proc/self/status (Linux); `None` when unavailable.
