@@ -78,7 +78,9 @@ for RATE in "${RATES[@]}"; do
     [ -n "$CONTAINERS" ] || CONTAINERS=$(docker ps -q --filter "label=com.docker.compose.project=$STACK_NAME" 2>/dev/null || true)
     if [ -n "$CONTAINERS" ]; then
       # Sampled at the rung's midpoint in the background, so it overlaps the load window.
-      CPU_FILE="/tmp/scale_cpu_$$"
+      # P3-228: mktemp, not a predictable /tmp/scale_cpu_$$ name (symlink-raceable, collides
+    # across namespaces).
+    CPU_FILE=$(mktemp "${TMPDIR:-/tmp}/scale_cpu.XXXXXX") || { echo "FAIL: cannot create a CPU sample file" >&2; exit 1; }
       ( sleep $((DURATION/2))
         docker stats --no-stream --format '{{.CPUPerc}}' $CONTAINERS 2>/dev/null \
           | awk '{s+=$1; n++} END{if(n)printf "%.1f", s/n; else print "NA"}' > "$CPU_FILE" ) &
@@ -91,7 +93,8 @@ for RATE in "${RATES[@]}"; do
     LOAD_PID=$!
   fi
 
-  LAT="/tmp/scale_lat_$$"; : > "$LAT"
+  # P3-228: same for the latency samples.
+  LAT=$(mktemp "${TMPDIR:-/tmp}/scale_lat.XXXXXX") || { echo "FAIL: cannot create a latency sample file" >&2; exit 1; }
   # Sample until the rung's wall-clock budget is spent, not for a fixed number of
   # iterations: a slow endpoint used to stretch the rung past DURATION, because
   # every iteration paid curl's full (unbounded) time plus the 1s sleep. Each
