@@ -23,7 +23,8 @@
 | Health check (cron-able; yesterday's day-folder ≥1 object, manifests ≥2, today's folder after 18:30 IST) | `bash code/01_platform/04_scripts/lake-guard.sh` |
 | Tiering job status (exit 0 = RUNNING, 1 = no running job, 2 = running without fixed-delay restart) | `bash code/01_platform/04_scripts/tiering-start.sh --status` |
 | Restart tiering job after table recreate / container restart (idempotent; guards the classpath first; two concurrent invocations are serialised by a lock) | `bash code/01_platform/04_scripts/tiering-start.sh` |
-| Query the lake (DuckDB, iceberg) | `bash code/01_platform/04_scripts/r2-query.sh "<sql>"` |
+| Query the lake (DuckDB, iceberg) | `bash code/01_platform/04_scripts/r2-query.sh "<sql>"` — operator tool: the SQL runs with your R2 credentials; exit 2 = bad usage/config, 1 = DuckDB failed |
+| List the lake objects (no aws cli) | `bash code/01_platform/04_scripts/r2-list.sh lake` (or `all`); sourcing it gives `r2_list_lake` / `r2_list_all` |
 | Pull one trading day to local parquet | `bash code/01_platform/04_scripts/r2-restore.sh <yyyyMMdd> [out.parquet]` |
 | EOD run with lake verification | `EOD_OFFLOAD=lake R2_LIST_SCRIPT="$PWD/code/01_platform/04_scripts/r2-list.sh" python3 code/01_platform/04_scripts/eod_controller.py run` |
 | Full guarded E2E tiering proof (smoke) — exit 0 = proof, 1 = verification failed, 2 = bad input; use 300s writes with `TIER_WAIT` so the run exceeds the 5-min freshness window + 1-min tier interval | `TIER_WAIT=420 bash code/01_platform/04_scripts/tiering-smoke.sh 300` |
@@ -49,7 +50,15 @@ WHERE event_day='20260831';
    re-enumerates current tables).
 4. Prove the round commits: watch `currentFinishedTables: {<tableId>=` appear
    in jobmanager logs, then object count grows via
-   `source code/01_platform/04_scripts/r2-list.sh && r2_list_lake`.
+   `bash code/01_platform/04_scripts/r2-list.sh lake` (or
+   `source code/01_platform/04_scripts/r2-list.sh && r2_list_lake`).
+
+Both R2 tools read `code/01_platform/01_docker/.env` and `secrets.env` through
+`r2-env.sh` (`r2_var`), which de-quotes values, strips CRLF, and reports a missing
+file/key as `missing <KEY> in <file>` instead of an empty variable. Override the paths
+with `R2_ENV_FILE` / `R2_SECRETS_FILE`, and r2-query's binary with `DUCKDB_BIN`.
+A listing that cannot be trusted (auth failure, error document, truncated page
+without a continuation token) exits non-zero; it never reports "no objects".
 
 ## Recovery: restore a trading day
 
