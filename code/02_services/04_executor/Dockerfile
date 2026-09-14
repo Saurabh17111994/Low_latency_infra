@@ -1,6 +1,10 @@
 # -----------------------------------------------------------------------------------------------
 # Nautilus execution service — Rust container (T8.4)
 #
+# Both base images are digest-pinned (`@sha256:`), not just version-tagged: a tag can be moved
+# to different content by the registry, a digest cannot. The same refs are recorded in
+# code/01_platform/04_scripts/versions.pin so the pin discipline has one source of record (P3-413).
+#
 # Multi-stage: pinned toolchain builder -> slim runtime.
 #
 # Env-gates (must hold at build time):
@@ -18,7 +22,7 @@
 # `-bookworm` names the Debian release the toolchain links against. The runtime stage is
 # debian:bookworm-slim, so an unsuffixed rolling `rust:1.97.1` could move the builder to a newer
 # glibc than the runtime ships and break the binary at boot (P3-176).
-FROM rust:1.97.1-bookworm AS builder
+FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
 WORKDIR /build
 
 # Dependencies are cached across builds by BuildKit cache mounts rather than by a
@@ -35,7 +39,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
  && cp /build/target/release/nautilus-execution-service /build/nautilus-execution-service
 
 # --- Runtime: slim, non-root, fail-closed -----------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 WORKDIR /app
 
 RUN apt-get update \
