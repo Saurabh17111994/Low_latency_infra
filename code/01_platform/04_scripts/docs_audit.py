@@ -311,10 +311,14 @@ def c6_test_counts():
     check("C6 common count matches doc", c == doc_c, f"surefire={c} doc={doc_c}")
     check("C6 ingestion count matches doc", i == doc_i, f"surefire={i} doc={doc_i}")
     if comp_reports:
+        # One measurement, used by both the check and its message: a second call
+        # re-globbed and re-parsed every compute report and re-walked the compute
+        # test tree per report (P6-724).
+        comp_total = surefire_total(comp_dir, os.path.join(comp_dir, "src", "test", "java"))
         check(
             "C6 compute count matches doc",
-            surefire_total(comp_dir, os.path.join(comp_dir, "src", "test", "java")) == doc_comp,
-            f"surefire={surefire_total(comp_dir, os.path.join(comp_dir, 'src', 'test', 'java'))} doc={doc_comp}",
+            comp_total == doc_comp,
+            f"surefire={comp_total} doc={doc_comp}",
         )
     else:
         check("C6 compute count (not built here — skipped)", True)
