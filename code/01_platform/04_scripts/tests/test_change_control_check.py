@@ -327,6 +327,20 @@ class TrackerRegexTests(unittest.TestCase):
         self.assertEqual(ccc.TRACKER_RE.findall("logs/tracker-14/ run"), ["14"])
         self.assertEqual(ccc.TRACKER_RE.findall("(tracker 7)"), ["7"])
 
+    def test_a_tracker_id_inside_a_path_is_not_a_reference(self):
+        """A plan_tasks artifact under logs/tracker-14/ must not demand a dossier."""
+        self.assertEqual(
+            ccc.plan_task_issues(
+                "logs/tracker-14/SafetyLiveJobRun.java", ccc.DEFAULT_RECORDS_DIR),
+            [],
+        )
+
+    def test_bare_tracker_reference_is_still_validated(self):
+        self.assertEqual(
+            ccc.plan_task_issues("tracker-04 P10", ccc.DEFAULT_RECORDS_DIR), [])
+        issues = ccc.plan_task_issues("tracker-99", ccc.DEFAULT_RECORDS_DIR)
+        self.assertTrue(any("tracker-99" in i for i in issues), issues)
+
 
 class RepoIndexTests(unittest.TestCase):
     """The repo-wide fallback resolves bare names and path suffixes, and pays

@@ -215,7 +215,13 @@ def plan_task_issues(value, records_dir):
     if not value or NONE_RE.match(value):
         return []
     issues = []
-    for n in TRACKER_RE.findall(value):
+    # A tracker reference is a bare `tracker-<n>` token. A path that merely
+    # contains the tracker log directory name (logs/tracker-14/x.java) is named
+    # for that directory, not for the dossier, and must not demand a
+    # docs/08_implementation/<n>-*.md that never existed (found while filing
+    # CHG-141, whose plan_tasks names such an artifact).
+    bare = " ".join(tok for tok in re.split(r"[\s,]+", value) if "/" not in tok)
+    for n in TRACKER_RE.findall(bare):
         hits = glob.glob(
             os.path.join(ROOT, "docs", "08_implementation", f"{n}-*.md")
         )
