@@ -568,8 +568,11 @@ sample_probes() {
     FlussKvProbe "$PROBE_TABLE" 15000 "$PROBE_TOKENS" "$PROBE_BOOTSTRAP" \
     >> "$OUT_DIR/consumer-read.tsv" 2>/dev/null || echo "!! WARN: FlussKvProbe failed this tick" >&2
   # Probe 3: CLOSED candle table (CP9->CP10 for the closed leg).
-  # Same lookups against candle_closed; FlussKvProbe reads the new 15-col
-  # layout (token=0, tf=3, window_start=4, window_end=5, last_event_time=12).
+  # Same lookups against candle_closed. FlussKvProbe resolves window_end and
+  # last_event_time BY NAME from the live table schema (wave 13, P6-371), so a
+  # reordered table fails loudly instead of reading whatever sits at index 5/12.
+  # A partial sample (some tokens failed or missed) exits 3 and is warned below;
+  # the rows that were read are still appended to the TSV.
   java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
     FlussKvProbe "$PROBE_CLOSED_TABLE" 15000 "$PROBE_TOKENS" "$PROBE_BOOTSTRAP" \
     >> "$OUT_DIR/closed-read.tsv" 2>/dev/null || echo "!! WARN: FlussKvProbe(closed) failed this tick" >&2
