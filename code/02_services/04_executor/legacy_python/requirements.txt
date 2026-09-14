@@ -1,4 +1,0 @@
-# Arrow REST executor deps (MVP scaffold)
-# Real client libs are added when the module is implemented.
-fluss-client>=0.1
-requests>=2.31
