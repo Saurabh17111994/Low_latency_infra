@@ -224,6 +224,8 @@ gate-fast:
 	@echo "GATE-FAST: NOT A RELEASE CERTIFICATE — no live drills, no DDL apply smoke, no full doc audit (scanners/sweeps/trio), no Go suite; images beyond ddl-apply unchecked."
 	@$(MAKE) --no-print-directory static-check
 	@$(MAKE) --no-print-directory test-audit-r2
+	@echo "GATE-FAST: pin discipline (pin-check.sh: matrix, corpus digests, SNAPSHOT ban, image/toolchain pins)"
+	@$(MAKE) --no-print-directory pin-check
 	@$(MAKE) --no-print-directory check-image-stale-fast
 	@if [ -n "$(MODULE)" ]; then cd code && $(MVN) test -pl $(MODULE); else echo "GATE-FAST: no MODULE= given — module suite skipped (e.g. make gate-fast MODULE=02_services/06_execution_gateway)"; fi
 	@echo "GATE-FAST: doc<->code truth audit (docs_audit.py, C1-C16)"
