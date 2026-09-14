@@ -55,9 +55,15 @@ for RATE in "${RATES[@]}"; do
   fi
 
   LAT="/tmp/scale_lat_$$"; : > "$LAT"
-  for ((i=0;i<DURATION;i++)); do
+  # Sample until the rung's wall-clock budget is spent, not for a fixed number of
+  # iterations: a slow endpoint used to stretch the rung past DURATION, because
+  # every iteration paid curl's full (unbounded) time plus the 1s sleep. Each
+  # request is bounded now, so an unresponsive endpoint costs at most 2s per
+  # sample and the rung still ends on time.
+  RUNG_END=$((SECONDS + DURATION))
+  while [ "$SECONDS" -lt "$RUNG_END" ]; do
     if [ -n "$METRICS_URL" ]; then
-      curl --max-time 2 -so /dev/null -w '%{time_total}\n' "$METRICS_URL" 2>/dev/null \
+      curl --max-time 2 --connect-timeout 1 -so /dev/null -w '%{time_total}\n' "$METRICS_URL" 2>/dev/null \
         | awk '{printf "%.3f\n", $1*1000}' >> "$LAT" || true
     fi
     sleep 1
