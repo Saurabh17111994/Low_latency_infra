@@ -104,6 +104,7 @@ SITES: list[tuple[str, str, str, str]] = [
     ("code/01_platform/04_scripts/bench-throughput.sh", "-f docker-compose.bench.yml stop ingestion", "FLAGS", ""),
     ("code/01_platform/04_scripts/bench-throughput.sh", "-f docker-compose.bench.yml up -d ingestion", "FLAGS", ""),
     ("code/01_platform/04_scripts/catalog-guard.sh", '"${COMPOSE[@]}" run --rm', "VAR", "array"),
+    ("code/01_platform/04_scripts/catalog-guard.sh", '"${COMPOSE[@]}" ps -q zookeeper', "VAR", "array"),
     ("code/01_platform/04_scripts/ddl_apply_smoke.py", "the FULL containerized apply", "TEXT", "docstring"),
     ("code/01_platform/04_scripts/ddl_apply_smoke.py", "interpolate secrets:", "TEXT", "docstring"),
     ("code/01_platform/04_scripts/ddl_apply_smoke.py", "docker compose config invalid", "TEXT", "error string"),

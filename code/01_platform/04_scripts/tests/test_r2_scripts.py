@@ -60,12 +60,18 @@ PYTHON_RECORDER = """
 """
 
 
-def list_xml(keys, truncated=False, token=None, ns=True, sizes=None):
+def list_xml(keys, truncated=False, token=None, ns=True, sizes=None, stamps=None):
     attr = f' {NS}' if ns else ""
     parts = [f'<?xml version="1.0" encoding="UTF-8"?>', f"<ListBucketResult{attr}>"]
     for i, key in enumerate(keys):
         size = (sizes or {}).get(key, i + 1)
-        parts.append(f"<Contents><Key>{key}</Key><Size>{size}</Size></Contents>")
+        # LastModified is part of the listing and is carried through to the TSV
+        # (P6-439): a caller that must age-check an object cannot do it without it.
+        stamp = (stamps or {}).get(key, "2026-09-14T00:00:00.000Z")
+        parts.append(
+            f"<Contents><Key>{key}</Key><Size>{size}</Size>"
+            f"<LastModified>{stamp}</LastModified></Contents>"
+        )
     parts.append(f"<IsTruncated>{'true' if truncated else 'false'}</IsTruncated>")
     if token is not None:
         parts.append(f"<NextContinuationToken>{token}</NextContinuationToken>")
@@ -353,19 +359,43 @@ class R2ListHttpTests(Base):
         server = self.serve(lambda n: (200, list_xml(["lake/default/raw_table_1/x.parquet"])))
         out = self.run_list(f"https://127.0.0.1:{server.port}")
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(out.stdout.strip(), "lake/default/raw_table_1/x.parquet\t1")
+        self.assertEqual(out.stdout.strip(),
+                         "lake/default/raw_table_1/x.parquet\t1\t2026-09-14T00:00:00.000Z")
         request = server.requests[0]
         self.assertTrue(request.startswith("/lake-bucket/?"), request)
         self.assertIn("prefix=lake%2F", request, "the warehouse prefix must be percent-encoded")
         self.assertNotIn("prefix=lake/", request, "a raw '/' in the query value breaks SigV4")
         self.assertIn("list-type=2", request)
 
+    def test_r2_list_lake_takes_a_sub_prefix(self):
+        # P6-437: lake-guard lists ONE partition instead of paginating the whole
+        # warehouse and grepping the buffer.
+        suffix = "lake/default/raw_table_1/data/event_day=20260913/a.parquet"
+        server = self.serve(lambda n: (200, list_xml([suffix])))
+        helper = self.tmp / "call-r2-list-lake-with-prefix.sh"
+        helper.write_text(
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            'source "$1"\n'
+            'r2_list_lake "$2"\n'
+        )
+        helper.chmod(0o755)
+        config = self.write_config(endpoint=f"https://127.0.0.1:{server.port}")
+        out = self.run_script(
+            helper, [str(LIST_SCRIPT), "lake/default/raw_table_1/data/"],
+            config=config, extra_env={"SSL_CERT_FILE": str(self.cert)})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertTrue(out.stdout.startswith(suffix + "\t1\t"), out.stdout)
+        self.assertIn("prefix=lake%2Fdefault%2Fraw_table_1%2Fdata%2F", server.requests[0],
+                      "the sub-prefix must reach the LIST request")
+
     def test_namespaceless_response_still_lists_keys(self):
         # P6-488: findall('s3:Contents') read a namespace-less page as "empty".
         server = self.serve(lambda n: (200, list_xml(["lake/a.parquet"], ns=False)))
         out = self.run_list(f"https://127.0.0.1:{server.port}")
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(out.stdout.strip(), "lake/a.parquet\t1")
+        self.assertEqual(out.stdout.strip(),
+                         "lake/a.parquet\t1\t2026-09-14T00:00:00.000Z")
 
     def test_http_error_reports_the_s3_code(self):
         body = (b'<?xml version="1.0"?><Error><Code>AccessDenied</Code>'
@@ -416,7 +446,12 @@ class R2ListHttpTests(Base):
         server = self.serve(responder)
         out = self.run_list(f"https://127.0.0.1:{server.port}")
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(out.stdout.split(), ["lake/one", "1", "lake/two", "1"])
+        self.assertEqual(
+            out.stdout.split(),
+            ["lake/one", "1", "2026-09-14T00:00:00.000Z",
+             "lake/two", "1", "2026-09-14T00:00:00.000Z"],
+            "TSV is key<TAB>size<TAB>LastModified")
+        self.assertEqual(len(out.stdout.strip().splitlines()), 2, "one object per line")
         self.assertEqual(len(server.requests), 2)
         self.assertIn("continuation-token=tok-2", server.requests[1])
 

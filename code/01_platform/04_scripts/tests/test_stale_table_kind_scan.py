@@ -7,6 +7,7 @@ Run via: python3 -m unittest discover -s code/01_platform/04_scripts/tests
 """
 
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -134,6 +135,75 @@ class LiveClaimVerdictTests(unittest.TestCase):
                 f"now {ing[0]}/0/{ing[2]}-skips, common {com[0]}/0/{com[2]}-skip)\n",
                 encoding="utf-8")
             self.assertEqual(self._main("--dir", d), 0)
+
+
+class SameLineAndDdlGateTests(unittest.TestCase):
+    """Wave 12 (P6-573, P6-574, P6-793, P6-794): the DDL gate must report what it
+    could not check, and same-line duplicates must not hide each other."""
+
+    def test_table_count_phrase_is_not_a_test_count_claim(self):
+        # P6-793: "24 common tables" is a table-count context. The first
+        # alternative excluded it with (?!\s+tables?); the reversed form did not,
+        # so it was reported as a stale test count (24 != TEST_COUNT_TRUTH).
+        hits = scan_text("The repo now has 24 common tables in the catalog\n")
+        self.assertEqual([t for _, _, t, _, _ in hits], [])
+        # control: the same shape as a real claim still fires.
+        control = scan_text("The suites are 24 common / 489 compute as of today\n")
+        self.assertIn("test-count-stale", [t for _, _, t, _, _ in control])
+
+    def test_same_line_duplicate_with_different_tiers_are_both_reported(self):
+        # P6-794: the table-kind/phase-status dedup key omitted the tier, so the
+        # second hit on a line was dropped. Here the first claim is live and the
+        # second sits next to a "legacy" marker, more than KIND_WINDOW away.
+        filler = " " * 105
+        hits = scan_text(
+            f"feature_candles_15s is a LOG table{filler}legacy note: "
+            "feature_candles_15s is a LOG table\n")
+        labels = {v: k for k, v in s.TIER_RANK.items()}
+        tiers = [labels[r] for r, _, t, _, _ in hits if t == "feature_candles_15s-as-LOG"]
+        self.assertEqual(sorted(tiers), ["LINE-ANNOTATED", "UNANNOTATED"],
+                         "both the live and the annotated claim must be reported")
+
+    def run_scan_ddl(self, ddl_dir: pathlib.Path):
+        return subprocess.run(
+            [sys.executable, str(pathlib.Path(s.__file__)), "--ddl", str(ddl_dir)],
+            capture_output=True, text=True, timeout=60)
+
+    def test_missing_manifest_is_reported_not_traced(self):
+        # P6-573: this is a CI gate — a missing input must read as a finding.
+        with tempfile.TemporaryDirectory() as d:
+            out = self.run_scan_ddl(pathlib.Path(d))
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("is missing", out.stderr)
+        self.assertNotIn("Traceback", out.stderr + out.stdout)
+
+    def test_unusable_manifest_is_reported_not_traced(self):
+        for payload in ('{"tables": ', '{"tables": []}', '{"tables": "nope"}',
+                        '{"tables": [{"table_kind": "LOG"}]}'):
+            with self.subTest(payload=payload):
+                with tempfile.TemporaryDirectory() as d:
+                    root = pathlib.Path(d)
+                    (root / "schema_manifest.json").write_text(payload, encoding="utf-8")
+                    out = self.run_scan_ddl(root)
+                self.assertEqual(out.returncode, 1, out.stdout)
+                self.assertIn("is unreadable", out.stderr)
+                self.assertNotIn("Traceback", out.stderr + out.stdout)
+
+    def test_unparseable_ddl_file_is_drift_not_a_silent_pass(self):
+        # P6-574: a file with no CREATE TABLE was dropped from `parsed`, so the
+        # parity check printed a PASS over an unverifiable file.
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "schema_manifest.json").write_text(
+                '{"tables": [{"table_name": "raw_table_1", "table_kind": "LOG",'
+                ' "primary_key": "instrument_token"}]}', encoding="utf-8")
+            (root / "01_raw_table_1.sql").write_text(
+                "-- this file has no CREATE TABLE statement\nSELECT 1;\n", encoding="utf-8")
+            out = self.run_scan_ddl(root)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("every DDL file parses", out.stdout)
+        self.assertIn("unparsed: 01_raw_table_1.sql", out.stdout)
+        self.assertIn("[DRIFT]", out.stdout)
 
 
 if __name__ == "__main__":

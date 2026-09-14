@@ -5,7 +5,8 @@
 # prefix?" Credentials come from the SAME files compose interpolates
 # (.env + secrets.env) — never hardcoded here, never in argv.
 #
-# Functions: r2_list_lake  (objects under the lake warehouse prefix)
+# Functions: r2_list_lake [prefix]  (objects under the warehouse prefix or a
+#                                    sub-prefix; TSV key/size/LastModified)
 #            r2_list_all  (everything in the bucket)
 # Direct use: r2-list.sh lake | all      (sourced use is unchanged)
 #
@@ -69,7 +70,8 @@ r2_load() {
 }
 
 _r2_list() {
-  # _r2_list <prefix> — TSV "key<TAB>size" on stdout, one object per line.
+  # _r2_list <prefix> — TSV "key<TAB>size<TAB>LastModified" on stdout, one
+  # object per line. The timestamp is what lets a caller age-check an object.
   local prefix="$1"
   r2_load || return 1
   # Secrets travel in the environment: argv is world-readable (P6-154). The
@@ -167,14 +169,21 @@ def list_page(token):
     for el in root.iter():
         tag = local(el.tag)
         if tag == "Contents":
-            key = size = None
+            key = size = stamp = None
             for child in el:
                 if local(child.tag) == "Key":
                     key = child.text
                 elif local(child.tag) == "Size":
                     size = child.text
+                elif local(child.tag) == "LastModified":
+                    # Carried through for callers that must age-check an object
+                    # (lake-guard's manifest freshness check, P6-439): a listing
+                    # that drops the timestamp cannot tell a live table from a
+                    # year-old orphan (P6-121/122).
+                    stamp = child.text
             if key is not None:
-                keys.append((key, size if size is not None else "0"))
+                keys.append((key, size if size is not None else "0",
+                             stamp if stamp is not None else ""))
         elif tag == "IsTruncated":
             saw_truncated = True
             truncated = (el.text or "").strip().lower() == "true"
@@ -189,8 +198,8 @@ def list_page(token):
 token = None
 for page in range(1, MAX_PAGES + 1):
     keys, truncated, token = list_page(token)
-    for key, size in keys:
-        print(f"{key}\t{size}")
+    for key, size, stamp in keys:
+        print(f"{key}\t{size}\t{stamp}")
     if not truncated:
         break
     if not token:
@@ -203,7 +212,13 @@ PYEOF
 
 # r2_load first: R2_PREFIX only exists after the config is read, and expanding it
 # earlier would quietly list "/" — the "no objects" verdict this wave is about.
-r2_list_lake() { r2_load || return 1; _r2_list "${R2_PREFIX}/"; }
+r2_list_lake() {
+  r2_load || return 1
+  # Optional prefix arg (P6-437): callers that only care about one partition or
+  # one directory pass it instead of paginating the whole warehouse and grepping
+  # the buffer. No arg = every object under the warehouse prefix (unchanged).
+  _r2_list "${1:-${R2_PREFIX}/}"
+}
 r2_list_all()  { _r2_list ""; }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
@@ -212,14 +227,14 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   # (P6-767).
   set -euo pipefail
   case "${1:-}" in
-    lake) r2_list_lake ;;
+    lake) r2_list_lake "${2:-}" ;;
     all)  r2_list_all ;;
     ""|help|--help|-h)
       cat >&2 <<'USAGE'
-usage: r2-list.sh lake   # objects under the lake warehouse prefix
+usage: r2-list.sh lake [prefix]   # objects under the lake warehouse prefix (or one partition)
        r2-list.sh all    # every object in the bucket
-       source r2-list.sh # then r2_list_lake / r2_list_all
-Prints TSV: "key<TAB>size". Config: 01_docker/.env + secrets.env
+       source r2-list.sh # then r2_list_lake [prefix] / r2_list_all
+Prints TSV: "key<TAB>size<TAB>LastModified". Config: 01_docker/.env + secrets.env
 (override with R2_ENV_FILE / R2_SECRETS_FILE).
 USAGE
       [ -n "${1:-}" ] || exit 2

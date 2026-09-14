@@ -211,7 +211,10 @@ TEST_COUNT_CLAIM_TYPES = (
         "test-count-stale",
         re.compile(
             r"\b(common|ingestion|compute)\s+\*{0,2}(\d{2,4})\b(?!\s+tables?)"
-            r"|\b(\d{2,4})\s+(common|ingestion|compute)\b",
+            # "24 common tables" is a table-count context, not a test-count
+            # claim: the reversed form needs the same exclusion as the first
+            # alternative (P6-793).
+            r"|\b(\d{2,4})\s+(common|ingestion|compute)\b(?!\s+tables?)",
             re.IGNORECASE,
         ),
     ),
@@ -408,8 +411,25 @@ def normalize_pk(s) -> list[str]:
 def run_ddl_check(ddl_dir: Path) -> int:
     files = sorted(ddl_dir.glob("*.sql"))
     manifest_path = ddl_dir / "schema_manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    entries = {t["table_name"]: t for t in manifest["tables"]}
+    # P6-573: this runs as the `make stale-tables` gate. A missing, malformed or
+    # shape-wrong manifest is a finding about the checkout, so it must come back
+    # as a readable message and a non-zero status — not a FileNotFoundError or a
+    # JSONDecodeError traceback.
+    if not manifest_path.exists():
+        print(f"ddl-table-kind: {manifest_path} is missing — cannot check DDL/manifest parity; "
+              "regenerate it from the DDL files", file=sys.stderr)
+        return 1
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        tables = manifest["tables"]
+        if not isinstance(tables, list) or not tables:
+            raise ValueError("'tables' is missing, empty or not a list")
+        entries = {t["table_name"]: t for t in tables}
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        print(f"ddl-table-kind: {manifest_path} is unreadable: {exc!r} — the manifest must be JSON "
+              "with a non-empty 'tables' list of objects carrying 'table_name'",
+              file=sys.stderr)
+        return 1
 
     checks: list[tuple[bool, str]] = []
     issues: list[str] = []
@@ -422,10 +442,16 @@ def run_ddl_check(ddl_dir: Path) -> int:
                    f"no {RETIRED_TABLE} manifest entry (" + (f"PRESENT" if RETIRED_TABLE in entries else "absent") + ")"))
 
     parsed: dict[str, tuple[Path, dict]] = {}
+    unparsed: list[Path] = []
     for f in files:
         p = parse_ddl(f)
         if p["name"]:
             parsed[p["name"]] = (f, p)
+        else:
+            # P6-574: dropping the file used to leave the parity check printing
+            # "every DDL file has a manifest entry (N/len(files))" as a PASS while
+            # an unverifiable file was simply absent from `parsed`.
+            unparsed.append(f)
 
     # Invariants B-E: the four re-scope tables carry the exact current kind.
     for tname, want in DDL_INVARIANTS.items():
@@ -458,8 +484,15 @@ def run_ddl_check(ddl_dir: Path) -> int:
                            if entries.get(n) and entries[n].get("table_kind") != parsed[n][1]["kind"])
     pk_mismatch = sorted(n for n in parsed
                          if entries.get(n) and normalize_pk(entries[n].get("primary_key")) != parsed[n][1]["pk"])
-    checks.append((not missing_entries,
+    checks.append((not unparsed,
+                   "every DDL file parses (" + (f"unparsed: {', '.join(f.name for f in unparsed)}"
+                                                if unparsed else "all") + ")"))
+    for f in unparsed:
+        issues.append(f"{f.name}: no CREATE TABLE statement found — the file cannot be checked "
+                      "against the manifest")
+    checks.append((not unparsed and not missing_entries,
                    f"every DDL file has a manifest entry ({len(parsed)}/{len(files)}" +
+                   (f" unparsed: {', '.join(f.name for f in unparsed)}" if unparsed else "") +
                    (f" missing: {', '.join(missing_entries)}" if missing_entries else "") + ")"))
     checks.append((not orphan_entries,
                    f"no manifest entries without a DDL file ({len(entries)}" +
@@ -582,7 +615,10 @@ def scan_file(path: Path) -> list[tuple[int, int, str, str, str]]:
                     kind_window = line[max(0, m.start() - KIND_WINDOW): m.start() + KIND_WINDOW]
                 tier = classify(lines, i, claim_type, span, heading_marker, banner_ctx,
                                 doc_hist, kind_window)
-                key = (i + 1, claim_type, "")
+                # P6-794: the tier is part of the key (as in the numeric loops):
+                # a live claim and a dated/marked one on the same line are
+                # distinct, and the first must not hide the second.
+                key = (i + 1, claim_type, "", tier)
                 if key in seen:
                     continue
                 seen.add(key)
@@ -595,7 +631,8 @@ def scan_file(path: Path) -> list[tuple[int, int, str, str, str]]:
                 span = line[max(0, m.start() - CONTEXT_BEFORE): m.end()]
                 tier = classify_status(lines, i, claim_type, span, heading_marker,
                                        banner_ctx, doc_hist)
-                key = (i + 1, claim_type, "")
+                # P6-794: same as the table-kind loop above.
+                key = (i + 1, claim_type, "", tier)
                 if key in seen:
                     continue
                 seen.add(key)

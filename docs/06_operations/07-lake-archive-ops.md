@@ -20,7 +20,7 @@
 
 | Task | Command |
 |---|---|
-| Health check (cron-able; yesterday's day-folder ≥1 object, manifests ≥2, today's folder after 18:30 IST) | `bash code/01_platform/04_scripts/lake-guard.sh` |
+| Health check (cron-able; yesterday's day-folder ≥1 real data object, newest manifest ≤48 h old, today's folder after 18:30 IST) | `bash code/01_platform/04_scripts/lake-guard.sh` |
 | Tiering job status (exit 0 = RUNNING, 1 = no running job, 2 = running without fixed-delay restart) | `bash code/01_platform/04_scripts/tiering-start.sh --status` |
 | Restart tiering job after table recreate / container restart (idempotent; guards the classpath first; two concurrent invocations are serialised by a lock) | `bash code/01_platform/04_scripts/tiering-start.sh` |
 | Query the lake (DuckDB, iceberg) | `bash code/01_platform/04_scripts/r2-query.sh "<sql>"` — operator tool: the SQL runs with your R2 credentials; exit 2 = bad usage/config, 1 = DuckDB failed |
