@@ -198,24 +198,35 @@ fn live_node_runtime_sustained_soak() {
     // measure the same thing: what the node and the soak left behind. (The node itself is already
     // dropped with the `block_on` future; only the runtime outlives it.)
     drop(rt);
-    if let (Some(before), Some(after)) = (fds_before, probe_fd_count()) {
-        assert!(
-            after <= before + 8,
-            "fd leak suspected: {before} -> {after} open fds across the soak"
-        );
-    }
-    if let (Some(before), Some(after)) = (rss_before_kb, probe_rss_kb()) {
-        let delta_mb = after.saturating_sub(before) / 1024;
-        assert!(
-            delta_mb <= 128,
-            "RSS growth {delta_mb} MB across a {soak_secs}s soak exceeds the runaway guard (before={before}kB after={after}kB)"
-        );
-        println!(
-            "live_node_soak[SOAK_SECS={soak_secs}]: ok — samples_ok, clean_stop, dup_guard, fds_stable, rss_delta_mb={delta_mb}"
-        );
-    } else {
-        println!("live_node_soak[SOAK_SECS={soak_secs}]: ok — functional legs green (resource probes unavailable)");
-    }
+    // P3-467: the two resource legs are independent, so each is judged and reported on its own
+    // evidence. The old shape printed the fd verdict only inside the RSS branch (a run whose RSS
+    // probe failed reported no fd result even when the fd assertion had just passed) and labelled
+    // both legs "unavailable" whenever either was missing.
+    let fd_verdict = match (fds_before, probe_fd_count()) {
+        (Some(before), Some(after)) => {
+            assert!(
+                after <= before + 8,
+                "fd leak suspected: {before} -> {after} open fds across the soak"
+            );
+            format!("fds_stable({before}->{after})")
+        }
+        _ => "fds_probe_unavailable".to_string(),
+    };
+    let rss_verdict = match (rss_before_kb, probe_rss_kb()) {
+        (Some(before), Some(after)) => {
+            let delta_mb = after.saturating_sub(before) / 1024;
+            assert!(
+                delta_mb <= 128,
+                "RSS growth {delta_mb} MB across a {soak_secs}s soak exceeds the runaway guard (before={before}kB after={after}kB)"
+            );
+            format!("rss_delta_mb={delta_mb}")
+        }
+        _ => "rss_probe_unavailable".to_string(),
+    };
+    // One verdict line, naming each leg's own outcome — never one leg's status on the other's say-so.
+    println!(
+        "live_node_soak[SOAK_SECS={soak_secs}]: ok — samples_ok, clean_stop, dup_guard, {fd_verdict}, {rss_verdict}"
+    );
 }
 
 /// Open-fd count for this process (Linux /proc); `None` when unavailable.
