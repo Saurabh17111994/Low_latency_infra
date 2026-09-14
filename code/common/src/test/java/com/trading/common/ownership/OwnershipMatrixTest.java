@@ -3,11 +3,14 @@ package com.trading.common.ownership;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.trading.common.ownership.OwnershipMatrix.Component;
 import com.trading.common.ownership.OwnershipMatrix.Rule;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 
@@ -106,14 +109,23 @@ class OwnershipMatrixTest {
     }
 
     @Test
-    void authorizedComponentsRowAllowsAnyWriter() {
-        // "Safety halt requests | Authorized components" — open owner set, no prohibited.
+    void openOwnerRowIsNotDecidedByThisHelper() {
+        // "Safety halt requests | Authorized components": the owner set is open, so
+        // this class cannot authorize a writer — canWrite denies and the caller
+        // checks isOpenOwnerRow and applies its own authorization.
         Rule r = rule("safety halt requests");
-        assertTrue(OwnershipMatrix.canWrite(r, Component.INGESTION));
-        assertTrue(OwnershipMatrix.canWrite(r, Component.EXECUTOR));
-        assertTrue(OwnershipMatrix.canWrite(r, Component.BABYSITTER));
+        assertTrue(OwnershipMatrix.isOpenOwnerRow(r));
+        assertFalse(OwnershipMatrix.canWrite(r, Component.INGESTION));
+        assertFalse(OwnershipMatrix.canWrite(r, Component.EXECUTOR));
+        assertFalse(OwnershipMatrix.canWrite(r, Component.BABYSITTER));
         assertTrue(OwnershipMatrix.canRead(r, Component.EXECUTOR));
         assertFalse(OwnershipMatrix.canRead(r, Component.SIGNAL_JOB));
+        // Only that row is open.
+        for (Rule other : OwnershipMatrix.RULES) {
+            if (other != r) {
+                assertFalse(OwnershipMatrix.isOpenOwnerRow(other), other.target);
+            }
+        }
     }
 
     @Test
@@ -136,5 +148,56 @@ class OwnershipMatrixTest {
             assertTrue(!r.readers.isEmpty() || r.soleOwner != null,
                     "rule '" + r.target + "' must have at least an owner or readers");
         }
+    }
+
+    @Test
+    void nullRuleOrActorDeniesInsteadOfThrowing() {
+        Rule r = rule("raw packet/decode");
+        assertFalse(OwnershipMatrix.canWrite(null, Component.INGESTION));
+        assertFalse(OwnershipMatrix.canWrite(r, null));
+        assertFalse(OwnershipMatrix.canRead(null, Component.INGESTION));
+        assertFalse(OwnershipMatrix.canRead(r, null));
+        assertFalse(OwnershipMatrix.isOpenOwnerRow(null));
+    }
+
+    @Test
+    void ruleSetsAreImmutableCopies() {
+        // The "every other component" rows are built from mutable EnumSets; before
+        // the copy, the builder of a rule kept a handle on global enforcement.
+        for (Rule r : OwnershipMatrix.RULES) {
+            assertThrows(UnsupportedOperationException.class, () -> r.readers.add(Component.BROKER));
+            assertThrows(UnsupportedOperationException.class,
+                    () -> r.prohibitedOwners.add(Component.BROKER));
+        }
+        Set<Component> readers = new HashSet<>();
+        readers.add(Component.EXECUTOR);
+        Rule local = new Rule("local", Component.INGESTION, readers, Set.of());
+        readers.clear();
+        assertTrue(local.readers.contains(Component.EXECUTOR),
+                "the rule must own a copy, not the caller's set");
+    }
+
+    @Test
+    void malformedRulesAreRejectedAtConstruction() {
+        assertThrows(IllegalArgumentException.class,
+                () -> new Rule("  ", Component.INGESTION, Set.of(), Set.of()));
+        assertThrows(NullPointerException.class,
+                () -> new Rule("t", Component.INGESTION, null, Set.of()));
+        assertThrows(NullPointerException.class,
+                () -> new Rule("t", Component.INGESTION, Set.of(), null));
+    }
+
+    @Test
+    void logRuleIsLeastPrivilegeAndValidated() {
+        Rule log = OwnershipMatrix.logRule("trading_logs", Component.SIGNAL_JOB);
+        assertTrue(OwnershipMatrix.canWrite(log, Component.SIGNAL_JOB));
+        assertFalse(OwnershipMatrix.canWrite(log, Component.STORAGE), "a reader is not a writer");
+        assertFalse(OwnershipMatrix.canWrite(log, Component.BROKER));
+        assertTrue(OwnershipMatrix.canRead(log, Component.PLATFORM_HEALTH)); // operations
+        assertTrue(OwnershipMatrix.canRead(log, Component.STORAGE));         // lake/audit
+        assertFalse(OwnershipMatrix.canRead(log, Component.BROKER));
+        assertThrows(IllegalArgumentException.class,
+                () -> OwnershipMatrix.logRule("  ", Component.SIGNAL_JOB));
+        assertThrows(IllegalArgumentException.class, () -> OwnershipMatrix.logRule("t", null));
     }
 }

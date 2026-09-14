@@ -2,6 +2,7 @@ package com.trading.common.ownership;
 
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -21,11 +22,13 @@ import java.util.Set;
  *       reconciliation).</li>
  *   <li>"raw ingestion" &rarr; INGESTION.</li>
  *   <li>"Authorized components" (safety-halt owner) &rarr; {@code soleOwner == null}:
- *       any authorized component may write (subject to authorization elsewhere); the
- *       row's owner set is deliberately open.</li>
+ *       the row's owner set is deliberately open, so this class cannot decide it.
+ *       {@link #canWrite} denies for such a row and the caller checks
+ *       {@link #isOpenOwnerRow} and applies its own authorization.</li>
  *   <li>Gate/attempt row prohibited column "Signal, Executor" in the doc is
  *       self-contradictory (the sole owner may not also be prohibited); interpreted as
- *       Signal + Babysitter, mirroring the order-lifecycle row.</li>
+ *       Signal + Babysitter, mirroring the order-lifecycle row. The foundation doc row
+ *       carries the same reconciliation.</li>
  * </ul>
  */
 public final class OwnershipMatrix {
@@ -39,17 +42,24 @@ public final class OwnershipMatrix {
 
     public static final class Rule {
         public final String target;
-        /** Sole writer owner; {@code null} = any authorized component (open set). */
+        /** Sole writer owner; {@code null} = the doc's open "Authorized components" row. */
         public final Component soleOwner;
         public final Set<Component> readers;
         public final Set<Component> prohibitedOwners;
 
         public Rule(String target, Component soleOwner, Set<Component> readers,
                     Set<Component> prohibitedOwners) {
+            if (target == null || target.isBlank()) {
+                throw new IllegalArgumentException("ownership rule target must not be null or blank");
+            }
+            // Defensive immutable copies: the caller's set used to be stored by
+            // reference, so whoever built a rule kept a handle on global
+            // enforcement (the "every other component" rows are mutable EnumSets).
             this.target = target;
             this.soleOwner = soleOwner;
-            this.readers = readers;
-            this.prohibitedOwners = prohibitedOwners;
+            this.readers = Set.copyOf(Objects.requireNonNull(readers, "readers"));
+            this.prohibitedOwners =
+                    Set.copyOf(Objects.requireNonNull(prohibitedOwners, "prohibitedOwners"));
         }
     }
 
@@ -93,18 +103,53 @@ public final class OwnershipMatrix {
                 EnumSet.complementOf(EnumSet.of(Component.BABYSITTER))) // Arrow REST / direct callers
     );
 
-    /** True only if {@code actor} is the sole owner and not prohibited. */
+    /**
+     * True only if {@code actor} is the sole owner of {@code rule} and not prohibited.
+     *
+     * <p>Fails closed. A {@code null} rule or actor denies: an enforcement path must
+     * answer "no" rather than throw, and must never authorize what it cannot
+     * identify. An open-owner row (see {@link #isOpenOwnerRow}) also denies, because
+     * this class records ownership and cannot perform the authorization the doc
+     * defers to the caller.
+     */
     public static boolean canWrite(Rule rule, Component actor) {
-        boolean isOwner = rule.soleOwner == null || rule.soleOwner == actor; // null = authorized-components row
-        return isOwner && !rule.prohibitedOwners.contains(actor);
+        if (rule == null || actor == null || rule.soleOwner == null) {
+            return false;
+        }
+        return rule.soleOwner == actor && !rule.prohibitedOwners.contains(actor);
     }
 
-    /** True only if {@code actor} is an allowed reader and not prohibited. */
+    /** True only if {@code actor} is an allowed reader and not prohibited; fails closed on null. */
     public static boolean canRead(Rule rule, Component actor) {
+        if (rule == null || actor == null) {
+            return false;
+        }
         return rule.readers.contains(actor) && !rule.prohibitedOwners.contains(actor);
     }
 
+    /**
+     * The doc's open-owner rows ("Authorized components", today only
+     * {@code safety halt requests}): the writer set is deliberately not enumerated
+     * here, so {@link #canWrite} denies and the caller must authorize against its
+     * own halt-writer rules before writing.
+     */
+    public static boolean isOpenOwnerRow(Rule rule) {
+        return rule != null && rule.soleOwner == null;
+    }
+
+    /**
+     * A log/telemetry table: {@code owner} writes, operations
+     * ({@link Component#PLATFORM_HEALTH}) and the lake/audit layer
+     * ({@link Component#STORAGE}) read, every other component is a prohibited
+     * writer. The previous default handed read to all components and prohibited
+     * nobody, i.e. an open-read/open-write rule.
+     */
     public static Rule logRule(String table, Component owner) {
-        return new Rule(table, owner, EnumSet.allOf(Component.class), EnumSet.noneOf(Component.class));
+        if (owner == null) {
+            throw new IllegalArgumentException("log rule owner must not be null");
+        }
+        Set<Component> readers = Set.of(Component.PLATFORM_HEALTH, Component.STORAGE);
+        return new Rule(table, owner, readers,
+                EnumSet.complementOf(EnumSet.of(owner, Component.PLATFORM_HEALTH, Component.STORAGE)));
     }
 }
