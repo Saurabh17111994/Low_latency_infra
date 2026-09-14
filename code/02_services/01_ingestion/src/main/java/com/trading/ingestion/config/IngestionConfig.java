@@ -1,6 +1,7 @@
 package com.trading.ingestion.config;
 
 import com.trading.common.config.SecretGuard;
+import com.trading.common.config.PlatformConfig;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -199,8 +200,14 @@ public final class IngestionConfig {
 
         // ---- Batching (max bounds; app-level batching stays off at the
         // defaults — the Fluss client owns transport-level coalescing) ----
-        b.maxBatchRecords = intRange(env, "INGESTION_MAX_BATCH_RECORDS", 1, 1, 1000, errors);
-        b.maxBatchWaitMs = intRange(env, "INGESTION_MAX_BATCH_WAIT_MS", 0, 0, 100, errors);
+        // P6-664: the defaults come from PlatformConfig, which is where the
+        // documented "immediate, bounded writes" policy pins them (the gate reads
+        // its declaration). Two literals here were a second statement of the same
+        // rule; the env override still wins, and the ranges are unchanged.
+        b.maxBatchRecords = intRange(env, "INGESTION_MAX_BATCH_RECORDS",
+                PlatformConfig.INGESTION_MAX_BATCH_RECORDS, 1, 1000, errors);
+        b.maxBatchWaitMs = intRange(env, "INGESTION_MAX_BATCH_WAIT_MS",
+                PlatformConfig.INGESTION_MAX_BATCH_WAIT_MS, 0, 100, errors);
         // O-2 RESOLVED 2026-08-27: linger 1ms (measured p99 10.5ms vs 38ms @
         // 20ms — THR-PROBE-002). Config-driven so T8 can sweep 16..1024.
         b.flussWriterBatchTimeoutMs = intRange(
@@ -340,7 +347,7 @@ public final class IngestionConfig {
         m.put("MAX_PENDING_APPEND_RECORDS", maxPendingRecords);
         m.put("MAX_PENDING_APPEND_BYTES", maxPendingBytes);
         m.put("PENDING_APPEND_WARNING_PERCENT", pendingWarningPercent);
-        m.put("APPEND_TIMEOUT", appendTimeout);
+        m.put("APPEND_TIMEOUT_SECONDS", appendTimeout);
         m.put("DRAIN_DEADLINE_SECONDS", drainDeadline.getSeconds());
         m.put("INGESTION_ZERO_ACK_TIMEOUT_MS", zeroAckTimeoutMs);
         m.put("CLOCK_OFFSET_LIMIT_MS", clockOffsetLimitMs);
