@@ -10,8 +10,9 @@
 //!    broker got it, our process died before recording).
 //! 2. Exactly ONE durable attempt record exists for the instruction after recovery.
 //! 3. Recovery from the ambiguous window HALTS the partition (`UnknownHalted`).
-//! 4. The operator re-enable bumps the gate epoch; the PRE-CRASH command (old epoch +
-//!    fence) is then rejected `Blocked` with no new bridge call.
+//! 4. The PRE-CRASH command is quarantined, never re-issued: replaying it during recovery
+//!    returns `UnknownHalted` (not `Blocked` — the ambiguous-window short-circuit runs
+//!    before any gate or fence check) with no new bridge call, and the partition re-halts.
 //! 5. A fresh command under the new epoch/fence succeeds exactly once with its own
 //!    broker id; the durable store converges to one record per attempt.
 //!
