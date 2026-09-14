@@ -20,6 +20,13 @@ Usage:
 Prints per file: size, last-complete-batch end, delta, and (when truncated)
     TRUNCATE_TO=<end>
 Exit 0 always (the caller decides); callers parse TRUNCATE_TO lines.
+
+TRUNCATE_TO is printed ONLY when at least one complete batch was found. A file
+with no complete batch at all (a fully preallocated segment, or a partial write
+smaller than one header) prints NO_COMPLETE_BATCH instead of TRUNCATE_TO=0, so
+a caller cannot mistake "nothing to keep" for "keep everything up to zero"
+(P6-383). repair-tablet.sh's parser already accepts only TRUNCATE_TO=[1-9]..., so
+this is not a behavior change for that caller.
 """
 
 import os
@@ -40,7 +47,10 @@ def scan(path):
     try:
         with open(path, "rb") as f:
             while pos + HEADER_SIZE <= size:
-                f.seek(pos)
+                # P6-735: read sequentially. The old absolute f.seek(pos) on every
+                # iteration forced the buffered reader to discard and refill its
+                # buffer once per batch (hundreds of thousands of batches in a
+                # 670 MB segment); the relative skip below stays in the buffer.
                 header = f.read(HEADER_SIZE)
                 if not any(header):
                     # Preallocated/never-written tail — the boundary.
@@ -49,6 +59,7 @@ def scan(path):
                 if total < HEADER_SIZE or pos + total > size:
                     # Corrupt/incomplete batch — stop at the last complete one.
                     break
+                f.seek(total - HEADER_SIZE, os.SEEK_CUR)  # skip the batch body
                 pos += total
                 last_end = pos
     except OSError as e:
@@ -67,7 +78,13 @@ def main(argv):
         if end is None or size < 0:
             continue
         delta = size - end
-        if delta > 0:
+        if end == 0 and delta > 0:
+            # P6-383: no complete batch at all. Printing TRUNCATE_TO=0 invited a
+            # caller to shrink the segment to zero bytes; make it explicit.
+            print(f"{path}: size={size} last_complete_batch_end=0 "
+                  f"zero_tail={delta} bytes")
+            print(f"NO_COMPLETE_BATCH={path}")
+        elif delta > 0:
             print(f"{path}: size={size} last_complete_batch_end={end} "
                   f"zero_tail={delta} bytes")
             print(f"TRUNCATE_TO={end}")

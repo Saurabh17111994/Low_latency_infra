@@ -254,6 +254,10 @@ def matrix_boundary(table_name):
     return "VM-FLUSS-SRV-005"
 
 
+class ManifestUnreadable(RuntimeError):
+    """The committed manifest exists but cannot be parsed (P6-350)."""
+
+
 def load_existing_manifest():
     """Return the committed schema_manifest.json as a dict, or None if absent/unreadable."""
     if not os.path.exists(MANIFEST_PATH):
@@ -272,9 +276,15 @@ def load_existing_manifest():
                 f"{MANIFEST_PATH} has no 'tables' list — malformed manifest structure"
             )
         return manifest
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"WARNING: cannot parse existing manifest ({exc}); treating as absent")
+    except FileNotFoundError:
+        # No manifest yet: legitimately absent, the caller writes one.
         return None
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        # P6-350: a manifest that exists but cannot be parsed is NOT absent.
+        # Treating it as absent regenerated it and exited 0, hiding exactly the
+        # corruption/tampering the drift gate exists to catch. Refuse instead
+        # (a caller that means to replace it passes --force).
+        raise ManifestUnreadable(f"{MANIFEST_PATH} exists but cannot be parsed: {exc}") from exc
 
 
 def compute_manifest_entries():
@@ -405,7 +415,11 @@ def run_sweep_tool():
     """
     try:
         versions = load_versions(VERSIONS_PIN)
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError, RuntimeError) as exc:
+        # P6-351: load_versions wraps OSError as RuntimeError, and a non-UTF-8
+        # pin file raises UnicodeDecodeError — `except OSError` never fired.
+        # Sweep mode calls this outside main's guard, so the old code crashed
+        # with a raw traceback instead of exiting 2.
         print(f"cannot read {VERSIONS_PIN}: {exc}")
         return 2
     classpath = build_tool_classpath(versions.get("FLUSS_VERSION", "unknown"))
@@ -433,6 +447,21 @@ def run_sweep_tool():
     return result.returncode
 
 
+def _unique_evidence_dir(stamp):
+    """ddl-apply-<stamp>-<pid>[-n], never an existing directory (P6-723).
+
+    The stamp has second resolution, so an immediate retry (or the smoke drill
+    running the orchestrator twice) used to land in the same directory and
+    overwrite the previous apply.json — the DDL gate's own evidence record.
+    """
+    base = os.path.join(EVIDENCE_ROOT, f"ddl-apply-{stamp}-{os.getpid()}")
+    out_dir, n = base, 1
+    while os.path.exists(out_dir):
+        n += 1
+        out_dir = f"{base}-{n}"
+    return out_dir
+
+
 def run_apply_tool(versions, matrix_evidence):
     """Execute the 9-step DDL application contract via the Java engine."""
     fluss_version = versions.get("FLUSS_VERSION", "unknown")
@@ -440,7 +469,7 @@ def run_apply_tool(versions, matrix_evidence):
     if classpath is None:
         return 2
     stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    out_dir = os.path.join(EVIDENCE_ROOT, f"ddl-apply-{stamp}")
+    out_dir = _unique_evidence_dir(stamp)
     try:
         os.makedirs(out_dir, exist_ok=True)
     except OSError as exc:
@@ -628,11 +657,14 @@ def main():
     args = parser.parse_args()
     echo_ownership_contract()
 
-    # CHG-100: fixture-pollution sweep — bypasses the apply contract entirely.
-    if os.environ.get("DDL_APPLY_SWEEP") == "1":
-        return run_sweep_tool()
-
     try:
+        # CHG-100: fixture-pollution sweep — bypasses the apply contract
+        # entirely. Dispatched inside the guard (P6-351): outside it, any
+        # RuntimeError from the sweep (an unreadable pin file, a missing tool
+        # class) escaped as a traceback instead of a clean exit 2.
+        if os.environ.get("DDL_APPLY_SWEEP") == "1":
+            return run_sweep_tool()
+
         versions = load_versions(VERSIONS_PIN)
         gate_problems = enforce_version_gate(versions)
         if gate_problems:
@@ -649,7 +681,18 @@ def main():
         # --- Manifest staleness detection (R-014: never return before the
         # apply step runs — a synced manifest must still reach the gated
         # apply/refusal handling below) ---
-        existing = load_existing_manifest()
+        try:
+            existing = load_existing_manifest()
+        except ManifestUnreadable as exc:
+            if not args.force:
+                print(f"MANIFEST UNREADABLE: {exc}")
+                print(
+                    "Refusing to regenerate schema_manifest.json over a file that "
+                    "cannot be parsed; re-run with --force to accept the loss."
+                )
+                return 2
+            print(f"--force: regenerating over unreadable {MANIFEST_PATH} ({exc}).")
+            existing = None
         needs_write = False
         if existing is not None:
             diffs = diff_manifests(existing, computed)
@@ -687,7 +730,11 @@ def main():
 
         # --- Contract check on the final on-disk manifest (post-regen):
         # every entry must carry a compatibility class (foundation L848).
-        final_manifest = load_existing_manifest()
+        try:
+            final_manifest = load_existing_manifest()
+        except ManifestUnreadable as exc:
+            print(f"MANIFEST UNREADABLE after write: {exc}")
+            return 2
         missing_compat = [
             e.get("table_name", "?")
             for e in (final_manifest or {}).get("tables", [])

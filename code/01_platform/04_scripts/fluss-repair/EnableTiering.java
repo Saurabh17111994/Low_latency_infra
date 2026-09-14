@@ -45,6 +45,13 @@ import java.util.List;
  */
 public class EnableTiering {
     public static void main(String[] args) throws Exception {
+        // P6-382: args[0] was read unchecked — no arguments produced an
+        // ArrayIndexOutOfBoundsException with no usage line. Exit 2 = unusable
+        // input, matching the other operator CLIs in this tree.
+        if (args.length < 1 || args[0].isBlank()) {
+            System.err.println("Usage: EnableTiering <table> [bootstrap-servers]");
+            System.exit(2);
+        }
         String table = args[0];
         String bootstrap = args.length > 1 ? args[1] : "localhost:9123";
         Configuration conf = new Configuration();

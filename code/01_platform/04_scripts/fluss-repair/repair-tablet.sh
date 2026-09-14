@@ -189,6 +189,7 @@ start_tablet_and_verify() {
 # The tablet MUST already be stopped (or DRY_RUN=1).
 # Returns: 0 = repaired or nothing to do, 2 = clean (nothing torn), 3 = no log
 # segments, 1 = error. Prints LogScan lines + TRUNCATE_TO lines to stdout
+# (a segment with no complete batch prints NO_COMPLETE_BATCH instead; wave 14)
 # (parsed by callers).
 # ─────────────────────────────────────────────────────────────────────────────
 repair_one_table() {

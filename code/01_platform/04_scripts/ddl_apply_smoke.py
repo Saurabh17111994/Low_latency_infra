@@ -161,12 +161,23 @@ def _docker_smoke_available(compose_file):
         return None, "docker CLI not found on this host"
     if not os.path.isfile(compose_file):
         return None, f"compose file not found: {compose_file}"
-    if subprocess.run(_compose_cmd(compose_file) + ["config"],
-                      capture_output=True, text=True).returncode != 0:
+    # P6-352: these two probes had no timeout and no exception handling, unlike
+    # every other docker call in this file — a present-but-unresponsive daemon
+    # hung the whole drill instead of degrading to a SKIP.
+    try:
+        cfg = subprocess.run(_compose_cmd(compose_file) + ["config"],
+                             capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"the compose config probe did not run: {exc}"
+    if cfg.returncode != 0:
         return None, ("docker compose config invalid "
                       "(missing required .env vars?)")
-    if subprocess.run(["docker", "image", "inspect", DDL_APPLY_IMAGE],
-                      capture_output=True, text=True).returncode != 0:
+    try:
+        image = subprocess.run(["docker", "image", "inspect", DDL_APPLY_IMAGE],
+                               capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"docker image inspect did not run: {exc}"
+    if image.returncode != 0:
         return None, (f"ddl-apply image not built ({DDL_APPLY_IMAGE}) — "
                       "run `make ddl-image`")
     return DDL_APPLY_IMAGE, None

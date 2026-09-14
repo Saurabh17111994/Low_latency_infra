@@ -231,5 +231,117 @@ class RunApplyToolTest(unittest.TestCase):
             self.assertEqual(rc, 6, "acknowledged partial apply must return the dedicated 6")
 
 
+class ManifestGuardTest(unittest.TestCase):
+    """P6-350: a manifest that exists but cannot be parsed is not "absent"."""
+
+    def test_absent_manifest_is_absence_not_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ddl_apply, "MANIFEST_PATH",
+                                   os.path.join(tmp, "schema_manifest.json")):
+                self.assertIsNone(ddl_apply.load_existing_manifest())
+
+    def test_corrupt_manifest_raises_instead_of_reading_as_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = os.path.join(tmp, "schema_manifest.json")
+            with open(bad, "w") as fh:
+                fh.write('{"tables": [')  # truncated write
+            with mock.patch.object(ddl_apply, "MANIFEST_PATH", bad):
+                with self.assertRaises(ddl_apply.ManifestUnreadable):
+                    ddl_apply.load_existing_manifest()
+
+    def test_valid_manifest_still_loads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            good = os.path.join(tmp, "schema_manifest.json")
+            with open(good, "w") as fh:
+                json.dump({"tables": [{"table_name": "t"}]}, fh)
+            with mock.patch.object(ddl_apply, "MANIFEST_PATH", good):
+                self.assertEqual(ddl_apply.load_existing_manifest()["tables"][0]["table_name"], "t")
+
+    def _run_main(self, argv, manifest_path, force_regen_ok):
+        """main() with the version gate and DDL parsing neutralized."""
+        with mock.patch.object(sys, "argv", ["ddl_apply.py"] + argv), \
+             mock.patch.object(ddl_apply, "MANIFEST_PATH", manifest_path), \
+             mock.patch.object(ddl_apply, "echo_ownership_contract"), \
+             mock.patch.object(ddl_apply, "load_versions", return_value={"FLUSS_VERSION": "x"}), \
+             mock.patch.object(ddl_apply, "enforce_version_gate", return_value=[]), \
+             mock.patch.object(ddl_apply, "compute_manifest_entries", return_value=[]):
+            return ddl_apply.main()
+
+    def test_main_refuses_a_corrupt_manifest_with_exit_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = os.path.join(tmp, "schema_manifest.json")
+            with open(bad, "w") as fh:
+                fh.write("not json at all")
+            self.assertEqual(self._run_main([], bad, False), 2)
+            # refused means refused: the unparseable file is still there
+            with open(bad) as fh:
+                self.assertEqual(fh.read(), "not json at all")
+
+    def test_main_force_regenerates_over_a_corrupt_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad = os.path.join(tmp, "schema_manifest.json")
+            with open(bad, "w") as fh:
+                fh.write("not json at all")
+            self.assertEqual(self._run_main(["--force"], bad, True), 0)
+            with open(bad) as fh:
+                self.assertEqual(json.load(fh), {"schema_manifest_version": "1", "tables": []})
+
+
+class SweepGuardTest(unittest.TestCase):
+    """P6-351: sweep mode must exit 2, not traceback, when the pin is unreadable."""
+
+    def test_non_utf8_pin_file_returns_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pin = os.path.join(tmp, "versions.pin")
+            with open(pin, "wb") as fh:
+                fh.write(b"FLUSS_VERSION=0.9.1\xff\xfe\n")
+            with mock.patch.object(ddl_apply, "VERSIONS_PIN", pin):
+                self.assertEqual(ddl_apply.run_sweep_tool(), 2)
+
+    def test_unreadable_pin_file_returns_two(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            pin = os.path.join(tmp, "versions.pin")
+            with open(pin, "w") as fh:
+                fh.write("FLUSS_VERSION=0.9.1-incubating\n")
+            os.chmod(pin, 0)
+            try:
+                with mock.patch.object(ddl_apply, "VERSIONS_PIN", pin):
+                    self.assertEqual(ddl_apply.run_sweep_tool(), 2)
+            finally:
+                os.chmod(pin, 0o644)
+
+    def test_sweep_dispatch_is_inside_the_guarded_block(self):
+        """main() must not let a sweep failure escape as a traceback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            pin = os.path.join(tmp, "versions.pin")
+            with open(pin, "w") as fh:
+                fh.write("FLUSS_VERSION=0.9.1-incubating\n")
+            os.chmod(pin, 0)
+            try:
+                with mock.patch.object(sys, "argv", ["ddl_apply.py"]), \
+                     mock.patch.dict(os.environ, {"DDL_APPLY_SWEEP": "1"}), \
+                     mock.patch.object(ddl_apply, "VERSIONS_PIN", pin), \
+                     mock.patch.object(ddl_apply, "echo_ownership_contract"):
+                    self.assertEqual(ddl_apply.main(), 2)
+            finally:
+                os.chmod(pin, 0o644)
+
+
+class EvidenceDirUniquenessTest(unittest.TestCase):
+    """P6-723: a same-second retry must not overwrite the previous apply.json."""
+
+    def test_second_apply_in_the_same_second_gets_its_own_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(ddl_apply, "EVIDENCE_ROOT", tmp):
+                stamp = "20260914T120000Z"
+                first = ddl_apply._unique_evidence_dir(stamp)
+                self.assertNotEqual(first, os.path.join(tmp, f"ddl-apply-{stamp}"))
+                self.assertIn(f"ddl-apply-{stamp}-", first)
+                os.makedirs(first)
+                second = ddl_apply._unique_evidence_dir(stamp)
+                self.assertNotEqual(first, second)
+                self.assertTrue(second.startswith(first + "-"))
+
+
 if __name__ == "__main__":
     unittest.main()
