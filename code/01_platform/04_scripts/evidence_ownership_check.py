@@ -8,12 +8,16 @@ with setgid 2775 + umask 002, so records land 664 (gid == the engine group) and
 host automation in the shared group can read AND manage them. This gate fails
 on any violation of that contract:
 
-  EVIDENCE ROOT DIR (scoped like records — enforced only when the corpus is
-  container-owned):
+  EVIDENCE ROOT DIR (owner-scoped, not record-scoped: a root-owned evidence
+  root fails even when every record inside it is host-owned, because the root's
+  ownership is produced by the container's own repair step — root here means a
+  container run escaped the contract and the next write would inherit it;
+  P6-726):
     * owner == root (0)        -> FAIL (the wrapper's ownership repair never
                                    ran; the container ran as root)
     * owner == engine uid but the dir lacks setgid or group-write (expected
       2775)                   -> FAIL (descendants would not inherit the group)
+    * owner == any other uid   -> out of scope (host-side run)
 
   RECORDS (apply.json):
     * owner == root (0)        -> FAIL (the container ran as root)
@@ -40,16 +44,39 @@ REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 EVIDENCE_DIR = os.environ.get("DDL_APPLY_EVIDENCE_DIR") or os.path.join(
     REPO_ROOT, "logs", "ddl-apply")
-CONTAINER_UID = int(os.environ.get("DDL_APPLY_UID", "10001"))
-CONTAINER_GID = int(os.environ.get("DDL_APPLY_GID", "10001"))
+
+
+def _uid_env(name, default):
+    """Read a uid/gid override; refuse a non-numeric value by name.
+
+    int() at import time turned a typo into an uncaught ValueError traceback,
+    which aborts the gate for a reason unrelated to ownership (P6-725). An
+    absent or blank value keeps the documented default.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        # exit 2 = "did not run", distinct from main()'s 1 = findings
+        print(f"evidence-ownership-check: FATAL — {name}='{raw}' is not an "
+              f"integer (expected a uid/gid number, e.g. {default})",
+              file=sys.stderr)
+        sys.exit(2)
+
+
+CONTAINER_UID = _uid_env("DDL_APPLY_UID", 10001)
+CONTAINER_GID = _uid_env("DDL_APPLY_GID", 10001)
 
 SETGID = 0o2000   # mode & SETGID -> setgid bit (descendants inherit the group)
 GROUP_WRITE = 0o020  # mode & GROUP_WRITE -> group-writable
 
 
 def _dir_problem(evidence_dir, st, container_uid):
-    """Evidence-root-dir contract violations, or None. Scoped like records:
-    enforced only when the dir is container-owned (root- or engine-owned)."""
+    """Evidence-root-dir contract violations, or None. Scoped by owner uid:
+    only root and the engine uid are governed. Root fails on its own, whatever
+    the records inside say (P6-726)."""
     if st.st_uid == 0:
         return (f"{evidence_dir}: root-owned (uid 0) — the wrapper's ownership "
                 "repair never ran; the container ran as root")
@@ -81,7 +108,13 @@ def check_evidence_dir(evidence_dir, container_uid, container_gid=CONTAINER_GID,
         p = _dir_problem(evidence_dir, dst, container_uid)
         if p:
             problems.append(p)
-    for root, _, files in os.walk(evidence_dir):
+    def _walk_error(exc):
+        # os.walk swallows read errors by default, so an unreadable subtree
+        # would hide every record inside it and the gate would still PASS
+        # (P6-367). Fail closed instead.
+        problems.append(f"{exc.filename or evidence_dir}: cannot read ({exc})")
+
+    for root, _, files in os.walk(evidence_dir, onerror=_walk_error):
         for name in files:
             if name != "apply.json":
                 continue
@@ -126,6 +159,10 @@ def main():
               "01_docker-ddl-apply -c 'chmod 2775 /logs/ddl-apply && "
               "find /logs/ddl-apply -name apply.json -exec chmod g+w {} +'")
         print("  (group mismatches: chgrp -R 10001 /logs/ddl-apply)")
+        print("  (root-owned dir/records: chmod cannot change an owner — "
+              "chown -R 10001:10001 /logs/ddl-apply, e.g. docker run --rm "
+              "-v \"$PWD/logs:/logs\" --entrypoint bash 01_docker-ddl-apply "
+              "-c 'chown -R 10001:10001 /logs/ddl-apply')")
         return 1
     print("evidence-ownership-check: PASS — evidence root setgid+group-writable, "
           "every container-written record group-writable with the engine GID")
