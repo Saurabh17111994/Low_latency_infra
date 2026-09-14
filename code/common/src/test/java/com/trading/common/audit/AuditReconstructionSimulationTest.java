@@ -221,7 +221,9 @@ class AuditReconstructionSimulationTest {
         // Build 365 synthetic trading days (offline, no cluster)
         java.util.List<AuditHashChain.Manifest> year = new java.util.ArrayList<>();
         for (int d = 0; d < 365; d++) {
-            String day = String.format("2025-%03d", d);
+            // Real ISO-8601 trading dates: Manifest validates the format (P6-654), and a
+            // padded ordinal like 2025-001 is not a date the chain accepts.
+            String day = java.time.LocalDate.of(2025, 1, 1).plusDays(d).toString();
             AuditHashChain.ManifestBuilder b = new AuditHashChain.ManifestBuilder(day, TABLE, SCHEMA);
             b.addEvent(day + "-evt", ImmutabilityProtocol.canonicalHash("event|" + day));
             year.add(b.build());

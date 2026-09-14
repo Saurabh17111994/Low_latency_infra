@@ -1,6 +1,8 @@
 package com.trading.common.audit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatNullPointerException;
 
 import com.trading.common.schema.ImmutabilityProtocol;
 
@@ -151,5 +153,98 @@ class AuditHashChainTest {
     void emptyChainIsValidAgainstEmptyRoot() {
         assertThat(AuditHashChain.verifyChain(List.of(), AuditHashChain.rootHash(List.of())))
                 .isEqualTo(AuditHashChain.Verification.VALID);
+    }
+
+    // --- P6-262: the content hash must actually be a SHA-256 hex digest ---
+
+    @Test
+    void rejectsContentHashThatIsNotSha256Hex() {
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new AuditHashChain.AuditEvent("ev-1", "x"));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new AuditHashChain.AuditEvent("ev-1", H1.substring(0, 63)));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new AuditHashChain.AuditEvent("ev-1", H1 + H1));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new AuditHashChain.AuditEvent("ev-1", "z".repeat(64)));
+        assertThat(new AuditHashChain.AuditEvent("ev-1", H1.toUpperCase()).contentHash())
+                .isEqualTo(H1.toUpperCase()); // hex case is not part of the identity
+    }
+
+    // --- P6-263: no field may forge canonical lines or shift a field boundary ---
+
+    @Test
+    void rejectsLineBreaksAndCanonicalDelimitersInFields() {
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                new AuditHashChain.Manifest("2025-01-01", "Execution\nAudit", "1", List.of()));
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                new AuditHashChain.Manifest("2025-01-01", "Execution_Audit", "1\ncount=9", List.of()));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new AuditHashChain.AuditEvent("ev:1", H1));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new AuditHashChain.AuditEvent("ev=1", H1));
+    }
+
+    @Test
+    void canonicalBytesForValidInputAreUnchanged() {
+        // The Python port (r2_legal_hold_check.py) is byte-exact against this text,
+        // so validation must not change the bytes of valid input.
+        assertThat(manifest20250101().canonical())
+                .isEqualTo("manifest-v1\ndate=2025-01-01\ntable=Execution_Audit\nschema=1\n"
+                        + "count=2\nevent=ev-1:" + H1 + "\nevent=ev-2:" + H2 + "\n");
+    }
+
+    // --- P6-654: the trading date is ISO-8601, so lexicographic order is chronological ---
+
+    @Test
+    void rejectsTradingDateThatIsNotIso8601() {
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                new AuditHashChain.Manifest("2025-1-2", "Execution_Audit", "1", List.of()));
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                new AuditHashChain.Manifest("2025-001", "Execution_Audit", "1", List.of()));
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                new AuditHashChain.Manifest("2025-13-01", "Execution_Audit", "1", List.of()));
+    }
+
+    // --- P6-850: a null event list is argued about, not dereferenced ---
+
+    @Test
+    void manifestRejectsNullEventListWithIllegalArgument() {
+        assertThatIllegalArgumentException().isThrownBy(() ->
+                new AuditHashChain.Manifest("2025-01-01", "Execution_Audit", "1", null));
+    }
+
+    // --- P6-652 / P6-655: nulls in reconstruction input are findings, not crashes ---
+
+    @Test
+    void reconstructionTreatsNullObservedEventAsMissing() {
+        AuditHashChain.Manifest m = manifest20250101();
+        List<AuditHashChain.AuditEvent> observed = java.util.Arrays.asList(m.events().get(0), null);
+        assertThat(AuditHashChain.verifyManifestAgainstSource(m, observed))
+                .isEqualTo(AuditHashChain.Verification.MISSING_EVENT);
+    }
+
+    @Test
+    void chainWithNullManifestIsBrokenLinkNotNpe() {
+        List<AuditHashChain.Manifest> manifests = java.util.Arrays.asList(manifest20250101(), null);
+        assertThat(AuditHashChain.verifyChain(manifests, "any-root"))
+                .isEqualTo(AuditHashChain.Verification.BROKEN_LINK);
+    }
+
+    @Test
+    void chainWithNullElementNeverDereferencesIt() {
+        List<AuditHashChain.Manifest> manifests =
+                java.util.Arrays.asList(manifest20250101(), null, manifest20250102());
+        assertThat(AuditHashChain.verifyChain(manifests, "any-root"))
+                .isEqualTo(AuditHashChain.Verification.BROKEN_LINK);
+    }
+
+    // --- P6-653: chain-building inputs are non-null by contract ---
+
+    @Test
+    void linkedHashesRejectsNullInputs() {
+        assertThatNullPointerException().isThrownBy(() -> AuditHashChain.linkedHashes(null));
+        assertThatNullPointerException().isThrownBy(() ->
+                AuditHashChain.rootHash(java.util.Arrays.asList(manifest20250101(), null)));
     }
 }

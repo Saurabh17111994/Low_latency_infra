@@ -2,10 +2,14 @@ package com.trading.common.audit;
 
 import com.trading.common.schema.ImmutabilityProtocol;
 
+import java.time.LocalDate;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Policy-controlled audit hash chain
@@ -17,6 +21,15 @@ import java.util.Set;
  * forming a chain whose root hash fingerprints the whole retained audit set.
  * Reconstruction verifies the chain and therefore detects a tampered, reordered,
  * or missing event.
+ *
+ * <p>Fields are validated at construction so the canonical byte form is
+ * injective in its inputs: header fields and event ids reject line breaks and
+ * the {@code :}/{@code =} delimiters (P6-263), a trading date must be ISO-8601
+ * {@code yyyy-MM-dd} so lexicographic order is chronological order (P6-654), and
+ * a content hash must be {@value #HASH_HEX_LENGTH}-character SHA-256 hex
+ * (P6-262). The canonical bytes of valid input are unchanged, so the byte-exact
+ * Python port in {@code 01_platform/04_scripts/r2_legal_hold_check.py} and its
+ * golden Java-parity hashes still hold.
  */
 public final class AuditHashChain {
 
@@ -24,6 +37,10 @@ public final class AuditHashChain {
 
     /** SHA-256 hex length — every hash in the chain has this shape. */
     public static final int HASH_HEX_LENGTH = 64;
+
+    private static final Pattern SHA256_HEX =
+            Pattern.compile("[0-9a-fA-F]{" + HASH_HEX_LENGTH + "}");
+    private static final Pattern ISO_DATE = Pattern.compile("\\d{4}-\\d{2}-\\d{2}");
 
     public enum Verification {
         VALID,
@@ -37,8 +54,12 @@ public final class AuditHashChain {
     /** One retained audit record: identity plus the content hash of its canonical bytes. */
     public record AuditEvent(String eventId, String contentHash) {
         public AuditEvent {
-            requireNonBlank(eventId, "eventId");
+            requireCanonicalField(eventId, "eventId");
             requireNonBlank(contentHash, "contentHash");
+            if (!SHA256_HEX.matcher(contentHash).matches()) {
+                throw new IllegalArgumentException(
+                        "contentHash must be " + HASH_HEX_LENGTH + "-char SHA-256 hex");
+            }
         }
     }
 
@@ -46,9 +67,12 @@ public final class AuditHashChain {
     public record Manifest(String tradingDate, String table, String schemaVersion,
                            List<AuditEvent> events) {
         public Manifest {
-            requireNonBlank(tradingDate, "tradingDate");
-            requireNonBlank(table, "table");
-            requireNonBlank(schemaVersion, "schemaVersion");
+            requireIsoDate(tradingDate);
+            requireCanonicalField(table, "table");
+            requireCanonicalField(schemaVersion, "schemaVersion");
+            if (events == null) {
+                throw new IllegalArgumentException("events must be non-null");
+            }
             events = List.copyOf(events);
         }
 
@@ -113,10 +137,15 @@ public final class AuditHashChain {
         }
         Set<String> observedIds = new HashSet<>();
         for (AuditEvent e : observed) {
+            if (e == null) {
+                // A hole in the reconstruction input is missing evidence, not a crash.
+                return Verification.MISSING_EVENT;
+            }
             if (!observedIds.add(e.eventId())) {
                 return Verification.DUPLICATE_EVENT;
             }
         }
+        // No element is null past this point, so the positional reads below are safe.
         if (!observedIds.equals(manifestIds)) {
             return Verification.MISSING_EVENT;
         }
@@ -138,9 +167,11 @@ public final class AuditHashChain {
      * one, so a change anywhere in the chain changes every subsequent link.
      */
     public static List<String> linkedHashes(List<Manifest> manifests) {
+        Objects.requireNonNull(manifests, "manifests");
         List<String> out = new ArrayList<>();
         String previous = "";
         for (Manifest m : manifests) {
+            Objects.requireNonNull(m, "manifest");
             String link = ImmutabilityProtocol.canonicalHash(m.canonical() + "prev=" + previous);
             out.add(link);
             previous = link;
@@ -150,6 +181,7 @@ public final class AuditHashChain {
 
     /** Root hash of the whole chain — fingerprints the retained audit set. */
     public static String rootHash(List<Manifest> manifests) {
+        Objects.requireNonNull(manifests, "manifests");
         List<String> links = linkedHashes(manifests);
         return links.isEmpty()
                 ? ImmutabilityProtocol.canonicalHash("")
@@ -165,7 +197,14 @@ public final class AuditHashChain {
         if (manifests == null) {
             return Verification.BROKEN_LINK;
         }
+        for (Manifest m : manifests) {
+            if (m == null) {
+                return Verification.BROKEN_LINK;
+            }
+        }
         for (int i = 1; i < manifests.size(); i++) {
+            // Dates are validated ISO-8601 at construction, so lexicographic
+            // order here is chronological order (P6-654).
             if (manifests.get(i - 1).tradingDate().compareTo(manifests.get(i).tradingDate()) >= 0) {
                 return Verification.BROKEN_LINK;
             }
@@ -187,6 +226,34 @@ public final class AuditHashChain {
     private static void requireNonBlank(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException(field + " must be non-blank");
+        }
+    }
+
+    /**
+     * A field that is rendered into the canonical bytes must also be free of line
+     * breaks and the {@code :}/{@code =} delimiters: a newline forges extra
+     * {@code key=value} lines and a delimiter shifts a field boundary, either of
+     * which would let two logically different manifests share one canonical byte
+     * string (and therefore one root hash).
+     */
+    private static void requireCanonicalField(String value, String field) {
+        requireNonBlank(value, field);
+        if (value.indexOf('\n') >= 0 || value.indexOf('\r') >= 0
+                || value.indexOf(':') >= 0 || value.indexOf('=') >= 0) {
+            throw new IllegalArgumentException(
+                    field + " must not contain a line break, ':' or '='");
+        }
+    }
+
+    /** ISO-8601 {@code yyyy-MM-dd}, so date ordering is not locale/padding dependent. */
+    private static void requireIsoDate(String value) {
+        if (value == null || !ISO_DATE.matcher(value).matches()) {
+            throw new IllegalArgumentException("tradingDate must be ISO-8601 yyyy-MM-dd");
+        }
+        try {
+            LocalDate.parse(value);
+        } catch (DateTimeParseException e) {
+            throw new IllegalArgumentException("tradingDate must be a real date: " + value);
         }
     }
 }
