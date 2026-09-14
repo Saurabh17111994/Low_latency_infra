@@ -109,15 +109,21 @@ TASKS = [
         ],
     },
     {
+        # seq 4 was "Bound candidate work and preserve in-job ranking": the ranking/reservation
+        # arm was REMOVED 2026-08-15 (CHG-005, 01-foundation.md row 4 struck), leaving only the
+        # "one active candidate per instrument" invariant. That invariant is enforced by the KV
+        # projection itself, so the pin moved from a declaration nothing read (P6-665) to the
+        # primary key that does the enforcing. The task keeps its slot: this gate's sequence is
+        # the doc's mandatory order, and downstream tasks stay blocked behind it.
         "seq": 4,
-        "title": "Bound candidate work and preserve in-job ranking",
-        "dossier": "docs/08_implementation/04-signal-job.md (Ranking section)",
+        "title": "Keep at most one current candidate per instrument",
+        "dossier": "docs/08_implementation/04-signal-job.md",
         "checks": [
             {
                 "type": "contains",
-                "path": "code/common/src/main/java/com/trading/common/config/PlatformConfig.java",
-                "needle": "MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT = 1",
-                "desc": "MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT=1 pin",
+                "path": "code/01_platform/02_sql/ddl/23_signal_candidates_current.sql",
+                "needle": "PRIMARY KEY (instrument_token)",
+                "desc": "one current candidate per instrument (KV primary key)",
             },
         ],
     },
