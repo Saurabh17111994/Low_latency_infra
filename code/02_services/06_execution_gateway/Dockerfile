@@ -13,7 +13,7 @@ RUN --mount=type=cache,target=/root/.m2 mvn -q -f /workspace/pom.xml -pl 02_serv
 COPY 02_services/06_execution_gateway/src /workspace/02_services/06_execution_gateway/src
 RUN --mount=type=cache,target=/root/.m2 mvn -q -f /workspace/pom.xml -pl 02_services/06_execution_gateway -am package -DskipTests
 
-FROM eclipse-temurin:17-jre
+FROM eclipse-temurin:17-jre@sha256:c6f2875c05ea10f16398bdc5f73405c384991506f2f1ead8bcc6582ae8adea79
 WORKDIR /app
 COPY --from=build /workspace/02_services/06_execution_gateway/target/execution-gateway.jar /app/execution-gateway.jar
 # 2026-08-22 single-pane: OTel Javaagent for JVM metrics (jvm.*) → collector:4318 (same as ingestion)
