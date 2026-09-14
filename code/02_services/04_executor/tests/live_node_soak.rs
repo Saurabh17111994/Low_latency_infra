@@ -28,10 +28,19 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn live_node_runtime_sustained_soak() {
-    let soak_secs: u64 = std::env::var("SOAK_SECS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(30);
+    // P3-024: a typo (`SOAK_SECS=abc`) used to be silently parsed away to the 30s default,
+    // and 0 was accepted — a 0-second soak samples nothing and then passes the liveness
+    // legs vacuously. Parse loudly and require a floor that can actually prove liveness.
+    let soak_secs: u64 = match std::env::var("SOAK_SECS") {
+        Ok(v) => v.parse().unwrap_or_else(|_| {
+            panic!("SOAK_SECS must be a positive integer number of seconds, got {v:?}")
+        }),
+        Err(_) => 30,
+    };
+    assert!(
+        soak_secs >= 5,
+        "SOAK_SECS={soak_secs} is too short to prove liveness; use >= 5 (the default is 30)"
+    );
     let soak = Duration::from_secs(soak_secs);
 
     // Resource baselines BEFORE building the node (Linux-only laptop/dev environment;
