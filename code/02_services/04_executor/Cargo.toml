@@ -30,7 +30,7 @@ nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader"
 nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "74d57e7e055015a8d974a0cf047ac2e5139610b3" }
 nautilus-sandbox = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "74d57e7e055015a8d974a0cf047ac2e5139610b3" }
 
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }  # P3-174: `fs` dropped — no tokio::fs use in src/ or tests/ (rg-verified); `net`+`signal` are the live service's HTTP serve + shutdown
 anyhow = "1"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
