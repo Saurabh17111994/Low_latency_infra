@@ -21,12 +21,12 @@
 | Task | Command |
 |---|---|
 | Health check (cron-able; yesterday's day-folder ≥1 object, manifests ≥2, today's folder after 18:30 IST) | `bash code/01_platform/04_scripts/lake-guard.sh` |
-| Tiering job status (exit 0 = RUNNING) | `bash code/01_platform/04_scripts/tiering-start.sh --status` |
-| Restart tiering job after table recreate / container restart (idempotent; guards the classpath first) | `bash code/01_platform/04_scripts/tiering-start.sh` |
+| Tiering job status (exit 0 = RUNNING, 1 = no running job, 2 = running without fixed-delay restart) | `bash code/01_platform/04_scripts/tiering-start.sh --status` |
+| Restart tiering job after table recreate / container restart (idempotent; guards the classpath first; two concurrent invocations are serialised by a lock) | `bash code/01_platform/04_scripts/tiering-start.sh` |
 | Query the lake (DuckDB, iceberg) | `bash code/01_platform/04_scripts/r2-query.sh "<sql>"` |
 | Pull one trading day to local parquet | `bash code/01_platform/04_scripts/r2-restore.sh <yyyyMMdd> [out.parquet]` |
 | EOD run with lake verification | `EOD_OFFLOAD=lake R2_LIST_SCRIPT="$PWD/code/01_platform/04_scripts/r2-list.sh" python3 code/01_platform/04_scripts/eod_controller.py run` |
-| Full guarded E2E tiering proof (smoke) | `TIER_WAIT=420 bash code/01_platform/04_scripts/tiering-smoke.sh 300` |
+| Full guarded E2E tiering proof (smoke) — exit 0 = proof, 1 = verification failed, 2 = bad input; use 300s writes with `TIER_WAIT` so the run exceeds the 5-min freshness window + 1-min tier interval | `TIER_WAIT=420 bash code/01_platform/04_scripts/tiering-smoke.sh 300` |
 
 Canonical proof query (row count for a day):
 

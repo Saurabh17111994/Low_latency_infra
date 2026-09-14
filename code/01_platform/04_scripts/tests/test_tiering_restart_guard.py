@@ -10,11 +10,15 @@ class TieringRestartGuardTest(unittest.TestCase):
     def test_tiering_submit_pins_and_verifies_fixed_delay_restart(self):
         script = (ROOT / "code" / "01_platform" / "04_scripts" / "tiering-start.sh").read_text()
         self.assertIn("-Drestart-strategy.type=fixed-delay", script)
-        self.assertIn("-Drestart-strategy.fixed-delay.attempts=3", script)
+        # P6-250 (wave 8): `attempts=3` means the tiering service dies permanently
+        # after the third TaskManager loss — the same outage the restart strategy
+        # exists to prevent, just delayed. Verify the strategy against the parsed
+        # execution-config as well (P6-249), not against the raw response body.
+        self.assertIn("-Drestart-strategy.fixed-delay.attempts=2147483647", script)
         self.assertIn("-Drestart-strategy.fixed-delay.delay=30 s", script)
         self.assertIn("tiering_has_restart_strategy", script)
         self.assertIn("without fixed-delay restart", script)
-        self.assertIn("fixed[- ]delay", script)
+        self.assertIn('json.load(sys.stdin).get("execution-config")', script)
 
     def test_tm_kill_drill_serializes_shared_cluster_ownership(self):
         script = (ROOT / "code" / "01_platform" / "04_scripts" / "tm-kill-full-load.sh").read_text()
