@@ -11,7 +11,12 @@ COPY 02_services/06_execution_bridge/go-bridge/go.mod 02_services/06_execution_b
 COPY 02_services/01_ingestion/go-bridge/third_party ./02_services/01_ingestion/go-bridge/third_party
 WORKDIR /src/02_services/06_execution_bridge/go-bridge
 RUN go mod download
-COPY 02_services/06_execution_bridge/go-bridge/*.go ./
+# Copy the module directory rather than a top-level `*.go` glob: the glob silently omitted any
+# sub-package that gets added later (the build would then fail confusingly, or worse, link an
+# incomplete module), and it dragged every *_test.go into the image. Tests are dropped after the
+# copy because Docker COPY cannot exclude paths (P3-470).
+COPY 02_services/06_execution_bridge/go-bridge/ ./
+RUN rm -f ./*_test.go ./execution-arrow-bridge
 # TARGETARCH is set by BuildKit for the platform being built; the explicit default keeps the
 # legacy builder (which does not set it) on today's amd64 behaviour instead of silently emitting
 # an empty GOARCH. The hardcoded amd64 produced an x86_64 binary on every builder, including
