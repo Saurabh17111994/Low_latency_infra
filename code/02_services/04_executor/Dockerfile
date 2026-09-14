@@ -25,18 +25,29 @@
 FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
 WORKDIR /build
 
-# Dependencies are cached across builds by BuildKit cache mounts rather than by a
-# dummy-source layer: the registry/git mounts keep the downloads, and the target
-# mount keeps the compiled dependency rlibs, so a source-only rebuild recompiles
-# just the service crate. The binary is copied OUT of the mounted target into the
-# layer, because cache-mount contents are not part of the image.
+# Layer-cache the dependencies, then copy the real source and build:
+#   * `cargo fetch --locked` runs in a plain layer (no cache mounts) and stores the complete lock
+#     graph into the image, so the sources cargo needs are present and described by Cargo.lock.
+#   * a stub `src/main.rs` then compiles the whole dependency closure in its own layer, which any
+#     later change under src/ reuses.
+# The target directory deliberately has NO cache mount: the mounts replace their target while the
+# layer builds, and a target directory shared between builds can hold fingerprints from an
+# earlier build while the artifacts they describe are gone, so cargo skips compiling a crate the
+# current build needs. That is exactly what happened here — three builds that shared a target
+# mount failed with `error[E0463]: can't find crate for `rstest`` while compiling
+# `nautilus-model`, and every build without that mount (this tree, cold target and cold
+# CARGO_HOME, on the host) compiled `rstest v0.26.1` first and succeeded.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+RUN cargo fetch --locked
+
+# Stub-source dependency layer: `cargo build` compiles the dependency closure of the requested
+# bin, and a stub main that references nothing still pulls the whole declared dependency set.
+RUN mkdir -p src && echo 'fn main() {}' > src/main.rs \
+ && cargo build --release --locked --bin nautilus-execution-service
+
 COPY src ./src
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
-    cargo build --release --locked --bin nautilus-execution-service \
- && cp /build/target/release/nautilus-execution-service /build/nautilus-execution-service
+RUN cargo build --release --locked --bin nautilus-execution-service \
+ && cp target/release/nautilus-execution-service ./nautilus-execution-service
 
 # --- Runtime: slim, non-root, fail-closed -----------------------------------------------------
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
