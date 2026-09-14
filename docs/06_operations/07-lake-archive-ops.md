@@ -56,12 +56,44 @@ WHERE event_day='20260831';
 `r2-restore.sh <yyyyMMdd>` exports the day-folder parquet (partition-pruned
 glob). Verified 2026-08-31: 2,293,048 rows → 313MB parquet.
 
+The script refuses to write a restore it cannot trust (P6-165 / P6-498):
+
+- `DAY` must be a real `yyyyMMdd` calendar date and `OUT` must be a plain
+  filename (no quotes, `;`, `..`, newline). A day typed as `2026-08-31` used to
+  export **zero rows** and still report success.
+- A day whose folder contains Iceberg **delete files** aborts: DuckDB's
+  `read_parquet` ignores them, so the export would silently contain deleted-away
+  rows. Use `r2-query.sh` with `iceberg_scan` for those days (upgrade path:
+  CHG-144).
+- A restore that returns **zero rows** aborts and leaves any existing output
+  file untouched. Output is written to `OUT.tmp.<pid>` and renamed only after
+  both counts come back non-zero, so a failed run never leaves a half-written
+  parquet behind.
+- Schema drift now fails loudly: the export dropped its previous
+  `union_by_name := true`, which had been quietly filling mismatched columns
+  with NULLs.
+
+Exit codes: `2` = refused before DuckDB ran (bad day, bad output path,
+incomplete R2 config — nothing was read or written); `1` = DuckDB ran and the
+result was not trustworthy. Secrets reach DuckDB inside a `0600` temp file on
+stdin, never on the command line (`ps`/`/proc/<pid>/cmdline` is world-readable).
+
 ## Recovery: rollback the v3 migration (last resort)
 
 1. Drop v3 table (`fluss-repair/RawTableAdmin.java drop`).
 2. Recreate the v2 non-partitioned shape.
 3. `r2-move-prefix.sh lake/_stale-20260831-v1/raw_table_1/ lake/default/raw_table_1/` back.
    (Post-migration rows are only re-derivable from upstream replay.)
+
+`r2-move-prefix.sh <src> <dst>` normalizes both prefixes to a trailing slash
+(`table` no longer also matches `table_backup/`) and refuses equal or
+overlapping prefixes before it talks to R2. Per object it is
+GET → PUT → **HEAD-verify** → DELETE: the source is deleted only after the
+destination's size and MD5 ETag match the bytes that were just uploaded, so a
+truncated or substituted copy leaves both copies in place and exits non-zero
+(P6-013). An interrupted run is resumable — re-running copies the remaining
+objects; already-moved ones are simply listed again on the destination side.
+Transient 408/429/5xx responses are retried with exponential backoff (P6-161).
 
 ## Known failure modes (bug ledger, 2026-08-31 migration)
 
@@ -104,5 +136,13 @@ dup lines→`tail -1`; T-9 reader segfault→`-Xmx1g`.
   the TIER_WAIT=420 math.
 - R2 credentials are temporary (rotate per `05_deployment/04-secrets-rotation.md`).
 - DuckDB first run installs httpfs + iceberg extensions (needs internet).
+- Both R2 scripts take their credentials from the environment / `01_docker`
+  config files, never from arguments — do not wrap them in a command that puts
+  the secrets back on the command line (e.g. `env ... bash -c "..."` is fine,
+  `r2-restore.sh` never needs a secret argument at all).
+- Scripts and their guardrails are covered by
+  `code/01_platform/04_scripts/tests/test_r2_move_prefix.py` (local mock R2) and
+  `.../test_r2_restore_guardrails.py` (stub DuckDB) — both run in the Monday
+  gate without network access.
 - The EOD lake verifier only covers raw_table_1; the other nine tables fail
   EOD verification (FAILED_RETRYABLE) until they are migrated — expected.
