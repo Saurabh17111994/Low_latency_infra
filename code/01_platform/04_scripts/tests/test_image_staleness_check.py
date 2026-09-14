@@ -9,6 +9,7 @@ touched: image_created_epoch is monkeypatched.
 Run: python3 -m unittest discover -s code/01_platform/04_scripts/tests -v
 """
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -624,9 +625,13 @@ class GateStepEightTest(unittest.TestCase):
                     "run-monday-gates.sh").read_text(encoding="utf-8")
 
     def _step_eight(self) -> str:
-        parts = self.gate.split("[8/16] image staleness", 1)
-        self.assertEqual(len(parts), 2, "the gate must have a step 8 banner")
-        return parts[1].split("\nelse\n", 1)[0]
+        # Match the step NUMBER, not the total. The gate grew from 16 to 19 steps on
+        # 2026-09-14; a hardcoded "[8/16]" then silently detached this test from the step it
+        # audits — the split found nothing and the body it returned covered the rest of the
+        # file instead of step 8.
+        m = re.search(r"=== \[8/\d+\] image staleness(.*?)\nelse\n", self.gate, re.S)
+        self.assertIsNotNone(m, "the gate must have a step 8 banner with its skip branch")
+        return m.group(1)
 
     def test_step_eight_demands_stamps(self):
         body = self._step_eight()
