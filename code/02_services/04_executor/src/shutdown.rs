@@ -7,6 +7,7 @@
 
 use crate::{execution::client::BridgeExecutionClient, gate::ExecState};
 use anyhow::Result;
+use std::{cell::RefCell, rc::Rc};
 
 /// The clean-shutdown phase the coordinator is currently in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +35,27 @@ pub struct ShutdownReport {
     pub gate_state: ExecState,
     /// Trading-ready must be false after shutdown.
     pub trading_ready: bool,
+}
+
+/// Fail-closed shutdown evidence shared with the service (D7).
+///
+/// Same ownership pattern as `GateWatch`/`ProgressWatch`: the factory creates the cell, the
+/// client records into it from its terminal lifecycle hook, and the service reads it after the
+/// run loop ends — the client itself is unreachable once it is boxed inside the node.
+#[derive(Debug, Clone, Default)]
+pub struct ShutdownWatch(Rc<RefCell<Option<ShutdownReport>>>);
+
+impl ShutdownWatch {
+    /// Records the report of the clean-shutdown sequence that just ran.
+    pub fn record(&self, report: ShutdownReport) {
+        *self.0.borrow_mut() = Some(report);
+    }
+
+    /// The last clean-shutdown report, or `None` if the sequence has not run.
+    #[must_use]
+    pub fn report(&self) -> Option<ShutdownReport> {
+        self.0.borrow().clone()
+    }
 }
 
 /// Drives the fail-closed shutdown sequence against a bridge client.
@@ -267,6 +289,45 @@ mod tests {
         assert_eq!(
             fresh.position(&order2.instrument_id()),
             rust_decimal::Decimal::from(0)
+        );
+    }
+
+    /// D7: the node stops its execution clients through `ExecutionEngine::stop()`, i.e. this
+    /// client's own `ExecutionClient::stop` hook. Before D7 that hook only cleared a flag, so a
+    /// stop request dropped the queued jobs without counting them and produced no evidence.
+    #[tokio::test(flavor = "current_thread")]
+    async fn d7_terminal_stop_hook_runs_the_clean_shutdown_sequence() {
+        let (mut client, order) = base_client();
+        enable(&mut client);
+        submit_place(&client, &order); // queued but never pumped -> in-flight, un-sent
+        assert_eq!(client.pending_count(), 1);
+
+        client.stop().expect("the lifecycle hook must stop cleanly");
+
+        assert_eq!(
+            client.pending_count(),
+            0,
+            "the queued job is abandoned as an unresolved attempt, not dropped silently"
+        );
+        assert_eq!(client.gate_state(), ExecState::Halted);
+        let report = client
+            .shutdown_report()
+            .expect("stop() must leave shutdown evidence behind");
+        assert_eq!(report.phase, ShutdownPhase::Complete);
+        assert_eq!(report.unresolved_attempts, 1);
+        assert_eq!(report.gate_state, ExecState::Halted);
+        assert!(!report.trading_ready);
+        assert!(verify_restart_safe(report.gate_state));
+
+        // The node may call the hook more than once; a second stop must not double-count the
+        // same attempt.
+        client.stop().expect("a second stop is a no-op");
+        assert_eq!(
+            client
+                .shutdown_report()
+                .expect("evidence survives a repeat stop")
+                .unresolved_attempts,
+            1
         );
     }
 

@@ -186,6 +186,15 @@ pub struct BridgeExecutionClient {
     /// `PositionProjector` is differential-test oracle). This map stays for offline fake-bridge parity;
     /// `position()` will delegate to portfolio when live cache is available.
     positions: Rc<RefCell<HashMap<InstrumentId, rust_decimal::Decimal>>>,
+    /// Clean-shutdown evidence (D7), recorded by the terminal `stop()` hook and read by the
+    /// service after the node's run loop returns, when this client is no longer reachable.
+    shutdown_watch: crate::shutdown::ShutdownWatch,
+    /// Whether the clean-shutdown sequence has already run (D7).
+    ///
+    /// Deliberately *not* `core.is_stopped()`: that is `!is_started()`, which is already `true`
+    /// for a client that was never started, so using it as the idempotence guard skipped the
+    /// sequence for exactly the clients a startup abort stops.
+    shutdown_ran: bool,
 }
 
 impl BridgeExecutionClient {
@@ -217,6 +226,8 @@ impl BridgeExecutionClient {
             client_refs: Rc::new(RefCell::new(HashMap::new())),
             progress: Rc::new(Cell::new(0)),
             positions: Rc::new(RefCell::new(HashMap::new())),
+            shutdown_watch: crate::shutdown::ShutdownWatch::default(),
+            shutdown_ran: false,
         }
     }
 
@@ -244,6 +255,25 @@ impl BridgeExecutionClient {
     #[must_use]
     pub fn with_progress_ticks(self, progress: Rc<Cell<u64>>) -> Self {
         Self { progress, ..self }
+    }
+
+    /// D7: adopt an externally owned clean-shutdown evidence cell.
+    ///
+    /// The terminal lifecycle hook runs inside the node, so the report it produces has to be
+    /// handed out at construction — the same reason [`Self::with_gate`] and
+    /// [`Self::with_progress_ticks`] exist.
+    #[must_use]
+    pub fn with_shutdown_watch(self, watch: crate::shutdown::ShutdownWatch) -> Self {
+        Self {
+            shutdown_watch: watch,
+            ..self
+        }
+    }
+
+    /// The clean-shutdown report recorded by [`Self::stop`] (D7), if the sequence has run.
+    #[must_use]
+    pub fn shutdown_report(&self) -> Option<crate::shutdown::ShutdownReport> {
+        self.shutdown_watch.report()
     }
 
     /// How many mass-status callbacks the runtime has driven through this client (P3-223).
@@ -841,11 +871,31 @@ impl ExecutionClient for BridgeExecutionClient {
         Ok(())
     }
 
+    /// Terminal lifecycle hook — `ExecutionEngine::stop()` calls this when the node stops.
+    ///
+    /// D7: this is the only production path with the client's own queued jobs and report stream
+    /// still in reach (the client is boxed inside the node, so nothing outside can drain them),
+    /// which is why the audited clean-shutdown sequence runs here: safety-halt the gate →
+    /// abandon queued jobs as unresolved attempts → flush remaining event evidence. Before D7
+    /// the hook only cleared a flag, so a stop request dropped in-flight attempts without
+    /// counting them and left no fail-closed evidence. A gate that does not reach `HALTED` is
+    /// refused (P3-460) rather than reported as a clean stop.
     fn stop(&mut self) -> Result<()> {
-        if self.core.is_stopped() {
+        self.core.set_stopped();
+        if self.shutdown_ran {
             return Ok(());
         }
-        self.core.set_stopped();
+        let mut coordinator = crate::shutdown::ShutdownCoordinator::new();
+        let report = coordinator.shutdown(self)?;
+        self.shutdown_ran = true;
+        tracing::info!(
+            phase = ?report.phase,
+            unresolved_attempts = report.unresolved_attempts,
+            gate_state = ?report.gate_state,
+            trading_ready = report.trading_ready,
+            "execution client stopped: clean-shutdown sequence complete"
+        );
+        self.shutdown_watch.record(report);
         Ok(())
     }
 

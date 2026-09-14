@@ -16,7 +16,8 @@ use nautilus_execution_service::{
     clockwatch::{DriftMonitor, FixedOffsetSource},
     config::ServiceConfig,
     engine::{BridgeSelection, LiveNodeRuntime},
-    http, telemetry,
+    gate::ExecState,
+    http, shutdown, telemetry,
 };
 
 /// Builds the route's bridge transport (T4a sync forward) from the same selection the node's
@@ -173,9 +174,48 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    // The pinned hosted-run future holds the mutable borrow of `node` and has returned above;
+    // release it before reading the shutdown evidence that same run produced.
+    drop(node_run);
     runtime.begin_shutdown();
     drain_http_server(&mut server, Duration::from_secs(5)).await;
-    Ok(())
+    verify_clean_shutdown(&node)
+}
+
+/// D7: reads the shutdown evidence the client recorded on the node's stop path and asserts the
+/// restart invariant here, on the production path.
+///
+/// The audited sequence (safety halt → abandon queued jobs as unresolved attempts → flush
+/// reports) runs inside the node's `finalize_stop`, where the client is still reachable; this
+/// function is what makes its absence or failure visible. `verify_restart_safe` used to be
+/// test-only, so a production stop that left the execution fence armed — or that never ran the
+/// sequence at all — exited 0 with no trace.
+fn verify_clean_shutdown(node: &LiveNodeRuntime) -> anyhow::Result<()> {
+    match node.shutdown_report() {
+        Some(report) => tracing::info!(
+            unresolved_attempts = report.unresolved_attempts,
+            gate_state = ?report.gate_state,
+            "clean shutdown complete: queued bridge jobs abandoned as unresolved attempts"
+        ),
+        None => tracing::error!(
+            "no clean-shutdown report: the node stop path did not run the client sequence, so \
+             queued jobs may have been dropped uncounted"
+        ),
+    }
+    assert_restart_safe(node.gate_watch().state())
+}
+
+/// The restart invariant (`shutdown::verify_restart_safe`) enforced as a production stop check:
+/// an exit that leaves the execution fence armed must fail loudly, because a restarted process
+/// could then auto-retry an attempt this one abandoned.
+fn assert_restart_safe(gate_state: ExecState) -> anyhow::Result<()> {
+    if shutdown::verify_restart_safe(gate_state) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "shutdown left the execution fence armed ({gate_state:?}): a restarted process could \
+         auto-retry an abandoned attempt"
+    )
 }
 
 /// Classifies an HTTP server task exit as the fatal error it is (P3-212). The old shutdown
@@ -334,6 +374,24 @@ mod p3_211_http_server_drain_tests {
             started.elapsed() < Duration::from_secs(5),
             "the drain must be bounded by the grace window, elapsed {:?}",
             started.elapsed()
+        );
+    }
+}
+
+#[cfg(test)]
+mod d7_restart_invariant_tests {
+    use super::*;
+
+    #[test]
+    fn a_stop_that_left_the_fence_armed_fails_the_production_check() {
+        // D7: `verify_restart_safe` was test-only, so a production exit with an armed execution
+        // fence was silent. The stop path now refuses it (non-zero exit) instead.
+        assert!(assert_restart_safe(ExecState::Halted).is_ok());
+        let err = assert_restart_safe(ExecState::Enabled)
+            .expect_err("an armed fence must fail the stop, not be reported as clean");
+        assert!(
+            err.to_string().contains("fence armed"),
+            "the failure must name the invariant: {err}"
         );
     }
 }

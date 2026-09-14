@@ -123,6 +123,8 @@ pub struct BridgeExecutionClientFactory {
     gate: GateWatch,
     /// Progress counter handed to every client this factory creates (P3-223).
     progress: ProgressWatch,
+    /// Clean-shutdown evidence cell handed to every client this factory creates (D7).
+    shutdown: crate::shutdown::ShutdownWatch,
 }
 
 impl BridgeExecutionClientFactory {
@@ -132,6 +134,7 @@ impl BridgeExecutionClientFactory {
             boot_gate: BootGate::default(),
             gate: GateWatch(Rc::new(RefCell::new(Gate::new()))),
             progress: ProgressWatch::default(),
+            shutdown: crate::shutdown::ShutdownWatch::default(),
         }
     }
 }
@@ -231,7 +234,8 @@ impl ExecutionClientFactory for BridgeExecutionClientFactory {
         };
         let client = BridgeExecutionClient::new(core, bridge)
             .with_gate(Rc::clone(&self.gate.0))
-            .with_progress_ticks(Rc::clone(&self.progress.0));
+            .with_progress_ticks(Rc::clone(&self.progress.0))
+            .with_shutdown_watch(self.shutdown.clone());
         // Observe the gate the client actually booted into: the runtime's fail-closed report is
         // derived from this observation, not from a constant (P3-439).
         self.boot_gate.record(client.gate_state());
@@ -299,6 +303,8 @@ pub struct LiveNodeRuntime {
     gate_watch: GateWatch,
     /// Progress counter shared with the client inside the node (P3-223).
     progress: ProgressWatch,
+    /// Clean-shutdown evidence recorded by the client inside the node (D7).
+    shutdown_watch: crate::shutdown::ShutdownWatch,
 }
 
 impl LiveNodeRuntime {
@@ -317,6 +323,7 @@ impl LiveNodeRuntime {
         // the live state rather than the construction-time snapshot `boot_gate` records.
         let gate_watch = GateWatch(Rc::new(RefCell::new(Gate::new())));
         let progress = ProgressWatch::default();
+        let shutdown_watch = crate::shutdown::ShutdownWatch::default();
         let builder = builder.add_exec_client(
             Some("exec".to_string()),
             Box::new(BridgeExecutionClientFactory {
@@ -324,6 +331,7 @@ impl LiveNodeRuntime {
                 boot_gate: boot_gate.clone(),
                 gate: gate_watch.clone(),
                 progress: progress.clone(),
+                shutdown: shutdown_watch.clone(),
             }),
             Box::new(BridgeClientConfig),
         )?;
@@ -335,6 +343,7 @@ impl LiveNodeRuntime {
             boot_gate,
             gate_watch,
             progress,
+            shutdown_watch,
         })
     }
 
@@ -366,6 +375,15 @@ impl LiveNodeRuntime {
     #[must_use]
     pub fn progress_watch(&self) -> ProgressWatch {
         self.progress.clone()
+    }
+
+    /// Clean-shutdown evidence recorded by the client's terminal `stop()` hook (D7).
+    ///
+    /// `None` means the sequence has not run — the run loop has not been polled to its clean
+    /// return, so a shutdown that reports a clean stop without this is not trustworthy.
+    #[must_use]
+    pub fn shutdown_report(&self) -> Option<crate::shutdown::ShutdownReport> {
+        self.shutdown_watch.report()
     }
 
     /// The fail-closed boot invariant (gate `HALTED`, health never implies `ENABLED`).
@@ -709,8 +727,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn runtime_hosted_run_loop_stops_cleanly_on_request() {
         // Workstream B: the node runs (hosted, no signal grabbing) and a stop request
-        // ends the loop with `Ok`. This is the clean-shutdown evidence at node level
-        // (client-level halt/flush/fence sequence stays covered by shutdown.rs).
+        // ends the loop with `Ok`.
         let mut rt = LiveNodeRuntime::build().expect("runtime should build");
         let handle = rt.handle();
         let mut run = Box::pin(rt.run_forever());
@@ -724,6 +741,16 @@ mod tests {
             !rt.is_running(),
             "node must be stopped after a clean stop request"
         );
+        // D7: in production the node's own stop path (`finalize_stop` ->
+        // `ExecutionEngine::stop`) is what must run the audited client sequence. Asserting the
+        // evidence here proves that wiring end to end; shutdown.rs only proves the sequence
+        // itself is correct when called directly.
+        let report = rt
+            .shutdown_report()
+            .expect("the node stop path must run the client's clean-shutdown sequence");
+        assert_eq!(report.phase, crate::shutdown::ShutdownPhase::Complete);
+        assert_eq!(report.gate_state, crate::gate::ExecState::Halted);
+        assert!(crate::shutdown::verify_restart_safe(report.gate_state));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -777,6 +804,7 @@ mod tests {
             boot_gate: boot_gate.clone(),
             gate: GateWatch::default(),
             progress: ProgressWatch::default(),
+            shutdown: crate::shutdown::ShutdownWatch::default(),
         };
         let _client = factory
             .create("exec", &BridgeClientConfig, cache)
