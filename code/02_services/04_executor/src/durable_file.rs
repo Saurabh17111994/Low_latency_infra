@@ -24,7 +24,8 @@
 //!
 //! ## One actor per log
 //!
-//! `try_claim` is atomic *within* one process: one borrow of the indexes spans classify-and-append.
+//! `try_claim` is atomic *within* one process: one mutex spans classify-and-append, so a concurrent
+//! second claim of the same identity observes the first one's record.
 //! Two processes sharing a log would each classify against their own view and could both mint a
 //! PREPARED attempt for the same `(instruction_id, request_hash)`, so each store takes an exclusive
 //! lock file (`<log>.lock`, holding its pid) and refuses to open a log whose lock names a live
@@ -34,10 +35,10 @@
 //! Fluss-backed client's job, which the Java side already implements; this file does not pretend to
 //! that guarantee.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,17 @@ use crate::executiongate::{
 /// (`DURABLE_DIR`), so changing one is a migration, not a rename.
 pub const ATTEMPTS_LOG: &str = "attempts.jsonl";
 pub const GATE_LOG: &str = "gate.jsonl";
+
+/// Locks a store's state, turning poisoning into an error.
+///
+/// A poisoned mutex means a previous holder panicked mid-mutation, so the store cannot know whether
+/// its indexes still match its log. Every caller that can refuse, refuses — rather than panicking
+/// into a 500 (P3-454 keeps `expect` out of the request path) or reporting an all-clear.
+fn lock<T>(state: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
+    state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("durable store lock poisoned by an earlier panic"))
+}
 
 // ── Records: the on-disk contract ──────────────────────────────────────────────────────────────
 
@@ -293,57 +305,37 @@ impl Drop for WriterLock {
 // ── Attempt store ─────────────────────────────────────────────────────────────────────────────
 
 /// Durable [`AttemptStore`] backed by `<dir>/attempts.jsonl`.
+///
+/// The log and the three indexes sit behind one mutex: classify-and-claim is atomic, and no lock
+/// ordering has to be reasoned about. The mutex is held across `write_all` + `sync_data`, so a claim
+/// is never visible to another caller before it is on disk.
 pub struct FileAttemptStore {
-    log: RefCell<JsonlLog>,
+    inner: Mutex<AttemptInner>,
     _lock: WriterLock,
+}
+
+struct AttemptInner {
+    log: JsonlLog,
     // Same three indexes as `InMemoryAttemptStore`, kept in step with the log. `by_id` is the
     // primary key; `dup` is `instruction_id -> request hashes`; `by_instruction` is the
     // `instruction_id` existence index. Nested sets rather than tuple keys so the lookups borrow.
-    by_id: RefCell<HashMap<String, Attempt>>,
-    dup: RefCell<HashMap<String, HashSet<String>>>,
-    by_instruction: RefCell<HashMap<String, ()>>,
+    by_id: HashMap<String, Attempt>,
+    dup: HashMap<String, HashSet<String>>,
+    by_instruction: HashMap<String, ()>,
 }
 
-impl FileAttemptStore {
-    /// Opens (or creates) the log and replays it into memory.
-    pub fn open(path: &Path) -> Result<Self> {
-        let lock = WriterLock::acquire(path)?;
-        let (log, records) = JsonlLog::open(path)?;
-        let store = Self {
-            log: RefCell::new(log),
-            _lock: lock,
-            by_id: RefCell::new(HashMap::new()),
-            dup: RefCell::new(HashMap::new()),
-            by_instruction: RefCell::new(HashMap::new()),
-        };
-        for value in records {
-            let record: AttemptRecord = serde_json::from_value(value)
-                .with_context(|| format!("decoding a record from {}", path.display()))?;
-            store.index(record.into_attempt().with_context(|| {
-                format!("decoding a record from {}", path.display())
-            })?)?;
-        }
-        Ok(store)
-    }
-
-    /// True when the previous process died inside an append and the torn line was dropped.
-    pub fn dropped_torn_tail(&self) -> bool {
-        self.log.borrow().dropped_torn_tail
-    }
-
-    /// Folds one replayed record into the indexes. A later record for the same `attempt_id`
-    /// supersedes the earlier one (that is how a phase transition is stored); a *second claim* of an
+impl AttemptInner {
+    /// Folds one record into the indexes. A later record for the same `attempt_id` supersedes the
+    /// earlier one (that is how a phase transition is stored); a *second claim* of an
     /// `(instruction_id, request_hash)` already in the log means two actors wrote this file, which
     /// is exactly what the lock exists to prevent, so it is refused rather than replayed.
-    fn index(&self, attempt: Attempt) -> Result<()> {
-        let known_id = self.by_id.borrow().contains_key(&attempt.attempt_id);
-        if !known_id {
-            let is_duplicate = self
+    fn fold(&mut self, attempt: Attempt) -> Result<()> {
+        if !self.by_id.contains_key(&attempt.attempt_id) {
+            if self
                 .dup
-                .borrow()
                 .get(&attempt.instruction_id)
-                .is_some_and(|hashes| hashes.contains(&attempt.request_hash));
-            if is_duplicate {
+                .is_some_and(|hashes| hashes.contains(&attempt.request_hash))
+            {
                 bail!(
                     "attempt log records two attempts for instruction {} and hash {}: \
                      this file was written by more than one actor",
@@ -352,42 +344,84 @@ impl FileAttemptStore {
                 );
             }
             self.dup
-                .borrow_mut()
                 .entry(attempt.instruction_id.clone())
                 .or_default()
                 .insert(attempt.request_hash.clone());
             self.by_instruction
-                .borrow_mut()
                 .insert(attempt.instruction_id.clone(), ());
         }
-        self.by_id
-            .borrow_mut()
-            .insert(attempt.attempt_id.clone(), attempt);
+        self.by_id.insert(attempt.attempt_id.clone(), attempt);
         Ok(())
+    }
+}
+
+impl FileAttemptStore {
+    /// Opens (or creates) the log and replays it into memory.
+    pub fn open(path: &Path) -> Result<Self> {
+        let lock = WriterLock::acquire(path)?;
+        let (log, records) = JsonlLog::open(path)?;
+        let mut inner = AttemptInner {
+            log,
+            by_id: HashMap::new(),
+            dup: HashMap::new(),
+            by_instruction: HashMap::new(),
+        };
+        for value in records {
+            let record: AttemptRecord = serde_json::from_value(value)
+                .with_context(|| format!("decoding a record from {}", path.display()))?;
+            inner.fold(record.into_attempt().with_context(|| {
+                format!("decoding a record from {}", path.display())
+            })?)?;
+        }
+        Ok(Self {
+            inner: Mutex::new(inner),
+            _lock: lock,
+        })
+    }
+
+    /// True when the previous process died inside an append and the torn line was dropped.
+    pub fn dropped_torn_tail(&self) -> bool {
+        // Drives a warning line at boot only. A poisoned lock cannot answer the question, and
+        // reporting the all-clear is the wrong direction, so it reports the tail as dropped.
+        lock(&self.inner)
+            .map(|inner| inner.log.dropped_torn_tail)
+            .unwrap_or(true)
     }
 }
 
 impl AttemptStore for FileAttemptStore {
     fn get(&self, attempt_id: &str) -> Option<Attempt> {
-        self.by_id.borrow().get(attempt_id).cloned()
+        lock(&self.inner)
+            .ok()
+            .and_then(|inner| inner.by_id.get(attempt_id).cloned())
     }
 
     fn put(&self, attempt: &Attempt) -> Result<()> {
-        // Durable first: if the append fails the in-memory view is untouched, and the next open
-        // replays whatever actually reached the disk.
-        self.log.borrow_mut().append(&AttemptRecord::of(attempt))?;
-        self.index(attempt.clone())
+        // Durable first, inside the lock: if the append fails the in-memory view is untouched, and
+        // the next open replays whatever actually reached the disk.
+        let mut inner = lock(&self.inner)?;
+        inner.log.append(&AttemptRecord::of(attempt))?;
+        inner.fold(attempt.clone())
     }
 
+    // A poisoned lock has no safe `false` here — "no duplicate" would authorise a second send — so
+    // these two answer `true` (refuse) when they cannot read the index. `try_claim` below never
+    // guesses: it fails outright.
     fn has_duplicate(&self, instruction_id: &str, request_hash: &str) -> bool {
-        self.dup
-            .borrow()
-            .get(instruction_id)
-            .is_some_and(|hashes| hashes.contains(request_hash))
+        lock(&self.inner)
+            .map(|inner| {
+                inner
+                    .dup
+                    .get(instruction_id)
+                    .is_some_and(|hashes| hashes.contains(request_hash))
+            })
+            .unwrap_or(true)
     }
 
     fn has_instruction(&self, instruction_id: &str) -> bool {
-        self.by_instruction.borrow().contains_key(instruction_id)
+        lock(&self.inner)
+            .map(|inner| inner.by_instruction.contains_key(instruction_id))
+            .unwrap_or(true)
     }
 
     fn try_claim(
@@ -397,23 +431,22 @@ impl AttemptStore for FileAttemptStore {
         request_hash: &str,
         client_order_ref: &str,
     ) -> Result<Claim> {
-        // One borrow spans the whole classification: no other call can observe "nothing durable"
+        // One lock spans the whole classification: no other caller can observe "nothing durable"
         // and then also claim. The append below is the only thing that makes the claim true, and it
         // is on disk before this returns.
-        let existing = match self.by_id.borrow().get(attempt_id) {
-            Some(existing) => Some(existing.clone()),
-            None => {
-                if self.has_duplicate(instruction_id, request_hash) {
-                    return Ok(Claim::Duplicate);
-                }
-                if self.has_instruction(instruction_id) {
-                    return Ok(Claim::ContractViolation);
-                }
-                None
-            }
-        };
-        if let Some(existing) = existing {
-            return Ok(Claim::Existing(existing));
+        let mut inner = lock(&self.inner)?;
+        if let Some(existing) = inner.by_id.get(attempt_id) {
+            return Ok(Claim::Existing(existing.clone()));
+        }
+        if inner
+            .dup
+            .get(instruction_id)
+            .is_some_and(|hashes| hashes.contains(request_hash))
+        {
+            return Ok(Claim::Duplicate);
+        }
+        if inner.by_instruction.contains_key(instruction_id) {
+            return Ok(Claim::ContractViolation);
         }
         let attempt = Attempt::new(
             attempt_id,
@@ -422,7 +455,8 @@ impl AttemptStore for FileAttemptStore {
             client_order_ref,
             AttemptPhase::Prepared,
         );
-        self.put(&attempt)?;
+        inner.log.append(&AttemptRecord::of(&attempt))?;
+        inner.fold(attempt.clone())?;
         Ok(Claim::Claimed(attempt))
     }
 }
@@ -436,20 +470,20 @@ impl AttemptStore for FileAttemptStore {
 /// incidental halts in [`crate::executiongate::ExecutionGate`] must not come through here — a halt
 /// raised *because* no row vouches for the partition must not then invent one.
 pub struct FileGateStore {
-    log: RefCell<JsonlLog>,
+    inner: Mutex<GateInner>,
     _lock: WriterLock,
-    by_partition: RefCell<HashMap<String, GateRow>>,
+}
+
+struct GateInner {
+    log: JsonlLog,
+    by_partition: HashMap<String, GateRow>,
 }
 
 impl FileGateStore {
     pub fn open(path: &Path) -> Result<Self> {
         let lock = WriterLock::acquire(path)?;
         let (log, records) = JsonlLog::open(path)?;
-        let store = Self {
-            log: RefCell::new(log),
-            _lock: lock,
-            by_partition: RefCell::new(HashMap::new()),
-        };
+        let mut by_partition = HashMap::new();
         for value in records {
             let record: GateRecord = serde_json::from_value(value)
                 .with_context(|| format!("decoding a gate record from {}", path.display()))?;
@@ -457,23 +491,27 @@ impl FileGateStore {
                 .into_row()
                 .with_context(|| format!("decoding a gate record from {}", path.display()))?;
             // Latest row per partition wins: that is how a transition is stored.
-            store.by_partition.borrow_mut().insert(row.partition.clone(), row);
+            by_partition.insert(row.partition.clone(), row);
         }
-        Ok(store)
+        Ok(Self {
+            inner: Mutex::new(GateInner { log, by_partition }),
+            _lock: lock,
+        })
     }
 
 }
 
 impl GateStateStore for FileGateStore {
     fn read(&self, partition: &str) -> Option<GateRow> {
-        self.by_partition.borrow().get(partition).cloned()
+        lock(&self.inner)
+            .ok()
+            .and_then(|inner| inner.by_partition.get(partition).cloned())
     }
 
     fn write(&self, row: &GateRow) -> Result<()> {
-        self.log.borrow_mut().append(&GateRecord::of(row))?;
-        self.by_partition
-            .borrow_mut()
-            .insert(row.partition.clone(), row.clone());
+        let mut inner = lock(&self.inner)?;
+        inner.log.append(&GateRecord::of(row))?;
+        inner.by_partition.insert(row.partition.clone(), row.clone());
         Ok(())
     }
 
@@ -481,13 +519,12 @@ impl GateStateStore for FileGateStore {
     /// Only the create path appends, so a row that already exists is not written again and a fenced
     /// gate survives a restart untouched.
     fn init(&self, row: &GateRow) -> Result<GateRow> {
-        if let Some(existing) = self.by_partition.borrow().get(&row.partition) {
+        let mut inner = lock(&self.inner)?;
+        if let Some(existing) = inner.by_partition.get(&row.partition) {
             return Ok(existing.clone());
         }
-        self.log.borrow_mut().append(&GateRecord::of(row))?;
-        self.by_partition
-            .borrow_mut()
-            .insert(row.partition.clone(), row.clone());
+        inner.log.append(&GateRecord::of(row))?;
+        inner.by_partition.insert(row.partition.clone(), row.clone());
         Ok(row.clone())
     }
 }
@@ -710,6 +747,56 @@ mod tests {
         let gate = FileGateStore::open(&nested.join("gate.jsonl")).unwrap();
         assert!(gate.read("p-1").is_none());
         assert!(nested.is_dir(), "the store created its own directory");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The live HTTP path shares one store across tokio worker threads, so this is the property the
+    /// Workstream-D swap rests on. A compile-time assertion, not a runtime one.
+    #[test]
+    fn the_store_is_shareable_across_threads() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<FileAttemptStore>();
+        assert_send_sync::<FileGateStore>();
+    }
+
+    /// Two workers racing the same identity must produce one claim and one refusal. One mutex over
+    /// log *and* indexes is what makes that true; per-index locks could interleave between the
+    /// classification and the append.
+    #[test]
+    fn a_racing_second_claim_is_refused() {
+        let dir = scratch_dir();
+        let path = dir.join("attempts.jsonl");
+        let store = std::sync::Arc::new(FileAttemptStore::open(&path).unwrap());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let claims: Vec<Claim> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..2)
+                .map(|i| {
+                    let store = std::sync::Arc::clone(&store);
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    scope.spawn(move || {
+                        // Both threads are inside the store at the same time; neither can be first
+                        // by accident of scheduling.
+                        barrier.wait();
+                        store
+                            .try_claim(&format!("a-{i}"), "ins-1", "h-1", &format!("c-{i}"))
+                            .unwrap()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let claimed = claims.iter().filter(|c| matches!(c, Claim::Claimed(_))).count();
+        let duplicates = claims.iter().filter(|c| matches!(c, Claim::Duplicate)).count();
+        assert_eq!((claimed, duplicates), (1, 1), "claims: {claims:?}");
+
+        // And the loser left nothing behind: exactly one attempt is in the log on disk.
+        drop(store);
+        let reopened = FileAttemptStore::open(&path).unwrap();
+        let present = (0..2)
+            .filter(|i| reopened.get(&format!("a-{i}")).is_some())
+            .count();
+        assert_eq!(present, 1, "only the winning claim is durable");
+        drop(reopened);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -21,12 +21,15 @@
 //!
 //! Each client is behind a dedicated env flag defaulting to OFF.
 //!
-//! **Wiring status (D1/D2):** the flags are read by [`open_for_service`], which a service start
-//! calls — ON selects the file-backed store under the configured directory, OFF keeps the in-memory
-//! one, and a flag whose client has no durable implementation is refused rather than quietly
-//! substituted. An enabled flag is still **not** evidence that the live order path is durable: the
-//! gate store is used at boot (the D2 row), while the attempt store's live caller arrives with the
-//! Workstream-D swap below. [`DurableClients::new_in_memory`] remains the in-memory bundle the
+//! **Wiring status (D1/D2 + the Workstream-D swap):** the flags are read by [`open_for_service`],
+//! which a service start calls — ON selects the file-backed store under the configured directory,
+//! OFF keeps the in-memory one, and a flag whose client has no durable implementation is refused
+//! rather than quietly substituted. The gate store is written at boot (the D2 row); the attempt
+//! store now has its live caller: the `/v1/intents` forward leg claims and records the attempt
+//! through [`LiveAttemptStore`] before the bridge sees the order, and answers a later attempt from
+//! the record instead of sending again (`crate::http::claim_for_send`). With the attempts flag OFF
+//! that guard is absent — no *in-memory* substitute, which would be a guard the server could not
+//! share across its workers. [`DurableClients::new_in_memory`] remains the in-memory bundle the
 //! flag-off tests pin.
 //!
 //! The file-backed stores live in [`crate::durable_file`]; the remaining swap plugs Fluss-backed /
@@ -36,6 +39,7 @@
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{bail, Result};
 
@@ -71,7 +75,7 @@ impl DurableFlags {
             audit: true,
         }
     }
-    /// True when any flag is on. No caller yet (P3-192) — kept as the B7 wiring seam.
+    /// True when any flag is on — the start-up guard for opening the bundle at all.
     pub fn any_on(&self) -> bool {
         self.gate || self.attempts || self.journal || self.audit
     }
@@ -182,17 +186,33 @@ impl AuditSink for InMemoryAuditSink {
 
 // ── Bundle: the four clients as a unit ──────────────────────────────────────
 
-/// The four durable clients. Handles onto one of these are `Rc`-shared, so two
-/// `ExecutionGate` instances built from the same bundle see the same store — an aliasing
-/// property, deliberately *not* a modelled process restart (P3-438; no durable store impl
-/// exists yet, see the module header).
+/// The attempt store as the live request path needs it.
+///
+/// [`AttemptStore`] is deliberately thread-agnostic — the in-memory store is `Rc`-based, which is
+/// all a single-actor boot or a test needs. The live forward leg runs on the HTTP server, so it asks
+/// for this narrower view instead: a store safe to hand to `ServerState` and use from any tokio
+/// worker. Only a store whose mutations are serialised internally qualifies; `FileAttemptStore`
+/// holds one mutex over its log and indexes.
+pub trait LiveAttemptStore: AttemptStore + Send + Sync {}
+
+impl<T: AttemptStore + Send + Sync + ?Sized> LiveAttemptStore for T {}
+
+/// The four durable clients. The in-memory handles are `Rc`-shared, so two `ExecutionGate`
+/// instances built from the same bundle see the same store — an aliasing property, deliberately
+/// *not* a modelled process restart. A modelled restart is [`DurableClients::open_for_service`]
+/// over the same directory (P3-438), which the file-backed stores make real.
 pub struct DurableClients {
     /// Parsed enablement flags, as chosen by [`DurableClients::open_for_service`] or the in-memory
-    /// constructor. An ON flag means the matching store below is the file-backed one; it is not
-    /// evidence that a live caller writes through it (see the module header).
+    /// constructor. An ON flag means the matching store below is the file-backed one. For the
+    /// attempt store that also means [`DurableClients::live_attempts`] is `Some`, so the flag is
+    /// evidence of a live writer: the forward leg is the caller (see the module header).
     pub flags: DurableFlags,
     pub gate_store: Rc<dyn GateStateStore>,
-    pub attempt_store: Rc<dyn AttemptStore>,
+    pub attempt_store: Arc<dyn AttemptStore>,
+    /// The same attempt store in the shape the live forward leg needs, when the attempts flag is ON.
+    /// `None` is not a degraded store — it is the flag-OFF behaviour, where the live path has no
+    /// durable guard at all (the gateway's own `Execution_Intent_Processed` dedup is the guard).
+    pub live_attempts: Option<Arc<dyn LiveAttemptStore>>,
     pub journal: Rc<dyn JournalStore>,
     pub audit: Rc<dyn AuditSink>,
     // Concrete in-memory handles, kept for test introspection only (P3-437): `#[cfg(test)]`
@@ -201,7 +221,7 @@ pub struct DurableClients {
     #[cfg(test)]
     gate_mem: Rc<InMemoryGateStateStore>,
     #[cfg(test)]
-    attempt_mem: Rc<InMemoryAttemptStore>,
+    attempt_mem: Arc<dyn AttemptStore>,
     #[cfg(test)]
     journal_mem: Rc<InMemoryJournalStore>,
     #[cfg(test)]
@@ -213,13 +233,20 @@ impl DurableClients {
     /// nothing (P3-192): every flag combination yields the same in-memory stores.
     pub fn new_in_memory(flags: DurableFlags) -> Self {
         let gate_mem = Rc::new(InMemoryGateStateStore::new());
-        let attempt_mem = Rc::new(InMemoryAttemptStore::new());
+        // An unsized trait object on purpose: the in-memory store is single-actor (its contract says
+        // so), and `Arc<dyn AttemptStore>` cannot cross a thread boundary, whereas `Arc<the concrete
+        // store>` would claim a thread-safety this store does not have.
+        let attempt_mem: Arc<dyn AttemptStore> =
+            Arc::from(Box::new(InMemoryAttemptStore::new()) as Box<dyn AttemptStore>);
         let journal_mem = Rc::new(InMemoryJournalStore::new());
         let audit_mem = Rc::new(InMemoryAuditSink::new());
         Self {
             flags,
             gate_store: gate_mem.clone() as Rc<dyn GateStateStore>,
-            attempt_store: attempt_mem.clone() as Rc<dyn AttemptStore>,
+            attempt_store: attempt_mem.clone(),
+            // An in-memory store is not `Send + Sync`, so it can never be the live path's guard:
+            // flag OFF means no durable guard, which is what the flag documents.
+            live_attempts: None,
             journal: journal_mem.clone() as Rc<dyn JournalStore>,
             audit: audit_mem.clone() as Rc<dyn AuditSink>,
             #[cfg(test)]
@@ -267,10 +294,17 @@ impl DurableClients {
                  (D1/D2 cover the attempt and gate stores)"
             );
         }
-        let attempt_store: Rc<dyn AttemptStore> = if flags.attempts {
-            Rc::new(FileAttemptStore::open(&dir.join(ATTEMPTS_LOG))?)
+        // One store object, two trait-object views: the bundle's `attempt_store` and the live
+        // handle the forward leg uses must be the same log, or the second `open` would be refused by
+        // the one-actor-per-log lock (which is the point of that lock).
+        let (attempt_store, live_attempts): (Arc<dyn AttemptStore>, _) = if flags.attempts {
+            let file = Arc::new(FileAttemptStore::open(&dir.join(ATTEMPTS_LOG))?);
+            (file.clone(), Some(file as Arc<dyn LiveAttemptStore>))
         } else {
-            Rc::new(InMemoryAttemptStore::new())
+            (
+                Arc::from(Box::new(InMemoryAttemptStore::new()) as Box<dyn AttemptStore>),
+                None,
+            )
         };
         let gate_store: Rc<dyn GateStateStore> = if flags.gate {
             Rc::new(FileGateStore::open(&dir.join(GATE_LOG))?)
@@ -301,6 +335,7 @@ impl DurableClients {
             flags,
             gate_store,
             attempt_store,
+            live_attempts,
             journal: Rc::new(InMemoryJournalStore::new()),
             audit: Rc::new(InMemoryAuditSink::new()),
             // Test-only handles. They exist so the in-memory bundle can be introspected; a bundle
@@ -309,7 +344,7 @@ impl DurableClients {
             #[cfg(test)]
             gate_mem: Rc::new(InMemoryGateStateStore::new()),
             #[cfg(test)]
-            attempt_mem: Rc::new(InMemoryAttemptStore::new()),
+            attempt_mem: Arc::from(Box::new(InMemoryAttemptStore::new()) as Box<dyn AttemptStore>),
             #[cfg(test)]
             journal_mem: Rc::new(InMemoryJournalStore::new()),
             #[cfg(test)]
@@ -323,7 +358,7 @@ impl DurableClients {
         &self.gate_mem
     }
     #[cfg(test)]
-    pub fn attempt_mem(&self) -> &Rc<InMemoryAttemptStore> {
+    pub fn attempt_mem(&self) -> &Arc<dyn AttemptStore> {
         &self.attempt_mem
     }
     #[cfg(test)]
@@ -416,7 +451,7 @@ mod tests {
         let a = Attempt::new("a-1", "ins-1", "h-1", "E-a-1", AttemptPhase::Prepared);
         clients.attempt_store.put(&a).unwrap();
         // Second handle reading the same attempt.
-        let restarted: Rc<dyn AttemptStore> = clients.attempt_mem.clone() as Rc<dyn AttemptStore>;
+        let restarted: Arc<dyn AttemptStore> = clients.attempt_mem.clone();
         let got = restarted.get("a-1").unwrap();
         assert_eq!(got.phase, AttemptPhase::Prepared);
         assert!(restarted.has_duplicate("ins-1", "h-1"));
@@ -479,6 +514,29 @@ mod tests {
     }
 
     #[test]
+    fn only_the_attempts_flag_gives_the_live_path_a_store() {
+        let dir = scratch_dir();
+        // Flag OFF: no durable guard in the live path, which is today's behaviour and not a
+        // degraded store. Asserting the absence keeps a future change from quietly substituting an
+        // in-memory guard the server cannot share across its workers.
+        let off = DurableClients::open_for_service(&dir, DurableFlags::all_off(), None).unwrap();
+        assert!(off.live_attempts.is_none());
+        drop(off);
+        let on = DurableClients::open_for_service(
+            &dir,
+            DurableFlags {
+                attempts: true,
+                ..DurableFlags::all_off()
+            },
+            None,
+        )
+        .unwrap();
+        assert!(on.live_attempts.is_some());
+        drop(on);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn file_attempts_flag_selects_a_store_that_survives_a_process_restart() {
         let dir = scratch_dir();
         let flags = DurableFlags {
@@ -496,6 +554,14 @@ mod tests {
 
         // A new start over the same directory — what a container restart does.
         let restarted = DurableClients::open_for_service(&dir, flags, None).unwrap();
+        // The live forward leg's handle is the same log as the bundle's store — not a second store
+        // (a second `open` of one log is refused by the writer lock, so this is the only shape that
+        // can work).
+        let live = restarted
+            .live_attempts
+            .as_ref()
+            .expect("the attempts flag ON gives the live path a store");
+        assert!(live.get("a-1").is_some(), "same log, two views");
         let recovered = restarted
             .attempt_store
             .get("a-1")

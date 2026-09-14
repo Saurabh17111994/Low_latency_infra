@@ -34,7 +34,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::bridge::{BridgeClient, ReportOutcome};
+use crate::durable::LiveAttemptStore;
 use crate::events;
+use crate::executiongate::{Attempt, AttemptPhase, Claim};
 use crate::gate::ExecState;
 use crate::gateway_protocol;
 use crate::intent;
@@ -70,6 +72,11 @@ pub type BridgeForwarder = Arc<tokio::sync::Mutex<Box<dyn BridgeClient + Send>>>
 pub struct ServerState {
     inner: Arc<Mutex<Snapshot>>,
     forwarder: Option<BridgeForwarder>,
+    /// Durable attempt guard for the live forward leg (Workstream-D swap, flag-gated). `None` is the
+    /// flag-OFF behaviour: no durable guard here at all, and the gateway's own durable
+    /// `Execution_Intent_Processed` dedup remains the only one. `Some` means an order is not sent
+    /// until its attempt is recorded on disk.
+    attempts: Option<Arc<dyn LiveAttemptStore>>,
 }
 
 impl std::fmt::Debug for ServerState {
@@ -77,6 +84,7 @@ impl std::fmt::Debug for ServerState {
         f.debug_struct("ServerState")
             .field("inner", &self.inner)
             .field("forwarder", &self.forwarder.is_some())
+            .field("attempts", &self.attempts.is_some())
             .finish()
     }
 }
@@ -132,6 +140,7 @@ impl ServerState {
                 connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
+            attempts: None,
         }
     }
 
@@ -174,6 +183,7 @@ impl ServerState {
                 connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
+            attempts: None,
         }
     }
 
@@ -210,6 +220,14 @@ impl ServerState {
     #[must_use]
     pub fn with_forwarder(mut self, forwarder: BridgeForwarder) -> Self {
         self.forwarder = Some(forwarder);
+        self
+    }
+
+    /// Attaches the durable attempt guard (Workstream-D swap). Absent (default) is the flag-OFF
+    /// behaviour: the ENABLED forward leg sends without a durable record of the attempt.
+    #[must_use]
+    pub fn with_attempts(mut self, attempts: Arc<dyn LiveAttemptStore>) -> Self {
+        self.attempts = Some(attempts);
         self
     }
 
@@ -549,6 +567,159 @@ fn verify_control(
     })
 }
 
+/// What the durable attempt guard decided about an order the forward leg is about to send.
+enum GuardOutcome {
+    /// The claim is ours and its SUBMITTING record is on disk: the order may be sent.
+    Send(Attempt),
+    /// Answer without sending — the durable record already decides this request.
+    Refuse(u16, serde_json::Value),
+}
+
+/// Durable pre-call persistence and duplicate guard for the live forward leg (Workstream-D swap).
+///
+/// The identity is the gateway's own: the attempt id [`intent`] mints per attempt, the
+/// `instruction_id` from the payload, and the signed `payload_hash` — the same `(instruction_id, n)`
+/// pair the Java `Execution_Intent_Processed` dedup keys on, which `gateway_protocol::verify` has
+/// already checked against the payload it covers. Nothing is sent until a SUBMITTING record for this
+/// attempt is on disk:
+///
+/// * `Claimed` — new identity: record SUBMITTING, then send.
+/// * `Existing` — this attempt id is already recorded. `ACCEPTED`/`REJECTED` answer from it with no
+///   second call; `PREPARED` proves no call was made (the record is written *before* the send and a
+///   failed write refuses instead of sending), so the send resumes; `SUBMITTING`/`UNKNOWN` is
+///   ambiguous — the bridge may have seen this order — so it halts the gate rather than retrying.
+/// * `Duplicate` — same instruction *and* payload under another attempt id: the gateway's ordinary
+///   retry after an unacknowledged response. Refuse, do not halt; the order is in a known state.
+/// * `ContractViolation` — same instruction, different payload: an operational fault, so it halts.
+fn claim_for_send(
+    state: &ServerState,
+    attempts: &Arc<dyn LiveAttemptStore>,
+    cmd_env: &crate::bridge::CommandEnvelope,
+    payload_hash: &str,
+) -> GuardOutcome {
+    let attempt = match attempts.try_claim(
+        &cmd_env.execution_attempt_id,
+        &cmd_env.instruction_id,
+        payload_hash,
+        &cmd_env.client_order_ref,
+    ) {
+        Ok(Claim::Claimed(attempt)) => attempt,
+        Ok(Claim::Existing(existing)) => match existing.phase {
+            AttemptPhase::Prepared => existing,
+            AttemptPhase::Accepted => {
+                return GuardOutcome::Refuse(
+                    202,
+                    serde_json::json!({
+                        "accepted": true,
+                        "outcome": "ACCEPTED",
+                        "reason": "durable attempt record answers this retry; no second bridge call",
+                        "instruction_id": existing.instruction_id,
+                        "execution_attempt_id": existing.attempt_id,
+                        "broker_order_id": existing.broker_order_id,
+                        "gate_state": state.snapshot().gate.as_str(),
+                    }),
+                )
+            }
+            AttemptPhase::Rejected => {
+                return GuardOutcome::Refuse(
+                    409,
+                    serde_json::json!({
+                        "accepted": false,
+                        "outcome": "REJECTED",
+                        "reason": existing.reason,
+                        "instruction_id": existing.instruction_id,
+                        "execution_attempt_id": existing.attempt_id,
+                        "gate_state": state.snapshot().gate.as_str(),
+                    }),
+                )
+            }
+            AttemptPhase::Submitting | AttemptPhase::Unknown => {
+                state.safety_halt(&format!(
+                    "unresolved durable attempt {} for instruction {} is {}: the bridge may have \
+                     seen this order, so no retry is sent",
+                    existing.attempt_id,
+                    existing.instruction_id,
+                    existing.phase.as_str()
+                ));
+                return GuardOutcome::Refuse(
+                    503,
+                    serde_json::json!({
+                        "accepted": false,
+                        "outcome": "UNRESOLVED",
+                        "phase": existing.phase.as_str(),
+                        "reason": "attempt recorded before the bridge call has no terminal outcome: \
+                                   halted for reconciliation, never re-sent",
+                        "instruction_id": existing.instruction_id,
+                        "execution_attempt_id": existing.attempt_id,
+                        "gate_state": state.snapshot().gate.as_str(),
+                    }),
+                )
+            }
+        },
+        Ok(Claim::Duplicate) => {
+            return GuardOutcome::Refuse(
+                409,
+                serde_json::json!({
+                    "accepted": false,
+                    "outcome": "DUPLICATE",
+                    "reason": "this instruction and payload hash were already attempted: \
+                               no second bridge call",
+                    "instruction_id": cmd_env.instruction_id,
+                    "gate_state": state.snapshot().gate.as_str(),
+                }),
+            )
+        }
+        Ok(Claim::ContractViolation) => {
+            state.safety_halt(&format!(
+                "instruction {} was attempted again with a different payload hash",
+                cmd_env.instruction_id
+            ));
+            return GuardOutcome::Refuse(
+                409,
+                serde_json::json!({
+                    "accepted": false,
+                    "outcome": "CONTRACT_VIOLATION",
+                    "reason": "this instruction was already attempted with different content: \
+                               halted instead of sending",
+                    "instruction_id": cmd_env.instruction_id,
+                    "gate_state": state.snapshot().gate.as_str(),
+                }),
+            );
+        }
+        // No durable record could be written, so nothing may be sent: the whole point of the guard
+        // is that the bridge is never called for an attempt the store does not know about.
+        Err(e) => {
+            return GuardOutcome::Refuse(
+                503,
+                serde_json::json!({
+                    "accepted": false,
+                    "outcome": "STORE_UNAVAILABLE",
+                    "reason": format!("durable attempt store refused the claim: {e}"),
+                    "instruction_id": cmd_env.instruction_id,
+                    "gate_state": state.snapshot().gate.as_str(),
+                }),
+            )
+        }
+    };
+    // The claim is durable; SUBMITTING must be too before the bridge can see the order.
+    let mut submitting = attempt;
+    submitting.phase = AttemptPhase::Submitting;
+    match attempts.put(&submitting) {
+        Ok(()) => GuardOutcome::Send(submitting),
+        Err(e) => GuardOutcome::Refuse(
+            503,
+            serde_json::json!({
+                "accepted": false,
+                "outcome": "STORE_UNAVAILABLE",
+                "reason": format!("durable attempt store refused to record SUBMITTING: {e}"),
+                "instruction_id": submitting.instruction_id,
+                "execution_attempt_id": submitting.attempt_id,
+                "gate_state": state.snapshot().gate.as_str(),
+            }),
+        ),
+    }
+}
+
 async fn route(state: &ServerState, method: &str, path: &str, body: &str) -> Vec<u8> {
     match (method, path) {
         ("GET", "/healthz") => json(200, &health_json(state)),
@@ -640,10 +811,52 @@ async fn route(state: &ServerState, method: &str, path: &str, body: &str) -> Vec
             // Scope the bridge lock to the send only: a concurrent /v1/intents must not
             // serialize behind the gateway emission round-trip (a hung gateway would
             // otherwise stall every subsequent order submit).
+            //
+            // D-swap: with a durable guard attached, the attempt is claimed and recorded BEFORE the
+            // send — a request the store cannot record is refused here and never reaches the bridge.
+            let guarded = match &state.attempts {
+                None => None,
+                Some(attempts) => match claim_for_send(state, attempts, &cmd_env, &envelope.payload_hash)
+                {
+                    GuardOutcome::Send(attempt) => Some((Arc::clone(attempts), attempt)),
+                    GuardOutcome::Refuse(status, doc) => return json(status, &doc),
+                },
+            };
             let submit = {
                 let mut guard = forwarder.lock().await;
                 guard.send_command(cmd_env.clone()).await
             };
+            // The terminal phase is recorded from the same report the response is built from, so a
+            // later retry of this attempt is answered from durable truth instead of being re-sent.
+            if let Some((attempts, mut settled)) = guarded {
+                settled.phase = match &submit {
+                    Ok(report) if report.is_success() => AttemptPhase::Accepted,
+                    Ok(report) if report.outcome() == Some(ReportOutcome::Rejected) => {
+                        AttemptPhase::Rejected
+                    }
+                    _ => AttemptPhase::Unknown,
+                };
+                settled.broker_order_id = submit
+                    .as_ref()
+                    .ok()
+                    .map(|report| report.broker_order_id.clone())
+                    .filter(|id| !id.is_empty());
+                settled.reason = match &submit {
+                    Ok(report) if report.is_success() => None,
+                    Ok(report) => Some(report.reason.clone()).filter(|r| !r.is_empty()),
+                    Err(e) => Some(e.to_string()),
+                };
+                if let Err(e) = attempts.put(&settled) {
+                    // The bridge outcome is already known and outranks our bookkeeping, so the
+                    // answer below stands. The attempt stays SUBMITTING on disk, which is the safe
+                    // direction: a retry then halts instead of sending again. Nothing silent.
+                    tracing::warn!(
+                        error = %e,
+                        attempt_id = %settled.attempt_id,
+                        "terminal attempt phase could not be recorded durably"
+                    );
+                }
+            }
             match submit {
                 Ok(report) if report.is_success() => {
                     // A2.4 leg: emit the normalized lifecycle+correlation image to the
@@ -1811,5 +2024,382 @@ mod tests {
         })
         .expect("a present envelope must pass through");
         assert_eq!(ok.request_id, "req-454");
+    }
+
+    // ── Workstream-D swap: the durable attempt guard on the live forward leg ──────────────────────
+
+    use crate::bridge::{BridgeReportStream, CommandEnvelope, ReportEnvelope};
+    use crate::durable_file::{FileAttemptStore, ATTEMPTS_LOG};
+    use crate::executiongate::AttemptStore;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+    /// A fake bridge that counts sends and, at send time, looks up what the durable store already
+    /// knows about the attempt it is being handed. "The record is on disk before the bridge sees the
+    /// order" is the whole contract of the swap, so the test observes it from inside the call instead
+    /// of inferring it from the order of assertions afterwards. `store: None` counts sends only.
+    struct WatchingBridge {
+        inner: FakeBridge,
+        store: Option<Arc<FileAttemptStore>>,
+        sends: Arc<AtomicU64>,
+        phase_at_send: Arc<Mutex<Vec<Option<AttemptPhase>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BridgeClient for WatchingBridge {
+        fn is_connected(&self) -> bool {
+            self.inner.is_connected()
+        }
+
+        async fn connect(&mut self) -> Result<()> {
+            self.inner.connect().await
+        }
+
+        async fn disconnect(&mut self) -> Result<()> {
+            self.inner.disconnect().await
+        }
+
+        async fn send_command(&mut self, envelope: CommandEnvelope) -> Result<ReportEnvelope> {
+            self.sends.fetch_add(1, Ordering::SeqCst);
+            let phase = self
+                .store
+                .as_ref()
+                .and_then(|store| store.get(&envelope.execution_attempt_id))
+                .map(|attempt| attempt.phase);
+            self.phase_at_send.lock().unwrap().push(phase);
+            self.inner.send_command(envelope).await
+        }
+
+        fn take_reports(&mut self) -> Option<BridgeReportStream> {
+            self.inner.take_reports()
+        }
+    }
+
+    /// An attempt store that can never write — the guard must refuse *before* the bridge, not after.
+    struct RefusingStore;
+
+    impl AttemptStore for RefusingStore {
+        fn get(&self, _attempt_id: &str) -> Option<Attempt> {
+            None
+        }
+        fn put(&self, _attempt: &Attempt) -> Result<()> {
+            anyhow::bail!("durable store unavailable")
+        }
+        fn has_duplicate(&self, _instruction_id: &str, _request_hash: &str) -> bool {
+            true
+        }
+        fn has_instruction(&self, _instruction_id: &str) -> bool {
+            true
+        }
+        fn try_claim(
+            &self,
+            _attempt_id: &str,
+            _instruction_id: &str,
+            _request_hash: &str,
+            _client_order_ref: &str,
+        ) -> Result<Claim> {
+            anyhow::bail!("durable store unavailable")
+        }
+    }
+
+    /// The same store in the shape the server shares it as (`LiveAttemptStore`), so the guard and
+    /// the test's own handle are provably one log.
+    fn live_guard(store: &Arc<FileAttemptStore>) -> Arc<dyn LiveAttemptStore> {
+        let same: Arc<FileAttemptStore> = Arc::clone(store);
+        same
+    }
+
+    fn watching_forwarder(
+        script: CommandScript,
+        store: Option<&Arc<FileAttemptStore>>,
+        sends: &Arc<AtomicU64>,
+        phase_at_send: &Arc<Mutex<Vec<Option<AttemptPhase>>>>,
+    ) -> BridgeForwarder {
+        let mut inner = FakeBridge::new();
+        inner.script(script);
+        Arc::new(tokio::sync::Mutex::new(Box::new(WatchingBridge {
+            inner,
+            store: store.cloned(),
+            sends: Arc::clone(sends),
+            phase_at_send: Arc::clone(phase_at_send),
+        }) as Box<dyn BridgeClient + Send>))
+    }
+
+    /// The durable store refuses to share a log, so every guard test gets its own directory.
+    fn guard_scratch_dir() -> std::path::PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "nautilus-http-guard-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Drives the ENABLED intent route in-process: the TCP helpers above cover the accept loop, and
+    /// these tests are about the durable guard.
+    async fn post_intent(state: &ServerState, body: &str) -> (u16, String) {
+        let resp = String::from_utf8(route(state, "POST", "/v1/intents", body).await).unwrap();
+        let status = resp
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .expect("a status line");
+        let body = resp.split("\r\n\r\n").nth(1).unwrap_or_default().to_string();
+        (status, body)
+    }
+
+    /// The signed envelope alone — no request line — for in-process route calls.
+    async fn intent_body() -> String {
+        encoded_bieq_request("s3cr3t")
+            .await
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap()
+            .to_string()
+    }
+
+    fn attempt_log(path: &std::path::Path) -> Vec<serde_json::Value> {
+        std::fs::read_to_string(path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// The guard's head line: the attempt is durable *before* the bridge is called, and the terminal
+    /// phase is recorded from the report the response was built from.
+    #[tokio::test]
+    async fn durable_guard_records_the_attempt_before_the_bridge_sees_it() {
+        let dir = guard_scratch_dir();
+        let path = dir.join(ATTEMPTS_LOG);
+        let store = Arc::new(FileAttemptStore::open(&path).unwrap());
+        let sends = Arc::new(AtomicU64::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let state = enabled_state(watching_forwarder(
+            CommandScript::Accept,
+            Some(&store),
+            &sends,
+            &seen,
+        ))
+        .with_attempts(live_guard(&store));
+
+        let (status, body) = post_intent(&state, &intent_body().await).await;
+        assert_eq!(status, 202, "body: {body}");
+        assert_eq!(sends.load(Ordering::SeqCst), 1, "exactly one bridge call");
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [Some(AttemptPhase::Submitting)],
+            "the bridge must be handed the order only after the attempt is durable as SUBMITTING"
+        );
+
+        let lines = attempt_log(&path);
+        // The claim itself is a durable record, so the log shows the whole life of the attempt:
+        // claimed PREPARED, then SUBMITTING (before the send), then the terminal phase.
+        assert_eq!(lines.len(), 3, "claim + submitting + terminal: {lines:?}");
+        assert_eq!(lines[0]["phase"], "PREPARED");
+        assert_eq!(lines[1]["phase"], "SUBMITTING");
+        assert_eq!(lines[2]["phase"], "ACCEPTED");
+        assert_eq!(lines[2]["broker_order_id"], "BRK-0001");
+        assert_eq!(lines[0]["instruction_id"], "T9-SB-0001");
+        assert_eq!(
+            lines[0]["attempt_id"], lines[2]["attempt_id"],
+            "one attempt, three phases"
+        );
+        assert_eq!(
+            lines[0]["request_hash"], lines[2]["request_hash"],
+            "the attempt keeps the identity it was claimed under"
+        );
+        drop(state);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A retry of the same signed envelope — what the gateway sends after a lost response — must be
+    /// refused, not forwarded a second time, and must not halt: the order is in a known state.
+    #[tokio::test]
+    async fn durable_guard_refuses_a_replayed_intent_without_a_second_bridge_call() {
+        let dir = guard_scratch_dir();
+        let path = dir.join(ATTEMPTS_LOG);
+        let store = Arc::new(FileAttemptStore::open(&path).unwrap());
+        let sends = Arc::new(AtomicU64::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let state = enabled_state(watching_forwarder(
+            CommandScript::Accept,
+            Some(&store),
+            &sends,
+            &seen,
+        ))
+        .with_attempts(live_guard(&store));
+
+        let body = intent_body().await;
+        let (first, first_body) = post_intent(&state, &body).await;
+        assert_eq!(first, 202, "body: {first_body}");
+        let (second, second_body) = post_intent(&state, &body).await;
+        assert_eq!(second, 409, "body: {second_body}");
+        assert!(
+            second_body.contains("\"outcome\":\"DUPLICATE\""),
+            "body: {second_body}"
+        );
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            1,
+            "the duplicate never reaches the bridge"
+        );
+        assert_eq!(
+            state.snapshot().gate,
+            ExecState::Enabled,
+            "a duplicate is not ambiguity: the gate stays ENABLED"
+        );
+        assert_eq!(
+            attempt_log(&path).len(),
+            3,
+            "the duplicate adds no record: claim, SUBMITTING, terminal"
+        );
+        drop(state);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The point of a *durable* guard: a process that has forgotten everything still refuses to send
+    /// an order its predecessor already sent.
+    #[tokio::test]
+    async fn a_restarted_process_answers_from_the_durable_log() {
+        let dir = guard_scratch_dir();
+        let path = dir.join(ATTEMPTS_LOG);
+        let body = intent_body().await;
+        let sends_first = Arc::new(AtomicU64::new(0));
+        {
+            let store = Arc::new(FileAttemptStore::open(&path).unwrap());
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let state = enabled_state(watching_forwarder(
+                CommandScript::Accept,
+                Some(&store),
+                &sends_first,
+                &seen,
+            ))
+            .with_attempts(live_guard(&store));
+            let (status, b) = post_intent(&state, &body).await;
+            assert_eq!(status, 202, "body: {b}");
+        } // the process ends: state and store drop, and the log's lock is released
+
+        // A new process over the same directory: empty memory, empty bridge, same log.
+        let store = Arc::new(FileAttemptStore::open(&path).unwrap());
+        assert!(
+            store.has_instruction("T9-SB-0001"),
+            "the attempt outlived the process that wrote it"
+        );
+        let sends_second = Arc::new(AtomicU64::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let state = enabled_state(watching_forwarder(
+            CommandScript::Accept,
+            Some(&store),
+            &sends_second,
+            &seen,
+        ))
+        .with_attempts(live_guard(&store));
+        let (status, b) = post_intent(&state, &body).await;
+        assert_eq!(status, 409, "body: {b}");
+        assert!(b.contains("\"outcome\":\"DUPLICATE\""), "body: {b}");
+        assert_eq!(
+            sends_second.load(Ordering::SeqCst),
+            0,
+            "a restart must not re-send an order its predecessor already sent"
+        );
+        assert_eq!(sends_first.load(Ordering::SeqCst), 1);
+        drop(state);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Fail-closed: an attempt the store cannot record is refused, and the bridge is never called.
+    #[tokio::test]
+    async fn a_store_that_cannot_record_is_never_sent() {
+        let sends = Arc::new(AtomicU64::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let state = enabled_state(watching_forwarder(
+            CommandScript::Accept,
+            None,
+            &sends,
+            &seen,
+        ))
+        .with_attempts(Arc::new(RefusingStore));
+
+        let (status, body) = post_intent(&state, &intent_body().await).await;
+        assert_eq!(status, 503, "body: {body}");
+        assert!(
+            body.contains("\"outcome\":\"STORE_UNAVAILABLE\""),
+            "body: {body}"
+        );
+        assert_eq!(
+            sends.load(Ordering::SeqCst),
+            0,
+            "no durable record, no send"
+        );
+        assert_eq!(
+            state.snapshot().gate,
+            ExecState::Enabled,
+            "an unrecordable store is an outage, not ambiguity"
+        );
+    }
+
+    /// The resume branch, tested where it lives. The live route mints a fresh attempt id per request
+    /// (`intent.rs`), so an `Existing` record belongs to a caller that resumes *an attempt* — a
+    /// recovery or a re-drive — not to one that re-issues an intent. What it must never do is send.
+    #[tokio::test]
+    async fn a_resumed_attempt_is_answered_from_its_record_or_halts() {
+        let dir = guard_scratch_dir();
+        let store = Arc::new(FileAttemptStore::open(&dir.join(ATTEMPTS_LOG)).unwrap());
+        let guard = live_guard(&store);
+        let state =
+            enabled_state(fake_forwarder(CommandScript::Accept)).with_attempts(Arc::clone(&guard));
+        let payload: serde_json::Value = serde_json::from_str(&bieq_payload_json()).unwrap();
+        let envelope = intent::place_envelope_from_payload(&payload).unwrap();
+
+        // First call claims the attempt and hands it to the bridge.
+        let first = claim_for_send(&state, &guard, &envelope, "hash-1");
+        let GuardOutcome::Send(mut settled) = first else {
+            panic!("a fresh attempt must be sent");
+        };
+        settled.phase = AttemptPhase::Accepted;
+        settled.broker_order_id = Some("BRK-0001".into());
+        store.put(&settled).unwrap();
+
+        // Resuming an accepted attempt answers with the recorded acceptance and sends nothing.
+        match claim_for_send(&state, &guard, &envelope, "hash-1") {
+            GuardOutcome::Refuse(202, doc) => {
+                assert_eq!(doc["outcome"], "ACCEPTED");
+                assert_eq!(doc["broker_order_id"], "BRK-0001");
+            }
+            GuardOutcome::Refuse(status, doc) => {
+                panic!("expected the recorded acceptance, got {status}: {doc}")
+            }
+            GuardOutcome::Send(_) => panic!("a resumed attempt must never be sent again"),
+        }
+
+        // An ambiguous record is the case the whole guard exists for: halt, never retry.
+        let mut ambiguous = settled;
+        ambiguous.phase = AttemptPhase::Submitting;
+        ambiguous.broker_order_id = None;
+        store.put(&ambiguous).unwrap();
+        match claim_for_send(&state, &guard, &envelope, "hash-1") {
+            GuardOutcome::Refuse(503, doc) => {
+                assert_eq!(doc["outcome"], "UNRESOLVED");
+                assert_eq!(doc["phase"], "SUBMITTING");
+            }
+            GuardOutcome::Refuse(status, doc) => {
+                panic!("an unresolved attempt must be refused, got {status}: {doc}")
+            }
+            GuardOutcome::Send(_) => panic!("an unresolved attempt must never be sent again"),
+        }
+        assert_eq!(
+            state.snapshot().gate,
+            ExecState::Halted,
+            "an unresolved attempt halts the gate for reconciliation"
+        );
+        drop(state);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

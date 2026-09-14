@@ -127,7 +127,7 @@ async fn main() -> anyhow::Result<()> {
     // cannot reach its durable store fails instead of serving without it — an enabled flag is never
     // a silent no-op. With the gate flag on, the partition's row is created HALTED and unbound when
     // absent and left untouched when it exists (D2: a restart must not clear a fenced gate).
-    if durable_flags.any_on() {
+    let durable_clients = if durable_flags.any_on() {
         let clients = DurableClients::open_for_service(
             std::path::Path::new(&durable_dir),
             durable_flags,
@@ -141,10 +141,17 @@ async fn main() -> anyhow::Result<()> {
             gate = durable_flags.gate,
             attempts = durable_flags.attempts,
             gate_row = ?gate_row,
-            "durable clients opened (file-backed stores selected by flag); the attempt store's live \
-             caller arrives with the Workstream-D swap"
+            "durable clients opened (file-backed stores selected by flag)"
         );
-    }
+        Some(clients)
+    } else {
+        None
+    };
+    // The clients are kept for the life of the process: the handle the forward leg holds is a clone
+    // of the same store, and its exclusive lock on the log lives inside it.
+    let live_attempts = durable_clients
+        .as_ref()
+        .and_then(|clients| clients.live_attempts.clone());
 
     tracing::info!(
         "nautilus-execution-service boot: gate HALTED, bridge mode {bridge_mode}, LiveNode hosted run loop armed, health on {addr} (execution enabled: false)"
@@ -154,6 +161,16 @@ async fn main() -> anyhow::Result<()> {
         .server_state()
         .with_forwarder(route_forwarder)
         .with_gateway_endpoint(gateway_endpoint);
+    // Workstream-D swap: with the attempts flag on, the live forward leg claims and records the
+    // attempt before the bridge sees the order, and answers retries from the record. With the flag
+    // off there is no guard here (the gateway's own dedup index is the only one) — unchanged.
+    let state = match live_attempts {
+        Some(attempts) => {
+            tracing::info!("durable attempt guard armed on the /v1/intents forward leg");
+            state.with_attempts(attempts)
+        }
+        None => state,
+    };
     let mut server = tokio::spawn(http::serve(addr, state));
 
     // B8 clock-drift safety: the offline slice samples a fixed zero offset (no NTP on the
