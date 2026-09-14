@@ -90,6 +90,23 @@ impl GateWatch {
     }
 }
 
+/// Read-only, cloneable handle on the client's node-driven progress counter (P3-223).
+///
+/// The running flag the node exposes stays `true` even for a wedged loop, so a sustained run
+/// needs a counter that only advances while the loop actually drives the client. Same ownership
+/// pattern as [`GateWatch`]: the factory creates the cell, the client bumps it, the runtime reads
+/// it — so a soak can show the loop made progress, not merely that it once started.
+#[derive(Debug, Clone, Default)]
+pub struct ProgressWatch(Rc<Cell<u64>>);
+
+impl ProgressWatch {
+    /// Ticks counted so far.
+    #[must_use]
+    pub fn ticks(&self) -> u64 {
+        self.0.get()
+    }
+}
+
 /// Execution-client factory registered into the [`LiveNodeBuilder`].
 ///
 /// The construction path is verified offline (see [`EngineFactory::verify_construction_path`])
@@ -104,6 +121,8 @@ pub struct BridgeExecutionClientFactory {
     boot_gate: BootGate,
     /// The safety gate handed to every client this factory creates (P3-025).
     gate: GateWatch,
+    /// Progress counter handed to every client this factory creates (P3-223).
+    progress: ProgressWatch,
 }
 
 impl BridgeExecutionClientFactory {
@@ -112,6 +131,7 @@ impl BridgeExecutionClientFactory {
             selection,
             boot_gate: BootGate::default(),
             gate: GateWatch(Rc::new(RefCell::new(Gate::new()))),
+            progress: ProgressWatch::default(),
         }
     }
 }
@@ -209,8 +229,9 @@ impl ExecutionClientFactory for BridgeExecutionClientFactory {
                 ref auth_token,
             } => Box::new(HttpBridgeClient::new(base_url.clone(), auth_token.clone())),
         };
-        let client =
-            BridgeExecutionClient::new(core, bridge).with_gate(Rc::clone(&self.gate.0));
+        let client = BridgeExecutionClient::new(core, bridge)
+            .with_gate(Rc::clone(&self.gate.0))
+            .with_progress_ticks(Rc::clone(&self.progress.0));
         // Observe the gate the client actually booted into: the runtime's fail-closed report is
         // derived from this observation, not from a constant (P3-439).
         self.boot_gate.record(client.gate_state());
@@ -276,6 +297,8 @@ pub struct LiveNodeRuntime {
     boot_gate: BootGate,
     /// Live handle on the gate inside the boxed client (P3-025).
     gate_watch: GateWatch,
+    /// Progress counter shared with the client inside the node (P3-223).
+    progress: ProgressWatch,
 }
 
 impl LiveNodeRuntime {
@@ -293,12 +316,14 @@ impl LiveNodeRuntime {
         // P3-025: the runtime keeps the same gate the client receives, so `gate_watch()` reads
         // the live state rather than the construction-time snapshot `boot_gate` records.
         let gate_watch = GateWatch(Rc::new(RefCell::new(Gate::new())));
+        let progress = ProgressWatch::default();
         let builder = builder.add_exec_client(
             Some("exec".to_string()),
             Box::new(BridgeExecutionClientFactory {
                 selection,
                 boot_gate: boot_gate.clone(),
                 gate: gate_watch.clone(),
+                progress: progress.clone(),
             }),
             Box::new(BridgeClientConfig),
         )?;
@@ -309,6 +334,7 @@ impl LiveNodeRuntime {
             handle,
             boot_gate,
             gate_watch,
+            progress,
         })
     }
 
@@ -331,6 +357,15 @@ impl LiveNodeRuntime {
     #[must_use]
     pub fn gate_watch(&self) -> GateWatch {
         self.gate_watch.clone()
+    }
+
+    /// Live handle on the client's progress counter (P3-223).
+    ///
+    /// The counter only advances when the node drives a mass-status callback through the client,
+    /// so a sustained run can distinguish a live loop from one whose running flag is stale.
+    #[must_use]
+    pub fn progress_watch(&self) -> ProgressWatch {
+        self.progress.clone()
     }
 
     /// The fail-closed boot invariant (gate `HALTED`, health never implies `ENABLED`).
@@ -741,6 +776,7 @@ mod tests {
             selection: BridgeSelection::Fake,
             boot_gate: boot_gate.clone(),
             gate: GateWatch::default(),
+            progress: ProgressWatch::default(),
         };
         let _client = factory
             .create("exec", &BridgeClientConfig, cache)

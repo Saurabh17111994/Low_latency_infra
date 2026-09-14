@@ -70,6 +70,7 @@ fn live_node_runtime_sustained_soak() {
         // P3-025: the boot flag is a construction-time snapshot, so a "stays HALTED" claim needs
     // the live gate. Taken as a clone before `run` borrows the runtime mutably.
     let gate_watch = node_rt.gate_watch();
+    let progress_watch = node_rt.progress_watch();
 
     let mut run = Box::pin(node_rt.run_forever());
 
@@ -81,6 +82,10 @@ fn live_node_runtime_sustained_soak() {
         // fail the soak spuriously, so ticks are skipped until the loop is first observed
         // running — with a bounded grace, because a loop that never starts must still fail.
         let mut started_running = false;
+        // P3-223: the running flag stays true even for a wedged loop; this counter only advances
+        // when the node actually drives a mass-status callback through the client.
+        let mut last_ticks = progress_watch.ticks();
+        let ticks_at_start = last_ticks;
         let stop_after = tokio::time::sleep(soak);
         tokio::pin!(stop_after);
         loop {
@@ -110,6 +115,17 @@ fn live_node_runtime_sustained_soak() {
                         "gate left HALTED mid-soak (after {:?})",
                         started.elapsed()
                     );
+                    // Measured: the node drives the mass-status callbacks in bursts (one
+                    // reconciliation round is 3 calls), so strict monotonicity per 500ms sample
+                    // would be flaky. Per sample the counter must not go backwards; the strict
+                    // "it advanced" check is over the whole leg, which is what a wedged loop fails.
+                    let ticks = progress_watch.ticks();
+                    assert!(
+                        ticks >= last_ticks,
+                        "progress counter went backwards mid-soak ({last_ticks} -> {ticks} after {:?})",
+                        started.elapsed()
+                    );
+                    last_ticks = ticks;
                     samples += 1;
                 }
                 result = &mut run => panic!(
@@ -144,6 +160,14 @@ fn live_node_runtime_sustained_soak() {
             gate_watch.state(),
             ExecState::Halted,
             "gate must stay HALTED for the whole soak (checked live, not from the boot snapshot)"
+        );
+        // P3-223: `is_running()` is a flag the loop sets once and never clears, so it cannot tell
+        // a live loop from a wedged one. The node-driven counter is the honest signal: it only
+        // advances when the runtime actually calls into the execution client.
+        assert!(
+            progress_watch.ticks() > ticks_at_start,
+            "the run loop made no progress across the whole {soak_secs}s soak \
+             (ticks stayed at {ticks_at_start}): the loop is wedged, not merely running"
         );
         assert!(
             !handle.is_running(),

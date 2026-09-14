@@ -15,7 +15,7 @@
 //! `HALTED -> RECONCILING -> APPROVAL_PENDING -> ENABLED`.
 
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
     rc::Rc,
     sync::atomic::Ordering,
@@ -177,6 +177,10 @@ pub struct BridgeExecutionClient {
     orders: Rc<RefCell<HashMap<ClientOrderId, VenueOrderId>>>,
     /// Mapping from deterministic `client_order_ref` (remarks) to `ClientOrderId` for fill correlation.
     client_refs: Rc<RefCell<HashMap<String, ClientOrderId>>>,
+    /// Node-driven progress counter (P3-223): bumped on every mass-status callback the live
+    /// runtime makes, so an observer outside the node can tell a running loop from a wedged one
+    /// whose running flag never clears.
+    progress: Rc<Cell<u64>>,
     /// Net position (signed quantity) tracked per instrument from fills.
     /// Parity reference only — Nautilus `portfolio` is the production authority (dossier §Position-management
     /// `PositionProjector` is differential-test oracle). This map stays for offline fake-bridge parity;
@@ -211,6 +215,7 @@ impl BridgeExecutionClient {
             })),
             orders: Rc::new(RefCell::new(HashMap::new())),
             client_refs: Rc::new(RefCell::new(HashMap::new())),
+            progress: Rc::new(Cell::new(0)),
             positions: Rc::new(RefCell::new(HashMap::new())),
         }
     }
@@ -232,6 +237,24 @@ impl BridgeExecutionClient {
     #[must_use]
     pub fn with_gate(self, gate: Rc<RefCell<Gate>>) -> Self {
         Self { gate, ..self }
+    }
+
+    /// P3-223: adopt an externally owned progress counter, so the creator can watch the node's
+    /// callbacks while the client itself is boxed inside the node.
+    #[must_use]
+    pub fn with_progress_ticks(self, progress: Rc<Cell<u64>>) -> Self {
+        Self { progress, ..self }
+    }
+
+    /// How many mass-status callbacks the runtime has driven through this client (P3-223).
+    #[must_use]
+    pub fn progress_ticks(&self) -> u64 {
+        self.progress.get()
+    }
+
+    /// Count one node-driven tick (see [`Self::progress_ticks`]).
+    fn record_tick(&self) {
+        self.progress.set(self.progress.get().wrapping_add(1));
     }
 
     /// Returns a reference to the shared safety gate.
@@ -1012,6 +1035,7 @@ impl ExecutionClient for BridgeExecutionClient {
         &self,
         cmd: &GenerateOrderStatusReports,
     ) -> Result<Vec<OrderStatusReport>> {
+        self.record_tick();
         // P3-200 note: unlike the five stubs beside it this method IS implemented — it just
         // ignores the command's filters (instrument / time window) and reports every order this
         // client knows about. Narrowing the filter is separate work; it is not an error path.
@@ -1027,6 +1051,7 @@ impl ExecutionClient for BridgeExecutionClient {
     }
 
     async fn generate_fill_reports(&self, cmd: GenerateFillReports) -> Result<Vec<FillReport>> {
+        self.record_tick();
         let _ = cmd;
         // P3-200: still a stub, and deliberately NOT an error. The Nautilus runtime's periodic
         // mass-status reconciliation calls this on every loop tick: returning Err here kills the
@@ -1041,6 +1066,7 @@ impl ExecutionClient for BridgeExecutionClient {
         &self,
         cmd: &GeneratePositionStatusReports,
     ) -> Result<Vec<PositionStatusReport>> {
+        self.record_tick();
         let _ = cmd;
         // P3-200: same contract as generate_fill_reports — the runtime's mass-status path calls
         // this per tick, so it must not Err. Empty positions is the stub's risk, not a claim.
