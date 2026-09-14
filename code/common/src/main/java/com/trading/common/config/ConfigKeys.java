@@ -15,7 +15,6 @@ public final class ConfigKeys {
     public static final String ALLOWED_LATENESS_MS = "ALLOWED_LATENESS_MS";
     public static final String ALLOW_FULL_REPLAY = "ALLOW_FULL_REPLAY";
     public static final String ALLOW_RUNTIME_DDL = "ALLOW_RUNTIME_DDL";
-    public static final String APPEND_TIMEOUT = "APPEND_TIMEOUT";
     public static final String APPEND_TIMEOUT_SECONDS = "APPEND_TIMEOUT_SECONDS";
     public static final String ARROW_APP_ID = "ARROW_APP_ID";
     public static final String ARROW_APP_SECRET = "ARROW_APP_SECRET";
@@ -54,7 +53,14 @@ public final class ConfigKeys {
     public static final String CONFIGURATION_VERSION = "CONFIGURATION_VERSION";
     public static final String DAY = "DAY";
     public static final String DEDUP_WINDOW_ENTRIES = "DEDUP_WINDOW_ENTRIES";
+    /**
+     * Preferred deployment key: ingestion reads this one and falls back to {@link #DEPLOY_ENV}
+     * (P1-077), and log4j2 resolves {@code ${env:DEPLOYMENT_ENV:-${env:DEPLOY_ENV:-dev}}} in the
+     * same order. Setting it can never be silently outranked.
+     */
     public static final String DEPLOYMENT_ENV = "DEPLOYMENT_ENV";
+
+    /** Legacy alias, read only when {@link #DEPLOYMENT_ENV} is absent. */
     public static final String DEPLOY_ENV = "DEPLOY_ENV";
 
     /** Compose env-file deployments set this marker; SecretGuard respects it. */

@@ -23,6 +23,13 @@ class SecretGuardTest {
         assertDoesNotThrow(() -> SecretGuard.assertNoSecrets(Map.of()));
     }
 
+    /** P6-854: the documented contract is IllegalStateException, not a NullPointerException. */
+    @Test
+    void nullEnvFailsClosedWithTheDocumentedException() {
+        assertThrows(IllegalStateException.class, () -> SecretGuard.assertNoSecrets(null),
+                "a null env map must fail closed as an IllegalStateException");
+    }
+
     @Test
     void nonSecretKeysPass() {
         assertDoesNotThrow(() -> SecretGuard.assertNoSecrets(

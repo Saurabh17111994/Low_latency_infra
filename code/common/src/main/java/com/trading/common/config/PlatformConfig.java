@@ -29,8 +29,11 @@ public final class PlatformConfig {
     public static final int INGESTION_MAX_BATCH_RECORDS = 1;
     public static final int INGESTION_MAX_BATCH_WAIT_MS = 0;
     // Note: MAX_PENDING_APPEND_RECORDS is owned by IngestionConfig (env default
-    // 50,000, range 100..1,000,000) — no duplicate constant here. A stale 10,000
-    // literal was removed 2026-08-13 (it was unused and contradicted the runtime).
+    // 150,000, range 100..1,000,000) and MAX_PENDING_APPEND_BYTES too (env default
+    // 201326592 = 192 MiB, floor 1 MiB) — no duplicate constants here. A stale
+    // 10,000 literal was removed 2026-08-13 (it was unused and contradicted the
+    // runtime); the min(192 MiB, 10% of container limit) helper below was removed
+    // 2026-09-14 (P6-852), see its note.
 
     // ---- raw_table_1 schema contract ----
     /**
@@ -106,27 +109,21 @@ public final class PlatformConfig {
     public static final int NON_HEAP_MEMORY_RESERVE_PERCENT = 35;
     public static final int CONTAINER_MEMORY_ALERT_PERCENT = 85;
 
-    // ---- signal job ----
-    public static final int MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT = 1;
-
-    /**
-     * {@code MAX_PENDING_APPEND_BYTES = min(201326592, floor(container_memory_limit_bytes * 0.10))}.
-     * Capped at 192 MiB (T2 streaming-3000: 64M → 192M) so very large container limits do not over-buffer
-     * beyond the 3k tunable bound. Env overrides via MAX_PENDING_APPEND_BYTES / PENDING_MAX_BYTES.
-     *
-     * <p>R-199: a non-positive container limit (unreadable cgroup surfaced as 0,
-     * or a misconfigured value) previously produced a <= 0 result from
-     * {@code Math.min} — silently disabling the byte ceiling. Fail fast instead.
-     */
-    public static long maxPendingAppendBytes(long containerMemoryLimitBytes) {
-        if (containerMemoryLimitBytes <= 0) {
-            throw new IllegalArgumentException(
-                    "containerMemoryLimitBytes must be positive, got: "
-                    + containerMemoryLimitBytes);
-        }
-        long derived = (long) Math.floor(containerMemoryLimitBytes * 0.10);
-        return Math.min(201_326_592L, derived);
-    }
+    // Two declarations were removed here 2026-09-14, because each was a second
+    // statement of a rule whose live implementation is elsewhere:
+    //
+    // P6-665 — MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT: its only consumer (the
+    // in-job ranking/reservation path) went away with CHG-005, and nothing read
+    // the constant afterwards. The invariant itself still holds structurally:
+    // the Signal_Candidates_current KV projection keeps at most one current row
+    // per instrument (primary key instrument_token, supersession overwrites in
+    // place), so there is no per-job bound left to declare.
+    //
+    // P6-852 — maxPendingAppendBytes(long): implemented
+    // min(201326592, floor(limit * 0.10)) with an R-199 fail-fast on a
+    // non-positive limit, but had no production caller. The shipped byte ceiling
+    // is the flat IngestionConfig default with its 1 MiB floor (see the ingestion
+    // note above), so the dynamic formula only misdescribed it.
 
     /**
      * The two constants whose value is load-bearing for correctness; any other value must abort
