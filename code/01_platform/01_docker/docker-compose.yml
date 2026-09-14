@@ -848,6 +848,14 @@ services:
         com.trading.build-stamp: ${NAUTILUS_BUILD_STAMP:-none}
     networks: [execution-net]
     depends_on: [execution-gateway, execution-bridge]
+    # D7 live finding (2026-09-14): with Docker's 10s default the executor was SIGKILLed mid-drain
+    # (exit 137) and the clean-shutdown report was lost — queued attempts abandoned uncounted,
+    # which is the failure D7 exists to prevent. Measured worst case is 15-16s: the vendored
+    # kernel waits up to 10s for residual events ("Awaiting residual events (10s)...") and then
+    # HTTP_DRAIN_GRACE_SECS=5 elapses for the HTTP task. 30s covers that with headroom.
+    # Pinned by shutdown_budget_grace_tests in the executor: raising a budget without raising
+    # this fails there rather than in production.
+    stop_grace_period: 30s
     environment:
       EXECUTION_ENABLED: ${EXECUTION_ENABLED:-false}
       EXECUTOR_LISTEN_ADDR: 0.0.0.0:9190

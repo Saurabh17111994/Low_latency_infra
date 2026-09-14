@@ -10,6 +10,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// How long the HTTP task is given to finish in-flight responses after the shutdown
+/// signal, before the task is aborted so the process can exit on the drain path.
+///
+/// This is one term of the container's shutdown budget: the vendored kernel waits up to
+/// `KERNEL_RESIDUAL_EVENT_WAIT_SECS` for residual events to drain first, then this window
+/// elapses. The budget can be 15 s; compose's `stop_grace_period` on the `nautilus` service
+/// must exceed it or Docker SIGKILLs the process before the D7 clean-shutdown sequence
+/// finishes (measured live 2026-09-14: 10 s grace → exit 137, report lost; 90 s grace →
+/// 16 s, exit 0). `shutdown_budget_grace_tests` pins that sum against the compose file.
+const HTTP_DRAIN_GRACE_SECS: u64 = 5;
+
 use nautilus_execution_service::{
     bootstrap::Runtime,
     bridge::{BridgeClient, CommandScript, FakeBridge, HttpBridgeClient},
@@ -178,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
     // release it before reading the shutdown evidence that same run produced.
     drop(node_run);
     runtime.begin_shutdown();
-    drain_http_server(&mut server, Duration::from_secs(5)).await;
+    drain_http_server(&mut server, Duration::from_secs(HTTP_DRAIN_GRACE_SECS)).await;
     verify_clean_shutdown(&node)
 }
 
@@ -421,5 +432,84 @@ mod d3_shutdown_signal_tests {
         tokio::time::timeout(Duration::from_secs(5), await_shutdown_signal(&mut signals))
             .await
             .expect("a signal registered before the gap must still be observed");
+    }
+}
+
+/// The container's stop grace period must outlast the executor's worst-case drain, or Docker
+/// SIGKILLs the process mid-shutdown: the D7 clean-shutdown sequence never finishes, queued
+/// attempts are abandoned uncounted, and the exit code is 137 instead of 0. That is not
+/// hypothetical — the live test of 2026-09-14 measured both ends of it:
+///
+/// * `docker stop` with the compose default (10 s) → exit 137, no "clean shutdown complete"
+///   line, `unresolved_attempts` never reported;
+/// * `docker stop -t 90` → 15-16 s, exit 0, `unresolved_attempts=0 gate_state=Halted`.
+///
+/// So the grace period is load-bearing, exactly as it is for ingestion
+/// (`ShutdownBudgetGraceTest`). This mirrors that test for the Rust service: it reads the
+/// real compose file and our real constant, so raising a term without raising the grace
+/// fails here instead of in production.
+#[cfg(test)]
+mod shutdown_budget_grace_tests {
+    use super::HTTP_DRAIN_GRACE_SECS;
+
+    /// The vendored nautilus kernel's residual-event wait, in seconds. Not a constant we own —
+    /// it is fixed in the kernel and only observable in the log line "Awaiting residual events
+    /// (10s)..." — but it is spent inside the same drain, so the grace period must cover it.
+    /// It lives here rather than at module scope because the running binary never reads it.
+    const KERNEL_RESIDUAL_EVENT_WAIT_SECS: u64 = 10;
+
+    /// The compose file the running stack is created from.
+    const COMPOSE: &str = include_str!("../../../01_platform/01_docker/docker-compose.yml");
+
+    /// The service whose stop path runs the clean-shutdown sequence.
+    const SERVICE: &str = "nautilus:";
+
+    /// Headroom over the summed budget. The two terms describe the *longest* each phase may
+    /// run, so a grace equal to their sum would still let a phase that overruns by a
+    /// millisecond lose the report; 10 s also absorbs process start/exit overhead.
+    const REQUIRED_HEADROOM_SECS: u64 = 10;
+
+    /// The `stop_grace_period` a service declares, in seconds. Hand-parsed on purpose: the
+    /// block is two levels of a YAML file we own, and pulling a YAML dependency into the
+    /// executor's test build to read one key would cost more than it proves. Returns `None`
+    /// when the service or the key is absent — both are failures the caller names.
+    fn stop_grace_period_secs(service: &str) -> Option<u64> {
+        let head = format!("\n  {service}\n");
+        let after = COMPOSE.split_once(&head)?.1;
+        // The block ends at the next two-space-indented key (the service's siblings).
+        let block = after
+            .lines()
+            .take_while(|l| !(l.starts_with("  ") && !l.starts_with("   ") && l.trim_end().ends_with(':')))
+            .collect::<Vec<_>>()
+            .join("\n");
+        block
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("stop_grace_period:"))
+            .and_then(|v| v.trim().strip_suffix('s'))
+            .and_then(|v| v.trim().parse::<u64>().ok())
+    }
+
+    #[test]
+    fn the_executor_declares_a_stop_grace_period() {
+        assert!(
+            stop_grace_period_secs(SERVICE).is_some(),
+            "{SERVICE} declares no stop_grace_period, so Docker uses its 10 s default and \
+             SIGKILLs the executor mid-drain (measured 2026-09-14: exit 137, no clean-shutdown \
+             report). Declare it explicitly."
+        );
+    }
+
+    #[test]
+    fn the_stop_grace_period_covers_the_worst_case_drain() {
+        let grace = stop_grace_period_secs(SERVICE).expect("test the_executor_declares_a_stop_grace_period first");
+        let budget = HTTP_DRAIN_GRACE_SECS + KERNEL_RESIDUAL_EVENT_WAIT_SECS;
+        assert!(
+            grace >= budget + REQUIRED_HEADROOM_SECS,
+            "stop_grace_period {grace}s does not cover the {budget}s drain budget plus \
+             {REQUIRED_HEADROOM_SECS}s headroom (HTTP_DRAIN_GRACE_SECS={HTTP_DRAIN_GRACE_SECS} + \
+             KERNEL_RESIDUAL_EVENT_WAIT_SECS={KERNEL_RESIDUAL_EVENT_WAIT_SECS}). Raise the grace \
+             period in the compose file or lower a budget — a stop that outruns the grace is a \
+             SIGKILL, and the queued-attempt accounting is what gets lost."
+        );
     }
 }
