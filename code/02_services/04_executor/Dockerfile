@@ -4,7 +4,7 @@
 # Multi-stage: pinned toolchain builder -> slim runtime.
 #
 # Env-gates (must hold at build time):
-#   * Base image `rust:1.97.1` must resolve (or be mirrored) — matches NAUTILUS_RUST_TOOLCHAIN
+#   * Base image `rust:1.97.1-bookworm` must resolve (or be mirrored) — toolchain matches
 #     in versions.pin.
 #   * The Nautilus git dependencies are pinned by revision in Cargo.toml/Cargo.lock and are
 #     fetched at build time (network + git). This does NOT copy a developer working tree or use a
@@ -15,7 +15,10 @@
 # -----------------------------------------------------------------------------------------------
 
 # --- Builder: pinned toolchain ----------------------------------------------------------------
-FROM rust:1.97.1 AS builder
+# `-bookworm` names the Debian release the toolchain links against. The runtime stage is
+# debian:bookworm-slim, so an unsuffixed rolling `rust:1.97.1` could move the builder to a newer
+# glibc than the runtime ships and break the binary at boot (P3-176).
+FROM rust:1.97.1-bookworm AS builder
 WORKDIR /build
 
 # Dependencies are cached across builds by BuildKit cache mounts rather than by a
