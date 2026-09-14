@@ -175,6 +175,15 @@ start_tablet_and_verify() {
         sleep 1
     done
     echo "ERROR: tablet is '$STATUS' after the repair, not running — recovery did NOT complete" >&2
+    # G20b: name the crash-loop case explicitly. A container that docker keeps
+    # relaunching never reaches `running`, so the poll above already fails it —
+    # but "Restarting" means the repair did not clear the damage (another
+    # table/bucket is still torn), which is a different action than "wait and
+    # retry", so say which one it is.
+    if docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null | grep -q "Restarting"; then
+        echo "       $CONTAINER is in a Docker RESTART LOOP (status Restarting) — a container that" >&2
+        echo "       keeps crashing cannot finish recovery. Re-run: ./repair-tablet.sh --all" >&2
+    fi
     echo "       the restart policy is back to '$POLICY_BEFORE'; the container is left as it is." >&2
     echo "       start it again once the cause is fixed: docker start $CONTAINER" >&2
     echo "       latest recovery error:" >&2
