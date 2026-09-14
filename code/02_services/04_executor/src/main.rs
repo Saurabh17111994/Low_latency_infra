@@ -135,11 +135,23 @@ async fn main() -> anyhow::Result<()> {
     let node_handle = node.handle();
     let mut node_run = Box::pin(node.run_forever());
 
+    // D3: the shutdown signals are registered **once**, before the loop, and the streams live for
+    // the whole run. The pre-D3 shape called `signal(...)`/`ctrl_c()` inside the loop, so every
+    // drift tick dropped the listeners and re-created them: a SIGTERM delivered in that window
+    // reached no live listener and — because tokio owns the disposition once it has registered a
+    // handler — was dropped rather than stopping the process. `recv()` is cancel-safe, so one
+    // registration can serve every iteration.
+    let mut shutdown_signals = install_shutdown_signals()?;
+    let mut shutdown_fired = false;
+
     // Run until a shutdown signal or the node loop ends; the periodic drift check is a
     // non-terminal branch (a drift halt is enforced on the gate, the process keeps serving).
     loop {
         tokio::select! {
-            _ = wait_for_shutdown_signal() => {
+            // A second signal is deliberately not acted on: the process is already draining, and
+            // the guard keeps this branch from re-entering (or re-polling a fired handler).
+            () = await_shutdown_signal(&mut shutdown_signals), if !shutdown_fired => {
+                shutdown_fired = true;
                 tracing::info!("shutdown signal received; stopping LiveNode, draining (readyz -> 503)");
                 // Keep the loop alive so the pinned run future is polled to its clean return
                 // instead of being dropped mid-shutdown (P3-211).
@@ -208,20 +220,57 @@ mod p3_212_http_server_exit_tests {
 }
 
 #[cfg(unix)]
-async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
+/// The process's shutdown-signal streams (D3), registered once by [`install_shutdown_signals`].
+#[cfg(unix)]
+struct ShutdownSignals {
+    sigint: tokio::signal::unix::Signal,
+    sigterm: tokio::signal::unix::Signal,
+}
+
+/// Non-unix has a single Ctrl-C handler; boxing it once gives the same "one registration for the
+/// whole run" shape as the unix path.
+#[cfg(not(unix))]
+struct ShutdownSignals {
+    ctrl_c: std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>>,
+}
+
+/// Registers the shutdown signals **now**, not on first poll (D3).
+///
+/// `tokio::signal::unix::signal` installs the handler as it constructs the stream, so calling
+/// this before the loop closes the window in which a signal would be swallowed. Registration
+/// failures surface here, at startup, instead of being indistinguishable from a signal later.
+#[cfg(unix)]
+fn install_shutdown_signals() -> anyhow::Result<ShutdownSignals> {
     use tokio::signal::unix::{signal, SignalKind};
-    let mut term = signal(SignalKind::terminate())?;
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {}
-        _ = term.recv() => {}
-    }
-    Ok(())
+    Ok(ShutdownSignals {
+        sigint: signal(SignalKind::interrupt())?,
+        sigterm: signal(SignalKind::terminate())?,
+    })
 }
 
 #[cfg(not(unix))]
-async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
-    tokio::signal::ctrl_c().await?;
-    Ok(())
+fn install_shutdown_signals() -> anyhow::Result<ShutdownSignals> {
+    Ok(ShutdownSignals {
+        ctrl_c: Box::pin(tokio::signal::ctrl_c()),
+    })
+}
+
+/// Resolves when SIGINT or SIGTERM arrives. Cancel-safe: the streams persist across loop
+/// iterations, only this `recv()` is re-created, so no signal can fall between ticks (D3).
+#[cfg(unix)]
+async fn await_shutdown_signal(signals: &mut ShutdownSignals) {
+    tokio::select! {
+        _ = signals.sigint.recv() => {}
+        _ = signals.sigterm.recv() => {}
+    }
+}
+
+#[cfg(not(unix))]
+async fn await_shutdown_signal(signals: &mut ShutdownSignals) {
+    if let Err(e) = signals.ctrl_c.as_mut().await {
+        // Cannot be signalled any more: stopping is the fail-closed reading of that.
+        tracing::error!(error = ?e, "Ctrl-C handler failed; stopping the service");
+    }
 }
 
 /// Bounded drain of the HTTP server task after `/readyz` flips to 503 (P3-211): in-flight
@@ -286,5 +335,33 @@ mod p3_211_http_server_drain_tests {
             "the drain must be bounded by the grace window, elapsed {:?}",
             started.elapsed()
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod d3_shutdown_signal_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_signal_delivered_while_the_loop_was_busy_is_not_lost() {
+        // D3: the streams are registered before the run loop and live for the whole run. This
+        // delivers a real SIGTERM to this process while nothing is awaiting it (standing in for
+        // the drift branch), then requires the already-registered stream to observe it. The
+        // pre-D3 shape re-created the listeners every iteration, so at delivery time none
+        // existed and — because tokio owns the disposition once it has registered a handler — the
+        // signal was dropped instead of stopping the process. The test also could not have been
+        // written against the old shape: with lazy registration the handler is installed on first
+        // poll, so this `kill` would have terminated the test binary.
+        let mut signals = install_shutdown_signals().expect("signal handlers install");
+        let delivered = std::process::Command::new("kill")
+            .arg("-TERM")
+            .arg(std::process::id().to_string())
+            .status()
+            .expect("kill(1) runs");
+        assert!(delivered.success(), "kill -TERM delivery failed");
+
+        tokio::time::timeout(Duration::from_secs(5), await_shutdown_signal(&mut signals))
+            .await
+            .expect("a signal registered before the gap must still be observed");
     }
 }
