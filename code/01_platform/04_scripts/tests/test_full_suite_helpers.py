@@ -331,16 +331,24 @@ class CleanupTest(unittest.TestCase):
             'sleep 300 >/dev/null 2>&1 & MONITOR_PID=$!\n'
             'sleep 300 >/dev/null 2>&1 & JAVA_PID=$!\n'
             'cleanup\n'
+            # Cleanup now TERM→KILLs with a grace poll, so by return both
+            # children are really gone; `gone` counts `ps`-observed states only.
+            'gone=9\n'
             'for p in "$MONITOR_PID" "$JAVA_PID"; do\n'
-            '  s="$(ps -o stat= -p "$p" 2>/dev/null || true)"\n'
-            '  case "$s" in ""|Z*) echo GONE ;; *) echo STILL_RUNNING ;; esac\n'
+            '  if ps -o stat= -p "$p" >/dev/null 2>&1; then\n'
+            '    s="$(ps -o stat= -p "$p" 2>/dev/null)"\n'
+            '    case "$s" in ""|Z*) gone=$((gone+1)) ;; *) echo STILL_RUNNING ;; esac\n'
+            '  else\n'
+            '    gone=$((gone+1))\n'
+            '  fi\n'
             'done\n'
+            'if [ "$gone" = 11 ]; then echo CHILD_GONE; echo CHILD_GONE; fi\n'
             f'[ -f {self.auth} ] && echo AUTH_PRESENT || echo AUTH_GONE\n'
         )
 
     def test_cleanup_kills_children_drops_the_credential_and_reports_fail(self) -> None:
         r = _lib(self._cleanup_body(), stub_dir=self.dir)
-        self.assertEqual(r.stdout.count("GONE"), 2, r.stdout)
+        self.assertEqual(r.stdout.count("CHILD_GONE"), 2, r.stdout)
         self.assertIn("AUTH_GONE", r.stdout)
         self.assertIn("FAIL (aborted before a verdict)", self.summary.read_text())
         self.assertFalse(self.docker_log.exists(), "cleanup stopped a container this run did not start")

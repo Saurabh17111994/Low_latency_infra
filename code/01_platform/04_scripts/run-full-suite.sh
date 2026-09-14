@@ -85,10 +85,31 @@ write_summary() {
 CONTAINER_STARTED=0
 SOAK_KEEP_CONTAINER="${SOAK_KEEP_CONTAINER:-false}"
 cleanup() {
-	local rc=$? pid
+	local rc=$? pid alive
+	# TERM, bounded grace poll, then KILL: a plain `kill` leaves the child
+	# visibly ALIVE for ~1 run in 2 on a loaded box (SIGTERM needs a scheduler
+	# slice before `ps` stops listing the pid), which made the
+	# cleanup-kills-children probe flaky. Stages 2/3 already use this
+	# TERM→KILL shape; cleanup matches it. No `wait` here: the EXIT-trap shell
+	# exits right after cleanup (no zombies possible), and `wait` on these
+	# pids hung under the test's piped stdio.
 	for pid in "${MONITOR_PID:-}" "${JAVA_PID:-}" "${BOOTSTRAP_JAVA_PID:-}" "${FAKETOOL_PID:-}" "${STAGE3_FAKETOOL_PID:-}"; do
 		[ -n "$pid" ] || continue
-		kill "$pid" 2>/dev/null || true
+		kill -TERM "$pid" 2>/dev/null || true
+	done
+	for _ in 1 2 3 4 5; do
+		alive=0
+		for pid in "${MONITOR_PID:-}" "${JAVA_PID:-}" "${BOOTSTRAP_JAVA_PID:-}" "${FAKETOOL_PID:-}" "${STAGE3_FAKETOOL_PID:-}"; do
+			[ -n "$pid" ] || continue
+			kill -0 "$pid" 2>/dev/null && alive=1
+		done
+		[ "$alive" = 0 ] && break
+		sleep 0.1
+	done
+	for pid in "${MONITOR_PID:-}" "${JAVA_PID:-}" "${BOOTSTRAP_JAVA_PID:-}" "${FAKETOOL_PID:-}" "${STAGE3_FAKETOOL_PID:-}"; do
+		[ -n "$pid" ] || continue
+		kill -0 "$pid" 2>/dev/null || continue
+		kill -KILL "$pid" 2>/dev/null || true
 	done
 	if [ "${CONTAINER_STARTED:-0}" = 1 ] && [ "$SOAK_KEEP_CONTAINER" != true ]; then
 		(cd "$DOCKER_DIR" && SOAK_JOURNAL_DIR="${SOAK_JOURNAL:-}" \
