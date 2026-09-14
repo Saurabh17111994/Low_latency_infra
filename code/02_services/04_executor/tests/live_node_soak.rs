@@ -70,6 +70,11 @@ fn live_node_runtime_sustained_soak() {
         // Sustained leg: keep the loop alive for the full soak, sampling liveness.
         let started = Instant::now();
         let mut samples = 0u64;
+        // P3-224: `is_running()` is only meaningful once the hosted loop has marked itself
+        // running. Asserting it from the very first 500ms tick made a slow or loaded runner
+        // fail the soak spuriously, so ticks are skipped until the loop is first observed
+        // running — with a bounded grace, because a loop that never starts must still fail.
+        let mut started_running = false;
         let stop_after = tokio::time::sleep(soak);
         tokio::pin!(stop_after);
         loop {
@@ -77,6 +82,17 @@ fn live_node_runtime_sustained_soak() {
                 biased;
                 _ = &mut stop_after => break,
                 _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                    if !started_running {
+                        if handle.is_running() {
+                            started_running = true;
+                        } else if started.elapsed() > Duration::from_secs(30) {
+                            panic!(
+                                "loop never became running within the 30s startup grace (soak requested {:?})",
+                                soak
+                            );
+                        }
+                        continue;
+                    }
                     assert!(
                         handle.is_running(),
                         "loop went down before the stop request (after {:?})",
@@ -90,6 +106,11 @@ fn live_node_runtime_sustained_soak() {
                 ),
             }
         }
+        assert!(
+            started_running,
+            "loop never became running within {:?}; no liveness sample was taken for the {soak_secs}s soak",
+            started.elapsed()
+        );
         assert!(
             samples >= soak_secs / 2,
             "liveness sampler starved (samples={samples} for {soak_secs}s) — event loop not responsive"
