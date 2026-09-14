@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.trading.common.observability.AlertThresholds;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -22,6 +23,14 @@ class JvmHeapReadinessGateTest {
 
     private JvmHeapReadinessGate gate() {
         return new JvmHeapReadinessGate(85, 75, WINDOW);
+    }
+
+    @Test
+    void defaultBlockSetpointIsTheAlertRowNumber() {
+        // The gate blocks at the figure CONTAINER_MEMORY publishes; the setpoint must
+        // come from the alert row, not a second literal.
+        assertEquals(AlertThresholds.CONTAINER_MEMORY_ALERT_PERCENT,
+                JvmHeapReadinessGate.DEFAULT_BLOCK_AT_PERCENT);
     }
 
     @Test

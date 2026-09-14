@@ -3,6 +3,7 @@ package com.trading.ingestion.config;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import com.trading.common.observability.AlertThresholds;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -30,6 +31,9 @@ class IngestionConfigTest {
     @DisplayName("WARNING_PERCENT = 80%")
     void warningPercent() {
         assertEquals(0.80, IngestionConfig.WARNING_PERCENT, 0.001);
+        // The 80% default and the PENDING_APPEND_* alert rows read one number.
+        assertEquals(AlertThresholds.PENDING_APPEND_WARNING_PERCENT / 100.0,
+                IngestionConfig.WARNING_PERCENT);
     }
 
     @Test

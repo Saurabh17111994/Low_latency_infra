@@ -23,10 +23,12 @@ import com.trading.common.observability.AlertThresholds;
 public final class JvmHeapReadinessGate {
 
     /**
-     * Default block setpoint: 85% of the container limit — the same figure as
-     * {@code AlertThresholds.Alert.CONTAINER_MEMORY} ("container_memory_pct >= 85").
+     * Default block setpoint: the figure of
+     * {@code AlertThresholds.Alert.CONTAINER_MEMORY} ("container_memory_pct >= 85"),
+     * read from there so the alert row and this gate cannot drift apart.
      */
-    public static final int DEFAULT_BLOCK_AT_PERCENT = 85;
+    public static final int DEFAULT_BLOCK_AT_PERCENT =
+            AlertThresholds.CONTAINER_MEMORY_ALERT_PERCENT;
     /** Hysteresis: recovery only clears once usage drops to/below 75%. */
     public static final int DEFAULT_CLEAR_AT_PERCENT = 75;
     /** Sustained window: reuse the observability invariant's 60 s consecutive breach bound. */

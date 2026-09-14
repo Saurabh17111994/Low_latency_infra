@@ -2,6 +2,7 @@ package com.trading.ingestion.config;
 
 import com.trading.common.config.SecretGuard;
 import com.trading.common.config.PlatformConfig;
+import com.trading.common.observability.AlertThresholds;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -29,7 +30,9 @@ public final class IngestionConfig {
     // with 80% warn / 100% halt (halt = 100% hard). Tunable without code change.
     public static final long MAX_PENDING_RECORDS = 150_000L;
     public static final long MAX_PENDING_BYTES = 201_326_592L; // 192 MiB (192*1024*1024)
-    public static final double WARNING_PERCENT = 0.80;
+    // One source for the 80%: the same number the PENDING_APPEND_* alert rows publish.
+    public static final double WARNING_PERCENT =
+            AlertThresholds.PENDING_APPEND_WARNING_PERCENT / 100.0;
     public static final long CLOCK_OFFSET_LIMIT_MS = 2000L; // T10: 2s NTP gate (was 100ms)
 
     // ---- Validated values (populated by validate()) ----
