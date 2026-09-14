@@ -1,6 +1,6 @@
 233d0e10de2c2c3b2549ef654ef7a93ea40c469a8641bcd0dd9974e2f8a67a2f  code/02_services/01_ingestion/go-bridge/testdata/golden/full-tick.frame
-c77d97592adc2b9ca5a779a57234fb7daa8539bcc7dd22857f8bd55335d4fe63  code/02_services/01_ingestion/go-bridge/testdata/golden/full-tick.golden
+b586c4a884ec195a0351bf9e489e122dd07ab971c84f673d65cabde1bcad2da1  code/02_services/01_ingestion/go-bridge/testdata/golden/full-tick.golden
 ef2f3ac5a89a56357270ca6de60ac2c27e755e0e5382e0064fff10446582a6c7  code/02_services/01_ingestion/go-bridge/testdata/golden/ltp-tick.frame
-75f2c11355264711b593e77763d63d785492559cb9843a6e95d9f70e07b11b8b  code/02_services/01_ingestion/go-bridge/testdata/golden/ltp-tick.golden
+805174c076d6d1568c7eea7301c8471baa6c13d83793316dfc13de1ee19d228a  code/02_services/01_ingestion/go-bridge/testdata/golden/ltp-tick.golden
 4deb4cf50bcde169596aae77ba115d9b78f7361a07482acbe23314d8812783a0  code/02_services/01_ingestion/go-bridge/testdata/golden/response.frame
 a9267200f1eae038e3a4d1c5bb6d7fbe8828d2672a3135d95dd33e1583c43704  code/02_services/01_ingestion/go-bridge/testdata/golden/unknown-packet.frame
