@@ -46,6 +46,13 @@ pub struct ServiceConfig {
     pub durable_attempts_enabled: bool,
     pub durable_journal_enabled: bool,
     pub durable_audit_enabled: bool,
+    /// Directory the file-backed durable stores live in (D1/D2). Only read when a durable flag is
+    /// ON; the default is inside the service's own working directory, so a deployment that wants the
+    /// stores to outlive a container must point `DURABLE_DIR` at a mounted volume.
+    pub durable_dir: String,
+    /// The partition this executor owns, from `EXECUTION_PARTITION_ID`. Required exactly when the
+    /// durable gate is enabled: without it there is no partition whose row the executor could own.
+    pub execution_partition_id: Option<String>,
     /// Max |host-clock offset vs UTC| in ms before the drift monitor safety-halts (B8).
     /// Mirrors compose `CLOCK_OFFSET_LIMIT_MS` (ingestion default 200 — see CHG-064).
     pub clock_offset_limit_ms: i64,
@@ -66,6 +73,8 @@ impl std::fmt::Debug for ServiceConfig {
             .field("durable_attempts_enabled", &self.durable_attempts_enabled)
             .field("durable_journal_enabled", &self.durable_journal_enabled)
             .field("durable_audit_enabled", &self.durable_audit_enabled)
+            .field("durable_dir", &self.durable_dir)
+            .field("execution_partition_id", &self.execution_partition_id)
             .field("clock_offset_limit_ms", &self.clock_offset_limit_ms)
             .finish()
     }
@@ -145,6 +154,12 @@ impl ServiceConfig {
             durable_attempts_enabled: bool_env("DURABLE_ATTEMPTS_ENABLED")?,
             durable_journal_enabled: bool_env("DURABLE_JOURNAL_ENABLED")?,
             durable_audit_enabled: bool_env("DURABLE_AUDIT_ENABLED")?,
+            // Only consulted when a durable flag is ON; the flag path fails closed if the directory
+            // cannot be opened or created, so a bad value is reported at the store, not swallowed.
+            durable_dir: get("DURABLE_DIR").unwrap_or("data/durable").to_string(),
+            // Sibling of compose `EXECUTION_PARTITION_ID`. Absent stays absent: the durable gate
+            // path refuses to start rather than inventing a partition name.
+            execution_partition_id: get("EXECUTION_PARTITION_ID").map(str::to_string),
         })
     }
 
@@ -179,6 +194,8 @@ mod tests {
             durable_attempts_enabled: false,
             durable_journal_enabled: false,
             durable_audit_enabled: false,
+            durable_dir: "data/durable".into(),
+            execution_partition_id: None,
             gateway_endpoint: "http://gw:8080".into(),
             bridge_endpoint: "http://bridge:8787".into(),
             bridge_auth_token: String::new(),

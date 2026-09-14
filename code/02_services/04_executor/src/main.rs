@@ -26,6 +26,7 @@ use nautilus_execution_service::{
     bridge::{BridgeClient, CommandScript, FakeBridge, HttpBridgeClient},
     clockwatch::{DriftMonitor, FixedOffsetSource},
     config::ServiceConfig,
+    durable::{DurableClients, DurableFlags},
     engine::{BridgeSelection, LiveNodeRuntime},
     gate::ExecState,
     http, shutdown, telemetry,
@@ -86,6 +87,20 @@ mod p3_456_drift_interval_tests {
 async fn main() -> anyhow::Result<()> {
     let config = ServiceConfig::from_env()?;
     let addr: SocketAddr = config.listen_addr()?;
+
+    // D1/D2: the durable flags select real stores. All OFF — the default — keeps the in-memory
+    // clients, so this changes nothing unless an operator enables one. Captured here because
+    // `config` moves into `Runtime::init`; the stores are opened once the logger exists (below) so
+    // the outcome is reported rather than silently dropped.
+    let durable_flags = DurableFlags {
+        gate: config.durable_gate_enabled,
+        attempts: config.durable_attempts_enabled,
+        journal: config.durable_journal_enabled,
+        audit: config.durable_audit_enabled,
+    };
+    let durable_dir = config.durable_dir.clone();
+    let execution_partition_id = config.execution_partition_id.clone();
+
     // WP-2 remainder (2026-08-21): a configured BRIDGE_ENDPOINT selects the production
     // HttpBridgeClient transport; no endpoint keeps the offline FakeBridge default. Either
     // way the execution client boots HALTED — no broker command flows until an authorized
@@ -107,6 +122,29 @@ async fn main() -> anyhow::Result<()> {
 
     telemetry::init_logging("info");
     telemetry::METRICS.record_restart();
+
+    // D1/D2: open the flag-selected durable stores before the health server starts, so a start that
+    // cannot reach its durable store fails instead of serving without it — an enabled flag is never
+    // a silent no-op. With the gate flag on, the partition's row is created HALTED and unbound when
+    // absent and left untouched when it exists (D2: a restart must not clear a fenced gate).
+    if durable_flags.any_on() {
+        let clients = DurableClients::open_for_service(
+            std::path::Path::new(&durable_dir),
+            durable_flags,
+            execution_partition_id.as_deref(),
+        )?;
+        let gate_row = clients
+            .gate_store
+            .read(execution_partition_id.as_deref().unwrap_or_default());
+        tracing::info!(
+            dir = %durable_dir,
+            gate = durable_flags.gate,
+            attempts = durable_flags.attempts,
+            gate_row = ?gate_row,
+            "durable clients opened (file-backed stores selected by flag); the attempt store's live \
+             caller arrives with the Workstream-D swap"
+        );
+    }
 
     tracing::info!(
         "nautilus-execution-service boot: gate HALTED, bridge mode {bridge_mode}, LiveNode hosted run loop armed, health on {addr} (execution enabled: false)"

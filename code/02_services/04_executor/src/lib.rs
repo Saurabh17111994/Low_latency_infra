@@ -4,6 +4,7 @@ pub mod bridge;
 pub mod clockwatch;
 pub mod config;
 pub mod durable;
+pub mod durable_file;
 pub mod engine;
 pub mod events;
 pub mod execution;

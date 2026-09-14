@@ -48,7 +48,7 @@ impl AttemptPhase {
 }
 
 /// A durable attempt record keyed by attempt id.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attempt {
     pub attempt_id: String,
     pub instruction_id: String,
@@ -82,19 +82,33 @@ impl Attempt {
 /// Durable per-attempt store (interior mutability; identically consistent across gate restarts).
 ///
 /// **Atomicity contract (P3-201).** The claim path is `get` →
-/// `has_duplicate`/`has_instruction` → `put` in [`ExecutionGate::execute`]. That sequence is
-/// safe only while this store has a single actor: two actors sharing one store can both observe
-/// "nothing durable for this `(instruction_id, request_hash)`" and both call the bridge,
-/// breaking exactly-once. Any store reachable by more than one actor — a durable/remote store
-/// shared between executors, or a restarted process running alongside its predecessor — MUST
-/// make classify-and-claim atomic for one `(instruction_id, request_hash)`.
+/// `has_duplicate`/`has_instruction` → `put` as it stood before D1. That sequence is safe only
+/// while this store has a single actor: two actors sharing one store can both observe "nothing
+/// durable for this `(instruction_id, request_hash)`" and both call the bridge, breaking
+/// exactly-once. Any store reachable by more than one actor — a durable/remote store shared
+/// between executors, or a restarted process running alongside its predecessor — MUST make
+/// classify-and-claim atomic for one `(instruction_id, request_hash)`.
 ///
-/// When such a store is wired, this trait must grow a single atomic claim entry point
-/// (classify + insert in one call: claimed / duplicate / contract-violation) and `execute` must
-/// call it instead of the check-then-act pair. A contract stated only in this comment does not
-/// bind a remote implementation, and the two lookups as they stand (resume by `attempt_id`,
-/// duplicate by `instruction_id` + `request_hash`) are a key-design decision that the durable
-/// implementation has to make deliberately.
+/// The entry point is now [`AttemptStore::try_claim`]: classify + insert in one call returning
+/// claimed / existing / duplicate / contract-violation, called by [`ExecutionGate::execute`] in
+/// place of the check-then-act pair. A contract stated only in a comment does not bind a remote
+/// implementation. The key layout it fixes — resume by `attempt_id`, duplicate by
+/// `instruction_id` + `request_hash`, existence by `instruction_id` — is the decision the durable
+/// implementation has to carry, and the load-bearing part is that a durable store performs the
+/// classification and the insert as ONE durable operation.
+/// Result of an atomic classify-and-claim ([`AttemptStore::try_claim`], P3-201).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Claim {
+    /// The identity was new: exactly one PREPARED attempt was inserted, and this is it.
+    Claimed(Attempt),
+    /// This `attempt_id` is already durable — resume from its phase, never a second bridge call.
+    Existing(Attempt),
+    /// Another attempt already carries this `(instruction_id, request_hash)` — no new call.
+    Duplicate,
+    /// This `instruction_id` is durable with a different `request_hash` — contract violation.
+    ContractViolation,
+}
+
 pub trait AttemptStore {
     fn get(&self, attempt_id: &str) -> Option<Attempt>;
     /// Persists create/update and returns `Ok` only after the durable acknowledgement.
@@ -103,6 +117,26 @@ pub trait AttemptStore {
     fn has_duplicate(&self, instruction_id: &str, request_hash: &str) -> bool;
     /// True when any attempt with this `instruction_id` exists (regardless of hash).
     fn has_instruction(&self, instruction_id: &str) -> bool;
+    /// Classifies the identity and, when it is new, claims it — in one operation (P3-201).
+    ///
+    /// This is the whole of `get` → `has_duplicate`/`has_instruction` → `put` from
+    /// [`ExecutionGate::execute`] as a single call, because that check-then-act sequence is safe
+    /// only while the store has one actor: two actors sharing one store can both observe "nothing
+    /// durable for this `(instruction_id, request_hash)`" and both call the bridge.
+    ///
+    /// **Key layout** (the decision a durable implementation must make deliberately): `attempt_id`
+    /// is the primary key; `(instruction_id, request_hash)` must be unique; a different
+    /// `request_hash` under an existing `instruction_id` is a contract violation. A store reachable
+    /// by more than one actor MUST implement this as one durable conditional insert against those
+    /// keys — not as a read followed by a write. The claim always mints `PREPARED`: a caller cannot
+    /// claim straight into a later phase.
+    fn try_claim(
+        &self,
+        attempt_id: &str,
+        instruction_id: &str,
+        request_hash: &str,
+        client_order_ref: &str,
+    ) -> Result<Claim>;
 }
 
 /// Durable gate row for a partition.
@@ -112,7 +146,7 @@ pub enum GateState {
     Halted,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateRow {
     pub partition: String,
     pub owner: String,
@@ -121,10 +155,29 @@ pub struct GateRow {
     pub fence_token: u64,
 }
 
+/// Owner recorded on a gate row that this service created at boot, before any worker bound it.
+/// It is a label, not an actor: gate decisions read state/epoch/fence, and a bound owner is never
+/// replaced by a boot-time create (see [`GateStateStore::init`]).
+pub const BOOT_HALTED_OWNER: &str = "unbound";
+
 /// Durable gate-state store (interior mutability).
 pub trait GateStateStore {
     fn read(&self, partition: &str) -> Option<GateRow>;
     fn write(&self, row: &GateRow) -> Result<()>;
+    /// Creates the row if the partition has none, else returns the existing row untouched (D2).
+    ///
+    /// The row is durable state about a partition, so a deliberate halt must be able to *create* it:
+    /// writing nothing and reporting success on a missing row is the fail-open shape — the gate
+    /// would be HALTED for nobody, and the error propagation of P3-202 cannot fire when there is no
+    /// row to write. "The row exists" is a property of the durable store, so the create belongs to
+    /// the store, not to each caller as a read-then-write habit (mirrors Java `GateStateStore.init`,
+    /// which is why a restarted executor cannot clear a fenced gate — P3-151).
+    ///
+    /// The incidental halts inside [`ExecutionGate`] must **not** come through here: a halt raised
+    /// *because* no row vouches for the partition (missing/corrupt/unreadable gate state) must not
+    /// then invent one, or a partition state that nothing established would acquire an epoch and a
+    /// fence token.
+    fn init(&self, row: &GateRow) -> Result<GateRow>;
 }
 
 /// Terminal bridge classification.
@@ -223,39 +276,38 @@ impl ExecutionGate {
     /// On a simulated crash the method returns `Err` (process death); the durable stores are
     /// the only memory that survives into the restarted gate.
     pub fn execute(&mut self, cmd: &Command, hooks: CrashHooks) -> Result<Outcome> {
-        let existing = self.attempts.get(&cmd.execution_attempt_id);
-
-        // Resume-by-attempt-id is authoritative: a durable attempt for THIS id means we have
-        // already begun (or finished) this money movement — never issue a second bridge call.
-        match existing {
-            // Nothing durable for this id yet.
-            None => {
-                // Another attempt already carries the same (instruction_id, request_hash):
-                // a different attempt id for the same logical order => duplicate, no new call.
-                if self
-                    .attempts
-                    .has_duplicate(&cmd.instruction_id, &cmd.request_hash)
-                {
-                    return Ok(Outcome::Duplicate);
-                }
-                // Same instruction but different request hash → contract violation: quarantine, halt, no call.
-                if self.attempts.has_instruction(&cmd.instruction_id) {
-                    self.halt(cmd)?;
-                    return Ok(Outcome::ContractViolation);
-                }
-                // Fresh attempt: persist PREPARED durably before any bridge call.
-                self.attempts.put(&Attempt::new(
-                    &cmd.execution_attempt_id,
-                    &cmd.instruction_id,
-                    &cmd.request_hash,
-                    &cmd.client_order_ref,
-                    AttemptPhase::Prepared,
-                ))?;
+        // D1/P3-201: classify and claim in ONE store operation. Resume-by-attempt-id stays
+        // authoritative — a durable attempt for THIS id means this money movement already began (or
+        // finished), so there is never a second bridge call — but the duplicate and
+        // contract-violation classifications belong to the store now: it owns the keys
+        // (`attempt_id`, `(instruction_id, request_hash)`, `instruction_id`), so only the store can
+        // make "nothing durable for this identity" and "claim it" one indivisible step.
+        let resume: Option<Attempt> = match self.attempts.try_claim(
+            &cmd.execution_attempt_id,
+            &cmd.instruction_id,
+            &cmd.request_hash,
+            &cmd.client_order_ref,
+        )? {
+            // Another attempt already carries the same (instruction_id, request_hash): a different
+            // attempt id for the same logical order => duplicate, no new call.
+            Claim::Duplicate => return Ok(Outcome::Duplicate),
+            // Same instruction but a different request hash → contract violation: halt, no call.
+            Claim::ContractViolation => {
+                self.halt(cmd)?;
+                return Ok(Outcome::ContractViolation);
+            }
+            // Fresh attempt: PREPARED is already durable before any bridge call.
+            Claim::Claimed(_) => {
                 if hooks.after_prepared {
                     anyhow::bail!("crash at AFTER_PREPARED");
                 }
+                None
             }
-            Some(existing) => match existing.phase {
+            Claim::Existing(existing) => Some(existing),
+        };
+
+        if let Some(existing) = resume {
+            match existing.phase {
                 // Resume from a durable, bridge-not-yet-called state: proceed to SUBMITTING.
                 AttemptPhase::Prepared => {}
                 // The bridge may or may not have been reached: halt, never a second call.
@@ -265,7 +317,7 @@ impl ExecutionGate {
                 }
                 AttemptPhase::Accepted => return Ok(Outcome::Accepted),
                 AttemptPhase::Rejected => return Ok(Outcome::Rejected),
-            },
+            }
         }
 
         // Transition to SUBMITTING durably, then (optionally) crash.
@@ -396,6 +448,42 @@ impl AttemptStore for InMemoryAttemptStore {
     fn has_instruction(&self, instruction_id: &str) -> bool {
         self.by_instruction.borrow().contains_key(instruction_id)
     }
+    fn try_claim(
+        &self,
+        attempt_id: &str,
+        instruction_id: &str,
+        request_hash: &str,
+        client_order_ref: &str,
+    ) -> Result<Claim> {
+        // Classification borrows the three indexes read-only and drops every borrow before the
+        // insert, so nothing can observe a half-classified state; with one actor this is the same
+        // sequence as the get → has_duplicate/has_instruction → put it replaces.
+        {
+            if let Some(existing) = self.by_id.borrow().get(attempt_id) {
+                return Ok(Claim::Existing(existing.clone()));
+            }
+            if self
+                .dup
+                .borrow()
+                .get(instruction_id)
+                .is_some_and(|hashes| hashes.contains(request_hash))
+            {
+                return Ok(Claim::Duplicate);
+            }
+            if self.by_instruction.borrow().contains_key(instruction_id) {
+                return Ok(Claim::ContractViolation);
+            }
+        }
+        let attempt = Attempt::new(
+            attempt_id,
+            instruction_id,
+            request_hash,
+            client_order_ref,
+            AttemptPhase::Prepared,
+        );
+        self.put(&attempt)?;
+        Ok(Claim::Claimed(attempt))
+    }
 }
 
 /// In-memory [`GateStateStore`] (mirrors Java `InMemoryGateStateStore`).
@@ -419,6 +507,15 @@ impl GateStateStore for InMemoryGateStateStore {
             .borrow_mut()
             .insert(row.partition.clone(), row.clone());
         Ok(())
+    }
+    fn init(&self, row: &GateRow) -> Result<GateRow> {
+        // Insert-if-absent under one borrow, so a concurrent caller cannot create it twice; an
+        // existing row is returned as it stands.
+        let mut rows = self.rows.borrow_mut();
+        Ok(rows
+            .entry(row.partition.clone())
+            .or_insert_with(|| row.clone())
+            .clone())
     }
 }
 
@@ -682,6 +779,45 @@ mod tests {
         assert_eq!(total_handle.get(), 1);
     }
 
+    // D1/P3-201: the classify-and-claim primitive itself, independent of `execute`, so the four
+    // classifications are pinned where a durable implementation will have to reproduce them.
+    #[test]
+    fn try_claim_classifies_and_claims_in_one_call() {
+        let store = InMemoryAttemptStore::new();
+
+        // Fresh identity: exactly one PREPARED attempt, returned to the caller.
+        let Claim::Claimed(claimed) = store.try_claim("a-1", "ins-1", "h-1", "c-1").unwrap() else {
+            panic!("a fresh identity must claim");
+        };
+        assert_eq!(claimed.phase, AttemptPhase::Prepared);
+        assert_eq!(claimed.attempt_id, "a-1");
+
+        // Same attempt id again: resume material, not a second claim — and the phase the store
+        // holds at that moment is what comes back (it is the durable state that wins).
+        assert_eq!(
+            store.try_claim("a-1", "ins-1", "h-1", "c-1").unwrap(),
+            Claim::Existing(claimed.clone())
+        );
+
+        // Different attempt id, same (instruction_id, request_hash): duplicate.
+        assert_eq!(
+            store.try_claim("a-2", "ins-1", "h-1", "c-2").unwrap(),
+            Claim::Duplicate
+        );
+
+        // Same instruction, different request hash: contract violation. The duplicate check must
+        // win over this one — a repeated (instruction, hash) is the duplicate case even though the
+        // instruction also exists.
+        assert_eq!(
+            store.try_claim("a-3", "ins-1", "h-9", "c-3").unwrap(),
+            Claim::ContractViolation
+        );
+
+        // A rejected claim leaves nothing behind: the store still holds exactly the one attempt.
+        assert_eq!(store.get("a-2"), None);
+        assert_eq!(store.get("a-3"), None);
+    }
+
     // P3-446: the duplicate index is consulted on every fresh `execute` that reaches the
     // claim path; has_duplicate must borrow the command strings rather than build owned
     // tuple keys per call.
@@ -767,6 +903,11 @@ mod tests {
             (partition == self.row.partition).then(|| self.row.clone())
         }
         fn write(&self, _row: &GateRow) -> Result<()> {
+            anyhow::bail!("durable gate write unavailable")
+        }
+        fn init(&self, _row: &GateRow) -> Result<GateRow> {
+            // The fail-closed double refuses the create too: a store that cannot write must not be
+            // able to satisfy "the row exists".
             anyhow::bail!("durable gate write unavailable")
         }
     }

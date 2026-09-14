@@ -130,6 +130,8 @@ mod tests {
             durable_attempts_enabled: false,
             durable_journal_enabled: false,
             durable_audit_enabled: false,
+            durable_dir: "data/durable".into(),
+            execution_partition_id: None,
         }
     }
 

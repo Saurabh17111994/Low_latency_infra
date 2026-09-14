@@ -19,8 +19,9 @@
 //! Run: `cargo test --offline --test crash_exactly_once`
 
 use nautilus_execution_service::executiongate::{
-    AttemptPhase, AttemptStore, BridgeCaller, BridgeOutcome, Command, CrashHooks, ExecutionGate,
-    GateRow, GateState, GateStateStore, InMemoryAttemptStore, InMemoryGateStateStore, Outcome,
+    AttemptPhase, AttemptStore, BridgeCaller, BridgeOutcome, Claim, Command, CrashHooks,
+    ExecutionGate, GateRow, GateState, GateStateStore, InMemoryAttemptStore, InMemoryGateStateStore,
+    Outcome,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -95,6 +96,27 @@ impl AttemptStore for RecordingAttempts {
     }
     fn has_instruction(&self, instruction_id: &str) -> bool {
         self.inner.has_instruction(instruction_id)
+    }
+    fn try_claim(
+        &self,
+        attempt_id: &str,
+        instruction_id: &str,
+        request_hash: &str,
+        client_order_ref: &str,
+    ) -> anyhow::Result<Claim> {
+        // D1 moved the insert into `try_claim`, so this is now where an attempt id first becomes
+        // durable: record it here as well as in `put`, or `unique_ids` would silently count
+        // nothing. The dedup keeps updates from being counted twice.
+        let claim =
+            self.inner
+                .try_claim(attempt_id, instruction_id, request_hash, client_order_ref)?;
+        if let Claim::Claimed(attempt) = &claim {
+            let mut ids = self.ids.borrow_mut();
+            if !ids.contains(&attempt.attempt_id) {
+                ids.push(attempt.attempt_id.clone());
+            }
+        }
+        Ok(claim)
     }
 }
 

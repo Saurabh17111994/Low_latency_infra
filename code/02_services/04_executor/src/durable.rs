@@ -1,21 +1,19 @@
-//! Durable write path — four permanent clients and their (not-yet-wired) enablement flags
+//! Durable write path — four permanent clients and their enablement flags
 //! (plan Task B7 / CHG-065).
 //!
-//! The Nautilus service currently keeps its duplicate-send guard in-process
-//! (`InMemoryAttemptStore` / `InMemoryGateStateStore`). Four durable clients are
-//! designed but were flag-gated unbuilt: without them an in-process crash can lose
-//! the "did I send this?" guard even though Fluss-backed gateway stores exist on the
-//! Java side. This module closes that gap in the offline slice:
+//! The Nautilus service keeps its duplicate-send guard in-process
+//! (`InMemoryAttemptStore` / `InMemoryGateStateStore`). Four durable clients are designed;
+//! without them an in-process crash can lose the "did I send this?" guard even though
+//! Fluss-backed gateway stores exist on the Java side. This module is where they are built:
 //!
 //! 1. **Gate store** — durable `GateState` (HALTED/ENABLED + epoch/fence), reuses
 //!    `executiongate::{GateStateStore, InMemoryGateStateStore}`.
 //! 2. **Attempt store** — durable `Attempt` (PREPARED→terminal), reuses
 //!    `executiongate::{AttemptStore, InMemoryAttemptStore}`.
-//!    **This is the store that must claim atomically (P3-201):** the `get` →
-//!    `has_duplicate` → `put` sequence in `ExecutionGate::execute` is only safe for a single
-//!    actor, so before two executors can share it the durable implementation needs an atomic
-//!    classify+claim entry point and the trait needs the matching method. The required shape
-//!    and the key-design consequence are stated on the trait's contract.
+//!    **This is the store that must claim atomically (P3-201):** the old `get` →
+//!    `has_duplicate` → `put` sequence in `ExecutionGate::execute` was safe only for a single
+//!    actor. The entry point landed with the store (D1): [`AttemptStore::try_claim`], implemented
+//!    by both the in-memory and the file-backed store, with the key layout stated on the trait.
 //! 3. **Local journal** — append-only event journal (file-backed in production, memory
 //!    in the offline slice), used for engine history/replay.
 //! 4. **Audit sink** — durable audit/OTel feed (Fluss `Execution_Audit` LOG in
@@ -23,22 +21,28 @@
 //!
 //! Each client is behind a dedicated env flag defaulting to OFF.
 //!
-//! **Wiring status (P3-192, verified by inspection):** the flags are recorded on
-//! [`DurableClients`] and read by nothing — `new_in_memory` builds all four in-memory stores
-//! unconditionally, so an all-ON client is behavior-identical to an all-OFF client *by
-//! construction*, not merely because a branch happens to agree. No `flags.*` branch exists yet
-//! and [`DurableFlags::any_on`] has no caller: the flags are the seam for the swap below, never
-//! evidence that a durable path is active. Pin the inertness with the `*_flag_off_*` tests.
+//! **Wiring status (D1/D2):** the flags are read by [`open_for_service`], which a service start
+//! calls — ON selects the file-backed store under the configured directory, OFF keeps the in-memory
+//! one, and a flag whose client has no durable implementation is refused rather than quietly
+//! substituted. An enabled flag is still **not** evidence that the live order path is durable: the
+//! gate store is used at boot (the D2 row), while the attempt store's live caller arrives with the
+//! Workstream-D swap below. [`DurableClients::new_in_memory`] remains the in-memory bundle the
+//! flag-off tests pin.
 //!
-//! When the swap lands, the live slice (Workstream D) plugs Fluss-backed / file / R2 / OTel
-//! implementations in behind the same traits — identical to the `clockwatch` swap pattern.
-//! Enabling the flags in compose requires explicit user approval (B7.5).
+//! The file-backed stores live in [`crate::durable_file`]; the remaining swap plugs Fluss-backed /
+//! R2 / OTel implementations in behind the same traits — identical to the `clockwatch` swap
+//! pattern. Enabling the flags in compose requires explicit user approval (B7.5).
 
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 
+use anyhow::{bail, Result};
+
+use crate::durable_file::{FileAttemptStore, FileGateStore, ATTEMPTS_LOG, GATE_LOG};
 use crate::executiongate::{
-    AttemptStore, GateStateStore, InMemoryAttemptStore, InMemoryGateStateStore,
+    AttemptStore, GateRow, GateState, GateStateStore, InMemoryAttemptStore, InMemoryGateStateStore,
+    BOOT_HALTED_OWNER,
 };
 
 /// Which durable clients are enabled (all OFF by default).
@@ -183,8 +187,9 @@ impl AuditSink for InMemoryAuditSink {
 /// property, deliberately *not* a modelled process restart (P3-438; no durable store impl
 /// exists yet, see the module header).
 pub struct DurableClients {
-    /// Parsed enablement flags. Stored for the B7 swap; **no code branches on them yet**
-    /// (P3-192) — see the module header. Reading them is not evidence of a durable path.
+    /// Parsed enablement flags, as chosen by [`DurableClients::open_for_service`] or the in-memory
+    /// constructor. An ON flag means the matching store below is the file-backed one; it is not
+    /// evidence that a live caller writes through it (see the module header).
     pub flags: DurableFlags,
     pub gate_store: Rc<dyn GateStateStore>,
     pub attempt_store: Rc<dyn AttemptStore>,
@@ -233,6 +238,85 @@ impl DurableClients {
         Self::new_in_memory(DurableFlags::all_off())
     }
 
+    /// Builds the durable clients for a real service start (D1/D2), and creates the partition's gate
+    /// row when the gate client is durable.
+    ///
+    /// A flag that is ON selects its file-backed store under `dir`, opened (and the directory
+    /// created) here — so a start that cannot reach its durable store fails instead of running
+    /// without it. A flag that is OFF keeps the in-memory store, which is the default and today's
+    /// behaviour. `partition` names the partition this executor owns and is required exactly when
+    /// the gate client is durable: without it there is no row to create and no partition to own.
+    ///
+    /// The journal and audit clients have no durable implementation yet, so enabling either is an
+    /// error rather than a quiet in-memory stand-in (the fail-closed reading of "an operator's
+    /// failed attempt to enable a durable flag must not pass unnoticed", P3-434).
+    pub fn open_for_service(
+        dir: &Path,
+        flags: DurableFlags,
+        partition: Option<&str>,
+    ) -> Result<Self> {
+        if flags.journal {
+            bail!(
+                "DURABLE_JOURNAL_ENABLED is set, but the local journal has no durable client yet \
+                 (D1/D2 cover the attempt and gate stores)"
+            );
+        }
+        if flags.audit {
+            bail!(
+                "DURABLE_AUDIT_ENABLED is set, but the audit sink has no durable client yet \
+                 (D1/D2 cover the attempt and gate stores)"
+            );
+        }
+        let attempt_store: Rc<dyn AttemptStore> = if flags.attempts {
+            Rc::new(FileAttemptStore::open(&dir.join(ATTEMPTS_LOG))?)
+        } else {
+            Rc::new(InMemoryAttemptStore::new())
+        };
+        let gate_store: Rc<dyn GateStateStore> = if flags.gate {
+            Rc::new(FileGateStore::open(&dir.join(GATE_LOG))?)
+        } else {
+            Rc::new(InMemoryGateStateStore::new())
+        };
+
+        // D2: the row must exist for a durable gate to be about anything. It is created HALTED and
+        // unbound — this service's boot state — and `init` leaves an existing row alone, so a
+        // restart cannot clear a fenced gate (P3-151).
+        if flags.gate {
+            let partition = partition.map(str::trim).filter(|p| !p.is_empty()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "DURABLE_GATE_ENABLED is set, so EXECUTION_PARTITION_ID must name the partition \
+                     whose gate row this executor owns"
+                )
+            })?;
+            gate_store.init(&GateRow {
+                partition: partition.to_string(),
+                owner: BOOT_HALTED_OWNER.to_string(),
+                state: GateState::Halted,
+                epoch: 0,
+                fence_token: 0,
+            })?;
+        }
+
+        Ok(Self {
+            flags,
+            gate_store,
+            attempt_store,
+            journal: Rc::new(InMemoryJournalStore::new()),
+            audit: Rc::new(InMemoryAuditSink::new()),
+            // Test-only handles. They exist so the in-memory bundle can be introspected; a bundle
+            // built from flags hands out no in-memory alias of a durable store, and a test that
+            // wants to prove durability reopens the directory instead.
+            #[cfg(test)]
+            gate_mem: Rc::new(InMemoryGateStateStore::new()),
+            #[cfg(test)]
+            attempt_mem: Rc::new(InMemoryAttemptStore::new()),
+            #[cfg(test)]
+            journal_mem: Rc::new(InMemoryJournalStore::new()),
+            #[cfg(test)]
+            audit_mem: Rc::new(InMemoryAuditSink::new()),
+        })
+    }
+
     // Introspection for tests: read back what a second handle onto the same store sees.
     #[cfg(test)]
     pub fn gate_mem(&self) -> &Rc<InMemoryGateStateStore> {
@@ -255,13 +339,13 @@ impl DurableClients {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::executiongate::{Attempt, AttemptPhase, GateRow, GateState};
+    use crate::executiongate::{Attempt, AttemptPhase, Claim, GateRow, GateState};
 
-    // GAP (P3-438): no durable (file- or Fluss-backed) store implementation exists in this
-    // crate, so these tests cannot model a process restart. They write through the trait object
-    // and read through a SECOND handle onto the same Rc, which proves handle-sharing — not
-    // recovery after a crash. Real restart recovery is unverified until the B7 swap lands; the
-    // names below say what they actually cover.
+    // P3-438: the `new_in_memory` tests below write through the trait object and read through a
+    // SECOND handle onto the same Rc. That proves handle-sharing, not recovery after a crash — the
+    // names say what they cover. Real restart recovery is covered by the `file_*` tests, which close
+    // the store and reopen its directory, and by `durable_file`'s own reopen tests. What is still
+    // absent is the Fluss-backed client (the Java side has one) and the live-slice caller.
     // ── Flag defaults ───────────────────────────────────────────────────────
 
     #[test]
@@ -377,5 +461,154 @@ mod tests {
         let clients = DurableClients::offline();
         clients.audit.record("x", b"y");
         assert_eq!(clients.audit.len(), 1);
+    }
+
+    // ── Flag-driven construction: a real service start puts the flag in charge ──────────────────
+
+    fn scratch_dir() -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "nautilus-durable-clients-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn file_attempts_flag_selects_a_store_that_survives_a_process_restart() {
+        let dir = scratch_dir();
+        let flags = DurableFlags {
+            attempts: true,
+            ..DurableFlags::all_off()
+        };
+        {
+            let clients = DurableClients::open_for_service(&dir, flags, None).unwrap();
+            let claim = clients
+                .attempt_store
+                .try_claim("a-1", "ins-1", "h-1", "E-a-1")
+                .unwrap();
+            assert!(matches!(claim, Claim::Claimed(_)));
+        } // the process "exits": the store is dropped and the lock released
+
+        // A new start over the same directory — what a container restart does.
+        let restarted = DurableClients::open_for_service(&dir, flags, None).unwrap();
+        let recovered = restarted
+            .attempt_store
+            .get("a-1")
+            .expect("the attempt outlived the process that wrote it");
+        assert_eq!(recovered.instruction_id, "ins-1");
+        assert_eq!(recovered.phase, AttemptPhase::Prepared);
+        // And the recovered store still refuses to mint a second attempt for that order.
+        assert_eq!(
+            restarted
+                .attempt_store
+                .try_claim("a-2", "ins-1", "h-1", "E-a-2")
+                .unwrap(),
+            Claim::Duplicate
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_gate_flag_creates_the_boot_row_and_a_restart_keeps_the_bound_one() {
+        let dir = scratch_dir();
+        let flags = DurableFlags {
+            gate: true,
+            ..DurableFlags::all_off()
+        };
+        {
+            let clients = DurableClients::open_for_service(&dir, flags, Some("p-1")).unwrap();
+            let row = clients.gate_store.read("p-1").expect("D2: the row exists");
+            assert_eq!(row.state, GateState::Halted);
+            assert_eq!(row.owner, "unbound");
+            assert_eq!((row.epoch, row.fence_token), (0, 0));
+            // An operator approval binds the row.
+            clients
+                .gate_store
+                .write(&GateRow {
+                    owner: "worker-1".into(),
+                    state: GateState::Enabled,
+                    epoch: 5,
+                    fence_token: 7,
+                    ..row
+                })
+                .unwrap();
+        }
+
+        // The restart must not reset a fenced gate back to the boot row.
+        let restarted = DurableClients::open_for_service(&dir, flags, Some("p-1")).unwrap();
+        let row = restarted.gate_store.read("p-1").unwrap();
+        assert_eq!(row.state, GateState::Enabled);
+        assert_eq!(row.owner, "worker-1");
+        assert_eq!((row.epoch, row.fence_token), (5, 7));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_durable_gate_without_a_partition_is_refused() {
+        let dir = scratch_dir();
+        let flags = DurableFlags {
+            gate: true,
+            ..DurableFlags::all_off()
+        };
+        let Err(err) = DurableClients::open_for_service(&dir, flags, None) else {
+            panic!("a durable gate with no partition must not start");
+        };
+        assert!(
+            err.to_string().contains("EXECUTION_PARTITION_ID"),
+            "unexpected error: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flags_whose_client_is_not_durable_yet_are_refused() {
+        let dir = scratch_dir();
+        for (flag, name) in [
+            (
+                DurableFlags {
+                    journal: true,
+                    ..DurableFlags::all_off()
+                },
+                "DURABLE_JOURNAL_ENABLED",
+            ),
+            (
+                DurableFlags {
+                    audit: true,
+                    ..DurableFlags::all_off()
+                },
+                "DURABLE_AUDIT_ENABLED",
+            ),
+        ] {
+            let Err(err) = DurableClients::open_for_service(&dir, flag, None) else {
+                panic!("{name} must be refused while its client is in-memory only");
+            };
+            assert!(err.to_string().contains(name), "unexpected error: {err}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_off_touches_no_files() {
+        let dir = scratch_dir();
+        let clients = DurableClients::open_for_service(&dir, DurableFlags::all_off(), None).unwrap();
+        clients.gate_store.write(&GateRow {
+            partition: "p".into(),
+            owner: "w1".into(),
+            state: GateState::Halted,
+            epoch: 1,
+            fence_token: 1,
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "with every flag OFF nothing may be created on disk"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
