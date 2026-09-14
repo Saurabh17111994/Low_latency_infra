@@ -52,7 +52,13 @@ COPY --from=builder /build/nautilus-execution-service /usr/local/bin/nautilus-ex
 ENV EXECUTION_ENABLED=false \
     LOG_LEVEL=info
 
-# Non-root execution.
+# Non-root execution. `WORKDIR /app` is root-owned by default, so a non-root process has nowhere
+# to write: the paper harness (src/t9paper) creates its output/audit directories with
+# `create_dir_all`, and those runs would fail with EACCES in this image. /app is handed to the
+# runtime user instead, and HOME is set because some runtime libraries look it up and `nobody`
+# has no home directory (P3-414).
+RUN chown -R nobody:nogroup /app
+ENV HOME=/tmp
 USER nobody
 
 EXPOSE 8787
