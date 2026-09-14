@@ -188,6 +188,24 @@ fn crash_exactly_once_composite() {
     // UnknownHalted BEFORE any gate/fence check — an unresolved broker outcome can never
     // be fenced away by an epoch bump; it stays quarantined for reconciliation. This is
     // STRONGER than plain Blocked: even a matching new epoch cannot resurrect it.
+    //
+    // For that claim to be discriminative the gate must actually BE enabled at the epoch
+    // and fence the replay carries — otherwise a gate-first implementation would compare
+    // against a stale halted row and the assertion would hold vacuously. Enable 6/8 first.
+    gates
+        .write(&GateRow {
+            partition: PARTITION.into(),
+            owner: "worker-1".into(),
+            state: GateState::Enabled,
+            epoch: 6,
+            fence_token: 8,
+        })
+        .unwrap();
+    assert_eq!(
+        gates.read(PARTITION).unwrap().state,
+        GateState::Enabled,
+        "precondition: the replay runs against a gate that WOULD accept this epoch/fence"
+    );
     let stale = g1
         .execute(&command("a-1", "ins-1", "h-1", 6, 8), CrashHooks::default())
         .expect("stale replay must terminate, not crash");
