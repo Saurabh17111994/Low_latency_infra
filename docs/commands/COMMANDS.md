@@ -10,8 +10,8 @@ unless a command says otherwise.
 | # | Action | Command |
 |---|---|---|
 | 1 | Starts everything | `make up --profile execution-t3` |
-| 2 | Enables trading | `POST /v1/approve` with a signed `GATE_APPROVE` envelope — recipe in §B (**not** a bare body: an unsigned request is 401) |
-| 3 | Disables trading | `POST /v1/halt` with a signed `GATE_HALT` envelope — recipe in §B |
+| 2 | Enables trading | `python3 code/01_platform/04_scripts/t9_order_sandbox.py --sign-control approve --operator saurabh --evidence "<hash>" --post` |
+| 3 | Disables trading (kill-switch) | `python3 code/01_platform/04_scripts/t9_order_sandbox.py --sign-control halt --operator saurabh --evidence "<CHG id>" --reason "<why>" --post` |
 | 4 | Stops everything | `make down` |
 
 ---
@@ -46,6 +46,18 @@ the older `curl -d "saurabh"` form — is answered 401, and the envelope's `gate
 epoch on `/healthz` (every gate transition advances it, so a captured envelope cannot be replayed).
 
 ```python
+# The one-command form is the operator path; the snippet below shows what it does and is the port
+# any other client should reuse (encode_envelope is what t9_order_sandbox.py --sign-control calls).
+#
+#   python3 code/01_platform/04_scripts/t9_order_sandbox.py --sign-control approve \
+#       --operator saurabh --evidence "<the ticket or note you keep>" --post
+#   python3 code/01_platform/04_scripts/t9_order_sandbox.py --sign-control halt \
+#       --operator saurabh --evidence "<CHG id>" --reason "<halt note>" --post
+# --gate-epoch N defaults to 1; a gate that has already transitioned needs the current value from
+# GET /healthz or the executor answers 401 "stale gate epoch". The signer prints the envelope on
+# stdout when --post is omitted, exits 1 on a malformed request and 2 when the transport is
+# unreachable (see §Gate halt in the runbooks).
+
 # approve; use "GATE_HALT" for the kill-switch. Signs with the same port the live harness uses.
 import json, sys, time, urllib.request
 sys.path.insert(0, "code/01_platform/04_scripts")

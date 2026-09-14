@@ -39,7 +39,26 @@ Halt for unknown broker outcome, duplicate-order risk, missing/ambiguous identit
 
 ### Procedure
 
-1. Transition the affected gate scope to `HALTED` and increment/record the gate epoch.
+1. Transition the affected gate scope to `HALTED` and increment/record the gate epoch. The halt is
+   authorised and applied in one step:
+
+   ```bash
+   # read the epoch the envelope must name (the signer defaults it to 1, which only the first
+   # transition of a fresh stack can use)
+   docker run --rm --network 01_docker_execution-net curlimages/curl:latest \
+       -sS http://nautilus:9190/healthz     # -> {..., "gate_state": "...", "gate_epoch": N}
+
+   # mints a signed GATE_HALT envelope against the current epoch and posts it
+   python3 code/01_platform/04_scripts/t9_order_sandbox.py --sign-control halt \
+       --operator saurabh --evidence "<CHG id or ticket>" --reason "<why, recorded in the log>" \
+       --gate-epoch <N> --post
+   ```
+
+   The reply is the executor's own answer: `{"halted":true,"gate_state":"HALTED","halted_by":…,"gate_epoch":N}`.
+   Confirm with `GET /healthz` — `gate_state` must read `HALTED` and `gate_epoch` must have advanced.
+   A `401` means the envelope was rejected (usually a stale `gate_epoch`: fetch it from `/healthz` and
+   re-mint); a `403` means the signed `operator` is not the configured one. Without `--post` the signer
+   only prints the envelope, which is what a client other than this script should reuse.
 2. Record reason, detection timestamp, affected attempts, actor/service, and evidence reference. (**Reservations REMOVED 2026-08-15, CHG-005.**)
 3. Confirm new money-moving calls stop within five seconds.
 4. Preserve attempts, request hashes, mappings, responses, offsets, fills, and logs.
@@ -58,8 +77,44 @@ Existing positions may remain monitored, but no new money-moving call is permitt
 7. Verify Signal job and checkpoint health.
 8. Verify projection completion and quarantine disposition.
 9. Produce an evidence hash bound to the current gate epoch.
-10. Require the single-operator (Saurabh, DEC-044) authenticated authorized approval of that same hash/epoch.
+10. Require the single-operator (Saurabh, DEC-044) authenticated authorized approval of that same hash/epoch:
+
+    ```bash
+    python3 code/01_platform/04_scripts/t9_order_sandbox.py --sign-control approve \
+        --operator saurabh --evidence "<the evidence hash produced in step 9>" --gate-epoch <N> --post
+    # -> {"approved":true,"gate_state":"ENABLED","approved_by":"saurabh","gate_epoch":N}
+    ```
+
+    Trading is live only when `GET /healthz` reports `gate_state: ENABLED` **and** `trading_ready: true`.
 11. Transition to `ENABLED` only after that approval.
+
+## Stopping or restarting the executor
+
+The executor drains for ~15 s before it exits: the Nautilus kernel waits up to 10 s for residual
+events, then the HTTP task gets a 5 s window (`HTTP_DRAIN_GRACE_SECS`). The `nautilus` service declares
+`stop_grace_period: 30s` for exactly that reason — **Docker's 10 s default kills the process mid-drain**
+(measured 2026-09-14: exit `137`, no `clean shutdown complete` line, queued attempts abandoned with no
+accounting).
+
+```bash
+docker compose --env-file code/01_platform/01_docker/.env --env-file code/01_platform/01_docker/secrets.env \
+  -f code/01_platform/01_docker/docker-compose.yml --profile execution-t3 stop nautilus
+docker inspect --format 'ExitCode={{.State.ExitCode}}' 01_docker-nautilus-1   # expect 0
+docker logs 01_docker-nautilus-1 2>&1 | grep -E "clean shutdown complete|no clean-shutdown report"
+```
+
+A clean stop logs `clean shutdown complete: queued bridge jobs abandoned as unresolved attempts
+unresolved_attempts=N gate_state=Halted`. `no clean-shutdown report` (or a non-zero exit) means the
+process did not reach the end of the sequence: treat any attempt that was in flight as `UNKNOWN` and
+follow *Unknown execution outcome* before restarting.
+
+Two things the stop path guarantees, and one it does not:
+
+- The sequence halts the gate itself before draining, so a stop is restart-safe even from `ENABLED`
+  (live-verified 2026-09-14: approval → `ENABLED` → plain `docker stop` → exit 0, `gate_state=Halted`).
+- Attempts that never reached the broker are counted as unresolved, not dropped silently.
+- It does **not** wait indefinitely: a stop that outruns the 30 s grace is a SIGKILL, so do not force
+  a stop during a live incident without reading the log line first.
 
 ## Execution_Gate recreate (v4 merge engine, CHG-122)
 
