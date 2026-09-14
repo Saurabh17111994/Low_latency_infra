@@ -9,7 +9,10 @@ COPY pom.xml /workspace/pom.xml
 COPY common /workspace/common
 COPY 02_services/01_ingestion /workspace/02_services/01_ingestion
 COPY 02_services/06_execution_gateway/pom.xml /workspace/02_services/06_execution_gateway/pom.xml
-RUN --mount=type=cache,target=/root/.m2 mvn -q -f /workspace/pom.xml -pl 02_services/06_execution_gateway -am dependency:go-offline -DskipTests || true
+# No `|| true`: a resolution failure here must fail the image build. The previous `|| true`
+# turned a transient (or real) failure into a cached green layer, so the later `package` step
+# silently redownloaded from scratch and the failure only surfaced much later (P3-265).
+RUN --mount=type=cache,target=/root/.m2 mvn -q -f /workspace/pom.xml -pl 02_services/06_execution_gateway -am dependency:go-offline -DskipTests
 COPY 02_services/06_execution_gateway/src /workspace/02_services/06_execution_gateway/src
 RUN --mount=type=cache,target=/root/.m2 mvn -q -f /workspace/pom.xml -pl 02_services/06_execution_gateway -am package -DskipTests
 
