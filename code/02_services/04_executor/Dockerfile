@@ -72,6 +72,9 @@ RUN chown -R nobody:nogroup /app
 ENV HOME=/tmp
 USER nobody
 
+# The service binds 127.0.0.1:8787 by default (src/config.rs) and compose overrides that with
+# EXECUTOR_LISTEN_ADDR=0.0.0.0:9190, which is the port NAUTILUS_PRIVATE_ENDPOINT points at. 8787
+# is the bridge's port, so an unqualified `EXPOSE 8787` read as if the executor served it (P3-415).
 EXPOSE 8787
 
 ENTRYPOINT ["nautilus-execution-service"]
