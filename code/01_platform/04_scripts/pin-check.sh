@@ -31,17 +31,25 @@ echo "== [3/6] external SNAPSHOT ban =="
 python3 code/01_platform/04_scripts/pom-snapshot-scan.py || rc=1
 
 echo "== [4/6] platform version pins =="
-if grep -qE '^FLINK_VERSION=(latest|TO_BE_PINNED)' code/01_platform/04_scripts/versions.pin ||
-	grep -qE '^FLUSS_VERSION=(latest|TO_BE_PINNED)' code/01_platform/04_scripts/versions.pin; then
-	echo "FAIL: placeholder platform version in versions.pin"
+# P6-138: the old `[^=]+$` let `*`, `^`, `~`, ranges, whitespace-only and even
+# `latest` (as a suffix) pass as "pinned". Versions here are MAJOR.MINOR.PATCH
+# with an optional SemVer prerelease qualifier (0.9.1-incubating) — nothing else.
+PIN='code/01_platform/04_scripts/versions.pin'
+if [ ! -f "$PIN" ]; then
+	echo "FAIL: versions.pin missing ($PIN not found)"
+	rc=1
+elif grep -qE '^(FLINK|FLUSS)_VERSION=(latest|TO_BE_PINNED)' "$PIN" ||
+	grep -qE '^(FLINK|FLUSS)_VERSION=.*(\*|\+|\^|~|\[|\(|,|SNAPSHOT)' "$PIN" ||
+	grep -qE '^(FLINK|FLUSS)_VERSION=.*[[:space:]]' "$PIN"; then
+	echo "FAIL: placeholder/range/snapshot platform version in versions.pin"
 	rc=1
 else
-	grep -qE '^FLINK_VERSION=[^=]+$' code/01_platform/04_scripts/versions.pin && echo "  FLINK_VERSION pinned" || {
-		echo "FAIL: FLINK_VERSION missing"
+	grep -qE '^FLINK_VERSION=[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z_-]+)*$' "$PIN" && echo "  FLINK_VERSION pinned" || {
+		echo "FAIL: FLINK_VERSION missing or not a strict MAJOR.MINOR.PATCH pin"
 		rc=1
 	}
-	grep -qE '^FLUSS_VERSION=[^=]+$' code/01_platform/04_scripts/versions.pin && echo "  FLUSS_VERSION pinned" || {
-		echo "FAIL: FLUSS_VERSION missing"
+	grep -qE '^FLUSS_VERSION=[0-9]+\.[0-9]+\.[0-9]+([-+.][0-9A-Za-z_-]+)*$' "$PIN" && echo "  FLUSS_VERSION pinned" || {
+		echo "FAIL: FLUSS_VERSION missing or not a strict MAJOR.MINOR.PATCH pin"
 		rc=1
 	}
 fi
@@ -53,17 +61,31 @@ if [ ! -f "$LOCK" ]; then
 	rc=1
 else
 	# Every *_IMAGE= line in runtime.lock must carry @sha256:<digest>.
-	# Registry digests are 64 hex; local build IDs are 12+ hex (image ID
-	# pinning). Trailing comments (# ...) are allowed after the ref.
-	bad=$(grep -E '^[A-Z0-9_]+_IMAGE=' "$LOCK" \
-		| grep -vE '@sha256:[0-9a-f]{12,64}([[:space:]]+#.*)?$' || true)
-	if [ -n "$bad" ]; then
-		echo "FAIL: bare/unpinned image refs in runtime.lock:"
-		printf '%s\n' "$bad"
+	# P6-139: the filter normalises each line first (leading whitespace,
+	# `export`, spaces around `=`) — the old `^[A-Z0-9_]+_IMAGE=` silently
+	# skipped those shapes, excluding them from BOTH counts. Case stays
+	# UPPER (shell vars are case-sensitive; `lower_image` is a different
+	# variable no consumer reads — counting it would bless a dead ref).
+	# P6-140: exactly 64 hex. A 12-hex short image-ID is mutable/local-only;
+	# the four local-build lines carry one and MUST fail until re-pinned.
+	norm() { sed -E -e 's/^[[:space:]]+//' -e 's/^export([[:space:]]+|$)//' -e 's/[[:space:]]*=[[:space:]]*/=/'; }
+	# P6-141: `grep -c` exits 1 on zero matches — without `|| true` the
+	# script aborted under set -e instead of reporting FAIL, and `OK: 0`
+	# would wrongly pass. Zero refs is a FAIL, not a vacuous pass.
+	n=$(norm < "$LOCK" | grep -cE '^[A-Za-z0-9_]+_IMAGE=' || true)
+	if [ "$n" -eq 0 ]; then
+		echo "FAIL: no _IMAGE= refs found in runtime.lock"
 		rc=1
 	else
-		n=$(grep -cE '^[A-Z0-9_]+_IMAGE=' "$LOCK")
-		echo "  OK: $n image refs all digest-pinned"
+		bad=$(norm < "$LOCK" | grep -E '^[A-Za-z0-9_]+_IMAGE=' \
+			| grep -vE '@sha256:[0-9a-f]{64}([[:space:]]+(#.*)?)?$' || true)
+		if [ -n "$bad" ]; then
+			echo "FAIL: bare/unpinned image refs in runtime.lock:"
+			printf '%s\n' "$bad"
+			rc=1
+		else
+			echo "  OK: $n image refs all digest-pinned"
+		fi
 	fi
 fi
 

@@ -36,7 +36,14 @@ validate_ref() {
 		echo "ERROR: '$img' is already digest-pinned — refusing to double-pin" >&2
 		return 1
 		;;
-	*:*)
+	esac
+	# P6-064/P6-065: only the name after the last '/' carries the tag — the
+	# old `*:*` accepted `registry:5000/repo` (port colon, no tag), which
+	# then pinned as `registry:5000/repo@sha256:...` without the required
+	# `:tag` component. `*:?*` also rejects empty tags (`repo:`).
+	name="${img##*/}"
+	case "$name" in
+	*:?*)
 		return 0
 		;;
 	*)
@@ -53,27 +60,54 @@ resolve_one() {
 
 	# R-056: capture resolver errors so a registry/auth failure is visible
 	# instead of a generic "could not resolve digest".
+	# P6-062/P6-066: stdout goes to `digest`, stderr to a temp file — the old
+	# `2>&1` merged them, so any warning line (auth notice, default-platform
+	# note) contaminated a successful result into a false hard failure.
+	# P6-354/P6-355/P6-357/P6-358: options before the ref + `--` — a ref
+	# starting with `-` must never parse as a resolver flag, and the trailing
+	# `--format` risked parsing as a second image on strict parsers.
+	tmp_err="$(mktemp)"
 	if command -v docker &>/dev/null; then
-		err=$(docker buildx imagetools inspect "$img" \
-			--format '{{.Manifest.Digest}}' 2>&1) && digest="$err" ||
-			err="docker buildx imagetools inspect failed: $err"
-		# R-223: for a multi-arch INDEX (e.g. fluss/flink official images),
-		# buildx prints the whole index document (not a plain digest); the
-		# index's own digest appears as `Digest: sha256:<hex>` on its own
-		# line. Extract it so the defensive regex below passes. A single-arch
-		# manifest prints the plain digest directly and is left untouched.
+		if digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' -- "$img" 2>"$tmp_err"); then
+			: # keep stdout-only digest
+		else
+			err="docker buildx imagetools inspect failed: $(cat "$tmp_err")"
+			digest=""
+		fi
+		# P6-063/P6-067: NEVER parse the human-readable `Digest:` line (with
+		# multiple `Digest:` lines — index + per-platform manifests — head -1
+		# can pin a single-platform digest instead of the index digest).
+		# Malformed output falls through to skopeo/crane (P6-353/P6-356).
 		if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-			digest=$(printf '%s\n' "$digest" | sed -n 's/^[[:space:]]*Digest:[[:space:]]*\(sha256:[0-9a-f]\{64\}\)$/\1/p' | head -1)
+			err="docker buildx imagetools inspect returned unexpected output: $digest"
+			digest=""
 		fi
 	fi
 	if [ -z "$digest" ] && command -v skopeo &>/dev/null; then
-		err=$(skopeo inspect --format '{{.Digest}}' "docker://${img}" 2>&1) && digest="$err" ||
-			err="skopeo inspect failed: $err"
+		if digest=$(skopeo inspect --format '{{.Digest}}' -- "docker://${img}" 2>"$tmp_err"); then
+			: # keep stdout-only digest
+		else
+			err="skopeo inspect failed: $(cat "$tmp_err")"
+			digest=""
+		fi
+		if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+			err="skopeo inspect returned unexpected output: $digest"
+			digest=""
+		fi
 	fi
 	if [ -z "$digest" ] && command -v crane &>/dev/null; then
-		err=$(crane digest "$img" 2>&1) && digest="$err" ||
-			err="crane digest failed: $err"
+		if digest=$(crane digest -- "$img" 2>"$tmp_err"); then
+			: # keep stdout-only digest
+		else
+			err="crane digest failed: $(cat "$tmp_err")"
+			digest=""
+		fi
+		if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+			err="crane digest returned unexpected output: $digest"
+			digest=""
+		fi
 	fi
+	rm -f "$tmp_err"
 
 	if [ -z "$digest" ]; then
 		echo "ERROR: could not resolve digest for $img" >&2

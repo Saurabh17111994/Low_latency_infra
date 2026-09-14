@@ -1,0 +1,142 @@
+"""Hermetic tests for digest-pin.sh (P6 wave 20: P6-062..067, P6-353..358).
+
+Probes run the real script with PATH stubs: `docker`/`skopeo`/`crane` print
+fixture digests (or fail per STUB_FAIL) and record argv; `mktemp` is the real
+one. No registry, daemon, or network is touched.
+"""
+import os
+import pathlib
+import subprocess
+import tempfile
+import unittest
+
+SCRIPT = pathlib.Path(__file__).resolve().parent.parent / "digest-pin.sh"
+SRC = SCRIPT.read_text()
+GOOD = "a" * 64
+
+
+class DigestHarness(unittest.TestCase):
+    def setUp(self):
+        self.t = pathlib.Path(tempfile.mkdtemp())
+        self.bin = self.t / "bin"
+        self.bin.mkdir()
+        # Each resolver stub: record argv, optionally fail, else print a digest.
+        # STDOUT_DIGEST / STDERR_LINE control the docker stub (P6-062 probe).
+        (self.bin / "docker").write_text(
+            '#!/usr/bin/env bash\n'
+            'echo "DOCKER ARGS=$*" >> "$RESOLVER_CALLS"\n'
+            'if [ "${STUB_FAIL:-}" = "docker" ]; then echo "auth warning: using default platform" >&2; exit 1; fi\n'
+            'if [ -n "${STDERR_LINE:-}" ]; then echo "$STDERR_LINE" >&2; fi\n'
+            'printf "%s\\n" "${STDOUT_DIGEST:-sha256:}"\n')
+        (self.bin / "skopeo").write_text(
+            '#!/usr/bin/env bash\n'
+            'echo "SKOPEO ARGS=$*" >> "$RESOLVER_CALLS"\n'
+            'if [ "${STUB_FAIL:-}" = "skopeo" ]; then echo "skopeo: unauthorized" >&2; exit 1; fi\n'
+            'printf "sha256:%s\\n" "${SKOPEO_DIGEST:-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb}"\n')
+        (self.bin / "crane").write_text(
+            '#!/usr/bin/env bash\n'
+            'echo "CRANE ARGS=$*" >> "$RESOLVER_CALLS"\n'
+            'if [ "${STUB_FAIL:-}" = "crane" ]; then echo "crane: not found" >&2; exit 1; fi\n'
+            'printf "sha256:%s\\n" "${CRANE_DIGEST:-cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc}"\n')
+        for b in ("docker", "skopeo", "crane"):
+            (self.bin / b).chmod(0o755)
+        self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
+                        RESOLVER_CALLS=str(self.t / "calls.log"),
+                        STDOUT_DIGEST=f"sha256:{GOOD}")
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.t)], check=False))
+
+    def run_pin(self, *args, extra=None, timeout=60):
+        env = dict(self.env)
+        if extra:
+            env.update(extra)
+        return subprocess.run(["bash", str(SCRIPT), *args], env=env,
+                              capture_output=True, text=True, timeout=timeout)
+
+    def calls(self):
+        p = self.t / "calls.log"
+        return p.read_text() if p.exists() else ""
+
+    # P6-064/065: registry-port refs rejected; empty tags rejected; good refs pass.
+    def test_registry_port_ref_rejected(self):
+        r = self.run_pin("registry:5000/repo")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("no tag", r.stderr)
+
+    def test_ref_shapes(self):
+        for bad in ("repo", "repo:", "img@sha256:" + GOOD):
+            r = self.run_pin(bad)
+            self.assertNotEqual(r.returncode, 0, f"{bad} must fail: {r.stdout}{r.stderr}")
+        r = self.run_pin("registry:5000/repo:tag")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"registry:5000/repo:tag@sha256:{GOOD}", r.stdout)
+
+    # P6-062/066: a stderr warning alongside a good digest must NOT fail.
+    def test_stderr_warning_does_not_contaminate_digest(self):
+        r = self.run_pin("repo:tag", extra={"STDERR_LINE": "auth warning: using default platform"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn(f"repo:tag@sha256:{GOOD}", r.stdout)
+
+    # P6-063/067: human-readable index output is NOT parsed — falls through.
+    def test_human_readable_digest_line_falls_through(self):
+        idx = f"Digest: sha256:{'d' * 64}"
+        r = self.run_pin("repo:tag", extra={"STDOUT_DIGEST": idx})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        c = self.calls()
+        self.assertIn("SKOPEO ARGS=", c, "docker's Digest: line must fall through to skopeo")
+        self.assertNotIn(idx, r.stdout)
+
+    # P6-353/356 (+P6-062): malformed docker stdout PLUS a stderr warning
+    # retries skopeo, then crane. Pre-fix the `2>&1` merge turned this into a
+    # hard failure (warning text inside digest); post-fix stderr is separate.
+    def test_malformed_docker_output_falls_through_to_crane(self):
+        r = self.run_pin("repo:tag", extra={"STDOUT_DIGEST": "garbage!!",
+                                            "STDERR_LINE": "warning: using default platform",
+                                            "STUB_FAIL": "skopeo"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        c = self.calls()
+        self.assertIn("SKOPEO ARGS=", c)
+        self.assertIn("CRANE ARGS=", c)
+        self.assertIn("repo:tag@sha256:" + "c" * 64, r.stdout)
+
+    def test_all_resolvers_fail_reports_last_error(self):
+        # Post-fix pin (passes on both scripts — the old defensive regex also
+        # rejected crane's malformed output): documents the fail-closed shape,
+        # not a changed behaviour.
+        r = self.run_pin("repo:tag", extra={"STDOUT_DIGEST": "garbage!!",
+                                            "STUB_FAIL": "skopeo",
+                                            "CRANE_DIGEST": "short"})
+        # crane prints sha256:short (malformed) -> reset -> no digest left.
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("could not resolve digest", r.stderr)
+
+    # P6-354/355/357/358: options-first + `--` on every resolver.
+    def test_resolvers_use_options_first_and_double_dash(self):
+        self.run_pin("repo:tag")
+        c = self.calls()
+        self.assertIn("--format {{.Manifest.Digest}} -- repo:tag", c, c)
+        self.run_pin("repo:tag", extra={"STDOUT_DIGEST": "bad", "STUB_FAIL": "skopeo"})
+        c = self.calls()
+        self.assertIn("--format {{.Digest}} -- docker://repo:tag", c, c)
+        self.assertIn("CRANE ARGS=digest -- repo:tag", c, c)
+
+    def test_dash_ref_never_parses_as_flag(self):
+        # P6-354/357/358: a dash-led ref must die in validate_ref (no tag) —
+        # no resolver is ever invoked, so it can never parse as a flag.
+        r = self.run_pin("--help", extra={"STDOUT_DIGEST": "bad"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(self.calls(), "")
+
+    # Static pins: no resolver merges stderr into the digest (only the
+    # P6-062 comment names `2>&1` now), no head -1 extraction (only the
+    # P6-063 comment names it), no Digest:-line sed.
+    def test_static_pins(self):
+        code_lines = [ln for ln in SRC.splitlines()
+                      if not ln.strip().startswith("#")]
+        code = "\n".join(code_lines)
+        self.assertNotIn("2>&1", code)
+        self.assertNotIn("head -1", code)
+        self.assertNotIn("Digest:", code)
+
+
+if __name__ == "__main__":
+    unittest.main()
