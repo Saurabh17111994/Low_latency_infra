@@ -263,7 +263,7 @@ After `PERF-PROD-60000-001` establishes the baseline, define the numeric review 
 | Collector buffer | `otelcol_exporter_send_failed_*` >0 5m | collector self-telemetry | `ALERT-OTEL-EXPORT-FAIL` `Critical` |
 | O2 memory | >14GB 60s (`ZO_MEMORY_LIMIT=12g` `Z0_MEMORY_ALERT_THRESHOLD=14g`) | `container_memory_usage_bytes{container="openobserve"}` | `ALERT-O2-MEM-14` |
 
-All thresholds use 60s consecutive breach (Foundation Task 7) and a bounded `scope` (`global`/`vm_id`/`container`/`service_name`/`instrument`). Dashboard `security-platform.json` + `compute-decision.json` query these signals; `o2-provision.py` installs the scheduled/promql alerts.
+All thresholds use 60s consecutive breach (Foundation Task 7), enforced where each alert is evaluated — the JVM-side container-memory gate reads `AlertThresholds.CONSECUTIVE_BREACH_SECONDS`, and each provisioned rule carries its own `for 60s` (`o2-provision.py`) — and a bounded `scope` (`global`/`vm_id`/`container`/`service_name`/`instrument`). Dashboard `security-platform.json` + `compute-decision.json` query these signals; `o2-provision.py` installs the scheduled/promql alerts.
 
 ### SLO boundaries
 
@@ -302,7 +302,7 @@ Security alerts cover credential expiry/revocation/authentication exhaustion; TL
 
 #### Alert thresholds (per [Foundation task 7](./01-foundation.md))
 
-Every threshold below uses a **60-second consecutive breach window** before escalating:
+Every threshold below uses a **60-second consecutive breach window** before escalating (provider-side `for 60s`; the JVM-side container-memory gate reads the same bound from `common`):
 
 | Alert | Condition | Severity | Gate impact |
 | --- | --- | --- | --- |
