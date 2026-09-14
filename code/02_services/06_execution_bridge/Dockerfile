@@ -12,7 +12,12 @@ COPY 02_services/01_ingestion/go-bridge/third_party ./02_services/01_ingestion/g
 WORKDIR /src/02_services/06_execution_bridge/go-bridge
 RUN go mod download
 COPY 02_services/06_execution_bridge/go-bridge/*.go ./
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /execution-bridge .
+# TARGETARCH is set by BuildKit for the platform being built; the explicit default keeps the
+# legacy builder (which does not set it) on today's amd64 behaviour instead of silently emitting
+# an empty GOARCH. The hardcoded amd64 produced an x86_64 binary on every builder, including
+# arm64 ones (P3-471).
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -o /execution-bridge .
 
 FROM alpine:3.22
 RUN addgroup -S execution && adduser -S -G execution execution
