@@ -23,6 +23,23 @@ DURATION="${DURATION:-15}"
 STACK_NAME="${STACK_NAME:-nautilus}"
 METRICS_URL="${METRICS_URL:-}"
 LOAD_CMD="${LOAD_CMD:-}"
+
+# P3-226: RATES_IN and DURATION feed the rung loop's arithmetic and the sampling
+# deadline; a non-numeric, empty or non-positive value used to skip a rung or stretch it
+# while still writing a report row that looked like measured data. Validate before the
+# report file is created, so a bad invocation leaves nothing behind.
+case "$DURATION" in
+  ''|*[!0-9]*) echo "FAIL: DURATION must be a positive integer number of seconds (got '$DURATION')" >&2; exit 2 ;;
+esac
+[ "$DURATION" -gt 0 ] || { echo "FAIL: DURATION must be greater than 0 (got '$DURATION')" >&2; exit 2; }
+case "$RATES_IN" in
+  ''|*[!0-9,]*) echo "FAIL: RATES_IN must be a comma-separated list of positive integers (got '$RATES_IN')" >&2; exit 2 ;;
+esac
+IFS=',' read -r -a RATES <<< "$RATES_IN"
+for rate_arg in "${RATES[@]}"; do
+  [ -n "$rate_arg" ] && [ "$rate_arg" -gt 0 ] \
+    || { echo "FAIL: RATES_IN contains an empty or non-positive rate (got '$RATES_IN')" >&2; exit 2; }
+done
 OUT="scale_report_$(date +%Y%m%d_%H%M%S).tsv"
 printf 'rung\trate_per_s\tduration_s\tsamples\tp50_ms\tp95_ms\tp99_ms\tp_max_ms\tcpu_pct\n' > "$OUT"
 
@@ -45,7 +62,6 @@ PY
 
 LOAD_FAILED=0
 rung=0
-IFS=',' read -r -a RATES <<< "$RATES_IN"
 for RATE in "${RATES[@]}"; do
   rung=$((rung+1))
   echo "== rung $rung: ${RATE} ticks/s for ${DURATION}s =="
