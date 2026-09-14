@@ -150,6 +150,20 @@ class AuditHashChainTest {
     }
 
     @Test
+    void chainAcceptsSameDayManifestsFromDifferentTables() {
+        // P6-654: the object contract is one manifest per table per day, so a
+        // day legitimately holds several links — equal dates are not a broken
+        // link, only going backwards is. The old strictly-increasing rule
+        // rejected real same-day multi-table chains.
+        AuditHashChain.Manifest otherTable = manifest("2025-01-01", "Ledger_Audit", "1",
+                List.of(new AuditHashChain.AuditEvent("ev-4", H3)));
+        List<AuditHashChain.Manifest> manifests =
+                List.of(manifest20250101(), otherTable, manifest20250102());
+        assertThat(AuditHashChain.verifyChain(manifests, AuditHashChain.rootHash(manifests)))
+                .isEqualTo(AuditHashChain.Verification.VALID);
+    }
+
+    @Test
     void emptyChainIsValidAgainstEmptyRoot() {
         assertThat(AuditHashChain.verifyChain(List.of(), AuditHashChain.rootHash(List.of())))
                 .isEqualTo(AuditHashChain.Verification.VALID);

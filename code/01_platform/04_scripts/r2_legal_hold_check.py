@@ -23,6 +23,15 @@ Three checks per run (plan E5b.2):
   * hash_chain  — spot-check the sampled chain: parse canonical manifest text,
                    recompute links + root exactly as AuditHashChain.java, and
                    (when a `_root.txt` object exists) compare the expected root.
+                   The sample holds the newest manifests of *every* table under
+                   the prefix (P6-771) and is linked in (date, table) order.
+
+Multi-table prefixes: `<prefix><table>/<YYYY-MM-DD>.manifest` means one day can
+hold one manifest per table, so a chain's dates are NON-DECREASING, not strictly
+increasing — the old rule rejected real same-day multi-table chains (P6-654).
+The writer's within-day cross-table order is not recorded in any object, so
+`(date, table)` is an assumption this checker shares with the writer; it is
+noted in the evidence whenever a sample spans more than one table.
 
 Object contract (documented here so the future EOD/offload writer and this
 verifier agree): a manifest object is the canonical text of the Java Manifest
@@ -47,8 +56,6 @@ import hashlib
 import json
 import os
 import sys
-import urllib.request
-import urllib.error
 import xml.etree.ElementTree as ET
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -65,6 +72,9 @@ ENV_FILE_DEFAULT = audit_r2.ENV_FILE_DEFAULT
 MIN_RETENTION_DAYS = 365
 
 DEFAULT_AUDIT_PREFIX = "audit/"
+
+# Safety cap on listing pagination: 1000 pages x 1000 keys (P6-499).
+MAX_LIST_PAGES = 1000
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +108,7 @@ def parse_manifest(text):
     if not lines or lines[0] != "manifest-v1":
         raise ValueError("not a manifest-v1 canonical object")
     date_ = table = schema = None
+    count = None
     events = []
     for line in lines[1:]:
         if not line:
@@ -110,13 +121,21 @@ def parse_manifest(text):
         elif key == "schema":
             schema = value
         elif key == "count":
-            if int(value) != 0 and not lines:
-                pass  # unreachable guard; count validated below
+            try:
+                count = int(value)
+            except ValueError:
+                raise ValueError(f"manifest count is not an integer: {value!r}") from None
         elif key == "event":
             event_id, _, content_hash = value.partition(":")
             events.append((event_id, content_hash))
     if date_ is None or table is None or schema is None:
         raise ValueError("manifest missing date/table/schema")
+    if count is None:
+        raise ValueError("manifest missing count")
+    if count != len(events):
+        # Clearer than the round-trip mismatch below, which says "corrupt" but
+        # not which field disagrees (P6-770).
+        raise ValueError(f"manifest count={count} but {len(events)} event(s) are present")
     rendered = manifest_canonical(date_, table, schema, events)
     if rendered != text:
         raise ValueError("manifest canonical round-trip mismatch (corrupt object)")
@@ -147,7 +166,8 @@ def root_hash(manifest_texts):
 
 def verify_chain(manifest_texts, expected_root=None):
     """Port of AuditHashChain.verifyChain(): VALID / BROKEN_LINK /
-    DUPLICATE_EVENT / TAMPERED. Strictly increasing dates first, then no
+    DUPLICATE_EVENT / TAMPERED. Non-decreasing dates first (a day may hold
+    several tables' manifests, so equal dates are legitimate — P6-654), then no
     duplicate event id across the chain, then root equality. Java-exact: a null
     expected root is TAMPERED (unverifiable root = unverified integrity). Callers
     that have no published root yet must classify that case as UNVERIFIED-ROOT
@@ -156,7 +176,7 @@ def verify_chain(manifest_texts, expected_root=None):
     for text in manifest_texts:
         parsed.append(parse_manifest(text))
     for i in range(1, len(parsed)):
-        if parsed[i - 1][0] >= parsed[i][0]:
+        if parsed[i - 1][0] > parsed[i][0]:
             return "BROKEN_LINK"
     seen = set()
     for _, _, _, events in parsed:
@@ -259,22 +279,57 @@ def check_bucket_lock(cf_cfg, prefixes):
 # 3. Retrieval + hash-chain spot check (R2 via audit_r2.R2Client)
 # ---------------------------------------------------------------------------
 
+def _tags(root, name):
+    """Every element whose local name is `name`, at any depth and with or
+    without a namespace. R2 replies without the S3 namespace, and `<Key>` lives
+    inside `<Contents>` — iterating the root's children matched neither, so the
+    old code reported every populated prefix as empty (P6-499)."""
+    return [c for c in root.iter() if c.tag.rsplit("}", 1)[-1] == name]
+
+
 def list_objects(client, prefix):
-    """ListObjectsV2 via the already-signed request machinery. Returns keys."""
-    _, _, body = client._request(
-        "GET", client._bucket_resource(),
-        query={"list-type": "2", "prefix": prefix, "max-keys": "1000"},
-    )
-    root = ET.fromstring(body)
-    return [c.text for c in root if c.tag.endswith("Key")]
+    """ListObjectsV2 via the already-signed request machinery. Returns every key
+    under the prefix: the listing is paginated with the continuation token until
+    the response says it is complete (P6-499). A page that does not say whether
+    it is complete, or is truncated without a usable token, is an error rather
+    than a silent short listing — the same reasoning as r2-list.sh.
+    Tag matching is namespace-agnostic: R2 replies without an S3 namespace."""
+    keys = []
+    next_token = None
+    for page in range(MAX_LIST_PAGES):
+        query = {"list-type": "2", "prefix": prefix, "max-keys": "1000"}
+        if next_token:
+            query["continuation-token"] = next_token
+        _, _, body = client._request(
+            "GET", client._bucket_resource(), query=query,
+        )
+        root = ET.fromstring(body)
+        keys.extend(t.text for t in _tags(root, "Key") if t.text)
+        truncated_tag = _tags(root, "IsTruncated")
+        truncated = truncated_tag[0].text if truncated_tag else None
+        if truncated is None:
+            raise ValueError(
+                "listing response has no IsTruncated flag — completeness cannot "
+                "be established, refusing to continue with a partial listing"
+            )
+        if truncated.strip().lower() != "true":
+            return keys
+        tokens = _tags(root, "NextContinuationToken")
+        next_token = tokens[0].text if tokens else None
+        if not next_token:
+            raise ValueError(
+                f"listing is truncated after page {page + 1} but carries no "
+                "NextContinuationToken — refusing to continue with a partial listing"
+            )
+    raise ValueError(f"listing exceeded {MAX_LIST_PAGES} pages — refusing to continue")
 
 
 def _structural_state(manifest_texts):
-    """Dates increasing + no duplicate event id — the integrity half that does
-    not need a published root. Returns VALID/BROKEN_LINK/DUPLICATE_EVENT."""
+    """Dates non-decreasing + no duplicate event id — the integrity half that
+    does not need a published root. Returns VALID/BROKEN_LINK/DUPLICATE_EVENT."""
     parsed = [parse_manifest(t) for t in manifest_texts]
     for i in range(1, len(parsed)):
-        if parsed[i - 1][0] >= parsed[i][0]:
+        if parsed[i - 1][0] > parsed[i][0]:
             return "BROKEN_LINK"
     seen = set()
     for _, _, _, events in parsed:
@@ -285,25 +340,56 @@ def _structural_state(manifest_texts):
     return "VALID"
 
 
+def _key_date(key):
+    """`<prefix><table>/<YYYY-MM-DD>.manifest` -> the date part."""
+    return key.rsplit("/", 1)[-1][: -len(".manifest")]
+
+
+def _key_table(key):
+    """`<prefix><table>/<YYYY-MM-DD>.manifest` -> the table part."""
+    parts = [p for p in key.split("/") if p]
+    return parts[-2] if len(parts) >= 2 else ""
+
+
+def newest_per_table(keys, sample):
+    """Newest manifest keys, with at least one from every table.
+
+    Keys are `<table>/<YYYY-MM-DD>.manifest`, so plain lexicographic order is
+    dominated by the table name: with several audit tables under the prefix the
+    old `keys[-sample:]` sampled only the lexicographically-last table, and the
+    newest manifests of the others were never checked (P6-771). Every table
+    contributes its newest `sample // n_tables` keys (at least one), and the
+    result is ordered by (date, table) — the order the links are computed in."""
+    by_table = {}
+    for key in keys:
+        by_table.setdefault(_key_table(key), []).append(key)
+    per_table = max(1, sample // max(1, len(by_table)))
+    picked = []
+    for table_keys in by_table.values():
+        picked.extend(sorted(table_keys, key=_key_date)[-per_table:])
+    return sorted(picked, key=lambda k: (_key_date(k), _key_table(k)))
+
+
 def check_retrieval_and_chain(client, prefix, sample=8):
     """Get a sample of manifest objects, hash them, and spot-check the chain.
     Reads a published `_root.txt` when present and binds the sample root to it.
-    Returns: {"retrieved", "objects", "manifest_hashes", "chain_root",
-    "chain": VALID|BROKEN_LINK|DUPLICATE_EVENT|TAMPERED, "root_bound": bool}."""
+    Every sampled object is fetched exactly once: the bytes that were hashed and
+    the bytes that were linked must be the same read (P6-500).
+    Returns: {"retrieved", "objects", "manifest_hashes", "chain_root", "tables",
+    "chain": VALID|BROKEN_LINK|DUPLICATE_EVENT|TAMPERED, "root_bound": bool,
+    "sample_order_note": str}."""
     keys = [k for k in list_objects(client, prefix) if k.endswith(".manifest")]
-    sample_keys = keys[-sample:]  # newest last (keys sort lexicographically)
-    objects = []
-    for k in sample_keys:
-        body = client.get_object(k)
-        objects.append({"key": k, "sha256": _sha256_hex(body), "bytes": len(body)})
-    if len(sample_keys) < 1:
+    if not keys:
         raise ValueError(
             f"no .manifest objects under prefix {prefix!r} — nothing to spot-check "
             "(EOD/offload writer has not published manifests yet)"
         )
-    texts = []
-    for obj in sample_keys:
-        texts.append(str(client.get_object(obj), "utf-8"))
+    sample_keys = newest_per_table(keys, sample)
+    objects, texts = [], []
+    for key in sample_keys:
+        body = client.get_object(key)  # exactly one GET per object (P6-500)
+        objects.append({"key": key, "sha256": _sha256_hex(body), "bytes": len(body)})
+        texts.append(str(body, "utf-8"))
     root = root_hash(texts)
     published = None
     root_bound = False
@@ -326,7 +412,24 @@ def check_retrieval_and_chain(client, prefix, sample=8):
         "chain_root": root,
         "chain": chain,
         "root_bound": root_bound,
-    }, objects
+        "tables": sorted({_key_table(k) for k in sample_keys}),
+        "sample_order_note": _sample_order_note(sample_keys),
+    }
+
+
+def _sample_order_note(sample_keys):
+    """Empty for a single-table sample; otherwise states the ordering the links
+    assume, so a root mismatch on a multi-table sample is not read as pure
+    tampering when it may only be a different cross-table order (P6-771)."""
+    tables = sorted({_key_table(k) for k in sample_keys})
+    if len(tables) <= 1:
+        return ""
+    return (
+        f"sample spans {len(tables)} tables ({', '.join(tables)}) and was linked "
+        "in (date, table) order; the writer's within-day cross-table order is not "
+        "recorded in any object, so a root mismatch here can also mean a "
+        "different order rather than tampering"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -362,14 +465,12 @@ def build_evidence(cfg, checks, run_id, utc_now):
             "hash-chain spot-check covers only the sampled manifests + "
             "recomputed root; a published _root.txt binds it to the DEC review "
             "hash when the EOD/offload writer publishes it",
+            "the sample holds the newest manifests of every table under the "
+            "prefix and is linked in (date, table) order; the writer's "
+            "within-day cross-table order is not recorded in any object "
+            "(multi-table samples carry a sample_order_note saying so)",
         ],
     }
-
-
-def _env_or_file(env_file):
-    env = dict(os.environ)
-    env.update(audit_r2.load_env_file(env_file))
-    return env
 
 
 def main(argv=None):
@@ -407,7 +508,7 @@ def main(argv=None):
         parser.print_help()
         return 2
 
-    env = _env_or_file(args.env_file)
+    env = audit_r2.merge_env(args.env_file)  # real env wins over the file
     cf_cfg = audit_r2.cloudflare_lock_config(env)
     if not cf_cfg:
         print("blocked: CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID required "
@@ -422,7 +523,7 @@ def main(argv=None):
                     for p in args.audit_prefix.split(",")]
         checks["bucket_lock"] = check_bucket_lock(cf_cfg, prefixes)
         client = audit_r2.R2Client(cfg)
-        checks["retrieval"], objects = check_retrieval_and_chain(client, prefixes[0])
+        checks["retrieval"] = check_retrieval_and_chain(client, prefixes[0])
         chain_ok = checks["retrieval"]["chain"] in ("VALID", "UNVERIFIED-ROOT")
         bound_note = ("; root NOT yet bound to DEC review hash (no _root.txt object)"
                       if checks["retrieval"]["chain"] == "UNVERIFIED-ROOT" else "")
@@ -466,7 +567,14 @@ def _self_check(out_dir, run_id, utc_now):
     assert root_hash(texts) == "2c62d7caaf769cd4ed3ef2f09a3e9360814453c2436234c4e537aad47b19978a"
     tampered = m1.replace(H2, _sha256_hex("event-two-x"))
     assert verify_chain([tampered, m2], "2c62d7caaf769cd4ed3ef2f09a3e9360814453c2436234c4e537aad47b19978a") == "TAMPERED"
-    assert verify_chain([m2, m1]) == "BROKEN_LINK"  # dates not increasing
+    # A day may hold one manifest per table, so equal dates are a real chain
+    # (P6-654); only going backwards is broken.
+    same_day_other_table = manifest_canonical(
+        "2025-01-01", "Ledger_Audit", "1", [("ev-4", H3)])
+    same_day_texts = [m1, same_day_other_table, m2]
+    assert verify_chain(
+        same_day_texts, root_hash(same_day_texts)) == "VALID", "P6-654"
+    assert verify_chain([m2, m1]) == "BROKEN_LINK"  # dates decreased
     dup = manifest_canonical("2025-01-03", "Execution_Audit", "1", [("ev-1", H1)])
     assert verify_chain([m1, m2, dup]) == "DUPLICATE_EVENT"
 

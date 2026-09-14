@@ -4,15 +4,27 @@
 Run: python3 -m unittest discover -s code/01_platform/04_scripts/tests -v
 """
 import datetime
+import importlib.util
 import os
 import sys
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+SCRIPTS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+sys.path.insert(0, SCRIPTS)
 
-import audit_r2  # noqa: E402
+# AUDIT_R2_SOURCE lets the wave's red run point the suite at the pre-fix file
+# (unset in production, and unread unless the suite itself asks for it).
+_SOURCE = os.environ.get("AUDIT_R2_SOURCE")
+if _SOURCE:
+    _spec = importlib.util.spec_from_file_location("audit_r2", _SOURCE)
+    audit_r2 = importlib.util.module_from_spec(_spec)
+    sys.modules["audit_r2"] = audit_r2
+    _spec.loader.exec_module(audit_r2)
+else:
+    import audit_r2  # noqa: E402
 
 CONFIG = {
     "endpoint": "https://acct.r2.cloudflarestorage.com",
@@ -354,6 +366,166 @@ class ValidateTest(unittest.TestCase):
         evidence = audit_r2.validate(CONFIG, client, "run-2", UTC)
         self.assertEqual(evidence["result"], "PASS")
         self.assertEqual(evidence["checks"]["bucket_exists"], "PASS")
+
+
+class ProbeCleanupTest(unittest.TestCase):
+    """P6-307 — cleanup is a claim about what happened, not a constant."""
+
+    class _BadDeleteClient(FakeClient):
+        def __init__(self, code="AccessDenied", message="denied"):
+            super().__init__()
+            self.created = True
+            self.code, self.message = code, message
+            self.deleted = []
+
+        def delete_object(self, key, version_id=None):
+            self.deleted.append(key)
+            raise audit_r2.R2Error(self.code, self.message, 403)
+
+    def test_failed_delete_is_reported_not_attested_as_clean(self):
+        client = self._BadDeleteClient()
+        evidence = audit_r2.validate(CONFIG, client, "run-1", UTC)
+        self.assertEqual(evidence["checks"]["object_io_probe"], "PASS")
+        self.assertEqual(evidence["checks"]["probe_cleanup"], "FAIL")
+        self.assertIn("could NOT be deleted",
+                      evidence["checks"]["probe_cleanup_note"])
+        self.assertIn("run-1", client.deleted[0])  # the probe key, not another
+
+    def test_missing_probe_object_is_not_a_leftover(self):
+        client = self._BadDeleteClient(code="NoSuchKey", message="absent")
+        evidence = audit_r2.validate(CONFIG, client, "run-1", UTC)
+        self.assertEqual(evidence["checks"]["probe_cleanup"], "PASS")
+        self.assertNotIn("probe_cleanup_note", evidence["checks"])
+
+    def test_cleanup_is_attempted_even_when_the_probe_read_fails(self):
+        client = FakeClient()
+        client.created = True
+        client.get_object = lambda key, version_id=None: b"not-what-we-wrote"
+        evidence = audit_r2.validate(CONFIG, client, "run-1", UTC)
+        self.assertEqual(evidence["checks"]["object_io_probe"], "FAIL")
+        self.assertEqual(evidence["checks"]["probe_cleanup"], "PASS")
+        self.assertEqual(client.objects, {}, "the probe object must be deleted")
+
+    def test_put_failure_leaves_nothing_and_still_reports_clean(self):
+        client = FakeClient(io_fail=True)
+        client.created = True
+        evidence = audit_r2.validate(CONFIG, client, "run-1", UTC)
+        self.assertEqual(evidence["checks"]["object_io_probe"], "FAIL")
+        self.assertEqual(evidence["checks"]["probe_cleanup"], "PASS")
+
+
+class EnvOverlayTest(unittest.TestCase):
+    """P6-308 — the documented contract is real environment over the file."""
+
+    def _merge(self, file_text, environ):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, ".env")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(file_text)
+            with mock.patch.dict(os.environ, environ):
+                return audit_r2.merge_env(path)
+
+    def test_environment_wins_over_the_file(self):
+        env = self._merge("R2_BUCKET=from-file\n", {"R2_BUCKET": "from-env"})
+        self.assertEqual(env["R2_BUCKET"], "from-env")
+
+    def test_file_value_is_used_when_the_shell_has_none(self):
+        # clear=True: the developer's own shell must not be able to decide this
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, ".env")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("R2_BUCKET=from-file\n")
+            with mock.patch.dict(os.environ, {}, clear=True):
+                self.assertEqual(audit_r2.merge_env(path)["R2_BUCKET"], "from-file")
+
+    def test_cloudflare_vars_from_the_shell_reach_the_lock_config(self):
+        # These two are the ones the old REQUIRED_KEYS-only overlay dropped, so
+        # `provision --set-lock` refused with "missing credentials" while both
+        # were exported, and validate recorded bucket_lock=NOT_CHECKED.
+        env = self._merge("", {"CLOUDFLARE_API_TOKEN": "tok",
+                               "CLOUDFLARE_ACCOUNT_ID": "acct",
+                               "R2_BUCKET": "audit"})
+        self.assertEqual(
+            audit_r2.cloudflare_lock_config(env),
+            {"token": "tok", "account_id": "acct", "bucket": "audit"},
+        )
+
+
+class CloudflareTransportTest(unittest.TestCase):
+    """P6-709 — transport failures degrade into the evidence, not a traceback."""
+
+    CFG = {"token": "tok", "account_id": "acct", "bucket": "audit"}
+
+    def test_unreachable_api_is_an_unsupported_feature(self):
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.URLError("dns failure")):
+            with self.assertRaises(audit_r2.UnsupportedFeature):
+                audit_r2.cf_get_bucket_lock(self.CFG)
+            with self.assertRaises(audit_r2.UnsupportedFeature):
+                audit_r2.cf_put_bucket_lock(self.CFG, [])
+
+    def test_timeout_is_an_unsupported_feature(self):
+        with mock.patch("urllib.request.urlopen", side_effect=TimeoutError("idle")):
+            with self.assertRaises(audit_r2.UnsupportedFeature):
+                audit_r2.cf_get_bucket_lock(self.CFG)
+
+    def test_http_error_still_reports_the_api_code(self):
+        err = urllib.error.HTTPError("https://api.cloudflare.com/x", 403,
+                                     "Forbidden", {}, None)
+        err.read = lambda: b'{"errors":[{"code":10000}]}'
+        with mock.patch("urllib.request.urlopen", side_effect=err):
+            with self.assertRaises(audit_r2.UnsupportedFeature) as ctx:
+                audit_r2.cf_get_bucket_lock(self.CFG)
+        self.assertIn("403", str(ctx.exception))
+
+    def test_validate_records_a_transport_failure_as_error(self):
+        client = FakeClient()
+        client.created = True
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.URLError("dns failure")):
+            evidence = audit_r2.validate(CONFIG, client, "run-1", UTC, self.CFG)
+        self.assertEqual(evidence["checks"]["bucket_lock"], "ERROR")
+        self.assertIn("bucket-lock GET failed",
+                      evidence["checks"]["bucket_lock_note"])
+
+
+class SignedHeadersTest(unittest.TestCase):
+    """P6-710 — every header in the signature must reach the wire."""
+
+    class _Resp:
+        status = 200
+        headers = {}
+
+        def read(self):
+            return b""
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def test_request_signs_exactly_what_it_sends(self):
+        import inspect
+        params = inspect.signature(audit_r2.R2Client._request).parameters
+        self.assertNotIn("extra_headers", params)
+        seen = {}
+
+        def fake_urlopen(req, timeout=None):
+            seen.update({k.lower(): v for k, v in req.header_items()})
+            return self._Resp()
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            audit_r2.R2Client(CONFIG)._request("GET", "/audit")
+        signed = (seen["authorization"].split("SignedHeaders=")[1]
+                  .split(",")[0].split(";"))
+        self.assertIn("x-amz-date", signed)
+        for name in signed:
+            if name == "host":
+                # urllib adds Host at send time from the URL, which is built from
+                # the same endpoint netloc the signature used.
+                continue
+            self.assertIn(name, seen, f"{name} is signed but never sent")
 
 
 if __name__ == "__main__":

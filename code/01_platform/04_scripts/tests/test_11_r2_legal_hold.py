@@ -11,6 +11,7 @@ against the Java writer.
 """
 
 import hashlib
+import importlib.util
 import json
 import os
 import sys
@@ -18,7 +19,18 @@ import tempfile
 
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SCRIPTS)
-import r2_legal_hold_check as lh  # noqa: E402
+
+# R2_LEGAL_HOLD_SOURCE lets the wave's red run point the suite at the pre-fix
+# file (unset in production, unread unless the suite asks for it; the copy needs
+# audit_r2.py beside it because the module imports it from its own directory).
+_SOURCE = os.environ.get("R2_LEGAL_HOLD_SOURCE")
+if _SOURCE:
+    _spec = importlib.util.spec_from_file_location("r2_legal_hold_check", _SOURCE)
+    lh = importlib.util.module_from_spec(_spec)
+    sys.modules["r2_legal_hold_check"] = lh
+    _spec.loader.exec_module(lh)
+else:
+    import r2_legal_hold_check as lh  # noqa: E402
 
 # Java-parity constants (from the real JVM run; see module docstring + CHG-083).
 H1 = "cbf7f07b5859c901a6d66590bc32250d7600d29770ffbc5085f6a2e0b19f58de"
@@ -153,3 +165,137 @@ def test_cli_self_check_exit_zero_writes_evidence():
         with open(ev_path, encoding="utf-8") as fh:
             evidence = json.load(fh)
         assert evidence["result"] == "PASS"
+
+
+# --- Wave 11: pagination, single-fetch sampling, per-table sample, P6-654 -----
+
+def _xml_page(keys, truncated, token=None):
+    """A ListObjectsV2 page with no namespace — R2 replies without one."""
+    items = "".join(f"<Contents><Key>{k}</Key></Contents>" for k in keys)
+    tok = f"<NextContinuationToken>{token}</NextContinuationToken>" if token else ""
+    flag = {True: "true", False: "false", None: ""}[truncated]
+    body = items
+    if flag:
+        body += f"<IsTruncated>{flag}</IsTruncated>"
+    return f"<ListBucketResult>{body}{tok}</ListBucketResult>"
+
+
+def _expect_value_error(fn, needle):
+    try:
+        fn()
+    except ValueError as exc:
+        assert needle in str(exc), f"expected {needle!r} in {exc}"
+        return
+    raise AssertionError(f"expected ValueError containing {needle!r}")
+
+
+def _chain_order(keys):
+    """The order check_retrieval_and_chain links in: (date, table)."""
+    return sorted(keys, key=lambda k: (k.rsplit("/", 1)[-1][: -len(".manifest")],
+                                       k.split("/")[-2]))
+
+
+class StubClient:
+    """R2Client stand-in: replays listing pages, serves object bodies."""
+
+    def __init__(self, pages, bodies, root_body=None):
+        self.pages = list(pages)
+        self.bodies = dict(bodies)
+        self.root_body = root_body
+        self.queries = []
+        self.gets = []
+
+    def _bucket_resource(self):
+        return "/audit"
+
+    def _request(self, method, resource, query=None, body=b""):
+        self.queries.append(dict(query or {}))
+        return 200, {}, self.pages.pop(0).encode("utf-8")
+
+    def get_object(self, key, version_id=None):
+        self.gets.append(key)
+        if key.endswith("_root.txt"):
+            if self.root_body is None:
+                raise lh.audit_r2.R2Error("NoSuchKey", "absent", 404)
+            return self.root_body.encode("utf-8")
+        return self.bodies[key].encode("utf-8")
+
+
+def test_listing_paginates_until_it_is_complete():
+    m1, m2 = fixture_manifests()
+    keys = ["audit/Execution_Audit/2025-01-01.manifest",
+            "audit/Execution_Audit/2025-01-02.manifest"]
+    client = StubClient(
+        pages=[_xml_page([keys[0]], True, "TOK"),
+               _xml_page([keys[1]], False)],
+        bodies=dict(zip(keys, (m1, m2))),
+        root_body=ROOT,
+    )
+    result = lh.check_retrieval_and_chain(client, "audit/")
+    assert result["retrieved"] == 2, "the second page must not be dropped"
+    assert result["chain"] == "VALID"
+    assert not client.queries[0].get("continuation-token")
+    assert client.queries[1]["continuation-token"] == "TOK"
+
+
+def test_truncated_listing_without_a_token_is_refused():
+    client = StubClient(pages=[_xml_page(["a.manifest"], True)], bodies={})
+    _expect_value_error(lambda: lh.list_objects(client, "audit/"),
+                        "no NextContinuationToken")
+
+
+def test_listing_without_a_completion_flag_is_refused():
+    client = StubClient(pages=[_xml_page(["a.manifest"], None)], bodies={})
+    _expect_value_error(lambda: lh.list_objects(client, "audit/"),
+                        "no IsTruncated flag")
+
+
+def test_each_sampled_object_is_read_exactly_once():
+    m1, m2 = fixture_manifests()
+    keys = ["audit/Execution_Audit/2025-01-01.manifest",
+            "audit/Execution_Audit/2025-01-02.manifest"]
+    client = StubClient(pages=[_xml_page(keys, False)],
+                        bodies=dict(zip(keys, (m1, m2))), root_body=ROOT)
+    result = lh.check_retrieval_and_chain(client, "audit/")
+    manifests = [k for k in client.gets if k.endswith(".manifest")]
+    assert manifests == _chain_order(keys), "hashed bytes == linked bytes, one read"
+    assert result["chain"] == "VALID"
+    assert result["sample_order_note"] == ""  # single table
+
+
+def test_sample_covers_every_table_not_just_the_last_one_alphabetically():
+    # P6-771: keys sort by table name first, so `keys[-sample:]` only ever
+    # sampled Zeta and never checked Alpha's or Beta's newest manifests.
+    tables = {"Alpha": "2025-01-05", "Beta": "2024-12-31", "Zeta": "2025-01-06"}
+    bodies = {}
+    for table, date in tables.items():
+        bodies[f"audit/{table}/{date}.manifest"] = lh.manifest_canonical(
+            date, table, "1", [(f"ev-{table}", H1)])
+    client = StubClient(pages=[_xml_page(sorted(bodies), False)], bodies=bodies,
+                        root_body=lh.root_hash(
+                            [bodies[k] for k in _chain_order(bodies)]))
+    result = lh.check_retrieval_and_chain(client, "audit/", sample=3)
+    assert result["tables"] == ["Alpha", "Beta", "Zeta"]
+    assert result["chain"] == "VALID", "links follow (date, table) order"
+    assert "date, table" in result["sample_order_note"]
+
+
+def test_same_day_manifests_from_different_tables_are_a_valid_chain():
+    # P6-654: one manifest per table per day is the documented object contract,
+    # so equal dates are a real chain — only going backwards is broken.
+    m1, m2 = fixture_manifests()
+    same_day = lh.manifest_canonical("2025-01-01", "Ledger_Audit", "1", [("ev-4", H3)])
+    texts = [m1, same_day, m2]
+    assert lh.verify_chain(texts, lh.root_hash(texts)) == "VALID"
+    assert lh._structural_state(texts) == "VALID"
+    assert lh.verify_chain([m2, m1], lh.root_hash([m2, m1])) == "BROKEN_LINK"
+
+
+def test_manifest_count_mismatch_names_the_field():
+    # P6-770: the round-trip catches it, but "corrupt object" does not say which
+    # field disagrees, and `count` was never compared with the events at all.
+    m1, _ = fixture_manifests()
+    _expect_value_error(lambda: lh.parse_manifest(m1.replace("count=2", "count=3")),
+                        "count=3 but 2 event(s) are present")
+    _expect_value_error(lambda: lh.parse_manifest(m1.replace("count=2\n", "")),
+                        "manifest missing count")

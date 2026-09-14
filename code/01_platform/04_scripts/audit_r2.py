@@ -182,6 +182,15 @@ def load_env_file(path):
     return cfg
 
 
+def merge_env(env_file):
+    """The recorded config contract: a KEY=VALUE file, with real environment
+    variables taking precedence over it. Every key is overlaid, not just the
+    five R2 ones — `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` exported in
+    the shell used to be ignored, so bucket-lock state was recorded NOT_CHECKED
+    and `provision --set-lock` failed while both were set (P6-308)."""
+    return {**load_env_file(env_file), **os.environ}
+
+
 def config_from(env):
     missing = [k for k in REQUIRED_KEYS if not env.get(k)]
     if missing:
@@ -230,6 +239,11 @@ def cf_get_bucket_lock(cfg):
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")[:300]
         raise UnsupportedFeature(f"Cloudflare API bucket-lock GET failed: {exc.code} {body}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        # Transport failures (DNS/TLS/connect/idle timeout) are recorded as an
+        # unsupported-unverifiable check instead of aborting the whole run with
+        # a traceback (P6-709).
+        raise UnsupportedFeature(f"Cloudflare API bucket-lock GET failed: {exc}") from exc
 
 
 def cf_put_bucket_lock(cfg, rules):
@@ -248,6 +262,8 @@ def cf_put_bucket_lock(cfg, rules):
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", "replace")[:300]
         raise UnsupportedFeature(f"Cloudflare API bucket-lock PUT failed: {exc.code} {body}") from exc
+    except (urllib.error.URLError, TimeoutError) as exc:
+        raise UnsupportedFeature(f"Cloudflare API bucket-lock PUT failed: {exc}") from exc
 
 
 def indefinite_lock_rule(prefix):
@@ -266,7 +282,7 @@ class R2Client:
         self.config = config
         self.endpoint = config["endpoint"].rstrip("/")
 
-    def _request(self, method, resource, query=None, body=b"", extra_headers=None):
+    def _request(self, method, resource, query=None, body=b""):
         now = _dt.datetime.now(_dt.timezone.utc)
         amz_date = now.strftime("%Y%m%dT%H%M%SZ")
         date_stamp = now.strftime("%Y%m%d")
@@ -285,8 +301,6 @@ class R2Client:
             "x-amz-content-sha256": payload_hash,
             "x-amz-date": amz_date,
         }
-        if extra_headers:
-            headers.update({k.lower(): v for k, v in extra_headers.items()})
         block, signed = build_canonical_headers(headers)
 
         creq = canonical_request(method, canonical_uri, canonical_query, block,
@@ -551,10 +565,22 @@ def validate(config, client, run_id, utc_now, cf_lock=None):
     try:
         client.put_object(key, b"audit-probe")
         got = client.get_object(key)
-        client.delete_object(key)
         probe_ok = got == b"audit-probe"
     except R2Error:
         probe_ok = False
+    # Cleanup is always attempted, and the claim now reflects what happened: the
+    # old code hardcoded probe_cleanup=PASS right here, so a delete that failed
+    # (the object most likely to fail is also the one most likely to be left
+    # behind) was attested as a clean round-trip (P6-307). NoSuchKey is not a
+    # leftover — it means the probe object is not there.
+    cleanup_note = ""
+    try:
+        client.delete_object(key)
+        cleanup_ok = True
+    except R2Error as exc:
+        cleanup_ok = getattr(exc, "code", "") == "NoSuchKey"
+        if not cleanup_ok:
+            cleanup_note = f"probe object {key} could NOT be deleted: {exc}"
     checks["object_io_probe"] = "PASS" if probe_ok else "FAIL"
     checks["probe_detail"] = (
         "put -> get (content verified) -> delete round-trip on _audit_probe/; "
@@ -562,7 +588,9 @@ def validate(config, client, run_id, utc_now, cf_lock=None):
         "surface, so immutability is proven by bucket locks (Cloudflare API), "
         "not by S3 probing"
     )
-    checks["probe_cleanup"] = "PASS"
+    checks["probe_cleanup"] = "PASS" if cleanup_ok else "FAIL"
+    if cleanup_note:
+        checks["probe_cleanup_note"] = cleanup_note
 
     return build_evidence(config, checks, run_id, utc_now)
 
@@ -633,8 +661,7 @@ def main(argv=None):
                              "(default: audit/)")
     args = parser.parse_args(argv)
 
-    file_env = load_env_file(args.env_file)
-    env = {**file_env, **{k: v for k, v in os.environ.items() if k in REQUIRED_KEYS}}
+    env = merge_env(args.env_file)  # real environment variables win (P6-308)
     try:
         config = config_from(env)
     except ConfigError as exc:

@@ -189,9 +189,10 @@ public final class AuditHashChain {
     }
 
     /**
-     * Verifies the chain against the expected root hash: strictly increasing
-     * trading dates, no event id repeated across the chain, and the recomputed
-     * root must equal the expected root.
+     * Verifies the chain against the expected root hash: non-decreasing trading
+     * dates (a day may hold more than one table's manifest, so equal dates are
+     * legitimate; the chain must not go backwards), no event id repeated across
+     * the chain, and the recomputed root must equal the expected root.
      */
     public static Verification verifyChain(List<Manifest> manifests, String expectedRootHash) {
         if (manifests == null) {
@@ -204,8 +205,11 @@ public final class AuditHashChain {
         }
         for (int i = 1; i < manifests.size(); i++) {
             // Dates are validated ISO-8601 at construction, so lexicographic
-            // order here is chronological order (P6-654).
-            if (manifests.get(i - 1).tradingDate().compareTo(manifests.get(i).tradingDate()) >= 0) {
+            // order here is chronological order (P6-654). Equal dates are not
+            // a broken link: one manifest per table per day is the documented
+            // object contract, so same-day links are real chains, and the old
+            // strictly-increasing rule rejected them.
+            if (manifests.get(i - 1).tradingDate().compareTo(manifests.get(i).tradingDate()) > 0) {
                 return Verification.BROKEN_LINK;
             }
         }
