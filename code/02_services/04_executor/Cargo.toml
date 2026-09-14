@@ -28,7 +28,7 @@ nautilus-model = { git = "https://github.com/nautechsystems/nautilus_trader", re
 nautilus-event-store = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "74d57e7e055015a8d974a0cf047ac2e5139610b3" }
 nautilus-portfolio = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "74d57e7e055015a8d974a0cf047ac2e5139610b3" }
 nautilus-risk = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "74d57e7e055015a8d974a0cf047ac2e5139610b3" }
-nautilus-sandbox = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "74d57e7e055015a8d974a0cf047ac2e5139610b3" }
+nautilus-sandbox = { git = "https://github.com/nautechsystems/nautilus_trader", rev = "74d57e7e055015a8d974a0cf047ac2e5139610b3", optional = true }  # P3-173: paper-only
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }  # P3-174: `fs` dropped — no tokio::fs use in src/ or tests/ (rg-verified); `net`+`signal` are the live service's HTTP serve + shutdown
 anyhow = "1"
@@ -43,6 +43,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4"] }
 
+[features]
+# P3-173: the Nautilus sandbox (SimulatedExchange/OrderMatchingEngine) is paper-trading-only.
+# Optional so the live authority's dependency closure cannot pull sandbox code; the three
+# t9-paper bins declare `required-features = ["paper"]` and cannot be built without it.
+# Callers that exercise the paper harness must pass `--features paper`.
+paper = ["dep:nautilus-sandbox"]
+
 [dev-dependencies]
 
 [profile.release]
@@ -55,14 +62,17 @@ path = "src/main.rs"
 
 [[bin]]
 name = "t9-paper"
+required-features = ["paper"]
 path = "src/bin/t9_paper.rs"
 
 [[bin]]
 name = "t9-paper-25"
+required-features = ["paper"]
 path = "src/bin/t9_paper_25.rs"
 
 [[bin]]
 name = "t9-paper-25-full"
+required-features = ["paper"]
 path = "src/bin/t9_paper_25_full.rs"
 
 [workspace]

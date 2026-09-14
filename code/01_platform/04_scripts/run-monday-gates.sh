@@ -798,7 +798,9 @@ echo "=== [15/16] Nautilus (Rust executor) suite — offline against the pinned 
 # unified-plan.md): it proves Cargo.lock resolves from the cached registry. On a
 # cold ~/.cargo this FAILS loudly on purpose — run `cargo fetch` once, do not
 # turn it into a skip.
-if ! timeout "$CARGO_TIMEOUT_SEC" bash -c "cd '$EXECUTOR_DIR' && cargo test --offline" >"$NAUTILUS_LOG" 2>&1; then
+# --features paper: the t9-paper bins are `required-features = ["paper"]` (P3-173), so the
+# default build skips them; passing the feature keeps their compile + unit coverage in the gate.
+if ! timeout "$CARGO_TIMEOUT_SEC" bash -c "cd '$EXECUTOR_DIR' && cargo test --offline --features paper" >"$NAUTILUS_LOG" 2>&1; then
 	echo "FAIL: nautilus Rust suite — see $NAUTILUS_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
