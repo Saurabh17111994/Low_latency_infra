@@ -48,11 +48,22 @@ public record WorkItem(
                         "BLOCKED requires unblockCondition; got null/blank");
             }
         }
+        // blockedFrom is only meaningful for the transition INTO BLOCKED: re-blocking an
+        // already-BLOCKED item (canTransition allows it) must not record BLOCKED as its own
+        // predecessor.
         WorkItemState blockedFrom =
-                (next == WorkItemState.BLOCKED) ? this.state : null;
+                (next == WorkItemState.BLOCKED && this.state != WorkItemState.BLOCKED)
+                        ? this.state : null;
+        // Blocking metadata is meaningful only while BLOCKED. Clearing it on every other
+        // target state keeps the new item consistent with its state instead of relying on
+        // the caller to pass nulls when unblocking.
+        String effectiveMissingEvidence =
+                (next == WorkItemState.BLOCKED) ? missingEvidence : null;
+        String effectiveUnblockCondition =
+                (next == WorkItemState.BLOCKED) ? unblockCondition : null;
         return new WorkItem(
-                this.id, next, blockedFrom, owner, missingEvidence,
-                unblockCondition);
+                this.id, next, blockedFrom, owner, effectiveMissingEvidence,
+                effectiveUnblockCondition);
     }
 
     private static boolean isBlank(String s) {
