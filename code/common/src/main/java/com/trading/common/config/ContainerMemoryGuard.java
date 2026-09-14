@@ -1,7 +1,11 @@
 package com.trading.common.config;
 
+import java.io.IOException;
+import java.math.BigInteger;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
+import java.util.List;
 
 /**
  * JVM / container memory contract (09-production-swarm § JVM and memory
@@ -30,6 +34,13 @@ import java.nio.file.Path;
  */
 public final class ContainerMemoryGuard {
     private static final long NO_LIMIT = -1L;
+
+    /**
+     * At/above this, a cgroup byte value means "no limit": cgroup v1 reports unbounded as a
+     * huge near-{@code Long.MAX_VALUE} value (9223372036854771712 on a 4 GiB page-boundary
+     * kernel) rather than the v2 string {@code max} (P6-026).
+     */
+    private static final long UNBOUNDED_AT = 1L << 60;
 
     // ---- env-tunable percentages (P3, 2026-08-29) ----
     private static final String HEAP_PCT_KEY = "JVM_HEAP_PERCENT";
@@ -75,12 +86,37 @@ public final class ContainerMemoryGuard {
     private ContainerMemoryGuard() {
     }
 
+    /**
+     * {@code floor(value * pct / 100)}, computed without overflowing. The naive form
+     * ({@code value * pct}) overflowed to a negative number for large limits and inverted the
+     * startup decision (P6-268); dividing first keeps both partial products in range.
+     * Exact for {@code value >= 0} and {@code 0 <= pct <= 100}.
+     */
+    static long percentOf(long value, int pct) {
+        return Math.floorDiv(value, 100L) * pct + Math.floorDiv((value % 100L) * pct, 100L);
+    }
+
+    /**
+     * {@code floor(part * 100 / whole)}, computed without overflowing. {@code part * 100}
+     * overflowed for huge usage values, which made the 85% alert unreachable (P6-660). The
+     * common case allocates nothing; only values that would overflow use exact BigInteger math.
+     */
+    static long ratioPercent(long part, long whole) {
+        if (part <= Long.MAX_VALUE / 100L) {
+            return Math.floorDiv(part * 100L, whole);
+        }
+        BigInteger exact = BigInteger.valueOf(part)
+                .multiply(BigInteger.valueOf(100L))
+                .divide(BigInteger.valueOf(whole));
+        return exact.compareTo(BigInteger.valueOf(Long.MAX_VALUE)) > 0 ? Long.MAX_VALUE : exact.longValue();
+    }
+
     /** Maximum heap the 65/35 contract allows for a given container limit. */
     public static long maxHeapBudget(long containerLimitBytes) {
         if (containerLimitBytes <= 0) {
             throw new IllegalArgumentException("containerLimitBytes must be positive, got " + containerLimitBytes);
         }
-        return Math.floorDiv(containerLimitBytes * heapPercent(), 100L);
+        return percentOf(containerLimitBytes, heapPercent());
     }
 
     /** Non-heap reserve = container limit − allowed max heap. */
@@ -96,7 +132,44 @@ public final class ContainerMemoryGuard {
         if (usedBytes < 0) {
             throw new IllegalArgumentException("usedBytes must be non-negative, got " + usedBytes);
         }
-        return Math.floorDiv(usedBytes * 100L, containerLimitBytes);
+        return ratioPercent(usedBytes, containerLimitBytes);
+    }
+
+    /**
+     * The heap and reserve shares are complements by definition (65/35 by default). A pair that
+     * does not sum to 100 silently contradicts the contract it claims to enforce — e.g. 90/35
+     * promises a bigger heap <em>and</em> a reserve that is no longer there (P6-267).
+     *
+     * @throws IllegalStateException when {@code JVM_HEAP_PERCENT + NON_HEAP_RESERVE_PERCENT != 100}
+     */
+    static void assertPercentagesComplementary() {
+        int heap = heapPercent();
+        int reserve = reservePercent();
+        if (heap + reserve != 100) {
+            throw new IllegalStateException("Container memory percentages must sum to 100: "
+                    + HEAP_PCT_KEY + "=" + heap + " + " + RESERVE_PCT_KEY + "=" + reserve
+                    + " = " + (heap + reserve) + " — the non-heap reserve is the complement of the"
+                    + " heap share (default 65/35; docs/08_implementation/09-production-swarm.md"
+                    + " § JVM and memory configuration).");
+        }
+    }
+
+    /**
+     * The contract-violation message. The reserve reported is the one actually left
+     * ({@code limit − currentMaxHeap}); the old text printed {@code nonHeapReserve(limit)}, the
+     * <em>allowed minimum</em>, so a violation always looked roughly compliant (P6-661).
+     */
+    static String contractViolationMessage(long limit, long currentMaxHeap, int heapPercent, int reservePercent) {
+        long heapBudget = percentOf(limit, heapPercent);
+        long reserve = limit - currentMaxHeap;
+        long reserveMin = percentOf(limit, reservePercent);
+        return "Container memory contract violated: container limit=" + limit
+                + " bytes, JVM max heap=" + currentMaxHeap + " bytes exceeds the "
+                + heapPercent + "% share (" + heapBudget + "), leaving non-heap reserve=" + reserve
+                + " below the required " + reservePercent + "% (" + reserveMin + "). Set an explicit"
+                + " container memory limit consistent with the 65/35 rule"
+                + " (docs/08_implementation/09-production-swarm.md § JVM and memory configuration)."
+                + " Refusing to start.";
     }
 
     /**
@@ -126,19 +199,12 @@ public final class ContainerMemoryGuard {
         if (limit <= 0) {
             return; // no bounded budget — nothing to enforce (dev/test JVM)
         }
+        assertPercentagesComplementary();
         long heapBudget = maxHeapBudget(limit);
         long currentMaxHeap = Runtime.getRuntime().maxMemory();
         if (currentMaxHeap > heapBudget) {
-            long reserve = nonHeapReserve(limit);
-            long reserveMin = Math.floorDiv(limit * reservePercent(), 100L);
             throw new IllegalStateException(
-                "Container memory contract violated: container limit=" + limit
-                    + " bytes, JVM max heap=" + currentMaxHeap + " bytes exceeds the "
-                    + heapPercent()
-                    + "% share (" + heapBudget + "), leaving non-heap reserve=" + reserve
-                    + " below the required " + reservePercent()
-                    + "% (" + reserveMin + "). Set an explicit container memory limit consistent with the 65/35 rule"
-                    + " (docs/08_implementation/09-production-swarm.md § JVM and memory configuration). Refusing to start.");
+                    contractViolationMessage(limit, currentMaxHeap, heapPercent(), reservePercent()));
         }
     }
 
@@ -150,27 +216,30 @@ public final class ContainerMemoryGuard {
         // cgroup v2: /sys/fs/cgroup/memory.max
         String v2 = readFirstLine("/sys/fs/cgroup/memory.max");
         if (v2 != null) {
-            if (v2.equals("max")) {
-                return NO_LIMIT; // unbounded
-            }
-            try {
-                long v = Long.parseLong(v2.trim());
-                return v > 0 ? v : NO_LIMIT;
-            } catch (NumberFormatException e) {
-                return NO_LIMIT;
-            }
+            return limitFromRaw(v2);
         }
         // cgroup v1: /sys/fs/cgroup/memory/memory.limit_in_bytes
         String v1 = readFirstLine("/sys/fs/cgroup/memory/memory.limit_in_bytes");
-        if (v1 != null) {
-            try {
-                long v = Long.parseLong(v1.trim());
-                return v > 0 ? v : NO_LIMIT;
-            } catch (NumberFormatException e) {
-                return NO_LIMIT;
-            }
+        return v1 == null ? NO_LIMIT : limitFromRaw(v1);
+    }
+
+    /**
+     * A cgroup memory-limit reading as bytes, or {@code NO_LIMIT} when the file is absent, the
+     * cgroup says {@code max}, or the value is the cgroup v1 unbounded sentinel. A present but
+     * non-numeric value is an environment fault and is raised rather than reported as
+     * "unbounded" (P6-026, P6-269).
+     */
+    static long limitFromRaw(String raw) {
+        if (raw == null || raw.equals("max")) {
+            return NO_LIMIT;
         }
-        return NO_LIMIT;
+        long v;
+        try {
+            v = Long.parseLong(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException("cgroup memory limit is not a number: '" + raw + "'", e);
+        }
+        return (v <= 0 || v >= UNBOUNDED_AT) ? NO_LIMIT : v;
     }
 
     /**
@@ -185,35 +254,42 @@ public final class ContainerMemoryGuard {
     public static long readContainerMemoryUsedBytes() {
         String v2 = readFirstLine("/sys/fs/cgroup/memory.current");
         if (v2 != null) {
-            try {
-                long v = Long.parseLong(v2.trim());
-                return v >= 0 ? v : -1L;
-            } catch (NumberFormatException e) {
-                return -1L;
-            }
+            return usedFromRaw(v2);
         }
         String v1 = readFirstLine("/sys/fs/cgroup/memory/memory.usage_in_bytes");
-        if (v1 != null) {
-            try {
-                long v = Long.parseLong(v1.trim());
-                return v >= 0 ? v : -1L;
-            } catch (NumberFormatException e) {
-                return -1L;
-            }
-        }
-        return -1L;
+        return v1 == null ? -1L : usedFromRaw(v1);
     }
 
-    private static String readFirstLine(String path) {
+    /**
+     * A cgroup memory-usage reading as bytes, or {@code -1} when the file is absent. A present
+     * but non-numeric value is an environment fault and is raised (P6-269).
+     */
+    static long usedFromRaw(String raw) {
+        if (raw == null) {
+            return -1L;
+        }
         try {
-            Path p = Path.of(path);
-            if (!Files.exists(p)) {
-                return null;
-            }
-            java.util.List<String> lines = Files.readAllLines(p);
+            long v = Long.parseLong(raw.trim());
+            return v >= 0 ? v : -1L;
+        } catch (NumberFormatException e) {
+            throw new IllegalStateException("cgroup memory usage is not a number: '" + raw + "'", e);
+        }
+    }
+
+    /**
+     * First line of a cgroup file, or {@code null} when the file does not exist (an unbounded
+     * host). A file that exists but cannot be read is an environment fault and is raised, never
+     * silently reported as "unbounded" — that turned the guard into a no-op exactly when the
+     * environment was unexpected (P6-269).
+     */
+    static String readFirstLine(String path) {
+        try {
+            List<String> lines = Files.readAllLines(Path.of(path));
             return lines.isEmpty() ? null : lines.get(0).trim();
-        } catch (Exception e) {
-            return null;
+        } catch (NoSuchFileException e) {
+            return null; // no such cgroup file
+        } catch (IOException e) {
+            throw new IllegalStateException("Unable to read cgroup file " + path + ": " + e, e);
         }
     }
 }
