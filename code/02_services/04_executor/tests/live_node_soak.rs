@@ -192,6 +192,12 @@ fn live_node_runtime_sustained_soak() {
 
     // Leak legs (post-run, same process).
     let (fds_before, rss_before_kb) = result;
+    // P3-222: the baselines are taken before the runtime (and node) exist, so the delta used to
+    // charge one-time runtime init — epoll/eventfd fds, allocator arenas — to the soak on the
+    // "after" side only, biasing both resource legs. Dropping the runtime first makes each side
+    // measure the same thing: what the node and the soak left behind. (The node itself is already
+    // dropped with the `block_on` future; only the runtime outlives it.)
+    drop(rt);
     if let (Some(before), Some(after)) = (fds_before, probe_fd_count()) {
         assert!(
             after <= before + 8,
