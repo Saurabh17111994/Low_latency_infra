@@ -43,6 +43,7 @@ print(f"{p(.5):.1f} {p(.95):.1f} {p99} {max(v):.1f}")
 PY
 }
 
+LOAD_FAILED=0
 rung=0
 IFS=',' read -r -a RATES <<< "$RATES_IN"
 for RATE in "${RATES[@]}"; do
@@ -88,7 +89,18 @@ for RATE in "${RATES[@]}"; do
     fi
     sleep 1
   done
-  [ -n "$LOAD_PID" ] && wait "$LOAD_PID" 2>/dev/null || true
+  # P3-028: a crashed load generator used to be swallowed by `|| true`, so the rung still
+  # reported latency/throughput as if the requested rate had been applied. Record the
+  # status, name the rung, and fail the run at the end — an acceptance run must not "pass"
+  # on no load.
+  if [ -n "$LOAD_PID" ]; then
+    if wait "$LOAD_PID"; then
+      :
+    else
+      echo "  FAIL: load generator exited $? for rung $rung (${RATE} ticks/s)" >&2
+      LOAD_FAILED=1
+    fi
+  fi
   if [ -n "$CPU_FILE" ]; then
     wait "$CPU_PID" 2>/dev/null || true
     CPU=$(cat "$CPU_FILE" 2>/dev/null || echo NA)
@@ -100,4 +112,8 @@ for RATE in "${RATES[@]}"; do
       "$rung" "$RATE" "$DURATION" "$(wc -l < "$LAT")" "$P50" "$P95" "$P99" "$PMAX" "$CPU" >> "$OUT"
   rm -f "$LAT"
 done
+if [ "$LOAD_FAILED" -ne 0 ]; then
+  echo "scale ladder FAILED: at least one rung's load generator exited non-zero (report: $OUT)" >&2
+  exit 1
+fi
 echo "scale ladder report: $OUT"
