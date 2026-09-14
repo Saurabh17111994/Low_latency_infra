@@ -42,24 +42,18 @@ DOCKER_DIR="$CODE_DIR/01_platform/01_docker"
 BRIDGE_DIR="$CODE_DIR/02_services/01_ingestion/go-bridge"
 INGESTION_DIR="$CODE_DIR/02_services/01_ingestion"
 JAR="$INGESTION_DIR/target/ingestion.jar"
-MANIFEST="/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv"
+# P6-513: derive the manifest from the repo instead of an absolute home path;
+# an explicit MANIFEST= in the environment still wins.
+MANIFEST="${MANIFEST:-$PROJECT_ROOT/../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv}"
 O2_BASE="http://localhost:5080"
-INGESTION_CONTAINER="01_docker-ingestion-1"
+# The ingestion container is discovered after `compose up` (P6-513): docker
+# inspect/exec take the id, and an id survives a renamed compose project.
+INGESTION_CONTAINER="${INGESTION_CONTAINER:-}"
 
-STAMP="$(date +%Y%m%d-%H%M%S)"
-OUT="${OUT_DIR:-$PROJECT_ROOT/logs/soak/full-suite-$STAMP}"
-mkdir -p "$OUT/marathon/journal" "$OUT/soak/journal" "$OUT/bin" "$OUT/reconnect" "$OUT/gates"
-RUN_LOG="$OUT/run.log"
-SUMMARY="$OUT/SUMMARY.txt"
-: > "$RUN_LOG"
+# Test seam: `RUN_FULL_SUITE_LIB=true . run-full-suite.sh` defines the helpers and
+# returns without running a stage, so the helper tests can call them directly.
+LIB_MODE="${RUN_FULL_SUITE_LIB:-false}"
 
-# Never echo credentials: O2 auth header value read from .env, kept in a var.
-O2_AUTH="$(awk -F= '/^O2_AUTH_BASIC=/{print $2; exit}' "$DOCKER_DIR/.env" 2>/dev/null || true)"
-
-# Everything the operator needs lands in run.log AND the console.
-exec > >(tee -a "$RUN_LOG") 2>&1
-
-echo "=== full-suite start $STAMP (out: $OUT)"
 
 # ── Stage bookkeeping ─────────────────────────────────────────────────────────
 declare -A STAGE
@@ -68,6 +62,8 @@ stage_pass() { STAGE["$1"]="PASS"; echo "=== Stage $1: PASS"; }
 stage_fail() { STAGE["$1"]="FAIL"; echo "=== Stage $1: FAIL — $2"; }
 
 write_summary() {
+	# P6-514: a `set -e` abort never sets a verdict; report FAIL, not RUNNING.
+	[ "$RESULT" = RUNNING ] && RESULT="FAIL (aborted before a verdict)"
 	{
 		echo "FULL-SUITE SUMMARY — $STAMP — result: $RESULT"
 		echo "evidence: $OUT"
@@ -78,32 +74,123 @@ write_summary() {
 		done
 		echo "---"
 		echo "gates evidence: ${GATES_EVIDENCE:-none}"
-		echo "marathon: acks=${MARATHON_ACKS:-0} max_epoch=${MARATHON_MAXEPOCH:-0} journal=$OUT/marathon/journal/ingestion.json monitor=$OUT/marathon/monitor.log"
+		echo "marathon: acks=${MARATHON_ACKS:-0} distinct_epochs=${MARATHON_EPOCHS:-0} max_epoch=${MARATHON_MAXEPOCH:-0} journal=$OUT/marathon/journal/ingestion.json monitor=$OUT/marathon/monitor.log"
 		echo "container: health=${CONTAINER_HEALTH:-n/a} reconnect_cycles=${RECONNECT_CYCLES:-0}"
 		echo "soak: append_count_start=${APPEND0:-n/a} append_count_end=${APPEND1:-n/a} recoveries=${RECOVERIES:-0}/3 snapshots=$OUT/soak/snapshots.tsv monitor=$OUT/soak/monitor.log"
 	} > "$SUMMARY"
 }
-trap 'write_summary' EXIT
-
+# P6-178: an abort must not leave the broker, monitor, java or container behind
+# (a leaked container also trips the double-run guard on the next run). P6-183:
+# the container is stopped here too, so the Stage-4 skip path stops it as well.
+CONTAINER_STARTED=0
+SOAK_KEEP_CONTAINER="${SOAK_KEEP_CONTAINER:-false}"
+cleanup() {
+	local rc=$? pid
+	for pid in "${MONITOR_PID:-}" "${JAVA_PID:-}" "${BOOTSTRAP_JAVA_PID:-}" "${FAKETOOL_PID:-}" "${STAGE3_FAKETOOL_PID:-}"; do
+		[ -n "$pid" ] || continue
+		kill "$pid" 2>/dev/null || true
+	done
+	if [ "${CONTAINER_STARTED:-0}" = 1 ] && [ "$SOAK_KEEP_CONTAINER" != true ]; then
+		(cd "$DOCKER_DIR" && SOAK_JOURNAL_DIR="${SOAK_JOURNAL:-}" \
+			docker compose --env-file .env --env-file secrets.env -f docker-compose.yml -f docker-compose.soak.yml stop ingestion) >/dev/null 2>&1 \
+			|| echo "!! cleanup: could not stop the ingestion container — stop it manually"
+	fi
+	rm -f "${O2_AUTH_FILE:-}"
+	write_summary
+	return $rc
+}
+trap cleanup EXIT
 # ── Helpers ───────────────────────────────────────────────────────────────────
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-port_open() { # $1=host $2=port — listener check via ss (bash /dev/tcp is unreliable here)
-	ss -ltn 2>/dev/null | grep -qE "[::0-9.*]:$2[[:space:]]"
+
+# O2 auth is read without the `awk -F=` truncation that dropped base64 padding
+# (P6-177) and is never placed on a command line (P6-179 — o2_query reads it
+# from a 0600 curl config file with -K).
+read_o2_auth() { # $1 = env file
+	local v
+	v="$(awk '/^O2_AUTH_BASIC=/{sub(/^[^=]*=/,""); gsub(/\r/,""); gsub(/^["'"'"']|["'"'"']$/,""); print; exit}' "$1" 2>/dev/null || true)"
+	printf '%s' "$v"
 }
 
-o2_query() { # $1 = SQL → latest value column (or UNAVAILABLE)
-	local sql="$1" payload val
-	payload="$(python3 - "$sql" <<'PY'
+port_open() { # $1=host $2=port — listener check via ss; 1 also means "cannot tell"
+	local host="${1:-localhost}" port="${2:?port_open: port required}"
+	command -v ss >/dev/null 2>&1 || { echo "port_open: ss not installed — cannot check $host:$port" >&2; return 1; }
+	case "$host" in
+		localhost|127.0.0.1|0.0.0.0|\[::1\]|::1) ;;
+		*) echo "port_open: refusing non-local host '$host' — ss only sees local sockets" >&2; return 1 ;;
+	esac
+	ss -ltn 2>/dev/null | grep -qE ":${port}[[:space:]]"
+}
+
+# Journal statistics from the log4j2 JSON layout, one object per line:
+# {"...","level":"INFO","loggerName":"...","message":"bridge lifecycle event=subscription_ack slot=hft-0 state=ACTIVE epoch=1 ..."}
+# A marker counts only when it is that field's value, so a line that merely
+# mentions subscription_ack in prose cannot pass for a cycle (P6-180); a file
+# that is absent or has no match reports 0 rather than nothing (P6-516); a torn
+# tail line is counted and skipped instead of hiding the rest of the file; and
+# distinct/monotonic epochs are reported, so a gap cannot hide behind maxepoch
+# (P6-180: max_epoch >= 100 does not prove 100 cycles).
+journal_stats() { # $1 = journal path — prints key=value lines; missing file = zeros
+	python3 - "${1:-/nonexistent}" <<'PYJ'
+import json, re, sys
+
+ACK = re.compile(r"\bevent=subscription_ack\b")
+EPOCH = re.compile(r"\bepoch=(\d+)\b")
+acks = errors = warns = torn = 0
+epochs = []
+try:
+    fh = open(sys.argv[1], encoding="utf-8", errors="replace")
+except OSError:
+    fh = None
+if fh is not None:
+    with fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                row = json.loads(raw)
+            except ValueError:
+                torn += 1          # torn tail line or a non-JSON banner
+                continue
+            if not isinstance(row, dict):
+                continue
+            if row.get("level") == "ERROR":
+                errors += 1
+            elif row.get("level") == "WARN":
+                warns += 1
+            message = row.get("message")
+            if not isinstance(message, str):
+                continue
+            if ACK.search(message):
+                acks += 1
+            found = EPOCH.search(message)
+            if found:
+                epochs.append(int(found.group(1)))
+print(f"acks={acks}")
+print(f"errors={errors}")
+print(f"warns={warns}")
+print(f"torn={torn}")
+print(f"maxepoch={max(epochs) if epochs else 0}")
+print(f"distinct_epochs={len(set(epochs))}")
+print(f"monotonic={1 if all(b >= a for a, b in zip(epochs, epochs[1:])) else 0}")
+PYJ
+}
+o2_query() { # $1 = SQL, $2 = window in microseconds (default 1h) -> latest value or UNAVAILABLE
+	local sql="$1" window_us="${2:-3600000000}" payload val
+	payload="$(python3 - "$sql" "$window_us" <<'PYQ'
 import json, sys, time
 now = int(time.time() * 1_000_000)
 print(json.dumps({
     "query": {"sql": sys.argv[1],
-              "start_time": now - 3_600_000_000,  # 1h window
+              "start_time": now - int(sys.argv[2]),
               "end_time": now,
               "size": 5}}))
-PY
+PYQ
 )"
-	val="$(curl -s -m 15 -H "Authorization: Basic $O2_AUTH" -H 'Content-Type: application/json' \
+	# P6-179: curl reads the Authorization header from a 0600 config file (-K), so
+	# the credential never appears in this or any child process's argv.
+	val="$(curl -s -m 15 -K "$O2_AUTH_FILE" -H 'Content-Type: application/json' \
 		-X POST "$O2_BASE/api/default/_search?type=metrics" -d "$payload" 2>/dev/null \
 		| python3 -c 'import json,sys
 try:
@@ -119,19 +206,88 @@ except Exception:
 	echo "${val:-UNAVAILABLE}"
 }
 
-journal_acks() { # $1 = journal path
-	awk '/subscription_ack/{n++} END{print n+0}' "$1" 2>/dev/null || echo 0
+journal_field() { # $1 = journal, $2 = field
+	journal_stats "$1" 2>/dev/null | awk -F= -v k="$2" '$1 == k { print $2; exit }'
 }
-journal_maxepoch() { # $1 = journal path
-	awk -F'epoch=' '{n=split($2,a,"[ ,\"]"); if (a[1]+0>m) m=a[1]+0} END{print m+0}' "$1" 2>/dev/null || echo 0
-}
-journal_errors() { # $1 = journal path, $2 = level (ERROR|WARN)
-	grep -c "\"level\":\"$2\"" "$1" 2>/dev/null || true
+_num() { local v; v="$(journal_field "$1" "$2")"; echo "${v:-0}"; }
+journal_acks() { _num "$1" acks; }
+journal_errors() { _num "$1" errors; }
+journal_warns() { _num "$1" warns; }
+journal_maxepoch() { _num "$1" maxepoch; }
+journal_distinct_epochs() { _num "$1" distinct_epochs; }
+
+wait_until() { # $1 = epoch second — 5s steps so a deadline is not overshot by 20s (P6-774)
+	local target="$1" late
+	while [ "$(date +%s)" -lt "$target" ]; do sleep 5; done
+	late=$(( $(date +%s) - target ))
+	[ "$late" -gt 60 ] && echo "!! wait_until: ${late}s late for deadline $target (clock jump?)" >&2
+	return 0
 }
 
-wait_until() { # $1 = epoch second
-	while [ "$(date +%s)" -lt "$1" ]; do sleep 20; done
+# Start the fake broker and refuse to continue if it never binds (P6-181); the
+# same check is what makes a soak-time broker restart safe (P6-184).
+FAKETOOL_WAIT_SECS="${FAKETOOL_WAIT_SECS:-30}"
+faketool_up() { # $1 = log file, remaining args = faketool args
+	local log="$1"
+	shift
+	"$OUT/bin/faketool" -port 8899 -tick-interval-ms 500 "$@" >> "$log" 2>&1 &
+	FAKETOOL_PID=$!
+	for _ in $(seq 1 "$FAKETOOL_WAIT_SECS"); do		port_open 127.0.0.1 8899 && return 0
+		kill -0 "$FAKETOOL_PID" 2>/dev/null || break
+		sleep 1
+	done
+	echo "!! faketool did not bind 127.0.0.1:8899 within ${FAKETOOL_WAIT_SECS}s — see $log" >&2
+	kill "$FAKETOOL_PID" 2>/dev/null || true
+	FAKETOOL_PID=""
+	return 1
 }
+
+# P6-185: the soak verdict reads every check as evidence, not as a file that
+# merely exists. `> monitor.log` creates the file even if the monitor died at
+# once, one snapshot line is not eleven, an ERROR-spamming soak is not a pass,
+# and a counter that reset (or came back NO_HITS) is not an advance (P6-521).
+SOAK_ERROR_BUDGET="${SOAK_ERROR_BUDGET:-20}"   # 3 forced feed interruptions; raise deliberately
+soak_verdict() { # reads the soak globals, fills SOAK_FAIL
+	local rows errors
+	SOAK_FAIL=""
+	[ "${RECOVERIES:-0}" -ge 3 ] || SOAK_FAIL="recoveries=${RECOVERIES:-0}/3"
+	[ -s "$OUT/soak/monitor.log" ] || SOAK_FAIL="${SOAK_FAIL:-} monitor missing or empty"
+	rows="$(wc -l < "$OUT/soak/snapshots.tsv" 2>/dev/null || true)"
+	[ "${rows:-0}" -ge 11 ] || SOAK_FAIL="${SOAK_FAIL:-} snapshots incomplete (${rows:-0}/11: start + i1-i3 + h1-h7)"
+	case "${APPEND0:-x}${APPEND1:-x}" in
+		*[!0-9]*) SOAK_FAIL="${SOAK_FAIL:-} append counter not numeric (start=$APPEND0 end=$APPEND1)" ;;
+		*) [ "$APPEND1" -gt "$APPEND0" ] || SOAK_FAIL="${SOAK_FAIL:-} append counter did not advance (start=$APPEND0 end=$APPEND1)" ;;
+	esac
+	errors="$(journal_errors "$SOAK_JOURNAL/ingestion.json")"
+	[ "${errors:-0}" -le "$SOAK_ERROR_BUDGET" ] || SOAK_FAIL="${SOAK_FAIL:-} journal ERRORs=${errors} over budget ${SOAK_ERROR_BUDGET}"
+	return 0
+}
+
+# ── Source-only mode (tests) ──
+# Everything above this line is a definition; no stage has run yet.
+if [ "$LIB_MODE" = true ]; then
+	trap - EXIT   # a sourcing test process has no run to clean up
+	return 0 2>/dev/null || exit 0
+fi
+
+# ── Run setup ──
+STAMP="$(date +%Y%m%d-%H%M%S)"
+OUT="${OUT_DIR:-$PROJECT_ROOT/logs/soak/full-suite-$STAMP}"
+mkdir -p "$OUT/marathon/journal" "$OUT/soak/journal" "$OUT/bin" "$OUT/reconnect" "$OUT/gates"
+RUN_LOG="$OUT/run.log"
+SUMMARY="$OUT/SUMMARY.txt"
+: > "$RUN_LOG"
+
+# Never echo credentials: O2 auth header value read from .env, kept in a var.
+O2_AUTH="$(read_o2_auth "$DOCKER_DIR/.env")"
+# P6-179: the header value goes into a 0600 curl config file, never onto a
+# command line (ps, /proc/<pid>/cmdline, audit logs). The EXIT trap removes it.
+O2_AUTH_FILE="$(umask 077; mktemp)"
+printf 'header = "Authorization: Basic %s"\n' "$O2_AUTH" > "$O2_AUTH_FILE"
+# Everything the operator needs lands in run.log AND the console.
+exec > >(tee -a "$RUN_LOG") 2>&1
+
+echo "=== full-suite start $STAMP (out: $OUT)"
 
 # ── Stage 0: preflight ────────────────────────────────────────────────────────
 echo "=== Stage 0: preflight"
@@ -142,11 +298,16 @@ command -v mvn >/dev/null || { echo "!! mvn missing"; FAILED=1; }
 command -v shellcheck >/dev/null || { echo "!! shellcheck missing (gates static stage)"; FAILED=1; }
 command -v python3 >/dev/null || { echo "!! python3 missing"; FAILED=1; }
 command -v curl >/dev/null || { echo "!! curl missing"; FAILED=1; }
+command -v ss >/dev/null || { echo "!! ss missing (listener checks)"; FAILED=1; }
 java -version 2>&1 | grep -q 'version "17' || { echo "!! java 17 missing"; FAILED=1; }
 command -v javac >/dev/null || { echo "!! javac missing (dropper compile)"; FAILED=1; }
 port_open localhost 9123 || { echo "!! Fluss :9123 not reachable"; FAILED=1; }
 [ -n "$O2_AUTH" ] || { echo "!! O2_AUTH_BASIC missing from .env"; FAILED=1; }
 [ -f "$MANIFEST" ] || { echo "!! manifest not found: $MANIFEST"; FAILED=1; }
+RUNNING_CONTAINER="$( (cd "$DOCKER_DIR" && docker compose --env-file .env --env-file secrets.env -f docker-compose.yml ps -q ingestion) 2>/dev/null | head -1 || true)"
+if [ -n "$RUNNING_CONTAINER" ]; then
+	echo "!! an ingestion container is already running ($RUNNING_CONTAINER) — stop it first (P6-517: no double-run)"; FAILED=1
+fi
 if pgrep -f 'com.trading.ingestion.IngestionService' >/dev/null 2>&1; then
 	echo "!! an IngestionService is already running (native or containerized) — refusing to double-run; stop it first (docker compose stop ingestion for the container)"; FAILED=1
 fi
@@ -248,21 +409,38 @@ DROPPER="java -cp $OUT/bin:$JAR FlussDropTables"
 OWNED_EXPECT="raw_table_1:20 suspected_discontinuities:11 ingestion_quarantine:10"
 
 echo "-- probe before:"
-$DROPPER --probe $OWNED_EXPECT 2>/dev/null
-echo "-- drop mismatched:"
-$DROPPER $OWNED_EXPECT 2>/dev/null
+PROBE_BEFORE="$($DROPPER --probe $OWNED_EXPECT)" \
+	|| { stage_fail 0 "dropper probe failed (Fluss unreachable or rejected the DDL read?) — see run.log"; RESULT="FAIL"; exit 1; }
+printf '%s\n' "$PROBE_BEFORE"
+if printf '%s\n' "$PROBE_BEFORE" | grep -q 'would-drop'; then
+	# P6-015: this branch DROPS tables irreversibly (a broker-side table has no
+	# backup here). It needs an explicit operator opt-in, a local (dev) bootstrap
+	# server, and visible stderr — no `2>/dev/null`, so a connect or auth failure
+	# fails the stage instead of looking like a clean run.
+	if [ "${ALLOW_DESTRUCTIVE_DROP:-false}" != true ]; then
+		stage_fail 0 "refusing to drop owned tables — set ALLOW_DESTRUCTIVE_DROP=true (dev cluster only)"; RESULT="FAIL"; exit 1
+	fi
+	case "${FLUSS_BOOTSTRAP:-localhost:9123}" in
+		localhost*|127.0.0.1*|0.0.0.0*|\[::1\]*) ;;
+		*) stage_fail 0 "refusing destructive drop against non-local FLUSS_BOOTSTRAP=${FLUSS_BOOTSTRAP}"; RESULT="FAIL"; exit 1 ;;
+	esac
+	echo "-- drop mismatched:"
+	$DROPPER $OWNED_EXPECT \
+		|| { stage_fail 0 "dropper failed while dropping mismatched tables"; RESULT="FAIL"; exit 1; }
+else
+	echo "-- no mismatched tables — nothing to drop"
+fi
 
 # Short bootstrap run (ALLOW_RUNTIME_DDL=true) to recreate owned tables.
 BOOTSTRAP_JOURNAL="$OUT/bootstrap/journal"
 mkdir -p "$BOOTSTRAP_JOURNAL"
-"$OUT/bin/faketool" -port 8899 -disconnect-every 0 -tick-interval-ms 500 \
-	> "$OUT/bootstrap/faketool.log" 2>&1 &
-FAKETOOL_PID=$!
-for _ in $(seq 1 30); do port_open 127.0.0.1 8899 && break; sleep 1; done
+	faketool_up "$OUT/bootstrap/faketool.log" -disconnect-every 0 \
+		|| { stage_fail 0 "faketool did not bind :8899"; RESULT="FAIL"; exit 1; }
 
 export ARROW_HFT_URL="ws://127.0.0.1:8899"
 export ARROW_BRIDGE_BIN="$BRIDGE_DIR/arrow-bridge"
-export ARROW_APP_ID="soak" ARROW_APP_SECRET="soaksecret" ARROW_TOKEN="soaktoken"
+	# P6-179: the broker credential triple is passed to the java child only
+	# (prefix assignment), not exported to every child of this script.
 unset ARROW_USER_ID ARROW_PASSWORD ARROW_TOTP_KEY 2>/dev/null || true
 export FLUSS_BOOTSTRAP="localhost:9123" FLUSS_BOOTSTRAP_SERVERS="localhost:9123"
 export OTEL_COLLECTOR_HOST="localhost:4318"
@@ -277,8 +455,8 @@ export CLOCK_CHECK_REQUIRED="false"
 export NTP_SERVER="ntp.ubuntu.com,time.google.com,in.pool.ntp.org"
 export ALLOW_RUNTIME_DDL="true"
 
-java --add-opens=java.base/java.nio=ALL-UNNAMED -Dlog.dir="$BOOTSTRAP_JOURNAL" \
-	-cp "$JAR" com.trading.ingestion.IngestionService > "$OUT/bootstrap/java.out" 2>&1 &
+ARROW_APP_ID="soak" ARROW_APP_SECRET="soaksecret" ARROW_TOKEN="soaktoken" \
+java --add-opens=java.base/java.nio=ALL-UNNAMED -Dlog.dir="$BOOTSTRAP_JOURNAL" \	-cp "$JAR" com.trading.ingestion.IngestionService > "$OUT/bootstrap/java.out" 2>&1 &
 BOOTSTRAP_JAVA_PID=$!
 
 BOOTSTRAP_OK=0
@@ -302,8 +480,7 @@ wait "$FAKETOOL_PID" 2>/dev/null || true
 unset ALLOW_RUNTIME_DDL
 
 echo "-- probe after (expect ok for all three):"
-$DROPPER --probe $OWNED_EXPECT 2>/dev/null | tee "$OUT/bootstrap/reconcile-after.txt"
-RECONCILE_OK="$($DROPPER --probe $OWNED_EXPECT 2>/dev/null | grep -c ': ok ' || true)"
+RECONCILE_OK="$($DROPPER --probe $OWNED_EXPECT | grep -c ': ok ' || true)"
 if [ "$BOOTSTRAP_OK" != 1 ] || [ "$RECONCILE_OK" != 3 ]; then
 	stage_fail 0 "schema reconcile incomplete: bootstrap_ok=$BOOTSTRAP_OK reconcile_ok=$RECONCILE_OK"
 	RESULT="FAIL"
@@ -320,7 +497,10 @@ else
 	RESULT="FAIL"
 	exit 1
 fi
-GATES_EVIDENCE="$(ls -td "$PROJECT_ROOT"/logs/soak/monday-gates-* 2>/dev/null | head -1 || echo none)"
+GATES_EVIDENCE="$(ls -td "$PROJECT_ROOT"/logs/soak/monday-gates-* 2>/dev/null | head -1 || true)"
+# P6-519: `| head -1` exits 0 even when the glob matched nothing, so `|| echo none`
+# never fired and the summary printed an empty evidence path.
+[ -n "$GATES_EVIDENCE" ] || GATES_EVIDENCE=none
 echo "gates evidence: $GATES_EVIDENCE"
 
 # ── Stage 2: 100-cycle reconnect marathon (native, real backoff) ─────────────
@@ -345,14 +525,12 @@ export CLOCK_CHECK_REQUIRED="false"
 export NTP_SERVER="ntp.ubuntu.com,time.google.com,in.pool.ntp.org"
 
 echo "-- starting fake broker (disconnect-every=1, tick 500ms)"
-"$OUT/bin/faketool" -port 8899 -disconnect-every 1 -tick-interval-ms 500 \
-	> "$OUT/marathon/faketool.log" 2>&1 &
-FAKETOOL_PID=$!
-for _ in $(seq 1 30); do port_open 127.0.0.1 8899 && break; sleep 1; done
+	faketool_up "$OUT/marathon/faketool.log" -disconnect-every 1 \
+		|| { stage_fail 2 "faketool did not bind :8899"; RESULT="FAIL"; exit 1; }
 
 echo "-- starting native IngestionService (pid will be logged)"
-java --add-opens=java.base/java.nio=ALL-UNNAMED -Dlog.dir="$MARATHON_JOURNAL" \
-	-cp "$JAR" com.trading.ingestion.IngestionService > "$OUT/marathon/java.out" 2>&1 &
+ARROW_APP_ID="soak" ARROW_APP_SECRET="soaksecret" ARROW_TOKEN="soaktoken" \
+java --add-opens=java.base/java.nio=ALL-UNNAMED -Dlog.dir="$MARATHON_JOURNAL" \	-cp "$JAR" com.trading.ingestion.IngestionService > "$OUT/marathon/java.out" 2>&1 &
 JAVA_PID=$!
 echo "java pid=$JAVA_PID faketool pid=$FAKETOOL_PID"
 
@@ -371,7 +549,10 @@ done
 
 MARATHON_ACKS="$(journal_acks "$MARATHON_JOURNAL/ingestion.json")"
 MARATHON_MAXEPOCH="$(journal_maxepoch "$MARATHON_JOURNAL/ingestion.json")"
-echo "marathon end: acks=$MARATHON_ACKS max_epoch=$MARATHON_MAXEPOCH (target ≥100)"
+# P6-180: max_epoch >= 100 does not prove 100 cycles (one jump to 100 would pass, a
+# monotonic run with a gap would not). Gate on the number of distinct epochs.
+MARATHON_EPOCHS="$(journal_distinct_epochs "$MARATHON_JOURNAL/ingestion.json")"
+echo "marathon end: acks=$MARATHON_ACKS max_epoch=$MARATHON_MAXEPOCH distinct_epochs=$MARATHON_EPOCHS (target ≥100)"
 
 kill -TERM "$JAVA_PID" 2>/dev/null || true
 for _ in $(seq 1 30); do kill -0 "$JAVA_PID" 2>/dev/null || break; sleep 2; done
@@ -382,8 +563,8 @@ wait "$JAVA_PID" 2>/dev/null || true
 wait "$MONITOR_PID" 2>/dev/null || true
 wait "$FAKETOOL_PID" 2>/dev/null || true
 
-if [ "$MARATHON_OK" != 1 ] || [ "${MARATHON_MAXEPOCH:-0}" -lt 100 ]; then
-	stage_fail 2 "marathon incomplete: acks=$MARATHON_ACKS max_epoch=${MARATHON_MAXEPOCH:-0}"
+if [ "$MARATHON_OK" != 1 ] || [ "${MARATHON_EPOCHS:-0}" -lt 100 ]; then
+	stage_fail 2 "marathon incomplete: acks=$MARATHON_ACKS distinct_epochs=${MARATHON_EPOCHS:-0} max_epoch=${MARATHON_MAXEPOCH:-0}"
 	RESULT="FAIL"
 	exit 1
 fi
@@ -402,14 +583,22 @@ SOAK_JOURNAL="$OUT/soak/journal"
 # subscriptionComplete + fresh ticks). Start a no-drop soak-mode broker here;
 # Stage 4 restarts its own, so this one is stopped after the reconnect cycle.
 echo "-- starting fake broker in soak mode (no drops, tick 500ms)"
-"$OUT/bin/faketool" -port 8899 -disconnect-every 0 -tick-interval-ms 500 \
-	> "$OUT/reconnect/faketool.log" 2>&1 &
-STAGE3_FAKETOOL_PID=$!
-for _ in $(seq 1 30); do port_open 127.0.0.1 8899 && break; sleep 1; done
+	faketool_up "$OUT/reconnect/faketool.log" -disconnect-every 0 \
+		|| { stage_fail 3 "faketool did not bind :8899"; RESULT="FAIL"; exit 1; }
+	STAGE3_FAKETOOL_PID="$FAKETOOL_PID"
 echo "-- compose up ingestion (soak override)"
+# P6-182: --force-recreate, so a container leaked by an earlier run cannot
+# serve a stale image or stale env to this stage.
 (cd "$DOCKER_DIR" && SOAK_JOURNAL_DIR="$SOAK_JOURNAL" \
-	docker compose --env-file .env --env-file secrets.env -f docker-compose.yml -f docker-compose.soak.yml up -d ingestion) \
-	|| { stage_fail 3 "compose up failed"; RESULT="FAIL"; exit 1; }
+		docker compose --env-file .env --env-file secrets.env -f docker-compose.yml -f docker-compose.soak.yml up -d --force-recreate ingestion) \
+		|| { stage_fail 3 "compose up failed"; RESULT="FAIL"; exit 1; }
+	CONTAINER_STARTED=1
+	# P6-513: discover the container instead of assuming the project name.
+	if [ -z "$INGESTION_CONTAINER" ]; then
+		INGESTION_CONTAINER="$( (cd "$DOCKER_DIR" && docker compose --env-file .env --env-file secrets.env -f docker-compose.yml -f docker-compose.soak.yml ps -q ingestion) | head -1)"
+	fi
+	[ -n "$INGESTION_CONTAINER" ] \
+		|| { stage_fail 3 "could not discover the ingestion container (compose ps -q)"; RESULT="FAIL"; exit 1; }
 
 CONTAINER_HEALTH="none"
 for _ in $(seq 1 60); do
@@ -422,10 +611,10 @@ echo "container health: $CONTAINER_HEALTH"
 # First subscription ack in the container journal (readiness + feed OK).
 CONT_ACKS=0
 for _ in $(seq 1 60); do
-	[ -f "$SOAK_JOURNAL/ingestion.json" ] && {
+	if [ -f "$SOAK_JOURNAL/ingestion.json" ]; then
 		CONT_ACKS="$(journal_acks "$SOAK_JOURNAL/ingestion.json")"
 		[ "${CONT_ACKS:-0}" -ge 1 ] && break
-	}
+	fi
 	sleep 2
 done
 echo "container journal acks: ${CONT_ACKS:-0}"
@@ -463,10 +652,8 @@ fi
 # ── Stage 4: 7h soak (in the container) ───────────────────────────────────────
 echo "=== Stage 4: 7h soak in container — $(now)"
 echo "-- restarting fake broker in soak mode (no drops, tick 500ms)"
-"$OUT/bin/faketool" -port 8899 -disconnect-every 0 -tick-interval-ms 500 \
-	> "$OUT/soak/faketool.log" 2>&1 &
-FAKETOOL_PID=$!
-for _ in $(seq 1 30); do port_open 127.0.0.1 8899 && break; sleep 1; done
+	faketool_up "$OUT/soak/faketool.log" -disconnect-every 0 \
+		|| { stage_fail 4 "faketool did not bind :8899 before the soak"; RESULT="FAIL"; exit 1; }
 
 # Confirm the container feed resumes before starting the soak clock.
 SOAK_ACK_BASE="$(journal_acks "$SOAK_JOURNAL/ingestion.json")"
@@ -516,9 +703,8 @@ interrupt() { # $1 = label, $2 = minute
 	kill -9 "$FAKETOOL_PID" 2>/dev/null || true
 	wait "$FAKETOOL_PID" 2>/dev/null || true
 	sleep 10 # feed fully down
-	"$OUT/bin/faketool" -port 8899 -disconnect-every 0 -tick-interval-ms 500 \
-		>> "$OUT/soak/faketool.log" 2>&1 &
-	FAKETOOL_PID=$!
+	faketool_up "$OUT/soak/faketool.log" -disconnect-every 0 \
+		|| { stage_fail 4 "broker did not come back after interruption [$1]"; RESULT="FAIL"; exit 1; }
 	echo "--- broker restarted pid=$FAKETOOL_PID ($(now))"
 	verify_recovery "$1"
 	snapshot "$1"
@@ -545,7 +731,8 @@ wait_until $((SOAK_START + 25200))
 snapshot h7
 wait "$MONITOR_PID" || true
 
-APPEND1="$(o2_query 'select value from "append_latency_ms_count" order by _timestamp desc limit 1')"
+	# 8h window: the 1h default cannot see a counter written 7h ago (P6-521).
+	APPEND1="$(o2_query 'select value from "append_latency_ms_count" order by _timestamp desc limit 1' 28800000000)"
 echo "soak end $(now): append_latency_ms_count=$APPEND1 (start=$APPEND0)"
 echo "recoveries: $RECOVERIES/3"
 
@@ -574,11 +761,7 @@ wait "$MONITOR_PID" 2>/dev/null || true
 	|| echo "!! compose stop ingestion failed (check manually)"
 
 # ── Stage verdicts ─────────────────────────────────────────────────────────────
-SOAK_FAIL=""
-[ "$RECOVERIES" -ge 3 ] || SOAK_FAIL="recoveries=$RECOVERIES/3"
-[ -f "$OUT/soak/monitor.log" ] || SOAK_FAIL="${SOAK_FAIL:-} monitor missing"
-[ -f "$OUT/soak/snapshots.tsv" ] || SOAK_FAIL="${SOAK_FAIL:-} snapshots missing"
-[ "$APPEND1" != "UNAVAILABLE" ] && [ "$APPEND1" != "$APPEND0" ] || SOAK_FAIL="${SOAK_FAIL:-} append counter did not advance"
+soak_verdict
 if [ -n "$SOAK_FAIL" ]; then
 	stage_fail 4 "soak evidence incomplete: $SOAK_FAIL"
 	RESULT="FAIL"
@@ -588,4 +771,7 @@ else
 fi
 
 echo "=== full-suite finished: $RESULT ($(now))"
+# P6-016: FAIL must reach the caller — a soak that writes FAIL into SUMMARY.txt
+# and exits 0 turns every regression green in CI.
+[ "$RESULT" = PASS ] || exit 1
 exit 0
