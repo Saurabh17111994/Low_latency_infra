@@ -26,14 +26,20 @@ LOAD_CMD="${LOAD_CMD:-}"
 OUT="scale_report_$(date +%Y%m%d_%H%M%S).tsv"
 printf 'rung\trate_per_s\tduration_s\tsamples\tp50_ms\tp95_ms\tp99_ms\tp_max_ms\tcpu_pct\n' > "$OUT"
 
-percentiles() {  # stdin: one latency-ms value per line -> "p50 p95 p99 max"
-python3 - <<'PY'
+percentiles() {  # $1: file with one latency-ms value per line -> "p50 p95 p99 max"
+# The program arrives on stdin (heredoc), so the data must arrive by argv —
+# with the data piped in, the heredoc replaces it and every percentile is NA.
+python3 - "$1" <<'PY'
 import sys
-v=sorted(float(l) for l in sys.stdin if l.strip())
+with open(sys.argv[1]) as fh:
+    v = sorted(float(l) for l in fh if l.strip())
 if not v:
     print("NA NA NA NA"); sys.exit(0)
-p=lambda q: v[min(len(v)-1,int(q*len(v)))]
-print(f"{p(.5):.1f} {p(.95):.1f} {p(.99):.1f} {max(v):.1f}")
+p = lambda q: v[min(len(v)-1, int(q*len(v)))]
+# With n samples the p99 estimate is the nearest-rank max until n >= 100; saying
+# so is honest, printing a "p99" that is really the max is not.
+p99 = f"{p(.99):.1f}" if len(v) >= 100 else "NA"
+print(f"{p(.5):.1f} {p(.95):.1f} {p99} {max(v):.1f}")
 PY
 }
 
@@ -51,7 +57,8 @@ for RATE in "${RATES[@]}"; do
   LAT="/tmp/scale_lat_$$"; : > "$LAT"
   for ((i=0;i<DURATION;i++)); do
     if [ -n "$METRICS_URL" ]; then
-      curl -so /dev/null -w '%{time_total}\n' "$METRICS_URL" 2>/dev/null >> "$LAT" || true
+      curl --max-time 2 -so /dev/null -w '%{time_total}\n' "$METRICS_URL" 2>/dev/null \
+        | awk '{printf "%.3f\n", $1*1000}' >> "$LAT" || true
     fi
     sleep 1
   done
@@ -64,7 +71,7 @@ for RATE in "${RATES[@]}"; do
     CPU=$(docker stats --no-stream --format '{{.CPUPerc}}' $CONTAINERS 2>/dev/null \
           | awk '{s+=$1; n++} END{if(n)printf "%.1f", s/n; else print "NA"}')
   fi
-  read P50 P95 P99 PMAX < <(percentiles < "$LAT")
+  read P50 P95 P99 PMAX < <(percentiles "$LAT")
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$rung" "$RATE" "$DURATION" "$(wc -l < "$LAT")" "$P50" "$P95" "$P99" "$PMAX" "$CPU" >> "$OUT"
   rm -f "$LAT"
