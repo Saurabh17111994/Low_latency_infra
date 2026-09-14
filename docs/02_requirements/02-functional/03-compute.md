@@ -13,7 +13,7 @@ The Signal Flink job consumes `raw_table_1`, performs bounded best-effort dedupl
 - The deployed `DEDUP_TTL_MS` SHALL be exactly `60000` (1 minute). Deployment SHALL reject any other value.
 - `CANDLE_WINDOW_MS` SHALL be exactly `15000` (15 seconds). Deployment SHALL reject any other value.
 - `CHECKPOINT_INTERVAL_MS` SHALL be exactly `10000` (10 seconds). `CHECKPOINT_TIMEOUT_MS` SHALL be exactly `30000` (30 seconds). `MAX_CONCURRENT_CHECKPOINTS` SHALL be exactly `1`. Deployment SHALL reject any other values.
-- `MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT` SHALL be exactly `1`. Do not forward another active candidate for that instrument.
+- `MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT` SHALL be exactly `1`. Do not forward another active candidate for that instrument. Structural, not a tunable: `Signal_Candidates_current` (DDL 23) is keyed by `instrument_token`, so supersession overwrites the single current row in place — the ranking-era `PlatformConfig` constant was removed 2026-09-14 (P6-665, after CHG-005 removed its consumer).
 - A late event received after final window emission SHALL be discarded and measured in MVP. Correction rows, backfill, or update of a prior candle SHALL NOT be emitted.
 - Empty windows and windows containing only invalid or late-discarded events SHALL produce no candle row.
 - Candle finalization SHALL use the tested watermark + allowed-lateness boundary. The implementation SHALL NOT claim exactly-once correctness for cross-table visibility, broker calls, or independent Fluss sinks without a version-specific test.

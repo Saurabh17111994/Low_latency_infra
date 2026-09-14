@@ -333,7 +333,7 @@ Actual chaining is performance-tested; logical boundaries remain explicit for me
 | `STRATEGY_VERSION` | Included in candidates/decisions |
 | ~~`RANKING_VERSION`~~ | ~~Included in ranking results/decisions~~ — **REMOVED 2026-08-15 (CHG-005)** |
 | ~~`RESERVATION_POLICY_VERSION`~~ | ~~Included in audit and restored state~~ — **REMOVED 2026-08-15 (CHG-005)** |
-| `MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT` | Fixed at `1`; do not forward another active candidate for that instrument |
+| `MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT` | Fixed at `1`; do not forward another active candidate for that instrument. Structural: one current row per instrument by the `Signal_Candidates_current` KV primary key (`instrument_token`, DDL 23); the `PlatformConfig` constant was removed 2026-09-14 (P6-665) |
 | `CHECKPOINT_RESTART_STRATEGY` | Fixed-delay: `RESTART_MAX_ATTEMPTS=3`, `RESTART_DELAY_MS=30000`, failure action = fail job. Deployment SHALL reject unbounded retry. **Production-pinned 2026-08-15:** in `DEPLOYMENT_ENV=production` both keys must be present and exactly equal the `PlatformConfig` pins (`RESTART_MAX_ATTEMPTS=3`, `RESTART_DELAY_MS=30000`) or startup fails — a deployment cannot silently raise the retry budget; dev keeps them as overridable tuning defaults (failure-injection integration tests use low attempts). |
 
 Deployment SHALL reject unbounded or too-short `DEDUP_TTL`, missing production checkpoint storage, unbounded checkpoint restart retry, and any deviation from pinned values.

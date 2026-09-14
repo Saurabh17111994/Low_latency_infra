@@ -46,8 +46,8 @@ The biggest gaps are not "missing env vars" but **fragmentation** (config split 
 | M28 | `DURATION_S=300`, `INTERVAL_S=30` | `loadtest-preview.sh:33-34` | Test duration | CLI-arg-driven, fine |
 | M29 | `-port 8899` faketool | `loadtest-preview.sh:119` | Mock feed port | Hardcoded port |
 | M30 | `TASK_MANAGER_MEMORY_MANAGED_SIZE=2g`, `TASK_MANAGER_NETWORK_MEMORY_MAX=256m`, `STATE_BACKEND=rocksdb` | `docker-compose.yml` | Flink TM memory | env-overridable in compose (`${...:-2g}`) — good pattern, defaults in compose |
-| M31 | `JVM_HEAP_PERCENT_OF_CONTAINER_LIMIT=65`, `NON_HEAP_MEMORY_RESERVE_PERCENT=35`, `CONTAINER_MEMORY_ALERT_PERCENT=85` | `PlatformConfig.java:94-96` | JVM memory contract | Pinned constants; the 65/35 split is a real tuning knob |
-| M32 | `MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT=1` | `PlatformConfig.java:99` | Signal candidates | Strategy parameter, should be configurable per-strategy |
+| M31 | `JVM_HEAP_PERCENT_OF_CONTAINER_LIMIT=65`, `NON_HEAP_MEMORY_RESERVE_PERCENT=35`, `CONTAINER_MEMORY_ALERT_PERCENT=85` | `PlatformConfig.java:105-107` | JVM memory contract | Pinned constants; the 65/35 split is a real tuning knob |
+| M32 | ~~`MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT=1`~~ | ~~`PlatformConfig.java:99`~~ → `code/01_platform/02_sql/ddl/23_signal_candidates_current.sql:73` | Signal candidates | Constant removed 2026-09-14 (P6-665): nothing read it after CHG-005 removed the ranking/reservation consumer. The bound is structural — `PRIMARY KEY (instrument_token)` on the `Signal_Candidates_current` KV projection |
 | M33 | `EARLY_SIGNAL_RULE`, `FORMING_RULE_ID`, `SIGNAL_STRATEGY_ID/VERSION/RULE_ID` | `SignalJobConfig.java:168-186` | Signal strategy identity | env-overridable, but these are the *strategy contract* — they should be a single strategy config block, not 6 separate env keys |
 
 ### 1B. Should probably be configurable (needs judgment)

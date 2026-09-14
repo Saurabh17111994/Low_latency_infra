@@ -80,7 +80,7 @@ The following configuration values SHALL be enforced at startup. Deployment SHAL
 | `CHECKPOINT_INTERVAL_MS` | `10000` | Signal and Babysitter jobs use this interval |
 | `CHECKPOINT_TIMEOUT_MS` | `30000` | Signal and Babysitter jobs use this timeout |
 | `MAX_CONCURRENT_CHECKPOINTS` | `1` | Signal and Babysitter jobs use this value |
-| `MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT` | `1` | Do not forward another active candidate for that instrument |
+| `MAX_ACTIVE_CANDIDATES_PER_INSTRUMENT` | `1` | Do not forward another active candidate for that instrument. Enforced structurally, not by a constant: the `Signal_Candidates_current` KV projection holds one current row per instrument (primary key `instrument_token`, DDL 23). The ranking-era `PlatformConfig` constant was removed 2026-09-14 (P6-665; its consumer went with CHG-005) |
 | `INGESTION_MAX_BATCH_RECORDS` | `1` (validated 1..1000) | Append each tick immediately |
 | `INGESTION_MAX_BATCH_WAIT_MS` | `0` (validated 0..100) | Do not wait for a batch |
 | `MAX_PENDING_APPEND_RECORDS` | `50000` (validated 100..1000000) | Stop accepting at limit |
