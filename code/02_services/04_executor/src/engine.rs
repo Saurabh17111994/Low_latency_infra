@@ -33,12 +33,15 @@ use nautilus_model::{
     enums::{AccountType, OmsType},
     identifiers::{AccountId, ClientId, TraderId, Venue},
 };
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 use crate::bridge::{FakeBridge, HttpBridgeClient};
 use crate::config::ServiceConfig;
 use crate::execution::BridgeExecutionClient;
-use crate::gate::ExecState;
+use crate::gate::{ExecState, Gate};
 
 /// Marker configuration accepted by the bridge exec client.
 #[derive(Debug, Default, Clone)]
@@ -70,6 +73,23 @@ impl BootGate {
     }
 }
 
+/// Read-only, cloneable handle on the bridge client's live safety gate (P3-025).
+///
+/// [`BootGate`] records the state at construction and never changes again, so re-reading it
+/// cannot show that the gate *stayed* `HALTED`. The gate itself lives inside the boxed client;
+/// the factory creates it, hands it to the client through `with_gate`, and keeps this handle so
+/// the runtime (and a soak test) can read the live state at any point during a run.
+#[derive(Debug, Clone, Default)]
+pub struct GateWatch(Rc<RefCell<Gate>>);
+
+impl GateWatch {
+    /// The gate's state right now.
+    #[must_use]
+    pub fn state(&self) -> ExecState {
+        self.0.borrow().state()
+    }
+}
+
 /// Execution-client factory registered into the [`LiveNodeBuilder`].
 ///
 /// The construction path is verified offline (see [`EngineFactory::verify_construction_path`])
@@ -82,6 +102,8 @@ pub struct BridgeExecutionClientFactory {
     selection: BridgeSelection,
     /// Receives the boot gate of the client `create` constructs (P3-439).
     boot_gate: BootGate,
+    /// The safety gate handed to every client this factory creates (P3-025).
+    gate: GateWatch,
 }
 
 impl BridgeExecutionClientFactory {
@@ -89,6 +111,7 @@ impl BridgeExecutionClientFactory {
         Self {
             selection,
             boot_gate: BootGate::default(),
+            gate: GateWatch(Rc::new(RefCell::new(Gate::new()))),
         }
     }
 }
@@ -186,7 +209,8 @@ impl ExecutionClientFactory for BridgeExecutionClientFactory {
                 ref auth_token,
             } => Box::new(HttpBridgeClient::new(base_url.clone(), auth_token.clone())),
         };
-        let client = BridgeExecutionClient::new(core, bridge);
+        let client =
+            BridgeExecutionClient::new(core, bridge).with_gate(Rc::clone(&self.gate.0));
         // Observe the gate the client actually booted into: the runtime's fail-closed report is
         // derived from this observation, not from a constant (P3-439).
         self.boot_gate.record(client.gate_state());
@@ -250,6 +274,8 @@ pub struct LiveNodeRuntime {
     handle: LiveNodeHandle,
     /// Boot gate recorded when the bridge exec client was constructed (P3-439).
     boot_gate: BootGate,
+    /// Live handle on the gate inside the boxed client (P3-025).
+    gate_watch: GateWatch,
 }
 
 impl LiveNodeRuntime {
@@ -264,11 +290,15 @@ impl LiveNodeRuntime {
         let cfg = EngineFactory::build_node_config();
         let builder = LiveNodeBuilder::from_config(cfg)?;
         let boot_gate = BootGate::default();
+        // P3-025: the runtime keeps the same gate the client receives, so `gate_watch()` reads
+        // the live state rather than the construction-time snapshot `boot_gate` records.
+        let gate_watch = GateWatch(Rc::new(RefCell::new(Gate::new())));
         let builder = builder.add_exec_client(
             Some("exec".to_string()),
             Box::new(BridgeExecutionClientFactory {
                 selection,
                 boot_gate: boot_gate.clone(),
+                gate: gate_watch.clone(),
             }),
             Box::new(BridgeClientConfig),
         )?;
@@ -278,6 +308,7 @@ impl LiveNodeRuntime {
             node,
             handle,
             boot_gate,
+            gate_watch,
         })
     }
 
@@ -291,6 +322,15 @@ impl LiveNodeRuntime {
     #[must_use]
     pub fn is_running(&self) -> bool {
         self.handle.is_running()
+    }
+
+    /// Live handle on the safety gate of the client inside the node (P3-025).
+    ///
+    /// Unlike [`Self::gate_was_halted_at_boot`] this is re-read on every call, so a sustained
+    /// run can assert the gate *stayed* `HALTED` instead of re-asserting a cached snapshot.
+    #[must_use]
+    pub fn gate_watch(&self) -> GateWatch {
+        self.gate_watch.clone()
     }
 
     /// The fail-closed boot invariant (gate `HALTED`, health never implies `ENABLED`).
@@ -700,6 +740,7 @@ mod tests {
         let factory = BridgeExecutionClientFactory {
             selection: BridgeSelection::Fake,
             boot_gate: boot_gate.clone(),
+            gate: GateWatch::default(),
         };
         let _client = factory
             .create("exec", &BridgeClientConfig, cache)

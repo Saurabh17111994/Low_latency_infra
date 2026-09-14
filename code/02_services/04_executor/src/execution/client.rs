@@ -223,6 +223,17 @@ impl BridgeExecutionClient {
         self
     }
 
+    /// P3-025: adopt an externally owned safety gate.
+    ///
+    /// The client is boxed inside the node, so a caller that needs to observe the gate *while
+    /// the node runs* — rather than the boot-time snapshot the factory records for
+    /// `LiveNodeRuntime::gate_was_halted_at_boot` — must create the gate itself and hand it in
+    /// here. The gate still boots `HALTED` (`Gate::new`); only its owner changes.
+    #[must_use]
+    pub fn with_gate(self, gate: Rc<RefCell<Gate>>) -> Self {
+        Self { gate, ..self }
+    }
+
     /// Returns a reference to the shared safety gate.
     #[must_use]
     pub fn gate(&self) -> &Rc<RefCell<Gate>> {

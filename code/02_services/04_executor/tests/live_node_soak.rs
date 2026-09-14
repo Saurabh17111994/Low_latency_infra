@@ -26,6 +26,8 @@
 
 use std::time::{Duration, Instant};
 
+use nautilus_execution_service::gate::ExecState;
+
 #[test]
 fn live_node_runtime_sustained_soak() {
     // P3-024: a typo (`SOAK_SECS=abc`) used to be silently parsed away to the 30s default,
@@ -65,7 +67,11 @@ fn live_node_runtime_sustained_soak() {
         let handle = node_rt.handle();
         // Owned boxed future (not pin!) so the &mut borrow can be released with an
         // explicit drop before the duplicate-run guard leg below.
-        let mut run = Box::pin(node_rt.run_forever());
+        // P3-025: the boot flag is a construction-time snapshot, so a "stays HALTED" claim needs
+    // the live gate. Taken as a clone before `run` borrows the runtime mutably.
+    let gate_watch = node_rt.gate_watch();
+
+    let mut run = Box::pin(node_rt.run_forever());
 
         // Sustained leg: keep the loop alive for the full soak, sampling liveness.
         let started = Instant::now();
@@ -98,6 +104,12 @@ fn live_node_runtime_sustained_soak() {
                         "loop went down before the stop request (after {:?})",
                         started.elapsed()
                     );
+                    assert_eq!(
+                        gate_watch.state(),
+                        ExecState::Halted,
+                        "gate left HALTED mid-soak (after {:?})",
+                        started.elapsed()
+                    );
                     samples += 1;
                 }
                 result = &mut run => panic!(
@@ -128,6 +140,11 @@ fn live_node_runtime_sustained_soak() {
             .await
             .expect("clean stop timed out after 30s — the run loop ignored the stop request");
         assert!(outcome.is_ok(), "clean stop must return Ok, got {outcome:?}");
+        assert_eq!(
+            gate_watch.state(),
+            ExecState::Halted,
+            "gate must stay HALTED for the whole soak (checked live, not from the boot snapshot)"
+        );
         assert!(
             !handle.is_running(),
             "node must be stopped after the stop request"
