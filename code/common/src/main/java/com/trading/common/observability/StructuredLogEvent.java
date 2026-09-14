@@ -183,8 +183,10 @@ public final class StructuredLogEvent {
         public Builder stacktrace(String v) { this.stacktrace = v; return this; }
 
         /**
-         * R-130: the contract says 12 required fields — build() must not
-         * emit a record with any of them missing or blank.
+         * R-130: the contract says 12 required fields — build() must not emit a
+         * record with any of them missing or blank, the timestamp included: an
+         * unset (0) or negative millisecond stamp becomes
+         * {@code timeUnixNano: "0"} (or worse), which is not a time.
          */
         public StructuredLogEvent build() {
             String missing = missingRequired();
@@ -197,6 +199,7 @@ public final class StructuredLogEvent {
 
         private String missingRequired() {
             StringBuilder sb = new StringBuilder();
+            if (timestampMs <= 0) sb.append("timestamp ");
             if (isBlank(level)) sb.append("level ");
             if (isBlank(service)) sb.append("service ");
             if (isBlank(component)) sb.append("component ");

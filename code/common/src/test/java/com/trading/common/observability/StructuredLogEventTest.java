@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class StructuredLogEventTest {
 
@@ -45,5 +46,18 @@ class StructuredLogEventTest {
         StructuredLogEvent e = sample();
         assertThat(e.correlationId).isEqualTo("executor/vm1/1.0.0/trace-1");
         assertThat(e.traceId).isEqualTo("trace-1");
+    }
+
+    @Test
+    void unsetOrNegativeTimestampIsRejected() {
+        // R-130 lists timestamp as required, but only the 11 String fields were
+        // checked: 0 (the default long) or a negative stamp built happily and
+        // emitted timeUnixNano "0".
+        for (long ts : new long[]{0L, -1L}) {
+            IllegalStateException e = assertThrows(IllegalStateException.class,
+                    () -> StructuredLogEvent.builder(ts, "INFO", "svc", "comp", "sub",
+                            "host", "vm", "prod", "cid", "trace", "span", "msg").build());
+            assertThat(e).hasMessageContaining("timestamp");
+        }
     }
 }
