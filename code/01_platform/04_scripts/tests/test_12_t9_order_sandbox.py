@@ -15,6 +15,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import datetime as _dt
 
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SCRIPTS)
@@ -186,3 +187,65 @@ def test_cli_self_check_exit_zero_writes_evidence():
         with open(os.path.join(out, ev[0]), encoding="utf-8") as fh:
             data = json.load(fh)
         assert data["jvm_parity"]["payload_hash_ok"] and data["jvm_parity"]["auth_ok"]
+
+
+def test_sign_control_mints_a_verifiable_control_envelope():
+    """D5 (2026-09-14): an operator can sign the DEC-044 approve/halt envelopes
+    without hand-assembling canonical bytes. The message type is the only thing
+    separating the two routes, so it must survive the round trip, and the
+    operator/evidence the executor audits must be inside the signed payload."""
+    now = _dt.datetime(2026, 9, 14, 12, 0, tzinfo=_dt.timezone.utc)
+    now_ms = int(now.timestamp() * 1000)
+    for action, msg_type in (("approve", "GATE_APPROVE"), ("halt", "GATE_HALT")):
+        code, cls, signed = t9.sign_control(
+            action, t9.APPROVED_OPERATOR, "CHG-131", reason="wave-4 d5",
+            secret="local-dev-only", now=now)
+        assert (code, cls) == (0, "PASS"), f"{action}: {signed}"
+        envelope = json.loads(signed)
+        assert envelope["message_type"] == msg_type, action
+        assert envelope["protocol_version"] == t9.PROTOCOL_VERSION
+        assert envelope["payload"]["operator"] == t9.APPROVED_OPERATOR
+        assert envelope["payload"]["evidence"] == "CHG-131"
+        accepted, reason = t9.verify_envelope(signed, "local-dev-only",
+                                              t9.PROTOCOL_VERSION, now_ms + 1)
+        assert accepted, f"{action}: {reason}"
+
+
+def test_sign_control_fails_closed_on_unknown_action_and_empty_evidence():
+    """Never mint a control artifact an operator would wrongly trust: the
+    executor rejects an empty operator/evidence pair with 401, and an unknown
+    action has no message type at all."""
+    now = _dt.datetime(2026, 9, 14, 12, 0, tzinfo=_dt.timezone.utc)
+    code, cls, note = t9.sign_control("halt", t9.APPROVED_OPERATOR, "", now=now)
+    assert (code, cls) == (1, "FAIL"), note
+    assert "evidence" in note
+    code, cls, note = t9.sign_control("open-the-gate", t9.APPROVED_OPERATOR, "x",
+                                     now=now)
+    assert (code, cls) == (1, "FAIL"), note
+    # A *different* operator is NOT refused here: authorization is the
+    # executor's decision (403 against its configured operator), and the
+    # harness must stay able to mint that envelope to exercise the 403 path.
+    code, cls, signed = t9.sign_control("halt", "not-the-operator", "x", now=now)
+    assert (code, cls) == (0, "PASS"), signed
+    assert json.loads(signed)["payload"]["operator"] == "not-the-operator"
+
+
+def test_sign_control_cli_prints_only_the_envelope_on_stdout():
+    """The signed envelope must be pipeable: stdout carries the JSON and
+    nothing else, human notes go to stderr."""
+    rc = subprocess.run([sys.executable, HARNESS, "--sign-control", "halt",
+                         "--evidence", "CHG-131", "--operator", "saurabh",
+                         "--secret", "local-dev-only"],
+                        capture_output=True, text=True)
+    assert rc.returncode == 0, f"{rc.stdout}\n{rc.stderr}"
+    payload = json.loads(rc.stdout)
+    assert payload["message_type"] == "GATE_HALT"
+    assert payload["payload"]["evidence"] == "CHG-131"
+
+
+def test_sign_control_cli_refuses_without_evidence():
+    rc = subprocess.run([sys.executable, HARNESS, "--sign-control", "approve"],
+                        capture_output=True, text=True)
+    assert rc.returncode == 1, f"{rc.stdout}\n{rc.stderr}"
+    assert rc.stdout.strip() == ""
+    assert "evidence" in rc.stderr

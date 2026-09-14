@@ -56,6 +56,17 @@ Usage:
   python3 t9_order_sandbox.py                    # offline contract (exit 0)
   python3 t9_order_sandbox.py --live             # in-network place->poll->cancel
   python3 t9_order_sandbox.py --self-check       # offline + fake-live demo
+  python3 t9_order_sandbox.py --sign-control approve --operator saurabh \
+      --evidence CHG-131                        # DEC-044 control envelope on stdout
+  python3 t9_order_sandbox.py --sign-control halt --operator saurabh \
+      --evidence CHG-131 --reason "ops halt" --post   # sign and send it
+
+The control envelope names the CURRENT control epoch, which the executor freezes
+`snapshot.control_epoch` against — read it from `GET /healthz` (`gate_epoch`).
+It starts at 1 and is bumped by every accepted approve/halt, so a second control
+action in the same process needs the new value. A stale epoch is rejected 401,
+which is the intended behaviour: an envelope minted for an older gate state must
+not act on a newer one.
 Env: T9_APPROVED_BY=saurabh (placement gate — fail closed without), T9_RUN_LIVE=1.
 Exit: 0 = PASS, 1 = FAIL, 2 = BLOCKED, 3 = LIVE-CHAIN-UNWIRED.
 """
@@ -90,6 +101,21 @@ APPROVED_OPERATOR = "saurabh"
 
 PROTOCOL_VERSION = "execution-gateway.v2"
 EXECUTION_INTENT_MSG = "EXECUTION_INTENT"
+
+# DEC-044 control plane (P3-020, D5 2026-09-14): `/v1/approve` and `/v1/halt` take the SAME
+# envelope an execution intent does — same HMAC, same canonical field order, same gate_epoch —
+# and differ ONLY in `message_type`. The operator identity and the evidence an audit line keeps
+# live INSIDE the signed payload, which is why the signer below refuses to mint an envelope
+# without both: the executor rejects such a request 401, and a half-signed control artifact is
+# exactly the thing an operator would wrongly trust.
+CONTROL_ACTIONS = {
+    "approve": {"message_type": "GATE_APPROVE", "route": "/v1/approve"},
+    "halt": {"message_type": "GATE_HALT", "route": "/v1/halt"},
+}
+CONTROL_INITIAL_GATE_EPOCH = 1      # http.rs: HttpState::snapshot starts the epoch at 1
+CONTROL_DEFAULT_SECRET = "local-dev-only"
+CONTROL_DEFAULT_FENCE = "t9-fence-0001"
+CONTROL_DEADLINE_SEC = 120
 
 # ---------------------------------------------------------------------------
 # JVM parity vector — REAL GatewayProtocol.java (production source, jackson
@@ -457,6 +483,26 @@ def offline_contract():
     accepted, reason = verify_envelope(env_json, isec,
                                        "execution-gateway.v1", JW_DEADLINE - 1)
     check("envelope self-verify round-trip", accepted, reason)
+
+    # 6. D5: the control plane's envelopes (approve/halt) are the same signed
+    # shape — same secret, same canonical order, only message_type differs.
+    # Signed here with the live protocol version the executor verifies against.
+    ctl_types = []
+    for action, spec in sorted(CONTROL_ACTIONS.items()):
+        ctl_types.append(spec["message_type"])
+        ctl_json, _, _ = encode_envelope(
+            isec, PROTOCOL_VERSION, spec["message_type"], f"ctl-{action}",
+            "dev-scope", "dev-partition",
+            {"operator": APPROVED_OPERATOR, "evidence": "t9-offline-check",
+             "reason": "offline contract"}, CONTROL_INITIAL_GATE_EPOCH,
+            CONTROL_DEFAULT_FENCE, JW_DEADLINE)
+        accepted, reason = verify_envelope(ctl_json, isec, PROTOCOL_VERSION,
+                                           JW_DEADLINE - 1)
+        check(f"control envelope {spec['message_type']} verifies", accepted, reason)
+    # The message type is the only thing that tells the two routes apart, so a
+    # single shared value would silently turn every halt into an approval.
+    check("control message types are distinct", len(set(ctl_types)) == 2,
+          f"{sorted(ctl_types)}")
     return errs
 
 
@@ -491,6 +537,58 @@ def approval_gate():
     """Placement is FORBIDDEN without T9_APPROVED_BY=saurabh (A2 DoD: no real
     order possible without the flag)."""
     return os.environ.get("T9_APPROVED_BY") == APPROVED_OPERATOR
+
+
+def sign_control(action, operator=APPROVED_OPERATOR, evidence="", reason="",
+                 secret=CONTROL_DEFAULT_SECRET, gate_epoch=None,
+                 fence_token=CONTROL_DEFAULT_FENCE, deadline_ms=None,
+                 request_id=None, transport=None, url_host="nautilus:9190",
+                 now=None):
+    """Sign a DEC-044 control envelope (approve/halt), optionally POST it.
+
+    Returns (exit_code, classifier, signed_envelope_json) on success; on a
+    refusal the third element is the reason instead. The signed JSON is the
+    artifact an operator keeps, so it is what the CLI writes to stdout.
+    """
+    spec = CONTROL_ACTIONS.get(action)
+    if spec is None:
+        return (1, "FAIL",
+                f"unknown control action {action!r} — expected one of "
+                f"{sorted(CONTROL_ACTIONS)}")
+    if not operator or not evidence:
+        # Fail closed, and say why: /v1/approve and /v1/halt read operator +
+        # evidence out of the signed payload and reject the request 401 without
+        # them, so minting one would only produce a misleading artifact.
+        return (1, "FAIL",
+                "payload operator and evidence are required — the executor "
+                "rejects a control envelope without them (401)")
+    now = now if now is not None else _dt.datetime.now(_dt.timezone.utc)
+    now_ms = int(now.timestamp() * 1000)
+    if deadline_ms is None:
+        deadline_ms = now_ms + CONTROL_DEADLINE_SEC * 1000
+    if request_id is None:
+        request_id = f"t9-ctl-{action}-{now.strftime('%Y%m%d-%H%M%S')}"
+    payload = {"operator": operator, "evidence": evidence, "reason": reason}
+    env_json, _, _ = encode_envelope(
+        secret, PROTOCOL_VERSION, spec["message_type"], request_id, "dev-scope",
+        "dev-partition", payload,
+        CONTROL_INITIAL_GATE_EPOCH if gate_epoch is None else gate_epoch,
+        fence_token, deadline_ms)
+    if transport is None:
+        return 0, "PASS", env_json
+    status, body = transport.http_json(
+        "POST", f"http://{url_host}{spec['route']}", body=env_json,
+        headers={"Content-Type": "application/json"})
+    if status == 0:
+        return 2, "BLOCKED", f"probe tool unavailable — {body}"
+    if status == 200:
+        # The executor echoes the resulting gate state — the operator's proof
+        # that the action landed. stderr, so stdout stays pipeable.
+        print(f"{spec['route']} accepted: {body.strip()}", file=sys.stderr)
+        return 0, "PASS", env_json
+    # 401 = auth/epoch/message-type/evidence refusal, 403 = operator not
+    # authorized, 405 = wrong method. All are refusals: never a success.
+    return 1, "FAIL", f"{spec['route']} refused the envelope ({status}): {body}"
 
 
 def run_live(transport=None, secret="local-dev-only", now=None,
@@ -554,9 +652,53 @@ def main(argv=None):
     ap.add_argument("--live", action="store_true", help="in-network place->cancel")
     ap.add_argument("--self-check", action="store_true", help="offline + fake-live demo")
     ap.add_argument("--out", default=EVIDENCE_DIR_DEFAULT)
+    ap.add_argument("--sign-control", choices=sorted(CONTROL_ACTIONS),
+                    metavar="ACTION",
+                    help="sign a DEC-044 control envelope (approve|halt) and "
+                         "print it on stdout; with --post, send it")
+    ap.add_argument("--operator", default=APPROVED_OPERATOR,
+                    help="signed operator identity (must be the executor's "
+                         "authorized operator)")
+    ap.add_argument("--evidence", default="",
+                    help="audited evidence for a control action (required — it "
+                         "is signed, and the executor rejects it empty)")
+    ap.add_argument("--reason", default="",
+                    help="halt note, signed; /v1/halt keeps it in the audit line")
+    ap.add_argument("--secret", default=CONTROL_DEFAULT_SECRET,
+                    help="shared secret (default: the local dev secret)")
+    ap.add_argument("--gate-epoch", type=int, default=None,
+                    help="current control epoch — read `gate_epoch` from GET "
+                         "/healthz; starts at 1, bumped by every accepted "
+                         "approve/halt")
+    ap.add_argument("--fence-token", default=CONTROL_DEFAULT_FENCE)
+    ap.add_argument("--post", action="store_true",
+                    help="send the signed envelope (needs the execution-t3 "
+                         "stack up) instead of only printing it")
+    ap.add_argument("--url", default="nautilus:9190",
+                    help="host:port for --post (default: the compose service "
+                         "name on the execution net)")
     args = ap.parse_args(argv)
 
     run_id = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
+    if args.sign_control:
+        # stdout carries the envelope and nothing else, so an operator can pipe
+        # it; every human note goes to stderr.
+        transport = DockerExecTransport() if args.post else None
+        code, cls, artifact = sign_control(
+            args.sign_control, args.operator, args.evidence, args.reason,
+            secret=args.secret, gate_epoch=args.gate_epoch,
+            fence_token=args.fence_token, transport=transport,
+            url_host=args.url)
+        if code != 0:
+            print(f"{cls}: {artifact}", file=sys.stderr)
+            return code
+        print(artifact)
+        sent = " and accepted by the executor" if args.post else (
+            " (not sent — pass --post to send it)")
+        print(f"{cls}: signed "
+              f"{CONTROL_ACTIONS[args.sign_control]['message_type']} envelope"
+              f"{sent}", file=sys.stderr)
+        return 0
     if args.self_check:
         return _self_check(args.out, run_id)
     if args.live:
