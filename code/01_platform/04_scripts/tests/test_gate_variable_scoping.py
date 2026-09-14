@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """No variable may be read in a step that does not assign it.
 
-`--steps` and `--sweep` run a subset of the 16 steps, so any value a step reads
+`--steps` and `--sweep` run a subset of the 19 steps, so any value a step reads
 must be assigned either in that same step or in the region before step 1 — which
 always runs. `set -u` turns a violation into a hard abort that looks like a broken
 step: `--steps 2` died on `STATIC_LOG: unbound variable` (assigned in step 1, read

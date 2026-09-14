@@ -618,7 +618,7 @@ if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ]; then
 		gate_fail
 	fi
 	echo "PASS: image staleness (ddl-apply — the service image this gate runs)" | tee -a "$SUMMARY"
-	echo "NOTE: this check (and 'make images') demands a real build stamp — an image whose only evidence is its build clock is refused. The other 7 compose images are checked by 'make images' and by 'make check-image-stale' at release, not by this gate." | tee -a "$SUMMARY"
+	echo "NOTE: this check (and 'make images') demands a real build stamp — an image whose only evidence is its build clock is refused. Step 18 of this same run builds all 8 images and stamp-checks them (until 2026-09-14 that happened only at release), so an unbuildable or unstamped image now fails the certificate instead of surviving to release." | tee -a "$SUMMARY"
 else
 	note_skip 8
 	echo "SKIP: image staleness (no docker/compose) — unverified, not green" | tee -a "$SUMMARY"
