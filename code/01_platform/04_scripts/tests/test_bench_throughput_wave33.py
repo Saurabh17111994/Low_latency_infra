@@ -583,5 +583,135 @@ class BenchJournalPermTest(BenchCase):
                          f"journal dir mode {oct(mode)} is not writable by "
                          "uid 65532 (world/group write bit missing)")
 
+
+
+class BenchProcessBoundaryTest(BenchCase):
+    """A process boundary must not be read as a decode-error spike.
+
+    Not a map finding: this pair was found by running the bench live, so it is
+    recorded as CHG-176 rather than cited to a P6 id.
+
+    Live incident 2026-09-15 (run 20260915-215449): the baseline read
+    `append_latency_ms_count=0 decode_errors=7` while window 1 read them from
+    the NEXT process, so the window reported `decode_errors delta=-4 != 0` and
+    the verdict blamed the feed for sending junk. Two defects, one cause:
+
+      * the baseline settled for a fixed 15s and never checked the sample was
+        this process's (the live process's first OTLP point landed a hair later);
+      * the rows counter refused to measure across a process boundary, but the
+        decode-errors counter had no such guard.
+
+    Both legs below run the PRE-FIX script as their red leg, so they prove the
+    fix is what changes the outcome rather than asserting the new text exists.
+    """
+
+    # The pre-fix baseline: sleep, then read, with no freshness proof.
+    @staticmethod
+    def _old_baseline(text: str) -> str:
+        start = text.index('SETTLE_S="${BENCH_BASELINE_SETTLE_S:-15}"')
+        end = text.index('ERR0="$(num')
+        return (text[:start]
+                + 'SETTLE_S="${BENCH_BASELINE_SETTLE_S:-15}"\n'
+                  'echo "=== baseline settle (${SETTLE_S}s for fresh OTLP counter)"\n'
+                  'sleep "$SETTLE_S"\n'
+                  'echo "=== baseline (O2)"\n'
+                  'CNT0="$(num "$(o2_query \'select value from '
+                  '"append_latency_ms_count" order by _timestamp desc limit 1\')")"\n'
+                + text[end:])
+
+    # The pre-fix window: no backwards guard on decode_errors.
+    @staticmethod
+    def _old_guard(text: str) -> str:
+        return text.replace(
+            'if [ "$err_delta" -lt 0 ]; then\n'
+            '\t\tskip_window "$w" "decode_errors counter went backwards '
+            '($ERR_A → $ERR_B) — stale process data?"\n'
+            '\t\tcontinue\n'
+            '\tfi\n', "")
+
+    def _variant(self, text: str, name: str) -> Path:
+        """The pre-fix script, at the sandbox's own mirrored depth.
+
+        The bench derives every path from `$BASH_SOURCE`, so a red-leg copy
+        dropped anywhere else resolves PROJECT_ROOT to the wrong tree and dies
+        at preflight before reaching the code under test.
+        """
+        p = self.sb.scripts_dir / name
+        p.write_text(text)
+        return p
+
+    def test_a_stale_baseline_is_not_used_as_the_reference(self):
+        """The baseline must be a sample the LIVE process produced."""
+        o2 = O2Server(mode="stale-once")
+        self.addCleanup(o2.stop)
+
+        # Red leg: the pre-fix script, where the stale zero IS the baseline.
+        red = self._variant(self._old_baseline(BENCH_SRC.read_text()),
+                            "bench-red-baseline.sh")
+        red_res = self.sb.run(o2, script=red)
+
+        # Green leg: the fixed script, which waits for an advance.
+        o2b = O2Server(mode="stale-once")
+        self.addCleanup(o2b.stop)
+        green_res = self.sb.run(o2b)
+
+        red_joined, green_joined = self.joined(red_res), self.joined(green_res)
+
+        # The red leg must have taken the stale zero as its baseline: that is
+        # what makes this test discriminate rather than merely pass.
+        self.assertIn("baseline: append_latency_ms_count=0", red_joined,
+                      "the red leg did not capture the stale baseline it is "
+                      "built from:\n" + red_joined[-2500:])
+
+        # Green: the baseline is the live process's, so it is not 0.
+        m = re.search(r"baseline: append_latency_ms_count=(\d+)", green_joined)
+        self.assertIsNotNone(m, "no baseline line:\n" + green_joined[-2500:])
+        self.assertNotEqual(
+            m.group(1), "0",
+            "the fixed script accepted the dead process's sample as its baseline")
+        self.assertIn("RESULT: PASS", green_joined, green_joined[-2500:])
+        self.assertEqual(green_res.returncode, 0)
+
+    def test_a_frozen_counter_fails_before_any_window(self):
+        """A stopped emitter is a baseline fault, not a throughput one."""
+        o2 = O2Server(mode="frozen")
+        self.addCleanup(o2.stop)
+        started = time.monotonic()
+        res = self.sb.run(o2)
+        elapsed = time.monotonic() - started
+        joined = self.joined(res)
+
+        self.assertIn("baseline counter frozen", joined, joined[-2500:])
+        self.assertNotEqual(res.returncode, 0)
+        self.assertNotIn("window 1:", joined, "no window should have run")
+        self.assertLess(elapsed, 60.0)
+
+    def test_a_backwards_decode_counter_skips_instead_of_blaming_the_feed(self):
+        """`delta=-4 != 0` must not be reported when the counter went backwards."""
+        red = self._variant(self._old_guard(BENCH_SRC.read_text()),
+                            "bench-red-guard.sh")
+
+        o2 = O2Server(mode="decode-backwards")
+        self.addCleanup(o2.stop)
+        red_res = self.sb.run(o2, script=red)
+
+        o2b = O2Server(mode="decode-backwards")
+        self.addCleanup(o2b.stop)
+        green_res = self.sb.run(o2b)
+
+        red_joined, green_joined = self.joined(red_res), self.joined(green_res)
+
+        # Red leg: exactly the incident's message, blaming the feed.
+        self.assertIn("decode_errors delta=-4 != 0", red_joined,
+                      "the red leg did not reproduce the incident's verdict:\n"
+                      + red_joined[-2500:])
+
+        # Green leg: named as a stale-sample fault instead.
+        self.assertIn("decode_errors counter went backwards", green_joined,
+                      green_joined[-2500:])
+        self.assertNotIn("!= 0", green_joined)
+        self.assertNotEqual(green_res.returncode, 0,
+                            "an unmeasurable window must still fail closed")
+
 if __name__ == "__main__":
     unittest.main()
