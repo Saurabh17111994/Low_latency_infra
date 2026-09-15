@@ -12,6 +12,21 @@ cluster-shaped assertions run against the live stack / Swarm and SKIP
 cleanly when the prerequisite is absent — because the deployment tests run
 later, serially, by the main agent.
 
+> **2026-09-15 supplement — wave 31: the slot-kill gate requires its tests to
+> have run (CHG-171).** The drill inherited the same defect wave 30 fixed
+> downstream: six `go test -run <Name>` calls whose exit 0 was read as proof,
+> although Go exits 0 when nothing matched — a renamed test was reported as
+> PASS, and the unanchored regex plus the missing `./...` could match a
+> sibling test or miss the package entirely. The gates now demand their own
+> `=== RUN`/`--- PASS` lines, a self-skipped gate is a named SKIP quoting Go's
+> reason, each gate is bounded by `CHAOS_GO_TEST_TIMEOUT`, `go vet` is
+> advisory instead of fatal, a missing bridge directory is a config error (2)
+> rather than six misleading test failures, and the old PASS line
+> (`1-of-3 slot kill: terminal isolated, peers healthy, reconnect clean`) no
+> longer claims a live kill for a run that injects no fault. The row below and
+> the expected-output block above name the superseded text and the 2026-08-24
+> 49-line revision of the script.
+
 > **2026-09-15 supplement — wave 30: the drill and its runner stopped
 > overstating coverage (CHG-170).** The tablet drill reported PASS on a
 > *skipped* integration test (its `-DfailIfNoTests=false` build is green
@@ -87,7 +102,7 @@ PID suffix keeps simultaneous runs from sharing one directory.
 
 ```text
 === [1/4] 01 slot kill — Go bridge, 1-of-3 slots ===
-SLOT-KILL-CHAOS-01: PASS — 1-of-3 slot kill: terminal isolated, peers healthy, reconnect clean
+SLOT-KILL-CHAOS-01: PASS — offline resilience gate only: all 6 Go gates ran to their own --- PASS (no live slot kill, ...); go vet clean
 RESULT [1]: PASS
 === [2/4] 02 TM kill ... ===
 TM-KILL-CHAOS-02: [leg A] PASS — restore from checkpoint, no duplicate fingerprint
@@ -111,7 +126,11 @@ offline drill ran, and the suite says so.
 ## Test 1 — slot kill (Go bridge)
 
 Script: `chaos-01-slot-kill.sh`. Offline, deterministic, no cluster/broker.
-Runs the named Go tests that implement the chaos:
+It injects **no fault** — no process is killed, no signal is sent, no
+partition is made — so a green run proves the sharding / isolation / reconnect
+*logic*. The blast radius of an actual slot loss is the live drills' job
+(02–04); this one's PASS line says so. It runs the named Go tests that
+implement the chaos:
 
 | Go test | Assertion the gate relies on |
 |---|---|
@@ -123,6 +142,21 @@ Runs the named Go tests that implement the chaos:
 
 Invariant (plan §6 row 1): kill 1 of 3 slots → reconnect, no drop-missed
 regression, peers stay healthy.
+
+**What counts as a gate passing.** `go test` exits 0 when the `-run` regex
+matches nothing (`[no tests to run]`), so its exit status is not a verdict and
+`-run TestFoo` is an unanchored regex that would also match `TestFooBar`. Each
+gate therefore must produce its own `=== RUN` and `--- PASS` lines, for an
+anchored regex over `./...`; a gate that ran nothing fails with "no invariant
+was proven" instead of passing (a renamed or moved test used to be reported as
+PASS), and a gate that skipped itself is a named SKIP — the drill quotes Go's
+own reason — so `-short` runs cannot be read as coverage. Every gate carries
+an explicit `-timeout` (`CHAOS_GO_TEST_TIMEOUT`, default `5m`) rather than
+Go's implicit per-invocation default, so a hung reconnect test fails with
+Go's diagnostic instead of stalling the suite. `go vet ./...` stays in the
+drill but is **advisory**: its result is named in the final line so it is
+visible, while a vet warning in an untouched package can no longer be reported
+as a failed slot kill.
 
 ## Test 2 — TM kill (Flink)
 
