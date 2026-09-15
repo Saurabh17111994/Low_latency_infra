@@ -169,24 +169,56 @@ class TestDigestPinLive(unittest.TestCase):
     fails — those mean the resolver chain itself is broken.
     """
 
-    def _run_live(self, *refs: str) -> "subprocess.CompletedProcess[str]":
+    def _run_live(self, *refs: str, path: str | None = None) -> "subprocess.CompletedProcess[str]":
         env = {k: v for k, v in os.environ.items()
                if k not in ("RESOLVER_CALLS", "STDOUT_DIGEST", "STDERR_LINE",
                             "STUB_FAIL", "SKOPEO_DIGEST", "CRANE_DIGEST")}
+        if path is not None:
+            env["PATH"] = path
         return subprocess.run(["bash", str(SCRIPT), *refs], env=env,
                               capture_output=True, text=True, timeout=LIVE_TIMEOUT_S)
 
-    def test_live_known_tag_resolves_to_sha256_shape(self):
-        r = self._run_live(LIVE_REF)
+    def _check_shape(self, r: "subprocess.CompletedProcess[str]", via: str) -> None:
         self.assertEqual(r.returncode, 0,
-                         f"live resolve failed; stderr tail: {r.stderr[-2000:]}")
-        self.assertTrue(r.stdout.strip(), f"no stdout; stderr tail: {r.stderr[-2000:]}")
+                         f"live resolve via {via} failed; stderr tail: {r.stderr[-2000:]}")
+        self.assertTrue(r.stdout.strip(),
+                        f"no stdout via {via}; stderr tail: {r.stderr[-2000:]}")
         line = r.stdout.strip().splitlines()[-1]
         ref, _, digest = line.partition("@")
         self.assertEqual(ref, LIVE_REF, line)
         self.assertTrue(_HEX64.match(digest),
-                        f"resolver output is not a bare manifest digest: {line!r} "
-                        f"(buildx human-dump regression? digest recorded: {digest!r})")
+                        f"resolver output via {via} is not a bare manifest digest: {line!r} "
+                        f"(human-dump regression? digest recorded: {digest!r})")
+
+    @staticmethod
+    def _hide(names: list[str]) -> str:
+        """PATH with the named resolvers shadowed by always-fail stubs.
+
+        Forces the script down one branch so each resolver gets live coverage
+        (verified 2026-09-15: docker-only RC=0 bare digest on buildx v0.23.0,
+        skopeo-only RC=0 on skopeo 1.13.3; pre-fix docker-only was RC=1).
+        Stubs live in a temp dir prepended to PATH; the real tool is found
+        later on PATH only for the resolver under test.
+        """
+        import tempfile
+        d = tempfile.mkdtemp(prefix="dp-hide.")
+        for n in names:
+            (pathlib.Path(d) / n).write_text(
+                "#!/usr/bin/env bash\necho \"shadowed for branch test: $0 $*\" >&2; exit 99\n")
+            (pathlib.Path(d) / n).chmod(0o755)
+        return d + ":" + os.environ.get("PATH", "")
+
+    def test_live_known_tag_resolves_to_sha256_shape(self):
+        # Chain order: docker first, so this exercises the docker branch live.
+        self._check_shape(self._run_live(LIVE_REF), via="chain")
+
+    def test_live_docker_branch_alone(self):
+        self._check_shape(self._run_live(LIVE_REF, path=self._hide(["skopeo", "crane"])),
+                          via="docker-only")
+
+    def test_live_skopeo_branch_alone(self):
+        self._check_shape(self._run_live(LIVE_REF, path=self._hide(["docker", "crane"])),
+                          via="skopeo-only")
 
     def test_live_bogus_tag_still_fails_closed(self):
         r = self._run_live("hello-world:this-tag-does-not-exist-xyz")
