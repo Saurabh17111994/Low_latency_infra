@@ -698,8 +698,17 @@ found on one day. Check them in order:**
 **Proof the load path is healthy (before a long run):** run
 `bench-throughput.sh` and require ALL of: healthy container, 1024 ack,
 non-zero baseline `append_latency_ms_count`, 0 EOFException, AND the bench
-finishing all 3 windows with rows >= 15000. This is the smoke gate before any
-30-min PERF-AUDIT run.
+finishing all 3 windows with `rows >= 0.90 x 20480 x elapsed_s`. This is the
+smoke gate before any 30-min PERF-AUDIT run.
+
+The row floor is derived, not fixed (P6-001): the bench generates 20,480
+frames/s (1024 subscribed ids x 20 Hz) and a window passes at >= 90% of that
+rate over the window length it actually measured (P6-032). The old flat
+`rows >= 15000` was an effective 250 rows/s — about 2% of the offered load —
+so a PASS said almost nothing. The rate, the share and the window length are
+overridable for a smoke run: `BENCH_EXPECTED_RPS`, `BENCH_MIN_RATE`,
+`BENCH_WINDOW_S`, `BENCH_WINDOWS`. A window whose latency cannot be read at
+all now fails rather than reporting `p99=-1` and passing (P6-033).
 
 
 ## C2 TM-kill-at-full-load drill (tracker-14 Block 1, 2026-09-02)
