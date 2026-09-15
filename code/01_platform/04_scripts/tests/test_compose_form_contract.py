@@ -127,7 +127,7 @@ SITES: list[tuple[str, str, str, str]] = [
     ("code/01_platform/04_scripts/run-full-suite.sh", "ps -q ingestion", "FLAGS_DIR",
      "container discovery (P6-513): preflight double-run guard and post-`up` id lookup"),
     ("code/01_platform/04_scripts/run-full-suite.sh", "docker-compose.soak.yml stop ingestion", "FLAGS_DIR", "soak override"),
-    ("code/01_platform/04_scripts/run-monday-gates.sh", "config >/dev/null 2>>\"$STATIC_LOG\"", "FLAGS", "gate step 2"),
+    ("code/01_platform/04_scripts/run-monday-gates.sh", 'config >"$COMPOSE_CONFIG_LOG" 2>&1', "FLAGS", "gate step 2 (P6-525: own log, not STATIC_LOG)"),
     ("code/01_platform/04_scripts/run-monday-gates.sh", "docker compose version", "TEXT",
      "gate step 18 capability probe — asks whether the compose plugin exists, never invokes the stack"),
     ("code/01_platform/04_scripts/stage-a2-baseline.sh", "secrets.env up -d flink-jobmanager", "FLAGS_DIR", ""),

@@ -28,7 +28,7 @@ ASSIGN = re.compile(r"^\s*(?:export\s+|local\s+|readonly\s+|declare\s+|typeset\s
 MAPFILE = re.compile(r"^\s*mapfile\s+(?:-\w+\s+)*([A-Z_][A-Z0-9_]*)")
 READ = re.compile(r"\$\{?([A-Z_][A-Z0-9_]*)")
 IGNORE = {"@", "#", "?", "!", "*", "-", "0", "1", "2", "$", "PPID", "RANDOM", "LINENO",
-          "BASH_SOURCE", "BASH_REMATCH", "PIPESTATUS", "IFS", "_"}
+          "BASH_SOURCE", "BASH_VERSINFO", "BASH_REMATCH", "PIPESTATUS", "IFS", "_"}
 # Supplied by the caller's environment, not by this script. Every read of these
 # must carry a `:-`/`:=` default, or a --steps run in a bare shell aborts.
 ENV_PROVIDED = {"FLUSS_BOOTSTRAP", "GATE_ALLOW_NO_FLUSS", "GATE_SWEEP_FROM", "GATE_SWEEP_CHILD"}

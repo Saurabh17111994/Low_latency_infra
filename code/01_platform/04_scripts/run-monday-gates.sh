@@ -119,7 +119,7 @@ _harness_abort() {
 		} >>"$SUMMARY" 2>/dev/null || true
 	fi
 }
-trap '_harness_abort' EXIT
+trap '_harness_abort; rm -f "${_script_list:-}"' EXIT
 # A kill must say the same thing instead of leaving a truncated SUMMARY behind.
 trap 'exit 143' TERM
 trap 'exit 130' INT
@@ -135,6 +135,10 @@ GATEWAY_LOG="$OUT_DIR/gateway-suite.log"
 NAUTILUS_LOG="$OUT_DIR/nautilus-suite.log"
 COMPUTE_LOG="$OUT_DIR/compute-suite.log"
 MOCK_ARROW_LOG="$OUT_DIR/mock-arrow-suite.log"
+COMPOSE_CONFIG_LOG="$OUT_DIR/compose-config.log"
+DOCKER_BUILD_LOG="$OUT_DIR/docker-build-smoke.log"
+E2E_BUILD_LOG="$OUT_DIR/e2e-build.log"
+OWNERSHIP_LOG="$OUT_DIR/evidence-ownership.log"
 PIN_LOG="$OUT_DIR/pin-discipline.log"
 IMAGES_LOG="$OUT_DIR/images-build.log"
 STALE_ALL_LOG="$OUT_DIR/image-staleness-all.log"
@@ -309,7 +313,7 @@ GATE_MEMO_PY="$SCRIPT_DIR/gate_memo.py"
 gate_memo_check() { # $1 = fingerprint
 	[ -n "$1" ] || return 0
 	local seen
-	if seen=$(timeout 60 python3 "$GATE_MEMO_PY" --root "$PROJECT_ROOT" lookup "$1" 2>/dev/null); then
+	if seen=$(timeout -k 30 60 python3 "$GATE_MEMO_PY" --root "$PROJECT_ROOT" lookup "$1" 2>/dev/null); then
 		if [ "$REPLAY_POLICY" = "refuse" ]; then
 			GATE_DECIDED=1
 			echo "$seen" >&2
@@ -324,7 +328,7 @@ gate_memo_check() { # $1 = fingerprint
 
 gate_memo_record() { # $1 = fingerprint, $2 = run dir
 	[ -n "$1" ] || return 0
-	if ! timeout 60 python3 "$GATE_MEMO_PY" --root "$PROJECT_ROOT" record "$1" "$2" >/dev/null 2>&1; then
+	if ! timeout -k 30 60 python3 "$GATE_MEMO_PY" --root "$PROJECT_ROOT" record "$1" "$2" >/dev/null 2>&1; then
 		echo "HARNESS: could not record the replay memo — this certificate stands, but an identical re-run would not be flagged as a replay." >&2
 	fi
 	return 0
@@ -367,7 +371,7 @@ PREFLIGHT_MODE=()
 if [ -n "$STEPS_SET" ] || [ "$SWEEP" = "1" ]; then
 	PREFLIGHT_MODE=( --allow-dirty )
 fi
-timeout 180 python3 "$SCRIPT_DIR/gate_preflight.py" "${PREFLIGHT_MODE[@]}" >"$PREFLIGHT_LOG" 2>&1 || PREFLIGHT_RC=$?
+timeout -k 60 180 python3 "$SCRIPT_DIR/gate_preflight.py" "${PREFLIGHT_MODE[@]}" >"$PREFLIGHT_LOG" 2>&1 || PREFLIGHT_RC=$?
 if [ "$PREFLIGHT_RC" -eq 2 ]; then
 	note_skip preflight
 	echo "SKIP: preflight — prerequisite missing, so drift was NOT verified — see $PREFLIGHT_LOG" | tee -a "$SUMMARY"
@@ -456,15 +460,23 @@ STATIC_FAIL=0
 # some sandboxes/CI chroots do not provide), with a `git ls-files` fallback
 # for environments where find/sort cannot load their shared libraries.
 _script_list=$(mktemp)
+SCRIPTS=()
+BASH_MAJOR="${BASH_VERSINFO[0]:-0}"
 if ! (cd "$CODE_DIR" && find . -name '*.sh' -not -path '*/target/*' -not -path '*/third_party/*' 2>/dev/null | sort 2>/dev/null) >"$_script_list"; then
 	: >"$_script_list"
 fi
-mapfile -t SCRIPTS <"$_script_list"
+if [ "$BASH_MAJOR" -ge 4 ]; then mapfile -t SCRIPTS <"$_script_list"; else while IFS= read -r _l; do SCRIPTS+=("$_l"); done <"$_script_list"; fi
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
 	(cd "$CODE_DIR" && git ls-files '*.sh' 2>/dev/null | grep -v -E '(^|/)(target|third_party)/') >"$_script_list" || true
-	mapfile -t SCRIPTS <"$_script_list"
+	if [ "$BASH_MAJOR" -ge 4 ]; then mapfile -t SCRIPTS <"$_script_list"; else while IFS= read -r _l; do SCRIPTS+=("$_l"); done <"$_script_list"; fi
 fi
 rm -f "$_script_list"
+SHELLCHECK_OK=0
+if command -v shellcheck >/dev/null 2>&1; then
+	SHELLCHECK_OK=1
+else
+	echo "WARN: shellcheck not installed — skipping (bash -n still enforced)" | tee -a "$SUMMARY"
+fi
 if [ "${#SCRIPTS[@]}" -eq 0 ]; then
 	echo "FAIL: no shell scripts found to check" | tee -a "$SUMMARY"
 	gate_fail
@@ -474,20 +486,18 @@ for s in "${SCRIPTS[@]}"; do
 		echo "FAIL: bash -n $s" | tee -a "$STATIC_LOG"
 		STATIC_FAIL=1
 	fi
-	if command -v shellcheck >/dev/null 2>&1; then
+	if [ "$SHELLCHECK_OK" = "1" ]; then
 		if ! shellcheck -S warning "$CODE_DIR/$s" >>"$STATIC_LOG" 2>&1; then
 			echo "FAIL: shellcheck $s" | tee -a "$STATIC_LOG"
 			STATIC_FAIL=1
 		fi
-	else
-		echo "WARN: shellcheck not installed — skipping (bash -n still enforced)" | tee -a "$SUMMARY"
 	fi
 done
 if [ "$STATIC_FAIL" -ne 0 ]; then
 	echo "FAIL: static checks — see $STATIC_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
-echo "PASS: static checks (${#SCRIPTS[@]} scripts bash -n + shellcheck clean)" | tee -a "$SUMMARY"
+echo "PASS: static checks (${#SCRIPTS[@]} scripts bash -n + shellcheck -S warning clean)" | tee -a "$SUMMARY"
 
 # ── 0b. Compose config validation (G4) ────────────────────────────────────────
 fi
@@ -497,9 +507,9 @@ echo "=== [2/19] docker compose config ===" | tee -a "$SUMMARY"
 # can be skipped by --steps while step 8 still needs them.
 # Same form as `make up` (see the Makefile COMPOSE variable): a bare `-f`
 # resolves a different config, so this step would validate the wrong stack.
-if [ -f "$COMPOSE_FILE" ] && [ -f "$COMPOSE_ENV_DIR/.env" ] && [ -f "$COMPOSE_ENV_DIR/secrets.env" ]; then
-	if ! docker compose --env-file "$COMPOSE_ENV_DIR/.env" --env-file "$COMPOSE_ENV_DIR/secrets.env" -f "$COMPOSE_FILE" config >/dev/null 2>>"$STATIC_LOG"; then
-		echo "FAIL: docker compose config invalid — see $STATIC_LOG" | tee -a "$SUMMARY"
+if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ] && [ -f "$COMPOSE_ENV_DIR/.env" ] && [ -f "$COMPOSE_ENV_DIR/secrets.env" ]; then
+	if ! docker compose --env-file "$COMPOSE_ENV_DIR/.env" --env-file "$COMPOSE_ENV_DIR/secrets.env" -f "$COMPOSE_FILE" config >"$COMPOSE_CONFIG_LOG" 2>&1; then
+		echo "FAIL: docker compose config invalid — see $COMPOSE_CONFIG_LOG" | tee -a "$SUMMARY"
 		gate_fail
 	fi
 	echo "PASS: docker compose config" | tee -a "$SUMMARY"
@@ -515,13 +525,14 @@ fi
 fi
 if step_active 3; then
 echo "=== [3/19] Python unit suites (reconcile-compare ING-TCP-002 + gate helpers) ===" | tee -a "$SUMMARY"
-if ! timeout 300 python3 -m unittest discover -s "$SCRIPT_DIR/tests" -p "test_*.py" \
+PY_TIMEOUT_SEC="${PY_TIMEOUT_SEC:-300}"
+if ! timeout -k 60 "$PY_TIMEOUT_SEC" python3 -m unittest discover -s "$SCRIPT_DIR/tests" -p "test_*.py" \
 	>"$PY_LOG" 2>&1; then
 	echo "FAIL: python unit suites — see $PY_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
-if ! grep -q "^OK" "$PY_LOG"; then
-	echo "FAIL: python unit suites did not report OK — see $PY_LOG" | tee -a "$SUMMARY"
+if ! grep -q "^OK" "$PY_LOG" || grep -qE 'Ran 0 tests|FAILED \(' "$PY_LOG"; then
+	echo "FAIL: python unit suites did not report OK with >=1 test — see $PY_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
 echo "PASS: python unit suites ($(grep -oE 'Ran [0-9]+ tests' "$PY_LOG" | head -1 || echo 'all tests'))" | tee -a "$SUMMARY"
@@ -535,7 +546,8 @@ echo "PASS: python unit suites ($(grep -oE 'Ran [0-9]+ tests' "$PY_LOG" | head -
 fi
 if step_active 4; then
 echo "=== [4/19] Entrypoint harness (ING-INT-006) ===" | tee -a "$SUMMARY"
-if ! bash "$SCRIPT_DIR/tests/test_docker_entrypoint.sh" >"$ENTRYPOINT_LOG" 2>&1; then
+ENTRYPOINT_TIMEOUT_SEC="${ENTRYPOINT_TIMEOUT_SEC:-300}"
+if ! timeout -k 60 "$ENTRYPOINT_TIMEOUT_SEC" bash "$SCRIPT_DIR/tests/test_docker_entrypoint.sh" >"$ENTRYPOINT_LOG" 2>&1; then
 	echo "FAIL: entrypoint harness — see $ENTRYPOINT_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -547,7 +559,7 @@ if step_active 5; then
 echo "=== [5/19] Go bridge suite (-race) ===" | tee -a "$SUMMARY"
 # The output goes to $GO_LOG: the FAIL message below points there (and the
 # final evidence list advertises it), plus the race reports are large.
-if ! timeout "$GO_TIMEOUT_SEC" bash -c "cd '$BRIDGE_DIR' && go test -race -count=1 ./..." >"$GO_LOG" 2>&1; then
+if ! (cd "$BRIDGE_DIR" && timeout -k 60 "$GO_TIMEOUT_SEC" go test -race -count=1 ./...) >"$GO_LOG" 2>&1; then
 	echo "FAIL: Go suite failed or timed out — see $GO_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -557,12 +569,12 @@ fi
 fi
 if step_active 6; then
 echo "=== [6/19] Building E2E test binaries (faketool + arrow-bridge) ===" | tee -a "$SUMMARY"
-# Appends to the same log: gate_fail exits, so a Go-suite failure never reaches
-# here, and the advertised Go evidence keeps both records.
-if ! (cd "$BRIDGE_DIR" &&
-	go build -tags faketool -o faketool/faketool ./faketool &&
-	go build -o arrow-bridge .) >>"$GO_LOG" 2>&1; then
-	echo "FAIL: could not build E2E test binaries — see $GO_LOG" | tee -a "$SUMMARY"
+# Own log (P6-530): sharing $GO_LOG discarded the compiler output on failure
+# and pointed at the wrong record; gate_fail exits, so step 5's log is complete
+# before this step ever runs.
+E2E_BUILD_TIMEOUT_SEC="${E2E_BUILD_TIMEOUT_SEC:-600}"
+if ! (cd "$BRIDGE_DIR" && timeout -k 60 "$E2E_BUILD_TIMEOUT_SEC" go build -tags faketool -o faketool/faketool ./faketool && timeout -k 60 "$E2E_BUILD_TIMEOUT_SEC" go build -o arrow-bridge .) >"$E2E_BUILD_LOG" 2>&1; then
+	echo "FAIL: could not build E2E test binaries — see $E2E_BUILD_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
 echo "PASS: E2E binaries built (faketool/faketool, arrow-bridge)" | tee -a "$SUMMARY"
@@ -580,8 +592,8 @@ if command -v docker >/dev/null 2>&1 && [ -f "$CODE_DIR/02_services/01_ingestion
 		# build context (parent POM + common module). Tag locally; never push.
 		if ! (cd "$CODE_DIR" && docker build -q \
 			-f 02_services/01_ingestion/Dockerfile -t ingestion-gate-smoke:local \
-			. >/dev/null 2>>"$STATIC_LOG"); then
-			echo "FAIL: docker build smoke failed (images present) — see $STATIC_LOG" | tee -a "$SUMMARY"
+			. >"$DOCKER_BUILD_LOG" 2>&1); then
+			echo "FAIL: docker build smoke failed (images present) — see $DOCKER_BUILD_LOG" | tee -a "$SUMMARY"
 			gate_fail
 		fi
 		docker rmi ingestion-gate-smoke:local >/dev/null 2>&1 || true
@@ -611,7 +623,7 @@ if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ]; then
 	# --require-stamps (2026-09-13): without it a stamp-less image passes as
 	# "FRESH (timestamp proxy)" — the clock is not evidence that the image
 	# contains the sources, which is the whole point of CHG-101.
-	if ! timeout 120 python3 "$SCRIPT_DIR/image_staleness_check.py" \
+	if ! timeout -k 60 120 python3 "$SCRIPT_DIR/image_staleness_check.py" \
 		--git-root "$PROJECT_ROOT" --compose "$COMPOSE_FILE" --service ddl-apply \
 		--require-stamps >"$IMAGE_LOG" 2>&1; then
 		echo "FAIL: stale, unstamped or missing ddl-apply image (CHG-101) — see $IMAGE_LOG" | tee -a "$SUMMARY"
@@ -642,10 +654,7 @@ echo "=== [9/19] Java full gate (FLUSS+MANIFEST+PERF+E2E) + live Fluss drills ==
 	# dir. Ingestion's live classes are unaffected: they gate on the
 	# INGESTION_INT_TEST_* flags and resolve FLUSS_BOOTSTRAP_SERVERS (default
 	# localhost:9123).
-	if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
-	env -u FLUSS_BOOTSTRAP INGESTION_INT_TEST_E2E=true INGESTION_INT_TEST_FLUSS=true \
-	INGESTION_INT_TEST_MANIFEST=true INGESTION_INT_TEST_PERF=true \
-	mvn -o test -pl 02_services/01_ingestion -am" >"$JAVA_LOG" 2>&1; then
+	if ! (cd "$CODE_DIR" && timeout -k 60 "$JAVA_TIMEOUT_SEC" env -u FLUSS_BOOTSTRAP INGESTION_INT_TEST_E2E=true INGESTION_INT_TEST_FLUSS=true INGESTION_INT_TEST_MANIFEST=true INGESTION_INT_TEST_PERF=true mvn -o test -pl 02_services/01_ingestion -am) >"$JAVA_LOG" 2>&1; then
 	echo "FAIL: Java suite failed or timed out — see $JAVA_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -658,8 +667,7 @@ echo "PASS: Java suite" | tee -a "$SUMMARY"
 # with the documented triple. Bootstrap defaults to the local stack — the Java step
 # above already requires it up (INGESTION_INT_TEST_FLUSS=true).
 DRILL_BOOTSTRAP="${FLUSS_BOOTSTRAP:-localhost:9123}"
-if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$PROJECT_ROOT' && \
-	FLUSS_BOOTSTRAP='$DRILL_BOOTSTRAP' MVN_FLAGS=-o make drill-live" >"$DRILL_LOG" 2>&1; then
+if ! (cd "$PROJECT_ROOT" && timeout -k 60 "$JAVA_TIMEOUT_SEC" env FLUSS_BOOTSTRAP="$DRILL_BOOTSTRAP" MVN_FLAGS=-o make drill-live) >"$DRILL_LOG" 2>&1; then
 	echo "FAIL: live Fluss drills (bootstrap $DRILL_BOOTSTRAP — is the stack up?) — see $DRILL_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -678,7 +686,7 @@ echo "PASS: live Fluss drills (common + gateway, bootstrap $DRILL_BOOTSTRAP)" | 
 fi
 if step_active 10; then
 echo "=== [10/19] full doc audit (make full-audit: scanners + sweeps + trio coherence) ===" | tee -a "$SUMMARY"
-if ! timeout 300 bash "$SCRIPT_DIR/full_audit.sh" >"$AUDIT_LOG" 2>&1; then
+if ! timeout -k 60 300 bash "$SCRIPT_DIR/full_audit.sh" >"$AUDIT_LOG" 2>&1; then
 	echo "FAIL: full doc audit — see $AUDIT_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -705,7 +713,7 @@ else
 	: "${FLUSS_BOOTSTRAP:=localhost:9123}"
 	export FLUSS_BOOTSTRAP
 fi
-if ! timeout "$DDL_SMOKE_TIMEOUT_SEC" python3 \
+if ! timeout -k 60 "$DDL_SMOKE_TIMEOUT_SEC" python3 \
 	"$SCRIPT_DIR/ddl_apply_smoke.py" >"$DDL_SMOKE_LOG" 2>&1; then
 	echo "FAIL: DDL apply exit-code smoke — see $DDL_SMOKE_LOG" | tee -a "$SUMMARY"
 	gate_fail
@@ -725,9 +733,11 @@ fi
 # group-writable and none root-owned (evidence_ownership_check.py). No cluster
 # needed; vacuous when no container-written records exist (host-side records
 # are out of scope). Also wired into docs-audit C15 + make evidence-ownership-check.
-if ! timeout 60 python3 "$SCRIPT_DIR/evidence_ownership_check.py" \
-	>>"$DDL_SMOKE_LOG" 2>&1; then
-	echo "FAIL: evidence ownership check — see $DDL_SMOKE_LOG" | tee -a "$SUMMARY"
+# Its own log (P6-776): sharing $DDL_SMOKE_LOG made a DDL SKIP + ownership FAIL
+# (or vice versa) unattributable, and the manifest listed only one path.
+if ! timeout -k 30 60 python3 "$SCRIPT_DIR/evidence_ownership_check.py" \
+	>"$OWNERSHIP_LOG" 2>&1; then
+	echo "FAIL: evidence ownership check — see $OWNERSHIP_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
 echo "PASS: evidence ownership check (container-written records group-writable)" | tee -a "$SUMMARY"
@@ -736,11 +746,8 @@ echo "PASS: evidence ownership check (container-written records group-writable)"
 fi
 if step_active 12; then
 echo "=== [12/19] SchemaAgreementTest + PerfBaselineTest explicit ===" | tee -a "$SUMMARY"
-if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
-	INGESTION_INT_TEST_PERF=true \
-	mvn -o test -pl 02_services/01_ingestion -am \
-	-Dtest='SchemaAgreementTest,DdlBootstrapSchemaAgreementTest,PerfBaselineTest' \
-	-Dsurefire.failIfNoSpecifiedTests=false" >"$SCHEMA_PERF_LOG" 2>&1; then
+SCHEMA_PERF_TIMEOUT_SEC="${SCHEMA_PERF_TIMEOUT_SEC:-1200}"
+if ! (cd "$CODE_DIR" && timeout -k 60 "$SCHEMA_PERF_TIMEOUT_SEC" env INGESTION_INT_TEST_PERF=true mvn -o test -pl 02_services/01_ingestion -am -Dtest='SchemaAgreementTest,DdlBootstrapSchemaAgreementTest,PerfBaselineTest' -Dsurefire.failIfNoSpecifiedTests=true) >"$SCHEMA_PERF_LOG" 2>&1; then
 	echo "FAIL: schema agreement / perf certification — see $SCHEMA_PERF_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -764,10 +771,8 @@ echo "PASS: SchemaAgreementTest + PerfBaselineTest (certification gates)" | tee 
 fi
 if step_active 13; then
 echo "=== [13/19] SIGTERM-drain regression explicit (ING-UNIT-023/024, CHG-015) ===" | tee -a "$SUMMARY"
-if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
-	mvn -o test -pl 02_services/01_ingestion -am \
-	-Dtest='BridgeShutdownRegressionTest,BridgeShutdownHookTest' \
-	-Dsurefire.failIfNoSpecifiedTests=false" >"$SHUTDOWN_LOG" 2>&1; then
+SHUTDOWN_TIMEOUT_SEC="${SHUTDOWN_TIMEOUT_SEC:-1200}"
+if ! (cd "$CODE_DIR" && timeout -k 60 "$SHUTDOWN_TIMEOUT_SEC" mvn -o test -pl 02_services/01_ingestion -am -Dtest='BridgeShutdownRegressionTest,BridgeShutdownHookTest' -Dsurefire.failIfNoSpecifiedTests=true) >"$SHUTDOWN_LOG" 2>&1; then
 	echo "FAIL: SIGTERM-drain regression (ING-UNIT-023/024) — see $SHUTDOWN_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -786,8 +791,7 @@ echo "PASS: SIGTERM-drain regression (ING-UNIT-023 in-process + ING-UNIT-024 rea
 fi
 if step_active 14; then
 echo "=== [14/19] Execution gateway module suite (unit + regression) ===" | tee -a "$SUMMARY"
-if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$CODE_DIR' && \
-	mvn -o test -pl 02_services/06_execution_gateway" >"$GATEWAY_LOG" 2>&1; then
+if ! (cd "$CODE_DIR" && timeout -k 60 "$JAVA_TIMEOUT_SEC" mvn -o test -pl 02_services/06_execution_gateway) >"$GATEWAY_LOG" 2>&1; then
 	echo "FAIL: execution gateway suite — see $GATEWAY_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -809,7 +813,7 @@ echo "=== [15/19] Nautilus (Rust executor) suite — offline against the pinned 
 # turn it into a skip.
 # --features paper: the t9-paper bins are `required-features = ["paper"]` (P3-173), so the
 # default build skips them; passing the feature keeps their compile + unit coverage in the gate.
-if ! timeout "$CARGO_TIMEOUT_SEC" bash -c "cd '$EXECUTOR_DIR' && cargo test --offline --features paper" >"$NAUTILUS_LOG" 2>&1; then
+if ! (cd "$EXECUTOR_DIR" && timeout -k 60 "$CARGO_TIMEOUT_SEC" cargo test --offline --features paper) >"$NAUTILUS_LOG" 2>&1; then
 	echo "FAIL: nautilus Rust suite — see $NAUTILUS_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -827,7 +831,7 @@ echo "=== [16/19] Compute module suite (Fluss/fingerprint/candle unit + integrat
 # 02_services/02_compute is deliberately NOT in the code/pom.xml reactor (R-272),
 # so it is tested from its own pom; common/ingestion resolve from ~/.m2 like the
 # gateway suite does.
-if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$COMPUTE_DIR' && mvn -o test" >"$COMPUTE_LOG" 2>&1; then
+if ! (cd "$COMPUTE_DIR" && timeout -k 60 "$JAVA_TIMEOUT_SEC" mvn -o test) >"$COMPUTE_LOG" 2>&1; then
 	echo "FAIL: compute suite — see $COMPUTE_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -845,7 +849,7 @@ fi
 # without changing a line in the tree.
 if step_active 17; then
 echo "=== [17/19] pin discipline (exact versions and digests across the tree) ===" | tee -a "$SUMMARY"
-if ! timeout 300 make -C "$PROJECT_ROOT" pin-check >"$PIN_LOG" 2>&1; then
+if ! timeout -k 60 300 make -C "$PROJECT_ROOT" pin-check >"$PIN_LOG" 2>&1; then
 	echo "FAIL: pin discipline — see $PIN_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -868,11 +872,11 @@ fi
 if step_active 18; then
 echo "=== [18/19] compose images: build all 8 + content stamps + staleness ===" | tee -a "$SUMMARY"
 if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
-	if ! timeout "$IMAGES_TIMEOUT_SEC" make -C "$PROJECT_ROOT" images >"$IMAGES_LOG" 2>&1; then
+	if ! timeout -k 60 "$IMAGES_TIMEOUT_SEC" make -C "$PROJECT_ROOT" images >"$IMAGES_LOG" 2>&1; then
 		echo "FAIL: compose image build (a broken image cannot fail the certificate) — see $IMAGES_LOG" | tee -a "$SUMMARY"
 		gate_fail
 	fi
-	if ! timeout 300 make -C "$PROJECT_ROOT" check-image-stale >"$STALE_ALL_LOG" 2>&1; then
+	if ! timeout -k 60 300 make -C "$PROJECT_ROOT" check-image-stale >"$STALE_ALL_LOG" 2>&1; then
 		echo "FAIL: an image is stale or carries no content stamp after the build — see $STALE_ALL_LOG" | tee -a "$SUMMARY"
 		gate_fail
 	fi
@@ -891,7 +895,7 @@ fi
 # the suites that depend on it.
 if step_active 19; then
 echo "=== [19/19] mock-arrow broker suite (offline mock used by the gateway/bridge slices) ===" | tee -a "$SUMMARY"
-if ! timeout "$JAVA_TIMEOUT_SEC" bash -c "cd '$MOCK_ARROW_DIR' && mvn -o test" >"$MOCK_ARROW_LOG" 2>&1; then
+if ! (cd "$MOCK_ARROW_DIR" && timeout -k 60 "$JAVA_TIMEOUT_SEC" mvn -o test) >"$MOCK_ARROW_LOG" 2>&1; then
 	echo "FAIL: mock-arrow suite — see $MOCK_ARROW_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -930,6 +934,9 @@ else
 fi
 echo "Evidence:" | tee -a "$SUMMARY"
 echo "  Static: ${STATIC_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Compose config: ${COMPOSE_CONFIG_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Docker build smoke: ${DOCKER_BUILD_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  E2E build: ${E2E_BUILD_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Python suites: ${PY_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Entrypoint: ${ENTRYPOINT_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Go:   ${GO_LOG:-not-run}" | tee -a "$SUMMARY"
@@ -937,6 +944,7 @@ echo "  Java: ${JAVA_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  full doc audit: ${AUDIT_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Image staleness: ${IMAGE_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  DDL smoke: ${DDL_SMOKE_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Evidence ownership: ${OWNERSHIP_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Schema/Perf: ${SCHEMA_PERF_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  SIGTERM-drain: ${SHUTDOWN_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Gateway suite: ${GATEWAY_LOG:-not-run}" | tee -a "$SUMMARY"
