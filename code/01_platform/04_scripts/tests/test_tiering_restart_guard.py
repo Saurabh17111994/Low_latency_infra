@@ -47,8 +47,15 @@ class TieringRestartGuardTest(unittest.TestCase):
         self.assertIn('"CANCELING"', script)
 
         quick = (ROOT / "code" / "01_platform" / "04_scripts" / "chaos" / "chaos-02-tm-kill.sh").read_text()
+        # 2026-09-15 rework (wave 27, CHG-167): the second pin named the retired
+        # one-liner (`any(j.get("state") == "RUNNING"`). The intent it protected is
+        # unchanged and is now pinned against the rewrite: the live leg asks Flink
+        # which jobs are RUNNING and requires one of the pre-kill ids specifically
+        # (a freshly submitted job is not a restore). The guard message above is
+        # restored verbatim in the script.
         self.assertIn("curl and python3 are required for the recovery probe", quick)
-        self.assertIn("any(j.get(\"state\") == \"RUNNING\"", quick)
+        self.assertIn('if job.get("state") == "RUNNING"', quick)
+        self.assertIn('grep -qxF "${jid}" "${pre_file}"', quick)
 
     def test_warmup_gate_polls_metric_report_grace_before_failing(self):
         # 2026-09-01 (attempt 20260901-125337): on a freshly restarted
