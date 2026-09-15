@@ -70,29 +70,40 @@ def main() -> int:
     if not ALERT_FILE.exists():
         print(f"exit 3: alert file missing: {ALERT_FILE}", file=sys.stderr)
         return 3
-    alerts = json.loads(ALERT_FILE.read_text())
+    try:
+        alerts = json.loads(ALERT_FILE.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"exit 3: cannot load {ALERT_FILE}: {e}", file=sys.stderr)
+        return 3
     if not isinstance(alerts, list) or not alerts:
         print("exit 3: alert file must be a non-empty JSON array", file=sys.stderr)
         return 3
     for a in alerts:
-        if not a.get("name") or not a.get("stream_name"):
-            print(f"exit 3: alert missing name/stream_name: {a}", file=sys.stderr)
+        if not isinstance(a, dict):
+            print(f"exit 3: alert file elements must be objects, got {type(a).__name__}", file=sys.stderr)
             return 3
+        # stream_type is printed below and sent to O2: validate it here so a typo
+        # is exit 3, not a KeyError traceback (P6-779).
+        for field in ("name", "stream_name", "stream_type"):
+            if not a.get(field):
+                print(f"exit 3: alert missing {field}: {a}", file=sys.stderr)
+                return 3
 
+    # The list is a read-only GET, so dry-run fetches it too: a plan that says
+    # "create" for an alert that already exists is a wrong plan (P6-778).
     existing: dict[str, dict] = {}
-    if not args.dry_run:
-        status, body = _api(base, org, user, pwd, "v2/alerts")
-        if status == 200:
-            try:
-                data = json.loads(body)
-                # O2 returns {"list": [...]} or {"data": [...]}
-                lst = data.get("list") or data.get("data") or data.get("alerts") or []
-                if isinstance(lst, list):
-                    existing = {x.get("name"): x for x in lst if x.get("name")}
-            except Exception:
-                existing = {}
-        else:
-            print(f"warn: list alerts failed ({status}): {body[:200]} — treating as empty", file=sys.stderr)
+    status, body = _api(base, org, user, pwd, "v2/alerts")
+    if status == 200:
+        try:
+            data = json.loads(body)
+            # O2 returns {"list": [...]} or {"data": [...]}
+            lst = data.get("list") or data.get("data") or data.get("alerts") or []
+            if isinstance(lst, list):
+                existing = {x.get("name"): x for x in lst if x.get("name")}
+        except Exception:
+            existing = {}
+    else:
+        print(f"warn: list alerts failed ({status}): {body[:200]} — treating as empty", file=sys.stderr)
 
     created = updated = untouched = 0
     for alert in alerts:
@@ -115,8 +126,11 @@ def main() -> int:
                 return 1
             created += 1
         elif args.force:
-            # PUT by id if we can find it, else POST is already handled
+            # PUT needs the id O2 assigned; without one the update cannot happen.
             aid = existing[name].get("id") or existing[name].get("alert_id")
+            if not aid:
+                print(f"warn: no id for existing alert '{name}' — force update skipped, "
+                      f"counted as untouched", file=sys.stderr)
             if aid:
                 status, body = _api(base, org, user, pwd, f"v2/alerts/{aid}", "PUT", alert)
                 if status == 200:
