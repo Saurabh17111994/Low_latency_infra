@@ -785,7 +785,7 @@ echo "stage-capture: evidence complete (all declared files have data rows, prom 
 # DURATION_S+30s of iostat; the loop ended at DURATION_S — it exits on its
 # own; never kill mid-write or the TSV loses its tail). Non-fatal WARN.
 wait "$IO_PROBE_PID" 2>/dev/null || \
-  echo "stage-capture: WARN — io-latency probe failed (see $IO_PROBE_LOG; disk-latency evidence DEGRADED)"
+  echo "stage-capture: WARN — io-latency probe failed (see $IO_PROBE_LOG; disk-latency evidence DEGRADED)" >&2
 IO_PROBE_PID=""   # probe finished on its own: the EXIT trap must not signal a recycled pid
 
 # Single-pane push: checkpoint events -> OpenObserve flink_checkpoints
@@ -794,7 +794,7 @@ IO_PROBE_PID=""   # probe finished on its own: the EXIT trap must not signal a r
 if [ -s "$OUT_DIR/flink-checkpoints.jsonl" ]; then
   python3 - "$OUT_DIR/flink-checkpoints.jsonl" <<'PYEOF2' | \
     python3 "$HERE_SC/o2_ingest.py" flink_checkpoints || \
-    echo "stage-capture: WARN — O2 checkpoint push failed (raw truth: $OUT_DIR/flink-checkpoints.jsonl)"
+    echo "stage-capture: WARN — O2 checkpoint push failed (raw truth: $OUT_DIR/flink-checkpoints.jsonl)" >&2
 import json, sys
 last = None
 with open(sys.argv[1], encoding="utf-8") as fh:
