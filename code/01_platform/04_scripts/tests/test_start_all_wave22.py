@@ -81,20 +81,26 @@ class StartAllSandbox:
                       mvn_rc: int = 0) -> None:
         self.bin.mkdir(parents=True, exist_ok=True)
         self.call_log = self.tmp / "calls.log"
+        self.argv_log = self.tmp / "argv.log"
+        self.cat_fd_log = self.tmp / "cat-fd.log"
         self.env_dump = self.tmp / "java-env.txt"
         self.java_pid_file = self.tmp / "java.pid"
         tablet_out = "fake-tablet-id\n" if tablet else ""
         ps_exit = "0" if compose else "1"
         write = self.bin.joinpath
+        # argv.log records one ARG:[<argument>] line per argument, so a test can
+        # assert how many words a flag became after the script split it.
         write("go").write_text(
             "#!/usr/bin/env bash\n"
             f"echo \"go $*\" >>{self.call_log}\n"
+            f"for a in \"$@\"; do printf 'ARG:[%s]\\n' \"$a\"; done >>{self.argv_log}\n"
             f"touch {self.root}/code/02_services/01_ingestion/go-bridge/arrow-bridge\n"
             f"chmod +x {self.root}/code/02_services/01_ingestion/go-bridge/arrow-bridge\n",
         )
         write("mvn").write_text(
             "#!/usr/bin/env bash\n"
             f"echo \"mvn $*\" >>{self.call_log}\n"
+            f"for a in \"$@\"; do printf 'ARG:[%s]\\n' \"$a\"; done >>{self.argv_log}\n"
             + ("exit %d\n" % mvn_rc if not make_jar else
                f"mkdir -p {self.root}/code/02_services/01_ingestion/target\n"
                f"touch {self.root}/code/02_services/01_ingestion/target/ingestion.jar\n"),
@@ -110,6 +116,20 @@ class StartAllSandbox:
             "  *) exit 1 ;;\n"
             "esac\n",
         )
+        # P6-861 probe: the shell opens the redirect target with the process
+        # umask *before* exec'ing cat, so the mode of /proc/self/fd/1 here is the
+        # mode the file was created with — the window the finding is about.
+        real_cat = shutil.which("cat") or "/bin/cat"
+        # fd 3 duplicates the real stdout: inside a command substitution fd 1 is
+        # the substitution's pipe, so it cannot be read from there.
+        write("cat").write_text(
+            "#!/usr/bin/env bash\n"
+            "exec 3>&1\n"
+            "_target=\"$(readlink /proc/self/fd/3 2>/dev/null)\"\n"
+            "_mode=\"$(stat -c %a \"$_target\" 2>/dev/null)\"\n"
+            f"printf 'CATFD:%s:%s\\n' \"$_mode\" \"$_target\" >>{self.cat_fd_log}\n"
+            f'exec {real_cat} "$@"\n',
+        )
         write("java").write_text(
             "#!/usr/bin/env bash\n"
             f"echo $$ >{self.java_pid_file}\n"
@@ -122,7 +142,7 @@ class StartAllSandbox:
                "sleep 60 & _child=$!\n"
                "wait \"$_child\"\n" if java_sleep else "exit 0\n"),
         )
-        for name in ("go", "mvn", "docker", "java"):
+        for name in ("go", "mvn", "docker", "java", "cat"):
             (self.bin / name).chmod(0o755)
 
     REQUIRED = {
@@ -247,7 +267,10 @@ class StartAllWave22(unittest.TestCase):
 
     def test_template_is_private_from_creation(self) -> None:
         # No credentials file and no compose .env: the script writes a template
-        # and stops. It must be 0600, and the heredoc must not expand.
+        # and stops. It must be 0600 *at creation* — a chmod after the write
+        # leaves a window where the file exists world-readable, and the end-state
+        # mode cannot see that window. The cat stub reports the mode of fd 1,
+        # which is the mode the shell created the redirect target with.
         (self.box.root / "code/01_platform/01_docker/.env").unlink()
         target = self.box.tmp / "home/new-credentials.env"
         proc = self.box.run(SECRETS_FILE=str(target))
@@ -255,6 +278,13 @@ class StartAllWave22(unittest.TestCase):
         self.assertTrue(target.is_file())
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o600)
         self.assertIn("ARROW_APP_ID=", target.read_text())
+
+        probe = self.box.cat_fd_log.read_text() if self.box.cat_fd_log.exists() else ""
+        created = [line for line in probe.splitlines() if line.endswith(str(target))]
+        self.assertTrue(created, f"no creation-time mode recorded for {target}: {probe!r}")
+        self.assertTrue(
+            created[0].startswith("CATFD:600:"),
+            "the template existed in a wider mode before the chmod: " + created[0])
 
     # ── readiness (P6-698/701) ───────────────────────────────────────────────
     def test_open_port_without_a_running_tablet_is_not_ready(self) -> None:
@@ -272,6 +302,11 @@ class StartAllWave22(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertIn("already running on", proc.stdout)
         self.assertTrue(self.box.java_pid_file.exists(), "the pipeline never started")
+        # TCP reachability alone is not the claim: the tablet container must have
+        # been asked for, which is what separates this from the pre-fix probe.
+        calls = self.box.call_log.read_text()
+        self.assertIn("ps -q --status running fluss-tablet", calls,
+                      "readiness passed without probing for the tablet container")
 
     def test_compose_without_the_plugin_degrades_loudly(self) -> None:
         # A stack started outside compose: no container for `ps` to find and no
@@ -293,46 +328,64 @@ class StartAllWave22(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("produced no jar", proc.stderr)
 
-    def test_up_to_date_outputs_skip_both_builds(self) -> None:
+    def test_up_to_date_outputs_skip_and_stale_sources_rebuild(self) -> None:
+        """Both directions of the staleness check in one run.
+
+        The pre-fix script rebuilt on every start, so the skip leg fails against
+        it; a script that skipped unconditionally would fail the rebuild leg.
+        """
         bridge = self.box.root / "code/02_services/01_ingestion/go-bridge/arrow-bridge"
         jar = self.box.root / "code/02_services/01_ingestion/target/ingestion.jar"
         jar.parent.mkdir(parents=True, exist_ok=True)
-        bridge.touch()
+        for artefact in (bridge, jar):
+            artefact.touch()
         bridge.chmod(0o755)
-        jar.touch()
         future = time.time() + 10
-        os.utime(bridge, (future, future))
-        os.utime(jar, (future, future))
-        proc = self.box.run()
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("Go bridge up to date", proc.stdout)
-        self.assertIn("Java jar up to date", proc.stdout)
-        calls = self.box.call_log.read_text() if self.box.call_log.exists() else ""
-        self.assertNotIn("go build", calls)
-        self.assertNotIn("mvn ", calls)
+        for artefact in (bridge, jar):
+            os.utime(artefact, (future, future))
 
-    def test_stale_source_triggers_a_rebuild(self) -> None:
-        bridge = self.box.root / "code/02_services/01_ingestion/go-bridge/arrow-bridge"
-        jar = self.box.root / "code/02_services/01_ingestion/target/ingestion.jar"
-        jar.parent.mkdir(parents=True, exist_ok=True)
-        bridge.touch()
-        bridge.chmod(0o755)
-        jar.touch()
-        old = time.time() - 3600
-        os.utime(bridge, (old, old))
-        os.utime(jar, (old, old))
-        proc = self.box.run()
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        calls = self.box.call_log.read_text()
-        self.assertIn("go build", calls)
-        self.assertIn("mvn ", calls)
+        fresh = self.box.run()
+        self.assertEqual(fresh.returncode, 0, fresh.stderr)
+        fresh_calls = self.box.call_log.read_text() if self.box.call_log.exists() else ""
+        self.assertIn("Go bridge up to date", fresh.stdout)
+        self.assertIn("Java jar up to date", fresh.stdout)
+        self.assertNotIn("go build", fresh_calls)
+        self.assertNotIn("mvn ", fresh_calls)
 
-    def test_flags_survive_as_one_argument_each(self) -> None:
-        proc = self.box.run(GO_FLAGS="-tags=netgo -ldflags=-s", MVN_FLAGS="-o -DskipTests=false")
+        # Sources newer than the artefacts: both builds must run again.
+        self.box.call_log.unlink()
+        newer = future + 10
+        for source in (self.box.root / "code/02_services/01_ingestion/go-bridge/main.go",
+                       self.box.root / "code/02_services/01_ingestion/src/main/App.java"):
+            os.utime(source, (newer, newer))
+        stale = self.box.run()
+        self.assertEqual(stale.returncode, 0, stale.stderr)
+        stale_calls = self.box.call_log.read_text()
+        self.assertIn("go build", stale_calls)
+        self.assertIn("mvn ", stale_calls)
+        self.assertNotIn("Go bridge up to date", stale.stdout)
+        self.assertNotIn("Java jar up to date", stale.stdout)
+
+    def test_flags_split_once_without_globbing(self) -> None:
+        """Flags reach the tools as the caller wrote them.
+
+        The pre-fix form put `$GO_FLAGS` straight into the command line, so the
+        shell word-split *and* pathname-expanded it: a word with a glob
+        metacharacter became a filename from the bridge directory. The array form
+        splits once and never globs. Quotes inside GO_FLAGS are still not
+        interpreted — pass one flag per word.
+        """
+        bridge_dir = self.box.root / "code/02_services/01_ingestion/go-bridge"
+        (bridge_dir / "flagtrap").write_text("")
+        proc = self.box.run(GO_FLAGS="-tags=netgo -ldflags=-s flag*",
+                            MVN_FLAGS="-o -Dmaven.repo.local=/tmp/m2 -DskipTests=false")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        calls = self.box.call_log.read_text()
-        self.assertIn("go build -tags=netgo -ldflags=-s -o arrow-bridge .", calls)
-        self.assertIn("mvn -o -DskipTests=false -q", calls)
+        argv = self.box.argv_log.read_text()
+        for expected in ("ARG:[-tags=netgo]", "ARG:[-ldflags=-s]", "ARG:[flag*]",
+                         "ARG:[-o]", "ARG:[-Dmaven.repo.local=/tmp/m2]",
+                         "ARG:[-DskipTests=false]"):
+            self.assertIn(expected, argv, f"{expected} is missing from the argv the tool saw")
+        self.assertNotIn("ARG:[flagtrap]", argv, "the flag word was glob-expanded")
 
     # ── signal handling (P6-699/706) ────────────────────────────────────────
     def test_sigterm_stops_the_java_child(self) -> None:

@@ -245,9 +245,12 @@ fi
 
 # ── 3. Build bridge + jar if stale ────────────────────────────────────────────
 mkdir -p "$LOG_DIR"
-# P6-703: GO_FLAGS/MVN_FLAGS are word-split once into arrays, so a multi-word
-# or quoted flag survives. `${ARR[@]+...}` keeps the empty-array case safe on
-# bash < 4.4 under `set -u` (macOS ships 3.2).
+# P6-703: GO_FLAGS/MVN_FLAGS are split once into arrays, so the flags reach the
+# tool exactly as written and the shell never pathname-expands one (the old
+# unquoted `$GO_FLAGS` turned a word like `flag*` into a filename from the cwd).
+# Quotes inside the variable are not interpreted — pass one flag per word.
+# `${ARR[@]+...}` keeps the empty-array case safe on bash < 4.4 under `set -u`
+# (macOS ships 3.2).
 GO_ARGS=()
 if [ -n "$GO_FLAGS" ]; then read -r -a GO_ARGS <<<"$GO_FLAGS"; fi
 MVN_ARGS=()
