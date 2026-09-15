@@ -12,11 +12,23 @@
 #                    histograms, so the mean is the confirmed fallback.
 #   - decode_errors delta over the window
 #
-# PASS (every window): rows >= 15,000 AND decode_errors delta == 0
-#                      AND p99 < 1000 ms.
+# PASS (every window): rows >= MIN_RATE x EXPECTED_RPS x elapsed_s AND
+#                      decode_errors delta == 0 AND p99 < 1000 ms.
+#
+# P6-001: this gate used to be a flat `rows >= 15000` over a hardcoded 60s — an
+# effective 250 rows/s, ~82x below the 20,480 frames/s this run generates
+# (1024 subscribed ids x 20 Hz). A PASS therefore proved almost nothing: the
+# stream could arrive at ~2% of the expected rate, or stop altogether for most
+# of the window, and the bench still went green. The floor is now derived from
+# the expected rate and the window length actually measured (P6-032).
+#
+# Env overrides: BENCH_EXPECTED_RPS (20480), BENCH_MIN_RATE (0.90),
+#                BENCH_WINDOW_S (60), OUT_DIR, O2_BASE_URL,
+#                INGESTION_CONTAINER_NAME, INSTRUMENT_MANIFEST_HOST_PATH,
+#                BENCH_BASELINE_SETTLE_S (15), BENCH_WINDOWS (3).
 #
 # The soak suite (run-full-suite.sh) is untouched: this bench only builds a
-# fresh ingestion image, runs one container for ~3 minutes of measurement,
+# fresh ingestion image, runs one container for 3 x 60s of measurement,
 # and tears everything down.
 #
 # docker-compose.bench.yml (bench-only, not in the suite) raises
@@ -38,9 +50,24 @@ DOCKER_DIR="$CODE_DIR/01_platform/01_docker"
 BRIDGE_DIR="$CODE_DIR/02_services/01_ingestion/go-bridge"
 INGESTION_DIR="$CODE_DIR/02_services/01_ingestion"
 JAR="$INGESTION_DIR/target/ingestion.jar"
-MANIFEST="/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv"
-O2_BASE="http://localhost:5080"
-INGESTION_CONTAINER="01_docker-ingestion-1"
+# P6-309: derived from this checkout (the same file docker-compose.soak.yml
+# bind-mounts to /instruments/NSE_CM_EQUITY.csv) and overridable with the
+# variable the compose files themselves honour. The old absolute path existed on
+# one machine only, and nothing but this existence check ever read it.
+MANIFEST="${INSTRUMENT_MANIFEST_HOST_PATH:-$PROJECT_ROOT/../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv}"
+# P6-310: both overridable — renaming the compose project or moving O2 used to
+# leave the bench unable to point anywhere else.
+O2_BASE="${O2_BASE_URL:-http://localhost:5080}"
+INGESTION_CONTAINER="${INGESTION_CONTAINER_NAME:-${COMPOSE_PROJECT_NAME:-01_docker}-ingestion-1}"
+# P6-001/P6-032: the rate this bench claims to generate (see the faketool
+# invocation below: 1024 subscribed ids x 20 Hz) and the share of it that must
+# actually arrive for a window to pass.
+EXPECTED_RPS="${BENCH_EXPECTED_RPS:-20480}"
+MIN_RATE="${BENCH_MIN_RATE:-0.90}"
+WINDOW_S="${BENCH_WINDOW_S:-60}"
+# Three windows is the documented measurement; the count is a knob so a smoke
+# run (or a test) can prove the gate wiring without paying three of them.
+WINDOW_COUNT="${BENCH_WINDOWS:-3}"
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="${OUT_DIR:-$PROJECT_ROOT/logs/soak/bench-$STAMP}"
@@ -50,11 +77,22 @@ RESULT_FILE="$OUT/bench/result.txt"
 TSV="$OUT/bench/bench-throughput.tsv"
 : > "$RUN_LOG"
 
-# Never echo credentials: O2 auth header value read from .env, kept in a var.
-# M-13 (2026-08-31): O2_AUTH_BASIC moved from .env to secrets.env — read
-# .env first, then fall back to secrets.env (compose env-file order).
-O2_AUTH="$(awk -F= '/^O2_AUTH_BASIC=/{print $2; exit}' "$DOCKER_DIR/.env" 2>/dev/null || true)"
-[ -z "$O2_AUTH" ] && O2_AUTH="$(awk -F= '/^O2_AUTH_BASIC=/{print $2; exit}' "$DOCKER_DIR/secrets.env" 2>/dev/null || true)"
+# P6-028: strip the key prefix instead of splitting on '='. `awk -F=` returned
+# only the text before the value's FIRST '=', so a base64 secret ending in '='
+# or '==' lost that padding and every request 401'd; quotes and CR survived too.
+# (same reader as run-full-suite.sh)
+read_o2_auth() { # $1 = env file
+	local v
+	v="$(awk '/^O2_AUTH_BASIC=/{sub(/^[^=]*=/,""); gsub(/\r/,""); gsub(/^["'"'"']|["'"'"']$/,""); print; exit}' "$1" 2>/dev/null || true)"
+	printf '%s' "$v"
+}
+O2_AUTH="$(read_o2_auth "$DOCKER_DIR/.env")"
+[ -z "$O2_AUTH" ] && O2_AUTH="$(read_o2_auth "$DOCKER_DIR/secrets.env")"
+# P6-029: the credential now travels in a 0600 curl config file (-K) instead of
+# a command line, where `ps`/`/proc/<pid>/cmdline` exposed it to every local
+# user for the duration of the call. The EXIT trap removes the file.
+O2_AUTH_FILE="$(umask 077; mktemp)"
+printf 'header = "Authorization: Basic %s"\n' "$O2_AUTH" > "$O2_AUTH_FILE"
 
 # Everything lands in run.log AND the console.
 exec > >(tee -a "$RUN_LOG") 2>&1
@@ -63,8 +101,10 @@ echo "=== bench-throughput start $STAMP (out: $OUT)"
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
-port_open() { # $1=host $2=port — listener check via ss
-	ss -ltn 2>/dev/null | grep -qE "[::0-9.*]:$2[[:space:]]"
+port_open() { # $1=host $2=port — TCP connect; the host argument is honoured
+	# 2>/dev/null: callers ask about ports they expect to be CLOSED (preflight
+	# checks, teardown verification) — bash's connect errors are not diagnostics.
+	timeout 2 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' _ "$1" "$2" 2>/dev/null
 }
 
 # Copied verbatim from run-full-suite.sh (o2_query): $1 = SQL → latest value
@@ -81,7 +121,7 @@ print(json.dumps({
               "size": 5}}))
 PY
 )"
-	val="$(curl -s -m 15 -H "Authorization: Basic $O2_AUTH" -H 'Content-Type: application/json' \
+	val="$(curl -s -m 15 -K "$O2_AUTH_FILE" -H 'Content-Type: application/json' \
 		-X POST "$O2_BASE/api/default/_search?type=metrics" -d "$payload" 2>/dev/null \
 		| python3 -c 'import json,sys
 try:
@@ -97,9 +137,12 @@ except Exception:
 	echo "${val:-UNAVAILABLE}"
 }
 
-# Non-numeric O2 replies (UNAVAILABLE / NO_HITS / NO_VALUE) → empty.
-# O2 serves counters as floats ("5637597.0") — coerce to integer for arithmetic.
-num() { case "$1" in ''|*[!0-9.-]*) echo "" ;; *) printf '%.0f' "$1" ;; esac; }
+# Non-numeric O2 replies (UNAVAILABLE / NO_HITS / NO_VALUE) → empty, which is
+# what the callers test for. O2 serves counters as floats ("5637597.0").
+# P6-711: a real numeric match. The old character-class test accepted "-", ".",
+# "1.2.3" and "--5" (printf then warned and coerced them to 0/1) and rejected
+# scientific notation that O2 can legitimately serve ("1e6").
+num() { awk -v v="$1" 'BEGIN { if (v ~ /^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/) printf "%.0f\n", v }'; }
 
 FAILED=0
 RESULT="PASS"
@@ -112,10 +155,11 @@ fail() { FAILED=1; RESULT="FAIL"; echo "!! $*"; }
 FAKETOOL_PID=""
 cleanup() {
 	local rc=$?
-	if [ "$WINDOWS_DONE" -ne 3 ]; then
+	rm -f "${O2_AUTH_FILE:-}"
+	if [ "$WINDOWS_DONE" -ne "$WINDOW_COUNT" ]; then
 		FAILED=1
 		RESULT="FAIL"
-		echo "!! bench aborted before completing all 3 windows ($WINDOWS_DONE/3) — result forced to FAIL"
+		echo "!! bench aborted before completing all $WINDOW_COUNT windows ($WINDOWS_DONE/$WINDOW_COUNT) — result forced to FAIL"
 	fi
 	echo "-- teardown ($(now))"
 	[ -n "$FAKETOOL_PID" ] && kill "$FAKETOOL_PID" 2>/dev/null || true
@@ -135,11 +179,19 @@ cleanup() {
 		echo "evidence: $OUT"
 		echo "---"
 		echo "command: faketool -port 8899 -real-rate -real-rate-hz 20 (1024 ids x 20Hz = 20,480 frames/s)"
-		echo "gates (every window): rows >= 15000, decode_errors delta == 0, p99 < 1000 ms"
+		echo "gates (every window): rows >= ${MIN_RATE} x ${EXPECTED_RPS}/s x elapsed_s, decode_errors delta == 0, p99 < 1000 ms"
 		[ -n "$WINDOW_FAILS" ] && echo "failures: $WINDOW_FAILS"
 		[ -f "$TSV" ] && cat "$TSV"
 	} > "$RESULT_FILE"
 	echo "=== bench-throughput end — $RESULT (result: $RESULT_FILE)"
+	# P6-030: `rc` is only the status the script had already exited with. When the
+	# failure is detected HERE — the broker would not die, port 8899 stayed busy,
+	# or a window was skipped — rc is still 0 on the PASS path, and `exit 0` told
+	# CI the bench was green while result.txt said FAIL.
+	if [ "$rc" -eq 0 ] && [ "$FAILED" = 1 ]; then
+		echo "!! teardown detected a failure the exit path did not — exiting 1"
+		rc=1
+	fi
 	exit "$rc"
 }
 trap cleanup EXIT
@@ -152,7 +204,12 @@ command -v go >/dev/null || { echo "!! go missing"; FAILED=1; }
 command -v mvn >/dev/null || { echo "!! mvn missing"; FAILED=1; }
 command -v python3 >/dev/null || { echo "!! python3 missing"; FAILED=1; }
 command -v curl >/dev/null || { echo "!! curl missing"; FAILED=1; }
-java -version 2>&1 | grep -q 'version "17' || { echo "!! java 17 missing"; FAILED=1; }
+command -v timeout >/dev/null || { echo "!! timeout missing"; FAILED=1; }
+# P6-712: accept any JDK >= 17. Grepping for the literal 'version "17' rejected
+# 21 and 25 even though the build runs on them.
+JAVA_MAJOR="$(java -version 2>&1 | awk -F'"' '/version/ {print $2; exit}' | awk -F. '{print ($1 == "1") ? $2 : $1}')"
+[ -n "$JAVA_MAJOR" ] && [ "$JAVA_MAJOR" -ge 17 ] 2>/dev/null \
+	|| { echo "!! java >= 17 required (found: ${JAVA_MAJOR:-none})"; FAILED=1; }
 port_open localhost 9123 || { echo "!! Fluss :9123 not reachable"; FAILED=1; }
 [ -n "$O2_AUTH" ] || { echo "!! O2_AUTH_BASIC missing from .env"; FAILED=1; }
 [ -f "$MANIFEST" ] || { echo "!! manifest not found: $MANIFEST"; FAILED=1; }
@@ -200,19 +257,32 @@ echo "=== ingestion container up (fresh image)"
 
 CONTAINER_HEALTH="none"
 for _ in $(seq 1 60); do
-	CONTAINER_HEALTH="$(docker inspect -f '{{.State.Health.Status}}' "$INGESTION_CONTAINER" 2>/dev/null || echo none)"
-	[ "$CONTAINER_HEALTH" = healthy ] && break
+	# P6-313: an image with no HEALTHCHECK has no .State.Health, so the old
+	# template errored, normalized to "none", and the bench always failed on a
+	# container that was up. Report Running when there is no health field.
+	CONTAINER_HEALTH="$(docker inspect -f \
+		'{{if .State.Health}}{{.State.Health.Status}}{{else}}running={{.State.Running}}{{end}}' \
+		"$INGESTION_CONTAINER" 2>/dev/null || echo none)"
+	case "$CONTAINER_HEALTH" in
+		healthy|running=true) break ;;
+	esac
 	sleep 5
 done
 echo "container health: $CONTAINER_HEALTH"
-[ "$CONTAINER_HEALTH" = healthy ] || { fail "container not healthy"; exit 1; }
+case "$CONTAINER_HEALTH" in
+	healthy|running=true) ;;
+	*) fail "container not healthy (state: $CONTAINER_HEALTH)"; exit 1 ;;
+esac
 
 # Full 1024-token subscription ack in the container journal (message field).
 ACKS=0
 for _ in $(seq 1 60); do
 	[ -f "$OUT/bench/journal/ingestion.json" ] && {
-		ACKS="$(grep -cE 'subscription_ack.*acknowledged[=:][[:space:]]?1024' \
-			"$OUT/bench/journal/ingestion.json" 2>/dev/null || true)"
+		# P6-314: the old pattern matched a bare `1024` with at most one optional
+		# space, so `acknowledged=10240` also counted, and it counted matching
+		# LINES rather than acks. Anchor the token and allow any whitespace.
+		ACKS="$(grep -oE 'subscription_ack.*acknowledged[=:][[:space:]]*1024\b' \
+			"$OUT/bench/journal/ingestion.json" 2>/dev/null | wc -l)"
 		[ "${ACKS:-0}" -ge 1 ] && break
 	}
 	sleep 1
@@ -224,83 +294,145 @@ echo "journal subscription acks (acknowledged=1024): ${ACKS:-0}"
 # The OTLP append counter restarts per process; O2 may still serve the previous
 # process's last point for a few seconds after start. Settle past one emitter
 # interval (10s) so baseline belongs to THIS container.
-echo "=== baseline settle (15s for fresh OTLP counter)"
-sleep 15
+# P6-315: the settle is also the seam the tests use to prove the baseline is
+# validated — 15s is one emitter interval, which no test needs to pay.
+SETTLE_S="${BENCH_BASELINE_SETTLE_S:-15}"
+echo "=== baseline settle (${SETTLE_S}s for fresh OTLP counter)"
+sleep "$SETTLE_S"
 echo "=== baseline (O2)"
 CNT0="$(num "$(o2_query 'select value from "append_latency_ms_count" order by _timestamp desc limit 1')")"
 ERR0="$(num "$(o2_query 'select value from "decode_errors" order by _timestamp desc limit 1')")"
 echo "baseline: append_latency_ms_count=$CNT0 decode_errors=$ERR0"
+# P6-315: this is the "is O2 serving THIS run's metrics?" probe, and it used to
+# be echoed and ignored — an O2 that answered nothing still burned the full ~3
+# minutes failing window after window. Fail here instead, while it is cheap.
+if [ -z "$CNT0" ] || [ -z "$ERR0" ]; then
+	fail "baseline unavailable (count='${CNT0:-}' errors='${ERR0:-}') from $O2_BASE — is O2 up and the emitter running?"
+	exit 1
+fi
 
-# ── Three 60s measurement windows ────────────────────────────────────────────
-echo "=== measurement: 3 x 60s windows"
+# ── Three measurement windows ────────────────────────────────────────────────
+echo "=== measurement: ${WINDOW_COUNT} x ${WINDOW_S}s windows"
 {
-	echo -e "window\trows_s\tp50_ms\tp99_ms\tdecode_errors_delta"
+	echo -e "window\trows_s\tp50_ms\tp99_ms\tdecode_errors_delta\tverdict"
 } > "$TSV"
 
-quantile_or_mean() { # $1=metric p50|p99 $2=sum $3=count → ms value or empty
-	local g
-	g="$(o2_query "select value from \"append_latency_ms_$1\" order by _timestamp desc limit 1")"
-	g="$(num "$g")"
-	if [ -n "$g" ]; then
-		echo "$g"
-		return
-	fi
-	# Fallback: mean = sum / count (O2 exposes no quantiles for OTLP
-	# histograms — count/sum/min/max only; confirmed at runtime).
-	if [ -n "$2" ] && [ -n "$3" ] && [ "$3" -gt 0 ] 2>/dev/null; then
-		echo $(( $2 / $3 ))
+# P6-032: the window is measured around the sleep, and the rate is divided by
+# the elapsed time actually observed. The old code slept a fixed 60s and always
+# divided by 60, even though each o2_query can spend up to 15s in curl, so the
+# real window was longer than the divisor and the reported rate was inflated.
+# The threshold scales with the same measured width, so it means the same thing
+# whatever the window costs.
+win_start_ms() { date +%s%3N; }
+
+window_mean_ms() { # $1=sum delta $2=count delta → ms mean over THIS window
+	# P6-031: the previous fallback divided lifetime-cumulative SUM by
+	# lifetime-cumulative CNT_END, both read at one instant, so the value
+	# labelled p50/p99 was the mean of the whole process uptime — recent
+	# tail dilution included. Window deltas only.
+	if [ -n "$1" ] && [ -n "$2" ] && [ "$2" -gt 0 ] 2>/dev/null; then
+		echo $(( $1 / $2 ))
 	else
 		echo ""
 	fi
 }
 
-for w in 1 2 3; do
+# P6-713: every early exit below used to `continue` without touching
+# WINDOW_FAILS, so a window skipped for a missing sample was absent from both
+# the TSV and result.txt's failures list — the artefact that is supposed to
+# say what went wrong. Record it.
+skip_window() { # $1=window $2=reason
+	fail "window $1: $2"
+	WINDOW_FAILS="$WINDOW_FAILS $1"
+	printf '%d\t\t\t\t\t%s\n' "$1" "SKIP" >> "$TSV"
+}
+
+for w in $(seq 1 "$WINDOW_COUNT"); do
+	# P6-312: the broker was checked once at startup and never again, so a
+	# faketool that died mid-run made all three windows fail with throughput and
+	# latency verdicts that blamed the pipeline. Fail fast with the real cause.
+	if [ -n "${FAKETOOL_PID:-}" ] && ! kill -0 "$FAKETOOL_PID" 2>/dev/null; then
+		skip_window "$w" "fake broker died (pid $FAKETOOL_PID) — no throughput measured"
+		break
+	fi
 	CNT_A="$(num "$(o2_query 'select value from "append_latency_ms_count" order by _timestamp desc limit 1')")"
 	ERR_A="$(num "$(o2_query 'select value from "decode_errors" order by _timestamp desc limit 1')")"
-	[ -n "$CNT_A" ] && [ -n "$ERR_A" ] || { fail "window $w: metric sample unavailable at start"; continue; }
-	sleep 60
+	SUM_A="$(num "$(o2_query 'select value from "append_latency_ms_sum" order by _timestamp desc limit 1')")"
+	[ -n "$CNT_A" ] && [ -n "$ERR_A" ] || { skip_window "$w" "metric sample unavailable at start"; continue; }
+	T_A="$(win_start_ms)"
+	sleep "$WINDOW_S"
 	CNT_B="$(num "$(o2_query 'select value from "append_latency_ms_count" order by _timestamp desc limit 1')")"
 	ERR_B="$(num "$(o2_query 'select value from "decode_errors" order by _timestamp desc limit 1')")"
-	SUM="$(num "$(o2_query 'select value from "append_latency_ms_sum" order by _timestamp desc limit 1')")"
-	CNT_END="$(num "$(o2_query 'select value from "append_latency_ms_count" order by _timestamp desc limit 1')")"
+	SUM_B="$(num "$(o2_query 'select value from "append_latency_ms_sum" order by _timestamp desc limit 1')")"
+	# T_B is read after the closing samples, so the divisor can only be a shade
+	# larger than the true counter span — a slightly stiffer gate, never a laxer one.
+	T_B="$(win_start_ms)"
 	if [ -z "$CNT_B" ] || [ -z "$ERR_B" ]; then
-		fail "window $w: metric sample unavailable at end"
+		skip_window "$w" "metric sample unavailable at end"
 		continue
 	fi
 
 	rows=$(( CNT_B - CNT_A ))
 	if [ "$rows" -lt 0 ]; then
-		fail "window $w: append counter went backwards ($CNT_A → $CNT_B) — stale process data?"
+		skip_window "$w" "append counter went backwards ($CNT_A → $CNT_B) — stale process data?"
 		continue
 	fi
-	rows_s=$(( rows / 60 ))
+	elapsed_s="$(awk -v a="$T_A" -v b="$T_B" 'BEGIN { printf "%.1f", (b - a) / 1000 }')"
+	if awk -v e="$elapsed_s" 'BEGIN { exit !(e > 0) }'; then :; else
+		skip_window "$w" "window measured 0s"
+		continue
+	fi
+	rows_s="$(awk -v r="$rows" -v e="$elapsed_s" 'BEGIN { printf "%d", r / e }')"
 	err_delta=$(( ERR_B - ERR_A ))
-	p50="$(quantile_or_mean p50 "$SUM" "$CNT_END")"
-	p99="$(quantile_or_mean p99 "$SUM" "$CNT_END")"
-	[ -n "$p50" ] || p50="-1"
-	[ -n "$p99" ] || p99="-1"
+	# Gauges first, as the header documents; the window-delta mean is the
+	# fallback for when O2 exposes no quantiles for the OTLP histogram.
+	p50="$(num "$(o2_query 'select value from "append_latency_ms_p50" order by _timestamp desc limit 1')")"
+	p99="$(num "$(o2_query 'select value from "append_latency_ms_p99" order by _timestamp desc limit 1')")"
+	if [ -z "$p50" ] || [ -z "$p99" ]; then
+		SUM_DELTA=""
+		if [ -n "$SUM_A" ] && [ -n "$SUM_B" ] && [ "$rows" -gt 0 ]; then
+			SUM_DELTA=$(( SUM_B - SUM_A ))
+			[ "$SUM_DELTA" -ge 0 ] || SUM_DELTA=""
+		fi
+		if [ -n "$SUM_DELTA" ]; then
+			mean="$(window_mean_ms "$SUM_DELTA" "$rows")"
+			[ -n "$p50" ] || p50="$mean"
+			[ -n "$p99" ] || p99="$mean"
+		fi
+	fi
 
 	verdict="PASS"
-	if [ "$rows" -lt 15000 ]; then
-		fail "window $w: rows=$rows < 15000"
+	# P6-001: the floor is derived from the expected rate and the MEASURED
+	# window width — not a flat row count that any trickle satisfied.
+	rows_min="$(awk -v e="$EXPECTED_RPS" -v m="$MIN_RATE" -v s="$elapsed_s" \
+		'BEGIN { printf "%.0f", e * m * s }')"
+	if awk -v r="$rows" -v n="$rows_min" 'BEGIN { exit !(r < n) }'; then
+		fail "window $w: rows=$rows < $rows_min (${MIN_RATE} x ${EXPECTED_RPS}/s x ${elapsed_s}s)"
 		verdict="FAIL"
 	fi
 	if [ "$err_delta" -ne 0 ]; then
 		fail "window $w: decode_errors delta=$err_delta != 0"
 		verdict="FAIL"
 	fi
-	if [ "$p99" -ge 1000 ] 2>/dev/null; then
+	# P6-033: a latency sample that could not be read was reported as -1, and
+	# `-1 >= 1000` is false — so the window passed with no latency evidence at
+	# all. Unmeasurable latency is a FAIL.
+	if [ -z "$p99" ]; then
+		fail "window $w: no latency sample (neither a p99 gauge nor sum/count) — cannot verify p99 < 1000 ms"
+		p50="-1"; p99="-1"
+		verdict="FAIL"
+	elif [ "$p99" -ge 1000 ] 2>/dev/null; then
 		fail "window $w: p99=$p99 >= 1000 ms"
 		verdict="FAIL"
 	fi
 	[ "$verdict" = PASS ] || WINDOW_FAILS="$WINDOW_FAILS $w"
-	printf '%d\t%d\t%s\t%s\t%d\t%s\n' "$w" "$rows_s" "$p50" "$p99" "$err_delta" "$verdict" >> "$TSV"
-	echo "window $w: rows=$rows (${rows_s}/s) p50=${p50}ms p99=${p99}ms decode_errors_delta=$err_delta → $verdict"
+	printf '%d\t%s\t%s\t%s\t%d\t%s\n' "$w" "$rows_s" "$p50" "$p99" "$err_delta" "$verdict" >> "$TSV"
+	echo "window $w: rows=$rows (${rows_s}/s over ${elapsed_s}s) p50=${p50}ms p99=${p99}ms decode_errors_delta=$err_delta → $verdict"
 	WINDOWS_DONE=$(( WINDOWS_DONE + 1 ))
 done
 
-if [ "$WINDOWS_DONE" -ne 3 ]; then
-	fail "only $WINDOWS_DONE of 3 windows completed"
+if [ "$WINDOWS_DONE" -ne "$WINDOW_COUNT" ]; then
+	fail "only $WINDOWS_DONE of $WINDOW_COUNT windows completed"
 fi
 if [ "$FAILED" = 1 ]; then
 	echo "=== RESULT: FAIL (see failures above and $RESULT_FILE)"
