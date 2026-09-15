@@ -65,12 +65,27 @@ class TimeoutsKillAfter(unittest.TestCase):
                           f"{name} is not env-overridable with default {default}")
 
     def test_named_pins_fail_closed(self) -> None:
+        """P6-189, shape corrected after a real Maven run (CHG-160).
+
+        `failIfNoSpecifiedTests=true` cannot be used with `-pl <service> -am`:
+        `common` joins the reactor, the pinned pattern matches nothing there, and
+        surefire aborts that module — the pin then fails on every run for the
+        wrong reason. The flag stays `false` and a named pin must carry a
+        require_class_ran call for every class in its pattern instead.
+        """
         invocations = [line for line in SRC.split("\n")
                        if "failIfNoSpecifiedTests=" in line and "mvn " in line]
-        for line in invocations:
-            self.assertIn("failIfNoSpecifiedTests=true", line,
-                          f"a named -Dtest pin still passes when its class is renamed away: {line.strip()[:120]}")
         self.assertGreater(len(invocations), 0, "no -Dtest pins left to guard")
+        for line in invocations:
+            self.assertIn("failIfNoSpecifiedTests=false", line,
+                          f"a `true` value aborts the build in the `common` module: {line.strip()[:120]}")
+            pattern = re.search(r"-Dtest='([^']+)'", line)
+            self.assertIsNotNone(pattern, f"no -Dtest pattern on the pin: {line.strip()[:120]}")
+            for cls in pattern.group(1).split(","):
+                self.assertRegex(
+                    SRC,
+                    rf"require_class_ran \"\$[A-Z_]+_LOG\" com\.trading\.ingestion\.{cls} ",
+                    f"{cls} is pinned with -Dtest but nothing asserts that class ran")
 
 
 class PythonGateShape(unittest.TestCase):

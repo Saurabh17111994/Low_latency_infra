@@ -253,6 +253,16 @@ gate_fail() {
 # surefire run nothing while maven still reports BUILD SUCCESS. Assert a
 # non-zero test count instead of trusting the build status alone. (The Rust step
 # has its own passed>0 check, and the pytest step asserts ^OK.)
+#
+# P6-189 (revisited, 2026-09-15): `failIfNoSpecifiedTests=true` is NOT usable
+# here. `-pl <service> -am` drags `common` into the reactor, the pinned pattern
+# matches nothing there, and surefire aborts that module with BUILD FAILURE — so
+# a `true` value fails the pin on every run, for the wrong reason (proved with a
+# real offline build: `No tests matching pattern … were executed!` in `common`).
+# The flag stays `false`; the strictness comes from require_class_ran below,
+# which asserts each NAMED class reported its own non-zero `Tests run:` line.
+# require_tests_run alone cannot see this: a pattern with one surviving class
+# still reports a positive maximum count.
 tests_run_summary() { # $1 = maven log -> highest "Tests run: N" in it, or empty
 	grep -aoE 'Tests run: [0-9]+' "$1" 2>/dev/null | grep -oE '[0-9]+' | sort -n | tail -1 || true
 }
@@ -261,6 +271,27 @@ require_tests_run() { # $1 = maven log, $2 = step label
 	count="$(tests_run_summary "$1")"
 	if [ -z "$count" ] || [ "$count" -lt 1 ]; then
 		echo "FAIL: $2 ran 0 tests — a renamed/moved class is not a pass (surefire.failIfNoSpecifiedTests=false hides it) — see $1" | tee -a "$SUMMARY"
+		gate_fail
+	fi
+}
+# Maven colourises its own log even when stdout is a file (TERM=xterm-256color,
+# no .mvn/maven.config needed): the class name arrives as "\e[1m<FQCN>\e[m", so
+# every escape has to go before a per-class line can be matched. Verified against
+# a real run — see tests/test_gate_class_pin.py.
+strip_ansi() { # $1 = file -> stdout with SGR colour sequences removed
+	sed $'s/\033\\[[0-9;]*m//g' "$1" 2>/dev/null
+}
+# P6-189: surefire 3.x closes each executed class with
+# "Tests run: N, Failures: …, Skipped: … -- in <fully.qualified.Class>". Assert
+# that line exists with a non-zero N for a named class: a rename, a move, or a
+# pom/surefire change that stops selecting it turns the gate red, which the
+# `-Dtest` pattern alone cannot do in a multi-module reactor. grep -c (not -q)
+# so sed reads the whole stream and pipefail cannot see a SIGPIPE as a failure.
+require_class_ran() { # $1 = maven log, $2 = fully.qualified.Class, $3 = step label
+	local hits
+	hits="$(strip_ansi "$1" | grep -cE "^\[INFO\] Tests run: [1-9][0-9]*, .* -- in $2$")" || hits=0
+	if [ "${hits:-0}" -lt 1 ]; then
+		echo "FAIL: $3 — $2 ran no tests (renamed, moved, or dropped by surefire); a BUILD SUCCESS without it is not a pass — see $1" | tee -a "$SUMMARY"
 		gate_fail
 	fi
 }
@@ -747,7 +778,7 @@ fi
 if step_active 12; then
 echo "=== [12/19] SchemaAgreementTest + PerfBaselineTest explicit ===" | tee -a "$SUMMARY"
 SCHEMA_PERF_TIMEOUT_SEC="${SCHEMA_PERF_TIMEOUT_SEC:-1200}"
-if ! (cd "$CODE_DIR" && timeout -k 60 "$SCHEMA_PERF_TIMEOUT_SEC" env INGESTION_INT_TEST_PERF=true mvn -o test -pl 02_services/01_ingestion -am -Dtest='SchemaAgreementTest,DdlBootstrapSchemaAgreementTest,PerfBaselineTest' -Dsurefire.failIfNoSpecifiedTests=true) >"$SCHEMA_PERF_LOG" 2>&1; then
+if ! (cd "$CODE_DIR" && timeout -k 60 "$SCHEMA_PERF_TIMEOUT_SEC" env INGESTION_INT_TEST_PERF=true mvn -o test -pl 02_services/01_ingestion -am -Dtest='SchemaAgreementTest,DdlBootstrapSchemaAgreementTest,PerfBaselineTest' -Dsurefire.failIfNoSpecifiedTests=false) >"$SCHEMA_PERF_LOG" 2>&1; then
 	echo "FAIL: schema agreement / perf certification — see $SCHEMA_PERF_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -756,6 +787,9 @@ if ! grep -q "BUILD SUCCESS" "$SCHEMA_PERF_LOG"; then
 	gate_fail
 fi
 require_tests_run "$SCHEMA_PERF_LOG" "step 12 (schema agreement + perf baseline pins)"
+require_class_ran "$SCHEMA_PERF_LOG" com.trading.ingestion.SchemaAgreementTest "step 12"
+require_class_ran "$SCHEMA_PERF_LOG" com.trading.ingestion.DdlBootstrapSchemaAgreementTest "step 12"
+require_class_ran "$SCHEMA_PERF_LOG" com.trading.ingestion.PerfBaselineTest "step 12"
 echo "PASS: SchemaAgreementTest + PerfBaselineTest (certification gates)" | tee -a "$SUMMARY"
 
 # ── 3d. CHG-015 SIGTERM-drain regression explicit (ING-UNIT-023/024) ────────
@@ -772,7 +806,7 @@ fi
 if step_active 13; then
 echo "=== [13/19] SIGTERM-drain regression explicit (ING-UNIT-023/024, CHG-015) ===" | tee -a "$SUMMARY"
 SHUTDOWN_TIMEOUT_SEC="${SHUTDOWN_TIMEOUT_SEC:-1200}"
-if ! (cd "$CODE_DIR" && timeout -k 60 "$SHUTDOWN_TIMEOUT_SEC" mvn -o test -pl 02_services/01_ingestion -am -Dtest='BridgeShutdownRegressionTest,BridgeShutdownHookTest' -Dsurefire.failIfNoSpecifiedTests=true) >"$SHUTDOWN_LOG" 2>&1; then
+if ! (cd "$CODE_DIR" && timeout -k 60 "$SHUTDOWN_TIMEOUT_SEC" mvn -o test -pl 02_services/01_ingestion -am -Dtest='BridgeShutdownRegressionTest,BridgeShutdownHookTest' -Dsurefire.failIfNoSpecifiedTests=false) >"$SHUTDOWN_LOG" 2>&1; then
 	echo "FAIL: SIGTERM-drain regression (ING-UNIT-023/024) — see $SHUTDOWN_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
@@ -781,6 +815,8 @@ if ! grep -q "BUILD SUCCESS" "$SHUTDOWN_LOG"; then
 	gate_fail
 fi
 require_tests_run "$SHUTDOWN_LOG" "step 13 (SIGTERM-drain pins)"
+require_class_ran "$SHUTDOWN_LOG" com.trading.ingestion.BridgeShutdownRegressionTest "step 13"
+require_class_ran "$SHUTDOWN_LOG" com.trading.ingestion.BridgeShutdownHookTest "step 13"
 echo "PASS: SIGTERM-drain regression (ING-UNIT-023 in-process + ING-UNIT-024 real hook)" | tee -a "$SUMMARY"
 
 # ── 4b. Execution gateway module suite (unit + regression) ─────────────────
