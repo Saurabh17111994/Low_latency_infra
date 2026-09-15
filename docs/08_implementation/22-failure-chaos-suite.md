@@ -12,6 +12,24 @@ cluster-shaped assertions run against the live stack / Swarm and SKIP
 cleanly when the prerequisite is absent — because the deployment tests run
 later, serially, by the main agent.
 
+> **2026-09-15 supplement — wave 30: the drill and its runner stopped
+> overstating coverage (CHG-170).** The tablet drill reported PASS on a
+> *skipped* integration test (its `-DfailIfNoTests=false` build is green
+> whether or not the gated IT ran), picked its victim with `head -n 1` over an
+> unstable `docker ps` order, accepted any running container as the victim
+> through a substring grep before handing it to `docker kill`, and let
+> `TABLET_KILL_ROWS=0` pass vacuously. The runner, in turn, called four SKIPs
+> `RESULT=PASS EXIT=0` and counted chaos-02's named leg-B skip as a plain
+> PASS. Both now derive their verdict from evidence: chaos-03 requires the
+> IT's own sentinel and verifies the victim with `docker inspect` (`2` for a
+> bad pin, `3` for an absent stack), and chaos-run.sh counts
+> PASS/SKIP/FAIL/PARTIAL, reports a drill that names a skipped part of itself
+> as PARTIAL, and exits `3` with `RESULT=SKIP` when nothing passed. Coverage
+> claims in the tables below that predate this date describe the superseded
+> counting; the line counts and the `RESULTS`/`SKIP 3` tokens they name
+> (`chaos-run.sh 69L`, `chaos-03-tablet-kill.sh 43L`) are the 2026-08-24
+> revision of those two files.
+
 > **2026-09-02 supplement — C2 TM-kill-at-full-load drill (tracker-14 Block 1):**
 > beyond this suite's chaos-02 (kill on an idle-ish job), the C2 drill
 > (`code/01_platform/04_scripts/tm-kill-full-load.sh`, CHG-120/CHG-121) kills
@@ -52,10 +70,18 @@ code/01_platform/04_scripts/chaos/chaos-03-tablet-kill.sh   # live stack require
 code/01_platform/04_scripts/chaos/chaos-04-vm-loss.sh       # multi-node swarm required (SKIP 3)
 ```
 
-Exit codes: **0 PASS, 1 FAIL, 3 SKIP** (prerequisite absent). The runner
-exits 0 when nothing FAILed, 1 with a `CHAOS-SUITE: RESULT=FAIL EXIT=1`
-sentinel when any test failed. Evidence lands under
-`logs/chaos/chaos-<ts>/` (per-test logs + `SUMMARY.txt`).
+Exit codes: **0 PASS, 1 FAIL, 3 SKIP** (prerequisite absent), **2 FAIL —
+usage/config error** (a bad knob, or a pinned container that is not a running
+`fluss-tablet`). Children are unchanged in kind; chaos-03 gained the explicit
+2. The runner exits 0 when at least one drill passed and none failed, 1 with a
+`CHAOS-SUITE: RESULT=FAIL EXIT=1` sentinel when any test failed (or an evidence
+log could not be written), and **3 with `RESULT=SKIP` when every drill
+skipped** — an all-SKIP run proves nothing about resilience and no longer
+reads as PASS. A drill that exits 0 while naming a skipped part of itself is
+reported `PARTIAL` (chaos-02 leg B is the named case); a drill exiting 2 is a
+FAIL, because a misconfigured drill is not an absent prerequisite. Evidence
+lands under `logs/chaos/chaos-<ts>-<pid>/` (per-test logs + `SUMMARY.txt`); the
+PID suffix keeps simultaneous runs from sharing one directory.
 
 ## Expected output shape
 
@@ -66,18 +92,21 @@ RESULT [1]: PASS
 === [2/4] 02 TM kill ... ===
 TM-KILL-CHAOS-02: [leg A] PASS — restore from checkpoint, no duplicate fingerprint
 TM-KILL-CHAOS-02: [leg B] SKIP — no flink-taskmanager container (stack not up)
-RESULT [2]: PASS
+RESULT [2]: PARTIAL (exit 0)
 === [3/4] 03 tablet kill ===
 TABLET-KILL-CHAOS-03: SKIP — no fluss-tablet container (start the stack; ...)
-RESULT [3]: SKIP
+RESULT [3]: SKIP (exit 3)
 === [4/4] 04 VM loss ===
 VM-LOSS-CHAOS-04: SKIP — this docker daemon is not in an active swarm (...)
-RESULT [4]: SKIP
+RESULT [4]: SKIP (exit 3)
+CHAOS-SUITE: passed=1 skipped=2 failed=0 partial=1 of 4
 CHAOS-SUITE: RESULT=PASS EXIT=0
 ```
 
 On a machine with the full stack + M3 swarm, tests 03/04 run their live
-assertions instead of skipping.
+assertions instead of skipping. On a machine with neither stack nor Swarm the
+same four lines end with `CHAOS-SUITE: RESULT=SKIP EXIT=3` instead: only the
+offline drill ran, and the suite says so.
 
 ## Test 1 — slot kill (Go bridge)
 
@@ -127,8 +156,7 @@ Script: `chaos-03-tablet-kill.sh` → `TabletKillChaosIntegrationTest`
 (DUR-TABLETKILL-001), env-gated `COMPUTE_INT_TEST_TABLET_KILL=true`, live
 stack required (SKIP 3 otherwise). Flow: write N acked rows to `raw_table_1`
 with the same fluss-client append path the bridge uses (append futures
-complete BEFORE the kill); `docker kill -s KILL` the tablet container
-(auto-discovered like `repair-tablet.sh`, `TABLET_CONTAINER` overrides);
+complete BEFORE the kill); `docker kill -s KILL` the tablet container;
 wait for the restart policy + table readability; assert every acked
 fingerprint is still readable and the immutable LOG count never shrank.
 Reports the coordinator-stamped `table.replication.factor`; the prod x3
@@ -137,11 +165,33 @@ contract is asserted when `CHAOS_REPLICATION_REQUIRED=true`
 the single-tablet dev compose. A truncated tail (repair-tablet.sh symptom)
 surfaces as a missing acked row / failed scan → FAIL.
 
+**Which container dies, and on whose evidence.** The drill resolves the victim
+before it kills anything: candidates are listed sorted, and with more than one
+running `fluss-tablet` container it refuses to pick and asks for
+`TABLET_CONTAINER` (a runner that silently kills "the first replica" is not
+reproducible and does not say which tablet died). The chosen container is
+verified with `docker inspect` and must be a *running* `*fluss-tablet*`, so a
+typo or a name that merely looks like a container cannot reach the `docker
+kill` inside the IT; a pinned override that does not resolve is a config error
+(2), while an absent stack is a SKIP (3). The knobs are validated the same way
+(`TABLET_KILL_ROWS`, `CHAOS_REPLICATION_MIN`, `CHAOS_SCAN_LIMIT_ROWS` — never
+zero or smaller than the acked batch, which would make the acked-row assertion
+hold vacuously), and the online compile retry is announced and bounded by
+`CHAOS_COMPILE_TIMEOUT_S` (default 300) instead of hanging an unattended run.
+
+**What a PASS means here.** Maven exiting 0 is not a PASS: the IT is gated and
+assumes its stack, so a skipped test leaves a green build. The drill greps the
+IT's own `TABLET-KILL-CHAOS-03: RESULT=PASS` sentinel and treats anything else
+as either a named SKIP (an unmet assumption, exit 3) or a FAIL. On an RF1 dev
+box the sentinel still means "the LOG did not shrink and the table is readable
+again" — the just-acked tail loss is reported by the IT, not asserted away.
+
 Env: `FLUSS_BOOTSTRAP`, `TABLET_CONTAINER`, `TABLET_KILL_ROWS` (default 25),
 `CHAOS_REPLICATION_REQUIRED`, `CHAOS_REPLICATION_MIN`,
 `CHAOS_POST_KILL_SCAN_BOUND_SEC` (default 600 — the full-log invariant rescan
 on this dev box takes ~4 min for 11.5M rows; the old 60s attempt bound aborted
-in-progress scans, see CHG-104), `CHAOS_SCAN_TIMEOUT_SEC`.
+in-progress scans, see CHG-104), `CHAOS_SCAN_TIMEOUT_SEC`,
+`CHAOS_COMPILE_TIMEOUT_S` (default 300 — bound on the one online compile retry).
 
 ## Test 4 — VM loss (Swarm)
 
