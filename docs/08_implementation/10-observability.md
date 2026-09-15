@@ -204,11 +204,18 @@ live and enabled; retention synced (logs 30d / metrics 90d / traces 14d).
 
 Soak evidence leg: `code/01_platform/04_scripts/soak-o2-evidence.py` re-queries
 the same 11-series set over the run window into `stages/o2-evidence.jsonl`
-(1 record/query: n_points, first/last/min/max), wired best-effort at the end
+(**one record per returned series**, carrying `series` + `series_labels` plus the
+historical scalar n_points/first/last/min/max for that series; an answered query
+that returns no series still writes one record with n_points 0, so "zero series"
+stays distinguishable from "never ran" — CHG-172), wired best-effort at the end
 of `stage-soak-e2e.sh`, and pushed back into O2 stream `soak_o2_evidence` via
 `o2_ingest.py` — the scorecard's "what O2 saw" section is evidence, not a
 screenshot. Smoke-verified 2026-09-05 against the 2026-09-04 window
-(11/11 queries answered, push + `_search` readback green).
+(11/11 queries answered, push + `_search` readback green). A query whose body is
+not JSON (an HTML error page from a proxy) is recorded as a failed query and the
+run continues; a plain `http://` O2 URL on a non-local host is refused (exit 2)
+unless `O2_ALLOW_INSECURE_HTTP=1`, because the Basic Authorization header would
+otherwise cross the network unencrypted.
 
 #### Dedup state dashboard (DEC-038)
 
