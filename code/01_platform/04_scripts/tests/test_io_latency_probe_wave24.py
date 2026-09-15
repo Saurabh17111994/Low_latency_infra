@@ -296,6 +296,75 @@ class HarnessReapTest(ProbeTest):
         self.assertEqual(left, [], f"timed-out capture leaked {left}")
 
 
+class SignalTeardownTest(ProbeTest):
+    """SIGTERM/SIGINT to the probe must stop the capture it started.
+
+    The leaking child is a GRANDCHILD: bash execs python, python spawns iostat.
+    Signalling the script used to kill bash alone, so the reader and its iostat
+    were reparented to init and kept writing into a $TSV whose caller had gone.
+    Two halves are needed and both are pinned here — bash forwarding the signal
+    to a pid it actually has, and the reader killing its own child (python's
+    default disposition would otherwise skip the finally entirely).
+    """
+
+    @staticmethod
+    def _named_by(root: Path) -> list[str]:
+        found = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmd = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode()
+            except OSError:
+                continue
+            if str(root) in cmd:
+                found.append(entry.name)
+        return found
+
+    def _sigterm_mid_capture(self, signum: int) -> list[str]:
+        """Signal the script while the stub is still streaming; return survivors."""
+        # half-exit + a long IOSTAT_WAIT_SEC is what makes this discriminating:
+        # the stub closes stdout and stays alive, so the reader parks in
+        # proc.wait() and is still parked when the signal lands. With the
+        # normal or paced-rows stub it finishes on its own within a couple of
+        # seconds and the assertion passes no matter what the script does.
+        proc = subprocess.Popen(
+            ["bash", str(self.sb.script), str(self.sb.out), "120", "nvme0n1"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            env={**os.environ, "PATH": f"{self.sb.bin}:{os.environ['PATH']}",
+                 "W24_IOSTAT_SCENARIO": "half-exit", "IOSTAT_WAIT_SEC": "600",
+                 "W24_O2_MODE": "fast"},
+            start_new_session=True,
+        )
+        time.sleep(1.2)
+        live = [p for p in self._named_by(self.sb.root) if p != str(proc.pid)]
+        self.assertTrue(live, "the capture was already over; not discriminating")
+        os.kill(proc.pid, signum)
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            self.fail("the probe ignored the signal")
+        deadline = time.time() + 5
+        left = self._named_by(self.sb.root)
+        while left and time.time() < deadline:
+            time.sleep(0.1)
+            left = self._named_by(self.sb.root)
+        return left
+
+    def test_sigterm_leaves_no_capture_process_behind(self):
+        if not Path("/proc").is_dir():
+            self.skipTest("/proc is not available")
+        left = self._sigterm_mid_capture(signal.SIGTERM)
+        self.assertEqual(left, [], f"SIGTERM leaked capture processes {left}")
+
+    def test_sigint_leaves_no_capture_process_behind(self):
+        if not Path("/proc").is_dir():
+            self.skipTest("/proc is not available")
+        left = self._sigterm_mid_capture(signal.SIGINT)
+        self.assertEqual(left, [], f"SIGINT leaked capture processes {left}")
+
+
 class O2PushTest(ProbeTest):
     """P6-751 — the best-effort push is bounded; the file evidence wins."""
 
