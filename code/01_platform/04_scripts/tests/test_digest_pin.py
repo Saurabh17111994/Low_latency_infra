@@ -1,11 +1,22 @@
 """Hermetic tests for digest-pin.sh (P6 wave 20: P6-062..067, P6-353..358).
 
-Probes run the real script with PATH stubs: `docker`/`skopeo`/`crane` print
-fixture digests (or fail per STUB_FAIL) and record argv; `mktemp` is the real
-one. No registry, daemon, or network is touched.
+Two layers, like the Fluss-probe tests (wave 13):
+
+* hermetic (this file) — the real script against PATH stubs: `docker`/
+  `skopeo`/`crane` print fixture digests (or fail per STUB_FAIL) and record
+  argv; `mktemp` is the real one. No registry, daemon, or network is touched.
+  These run everywhere and are the differential signal for every wave-20 fix.
+* live — `TestDigestPinLive` at the bottom: the real script against the real
+  registry. Skipped unless DIGEST_PIN_LIVE=1, so the helper suite stays green
+  on a machine with no registry access. Live runs are advisory: they pin the
+  observed digest for the record but never fail on drift (tags move; the
+  fail-closed regex is what forbids pinning garbage, and the hermetic legs
+  prove that). The only hard live assertions are shape (`repo:tag@sha256:` +
+  64 hex) and that an unresolvable tag still exits non-zero.
 """
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -113,7 +124,7 @@ class DigestHarness(unittest.TestCase):
     def test_resolvers_use_options_first_and_double_dash(self):
         self.run_pin("repo:tag")
         c = self.calls()
-        self.assertIn("--format {{.Manifest.Digest}} -- repo:tag", c, c)
+        self.assertIn('--format {{printf "%s" .Manifest.Digest}} -- repo:tag', c, c)
         self.run_pin("repo:tag", extra={"STDOUT_DIGEST": "bad", "STUB_FAIL": "skopeo"})
         c = self.calls()
         self.assertIn("--format {{.Digest}} -- docker://repo:tag", c, c)
@@ -136,6 +147,51 @@ class DigestHarness(unittest.TestCase):
         self.assertNotIn("2>&1", code)
         self.assertNotIn("head -1", code)
         self.assertNotIn("Digest:", code)
+
+
+LIVE_REF = "hello-world:latest"   # tiny, public, stable tag
+LIVE_TIMEOUT_S = 120
+_HEX64 = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _live_enabled() -> bool:
+    return os.environ.get("DIGEST_PIN_LIVE") == "1"
+
+
+@unittest.skipUnless(_live_enabled(), "live registry check: set DIGEST_PIN_LIVE=1 to run")
+class TestDigestPinLive(unittest.TestCase):
+    """Live coverage for the docker-branch format fix (buildx v0.23+ ignores a
+    bare `{{.Manifest.Digest}}` and prints the human-readable dump instead).
+
+    Advisory on digest drift, strict on shape and on fail-closed behaviour:
+    a moved tag still passes (digest recorded in the failure message for the
+    human to compare), but a non-digest output or a zero exit on a bogus tag
+    fails — those mean the resolver chain itself is broken.
+    """
+
+    def _run_live(self, *refs: str) -> "subprocess.CompletedProcess[str]":
+        env = {k: v for k, v in os.environ.items()
+               if k not in ("RESOLVER_CALLS", "STDOUT_DIGEST", "STDERR_LINE",
+                            "STUB_FAIL", "SKOPEO_DIGEST", "CRANE_DIGEST")}
+        return subprocess.run(["bash", str(SCRIPT), *refs], env=env,
+                              capture_output=True, text=True, timeout=LIVE_TIMEOUT_S)
+
+    def test_live_known_tag_resolves_to_sha256_shape(self):
+        r = self._run_live(LIVE_REF)
+        self.assertEqual(r.returncode, 0,
+                         f"live resolve failed; stderr tail: {r.stderr[-2000:]}")
+        self.assertTrue(r.stdout.strip(), f"no stdout; stderr tail: {r.stderr[-2000:]}")
+        line = r.stdout.strip().splitlines()[-1]
+        ref, _, digest = line.partition("@")
+        self.assertEqual(ref, LIVE_REF, line)
+        self.assertTrue(_HEX64.match(digest),
+                        f"resolver output is not a bare manifest digest: {line!r} "
+                        f"(buildx human-dump regression? digest recorded: {digest!r})")
+
+    def test_live_bogus_tag_still_fails_closed(self):
+        r = self._run_live("hello-world:this-tag-does-not-exist-xyz")
+        self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("could not resolve digest", r.stderr)
 
 
 if __name__ == "__main__":

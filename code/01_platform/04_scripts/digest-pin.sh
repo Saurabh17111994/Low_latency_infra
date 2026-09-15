@@ -68,7 +68,13 @@ resolve_one() {
 	# `--format` risked parsing as a second image on strict parsers.
 	tmp_err="$(mktemp)"
 	if command -v docker &>/dev/null; then
-		if digest=$(docker buildx imagetools inspect --format '{{.Manifest.Digest}}' -- "$img" 2>"$tmp_err"); then
+		# buildx v0.23+ ignores a bare struct field as a format: it falls back to
+		# the human-readable dump (and the strict digest regex fails it closed
+		# into the skopeo/crane fallbacks). `printf "%s"` forces template
+		# evaluation of the field. Verified live on buildx v0.23.0-desktop.1:
+		# bare `{{.Manifest.Digest}}` prints the full Name:/MediaType:/Digest:
+		# dump; `{{printf "%s" .Manifest.Digest}}` prints the bare digest.
+		if digest=$(docker buildx imagetools inspect --format '{{printf "%s" .Manifest.Digest}}' -- "$img" 2>"$tmp_err"); then
 			: # keep stdout-only digest
 		else
 			err="docker buildx imagetools inspect failed: $(cat "$tmp_err")"
