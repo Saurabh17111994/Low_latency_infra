@@ -341,17 +341,31 @@ class SignalLatencyContractTests(ProbeTestBase):
 
     @unittest.skipUnless(_dev_stack_up(), "dev stack (:9123) is not running")
     def test_the_two_table_orphans_run_names_both_tables(self) -> None:
-        """Live: the output must identify both sides, so a zero is interpretable."""
+        """Live: the output must identify both sides, so a zero is interpretable.
+
+        Wave 35x: this run refuses rather than printing a short census whenever
+        the probe cannot read the table's tiered segments (on the dev box the
+        remote-data volume is readable only inside the containers). Both
+        outcomes are accepted here; what is NOT accepted is a census printed
+        from a read that disagreed with the server, so the counts are no longer
+        pinned to the truncated values (11 and 25) that used to be asserted —
+        those numbers were the defect, not the contract.
+        """
         proc = self.run_probe(
             "FlussSignalLatency", ["orphans", "Execution_Intent", "Signal_Candidates"],
             timeout=180)
         self.assert_no_classpath_error(self, proc)
-        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
-        self.assertIn("intent_table=Execution_Intent", proc.stdout)
-        self.assertIn("signal_table=Signal_Candidates", proc.stdout)
-        self.assertIn("intent_candidates=11", proc.stdout)
-        self.assertIn("signal_candidates=25", proc.stdout)
-        self.assertIn("orphan_intents=2", proc.stdout)
+        if proc.returncode == 0:
+            self.assertIn("intent_table=Execution_Intent", proc.stdout)
+            self.assertIn("signal_table=Signal_Candidates", proc.stdout)
+            self.assertIn("orphan_intents=", proc.stdout)
+        else:
+            # A refusal is only acceptable when it says the read and the
+            # server's count disagreed, and when it withheld the census.
+            self.assertIn("server's own row count disagree", proc.stderr,
+                          f"a failed census must name the disagreement:\n{proc.stderr[-2000:]}")
+            self.assertNotIn("orphan_intents=", proc.stdout,
+                             "a short read must not print a census")
 
     @unittest.skipUnless(_dev_stack_up(), "dev stack (:9123) is not running")
     def test_the_scanned_table_is_the_one_printed(self) -> None:
