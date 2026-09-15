@@ -78,18 +78,69 @@ if ! echo -e "epoch_s\tdevice\tr_await_ms\tw_await_ms\taqu_sz\tutil_pct\tr_iops\
   exit 4
 fi
 
-python3 - "$TSV" "$JSONL" "$SAMPLES" "$DEVICES" "$IOSTAT_WAIT_SEC" <<'PYEOF'
-import json, subprocess, sys, time
+# The reader is backgrounded so a trap has a pid to signal, and the trap is
+# what makes SIGTERM/SIGINT here stop the capture: without it, signalling this
+# script killed bash alone and left the reader (and its iostat) reparented to
+# init, writing into $TSV after the caller had gone. The reader's own handler
+# is what reaps iostat once signalled — the leaking child is a GRANDCHILD, so
+# this trap alone would not be enough.
+CAPTURE_PID=""
+cleanup() {
+  local rc=$?
+  if [ -n "$CAPTURE_PID" ] && kill -0 "$CAPTURE_PID" 2>/dev/null; then
+    echo "io-latency-probe: interrupted — stopping the capture (pid $CAPTURE_PID)" >&2
+    kill -TERM "$CAPTURE_PID" 2>/dev/null || true
+    local _i
+    for _i in $(seq 1 50); do
+      kill -0 "$CAPTURE_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL "$CAPTURE_PID" 2>/dev/null || true
+  fi
+  exit "$rc"
+}
+trap cleanup INT TERM EXIT
+
+python3 - "$TSV" "$JSONL" "$SAMPLES" "$DEVICES" "$IOSTAT_WAIT_SEC" <<'PYEOF' &
+import json, signal, subprocess, sys, time
 
 tsv_path, jsonl_path = sys.argv[1], sys.argv[2]
 samples, devices = int(sys.argv[3]), set(sys.argv[4].split())
 wait_sec = int(sys.argv[5])
+
+interrupted = False
+_capture = {}          # {"proc": Popen} — the handler has to reach the child
+
+
+def _on_signal(signum, _frame):
+    # Why a handler at all: python's DEFAULT disposition for SIGTERM/SIGINT is
+    # to die immediately, so the `finally` below never ran and the iostat this
+    # process spawned was reparented to init and kept streaming (measured: it
+    # outlives its reader indefinitely). The kill has to happen HERE rather
+    # than in the finally: in the half-exit case the reader is parked inside
+    # proc.wait() when the signal lands, so a finally-only kill is never
+    # reached and the grandchild survives. Raising SystemExit then unwinds
+    # through the finally, flushing the partial evidence.
+    global interrupted
+    interrupted = True
+    proc = _capture.get("proc")
+    if proc is not None:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+    raise SystemExit(128 + signum)
+
+
+signal.signal(signal.SIGTERM, _on_signal)
+signal.signal(signal.SIGINT, _on_signal)
 
 proc = subprocess.Popen(
     ["iostat", "-x", "2", str(samples)],
     # stderr to DEVNULL, never PIPE: nothing drains the pipe, so one verbose
     # iostat warning past 64KiB would block the child forever.
     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+_capture["proc"] = proc
 
 n_tsv = 0
 n_malformed = 0
@@ -289,7 +340,11 @@ if rc != 0 or n_tsv == 0:
     sys.exit(4)
 print(f"io-latency-probe: {n_tsv} sample rows -> {tsv_path}", file=sys.stderr)
 PYEOF
+CAPTURE_PID=$!
+wait "$CAPTURE_PID"
 PROBE_RC=$?
+# Reaped: a recycled pid must not be signalled by the EXIT trap.
+CAPTURE_PID=""
 
 if [ "$PROBE_RC" -ne 0 ]; then
   exit "$PROBE_RC"
