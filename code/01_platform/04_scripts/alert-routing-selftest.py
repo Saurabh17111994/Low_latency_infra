@@ -52,6 +52,14 @@ def fail(msg: str) -> "NoReturn":  # type: ignore[valid-type]
     raise SystemExit(1)
 
 
+def _safe_json(raw: str) -> dict:
+    """Body -> dict. A proxy's HTML error page must not become a traceback."""
+    try:
+        return json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {"raw": raw[:200]}
+
+
 def o2_api(path: str, method: str = "GET", body: dict | None = None):
     """Call the O2 v2 API (v2 BEFORE the org id — v0.91.5 quirk)."""
     url = f"{BASE.rstrip('/')}/api/v2/{ORG}/{path.lstrip('/')}"
@@ -66,9 +74,13 @@ def o2_api(path: str, method: str = "GET", body: dict | None = None):
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.status, json.loads(resp.read().decode() or "{}")
+            return resp.status, _safe_json(resp.read().decode())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read().decode() or "{}")
+        return e.code, _safe_json(e.read().decode())
+    except (urllib.error.URLError, TimeoutError) as e:
+        # Unreachable, refused or slow: this script exists to localise routing
+        # breakage, so say which endpoint failed instead of raising.
+        fail(f"O2 API unreachable at {url}: {e}")
 
 
 def consumer(path: str, method: str = "GET", body: str | None = None) -> tuple[int, str]:
@@ -118,7 +130,10 @@ def main() -> int:
     status, existing = o2_api("alerts")
     for a in (existing.get("list") or existing.get("data") or []):
         if a.get("name") == TEST_ALERT:
-            o2_api(f"alerts/{a.get('id')}", "DELETE")
+            st, resp = o2_api(f"alerts/{a.get('id')}", "DELETE")
+            if st not in (200, 202, 204):
+                fail(f"cannot delete leftover {TEST_ALERT} (HTTP {st}: "
+                     f"{json.dumps(resp)[:200]}) — leaving it would keep it firing")
             print(f"   deleted leftover {TEST_ALERT}")
     body = {
         "name": TEST_ALERT,
@@ -177,7 +192,10 @@ def main() -> int:
     status, existing = o2_api("alerts")
     for a in (existing.get("list") or existing.get("data") or []):
         if a.get("name") == TEST_ALERT:
-            o2_api(f"alerts/{a.get('id')}", "DELETE")
+            st, resp = o2_api(f"alerts/{a.get('id')}", "DELETE")
+            if st not in (200, 202, 204):
+                fail(f"cleanup delete failed for {TEST_ALERT} (HTTP {st}: "
+                     f"{json.dumps(resp)[:200]}) — the always-firing probe is STILL enabled")
             cleaned = True
     if not record:
         fail(f"alert never reached the consumer within {POLL_BUDGET_S}s "
