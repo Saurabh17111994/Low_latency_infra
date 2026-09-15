@@ -141,7 +141,11 @@ SITES: list[tuple[str, str, str, str]] = [
     ("code/01_platform/04_scripts/tests/test_08_local_compose_l0.py", "config must not leak secret values", "TEXT", "docstring"),
     ("code/01_platform/04_scripts/tests/test_08_local_compose_l2.py", "invocation, and", "TEXT", "comment in docstring"),
     ("code/01_platform/04_scripts/tests/test_gate_preflight.py", "The preflight's compose form must stay identical", "TEXT", "docstring"),
-    ("start-all.sh", "secrets.env up -d zookeeper", "FLAGS_DIR", ""),
+    ("start-all.sh", "up -d zookeeper", "FLAGS_DIR", "start path; names the stack file (P6-858)"),
+    ("start-all.sh", "ps -q --status running fluss-tablet", "FLAGS_DIR",
+     "readiness probe (P6-701): TCP reachability is not Fluss-readiness"),
+    ("start-all.sh", "docker compose version", "TEXT",
+     "readiness capability probe (P6-698) — asks whether the compose plugin exists"),
     ("start-all.sh", "check docker compose logs", "TEXT", "error message"),
 ]
 
