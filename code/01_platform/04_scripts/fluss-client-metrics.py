@@ -23,6 +23,18 @@ def o2_get(path, params, auth):
     return json.loads(urllib.request.urlopen(req, timeout=30).read())
 
 
+def _at_or_before(points, g):
+    """Value at the newest sample no later than g (None if the series starts
+    after g). P6-369: an exact-key lookup drops a point whenever the payload's
+    timestamp is not the precise integer on the grid — the sampling step and
+    the query step need not align. Forward-fill, as fused_timeline.py does."""
+    # Deliberately not an early-break walk: that would depend on `points` being
+    # in ascending key order, which is true of the Prometheus payload today but
+    # is not this function's to assume. The dictionaries here are small.
+    cands = [t for t in points if t <= g]
+    return points[max(cands)] if cands else None
+
+
 def prom_range(query, start, end, step, auth):
     d = o2_get("/api/default/prometheus/api/v1/query_range",
                {"query": query, "start": start, "end": end, "step": step}, auth)
@@ -87,7 +99,14 @@ def main():
                 ops.add(s["metric"].get("operator_name") or
                         n.split("_operator_")[-1].split("_fluss")[0][:30])
                 for t, v in s["values"]:
-                    by_t[t] = max(by_t.get(t, float(v)), float(v))
+                    # P6-369: the payload's timestamps are typed by the
+                    # encoder, not by us — a float with a fractional part or a
+                    # string would make every exact-match lookup against the
+                    # integer grid below miss, silently emptying the column.
+                    # Normalise here, like fused_timeline.py's _prom_range.
+                    t = int(float(t))
+                    v = float(v)
+                    by_t[t] = max(by_t.get(t, v), v)
         if by_t:
             series[col] = by_t
             used[col] = sorted(ops)[:6]
@@ -98,7 +117,7 @@ def main():
             row = [str(g), datetime.datetime.fromtimestamp(
                 g, datetime.timezone.utc).isoformat()]
             for c in cols:
-                v = series[c].get(g)
+                v = _at_or_before(series[c], g)
                 row.append("" if v is None else f"{v:.2f}")
             f.write("\t".join(row) + "\n")
     print(f"wrote {args.out}: {len(grid)} grid points x {len(cols)} cols")
