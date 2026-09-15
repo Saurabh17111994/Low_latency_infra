@@ -8,6 +8,9 @@ touched: image_created_epoch is monkeypatched.
 
 Run: python3 -m unittest discover -s code/01_platform/04_scripts/tests -v
 """
+import ast
+import datetime
+import io
 import os
 import re
 import subprocess
@@ -295,12 +298,14 @@ class VerdictTest(unittest.TestCase):
         self.assertEqual(status, "FRESH")
         self.assertIn("timestamp proxy", detail)
 
-    def test_dirty_beats_a_matching_stamp(self):
-        status, _ = isc.verdict(EPOCH_B, EPOCH_A, dirty=True,
-                                stamp_image="a" * 64, stamp_sources="a" * 64)
-        self.assertEqual(status, "DIRTY-WARN",
-                         "the gate runs committed truth: an uncommitted tree is "
-                         "reported even when the image matches the working copy")
+    def test_a_matching_stamp_beats_a_dirty_tree(self):
+        """P6-109 reversed this on purpose: the stamp already answers the
+        question, so an uncommitted edit elsewhere must not downgrade it to a
+        DIRTY-WARN that hides a real STALE/MISSING image."""
+        status, detail = isc.verdict(EPOCH_B, EPOCH_A, dirty=True,
+                                     stamp_image="a" * 64, stamp_sources="a" * 64)
+        self.assertEqual(status, "FRESH")
+        self.assertIn("matches the sources", detail)
 
 
 class GitEpochTest(unittest.TestCase):
@@ -357,14 +362,31 @@ class CheckServiceTest(unittest.TestCase):
                 result = isc.check_service("nautilus", "img", repo)
             self.assertEqual(result["status"], "STALE")
 
-    def test_check_service_fallback_to_compose(self):
-        """Unlisted service uses the build context + dockerfile from compose."""
+    def test_an_undeclared_service_reports_itself_instead_of_a_verdict(self):
+        """P6-414: the compose fallback cannot see the Dockerfile's COPY inputs,
+        so an unlisted build service gets UNDECLARED-SOURCES, not a
+        confident FRESH."""
         with tempfile.TemporaryDirectory() as td:
             repo = make_repo(Path(td), filename="ctx/x.txt")
             compose_services = {"custom": {"context": "ctx",
                                            "dockerfile": "ctx/Dockerfile"}}
             with mock.patch.object(isc, "image_created_epoch",
                                    return_value=EPOCH_A + 50):
+                result = isc.check_service("custom", "img", repo,
+                                           compose_services)
+            self.assertEqual(result["status"], "UNDECLARED-SOURCES")
+            self.assertIn("SERVICE_SOURCES", result["detail"])
+
+    def test_a_declared_service_still_gets_a_timestamp_verdict(self):
+        """The declared set keeps the old behaviour: the compose entry is only
+        used for the stamp, the verdict still compares against the clock."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_repo(Path(td), filename="ctx/x.txt")
+            compose_services = {"custom": {"context": "ctx",
+                                           "dockerfile": "ctx/Dockerfile"}}
+            with mock.patch.dict(isc.SERVICE_SOURCES, {"custom": ["ctx"]}), \
+                    mock.patch.object(isc, "image_created_epoch",
+                                      return_value=EPOCH_A + 50):
                 result = isc.check_service("custom", "img", repo,
                                            compose_services)
             self.assertEqual(result["status"], "FRESH")
@@ -422,7 +444,10 @@ class MainTest(unittest.TestCase):
                 asked.append(image)
                 return EPOCH_B
 
-            with mock.patch.object(isc, "image_created_epoch", fake_epoch):
+            with mock.patch.object(isc, "image_created_epoch", fake_epoch), \
+                    mock.patch.object(isc, "image_label",
+                                      lambda image, key=isc.STAMP_LABEL: None), \
+                    mock.patch.dict(isc.SERVICE_SOURCES, {"custom": ["Dockerfile"]}):
                 rc = isc.main(["--git-root", str(repo), "--compose", str(compose)])
             self.assertEqual(rc, 0, "a fresh declared image must pass")
             self.assertEqual(asked, ["pipeline-loadgen:1.0.0"])
@@ -465,7 +490,8 @@ class RequireStampsTest(unittest.TestCase):
         with mock.patch.object(isc, "image_created_epoch",
                                lambda image: EPOCH_B), \
                 mock.patch.object(isc, "image_label",
-                                  lambda image, key=isc.STAMP_LABEL: stamp_image):
+                                  lambda image, key=isc.STAMP_LABEL: stamp_image), \
+                mock.patch.dict(isc.SERVICE_SOURCES, {"ing": ["Dockerfile"]}):
             return isc.main(["--git-root", str(repo), "--compose", str(compose)]
                             + extra)
 
@@ -648,3 +674,189 @@ class GateStepEightTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Wave 24: content before clock (P6-109), a printed FAIL that must exit
+# non-zero (P6-413), a crash-free docker Created parse (P6-412) and an honestly
+# named existence predicate (P6-744).
+# ---------------------------------------------------------------------------
+
+
+class Wave24VerdictTest(unittest.TestCase):
+    def test_dirty_does_not_downgrade_a_stamp_mismatch(self):
+        status, detail = isc.verdict(EPOCH_B, EPOCH_A, dirty=True,
+                                     stamp_image="a" * 64, stamp_sources="b" * 64)
+        self.assertEqual(status, "STALE",
+                         "an uncommitted tree must not mask a stale image")
+        self.assertIn("make images", detail)
+
+    def test_dirty_does_not_mask_a_missing_image(self):
+        status, _ = isc.verdict(None, EPOCH_A, dirty=True)
+        self.assertEqual(status, "MISSING")
+
+    def test_dirty_still_warns_on_the_timestamp_proxy(self):
+        """The unstamped path keeps the committed-truth warning."""
+        status, detail = isc.verdict(EPOCH_B, EPOCH_A, dirty=True)
+        self.assertEqual(status, "DIRTY-WARN")
+        self.assertIn("uncommitted", detail)
+        self.assertNotIn("DIRTY-WARN", isc.FAILING_STATUSES)
+
+    def test_git_error_fails_even_when_the_stamp_matches(self):
+        reason = "fatal: detected dubious ownership in repository at '/repo'"
+        status, detail = isc.verdict(EPOCH_B, EPOCH_A, dirty=False,
+                                     stamp_image="a" * 64, stamp_sources="a" * 64,
+                                     git_error=reason)
+        self.assertEqual(status, "GIT-ERROR")
+        self.assertIn("dubious ownership", detail)
+
+    def test_undeclared_sources_fail_even_when_the_stamp_matches(self):
+        status, detail = isc.verdict(EPOCH_B, EPOCH_A, dirty=False,
+                                     stamp_image="a" * 64, stamp_sources="a" * 64,
+                                     undeclared=True)
+        self.assertEqual(status, "UNDECLARED-SOURCES")
+        self.assertIn("SERVICE_SOURCES", detail)
+
+    def test_no_history_is_classified_as_a_failure(self):
+        """P6-413: NO-HISTORY printed FAIL but was not counted, so the gate
+        exited 0."""
+        self.assertIn("NO-HISTORY", isc.FAILING_STATUSES)
+
+
+class FailingStatusContractTest(unittest.TestCase):
+    def test_every_status_verdict_returns_is_classified(self):
+        """A status printed as FAIL must belong to FAILING_STATUSES, and the
+        non-failing set must be exactly FRESH and DIRTY-WARN."""
+        source = Path(isc.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        fn = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name == "verdict")
+        returned = set()
+        for node in ast.walk(fn):
+            if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple):
+                first = node.value.elts[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    returned.add(first.value)
+        self.assertTrue(returned, "no status literals found in verdict()")
+        non_failing = {"FRESH", "DIRTY-WARN"}
+        self.assertEqual(returned & non_failing, non_failing)
+        self.assertEqual(returned - non_failing,
+                         set(isc.FAILING_STATUSES) - {"NO-STAMP"})
+        # NO-STAMP is main()'s own override for a missing label, not a verdict
+        self.assertIn("NO-STAMP", isc.FAILING_STATUSES)
+        self.assertIn('"NO-STAMP"', source.split("def verdict(")[0])
+
+
+class GitStateTest(unittest.TestCase):
+    def test_a_plain_directory_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as td:
+            state, reason = isc.git_state(Path(td))
+            self.assertEqual(state, "unavailable")
+            self.assertIn("not a git repository", reason)
+
+    def test_a_real_repository_is_ok(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_repo(Path(td))
+            self.assertEqual(isc.git_state(repo), ("ok", ""))
+
+    def test_a_damaged_repository_is_an_error_not_a_tarball(self):
+        """`.git` is there but git cannot read it: that must FAIL rather than
+        fall through to the NO-HISTORY path (P6-412/P6-413)."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_repo(Path(td))
+            (repo / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")
+            state, reason = isc.git_state(repo)
+            self.assertEqual(state, "error", reason)
+            self.assertTrue(reason)
+
+    def test_git_missing_from_path_is_an_error(self):
+        with tempfile.TemporaryDirectory() as td, \
+                mock.patch.dict(os.environ, {"PATH": td}):
+            state, reason = isc.git_state(Path(td))
+            self.assertEqual(state, "error")
+            self.assertIn("FileNotFoundError", reason)
+
+
+class SourcePathPredicateTest(unittest.TestCase):
+    def test_it_answers_existence_not_history(self):
+        """P6-744: the old name promised "every path exists and has history"
+        while the body returned True on the first path that existed."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "present.txt").write_text("x", encoding="utf-8")
+            self.assertFalse(isc.any_source_path_exists(root, ["absent.txt"]))
+            self.assertTrue(isc.any_source_path_exists(
+                root, ["absent.txt", "present.txt"]))
+            self.assertFalse(isc.any_source_path_exists(root, []))
+            self.assertFalse(hasattr(isc, "have_git_history"))
+
+
+class DockerCreatedParseTest(unittest.TestCase):
+    def test_nanoseconds_and_z_suffix(self):
+        got = isc._parse_docker_created("2026-09-15T06:24:29.123456789Z")
+        want = datetime.datetime.fromisoformat("2026-09-15T06:24:29.123456+00:00")
+        self.assertEqual(got, want)
+
+    def test_a_fraction_less_z_timestamp_does_not_crash(self):
+        """The Python <3.11 crash case: no fraction, so the old fallback's
+        `raw.split(".")[0]` kept the Z and raised."""
+        got = isc._parse_docker_created("2026-09-15T06:24:29Z")
+        self.assertEqual(got,
+                         datetime.datetime.fromisoformat("2026-09-15T06:24:29+00:00"))
+
+    def test_an_offset_survives_the_fraction_trim(self):
+        got = isc._parse_docker_created("2026-09-15T06:24:29.123456789-05:00")
+        want = datetime.datetime.fromisoformat("2026-09-15T06:24:29.123456-05:00")
+        self.assertEqual(got, want)
+
+    def test_garbage_is_none_not_an_exception(self):
+        self.assertIsNone(isc._parse_docker_created("not-a-timestamp"))
+        self.assertIsNone(isc._parse_docker_created(""))
+
+
+class MainExitCodeTest(unittest.TestCase):
+    """P6-413 end to end: a status that prints FAIL must return non-zero."""
+
+    def _main(self, repo: Path):
+        compose = {"services": {"svc": {"build": {"context": ".",
+                                                  "dockerfile": "Dockerfile"}}}}
+        patchers = [
+            mock.patch.object(isc, "load_compose", lambda path: compose),
+            mock.patch.object(isc, "build_services",
+                              lambda c: {"svc": {"context": ".", "dockerfile": "Dockerfile",
+                                                 "image": None}}),
+            mock.patch.object(isc, "image_created_epoch", lambda image: EPOCH_A),
+            mock.patch.object(isc, "image_label", lambda image: None),
+            mock.patch.object(isc, "input_stamp", lambda *a, **k: None),
+            mock.patch.dict(isc.SERVICE_SOURCES, {"svc": ["missing-src"]}),
+        ]
+        for patcher in patchers:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_a_source_with_no_history_exits_nonzero(self):
+        """NO-HISTORY printed FAIL while the gate exited 0 (P6-413)."""
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_repo(Path(td))
+            self._main(repo)
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                rc = isc.main(["--compose", str(repo / "compose.yml"),
+                               "--git-root", str(repo)])
+            out = buf.getvalue()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("NO-HISTORY", out)
+        self.assertIn("FAIL", out)
+
+    def test_a_broken_repository_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as td:
+            repo = make_repo(Path(td))
+            (repo / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")
+            self._main(repo)
+            buf = io.StringIO()
+            with mock.patch("sys.stdout", buf):
+                rc = isc.main(["--compose", str(repo / "compose.yml"),
+                               "--git-root", str(repo)])
+            out = buf.getvalue()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("GIT-ERROR", out)
