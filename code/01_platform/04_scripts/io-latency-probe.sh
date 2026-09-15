@@ -18,7 +18,8 @@
 # Exit codes: 0 = wrote samples (O2 push may have WARNed); 2 = bad argument
 #   (DURATION_S is not a positive integer); 3 = iostat absent; 4 = iostat
 #   failed / the stages dir is not writable / zero samples parsed (degraded
-#   evidence, loud).
+#   evidence, loud). SIGINT/SIGTERM exit 130/143 (128+signal) after stopping
+#   the capture and flushing whatever samples it had already written.
 #
 # Seams (tests and slow hosts; each value is normalised, so a typo cannot turn
 # into a python traceback):
@@ -108,7 +109,6 @@ tsv_path, jsonl_path = sys.argv[1], sys.argv[2]
 samples, devices = int(sys.argv[3]), set(sys.argv[4].split())
 wait_sec = int(sys.argv[5])
 
-interrupted = False
 _capture = {}          # {"proc": Popen} — the handler has to reach the child
 
 
@@ -121,8 +121,6 @@ def _on_signal(signum, _frame):
     # proc.wait() when the signal lands, so a finally-only kill is never
     # reached and the grandchild survives. Raising SystemExit then unwinds
     # through the finally, flushing the partial evidence.
-    global interrupted
-    interrupted = True
     proc = _capture.get("proc")
     if proc is not None:
         try:
