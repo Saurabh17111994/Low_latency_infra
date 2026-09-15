@@ -20,6 +20,7 @@
 # Measurement-only: reads REST/Prometheus; never writes to the data path.
 # Fail-closed: exits non-zero if the job is not RUNNING at start or when it
 # leaves RUNNING mid-capture (recorded as `job_state` transitions).
+# Signals: INT/TERM stop the io-latency probe and exit 130/143.
 #
 # Usage:
 #   DURATION_S=900 bash stage-capture.sh            # 15 min capture
@@ -592,6 +593,41 @@ IO_PROBE_STAGES_DIR="$OUT_DIR" \
 bash "$HERE_SC/io-latency-probe.sh" "$OUT_DIR" "$((DURATION_S + 30))" \
   "$IO_PROBE_DEVICE" >"$IO_PROBE_LOG" 2>&1 &
 IO_PROBE_PID=$!
+
+# Stop the probe on the way out (P6-562). Every fail-fast exit between here and
+# the tail `wait` (job left RUNNING, dead legs, evidence incomplete) used to
+# leave it running: it kept writing into $OUT_DIR for up to DURATION_S+30s after
+# this script had died, burned iostat load, and raced the next run's teardown.
+# TERM is enough to stop the whole subtree because the probe reaps its own
+# reader+iostat from its own handler — which is why the pid alone is safe to
+# signal now.
+#
+# The signal codes are explicit, not `$?`: a signal arriving while bash waits on
+# a child (sleep/curl) leaves $? = 0, so a trap that just forwarded $? reported
+# SUCCESS for a killed capture. The EXIT trap takes $? because there it is the
+# real pending status (a fail-fast `exit 2` stays 2).
+#
+# On the normal path this must NOT fire — the tail deliberately waits out the
+# probe's extra samples ("never kill mid-write"), and it clears IO_PROBE_PID
+# afterwards so the EXIT trap cannot signal a recycled pid.
+io_probe_cleanup() {
+  local rc="$1"
+  if [ -n "$IO_PROBE_PID" ] && kill -0 "$IO_PROBE_PID" 2>/dev/null; then
+    echo "stage-capture: stopping the io-latency probe (pid $IO_PROBE_PID) — capture is ending early" >&2
+    kill -TERM "$IO_PROBE_PID" 2>/dev/null || true
+    local _i
+    for _i in $(seq 1 50); do
+      kill -0 "$IO_PROBE_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL "$IO_PROBE_PID" 2>/dev/null || true
+  fi
+  IO_PROBE_PID=""
+  exit "$rc"
+}
+trap 'io_probe_cleanup $?' EXIT
+trap 'io_probe_cleanup 130' INT
+trap 'io_probe_cleanup 143' TERM
 while :; do
   NOW=$(date +%s)
   ELAPSED=$((NOW - START))
@@ -750,6 +786,7 @@ echo "stage-capture: evidence complete (all declared files have data rows, prom 
 # own; never kill mid-write or the TSV loses its tail). Non-fatal WARN.
 wait "$IO_PROBE_PID" 2>/dev/null || \
   echo "stage-capture: WARN — io-latency probe failed (see $IO_PROBE_LOG; disk-latency evidence DEGRADED)"
+IO_PROBE_PID=""   # probe finished on its own: the EXIT trap must not signal a recycled pid
 
 # Single-pane push: checkpoint events -> OpenObserve flink_checkpoints
 # stream. flink-checkpoints.jsonl holds a FULL history snapshot per tick;
