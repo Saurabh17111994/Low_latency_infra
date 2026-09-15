@@ -25,7 +25,15 @@
 # Env overrides: BENCH_EXPECTED_RPS (20480), BENCH_MIN_RATE (0.90),
 #                BENCH_WINDOW_S (60), OUT_DIR, O2_BASE_URL,
 #                INGESTION_CONTAINER_NAME, INSTRUMENT_MANIFEST_HOST_PATH,
-#                BENCH_BASELINE_SETTLE_S (15), BENCH_WINDOWS (3).
+#                BENCH_BASELINE_SETTLE_S (15), BENCH_BASELINE_TRIES (6),
+#                BENCH_WINDOWS (3).
+#
+# The baseline polls append_latency_ms_count until it ADVANCES (up to
+# BENCH_BASELINE_TRIES x BENCH_BASELINE_SETTLE_S), because O2 keeps serving a
+# just-stopped process's last sample until the new one flushes its first OTLP
+# point. A frozen counter fails the run as `baseline counter frozen`; a window
+# whose decode_errors counter goes backwards is skipped as a stale sample
+# (CHG-176).
 #
 # The soak suite (run-full-suite.sh) is untouched: this bench only builds a
 # fresh ingestion image, runs one container for 3 x 60s of measurement,
@@ -301,13 +309,50 @@ echo "journal subscription acks (acknowledged=1024): ${ACKS:-0}"
 # The OTLP append counter restarts per process; O2 may still serve the previous
 # process's last point for a few seconds after start. Settle past one emitter
 # interval (10s) so baseline belongs to THIS container.
-# P6-315: the settle is also the seam the tests use to prove the baseline is
-# validated — 15s is one emitter interval, which no test needs to pay.
+# P6-315: this is also the seam the tests use to prove the baseline is
+# validated, so it names the poll INTERVAL rather than a fixed wait. 15s is one
+# emitter interval, which no test needs to pay.
 SETTLE_S="${BENCH_BASELINE_SETTLE_S:-15}"
-echo "=== baseline settle (${SETTLE_S}s for fresh OTLP counter)"
-sleep "$SETTLE_S"
+# A fixed sleep cannot prove the sample belongs to THIS process. On 2026-09-15
+# the new container's first OTLP point landed at exactly settle+0, so the
+# baseline read the DEAD process's tail (append_latency_ms_count=0,
+# decode_errors=7) while window 1 read the live one — decode_errors went
+# 7 -> 3 and the window failed as "delta=-4 != 0", blaming the feed for junk.
+# Poll for the counter to ADVANCE instead: a stopped process cannot advance,
+# and the previous container is stopped above, so advancement proves the sample
+# is this process's. Both counters ride in one OTLP payload on the same 10s
+# tick, so a fresh append sample proves the same-moment decode_errors sample is
+# fresh too. SETTLE_S is the poll interval, so the tests stay free.
+BASE_TRIES="${BENCH_BASELINE_TRIES:-6}"
+echo "=== baseline freshness (poll ${BASE_TRIES}x${SETTLE_S}s for a live counter)"
+CNT0=""
+prev=""
+last=""
+for _ in $(seq 1 "$BASE_TRIES"); do
+	CNT0="$(num "$(o2_query 'select value from "append_latency_ms_count" order by _timestamp desc limit 1')")"
+	if [ -n "$CNT0" ]; then
+		if [ -n "$prev" ] && [ "$CNT0" -gt "$prev" ]; then
+			break
+		fi
+		prev="$CNT0"
+		last="$CNT0"
+	fi
+	CNT0=""
+	sleep "$SETTLE_S"
+done
+# No advance after the full budget: the emitter is not producing samples (or
+# the broker is not feeding the appends it counts). Either way there is nothing
+# to measure, and the per-window gates would only blame throughput and latency.
+if [ -z "$CNT0" ]; then
+	# Frozen and absent are different faults, so they get different messages.
+	if [ -n "$last" ]; then
+		fail "baseline counter frozen at $last across ${BASE_TRIES} reads over ${SETTLE_S}s each — O2 serves a sample but the container's OTLP emitter (or the broker feeding it) is not advancing it"
+	else
+		fail "baseline unavailable (count='' errors='') from $O2_BASE — is O2 up and the emitter running?"
+	fi
+	exit 1
+fi
 echo "=== baseline (O2)"
-CNT0="$(num "$(o2_query 'select value from "append_latency_ms_count" order by _timestamp desc limit 1')")"
 ERR0="$(num "$(o2_query 'select value from "decode_errors" order by _timestamp desc limit 1')")"
 echo "baseline: append_latency_ms_count=$CNT0 decode_errors=$ERR0"
 # P6-315: this is the "is O2 serving THIS run's metrics?" probe, and it used to
@@ -391,6 +436,14 @@ for w in $(seq 1 "$WINDOW_COUNT"); do
 	fi
 	rows_s="$(awk -v r="$rows" -v e="$elapsed_s" 'BEGIN { printf "%d", r / e }')"
 	err_delta=$(( ERR_B - ERR_A ))
+	# The rows counter above already refuses to measure across a process
+	# boundary; the decode-error counter needs the same guard. A live counter
+	# cannot decrease, so a negative delta means the two samples came from
+	# different processes — unmeasurable, not evidence of bad ticks.
+	if [ "$err_delta" -lt 0 ]; then
+		skip_window "$w" "decode_errors counter went backwards ($ERR_A → $ERR_B) — stale process data?"
+		continue
+	fi
 	# Gauges first, as the header documents; the window-delta mean is the
 	# fallback for when O2 exposes no quantiles for the OTLP histogram.
 	p50="$(num "$(o2_query 'select value from "append_latency_ms_p50" order by _timestamp desc limit 1')")"
