@@ -29,7 +29,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 PROBE_DIR = ROOT / "code/01_platform/04_scripts/fluss-probes"
-PROBES = ["FlussPrefixReader", "FlussReadLagProbe", "FlussKvProbe", "FlussRuleCounter"]
+PROBES = ["FlussPrefixReader", "FlussReadLagProbe", "FlussKvProbe", "FlussRuleCounter",
+          "FlussSignalLatency"]
 INGESTION = ROOT / "code/02_services/01_ingestion"
 BOOTSTRAP = "localhost:9123"
 DEAD = "127.0.0.1:9"          # nothing listens here; connection refused, no wait
@@ -112,8 +113,14 @@ class ProbeTestBase(unittest.TestCase):
                   timeout: int = 60) -> subprocess.CompletedProcess:
         e = dict(os.environ)
         e.update(env or {})
-        return subprocess.run(["java", "-cp", f"{self.classes}{os.pathsep}{self.cp}", name] + args,
-                              capture_output=True, text=True, timeout=timeout, env=e)
+        # The Fluss client's shaded Arrow touches java.nio internals, so every
+        # JVM that loads it needs this flag. It lives here, once, so a probe
+        # that decodes rows does not fail on Arrow's MemoryUtil instead of on
+        # its own contract.
+        return subprocess.run(
+            ["java", "--add-opens=java.base/java.nio=ALL-UNNAMED",
+             "-cp", f"{self.classes}{os.pathsep}{self.cp}", name] + args,
+            capture_output=True, text=True, timeout=timeout, env=e)
 
     @staticmethod
     def assert_no_classpath_error(test: unittest.TestCase, proc: subprocess.CompletedProcess) -> None:
@@ -235,6 +242,172 @@ class LiveSmokeTests(ProbeTestBase):
             self.assertIn(proc.returncode, (1, 3),
                           "no rows must come with a non-zero exit and a stderr diagnostic")
             self.assertIn("no row for windows", proc.stderr)
+
+
+class SignalLatencyDrainPins(unittest.TestCase):
+    """Source pins for the two defects that cannot be provoked from a small table.
+
+    P6-088 (a poll timeout read as end-of-bucket) only bites when a poll times
+    out mid-bucket, which needs a contended server and a bucket far larger than
+    the dev stack's 25 rows; P6-379 (the 1e9-row cap) needs a billion rows. A
+    live differential is therefore impossible here, so these are structural
+    pins, not behaviour proofs — they would stay green if someone reintroduced
+    the bug in a different shape. The live contract tests above are the
+    discriminating layer; these only stop the specific regression returning.
+    """
+
+    SRC = PROBE_DIR / "FlussSignalLatency.java"
+
+    def _source(self) -> str:
+        return self.SRC.read_text(encoding="utf-8")
+
+    def test_a_poll_timeout_is_not_treated_as_end_of_bucket(self) -> None:
+        src = self._source()
+        self.assertIn("EMPTY_POLLS_TO_DRAIN = 3", src,
+                      "the drain rule must require N consecutive empty polls")
+        # null is end-of-input; an empty iterator is a timeout and must not break.
+        self.assertIn("if (batch == null) {", src,
+                      "only a null batch proves the bucket is exhausted")
+        self.assertNotIn("if (batch == null || !batch.hasNext()) {\n                                break;",
+                         src, "the single-empty-poll break is the P6-088 defect")
+
+    def test_the_row_cap_cannot_truncate_a_census_silently(self) -> None:
+        src = self._source()
+        self.assertIn("BUCKET_ROW_LIMIT", src)
+        self.assertIn("reached the ", src)
+        self.assertIn("per-bucket cap", src,
+                      "hitting the cap must fail loudly, not under-report")
+
+    def test_every_bucket_scan_goes_through_the_drain_helper(self) -> None:
+        """Four hand-rolled loops were how the same bug survived in four places."""
+        src = self._source()
+        self.assertEqual(src.count("scanner.pollBatch("), 1,
+                         "all bucket scans must share one poll loop")
+        self.assertNotIn("pollBatch(Duration.ofMillis(5000))", src,
+                         "the old inline timeout call must be gone")
+
+    def test_an_over_large_census_refuses_instead_of_dying(self) -> None:
+        """P6-087/P6-089: an OOM kill loses the answer; a refusal names the limit."""
+        src = self._source()
+        self.assertIn("MAX_RETAINED", src)
+        self.assertIn("checkRetained(", src)
+        self.assertIn("Flink/Fluss SQL", src, "the refusal must name the way out")
+
+
+class SignalLatencyContractTests(ProbeTestBase):
+    """Wave 34. The `orphans` mode reported a false all-clear on a live stack.
+
+    Pre-fix, `orphans` with no table argument defaulted the intent table to
+    `Signal_Candidates` while the signal side was hardcoded to the same name,
+    so the comparison was a table against itself and `orphan_intents=0` was
+    printed no matter what the tables held. Measured on a live :9123 with
+    Execution_Intent=11 rows and Signal_Candidates=25 rows, the two-table run
+    finds 2 orphans — so the old zero was wrong, not merely suspicious.
+    """
+
+    def test_orphans_requires_both_tables(self) -> None:
+        """The one-table form is exactly the shape that reported a false zero."""
+        proc = self.run_probe("FlussSignalLatency", ["orphans", "Signal_Candidates"], timeout=90)
+        self.assert_no_classpath_error(self, proc)
+        self.assertNotEqual(proc.returncode, 0,
+                            f"a one-table orphans run must not succeed:\n{proc.stdout}")
+        self.assertIn("needs both tables", proc.stderr)
+        self.assertNotIn("orphan_intents=", proc.stdout,
+                         "no orphan count may be printed for an unusable request")
+
+    def test_a_table_is_never_compared_against_itself(self) -> None:
+        """Same table twice is a guaranteed zero wearing a real answer's clothes."""
+        proc = self.run_probe(
+            "FlussSignalLatency", ["orphans", "Signal_Candidates", "Signal_Candidates"],
+            timeout=90)
+        self.assert_no_classpath_error(self, proc)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("self-comparison", proc.stderr)
+        self.assertNotIn("orphan_intents=0", proc.stdout)
+
+    def test_an_unknown_mode_is_rejected_instead_of_running_signals(self) -> None:
+        """A typo used to fall through to a signals scan with shifted arguments."""
+        proc = self.run_probe("FlussSignalLatency", ["signalish"], timeout=90)
+        self.assert_no_classpath_error(self, proc)
+        self.assertNotEqual(proc.returncode, 0, proc.stdout)
+        self.assertIn("unknown mode 'signalish'", proc.stderr)
+        self.assertNotIn("latency_ms", proc.stdout, "a typo must not read a table")
+
+    def test_no_arguments_prints_usage_rather_than_defaulting(self) -> None:
+        proc = self.run_probe("FlussSignalLatency", [], timeout=90)
+        self.assert_no_classpath_error(self, proc)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("usage: FlussSignalLatency", proc.stderr)
+
+    @unittest.skipUnless(_dev_stack_up(), "dev stack (:9123) is not running")
+    def test_the_two_table_orphans_run_names_both_tables(self) -> None:
+        """Live: the output must identify both sides, so a zero is interpretable."""
+        proc = self.run_probe(
+            "FlussSignalLatency", ["orphans", "Execution_Intent", "Signal_Candidates"],
+            timeout=180)
+        self.assert_no_classpath_error(self, proc)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        self.assertIn("intent_table=Execution_Intent", proc.stdout)
+        self.assertIn("signal_table=Signal_Candidates", proc.stdout)
+        self.assertIn("intent_candidates=11", proc.stdout)
+        self.assertIn("signal_candidates=25", proc.stdout)
+        self.assertIn("orphan_intents=2", proc.stdout)
+
+    @unittest.skipUnless(_dev_stack_up(), "dev stack (:9123) is not running")
+    def test_the_scanned_table_is_the_one_printed(self) -> None:
+        """P6-380/381: a custom table must not be reported under a default name."""
+        proc = self.run_probe("FlussSignalLatency", ["intents", "Execution_Intent"], timeout=120)
+        self.assert_no_classpath_error(self, proc)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        self.assertIn("table=Execution_Intent", proc.stdout)
+        self.assertNotIn("table=Signal_Candidates", proc.stdout)
+
+
+class SignalLatencyRedLegTests(ProbeTestBase):
+    """Differential proof: the pre-fix probe produces the incident, the fix does not.
+
+    The red legs are skipped unless W34_PRE_FIX_SRC names the HEAD~ source, so a
+    normal run stays hermetic; the close-out sets it to demonstrate the discriminator.
+    """
+
+    def _pre_fix(self) -> Path:
+        src = Path(os.environ.get("W34_PRE_FIX_SRC", ""))
+        if not src.is_file():
+            self.skipTest("W34_PRE_FIX_SRC not set — red leg skipped")
+        out = self.tmp / "pre_fix_red"
+        out.mkdir(exist_ok=True)
+        proc = subprocess.run(["javac", "-nowarn", "-cp", self.cp, "-d", str(out), str(src)],
+                              capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            raise AssertionError(proc.stderr[-2000:])
+        return out
+
+    def test_the_pre_fix_probe_reports_the_false_zero(self) -> None:
+        """The incident itself: a bare `orphans` run printing 0 on a live stack."""
+        if not _dev_stack_up():
+            self.skipTest("dev stack (:9123) is not running")
+        classes = self._pre_fix()
+        proc = subprocess.run(
+            ["java", "--add-opens=java.base/java.nio=ALL-UNNAMED",
+             "-cp", f"{classes}{os.pathsep}{self.cp}", "FlussSignalLatency", "orphans"],
+            capture_output=True, text=True, timeout=180)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        # The old default: compare Signal_Candidates with Signal_Candidates.
+        self.assertIn("orphan_intents=0", proc.stdout,
+                      "the red leg must reproduce the false all-clear it is named for")
+
+    def test_the_pre_fix_probe_runs_signals_for_an_unknown_mode(self) -> None:
+        """P6-732 red leg: a typo silently became a signals scan."""
+        if not _dev_stack_up():
+            self.skipTest("dev stack (:9123) is not running")
+        classes = self._pre_fix()
+        proc = subprocess.run(
+            ["java", "--add-opens=java.base/java.nio=ALL-UNNAMED",
+             "-cp", f"{classes}{os.pathsep}{self.cp}", "FlussSignalLatency", "signalish"],
+            capture_output=True, text=True, timeout=180)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        self.assertIn("table=Signal_Candidates", proc.stdout,
+                      "the pre-fix probe treated an unknown mode as 'signals'")
 
 
 if __name__ == "__main__":
