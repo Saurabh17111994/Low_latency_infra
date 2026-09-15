@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -299,23 +300,52 @@ class BenchCase(unittest.TestCase):
 class BenchGateTest(BenchCase):
     """P6-001/P6-031/P6-032/P6-033/P6-316 — the gate and the numbers behind it."""
 
-    def test_trickle_the_old_gate_passed_now_fails(self):
-        """The regression itself: 250 rows/s used to PASS.
+    # A rate the OLD gate accepts and the NEW gate rejects, at this suite's
+    # WINDOW_S. The old gate was an absolute `rows < 15000` regardless of the
+    # window, so at 2s it accepted anything at or above 7500 rows/s; the derived
+    # floor at 2s is 0.90 x 20480 x 2 = 36,864 rows, i.e. 18,432 rows/s. Any
+    # rate in [7500, 18432) discriminates; 10,000 sits inside that band.
+    #
+    # The first draft of this test used 250 rows/s — the rate the finding is
+    # *about* — and did not discriminate at all: 250 rows/s over 2s is 500
+    # rows, which the old gate rejected too (500 < 15000). It failed in the red
+    # leg only because the pre-fix script has no O2_BASE_URL seam and never
+    # reached the stub, so it proved nothing about either gate.
+    DISCRIMINATING_RPS = 10000
 
-        The old gate asked for 15,000 rows in a nominal 60s — 250 rows/s, 1.2%
-        of the claimed rate. Under the derived gate the floor is
-        0.9 x 20480 x elapsed, so the same stream cannot pass.
+    def test_trickle_the_old_gate_passed_now_fails(self):
+        """The regression itself: a rate the old gate accepted now fails.
+
+        `_old_gate_verdict` below states the pre-fix predicate, so the claim in
+        this docstring is checked here rather than assumed: the same row count
+        that the script now rejects is one the old arithmetic accepted.
         """
-        o2 = O2Server(rate=250)
+        o2 = O2Server(rate=self.DISCRIMINATING_RPS)
         self.addCleanup(o2.stop)
         res = self.sb.run(o2)
         joined = self.joined(res)
+
+        # What the window measured, straight from the script's own line.
+        m = re.search(r"window \d+: rows=(\d+)", joined)
+        self.assertIsNotNone(m, "no row count reported:\n" + joined[-2500:])
+        rows = int(m.group(1))
+        self.assertEqual(
+            self._old_gate_verdict(rows), "PASS",
+            "the test does not discriminate: the old gate rejects %d rows too"
+            % rows)
+
         self.assertIn("RESULT: FAIL", joined, joined[-2500:])
-        self.assertNotEqual(res.returncode, 0, "a 250 rows/s stream must not pass")
+        self.assertNotEqual(
+            res.returncode, 0,
+            "a %d rows/s stream must not pass" % self.DISCRIMINATING_RPS)
         # The failure must name the derived floor, not the old constant.
-        self.assertIn("no latency sample", joined) if False else None
         self.assertIn("<", joined)
         self.assertNotIn("< 15000", joined)
+
+    @staticmethod
+    def _old_gate_verdict(rows: int) -> str:
+        """The pre-fix predicate, verbatim: `if [ "$rows" -lt 15000 ]`."""
+        return "FAIL" if rows < 15000 else "PASS"
 
     def test_expected_rate_still_passes(self):
         """The derived gate must not reject a healthy stream.
