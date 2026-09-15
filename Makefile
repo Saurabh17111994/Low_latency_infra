@@ -474,8 +474,14 @@ check-ingestion-clean:
 		echo "check-ingestion-clean: FAIL — no running 'ingestion' container in this compose project" >&2; \
 		exit 1; \
 	fi; \
-	FAKE=$$(docker exec "$$cid" sh -c 'echo "$$ARROW_FAKE_BROKER"'); \
-	TOK=$$(docker exec "$$cid" sh -c 'echo "$$ARROW_INSTRUMENT_TOKENS"'); \
+	FAKE=$$(docker exec "$$cid" sh -c 'echo "$$ARROW_FAKE_BROKER"') || { \
+		echo "check-ingestion-clean: FAIL — 'docker exec' failed on $$cid (container starting or stopping?)" >&2; \
+		exit 1; \
+	}; \
+	TOK=$$(docker exec "$$cid" sh -c 'echo "$$ARROW_INSTRUMENT_TOKENS"') || { \
+		echo "check-ingestion-clean: FAIL — 'docker exec' failed on $$cid (container starting or stopping?)" >&2; \
+		exit 1; \
+	}; \
 	if [ -n "$$FAKE" ]; then echo "check-ingestion-clean: FAIL — ARROW_FAKE_BROKER is set ($$FAKE)" >&2; exit 1; fi; \
 	if echo "$$TOK" | grep -qE '^[0-9,]+\$$'; then echo "check-ingestion-clean: FAIL — test token list in container" >&2; exit 1; fi; \
 	echo "check-ingestion-clean: OK (no fake broker, no test tokens)"
