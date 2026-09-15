@@ -141,15 +141,28 @@ def probe_gateway_running():
     return ok, redact(r["out"].strip() or "(inspect failed)")
 
 
+def _is_trading_net(name):
+    return name.endswith("_trading-net") or name == "trading-net"
+
+
 def resolve_trading_net():
     """Resolve the compose project-prefixed trading network (docker compose
-    names it <project>_trading-net) from the tablet's attached networks."""
+    names it <project>_trading-net).
+
+    The tablet's attached networks are preferred — that is the network the
+    tablet is actually on. But the tablet is DETACHED during a partition drill,
+    so falling back to `docker network ls` keeps the name resolvable while the
+    fault is active; a DR-006 recovery cannot ask the disconnected tablet which
+    network to reconnect it to."""
     r = docker("inspect", "-f",
                "{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}",
                DEFAULT_PROJECT + "-fluss-tablet-1")
-    nets = r["out"].split()
-    for n in nets:
-        if n.endswith("_trading-net") or n == "trading-net":
+    for n in r["out"].split():
+        if _is_trading_net(n):
+            return n
+    ls = docker("network", "ls", "--format", "{{.Name}}")
+    for n in ls["out"].split():
+        if _is_trading_net(n):
             return n
     return None
 
@@ -177,13 +190,20 @@ def reconnect_tablet(retries=5):
 
 
 def resolve_steps(steps, verbose):
-    """Replace the {{TRADING_NET}} sentinel; returns (steps, error)."""
-    net = resolve_trading_net()
-    if net is None:
-        return None, "cannot resolve the trading network (tablet not attached?)"
+    """Replace the {{TRADING_NET}} sentinel; returns (steps, error).
+
+    Resolution is only attempted when a step actually contains the sentinel.
+    DR-006's recovery is `__RECONNECT_TABLET__`, which carries its own fallback
+    and needs no name — demanding one there aborted the drill before the
+    reconnect could ever run."""
+    needs_net = any("{{TRADING_NET}}" in s for step in steps for s in step)
+    net = resolve_trading_net() if needs_net else None
+    if needs_net and net is None:
+        return None, ("cannot resolve the trading network "
+                      "(not seen on the tablet or in docker network ls)")
     out = []
     for step in steps:
-        out.append([s.replace("{{TRADING_NET}}", net) for s in step])
+        out.append([s.replace("{{TRADING_NET}}", net or "") for s in step])
     return out, None
 
 
@@ -537,7 +557,7 @@ def drive(d, suite_id, approve, out_dir, verbose, deadline=None):
     # Poll post-assertions until green or bound exceeded.
     post_deadline = time.time() + d["bound_s"]
     results = []
-    remaining = list(d["post"])
+    remaining = [(probe, label, "not yet probed") for probe, label in d["post"]]
     round_no = 0
     while remaining and time.time() < post_deadline:
         if deadline is not None and time.monotonic() >= deadline:
@@ -546,13 +566,15 @@ def drive(d, suite_id, approve, out_dir, verbose, deadline=None):
             return "FAIL", record
         round_no += 1
         still = []
-        for probe, label in remaining:
+        for probe, label, _previous in remaining:
             ok, detail = PROBES[probe]()
             if ok:
                 results.append((label, True, detail))
             else:
                 still.append((probe, label, detail))
-        remaining = [(p, l) for p, l, _ in still]
+        # Keep the probes' own (probe, label, detail) shape: the deadline path
+        # below still has to unpack all three to record why they were pending.
+        remaining = still
         print("  [%s] poll round %d: pending=%d" % (d["id"], round_no, len(remaining)),
               flush=True)
         if remaining:
