@@ -371,9 +371,19 @@ class SignalLatencyRedLegTests(ProbeTestBase):
     """
 
     def _pre_fix(self) -> Path:
-        src = Path(os.environ.get("W34_PRE_FIX_SRC", ""))
-        if not src.is_file():
+        raw = os.environ.get("W34_PRE_FIX_SRC", "")
+        if not raw:
             self.skipTest("W34_PRE_FIX_SRC not set — red leg skipped")
+        src = Path(raw)
+        if src.is_dir():
+            src = src / "FlussSignalLatency.java"
+        if not src.is_file():
+            # Fail closed: a mistyped path must not turn the differential proof
+            # into a silent skip, which is the failure mode these tests exist
+            # to catch. An unset variable is the only reason to skip.
+            raise AssertionError(
+                f"W34_PRE_FIX_SRC={raw!r} is set but does not name a source file "
+                f"(looked for {src})")
         out = self.tmp / "pre_fix_red"
         out.mkdir(exist_ok=True)
         proc = subprocess.run(["javac", "-nowarn", "-cp", self.cp, "-d", str(out), str(src)],
