@@ -11,7 +11,8 @@
 #   Fluss: 0.9.1-incubating | Flink: 2.2.1 | Java: 17.0.19 | Python: 3.11.9
 #   OpenObserve: v0.91.5-amd64 (public.ecr.aws/zinclabs/openobserve)
 #
-# Last updated: 2026-07-24 (pinned matrix aligned)
+# Last updated: 2026-09-15 (P6-140: the four local-build image IDs re-pinned
+#   to their full 64-hex form — they carried 12-hex truncations)
 
 # ---- Container image versions (semantic tags; fill digests before production) ----
 FLUSS_IMAGE=apache/fluss:0.9.1-incubating@sha256:65f5513b33dde10ace4f8adb3956f17226a2a1e2663f92b3096e4769b0ee1d1c
@@ -22,7 +23,20 @@ FLINK_IMAGE=flink:2.2.1-scala_2.12-java17@sha256:1934ab4b984d0873ef46825b1140377
 # stale. Re-pin only on unresolvable digest, CVE, or deliberate Flink upgrade
 # with full stack re-verify + change record.
 OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64@sha256:9e3da77459b0b53a2b955fb34ae08ddf01be04b0699a5c1ffefb36bf05ae5644
-INGESTION_IMAGE=01_docker-ingestion@sha256:630166c0ac4b  # local build — pin image ID
+# NOTE (2026-09-15, P6-140 re-pin): the four *_IMAGE refs below are locally built
+# images (`make images`) that were never pushed, so they have no RepoDigests and no
+# registry manifest digest — the image ID is the only digest that exists, and it is
+# what a build host can verify (docker image inspect <repo>:latest -> .Id).
+# `docker run <repo>@sha256:<image-id>` does NOT resolve: digest resolution goes
+# through RepoDigests/manifests, not the config digest. Treat these four lines as
+# provenance ("which image was tested"), not as a pullable ref; a deploy needs a
+# pushed manifest digest (push, then `digest-pin.sh <image:tag>`). Re-pin after every rebuild:
+#   python3 -m unittest discover -s code/01_platform/04_scripts/tests -p test_pin_check.py
+# names the stale line (test_local_build_pins_match_the_local_images).
+# Freshness (does the image contain the current sources?) is a different check —
+# `make check-image-stale` / image_staleness_check.py, run as a gate step. A pin
+# can match this host and still be a stale build; rebuild before deploying.
+INGESTION_IMAGE=01_docker-ingestion@sha256:5e363c21e76a16b29670482939129fd0bc2010b4a67c7f4eee84e0a082de4e7c  # local build — image ID (config digest), not a registry manifest
 # COMPUTE_IMAGE=  # built from code/02_services/02_compute — pin digest
 # EXECUTOR_IMAGE=  # built from code/02_services/04_executor — pin digest
 
@@ -58,6 +72,7 @@ FLUSS_FLINK_CONNECTOR=fluss-flink-2.2
 
 # ---- Other registry images ----
 ZOOKEEPER_IMAGE=zookeeper:3.9.2@sha256:43d39109cbd4de394742efbfc162a8a0a93731e806374b71f3865f4ef4460a56
-NAUTILUS_IMAGE=01_docker-nautilus@sha256:ecd51cdce0dc  # local build — pin image ID
-EXECUTION_BRIDGE_IMAGE=01_docker-execution-bridge@sha256:f2206d850721  # local build — pin image ID
-EXECUTION_GATEWAY_IMAGE=01_docker-execution-gateway@sha256:b1b63d077c41  # local build — pin image ID
+# (same convention as INGESTION_IMAGE above: full image ID, not a manifest digest)
+NAUTILUS_IMAGE=01_docker-nautilus@sha256:3e893cd8491e5ce32584330ec7523ced47a65f36fa057d306488423df1ce7135  # local build — image ID (config digest), not a registry manifest
+EXECUTION_BRIDGE_IMAGE=01_docker-execution-bridge@sha256:84c758d2c6ae302ae3f720d5d3b4d973f34d64cd48000fd5d66f83524203683d  # local build — image ID (config digest), not a registry manifest
+EXECUTION_GATEWAY_IMAGE=01_docker-execution-gateway@sha256:21b2fd9b22b0bb44fae95d7dbdfc4b89d459abcd22047f9a6fb00efb840c8ffb  # local build — image ID (config digest), not a registry manifest
