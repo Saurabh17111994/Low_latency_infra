@@ -100,6 +100,8 @@ SITES: list[tuple[str, str, str, str]] = [
     ("Makefile", "$(COMPOSE) logs -f", "VAR", ""),
     ("Makefile", "$(COMPOSE) build ddl-apply", "VAR", "ddl-image"),
     ("Makefile", "image_staleness_check.py --git-root", "TEXT", "message text"),
+    ("Makefile", "'docker compose ps' failed", "TEXT",
+     "P6-304: the reason check-ingestion-clean prints when compose ps cannot run — a message, not a site"),
     ("code/01_platform/04_scripts/bench-throughput.sh", "secrets.env build ingestion", "FLAGS_DIR", ""),
     ("code/01_platform/04_scripts/bench-throughput.sh", "-f docker-compose.bench.yml stop ingestion", "FLAGS", ""),
     ("code/01_platform/04_scripts/bench-throughput.sh", "-f docker-compose.bench.yml up -d ingestion", "FLAGS", ""),
