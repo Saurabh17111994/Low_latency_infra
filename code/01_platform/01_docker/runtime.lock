@@ -16,6 +16,11 @@
 # ---- Container image versions (semantic tags; fill digests before production) ----
 FLUSS_IMAGE=apache/fluss:0.9.1-incubating@sha256:65f5513b33dde10ace4f8adb3956f17226a2a1e2663f92b3096e4769b0ee1d1c
 FLINK_IMAGE=flink:2.2.1-scala_2.12-java17@sha256:1934ab4b984d0873ef46825b1140377eed34475904aa077062497712d6e259f8
+# NOTE (2026-09-15, digest-pin live probe): flink:2.2.1-scala_2.12-java17 tag
+# has moved upstream (index sha256:d2b6d48b..., 2026-09-09, new temurin base).
+# Lock keeps 1934ab4b... (2026-08-21, still resolves) — deliberate drift, not
+# stale. Re-pin only on unresolvable digest, CVE, or deliberate Flink upgrade
+# with full stack re-verify + change record.
 OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64@sha256:9e3da77459b0b53a2b955fb34ae08ddf01be04b0699a5c1ffefb36bf05ae5644
 INGESTION_IMAGE=01_docker-ingestion@sha256:630166c0ac4b  # local build — pin image ID
 # COMPUTE_IMAGE=  # built from code/02_services/02_compute — pin digest
