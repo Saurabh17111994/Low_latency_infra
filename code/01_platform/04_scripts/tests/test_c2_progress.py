@@ -48,6 +48,30 @@ class C2ProgressTest(unittest.TestCase):
         assert summary is not None
         self.assertEqual((summary.read_resets, summary.write_resets), (1, 1))
 
+    def test_a_missing_counter_is_not_a_sample(self):
+        # P6-251: metric_totals() reports a missing counter as -1. A window where
+        # every row carries -1 has no measurement in it at all, so the summary is
+        # empty and the caller fails closed instead of reporting "no change".
+        self.assertIsNone(self._summary(
+            "1\tpost-kill\t0\tRUNNING\t-1\t-1\n"
+            "2\tpost-kill\t5\tRUNNING\t-1\t-1\n"
+        ))
+
+    def test_the_jump_out_of_minus_one_is_not_an_increase(self):
+        # The first real sample after a -1 run is a baseline, not progress: the
+        # old code compared it against -1 and counted a huge increase.
+        summary = self._summary(
+            "1\tpost-kill\t0\tRUNNING\t-1\t-1\n"
+            "2\tpost-kill\t5\tRUNNING\t100\t200\n"
+            "3\tpost-kill\t10\tRUNNING\t110\t215\n"
+        )
+        self.assertIsNotNone(summary)
+        assert summary is not None
+        self.assertEqual(1, summary.read_increases)
+        self.assertEqual(1, summary.write_increases)
+        self.assertEqual((100, 110), (summary.first_read, summary.last_read))
+        self.assertEqual(2, summary.samples)
+
     def test_reset_alone_does_not_count_as_an_increase(self):
         summary = self._summary(
             "1\tpost-kill\t0\tRUNNING\t100\t200\n"
