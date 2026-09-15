@@ -70,6 +70,15 @@ def summarize_phase(path: Path, phase: str) -> PhaseProgress | None:
         except ValueError:
             continue
 
+        # P6-251: metric_totals() reports a missing counter as -1. Treating that
+        # as a numeric sample lets a partially-instrumented job pass the
+        # delta/increase gate (the jump out of -1 reads as a large increase, and
+        # a freeze at -1 reads as "no change"). Unknown is not a measurement:
+        # the row is skipped, so a window with nothing but -1 samples yields zero
+        # samples and the caller fails closed.
+        if current_read < 0 or current_write < 0:
+            continue
+
         if previous_read is None or previous_write is None:
             first_read = current_read
             first_write = current_write
