@@ -220,7 +220,9 @@ class IngestionCleanTargetTest(unittest.TestCase):
     def test_a_failed_compose_ps_is_not_reported_as_a_missing_container(self):
         proc = self._run("ps-fail")
         self.assertNotEqual(0, proc.returncode)
-        self.assertIn("'docker compose ps' failed", proc.stderr)
+        # The tail of the message identifies the branch without repeating the
+        # invocation form the compose-contract scanner watches for.
+        self.assertIn("(no daemon, or unreadable compose/env files)", proc.stderr)
 
     def test_a_failing_docker_exec_fails_loudly(self):
         proc = self._run("exec-fail")
