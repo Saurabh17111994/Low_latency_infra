@@ -76,20 +76,36 @@ JM_CONTAINER="${JM_CONTAINER:-01_docker-flink-jobmanager-1}"
 SMOKE_WARMUP_S="${SMOKE_WARMUP_S:-30}"
 SMOKE_PRE_KILL_S="${SMOKE_PRE_KILL_S:-60}"
 SMOKE_POST_KILL_S="${SMOKE_POST_KILL_S:-120}"
+# Drain gate knobs (P6-252: both were read inline with `:-` defaults and were
+# never validated, so an empty or zero override ran a deadline of "now" or a
+# zero-poll "stable" gate).
+DRAIN_TIMEOUT_S="${DRAIN_TIMEOUT_S:-180}"
+DRAIN_STABLE_POLLS="${DRAIN_STABLE_POLLS:-3}"
+# A single failed REST poll is not a dead job: /jobs/<id> can be unavailable for
+# one interval during a JobManager restart or a slow response (P6-637).
+REST_TOLERANCE="${REST_TOLERANCE:-3}"
+# The alert feed lives in its own container; parameterized like the others
+# (P6-642 - the name was hardcoded here while TM/JM already were not).
+ALERT_CONSUMER_CONTAINER="${ALERT_CONSUMER_CONTAINER:-01_docker-alert-consumer-1}"
 
 PHASE_NAME="tm-kill-full-load"
 [ "$C2_MODE" = "smoke" ] && PHASE_NAME="tm-kill-smoke"
 PHASE_OUT="$ROOT/logs/tracker-14/${PHASE_NAME}-$(date +%Y%m%d-%H%M%S)"
 OUT="$PHASE_OUT/$C2_MODE"
 RUN_LOG="$PHASE_OUT/run.log"
-mkdir -p "$OUT/j1" "$OUT/bin"
+mkdir -p "$OUT/j1" "$OUT/bin" "$OUT/gc-live"
 touch "$OUT/checkpoints.jsonl" "$OUT/checkpoints-detail.jsonl"
 exec > >(tee -a "$RUN_LOG") 2>&1
 
 # pipeline-lib.sh requires ROOT, OUT, and RATE_HZ before it is sourced.
 # shellcheck source=pipeline-lib.sh
 source "$SCRIPT_DIR/pipeline-lib.sh"
-pipeline_install_cleanup_trap
+# The cleanup trap is deliberately NOT installed here (P6-022). A contender that
+# fails `flock -n` below exits through fatal(), and an EXIT trap installed this
+# early would run pipeline_cleanup in that contender - `docker rm -f
+# pipeline-faketool pipeline-ingestion` - destroying the feed and ingestion
+# containers of the drill it just refused to join. It is armed just before this
+# drill starts its own containers.
 
 JOB_ID=""
 CP=""
@@ -99,12 +115,25 @@ TIERING_REQUIRED=0
 DRILL_FAILED=0
 KILL_EPOCH=0
 PRE_KILL_MAX_CP=-1
+PRE_CP_MAX_TS=0
 RECOVERY_EPOCH=0
 AUXILIARY_JOBS=0
+# Restart evidence is "unknown" (empty) until collect_restart_evidence runs, so
+# the contract check can tell "never measured" from "measured as zero" (P6-256).
+RESTARTS_SINCE_KILL=""
+FAILED_SINCE_KILL=""
+TERMINAL_SINCE_KILL=""
+GC_SAMPLES=0
+GC_EMPTY_SAMPLES=0
 
 fatal() {
   echo "TM-KILL-FULL-LOAD: FAIL — $*" >&2
   printf 'FAIL\n%s\n' "$*" > "$PHASE_OUT/FAILURE.txt"
+  # P6-643: every failure path leaves the structured verdict behind, not just
+  # the two branches at the end of the script. A G7 parity failure exits here,
+  # and used to produce FAILURE.txt with no RESULT.txt at all.
+  printf 'FAIL\n%s\njob_id=%s\nkill_epoch=%s\nrecovery_epoch=%s\n' \
+    "$*" "$JOB_ID" "$KILL_EPOCH" "$RECOVERY_EPOCH" > "$PHASE_OUT/RESULT.txt"
   exit 1
 }
 
@@ -132,12 +161,23 @@ require_positive_int() {
   (( 10#$value > 0 )) || fatal "$name='$value' must be > 0"
 }
 
+# Every knob that reaches arithmetic or a deadline is validated up front
+# (P6-635, P6-252): an empty/zero/non-numeric override used to surface as a
+# division by zero, a deadline of "now", or a vacuous gate
+# (MIN_PRE_KILL_CHECKPOINTS=0 passed with zero completed checkpoints).
 for _arg in \
   "POLL_S=$POLL_S" "WARMUP_S=$WARMUP_S" "PRE_KILL_S=$PRE_KILL_S" \
   "SMOKE_WARMUP_S=$SMOKE_WARMUP_S" "SMOKE_PRE_KILL_S=$SMOKE_PRE_KILL_S" \
   "SMOKE_POST_KILL_S=$SMOKE_POST_KILL_S" \
   "POST_KILL_S=$POST_KILL_S" "RECOVERY_TIMEOUT_S=$RECOVERY_TIMEOUT_S" \
-  "NEW_CP_TIMEOUT_S=$NEW_CP_TIMEOUT_S" "TIERING_TIMEOUT_S=$TIERING_TIMEOUT_S"; do
+  "NEW_CP_TIMEOUT_S=$NEW_CP_TIMEOUT_S" "TIERING_TIMEOUT_S=$TIERING_TIMEOUT_S" \
+  "RATE_HZ=$RATE_HZ" "WARMUP_GRACE_S=$WARMUP_GRACE_S" \
+  "MIN_PRE_KILL_CHECKPOINTS=$MIN_PRE_KILL_CHECKPOINTS" \
+  "CHECKPOINT_INTERVAL_MS=$CHECKPOINT_INTERVAL_MS" \
+  "CHECKPOINT_TIMEOUT_MS=$CHECKPOINT_TIMEOUT_MS" \
+  "RESTART_MAX_ATTEMPTS=$RESTART_MAX_ATTEMPTS" "RESTART_DELAY_MS=$RESTART_DELAY_MS" \
+  "DRAIN_TIMEOUT_S=$DRAIN_TIMEOUT_S" "DRAIN_STABLE_POLLS=$DRAIN_STABLE_POLLS" \
+  "REST_TOLERANCE=$REST_TOLERANCE"; do
   require_positive_int "${_arg%%=*}" "${_arg#*=}"
 done
 
@@ -166,9 +206,23 @@ sleep_bounded() {
   done
 }
 
-tm_running() {
-  [ "$(docker inspect --format '{{.State.Running}}' "$TM_CONTAINER" 2>/dev/null || true)" = "true" ]
+container_running() {
+  [ "$(docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null || true)" = "true" ]
 }
+
+tm_running() {
+  container_running "$TM_CONTAINER"
+}
+
+# CHG-122 moved the data path into containers: there is no host PID for the feed
+# or the ingestion JVM. FAKETOOL_PID/JVM_PID are never set by pipeline-lib.sh
+# (it exports FAKETOOL_LOG_PID/INGESTION_LOG_PID, which are `docker logs -f`
+# mirrors, not producers), so the old `kill -0` liveness polls aborted the drill
+# on the first poll under `set -u` (P6-024) and the drain's `kill -9` signalled a
+# PID that never existed (P6-023) - the feed kept running, the ~500k replay
+# backlog never drained, and the F4 verdict was drawn from a trailing pipeline.
+feed_running() { container_running "$LIB_FAKETOOL_CONTAINER"; }
+ingestion_running() { container_running "$LIB_INGESTION_CONTAINER"; }
 
 tm_registered() {
   curl -fsS --max-time 5 "$FLINK_REST_URL/taskmanagers" 2>/dev/null \
@@ -216,25 +270,53 @@ print("%d\t%d\t%d" % (len(done), max([ident(c) for c in done] or [-1]),
 # JobID after the same TM loss, so checking only the pre-kill ID is unsafe.
 # Output: job_id<TAB>state, preferring a RUNNING instance.
 find_tiering() {
+  # Output: active_count<TAB>job_id<TAB>state. P6-636: the caller used to take
+  # the last match, so two live tiering jobs - the split-brain the preflight
+  # refuses - were silently collapsed into one and "recovery" was reported for a
+  # stack that had resubmitted the job twice. Terminal instances are kept as the
+  # fallback answer (a FINISHED/FAILED job still has to be reported), because
+  # Flink's overview lists recently finished jobs alongside live ones.
   curl -fsS --max-time 10 "$FLINK_REST_URL/jobs/overview" 2>/dev/null \
     | python3 -c '
 import json,sys
+active={"RUNNING","RESTARTING","FAILING","INITIALIZING","RECONCILING","CANCELING"}
 try:
     jobs=json.load(sys.stdin).get("jobs", [])
 except Exception:
     raise SystemExit(0)
 matches=[j for j in jobs if j.get("name") == "Fluss Lake Tiering"]
-running=[j for j in matches if j.get("state") == "RUNNING"]
-j=(running or matches)[-1] if (running or matches) else None
-if j:
-    print("%s\t%s" % (j.get("jid", ""), j.get("state", "")))
+live=[j for j in matches if j.get("state") in active]
+if live:
+    print("%d\t%s\t%s" % (len(live), live[-1].get("jid", ""), live[-1].get("state", "")))
+elif matches:
+    print("0\t%s\t%s" % (matches[-1].get("jid", ""), matches[-1].get("state", "")))
 ' 2>/dev/null || true
 }
 
 alert_count() {
-  docker exec 01_docker-alert-consumer-1 sh -c \
+  # P6-642: -1 means the feed could not be read at all (container missing or not
+  # running). Returning 0 made an unreadable feed indistinguishable from "no
+  # alerts", which is exactly the case the alert gate has to catch.
+  docker exec "$ALERT_CONSUMER_CONTAINER" sh -c \
     'if [ -f /data/alerts/alerts.jsonl ]; then grep -c "SIGNAL-crit-taskmanager-down" /data/alerts/alerts.jsonl || true; else echo 0; fi' \
-    2>/dev/null || printf '0\n'
+    2>/dev/null || printf '%s\n' '-1'
+}
+
+assert_alert_contract() {
+  # P6-642: the TM-down alert was recorded as evidence and never checked, so a
+  # drill whose alert path was broken still PASSed. The kill must produce the
+  # alert while the TaskManager is down.
+  local before="${1:--1}" during="${2:--1}"
+  if [ "$before" -lt 0 ] || [ "$during" -lt 0 ]; then
+    mark_failure "cannot read the SIGNAL-crit-taskmanager-down feed from $ALERT_CONSUMER_CONTAINER (before=$before during=$during); alert coverage is unverified, not proven"
+    return 1
+  fi
+  if [ "$during" -le "$before" ]; then
+    mark_failure "no SIGNAL-crit-taskmanager-down alert appeared while the TaskManager was down (before=$before during=$during) — the alert path did not notice the kill"
+    return 1
+  fi
+  echo "TM-KILL-FULL-LOAD: taskmanager-down alert observed (before=$before during=$during)"
+  return 0
 }
 
 metric_totals() {
@@ -278,8 +360,36 @@ capture_sample() {
       | sed "s/^/$epoch /" >> "$OUT/tm-prom-latency.tsv" || true
     printf '%s\n' "$prom" | grep -E '^flink_taskmanager_job_task_checkpoint' \
       | sed "s/^/$epoch /" >> "$OUT/tm-prom-cp-phases.tsv" || true
-    harvest_tm_gc_log "$OUT/tm-gc-live.log" || true
+    harvest_live_gc "$index"
   fi
+}
+
+# P6-845: the live GC harvest used to overwrite one file every third sample, so
+# only the last snapshot survived and a GC pause inside the kill interval was
+# lost. Each sample now writes its own file, and the caller can tell how much
+# evidence was actually collected.
+harvest_live_gc() {
+  local index="$1"
+  local dest
+  dest="$OUT/gc-live/sample-$(printf '%03d' "$index").log"
+  harvest_tm_gc_log "$dest" || true
+  GC_SAMPLES=$((GC_SAMPLES + 1))
+  [ -s "$dest" ] || GC_EMPTY_SAMPLES=$((GC_EMPTY_SAMPLES + 1))
+}
+
+assert_gc_evidence() {
+  printf 'samples=%s\nempty=%s\n' "$GC_SAMPLES" "$GC_EMPTY_SAMPLES" > "$OUT/gc-evidence.txt"
+  if [ "$GC_SAMPLES" -gt 0 ] && [ "$GC_EMPTY_SAMPLES" -eq "$GC_SAMPLES" ]; then
+    mark_failure "no GC evidence could be harvested from the TaskManager in ${GC_SAMPLES} samples (gc.log absent or unreadable) — a GC pause during the kill window would be invisible"
+    return 1
+  fi
+  # The final harvest is an input to holistic-analyze.py's GC-pause report, so
+  # an empty one is a gap in the verdict, not a cosmetic miss.
+  if [ ! -s "$OUT/tm-gc-final.log" ]; then
+    mark_failure "the final TaskManager GC harvest is empty ($OUT/tm-gc-final.log) — the analyzer's GC-pause input is missing"
+    return 1
+  fi
+  return 0
 }
 
 drill_drain_backlog() {
@@ -297,48 +407,88 @@ drill_drain_backlog() {
   # F4 verdict becomes exact. The drain gate itself is the guard: a
   # pipeline that cannot drain within DRAIN_TIMEOUT_S fails the drill
   # instead of producing a bogus F4 verdict.
-  local timeout_s="${DRAIN_TIMEOUT_S:-180}" stable_needed="${DRAIN_STABLE_POLLS:-3}"
-  local poll_s=5 stable=0 last=-1 i=0 dump source
-  echo "TM-KILL-FULL-LOAD: drain — stopping feed (faketool pid ${FAKETOOL_PID:-unknown})"
-  [ -n "${FAKETOOL_PID:-}" ] && kill -9 "$FAKETOOL_PID" 2>/dev/null || true
-  FAKETOOL_PID=""
+  local timeout_s="$DRAIN_TIMEOUT_S" stable_needed="$DRAIN_STABLE_POLLS"
+  local poll_s=5 stable=0 last_source=-1 last_writes=-1 i=0 dump source writes state
+  # P6-023: the producer is the pipeline-faketool CONTAINER, not a host PID.
+  # The old `kill -9 $FAKETOOL_PID` signalled a variable pipeline-lib.sh never
+  # sets, so the feed kept running, the backlog never drained, and the drill
+  # cancelled a pipeline that was still trailing the event clock.
+  echo "TM-KILL-FULL-LOAD: drain — stopping the feed container $LIB_FAKETOOL_CONTAINER"
+  if ! docker rm -f "$LIB_FAKETOOL_CONTAINER" >/dev/null 2>&1; then
+    printf 'drained=false\nreason=feed_container_not_removed\ncontainer=%s\n' \
+      "$LIB_FAKETOOL_CONTAINER" > "$OUT/drain.txt"
+    mark_failure "could not stop the feed ($LIB_FAKETOOL_CONTAINER could not be removed): the replay backlog cannot drain while the feed runs"
+    return 1
+  fi
   local deadline=$(( $(date +%s) + timeout_s ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     dump="$(flink_metric_dump 2>/dev/null || true)"
-    source="$(metric_totals "$dump" | awk -F'\t' '{print $1}')"
+    state="$(printf '%s\n' "$dump" | awk '$1 == "STATE" {print $2; exit}')"
+    IFS=$'\t' read -r source writes <<< "$(metric_totals "$dump")"
     i=$((i+1))
-    printf '%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "drain" "$i" \
-            "$(printf '%s\n' "$dump" | awk '$1 == "STATE" {print $2; exit}')" \
-            "${source:--1}\t-1" >> "$OUT/metric-progress.tsv" || true
-    if [ "${source:--1}" -ge 0 ] 2>/dev/null && [ "$source" = "$last" ]; then
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date +%s)" "drain" "$i" \
+            "${state:-UNKNOWN}" "${source:--1}" "${writes:--1}" \
+            >> "$OUT/metric-progress.tsv" || true
+    # "Drained" needs all three (P6-252, P6-253):
+    #   * the job is still RUNNING - a deadlocked job freezes every counter, so
+    #     flat counters alone would report a stalled pipeline as drained;
+    #   * BOTH the source and the pipeline's writes have stopped moving - with
+    #     the feed stopped the source freezes immediately while downstream
+    #     writes may still be chewing through the ~500k replay backlog, which is
+    #     how the phantom-tail F4 orphans appear;
+    #   * neither counter is -1: that is "metric missing", which the old gate
+    #     treated as a stable value.
+    # Residual: a job that stays RUNNING while both counters freeze is still
+    # read as drained. The post-kill gates (new checkpoint + advancing counters)
+    # and the drain deadline bound that risk; a lag/consumer-lag metric would
+    # close it properly.
+    if [ "${source:--1}" -lt 0 ] || [ "${writes:--1}" -lt 0 ]; then
+      stable=0
+      echo "TM-KILL-FULL-LOAD: drain — metric missing at poll ${i} (source=${source:--1} writes=${writes:--1}); not draining"
+    elif [ "$state" != "RUNNING" ]; then
+      stable=0
+      echo "TM-KILL-FULL-LOAD: drain — job state=$state at poll ${i}; not draining"
+    elif [ "$source" = "$last_source" ] && [ "$writes" = "$last_writes" ]; then
       stable=$((stable+1))
     else
       stable=0
     fi
-    last="${source:--1}"
+    last_source="${source:--1}"
+    last_writes="${writes:--1}"
     if [ "$stable" -ge "$stable_needed" ]; then
-      echo "TM-KILL-FULL-LOAD: drain complete (source stable at ${last} for ${stable_needed} polls)"
-      printf 'drained=true\nstable_source=%s\npolls=%s\n' "$last" "$i" > "$OUT/drain.txt"
+      echo "TM-KILL-FULL-LOAD: drain complete (source stable at ${last_source}, writes stable at ${last_writes}, for ${stable_needed} polls)"
+      printf 'drained=true\nstable_source=%s\nstable_writes=%s\npolls=%s\n' \
+        "$last_source" "$last_writes" "$i" > "$OUT/drain.txt"
       return 0
     fi
     sleep_bounded "$poll_s"
   done
-  printf 'drained=false\nstable_source=%s\npolls=%s\n' "$last" "$i" > "$OUT/drain.txt"
-  mark_failure "pipeline did not drain within ${timeout_s}s of feed stop (source counter still advancing at ${last}) — F4 verdict would be bogus"
+  printf 'drained=false\nstable_source=%s\nstable_writes=%s\npolls=%s\n' \
+    "$last_source" "$last_writes" "$i" > "$OUT/drain.txt"
+  mark_failure "pipeline did not drain within ${timeout_s}s of the feed stop (source=${last_source} writes=${last_writes}) — F4 verdict would be bogus"
   return 1
 }
 
 run_load_phase() {
-  local phase="$1" duration="$2" elapsed state index
+  local phase="$1" duration="$2" elapsed state index bad_polls=0
   echo "TM-KILL-FULL-LOAD: phase=$phase duration=${duration}s"
   for ((elapsed=0; elapsed<duration; elapsed+=POLL_S)); do
     state="$(job_state)"
-    [ "$state" = "RUNNING" ] \
-      || fatal "$phase phase job state=$state at t+${elapsed}s"
-    kill -0 "$FAKETOOL_PID" 2>/dev/null \
-      || fatal "$phase phase faketool died at t+${elapsed}s"
-    kill -0 "$JVM_PID" 2>/dev/null \
-      || fatal "$phase phase ingestion JVM died at t+${elapsed}s"
+    # P6-637: one non-RUNNING poll is not a dead job - a REST blip, a JM
+    # restart or a poll landing inside a transient state used to fatal-abort a
+    # 12-minute drill. Only REST_TOLERANCE consecutive bad polls fail.
+    if [ "$state" != "RUNNING" ]; then
+      bad_polls=$((bad_polls + 1))
+      echo "TM-KILL-FULL-LOAD: $phase phase job state=$state at t+${elapsed}s (bad poll ${bad_polls}/${REST_TOLERANCE})"
+      [ "$bad_polls" -lt "$REST_TOLERANCE" ] \
+        || fatal "$phase phase job state=$state at t+${elapsed}s for ${bad_polls} consecutive polls"
+    else
+      bad_polls=0
+    fi
+    feed_running \
+      || fatal "$phase phase feed container $LIB_FAKETOOL_CONTAINER is not running at t+${elapsed}s"
+    ingestion_running \
+      || fatal "$phase phase ingestion container $LIB_INGESTION_CONTAINER is not running at t+${elapsed}s"
     index=$(( elapsed / POLL_S ))
     capture_sample "$phase" "$elapsed" "$index"
     sleep_bounded "$POLL_S"
@@ -372,9 +522,17 @@ print(sum(1 for j in jobs if j.get("name") == "Fluss Lake Tiering"
 cancel_preflight_tiering() {
   [ "$TIERING_REQUIRED" -eq 1 ] || return 0
   local state i
-  state="$(curl -fsS --max-time 10 "$FLINK_REST_URL/jobs/$PREEXISTING_TIERING_ID" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))' \
-    2>/dev/null || true)"
+  # P6-638: the job can finish or be cancelled between the overview and this
+  # probe; the REST call then 404s and the state comes back empty. Retry before
+  # concluding anything, and treat a still-empty state as already stopped
+  # rather than aborting a 12-minute drill on a race.
+  for i in 1 2 3; do
+    state="$(curl -fsS --max-time 10 "$FLINK_REST_URL/jobs/$PREEXISTING_TIERING_ID" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))' \
+      2>/dev/null || true)"
+    [ -n "$state" ] && break
+    sleep_bounded 2
+  done
   case "$state" in
     RUNNING|RESTARTING|FAILING|INITIALIZING|RECONCILING|CANCELING)
       echo "TM-KILL-FULL-LOAD: stopping pre-existing tiering job $PREEXISTING_TIERING_ID before table purge"
@@ -382,6 +540,9 @@ cancel_preflight_tiering() {
         >/dev/null 2>&1 \
         || fatal "cannot stop pre-existing tiering job $PREEXISTING_TIERING_ID before purge" ;;
     FAILED|CANCELED|FINISHED) return 0 ;;
+    "")
+      echo "TM-KILL-FULL-LOAD: pre-existing tiering job $PREEXISTING_TIERING_ID has no state (finished or cancelled before the purge) — treating it as already stopped"
+      return 0 ;;
     *) fatal "cannot determine pre-existing tiering job state before purge: $state" ;;
   esac
   for ((i=0; i<90; i+=2)); do
@@ -408,10 +569,27 @@ wait_job_recovery() {
       FAILED|CANCELED|FINISHED|SUSPENDED)
         fatal "SignalJob entered terminal state=$state after TM kill" ;;
     esac
-    if [ "$state" = "RUNNING" ] && [ "$seen_transition" -eq 1 ]; then
-      RECOVERY_EPOCH="$(date +%s)"
-      echo "TM-KILL-FULL-LOAD: SignalJob recovered after $((RECOVERY_EPOCH - KILL_EPOCH))s"
-      return 0
+    if [ "$state" = "RUNNING" ]; then
+      local recovered_by=""
+      if [ "$seen_transition" -eq 1 ]; then
+        recovered_by="observed FAILING/RESTARTING -> RUNNING"
+      else
+        # P6-254: a job that never flaps away from RUNNING (slow failure
+        # detection, a 2s poll that skipped the transient, or a REST blip) is
+        # still a recovered job if the JobManager has completed a NEW
+        # checkpoint since the kill: a dead TaskManager cannot complete one.
+        # Without this, a genuinely restored job timed out the whole drill.
+        IFS=$'\t' read -r _cp_count max_id _cp_ts <<< "$(checkpoint_summary)"
+        if [ "${max_id:--1}" -gt "$PRE_KILL_MAX_CP" ] 2>/dev/null; then
+          recovered_by="new checkpoint after the kill (max_id=${max_id})"
+        fi
+      fi
+      if [ -n "$recovered_by" ]; then
+        RECOVERY_EPOCH="$(date +%s)"
+        printf '%s\n' "$recovered_by" > "$OUT/recovery-evidence.txt"
+        echo "TM-KILL-FULL-LOAD: SignalJob recovered after $((RECOVERY_EPOCH - KILL_EPOCH))s — $recovered_by"
+        return 0
+      fi
     fi
     sleep_bounded 2
   done
@@ -419,47 +597,125 @@ wait_job_recovery() {
 }
 
 wait_new_checkpoint() {
-  local timeout_s="$1" kill_ms="$2" i count max_id max_ts
+  local timeout_s="$1" i count max_id max_ts
   for ((i=0; i<timeout_s; i+=5)); do
     capture_checkpoint_history "$OUT/checkpoints.jsonl" || true
     IFS=$'\t' read -r count max_id max_ts <<< "$(checkpoint_summary)"
-    echo "TM-KILL-FULL-LOAD: post-kill checkpoints t+${i}s count=${count:-0} max_id=${max_id:--1} max_ts=${max_ts:-0}"
+    echo "TM-KILL-FULL-LOAD: post-kill checkpoints t+${i}s count=${count:-0} max_id=${max_id:--1} max_ts=${max_ts:-0} (pre-kill max_id=${PRE_KILL_MAX_CP} max_ts=${PRE_CP_MAX_TS:-0}, kill_epoch=${KILL_EPOCH})"
+    # P6-255: both sides of this gate now come from the JobManager's own
+    # checkpoint history - max_ts is the newest ack/trigger stamp of a completed
+    # checkpoint (JM clock) and PRE_CP_MAX_TS is the pre-kill maximum of the
+    # same field. The old gate compared a JM timestamp against the host wall
+    # clock (KILL_MS), so a clock skew or NTP step could reject a healthy
+    # checkpoint. The kill epoch is still logged and kept in the evidence, but
+    # it no longer decides the gate.
     if [ "${max_id:--1}" -gt "$PRE_KILL_MAX_CP" ] 2>/dev/null \
-      && [ "${max_ts:-0}" -ge "$kill_ms" ] 2>/dev/null; then
-      echo "${max_id}\t${max_ts}" > "$OUT/post-kill-checkpoint.txt"
+      && [ "${max_ts:-0}" -gt "${PRE_CP_MAX_TS:-0}" ] 2>/dev/null; then
+      printf '%s\t%s\t%s\n' "$max_id" "$max_ts" "$KILL_EPOCH" > "$OUT/post-kill-checkpoint.txt"
       return 0
     fi
     sleep_bounded 5
   done
-  fatal "no completed checkpoint newer than pre-kill max=${PRE_KILL_MAX_CP} and kill=${kill_ms}ms within ${timeout_s}s"
+  fatal "no completed checkpoint newer than pre-kill max_id=${PRE_KILL_MAX_CP} max_ts=${PRE_CP_MAX_TS:-0} within ${timeout_s}s"
 }
 
 wait_tiering_recovery() {
   [ "$TIERING_REQUIRED" -eq 1 ] || {
-    echo "tiering job was absent before drill — no tiering recovery assertion" > "$OUT/tiering-recovery.txt"
+    # P6-639: append - the preflight already wrote the `before` line into this
+    # file and truncating it lost the pre-kill tiering id.
+    echo "tiering job was absent before drill — no tiering recovery assertion" >> "$OUT/tiering-recovery.txt"
     return 0
   }
-  local timeout_s="$1" i row jid state
+  local timeout_s="$1" i row jid state active_count
   for ((i=0; i<timeout_s; i+=5)); do
     row="$(find_tiering)"
-    jid="${row%%$'\t'*}"
-    state="${row#*$'\t'}"
+    IFS=$'\t' read -r active_count jid state <<< "$row"
+    # P6-636: more than one live tiering job is split-brain. The preflight
+    # refuses it; recovery must not paper over it by picking the last one.
+    if [ "${active_count:-0}" -gt 1 ] 2>/dev/null; then
+      printf 'FAIL\t%s\tMULTIPLE(%s)\n' "${jid:-unknown}" "$active_count" >> "$OUT/tiering-recovery.txt"
+      mark_failure "more than one Fluss Lake Tiering job is active after the TM kill (${active_count}) — recovery is ambiguous, the drill cannot assert a clean restart"
+      return 0
+    fi
     if [ -n "$row" ] && [ "$state" = "RUNNING" ]; then
       TIERING_ID="$jid"
-      printf 'PASS\t%s\t%s\n' "$jid" "$state" > "$OUT/tiering-recovery.txt"
+      printf 'PASS\t%s\t%s\n' "$jid" "$state" >> "$OUT/tiering-recovery.txt"
       echo "TM-KILL-FULL-LOAD: tiering job RUNNING after TM recovery (job=$jid)"
       return 0
     fi
     case "$state" in
       FAILED|CANCELED|FINISHED)
-        printf 'FAIL\t%s\t%s\n' "${jid:-unknown}" "$state" > "$OUT/tiering-recovery.txt"
+        printf 'FAIL\t%s\t%s\n' "${jid:-unknown}" "$state" >> "$OUT/tiering-recovery.txt"
         mark_failure "Fluss Lake Tiering did not recover after TM kill (job=${jid:-unknown}, state=$state)"
         return 0 ;;
     esac
     sleep_bounded 5
   done
-  printf 'FAIL\t%s\t%s\n' "${TIERING_ID:-unknown}" "timeout" > "$OUT/tiering-recovery.txt"
+  # P6-639: append every verdict; the preflight's `before` line stays readable.
+  printf 'FAIL\t%s\t%s\n' "${TIERING_ID:-unknown}" "timeout" >> "$OUT/tiering-recovery.txt"
   mark_failure "Fluss Lake Tiering was not RUNNING within ${timeout_s}s after TM recovery"
+}
+
+# Restart evidence for the kill window (P6-256, P6-257, P6-258).
+#
+# P6-257: `docker logs --since` wants a Go duration or an RFC3339 stamp, never a
+# bare epoch. The old call passed `$((KILL_EPOCH - 5))`; depending on the daemon
+# that is an error or an empty slice, and an empty slice made both counts 0 -
+# a vacuous pass for a contract this drill exists to enforce. It now passes a
+# duration computed from the kill epoch.
+#
+# P6-256: the reads are fail-closed. A failed `docker logs` or a slice too small
+# to contain a job transition (rotation, truncation, container recreate) is
+# recorded as `unverified`, not as "no restarts happened".
+#
+# P6-258: a killed TaskManager commonly logs RUNNING->FAILING->RESTARTING, which
+# the old `RUNNING -> RESTARTING` pattern missed entirely, so a second
+# catch-up restart through the FAILING path was invisible. Every transition into
+# RESTARTING is counted now, plus the FAILING and terminal-FAILED transitions as
+# separate signals.
+collect_restart_evidence() {
+  local since_s=$(( $(date +%s) - (KILL_EPOCH - 5) ))
+  [ "$since_s" -gt 0 ] || since_s=1
+  local logs_file="$OUT/jm-logs-since-kill.txt" bytes restarts failed terminal
+  if ! docker logs --since "${since_s}s" "$JM_CONTAINER" > "$logs_file" 2>&1; then
+    printf 'unverified=true\nreason=docker_logs_failed\n' > "$OUT/restarts-since-kill.txt"
+    mark_failure "cannot read the JobManager log slice for the kill window (docker logs --since ${since_s}s $JM_CONTAINER failed); the restart contract could not be verified"
+    return 1
+  fi
+  bytes="$(wc -c < "$logs_file" 2>/dev/null || echo 0)"
+  if [ "${bytes:-0}" -lt 1024 ]; then
+    printf 'unverified=true\nreason=empty_log_slice\nbytes=%s\n' "${bytes:-0}" \
+      > "$OUT/restarts-since-kill.txt"
+    mark_failure "the JobManager log slice since the kill is empty or truncated (${bytes:-0} bytes, fewer than the 1KiB a state-transition table needs); the restart contract could not be verified"
+    return 1
+  fi
+  restarts="$(grep -F "$JOB_ID" "$logs_file" | grep -c "switched from state [A-Z]* to RESTARTING" || true)"
+  failed="$(grep -F "$JOB_ID" "$logs_file" | grep -c "switched from state [A-Z]* to FAILING" || true)"
+  terminal="$(grep -F "$JOB_ID" "$logs_file" | grep -c "switched from state [A-Z]* to FAILED" || true)"
+  RESTARTS_SINCE_KILL="${restarts:-0}"
+  FAILED_SINCE_KILL="${failed:-0}"
+  TERMINAL_SINCE_KILL="${terminal:-0}"
+  printf 'restarts=%s\nfailed=%s\nterminal=%s\nsince=%ss\nlog_bytes=%s\n' \
+    "$RESTARTS_SINCE_KILL" "$FAILED_SINCE_KILL" "$TERMINAL_SINCE_KILL" "${since_s}" "${bytes:-0}" \
+    > "$OUT/restarts-since-kill.txt"
+  return 0
+}
+
+assert_restart_contract() {
+  # Exactly the kill-induced restart is tolerated. 0 is valid: with the P6-254
+  # fix a job that never left RUNNING can recover through a new checkpoint, so
+  # the gate is an upper bound, not an equality.
+  if [ -z "${RESTARTS_SINCE_KILL:-}" ]; then
+    mark_failure "restart evidence was never collected; the restart contract is unverified"
+    return 1
+  fi
+  [ "$RESTARTS_SINCE_KILL" -le 1 ] 2>/dev/null \
+    || fatal "job entered RESTARTING ${RESTARTS_SINCE_KILL} times after the TM kill (expected at most 1 — the kill-induced recovery); recovery contract violated"
+  [ "${FAILED_SINCE_KILL:-0}" -le 1 ] 2>/dev/null \
+    || fatal "job entered FAILING ${FAILED_SINCE_KILL} times after the TM kill (more than the kill-induced one); recovery contract violated"
+  [ "${TERMINAL_SINCE_KILL:-0}" -eq 0 ] 2>/dev/null \
+    || fatal "job entered terminal FAILED ${TERMINAL_SINCE_KILL} times after the TM kill"
+  return 0
 }
 
 # ---------- preflight guards ------------------------------------------------
@@ -504,6 +760,11 @@ while IFS=$'\t' read -r _jid _state _name; do
     if [ "$_state" = "RUNNING" ]; then
       : # It will be re-submitted after the mandatory fresh-TM preflight.
     elif [ "$_state" = "FAILED" ] || [ "$_state" = "CANCELED" ] || [ "$_state" = "FINISHED" ]; then
+      # P6-640: this branch promised a guarded restart while leaving
+      # TIERING_REQUIRED=0, so the restart was skipped and the drill ran with no
+      # tiering at all - coverage it claims. A terminal tiering job is still a
+      # tiering job that has to come back after the kill.
+      TIERING_REQUIRED=1
       echo "TM-KILL-FULL-LOAD: prior tiering job is $_state; it will be restarted with the guarded contract"
     else
       fatal "Fluss Lake Tiering is in transitional state before drill: job=$_jid state=$_state"
@@ -543,6 +804,10 @@ if [ "$TIERING_REQUIRED" -eq 1 ]; then
   bash "$SCRIPT_DIR/tiering-start.sh" \
     || fatal "tiering restart failed after fresh-TM preflight"
 fi
+# From here the drill owns pipeline-faketool/pipeline-ingestion, so arm the
+# teardown now (P6-022: not at source time - a contender that loses the lock
+# must not clean up the winner's containers; see the note at the source above).
+pipeline_install_cleanup_trap
 pipeline_start_faketool || fatal "faketool start failed"
 pipeline_start_ingestion || fatal "ingestion start failed"
 pipeline_submit_job || fatal "SignalJob submission failed"
@@ -587,7 +852,6 @@ printf '%s\t%s\t%s\t%s\n' "$PRE_CP_COUNT" "$PRE_KILL_MAX_CP" "$PRE_CP_MAX_TS" "$
   > "$OUT/pre-kill-checkpoint.txt"
 
 KILL_EPOCH="$(date +%s)"
-KILL_MS=$(( KILL_EPOCH * 1000 ))
 printf '%s\n' "$KILL_EPOCH" > "$OUT/tm-kill-epoch"
 echo "TM-KILL-FULL-LOAD: KILLING $TM_CONTAINER at epoch=$KILL_EPOCH pre_kill_max_checkpoint=$PRE_KILL_MAX_CP"
 tm_running || fatal "TaskManager is not running at the kill point"
@@ -606,11 +870,20 @@ for _i in 1 2 3 4 5; do
 done
 if [ "$TM_UP" -ne 1 ]; then
   echo "TM-KILL-FULL-LOAD: restart policy did not bring TM up — explicit docker start"
-  docker start "$TM_CONTAINER" >/dev/null \
-    || fatal "explicit docker start failed for $TM_CONTAINER_ID"
+  # P6-641: right after SIGKILL the container is often still `restarting` or
+  # `removing`, where `docker start` reports "already started" while Docker is in
+  # fact bringing it back. The re-registration wait below is the real gate, so a
+  # start error is reported, not fatal.
+  if ! docker start "$TM_CONTAINER" >/dev/null 2>&1; then
+    if tm_running; then
+      echo "TM-KILL-FULL-LOAD: docker start reported an error but $TM_CONTAINER_ID is running (Docker was already restarting it)"
+    else
+      echo "TM-KILL-FULL-LOAD: WARNING — docker start reported an error and $TM_CONTAINER_ID is not running yet; waiting for Docker"
+    fi
+  fi
 fi
-wait_tm_registered 120 \
-  || fatal "TaskManager did not re-register with JobManager within 120s"
+wait_tm_registered "$RECOVERY_TIMEOUT_S" \
+  || fatal "TaskManager did not re-register with JobManager within ${RECOVERY_TIMEOUT_S}s (RECOVERY_TIMEOUT_S)"
 TM_UP_EPOCH="$(date +%s)"
 printf '%s\t%s\n' "$TM_UP_EPOCH" "$TM_CONTAINER_ID" > "$OUT/tm-recovered.txt"
 
@@ -620,7 +893,7 @@ wait_job_recovery "$RECOVERY_TIMEOUT_S"
 
 # G-TMK-9: regular checkpoint completion after the kill proves that state
 # snapshotting resumed, not just that the REST endpoint says RUNNING.
-wait_new_checkpoint "$NEW_CP_TIMEOUT_S" "$KILL_MS"
+wait_new_checkpoint "$NEW_CP_TIMEOUT_S"
 
 # Continue feeding after recovery so the kill-boundary windows close and the
 # source has time to drain the replay/catch-up backlog. Live Flink counters
@@ -655,16 +928,8 @@ printf '%s\n' "$POST_PROGRESS" > "$OUT/post-recovery-progress.txt"
 # catch-up (observed 2026-09-02: synchronous marker I/O stalled the task
 # mailbox until checkpoint RPCs timed out and Flink escalated to a global
 # failure) violates the recovery contract even if counters later resume.
-RESTARTS_SINCE_KILL="$(docker logs --since "$((KILL_EPOCH - 5))" "$JM_CONTAINER" 2>&1 \
-  | grep -F "$JOB_ID" | grep -c "switched from state RUNNING to RESTARTING" || true)"
-FAILED_SINCE_KILL="$(docker logs --since "$((KILL_EPOCH - 5))" "$JM_CONTAINER" 2>&1 \
-  | grep -F "$JOB_ID" | grep -c "switched from state RUNNING to FAILED" || true)"
-printf 'restarts=%s\nfailed=%s\n' "${RESTARTS_SINCE_KILL:-0}" "${FAILED_SINCE_KILL:-0}" \
-  > "$OUT/restarts-since-kill.txt"
-[ "${RESTARTS_SINCE_KILL:-0}" -le 1 ] 2>/dev/null \
-  || fatal "job restarted ${RESTARTS_SINCE_KILL} times after the TM kill (expected exactly 1 — the kill-induced recovery); recovery contract violated"
-[ "${FAILED_SINCE_KILL:-0}" -eq 0 ] 2>/dev/null \
-  || fatal "job transitioned to FAILED after the TM kill (${FAILED_SINCE_KILL} times)"
+collect_restart_evidence || true
+assert_restart_contract
 
 # G-TMK-10c: stop the feed and drain the replay backlog before cancel —
 # in-flight settles must land before the F4 verdict (see drill_drain_backlog).
@@ -682,6 +947,7 @@ if [ "$C2_MODE" = "smoke" ]; then
   flink_metric_dump > "$OUT/metrics-final.txt" || true
   capture_checkpoint_history "$OUT/checkpoints.jsonl" || true
   harvest_tm_gc_log "$OUT/tm-gc-final.log" || true
+  assert_gc_evidence || true
   RUN_END="$(date +%s)"
   printf '%s\n' "$RUN_END" > "$OUT/run-end-epoch"
   pipeline_cleanup
@@ -694,9 +960,12 @@ job_id=$JOB_ID
 kill_epoch=$KILL_EPOCH
 pre_kill_seconds=$PRE_KILL_S
 post_kill_seconds=$POST_KILL_S
-restarts_since_kill=${RESTARTS_SINCE_KILL:-0}
+restarts_since_kill=${RESTARTS_SINCE_KILL:-unknown}
+failed_since_kill=${FAILED_SINCE_KILL:-unknown}
+terminal_since_kill=${TERMINAL_SINCE_KILL:-unknown}
+not_covered_in_smoke=tiering-recovery,G7c-parity,F4-orphans
 EOF
-    echo "TM-KILL-FULL-LOAD: PASS — smoke drill green; full main drill (G7c+F4) is authorized"
+    echo "TM-KILL-FULL-LOAD: PASS — smoke drill green; full main drill (G7c+F4+tiering) is authorized"
     exit 0
   fi
   cat > "$PHASE_OUT/RESULT.txt" <<EOF
@@ -704,7 +973,10 @@ FAIL
 Smoke drill failed before the G7c analysis stage.
 job_id=$JOB_ID
 kill_epoch=$KILL_EPOCH
-restarts_since_kill=${RESTARTS_SINCE_KILL:-0}
+restarts_since_kill=${RESTARTS_SINCE_KILL:-unknown}
+failed_since_kill=${FAILED_SINCE_KILL:-unknown}
+terminal_since_kill=${TERMINAL_SINCE_KILL:-unknown}
+not_covered_in_smoke=tiering-recovery,G7c-parity,F4-orphans
 EOF
   echo "TM-KILL-FULL-LOAD: FAIL — see $PHASE_OUT/findings.txt and run.log" >&2
   exit 1
@@ -712,12 +984,14 @@ fi
 
 wait_tiering_recovery "$TIERING_TIMEOUT_S"
 ALERTS_DURING="$(alert_count)"
+assert_alert_contract "$ALERTS_BEFORE" "$ALERTS_DURING" || true
 
 # Harvest while the live job still exists; REST checkpoint history is trimmed
 # after cancel. Then cancel only our SignalJob and leave the shared stack up.
 flink_metric_dump > "$OUT/metrics-final.txt" || true
 capture_checkpoint_history "$OUT/checkpoints.jsonl" || true
 harvest_tm_gc_log "$OUT/tm-gc-final.log" || true
+assert_gc_evidence || true
 RUN_END="$(date +%s)"
 printf '%s\n' "$RUN_END" > "$OUT/run-end-epoch"
 pipeline_cleanup
@@ -755,6 +1029,11 @@ recovery_epoch=$RECOVERY_EPOCH
 pre_kill_completed_checkpoints=$PRE_CP_COUNT
 pre_kill_max_checkpoint=$PRE_KILL_MAX_CP
 g7c_compared=$G7C_COMPARED
+restarts_since_kill=${RESTARTS_SINCE_KILL:-unknown}
+failed_since_kill=${FAILED_SINCE_KILL:-unknown}
+terminal_since_kill=${TERMINAL_SINCE_KILL:-unknown}
+gc_samples=$GC_SAMPLES
+gc_empty_samples=$GC_EMPTY_SAMPLES
 taskmanager_alert_before=$ALERTS_BEFORE
 taskmanager_alert_during=$ALERTS_DURING
 taskmanager_alert_after=$ALERTS_AFTER
