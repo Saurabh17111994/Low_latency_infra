@@ -254,6 +254,48 @@ class ProbeTeardownTest(ProbeTest):
         self.assertIn("evidence DEGRADED", res.stderr)
 
 
+class HarnessReapTest(ProbeTest):
+    """The harness must not outlive its own timeout.
+
+    `subprocess.run(timeout=)` signals only bash, so a capture that outran the
+    timeout left the probe's reader and its own iostat reparented to init and
+    blocked on the stdout pipe — permanently, on the verbose-stderr scenario.
+    A wave-24 red leg left such a pair alive for six hours.
+    """
+
+    @staticmethod
+    def _named_by(root: Path) -> list[str]:
+        """PIDs whose command line names this sandbox (reader and stubs)."""
+        found = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                cmd = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode()
+            except OSError:
+                continue          # exited between listdir and read
+            if str(root) in cmd:
+                found.append(entry.name)
+        return found
+
+    def test_a_timed_out_capture_reaps_its_whole_subtree(self):
+        if not Path("/proc").is_dir():
+            self.skipTest("/proc is not available")
+        with self.assertRaises(subprocess.TimeoutExpired):
+            # IOSTAT_WAIT_SEC keeps the reader alive well past the timeout, so
+            # without the group kill it survives to be caught here.
+            self.sb.run("120", "nvme0n1",
+                        env={"W24_IOSTAT_SCENARIO": "half-exit",
+                             "IOSTAT_WAIT_SEC": "600"},
+                        timeout=1.5)
+        deadline = time.time() + 5
+        left = self._named_by(self.sb.root)
+        while left and time.time() < deadline:
+            time.sleep(0.1)
+            left = self._named_by(self.sb.root)
+        self.assertEqual(left, [], f"timed-out capture leaked {left}")
+
+
 class O2PushTest(ProbeTest):
     """P6-751 — the best-effort push is bounded; the file evidence wins."""
 
