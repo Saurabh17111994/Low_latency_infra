@@ -183,10 +183,7 @@ class StageCaptureTeardownTest(unittest.TestCase):
         log = (self.sb.out / "io-latency-probe.log").read_text()
         self.assertIn("iostat did not exit in 3s, killing it", log,
                       f"the probe was denied its own ending:\n{log}")
-        # The tail's non-fatal WARN is asserted on the combined streams: where
-        # it is written is not what this test pins (the probe must reach its own
-        # ending, and a trap that preempted it would suppress this line).
-        self.assertIn("WARN — io-latency probe failed", res.stdout + res.stderr)
+        self.assertIn("WARN — io-latency probe failed", res.stderr)
         self.assertEqual(self.sb.settle(3.0), [],
                          "the probe outlived its own run on the normal path")
 
@@ -220,6 +217,38 @@ class StageCaptureTeardownTest(unittest.TestCase):
                     self.assertEqual(sb.settle(), [], f"signal leaked the probe")
                 finally:
                     tmp.cleanup()
+
+
+class WarningStreamTest(unittest.TestCase):
+    """P6-863 — a WARN belongs on stderr like its siblings.
+
+    Every FAIL in this script already went to stderr; two WARNs did not, so a
+    caller that splits the streams (or greps stderr for warnings) silently lost
+    them. The severity is low — the script's own caller merges the streams into
+    one run log, so nothing was broken end to end — but the inconsistency is a
+    trap for the next consumer.
+    """
+
+    def test_every_warn_and_fail_line_goes_to_stderr(self):
+        """Source-text guard: the whole class, not just the two lines fixed."""
+        offenders = [
+            (n, line.strip())
+            for n, line in enumerate(CAPTURE_SRC.read_text().splitlines(), 1)
+            if line.strip().startswith("echo ")
+            and ("WARN" in line or "FAIL" in line)
+            and ">&2" not in line
+        ]
+        self.assertEqual(offenders, [],
+                         f"WARN/FAIL lines missing >&2: {offenders}")
+
+    def test_the_probe_warn_reaches_stderr_on_a_real_run(self):
+        """The behavioural half: an actually-emitted WARN is on stderr."""
+        with tempfile.TemporaryDirectory(prefix="w38-warn-") as td:
+            sb = Sandbox(Path(td))
+            res = sb.run(DURATION_S="2", CAPTURE_INTERVAL_S="1",
+                         **{**PARKED, "IOSTAT_WAIT_SEC": "3"})
+            self.assertIn("WARN — io-latency probe failed", res.stderr)
+            self.assertNotIn("WARN — io-latency probe failed", res.stdout)
 
 
 if __name__ == "__main__":
