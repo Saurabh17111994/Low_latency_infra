@@ -18,8 +18,6 @@ Driven in-process against the real module imported from a throwaway tree, with
 """
 import datetime
 import importlib.util
-import json
-import os
 import shutil
 import sys
 import tempfile
