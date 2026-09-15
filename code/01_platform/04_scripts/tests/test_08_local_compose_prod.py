@@ -136,12 +136,38 @@ class ProdHardeningTest(unittest.TestCase):
         self.assertIn("${AWS_SECRET_ACCESS_KEY", text)
         self.assertIn("never in fluss_properties", text.lower(), "PROD-012: FLUSS_PROPERTIES must document env-only creds")
 
-    def test_PROD_013_lake_snapshot_shared_volume(self):
-        """PROD-013: fluss-remote-data shared between coordinator+tablet for lake-snapshot offsets."""
+    def test_PROD_013_lake_snapshot_remote_dir_shared(self):
+        """PROD-013: whatever serves getLakeSnapshot (coordinator OR tablet) must
+        read the SAME remote.data.dir, because lake-snapshot metadata and tiered
+        log segments are written there.
+
+        W35x (2026-09-16): the shared *volume* this used to require is gone — dev
+        moved remote.data.dir to a Cloudflare R2 bucket, where sharing is by
+        construction rather than by a mount. The invariant is unchanged, so this
+        pins the new form: both servers name the same remote.data.dir, that value
+        is the env-interpolated bucket URI, and the container-local path (which
+        only THAT container can read — the bug W35x fixed) must NOT come back.
+        """
         text = compose_text()
-        self.assertIn("fluss-remote-data", text)
-        self.assertIn("fluss-remote-data:/tmp/fluss/remote-data", text)
-        self.assertGreaterEqual(text.count("fluss-remote-data:/tmp/fluss/remote-data"), 2, "PROD-013: shared volume must be mounted on coordinator+tablet")
+        self.assertIn("${R2_BUCKET", text, "PROD-013: remote.data.dir must use the R2 bucket")
+        self.assertGreaterEqual(
+            text.count("remote.data.dir: s3://${R2_BUCKET"),
+            2,
+            "PROD-013: coordinator AND tablet must both point remote.data.dir at the same R2 bucket",
+        )
+        self.assertNotIn(
+            "remote.data.dir: /tmp/fluss/remote-data",
+            text,
+            "PROD-013: a container-local remote.data.dir is readable only from inside "
+            "that container, so other readers silently lose the tiered rows",
+        )
+        # The path must be the same string in both services, or they disagree.
+        remote_dirs = re.findall(r"remote\.data\.dir:\s*(\S+)", text)
+        self.assertEqual(
+            len(set(remote_dirs)),
+            1,
+            f"PROD-013: coordinator and tablet disagree on remote.data.dir: {sorted(set(remote_dirs))}",
+        )
 
     def test_PROD_014_ten_vs_1024_instrument_manifest(self):
         """PROD-014: local smoke is 10 random instruments; live bench is 1024 cap (2433-row NSE file cannot be serviced)."""

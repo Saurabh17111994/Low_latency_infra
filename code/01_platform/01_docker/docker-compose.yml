@@ -323,7 +323,14 @@ services:
     ports: ["9123:9123"]
     volumes:
       - fluss-data:/data
-      - fluss-remote-data:/tmp/fluss/remote-data
+      # W35x: remote.data.dir is Cloudflare R2 (S3), so there is no local
+      # remote-data volume any more — tiered segments and the tiering manifest
+      # live in the bucket, where any client holding the R2 credentials can
+      # read them. ServerBase initialises filesystems through
+      # PluginUtils.createPluginManagerFromRootFolder($FLUSS_HOME/plugins), and
+      # the image already ships plugins/s3/fluss-fs-s3-*.jar, so s3:// resolves
+      # with no extra mount. The old fluss-remote-data volume is left in place
+      # (unmounted, not deleted) so pre-switch segments stay on disk.
       # P8.1 (tracker 14 box 827): fluss_logs stream — server logs volume.
       - fluss-logs:/opt/fluss/log
       # P3.2 lake tiering: the iceberg plugin classloader needs hadoop-aws/S3A
@@ -350,7 +357,41 @@ services:
         # (127.0.0.1 fluss-coordinator fluss-tablet) + the host port mappings.
         advertised.listeners: CLIENT://fluss-coordinator:9123
         internal.listener.name: INTERNAL
-        remote.data.dir: /tmp/fluss/remote-data
+        # W35x: tiered log segments live in Cloudflare R2 (S3), beside the Lake
+        # Iceberg warehouse that already uses the same bucket and credentials.
+        # Why: a tiered segment written to a container-local path is readable
+        # only from inside that container, so any reader outside it (a host
+        # probe, a task manager, another node) silently loses those rows —
+        # Fluss logs the fetch failure and then SKIPS the segment. In the
+        # bucket, a reader holding R2 credentials reads the same bytes.
+        # The S3 plugin config mirrors s3.* onto Hadoop's fs.s3a.* (see
+        # S3FileSystemPlugin), which is why the keys below are not
+        # datalake.iceberg.* — this is the tiering filesystem, not the lake.
+        # Credentials: the plugin REFUSES to build at all when no access/secret
+        # key is configured — it does NOT fall back to the AWS environment
+        # credential chain (verified against this jar: buildHadoopConfiguration
+        # throws NoAwsCredentialsException without static keys). So the keys
+        # must be present, but their VALUES are env-placeholders (the
+        # dollar-brace form, escaped below with a doubled dollar so compose
+        # leaves it alone):
+        # GlobalConfiguration logs every property value at INFO, so writing the
+        # secret here would print it into docker logs. Hadoop expands an
+        # env-placeholder from the process environment when the value is read,
+        # and secrets.env already supplies AWS_ACCESS_KEY_ID /
+        # AWS_SECRET_ACCESS_KEY to this container, so what reaches server.yaml
+        # is the placeholder, not the secret. (Bare dollar-brace text cannot
+        # appear in these comments at all: everything inside this block scalar
+        # is part of the value, so compose would try to interpolate it.)
+        # NOTE: values are unquoted on purpose — this file is parsed by
+        # GlobalConfiguration's line splitter, not a YAML parser, so quotes
+        # would end up inside the value (a quoted "true" is not read as true).
+        remote.data.dir: s3://${R2_BUCKET:?set R2_BUCKET for tiering}/remote-data
+        s3.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        s3.endpoint.region: ${AWS_REGION:-auto}
+        s3.access-key: $${env.AWS_ACCESS_KEY_ID}
+        s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
+        s3.path.style.access: true
+        s3.connection.ssl.enabled: true
         # Lake tiering (tracker 14 P3.2): datalake.* is the server-side lakehouse
         # config; datalake.iceberg.* becomes the Iceberg catalog properties and
         # iceberg.hadoop.* the Hadoop fs.s3a.* config (R2). Credentials arrive
@@ -400,10 +441,12 @@ services:
     ports: ["9124:9124"]
     volumes:
       - fluss-data:/data
-      # P3.2: shared lake-snapshot dir — the tablet also serves getLakeSnapshot.
-      - fluss-remote-data:/tmp/fluss/remote-data
       # P3.2: tablet log data must survive container recreation.
       - fluss-tablet-data:/tmp/fluss/data
+      # W35x: the local remote-data volume is gone — tiering writes to R2 (see
+      # remote.data.dir below). Unmounting it is what makes the container's view
+      # and every other reader's view the same bytes; the volume itself is left
+      # on disk so pre-switch segments are not destroyed.
       # P8.1 (tracker 14 box 827): fluss_logs stream — server logs volume.
       - fluss-logs:/opt/fluss/log
       # P3.2 lake tiering — same S3A + hdfs plugin overlay as the coordinator.
@@ -435,7 +478,26 @@ services:
         tablet-server.id: 0
         kv.snapshot.interval: 0s
         data.dir: /tmp/fluss/data
-        remote.data.dir: /tmp/fluss/remote-data
+        # W35x: tiered log segments go to Cloudflare R2 (same bucket/credentials
+        # as the Lake warehouse). A container-local path is readable only from
+        # inside that one container: every other reader silently loses the
+        # tiered rows, because Fluss logs the fetch failure and then SKIPS the
+        # segment. See the coordinator block for the full rationale; keys are
+        # s3.* (the tiering filesystem), not datalake.iceberg.* (the lake).
+        # Credentials: the plugin requires access/secret keys to be configured
+        # (it throws NoAwsCredentialsException without them — it does not use
+        # the AWS environment chain on its own), but the values are
+        # env-placeholders that Hadoop expands from the container environment,
+        # so the secret text never lands in this config file, which
+        # GlobalConfiguration logs value-by-value at INFO. See the coordinator
+        # block for the full note.
+        remote.data.dir: s3://${R2_BUCKET:?set R2_BUCKET for tiering}/remote-data
+        s3.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        s3.endpoint.region: ${AWS_REGION:-auto}
+        s3.access-key: $${env.AWS_ACCESS_KEY_ID}
+        s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
+        s3.path.style.access: true
+        s3.connection.ssl.enabled: true
         # 2026-08-30 burst root cause (A2b v3): LogTieringTask copies rolled
         # segments to remote.data.dir — on this single-NVMe dev box that is
         # read+write on the SAME disk at 150-200 MB/s, saturating it and
