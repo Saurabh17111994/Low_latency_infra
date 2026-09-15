@@ -710,6 +710,68 @@ overridable for a smoke run: `BENCH_EXPECTED_RPS`, `BENCH_MIN_RATE`,
 `BENCH_WINDOW_S`, `BENCH_WINDOWS`. A window whose latency cannot be read at
 all now fails rather than reporting `p99=-1` and passing (P6-033).
 
+## Bench journal: three ways it reads empty (2026-09-15)
+
+The bench gates on evidence it reads from the ingestion journal — the
+subscription ack before the windows, and the error/warn counts afterwards. Three
+independent changes since the last recorded pass (`logs/soak/bench-20260831-212352`)
+each emptied that read, so a healthy stream looked like a dead one. Check them in
+order; all three are fixed in-tree, so a recurrence means one has regressed.
+
+1. **Directory not writable by the container.** `bench-throughput.sh` creates the
+   journal bind mount as the invoking user (mode 0775, typically uid 1000) and
+   hands it to the ingestion container, which P1-137 dropped to uid 65532. The
+   entrypoint probes `LOG_DIR` and exits 2, so the container never becomes
+   healthy. The script now `chmod 0777`s the directory. Symptom:
+   `container not healthy` plus `FATAL — LOG_DIR not writable` in
+   `docker logs <container>`.
+2. **The filename is per-host.** P1-132 names it
+   `ingestion-${HOST}-${VM_ID}.json` (a volume shared with the collector must not
+   interleave writers), but the scripts read a fixed `ingestion.json`. The bench
+   globs `ingestion*.json`; the suite's `journal_stats` resolves the real file
+   from the name it is given. Symptom: `journal subscription acks ... 0` and
+   `no full subscription ack in journal` on a stream that is demonstrably running.
+3. **The appender buffers, so a live reader sees nothing.** P1-278 made the
+   JSON_FILE appender buffered (256KiB, `immediateFlush="false"`) to take a
+   per-event syscall off the hot path; combined with `shutdownHook="disable"` the
+   buffer was also dropped on exit. The hook is back on, and flush policy is an
+   env seam (`LOG_IMMEDIATE_FLUSH`, `LOG_BUFFERED_IO`) that the bench overlay sets
+   to flush per event — the soak path keeps buffering. Symptom: the journal file
+   exists but stays 0 bytes for the whole run, and after a graceful stop too.
+
+Verify with a real run, not by reading the script: the ack line must appear in
+the journal while the run is live, and the result must show all three windows
+PASSing at ~20,400 rows/s with zero decode errors.
+
+### The bench reads the previous container's counters (2026-09-15, CHG-176)
+
+With the journal readable, the next failure was the bench's own: window 1
+reported `decode_errors delta=-4 != 0`, which reads as the feed sending junk.
+The feed was healthy. OpenObserve keeps serving the newest sample in its query
+window, and a container that has just started has not flushed its first OTLP
+point yet — so the baseline and window 1's opening read were answered from the
+**previous, stopped** container. Its counters are unrelated to the new one's, so
+their difference is meaningless.
+
+Symptom worth recognising: a baseline line that pairs
+`append_latency_ms_count=0` with a non-zero `decode_errors`. No live process can
+produce that — a process appending at 20k/s has a non-zero append count by its
+first tick. Any of these three lines means the bench is reading two processes:
+
+```text
+baseline: append_latency_ms_count=0 decode_errors=7      <- the pair to look for
+!! window 1: decode_errors delta=-4 != 0                 <- misreported as bad ticks
+!! window N: decode_errors counter went backwards ...     <- the honest message
+```
+
+The fix polls the append counter until it is seen to **advance** before taking a
+baseline (a stopped process cannot advance its own counter, and both counters
+ship in one OTLP payload, so a fresh append sample proves the decode-error
+sample is fresh too). A counter that never advances fails as
+`baseline counter frozen`; a delta that still goes backwards is skipped as a
+stale sample instead of being reported as bad ticks. `skip_window` still fails
+the run, so an unmeasurable window never passes.
+
 
 ## C2 TM-kill-at-full-load drill (tracker-14 Block 1, 2026-09-02)
 
