@@ -14,9 +14,13 @@ MVN := mvn $(MVN_FLAGS)
 
 .PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite gate-fast check-image-stale check-image-stale-fast images branch-check proto
 
-# Branch guard: low-latency work must happen on the low-latency branch.
-# Any agent (human or AI) MUST run this before editing code. Fails (exit 1)
-# with a clear message if the current branch is wrong.
+# P6-302: these recipes create no file of their own name, so a stray file in the
+# repo root would make make treat the target as up to date and skip the recipe.
+.PHONY: test-local test-network test-08-phaseA test-08-phaseB test-08-phaseC test-08-phaseD test-execution test-failure test-observability test-performance test-25-smoke test-prod-hardening test-all test-all-plus-prod alert-routing-test check-loadtest-env check-ingestion-clean test-loadtest-guards loadtest-20k-regression disaster-drills eod-controller
+
+# Branch guard: work must happen on `main` — the single working branch per
+# AGENTS.md 'Branch Context'. Any agent (human or AI) MUST run this before
+# editing code. Fails (exit 1) with a clear message if the branch is wrong.
 branch-check:
 	@branch=$$(git branch --show-current); \
 	if [ "$$branch" != "main" ]; then \
@@ -427,13 +431,17 @@ static-check:
 	# Flag the pattern ONLY when it appears near a metrics scrape (curl to a \
 	# :9249/:9250/:9090 endpoint or a file named *metrics*) — the same pattern \
 	# on a config file / test log (e.g. MAX_BRIDGE_RESTARTS=3) is fine. \
-	if rg -n 'grep -o[EP]?.*(\[0-9\]|\\d).*(9250|9249|9090|prom|metrics)|(9250|9249|9090|prom|metrics).*grep -o[EP]?.*(\[0-9\]|\\d)' code --glob '*.sh' -g '!**/target/**' >/tmp/prom-float-trap.txt; then \
-		echo "static-check: Prometheus float-trap pattern found (grep -oE '[0-9]+$$'):" >&2; \
-		cat /tmp/prom-float-trap.txt >&2; \
-		rm -f /tmp/prom-float-trap.txt; \
-		fail=1; \
+	if command -v rg >/dev/null 2>&1; then \
+		tmp=$$(mktemp); \
+		if rg -n 'grep -o[EP]?.*(\[0-9\]|\\d).*(9250|9249|9090|prom|metrics)|(9250|9249|9090|prom|metrics).*grep -o[EP]?.*(\[0-9\]|\\d)' code --glob '*.sh' -g '!**/target/**' >"$$tmp"; then \
+			echo "static-check: Prometheus float-trap pattern found (grep -oE '[0-9]+$$'):" >&2; \
+			cat "$$tmp" >&2; \
+			fail=1; \
+		fi; \
+		rm -f "$$tmp"; \
+	else \
+		echo "static-check: WARN — rg (ripgrep) not installed; Prometheus float-trap scan SKIPPED" >&2; \
 	fi; \
-	rm -f /tmp/prom-float-trap.txt; \
 	echo "static-check: $$fail failures"; [ "$$fail" -eq 0 ]
 
 # Load-test guards (audit #9, 2026-08-28): preflight asserts that catch the
@@ -442,14 +450,32 @@ static-check:
 # load test that measures the wrong thing (idle faketool, stale broker on a
 # busy port, wrong env var names, >1024 tokens, missing manifest/jar).
 check-loadtest-env:
-	@bash code/01_platform/04_scripts/loadtest-run.sh --check-only 2>&1 | head -20 || true
+	@out=$$(mktemp); \
+	bash code/01_platform/04_scripts/loadtest-run.sh --check-only >"$$out" 2>&1; rc=$$?; \
+	head -20 "$$out"; \
+	if [ "$$rc" -ne 0 ]; then \
+		echo "check-loadtest-env: FAIL (rc=$$rc) — the preflight refused this environment:" >&2; \
+		cat "$$out" >&2; \
+		rm -f "$$out"; \
+		exit "$$rc"; \
+	fi; \
+	rm -f "$$out"; \
+	echo "check-loadtest-env: OK (preflight passed)" 
 
 # Post-load-test hygiene: the ingestion container must be back on the real
 # feed (no ARROW_FAKE_BROKER, no test tokens) after a host-side load run.
 check-ingestion-clean:
 	@set -e; \
-	FAKE=$$(docker exec 01_docker-ingestion-1 sh -c 'echo "$$ARROW_FAKE_BROKER"' 2>/dev/null); \
-	TOK=$$(docker exec 01_docker-ingestion-1 sh -c 'echo "$$ARROW_INSTRUMENT_TOKENS"' 2>/dev/null); \
+	if ! cid=$$($(COMPOSE) ps -q ingestion 2>/dev/null); then \
+		echo "check-ingestion-clean: FAIL — 'docker compose ps' failed (no daemon, or unreadable compose/env files)" >&2; \
+		exit 1; \
+	fi; \
+	if [ -z "$$cid" ]; then \
+		echo "check-ingestion-clean: FAIL — no running 'ingestion' container in this compose project" >&2; \
+		exit 1; \
+	fi; \
+	FAKE=$$(docker exec "$$cid" sh -c 'echo "$$ARROW_FAKE_BROKER"'); \
+	TOK=$$(docker exec "$$cid" sh -c 'echo "$$ARROW_INSTRUMENT_TOKENS"'); \
 	if [ -n "$$FAKE" ]; then echo "check-ingestion-clean: FAIL — ARROW_FAKE_BROKER is set ($$FAKE)" >&2; exit 1; fi; \
 	if echo "$$TOK" | grep -qE '^[0-9,]+\$$'; then echo "check-ingestion-clean: FAIL — test token list in container" >&2; exit 1; fi; \
 	echo "check-ingestion-clean: OK (no fake broker, no test tokens)"
