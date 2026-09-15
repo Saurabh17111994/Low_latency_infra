@@ -21,6 +21,7 @@ produce it, the compile test fails loudly rather than silently skipping.
 from __future__ import annotations
 
 import os
+import re
 import socket
 import subprocess
 import tempfile
@@ -259,32 +260,101 @@ class SignalLatencyDrainPins(unittest.TestCase):
     SRC = PROBE_DIR / "FlussSignalLatency.java"
 
     def _source(self) -> str:
+        """Read the probe source under test.
+
+        W35X_PROBE_SRC redirects these pins at another copy of the probe so a
+        red leg can run them against the PRE-FIX source and show that they
+        fail there. Without the override they pin the repo's own source, which
+        is what a normal run should check; with it, "these pins would have
+        caught the bug" is a measured claim instead of an assertion.
+        """
+        override = os.environ.get("W35X_PROBE_SRC", "")
+        if override:
+            path = Path(override)
+            if path.is_dir():
+                path = path / "FlussSignalLatency.java"
+            if not path.is_file():
+                raise AssertionError(
+                    f"W35X_PROBE_SRC={override!r} is set but does not name a probe source "
+                    f"(looked for {path})")
+            return path.read_text(encoding="utf-8")
         return self.SRC.read_text(encoding="utf-8")
 
-    def test_a_poll_timeout_is_not_treated_as_end_of_bucket(self) -> None:
+    def test_a_poll_timeout_is_not_treated_as_end_of_read(self) -> None:
         src = self._source()
         self.assertIn("EMPTY_POLLS_TO_DRAIN = 3", src,
                       "the drain rule must require N consecutive empty polls")
         # null is end-of-input; an empty iterator is a timeout and must not break.
         self.assertIn("if (batch == null) {", src,
-                      "only a null batch proves the bucket is exhausted")
+                      "only a null batch proves a KV snapshot is exhausted")
+        self.assertIn("if (records == null || records.isEmpty()) {", src,
+                      "only consecutive empties prove a log read reached the end")
         self.assertNotIn("if (batch == null || !batch.hasNext()) {\n                                break;",
                          src, "the single-empty-poll break is the P6-088 defect")
 
-    def test_the_row_cap_cannot_truncate_a_census_silently(self) -> None:
+    def test_a_log_table_is_never_read_by_the_batch_scanner(self) -> None:
+        """Wave 35x: the batch path returns a bucket's first SEGMENT, not the bucket.
+
+        This is the invariant that would have caught the original defect: a LOG
+        table read through createBatchScanner cannot be a census at any limit
+        (LimitBatchScanner.pollBatch does one RPC then sets endOfInput), and its
+        cap can never be reached, so the saturation guard could not fire.
+        """
+        src = self._source()
+        self.assertIn("info.hasPrimaryKey() ? readKvSnapshot(table, info, sink)"
+                      " : readLog(table, info, sink)", src,
+                      "the scan path must be chosen by table kind")
+        # readLog must page by offset; readKvSnapshot is the only batch user.
+        log_body = src.split("private static long readLog(")[1].split("private static long readKvSnapshot(")[0]
+        self.assertIn("createLogScanner()", log_body)
+        self.assertNotIn("createBatchScanner", log_body,
+                         "a LOG table must never go through the batch scanner")
+        kv_body = src.split("private static long readKvSnapshot(")[1]
+        self.assertEqual(kv_body.count("createBatchScanner("), 1,
+                         "only the KV snapshot reads through the batch scanner")
+
+    def test_the_read_is_reconciled_with_the_server_row_count(self) -> None:
+        """Wave 35x: the printed total is checked, never merely believed."""
+        src = self._source()
+        self.assertIn("tableRowCount(admin,", src,
+                      "the expected total must come from the server")
+        self.assertIn("getTableStats(", src)
+        self.assertIn("checkAgainstServer(", src,
+                      "reads must be reconciled before a census is printed")
+        # The comparison must run BEFORE any census output: every printing
+        # method calls it after its read and before its println.
+        for mode in ("reportSignals", "reportIntents", "reportOrphans"):
+            body = src.split(f"private static void {mode}(")[1]
+            check = body.index("checkAgainstServer(")
+            out = body.index("System.out.println(")
+            self.assertLess(check, out,
+                            f"{mode} must reconcile before printing")
+
+    def test_the_kv_row_cap_cannot_truncate_a_census_silently(self) -> None:
         src = self._source()
         self.assertIn("BUCKET_ROW_LIMIT", src)
-        self.assertIn("reached the ", src)
-        self.assertIn("per-bucket cap", src,
-                      "hitting the cap must fail loudly, not under-report")
+        self.assertIn("snapshot cap", src,
+                      "hitting the KV cap must fail loudly, not under-report")
+        self.assertIn("-Dfluss.probe.bucket.row.limit=<n>", src,
+                      "the failure must name the override that reaches it")
+        self.assertIn("Integer.getInteger(\"fluss.probe.bucket.row.limit\", 10_000_000)", src,
+                      "the cap must be overridable so the failure is provable in dev")
 
-    def test_every_bucket_scan_goes_through_the_drain_helper(self) -> None:
-        """Four hand-rolled loops were how the same bug survived in four places."""
+    def test_the_rule_filter_and_null_timestamp_guards_survive(self) -> None:
+        """The wave-34 lambda refactor silently deleted both guards.
+
+        Measured: `signals Signal_Candidates no-such-rule-v9` reported kept=25 of
+        25 rows and 17 latency samples from a rule that matches nothing. A
+        source pin is the only cheap discriminator here: no dev table has rows
+        with null timestamps, and 25 rows cannot provoke a truncation.
+        """
         src = self._source()
-        self.assertEqual(src.count("scanner.pollBatch("), 1,
-                         "all bucket scans must share one poll loop")
-        self.assertNotIn("pollBatch(Duration.ofMillis(5000))", src,
-                         "the old inline timeout call must be gone")
+        body = src.split("private static void reportSignals(")[1]
+        self.assertIn("return;", body,
+                      "non-matching rows must skip, not fall through")
+        self.assertIn("!rule.equals(row.getString(ruleIdx).toString())", body)
+        self.assertIn("null_ts=", body,
+                      "null-timestamp rows must be counted, not silently used")
 
     def test_an_over_large_census_refuses_instead_of_dying(self) -> None:
         """P6-087/P6-089: an OOM kill loses the answer; a refusal names the limit."""
@@ -366,6 +436,22 @@ class SignalLatencyContractTests(ProbeTestBase):
                           f"a failed census must name the disagreement:\n{proc.stderr[-2000:]}")
             self.assertNotIn("orphan_intents=", proc.stdout,
                              "a short read must not print a census")
+
+    @unittest.skipUnless(_dev_stack_up(), "dev stack (:9123) is not running")
+    def test_the_intents_run_agrees_with_the_server_row_count(self) -> None:
+        """Wave 35x: the printed total is checked against Fluss's own count.
+
+        Pre-fix, this mode read 11 rows of Execution_Intent by batch scan while
+        the server reports 24 — a batch scan of a bucket returns the bucket's
+        first stored SEGMENT, so the total was short and nothing said so.
+        """
+        proc = self.run_probe("FlussSignalLatency", ["intents", "Execution_Intent"], timeout=180)
+        self.assert_no_classpath_error(self, proc)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+        rows = re.search(r"\brows=(\d+)", proc.stdout)
+        self.assertIsNotNone(rows, proc.stdout)
+        self.assertGreaterEqual(int(rows.group(1)), 1, proc.stdout)
+        self.assertNotIn("server's own row count disagree", proc.stderr)
 
     @unittest.skipUnless(_dev_stack_up(), "dev stack (:9123) is not running")
     def test_the_scanned_table_is_the_one_printed(self) -> None:
