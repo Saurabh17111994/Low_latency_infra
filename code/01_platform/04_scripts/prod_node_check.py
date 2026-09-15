@@ -13,7 +13,13 @@ Per-Node checks:
   * label/role     — Swarm node role + labels match the inventory expectation
                      (role=manager / role=worker / observability=true), and (optional)
                      availability is `drained` for v2 manager-only nodes. Swarm checks
-                     run only when the inventory marks the node `swarm: true`.
+                     run only when the inventory marks the node `swarm: true`, and the
+                     node's role/availability/labels are read by NodeID: `docker info`
+                     on the node itself (the one swarm call a worker can answer) and
+                     `docker node inspect <NodeID>` on a manager, because the
+                     `docker node` API is manager-only — a worker answers it with
+                     "This node is not a swarm manager", which used to FAIL every
+                     healthy worker.
   * placement rule — the stack must NEVER pin a hostname; this checker only confirms
                      labels because test_09_stack.py enforces no hostname in the stack.
 
@@ -37,10 +43,8 @@ import argparse
 import datetime as _dt
 import json
 import os
-import socket
 import subprocess
 import sys
-import tempfile
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
@@ -117,35 +121,86 @@ def _parse_df_gb(stdout):
     return None
 
 
-def _node_swarm_info(runner, node):
-    """Role + availability + labels for node via `docker node ls`/`inspect` on itself."""
-    rc, out = runner.run(node["host"], "docker node ls --format '{{.Hostname}}|{{.Role}}|{{.Availability}}'")
+DOCKER_INFO_FMT = ("{{.Name}}|{{.Swarm.LocalNodeState}}|"
+                   "{{.Swarm.ControlAvailable}}|{{.Swarm.NodeID}}")
+
+
+def _local_swarm_identity(runner, node):
+    """What a node's OWN daemon reports about its swarm membership.
+
+    `docker node ls`/`docker node inspect` are manager-only API calls: run on a
+    worker they exit non-zero ("This node is not a swarm manager"), so the old
+    implementation FAILED every worker on healthy infrastructure (P6-153).
+    `docker info` is answered by any daemon, manager or worker, and carries the
+    daemon hostname, the local swarm state, whether this daemon is a manager and
+    the local swarm NodeID.
+    """
+    rc, out = runner.run(node["host"], f"docker info --format '{DOCKER_INFO_FMT}'")
     if rc != 0:
-        return None, f"docker node ls failed (rc={rc}): {out}"
-    row = {}
-    for line in out.splitlines():
-        parts = line.split("|")
-        if len(parts) == 3:
-            row[parts[0].strip()] = (parts[1].strip(), parts[2].strip())
-    if node["host"] not in row and node["name"] not in row:
-        return None, f"node {node['name']} absent from swarm membership"
-    host = node["host"] if node["host"] in row else node["name"]
-    role, availability = row[host]
-    rc2, labels_out = runner.run(
-        node["host"],
-        f"docker node inspect {host} --format '{{{{json .Spec.Labels}}}}'",
-    )
-    labels = {}
-    if rc2 == 0 and labels_out:
-        try:
-            labels = json.loads(labels_out)
-        except json.JSONDecodeError:
-            labels = {}
-    return {"role": role, "availability": availability, "labels": labels}, None
+        return None, f"docker info failed (rc={rc}): {out}"
+    parts = [part.strip() for part in out.strip().split("|")]
+    if len(parts) != 4 or not parts[3]:
+        return None, f"unexpected docker info output for {node['name']}: {out.strip()!r}"
+    hostname, state, control_available, node_id = parts
+    return {
+        "hostname": hostname,
+        "local_state": state,
+        "control_available": control_available.lower() == "true",
+        "node_id": node_id,
+    }, None
 
 
-def check_node(node, runner):
-    """Returns (checks, ok) for one node; checks is {name: (PASS|FAIL, detail)}."""
+def _node_swarm_info(runner, node, manager_host=None):
+    """Role + availability + labels, addressed by the node's own swarm NodeID.
+
+    The node OBJECT (role/availability/labels) lives behind the manager-only
+    `docker node` API, so a worker's is read from `manager_host`. Matching is by
+    NodeID on purpose: swarm membership is keyed by NodeID/hostname, and the
+    inventory's `host` (an IP) and `name` (M1/W1-style) are neither — matching on
+    those reported a correctly joined node as "absent from swarm membership"
+    (P6-764). Fail-closed: an unreadable or ambiguous membership is an error, not
+    a pass.
+    """
+    local, err = _local_swarm_identity(runner, node)
+    if err:
+        return None, err
+    if local["local_state"] != "active":
+        return None, (f"node {node['name']} is not an active swarm node "
+                      f"(localstate={local['local_state']})")
+    if local["control_available"]:
+        probe_host = node["host"]  # this daemon is a manager: ask it directly
+    elif manager_host:
+        probe_host = manager_host
+    else:
+        return None, (f"node {node['name']} is a worker: role/availability/labels "
+                      "are manager-only API data and the inventory names no "
+                      "manager to read them from (add the manager node)")
+    cmd = ("docker node inspect " + local["node_id"] +
+           " --format '{{json .Spec.Labels}}|{{.Spec.Role}}|{{.Spec.Availability}}'")
+    rc, out = runner.run(probe_host, cmd)
+    if rc != 0:
+        return None, (f"docker node inspect {local['node_id']} on {probe_host} "
+                      f"failed (rc={rc}): {out}")
+    parts = [part.strip() for part in out.strip().split("|")]
+    if len(parts) != 3:
+        return None, f"unexpected docker node inspect output: {out.strip()!r}"
+    labels_raw, role, availability = parts
+    try:
+        labels = json.loads(labels_raw) if labels_raw else {}
+    except json.JSONDecodeError:
+        labels = {}
+    if not isinstance(labels, dict):
+        labels = {}
+    return {"role": role, "availability": availability, "labels": labels,
+            "hostname": local["hostname"], "node_id": local["node_id"]}, None
+
+
+def check_node(node, runner, manager_host=None):
+    """Returns (checks, ok) for one node; checks is {name: (PASS|FAIL, detail)}.
+
+    `manager_host` is where a worker's node object is inspected; a manager reads
+    its own. Without one, a worker's swarm check fails closed (P6-153).
+    """
     checks = {}
     # 1. reachability
     rc, out = runner.run(node["host"], "true")
@@ -167,7 +222,7 @@ def check_node(node, runner):
 
     # 3. swarm role/labels (only when the node is intended to be in the swarm)
     if node.get("swarm"):
-        info, err = _node_swarm_info(runner, node)
+        info, err = _node_swarm_info(runner, node, manager_host)
         if err:
             checks["swarm"] = ("FAIL", err)
         else:
@@ -183,15 +238,32 @@ def check_node(node, runner):
                 problems.append(
                     f"availability {info['availability']} != expected {want_avail}"
                 )
+            # name the swarm identity we actually inspected: with NodeID matching
+            # an operator can tell WHICH node the verdict is about (P6-764)
+            identity = f"swarm node {info['hostname']} ({info['node_id']})"
             checks["swarm"] = (
-                ("PASS", f"role={info['role']} labels={info['labels']}") if not problems
-                else ("FAIL", "; ".join(problems))
+                ("PASS", f"role={info['role']} availability={info['availability']} "
+                         f"labels={info['labels']} — {identity}") if not problems
+                else ("FAIL", "; ".join(problems) + f" — {identity}")
             )
     else:
         checks["swarm"] = ("PASS", "outside swarm (observability) — label check n/a; "
                                     "stack places by observability=true only if joined")
     ok = all(verdict == "PASS" for verdict, _ in checks.values())
     return checks, ok
+
+
+def _resolve_manager_host(inventory):
+    """First inventory node that is a swarm manager, else None.
+
+    Workers cannot read their own node object — role, availability and labels sit
+    behind the manager-only `docker node` API — so every worker's check inspects
+    them from this host, addressed by the worker's own NodeID (P6-153).
+    """
+    for node in inventory["nodes"]:
+        if node.get("swarm") and str(node.get("role", "")).lower() == "manager":
+            return node["host"]
+    return None
 
 
 def build_evidence(inventory, per_node, run_id, utc_now):
@@ -216,7 +288,9 @@ def build_evidence(inventory, per_node, run_id, utc_now):
         "limitations": [
             "swarm checks run only on nodes marked swarm:true (O1 observability is "
             "verified for reachability+disk unless it joins the swarm)",
-            "label/role verified against docker node inspect on the node itself; "
+            "label/role/availability come from the manager-only `docker node` API: "
+            "`docker info` on the node itself for the identity, then `docker node "
+            "inspect <NodeID>` on a manager (a worker cannot read its own node object)",
             "hostname-free placement itself is enforced by test_09_stack.py",
         ],
     }
@@ -243,9 +317,10 @@ def main(argv=None):
         return 2
     inventory = load_inventory(args.inventory)
     runner = RemoteRunner(inventory["access"])
+    manager_host = _resolve_manager_host(inventory)
     per_node = []
     for node in inventory["nodes"]:
-        node_checks, ok = check_node(node, runner)
+        node_checks, ok = check_node(node, runner, manager_host=manager_host)
         per_node.append((node, (node_checks, ok)))
         for name, (verdict, detail) in node_checks.items():
             print(f"{node['name']:<16} {name:<12} {verdict:<4} {detail}")
@@ -267,9 +342,15 @@ def _self_check(args, utc_now, run_id):
             self.access = access
             self.reachable = {"10.0.0.11", "10.0.0.21", "10.0.0.40"}
             self.disks = {"10.0.0.11": 600, "10.0.0.21": 480, "10.0.0.40": 512}
-            self.swarm = {
-                "10.0.0.11": ("manager", "drained", {"role": "manager"}),
-                "10.0.0.21": ("worker", "active", {"role": "employee"}),  # label drift!
+            # what each node's OWN daemon reports: hostname|state|manager?|NodeID
+            self.identities = {
+                "10.0.0.11": ("M1", "active", True, "node-m1"),
+                "10.0.0.21": ("W1", "active", False, "node-w1"),
+            }
+            # what a manager sees, keyed by NodeID: role, availability, labels
+            self.node_objects = {
+                "node-m1": ("manager", "drained", {"role": "manager"}),
+                "node-w1": ("worker", "active", {"role": "employee"}),  # label drift!
             }
 
         def run(self, host, command, timeout=20):
@@ -279,14 +360,13 @@ def _self_check(args, utc_now, run_id):
                 return 0, ""
             if command.startswith("df -BG"):
                 return 0, f"{self.disks[host]}G"
-            if "docker node ls" in command:
-                lines = []
-                for h, (role, avail, _) in self.swarm.items():
-                    lines.append(f"{h}|{role}|{avail}")
-                return 0, "\n".join(lines)
+            if "docker info --format" in command:
+                name, state, control, node_id = self.identities[host]
+                return 0, f"{name}|{state}|{'true' if control else 'false'}|{node_id}"
             if "docker node inspect" in command:
-                host = command.split("inspect ")[1].split()[0]
-                return 0, json.dumps(self.swarm[host][2])
+                node_id = command.split("inspect ")[1].split()[0]
+                role, avail, labels = self.node_objects[node_id]
+                return 0, f"{json.dumps(labels)}|{role}|{avail}"
             return 0, ""
 
     fake_inv = {
@@ -302,10 +382,14 @@ def _self_check(args, utc_now, run_id):
         ],
     }
     runner = FakeRunner(fake_inv["access"])
+    # the same manager resolution the real run does — without it a worker's swarm
+    # check fails closed for the wrong reason ("no manager") and the self-check
+    # would "pass" while demonstrating nothing about label drift
+    manager_host = _resolve_manager_host(fake_inv)
     per_node = []
     expect_ok = {"M1": True, "W1": False, "O1": True}  # W1 disk 480<500 AND label drift
     for node in fake_inv["nodes"]:
-        node_checks, ok = check_node(node, runner)
+        node_checks, ok = check_node(node, runner, manager_host=manager_host)
         per_node.append((node, (node_checks, ok)))
         for name, (verdict, detail) in node_checks.items():
             print(f"[self-check] {node['name']:<6} {name:<12} {verdict:<4} {detail}")
