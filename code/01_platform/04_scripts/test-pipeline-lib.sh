@@ -29,12 +29,14 @@ bash -n "$LIB" && ok "G1 lib syntax valid" || { bad "G1 lib syntax invalid"; exi
 ROOT="$SCRIPT_DIR/../../.." ; ROOT="$(cd "$ROOT" && pwd)"
 OUT="$(mktemp -d)"
 FAKETOOL_PORT=8899 RATE_HZ=10
-# shellcheck source=pipeline-lib.sh
 # P6-142: pipeline-lib.sh now refuses to be sourced without ROOT/RATE_HZ;
 # this guard suite sources it directly, so satisfy the contract here (the
 # nested-source tests below already set RATE_HZ=10 themselves).
 RATE_HZ="${RATE_HZ:-10}"
 export RATE_HZ
+# The directive must sit immediately above the command it annotates: wave 17
+# inserted the RATE_HZ pre-amble between the two and detached it (SC1090).
+# shellcheck source=pipeline-lib.sh
 source "$LIB"
 for fn in pipeline_preflight pipeline_start_faketool pipeline_start_ingestion \
           pipeline_submit_job pipeline_cleanup pipeline_install_cleanup_trap \
