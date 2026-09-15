@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -68,11 +69,41 @@ class Sandbox:
         environ.setdefault("W24_IOSTAT_SCENARIO", "normal")
         environ.setdefault("W24_O2_MODE", "fast")
         environ.update(env or {})
-        return subprocess.run(
+        # Own process group + an explicit reap on timeout. `subprocess.run(
+        # timeout=)` signals ONLY bash, so a capture that outran the timeout
+        # left the probe's python reader and its own iostat reparented to init
+        # — still blocked on the stdout pipe, and on the verbose-stderr
+        # scenario (P6-430) blocked forever: a wave-24 red leg left a pair of
+        # them alive for 6 hours. Killing the group takes the whole subtree.
+        proc = subprocess.Popen(
             ["bash", str(self.script), str(out_dir or self.out), duration,
              *devices],
-            capture_output=True, text=True, timeout=timeout, env=environ,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            env=environ, start_new_session=True,
         )
+        try:
+            out, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self._reap_group(proc)
+            raise
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+
+    @staticmethod
+    def _reap_group(proc: subprocess.Popen) -> None:
+        """TERM then KILL the capture's whole process group, and drain it."""
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(proc.pid, sig)
+            except ProcessLookupError:
+                break
+            try:
+                proc.wait(timeout=5)
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.close()
 
     def tsv(self) -> tuple[list[str], list[dict]]:
         lines = [ln for ln in
