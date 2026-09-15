@@ -72,6 +72,10 @@ WINDOW_COUNT="${BENCH_WINDOWS:-3}"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="${OUT_DIR:-$PROJECT_ROOT/logs/soak/bench-$STAMP}"
 mkdir -p "$OUT/bench/journal" "$OUT/bin"
+# P1-137 dropped the ingestion container to uid 65532, which writes its
+# journal into this host bind mount; the default 0775/uid-1000 mode denies
+# it and the entrypoint fails closed (P1-137 follow-up gate).
+chmod 0777 "$OUT/bench/journal"
 RUN_LOG="$OUT/bench/run.log"
 RESULT_FILE="$OUT/bench/result.txt"
 TSV="$OUT/bench/bench-throughput.tsv"
@@ -275,16 +279,19 @@ case "$CONTAINER_HEALTH" in
 esac
 
 # Full 1024-token subscription ack in the container journal (message field).
+# P1-132 names the journal ingestion-${HOST}-${VM_ID}.json (a shared volume must
+# not interleave writers), so the old fixed ingestion.json matched nothing after
+# 2026-09-07 and this gate could never pass. Glob the directory instead: it also
+# covers the root-era name and any future per-replica naming.
+JOURNAL_DIR="$OUT/bench/journal"
 ACKS=0
 for _ in $(seq 1 60); do
-	[ -f "$OUT/bench/journal/ingestion.json" ] && {
-		# P6-314: the old pattern matched a bare `1024` with at most one optional
-		# space, so `acknowledged=10240` also counted, and it counted matching
-		# LINES rather than acks. Anchor the token and allow any whitespace.
-		ACKS="$(grep -oE 'subscription_ack.*acknowledged[=:][[:space:]]*1024\b' \
-			"$OUT/bench/journal/ingestion.json" 2>/dev/null | wc -l)"
-		[ "${ACKS:-0}" -ge 1 ] && break
-	}
+	# P6-314: the old pattern matched a bare `1024` with at most one optional
+	# space, so `acknowledged=10240` also counted, and it counted matching
+	# LINES rather than acks. Anchor the token and allow any whitespace.
+	ACKS="$(grep -hoE 'subscription_ack.*acknowledged[=:][[:space:]]*1024\b' \
+		"$JOURNAL_DIR"/ingestion*.json 2>/dev/null | wc -l)"
+	[ "${ACKS:-0}" -ge 1 ] && break
 	sleep 1
 done
 echo "journal subscription acks (acknowledged=1024): ${ACKS:-0}"

@@ -110,6 +110,51 @@ class JournalStatsTest(unittest.TestCase):
         r = _lib(f"echo $(journal_errors {absent})/$(journal_warns {absent})/$(journal_acks {absent})")
         self.assertEqual(r.stdout.strip(), "0/0/0")
 
+    def test_the_per_host_filename_is_resolved_from_the_fixed_name(self) -> None:
+        """P1-132: the journal is ingestion-<HOST>-<VM_ID>.json, not ingestion.json.
+
+        Every caller in the suite still passes the fixed name, so the resolver
+        has to find the real file — otherwise every ack/error/epoch gate reads
+        zeros and reports a healthy run as empty.
+        """
+        (self.dir / "ingestion-somehost-vm0.json").write_text(json.dumps(
+            {"level": "INFO",
+             "message": "bridge lifecycle event=subscription_ack epoch=3"}) + "\n")
+        fixed = shlex.quote(str(self.dir / "ingestion.json"))
+        r = _lib(f"echo acks=$(journal_acks {fixed}) epochs=$(journal_maxepoch {fixed})")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "acks=1 epochs=3")
+
+    def test_journal_file_resolves_the_path_for_existence_checks(self) -> None:
+        """P1-132: callers that need the PATH (not the counts) must resolve too.
+
+        `[ -f .../ingestion.json ]` guards several waits; on the per-host name it
+        is always false, so the wait spins to its deadline on a healthy run.
+        """
+        real = self.dir / "ingestion-somehost-vm0.json"
+        real.write_text("{}\n")
+        fixed = shlex.quote(str(self.dir / "ingestion.json"))
+        r = _lib(f"journal_file {fixed}")
+        self.assertEqual(r.stdout.strip(), str(real))
+
+    def test_journal_file_passes_an_unmatched_path_through(self) -> None:
+        """No journal yet must keep the old missing-file behaviour, not invent one."""
+        absent = self.dir / "ingestion.json"
+        r = _lib(f"journal_file {shlex.quote(str(absent))}")
+        self.assertEqual(r.stdout.strip(), str(absent))
+
+    def test_the_newest_journal_wins_when_several_exist(self) -> None:
+        """A stale file from an earlier run must not satisfy the gate."""
+        old_j = self.dir / "ingestion-oldhost-vm0.json"
+        old_j.write_text(json.dumps(
+            {"level": "INFO", "message": "bridge lifecycle event=subscription_ack epoch=1"}) + "\n")
+        os.utime(old_j, (1_600_000_000, 1_600_000_000))
+        (self.dir / "ingestion-newhost-vm0.json").write_text(json.dumps(
+            {"level": "INFO", "message": "bridge lifecycle event=subscription_ack epoch=9"}) + "\n")
+        fixed = shlex.quote(str(self.dir / "ingestion.json"))
+        r = _lib(f"echo epochs=$(journal_maxepoch {fixed})")
+        self.assertEqual(r.stdout.strip(), "epochs=9")
+
 
 class O2AuthTest(unittest.TestCase):
     """P6-177: the `awk -F=` form truncated a base64 secret at its padding."""

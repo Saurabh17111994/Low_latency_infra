@@ -12,3 +12,10 @@ services:
   ingestion:
     environment:
       CLOCK_OFFSET_LIMIT_MS: ${BENCH_CLOCK_OFFSET_LIMIT_MS:-500}
+      # The bench gates on evidence it reads from the journal WHILE the run is
+      # live (subscription ack, then per-window errors), but P1-278 made the
+      # JSON_FILE appender buffered (256KiB, flush only on rollover/exit) — so
+      # the file stays 0 bytes for the whole run and every gate reads nothing.
+      # Bench-only: the soak path keeps buffering (its hot path wants it).
+      LOG_IMMEDIATE_FLUSH: "true"
+      LOG_BUFFERED_IO: "false"

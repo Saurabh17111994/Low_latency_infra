@@ -195,10 +195,18 @@ class Sandbox:
             'state=ACTIVE epoch=1 assigned=1024 acknowledged=1024 rejected=0"}\n')
 
         # ── a stand-in for Fluss :9123 (preflight requires it reachable) ────
+        # The preflight needs :9123 reachable, and usually nothing is there, so
+        # this stub provides it. When a real Fluss already holds the port the
+        # check is satisfied without us — binding would then fail the test for
+        # the environment being in its CORRECT state.
         self.fluss = socket.socket()
         self.fluss.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.fluss.bind(("127.0.0.1", 9123))
-        self.fluss.listen(8)
+        try:
+            self.fluss.bind(("127.0.0.1", 9123))
+        except OSError:
+            self.fluss.close()
+        else:
+            self.fluss.listen(8)
 
     def shim(self, name: str, body: str) -> None:
         p = self.bin / name
@@ -509,7 +517,10 @@ class BenchSourceContractTest(unittest.TestCase):
     def test_ack_pattern_is_anchored_and_counts_acks(self):
         """P6-314: `acknowledged=10240` must not count, and acks != lines."""
         self.assertIn(r"1024\b", self.code)
-        self.assertIn("grep -oE", self.code)
+        # `-h` suppresses the filename prefix so the count stays a count of acks
+        # across the globbed files (P1-132: ingestion-<HOST>-<VM_ID>.json).
+        self.assertIn("grep -hoE", self.code)
+        self.assertIn('"$JOURNAL_DIR"/ingestion*.json', self.code)
 
     def test_health_gate_tolerates_a_missing_healthcheck(self):
         """P6-313: no .State.Health is not a failure if the container is up."""
@@ -545,6 +556,32 @@ class BenchSourceContractTest(unittest.TestCase):
         """
         self.assertIn("exec > >(tee -a", self.code)
 
+
+class BenchJournalPermTest(BenchCase):
+    """The journal bind mount must be writable by the ingestion container's uid.
+
+    P1-137 dropped the ingestion container to uid 65532, and the bench hands it
+    a host bind mount created by the invoking user (typically uid 1000, mode
+    0775). The entrypoint probes LOG_DIR and exits 2 when it cannot write, so
+    every bench run after 2026-09-08 died at `container health` with no window
+    ever measured — while the recorded pass in logs/soak/bench-20260831-212352
+    predates that change and ran as root.
+
+    Asserted by MODE, not by grepping for `chmod`: the thing that regressed is
+    whether the container can write, and the test says so directly.
+    """
+
+    def test_journal_dir_is_group_and_world_writable(self):
+        o2 = O2Server(rate=EXPECTED_RPS)
+        self.addCleanup(o2.stop)
+        self.sb.run(o2)
+
+        journal = self.sb.out / "bench/journal"
+        self.assertTrue(journal.is_dir(), "bench did not create its journal dir")
+        mode = journal.stat().st_mode & 0o777
+        self.assertEqual(mode & 0o022, 0o022,
+                         f"journal dir mode {oct(mode)} is not writable by "
+                         "uid 65532 (world/group write bit missing)")
 
 if __name__ == "__main__":
     unittest.main()

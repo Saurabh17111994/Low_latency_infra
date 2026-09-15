@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Configuration status="WARN" shutdownHook="disable">
+<!-- P1-278 follow-up: the shutdown hook must stay ENABLED because the
+     JSON_FILE appender is buffered (bufferedIO + 256KiB). With the hook
+     disabled the buffer was dropped on every exit — measured 0 bytes in the
+     journal after a full bench run AND after a graceful `docker stop -t 40`,
+     so the ack/error gates in bench-throughput.sh and run-full-suite.sh had
+     nothing to read and start-up evidence was silently lost. The hook runs
+     once per JVM exit, not per event, so the hot path is unaffected. -->
+<Configuration status="WARN" shutdownHook="enable">
   <!--
     Log4j2 configuration for the trading platform ingestion service.
 
@@ -55,7 +62,8 @@
     <RollingFile name="JSON_FILE"
                  fileName="${LOG_DIR}/ingestion-${HOST}-${VM_ID}.json"
                  filePattern="${LOG_DIR}/ingestion-${HOST}-${VM_ID}-%d{yyyy-MM-dd}-%i.json.gz"
-                 immediateFlush="false" bufferedIO="true" bufferSize="262144">
+                 immediateFlush="${env:LOG_IMMEDIATE_FLUSH:-false}"
+                 bufferedIO="${env:LOG_BUFFERED_IO:-true}" bufferSize="262144">
       <JsonLayout compact="true" eventEol="true" properties="true"
                   includeStacktrace="true" stacktraceAsString="true">
         <!-- R-161: JsonLayout properties=true serializes only the ThreadContext

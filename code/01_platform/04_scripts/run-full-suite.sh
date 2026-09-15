@@ -153,14 +153,25 @@ port_open() { # $1=host $2=port — listener check via ss; 1 also means "cannot 
 # (P6-180: max_epoch >= 100 does not prove 100 cycles).
 journal_stats() { # $1 = journal path — prints key=value lines; missing file = zeros
 	python3 - "${1:-/nonexistent}" <<'PYJ'
-import json, re, sys
+import glob, json, os, re, sys
+
+# P1-132 names the journal ingestion-${HOST}-${VM_ID}.json (a volume shared with
+# the collector must not interleave writers), so the fixed ingestion.json every
+# caller passes has matched nothing since 2026-09-07 and every gate below read
+# zeros. Resolve the real per-host name here, once, instead of at ~20 call sites:
+# the newest file in the directory is this run's journal.
+_path = sys.argv[1]
+if not os.path.exists(_path) and os.path.basename(_path) == "ingestion.json":
+    _cands = glob.glob(os.path.join(os.path.dirname(_path), "ingestion*.json"))
+    if _cands:
+        _path = max(_cands, key=os.path.getmtime)
 
 ACK = re.compile(r"\bevent=subscription_ack\b")
 EPOCH = re.compile(r"\bepoch=(\d+)\b")
 acks = errors = warns = torn = 0
 epochs = []
 try:
-    fh = open(sys.argv[1], encoding="utf-8", errors="replace")
+    fh = open(_path, encoding="utf-8", errors="replace")
 except OSError:
     fh = None
 if fh is not None:
@@ -225,6 +236,21 @@ try:
 except Exception:
     print("UNAVAILABLE")' || true)"
 	echo "${val:-UNAVAILABLE}"
+}
+
+journal_file() { # $1 = journal dir or the fixed ingestion.json path -> real path
+	# P1-132 names the journal ingestion-${HOST}-${VM_ID}.json, so a caller-
+	# supplied ingestion.json does not exist. Mirrors journal_stats's resolver:
+	# newest ingestion*.json beside it wins. Prints the input unchanged if
+	# nothing matches, so callers keep their missing-file behaviour.
+	local want="$1" dir found
+	if [ -f "$want" ]; then printf '%s\n' "$want"; return 0; fi
+	case "$want" in
+		*/ingestion.json) dir="${want%/ingestion.json}" ;;
+		*) dir="$want" ;;
+	esac
+	found="$(ls -1t "$dir"/ingestion*.json 2>/dev/null | head -1)"
+	if [ -n "$found" ]; then printf '%s\n' "$found"; else printf '%s\n' "$want"; fi
 }
 
 journal_field() { # $1 = journal, $2 = field
@@ -295,6 +321,10 @@ fi
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT="${OUT_DIR:-$PROJECT_ROOT/logs/soak/full-suite-$STAMP}"
 mkdir -p "$OUT/marathon/journal" "$OUT/soak/journal" "$OUT/bin" "$OUT/reconnect" "$OUT/gates"
+# P1-137 dropped the ingestion container to uid 65532, which writes its
+# journal into these host bind mounts; the default 0775/uid-1000 mode denies
+# it and the entrypoint fails closed (P1-137 follow-up gate).
+chmod 0777 "$OUT/marathon/journal" "$OUT/soak/journal"
 RUN_LOG="$OUT/run.log"
 SUMMARY="$OUT/SUMMARY.txt"
 : > "$RUN_LOG"
@@ -482,9 +512,10 @@ BOOTSTRAP_JAVA_PID=$!
 
 BOOTSTRAP_OK=0
 for _ in $(seq 1 90); do # up to 180s
-	if [ -f "$BOOTSTRAP_JOURNAL/ingestion.json" ] \
-		&& [ "$(journal_acks "$BOOTSTRAP_JOURNAL/ingestion.json")" -ge 1 ] \
-		&& grep -q 'tables ok' "$BOOTSTRAP_JOURNAL/ingestion.json"; then
+	_bj="$(journal_file "$BOOTSTRAP_JOURNAL/ingestion.json")"
+	if [ -f "$_bj" ] \
+		&& [ "$(journal_acks "$_bj")" -ge 1 ] \
+		&& grep -q 'tables ok' "$_bj"; then
 		BOOTSTRAP_OK=1
 		break
 	fi
@@ -555,14 +586,15 @@ java --add-opens=java.base/java.nio=ALL-UNNAMED -Dlog.dir="$MARATHON_JOURNAL" \	
 JAVA_PID=$!
 echo "java pid=$JAVA_PID faketool pid=$FAKETOOL_PID"
 
-LOG_FILE="$MARATHON_JOURNAL/ingestion.json" OUT_DIR="$OUT/marathon" \
+LOG_FILE="$(journal_file "$MARATHON_JOURNAL/ingestion.json")" OUT_DIR="$OUT/marathon" \
 	"$SCRIPT_DIR/soak-monitor.sh" 3700 10 > "$OUT/marathon/monitor.log" 2>&1 &
 MONITOR_PID=$!
 
 MARATHON_OK=0
 for _ in $(seq 1 240); do # 240 x 15s = 60 min budget
-	[ -f "$MARATHON_JOURNAL/ingestion.json" ] || { sleep 15; continue; }
-	ACKS="$(journal_acks "$MARATHON_JOURNAL/ingestion.json")"
+	_mj="$(journal_file "$MARATHON_JOURNAL/ingestion.json")"
+	[ -f "$_mj" ] || { sleep 15; continue; }
+	ACKS="$(journal_acks "$_mj")"
 	if [ "${ACKS:-0}" -ge 100 ]; then MARATHON_OK=1; break; fi
 	kill -0 "$JAVA_PID" 2>/dev/null || { echo "!! java exited early"; break; }
 	sleep 15
@@ -632,8 +664,9 @@ echo "container health: $CONTAINER_HEALTH"
 # First subscription ack in the container journal (readiness + feed OK).
 CONT_ACKS=0
 for _ in $(seq 1 60); do
-	if [ -f "$SOAK_JOURNAL/ingestion.json" ]; then
-		CONT_ACKS="$(journal_acks "$SOAK_JOURNAL/ingestion.json")"
+	_sj="$(journal_file "$SOAK_JOURNAL/ingestion.json")"
+	if [ -f "$_sj" ]; then
+		CONT_ACKS="$(journal_acks "$_sj")"
 		[ "${CONT_ACKS:-0}" -ge 1 ] && break
 	fi
 	sleep 2
@@ -653,7 +686,7 @@ fi
 
 # One crash-restart cycle inside the container (MAX_BRIDGE_RESTARTS=1 budget).
 echo "-- crash-restart cycle (soak-reconnect-loop.sh 1 8)"
-LOG_FILE="$SOAK_JOURNAL/ingestion.json" OUT_DIR="$OUT/reconnect" CONTAINER="$INGESTION_CONTAINER" \
+LOG_FILE="$(journal_file "$SOAK_JOURNAL/ingestion.json")" OUT_DIR="$OUT/reconnect" CONTAINER="$INGESTION_CONTAINER" \
 	"$SCRIPT_DIR/soak-reconnect-loop.sh" 1 8 \
 	|| { stage_fail 3 "reconnect loop failed"; RESULT="FAIL"; exit 1; }
 RECONNECT_CYCLES=1
@@ -688,7 +721,7 @@ SOAK_START="$(date +%s)"
 APPEND0="$(o2_query 'select value from "append_latency_ms_count" order by _timestamp desc limit 1')"
 echo "soak start $(now): append_latency_ms_count=$APPEND0"
 
-LOG_FILE="$SOAK_JOURNAL/ingestion.json" OUT_DIR="$OUT/soak" \
+LOG_FILE="$(journal_file "$SOAK_JOURNAL/ingestion.json")" OUT_DIR="$OUT/soak" \
 	"$SCRIPT_DIR/soak-monitor.sh" 25380 30 > "$OUT/soak/monitor.log" 2>&1 &
 MONITOR_PID=$!
 
@@ -760,7 +793,7 @@ echo "recoveries: $RECOVERIES/3"
 # ── Final evidence + teardown ─────────────────────────────────────────────────
 echo "=== final evidence collection — $(now)"
 echo "-- headroom scan"
-LOG_FILE="$SOAK_JOURNAL/ingestion.json" OUT_DIR="$OUT/soak" \
+LOG_FILE="$(journal_file "$SOAK_JOURNAL/ingestion.json")" OUT_DIR="$OUT/soak" \
 	"$SCRIPT_DIR/soak-headroom.sh" "$SOAK_JOURNAL/ingestion.json" \
 	> "$OUT/soak/headroom.out" 2>&1 || true
 echo "-- tick viewer sample (last 3 persisted rows)"

@@ -71,8 +71,14 @@ class SuiteContract(unittest.TestCase):
         self.assertRegex(SRC, r'\[ "\$\{MARATHON_EPOCHS:-0\}" -lt 100 \]')
 
     def test_the_container_ack_poll_cannot_abort_the_suite(self) -> None:
-        """P6-520: `[ x ] && { ...; break; }` ends the list with a false test."""
-        self.assertRegex(SRC, r'if \[ -f "\$SOAK_JOURNAL/ingestion\.json" \]; then')
+        """P6-520: `[ x ] && { ...; break; }` ends the list with a false test.
+
+        P1-132 moved the read onto the resolved per-host path (`$SOAK_JOURNAL/
+        ingestion.json` never exists), but the property is unchanged: the test
+        must be an `if`, not a `&&` list terminator.
+        """
+        self.assertRegex(SRC, r'if \[ -f "\$_sj" \]; then')
+        self.assertRegex(SRC, r'_sj="\$\(journal_file "\$SOAK_JOURNAL/ingestion\.json"\)"')
 
     def test_gates_evidence_falls_back_to_none(self) -> None:
         """P6-519: `| head -1` exits 0 on an empty glob, so `|| echo none` never ran."""
