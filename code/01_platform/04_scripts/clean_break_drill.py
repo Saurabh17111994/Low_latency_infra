@@ -49,7 +49,12 @@ def load_plan(path):
         print("ERROR: plan must be an object with a non-empty 'tables' list", file=sys.stderr)
         return None
     tables = plan.get("tables", [])
-    if not tables or not all(isinstance(t, str) and t for t in tables):
+    # isinstance(..., list) is load-bearing: a bare string is iterable, so a
+    # plan written as "tables": "A,B" would pass the per-element check and the
+    # runner would record single-character table names; a non-iterable scalar
+    # (5, true) would raise TypeError out of all() and die on an undocumented
+    # exit code instead of the declared plan-error path (exit 2).
+    if not isinstance(tables, list) or not tables or not all(isinstance(t, str) and t for t in tables):
         print("ERROR: 'tables' must be a non-empty list of table names", file=sys.stderr)
         return None
     plan.setdefault("replay_from_offset", 0)
