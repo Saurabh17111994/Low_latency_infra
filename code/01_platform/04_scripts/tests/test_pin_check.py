@@ -6,8 +6,10 @@ REPO TREE's script into a sandbox repo skeleton (versions.pin + runtime.lock +
 stub check scripts) and runs it there with REPO_ROOT-relative paths intact.
 Checks 1-3/6 are stubbed to pass (their own suites own them); only 4-5 vary.
 """
+import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -20,6 +22,28 @@ REAL_PIN = (REPO / "code/01_platform/04_scripts/versions.pin").read_text()
 REAL_LOCK = (REPO / "code/01_platform/01_docker/runtime.lock").read_text()
 
 STUB_PASS = '#!/usr/bin/env bash\nexit 0\n'
+
+# The four locally built images runtime.lock pins by image ID (P6-140). Their
+# digests can only come from the build host: no registry manifest exists for an
+# image that was never pushed, so this list is also the live check's input.
+LOCAL_BUILD_IMAGES = {
+    "INGESTION_IMAGE": "01_docker-ingestion",
+    "NAUTILUS_IMAGE": "01_docker-nautilus",
+    "EXECUTION_BRIDGE_IMAGE": "01_docker-execution-bridge",
+    "EXECUTION_GATEWAY_IMAGE": "01_docker-execution-gateway",
+}
+
+
+def parse_image_refs(lock_text):
+    """name -> ref, normalising the shapes pin-check counts (P6-139)."""
+    refs = {}
+    for line in lock_text.splitlines():
+        line = re.sub(r"^\s+", "", line)
+        line = re.sub(r"^export(\s+|$)", "", line)
+        m = re.match(r"([A-Za-z0-9_]+_IMAGE)\s*=\s*(.*)$", line)
+        if m:
+            refs[m.group(1)] = re.sub(r"\s+#.*$", "", m.group(2)).strip()
+    return refs
 
 
 class PinCheckHarness(unittest.TestCase):
@@ -77,10 +101,44 @@ class PinCheckHarness(unittest.TestCase):
 
     # P6-140: 12-hex short IDs fail; P6-141: zero refs fail (no abort).
     def test_short_digests_fail(self):
-        r = self.run_check()
+        """P6-140: 12-hex and 63-hex truncations are not pins."""
+        lock = ("SHORT_IMAGE=repo:1@sha256:" + "a" * 12 + "\n"
+                "ALMOST_IMAGE=repo:1@sha256:" + "b" * 63 + "\n")
+        r = self.run_check(lock_text=lock)
         sec = self.section(r.stdout + r.stderr, "[5/6]")
         self.assertIn("FAIL", sec, sec)
-        self.assertIn("INGESTION_IMAGE", sec)
+        self.assertIn("SHORT_IMAGE", sec)
+        self.assertIn("ALMOST_IMAGE", sec)
+
+    def test_real_runtime_lock_check_5_passes(self):
+        """The lock that ships must satisfy the tightened P6-140 rule."""
+        r = self.run_check(lock_text=REAL_LOCK)
+        sec = self.section(r.stdout + r.stderr, "[5/6]")
+        self.assertNotIn("FAIL", sec, sec)
+        self.assertIn("all digest-pinned", sec)
+
+    def test_local_build_pins_match_the_local_images(self):
+        """Each local-build line is the image ID of the image on this host.
+
+        The four images are never pushed, so their ID is the only verifiable
+        digest; this leg fails when a rebuild makes the lock stale.
+        """
+        if shutil.which("docker") is None:
+            self.skipTest("no docker binary")
+        refs = parse_image_refs(REAL_LOCK)
+        for var, repo in LOCAL_BUILD_IMAGES.items():
+            with self.subTest(image=var):
+                self.assertIn(var, refs, f"{var} missing from runtime.lock")
+                pinned = refs[var]
+                self.assertRegex(pinned, r"@sha256:[0-9a-f]{64}$")
+                host = subprocess.run(
+                    ["docker", "image", "inspect", f"{repo}:latest"],
+                    capture_output=True, text=True, timeout=60)
+                if host.returncode != 0:
+                    self.skipTest(f"{repo}:latest not on this host (daemon down or image absent)")
+                live = json.loads(host.stdout)[0]["Id"]
+                self.assertEqual(pinned.split("@")[1], live,
+                                 f"{var} pins {pinned.split('@')[1][:20]}... but {repo}:latest is {live[:20]}...")
 
     def test_zero_refs_fail_closed(self):
         r = self.run_check(lock_text="# no images here\nFOO=bar\n")
