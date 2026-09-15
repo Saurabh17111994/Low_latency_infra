@@ -14,7 +14,8 @@ password and refuses to run without one:
     O2_PASSWORD  (REQUIRED)
 
 Exit codes: 0 = all ensured (or dry-run); 1 = API/apply error; 2 = credential
-gate refused; 3 = invalid dashboard files or manifest.
+gate refused; 3 = invalid dashboard files or manifest. The plan --dry-run prints
+is fetched from the same list endpoint a real run uses, so it can be trusted.
 """
 
 from __future__ import annotations
@@ -24,31 +25,64 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import NoReturn
 
 ROOT = Path(__file__).resolve().parents[3]
 DASH_DIR = ROOT / "code/01_platform/01_docker/openobserve/dashboards"
 MANIFEST = DASH_DIR / "manifest.json"
 
 
-def _load() -> tuple[list[dict], list[dict]]:
+def _bad(msg: str) -> NoReturn:
+    """The documented exit 3 for an invalid manifest or corpus (P6-782).
+
+    `raise SystemExit("exit 3: ...")` exits 1 — a string argument is a message,
+    not a status — so the number is passed explicitly.
+    """
+    print(f"exit 3: {msg}", file=sys.stderr)
+    raise SystemExit(3)
+
+
+def _load() -> tuple[dict, list[tuple[dict, dict]]]:
+    """Manifest plus its (record, document) pairs, or nothing at all."""
     if not MANIFEST.exists():
-        raise SystemExit(f"exit 3: manifest missing: {MANIFEST}")
-    manifest = json.loads(MANIFEST.read_text())
-    records = manifest["dashboards"]
+        _bad(f"manifest missing: {MANIFEST}")
+    try:
+        manifest = json.loads(MANIFEST.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        _bad(f"cannot read manifest {MANIFEST}: {e}")
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("dashboards"), list):
+        _bad(f"manifest has no 'dashboards' list: {MANIFEST}")
     dashboards = []
-    for rec in records:
+    for rec in manifest["dashboards"]:
+        if not isinstance(rec, dict) or not rec.get("file") or not rec.get("title"):
+            _bad(f"manifest records need 'file' and 'title': {rec!r}")
         path = DASH_DIR / rec["file"]
         if not path.exists():
-            raise SystemExit(f"exit 3: manifest references missing file: {rec['file']}")
-        doc = json.loads(path.read_text())
+            _bad(f"manifest references missing file: {rec['file']}")
+        try:
+            doc = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            _bad(f"cannot read dashboard {rec['file']}: {e}")
         if doc.get("title") != rec["title"]:
-            raise SystemExit(
-                f"exit 3: {rec['file']} title {doc.get('title')!r} != manifest {rec['title']!r}"
-            )
+            _bad(f"{rec['file']} title {doc.get('title')!r} != manifest {rec['title']!r}")
         dashboards.append((rec, doc))
     return manifest, dashboards
+
+
+def _warn_insecure_url(base: str) -> None:
+    """P6-783: Basic auth over plain HTTP off-loopback exposes the password.
+
+    Not a refusal — a local stack is the normal case and http://localhost is fine
+    — but a remote plain-http endpoint must not pass unremarked.
+    """
+    parts = urllib.parse.urlsplit(base)
+    if parts.scheme == "https" or parts.hostname in ("localhost", "127.0.0.1", "::1", None):
+        return
+    print(f"warn: O2_API_URL {base} is not https — the admin password travels in "
+          f"cleartext to {parts.hostname}", file=sys.stderr)
 
 
 def _api(base: str, org: str, user: str, password: str, path: str, method="GET", body=None):
@@ -138,17 +172,18 @@ def main() -> int:
     base = os.environ.get("O2_API_URL", "http://localhost:5080")
     org = os.environ.get("O2_ORG", "default")
     user = os.environ.get("O2_USER", "admin@example.com")
+    _warn_insecure_url(base)
 
     manifest, dashboards = _load()
     for _, doc in dashboards:
         _normalize(doc)
-    existing = {}
-    if not args.dry_run:
-        status, body = _api(base, org, user, password, "/dashboards")
-        if status != 200:
-            print(f"exit 1: list dashboards failed ({status}): {body[:200]}", file=sys.stderr)
-            return 1
-        existing = {d["title"]: d for d in json.loads(body).get("dashboards", [])}
+    # The list is a read-only GET, so dry-run fetches it too: a plan that says
+    # "create" for a dashboard that already exists is a wrong plan (P6-539).
+    status, body = _api(base, org, user, password, "/dashboards")
+    if status != 200:
+        print(f"exit 1: list dashboards failed ({status}): {body[:200]}", file=sys.stderr)
+        return 1
+    existing = {d["title"]: d for d in json.loads(body).get("dashboards", [])}
 
     created = updated = untouched = 0
     for rec, doc in dashboards:
