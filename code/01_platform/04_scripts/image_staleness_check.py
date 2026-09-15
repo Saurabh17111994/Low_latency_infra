@@ -300,6 +300,13 @@ def env_var_name(service: str) -> str:
     return service.upper().replace("-", "_") + "_BUILD_STAMP"
 
 
+# Statuses that print FAIL, and therefore MUST produce a non-zero exit: a
+# printed FAIL with exit 0 is a silently green gate. NO-HISTORY used to print
+# FAIL while being absent from the failure count (P6-413).
+FAILING_STATUSES = ("STALE", "MISSING", "NO-STAMP", "NO-HISTORY", "GIT-ERROR",
+                    "UNDECLARED-SOURCES")
+
+
 def _run_git(git_root: Path, args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git"] + args, cwd=str(git_root), capture_output=True, text=True,
@@ -324,12 +331,46 @@ def source_epoch(git_root: Path, rel_paths: list[str]) -> int | None:
         return None
 
 
-def have_git_history(git_root: Path, rel_paths: list[str]) -> bool:
-    """True when every path exists and at least one has git history."""
-    for p in rel_paths:
-        if (git_root / p).exists():
-            return True
-    return False
+def git_state(git_root: Path) -> tuple[str, str]:
+    """('ok' | 'unavailable' | 'error', short reason) for this tree.
+
+    'unavailable' means there is no repository here at all (an unpacked release
+    tree): the timestamp proxy has nothing to compare against, which is a
+    NO-HISTORY verdict per service. 'error' means a repository IS here but git
+    cannot read it — corrupt or unreadable `.git`, dubious ownership, no git
+    binary. In that state every epoch comes back None and `worktree_dirty`
+    silently reports "clean", so without this distinction the check would
+    report NO-HISTORY for a tree whose history is merely unreadable. That
+    FAILS instead (P6-412/P6-413).
+
+    The discriminator is the presence of a `.git` entry: git collapses every
+    on-disk breakage (bad HEAD, unreadable objects) into the same generic
+    "not a git repository" message, so the message alone cannot tell a tarball
+    from a damaged checkout.
+    """
+    try:
+        result = _run_git(git_root, ["rev-parse", "--git-dir"])
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "error", f"{exc.__class__.__name__}: {exc}"
+    if result.returncode == 0:
+        return "ok", ""
+    lines = (result.stderr or result.stdout or "").strip().splitlines()
+    reason = lines[0] if lines else f"git rev-parse exited {result.returncode}"
+    if "not a git repository" in reason.lower() and not (git_root / ".git").exists():
+        return "unavailable", reason
+    return "error", reason
+
+
+def any_source_path_exists(git_root: Path, rel_paths: list[str]) -> bool:
+    """True when at least ONE of the paths exists.
+
+    A cheap "is there anything to ask git about" gate, not a proof that the
+    source set is complete — hence the name. It used to be called
+    have_git_history while its body checked existence, so every reader (and the
+    docstring claiming "every path exists") was wrong about what a False here
+    means (P6-744).
+    """
+    return any((git_root / p).exists() for p in rel_paths)
 
 
 def worktree_dirty(git_root: Path, rel_paths: list[str]) -> bool:
@@ -357,27 +398,79 @@ def image_created_epoch(image: str) -> int | None:
     raw = result.stdout.strip()
     if not raw:
         return None
-    try:
-        created = datetime.datetime.fromisoformat(raw)
-    except ValueError:
-        # Docker prints RFC3339 with nanoseconds; strip suffix on failure.
-        created = datetime.datetime.fromisoformat(raw.split(".")[0])
+    created = _parse_docker_created(raw)
+    if created is None:
+        return None
     if created.tzinfo is None:
         created = created.replace(tzinfo=datetime.timezone.utc)
     return int(created.timestamp())
 
 
+def _parse_docker_created(raw: str) -> datetime.datetime | None:
+    """RFC3339 from `docker image inspect`, or None when it cannot be parsed.
+
+    Docker prints nanoseconds (9 fraction digits) and a `Z` suffix; Python
+    before 3.11 accepts neither more than 6 digits nor `Z`. The previous
+    fallback (`raw.split(".")[0]`) threw the fraction away together with the
+    timezone, so on a fraction-less `...Z` timestamp it raised an uncaught
+    ValueError and crashed the check (P6-412). Normalise both forms and give up
+    quietly instead: an unparseable Created means "no timestamp", which the
+    verdicts already handle.
+    """
+    text = raw.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    head, dot, tail = text.partition(".")
+    if dot:
+        # keep up to 6 fraction digits, and any UTC offset that follows them
+        for sep in ("+", "-"):
+            frac, found, offset = tail.partition(sep)
+            if found:
+                tail = f"{frac[:6]}{sep}{offset}"
+                break
+        else:
+            tail = tail[:6]
+        text = f"{head}.{tail}"
+    try:
+        return datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
 def verdict(created_epoch: int | None, source_epoch: int | None,
             dirty: bool, stamp_image: str | None = None,
-            stamp_sources: str | None = None) -> tuple[str, str]:
-    """(status, detail): FRESH|STALE|MISSING|NO-HISTORY|DIRTY-WARN.
+            stamp_sources: str | None = None,
+            git_error: str | None = None,
+            undeclared: bool = False) -> tuple[str, str]:
+    """(status, detail): FRESH|STALE|MISSING|NO-HISTORY|DIRTY-WARN|GIT-ERROR|
+    UNDECLARED-SOURCES.
 
-    When both the image and the tree carry a content stamp, that decides
-    FRESH/STALE (see the module docstring); the timestamp comparison is the
-    fallback for images built before the stamp existed.
+    Content decides before the clock (P6-109):
+
+      1. GIT-ERROR            — git cannot read the repository, so history and
+                                the dirty guard are both unverifiable: fail,
+                                do not guess
+      2. UNDECLARED-SOURCES   — no declared source set for this service; the
+                                compose fallback cannot see a Dockerfile's COPY
+                                inputs, so no verdict here is trustworthy
+      3. stamps               — image and tree stamps agree/disagree =>
+                                FRESH/STALE. A dirty worktree does NOT downgrade
+                                this: the stamp already answers the question,
+                                and DIRTY-WARN used to mask a genuinely STALE
+                                (even a MISSING) image behind uncommitted edits
+      4. NO-HISTORY / MISSING — nothing to compare, or no image to compare
+      5. DIRTY-WARN           — timestamp proxy only: uncommitted changes make
+                                the clock comparison untrustworthy
+      6. STALE / FRESH        — the clock proxy, for images built before stamps
     """
-    if dirty:
-        return "DIRTY-WARN", "uncommitted source changes (image may be behind)"
+    if git_error:
+        return "GIT-ERROR", (f"git cannot read the repository ({git_error}) — "
+                             "source history and dirty state are unverifiable")
+    if undeclared:
+        return "UNDECLARED-SOURCES", (
+            "this service declares no source set — the compose fallback cannot "
+            "see the Dockerfile's COPY inputs, so staleness is unverifiable "
+            "(add it to SERVICE_SOURCES)")
     if stamp_image and stamp_sources:
         if stamp_image == stamp_sources:
             return "FRESH", f"stamp {stamp_image[:12]}... matches the sources"
@@ -387,6 +480,8 @@ def verdict(created_epoch: int | None, source_epoch: int | None,
         return "NO-HISTORY", "source paths have no git history (untracked)"
     if created_epoch is None:
         return "MISSING", "image not built (docker compose build <service>)"
+    if dirty:
+        return "DIRTY-WARN", "uncommitted source changes (image may be behind)"
     if created_epoch < source_epoch:
         return "STALE", (f"image {created_epoch} < source {source_epoch} "
                          f"(rebuild with make images)")
@@ -396,22 +491,39 @@ def verdict(created_epoch: int | None, source_epoch: int | None,
 
 def check_service(service: str, image: str, git_root: Path,
                   compose_services: dict | None = None,
-                  compose_dir: Path | None = None) -> dict:
-    """Full check for one service; compose_services override is for tests."""
+                  compose_dir: Path | None = None,
+                  git_error: str | None = "auto") -> dict:
+    """Full check for one service; compose_services override is for tests.
+
+    `git_error` is an injected reason string. The default "auto" probes the
+    repository so a direct call fails closed on a broken repo too; pass None to
+    bypass the probe in a unit test (P6-413).
+    """
     entry = (compose_services or {}).get(service) or {}
     sources = SERVICE_SOURCES.get(service)
+    undeclared = False
     if sources is None:
         if entry:
+            # A new build service with no SERVICE_SOURCES entry: the compose
+            # context/dockerfile is a GUESS at the build inputs — it cannot see
+            # the COPY list, so a service that copies something else looks
+            # unchanged forever. Report that instead of a FRESH/STALE verdict
+            # built on inputs nobody verified (P6-414, cf. CHG-122 loadgen).
             sources = [entry["context"], entry["dockerfile"]]
+            undeclared = True
         else:
             sources = []
-    epoch = source_epoch(git_root, sources) if have_git_history(git_root, sources) else None
+    if git_error == "auto":
+        state, reason = git_state(git_root)
+        git_error = reason if state == "error" else None
+    epoch = source_epoch(git_root, sources) if any_source_path_exists(git_root, sources) else None
     dirty = worktree_dirty(git_root, sources)
     created = image_created_epoch(image)
     stamp_image = image_label(image)
     stamp_sources = input_stamp(git_root, service, entry, compose_dir)
     status, detail = verdict(created, epoch, dirty, stamp_image=stamp_image,
-                             stamp_sources=stamp_sources)
+                             stamp_sources=stamp_sources, git_error=git_error,
+                             undeclared=undeclared)
     return {
         "service": service, "image": image, "status": status,
         "detail": detail, "source_epoch": epoch, "created_epoch": created,
@@ -478,12 +590,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     project = args.project or compose_path.parent.name
+    state, reason = git_state(git_root)
+    git_error = reason if state == "error" else None
+    if git_error:
+        print(f"image-stale: git cannot read {git_root}: {reason}",
+              file=sys.stderr)
     failures = 0
     warn = 0
     for name in sorted(services):
         image = image_ref(project, name, services[name])
         result = check_service(name, image, git_root, services,
-                               compose_path.parent)
+                               compose_path.parent, git_error)
         status = result["status"]
         detail = result["detail"]
         if args.require_stamps and result["stamp_image"] is None:
@@ -495,15 +612,15 @@ def main(argv: list[str] | None = None) -> int:
                       "reach docker compose (rebuild: make images)")
         mark = "OK " if status == "FRESH" else ("WARN" if status == "DIRTY-WARN"
                                                 else "FAIL")
-        if status in ("STALE", "MISSING", "NO-STAMP"):
+        if status in FAILING_STATUSES:
             failures += 1
         elif status == "DIRTY-WARN":
             warn += 1
         print(f"image-stale: [{mark}] {name} ({image}) {status}: {detail}")
 
     if failures:
-        print(f"image-stale: FAIL — {failures} stale/missing/unstamped "
-              f"(rebuild: make images)")
+        print(f"image-stale: FAIL — {failures} stale/missing/unstamped/"
+              f"unverifiable (rebuild: make images; see the lines above)")
         return 1
     if warn:
         print(f"image-stale: PASS with {warn} DIRTY-WARN (committed truth "
