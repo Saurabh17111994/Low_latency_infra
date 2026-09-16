@@ -104,10 +104,15 @@ echo ">> labelled $node_id role=worker + observability=true"
 #     Credentials are external Swarm secrets and deliberately have NO env
 #     fallback here (fail closed).
 : "${ZOOKEEPER_IMAGE:=zookeeper:3.9.2}"     # real default in the stack
+# NOTE: the stack's own `VAR:?msg` guards do NOT fire for keys inside the
+# FLUSS_PROPERTIES block scalar (compose renders s3:///remote-data with the
+# var unset instead of erroring - verified 2026-09-16 against the dev twin,
+# which carries the same single-$ form). So R2_BUCKET's fail-closed lives
+# HERE: DEPLOY=1 refuses an unset/empty R2_BUCKET before any deploy.
 required_vars=(
   FLUSS_IMAGE FLINK_IMAGE INGESTION_IMAGE EXECUTION_BRIDGE_IMAGE
   EXECUTION_GATEWAY_IMAGE NAUTILUS_IMAGE OPENOBSERVE_IMAGE
-  S3_WAREHOUSE_PATH R2_ENDPOINT ARROW_APP_ID ARROW_USER_ID CHECKPOINT_DIR
+  S3_WAREHOUSE_PATH R2_ENDPOINT R2_BUCKET ARROW_APP_ID ARROW_USER_ID CHECKPOINT_DIR
 )
 if [ "${DEPLOY:-0}" = "1" ]; then
   missing=()
@@ -129,6 +134,7 @@ else
   : "${OPENOBSERVE_IMAGE:=openobserve:unset}"
   : "${S3_WAREHOUSE_PATH:=s3://placeholder/warehouse}"
   : "${R2_ENDPOINT:=https://placeholder.example}"
+  : "${R2_BUCKET:=placeholder-bucket}"
   : "${ARROW_APP_ID:=000000}"
   : "${ARROW_USER_ID:=00000000}"
   : "${CHECKPOINT_DIR:=s3://placeholder/checkpoints}"
@@ -136,7 +142,7 @@ else
 fi
 export FLUSS_IMAGE FLINK_IMAGE INGESTION_IMAGE EXECUTION_BRIDGE_IMAGE \
        EXECUTION_GATEWAY_IMAGE NAUTILUS_IMAGE OPENOBSERVE_IMAGE \
-       ZOOKEEPER_IMAGE S3_WAREHOUSE_PATH R2_ENDPOINT ARROW_APP_ID ARROW_USER_ID \
+       ZOOKEEPER_IMAGE S3_WAREHOUSE_PATH R2_ENDPOINT R2_BUCKET ARROW_APP_ID ARROW_USER_ID \
        CHECKPOINT_DIR
 
 # 4. Compile the stack (catches YAML/deploy-schema errors without starting).

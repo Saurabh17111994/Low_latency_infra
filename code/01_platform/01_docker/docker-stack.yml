@@ -129,7 +129,6 @@ volumes:
   zk-data-2:
   zk-data-3:
   fluss-data:
-  fluss-remote-data:
   fluss-tablet-data-1:
   fluss-tablet-data-2:
   fluss-tablet-data-3:
@@ -284,7 +283,13 @@ services:
         bind.listeners: INTERNAL://fluss-coordinator:0,CLIENT://fluss-coordinator:9123
         advertised.listeners: CLIENT://fluss-coordinator:9123
         internal.listener.name: INTERNAL
-        remote.data.dir: /tmp/fluss/remote-data
+        remote.data.dir: s3://${R2_BUCKET:?set R2_BUCKET for tiering}/remote-data
+        s3.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        s3.endpoint.region: ${AWS_REGION:-auto}
+        s3.access-key: $${env.AWS_ACCESS_KEY_ID}
+        s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
+        s3.path.style.access: true
+        s3.connection.ssl.enabled: true
         datalake.format: ${DATALAKE_FORMAT:-iceberg}
         datalake.iceberg.type: hadoop
         datalake.iceberg.warehouse: ${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH for lake tiering}
@@ -297,7 +302,6 @@ services:
         datalake.iceberg.iceberg.hadoop.fs.s3a.connection.establish.timeout: 30000
     volumes:
       - fluss-data:/data
-      - fluss-remote-data:/tmp/fluss/remote-data
       - fluss-logs:/opt/fluss/log
 
   # ---- Fluss tablet servers (P5-001) ----------------------------------------
@@ -307,8 +311,9 @@ services:
   # breaking log replication/failover (server identity must be unique, like
   # zookeeper-1/2/3). Split into three pinned services with distinct ids
   # (1/2/3) and listener hostnames. Data volumes are per-server (a shared
-  # fluss-tablet-data would corrupt); fluss-data/fluss-remote-data stay shared
-  # (lake-snapshot offset contract, PROD-013).
+  # fluss-tablet-data would corrupt); fluss-data stays shared
+  # (lake-snapshot offset contract, PROD-013). Tiered segments live on R2
+  # (remote.data.dir), so no local remote-data volume remains.
   # Residue: co-location — tablet-1/2/3 each allow any worker (max_replicas_
   # per_node is per-service), so two tablets MAY share a node; the hard
   # guarantee is pinning via node.labels.fluss_tablet == N constraints once
@@ -362,7 +367,13 @@ services:
         tablet-server.id: 1
         kv.snapshot.interval: 0s
         data.dir: /tmp/fluss/data
-        remote.data.dir: /tmp/fluss/remote-data
+        remote.data.dir: s3://${R2_BUCKET:?set R2_BUCKET for tiering}/remote-data
+        s3.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        s3.endpoint.region: ${AWS_REGION:-auto}
+        s3.access-key: $${env.AWS_ACCESS_KEY_ID}
+        s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
+        s3.path.style.access: true
+        s3.connection.ssl.enabled: true
         datalake.format: ${DATALAKE_FORMAT:-iceberg}
         datalake.iceberg.type: hadoop
         datalake.iceberg.warehouse: ${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH for lake tiering}
@@ -375,7 +386,6 @@ services:
         datalake.iceberg.iceberg.hadoop.fs.s3a.connection.establish.timeout: 30000
     volumes:
       - fluss-data:/data
-      - fluss-remote-data:/tmp/fluss/remote-data
       - fluss-tablet-data-1:/tmp/fluss/data
       - fluss-logs:/opt/fluss/log
 
@@ -428,7 +438,13 @@ services:
         tablet-server.id: 2
         kv.snapshot.interval: 0s
         data.dir: /tmp/fluss/data
-        remote.data.dir: /tmp/fluss/remote-data
+        remote.data.dir: s3://${R2_BUCKET:?set R2_BUCKET for tiering}/remote-data
+        s3.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        s3.endpoint.region: ${AWS_REGION:-auto}
+        s3.access-key: $${env.AWS_ACCESS_KEY_ID}
+        s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
+        s3.path.style.access: true
+        s3.connection.ssl.enabled: true
         datalake.format: ${DATALAKE_FORMAT:-iceberg}
         datalake.iceberg.type: hadoop
         datalake.iceberg.warehouse: ${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH for lake tiering}
@@ -441,7 +457,6 @@ services:
         datalake.iceberg.iceberg.hadoop.fs.s3a.connection.establish.timeout: 30000
     volumes:
       - fluss-data:/data
-      - fluss-remote-data:/tmp/fluss/remote-data
       - fluss-tablet-data-2:/tmp/fluss/data
       - fluss-logs:/opt/fluss/log
 
@@ -494,7 +509,13 @@ services:
         tablet-server.id: 3
         kv.snapshot.interval: 0s
         data.dir: /tmp/fluss/data
-        remote.data.dir: /tmp/fluss/remote-data
+        remote.data.dir: s3://${R2_BUCKET:?set R2_BUCKET for tiering}/remote-data
+        s3.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        s3.endpoint.region: ${AWS_REGION:-auto}
+        s3.access-key: $${env.AWS_ACCESS_KEY_ID}
+        s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
+        s3.path.style.access: true
+        s3.connection.ssl.enabled: true
         datalake.format: ${DATALAKE_FORMAT:-iceberg}
         datalake.iceberg.type: hadoop
         datalake.iceberg.warehouse: ${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH for lake tiering}
@@ -507,7 +528,6 @@ services:
         datalake.iceberg.iceberg.hadoop.fs.s3a.connection.establish.timeout: 30000
     volumes:
       - fluss-data:/data
-      - fluss-remote-data:/tmp/fluss/remote-data
       - fluss-tablet-data-3:/tmp/fluss/data
       - fluss-logs:/opt/fluss/log
 
