@@ -150,6 +150,8 @@ configs:
     file: ./otel-collector-config.swarm.yaml
   alert-consumer-src:
     file: ./alert-consumer.py
+  fluss-r2-secrets-bridge:
+    file: ./fluss-r2-secrets-from-file.sh
 
 services:
   # ---- ZooKeeper: 3-member ensemble (quorum 2-of-3), one member per VM ------
@@ -242,6 +244,9 @@ services:
     # command the container prints usage and exits 0, so Swarm
     # reports the task as started while no server runs.
     command: ["coordinatorServer"]
+    # Task-3 bridge: Swarm secrets arrive as files; this entrypoint
+    # exports them into the environment before the stock entrypoint.
+    entrypoint: ["/bin/sh", "/opt/fluss/bin/r2-secrets-from-file.sh"]
     healthcheck:
       # CHG-181 sibling: CMD-SHELL is dash (no /dev/tcp); probe
       # $HOSTNAME under bash, loopback as fallback.
@@ -263,12 +268,17 @@ services:
     secrets:
       - aws_access_key_id
       - aws_secret_access_key
+    configs:
+      - source: fluss-r2-secrets-bridge
+        target: /opt/fluss/bin/r2-secrets-from-file.sh
     environment:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       FLUSS_COORDINATOR_HOST: fluss-coordinator
       FLUSS_TABLET_HOST: fluss-tablet
-      # Credentials arrive via Swarm secrets (read by app from /run/secrets).
-      # See app config for the secret-file env wiring.
+      AWS_ACCESS_KEY_ID_FILE: /run/secrets/aws_access_key_id
+      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
+      # Credentials arrive via Swarm secrets, bridged into the environment by
+      # the entrypoint (fluss-r2-secrets-from-file.sh) before the JVM starts.
       FLUSS_PROPERTIES: |
         zookeeper.address: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
         bind.listeners: INTERNAL://fluss-coordinator:0,CLIENT://fluss-coordinator:9123
@@ -312,6 +322,9 @@ services:
     # command the container prints usage and exits 0, so Swarm
     # reports the task as started while no server runs.
     command: ["tabletServer"]
+    # Task-3 bridge: Swarm secrets arrive as files; this entrypoint
+    # exports them into the environment before the stock entrypoint.
+    entrypoint: ["/bin/sh", "/opt/fluss/bin/r2-secrets-from-file.sh"]
     healthcheck:
       # CHG-181 sibling: CMD-SHELL is dash (no /dev/tcp); probe
       # $HOSTNAME under bash, loopback as fallback.
@@ -332,10 +345,15 @@ services:
     secrets:
       - aws_access_key_id
       - aws_secret_access_key
+    configs:
+      - source: fluss-r2-secrets-bridge
+        target: /opt/fluss/bin/r2-secrets-from-file.sh
     environment:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       FLUSS_COORDINATOR_HOST: fluss-coordinator
       FLUSS_TABLET_HOST: fluss-tablet-1
+      AWS_ACCESS_KEY_ID_FILE: /run/secrets/aws_access_key_id
+      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
       FLUSS_PROPERTIES: |
         zookeeper.address: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
         bind.listeners: INTERNAL://fluss-tablet-1:0, CLIENT://fluss-tablet-1:9124
@@ -370,6 +388,9 @@ services:
     # command the container prints usage and exits 0, so Swarm
     # reports the task as started while no server runs.
     command: ["tabletServer"]
+    # Task-3 bridge: Swarm secrets arrive as files; this entrypoint
+    # exports them into the environment before the stock entrypoint.
+    entrypoint: ["/bin/sh", "/opt/fluss/bin/r2-secrets-from-file.sh"]
     healthcheck:
       # CHG-181 sibling: CMD-SHELL is dash (no /dev/tcp); probe
       # $HOSTNAME under bash, loopback as fallback.
@@ -390,10 +411,15 @@ services:
     secrets:
       - aws_access_key_id
       - aws_secret_access_key
+    configs:
+      - source: fluss-r2-secrets-bridge
+        target: /opt/fluss/bin/r2-secrets-from-file.sh
     environment:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       FLUSS_COORDINATOR_HOST: fluss-coordinator
       FLUSS_TABLET_HOST: fluss-tablet-2
+      AWS_ACCESS_KEY_ID_FILE: /run/secrets/aws_access_key_id
+      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
       FLUSS_PROPERTIES: |
         zookeeper.address: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
         bind.listeners: INTERNAL://fluss-tablet-2:0, CLIENT://fluss-tablet-2:9124
@@ -428,6 +454,9 @@ services:
     # command the container prints usage and exits 0, so Swarm
     # reports the task as started while no server runs.
     command: ["tabletServer"]
+    # Task-3 bridge: Swarm secrets arrive as files; this entrypoint
+    # exports them into the environment before the stock entrypoint.
+    entrypoint: ["/bin/sh", "/opt/fluss/bin/r2-secrets-from-file.sh"]
     healthcheck:
       # CHG-181 sibling: CMD-SHELL is dash (no /dev/tcp); probe
       # $HOSTNAME under bash, loopback as fallback.
@@ -448,10 +477,15 @@ services:
     secrets:
       - aws_access_key_id
       - aws_secret_access_key
+    configs:
+      - source: fluss-r2-secrets-bridge
+        target: /opt/fluss/bin/r2-secrets-from-file.sh
     environment:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       FLUSS_COORDINATOR_HOST: fluss-coordinator
       FLUSS_TABLET_HOST: fluss-tablet-3
+      AWS_ACCESS_KEY_ID_FILE: /run/secrets/aws_access_key_id
+      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
       FLUSS_PROPERTIES: |
         zookeeper.address: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
         bind.listeners: INTERNAL://fluss-tablet-3:0, CLIENT://fluss-tablet-3:9124
