@@ -661,15 +661,18 @@ mod tests {
     #[test]
     fn all_off_touches_no_files() {
         let dir = scratch_dir();
-        let clients = DurableClients::open_for_service(&dir, DurableFlags::all_off(), None).unwrap();
-        clients.gate_store.write(&GateRow {
-            partition: "p".into(),
-            owner: "w1".into(),
-            state: GateState::Halted,
-            epoch: 1,
-            fence_token: 1,
-        })
-        .unwrap();
+        let clients =
+            DurableClients::open_for_service(&dir, DurableFlags::all_off(), None).unwrap();
+        clients
+            .gate_store
+            .write(&GateRow {
+                partition: "p".into(),
+                owner: "w1".into(),
+                state: GateState::Halted,
+                epoch: 1,
+                fence_token: 1,
+            })
+            .unwrap();
         assert_eq!(
             std::fs::read_dir(&dir).unwrap().count(),
             0,

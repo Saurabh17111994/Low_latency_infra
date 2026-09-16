@@ -230,8 +230,8 @@ fn replay(path: &Path) -> Result<(Vec<serde_json::Value>, bool)> {
     if bytes.is_empty() {
         return Ok((Vec::new(), false));
     }
-    let text = std::str::from_utf8(&bytes)
-        .with_context(|| format!("{} is not UTF-8", path.display()))?;
+    let text =
+        std::str::from_utf8(&bytes).with_context(|| format!("{} is not UTF-8", path.display()))?;
     let mut parts: Vec<&str> = text.split('\n').collect();
     // `split` yields a trailing "" exactly when the file ends with a newline. Pop only that
     // terminator — popping unconditionally would discard the very torn line this checks for.
@@ -369,9 +369,11 @@ impl FileAttemptStore {
         for value in records {
             let record: AttemptRecord = serde_json::from_value(value)
                 .with_context(|| format!("decoding a record from {}", path.display()))?;
-            inner.fold(record.into_attempt().with_context(|| {
-                format!("decoding a record from {}", path.display())
-            })?)?;
+            inner.fold(
+                record
+                    .into_attempt()
+                    .with_context(|| format!("decoding a record from {}", path.display()))?,
+            )?;
         }
         Ok(Self {
             inner: Mutex::new(inner),
@@ -498,7 +500,6 @@ impl FileGateStore {
             _lock: lock,
         })
     }
-
 }
 
 impl GateStateStore for FileGateStore {
@@ -511,7 +512,9 @@ impl GateStateStore for FileGateStore {
     fn write(&self, row: &GateRow) -> Result<()> {
         let mut inner = lock(&self.inner)?;
         inner.log.append(&GateRecord::of(row))?;
-        inner.by_partition.insert(row.partition.clone(), row.clone());
+        inner
+            .by_partition
+            .insert(row.partition.clone(), row.clone());
         Ok(())
     }
 
@@ -524,7 +527,9 @@ impl GateStateStore for FileGateStore {
             return Ok(existing.clone());
         }
         inner.log.append(&GateRecord::of(row))?;
-        inner.by_partition.insert(row.partition.clone(), row.clone());
+        inner
+            .by_partition
+            .insert(row.partition.clone(), row.clone());
         Ok(row.clone())
     }
 }
@@ -561,8 +566,7 @@ mod tests {
         let path = attempts_log(&dir);
         let claimed = {
             let store = FileAttemptStore::open(&path).unwrap();
-            let Claim::Claimed(attempt) =
-                store.try_claim("a-1", "ins-1", "h-1", "c-1").unwrap()
+            let Claim::Claimed(attempt) = store.try_claim("a-1", "ins-1", "h-1", "c-1").unwrap()
             else {
                 panic!("a fresh identity must claim");
             };
@@ -578,7 +582,9 @@ mod tests {
 
         // A genuinely new store over the same file — the restart, not an Rc alias.
         let reopened = FileAttemptStore::open(&path).unwrap();
-        let recovered = reopened.get("a-1").expect("the attempt survived the reopen");
+        let recovered = reopened
+            .get("a-1")
+            .expect("the attempt survived the reopen");
         assert_eq!(recovered.instruction_id, "ins-1");
         assert_eq!(
             recovered.phase,
@@ -630,7 +636,9 @@ mod tests {
         } // the process "exits": the store is dropped, the lock released and the file closed
 
         let reopened = FileGateStore::open(&path).unwrap();
-        let row = reopened.read("p-1").expect("the gate row survived the reopen");
+        let row = reopened
+            .read("p-1")
+            .expect("the gate row survived the reopen");
         assert_eq!(row.state, GateState::Enabled);
         assert_eq!(row.epoch, 5);
         assert_eq!(row.fence_token, 7);
@@ -692,7 +700,11 @@ mod tests {
         let store = FileAttemptStore::open(&path).unwrap();
         assert!(store.dropped_torn_tail(), "the torn tail must be reported");
         assert_eq!(store.get("a-1").unwrap().phase, AttemptPhase::Prepared);
-        assert_eq!(store.get("a-2"), None, "a torn append never claimed anything");
+        assert_eq!(
+            store.get("a-2"),
+            None,
+            "a torn append never claimed anything"
+        );
         drop(store);
 
         // A corrupt line that is *not* the tail means the file is not what this store wrote.
@@ -785,8 +797,14 @@ mod tests {
                 .collect();
             handles.into_iter().map(|h| h.join().unwrap()).collect()
         });
-        let claimed = claims.iter().filter(|c| matches!(c, Claim::Claimed(_))).count();
-        let duplicates = claims.iter().filter(|c| matches!(c, Claim::Duplicate)).count();
+        let claimed = claims
+            .iter()
+            .filter(|c| matches!(c, Claim::Claimed(_)))
+            .count();
+        let duplicates = claims
+            .iter()
+            .filter(|c| matches!(c, Claim::Duplicate))
+            .count();
         assert_eq!((claimed, duplicates), (1, 1), "claims: {claims:?}");
 
         // And the loser left nothing behind: exactly one attempt is in the log on disk.

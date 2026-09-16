@@ -534,7 +534,9 @@ mod shutdown_budget_grace_tests {
         // The block ends at the next two-space-indented key (the service's siblings).
         let block = after
             .lines()
-            .take_while(|l| !(l.starts_with("  ") && !l.starts_with("   ") && l.trim_end().ends_with(':')))
+            .take_while(|l| {
+                !(l.starts_with("  ") && !l.starts_with("   ") && l.trim_end().ends_with(':'))
+            })
             .collect::<Vec<_>>()
             .join("\n");
         block
@@ -556,7 +558,8 @@ mod shutdown_budget_grace_tests {
 
     #[test]
     fn the_stop_grace_period_covers_the_worst_case_drain() {
-        let grace = stop_grace_period_secs(SERVICE).expect("test the_executor_declares_a_stop_grace_period first");
+        let grace = stop_grace_period_secs(SERVICE)
+            .expect("test the_executor_declares_a_stop_grace_period first");
         let budget = HTTP_DRAIN_GRACE_SECS + KERNEL_RESIDUAL_EVENT_WAIT_SECS;
         assert!(
             grace >= budget + REQUIRED_HEADROOM_SECS,
