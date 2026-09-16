@@ -204,21 +204,29 @@ block of `fluss-coordinator`, `fluss-tablet-1`, `fluss-tablet-2`,
 `fluss-tablet-3`)
 **Depends on:** none
 
-- [ ] Add `command: ["coordinatorServer"]` to `fluss-coordinator` and
+- [x] Add `command: ["coordinatorServer"]` to `fluss-coordinator` and
       `command: ["tabletServer"]` to each of `fluss-tablet-1/2/3`, placed
       alongside the `image:` / `networks:` keys the way the dev compose and the
       Flink services do. Mirror the dev comment explaining that the image's `CMD`
-      is only the usage fallback.
-- [ ] Add a `ProductionStackTests`-style regression test in `test_09_stack.py`
+      is only the usage fallback. Done in `de88cac2`.
+- [x] Add a `ProductionStackTests`-style regression test in `test_09_stack.py`
       asserting all four services declare their `command`, using a
       comment-stripping service-block helper (same technique as
       `test_flink_runtime_image.py:370`). Verify it **fails** against the
-      pre-change stack file and passes after.
-- [ ] Verify the render and the dispatch:
+      pre-change stack file and passes after. Done in `dfa95636` as
+      `test_every_service_declares_what_to_run` (broad contract over all 16
+      services, allowlist `COMMAND_ALLOWED_BY_IMAGE_DEFAULT`) plus
+      `test_fluss_services_run_the_server_they_are_named_for` (exact four).
+      Simpler than the planned comment-stripping helper: asserts on the parsed
+      YAML value, so prose cannot satisfy it. Verified failing-first (3 failed
+      against the pre-fix stack, naming fluss-coordinator, then tablet-1 once
+      the coordinator was fixed).
+- [x] Verify the render and the dispatch:
       `docker stack config -c docker-stack.yml` (with the 12 placeholder vars)
-      shows `command:` for all four, and
+      shows `command:` for all four (render shows `- coordinatorServer` once,
+      `- tabletServer` three times), and
       `docker run --rm --entrypoint /bin/sh <image> -c 'echo "[$0]"' coordinatorServer`
-      prints `[coordinatorServer]`.
+      prints `[coordinatorServer]` (verified in the planning session).
 
 ### Task 2: Give the healthchecks an interpreter that can run them
 **Why:** The probe is permanently negative for a healthy server, so no consumer
@@ -229,22 +237,42 @@ readiness contract, so a permanently-failing probe is a false contract.
 of the four Fluss services); `code/01_platform/04_scripts/tests/test_09_stack.py`
 **Depends on:** none (independent of Task 1, but commit together)
 
-- [ ] Change the four Fluss `healthcheck.test` entries to
+- [x] Change the four Fluss `healthcheck.test` entries to
       `["CMD", "bash", "-c", "(echo > /dev/tcp/127.0.0.1/<port>) >/dev/null 2>&1 || exit 1"]`
       (option A: 9123 for the coordinator, 9124 for each tablet), or apply
-      option B from *Review Handoff* and record why.
-- [ ] Add a test asserting the four services' healthcheck does not rely on
+      option B from *Review Handoff* and record why. Done in `de88cac2`, but
+      the plan's shape was **wrong in two ways found during execution**:
+      (1) the interpreter was only half the defect - Fluss binds the container
+      hostname, not loopback, so `127.0.0.1:9124` is refused even under bash
+      (`rc=1` vs `$HOSTNAME:9124 -> rc=0`, live tablet). The fixed probe is
+      `(echo > /dev/tcp/$$HOSTNAME/<port> || echo > /dev/tcp/127.0.0.1/<port>)`
+      (`$$` because compose interpolation rejects a bare `$(...)`; render
+      verified to deliver `$HOSTNAME`). (2) Scope was 6 probes, not 4:
+      flink-jobmanager `:8081` had the same dash defect (fixed the same way;
+      Flink listens on loopback too, so the fallback covers it), and
+      openobserve `:5080` is a static binary with no shell/curl/wget at all -
+      its probe reported exit=-1 and flipped the status to unhealthy, so it
+      was REMOVED with an `x-healthcheck` exception marker (otel-collector
+      precedent), not repaired.
+- [x] Add a test asserting the four services' healthcheck does not rely on
       `CMD-SHELL` with a `/dev/tcp` probe — i.e. that the probe's interpreter is
       `bash`. State in the test docstring that `/bin/sh` is dash in this image.
-- [ ] Verify behaviourally, not just by reading YAML: with a listener on a
+      Done in `dfa95636` as `test_healthchecks_can_actually_run_where_declared`,
+      which pins both the interpreter AND the `$HOSTNAME` target, plus asserts
+      shell-less images carry no probe. Verified failing-first against the
+      pre-fix stack.
+- [x] Verify behaviourally, not just by reading YAML: with a listener on a
       Docker network, the `bash` probe against a **closed** port exits non-zero
       and against the **open** port exits 0. Record both commands and their exit
-      codes as the evidence.
+      codes as the evidence. Done on the live dev containers: fixed probe
+      `rc=0` on real ports 9123/9124/8081, `rc=1` on closed 9999, all three
+      servers.
 - [ ] If a Swarm **manager** is reachable, settle what Swarm does with an
       unhealthy task (create a throwaway service whose probe always fails and
       watch the task states). If no manager is reachable, record the behaviour as
       unverified in the CHG record rather than asserting either documented
-      possibility; the fix stands on the false-signal argument alone.
+      possibility; the fix stands on the false-signal argument alone. Still
+      open: this host is a Swarm worker, unchanged.
 
 ### Task 3: Deliver the R2 credentials to the Fluss process, fail-closed
 **Why:** Static keys are the only working R2 mechanism and the servers currently
