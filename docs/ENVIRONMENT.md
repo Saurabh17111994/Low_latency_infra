@@ -173,3 +173,12 @@ Check: manual (run 'docker secret ls' on a prod manager - impossible from this w
 Recheck when: secret set changes or prod cluster rebuilt
 Creating secrets mutates cluster state - needs the operator's word, same
 as `swarm init`, `stack deploy`, and `docker push`.
+
+### FACT-011: Fluss 0.9.1 tiers closed segments to R2 and commits the manifest; R2 is not a restore source
+Status: LIVE
+Verified: 2026-09-16 - two-container trial with production FLUSS_PROPERTIES: 142 'Copied ... to remote storage as remote log segment' lines, ZK .../remote_logs held remote_log_manifest_path on s3:// and remote_log_end_offset 9923850, bucket listing after stop 833 objects / 66 MB / 208 .log
+Check: manual (needs a live R2-tiered Fluss trial; see CHG-182 and the plan 2026-09-16 Post-Completion)
+Recheck when: Fluss image bump, or a change to remote.data.dir
+Tiering copies only *closed* log segments, so a small write proves nothing - a 0-key listing after 3 rows is normal (default log.segment.file-size is large).
+A tablet started against a fresh empty local data directory does NOT re-read from R2: ZK keeps the manifest path but the LogTieringTask logs 'Reset remote end offset to local end offset' and COUNT(*) returns 0.
+Production gives each tablet its own data volume (fluss-tablet-data-1/2/3:/tmp/fluss/data), so ordinary restarts and reschedules keep the local log; R2 is a tiering target and lakehouse feed, not node recovery.
