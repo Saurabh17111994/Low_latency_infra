@@ -19,6 +19,39 @@ def compose_text():
 def collector_text():
     return COLLECTOR.read_text() if COLLECTOR.exists() else ""
 
+def service_block(text, name):
+    """Return one service's compose source, comments removed, up to the next key.
+
+    Indentation decides the boundary: a service is `  name:` and its body is
+    more indented, so the block ends at the next line matching `  <key>:`.
+
+    Comments are stripped so a pin cannot be satisfied by prose: a `#` line
+    mentioning R2_ENDPOINT is not a setting, and an `assertNotIn` must not pass
+    merely because the stale value survives only inside a comment.
+    """
+    lines = text.splitlines()
+    start = next(
+        (i for i, l in enumerate(lines) if l.rstrip() == f"  {name}:"), None
+    )
+    if start is None:
+        raise AssertionError(f"service {name!r} not found in compose")
+    end = len(lines)
+    for i in range(start + 1, len(lines)):
+        if re.match(r"^  \S", lines[i]):
+            end = i
+            break
+    body = (l for l in lines[start:end] if not l.lstrip().startswith("#"))
+    return "\n".join(body)
+
+def s3a_properties(xml):
+    """Return the (name, value) pairs of an Hadoop core-site.xml, comments stripped.
+
+    The two copies of this file carry different explanatory headers, so only the
+    configuration body is comparable.
+    """
+    body = re.sub(r"<!--.*?-->", "", xml, flags=re.S)
+    return re.findall(r"<name>(.*?)</name>\s*<value>(.*?)</value>", body, flags=re.S)
+
 class ProdHardeningTest(unittest.TestCase):
     def test_PROD_001_single_node_simplification_explicit(self):
         """PROD-001: local is single ZK + single Fluss (not 3-node HA) — doc + compose must say so."""
@@ -232,6 +265,90 @@ class ProdHardeningTest(unittest.TestCase):
                          "images or delete it; never keep dead server config")
         self.assertIn("FLUSS_PROPERTIES:", compose_text(),
                       "the live server-config source must stay in compose")
+
+
+    def test_PROD_020_taskmanager_can_read_tiered_data(self):
+        """PROD-020 (CHG-180): a task manager must be able to read Fluss data
+        that has tiered out to object storage.
+
+        remote.data.dir is an s3:// URI, so a scanning source subtask fetches
+        those segments itself — the tablet hands it a path, not the bytes. Two
+        things make that possible and neither is inherited from the tablet:
+
+          * R2_ENDPOINT / AWS_REGION in the task manager's own environment;
+          * /etc/hadoop/conf/core-site.xml, which is what turns those variables
+            into fs.s3a.* for the Hadoop client the Fluss S3 plugin uses.
+
+        Without the conf, Hadoop keeps its default endpoint and the request
+        goes to Amazon S3, failing 403 InvalidAccessKeyId (observed 2026-09-16
+        against R2). Without the region it fails 400 Bad Request.
+
+        The old shared fluss-remote-data volume must NOT come back: it held the
+        bytes only while remote.data.dir was a local path, and a permanent empty
+        mount reads as "the tiered data is gone" while the client silently
+        under-counts rows — the defect W35x (P6-380) fixed.
+
+        Source pins only. The behaviour evidence is the live R2 list in
+        CHG-180, which needs Docker, network and credentials.
+        """
+        text = compose_text()
+        tm = service_block(text, "flink-taskmanager")
+        self.assertIn("R2_ENDPOINT:", tm,
+                      "PROD-020: the task manager needs R2_ENDPOINT — the S3 "
+                      "plugin resolves the endpoint from env, not from the tablet")
+        self.assertIn("AWS_REGION:", tm,
+                      "PROD-020: without a region S3A answers 400 Bad Request")
+        self.assertIn(
+            "./flink-runtime/core-site.xml:/etc/hadoop/conf/core-site.xml:ro",
+            tm,
+            "PROD-020: the task manager must mount core-site.xml at the path "
+            "Flink's bin/config.sh auto-detects (/etc/hadoop/conf); without it "
+            "s3:// resolves against Amazon S3 and fails 403",
+        )
+        self.assertNotIn(
+            "fluss-remote-data:/tmp/fluss/remote-data",
+            tm,
+            "PROD-020: a local remote-data mount is stale — the bytes live on "
+            "R2 now, and an empty mount silently under-counts tiered rows",
+        )
+        # The mount's source must be the SAME file the servers' client uses, or
+        # the two ends disagree about the endpoint. Both are tracked copies of
+        # one config, so compare the property bodies, not the prose headers.
+        probe_conf = ROOT / "code/01_platform/04_scripts/fluss-probes/hadoop-conf/core-site.xml"
+        image_conf = ROOT / "code/01_platform/01_docker/flink-runtime/core-site.xml"
+        self.assertEqual(
+            s3a_properties(probe_conf.read_text()),
+            s3a_properties(image_conf.read_text()),
+            "PROD-020: the Flink image's core-site.xml and the host probe's copy "
+            "have diverged — the readers would resolve different endpoints",
+        )
+
+
+    def test_PROD_021_flink_runtime_conf_is_a_guarded_bind_source(self):
+        """PROD-021 (CHG-180): the compose bind source added for the task
+        manager must be registered in pipeline-lib's B7 guard.
+
+        The guard exists because compose creates a *directory* when a
+        short-syntax bind source is missing, and the container then dies with an
+        opaque OCI exit 127. A source that is mounted but not registered loses
+        that protection silently: the failure returns only on the node where the
+        file happens to be absent. Registering it is what turns that into a
+        local, named, pre-start error.
+        """
+        lib = (ROOT / "code/01_platform/04_scripts/pipeline-lib.sh").read_text()
+        block = re.search(
+            r"pipeline_validate_compose_bind_sources\(\)\s*\{.*?for relative in \\\n(.*?); do",
+            lib,
+            re.S,
+        )
+        self.assertIsNotNone(block, "PROD-021: bind-source guard not found in pipeline-lib.sh")
+        guarded = set(re.findall(r'"([^"]+)"', block.group(1)))
+        self.assertIn(
+            "flink-runtime/core-site.xml",
+            guarded,
+            "PROD-021: the task manager mounts this file, so the B7 guard must "
+            "check it — unregistered, a missing file becomes an OCI exit 127",
+        )
 
 if __name__ == "__main__":
     unittest.main()
