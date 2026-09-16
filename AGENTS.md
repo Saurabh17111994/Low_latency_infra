@@ -85,8 +85,13 @@ Spec-driven repo: `docs/` is the spec, `code/` is the implementation.
   re-run those trials expecting a different result, and do not claim a production
   deploy is verified. Same boundary for the 4-VM Swarm (never exercised), the
   `FLINK_IMAGE` digest pin (FACT-009: blocked on `docker push`; do not invent a
-  digest), and production lake tiering (FACT-013: `datalake.*` keys are set but
-  no plugin jars are mounted - a known gap, not a bug to rediscover).
+  digest), and the `FLUSS_IMAGE` digest pin (FACT-014: the derived lake-plugin
+  image exists and is built + proven against R2 (CHG-183), but `FLUSS_IMAGE`
+  still names the stock digest - so a deploy today still fails the lake path;
+  do not claim the pin is done, and do not invent a digest).
+  Lake tiering's *classloader* gap is closed (CHG-183); whether a real tiering
+  job writes parquet to the lake prefix is still unproven - that needs the
+  Flink tiering service plus a `table.datalake.enabled = true` table.
 
 ## Docs
 

@@ -194,8 +194,15 @@ Recheck when: a real docker stack deploy runs on the 4-VM Swarm
 PROVEN: Fluss servers start under the production FLUSS_PROPERTIES, tier closed segments to R2, commit the manifest, and a client reads them back from R2 (FACT-011). NOT PROVEN: docker stack deploy, per-service health on a real cluster, and the DEPLOY=1 gate on a manager are all unexercised. Do not re-derive the trial evidence or rerun it looking for a different answer - it is recorded in CHG-182 and docs/08_implementation/09-production-swarm.md. The 4-VM Swarm has never been exercised; FACT-002 is the topology decision, not evidence of a running cluster.
 
 ### FACT-013: production lake tiering (datalake.*) is unwired - the keys are set but no plugin jars are mounted
-Status: LIVE
+Status: DEAD (superseded by next row: lake-tiering plugins exist in a derived image, but FLUSS_IMAGE still names the stock one)
 Verified: 2026-09-16 - docker-stack.yml carries datalake.iceberg.* on all four Fluss services but no plugin-jar mounts; dev compose bind-mounts fluss-fs-s3/fluss-fs-hdfs/fluss-fs-hadoop-shaded into plugins/iceberg/
 Check: grep -c 'plugins/iceberg' code/01_platform/01_docker/docker-stack.yml | grep -q '^0$'
 Recheck when: plugin jars are mounted in docker-stack.yml, or the datalake.* keys are removed
 Log/KV tiering to R2 does NOT need these jars (FACT-011 proves it works without them). Lake tiering does. Whether it works in production as written is unverified and out of CHG-182 scope - do not assume it works, and do not 'fix' it by adding the keys again; they are already present and the gap is the missing jars.
+
+### FACT-014: lake-tiering plugins exist in a derived image, but FLUSS_IMAGE still names the stock one
+Status: LIVE
+Verified: 2026-09-16 - CHG-183: built trading-fluss-runtime:0.1.0 and drove it against real R2; stock image exits NoClassDefFoundError Configurable, derived image starts with the Iceberg catalog loaded
+Check: test -f code/01_platform/01_docker/fluss-runtime/Dockerfile && grep -q 'plugins/iceberg' code/01_platform/01_docker/fluss-runtime/Dockerfile
+Recheck when: FLUSS_IMAGE in runtime.lock points at a pushed derived image, or fluss-runtime/ is removed
+code/01_platform/01_docker/fluss-runtime/ bakes fluss-fs-s3 + fluss-fs-hdfs INTO /opt/fluss/plugins/iceberg/ (the stock image ships both in plugins/s3 and plugins/hdfs, which the iceberg classloader cannot see). This fixes the classloader gap only. runtime.lock's FLUSS_IMAGE is deliberately still the stock digest, because a locally built image has no registry manifest digest to pin. So a deploy today still gets the stock image, and the datalake.* keys would still fail with NoClassDefFoundError. Push the image and run digest-pin.sh before expecting lake tiering to work in production.

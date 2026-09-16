@@ -257,6 +257,40 @@ image's default is the usage/help path, so the container prints usage and
 **exits 0** — Swarm then reports the task as started while nothing runs. With no
 region, S3A fails `400 Bad Request`.
 
+### The Fluss runtime image (CHG-183)
+
+The same "cannot `build:`" rule applies to the Fluss servers. Their stock image
+cannot load a lake plugin, because Fluss loads `/opt/fluss/plugins/<name>/` as
+**separate classloaders**: the stock image ships `fluss-fs-s3` and
+`fluss-fs-hdfs` in `plugins/s3` and `plugins/hdfs`, where the `iceberg` loader
+cannot see them, and Iceberg's `HadoopCatalog` needs
+`org.apache.hadoop.conf.Configurable` from exactly those jars.
+
+`make fluss-image` builds the derived image from
+`code/01_platform/01_docker/fluss-runtime/`; push it and pin `FLUSS_IMAGE` the
+same way as `FLINK_IMAGE`. Measured 2026-09-16 with the identical production
+`datalake.iceberg.*` config, same network and same credentials:
+
+| Image | Result |
+| --- | --- |
+| Stock `apache/fluss` | container **exits** — `NoClassDefFoundError: org/apache/hadoop/conf/Configurable` |
+| Derived | container **runs** — Iceberg `HadoopCatalog` constructed, `Successfully start Netty server` |
+
+The dev compose gets the same effect from bind mounts out of
+`fluss-plugins/`, which is a gitignored tree — `git ls-files` on it returns one
+file, the README — so those jars exist only where someone downloaded them by
+hand, and a Swarm stack cannot express a per-node bind mount portably.
+
+Two traps, both recorded in CHG-183:
+
+- **`remote.data.dir: s3://…` does NOT exercise this path.** That is log/KV
+  tiering, which loads `plugins/s3` and already worked (FACT-011). Lake tiering
+  needs `datalake.*` in the config before the iceberg classloader is involved at
+  all.
+- **`datalake.iceberg.iceberg.hadoop.fs.s3.impl` (and the `s3a` twin) are
+  required.** Without them the classloader is fixed but startup fails
+  `No FileSystem for scheme "s3"` — which reads like the same bug and is not.
+
 ### The Fluss startup fix (CHG-182 fixes CHG-181 — Tasks 1-4)
 
 Same defect class as the Flink `command:` gap above, found while planning the
@@ -340,11 +374,19 @@ And one thing this change deliberately does not claim: R2 is a tiering target,
 **not** a recovery source for a tablet that has lost its local log (see the
 counter-example above). Production gives each tablet its own data volume, so an
 ordinary restart or reschedule keeps its local log; a lost volume is lost
-either way. Also unwired: lake tiering (`datalake.*`) — production carries the
-keys but mounts no plugin jars, unlike dev, which bind-mounts `fluss-fs-s3`,
-`fluss-fs-hdfs` and `fluss-fs-hadoop-shaded` into `plugins/iceberg/`. Full
-detail: `docs/05_deployment/change-records/CHG-182.md` and the plan's
-*Post-Completion*,
+either way. Lake tiering (`datalake.*`) is a separate matter, fixed in CHG-183:
+the Fluss server image is now built from
+`code/01_platform/01_docker/fluss-runtime/`, which bakes `fluss-fs-s3` +
+`fluss-fs-hdfs` **into** `/opt/fluss/plugins/iceberg/` — what dev was getting
+from its bind mounts. Fluss loads each plugin directory as its own classloader,
+so the stock image's copies in `plugins/s3` and `plugins/hdfs` are invisible to
+the iceberg one: with the production `datalake.iceberg.*` config the stock image
+exits `NoClassDefFoundError: org/apache/hadoop/conf/Configurable`, while the
+derived image starts with the Iceberg catalog loaded. `FLUSS_IMAGE` still names
+the stock digest, so a deploy today still gets the stock behaviour — build, push
+and pin before expecting the lake path to work (FACT-014). Full detail:
+`docs/05_deployment/change-records/CHG-183.md`, CHG-182 for the log/KV path, and
+the plan's *Post-Completion*,
 `docs/plans/2026-09-16-production-fluss-startup-and-tiering.md`.
 
 ### Storage and recovery

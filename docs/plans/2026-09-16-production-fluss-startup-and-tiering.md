@@ -564,17 +564,32 @@ both wrong.
   independent listing confirming 0 remain, and the `/tmp` scripts, the copied
   segment and the downloaded Fluss sources removed. The dev cluster and its
   `/fluss` root were untouched throughout.
-- **Lake tiering (`datalake.*`) in production is still unwired.** The four
-  services carry `datalake.iceberg.*` keys pointing at `${S3_WAREHOUSE_PATH}`, but
-  production mounts **no** plugin jars, while dev bind-mounts `fluss-fs-s3`,
-  `fluss-fs-hdfs` and `fluss-fs-hadoop-shaded` into `plugins/iceberg/` — dev's own
-  comment says the iceberg classloader needs the first two. The stock image bakes
-  `plugins/s3/` and `plugins/hdfs/` but not the shuffled-namespace
-  `hadoop-shaded` jar, which is absent from the image entirely. Whether lake
-  tiering works in production without those mounts is **unverified** and needs its
-  own investigation; it is out of scope here because it does not affect log/KV
-  tiering to R2.
+- **Lake tiering's classloader gap is closed (CHG-183) — its pin is not.** The
+  four services carry `datalake.iceberg.*` keys pointing at
+  `${S3_WAREHOUSE_PATH}`, and the stock image could not load an Iceberg catalog
+  at all: Fluss loads each plugin directory as a **separate classloader**, so the
+  stock image's `fluss-fs-s3` / `fluss-fs-hdfs` (in `plugins/s3`, `plugins/hdfs`)
+  are invisible to the `iceberg` one, and `HadoopCatalog` needs
+  `org.apache.hadoop.conf.Configurable` from those jars. Measured with the
+  identical production config: stock **exits**
+  `NoClassDefFoundError: org/apache/hadoop/conf/Configurable`; the derived image
+  from `code/01_platform/01_docker/fluss-runtime/` (`make fluss-image`) **starts**
+  with the catalog loaded. The dropped `hadoop-shaded` jar is unpublished (404 on
+  Central and on the Apache snapshots repo), therefore unpinnable; all 12898 of
+  its entries are already in the published `fluss-fs-s3` + `fluss-fs-hdfs` pair
+  (verified: 0 missing), and it declares no `FileSystemPlugin` service. Two traps
+  recorded in CHG-183: `remote.data.dir: s3://…` exercises log/KV tiering, **not**
+  this path; and without `datalake.iceberg.iceberg.hadoop.fs.s3.impl` (+ the `s3a`
+  twin) the classloader is fixed but startup fails `No FileSystem for scheme
+  "s3"`, which reads like the same bug and is not. **Still unproven:** that a real
+  tiering job writes parquet to the lake prefix — that needs the Flink tiering
+  service plus a `table.datalake.enabled = true` table (FACT-014).
 - **`FLINK_IMAGE` is still un-pinned** — the locally built image must be pushed
   and digest-pinned (`digest-pin.sh`) before `runtime.lock` can reference it.
+- **`FLUSS_IMAGE` is still un-pinned** for the same reason: the derived
+  `trading-fluss-runtime` image was built and proven but never pushed, so it has
+  no registry manifest digest and `runtime.lock` still names the stock
+  `apache/fluss` digest. Until it is pushed and pinned, a deploy still gets the
+  stock image and the lake path still fails.
 - **Production deploy verification** needs a 4-VM Swarm; the single-node harness
   on this worker cannot substitute for it.
