@@ -291,23 +291,34 @@ path in `configs.file:`.
 **Depends on:** none (independent of Tasks 1-2, but the `entrypoint:` edit lands
 in the same blocks)
 
-- [ ] Write the bridge script: for each of `AWS_ACCESS_KEY_ID` and
-      `AWS_SECRET_ACCESS_KEY`, read `${VAR}_FILE`; if set, require the file to be
+- [x] Done in `cedb4405` (fix) + `d508aa51` (tests, 18 in three classes).
+      Verified live against the real image in four runs: both variables reach the
+      server process with the newline stripped, a missing or empty secret aborts
+      `FATAL` with rc=1, and an unset `*_FILE` is tolerated. Write the bridge
+      script: for each of `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`, read
+      `${VAR}_FILE`; if set, require the file to be
       readable and non-empty (after stripping CR/LF), `export` the value, and on
       failure print a `FATAL: ...` line and `exit 1`. Then
       `exec /docker-entrypoint.sh "$@"`. An **unset** `*_FILE` must be tolerated
       (dev passes the values directly).
-- [ ] Ensure the script is **fail-closed**: a `*_FILE` that is set and unusable
+- [x] Ensure the script is **fail-closed**: a `*_FILE` that is set and unusable
       must abort. Note in the script header that dash does not abort on a failed
       command substitution inside a prefix assignment even under `set -e` — which
       is why the value is read into a variable and checked explicitly rather than
       exported inline.
-- [ ] Register the script under `configs:` and set each Fluss service's
+- [x] Done in `cedb4405`: `fluss-r2-secrets-bridge: file: ./fluss-r2-secrets-from-file.sh`,
+      flat in `code/01_platform/01_docker/` as this plan's location note advised.
+      Register the script under `configs:` and set each Fluss service's
       `entrypoint: ["/bin/sh", "/opt/fluss/bin/r2-secrets-from-file.sh"]`, with
       `AWS_ACCESS_KEY_ID_FILE` / `AWS_SECRET_ACCESS_KEY_FILE` pointing at
       `/run/secrets/...`. Do **not** put the credentials in `environment:` —
       `/run/secrets` stays the only source.
-- [ ] Decide whether the new file belongs in `pipeline-lib.sh`'s
+- [x] Decided: **leave B7 alone.** The bridge is delivered through
+      `configs.file:`, and `pipeline_validate_compose_bind_sources` guards
+      dev-compose bind sources only — `configs.file:` sources have never been in
+      that list. No claim is made that B7 covers config-delivered files; the pin
+      lives in `test_fluss_runtime.py::StackWiringTests` instead. Decide whether
+      the new file belongs in `pipeline-lib.sh`'s
       `pipeline_validate_compose_bind_sources` list (L147-165). Note what that
       list actually guards: **dev-compose bind-mount sources**, `$LIB_COMPOSE_DIR`
       relative, checked with `-f`. The stack delivers this script through
@@ -316,7 +327,7 @@ in the same blocks)
       as the `configs:` source). Add it only if the file also becomes a dev
       bind-mount source; otherwise leave the guard alone and say so in the CHG
       record. Do **not** claim the B7 guard covers config-delivered files.
-- [ ] Add tests in `test_fluss_runtime.py` (class names `*Tests`, no `test_`
+- [x] Add tests in `test_fluss_runtime.py` (class names `*Tests`, no `test_`
       helper prefixes) covering: both variables bridged; the `*_FILE` name
       derived from the target variable; trailing newline stripped; unreadable
       file aborts; empty file aborts; unset `*_FILE` is not an error; the `exec`
@@ -325,7 +336,7 @@ in the same blocks)
       `code_lines()` output, never raw text, so a comment cannot satisfy a pin.
       Run each test against a deliberately broken variant of the script and
       confirm it names the specific break.
-- [ ] Verify end-to-end with real files: start a container using the changed
+- [x] Verify end-to-end with real files: start a container using the changed
       spec (base image plus a fake secret pair under `/run/secrets`) and confirm
       it prints `Starting Coordinator Server`, then confirm the credentials are
       actually in the process environment. Never print real credential values.
@@ -340,7 +351,8 @@ L107 and the compile-only defaults from L123); `code/01_platform/04_scripts/test
 **Depends on:** Task 3 (credentials must be in the environment, or these `s3.*`
 keys resolve to nothing)
 
-- [ ] Replace `remote.data.dir: /tmp/fluss/remote-data` with
+- [x] Done in `4f338631` (fix) + `4ec56985` (tests). Red leg: 2 failed
+      pre-change. Replace `remote.data.dir: /tmp/fluss/remote-data` with
       `remote.data.dir: s3://${R2_BUCKET:?set R2_BUCKET for tiering}/remote-data`
       on all four services, and add the dev key set — `s3.endpoint`,
       `s3.endpoint.region`, `s3.access-key: $${env.AWS_ACCESS_KEY_ID}`,
@@ -349,23 +361,29 @@ keys resolve to nothing)
       the escaping contract: single `$` for values compose interpolates at render
       time, double `$$` for the `${env....}` placeholders that must survive to the
       container.
-- [ ] Delete the `fluss-remote-data` mounts from all four services and its
+- [x] Delete the `fluss-remote-data` mounts from all four services and its
       declaration at L132. Confirm nothing else references it
       (`grep -rn fluss-remote-data`).
-- [ ] Add `R2_BUCKET` to `stack_selfcheck.sh`'s `required_vars` (L107), the
+- [x] Add `R2_BUCKET` to `stack_selfcheck.sh`'s `required_vars` (L107), the
       message that lists what is missing, and the compile-only placeholder
       defaults (from L123). It joins the other `:?` variables, so DEPLOY=1
       refuses to run with it unset. Update `REAL_ENV` in
       `test_stack_selfcheck.py:20-34` to match.
-- [ ] Update `test_09_stack.py`: drop `fluss-remote-data` from
+- [x] Update `test_09_stack.py`: drop `fluss-remote-data` from
       `TestVolumes.test_durable_volumes_declared` (L140-149) and add an assertion
       that no service carries a local `remote.data.dir` — asserting on the
       `FLUSS_PROPERTIES` value, not on prose. Verify both the new test and the
       volume test fail against the pre-change file and pass after.
-- [ ] Confirm the fail-closed behaviour: `docker stack config` with `R2_BUCKET`
-      unset must error with *"required variable R2_BUCKET is missing a value"*,
-      and with it set must render `remote.data.dir: s3://<bucket>/remote-data`
-      while leaving `s3.access-key: ${env.AWS_ACCESS_KEY_ID}` **unexpanded**.
+- [x] Confirm the fail-closed behaviour. **This checkbox's premise was wrong,
+      found during execution:** `docker stack config` with `R2_BUCKET` unset does
+      **not** error — the `:?` guard does not fire inside the `FLUSS_PROPERTIES`
+      block scalar. Measured: rc=0 and it renders `s3:///remote-data`. The same
+      holds in the dev twin, so this is a compose behaviour, not a stack typo.
+      The fail-closed behaviour therefore moved to `stack_selfcheck.sh`'s
+      `DEPLOY=1` gate, which refuses an unset or empty `R2_BUCKET` and names it
+      before any deploy; `test_deploy_without_r2_bucket_names_it` pins it and
+      the render with a bucket set leaves `s3.access-key: ${env.AWS_ACCESS_KEY_ID}`
+      **unexpanded** in a real run (verified).
 
 ### Task 5: Update the production documentation
 **Why:** `09-production-swarm.md` recounts the M2 deployment and the CHG-179
@@ -374,13 +392,17 @@ first blocker invisible.
 **Files:** `docs/08_implementation/09-production-swarm.md`
 **Depends on:** Tasks 1-4
 
-- [ ] Document the two defects and their fixes in the section that already
+- [x] Done: new section *The Fluss startup fix (CHG-182 fixes CHG-181 — Tasks
+      1-4)* before *Storage and recovery*, with the four-defect table, the four
+      bridge runs, the live tiering write, and the not-verified list; the storage
+      bullet now reads hot-segments-local / tiered-segments-on-R2. Document the
+      two defects and their fixes in the section that already
       narrates the Flink startup fix (around L255, which discusses `command:` and
       `AWS_REGION`), with the verified evidence: the usage-plus-exit-0 render, the
       `command=None` render, and the dash-versus-bash probe result.
-- [ ] Document the tiering location change and the credential path (file secrets
+- [x] Document the tiering location change and the credential path (file secrets
       to bridge to `${env.*}` to Hadoop at read time).
-- [ ] Note the residual risk that the plugin jars for lake tiering (`datalake.*`)
+- [x] Note the residual risk that the plugin jars for lake tiering (`datalake.*`)
       are still unwired in production, cross-referencing *Post-Completion*.
 
 ### Task 6: Record the change and close the lane
@@ -390,16 +412,19 @@ landed with a CHG record.
 free number by listing the directory)
 **Depends on:** Tasks 1-5
 
-- [ ] Write the CHG record in the established format (see CHG-180): header with
+- [x] Done: `docs/05_deployment/change-records/CHG-182.md` (**not** CHG-181 as
+      this plan assumed — 181 was already filed as the record-of-defect, so 182
+      is the record of the fix). Write the CHG record in the established format
+      (see CHG-180): header with
       status/filed/closed, the `text` metadata block (`change_record_id`, `scope`,
       `affected_artifacts`, `compatibility_class`, `savepoint_impact`,
       `test_updates`, `rollback_behavior`, `plan_tasks`), then what was wrong and
       what changed. Be explicit about the healthcheck change and about what was
       **not** verified.
-- [ ] State the red-leg evidence for each new test (which test failed against
+- [x] State the red-leg evidence for each new test (which test failed against
       which pre-change file and named which break) — the standard the repo holds
       test claims to.
-- [ ] Run the gates and record them:
+- [x] Run the gates and record them:
       `python3 code/01_platform/04_scripts/change_control_check.py` (all records
       complete), `docs_audit.py`, the banned-substring set, `pytest` on the
       touched suites, and `shellcheck -S warning` on the new script.
@@ -407,22 +432,32 @@ free number by listing the directory)
 ### Task 7: Verify acceptance criteria
 **Depends on:** Tasks 1-6
 
-- [ ] `make test-09` green, including the new command, healthcheck and tiering
+- [x] `make test-09` green, including the new command, healthcheck and tiering
       assertions.
-- [ ] `make stack-selfcheck` — see *Required External or Manual Verification* for
+- [x] `make stack-selfcheck` — see *Required External or Manual Verification* for
       the environment caveat: this host is a Swarm **worker**
       (`ControlAvailable=false`), so the script exits 1 at "cannot determine this
       node's swarm NodeID" **before** reaching the stack. On the worker host the
       equivalent compile check is the manual `docker stack config` invocation with
-      the 12 placeholder values; record which was actually run.
-- [ ] `pytest` on the full touched suite list, reporting the pass count and any
+      the placeholder values (13 required vars after Task 4 added `R2_BUCKET`, not
+      the 12 this plan assumed); record which was actually run. **Run:** the manual
+      `docker stack config` with all 13 placeholders, rc=0 — renders
+      `coordinatorServer` once, `tabletServer` three times, `jobmanager` and
+      `taskmanager`, 4x `remote.data.dir: s3://placeholder-bucket/remote-data`,
+      and 0 references to `fluss-remote-data`. `make stack-selfcheck` was also run
+      and exits 1 at "cannot determine this node's swarm NodeID", as this section
+      predicted.
+- [x] `pytest` on the full touched suite list, reporting the pass count and any
       skip.
-- [ ] Confirm no credential value appears in any committed file. Grep the changed
+- [x] Confirm no credential value appears in any committed file. Grep the changed
       files for AWS access-key prefixes and for a long literal value on any
       `*-key:` / `*-secret:` line — the committed forms must be `${env....}`
       placeholders or `/run/secrets/...` paths only. Write the pattern so it does
       not match its own text in this plan.
-- [ ] Commit in the repo's order — fix commit, test commit, docs/CHG commit —
+- [x] Landed across the lane's commit pairs: `de88cac2`+`dfa95636` (Tasks 1-2),
+      `cedb4405`+`d508aa51` (Task 3), `4f338631`+`4ec56985` (Task 4), then this
+      docs/CHG commit. Each fix preceded its test. Commit in the repo's order —
+      fix commit, test commit, docs/CHG commit —
       showing the diffstat for approval first. Never `git add -A` / `git add .`;
       never amend, rebase, force-push or push.
 ## Technical Details
@@ -490,6 +525,22 @@ both wrong.
 
 ## Post-Completion
 
+- **How the tiering write was proven, and what is still open.** The trial proved
+  the copy, the manifest commit and the bucket objects (833 objects / 66 MB /
+  208 `.log` segments, counted after the trial was stopped so the figure could
+  not drift). It did **not** prove a read served from R2: every row a `SELECT`
+  returned came off local disk, and a tablet started against a fresh empty local
+  directory did **not** re-read from R2 (`Reset remote end offset to local end
+  offset`, then `COUNT(*)` = 0). Production gives each tablet its own data volume,
+  so R2 is a tiering target and not a recovery source for a lost local log —
+  state that in operations docs rather than implying R2 restores a wiped node.
+  Two measurement traps are recorded in CHG-182: a small write proves nothing
+  about tiering (only *closed* segments are copied), and wiping local disk proves
+  nothing about the write path.
+- **Trial resources were cleaned up**: the two trial containers, the
+  `/trial-chroot` ZooKeeper subtree (the dev `/fluss` root was left untouched),
+  the 931 objects under the three trial R2 prefixes, and the `/tmp` scripts. The
+  dev five-container cluster was left running and unchanged.
 - **Lake tiering (`datalake.*`) in production is still unwired.** The four
   services carry `datalake.iceberg.*` keys pointing at `${S3_WAREHOUSE_PATH}`, but
   production mounts **no** plugin jars, while dev bind-mounts `fluss-fs-s3`,

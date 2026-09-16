@@ -257,6 +257,87 @@ image's default is the usage/help path, so the container prints usage and
 **exits 0** — Swarm then reports the task as started while nothing runs. With no
 region, S3A fails `400 Bad Request`.
 
+### The Fluss startup fix (CHG-182 fixes CHG-181 — Tasks 1-4)
+
+Same defect class as the Flink `command:` gap above, found while planning the
+R2 tiering move. Four production Fluss services shipped with no `command:`, a
+probe that cannot run, no R2 credentials in the process, and a tier directory
+that lives on one machine.
+
+| # | What was wrong | What changed |
+| --- | --- | --- |
+| 1 | No `command:` — image default is `help`, prints usage and exits 0, so Swarm reports started while no server runs | `fluss-coordinator` declares `command: ["coordinatorServer"]`; `fluss-tablet-1/2/3` declare `command: ["tabletServer"]` |
+| 2 | Health probe used `CMD-SHELL` with `/dev/tcp` — `/bin/sh` in this image is dash, which has no `/dev/tcp`, so a healthy server reported unhealthy | Probe runs under `bash` against `$HOSTNAME` first, loopback fallback |
+| 3 | R2 keys arrived as Swarm file secrets nothing read | New `fluss-r2-secrets-from-file.sh` (Swarm `configs:`) reads `*_FILE`, fails closed on unreadable/empty, exports into the process, then `exec`s the stock entrypoint |
+| 4 | `remote.data.dir` was `/tmp/fluss/remote-data` on a volume with no driver and no placement pin — tiered bytes land on one machine and reads from another machine find nothing | All four services set `remote.data.dir: s3://${R2_BUCKET}/remote-data` plus the `s3.*` key set; `fluss-remote-data` volume deleted; `R2_BUCKET` joins the `stack_selfcheck.sh` required list |
+
+Evidence (all run 2026-09-16):
+
+- `docker run --rm apache/fluss:0.9.1-incubating` prints
+  `Usage: docker-entrypoint.sh (coordinatorServer|tabletServer)` and exits 0.
+- `docker stack config` rendered `command=None` for all four Fluss services
+  before the fix; after, it renders `coordinatorServer` once and
+  `tabletServer` three times.
+- Live probe: `bash` against the open port exits 0, against a closed port
+  exits non-zero; the same probe under `sh` (dash) fails even on the open port.
+  Fluss binds the container **hostname**, not loopback, so the probe tries
+  `$HOSTNAME` first and falls back.
+- Live bridge, four runs against the real image: with both `*_FILE` readable
+  both variables reach the server process and the newline is stripped; a
+  missing or empty secret file aborts `FATAL` with rc=1; with no `*_FILE` set
+  a directly-passed value is tolerated, so dev is unaffected.
+- Live tiering **write**: a two-container trial carrying the production
+  `FLUSS_PROPERTIES` rolled its segments and copied them to R2 —
+  `Copied ... to remote storage as remote log segment: <uuid>` — and
+  **committed the manifest**: ZooKeeper then held
+  `remote_log_manifest_path: s3://<bucket>/remote-data-trial3/log/.../<uuid>.manifest`
+  with `remote_log_end_offset: 9923850`. An independent bucket listing taken
+  after the trial was stopped agreed: **833 objects / 66 MB, 208 of them `.log`
+  segments** plus their index, timeindex and writer-snapshot companions. A first
+  attempt showed 0 keys and looked like
+  a failure; tiering copies only *closed* segments, and three small rows never
+  rolled one. *A 0-key listing after a small write says nothing about tiering.*
+- Live read of a table whose data is intact: `SELECT COUNT(*)` over
+  10,000,000 rows returned `10000000`, so the trial cluster serves reads
+  normally.
+- Live counter-example worth keeping: a tablet started against a **fresh, empty**
+  local directory did **not** re-read its log from R2. ZooKeeper still held the
+  manifest pointer and offset, but the tiering task logged
+  `Local end offset should be greater than remote end offset ... local: 0 and
+  remote: 9923850. Reset remote end offset to local end offset.` and the same
+  `SELECT COUNT(*)` returned **0**. In this version R2 is where tiered segments
+  are kept for cost and for the lakehouse, not a restore path for a tablet that
+  has lost its local log.
+
+Credential path: Swarm files at `/run/secrets/...` → bridge exports
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` → `FLUSS_PROPERTIES` keeps the
+`${env.AWS_ACCESS_KEY_ID}` placeholders (the entrypoint leaves them; Hadoop
+expands them at read time).
+
+Not verified — the honest boundary of this evidence:
+
+- **No real `docker stack deploy`.** This host is a Swarm worker, so
+  `make stack-selfcheck` stops before reaching the stack and the compile check
+  used instead is the manual `docker stack config` above.
+- **No read served from R2.** The write path and the manifest commit are
+  proven, but every row a `SELECT` returned came off local disk. The client
+  ships a remote-segment downloader, so the untested path is client-to-R2, not
+  tablet-to-R2 — this lane did not exercise it, which is not the same as
+  finding it broken.
+- **What Swarm does with an unhealthy task** still needs a manager node. The
+  startup fix rests on the false-signal argument alone.
+
+And one thing this change deliberately does not claim: R2 is a tiering target,
+**not** a recovery source for a tablet that has lost its local log (see the
+counter-example above). Production gives each tablet its own data volume, so an
+ordinary restart or reschedule keeps its local log; a lost volume is lost
+either way. Also unwired: lake tiering (`datalake.*`) — production carries the
+keys but mounts no plugin jars, unlike dev, which bind-mounts `fluss-fs-s3`,
+`fluss-fs-hdfs` and `fluss-fs-hadoop-shaded` into `plugins/iceberg/`. Full
+detail: `docs/05_deployment/change-records/CHG-182.md` and the plan's
+*Post-Completion*,
+`docs/plans/2026-09-16-production-fluss-startup-and-tiering.md`.
+
 ### Storage and recovery
 
 - **Job artifact model (CHG-110 native split):** the compute image is the
@@ -268,7 +349,7 @@ region, S3A fails `400 Bad Request`.
   savepoint-restart; **no image rebuild per code change**. The image itself
   is the CHG-179 runtime image above — rebuild it only when the Flink/Fluss
   versions or the object-store wiring change.
-- Fluss data uses durable per-node volumes and tested replication (LOG tables; KV tables are single-replica in Fluss 0.9.1 — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038)).
+- Fluss data: hot segments stay on durable per-node volumes (`fluss-data`, `fluss-tablet-data-1/2/3`) with tested replication (LOG tables; KV tables are single-replica in Fluss 0.9.1 — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038)); tiered segments live in R2 at `s3://${R2_BUCKET}/remote-data`, readable from any node holding the credentials.
 - ZooKeeper ensemble members use durable per-node volumes; loss of one member is tolerated while quorum (2-of-3) holds.
 - Flink checkpoints/savepoints use encrypted versioned S3; Flink JobManager HA metadata (`high-availability.storageDir`) uses the same encrypted S3 store, with leadership in ZooKeeper.
 - Iceberg/audit storage uses encryption, versioning, and approved retention/lifecycle policy.
