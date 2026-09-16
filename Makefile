@@ -12,7 +12,7 @@ STACK_LOCK := bash code/01_platform/04_scripts/stack-lock.sh
 # fails obscurely). Set MVN_FLAGS=-o when the local cache is warm.
 MVN := mvn $(MVN_FLAGS)
 
-.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite gate-fast check-image-stale check-image-stale-fast images branch-check proto flink-image
+.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite gate-fast check-image-stale check-image-stale-fast images branch-check proto flink-image fluss-image
 
 # P6-302: these recipes create no file of their own name, so a stray file in the
 # repo root would make make treat the target as up to date and skip the recipe.
@@ -104,6 +104,8 @@ help:
 	@echo "              certificate — releases, market sessions and soak runs need \`make gate\`"
 	@echo "  flink-image build the production Flink runtime image (Fluss jars + R2 config +"
 	@echo "              secret bridge) from SHA256-pinned Maven Central artifacts"
+	@echo "  fluss-image build the production Fluss server image (stock apache/fluss + the two"
+	@echo "              lake plugins in plugins/iceberg/) from SHA256-pinned artifacts"
 	@echo "  images      rebuild every build: image WITH its content stamp (sha256 of its"
 	@echo "              inputs, baked in as build.labels) and verify with check-image-stale"
 	@echo "  pin-check   pin discipline (foundation L548/553/554): matrix shape, corpus integrity,"
@@ -418,6 +420,28 @@ flink-image:
 	trap 'rm -rf "$$ctx"' EXIT; \
 	bash "$$dir/fetch-jars.sh" --dest "$$ctx/jars"; \
 	cp "$$dir/Dockerfile" "$$dir/core-site.xml" "$$dir/20-r2-secrets-from-file.sh" "$$ctx/"; \
+	docker build -t "$$tag" "$$ctx"; \
+	bash "$$dir/fetch-jars.sh" --verify "$$ctx/jars"; \
+	echo ""; \
+	echo "Built $$tag"; \
+	echo "  image id: $$(docker image inspect "$$tag" --format '{{.Id}}')"; \
+	echo "Next: push it, then pin the manifest digest in runtime.lock:"; \
+	echo "  bash code/01_platform/04_scripts/digest-pin.sh <repo>:<tag>"
+
+# Usage: make fluss-image [FLUSS_RUNTIME_TAG=trading-fluss-runtime:0.1.0]
+# The Fluss server image: stock apache/fluss + the two lake plugins baked into
+# /opt/fluss/plugins/iceberg/. Same reason as flink-image — a Swarm stack cannot
+# `build:`, and the dev compose sources those jars from a gitignored host tree
+# that does not exist on the production VM.
+fluss-image:
+	@set -e; \
+	dir=code/01_platform/01_docker/fluss-runtime; \
+	tag="$${FLUSS_RUNTIME_TAG:-trading-fluss-runtime:0.1.0}"; \
+	ctx="$$dir/.buildctx"; \
+	rm -rf "$$ctx"; mkdir -p "$$ctx"; \
+	trap 'rm -rf "$$ctx"' EXIT; \
+	bash "$$dir/fetch-jars.sh" --dest "$$ctx/jars"; \
+	cp "$$dir/Dockerfile" "$$ctx/"; \
 	docker build -t "$$tag" "$$ctx"; \
 	bash "$$dir/fetch-jars.sh" --verify "$$ctx/jars"; \
 	echo ""; \
