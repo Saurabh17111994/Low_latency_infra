@@ -74,6 +74,10 @@ Spec-driven repo: `docs/` is the spec, `code/` is the implementation.
 - `logs/tracker-14/` holds dated evidence records — append new dated files, never edit
   past evidence.
 - Secrets live in `.env` (`make env` copies from `.env.example`). Never commit secrets.
+- Machine truth lives in `docs/ENVIRONMENT.md` (the facts ledger: swarm role, prod
+  topology, image shells, ports, secrets split). Before ANY docker/swarm/deploy
+  reasoning, read it - re-discovering a recorded fact wastes the investigation.
+  append-only with proof+expiry per row; never edit a LIVE row in place.
 
 ## Docs
 
