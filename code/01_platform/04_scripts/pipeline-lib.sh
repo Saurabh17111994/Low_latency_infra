@@ -148,6 +148,7 @@ pipeline_validate_compose_bind_sources() {
   local relative path
   for relative in \
     "flink-log4j-console.properties" \
+    "flink-runtime/core-site.xml" \
     "alert-consumer.py" \
     "fluss-plugins/iceberg/fluss-flink-2.2-0.9.1-incubating.jar" \
     "fluss-plugins/iceberg/fluss-flink-tiering-0.9.1-incubating.jar" \

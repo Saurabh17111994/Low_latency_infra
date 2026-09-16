@@ -630,6 +630,20 @@ services:
         --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED
         -Xlog:gc*,safepoint:file=/opt/flink/log/gc.log:time,uptime,level,tags:filecount=5,filesize=50m
         -XX:StartFlightRecording=settings=profile,duration=900s,filename=/opt/flink/log/tm-diag.jfr,maxsize=1g
+      # CHG-180 (2026-09-16): the task manager reads tiered Fluss data itself.
+      # remote.data.dir is an s3:// URI (see the coordinator/tablet above), so a
+      # scanning source subtask downloads segments straight from R2. Two things
+      # are needed and neither is inherited from the servers:
+      #   * R2_ENDPOINT / AWS_REGION, because the R2 S3 plugin resolves the
+      #     endpoint from env — without the region, S3A answers 400 Bad Request;
+      #   * /etc/hadoop/conf/core-site.xml, which is what turns those env vars
+      #     into fs.s3a.* for the client. Without it Hadoop keeps its default
+      #     endpoint and the request goes to Amazon S3, failing 403
+      #     InvalidAccessKeyId (observed 2026-09-16 on the prod image).
+      # FLINK_PROPERTIES cannot carry these: Hadoop reads core-site.xml, and
+      # Fluss forwards only 'client.fs.'-prefixed keys, which the plugin ignores.
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      AWS_REGION: ${AWS_REGION:-auto}
     # Run as root so the Fluss RemoteLogDownloader can create its download
     # cache under /tmp/fluss (docker creates the /tmp/fluss mount parent as
     # root; the image default user flink:flink gets AccessDeniedException —
@@ -649,12 +663,16 @@ services:
       # declaration for the full rationale (overlayfs was capping the
       # pipeline at ~4k rec/s; JFR: task threads inside RocksDB.put only).
       - flink-rocksdb:/tmp/flink-rocksdb
-      # Fluss remote-data must be shared with the tablet: raw_table_1 has
-      # datalake tiering enabled, and the source's RemoteLogDownloader fetches
-      # tiered log segments from remote.data.dir. Without this mount the TM
-      # hits FileNotFoundException and the source stalls at read=0
-      # (observed 2026-08-29: Shape B — job RUNNING, all operators read=0).
-      - fluss-remote-data:/tmp/fluss/remote-data
+      # CHG-180 (2026-09-16): the shared fluss-remote-data volume is GONE from
+      # this service. It was mounted so the Fluss client could read tiered
+      # segments, but remote.data.dir became an R2 URI (W35x, P6-380), so the
+      # bytes no longer live on a local path. Keeping the mount would leave a
+      # permanently empty directory that reads as "the tiered data is missing"
+      # while the client silently falls back to under-counting rows — the exact
+      # failure W35x fixed (observed 2026-08-29: Shape B — job RUNNING, all
+      # operators read=0). The client now fetches from R2 through the config
+      # below, so the TM needs the S3 settings, not a volume.
+      - ./flink-runtime/core-site.xml:/etc/hadoop/conf/core-site.xml:ro
       - ./flink-log4j-console.properties:/opt/flink/conf/log4j-console.properties:ro
       # Lake tiering service jars (Flink job classpath): fluss-flink-2.2 fat
       # connector (client + tiering builder + 2.2 adapter), fluss-flink-tiering
