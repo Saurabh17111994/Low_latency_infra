@@ -520,5 +520,91 @@ class SignalLatencyRedLegTests(ProbeTestBase):
                       "the pre-fix probe treated an unknown mode as 'signals'")
 
 
+GATE_SCRIPT = ROOT / "code/01_platform/04_scripts/stage-soak-e2e.sh"
+HADOOP_CONF = PROBE_DIR / "hadoop-conf/core-site.xml"
+COMPOSE = ROOT / "code/01_platform/01_docker"
+
+
+class TieredReadWiringTests(unittest.TestCase):
+    """Wave 35x: a probe that scans a table must be able to fetch the segments
+    that tiering moved to object storage.
+
+    The tablet hands the client an s3:// path and the client downloads the
+    bytes itself, so the probe process needs the S3 plugin and S3 settings.
+    Three things are pinned here, because each one silently defeats the others:
+    the settings must not be passed as Fluss client options (they are ignored),
+    the config file must carry no credentials, and a missing config must degrade
+    to local-only reads instead of failing the run.
+    """
+
+    def test_the_probe_classpath_carries_the_s3_plugin_and_conf_dir(self) -> None:
+        text = GATE_SCRIPT.read_text()
+        self.assertIn("gate_wire_probe_filesystem", text,
+                      "the gate must wire the probe filesystem before it runs the census")
+        self.assertIn("fluss-fs-s3-0.9.1-incubating.jar", text,
+                      "without the S3 plugin the probe cannot resolve s3:// at all")
+        self.assertIn("fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar", text,
+                      "the plugin's Hadoop dependency must be on the probe classpath too")
+        # The conf dir must reach the JVM that runs the census, not just the one
+        # that compiles it — a compile-time-only classpath entry proves nothing.
+        run_cp = [ln for ln in text.splitlines() if "FlussRuleCounter" in ln and "-cp" in ln]
+        self.assertTrue(run_cp, "no FlussRuleCounter invocation found in the gate")
+        self.assertTrue(any("GATE_FS_CP" in ln for ln in run_cp),
+                        f"the census JVM's classpath omits the wired filesystem config: {run_cp}")
+
+    def test_wiring_never_passes_s3_settings_as_fluss_client_options(self) -> None:
+        """FlussConnection forwards only 'client.fs.' keys, and the shipped S3
+        plugin never strips that prefix — so 'client.fs.s3.*' is silently
+        ignored. The working route is Hadoop's own core-site.xml."""
+        text = GATE_SCRIPT.read_text()
+        self.assertNotIn("client.fs.s3", text,
+                         "client.fs.s3.* keys are ignored by the S3 plugin (verified against "
+                         "fluss-fs-s3-0.9.1-incubating.jar); use core-site.xml instead")
+
+    def test_the_committed_hadoop_config_holds_no_credentials(self) -> None:
+        text = HADOOP_CONF.read_text()
+        for key in ("fs.s3a.endpoint", "fs.s3a.access.key", "fs.s3a.secret.key",
+                    "fs.s3a.path.style.access"):
+            self.assertIn(f"<name>{key}</name>", text, f"{key} is missing from core-site.xml")
+        # Every credential-shaped value must be an ${env.NAME} reference. A
+        # literal would be a committed secret, and R2 keys are 32/64 chars.
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped.startswith("<value>"):
+                continue
+            value = stripped[len("<value>"):-len("</value>")]
+            if "access.key" in line or "secret.key" in line or "endpoint" in line:
+                self.assertRegex(
+                    value, r"^\$\{env\.[A-Z0-9_]+\}$",
+                    f"credential settings must use ${{env.NAME}} placeholders, got {value!r}")
+            self.assertNotRegex(value, r"^[A-Za-z0-9+/]{32,}={0,2}$",
+                                f"core-site.xml appears to embed a literal secret: {stripped[:60]!r}")
+
+    def test_a_missing_r2_config_degrades_to_local_reads_instead_of_failing(self) -> None:
+        """The gate must keep its previous behaviour when R2 config is absent.
+
+        A hard failure here would block every run on a config file; the honest
+        behaviour is to run with local-only reads and say so, because a census
+        that cannot reach a tiered segment under-counts rather than erroring.
+        """
+        text = GATE_SCRIPT.read_text()
+        helper = text.split("gate_wire_probe_filesystem()", 1)[1].split("\n}\n", 1)[0]
+        self.assertNotIn("exit 1", helper,
+                         "an unwired filesystem must not abort the run")
+        self.assertNotIn("fatal ", helper,
+                         "an unwired filesystem must warn, not fail — the census still has "
+                         "whatever local segments exist")
+        self.assertGreaterEqual(helper.count("return 0"), 4,
+                                "every missing-R2 path needs its own warn-and-continue branch")
+
+    def test_secrets_are_read_through_the_shared_env_reader(self) -> None:
+        """Credentials come from the git-ignored secrets file via r2_var, the
+        one parser that de-quotes and rejects empty values (P6-485/P6-162)."""
+        text = GATE_SCRIPT.read_text()
+        self.assertIn('r2_var "$COMPOSE_DIR/secrets.env" AWS_ACCESS_KEY_ID', text)
+        self.assertIn('r2_var "$COMPOSE_DIR/secrets.env" AWS_SECRET_ACCESS_KEY', text)
+        self.assertIn("r2-env.sh", text, "the gate must source the shared env reader")
+
+
 if __name__ == "__main__":
     unittest.main()
