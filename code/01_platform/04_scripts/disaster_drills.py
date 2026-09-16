@@ -173,8 +173,14 @@ DEFAULT_TABLET = DEFAULT_PROJECT + "-fluss-tablet-1"
 def reconnect_tablet(retries=5):
     """Documented DR-006 heal. docker network connect can fail with a stale
     libnetwork endpoint after disconnect (observed 2026-08-21); retry, then
-    re-create the container sandbox via compose restart — tablet data lives in
-    named volumes (fluss-tablet-data / fluss-remote-data), so RPO=0 holds."""
+    re-create the container sandbox via compose restart — the tablet log lives
+    in the named volume fluss-tablet-data:/tmp/fluss/data, which the restart
+    keeps, so RPO=0 holds for this heal. Tiered segments are NOT in that volume:
+    remote.data.dir is an s3:// URI (W35x / CHG-180), so the old
+    fluss-remote-data mount is gone and naming it here would imply data on a
+    volume nothing mounts any more. (Whether a *cold* tablet re-reads tiered
+    segments from the bucket is unverified — the 2026-09-16 trial showed a
+    tablet started against a fresh empty data dir does not; see FACT-011.)"""
     net = resolve_trading_net() or "01_docker_" + "trading-net"
     last = {"rc": 127}
     for i in range(retries):
