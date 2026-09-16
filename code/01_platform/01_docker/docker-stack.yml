@@ -237,8 +237,15 @@ services:
     <<: *common_workload
     image: ${FLUSS_IMAGE:?set FLUSS_IMAGE to an immutable digest}
     networks: [trading-net]
+    # CHG-181: the image's CMD is only the usage fallback
+    # (Entrypoint /docker-entrypoint.sh, Cmd "help"). With no
+    # command the container prints usage and exits 0, so Swarm
+    # reports the task as started while no server runs.
+    command: ["coordinatorServer"]
     healthcheck:
-      test: ["CMD-SHELL","(echo > /dev/tcp/127.0.0.1/9123) >/dev/null 2>&1 || exit 1"]
+      # CHG-181 sibling: CMD-SHELL is dash (no /dev/tcp); probe
+      # $HOSTNAME under bash, loopback as fallback.
+      test: ["CMD", "bash", "-c", "(echo > /dev/tcp/$$HOSTNAME/9123 || echo > /dev/tcp/127.0.0.1/9123) >/dev/null 2>&1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -300,8 +307,15 @@ services:
     <<: *common_workload
     image: ${FLUSS_IMAGE:?set FLUSS_IMAGE to an immutable digest}
     networks: [trading-net]
+    # CHG-181: the image's CMD is only the usage fallback
+    # (Entrypoint /docker-entrypoint.sh, Cmd "help"). With no
+    # command the container prints usage and exits 0, so Swarm
+    # reports the task as started while no server runs.
+    command: ["tabletServer"]
     healthcheck:
-      test: ["CMD-SHELL","(echo > /dev/tcp/127.0.0.1/9124) >/dev/null 2>&1 || exit 1"]
+      # CHG-181 sibling: CMD-SHELL is dash (no /dev/tcp); probe
+      # $HOSTNAME under bash, loopback as fallback.
+      test: ["CMD", "bash", "-c", "(echo > /dev/tcp/$$HOSTNAME/9124 || echo > /dev/tcp/127.0.0.1/9124) >/dev/null 2>&1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -351,8 +365,15 @@ services:
     <<: *common_workload
     image: ${FLUSS_IMAGE:?set FLUSS_IMAGE to an immutable digest}
     networks: [trading-net]
+    # CHG-181: the image's CMD is only the usage fallback
+    # (Entrypoint /docker-entrypoint.sh, Cmd "help"). With no
+    # command the container prints usage and exits 0, so Swarm
+    # reports the task as started while no server runs.
+    command: ["tabletServer"]
     healthcheck:
-      test: ["CMD-SHELL","(echo > /dev/tcp/127.0.0.1/9124) >/dev/null 2>&1 || exit 1"]
+      # CHG-181 sibling: CMD-SHELL is dash (no /dev/tcp); probe
+      # $HOSTNAME under bash, loopback as fallback.
+      test: ["CMD", "bash", "-c", "(echo > /dev/tcp/$$HOSTNAME/9124 || echo > /dev/tcp/127.0.0.1/9124) >/dev/null 2>&1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -402,8 +423,15 @@ services:
     <<: *common_workload
     image: ${FLUSS_IMAGE:?set FLUSS_IMAGE to an immutable digest}
     networks: [trading-net]
+    # CHG-181: the image's CMD is only the usage fallback
+    # (Entrypoint /docker-entrypoint.sh, Cmd "help"). With no
+    # command the container prints usage and exits 0, so Swarm
+    # reports the task as started while no server runs.
+    command: ["tabletServer"]
     healthcheck:
-      test: ["CMD-SHELL","(echo > /dev/tcp/127.0.0.1/9124) >/dev/null 2>&1 || exit 1"]
+      # CHG-181 sibling: CMD-SHELL is dash (no /dev/tcp); probe
+      # $HOSTNAME under bash, loopback as fallback.
+      test: ["CMD", "bash", "-c", "(echo > /dev/tcp/$$HOSTNAME/9124 || echo > /dev/tcp/127.0.0.1/9124) >/dev/null 2>&1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -468,7 +496,9 @@ services:
     # runs. These must stay explicit.
     command: ["jobmanager"]
     healthcheck:
-      test: ["CMD-SHELL","(echo > /dev/tcp/127.0.0.1/8081) >/dev/null 2>&1 || exit 1"]
+      # CHG-181 sibling: CMD-SHELL is dash (no /dev/tcp); probe
+      # $HOSTNAME under bash, loopback as fallback.
+      test: ["CMD", "bash", "-c", "(echo > /dev/tcp/$$HOSTNAME/8081 || echo > /dev/tcp/127.0.0.1/8081) >/dev/null 2>&1"]
       interval: 30s
       timeout: 10s
       retries: 5
@@ -829,12 +859,9 @@ services:
   openobserve:
     image: ${OPENOBSERVE_IMAGE:?set OPENOBSERVE_IMAGE to an immutable digest}
     networks: [trading-net]
-    healthcheck:
-      test: ["CMD-SHELL","(echo > /dev/tcp/127.0.0.1/5080) >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 20s
+    # x-healthcheck: none (static /openobserve binary, no shell/curl/wget, 
+    # a CMD-SHELL probe can never run: exit=-1 with the status flipping to
+    # unhealthy, so the dead probe was removed rather than repaired)
     deploy:
       update_config:
         order: start-first
