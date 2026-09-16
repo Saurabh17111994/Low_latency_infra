@@ -78,6 +78,15 @@ Spec-driven repo: `docs/` is the spec, `code/` is the implementation.
   topology, image shells, ports, secrets split). Before ANY docker/swarm/deploy
   reasoning, read it - re-discovering a recorded fact wastes the investigation.
   append-only with proof+expiry per row; never edit a LIVE row in place.
+- **Production deploy is unproven and cannot be proven from this PC** (FACT-001,
+  FACT-012). The Fluss tiering work (CHG-182) is verified by isolated two-container
+  trials plus a static `docker stack config` render - **no `docker stack deploy`
+  has ever run**, because this host is a Swarm worker with no manager. Do not
+  re-run those trials expecting a different result, and do not claim a production
+  deploy is verified. Same boundary for the 4-VM Swarm (never exercised), the
+  `FLINK_IMAGE` digest pin (FACT-009: blocked on `docker push`; do not invent a
+  digest), and production lake tiering (FACT-013: `datalake.*` keys are set but
+  no plugin jars are mounted - a known gap, not a bug to rediscover).
 
 ## Docs
 

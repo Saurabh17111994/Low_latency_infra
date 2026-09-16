@@ -185,3 +185,17 @@ A tablet started against a fresh empty local data directory does NOT re-read fro
 The client-side read path DOES reach R2 (fluss-flink's RemoteLogDownloader), so a reader whose local log no longer holds the offsets it needs is served from the bucket; the two facts are about different paths and neither contradicts the other.
 table.log.tiered.local-segments must be > 0: LogTablet rejects 0, so a 0 never enables cleanup and the row you are trying to read below the local base stays local.
 Production gives each tablet its own data volume (fluss-tablet-data-1/2/3:/tmp/fluss/data), so ordinary restarts and reschedules keep the local log; R2 is a tiering target and lakehouse feed, not node recovery.
+
+### FACT-012: production Fluss tiering is proven in isolated trials only - no real stack deploy has ever run
+Status: LIVE
+Verified: 2026-09-16 - CHG-182 (docker stack config render + two-container trials); docker info on this host shows no manager (FACT-001)
+Check: manual (needs a Swarm manager - this host is a worker, see FACT-001)
+Recheck when: a real docker stack deploy runs on the 4-VM Swarm
+PROVEN: Fluss servers start under the production FLUSS_PROPERTIES, tier closed segments to R2, commit the manifest, and a client reads them back from R2 (FACT-011). NOT PROVEN: docker stack deploy, per-service health on a real cluster, and the DEPLOY=1 gate on a manager are all unexercised. Do not re-derive the trial evidence or rerun it looking for a different answer - it is recorded in CHG-182 and docs/08_implementation/09-production-swarm.md. The 4-VM Swarm has never been exercised; FACT-002 is the topology decision, not evidence of a running cluster.
+
+### FACT-013: production lake tiering (datalake.*) is unwired - the keys are set but no plugin jars are mounted
+Status: LIVE
+Verified: 2026-09-16 - docker-stack.yml carries datalake.iceberg.* on all four Fluss services but no plugin-jar mounts; dev compose bind-mounts fluss-fs-s3/fluss-fs-hdfs/fluss-fs-hadoop-shaded into plugins/iceberg/
+Check: grep -c 'plugins/iceberg' code/01_platform/01_docker/docker-stack.yml | grep -q '^0$'
+Recheck when: plugin jars are mounted in docker-stack.yml, or the datalake.* keys are removed
+Log/KV tiering to R2 does NOT need these jars (FACT-011 proves it works without them). Lake tiering does. Whether it works in production as written is unverified and out of CHG-182 scope - do not assume it works, and do not 'fix' it by adding the keys again; they are already present and the gap is the missing jars.
