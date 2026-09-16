@@ -15,7 +15,7 @@ TESTS_DIR = pathlib.Path(__file__).resolve().parent
 SCRIPTS = TESTS_DIR.parent
 SCRIPT = SCRIPTS / "stack_selfcheck.sh"
 
-# Real-looking values for the 12 `:?` vars docker-stack.yml requires. DEPLOY=1
+# Real-looking values for the 13 `:?` vars docker-stack.yml requires. DEPLOY=1
 # refuses placeholders (P6-208), so every deploy test must supply these.
 REAL_ENV = {
     "FLUSS_IMAGE": "fluss@sha256:" + "a" * 64,
@@ -27,6 +27,7 @@ REAL_ENV = {
     "OPENOBSERVE_IMAGE": "openobserve@sha256:" + "0" * 64,
     "S3_WAREHOUSE_PATH": "s3://real/warehouse",
     "R2_ENDPOINT": "https://real.example",
+    "R2_BUCKET": "real-bucket",
     "ARROW_APP_ID": "123456",
     "ARROW_USER_ID": "12345678",
     "CHECKPOINT_DIR": "s3://real/checkpoints",
@@ -186,6 +187,15 @@ class StackSelfcheckTest(unittest.TestCase):
         done = self.run_script("DEPLOY=1")
         self.assertEqual(done.returncode, 2)
         self.assertIn("DEPLOY=1 needs real values for:", done.stderr)
+        self.assertNotIn("stack deploy", "\n".join(self.calls_made()))
+
+    def test_deploy_without_r2_bucket_names_it(self):
+        """R2_BUCKET fail-closed lives in the DEPLOY=1 gate (compose does not
+        enforce :? inside the FLUSS_PROPERTIES block scalar)."""
+        env = {k: v for k, v in REAL_ENV.items() if k != "R2_BUCKET"}
+        done = self.run_script("DEPLOY=1", **env)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("R2_BUCKET", done.stderr)
         self.assertNotIn("stack deploy", "\n".join(self.calls_made()))
 
     def test_deploy_with_real_values_proceeds_to_deploy(self):

@@ -141,11 +141,22 @@ class TestVolumes:
         d = _load()
         vols = set(d.get("volumes", {}))
         # P5-001: per-server tablet data volumes (a shared one would corrupt)
-        for v in ("fluss-data", "fluss-remote-data",
+        for v in ("fluss-data",
                   "fluss-tablet-data-1", "fluss-tablet-data-2", "fluss-tablet-data-3",
                   "flink-checkpoints", "flink-logs", "fluss-logs",
                   "openobserve-data", "ingestion-logs"):
             assert v in vols, f"durable volume {v} missing from stack"
+
+    def test_no_local_remote_data_volume(self):
+        """Tiered segments live on R2 - a node-local volume cannot serve reads."""
+        d = _load()
+        assert "fluss-remote-data" not in d.get("volumes", {}), (
+            "fluss-remote-data volume must be gone with remote.data.dir on R2")
+        for name, svc in d["services"].items():
+            for m in svc.get("volumes", []) or []:
+                src = m.split(":")[0] if isinstance(m, str) else m.get("source", "")
+                assert src != "fluss-remote-data", (
+                    f"{name} still mounts fluss-remote-data")
 
     def test_replicas_scale_for_workers(self):
         # v2 target: replicated stateful compute spread across >=3 workers.
@@ -215,6 +226,25 @@ class TestTier1ProductionConfig:
                   "flink-jobmanager", "flink-taskmanager"):
             assert d["services"][n]["deploy"]["placement"].get("max_replicas_per_node") == 1, \
                 f"{n}: must anti-co-locate (max_replicas_per_node: 1)"
+
+    def test_fluss_tiers_to_r2_not_local_disk(self):
+        """remote.data.dir on R2 with the dev s3 key set - node-local reads back nothing."""
+        d = _load()
+        for name in ("fluss-coordinator", "fluss-tablet-1", "fluss-tablet-2",
+                     "fluss-tablet-3"):
+            props = d["services"][name]["environment"]["FLUSS_PROPERTIES"]
+            assert "remote.data.dir: s3://${R2_BUCKET" in props, (
+                f"{name}: remote.data.dir must be an R2 URL gated on R2_BUCKET")
+            assert "remote.data.dir: /tmp/fluss/remote-data" not in props, (
+                f"{name}: node-local remote.data.dir cannot serve cluster reads")
+            # Raw YAML carries doubled dollars ($$); compose render collapses
+            # $${env...} to ${env...} inside the container.
+            for key in ("s3.endpoint:", "s3.endpoint.region:",
+                        "s3.access-key: $${env.AWS_ACCESS_KEY_ID}",
+                        "s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}",
+                        "s3.path.style.access: true",
+                        "s3.connection.ssl.enabled: true"):
+                assert key in props, f"{name}: FLUSS_PROPERTIES missing {key}"
 
     def test_flink_ha_cluster_id_and_restart_strategy(self):
         props = _load()["services"]["flink-jobmanager"]["environment"]["FLINK_PROPERTIES"]
