@@ -1137,6 +1137,30 @@ def c16_env_key_drift():
           f"{len(keys)} documented keys; unread: {', '.join(missing) if missing else 'none'}")
 
 
+def c17_env_facts_ledger():
+    """C17: docs/ENVIRONMENT.md rows are well-formed (id/fields/linkage).
+
+    The ledger is the agent's machine-truth reference - a malformed row (a
+    missing proof, a duplicate id, a dead supersede link) silently misleads
+    the next session, so shape is gated like every other doc<->code truth.
+    Row semantics are owned by env_facts.py (parse_ledger); this check only
+    wires its verdict into the audit.
+    """
+    p = os.path.join(DOCS_DIR, "ENVIRONMENT.md")
+    txt = safe_read(p)
+    if txt is None:
+        return check("C17 facts ledger readable", False, p)
+    try:
+        sys.path.insert(0, SCRIPTS_DIR)
+        import env_facts
+        _, rows, errors = env_facts.parse_ledger(txt)
+    except (ImportError, ValueError) as exc:  # pragma: no cover - import wiring
+        return check("C17 facts ledger parses", False, str(exc))
+    live = sum(1 for r in rows if r["fields"].get("Status") == "LIVE")
+    check("C17 facts ledger shape clean", not errors,
+          f"{len(rows)} rows ({live} live); " + ("; ".join(errors) if errors else "all ids sequential, all rows carry proof+expiry"))
+
+
 def main():
     c1_manifest()
     c2_ownership_matrix()
@@ -1154,6 +1178,7 @@ def main():
     c14_change_control()
     c15_evidence_ownership()
     c16_env_key_drift()
+    c17_env_facts_ledger()
     if failures:
         print(f"\ndocs-audit: {len(failures)} check(s) FAILED — fix before proceeding")
         return 1

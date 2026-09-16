@@ -26,6 +26,26 @@ A fact left in chat history is lost at the next compaction.
 5. **No secrets in this file.** Secret *names* and *mechanisms* are fine;
    secret *values* never land here.
 
+## Keeper (`env_facts.py`)
+
+Hand-editing works, but the keeper is safer - it assigns ids, enforces
+anchors, and writes fail-closed (backup, assert, atomic replace):
+
+```text
+python3 code/01_platform/04_scripts/env_facts.py add --title "..." \
+  --verified "2026-09-16 - <command + key output>" --check "<rc=0 holds>" \
+  --recheck "<event that kills it>" --body "<1-3 lines>"
+python3 code/01_platform/04_scripts/env_facts.py retire FACT-003 --reason "..."
+python3 code/01_platform/04_scripts/env_facts.py replace FACT-003 --title ... (same flags as add)
+python3 code/01_platform/04_scripts/env_facts.py check    # re-run LIVE checks, flags drift
+python3 code/01_platform/04_scripts/env_facts.py prune    # archive DEAD rows, keeps the ledger lean
+```
+
+Size rule: the ledger stays a quick read (~50 rows max). Past that, `prune`
+moves DEAD rows to `docs/ENVIRONMENT.archive.md`; if LIVE rows still overflow,
+split by area (`ENVIRONMENT.prod.md`) - never let one file become the burden
+it was built to remove. Shape is gated by docs-audit C17.
+
 ## How to add a fact
 
 Copy this skeleton. Keep the row small - one claim per FACT id.
@@ -46,7 +66,7 @@ Status: LIVE
 Verified: 2026-09-16 - `docker info` shows `ControlAvailable=false`,
 `NodeID` empty, `Managers=0`; `docker service ls` and `docker node ls` both
 fail with "This node is not a swarm manager".
-Check: `docker info --format '{{.Swarm.ControlAvailable}}'` - `false` means worker-or-orphan
+Check: test "$(docker info --format '{{.Swarm.ControlAvailable}}')" = false
 Recheck when: any `docker swarm init` / `join` / `leave` on this PC
 This PC joined a swarm as a worker (the `ingress` overlay network proves it)
 but its manager is gone - an orphaned worker. Plain containers and Compose
@@ -93,7 +113,7 @@ savepoint so dedup state survives.
 Status: LIVE
 Verified: 2026-09-16 - host `/etc/hosts` line 14 `127.0.0.1 fluss-tablet`,
 line 17 `127.0.0.1 fluss-coordinator`. Operator decision: leave it.
-Check: `grep -n "fluss-" /etc/hosts`
+Check: grep -q "fluss-" /etc/hosts
 Recheck when: host file edited or dev machine replaced
 Host-level change needs the operator's word, so the standing workaround is
 `--add-host` on the commands that need real DNS. Never bake the workaround
@@ -105,7 +125,7 @@ Verified: 2026-09-16 - `docker-compose.yml` ports lines and live inspect:
 coordinator 9123 (host-mapped), tablet 9124 (host-mapped), Flink REST 8081,
 OpenObserve 5080, ZooKeeper 2181; tablet container IP 172.19.0.8 on
 `01_docker_trading-net`.
-Check: `docker ps` + `grep -nE '"(9123|9124|8081|5080|2181)' code/01_platform/01_docker/docker-compose.yml`
+Check: docker ps >/dev/null && grep -qE '"(9123|9124|8081|5080|2181)' code/01_platform/01_docker/docker-compose.yml
 Recheck when: compose ports edited or network recreated
 Overlay variants (p10 etc.) remap ports via `!override` - never assume base
 ports hold on overlays (see AGENTS.md Hazards).
@@ -117,7 +137,7 @@ the Fluss and Flink images; `sh`/`bash`/`ls`/`curl`/`wget`/`busybox` exec
 all fail with "executable file not found in $PATH" on openobserve-1.
 A CMD-SHELL probe on openobserve reported exit=-1 and flipped the status
 to unhealthy.
-Check: `docker exec <ctr> ls -l /bin/sh`
+Check: docker exec 01_docker-fluss-tablet-1 ls -l /bin/sh | grep -q dash
 Recheck when: any of the three images is re-pinned or rebuilt
 Consequences, all now enforced in `test_09_stack.py`: `/dev/tcp` probes
 must run under `bash` (dash has no `/dev/tcp`); Fluss probes must target
@@ -140,7 +160,7 @@ vars only.
 Status: LIVE
 Verified: 2026-09-16 - `code/01_platform/01_docker/runtime.lock` line 19
 names the digest-pinned Flink image; CHG-179 section 5 (push before pin).
-Check: `grep -n FLINK_IMAGE code/01_platform/01_docker/runtime.lock`
+Check: grep -q FLINK_IMAGE code/01_platform/01_docker/runtime.lock
 Recheck when: `docker push` plus `digest-pin.sh` runs
 The image is built locally and unpushed, so the pin cannot move yet.
 Do not invent a digest.
@@ -149,7 +169,7 @@ Do not invent a digest.
 Status: LIVE
 Verified: 2026-09-16 - `docker-stack.yml` `secrets:` are all
 `external: true`; `PROD_VM_PROVISIONING.md` step 5 gates deploy on D1.2.
-Check: `docker secret ls` on a manager (unavailable from this worker PC)
+Check: manual (run 'docker secret ls' on a prod manager - impossible from this worker PC)
 Recheck when: secret set changes or prod cluster rebuilt
 Creating secrets mutates cluster state - needs the operator's word, same
 as `swarm init`, `stack deploy`, and `docker push`.
