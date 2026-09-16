@@ -217,6 +217,46 @@ Rejected: Option A (separate branches for local / mimic / prod) — rejected bec
 * Local mimic of production (09 on 1 computer): `docker swarm init` then `docker stack deploy -c code/01_platform/01_docker/docker-stack.yml prod`
 * Real production (09 on 4 computers): same `docker-stack.yml` on the 4 VMs after `swarm init` / `swarm join` and node labels
 
+### The Flink runtime image (CHG-179)
+
+The production stack cannot `build:` an image — Swarm ignores the directive — so
+the Flink image the two Flink services run is built on a build host, pushed to a
+registry, and referenced by digest through `FLINK_IMAGE`. It is **not** the stock
+`flink` image: the stock image cannot run this job at all.
+
+Build it, then push it, then pin it:
+
+```bash
+make flink-image                       # fetch + SHA256-verify + build + re-verify
+docker push <repo>:<tag>
+bash code/01_platform/04_scripts/digest-pin.sh <repo>:<tag>
+# put the printed ref on FLINK_IMAGE in code/01_platform/01_docker/runtime.lock
+```
+
+**Push before pinning.** A locally built image that was never pushed has no
+registry manifest digest, so `repo@sha256:<image-id>` does not resolve — the
+pin would name an image no node can pull. `FLINK_IMAGE` stays on the stock
+digest until that push happens.
+
+The build lives in `code/01_platform/01_docker/flink-runtime/`; its README
+carries the pin table, the reproducible-derivation rules, and the residual risk.
+What it adds to the stock image, and why each item is load-bearing (all verified
+in-container 2026-09-16, CHG-179):
+
+| Addition | Without it |
+| --- | --- |
+| Fluss connector + filesystem plugins in `/opt/flink/lib` | The job cannot load the connector — `compute.jar` ships zero `org/apache/fluss` classes (they are `provided` scope, supplied by the cluster). |
+| `/etc/hadoop/conf/core-site.xml` | The object-store **endpoint** is lost. Credentials are still found by the default chain, so `s3://` silently resolves against Amazon's real S3 and fails `403 InvalidAccessKeyId` — a confusing failure, not an obvious one. |
+| `ENABLE_BUILT_IN_PLUGINS` | `flink-s3-fs-hadoop` ships in `/opt/flink/opt` but is not linked into `plugins/`, so `state.checkpoints.dir: s3://…` has no filesystem. |
+| The secret-bridge entrypoint | Swarm delivers the credentials as **files**; `core-site.xml` can only expand environment variables. |
+
+Two stack-side defects are fixed in `docker-stack.yml` rather than the image,
+and both must stay explicit: each Flink service declares its `command`
+(`jobmanager` / `taskmanager`) and its `AWS_REGION`. With no `command:` the
+image's default is the usage/help path, so the container prints usage and
+**exits 0** — Swarm then reports the task as started while nothing runs. With no
+region, S3A fails `400 Bad Request`.
+
 ### Storage and recovery
 
 - **Job artifact model (CHG-110 native split):** the compute image is the
@@ -225,7 +265,9 @@ Rejected: Option A (separate branches for local / mimic / prod) — rejected bec
   (R2/S3, alongside checkpoints) and referenced at submit time
   (`flink run s3://…/compute.jar` via `submit-jobs.sh` / rollout), keeping
   the image static + digest-pinned. A release = upload a new jar version +
-  savepoint-restart; **no image rebuild per code change**.
+  savepoint-restart; **no image rebuild per code change**. The image itself
+  is the CHG-179 runtime image above — rebuild it only when the Flink/Fluss
+  versions or the object-store wiring change.
 - Fluss data uses durable per-node volumes and tested replication (LOG tables; KV tables are single-replica in Fluss 0.9.1 — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038)).
 - ZooKeeper ensemble members use durable per-node volumes; loss of one member is tolerated while quorum (2-of-3) holds.
 - Flink checkpoints/savepoints use encrypted versioned S3; Flink JobManager HA metadata (`high-availability.storageDir`) uses the same encrypted S3 store, with leadership in ZooKeeper.
