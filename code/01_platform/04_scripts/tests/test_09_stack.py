@@ -260,6 +260,7 @@ class TestTier2Hardening:
     # Services that may validly have NO swarm healthcheck, and must say why.
     HEALTHCHECK_ALLOWED_EXCEPTIONS = {
         "otel-collector",      # distroless — no shell, cannot run a CMD probe
+        "openobserve",         # static /openobserve binary, no shell/curl/wget
         "flink-taskmanager",   # no fixed external listener
         "execution-gateway",   # GATEWAY_BIND_PORT env-driven; readiness = GatewayReadiness
         "alert-consumer",      # stateless ingress; port in-app
@@ -275,6 +276,144 @@ class TestTier2Hardening:
             assert ok, (
                 f"{name}: image {img!r} is a mutable tag — pin to @sha256 digest "
                 "or a ${...} form requiring an immutable digest"
+            )
+
+    # Services that may validly run whatever their image's own default is, and
+    # why. Every entry states the verified default, because the whole point of
+    # the CHG-181 check is that "the image has a default" is not the question -
+    # "the default is the real process" is. A default that is a usage/help path
+    # exits 0 and the task is reported as started while nothing runs.
+    COMMAND_ALLOWED_BY_IMAGE_DEFAULT = {
+        # zookeeper:3.9.2 - Entrypoint [/docker-entrypoint.sh], CMD
+        # [zkServer.sh start-foreground]: the default IS the server.
+        "zookeeper-1": "zookeeper CMD is zkServer.sh start-foreground",
+        "zookeeper-2": "zookeeper CMD is zkServer.sh start-foreground",
+        "zookeeper-3": "zookeeper CMD is zkServer.sh start-foreground",
+        # Verified on the running dev container: Entrypoint [], CMD
+        # [/openobserve], and it has served traffic for days with no command:.
+        "openobserve": "openobserve CMD [/openobserve] is the server",
+        # Our own images set ENTRYPOINT to the server binary itself, so no
+        # command: is needed - the default cannot be a help path.
+        "ingestion": "Dockerfile ENTRYPOINT /app/docker-entrypoint.sh execs java IngestionService",
+        "execution-bridge": "Dockerfile ENTRYPOINT /app/execution-bridge is the binary",
+        "execution-gateway": "Dockerfile ENTRYPOINT is java -jar /app/execution-gateway.jar",
+        "nautilus": "Dockerfile ENTRYPOINT nautilus-execution-service is the binary",
+    }
+
+    def test_every_service_declares_what_to_run(self):
+        """CHG-181: a service whose image CMD is a usage/help path starts nothing.
+
+        Verified for ``apache/fluss:0.9.1-incubating`` (Entrypoint
+        ``/docker-entrypoint.sh``, CMD ``help``): with no ``command:`` the
+        container prints usage and **exits 0**, so Swarm reports the task as
+        started while no server runs. The same defect class was fixed for Flink
+        in CHG-179 but the Fluss half of this stack was left unpinned, so the
+        check has to cover every service, not just the four that broke.
+
+        A service may rely on its image's default CMD only when that default is
+        the real process - each such service is named with its reason in
+        COMMAND_ALLOWED_BY_IMAGE_DEFAULT.
+        """
+        d = _load()
+        for name, svc in d["services"].items():
+            if svc.get("command") or svc.get("entrypoint"):
+                continue
+            assert name in self.COMMAND_ALLOWED_BY_IMAGE_DEFAULT, (
+                f"{name}: declares neither command: nor entrypoint: - if the image's "
+                f"CMD is a usage/help path the task exits 0 and Swarm reports it as "
+                f"started while nothing runs (CHG-181). Add command:, or name the "
+                f"service in COMMAND_ALLOWED_BY_IMAGE_DEFAULT with the reason its "
+                f"image default is the real process."
+            )
+
+    def test_fluss_services_run_the_server_they_are_named_for(self):
+        """The exact four services CHG-181 found starting nothing.
+
+        Asserted on the parsed value, so no amount of prose elsewhere in the file
+        can satisfy it.
+        """
+        d = _load()
+        expected = {
+            "fluss-coordinator": "coordinatorServer",
+            "fluss-tablet-1": "tabletServer",
+            "fluss-tablet-2": "tabletServer",
+            "fluss-tablet-3": "tabletServer",
+        }
+        for name, want in expected.items():
+            got = d["services"][name].get("command")
+            assert got == [want], (
+                f"{name}: command must be [{want!r}] - the image's CMD is only the "
+                f"usage fallback, so with no command the server never starts "
+                f"(CHG-181). Got {got!r}."
+            )
+
+    # Services whose image has NO shell at all: no healthcheck probe can run,
+    # so the service must carry no healthcheck and be a declared exception.
+    # Verified live: exec of sh/bash/ls/curl/wget/busybox all fail with
+    # "executable file not found in $PATH" (static binary image), and a
+    # CMD-SHELL probe reports exit=-1
+    # ("exec: \"/bin/sh\": stat /bin/sh: no such file or directory") while the
+    # status flips to unhealthy - a permanently-failing probe is worse than
+    # none, so the check must be ABSENT, not fixed. Compose interpolation
+    # rejects a bare ``$(...)`` (render error: "you may need to escape any $
+    # with another $"), which is why the probe strings below use ``$$``.
+    SHELL_LESS_NO_HEALTHCHECK = {
+        "otel-collector",   # distroless - no shell, cannot run a CMD probe
+        "openobserve",      # static /openobserve binary, no shell/curl/wget
+    }
+
+    def test_healthchecks_can_actually_run_where_declared(self):
+        """A probe that can never pass is worse than no probe (CHG-181 sibling).
+
+        Verified broken **two** ways on the running dev containers, so the test
+        pins both:
+
+        1. **Interpreter.** The Fluss ``/dev/tcp`` probes are a **bash** feature,
+           but ``CMD-SHELL`` runs ``/bin/sh`` - dash in the Fluss image
+           (``/bin/sh -> dash``), which has no ``/dev/tcp``. Against a
+           confirmed-open port the bash probe exits 0 while the identical probe
+           under ``/bin/sh`` exits non-zero.
+        2. **Address.** Fluss binds the container hostname, not loopback
+           (``bind.listeners: ...://fluss-tablet:9124``), so ``127.0.0.1`` is
+           refused even under bash: ``127.0.0.1:9124 -> rc=1`` while
+           ``$HOSTNAME:9124 -> rc=0``. The fixed probe tries ``$HOSTNAME``
+           first, then falls back to loopback for the Flink shape.
+
+        Services with no shell at all (``SHELL_LESS_NO_HEALTHCHECK``) must carry
+        NO healthcheck: removing the probe is the fix, so an absent probe is the
+        passing state. ``test_every_service_healthcheck_or_documented_exception``
+        passes on these dead probes because it only asks whether a healthcheck
+        EXISTS. This one asks whether it can RUN.
+        """
+        d = _load()
+        for name in self.SHELL_LESS_NO_HEALTHCHECK:
+            hc = (d["services"][name].get("healthcheck") or {})
+            assert not hc.get("test"), (
+                f"{name}: image has no shell - a healthcheck probe can never run "
+                f"(exit=-1, status flips to unhealthy), so the probe must be "
+                f"removed, not repaired. Got {hc.get('test')!r}."
+            )
+        for name, svc in d["services"].items():
+            hc = svc.get("healthcheck") or {}
+            test = hc.get("test")
+            if not test:
+                continue
+            joined = " ".join(test) if isinstance(test, list) else str(test)
+            if "/dev/tcp" not in joined:
+                continue
+            assert test[0] != "CMD-SHELL", (
+                f"{name}: CMD-SHELL runs /bin/sh (dash in the Fluss image), which "
+                f"has no /dev/tcp - the probe can never pass. Use "
+                f'["CMD", "bash", "-c", ...] instead.'
+            )
+            assert "bash" in joined, (
+                f"{name}: a /dev/tcp probe needs bash, got {test!r}"
+            )
+            assert "HOSTNAME" in joined, (
+                f"{name}: the probe must target the container hostname ($HOSTNAME "
+                f"first, loopback as fallback) - Fluss binds the container host, "
+                f"not 127.0.0.1, so a loopback-only probe is refused even under "
+                f"bash. Got {test!r}."
             )
 
     def test_every_service_healthcheck_or_documented_exception(self):
