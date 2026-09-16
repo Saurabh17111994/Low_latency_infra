@@ -326,9 +326,10 @@ Not verified — the honest boundary of this evidence:
   `LogTablet`, so cleanup never runs and every row stays local) tiered 17 closed
   segments and then **deleted its local copies**, leaving one local segment with
   base offset 981794 while the manifest covered offsets 0–981794. A default
-  Flink SQL `SELECT` then returned a row whose bytes live at offset 520000, in a
-  remote segment far below the local base, and the task manager logged the
-  client downloading all 17 remote segments
+  Flink SQL `SELECT` then returned a row whose bytes live at an offset below
+  that base — a write3 row, so somewhere in 20005..520000, remote under every
+  candidate position — and the task manager logged the client downloading all 17
+  remote segments
   (`Successfully downloaded remote log segment file ...`). This is a
   **client-to-R2** read: the task manager carries `core-site.xml` and the R2
   environment, and no startup option is needed to reach the bucket.

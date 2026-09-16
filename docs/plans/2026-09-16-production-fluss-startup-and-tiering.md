@@ -525,7 +525,7 @@ both wrong.
 | Compile/render of the stack | All four Fluss services render `command:`, an `s3://` `remote.data.dir`, and no `fluss-remote-data` mount | `docker stack config -c docker-stack.yml` with the 12 placeholder values, parsed as YAML | Anyone with the docker CLI; **no swarm manager needed** | none | The parsed per-service `command` / entrypoint / properties lines |
 | Real deploy of the production stack | The four Fluss services run, report healthy, and tier to R2 | `DEPLOY=1 bash stack_selfcheck.sh` after creating the Swarm secrets, or a real `docker stack deploy` on the target cluster | Requires a Swarm **manager**; this host is a worker and cannot run it | **user's explicit word** — it creates swarm resources and secrets | `docker service ps` showing running+healthy tasks and the tiered-object listing |
 | Secret bridge against real credentials | The Fluss process sees the R2 credentials and starts | Start a container from the changed spec with the real secret files mounted | Any Docker host with the credentials in a gitignored env file | none (never print values) | `Starting Coordinator Server` plus a boolean check that the variable is set |
-| Tiered read from a second client | A segment written by one tablet is readable after tiering | **DONE 2026-09-16** — an isolated trial cluster (`table.log.tiered.local-segments: 1`, small `log.segment.file-size`) tiered 17 segments, committed the manifest, deleted its local copies, and a default Flink SQL `SELECT` returned a row whose bytes live below the local base while the task manager downloaded the remote segments | Isolated trial cluster in the dev Docker network; no dev or production data touched | none | `Successfully downloaded remote log segment file ...` for all 17 segments + the decoded row value at offset 520000 |
+| Tiered read from a second client | A segment written by one tablet is readable after tiering | **DONE 2026-09-16** — an isolated trial cluster (`table.log.tiered.local-segments: 1`, small `log.segment.file-size`) tiered 17 segments, committed the manifest, deleted its local copies, and a default Flink SQL `SELECT` returned a row whose bytes live below the local base while the task manager downloaded the remote segments | Isolated trial cluster in the dev Docker network; no dev or production data touched | none | `Successfully downloaded remote log segment file ...` for all 17 segments + the decoded row value (write3, offset bounded 20005..520000, below the local base 981794 under every candidate position) |
 
 ## Post-Completion
 
@@ -536,9 +536,9 @@ both wrong.
   the earlier "not proven" text is superseded: a second trial set
   `table.log.tiered.local-segments: 1`, let cleanup delete the tiered local
   copies (local base offset 981794, manifest 0-981794), and a default-settings
-  Flink SQL `SELECT` returned a row whose bytes live at offset 520000 — below the
-  local base — while the task manager logged the client downloading all 17 remote
-  segments. The lever was the local-segments value: `0` is **rejected** by
+  Flink SQL `SELECT` returned a write3 row whose bytes live below the local base
+  (bounded 20005..520000, and so remote under every candidate position) while the
+  task manager logged the client downloading all 17 remote segments. The lever was the local-segments value: `0` is **rejected** by
   `LogTablet` (`log segments to retain in local must be greater than 0`), so the
   first trial's cleanup never ran and every row stayed local, which is why the
   early read attempts all returned tail rows. This is a **client-to-R2** read
