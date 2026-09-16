@@ -525,26 +525,45 @@ both wrong.
 | Compile/render of the stack | All four Fluss services render `command:`, an `s3://` `remote.data.dir`, and no `fluss-remote-data` mount | `docker stack config -c docker-stack.yml` with the 12 placeholder values, parsed as YAML | Anyone with the docker CLI; **no swarm manager needed** | none | The parsed per-service `command` / entrypoint / properties lines |
 | Real deploy of the production stack | The four Fluss services run, report healthy, and tier to R2 | `DEPLOY=1 bash stack_selfcheck.sh` after creating the Swarm secrets, or a real `docker stack deploy` on the target cluster | Requires a Swarm **manager**; this host is a worker and cannot run it | **user's explicit word** — it creates swarm resources and secrets | `docker service ps` showing running+healthy tasks and the tiered-object listing |
 | Secret bridge against real credentials | The Fluss process sees the R2 credentials and starts | Start a container from the changed spec with the real secret files mounted | Any Docker host with the credentials in a gitignored env file | none (never print values) | `Starting Coordinator Server` plus a boolean check that the variable is set |
-| Tiered read from a second client | A segment written by one tablet is readable after tiering | Not achievable today: the dev run produced 0 remote-only segments, and forcing one needs a destructive delete of local segments | Deferred | **user's explicit word** (destructive) | Deliberately left open; record as unverified |
+| Tiered read from a second client | A segment written by one tablet is readable after tiering | **DONE 2026-09-16** — an isolated trial cluster (`table.log.tiered.local-segments: 1`, small `log.segment.file-size`) tiered 17 segments, committed the manifest, deleted its local copies, and a default Flink SQL `SELECT` returned a row whose bytes live below the local base while the task manager downloaded the remote segments | Isolated trial cluster in the dev Docker network; no dev or production data touched | none | `Successfully downloaded remote log segment file ...` for all 17 segments + the decoded row value at offset 520000 |
 
 ## Post-Completion
 
-- **How the tiering write was proven, and what is still open.** The trial proved
-  the copy, the manifest commit and the bucket objects (833 objects / 66 MB /
-  208 `.log` segments, counted after the trial was stopped so the figure could
-  not drift). It did **not** prove a read served from R2: every row a `SELECT`
-  returned came off local disk, and a tablet started against a fresh empty local
-  directory did **not** re-read from R2 (`Reset remote end offset to local end
-  offset`, then `COUNT(*)` = 0). Production gives each tablet its own data volume,
-  so R2 is a tiering target and not a recovery source for a lost local log —
-  state that in operations docs rather than implying R2 restores a wiped node.
-  Two measurement traps are recorded in CHG-182: a small write proves nothing
-  about tiering (only *closed* segments are copied), and wiping local disk proves
-  nothing about the write path.
+- **How the tiering write was proven, and the read that followed.** The trial
+  proved the copy, the manifest commit and the bucket objects (833 objects /
+  66 MB / 208 `.log` segments, counted after the trial was stopped so the figure
+  could not drift). **The read served from R2 was proven later the same day** and
+  the earlier "not proven" text is superseded: a second trial set
+  `table.log.tiered.local-segments: 1`, let cleanup delete the tiered local
+  copies (local base offset 981794, manifest 0-981794), and a default-settings
+  Flink SQL `SELECT` returned a row whose bytes live at offset 520000 — below the
+  local base — while the task manager logged the client downloading all 17 remote
+  segments. The lever was the local-segments value: `0` is **rejected** by
+  `LogTablet` (`log segments to retain in local must be greater than 0`), so the
+  first trial's cleanup never ran and every row stayed local, which is why the
+  early read attempts all returned tail rows. This is a **client-to-R2** read
+  (`RemoteLogDownloader`), and it needs no `scan.startup.mode`.
+  Separately, a tablet started against a fresh empty local directory still did
+  **not** re-read from R2 (`Reset remote end offset to local end offset`, then
+  `COUNT(*)` = 0) — a different path, and still true. Production gives each
+  tablet its own data volume, so R2 is a tiering target and not a recovery source
+  for a tablet that lost its local log — state that in operations docs rather
+  than implying R2 restores a wiped node.
+  Three measurement traps are recorded in CHG-182: a small write proves nothing
+  about tiering (only *closed* segments are copied), wiping local disk proves
+  nothing about the write path, and `local-segments: 0` silently disables the
+  cleanup you are relying on.
 - **Trial resources were cleaned up**: the two trial containers, the
   `/trial-chroot` ZooKeeper subtree (the dev `/fluss` root was left untouched),
   the 931 objects under the three trial R2 prefixes, and the `/tmp` scripts. The
   dev five-container cluster was left running and unchanged.
+- **The read-proof trial was cleaned up the same way**: containers `rp3-coord`
+  and `rp3-tablet` removed, the `/rp3-chroot` ZooKeeper subtree deleted (plus a
+  stray `/rp2-chroot` from the aborted first attempt — `ls /` now shows only
+  `fluss, zookeeper`), the 103 objects under `remote-data-rp3/` deleted with an
+  independent listing confirming 0 remain, and the `/tmp` scripts, the copied
+  segment and the downloaded Fluss sources removed. The dev cluster and its
+  `/fluss` root were untouched throughout.
 - **Lake tiering (`datalake.*`) in production is still unwired.** The four
   services carry `datalake.iceberg.*` keys pointing at `${S3_WAREHOUSE_PATH}`, but
   production mounts **no** plugin jars, while dev bind-mounts `fluss-fs-s3`,

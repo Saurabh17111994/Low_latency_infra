@@ -307,7 +307,8 @@ Evidence (all run 2026-09-16):
   remote: 9923850. Reset remote end offset to local end offset.` and the same
   `SELECT COUNT(*)` returned **0**. In this version R2 is where tiered segments
   are kept for cost and for the lakehouse, not a restore path for a tablet that
-  has lost its local log.
+  has lost its local log. This is a fact about a tablet **losing** its log; the
+  client-side read path proven above is a different path and is unaffected.
 
 Credential path: Swarm files at `/run/secrets/...` → bridge exports
 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` → `FLUSS_PROPERTIES` keeps the
@@ -319,11 +320,18 @@ Not verified — the honest boundary of this evidence:
 - **No real `docker stack deploy`.** This host is a Swarm worker, so
   `make stack-selfcheck` stops before reaching the stack and the compile check
   used instead is the manual `docker stack config` above.
-- **No read served from R2.** The write path and the manifest commit are
-  proven, but every row a `SELECT` returned came off local disk. The client
-  ships a remote-segment downloader, so the untested path is client-to-R2, not
-  tablet-to-R2 — this lane did not exercise it, which is not the same as
-  finding it broken.
+- **A read served from R2 — now proven** (closed 2026-09-16, after this
+  section was first written). A trial that let local cleanup proceed
+  (`table.log.tiered.local-segments: 1`; the same key set to `0` is rejected by
+  `LogTablet`, so cleanup never runs and every row stays local) tiered 17 closed
+  segments and then **deleted its local copies**, leaving one local segment with
+  base offset 981794 while the manifest covered offsets 0–981794. A default
+  Flink SQL `SELECT` then returned a row whose bytes live at offset 520000, in a
+  remote segment far below the local base, and the task manager logged the
+  client downloading all 17 remote segments
+  (`Successfully downloaded remote log segment file ...`). This is a
+  **client-to-R2** read: the task manager carries `core-site.xml` and the R2
+  environment, and no startup option is needed to reach the bucket.
 - **What Swarm does with an unhealthy task** still needs a manager node. The
   startup fix rests on the false-signal argument alone.
 
