@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  Hadoop client configuration for the Flink job/table managers.
+
+  WHY THIS FILE IS IN THE IMAGE
+  Two different S3 clients share every Flink container:
+    * Flink's own state backend, which writes checkpoints/savepoints and the
+      HA metadata to state.checkpoints.dir (an s3:// URI in production), and
+    * the Fluss client inside the Flink connector, which downloads log
+      segments and KV snapshots that the tablet servers have already tiered
+      out of local disk.
+  Both resolve s3:// through Hadoop, and Hadoop reads THIS file. Without it
+  the credentials are still found by the default provider chain but the
+  ENDPOINT is not, so s3:// silently resolves against Amazon's real S3 and
+  fails with 403 InvalidAccessKeyId (observed against R2, 2026-09-16).
+
+  WHY IT IS BAKED RATHER THAN MOUNTED
+  /etc/hadoop/conf is auto-detected by Flink's own bin/config.sh (it appends
+  the directory to the JVM classpath when it exists), so baking the file here
+  needs zero settings in docker-stack.yml and no per-node bind mount — which
+  a Swarm stack cannot express portably anyway. Client-side only: the Fluss
+  SERVERS read their S3 settings from FLUSS_PROPERTIES in the compose/stack
+  file, not from here.
+
+  NO SECRETS HERE
+  The values are ${env.NAME} references that Hadoop expands at read time. The
+  secrets themselves stay in Swarm secrets; the image's entrypoint bridge
+  (/opt/flink/bin/20-r2-secrets-from-file.sh) copies the *_FILE secret mounts
+  into these environment variables before Flink starts. Unset variables are
+  NOT silently tolerated: Hadoop leaves the literal text in place and the
+  failure is a loud URISyntaxException rather than a fallback to Amazon S3.
+-->
+<configuration>
+  <property>
+    <name>fs.s3a.endpoint</name>
+    <value>${env.R2_ENDPOINT}</value>
+  </property>
+  <property>
+    <name>fs.s3a.endpoint.region</name>
+    <value>${env.AWS_REGION}</value>
+  </property>
+  <property>
+    <name>fs.s3a.access.key</name>
+    <value>${env.AWS_ACCESS_KEY_ID}</value>
+  </property>
+  <property>
+    <name>fs.s3a.secret.key</name>
+    <value>${env.AWS_SECRET_ACCESS_KEY}</value>
+  </property>
+  <!-- R2 is addressed by bucket in the path, not by a Host header. -->
+  <property>
+    <name>fs.s3a.path.style.access</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>fs.s3a.connection.ssl.enabled</name>
+    <value>true</value>
+  </property>
+</configuration>

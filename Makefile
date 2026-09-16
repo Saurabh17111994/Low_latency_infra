@@ -12,7 +12,7 @@ STACK_LOCK := bash code/01_platform/04_scripts/stack-lock.sh
 # fails obscurely). Set MVN_FLAGS=-o when the local cache is warm.
 MVN := mvn $(MVN_FLAGS)
 
-.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite gate-fast check-image-stale check-image-stale-fast images branch-check proto
+.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite gate-fast check-image-stale check-image-stale-fast images branch-check proto flink-image
 
 # P6-302: these recipes create no file of their own name, so a stray file in the
 # repo root would make make treat the target as up to date and skip the recipe.
@@ -102,6 +102,8 @@ help:
 	@echo "  gate-fast   fast pre-gate subset: static-check + the python suites + the ddl-apply"
 	@echo "              image + an optional MODULE=<module> suite (~20 s). NOT a release"
 	@echo "              certificate — releases, market sessions and soak runs need \`make gate\`"
+	@echo "  flink-image build the production Flink runtime image (Fluss jars + R2 config +"
+	@echo "              secret bridge) from SHA256-pinned Maven Central artifacts"
 	@echo "  images      rebuild every build: image WITH its content stamp (sha256 of its"
 	@echo "              inputs, baked in as build.labels) and verify with check-image-stale"
 	@echo "  pin-check   pin discipline (foundation L548/553/554): matrix shape, corpus integrity,"
@@ -398,6 +400,32 @@ ddl-image:
 	[ -n "$$stamps" ] || { echo "ddl-image: no build stamps computed — refusing to build unstamped images"; exit 1; }; \
 	$(STACK_LOCK) env $$stamps $(COMPOSE) build ddl-apply && \
 	python3 code/01_platform/04_scripts/image_staleness_check.py --git-root . --compose code/01_platform/01_docker/docker-compose.yml --service ddl-apply --require-stamps
+
+# Build the production Flink runtime image (code/01_platform/01_docker/flink-runtime/).
+# WHY A SEPARATE TARGET: this image is NOT a docker-compose service and has no
+# `build:` anywhere — docker-stack.yml cannot build at deploy time, so the image
+# is produced here on a build host and referenced by digest via FLINK_IMAGE.
+# The jars come from fetch-jars.sh, which verifies every one against a pinned
+# SHA256 before the Dockerfile can see it; the staging tree is removed
+# afterwards either way.
+# Usage: make flink-image [FLINK_RUNTIME_TAG=trading-flink-runtime:0.1.0]
+flink-image:
+	@set -e; \
+	dir=code/01_platform/01_docker/flink-runtime; \
+	tag="$${FLINK_RUNTIME_TAG:-trading-flink-runtime:0.1.0}"; \
+	ctx="$$dir/.buildctx"; \
+	rm -rf "$$ctx"; mkdir -p "$$ctx"; \
+	trap 'rm -rf "$$ctx"' EXIT; \
+	bash "$$dir/fetch-jars.sh" --dest "$$ctx/jars"; \
+	cp "$$dir/Dockerfile" "$$dir/core-site.xml" "$$dir/20-r2-secrets-from-file.sh" "$$ctx/"; \
+	docker build -t "$$tag" "$$ctx"; \
+	bash "$$dir/fetch-jars.sh" --verify "$$ctx/jars"; \
+	echo ""; \
+	echo "Built $$tag"; \
+	echo "  image id: $$(docker image inspect "$$tag" --format '{{.Id}}')"; \
+	echo "Next: push it, then pin the manifest digest in runtime.lock:"; \
+	echo "  bash code/01_platform/04_scripts/digest-pin.sh <repo>:<tag>"
+
 
 # Non-root ownership contract gate (evidence_ownership_check.py): every
 # apply.json the ddl-apply container wrote (owner == DDL_APPLY_UID) must be

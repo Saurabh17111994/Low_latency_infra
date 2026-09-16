@@ -462,6 +462,11 @@ services:
     <<: *common_workload
     image: ${FLINK_IMAGE:?set FLINK_IMAGE to an immutable digest}
     networks: [trading-net]
+    # What this container runs. Verified 2026-09-16: the image's own default
+    # CMD is only the usage/help path, so a service with NO command prints
+    # usage and exits 0 — Swarm then reports the task as started while nothing
+    # runs. These must stay explicit.
+    command: ["jobmanager"]
     healthcheck:
       test: ["CMD-SHELL","(echo > /dev/tcp/127.0.0.1/8081) >/dev/null 2>&1 || exit 1"]
       interval: 30s
@@ -494,6 +499,11 @@ services:
       # + AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY when CHECKPOINT_DIR is s3://.
       S3_ENDPOINT: ${S3_ENDPOINT:-${R2_ENDPOINT:-}}
       R2_ENDPOINT: ${R2_ENDPOINT:-}
+      # The baked /etc/hadoop/conf/core-site.xml expands ${env.AWS_REGION} into
+      # fs.s3a.endpoint.region. Verified 2026-09-16: with the region unset, S3A
+      # requests fail 400 Bad Request; R2 answers 'auto' (compose uses the same
+      # default for its FLUSS_PROPERTIES s3.endpoint.region).
+      AWS_REGION: ${AWS_REGION:-auto}
       AWS_ACCESS_KEY_ID_FILE: /run/secrets/aws_access_key_id
       AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
       # Streaming-3000 T3 G3 Compute (p=8, 16 buckets → 8 slots, hash(token) 2:1)
@@ -559,6 +569,11 @@ services:
     <<: *common_workload
     image: ${FLINK_IMAGE:?set FLINK_IMAGE to an immutable digest}
     networks: [trading-net]
+    # What this container runs. Verified 2026-09-16: the image's own default
+    # CMD is only the usage/help path, so a service with NO command prints
+    # usage and exits 0 — Swarm then reports the task as started while nothing
+    # runs. These must stay explicit.
+    command: ["taskmanager"]
     deploy:
       <<: *deploy_workload
       replicas: 3                      # one TM per worker in v2; scales with W4+
@@ -579,6 +594,11 @@ services:
       SAVEPOINT_DIR: ${SAVEPOINT_DIR:-${CHECKPOINT_DIR}}
       S3_ENDPOINT: ${S3_ENDPOINT:-${R2_ENDPOINT:-}}
       R2_ENDPOINT: ${R2_ENDPOINT:-}
+      # The baked /etc/hadoop/conf/core-site.xml expands ${env.AWS_REGION} into
+      # fs.s3a.endpoint.region. Verified 2026-09-16: with the region unset, S3A
+      # requests fail 400 Bad Request; R2 answers 'auto' (compose uses the same
+      # default for its FLUSS_PROPERTIES s3.endpoint.region).
+      AWS_REGION: ${AWS_REGION:-auto}
       AWS_ACCESS_KEY_ID_FILE: /run/secrets/aws_access_key_id
       AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
       # Streaming-3000 T3 G3 Compute (p=8, 16 buckets → 8 slots)
