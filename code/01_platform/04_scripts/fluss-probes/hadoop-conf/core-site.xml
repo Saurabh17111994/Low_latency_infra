@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+  Hadoop client configuration for the host probes (wave 35x).
+
+  WHY THIS FILE EXISTS
+  Tiered log segments and KV snapshots live in object storage, and a probe that
+  scans a table has to fetch those segments itself — the tablet server hands the
+  client a path, not the bytes. Without S3 settings the probe cannot resolve
+  s3:// at all, so the census either fails or (worse) under-counts the rows that
+  have already rolled out of local disk.
+
+  WHY NOT Fluss / client.fs. OPTIONS
+  FlussConnection forwards only keys prefixed 'client.fs.' to its filesystem
+  layer, but the shipped S3 plugin recognises only 's3.', 's3a.' and 'fs.s3a.'
+  — it never strips the 'client.fs.' prefix, so those keys are silently ignored
+  and every client-side read fails with NoAwsCredentialsException. Verified
+  against fluss-fs-s3-0.9.1-incubating.jar. Hadoop reads this file off the
+  classpath instead, which is the route that actually works.
+
+  NO SECRETS HERE
+  Values are ${env.NAME} references that Hadoop expands at read time, so the
+  credentials stay in the environment (01_docker/.env + secrets.env) and never
+  enter the repository. Unset variables are not silently tolerated: Hadoop
+  leaves the literal text in place and the failure is a loud URISyntaxException.
+
+  NOT A SERVER FILE
+  This is client-side only. The servers read their S3 settings from
+  docker-compose.yml FLUSS_PROPERTIES.
+-->
+<configuration>
+  <property>
+    <name>fs.s3a.endpoint</name>
+    <value>${env.R2_ENDPOINT}</value>
+  </property>
+  <property>
+    <name>fs.s3a.endpoint.region</name>
+    <value>${env.AWS_REGION}</value>
+  </property>
+  <property>
+    <name>fs.s3a.access.key</name>
+    <value>${env.AWS_ACCESS_KEY_ID}</value>
+  </property>
+  <property>
+    <name>fs.s3a.secret.key</name>
+    <value>${env.AWS_SECRET_ACCESS_KEY}</value>
+  </property>
+  <!-- R2 is addressed by bucket in the path, not by a Host header. -->
+  <property>
+    <name>fs.s3a.path.style.access</name>
+    <value>true</value>
+  </property>
+  <property>
+    <name>fs.s3a.connection.ssl.enabled</name>
+    <value>true</value>
+  </property>
+</configuration>

@@ -250,10 +250,53 @@ echo "SOAK-E2E: capture complete — evidence at $PHASE_OUT"
 # side-by-side comparison remains. The run passes its signal leg when this
 # run's rows include host N7 candidates in both the LOG and the current KV
 # table. FlussRuleCounter prints "rule=<id> count=<n>" per rule id.
+# Wave 35x: a probe that scans a table must be able to read the segments that
+# have already rolled out of local disk onto object storage. The tablet hands
+# the client a path (s3://...) and the client fetches the bytes itself, so the
+# probe process needs both the S3 filesystem plugin and S3 client settings.
+#
+# Those settings cannot travel as Fluss client options: FlussConnection forwards
+# only 'client.fs.'-prefixed keys, while the shipped S3 plugin matches only
+# 's3.', 's3a.' and 'fs.s3a.' and never strips 'client.fs.' (verified against
+# fluss-fs-s3-0.9.1-incubating.jar — the keys are ignored and every read fails
+# with NoAwsCredentialsException). Hadoop reads core-site.xml off the classpath,
+# which is the route that works; the credentials in it are ${env.NAME}
+# references, so no secret is stored in the repository.
+#
+# Absent R2 config is not fatal here: the run degrades to exactly its previous
+# behaviour (probes read the local segments they always could) instead of
+# inventing a new failure mode. The consequence is named out loud, because a
+# census that cannot reach a tiered segment under-counts rather than erroring.
+GATE_FS_CP=""
+gate_wire_probe_filesystem() {
+  local conf_dir="$SCRIPT_DIR/fluss-probes/hadoop-conf"
+  local plugin_dir="$COMPOSE_DIR/fluss-plugins/iceberg"
+  local jar
+  local -a jars=()
+  for jar in "$plugin_dir/fluss-fs-s3-0.9.1-incubating.jar" \
+             "$plugin_dir/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar"; do
+    [ -r "$jar" ] || { echo "SOAK-E2E: WARN no S3 plugin jar at $jar — the census can only read local segments; a tiered segment will under-count it. Install the plugin jars or accept local-only reads." >&2; return 0; }
+    jars+=("$jar")
+  done
+  [ -r "$conf_dir/core-site.xml" ] || { echo "SOAK-E2E: WARN no $conf_dir/core-site.xml — the census can only read local segments." >&2; return 0; }
+  # shellcheck source=./r2-env.sh
+  . "$SCRIPT_DIR/r2-env.sh"
+  local endpoint region ak sk
+  endpoint="$(r2_var "$COMPOSE_DIR/.env" R2_ENDPOINT)" || { echo "SOAK-E2E: WARN R2_ENDPOINT unreadable — the census can only read local segments; tiered rows will under-count it. Set it in 01_docker/.env." >&2; return 0; }
+  region="$(r2_var "$COMPOSE_DIR/.env" AWS_REGION)" || region=auto
+  ak="$(r2_var "$COMPOSE_DIR/secrets.env" AWS_ACCESS_KEY_ID)" || { echo "SOAK-E2E: WARN AWS_ACCESS_KEY_ID unreadable (01_docker/secrets.env) — the census can only read local segments; tiered rows will under-count it." >&2; return 0; }
+  sk="$(r2_var "$COMPOSE_DIR/secrets.env" AWS_SECRET_ACCESS_KEY)" || { echo "SOAK-E2E: WARN AWS_SECRET_ACCESS_KEY unreadable (01_docker/secrets.env) — the census can only read local segments; tiered rows will under-count it." >&2; return 0; }
+  R2_ENDPOINT="$endpoint" AWS_REGION="$region" \
+    AWS_ACCESS_KEY_ID="$ak" AWS_SECRET_ACCESS_KEY="$sk" export R2_ENDPOINT AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+  GATE_FS_CP="$conf_dir:$(IFS=:; echo "${jars[*]}")"
+  echo "SOAK-E2E: probe filesystem wired for tiered reads ($(basename "${jars[0]}"))"
+}
+
 if [ "${MULTITF_ENABLED:-false}" = "true" ]; then
   echo "SOAK-E2E: MULTITF_ENABLED=true — running host-N7 signal gate"
   GATE_BIN="$PHASE_OUT/stages/probes"
   mkdir -p "$GATE_BIN"
+  gate_wire_probe_filesystem
   javac -cp "$CP" -d "$GATE_BIN" "$SCRIPT_DIR/fluss-probes/FlussRuleCounter.java" \
     > "$PHASE_OUT/stages/javac-FlussRuleCounter.log" 2>&1 \
     || fatal "host-N7 gate: FlussRuleCounter compile failed"
@@ -263,7 +306,7 @@ if [ "${MULTITF_ENABLED:-false}" = "true" ]; then
     # old `cut -d= -f3` yielded garbage on format drift and `[ -ge ]` then
     # died with "integer expression expected" instead of a clear FAIL.
     gate_out="$(java --add-opens=java.base/java.nio=ALL-UNNAMED -Dlog.dir=/tmp/fluss-probe-logs \
-      -cp "$GATE_BIN:$CP" FlussRuleCounter "$gate_table" "${PROBE_BOOTSTRAP:-localhost:9123}" 2>"$PHASE_OUT/stages/n7-gate-$gate_table.err")" \
+      -cp "$GATE_BIN:$GATE_FS_CP:$CP" FlussRuleCounter "$gate_table" "${PROBE_BOOTSTRAP:-localhost:9123}" 2>"$PHASE_OUT/stages/n7-gate-$gate_table.err")" \
       || { tail -5 "$PHASE_OUT/stages/n7-gate-$gate_table.err" 2>/dev/null; fatal "host-N7 gate: census of $gate_table failed (see stages/n7-gate-$gate_table.err)"; }
     printf '%s\n' "$gate_out" > "$PHASE_OUT/stages/n7-gate-$gate_table.txt"
     gate_n="$(printf '%s\n' "$gate_out" | sed -n 's/^rule=n7-range-breakout-v1 count=\([0-9][0-9]*\).*/\1/p' | head -1)"
