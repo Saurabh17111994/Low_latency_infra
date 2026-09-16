@@ -1,9 +1,12 @@
 """Validate the OpenObserve dashboard corpus + seed script contracts."""
 
+import base64
+import http.server
 import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
@@ -86,11 +89,102 @@ def test_seed_refuses_without_password():
     assert "O2_PASSWORD" in proc.stderr
 
 
+class _DashboardsStub:
+    """A stand-in for OpenObserve's read-only `GET /api/{org}/dashboards`.
+
+    P6-539 made `--dry-run` fetch the list before printing, because a plan that
+    says "create" for a dashboard that already exists is a wrong plan. That
+    makes the dry-run path need a reachable endpoint; this answers the one GET
+    it makes, so the test needs neither the stack nor the real admin password.
+    """
+
+    def __init__(self, dashboards=(), *, expected_auth=None):
+        self.dashboards = list(dashboards)
+        self.expected_auth = expected_auth
+        self.seen_path = None
+        self.seen_auth = None
+        stub = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 — BaseHTTPRequestHandler's spelling
+                stub.seen_path = self.path
+                stub.seen_auth = self.headers.get("Authorization")
+                if stub.expected_auth is not None and stub.seen_auth != stub.expected_auth:
+                    # A real 401, so a wrong-credential run exercises the same
+                    # branch the live server does.
+                    self.send_error(401, "Unauthorized Access")
+                    return
+                body = json.dumps({"dashboards": [
+                    {"title": t, "dashboard_id": t.lower().replace(" ", "-")}
+                    for t in stub.dashboards]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass  # keep pytest output clean
+
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        return False
+
+
+def _seed_env(stub_url: str, password: str) -> dict:
+    # no_proxy: a host-level HTTP proxy must not intercept the loopback stub.
+    return {**os.environ, "O2_PASSWORD": password, "O2_API_URL": stub_url,
+            "no_proxy": "127.0.0.1", "NO_PROXY": "127.0.0.1"}
+
+
+def _basic(user: str, password: str) -> str:
+    return "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+
+
 def test_seed_dry_run_plans_known_titles():
-    env = dict(os.environ)
-    env["O2_PASSWORD"] = "Dry-Run!2026"
-    proc = subprocess.run([sys.executable, str(SEED), "--dry-run"], env=env,
-                          capture_output=True, text=True, timeout=60)
-    assert proc.returncode == 0
+    """--dry-run plans against a stubbed list endpoint, fully offline.
+
+    The stub keeps the "the plan reflects what is already deployed" invariant
+    that P6-539 introduced (a dashboard reported present must print `keep`, not
+    `create`) while restoring the offline property the test had before it. It
+    also asserts the Basic credential actually travels — which a fake password
+    against a dead endpoint never exercised.
+    """
+    with _DashboardsStub(["Safe to Trade"],
+                         expected_auth=_basic("admin@example.com", "Dry-Run!2026")) as stub:
+        proc = subprocess.run([sys.executable, str(SEED), "--dry-run"],
+                              env=_seed_env(stub.url, "Dry-Run!2026"),
+                              capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert "[keep  ] Safe to Trade" in proc.stdout, (
+        "the stub reported this dashboard as already present, so the plan must "
+        f"say keep — got:\n{proc.stdout}"
+    )
     assert "RESULT:" in proc.stdout
-    assert "Safe to Trade" in proc.stdout
+    assert stub.seen_path == "/api/default/dashboards"
+    assert stub.seen_auth == _basic("admin@example.com", "Dry-Run!2026")
+
+
+def test_seed_reports_401_as_exit_1():
+    """A refused credential is exit 1 with the status named, never a plan.
+
+    This is the shape that broke the previous test on 2026-09-15: its fake
+    password reached a live server for the first time and came back 401.
+    """
+    with _DashboardsStub(expected_auth=_basic("admin@example.com", "the-real-one")) as stub:
+        proc = subprocess.run([sys.executable, str(SEED), "--dry-run"],
+                              env=_seed_env(stub.url, "not-the-real-one"),
+                              capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 1, f"401 must exit 1, got {proc.returncode}"
+    assert "401" in proc.stderr, proc.stderr
+    assert "RESULT:" not in proc.stdout, "a refused list must not print a plan"

@@ -20,8 +20,8 @@
 
 use nautilus_execution_service::executiongate::{
     AttemptPhase, AttemptStore, BridgeCaller, BridgeOutcome, Claim, Command, CrashHooks,
-    ExecutionGate, GateRow, GateState, GateStateStore, InMemoryAttemptStore, InMemoryGateStateStore,
-    Outcome,
+    ExecutionGate, GateRow, GateState, GateStateStore, InMemoryAttemptStore,
+    InMemoryGateStateStore, Outcome,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;

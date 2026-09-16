@@ -653,7 +653,7 @@ fn claim_for_send(
                         "execution_attempt_id": existing.attempt_id,
                         "gate_state": state.snapshot().gate.as_str(),
                     }),
-                )
+                );
             }
         },
         Ok(Claim::Duplicate) => {
@@ -816,11 +816,12 @@ async fn route(state: &ServerState, method: &str, path: &str, body: &str) -> Vec
             // send — a request the store cannot record is refused here and never reaches the bridge.
             let guarded = match &state.attempts {
                 None => None,
-                Some(attempts) => match claim_for_send(state, attempts, &cmd_env, &envelope.payload_hash)
-                {
-                    GuardOutcome::Send(attempt) => Some((Arc::clone(attempts), attempt)),
-                    GuardOutcome::Refuse(status, doc) => return json(status, &doc),
-                },
+                Some(attempts) => {
+                    match claim_for_send(state, attempts, &cmd_env, &envelope.payload_hash) {
+                        GuardOutcome::Send(attempt) => Some((Arc::clone(attempts), attempt)),
+                        GuardOutcome::Refuse(status, doc) => return json(status, &doc),
+                    }
+                }
             };
             let submit = {
                 let mut guard = forwarder.lock().await;
@@ -2121,7 +2122,8 @@ mod tests {
             store: store.cloned(),
             sends: Arc::clone(sends),
             phase_at_send: Arc::clone(phase_at_send),
-        }) as Box<dyn BridgeClient + Send>))
+        })
+            as Box<dyn BridgeClient + Send>))
     }
 
     /// The durable store refuses to share a log, so every guard test gets its own directory.
@@ -2146,7 +2148,11 @@ mod tests {
             .nth(1)
             .and_then(|s| s.parse().ok())
             .expect("a status line");
-        let body = resp.split("\r\n\r\n").nth(1).unwrap_or_default().to_string();
+        let body = resp
+            .split("\r\n\r\n")
+            .nth(1)
+            .unwrap_or_default()
+            .to_string();
         (status, body)
     }
 
