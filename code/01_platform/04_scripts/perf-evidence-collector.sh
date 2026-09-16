@@ -16,146 +16,171 @@
 #   interval: default 30
 #
 # Evidence: <out-dir>/snapshots/snap-<n>.json + <out-dir>/summary.tsv
+#           <out-dir>/collector.log (stderr from the snapshot step)
+#
+# Env overrides:
+#   FLINK_JM_CONTAINER  JobManager container    (default 01_docker-flink-jobmanager-1)
+#   JOB_NAME_PATTERN    RUNNING job name match  (default "signal")
+#   O2_BASE_URL         OpenObserve base URL    (default http://localhost:5080)
+#   O2_ENV_FILE         credential file         (default 01_docker/secrets.env)
+#   RUN_FOR_S           stop after N seconds    (default 0 = run until signalled)
+#
+# P6-011: this loop is deliberately NOT `set -e`. A poller that aborts the whole
+# PERF-AUDIT-001 capture because one `docker exec` was slow turns a transient
+# into total evidence loss — proved 2026-09-16, where a failing `docker` made
+# iteration 1 the last one. Every failure is recorded per snapshot instead,
+# counted, and reported at the end, so a capture that is broken throughout still
+# says so loudly rather than quietly producing nothing.
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
 
 OUT_DIR="${1:?usage: perf-evidence-collector.sh <out-dir> [interval]}"
 INTERVAL="${2:-30}"
+
+# P6-463: 'abc'/'0'/'-5' used to reach `sleep` (fatal under set -e) or busy-loop.
+case "$INTERVAL" in
+'' | *[!0-9]*)
+	echo "interval must be a positive integer, got '$INTERVAL'" >&2
+	exit 2
+	;;
+esac
+[ "$INTERVAL" -ge 1 ] || { echo "interval must be >= 1, got '$INTERVAL'" >&2; exit 2; }
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+PARSE_PY="$SCRIPT_DIR/perf_evidence_parse.py"
 SNAP_DIR="$OUT_DIR/snapshots"
-mkdir -p "$SNAP_DIR"
 
-JEXEC() { docker exec 01_docker-flink-jobmanager-1 curl -s "$@"; }
+[ -f "$PARSE_PY" ] || { echo "missing companion $PARSE_PY" >&2; exit 2; }
 
-job_id() {
-	JEXEC http://localhost:8081/jobs/overview 2>/dev/null | python3 -c "
-import json,sys
-d=json.load(sys.stdin)
-for j in d['jobs']:
-    if j['state']=='RUNNING' and 'signal' in j['name'].lower():
-        print(j['jid']); break
-" 2>/dev/null
+# P6-135: a renamed compose project or a renamed job used to yield silent empty
+# snapshots and exit 0. Both are configurable now.
+JM_CONTAINER="${FLINK_JM_CONTAINER:-01_docker-flink-jobmanager-1}"
+JOB_PATTERN="${JOB_NAME_PATTERN:-signal}"
+O2_BASE="${O2_BASE_URL:-http://localhost:5080}"
+O2_ENV_FILE="${O2_ENV_FILE:-$PROJECT_ROOT/code/01_platform/01_docker/secrets.env}"
+RUN_FOR_S="${RUN_FOR_S:-0}"
+case "$RUN_FOR_S" in
+'' | *[!0-9]*)
+	echo "RUN_FOR_S must be a non-negative integer, got '$RUN_FOR_S'" >&2
+	exit 2
+	;;
+esac
+
+# The MIB/column layout comes from the module, so header and rows cannot drift.
+column_header() {
+	python3 -c "
+import sys
+sys.path.insert(0, sys.argv[1])
+from perf_evidence_parse import header_row
+print(header_row())
+" "$SCRIPT_DIR"
 }
 
-snapshot() {
-	local n="$1"
-	local jid="$2"
-	local out="$SNAP_DIR/snap-$n.json"
-	local vertices_json="[]"
-	local metrics_json="{}"
-	local ckpt_json="{}"
-	local stats_json="[]"
+# P6-029: the credential travels in a 0600 curl config file, never on a command
+# line where /proc/<pid>/cmdline exposes it. Removed by the trap and at exit.
+O2_AUTH_FILE=""
+read_o2_auth() {
+	awk '/^O2_AUTH_BASIC=/{sub(/^[^=]*=/,""); gsub(/\r/,""); gsub(/^["'"'"']|["'"'"']$/,""); print; exit}' "$1" 2>/dev/null || true
+}
+if [ -f "$O2_ENV_FILE" ]; then
+	AUTH="$(read_o2_auth "$O2_ENV_FILE")"
+	if [ -n "$AUTH" ]; then
+		O2_AUTH_FILE="$(umask 077; mktemp "${TMPDIR:-/tmp}/perf-o2auth.XXXXXX")"
+		printf 'header = "Authorization: Basic %s"\n' "$AUTH" > "$O2_AUTH_FILE"
+	fi
+	unset AUTH
+fi
 
-	if [ -n "$jid" ]; then
-		# Vertices (names + parallelism)
-		vertices_json=$(JEXEC "http://localhost:8081/jobs/$jid" 2>/dev/null | python3 -c "
-import json,sys
+cleanup() {
+	rm -f "${O2_AUTH_FILE:-}"
+}
+trap cleanup INT TERM EXIT
+
+if ! mkdir -p "$SNAP_DIR"; then
+	echo "cannot create $SNAP_DIR (is $OUT_DIR writable?)" >&2
+	exit 2
+fi
+
+if ! column_header > "$OUT_DIR/summary.tsv"; then
+	echo "cannot write $OUT_DIR/summary.tsv" >&2
+	exit 2
+fi
+
+# P6-463: a rerun used to restart at n=1 and overwrite the previous capture's
+# snapshots. Continue after the highest existing index instead.
+n="$(find "$SNAP_DIR" -maxdepth 1 -name 'snap-*.json' 2>/dev/null \
+	| sed -n 's|.*/snap-\([0-9]\+\)\.json$|\1|p' | sort -n | tail -1)"
+n="${n:-0}"
+
+STOP=0
+snapshots=0
+errored=0
+start_epoch="$SECONDS"
+
+# P6-463: without this, Ctrl-C killed the collector mid-snapshot and the capture
+# ended with no line saying how far it got. The handler only flips a flag; the
+# loop notices after the in-flight snapshot finishes, so evidence is not truncated.
+trap 'STOP=1' INT TERM
+
+echo "perf-evidence: every ${INTERVAL}s -> $SNAP_DIR (jm=$JM_CONTAINER job~$JOB_PATTERN)"
+echo "perf-evidence: O2 ${O2_BASE}$([ -n "$O2_AUTH_FILE" ] && echo " (credential loaded)" || echo " (no credential — latency will be unavailable)")"
+
+while [ "$STOP" -eq 0 ]; do
+	n=$((n + 1))
+	# Stamped BEFORE the queries, so ts describes when the sample started rather
+	# than when a slow JobManager finally answered (P6-466).
+	STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+	payload="$(python3 -c "
+import json, sys
+print(json.dumps({
+    'snapshot': int(sys.argv[1]),
+    'out_dir': sys.argv[2],
+    'started_at': sys.argv[3],
+    'jm_container': sys.argv[4],
+    'job_name_pattern': sys.argv[5],
+    'o2_base': sys.argv[6],
+    'o2_auth_file': sys.argv[7],
+}))
+" "$n" "$OUT_DIR" "$STARTED_AT" "$JM_CONTAINER" "$JOB_PATTERN" "$O2_BASE" "${O2_AUTH_FILE:-}")"
+
+	if printf '%s' "$payload" | python3 "$PARSE_PY" >>"$OUT_DIR/summary.tsv" 2>>"$OUT_DIR/collector.log"; then
+		snapshots=$((snapshots + 1))
+		# A snapshot that recorded gaps is still evidence, but it is counted, so
+		# the run cannot finish claiming a clean capture (P6-011).
+		if python3 -c "
+import json, sys
 try:
-    d=json.load(sys.stdin)
-    out=[{'name': v['name'], 'par': v.get('parallelism'), 'id': v['id']} for v in d.get('vertices',[])]
-    print(json.dumps(out))
-except: print('[]')
-" 2>/dev/null)
-		# Aggregated per-vertex metrics (busy/backpressure/records) — query each vertex
-		metrics_json=$(python3 - "$jid" << 'PYEOF'
-import json, sys, subprocess
-jid = sys.argv[1]
-def jexec(path):
-    r = subprocess.run(['docker','exec','01_docker-flink-jobmanager-1','curl','-s',f'http://localhost:8081{path}'],
-                       capture_output=True, text=True)
-    try: return json.loads(r.stdout)
-    except: return None
-job = jexec(f'/jobs/{jid}')
-if not job: print('{}'); sys.exit()
-out = {}
-for v in job.get('vertices', []):
-    m = jexec(f"/jobs/{jid}/vertices/{v['id']}/subtasks/metrics?get=busyTimeMsPerSecond,backPressuredTimeMsPerSecond,idleTimeMsPerSecond,numRecordsInPerSecond,numRecordsOutPerSecond")
-    if m:
-        # m is a list of per-subtask entries: [{"id": metric, "min":..,"max":..,"avg":..}, ...]
-        # aggregate: average of 'avg' across subtasks, plus the sum
-        agg = {}
-        for x in m:
-            mid = x.get('id')
-            if mid and x.get('avg') is not None:
-                agg.setdefault(mid, []).append(x['avg'])
-        out[v['name']] = {k: {'avg_of_subtask_avgs': round(sum(vals)/len(vals),1), 'n_subtasks': len(vals)} for k, vals in agg.items()}
-print(json.dumps(out))
-PYEOF
-)
-		# Checkpoints
-		ckpt_json=$(JEXEC "http://localhost:8081/jobs/$jid/checkpoints" 2>/dev/null | python3 -c "
-import json,sys
-try:
-    d=json.load(sys.stdin)
-    print(json.dumps({'counts': d.get('counts',{}), 'latest_completed': d.get('latest',{}).get('completed',{})}))
-except: print('{}')
-" 2>/dev/null)
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if d.get('errors') else 1)
+" "$SNAP_DIR/snap-$n.json"; then
+			errored=$((errored + 1))
+		fi
+	else
+		errored=$((errored + 1))
+		printf '%s\n' "$(python3 -c "
+import sys
+sys.path.insert(0, sys.argv[1])
+from perf_evidence_parse import error_row
+print(error_row(int(sys.argv[2]), 'snapshot failed'))
+" "$SCRIPT_DIR" "$n")" >>"$OUT_DIR/summary.tsv"
 	fi
 
-	# Docker stats
-	stats_json=$(docker stats --no-stream --format '{{.Name}}|{{.MemUsage}}|{{.CPUPerc}}' 2>/dev/null | grep -E "flink|fluss|ingestion" | python3 -c "
-import json,sys
-rows=[]
-for line in sys.stdin:
-    p=line.strip().split('|')
-    rows.append({'name': p[0], 'mem': p[1], 'cpu': p[2] if len(p)>2 else ''})
-print(json.dumps(rows))
-" 2>/dev/null)
-
-	# Write valid JSON
-	python3 - "$out" "$n" "$vertices_json" "$metrics_json" "$ckpt_json" "$stats_json" << 'PYEOF'
-import json, sys
-out, n = sys.argv[1], int(sys.argv[2])
-try: verts = json.loads(sys.argv[3])
-except: verts = []
-try: metrics = json.loads(sys.argv[4])
-except: metrics = {}
-try: ckpt = json.loads(sys.argv[5])
-except: ckpt = {}
-try: stats = json.loads(sys.argv[6])
-except: stats = []
-doc = {
-  "snapshot": n,
-  "ts": __import__('datetime').datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
-  "vertices": verts,
-  "per_vertex_metrics": metrics,
-  "checkpoints": ckpt,
-  "docker_stats": stats
-}
-json.dump(doc, open(out, 'w'), indent=1)
-PYEOF
-}
-
-# ── Main loop ────────────────────────────────────────────────────────────────
-echo "perf-evidence: capturing every ${INTERVAL}s → $SNAP_DIR"
-{
-	echo -e "snap\tts\tckpt_completed\tckpt_latest_size\tckpt_duration_ms\tflink_mem\tflink_cpu\tingestion_mem"
-} > "$OUT_DIR/summary.tsv"
-
-n=0
-while true; do
-	n=$((n+1))
-	JID=$(job_id)
-	snapshot "$n" "$JID"
-	# Compact summary row
-	python3 - "$n" "$OUT_DIR" << 'PYEOF'
-import json, sys, os
-n = sys.argv[1]; out_dir = sys.argv[2]
-try:
-    d = json.load(open(f"{out_dir}/snapshots/snap-{n}.json"))
-    ck = d.get('checkpoints', {})
-    comp = ck.get('counts', {}).get('completed', '')
-    lc = ck.get('latest_completed', {})
-    size = lc.get('checkpointed_size', '')
-    dur = lc.get('end_to_end_duration', '')
-    flink_mem = flink_cpu = ing_mem = ''
-    for s in d.get('docker_stats', []):
-        if 'taskmanager' in s['name']: flink_mem = s['mem']; flink_cpu = s['cpu']
-        if 'ingestion' in s['name']: ing_mem = s['mem']
-    with open(f"{out_dir}/summary.tsv", 'a') as f:
-        f.write(f"{n}\t{d.get('ts','')}\t{comp}\t{size}\t{dur}\t{flink_mem}\t{flink_cpu}\t{ing_mem}\n")
-except Exception as e:
-    with open(f"{out_dir}/summary.tsv", 'a') as f:
-        f.write(f"{n}\tERROR {e}\n")
-PYEOF
-	sleep "$INTERVAL"
+	[ "$STOP" -eq 1 ] && break
+	if [ "$RUN_FOR_S" -gt 0 ] && [ "$((SECONDS - start_epoch))" -ge "$RUN_FOR_S" ]; then
+		break
+	fi
+	sleep "$INTERVAL" &
+	wait $! 2>/dev/null || true
 done
+
+cleanup
+echo "perf-evidence: ${snapshots} snapshot(s) written, ${errored} with errors -> $OUT_DIR/summary.tsv"
+if [ "$errored" -gt 0 ] && [ "$snapshots" -eq 0 ]; then
+	echo "perf-evidence: NO snapshot succeeded — this capture is not usable evidence" >&2
+	exit 1
+fi
+exit 0

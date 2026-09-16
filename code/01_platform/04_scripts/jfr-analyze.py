@@ -12,7 +12,6 @@ import collections
 import datetime
 import json
 import subprocess
-import sys
 
 CLASSES = [
     ("RocksDB", ["org.rocksdb", "rocksdb::"]),
@@ -40,11 +39,23 @@ INTERESTING = ("jdk.ExecutionSample", "jdk.NativeMethodSample",
 
 
 def classify(frames):
-    """frames innermost-first; first marker found innermost-out wins."""
-    for name, markers in CLASSES:
-        for cls, meth in frames:
+    """frames innermost-first; first marker found innermost-out wins.
+
+    A frame is matched on three forms: the class name, the method name, and the
+    joined "Class.method" form. The joined form is required, not cosmetic: JFR
+    delivers class and method as separate fields, so a marker written as a
+    Class.method pair ("Object.wait", "Thread.sleep", "Unsafe.park",
+    "Arrays.copyOf") matches neither field on its own and would mark its bucket
+    unreachable. Verified 2026-09-16 — before this, a thread parked in
+    Object.wait (the single most common idle signature) was reported as
+    FlinkRuntime, and the Lock/Monitor and JVM/Park buckets could only be
+    reached through their class-substring markers.
+    """
+    for cls, meth in frames:
+        joined = f"{cls}.{meth}"
+        for name, markers in CLASSES:
             for mk in markers:
-                if mk in cls or mk in meth:
+                if mk in cls or mk in meth or mk in joined:
                     return name
     return "Other/Java"
 
@@ -75,7 +86,6 @@ def main():
     tops = collections.defaultdict(collections.Counter)     # (per,etype)->frame
     threads = collections.defaultdict(collections.Counter)  # (per,etype,cls)->th
     totals = collections.Counter()
-    starts = collections.Counter()                          # ThreadStart names
     overall = collections.Counter()                         # etype total
 
     for ev in events:
@@ -98,8 +108,11 @@ def main():
         stack = (v.get("stackTrace") or {})
         frames = []
         for f in (stack.get("frames") or []):
-            m = f.get("method", {})
-            frames.append((m.get("type", {}).get("name", "?"),
+            # `or {}` rather than a .get default: jfr print emits an explicit
+            # JSON null for a method/type it could not record, and .get returns
+            # that null instead of the default, so .get("name") would raise.
+            m = f.get("method") or {}
+            frames.append(((m.get("type") or {}).get("name", "?"),
                            m.get("name", "?")))
         cls = classify(frames) if frames else "NoStack"
         key = (matched, etype)
