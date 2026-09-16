@@ -267,12 +267,16 @@ of the four Fluss services); `code/01_platform/04_scripts/tests/test_09_stack.py
       codes as the evidence. Done on the live dev containers: fixed probe
       `rc=0` on real ports 9123/9124/8081, `rc=1` on closed 9999, all three
       servers.
-- [ ] If a Swarm **manager** is reachable, settle what Swarm does with an
-      unhealthy task (create a throwaway service whose probe always fails and
-      watch the task states). If no manager is reachable, record the behaviour as
-      unverified in the CHG record rather than asserting either documented
-      possibility; the fix stands on the false-signal argument alone. Still
-      open: this host is a Swarm worker, unchanged.
+- [x] Resolved by the second branch of this checkbox. **No manager was
+      reachable** — this host is still a Swarm worker (`ControlAvailable=false`,
+      `NodeID=""`), unchanged — so the behaviour is recorded as **unverified** in
+      `docs/05_deployment/change-records/CHG-182.md` (*What Swarm does with an
+      unhealthy task* stays unverified; it needs a manager node) and in
+      `docs/08_implementation/09-production-swarm.md` rather than asserted either
+      way. The fix stands on the false-signal argument alone: a probe that cannot
+      run reports an unstartable server as healthy, which is wrong regardless of
+      what Swarm does next. The live half of this checkbox (throwaway service
+      with an always-failing probe) remains undone for when a manager exists.
 
 ### Task 3: Deliver the R2 credentials to the Fluss process, fail-closed
 **Why:** Static keys are the only working R2 mechanism and the servers currently
