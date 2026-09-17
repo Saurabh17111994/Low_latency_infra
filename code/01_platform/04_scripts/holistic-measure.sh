@@ -47,10 +47,15 @@ POLL_S="${POLL_S:-5}"
 RATE_HZ="${RATE_HZ:-10}"
 CHECKPOINT_TIMEOUT_MS="${CHECKPOINT_TIMEOUT_MS:-30000}"
 ALLOW_FULL_REPLAY="${ALLOW_FULL_REPLAY:-false}"
-# P6-148: a failed purge is non-fatal for this measurement script (the smoke
-# gate catches a failed CREATE), but it must now SAY so — pipeline_purge_table
-# refuses to continue on stale data unless this is set.
-export ALLOW_STALE_TABLE=true
+# P6-102 (wave 36): this used to `export ALLOW_STALE_TABLE=true`, which made
+# `pipeline_purge_table` fall off the end and return 0 even when the purge
+# FAILED — so the caller saw success and the `|| true` below was unreachable
+# code. A stale raw table is then replayed from EARLIEST by the fresh job and
+# every number in the run is garbage. Fail closed instead.
+#
+# The line is DELETED rather than set to false: the library's own default is
+# `${ALLOW_STALE_TABLE:-false}`, and an explicit `export ...=false` here would
+# override an operator who deliberately opts in from their own environment.
 WARMUP_S="${WARMUP_S:-45}"
 
 # Test seam: the cgroup root holding the per-container docker-*.scope dirs.
@@ -59,6 +64,7 @@ WARMUP_S="${WARMUP_S:-45}"
 # Test-hook precedent: G7_REUSE_RAW (holistic-analyze.py), DIGEST_PIN_LIVE
 # (wave 35), W34_PRE_FIX_SRC (wave 34).
 CG_ROOT="${HOLISTIC_CG_ROOT:-/sys/fs/cgroup/system.slice}"
+
 # CHG-122 moved the data path into containers: there is no host PID for the
 # feed or the ingestion JVM. FAKETOOL_PID/JVM_PID are never set by
 # pipeline-lib.sh (it exports FAKETOOL_LOG_PID/INGESTION_LOG_PID, which are
@@ -69,6 +75,7 @@ CG_ROOT="${HOLISTIC_CG_ROOT:-/sys/fs/cgroup/system.slice}"
 container_running() {
   [ "$(docker inspect --format '{{.State.Running}}' "$1" 2>/dev/null || echo false)" = "true" ]
 }
+
 # shellcheck source=pipeline-lib.sh
 source "$SCRIPT_DIR/pipeline-lib.sh"
 
@@ -149,7 +156,11 @@ run_phase() {
   pipeline_preflight || return 1
   # Purge raw BEFORE ingestion starts (ingestion holds the writer; raw is
   # also what the fresh job would otherwise replay from earliest).
-  pipeline_purge_raw_table || true
+  # P6-102: `|| true` here was dead code — the caller exported
+  # ALLOW_STALE_TABLE=true, so the lib returned 0 even on a failed purge. With
+  # that opt-in gone the lib refuses, and the refusal must reach the phase
+  # result: a measurement over stale rows is worse than no measurement.
+  pipeline_purge_raw_table || return 1
   pipeline_start_faketool || return 1
   pipeline_start_ingestion || return 1
   pipeline_submit_job || return 1
