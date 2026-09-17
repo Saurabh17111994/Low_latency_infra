@@ -434,5 +434,63 @@ class F4OrphanCheckTest(unittest.TestCase):
         self.assertEqual(unver, 0)
 
 
+class G7bLateSupersetTests(unittest.TestCase):
+    """P6-487 — the late-drop counter is a SUPERSET of the injection.
+
+    `compute.candles.late.dropped` counts every late/out-of-order drop the
+    multi-TF aggregator makes, so the injected frames and the feed's own
+    re-feeds land in the same counter. Equality was never achievable: the
+    2026-09-17 run counted the injected 20 exactly on one subtask while
+    another subtask carried 114 natural re-feeds into the same window, so the
+    old `late_delta != late_in_window` reported "data loss" for a run whose
+    injection was counted perfectly.
+    """
+
+    def setUp(self):
+        self.mod = load_analyze()
+
+    def test_the_measured_surplus_is_not_a_failure(self):
+        """Run 9's real numbers: 134 counted, 20 of them injected in-window."""
+        failures, notes = self.mod.g7b_verdicts(134, 20, 20, 20)
+
+        self.assertEqual(failures, [],
+                         "natural feed re-feeds were reported as data loss")
+        self.assertTrue(notes, "the surplus must stay visible in the report")
+        self.assertIn("114", notes[0], notes[0])
+        self.assertIn("natural", notes[0], notes[0])
+
+    def test_a_shortfall_still_fails(self):
+        """Run 8's defect: the counter never moved because the path was absent."""
+        failures, _ = self.mod.g7b_verdicts(0, 20, 20, 20)
+
+        self.assertEqual(len(failures), 1, failures)
+        self.assertIn("BELOW", failures[0], failures[0])
+
+    def test_injected_rows_missing_from_raw_still_fails(self):
+        failures, _ = self.mod.g7b_verdicts(20, 20, 17, 20)
+
+        self.assertEqual(len(failures), 1, failures)
+        self.assertIn("raw_table_1", failures[0], failures[0])
+
+    def test_an_exact_cover_reports_no_surplus(self):
+        failures, notes = self.mod.g7b_verdicts(20, 20, 20, 20)
+
+        self.assertEqual(failures, [])
+        self.assertEqual(notes, [])
+
+    def test_the_equality_comparison_is_gone_and_main_uses_the_helper(self):
+        """main() is not unit-testable end to end, so pin the wiring here."""
+        src = open(ANALYZE, encoding="utf-8").read()
+
+        self.assertIn("g7b_failures, g7b_notes = g7b_verdicts(", src,
+                      "main() no longer calls the extracted G7b helper")
+        self.assertIn("failures.extend(g7b_failures)", src,
+                      "the helper's verdicts are not reaching the guard list")
+        # The superset semantics themselves are pinned by the behavioural tests
+        # above (134 vs 20 must pass); this only guards the wiring, so it does
+        # not grep for the old expression — a comment or docstring naming it is
+        # documentation, not a regression.
+
+
 if __name__ == "__main__":
     unittest.main()

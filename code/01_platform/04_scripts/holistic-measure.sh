@@ -510,7 +510,6 @@ smoke_inject_gate() {
   local late_first
   late_first="$(awk '/compute_candles_late_dropped/ {if (!($2 in first)) first[$2]=$NF} END {s=0; for (k in first) s+=first[k]; printf "%.0f", s}' "$dir/tm-prom-dedup-late.tsv" 2>/dev/null)"
   late_delta=$(( ${late_delta:-0} - ${late_first:-0} ))
-    echo "!! SMOKE INJECT GATE FAIL: dedup duplicates counter ${dup_delta} != injected ${want_dups}" >&2
   # P6-410: compare with a tolerance instead of exact equality. Exact equality
   # treats a missed sample, subtask churn, or a %.0f rounding difference as a
   # pipeline bug, which fails a healthy run. Tolerance is max(1, 5% of want);
@@ -524,19 +523,44 @@ smoke_inject_gate() {
   # maps, so a series that restarts is not read as a negative delta. This
   # mirrors counter_deltas() in holistic-analyze.py L164-192.
   #
+  # P6-487 (2026-09-17, run 9): the LATE half is one-sided, because
+  # compute.candles.late.dropped is a SUPERSET of the injection. The counter
+  # increments for every late/out-of-order drop the multi-tf aggregator makes —
+  # the injected 90s-old frames AND the re-feeds the live feed produces on its
+  # own (monotonic gate: a tick whose event time is not greater than the last
+  # seen for that token is dropped loudly, REQ-FC-006). Measured in run 9: the
+  # injected 20 landed on subtask 2 EXACTLY (0 → 20 in the sample right after
+  # the injection), while subtask 1 had already accumulated 112 natural
+  # re-feeds BEFORE the injection fired and reached 226 by phase end. Equality
+  # (or a +-1 tolerance around it) therefore summed unrelated drops and failed a
+  # run whose injection was counted perfectly: got late=134 (114 natural + 20
+  # injected) against want=20. Only the inequality is sound here — the counter
+  # must COVER every injected tick. A SHORTFALL still fails (that is the
+  # original defect this gate exists for: run 8, where the candle path was
+  # absent and the counter never moved at all); a SURPLUS is reported, not
+  # failed, because over-count cannot be attributed to the injection — every
+  # injected frame is a unique token counted at most once. The exact zero-loss
+  # authority is the analyzer's G7c tick-set parity check, which recounts the
+  # raw table rather than trusting a counter.
+  #
+  # The DEDUP half stays two-sided: dedup drops are exclusively the injection
+  # (run 9: dedup_duplicates = exactly 200 on one subtask, 0 elsewhere), so
+  # there is no natural baseline to swamp it.
   local tol_dups
   tol_dups=$(( want_dups / 20 )); [ "$tol_dups" -ge 1 ] || tol_dups=1
   local d_dups late_surplus
   d_dups=$(( dup_delta  - want_dups )); [ "$d_dups" -lt 0 ] && d_dups=$(( -d_dups ))
+  late_surplus=$(( late_delta - want_late )); [ "$late_surplus" -gt 0 ] || late_surplus=0
   echo "smoke inject gate: want dups=${want_dups:-0} late=${want_late:-0}; got dups=${dup_delta} late=${late_delta}; tolerance dups=+-${tol_dups} late=>=${want_late}; natural-late(not injected)=${late_surplus}"
   if [ "$d_dups" -gt "$tol_dups" ]; then
     echo "!! SMOKE INJECT GATE FAIL: dedup duplicates counter ${dup_delta} differs from injected ${want_dups} by ${d_dups} (tolerance ${tol_dups})" >&2
     return 1
   fi
-  if [ "${late_delta:-x}" != "${want_late:-x}" ]; then
-    echo "!! SMOKE INJECT GATE FAIL: late-drop counter ${late_delta} != injected ${want_late}" >&2
+  if [ "$late_delta" -lt "$want_late" ]; then
+    echo "!! SMOKE INJECT GATE FAIL: late-drop counter ${late_delta} is BELOW the injected ${want_late} — the candle window did not drop every injected late tick (absent path, stalled window, or ticks lost before the counter)" >&2
     return 1
   fi
+  echo "SMOKE INJECT GATE PASS — dedup dropped ${dup_delta} of ${want_dups} dups (tolerance +-${tol_dups}), window late-dropped ${late_delta} >= ${want_late} injected (${late_surplus} of those were natural feed re-feeds, not the injection; G7c parity is the zero-loss authority)"
   return 0
 }
 if ! smoke_inject_gate; then

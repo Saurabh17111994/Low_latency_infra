@@ -277,6 +277,55 @@ def g7c_measurement_guard(raw_read_ok, compared):
     return None
 
 
+def g7b_verdicts(late_delta, late_in_window, late_rows, want_late):
+    """G7b — the late-drop counter is a SUPERSET of the injection (P6-487).
+
+    `compute.candles.late.dropped` counts EVERY late/out-of-order drop the
+    multi-TF aggregator makes, not just the injected frames: the operator's
+    monotonic gate drops any tick whose event time is not greater than the
+    last seen for that token, loudly and by design (REQ-FC-006). The live feed
+    produces those re-feeds on its own.
+
+    Measured on the 2026-09-17 run: the 20 injected 90s-old frames landed on
+    one subtask *exactly* (0 -> 20 in the sample right after the injection
+    fired), while another subtask had already accumulated 112 natural re-feeds
+    BEFORE the injection and reached 226 by phase end. The old equality check
+    (`late_delta != late_in_window`) therefore compared a superset against a
+    subset and fired on a perfectly healthy run — 134 vs 20.
+
+    Only the inequality is sound: the counter must COVER every late tick that
+    reached raw and ingested inside the sampling window. Falling short means
+    injected late ticks were not dropped by the window (they reached candles as
+    stale rows) or were lost before the counter. A surplus is NOT evidence of
+    over-dropping — each injected frame is a unique token counted at most once,
+    so over-count cannot be attributed to the injection; the zero-loss
+    authority is G7c, which recounts ticks from the raw table.
+
+    Returns (failures, notes): failures go into the guard list, notes are
+    printed so the natural-re-feed surplus stays visible and auditable.
+    """
+    failures, notes = [], []
+    if want_late and late_delta < late_in_window:
+        failures.append(
+            f"G7b: late-drop counter {late_delta:.0f} is BELOW the "
+            f"{late_in_window} late ticks ingested inside the counter "
+            f"sampling window - late ticks are reaching candles (wrong "
+            f"data) or being lost before the counter")
+    surplus = late_delta - late_in_window
+    if surplus > 0:
+        notes.append(
+            f"- G7b note: the late-drop counter is {surplus:.0f} above the "
+            f"{late_in_window} injected late ticks ingested in-window — those "
+            f"are natural feed re-feeds the aggregator drops by design "
+            f"(monotonic gate), not over-dropping of the injection")
+    if late_rows != want_late:
+        failures.append(
+            f"G7b: raw table shows {late_rows} late ticks but "
+            f"{want_late} were injected - some late ticks never reached "
+            f"raw_table_1 (quarantined? dropped?)")
+    return failures, notes
+
+
 def f4_orphan_check(sig_groups, sig_group_ts, run_end, event_horizon=None,
                     grace_ms=30000):
     """F4: TENTATIVE-only groups whose settle decision MUST have landed.
@@ -1547,17 +1596,13 @@ def main():
             f"G7a: raw table shows {dup_extras} duplicate extras but "
             f"{want_dups} were injected - unexpected duplication "
             f"(bridge resend?) or dropped frames")
-    if want_late and late_delta != late_in_window:
-        failures.append(
-            f"G7b: late-drop counter {late_delta:.0f} != "
-            f"{late_in_window} late ticks ingested inside the counter "
-            f"sampling window - late ticks are reaching candles "
-            f"(wrong data) or being lost before the counter")
-    if late_rows != want_late:
-        failures.append(
-            f"G7b: raw table shows {late_rows} late ticks but "
-            f"{want_late} were injected - some late ticks never reached "
-            f"raw_table_1 (quarantined? dropped?)")
+    # P6-487: extracted so the superset semantics are unit-testable; see
+    # g7b_verdicts for why equality was never achievable here.
+    g7b_failures, g7b_notes = g7b_verdicts(
+        late_delta, late_in_window, late_rows, want_late)
+    failures.extend(g7b_failures)
+    for _note in g7b_notes:
+        print(_note)
     if mismatch:
         for msg in mismatch[:10]:
             failures.append(f"G7c: {msg}")
