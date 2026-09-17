@@ -1,7 +1,7 @@
 {
   "version": 8,
   "title": "Compute and Decision \u2014 Backpressure/Checkpoint/DEC-038",
-  "description": "SignalJob throughput/lag, watermarks, operator busy/idle/backpressure, checkpoint duration/size/failure/restore, plus DEC-038 dedup-table size/update rate/cache. Source: SignalJob Flink metrics via prometheus:9249 \u2192 metrics, logs via flink_logs/trading_alerts.",
+  "description": "SignalJob throughput/lag, watermarks, operator busy/idle/backpressure, checkpoint duration/size/failure/restore, plus the live Design-B dedup counters (compute.dedup.first/.duplicates; the DEC-038 Fluss dedup table is removed). Source: SignalJob Flink metrics via prometheus:9249 \u2192 metrics, logs via flink_logs/trading_alerts.",
   "folder_id": "default",
   "tabs": [
     {
@@ -87,7 +87,7 @@
           "id": "C04",
           "type": "gauge",
           "title": "Decision p99 \u2014 trigger tick \u2192 immutable decision",
-          "description": "ALERT-DECISION-P99 >100ms trending 3 windows 60s. SignalJob decision latency.",
+          "description": "ALERT-DECISION-P99 >100ms trending 3 windows 60s. SignalJob decision latency. NOTE 2026-09-17 (compute-identifier parity sweep): this panel has NO producer anywhere in the repo, and that is by design rather than drift — SIG-PERF-001's p99 decision-latency half is NOT_IMPLEMENTED (docs/02_requirements/09-acceptance-matrix.md AC-NFR-002), so the panel renders empty until the signal-side emitter lands. Deliberately kept as the placeholder for it and NOT removed by the CHG-195 dead-reference cleanup, unlike compute.dedup.state.count which was renamed away.",
           "config": {},
           "queryType": "sql",
           "queries": [
@@ -103,31 +103,6 @@
           ],
           "layout": {
             "x": 0,
-            "y": 8,
-            "w": 64,
-            "h": 8
-          }
-        },
-        {
-          "id": "C05",
-          "type": "line",
-          "title": "Dedup live state \u2014 compute.dedup.state.count / bytes.estimate (Design B)",
-          "description": "Design B (CHG-022/023): authoritative Flink keyed MapState, native TTL. Live entry count + bytes estimate gauge; no Fluss dedup table.",
-          "config": {},
-          "queryType": "sql",
-          "queries": [
-            {
-              "fields": {
-                "stream": "metrics",
-                "stream_type": "metrics"
-              },
-              "query": "SELECT max(value) as y, _timestamp as x FROM metrics WHERE metric_name='flink_taskmanager_job_task_operator_compute_dedup_state_count' GROUP BY x ORDER BY x",
-              "startTime": 0,
-              "endTime": 0
-            }
-          ],
-          "layout": {
-            "x": 64,
             "y": 8,
             "w": 64,
             "h": 8
@@ -152,7 +127,7 @@
             }
           ],
           "layout": {
-            "x": 128,
+            "x": 64,
             "y": 8,
             "w": 64,
             "h": 8

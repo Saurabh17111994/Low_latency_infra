@@ -101,6 +101,7 @@ STATE="$(job_state)"
 # burning the remaining DURATION_S and discovering it post-run.
 LEG_CHECKED_AT30=0
 BRIDGE_CHECKED_AT65=0
+AVAIL_REPORTED=0
 
 echo "stage-capture: job=$JOB_ID duration=${DURATION_S}s interval=${CAPTURE_INTERVAL_S}s out=$OUT_DIR"
 
@@ -140,6 +141,28 @@ vertex_ids="$(cut -f1 "$OUT_DIR/vertex-map.tsv" | tr '\n' ' ')"
 # Mirror of vertex-map.tsv consumed by the per-tick REST custom-metric fetch.
 cp "$OUT_DIR/vertex-map.tsv" "$OUT_DIR/.vertex-names.tsv"
 
+# ---------------------------------------------------------------------------
+# Observed topology (2026-09-17).
+#
+# The topology flags are NOT readable from this host: pipeline-lib.sh passes
+# MULTITF_ENABLED / STRATEGY_HOST_ENABLED / EXECUTION_INTENT_ENABLED to the
+# `flink run` CLIENT (`docker compose exec -T -e ...`), so they live in that one
+# process's environment and are persisted on no container. What IS observable is
+# the running job's own graph — so the branch state is DERIVED from
+# vertex-map.tsv, which is the same object the flags produced.
+#
+# Why it matters (CHG-191's shape): a capture of a job whose candle branch is off
+# records nothing for compute.candles.* and previously SAID nothing about it, so
+# downstream analysis read absence as zero. Recording the branch state plus a
+# per-name availability row turns that silence into evidence.
+#
+# No pipe into `grep -q`: under `set -o pipefail` grep's early exit SIGPIPEs the
+# producer and turns a match into a spurious failure.
+topology_has_op() { grep -q -- "$1" "$OUT_DIR/vertex-map.tsv"; }
+TOPOLOGY_BRANCHES="multi_tf=$(topology_has_op multi-tf-aggregator && echo on || echo off) \
+strategy_host=$(topology_has_op strategy-host && echo on || echo off) \
+execution_intent=$(topology_has_op execution-intent-producer && echo on || echo off)"
+
 {
   echo "started_epoch=$(date +%s)"
   echo "job_id=$JOB_ID"
@@ -155,12 +178,19 @@ cp "$OUT_DIR/vertex-map.tsv" "$OUT_DIR/.vertex-names.tsv"
   echo "fluss_probe_cp=${FLUSS_PROBE_CP:+set}"       # never echo the cp path (huge)
   echo "probe_table=${PROBE_TABLE}"
   echo "probe_tokens=${PROBE_TOKENS}"
+  # Observed topology, derived from the job graph (see the topology_has_op block).
+  echo "topology_branches=$TOPOLOGY_BRANCHES"
+  echo "topology_operators=$(cut -f2 "$OUT_DIR/vertex-map.tsv" | sed 's/ -> .*//' | tr '\n' ';')"
+  echo "topology_flags_source=derived-from-vertex-map (the flags reach the flink-run client, not any container)"
 } > "$OUT_DIR/run-meta.txt"
 
 echo -e "epoch\tvertex_id\toperator\tnumRecordsIn\tnumRecordsOut\tbusyMsSum\tbackpressuredMsSum\tidleMsSum" \
   > "$OUT_DIR/stages.tsv"
 echo -e "epoch\tvertex_id\toperator\tsubtask\twatermark" > "$OUT_DIR/watermark-lag.tsv"
 echo -e "epoch_ms\tvertex_id\toperator\tmetric\tsum" > "$OUT_DIR/custom-rest.tsv"
+# Per-name availability of the REQUESTED custom metrics: a requested name that
+# no vertex serves is recorded present=no here instead of going silently missing.
+echo -e "epoch_ms\tmetric\tpresent" > "$OUT_DIR/metric-availability.tsv"
 
 # Output-file declaration (2026-09-04): a hook that is env-enabled but whose
 # leg never produced data is a silent measurement failure. Declare exactly
@@ -389,7 +419,27 @@ PYEOF
   # /subtasks/metrics?get=<operator>.<metric>.
   # Rows: epoch, vertex_id, operator, metric(dotted), sum.
   local custom_names
-  custom_names="compute.dedup.first,compute.dedup.duplicates,compute.candles.emitted,compute.candles.late.updates,compute.candles.late.dropped,compute.candles.previews.emitted,compute.candles.previews.late.dropped,compute.candles.previews.restored_timer_noop,compute.candles.restored_timer_noop,compute.candles.duplicate_window,compute.candles.invalid.total,compute.candles.invalid.,compute.forming.bar.updates,compute.signal.passed,compute.signal.dropped.active_exists,compute.signal.cleared.closed,compute.signal.cleared.admin,compute.signal.active.count,compute.signals.detected,compute.signals.detected.forming,compute.signals.early.tentative,compute.signals.early.confirmed,compute.signals.early.confirmed_early,compute.signals.early.cancelled,compute.signals.early.marker_dropped,compute.invalid.rows,compute.invalid.byReason,compute.execution_intent.rejected,babysitter.positions.applied,babysitter.positions.conflict,babysitter.positions.duplicate,babysitter.positions.observed,babysitter.positions.stale,babysitter.positions.latest_observed_version,preview.trigger.previewFires,preview.trigger.eventTimeFires,rows.malformed,rows.skipped,transitions.applied"
+  # Requested operator metrics (2026-09-17 audit). The list is the EXACT set of
+  # identifiers the running SignalJob is expected to serve; anything else is
+  # recorded present=no in metric-availability.tsv (see the WARN in the capture
+  # loop). 22 names were removed here: they belonged to the 15s candle window
+  # path, the forming-bar stack, the 1s preview window and the old signal
+  # LOG/KV sinks, all retired by the 2026-09-05 cutover (`0f3e5952` and
+  # successors) — the harness kept asking for counters its own job graph no
+  # longer created, and recorded nothing for them without saying so (CHG-191's
+  # shape). The CandleTableContractValidator-era names are gone; do not re-add
+  # one without a `compute_identifier_parity` green run.
+  #
+  # Groups, in the order they appear below:
+  #   unconditional  — dedup / validation / startup / KV filter / ingest latency
+  #   MULTITF_ENABLED — the candle + live-snapshot + session-filter path
+  #   EXECUTION_INTENT_ENABLED — intent producer + its two histograms
+  #   cross-job      — babysitter.* live in the BabysitterJob graph and
+  #                    rows.*/transitions.applied in SafetyHaltJob, so they are
+  #                    ALWAYS present=no for a SignalJob capture; they are kept
+  #                    so the availability record states that rather than
+  #                    implying this capture should have measured them.
+  custom_names="compute.dedup.first,compute.dedup.duplicates,compute.invalid.rows,compute.invalid.byReason,compute.startup.mode,compute.signal.kv.filtered.noncanonical,compute.latency.ingest_to_monitor,compute.candles.emitted,compute.candles.late.dropped,compute.candles.gap.detected,compute.candles.live.emitted,compute.candles.restored_timer_noop,compute.candles.multitf.duplicate_window,compute.session.filtered.pre_open,compute.session.filtered.post_close,compute.execution_intent.rejected,compute.latency.tick_to_intent,compute.latency.signal_to_intent,babysitter.positions.applied,babysitter.positions.conflict,babysitter.positions.duplicate,babysitter.positions.observed,babysitter.positions.stale,babysitter.positions.latest_observed_version,rows.malformed,rows.skipped,transitions.applied"
   local epoch_ms
   epoch_ms="$(date +%s%3N)"
   local names_file="$OUT_DIR/.vertex-names.tsv"
@@ -413,6 +463,7 @@ def fetch(url, timeout=6):
     with urllib.request.urlopen(url, timeout=timeout) as r:
         return json.load(r)
 rows = []
+present: set[str] = set()
 for vid in vertex_names:
     op = vertex_names[vid].split(" -> ", 1)[0].replace("\t", " ")
     try:
@@ -436,6 +487,8 @@ for vid in vertex_names:
         for dotted, underscored in wanted_underscore.items():
             if last_seg == underscored:
                 pairs[f"{op_seg}.{underscored}"] = dotted
+                # Served by this vertex => the identifier EXISTS in this job.
+                present.add(dotted)
                 break
     if not pairs:
         continue
@@ -454,6 +507,14 @@ for vid in vertex_names:
         total = item.get("sum")
         if isinstance(total, (int, float)):
             rows.append(f"{epoch_ms}\t{vid}\t{op}\t{dotted}\t{int(total)}")
+# Availability record: one row per REQUESTED name, every sample. A name that no
+# vertex serves is present=no — recorded, never silently dropped. The printed
+# AVAIL_ABSENT line drives the one-time WARN in the capture loop.
+with open(f"{out_dir}/metric-availability.tsv", "a") as f:
+    for dotted in wanted:
+        f.write(f"{epoch_ms}\t{dotted}\t{'yes' if dotted in present else 'no'}\n")
+print("AVAIL_ABSENT=" + ",".join(n for n in wanted if n not in present))
+
 if rows:
     with open(f"{out_dir}/custom-rest.tsv", "a") as f:
         f.write("\n".join(rows) + "\n")
@@ -642,6 +703,26 @@ while :; do
     exit 2
   fi
   sample_tick || echo "warn: one sample tick failed (continuing)"
+
+  # Requested-vs-served report, once. The requested list is a superset of what any
+  # single topology serves: a flag-gated branch, or a counter owned by the
+  # Babysitter/SafetyHalt jobs (which this capture does not attach to), is
+  # legitimately absent. Absence must be STATED — otherwise a capture of a job with
+  # the candle branch off records nothing for compute.candles.* and says nothing,
+  # and downstream analysis reads the absence as zero (CHG-191, 2026-09-17).
+  if [ "$AVAIL_REPORTED" -eq 0 ] && [ -s "$OUT_DIR/metric-availability.tsv" ] \
+      && [ "$(wc -l < "$OUT_DIR/metric-availability.tsv")" -gt 1 ]; then
+    AVAIL_REPORTED=1
+    absent="$(awk -F'\t' '$3=="no"{print $2}' "$OUT_DIR/metric-availability.tsv" | sort -u | tr '\n' ' ')"
+    if [ -n "$absent" ]; then
+      echo "!! WARN: operator metrics ABSENT from job $JOB_ID (present=no in $OUT_DIR/metric-availability.tsv):" >&2
+      echo "   $absent" >&2
+      echo "   observed topology: $TOPOLOGY_BRANCHES" >&2
+      echo "   A gated name is absent because its operator is not wired (see the branch state); babysitter.*, rows.* and transitions.applied belong to the Babysitter/SafetyHalt jobs, which this capture does not attach to." >&2
+    else
+      echo "stage-capture: all requested operator metrics present ($TOPOLOGY_BRANCHES)"
+    fi
+  fi
 
   # t+30 leg-liveness: header-only ingestion/probe legs after 3 flush
   # intervals are dead — fail with the direct reason instead of waiting.

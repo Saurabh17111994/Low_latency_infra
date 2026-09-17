@@ -352,16 +352,15 @@ DASHBOARDS = [
                 "flink_taskmanager_job_task_operator_compute_candles_emitted",
             ),
             (
-                "Candles late updates",
+                # 2026-09-17 compute-identifier parity audit: this tile read
+                # compute_candles_late_updates, the pre-cutover 15s candle-window
+                # counter (`0f3e5952` retired it). The live counter is
+                # compute.candles.late.dropped — the one CHG-191/192 are about, which
+                # had NO tile at all while its dead predecessor had two.
+                "Candles late dropped (out-of-order)",
                 "promql",
-                "max(flink_taskmanager_job_task_operator_compute_candles_late_updates)",
-                "flink_taskmanager_job_task_operator_compute_candles_late_updates",
-            ),
-            (
-                "Signals detected",
-                "promql",
-                "max(flink_taskmanager_job_task_operator_compute_signals_detected)",
-                "flink_taskmanager_job_task_operator_compute_signals_detected",
+                "max(flink_taskmanager_job_task_operator_compute_candles_late_dropped)",
+                "flink_taskmanager_job_task_operator_compute_candles_late_dropped",
             ),
             (
                 "Dedup duplicates",
@@ -369,12 +368,16 @@ DASHBOARDS = [
                 "max(flink_taskmanager_job_task_operator_compute_dedup_duplicates)",
                 "flink_taskmanager_job_task_operator_compute_dedup_duplicates",
             ),
-            (
-                "Dedup state count",
-                "timeseries",
-                "select _timestamp, value from \"flink_taskmanager_job_task_operator_compute_dedup_state_count\" where _timestamp >= '{start_time}' and _timestamp <= '{end_time}' order by _timestamp",
-                "flink_taskmanager_job_task_operator_compute_dedup_state_count",
-            ),
+            # 2026-09-17 compute-identifier parity audit: removed two tiles here.
+            #   "Signals detected" read compute_signals_detected (old signal-detection
+            #     stack; its live successor is the per-rule strategy-host family
+            #     strategy_host_emitted_<rule>, which is not a single stream and needs
+            #     a tile designed around the dynamic ruleId label).
+            #   "Dedup state count" read compute_dedup_state_count; the fingerprint-dedup
+            #     operator registers only compute.dedup.first/compute.dedup.duplicates,
+            #     so no app gauge for dedup state size exists any more. State sizing is
+            #     observed through Flink's own state metrics on the Checkpoints dashboard.
+
             (
                 "Invalid rows (validation)",
                 "promql",
@@ -431,16 +434,22 @@ DASHBOARDS = [
                 "flink_taskmanager_job_task_operator_compute_candles_emitted",
             ),
             (
-                "Candles late updates",
+                # 2026-09-17 compute-identifier parity audit: was
+                # compute_candles_late_updates (see the COMPUTE - Signals tile above).
+                "Candles late dropped (out-of-order)",
                 "promql",
-                "max(flink_taskmanager_job_task_operator_compute_candles_late_updates)",
-                "flink_taskmanager_job_task_operator_compute_candles_late_updates",
+                "max(flink_taskmanager_job_task_operator_compute_candles_late_dropped)",
+                "flink_taskmanager_job_task_operator_compute_candles_late_dropped",
             ),
             (
-                "KV filter noncanonical (emitter)",
+                # 2026-09-17 compute-identifier parity audit: was
+                # compute_kv_filtered_noncanonical — one `signal_` short of the live
+                # stream, so the panel was empty. The "(emitter)" suffix went with the
+                # hand-rolled emitter (CHG-023 item 1, native Flink reporter).
+                "KV filter noncanonical",
                 "promql",
-                "max(compute_kv_filtered_noncanonical)",
-                "compute_kv_filtered_noncanonical",
+                "max(compute_signal_kv_filtered_noncanonical)",
+                "compute_signal_kv_filtered_noncanonical",
             ),
         ],
     },
@@ -497,18 +506,11 @@ DASHBOARDS = [
                 "max(flink_jobmanager_job_restartingtime)",
                 "flink_jobmanager_job_restartingtime",
             ),
-            (
-                "Dedup state count",
-                "timeseries",
-                "select _timestamp, value from \"flink_taskmanager_job_task_operator_compute_dedup_state_count\" where _timestamp >= '{start_time}' and _timestamp <= '{end_time}' order by _timestamp",
-                "flink_taskmanager_job_task_operator_compute_dedup_state_count",
-            ),
-            (
-                "Dedup state bytes estimate",
-                "timeseries",
-                "select _timestamp, value from \"flink_taskmanager_job_task_operator_compute_dedup_state_bytes_estimate\" where _timestamp >= '{start_time}' and _timestamp <= '{end_time}' order by _timestamp",
-                "flink_taskmanager_job_task_operator_compute_dedup_state_bytes_estimate",
-            ),
+            # 2026-09-17 compute-identifier parity audit: removed "Dedup state count"
+            # and "Dedup state bytes estimate" — both streams (compute_dedup_state_count,
+            # compute_dedup_state_bytes_estimate) were retired with the old signal path
+            # and the fingerprint-dedup operator registers no state-size gauge. Dedup
+            # pressure is read from compute.dedup.duplicates on the Signals dashboard.
             (
                 "JM heap used (bytes)",
                 "timeseries",
@@ -896,10 +898,13 @@ DASHBOARDS = [
                 "compute_invalid_byreason_schema_version",
             ),
             (
-                "KV filter noncanonical (emitter)",
+                # 2026-09-17 compute-identifier parity audit: was
+                # compute_kv_filtered_noncanonical — one `signal_` short of the live
+                # stream, and named for an emitter that no longer exists (CHG-023 item 1).
+                "KV filter noncanonical",
                 "timeseries",
-                "select _timestamp, value from \"compute_kv_filtered_noncanonical\" where _timestamp >= '{start_time}' and _timestamp <= '{end_time}' order by _timestamp",
-                "compute_kv_filtered_noncanonical",
+                "select _timestamp, value from \"compute_signal_kv_filtered_noncanonical\" where _timestamp >= '{start_time}' and _timestamp <= '{end_time}' order by _timestamp",
+                "compute_signal_kv_filtered_noncanonical",
             ),
             (
                 "Dedup duplicates (suppressed rows)",
