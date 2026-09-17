@@ -217,7 +217,7 @@ L129-252); `code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py`
 
 **Depends on:** none
 
-- [ ] **P6-008 / P6-009 — liveness.** Replace L249-250 with container probes using
+- [x] **P6-008 / P6-009 — liveness.** Replace L249-250 with container probes using
       the lib's own variables and message shape:
       ```bash
       # CHG-122: the data path is containers, not host PIDs. Library container
@@ -232,23 +232,23 @@ L129-252); `code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py`
       ```
       `_alive` is a local helper, not a lib export — do not add it to
       `pipeline-lib.sh`.
-- [ ] **P6-007 — delete the `jvm` row** (L199). `/proc/<pid>/io` is mode 0400 and the
+- [x] **P6-007 — delete the `jvm` row** (L199). `/proc/<pid>/io` is mode 0400 and the
       ingestion process runs as root inside a container, so the row can only ever
       be empty or raise an unbound-variable error. Replace it with a cgroup
       `io.stat` sample for `$LIB_INGESTION_CONTAINER`, label `ingestion`.
-- [ ] **Also delete the `bridge` row** (L200-202, `pgrep -f arrow-bridge`). Same
+- [x] **Also delete the `bridge` row** (L200-202, `pgrep -f arrow-bridge`). Same
       reason — and a host-side `arrow-bridge` makes `pipeline_preflight` L418 fail
       the run as a CHG-122 policy violation, so the row is unreachable in a valid
       run either way.
-- [ ] **Extend the cgroup list** (L149) beyond the 6 stack containers to include
+- [x] **Extend the cgroup list** (L149) beyond the 6 stack containers to include
       `$LIB_FAKETOOL_CONTAINER` and `$LIB_INGESTION_CONTAINER`, so the removed
       `/proc` rows are replaced by samples that carry data.
-- [ ] **P6-107 — hoist.** Move `DISK_DEV` (L141), the container-ID resolution
+- [x] **P6-107 — hoist.** Move `DISK_DEV` (L141), the container-ID resolution
       (L148-156) and the `io.stat` path build **above** the `for ((i…))` loop so
       they run once per phase instead of ~180×. The existing comment already says
       "once per phase"; make the code match it. Place the block after the warm-up
       guard (L121) — the pipeline containers do not exist before L96-97.
-- [ ] **P6-406 — validate the knobs.** `fail()` is defined at **L59**, after the
+- [x] **P6-406 — validate the knobs.** `fail()` is defined at **L59**, after the
       `source` at L57, so the validation must sit immediately after L59/L60 —
       **not** before `source`, where `fail` does not exist yet. Add:
       ```bash
@@ -261,11 +261,11 @@ L129-252); `code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py`
         [ "$_v" -gt 0 ] || fail "$_knob must be greater than 0 (got '$_v')"
       done
       ```
-- [ ] **Add the cgroup-root test seam.** One line beside the other locals:
+- [x] **Add the cgroup-root test seam.** One line beside the other locals:
       `_CG_ROOT="${HOLISTIC_CG_ROOT:-/sys/fs/cgroup/system.slice}"`, used to build the
       `io.stat` path. Comment it as a test hook (precedent: `G7_REUSE_RAW`), because
       a test cannot write to `/sys`.
-- [ ] **Tests** (failing first):
+- [x] **Tests** (failing first):
       * a dead loadgen container ends the phase, names `$LIB_FAKETOOL_CONTAINER` on
         stderr, and the run does **not** die with "unbound variable" — assert that
         string is absent from stderr;
@@ -276,7 +276,7 @@ L129-252); `code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py`
         reach Phase A — assert the evidence directory was not created;
       * the hoist is observable: with a `docker` shim counting invocations, a 3-poll
         phase calls `docker inspect` the same number of times as a 1-poll phase.
-- [ ] **Verify:** `shellcheck -S warning` clean; `bash -n` clean; new tests pass;
+- [x] **Verify:** `shellcheck -S warning` clean; `bash -n` clean; new tests pass;
       and the liveness test **fails against a copy of the pre-fix file** (capture
       that output as evidence).
 
@@ -293,24 +293,24 @@ identically. Both edits are required or nothing changes.
 
 **Depends on:** Task 1
 
-- [ ] Replace `export ALLOW_STALE_TABLE=true` (L53) with a `false` default, or
+- [x] Replace `export ALLOW_STALE_TABLE=true` (L53) with a `false` default, or
       delete the line and let the library's own default apply. Keep the comment
       (L50-52) but correct it — it currently asserts the opt-in is deliberate,
       which this task reverses.
-- [ ] File **CHG-184** (`scope: gate-behavior`) in the same commit train, because
+- [x] File **CHG-184** (`scope: gate-behavior`) in the same commit train, because
       this task removes a limitation `CHG-154.md` L164 filed as gate behaviour.
       Fields and validation in *Required External or Manual Verification*.
-- [ ] Change L95 to `pipeline_purge_raw_table || return 1`.
-- [ ] **Do not touch P6-103.** `pipeline_purge_preview_table` was removed in
+- [x] Change L95 to `pipeline_purge_raw_table || return 1`.
+- [x] **Do not touch P6-103.** `pipeline_purge_preview_table` was removed in
       `72bd64ae` together with this file's call site. `pipeline_purge_table`'s
       comment at lib L735-742 still describes the retired preview purge and is
       **stale**; fixing that comment is optional and belongs in a docs commit.
-- [ ] **Tests:** with the stub lib reporting a failed purge, `run_phase` returns
+- [x] **Tests:** with the stub lib reporting a failed purge, `run_phase` returns
       non-zero and never reaches `pipeline_start_ingestion`; with
       `ALLOW_STALE_TABLE=true` set by the **operator**, the phase continues (the
       opt-in stays available, it is just not the default). Cite
       `test_pipeline_lib_hardening.py` L252-267 as precedent for both halves.
-- [ ] **Verify:** both tests pass; `make docs-audit` stays green.
+- [x] **Verify:** both tests pass; `make docs-audit` stays green.
 
 ### Task 3: Make the evidence columns correct
 
@@ -323,7 +323,7 @@ sample across rows.
 
 **Depends on:** Task 1
 
-- [ ] **P6-106 — the separator.** The emitter is `pipeline-lib.sh` L1253:
+- [x] **P6-106 — the separator.** The emitter is `pipeline-lib.sh` L1253:
       `print(vertex_name, "|", read, "|", write)`, so a real row is
       `src_raw | 12345 | 67890`. `-F'| '` is two characters and awk reads a
       multi-character FS as an ERE: `|` is alternation, so the separator is
@@ -340,26 +340,26 @@ sample across rows.
         '{printf "%s\t%s\t%s\t%s\t%s\n", e, $1, $2, $3, s}' >> "$tsv"
       ```
       Verified against the real row: gives `$1=src_raw $2=12345 $3=67890`.
-- [ ] **P6-407 — multi-device `io.stat`.** A cgroup with more than one device emits
+- [x] **P6-407 — multi-device `io.stat`.** A cgroup with more than one device emits
       one line per device, so `print $i` returns several lines and `_r`/`_w` carry
       embedded newlines. Sum within awk:
       `awk '{for(i=2;i<=NF;i++) if($i ~ /^rbytes=/) {sub("rbytes=","",$i); s+=$i}} END{print s+0}' "$_cg"`
       (same shape for `wbytes`), keeping the `${_r:-0}` fallbacks.
-- [ ] **P6-407 — stale paths.** When `docker inspect` fails (container recreated ⇒
+- [x] **P6-407 — stale paths.** When `docker inspect` fails (container recreated ⇒
       new id), unset the corresponding `DISK_<name>_CG` instead of leaving the old
       path, which silently samples the previous container.
-- [ ] **P6-407 — drop both `eval`s.** L155 (`eval "DISK_${_c}_CG=…"`) and L192
+- [x] **P6-407 — drop both `eval`s.** L155 (`eval "DISK_${_c}_CG=…"`) and L192
       (`eval echo \$DISK_${_n}_CG`) build variable names by string. Replace with one
       associative array (`declare -A DISK_CG`) — already used in this repo
       (`run-full-suite.sh` L59). This also removes the `set -u` stderr noise the
       audit measured when a monitored container is absent.
-- [ ] **Keep the analyzer's label contract.** `holistic-analyze.py` parses
+- [x] **Keep the analyzer's label contract.** `holistic-analyze.py` parses
       `main/proc-io.tsv` with `r"(\d+) (\w+) read_bytes: (\d+) write_bytes: (\d+)"`
       (L1131, L1284) and special-cases the label `tablet` for the G6c read-storm
       guard (L1288). Keep `tablet` spelled exactly as today and use only `\w`-safe
       labels for new rows (`faketool`, `ingestion`) — a hyphen or space would
       silently drop every row for that container.
-- [ ] **Tests:**
+- [x] **Tests:**
       * feed the real emitter line `src_raw | 12345 | 67890` through the script's
         own awk invocation and assert the written row carries `12345` in the `read`
         column and `67890` in `write` — key by column **name** from the header, never
@@ -369,7 +369,7 @@ sample across rows.
         whose read/write equal the summed values;
       * with a fixture where one device has no `wbytes`, assert the row still
         appears with a correct read sum and `write_bytes: 0`.
-- [ ] **Verify:** tests pass; byte-compare the new awk against the current one on the
+- [x] **Verify:** tests pass; byte-compare the new awk against the current one on the
       real emitter format to show the split changed.
 
 ### Task 4: Bound the poll body and the metric fan-out
@@ -385,13 +385,13 @@ distorts the system it measures.
 
 **Depends on:** Task 1
 
-- [ ] **P6-409 — batch the fetch.** One call per vertex instead of six, using the
+- [x] **P6-409 — batch the fetch.** One call per vertex instead of six, using the
       comma-joined form proven in `loadtest-collect.sh` L136:
       `…/vertices/{vid}/metrics?get=busyTimeMsPerSecond,backPressuredTimeMsPerSecond,idleTimeMsPerSecond,latencyP50,latencyP95,latencyP99`.
       Emit one TSV row per returned metric, preserving the existing
       `epoch / vertex / metric / value` shape, and keep the per-item `try/except`
       so a missing metric stays a missing row, never a fatal error.
-- [ ] **P6-408 — deadline-based pacing.** Replace `sleep "$POLL_S"` (L251) with:
+- [x] **P6-408 — deadline-based pacing.** Replace `sleep "$POLL_S"` (L251) with:
       ```bash
       next=$((next + POLL_S)); now=$(date +%s)
       [ "$now" -lt "$next" ] && sleep $((next - now))
@@ -399,11 +399,11 @@ distorts the system it measures.
       Initialise `next` from the phase start so drift cannot accumulate, and never
       sleep a negative value. Log once per phase when the body overruns its budget,
       so an under-sampled run is visible rather than silent.
-- [ ] **Tests:** with a `curl` shim counting requests, a phase with 3 vertices makes
+- [x] **Tests:** with a `curl` shim counting requests, a phase with 3 vertices makes
       exactly 3 vertex-metric calls, not 18; with a `sleep` shim recording its
       argument, a body that exceeds `POLL_S` results in no sleep call for that
       iteration.
-- [ ] **Verify:** tests pass; the suite stays under ~60s (use shims and 1-2 poll
+- [x] **Verify:** tests pass; the suite stays under ~60s (use shims and 1-2 poll
       iterations, never real multi-minute waits).
 
 ### Task 5: Make the gates prove what they claim
@@ -416,7 +416,7 @@ L366-377); `code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py`
 
 **Depends on:** Task 1
 
-- [ ] **P6-405 — injection must fire inside the sampled window.** The offset is
+- [x] **P6-405 — injection must fire inside the sampled window.** The offset is
       measured from faketool start (`main.go` L328 `time.Now().Add(*injectAfter)`),
       but counters are only sampled from the end of warm-up onward — the poll loop
       begins at L129, after `sleep "$WARMUP_S"` at L103. The gate compares
@@ -449,7 +449,7 @@ L366-377); `code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py`
       so the live-verified commentary at L75-84 stays true and the change carries
       zero risk to a normal run; only the documented quick variant moves, from an
       offset it could never satisfy to one inside its 65..85s window.
-- [ ] **P6-411 — fail closed on missing evidence.** `fingerprint_gate` L368 runs
+- [x] **P6-411 — fail closed on missing evidence.** `fingerprint_gate` L368 runs
       `grep -ac … "$dir/j1/java.out" 2>/dev/null || true`; a missing file leaves `n`
       empty and `${n:-0} -eq 0` **passes**. Add before the grep:
       ```bash
@@ -461,7 +461,7 @@ L366-377); `code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py`
       This cannot false-fail a successful phase: the library creates `$OUT/j1`
       (L364, L520), mirrors the container log into `java.out` (L692), and requires
       `HFT subscribed` to appear there (L710-713).
-- [ ] **P6-410 — tolerant, reset-aware counter delta.** Exact equality at L341/L345
+- [x] **P6-410 — tolerant, reset-aware counter delta.** Exact equality at L341/L345
       treats a missed sample, a series reset (a job restart resets counters to 0),
       subtask churn, or a `%.0f` rounding difference as a pipeline bug. Reuse
       `counter_deltas()` (`holistic-analyze.py` L164-192) rather than writing a
@@ -472,11 +472,11 @@ L366-377); `code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py`
       `main.go` L381 prints `dups=`, and only on an INJECT line (verified), so the
       `want_*` sums are already correct. Record that correction in the finding's
       evidence note.
-- [ ] **Tests:** missing/empty `j1/java.out` ⇒ gate non-zero (failing-first for
+- [x] **Tests:** missing/empty `j1/java.out` ⇒ gate non-zero (failing-first for
       P6-411 — it passes today); delta off by 1 ⇒ gate passes; delta off by 50% ⇒
       gate fails; a series dropping to 0 mid-run (restart) ⇒ gate passes;
       `SMOKE_S=60` ⇒ `INJECT_AFTER_MS=85000`; `SMOKE_S=180` ⇒ still `120000`.
-- [ ] **Verify:** all new tests pass; the P6-411 test fails against the current file
+- [x] **Verify:** all new tests pass; the P6-411 test fails against the current file
       before the edit.
 
 ### Task 6: Remove dead weight and restore shell discipline
@@ -486,16 +486,16 @@ L366-377); `code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py`
 
 **Depends on:** Task 1
 
-- [ ] **P6-743 — restore, do not clear, `pipefail`.** L403 enables it for the
+- [x] **P6-743 — restore, do not clear, `pipefail`.** L403 enables it for the
       analyzer pipeline and L407 does `set +o pipefail`, permanently clearing the
       script-global mode set at L38. Change L407 to `set -o pipefail`.
-- [ ] **P6-108 — capture `CP` explicitly.** `CP` is assigned only as a side effect of
+- [x] **P6-108 — capture `CP` explicitly.** `CP` is assigned only as a side effect of
       `pipeline_preflight` (lib L425, no `local`), so L404 depends on a library
       internal. Add the guard before the invocation: `CP="${CP:-}"` then
       `[ -n "$CP" ] || { echo "FATAL: empty CP after main phase" >&2; exit 1; }`.
       Do **not** add `local CP` in the lib — that would break every caller reading
       it this way.
-- [ ] **P6-108 — delete `analyze_latency()`** (L65-68). It has exactly one
+- [x] **P6-108 — delete `analyze_latency()`** (L65-68). It has exactly one
       occurrence in the repo (its own definition), takes a 2-argument shape that no
       longer matches the analyzer's 4-argument call, and wraps the call in
       `|| true`, which would hide a failing guard.
@@ -504,39 +504,39 @@ L366-377); `code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py`
       callers (L304-308, L384-386) `exit 1` immediately, which fires the `EXIT` trap
       installed at L60 and runs `pipeline_cleanup`. An explicit call is redundant,
       not harmful; omitting it keeps the diff honest.
-- [ ] **Do not break `test-pipeline-lib.sh` G9:** it greps `holistic-measure.sh` for
+- [x] **Do not break `test-pipeline-lib.sh` G9:** it greps `holistic-measure.sh` for
       the literal `fingerprint_gate` (L174-177), so that function keeps its name.
-- [ ] **Tests:** a non-zero analyzer exit still fails the run after the `pipefail`
+- [x] **Tests:** a non-zero analyzer exit still fails the run after the `pipefail`
       change (the guard at L408-411 must still fire); with `CP` unset the script
       exits non-zero with the message instead of an "unbound variable" abort;
       `analyze_latency` is gone (source-text check skipping comment lines).
-- [ ] **Verify:** `bash -n`; `shellcheck -S warning`; `bash
+- [x] **Verify:** `bash -n`; `shellcheck -S warning`; `bash
       code/01_platform/04_scripts/test-pipeline-lib.sh` still green (it covers G9).
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] `shellcheck -S warning code/01_platform/04_scripts/holistic-measure.sh` clean;
+- [x] `shellcheck -S warning code/01_platform/04_scripts/holistic-measure.sh` clean;
       `bash -n` clean; `python3 -m pyflakes` clean on the new test file.
-- [ ] New suite passes:
+- [x] New suite passes:
       `python3 -m pytest code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py -q`;
       wave-35 suites still pass.
-- [ ] **Failing-first evidence for the three headline bugs**, captured against a
+- [x] **Failing-first evidence for the three headline bugs**, captured against a
       copy of the pre-fix file (not asserted from memory): the liveness test, the
       `throughput.tsv` column test, and the `fingerprint_gate` test each fail before
       the fix and pass after. Record commands and output in the commit body or the
       findings' evidence notes.
-- [ ] **Mutation check.** Apply these to a copy and confirm the suite catches each:
+- [x] **Mutation check.** Apply these to a copy and confirm the suite catches each:
       (a) restore `kill -0 "$FAKETOOL_PID"`; (b) restore `-F'| '`; (c) remove the
       `-s` guard in `fingerprint_gate`; (d) restore `export ALLOW_STALE_TABLE=true`;
       (e) re-add `set +o pipefail`. A mutation that is **not** caught is a documented
       limitation, not a silence — the wave-35 precedent records honest limits in the
       test docstring.
-- [ ] Confirm the test sandbox **mirrors the repo layout**. Tests resolve
+- [x] Confirm the test sandbox **mirrors the repo layout**. Tests resolve
       `REPO = Path(__file__).resolve().parents[4]`; the copy under test must sit at
       `<sandbox>/code/01_platform/04_scripts/` or the tests exercise the real repo
       and every mutation becomes a no-op.
-- [ ] Full gate: `make docs-audit` and the full pytest suite. Report the totals.
-- [ ] **Live run** — see Required External or Manual Verification.
+- [x] Full gate: `make docs-audit` and the full pytest suite. Report the totals.
+- [x] **Live run** — see Required External or Manual Verification.
 - [ ] **All 18 findings ticked** in
       `~/.opencodereview/sessions/home-saurabh-Jupyter_notebook-Flink_Fluss_Infrastructure-streaming_project_New/phases/p6-ops-scripts-tests-chaos-audit.md`,
       each with a `> **Fixed:**` / `> **Not a bug:**` / `> **Already fixed:**`
