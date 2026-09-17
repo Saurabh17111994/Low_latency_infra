@@ -20,24 +20,40 @@ STUBS = TESTS / "stubs"
 SCRIPT = SCRIPTS / "stage-capture.sh"
 
 
-def _sandbox(tmp_path):
+JAVA_STUB = """#!/usr/bin/env bash
+echo "java $@" >> "$JAVA_ARGV"
+# Hang only the read-lag probe: all three probes share this stub, and each
+# has its own 20s timeout — hanging all three would (correctly) cost 60s.
+case "$*" in
+  *FlussReadLagProbe*) [ "${JAVA_HANG:-0}" = "1" ] && /bin/sleep 60 ;;
+esac
+exit "${JAVA_RC:-0}"
+"""
+
+
+def _sandbox(tmp_path, extra_bins=None):
     d = tmp_path / "bin"
     d.mkdir()
     shutil.copy(STUBS / "wave38_curl.py", d / "curl")
     shutil.copy(STUBS / "wave38_docker.py", d / "docker")
     shutil.copy(STUBS / "wave24_iostat.py", d / "iostat")
     (d / "sleep").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (d / "java").write_text(JAVA_STUB)
+    (d / "javac").write_text("#!/usr/bin/env bash\nexit 0\n")
+    for name, body in (extra_bins or {}).items():
+        (d / name).write_text(body)
     for f in d.iterdir():
         f.chmod(f.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return d
 
 
-def _run(tmp_path, curl_mode="stay-running", queue="", duration="8", extra_env=None):
+def _run(tmp_path, curl_mode="stay-running", queue="", duration="8", extra_env=None,
+         extra_bins=None):
     out = tmp_path / "out"
     out.mkdir(exist_ok=True)  # tests may pre-plant fixtures (e.g. a corrupt offset)
     state = tmp_path / "curl-state.json"
     env = dict(os.environ)
-    env.update({"PATH": str(_sandbox(tmp_path)) + os.pathsep + env["PATH"],
+    env.update({"PATH": str(_sandbox(tmp_path, extra_bins)) + os.pathsep + env["PATH"],
                 "OUT_DIR": str(out), "DURATION_S": duration,
                 "W38_CURL_STATE": str(state), "W38_CURL_MODE": curl_mode,
                 "W38_CURL_QUEUE": queue})
@@ -165,3 +181,44 @@ def test_parse_failure_holds_offset(tmp_path):
     assert "ingestion.tsv" in text and "NO data rows" in text
     assert not (out / ".ingestion-java.out.offset").exists(), \
         "offset advanced despite failed parse"
+
+
+# ---------------- commit 6 (P6-560/561) ----------------
+def test_probe_db_table_params(tmp_path):
+    # P6-561: probe 1 must take PROBE_DB/PROBE_RAW_TABLE (old: hardcoded
+    # `default raw_table_1`, incomparable with the KV legs); the KV probes
+    # keep their own tables (guards against over-editing the block).
+    argv = tmp_path / "java-argv.txt"
+    extra = {"FLUSS_PROBE_CP": "/tmp/fake-cp", "JAVA_ARGV": str(argv),
+             "PROBE_DB": "mydb", "PROBE_RAW_TABLE": "myraw"}
+    proc, out, _ = _run(tmp_path, extra_env=extra)
+    text = proc.stdout + proc.stderr
+    # The stub probes emit no rows, so the end-gate fails the run on the
+    # rowless read-lag leg (rc 2) — expected: it proves the probes actually
+    # ran under FLUSS_PROBE_CP. The 561 pin is the argv below.
+    assert proc.returncode == 2, text
+    assert "read-lag.tsv(header-only)" in text, text
+    lines = argv.read_text().splitlines()
+    lag = [l for l in lines if "FlussReadLagProbe" in l]
+    assert lag, "read-lag probe never ran"
+    assert any("mydb myraw" in l for l in lag), lines
+    assert not any("default raw_table_1" in l for l in lag), lines
+    kv = [l for l in lines if "FlussKvProbe" in l]
+    assert kv and any("candle_live" in l for l in kv), lines
+
+
+def test_probe_hang_bounded(tmp_path):
+    # P6-560: a hung probe RPC must die at 20s (timeout), keep stderr in the
+    # per-tick err file, and WARN — never wedge the run. The stub hangs the
+    # read-lag probe 60s; without the fix that tick blocks ~60s (wall >= 50).
+    import time
+    argv = tmp_path / "java-argv.txt"
+    extra = {"FLUSS_PROBE_CP": "/tmp/fake-cp", "JAVA_ARGV": str(argv),
+             "JAVA_HANG": "1"}
+    start = time.monotonic()
+    proc, out, _ = _run(tmp_path, duration="25", extra_env=extra)
+    elapsed = time.monotonic() - start
+    text = proc.stdout + proc.stderr
+    assert "FlussReadLagProbe failed this tick" in text, text
+    assert (out / "probe-read-lag.err").is_file(), "probe stderr not kept"
+    assert elapsed < 50, f"probe hang not bounded (wall {elapsed:.0f}s)"

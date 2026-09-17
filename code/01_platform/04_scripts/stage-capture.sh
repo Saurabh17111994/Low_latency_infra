@@ -52,6 +52,8 @@ FLUSS_PROBE_CP="${FLUSS_PROBE_CP:-}"       # classpath for FlussReadLagProbe/Flu
 FLUSS_PROBE_DIR="${FLUSS_PROBE_DIR:-$SCRIPT_DIR/fluss-probes}"
 PROBE_TABLE="${PROBE_TABLE:-candle_live}"
 PROBE_CLOSED_TABLE="${PROBE_CLOSED_TABLE:-candle_closed}"
+PROBE_DB="${PROBE_DB:-default}"
+PROBE_RAW_TABLE="${PROBE_RAW_TABLE:-raw_table_1}"
 PROBE_TOKENS="${PROBE_TOKENS:-4,7,13,17,19}"
 PROBE_BOOTSTRAP="${PROBE_BOOTSTRAP:-localhost:9123}"
 
@@ -642,23 +644,28 @@ fi
 
 sample_probes() {
   [ -n "$FLUSS_PROBE_CP" ] || return 0
+  # P6-560: every probe runs under `timeout 20` with stderr in a per-tick
+  # err file. Unbounded, a hung Admin/KV RPC blocks the whole tick (and the
+  # discarded stderr defeated fail-LOUD). P6-561: probe 1 takes PROBE_DB /
+  # PROBE_RAW_TABLE like the KV probes take theirs, so read-lag and
+  # consumer-read monitor the same tables and stay comparable.
   # Probe 1: raw log-end offsets (CP3 side). One Admin.listOffsets RPC.
-  java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
-    FlussReadLagProbe default raw_table_1 "$PROBE_BOOTSTRAP" \
-    >> "$OUT_DIR/read-lag.tsv" 2>/dev/null || echo "!! WARN: FlussReadLagProbe failed this tick" >&2
+  timeout 20 java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+    FlussReadLagProbe "${PROBE_DB}" "${PROBE_RAW_TABLE}" "$PROBE_BOOTSTRAP" \
+    >> "$OUT_DIR/read-lag.tsv" 2>"$OUT_DIR/probe-read-lag.err" || echo "!! WARN: FlussReadLagProbe failed this tick (see $OUT_DIR/probe-read-lag.err)" >&2
   # Probe 2: KV live lookups (CP9->CP10). 3 lookups, <=1/s aggregate.
-  java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+  timeout 20 java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
     FlussKvProbe "$PROBE_TABLE" 15000 "$PROBE_TOKENS" "$PROBE_BOOTSTRAP" \
-    >> "$OUT_DIR/consumer-read.tsv" 2>/dev/null || echo "!! WARN: FlussKvProbe failed this tick" >&2
+    >> "$OUT_DIR/consumer-read.tsv" 2>"$OUT_DIR/probe-consumer.err" || echo "!! WARN: FlussKvProbe failed this tick (see $OUT_DIR/probe-consumer.err)" >&2
   # Probe 3: CLOSED candle table (CP9->CP10 for the closed leg).
   # Same lookups against candle_closed. FlussKvProbe resolves window_end and
   # last_event_time BY NAME from the live table schema (wave 13, P6-371), so a
   # reordered table fails loudly instead of reading whatever sits at index 5/12.
   # A partial sample (some tokens failed or missed) exits 3 and is warned below;
   # the rows that were read are still appended to the TSV.
-  java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+  timeout 20 java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
     FlussKvProbe "$PROBE_CLOSED_TABLE" 15000 "$PROBE_TOKENS" "$PROBE_BOOTSTRAP" \
-    >> "$OUT_DIR/closed-read.tsv" 2>/dev/null || echo "!! WARN: FlussKvProbe(closed) failed this tick" >&2
+    >> "$OUT_DIR/closed-read.tsv" 2>"$OUT_DIR/probe-closed.err" || echo "!! WARN: FlussKvProbe(closed) failed this tick (see $OUT_DIR/probe-closed.err)" >&2
 }
 
 START=$(date +%s)
