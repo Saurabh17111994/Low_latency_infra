@@ -240,7 +240,13 @@ x-flink-common: &flink-common
     # restore run failed closed at [F005] ("STATE_RECOVERY_PATH is required")
     # despite a valid savepoint. Same value on the anchor keeps the launcher
     # gate and the job's gate consistent. No default: unset stays unset.
-    STATE_RECOVERY_PATH: ${STATE_RECOVERY_PATH:-}
+    # Bare null, NOT `${STATE_RECOVERY_PATH:-}` — `:-` substitutes an empty
+    # string, so the job JVM saw it present-and-blank and [F005] refused to
+    # start ("present but blank"), stalling every pipeline_submit_job caller
+    # that `compose exec`s into this container (CHG-187). [F005]'s
+    # blank-rejection is deliberate and safety-gated, so blank is never a
+    # valid way to say "no restore".
+    STATE_RECOVERY_PATH:
 
 networks:
   trading-net:
@@ -554,6 +560,21 @@ services:
       # Host-side reporter port for verification (collector scrapes the
       # internal name flink-jobmanager:9249; this mapping is dev-only).
       - "9249:9249"
+    # Run as root so the checkpoint coordinator can create its directories
+    # under /checkpoints. The image has no /checkpoints directory, so Docker
+    # creates the named volume's mount point as root:root 755 on first use and
+    # the image default user flink:flink (uid 9999) then cannot create the
+    # per-job `shared` directory. Job submission fails outright:
+    #   java.io.IOException: Failed to create directory for shared state:
+    #   file:/checkpoints/<jobid>/shared
+    #   -> FlinkRuntimeException: Failed to create checkpoint storage
+    # Reproduced on a brand-new volume, so it is not stale local state: any
+    # `make up` against a fresh flink-checkpoints volume hits it. The
+    # taskmanager below carries the same fix for the same reason (its
+    # /tmp/fluss cache), and the drain/verify path proves root works here.
+    # Dev-only compromise, same as the taskmanager: the Flink entrypoint drops
+    # privileges for workers where configured.
+    user: "root"
     volumes:
       - flink-checkpoints:/checkpoints
       - flink-logs:/opt/flink/log
