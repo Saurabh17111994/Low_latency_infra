@@ -813,12 +813,54 @@ public class TablePurge {
         return (tz == null || tz.isBlank()) ? "UTC" : tz;
     }
 
+    /**
+     * Ask the WRITE path for this table and return null when it answers, or a
+     * one-line reason while it does not.
+     *
+     * getTableInfo (what the preflight readiness probe uses) is a metadata read
+     * served without a bucket leader — it answers immediately after a purge,
+     * which is why a run can pass readiness and still die on its first append.
+     * listOffsets is served by the bucket leader, so it is the cheapest
+     * read-only way to ask "would an append to this table work right now?".
+     */
+    static String writePathBlocked(Admin admin, TablePath tp) {
+        try {
+            TableInfo info = admin.getTableInfo(tp).get(10, TimeUnit.SECONDS);
+            List<Integer> buckets = new ArrayList<>();
+            for (int b = 0; b < info.getNumBuckets(); b++) {
+                buckets.add(b);
+            }
+            if (info.isPartitioned()) {
+                List<PartitionInfo> parts =
+                        admin.listPartitionInfos(tp).get(15, TimeUnit.SECONDS);
+                if (parts.isEmpty()) {
+                    return "no partitions";
+                }
+                for (PartitionInfo p : parts) {
+                    admin.listOffsets(tp, p.getPartitionName(), buckets,
+                                    new OffsetSpec.LatestSpec())
+                            .all().get(10, TimeUnit.SECONDS);
+                }
+            } else {
+                admin.listOffsets(tp, buckets, new OffsetSpec.LatestSpec())
+                        .all().get(10, TimeUnit.SECONDS);
+            }
+            return null;
+        } catch (Exception e) {
+            Throwable cause = e.getCause() != null ? e.getCause() : e;
+            String msg = String.valueOf(cause.getMessage()).split("\n")[0];
+            return cause.getClass().getSimpleName() + ": "
+                    + msg.substring(0, Math.min(90, msg.length()));
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         String ddl = Files.readString(Path.of(args[0]));
         DdlText.ParsedDdl parsed = DdlText.parse(ddl, args[0]);
         TablePath tp = TablePath.of("default", parsed.tableName());
         Configuration conf = new Configuration();
         conf.setString("bootstrap.servers", "localhost:9123");
+        int settleTimeoutS = args.length > 1 ? Integer.parseInt(args[1]) : 120;
         try (Connection c = ConnectionFactory.createConnection(conf);
              Admin admin = c.getAdmin()) {
             // P6-484: clear the DATA without churning the table's identity.
@@ -911,6 +953,33 @@ public class TablePurge {
                 System.out.println("PURGED " + tp);
             }
 
+            // P6-485: do not return until the WRITE path answers for this
+            // table. Dropping partitions or recreating the table leaves the
+            // server deleting the dead buckets' segments and re-establishing
+            // leadership for the new ones; for the whole of that window a
+            // client that asks the bucket leader anything gets
+            //   NotLeaderOrFollowerException / "Failed to update metadata"
+            // and the very next append dies. Measured after ONE purge on an
+            // otherwise quiet cluster: listOffsets failed from t+0s to t+40s
+            // and recovered by t+44s; run 7 of holistic-measure purged, waited
+            // 34s of container bring-up, then lost its first append at t+44s
+            // to exactly this window. The preflight readiness probe cannot see
+            // it (getTableInfo is served without a bucket leader), so waiting
+            // here — where the caller is about to hand the table to a writer —
+            // is the only place that closes it.
+            long deadline = System.currentTimeMillis() + settleTimeoutS * 1000L;
+            String blocked = writePathBlocked(admin, tp);
+            while (blocked != null && System.currentTimeMillis() < deadline) {
+                Thread.sleep(2000);
+                blocked = writePathBlocked(admin, tp);
+            }
+            if (blocked != null) {
+                // The caller decides what a still-churning table means (a
+                // measurement run must not proceed; see ALLOW_STALE_TABLE).
+                System.out.println("WARN: write path still not serving " + tp
+                        + " after " + settleTimeoutS + "s (" + blocked + ")");
+            } else {
+                System.out.println("SETTLED " + tp);
             }
         }
     }
@@ -920,10 +989,18 @@ JAVAEOF
   purge_out="$(cd "$tmpdir" && javac -cp "$CP" -d "$tmpdir" TablePurge.java 2>&1 \
       && java --add-opens=java.base/java.lang=ALL-UNNAMED \
        --add-opens=java.base/java.nio=ALL-UNNAMED \
-       -cp "$tmpdir:$CP" TablePurge "$ddl_file" 2>&1)" || true
+       -cp "$tmpdir:$CP" TablePurge "$ddl_file" "${PURGE_SETTLE_TIMEOUT_S:-120}" 2>&1)" || true
   rm -rf "$tmpdir"
   if echo "$purge_out" | grep -q "PURGED"; then
     pipeline_log "$label table purged"
+    # P6-485: say out loud how long the write path took to serve again. A
+    # silent 40s wait looks like the harness hanging; this line is the
+    # difference between "slow run" and "the cluster stopped answering".
+    case "$purge_out" in
+      *SETTLED*) pipeline_log "$label write path is serving again" ;;
+      *"WARN: write path still not serving"*)
+        pipeline_log "WARN: $label write path never settled within ${PURGE_SETTLE_TIMEOUT_S:-120}s — the next append may fail: $(echo "$purge_out" | grep -oE 'WARN: write path.*' | head -1)" ;;
+    esac
   else
     # Normal measurement runs keep the historical non-fatal behavior: the
     # smoke gate will catch a failed CREATE. Fault drills can set

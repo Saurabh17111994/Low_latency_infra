@@ -498,9 +498,18 @@ fi
 
 # ---------- G8: bridge/manifest fingerprint consistency (2026-08-31) ------
 # The G3 native fix (startBridge hands Java's loaded token set to the Go
-# child via ARROW_INSTRUMENT_TOKENS) made Go and Java hash the SAME set by
-# construction — so any remaining mismatch line in java.out is REAL drift
-# (manifest changed under a running bridge, wrong binary, tampering).
+# child via ARROW_INSTRUMENT_TOKENS) made Go and Java hash the SAME token set
+# by construction — so any remaining mismatch line in java.out is REAL drift
+# (tokens changed under a running bridge, wrong binary, tampering).
+# P6-486: the Java side now compares the bridge's manifest_fingerprint against
+# its token-set digest (computeAssignedTokenHash), because that is the only
+# scheme both sides can compute — the bridge is handed tokens, never the
+# symbols/exchange/segment/lotSize that computeFingerprint folds in. Before
+# that fix this gate failed EVERY subscribing run on 4 structural mismatch
+# lines while the real drift signal (assigned_token_set_hash) was clean; a
+# gate that always fires is a gate nobody reads. The manifest-level check it
+# protects is unchanged and fail-closed, one level up, in
+# InstrumentManifestLoader.isManifestApproved.
 # Before G3, every bench run logged a mismatch (1,024-token bridge env vs
 # 2,431-token Java manifest) — a loud signal nobody acted on. Now it fails
 # the run. Checked on BOTH phases' java.out (smoke already completed; main

@@ -88,6 +88,22 @@ class SafetyHaltWriterTest {
     }
 
     @Test
+    @DisplayName("token-set digest matches the Go bridge vector (P6-486)")
+    void tokenSetDigestMatchesTheBridge() {
+        // The bridge emits manifest_fingerprint = tokenSetHash(allTokens) over
+        // exactly the tokens Java handed it, and IngestionService compares that
+        // field against computeAssignedTokenHash. The two implementations must
+        // therefore agree byte for byte; the same vector is asserted in
+        // go-bridge/subscription_plan_test.go (TestTokenSetHashMatchesJavaVector).
+        // This is the invariant whose absence let the cross-check compare a
+        // token-only digest against computeFingerprint (symbol/exchange/
+        // segment/lotSize) and report a mismatch on every subscribing run.
+        assertEquals("ca73761ddabfffcbe51170be0b07f67bafcdbed202545c60707573d36dc935b4",
+                SafetyHaltWriter.computeAssignedTokenHash(List.of(3L, 1L, 2L)),
+                "token-set digest drifted from the Go bridge's tokenSetHash");
+    }
+
+    @Test
     @DisplayName("recovered differs from unsafe for the same slot")
     void recoveredDiffersFromUnsafe() {
         String unsafe = SafetyHaltWriter.computeHaltRequestId("fp", "hft-0", 5, "UNSAFE", "FEED_STALLED");

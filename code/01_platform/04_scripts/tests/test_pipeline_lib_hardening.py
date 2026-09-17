@@ -304,6 +304,56 @@ def test_purge_helper_clears_a_partitioned_table_by_dropping_partitions():
     assert text.count('System.out.println("PURGED " + tp') == 2, \
         "both purge branches must report PURGED for the caller's grep"
 
+
+def test_purge_waits_for_the_write_path_before_returning():
+    """P6-485 pinned statically, like the P6-484 test above and for the same
+    reason: the condition is the live cluster's state, so the assertion is on
+    the source.
+
+    A purge leaves the server deleting the dead buckets' segments and
+    re-electing leaders. During that window the client's metadata path answers
+    with NotLeaderOrFollowerException ("Failed to update metadata") and the next
+    append dies. The preflight readiness probe cannot see it — getTableInfo is
+    served WITHOUT a bucket leader — so a run can pass readiness and still lose
+    its first append.
+
+    Measured live, one purge on an otherwise quiet cluster with the gate
+    disabled (0s): the probe reported NotLeaderOrFollower and the immediate
+    append failed with TimeoutException. With the gate on: the purge waited 32s
+    until listOffsets answered and the same append succeeded.
+    """
+    text = LIB.read_text()
+    assert "writePathBlocked" in text, \
+        "the purge no longer checks whether the write path serves the table"
+    # The check has to be CALLED before the helper returns — a definition with
+    # no call site is exactly the "guard exists but never runs" defect class
+    # this file exists to pin (P6-411/P6-472).
+    assert text.count("writePathBlocked(admin, tp)") >= 2, (
+        "writePathBlocked is defined but not driven to a verdict: expected the "
+        "initial probe AND the re-probe inside the wait loop — found "
+        + str(text.count("writePathBlocked(admin, tp)"))
+    )
+    assert "while (blocked != null && System.currentTimeMillis() < deadline)" in text, \
+        "the purge does not actually wait for the write path (loop removed or made unbounded)"
+    assert "Thread.sleep(2000)" in text, \
+        "the settle wait does not back off between probes"
+    # listOffsets (not getTableInfo) is what makes the check meaningful: it is
+    # served by the bucket leader, so it is the cheapest read-only way to ask
+    # "would an append work right now?".
+    assert "listOffsets" in text and "LatestSpec" in text, \
+        "the settle probe must ask the bucket leader (listOffsets), not just metadata"
+    assert "public static void main(String[] args)" in text
+    # The wait must be bounded by an explicit, caller-adjustable budget rather
+    # than an unbounded loop in a harness step.
+    assert "settleTimeoutS" in text and "PURGE_SETTLE_TIMEOUT_S" in text, \
+        "the settle wait is not bounded by a caller-visible timeout"
+    # A still-churning table has to be reported, not swallowed: the shell side
+    # distinguishes "settled" from "never settled" so a run that is about to
+    # fail says so instead of looking like a hang.
+    assert "WARN: write path still not serving" in text, \
+        "a table that never settles is not reported to the caller"
+
+
 # ── P6-474: INJECT_* must be bare integers ───────────────────────────────────
 @pytest.mark.parametrize("value", ["5s", "abc", ""])
 def test_inject_env_is_validated(tmp_path, value):

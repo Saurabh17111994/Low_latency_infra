@@ -1413,13 +1413,31 @@ public final class IngestionService {
 
         // Slot-identity cross-check (plan §Slot-scoped safety propagation):
         // the bridge's manifest_fingerprint / assigned_token_set_hash must
-        // match Java's manifest-derived digests. Warn-only — the event is
+        // match Java's digests over the SAME input. Warn-only — the event is
         // never rejected, because Go/Java token sets can legitimately differ
         // in dev synthetic mode. Both sides are hex digests (no secrets).
-        if (!manifestFingerprint.equals(event.manifestFingerprint())) {
-            LOG.warn("ingestion: bridge manifest_fingerprint mismatch (slot={}, epoch={}): got={} want={} — cross-check only, event not rejected",
+        //
+        // P6-486: compare like with like. `manifestFingerprint` is
+        // InstrumentManifestLoader.computeFingerprint — a digest over each
+        // instrument's token AND tradingSymbol/exchange/segment/lotSize. The
+        // bridge never sees the last four: the G3 handoff (startBridge) sends
+        // it ARROW_INSTRUMENT_TOKENS, i.e. tokens only, so its own
+        // manifest_fingerprint is tokenSetHash(allTokens) — the same scheme as
+        // assigned_token_set_hash. Comparing the two therefore reported a
+        // mismatch on EVERY subscribing run (4 lines: one per slot event), on
+        // identical token sets, and the G8 gate in holistic-measure.sh failed
+        // the run for it. Verified against a live run's own token slice: Go's
+        // reported value equals Java's computeAssignedTokenHash exactly
+        // (4914b8f1…), while computeFingerprint's (c68f50f7…) covers fields the
+        // bridge is never given. The manifest-level drift check still happens,
+        // one level up and fail-closed, in InstrumentManifestLoader
+        // .isManifestApproved (version + count + computeFingerprint against the
+        // approved manifest); this cross-check covers bridge/Java token-set
+        // agreement, which is what both sides can actually compute.
+        if (!assignedTokenSetHash.equals(event.manifestFingerprint())) {
+            LOG.warn("ingestion: bridge manifest_fingerprint mismatch (slot={}, epoch={}): got={} want={} (token-set digest) — cross-check only, event not rejected",
                     event.slotId(), event.connectionEpoch(),
-                    event.manifestFingerprint(), manifestFingerprint);
+                    event.manifestFingerprint(), assignedTokenSetHash);
             metrics.incrementDecodeError("FINGERPRINT_MISMATCH");
         }
         if (!assignedTokenSetHash.equals(event.assignedTokenSetHash())) {
