@@ -222,3 +222,94 @@ def test_probe_hang_bounded(tmp_path):
     assert "FlussReadLagProbe failed this tick" in text, text
     assert (out / "probe-read-lag.err").is_file(), "probe stderr not kept"
     assert elapsed < 50, f"probe hang not bounded (wall {elapsed:.0f}s)"
+
+
+# ---------------- commit 7 (P6-790/563/564/565) ----------------
+def test_bad_durations_fail_fast(tmp_path):
+    # P6-790: non-numeric cadences die at the header with one clear line
+    # (old: cryptic mid-run `[ -ge ]` / `sleep` errors).
+    cases = ({"DURATION_S": "abc"}, {"CAPTURE_INTERVAL_S": "1.5"},
+             {"DURATION_S": "0"})
+    for i, bad in enumerate(cases):
+        sub = tmp_path / f"case{i}"
+        sub.mkdir()
+        proc, _, _ = _run(sub, extra_env=bad)
+        text = proc.stdout + proc.stderr
+        assert proc.returncode == 1, text
+        assert "must be a positive integer" in text, text
+
+
+def test_freshness_scales_with_interval(tmp_path):
+    # P6-565: scrapes die ~2s in; at interval 30 the 5x budget (150s) holds
+    # the run green with a ~26s-old last scrape. Old hardcoded 25s fails it
+    # spuriously. Duration stays under the t+30 leg gate (which owns dead-leg
+    # detection) so this pins exactly the end-gate budget.
+    extra = {"CAPTURE_INTERVAL_S": "30", "W38_CURL_MAX_ALIVE": "5"}
+    proc, _, _ = _run(tmp_path, duration="28", extra_env=extra)
+    text = proc.stdout + proc.stderr
+    assert proc.returncode == 0, text
+    assert "last prom scrape" not in text, text
+
+
+def test_checkpoints_append_only_new_ids(tmp_path):
+    # P6-564: cumulative history appends each id exactly once (old: full
+    # history every tick, O(ticks x checkpoints) with duplicates).
+    import json
+    proc, out, _ = _run(tmp_path, extra_env={"W38_CURL_CP_MODE": "grow"})
+    text = proc.stdout + proc.stderr
+    assert proc.returncode == 0, text
+    lines = (out / "flink-checkpoints.jsonl").read_text().splitlines()
+    assert len(lines) >= 2, "expected several tick summaries"
+    ids = [e["id"] for line in lines for e in json.loads(line)["events"]]
+    assert len(ids) == len(set(ids)), f"duplicate checkpoint ids: {ids}"
+
+
+def test_checkpoints_dead_rest_fails_closed(tmp_path):
+    # P6-564: 5 consecutive fetch failures exit 2 (old: `|| true` silence).
+    proc, _, _ = _run(tmp_path, extra_env={"W38_CURL_CP_MODE": "dead"})
+    text = proc.stdout + proc.stderr
+    assert proc.returncode == 2, text
+    assert "checkpoint fetch failed" in text, text
+    assert "5 consecutive ticks" in text, text
+
+
+def _arrow_run(tmp_path, arrow_line, tag):
+    j = tmp_path / f"java-{tag}.out"
+    j.write_text(OTLP_LINE + arrow_line)
+    extra = {"INGESTION_JAVA_OUT": str(j), "BRIDGE_CHECK_AT_S": "5"}
+    return _run(tmp_path, extra_env=extra)
+
+
+def test_bridge_full_date_stale_fails(tmp_path):
+    # P6-563: a stale FULL-date report fails (old: `cut -c1-12` mangled it to
+    # `2026-09-17 0`, the parse failed, and the guard skipped fail-open).
+    arrow = "2020-01-01 00:00:00.000 arrow-tick-counts: total=5\n"
+    proc, _, _ = _arrow_run(tmp_path, arrow, "fulldate")
+    text = proc.stdout + proc.stderr
+    assert proc.returncode == 2, text
+    assert "arrow-tick-counts report" in text and "old at t+" in text, text
+
+
+def test_bridge_future_bare_time_rolls_to_yesterday(tmp_path):
+    # P6-563: a bare clock-time 1h in the future belongs to yesterday
+    # (midnight rollover) — age ~23h, FAIL. Old: negative age, missed stall.
+    import datetime
+    future = (datetime.datetime.now(datetime.timezone.utc)
+              + datetime.timedelta(hours=1)).strftime("%H:%M:%S.000")
+    proc, _, _ = _arrow_run(tmp_path, f"{future} arrow-tick-counts: total=5\n",
+                            "future")
+    text = proc.stdout + proc.stderr
+    assert proc.returncode == 2, text
+    assert "arrow-tick-counts report" in text and "old at t+" in text, text
+
+
+def test_bridge_fresh_report_passes(tmp_path):
+    # P6-563 guard: a fresh report must NOT trip the check (no false stall
+    # from the UTC / rollover handling).
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S.000")
+    proc, _, _ = _arrow_run(tmp_path, f"{now} arrow-tick-counts: total=5\n",
+                            "fresh")
+    text = proc.stdout + proc.stderr
+    assert proc.returncode == 0, text
+    assert "arrow-tick-counts report" not in text, text

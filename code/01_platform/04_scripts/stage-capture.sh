@@ -37,6 +37,10 @@ TM_PROM_URL="${TM_PROM_URL:-http://localhost:9250}"
 JOB_ID="${JOB_ID:-}"
 DURATION_S="${DURATION_S:-900}"
 CAPTURE_INTERVAL_S="${CAPTURE_INTERVAL_S:-5}"
+# P6-790: fail fast on non-numeric cadences — the old cryptic mid-run
+# `[ -ge ]` / `$(( ))` / `sleep` errors are replaced by one clear line.
+case "$DURATION_S" in ''|*[!0-9]*|0) echo "!! FAIL: DURATION_S must be a positive integer (got '$DURATION_S')" >&2; exit 1;; esac
+case "$CAPTURE_INTERVAL_S" in ''|*[!0-9]*|0) echo "!! FAIL: CAPTURE_INTERVAL_S must be a positive integer (got '$CAPTURE_INTERVAL_S')" >&2; exit 1;; esac
 OUT_DIR="${OUT_DIR:-logs/tracker-14/stage-capture-$(date +%Y%m%d-%H%M%S)}"
 
 # B2 hooks (2026-09-02): optional, env-gated. When set, each tick also samples
@@ -104,6 +108,11 @@ STATE="$(job_state)"
 LEG_CHECKED_AT30=0
 BRIDGE_CHECKED_AT65=0
 AVAIL_REPORTED=0
+# P6-564: consecutive checkpoint-fetch failures (reset on success).
+_cp_fail=0
+# Test knob: the bridge-age check fires at ELAPSED>=65 in prod; tests
+# shrink it (hermetic runs last 8s).
+BRIDGE_CHECK_AT_S="${BRIDGE_CHECK_AT_S:-65}"
 
 echo "stage-capture: job=$JOB_ID duration=${DURATION_S}s interval=${CAPTURE_INTERVAL_S}s out=$OUT_DIR"
 
@@ -807,10 +816,13 @@ while :; do
   # leg check cannot see it. After t+65s the 2nd report (~t+63s) must have
   # arrived; fail with a direct reason + stall dump ~45s before the prom
   # death cascade.
-  if [ "$BRIDGE_CHECKED_AT65" -eq 0 ] && [ "$ELAPSED" -ge 65 ]; then
+  if [ "$BRIDGE_CHECKED_AT65" -eq 0 ] && [ "$ELAPSED" -ge "$BRIDGE_CHECK_AT_S" ]; then
     BRIDGE_CHECKED_AT65=1
     if [ -n "$INGESTION_JAVA_OUT" ] && [ -f "$INGESTION_JAVA_OUT" ]; then
-      last_report="$(grep -E 'arrow-tick-counts: total' "$INGESTION_JAVA_OUT" | tail -1 | cut -c1-12)"
+      # P6-563: the old `cut -c1-12` assumed a bare HH:MM:SS.mmm at column 1
+      # and mangled full-date stamps (`2026-09-17 0`), fail-opening the
+      # check. Extract a full date when present, else a bare clock time.
+      last_report="$(grep -E 'arrow-tick-counts: total' "$INGESTION_JAVA_OUT" | tail -1 | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:.]+|[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?' | tail -1)"
       if [ -z "$last_report" ]; then
         echo "!! FAIL: no arrow-tick-counts report line ever in $INGESTION_JAVA_OUT by t+${ELAPSED}s — bridge tick counter disabled or stderr not mirrored. Check ARROW_TICK_COUNTS and the ingestion container." >&2
         capture_stall_diagnostics "no arrow-tick-counts line ever in java.out by t+${ELAPSED}s"
@@ -822,7 +834,25 @@ while :; do
       # zone misread 08:41 UTC as 08:41 IST -> "19819s old" -> false stall
       # killed a healthy run at t+76s (soak 20260904-140936). Compare in
       # UTC on both sides.
-      last_epoch="$(TZ=UTC date -d "$(echo "$last_report" | sed 's/\..*//')" +%s 2>/dev/null)"
+      # P6-563: parse the full date when present; a bare clock-time parsed
+      # on the wrong side of midnight reads as future — it belongs to
+      # yesterday. (Full dates are exempt: a future full date is clock skew,
+      # and subtracting a day would invent a stall. Deviation from the audit
+      # sketch, whose fallback never fired: bare times parse as today
+      # successfully, so the midnight case needs the explicit future check.)
+      last_epoch="$(TZ=UTC date -d "$last_report" +%s 2>/dev/null)"
+      if [ -z "$last_epoch" ]; then
+        last_epoch="$(TZ=UTC date -d "$(echo "$last_report" | sed 's/\..*//')" +%s 2>/dev/null)"
+      fi
+      case "$last_report" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*)
+          ;;
+        *)
+          if [ -n "$last_epoch" ] && [ "$last_epoch" -gt "$(date -u +%s)" ]; then
+            last_epoch=$((last_epoch - 86400))
+          fi
+          ;;
+      esac
       now_utc="$(date -u +%s)"
       if [ -n "$last_epoch" ] && [ $((now_utc - last_epoch)) -gt 40 ]; then
         echo "!! FAIL: last arrow-tick-counts report $((now_utc - last_epoch))s old at t+${ELAPSED}s (report at $last_report UTC) — the arrow-bridge interval report stopped (bridge stall / feed stall); Java otlp may still flush. Dumping stall diagnostics now." >&2
@@ -832,16 +862,35 @@ while :; do
     fi
   fi
 
-  # checkpoint events (append any new ones)
-  curl -fsS --max-time 10 "$FLINK_REST_URL/jobs/$JOB_ID/checkpoints" 2>/dev/null | \
-    python3 -c '
-import json, sys
+  # P6-564: checkpoint events -- append ONLY ids newer than the last recorded
+  # one (the old full-history append grew O(ticks x checkpoints)), and count
+  # consecutive fetch failures LOUD instead of swallowing them.
+  if ! _cp_json="$(curl -fsS --max-time 10 "$FLINK_REST_URL/jobs/$JOB_ID/checkpoints" 2>"$OUT_DIR/probe-checkpoints.err")"; then
+    _cp_fail=$(( _cp_fail + 1 ))
+    echo "!! WARN: checkpoint fetch failed ${_cp_fail}x this run (see $OUT_DIR/probe-checkpoints.err)" >&2
+    if [ "$_cp_fail" -ge 5 ]; then
+      echo "!! FAIL: checkpoint REST failed ${_cp_fail} consecutive ticks -- fail-closed, not swallowed" >&2
+      capture_stall_diagnostics "checkpoint REST dead ${_cp_fail}x consecutive"
+      exit 2
+    fi
+  else
+    _cp_fail=0
+    printf '%s' "$_cp_json" | LAST_CP_FILE="$OUT_DIR/.cp-last-id" python3 -c '
+import json, os, sys
 try:
     data = json.load(sys.stdin)
 except Exception:
     sys.exit(0)
 hist = sorted(data.get("history", []), key=lambda c: c.get("id", 0))
-print(json.dumps({"count": len(hist),
+try:
+    last = int(open(os.environ["LAST_CP_FILE"]).read().strip() or 0)
+except Exception:
+    last = 0
+new = [c for c in hist if c.get("id", 0) > last]
+if not new:
+    sys.exit(0)
+open(os.environ["LAST_CP_FILE"], "w").write(str(max(c.get("id", 0) for c in new)))
+print(json.dumps({"count": len(new),
                   "events": [{k: c.get(k) for k in
                               ("id", "status", "end_to_end_duration", "state_size",
                                "trigger_timestamp",
@@ -851,8 +900,9 @@ print(json.dumps({"count": len(hist),
                                "alignment_duration", "alignment_buffered",
                                "start_delay", "sync_dur", "async_dur",
                                "processed_data", "persisted_data",
-                               "num_subtasks", "num_ack_subtasks")} for c in hist]}))
-' >> "$OUT_DIR/flink-checkpoints.jsonl" 2>/dev/null || true
+                               "num_subtasks", "num_ack_subtasks")} for c in new]}))
+' >> "$OUT_DIR/flink-checkpoints.jsonl" 2>"$OUT_DIR/probe-checkpoints.err" || echo "!! WARN: checkpoint append failed this tick (see $OUT_DIR/probe-checkpoints.err)" >&2
+  fi
 
   sleep "$CAPTURE_INTERVAL_S"
 done
@@ -894,8 +944,12 @@ latest_prom="$(ls -1 "$OUT_DIR"/prom-*.txt 2>/dev/null | sort | tail -1)"
 if [ -n "$latest_prom" ]; then
   now_s="$(date +%s)"
   last_scrape_s="$(basename "$latest_prom" .txt | sed 's/prom-//')"
-  if [ $((now_s - last_scrape_s)) -gt 25 ]; then
-    echo "!! FAIL: last prom scrape was $((now_s - last_scrape_s))s ago (TM prom endpoint died before capture end) — latency/custom legs are truncated; check TM heartbeat." >&2
+  # P6-565: the staleness budget scales with the configured cadence (5x
+  # interval, 25s floor) — a fixed 25s spuriously failed slow-cadence runs
+  # and waved through multi-miss gaps on fast ones.
+  _max_gap=$((CAPTURE_INTERVAL_S * 5)); [ "$_max_gap" -lt 25 ] && _max_gap=25
+  if [ $((now_s - last_scrape_s)) -gt "$_max_gap" ]; then
+    echo "!! FAIL: last prom scrape was $((now_s - last_scrape_s))s ago (budget ${_max_gap}s at interval ${CAPTURE_INTERVAL_S}s; TM prom endpoint died before capture end) — latency/custom legs are truncated; check TM heartbeat." >&2
     exit 2
   fi
 fi

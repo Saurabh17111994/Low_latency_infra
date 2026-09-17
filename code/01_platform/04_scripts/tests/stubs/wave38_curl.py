@@ -47,6 +47,9 @@ def _emit(text):
 
 
 if url.endswith("/metrics"):
+    max_alive = os.environ.get("W38_CURL_MAX_ALIVE")
+    if max_alive is not None and counts[url] > int(max_alive):
+        sys.exit(1)  # scrape dies mid-run (P6-565 freshness pin)
     if mode == "scrape-empty":
         _emit("# alive but no matching series\nup 1\n")
         sys.exit(0)
@@ -55,6 +58,18 @@ if url.endswith("/metrics"):
         sys.exit(1)
     # Non-empty scrape: the preflight only checks it answers, sample_tick greps it.
     _emit("# TYPE busyTimeMsPerSecond gauge\nbusyTimeMsPerSecond 1.0\n")
+    sys.exit(0)
+
+if url.endswith("/checkpoints"):
+    cp_mode = os.environ.get("W38_CURL_CP_MODE", "static")
+    if cp_mode == "dead":
+        sys.exit(1)
+    if cp_mode == "grow":
+        # Cumulative history with one new id per fetch, like a live job.
+        hist = [{"id": i, "status": "COMPLETED"} for i in range(1, counts[url] + 1)]
+    else:
+        hist = [{"id": 1, "status": "COMPLETED"}]
+    _emit(json.dumps({"history": hist}) + "\n")
     sys.exit(0)
 
 if "/jobs/" in url and "overview" not in url:
