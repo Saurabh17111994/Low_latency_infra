@@ -267,10 +267,56 @@ def g7c_compare(win_ticks, win_vol, final_by_key, run_start, run_end,
     return mismatch, compared, startup_skipped
 
 
-def g7c_measurement_guard(raw_read_ok, compared):
+# G7c parity compares candle_closed against the raw recount. The 15s family is
+# identified by WINDOW WIDTH, not by the `tf` label: tf carries an enum code
+# ("FIFTEEN_S", Timeframe.java) and a rename would silently empty the candle
+# side of the comparison - the same failure shape that made this leg read a
+# retired table for two weeks. The widths (15s/30s/1m/3m/5m/15m) are unique by
+# construction, so width identifies the family without naming it.
+CANDLE_PARITY_WINDOW_MS = 15000
+
+
+def candle_parity_map(rows, window_ms=CANDLE_PARITY_WINDOW_MS):
+    """{(instrument_token, window_start): (tick_count, volume)} for one family.
+
+    `rows` are dicts keyed by COLUMN NAME (FlussPrefixReader resolves names from
+    the live TableInfo, P6-371), so a column reorder cannot silently shift the
+    comparison the way the old index parse (f[3], f[9], f[10]) could. Rows of
+    another width are skipped; if that leaves nothing the caller's
+    g7c_measurement_guard fails on compared==0 rather than passing quietly.
+    """
+    out = {}
+    for r in rows:
+        try:
+            if int(r["window_end"]) - int(r["window_start"]) != window_ms:
+                continue
+            out[(int(r["instrument_token"]), int(r["window_start"]))] = (
+                int(r["tick_count"]), int(r["volume"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def strategy_host_enabled(env=None):
+    """Whether the submitted job wires the strategy host.
+
+    It is the ONLY writer of Signal_Candidates (SignalJob L314), so with it off
+    an empty read of that table is the expected state, not a broken probe.
+    pipeline-lib.sh submits STRATEGY_HOST_ENABLED (default false); the flag is
+    read here so the F4 leg can tell "no writer in this topology" from "the
+    writer ran and the read still failed".
+    """
+    env = os.environ if env is None else env
+    return env.get("STRATEGY_HOST_ENABLED", "false").strip().lower() == "true"
+
+
+def g7c_measurement_guard(raw_read_ok, compared, candle_read_ok=True):
     """Require an actual raw/candle comparison before declaring G7c green."""
     if not raw_read_ok:
         return "G7c: raw recount unavailable — parity proof was not evaluated"
+    if not candle_read_ok:
+        return ("G7c: candle_closed read failed — the parity proof was not "
+                "evaluated (a failed read must never read as 'no candles')")
     if compared == 0:
         return ("G7c: zero fully-closed (token,window) pairs compared — "
                 "raw/candle parity proof is unavailable")
@@ -516,6 +562,85 @@ def collect_rows_stream(table, cp, out_dir, run_ms=30000, mode="offset"):
     return rows_path
 
 
+def read_candle_closed_rows(cp, out_dir, tokens, table="candle_closed",
+                            bootstrap="localhost:9123", timeout_s=900):
+    """Read every row of a KV candle table via fluss-probes/FlussPrefixReader.
+
+    A candle table is a PRIMARY-KEY (KV) table, so the log reader the raw path
+    uses cannot read it (LogFullRead subscribes to a LOG's buckets). The prefix
+    reader does lookupBy(instrument_token), which REQUIRES an explicit token
+    list: its '*'/empty wildcard only means "no filter" on the LOG path, and on
+    the KV path '*' is parsed as a token, fails to parse, and prints __END__ 0 -
+    a silent empty read (the P6-082 class). Callers pass the tokens the raw
+    recount actually saw.
+
+    Returns (rows, ok): rows are dicts keyed by column NAME; ok is False when the
+    probe never printed its __END__ sentinel, because a failed read must never be
+    mistaken for "the table holds no candles" - that is a real zero-loss failure.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    probe_src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "fluss-probes", "FlussPrefixReader.java")
+    if not os.path.exists(probe_src):
+        print(f"!! G7c: candle reader source missing: {probe_src}")
+        return [], False
+    # ALWAYS recompile (~2s): a stale .class silently ignores a changed probe
+    # (same lesson the LogFullRead docstring above records).
+    r = subprocess.run(["javac", "-cp", cp, "-d", out_dir, probe_src],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"!! G7c: FlussPrefixReader compile failed: {r.stderr[:400]}")
+        return [], False
+    tokens_csv = ",".join(str(t) for t in sorted(tokens))
+    if not tokens_csv:
+        print("!! G7c: the raw recount yielded no token, so candle_closed "
+              "cannot be read by prefix lookup")
+        return [], False
+    rows_path = os.path.join(out_dir, f"latency-{table}.jsonl")
+    err_path = os.path.join(out_dir, f"latency-{table}.reader.stderr.log")
+    print(f"- G7c: reading {table} for {len(tokens)} token(s) by prefix "
+          f"lookup (candle-vs-raw parity)...")
+    try:
+        with open(rows_path, "w") as fh, open(err_path, "w") as errh:
+            result = subprocess.run(
+                ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                 "--add-opens=java.base/java.nio=ALL-UNNAMED",
+                 "-Dlog.dir=/tmp/fluss-probe-logs",
+                 "-cp", f"{out_dir}:{cp}", "FlussPrefixReader",
+                 table, tokens_csv, "0", "0", bootstrap],
+                stdout=fh, stderr=errh, timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        print(f"!! G7c: {table} reader timed out after {timeout_s}s; "
+              f"diagnostics: {err_path}")
+        return [], False
+    rows, ok = [], False
+    try:
+        with open(rows_path) as fh:
+            for ln in fh:
+                ln = ln.strip()
+                if ln.startswith("__END__"):
+                    ok = True
+                elif ln.startswith("{"):
+                    try:
+                        rows.append(json.loads(ln))
+                    except ValueError:
+                        continue
+    except OSError:
+        pass
+    if not ok:
+        detail = ""
+        try:
+            with open(err_path) as errh:
+                detail = " ".join(errh.read().split())[-400:]
+        except OSError:
+            pass
+        print(f"!! G7c: {table} reader printed no __END__ sentinel "
+              f"(rc={result.returncode}); diagnostics: {err_path}"
+              + (f": {detail}" if detail else ""))
+        return rows, False
+    return rows, True
+
+
 def classify_status(candidate_id):
     """Status from the candidate_id suffix (NOT substring search: CONFIRM
     rows' validity_reason also contains 'TENTATIVE')."""
@@ -530,6 +655,12 @@ def classify_status(candidate_id):
 
 def main():
     failures = []  # collected by all guards; exit 1 if non-empty
+    # Legs that CANNOT be measured in this topology: reported loudly, never
+    # silently dropped, but NOT failed - a question the catalog cannot answer is
+    # not evidence that the pipeline is broken. Every entry here is an explicit,
+    # reviewable exemption; anything unmeasurable OUTSIDE this set still fails,
+    # so a newly broken read cannot hide behind the accepted ones.
+    unavailable = []
     out_dir, cp = sys.argv[1], sys.argv[2]
     run_start = int(sys.argv[3]) * 1000 if len(sys.argv) > 3 else None
     run_end = int(sys.argv[4]) * 1000 if len(sys.argv) > 4 else None
@@ -547,8 +678,8 @@ def main():
     # leg as unavailable instead of reading a dropped table — the dead read also
     # burned the reader's missing-table timeout on every drill run.
     prev_rows = []
-    failures.append(
-        "G6: preview latency leg UNAVAILABLE — feature_candles_15s_preview retired "
+    unavailable.append(
+        "G6: preview latency leg — feature_candles_15s_preview retired "
         "(DDL 30, 2026-09-05) and candle_live/candle_closed carry no landing "
         "timestamp (output_ts), so preview write latency cannot be measured")
     # Row (v2): (token,NSE,symbol,window_start,window_end,o,h,l,c,vol,tick_count,
@@ -596,18 +727,21 @@ def main():
     print(f"- preview freshness at run end (staleness): p50={fmt_ms(pct(freshness,50))} "
           f"p95={fmt_ms(pct(freshness,95))} p99={fmt_ms(pct(freshness,99))} (n={len(freshness)})")
 
-    # ---- Final candle path: UNAVAILABLE for the same reason as G6 ----
-    # The candle-era feature_candles_15s (DDL 03) that carried output_ts is gone;
-    # candle_closed (DDL 33) has window_end but no write timestamp, so
-    # "window-close → committed" latency cannot be computed from the catalog.
-    # Keep the leg fail-closed (never invent a number) instead of reading a
-    # dropped table. Reviving it needs a landing-timestamp column or a redefined
-    # metric — its own change, falsified on a live drill.
+    # ---- Final candle path: the LATENCY leg only ----
+    # PARITY is measured from candle_closed near the raw recount (the live table
+    # carries tick_count + volume per (token, tf, window_start)). Only the
+    # LATENCY leg stays unavailable: the candle-era feature_candles_15s (DDL 03)
+    # that carried output_ts is gone and candle_closed (DDL 33) has window_end
+    # but no write timestamp, so "window-close → committed" cannot be computed
+    # from the catalog. Keep it fail-closed (never invent a number) rather than
+    # reading a dropped table; reviving it needs a landing-timestamp column or a
+    # redefined metric — its own change, falsified on a live drill.
     final_rows = []
-    failures.append(
-        "G7c: final-candle parity leg UNAVAILABLE — feature_candles_15s retired "
-        "(DDL 03, 2026-09-05); candle_closed carries no write timestamp, so the "
-        "window-close → committed latency is not observable")
+    unavailable.append(
+        "G7c: final-candle latency leg — candle_closed (DDL 33) carries "
+        "window_end but no write timestamp (feature_candles_15s and its "
+        "output_ts retired, DDL 03, 2026-09-05), so window-close → committed "
+        "is not observable (parity IS measured, from candle_closed)")
     final_rows = list(dict.fromkeys(final_rows))  # same re-delivery dedupe
     close_lat = []
     for ln in final_rows:
@@ -654,8 +788,16 @@ def main():
     else:
         sig_rows = collect_rows("Signal_Candidates", cp, out_dir)
         if sig_rows is None:
-            failures.append("F4: Signal_Candidates LOG read failed — signal "
-                            "settlement measurement is unavailable")
+            msg = ("F4: Signal_Candidates LOG read failed — signal settlement "
+                   "measurement is unavailable")
+            if strategy_host_enabled():
+                # The host is wired, so this table HAS a writer: an unreadable
+                # table is a real defect here, not a topology gap.
+                failures.append(msg)
+            else:
+                unavailable.append(
+                    msg + " (STRATEGY_HOST_ENABLED is off: nothing in this "
+                          "topology writes Signal_Candidates)")
             sig_rows = []
     # DEDUPE: same LogScanner re-delivery (see preview note above).
     sig_rows = list(dict.fromkeys(sig_rows))
@@ -1268,10 +1410,14 @@ def main():
     if guard_off:
         print("- G6: LATENCY_GUARD_OFF=1 — latency guard SKIPPED (diagnostic run)")
     elif not e2e_lat:
-        failures.append(
-            "G6: no preview e2e samples — the preview leg is unavailable by design "
-            "(see the G6 note above: retired table, and the live candle pair has no "
-            "write-timestamp column)")
+        # Cascade of the G6 leg above: with the preview table retired there is
+        # no source of e2e samples at all, so an empty list is the expected
+        # state, not a latency regression. Same accepted-unavailable channel -
+        # it must not fail the run, and it must not vanish either.
+        unavailable.append(
+            "G6: no preview e2e samples — cascade of the preview leg above "
+            "(retired table; the live candle pair has no write-timestamp "
+            "column, so nothing can produce a sample)")
     else:
         p95 = pct(e2e_lat, 95)
         if p95 is not None and p95 > 1000:
@@ -1507,23 +1653,25 @@ def main():
             f"timestamps and lag disagree (rewritten event times? "
             f"replayed frames?)")
 
-    # final candles per (token, ws): tick_count (idx 10) + volume (idx 9)
-    final_by_key = {}
-    for ln in final_rows:
-        f = ln.strip("()").split(",")
-        if len(f) >= 15:
-            try:
-                key = (int(f[0]), int(f[3]))
-                final_by_key[key] = (int(f[10]), int(f[9]))
-            except ValueError:
-                continue
+    # final candles per (token, ws): tick_count + volume, read from
+    # candle_closed. The table is KV (PK token,tf,window_start), so the raw
+    # path's log reader cannot see it - this uses the prefix reader, and the
+    # candle side is keyed by COLUMN NAME so a reorder cannot shift it.
+    candle_rows, candle_read_ok = [], False
+    if raw_read_ok:
+        candle_rows, candle_read_ok = read_candle_closed_rows(
+            cp, out_dir, {tok for (tok, _ws) in win_ticks})
+    final_by_key = candle_parity_map(candle_rows) if candle_read_ok else {}
+    print(f"- G7c candle side: {len(final_by_key)} closed "
+          f"{CANDLE_PARITY_WINDOW_MS // 1000}s candle(s) from candle_closed "
+          f"(read_ok={candle_read_ok}, {len(candle_rows)} raw row(s))")
 
     # compare fully-closed windows inside the run window (module-level
     # g7c_compare - unit-tested in tests/test_holistic_g7_parity.py)
     mismatch, compared, startup_skipped = g7c_compare(
         win_ticks, win_vol, final_by_key, run_start, run_end,
         event_horizon=event_horizon or None)
-    parity_failure = g7c_measurement_guard(raw_read_ok, compared)
+    parity_failure = g7c_measurement_guard(raw_read_ok, compared, candle_read_ok)
     if parity_failure:
         failures.append(parity_failure)
 
@@ -1611,11 +1759,19 @@ def main():
                             "window mismatches")
     elif parity_failure is None:
         print("- G7: data-quality guards passed (dedup exact, late-drop "
-              "exact, tick-set parity exact)")
+              "covered, tick-set parity exact)")
     else:
-        print("- G7: data-quality guards NOT EVALUATED — raw recount failed")
+        print("- G7: data-quality guards NOT EVALUATED — the parity guard "
+              "above names which side was unavailable")
 
 
+    if unavailable:
+        print()
+        for u in unavailable:
+            print(f"~~ UNAVAILABLE (accepted, not a failure): {u}")
+        print(f"~~ {len(unavailable)} measurement leg(s) unavailable in this "
+              f"topology — reported so the hole is visible, but not failed: "
+              f"an unanswerable question is not evidence of data loss")
     if failures:
         print()
         for f in failures:

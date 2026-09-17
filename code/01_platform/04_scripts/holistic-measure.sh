@@ -119,6 +119,15 @@ if [ "$MULTITF_ENABLED" != "true" ]; then
   fail "MULTITF_ENABLED='$MULTITF_ENABLED': the smoke inject gate and the G7 audit both read compute.candles.late.dropped, which only exists when the multi-tf-aggregator is wired. With the candle path off the late-drop assertion is unsatisfiable, so this run is refused instead of failing later with a misleading counter mismatch."
 fi
 
+# CHG-194: the analyzer needs to know whether Signal_Candidates has a writer at
+# all. It is the strategy host's only output, so with the host off an empty read
+# is the expected state rather than a failed probe. pipeline-lib.sh already
+# submits this flag (default false); exporting it here makes the value the
+# analyzer reads be the value that was submitted, not an inherited default.
+export STRATEGY_HOST_ENABLED="${STRATEGY_HOST_ENABLED:-false}"
+if [ "$STRATEGY_HOST_ENABLED" = "false" ]; then
+  echo "note: STRATEGY_HOST_ENABLED=false — Signal_Candidates has no writer in this topology, so the F4 signal-settlement leg is reported UNAVAILABLE rather than failed"
+fi
 
 pipeline_install_cleanup_trap
 

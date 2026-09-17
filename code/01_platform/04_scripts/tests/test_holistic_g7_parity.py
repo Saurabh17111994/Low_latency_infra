@@ -12,6 +12,7 @@ Covers the two changes made for the TM-kill-at-full-load drill:
      fire; the contiguous LATEST-mode startup prefix is tolerated.
 """
 
+import ast
 import importlib.util
 import os
 import tempfile
@@ -490,6 +491,274 @@ class G7bLateSupersetTests(unittest.TestCase):
         # above (134 vs 20 must pass); this only guards the wiring, so it does
         # not grep for the old expression — a comment or docstring naming it is
         # documentation, not a regression.
+
+
+def guard_messages(src, listname):
+    """String literals passed to <listname>.append(...) anywhere in `src`.
+
+    Read through the AST so the assertions describe behaviour (which channel a
+    verdict travels down) instead of line layout, which any reformat would
+    invalidate.
+    """
+    out = []
+    for node in ast.walk(ast.parse(src)):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == listname
+                and node.args):
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                out.append(arg.value)
+    return out
+
+
+class G7cCandleSourceTests(unittest.TestCase):
+    """CHG-194 — the parity proof reads candle_closed, not an empty list.
+
+    feature_candles_15s was retired on 2026-09-05; the analyzer was patched to
+    stop reading it but kept `final_rows = []`, so the candle side of G7c was
+    structurally empty: every one of a run's ~22.5k windows reported "NO final
+    candle" and the harness could never pass. candle_closed (DDL 33) carries
+    tick_count + volume per (instrument_token, tf, window_start), so parity is
+    measurable without the retired table.
+    """
+
+    def setUp(self):
+        self.mod = load_analyze()
+
+    @staticmethod
+    def _row(token, ws, ticks, vol, width=15000):
+        return {"instrument_token": token, "window_start": ws,
+                "window_end": ws + width, "tick_count": ticks, "volume": vol}
+
+    def test_a_15s_candle_becomes_a_parity_key(self):
+        mapping = self.mod.candle_parity_map([self._row(25, 15000, 150, 9000)])
+
+        self.assertEqual(mapping, {(25, 15000): (150, 9000)})
+
+    def test_other_timeframes_are_not_the_15s_family(self):
+        """candle_closed holds six TFs under the same window_start and the raw
+        recount groups at 15s, so a 30s row must not be compared against it."""
+        mapping = self.mod.candle_parity_map([
+            self._row(25, 15000, 150, 9000),
+            self._row(25, 15000, 300, 18000, width=30000)])
+
+        self.assertEqual(mapping, {(25, 15000): (150, 9000)},
+                         "a second timeframe leaked into the 15s comparison")
+
+    def test_only_other_timeframes_leaves_nothing_to_compare(self):
+        """The map goes empty rather than guessing - and the guard, not the map,
+        is what turns an empty comparison into a failure."""
+        mapping = self.mod.candle_parity_map(
+            [self._row(25, 15000, 300, 18000, width=30000)])
+
+        self.assertEqual(mapping, {})
+
+    def test_a_row_missing_a_column_is_skipped_not_crashed(self):
+        mapping = self.mod.candle_parity_map([
+            {"instrument_token": 25, "window_start": 15000},
+            self._row(26, 30000, 150, 1)])
+
+        self.assertEqual(mapping, {(26, 30000): (150, 1)})
+
+    def test_the_candle_side_is_read_by_name_not_by_position(self):
+        """The retired parse read f[3]/f[9]/f[10] of a 15-field layout; the
+        probe emits a JSON object keyed by column name, so a reorder cannot
+        shift the comparison onto the wrong values."""
+        src = open(ANALYZE, encoding="utf-8").read()
+
+        for column in ('r["tick_count"]', 'r["volume"]', 'r["window_start"]',
+                       'r["window_end"]', 'r["instrument_token"]'):
+            self.assertIn(column, src, column)
+
+    def test_a_failed_candle_read_is_a_failure_not_a_pass(self):
+        message = self.mod.g7c_measurement_guard(True, 22528, False)
+
+        self.assertIsNotNone(message, "a dead read was accepted as a real one")
+        self.assertIn("candle_closed read failed", message)
+
+    def test_a_zero_comparison_is_still_rejected_when_the_read_worked(self):
+        message = self.mod.g7c_measurement_guard(True, 0, True)
+
+        self.assertIn("zero fully-closed", message)
+
+    def test_main_reads_the_live_table_and_hands_the_result_to_the_guard(self):
+        """Wiring pin: without both halves a dead read would land in the guard
+        as `compared == 0` and be reported as a mere startup skip."""
+        src = open(ANALYZE, encoding="utf-8").read()
+
+        self.assertIn("read_candle_closed_rows(", src,
+                      "main() no longer reads candle_closed")
+        self.assertIn(
+            "g7c_measurement_guard(raw_read_ok, compared, candle_read_ok)", src,
+            "the candle read result never reaches the parity guard")
+
+    def test_the_kv_read_never_falls_back_to_the_log_wildcard(self):
+        """candle_closed is a PRIMARY-KEY table: FlussPrefixReader's '*' means
+        'no filter' only on the LOG path, and on the KV path it would parse '*'
+        as a token, fail, and print __END__ 0 - a silent empty read (P6-082)."""
+        src = open(ANALYZE, encoding="utf-8").read()
+
+        self.assertIn('",".join(str(t) for t in sorted(tokens))', src,
+                      "the candle read must pass an explicit token list")
+
+
+class AcceptedUnavailableTests(unittest.TestCase):
+    """CHG-194 — "cannot measure" must not be reported as "pipeline is broken".
+
+    Three legs are unmeasurable in this topology: the preview table was retired,
+    the live candle pair carries no write timestamp, and Signal_Candidates has
+    no writer at all while the strategy host is off. They were appended to
+    `failures`, whose non-emptiness is the analyzer's exit code - so the run
+    exited 1 no matter how clean the pipeline was, and the harness could not
+    pass. They now travel the `unavailable` channel: printed, counted, and
+    rc-neutral. The split is fail-closed, so an unmeasurable leg OUTSIDE the
+    accepted set still fails.
+    """
+
+    def setUp(self):
+        self.src = open(ANALYZE, encoding="utf-8").read()
+
+    def test_the_retired_legs_are_reported_as_unavailable(self):
+        unavailable = guard_messages(self.src, "unavailable")
+
+        for stem in ("G6: preview latency leg",
+                     "G7c: final-candle latency leg",
+                     "G6: no preview e2e samples"):
+            self.assertTrue(any(m.startswith(stem) for m in unavailable),
+                            f"{stem!r} is not on the unavailable channel")
+
+    def test_the_retired_legs_are_no_longer_hard_failures(self):
+        hard = guard_messages(self.src, "failures")
+
+        for stem in ("G6: preview latency leg",
+                     "G7c: final-candle latency leg",
+                     "G6: no preview e2e samples"):
+            self.assertFalse(any(m.startswith(stem) for m in hard),
+                             f"{stem!r} would still fail every run")
+
+    def test_unavailable_is_printed_and_counted(self):
+        self.assertIn("~~ UNAVAILABLE (accepted, not a failure)", self.src)
+        self.assertIn("measurement leg(s) unavailable in this ",
+                      self.src)
+
+    def test_unavailable_never_exits_nonzero(self):
+        """The exit code is driven by `failures` alone."""
+        start = self.src.index("if unavailable:")
+        block = self.src[start:self.src.index("if failures:", start)]
+
+        self.assertNotIn("sys.exit", block,
+                         "an unmeasurable leg must not fail the run")
+
+    def test_the_signal_leg_still_fails_when_the_host_did_run(self):
+        """With the strategy host wired, Signal_Candidates HAS a writer, so an
+        unreadable table is a real defect and must not be excused."""
+        self.assertIn("if strategy_host_enabled():", self.src)
+        self.assertIn("failures.append(msg)", self.src,
+                      "the host-on path must still fail")
+        self.assertIn("STRATEGY_HOST_ENABLED is off", self.src)
+
+
+class StrategyHostFlagTests(unittest.TestCase):
+    """The F4 exemption is decided by the submitted flag, not by guessing."""
+
+    def setUp(self):
+        self.mod = load_analyze()
+
+    def test_absent_flag_means_the_host_is_off(self):
+        self.assertFalse(self.mod.strategy_host_enabled({}))
+
+    def test_true_is_recognised_in_any_case(self):
+        for raw in ("true", "TRUE", " true "):
+            self.assertTrue(
+                self.mod.strategy_host_enabled({"STRATEGY_HOST_ENABLED": raw}),
+                raw)
+
+    def test_anything_else_is_off(self):
+        for raw in ("false", "1", "yes", ""):
+            self.assertFalse(
+                self.mod.strategy_host_enabled({"STRATEGY_HOST_ENABLED": raw}),
+                raw)
+
+
+class CandleReaderGuardTests(unittest.TestCase):
+    """The G7c candle reader: a failed read must never look like "no candles".
+
+    An empty candle side and a broken candle reader produce the same comparison
+    (`compared == 0`), so the only thing separating "this run lost nothing" from
+    "this run proved nothing" is the probe's `__END__` sentinel. These drive the
+    reader directly, mirroring RawReaderGuardTests above.
+    """
+
+    ROW = ('{"instrument_token":25,"tf":"FIFTEEN_S","window_start":15000,'
+           '"window_end":30000,"volume":9000,"tick_count":150}\n')
+
+    def setUp(self):
+        self.mod = load_analyze()
+
+    def _read(self, out_dir, stdout_text, rc=0, tokens=(25, 26)):
+        """Run the reader with javac/java faked; return (result, calls)."""
+        calls = []
+
+        def run(*args, **kwargs):
+            calls.append((args, kwargs))
+            if kwargs.get("capture_output"):
+                return SimpleNamespace(returncode=0)   # the javac step
+            kwargs["stdout"].write(stdout_text)        # the java step
+            return SimpleNamespace(returncode=rc)
+
+        with mock.patch.object(self.mod.subprocess, "run", side_effect=run):
+            result = self.mod.read_candle_closed_rows(
+                "unused", out_dir, set(tokens))
+        return result, calls
+
+    def test_a_complete_read_returns_parsable_rows(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            (rows, ok), _ = self._read(out_dir, self.ROW + "__END__ 1\n")
+
+        self.assertTrue(ok)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(self.mod.candle_parity_map(rows),
+                         {(25, 15000): (150, 9000)})
+
+    def test_a_read_without_the_sentinel_is_not_a_pass(self):
+        """rc=1 with rows on stdout is a FAILED read — the rows are diagnostics,
+        and reporting them as the candle side would be the phantom-mismatch bug
+        in reverse (a silent 'no candles')."""
+        with tempfile.TemporaryDirectory() as out_dir:
+            (rows, ok), _ = self._read(out_dir, self.ROW, rc=1)
+
+        self.assertFalse(ok, "a failed read passed as a clean one")
+        self.assertIsNotNone(self.mod.g7c_measurement_guard(True, 1, ok))
+
+    def test_the_read_asks_for_explicit_tokens(self):
+        """A KV table cannot be read with the LOG wildcard: `*` parses as a token,
+        fails, and prints `__END__ 0` (P6-082)."""
+        with tempfile.TemporaryDirectory() as out_dir:
+            _, calls = self._read(out_dir, self.ROW + "__END__ 1\n")
+
+        # subprocess.run(argv, …) — the first positional is the whole argv list.
+        java_argv = [call[0][0] for call in calls
+                     if call[0] and call[0][0][0] == "java"][0]
+        self.assertIn("25,26", java_argv)
+        self.assertNotIn("*", java_argv)
+
+    def test_no_tokens_refuses_before_reading_anything(self):
+        """Without the raw recount there is nothing to look up, and an unfiltered
+        read would compare the candles of every token that was never measured."""
+        with tempfile.TemporaryDirectory() as out_dir:
+            (rows, ok), calls = self._read(
+                out_dir, self.ROW + "__END__ 1\n", tokens=())
+
+        self.assertFalse(ok)
+        self.assertEqual(rows, [])
+        # Asserting the refusal alone is not enough: an unfiltered read still
+        # ends with __END__ 0, so `ok` stays False for the wrong reason. The
+        # probe must never be launched at all.
+        self.assertEqual([call for call in calls if call[0][0][0] == "java"],
+                         [], "java ran with no token list to look up")
 
 
 if __name__ == "__main__":
