@@ -157,7 +157,8 @@ echo "STAGE-A2: job $JOB_ID RUNNING — capturing ${DURATION_S}s"
 # ~100x (fingerprint-dedup ~2.3 ms busy/rec, pipeline capped ~1.7k/s) —
 # invisible until throughput analysis. Fail the run INSTEAD of capturing a
 # poisoned baseline: the job's RocksDB dirs are named job_<JOB_ID>_op_*;
-# they must appear under /tmp/flink-rocksdb (the named volume mount).
+# they must appear under /tmp/flink-rocksdb (the named volume mount),
+# i.e. /tmp/flink-rocksdb/job_${JOB_ID}_op_* must exist post-submit (G24a pin).
 # P6-211: the mount-source + dir-presence check lives in pipeline-lib
 # (pipeline_g24_rocksdb_check) so it is unit-testable. JOB_ID is non-empty
 # here (P6-210 gate above). This also fixes the wave-17 regression: the old
