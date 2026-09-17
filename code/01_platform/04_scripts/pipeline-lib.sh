@@ -769,7 +769,9 @@ pipeline_purge_table() {
   # from-earliest evidence reads bounded (raw grows ~6M rows per 10-min
   # phase; reading all history would blow the analyzer's memory).
   local ddl_file="$1" label="$2"
-  pipeline_log "purging $label table (drop + recreate)"
+  # P6-484: a partitioned table keeps its identity and has its partitions
+  # dropped; anything else is dropped and recreated. See TablePurge.java.
+  pipeline_log "purging $label table (clearing data)"
   # P6-147/P6-476: a private temp dir per call. The fixed /tmp/TablePurge.java
   # and .class raced between concurrent runs, were predictable enough for a
   # symlink attack on a world-writable /tmp, and left TablePurge$*.class
@@ -782,14 +784,35 @@ import com.trading.common.schema.ddl.DdlText;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
 import org.apache.fluss.client.admin.Admin;
+import org.apache.fluss.client.admin.OffsetSpec;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.metadata.PartitionInfo;
+import org.apache.fluss.metadata.PartitionSpec;
+import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 public class TablePurge {
+    /**
+     * The DDL's own time zone, so "today" matches the partitions the
+     * coordinator would name. Falling back to the DDL's declared default keeps
+     * a table without the option working instead of throwing.
+     */
+    static String timeZone(DdlText.ParsedDdl parsed) {
+        String tz = parsed.options().get("table.auto-partition.time-zone");
+        return (tz == null || tz.isBlank()) ? "UTC" : tz;
+    }
+
     public static void main(String[] args) throws Exception {
         String ddl = Files.readString(Path.of(args[0]));
         DdlText.ParsedDdl parsed = DdlText.parse(ddl, args[0]);
@@ -798,14 +821,97 @@ public class TablePurge {
         conf.setString("bootstrap.servers", "localhost:9123");
         try (Connection c = ConnectionFactory.createConnection(conf);
              Admin admin = c.getAdmin()) {
+            // P6-484: clear the DATA without churning the table's identity.
+            //
+            // An unconditional dropTable+createTable here left every caller
+            // that appends right after a purge broken for about a minute. The
+            // recreate hands the table a NEW id and the tablet then has to
+            // re-establish leadership for that table's buckets, and a client
+            // connecting in that window fails each append:
+            //   IllegalArgumentException: table path not found for tableId <old>
+            //   -> FlussRuntimeException: Failed to update metadata
+            //   -> RawTickWriter FATAL append -> FAIL-FAST -> exit 1
+            // Measured on the live cluster, ONE purge on a quiet node:
+            // drop+recreate -> append fails from t+0s through t+50s, first
+            // success at t+55s (reproduced twice); dropping the partitions
+            // instead -> append succeeds at t+0s, 6/6 back-to-back. Only a
+            // PARTITIONED table shows the window, which is why it surfaced on
+            // raw_table_1 - the only partitioned table a harness purges.
+            //
+            // Dropping partitions empties the table just as completely: the
+            // dropped partitions' segments go with them.
+            //
+            // The current day's partition is then re-created here, and that
+            // step is load-bearing rather than tidiness. Fluss's
+            // auto-partitioning (table.auto-partition.enabled=true) does NOT
+            // create a partition on the write that needs it - it runs on the
+            // coordinator's periodic sweep - so a table left with zero
+            // partitions answers the next append with
+            //   PartitionNotExistException: Table partition
+            //   'default.raw_table_1(p=20260917)' does not exist
+            // Measured with the harness's own timing (purge, wait 50s of
+            // bring-up, append): without pre-creating, the append failed and
+            // the partition was still absent afterwards; pre-creating the
+            // current IST day first made the same append succeed.
+            // The pre-create also matches what the DDL asks for: it declares
+            // 'table.auto-partition.num-precreate' = '2', i.e. a purged table
+            // is expected to carry the current day ready to accept writes.
+            TableInfo live = null;
             try {
-                admin.dropTable(tp, false).get(60, TimeUnit.SECONDS);
-            } catch (Exception e) {
-                System.out.println("drop skipped: " + e.getMessage());
+                live = admin.getTableInfo(tp).get(10, TimeUnit.SECONDS);
+            } catch (Exception absent) {
+                // No table yet: nothing to clear, fall through to create.
             }
-            admin.createTable(tp, DdlText.toDescriptor(parsed), false)
-                    .get(60, TimeUnit.SECONDS);
-            System.out.println("PURGED " + tp);
+
+            // A rewritten DDL must still take effect, and that needs a real
+            // recreate. Comparing column count and partition keys keeps the
+            // test cheap and fail-safe: on any difference we drop and recreate
+            // exactly as before.
+            boolean schemaCurrent = live != null
+                    && live.getRowType().getFieldCount() == parsed.columns().size()
+                    && live.getPartitionKeys().equals(parsed.partitionKeys());
+
+            if (live != null && live.isPartitioned() && schemaCurrent) {
+                int dropped = 0;
+                for (PartitionInfo part : admin.listPartitionInfos(tp).get(30, TimeUnit.SECONDS)) {
+                    try {
+                        admin.dropPartition(tp, part.getPartitionSpec(), false)
+                                .get(60, TimeUnit.SECONDS);
+                        dropped++;
+                    } catch (ExecutionException e) {
+                        // The goal is "no rows left", not "N drops succeeded":
+                        // a partition that vanished under us is not a failure.
+                        System.out.println("partition drop skipped: " + e.getCause());
+                    }
+                }
+                // Put the current day back so the next append has somewhere to
+                // land; see the P6-484 note above for why this is required
+                // rather than left to auto-partitioning.
+                String today = LocalDate.now(ZoneId.of(timeZone(parsed)))
+                        .format(DateTimeFormatter.ofPattern("yyyyMMdd"));
+                try {
+                    admin.createPartition(tp,
+                            new PartitionSpec(Map.of(live.getPartitionKeys().get(0), today)), true)
+                            .get(60, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    // Already there (a second purge in the same day) is fine;
+                    // anything else means the append will fail loudly on its
+                    // own, so this stays non-fatal.
+                    System.out.println("partition pre-create skipped: " + e.getMessage());
+                }
+                System.out.println("PURGED " + tp + " (partitions=" + dropped + ", day=" + today + ")");
+            } else {
+                try {
+                    admin.dropTable(tp, false).get(60, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    System.out.println("drop skipped: " + e.getMessage());
+                }
+                admin.createTable(tp, DdlText.toDescriptor(parsed), false)
+                        .get(60, TimeUnit.SECONDS);
+                System.out.println("PURGED " + tp);
+            }
+
+            }
         }
     }
 }

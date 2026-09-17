@@ -267,6 +267,43 @@ def test_purge_failure_continues_with_the_opt_in(tmp_path):
     assert "rc=0" in r.stdout
 
 
+# ── P6-484: purge a partitioned table without churning its identity ─────────
+def test_purge_helper_clears_a_partitioned_table_by_dropping_partitions():
+    """P6-484 pinned statically: the branch taken depends on the LIVE table's
+    metadata (is it partitioned, does its schema still match the DDL), which
+    only a real cluster can answer, so the properties are asserted on the
+    source the way P6-146/475 assert the docker argv.
+
+    Dropping and recreating a partitioned table hands it a new id, and until
+    the tablet re-establishes leadership for the new id every append fails
+    ("table path not found for tableId <old>" -> "Failed to update metadata").
+    Measured on the live cluster after ONE purge: appends failed from t+0s
+    through t+50s and first succeeded at t+55s; dropping partitions instead
+    appended fine at t+0s, 6/6."""
+    text = LIB.read_text()
+    assert "listPartitionInfos" in text and "dropPartition" in text, \
+        "the purge no longer stops to consider dropping partitions"
+    assert "isPartitioned()" in text, \
+        "the purge no longer checks whether the table is partitioned"
+    # Auto-partitioning does not create the partition the next append needs —
+    # it runs on the coordinator's periodic sweep — so the purge has to leave
+    # the current day ready, or the harness's append (which happens ~50s later,
+    # after bring-up) fails with PartitionNotExistException. Measured: without
+    # the pre-create the append failed and the partition was still absent
+    # afterwards; with it the same append succeeded.
+    assert "createPartition" in text, \
+        "the purge no longer pre-creates the current day's partition"
+    assert "table.auto-partition.time-zone" in text, \
+        "the pre-created day is not named in the DDL's own time zone"
+    # The fallback has to stay: a rewritten DDL can only be applied by a real
+    # recreate, so the drop+create path must survive alongside the new branch.
+    assert "admin.dropTable(tp, false)" in text and "admin.createTable(tp," in text, \
+        "the drop+recreate fallback (needed for schema changes) was removed"
+    # The shell wrapper keys success off this string, so both branches must
+    # still print it or every caller would read a successful purge as a failure.
+    assert text.count('System.out.println("PURGED " + tp') == 2, \
+        "both purge branches must report PURGED for the caller's grep"
+
 # ── P6-474: INJECT_* must be bare integers ───────────────────────────────────
 @pytest.mark.parametrize("value", ["5s", "abc", ""])
 def test_inject_env_is_validated(tmp_path, value):
