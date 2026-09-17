@@ -36,6 +36,9 @@ This validator fails LOUD at edit time (exit 1 + reason) for:
 
 Pinned by G22 in test-pipeline-lib.sh; unit-tested by
 tests/test_check_flink_properties.py.
+E. duplicate keys inside the block (last-wins merge silently discards the
+   earlier value — the same silent-drop class as the prefix collisions in B).
+(A missing FLINK_PROPERTIES block itself reports FAIL + exit 1, not a traceback.)
 """
 import re
 import sys
@@ -102,6 +105,20 @@ def check(compose_path: Path = COMPOSE) -> list[str]:
     lines = extract_block(compose_path.read_text())
     props = parse_props(lines)
     keys = [k for k, _ in props]
+    # E. duplicate keys (last-wins merge silently discards earlier values —
+    # the same silent-drop class as the prefix collisions in B).
+    seen: dict[str, int] = {}
+    for k, _ in props:
+        seen[k] = seen.get(k, 0) + 1
+    for k, c in seen.items():
+        if c > 1:
+            failures.append(
+                f"DUPLICATE KEY {k!r} appears {c}x in FLINK_PROPERTIES\n"
+                f"    WHY: duplicate entries are merged with last-wins semantics, silently\n"
+                f"    discarding the earlier value (the same silent-drop class as the prefix\n"
+                f"    collisions this validator blocks).\n"
+                f"    FIX: keep a single definition of the key."
+            )
 
     # A. comment lines inside the block
     for line in lines:
@@ -168,7 +185,11 @@ def main() -> int:
     if not COMPOSE.exists():
         print(f"FAIL: {COMPOSE} not found", file=sys.stderr)
         return 1
-    failures = check()
+    try:
+        failures = check(COMPOSE)
+    except ValueError as e:
+        print(f"FAIL: {e}", file=sys.stderr)
+        return 1
     if failures:
         print("FLINK_PROPERTIES validation FAILED "
               f"({len(failures)} problem(s)):", file=sys.stderr)

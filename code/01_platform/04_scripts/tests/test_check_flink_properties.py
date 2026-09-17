@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from check_flink_properties import check, COMPOSE  # noqa: E402
+import check_flink_properties as validator  # noqa: E402
 
 
 def _compose(tmp_path: Path, block_lines: str) -> Path:
@@ -125,3 +126,28 @@ def test_missing_required_key_fails(tmp_path):
 def test_real_repo_compose_passes():
     """The actual docker-compose.yml in this repo must validate clean."""
     assert check(COMPOSE) == []
+
+
+def test_duplicate_key_fails(tmp_path):
+    # Last-wins merge silently discards the earlier value — the same
+    # silent-drop class as the prefix collisions, so it must fail loud.
+    block = VALID_BLOCK + "taskmanager.numberOfTaskSlots: 32\n"
+    failures = check(_compose(tmp_path, block))
+    assert any("DUPLICATE KEY" in f and "taskmanager.numberOfTaskSlots" in f
+               for f in failures)
+
+
+def test_main_reports_missing_block_gracefully(tmp_path, capsys, monkeypatch):
+    # A block the regex cannot terminate (e.g. last entry before EOF) must
+    # report FAIL + exit 1, not die with a ValueError traceback (P6-722).
+    p = tmp_path / "compose-last.yml"
+    p.write_text(
+        "x-flink-common:\n"
+        "  environment: &flink-common-env\n"
+        '    SOME_ENV: "1"\n'
+        "    FLINK_PROPERTIES: |\n"
+        "      jobmanager.rpc.address: flink-jobmanager\n"
+    )
+    monkeypatch.setattr(validator, "COMPOSE", p)
+    assert validator.main() == 1
+    assert "FAIL" in capsys.readouterr().err
