@@ -604,12 +604,13 @@ normalisation in leg 1 makes both "resolve".
       (so the corpus findings came from a hand sweep), that the capture list
       changed 22 removed / 10 added with 1 withheld (above), and that the live
       re-seed of O2 has not been run.
+      **Update (same day):** the re-seed **has now been run** — see Task 7 below.
 - [x] **Verify:** `python3 code/01_platform/04_scripts/change_control_check.py`
       → exit 0, and the same check via `make docs-audit` (C14).
       **Results:** `change-control: all 188 change record(s) complete` (CHG-195
       PASS); `docs-audit: all checks pass — docs agree with code`, C14 included.
 
-### Task 6: Verify the guard, not just the change
+### Task 6: Confirm the suite needs no Makefile change
 
 - [x] Confirm the new suite runs with **no Makefile change**:
       `python3 -m unittest discover -s code/01_platform/04_scripts/tests -v`
@@ -620,6 +621,35 @@ normalisation in leg 1 makes both "resolve".
       behavioural failure. `gate-fast` as a single command still needs several
       minutes here (the suite has grown past a 60 s budget), so the sweep, not one
       run, is the evidence.
+### Task 7: Re-seed O2 from the cleaned sources (done 2026-09-17, same day)
+
+- [x] `make seed-dashboards` with `O2_PASSWORD` from `secrets.env` and `O2_USER`
+      from `.env` — **RESULT: created=8 updated=0 untouched=0**. The O2 org turned
+      out to have never been seeded, so nothing needed `--force`: all 8 seed
+      dashboards went in fresh from the cleaned corpus.
+- [x] `o2-provision.py` (first run) — created its 11 dashboards, the
+      `dev-webhook` destination, 43 alert rules and first-time retention policies
+      (845 streams) from the fixed spec; reached `done`.
+- [x] Idempotency proof (second run) — all 11 dashboards `converged`, every
+      alert `exists`, `destination exists: dev-webhook`, nothing recreated.
+- [x] Post-state verified over the REST API: **19 dashboards** deployed,
+      **zero** dead stream names in any of them; both repointed panels carry
+      their live successors in the deployed copies:
+      `compute_candles_late_dropped` on *COMPUTE - Candle Health* and
+      *COMPUTE - SignalJob Overview*; `compute_signal_kv_filtered_noncanonical`
+      on *COMPUTE - Candle Health* and *COMPUTE - Quality*.
+- [x] `CHG-195` updated in place: Status line and Verification section now
+      record the applied re-seed; `affected_artifacts` gains `status.md`.
+      Side effect recorded: since the org was empty, this run also stood up the
+      alert rules and retention for the first time.
+- Note: `o2-provision.py` runs the COMMAND converge check before any write
+      (`validate_command_spec()`), so the Task-3 edits are proven against the
+      live instance every provision run.
+- Note: no repo code changed in this task — O2 state only — so the only commit
+      here is this bookkeeping.
+
+### Task 8: Verify the guard, not just the change (open)
+
 - [ ] **Mutation list** — apply each to a copy and confirm the suite catches it:
       (a) rename a metric literal in `MultiTimeframeAggregateFunction`;
       (b) add a `.name()` to `SignalJob.java` and remove its script reference;
