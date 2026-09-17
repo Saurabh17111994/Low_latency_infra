@@ -1101,8 +1101,8 @@ ALERTS = [
     dict(
         name="SIGNAL-error-checkpoint-slow",
         stream="flink_jobmanager_job_lastcheckpointduration",
-        conditions=[("value", ">=", 240000)],
-        desc="[Error/compute] Checkpoint duration >= 240000 ms = 80% of pinned CHECKPOINT_TIMEOUT_MS=300000: timeout risk; recovery = fast checkpoint",
+        conditions=[("value", ">=", 24000)],
+        desc="[Error/compute] Checkpoint duration >= 24000 ms = 80% of pinned CHECKPOINT_TIMEOUT_MS=30000 (PlatformConfig.CHECKPOINT_TIMEOUT_MS): timeout risk; recovery = fast checkpoint",
     ),
     dict(
         name="SIGNAL-error-job-restarting",

@@ -764,4 +764,11 @@ evidence for this change. `gate-fast` + `docs-audit` are the right scope.
 * This class will recur one level up too: nothing yet ties O2 **alert thresholds**
   to the config constants they assume (the `AlertThresholds` ↔ `seed_alerts.py`
   pairing is hand-copied). Out of scope here; noted so it is not re-discovered as
-  a surprise.
+  a surprise. **Update (2026-09-17, same day): done** —
+  `tests/test_alert_threshold_parity.py` (15 tests) now ties all 47 ALERTS
+  setpoints to their authorities (`AlertThresholds`/`PlatformConfig` constants,
+  the compose pin, 02-ingestion-alerting.md, the runbook table, the
+  position-state JSON corpus) with a fail-closed completeness leg, and the
+  predicted drift was real: `SIGNAL-error-checkpoint-slow` fired at 240 000 ms
+  against a 30 000 ms pin (runbook said 24 000) — fixed as CHG-197, including
+  the live rule re-provisioned in O2.
