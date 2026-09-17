@@ -383,7 +383,6 @@ class Wave36Case(unittest.TestCase):
             'smoke_inject_gate\necho "GATE_RC=$?"\n')
         return self.sb.run(p)
 
-
 class TestLivenessProbesContainers(Wave36Case):
     """P6-008/P6-009 — the data path is containers, not host PIDs."""
 
@@ -882,19 +881,75 @@ class TestInjectOffsetIsClamped(Wave36Case):
                 "the offset is being shifted by WARMUP_S on top of an "
                 "already-absolute value")
 
-    def test_a_phase_too_short_to_host_an_injection_is_rejected(self):
-        """A 30s phase cannot host the 20s-margin window; fail fast, don't
-        silently measure a window that cannot contain the injection."""
+    def test_a_phase_too_short_to_host_an_injection_skips_loudly(self):
+        """A 30s phase cannot host the 20s-margin window (CHG-198): the
+        injection is SKIPPED with a loud notice and the phase continues.
+        Failing here would forbid short pipeline-sanity iterations outright;
+        silence here would let an unproven phase pose as proven."""
         drv = self.sb.body_script(SCRIPT_SRC.read_text(), "hm-inj3.sh", "smoke", "30")
 
         res = self.sb.run(drv, HOLISTIC_INJECT_MARGIN=self.REAL_MARGIN)
 
-        self.assertIn("too short to host an injection", res.stderr, res.stderr)
-        # `fail` exits the whole script, so the driver's `echo PHASE_RC` never
-        # runs — the non-zero exit IS the evidence that the phase stopped.
-        self.assertNotEqual(res.returncode, 0,
-                            "the phase continued past an impossible injection "
-                            "window:\n" + res.stdout[-1500:])
+        self.assertIn("INJECT SKIPPED", res.stderr, res.stderr[-2000:])
+        self.assertIn("proves nothing about duplicate/late handling",
+                      res.stderr, res.stderr[-2000:])
+        # No offset is exported for a skipped injection: the stub preflight
+        # reports exactly what run_phase exported.
+        self.assertIn("OFFSET=unset", res.stderr, res.stderr[-2000:])
+        self.assertIn("PHASE_RC=0", res.stdout, res.stdout[-2000:])
+
+    def test_a_skipped_injection_passes_the_gate_with_a_loud_notice(self):
+        """CHG-198: the inject-skipped marker turns the gate's fail-closed
+        branch into a loud pass. The phase-level skip notice (previous test)
+        is what keeps an unproven phase honest."""
+        phase_out = self.sb.out / "phase"
+        d = phase_out / "smoke"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "inject-skipped").write_text(
+            "phase smoke duration 30s <= 40s sampled-window minimum")
+        (d / "faketool.log").write_text(
+            "fake HFT broker listening on :8899\n"
+            "faketool: conn=1 accepted\n")
+        # The counters are cumulative series; first sample then last sample.
+        (d / "tm-prom-dedup-late.tsv").write_text(
+            "1 flink_x_compute_dedup_duplicates 0\n"
+            "1 flink_x_compute_candles_late_dropped 0\n"
+            "2 flink_x_compute_dedup_duplicates 0\n"
+            "2 flink_x_compute_candles_late_dropped 0\n")
+        p = self.sb.gate_script(
+            SCRIPT_SRC.read_text(), "hm-gate-skip.sh",
+            f'PHASE_OUT="{phase_out}"\n'
+            'smoke_inject_gate\necho "GATE_RC=$?"\n')
+        res = self.sb.run(p)
+
+        self.assertIn("GATE SKIP", res.stdout, res.stdout[-2000:])
+        self.assertIn("GATE_RC=0", res.stdout, res.stdout[-2000:])
+
+    def test_a_missing_injection_without_the_marker_still_fails_closed(self):
+        """CHG-198 twin: no marker + no INJECT line means the injection was
+        expected but never fired — the gate must fail LOUDLY (never silently:
+        the want-derivation carries `|| true` so a matchless grep reaches
+        this branch instead of tripping set -e under pipefail)."""
+        phase_out = self.sb.out / "phase"
+        d = phase_out / "smoke"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "faketool.log").write_text(
+            "fake HFT broker listening on :8899\n"
+            "faketool: conn=1 accepted\n")
+        (d / "tm-prom-dedup-late.tsv").write_text(
+            "1 flink_x_compute_dedup_duplicates 0\n"
+            "1 flink_x_compute_candles_late_dropped 0\n"
+            "2 flink_x_compute_dedup_duplicates 0\n"
+            "2 flink_x_compute_candles_late_dropped 0\n")
+        p = self.sb.gate_script(
+            SCRIPT_SRC.read_text(), "hm-gate-missing.sh",
+            f'PHASE_OUT="{phase_out}"\n'
+            'smoke_inject_gate\necho "GATE_RC=$?"\n')
+        res = self.sb.run(p)
+
+        self.assertIn("no INJECT lines", res.stderr + res.stdout,
+                      res.stdout[-2000:])
+        self.assertIn("GATE_RC=1", res.stdout, res.stdout[-2000:])
 
 
 class TestInjectGateTolerance(Wave36Case):

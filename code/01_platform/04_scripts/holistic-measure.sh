@@ -170,16 +170,32 @@ run_phase() {
   # runs a 1-3s phase that could never host any injection. Default is the real
   # value and does not change production behaviour.
   local _margin="${HOLISTIC_INJECT_MARGIN:-20}"
-  [ "$duration_s" -gt $(( _margin * 2 )) ] \
-    || fail "phase $name duration ${duration_s}s is too short to host an injection (need > $(( _margin * 2 ))s)"
-  local _inject_limit
-  _inject_limit=$(( (WARMUP_S + duration_s - _margin) * 1000 ))
-  [ "$_inject_limit" -lt 120000 ] || _inject_limit=120000
-  if [ "$name" = "smoke" ]; then
-    export INJECT_AFTER_MS="$_inject_limit" INJECT_DUPS=200 INJECT_LATE=20 INJECT_EVERY_MS=0
+  # A phase shorter than twice the margin cannot host an injection inside the
+  # sampled window — but that SKIPS the injection loudly instead of failing
+  # the phase (CHG-198): short phases are legitimate quick pipeline-sanity
+  # iterations. Zero counts fire no round (faketool main.go: injectAfter>0
+  # AND (dups>0 OR late>0)), so faketool.log carries no INJECT line and the
+  # smoke gate passes on the inject-skipped marker written below. A skipped MAIN still runs the
+  # analyzer's parity-only audit with its clean-feed assertions — unchanged
+  # pre-existing behavior for injection-less runs, see the record.
+  if [ "$duration_s" -gt $(( _margin * 2 )) ]; then
+    local _inject_limit
+    _inject_limit=$(( (WARMUP_S + duration_s - _margin) * 1000 ))
+    [ "$_inject_limit" -lt 120000 ] || _inject_limit=120000
+    if [ "$name" = "smoke" ]; then
+      export INJECT_AFTER_MS="$_inject_limit" INJECT_DUPS=200 INJECT_LATE=20 INJECT_EVERY_MS=0
+    else
+      export INJECT_AFTER_MS="$_inject_limit" INJECT_DUPS=200 INJECT_LATE=20 \
+        INJECT_EVERY_MS=120000 INJECT_MAX_ROUNDS=4
+    fi
   else
-    export INJECT_AFTER_MS="$_inject_limit" INJECT_DUPS=200 INJECT_LATE=20 \
-      INJECT_EVERY_MS=120000 INJECT_MAX_ROUNDS=4
+    echo "!! phase $name duration ${duration_s}s cannot host an injection inside the sampled window (need > $(( _margin * 2 ))s) — INJECT SKIPPED: this phase proves nothing about duplicate/late handling" >&2
+    unset INJECT_AFTER_MS INJECT_MAX_ROUNDS
+    export INJECT_DUPS=0 INJECT_LATE=0 INJECT_EVERY_MS=0
+    # Marker the smoke gate reads: without it a missing injection fails
+    # closed ("no INJECT lines ... never fired"). The gate failing LOUDLY on
+    # a lost marker is the self-check on this write.
+    echo "phase $name duration ${duration_s}s <= $(( _margin * 2 ))s sampled-window minimum — injection deliberately not scheduled" > "$OUT/inject-skipped"
   fi
   export ARROW_MAX_EVENT_AGE_MS=180000
   pipeline_preflight || return 1
@@ -499,9 +515,19 @@ fi
 # downstream); a counter over = over-dropping (data loss). Both fail the gate.
 smoke_inject_gate() {
   local dir="$PHASE_OUT/smoke"
+  # CHG-198: a deliberately skipped injection (short phase) carries a marker;
+  # it passes with a loud notice, not counter proof. No marker + no INJECT
+  # lines is a broken injection and still fails closed below.
+  if [ -f "$dir/inject-skipped" ]; then
+    echo "SMOKE INJECT GATE SKIP — $(cat "$dir/inject-skipped"): duplicate/late handling is unproven by this phase; all other gates still apply"
+    return 0
+  fi
   local want_dups want_late
-  want_dups="$(grep -oE 'dups=[0-9]+' "$dir/faketool.log" 2>/dev/null | cut -d= -f2 | awk '{s+=$1} END {print s+0}')"
-  want_late="$(grep -oE 'late=[0-9]+' "$dir/faketool.log" 2>/dev/null | cut -d= -f2 | awk '{s+=$1} END {print s+0}')"
+  # `|| true`: with pipefail a grep that matches nothing (or a missing log)
+  # would kill the caller silently under set -e; want=0 must reach the loud
+  # fail-closed branch below instead.
+  want_dups="$(grep -oE 'dups=[0-9]+' "$dir/faketool.log" 2>/dev/null | cut -d= -f2 | awk '{s+=$1} END {print s+0}' || true)"
+  want_late="$(grep -oE 'late=[0-9]+' "$dir/faketool.log" 2>/dev/null | cut -d= -f2 | awk '{s+=$1} END {print s+0}' || true)"
   if [ "${want_dups:-0}" -eq 0 ] && [ "${want_late:-0}" -eq 0 ]; then
     echo "!! SMOKE INJECT GATE: no INJECT lines in faketool.log — injection never fired" >&2
     return 1
