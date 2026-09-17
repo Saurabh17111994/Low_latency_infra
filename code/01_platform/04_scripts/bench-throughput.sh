@@ -23,7 +23,7 @@
 # the expected rate and the window length actually measured (P6-032).
 #
 # Env overrides: BENCH_EXPECTED_RPS (20480), BENCH_MIN_RATE (0.90),
-#                BENCH_WINDOW_S (60), OUT_DIR, O2_BASE_URL,
+#                BENCH_WINDOW_S (60), BENCH_PORT (8899), OUT_DIR, O2_BASE_URL,
 #                INGESTION_CONTAINER_NAME, INSTRUMENT_MANIFEST_HOST_PATH,
 #                BENCH_BASELINE_SETTLE_S (15), BENCH_BASELINE_TRIES (6),
 #                BENCH_WINDOWS (3).
@@ -73,6 +73,7 @@ INGESTION_CONTAINER="${INGESTION_CONTAINER_NAME:-${COMPOSE_PROJECT_NAME:-01_dock
 EXPECTED_RPS="${BENCH_EXPECTED_RPS:-20480}"
 MIN_RATE="${BENCH_MIN_RATE:-0.90}"
 WINDOW_S="${BENCH_WINDOW_S:-60}"
+BENCH_PORT="${BENCH_PORT:-8899}"
 # Three windows is the documented measurement; the count is a knob so a smoke
 # run (or a test) can prove the gate wiring without paying three of them.
 WINDOW_COUNT="${BENCH_WINDOWS:-3}"
@@ -179,25 +180,25 @@ cleanup() {
 	(cd "$DOCKER_DIR" && docker compose --env-file .env --env-file secrets.env \
 		-f docker-compose.yml \
 		-f docker-compose.soak.yml -f docker-compose.bench.yml stop ingestion) >/dev/null 2>&1 || true
-	if port_open 127.0.0.1 8899; then
-		echo "!! teardown: port 8899 still busy"
+	if port_open 127.0.0.1 "$BENCH_PORT"; then
+		echo "!! teardown: port $BENCH_PORT still busy"
 		FAILED=1
 		RESULT="FAIL"
 	else
-		echo "teardown: port 8899 free"
+		echo "teardown: port $BENCH_PORT free"
 	fi
 	{
 		echo "BENCH-THROUGHPUT RESULT — $STAMP — $RESULT"
 		echo "evidence: $OUT"
 		echo "---"
-		echo "command: faketool -port 8899 -real-rate -real-rate-hz 20 (1024 ids x 20Hz = 20,480 frames/s)"
+		echo "command: faketool -port $BENCH_PORT -real-rate -real-rate-hz 20 (1024 ids x 20Hz = 20,480 frames/s)"
 		echo "gates (every window): rows >= ${MIN_RATE} x ${EXPECTED_RPS}/s x elapsed_s, decode_errors delta == 0, p99 < 1000 ms"
 		[ -n "$WINDOW_FAILS" ] && echo "failures: $WINDOW_FAILS"
 		[ -f "$TSV" ] && cat "$TSV"
 	} > "$RESULT_FILE"
 	echo "=== bench-throughput end — $RESULT (result: $RESULT_FILE)"
 	# P6-030: `rc` is only the status the script had already exited with. When the
-	# failure is detected HERE — the broker would not die, port 8899 stayed busy,
+	# failure is detected HERE — the broker would not die, the broker port stayed busy,
 	# or a window was skipped — rc is still 0 on the PASS path, and `exit 0` told
 	# CI the bench was green while result.txt said FAIL.
 	if [ "$rc" -eq 0 ] && [ "$FAILED" = 1 ]; then
@@ -228,8 +229,8 @@ port_open localhost 9123 || { echo "!! Fluss :9123 not reachable"; FAILED=1; }
 if pgrep -f 'com.trading.ingestion.IngestionService' >/dev/null 2>&1; then
 	echo "!! an IngestionService is already running (native or containerized) — refusing to double-run; stop it first (docker compose stop ingestion for the container)"; FAILED=1
 fi
-if port_open 127.0.0.1 8899; then
-	echo "!! port 8899 busy — a fake broker may already run"; FAILED=1
+if port_open 127.0.0.1 "$BENCH_PORT"; then
+	echo "!! port $BENCH_PORT busy — a fake broker may already run"; FAILED=1
 fi
 if [ "$FAILED" = 1 ]; then
 	echo "preflight FAILED"
@@ -250,11 +251,11 @@ echo "jar: $JAR bridge: $BRIDGE_DIR/arrow-bridge faketool: $OUT/bin/faketool"
 
 # ── Start fake broker in real-rate mode ──────────────────────────────────────
 echo "=== fake broker (-real-rate -real-rate-hz 20 → 20,480 frames/s)"
-"$OUT/bin/faketool" -port 8899 -real-rate -real-rate-hz 20 \
+"$OUT/bin/faketool" -port "$BENCH_PORT" -real-rate -real-rate-hz 20 \
 	> "$OUT/bench/faketool.log" 2>&1 &
 FAKETOOL_PID=$!
-for _ in $(seq 1 30); do port_open 127.0.0.1 8899 && break; sleep 1; done
-port_open 127.0.0.1 8899 || { fail "faketool did not open :8899"; exit 1; }
+for _ in $(seq 1 30); do port_open 127.0.0.1 "$BENCH_PORT" && break; sleep 1; done
+port_open 127.0.0.1 "$BENCH_PORT" || { fail "faketool did not open :$BENCH_PORT"; exit 1; }
 
 # ── Build + start ingestion container (fresh image carries the async writer
 #    and the 20ms client linger) ──────────────────────────────────────────────

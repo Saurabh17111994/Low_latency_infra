@@ -42,19 +42,36 @@ STUBS = Path(__file__).resolve().parent / "stubs"
 sys.path.insert(0, str(STUBS))
 import wave33_o2  # noqa: E402  (path set above)
 
+# The bench-under-test refuses double-run by design (bench-throughput.sh
+# preflight: `pgrep -f IngestionService` → preflight FAILED), so with the live
+# stack up these tests CANNOT pass — they would fail without proving anything.
+# Skip the whole module loudly instead; re-run with the stack down.
+def _live_ingestion_running(pattern: str = "com.trading.ingestion.IngestionService") -> bool:
+    try:
+        return subprocess.run(["pgrep", "-f", pattern],
+                              capture_output=True).returncode == 0
+    except OSError:
+        return False
+
+
+if _live_ingestion_running():
+    raise unittest.SkipTest(
+        "live IngestionService is up — the bench refuses double-run by "
+        "design; re-run with the stack down")
+
 # Two seconds keeps the suite fast. The gate is derived from WINDOW_S, so the
 # arithmetic under test is the same at 60s as at 2s.
 WINDOW_S = "2"
 EXPECTED_RPS = 20480
 
-# The bench's own broker: binds :8899 so preflight and the startup wait succeed,
+# The bench's own broker: binds $W33_BROKER_PORT so preflight and the startup wait succeed,
 # and exits on the teardown kill, which frees the port (the healthy path).
 FAKETOOL = '''\
 #!/usr/bin/env python3
-import socket, sys, time
+import os, socket, sys, time
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-s.bind(("127.0.0.1", 8899))
+s.bind(("127.0.0.1", int(os.environ.get("W33_BROKER_PORT", "8899"))))
 s.listen(16)
 while True:
     try:
@@ -77,7 +94,7 @@ if os.fork() == 0:                       # listener: detached from this pid
     os.setsid()
     s = socket.socket()
     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind(("127.0.0.1", 8899))
+    s.bind(("127.0.0.1", int(os.environ.get("W33_BROKER_PORT", "8899"))))
     s.listen(16)
     open(pidfile, "w").write(str(os.getpid()))
     os.write(w, b"1")
@@ -156,6 +173,9 @@ class Sandbox:
         self.bin.mkdir()
         self.out = root / "out"
         self.out.mkdir()
+        # The bench's broker port: free per sandbox, never assumed. Follows
+        # the O2Server pattern (free_port + env) two dozen lines below.
+        self.broker_port = free_port()
 
         # ── the layout the script's own path derivation expects ──────────────
         self.scripts_dir = self.code / "01_platform/04_scripts"
@@ -225,6 +245,8 @@ class Sandbox:
             "BENCH_EXPECTED_RPS": str(EXPECTED_RPS),
             "BENCH_WINDOWS": "1",
             "BENCH_BASELINE_SETTLE_S": "0",
+            "W33_BROKER_PORT": str(self.broker_port),
+            "BENCH_PORT": str(self.broker_port),
             "W33_O2_STATE": str(o2.state),
             "W33_O2_MODE": wave33_o2.MODE,
             "W33_O2_RATE": str(wave33_o2.RATE),
@@ -367,6 +389,32 @@ class BenchGateTest(BenchCase):
         self.assertIn("RESULT: PASS", joined, joined[-2500:])
         self.assertEqual(res.returncode, 0, joined[-2500:])
 
+    def test_the_bench_runs_on_a_non_default_port(self):
+        """Finding-1 anti-regression: with :8899 held busy by a stranger, a
+        healthy bench on its own free port still passes — nothing assumes
+        8899 anymore."""
+        squatter = socket.socket()
+        squatter.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            squatter.bind(("127.0.0.1", 8899))
+            squatter.listen(16)
+        except OSError:
+            squatter.close()  # 8899 busy by a stranger — the scenario holds anyway
+        else:
+            self.addCleanup(squatter.close)
+        o2 = O2Server(rate=20483)
+        self.addCleanup(o2.stop)
+        res = self.sb.run(o2)
+        joined = self.joined(res)
+        self.assertIn("RESULT: PASS", joined, joined[-2500:])
+        self.assertEqual(res.returncode, 0, joined[-2500:])
+
+    def test_the_live_stack_probe(self):
+        """The module skip rests on _live_ingestion_running: a nonce pattern
+        matches nothing (False); 'python' matches the runner itself (True)."""
+        self.assertFalse(_live_ingestion_running("w33-no-such-process-xyz"))
+        self.assertTrue(_live_ingestion_running("python"))
+
     def test_rate_divides_by_the_measured_window(self):
         """P6-032: the divisor is the span actually measured.
 
@@ -436,7 +484,7 @@ class BenchTeardownTest(BenchCase):
         self.sb = Sandbox(self.tmp, faketool_src=FAKETOOL_ORPHANING)
 
     def test_teardown_failure_is_not_reported_as_success(self):
-        """The broker's listener outlives the kill, so teardown sees :8899 busy.
+        """The broker's listener outlives the kill, so teardown sees the broker port busy.
 
         Every window passes; the failure is discovered in teardown, i.e. on the
         exit-0 path. The old cleanup printed the failure and then `exit "$rc"`
@@ -456,7 +504,8 @@ class BenchTeardownTest(BenchCase):
         self.assertNotIn("!! window", joined, joined[-2500:])
         verdict = self.sb.result_text().splitlines()[0]
         self.assertTrue(verdict.endswith("FAIL"), verdict)
-        self.assertIn("port 8899 still busy", joined, joined[-2500:])
+        self.assertIn(f"port {self.sb.broker_port} still busy", joined,
+                      joined[-2500:])
         self.assertEqual(
             res.returncode, 1,
             "result.txt says FAIL but the script exited %d" % res.returncode)
