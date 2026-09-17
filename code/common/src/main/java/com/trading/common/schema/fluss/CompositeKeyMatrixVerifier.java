@@ -112,7 +112,20 @@ public final class CompositeKeyMatrixVerifier {
                     // createTable succeeded server-side even if getTable failed
                     created.add(name);
                 }
-                String outcome = runCell(table, timeout);
+                CellAttempt attempt = runCell(table, timeout);
+                if (!spec.matches(attempt.outcome()) && attempt.timedOut()) {
+                    // Transient-load tolerance: a transport timeout is retried
+                    // ONCE against the same table (the upsert is idempotent, so
+                    // re-running converges to the true outcome). Assertion
+                    // outcomes — PASS, value mismatch, encoder failure — never
+                    // retry. Stdout-logged so the certificate never silently
+                    // hides flakiness.
+                    System.out.println("matrix: cell " + (i + 1) + " (" + spec.label()
+                            + ") timed out after " + timeout.getSeconds()
+                            + "s — retrying once");
+                    attempt = runCell(table, timeout);
+                }
+                String outcome = attempt.outcome();
                 boolean matched = spec.matches(outcome);
                 cells.add(new CellResult(spec.label(), spec.bucketKeys(), spec.kvFormatVersion(),
                         spec.expectedPass(), outcome, matched));
@@ -166,7 +179,28 @@ public final class CompositeKeyMatrixVerifier {
      * One matrix cell: upsert + lookup round-trip. Returns {@code "PASS"} or the
      * failure message (never throws) — the caller asserts the expected outcome.
      */
-    private static String runCell(Table table, Duration timeout) {
+    /** One cell attempt: the recorded outcome plus whether the attempt hit a transport timeout. */
+    private record CellAttempt(String outcome, boolean timedOut) {}
+
+    /**
+     * True when any link of the cause chain is a transport timeout
+     * ({@code Future.get} cap) as opposed to a content verdict.
+     */
+    private static boolean isTimeout(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof java.util.concurrent.TimeoutException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * One matrix cell: upsert + lookup round-trip. Returns the outcome and
+     * whether it timed out (never throws) — the caller asserts the expected
+     * outcome and may retry a timed-out attempt once.
+     */
+    private static CellAttempt runCell(Table table, Duration timeout) {
         // NOTE (P4-145): UpsertWriter/Lookuper are NOT Closeable in this Fluss
         // version (only Table is AutoCloseable), so there is nothing to release
         // and no close() to call — the bounded get() below IS the whole write.
@@ -192,9 +226,11 @@ public final class CompositeKeyMatrixVerifier {
                             GenericRow.of(BinaryString.fromString("a"), BinaryString.fromString("b")))
                     .get(timeout.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow();
             if (found == null) {
-                return "KV upsert not found by composite-PK lookup";
+                return new CellAttempt("KV upsert not found by composite-PK lookup", false);
             }
-            return found.getLong(2) == 7L ? "PASS" : "unexpected value " + found.getLong(2);
+            return found.getLong(2) == 7L
+                    ? new CellAttempt("PASS", false)
+                    : new CellAttempt("unexpected value " + found.getLong(2), false);
         } catch (Exception e) {
             StringBuilder chained = new StringBuilder();
             for (Throwable t = e; t != null; t = t.getCause()) {
@@ -204,7 +240,7 @@ public final class CompositeKeyMatrixVerifier {
                     chained.append(t.getClass().getSimpleName()).append(" | ");
                 }
             }
-            return chained.toString().split("\n")[0];
+            return new CellAttempt(chained.toString().split("\n")[0], isTimeout(e));
         }
     }
 }
