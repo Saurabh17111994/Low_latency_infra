@@ -580,7 +580,11 @@ fi
 fi
 if step_active 3; then
 echo "=== [3/19] Python unit suites (reconcile-compare ING-TCP-002 + gate helpers) ===" | tee -a "$SUMMARY"
-PY_TIMEOUT_SEC="${PY_TIMEOUT_SEC:-300}"
+# CHG-199: 600, not 300. The suite needs ~295s on a quiet tree and EXCEEDS
+# 300s under gate load (full stack up) — measured 2026-09-17: timeout-killed
+# at step 3 with zero FAIL/ERROR lines. The budget must cover the conditions
+# the gate actually runs in. Still env-overridable (see pin test).
+PY_TIMEOUT_SEC="${PY_TIMEOUT_SEC:-600}"
 if ! timeout -k 60 "$PY_TIMEOUT_SEC" python3 -m unittest discover -s "$SCRIPT_DIR/tests" -p "test_*.py" \
 	>"$PY_LOG" 2>&1; then
 	echo "FAIL: python unit suites — see $PY_LOG" | tee -a "$SUMMARY"

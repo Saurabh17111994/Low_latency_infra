@@ -58,7 +58,9 @@ class TimeoutsKillAfter(unittest.TestCase):
     def test_subset_pins_have_short_env_overridable_timeouts(self) -> None:
         for name, default in (("SCHEMA_PERF_TIMEOUT_SEC", "1200"),
                               ("SHUTDOWN_TIMEOUT_SEC", "1200"),
-                              ("PY_TIMEOUT_SEC", "300"),
+                              # CHG-199: 600 — the suite overruns 300 under
+                              # gate load (see run-monday-gates.sh step 3).
+                              ("PY_TIMEOUT_SEC", "600"),
                               ("ENTRYPOINT_TIMEOUT_SEC", "300"),
                               ("E2E_BUILD_TIMEOUT_SEC", "600")):
             self.assertIn(f'{name}="${{{name}:-{default}}}"', SRC,
