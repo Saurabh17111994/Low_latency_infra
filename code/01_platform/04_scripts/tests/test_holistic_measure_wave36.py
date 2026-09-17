@@ -712,15 +712,18 @@ class TestPacingIsDeadlineBased(Wave36Case):
         interval, so a slow body stretched the sampling cadence without saying
         so. With an absolute deadline the sleep is simply skipped.
         """
-        # A curl shim that really consumes 2s per call. It uses the ABSOLUTE
-        # /bin/sleep so it is not swallowed by our own sleep shim.
+        # A curl shim that really consumes 0.5s per call. It uses the ABSOLUTE
+        # /bin/sleep so it is not swallowed by our own sleep shim. One smoke
+        # run makes several curl calls, which still aggregate well past
+        # POLL_S=1 — so the overrun still triggers. (The old 2s sleep cost
+        # the suite ~14s for the same assertion.)
         self.sb._shim("curl", """\
 #!/usr/bin/env python3
 import json, os, re, subprocess, sys
 url = sys.argv[-1]
 with open(os.environ["H39_CURL_LOG"], "a") as fh:
     fh.write(url + "\\n")
-subprocess.run(["/bin/sleep", "2"])
+subprocess.run(["/bin/sleep", "0.5"])
 if "/jobs/" in url and "/vertices/" not in url:
     print(json.dumps({"vertices": [{"id": "vid1", "name": "op_alpha"}]}))
     sys.exit(0)
