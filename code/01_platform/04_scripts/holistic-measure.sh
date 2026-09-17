@@ -99,6 +99,26 @@ for _knob in SMOKE_S MAIN_S POLL_S WARMUP_S; do
   [ "$_v" -gt 0 ] || fail "$_knob must be greater than 0 (got '$_v')"
 done
 
+# CHG-191: this harness gates on the CANDLE path, so it must run it.
+# `compute.candles.late.dropped` has exactly one registration site —
+# MultiTimeframeAggregateFunction L159 — and that operator is wired ONLY when
+# MULTITF_ENABLED=true (SignalJob.java L271). The unconditional 15s candle path
+# that used to own this counter was retired in 0f3e5952 ("retire 15s candle
+# path"), a commit that touched NO file under 04_scripts: the harness kept
+# asserting a counter its own job graph no longer created, so `late_delta` was
+# structurally 0 and the inject gate could never pass (run 8, 2026-09-17 —
+# 1 024 tokens subscribed, 0 occurrences of the metric name in the whole
+# scrape, while the dedup half passed 200/200).
+# The header's own methodology needs the same path (window_start -> preview
+# cadence, window_end -> settlement), so the candle path is opted IN here.
+# MULTITF_ENABLED=false is REFUSED rather than run: it would silently measure a
+# 3-operator ingest stub (raw-validation -> fingerprint-dedup ->
+# ingest-latency-monitor) and then fail the gate for the wrong reason.
+export MULTITF_ENABLED="${MULTITF_ENABLED:-true}"
+if [ "$MULTITF_ENABLED" != "true" ]; then
+  fail "MULTITF_ENABLED='$MULTITF_ENABLED': the smoke inject gate and the G7 audit both read compute.candles.late.dropped, which only exists when the multi-tf-aggregator is wired. With the candle path off the late-drop assertion is unsatisfiable, so this run is refused instead of failing later with a misleading counter mismatch."
+fi
+
 
 pipeline_install_cleanup_trap
 
@@ -161,6 +181,23 @@ run_phase() {
   # that opt-in gone the lib refuses, and the refusal must reach the phase
   # result: a measurement over stale rows is worse than no measurement.
   pipeline_purge_raw_table || return 1
+  # CHG-191: candle tables, for the same reason as raw — and one more.
+  # candle_live/candle_closed are LOG-append tables written by the multi-tf
+  # sinks, so a run that only "ensures" them accumulates every previous run's
+  # rows; the job also PREFLIGHTS both (TableContractValidator, behind
+  # MULTITF_ENABLED) and refuses to submit when either is absent. Purge-then-
+  # ensure mirrors stage-soak-e2e.sh L131-140. Inside the flag guard because the
+  # tables are untouched when the candle path is off.
+  if [ "$MULTITF_ENABLED" = "true" ]; then
+    pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" candle_closed \
+      || return 1
+    pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/32_candle_live.sql" candle_live \
+      || return 1
+    pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/32_candle_live.sql" "candle_live" \
+      || return 1
+    pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" "candle_closed" \
+      || return 1
+  fi
   pipeline_start_faketool || return 1
   pipeline_start_ingestion || return 1
   pipeline_submit_job || return 1
