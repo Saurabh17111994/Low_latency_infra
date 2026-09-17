@@ -18,6 +18,9 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
@@ -100,6 +103,45 @@ public final class DdlApplyTool {
 
     private DdlApplyTool() {}
 
+    /** A close operation, which the Fluss client declares as throwing. */
+    @FunctionalInterface
+    interface ThrowingClose {
+        void run() throws Exception;
+    }
+
+    /**
+     * Bounded teardown: a Fluss {@code close()} can park indefinitely
+     * (observed: {@code WriterClient.close} awaiting writer-pool termination
+     * 34 min after a write timeout), holding the run hostage after the
+     * outcome is already decided. Run the close on a daemon thread and
+     * abandon it after {@link #TIMEOUT} — teardown failure is reported,
+     * never fatal, and never masks the validated result. No new knob: the
+     * existing per-operation budget is the close budget.
+     */
+    static void closeBounded(String name, ThrowingClose close) {
+        ExecutorService one = Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "ddl-apply-close-" + name);
+            t.setDaemon(true);
+            return t;
+        });
+        Future<?> done = one.submit(() -> {
+            close.run();
+            return null;
+        });
+        one.shutdown();
+        try {
+            done.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException te) {
+            System.err.println("ddl-apply: WARN — " + name + ".close() did not finish in "
+                    + TIMEOUT.getSeconds() + "s, abandoned (outcome already decided)");
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            System.err.println("ddl-apply: WARN — " + name + ".close() interrupted, abandoned");
+        } catch (Exception e) {
+            System.err.println("ddl-apply: WARN — " + name + ".close() failed: " + e.getMessage());
+        }
+    }
+
     public static void main(String[] args) {
         try {
             System.exit(run(args));
@@ -127,10 +169,10 @@ public final class DdlApplyTool {
                 return sweep(connection, admin, opts);
             } finally {
                 if (admin != null) {
-                    admin.close();
+                    closeBounded("admin", admin::close);
                 }
                 if (connection != null) {
-                    connection.close();
+                    closeBounded("connection", connection::close);
                 }
             }
         }
@@ -161,10 +203,10 @@ public final class DdlApplyTool {
                 return 0;
             } finally {
                 if (admin != null) {
-                    admin.close();
+                    closeBounded("admin", admin::close);
                 }
                 if (connection != null) {
-                    connection.close();
+                    closeBounded("connection", connection::close);
                 }
             }
         }
@@ -517,10 +559,10 @@ public final class DdlApplyTool {
             return decision.exitCode();
         } finally {
             if (admin != null) {
-                admin.close();
+                closeBounded("admin", admin::close);
             }
             if (connection != null) {
-                connection.close();
+                closeBounded("connection", connection::close);
             }
         }
     }
