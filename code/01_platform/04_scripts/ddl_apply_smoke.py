@@ -9,20 +9,19 @@ decision function is unit-tested (DdlApplyToolStatusTest), but the LIVE contract
 — orchestrator propagation, sentinel emission, evidence recording, the in-band
 COMPAT-FLUSS-005 matrix gate, and the fail-closed refusal — needs end-to-end
 regression coverage. This smoke provides it by running the REAL orchestrator CLI
-(`ddl_apply.py --apply-verified`) three times against scratch-prefixed catalogs:
+(`ddl_apply.py --apply-verified`) twice against scratch-prefixed catalogs:
 
   S1  full PASS        DDL_APPLY_SKIP_SMOKE=1                  -> exit 0  RESULT=PASS
   S2  full PASS        write/read smoke enabled (default)      -> exit 0  RESULT=PASS
-  S3  full PASS        DDL_APPLY_ACK_LIMITATIONS=auto (no-op,  -> exit 0  RESULT=PASS
-      no predicted limitation)
-      + evidence record: status PASS / ack_mode / acknowledged_limitations == []
-        The composite-PK raw-client limitation (COMPAT-FLUSS-005) is RESOLVED
-        by the owner-approved DDL fix (kv.format-version=2 + a single-field
-        subset bucket key on Order_Lifecycle/Order_Correlation) — see the plan
-        19-nautilus-execution-service-implementation-plan.md T2 and
-        CompositeKeyMatrixVerifier. The refusal/acknowledgment machinery
-        (exit 6 / exit 1) stays unit-tested for any FUTURE table that
-        re-introduces bucket key == PK.
+      NOTE: no live ack-mode scenario. DDL_APPLY_ACK_LIMITATIONS=auto is a
+      proven no-op while the manifest predicts zero limitations
+      (COMPAT-FLUSS-005 RESOLVED by the owner-approved DDL fix:
+      kv.format-version=2 + single-field subset bucket key — the former S3
+      ran the IDENTICAL full apply as S2 with the no-op flag and asserted
+      the same sentinels plus ack_mode, so it proved nothing S2 does not;
+      removed to save one full 27-table live cycle). The
+      refusal/acknowledgment machinery (exit 6 / exit 1) stays unit-tested
+      for any FUTURE table that re-introduces bucket key == PK.
   S4  containerized    mounts a PRE-SEEDED bad-ownership evidence record
       bad-ownership    (engine-uid-owned, mode 644 — the exact umask/setgid
       drill            regression class) into a scratch evidence dir and runs
@@ -495,23 +494,6 @@ def main():
                                   "REFUSED"],
                    check_evidence={"status": "PASS",
                                    "acknowledged_limitations": [],
-                                   "matrix.status": "PASS",
-                                   "matrix.cells": 4},
-                   classpath=classpath, bootstrap=bootstrap)
-
-    # S3 — --ack-limitations auto is a no-op when the manifest predicts no
-    # limitation (the composite-key DDL fix resolved COMPAT-FLUSS-005): still
-    # full PASS exit 0, acknowledged_limitations == [].
-    ok &= scenario(3, {"DDL_APPLY_ACK_LIMITATIONS": "auto"},
-                   expect_rc=0,
-                   expect_parts=[
-                       "DDL-APPLY-RESULT: PASS exit=0",
-                       "ddl-apply: RESULT=PASS EXIT=0 TABLES=27 MANIFEST="],
-                   expect_absent=["PASS_WITH_LIMITATION", "LIMITATION"],
-                   check_evidence={"status": "PASS",
-                                   "ack_mode": "auto",
-                                   "limitations": EXPECTED_LIMITED,
-                                   "acknowledged_limitations": EXPECTED_LIMITED,
                                    "matrix.status": "PASS",
                                    "matrix.cells": 4},
                    classpath=classpath, bootstrap=bootstrap)
