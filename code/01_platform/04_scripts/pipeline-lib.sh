@@ -1225,6 +1225,58 @@ pipeline_g24_rocksdb_check() {
   return 0
 }
 
+# P6-213/P6-555: throughput-floor verdict from a stages.tsv. Prints one
+# verdict line; rc 0 = HEALTHY, 1 = POISONED (below floor), 2 = INSUFFICIENT
+# DATA (<2 raw-validation rows, unreadable TSV, or non-numeric cells — a
+# header-only capture is NOT evidence and must never read as avg 0).
+# args: <stages.tsv> <expected_rate_per_s> <floor_pct>. No hang vector: the
+# TSV is tick-aggregated (one row per vertex per second), not event data.
+pipeline_g25_floor_verdict() {
+  local tsv="$1" expected="$2" pct="$3"
+  local floor=$((expected * pct / 100))
+  local result
+  result="$(python3 - "$tsv" <<'PYEOF' 2>/dev/null || echo INSUFFICIENT
+import csv, sys
+try:
+    rows = [r for r in csv.reader(open(sys.argv[1]), delimiter="\t")
+            if len(r) > 4 and "raw-validation" in r[2] and r[4].strip().isdigit()]
+    rows.sort(key=lambda r: int(r[0]))
+    if len(rows) < 2:
+        print("INSUFFICIENT"); sys.exit(0)
+    dt = int(rows[-1][0]) - int(rows[0][0])
+    dout = int(rows[-1][4]) - int(rows[0][4])
+    print(dout // dt if dt > 0 else "INSUFFICIENT")
+except Exception:
+    print("INSUFFICIENT")
+PYEOF
+)"
+  case "$result" in
+    INSUFFICIENT) echo "INSUFFICIENT DATA: fewer than 2 raw-validation rows in $tsv (the capture wrote no evidence — lengthen DURATION_S; one row cannot yield a rate)"; return 2 ;;
+  esac
+  if [ "$result" -lt "$floor" ]; then
+    echo "POISONED BASELINE: source avg ${result}/s is below ${pct}% of the ${expected}/s feed (floor ${floor}/s)"
+    return 1
+  fi
+  echo "HEALTHY: source avg ${result}/s >= ${floor}/s (${pct}% of ${expected}/s feed)"
+  return 0
+}
+
+# P6-212 (manifest half): one TSV run-manifest per capture for cross-wave
+# comparison. Extra args (already key=value lines) are appended verbatim.
+gate_manifest_add() {
+  local manifest="$1"; shift || true
+  {
+    printf 'run_dir=%s\n' "${PHASE_OUT:-unknown}"
+    printf 'rate_hz=%s\n' "${RATE_HZ:-unknown}"
+    printf 'duration_s=%s\n' "${DURATION_S:-unknown}"
+    printf 'job_id=%s\n' "${JOB_ID:-none}"
+    printf 'state_backend=%s\n' "${STATE_BACKEND:-rocksdb}"
+    printf 'floor_pct=%s\n' "${SOURCE_RATE_FLOOR_PCT:-80}"
+    printf 'git_sha=%s\n' "$(git -C "${ROOT:-.}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    for extra in "$@"; do printf '%s\n' "$extra"; done
+  } > "$manifest"
+}
+
 # ---------- teardown ----------
 pipeline_cleanup() {
   # CHG-122: the data path is containers — remove them. P6-479: kill the

@@ -187,3 +187,102 @@ def test_handoff_forwards_env():
                    'STATE_BACKEND="${STATE_BACKEND:-rocksdb}"',
                    'SOURCE_RATE_FLOOR_PCT="${SOURCE_RATE_FLOOR_PCT:-80}"'):
         assert assign in head, f"handoff drops {assign} (P6-212)"
+
+
+# ---------------- wave-38 commit 3 (P6-555/213/556 + manifest) ----------------
+def _lib_run(command, env_extra=None, timeout=60):
+    env = dict(os.environ)
+    env.update({"ROOT": str(ROOT), "RATE_HZ": "10"})
+    if env_extra:
+        env.update(env_extra)
+    return subprocess.run(["bash", "-c", f'source "{LIB}"; {command}'],
+                          env=env, capture_output=True, text=True, timeout=timeout)
+
+
+def test_knob_validation_fails_fast(tmp_path):
+    # P6-555: bad knobs fatal BEFORE mkdir (no out=) and before any cluster
+    # use. Stubs stay on PATH so a pre-fix script can only reach the
+    # still-down fatal, never live preflight (hermetic rule).
+    stubs = _stub_bin(tmp_path)
+    cases = [({"RATE_HZ": "abc"}, "RATE_HZ must be a positive integer"),
+             ({"RATE_HZ": "0"}, "RATE_HZ must be a positive integer"),
+             ({"DURATION_S": "abc"}, "DURATION_S must be a positive integer"),
+             ({"DURATION_S": "0"}, "DURATION_S must be a positive integer"),
+             ({"SOURCE_RATE_FLOOR_PCT": "abc"}, "SOURCE_RATE_FLOOR_PCT must be an integer 1-100"),
+             ({"SOURCE_RATE_FLOOR_PCT": "0"}, "SOURCE_RATE_FLOOR_PCT must be an integer 1-100"),
+             ({"SOURCE_RATE_FLOOR_PCT": "101"}, "SOURCE_RATE_FLOOR_PCT must be an integer 1-100")]
+    for env_extra, msg in cases:
+        d = None
+        try:
+            p = _run(env_extra, stubs=stubs)
+            out = p.stdout + p.stderr
+            assert p.returncode == 1, f"{env_extra}: rc={p.returncode}\n{out}"
+            assert msg in out, f"{env_extra}: missing {msg!r}\n{out}"
+            assert "out=" not in out, f"{env_extra}: created a run dir before validating"
+        finally:
+            m = re.search(r"out=(\S+)", p.stdout + p.stderr)
+            if m:
+                shutil.rmtree(m.group(1), ignore_errors=True)
+
+
+def _verdict_tsv(tmp_path, name, lines):
+    tsv = tmp_path / name
+    tsv.write_text("".join(lines))
+    return tsv
+
+
+def test_g25_healthy(tmp_path):
+    tsv = _verdict_tsv(tmp_path, "ok.tsv",
+                       ["epoch\tw\traw-validation\tx\t0\n",
+                        "epoch\tw\traw-validation\tx\t200000\n"])
+    # fix epochs: first col must be ints 100 -> 110 (avg 20000/s)
+    tsv.write_text("100\tw\traw-validation\tx\t0\n110\tw\traw-validation\tx\t200000\n")
+    p = _lib_run(f'pipeline_g25_floor_verdict "{tsv}" 20480 80')
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "HEALTHY" in p.stdout
+
+
+def test_g25_poisoned(tmp_path):
+    tsv = _verdict_tsv(tmp_path, "low.tsv",
+                       ["100\tw\traw-validation\tx\t0\n",
+                        "110\tw\traw-validation\tx\t34000\n"])
+    p = _lib_run(f'pipeline_g25_floor_verdict "{tsv}" 20480 80')
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "POISONED" in p.stdout
+
+
+def test_g25_insufficient(tmp_path):
+    tsv = _verdict_tsv(tmp_path, "empty.tsv",
+                       ["epoch\tvert\tmetric\tsub\tcount\n",
+                        "garbage,not,a,tsv,row\n",
+                        "100\tw\traw-validation\tx\t5\n"])
+    p = _lib_run(f'pipeline_g25_floor_verdict "{tsv}" 20480 80')
+    assert p.returncode == 2, p.stdout + p.stderr
+    assert "INSUFFICIENT DATA" in p.stdout
+
+
+def test_manifest_helper(tmp_path):
+    m = tmp_path / "manifest.tsv"
+    # NOTE: the lib owns JOB_ID (top-level JOB_ID="" at source) — set it after.
+    p = _lib_run(f'JOB_ID="{FAKE_JOB}"; gate_manifest_add "{m}" "extra_line=1"',
+                 {"PHASE_OUT": "/tmp/run-1", "DURATION_S": "720",
+                  "STATE_BACKEND": "rocksdb",
+                  "SOURCE_RATE_FLOOR_PCT": "80"})
+    assert p.returncode == 0, p.stdout + p.stderr
+    lines = m.read_text().strip().split("\n")
+    assert lines[0] == "run_dir=/tmp/run-1", lines
+    assert "rate_hz=10" in lines and "duration_s=720" in lines
+    assert f"job_id={FAKE_JOB}" in lines
+    assert "state_backend=rocksdb" in lines and "floor_pct=80" in lines
+    assert any(l.startswith("git_sha=") for l in lines)
+    assert "extra_line=1" in lines
+
+
+def test_g25_callsite_and_tail_gate():
+    src = (SCRIPTS / "stage-a2-baseline.sh").read_text()
+    assert "pipeline_g25_floor_verdict" in src, "G25 must call the lib verdict (P6-213)"
+    assert 'G25: $g25_verdict' in src, "both verdicts must fatal loud"
+    assert 'ls -la "$PHASE_OUT/stages"' not in src, "success-by-ls must go (P6-556)"
+    assert 'submission-ids.txt' in src, "submit receipt missing (P6-556)"
+    assert 'gate_manifest_add "$PHASE_OUT/stage-manifest.tsv"' in src, "manifest call missing (P6-212)"
+    assert "INSUFFICIENT" in LIB.read_text(), "lib must distinguish INSUFFICIENT (P6-213)"

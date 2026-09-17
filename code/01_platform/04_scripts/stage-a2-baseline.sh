@@ -31,6 +31,26 @@ DURATION_S="${DURATION_S:-720}"
 MIN_UPTIME_S="${MIN_UPTIME_S:-600}"
 FLINK_REST_URL="${FLINK_REST_URL:-http://localhost:8081}"
 
+fatal() {
+  echo "STAGE-A2: FAIL — $*" >&2
+  if [ -n "${PHASE_OUT:-}" ]; then
+    printf 'FAIL\n%s\n' "$*" > "$PHASE_OUT/FAILURE.txt"
+  fi
+  exit 1
+}
+
+# P6-555: validate run knobs HERE (fail fast, before mkdir/cluster) — a bad
+# RATE_HZ/DURATION_S/floor must never start (or silently skip-gate) a
+# measurement. PHASE_OUT is unset at this point, so fatal only writes stderr.
+case "${RATE_HZ:-}" in ''|*[!0-9]*) fatal "RATE_HZ must be a positive integer (got '${RATE_HZ:-}')";; esac
+[ "${RATE_HZ}" -eq 0 ] && fatal "RATE_HZ must be a positive integer (got '0')"
+case "${DURATION_S:-}" in ''|*[!0-9]*) fatal "DURATION_S must be a positive integer (got '${DURATION_S:-}')";; esac
+[ "${DURATION_S}" -eq 0 ] && fatal "DURATION_S must be a positive integer (got '0')"
+case "${SOURCE_RATE_FLOOR_PCT:-80}" in ''|*[!0-9]*) fatal "SOURCE_RATE_FLOOR_PCT must be an integer 1-100 (got '${SOURCE_RATE_FLOOR_PCT:-}')";; esac
+if [ "${SOURCE_RATE_FLOOR_PCT:-80}" -lt 1 ] || [ "${SOURCE_RATE_FLOOR_PCT:-80}" -gt 100 ]; then
+  fatal "SOURCE_RATE_FLOOR_PCT must be an integer 1-100 (got '${SOURCE_RATE_FLOOR_PCT:-}')"
+fi
+
 PHASE_NAME="stage-a2-baseline"
 # P6-552: PID suffix — 1s timestamps collide across concurrent invocations
 # (shared dir, interleaved tee output, clobbered FAILURE.txt/stages).
@@ -47,12 +67,6 @@ pipeline_install_cleanup_trap
 
 JOB_ID=""
 # CHG-122: data path is containers now - no host PIDs to track
-
-fatal() {
-  echo "STAGE-A2: FAIL — $*" >&2
-  printf 'FAIL\n%s\n' "$*" > "$PHASE_OUT/FAILURE.txt"
-  exit 1
-}
 
 echo "STAGE-A2: rate=${RATE_HZ}Hz duration=${DURATION_S}s out=$PHASE_OUT"
 
@@ -118,6 +132,13 @@ case "$JOB_ID" in
   *) fatal "SignalJob submission returned empty/malformed JOB_ID (got '$JOB_ID') — refusing to poll /jobs//<id>" ;;
 esac
 
+# P6-556 (receipt half): the submit step's receipt — replays and debugging
+# must not depend on scrolling run.log. Frozen at submit time.
+printf 'job_id=%s\nrate_hz=%s\nduration_s=%s\nstate_backend=%s\nfloor_pct=%s\ngit_sha=%s\n' \
+  "$JOB_ID" "$RATE_HZ" "$DURATION_S" "${STATE_BACKEND:-rocksdb}" "${SOURCE_RATE_FLOOR_PCT:-80}" \
+  "$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+  > "$PHASE_OUT/submission-ids.txt" || fatal "cannot write submission-ids.txt"
+
 # --- Wait RUNNING (fail-closed; stage-capture.sh re-checks) ---
 state=""
 for _ in $(seq 1 40); do
@@ -157,6 +178,9 @@ JOB_ID="$JOB_ID" DURATION_S="$DURATION_S" \
   OUT_DIR="$PHASE_OUT/stages" \
   bash "$SCRIPT_DIR/stage-capture.sh" || fatal "stage capture failed"
 
+# P6-212 (manifest half): run-manifest for cross-wave comparison.
+gate_manifest_add "$PHASE_OUT/stage-manifest.tsv"
+
 # --- G25 (2026-09-02): throughput-floor fail-fast --------------------------
 # 2026-09-02 incident class: four successive 20Hz captures each exited PASS
 # while the pipeline was silently degraded (source 19.8k -> 7.3k -> 5.4k ->
@@ -165,25 +189,26 @@ JOB_ID="$JOB_ID" DURATION_S="$DURATION_S" \
 # run. A capture whose source cannot sustain at least SOURCE_RATE_FLOOR_PCT
 # (default 80%) of the feed rate is a POISONED BASELINE, not evidence -
 # fail it, with the numbers and the likely classes to check.
-floor_pct="${SOURCE_RATE_FLOOR_PCT:-80}"
+# P6-213: feed = RATE_HZ batches/s x 1024 ids/batch (faketool batch size);
+# the raw-validation vertex carries the full stream, so its first-to-last
+# avg must clear floor_pct of the feed. The verdict lives in pipeline-lib
+# (pipeline_g25_floor_verdict) so empty/low/healthy TSVs are unit-testable.
+# INSUFFICIENT DATA (<2 rows — a header-only capture wrote no evidence) is a
+# different verdict from POISONED (below floor), never a silent avg 0. A
+# 1-row capture cannot yield a rate — lengthen DURATION_S, no override flag.
+floor_pct="${SOURCE_RATE_FLOOR_PCT:-80}"  # validated 1-100 at the top
 expected_rate=$((RATE_HZ * 1024))
-src_avg="$(python3 - "$PHASE_OUT/stages/stages.tsv" <<'PYCALC'
-import csv, sys
-rows = [r for r in csv.reader(open(sys.argv[1]), delimiter="\t")
-        if len(r) > 4 and "raw-validation" in r[2] and r[4]]
-rows.sort(key=lambda r: int(r[0]))
-if len(rows) < 2:
-    print(0); sys.exit(0)
-dt = int(rows[-1][0]) - int(rows[0][0])
-dout = int(rows[-1][4]) - int(rows[0][4])
-print(dout // dt if dt > 0 else 0)
-PYCALC
-)"
-floor_rate=$((expected_rate * floor_pct / 100))
-if [ "${src_avg:-0}" -lt "$floor_rate" ]; then
-  fatal "G25: source avg ${src_avg}/s is below ${floor_pct}% of the ${expected_rate}/s feed (floor ${floor_rate}/s) - the capture is a POISONED BASELINE, refusing to bless it. Likely classes: (1) RocksDB state silently misplaced (check G23/G24 lines in run.log above), (2) cumulative per-run degradation (2026-09-02: monotonic decline across runs 19.8k->3.4k, root cause then under investigation - see plan evolution log), (3) a new limiter (compare per-operator busy/per-record cost against the last good capture). Evidence: $PHASE_OUT/stages/stages.tsv"
-fi
-echo "STAGE-A2: G25 OK - source avg ${src_avg}/s >= ${floor_rate}/s (${floor_pct}% of feed)"
+g25_verdict="$(pipeline_g25_floor_verdict "$PHASE_OUT/stages/stages.tsv" "$expected_rate" "$floor_pct")"
+case "$g25_verdict" in
+  HEALTHY*) echo "STAGE-A2: G25 OK - $g25_verdict" ;;
+  *) fatal "G25: $g25_verdict - refusing to bless it. Likely classes: (1) RocksDB state silently misplaced (check G23/G24 lines in run.log above), (2) cumulative per-run degradation (see plan evolution log), (3) a new limiter (compare per-operator busy/per-record cost against the last good capture). Evidence: $PHASE_OUT/stages/stages.tsv" ;;
+esac
 
-echo "STAGE-A2: capture complete — evidence at $PHASE_OUT"
-ls -la "$PHASE_OUT/stages"
+# P6-556 (gate half): success needs EVIDENCE, not a directory listing. G25
+# already refused INSUFFICIENT DATA above, so stages.tsv holds ≥2
+# raw-validation rows here — assert the artifact set is complete.
+for _artifact in stages/stages.tsv submission-ids.txt stage-manifest.tsv; do
+  [ -s "$PHASE_OUT/$_artifact" ] || fatal "evidence gate: missing/empty $_artifact — the capture did not produce a complete artifact set"
+done
+[ -f "$PHASE_OUT/stages/flink-checkpoints.jsonl" ] || fatal "evidence gate: missing stages/flink-checkpoints.jsonl — checkpoint history was never captured"
+echo "STAGE-A2: capture complete — evidence at $PHASE_OUT (stages.tsv, flink-checkpoints.jsonl, submission-ids.txt, stage-manifest.tsv)"
