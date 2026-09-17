@@ -51,7 +51,7 @@ its evidence files carry correct values, and every gate fails closed.
 |---|---|
 | `code/01_platform/04_scripts/holistic-measure.sh` | The target, 428 lines. `run_phase()` L71-264 owns the measurement loop; `collect_vertex_metrics()` L270-295; `smoke_inject_gate()` L318-351; `fingerprint_gate()` L366-377; phase driver L297-428. |
 | `code/01_platform/04_scripts/pipeline-lib.sh` | Sourced; owns all bring-up/teardown. `pipeline_purge_table` L743-818, `pipeline_purge_raw_table` L820-823, `pipeline_cleanup` L992, `pipeline_install_cleanup_trap` L1010-1023, `pipeline_validate_rate` L167-173, `pipeline_preflight` L362-523. |
-| `code/01_platform/04_scripts/holistic-analyze.py` | Consumer of the evidence. Reads `main/proc-io.tsv` at L1127-1170 (A2b ranking) and L1281-1303 (G6c tablet read-storm). Does **not** read `throughput.tsv`. |
+| `code/01_platform/04_scripts/holistic-analyze.py` | Consumer of the evidence. Reads `main/proc-io.tsv` at L1127-1170 (A2b per-process disk-write rates) and L1281-1303 (G6c tablet read-storm). Does **not** read `throughput.tsv`. |
 | `code/01_platform/04_scripts/tests/test_holistic_measure_wave36.py` | **New.** The wave-36 suite. |
 | `code/01_platform/04_scripts/test-pipeline-lib.sh` L174-177 | Existing gate **G9** greps `holistic-measure.sh` for the literal `fingerprint_gate`. The function name must survive. |
 
