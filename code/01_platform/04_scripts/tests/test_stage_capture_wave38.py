@@ -32,15 +32,17 @@ def _sandbox(tmp_path):
     return d
 
 
-def _run(tmp_path, curl_mode="stay-running", queue="", duration="8"):
+def _run(tmp_path, curl_mode="stay-running", queue="", duration="8", extra_env=None):
     out = tmp_path / "out"
-    out.mkdir()
+    out.mkdir(exist_ok=True)  # tests may pre-plant fixtures (e.g. a corrupt offset)
     state = tmp_path / "curl-state.json"
     env = dict(os.environ)
     env.update({"PATH": str(_sandbox(tmp_path)) + os.pathsep + env["PATH"],
                 "OUT_DIR": str(out), "DURATION_S": duration,
                 "W38_CURL_STATE": str(state), "W38_CURL_MODE": curl_mode,
                 "W38_CURL_QUEUE": queue})
+    if extra_env:
+        env.update(extra_env)
     proc = subprocess.run(["bash", str(SCRIPT)], env=env, capture_output=True,
                           text=True, timeout=120)
     return proc, out, state
@@ -93,3 +95,73 @@ def test_three_consecutive_fail_loud(tmp_path):
     assert "failing closed" in text
     assert list(out.rglob("00-reason.txt")), "stall diagnostics never fired"
     assert _exact_job_hits(state) >= 5, "guard must poll 3x before failing"
+
+
+OTLP_LINE = ('2026-09-17T00:00:00Z otlp-metrics-payload: '
+             '{"resourceMetrics": [{"scopeMetrics": [{"metrics": ['
+             '{"name": "feed.ack", "sum": {"dataPoints": [{"asInt": 42}]}}'
+             ']}]}]}\n')
+
+
+def _java_out(tmp_path, name="java.out", mode=0o644):
+    j = tmp_path / name
+    j.write_text(OTLP_LINE)
+    j.chmod(mode)
+    return j
+
+
+# ---------------- commit 5 (P6-558/559) ----------------
+def test_missing_java_out_uses_sentinel(tmp_path):
+    # P6-558: file present at preflight, vanishing mid-run. The new separate
+    # sentinel warns exactly once; the offset file is never touched-empty
+    # (old code warned never — its sentinel was the offset file, already
+    # created by the early successful ticks — and poisoned resume).
+    j = _java_out(tmp_path)
+    deleter = subprocess.Popen(
+        ["python3", "-c", "import time,os; time.sleep(3); os.remove(r'%s')" % j])
+    try:
+        proc, out, _ = _run(tmp_path, extra_env={"INGESTION_JAVA_OUT": str(j)})
+    finally:
+        deleter.wait(timeout=30)
+    text = proc.stdout + proc.stderr
+    assert proc.returncode == 0, text
+    assert text.count("set but file missing") == 1, text
+    assert (out / ".ingestion-warned").is_file(), "warned-once sentinel missing"
+    off = out / ".ingestion-java.out.offset"
+    if off.exists():
+        assert off.read_text().strip().isdigit(), "offset must stay numeric"
+
+
+def test_corrupt_offset_defaults_zero(tmp_path):
+    # P6-559: garbage offset + present file parses from 0 and heals the file
+    # (old code crashed int() that tick and wrote zero rows).
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / ".ingestion-java.out.offset").write_text("garbage!!\n")
+    j = _java_out(tmp_path)
+    proc, out, _ = _run(tmp_path, extra_env={"INGESTION_JAVA_OUT": str(j)})
+    text = proc.stdout + proc.stderr
+    assert proc.returncode == 0, text
+    tsv = out / "ingestion.tsv"
+    assert tsv.is_file(), "no rows parsed despite offset defaulting to 0"
+    assert any("feed.ack\t42" in line for line in tsv.read_text().splitlines())
+    off = out / ".ingestion-java.out.offset"
+    assert off.read_text().strip().isdigit(), "offset file not healed to numeric"
+
+
+def test_parse_failure_holds_offset(tmp_path):
+    # P6-559: unreadable java.out fails the parse — the offset must NOT
+    # advance (old code wrote fsize unconditionally, skipping bytes forever).
+    # Per-tick resilience still ends loud: the end-of-run evidence gate fails
+    # the run (rc 2) because the enabled leg produced zero rows.
+    j = _java_out(tmp_path, mode=0o000)
+    try:
+        proc, out, _ = _run(tmp_path, extra_env={"INGESTION_JAVA_OUT": str(j)})
+    finally:
+        j.chmod(0o644)
+    text = proc.stdout + proc.stderr
+    assert proc.returncode == 2, text
+    assert "offset held at 0" in text
+    assert "ingestion.tsv" in text and "NO data rows" in text
+    assert not (out / ".ingestion-java.out.offset").exists(), \
+        "offset advanced despite failed parse"

@@ -549,18 +549,25 @@ INGESTION_OFFSET_FILE="$OUT_DIR/.ingestion-java.out.offset"
 sample_ingestion() {
   [ -n "$INGESTION_JAVA_OUT" ] || return 0
   [ -f "$INGESTION_JAVA_OUT" ] || {
-    # Fail-fast: enabled but the file never appeared. One loud warn (guarded
-    # by the offset file's absence — it is created on first successful read).
-    if [ ! -f "$INGESTION_OFFSET_FILE" ]; then
+    # P6-558: missing-file sentinel is a SEPARATE file. Reusing the offset
+    # file poisoned resume: when java.out later appeared, `cat offset`
+    # yielded "" and the numeric compare + int() crashed that tick.
+    if [ ! -f "$OUT_DIR/.ingestion-warned" ]; then
       echo "!! WARN: INGESTION_JAVA_OUT=$INGESTION_JAVA_OUT set but file missing — ingestion.tsv stays empty (feed->ack leg lost)" >&2
-      touch "$INGESTION_OFFSET_FILE"
+      touch "$OUT_DIR/.ingestion-warned"
     fi
     return 0
   }
 
-  local start_off=0
-  [ -f "$INGESTION_OFFSET_FILE" ] && start_off="$(cat "$INGESTION_OFFSET_FILE")"
+  # P6-559: the offset is untrusted state (empty/corrupt breaks `[ -lt ]`
+  # and int()) — accept digits only, default 0.
+  local start_off=0 _off
+  if [ -f "$INGESTION_OFFSET_FILE" ]; then
+    _off="$(cat "$INGESTION_OFFSET_FILE" 2>/dev/null)"
+    case "$_off" in ''|*[!0-9]*) start_off=0 ;; *) start_off="$_off" ;; esac
+  fi
   local fsize; fsize="$(stat -c %s "$INGESTION_JAVA_OUT" 2>/dev/null || echo 0)"
+  case "$fsize" in ''|*[!0-9]*) fsize=0 ;; esac
   # File shrank (rotation) → restart from 0.
   if [ "$fsize" -lt "$start_off" ]; then start_off=0; fi
 
@@ -571,7 +578,7 @@ sample_ingestion() {
   # (observed in the 15:56 A/B capture: offset advanced, zero rows written).
   # Python now opens the file itself at the offset — no pipe, no heredoc
   # stdin conflict.
-  python3 - "$INGESTION_JAVA_OUT" "$start_off" "$OUT_DIR" "$(date +%s%3N)" <<'PYEOF'
+  if python3 - "$INGESTION_JAVA_OUT" "$start_off" "$OUT_DIR" "$(date +%s%3N)" <<'PYEOF'
 import json, os, re, sys
 java_out, start_off, out_dir, epoch = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 rows = []
@@ -614,7 +621,11 @@ if rows:
     with open(f"{out_dir}/ingestion.tsv", "a") as f:
         f.write("\n".join(rows) + "\n")
 PYEOF
-  echo "$fsize" > "$INGESTION_OFFSET_FILE"
+  then
+    echo "$fsize" > "$INGESTION_OFFSET_FILE"
+  else
+    echo "!! WARN: ingestion OTLP parse failed this tick — offset held at $start_off (bytes will be retried)" >&2
+  fi
 }
 
 # Compile the two B2 probes once (fail fast if the classpath is broken).
