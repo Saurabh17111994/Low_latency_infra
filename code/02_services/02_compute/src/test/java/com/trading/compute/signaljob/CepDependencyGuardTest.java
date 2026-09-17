@@ -24,7 +24,7 @@ import org.junit.jupiter.api.Test;
  * path). Three legs:
  *
  * <ol>
- *   <li>in-JVM scan: the module pom.xml and java/scala sources contain none of
+ *   <li>in-JVM scan: the module pom.xml, JVM build files and java/scala/kotlin sources contain none of
  *       the forbidden dependency/import literals (mirrors the repo's
  *       {@code cep_guard.sh} file patterns and exclusions);</li>
  *   <li>shell-guard agreement: running the repo's {@code cep_guard.sh} scoped
@@ -46,8 +46,10 @@ class CepDependencyGuardTest {
     private static final Pattern FORBIDDEN = Pattern.compile(
             "flink-" + "cep|org\\.apache\\.flink\\." + "cep");
 
-    private static final List<String> SCANNED_FILENAMES = List.of("pom.xml");
-    private static final List<String> SCANNED_SUFFIXES = List.of(".java", ".scala");
+    private static final List<String> SCANNED_FILENAMES = List.of("pom.xml",
+            "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts",
+            "build.sbt", "libs.versions.toml", "extensions.xml");
+    private static final List<String> SCANNED_SUFFIXES = List.of(".java", ".scala", ".kt", ".kts");
     private static final List<String> SKIPPED_DIRS = List.of(".git", "target", "node_modules");
 
     @Test
@@ -98,7 +100,13 @@ class CepDependencyGuardTest {
         // test's constants, this set diverges.
         Process p = new ProcessBuilder(
                         "grep", "-rEl",
-                        "--include=pom.xml", "--include=*.java", "--include=*.scala",
+                        "--include=pom.xml",
+                        "--include=*.java", "--include=*.scala",
+                        "--include=*.kt", "--include=*.kts",
+                        "--include=build.gradle", "--include=build.gradle.kts",
+                        "--include=settings.gradle", "--include=settings.gradle.kts",
+                        "--include=build.sbt", "--include=libs.versions.toml",
+                        "--include=extensions.xml",
                         "--exclude-dir=.git", "--exclude-dir=target", "--exclude-dir=node_modules",
                         "^", root.toString())
                 .redirectErrorStream(true)
