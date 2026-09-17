@@ -16,7 +16,7 @@ MVN := mvn $(MVN_FLAGS)
 
 # P6-302: these recipes create no file of their own name, so a stray file in the
 # repo root would make make treat the target as up to date and skip the recipe.
-.PHONY: test-local test-network test-08-phaseA test-08-phaseB test-08-phaseC test-08-phaseD test-execution test-failure test-observability test-performance test-25-smoke test-prod-hardening test-all test-all-plus-prod alert-routing-test check-loadtest-env check-ingestion-clean test-loadtest-guards loadtest-20k-regression disaster-drills eod-controller
+.PHONY: test-local test-network test-08-phaseA test-08-phaseB test-08-phaseC test-08-phaseD test-execution test-failure test-observability test-performance test-25-smoke test-prod-hardening test-all test-all-plus-prod alert-routing-test check-loadtest-env check-ingestion-clean test-loadtest-guards loadtest-20k-regression disaster-drills eod-controller holistic holistic-quick
 
 # Branch guard: work must happen on `main` — the single working branch per
 # AGENTS.md 'Branch Context'. Any agent (human or AI) MUST run this before
@@ -124,6 +124,13 @@ help:
 	@echo "         SAVEPOINT_DIR, COMPOSE_FILE, DRY_RUN=1; required pinned job env (DEDUP_TTL_MS,"
 	@echo "         CANDLE_WINDOW_MS, CHECKPOINT_INTERVAL_MS, CHECKPOINT_TIMEOUT_MS,"
 	@echo "         MAX_CONCURRENT_CHECKPOINTS) must be exported. See docs/08_implementation/21-savepoint-rollout.md"
+	@echo "  holistic    full end-to-end measurement (holistic-measure.sh): raw<->candle zero-loss"
+	@echo "              parity over candle_closed, dedup/late inject gates, latency legs. Writes"
+	@echo "              logs/tracker-14/holistic-measure-<ts>/. Needs the stack up (make up) and a"
+	@echo "              QUIET cluster — the time-sensitive probes are invalid while it is deleting"
+	@echo "              or re-electing. Result: exit 0 = every measurable gate passed; the legs the"
+	@echo "              live schema cannot measure are printed as UNAVAILABLE, not as failures"
+	@echo "  holistic-quick   same harness, short phases (SMOKE_S=60 MAIN_S=300)"
 
 env:
 	@if [ ! -f code/01_platform/01_docker/.env ]; then \
@@ -601,6 +608,18 @@ full-audit:
 # external-SNAPSHOT ban, platform version pins. CI SHALL run this.
 pin-check:
 	@bash code/01_platform/04_scripts/pin-check.sh
+
+# Wave 36: the holistic measurement harness produced the end-to-end zero-loss
+# evidence, and until now nothing named it — it had no target and no entry in
+# docs/commands/COMMANDS.md, so it was only reachable by someone who already
+# knew the path and its knobs. Needs the stack up (`make up`) and a QUIET
+# cluster: the probes are invalid while it is deleting or re-electing.
+holistic:
+	@bash code/01_platform/04_scripts/holistic-measure.sh
+
+# The same harness with short phases, for a quick verdict after a change.
+holistic-quick:
+	@SMOKE_S=60 MAIN_S=300 bash code/01_platform/04_scripts/holistic-measure.sh
 
 clean:
 	$(STACK_LOCK) $(COMPOSE) down -v

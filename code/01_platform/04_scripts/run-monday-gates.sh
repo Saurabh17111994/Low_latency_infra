@@ -93,6 +93,7 @@ GO_LOG="$OUT_DIR/go-suite.log"
 JAVA_LOG="$OUT_DIR/java-suite.log"
 PREFLIGHT_LOG="$OUT_DIR/preflight.log"
 STATIC_LOG="$OUT_DIR/static-checks.log"
+GUARD_LOG="$OUT_DIR/harness-guards.log"
 
 # ── Failure labelling ────────────────────────────────────────────────────────
 # A run that dies before committing to a verdict — a `set -u` abort, a SIGTERM,
@@ -483,7 +484,7 @@ fi
 
 GATE_RUN_LIVE=1
 if step_active 1; then
-echo "=== [1/19] Static checks (bash -n, shellcheck) ===" | tee -a "$SUMMARY"
+echo "=== [1/19] Static checks (bash -n, shellcheck, harness guards) ===" | tee -a "$SUMMARY"
 : >"$STATIC_LOG"
 STATIC_FAIL=0
 # Every repo shell script (excludes third_party vendored sources).
@@ -529,6 +530,29 @@ if [ "$STATIC_FAIL" -ne 0 ]; then
 	gate_fail
 fi
 echo "PASS: static checks (${#SCRIPTS[@]} scripts bash -n + shellcheck -S warning clean)" | tee -a "$SUMMARY"
+
+# ── 0a. Harness guards (test-pipeline-lib.sh) ─────────────────────────────────
+# test-pipeline-lib.sh pins pipeline-lib.sh's contract, but its only caller was
+# holistic-measure's own preflight (pipeline-lib.sh G27c) — so a change made by
+# any OTHER caller of the library (tm-kill-full-load.sh, stage-soak-e2e.sh, the
+# soak scripts) could contradict a guard and nothing would notice until someone
+# happened to run the measurement. Static and fast (no cluster), so it runs here
+# beside bash -n/shellcheck.
+if ! bash "$SCRIPT_DIR/test-pipeline-lib.sh" >"$GUARD_LOG" 2>&1; then
+	echo "FAIL: harness guards (test-pipeline-lib.sh) — see $GUARD_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+# Fail closed on a suite that exits 0 without reporting a full pass — the same
+# shape as the Python step's "Ran 0 tests" refusal below.
+GUARD_LINE="$(grep -oE 'guards: [0-9]+ passed, [0-9]+ failed' "$GUARD_LOG" | tail -1 || true)"
+case "$GUARD_LINE" in
+	*", 0 failed") ;;
+	*)
+		echo "FAIL: harness guards did not report 'guards: N passed, 0 failed' (got '${GUARD_LINE:-nothing}') — see $GUARD_LOG" | tee -a "$SUMMARY"
+		gate_fail
+		;;
+esac
+echo "PASS: harness guards ($GUARD_LINE — static, pinning pipeline-lib.sh)" | tee -a "$SUMMARY"
 
 # ── 0b. Compose config validation (G4) ────────────────────────────────────────
 fi
