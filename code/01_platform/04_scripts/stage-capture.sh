@@ -387,13 +387,23 @@ PYEOF
   # custom-rest.tsv (REST full-id query, fixed 2026-09-05).
   local prom_file
   prom_file="$OUT_DIR/prom-$(date +%s).txt"
-  if ! curl -fsS --max-time 8 "$TM_PROM_URL/metrics" 2>/dev/null \
-      | grep -E 'busyTimeMsPerSecond|backPressuredTimeMsPerSecond|hardBackPressuredTimeMsPerSecond|idleTimeMsPerSecond|currentWatermark|latency_source_id|flink_taskmanager_job_task_operator_' \
-      > "$prom_file"; then
+  # P6-214: separate the stages — with pipefail, `curl | grep` conflated
+  # 'TM dead' (curl fails) with 'TM alive but zero matching series' (grep
+  # finds nothing). The latter warns and keeps the raw scrape; only a dead
+  # endpoint fails the tick.
+  local _prom_tmp
+  _prom_tmp="${prom_file}.tmp"
+  if ! curl -fsS --max-time 8 "$TM_PROM_URL/metrics" -o "$_prom_tmp" 2>/dev/null; then
     echo "!! FAIL: TM prom scrape dead at $(date +%s) ($TM_PROM_URL/metrics empty/failed) — TM likely restarting/heartbeat-lost; the latency/custom legs would be silent. Check TM logs." >&2
+    rm -f "$_prom_tmp" "$prom_file"
     capture_stall_diagnostics "TM prom scrape dead at $(date +%s) — endpoint $TM_PROM_URL/metrics empty/failed"
-    exit 2
+    return 2  # P6-215: let the main-loop debounce policy decide; do not exit the script from inside sample_tick
   fi
+  if ! grep -E 'busyTimeMsPerSecond|backPressuredTimeMsPerSecond|hardBackPressuredTimeMsPerSecond|idleTimeMsPerSecond|currentWatermark|latency_source_id|flink_taskmanager_job_task_operator_' "$_prom_tmp" > "$prom_file"; then
+    echo "!! WARN: TM prom alive but zero matching series at $(date +%s) — keeping raw scrape" >&2
+    cp "$_prom_tmp" "$prom_file"
+  fi
+  rm -f "$_prom_tmp"
 
   # B2 hooks: ingestion OTLP payloads (10s cadence — new rows every ~2 ticks)
   # and the two passive Fluss probes.
@@ -698,9 +708,20 @@ while :; do
   fi
   STATE="$(job_state)"
   if [ "$STATE" != "RUNNING" ]; then
-    echo "!! job left RUNNING at t+${ELAPSED}s (state=$STATE) — failing closed"
-    capture_stall_diagnostics "job left RUNNING at t+${ELAPSED}s (state=$STATE)"
-    exit 2
+    # P6-216: debounce — one bad poll != dead job (brief JM restart,
+    # heartbeat loss, or a 10s timeout must not kill a 900s capture).
+    # P6-216 posture: the final failure still fires stall diagnostics loudly.
+    sleep 5
+    STATE="$(job_state)"
+    if [ "$STATE" != "RUNNING" ]; then
+      sleep 5
+      STATE="$(job_state)"
+    fi
+    if [ "$STATE" != "RUNNING" ]; then
+      echo "!! job left RUNNING at t+${ELAPSED}s (state=$STATE) — failing closed"
+      capture_stall_diagnostics "job left RUNNING at t+${ELAPSED}s (state=$STATE)"
+      exit 2
+    fi
   fi
   sample_tick || echo "warn: one sample tick failed (continuing)"
 
