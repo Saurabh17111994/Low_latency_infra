@@ -238,8 +238,8 @@ def g7c_compare(win_ticks, win_vol, final_by_key, run_start, run_end,
         first_candle_window[token] = min(
             ws, first_candle_window.get(token, ws))
     for (token, ws), exp_ticks in sorted(win_ticks.items()):
-        wend = ws + 14999
-        if run_start and ws < ((run_start + 14999) // 15000) * 15000:
+        wend = ws + CANDLE_PARITY_WINDOW_MS - 1
+        if run_start and ws < ((run_start + CANDLE_PARITY_WINDOW_MS - 1) // CANDLE_PARITY_WINDOW_MS) * CANDLE_PARITY_WINDOW_MS:
             continue  # window straddles run start - partial raw history
         if wend > cutoff_end:
             continue  # window not fully closed (run end or event horizon)
@@ -273,6 +273,10 @@ def g7c_compare(win_ticks, win_vol, final_by_key, run_start, run_end,
 # side of the comparison - the same failure shape that made this leg read a
 # retired table for two weeks. The widths (15s/30s/1m/3m/5m/15m) are unique by
 # construction, so width identifies the family without naming it.
+# Single source for the 15s grid: the run-window align-up, the event-time
+# floor, and the tentative window-end bound below all use this name — a bare
+# 15000 anywhere else in this file is a second copy (pinned by
+# test_analyzer_window_matches_timeframe.py).
 CANDLE_PARITY_WINDOW_MS = 15000
 
 
@@ -398,7 +402,7 @@ def f4_orphan_check(sig_groups, sig_group_ts, run_end, event_horizon=None,
         lonely_n += 1
         ts = sig_group_ts[pfx]
         if event_horizon:
-            window_end_max = ts + 15000  # tentative fires mid-window
+            window_end_max = ts + CANDLE_PARITY_WINDOW_MS  # tentative fires mid-window
             if event_horizon - 500 < window_end_max + grace_ms:
                 unverifiable_n += 1  # window never provably closed+settled
                 continue
@@ -1638,7 +1642,7 @@ def main():
                 dup_in_window += 1
             continue
         fp_seen.add(fp)
-        ws = (ev_ms // 15000) * 15000
+        ws = (ev_ms // CANDLE_PARITY_WINDOW_MS) * CANDLE_PARITY_WINDOW_MS
         win_ticks[(token, ws)] += 1
         win_vol[(token, ws)] += qty
     print(f"- G7 raw recount: {len(seen_offsets)} logical rows, "
