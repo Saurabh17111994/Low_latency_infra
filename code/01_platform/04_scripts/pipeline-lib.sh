@@ -1463,8 +1463,9 @@ for vertex in job.get("vertices", []):
 # while downstream vertices are already processing records (observed in C2 on
 # 2026-09-01); treating that snapshot as a dead pipeline causes a false
 # negative.  Prefer the raw source read/output counters, then use the largest
-# read counter from the bounded set of operators immediately downstream of the
-# raw path.  An absent signal remains -1 so callers still fail closed.
+# counter seen on any other vertex (CHG-193: the bounded operator set that used
+# to live here was retired out from under it).  An absent signal remains -1 so
+# callers still fail closed.
 pipeline_metric_input_progress() {
   local dump="$1"
   printf '%s\n' "$dump" | awk -F'|' '
@@ -1481,14 +1482,25 @@ pipeline_metric_input_progress() {
         raw_seen = 1
         if (read > raw_read) raw_read = read
         if (write > raw_write) raw_write = write
+      } else {
+        # CHG-193: every non-raw row is by construction downstream of the raw
+        # source, so a positive counter anywhere proves the feed is traversing
+        # the job.  The previous hand-written operator set
+        # (fingerprint-dedup | candle-15s | forming-bar-*) was left stale by
+        # 0f3e5952, which retired the 15s path and the forming-bar stack and
+        # added nothing here: run 10 hit the documented 0|0 race on BOTH the raw
+        # and dedup vertices and this guard called a healthy pipeline dead while
+        # multi-tf-aggregator held 458 132 records.  Naming no operator cannot
+        # rot when operators are added or renamed.
+        if (read > any_read) any_read = read
+        if (write > any_write) any_write = write
       }
-      if (name ~ /fingerprint[-_]dedup|candle[-_]15s|forming[-_]bar[-_](builder|detection|writer)/ \
-          && read > downstream_read) downstream_read = read
     }
     END {
       if (raw_read > 0) print raw_read
       else if (raw_write > 0) print raw_write
-      else if (downstream_read > 0) print downstream_read
+      else if (any_read > 0) print any_read
+      else if (any_write > 0) print any_write
       else print -1
     }'
 }

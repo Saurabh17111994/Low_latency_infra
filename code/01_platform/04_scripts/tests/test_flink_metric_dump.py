@@ -152,6 +152,74 @@ class FlinkMetricDumpTest(unittest.TestCase):
         )
         self.assertEqual(result.stdout.strip(), "26071")
 
+    def test_the_multitf_path_proves_the_feed_without_naming_an_operator(self) -> None:
+        """CHG-193 — the 0|0 race on the raw AND dedup vertices (run 10).
+
+        The fallback used to match a hand-written operator set
+        (fingerprint-dedup | candle-15s | forming-bar-*). `0f3e5952` retired the
+        15s candle path and the forming-bar stack and added nothing to that set,
+        so the only surviving name was fingerprint-dedup. When both the raw and
+        dedup vertices answered the documented 0|0 snapshot, the guard had
+        nothing left to match and declared a healthy pipeline dead — while
+        multi-tf-aggregator was holding 458 132 records and the candle sinks
+        534 528. The dump below is that run's `smoke/metrics-warmup.txt`,
+        verbatim; the rule is now name-free, so it cannot rot again.
+        """
+        root = Path(__file__).resolve().parents[4]
+        lib = root / "code/01_platform/04_scripts/pipeline-lib.sh"
+        env = os.environ.copy()
+        env["ROOT"] = str(root)
+        env["RATE_HZ"] = "10"
+        dump = (
+            "STATE RUNNING\n"
+            "Source: raw-table-1 -> raw-validation | 0 | 0\n"
+            "fingerprint-dedup -> ingest-latency-monitor | 0 | 0\n"
+            "multi-tf-aggregator | 458132 | 539648\n"
+            "candle-closed-first-write-wins | 5120 | 5120\n"
+            "candle-closed-sink: Writer | 5120 | 5120\n"
+            "candle-live-sink: Writer | 534528 | 534528\n"
+        )
+        command = (
+            f"source {shlex.quote(str(lib))}; "
+            f"pipeline_metric_input_progress {shlex.quote(dump)}"
+        )
+        result = subprocess.run(
+            ["bash", "-c", command],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(
+            result.stdout.strip(), "534528",
+            "a healthy pipeline was reported as dead because the fallback only "
+            "knew retired operator names")
+
+    def test_the_raw_counters_still_win_when_they_are_readable(self) -> None:
+        """The priority order is unchanged — the raw read is the reported value."""
+        root = Path(__file__).resolve().parents[4]
+        lib = root / "code/01_platform/04_scripts/pipeline-lib.sh"
+        env = os.environ.copy()
+        env["ROOT"] = str(root)
+        env["RATE_HZ"] = "10"
+        dump = (
+            "STATE RUNNING\n"
+            "Source: raw-table-1 -> raw-validation | 458640 | 458640\n"
+            "multi-tf-aggregator | 458132 | 539648\n"
+        )
+        command = (
+            f"source {shlex.quote(str(lib))}; "
+            f"pipeline_metric_input_progress {shlex.quote(dump)}"
+        )
+        result = subprocess.run(
+            ["bash", "-c", command],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(result.stdout.strip(), "458640")
+
     def test_missing_raw_and_downstream_progress_fails_closed(self) -> None:
         root = Path(__file__).resolve().parents[4]
         lib = root / "code/01_platform/04_scripts/pipeline-lib.sh"
