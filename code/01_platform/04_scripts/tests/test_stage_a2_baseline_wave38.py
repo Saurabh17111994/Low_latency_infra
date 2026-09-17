@@ -119,3 +119,71 @@ def test_bring_up_uses_lib_compose(tmp_path):
     finally:
         if d is not None:
             shutil.rmtree(d, ignore_errors=True)
+
+
+# ---------------- wave-38 commit 2 (P6-210/211/212) ----------------
+ROOT = TESTS.parent.parent.parent.parent
+STUBS = TESTS / "stubs"
+LIB = SCRIPTS / "pipeline-lib.sh"
+FAKE_JOB = "abcdef0123456789abcdef0123456789"
+
+
+def _g24_run(tmp_path, inspect, exec_rc="0"):
+    """Source the real lib, run only pipeline_g24_rocksdb_check. Hermetic:
+    stub docker answers ps/inspect/exec, stub sleep keeps the wait instant."""
+    d = tmp_path / "g24stubs"
+    d.mkdir()
+    shutil.copy(STUBS / "wave38_docker.py", d / "docker")
+    sl = d / "sleep"
+    sl.write_text("#!/usr/bin/env bash\nexit 0\n")
+    sl.chmod(0o755)
+    env = dict(os.environ)
+    env.update({"ROOT": str(ROOT), "RATE_HZ": "10", "STATE_BACKEND": "rocksdb",
+                "PATH": str(d) + os.pathsep + env["PATH"],
+                "STUB_DOCKER_PS": "fakecid123",
+                "STUB_DOCKER_INSPECT": inspect,
+                "STUB_DOCKER_EXEC_RC": exec_rc})
+    return subprocess.run(
+        ["bash", "-c", 'source "$ROOT/code/01_platform/04_scripts/pipeline-lib.sh"; '
+                       'JOB_ID="$FAKE_JOB"; pipeline_g24_rocksdb_check'],
+        env=env, capture_output=True, text=True, timeout=60)
+
+
+def test_g24_unmounted_fails_fast(tmp_path):
+    p = _g24_run(tmp_path, inspect="")
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "NOT MOUNTED" in p.stdout + p.stderr
+
+
+def test_g24_bind_mount_fails(tmp_path):
+    p = _g24_run(tmp_path, inspect="/data/rocksdb")
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "BIND MOUNT" in p.stdout + p.stderr
+
+
+def test_g24_named_volume_passes(tmp_path):
+    p = _g24_run(tmp_path, inspect="01_docker_flink-rocksdb", exec_rc="0")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "G24 OK" in p.stdout + p.stderr
+
+
+def test_jobid_gate_present_and_ordered():
+    # P6-210's path is unreachable via real submit (the lib already guarantees
+    # non-empty) — pin the defense-in-depth guard by source text + position.
+    src = (SCRIPTS / "stage-a2-baseline.sh").read_text()
+    i_submit = src.index("pipeline_submit_job || fatal")
+    i_gate = src.index("empty/malformed JOB_ID")
+    # (the same loop shape appears earlier in the bring-up block — search after the gate)
+    i_wait = src.index("for _ in $(seq 1 40)", i_gate)
+    assert i_submit < i_gate < i_wait, "210 guard must sit between submit and wait"
+
+
+def test_handoff_forwards_env():
+    # P6-212 (env half): the capture child must see the run's own knobs.
+    src = (SCRIPTS / "stage-a2-baseline.sh").read_text()
+    handoff = src.index('bash "$SCRIPT_DIR/stage-capture.sh"')
+    head = src[:handoff]
+    for assign in ('RATE_HZ="$RATE_HZ"', 'MIN_UPTIME_S="$MIN_UPTIME_S"',
+                   'STATE_BACKEND="${STATE_BACKEND:-rocksdb}"',
+                   'SOURCE_RATE_FLOOR_PCT="${SOURCE_RATE_FLOOR_PCT:-80}"'):
+        assert assign in head, f"handoff drops {assign} (P6-212)"

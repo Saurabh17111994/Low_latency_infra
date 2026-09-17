@@ -108,6 +108,16 @@ pipeline_start_faketool || fatal "faketool start failed"
 pipeline_start_ingestion || fatal "ingestion start failed"
 pipeline_submit_job || fatal "SignalJob submission failed"
 
+# P6-210: fail closed on empty/malformed JOB_ID before the wait loop polls
+# /jobs/<id>. pipeline_submit_job already guarantees non-empty 32-hex on
+# success — this is defense-in-depth so a future lib change can never send
+# the loop at /jobs//<empty> (the JM answers the web UI page, HTTP 200, and
+# the loop burns 40x5s+ on HTML before failing).
+case "$JOB_ID" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+  *) fatal "SignalJob submission returned empty/malformed JOB_ID (got '$JOB_ID') — refusing to poll /jobs//<id>" ;;
+esac
+
 # --- Wait RUNNING (fail-closed; stage-capture.sh re-checks) ---
 state=""
 for _ in $(seq 1 40); do
@@ -127,18 +137,11 @@ echo "STAGE-A2: job $JOB_ID RUNNING — capturing ${DURATION_S}s"
 # invisible until throughput analysis. Fail the run INSTEAD of capturing a
 # poisoned baseline: the job's RocksDB dirs are named job_<JOB_ID>_op_*;
 # they must appear under /tmp/flink-rocksdb (the named volume mount).
-if [ "${STATE_BACKEND:-rocksdb}" = "rocksdb" ]; then
-  rocks_ok=""
-  for _ in $(seq 1 12); do
-    if $COMPOSE exec -T flink-taskmanager \
-        sh -c "ls -d /tmp/flink-rocksdb/job_${JOB_ID}_op_* >/dev/null 2>&1"; then
-      rocks_ok=1; break
-    fi
-    sleep 5
-  done
-  [ -n "$rocks_ok" ] || fatal "G24: no RocksDB dirs for job $JOB_ID under /tmp/flink-rocksdb after 60s — RocksDB is writing somewhere else (container overlay = the CHG-120 ~1.7k/s degradation). WHY: state.backend.rocksdb.localdir not in effect (FLINK_PROPERTIES prefix collision dropped it, or STATE_BACKEND_LOCAL_DIRS env wrong). Check: docker exec 01_docker-flink-taskmanager-1 grep -A4 localdir /opt/flink/conf/config.yaml — and guard G22 (check_flink_properties.py)"
-  echo "STAGE-A2: G24 OK — RocksDB on the named volume (job_${JOB_ID}_op_* under /tmp/flink-rocksdb)"
-fi
+# P6-211: the mount-source + dir-presence check lives in pipeline-lib
+# (pipeline_g24_rocksdb_check) so it is unit-testable. JOB_ID is non-empty
+# here (P6-210 gate above). This also fixes the wave-17 regression: the old
+# inline `$COMPOSE exec` was bare-`docker` since P6-468 made COMPOSE an array.
+pipeline_g24_rocksdb_check || fatal "RocksDB volume check (G24) failed — refusing a poisoned baseline (detail above)"
 
 # --- The capture (all stage metrics, one timeline) ---
 # B2 hooks (2026-09-02): FLUSS_PROBE_CP enables the two passive Fluss probes
@@ -146,6 +149,9 @@ fi
 # from pipeline_preflight above. INGESTION_JAVA_OUT enables ingestion.tsv
 # (feed->ack OTLP payloads from the ingestion JVM's java.out).
 JOB_ID="$JOB_ID" DURATION_S="$DURATION_S" \
+  RATE_HZ="$RATE_HZ" MIN_UPTIME_S="$MIN_UPTIME_S" \
+  STATE_BACKEND="${STATE_BACKEND:-rocksdb}" \
+  SOURCE_RATE_FLOOR_PCT="${SOURCE_RATE_FLOOR_PCT:-80}" \
   INGESTION_JAVA_OUT="$OUT/j1/java.out" \
   FLUSS_PROBE_CP="$CP" \
   OUT_DIR="$PHASE_OUT/stages" \

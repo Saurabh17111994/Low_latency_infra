@@ -1192,6 +1192,39 @@ pipeline_submit_job() {
   pipeline_log "SignalJob submitted: job_id=$JOB_ID"
 }
 
+# P6-211: RocksDB must land on the NAMED VOLUME (G24, 2026-09-02 / CHG-120
+# class: overlay-fs state = ~100x per-op cost, ~1.7k/s pipeline cap,
+# invisible until analysis). Lives here (not inline in stage-a2-baseline.sh)
+# so it is unit-testable. Caller guarantees JOB_ID non-empty (baseline
+# P6-210 gate), so job_${JOB_ID}_op_* is exact. Two layers: (1) mount-source
+# check fails fast when the mount itself is wrong (absent or bind dir);
+# (2) dir-presence wait proves RocksDB actually landed. No-op unless
+# STATE_BACKEND=rocksdb. 0 = on the volume, 1 = fatal-worthy (caller fatals).
+pipeline_g24_rocksdb_check() {
+  [ "${STATE_BACKEND:-rocksdb}" = "rocksdb" ] || return 0
+  local jm_cid rocks_mount rocks_ok=""
+  jm_cid="$(pipeline_compose_cid flink-taskmanager)" || return 1
+  rocks_mount="$(docker inspect "$jm_cid" --format '{{range .Mounts}}{{if eq .Destination "/tmp/flink-rocksdb"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
+  case "$rocks_mount" in
+    "") echo "G24: /tmp/flink-rocksdb is NOT MOUNTED in flink-taskmanager — the named volume is missing; RocksDB would write the container overlay (CHG-120 ~1.7k/s degradation)" >&2; return 1 ;;
+    /*) echo "G24: /tmp/flink-rocksdb is a BIND MOUNT ($rocks_mount), not the named volume — refusing a poisoned baseline" >&2; return 1 ;;
+  esac
+  for _ in $(seq 1 12); do
+    # Array form "${COMPOSE[@]}" — scalar $COMPOSE is bare `docker` since P6-468.
+    if "${COMPOSE[@]}" exec -T flink-taskmanager \
+        sh -c "ls -d /tmp/flink-rocksdb/job_${JOB_ID}_op_* >/dev/null 2>&1"; then
+      rocks_ok=1; break
+    fi
+    sleep 5
+  done
+  if [ -z "$rocks_ok" ]; then
+    echo "G24: no RocksDB dirs for job $JOB_ID under /tmp/flink-rocksdb after 60s — RocksDB is writing somewhere else (container overlay = the CHG-120 ~1.7k/s degradation). Check state.backend.rocksdb.localdir in the TM config — and guard G22 (check_flink_properties.py)" >&2
+    return 1
+  fi
+  echo "STAGE-A2: G24 OK — RocksDB on the named volume (job_${JOB_ID}_op_* under /tmp/flink-rocksdb)"
+  return 0
+}
+
 # ---------- teardown ----------
 pipeline_cleanup() {
   # CHG-122: the data path is containers — remove them. P6-479: kill the
