@@ -130,7 +130,11 @@ def main() -> int:
     status, existing = o2_api("alerts")
     for a in (existing.get("list") or existing.get("data") or []):
         if a.get("name") == TEST_ALERT:
-            st, resp = o2_api(f"alerts/{a.get('id')}", "DELETE")
+            # O2 v0.91.5 list payloads key the alert as alert_id (same quirk
+            # seed_alerts.py handles); a bare .get("id") deletes "None" and
+            # leaks the always-firing probe.
+            aid = a.get("id") or a.get("alert_id")
+            st, resp = o2_api(f"alerts/{aid}", "DELETE")
             if st not in (200, 202, 204):
                 fail(f"cannot delete leftover {TEST_ALERT} (HTTP {st}: "
                      f"{json.dumps(resp)[:200]}) — leaving it would keep it firing")
@@ -192,7 +196,9 @@ def main() -> int:
     status, existing = o2_api("alerts")
     for a in (existing.get("list") or existing.get("data") or []):
         if a.get("name") == TEST_ALERT:
-            st, resp = o2_api(f"alerts/{a.get('id')}", "DELETE")
+            # Same alert_id quirk as the leftover check above.
+            aid = a.get("id") or a.get("alert_id")
+            st, resp = o2_api(f"alerts/{aid}", "DELETE")
             if st not in (200, 202, 204):
                 fail(f"cleanup delete failed for {TEST_ALERT} (HTTP {st}: "
                      f"{json.dumps(resp)[:200]}) — the always-firing probe is STILL enabled")

@@ -49,9 +49,13 @@ class _Response:
 class _Api:
     """A fake OpenObserve: enough of the alert lifecycle for main() to run."""
 
-    def __init__(self, *, delete_rc: int = 204, leftover: bool = False, create_rc: int = 201):
+    def __init__(self, *, delete_rc: int = 204, leftover: bool = False, create_rc: int = 201,
+                 payload_key: str = "alert_id"):
         self.delete_rc = delete_rc
-        self.alerts = [{"id": "left-1", "name": mod.TEST_ALERT}] if leftover else []
+        self.payload_key = payload_key
+        # Default payload_key is the REAL O2 v0.91.5 shape (alert_id, no id);
+        # the script must resolve the id through both spellings.
+        self.alerts = [{payload_key: "left-1", "name": mod.TEST_ALERT}] if leftover else []
         self.create_rc = create_rc
         self.calls: list[tuple[str, str]] = []
 
@@ -61,13 +65,14 @@ class _Api:
             return 200, {"list": list(self.alerts)}
         if path == "alerts" and method == "POST":
             if self.create_rc in (200, 201):
-                self.alerts.append({"id": "new-1", "name": mod.TEST_ALERT})
+                self.alerts.append({self.payload_key: "new-1", "name": mod.TEST_ALERT})
             return self.create_rc, {}
         if path.startswith("alerts/") and method == "DELETE":
             if self.delete_rc not in (200, 202, 204):
                 return self.delete_rc, {"error": "delete refused"}
             aid = path.split("/", 1)[1]
-            self.alerts = [a for a in self.alerts if a.get("id") != aid]
+            self.alerts = [a for a in self.alerts
+                           if aid not in (a.get("id"), a.get("alert_id"))]
             return self.delete_rc, {}
         raise AssertionError(f"unexpected O2 call: {method} {path}")
 
@@ -167,6 +172,19 @@ class CleanupStatusTest(unittest.TestCase):
         self.assertIn("temp alert deleted: True", self.out.getvalue())
         self.assertIn("PASS:", self.out.getvalue())
         self.assertEqual([], api.alerts, "the probe alert must be gone")
+
+    def test_cleanup_deletes_a_real_o2_alert_id_payload(self):
+        """O2 v0.91.5 lists alerts as {alert_id: ...} with no id — the script
+        must not DELETE alerts/None and leak the always-firing probe."""
+        api = _Api(leftover=True, payload_key="alert_id")
+        self.assertEqual(0, self._run(api))
+        self.assertEqual([], api.alerts, "alert_id-keyed probe must be deleted")
+        self.assertIn("deleted leftover", self.out.getvalue())
+
+    def test_cleanup_still_accepts_the_legacy_id_payload(self):
+        api = _Api(leftover=True, payload_key="id")
+        self.assertEqual(0, self._run(api))
+        self.assertEqual([], api.alerts, "id-keyed probe must be deleted")
 
     def test_a_202_delete_is_accepted(self):
         api = _Api(delete_rc=202)
