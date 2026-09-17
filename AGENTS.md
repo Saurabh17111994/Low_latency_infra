@@ -51,6 +51,31 @@ Spec-driven repo: `docs/` is the spec, `code/` is the implementation.
    does / its function. This is done only after the test exists and passes — so the next
    person does not have to re-verify what each entity does.
 
+## Wave implementation + gate absorption
+
+Waves are audit finding batches (`P6-xxx`) from the phase audit file. The gate
+(`make gate` → `run-monday-gates.sh`, 19 steps) is the single shield: each wave's
+tests join it permanently, so every later wave is checked against all earlier ones.
+
+1. **Verify first, trust no tick.** Reproduce every finding against the tree
+   (read-only) before implementing — audit ticks have marked items done that the
+   tree contradicts. Verdict per finding: REPRODUCES / STALE / UNCLEAR.
+2. **Scope doc for multi-finding waves** under `docs/plans/` (code map with
+   current lines — audit L-numbers drift; commit slices by code region, not finding
+   number; test plan; risks). Get operator approval before implementing.
+3. **Implement region-sliced** (one commit per code region; findings sharing a
+   hunk ship together). New tests go in `code/01_platform/04_scripts/tests/` —
+   gate step 3 auto-discovers `test_*.py`, so they join the shield with no gate
+   change. Failing-first + mutation checks per commit, one CHG record per commit
+   in `docs/05_deployment/change-records/`, pytest from REPO ROOT.
+4. **Gate rules:** never add a numbered step (`GATE_TOTAL=19` — renumbering cost);
+   new checks fold into an existing step (guards live in step 1, fail-closed).
+   Never edit code or touch the cluster while a gate run is in flight — later
+   steps execute these files. Diagnose failures only after the run completes,
+   then fix together and re-run (scoped `--steps` first, full gate to certify).
+5. **Done = green gate with the wave's tests inside it**, then tick the findings
+   in the audit file with `Fixed:` + commit evidence.
+
 ## Hazards
 
 - DDL in `code/01_platform/02_sql/ddl/` is reconciled proposals, NOT applied anywhere —
