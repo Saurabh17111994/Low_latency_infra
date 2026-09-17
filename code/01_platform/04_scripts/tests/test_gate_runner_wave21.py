@@ -92,7 +92,8 @@ class TimeoutsKillAfter(unittest.TestCase):
 
 class PythonGateShape(unittest.TestCase):
     def test_empty_or_failed_discovery_fails(self) -> None:
-        self.assertIn("Ran 0 tests|FAILED \\(", SRC,
+        # CHG-201: the FAILED leg is line-anchored — see the behavioural test.
+        self.assertIn("Ran 0 tests|^FAILED \\(", SRC,
                       "step 3 lost its non-empty-OK assertion")
 
     def test_behavioural_nonempty_ok_gate(self) -> None:
@@ -107,10 +108,13 @@ class PythonGateShape(unittest.TestCase):
             "Ran 0 tests in 0.001s\n\nOK\n": True,            # empty discovery fails
             "Ran 1 test in 0.001s\n\nFAILED (failures=1)\n": True,  # failure fails
             "Ran 0 tests in 0.001s\n\nOK (skipped=1)\n": True,      # skip-only fails
+            # CHG-201: mid-line chatter must not fail a green suite (grep is
+            # line-oriented, so the model uses re.M like the real check).
+            "Ran 3 tests in 0.001s\nDDL APPLY FAILED (exit 3)\n\nOK\n": False,
         }
         for body, must_fail in cases.items():
-            has_ok = bool(re.search(r"^OK", body, re.M))
-            has_bad = bool(re.search(pattern, body))
+            has_ok = bool(re.search(r"^OK", body, flags=re.M))
+            has_bad = bool(re.search(pattern, body, flags=re.M))
             fails = (not has_ok) or has_bad
             self.assertEqual(fails, must_fail, f"wrong verdict for {body!r}")
 

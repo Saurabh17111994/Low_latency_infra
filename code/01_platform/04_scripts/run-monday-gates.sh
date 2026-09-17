@@ -590,7 +590,10 @@ if ! timeout -k 60 "$PY_TIMEOUT_SEC" python3 -m unittest discover -s "$SCRIPT_DI
 	echo "FAIL: python unit suites — see $PY_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
-if ! grep -q "^OK" "$PY_LOG" || grep -qE 'Ran 0 tests|FAILED \(' "$PY_LOG"; then
+# CHG-201: `^FAILED` is anchored — unittest's summary starts the line, while
+# test chatter ("DDL APPLY FAILED (exit 3)") sits mid-line. Unanchored, the
+# chatter failed a green suite (2026-09-17: 1473 tests OK, gate red).
+if ! grep -q "^OK" "$PY_LOG" || grep -qE 'Ran 0 tests|^FAILED \(' "$PY_LOG"; then
 	echo "FAIL: python unit suites did not report OK with >=1 test — see $PY_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
