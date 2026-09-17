@@ -406,6 +406,53 @@ def test_compose_array_keeps_paths_intact_when_root_has_a_space(tmp_path):
     assert "space" in calls, "the space-containing ROOT was split into separate argv words"
 
 
+# ── CHG-185: the ingestion container's environment ───────────────────────────
+# Ingestion fails closed without DEPLOYMENT_ENV, and neither usual path supplies
+# it for this call: Dockerfile.loadgen has no ENTRYPOINT (so
+# docker-entrypoint.sh's `${DEPLOYMENT_ENV:-dev}` default never runs) and
+# `docker run` does not forward the caller's exported variables. These assert on
+# the recorded docker argv, so they cover the real command the lib builds.
+def _start_ingestion(tmp_path, **extra_env):
+    """Run pipeline_start_ingestion with the credentials file it requires
+    (P6-146) and return the completed process."""
+    secrets = tmp_path / "root/code/01_platform/01_docker/secrets.env"
+    secrets.parent.mkdir(parents=True, exist_ok=True)
+    secrets.write_text("ARROW_APP_SECRET=x\n")
+    # The function waits for the readiness marker and for "HFT subscribed" in
+    # its log mirror; the docker stub is not a real container, so write both
+    # (the log target is created by the function's own `docker logs -f` stub).
+    script = textwrap.dedent('''
+        rm -f "$OUT/j1/java.out"
+        ( sleep 1; touch "$OUT/ingestion.loadtest.ready"; mkdir -p "$OUT/j1"; \\
+          printf '%s\\n' "HFT subscribed" > "$OUT/j1/java.out" ) &
+        pipeline_start_ingestion; echo "rc=$?"
+    ''')
+    return run_lib(tmp_path, script,
+                   extra_env=extra_env or None)
+
+
+def test_ingestion_passes_deployment_env_with_a_dev_default(tmp_path):
+    r = _start_ingestion(tmp_path)
+    assert "rc=0" in r.stdout, r.stderr + r.stdout
+    calls = docker_calls(tmp_path)
+    assert "run -d" in calls, calls
+    assert "-e DEPLOYMENT_ENV=dev" in calls, (
+        "the ingestion container is started without DEPLOYMENT_ENV, so "
+        "IngestionConfig fails closed and the container exits immediately:\n"
+        + calls)
+
+
+def test_ingestion_forwards_an_operators_deployment_env(tmp_path):
+    """A prod invocation must reach the container unchanged — the production-only
+    gates in PlatformConfig depend on seeing the real value."""
+    r = _start_ingestion(tmp_path, DEPLOYMENT_ENV="production")
+    assert "rc=0" in r.stdout, r.stderr + r.stdout
+    calls = docker_calls(tmp_path)
+    assert "-e DEPLOYMENT_ENV=production" in calls, calls
+    assert "-e DEPLOYMENT_ENV=dev" not in calls, (
+        "the operator's DEPLOYMENT_ENV was overwritten by the default:\n" + calls)
+
+
 # ── static pins: guards that only a full preflight can reach ─────────────────
 def test_preflight_only_guards_are_pinned_statically():
     text = LIB.read_text()

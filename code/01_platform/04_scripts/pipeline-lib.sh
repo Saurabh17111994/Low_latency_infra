@@ -56,7 +56,18 @@
 LIB_JAR="$ROOT/code/02_services/02_compute/target/compute.jar"
 LIB_ING_JAR="$ROOT/code/02_services/01_ingestion/target/ingestion.jar"
 LIB_BRIDGE_DIR="$ROOT/code/02_services/01_ingestion/go-bridge"
-LIB_MANIFEST="$ROOT/../../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv"
+# Path is ONE level up, not two: the manifest tree lives at
+# Flink_Fluss_Infrastructure/Arrow_broker (sibling of this repo), NOT at
+# Jupyter_notebook/Arrow_broker. The pre-fix `$ROOT/../../` resolved to the
+# latter, whose only NSE_CM_EQUITY.csv is a 7-column export with NO LotSize
+# column — so since d09e9795 (2026-09-07) made the loader fail closed on a
+# missing LotSize, every harness sourcing this lib died at manifest load
+# ("instrument-manifest: CSV missing LotSize column; refusing to load") and
+# no phase could ever start. One level up also holds the approved manifest
+# every other consumer uses (bench-throughput.sh, run-full-suite.sh,
+# start-all.sh, docker-compose.yml, and docs). run-signal-chain-e2e.sh fixed
+# this same too-deep default in wave 27; this is the remaining copy.
+LIB_MANIFEST="$ROOT/../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv"
 LIB_FAKETOOL_SRC="$LIB_BRIDGE_DIR/faketool/main.go"
 FAKETOOL_PORT="${FAKETOOL_PORT:-8899}"
 LIB_COMPOSE_FILE="$ROOT/code/01_platform/01_docker/docker-compose.yml"
@@ -656,12 +667,22 @@ pipeline_start_ingestion() {
   # that the compose commands in this repo already pass.
   [ -f "$LIB_SECRETS_FILE" ] \
     || { pipeline_fail "missing $LIB_SECRETS_FILE — ingestion credentials must come from it (ARROW_APP_SECRET, ARROW_PASSWORD, ARROW_TOTP_KEY)"; return 1; }
+  # P6-745 (CHG-185): DEPLOYMENT_ENV must be passed EXPLICITLY. Ingestion fails
+  # closed without it ("DEPLOYMENT_ENV/DEPLOY_ENV is required but not set"), and
+  # neither of the two usual paths covers this call: docker-entrypoint.sh L23
+  # defaults it to dev, but Dockerfile.loadgen deliberately has no ENTRYPOINT
+  # (this command selects the binary), so that script never runs; and
+  # `docker run` does not forward the caller's exported variables — verified
+  # live: an exported DEPLOYMENT_ENV=dev still arrived as UNSET. Default to dev
+  # to match the entrypoint's own ad-hoc default; an operator's explicit value
+  # (prod deployments) wins.
   docker run -d --name "$LIB_INGESTION_CONTAINER" \
     --network "$LIB_TRADING_NET" \
     --env-file "$LIB_SECRETS_FILE" \
     -v "$OUT":/run -v "$OUT/j1":/logs \
     --mount "type=bind,src=$OUT/instruments-1024.csv,dst=/run/instruments-1024.csv,readonly" \
     -e LOG_DIR=/logs \
+    -e DEPLOYMENT_ENV="${DEPLOYMENT_ENV:-dev}" \
     -e READINESS_FILE_PATH=/run/ingestion.loadtest.ready \
     -e ARROW_HFT_URL="ws://$LIB_FAKETOOL_CONTAINER:$FAKETOOL_PORT" \
     -e ARROW_BRIDGE_BIN=/app/arrow-bridge \

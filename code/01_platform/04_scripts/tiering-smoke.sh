@@ -20,7 +20,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 LIB_BRIDGE_DIR="$ROOT/code/02_services/01_ingestion/go-bridge"
 LIB_ING_JAR="$ROOT/code/02_services/01_ingestion/target/ingestion.jar"
-LIB_MANIFEST="$ROOT/../../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv"
+# One level up, not two — see pipeline-lib.sh LIB_MANIFEST for the full
+# root cause (the two-level path has no LotSize column and fail-closes).
+LIB_MANIFEST="$ROOT/../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv"
 SMOKE_T="${1:-300}"
 RATE_HZ="${RATE_HZ:-10}"
 NTOK="${NTOK:-1024}"

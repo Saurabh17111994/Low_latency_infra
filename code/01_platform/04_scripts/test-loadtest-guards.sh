@@ -50,10 +50,10 @@ echo "=== G3+G7: missing file / manifest asserts ==="
 expect_fail "G3: missing jar detected" bash -c "test -f /nonexistent-ingestion.jar"
 expect_fail "G7: missing manifest detected" bash -c "test -f /nonexistent-manifest.csv"
 expect_ok  "G3: existing jar passes" test -f "$ROOT/code/02_services/01_ingestion/target/ingestion.jar"
-expect_ok  "G7: manifest passes" test -f "$ROOT/../../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv"
+expect_ok  "G7: manifest passes" test -f "$ROOT/../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv"
 
 echo "=== G6: token count cap ==="
-if [ "$(tail -n +2 "$ROOT/../../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv" | head -1024 | cut -d, -f4 | tr ',' '\n' | grep -c .)" -eq 1024 ]; then
+if [ "$(tail -n +2 "$ROOT/../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv" | head -1024 | cut -d, -f4 | tr ',' '\n' | grep -c .)" -eq 1024 ]; then
   ok "G6: 1024-token extraction exact"
 else
   bad "G6: token extraction != 1024"

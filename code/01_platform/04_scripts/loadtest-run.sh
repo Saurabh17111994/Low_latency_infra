@@ -26,7 +26,10 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 JAR="$ROOT/code/02_services/01_ingestion/target/ingestion.jar"
 BRIDGE_DIR="$ROOT/code/02_services/01_ingestion/go-bridge"
-MANIFEST="$ROOT/../../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv"
+# One level up, not two (see pipeline-lib.sh LIB_MANIFEST): `../../` lands in
+# Jupyter_notebook/Arrow_broker, whose NSE_CM_EQUITY.csv has no LotSize column
+# and is refused by the loader since d09e9795 (2026-09-07).
+MANIFEST="$ROOT/../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv"
 FAKETOOL_SRC="$BRIDGE_DIR/faketool/main.go"
 OUT="$ROOT/logs/tracker-14/loadtest-$(date +%Y%m%d-%H%M%S)"
 DURATION_S="${1:-240}"
