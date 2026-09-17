@@ -30,10 +30,12 @@ RATE_HZ="${RATE_HZ:-10}"
 DURATION_S="${DURATION_S:-720}"
 MIN_UPTIME_S="${MIN_UPTIME_S:-600}"
 FLINK_REST_URL="${FLINK_REST_URL:-http://localhost:8081}"
-COMPOSE_DIR="$ROOT/code/01_platform/01_docker"
 
 PHASE_NAME="stage-a2-baseline"
-PHASE_OUT="$ROOT/logs/tracker-14/${PHASE_NAME}-$(date +%Y%m%d-%H%M%S)"
+# P6-552: PID suffix — 1s timestamps collide across concurrent invocations
+# (shared dir, interleaved tee output, clobbered FAILURE.txt/stages).
+PHASE_OUT="$ROOT/logs/tracker-14/${PHASE_NAME}-$(date +%Y%m%d-%H%M%S)-$$"
+mkdir -p "$PHASE_OUT" || { echo "STAGE-A2: FAIL — cannot create $PHASE_OUT" >&2; exit 1; }
 OUT="$PHASE_OUT/capture"
 RUN_LOG="$PHASE_OUT/run.log"
 mkdir -p "$OUT/j1"
@@ -61,8 +63,14 @@ echo "STAGE-A2: rate=${RATE_HZ}Hz duration=${DURATION_S}s out=$PHASE_OUT"
 # been up MIN_UPTIME_S (default 600s = 10min). If the power cut left torn
 # Fluss segments, the preflight's 180s readiness wait will fail closed — run
 # `fluss-repair/repair-tablet.sh --all` first.
+# P6-553: validate both sides — a non-integer MIN_UPTIME_S made `[ -lt ]`
+# error so the if-branch silently skipped the gate; a missing /proc/uptime
+# produced a confusing post-reboot fatal instead of a clear one.
+case "${MIN_UPTIME_S:-}" in ''|*[!0-9]*) fatal "MIN_UPTIME_S must be non-negative integer (got '${MIN_UPTIME_S:-}')";; esac
+[ -r /proc/uptime ] || fatal "cannot read /proc/uptime — host-stability gate needs Linux /proc (uptime_s unknown)"
 uptime_s="$(awk '{print int($1)}' /proc/uptime)"
-if [ "${uptime_s:-0}" -lt "$MIN_UPTIME_S" ]; then
+case "$uptime_s" in ''|*[!0-9]*) fatal "cannot parse host uptime";; esac
+if [ "$uptime_s" -lt "$MIN_UPTIME_S" ]; then
   fatal "host uptime ${uptime_s}s < MIN_UPTIME_S=${MIN_UPTIME_S}s — refusing a measurement start right after a reboot; re-run in $((MIN_UPTIME_S - uptime_s))s"
 fi
 
@@ -73,7 +81,11 @@ export PURGE_STRICT=true ALLOW_FULL_REPLAY=false
 # --- Flink up? (power-cut left JM/TM down; drills assume them up) ---
 if ! curl -fsS --max-time 5 "$FLINK_REST_URL/overview" >/dev/null 2>&1; then
   echo "STAGE-A2: Flink REST down — starting flink containers"
-  ( cd "$COMPOSE_DIR" && docker compose --env-file .env --env-file secrets.env up -d flink-jobmanager flink-taskmanager ) \
+  # P6-554: reuse the lib's $COMPOSE (B1: both env files + explicit -f) instead
+  # of a divergent cwd-dependent recipe. Array form "${COMPOSE[@]}" — scalar
+  # $COMPOSE is only element 0 (bare `docker`) since P6-468 made it an array,
+  # so the audit's literal `$COMPOSE up` would run `docker up` (no such command).
+  "${COMPOSE[@]}" up -d flink-jobmanager flink-taskmanager \
     || fatal "cannot start flink containers"
   for _ in $(seq 1 40); do
     curl -fsS --max-time 5 "$FLINK_REST_URL/overview" >/dev/null 2>&1 && break
