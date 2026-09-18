@@ -484,7 +484,11 @@ def fetch(url, timeout=6):
     with urllib.request.urlopen(url, timeout=timeout) as r:
         return json.load(r)
 rows = []
-present: set[str] = set()
+# No PEP 585 annotations in this leg: `dict[str, str]` / `set[str]` need
+# python >=3.9 and are EVALUATED at runtime on 3.8, where the TypeError kills
+# the whole leg and the capture silently loses its custom-metric rows. Nothing
+# in the repo pins the host's python, so the type stays in the comment.
+present = set()
 for vid in vertex_names:
     op = vertex_names[vid].split(" -> ", 1)[0].replace("\t", " ")
     try:
@@ -497,7 +501,7 @@ for vid in vertex_names:
     #    matches a wanted metric. The operator segment comes from the id
     #    itself (the vertex may be a chain — the OWNING operator is in the
     #    id, e.g. "3.fingerprint-dedup.compute_dedup_first").
-    pairs: dict[str, str] = {}  # "<operator>.<underscored>" -> dotted name
+    pairs = {}  # "<operator>.<underscored>" -> dotted name
     for m in available:
         mid = str(m.get("id", ""))
         parts = mid.split(".")

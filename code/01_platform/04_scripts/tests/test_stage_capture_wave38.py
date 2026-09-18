@@ -12,6 +12,8 @@ import os
 import shutil
 import stat
 import subprocess
+import re
+import ast
 from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
@@ -313,3 +315,69 @@ def test_bridge_fresh_report_passes(tmp_path):
     text = proc.stdout + proc.stderr
     assert proc.returncode == 0, text
     assert "arrow-tick-counts report" not in text, text
+
+
+# ---------------- P6-557 (remainder): the leg must run on python 3.8 ---------
+
+def _python_heredocs(script: Path) -> list[tuple[int, str]]:
+    """Every `python3 ... <<'DELIM'` body in the script, with its first line number.
+
+    The capture legs are embedded python; the host's python version is not
+    pinned anywhere, so the source is the only thing a test can inspect.
+    """
+    lines = script.read_text(encoding="utf-8").splitlines()
+    blocks: list[tuple[int, str]] = []
+    i = 0
+    while i < len(lines):
+        # Only a real invocation: the line must START with `python3` (an optional
+        # `if` in front), never a comment that merely mentions the form.
+        m = re.match(r"\s*(?:if\s+)?python3\b[^\n]*<<'([A-Za-z_][A-Za-z0-9_]*)'",
+                     lines[i])
+        if not m:
+            i += 1
+            continue
+        delim, body = m.group(1), []
+        # The body starts after the WHOLE command: a heredoc command may be
+        # continued over several lines (`... <<'X' | \` + `python3 ... || \`).
+        while i < len(lines) and lines[i].rstrip().endswith("\\"):
+            i += 1
+        start = i + 2          # 1-based line number of the first body line
+        i += 1
+        while i < len(lines) and lines[i].strip() != delim:
+            body.append(lines[i])
+            i += 1
+        blocks.append((start, "\n".join(body)))
+        i += 1
+    return blocks
+
+
+def _pep585_annotations(src: str) -> list[str]:
+    """Annotation nodes that subscript a builtin (`dict[str, str]`)."""
+    builtins = {"dict", "set", "list", "tuple", "frozenset", "type"}
+    hits = []
+    for node in ast.walk(ast.parse(src)):
+        ann = getattr(node, "annotation", None)
+        if isinstance(ann, ast.Subscript) and isinstance(ann.value, ast.Name) \
+                and ann.value.id in builtins:
+            hits.append(f"L{ann.lineno}: {ann.value.id}[...]")
+    return hits
+
+
+def test_capture_python_is_version_neutral():
+    # P6-557: `pairs: dict[str, str]` / `present: set[str]` are PEP 585 — they
+    # need python >=3.9, and on 3.8 the annotation is EVALUATED at runtime, so
+    # the whole leg dies with TypeError and the capture loses its custom-metric
+    # rows. Nothing in the repo pins the host's python, so the legs must stay
+    # version-neutral. Syntax-level features (match, parenthesized context
+    # managers) are covered by feature_version.
+    blocks = _python_heredocs(SCRIPT)
+    assert blocks, "no python heredoc found in stage-capture.sh — extractor is stale"
+    problems = []
+    for start, src in blocks:
+        try:
+            ast.parse(src, feature_version=(3, 8))
+        except SyntaxError as exc:
+            problems.append(f"heredoc at L{start}: not 3.8 syntax: {exc}")
+        for hit in _pep585_annotations(src):
+            problems.append(f"heredoc at L{start}: PEP 585 annotation {hit}")
+    assert not problems, "\n".join(problems)
