@@ -607,7 +607,11 @@ echo "=== [3/19] Python unit suites (reconcile-compare ING-TCP-002 + gate helper
 # at step 3 with zero FAIL/ERROR lines. The budget must cover the conditions
 # the gate actually runs in. Still env-overridable (see pin test).
 PY_TIMEOUT_SEC="${PY_TIMEOUT_SEC:-600}"
-if ! timeout -k 60 "$PY_TIMEOUT_SEC" python3 -m unittest discover -s "$SCRIPT_DIR/tests" -p "test_*.py" \
+# CHG-220: -v. The summary line carries only a count ("OK (skipped=11)"), so a
+# skip is the one verdict the certificate stated without naming — an accepted
+# live-refusal and a test somebody quietly disabled looked identical. The
+# inventory below turns the verbose log into the missing names.
+if ! timeout -k 60 "$PY_TIMEOUT_SEC" python3 -m unittest discover -s "$SCRIPT_DIR/tests" -p "test_*.py" -v \
 	>"$PY_LOG" 2>&1; then
 	echo "FAIL: python unit suites — see $PY_LOG" | tee -a "$SUMMARY"
 	gate_fail
@@ -620,6 +624,17 @@ if ! grep -q "^OK" "$PY_LOG" || grep -qE 'Ran 0 tests|^FAILED \(' "$PY_LOG"; the
 	gate_fail
 fi
 echo "PASS: python unit suites ($(grep -oE 'Ran [0-9]+ tests' "$PY_LOG" | head -1 || echo 'all tests'))" | tee -a "$SUMMARY"
+# CHG-220: name every skip, or fail. A count that cannot be itemized is not
+# evidence — it is the same hole as a refusal mistaken for a pass, one level up
+# (the certificate quotes this count; nobody could check it).
+# The assignment starts the line on purpose: test_gate_variable_scoping.py
+# requires each step to assign what it reads, and its parser sees `NAME=…`
+# only at line start. `|| { …; }` keeps the failure handled under `set -e`.
+SKIP_LINE="$(python3 "$SCRIPT_DIR/skip_inventory.py" "$PY_LOG" 2>&1)" || {
+	echo "FAIL: python unit suites — skip count is not auditable — $SKIP_LINE" | tee -a "$SUMMARY"
+	gate_fail
+}
+echo "$SKIP_LINE" | tee -a "$SUMMARY"
 # CHG-219 / plan 2026-09-18 §6: the pytest-style files under tests/ are invisible
 # to unittest's discovery — 18 of them sat outside the certificate entirely until
 # now (measured 2026-09-18: 278 passed in 203.82s, 278 collected, exactly those).
@@ -627,7 +642,9 @@ echo "PASS: python unit suites ($(grep -oE 'Ran [0-9]+ tests' "$PY_LOG" | head -
 # pytest-only files without a hand-maintained list that could silently go stale.
 # 420s = ~2x the measured 204s, the same rule PY_TIMEOUT_SEC follows above.
 PYTEST_TIMEOUT_SEC="${PYTEST_TIMEOUT_SEC:-420}"
-if ! timeout -k 60 "$PYTEST_TIMEOUT_SEC" python3 -m pytest "$SCRIPT_DIR/tests" -q \
+# -rs (CHG-220): the pytest half's skip reasons land in its log. Its console
+# line stays count-free, so no certificate ever quoted an unauditable share.
+if ! timeout -k 60 "$PYTEST_TIMEOUT_SEC" python3 -m pytest "$SCRIPT_DIR/tests" -q -rs \
 	-p no:cacheprovider -p no:unittest >"$PYTEST_LOG" 2>&1; then
 	echo "FAIL: python pytest-only suites — see $PYTEST_LOG" | tee -a "$SUMMARY"
 	gate_fail
