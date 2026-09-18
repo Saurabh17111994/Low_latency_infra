@@ -235,12 +235,9 @@ class CompatFlussIntegrationTest {
     byte[] payload = "raw-payload-0123456789-abcdef".getBytes(StandardCharsets.UTF_8);
 
     AppendWriter writer = table.newAppend().createWriter();
-    try {
+    {
       GenericRow row = GenericRow.of(1L, payload, bs("alpha"));
       writer.append(row).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
 
     // Read back via LogScanner
@@ -278,12 +275,9 @@ class CompatFlussIntegrationTest {
     String logName = PREFIX + "log_" + System.nanoTime();
     Table logTable = createTable(logName, LOG_SCHEMA, "id");
     AppendWriter w = logTable.newAppend().createWriter();
-    try {
+    {
       w.append(GenericRow.of(1L, new byte[] {1, 2, 3}, bs("one"))).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
       w.append(GenericRow.of(2L, new byte[] {4, 5, 6}, bs("two"))).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
     try (LogScanner s = logTable.newScan().createLogScanner()) {
       s.subscribe(0, 0L);
@@ -295,12 +289,9 @@ class CompatFlussIntegrationTest {
     String kvName = PREFIX + "kv_" + System.nanoTime();
     Table kvTable = createTable(kvName, KV_SCHEMA, "key");
     UpsertWriter kvWriter = kvTable.newUpsert().createWriter();
-    try {
+    {
       GenericRow row = GenericRow.of(bs("instrument-1"), bs("100.50"), bs("ACTIVE"));
       kvWriter.upsert(row).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
     Lookuper lookuper = kvTable.newLookup().createLookuper();
     InternalRow found = lookuper.lookup(GenericRow.of(bs("instrument-1")))
@@ -311,12 +302,9 @@ class CompatFlussIntegrationTest {
 
     // (3) partial_update — change only 'value', preserve 'status'
     UpsertWriter w2 = kvTable.newUpsert().partialUpdate("key", "value").createWriter();
-    try {
+    {
       GenericRow partial = GenericRow.of(bs("instrument-1"), bs("101.25"), bs("IGNORED"));
       w2.upsert(partial).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
     InternalRow after = lookuper.lookup(GenericRow.of(bs("instrument-1")))
         .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow();
@@ -344,12 +332,9 @@ class CompatFlussIntegrationTest {
     Table kvTable = createTable(kvName, KV_SCHEMA, "key");
 
     UpsertWriter w = kvTable.newUpsert().createWriter();
-    try {
+    {
       w.upsert(GenericRow.of(bs("k1"), bs("v1"), bs("ACTIVE")))
           .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
 
     try (LogScanner s = kvTable.newScan().createLogScanner()) {
@@ -366,12 +351,9 @@ class CompatFlussIntegrationTest {
     // Second full upsert on the same key — changelog grows by another FULL
     // record; the lookup reflects the latest write.
     UpsertWriter w2 = kvTable.newUpsert().createWriter();
-    try {
+    {
       w2.upsert(GenericRow.of(bs("k1"), bs("v2"), bs("ACTIVE")))
           .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
     try (LogScanner s = kvTable.newScan().createLogScanner()) {
       s.subscribe(0, 0L);
@@ -394,12 +376,9 @@ class CompatFlussIntegrationTest {
     // untouched columns stay populated) — merge at the storage layer, not a
     // column delta.
     UpsertWriter w3 = kvTable.newUpsert().partialUpdate("key", "value").createWriter();
-    try {
+    {
       w3.upsert(GenericRow.of(bs("k1"), bs("v3"), bs("IGNORED")))
           .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
     try (LogScanner s = kvTable.newScan().createLogScanner()) {
       s.subscribe(0, 0L);
@@ -449,12 +428,9 @@ class CompatFlussIntegrationTest {
 
     // Commit to A only.
     AppendWriter wa = tableA.newAppend().createWriter();
-    try {
+    {
       wa.append(GenericRow.of(1L, new byte[] {1}, bs("a1")))
           .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
     // A is visible immediately …
     try (LogScanner sa = tableA.newScan().createLogScanner()) {
@@ -472,12 +448,9 @@ class CompatFlussIntegrationTest {
 
     // Commit to B independently; both are now visible.
     AppendWriter wb = tableB.newAppend().createWriter();
-    try {
+    {
       wb.append(GenericRow.of(1L, new byte[] {1}, bs("b1")))
           .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
     try (LogScanner sb = tableB.newScan().createLogScanner()) {
       sb.subscribe(0, 0L);
@@ -505,13 +478,10 @@ class CompatFlussIntegrationTest {
     Table kvTable = createTable(kvName, KV_SCHEMA, "key");
 
     UpsertWriter w = kvTable.newUpsert().createWriter();
-    try {
+    {
       w.upsert(GenericRow.of(bs("k1"), bs("v1"), bs("ACTIVE"))).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
       // overwrite with a newer value
       w.upsert(GenericRow.of(bs("k1"), bs("v2"), bs("ACTIVE"))).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
 
     Lookuper lookuper = kvTable.newLookup().createLookuper();
@@ -544,12 +514,9 @@ class CompatFlussIntegrationTest {
     Table kvTable = createTable(kvName, KV_SCHEMA, "key");
 
     UpsertWriter w = kvTable.newUpsert().createWriter();
-    try {
+    {
       w.upsert(GenericRow.of(bs("a"), bs("1"), bs("ACTIVE"))).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
       w.upsert(GenericRow.of(bs("b"), bs("2"), bs("ACTIVE"))).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
 
     // Rebuild: read all rows via a scan
@@ -561,11 +528,8 @@ class CompatFlussIntegrationTest {
 
     // Converge: after replay, the latest upsert is visible
     UpsertWriter w2 = kvTable.newUpsert().createWriter();
-    try {
+    {
       w2.upsert(GenericRow.of(bs("a"), bs("10"), bs("ACTIVE"))).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
     Lookuper lookuper = kvTable.newLookup().createLookuper();
     InternalRow finalRow = lookuper.lookup(GenericRow.of(bs("a")))
@@ -615,14 +579,11 @@ class CompatFlussIntegrationTest {
     Table table = connection.getTable(path);
 
     AppendWriter w = table.newAppend().createWriter();
-    try {
+    {
       for (long i = 0; i < rows; i++) {
         w.append(GenericRow.of(i, new byte[] {1}, bs("k" + i)))
             .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
       }
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
 
     TableInfo info = table.getTableInfo();
@@ -672,14 +633,11 @@ class CompatFlussIntegrationTest {
     CREATED_TABLES.add(hotName);
     Table hotTable = connection.getTable(hotPath);
     AppendWriter hw = hotTable.newAppend().createWriter();
-    try {
+    {
       for (int i = 0; i < 200; i++) {
         hw.append(GenericRow.of(0L, new byte[] {1}, bs("same")))
             .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
       }
-    } finally {
-      // no flush: the acked write IS the visibility guarantee (CHG-212, CHG-213);
-      // an unbounded flush here masked timeouts and cost ~10 min of every drill.
     }
     long hotTableId = hotTable.getTableInfo().getTableId();
     int hotBuckets = 0;
