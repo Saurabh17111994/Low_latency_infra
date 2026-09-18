@@ -24,7 +24,10 @@
 #      (empty-catalog precondition enforced by the tool itself).
 #   7. Count > EXPECTED_TABLES -> MORE tables than the manifest describes:
 #      report, exit 3, never auto-apply (P6-320: extra tables are drift, and
-#      the old `-ge` test called any over-count healthy).
+#      the old `-ge` test called any over-count healthy). The report NAMES the
+#      tables (catalog_drift.py): a count of drift is not actionable — on
+#      2026-09-18 the six extras behind "33/27" needed a hand-run ZK listing to
+#      identify, and four were leftovers of an interrupted drill run.
 #   8. 0 < Count < EXPECTED   -> PARTIAL: report, exit 3, never auto-apply
 #      (the DDL contract refuses non-empty catalogs; partial = different
 #      problem, needs investigation).
@@ -57,6 +60,24 @@ set -u
 log()  { printf '[catalog-guard] %s\n' "$*"; }
 # P6-714: $1 only — `fail "msg" 3` used to print "ERROR: msg 3".
 fail() { printf '[catalog-guard] ERROR: %s\n' "$1" >&2; exit "${2:-1}"; }
+
+# Name the drift instead of only counting it (2026-09-18): the six extras behind this guard's
+# "33/27" message needed a hand-run ZK listing to identify. $1 = live comma-separated names,
+# $2 = which half to log ("extra" or "missing"). Best-effort: a helper that cannot run must not
+# turn "the catalog is drifted" into "the guard crashed".
+drift_lines() {
+    local names="$1" want="$2" out
+    [ -n "$names" ] || return 0
+    out="$(python3 "$ROOT/code/01_platform/04_scripts/catalog_drift.py" \
+        --manifest "$MANIFEST" --live "$names" 2>/dev/null || true)"
+    [ -n "$out" ] || return 0
+    while IFS= read -r _line; do
+        case "$_line" in
+            "$want:"*) log "$_line" ;;
+            "no drift:"*) [ "$want" = "extra" ] && log "$_line" ;;
+        esac
+    done <<<"$out"
+}
 
 # ── Config ────────────────────────────────────────────────────────────────
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -187,11 +208,13 @@ probe_tables() {
     cleaned="${cleaned%\]}"
     # P6-715: a whitespace-only list ("[ ]") is empty, not one table.
     LIVE="$(printf '%s' "$cleaned" | awk -F, '{n=0; for (i=1; i<=NF; i++) if ($i ~ /[^[:space:]]/) n++; print n}')"
+    LIVE_NAMES="$cleaned"
     return 0
 }
 
 # ── 7. State machine (P6-320) ─────────────────────────────────────────────
 LIVE=""
+LIVE_NAMES=""
 probe_tables || fail "$PROBE_ERR" 5
 log "catalog probe: $LIVE/$EXPECTED_TABLES tables under $ZK_PATH"
 
@@ -204,12 +227,17 @@ if [ "$LIVE" -gt "$EXPECTED_TABLES" ]; then
     log "catalog has MORE tables than the manifest describes ($LIVE/$EXPECTED_TABLES) —"
     log "not applying: extra tables are drift, not health. Compare the manifest with"
     log "'make ddl' and reconcile the extras."
+    drift_lines "$LIVE_NAMES" "extra"
+    log "To drop one that nothing references, use the DDL tool's own cleanup by prefix:"
+    log "  java -cp \$FLUSS_PROBE_CP com.trading.common.schema.ddl.DdlApplyTool \\"
+    log "    --ddl-dir code/01_platform/02_sql/ddl --bootstrap localhost:9123 --cleanup-prefix '<name-prefix>'"
     exit 3
 fi
 
 if [ "$LIVE" -gt 0 ]; then
     log "catalog PARTIAL ($LIVE/$EXPECTED_TABLES) — not applying (the DDL contract needs an"
     log "empty catalog). Investigate: tables exist but fewer than the manifest expects."
+    drift_lines "$LIVE_NAMES" "missing"
     exit 3
 fi
 
