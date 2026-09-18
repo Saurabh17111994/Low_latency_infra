@@ -420,6 +420,11 @@ class SignalLatencyContractTests(ProbeTestBase):
         from a read that disagreed with the server, so the counts are no longer
         pinned to the truncated values (11 and 25) that used to be asserted —
         those numbers were the defect, not the contract.
+
+        The refusal is reported as a *skip*, not a pass (CHG-217 follow-up): the
+        contract is still asserted below, but nothing was verified about the
+        census, and that belongs in the record's skipped count rather than in a
+        silent green.
         """
         proc = self.run_probe(
             "FlussSignalLatency", ["orphans", "Execution_Intent", "Signal_Candidates"],
@@ -436,6 +441,10 @@ class SignalLatencyContractTests(ProbeTestBase):
                           f"a failed census must name the disagreement:\n{proc.stderr[-2000:]}")
             self.assertNotIn("orphan_intents=", proc.stdout,
                              "a short read must not print a census")
+            # The contract above holds either way; the census itself was not
+            # covered, so the record says so (CHG-217).
+            self.skipTest("census withheld — " + re.search(
+                r"census read \d+ rows but Fluss reports \d+", proc.stderr).group(0))
 
     @unittest.skipUnless(_dev_stack_up(), "dev stack (:9123) is not running")
     def test_the_intents_run_agrees_with_the_server_row_count(self) -> None:
@@ -451,7 +460,9 @@ class SignalLatencyContractTests(ProbeTestBase):
         always read a LOG table exactly in Fluss 0.9.1 — its own header records
         the measurement (25 rows by batch, 41 by offset-paged read, 48 by the
         server's count) — so as Execution_Intent grows, this leg flips to the
-        documented refusal. It must flip the suite green, not red.
+        documented refusal. It must flip the suite green, not red — and it says so
+        as a skip (CHG-217 follow-up), so a refusal can never read as coverage the
+        run never had.
         """
         proc = self.run_probe("FlussSignalLatency", ["intents", "Execution_Intent"], timeout=180)
         self.assert_no_classpath_error(self, proc)
@@ -466,6 +477,9 @@ class SignalLatencyContractTests(ProbeTestBase):
             self.assertRegex(proc.stderr, r"census read \d+ rows but Fluss reports \d+",
                              f"a failed census must name both counts:\n{proc.stderr[-2000:]}")
             self.assertNotIn("rows=", proc.stdout, "a short read must not print a total")
+            # Asserted above; the row-count agreement below is not exercised.
+            self.skipTest("census withheld — " + re.search(
+                r"census read \d+ rows but Fluss reports \d+", proc.stderr).group(0))
 
     @unittest.skipUnless(_dev_stack_up(), "dev stack (:9123) is not running")
     def test_the_scanned_table_is_the_one_printed(self) -> None:
@@ -473,7 +487,8 @@ class SignalLatencyContractTests(ProbeTestBase):
 
         A refusal satisfies this too: nothing is reported at all, so no table
         can be mis-labelled. What must not happen is a table= line printed by a
-        run whose read disagreed with the server.
+        run whose read disagreed with the server. A refusal is reported as a skip
+        (CHG-217 follow-up): nothing was reported, so nothing was verified.
         """
         proc = self.run_probe("FlussSignalLatency", ["intents", "Execution_Intent"], timeout=120)
         self.assert_no_classpath_error(self, proc)
@@ -484,6 +499,8 @@ class SignalLatencyContractTests(ProbeTestBase):
             self.assertRegex(proc.stderr, r"census read \d+ rows but Fluss reports \d+",
                              f"a failed census must name both counts:\n{proc.stderr[-2000:]}")
             self.assertNotIn("table=", proc.stdout, "a withheld census must not name a table")
+            self.skipTest("census withheld, so no table was reported — " + re.search(
+                r"census read \d+ rows but Fluss reports \d+", proc.stderr).group(0))
 
 
 class SignalLatencyRedLegTests(ProbeTestBase):
