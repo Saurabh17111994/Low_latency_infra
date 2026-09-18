@@ -97,6 +97,15 @@ REAL_EVIDENCE = os.path.join(
 # one coupling, pinned by test_ddl_apply_smoke.ScenarioBudgetTest.
 SCENARIO_TIMEOUT_S = 1800
 CLEANUP_TIMEOUT_S = 120
+# CHG-227: the gate wraps ALL of these scenarios in ONE outer cap
+# (run-monday-gates.sh DDL_SMOKE_TIMEOUT_SEC), so that cap has to outlast this
+# count times SCENARIO_TIMEOUT_S. Measured 2026-09-19: the cap was 1800 — the
+# budget of a SINGLE scenario — so S1 and S2 passed, S4 was killed mid-apply at
+# the cap, and the SIGKILL discarded the buffered log entirely (ddl-smoke.log came
+# back empty, so the failure carried no evidence). Pinned by
+# tests/test_ddl_apply_smoke.GateCapTest, which also checks this count against the
+# invocations in main().
+SCENARIO_COUNT = 3
 # The ddl-apply image the containerized S4 drill runs (compose's default
 # <project>-<service> tag; override for a non-default compose project name).
 DDL_APPLY_IMAGE = os.environ.get("DDL_APPLY_IMAGE", "01_docker-ddl-apply:latest")

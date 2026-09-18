@@ -823,7 +823,16 @@ echo "PASS: full doc audit (stale claims + doc↔code truth + DDL parity + sweep
 fi
 if step_active 11; then
 echo "=== [11/19] DDL apply exit-code smoke ===" | tee -a "$SUMMARY"
-DDL_SMOKE_TIMEOUT_SEC="${DDL_SMOKE_TIMEOUT_SEC:-1800}"
+# CHG-227: this cap wraps ALL THREE scenarios in ddl_apply_smoke.py, and each of them
+# may legitimately spend SCENARIO_TIMEOUT_S=1800s waiting out the apply tool's own
+# DRAIN_BUDGET (CHG-226). 1800 was the budget of ONE scenario, not the sum, so a
+# healthy-but-slow cluster was killed from the outside: measured 2026-09-19, S1 and S2
+# PASSed and wrote their apply.json, then S4 was killed mid-apply at the cap — and
+# because SIGKILL discards a pipe-buffered stdout, ddl-smoke.log came back EMPTY, so the
+# failure carried no evidence at all. 6000 = 3 x 1800 + 600s of slack for the classpath
+# build and the per-scenario cleanups. The coupling is pinned against the smoke's own
+# SCENARIO_COUNT/SCENARIO_TIMEOUT_S by tests/test_ddl_apply_smoke.GateCapTest.
+DDL_SMOKE_TIMEOUT_SEC="${DDL_SMOKE_TIMEOUT_SEC:-6000}"
 # Env-gated: the smoke reports itself SKIPPED when it gets no bootstrap; any
 # deviation from the 0/6/1 contract, the sentinels, or the evidence record FAILS
 # the gate. The bootstrap defaults to the same local stack the drills use, so a
@@ -847,7 +856,7 @@ fi
 DDL_APPLY_EVIDENCE_DIR="$OUT_DIR/ddl-apply-evidence"
 export DDL_APPLY_EVIDENCE_DIR
 mkdir -p "$DDL_APPLY_EVIDENCE_DIR"
-if ! timeout -k 60 "$DDL_SMOKE_TIMEOUT_SEC" python3 \
+if ! timeout -k 60 "$DDL_SMOKE_TIMEOUT_SEC" python3 -u \
 	"$SCRIPT_DIR/ddl_apply_smoke.py" >"$DDL_SMOKE_LOG" 2>&1; then
 	echo "FAIL: DDL apply exit-code smoke — see $DDL_SMOKE_LOG" | tee -a "$SUMMARY"
 	gate_fail
