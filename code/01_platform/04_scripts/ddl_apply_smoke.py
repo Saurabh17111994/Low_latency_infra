@@ -89,7 +89,13 @@ EXPECTED_LIMITED = []
 REAL_EVIDENCE = os.path.join(
     REPO_ROOT, "logs", "schema-compat", "composite-pk-raw-client-20260815.md"
 )
-SCENARIO_TIMEOUT_S = 900
+# CHG-226: 1800, not 900. A scenario runs an apply that is entitled to wait DRAIN_BUDGET (25 min)
+# for its own scratch teardown, so a 900 s scenario timeout fired from the OUTSIDE on a
+# healthy-but-slow cluster: measured 2026-09-18, scenario 2 used 882 s of its 900 s and scenario 4
+# timed out, failing the smoke (and gate step 11 with it) while the applies themselves were fine.
+# This only ever bounds the outer wait, so it must exceed the tool's budget — the two numbers are
+# one coupling, pinned by test_ddl_apply_smoke.ScenarioBudgetTest.
+SCENARIO_TIMEOUT_S = 1800
 CLEANUP_TIMEOUT_S = 120
 # The ddl-apply image the containerized S4 drill runs (compose's default
 # <project>-<service> tag; override for a non-default compose project name).
@@ -396,6 +402,34 @@ def scenario(index, extra_env, expect_rc, expect_parts, expect_absent=(),
         cleanup_prefix(prefix, classpath, bootstrap)
 
 
+def _evidence_root_writable(root):
+    """Whether this user can write into the evidence root (probe file, created then removed)."""
+    try:
+        os.makedirs(root, exist_ok=True)
+        probe = os.path.join(root, ".ddl-apply-smoke-probe")
+        with open(probe, "w", encoding="utf-8") as fh:
+            fh.write("probe")
+        os.unlink(probe)
+        return True
+    except OSError:
+        return False
+
+
+def resolve_evidence_root(default_root, env, is_writable):
+    """Which evidence root the scenarios should use, and why — (root_or_None, reason).
+
+    None means "the caller makes a temp dir": nothing else was usable. An explicit
+    DDL_APPLY_EVIDENCE_DIR wins over both, because the gate sets it to a path inside its own run
+    directory — and overriding that with a temp dir is exactly what lost run 6's per-apply evidence.
+    """
+    explicit = env.get("DDL_APPLY_EVIDENCE_DIR", "").strip()
+    if explicit:
+        return explicit, "explicit"
+    if is_writable(default_root):
+        return default_root, "default"
+    return None, "temp"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Live smoke for the DDL apply exit-code contract (0/6/1 + "
@@ -449,20 +483,22 @@ def main():
     # The scenarios assert the evidence CONTENT (parsed from the orchestrator's
     # printed path), not the default location, so fall back to a per-run temp
     # dir and keep the host smoke regression-worthy regardless of the evidence
-    # dir's current owner.
+    # dir's current owner. An explicitly-set DDL_APPLY_EVIDENCE_DIR is honoured
+    # instead: the gate points it at its own run directory, so a certificate's
+    # step 11 keeps the per-apply evidence it just produced (before this, that
+    # evidence went to a temp dir and was discarded — run 6's was).
+    root, why = resolve_evidence_root(ddl_apply.EVIDENCE_ROOT, os.environ,
+                                      _evidence_root_writable)
     tmp_evidence = None
-    try:
-        os.makedirs(ddl_apply.EVIDENCE_ROOT, exist_ok=True)
-        probe = os.path.join(ddl_apply.EVIDENCE_ROOT, ".ddl-apply-smoke-probe")
-        with open(probe, "w", encoding="utf-8") as fh:
-            fh.write("probe")
-        os.unlink(probe)
-    except OSError:
+    if root is None:
         tmp_evidence = tempfile.mkdtemp(prefix="ddl-apply-smoke-evidence-")
         os.environ["DDL_APPLY_EVIDENCE_DIR"] = tmp_evidence
         print(f"ddl-apply-smoke: default evidence dir "
               f"{ddl_apply.EVIDENCE_ROOT} not writable by the host user — "
               f"using temp {tmp_evidence}")
+    elif why == "explicit":
+        os.makedirs(root, exist_ok=True)
+        print(f"ddl-apply-smoke: evidence dir {root} (from DDL_APPLY_EVIDENCE_DIR)")
 
     ok = True
     # S1 — full PASS: smoke skipped, every table PASS -> exit 0. The

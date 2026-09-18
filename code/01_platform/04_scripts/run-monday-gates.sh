@@ -836,6 +836,17 @@ else
 	: "${FLUSS_BOOTSTRAP:=localhost:9123}"
 	export FLUSS_BOOTSTRAP
 fi
+# CHG-224: keep this step's per-apply evidence inside the run directory. The scenarios'
+# apply.json records live under DDL_APPLY_EVIDENCE_DIR; unset, the smoke falls back to a
+# temp dir whenever the default (repo-root logs/ddl-apply) is container-owned — which it is
+# after any container run — so a certificate's step 11 kept only its 1 KB summary (run 6's
+# per-apply evidence was lost exactly that way, which is why it could not be profiled).
+# S4 overrides this on purpose (it points the container at its bad-ownership seed), so it
+# reaches the host scenarios. The assignment starts the line because
+# test_gate_variable_scoping.py only reads assignments at line start.
+DDL_APPLY_EVIDENCE_DIR="$OUT_DIR/ddl-apply-evidence"
+export DDL_APPLY_EVIDENCE_DIR
+mkdir -p "$DDL_APPLY_EVIDENCE_DIR"
 if ! timeout -k 60 "$DDL_SMOKE_TIMEOUT_SEC" python3 \
 	"$SCRIPT_DIR/ddl_apply_smoke.py" >"$DDL_SMOKE_LOG" 2>&1; then
 	echo "FAIL: DDL apply exit-code smoke — see $DDL_SMOKE_LOG" | tee -a "$SUMMARY"
