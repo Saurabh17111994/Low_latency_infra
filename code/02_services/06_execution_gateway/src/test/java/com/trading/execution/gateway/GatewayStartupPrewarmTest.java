@@ -41,6 +41,14 @@ class GatewayStartupPrewarmTest {
 
     private static final int ITERATIONS = 8;
 
+    /**
+     * Fixture readiness bound: each iteration creates its database and its six tables
+     * milliseconds before using them, and the coordinator places a fresh replica only
+     * after the previous churn's teardown backlog drains (see
+     * {@link FlussProjectionWriterIntegrationTest#awaitReady}).
+     */
+    private static final long FIXTURE_READY_BUDGET_MS = 240_000L;
+
     /** The caller's bound: {@code GatewayConfig.requestTimeout()} at its production value. */
     private static final long REQUEST_BOUND_MILLIS = 2000L;
 
@@ -90,6 +98,12 @@ class GatewayStartupPrewarmTest {
                 assertThat(cfg.requestTimeout().toMillis())
                         .as("this test is only meaningful at the production 2s bound")
                         .isEqualTo(2000L);
+
+                // Fixture readiness, not the step under test: the tables were created a
+                // moment ago and their replicas may still be queued behind teardown.
+                FlussProjectionWriterIntegrationTest.awaitReady(
+                        "prewarm fixture " + db, FIXTURE_READY_BUDGET_MS,
+                        () -> GatewayStartup.prewarmTables(cfg));
 
                 // The step under test: everything a request would otherwise pay for.
                 GatewayStartup.prewarmTables(cfg);

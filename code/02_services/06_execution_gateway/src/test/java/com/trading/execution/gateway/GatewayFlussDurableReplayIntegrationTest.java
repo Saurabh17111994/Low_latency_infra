@@ -37,6 +37,15 @@ import org.junit.jupiter.api.Tag;
 @Tag("integration")
 class GatewayFlussDurableReplayIntegrationTest {
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
+
+    /**
+     * Fixture readiness bound. Both ledger tests create their table milliseconds
+     * before using it, and the coordinator places a fresh replica only after the
+     * previous churn's teardown backlog drains (see
+     * {@link FlussProjectionWriterIntegrationTest#awaitReady}). The preemptive
+     * guards below cover this bound plus the test's own work.
+     */
+    private static final long FIXTURE_READY_BUDGET_MS = 240_000L;
     private static final String ACCOUNT = "gr-acct";
     private static final String PARTITION = "gr-part";
 
@@ -120,7 +129,8 @@ class GatewayFlussDurableReplayIntegrationTest {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 bootstrap != null && !bootstrap.isBlank(),
                 "set FLUSS_BOOTSTRAP for live T2 recoverable-ledger evidence");
-        assertTimeoutPreemptively(Duration.ofSeconds(90), () -> {
+        // The guard covers the bounded fixture-readiness wait plus the test's own work.
+        assertTimeoutPreemptively(Duration.ofSeconds(360), () -> {
             String db = "gateway_ledger_" + System.nanoTime();
             Configuration conf = new Configuration();
             conf.setString("bootstrap.servers", bootstrap);
@@ -132,6 +142,10 @@ class GatewayFlussDurableReplayIntegrationTest {
                     createProjectionLedgerKv(admin, conn, db);
                     GatewayConfig config = config(db);
                     NormalizedExecutionEvent event = event("pe-recover-1");
+
+                    // Fixture readiness, not the step under test: the table was created
+                    // milliseconds ago and its replica may still be queued behind teardown.
+                    awaitLedgerReady(config, event.postbackEventId());
 
                     // Crash mid-apply: the writer fails on the lifecycle write, so
                     // the ledger stops at LIFECYCLE_APPLIED (incomplete), not COMPLETE.
@@ -190,7 +204,8 @@ class GatewayFlussDurableReplayIntegrationTest {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 bootstrap != null && !bootstrap.isBlank(),
                 "set FLUSS_BOOTSTRAP for live P3-102 bounded-recovery-page evidence");
-        assertTimeoutPreemptively(Duration.ofSeconds(90), () -> {
+        // The guard covers the bounded fixture-readiness wait plus the test's own work.
+        assertTimeoutPreemptively(Duration.ofSeconds(360), () -> {
             String db = "gateway_page_" + System.nanoTime();
             Configuration conf = new Configuration();
             conf.setString("bootstrap.servers", bootstrap);
@@ -200,6 +215,9 @@ class GatewayFlussDurableReplayIntegrationTest {
                         .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
                 try {
                     createProjectionLedgerKv(admin, conn, db);
+                    // Fixture readiness, not the step under test: the table was created
+                    // milliseconds ago and its replica may still be queued behind teardown.
+                    awaitLedgerReady(config(db), "await-ready-probe");
                     try (FlussProjectionLedgerStore ledger =
                                  FlussProjectionLedgerStore.open(config(db))) {
                         long now = System.currentTimeMillis();
@@ -354,6 +372,20 @@ class GatewayFlussDurableReplayIntegrationTest {
     }
 
     private static BinaryString bs(String s) { return s == null ? null : BinaryString.fromString(s); }
+
+    /**
+     * Waits until the freshly created ledger table can serve a read. The probe is a
+     * READ on the key the test is about (same bucket, no entry written), bounded and
+     * logged; it asserts nothing.
+     */
+    private static void awaitLedgerReady(GatewayConfig config, String eventId) throws Exception {
+        FlussProjectionWriterIntegrationTest.awaitReady("ledger fixture", FIXTURE_READY_BUDGET_MS,
+                () -> {
+                    try (FlussProjectionLedgerStore probe = FlussProjectionLedgerStore.open(config)) {
+                        probe.lookup(eventId);
+                    }
+                });
+    }
 
     private static void awaitHandoff(IntentReader reader, RecordingSink sink, String id) throws Exception {
         for (int i = 0; i < 40; i++) {

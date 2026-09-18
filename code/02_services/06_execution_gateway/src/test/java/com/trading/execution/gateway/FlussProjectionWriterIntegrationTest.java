@@ -199,6 +199,48 @@ class FlussProjectionWriterIntegrationTest {
 
     /* ---- scratch DDL mirrors (column order == FlussProjectionWriter row order) ---- */
 
+    /**
+     * Waits until a fixture created moments ago can actually serve a request.
+     *
+     * <p>The coordinator places a new table's replica only once the previous churn's
+     * teardown backlog has drained — measured on the drill cluster 2026-09-18: ~1.5 s
+     * per bucket, because {@code RemoteLogManager.stopReplica} deletes the dropped
+     * table's remote log segments from the remote store (Cloudflare R2 here, ~100 ms
+     * per round trip). A create-then-use sequence can therefore spend its whole
+     * request budget on {@code NotLeaderOrFollower} without anything being wrong with
+     * the request path. The step under test is that path on a table that exists, not
+     * the cluster's placement latency, so the fixture is waited for here: bounded,
+     * logged, and asserting nothing.
+     *
+     * <p>The probe must be idempotent — it is re-run until it stops throwing.
+     *
+     * @param what         what is being waited for (log line and failure message)
+     * @param budgetMillis wall-clock bound; exceeding it fails the test loudly
+     * @param step         the idempotent probe
+     */
+    static void awaitReady(String what, long budgetMillis, ThrowingRunnable step) throws Exception {
+        long deadline = System.nanoTime() + budgetMillis * 1_000_000L;
+        for (int attempt = 1; ; attempt++) {
+            try {
+                step.run();
+                System.out.printf("[await] %s ready after %d attempt(s)%n", what, attempt);
+                return;
+            } catch (Exception e) {
+                if (System.nanoTime() > deadline) {
+                    throw new IllegalStateException(what + " not ready within " + budgetMillis
+                            + "ms (" + attempt + " attempt(s)); last failure: " + e, e);
+                }
+                Thread.sleep(500);
+            }
+        }
+    }
+
+    /** A probe step that may fail; see {@link #awaitReady}. */
+    @FunctionalInterface
+    interface ThrowingRunnable {
+        void run() throws Exception;
+    }
+
     static void createFills(Admin admin, String db) throws Exception {
         Schema s = Schema.newBuilder()
                 .column("postback_event_id", DataTypes.STRING())
