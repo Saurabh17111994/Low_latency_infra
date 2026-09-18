@@ -59,11 +59,15 @@ class FlussProjectionWriterIntegrationTest {
         String db = "proj_" + Long.toHexString(System.nanoTime());
         Connection conn = null;
         Admin admin = null;
+        // Set when a write never landed: the scratch DB must then be KEPT (see the probe below).
+        boolean keepScratch = false;
         try {
             Configuration c = new Configuration();
             c.setString("bootstrap.servers", bootstrap);
             conn = ConnectionFactory.createConnection(c);
             admin = conn.getAdmin();
+            // Effectively final alias: the readiness probes below are lambdas.
+            final Connection probeConn = conn;
             admin.createDatabase(db, DatabaseDescriptor.EMPTY, false)
                     .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
 
@@ -74,6 +78,14 @@ class FlussProjectionWriterIntegrationTest {
             createOrderCorrelation(admin, db);
             createExecutionAudit(admin, db);
 
+            // Fixture readiness, not the step under test: the six tables were created
+            // milliseconds ago, and the coordinator places a fresh replica only once the
+            // previous churn's teardown backlog has drained (see awaitReady). Without this
+            // the first write can spend its whole 2 s production budget on
+            // NotLeaderOrFollower and leave a PENDING record in the writer's Sender.
+            awaitReady("projection fixture " + db, FIXTURE_READY_BUDGET_MS,
+                    () -> readString(probeConn, db, "Positions", new String[]{"await-probe"}, 0));
+
             NormalizedExecutionEvent e = event("pb-proj-1");
             try (FlussProjectionWriter writer = FlussProjectionWriter.open(config(bootstrap, db))) {
                 writer.writeAudit(e);
@@ -82,6 +94,25 @@ class FlussProjectionWriterIntegrationTest {
                 // Re-drive the same event: upsert-by-key must stay idempotent (single rows).
                 writer.writePosition(e);
                 writer.writeLifecycle(e);
+            }
+
+            // The writes must have LANDED before the scratch DB is dropped. Fluss 0.9.1's
+            // TableWriter has no close() (see FlussHandlePool), so a record left pending in a
+            // writer's Sender spins forever against a table that no longer exists — the storm
+            // measured on 2026-09-18 that starved this cluster and then blocked this very test
+            // in Connection.close(). If the row never becomes visible, keep the DB and fail
+            // loudly instead of dropping it under a pending write.
+            try {
+                awaitReady("projection writes landed in " + db, FIXTURE_READY_BUDGET_MS,
+                        () -> {
+                            if (readString(probeConn, db, "Positions",
+                                    new String[]{"pos-proj-1"}, 0) == null) {
+                                throw new IllegalStateException("Positions row not visible yet");
+                            }
+                        });
+            } catch (Exception notLanded) {
+                keepScratch = true;
+                throw notLanded;
             }
 
             // KV read-back via Lookuper on the live cluster.
@@ -104,7 +135,11 @@ class FlussProjectionWriterIntegrationTest {
             assertThat(readString(conn, db, "Positions",
                     new String[]{"pos-proj-1"}, 12)).isEqualTo("pb-proj-1");
         } finally {
-            if (admin != null) {
+            if (keepScratch) {
+                System.out.println("projection: KEPT scratch DB " + db
+                        + " — a write never landed; dropping it would spin an unclosable"
+                        + " writer's Sender against a table that no longer exists");
+            } else if (admin != null) {
                 // cascade=true: the scratch DB holds tables, and a non-cascading
                 // drop throws DatabaseNotEmptyException — swallowed below, which
                 // leaked the database on every run.
@@ -198,6 +233,9 @@ class FlussProjectionWriterIntegrationTest {
     }
 
     /* ---- scratch DDL mirrors (column order == FlussProjectionWriter row order) ---- */
+
+    /** Fixture readiness bound for the drill classes that call {@link #awaitReady}. */
+    static final long FIXTURE_READY_BUDGET_MS = 240_000L;
 
     /**
      * Waits until a fixture created moments ago can actually serve a request.

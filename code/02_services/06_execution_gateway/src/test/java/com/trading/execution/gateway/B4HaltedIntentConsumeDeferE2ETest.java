@@ -4,11 +4,13 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import com.trading.common.schema.ownership.ExecutionGateColumns;
+import com.trading.common.schema.fluss.WriteAwait;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
@@ -44,6 +46,14 @@ import org.junit.jupiter.api.Test;
 @Tag("integration")
 class B4HaltedIntentConsumeDeferE2ETest {
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
+
+    /**
+     * Fixture readiness bound: the five tables are created milliseconds before the
+     * append, and the coordinator places a fresh replica only after the previous
+     * churn's teardown backlog drains (see
+     * {@link FlussProjectionWriterIntegrationTest#awaitReady}).
+     */
+    private static final long FIXTURE_READY_BUDGET_MS = 240_000L;
     private static final String ACCOUNT = "b4halt-acct";
     private static final String PARTITION = "b4halt-part";
     private static final String HALTED_REASON_FENCE =
@@ -59,6 +69,12 @@ class B4HaltedIntentConsumeDeferE2ETest {
             String db = "b4_halted_" + System.nanoTime();
             Configuration conf = new Configuration();
             conf.setString("bootstrap.servers", bootstrap);
+            // Set when the intent append never resolved. The scratch DB must then be KEPT:
+            // dropping it leaves the writer's Sender retrying a record whose table no longer
+            // exists — the busy loop that produced 115k metadata errors on 2026-09-18,
+            // starved every other request on the cluster, and then blocked this test in
+            // Connection.close() until its preemptive guard fired.
+            boolean keepScratch = false;
             try (Connection conn = ConnectionFactory.createConnection(conf);
                  Admin admin = conn.getAdmin()) {
                 admin.createDatabase(db, DatabaseDescriptor.EMPTY, false)
@@ -69,6 +85,12 @@ class B4HaltedIntentConsumeDeferE2ETest {
                     createExecutionGate(admin, conn, db);   // EMPTY — gate not ENABLED
                     createAttempts(admin, conn, db);        // EMPTY — nothing may land here
                     createOrderLifecycle(admin, conn, db);  // EMPTY
+                    // Fixture readiness, not the step under test: the five tables were created
+                    // milliseconds ago, and the coordinator places a fresh replica only once
+                    // the previous churn's teardown backlog has drained (see awaitReady).
+                    FlussProjectionWriterIntegrationTest.awaitReady(
+                            "b4 halted fixture " + db, FIXTURE_READY_BUDGET_MS,
+                            () -> tableRowCount(conn, db, "Execution_Intent"));
                     GatewayConfig config = config(db);
                     GatewayReadiness readiness = new GatewayReadiness();
 
@@ -76,68 +98,85 @@ class B4HaltedIntentConsumeDeferE2ETest {
                         NautilusIntentClient sink = new NautilusIntentClient(config, controls, readiness);
 
                         // 1. An immutable intent row is already in the LOG (as the signal job writes it).
-                        Table table = conn.getTable(TablePath.of(db, "Execution_Intent"));
                         String id = "halt-instr-0001";
                         String hash = "aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabb";
-                        AppendWriter w = table.newAppend().createWriter();
-                        w.append(intentRow(id, hash))
-                                .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-                        w.flush();
+                        // The table handle is closed before the scratch DB is dropped, and the
+                        // append is required to resolve (see keepScratch). Fluss 0.9.1's
+                        // TableWriter has no close() (FlussHandlePool javadoc), so an abandoned
+                        // writer whose record never resolved keeps a Sender retrying against a
+                        // table that no longer exists — the storm this guard exists to prevent.
+                        try (Table table = conn.getTable(TablePath.of(db, "Execution_Intent"))) {
+                            AppendWriter w = table.newAppend().createWriter();
+                            WriteAwait.State append = WriteAwait.await(
+                                    w.append(intentRow(id, hash)), "intent append to " + db, TIMEOUT);
+                            keepScratch = append == WriteAwait.State.UNRESOLVED;
+                            assertThat(append)
+                                    .as("the intent append must resolve; when it cannot, the"
+                                            + " scratch DB is kept instead of being dropped"
+                                            + " under a pending write")
+                                    .isEqualTo(WriteAwait.State.RESOLVED);
 
-                        // 2. The real reader runs the real consume path.
-                        List<String> violations = new ArrayList<>();
-                        try (IntentReader reader = IntentReader.open(
-                                config, sink, violations::add)) {
-                            reader.subscribeFromBeginning();
-                            int accepted = 0;
-                            for (int i = 0; i < 40; i++) {
-                                accepted += reader.poll(Duration.ofMillis(250));
-                                if (accepted > 0) break;
+                            // 2. The real reader runs the real consume path.
+                            List<String> violations = new ArrayList<>();
+                            try (IntentReader reader = IntentReader.open(
+                                    config, sink, violations::add)) {
+                                reader.subscribeFromBeginning();
+                                int accepted = 0;
+                                for (int i = 0; i < 40; i++) {
+                                    accepted += reader.poll(Duration.ofMillis(250));
+                                    if (accepted > 0) break;
+                                }
+                                // HALTED wall: the intent is consumed but NEVER handed off.
+                                assertThat(accepted)
+                                        .as("a HALTED gate must hand off nothing")
+                                        .isZero();
+                                assertThat(violations).as("valid intent must not violate")
+                                        .isEmpty();
                             }
-                            // HALTED wall: the intent is consumed but NEVER handed off.
-                            assertThat(accepted)
-                                    .as("a HALTED gate must hand off nothing")
-                                    .isZero();
-                            assertThat(violations).as("valid intent must not violate")
-                                    .isEmpty();
+
+                            // 3. The fail-closed observable state (readiness contract).
+                            GatewayReadiness.Snapshot snap = readiness.snapshot();
+                            assertThat(snap.protocolReady())
+                                    .as("no durable fence token -> protocol not ready")
+                                    .isFalse();
+                            assertThat(snap.flussReady())
+                                    .as("gate lookup did not find an ENABLED row")
+                                    .isFalse();
+                            assertThat(snap.executionReady())
+                                    .as("gate HALTED means execution not ready")
+                                    .isFalse();
+
+                            // 4. Forward() itself must answer DEFERRED (direct contract).
+                            assertThat(sink.forward(IntentReader.decode(intentRow(id, hash), 0L)))
+                                    .isEqualTo(IntentSink.Result.DEFERRED);
+
+                            // 5. No execution side effects anywhere:
+                            //    Execution_Attempts empty, Order_Lifecycle empty,
+                            //    intent NOT marked processed (stays replayable).
+                            assertThat(tableRowCount(conn, db, "Execution_Attempts"))
+                                    .as("no Execution_Attempts while HALTED").isZero();
+                            assertThat(tableRowCount(conn, db, "Order_Lifecycle"))
+                                    .as("no Order_Lifecycle while HALTED").isZero();
+                            assertThat(durableRecord(conn, db, id))
+                                    .as("DEFERRED intents must not be committed as processed")
+                                    .isNull();
                         }
-
-                        // 3. The fail-closed observable state (readiness contract).
-                        GatewayReadiness.Snapshot snap = readiness.snapshot();
-                        assertThat(snap.protocolReady())
-                                .as("no durable fence token -> protocol not ready")
-                                .isFalse();
-                        assertThat(snap.flussReady())
-                                .as("gate lookup did not find an ENABLED row")
-                                .isFalse();
-                        assertThat(snap.executionReady())
-                                .as("gate HALTED means execution not ready")
-                                .isFalse();
-
-                        // 4. Forward() itself must answer DEFERRED (direct contract).
-                        assertThat(sink.forward(IntentReader.decode(intentRow(id, hash), 0L)))
-                                .isEqualTo(IntentSink.Result.DEFERRED);
-
-                        // 5. No execution side effects anywhere:
-                        //    Execution_Attempts empty, Order_Lifecycle empty,
-                        //    intent NOT marked processed (stays replayable).
-                        assertThat(tableRowCount(conn, db, "Execution_Attempts"))
-                                .as("no Execution_Attempts while HALTED").isZero();
-                        assertThat(tableRowCount(conn, db, "Order_Lifecycle"))
-                                .as("no Order_Lifecycle while HALTED").isZero();
-                        assertThat(durableRecord(conn, db, id))
-                                .as("DEFERRED intents must not be committed as processed")
-                                .isNull();
                     }
                 } finally {
-                    try {
-                        // cascade=true: the scratch DB holds tables, and a
-                        // non-cascading drop throws DatabaseNotEmptyException —
-                        // swallowed below, which leaked the DB on every run.
-                        admin.dropDatabase(db, false, true)
-                                .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-                    } catch (Exception ignored) {
-                        // best-effort scratch cleanup
+                    if (keepScratch) {
+                        System.out.println("b4-halted: KEPT scratch DB " + db
+                                + " — its intent append never resolved; dropping it would spin"
+                                + " the writer's Sender against a table that no longer exists");
+                    } else {
+                        try {
+                            // cascade=true: the scratch DB holds tables, and a
+                            // non-cascading drop throws DatabaseNotEmptyException —
+                            // swallowed below, which leaked the DB on every run.
+                            admin.dropDatabase(db, false, true)
+                                    .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                        } catch (Exception ignored) {
+                            // best-effort scratch cleanup
+                        }
                     }
                 }
             }
