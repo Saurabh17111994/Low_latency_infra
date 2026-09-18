@@ -90,6 +90,18 @@ The previous single-axis status vocabulary (`Draft`, `Design-ready`, `Implementa
 
 > **E4 note (2026-08-21, CHG-078):** this table is the single `Current readiness` truth for the laptop-now cut. Live-money stays `Blocked` for every row until E5 single-operator (Saurabh, DEC-044) sign-off. `Production runtime` honest `Not-implemented/Untested` — requires the VM era (`D1→D7`). No row is claimed `Production-validated` on a laptop.
 
+> **Gate state (2026-09-18 — later than the rows above, so re-measure before quoting).** The gate is
+> **19 steps**, and the standing certificate is run 6: `GATE RESULT: PASS — 19/19 verified, 0 skipped`
+> at `HEAD 24d8c59f`, in `logs/soak/monday-gates-20260918-163105/`. **No certificate covers the
+> current HEAD** — it stands 13 commits ahead of the certified tree, 7 of which touch the scripts,
+> tests and Makefile the gate executes. Measure rather than assume:
+> `git log --oneline 24d8c59f..HEAD` and
+> `git log --oneline 24d8c59f..HEAD -- code/01_platform/04_scripts tests Makefile`.
+> The per-change loop is `make gate-fast` (T0, ~4 min); a `make gate --steps …` subset run prints
+> `SUBSET RESULT` and **never** certifies. The certification-hygiene batch closed on that subset
+> evidence by decision (option B, `825e2dc5`) rather than by running the hour. The `13/13` rows
+> above quote the 13-step era and stay historical.
+
 ## Mandatory implementation order
 
 1. Approve documentation governance and cross-cutting invariants.
