@@ -11,8 +11,11 @@
 #   Fluss: 0.9.1-incubating | Flink: 2.2.1 | Java: 17.0.19 | Python: 3.11.9
 #   OpenObserve: v0.91.5-amd64 (public.ecr.aws/zinclabs/openobserve)
 #
-# Last updated: 2026-09-15 (P6-140: the four local-build image IDs re-pinned
-#   to their full 64-hex form — they carried 12-hex truncations)
+# Last updated: 2026-09-18 (waves 36-38: INGESTION_IMAGE + EXECUTION_GATEWAY_IMAGE re-pinned
+#   after their rebuild — those two modules' code changed; nautilus and execution-bridge
+#   were unchanged and still match)
+# Previous: 2026-09-15 (P6-140: the four local-build image IDs re-pinned to their full
+#   64-hex form — they carried 12-hex truncations)
 
 # ---- Container image versions (semantic tags; fill digests before production) ----
 FLUSS_IMAGE=apache/fluss:0.9.1-incubating@sha256:65f5513b33dde10ace4f8adb3956f17226a2a1e2663f92b3096e4769b0ee1d1c
@@ -36,7 +39,7 @@ OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64@sha256:9e3da
 # Freshness (does the image contain the current sources?) is a different check —
 # `make check-image-stale` / image_staleness_check.py, run as a gate step. A pin
 # can match this host and still be a stale build; rebuild before deploying.
-INGESTION_IMAGE=01_docker-ingestion@sha256:91e5247e82db8915962d178de713ff1db0a531426afc6f969cf1c4a09ae9ba13  # local build — image ID (config digest), not a registry manifest
+INGESTION_IMAGE=01_docker-ingestion@sha256:ddf59dc8953d9f38492e3a9ba2401f4980ceeaf5c45ed35559169b60de4bc2ef  # local build — image ID (config digest), not a registry manifest
 # COMPUTE_IMAGE=  # built from code/02_services/02_compute — pin digest
 # EXECUTOR_IMAGE=  # built from code/02_services/04_executor — pin digest
 
@@ -75,4 +78,4 @@ ZOOKEEPER_IMAGE=zookeeper:3.9.2@sha256:43d39109cbd4de394742efbfc162a8a0a93731e80
 # (same convention as INGESTION_IMAGE above: full image ID, not a manifest digest)
 NAUTILUS_IMAGE=01_docker-nautilus@sha256:0a65c5e0514388beaadf5322f8607bc29c352cc0c2bf5664ebfdd659221a0982  # local build — image ID (config digest), not a registry manifest
 EXECUTION_BRIDGE_IMAGE=01_docker-execution-bridge@sha256:84c758d2c6ae302ae3f720d5d3b4d973f34d64cd48000fd5d66f83524203683d  # local build — image ID (config digest), not a registry manifest
-EXECUTION_GATEWAY_IMAGE=01_docker-execution-gateway@sha256:a696252e1d04df3293a4d99c4db1bd616857fc445126c6c149f0080c149e3506  # local build — image ID (config digest), not a registry manifest
+EXECUTION_GATEWAY_IMAGE=01_docker-execution-gateway@sha256:b02b573fdfa90b21ff451e230132a65fa0efec34120a4c70f4f8e6b9203f009d  # local build — image ID (config digest), not a registry manifest
