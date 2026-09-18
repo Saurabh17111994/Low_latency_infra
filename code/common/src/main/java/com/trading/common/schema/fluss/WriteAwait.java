@@ -17,6 +17,12 @@
  * batch, so its table must not be dropped. Callers await with a budget, allow
  * exactly one more bounded wait for the SAME future (never re-issuing the
  * write), and drop the table only when the write RESOLVED.
+ *
+ * retry-exempt-file: this class waits on an ALREADY-ISSUED future, which is the
+ * whole point of the rule above. Routing these two awaits through BoundedRetry
+ * would re-issue the write and duplicate the record — the opposite of the rule.
+ * The exemption is file-level, so keep this file single-purpose: a new await
+ * added here is exempt too, and should move to a caller that can retry safely.
  */
 package com.trading.common.schema.fluss;
 
