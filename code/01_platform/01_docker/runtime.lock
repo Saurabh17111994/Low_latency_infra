@@ -11,7 +11,11 @@
 #   Fluss: 0.9.1-incubating | Flink: 2.2.1 | Java: 17.0.19 | Python: 3.11.9
 #   OpenObserve: v0.91.5-amd64 (public.ecr.aws/zinclabs/openobserve)
 #
-# Last updated: 2026-09-18 (waves 36-38: INGESTION_IMAGE + EXECUTION_GATEWAY_IMAGE re-pinned
+# Last updated: 2026-09-18 (CHG-218: the four local-build image IDs are retired as pins and
+#   kept as comments below. `make check-image-stale` owns "is this image current?" by content
+#   stamp; an image ID cannot answer it — a rebuild changes it, and a source change without a
+#   rebuild leaves it untouched.)
+# Previous: 2026-09-18 (waves 36-38: INGESTION_IMAGE + EXECUTION_GATEWAY_IMAGE re-pinned
 #   after their rebuild — those two modules' code changed; nautilus and execution-bridge
 #   were unchanged and still match)
 # Previous: 2026-09-15 (P6-140: the four local-build image IDs re-pinned to their full
@@ -26,20 +30,22 @@ FLINK_IMAGE=flink:2.2.1-scala_2.12-java17@sha256:1934ab4b984d0873ef46825b1140377
 # stale. Re-pin only on unresolvable digest, CVE, or deliberate Flink upgrade
 # with full stack re-verify + change record.
 OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64@sha256:9e3da77459b0b53a2b955fb34ae08ddf01be04b0699a5c1ffefb36bf05ae5644
-# NOTE (2026-09-15, P6-140 re-pin): the four *_IMAGE refs below are locally built
+# RETIRED as pins (2026-09-18, CHG-218): the four *_IMAGE refs below are locally built
 # images (`make images`) that were never pushed, so they have no RepoDigests and no
-# registry manifest digest — the image ID is the only digest that exists, and it is
+# registry manifest digest — the image ID was the only digest that exists, and it is
 # what a build host can verify (docker image inspect <repo>:latest -> .Id).
 # `docker run <repo>@sha256:<image-id>` does NOT resolve: digest resolution goes
-# through RepoDigests/manifests, not the config digest. Treat these four lines as
-# provenance ("which image was tested"), not as a pullable ref; a deploy needs a
-# pushed manifest digest (push, then `digest-pin.sh <image:tag>`). Re-pin after every rebuild:
-#   python3 -m unittest discover -s code/01_platform/04_scripts/tests -p test_pin_check.py
-# names the stale line (test_local_build_pins_match_the_local_images).
-# Freshness (does the image contain the current sources?) is a different check —
-# `make check-image-stale` / image_staleness_check.py, run as a gate step. A pin
-# can match this host and still be a stale build; rebuild before deploying.
-INGESTION_IMAGE=01_docker-ingestion@sha256:ddf59dc8953d9f38492e3a9ba2401f4980ceeaf5c45ed35559169b60de4bc2ef  # local build — image ID (config digest), not a registry manifest
+# through RepoDigests/manifests, not the config digest.
+#
+# Why they are no longer pinned: an image ID cannot answer the question that matters —
+# "does this image contain the sources being certified?" A rebuild from identical sources
+# changes the ID (red on a correct image), while a source change without a rebuild leaves
+# it untouched (green on a stale image). `make check-image-stale` / image_staleness_check.py
+# owns that question with a content stamp (`com.trading.build-stamp`), and gate step 18
+# runs it after the image build. The IDs below are kept for provenance only ("which image
+# was last built here"). A deploy needs a pushed manifest digest: push, then
+# `digest-pin.sh <image:tag>`, and pin THAT on an active line.
+# INGESTION_IMAGE=01_docker-ingestion@sha256:ddf59dc8953d9f38492e3a9ba2401f4980ceeaf5c45ed35559169b60de4bc2ef
 # COMPUTE_IMAGE=  # built from code/02_services/02_compute — pin digest
 # EXECUTOR_IMAGE=  # built from code/02_services/04_executor — pin digest
 
@@ -75,7 +81,8 @@ FLUSS_FLINK_CONNECTOR=fluss-flink-2.2
 
 # ---- Other registry images ----
 ZOOKEEPER_IMAGE=zookeeper:3.9.2@sha256:43d39109cbd4de394742efbfc162a8a0a93731e806374b71f3865f4ef4460a56
-# (same convention as INGESTION_IMAGE above: full image ID, not a manifest digest)
-NAUTILUS_IMAGE=01_docker-nautilus@sha256:0a65c5e0514388beaadf5322f8607bc29c352cc0c2bf5664ebfdd659221a0982  # local build — image ID (config digest), not a registry manifest
-EXECUTION_BRIDGE_IMAGE=01_docker-execution-bridge@sha256:84c758d2c6ae302ae3f720d5d3b4d973f34d64cd48000fd5d66f83524203683d  # local build — image ID (config digest), not a registry manifest
-EXECUTION_GATEWAY_IMAGE=01_docker-execution-gateway@sha256:b02b573fdfa90b21ff451e230132a65fa0efec34120a4c70f4f8e6b9203f009d  # local build — image ID (config digest), not a registry manifest
+# The three local-build IDs that lived here are retired as pins (CHG-218) and kept as
+# comments for provenance — see the note above INGESTION_IMAGE for why.
+# NAUTILUS_IMAGE=01_docker-nautilus@sha256:0a65c5e0514388beaadf5322f8607bc29c352cc0c2bf5664ebfdd659221a0982
+# EXECUTION_BRIDGE_IMAGE=01_docker-execution-bridge@sha256:84c758d2c6ae302ae3f720d5d3b4d973f34d64cd48000fd5d66f83524203683d
+# EXECUTION_GATEWAY_IMAGE=01_docker-execution-gateway@sha256:b02b573fdfa90b21ff451e230132a65fa0efec34120a4c70f4f8e6b9203f009d
