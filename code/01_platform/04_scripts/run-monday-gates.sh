@@ -128,6 +128,27 @@ PY_LOG="$OUT_DIR/python-tests.log"
 ENTRYPOINT_LOG="$OUT_DIR/entrypoint.log"
 IMAGE_LOG="$OUT_DIR/image-staleness.log"
 DRILL_LOG="$OUT_DIR/drill-live.log"
+
+# Drill-owned live classes (2026-09-18). `make drill-live` (step 9) runs exactly
+# these against the live cluster, with FLUSS_BOOTSTRAP set. Steps 14 and 16 are
+# module suites — unit + regression — and must not run them a second time: every
+# one of these classes self-gates on FLUSS_BOOTSTRAP (`assumeTrue(getenv(...))`),
+# so with the gate's bootstrap in the environment they execute again, i.e. a whole
+# second live run on top of the drill's own table churn. On 2026-09-18 that second
+# run of B4 (step 14) waited 420 s on the coordinator's table-deletion backlog,
+# timed out, and its cleanup dropped a scratch DB under a pending write: 628,185
+# storm lines and that step's FAIL (run 4b). Step 9 owns these classes, so the
+# exclusions below are coverage-neutral. test_gate_drill_exclusions.py fails if
+# this list and the Makefile's drill list drift apart, or if a new drill class is
+# left running live in these module suites.
+#
+# They live in this shared region, not above step 14: test_gate_variable_scoping
+# rejects a step that reads a variable assigned inside another step's guard
+# region — `--steps 16` alone would never assign it and would abort.
+DRILL_OWNED_CLASSES_GATEWAY='GatewayFlussIntegrationTest,GatewayFlussDurableReplayIntegrationTest,B4HaltedIntentConsumeDeferE2ETest,GatewayStartupPrewarmTest,FlussProjectionWriterIntegrationTest'
+DRILL_OWNED_CLASSES_COMPUTE='B4SignalIntentE2ETest'
+# A,B -> !A,!B — surefire runs everything else when the list is exclusions only
+surefire_exclude() { printf '!%s' "$(printf '%s' "$1" | sed 's/,/,!/g')"; }
 AUDIT_LOG="$OUT_DIR/full-audit.log"
 DDL_SMOKE_LOG="$OUT_DIR/ddl-smoke.log"
 SCHEMA_PERF_LOG="$OUT_DIR/schema-perf.log"
@@ -856,22 +877,7 @@ echo "PASS: SIGTERM-drain regression (ING-UNIT-023 in-process + ING-UNIT-024 rea
 # approval authority, halt tails and the reader-death pin (P3-064) — ran in no
 # gate step at all. ~40 s offline; it needs no cluster.
 fi
-# Drill-owned live classes (2026-09-18). `make drill-live` (step 9) runs exactly
-# these against the live cluster, with FLUSS_BOOTSTRAP set. Steps 14 and 16 are
-# module suites — unit + regression — and must not run them a second time: every
-# one of these classes self-gates on FLUSS_BOOTSTRAP (`assumeTrue(getenv(...))`),
-# so with the gate's bootstrap in the environment they execute again, i.e. a whole
-# second live run on top of the drill's own table churn. On 2026-09-18 that second
-# run of B4 (step 14) waited 420 s on the coordinator's table-deletion backlog,
-# timed out, and its cleanup dropped a scratch DB under a pending write: 628,185
-# storm lines and this step's FAIL (run 4b). Step 9 owns these classes, so the
-# exclusions below are coverage-neutral. test_gate_drill_exclusions.py fails if
-# this list and the Makefile's drill list drift apart, or if a new drill class is
-# left running live in these module suites.
-DRILL_OWNED_CLASSES_GATEWAY='GatewayFlussIntegrationTest,GatewayFlussDurableReplayIntegrationTest,B4HaltedIntentConsumeDeferE2ETest,GatewayStartupPrewarmTest,FlussProjectionWriterIntegrationTest'
-DRILL_OWNED_CLASSES_COMPUTE='B4SignalIntentE2ETest'
-# A,B -> !A,!B — surefire runs everything else when the list is exclusions only
-surefire_exclude() { printf '!%s' "$(printf '%s' "$1" | sed 's/,/,!/g')"; }
+# the drill-owned exclusions below come from the shared region (DRILL_OWNED_CLASSES_*)
 if step_active 14; then
 echo "=== [14/19] Execution gateway module suite (unit + regression) ===" | tee -a "$SUMMARY"
 if ! (cd "$CODE_DIR" && timeout -k 60 "$JAVA_TIMEOUT_SEC" mvn -o test -pl 02_services/06_execution_gateway \
