@@ -440,8 +440,13 @@ class ExpectedSnapshotIsLive(unittest.TestCase):
         stale = []
         for row in EXPECTED:
             text = (REPO / row.anchor).read_text(encoding="utf-8")
-            if row.literal not in text:
-                stale.append(f"{row.kind} {row.name}: {row.literal!r} gone from {row.anchor}")
+            # The anchor must match the QUOTED declaration. A bare-substring check
+            # let a suffix rename through (`"x"` -> `"x_v2"` still contains `x`),
+            # which is the exact CHG-191 class this suite exists to catch — found
+            # by the Task-8 mutation run (mutation a), 2026-09-17.
+            needle = row.literal if row.literal.startswith('"') else f'"{row.literal}"'
+            if needle not in text:
+                stale.append(f"{row.kind} {row.name}: {needle} gone from {row.anchor}")
         self.assertFalse(
             stale,
             "EXPECTED is stale — the compute source changed under it. Update the row (and "
@@ -543,10 +548,21 @@ class GatedReferencesOptIn(unittest.TestCase):
             text = (SCRIPTS / rel).read_text(encoding="utf-8")
             if not self._is_driver(text):
                 continue
-            if flag not in text:
+            # Executable lines only: a full-line comment "# FLAG=true ..."
+            # documents the contract but opts nothing in. Found by Task 8's
+            # mutation (d) — removing ONLY the export line from
+            # holistic-measure.sh left its L105 comment naming the flag, and
+            # the whole-text search below called that an opt-in.
+            code = "\n".join(ln for ln in text.splitlines()
+                             if not ln.lstrip().startswith("#"))
+            if flag not in code:
                 bad.append(f"{rel}:{lineno}  {token}  needs {flag}=true ({row.condition}) "
                            f"but {rel} never mentions {flag}")
-            elif not re.search(rf"{flag}=(?:\"?true\"?|\$\{{{flag}:-true\}})", text):
+            # Quote-tolerant default expansion: `export FLAG="${FLAG:-true}"`
+            # is the house opt-in form; the old pattern matched neither it nor
+            # anything else in holistic-measure.sh — it passed on the L105
+            # COMMENT until the comment strip above exposed that.
+            elif not re.search(rf"{flag}=(?:\"?(?:true|\$\{{{flag}:-true\}})\"?)", code):
                 bad.append(f"{rel}:{lineno}  {token}  names {flag} but never opts it IN "
                            f"(no {flag}=true / ${{{flag}:-true}})")
         self.assertFalse(
