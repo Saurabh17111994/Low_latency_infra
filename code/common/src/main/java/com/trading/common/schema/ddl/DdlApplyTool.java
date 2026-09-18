@@ -38,11 +38,13 @@ import org.apache.fluss.metadata.Schema;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
+import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypeRoot;
+import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.CloseableIterator;
 
@@ -98,6 +100,24 @@ public final class DdlApplyTool {
             .enable(SerializationFeature.INDENT_OUTPUT);
 
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
+
+    /**
+     * Bound on waiting for this run's scratch replica teardown to drain (see
+     * {@link #drainScratchTeardown}). Measured on the live dev cluster: ~1.5 s of server-side
+     * pacing per bucket, and a full apply drops ~54 scratch tables (~540 buckets) — so a healthy
+     * drain is on the order of 10-15 min, and the budget only bites when the cluster has stopped
+     * placing replicas altogether.
+     */
+    private static final Duration DRAIN_BUDGET = Duration.ofMinutes(25);
+
+    /**
+     * The drain probe: the cheapest table that still needs a replica placement (1 bucket, no
+     * primary key, so the append path carries no key-encoder edge cases).
+     */
+    private static final TableDescriptor DRAIN_CANARY_DESCRIPTOR = TableDescriptor.builder()
+            .schema(Schema.newBuilder().column("probe", DataTypes.STRING()).build())
+            .distributedBy(1, "probe")
+            .build();
 
     /** Bound on waiting for a partitioned table's auto-created partitions (normally well under 1s). */
     private static final Duration AUTO_PARTITION_WAIT = Duration.ofSeconds(30);
@@ -367,6 +387,11 @@ public final class DdlApplyTool {
 
             // Step 4 — apply in deterministic order.
             List<String> created = new ArrayList<>();
+            // Replica churn this run creates: every dropped scratch table (the prefixed real
+            // tables AND the smoke twins) leaves its buckets queued for teardown, and a table
+            // created while that queue runs cannot get its replica placed — so the drain at the
+            // end of this block counts BOTH halves and waits for the whole queue.
+            int scratchDropped = 0;
             try {
                 for (int i = 0; i < ordered.size(); i++) {
                     SchemaManifestEntry entry = ordered.get(i);
@@ -424,7 +449,9 @@ public final class DdlApplyTool {
                                         + " (LOG rows are undeletable; do NOT use on "
                                         + "consumer-bearing catalogs)");
                             } else {
-                                dropIfExists(admin, smokeName);
+                                if (dropIfExists(admin, smokeName)) {
+                                    scratchDropped++;
+                                }
                                 admin.createTable(TablePath.of("default", smokeName),
                                         DdlText.toDescriptor(ddl), false)
                                         .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
@@ -453,7 +480,9 @@ public final class DdlApplyTool {
                                             + " — smoke write never resolved; a pending batch would"
                                             + " spin the client Sender if it were dropped");
                                 } else {
-                                    dropIfExists(admin, smokeName);
+                                    if (dropIfExists(admin, smokeName)) {
+                                        scratchDropped++;
+                                    }
                                 }
                             }
                         }
@@ -467,12 +496,16 @@ public final class DdlApplyTool {
                             admin.dropTable(TablePath.of("default", name), false)
                                     .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
                             System.out.println("ddl-apply: dropped scratch table " + name);
+                            scratchDropped++;
                         } catch (Exception e) {
                             System.err.println("ddl-apply: drop " + name + " failed: "
                                     + e.getMessage());
                         }
                     }
                 }
+            }
+            if (scratchDropped > 0) {
+                drainScratchTeardown(connection, admin, opts.prefix, scratchDropped);
             }
 
             // Step 8 — evidence record. Status honors the composite-PK matrix:
@@ -1095,16 +1128,86 @@ public final class DdlApplyTool {
         return (prefix == null ? "" : prefix) + "smoke_twin_" + logicalName;
     }
 
-    /** Drop a table, swallowing only not-exist (leftover hygiene). */
-    private static void dropIfExists(Admin admin, String name) {
+    /**
+     * Drop a table, swallowing only not-exist (leftover hygiene). Returns true when a table was
+     * actually dropped — callers use that to count the replica churn they created.
+     */
+    private static boolean dropIfExists(Admin admin, String name) {
         try {
             admin.dropTable(TablePath.of("default", name), false)
                     .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
             System.out.println("ddl-apply: dropped " + name);
+            return true;
         } catch (Exception e) {
             if (e.getMessage() == null || !e.getMessage().toLowerCase().contains("not exist")) {
                 System.err.println("ddl-apply: drop " + name + " failed: " + e.getMessage());
             }
+            return false;
+        }
+    }
+
+    /**
+     * Waits, bounded, until the cluster can place a fresh replica again — i.e. until the scratch
+     * twins dropped above are fully torn down.
+     *
+     * <p>WHY (measured 2026-09-18, live single-tablet cluster): a dropped table's buckets are torn
+     * down one at a time, ~1.5 s apart, with only ~65 ms of actual tablet work per bucket
+     * (~0.65 buckets/s — the rest is the remote-log cleanup step, whose remote store here is
+     * Cloudflare R2). While that queue drains the coordinator does not bring up new replicas: a
+     * table created right after an apply had no replica for 8 minutes (table created 05:41:57, the
+     * tablet only attempted its replica at 05:49:48 — by then the caller had given up and dropped
+     * it, so the attempt died with SchemaNotExistException). Every phase after the apply inherited
+     * that backlog — one stalled append even reached a production store's 412 s retry budget — and
+     * the tablet's request channel hit its backpressure threshold (queue 70 vs limit 62). Writes to
+     * tables that already have their replica stay at ~100 ms throughout, so this is placement-only:
+     * the apply is the churn source, so it waits its own backlog out instead of passing it on.
+     *
+     * <p>The probe is deliberately the same operation the next phase needs (create → append → drop
+     * a 1-bucket table): it resolves exactly when placement works again, so a drained cluster costs
+     * ~2 s. On budget expiry the canary is KEPT — its write may still hold a batch, and dropping a
+     * table under a pending batch spins the client Sender (see {@link WriteAwait}) — and the run
+     * says so loudly.
+     */
+    private static void drainScratchTeardown(Connection connection, Admin admin, String prefix,
+            int scratchDropped) {
+        String canary = smokeTwinName(prefix, "drain_canary");
+        long startNanos = System.nanoTime();
+        System.out.println("ddl-apply: " + scratchDropped + " scratch table(s) dropped — waiting"
+                + " until the cluster can place a fresh replica again (probe " + canary + ", budget "
+                + DRAIN_BUDGET.toMinutes() + "m; teardown runs ~1.5 s per bucket)");
+        try {
+            dropIfExists(admin, canary);
+            admin.createTable(TablePath.of("default", canary), DRAIN_CANARY_DESCRIPTOR, false)
+                    .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            AppendWriter writer = connection.getTable(TablePath.of("default", canary))
+                    .newAppend().createWriter();
+            Future<?> probe = writer.append(GenericRow.of(BinaryString.fromString("drain")));
+            long deadline = startNanos + DRAIN_BUDGET.toNanos();
+            while (true) {
+                try {
+                    probe.get(30, TimeUnit.SECONDS);
+                    break;
+                } catch (java.util.concurrent.TimeoutException stillPending) {
+                    if (System.nanoTime() >= deadline) {
+                        System.out.println("ddl-apply: WARN scratch teardown did NOT drain within "
+                                + DRAIN_BUDGET.toMinutes() + "m (canary " + canary + " KEPT — its"
+                                + " write may still hold a batch); later phases will see slow"
+                                + " fresh-table placement");
+                        return;
+                    }
+                    System.out.println("ddl-apply: still draining after "
+                            + (System.nanoTime() - startNanos) / 1_000_000_000L
+                            + "s — the cluster cannot place a fresh replica yet; waiting");
+                }
+            }
+            if (dropIfExists(admin, canary)) {
+                System.out.println("ddl-apply: scratch teardown drained after "
+                        + (System.nanoTime() - startNanos) / 1_000_000_000L
+                        + "s — fresh replicas place again");
+            }
+        } catch (Exception e) {
+            System.out.println("ddl-apply: WARN scratch teardown drain probe failed ("
+                    + e.getMessage() + ") — continuing; later phases may see slow placement");
         }
     }
 
