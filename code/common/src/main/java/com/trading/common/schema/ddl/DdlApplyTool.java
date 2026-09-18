@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.trading.common.schema.SchemaManifest;
 import com.trading.common.schema.SchemaManifestEntry;
 import com.trading.common.schema.fluss.CompositeKeyMatrixVerifier;
+import com.trading.common.schema.fluss.WriteAwait;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -412,6 +413,10 @@ public final class DdlApplyTool {
                         // same descriptor and dropped immediately after.
                         String smokeName = opts.allowLiveSmoke ? target
                                 : smokeTwinName(opts.prefix, ordered.get(i).tableName);
+                        // A twin may only be dropped once its smoke write RESOLVED: an unresolved
+                        // write can still hold a pending batch, and dropping the table under it
+                        // makes Fluss's Sender spin on metadata forever (see WriteAwait).
+                        boolean keepTwin = false;
                         try {
                             if (opts.allowLiveSmoke) {
                                 System.out.println("ddl-apply: WARNING --allow-live-smoke: "
@@ -424,14 +429,16 @@ public final class DdlApplyTool {
                                         DdlText.toDescriptor(ddl), false)
                                         .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
                             }
-                            String outcome = smokeRoundTrip(connection, admin, smokeName, ddl);
-                            records.get(i).smoke(outcome);
-                            if (outcome != null && !isKnownLimitation(outcome)) {
-                                failures.add(target + " smoke failed: " + outcome);
+                            SmokeResult result = smokeRoundTrip(connection, admin, smokeName, ddl);
+                            keepTwin = !result.writeResolved();
+                            records.get(i).smoke(result.outcome());
+                            if (result.outcome() != null && !isKnownLimitation(result.outcome())) {
+                                failures.add(target + " smoke failed: " + result.outcome());
                             }
                             System.out.println("ddl-apply: smoke " + target + " via twin "
-                                    + smokeName + " -> " + (outcome == null ? "PASS"
-                                            : isKnownLimitation(outcome) ? "LIMITATION" : "FAIL"));
+                                    + smokeName + " -> " + (result.outcome() == null ? "PASS"
+                                            : isKnownLimitation(result.outcome())
+                                                    ? "LIMITATION" : "FAIL"));
                         } catch (Exception e) {
                             String outcome = e.getMessage() == null
                                     ? e.getClass().getSimpleName() : e.getMessage();
@@ -441,7 +448,13 @@ public final class DdlApplyTool {
                             }
                         } finally {
                             if (!opts.allowLiveSmoke) {
-                                dropIfExists(admin, smokeName);
+                                if (keepTwin) {
+                                    System.out.println("ddl-apply: KEPT twin " + smokeName
+                                            + " — smoke write never resolved; a pending batch would"
+                                            + " spin the client Sender if it were dropped");
+                                } else {
+                                    dropIfExists(admin, smokeName);
+                                }
                             }
                         }
                     }
@@ -806,10 +819,30 @@ public final class DdlApplyTool {
     }
 
     /**
-     * One write + read round trip: LOG append + scan, KV upsert + lookup.
-     * Returns null on PASS, or the reason (a known limitation for composite-PK KV).
+     * A smoke outcome plus whether its write future settled. {@code writeResolved == false} means
+     * a batch may still be pending in the client, so the caller must keep the twin table alive
+     * (dropping it spins Fluss's Sender on metadata — see {@link WriteAwait}).
      */
-    private static String smokeRoundTrip(Connection connection, Admin admin, String name,
+    private record SmokeResult(String outcome, boolean writeResolved) {
+
+        static SmokeResult pass() {
+            return new SmokeResult(null, true);
+        }
+
+        static SmokeResult fail(String outcome) {
+            return new SmokeResult(outcome, true);
+        }
+
+        static SmokeResult unresolvedWrite() {
+            return new SmokeResult("write unresolved (batch may still be pending)", false);
+        }
+    }
+
+    /**
+     * One write + read round trip: LOG append + scan, KV upsert + lookup.
+     * Returns a PASS (null outcome) or the reason (a known limitation for composite-PK KV).
+     */
+    private static SmokeResult smokeRoundTrip(Connection connection, Admin admin, String name,
             DdlText.ParsedDdl ddl) throws Exception {
         Table table = connection.getTable(TablePath.of("default", name));
         // A partitioned table routes on the partition values carried IN the row
@@ -835,17 +868,25 @@ public final class DdlApplyTool {
             // No flush in a finally here (2026-09-11): flush() is unbounded in Fluss
             // 0.9.1 and in that slot masked the bounded get()'s timeout instead of
             // cleaning anything up — see flush_guard.sh.
-            writer.append(GenericRow.of(values)).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            // Bounded await with ONE extra wait on timeout: the write is never re-issued, so a
+            // transiently slow append cannot become a duplicate row (2026-09-18).
+            if (WriteAwait.await(writer.append(GenericRow.of(values)), "LOG append to " + name,
+                    TIMEOUT) == WriteAwait.State.UNRESOLVED) {
+                return SmokeResult.unresolvedWrite();
+            }
             long seen = scanCount(table, info(admin, name),
                     partition == null ? null : partition.getPartitionId());
             if (seen < 1) {
-                return "LOG append not readable back (scan count " + seen + ")";
+                return SmokeResult.fail("LOG append not readable back (scan count " + seen + ")");
             }
-            return null;
+            return SmokeResult.pass();
         }
         UpsertWriter writer = table.newUpsert().createWriter();
-        // Same shape as the LOG branch above — one bounded await, no flush.
-        writer.upsert(GenericRow.of(values)).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        // Same shape as the LOG branch above — bounded await, no flush, no re-issue.
+        if (WriteAwait.await(writer.upsert(GenericRow.of(values)), "KV upsert to " + name,
+                TIMEOUT) == WriteAwait.State.UNRESOLVED) {
+            return SmokeResult.unresolvedWrite();
+        }
         Object[] key = new Object[ddl.primaryKey().size()];
         for (int k = 0; k < ddl.primaryKey().size(); k++) {
             int colIndex = columnIndex(ddl, ddl.primaryKey().get(k));
@@ -855,9 +896,9 @@ public final class DdlApplyTool {
         InternalRow found = lookuper.lookup(GenericRow.of(key))
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow();
         if (found == null) {
-            return "KV upsert not found by primary key lookup";
+            return SmokeResult.fail("KV upsert not found by primary key lookup");
         }
-        return null;
+        return SmokeResult.pass();
     }
 
     private static TableInfo info(Admin admin, String name) throws Exception {

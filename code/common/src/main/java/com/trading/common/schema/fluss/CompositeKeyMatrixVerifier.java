@@ -101,6 +101,9 @@ public final class CompositeKeyMatrixVerifier {
         List<CellResult> cells = new ArrayList<>();
         List<String> deviations = new ArrayList<>();
         List<String> created = new ArrayList<>();
+        // Scratch tables whose write never resolved: dropping one would leave a pending batch
+        // pointing at a vanished table, which spins Fluss's Sender on metadata (see WriteAwait).
+        List<String> keep = new ArrayList<>();
         try {
             for (int i = 0; i < MATRIX.size(); i++) {
                 CellSpec spec = MATRIX.get(i);
@@ -125,6 +128,9 @@ public final class CompositeKeyMatrixVerifier {
                             + "s — retrying once");
                     attempt = runCell(table, timeout);
                 }
+                if (!attempt.writeResolved()) {
+                    keep.add(name);
+                }
                 String outcome = attempt.outcome();
                 boolean matched = spec.matches(outcome);
                 cells.add(new CellResult(spec.label(), spec.bucketKeys(), spec.kvFormatVersion(),
@@ -137,6 +143,11 @@ public final class CompositeKeyMatrixVerifier {
             }
         } finally {
             for (String name : created) {
+                if (keep.contains(name)) {
+                    System.out.println("matrix: KEPT " + name + " — its write never resolved; a"
+                            + " pending batch would spin the client Sender if it were dropped");
+                    continue;
+                }
                 try {
                     admin.dropTable(TablePath.of("default", name), false)
                             .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
@@ -180,7 +191,11 @@ public final class CompositeKeyMatrixVerifier {
      * failure message (never throws) — the caller asserts the expected outcome.
      */
     /** One cell attempt: the recorded outcome plus whether the attempt hit a transport timeout. */
-    private record CellAttempt(String outcome, boolean timedOut) {}
+    /**
+     * @param writeResolved false when the upsert future never settled — the cell's scratch table
+     *     must then be kept alive (see {@link WriteAwait}).
+     */
+    private record CellAttempt(String outcome, boolean timedOut, boolean writeResolved) {}
 
     /**
      * True when any link of the cause chain is a transport timeout
@@ -218,19 +233,23 @@ public final class CompositeKeyMatrixVerifier {
             // and aborted the whole matrix as "matrix verification failed"
             // instead of being recorded as the cell's expected outcome.
             UpsertWriter writer = table.newUpsert().createWriter();
-            writer.upsert(GenericRow.of(
-                            BinaryString.fromString("a"), BinaryString.fromString("b"), 7L))
-                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            if (WriteAwait.await(
+                    writer.upsert(GenericRow.of(
+                            BinaryString.fromString("a"), BinaryString.fromString("b"), 7L)),
+                    "matrix cell upsert",
+                    timeout) == WriteAwait.State.UNRESOLVED) {
+                return new CellAttempt("write unresolved (batch may still be pending)", true, false);
+            }
             Lookuper lookuper = table.newLookup().createLookuper();
             InternalRow found = lookuper.lookup(
                             GenericRow.of(BinaryString.fromString("a"), BinaryString.fromString("b")))
                     .get(timeout.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow();
             if (found == null) {
-                return new CellAttempt("KV upsert not found by composite-PK lookup", false);
+                return new CellAttempt("KV upsert not found by composite-PK lookup", false, true);
             }
             return found.getLong(2) == 7L
-                    ? new CellAttempt("PASS", false)
-                    : new CellAttempt("unexpected value " + found.getLong(2), false);
+                    ? new CellAttempt("PASS", false, true)
+                    : new CellAttempt("unexpected value " + found.getLong(2), false, true);
         } catch (Exception e) {
             StringBuilder chained = new StringBuilder();
             for (Throwable t = e; t != null; t = t.getCause()) {
@@ -240,7 +259,9 @@ public final class CompositeKeyMatrixVerifier {
                     chained.append(t.getClass().getSimpleName()).append(" | ");
                 }
             }
-            return new CellAttempt(chained.toString().split("\n")[0], isTimeout(e));
+            // A throw means the future settled (exceptionally) or the failure happened before the
+            // write was issued — either way no batch is pending, so the table stays droppable.
+            return new CellAttempt(chained.toString().split("\n")[0], isTimeout(e), true);
         }
     }
 }
