@@ -98,3 +98,36 @@ levels could only add "worse", at up to 25 minutes each. Recorded as a deliberat
 - `logs/ddl-bench/phase1/` — timestamped apply log, wall clock, evidence record
 - `logs/ddl-bench/phase2/20260918T160123Z/` — `summary.tsv`, per-apply logs (each with its own drain
   line), per-level memory samples
+
+---
+
+## Addendum (same day, later) — lever B's redundancy proof, and it fails
+
+Section 6 said lever B (share the apply between step 11 and the drill's `DdlSmokeTwinSweepTest`)
+needed "a redundancy proof first". That proof has now been done, and **the lever does not hold in the
+form it was proposed**:
+
+- The drill test `applySmokeRunsOnTwinAndLeavesNoFixtures` does run the same apply **with the smoke
+  enabled**, and it asserts strictly more about *cleanup* (`no prefix tables or smoke twins may remain
+  after the apply`). But it accepts `rc == 0 || rc == 6` and passes `--ack-limitations auto` — i.e. it
+  stays green when a table is only writable *with* an acknowledged limitation.
+- Step 11's **S2 is the gate's only assertion that the smoke passes for all 27 tables with no
+  limitation acknowledged** — the strongest COMPAT-FLUSS-005 evidence in the certificate. Dropping
+  S2's smoke would remove it.
+- The honest form of lever B is therefore a **shift, not a removal**: strengthen the drill test to
+  require `rc == 0` with no acknowledgment (it would then fail whenever a limitation appears, which is
+  the point), and only then skip the smoke in S2. Coverage moves from step 11 to step 9 inside the
+  same run — it is not deleted.
+- Saving, if taken: with `--skip-smoke` a scenario drops 27 scratch tables instead of ~54, so it
+  absorbs roughly half the teardown backlog it must wait out. It is variable by construction — the
+  same 27-table drop drained in 14 s on a quiet cluster and 455 s behind a backlog.
+
+### Where the drift tables come from (found while proving the above)
+
+`DdlSmokeTwinSweepTest.sweepDetectsAndFixesKvOnly` creates `chg100_sweep_log_<nano>` and
+`chg100_sweep_kv_<nano>`. The class drops what it created in an `@AfterAll` cleanup, with a deliberate
+`KEEP` list for a table whose write never resolved (the run-4b rule) and a warning when a drop fails.
+Two tables per run × the two 2026-09-17 runs = exactly the four `chg100_sweep_*` extras in the live
+catalog. The mechanism that leaks them is the one the smoke already has a safety net for and the drill
+does not: **an interrupted JVM never reaches cleanup**. `ddl_apply_smoke.cleanup_prefix` exists for
+its own scenarios; there is no equivalent pass over drill-created tables.
