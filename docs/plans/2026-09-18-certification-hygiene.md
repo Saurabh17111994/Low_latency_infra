@@ -1,6 +1,8 @@
 # Certification hygiene — plan (2026-09-18)
 
-**Status:** proposed — awaiting three decisions (§3: A1/A2, B0/B1, go-ahead).
+**Status:** closed (2026-09-18) — Step 1 and Step 2 shipped; the probe work shipped under
+B0+ instead of B1; Phase 2 and the B1 fixture deferred. **No certifying gate ran for this
+tree** — see §9 for the evidence, the reason, and the consequences.
 **Baseline:** `a77c4927`, tree clean, certificate run 6 green (`GATE RESULT: PASS — 19/19
 verified, 0 skipped`, 51 m 0 s, dir `logs/soak/monday-gates-20260918-163105`).
 **Next free change-record id:** CHG-218.
@@ -66,7 +68,7 @@ from a scratch copy of `27_execution_intent.sql`. It is bounded work, not a shor
 |---|---|
 | 18 `test_*.py` files contain pytest-style tests and no `unittest.TestCase`, so `unittest discover` collects none of them; step 3 runs only `unittest discover`. | measured; `run-monday-gates.sh:603-620` |
 | They are green: `278 passed in 203.82s`, rc=0 (17 passed for the same selection the explicit list gives). | measured 2026-09-18 18:08 |
-| `pytest … -p no:unittest` collects **exactly those 278**, so no file list is needed and the selection cannot go stale. Full collection is 1754 (= 1477 unittest + 278 pytest-only, with a 1-test accounting difference not claimed as equivalence). | measured |
+| `pytest … -p no:unittest` collects **exactly those 278**, so no file list is needed and the selection cannot go stale. Full collection is 1754 (= 1477 unittest + 278 pytest-only, with a 1-test accounting difference not claimed as equivalence); unittest reports 1476 once CHG-218's retirement lands. | measured |
 | Step 3's budget is `PY_TIMEOUT_SEC` default 600, for a suite that needs ~295 s quiet and exceeded 300 s under gate load; failure detection is `grep -q "^OK"` plus no `^FAILED (`; the PASS line carries `Ran N tests`. | `run-monday-gates.sh:603-620` (CHG-199, CHG-201) |
 | pytest 9.0.2 is installed and already used by other Makefile targets. | `python3 -c "import pytest"`; `Makefile:274-296` |
 
@@ -169,6 +171,35 @@ scoping pass plus 1-2 days; not this week, and not bundled with Steps 1-3.
 - No test retired without its redundancy proof recorded in a change record.
 - Each step's verification evidence comes from that step's own run (evidence is never reused
   across runs).
+
+### How the batch actually closed (2026-09-18, option B — no certifying run)
+
+Step 1 (D1 = A1) shipped as `beca9f28` + CHG-218; Step 2 (D3) as `d8d29ffe` + CHG-219; the
+probe work shipped as `2edc8a8b` under **B0+** — an accepted refusal now reports as a skip
+instead of a silent pass — rather than B1's Java fixture, which stays deferred. Phase 2 (§7)
+is untouched.
+
+Evidence, per step, from its own run. **Step 1** — `pin-check` PASS (`OK: 4 image refs all
+digest-pinned`), `test_pin_check.py` 9 tests OK, `make check-image-stale` PASS (8 images
+current), `make gate-fast` green (233 s). **Step 2** — probe suite `Ran 33 tests in 72.595s —
+OK (skipped=5)`, all three skips naming `census read 23 rows but Fluss reports 27`. **Step 3** —
+`bash -n` and `shellcheck -S warning -x` clean; `--steps 3` → `SUBSET RESULT: PASS — 1/1
+verified`, with `PASS: python unit suites (Ran 1476 tests)` and `PASS: python pytest-only
+suites (278 passed)`; `make gate-fast` green — `Ran 1476 tests in 246.490s OK (skipped=11)`,
+`278 passed, 1 skipped, 25 warnings in 205.23s`, `docs-audit: all checks pass`. Docs: the
+stale-claim scanner exits 0 in both `--upstream` (97 LINE-ANNOTATED) and default mode (88).
+
+**The second criterion is deliberately not met.** No certifying `make gate` was run for
+`d8d29ffe`. The standing certificate is run 6, whose preflight recorded `HEAD 24d8c59f` — 8
+commits behind, two of which change what the gate checks (`d8d29ffe` step 3, `beca9f28` step
+17). The gap is accepted because all six components of `gate-fast` were proven green in the
+same hour, and because 40 of a certifying run's 51 minutes are two live steps — the drill
+(23 m 5 s) and the DDL apply smoke (17 m 16 s) — which would re-verify code these commits do
+not touch.
+
+Consequences, stated so they cannot be discovered later: nobody may quote a certificate for
+`d8d29ffe`; the step-3 invoker and the retired pin leg carry subset-level evidence only; the
+next scheduled certification (§7) or any release run must certify this tree or a descendant.
 
 ## 10. Open unknowns
 
