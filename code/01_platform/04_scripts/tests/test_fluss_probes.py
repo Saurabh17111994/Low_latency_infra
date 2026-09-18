@@ -444,23 +444,46 @@ class SignalLatencyContractTests(ProbeTestBase):
         Pre-fix, this mode read 11 rows of Execution_Intent by batch scan while
         the server reports 24 — a batch scan of a bucket returns the bucket's
         first stored SEGMENT, so the total was short and nothing said so.
+
+        Same convention as the orphans leg above: a withheld census is a valid
+        outcome of the check, and the only thing the contract forbids is a total
+        printed from a read that disagreed with the server. The probe cannot
+        always read a LOG table exactly in Fluss 0.9.1 — its own header records
+        the measurement (25 rows by batch, 41 by offset-paged read, 48 by the
+        server's count) — so as Execution_Intent grows, this leg flips to the
+        documented refusal. It must flip the suite green, not red.
         """
         proc = self.run_probe("FlussSignalLatency", ["intents", "Execution_Intent"], timeout=180)
         self.assert_no_classpath_error(self, proc)
-        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
-        rows = re.search(r"\brows=(\d+)", proc.stdout)
-        self.assertIsNotNone(rows, proc.stdout)
-        self.assertGreaterEqual(int(rows.group(1)), 1, proc.stdout)
-        self.assertNotIn("server's own row count disagree", proc.stderr)
+        if proc.returncode == 0:
+            rows = re.search(r"\brows=(\d+)", proc.stdout)
+            self.assertIsNotNone(rows, proc.stdout)
+            self.assertGreaterEqual(int(rows.group(1)), 1, proc.stdout)
+            self.assertNotIn("server's own row count disagree", proc.stderr)
+        else:
+            # A refusal is only acceptable when it names the disagreement with
+            # both figures, and when it withheld the total.
+            self.assertRegex(proc.stderr, r"census read \d+ rows but Fluss reports \d+",
+                             f"a failed census must name both counts:\n{proc.stderr[-2000:]}")
+            self.assertNotIn("rows=", proc.stdout, "a short read must not print a total")
 
     @unittest.skipUnless(_dev_stack_up(), "dev stack (:9123) is not running")
     def test_the_scanned_table_is_the_one_printed(self) -> None:
-        """P6-380/381: a custom table must not be reported under a default name."""
+        """P6-380/381: a custom table must not be reported under a default name.
+
+        A refusal satisfies this too: nothing is reported at all, so no table
+        can be mis-labelled. What must not happen is a table= line printed by a
+        run whose read disagreed with the server.
+        """
         proc = self.run_probe("FlussSignalLatency", ["intents", "Execution_Intent"], timeout=120)
         self.assert_no_classpath_error(self, proc)
-        self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
-        self.assertIn("table=Execution_Intent", proc.stdout)
-        self.assertNotIn("table=Signal_Candidates", proc.stdout)
+        if proc.returncode == 0:
+            self.assertIn("table=Execution_Intent", proc.stdout)
+            self.assertNotIn("table=Signal_Candidates", proc.stdout)
+        else:
+            self.assertRegex(proc.stderr, r"census read \d+ rows but Fluss reports \d+",
+                             f"a failed census must name both counts:\n{proc.stderr[-2000:]}")
+            self.assertNotIn("table=", proc.stdout, "a withheld census must not name a table")
 
 
 class SignalLatencyRedLegTests(ProbeTestBase):
