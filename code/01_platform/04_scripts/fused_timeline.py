@@ -23,11 +23,9 @@ Exit codes: 0 ok; 3 config (no auth/window); 4 O2 query failed (reason);
 import argparse
 import csv
 import datetime as _dt
-import io as _io
 import json
 import os
 import sys
-import time
 import urllib.parse
 import urllib.request
 
@@ -48,17 +46,34 @@ def _o2_get(path, params, auth):
 
 
 def _o2_search(sql, start_s, end_s, auth):
-    body = json.dumps({
-        "query": {"sql": sql,
-                  "start_time": int(start_s) * 1_000_000,
-                  "end_time": int(end_s) * 1_000_000,
-                  "from": 0, "size": 5000}}).encode()
-    req = urllib.request.Request(
-        O2_URL + "/api/default/_search", data=body, method="POST",
-        headers={"Authorization": f"Basic {auth}",
-                 "Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+    """One O2 SQL search, paginated (P6-399).
+
+    The io-latency stream runs at a 2s cadence (~1800 rows/h), so a single
+    `from: 0, size: 5000` page silently dropped the tail of any capture
+    longer than ~2.8h — and the tail of the window is exactly what a run
+    analysis wants. Pages until a short page arrives. MAX_PAGES is a runaway
+    guard (50 x 5000 rows ≈ 139h of io-latency), not a limit a real capture
+    should reach.
+    """
+    page_size, max_pages = 5000, 50
+    hits = []
+    for page in range(max_pages):
+        body = json.dumps({
+            "query": {"sql": sql,
+                      "start_time": int(start_s) * 1_000_000,
+                      "end_time": int(end_s) * 1_000_000,
+                      "from": page * page_size, "size": page_size}}).encode()
+        req = urllib.request.Request(
+            O2_URL + "/api/default/_search", data=body, method="POST",
+            headers={"Authorization": f"Basic {auth}",
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            page_hits = json.loads(
+                resp.read().decode("utf-8", "replace")).get("hits", [])
+        hits.extend(page_hits)
+        if len(page_hits) < page_size:
+            break
+    return {"hits": hits}
 
 
 def _prom_range(query, start_s, end_s, step_s, auth):
@@ -236,7 +251,9 @@ def main():
 
     out_path = args.out or os.path.join(
         args.capture, "stages", "fused-timeline.tsv")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    out_dir = os.path.dirname(out_path)
+    if out_dir:   # P6-739: dirname("fused.tsv") == "" and makedirs("") raises
+        os.makedirs(out_dir, exist_ok=True)
 
     warnings = []
     fused = {}   # epoch -> {col: value}
@@ -246,15 +263,24 @@ def main():
 
     # 1) io-latency stream (2s cadence) — the base grid
     io_rows = 0
-    r = _o2_search(
-        f"SELECT epoch_s, r_await_ms, w_await_ms, aqu_sz, util_pct, "
-        f"r_iops, w_iops, psi_io_some_avg10, psi_mem_some_avg10, "
-        f"psi_cpu_some_avg10, cpu_mhz_avg, mem_avail_mb, cpu_user_pct, "
-        f"cpu_system_pct, cpu_iowait_pct, cpu_idle_pct "
-        f"FROM 'host_io_latency' "
-        f"WHERE device='{DEFAULT_DEVICE}' "
-        f"AND epoch_s >= {start} AND epoch_s <= {end} ORDER BY epoch_s",
-        start - 10, end + 10, auth)
+    try:
+        r = _o2_search(
+            f"SELECT epoch_s, r_await_ms, w_await_ms, aqu_sz, util_pct, "
+            f"r_iops, w_iops, psi_io_some_avg10, psi_mem_some_avg10, "
+            f"psi_cpu_some_avg10, cpu_mhz_avg, mem_avail_mb, cpu_user_pct, "
+            f"cpu_system_pct, cpu_iowait_pct, cpu_idle_pct "
+            f"FROM 'host_io_latency' "
+            f"WHERE device='{DEFAULT_DEVICE}' "
+            f"AND epoch_s >= {start} AND epoch_s <= {end} ORDER BY epoch_s",
+            start - 10, end + 10, auth)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        # The base grid is not optional — without it there is nothing to fuse.
+        # The docstring promises exit 4 for "O2 query failed"; before this the
+        # URLError escaped as a traceback with exit 1 (P6-400).
+        warnings.append(f"host_io_latency: query failed: {str(e)[:120]}")
+        print(f"fused_timeline: O2 query failed (host_io_latency): "
+              f"{str(e)[:200]}", file=sys.stderr)
+        return 4
     for hit in r.get("hits", []):
         try:
             t = int(hit["epoch_s"])
@@ -278,17 +304,25 @@ def main():
 
     # 2) checkpoint events (alignment!) — forward-fill onto grid
     cp_rows = 0
-    r = _o2_search(
-        # NOTE: alignment DURATION / sync_dur / async_dur are NOT exposed
-        # top-level by this Flink version's checkpoint REST JSON (verified
-        # 2026-09-02: only alignment_buffered exists; per-task sync/async
-        # live under tasks{} which history serialization empties). Do not
-        # select them — O2 400s on non-existent fields.
-        "SELECT trigger_timestamp, id, status, end_to_end_duration, "
-        "alignment_buffered, state_size FROM 'flink_checkpoints' "
-        f"WHERE trigger_timestamp >= {start * 1000} "
-        f"AND trigger_timestamp <= {end * 1000} ORDER BY trigger_timestamp",
-        start - 10, end + 10, auth)
+    try:
+        r = _o2_search(
+            # NOTE: alignment DURATION / sync_dur / async_dur are NOT exposed
+            # top-level by this Flink version's checkpoint REST JSON (verified
+            # 2026-09-02: only alignment_buffered exists; per-task sync/async
+            # live under tasks{} which history serialization empties). Do not
+            # select them — O2 400s on non-existent fields.
+            "SELECT trigger_timestamp, id, status, end_to_end_duration, "
+            "alignment_buffered, state_size FROM 'flink_checkpoints' "
+            f"WHERE trigger_timestamp >= {start * 1000} "
+            f"AND trigger_timestamp <= {end * 1000} ORDER BY trigger_timestamp",
+            start - 10, end + 10, auth)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        # Same contract as the base grid: a failed O2 query is exit 4, not a
+        # traceback (P6-400).
+        warnings.append(f"flink_checkpoints: query failed: {str(e)[:120]}")
+        print(f"fused_timeline: O2 query failed (flink_checkpoints): "
+              f"{str(e)[:200]}", file=sys.stderr)
+        return 4
     cp_events = []
     for hit in r.get("hits", []):
         try:
@@ -326,7 +360,10 @@ def main():
         last_val, last_t = None, None
         for g in grid:
             # newest sample at or before g
-            cand = [t for t in by_t if t <= g and (t - g) <= 120]
+            # P6-401: the bound has to be `g - t`. With `t <= g` required
+            # first, the old reversed bound was always true, so a metric
+            # that stopped scraping was forward-filled to the grid's end.
+            cand = [t for t in by_t if t <= g and (g - t) <= 120]
             if cand:
                 best = max(cand)
                 vals = by_t[best]

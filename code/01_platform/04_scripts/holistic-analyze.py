@@ -432,7 +432,10 @@ def collect_rows(table, cp, out_dir, run_ms=30000, with_offset=False):
                            capture_output=True, text=True)
         if r.returncode != 0:
             print(f"!! LogFullRead compile failed for {table}: {r.stderr[:400]}")
-            return []
+            # P6-740: the docstring above promises None so callers fail closed
+            # (the F4 Signal_Candidates guard at the call site tests `is None`).
+            # Returning [] reported a reader failure as "the table is empty".
+            return None
     err_path = os.path.join(out_dir, f"latency-{table}.reader.stderr.log")
     try:
         r = subprocess.run(
@@ -672,8 +675,6 @@ def main():
     if run_start:
         print(f"- run window: [{run_start}, {run_end}] epoch-ms\n")
 
-    ms = lambda v: v  # clarity: all row timestamps are epoch-ms
-
     # ---- previews: UNAVAILABLE after the 2026-09-05 multi-timeframe cutover ----
     # The preview table (feature_candles_15s_preview, DDL 30) was retired with the
     # candle-era schema, and its replacements (candle_live/candle_closed, DDLs
@@ -702,10 +703,14 @@ def main():
         if run_start and not (run_start <= ots <= (run_end or ots)):
             continue
         per_key_ts[(token, ws)].append(ots)
-        buckets_1s.setdefault((ots - (run_start or ots)) // 1000, []).append(ots - lets)
         if ots > last_ts_per_token.get(token, 0):
             last_ts_per_token[token] = ots
         if lets and ots >= lets:
+            # P6-402: with a zero/missing last-event-ts, `ots - lets` is an
+            # epoch-ms "latency" of decades — it then dominated the 1s p95
+            # slices and invented latency bursts. Same guard as e2e_lat.
+            buckets_1s.setdefault((ots - (run_start or ots)) // 1000,
+                                  []).append(ots - lets)
             e2e_lat.append(ots - lets)
 
     # DEDUPE: the Fluss LogScanner re-delivers records across polls
@@ -938,8 +943,10 @@ def main():
     ing_gc = gc_pauses(os.path.join(out_dir, "main", "j1", "gc.log"), "ingestion JVM")
 
     # Latency bursts: 1s slices with p95 > 2000ms
+    # P6-403: indexing an unsorted list at 0.95*len is not a percentile, and
+    # for short slices it reads past the end. Use the helper that sorts first.
     burst_secs = sorted(k for k, v in buckets_1s.items()
-                        if v and v[int(len(v) * 0.95)] > 2000) if buckets_1s else []
+                        if v and pct(v, 95) > 2000) if buckets_1s else []
     print(f"- latency bursts (1s slices with p95>2s): {len(burst_secs)}")
 
     def overlaps(ts_ms, offsets_s, window_ms=3000):
@@ -1356,9 +1363,12 @@ def main():
             for wmax, name, ravg, rmax, wavg, ns, nh in sorted(ranked, reverse=True):
                 print(f"- {name:<12} {ravg:>6.1f} {rmax:>6.1f} {wavg:>6.1f} {wmax:>6.1f} "
                       f"{nh}/{ns:>5}")
-            top = sorted(ranked, reverse=True)[0]
-            print(f"- A2b VERDICT: heaviest writer = '{top[1]}' (max {top[0]:.0f} MB/s) "
-                  f"— {'and its spikes ALIGN with bursts' if top[6] >= max(1, top[5]//2) else 'but spikes do not align with bursts'}")
+            # P6-742: `ranked` stays [] when every io series has <2 samples,
+            # and indexing [0] then aborted the whole analysis.
+            if ranked:
+                top = sorted(ranked, reverse=True)[0]
+                print(f"- A2b VERDICT: heaviest writer = '{top[1]}' (max {top[0]:.0f} MB/s) "
+                      f"— {'and its spikes ALIGN with bursts' if top[6] >= max(1, top[5]//2) else 'but spikes do not align with bursts'}")
         else:
             print("- proc-io.tsv: no parseable samples")
     except OSError:
@@ -1489,7 +1499,11 @@ def main():
         for a, b in zip(tser, tser[1:]):
             dt = b[0] - a[0]
             if dt > 0 and (b[1] - a[1]) / dt / 1e6 > 50:
-                storm.append(b[0] - run_start // 1000)
+                # P6-404: `run_start` is epoch-MILLIseconds (or None) — the old
+                # `run_start // 1000` was a TypeError on None and a unit
+                # mismatch otherwise. L911 already defines the normalised
+                # alias; use it exactly like the block at L1187 does.
+                storm.append(b[0] - run_start_ms // 1000)
         if storm:
             hits = sum(1 for t in storm if near_bursts(t, 12))
             if hits >= max(1, len(storm) // 2):
