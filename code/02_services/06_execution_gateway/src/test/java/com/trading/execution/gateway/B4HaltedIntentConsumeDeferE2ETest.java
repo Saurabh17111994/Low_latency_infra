@@ -45,7 +45,17 @@ import org.junit.jupiter.api.Test;
  *  same env gate as the T2 durable-replay evidence). Scratch DB, dropped at end. */
 @Tag("integration")
 class B4HaltedIntentConsumeDeferE2ETest {
-    private static final Duration TIMEOUT = Duration.ofSeconds(20);
+    /**
+     * Write/await budget. Measured 2026-09-18 in the full drill: under the churn's
+     * teardown backlog the cluster answers NotLeader while a fresh replica finds its
+     * leader, so a write to a table created seconds earlier can take 20-60s to ack —
+     * other writes in that same run resolved on their second wait. {@link
+     * com.trading.common.schema.fluss.WriteAwait} allows exactly one more wait for the
+     * SAME future, so the intent append gets 2x this budget. The assertions are
+     * unchanged: a write that never resolves still fails the run, it just no longer
+     * fails at 40s while the cluster is merely slow.
+     */
+    private static final Duration TIMEOUT = Duration.ofSeconds(45);
 
     /**
      * Fixture readiness bound: the five tables are created milliseconds before the
@@ -65,7 +75,10 @@ class B4HaltedIntentConsumeDeferE2ETest {
         org.junit.jupiter.api.Assumptions.assumeTrue(
                 bootstrap != null && !bootstrap.isBlank(),
                 "set FLUSS_BOOTSTRAP for live B4.2 HALTED-path evidence");
-        assertTimeoutPreemptively(Duration.ofSeconds(120), () -> {
+        // Envelope above the worst legitimate case, not a budget for the step under
+        // test: fixture readiness (FIXTURE_READY_BUDGET_MS) + a write that needs both
+        // of its waits (2x TIMEOUT) + the reader's poll and the scratch cleanup.
+        assertTimeoutPreemptively(Duration.ofSeconds(420), () -> {
             String db = "b4_halted_" + System.nanoTime();
             Configuration conf = new Configuration();
             conf.setString("bootstrap.servers", bootstrap);
