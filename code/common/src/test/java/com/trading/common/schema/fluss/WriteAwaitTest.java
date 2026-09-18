@@ -17,6 +17,17 @@ class WriteAwaitTest {
 
     private static final Duration FAST = Duration.ofMillis(80);
 
+    /**
+     * Budget and resolve time for the late-resolution case. The resolver must land inside the
+     * SECOND wait window ([budget, 2 x budget]) with real margin: it originally completed at
+     * exactly 2 x FAST, i.e. on the deadline, so a loaded machine could report a write
+     * UNRESOLVED that had in fact acked (measured 2026-09-18: 1 failure in the plain suite).
+     * 1000 ms against a 750 ms budget leaves 500 ms of slack before the 1500 ms deadline.
+     */
+    private static final Duration LATE_BUDGET = Duration.ofMillis(750);
+
+    private static final long LATE_RESOLVE_AFTER_MS = 1000L;
+
     @Test
     void completedWriteResolvesImmediately() throws Exception {
         CompletableFuture<String> done = CompletableFuture.completedFuture("ok");
@@ -30,7 +41,7 @@ class WriteAwaitTest {
         CompletableFuture<String> slow = new CompletableFuture<>();
         Thread resolver = new Thread(() -> {
             try {
-                Thread.sleep(FAST.toMillis() * 2);
+                Thread.sleep(LATE_RESOLVE_AFTER_MS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
@@ -38,8 +49,12 @@ class WriteAwaitTest {
         });
         resolver.setDaemon(true);
         resolver.start();
-        assertThat(WriteAwait.await(slow, "upsert to t", FAST))
+        long t0 = System.nanoTime();
+        assertThat(WriteAwait.await(slow, "upsert to t", LATE_BUDGET))
                 .isEqualTo(WriteAwait.State.RESOLVED);
+        // The first wait must have expired unresolved: that is what makes this the "resolved
+        // during the SECOND wait" case rather than a repeat of completedWriteResolvesImmediately.
+        assertThat(Duration.ofNanos(System.nanoTime() - t0)).isGreaterThanOrEqualTo(LATE_BUDGET);
     }
 
     @Test
