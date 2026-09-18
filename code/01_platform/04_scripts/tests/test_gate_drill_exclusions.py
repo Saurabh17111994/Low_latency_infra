@@ -73,6 +73,57 @@ def _module_of(class_name: str) -> str | None:
     return None
 
 
+def _step_blocks(gate: str) -> list[tuple[str, str]]:
+    """[(label, text)] split on the gate's own `=== [N/19] … ===` banners."""
+    banners = list(re.finditer(r'echo "=== \[(\d+)/19\] ([^"]+) ==="', gate))
+    blocks: list[tuple[str, str]] = []
+    for index, banner in enumerate(banners):
+        end = banners[index + 1].start() if index + 1 < len(banners) else len(gate)
+        blocks.append((f"step {banner.group(1)} ({banner.group(2)})", gate[banner.start():end]))
+    return blocks
+
+
+def _joined(block: str) -> str:
+    """The block with line continuations folded, so a wrapped mvn call reads as one line."""
+    return block.replace("\\\n", " ")
+
+
+def _mvn_commands(block: str) -> list[str]:
+    """Every mvn invocation in the block, including whatever precedes it on the command.
+
+    The guard flags do not all sit on the right of ``mvn``: ``env -u FLUSS_BOOTSTRAP``
+    comes before it (the gate's own form in steps 9 and 19), while ``-Dtest=`` comes
+    after. So the window starts at the enclosing subshell/``&&`` and ends at the closing
+    parenthesis — a parse that started at ``mvn`` would call a guarded step unguarded
+    (it did, on the first version of this guard).
+    """
+    joined = _joined(block)
+    commands: list[str] = []
+    for match in re.finditer(r"\bmvn\b", joined):
+        start = max(joined.rfind("(", 0, match.start()), joined.rfind("&&", 0, match.start())) + 1
+        end = joined.find(")", match.start())
+        commands.append(joined[start : end if end != -1 else len(joined)])
+    return commands
+
+
+EXPORT_FLUSS_BOOTSTRAP = re.compile(r"^[ \t]*export FLUSS_BOOTSTRAP[ \t]*$", re.M)
+
+
+def _export_at(gate: str) -> int:
+    """Where step 11 exports FLUSS_BOOTSTRAP — the point every later step inherits from.
+
+    Tab-indented in the script, hence the explicit ``[ \\t]`` classes rather than ``\\s``:
+    this anchor is what makes the guard below mean "after the export".
+    """
+    match = EXPORT_FLUSS_BOOTSTRAP.search(gate)
+    if match is None:
+        raise AssertionError(
+            "run-monday-gates.sh no longer exports FLUSS_BOOTSTRAP — the post-export "
+            "suite guard checks nothing without that anchor; fix the anchor or the guard"
+        )
+    return match.start()
+
+
 class GateDrillExclusionsTest(unittest.TestCase):
     def setUp(self) -> None:
         self.gate = GATE_SCRIPT.read_text("utf-8")
@@ -125,6 +176,58 @@ class GateDrillExclusionsTest(unittest.TestCase):
                     f"{excluded} is excluded from {module} but the drill-live target no "
                     f"longer runs it — it would then run in no gate step at all",
                 )
+
+    def test_the_bootstrap_export_site_is_still_there(self) -> None:
+        # Everything below is "after the export". If step 11 stops exporting, the checks
+        # would quietly stop covering anything — so the anchor itself is asserted.
+        self.assertGreater(_export_at(self.gate), 0)  # raises with why, if it moved
+
+    def test_every_module_suite_after_the_export_is_guarded(self) -> None:
+        """Step 11 exports FLUSS_BOOTSTRAP, and every later step inherits it.
+
+        That is deliberate (the DDL smoke needs it), but it means any module suite that
+        runs afterwards executes every class self-gating on ``FLUSS_BOOTSTRAP`` against
+        the live cluster — the second-run shape that stormed in run 4b (see this file's
+        docstring). Each such suite must therefore either unset it (``env -u``) or name
+        what it runs (``-Dtest=``, including the drill exclusions). Step 19 did neither.
+        """
+        export_at = _export_at(self.gate)
+        checked = 0
+        for label, block in _step_blocks(self.gate):
+            if self.gate.index(block) < export_at:
+                continue  # runs before the export: nothing has leaked in yet
+            for command in _mvn_commands(block):
+                if not re.search(r"\btest\b", command):
+                    continue  # a non-test mvn goal says nothing about live classes
+                checked += 1
+                self.assertTrue(
+                    "env -u FLUSS_BOOTSTRAP" in command or "-Dtest=" in command,
+                    f"{label} runs a module suite with FLUSS_BOOTSTRAP exported from step 11 "
+                    f"and no guard:\n  {command.strip()}\n"
+                    f"A class gated on the bootstrap would run live here, a second time on "
+                    f"top of the drill's own table churn. Add `env -u FLUSS_BOOTSTRAP` or "
+                    f"`-Dtest=…` (drill classes: surefire_exclude).",
+                )
+        # Guards the parser: a rename of the banners would make the loop above vacuous.
+        self.assertGreaterEqual(checked, 5, f"only {checked} mvn test command(s) parsed")
+
+    def test_the_mock_arrow_suite_cannot_need_the_bootstrap(self) -> None:
+        """Step 19 unsets FLUSS_BOOTSTRAP; that must not silently cut live coverage.
+
+        The suite is offline mock-arrow by design, so nothing in it should gate on the
+        bootstrap. If that ever changes, the class belongs in the drill list (and the
+        unset has to be reconsidered) rather than quietly skipping under step 19.
+        """
+        sources = sorted((ROOT / "code/02_services/05_mock_arrow/src/test").rglob("*.java"))
+        self.assertTrue(sources, "mock-arrow has no test sources — check this guard's path")
+        for path in sources:
+            self.assertNotIn(
+                "FLUSS_BOOTSTRAP",
+                path.read_text("utf-8"),
+                f"{path.name} gates on FLUSS_BOOTSTRAP, but step 19 runs with it unset — "
+                f"the leg would skip instead of running; add the class to the drill list "
+                f"and the step's handling, or drop the unset deliberately",
+            )
 
 
 if __name__ == "__main__":  # pragma: no cover

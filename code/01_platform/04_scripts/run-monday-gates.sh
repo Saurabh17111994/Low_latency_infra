@@ -1026,7 +1026,13 @@ fi
 # the suites that depend on it.
 if step_active 19; then
 echo "=== [19/19] mock-arrow broker suite (offline mock used by the gateway/bridge slices) ===" | tee -a "$SUMMARY"
-if ! (cd "$MOCK_ARROW_DIR" && timeout -k 60 "$JAVA_TIMEOUT_SEC" mvn -o test) >"$MOCK_ARROW_LOG" 2>&1; then
+# CHG-222: step 11 exports FLUSS_BOOTSTRAP and every later step inherits it. This suite
+# is offline mock-arrow and nothing in it gates on the bootstrap (the set of such classes
+# is pinned by tests/test_gate_drill_exclusions.py), so the export can only be a trap: a
+# class added later that gates on it would run LIVE here — a second live run on top of
+# the drill's own table churn, which is the shape that stormed in run 4b. Unset it, so
+# step 19 cannot become a live step by accident.
+if ! (cd "$MOCK_ARROW_DIR" && timeout -k 60 "$JAVA_TIMEOUT_SEC" env -u FLUSS_BOOTSTRAP mvn -o test) >"$MOCK_ARROW_LOG" 2>&1; then
 	echo "FAIL: mock-arrow suite — see $MOCK_ARROW_LOG" | tee -a "$SUMMARY"
 	gate_fail
 fi
