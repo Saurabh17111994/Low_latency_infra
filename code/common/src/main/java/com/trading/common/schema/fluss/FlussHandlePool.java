@@ -48,6 +48,7 @@ public final class FlussHandlePool<T> {
     private final Deque<T> idle = new ArrayDeque<>();
     private final AtomicInteger created = new AtomicInteger();
     private final AtomicInteger reused = new AtomicInteger();
+    private volatile boolean closed;
 
     public FlussHandlePool(Supplier<T> factory) {
         this(factory, DEFAULT_MAX_IDLE);
@@ -73,6 +74,10 @@ public final class FlussHandlePool<T> {
     }
 
     public T borrow() {
+        if (closed) {
+            // Fail fast instead of manufacturing handles for a store that is shutting down.
+            throw new IllegalStateException("FlussHandlePool is closed");
+        }
         synchronized (idle) {
             T pooled = idle.pollFirst();
             if (pooled != null) {
@@ -88,6 +93,11 @@ public final class FlussHandlePool<T> {
         if (handle == null) {
             return;
         }
+        if (closed) {
+            // Late return during shutdown: drop it rather than retain it, so no later
+            // borrower can be handed a handle from a closed store (see close()).
+            return;
+        }
         synchronized (idle) {
             if (idle.size() < maxIdle) {
                 idle.addLast(handle);
@@ -96,8 +106,41 @@ public final class FlussHandlePool<T> {
         }
     }
 
-    /** Drop every retained handle. Nothing to close (see the class javadoc) — just release. */
+    /**
+     * Drop every <b>retained</b> handle. A borrowed one is not recalled — see {@link #close()}
+     * for why that cannot be fixed here.
+     */
     public void clear() {
+        synchronized (idle) {
+            idle.clear();
+        }
+    }
+
+    /**
+     * Close the pool: drop retained handles, stop retaining late ones, and refuse further
+     * borrows.
+     *
+     * <p>This is not — and cannot be — a close of the handles themselves. In Fluss 0.9.1 a
+     * {@code TableWriter} exposes only {@code flush()} and a {@code Lookuper} nothing at all,
+     * so there is no lifecycle to end; and a handle whose write is still in flight keeps its
+     * record in the client's sender no matter what happens here. What this does guarantee is
+     * the pool's own half, which is what the stores were reaching for when they called
+     * {@link #clear()} as a stand-in for closing:
+     * <ul>
+     *   <li>no handle stays retained after close;</li>
+     *   <li>a handle returned <i>after</i> close is dropped rather than pooled, so a later
+     *       borrower cannot be handed a handle from a closed store;</li>
+     *   <li>{@link #borrow()} fails fast instead of creating new handles for a store that is
+     *       shutting down.</li>
+     * </ul>
+     *
+     * <p>The record that may still be in flight is explicitly <b>not</b> handled here: no
+     * amount of pool bookkeeping can recall it, which is why the load-bearing guard against
+     * the run-4b storm shape is on the side that decides to drop a table — keep the handle
+     * alive until the write is resolved, rather than trying to close it.
+     */
+    public void close() {
+        closed = true;
         synchronized (idle) {
             idle.clear();
         }

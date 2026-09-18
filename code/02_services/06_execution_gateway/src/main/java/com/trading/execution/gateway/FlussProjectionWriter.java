@@ -408,12 +408,13 @@ public final class FlussProjectionWriter implements ProjectionWriter {
     // P3-288: collect, don't abort — snapshot under concurrency (P3-070),
     // always close the connection, and clear so close is idempotent.
     @Override public void close() throws Exception {
-        // P3-072: drop pooled writers first — TableWriter is not Closeable (only flush()),
-        // so there is nothing to close, but holding them past the table close would leave
-        // dead references behind.
-        appendPools.values().forEach(FlussHandlePool::clear);
+        // P3-072 / CHG-223: close the pools first — TableWriter is not Closeable (only
+        // flush()), so there is nothing to close on the handle itself, but holding them past
+        // the table close would leave dead references behind, and a writer whose call is
+        // still in flight must not be re-pooled for a later borrower.
+        appendPools.values().forEach(FlussHandlePool::close);
         appendPools.clear();
-        upsertPools.values().forEach(FlussHandlePool::clear);
+        upsertPools.values().forEach(FlussHandlePool::close);
         upsertPools.clear();
         Exception failure = null;
         for (Table t : List.copyOf(tables.values())) {

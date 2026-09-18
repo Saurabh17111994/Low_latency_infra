@@ -134,10 +134,12 @@ public final class FlussProjectionLedgerStore implements ProjectionLedgerStore {
     private static Long nullableLong(InternalRow r, int i) { return r.isNullAt(i) ? null : r.getLong(i); }
     // P3-283: collect, don't abort — a table failure must not leak the rest or the connection.
     @Override public void close() throws Exception {
-        // P3-068: drop pooled handles first — nothing to close (Lookuper/TableWriter are not
-        // Closeable), but retaining them past the table close leaves dead references.
-        lookupers.clear();
-        writers.clear();
+        // P3-068 / CHG-223: close the pools first — nothing to close on the handles
+        // (Lookuper/TableWriter are not Closeable), but retaining them past the table close
+        // leaves dead references, and a handle returned after close must not be pooled for a
+        // later borrower.
+        lookupers.close();
+        writers.close();
         Exception first = null;
         try { table.close(); } catch (Exception e) { first = e; }
         try { connection.close(); } catch (Exception e) { if (first == null) first = e; else first.addSuppressed(e); }

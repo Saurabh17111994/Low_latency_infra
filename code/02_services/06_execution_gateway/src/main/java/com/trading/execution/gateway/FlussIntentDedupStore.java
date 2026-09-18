@@ -1,6 +1,7 @@
 package com.trading.execution.gateway;
 
 
+import com.trading.common.schema.fluss.FlussHandlePool;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
@@ -24,6 +25,7 @@ public final class FlussIntentDedupStore implements IntentDedupStore {
     private final Connection connection;
     private final Table table;
     private final Duration timeout;
+    private final FlussHandlePool<UpsertWriter> writerPool;
 
     public static FlussIntentDedupStore open(GatewayConfig config) {
         try {
@@ -47,6 +49,7 @@ public final class FlussIntentDedupStore implements IntentDedupStore {
     }
     FlussIntentDedupStore(Connection connection, Table table, Duration timeout) {
         this.connection = connection; this.table = table; this.timeout = timeout;
+        this.writerPool = new FlussHandlePool<>(() -> table.newUpsert().createWriter());
     }
 
     @Override public Map<String, String> hydrate() throws Exception {
@@ -93,17 +96,27 @@ public final class FlussIntentDedupStore implements IntentDedupStore {
         // instruction_id, so idempotent by construction and safe to repeat. Without retry a
         // single transient timeout here fails the commit, which the reader's violation
         // handler escalates to fail() — latching the whole gateway HALTED until restart.
-        // That is far more disruptive than the transient it reacted to. A fresh writer per
-        // attempt mirrors FlussHandlePool's rule that a failed handle may be poisoned.
-        RequestBudget.run(() -> {
-            UpsertWriter attempt = table.newUpsert().createWriter();
-            attempt.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        // That is far more disruptive than the transient it reacted to.
+        //
+        // CHG-223 (§5.7): the attempt borrows from the shared handle pool instead of creating a
+        // writer per try. A failed attempt's writer is dropped rather than pooled — the pool's
+        // own rule, which is exactly what the old per-attempt creation did implicitly — so a
+        // retry still gets a fresh writer. What changed is what happens to the abandoned one:
+        // it used to leak, taking a Sender with the pending record with it, which is the
+        // run-4b storm shape (a writer that cannot be closed because Fluss 0.9.1 gives it no
+        // close) on the handoff path rather than on the drill's.
+        RequestBudget.run(() -> writerPool.with(writer -> {
+            writer.upsert(row).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             return null;
-        });
+        }));
     }
 
     // P3-280: collect, don't abort — table failure must not leak the connection.
     @Override public void close() throws Exception {
+        // CHG-223: drop the pooled writers first. A borrowed handle is deliberately NOT
+        // recalled — a record already in flight cannot be recalled, and pretending otherwise
+        // is what clear()-as-close did (see FlussHandlePool.close()).
+        writerPool.close();
         try { table.close(); } finally { connection.close(); }
     }
 }

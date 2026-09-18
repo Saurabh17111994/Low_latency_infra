@@ -129,10 +129,11 @@ public final class FlussControlStateStore implements ControlStateStore {
         return value instanceof String s ? BinaryString.fromString(s) : value;
     }
     @Override public void close() throws Exception {
-        // P3-065: drop pooled handles first — nothing to close (Lookuper is not Closeable),
-        // but holding them past the table close would leave dead references behind.
+        // P3-065 / CHG-223: close the pools first — nothing to close on the handle (Lookuper
+        // is not Closeable), but holding them past the table close would leave dead references
+        // behind, and a handle returned after close must not be pooled for a later borrower.
         for (FlussHandlePool<Lookuper> pool : List.copyOf(lookuperPools.values())) {
-            pool.clear();
+            pool.close();
         }
         lookuperPools.clear();
         // P3-066: collect, don't abort — one table failing must not leak the

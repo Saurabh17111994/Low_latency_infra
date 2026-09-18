@@ -82,6 +82,35 @@ class FlussHandlePoolTest {
     }
 
     @Test
+    void closeDrainsRetainedHandlesAndRefusesNewBorrows() throws Exception {
+        FlussHandlePool<Object> pool = new FlussHandlePool<>(Object::new, 4);
+        Object used = pool.with(handle -> handle);
+        assertThat(pool.idleForTest()).isEqualTo(1);
+
+        pool.close();
+
+        assertThat(pool.idleForTest()).as("close drops what was retained").isZero();
+        assertThatThrownBy(pool::borrow)
+                .as("a closed pool must not manufacture handles for a store that is shutting down")
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("closed");
+        assertThat(used).isNotNull();
+    }
+
+    @Test
+    void aHandleReturnedAfterCloseIsDroppedInsteadOfPooled() throws Exception {
+        FlussHandlePool<Object> pool = new FlussHandlePool<>(Object::new, 4);
+        Object inFlight = pool.borrow();
+
+        pool.close();
+        pool.release(inFlight); // the call that was in flight when the store closed
+
+        assertThat(pool.idleForTest())
+                .as("pooling it would hand a closed store's handle to a later borrower")
+                .isZero();
+    }
+
+    @Test
     void concurrentBorrowsNeverHandTheSameHandleToTwoCallers() throws Exception {
         // The property the whole design rests on: these handles are @NotThreadSafe, so even
         // with reuse the pool must never lend one instance to two callers at once.

@@ -68,9 +68,10 @@ public final class FlussPostbackQuarantineStore implements PostbackQuarantineSto
 
     // P3-396: close the Table handle too — connection-only close leaks tablets.
     @Override public void close() throws Exception {
-        // P3-502: drop the pooled writer first — nothing to close (AppendWriter is not
-        // Closeable), but retaining it past the table close leaves a dead reference.
-        appenders.clear();
+        // P3-502 / CHG-223: close the pool first — nothing to close on the handle
+        // (AppendWriter is not Closeable), but retaining it past the table close leaves a dead
+        // reference, and a handle returned after close must not be pooled for a later borrower.
+        appenders.close();
         try { if (table != null) table.close(); }
         finally { connection.close(); }
     }
