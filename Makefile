@@ -208,6 +208,7 @@ drill-live:
 # parsing, provisioning/validation against an in-memory fake client).
 test-audit-r2:
 	python3 -m unittest discover -s code/01_platform/04_scripts/tests -v
+	python3 -m pytest code/01_platform/04_scripts/tests -q -p no:cacheprovider -p no:unittest
 
 # Live regression smoke for the DDL apply exit-code contract (0 full PASS / 6
 # acknowledged PASS_WITH_LIMITATION / 1 refused) + the machine-readable

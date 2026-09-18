@@ -125,6 +125,7 @@ trap '_harness_abort; rm -f "${_script_list:-}"' EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 PY_LOG="$OUT_DIR/python-tests.log"
+PYTEST_LOG="$OUT_DIR/python-pytest.log"
 ENTRYPOINT_LOG="$OUT_DIR/entrypoint.log"
 IMAGE_LOG="$OUT_DIR/image-staleness.log"
 DRILL_LOG="$OUT_DIR/drill-live.log"
@@ -619,6 +620,28 @@ if ! grep -q "^OK" "$PY_LOG" || grep -qE 'Ran 0 tests|^FAILED \(' "$PY_LOG"; the
 	gate_fail
 fi
 echo "PASS: python unit suites ($(grep -oE 'Ran [0-9]+ tests' "$PY_LOG" | head -1 || echo 'all tests'))" | tee -a "$SUMMARY"
+# CHG-219 / plan 2026-09-18 §6: the pytest-style files under tests/ are invisible
+# to unittest's discovery — 18 of them sat outside the certificate entirely until
+# now (measured 2026-09-18: 278 passed in 203.82s, 278 collected, exactly those).
+# `-p no:unittest` turns off pytest's unittest collector, so this selects the
+# pytest-only files without a hand-maintained list that could silently go stale.
+# 420s = ~2x the measured 204s, the same rule PY_TIMEOUT_SEC follows above.
+PYTEST_TIMEOUT_SEC="${PYTEST_TIMEOUT_SEC:-420}"
+if ! timeout -k 60 "$PYTEST_TIMEOUT_SEC" python3 -m pytest "$SCRIPT_DIR/tests" -q \
+	-p no:cacheprovider -p no:unittest >"$PYTEST_LOG" 2>&1; then
+	echo "FAIL: python pytest-only suites — see $PYTEST_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+# pytest exits 5 when it collects nothing, so the rc above already refuses a
+# green zero; the anchored patterns keep test chatter from faking either verdict
+# (the CHG-201 lesson: an unanchored `FAILED` matched mid-line output and failed
+# a green suite). A missing pass count is a failure, not a skip.
+PYTEST_SUMMARY="$(grep -oE '^[0-9]+ passed' "$PYTEST_LOG" | head -1)"
+if [ -z "$PYTEST_SUMMARY" ] || grep -qE '^[0-9]+ (failed|error)|^ERROR ' "$PYTEST_LOG"; then
+	echo "FAIL: python pytest-only suites reported no clean pass count — see $PYTEST_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+echo "PASS: python pytest-only suites ($PYTEST_SUMMARY)" | tee -a "$SUMMARY"
 
 # ── 0d. Entrypoint harness (ING-INT-006) ───────────────────────────────────
 # docker-entrypoint.sh FATAL paths: missing FLUSS_BOOTSTRAP (2), missing
@@ -1029,6 +1052,7 @@ echo "  Compose config: ${COMPOSE_CONFIG_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Docker build smoke: ${DOCKER_BUILD_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  E2E build: ${E2E_BUILD_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Python suites: ${PY_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Python pytest-only suites: ${PYTEST_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Entrypoint: ${ENTRYPOINT_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Go:   ${GO_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Java: ${JAVA_LOG:-not-run}" | tee -a "$SUMMARY"
