@@ -693,6 +693,19 @@ CI must fail for:
 - Secret/redaction failure.
 - Unsupported state/schema compatibility.
 
+### Verification tiers — pick the cheapest tier that can fail for the change
+
+| tier | command | use for | ceiling |
+|---|---|---|---|
+| T0 | `make gate-fast` (add `MODULE=<module>` to also run that module's suite) | every change: `make ddl`, static checks, the R2/parity audit suite, pin discipline, fast image staleness, doc↔code truth (C1–C16) | no live drills, no DDL apply smoke, no full doc audit; prints `GATE-FAST RESULT: subset green` — never a certificate |
+| T1 | one targeted suite: `cd code && mvn -o test -pl <module>` — for a live drill class add `-Pdrill-reports -Dtest=<Class> -Dsurefire.failIfNoSpecifiedTests=false` and `FLUSS_BOOTSTRAP=localhost:9123`. Gateway classes need the reactor form `-pl common,02_services/06_execution_gateway`. | narrowing one failure T0 exposed, and re-verifying exactly that fix | one class/suite; says nothing about the rest of the module |
+| T3 | `make gate` — the 19 steps | per batch, and the **only** run that certifies | ~51 min, clean tree required, cluster must be free |
+
+Escalate T0 → T1 → T3. A failure mode counts as cross-class only once two
+independent targeted runs disagree; otherwise one class is the right scope.
+`run-monday-gates.sh --steps …` is a subset run: its SUMMARY ends in
+`SUBSET RESULT` and it never certifies, however many steps it is given.
+
 ### Definition of done
 
 The test program is complete when every mandatory requirement and P0/P1 audit issue maps to executable evidence, exact versions and environments are recorded, failure tests exercise the actual crash windows, performance campaigns match the workload envelope, and release evidence can be independently reviewed.
