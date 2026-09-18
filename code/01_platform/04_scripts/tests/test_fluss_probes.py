@@ -3,7 +3,7 @@
 
 Two layers, and the difference matters when reading a run:
 
-* hermetic — javac all four probes against the Fluss client on the local Maven
+* hermetic — javac every probe against the Fluss client on the local Maven
   repository, then drive the CLI paths that must fail BEFORE any RPC (bad window,
   unusable token list, zero window_ms) and the failure path that must still print
   the __END__ sentinel (bootstrap pointing at a closed port). These run everywhere
@@ -30,12 +30,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 PROBE_DIR = ROOT / "code/01_platform/04_scripts/fluss-probes"
+# CHG-221: ProbeFixtureSeeder is not a probe, but this list is the only place the
+# probe sources are compiled, and the fixture legs need it on the same classpath.
 PROBES = ["FlussPrefixReader", "FlussReadLagProbe", "FlussKvProbe", "FlussRuleCounter",
-          "FlussSignalLatency"]
+          "FlussSignalLatency", "ProbeFixtureSeeder"]
 INGESTION = ROOT / "code/02_services/01_ingestion"
 BOOTSTRAP = "localhost:9123"
 DEAD = "127.0.0.1:9"          # nothing listens here; connection refused, no wait
 LIVE_TIMEOUT_S = 120
+# The fixture's own names; every expected count is read back from what the seeder
+# printed it wrote (seed_probe_fixture), so drift cannot pass as agreement.
+FIXTURE_INTENT_TABLE = "zz_probe_fixture_intent"
+FIXTURE_SIGNAL_TABLE = "zz_probe_fixture_signal"
 
 
 def _is_row(line: str, cols: int) -> bool:
@@ -130,6 +136,36 @@ class ProbeTestBase(unittest.TestCase):
             test.assertNotIn(marker, proc.stderr,
                              "the probe could not even load its classes — fix the classpath "
                              f"before trusting this assertion:\n{proc.stderr[-2000:]}")
+
+    def seed_probe_fixture(self) -> dict[str, int]:
+        """Create the CHG-221 KV fixtures and register their removal.
+
+        The seeder prints what it wrote; those counts are the expectations the legs
+        compare the probe against, so the fixture is the single source of truth and a
+        drift between the two sides shows up as a mismatch instead of a green.
+
+        Cleanup is registered BEFORE the create call so a half-created fixture is still
+        dropped; both subcommands are idempotent, so that costs nothing.
+        """
+        self.addCleanup(self.drop_probe_fixture)
+        proc = self.run_probe("ProbeFixtureSeeder", ["create", BOOTSTRAP], timeout=180)
+        self.assertEqual(proc.returncode, 0,
+                         f"fixture seeder failed:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
+        # Order-free on purpose: the seeder's line interleaves names and counts
+        # (intent_rows, then signal_table, then signal_rows), so a single pattern
+        # that assumes adjacency reads as "the seeder said nothing" — which is how
+        # the first version of this helper failed.
+        values = dict(re.findall(r"\b(intent_rows|signal_rows|orphan_intents)=(\d+)", proc.stdout))
+        self.assertEqual(sorted(values), ["intent_rows", "orphan_intents", "signal_rows"],
+                         f"the seeder must state what it wrote:\n{proc.stdout[-2000:]}")
+        return {"intent_rows": int(values["intent_rows"]), "signal_rows": int(values["signal_rows"]),
+                "orphans": int(values["orphan_intents"])}
+
+    def drop_probe_fixture(self) -> None:
+        """Remove both fixture tables: one left behind is a count the catalog guard sees."""
+        proc = self.run_probe("ProbeFixtureSeeder", ["drop", BOOTSTRAP], timeout=120)
+        self.assertEqual(proc.returncode, 0,
+                         f"fixture drop failed:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
 
 
 class ProbeCompileTests(ProbeTestBase):
@@ -501,6 +537,63 @@ class SignalLatencyContractTests(ProbeTestBase):
             self.assertNotIn("table=", proc.stdout, "a withheld census must not name a table")
             self.skipTest("census withheld, so no table was reported — " + re.search(
                 r"census read \d+ rows but Fluss reports \d+", proc.stderr).group(0))
+
+    @unittest.skipUnless(_dev_stack_up(), "dev stack (:9123) is not running")
+    def test_a_kv_fixture_census_agrees_with_the_server_row_count(self) -> None:
+        """CHG-221: the agreement the live legs can only refuse, checked for real.
+
+        A paged log read of the live Execution_Intent returns a bucket's first stored
+        segment, so on that table the census always disagrees with the server and the
+        property this file is named for — "the printed total is the server's row count"
+        — went unverified: the leg could only assert the refusal. A KV table reads as
+        an exact snapshot, so a fixture of known size reaches the pass path: exit 0,
+        the exact row count, no refusal. That is what CHG-221 buys, and it is why this
+        leg never skips while the stack is up.
+        """
+        fixture = self.seed_probe_fixture()
+        proc = self.run_probe("FlussSignalLatency", ["intents", FIXTURE_INTENT_TABLE],
+                              timeout=180)
+        self.assert_no_classpath_error(self, proc)
+        self.assertEqual(proc.returncode, 0,
+                         "a KV fixture of known size must agree with the server's count, "
+                         f"not refuse:\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
+        self.assertIn(f"table={FIXTURE_INTENT_TABLE}", proc.stdout)
+        self.assertIn(f"rows={fixture['intent_rows']}", proc.stdout)
+        self.assertIn(f"distinct_candidates={fixture['intent_rows']}", proc.stdout)
+        self.assertIn("duplicate_rows=0", proc.stdout)
+        self.assertNotIn("disagree", proc.stderr,
+                         "the census compared its read against the server and lost")
+
+    @unittest.skipUnless(_dev_stack_up(), "dev stack (:9123) is not running")
+    def test_a_kv_fixture_orphan_census_is_exact(self) -> None:
+        """CHG-221: the two-table join is checked against a known answer, not a range.
+
+        The live orphans leg asserts that both sides are named and skips when the
+        census refuses — it cannot assert a number, because the live tables hold
+        whatever they hold. Here the answer is fixed by the fixture (5 intent ids, 3
+        signal ids, fx-x present only on the signal side), so the leg can assert the
+        count, that the orphan list holds that many DISTINCT ids, and that no id which
+        exists on the signal side was reported as an orphan.
+        """
+        fixture = self.seed_probe_fixture()
+        proc = self.run_probe(
+            "FlussSignalLatency", ["orphans", FIXTURE_INTENT_TABLE, FIXTURE_SIGNAL_TABLE],
+            timeout=180)
+        self.assert_no_classpath_error(self, proc)
+        self.assertEqual(proc.returncode, 0,
+                         f"the fixture census must not refuse:\n{proc.stdout[-2000:]}\n"
+                         f"{proc.stderr[-2000:]}")
+        self.assertIn(f"intent_table={FIXTURE_INTENT_TABLE}", proc.stdout)
+        self.assertIn(f"signal_table={FIXTURE_SIGNAL_TABLE}", proc.stdout)
+        self.assertIn(f"intent_candidates={fixture['intent_rows']}", proc.stdout)
+        self.assertIn(f"signal_candidates={fixture['signal_rows']}", proc.stdout)
+        self.assertIn(f"orphan_intents={fixture['orphans']}", proc.stdout)
+        printed = re.findall(r"^orphan=(\S+)$", proc.stdout, re.MULTILINE)
+        self.assertEqual(len(set(printed)), fixture["orphans"],
+                         f"expected {fixture['orphans']} distinct orphan ids:\n{proc.stdout}")
+        for present_on_the_signal_side in ("fx-a", "fx-b", "fx-x"):
+            self.assertNotIn(f"orphan={present_on_the_signal_side}", proc.stdout,
+                             "an id the signal table holds is not an orphan")
 
 
 class SignalLatencyRedLegTests(ProbeTestBase):

@@ -179,6 +179,17 @@ probe work shipped as `2edc8a8b` under **B0+** — an accepted refusal now repor
 instead of a silent pass — rather than B1's Java fixture, which stays deferred. Phase 2 (§7)
 is untouched.
 
+> **Later the same day — CHG-221 (todo #21).** B1 was built after all, and the fixture needs no
+> new harness: `ProbeFixtureSeeder.java` creates two scratch KV tables (single-field PK,
+> `kv.format-version=2`, tiering off), seeds 5 + 3 rows, and waits until the server's own row
+> count agrees before returning. Two **new** legs in `SignalLatencyContractTests` assert the
+> agreement the live legs can only refuse for; the live refusal legs keep their assertions. §6's
+> design is what shipped, with one difference worth naming: the fixture backs new legs rather
+> than replacing the live refusal coverage. Measured — probe suite `Ran 35 tests in 94.990s —
+> OK (skipped=5)` (the same 5 skips), the fixture census printing `rows=5 distinct_candidates=5
+> duplicate_rows=0` and `orphan_intents=3` with `orphan=fx-c`, `orphan=fx-d`, `orphan=fx-e`, and
+> the catalog verified back at 33 tables afterwards.
+
 Evidence, per step, from its own run. **Step 1** — `pin-check` PASS (`OK: 4 image refs all
 digest-pinned`), `test_pin_check.py` 9 tests OK, `make check-image-stale` PASS (8 images
 current), `make gate-fast` green (233 s). **Step 2** — probe suite `Ran 33 tests in 72.595s —
