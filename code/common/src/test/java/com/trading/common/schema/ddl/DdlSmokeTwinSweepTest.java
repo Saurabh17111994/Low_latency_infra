@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.trading.common.schema.fluss.WriteAwait;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -56,6 +57,16 @@ class DdlSmokeTwinSweepTest {
     private static Admin admin;
     private static final List<String> CREATED = new ArrayList<>();
 
+    /**
+     * Tables whose write never resolved. They must NOT be dropped by {@link #cleanup}: a drop
+     * under a possibly-pending batch makes Fluss's Sender busy-loop on metadata for a table that
+     * no longer exists, which starves every other request on the cluster (measured 2026-09-18:
+     * 81,386 metadata requests in 3 s and ~7 minutes of stalled replica placement for the whole
+     * drill). A kept table is a loud leftover instead of a cluster-wide storm — see
+     * {@code WriteAwait}.
+     */
+    private static final List<String> KEEP = new ArrayList<>();
+
     @BeforeAll
     static void connect() throws Exception {
         bootstrap = System.getenv("FLUSS_BOOTSTRAP");
@@ -76,9 +87,16 @@ class DdlSmokeTwinSweepTest {
     static void cleanup() throws Exception {
         if (admin != null) {
             for (String name : CREATED) {
+                if (KEEP.contains(name)) {
+                    LOG.error("chg-100: KEEPING {} — its write never resolved, and dropping a table"
+                            + " under a possibly-pending batch makes the client Sender busy-loop on"
+                            + " metadata for the whole cluster (see WriteAwait). Drop it by hand"
+                            + " once the write resolves.", name);
+                    continue;
+                }
                 try {
-                    admin.dropTable(TablePath.of("default", name), false)
-                            .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                    awaitCluster(admin.dropTable(TablePath.of("default", name), false),
+                            "drop " + name);
                     LOG.info("chg-100: dropped {}", name);
                 } catch (Exception e) {
                     LOG.warn("chg-100: drop {} failed: {}", name, e.getMessage());
@@ -108,8 +126,7 @@ class DdlSmokeTwinSweepTest {
                 "--ack-limitations", "auto",
         });
         assertTrue(rc == 0 || rc == 6, "apply must PASS (0) or PASS_WITH_LIMITATION (6), got " + rc);
-        List<String> live = admin.listTables("default")
-                .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        List<String> live = awaitCluster(admin.listTables("default"), "listTables after apply");
         List<String> leftovers = live.stream()
                 .filter(n -> n.startsWith(prefix) || n.startsWith("smoke_twin_"))
                 .toList();
@@ -147,10 +164,10 @@ class DdlSmokeTwinSweepTest {
                         + "    'table.log.ttl' = '7d'\n"
                         + ")",
                 "inline-kv");
-        admin.createTable(TablePath.of("default", logName), DdlText.toDescriptor(logDdl), false)
-                .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-        admin.createTable(TablePath.of("default", kvName), DdlText.toDescriptor(kvDdl), false)
-                .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        awaitCluster(admin.createTable(TablePath.of("default", logName),
+                DdlText.toDescriptor(logDdl), false), "create " + logName);
+        awaitCluster(admin.createTable(TablePath.of("default", kvName),
+                DdlText.toDescriptor(kvDdl), false), "create " + kvName);
 
         Table logTable = connection.getTable(TablePath.of("default", logName));
         Table kvTable = connection.getTable(TablePath.of("default", kvName));
@@ -160,23 +177,22 @@ class DdlSmokeTwinSweepTest {
                 BinaryString.fromString("smoke-0"),
                 2L
         };
+        // Bounded awaits with ONE extra wait on timeout (WriteAwait): a write to a freshly created
+        // table can outlive a single 30s budget while the cluster places its replicas. Measured
+        // 2026-09-18: the bare get(30s) below threw, and the unbounded finally-flush that followed
+        // then blocked 435s before the timeout could propagate — the mask-the-timeout shape the
+        // main-source guard (flush_guard.sh) forbids. The acked await IS the visibility guarantee
+        // the flush stood for: if the fixture rows were not visible, the sweep assertions below
+        // fail loudly.
         AppendWriter logWriter = logTable.newAppend().createWriter();
-        try {
-            logWriter.append(GenericRow.of(fixture)).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-            logWriter.append(GenericRow.of(BinaryString.fromString("real_key"), 999L))
-                    .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-        } finally {
-            logWriter.flush();
-        }
+        awaitWrite(logWriter.append(GenericRow.of(fixture)), "sweep LOG fixture append", logName);
+        awaitWrite(logWriter.append(GenericRow.of(BinaryString.fromString("real_key"), 999L)),
+                "sweep LOG real append", logName);
         Object[] kvFixture = {BinaryString.fromString("smoke-0"), 2L};
         Object[] kvReal = {BinaryString.fromString("real_key"), 999L};
         UpsertWriter kvWriter = kvTable.newUpsert().createWriter();
-        try {
-            kvWriter.upsert(GenericRow.of(kvFixture)).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-            kvWriter.upsert(GenericRow.of(kvReal)).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
-        } finally {
-            kvWriter.flush();
-        }
+        awaitWrite(kvWriter.upsert(GenericRow.of(kvFixture)), "sweep KV fixture upsert", kvName);
+        awaitWrite(kvWriter.upsert(GenericRow.of(kvReal)), "sweep KV real upsert", kvName);
 
         int rcReport = DdlApplyTool.sweep(connection, admin,
                 options(new String[] {"--sweep-table", logName, "--sweep-table", kvName}));
@@ -188,16 +204,18 @@ class DdlSmokeTwinSweepTest {
         assertEquals(3, rcFix, "LOG fixture rows are undeletable — exit 3 even after KV fix");
 
         Lookuper lookuper = kvTable.newLookup().createLookuper();
-        assertNull(lookuper.lookup(GenericRow.of(BinaryString.fromString("smoke-0")))
-                        .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow(),
+        assertNull(awaitCluster(
+                        lookuper.lookup(GenericRow.of(BinaryString.fromString("smoke-0"))),
+                        "lookup of the swept KV fixture key").getSingletonRow(),
                 "KV fixture key must be deleted by --sweep-fix-kv");
-        assertNotNull(lookuper.lookup(GenericRow.of(BinaryString.fromString("real_key")))
-                        .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS).getSingletonRow(),
+        assertNotNull(awaitCluster(
+                        lookuper.lookup(GenericRow.of(BinaryString.fromString("real_key"))),
+                        "lookup of the real KV row").getSingletonRow(),
                 "the real KV row must survive the sweep");
 
         // After dropping the LOG table, the same scoped sweep is CLEAN.
-        admin.dropTable(TablePath.of("default", logName), false)
-                .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        awaitCluster(admin.dropTable(TablePath.of("default", logName), false),
+                "drop " + logName);
         CREATED.remove(logName);
         int rcClean = DdlApplyTool.sweep(connection, admin,
                 options(new String[] {"--sweep-table", kvName, "--sweep-fix-kv"}));
@@ -212,6 +230,42 @@ class DdlSmokeTwinSweepTest {
         full.add(bootstrap == null ? "localhost:9123" : bootstrap);
         full.addAll(List.of(args));
         return DdlApplyTool.Options.parse(full.toArray(new String[0]));
+    }
+
+    /**
+     * Bounded write await; fails the test loudly when the write never resolved. A pending batch
+     * must not be followed by a table drop — that spins the client Sender on metadata (WriteAwait).
+     */
+    private static void awaitWrite(java.util.concurrent.CompletableFuture<?> write, String what,
+            String tableName) throws Exception {
+        WriteAwait.State state = WriteAwait.await(write, what, TIMEOUT);
+        if (state != WriteAwait.State.RESOLVED) {
+            // Register the table for KEEPING before the assertion fails: cleanup() must not drop a
+            // table whose batch may still be pending (that is what turns one slow write into a
+            // cluster-wide Sender storm).
+            KEEP.add(tableName);
+        }
+        assertEquals(WriteAwait.State.RESOLVED, state,
+                what + " never resolved — the cluster did not place the table's replica in time");
+    }
+
+    /**
+     * Bounded await for a live-cluster call (metadata or read), with the same single tolerated
+     * slow window as {@link #awaitWrite}. Measured 2026-09-18: such a call can exceed one 30s
+     * budget while the client's connection is congested, while the server answers the same
+     * request in single-digit milliseconds on a fresh connection (see the metadata-latency probe
+     * in the wave notes). Tolerance only — the caller's assertion is unchanged, and a call that
+     * is still unanswered after both windows fails the test loudly.
+     */
+    private static <T> T awaitCluster(java.util.concurrent.CompletableFuture<T> call, String what)
+            throws Exception {
+        try {
+            return call.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException first) {
+            System.out.println("ddl-smoke-test: " + what + " did not answer within "
+                    + TIMEOUT.getSeconds() + "s — waiting once more");
+            return call.get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        }
     }
 
     /** Locate {@code code/01_platform/02_sql/ddl} by walking up from the working directory. */
