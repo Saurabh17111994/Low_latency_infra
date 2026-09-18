@@ -68,7 +68,7 @@ levels could only add "worse", at up to 25 minutes each. Recorded as a deliberat
 | C — run module halves / applies concurrently | ~7 min | parallel applies are unsafe at 2: a metadata read timed out; the cluster reported nothing | **rejected, as measured** |
 | D — shard step 3 (1476 tests) | ~3 min | not measured here | open |
 | E — cache the image builds | ~1 min | already stamped/skipped when nothing changed | keep |
-| F — drop the drain wait on the *last* scenario | — (found here) | after step 11 nothing creates fresh tables (12/13 target existing tables, 14/16/19 are module suites), so that wait protects nothing | **proposed, ~5 min** |
+| F — drop the drain wait on the *last* scenario | — (suggested here, **withdrawn the same day**) | the premise failed: three compute classes that create tables run live in step 16 on the bootstrap step 11 exported (`BabysitterPositionsRestoreIntegrationTest`, `CandleTelemetryOutageIntegrationTest`, `TabletKillChaosIntegrationTest`), and the drill-owned exclusions do not name them. The wait protects that step, so removing it would move the backlog onto them | **withdrawn — premise failed** |
 | G — run the smoke *before* the drill | — (suggested earlier, withdrawn) | total churn is unchanged; the wait would just move to the drill | **withdrawn** |
 
 ## Also found while measuring
@@ -76,6 +76,9 @@ levels could only add "worse", at up to 25 minutes each. Recorded as a deliberat
 - **The catalog-guard's `33/27 … extra tables are drift, not health` is six leaked scratch tables:**
   four `chg100_sweep_*` created 2026-09-17 by the `DdlSmokeTwinSweepTest` drill class, `probe_tbl_1`,
   and a lowercase `signal_candidates`. No DDL file and no code path references any of them.
+  **Resolved later the same day:** all six were dropped with the DDL tool's own
+  `--cleanup-prefix`, and `catalog-guard` now reports `catalog probe: 27/27 tables` →
+  `catalog healthy — nothing to do`.
 - **The tool's safety rule is real and was re-demonstrated:** when the benchmark was killed mid-drain,
   its drain canary was kept while a write could still be pending; its drop timed out once
   (`DdlApplyTool.java:213`) and succeeded about a minute later, after the coordinator's queue drained.
@@ -83,6 +86,14 @@ levels could only add "worse", at up to 25 minutes each. Recorded as a deliberat
 - **Step 11's per-apply evidence is self-erasing:** `logs/ddl-apply` is container-owned, the host cannot
   write it, so the smoke falls back to `/tmp/ddl-apply-smoke-evidence-*` and the certificate keeps only
   the 1 KB summary. That is why run 6 could not be profiled after the fact.
+- **Step 16 runs three live, table-creating compute classes** — `BabysitterPositionsRestoreIntegrationTest`
+  (5 `createTable`/`TablePath.of` sites), `CandleTelemetryOutageIntegrationTest` (8) and
+  `TabletKillChaosIntegrationTest` (1) — because step 11 exports `FLUSS_BOOTSTRAP` and step 16 excludes
+  only the drill-owned class (`B4SignalIntentE2ETest`). The CHG-222 guard checks each post-export
+  suite's *shape* (unset the bootstrap, or name the classes it runs); step 16 names classes, so the
+  guard cannot see this. It differs from the drill-owned instances in an important way: these three are
+  not in `make drill-live` either, so excluding them from step 16 would mean they run in no gate step
+  at all — the fix is a decision, not a one-line exclusion.
 
 ## Not measured / open
 

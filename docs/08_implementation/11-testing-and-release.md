@@ -706,6 +706,22 @@ independent targeted runs disagree; otherwise one class is the right scope.
 `run-monday-gates.sh --steps …` is a subset run: its SUMMARY ends in
 `SUBSET RESULT` and it never certifies, however many steps it is given.
 
+### When the certificate has to be re-earned (decided 2026-09-18)
+
+A certifying `make gate` runs **on request — and always before any release claim, and after any
+change that alters what the gate executes** (a step's command, environment, timeouts, exclusions,
+the pin set, or any suite the gate runs). It is deliberately not a schedule: a weekly run over an
+unchanged tree re-proves exactly the same thing, while a run *after* a gate change is the one that
+matters, because until then the standing certificate describes a gate that no longer exists.
+
+- A change to a test the gate runs, or to a gate step, makes the standing certificate stale the
+  moment it lands — that is the trigger, not the calendar.
+- The certificate names its tree (`PREFLIGHT: PASS (HEAD …)`), so "certified" is always a statement
+  about a commit, never about the repository at large.
+- A subset (`--steps`) or a sweep never counts, however green; only the no-argument run does.
+- Batch gate-affecting changes before the run (T3 is per batch): one hour then covers all of them,
+  and each unbatched change buys its own hour.
+
 ### Definition of done
 
 The test program is complete when every mandatory requirement and P0/P1 audit issue maps to executable evidence, exact versions and environments are recorded, failure tests exercise the actual crash windows, performance campaigns match the workload envelope, and release evidence can be independently reviewed.
