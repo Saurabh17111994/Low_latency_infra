@@ -15,11 +15,12 @@ ingestion service reads the following credentials at runtime:
 | `arrow_user_id` | Go bridge (autologin) | `ARROW_USER_ID` |
 | `arrow_password` | Go bridge (autologin) | `ARROW_PASSWORD` |
 | `arrow_totp_key` | Go bridge (autologin TOTP) | `ARROW_TOTP_KEY` |
-| `arrow_token` | Go bridge (pre-generated token) | `ARROW_TOKEN` |
 | `fluss_bootstrap` | Java writers (coordinator) | `FLUSS_BOOTSTRAP` (not a secret, but pinned) |
 
-If `ARROW_TOKEN` is present it is used directly; otherwise autologin
-(`ARROW_USER_ID` + `ARROW_PASSWORD` + `ARROW_TOTP_KEY`) is attempted.
+Autologin (`ARROW_USER_ID` + `ARROW_PASSWORD` + `ARROW_TOTP_KEY`) is the only
+supported path. Since 2026-08-24 `IngestionConfig` rejects a non-blank
+`ARROW_TOKEN` outright, so do not create that secret or export that variable —
+ingestion fails config validation before it connects.
 
 ## Sequence
 
@@ -31,7 +32,6 @@ docker secret create arrow_app_secret <(printf '%s' "<app-secret>")
 docker secret create arrow_user_id    <(printf '%s' "<user-id>")
 docker secret create arrow_password   <(printf '%s' "<password>")
 docker secret create arrow_totp_key   <(printf '%s' "<totp-key>")
-docker secret create arrow_token      <(printf '%s' "<token>")   # optional; skips autologin
 ```
 
 Never pass secrets on a shell command line visible to `ps` — use the
@@ -49,7 +49,6 @@ services:
       - arrow_user_id
       - arrow_password
       - arrow_totp_key
-      - arrow_token
     environment:
       # non-secret config only
       FLUSS_BOOTSTRAP: "fluss-coordinator:9123"
@@ -64,7 +63,6 @@ secrets:
   arrow_user_id:    { external: true }
   arrow_password:   { external: true }
   arrow_totp_key:   { external: true }
-  arrow_token:      { external: true }
 
 configs:
   instruments_1024:
@@ -82,7 +80,6 @@ export ARROW_APP_SECRET="$(cat /run/secrets/arrow_app_secret)"
 export ARROW_USER_ID="${ARROW_USER_ID:-$(cat /run/secrets/arrow_user_id)}"
 export ARROW_PASSWORD="${ARROW_PASSWORD:-$(cat /run/secrets/arrow_password)}"
 export ARROW_TOTP_KEY="${ARROW_TOTP_KEY:-$(cat /run/secrets/arrow_totp_key)}"
-export ARROW_TOKEN="${ARROW_TOKEN:-$(cat /run/secrets/arrow_token)}"
 ```
 
 ### 4. Deploy
