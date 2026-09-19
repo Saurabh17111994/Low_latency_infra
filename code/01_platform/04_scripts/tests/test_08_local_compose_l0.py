@@ -1,9 +1,57 @@
 """L0 Static configuration tests — CONFIG-001..006 — no containers required."""
-import os, re, subprocess, json, unittest
+import re, subprocess, json, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).parents[4]
 COMPOSE = ROOT / "code/01_platform/01_docker/docker-compose.yml"
+
+ENV_FILES = [COMPOSE.parent / ".env", COMPOSE.parent / "secrets.env"]
+# P6-597: keys the local stack cannot work without. The dev compose interpolates
+# them PLAINLY (no ${VAR:?}) on purpose — the rationale is at
+# docker-compose.yml:50-60 (the hard pins broke `compose config` for the
+# documented "copy .env.example to .env" flow) — so this file asserts the VALUE
+# really is supplied by an env file instead of claiming a fail-closed
+# interpolation that does not exist. The fail-closed contract for the Arrow keys
+# lives in the Java SecretGuard, not here.
+REQUIRED_ENV_SECRETS = ["O2_PASSWORD", "ARROW_APP_SECRET", "ARROW_PASSWORD", "ARROW_TOTP_KEY"]
+SECRET_SETTING = re.compile(r"^([A-Z0-9_]*(?:PASSWORD|SECRET|TOKEN)):\s*(.+)$")
+
+def env_values(path):
+    """KEY=VALUE map from a docker env file; {} when the file is absent."""
+    vals = {}
+    p = Path(path)
+    if not p.exists():
+        return vals
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        vals[k.strip()] = v.strip()
+    return vals
+
+def missing_secrets(paths, keys):
+    """Keys that no file in `paths` supplies with a non-empty value."""
+    have = {}
+    for p in paths:
+        have.update(env_values(p))
+    return [k for k in keys if not have.get(k)]
+
+def literal_secret_settings(text):
+    """Secret-named compose settings whose value is a literal, not an env reference.
+
+    P6-598: `docker compose config` renders YAML (`KEY: value`), so a scan for
+    `KEY=value` can never fire; this looks at the source settings instead.
+    """
+    bad = []
+    for i, line in enumerate(text.splitlines(), 1):
+        s = line.strip()
+        if s.startswith("#"):
+            continue
+        m = SECRET_SETTING.match(s)
+        if m and "${" not in m.group(2):
+            bad.append((i, s[:70]))
+    return bad
 
 class ConfigL0Test(unittest.TestCase):
     def test_CONFIG_001_compose_syntax_valid(self):
@@ -45,20 +93,32 @@ class ConfigL0Test(unittest.TestCase):
         self.assertIn("CONFIG-003", doc)
 
     def test_CONFIG_004_required_secrets_cannot_silently_default(self):
-        """CONFIG-004: O2_PASSWORD etc must be required (no fake default substituted)."""
+        """CONFIG-004: required secrets come from an env file, never a compose literal."""
         text = COMPOSE.read_text()
-        # O2_PASSWORD and S3 creds are used with :? which fails closed — assert that
-        self.assertIn("O2_PASSWORD", text, "CONFIG-004: O2_PASSWORD not referenced")
-        # check that dependent services use :? or :- with empty sentinel that still fails readiness
-        # at least verify no hard-coded default password appears
+        for key in REQUIRED_ENV_SECRETS:
+            self.assertIn(key, text, f"CONFIG-004: {key} not referenced by the compose")
+        # P6-597: the dev compose interpolates these plainly, so the VALUE has to
+        # exist in an env file — otherwise the container silently receives an empty
+        # password and nothing anywhere fails.
+        gone = missing_secrets(ENV_FILES, REQUIRED_ENV_SECRETS)
+        self.assertEqual(
+            gone, [],
+            f"CONFIG-004: {gone} missing/empty in {[p.name for p in ENV_FILES]} — the dev "
+            f"compose does not fail closed on these; set them in secrets.env",
+        )
         self.assertNotRegex(text, r'O2_PASSWORD.*:-.*password', "CONFIG-004: O2_PASSWORD must not default to a real password")
 
     def test_CONFIG_005_secret_leakage_scan(self):
-        """CONFIG-005: docker compose config must not leak secret values (only var names)."""
+        """CONFIG-005: secrets are referenced by variable, and ARROW_TOKEN stays removed."""
+        text = COMPOSE.read_text()
+        # P6-598: the old scan looked for "ARROW_TOKEN=" inside `compose config`
+        # output, which is YAML (`KEY: value`) — it could never match, so it could
+        # never fail. ARROW_TOKEN was removed 2026-08-24 (TOTP only), so pin its
+        # absence from the compose: that is a real regression guard.
+        self.assertNotIn("ARROW_TOKEN", text, "CONFIG-005: ARROW_TOKEN (removed 2026-08-24) is back in the compose")
+        lits = literal_secret_settings(text)
+        self.assertEqual(lits, [], f"CONFIG-005: secret-named settings with literal values: {lits}")
         out = subprocess.check_output(["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env"),"config"], text=True)
-        # config should contain variable names, not values; check no obvious secret value appears
-        # we can't know values, but we can assert no quoted secret-looking assignment leaks
-        self.assertNotIn("ARROW_TOKEN=", out.replace(" ", ""), "CONFIG-005: raw ARROW_TOKEN assignment leaked")
         # LOG_DIR etc are not secrets — the key is that no production cred file is printed
         self.assertIn("services:", out)
 

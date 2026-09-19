@@ -1,24 +1,50 @@
 """L1 Health + L3 Startup — HEALTH-001..008, START-001..006."""
-import re, json, subprocess, unittest
+import json, subprocess, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).parents[4]
 COMPOSE = ROOT / "code/01_platform/01_docker/docker-compose.yml"
 
 def compose_json(profile="execution-t3"):
-    import json, subprocess
     cmd=["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env")]
     if profile: cmd+=["--profile", profile]
     cmd+=["config","--format","json"]
     return json.loads(subprocess.check_output(cmd, text=True))
 
+
+# P6-805: HEALTH-001's name promises a per-service readiness proof, but the body
+# only asserted presence. Only the host-built services declare a compose
+# healthcheck; Flink's readiness surface is its REST/metrics endpoints (pinned by
+# HEALTH-005/006) and Fluss declares none. Assert the proof each service ACTUALLY
+# has, so a service that loses it (or a new entry in this list) fails loudly.
+READINESS_PROOF = {
+    "ingestion": "healthcheck",
+    "execution-bridge": "healthcheck",
+    "flink-jobmanager": "rest",
+    "flink-taskmanager": "rest",
+}
+
+def readiness_gaps(cfg, proofs=None):
+    """[(service, why)] for entries whose declared readiness proof is missing."""
+    gaps = []
+    for svc, kind in (proofs or READINESS_PROOF).items():
+        s = (cfg.get("services") or {}).get(svc)
+        if s is None:
+            gaps.append((svc, "service missing"))
+        elif kind == "healthcheck" and not s.get("healthcheck"):
+            gaps.append((svc, "no healthcheck declared"))
+        elif kind == "rest":
+            props = (s.get("environment") or {}).get("FLINK_PROPERTIES") or ""
+            if "rest.address" not in props and not s.get("ports"):
+                gaps.append((svc, "no REST/metrics surface"))
+    return gaps
+
 class HealthStartupTest(unittest.TestCase):
     def test_HEALTH_001_all_containers_eventually_healthy(self):
-        """HEALTH-001: every required service must declare a healthcheck or readiness proof."""
+        """HEALTH-001: every required service declares the readiness proof it owns (READINESS_PROOF)."""
         cfg = compose_json("execution-t3")
-        # ingestion, execution-bridge, nautilus, gateway should all have healthcheck or be restarted
-        for svc in ["ingestion","execution-bridge","flink-jobmanager","flink-taskmanager"]:
-            self.assertIn(svc, cfg["services"], f"HEALTH-001: {svc} missing")
+        gaps = readiness_gaps(cfg)
+        self.assertEqual(gaps, [], f"HEALTH-001: readiness proof missing for {gaps}")
 
     def test_HEALTH_002_liveness_vs_readiness(self):
         """HEALTH-002: liveness vs readiness are distinct (doc gate) — check that at least ingestion has readiness file."""
@@ -111,7 +137,7 @@ class HealthStartupTest(unittest.TestCase):
         self.assertNotIn("flink-taskmanager", jm_set, "START-003: JM must not hard-depend on TM")
         tm_deps = cfg["services"]["flink-taskmanager"].get("depends_on") or {}
         tm_set = set(tm_deps.keys()) if isinstance(tm_deps, dict) else set(tm_deps)
-        self.assertIn("flink-jobmanager", tm_set | jm_set | {"flink-jobmanager"}, "START-003: TM or JM wiring missing")
+        self.assertIn("flink-jobmanager", tm_set, "START-003: TM must depend on JM")
 
     def test_START_004_openobserve_unavailable_degrades_not_falsely_ready(self):
         """START-004: O2 down → core trading stays safe; telemetry degradation not false success."""

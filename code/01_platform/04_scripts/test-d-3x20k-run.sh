@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${TEST_D_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 JAR="$ROOT/code/02_services/01_ingestion/target/ingestion.jar"
 BRIDGE_DIR="$ROOT/code/02_services/01_ingestion/go-bridge"
-MANIFEST="${TEST_D_MANIFEST:-$ROOT/../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv}"
+MANIFEST="${TEST_D_MANIFEST:-$ROOT/../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv}"
 preflight() {
   local missing=0 f c
   for f in "$JAR" "$MANIFEST"; do

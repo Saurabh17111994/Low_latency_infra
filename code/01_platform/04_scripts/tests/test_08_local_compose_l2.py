@@ -19,6 +19,38 @@ def compose_json(profile="execution-t3"):
 def compose_json_default():
     return compose_json(profile=None)
 
+# P6-604/P6-605: the documented dev-published ports. `compose config --format
+# json` renders ports as objects ({"published": "9123", "target": 9123}), so the
+# comparison is over (published, target) pairs — note TM maps 9250 -> 9249.
+FLUSS_PORT_ALLOWLIST = {"fluss-coordinator": {("9123", "9123")},
+                        "fluss-tablet": {("9124", "9124")}}
+FLINK_PORT_ALLOWLIST = {"flink-jobmanager": {("8081", "8081"), ("9249", "9249")},
+                        "flink-taskmanager": {("9250", "9249")}}
+
+def service_networks(cfg, name):
+    """Network names of a service (handles the dict and the list YAML form)."""
+    nets = (cfg.get("services", {}).get(name) or {}).get("networks") or {}
+    return set(nets.keys()) if isinstance(nets, dict) else set(nets)
+
+def ports_allowlist(cfg, name):
+    """{(published, target)} published by a service."""
+    out = set()
+    for p in (cfg.get("services", {}).get(name) or {}).get("ports") or []:
+        if isinstance(p, dict):
+            out.add((str(p.get("published")), str(p.get("target"))))
+        else:
+            pub, _, tgt = str(p).partition(":")
+            out.add((pub, tgt or pub))
+    return out
+
+def port_violations(cfg, allowlist):
+    """[(service, unexpected (published, target))] outside the documented allowlist."""
+    bad = []
+    for name, allowed in allowlist.items():
+        for port in sorted(ports_allowlist(cfg, name) - allowed):
+            bad.append((name, port))
+    return bad
+
 class NetworkL2Test(unittest.TestCase):
     def test_NETWORK_001_bridge_only_arrow(self):
         """NETWORK-001 / SEC-003: only go-arrow bridge has arrow-egress."""
@@ -30,6 +62,10 @@ class NetworkL2Test(unittest.TestCase):
             # networks may be dict or list
             net_names = set(nets.keys()) if isinstance(nets, dict) else set(nets)
             self.assertNotIn("arrow-egress", net_names, f"NETWORK-001: {name} must not be on arrow-egress")
+        # P6-806: that loop skips the bridge, so nothing proved the bridge IS
+        # attached — removing arrow-egress from it broke no test.
+        self.assertIn("arrow-egress", service_networks(cfg, "execution-bridge"),
+                      "NETWORK-001: execution-bridge must be on arrow-egress (the order path)")
 
     def test_NETWORK_002_bridge_profile_disabled_by_default(self):
         """NETWORK-002: without execution-t3, bridge is absent."""
@@ -42,7 +78,7 @@ class NetworkL2Test(unittest.TestCase):
         """NETWORK-004 / SEC-005: bridge, gateway, nautilus have no published host port."""
         cfg = compose_json("execution-t3")
         for name in ["execution-bridge","execution-gateway","nautilus"]:
-            svc = cfg["services"].get(name, {})
+            svc = cfg["services"][name]   # P6-807: loud KeyError, never a silent {}
             self.assertFalsy(svc.get("ports"), f"NETWORK-004: {name} must not publish host port, got {svc.get('ports')}")
     def assertFalsy(self, v, msg):
         self.assertFalse(bool(v), msg)
@@ -148,6 +184,9 @@ class NetworkL2Test(unittest.TestCase):
             nets = svc.get("networks") or {}
             net_names = set(nets.keys()) if isinstance(nets, dict) else set(nets)
             self.assertNotIn("arrow-egress", net_names, f"SEC-003: {name} must not be on arrow-egress")
+        # P6-806: same gap as NETWORK-001 — assert the bridge IS attached.
+        self.assertIn("arrow-egress", service_networks(cfg, "execution-bridge"),
+                      "SEC-003: execution-bridge must be the arrow-egress client")
 
     def test_SEC_004_no_arrow_creds_outside_bridge(self):
         """SEC-004 dup NETWORK-008 — source-level check (see NETWORK-008 note)."""
@@ -168,7 +207,7 @@ class NetworkL2Test(unittest.TestCase):
         """SEC-005 dup NETWORK-004."""
         cfg = compose_json("execution-t3")
         for name in ["execution-bridge"]:
-            svc = cfg["services"].get(name, {})
+            svc = cfg["services"][name]   # P6-807: loud KeyError, never a silent {}
             self.assertFalse(bool(svc.get("ports")), f"SEC-005: {name} must not publish host port")
 
     def test_SEC_006_no_fluss_internal_port_exposure(self):
@@ -177,12 +216,14 @@ class NetworkL2Test(unittest.TestCase):
         # fluss is on trading-net only, not arrow-egress; execution-* have no ports
         for name in ["execution-bridge","execution-gateway","nautilus"]:
             self.assertFalse(bool(cfg["services"][name].get("ports")), f"SEC-006: {name} must not publish ports")
-        # fluss ports are dev-published (9123) but marked LOCAL_SERVICE_ONLY in docs — ensure not on arrow-egress
-        for name, svc in cfg["services"].items():
-            nets = svc.get("networks") or {}
-            net_names = set(nets.keys()) if isinstance(nets, dict) else set(nets)
-            if name.startswith("fluss-"):
-                self.assertNotIn("arrow-egress", net_names)
+        # P6-604: the docstring promises the RPC/tablet ports stay inside the
+        # documented dev allowlist, but the body only denied arrow-egress. Pin the
+        # published set (docs 08-local-compose.md marks both LOCAL_SERVICE_ONLY).
+        for name in FLUSS_PORT_ALLOWLIST:
+            self.assertIn(name, cfg["services"], f"SEC-006: {name} missing")
+            self.assertNotIn("arrow-egress", service_networks(cfg, name), f"SEC-006: {name} must not be on arrow-egress")
+        self.assertEqual(port_violations(cfg, FLUSS_PORT_ALLOWLIST), [],
+                         "SEC-006: Fluss host-published ports changed — extend the allowlist deliberately")
 
     def test_SEC_007_no_zookeeper_peer_port_exposure(self):
         """SEC-007: ZK 2181/2888/3888 not beyond local service boundary."""
@@ -203,12 +244,14 @@ class NetworkL2Test(unittest.TestCase):
         cfg = compose_json("execution-t3")
         for name in ["execution-bridge","execution-gateway","nautilus"]:
             self.assertFalse(bool(cfg["services"][name].get("ports")))
-        # Flink ports are on trading-net only
-        for name in ["flink-jobmanager","flink-taskmanager"]:
-            if name in cfg["services"]:
-                nets = cfg["services"][name].get("networks") or {}
-                net_names = set(nets.keys()) if isinstance(nets, dict) else set(nets)
-                self.assertNotIn("arrow-egress", net_names)
+        # P6-605: the docstring says the REST/admin surface stays inside the local
+        # operator boundary, but the body never inspected the ports. Pin the
+        # published set: JM 8081 (REST/UI) + 9249 (metrics), TM 9250 -> 9249.
+        for name in FLINK_PORT_ALLOWLIST:
+            self.assertIn(name, cfg["services"], f"SEC-008: {name} missing")
+            self.assertNotIn("arrow-egress", service_networks(cfg, name), f"SEC-008: {name} must not be on arrow-egress")
+        self.assertEqual(port_violations(cfg, FLINK_PORT_ALLOWLIST), [],
+                         "SEC-008: Flink host-published ports changed — review the exposure deliberately")
 
     def test_SEC_009_no_arrow_rest_external_exposure(self):
         """SEC-009: Arrow REST not exposed beyond bridge."""
@@ -218,6 +261,9 @@ class NetworkL2Test(unittest.TestCase):
                 nets = svc.get("networks") or {}
                 net_names = set(nets.keys()) if isinstance(nets, dict) else set(nets)
                 self.assertNotIn("arrow-egress", net_names, f"SEC-009: {name} must not be on arrow-egress")
+        # P6-806: the same skip-the-bridge loop — assert the sole Arrow client.
+        self.assertIn("arrow-egress", service_networks(cfg, "execution-bridge"),
+                      "SEC-009: execution-bridge must be on arrow-egress")
         # execution services have no ports so HOST cannot bypass gateway
         for name in ["execution-bridge","execution-gateway","nautilus"]:
             self.assertFalse(bool(cfg["services"][name].get("ports")))
