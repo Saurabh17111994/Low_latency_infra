@@ -270,7 +270,19 @@ sudo systemctl restart docker
 ```
 
 **6. Publish and pin** — from the workstation, through a tunnel, so port 5000 never opens to the
-internet:
+internet. One command tags, pushes and digest-resolves the six project-built images and rewrites the
+six image lines in the deploy environment:
+```bash
+ssh -N -L 5000:localhost:5000 <ssh-user>@<vm1-ip> &      # keep running for the pushes
+bash code/01_platform/04_scripts/image-publish.sh \
+     --registry localhost:5000 --env-registry <vm1-ip>:5000 --tag prod \
+     --write-env code/01_platform/01_docker/.env
+```
+`--env-registry` exists because the two addresses differ: the push goes through the tunnel as
+`localhost:5000`, while the deploy environment must carry `<vm1-ip>:5000` — a node resolving
+`localhost` reaches itself, not VM1. The digest is content-addressed, so it is the same either way.
+`--print-map` shows what it will push, `--self-check` verifies the set offline, and it refuses to run
+at all if the registry does not answer. The manual equivalent, image by image:
 ```bash
 ssh -N -L 5000:localhost:5000 <ssh-user>@<vm1-ip> &      # keep running for the pushes
 docker tag  <project-built-image> localhost:5000/<project-built-image>
@@ -284,9 +296,14 @@ Then write the digests into the deploy environment (§6.2) using **`<vm1-ip>:500
 `localhost` — every node resolves `localhost` as itself, and only VM1 hosts the registry. The digest
 itself is identical whichever hostname the push went through.
 
-**Note:** if `digest-pin.sh` refuses a plain-HTTP registry (`buildx imagetools` may), use the digest
-`docker push` printed, or `docker image inspect --format '{{index .RepoDigests 0}}'` on the machine
-that pushed — both are the same manifest digest and need no registry query.
+**Note (measured 2026-09-19 against a local `registry:2` over plain HTTP):** `digest-pin.sh` resolved
+every pushed image with no extra flags, and its value matched the digest `docker push` printed;
+`docker pull <repo>@sha256:<digest>` then succeeded, while a wrong digest failed with "manifest
+unknown". A *remote* plain-HTTP registry still needs the `insecure-registries` entry from step 5 —
+that is a daemon setting, not a resolver limitation. If a resolution ever does fail, use the
+`digest: sha256:…` line `docker push` prints; note that `docker image inspect --format
+'{{json .RepoDigests}}'` records `repo@sha256:…` **without** the tag, so it is unambiguous only while
+that repository holds a single tag.
 
 **Exit:** `docker version` works on each node without `sudo`; `timedatectl` shows a synchronized
 clock; `curl -s http://<vm1-ip>:5000/v2/_catalog` lists the pushed repositories; every image
