@@ -13,6 +13,26 @@ PLATFORM_CONFIG = ROOT / "code/common/src/main/java/com/trading/common/config/Pl
 INGESTION_METRICS = ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/telemetry/OtlpMetricsEmitter.java"
 GATE_RS = ROOT / "code/02_services/04_executor/src/gate.rs"
 
+# P6-611: services allowed to wire Arrow credentials in the compose SOURCE. The
+# rendered config cannot be used for this — every service carries
+# `env_file: secrets.env`, so eight of them render ARROW_* keys (the false-fire
+# already documented in L2's NETWORK-008).
+ARROW_CARRIERS_ALLOWED = {"execution-bridge", "ingestion"}
+
+
+def arrow_env_carriers(path):
+    """{service: [ARROW_* env keys]} explicitly wired in the compose source."""
+    import yaml
+    cfg = yaml.safe_load(Path(path).read_text()) or {}
+    out = {}
+    for name, svc in (cfg.get("services") or {}).items():
+        env = (svc or {}).get("environment") or {}
+        keys = set(env) if isinstance(env, dict) else set(env or [])
+        arrow = sorted(str(k) for k in keys if str(k).startswith("ARROW_"))
+        if arrow:
+            out[name] = arrow
+    return out
+
 
 def compose_text() -> str:
     return COMPOSE.read_text()
@@ -60,12 +80,13 @@ class ObservabilityL9Test(unittest.TestCase):
     def test_OBS_005_ws_reconnect_observable(self):
         """OBS-005: WS reconnect is observable (ingestion reconnect metrics + discontinuity evidence)."""
         # Reconnect evidence is the observable
-        self.assertTrue(
-            (ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/discontinuity/DiscontinuityWriter.java").exists()
-            or (ROOT / "code/02_services/01_ingestion/src/test/java/com/trading/ingestion/discontinuity/ReconnectEpochSequenceTest.java").exists(),
-            "OBS-005: discontinuity/reconnect evidence missing",
-        )
-        self.assertIn("reconnect", (ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/discontinuity/DiscontinuityWriter.java").read_text().lower() if (ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/discontinuity/DiscontinuityWriter.java").exists() else "reconnect")
+        # P6-610: the writer IS the evidence. The old form read it only when it
+        # existed and otherwise fell back to the literal word it then searched for, so
+        # a missing writer passed. Assert the file, then assert on its content.
+        writer = (ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/"
+                  "discontinuity/DiscontinuityWriter.java")
+        self.assertTrue(writer.exists(), "OBS-005: DiscontinuityWriter missing — no reconnect evidence")
+        self.assertIn("reconnect", writer.read_text().lower())
 
     def test_OBS_006_gap_count_observable(self):
         """OBS-006: gap count is observable (ingestion gap detection + metrics)."""
@@ -107,11 +128,14 @@ class ObservabilityL9Test(unittest.TestCase):
         # Mirrors L2 SEC-010 — collector filelog reads JSON logs that must not contain secrets
         spec = (ROOT / "docs/08_implementation/08-local-compose.md").read_text()
         self.assertIn("No secrets in logs", spec)
-        # Compose must not leak ARROW_* outside bridge
-        env_lines = [l for l in compose_text().splitlines() if "ARROW_" in l]
-        for line in env_lines:
-            # only bridge/ingestion may mention ARROW_* (ingestion exception)
-            self.assertTrue(True)  # structural — deeper check is in L2 NETWORK-008
+        # P6-611: the loop that used to sit here asserted True on every line, so it
+        # verified nothing (and nothing at all when the list was empty). Assert the real
+        # property against the compose source; network placement is L2's NETWORK-008.
+        carriers = arrow_env_carriers(COMPOSE)
+        self.assertTrue(carriers, "OBS-011: no service wires ARROW_* — this guard would be checking nothing")
+        outside = sorted(set(carriers) - ARROW_CARRIERS_ALLOWED)
+        self.assertEqual(outside, [],
+                         f"OBS-011: ARROW_* wired outside {sorted(ARROW_CARRIERS_ALLOWED)}: {outside}")
 
     def test_OBS_012_telemetry_failure_not_unsafe(self):
         """OBS-012: telemetry failure does not cause unsafe trading behavior (non-critical path)."""

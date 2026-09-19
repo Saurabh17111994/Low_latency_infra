@@ -1,5 +1,5 @@
 """L6 Streaming + L7 Execution lifecycle — STREAM-001..010, EXEC-001..013."""
-import json, subprocess, unittest, re
+import json, shutil, subprocess, unittest
 from pathlib import Path
 
 ROOT = Path(__file__).parents[4]
@@ -7,7 +7,6 @@ COMPOSE = ROOT / "code/01_platform/01_docker/docker-compose.yml"
 DDL_DIR = ROOT / "code/01_platform/02_sql/ddl"
 
 def compose_json(profile="execution-t3"):
-    import json, subprocess
     cmd=["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env")]
     if profile: cmd+=["--profile", profile]
     cmd+=["config","--format","json"]
@@ -48,8 +47,15 @@ class ExecutionL7Test(unittest.TestCase):
         cfg=compose_json("execution-t3")
         env=cfg["services"]["nautilus"].get("environment") or {}
         self.assertEqual(env.get("EXECUTION_ENABLED"), "false", "EXEC-001: must boot HALTED")
-        # Rust unit tests also prove Gate::new() == HALTED — verify cargo test passes
-        out=subprocess.check_output(["cargo","test","-p","nautilus-execution-service","gate","--","--nocapture"], cwd=str(ROOT / "code/02_services/04_executor"), text=True)
+        # Rust unit tests also prove Gate::new() == HALTED. Fail fast with a named
+        # reason when the toolchain is absent, and cap the run so a hung build cannot
+        # freeze the suite (P6-813).
+        cargo = shutil.which("cargo")
+        self.assertIsNotNone(cargo, "EXEC-001: cargo not on PATH — the Rust gate tests cannot run here")
+        out = subprocess.check_output(
+            [cargo, "test", "-p", "nautilus-execution-service", "gate", "--", "--nocapture"],
+            cwd=str(ROOT / "code/02_services/04_executor"), text=True, timeout=300,
+        )
         self.assertIn("ok", out.lower())
 
     def test_EXEC_002_halted_blocks_order(self):
@@ -167,8 +173,9 @@ class ExecutionL7Test(unittest.TestCase):
     def test_EXEC_013_projection_cannot_mutate_nautilus(self):
         """EXEC-013: direct write to projection does not become authoritative."""
         # Check that projection writer is gateway-owned, not nautilus-owned
-        gw_src=(ROOT / "code/02_services/06_execution_gateway/src/main/java/com/trading/execution/gateway/ProjectionWriter.java").read_text() if (ROOT / "code/02_services/06_execution_gateway/src/main/java/com/trading/execution/gateway/ProjectionWriter.java").exists() else ""
-        self.assertIn("Projection", gw_src or "ProjectionWriter")
+        gw = ROOT / "code/02_services/06_execution_gateway/src/main/java/com/trading/execution/gateway/ProjectionWriter.java"
+        self.assertTrue(gw.exists(), "EXEC-013: gateway-owned ProjectionWriter.java missing")
+        self.assertIn("Projection", gw.read_text())
 
 if __name__ == "__main__":
     unittest.main()

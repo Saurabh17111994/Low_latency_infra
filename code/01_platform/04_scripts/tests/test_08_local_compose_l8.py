@@ -4,6 +4,7 @@ FAIL-001..010 + SAFETY-001 per 08-local-compose.md §L8.
 All tests pass offline (contract checks); live probes degrade to contract-only
 when the execution-t3 stack is not up, so CI without containers stays green.
 """
+import shutil
 import subprocess
 import unittest
 from pathlib import Path
@@ -66,10 +67,15 @@ class FailRestartTest(unittest.TestCase):
         self.assertIn('safety_halt', src)
         self.assertIn('can_execute', src)
         self.assertIn('Halted, ExecState::Reconciling', src)
-        # cargo gate tests prove HALTED invariant — run them
+        # The Rust gate tests prove the HALTED invariant. Run them only when the
+        # toolchain exists, and with a cap, so this module keeps its documented
+        # "CI without containers stays green" promise (P6-608).
+        cargo = shutil.which("cargo")
+        if cargo is None:
+            self.skipTest("cargo not on PATH — contract checks above still ran, no live Rust gate proof")
         out = subprocess.check_output(
-            ["cargo", "test", "-p", "nautilus-execution-service", "gate", "--", "--nocapture"],
-            cwd=str(ROOT / "code/02_services/04_executor"), text=True,
+            [cargo, "test", "-p", "nautilus-execution-service", "gate", "--", "--nocapture"],
+            cwd=str(ROOT / "code/02_services/04_executor"), text=True, timeout=600,
         )
         self.assertIn("ok", out.lower())
         # Compose: nautilus boots HALTED via EXECUTION_ENABLED=false
@@ -79,7 +85,7 @@ class FailRestartTest(unittest.TestCase):
         """FAIL-006: bridge restart / reconnect emits no accidental orders (HALTED blocks)."""
         src = GATE_RS.read_text()
         self.assertIn("can_execute", src)
-        self.assertFalse("HALTED" not in src)
+        self.assertIn("HALTED", src)   # P6-814: stated directly, not as a double negative
         # Go bridge fake exists — reconnect seam
         self.assertTrue((ROOT / "code/02_services/06_execution_bridge/go-bridge").exists())
 
@@ -97,9 +103,11 @@ class FailRestartTest(unittest.TestCase):
         """FAIL-008: fake broker timeout must NOT become FILLED."""
         # Projection treats timeout as UNKNOWN/REQUIRES_RECONCILIATION, never FILLED
         proj = ROOT / "code/02_services/04_executor/src/projection/mod.rs"
-        if proj.exists():
-            src = proj.read_text()
-            self.assertTrue("Unknown" in src or "UNKNOWN" in src or "REQUIRES_RECONCILIATION" in src)
+        # P6-609: an absent contract file is the failure this suite exists to catch,
+        # not a licence to assert nothing.
+        self.assertTrue(proj.exists(), "FAIL-008: projection/mod.rs missing")
+        src = proj.read_text()
+        self.assertTrue("Unknown" in src or "UNKNOWN" in src or "REQUIRES_RECONCILIATION" in src)
 
     def test_FAIL_009_fake_broker_unknown_stays_reconcilable(self):
         """FAIL-009: UNKNOWN after timeout stays reconcilable (no silent drop)."""
@@ -115,8 +123,8 @@ class FailRestartTest(unittest.TestCase):
             ROOT / "code/common/src/test/java/com/trading/common/schema/position/PositionProjectorTest.java",
             ROOT / "code/common/src/test/java/com/trading/common/schema/KvStateUpdateProtocolTest.java",
         ]:
-            if p.exists():
-                self.assertIn("DUPLICATE", p.read_text(), f"FAIL-010: {p.name} lacks DUPLICATE contract")
+            self.assertTrue(p.exists(), f"FAIL-010: {p.name} missing")   # P6-609
+            self.assertIn("DUPLICATE", p.read_text(), f"FAIL-010: {p.name} lacks DUPLICATE contract")
         # Live dedup: gateway deduplicator
         self.assertIn("DUPLICATE", DEDUP_JAVA.read_text())
 
@@ -139,8 +147,8 @@ class SafetyFailClosedTest(unittest.TestCase):
         self.assertIn("HASH_VIOLATION", dedup)
         # d) Projection idempotency prevents double-apply on replay after restart
         projector = ROOT / "code/common/src/test/java/com/trading/common/schema/KvStaleWriteRejectionTest.java"
-        if projector.exists():
-            self.assertIn("DUPLICATE", projector.read_text())
+        self.assertTrue(projector.exists(), "SAFETY-001: KvStaleWriteRejectionTest missing")   # P6-609
+        self.assertIn("DUPLICATE", projector.read_text())
         # e) State machine never permits direct skip to ENABLED — must reconcile + approve
         self.assertIn("ApprovalPending", gate)
 

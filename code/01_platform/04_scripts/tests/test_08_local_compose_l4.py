@@ -1,11 +1,10 @@
 """L4 Schema + L5 Job — SCHEMA-001..010, JOB-001..005."""
-import re, subprocess, unittest
+import subprocess
+import unittest
 from pathlib import Path
-import json
 
 ROOT = Path(__file__).parents[4]
 DDL_DIR = ROOT / "code/01_platform/02_sql/ddl"
-MANIFEST = ROOT / "code/01_platform/02_sql/manifest.json"  # generated, may not exist yet
 
 class SchemaJobTest(unittest.TestCase):
     def test_SCHEMA_001_manifest_exists_or_generatable(self):
@@ -22,21 +21,30 @@ class SchemaJobTest(unittest.TestCase):
             self.assertIn(tbl, joined, f"SCHEMA-003: required table DDL for {tbl} missing, have {joined}")
 
     def test_SCHEMA_006_missing_table_causes_readiness_failure(self):
-        """SCHEMA-006: ingestion/compute must gate readiness on schema — check IngestionConfig/ddl_apply."""
-        text = (ROOT / "code/02_services/01_ingestion").rglob("*.java")
-        # instead check ddl_apply contract exists
+        """SCHEMA-006: the schema contract the readiness gate depends on exists (P6-810).
+
+        The readiness gate itself lives in the ingestion service; what this module can
+        pin offline is the DDL surface that gate validates against.
+        """
         self.assertTrue((ROOT / "code/01_platform/04_scripts/ddl_apply.py").exists())
         self.assertTrue((ROOT / "code/01_platform/04_scripts/ddl_apply_smoke.py").exists())
 
     def test_JOB_001_exactly_two_jobs(self):
-        """JOB-001: submitter produces Signal + Babysitter and nothing else — check docker-compose and submitter."""
-        compose_text = (ROOT / "code/01_platform/01_docker/docker-compose.yml").read_text()
-        # flink jobs are submitted via compute module; check that module exists
-        self.assertTrue((ROOT / "code/02_services/02_compute").exists(), "JOB-001: compute module missing")
-        # check that compose references both jobs via env/args
-        # at minimum the spec table must be present
+        """JOB-001: the submitter installs exactly Signal + Babysitter (P6-811).
+
+        The spec sentence is the contract for "exactly two": SafetyHaltJob is a
+        separate slot-scoped job (docker-compose.yml:86), not a submitter job, so the
+        assertion is the two named job classes plus that sentence — not every *Job.java
+        in the module.
+        """
+        compute = ROOT / "code/02_services/02_compute"
+        self.assertTrue(compute.exists(), "JOB-001: compute module missing")
         doc = (ROOT / "docs/08_implementation/08-local-compose.md").read_text()
-        self.assertIn("JOB-001", doc)
+        self.assertIn("installs exactly Signal and Babysitter jobs", doc,
+                      "JOB-001: the spec no longer states the two-job contract")
+        for rel in ("src/main/java/com/trading/compute/signaljob/SignalJob.java",
+                    "src/main/java/com/trading/compute/babysitter/BabysitterJob.java"):
+            self.assertTrue((compute / rel).exists(), f"JOB-001: {rel} missing")
 
     def test_SCHEMA_002_ddl_matches_manifest(self):
         """SCHEMA-002: DDL matches manifest."""
@@ -97,7 +105,7 @@ class SchemaJobTest(unittest.TestCase):
         cand = list((ROOT / "code/02_services/02_compute").rglob("Signal*Job*.java"))
         # name varies — at least one Signal* class exists
         joined = " ".join(p.name for p in cand)
-        self.assertTrue("Signal" in joined or (ROOT / "code/02_services/02_compute").exists(), f"JOB-002: Signal job class missing, have {joined}")
+        self.assertTrue("Signal" in joined, f"JOB-002: Signal job class missing, have {joined}")
         self.assertIn("flink-jobmanager", (ROOT / "code/01_platform/01_docker/docker-compose.yml").read_text())
 
     def test_JOB_003_babysitter_job_running(self):
