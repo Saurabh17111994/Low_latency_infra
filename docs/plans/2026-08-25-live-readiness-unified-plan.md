@@ -5,6 +5,7 @@
 **Supersedes:** `docs/plans/2026-08-21-live-readiness-master-plan.md` (Phases A–E) + `docs/plans/2026-08-24-laptop-now-market-open-plan.md` (P0–P5) — both deleted 2026-08-25 after merge; this file is the single tracker.
 **Scope:** Everything between today's local truth and one approved, safe broker round-trip, plus the deferred prod swarm that gates real money. Laptop work is the only thing this plan drives; prod VMs are honestly `BLOCKED` inventory.
 **Authority:** `01-foundation.md` > `11-testing-and-release.md` > version matrix > this plan. If this plan conflicts with a dossier/DEC/contract, the dossier wins — file a `CHG-*` and keep the task `BLOCKED:`.
+**Reader's summary:** `../06_operations/08-live-readiness-gaps.md` — one page of the live-money gate rows and their sources. Task status stays in this file; that page repeats none of it.
 **Constraints:** Single-VM `docker-compose.yml` only (16 containers: `zookeeper` single, `fluss-coordinator/tablet` single, `flink-jobmanager/taskmanager` single, `minio` local `s3://`, `openobserve` `v0.91.5`, `otel-collector` `0.123.0`). No `docker-stack.yml` quorum, no `replication.factor=3`, no encrypted `S3` HA, no `PERF-PROD-60000` prod sizing. Live money stays `HALTED` (DEC-044 `saurabh` single-operator gate; executor boots halted — `EXECUTION_ENABLED=true` rejected at boot).
 
 ---
