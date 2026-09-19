@@ -44,6 +44,11 @@ def parse_stages_tsv(path: str | Path) -> list[dict]:
                     row[key] = int(row[key]) if row[key] != "" else None
                 except (ValueError, KeyError):
                     row[key] = None
+            if row["epoch"] is None:
+                # Every consumer needs a numeric epoch (sorting, rate deltas,
+                # window bounds); a blank/malformed epoch used to reach them as
+                # None and raised TypeError inside sort()/subtraction.
+                continue
             rows.append(row)
     return rows
 
@@ -173,7 +178,14 @@ def parse_prom_files(capture_dir: str | Path) -> list[dict]:
                 q = labels.get("quantile")
                 if q is not None:
                     op = labels.get("operator_subtask_index", "?")
-                    lat.setdefault((task, sub, op), {})[q] = val
+                    # Several sources emit latency for the same operator
+                    # subtask, and the metric NAME carries the source id that
+                    # this key drops — so keep the MAX (worst observed
+                    # source->operator latency) instead of letting the last
+                    # series in the scrape win.
+                    k = (task, sub, op)
+                    lat.setdefault(k, {})
+                    lat[k][q] = max(lat[k].get(q, val), val)
             elif ("_operator_" in raw_name
                     and "currentWatermark" not in name
                     and "split_watermark" not in name):
@@ -304,10 +316,16 @@ def watermark_lag_report(prom_samples: list[dict],
 
 
 def divergence_report(capture_dir: str | Path,
-                      windows: list[tuple[int, int]]) -> str:
-    """Build the per-operator, per-window TSV summary with divergence flags."""
+                      windows: list[tuple[int, int]],
+                      rows: list[dict] | None = None) -> str:
+    """Build the per-operator, per-window TSV summary with divergence flags.
+
+    `rows` lets the caller pass an already-parsed stages.tsv (main() parses it
+    once per run); None keeps the standalone behavior.
+    """
     capture_dir = Path(capture_dir)
-    rows = parse_stages_tsv(capture_dir / "stages.tsv")
+    if rows is None:
+        rows = parse_stages_tsv(capture_dir / "stages.tsv")
     series = operator_series(rows)
 
     # Source operator = the raw-table source (feeds the whole chain).
@@ -360,7 +378,8 @@ def _parse_epoch_tsv(path: Path, ncols: int) -> list[list[str]]:
 
 
 def b2_read_lag_report(capture_dir: str | Path,
-                       windows: list[tuple[int, int]]) -> str:
+                       windows: list[tuple[int, int]],
+                       rows: list[dict] | None = None) -> str:
     """B2 CP3->CP4 read lag (plan Stage B2): per-window delta differential.
 
     log-end comes from read-lag.tsv (FlussReadLagProbe, one sample per tick);
@@ -377,8 +396,13 @@ def b2_read_lag_report(capture_dir: str | Path,
     grows faster than the job consumes (a REAL read lag), negative when the
     job drains faster than the feed appends (not a lag). Reported as the
     p50/p95 of per-sample deltas plus the window net.
+
+    `rows` lets the caller pass an already-parsed stages.tsv (main() parses it
+    once per run); None keeps the standalone behavior.
     """
     capture_dir = Path(capture_dir)
+    if rows is None:
+        rows = parse_stages_tsv(capture_dir / "stages.tsv")
     probe_rows = _parse_epoch_tsv(capture_dir / "read-lag.tsv", 5)
     if not probe_rows:
         return "CP3->CP4 read lag: read-lag.tsv absent (FLUSS_PROBE_CP not set for this capture)"
@@ -391,7 +415,7 @@ def b2_read_lag_report(capture_dir: str | Path,
             continue
     logend.sort()
     consumed: list[tuple[float, float]] = []
-    for row in parse_stages_tsv(capture_dir / "stages.tsv"):
+    for row in rows:
         name = row.get("operator", "")
         if "raw_table" not in name and "raw-table" not in name:
             continue
@@ -610,6 +634,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", default=None, help="optional JSON output path")
     args = parser.parse_args(argv)
 
+    # stages.tsv is parsed ONCE here and passed down: the report builders used
+    # to re-parse it (default window, divergence, B2 read lag and --json = up to
+    # 4 full parses of the same file per run).
+    rows = parse_stages_tsv(Path(args.capture_dir) / "stages.tsv")
     windows: list[tuple[int, int]] = []
     if args.window:
         for w in args.window:
@@ -618,17 +646,16 @@ def main(argv: list[str] | None = None) -> int:
     else:
         # Default: whole capture as one window (epochs are absolute; caller
         # usually passes explicit windows from run-meta started_epoch).
-        rows = parse_stages_tsv(Path(args.capture_dir) / "stages.tsv")
         if rows:
             epochs = [r["epoch"] for r in rows]
             windows = [(min(epochs), max(epochs) + 1)]
 
-    report = divergence_report(args.capture_dir, windows)
+    report = divergence_report(args.capture_dir, windows, rows)
     print(report)
 
     # B2 hook reports (plan Stage B2; absent files print an explicit note).
     print()
-    print(b2_read_lag_report(args.capture_dir, windows))
+    print(b2_read_lag_report(args.capture_dir, windows, rows))
     print()
     print(b2_consumer_read_report(args.capture_dir, windows))
     print()
@@ -648,7 +675,6 @@ def main(argv: list[str] | None = None) -> int:
         print(watermark_lag_report(prom, windows))
 
     if args.json:
-        rows = parse_stages_tsv(Path(args.capture_dir) / "stages.tsv")
         payload = {
             "capture_dir": str(args.capture_dir),
             "windows": [list(w) for w in windows],

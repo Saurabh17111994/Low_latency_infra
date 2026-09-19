@@ -17,7 +17,8 @@ default:  require delta >= bridge count per token AND no unexpected/vanished
 
 --sink:   which Fluss table the ticks should have landed in for this window.
           quar   = ingestion_quarantine (post-close / stale-window runs).
-                   RAW>0 is a mismatch in this mode.
+                   A RAW increase over the window is a mismatch in this mode
+                   (rows already present before the window are not).
           raw    = raw_table_1 (market-hours runs: fresh ticks).
                    QUAR>0 is tolerated (stale edge ticks), RAW delta compared.
           total  = RAW + QUAR combined (use when rows may land in either).
@@ -65,13 +66,18 @@ def main():
 
     # Fail closed: an empty/truncated counter file must never reconcile as a
     # pass — zero bridge emissions would vacuously match an empty sink (the
-    # 'no evidence is not evidence of no loss' trap). A missing file already
-    # crashes the parse; a truncated one yields {} and must exit 1 here.
+    # 'no evidence is not evidence of no loss' trap), and an empty PRE baseline
+    # turns every delta into post-0, so a real loss still clears the >=
+    # comparison. A missing file already crashes the parse; a truncated one
+    # yields {} and must exit 1 here.
     if not bridge:
         print("MISMATCH bridge file empty or truncated — no emitted-tick counts to reconcile")
         return 1
     if not post:
         print("MISMATCH post probe file empty or truncated — no sink rows to reconcile")
+        return 1
+    if not pre:
+        print("MISMATCH pre probe file empty or truncated — no baseline to diff against")
         return 1
 
     def sink_value(entry):
@@ -85,9 +91,15 @@ def main():
             bad.append((t, bridge[t], d))
     vanished = set(pre) - set(post)
     extra = [t for t in post if t not in bridge and t != -1]
-    # RAW>0 is only unexpected when the chosen sink is quarantine (post-close
-    # runs); at market hours fresh ticks belong in raw_table_1 by design.
-    raw_nonzero = [t for t, (r, _) in post.items() if r != 0] if args.sink == "quar" else []
+    # A RAW *increase* over the window is only unexpected when the chosen sink
+    # is quarantine (post-close runs): rows already there before the window are
+    # not this window's mismatch (a reused cluster keeps earlier runs' rows),
+    # and at market hours fresh ticks belong in raw_table_1 by design.
+    raw_nonzero = (
+        [t for t, (r, _) in post.items() if r != pre.get(t, (0, 0))[0]]
+        if args.sink == "quar"
+        else []
+    )
 
     for t, want, got in bad[:20]:
         print(f"MISMATCH token={t} bridge={want} sink_delta={got}")
@@ -96,7 +108,7 @@ def main():
     if extra:
         print(f"MISMATCH unexpected sink tokens: {sorted(extra)[:20]}")
     if raw_nonzero:
-        print(f"MISMATCH tokens with RAW>0: {sorted(raw_nonzero)[:20]}")
+        print(f"MISMATCH tokens with new RAW rows (RAW>0 since pre): {sorted(raw_nonzero)[:20]}")
 
     ok = not bad and not vanished and not extra and not raw_nonzero
     print("RESULT " + ("PASS" if ok else "FAIL"))

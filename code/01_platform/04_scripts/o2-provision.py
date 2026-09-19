@@ -46,40 +46,6 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-METRIC_TYPES = {
-    "bridge_slot_capacity_used_percent": "gauge",
-    "bridge_slot_capacity_remaining": "gauge",
-    "bridge_slot_safety_state": "gauge",
-    "bridge_slot_unsafe_duration_ms": "gauge",
-    "bridge_reconnect_consecutive": "gauge",
-    "bridge_active_sockets": "gauge",
-    "bridge_child_process_alive": "gauge",
-    "process_open_fds": "gauge",
-    "process_fd_limit": "gauge",
-    "process_fd_usage_percent": "gauge",
-    "process_rss_bytes": "gauge",
-    "go_goroutines": "gauge",
-    "jvm_threads_live": "gauge",
-    "decode_errors_by_reason": "counter",
-    "append_latency_ms": "histogram",
-    "otelcol_exporter_send_failed_metric_points": "counter",
-    # CHG-023 item 1 (2026-08-17): the schema-version rejection counter now
-    # reaches O2 via the native flink-metrics-otel reporter as the Flink
-    # MetricGroup series below (same flink_taskmanager_job_task_operator_*
-    # shape as the dashboards already query). The hand-emitted
-    # compute_invalid_byreason_schema_version stream is dead — retained as the
-    # historical entry.
-    "compute_invalid_byreason_schema_version": "counter",
-    "flink_taskmanager_job_task_operator_compute_invalid_byreason_schema-version": "counter",
-}
-
-
-# OpenObserve renames metric streams: '.' -> '_' (verified 2026-08-08:
-# bridge.slot.capacity_used_percent lands as bridge_slot_capacity_used_percent).
-def stream(metric_name):
-    return metric_name.replace(".", "_")
-
-
 # ---------------------------------------------------------------------------
 # COMMAND - Command Center corpus contract (2026-09-05).
 # KNOWN_COMMAND_LIVE_STREAMS: every O2 stream the captain's screen reads that
@@ -1337,10 +1303,16 @@ ALERTS = [
         name="INFRA-warn-net-80",
         stream="node_network_transmit_bytes_total",
         promql="rate(node_network_transmit_bytes_total[5m])",
-        promql_condition=(">", 80),
+        # 2026-09-19 (P6-758): the expression is a BYTE RATE
+        # (rate(node_network_transmit_bytes_total[5m]), bytes/s), so the old
+        # "80%" description claimed a capacity ratio the query never computes —
+        # and a threshold of 80 bytes/s fires on keep-alives. 80 MB/s is a real
+        # saturation level for a 1 GbE host; revisit per-host once a capacity
+        # series (node_network_speed_bytes) is available.
+        promql_condition=(">", 80e6),
         period=1,
         frequency=1,
-        desc="[Warning/infra] Network TX >80% capacity per host 60s (rate observed). Scope=host/device",
+        desc="[Warning/infra] Network TX >80 MB/s per host 60s (rate observed). Scope=host/device",
     ),
     dict(
         name="INFRA-crit-o2-mem-14",
@@ -1432,24 +1404,6 @@ def api_raw(method, url, body=None):
             return resp.status, json.loads(resp.read().decode())
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode()[:2000]
-
-
-def make_panel(pid, title, ptype, query, stream):
-    q = {
-        "query": query,
-        "query_type": "sql" if ptype != "promql" else "promql",
-        "format": "table" if ptype == "table" else "time_series",
-        "group_by": [] if ptype == "table" else [],
-        "stream": {"name": stream, "type": "metrics"},
-    }
-    if ptype in ("gauge", "value"):
-        q["fields"] = {"value": "value"}
-    return {
-        "id": pid,
-        "title": title,
-        "type": "panel",
-        "data": {"type": ptype, "queries": [q], "base": {"show": True}},
-    }
 
 
 # ---- v0.91.5 v8 dashboard schema (empirically verified 2026-08-11 against
@@ -1560,7 +1514,13 @@ def make_dashboard_v8(spec):
     }
 
 
-def provision_dashboards():
+def provision_dashboards() -> int:
+    """Converge every dashboard; returns the number that FAILED to converge.
+
+    The caller exits non-zero on any failure: a partial run used to print
+    "dashboard converged" and exit 0 with the stale dashboards still live.
+    """
+    failures = 0
     problems = validate_command_spec()
     if problems:
         print("ERROR: COMMAND - Command Center spec is invalid:")
@@ -1582,9 +1542,18 @@ def provision_dashboards():
             # folder "default" and groups by title prefix (INGESTION - /COMPUTE - /COMMAND -).
             status, resp = api("POST", "/dashboards", make_dashboard_v8(spec))
             print(f"{status} create dashboard {title}: {json.dumps(resp)[:160]}")
+            if status != 200:
+                failures += 1
             continue
         did = db["dashboard_id"]
         status, full = api("GET", f"/dashboards/{did}")
+        if not isinstance(full, dict):
+            # api() returns the RAW BODY (a string) on HTTPError; full.get() used
+            # to raise AttributeError and abort the whole run, so every dashboard
+            # after this one never ran.
+            print(f"{status} get dashboard {title}: {str(full)[:200]}")
+            failures += 1
+            continue
         hashv = full.get("hash", "")
         v8 = full.get("v8") or {}
         tabs = v8.get("tabs") or []
@@ -1621,6 +1590,11 @@ def provision_dashboards():
                 print(f"{status} rewrite dashboard {title} "
                       f"({len(cur)} -> {len(want)} panels)")
                 hashv = resp.get("hash", hashv) if isinstance(resp, dict) else hashv
+                if status != 200:
+                    # The single PUT rewrite IS this dashboard's only convergence
+                    # path: a failed PUT must not be reported as converged.
+                    failures += 1
+                    continue
             # After rewrite the panels match the spec; nothing left to add.
             print(f"dashboard converged: {title} ({len(want)} panels)")
             continue
@@ -1642,6 +1616,8 @@ def provision_dashboards():
             status, resp = api("PUT", f"/dashboards/{did}?hash={hashv}", seed)
             hashv = resp.get("hash", hashv) if isinstance(resp, dict) else hashv
             print(f"{status} seed tab for {title}")
+            if status != 200:
+                failures += 1
         for i, (ptitle, ptype, query, stream, *rest) in missing:
             panel = make_panel_v8(f"p{i}", i, ptitle, ptype, query, stream, *rest)
             status, resp = api(
@@ -1651,6 +1627,9 @@ def provision_dashboards():
             )
             hashv = resp.get("hash", hashv) if isinstance(resp, dict) else hashv
             print(f"{status} add panel {ptitle!r} -> {title}")
+            if status != 200:
+                failures += 1
+    return failures
 
 
 def provision_destination():
@@ -1720,7 +1699,10 @@ SEED_DELTA_SUMS = [
 SEED_HISTOGRAM = (
     "append.latency.ms",
     [5, 10, 25, 50, 100, 250, 500],
-    ["0", "0", "1", "0", "0", "0", "0"],
+    # OTLP requires bucketCounts to be exactly len(explicitBounds)+1 — the last
+    # entry is the +Inf bucket (R-036 in OtlpMetricsEmitter, which the collector
+    # enforces: 7 bounds need 8 counts). The seed had 7 and was rejected.
+    ["0", "0", "1", "0", "0", "0", "0", "0"],
     12.5,
     1,
 )
@@ -1909,13 +1891,22 @@ if __name__ == "__main__":
     except urllib.error.HTTPError as e:
         status = e.code
         payload = e.read().decode()[:2000]
+    except (urllib.error.URLError, OSError) as e:
+        # O2 down (connection refused / DNS): report the documented "not ready"
+        # and exit 1 like any other failed health gate. This used to raise
+        # URLError as an uncaught traceback, so a stopped stack looked like a
+        # crash instead of a health verdict.
+        status, payload = 0, str(e)
     if status != 200:
         print(f"ERROR: OpenObserve not ready (GET /config -> {status}): {payload}")
         sys.exit(1)
     print(f"OpenObserve reachable: {json.dumps(json.loads(payload))[:160]}")
     provision_destination()
-    provision_dashboards()
+    dash_failures = provision_dashboards()
     seed_streams()
     provision_alerts()
     provision_retention()
+    if dash_failures:
+        print(f"ERROR: {dash_failures} dashboard(s) failed to converge (see above)")
+        sys.exit(1)
     print("done")

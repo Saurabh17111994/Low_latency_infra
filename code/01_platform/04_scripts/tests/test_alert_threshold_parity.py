@@ -240,7 +240,10 @@ class ThresholdParity(unittest.TestCase):
             "INFRA-warn-jvm-gc-500": ("JVM non-heap / GC", 500, ">="),
             "INFRA-crit-disk-20": ("Free SSD", 20, "<"),
             "INFRA-warn-disk-io-20": ("Disk I/O await", 20, ">="),
-            "INFRA-warn-net-80": ("Network TX/RX", 80, None),
+            # 2026-09-19 (CHG-230, P6-758): the net rule is an absolute byte
+            # rate (rate(node_network_transmit_bytes_total[5m])) — the doc row
+            # reads ">80 MB/s" and the spec is 80e6 bytes/s, not 80.
+            "INFRA-warn-net-80": ("Network TX/RX", 80_000_000, None),
         }
         for rule, (doc_label, expected, op_required) in rows.items():
             op, actual = _spec_threshold(rule)

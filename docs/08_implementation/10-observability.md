@@ -261,7 +261,7 @@ After `PERF-PROD-60000-001` establishes the baseline, define the numeric review 
 | JVM non-heap / GC | GC pause `jvm_gc_duration_seconds_sum` >500ms p99 60s | `jvm.*` | `ALERT-JVM-GC-500` |
 | Free SSD | <20% `node_filesystem_avail_bytes` per mount | `node_exporter` | `ALERT-DISK-20` `Critical` |
 | Disk I/O await | >20ms `node_disk_io_time_seconds_total` rate | `node_exporter` | `ALERT-DISK-IO-20` |
-| Network TX/RX | >80% of `node_network_transmit_bytes_total` capacity per host | `node_exporter` | `ALERT-NET-80` |
+| Network TX/RX | >80 MB/s `rate(node_network_transmit_bytes_total[5m])` per host (absolute byte rate — no capacity series is scraped, so this is not a %) | `node_exporter` | `ALERT-NET-80` |
 | Checkpoint duration | p99 >5s (already `Checkpoint duration critical` 60s) | Flink `metrics/prometheus` | `ALERT-CKPT-DURATION` |
 | Checkpoint size | >2x baseline median per job (baseline from `PERF-PROD-60000-001`) | Flink | `ALERT-CKPT-SIZE-2X` |
 | Fluss append p99 | >50ms (already `Append latency critical`) | Fluss metrics | `ALERT-APPEND-50` |

@@ -16,7 +16,8 @@ scripts (the local evidence file remains raw truth); exit codes still say what
 happened so callers can log:
   0 = all records accepted (HTTP 200 + status ok)
   3 = config error (no O2_AUTH_BASIC; see reason)
-  4 = O2 refused (non-200; reason + body prefix in stderr)
+  4 = O2 refused (non-200, or 200 with a non-JSON body — something other
+      than O2 answered; reason + body prefix in stderr)
   5 = zero records on stdin (nothing to do, not an error for callers)
 Auth resolution: env O2_AUTH_BASIC, else code/01_platform/01_docker/secrets.env
 (never printed). Endpoint: ${O2_URL:-http://localhost:5080}/api/default.
@@ -32,11 +33,20 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_SECRETS = os.path.join(_HERE, "..", "01_docker", "secrets.env")
 
 
+def _secrets_path() -> str:
+    """The secrets file consulted when O2_AUTH_BASIC is not in the env.
+
+    Single resolver: the error message below must name the same file the read
+    actually used (O2_SECRETS_FILE override), not always the built-in default.
+    """
+    return os.environ.get("O2_SECRETS_FILE", _DEFAULT_SECRETS)
+
+
 def _auth_basic() -> str:
     val = os.environ.get("O2_AUTH_BASIC", "")
     if val:
         return val
-    path = os.environ.get("O2_SECRETS_FILE", _DEFAULT_SECRETS)
+    path = _secrets_path()
     try:
         with open(path, encoding="utf-8") as fh:
             for line in fh:
@@ -76,7 +86,7 @@ def main() -> int:
     auth = _auth_basic()
     if not auth:
         print("o2_ingest: REFUSED — no O2_AUTH_BASIC (env or "
-              f"{_DEFAULT_SECRETS}); cannot authenticate to OpenObserve",
+              f"{_secrets_path()}); cannot authenticate to OpenObserve",
               file=sys.stderr)
         return 3
 
@@ -96,7 +106,16 @@ def main() -> int:
                  "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
-            payload = json.loads(resp.read().decode("utf-8", "replace"))
+            raw = resp.read().decode("utf-8", "replace")
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError:
+                # A 200 that is not JSON means something other than O2 answered
+                # (proxy, portal, login page). Refuse (documented exit 4) instead
+                # of raising JSONDecodeError through the caller.
+                print(f"o2_ingest: O2 refused (http={resp.status}, non-JSON body): "
+                      f"{raw[:200]}", file=sys.stderr)
+                return 4
             # _json responds {"code":200,"status":[{"name":...,"successful":N,
             # "failed":M}]} — fail if any record failed or top-level code>=400.
             code = payload.get("code", resp.status)

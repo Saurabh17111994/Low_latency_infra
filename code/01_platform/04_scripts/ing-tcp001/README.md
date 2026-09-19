@@ -15,7 +15,7 @@ token = zero loss.
 | File | What it does |
 | --- | --- |
 | `TokenCountReconcile.java` | Standalone Fluss client probe. Reads per-token row counts from `raw_table_1` (lake-enabled LOG → `LogScanner`, `subscribeFromBeginning` per bucket) and `ingestion_quarantine` (plain LOG → `BatchScanner`). Token columns: raw_table_1 idx 4, quarantine idx 2. Output: `TOKEN <t> RAW=<n> QUAR=<n> TOTAL=<n>` lines + per-bucket and grand totals. |
-| `reconcile-compare.py` | Compares bridge counts vs probe deltas. `--exact` requires `post − pre == bridge` per token (single-epoch market-hours proof); default requires `>=` (multi-epoch validation). `--sink quar|raw|total` selects which table the ticks should have landed in: `quar` for post-close/stale-window runs (RAW>0 is a mismatch), `raw`/`total` for market-hours runs. |
+| `reconcile-compare.py` | Compares bridge counts vs probe deltas. `--exact` requires `post − pre == bridge` per token (single-epoch market-hours proof); default requires `>=` (multi-epoch validation). `--sink quar|raw|total` selects which table the ticks should have landed in: `quar` for post-close/stale-window runs (a RAW *increase over the window* is a mismatch), `raw`/`total` for market-hours runs. An empty/truncated bridge, pre or post file fails closed (exit 1). |
 
 ## Bridge side
 

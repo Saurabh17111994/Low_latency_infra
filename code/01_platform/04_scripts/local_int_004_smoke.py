@@ -13,7 +13,7 @@ Offline mode (default, always passes without containers) checks the static
 contracts; --live requires an execution-t3 fake stack.
 """
 from __future__ import annotations
-import argparse, json, random, subprocess, sys
+import argparse, json, subprocess, sys
 from pathlib import Path
 
 ROOT = Path(__file__).parents[3]
@@ -62,24 +62,20 @@ def offline_contract() -> list[str]:
         env=svc.get("environment") or {}
         if any(k.startswith("ARROW_") for k in env):
             errs.append(f"{name} leaks ARROW_*")
-    # DDL projections must exist
+    # DDL projections must exist — all three the smoke drives. Until 2026-09-19
+    # this loop validated nothing (its body was `pass`) and the two checks that
+    # followed covered only two of the three files, so a missing
+    # 13_order_correlation.sql passed the contract silently.
     ddl_dir=ROOT / "code/01_platform/02_sql/ddl"
     for need in ["09_order_lifecycle","10_positions","13_order_correlation"]:
-        if not any(p.name.startswith(need.split("_")[0]) and need.split("_",1)[1] in p.name for p in ddl_dir.glob("*.sql")):
-            # looser: just check files exist at all
-            pass
-    if not list(ddl_dir.glob("*order_lifecycle*")):
-        errs.append("09_order_lifecycle.sql missing")
-    if not list(ddl_dir.glob("*positions*")):
-        errs.append("10_positions.sql missing")
+        if not list(ddl_dir.glob(f"*{need}*.sql")):
+            errs.append(f"{need}.sql missing under {ddl_dir}")
     return errs
 
 def live_smoke(seed: int = 42, n: int = 10) -> list[str]:
     errs=offline_contract()
     if errs:
         return errs
-    rnd=random.Random(seed)
-    picked=rnd.sample(INSTRUMENTS, min(n, len(INSTRUMENTS)))
     # Try to hit the fake bridge healthz via the execution-net (requires stack up)
     # We do a simple docker compose ps check; if bridge not running, mark as skip not fail
     try:
@@ -90,15 +86,12 @@ def live_smoke(seed: int = 42, n: int = 10) -> list[str]:
     if "execution-bridge" not in out and "nautilus" not in out:
         # stack not up — treat as contract-only
         return []
-    # If stack is up, try curl from within the network (use docker exec if possible)
-    # For now, just verify the fake semantics: Place→ACK, Modify, Cancel, REJECT, UNKNOWN, fills
-    # The real Go fake bridge is contract-validated by the Rust live_go_bridge test and the
-    # gateway's FlussProjectionWriterIntegrationTest; here we prove the harness would drive it.
-    for tok in picked:
-        # simulate the lifecycle — no network, just proof the state machine would be driven
-        seq=["PlaceOrder","Modify","Cancel","REJECT","UNKNOWN","partial_fill_40","full_fill"]  # per-instrument fake lifecycle
-        if not seq:
-            errs.append(f"instrument {tok}: empty sequence")
+    # If the stack is up, the fake lifecycle (PlaceOrder → Modify → Cancel →
+    # REJECT → UNKNOWN → partial_fill_40 → full_fill) is driven by the live run:
+    # the Go fake bridge is contract-validated by the Rust live_go_bridge test
+    # and the gateway's FlussProjectionWriterIntegrationTest. Offline there is no
+    # per-instrument state to assert — until 2026-09-19 this loop iterated a
+    # literal list and its empty-sequence branch was unreachable dead code.
     # Babysitter zero-action: positions projection must converge per spec §EXEC-012
     # Live proof is the Flink checkpoint + Fluss read; offline we just check the spec exists
     return errs

@@ -74,8 +74,10 @@ and the consumer stays alive. Offline unit tests:
 - O2 retries a delivery on non-2xx and re-delivers after each silence
   window; duplicate records in the JSONL are honest delivery history, not
   consumer bugs.
-- `INFRA-warn-net-80` / `INFRA-warn-disk-io-20` fire regularly on the dev
-  box (single-host NIC + NVMe) — expected on dev hardware.
+- `INFRA-warn-disk-io-20` fires regularly on the dev box (single NVMe) —
+  expected on dev hardware. `INFRA-warn-net-80` was in this list until
+  2026-09-19: its threshold was 80 *bytes*/s, so NIC keep-alives tripped it.
+  It is now an absolute 80 MB/s rate (P6-758, CHG-230).
 
 ## Production migration (when the 4-VM stack lands)
 
