@@ -85,7 +85,7 @@ export ARROW_TOTP_KEY="${ARROW_TOTP_KEY:-$(cat /run/secrets/arrow_totp_key)}"
 ### 4. Deploy
 
 ```
-docker stack deploy -c docker-compose.prod.yml trading
+docker stack deploy -c docker-stack.yml trading
 ```
 
 ### 5. Rotate (per `04-secrets-rotation.md`)
