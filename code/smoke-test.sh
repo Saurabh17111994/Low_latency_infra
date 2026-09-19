@@ -14,7 +14,12 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export FLUSS_BOOTSTRAP="${FLUSS_BOOTSTRAP:-localhost:9123}"
 export ARROW_APP_ID="${ARROW_APP_ID:-smoke-test}"
 export ARROW_APP_SECRET="${ARROW_APP_SECRET:-smoke-secret}" # local smoke-test only
-export ARROW_TOKEN="${ARROW_TOKEN:-fake-token-for-test}"    # local smoke-test only
+# ARROW_TOKEN is rejected outright by IngestionConfig since 2026-08-24, so a fake
+# token here made the live smoke path die in config validation. Export the TOTP
+# trio instead — AutoLogin needs all three non-blank.
+export ARROW_USER_ID="${ARROW_USER_ID:-smoke-user}"        # local smoke-test only
+export ARROW_PASSWORD="${ARROW_PASSWORD:-smoke-password}"  # local smoke-test only
+export ARROW_TOTP_KEY="${ARROW_TOTP_KEY:-smoke-totp-key}"  # local smoke-test only
 # P6-689: the DDL bootstrap creates this table and 10 ticks land in it per run.
 export RAW_TABLE_NAME="${RAW_TABLE_NAME:-raw_table_1}"
 # R-050: IngestionConfig treats these as required with no code default —

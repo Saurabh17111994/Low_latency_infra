@@ -269,7 +269,7 @@ class TicksToolchain(unittest.TestCase):
 
 
 class SmokeTestPreflight(unittest.TestCase):
-    """smoke-test.sh: env defaults, artifact preflight, named probe failure."""
+    """smoke-test.sh: TOTP-only env defaults, artifact preflight, named probe failure."""
 
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="w23-smoke-")
@@ -284,12 +284,16 @@ class SmokeTestPreflight(unittest.TestCase):
         proc = self.box.run_smoke(
             FLUSS_BOOTSTRAP=f"127.0.0.1:{port}",
             ARROW_APP_ID="acme-id", ARROW_APP_SECRET="acme-secret",
-            ARROW_TOKEN="acme-token", RAW_TABLE_NAME="scratch_ticks",
+            ARROW_USER_ID="acme-user", ARROW_PASSWORD="acme-pass",
+            ARROW_TOTP_KEY="acme-totp", RAW_TABLE_NAME="scratch_ticks",
         )
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         env_text = self.box.env_text
+        self.assertNotIn("ARROW_TOKEN=", env_text,
+                         "ARROW_TOKEN is rejected by IngestionConfig")
         for expected in ("FLUSS_BOOTSTRAP=127.0.0.1:", "ARROW_APP_ID=acme-id",
-                         "ARROW_APP_SECRET=acme-secret", "ARROW_TOKEN=acme-token",
+                         "ARROW_APP_SECRET=acme-secret", "ARROW_USER_ID=acme-user",
+                         "ARROW_PASSWORD=acme-pass", "ARROW_TOTP_KEY=acme-totp",
                          "RAW_TABLE_NAME=scratch_ticks"):
             self.assertIn(expected, env_text)
 
@@ -298,8 +302,11 @@ class SmokeTestPreflight(unittest.TestCase):
         proc = self.box.run_smoke(FLUSS_BOOTSTRAP=f"127.0.0.1:{port}")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         env_text = self.box.env_text
+        self.assertNotIn("ARROW_TOKEN=", env_text,
+                         "ARROW_TOKEN is rejected by IngestionConfig")
         for expected in ("ARROW_APP_ID=smoke-test", "ARROW_APP_SECRET=smoke-secret",
-                         "ARROW_TOKEN=fake-token-for-test", "RAW_TABLE_NAME=raw_table_1",
+                         "ARROW_USER_ID=smoke-user", "ARROW_PASSWORD=smoke-password",
+                         "ARROW_TOTP_KEY=smoke-totp-key", "RAW_TABLE_NAME=raw_table_1",
                          "ARROW_MAX_EVENT_AGE_MS=5000",
                          "ARROW_MAX_FUTURE_EVENT_SKEW_MS=2000"):
             self.assertIn(expected, env_text)
