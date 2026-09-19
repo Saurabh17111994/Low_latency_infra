@@ -145,3 +145,4 @@ make down
 - Runtime requirements: `../02_requirements/02-functional/09-platform-runtime.md`
 - Quality targets: `../01_project/03-quality-targets.md`
 - Deployment contract: `../04_contracts/09-platform-runtime.md`
+- Production VM guide (provisioning + stage-by-stage deployment): `PROD_VM_PROVISIONING.md`
