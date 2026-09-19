@@ -1,6 +1,8 @@
 """A2.5 — offline tests for the T9_ORDER_SANDBOX harness (t9_order_sandbox.py).
 
-No containers, no credentials, no market hours required. The trust anchor is the
+Nothing here starts a container, and no credentials or market hours are required
+(P6-616: the harness's `--offline` leg does need a working docker CLI — one of its
+checks parses the execution-t3 compose config). The trust anchor is the
 JW_* parity block inside the harness: those constants were printed by the REAL
 production GatewayProtocol.java (compiled against jackson 2.16.1 from ~/.m2 and
 run on this host 2026-08-21 for one fixed instance) — the Python signing port
