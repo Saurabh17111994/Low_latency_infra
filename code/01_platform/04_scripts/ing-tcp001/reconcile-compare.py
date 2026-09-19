@@ -42,7 +42,9 @@ def parse_bridge(path):
 def parse_probe(path):
     m = {}
     for line in open(path):
-        mm = re.match(r"TOKEN (\d+) RAW=(\d+) QUAR=(\d+) TOTAL=(\d+)", line.strip())
+        # P6-625: the token field must accept the Fluss sentinel -1 — with `\d+`
+        # the row never entered the map, so the `t != -1` guards below never ran.
+        mm = re.match(r"TOKEN (-?\d+) RAW=(\d+) QUAR=(\d+) TOTAL=(\d+)", line.strip())
         if mm:
             t, raw, quar, _ = map(int, mm.groups())
             m[t] = (raw, quar)
@@ -95,8 +97,10 @@ def main():
     # is quarantine (post-close runs): rows already there before the window are
     # not this window's mismatch (a reused cluster keeps earlier runs' rows),
     # and at market hours fresh ticks belong in raw_table_1 by design.
+    # P6-625: exclude the sentinel here exactly as `extra` does — now that -1 is
+    # parsed, leaving it in would report the sentinel itself as a raw-row mismatch.
     raw_nonzero = (
-        [t for t, (r, _) in post.items() if r != pre.get(t, (0, 0))[0]]
+        [t for t, (r, _) in post.items() if t != -1 and r != pre.get(t, (0, 0))[0]]
         if args.sink == "quar"
         else []
     )

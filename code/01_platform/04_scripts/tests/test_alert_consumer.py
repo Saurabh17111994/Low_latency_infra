@@ -13,17 +13,12 @@ import os
 import sys
 import tempfile
 import threading
-import time
 import unittest
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 
-CONSUMER = (
-    Path(__file__).resolve().parents[2]
-    / "01_platform"  # placeholder, fixed below
-)
 # tests/ -> 04_scripts -> 04_scripts parent layout:
 #   code/01_platform/04_scripts/tests/test_alert_consumer.py
 #   code/01_platform/01_docker/alert-consumer.py
@@ -114,6 +109,10 @@ class TestHttpSurface(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
+        # P6-825: remember the global so this class leaves no dangling state — the
+        # next class restores STORE_PATH to THIS class's temp path, which is gone
+        # by then, so the suite used to depend on test ordering.
+        cls._orig_store = ac.STORE_PATH
         ac.STORE_PATH = os.path.join(cls.tmp.name, "alerts.jsonl")
         cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), ac.Handler)
         cls.port = cls.srv.server_address[1]
@@ -122,7 +121,9 @@ class TestHttpSurface(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
+        cls.srv.server_close()      # release the listening socket (P6-825)
         cls.tmp.cleanup()
+        ac.STORE_PATH = cls._orig_store
 
     def _req(self, path, method="GET", data=None):
         req = urllib.request.Request(

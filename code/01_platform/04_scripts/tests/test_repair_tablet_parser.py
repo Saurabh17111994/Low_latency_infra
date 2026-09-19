@@ -1,5 +1,6 @@
 """Keep the tablet repair offset/filename parser fail-closed."""
 
+import re
 import subprocess
 import tempfile
 import unittest
@@ -8,6 +9,23 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 REPAIR = ROOT / "code" / "01_platform" / "04_scripts" / "fluss-repair" / "repair-tablet.sh"
+
+
+def embedded_awk():
+    """The parser repair-tablet.sh actually runs (P6-841).
+
+    This test used to carry its own copy, so the shipped parser could drift free of
+    it — only three string fragments were pinned. Extract the block from the script,
+    and fail loudly if the extraction stops finding it: silently running an empty
+    program would be worse than a red test.
+    """
+    script = REPAIR.read_text()
+    match = re.search(r"awk '\n(.*?)\n' \"\$SCAN_LOG\"", script, re.S)
+    assert match, "the awk block moved in repair-tablet.sh — fix this extraction"
+    body = match.group(1)
+    assert "bad = 1" in body and "END { if (bad) exit 1 }" in body, \
+        "the extracted block is not the fail-closed parser"
+    return body
 
 
 class RepairTabletParserTest(unittest.TestCase):
@@ -28,19 +46,7 @@ class RepairTabletParserTest(unittest.TestCase):
             "size=32157696 last_complete_batch_end=32156904 zero_tail=792 bytes\n"
             "TRUNCATE_TO=32156904\n"
         )
-        awk = r"""
-/^TRUNCATE_TO=/ {
-    path = prev
-    sub(/: size=.*/, "", path)
-    if (path !~ /^\/d\/.*\.log$/ || $0 !~ /^TRUNCATE_TO=[1-9][0-9]*$/) {
-        bad = 1
-    } else {
-        print path "\t" substr($0, index($0, "=") + 1)
-    }
-}
-{ prev = $0 }
-END { if (bad) exit 1 }
-"""
+        awk = embedded_awk()
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as handle:
             handle.write(scan_output)
             handle.flush()
@@ -55,6 +61,21 @@ END { if (bad) exit 1 }
             result.stdout.strip(),
             "/d/default/raw_table_1-90/20260901-p21/log-6/00000000000000000000.log\t32156904",
         )
+
+    def test_malformed_scan_output_is_rejected(self):
+        """P6-626: the parser is fail-closed — a non-/d/ path and a zero offset must
+        exit non-zero with no output, instead of repairing the wrong boundary."""
+        scan_output = (
+            "/etc/passwd: size=12 last_complete_batch_end=0 zero_tail=12 bytes\n"
+            "TRUNCATE_TO=0\n"
+        )
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as handle:
+            handle.write(scan_output)
+            handle.flush()
+            result = subprocess.run(["awk", embedded_awk(), handle.name],
+                                    check=False, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "")
 
 
 if __name__ == "__main__":

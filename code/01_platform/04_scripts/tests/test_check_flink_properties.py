@@ -10,8 +10,6 @@ validator itself cannot silently rot:
   - the REAL docker-compose.yml in the repo passes
 """
 import sys
-import tempfile
-import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -110,7 +108,10 @@ def test_forbidden_leaf_state_backend_fails(tmp_path):
     # no nested rocksdb key: still forbidden as a known-fragile leaf
     block = VALID_BLOCK.replace(
         "state.backend.rocksdb.localdir: /tmp/flink-rocksdb\n", "")
-    block = block.replace('state.backend.incremental: "true"\n', "")
+    # P6-617: VALID_BLOCK carries the UNQUOTED spelling — replacing the quoted
+    # form was a no-op, so the incremental key stayed and this test also tripped
+    # the prefix-collision and forbidden-leaf paths.
+    block = block.replace("state.backend.incremental: true\n", "")
     block += "state.backend: rocksdb\n"
     failures = check(_compose(tmp_path, block))
     assert any("FORBIDDEN LEAF" in f and "state.backend" in f for f in failures)

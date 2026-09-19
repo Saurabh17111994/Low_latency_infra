@@ -46,7 +46,11 @@ class ExecutionNetworkCheckTest(unittest.TestCase):
     def test_rejects_non_internal_execution_network(self):
         config = valid_config()
         config["networks"]["execution-net"]["internal"] = False
-        self.assertTrue(MODULE.validate_config(config))
+        # P6-835: bind to the rule under test — "some error" would also pass if an
+        # unrelated check regressed.
+        errors = MODULE.validate_config(config)
+        self.assertTrue(any("execution-net must be an internal network" in e for e in errors),
+                        errors)
 
     def test_rejects_arrow_credentials_outside_market_data_exception(self):
         config = valid_config()
@@ -54,12 +58,15 @@ class ExecutionNetworkCheckTest(unittest.TestCase):
             "ARROW_APP_SECRET": "must-not-be-here"
         }
         errors = MODULE.validate_config(config)
-        self.assertTrue(any("rust-executor" in error for error in errors))
+        # P6-836: the service name alone also matches unrelated failures; assert the
+        # leaked key that this rule exists to catch.
+        self.assertTrue(any("ARROW_APP_SECRET" in error for error in errors), errors)
 
     def test_rejects_published_bridge_port(self):
         config = valid_config()
         config["services"]["execution-bridge"]["ports"] = ["8787:8787"]
-        self.assertTrue(MODULE.validate_config(config))
+        errors = MODULE.validate_config(config)
+        self.assertTrue(any("must not publish a host port" in e for e in errors), errors)
 
 
 if __name__ == "__main__":

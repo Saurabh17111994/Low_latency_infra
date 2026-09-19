@@ -7,7 +7,6 @@ the non-zero-drift exit contract before any real VM exists (D1.3 is human-gated)
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 
@@ -148,12 +147,8 @@ def test_cli_self_check_exits_zero():
 def test_cli_drift_exits_nonzero():
     """Real-mode exit contract: drift -> non-zero (the D2 gate)."""
     with tempfile.TemporaryDirectory() as tmp:
-        inv_path = os.path.join(tmp, "inv.json")
         out = os.path.join(tmp, "out")
-        with open(inv_path, "w", encoding="utf-8") as fh:
-            # Test the main() argv handling by pointing at a missing file first.
-            pass
-        # missing inventory file -> exit 2 (drift/blocked)
+
         rc = pnc.main(["--inventory", os.path.join(tmp, "missing.json"), "--out", out])
         assert rc == 2
 

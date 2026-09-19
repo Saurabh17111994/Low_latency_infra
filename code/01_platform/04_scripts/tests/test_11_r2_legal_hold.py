@@ -92,7 +92,6 @@ def test_verify_chain_classifications():
     assert lh.verify_chain([m1, m2], ROOT) == "VALID"
     # Java-exact: a null expected root is TAMPERED (unverifiable = unverified)
     assert lh.verify_chain([m1, m2]) == "TAMPERED"
-    assert lh.verify_chain([m1, m2], ROOT) == "VALID"
     assert lh.verify_chain([m1, m2], "0" * 64) == "TAMPERED"
     assert lh.verify_chain([m2, m1]) == "BROKEN_LINK"  # dates decrease
     tampered = m1.replace(H2, hashlib.sha256(b"event-two-x").hexdigest())
@@ -150,7 +149,9 @@ def test_bucket_lock_rule_classification():
         {"enabled": True, "prefix": "audit/", "condition": {"type": "Date",
          "date": "2025-01-01"}})
     # a year-out Date guard passes the one-year retention test
-    far = lh._dt.date.today().replace(year=lh._dt.date.today().year + 2)
+    # P6-822: year+2 on Feb 29 raises ValueError (2030 is not a leap year), and two
+    # today() calls can straddle a year boundary. Anchor to Jan 1 of the target year.
+    far = lh._dt.date(lh._dt.date.today().year + 2, 1, 1)
     ruled = {"condition": {"type": "Date", "date": far.isoformat()}}
     assert lh.rule_retains_one_year(ruled)
 

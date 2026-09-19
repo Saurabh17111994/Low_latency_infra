@@ -22,10 +22,9 @@ class ParseTests(unittest.TestCase):
         # The module file is hyphenated (reconcile-compare.py), so it cannot be
         # imported by name — load it via importlib from its path.
         import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "reconcile_compare",
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                         "ing-tcp001", "reconcile-compare.py"))
+        # P6-840: reuse the module-level COMPARE — deriving the path twice meant a
+        # move had to be reflected in two places or the classes silently diverge.
+        spec = importlib.util.spec_from_file_location("reconcile_compare", COMPARE)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         self.rc = mod
@@ -69,6 +68,16 @@ class ParseTests(unittest.TestCase):
 
     def test_parse_probe_empty(self):
         self.assertEqual(self.rc.parse_probe(self._write("")), {})
+
+    def test_parse_probe_accepts_the_fluss_sentinel(self):
+        """P6-625: the token field must accept -1. With the old `\d+` pattern the row
+        was dropped silently, which is exactly why the CLI tolerance test above used
+        to pass without reaching the script's `t != -1` guard."""
+        m = self.rc.parse_probe(self._write(
+            "TOKEN 100 RAW=2 QUAR=0 TOTAL=2\n"
+            "TOKEN -1 RAW=1 QUAR=0 TOTAL=1\n"))
+        self.assertIn(-1, m)
+        self.assertIn(100, m)
 
 
 class CliTests(unittest.TestCase):

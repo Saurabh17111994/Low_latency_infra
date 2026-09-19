@@ -50,8 +50,13 @@ def test_dashboard_files_are_valid_v8_corpus():
         for tab in doc["tabs"]:
             assert tab.get("tabId") and tab.get("name")
             for panel in tab.get("panels", []):
-                assert panel.get("id") not in seen, f"{title}: duplicate panel id"
-                seen.add(panel.get("id"))
+                # P6-842: a missing id must be its own failure — `None not in seen`
+                # passed the first time and reported the second id-less panel as a
+                # bogus "duplicate panel id".
+                pid = panel.get("id")
+                assert pid, f"{title}: panel has no id"
+                assert pid not in seen, f"{title}: duplicate panel id {pid}"
+                seen.add(pid)
                 assert panel["type"] in PANEL_TYPES, f"{title}: bad type {panel['type']}"
                 assert panel["queryType"] == "sql"
                 assert panel.get("layout"), f"{title}: panel {panel['id']} missing layout"
@@ -64,8 +69,12 @@ def test_dashboard_files_are_valid_v8_corpus():
 
 
 def test_no_secrets_in_corpus():
-    for f in ["manifest.json", "safe-to-trade.json", "order-execution.json",
-              "data-ingestion.json", "storage-eod.json"]:
+    # P6-627: derive the corpus from the manifest. The hard-coded list covered 4 of
+    # the 8 dashboards, so anything added to the corpus silently skipped the scan.
+    manifest, _ = _load_all()
+    files = ["manifest.json"] + [rec["file"] for rec in manifest["dashboards"]]
+    assert len(files) >= 5, f"the manifest lost entries: {files}"
+    for f in files:
         doc = json.loads((DASH_DIR / f).read_text())
 
         def walk(node):

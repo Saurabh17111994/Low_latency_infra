@@ -38,14 +38,23 @@ def make_repo(path: Path, filename: str = "src/file.txt", epoch: int = EPOCH_A):
                GIT_COMMITTER_DATE=f"@{epoch} +0000",
                GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
                GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
-    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo,
+    # P6-838: the throwaway repos must not inherit the developer's git config —
+    # this host has core.autocrlf=input globally, and a global commit.gpgsign
+    # would try to sign (and can hang) here. Pin both, and ignore system/global
+    # config entirely.
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+    subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false",
+                    "init", "-q", "-b", "main"], cwd=repo,
                    env=env, check=True, capture_output=True)
     src = repo / filename
     src.parent.mkdir(parents=True, exist_ok=True)
     src.write_text("v1\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=repo, check=True, env=env,
+    subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false",
+                    "add", "."], cwd=repo, check=True, env=env,
                    capture_output=True)
-    subprocess.run(["git", "commit", "-q", "-m", "one"], cwd=repo, check=True,
+    subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false",
+                    "commit", "-q", "-m", "one"], cwd=repo, check=True,
                    env=env, capture_output=True)
     return repo
 
@@ -622,7 +631,8 @@ class NativeSplitGuardTest(unittest.TestCase):
         """CHG-101 staleness sources for the compute image must not include
         the jar/02_services — otherwise every code change flags the image
         STALE and forces a rebuild."""
-        for path in isc.SERVICE_SOURCES.get("compute", []):
+        # P6-624: index, do not .get(...) — a renamed key must fail, not empty the loop.
+        for path in isc.SERVICE_SOURCES["compute"]:
             # Only the Dockerfile + launcher may be sources; the job SOURCE
             # TREE (02_services/02_compute/src, target/) must not be — but the
             # Dockerfile/launcher paths themselves live under 02_services, so

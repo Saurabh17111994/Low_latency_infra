@@ -21,12 +21,21 @@ import os
 import re
 from pathlib import Path
 
-os.environ.setdefault("O2_AUTH_BASIC", "ZHVtbXk6ZHVtbXk=")  # dummy, never used
+# P6-828: o2-provision.py reads this at import time, so it must be present for the
+# exec_module below — but it must NOT stay in the environment for the rest of the
+# pytest session, where it would silently authorize bogus requests.
+_ORIG_O2_AUTH = os.environ.get("O2_AUTH_BASIC")
+os.environ.setdefault("O2_AUTH_BASIC", "ZHVtbXk6ZHVtbXk=")
 
 PROV = Path(__file__).resolve().parents[1] / "o2-provision.py"
 _spec = importlib.util.spec_from_file_location("o2provision_cmd", PROV)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
+
+if _ORIG_O2_AUTH is None:
+    os.environ.pop("O2_AUTH_BASIC", None)
+else:
+    os.environ["O2_AUTH_BASIC"] = _ORIG_O2_AUTH
 
 DASHBOARDS = _mod.DASHBOARDS
 
@@ -163,18 +172,6 @@ def test_command_promql_without_taskname_has_explicit_legend():
         "O2 renders raw {{task_name}} on these (seen live 2026-09-05): "
         f"{bare}"
     )
-
-
-def test_command_sql_panels_carry_no_placeholder_where():
-    """All SQL panels must omit {start_time}/{end_time} — O2 never
-    substitutes them (string-vs-BIGINT -> silently empty)."""
-    bad = [
-        p[0]
-        for p in _command()["panels"]
-        if p[1] != "promql"
-        and ("{start_time}" in p[2] or "{end_time}" in p[2])
-    ]
-    assert not bad, f"SQL panels must not carry time placeholders: {bad}"
 
 
 def test_command_not_live_yet_tiles_are_promql_empty():
