@@ -35,6 +35,10 @@ public final class PlaceholderVersions {
             return false;
         }
         String v = value.trim().toUpperCase(java.util.Locale.ROOT);
-        return v.contains("_TO_BE_PINNED") || v.contains("TO_BE_VERIFIED");
+        // P6-856: both markers are documented with the leading underscore (R-268),
+        // and every constant in this class carries it. Matching the bare
+        // "TO_BE_VERIFIED" treated unrelated text as a placeholder — a spurious
+        // start refusal — and contradicted the _TO_BE_PINNED check beside it.
+        return v.contains("_TO_BE_PINNED") || v.contains("_TO_BE_VERIFIED");
     }
 }

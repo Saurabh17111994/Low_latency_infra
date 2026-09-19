@@ -51,10 +51,13 @@ class CounterDeltaTests(unittest.TestCase):
 
     def setUp(self):
         self.mod = load_analyze()
-        self.addCleanup(os.unlink, self._tmp) if hasattr(self, "_tmp") else None
 
     def _deltas(self, rows):
+        # P6-623: register the cleanup where the file is created. Registering it in
+        # setUp could never fire — _tmp does not exist yet — so every run leaked one
+        # NamedTemporaryFile(delete=False) tsv (48 were sitting in /tmp).
         self._tmp = write_tsv(rows)
+        self.addCleanup(os.unlink, self._tmp)
         return self.mod.counter_deltas(self._tmp)
 
     def test_no_reset_is_last_minus_first(self):

@@ -39,7 +39,10 @@ def make_fake_m2(root):
 class BuildClasspathTest(unittest.TestCase):
     def test_full_classpath_lists_common_classes_and_all_jars(self):
         with tempfile.TemporaryDirectory() as tmp:
-            make_fake_m2(tmp)
+            jars = make_fake_m2(tmp)
+            # P6-830: use the fixture's return value — it is the self-check that the
+            # five jars this classpath test expects were really created.
+            self.assertEqual(5, len(jars))
             with mock.patch.object(ddl_apply, "COMMON_CLASSES",
                                    os.path.join(tmp, "common-classes")):
                 os.makedirs(os.path.join(tmp, "common-classes",
@@ -105,7 +108,15 @@ class EvidenceRootOverrideTest(unittest.TestCase):
                 importlib.reload(ddl_apply)
                 self.assertEqual(ddl_apply.EVIDENCE_ROOT, "/custom/evidence")
         finally:
-            importlib.reload(ddl_apply)
+            # P6-618: make "unset" explicit. DDL_APPLY_EVIDENCE_DIR is a documented
+            # override, so relying on the ambient environment would fail this
+            # assertion wherever it is legitimately set.
+            saved = os.environ.pop("DDL_APPLY_EVIDENCE_DIR", None)
+            try:
+                importlib.reload(ddl_apply)
+            finally:
+                if saved is not None:
+                    os.environ["DDL_APPLY_EVIDENCE_DIR"] = saved
         self.assertEqual(
             ddl_apply.EVIDENCE_ROOT,
             os.path.join(ddl_apply.REPO_ROOT, "logs", "ddl-apply"),

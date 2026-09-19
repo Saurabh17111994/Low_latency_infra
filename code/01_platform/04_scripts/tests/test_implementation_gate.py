@@ -41,10 +41,6 @@ FAKE_TASKS = [
 ]
 
 
-def run(args=None):
-    return gate.main(args)
-
-
 class OrderingTests(unittest.TestCase):
     def test_all_pass_in_order(self):
         runner = FakeRunner([(True, "ok")] * 4)

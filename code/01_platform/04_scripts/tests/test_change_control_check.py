@@ -131,7 +131,47 @@ class ValidateTests(unittest.TestCase):
         )
 
 
-class ScanTests(unittest.TestCase):
+class HermeticReferenceTests(unittest.TestCase):
+    """P6-826: resolve references against a fixture tree, not the live repository.
+
+    `plan_task_issues` and `artifact_issues` resolve tracker dossiers and artifact
+    paths against the module-global ROOT, so these tests used to pass only while the
+    real `docs/08_implementation/*.md`, `docs/02_requirements/*` and the DDL manifest
+    happened to exist — any rename broke them for a reason unrelated to the resolver.
+    The fixture below mirrors exactly the paths the cases need;
+    RepoReferenceIntegrityTests (bottom of this file) pins the real ones instead.
+    """
+
+    TREE_FILES = (
+        "docs/08_implementation/04-signal-job.md",
+        "docs/08_implementation/03-ingestion.md",
+        "docs/08_implementation/11-testing-and-release.md",
+        "docs/02_requirements/04-data.md",
+        "code/01_platform/02_sql/ddl/schema_manifest.json",
+        "code/common/src/main/java/com/trading/common/config/PlatformConfig.java",
+    )
+
+    def setUp(self):
+        self.tree = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tree.cleanup)
+        for rel in self.TREE_FILES:
+            path = os.path.join(self.tree.name, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("# fixture file; content is irrelevant to resolution\n")
+        self.records = os.path.join(self.tree.name, "docs", "05_deployment", "change-records")
+        os.makedirs(self.records, exist_ok=True)
+        # ROOT, the default records dir and the repo-wide basename index are module
+        # globals; repoint all three and restore them on teardown.
+        for patcher in (mock.patch.object(ccc, "ROOT", self.tree.name),
+                        mock.patch.object(ccc, "DEFAULT_RECORDS_DIR", self.records)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(setattr, ccc, "_REPO_INDEX", ccc._REPO_INDEX)
+        ccc._REPO_INDEX = None      # force the index to rebuild against the fixture
+
+
+class ScanTests(HermeticReferenceTests):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -168,7 +208,7 @@ class ScanTests(unittest.TestCase):
         self.assertTrue(issues[0].startswith("unreadable"))
 
 
-class PlanTasksReferenceTests(unittest.TestCase):
+class PlanTasksReferenceTests(HermeticReferenceTests):
     """plan_tasks references must resolve to real trackers/dossiers."""
 
     def test_tracker_reference_resolves(self):
@@ -221,8 +261,8 @@ class PlanTasksReferenceTests(unittest.TestCase):
             self.assertTrue(any("tracker-99" in i for i in issues))
 
 
-class AffectedArtifactsReferenceTests(unittest.TestCase):
-    """affected_artifacts path-shaped tokens must resolve to real files."""
+class AffectedArtifactsReferenceTests(HermeticReferenceTests):
+    """affected_artifacts path-shaped tokens must resolve to fixture files."""
 
     def test_repo_relative_artifact_resolves(self):
         self.assertEqual(
@@ -285,7 +325,7 @@ class AffectedArtifactsReferenceTests(unittest.TestCase):
             self.assertTrue(any("no-such-manifest.json" in i for i in issues))
 
 
-class CliTests(unittest.TestCase):
+class CliTests(HermeticReferenceTests):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -374,6 +414,19 @@ class RepoIndexTests(unittest.TestCase):
             ccc.find_basename("04_scripts/docs_audit.py")
             ccc.find_basename("definitely-not-in-the-tree.py")
         self.assertEqual(walk.call_count, 1)
+
+
+class RepoReferenceIntegrityTests(unittest.TestCase):
+    """P6-826, the other half: the repository itself must still hold the paths
+    the fixtures copy. Otherwise a rename leaves the hermetic cases green while
+    the real change records break — the failure has to land in a test whose
+    name says it depends on the repository.
+    """
+
+    def test_paths_the_reference_fixtures_mirror_exist(self):
+        for ref in HermeticReferenceTests.TREE_FILES:
+            self.assertTrue(os.path.isfile(os.path.join(ccc.ROOT, ref)),
+                            f"missing in the repository: {ref}")
 
 
 if __name__ == "__main__":

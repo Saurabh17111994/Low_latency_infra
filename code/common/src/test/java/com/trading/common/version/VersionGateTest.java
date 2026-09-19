@@ -64,6 +64,12 @@ class VersionGateTest {
         assertTrue(PlaceholderVersions.isPlaceholder("SCHEMA_LIFECYCLE_TO_BE_VERIFIED"));
         // Even after a constant is replaced by a real version, an un-pinned
         // sentinel still carries the marker and is detected.
+        // P6-856: the marker shape is documented WITH the leading underscore
+        // (R-268) and every constant in PlaceholderVersions carries it. The bare
+        // word is prose (docs, status columns), not a pin marker — matching it
+        // refused legitimate values.
+        assertFalse(PlaceholderVersions.isPlaceholder("TO_BE_VERIFIED"));
+        assertFalse(PlaceholderVersions.isPlaceholder("note: TO_BE_VERIFIED in matrix"));
         assertFalse(PlaceholderVersions.isPlaceholder("2.2.1"));
         assertFalse(PlaceholderVersions.isPlaceholder(null));
     }

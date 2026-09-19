@@ -281,7 +281,7 @@ def test_capture_prom_filter_keeps_chain_head_compute_samples():
     survived. Pin the actual filter text from stage-capture.sh and simulate
     it on the real line shapes."""
     import re
-    from pathlib import Path
+    # P6-843: Path is imported at module level — do not re-import it per test.
     cap = Path(__file__).resolve().parents[1] / "stage-capture.sh"
     m = re.search(
         r"grep -E '([^']*flink_taskmanager_job_task_operator_[^']*)'",
@@ -303,8 +303,8 @@ def test_capture_prom_filter_keeps_chain_head_compute_samples():
         'flink_taskmanager_job_task_busyTimeMsPerSecond{job_id="x",'
         'task_name="candle_15s",subtask_index="0",} 100.0',
     ]
-    import re as _re
-    pat = _re.compile(flt)
+    import re
+    pat = re.compile(flt)
     kept = [l for l in lines if pat.search(l)]
     assert any("compute_dedup_first" in l for l in kept), (
         f"filter dropped chain-head compute sample; kept={kept}")

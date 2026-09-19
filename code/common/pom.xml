@@ -23,13 +23,17 @@
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-databind</artifactId>
     </dependency>
+    <!-- P6-847: the parent's dependencyManagement already pins both to test scope;
+         declaring it here makes that explicit and matches every sibling module. -->
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.assertj</groupId>
       <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
     </dependency>
     <!-- Fluss client — compile scope since 2026-08-15: the DDL application
          contract tool (com.trading.common.schema.ddl.DdlApplyTool) lives in
@@ -40,10 +44,16 @@
          tests (real LOG/KV/changelog evidence against a live cluster).
          The 0.9.1-incubating client jar is a self-contained shaded artifact
          (its own pom declares runtime deps test-scoped), so the fat-jar
-         builds are unaffected. -->
+         builds are unaffected.
+         P6-645: optional, so a future consumer of `common` opts in explicitly
+         instead of silently inheriting the heavy client. Every module that imports
+         org.apache.fluss already declares the client itself (verified across
+         ingestion, compute, execution-gateway — and this module declares it for its
+         own DdlApplyTool), so nothing resolves it transitively today. -->
     <dependency>
       <groupId>org.apache.fluss</groupId>
       <artifactId>fluss-client</artifactId>
+      <optional>true</optional>
     </dependency>
   </dependencies>
 </project>

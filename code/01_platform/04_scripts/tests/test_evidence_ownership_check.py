@@ -206,10 +206,21 @@ class UidOverrideTests(unittest.TestCase):
 
 class ModuleDefaultsTest(unittest.TestCase):
     def test_defaults_point_at_repo_evidence_root(self):
-        self.assertTrue(evidence_ownership_check.EVIDENCE_DIR.endswith(
-            os.path.join("logs", "ddl-apply")))
-        self.assertEqual(evidence_ownership_check.CONTAINER_UID, 10001)
-        self.assertEqual(evidence_ownership_check.CONTAINER_GID, 10001)
+        """P6-834: the module reads DDL_APPLY_* at import time, so this must reload
+        it under blank overrides — otherwise a CI or host that legitimately exports
+        them fails this assertion for a reason unrelated to the defaults."""
+        import importlib
+        with mock.patch.dict(os.environ, {"DDL_APPLY_EVIDENCE_DIR": "",
+                                          "DDL_APPLY_UID": "",
+                                          "DDL_APPLY_GID": ""}):
+            try:
+                module = importlib.reload(evidence_ownership_check)
+                self.assertTrue(module.EVIDENCE_DIR.endswith(
+                    os.path.join("logs", "ddl-apply")))
+                self.assertEqual(module.CONTAINER_UID, 10001)
+                self.assertEqual(module.CONTAINER_GID, 10001)
+            finally:
+                importlib.reload(evidence_ownership_check)
 
 
 if __name__ == "__main__":

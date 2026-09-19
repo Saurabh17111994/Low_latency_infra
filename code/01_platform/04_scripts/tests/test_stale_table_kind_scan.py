@@ -85,10 +85,14 @@ class LiveClaimClassificationTests(unittest.TestCase):
         self.assertEqual(hits, [])
 
     def test_now_that_is_not_a_live_marker(self):
-        com = s.SUITE_TRIPLE_TRUTH["common"]
+        # P6-628: probe with a STALE triple. Using the current truth
+        # (SUITE_TRIPLE_TRUTH) made this vacuous: the truth filter suppressed any
+        # hit, so it passed even if "now that …" were wrongly a live marker.
         hits = scan_text(
-            f"now that the suite is common {com[0]}/0/{com[2]}, nothing fires 2026-08-13\n")
-        self.assertEqual(hits, [])
+            "now that the suite is common 340/0/1, nothing fires 2026-08-13\n")
+        tiers = claim_tiers(hits)
+        self.assertNotIn(("live-count-stale", "LIVE-STALE"), tiers)
+        self.assertNotIn(("test-count-stale", "LIVE-STALE"), tiers)
 
     def test_status_word_current_is_not_live(self):
         # "manifest is current" is a status word, not a live-count modifier —

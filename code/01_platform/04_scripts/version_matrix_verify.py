@@ -53,8 +53,11 @@ def verify(path: Path) -> int:
     try:
         with path.open(encoding="utf-8") as fh:
             doc = yaml.safe_load(fh)
-    except yaml.YAMLError as exc:
-        # R-092: malformed YAML must fail with a clear message, not a traceback.
+    except (yaml.YAMLError, OSError, UnicodeDecodeError) as exc:
+        # R-092: an unreadable or malformed matrix must fail with a clear message,
+        # not a traceback. P6-644: OSError covers a missing path, a directory or a
+        # permission problem, and UnicodeDecodeError a non-UTF-8 file — all of which
+        # used to escape as raw exceptions from the path.open() above.
         fail(f"cannot parse {path}: {exc}")
         return 1
 
@@ -78,6 +81,14 @@ def verify(path: Path) -> int:
             errors += 1
             continue
         cid = _as_str(row, "compatibility_id") or "<no-id>"
+        # P6-846: _as_str() stringifies anything, so a YAML list or mapping became
+        # text like "[1.4, 2.0]" and sailed through the empty/latest/blocker checks.
+        # A pin is a single scalar; anything else is a shape error, not a pin.
+        if isinstance(row.get("proposed_version"), (list, dict)):
+            fail(f"{cid}: proposed_version must be a single pinned scalar, got "
+                 f"{type(row['proposed_version']).__name__}: {row['proposed_version']!r}")
+            errors += 1
+            continue
         version = _as_str(row, "proposed_version")
         owner = _as_str(row, "evidence_owner")
         method = _as_str(row, "evidence_method")

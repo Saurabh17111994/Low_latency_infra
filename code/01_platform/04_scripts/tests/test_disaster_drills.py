@@ -47,7 +47,10 @@ def test_evidence_rendered_with_all_required_headings(tmp_path):
     for heading in dd.EVIDENCE_HEADINGS:
         assert heading in text
     assert "Verdict: PASS" in text
-    assert "log" not in text.lower() or True  # structural check below
+    # P6-619: the line here was `assert "log" not in text.lower() or True` — always
+    # true, and it could never have worked anyway: the record's own path contains
+    # "log". No structural rule was ever specified, so the line is gone rather than
+    # guessed at (see CHG-243, observations).
 
 
 def test_redact_strips_secret_shapes():
