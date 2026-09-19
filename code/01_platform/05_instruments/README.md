@@ -31,7 +31,10 @@ When `EXECUTION_ENABLED=true`, the Ingestion service SHALL fail startup if the a
 
 - Ingestion requirement: [REQ-ING-004](/docs/02_requirements/02-functional/01-ingestion.md)
 - Data gap: [DATA-GAP-001](/docs/09_data_gaps.md)
-- Import script: [import_instruments.sh](/code/01_platform/04_scripts/import_instruments.sh)
+- Import: the ingestion service loads the approved manifest — `InstrumentManifestWriter`
+  (`INSTRUMENT_MANIFEST_PATH`; the manifest version is a loader parameter, default 1).
+  The old [import_instruments.sh](/code/01_platform/04_scripts/import_instruments.sh) is **retired**
+  (CHG-229) — it refuses with exit 2 and cannot write the live 14-column KV table.
 
 ## T0 3-slot parameterization (streaming-3000)
 
