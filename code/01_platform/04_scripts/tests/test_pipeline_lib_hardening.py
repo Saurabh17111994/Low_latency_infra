@@ -17,9 +17,12 @@ from __future__ import annotations
 import os
 import shutil
 import socket
+import re
 import subprocess
+import tempfile
 import textwrap
 import time
+import unittest
 from pathlib import Path
 
 import pytest
@@ -550,3 +553,47 @@ def test_preflight_only_guards_are_pinned_statically():
     assert "is $state (terminal)" not in text or "terminal state" in text, "P6-483 wording"
     assert "TableEnsure/TablePurge helpers are deduplicated" not in text, \
         "P6-477 was deliberately deferred; this pin documents the expectation"
+
+# ---------------------------------------------------------------------------
+# P6-144: the host-stray filter must recognise every container cgroup form.
+# cgroup v1 / systemd scope -> `docker-<id>.scope`; cgroup v2 and the cgroupfs
+# driver -> `0::/docker/<id>`; containerd/k8s -> containerd/kubepods paths.
+# Matching only `docker-` classified container JVMs as host strays and tripped
+# G26 on a cgroup-v2 host.
+# ---------------------------------------------------------------------------
+class StrayCgroupClassificationTest(unittest.TestCase):
+    """Behavioural: feed real cgroup-file shapes to the pattern the script uses."""
+
+    @classmethod
+    def setUpClass(cls):
+        text = LIB.read_text()
+        hits = re.findall("grep -qsE '([^']+)' \"/proc/\\$p/cgroup\"", text)
+        assert len(hits) == 1, (
+            f"P6-144: expected exactly one host-stray cgroup predicate, found {len(hits)} — "
+            "re-point this guard at the new spelling")
+        cls.pattern = hits[0]
+
+    def _classifies_as_container(self, cgroup_line):
+        with tempfile.NamedTemporaryFile("w", suffix=".cgroup", delete=False) as fh:
+            fh.write(cgroup_line + "\n")
+            path = fh.name
+        try:
+            return subprocess.run(["grep", "-qsE", self.pattern, path]).returncode == 0
+        finally:
+            os.unlink(path)
+
+    def test_container_cgroup_forms_are_not_host_strays(self):
+        for line in ("0::/docker/abc123def",                      # cgroup v2, cgroupfs driver
+                     "0::/system.slice/docker-abc123def.scope",    # cgroup v1 / systemd scope
+                     "1:name=systemd:/docker/abc123def",           # cgroup v1, cgroupfs driver
+                     "0::/kubepods/besteffort/pod123/abc123def",   # k8s
+                     "0::/containerd/abc123def"):                  # containerd
+            self.assertTrue(self._classifies_as_container(line),
+                            f"P6-144: {line!r} must count as a container, not a host stray")
+
+    def test_host_cgroup_forms_are_still_strays(self):
+        for line in ("0::/init.scope",
+                     "0::/system.slice/ssh.service",
+                     "0::/user.slice/user-1000.slice/session-1.scope"):
+            self.assertFalse(self._classifies_as_container(line),
+                             f"P6-144: {line!r} is a host process and must be reported as a stray")

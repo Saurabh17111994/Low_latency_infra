@@ -415,12 +415,16 @@ pipeline_preflight() {
   local stray p
   stray=""
   # pgrep sees CONTAINER JVMs through the host /proc (same kernel) — a
-  # container-owned PID (docker cgroup) is NOT a host process. Filter by
-  # cgroup: only PIDs OUTSIDE any docker*.scope cgroup are true host
-  # data-path processes. (False-positive observed 2026-09-02 post-reboot:
-  # the compose ingestion service's JVM tripped G26 and blocked the run.)
+  # container-owned PID is NOT a host process. Filter by cgroup: only PIDs
+  # OUTSIDE any container cgroup are true host data-path processes. The
+  # cgroup path differs by host: v1/ systemd scope uses `docker-<id>.scope`,
+  # cgroup v2 (and the cgroupfs driver) uses `0::/docker/<id>`, and
+  # containerd/k8s use containerd or kubepods paths — matching only
+  # `docker-` classified those JVMs as host strays (P6-144). (Original
+  # false positive observed 2026-09-02 post-reboot: the compose ingestion
+  # service's JVM tripped G26 and blocked the run.)
   for p in $(pgrep -x faketool; pgrep -x arrow-bridge; pgrep -f 'com.trading.ingestion.IngestionService'; true); do
-    if ! grep -qs 'docker-' "/proc/$p/cgroup" 2>/dev/null; then
+    if ! grep -qsE 'docker[-/]|containerd|kubepods' "/proc/$p/cgroup" 2>/dev/null; then
       stray="$stray $p"
     fi
   done
