@@ -91,3 +91,4 @@ Operations records UTC timestamps, workload, software/configuration versions, ga
 - Observability, dashboards, alerts, and thresholds: `../08_implementation/10-observability.md`
 - DR: `./04-dr-plan.md`
 - Maintenance: `./05-maintenance.md`
+- Live-readiness gaps (one page: what blocks live money, and why): `./08-live-readiness-gaps.md`
