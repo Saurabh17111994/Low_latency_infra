@@ -120,6 +120,107 @@ expect_ok "B4: port check passes when :8899 is free (ss path)" bash -c '
   port_8899_free
 ' bash "$RUN"
 
+echo "=== P6-127..134 / P6-447..456: wave-47 invariants ==="
+# P6-127/128: the stray reap must run BEFORE the port assert, otherwise a stale
+# faketool holding :8899 makes the reap unreachable and the run dies instead.
+REAP_LINE=$(grep -n 'pgrep -x faketool || true' "$RUN" | head -1 | cut -d: -f1)
+ASSERT_LINE=$(grep -n 'port 8899 already in use' "$RUN" | head -1 | cut -d: -f1)
+if [ -n "$REAP_LINE" ] && [ -n "$ASSERT_LINE" ] && [ "$REAP_LINE" -lt "$ASSERT_LINE" ]; then
+  ok "P6-127: reap (line $REAP_LINE) precedes the port assert (line $ASSERT_LINE)"
+else
+  bad "P6-127: reap/assert order wrong (reap='$REAP_LINE' assert='$ASSERT_LINE')"
+fi
+# P6-129/133: a fixed /tmp readiness marker survives `kill -9` and false-passes.
+if grep -q '/tmp/ingestion.loadtest.ready' "$RUN"; then
+  bad "P6-129: fixed /tmp readiness path is back in run.sh"
+else
+  ok "P6-129: no fixed /tmp readiness path"
+fi
+if grep -q 'READINESS_FILE="\$OUT/ingestion.loadtest.ready"' "$RUN" && \
+   grep -q 'rm -f "\$READINESS_FILE"' "$RUN"; then
+  ok "P6-129: per-run readiness marker set and pre-cleared"
+else
+  bad "P6-129: per-run readiness marker or its pre-clear is missing"
+fi
+# P6-130/132: one counter for every token count, header validated, no head -1025.
+# (the prose in the P6-130/132 comment names the old idiom, so match the code form)
+if grep -q 'head -1025 "\$MANIFEST"' "$RUN"; then
+  bad "P6-130: head -1025 is back (the slice trusts the manifest shape again)"
+else
+  ok "P6-130: no shape-trusting head -1025 slice"
+fi
+CNT_SITES=$(grep -c 'count_tokens ' "$RUN")
+if [ "$CNT_SITES" -ge 4 ] && ! grep -q 'tail -n +2 "\$MANIFEST" | wc -l' "$RUN" \
+   && ! grep -q 'MANIFEST_SLICE" | grep -c .' "$RUN"; then
+  ok "P6-130: token counts all go through count_tokens (no wc -l / grep -c . left)"
+else
+  bad "P6-130: a second counting idiom is back (count_tokens sites=$CNT_SITES)"
+fi
+if grep -q 'grep . | head -1024' "$RUN" && grep -q 'manifest header has no comma separator' "$RUN"; then
+  ok "P6-130: slice built from validated, CR-stripped data rows"
+else
+  bad "P6-130: slice build lost its header validation or CR strip"
+fi
+# P6-448/454: /dev/tcp may only survive as the ss fallback (B4), never as the wait.
+DEV_SITES=$(grep -c 'exec 3<>/dev/tcp' "$RUN")
+if [ "$DEV_SITES" -eq 1 ]; then
+  ok "P6-448: no /dev/tcp probe left in the bind wait (1 site = the ss fallback)"
+else
+  bad "P6-448: exec 3<>/dev/tcp appears $DEV_SITES times (want exactly 1: the ss fallback)"
+fi
+# P6-450/455: the G2 failure path must tail the log, never cat it.
+if grep -q 'tail -20 "\$OUT/faketool.log"' "$RUN" && ! grep -q 'cat "\$OUT/faketool.log"' "$RUN"; then
+  ok "P6-450: G2 failure dumps a log tail, never cat"
+else
+  bad "P6-450: G2 still cats the faketool log"
+fi
+# P6-449/456: both startup waits must notice a dead JVM.
+ALIVE_BREAKS=$(grep -c 'alive "\$JVM_PID" || break' "$RUN")
+if [ "$ALIVE_BREAKS" -ge 2 ]; then
+  ok "P6-449: readiness + subscription waits break on JVM death ($ALIVE_BREAKS sites)"
+else
+  bad "P6-449: only $ALIVE_BREAKS wait(s) notice a dead JVM (want >=2)"
+fi
+# P6-131/134: teardown reaps collector AND watcher, and never waits the watcher out.
+if grep -q 'kill -9 "\$COLLECTOR_PID"' "$RUN" && grep -q 'pkill -9 -P "\$LIVENESS_PID"' "$RUN"; then
+  ok "P6-131: cleanup reaps both the collector and the watcher (children first)"
+else
+  bad "P6-131: cleanup does not reap collector + watcher"
+fi
+if grep -q 'wait "\$LIVENESS_PID" || \[ "\$RC" -ne 0 \]' "$RUN"; then
+  bad "P6-131: the unbounded watcher wait is back (up to 2min dead time)"
+else
+  ok "P6-131: no unbounded wait on the liveness watcher"
+fi
+if grep -q 'liveness_check t+end' "$RUN"; then
+  ok "P6-131: final t+end liveness check present"
+else
+  bad "P6-131: no final liveness check after the collector"
+fi
+# P6-447/452: credentials never inline, always from the hardened 0600 file.
+if grep -q 'ARROW_PASSWORD="testd-pass"' "$RUN" || grep -q 'ARROW_APP_SECRET="testd"' "$RUN" \
+   || grep -q 'JBSWY3DPEHPK3PXP' "$RUN"; then
+  bad "P6-447: inline test credentials are back in run.sh"
+else
+  ok "P6-447: no inline credentials in run.sh"
+fi
+if grep -q 'SECRETS_FILE=' "$RUN" && grep -q 'source "\$SECRETS_FILE"' "$RUN" \
+   && grep -q 'is a symlink' "$RUN" && grep -q 'not owner-only' "$RUN"; then
+  ok "P6-447: credentials come from the hardened secrets file"
+else
+  bad "P6-447: secrets-file loader missing or unhardened"
+fi
+# P6-451/453: numeric args validated before anything is created; OUT per run.
+expect_fail "P6-451: DURATION_S=abc rejected" bash "$RUN" abc 30
+expect_fail "P6-451: DURATION_S=0 rejected" bash "$RUN" 0 30
+expect_fail "P6-451: DURATION_S=240s rejected" bash "$RUN" 240s 30
+expect_fail "P6-451: INTERVAL_S=abc rejected" bash "$RUN" 240 abc
+if grep -q 'loadtest-\$(date +%Y%m%d-%H%M%S)-\$\$' "$RUN"; then
+  ok "P6-453: OUT is unique per run (pid suffix)"
+else
+  bad "P6-453: OUT is not run-unique"
+fi
+
 echo ""
 echo "=== guard self-test result: PASS=$PASS FAIL=$FAIL (total $((PASS+FAIL)) asserts) ==="
 [ "$FAIL" -eq 0 ] || exit 1
