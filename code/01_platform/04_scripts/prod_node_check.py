@@ -377,6 +377,9 @@ def _self_check(args, utc_now, run_id):
              "disk_min_gb": 10},
             {"name": "W1", "host": "10.0.0.21", "role": "worker", "swarm": True,
              "labels": {"role": "worker"}, "disk_min_gb": 500},
+            # deliberately swarm:False — this fixture is the only cover for the
+            # "not joined" branch. The shipped template marks O1 a joined worker
+            # (CHG-246); do not copy this entry into prod_vms.json.
             {"name": "O1", "host": "10.0.0.40", "role": "observability", "swarm": False,
              "labels": {"observability": "true"}, "disk_min_gb": 500},
         ],
@@ -388,6 +391,8 @@ def _self_check(args, utc_now, run_id):
     manager_host = _resolve_manager_host(fake_inv)
     per_node = []
     expect_ok = {"M1": True, "W1": False, "O1": True}  # W1 disk 480<500 AND label drift
+    # say it before the per-node lines, so nobody reads this inventory as topology
+    print("[self-check] FAKE inventory — classification proof only, not the shipped topology")
     for node in fake_inv["nodes"]:
         node_checks, ok = check_node(node, runner, manager_host=manager_host)
         per_node.append((node, (node_checks, ok)))

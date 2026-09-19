@@ -59,8 +59,8 @@
     {
       "name": "O1",
       "host": "10.0.0.40",
-      "role": "observability",
-      "swarm": false,
+      "role": "worker",
+      "swarm": true,
       "labels": { "observability": "true" }
     }
   ]

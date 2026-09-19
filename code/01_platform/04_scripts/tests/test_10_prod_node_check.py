@@ -293,3 +293,36 @@ def test_worker_identity_comes_from_a_call_a_worker_can_answer():
     for field in (".Name", ".Swarm.LocalNodeState", ".Swarm.ControlAvailable",
                   ".Swarm.NodeID"):
         assert field in identity_cmds[0]
+
+
+def test_example_inventory_marks_o1_as_a_joined_worker():
+    """The template an operator copies must survive its own gate (CHG-246).
+
+    Three stack services pin `node.labels.observability == true` and thirteen pin
+    `node.labels.role == worker`; a label only exists on a joined node, so an O1
+    outside the swarm leaves those services with nowhere to land — and
+    `swarm: false` skips the swarm check, so the gate passes without ever
+    verifying that. The role is checked too: the checker compares the inventory's
+    role against the role the swarm reports (`manager`/`worker` only), so a
+    joined node declaring `observability` FAILS at D1.3.
+    """
+    with open(os.path.join(SCRIPTS, "prod_vms.example.json")) as fh:
+        inventory = json.load(fh)
+
+    joined = [n for n in inventory["nodes"] if n.get("swarm")]
+    assert joined, "the example must contain at least one joined node"
+    for node in joined:
+        assert node["role"] in ("manager", "worker"), (
+            f"{node['name']} is marked swarm:true but declares role "
+            f"{node['role']!r}; a swarm only reports manager/worker, so the "
+            "checker would FAIL against the live node")
+
+    o1 = next(n for n in inventory["nodes"] if n["name"] == "O1")
+    assert o1["swarm"] is True and o1["role"] == "worker"
+    assert o1["labels"].get("observability") == "true"
+
+    # and the observability label stays unique — it is what keeps the trading
+    # stack off the observability VM
+    carriers = [n["name"] for n in inventory["nodes"]
+                if n.get("labels", {}).get("observability") == "true"]
+    assert carriers == ["O1"]
