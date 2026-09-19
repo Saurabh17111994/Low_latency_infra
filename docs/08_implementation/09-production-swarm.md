@@ -10,7 +10,7 @@ Build this phase, then implement the tests in the second section before moving o
 
 | Field | Value |
 | --- | --- |
-| Status | Partially implemented (offline) — M1 docs + M2 deployment static 25/25 PASS on laptop (single-VM `docker-compose.yml` + `docker-stack.yml` `test_09_stack.py`), M3 4VM live (`SWARM-MGR` quorum 2/3, `replication.factor=3`, `S3` HA, `PERF-NODELOSS`) still `TO_BE_VERIFIED` |
+| Status | Partially implemented (offline) — M1 docs + M2 deployment static 31/31 PASS on laptop (single-VM `docker-compose.yml` + `docker-stack.yml` `test_09_stack.py`), M3 4VM live (`SWARM-MGR` quorum 2/3, `replication.factor=3`, `S3` HA, `PERF-NODELOSS`) still `TO_BE_VERIFIED` |
 | Owner | Platform Team |
 | Topology | v1: 4 VMs (3× Manager+Worker + 1 O2) → v2: 7 VMs (3× Manager-ONLY + N≥3 Workers + 1 O2), same stack, Option B |
 | EOD controller | Named service or scheduled job owning manifest lifecycle |
@@ -22,7 +22,7 @@ Build this phase, then implement the tests in the second section before moving o
 | Milestone | Status 2026-08-24 | Evidence offline (laptop) | Needs 4VM Swarm |
 | --- | --- | --- | --- |
 | M1 Architecture (docs) | DONE | v1 4VM / v2 7VM Option B role labels cross-check `docs_audit` + `docker-stack.yml 724L` doc tables match; `09` `M1` docs parity `test_09_stack.py StackShape 5 Placement 3` | Live docs review on provisioned Swarm (labels visible `docker node ls`) |
-| M2 Deployment (stack + 1-host mimic) | DONE | `docker-stack.yml` immutable digests `zookeeper@sha256:43d3…` `golang:1.24.5-alpine@sha256:daae04eb…`, `5 x-healthcheck` exceptions documented, `x-networks` encrypted `overlay` `attachable:false`, `secrets external:true`, `replicas 1→3` scale `25/25 PASS` `make test-09` + `docker compose config` parses; `stack_selfcheck.sh` `1-host swarm mimic` compile-only | `docker stack deploy` 7VM, `s3://tradingticks-aug-2026` `high-availability.type:zookeeper` `replication.factor=3` 8 `[ ]` placements, `SWARM-MGR-001..006` quorum 2/3 survive 1 loss |
+| M2 Deployment (stack + 1-host mimic) | DONE | `docker-stack.yml` immutable digests `zookeeper@sha256:43d3…` `golang:1.24.5-alpine@sha256:daae04eb…`, `5 x-healthcheck` exceptions documented, `x-networks` encrypted `overlay` `attachable:false`, `secrets external:true`, `replicas 1→3` scale `31/31 PASS` `make test-09` + `docker compose config` parses; `stack_selfcheck.sh` `1-host swarm mimic` compile-only | `docker stack deploy` 7VM, `s3://tradingticks-aug-2026` `high-availability.type:zookeeper` `replication.factor=3` 8 `[ ]` placements, `SWARM-MGR-001..006` quorum 2/3 survive 1 loss |
 | M3 Production HA (4VM live) | NOT FULLY | `make up` `12 Running/Started` single-VM `replication.factor=1` HA disabled `file:///checkpoints` (dev) — proves dev path | `3-node ZK 3.9.2` `HA/recovery` `PERF-NODELOSS 50k tps 3k instr` `DR-001..006` `chaos-suite` encrypted S3 recovery, capacity `500GB SSD` proof — cannot on 1 VM (`08:34` `cannot prove replication/one-VM tolerance/encrypted S3 recovery/production capacity`) |
 
 ### Placement model
@@ -86,7 +86,7 @@ Scale-out steps (1 → 3 VMs): add the two workload nodes and labels, convert Zo
 
 **Principle:** Docker Swarm provides Raft consensus built-in. The project does not implement Raft. It only configures and validates the 3-manager topology.
 
-**v1 — Baseline (4 VMs, ship now):** `VM1, VM2, VM3 = Swarm Manager + Worker (Active)`, `VM4 = Observability (outside Swarm)`. This is the authoritative production topology for the initial `N=3` worker baseline. It is cost-efficient (4 VMs) and HA-correct (Raft quorum `2/3`, tolerates 1 manager loss).
+**v1 — Baseline (4 VMs, ship now):** `VM1, VM2, VM3 = Swarm Manager + Worker (Active)`, `VM4 = Observability (worker, joined — label observability=true, no vote)`. VM4 must join the swarm or the observability services have no node to land on; a worker does not vote, so the quorum stays `2/3`. This is the authoritative production topology for the initial `N=3` worker baseline. It is cost-efficient (4 VMs) and HA-correct (Raft quorum `2/3`, tolerates 1 manager loss).
 
 ```text
                     PRODUCTION v1 — 4 VMs (NOW)
@@ -109,10 +109,10 @@ Scale-out steps (1 → 3 VMs): add the two workload nodes and labels, convert Zo
                      │   2 failures = lost │
                      └─────────────────────┘
                               +
-                        VM4 = O1 Observability (outside Swarm)
+                        VM4 = O1 Observability (worker, joined, no vote)
 ```
 
-**v2 — Evolution (7 VMs, when scaling or contention observed):** `M1, M2, M3 = Swarm Manager ONLY (Drained)`, `W1, W2, W3 (+ W4...) = Worker`, `O1 = Observability (outside Swarm)`. Trigger: `N>6` workers, sustained CPU >80%, or observed Raft election flaps. The same `docker-stack.yml` works unchanged — only `docker node update --availability drain M1 M2 M3` and adding `W1-3` changes.
+**v2 — Evolution (7 VMs, when scaling or contention observed):** `M1, M2, M3 = Swarm Manager ONLY (Drained)`, `W1, W2, W3 (+ W4...) = Worker`, `O1 = Observability (worker, joined, no vote)`. Trigger: `N>6` workers, sustained CPU >80%, or observed Raft election flaps. The same `docker-stack.yml` works unchanged — only `docker node update --availability drain M1 M2 M3` and adding `W1-3` changes.
 
 ```text
                     PRODUCTION v2 — 7 VMs (EVOLUTION)
@@ -134,7 +134,7 @@ Scale-out steps (1 → 3 VMs): add the two workload nodes and labels, convert Zo
   │Flink TM    │  │Flink TM    │  │Flink TM    │  │+ capacity │
   └───────────┘   └───────────┘   └───────────┘   └───────────┘
                               +
-                         O1 = Observability (outside Swarm)
+                         O1 = Observability (worker, joined, no vote)
 ```
 
 **Why v1 then v2:** v1 is correct for the initial baseline — Swarm docs state managers may be workers; dedicating 3 VMs to only Raft (2GB RAM) at `N=3` wastes 75% VM cost and exceeds the local PC (`15GB`) for `7-VM` validation. v2 provides strict control-plane isolation when worker pressure (Flink 30GB DirectMemory, Fluss compaction) risks Raft heartbeat latency (~10ms). The stack is forward-compatible: placement uses `role` labels (`role=manager`, `role=worker`, `flink=true`, `fluss=true`, `storage=nvme`), not hard-coded hostnames, so `W4` joins without stack redesign.
@@ -216,6 +216,27 @@ Rejected: Option A (separate branches for local / mimic / prod) — rejected bec
 * Local (08): `docker compose -f code/01_platform/01_docker/docker-compose.yml up` or `make up`
 * Local mimic of production (09 on 1 computer): `docker swarm init` then `docker stack deploy -c code/01_platform/01_docker/docker-stack.yml prod`
 * Real production (09 on 4 computers): same `docker-stack.yml` on the 4 VMs after `swarm init` / `swarm join` and node labels
+
+### Pre-deploy implementation items (the five mechanics the VM guide marks `[NOT BUILT]`)
+
+`docs/05_deployment/PROD_VM_PROVISIONING.md` §6.1 records five mechanics the
+deployment path needs that no phase builds today. They are listed here so the
+build plan owns them: all five are code rather than documentation, each needs its
+own change record, and none needs the production VMs — they can be built and
+tested on the workstation.
+
+| # | Item | What to build | Acceptance test | Unblocks |
+| --- | --- | --- | --- | --- |
+| 1 | Publish every image and wire the lock into the deploy environment | Push the six project-built images (Flink runtime, Fluss runtime, and the four app images `INGESTION_IMAGE`, `NAUTILUS_IMAGE`, `EXECUTION_BRIDGE_IMAGE`, `EXECUTION_GATEWAY_IMAGE`) to the `registry:2` container on VM1 — retired as pins in CHG-218 because an image that was never pushed has no registry manifest digest — then make every image reference the deploy environment carries an immutable digest (`<vm1-ip>:5000/name@sha256:…`; `localhost` is wrong there, because every node resolves it as itself). `runtime.lock` already holds digests for `FLUSS_IMAGE`, `FLINK_IMAGE`, `OPENOBSERVE_IMAGE` and `ZOOKEEPER_IMAGE`; the deploy environment carries bare tags for three of them, so a deploy is currently tag-based. | `make pin-check` step `[5/6]` already rejects bare tags in `runtime.lock`; add a parity test asserting the deploy environment's image values equal the lock's digests | VM guide `S1` (build) and `S4` (publish), therefore `S7` |
+| 2 | Secrets bootstrap from one values file | One script creating the nine `external: true` secrets the stack declares, from a single git-ignored values file and never from a command line visible to `ps`. The stack file is authoritative for names; `docs/05_deployment/06-swarm-secrets.md` still creates five ingestion-era names, two of which (`arrow_app_id`, `arrow_user_id`) are not stack secrets at all — it must be rewritten in the same change. | A test asserting the script's name list equals the `secrets:` block in `docker-stack.yml`; this drift is what fails a deploy with "secret not found" | VM guide `S6` |
+| 3 | Host bootstrap and a real clock source | A script installing Docker Engine and enabling NTP/chrony on a fresh VM, plus an offset check in `prod_node_check.py` (it probes reachability, disk, role and labels, and records `clock: UTC` as a label only — it measures no offset). Enforcement itself already exists: CHG-107 arms a periodic `DriftMonitor` in the live boot loop, but the offline path uses `FixedOffsetSource(0)`, so the real NTP/chrony `OffsetSource` is unbuilt. | `prod_node_check.py --self-check` green on a fresh VM; a drift test proving `\|offset\| > CLOCK_OFFSET_LIMIT_MS` still fails closed to `safety_halt()` | VM guide `S4` |
+| 4 | Multi-node pre-deploy validation | `stack_selfcheck.sh` refuses to run when the swarm has more than one node ("single-host mimic, not a cluster"), so nothing validates a real cluster's stack before `docker stack deploy`. Either parameterise that script for a real cluster or add a cluster validator covering the 13 `required_vars`, `docker stack config`, placement labels and node roles. | Validator green against a multi-node swarm, with its failure modes asserted offline | VM guide `S7` |
+| 5 | EOD scheduling | The stack requirement is "a named service or scheduled job owning manifest lifecycle", and `eod_controller.py` exists (SCH-23; subcommands `status`, `run`, `extend`, `reconcile`, `reset`), but no cron, systemd timer or stack service anywhere invokes it, so the EOD manifest lifecycle never starts in production. | A scheduler entry or stack service that invokes the run, plus a test asserting the manifest reaches `VERIFIED` | VM guide `S11` |
+
+**Ordering:** items 2 and 1 are the hard prerequisites for any deploy; 3 and 4 are
+prerequisites for *validating* a deploy; 5 is independent. Two inputs stay
+human-only — the registry choice and the `CHECKPOINT_DIR` (`s3://`) value — and are
+tracked in the live-readiness ledger.
 
 ### The Flink runtime image (CHG-179)
 
@@ -438,6 +459,11 @@ Every change record includes:
 - Post-deployment verification.
 
 Any uncertain rollback returns the Executor gate to `HALTED`. Schema-breaking clean break is permitted only before live-money release with reset/replay evidence.
+
+The stage-by-stage procedure for executing this section on the production VMs —
+build/publish/pin, cluster formation, secrets, deploy, readiness, drills — is
+`docs/05_deployment/PROD_VM_PROVISIONING.md` §9 (`S0`–`S11`). That document is a
+procedure only: it records no status, and no stage in it may enable order placement.
 
 ### M2 completion — Tier-2 stack hardening (2026-08-21)
 
