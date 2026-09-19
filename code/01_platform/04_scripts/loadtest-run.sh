@@ -118,6 +118,21 @@ port_8899_free() {
   return 0
 }
 
+# G2/P6-450/455: faketool must really be in real-rate mode, i.e. emitting frames.
+# The log write is buffered, so a single grep right after bind raced the flush
+# (false fatal) — poll instead, give up as soon as faketool dies, and never `cat`
+# a log that grows at 20k lines/s (bounded tail only). Its own function so the
+# guard self-test can drive it with synthetic logs (P6-229).
+wait_real_rate() { # wait_real_rate <log> <pid> [tries]: rc 1 when the marker never appears
+  local log="$1" pid="$2" tries="${3:-10}"
+  for _ in $(seq 1 "$tries"); do
+    grep -q "real_rate=true" "$log" && return 0
+    alive "$pid" || return 1
+    sleep 1
+  done
+  return 1
+}
+
 # ---------- B3: mid-run liveness (defined here: the startup waits use alive) ----------
 # faketool/JVM can die MID-RUN (e.g. killed by session teardown) and leave the
 # JVM consuming nothing while the collector keeps "measuring". Watch both PIDs
@@ -249,15 +264,7 @@ if [ "$BOUND" != 1 ]; then
 fi
 
 # G2: assert real-rate mode is actually on (idle faketool = silently wrong measurements)
-# P6-450/455: the log write is buffered, so a single grep right after bind raced
-# the flush (false fatal); and never `cat` a log that grows at 20k lines/s.
-RATE_OK=0
-for _ in $(seq 1 10); do
-  grep -q "real_rate=true" "$OUT/faketool.log" && { RATE_OK=1; break; }
-  alive "$FAKETOOL_PID" || break
-  sleep 1
-done
-if [ "$RATE_OK" != 1 ]; then
+if ! wait_real_rate "$OUT/faketool.log" "$FAKETOOL_PID"; then
   echo "!! faketool log missing real_rate=true — log tail:"; tail -20 "$OUT/faketool.log"
   fail "faketool is NOT in real-rate mode; aborting to avoid idle-feed measurements"
 fi

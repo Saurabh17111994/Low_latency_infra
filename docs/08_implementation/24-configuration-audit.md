@@ -42,7 +42,7 @@ The biggest gaps are not "missing env vars" but **fragmentation** (config split 
 | M24 | `localhost:9123`, `fluss-coordinator:9123` | many files | Fluss bootstrap | Repeated everywhere; see D3 |
 | M25 | `bucket.num=16`, `table.log.ttl=7d`, `freshness=5min` | DDL `02_raw_table_1.sql` | Table storage params | Hardcoded in SQL; the DdlBootstrap Java mirror has them too (D2) |
 | M26 | `bucket.num=8` | `fluss.properties`, DDL | Cluster bucketing | `8` in `fluss.properties`, `16` in DDL — conflicting (D4). **Resolved 2026-09-09 (P5-014/023/029/030): `fluss.properties` deleted — never wired into any image/mount/script (single-commit MVP artifact); the Fluss server config is the `FLUSS_PROPERTIES` env block in docker-compose.yml/docker-stack.yml. bucket.num exists only as per-table DDL options.** |
-| M27 | `RATE_HZ` default `10`, `LIVE_THRESHOLD_RATE=500` | `loadtest-preview.sh:39`, `loadtest-collect.sh:32` | Loadtest rates | Operational test params; RATE_HZ is env-overridable but THRESHOLD is a literal |
+| M27 | `RATE_HZ` default `10`, `LIVE_THRESHOLD_RATE=500` | `loadtest-preview.sh:39`, `loadtest-collect.sh:27` | Loadtest rates | Operational test params; both env-overridable with defaults (collector threshold and `TM_CONTAINER` since wave 48) |
 | M28 | `DURATION_S=300`, `INTERVAL_S=30` | `loadtest-preview.sh:33-34` | Test duration | CLI-arg-driven, fine |
 | M29 | `-port 8899` faketool | `loadtest-preview.sh:119` | Mock feed port | Hardcoded port |
 | M30 | `TASK_MANAGER_MEMORY_MANAGED_SIZE=2g`, `TASK_MANAGER_NETWORK_MEMORY_MAX=256m`, `STATE_BACKEND=rocksdb` | `docker-compose.yml` | Flink TM memory | env-overridable in compose (`${...:-2g}`) — good pattern, defaults in compose |
@@ -61,7 +61,7 @@ The biggest gaps are not "missing env vars" but **fragmentation** (config split 
 | S6 | `OTEL_COLLECTOR_HOST=otel-collector:4318` | `SignalJobConfig.java:189` | Observability endpoint — env-overridable, fine |
 | S7 | `FLUSS_WRITER_BATCH_TIMEOUT_MS=1`, `FLUSS_WRITER_MODE=generic`, `FLUSS_WRITERS=1` | `IngestionConfig.java` | A/B bench knobs — already env, good |
 | S8 | `commandTimeout=10s` (exec bridge) | server.go:50 | env-overridable would be nice |
-| S9 | `PROM=http://localhost:9250/metrics`, `FLINK=http://localhost:8081` | `loadtest-collect.sh:30-31` | Ops endpoints, hardcoded |
+| S9 | `PROM=http://localhost:9250/metrics`, `FLINK=http://localhost:8081` | `loadtest-collect.sh:25-26` | Ops endpoints, env-overridable with localhost defaults |
 | S10 | `DEDUP_TTL_MS` / `CANDLE_WINDOW_MS` pinning | PlatformConfig.validateStartup | The pin mechanism itself is good; the *values* should be env-settable with the pin as a prod-only guard |
 
 ### 1C. Should remain hardcoded (true constants — keep in code)
@@ -112,7 +112,7 @@ The biggest gaps are not "missing env vars" but **fragmentation** (config split 
 2. **Schema definition scattered** (P1) — the worst maintenance hazard; a schema change is a 3-file edit.
 3. **Mixed config-flag philosophy** — some values are *pinned* (refuse-start on deviation: `DEDUP_TTL_MS`, `CANDLE_WINDOW_MS`, HFT pins), some are *ranged* (env-settable within bounds), some are *silent defaults*. This is defensible but undocumented as a policy; a new maintainer can't tell which is which.
 4. **Secrets in .env at rest** (S1/M19-22) — `.env` is git-ignored so not committed, but the file holds live broker credentials + EOD key + OpenObserve admin. The EOD key is a *real encryption key* (base64, `EOD_MASTER_KEY`).
-5. **Test-env coupling** — `loadtest-preview.sh` and `loadtest-collect.sh` hardcode localhost endpoints and rates that assume a local dev cluster; running them against a remote cluster requires editing the script.
+5. **Test-env coupling** — `loadtest-preview.sh` still hardcodes localhost endpoints and rates that assume a local dev cluster (editing the script is required for a remote cluster). `loadtest-collect.sh` (wave 48) is the fixed pattern: `PROM_URL`, `FLINK_URL`, `LIVE_THRESHOLD_RATE` and `TM_CONTAINER` are env-overridable with localhost defaults.
 
 ---
 
@@ -180,7 +180,7 @@ secrets:       (separate, git-ignored) ARROW_APP_SECRET, ARROW_PASSWORD, ARROW_T
 15. ✅ `JVM_HEAP_PERCENT` (M31): env with 65/35 default.
 
 **Phase 6 — script/ops params:**
-16. ✅ `loadtest-collect.sh` endpoints/rates (S9/M27) → env with localhost defaults.
+16. ✅ `loadtest-collect.sh` endpoints/rates (S9/M27) → env with localhost defaults (the rate threshold and container name joined them in wave 48).
 17. ✅ `INSTRUMENT_MANIFEST_HOST_PATH` (M23) → derive from repo root, not absolute path.
 18. `MOCK_ARROW_*` tick-gen literals (M14) → env where they vary by test scenario.
 
