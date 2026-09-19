@@ -70,7 +70,7 @@ class Sandbox:
         stub.write_text(
             "#!/usr/bin/env bash\n"
             f"printf 'java %s\\n' \"$*\" >>{self.call_log}\n"
-            f"env | grep -E '^(ARROW_|FLUSS_|RAW_TABLE_NAME=)' | sort >{self.env_dump}\n"
+            f"env | grep -E '^(ARROW_|FLUSS_|RAW_TABLE_NAME=|SECRETS_VIA_ENV_FILE=|DEPLOYMENT_ENV=)' | sort >{self.env_dump}\n"
             "exit 0\n",
         )
         stub.chmod(0o755)
@@ -294,7 +294,8 @@ class SmokeTestPreflight(unittest.TestCase):
         for expected in ("FLUSS_BOOTSTRAP=127.0.0.1:", "ARROW_APP_ID=acme-id",
                          "ARROW_APP_SECRET=acme-secret", "ARROW_USER_ID=acme-user",
                          "ARROW_PASSWORD=acme-pass", "ARROW_TOTP_KEY=acme-totp",
-                         "RAW_TABLE_NAME=scratch_ticks"):
+                         "RAW_TABLE_NAME=scratch_ticks",
+                         "SECRETS_VIA_ENV_FILE=1"):
             self.assertIn(expected, env_text)
 
     def test_local_defaults_apply_when_nothing_is_set(self) -> None:
@@ -308,7 +309,8 @@ class SmokeTestPreflight(unittest.TestCase):
                          "ARROW_USER_ID=smoke-user", "ARROW_PASSWORD=smoke-password",
                          "ARROW_TOTP_KEY=smoke-totp-key", "RAW_TABLE_NAME=raw_table_1",
                          "ARROW_MAX_EVENT_AGE_MS=5000",
-                         "ARROW_MAX_FUTURE_EVENT_SKEW_MS=2000"):
+                         "ARROW_MAX_FUTURE_EVENT_SKEW_MS=2000",
+                         "SECRETS_VIA_ENV_FILE=1", "DEPLOYMENT_ENV=dev"):
             self.assertIn(expected, env_text)
         self.assertIn("SmokeTest", self.box.calls)
 

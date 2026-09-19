@@ -26,6 +26,13 @@ export RAW_TABLE_NAME="${RAW_TABLE_NAME:-raw_table_1}"
 # without them SmokeTest throws at the first config-validation step.
 export ARROW_MAX_EVENT_AGE_MS="${ARROW_MAX_EVENT_AGE_MS:-5000}"
 export ARROW_MAX_FUTURE_EVENT_SKEW_MS="${ARROW_MAX_FUTURE_EVENT_SKEW_MS:-2000}"
+# SecretGuard refuses the SECRET_KEYS above when they sit in the env unless the
+# process declares they arrived through an env file — the marker docker-compose.yml
+# and the four host harnesses (loadtest-run, tiering-smoke, stage-soak-e2e,
+# pipeline-lib) already set.
+export SECRETS_VIA_ENV_FILE="${SECRETS_VIA_ENV_FILE:-1}"
+# IngestionConfig requires a deployment env; compose defaults it to dev the same way.
+export DEPLOYMENT_ENV="${DEPLOYMENT_ENV:-dev}"
 
 JAR="02_services/01_ingestion/target/ingestion.jar"
 TEST_CLASSES="02_services/01_ingestion/target/test-classes"
