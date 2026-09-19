@@ -2,9 +2,12 @@
 
 These tests prove local Compose cannot be mistaken for Swarm prod and that
 the single-node dev simplifications are explicit. All offline PASS (CI green);
-live probes gate on Swarm/prod env vars so they SKIP locally.
+live probes gate on Swarm/prod env vars so they SKIP locally, and PROD-011 also
+gates on the docker CLI plus the gitignored .env/secrets.env (P6-614).
 """
-import re, subprocess, unittest
+import json, re, shutil, subprocess, unittest
+
+import yaml
 from pathlib import Path
 
 ROOT = Path(__file__).parents[4]
@@ -42,6 +45,19 @@ def service_block(text, name):
             break
     body = (l for l in lines[start:end] if not l.lstrip().startswith("#"))
     return "\n".join(body)
+
+def fluss_properties(compose_yaml):
+    """Every service's FLUSS_PROPERTIES value, as parsed — not regex-matched (P6-817).
+
+    The block is the live server config, so a leak scan over it must cover all of
+    them and must be able to tell "nothing found" from "nothing scanned".
+    """
+    parsed = yaml.safe_load(compose_yaml)
+    return [svc["environment"]["FLUSS_PROPERTIES"]
+            for svc in parsed["services"].values()
+            if isinstance(svc.get("environment"), dict)
+            and "FLUSS_PROPERTIES" in svc["environment"]]
+
 
 def s3a_properties(xml):
     """Return the (name, value) pairs of an Hadoop core-site.xml, comments stripped.
@@ -84,7 +100,9 @@ class ProdHardeningTest(unittest.TestCase):
         ex = (ROOT / "code/01_platform/01_docker/.env.example").read_text()
         # placeholders use ${} or example/test/sandbox tokens, not real creds
         self.assertNotRegex(ex.lower(), r"sk-live|prod.*token.*[a-f0-9]{20}", "PROD-004: .env.example leaks prod-like token")
-        self.assertTrue(".env" in (ROOT / ".gitignore").read_text() if (ROOT / ".gitignore").exists() else True)
+        # P6-612: `if exists else True` made a deleted .gitignore look like a pass.
+        self.assertIn(".env", (ROOT / ".gitignore").read_text(),
+                      "PROD-004: .env must be gitignored")
 
     def test_PROD_005_no_latest_digests_pinned(self):
         """PROD-005: no :latest; digests pinned where required (golang@sha256, rust:1.97.1)."""
@@ -117,7 +135,15 @@ class ProdHardeningTest(unittest.TestCase):
         """PROD-008: DDL apply is idempotent + evidence 2775/664 (not root-owned)."""
         self.assertTrue((ROOT / "code/01_platform/04_scripts/ddl_apply.py").exists())
         self.assertTrue((ROOT / "code/01_platform/04_scripts/evidence_ownership_check.py").exists())
-        dockerfile = (ROOT / "code/01_platform/01_docker/ddl-apply/Dockerfile").read_text() if (ROOT / "code/01_platform/01_docker/ddl-apply/Dockerfile").exists() else ""
+        # P6-816: the image must run the repo's own orchestrator, and the non-root
+        # contract (02-schema-storage.md: the ENGINE runs as uid/gid 10001) lives in
+        # the entrypoint, not in a Dockerfile USER line.
+        dockerfile = (ROOT / "code/01_platform/01_docker/ddl-apply/Dockerfile").read_text()
+        self.assertIn("04_scripts/ddl_apply.py", dockerfile,
+                      "PROD-008: the image must run the repo's ddl_apply.py, not a copy")
+        entrypoint = (ROOT / "code/01_platform/01_docker/ddl-apply/ddl-apply-entrypoint.sh").read_text()
+        self.assertIn("setpriv", entrypoint, "PROD-008: the engine must drop privileges via setpriv")
+        self.assertIn("10001", entrypoint, "PROD-008: the engine must run as the documented uid/gid 10001")
         # ownership gate is documented in Makefile
         self.assertIn("evidence-ownership-check", (ROOT / "Makefile").read_text())
 
@@ -128,12 +154,12 @@ class ProdHardeningTest(unittest.TestCase):
         self.assertIn("max_elapsed_time: 5m", ct)
         self.assertIn("send_failed", ct, "PROD-009: send_failed metric name changed")
         self.assertIn("http://openobserve:5080", ct)
-        # ingestion must not hold O2 cred (collector does)
-        ing_env = ""
-        for p in (ROOT / "code/02_services/01_ingestion").rglob("*.java"):
-            if "O2_AUTH" in p.read_text():
-                ing_env = p.read_text()
-                break
+        # P6-613: report, do not swallow — the walk used to keep its match in a
+        # variable nobody read. Source-level on purpose: every service carries the
+        # shared env file, so a rendered-config check false-fires (l9 NETWORK-008).
+        leaked = [str(p) for p in (ROOT / "code/02_services/01_ingestion").rglob("*.java")
+                  if "O2_AUTH" in p.read_text()]
+        self.assertEqual([], leaked, "PROD-009: ingestion must not hold O2 cred")
         # filelog receiver is on collector, not ingestion
         self.assertIn("filelog", ct)
 
@@ -150,20 +176,34 @@ class ProdHardeningTest(unittest.TestCase):
         self.assertIn("InvalidTransition", src)
 
     def test_PROD_011_execution_t3_disabled_by_default(self):
-        """PROD-011: bridge disabled by default; needs --profile execution-t3 to appear."""
-        import json, subprocess
-        cfg_default = json.loads(subprocess.check_output(["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env"),"config","--format","json"], text=True))
+        """PROD-011: bridge disabled by default; needs --profile execution-t3 to appear.
+
+        P6-614: the module's one test that needs the docker CLI *and* the two
+        gitignored env files, so it skips when either is absent instead of erroring
+        in a Docker-less checkout.
+        """
+        env_files = [COMPOSE.parent / ".env", COMPOSE.parent / "secrets.env"]
+        if shutil.which("docker") is None or not all(f.exists() for f in env_files):
+            self.skipTest("needs the docker CLI plus .env/secrets.env (both gitignored)")
+        base = ["docker", "compose", "-f", str(COMPOSE)]
+        for f in env_files:
+            base += ["--env-file", str(f)]
+        cfg_default = json.loads(subprocess.check_output([*base, "config", "--format", "json"], text=True))
         self.assertNotIn("execution-bridge", cfg_default.get("services", {}))
-        cfg_t3 = json.loads(subprocess.check_output(["docker","compose","-f",str(COMPOSE),"--env-file",str(COMPOSE.parent/".env"),"--env-file",str(COMPOSE.parent/"secrets.env"),"--profile","execution-t3","config","--format","json"], text=True))
+        cfg_t3 = json.loads(subprocess.check_output([*base, "--profile", "execution-t3", "config", "--format", "json"], text=True))
         self.assertIn("execution-bridge", cfg_t3["services"])
 
     def test_PROD_012_no_aws_creds_in_fluss_properties(self):
         """PROD-012: S3A creds via env (AWS_*) only, never in FLUSS_PROPERTIES."""
         text = compose_text()
         # FLUSS_PROPERTIES must not contain AWS_SECRET
-        props_block = re.findall(r"FLUSS_PROPERTIES:.*?(?=\n\s{6}[A-Z]|\nservices:|\Z)", text, flags=re.S)
-        joined = " ".join(props_block)
-        self.assertNotIn("AWS_SECRET_ACCESS_KEY:", joined, "PROD-012: creds leaked into FLUSS_PROPERTIES")
+        # P6-817: scan the parsed values, not a regex over the raw text. The old
+        # delimiter guessed "6 spaces then an uppercase letter"; when it missed, the
+        # block list came back empty and the leak assertion passed on nothing.
+        props = fluss_properties(text)
+        self.assertTrue(props, "PROD-012: no FLUSS_PROPERTIES block found — the leak scan would be vacuous")
+        leaked_props = [b for b in props if "AWS_SECRET_ACCESS_KEY:" in b]
+        self.assertEqual([], leaked_props, "PROD-012: creds leaked into FLUSS_PROPERTIES")
         # env interpolation is correct
         self.assertIn("${AWS_ACCESS_KEY_ID", text)
         self.assertIn("${AWS_SECRET_ACCESS_KEY", text)

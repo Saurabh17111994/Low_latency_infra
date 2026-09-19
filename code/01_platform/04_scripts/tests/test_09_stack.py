@@ -17,6 +17,8 @@ verify the production stack compiles to a legal, deployable Swarm manifest:
 Live quorum/HA behaviour (SWARM-MGR-001..006) is NOT testable offline — that
 is M3 (multi-VM rig). These tests only gate M2 (offline prep → 1-host mimic).
 """
+import re
+
 import yaml
 from pathlib import Path
 
@@ -34,6 +36,33 @@ OBSERVABILITY = ["otel-collector", "openobserve", "alert-consumer"]
 
 def _load():
     return yaml.safe_load(STACK.read_text())
+
+
+def service_block_raw(raw, name):
+    """One service's source from the stack, comments INCLUDED (P6-818).
+
+    The healthcheck-exception markers are comments, so a block read for them must
+    not be comment-stripped: scoping the check to the service's own block is what
+    stops one marker from justifying every exception.
+    """
+    lines = raw.splitlines()
+    start = next((i for i, l in enumerate(lines) if l.rstrip() == f"  {name}:"), None)
+    if start is None:
+        raise AssertionError(f"service {name!r} not found in docker-stack.yml")
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"^  \S", lines[i])),
+               len(lines))
+    return "\n".join(lines[start:end])
+
+
+def ha_backend_ok(props):
+    """True when Flink's HA properties name a real backend and its ensemble (P6-615).
+
+    A cluster-id alone proves nothing: an id with no backend is a JobManager that
+    cannot fail over. The `or True` this replaces made the whole check unreachable.
+    """
+    return ("high-availability.type: zookeeper" in props
+            and "high-availability.zookeeper.quorum: zookeeper-1:2181,zookeeper-2:2181,"
+                "zookeeper-3:2181" in props)
 
 
 class TestStackShape:
@@ -252,7 +281,9 @@ class TestTier1ProductionConfig:
         assert "restart-strategy.type: fixed-delay" in props, "restart-strategy must be fixed-delay"
         assert "restart-strategy.fixed-delay.attempts: 3" in props, "must cap retries at 3"
         assert "restart-strategy.fixed-delay.delay: 30 s" in props, "must pause 30s between retries"
-        assert "high-availability.cluster" in props or "high-availability-zookeeper" in props or True
+        # P6-615: `… or True` could never fail. Assert the backend and its ensemble,
+        # not a substring of the cluster-id already asserted above.
+        assert ha_backend_ok(props), "Flink HA must name the ZooKeeper backend and the full ensemble"
 
     def test_every_service_has_memory_limit(self):
         d = _load()
@@ -455,8 +486,14 @@ class TestTier2Hardening:
             assert name in self.HEALTHCHECK_ALLOWED_EXCEPTIONS, (
                 f"{name}: no healthcheck and not a declared exception"
             )
-            # each exception must justify itself in-place
-            assert f"x-healthcheck:" in raw, f"{name}: x-healthcheck marker missing"
+            # P6-818: the marker must be in THIS service's block. Searching the
+            # whole file let one marker justify every exception — and hid that
+            # otel-collector had none at all.
+            block = service_block_raw(raw, name)
+            marker = next((l for l in block.splitlines() if "x-healthcheck:" in l), "")
+            assert marker, f"{name}: x-healthcheck marker missing from its own block"
+            assert "none" in marker and len(marker.split(":", 1)[1].strip()) >= 20, \
+                f"{name}: the marker must state why the exception is valid: {marker.strip()}"
 
     def test_overlay_networks_encrypted_all(self):
         d = _load()
