@@ -118,30 +118,51 @@ JAVAEOF
 # controller. Propagate the failure instead — callers compare the output against
 # "0", so both the bare number (days_on_file) and the distinct failure string
 # below are part of the contract.
+#
+# `status` exits 0/2/3 BY DESIGN — the tool documents `0 ok, 1 failure,
+# 2 extension/retryable, 3 pending work, 4 usage/approval, 5 lease held` — and it
+# reports 3 (PENDING_WORK) precisely when unverified days exist, which is the
+# normal state right after a fail-closed run. So the exit code alone says nothing
+# here; what matters is whether a status was produced at all. Only an unusable
+# one (no parseable DAYS= line, e.g. a JVM/classpath death) is a failure, and it
+# carries a diagnostic line so it explains itself.
+eod_status() {
+  local out rc attempt why
+  for attempt in 1 2 3; do
+    out="$(python3 "$EOD" status 2>&1)"; rc=$?
+    if printf '%s\n' "$out" | grep -qE 'DAYS=[0-9]+'; then
+      printf '%s\n' "$out"; return 0
+    fi
+    sleep 2
+  done
+  why="$(printf '%s\n' "$out" | grep -iE 'exception|error|failed|refus' | head -1)"
+  [ -n "$why" ] || why="$(printf '%s\n' "$out" | grep -vE '^[[:space:]]*$' | head -1)"
+  printf 'STATUS_UNUSABLE rc=%s why=%s' "$rc" "$why"
+  return 1
+}
 days_on_file() {
-  local out rc
-  out="$(python3 "$EOD" status 2>&1)"; rc=$?
-  [ "$rc" = "0" ] || { printf 'STATUS_FAILED rc=%s' "$rc"; return 1; }
+  local out
+  out="$(eod_status)" || { printf '%s' "$out"; return 1; }
   printf '%s\n' "$out" | grep -oE 'DAYS=[0-9]+' | grep -oE '[0-9]+' | head -1
 }
 verified_days() {
-  local out rc
-  out="$(python3 "$EOD" status 2>&1)"; rc=$?
-  [ "$rc" = "0" ] || { printf 'STATUS_FAILED rc=%s' "$rc"; return 1; }
+  local out
+  out="$(eod_status)" || { printf '%s' "$out"; return 1; }
   printf '%s\n' "$out" | grep -cE 'state=VERIFIED'
 }
 
-# wait_for_day_state <date> <states-regex> <timeout_s> — poll status until the
-# run has written its day record in one of those states. P6-366/P6-361: the
-# previous fixed `sleep 2` raced the controller's JVM start (if the mock run
-# finished first the lease was released and the check could pass for the wrong
-# reason). Bounded, so a wedged controller cannot hang the test.
-wait_for_day_state() {
-  local want_date="$1" want_states="$2" timeout_s="$3"
+# wait_for_day_record <date> <timeout_s> — poll status until the run has written
+# its day record, in whatever state it holds. P6-366/P6-361: the previous fixed
+# `sleep 2` raced the controller's JVM start, and requiring PENDING|COMMITTED
+# missed runs that reached VERIFIED between two polls (each poll is a JVM launch,
+# 1-2s) — observed live. After the caller's purge, ANY record for this date is
+# this run's. The wait is bounded, so a wedged controller cannot hang the test.
+wait_for_day_record() {
+  local want_date="$1" timeout_s="$2"
   local deadline=$((SECONDS + timeout_s))
   while [ "$SECONDS" -lt "$deadline" ]; do
     if python3 "$EOD" status 2>/dev/null \
-        | grep -qE "^eod-controller:   day $want_date state=($want_states)"; then
+        | grep -qE "^eod-controller:   day $want_date "; then
       return 0
     fi
     sleep 1
@@ -182,35 +203,53 @@ guards() {
   local v1; v1="$(verified_days)"
   if [ "$rc1" -ne 0 ] && [ "${v1:-0}" = "0" ]; then
     ok "G-EOD-1 fail-closed: offload=none rc=$rc1, VERIFIED days=0"
+  elif [ "$rc1" -eq 0 ]; then
+    bad "G-EOD-1 fail-closed violated: offload=none exited 0 — a day may have been verified with no offload target"
   else
-    bad "G-EOD-1 fail-closed violated: rc=$rc1 verified=$v1"
+    # P6-365: an unreadable status proves neither branch — say that instead of
+    # reporting a violation that was never observed.
+    bad "G-EOD-1 unproven: offload=none rc=$rc1 (want non-zero) but the status probe failed: $v1"
   fi
   purge_state || true
 
-  # G-EOD-2: lease fencing — concurrent run refused with exit 5
-  python3 "$EOD" run --offload mock --run-date "$RUN_DATE" --lease-ttl 60s \
-    --tables "$EOD_TABLES" >/dev/null 2>&1 &
-  local bg=$!
-  # P6-366/P6-361: wait until the holder is really mid-run (record written =
-  # lease acquired), then FREEZE its JVM so the lease cannot be released under
-  # us; the concurrent attempt is then refused deterministically instead of
-  # racing a fixed 2s sleep. The reap below is bounded.
-  local jvm=""
-  if wait_for_day_state "$RUN_DATE" "PENDING|COMMITTED" 30; then
-    jvm="$(pgrep -P "$bg" 2>/dev/null | head -1)"
-    [ -n "$jvm" ] && kill -STOP "$jvm" 2>/dev/null
-  fi
-  eod run --offload mock --run-date "$RUN_DATE" --lease-ttl 60s \
-    --tables "$EOD_TABLES" >/dev/null 2>&1
-  local rc2=$?
-  [ -n "$jvm" ] && kill -CONT "$jvm" 2>/dev/null
-  wait_bounded "$bg" 60 || true
-  if [ -z "$jvm" ]; then
-    bad "G-EOD-2 could not hold the lease: no controller JVM for $RUN_DATE was observable (concurrent rc=$rc2)"
-  elif [ "$rc2" = "5" ]; then
-    ok "G-EOD-2 lease fencing: concurrent run refused (rc=5, holder frozen)"
-  else
-    bad "G-EOD-2 lease fencing NOT enforced: concurrent rc=$rc2 (want 5)"
+  # G-EOD-2: lease fencing — a concurrent run must be refused with exit 5.
+  # P6-366/P6-361: a fixed `sleep 2` raced the holder's JVM start (if it finished
+  # first the lease was released and the check could pass for the wrong reason),
+  # the reap was unbounded, and one attempt could miss a slow cluster entirely —
+  # all observed live. So: poll for the holder's record, freeze its JVM so the
+  # lease cannot be released under the check, and classify the outcome by the
+  # concurrent exit code AND whether the holder was still running when it ran.
+  local attempts=0 rc2=99 holder_alive=0 jvm="" bg=""
+  while [ "$attempts" -lt 3 ]; do
+    attempts=$((attempts + 1))
+    purge_state || true   # a VERIFIED day would make the holder a no-op
+    python3 "$EOD" run --offload mock --run-date "$RUN_DATE" --lease-ttl 60s \
+      --tables "$EOD_TABLES" >/dev/null 2>&1 &
+    bg=$!
+    jvm=""
+    if wait_for_day_record "$RUN_DATE" 30; then
+      jvm="$(pgrep -P "$bg" 2>/dev/null | head -1)"
+      [ -n "$jvm" ] && kill -STOP "$jvm" 2>/dev/null
+    fi
+    eod run --offload mock --run-date "$RUN_DATE" --lease-ttl 60s \
+      --tables "$EOD_TABLES" >/dev/null 2>&1
+    rc2=$?
+    holder_alive=0
+    kill -0 "$bg" 2>/dev/null && holder_alive=1
+    [ -n "$jvm" ] && kill -CONT "$jvm" 2>/dev/null
+    wait_bounded "$bg" 60 || true
+    if [ "$rc2" = "5" ]; then
+      ok "G-EOD-2 lease fencing: concurrent run refused (rc=5, attempt $attempts)"
+      break
+    fi
+    if [ "$holder_alive" = "1" ]; then
+      bad "G-EOD-2 lease fencing NOT enforced: concurrent rc=$rc2 while the holder was still running"
+      break
+    fi
+    info "G-EOD-2 attempt $attempts: the holder finished before the concurrent run (rc=$rc2) — retrying"
+  done
+  if [ "$rc2" != "5" ] && [ "$holder_alive" != "1" ]; then
+    bad "G-EOD-2 unproven: 3 attempts missed the holder's window (last concurrent rc=$rc2)"
   fi
   purge_state || true
 

@@ -24,26 +24,34 @@ SCRIPT = SCRIPTS / "eod-controller-test.sh"
 STATUS_RC = 2  # what eod_controller.py returns when its classpath is incomplete
 
 FAKE_PYTHON3 = """#!/usr/bin/env bash
-# fake python3: serves the two call shapes the script makes
+# fake python3: serves the two call shapes the script makes (status / run)
 printf '%s\\n' "$*" >> "$FAKE_LOG"
-if [ -n "${FAKE_STATUS_SLEEP:-}" ]; then sleep "$FAKE_STATUS_SLEEP"; fi
 case "$*" in
   *" status"*)
+    if [ -n "${FAKE_STATUS_FAIL_TIMES:-}" ]; then
+      f="$FAKE_LOG.statusfail"; n=$(cat "$f" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$f"
+      if [ "$n" -le "$FAKE_STATUS_FAIL_TIMES" ]; then
+        printf 'transient: metadata cache unavailable\\n' >&2
+        exit "${FAKE_STATUS_RC:-2}"
+      fi
+    fi
     if [ "${FAKE_STATUS_FAIL:-0}" = "1" ]; then
       printf 'EOD CONTROLLER CLASSPATH INCOMPLETE:\\n  - /nonexistent.jar\\n' >&2
       exit "${FAKE_STATUS_RC:-2}"
     fi
     n="${FAKE_STATUS_DAYS:-0}"
+    lines="${FAKE_DAY_LINES:-1}"
     printf 'eod-controller: RESULT=VERIFIED EXIT=0 TABLES=1 DAYS=%s\\n' "$n"
     i=0
-    lines="${FAKE_DAY_LINES:-1}"
     while [ "$i" -lt "$lines" ]; do
       printf 'eod-controller:   day 2026-09-19 state=%s retry=0 nextRetry=-\\n' "${FAKE_DAY_STATE:-VERIFIED}"
       i=$((i + 1))
     done
-    exit 0 ;;
-  *" run"*) printf 'eod-controller: RESULT=VERIFIED EXIT=0 TABLES=1 DAYS=0\\n'
-            exit "${FAKE_RUN_RC:-0}" ;;
+    exit "${FAKE_STATUS_EXIT:-0}" ;;   # status may exit 2/3 by design
+  *" run"*)
+    printf 'eod-controller: RESULT=VERIFIED EXIT=0 TABLES=1 DAYS=0\\n'
+    if [ -n "${FAKE_RUN_SLEEP:-}" ]; then sleep "$FAKE_RUN_SLEEP"; fi
+    exit "${FAKE_RUN_RC:-0}" ;;
 esac
 exit 0
 """
@@ -71,6 +79,12 @@ exit 0
 """
 
 FAKE_CURL = """#!/usr/bin/env bash
+exit 0
+"""
+
+FAKE_PGREP = """#!/usr/bin/env bash
+printf 'pgrep %s\\n' "$*" >> "$FAKE_LOG"
+printf '%s\\n' "${FAKE_PGREP_PID:?fake pgrep needs FAKE_PGREP_PID}"
 exit 0
 """
 
@@ -112,6 +126,7 @@ class Sandbox:
         self.tmpdir = self.root / "tmp"
         self.tmpdir.mkdir()
         self.log = self.root / "calls.log"
+        self.g2_counter = self.root / "g2-counter"
         self.log.write_text("")
         (self.scripts / "pipeline-lib.sh").write_text(STUB_LIB)
         self.script = self.scripts / "eod-controller-test.sh"
@@ -122,7 +137,8 @@ class Sandbox:
         (self.root / "ddl.sql").write_text("CREATE TABLE eod_offload_state (id INT);\n")
         for name, body in (("python3", FAKE_PYTHON3), ("javac", FAKE_JAVAC),
                            ("java", FAKE_JAVA), ("docker", FAKE_DOCKER),
-                           ("curl", FAKE_CURL), ("pkill", FAKE_PKILL)):
+                           ("curl", FAKE_CURL), ("pkill", FAKE_PKILL),
+                           ("pgrep", FAKE_PGREP)):
             self.write_fake(name, body)
 
     def write_fake(self, name: str, body: str) -> None:
@@ -320,13 +336,13 @@ class StatusHelperTest(Wave45Base):
 
     def _run(self, fn: str, **extra: str) -> tuple[int, str, Sandbox]:
         box = self.sandbox()
-        rc, out = self.harness(box, [fn], "", f'{fn}\necho "RC=$?"', **extra)
+        rc, out = self.harness(box, [fn, "eod_status"], "", f'{fn}\necho "RC=$?"', **extra)
         return rc, out, box
 
     def test_days_on_file_propagates_a_controller_crash(self) -> None:
         rc, out, box = self._run("days_on_file", FAKE_STATUS_FAIL="1")
         self.assertIn("RC=1", out)
-        self.assertIn("STATUS_FAILED rc=2", out)   # was `0` before the fix
+        self.assertIn("STATUS_UNUSABLE rc=2", out)   # was `0` before the fix
 
     def test_days_on_file_still_reports_zero_days(self) -> None:
         rc, out, box = self._run("days_on_file")
@@ -336,7 +352,28 @@ class StatusHelperTest(Wave45Base):
     def test_verified_days_propagates_a_controller_crash(self) -> None:
         rc, out, box = self._run("verified_days", FAKE_STATUS_FAIL="1")
         self.assertIn("RC=1", out)
-        self.assertIn("STATUS_FAILED", out)
+        self.assertIn("STATUS_UNUSABLE", out)
+
+    def test_a_pending_work_status_is_usable(self) -> None:
+        """Live: `status` exits 3 (PENDING_WORK) whenever unverified days exist —
+        a documented code, not a probe failure. Parsing must not depend on it."""
+        box = self.sandbox()
+        rc, out, box = self._run("days_on_file", FAKE_STATUS_EXIT="3")
+        self.assertIn("0\nRC=0", out)
+
+    def test_a_transient_status_failure_is_retried(self) -> None:
+        """Live: one status call failed with rc=3, not a documented exit code."""
+        box = self.sandbox()
+        rc, out, box = self._run("days_on_file", FAKE_STATUS_FAIL_TIMES="1")
+        self.assertIn("0\nRC=0", out)
+
+    def test_a_persistent_status_failure_carries_the_diagnostic(self) -> None:
+        box = self.sandbox()
+        rc, out, box = self._run("days_on_file", FAKE_STATUS_FAIL="1")
+        self.assertIn("RC=1", out)
+        self.assertIn("STATUS_UNUSABLE rc=2", out)
+        self.assertIn("why=", out)                    # the reason is not lost
+        self.assertIn("CLASSPATH INCOMPLETE", out)
 
     def test_verified_days_counts_verified_states(self) -> None:
         rc, out, box = self._run("verified_days", FAKE_DAY_LINES="2")
@@ -347,27 +384,30 @@ class StatusHelperTest(Wave45Base):
 class PollAndWaitTest(Wave45Base):
     """P6-366/P6-361: the lease poll must be observable, and the reap bounded."""
 
-    def test_poll_succeeds_when_the_record_is_mid_flight(self) -> None:
+    def test_poll_matches_a_record_in_any_state(self) -> None:
+        """Live failure: requiring PENDING|COMMITTED missed a run that reached
+        VERIFIED between two polls (each poll is a JVM launch of its own)."""
         box = self.sandbox()
-        rc, out = self.harness(box, ["wait_for_day_state"], "",
-                              'wait_for_day_state 2026-09-19 "PENDING|COMMITTED" 5\n'
-                              'echo "RC=$?"', FAKE_DAY_STATE="PENDING")
+        rc, out = self.harness(box, ["wait_for_day_record"], "",
+                              'wait_for_day_record 2026-09-19 5\necho "RC=$?"')
         self.assertIn("RC=0", out)
 
-    def test_poll_ignores_a_record_that_is_already_verified(self) -> None:
+    def test_poll_times_out_when_no_record_appears(self) -> None:
         box = self.sandbox()
-        rc, out = self.harness(box, ["wait_for_day_state"], "",
-                              'wait_for_day_state 2026-09-19 "PENDING|COMMITTED" 2\n'
-                              'echo "RC=$?"')
+        rc, out = self.harness(box, ["wait_for_day_record"], "",
+                              'wait_for_day_record 2026-09-19 2\necho "RC=$?"',
+                              FAKE_DAY_LINES="0")
         self.assertIn("RC=1", out)
 
     def test_poll_times_out_within_its_budget(self) -> None:
         box = self.sandbox()
-        rc, out = self.harness(box, ["wait_for_day_state"], "",
-                              'time wait_for_day_state 2026-09-19 "PENDING" 3\necho "RC=$?"',
-                              timeout=60)
+        rc, out = self.harness(box, ["wait_for_day_record"], "",
+                              'time wait_for_day_record 2026-09-19 3\necho "RC=$?"',
+                              FAKE_DAY_LINES="0", timeout=60)
         self.assertIn("RC=1", out)
-        self.assertRegex(out, r"real\s+0m[123]")
+        m = re.search(r"real\s+0m([0-9.]+)s", out)
+        self.assertIsNotNone(m, out)
+        self.assertLess(float(m.group(1)), 5.0)   # bounded by the 3s budget
 
     def test_wait_bounded_kills_a_child_that_overstays(self) -> None:
         box = self.sandbox()
@@ -378,6 +418,63 @@ class PollAndWaitTest(Wave45Base):
             'if kill -0 "$p" 2>/dev/null; then echo "CHILD-ALIVE"; else echo "CHILD-GONE"; fi',
             timeout=60)
         self.assertIn("CHILD-GONE", out)
+
+
+class GuardsFencingTest(Wave45Base):
+    """P6-366 as it runs live: one attempt can miss a slow cluster, so the check
+    retries, and its verdict depends on whether the holder was still running."""
+
+    _PROLOGUE = """G2_COUNTER="@G2COUNTER@"; : > "$G2_COUNTER"
+purge_state() { return 0; }
+eod() {
+  printf 'eod-stub: %s\n' "$*"
+  case "$*" in
+    *"--offload none"*) return "${G1_RC:-2}" ;;
+    *"--lease-ttl 60s"*)
+      n=$(cat "$G2_COUNTER" 2>/dev/null || echo 0); n=$((n + 1))
+      echo "$n" > "$G2_COUNTER"
+      case "$n" in
+        1) return "${G2_RC_1:-0}" ;;
+        2) return "${G2_RC_2:-0}" ;;
+        3) return "${G2_RC_3:-0}" ;;
+        *) return "${G2_RC_DEFAULT:-0}" ;;
+      esac ;;
+    *) return 0 ;;
+  esac
+}
+"""
+
+    def _run_guards(self, **extra: str) -> tuple[int, str, Sandbox]:
+        box = self.sandbox()
+        mirror = subprocess.Popen(["sleep", "300"])
+        self.addCleanup(mirror.kill)
+        rc, out = self.harness(
+            box,
+            ["guards", "wait_for_day_record", "wait_bounded", "eod_status",
+             "days_on_file", "verified_days"],
+            self._PROLOGUE.replace("@G2COUNTER@", str(box.g2_counter)),
+            'guards; echo "GUARDS_RC=$?"',
+            FAKE_DAY_STATE="PENDING",                 # verified_days must stay 0
+            FAKE_PGREP_PID=str(mirror.pid), **extra)
+        return rc, out, box
+
+    def test_a_missed_window_is_retried_and_then_passes(self) -> None:
+        rc, out, box = self._run_guards(G2_RC_1="0", G2_RC_2="5")
+        self.assertIn("attempt 1: the holder finished before the concurrent run", out)
+        self.assertIn("ok    G-EOD-2 lease fencing: concurrent run refused (rc=5, attempt 2)", out)
+        self.assertIn("GUARDS_RC=0", out)
+
+    def test_fencing_not_enforced_while_the_holder_runs_is_a_failure(self) -> None:
+        rc, out, box = self._run_guards(G2_RC_1="2", FAKE_RUN_SLEEP="3")
+        self.assertIn("!! FAIL G-EOD-2 lease fencing NOT enforced: concurrent rc=2 "
+                      "while the holder was still running", out)
+        self.assertIn("GUARDS_RC=1", out)
+
+    def test_missing_the_window_three_times_is_reported_as_unproven(self) -> None:
+        rc, out, box = self._run_guards(G2_RC_1="0", G2_RC_2="0", G2_RC_3="0")
+        self.assertIn("!! FAIL G-EOD-2 unproven: 3 attempts missed the holder's window", out)
+        self.assertIn("GUARDS_RC=1", out)
+
 
 
 class StaticGuardTest(Wave45Base):
