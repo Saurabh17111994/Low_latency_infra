@@ -140,7 +140,6 @@ SITES: list[tuple[str, str, str, str]] = [
     ("code/01_platform/04_scripts/stage-soak-e2e.sh", "secrets.env exec -T flink-taskmanager sh -c", "FLAGS_DIR", ""),
     ("code/01_platform/04_scripts/t9_order_sandbox.py", "probes go through", "TEXT", "docstring"),
     ("code/01_platform/04_scripts/tests/test_08_local_compose_l0.py", "config must succeed (YAML parses", "TEXT", "docstring"),
-    ("code/01_platform/04_scripts/tests/test_08_local_compose_l0.py", "config must not leak secret values", "TEXT", "docstring"),
     ("code/01_platform/04_scripts/tests/test_08_local_compose_l2.py", "invocation, and", "TEXT", "comment in docstring"),
     ("code/01_platform/04_scripts/tests/test_gate_preflight.py", "The preflight's compose form must stay identical", "TEXT", "docstring"),
     ("start-all.sh", "up -d zookeeper", "FLAGS_DIR", "start path; names the stack file (P6-858)"),

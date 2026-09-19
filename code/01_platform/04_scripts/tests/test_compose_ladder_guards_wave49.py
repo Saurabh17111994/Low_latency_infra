@@ -15,7 +15,7 @@ Every behavioural test is mutant-driven: the same helper the ladder module uses 
 handed a mutated `compose config` shape and must report the violation. A helper
 that quietly stops detecting fails HERE, which is exactly what the original
 assertions could not do (they passed on both the good and the broken input).
-Only `docker compose config` runs — no containers are started.
+Only `compose config` is parsed — no containers are started.
 """
 import ast
 import importlib.util

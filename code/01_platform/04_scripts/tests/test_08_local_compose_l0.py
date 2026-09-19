@@ -40,7 +40,7 @@ def missing_secrets(paths, keys):
 def literal_secret_settings(text):
     """Secret-named compose settings whose value is a literal, not an env reference.
 
-    P6-598: `docker compose config` renders YAML (`KEY: value`), so a scan for
+    P6-598: the rendered compose config is YAML (`KEY: value`), so a scan for
     `KEY=value` can never fire; this looks at the source settings instead.
     """
     bad = []
