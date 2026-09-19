@@ -15,18 +15,28 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIB="$SCRIPT_DIR/pipeline-lib.sh"
+# PIPELINE_LIB_UNDER_TEST lets the wave-44 mutation tests run this suite against a
+# deliberately broken copy of the lib — the only way to prove these guards bite.
+LIB="${PIPELINE_LIB_UNDER_TEST:-$SCRIPT_DIR/pipeline-lib.sh}"
 
 pass=0; fail=0
 ok()   { echo "PASS: $*"; pass=$((pass+1)); }
 bad()  { echo "FAIL: $*" >&2; fail=$((fail+1)); }
+# P6-595: fixture dirs used to leak (one was a fixed /tmp path shared by
+# concurrent runs). One trap covers every mktemp dir this suite creates.
+trap 'rm -rf "${OUT-}" "${G10DIR-}" "${G14DIR-}" "${G16DIR-}" "${G19BIN-}" "${G28DIR-}"' EXIT
 
 # ---- G1: the lib parses ----
 bash -n "$LIB" && ok "G1 lib syntax valid" || { bad "G1 lib syntax invalid"; exit 1; }
 
 # ---- G2: sourcing defines every public function the harness scripts call ----
 # (a sourcing failure or a renamed function would break callers at run time)
-ROOT="$SCRIPT_DIR/../../.." ; ROOT="$(cd "$ROOT" && pwd)"
+ROOT="$SCRIPT_DIR/../../.." ; ROOT="$(cd "$ROOT" && pwd)" \
+    || { bad "cannot resolve repo ROOT from $SCRIPT_DIR/../../.."; exit 1; }
+# P6-589: an empty ROOT used to make every compose-path grep below test the
+# wrong file (or none) while the suite still reported success.
+[ -f "$ROOT/code/01_platform/01_docker/docker-compose.yml" ] \
+    || { bad "compose file not found under ROOT=$ROOT"; exit 1; }
 OUT="$(mktemp -d)"
 FAKETOOL_PORT=8899 RATE_HZ=10
 # P6-142: pipeline-lib.sh now refuses to be sourced without ROOT/RATE_HZ;
@@ -34,20 +44,33 @@ FAKETOOL_PORT=8899 RATE_HZ=10
 # nested-source tests below already set RATE_HZ=10 themselves).
 RATE_HZ="${RATE_HZ:-10}"
 export RATE_HZ
-# The directive must sit immediately above the command it annotates: wave 17
-# inserted the RATE_HZ pre-amble between the two and detached it (SC1090).
-# shellcheck source=pipeline-lib.sh
-source "$LIB"
-for fn in pipeline_preflight pipeline_start_faketool pipeline_start_ingestion \
-          pipeline_submit_job pipeline_cleanup pipeline_install_cleanup_trap \
-          pipeline_validate_rate pipeline_port_free pipeline_validate_compute_jar \
-          pipeline_validate_compose_bind_sources pipeline_fluss_port_open \
-          pipeline_compile_fluss_ready_probe pipeline_fluss_metadata_ready \
-          pipeline_wait_for_fluss_ready \
-          flink_metric_dump flink_wait_state; do
-    declare -f "$fn" >/dev/null 2>&1 && ok "G2 function $fn defined" \
-        || bad "G2 function $fn MISSING from $LIB"
+# P6-590: the definition check must not be the reason this test process
+# sources the lib — sourcing runs its top-level side effects (traps, mkdir,
+# docker calls). The ONE operational source is below, just before G14, where
+# the first function is actually called. P6-142: the lib refuses to be sourced
+# without ROOT/RATE_HZ, so the subshell supplies them.
+G2_FUNCS="pipeline_preflight pipeline_start_faketool pipeline_start_ingestion
+pipeline_submit_job pipeline_cleanup pipeline_install_cleanup_trap
+pipeline_validate_rate pipeline_port_free pipeline_validate_compute_jar
+pipeline_validate_compose_bind_sources pipeline_fluss_port_open
+pipeline_compile_fluss_ready_probe pipeline_fluss_metadata_ready
+pipeline_wait_for_fluss_ready
+flink_metric_dump flink_wait_state"
+G2_MISSING="$( ( FAKETOOL_PORT=8899 RATE_HZ=10; source "$LIB" >/dev/null 2>&1;
+    for fn in $G2_FUNCS; do declare -f "$fn" >/dev/null 2>&1 || printf '%s\n' "$fn"; done ) )"
+for fn in $G2_FUNCS; do
+    if printf '%s\n' "$G2_MISSING" | grep -qx "$fn"; then
+        bad "G2 function $fn MISSING from $LIB"
+    else
+        ok "G2 function $fn defined"
+    fi
 done
+
+# P6-020/P6-231: per-function bodies straight from bash's own parser. A sed
+# range is not usable here: the lib contains here-docs whose bodies include
+# col-0 braces, so `/^fn() {/,/^}/` can truncate or overrun. One helper, so the
+# readiness guards and the G19 wiring guards read the same source of truth.
+lib_fn_body() { ( FAKETOOL_PORT=8899 RATE_HZ=10; source "$LIB" >/dev/null 2>&1; declare -f "$1" ); }
 
 # ---- G17 (2026-09-01): Fluss readiness must precede table mutation. A
 # coordinator-only check accepts a live RPC endpoint while the tablet is
@@ -55,10 +78,15 @@ done
 # the first destructive purge. Keep both container-state and client-listener
 # checks in the shared preflight, and make the timeout configurable but
 # positive.
-if grep -q 'pipeline_wait_for_fluss_ready || return 1' "$LIB" \
-    && grep -q 'pipeline_fluss_port_open 127.0.0.1 9123' "$LIB" \
-    && grep -q 'pipeline_fluss_port_open 127.0.0.1 9124' "$LIB" \
-    && grep -q 'FLUSS_READY_TIMEOUT_S' "$LIB"; then
+# P6-231: scoped to pipeline_preflight's own body (declare -f in a subshell) —
+# a readiness check parked in a comment or another function used to satisfy
+# these whole-file greps.
+pre="$(lib_fn_body pipeline_preflight)"
+wait_body="$(lib_fn_body pipeline_wait_for_fluss_ready)"
+if printf '%s\n' "$pre" | grep -q 'pipeline_wait_for_fluss_ready || return 1' \
+    && printf '%s\n' "$wait_body" | grep -q 'pipeline_fluss_port_open 127.0.0.1 9123' \
+    && printf '%s\n' "$wait_body" | grep -q 'pipeline_fluss_port_open 127.0.0.1 9124' \
+    && printf '%s\n' "$wait_body" | grep -q 'FLUSS_READY_TIMEOUT_S'; then
     ok "G17 Fluss coordinator+tablet readiness guard precedes table mutation"
 else
     bad "G17 Fluss readiness guard missing — leaderless tablet can reach TablePurge"
@@ -68,12 +96,25 @@ fi
 # client itself rejects metadata initialization while the tablet is alive but
 # not elected, so readiness must include a read-only metadata probe before the
 # first drop/create.
-if grep -q 'pipeline_compile_fluss_ready_probe || return 1' "$LIB" \
-    && grep -q 'pipeline_fluss_metadata_ready; then' "$LIB" \
-    && grep -q 'FlussReadyProbe' "$LIB"; then
+probe_body="$(lib_fn_body pipeline_compile_fluss_ready_probe)"
+metadata_body="$(lib_fn_body pipeline_fluss_metadata_ready)"
+if printf '%s\n' "$pre" | grep -q 'pipeline_compile_fluss_ready_probe || return 1' \
+    && printf '%s\n' "$wait_body" | grep -q 'pipeline_fluss_metadata_ready; then' \
+    && { printf '%s\n' "$probe_body" | grep -q 'FlussReadyProbe' \
+         || printf '%s\n' "$metadata_body" | grep -q 'FlussReadyProbe'; }; then
     ok "G18 Fluss metadata readiness probe precedes table mutation"
 else
     bad "G18 metadata probe missing — listener-open/leaderless race can reach TablePurge"
+fi
+
+# P6-231 (ordering half): readiness must be established BEFORE preflight
+# commits PIPELINE_PREFLIGHT_OK, or a purge can run against a leaderless tablet.
+ready_at="$(printf '%s\n' "$pre" | grep -n 'pipeline_wait_for_fluss_ready || return 1' | head -1 | cut -d: -f1)"
+ok_at="$(printf '%s\n' "$pre" | grep -n 'PIPELINE_PREFLIGHT_OK=1' | head -1 | cut -d: -f1)"
+if [ -n "$ready_at" ] && [ -n "$ok_at" ] && [ "$ready_at" -lt "$ok_at" ]; then
+    ok "G17 Fluss readiness precedes the preflight OK-flag commit (line $ready_at < $ok_at)"
+else
+    bad "G17 readiness/OK-flag order wrong (ready=${ready_at:-absent} ok=${ok_at:-absent}) — purge can run before readiness"
 fi
 
 # ---- G3: the submit command is ONE complete command containing the
@@ -82,11 +123,16 @@ fi
 # for the FINAL token (compute.jar) on the SAME logical line as the first
 # (-e ALLOW_FULL_REPLAY) proves the continuation chain is intact.
 # Simpler + robust: extract the function body and join continuations.
-body="$(declare -f pipeline_submit_job | sed 's/\\$//' | tr -d '\n')"
+# P6-232: `declare -f` in a subshell (the lib is not sourced yet at this point),
+# comment-only lines dropped, and ONLY continuation lines joined — the old
+# sed+tr flattened every line, so a comment spliced into the chain still
+# satisfied every needle below.
+body="$( ( FAKETOOL_PORT=8899 RATE_HZ=10; source "$LIB" >/dev/null 2>&1; declare -f pipeline_submit_job ) | grep -v '^[[:space:]]*#' )"
+joined="$(printf '%s\n' "$body" | awk '{ if (cont) { line = line " " $0 } else { line = $0 } ; if ($0 ~ /\\$/) { cont = 1 } else { printf "%s\n", line; cont = 0 } }')"
 for needle in '-e ALLOW_FULL_REPLAY' '-e WATERMARK_OUT_OF_ORDER_MS' \
               '-e CHECKPOINT_TIMEOUT_MS' '-e PREVIEW_ENABLED=true' \
               'flink run -d' 'compute.jar'; do
-    case "$body" in
+    case "$joined" in
         *"$needle"*) ok "G3 submit contains: $needle" ;;
         *)           bad "G3 submit command MISSING: $needle (broken continuation?)" ;;
     esac
@@ -94,10 +140,10 @@ done
 # The FINAL jar token (the flink run target) must come AFTER the first -e
 # (ordering sanity: one command). NOTE: compute.jar also appears earlier in
 # the docker cp line — use the LAST occurrence, not the first.
-first_pos="${body%%-e ALLOW_FULL_REPLAY*}"
+first_pos="${joined%%-e ALLOW_FULL_REPLAY*}"
 first_pos=$(( ${#first_pos} + 1 ))
-jar_pos="${body##*compute.jar}"
-jar_pos=$(( ${#body} - ${#jar_pos} ))
+jar_pos="${joined##*compute.jar}"
+jar_pos=$(( ${#joined} - ${#jar_pos} ))
 [ "$first_pos" -gt 0 ] && [ "$jar_pos" -gt "$first_pos" ] \
     && ok "G3 submit is one ordered command (env vars → flink run → jar)" \
     || bad "G3 submit token order broken (env vars must precede compute.jar)"
@@ -108,6 +154,8 @@ jar_pos=$(( ${#body} - ${#jar_pos} ))
 # comment/blank there breaks the command silently (bash -n won't catch it).
 in_cont=0
 lineno=0
+# P6-591: snapshot so this guard's PASS is not suppressed by an earlier failure.
+g4_start=$fail
 while IFS= read -r line; do
     lineno=$((lineno+1))
     trimmed="${line#"${line%%[![:space:]]*}"}"   # lstrip
@@ -124,16 +172,19 @@ while IFS= read -r line; do
     # dropping every following env var. This exact bug broke the A3 run
     # (OTEL_COLLECTOR_HOST + all subsequent vars lost). Rule: inside a
     # continuation, no '#' at all (space-hash caught; leading-# is G4).
-    if [ "$in_cont" -eq 1 ] && [[ "$trimmed" == *" #"* ]]; then
+    if [ "$in_cont" -eq 1 ] && [[ "$trimmed" == *[[:space:]]#* ]]; then
         bad "G4b line $lineno: trailing comment inside a continued command kills the backslash chain: $trimmed"
-        continue
+        # P6-233: fall through — the old `continue` skipped the state update, so
+        # in_cont stayed 1 and the NEXT line was misjudged as continued.
     fi
-    case "$line" in
+    # P6-233: strip trailing whitespace before testing for the continuation.
+    stripped="${line%"${line##*[![:space:]]}"}"
+    case "$stripped" in
         *\\) in_cont=1 ;;
         *)    in_cont=0 ;;
     esac
 done < "$LIB"
-[ "$fail" -eq 0 ] && ok "G4 no comments/blanks inside continued commands"
+[ "$fail" -eq "$g4_start" ] && ok "G4 no comments/blanks inside continued commands"
 
 # ---- G11 (2026-08-31): JVM flags must be IDENTICAL in both harness
 # scripts. pipeline-lib.sh and loadtest-run.sh each carry a full java
@@ -183,24 +234,37 @@ G10DIR="$(mktemp -d)"
 mkdir -p "$G10DIR/j1"
 printf 'INFO  ok line\nWARN  ingestion: bridge manifest_fingerprint mismatch (slot=hft-0, epoch=1): got=aa want=bb\n' \
     > "$G10DIR/j1/java.out"
-n=$(grep -ac "manifest_fingerprint mismatch\|assigned_token_set_hash mismatch" "$G10DIR/j1/java.out" 2>/dev/null || true)
-if [ "${n:-0}" -ge 1 ]; then
-    ok "G10 tampered java.out detected ($n mismatch line(s) — gate would fire)"
+# P6-234: RUN the gate. The old form re-implemented its grep over a fixture of
+# our own making, so it asserted the fixture, never the gate. fingerprint_gate
+# is extracted by text because holistic-measure.sh is not source-safe (it has
+# top-level guards and exit 1).
+gate_src="$(sed -n '/^fingerprint_gate() {/,/^}/p' "$HM")"
+printf '%s\n' "$gate_src" | grep -q 'manifest_fingerprint mismatch' \
+    || bad "G10 could not extract fingerprint_gate from $HM"
+if ( eval "$gate_src"; fingerprint_gate "$G10DIR" ) >/dev/null 2>&1; then
+    bad "G10 the REAL gate accepted a tampered java.out — the G8 gate is decorative"
 else
-    bad "G10 tampered java.out NOT detected — the G8 gate is decorative"
+    ok "G10 the real gate fires on a tampered java.out"
 fi
 printf 'INFO  clean log\n' > "$G10DIR/j1/java.out"
-n=$(grep -ac "manifest_fingerprint mismatch\|assigned_token_set_hash mismatch" "$G10DIR/j1/java.out" 2>/dev/null || true)
-[ "${n:-0}" -eq 0 ] \
-    && ok "G10 clean java.out passes (zero mismatch lines)" \
-    || bad "G10 clean java.out flagged — gate has false positives"
+if ( eval "$gate_src"; fingerprint_gate "$G10DIR" ) >/dev/null 2>&1; then
+    ok "G10 the real gate passes a clean java.out"
+else
+    bad "G10 the real gate rejected a clean java.out — false positive"
+fi
+rm -f "$G10DIR/j1/java.out"
+if ( eval "$gate_src"; fingerprint_gate "$G10DIR" ) >/dev/null 2>&1; then
+    bad "G10 the real gate passed with no java.out (P6-411 fail-closed regression)"
+else
+    ok "G10 the real gate fails closed on missing evidence"
+fi
 rm -rf "$G10DIR"
 
 # ---- G12 (2026-08-31): B5 experiment integrity — when
 # UNALIGNED_CHECKPOINTS=true is set, the submit MUST carry the unaligned
 # flag; without it, a "B5 experiment run" silently measures the baseline
 # and closes the lever on fabricated evidence.
-PL="$SCRIPT_DIR/pipeline-lib.sh"
+PL="$LIB"
 grep -q 'UNALIGNED_CHECKPOINTS' "$PL" \
     && grep -q 'execution.checkpointing.unaligned=true' "$PL" \
     && ok "G12 unaligned flag wiring present in pipeline_submit_job" \
@@ -237,14 +301,26 @@ grep -q 'byReason' "$SCRIPT_DIR/holistic-analyze.py" \
 rm -rf "$OUT"
 
 # ---- G14 (2026-09-01): B6 artifact classpath guard must FIRE on the exact
+# P6-590: the ONE operational source (declared right where the first function
+# is called). Everything above is a file grep or a subshell.
+# shellcheck source=pipeline-lib.sh
+export OUT FAKETOOL_PORT RATE_HZ
+OUT="$(mktemp -d)"
+FAKETOOL_PORT=8899 RATE_HZ=10
+source "$LIB"
+
 # broken shape observed in C2. Use a temporary jar containing one Fluss class;
 # the guard must reject it. Then prove the production-shaped jar (no Fluss
 # classes/descriptors) passes, and a truncated/non-JAR file fails closed. This
 # is intentionally runtime execution, not just a grep for the guard text.
 G14DIR="$(mktemp -d)"
+# P6-592: remember LIB_JAR so the block cannot leak its fixture path outward.
+G14_LIB_JAR_SAVED="${LIB_JAR-}"
+G14_LIB_JAR_SET=$([ -n "${LIB_JAR-}" ] && echo 1 || echo 0)
 mkdir -p "$G14DIR/org/apache/fluss/client"
 printf 'not-a-real-class' > "$G14DIR/org/apache/fluss/client/Duplicate.class"
-(cd "$G14DIR" && jar cf bad-compute.jar org) >/dev/null 2>&1
+(cd "$G14DIR" && jar cf bad-compute.jar org) >/dev/null 2>&1 \
+    || bad "G14 could not build the duplicate-class fixture jar (is jar on PATH?)"
 LIB_JAR="$G14DIR/bad-compute.jar"
 if pipeline_validate_compute_jar >/dev/null 2>&1; then
     bad "G14 duplicate Fluss class was accepted — B6 guard would not fire"
@@ -253,7 +329,8 @@ else
 fi
 mkdir -p "$G14DIR/good/com/trading"
 printf 'not-a-real-class' > "$G14DIR/good/com/trading/Job.class"
-(cd "$G14DIR/good" && jar cf ../good-compute.jar com) >/dev/null 2>&1
+(cd "$G14DIR/good" && jar cf ../good-compute.jar com) >/dev/null 2>&1 \
+    || bad "G14 could not build the clean fixture jar (is jar on PATH?)"
 LIB_JAR="$G14DIR/good-compute.jar"
 if pipeline_validate_compute_jar >/dev/null 2>&1; then
     ok "G14 Flink-owned Fluss classpath shape accepted"
@@ -268,13 +345,16 @@ if pipeline_validate_compute_jar >/dev/null 2>&1; then
 else
     ok "G14 corrupt compute artifact rejected before submit"
 fi
+if [ "$G14_LIB_JAR_SET" -eq 1 ]; then LIB_JAR="$G14_LIB_JAR_SAVED"; else unset LIB_JAR; fi
 rm -rf "$G14DIR"
 
 # ---- G16 (2026-09-01): B7 Compose short-bind guard — a missing source must
 # fail before Docker can auto-create a directory and return an opaque OCI
 # exit-127 mount error. The real repository sources must still pass.
 G16DIR="$(mktemp -d)"
-G16_COMPOSE_DIR="$LIB_COMPOSE_DIR"
+G16_COMPOSE_DIR="${LIB_COMPOSE_DIR-}"
+# P6-235: remember whether it was unset, so the restore can put it back that way.
+G16_COMPOSE_DIR_SET=$([ -n "${LIB_COMPOSE_DIR-}" ] && echo 1 || echo 0)
 LIB_COMPOSE_DIR="$G16DIR"
 if pipeline_validate_compose_bind_sources >/dev/null 2>&1; then
     bad "G16 missing Compose bind sources were accepted"
@@ -287,7 +367,7 @@ if pipeline_validate_compose_bind_sources >/dev/null 2>&1; then
 else
     ok "G16 directory-shaped Compose bind source rejected (OCI exit-127 prevented)"
 fi
-LIB_COMPOSE_DIR="$G16_COMPOSE_DIR"
+if [ "$G16_COMPOSE_DIR_SET" -eq 1 ]; then LIB_COMPOSE_DIR="$G16_COMPOSE_DIR"; else unset LIB_COMPOSE_DIR; fi
 if pipeline_validate_compose_bind_sources >/dev/null 2>&1; then
     ok "G16 repository Compose bind sources are regular files"
 else
@@ -295,49 +375,62 @@ else
 fi
 rm -rf "$G16DIR"
 
+# P6-237: ONE canonical list for both halves of G19 (runtime refusals + wiring
+# greps), so the two can never disagree about which functions need the guard.
+G19_GUARDED_FUNCS="pipeline_purge_table pipeline_purge_raw_table
+pipeline_start_faketool pipeline_start_ingestion pipeline_submit_job"
+
 # ---- G19 (2026-09-02): preflight-state guard. Launch-phase functions that
 # depend on pipeline_preflight's setup (CP, fresh TM,
 # Fluss readiness) must fail fast with a clear message when preflight has
 # NOT run — the stage-a2-baseline "unbound variable deep inside ingestion"
 # failure class. Runtime negative tests + wiring greps (drift-proof).
-PL="$SCRIPT_DIR/pipeline-lib.sh"
+PL="$LIB"
 bash -n "$PL" || { bad "G19 lib syntax invalid"; exit 1; }
 
 # (a) runtime: guarded functions refuse BEFORE launching anything
 # shellcheck disable=SC2034  # lib knobs: FAKETOOL_PORT and RATE_HZ are read by pipeline-lib.sh
-OUT="$(mktemp -d)" FAKETOOL_PORT=8899 RATE_HZ=10
-# shellcheck source=pipeline-lib.sh
-source "$PL"
+# P6-590: no second source — the lib is already sourced (one operational
+# source, declared at G14). Re-sourcing re-ran its top-level side effects.
+mkdir -p "$OUT"
 # shellcheck disable=SC2034  # lib state: read by pipeline-lib.sh's preflight guard
 PIPELINE_PREFLIGHT_OK=0
-msg="$(pipeline_start_faketool 2>&1 || true)"
-case "$msg" in
-  *"pipeline_preflight not run"*) ok "G19 start_faketool refuses without preflight" ;;
-  *) bad "G19 start_faketool did not refuse: $msg" ;;
-esac
-msg="$(pipeline_purge_raw_table 2>&1 || true)"
-case "$msg" in
-  *"pipeline_preflight not run"*) ok "G19 purge refuses without preflight" ;;
-  *) bad "G19 purge did not refuse: $msg" ;;
-esac
-msg="$(pipeline_start_ingestion 2>&1 || true)"
-case "$msg" in
-  *"pipeline_preflight not run"*) ok "G19 start_ingestion refuses without preflight" ;;
-  *) bad "G19 start_ingestion did not refuse: $msg" ;;
-esac
-msg="$(pipeline_submit_job 2>&1 || true)"
-case "$msg" in
-  *"pipeline_preflight not run"*) ok "G19 submit refuses without preflight" ;;
-  *) bad "G19 submit did not refuse: $msg" ;;
-esac
+# P6-236: the negative tests below call functions whose guard SHOULD refuse.
+# When a guard is missing (exactly the regression under test) the body would
+# continue and drive the real stack. COMPOSE is an array (pipeline-lib.sh L78)
+# whose first word is `docker`, so a PATH shim covers both it and the direct
+# `docker inspect` calls.
+G19BIN="$(mktemp -d)"
+printf '#!/bin/sh\necho "STUBBED docker $*" >&2\nexit 1\n' > "$G19BIN/docker"
+chmod +x "$G19BIN/docker"
+G19_PATH_SAVED="$PATH"
+PATH="$G19BIN:$PATH"; export PATH
+for fn in $G19_GUARDED_FUNCS; do
+  msg="$($fn 2>&1 || true)"
+  case "$msg" in
+    *"pipeline_preflight not run"*) ok "G19 $fn refuses without preflight" ;;
+    *) bad "G19 $fn did not refuse without preflight: $msg" ;;
+  esac
+done
+# the shim is scoped to this block: the G26/G27 guards below call docker for real.
+PATH="$G19_PATH_SAVED"; export PATH
+rm -rf "$G19BIN"
 rm -rf "$OUT"
 
 # (b) wiring: every launch-phase function carries the guard; preflight sets
 # the OK flag only on success (reset at entry, set before the OK log).
-for fn in pipeline_purge_table pipeline_purge_raw_table \
-          pipeline_start_faketool pipeline_start_ingestion pipeline_submit_job; do
-  if grep -q 'pipeline_require_preflight || return 1' "$PL"; then
+# P6-020: scope the guard to the function's OWN body. `declare -f` (not a sed
+# range: the lib has here-docs and nested col-0 braces) in ONE subshell, and
+# accept one level of delegation — pipeline_purge_raw_table is a 3-line wrapper
+# around pipeline_purge_table, which carries the guard, so a literal-text
+# requirement would report a false MISSING for a function that cannot skip it.
+for fn in $G19_GUARDED_FUNCS; do
+  body_fn="$(lib_fn_body "$fn")"
+  if printf '%s\n' "$body_fn" | grep -q 'pipeline_require_preflight || return 1'; then
     ok "G19 guard wired in $fn"
+  elif printf '%s\n' "$body_fn" | grep -q 'pipeline_purge_table' \
+      && printf '%s\n' "$(lib_fn_body pipeline_purge_table)" | grep -q 'pipeline_require_preflight || return 1'; then
+    ok "G19 guard wired in $fn (delegates to pipeline_purge_table)"
   else
     bad "G19 guard MISSING in $fn — skips preflight silently"
   fi
@@ -463,9 +556,11 @@ grep -q 'net_lag_p99_records' "$parse" \
 #    soak runner so ingestion.tsv has rows even with a healthy collector.
 echo "---"
 echo "G21g 48k e2e measurement facilities"
-grep -qE '_operator_|operator_.*compute' "$cap" \
-  && ok "G21g scrape keeps custom operator metrics" \
-  || bad "G21g custom-operator scrape filter MISSING"
+# P6-593: the old alternation matched ANY `_operator_` line, so it passed even
+# when the whole compute.* family was filtered out — vacuously true by design.
+grep -q 'flink_taskmanager_job_task_operator_' "$cap" \
+  && ok "G21g scrape filter keeps the custom operator prefix (compute.* family included)" \
+  || bad "G21g custom operator prefix MISSING from the scrape filter"
 # 2026-09-05 (grep-filter regression): the old alternation
 # 'flink_taskmanager_job_task_.*_operator_' does NOT match chain-head custom
 # families (flink_taskmanager_job_task_operator_compute_* — the prefix ends
@@ -518,9 +613,15 @@ validator="$SCRIPT_DIR/check_flink_properties.py"
 [ -f "$validator" ] \
   && ok "G22a check_flink_properties.py present" \
   || bad "G22a check_flink_properties.py MISSING"
-python3 "$validator" >/dev/null 2>&1 \
-  && ok "G22b the REAL docker-compose.yml FLINK_PROPERTIES validates (no comments in block, no prefix collisions, required keys present)" \
-  || { python3 "$validator" 2>&1 | head -8 >&2; bad "G22b docker-compose.yml FLINK_PROPERTIES INVALID - see reason above"; }
+# P6-798: one run. The old form ran the validator twice (once discarded, once
+# piped to head -8), so the output shown could come from a second, divergent run.
+vout="$(python3 "$validator" 2>&1)"; vrc=$?
+if [ "$vrc" -eq 0 ]; then
+  ok "G22b the REAL docker-compose.yml FLINK_PROPERTIES validates (no comments in block, no prefix collisions, required keys present)"
+else
+  printf '%s\n' "$vout" | head -20 >&2
+  bad "G22b docker-compose.yml FLINK_PROPERTIES INVALID (exit $vrc) - see reason above"
+fi
 grep -q "FORBIDDEN_LEAVES" "$validator" \
   && grep -q "PREFIX COLLISION" "$validator" \
   && ok "G22c validator explains the WHY (prefix collision + forbidden leaf reasons)" \
@@ -608,8 +709,10 @@ grep -q 'kill -9 "$JVM_PID"' "$lib" \
 
 # G26f: compose gates the loadgen service behind a profile (never started
 # by `up`) and pins the image tag the lib expects
-compose="$ROOT/code/01_platform/01_docker/docker-compose.yml"
-grep -q 'profiles: \["loadgen"\]' "$compose" \
+compose="${PIPELINE_COMPOSE_UNDER_TEST:-$ROOT/code/01_platform/01_docker/docker-compose.yml}"
+# P6-799: legal YAML variants (no space after ':', single quotes, extra spaces)
+# all gate the service; the old literal-only match failed them.
+grep -qE 'profiles:[[:space:]]*\[[^]]*loadgen[^]]*\]' "$compose" \
   && ok "G26f loadgen compose service is profile-gated" \
   || bad "G26f loadgen service would start with plain `up`"
 grep -q 'image: pipeline-loadgen:1.0.0' "$compose" \
@@ -684,14 +787,14 @@ grep -q "DEGRADED" "$cap" \
   || bad "G28c probe failure no longer warns"
 
 # G28d: compose exposes the RocksDB compaction/flush/SST families
-compose="$ROOT/code/01_platform/01_docker/docker-compose.yml"
+compose="${PIPELINE_COMPOSE_UNDER_TEST:-$ROOT/code/01_platform/01_docker/docker-compose.yml}"
 for key in num-running-compactions compaction-pending num-running-flushes \
            estimate-num-keys total-sst-files-size estimate-live-data-size \
            size-all-mem-tables num-entries-active-mem-table num-immutable-mem-table \
            estimate-pending-compaction-bytes num-live-versions \
            cur-size-active-mem-table num-entries-immutable-mem-table \
            block-cache-pinned-usage; do
-  grep -q "state.backend.rocksdb.metrics.$key" "$compose" \
+  grep -qF "state.backend.rocksdb.metrics.$key" "$compose" \
     && ok "G28d rocksdb metric toggle present: $key" \
     || bad "G28d rocksdb metric toggle missing: $key"
 done
@@ -701,8 +804,8 @@ ft="$SCRIPT_DIR/fused_timeline.py"
 [ -f "$ft" ] && python3 -c "import ast; ast.parse(open('$ft').read())" \
   && ok "G28e fused_timeline.py present + parses" \
   || bad "G28e fused_timeline.py missing or syntax error"
-mkdir -p /tmp/g28-empty-cap
-out="$(python3 "$ft" --capture /tmp/g28-empty-cap 2>&1)"; rc=$?
+G28DIR="$(mktemp -d)"
+out="$(python3 "$ft" --capture "$G28DIR" 2>&1)"; rc=$?
 [ "$rc" -eq 3 ] \
   && ok "G28e no-window refusal -> exit 3 with reason" \
   || bad "G28e no-window should exit 3, got $rc: $out"
