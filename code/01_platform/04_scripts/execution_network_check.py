@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -34,11 +35,36 @@ MARKET_DATA_EXCEPTION = {"ingestion", "execution-bridge"}
 
 
 def _names(value: Any) -> set[str]:
+    """Variable names from either Compose env form.
+
+    P6-368: the list form (``["KEY=value", ...]``) yielded the whole
+    "KEY=value" string, so a leaked name never matched ORDER_ARROW_ENV and
+    the leak check silently passed."""
     if isinstance(value, dict):
         return set(value)
     if isinstance(value, list):
-        return {str(item) for item in value}
+        names: set[str] = set()
+        for item in value:
+            if isinstance(item, dict):
+                names.update(item)
+            else:
+                names.add(str(item).split("=", 1)[0])
+        return names
     return set()
+
+
+# P6-729: a hung Docker daemon must not block the check forever.
+COMPOSE_CONFIG_TIMEOUT_SEC = float(os.environ.get("COMPOSE_CONFIG_TIMEOUT_SEC", "60"))
+
+
+def _declared_profiles(path: Path) -> list[str]:
+    """P6-728: every profile the compose file declares.
+
+    Pinning execution-t3 alone left services under other profiles out of the
+    resolved config, so their networks and environment were never validated."""
+    services = (load_source_compose(path).get("services") or {}).values()
+    return sorted({p for svc in services if isinstance(svc, dict)
+                   for p in (svc.get("profiles") or [])})
 
 
 def validate_config(config: dict[str, Any], source: dict[str, Any] | None = None) -> list[str]:
@@ -102,9 +128,22 @@ def load_resolved_compose(path: Path) -> dict[str, Any]:
     # a bare `compose config` fails interpolation since the lake-tiering pins.
     command = ["docker", "compose", "-f", str(path),
                "--env-file", str(path.parent / ".env"),
-               "--env-file", str(path.parent / "secrets.env"),
-               "--profile", "execution-t3", "config", "--format", "json"]
-    return json.loads(subprocess.check_output(command, text=True))
+               "--env-file", str(path.parent / "secrets.env")]
+    for profile in _declared_profiles(path) or ["execution-t3"]:
+        command += ["--profile", profile]
+    command += ["config", "--format", "json"]
+    try:
+        out = subprocess.check_output(command, text=True,
+                                      timeout=COMPOSE_CONFIG_TIMEOUT_SEC)
+    except subprocess.TimeoutExpired:
+        # Worded without the literal invocation so the compose-form contract does
+        # not read this message as an unregistered call site.
+        raise SystemExit("execution-network-check: resolving the stack timed out "
+                         f"after {COMPOSE_CONFIG_TIMEOUT_SEC:g}s") from None
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit("execution-network-check: resolving the stack failed "
+                         f"(exit {exc.returncode})") from None
+    return json.loads(out)
 
 
 def load_source_compose(path: Path) -> dict[str, Any]:

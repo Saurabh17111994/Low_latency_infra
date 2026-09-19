@@ -36,6 +36,12 @@ COMPOSE = os.path.join(ROOT, "code", "01_platform", "01_docker", "docker-compose
 ENV_EXAMPLE = os.path.join(ROOT, "code", "01_platform", "01_docker", ".env.example")
 SUBMIT = os.path.join(ROOT, "code", "02_services", "02_compute", "submit-jobs.sh")
 
+# P6-575: also catch the substitution-default and quoted forms, e.g.
+# ${EXECUTION_ENABLED:-true} or EXECUTION_ENABLED: "true".
+_EXEC_ENABLED_TRUE_RE = re.compile(
+    r"""EXECUTION_ENABLED\s*[:=]\s*(?:['\"]?true['\"]?|\$\{[^:}]+:-\s*['\"]?true['\"]?\})""",
+    re.I)
+
 FAILURES = []
 
 
@@ -110,7 +116,7 @@ def main():
     composed_text = open(COMPOSE, encoding="utf-8").read()
     check(
         "no EXECUTION_ENABLED default true in compose",
-        not re.search(r"EXECUTION_ENABLED\s*[:=]\s*true", composed_text, re.I),
+        not _EXEC_ENABLED_TRUE_RE.search(composed_text),
         "scanned compose",
     )
     check(
@@ -162,7 +168,7 @@ def main():
             "no ARROW_* in launcher",
         )
 
-    summary = f"local-sandbox-contract: all {len(FAILURES) == 0 and 'checks pass' or f'{len(FAILURES)} check(s) FAILED'}"
+    summary = f"t8-sandbox-contract: all {len(FAILURES) == 0 and 'checks pass' or f'{len(FAILURES)} check(s) FAILED'}"
     print(summary)
     sys.exit(1 if FAILURES else 0)
 
@@ -174,8 +180,16 @@ def _nonblank_env(text, key):
         if line.startswith("#") or "=" not in line:
             continue
         k, _, v = line.partition("=")
-        if k.strip() == key and v.strip() and not v.strip().startswith('"${'):
-            return True
+        if k.strip() != key or not v.strip():
+            continue
+        val = v.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\'\"":
+            val = val[1:-1].strip()
+        # P6-795: a bare self-reference (${VAR} or ${VAR:-}) is a blank
+        # placeholder, quoted or not. A real default (${VAR:-value}) is not.
+        if re.fullmatch(r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::-)?\}", val):
+            continue
+        return True
     return False
 
 

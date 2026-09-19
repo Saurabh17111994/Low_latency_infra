@@ -45,7 +45,7 @@ Wire contract (documented, cross-pinned to both implementations):
                str(gate_epoch), fence_token, str(deadline_epoch_ms),
                payload_json)                       # Jackson/Python compact
   auth       = hex(hmac_sha256(canonical, shared_secret))   # lowercase hex
-  payload_has= hex(sha256(payload_json_bytes))              # lowercase hex
+  payload_hash= hex(sha256(payload_json_bytes))              # lowercase hex
   envelope   = {protocol_version, message_type, request_id, account_scope_id,
                execution_partition_id, payload_hash, gate_epoch, fence_token,
                deadline_epoch_ms, payload, authentication}
@@ -241,6 +241,14 @@ def verify_envelope(json_text, secret, expected_version, now_ms):
               "authentication")
     if not all(k in env for k in fields):
         return False, "malformed envelope"
+    # P6-577: a keyed-but-ill-typed envelope crashed on the comparisons below
+    # (deadline compare, hmac.compare_digest) instead of reporting a bad envelope.
+    if not all(isinstance(env[k], str) for k in fields
+               if k not in ("gate_epoch", "deadline_epoch_ms", "payload")):
+        return False, "malformed envelope"
+    if any(isinstance(env[k], bool) or not isinstance(env[k], int)
+           for k in ("gate_epoch", "deadline_epoch_ms")):
+        return False, "malformed envelope"
     if env["protocol_version"] != expected_version:
         return False, "unsupported version"
     if not (env["request_id"] and env["account_scope_id"]
@@ -382,6 +390,21 @@ def _compose_json():
          "config", "--format", "json"], text=True))
 
 
+def _all_failures(errs):
+    """P6-221: FAILURES grows while the checks run, but errs is the snapshot
+    taken at entry — returning errs alone silently dropped later failures."""
+    return list(dict.fromkeys([*errs, *FAILURES]))
+
+
+def _read_text(path):
+    """P6-797: a moved file must fail a check, not kill the harness."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
 def offline_contract():
     """All checks provable today without containers. Returns list of failures."""
     errs = list(FAILURES)
@@ -401,7 +424,7 @@ def offline_contract():
     except Exception as exc:
         check("execution-t3 compose config", False, str(exc))
         errs.append("compose config failed")
-        return errs
+        return _all_failures(errs)
     svcs = cfg.get("services", {})
     net = cfg.get("networks", {}).get("execution-net", {})
     check("execution-net internal (T8 gate 1)", net.get("internal") is True,
@@ -433,7 +456,10 @@ def offline_contract():
     sjc = os.path.join(ROOT, "code", "02_services", "02_compute", "src", "main",
                        "java", "com", "trading", "compute", "signaljob",
                        "SignalJobConfig.java")
-    sjc_text = open(sjc, encoding="utf-8").read()
+    sjc_text = _read_text(sjc)
+    if sjc_text is None:
+        check("SignalJobConfig.java readable", False, f"missing at {sjc}")
+        return _all_failures(errs)
     check("EXECUTION_INTENT_ENABLED settable (SignalJobConfig)",
           "EXECUTION_INTENT_ENABLED" in sjc_text, "env key present")
     gw_dir = os.path.join(ROOT, "code", "02_services", "06_execution_gateway",
@@ -503,7 +529,7 @@ def offline_contract():
     # single shared value would silently turn every halt into an approval.
     check("control message types are distinct", len(set(ctl_types)) == 2,
           f"{sorted(ctl_types)}")
-    return errs
+    return _all_failures(errs)
 
 
 # ---------------------------------------------------------------------------
