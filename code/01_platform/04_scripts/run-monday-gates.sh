@@ -127,6 +127,8 @@ trap 'exit 130' INT
 PY_LOG="$OUT_DIR/python-tests.log"
 PYTEST_LOG="$OUT_DIR/python-pytest.log"
 ENTRYPOINT_LOG="$OUT_DIR/entrypoint.log"
+INGESTION_LAUNCHER_LOG="$OUT_DIR/ingestion-launchers.log"
+TOKEN_RECONCILE_LOG="$OUT_DIR/token-count-reconcile.log"
 IMAGE_LOG="$OUT_DIR/image-staleness.log"
 DRILL_LOG="$OUT_DIR/drill-live.log"
 
@@ -676,6 +678,23 @@ if ! timeout -k 60 "$ENTRYPOINT_TIMEOUT_SEC" bash "$SCRIPT_DIR/tests/test_docker
 fi
 echo "PASS: entrypoint harness (exit codes + messages)" | tee -a "$SUMMARY"
 
+# Ingestion launcher FATAL paths (W41): TOTP-only enforcement, secrets-file
+# owner/mode/symlink rules, manifest preflight order, child export + exit code.
+if ! timeout -k 60 "$ENTRYPOINT_TIMEOUT_SEC" bash "$SCRIPT_DIR/tests/test_ingestion_launchers.sh" >"$INGESTION_LAUNCHER_LOG" 2>&1; then
+	echo "FAIL: ingestion launcher harness — see $INGESTION_LAUNCHER_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+echo "PASS: ingestion launcher harness (TOTP-only + FATAL paths)" | tee -a "$SUMMARY"
+
+# TokenCountReconcile column contract (W41): instrument_token is resolved from
+# the live schema, and the DDL-declared index is asserted against it. Compiles
+# the probe against the pinned Fluss client, so a jar/API drift also fails here.
+if ! timeout -k 60 "$ENTRYPOINT_TIMEOUT_SEC" bash "$SCRIPT_DIR/tests/test_token_count_reconcile.sh" >"$TOKEN_RECONCILE_LOG" 2>&1; then
+	echo "FAIL: token-count reconcile harness — see $TOKEN_RECONCILE_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+echo "PASS: token-count reconcile harness (column-by-name contract)" | tee -a "$SUMMARY"
+
 # ── 1. Go suite with race detector (Phase 8: go test -race) ──────────────────
 fi
 if step_active 5; then
@@ -1097,6 +1116,8 @@ echo "  E2E build: ${E2E_BUILD_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Python suites: ${PY_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Python pytest-only suites: ${PYTEST_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Entrypoint: ${ENTRYPOINT_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Ingestion launchers: ${INGESTION_LAUNCHER_LOG:-not-run}" | tee -a "$SUMMARY"
+echo "  Token-count reconcile: ${TOKEN_RECONCILE_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Go:   ${GO_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  Java: ${JAVA_LOG:-not-run}" | tee -a "$SUMMARY"
 echo "  full doc audit: ${AUDIT_LOG:-not-run}" | tee -a "$SUMMARY"

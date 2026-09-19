@@ -575,17 +575,20 @@ loadtest-20k-regression:
 # logs/ — both gitignored, so a fresh worktree must symlink logs/ to the main
 # project folder (repo convention; see CLAUDE.md symlinks) and copy the
 # surefire reports from the main project's target/ dirs before this gate.
+# P3-180: cd first — rustup resolves the toolchain from cwd, so --manifest-path from
+# the repo root would silently bypass code/02_services/04_executor/rust-toolchain.toml.
+#
+# P6-864: every step runs even when an earlier one fails, and the target then fails if ANY
+# did. As a bare sequence of recipe lines, a single formatting nit aborted make before
+# docs_audit.py ever ran — silently suppressing the whole doc-vs-code audit.
 docs-audit:
-	@echo "== T0-T8 hardening: cargo clippy -D warnings =="
-	# P3-180: cd first — rustup resolves the toolchain from cwd, so --manifest-path from
-	# the repo root would silently bypass code/02_services/04_executor/rust-toolchain.toml.
-	@bash -c 'set -o pipefail; cd code/02_services/04_executor && cargo clippy --all-targets --features paper -- -D warnings 2>&1 | tail -20'
-	@echo "== T0-T8 hardening: cargo fmt --check =="
-	@bash -c 'set -o pipefail; cd code/02_services/04_executor && cargo fmt --check 2>&1 | tail -20'
-	@echo "== T0-T8 hardening: go vet =="
-	@bash -c 'set -o pipefail; cd code/02_services/06_execution_bridge/go-bridge && go vet ./... 2>&1 | tail -20'
-	@echo "== T0-T8 hardening: docs-audit hardening checks done =="
-	@python3 code/01_platform/04_scripts/docs_audit.py
+	@rc=0; \
+	step() { printf '== T0-T8 hardening: %s ==\n' "$$1"; shift; "$$@" || rc=1; }; \
+	step 'cargo clippy -D warnings' bash -c 'set -o pipefail; cd code/02_services/04_executor && cargo clippy --all-targets --features paper -- -D warnings 2>&1 | tail -20'; \
+	step 'cargo fmt --check' bash -c 'set -o pipefail; cd code/02_services/04_executor && cargo fmt --check 2>&1 | tail -20'; \
+	step 'go vet' bash -c 'set -o pipefail; cd code/02_services/06_execution_bridge/go-bridge && go vet ./... 2>&1 | tail -20'; \
+	step 'docs-audit hardening checks done' python3 code/01_platform/04_scripts/docs_audit.py; \
+	exit $$rc
 # implementation dossiers or the authoritative upstream layers (decisions,
 # requirements, architecture, contracts) reads feature_candles_15s as a LOG,
 # Signal_Candidates as a KV table, or feature_candles_15s_current as live — or
