@@ -671,6 +671,28 @@ and stays `Pending`.
 **Exit:** each dimension recorded as its own line of evidence. A healthy container is not sufficient for any higher dimension.
 **Stop if:** `CHECKPOINT_DIR` is not `s3://` in production — the job is designed to fail fast rather than run without durable checkpoints.
 
+### S8b — Validate the deployed cluster `[PRODUCTION]`
+S3 verifies the machines and the stack file's tests verify the file; neither sees what the cluster
+did with it. That gap is where every failure of 2026-09-20 lived — a task `Pending` on
+`no suitable node` while `docker stack deploy` reported success, a bind mount whose source was
+missing on the node the task landed on, a global agent covering one node out of four.
+
+```bash
+python3 code/01_platform/04_scripts/cluster_check.py \
+    --expect code/01_platform/04_scripts/prod_vms.json --out ~/readiness
+```
+
+Read-only, no SSH, exit code = number of FAILs. It checks node readiness and node labels, replica
+counts, tasks waiting on a placement or a mount, `max_replicas_per_node: 1` spread, global-agent
+coverage against the node labels each service selects, which service publishes a port, and — with
+`--expect` — whether the cluster is the size the inventory describes.
+Two verdicts, deliberately different: **FAIL** means the cluster could satisfy the check and does
+not (something is broken); **WARN** means the nodes present cannot satisfy it (three replicas, one
+eligible node) — expected on a rehearsal cluster, a defect on the four VMs. Measured on the 1-node
+rehearsal cluster (2026-09-20) it returned exactly two FAILs, both real, and nothing else:
+`prod_ingestion 0/1` with `task: non-zero exit (1)` — the missing `ARROW_*` credentials. The two
+Flink services the single node cannot fit were WARNs, not FAILs.
+
 ### S9 — Data-loop smoke `[PRODUCTION]`
 ```bash
 make test-25-smoke                     # existing smoke target
