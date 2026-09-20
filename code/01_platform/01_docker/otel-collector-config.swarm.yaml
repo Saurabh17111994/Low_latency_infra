@@ -89,11 +89,16 @@ receivers:
         - job_name: infra-host
           scrape_interval: 15s
           static_configs:
-            - targets: ["node-exporter:9100"]
+        # CHG-265: `tasks.` returns EVERY task of the service, so this one collector
+        # scrapes all four nodes. The bare name returns the VIP, which load-balances
+        # to one arbitrary task — with the agents on every node that would sample a
+        # random node per scrape instead of covering them (measured 2026-09-20:
+        # `tasks.node-exporter` -> 10.0.1.18 (the task), `node-exporter` -> 10.0.1.17).
+            - targets: ["tasks.node-exporter:9100"]
         - job_name: infra-containers
           scrape_interval: 15s
           static_configs:
-            - targets: ["cadvisor:8080"]
+            - targets: ["tasks.cadvisor:8080"]
         # CHG-259: ZooKeeper answers nothing but TCP port 2181 out of the box — a
         # quorum or latency problem is invisible until something else times out.
         # The pinned image bundles zookeeper-prometheus-metrics-3.9.2.jar, and

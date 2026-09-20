@@ -1036,10 +1036,20 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    # CHG-265: no placement constraint, on purpose. A per-host agent is the one
+    # service class whose correct placement is "every node" — that is what
+    # `mode: global` means — and any label here is a conditional that decides for
+    # a human. Both agents used to pin to `observability == true`, so on four VMs
+    # the trading nodes' own host and container metrics were collected from
+    # nowhere. Measured cost of running them everywhere (2026-09-20, per node):
+    # node-exporter 9.9 MiB / 0.00% CPU, cadvisor 99.7 MiB / 2.58% CPU.
+    # The hostname is what makes four nodes tell each other apart: node-exporter
+    # reports `node_uname_info{nodename=...}` from its UTS namespace, which is
+    # the container id unless it is set (measured 2026-09-20: nodename=
+    # "f77f64fd95c1" before, the VM's own name after this template).
+    hostname: "{{.Node.Hostname}}"
     deploy:
       mode: global
-      placement:
-        constraints: [node.labels.observability == true]
       restart_policy:
         condition: any
       update_config:
@@ -1073,10 +1083,20 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    # CHG-265: no placement constraint, on purpose. A per-host agent is the one
+    # service class whose correct placement is "every node" — that is what
+    # `mode: global` means — and any label here is a conditional that decides for
+    # a human. Both agents used to pin to `observability == true`, so on four VMs
+    # the trading nodes' own host and container metrics were collected from
+    # nowhere. Measured cost of running them everywhere (2026-09-20, per node):
+    # node-exporter 9.9 MiB / 0.00% CPU, cadvisor 99.7 MiB / 2.58% CPU.
+    # The hostname is what makes four nodes tell each other apart: node-exporter
+    # reports `node_uname_info{nodename=...}` from its UTS namespace, which is
+    # the container id unless it is set (measured 2026-09-20: nodename=
+    # "f77f64fd95c1" before, the VM's own name after this template).
+    hostname: "{{.Node.Hostname}}"
     deploy:
       mode: global
-      placement:
-        constraints: [node.labels.observability == true]
       restart_policy:
         condition: any
       update_config:

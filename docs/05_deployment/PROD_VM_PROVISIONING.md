@@ -59,7 +59,13 @@ trigger: `N>6` workers, sustained CPU >80%, or Raft election flaps.
 ## 2. Hard rules (fail = provisioning defect)
 
 1. **No hostname pinning anywhere.** The stack places by `node.labels.role == worker` and
-   `node.labels.observability == true` only. Never edit `docker-stack.yml` to name a host;
+   `node.labels.observability == true` only. Never edit `docker-stack.yml` to name a host.
+   **Exception (CHG-265): the per-host agents carry no constraint at all.** `node-exporter`
+   and `cadvisor` are `mode: global`, so they run on every node including VM4; any label
+   here would exclude the nodes whose metrics must exist. Everything else keeps label
+   placement, and a hostname pin stays forbidden everywhere. They also take
+   `hostname: "{{.Node.Hostname}}"`, because otherwise every node's series reports the
+   container id as its own name;
    W4+ joins by labeling, not by stack rewrite (`test_09_stack.py` enforces this).
 2. **Manager quorum is 3** (tolerant of 1 loss). O1 (observability) is a worker, outside the
    manager quorum; its loss must never authorize orders or erase the durable audit.
@@ -427,7 +433,7 @@ docker node ls                                            # expect 3 managers + 
 # v2 only (dedicated managers): docker node update --availability drain m1 m2 m3
 ```
 **Why VM4 carries `observability` and not `role`:** the 13 workload services require
-`node.labels.role == worker` and the 5 observability services (collector, OpenObserve,
+`node.labels.role == worker` and the 3 observability services (collector, OpenObserve,
 alert-consumer, node-exporter, cAdvisor) require
 `node.labels.observability == true`. Leaving `role` off VM4 keeps the trading stack from being
 scheduled onto the observability VM; leaving `observability` off VM1–VM3 keeps OpenObserve off the
@@ -633,7 +639,7 @@ present, and the operator login (`ZO_ROOT_USER_EMAIL` + the deploy-environment `
 fails this dimension.
 Host and container metrics come from the two per-node agents, `node-exporter` (`:9100`, host
 filesystems/CPU/memory through the `/host/*` mounts and `--path.rootfs`) and `cAdvisor` (`:8080`,
-container cgroups). Both are `mode: global`, both pin to `observability == true`, and each probes
+container cgroups). Both are `mode: global` and carry no constraint (CHG-265), so they cover every node — and each probes
 itself every 30 s — a probe that depends on another service is not a liveness check.
 ZooKeeper answers Prometheus on `:7000/metrics` per replica (`metricsProvider.className` +
 `metricsProvider.httpPort` in `ZOO_CFG_EXTRA`; the provider class ships in the pinned image, so this
@@ -681,6 +687,12 @@ missing on the node the task landed on, a global agent covering one node out of 
 python3 code/01_platform/04_scripts/cluster_check.py \
     --expect code/01_platform/04_scripts/prod_vms.json --out ~/readiness
 ```
+
+**Redeploying after a `configs:` change.** Swarm configs are immutable: a stack redeploy that
+would change the collector config's contents fails with `only updates to Labels are
+allowed` (`failed to update config prod_otel-collector-config`, measured 2026-09-20).
+Apply such a change with `docker stack rm prod` followed by `docker stack deploy` — the
+order the rehearsal uses — or give the config a new name.
 
 Read-only, no SSH, exit code = number of FAILs. It checks node readiness and node labels, replica
 counts, tasks waiting on a placement or a mount, `max_replicas_per_node: 1` spread, global-agent

@@ -32,8 +32,11 @@ WORKLOAD = [
     "flink-jobmanager", "flink-taskmanager", "ingestion",
     "execution-bridge", "execution-gateway", "nautilus",
 ]
-OBSERVABILITY = ["otel-collector", "openobserve", "alert-consumer",
-                 "node-exporter", "cadvisor"]
+OBSERVABILITY = ["otel-collector", "openobserve", "alert-consumer"]
+# Per-host agents (CHG-265): global mode IS their placement, so they carry no
+# constraint. Every node runs them, which is the only way VM1-VM3 host and container
+# metrics exist — and it means a node added later is covered without an edit here.
+PER_HOST_AGENTS = ("node-exporter", "cadvisor")
 COLLECTOR = ROOT / "code/01_platform/01_docker/otel-collector-config.swarm.yaml"
 
 def _load():
@@ -112,20 +115,35 @@ class TestPlacement:
             assert "node.labels.observability == true" in cons, (
                 f"{name} must place on observability == true (keeps O1 off manager/workload)")
 
-    def test_all_services_have_label_placement(self):
+    def test_every_service_is_placed_by_label_except_per_host_agents(self):
+        """Policy with one named exception, not a blanket (CHG-265).
+
+        A per-host agent is the one service class whose correct placement is "every
+        node" — that is what `mode: global` means. A label constraint there is a
+        conditional that decides for a human, and both agents used to carry one
+        (`observability == true`), so on four VMs the trading nodes' own host and
+        container metrics came from nowhere. Every other service is still placed by
+        label, and nothing may pin a hostname.
+        """
         d = _load()
         for name, svc in d["services"].items():
-            cons = svc["deploy"]["placement"]["constraints"]
+            cons = (svc["deploy"].get("placement") or {}).get("constraints") or []
+            # anti-hostname applies to everyone, agents included
+            for c in cons:
+                assert "node.hostname" not in c and "node.id" not in c, (
+                    f"{name} must not pin a hostname (v1/v2 rewires labels only)")
+            if name in PER_HOST_AGENTS:
+                assert svc["deploy"]["mode"] == "global", (
+                    f"{name} is a per-host agent: global mode is its placement")
+                assert not cons, (
+                    f"{name}: any constraint here excludes nodes the agent must cover "
+                    f"({cons}) — per-host agents take no constraint")
+                continue
             assert cons, f"{name}: placement constraints required (label-based)"
             # workload uses node.labels.role; observability uses the separate
             # boolean node.labels.observability — accept either label key.
             assert any("node.labels.role" in c or "node.labels.observability" in c
                        for c in cons), f"{name}: must use a label constraint"
-            # never a hostname pin (v1/v2 re-labels, never rewrites)
-            for c in cons:
-                assert "node.hostname" not in c and "node.id" not in c, (
-                    f"{name} must not pin a hostname")
-
 
 class TestNoComposeOnlyKeys:
     """Keys that `docker stack deploy` ignores or rejects — must be absent.
@@ -1154,7 +1172,10 @@ class TestCollectorScrapeTargets:
 
     def test_every_scraped_host_is_a_stack_service(self):
         services = set(_load()["services"])
-        unknown = sorted(h for h in self._hosts() if h not in services)
+        # CHG-265: `tasks.<svc>` is Swarm DNS for every task of <svc> — the service
+        # name is what must exist, with or without the prefix.
+        unknown = sorted(h for h in self._hosts()
+                         if h.removeprefix("tasks.") not in services)
         assert not unknown, (
             f"the collector scrapes/exporters at {unknown}, which the stack does not "
             f"declare — the receiver will warn every interval and the panels stay empty"
@@ -1194,6 +1215,21 @@ class TestCollectorScrapeTargets:
                     for t in static.get("targets", []) or []:
                         found.add(str(t))
         return found
+
+    def test_per_host_agents_identify_their_node_and_one_collector_scrapes_them_all(self):
+        """CHG-265: agents on every node only help if the series say WHICH node."""
+        d = _load()["services"]
+        for name in PER_HOST_AGENTS:
+            assert d[name].get("hostname") == "{{.Node.Hostname}}", (
+                f"{name} must take the node's own hostname: node-exporter reads its UTS "
+                "name, measured as the container id (nodename=f77f64fd95c1) without this")
+        swarm = yaml.safe_load(COLLECTOR.read_text())
+        targets = {t for c in swarm["receivers"]["prometheus"]["config"]["scrape_configs"]
+                   for sc in c.get("static_configs", []) for t in sc.get("targets", [])}
+        for name, port in (("node-exporter", 9100), ("cadvisor", 8080)):
+            assert f"tasks.{name}:{port}" in targets, (
+                f"the collector must scrape tasks.{name}:{port}; the bare name resolves to "
+                "the VIP and would sample one random node per scrape instead of all of them")
 
     def test_infra_agents_report_on_the_host_not_the_container(self):
         d = _load()["services"]
