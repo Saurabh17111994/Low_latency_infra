@@ -16,7 +16,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "code/01_platform/04_scripts/vm-bootstrap.sh"
-CORE_TOOLS = ["awk", "grep", "sed", "stat", "id", "tr", "cat", "python3", "ls"]
+CORE_TOOLS = ["awk", "grep", "sed", "stat", "id", "tr", "cat", "python3", "ls", "mkdir", "mv", "cmp"]
 # The interpreter is launched by absolute path: the child PATH contains only fakes, so that an
 # absent fake means an absent tool and never accidentally reaches the real one.
 BASH = shutil.which("bash") or "/bin/bash"
@@ -56,6 +56,8 @@ def make_node(
     syslog: bool = True,
     syslog_group: str | None = None,
     package_tools: bool = True,
+    sysctls: dict[str, str] | None = None,
+    sysctl: bool = True,
 ):
     tmp.mkdir(parents=True, exist_ok=True)
     bin_dir, root, home = tmp / "bin", tmp / "root", tmp / "home"
@@ -71,6 +73,13 @@ def make_node(
         _fake(bin_dir, "chronyc", f'echo "System time     : {offset} seconds fast of NTP time"')
     _fake(bin_dir, "timedatectl",
           f'echo "System clock synchronized: {"yes" if synchronized else "no"}"')
+    if sysctl:
+        # The four recorded rules (runbook §6.1), with per-test overrides.
+        values = {"vm.swappiness": "1", "net.core.somaxconn": "32768",
+                  "net.ipv4.tcp_max_syn_backlog": "16384", "vm.max_map_count": "262144"}
+        values.update(sysctls or {})
+        cases = "\n".join(f"        {k}) echo {v} ;;" for k, v in values.items())
+        _fake(bin_dir, "sysctl", f'case "$1" in\n    --system) exit 0 ;;\n    -n) case "$2" in\n{cases}\n        *) exit 1 ;;\n    esac ;;\n    *) exit 1 ;;\nesac')
     _fake(bin_dir, "ss", "\n".join(f'echo "LISTEN 0 4096 0.0.0.0:{p} 0.0.0.0:*"' for p in listeners) or "exit 0")
     if package_tools:
         # tee and gpg read stdin for real: a fake that exits without draining the pipe makes the
@@ -121,22 +130,25 @@ def commands(node) -> list[str]:
 
 # ------------------------------------------------------------------ the check is fail-fast
 
-def test_a_ready_node_reports_exactly_one_known_gap():
+def test_a_ready_node_reports_no_gap():
+    """Until CHG-272 the sysctl decision was missing, so a ready node still failed. It no longer does."""
     with tempfile.TemporaryDirectory() as t:
         node = make_node(Path(t), daemon={"insecure-registries": ["10.0.0.1:5000"]})
         r = run(node, "--check", "--registry", "10.0.0.1:5000")
-        assert r.returncode == 1, r.stdout + r.stderr
+        assert r.returncode == 0, r.stdout + r.stderr
         out = r.stdout
         assert "[PASS] docker 29.4.0 is usable by tester without sudo" in out
         assert "[PASS] system clock is synchronized" in out
         assert "[PASS] clock offset 0.000123456s is within 1.0s" in out
         assert "[PASS] ports free: 2377 7946 4789" in out
         assert "[PASS] " in out and "declares the registry 10.0.0.1:5000 as insecure" in out
-        assert out.count("[FAIL]") == 1 and "sysctls" in out
-        assert "1 failure(s)" in out
+        assert "[FAIL]" not in out
+        assert "[PASS] vm.swappiness = 1 (rule: le 1)" in out
+        assert "[PASS] vm.max_map_count = 262144 (rule: ge 262144)" in out
+        assert "0 failure(s)" in out
 
 
-MUTATING = ("apt-get", "install ", "usermod", "systemctl", "tee ", "gpg ", "curl ")
+MUTATING = ("apt-get", "install ", "usermod", "systemctl", "tee ", "gpg ", "curl ", "sysctl --system")
 
 
 def test_the_check_only_reads():
@@ -150,22 +162,22 @@ def test_clock_drift_beyond_the_limit_is_a_failure():
     with tempfile.TemporaryDirectory() as t:
         node = make_node(Path(t), offset="5.0", daemon={"insecure-registries": ["r:5000"]})
         r = run(node, "--check")
-        assert r.returncode == 2, r.stdout
+        assert r.returncode == 1, r.stdout
         assert "clock offset 5.0s is beyond the 1.0s limit" in r.stdout
 
 
 def test_the_limit_can_be_tightened_per_node():
     with tempfile.TemporaryDirectory() as t:
         node = make_node(Path(t), offset="0.2", daemon={"insecure-registries": ["r:5000"]})
-        assert run(node, "--check").returncode == 1
-        assert run(node, "--check", "--max-offset", "0.1").returncode == 2
+        assert run(node, "--check").returncode == 0
+        assert run(node, "--check", "--max-offset", "0.1").returncode == 1
 
 
 def test_an_unsynchronized_clock_is_a_failure():
     with tempfile.TemporaryDirectory() as t:
         node = make_node(Path(t), synchronized=False, daemon={"insecure-registries": ["r:5000"]})
         r = run(node, "--check")
-        assert r.returncode == 2
+        assert r.returncode == 1
         assert "system clock is not synchronized" in r.stdout
 
 
@@ -173,7 +185,7 @@ def test_a_missing_chronyc_is_a_failure_not_a_skip():
     with tempfile.TemporaryDirectory() as t:
         node = make_node(Path(t), chronyc=False, daemon={"insecure-registries": ["r:5000"]})
         r = run(node, "--check")
-        assert r.returncode == 2
+        assert r.returncode == 1
         assert "chronyc not installed" in r.stdout
 
 
@@ -206,7 +218,7 @@ def test_syslog_that_the_collector_cannot_read_is_a_failure():
                          daemon={"insecure-registries": ["r:5000"]})
         r = run(node, "--check")
         assert "not 'not-the-collectors-group'" in r.stdout
-        assert r.returncode == 2
+        assert r.returncode == 1
 
 
 def test_a_missing_syslog_is_a_failure():
@@ -224,8 +236,8 @@ def test_a_missing_repository_clone_is_a_failure():
 def test_daemon_json_must_declare_the_registry():
     with tempfile.TemporaryDirectory() as t:
         node = make_node(Path(t), daemon={"insecure-registries": ["10.0.0.1:5000"]})
-        assert run(node, "--check", "--registry", "10.0.0.1:5000").returncode == 1
-        assert run(node, "--check", "--registry", "10.0.0.9:5000").returncode == 2
+        assert run(node, "--check", "--registry", "10.0.0.1:5000").returncode == 0
+        assert run(node, "--check", "--registry", "10.0.0.9:5000").returncode == 1
         assert "does not list 10.0.0.9:5000" in run(node, "--check", "--registry", "10.0.0.9:5000").stdout
 
 
@@ -272,10 +284,70 @@ def test_apply_runs_the_documented_installs_once_and_only_when_missing():
         assert issued.count("git clone") == 1
 
 
-def test_apply_never_applies_sysctls():
+def test_apply_writes_only_the_recorded_sysctls_and_is_idempotent():
+    """CHG-272 replaced "never touch sysctls" with "apply exactly the recorded four": no ad-hoc
+    `sysctl -w`, one file, and a second run that changes nothing runs nothing."""
     source = SCRIPT.read_text()
-    assert "sysctl -w" not in source and "sysctl --" not in source
+    assert "sysctl -w" not in source
     with tempfile.TemporaryDirectory() as t:
         node = make_node(Path(t), docker=None, chronyc=False, repo=False)
-        run(node, "--apply")
-        assert [c for c in commands(node) if "sysctl" in c] == []
+        first = run(node, "--apply")
+        assert first.returncode == 0, first.stdout + first.stderr
+        conf = node["root"] / "etc" / "sysctl.d" / "99-arrow-infra.conf"
+        body = conf.read_text()
+        # Exactly the recorded four, in order: an extra knob here would be an invented one.
+        entries = [line for line in body.splitlines() if line.strip() and not line.startswith("#")]
+        assert entries == ["vm.swappiness = 1", "net.core.somaxconn = 32768",
+                           "net.ipv4.tcp_max_syn_backlog = 16384", "vm.max_map_count = 262144"], entries
+        assert commands(node).count("sysctl --system") == 1
+        before = commands(node)
+        second = run(node, "--apply")
+        assert second.returncode == 0, second.stdout + second.stderr
+        assert "sysctls already applied" in second.stdout
+        assert commands(node) == before + [c for c in commands(node)[len(before):] if "sysctl" not in c]
+
+
+def test_a_wrong_sysctl_is_a_failure_that_names_the_rule():
+    with tempfile.TemporaryDirectory() as t:
+        node = make_node(Path(t), sysctls={"vm.swappiness": "60"},
+                         daemon={"insecure-registries": ["r:5000"]})
+        r = run(node, "--check")
+        assert r.returncode == 1, r.stdout
+        assert "vm.swappiness = 60 breaks 'le 1'" in r.stdout
+
+
+def test_a_host_already_beyond_a_floor_passes():
+    """Rules are comparisons, not equalities: 1048576 is a valid max_map_count and 65535 a valid
+    somaxconn, and prescribing exact values would have *lowered* this host. Every `ge` rule is checked
+    here with a value strictly above it, so a rule that silently became `le` cannot pass."""
+    with tempfile.TemporaryDirectory() as t:
+        node = make_node(Path(t), sysctls={"vm.max_map_count": "1048576",
+                                           "net.core.somaxconn": "65535",
+                                           "net.ipv4.tcp_max_syn_backlog": "32768"},
+                         daemon={"insecure-registries": ["r:5000"]})
+        r = run(node, "--check")
+        assert r.returncode == 0, r.stdout
+        assert "[PASS] vm.max_map_count = 1048576 (rule: ge 262144)" in r.stdout
+        assert "[PASS] net.core.somaxconn = 65535 (rule: ge 32768)" in r.stdout
+        assert "[PASS] net.ipv4.tcp_max_syn_backlog = 32768 (rule: ge 16384)" in r.stdout
+
+
+def test_an_unreadable_sysctl_is_a_failure_not_a_skip():
+    with tempfile.TemporaryDirectory() as t:
+        node = make_node(Path(t), sysctl=False, daemon={"insecure-registries": ["r:5000"]})
+        r = run(node, "--check")
+        assert r.returncode == 4, r.stdout
+        assert "vm.swappiness is unreadable" in r.stdout
+
+
+def test_the_script_and_the_runbook_list_the_same_sysctls():
+    """The decision lives in two places: the script that applies it and the table an operator reads.
+    CHG-272 added this test so the next knob cannot land in only one of them."""
+    import re
+    source = SCRIPT.read_text()
+    block = re.search(r"SYSCTL_RULES=\((.*?)\n\)", source, re.S).group(1)
+    in_script = {line.split("|")[0].strip().strip('"') for line in block.splitlines() if "|" in line}
+    runbook = (REPO_ROOT / "docs/05_deployment/PROD_VM_PROVISIONING.md").read_text()
+    section = runbook.split("**3. Sysctls")[1].split("**4.")[0]
+    in_runbook = set(re.findall(r"^\| `([a-z0-9_.]+)` \|", section, re.M))
+    assert in_script == in_runbook, (in_script, in_runbook)

@@ -145,8 +145,11 @@ trigger: `N>6` workers, sustained CPU >80%, or Raft election flaps.
 
 ## 3. Verification gate (D1.2 — `prod_node_check.py`)
 
-`code/01_platform/04_scripts/prod_node_check.py` verifies per-VM **disk / label / role**
-from an inventory file (SSH or a cloud-API access profile), and **exits non-zero on drift**.
+`code/01_platform/04_scripts/prod_node_check.py` verifies per-VM **disk / clock / label / role**
+from an inventory file (SSH or a cloud-API access profile), and **exits non-zero on drift**. The
+clock is **measured**, not labelled: `timedatectl` must report a synchronized clock and
+`chronyc tracking` an offset within `CLOCK_OFFSET_LIMIT_MS` (default 200 ms — the limit the executor
+itself halts at, tightened or loosened with `--max-offset-ms`).
 
 - Inventory: `--inventory <JSON>` (schema documented in the script header and in a bundled
   example `prod_vms.example.json`).
@@ -190,7 +193,7 @@ result (`09-production-swarm.md`).
 | Gap | What is missing | Blocks |
 | --- | --- | --- |
 | Image publication | `image-publish.sh` (CHG-247, seven images since CHG-256) pushes the project-built images and writes digest-pinned deploy values, and `digest-pin.sh` resolves digests against a plain-HTTP registry — rehearsed end-to-end against a **local** `registry:2` only. VM1's registry does not exist yet, so `.env` still carries bare tags and no digest-pinned production environment has been produced | S4 (publish), and therefore S7, S7b |
-| Production sysctl list | `vm-bootstrap.sh` installs Docker, enables NTP and **fails** on an unsynchronised or drifting clock (CHG-266), so the remaining gap is the sysctl list itself — still undefined in this repository, decide and record it before the first boot | S4 |
+| Executor's live clock source | `ChronycOffsetSource` (CHG-272) reads the host's `chronyc tracking` behind the existing `OffsetSource` trait and fails closed when it cannot — but the executor runs in a **container**, so production needs `chrony` in that image **and** the host's chrony socket reachable from it (and a decision about the socket's ownership, since it is root-owned). Neither can be proved without a VM, so `CLOCK_OFFSET_SOURCE` stays unset (fixed source) and the host clock is gated by `prod_node_check.py` at S3/S7 meanwhile | S7, before the first live order |
 | EOD lake offload | The trigger exists now — the `eod-scheduler` stack service (CHG-269) runs `eod_controller.py` daily — but the lake path itself still needs the R2 bucket and keys, so the service ships with `EOD_OFFLOAD=none` and the manifest lifecycle is proven without offload | S11 |
 
 **Sizing caveat:** the final service-to-node CPU/RAM/IOPS/bandwidth allocation is `EVIDENCE-BLOCKED` until the production performance and one-VM-loss scenarios pass (§4 above). The 500 GB per-node disk figure is a starting allocation, not a proven sizing result.
@@ -337,10 +340,26 @@ timedatectl                            # expect "System clock synchronized: yes"
 chronyc tracking                       # expect a small System time offset
 ```
 
-**3. Sysctls — not yet defined.** This repository does not record which sysctls production needs
-(§6.1). Decide the list, write it down, then apply it; Flink's own host requirements
-(swappiness, socket backlog, overcommit, file descriptors) are the starting point. Do not paste a
-list nobody recorded.
+**3. Sysctls — the recorded production list (CHG-272).** Four rules, each naming the failure it
+prevents. They are *comparisons*, not equalities: a host already tuned beyond a floor is ready, and
+writing an exact value would **lower** a host that is already better (this laptop reports
+`vm.max_map_count = 1048576`).
+
+| Knob | Rule | Why |
+| --- | --- | --- |
+| `vm.swappiness` | ≤ 1 | JVM heaps and RocksDB block caches are large and latency-critical; paging them out turns a p99 spike into a stall |
+| `net.core.somaxconn` | ≥ 32768 | Kafka-protocol clients, task managers and health probes open many sockets; the accept queue overflows at the 4096 default |
+| `net.ipv4.tcp_max_syn_backlog` | ≥ 16384 | the queue before `accept()`, paired with `somaxconn` |
+| `vm.max_map_count` | ≥ 262144 | Flink's RocksDB state backend mmaps many regions per instance (`STATE_BACKEND=rocksdb`); the 65530 default fails state open |
+
+Deliberately **not** set, with the measurement that justifies skipping each: `fs.file-max` (already
+effectively unlimited on a modern kernel), the Docker daemon's `LimitNOFILE` (the package default is
+already 524287, so no systemd drop-in is needed), and `vm.overcommit_memory` (it masks real memory
+exhaustion, and the container limits bound memory here). Anything else is a measurement, not a guess.
+
+`vm-bootstrap.sh --apply` writes these to `/etc/sysctl.d/99-arrow-infra.conf` — idempotently, the file
+is rewritten only when its content changes — and applies them with `sysctl --system`; `--check`
+verifies the four rules and fails on a **wrong value**, not on a missing decision.
 
 **4. Logs and ports.** Application output must land in `/var/log/*.log` (the collector reads that
 path; there is **no** journald receiver configured, so `/var/log/syslog` — not the journal — is
@@ -425,9 +444,11 @@ code = number of FAILs, and also verifies that `docker` works without `sudo`, th
 belongs to group `adm` (CHG-263), that the Swarm ports are free, and that `daemon.json` declares the
 plain-HTTP registry.
 
-**Step 3 is the exception: the script never touches sysctls.** The list is still undefined (§6.1), so
-`--check` reports `[FAIL] sysctls …` until someone decides it — a host cannot be declared ready on a
-guess.
+**Step 3 applies the recorded list, and nothing else.** `--apply` writes the four rules of §6.1 to
+`/etc/sysctl.d/99-arrow-infra.conf` (rewriting only when the content changes) and applies them with
+`sysctl --system`; `--check` verifies each rule, so a wrong value is a `[FAIL]` naming the rule and a
+host already tuned beyond a floor passes. The script contains no `sysctl -w` and no knob that is not in
+that table.
 
 **Before deploying — after step 6 has just rewritten the deploy environment.** Compose interpolates
 that file silently, so a missing key becomes an empty string and a tag becomes "whatever the node

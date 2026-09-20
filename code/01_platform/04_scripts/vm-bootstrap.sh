@@ -5,9 +5,9 @@
 # skipped the clock step, or that cannot run docker without sudo, otherwise shows up days later.
 #
 # What it deliberately does NOT do:
-#   * no sysctls — this repository does not define the production list (runbook §6.1). A host with a
-#     guessed kernel tuning is worse than a host that is visibly not ready, so --check FAILs on the
-#     missing decision instead of hiding it.
+#   * no sysctls beyond the recorded list — runbook §6.1 fixes four rules (CHG-272), each with the
+#     failure it prevents, and --apply writes exactly those. A host with a guessed kernel tuning is
+#     worse than a host that is visibly not ready, so anything not on the list is not applied here.
 #   * no `docker swarm join` — that needs a token from VM1 and is step S5. --apply prints it.
 #   * no secrets — that is S6 (`secrets-bootstrap.sh`).
 #   * nothing on the cluster — no SSH, no docker service calls.
@@ -30,6 +30,18 @@ CLONE_URL="https://github.com/Saurabh17111994/Low_latency_infra.git"
 SWARM_PORTS="2377 7946 4789"
 REGISTRY=""
 EXTRA_PORTS=""
+
+# The recorded production sysctl list (runbook §6.1). Rules are comparisons, not equalities: a host
+# already tuned beyond a floor is ready, and writing an exact value would *lower* a better host (this
+# laptop already reports vm.max_map_count = 1048576). Format: key|comparison|value|why.
+SYSCTL_RULES=(
+    "vm.swappiness|le|1|JVM heaps and RocksDB block caches are large and latency-critical; paging them out turns a p99 spike into a stall"
+    "net.core.somaxconn|ge|32768|Kafka-protocol clients, task managers and health probes open many sockets; the accept queue overflows at the 4096 default"
+    "net.ipv4.tcp_max_syn_backlog|ge|16384|the queue before accept(), paired with somaxconn"
+    "vm.max_map_count|ge|262144|Flink's RocksDB state backend mmaps many regions per instance (STATE_BACKEND=rocksdb); the 65530 default fails state open"
+)
+SYSCTL_CONF="$ROOT/etc/sysctl.d/99-arrow-infra.conf"
+SYSCTL_HEADER="# arrow-infra production sysctls — runbook §6.1 (CHG-272). Do not hand-edit: vm-bootstrap.sh --apply rewrites this file."
 MODE="apply"
 FAILS=0
 
@@ -42,6 +54,8 @@ vm-bootstrap.sh — S4 for ONE node: idempotent apply, fail-fast check.
   vm-bootstrap.sh --check --max-offset 0.5 --repo ~/arrow-infra
 
 --check exits with the number of FAILs (0 = the node is ready for S5).
+
+--apply also writes /etc/sysctl.d/99-arrow-infra.conf (the four rules of runbook §6.1) and applies it.
 EOF
 }
 
@@ -130,12 +144,32 @@ apply_clock() {
     fi
 }
 
+apply_sysctls() {
+    local rule key cmp want why candidate
+    candidate="${SYSCTL_CONF}.new"
+    mkdir -p "${SYSCTL_CONF%/*}" || return 1   # pure shell: dirname is not guaranteed on a minimal host
+    {
+        printf '%s\n' "$SYSCTL_HEADER"
+        for rule in "${SYSCTL_RULES[@]}"; do
+            IFS='|' read -r key cmp want why <<<"$rule"
+            printf '# rule: %s %s — %s\n%s = %s\n' "$cmp" "$want" "$why" "$key" "$want"
+        done
+    } > "$candidate" || return 1
+    if [ -f "$SYSCTL_CONF" ] && cmp -s "$candidate" "$SYSCTL_CONF"; then
+        rm -f "$candidate"
+        note "sysctls already applied ($SYSCTL_CONF is unchanged)"
+        return 0
+    fi
+    run $SUDO mv "$candidate" "$SYSCTL_CONF" || return 1
+    run $SUDO sysctl --system || return 1
+}
+
 do_apply() {
     apply_repo || return 1
     apply_docker || return 1
     apply_clock || return 1
+    apply_sysctls || return 1
     echo
-    info "sysctls are NOT applied here: the production list is still undefined (runbook §6.1)"
     info "next: re-run this script with --check, then do S5 (docker swarm join) with a token from VM1"
 }
 
@@ -239,8 +273,22 @@ check_daemon_json() {
 }
 
 check_sysctls() {
-    # Deliberate, permanent FAIL until the decision is recorded — see the header.
-    bad "sysctls — the production list is not defined in this repository (runbook §6.1); this host cannot be called ready while that decision is missing"
+    # Each rule is verified, so a wrong value fails and a host already beyond a floor passes.
+    local rule key cmp want why current
+    for rule in "${SYSCTL_RULES[@]}"; do
+        IFS='|' read -r key cmp want why <<<"$rule"
+        current=$(sysctl -n "$key" 2>/dev/null || true)
+        if [ -z "$current" ]; then
+            bad "$key is unreadable — apply the recorded list (runbook §6.1) with --apply"
+            continue
+        fi
+        if awk -v c="$current" -v w="$want" -v op="$cmp" 'BEGIN { exit !(op == "ge" ? c + 0 >= w + 0 : c + 0 <= w + 0) }'; then
+            ok "$key = $current (rule: $cmp $want)"
+        else
+            bad "$key = $current breaks '$cmp $want' — $why"
+        fi
+    done
+    [ -f "$SYSCTL_CONF" ] || info "no $SYSCTL_CONF: the values pass, but nothing pins them across a reboot"
 }
 
 do_check() {

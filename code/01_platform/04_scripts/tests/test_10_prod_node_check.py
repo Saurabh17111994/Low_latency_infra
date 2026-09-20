@@ -26,7 +26,7 @@ class FakeRunner(pnc.RemoteRunner):
     """
 
     def __init__(self, access, swarm_hostnames=None, node_objects=None,
-                 identities=None):
+                 identities=None, clocks=None):
         super().__init__(access)
         self.reachable = {"10.0.0.11", "10.0.0.21", "10.0.0.40", "10.0.0.41"}
         self.disks = {"10.0.0.11": 600, "10.0.0.21": 480, "10.0.0.40": 512, "10.0.0.41": 520}
@@ -42,6 +42,8 @@ class FakeRunner(pnc.RemoteRunner):
             "node-w1": ("worker", "active", {"role": "employee"}),  # label drift
             "node-w2": ("worker", "active", {"role": "worker"}),
         }
+        # host -> CLOCK_PROBE output; a healthy node unless a test overrides it
+        self.clocks = clocks or {}
         self.commands = []
 
     def run(self, host, command, timeout=20):
@@ -52,6 +54,8 @@ class FakeRunner(pnc.RemoteRunner):
             return 0, ""
         if command.startswith("df -BG"):
             return 0, f"{self.disks[host]}G"
+        if "timedatectl" in command:
+            return 0, self.clocks.get(host, "SYNCED\n0.000123456")
         if "docker info --format" in command:
             ident = self.identities.get(host)
             if ident is None:
@@ -326,3 +330,59 @@ def test_example_inventory_marks_o1_as_a_joined_worker():
     carriers = [n["name"] for n in inventory["nodes"]
                 if n.get("labels", {}).get("observability") == "true"]
     assert carriers == ["O1"]
+
+
+# ------------------------------------------------------- the clock is measured, not labelled (CHG-272)
+
+def test_a_drifting_clock_fails_and_names_the_offset():
+    node = _inv()["nodes"][0]
+    runner = FakeRunner({}, clocks={"10.0.0.11": "SYNCED\n0.350"})
+    checks, ok = pnc.check_node(node, runner)
+    assert ok is False
+    assert checks["clock"][0] == "FAIL"
+    assert "beyond" in checks["clock"][1] and "200 ms" in checks["clock"][1]
+
+
+def test_an_offset_exactly_at_the_limit_is_within_it():
+    """The executor's own contract, not this script's opinion: `DriftMonitor::new(200, ...)` reports
+    Within(200) at exactly 200 ms (clockwatch.rs tests), so the gate must not be stricter than the
+    platform it guards."""
+    node = _inv()["nodes"][0]
+    runner = FakeRunner({}, clocks={"10.0.0.11": "SYNCED\n0.200"})
+    checks, ok = pnc.check_node(node, runner)
+    assert ok is True, checks
+    assert checks["clock"][0] == "PASS"
+
+
+def test_the_clock_limit_is_configurable():
+    node = _inv()["nodes"][0]
+    runner = FakeRunner({}, clocks={"10.0.0.11": "SYNCED\n0.150"})
+    assert pnc.check_node(node, runner)[1] is True
+    assert pnc.check_node(node, runner, max_offset_ms=100)[1] is False
+
+
+def test_an_unsynchronized_clock_fails():
+    node = _inv()["nodes"][0]
+    runner = FakeRunner({}, clocks={"10.0.0.11": "UNSYNCED\n0.0001"})
+    checks, ok = pnc.check_node(node, runner)
+    assert ok is False and "does not report" in checks["clock"][1]
+
+
+def test_an_unreadable_clock_fails_closed():
+    """No chronyc (or a missing one) must never be read as a disciplined clock."""
+    node = _inv()["nodes"][0]
+    runner = FakeRunner({}, clocks={"10.0.0.11": "SYNCED\n"})
+    checks, ok = pnc.check_node(node, runner)
+    assert ok is False and "cannot read the offset" in checks["clock"][1]
+
+
+def test_the_probe_reads_the_field_the_bootstrap_reads():
+    """Both scripts read field 4 of `chronyc tracking`'s `System time` line, so the node gate and
+    S4's bootstrap cannot disagree about what the clock says."""
+    assert "'/^System time/{print $4}'" in pnc.CLOCK_PROBE
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPTS)))
+    bootstrap = open(os.path.join(repo_root, "code/01_platform/04_scripts/vm-bootstrap.sh"),
+                     encoding="utf-8").read()
+    assert "awk '/^System time/{print $4}'" in bootstrap
+    synced, offset = pnc._parse_clock("SYNCED\n0.000123456")
+    assert synced is True and offset == 0.000123456

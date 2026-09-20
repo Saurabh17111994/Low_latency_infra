@@ -24,7 +24,7 @@ const HTTP_DRAIN_GRACE_SECS: u64 = 5;
 use nautilus_execution_service::{
     bootstrap::Runtime,
     bridge::{BridgeClient, CommandScript, FakeBridge, HttpBridgeClient},
-    clockwatch::{DriftMonitor, FixedOffsetSource},
+    clockwatch::{ChronycOffsetSource, DriftMonitor, FixedOffsetSource, OffsetSource},
     config::ServiceConfig,
     durable::{DurableClients, DurableFlags},
     engine::{BridgeSelection, LiveNodeRuntime},
@@ -173,26 +173,30 @@ async fn main() -> anyhow::Result<()> {
     };
     let mut server = tokio::spawn(http::serve(addr, state));
 
-    // B8 clock-drift safety: the offline slice samples a fixed zero offset (no NTP on the
-    // laptop dev box — a real NTP/chrony source is a Workstream-D/prod concern behind the
-    // same OffsetSource trait, see clockwatch.rs). The monitor enforces CLOCK_OFFSET_LIMIT_MS
-    // on the gate: |offset| beyond the limit (or an unmeasurable probe) fails closed to
-    // HALTED; recovery is only ever the sanctioned reconcile -> approval -> enable path.
+    // B8 clock-drift safety. The source is selected by CLOCK_OFFSET_SOURCE (CHG-272): unset —
+    // dev, soak, CI — keeps the fixed zero offset the offline slice always used; `chronyc`
+    // arms the live host-clock source, which reads the same `System time` field the S4 bootstrap
+    // and the D1.2 node gate read. Either way the monitor enforces CLOCK_OFFSET_LIMIT_MS on the
+    // gate: |offset| beyond the limit, or an unmeasurable probe, fails closed to HALTED;
+    // recovery is only ever the sanctioned reconcile -> approval -> enable path.
     let drift_interval = parse_drift_interval(
         std::env::var("CLOCK_DRIFT_CHECK_INTERVAL_S")
             .ok()
             .as_deref(),
     );
-    let mut drift_monitor = DriftMonitor::new(
-        runtime.config.clock_offset_limit_ms,
-        Box::new(FixedOffsetSource(0)),
-    );
+    let (drift_source, drift_source_name): (Box<dyn OffsetSource>, &str) =
+        match std::env::var("CLOCK_OFFSET_SOURCE").as_deref() {
+            Ok("chronyc") => (Box::new(ChronycOffsetSource::new()), "chronyc tracking"),
+            _ => (Box::new(FixedOffsetSource(0)), "fixed zero offset"),
+        };
+    let mut drift_monitor = DriftMonitor::new(runtime.config.clock_offset_limit_ms, drift_source);
     let mut drift_tick = tokio::time::interval(drift_interval);
     drift_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     tracing::info!(
         interval_s = drift_interval.as_secs(),
         limit_ms = runtime.config.clock_offset_limit_ms,
-        "clock-drift monitor armed (fixed zero-offset source; NTP in Workstream D)"
+        source = drift_source_name,
+        "clock-drift monitor armed"
     );
 
     // The hosted run future must be pinned once and polled by `&mut`: `run_forever` consumes

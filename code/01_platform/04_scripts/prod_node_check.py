@@ -10,6 +10,10 @@ Per-Node checks:
   * reachability   — SSH connect (BatchMode; no password prompt ever)
   * disk           — root filesystem size >= disk_min_gb (default 500, imported from
                      PROD_VM_PROVISIONING.md; manager nodes may set a smaller floor)
+  * clock          — measured, not labelled: `timedatectl` must report a synchronized clock and
+                     `chronyc tracking` an offset within CLOCK_OFFSET_LIMIT_MS (default 200 ms, the
+                     limit the executor itself halts at). Same field `vm-bootstrap.sh` reads, so the
+                     two checks cannot disagree about what the clock says.
   * label/role     — Swarm node role + labels match the inventory expectation
                      (role=manager / role=worker / observability=true), and (optional)
                      availability is `drained` for v2 manager-only nodes. Swarm checks
@@ -52,6 +56,13 @@ REPO_ROOT = os.path.abspath(
 EVIDENCE_DIR_DEFAULT = os.path.join(REPO_ROOT, "logs", "nautilus-execution")
 
 DEFAULT_DISK_MIN_GB = 500  # PROD_VM_PROVISIONING.md §1 (workload/observability floor)
+# The platform's own limit: the executor halts at CLOCK_OFFSET_LIMIT_MS, default 200 ms
+# (clockwatch.rs). A node beyond it is not ready to run the platform, so this gate uses the
+# platform's number, not the looser 1 s TOTP tolerance of S4's bootstrap.
+DEFAULT_CLOCK_OFFSET_LIMIT_MS = 200
+# One round trip: synchronization flag first, then the offset field vm-bootstrap.sh also reads.
+CLOCK_PROBE = ("timedatectl 2>/dev/null | grep -q 'System clock synchronized: yes' && echo SYNCED "
+               "|| echo UNSYNCED; chronyc tracking 2>/dev/null | awk '/^System time/{print $4}'")
 
 # Inventory shape (JSON):
 # {
@@ -195,7 +206,29 @@ def _node_swarm_info(runner, node, manager_host=None):
             "hostname": local["hostname"], "node_id": local["node_id"]}, None
 
 
-def check_node(node, runner, manager_host=None):
+def _parse_clock(stdout):
+    """(synced, offset_seconds) from CLOCK_PROBE output; None where the probe said nothing.
+
+    `chronyc tracking` prints 'System time     : 0.000123456 seconds fast of NTP time', so the
+    offset is field 4 of that line. An unreadable probe yields (None, None) and the caller fails
+    closed rather than assuming a disciplined clock.
+    """
+    lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+    synced = None
+    if lines and lines[0] in ("SYNCED", "UNSYNCED"):
+        synced = lines[0] == "SYNCED"
+        lines = lines[1:]
+    offset = None
+    for line in lines:
+        try:
+            offset = float(line)
+            break
+        except ValueError:
+            continue
+    return synced, offset
+
+
+def check_node(node, runner, manager_host=None, max_offset_ms=DEFAULT_CLOCK_OFFSET_LIMIT_MS):
     """Returns (checks, ok) for one node; checks is {name: (PASS|FAIL, detail)}.
 
     `manager_host` is where a worker's node object is inspected; a manager reads
@@ -220,7 +253,20 @@ def check_node(node, runner, manager_host=None):
     else:
         checks["disk"] = ("PASS", f"{size_gb}G >= floor {floor}G")
 
-    # 3. swarm role/labels (only when the node is intended to be in the swarm)
+    # 3. clock (measured, per node — TOTP is clock-based and the executor halts beyond the limit)
+    rc, out = runner.run(node["host"], CLOCK_PROBE)
+    synced, offset = _parse_clock(out if rc == 0 else "")
+    limit_s = max_offset_ms / 1000.0
+    if synced is not True:
+        checks["clock"] = ("FAIL", "timedatectl does not report 'System clock synchronized: yes'")
+    elif offset is None:
+        checks["clock"] = ("FAIL", f"cannot read the offset from `chronyc tracking` (rc={rc})")
+    elif abs(offset) > limit_s:
+        checks["clock"] = ("FAIL", f"offset {offset:+.6f}s is beyond +-{limit_s}s ({max_offset_ms} ms)")
+    else:
+        checks["clock"] = ("PASS", f"offset {offset:+.6f}s within +-{limit_s}s ({max_offset_ms} ms)")
+
+    # 4. swarm role/labels (only when the node is intended to be in the swarm)
     if node.get("swarm"):
         info, err = _node_swarm_info(runner, node, manager_host)
         if err:
@@ -292,6 +338,8 @@ def build_evidence(inventory, per_node, run_id, utc_now):
             "`docker info` on the node itself for the identity, then `docker node "
             "inspect <NodeID>` on a manager (a worker cannot read its own node object)",
             "hostname-free placement itself is enforced by test_09_stack.py",
+            "the clock offset is measured per node over SSH (chronyc tracking), not assumed from "
+            "a label: a node whose clock is unreadable fails closed",
         ],
     }
 
@@ -301,6 +349,9 @@ def main(argv=None):
     parser.add_argument("--inventory", default="prod_vms.json", help="JSON inventory")
     parser.add_argument("--out", default=EVIDENCE_DIR_DEFAULT,
                         help="evidence output directory (EvidenceRecord JSON)")
+    parser.add_argument("--max-offset-ms", type=int, default=DEFAULT_CLOCK_OFFSET_LIMIT_MS,
+                        help=f"clock offset limit in ms (default {DEFAULT_CLOCK_OFFSET_LIMIT_MS}, "
+                             "the executor's own CLOCK_OFFSET_LIMIT_MS)")
     parser.add_argument("--self-check", action="store_true",
                         help="run against the bundled fake inventory + in-process runner")
     args = parser.parse_args(argv)
@@ -320,7 +371,8 @@ def main(argv=None):
     manager_host = _resolve_manager_host(inventory)
     per_node = []
     for node in inventory["nodes"]:
-        node_checks, ok = check_node(node, runner, manager_host=manager_host)
+        node_checks, ok = check_node(node, runner, manager_host=manager_host,
+                                     max_offset_ms=args.max_offset_ms)
         per_node.append((node, (node_checks, ok)))
         for name, (verdict, detail) in node_checks.items():
             print(f"{node['name']:<16} {name:<12} {verdict:<4} {detail}")
@@ -347,6 +399,10 @@ def _self_check(args, utc_now, run_id):
                 "10.0.0.11": ("M1", "active", True, "node-m1"),
                 "10.0.0.21": ("W1", "active", False, "node-w1"),
             }
+            # clock probe answers: M1 and O1 healthy, W1 350 ms out (beyond the 200 ms limit)
+            self.clocks = {"10.0.0.11": "SYNCED\n0.000123456",
+                           "10.0.0.21": "SYNCED\n0.350",
+                           "10.0.0.40": "SYNCED\n-0.000045"}
             # what a manager sees, keyed by NodeID: role, availability, labels
             self.node_objects = {
                 "node-m1": ("manager", "drained", {"role": "manager"}),
@@ -360,6 +416,8 @@ def _self_check(args, utc_now, run_id):
                 return 0, ""
             if command.startswith("df -BG"):
                 return 0, f"{self.disks[host]}G"
+            if "timedatectl" in command:
+                return 0, self.clocks[host]
             if "docker info --format" in command:
                 name, state, control, node_id = self.identities[host]
                 return 0, f"{name}|{state}|{'true' if control else 'false'}|{node_id}"
@@ -408,7 +466,7 @@ def _self_check(args, utc_now, run_id):
     path = os.path.join(args.out, f"self-check-{run_id}-prod-node-check-evidence.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(evidence, fh, indent=2)
-    print(f"\n[self-check] PASS — checker classifies reachable/disk/label/availability "
+    print(f"\n[self-check] PASS — checker classifies reachable/disk/clock/label/availability "
           f"correctly; evidence at {path}")
     return 0
 

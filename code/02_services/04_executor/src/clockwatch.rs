@@ -10,9 +10,12 @@
 //! - probe failure       -> `Unmeasurable` -> same fail-closed halt (never trust silence).
 //! - `|offset| <= limit` -> `Within` (no action; halting is never automatic on recovery).
 //!
-//! The offline slice uses [`FixedOffsetSource`]; the live slice (Workstream D) swaps in a
-//! real NTP/chrony source behind the same trait — identical to how the durable stores are
-//! swapped behind `AttemptStore`/`GateStateStore`.
+//! The offline slice uses [`FixedOffsetSource`]; [`ChronycOffsetSource`] reads the live host
+//! clock through `chronyc tracking` behind the same trait — identical to how the durable stores
+//! are swapped behind `AttemptStore`/`GateStateStore`. `main.rs` selects it with
+//! `CLOCK_OFFSET_SOURCE=chronyc`; the default stays the fixed source so a dev box without a
+//! disciplined clock keeps working, and a *selected but unreadable* chrony fails closed
+//! (`Unmeasurable` -> halt) rather than silently reporting zero (CHG-272).
 
 use anyhow::Result;
 
@@ -32,6 +35,68 @@ pub struct FixedOffsetSource(pub i64);
 impl OffsetSource for FixedOffsetSource {
     fn sample_offset_ms(&mut self) -> Result<i64> {
         Ok(self.0)
+    }
+}
+
+/// Production offset source: the host's own chrony estimate, read from `chronyc tracking`.
+///
+/// The offset is field 4 of the `System time` line — the same field `vm-bootstrap.sh` (S4) and
+/// `prod_node_check.py` (D1.2) read, so the three checks cannot disagree about what the clock
+/// says. One process per sample is the cost; the monitor samples on a period, not per order.
+///
+/// Every failure — chronyc absent, non-zero exit, unparseable line — is an `Err`, so the monitor
+/// classifies it `Unmeasurable` and halts. Silence is never read as a disciplined clock.
+#[derive(Debug, Clone)]
+pub struct ChronycOffsetSource {
+    program: String,
+}
+
+impl Default for ChronycOffsetSource {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChronycOffsetSource {
+    pub fn new() -> Self {
+        Self {
+            program: "chronyc".to_string(),
+        }
+    }
+
+    /// Only for tests: point at a stub instead of a `chronyc` on PATH.
+    #[cfg(test)]
+    fn with_program(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+        }
+    }
+
+    /// `chronyc tracking` prints e.g.
+    /// `System time     : 0.000123456 seconds fast of NTP time`; field 4 is the seconds offset,
+    /// positive meaning the local clock is ahead. Milliseconds, rounded.
+    fn parse_tracking(stdout: &str) -> Option<i64> {
+        let line = stdout.lines().find(|l| l.starts_with("System time"))?;
+        let seconds: f64 = line.split_whitespace().nth(3)?.parse().ok()?;
+        Some((seconds * 1000.0).round() as i64)
+    }
+}
+
+impl OffsetSource for ChronycOffsetSource {
+    fn sample_offset_ms(&mut self) -> Result<i64> {
+        let out = std::process::Command::new(&self.program)
+            .arg("tracking")
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!("`{} tracking` exited with {}", self.program, out.status);
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Self::parse_tracking(&stdout).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no readable 'System time' offset in `{} tracking` output",
+                self.program
+            )
+        })
     }
 }
 
@@ -230,6 +295,85 @@ mod tests {
         let mut m = DriftMonitor::new(200, Box::new(FailingSource));
         let status = m.enforce(&mut g);
         assert!(matches!(status, DriftStatus::Unmeasurable(_)));
+        assert_eq!(g.state(), ExecState::Halted);
+    }
+
+    // ------------------------------------------------ CHG-272: the live chrony source
+
+    /// A stub `chronyc` on disk: the spawn-and-parse path is exercised for real, without a
+    /// chrony daemon (there is none on a dev box, and a container cannot read the host's socket
+    /// without the packaging work recorded in CHG-272).
+    fn stub_chronyc(name: &str, body: &str) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("clockwatch-{}-{}", std::process::id(), name));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chronyc");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn parses_the_field_the_host_scripts_read() {
+        let out = "Reference ID    : 1B2C3D4E (ntp.example)\n\
+                   System time     : 0.350000000 seconds fast of NTP time\n\
+                   Leap status     : Normal\n";
+        assert_eq!(ChronycOffsetSource::parse_tracking(out), Some(350));
+        // negative = local clock behind, and the sign must survive
+        assert_eq!(
+            ChronycOffsetSource::parse_tracking(
+                "System time     : -0.045678901 seconds slow of NTP time\n"
+            ),
+            Some(-46)
+        );
+        // anything else is "cannot measure", never a zero
+        assert_eq!(
+            ChronycOffsetSource::parse_tracking("Leap status     : Normal\n"),
+            None
+        );
+        assert_eq!(
+            ChronycOffsetSource::parse_tracking("System time     : unreadable\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn the_live_source_measures_a_real_process() {
+        let program = stub_chronyc(
+            "ok",
+            "echo 'System time     : 0.350000000 seconds fast of NTP time'",
+        );
+        let mut src = ChronycOffsetSource::with_program(program);
+        assert_eq!(src.sample_offset_ms().unwrap(), 350);
+    }
+
+    #[test]
+    fn a_failing_chronyc_is_unmeasurable_and_halts() {
+        let program = stub_chronyc("fail", "exit 1");
+        let mut src = ChronycOffsetSource::with_program(program);
+        assert!(src.sample_offset_ms().is_err());
+        let mut g = Gate::new();
+        let mut m = DriftMonitor::new(200, Box::new(src));
+        assert!(matches!(m.enforce(&mut g), DriftStatus::Unmeasurable(_)));
+        assert_eq!(g.state(), ExecState::Halted, "silence must fail closed");
+    }
+
+    #[test]
+    fn an_unreadable_output_is_unmeasurable_not_zero() {
+        let program = stub_chronyc("garbage", "echo 'Leap status     : Normal'");
+        let mut src = ChronycOffsetSource::with_program(program);
+        assert!(src.sample_offset_ms().is_err());
+    }
+
+    #[test]
+    fn the_live_source_drives_the_existing_enforcement() {
+        let program = stub_chronyc(
+            "drift",
+            "echo 'System time     : 1.500000000 seconds fast of NTP time'",
+        );
+        let mut g = Gate::new();
+        let mut m = DriftMonitor::new(200, Box::new(ChronycOffsetSource::with_program(program)));
+        assert_eq!(m.enforce(&mut g), DriftStatus::Beyond(1500));
         assert_eq!(g.state(), ExecState::Halted);
     }
 }
