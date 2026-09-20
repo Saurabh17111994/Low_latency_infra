@@ -2,10 +2,13 @@ package com.trading.execution.gateway;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 class GatewayConfigTest {
     static Map<String, String> values() {
@@ -148,5 +151,52 @@ class GatewayConfigTest {
         assertThatThrownBy(() -> GatewayConfig.defaultRequestBudget(null))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("GATEWAY_REQUEST_TIMEOUT_MS");
+    }
+
+    /**
+     * CHG-249: Docker and Swarm secrets arrive as FILES. The trailing newline is stripped — a
+     * secret written by `docker secret create` has none, but a hand-made file usually does.
+     */
+    @Test void secretCanComeFromAFile(@TempDir Path dir) throws Exception {
+        Path secret = dir.resolve("gateway_shared_secret");
+        Files.writeString(secret, "from-file-sentinel\n");
+        Map<String, String> m = values();
+        m.remove("GATEWAY_SHARED_SECRET");
+        m.put("GATEWAY_SHARED_SECRET_FILE", secret.toString());
+        assertThat(GatewayConfig.from(m).sharedSecret()).isEqualTo("from-file-sentinel");
+    }
+
+    @Test void secretFileWinsOverThePlainVariable(@TempDir Path dir) throws Exception {
+        Path secret = dir.resolve("gateway_shared_secret");
+        Files.writeString(secret, "from-file");
+        Map<String, String> m = values();   // still carries GATEWAY_SHARED_SECRET=private
+        m.put("GATEWAY_SHARED_SECRET_FILE", secret.toString());
+        assertThat(GatewayConfig.from(m).sharedSecret()).isEqualTo("from-file");
+    }
+
+    @Test void plainVariableStillWorksWhenNoFileIsNamed() {
+        assertThat(GatewayConfig.from(values()).sharedSecret()).isEqualTo("private");
+    }
+
+    /**
+     * A named-but-unusable file must fail LOUD rather than silently continue with an unset
+     * secret — the same fail-closed contract the Go execution bridge applies.
+     */
+    @Test void unreadableOrEmptySecretFileFailsLoud(@TempDir Path dir) throws Exception {
+        Map<String, String> missing = values();
+        missing.put("GATEWAY_SHARED_SECRET_FILE", dir.resolve("does-not-exist").toString());
+        assertThatThrownBy(() -> GatewayConfig.from(missing))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("GATEWAY_SHARED_SECRET_FILE")
+                .hasMessageContaining("unreadable");
+
+        Path empty = dir.resolve("empty");
+        Files.writeString(empty, "   \n");
+        Map<String, String> blank = values();
+        blank.put("GATEWAY_SHARED_SECRET_FILE", empty.toString());
+        assertThatThrownBy(() -> GatewayConfig.from(blank))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("GATEWAY_SHARED_SECRET_FILE")
+                .hasMessageContaining("empty");
     }
 }

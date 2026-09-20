@@ -151,6 +151,11 @@ configs:
     file: ./alert-consumer.py
   fluss-r2-secrets-bridge:
     file: ./fluss-r2-secrets-from-file.sh
+  # Instrument manifest, delivered as a Swarm config (never a per-VM file copy).
+  # Swarm configs are immutable: a revised manifest must be committed under a NEW
+  # config name, which fails loudly instead of silently serving stale instruments.
+  manifest-nse:
+    file: ${MANIFEST_FILE:-./instruments/NSE_CM_EQUITY.csv}
 
 services:
   # ---- ZooKeeper: 3-member ensemble (quorum 2-of-3), one member per VM ------
@@ -162,14 +167,24 @@ services:
     image: ${ZOOKEEPER_IMAGE:-zookeeper@sha256:43d39109cbd4de394742efbfc162a8a0a93731e806374b71f3865f4ef4460a56}
     networks: [trading-net]
     healthcheck:
-      test: ["CMD-SHELL","zkServer.sh status >/dev/null 2>&1 || exit 1"]
+      # Liveness only — never `zkServer.sh status`: that requires quorum, and Swarm
+      # publishes a DNS record only for tasks whose healthcheck passes, so members
+      # could never resolve each other (bootstrap deadlock; see CHG-249).
+      test: ["CMD","bash","-c","exec 3<>/dev/tcp/127.0.0.1/8080"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 20s
     environment:
       ZOO_MY_ID: "1"
-      ZOO_SERVERS: "server.1=zookeeper-1:2888:3888;server.2=zookeeper-2:2888:3888;server.3=zookeeper-3:2888:3888"
+      # Whitespace separated: the image appends ONE zoo.cfg line per token. With
+      # ';' the whole ensemble collapses into a single invalid line and ZK exits 2.
+      ZOO_SERVERS: "server.1=zookeeper-1:2888:3888 server.2=zookeeper-2:2888:3888 server.3=zookeeper-3:2888:3888"
+      # clientPort: without it `zkServer.sh status` can never pass AND nothing
+      # listens on 2181 for Flink/Fluss. quorumListenOnAllIPs: bind the election
+      # port without resolving our own service name. admin.*: pin the liveness
+      # endpoint to loopback so it is never reachable from the network.
+      ZOO_CFG_EXTRA: "clientPort=2181 quorumListenOnAllIPs=true admin.serverAddress=127.0.0.1 admin.serverPort=8080"
     deploy:
       replicas: 1
       placement:
@@ -187,14 +202,17 @@ services:
     image: ${ZOOKEEPER_IMAGE:-zookeeper@sha256:43d39109cbd4de394742efbfc162a8a0a93731e806374b71f3865f4ef4460a56}
     networks: [trading-net]
     healthcheck:
-      test: ["CMD-SHELL","zkServer.sh status >/dev/null 2>&1 || exit 1"]
+      # Liveness only — see zookeeper-1 for why `zkServer.sh status` deadlocks.
+      test: ["CMD","bash","-c","exec 3<>/dev/tcp/127.0.0.1/8080"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 20s
     environment:
       ZOO_MY_ID: "2"
-      ZOO_SERVERS: "server.1=zookeeper-1:2888:3888;server.2=zookeeper-2:2888:3888;server.3=zookeeper-3:2888:3888"
+      # Whitespace separated (one zoo.cfg line per token) — see zookeeper-1.
+      ZOO_SERVERS: "server.1=zookeeper-1:2888:3888 server.2=zookeeper-2:2888:3888 server.3=zookeeper-3:2888:3888"
+      ZOO_CFG_EXTRA: "clientPort=2181 quorumListenOnAllIPs=true admin.serverAddress=127.0.0.1 admin.serverPort=8080"
     deploy:
       replicas: 1
       placement:
@@ -212,14 +230,17 @@ services:
     image: ${ZOOKEEPER_IMAGE:-zookeeper@sha256:43d39109cbd4de394742efbfc162a8a0a93731e806374b71f3865f4ef4460a56}
     networks: [trading-net]
     healthcheck:
-      test: ["CMD-SHELL","zkServer.sh status >/dev/null 2>&1 || exit 1"]
+      # Liveness only — see zookeeper-1 for why `zkServer.sh status` deadlocks.
+      test: ["CMD","bash","-c","exec 3<>/dev/tcp/127.0.0.1/8080"]
       interval: 30s
       timeout: 10s
       retries: 5
       start_period: 20s
     environment:
       ZOO_MY_ID: "3"
-      ZOO_SERVERS: "server.1=zookeeper-1:2888:3888;server.2=zookeeper-2:2888:3888;server.3=zookeeper-3:2888:3888"
+      # Whitespace separated (one zoo.cfg line per token) — see zookeeper-1.
+      ZOO_SERVERS: "server.1=zookeeper-1:2888:3888 server.2=zookeeper-2:2888:3888 server.3=zookeeper-3:2888:3888"
+      ZOO_CFG_EXTRA: "clientPort=2181 quorumListenOnAllIPs=true admin.serverAddress=127.0.0.1 admin.serverPort=8080"
     deploy:
       replicas: 1
       placement:
@@ -735,6 +756,12 @@ services:
       - arrow_app_secret
       - arrow_password
       - arrow_totp_key
+    # The manifest must be present inside the container at the path the app
+    # already defaults to (INSTRUMENT_MANIFEST_PATH); without it ingestion refuses
+    # to start with "readable manifest FILE is required".
+    configs:
+      - source: manifest-nse
+        target: /instruments/NSE_CM_EQUITY.csv
     environment:
       # P1-077: stack is the prod deploy — prod gates engaged.
       DEPLOYMENT_ENV: production
@@ -743,6 +770,11 @@ services:
       TRANSPORT: ${TRANSPORT:-proto}
       ARROW_APP_ID: ${ARROW_APP_ID:?set ARROW_APP_ID}
       ARROW_USER_ID: ${ARROW_USER_ID:?set ARROW_USER_ID}
+      # The three credentials are mounted as secrets; the arrow-bridge child reads
+      # them through its _FILE form so no value lands in the service spec.
+      ARROW_APP_SECRET_FILE: /run/secrets/arrow_app_secret
+      ARROW_PASSWORD_FILE: /run/secrets/arrow_password
+      ARROW_TOTP_KEY_FILE: /run/secrets/arrow_totp_key
       ARROW_INSTRUMENT_TOKENS: ${ARROW_INSTRUMENT_TOKENS:-}
       ARROW_DEBUG_WS: ${ARROW_DEBUG_WS:-}
       ARROW_TICK_COUNTS: ${ARROW_TICK_COUNTS:-}
@@ -841,6 +873,9 @@ services:
       # published for the gateway, so the bind stays inside the private network.
       GATEWAY_ALLOW_WILDCARD_BIND: "true"
       GATEWAY_BIND_HOST: 0.0.0.0
+      # The secret is mounted read-only at /run/secrets/<name>; GATEWAY_SHARED_SECRET
+      # itself is deliberately unset so the value never lands in the service spec.
+      GATEWAY_SHARED_SECRET_FILE: /run/secrets/gateway_shared_secret
       GATEWAY_BIND_PORT: "9180"
       NAUTILUS_PRIVATE_ENDPOINT: http://nautilus:9190/v1/intents
       GATEWAY_PROTOCOL_VERSION: execution-gateway.v2
@@ -870,6 +905,8 @@ services:
     environment:
       EXECUTION_ENABLED: "false"         # live-money disabled until all gates pass
       EXECUTOR_LISTEN_ADDR: 0.0.0.0:9190
+      # File form of the gateway secret — see execution-gateway.
+      GATEWAY_SHARED_SECRET_FILE: /run/secrets/gateway_shared_secret
       BRIDGE_ENDPOINT: http://execution-bridge:8787
       # CHG-079 (2026-08-21): BRIDGE_ENDPOINT now selects the production HttpBridgeClient
       # transport. Bridge side is wired (P5-013): the bridge reads the Swarm
@@ -929,9 +966,13 @@ services:
       restart_policy: {condition: any}
       resources:
         limits: {cpus: "4", memory: 8G}
-    secrets:
-      - o2_password
     environment:
+      # OpenObserve reads ZO_ROOT_USER_PASSWORD from the environment only — it has
+      # no *_FILE form (measured on v0.91.5: it panics at startup when the var is
+      # absent, even with the secret mounted). The value therefore comes from the
+      # deploy environment; CHG-249 records the wrapper-image upgrade path that
+      # restores secret-only delivery.
+      ZO_ROOT_USER_PASSWORD: ${O2_PASSWORD:?set O2_PASSWORD}
       ZO_ROOT_USER_EMAIL: ${O2_USER:-admin@example.com}
       ZO_MAX_FILE_RETENTION_TIME: ${ZO_MAX_FILE_RETENTION_TIME:-3600}
       ZO_MAX_FILE_SIZE_ON_DISK: ${ZO_MAX_FILE_SIZE_ON_DISK:-128}

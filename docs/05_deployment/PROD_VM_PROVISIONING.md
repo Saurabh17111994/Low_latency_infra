@@ -69,6 +69,11 @@ trigger: `N>6` workers, sustained CPU >80%, or Raft election flaps.
 4. **Encrypted overlays** for `trading-net`/`execution-net`; Swarm secrets `external: true`
    (`06-swarm-secrets.md`); per-node durable volumes declared, never hostname-bound.
 5. **No stray host ports** for the execution/gateway/bridge trio (private topology, T8).
+6. **No healthcheck may require another service or cluster formation.** Swarm only publishes a DNS
+   record for tasks whose healthcheck has PASSED, so a probe that waits for peers can never pass:
+   the peers it waits for cannot resolve it either (DEC-047). Liveness only — reach your own port,
+   read your own file. Quorum and dependency state belong in metrics, logs and alerts. A
+   `test_09_stack.py` guard fails the build on `zkServer.sh status`-style probes.
 
 ## 3. Verification gate (D1.2 — `prod_node_check.py`)
 
@@ -382,11 +387,20 @@ in `otel-collector-config.swarm.yaml`), so a prefixed value authenticates as `Ba
 OpenObserve answers 401 with nothing useful in the log. An earlier revision of this step said the
 opposite; the script derives the correct form and `--self-check` pins it.
 
-**Entrypoint paths are unchanged:** Swarm mounts secrets at `/run/secrets/<name>`, and the
-consumers read them from there (`AWS_ACCESS_KEY_ID_FILE`/`AWS_SECRET_ACCESS_KEY_FILE` for the six
-services that use S3, `EXECUTION_BRIDGE_AUTH_TOKEN_FILE` for the bridge, `arrow_*` for ingestion).
-`ARROW_APP_ID` and `ARROW_USER_ID` are **plain deploy values, not secrets** — the stack takes them
-as `${…:?}` environment entries, so no secret of those names belongs here.
+**Entrypoint paths are unchanged:** Swarm mounts secrets at `/run/secrets/<name>`, and every consumer
+reads them from there through a `*_FILE` variable — `AWS_ACCESS_KEY_ID_FILE`/`AWS_SECRET_ACCESS_KEY_FILE`
+for the six S3 services, `EXECUTION_BRIDGE_AUTH_TOKEN_FILE` for the bridge, `GATEWAY_SHARED_SECRET_FILE`
+for the execution gateway and the executor, and `ARROW_APP_SECRET_FILE`/`ARROW_PASSWORD_FILE`/
+`ARROW_TOTP_KEY_FILE` for ingestion's Arrow bridge. `otel-collector` needs no variable: it expands the
+file inside its own config (`${file:/run/secrets/o2_auth_basic}`). `ARROW_APP_ID` and `ARROW_USER_ID`
+are **plain deploy values, not secrets** — the stack takes them as `${…:?}` environment entries, so no
+secret of those names belongs here.
+
+**`o2_password` is created but never mounted.** OpenObserve v0.91.5 has no `_FILE` support: it panics
+at startup when the root password variable is missing — with the secret file sitting right next to it —
+so the stack passes `ZO_ROOT_USER_PASSWORD` from the deploy environment instead. Give the same value to
+both paths: `secrets-bootstrap.sh` takes it from the values file, and the deploy shell needs
+`O2_PASSWORD` exported from that same file (S7), so the two cannot drift.
 
 **Exit:** `secrets-bootstrap.sh --check` prints `[PASS] all 9 secrets exist`.
 **Stop if:** any name differs, or any already exists. Swarm secret values are immutable, so the
@@ -411,6 +425,23 @@ never mix.
 **Expect:** replicas converge; nothing stuck at `0/N`; encrypted overlays and internal-only execution networks are the ones declared by the stack.
 **Exit:** all services converge, and Flink shows exactly the expected jobs running.
 **Stop if:** a service reports "no suitable node" — that is a labelling problem (S5), not a scheduling problem.
+
+**Traps observed on a real deploy** (each one cost a full debugging cycle; none is caught by
+`docker stack config`, which compiles all of them with rc=0):
+
+- **Never split the stack across several `-c` files.** With two or more, list-valued fields
+  (`healthcheck.test`, `configs`, `secrets`, `ports`) are **APPENDED**, not replaced — an override
+  produced a four-element `healthcheck.test` in which the original probe still ran. Deploy the single
+  committed file.
+- **A failed deploy leaves orphans.** `docker stack rm` frees networks *and* configs asynchronously;
+  re-deploying immediately can fail on "network not found" or "config … already exists". Wait for them
+  to disappear (`docker network ls`, `docker config ls`), or remove the `prod_*` objects explicitly.
+- **`update_config.failure_action: rollback` hides a broken fix.** Updating a service whose tasks keep
+  dying reverts the spec silently — `docker service inspect` shows `rollback_paused` and the new
+  configuration was never really live. Validate a config fix with a FRESH create after `docker stack rm`,
+  exactly as a first production deploy does.
+- **Swarm configs are immutable.** Replacing the instrument manifest needs a new config name, or the
+  deploy fails with "only updates to Labels are allowed".
 
 ### S8 — Readiness verification `[PRODUCTION]`
 Assess the five dimensions **separately** and record each (`02-environments.md` §Readiness dimensions):

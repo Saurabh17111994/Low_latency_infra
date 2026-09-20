@@ -88,10 +88,14 @@ func main() {
 	}
 
 	appID := envOrFatal("ARROW_APP_ID")
-	appSecret := envOrFatal("ARROW_APP_SECRET")
+	// CHG-249: production mounts these three as Docker/Swarm secret FILES
+	// (arrow_app_secret / arrow_password / arrow_totp_key) and sets no plaintext
+	// variable, so they resolve through the _FILE-aware reader. ARROW_APP_ID is
+	// not a secret and keeps the plain reader.
+	appSecret := fatalSecret("ARROW_APP_SECRET")
 	userID := envOrDefault("ARROW_USER_ID", "")
-	password := envOrDefault("ARROW_PASSWORD", "")
-	totpKey := envOrDefault("ARROW_TOTP_KEY", "")
+	password := optionalSecret("ARROW_PASSWORD")
+	totpKey := optionalSecret("ARROW_TOTP_KEY")
 
 	client := arrow.NewClient(appID, appSecret)
 	var refreshAuth func(context.Context) error
@@ -785,6 +789,54 @@ func envOrDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// secretFromEnv resolves a credential that Docker/Swarm mounts as a FILE. The
+// idiomatic `_FILE` form wins when set — the same convention the execution
+// bridge and the Java services already use — so the value never has to appear
+// in a service spec. A named-but-unreadable or empty file returns an error
+// rather than falling back: the bridge must never run with an unset credential
+// while appearing configured. An absent credential is NOT an error here; the
+// caller decides whether it is fatal.
+func secretFromEnv(key string) (string, error) {
+	if path := strings.TrimSpace(os.Getenv(key + "_FILE")); path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("%s_FILE=%s unreadable: %w", key, path, err)
+		}
+		secret := strings.TrimSpace(string(b))
+		if secret == "" {
+			return "", fmt.Errorf("%s_FILE=%s is empty", key, path)
+		}
+		return secret, nil
+	}
+	return strings.TrimSpace(os.Getenv(key)), nil
+}
+
+// fatalSecret applies the bridge's required-credential contract (exit 2) to
+// secretFromEnv, keeping the missing-env message identical to envOrFatal's.
+func fatalSecret(key string) string {
+	v, err := secretFromEnv(key)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "arrow-bridge: %v\n", err)
+		os.Exit(exitFatalStart)
+	}
+	if v == "" {
+		fmt.Fprintf(os.Stderr, "arrow-bridge: missing required env: %s\n", key)
+		os.Exit(exitFatalStart)
+	}
+	return v
+}
+
+// optionalSecret is secretFromEnv for credentials the caller validates itself
+// (live mode requires the TOTP trio). A malformed FILE is still fatal.
+func optionalSecret(key string) string {
+	v, err := secretFromEnv(key)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "arrow-bridge: %v\n", err)
+		os.Exit(exitFatalStart)
+	}
+	return v
 }
 
 // hftPin enforces a pinned HFT policy env key (mirrors Java exactInt): unset

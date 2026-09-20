@@ -244,6 +244,130 @@ class TestTier1ProductionConfig:
             assert ens in d["services"][t]["environment"]["FLUSS_PROPERTIES"]
         assert ens in d["services"]["flink-jobmanager"]["environment"]["FLINK_PROPERTIES"]
 
+    def test_zookeeper_servers_separator_is_whitespace(self):
+        """The image writes ONE zoo.cfg line per whitespace token (CHG-249).
+
+        With ';' the whole ensemble collapses into a single invalid line and every member
+        exits 2 with ``does not have the form server_config or server_config;client_config``
+        — observed live, with 14 s of retrying before each failure.
+        """
+        d = _load()
+        for i in (1, 2, 3):
+            servers = d["services"][f"zookeeper-{i}"]["environment"]["ZOO_SERVERS"]
+            assert ";" not in servers, f"zookeeper-{i}: ZOO_SERVERS must not use ';'"
+            assert len(servers.split()) == 3, \
+                f"zookeeper-{i}: ZOO_SERVERS must be 3 whitespace-separated members: {servers!r}"
+
+    def test_zookeeper_generates_the_config_it_needs(self):
+        """The image ships no zoo.cfg and generates one from ZOO_* env (CHG-249).
+
+        Without ``clientPort`` nothing listens on 2181 for Flink/Fluss *and* the election
+        port can only be bound by resolving the member's own service name — which fails
+        (``<unresolved>:3888``, exit 14). ``quorumListenOnAllIPs`` binds it without DNS.
+        """
+        d = _load()
+        for i in (1, 2, 3):
+            extra = d["services"][f"zookeeper-{i}"]["environment"].get("ZOO_CFG_EXTRA", "")
+            assert "clientPort=2181" in extra, \
+                f"zookeeper-{i}: ZOO_CFG_EXTRA must set clientPort=2181"
+            assert "quorumListenOnAllIPs=true" in extra, \
+                f"zookeeper-{i}: ZOO_CFG_EXTRA must set quorumListenOnAllIPs=true"
+
+    def test_no_healthcheck_requires_another_service_or_quorum(self):
+        """Swarm publishes a DNS record only for tasks whose healthcheck PASSES.
+
+        So a probe that waits for quorum (or for any peer) can never pass: the peers it
+        waits for cannot resolve it either. ZK's ``zkServer.sh status`` did exactly that —
+        every member sat in ``Starting`` until the health monitor killed it (exit 143).
+        Cluster state belongs in metrics/logs/alerts; the probe stays liveness-only
+        (CHG-249, DEC-034).
+        """
+        d = _load()
+        banned = ("zkServer.sh status", "checkLeader", "getent hosts", "nslookup")
+        for name, svc in d["services"].items():
+            blob = " ".join(str(x) for x in ((svc.get("healthcheck") or {}).get("test") or []))
+            for needle in banned:
+                assert needle not in blob, \
+                    f"{name}: healthcheck must not depend on another service or quorum ({needle!r})"
+
+    def test_ingestion_mounts_the_manifest_where_the_app_looks(self):
+        """The image bakes in no CSV (Dockerfile: "COPY removed"), so the stack must supply it.
+
+        Without the mount ingestion refuses to start: ``readable manifest FILE is required``.
+        """
+        d = _load()
+        ing = d["services"]["ingestion"]
+        mounts = [c for c in (ing.get("configs") or []) if isinstance(c, dict)]
+        assert mounts, "ingestion must mount the instrument manifest as a Swarm config"
+        assert any(c.get("target") == "/instruments/NSE_CM_EQUITY.csv" for c in mounts), \
+            f"manifest must land on the path the app defaults to: {mounts}"
+        raw = (d.get("configs") or {}).get(mounts[0]["source"], {}).get("file", "")
+        # file: may be an env-interpolated default, e.g. ${MANIFEST_FILE:-./instruments/x.csv}
+        m = re.match(r"\$\{[A-Z_]+:-([^}]*)\}", str(raw))
+        src = m.group(1) if m else str(raw)
+        path = STACK.parent / src
+        assert path.exists(), f"manifest source file does not exist: {path}"
+        lines = path.read_text().splitlines()
+        assert len(lines) > 100, f"manifest looks truncated: {len(lines)} lines from {path}"
+
+    def test_every_mounted_secret_is_actually_consumed(self):
+        """A mounted-but-unread secret fails SILENTLY — the service just starts without it.
+
+        openobserve (password never read, crash-looped), execution-gateway and nautilus (no
+        _FILE variable) and the ingestion arrow-bridge (no _FILE support at all) all shipped
+        that way; found by rebuilding this matrix during CHG-249. Two mechanisms count as
+        consumption: a ``*_FILE`` variable pointing at the mount, or a mounted config that
+        reads the file itself (the OpenTelemetry collector's ``${file:...}`` expansion).
+        """
+        d = _load()
+        unconsumed = []
+        for name, svc in d["services"].items():
+            env = svc.get("environment") or {}
+            for entry in svc.get("secrets") or []:
+                sname = entry if isinstance(entry, str) else entry.get("secret")
+                target = "/run/secrets/" + sname
+                if any(str(v).strip() == target for v in env.values()):
+                    continue
+                by_config = False
+                for c in svc.get("configs") or []:
+                    cname = c if isinstance(c, str) else c.get("source")
+                    cfg_file = (d.get("configs") or {}).get(cname, {}).get("file")
+                    if cfg_file and (STACK.parent / cfg_file).exists() \
+                            and f"file:{target}" in (STACK.parent / cfg_file).read_text():
+                        by_config = True
+                if not by_config:
+                    unconsumed.append(f"{name}:{sname}")
+        assert not unconsumed, (
+            "secret mounted but nothing reads it — add a *_FILE variable, teach the app the "
+            "file form, or drop the mount: " + ", ".join(unconsumed))
+
+    def test_money_path_services_read_the_gateway_secret_from_a_file(self):
+        d = _load()
+        for name in ("execution-gateway", "nautilus"):
+            env = d["services"][name]["environment"]
+            assert env.get("GATEWAY_SHARED_SECRET_FILE") == "/run/secrets/gateway_shared_secret", \
+                f"{name}: must read the gateway secret from the mounted file"
+            assert "GATEWAY_SHARED_SECRET" not in env, \
+                f"{name}: the plaintext gateway secret must never appear in the service spec"
+
+    def test_ingestion_reads_the_arrow_credentials_from_files(self):
+        d = _load()
+        env = d["services"]["ingestion"]["environment"]
+        for key in ("ARROW_APP_SECRET", "ARROW_PASSWORD", "ARROW_TOTP_KEY"):
+            assert key not in env, \
+                f"ingestion: {key} must not appear in the service spec"
+            assert env.get(f"{key}_FILE") == f"/run/secrets/{key.lower()}", \
+                f"ingestion: {key}_FILE must point at the mounted secret"
+
+    def test_openobserve_mounts_no_secret_it_cannot_read(self):
+        """v0.91.5 has no *_FILE support — measured: it panics with the file present, so the
+        password comes from the deploy environment and a mount would only be a lie (CHG-249)."""
+        d = _load()
+        oo = d["services"]["openobserve"]
+        assert not oo.get("secrets"), "openobserve cannot read a mounted secret — drop the mount"
+        assert "ZO_ROOT_USER_PASSWORD" in (oo.get("environment") or {}), \
+            "openobserve needs ZO_ROOT_USER_PASSWORD supplied at deploy time"
+
     def test_zookeeper_members_anti_colocated(self):
         d = _load()
         for i in (1, 2, 3):
@@ -440,6 +564,16 @@ class TestTier2Hardening:
            ``$HOSTNAME:9124 -> rc=0``. The fixed probe tries ``$HOSTNAME``
            first, then falls back to loopback for the Flink shape.
 
+        3. **Which address is right depends on the bind.** A probe must target an
+           address the service actually listens on, and the two shapes below are
+           opposites. The ZooKeeper members set
+           ``admin.serverAddress=127.0.0.1`` in ``ZOO_CFG_EXTRA``, so their admin
+           server answers on loopback only: a ``$HOSTNAME`` probe would be
+           refused there, and ``bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080'``
+           returns 0 within 8 s of the process starting (measured, CHG-249).
+           That exception is derived from the service's own environment rather
+           than trusted from a list, so deleting the setting fails this test.
+
         Services with no shell at all (``SHELL_LESS_NO_HEALTHCHECK``) must carry
         NO healthcheck: removing the probe is the fix, so an absent probe is the
         passing state. ``test_every_service_healthcheck_or_documented_exception``
@@ -470,12 +604,27 @@ class TestTier2Hardening:
             assert "bash" in joined, (
                 f"{name}: a /dev/tcp probe needs bash, got {test!r}"
             )
-            assert "HOSTNAME" in joined, (
-                f"{name}: the probe must target the container hostname ($HOSTNAME "
-                f"first, loopback as fallback) - Fluss binds the container host, "
-                f"not 127.0.0.1, so a loopback-only probe is refused even under "
-                f"bash. Got {test!r}."
-            )
+            if "HOSTNAME" not in joined:
+                # A loopback probe is only correct where the listener is bound to
+                # loopback. The ZooKeeper admin server is: ZOO_CFG_EXTRA sets
+                # admin.serverAddress=127.0.0.1, so probing $HOSTNAME would be
+                # refused. Reading the setting out of this service's own
+                # environment keeps the exception tied to the recipe - remove the
+                # setting and this fails instead of passing on a stale claim.
+                env = svc.get("environment") or {}
+                extra = str(env.get("ZOO_CFG_EXTRA", "")) if isinstance(env, dict) else ""
+                assert "admin.serverAddress=127.0.0.1" in extra, (
+                    f"{name}: only a listener actually bound to loopback may be "
+                    f"probed on 127.0.0.1, and {name} declares no "
+                    f"admin.serverAddress=127.0.0.1 - so the probe must target "
+                    f"$HOSTNAME instead (Fluss binds the container host, not "
+                    f"loopback, and a loopback-only probe is refused even under "
+                    f"bash). Got {test!r}."
+                )
+                assert "127.0.0.1" in joined, (
+                    f"{name}: a loopback-bound listener must be probed on "
+                    f"127.0.0.1, got {test!r}"
+                )
 
     def test_every_service_healthcheck_or_documented_exception(self):
         d = _load()

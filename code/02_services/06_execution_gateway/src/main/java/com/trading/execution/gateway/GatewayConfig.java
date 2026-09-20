@@ -2,6 +2,9 @@ package com.trading.execution.gateway;
 
 import com.trading.common.schema.fluss.BoundedRetry;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 
@@ -168,7 +171,8 @@ public record GatewayConfig(
                 Map.entry("GATEWAY_BIND_PORT", env("GATEWAY_BIND_PORT", "9180")),
                 Map.entry("NAUTILUS_PRIVATE_ENDPOINT", env("NAUTILUS_PRIVATE_ENDPOINT", "http://127.0.0.1:9190/v1/intents")),
                 Map.entry("GATEWAY_PROTOCOL_VERSION", env("GATEWAY_PROTOCOL_VERSION", "execution-gateway.v2")),
-                Map.entry("GATEWAY_SHARED_SECRET", requiredEnv("GATEWAY_SHARED_SECRET")),
+                Map.entry("GATEWAY_SHARED_SECRET", env("GATEWAY_SHARED_SECRET", "")),
+                Map.entry("GATEWAY_SHARED_SECRET_FILE", env("GATEWAY_SHARED_SECRET_FILE", "")),
                 Map.entry("GATEWAY_REQUEST_TIMEOUT_MS", env("GATEWAY_REQUEST_TIMEOUT_MS", "2000")),
                 // Blank (the default) means "derive from GATEWAY_REQUEST_TIMEOUT_MS" - see
                 // defaultRequestBudget. Listed here so the whole env surface stays in one place.
@@ -193,7 +197,7 @@ public record GatewayConfig(
                 e.get("ORDER_CORRELATION_TABLE"), e.get("PROJECTION_LEDGER_TABLE"), e.get("SAFETY_HALT_TABLE"),
                 e.get("GATEWAY_BIND_HOST"), integer(e, "GATEWAY_BIND_PORT"), e.get("NAUTILUS_PRIVATE_ENDPOINT"),
                 e.get("GATEWAY_PROTOCOL_VERSION"),
-                e.get("GATEWAY_SHARED_SECRET"), requestTimeout,
+                gatewaySecret(e), requestTimeout,
                 Duration.ofMillis(longValue(e, "GATEWAY_POLL_TIMEOUT_MS")),
                 e.get("ACCOUNT_SCOPE_ID"), e.get("EXECUTION_PARTITION_ID"),
                 parseExecutionEnabled(e.get("EXECUTION_ENABLED")),
@@ -234,6 +238,37 @@ public record GatewayConfig(
         String value = System.getenv(key);
         if (value == null || value.isBlank()) throw new IllegalArgumentException(key + " is required");
         return value;
+    }
+
+    /**
+     * Resolves the gateway's shared secret, preferring the file form.
+     *
+     * <p>Docker and Swarm secrets are mounted as FILES, so a secret-based deployment points
+     * {@code GATEWAY_SHARED_SECRET_FILE} at the mount and leaves {@code GATEWAY_SHARED_SECRET}
+     * unset — the idiomatic {@code _FILE} pattern (same as the official postgres/redis images,
+     * and the convention already applied by the Go execution bridge). The file wins when both
+     * are set.
+     *
+     * <p>A named-but-unreadable or empty file fails LOUD, exactly as the bridge does: the
+     * gateway must never fall back to an unset secret while appearing configured. Only a blank
+     * or absent file variable falls through to the plain variable, whose absence is then
+     * reported by the record's {@code require(sharedSecret, …)} check.
+     */
+    private static String gatewaySecret(Map<String, String> e) {
+        String path = e.get("GATEWAY_SHARED_SECRET_FILE");
+        if (path != null && !path.isBlank()) {
+            String trimmed;
+            try {
+                trimmed = Files.readString(Path.of(path.trim())).strip();
+            } catch (IOException ex) {
+                throw new IllegalArgumentException("GATEWAY_SHARED_SECRET_FILE=" + path + " unreadable", ex);
+            }
+            if (trimmed.isEmpty()) {
+                throw new IllegalArgumentException("GATEWAY_SHARED_SECRET_FILE=" + path + " is empty");
+            }
+            return trimmed;
+        }
+        return e.get("GATEWAY_SHARED_SECRET");
     }
 
     private static int integer(Map<String, String> e, String key) {

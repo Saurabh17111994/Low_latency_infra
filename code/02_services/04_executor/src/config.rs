@@ -20,6 +20,30 @@ fn parse_bool_env(key: &str, raw: &str) -> Result<bool> {
     }
 }
 
+/// CHG-249: Docker and Swarm secrets are mounted as FILES, so a secret-based deployment points
+/// `GATEWAY_SHARED_SECRET_FILE` at the mount and leaves `GATEWAY_SHARED_SECRET` unset — the
+/// idiomatic `_FILE` pattern, matching the Go execution bridge and the Java gateway. The file wins
+/// when both forms are present. A named-but-unreadable or empty file is a hard error: the executor
+/// must never fall back to an unset secret while appearing configured. Resolution happens before
+/// parsing so the P3-435 emptiness check below keeps working unchanged.
+fn apply_gateway_secret_file(vars: &mut std::collections::HashMap<String, String>) -> Result<()> {
+    let path = vars
+        .get("GATEWAY_SHARED_SECRET_FILE")
+        .map(|p| p.trim().to_string())
+        .unwrap_or_default();
+    if path.is_empty() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .with_context(|| format!("GATEWAY_SHARED_SECRET_FILE={path} unreadable"))?;
+    let secret = raw.trim();
+    if secret.is_empty() {
+        bail!("GATEWAY_SHARED_SECRET_FILE={path} is empty");
+    }
+    vars.insert("GATEWAY_SHARED_SECRET".to_string(), secret.to_string());
+    Ok(())
+}
+
 /// Strict service configuration — HALTED default, fail-closed.
 ///
 /// Endpoints (gateway/bridge) are optional at boot so the service can start health-only and
@@ -83,7 +107,9 @@ impl std::fmt::Debug for ServiceConfig {
 impl ServiceConfig {
     /// Parses from the process environment; fails closed on a forbidden `EXECUTION_ENABLED=true`.
     pub fn from_env() -> Result<Self> {
-        Self::from_iter(std::env::vars())
+        let mut vars: std::collections::HashMap<String, String> = std::env::vars().collect();
+        apply_gateway_secret_file(&mut vars)?;
+        Self::from_iter(vars)
     }
 
     /// Parses from a key/value iterator (testable without mutating process env).
@@ -416,6 +442,56 @@ mod tests {
         ]))
         .unwrap();
         assert_eq!(c.gateway_shared_secret, "local-dev-only");
+    }
+
+    /// CHG-249: Docker/Swarm secrets arrive as FILES. Resolution happens before parsing so the
+    /// downstream emptiness checks keep working unchanged, and the file wins when both forms
+    /// are present — the convention already used by the Go execution bridge.
+    #[test]
+    fn gateway_secret_can_come_from_a_file() {
+        let path = std::env::temp_dir().join(format!("executor-secret-{}", std::process::id()));
+        std::fs::write(&path, "from-file-sentinel\n").unwrap();
+
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("GATEWAY_ENDPOINT".to_string(), "http://gw:8080".to_string());
+        vars.insert("GATEWAY_SHARED_SECRET".to_string(), "plain-loses".to_string());
+        vars.insert("GATEWAY_SHARED_SECRET_FILE".to_string(), path.to_string_lossy().into_owned());
+        apply_gateway_secret_file(&mut vars).unwrap();
+        assert_eq!(vars.get("GATEWAY_SHARED_SECRET").map(String::as_str), Some("from-file-sentinel"));
+
+        let c = ServiceConfig::from_iter(vars).unwrap();
+        assert_eq!(c.gateway_shared_secret, "from-file-sentinel");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A named-but-unusable file must fail LOUD — never a silent fall-through to no credential.
+    #[test]
+    fn unusable_gateway_secret_file_fails_loud() {
+        let dir = std::env::temp_dir();
+        let mut missing = std::collections::HashMap::new();
+        missing.insert(
+            "GATEWAY_SHARED_SECRET_FILE".to_string(),
+            dir.join(format!("executor-secret-absent-{}", std::process::id())).to_string_lossy().into_owned(),
+        );
+        let err = apply_gateway_secret_file(&mut missing).unwrap_err();
+        assert!(err.to_string().contains("GATEWAY_SHARED_SECRET_FILE"), "got: {err}");
+
+        let empty_path = dir.join(format!("executor-secret-empty-{}", std::process::id()));
+        std::fs::write(&empty_path, "  \n").unwrap();
+        let mut empty = std::collections::HashMap::new();
+        empty.insert("GATEWAY_SHARED_SECRET_FILE".to_string(), empty_path.to_string_lossy().into_owned());
+        let err = apply_gateway_secret_file(&mut empty).unwrap_err();
+        assert!(err.to_string().contains("is empty"), "got: {err}");
+        std::fs::remove_file(&empty_path).ok();
+    }
+
+    /// Nothing named: behaviour is exactly as before the file form existed.
+    #[test]
+    fn gateway_secret_file_absent_is_a_no_op() {
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("GATEWAY_SHARED_SECRET".to_string(), "plain".to_string());
+        apply_gateway_secret_file(&mut vars).unwrap();
+        assert_eq!(vars.get("GATEWAY_SHARED_SECRET").map(String::as_str), Some("plain"));
     }
 
     #[test]
