@@ -74,6 +74,68 @@ trigger: `N>6` workers, sustained CPU >80%, or Raft election flaps.
    the peers it waits for cannot resolve it either (DEC-047). Liveness only — reach your own port,
    read your own file. Quorum and dependency state belong in metrics, logs and alerts. A
    `test_09_stack.py` guard fails the build on `zkServer.sh status`-style probes.
+7. **No service binds its own name in order to start.** The same bootstrap circle as rule 6:
+   Swarm publishes a DNS name only for tasks that are Running, so a listener bound to that name
+   (Fluss `bind.listeners` was `...://fluss-coordinator:9123`) fails its first bind and can
+   never reach Running (DEC-051). Bind a literal — `0.0.0.0` where peers/clients must reach
+   the service, `127.0.0.1` where it must be loopback-only — and advertise the resolvable
+   service name. A `test_09_stack.py` guard fails the build on either half drifting.
+
+8. **No comment text inside `FLINK_PROPERTIES` / `FLUSS_PROPERTIES`.** Those are YAML block
+   scalars, so the text reaches the service verbatim and YAML comment semantics never apply.
+   Measured twice: a prose line was loaded as a configuration property (Flink, run8c), and a
+   rehearsal note appended to a path value survived into the value —
+   `high-availability.storageDir` became `file:/checkpoints/flink-ha#REHEARSAL-ONLY(...)`, a URI
+   with a fragment, and the jobmanager died in `FileSystemJobResultStore` looking like a storage
+   outage (run8d). Keep prose above the key; put rehearsal markers on their own comment line
+   above the block. `test_09_stack.py` fails the build on any `#` inside the six blocks.
+
+9. **A `file://` HA or checkpoint path needs its directory prepared, because Flink will not tell
+   you when it cannot create it.** `FileSystemJobResultStore.createBasePathIfNeeded()` ignores
+   `mkdirs`'s return value: it logs `Created highly available job result storage directory at …`
+   and then fails `listStatus` with `The base directory of the JobResultStore isn't accessible`,
+   exiting 239 — a message that reads like a storage outage but means "permission denied"
+   (javap-verified on Flink 2.2.1; reproduced in the rehearsal, where a fresh named volume is
+   `root:root 755` and the Flink image runs as uid 9999). Production is not exposed by
+   construction — `high-availability.storageDir`, `state.checkpoints.dir` and Fluss
+   `remote.data.dir` are all `s3://` there, where `mkdirs` is a no-op and `listStatus` returns an
+   empty listing. Two consequences for the VMs: (a) if anyone ever falls back to local paths,
+   create and `chown` those directories first; (b) object stores make the same silence possible
+   on a **rejected** write, so after the first boot confirm the HA markers actually appear under
+   the bucket path before trusting leadership handover.
+
+10. **Flink's advertised RPC port and its bind port are two settings — pin both.** Flink 2.x
+    splits them: `jobmanager.rpc.port` / `taskmanager.rpc.port` (6123, also the image default)
+    is the port peers dial, while `*.rpc.bind-port` decides what is actually bound. Measured on
+    the deployed image: a standalone jobmanager binds `jobmanager.rpc.port`, but **with
+    `high-availability.type: zookeeper` it binds an ephemeral port** unless
+    `jobmanager.rpc.bind-port` pins it (measured `…:35821` and `…:42955`), and a taskmanager
+    binds ephemeral unless `taskmanager.rpc.bind-port` pins it (measured 33255/33801/46237) —
+    consistent with HA meaning "the address is discovered through ZooKeeper rather than
+    dialled". Production is the HA jobmanager plus a statically addressed taskmanager, i.e. the
+    one combination that cannot work: in the rehearsal the jobmanager was Running and healthy
+    with leadership granted while Pekko bound `…:42353`, so the taskmanager's dial to the
+    advertised `flink-jobmanager:6123` was refused until it killed itself with
+    `RegistrationTimeoutException ... within the specified maximum registration duration
+    PT5M`. The cluster had **no** TaskManagers and no failing component: every service showed
+    Running. The trap is symmetric — the ResourceManager dials a registered TaskManager's
+    *advertised* port, so a TaskManager that binds an ephemeral port is equally unreachable.
+    `docker-stack.yml` pins both services to 6123 (CHG-253) and `test_09_stack.py` fails the
+    build when a Flink service pins one port without the other.
+
+    **Both roles also need the same `high-availability.*` keys (CHG-255).** Pinning the ports
+    made the taskmanager's registration message reach the ResourceManager, and the
+    ResourceManager threw it away:
+    `FencingTokenException: Fencing token mismatch: Ignoring message RemoteFencedMessage(00000000000000000000000000000000, RemoteRpcInvocation(ResourceManagerGateway.registerTaskExecutor(…))) because the fencing token 0…0 did not match the expected fencing token 9f3175f098076291f8095be45eee44b3`
+    — the taskmanager registered with token `0`, because the fencing token travels with the
+    leader information the HA service hands out, and a taskmanager without
+    `high-availability.*` falls back to the static address instead of reading ZooKeeper. The
+    cluster then reports `{"taskmanagers":[]}` while the jobmanager looks healthy. The
+    taskmanager declares the same five keys as the jobmanager — `high-availability.type`,
+    `.zookeeper.quorum`, `.storageDir`, `.zookeeper.path.root` and `.cluster-id` — and the
+    keys must **agree**: a different ensemble, cluster id or root path is a different election
+    to read. `test_09_stack.py` fails the build when the two role blocks disagree on any of
+    them.
 
 ## 3. Verification gate (D1.2 — `prod_node_check.py`)
 
@@ -120,7 +182,7 @@ result (`09-production-swarm.md`).
 
 | Gap | What is missing | Blocks |
 | --- | --- | --- |
-| Image publication | `image-publish.sh` (CHG-247) pushes the six project-built images and writes digest-pinned deploy values, and `digest-pin.sh` resolves digests against a plain-HTTP registry — rehearsed end-to-end against a **local** `registry:2` only. VM1's registry does not exist yet, so `.env` still carries bare tags and no digest-pinned production environment has been produced | S4 (publish), and therefore S7 |
+| Image publication | `image-publish.sh` (CHG-247, seven images since CHG-256) pushes the project-built images and writes digest-pinned deploy values, and `digest-pin.sh` resolves digests against a plain-HTTP registry — rehearsed end-to-end against a **local** `registry:2` only. VM1's registry does not exist yet, so `.env` still carries bare tags and no digest-pinned production environment has been produced | S4 (publish), and therefore S7, S7b |
 | Host bootstrap + clock check | No script installs Docker/enables NTP; `prod_node_check.py` verifies reachability, disk and role/labels — **not** clock offset. The sysctl list S4 needs is itself undefined in this repository — decide and record it before the first boot | S4 |
 | EOD trigger | `eod_controller.py` is a one-shot; nothing schedules it. The requirement names a scheduled owner (`../02_requirements/06-operational.md` §6.8) | S11 |
 | Multi-node pre-deploy validation | `stack_selfcheck.sh` refuses to run when the swarm has more than one node ("refusing to label — single-host mimic, not a cluster"), so **nothing validates a real cluster's stack before `docker stack deploy`** | S7 |
@@ -150,14 +212,15 @@ make every reference the deploy environment carries an immutable digest.**
 | Stage | Env | Who | Entry | Exit |
 | --- | --- | --- | --- | --- |
 | S0 Pre-flight | `[WORKSTATION]` | operator | clean tree, secrets file present | version pin, docs audit, change control, tests, images build all green |
-| S1 Build images | `[WORKSTATION]` | operator / CI | S0 green | eight images present locally; build green |
+| S1 Build images | `[WORKSTATION]` | operator / CI | S0 green | nine images present locally (seven project-built + two third-party); build green |
 | S2 Create the VMs | `[PRODUCTION]` | **human only** | provider account, specs decided | 4 reachable VMs, SSH keys held, inventory JSON filled |
 | S3 Verify nodes | `[ACCEPTANCE]` | operator | S2 done | `prod_node_check.py --inventory …` exits 0 for every node |
 | S4 Bootstrap hosts + registry + publish | `[PRODUCTION]` + `[WORKSTATION]` | operator | S3 done | Docker + NTP + sysctls + ports on all 4; registry serving on VM1; every image reference digest-pinned **in the deploy environment** |
 | S5 Cluster init + labels | `[PRODUCTION]` | operator | S4 done | `docker node ls` = 3 managers + 1 worker, quorum 2/3, labels applied, swarm locked |
 | S6 Create the 9 secrets | `[PRODUCTION]` | operator | S5 done | `secrets-bootstrap.sh --check` prints `[PASS] all 9 secrets exist` |
 | S7 Deploy the stack | `[PRODUCTION]` | operator | S6 done | every service converges; placement matches labels; 2 Flink jobs running |
-| S8 Readiness verification | `[PRODUCTION]` | operator | S7 done | five readiness dimensions assessed **separately** and recorded |
+| S7b Apply the DDL catalog (first boot only) | `[PRODUCTION]` | operator | S7 green, Fluss catalog still EMPTY | 27 manifest tables exist and `DDL-APPLY-RESULT: PASS` is recorded |
+| S8 Readiness verification | `[PRODUCTION]` | operator | S7b done | five readiness dimensions assessed **separately** and recorded |
 | S9 Data-loop smoke | `[PRODUCTION]` | operator | S8 done | ticks → raw table → candles → candidates proven on this deployment |
 | S10 Failure drills | `[PRODUCTION]` | operator | S9 done | one-VM loss + quorum + placement drills pass, RPO/RTO recorded |
 | S11 Operate | `[PRODUCTION]` | operator | S10 done | EOD verified, backups verified, maintenance/rollback/upgrade procedures usable |
@@ -204,11 +267,13 @@ make test-all                      # component tests
 **Do:** build with the existing stamped builder. **Publishing deliberately waits for S4** — the
 registry lives on VM1, which does not exist until S2/S4, so there is nothing to push to yet.
 ```bash
-make images                                                    # stamped build
+make images                                                    # stamped build (six stack images)
+make ddl-image                                                 # the DDL-apply tool image (not a stack service)
 make pin-check                                                  # step 5/6 rejects bare tags in runtime.lock
 docker images | grep -E "trading-|01_docker-"                   # the images the stack pulls
 ```
-**Expect:** the six project-built images (Flink runtime, Fluss runtime, and the four app images)
+**Expect:** the seven project-built images (Flink runtime, Fluss runtime, the four app images, and the
+DDL-apply tool image that S7b runs)
 plus the two third-party images (OpenObserve, ZooKeeper) are present locally.
 **Exit:** the build is green and every image the stack names exists locally.
 **Stop if:** any image is referenced by a mutable tag — production prohibits `latest`, floating tags and version ranges.
@@ -287,8 +352,8 @@ sudo systemctl restart docker
 ```
 
 **6. Publish and pin** — from the workstation, through a tunnel, so port 5000 never opens to the
-internet. One command tags, pushes and digest-resolves the six project-built images and rewrites the
-six image lines in the deploy environment:
+internet. One command tags, pushes and digest-resolves the seven project-built images and rewrites the
+seven image lines in the deploy environment:
 ```bash
 ssh -N -L 5000:localhost:5000 <ssh-user>@<vm1-ip> &      # keep running for the pushes
 bash code/01_platform/04_scripts/image-publish.sh \
@@ -306,7 +371,8 @@ docker tag  <project-built-image> localhost:5000/<project-built-image>
 docker push localhost:5000/<project-built-image>          # prints "digest: sha256:…" = the manifest digest
 bash code/01_platform/04_scripts/digest-pin.sh localhost:5000/<project-built-image>
 ```
-Push the six project-built images (Flink runtime, Fluss runtime, and the four app images). The two
+Push the seven project-built images (Flink runtime, Fluss runtime, the four app images, and the DDL-apply
+tool image S7b runs on VM1 — without it the catalog step has no image to run). The two
 third-party images (OpenObserve, ZooKeeper) come from their public registries at the digests
 `runtime.lock` already records — if either digest no longer resolves, mirror that image here too.
 Then write the digests into the deploy environment (§6.2) using **`<vm1-ip>:5000/…@sha256:…`**, not
@@ -374,11 +440,11 @@ neither filesystem, neither shell history, nor either process list.
 ssh <ssh-user>@<vm1-ip> 'cd ~/arrow-infra && code/01_platform/04_scripts/secrets-bootstrap.sh \
   --values-file /dev/stdin --o2-user admin@example.com' < ~/vm-secrets.env
 ```
-That file holds the five values only you have — one `KEY=VALUE` per line, any letter case:
+That file holds the six values only you have — one `KEY=VALUE` per line, any letter case:
 `arrow_app_secret`, `arrow_password`, `arrow_totp_key`, `aws_access_key_id`,
-`aws_secret_access_key`. The other four are generated on VM1: `o2_password`,
+`aws_secret_access_key` and `o2_password`. The remaining three are generated on VM1:
 `execution_bridge_auth_token`, `gateway_shared_secret`, and `o2_auth_basic` derived from the O2 user
-and that password. A value you do supply for any of those four wins over generation, so a hand
+and that password. A value you do supply for either generated token wins over generation, so a hand
 rotation is never fought. Keep the file outside the repository and delete it when the secrets exist.
 
 **`o2_auth_basic` is bare base64** — `base64("<o2-user>:<password>")`, with **no** `Basic ` prefix.
@@ -400,7 +466,15 @@ secret of those names belongs here.
 at startup when the root password variable is missing — with the secret file sitting right next to it —
 so the stack passes `ZO_ROOT_USER_PASSWORD` from the deploy environment instead. Give the same value to
 both paths: `secrets-bootstrap.sh` takes it from the values file, and the deploy shell needs
-`O2_PASSWORD` exported from that same file (S7), so the two cannot drift.
+`O2_PASSWORD` exported from that same file (S7), so the two cannot drift. **Choose a value that passes
+OpenObserve's own policy** — 8 to 128 characters with at least one lowercase letter, one uppercase
+letter, one digit and one special character — otherwise the container panics with
+`ZO_ROOT_USER_PASSWORD is too weak` and `backend job init failed: channel closed` and never becomes
+healthy (measured in the rehearsal with a password that had no digit, uppercase letter or symbol).
+`secrets-bootstrap.sh` makes that mistake impossible to deploy: it refuses to run when the values file
+omits `o2_password` (it is the one value that cannot be generated on the VM, because the deploy shell
+has to export the same string), and it refuses a value that fails the policy, naming the policy in the
+error.
 
 **Exit:** `secrets-bootstrap.sh --check` prints `[PASS] all 9 secrets exist`.
 **Stop if:** any name differs, or any already exists. Swarm secret values are immutable, so the
@@ -443,6 +517,50 @@ never mix.
 - **Swarm configs are immutable.** Replacing the instrument manifest needs a new config name, or the
   deploy fails with "only updates to Labels are allowed".
 
+### S7b — Apply the DDL catalog (first boot only) `[PRODUCTION]`
+**Entry:** S7 green on a cluster whose Fluss catalog is still empty.
+**Why this step exists:** the stack deploys no DDL step of its own. `ingestion` starts with
+`allowRuntimeDdl=false` and exits fail-closed (`Fluss schema verification failed`) while the 27 tables of
+`02_sql/ddl/schema_manifest.json` are missing, so on a fresh cluster it never reaches `1/1` and the data
+loop cannot start. Nothing else in this sequence creates them.
+**Precondition — check it, do not assume it:** the catalog is EMPTY. The tool refuses a populated catalog
+(exit 3), so this is a once-per-cluster step.
+**Do (on VM1):**
+```bash
+REPO=<path to the cloned repo>
+DDL_APPLY_IMAGE="$(sed -n 's/^DDL_APPLY_IMAGE=//p' "$REPO/code/01_platform/01_docker/.env")"
+COORD="$(docker ps -q -f name=prod_fluss-coordinator | head -1)"
+mkdir -p /var/lib/trading/ddl-apply-evidence
+docker run --rm --network "container:$COORD" \
+  -e FLUSS_BOOTSTRAP=fluss-coordinator:9123 \
+  -e DDL_APPLY_EVIDENCE_DIR=/app/logs/ddl-apply/prod-first-boot \
+  -e DDL_APPLY_MATRIX_EVIDENCE=/app/code/01_platform/02_sql/ddl/schema_manifest.json \
+  -v /var/lib/trading/ddl-apply-evidence:/app/logs/ddl-apply \
+  "$DDL_APPLY_IMAGE" apply
+```
+**Expect:** `DDL-APPLY-RESULT: PASS exit=0`, then `evidence-ownership-check: PASS`, and exit code 0. The
+record (`apply.json`, `tables_applied: 27`) lands in the mounted directory.
+**Exit:** the catalog holds the 27 manifest tables. Then restart ingestion — its earlier task already
+exited and consumed Swarm's restart budget:
+```bash
+docker service update --force prod_ingestion
+docker service ls --filter name=prod_ingestion            # 1/1 needs the vendor feed too, see below
+```
+**Three measured traps:**
+- `--network container:$COORD` is not a preference: the stack's overlay networks are deliberately not
+  `attachable`, so a standalone container cannot join them; sharing the coordinator container's network
+  namespace is what makes `fluss-coordinator:9123` resolve.
+- Never pass `--apply-verified` or `--matrix-evidence` as flags: the dispatcher refuses them as duplicated
+  state (exit 2). Both travel in the environment, as above; the matrix path points at the manifest baked
+  into the image, not at a host file.
+- `ingestion` reaching `1/1` also needs the Arrow vendor feed. With placeholder credentials the bridge is
+  rejected (`Login request failed … user not found`), the service drains with 0 ticks and stays `0/1`. This
+  step removes the schema failure; it is not a substitute for vendor credentials.
+**Rehearsed:** 2026-09-20 on the single-node rehearsal cluster (`run9`). This exact command returned
+`DDL-APPLY-RESULT: PASS exit=0` for 27 tables, and the following ingestion attempt reached the vendor
+(which answered `user not found` for the placeholder user) with Fluss writes accepted, including a
+`DROP/arrow-bridge crashed` discontinuity record.
+
 ### S8 — Readiness verification `[PRODUCTION]`
 Assess the five dimensions **separately** and record each (`02-environments.md` §Readiness dimensions):
 | Dimension | Question | Where it is answered |
@@ -452,6 +570,12 @@ Assess the five dimensions **separately** and record each (`02-environments.md` 
 | Job health | are the required Flink jobs running and checkpointing? | Flink REST/UI |
 | Trading readiness | is the executor gate state known and reconciliation clean? | gate state — expected `HALTED` |
 | Durability readiness | replication, checkpoints, offload, audit retention, recovery posture | checkpoints in encrypted S3, EOD manifest |
+**OpenObserve is the one destination for every log and metric**, so it is part of readiness, not an
+extra. Measured on the rehearsal cluster (2026-09-20): the collector's four log streams
+(`flink_logs`, `fluss_logs`, `platform_logs`, `trading_alerts`) and the ingestion metric streams are
+present, and the operator login (`ZO_ROOT_USER_EMAIL` + the deploy-environment `O2_PASSWORD`) answers
+`200` on `/api/default/streams`. An OpenObserve that answers `401`, or one that holds no log stream,
+fails this dimension.
 **Exit:** each dimension recorded as its own line of evidence. A healthy container is not sufficient for any higher dimension.
 **Stop if:** `CHECKPOINT_DIR` is not `s3://` in production — the job is designed to fail fast rather than run without durable checkpoints.
 
@@ -519,6 +643,7 @@ Nothing in this guide is evidence by itself. Capture per stage so gate rows can 
 | S1 | registry digests, `pin-check` output, deploy-env values | artifact provenance |
 | S3 | `prod_node_check.py` output per node | provisioning evidence (`D1.2`) |
 | S5–S7 | `docker node ls`, `docker service ls/ps`, deploy log | deployment evidence (`SWARM-DEPLOY-*`) |
+| S7b | `DDL-APPLY-RESULT` sentinel, `apply.json` path, table count | catalog-creation evidence (first boot only) |
 | S8 | five readiness dimensions, checkpoint location evidence | readiness evidence |
 | S9 | smoke output, tick/candle/candidate counts | loop proof on this deployment |
 | S10 | drill logs, measured RPO/RTO per scenario | `FAIL-VM-LOSS-60000`, `DR-001..006`, `SWARM-MGR-*` |

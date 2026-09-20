@@ -5,6 +5,10 @@
 #   supplied  — your git-ignored values file (base64/Excel/OpenObserve credentials)
 #   generated — on this host, for internal or derivable secrets
 # A supplied value always wins over generation, so rotating by hand is not fought.
+# o2_password is always supplied: OpenObserve rejects a weak password at startup
+# (8-128 characters, with a lowercase letter, an uppercase letter, a digit and a
+# special character), and the stack also passes it in as ZO_ROOT_USER_PASSWORD,
+# so a value generated here could never be exported at deploy time to match it.
 #
 # Every secret is created with `docker secret create <name> -`: the value travels
 # on stdin and never appears in an argument, where `ps` and shell history see it.
@@ -41,11 +45,13 @@ NAMES=(
 
 # Generated on this host unless the values file pins them. o2_auth_basic is
 # derived from the O2 user and the o2_password chosen here — see note below.
+# o2_password is deliberately NOT here: it is the one value that cannot be
+# generated, because the stack also passes it to OpenObserve through the deploy
+# environment, and only a value you keep can be exported at deploy time.
 GENERATED=(
   execution_bridge_auth_token
   gateway_shared_secret
   o2_auth_basic
-  o2_password
 )
 
 VALUES_FILE=""
@@ -63,6 +69,26 @@ fail() { local code=$1; shift; printf 'FAIL: %s\n' "$*" >&2; exit "$code"; }
 # writer takes SIGPIPE (which pipefail would turn into a silent 141).
 gen_hex() {
   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'
+}
+
+# OpenObserve validates its root password at startup and panics when it is weak
+# ("ZO_ROOT_USER_PASSWORD is too weak: Password must be 8-128 characters and
+# contain at least one lowercase letter, one uppercase letter, one digit, an[d
+# special char]", then "backend job init failed: channel closed" — measured in
+# the rehearsal). A hex string cannot satisfy that, which is why this validator
+# runs before anything is created.
+o2_password_ok() {
+  local pw=$1
+  [ "${#pw}" -ge 8 ] && [ "${#pw}" -le 128 ] || return 1
+  # tr -d DELETES a class, so a non-empty result means that class is present.
+  # LC_ALL=C keeps the ranges exactly a-z / A-Z / 0-9: a UTF-8 locale can blur
+  # `[A-Z]` against `[a-z]`, which would silently accept a weaker value.
+  local lower upper digit special
+  lower=$(printf '%s' "$pw" | LC_ALL=C tr -dc 'a-z')
+  upper=$(printf '%s' "$pw" | LC_ALL=C tr -dc 'A-Z')
+  digit=$(printf '%s' "$pw" | LC_ALL=C tr -dc '0-9')
+  special=$(printf '%s' "$pw" | LC_ALL=C tr -d 'A-Za-z0-9')
+  [ -n "$lower" ] && [ -n "$upper" ] && [ -n "$digit" ] && [ -n "$special" ]
 }
 
 is_generated() {
@@ -125,8 +151,19 @@ self_check() {
     printf 'FAIL: base64 derivation changed: %s\n' "$derived" >&2
     rc=4
   fi
-  printf '%s\n' "SUPPLIED (from --values-file): 5 — arrow_app_secret arrow_password arrow_totp_key aws_access_key_id aws_secret_access_key"
-  printf '%s\n' "GENERATED (on this host): 4 — ${GENERATED[*]}"
+  # The policy check is what keeps a weak o2_password from reaching OpenObserve
+  # as a startup panic, so prove it: accepts a compliant value, rejects the hex
+  # shape this script used for it before, and rejects anything under 8 characters.
+  o2_password_ok 'Rehearsal-Only-1!' \
+    || { printf 'FAIL: policy check rejects a compliant o2_password\n' >&2; rc=4; }
+  if o2_password_ok "$(gen_hex)"; then
+    printf 'FAIL: policy check accepts 64 hex characters — the shape OpenObserve panics on\n' >&2
+    rc=4
+  fi
+  o2_password_ok 'Short1!' \
+    && { printf 'FAIL: policy check accepts a password shorter than 8 characters\n' >&2; rc=4; }
+  printf '%s\n' "SUPPLIED (from --values-file): $(( ${#NAMES[@]} - ${#GENERATED[@]} )) — arrow_app_secret arrow_password arrow_totp_key aws_access_key_id aws_secret_access_key o2_password"
+  printf '%s\n' "GENERATED (on this host): ${#GENERATED[@]} — ${GENERATED[*]}"
   if [ "$rc" = 0 ]; then printf '[PASS] secrets-bootstrap self-check\n'; fi
   return "$rc"
 }
@@ -208,6 +245,12 @@ create_mode() {
     printf 'FAIL: %d value(s) missing from %s: %s\n' \
       "${#missing[@]}" "$VALUES_FILE" "${missing[*]}" >&2
     printf 'Add them (any case) or omit the key to accept a generated value.\n' >&2
+    case " ${missing[*]} " in
+      *" o2_password "*)
+        printf 'o2_password is the exception: the stack passes the same value to\n' >&2
+        printf 'OpenObserve as ZO_ROOT_USER_PASSWORD, so it must come from your values\n' >&2
+        printf 'file — a value generated here could never be exported to match it.\n' >&2 ;;
+    esac
     return 3
   fi
 
@@ -223,15 +266,18 @@ create_mode() {
   fi
 
   # o2_auth_basic is base64("<user>:<password>") with NO "Basic " prefix — the
-  # otel config writes the scheme itself. Derived from whichever o2_password is
-  # in play (supplied or generated) so the pair can never drift apart.
+  # otel config writes the scheme itself. Derived from the supplied o2_password
+  # so the pair can never drift apart.
   if [ -z "${VALUES[o2_password]:-}" ]; then
-    # A pinned header with no password to match it would authenticate against
-    # nothing; refuse rather than invent a mismatch.
-    [ -z "${VALUES[o2_auth_basic]:-}" ] \
-      || fail 3 "o2_auth_basic is pinned but o2_password is not — supply both or neither"
-    VALUES[o2_password]=$(gen_hex)
+    fail 3 "o2_password is required in $VALUES_FILE — it cannot be generated here,
+      because the deploy environment must export the same value as O2_PASSWORD"
   fi
+  # Fail here, with the policy spelled out, rather than as an OpenObserve panic
+  # minutes later: the container refuses a weak password before it serves.
+  o2_password_ok "${VALUES[o2_password]}" \
+    || fail 3 "o2_password does not satisfy OpenObserve's policy: 8-128 characters
+      with at least one lowercase letter, one uppercase letter, one digit and one
+      special character — OpenObserve panics at startup otherwise"
   if [ -z "${VALUES[o2_auth_basic]:-}" ]; then
     [ -n "$O2_USER" ] || fail 3 "o2_auth_basic must be derived but no O2 user is known — pass --o2-user USER (or set o2_user in the values file)"
     VALUES[o2_auth_basic]=$(printf '%s' "$O2_USER:${VALUES[o2_password]}" | base64 -w0)

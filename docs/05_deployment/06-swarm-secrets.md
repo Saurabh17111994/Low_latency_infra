@@ -18,13 +18,15 @@ found". `--check` is the runtime form: it asks the cluster whether all nine exis
 | `aws_access_key_id` · `aws_secret_access_key` | `fluss-coordinator`, `fluss-tablet-1/2/3`, `flink-jobmanager`, `flink-taskmanager` | `/run/secrets/…` via `AWS_ACCESS_KEY_ID_FILE` / `AWS_SECRET_ACCESS_KEY_FILE` |
 | `execution_bridge_auth_token` | `execution-bridge` | `EXECUTION_BRIDGE_AUTH_TOKEN_FILE` |
 | `arrow_app_secret` · `arrow_password` · `arrow_totp_key` | `ingestion` | `/run/secrets/arrow_*` |
-| `o2_password` · `o2_auth_basic` | `openobserve`, `otel-collector` | `/run/secrets/o2_*` |
+| `o2_auth_basic` | `otel-collector` | `/run/secrets/o2_auth_basic`, expanded by `${file:…}` in its own config |
+| `o2_password` | *mounted nowhere* | OpenObserve v0.91.5 has no `_FILE` support; it takes the same value as the deploy variable `ZO_ROOT_USER_PASSWORD` |
 | `gateway_shared_secret` | `execution-gateway`, `nautilus` | `/run/secrets/gateway_shared_secret` |
 
 ## Creation — one command, no secret on disk
 
-`code/01_platform/04_scripts/secrets-bootstrap.sh` creates all nine: five values from the operator,
-four generated on the host. The procedure and the values-file format are in
+`code/01_platform/04_scripts/secrets-bootstrap.sh` creates all nine: six values from the operator,
+three generated on the host (the two internal tokens plus `o2_auth_basic`, derived from the O2 user
+and password). The procedure and the values-file format are in
 `PROD_VM_PROVISIONING.md` §9 `S6`.
 
 ```bash

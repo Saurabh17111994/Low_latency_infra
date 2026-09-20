@@ -4,6 +4,9 @@ import com.trading.common.config.SecretGuard;
 import com.trading.common.config.PlatformConfig;
 import com.trading.common.observability.AlertThresholds;
 import java.time.Duration;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -176,14 +179,14 @@ public final class IngestionConfig {
 
         // ---- Arrow auth (TOTP only — ARROW_TOKEN removed 2026-08-24) ----
         b.arrowAppId = required(env, "ARROW_APP_ID", errors);
-        b.arrowAppSecret = required(env, "ARROW_APP_SECRET", errors);
+        b.arrowAppSecret = requiredSecret(env, "ARROW_APP_SECRET", errors);
         b.arrowToken = optional(env, "ARROW_TOKEN");
         if (!b.arrowToken.isBlank()) {
             errors.add("ARROW_TOKEN removed 2026-08-24 — use ARROW_USER_ID+PASSWORD+TOTP_KEY (TOTP AutoLogin) only");
         }
         b.arrowUserId = optional(env, "ARROW_USER_ID");
-        b.arrowPassword = optional(env, "ARROW_PASSWORD");
-        b.arrowTotpKey = optional(env, "ARROW_TOTP_KEY");
+        b.arrowPassword = optionalSecret(env, "ARROW_PASSWORD");
+        b.arrowTotpKey = optionalSecret(env, "ARROW_TOTP_KEY");
 
         // TOTP AutoLogin is the only supported auth (access-token path removed)
         boolean hasAutoLogin = !b.arrowUserId.isBlank()
@@ -423,6 +426,50 @@ public final class IngestionConfig {
 
     private static String optional(Map<String, String> env, String key) {
         String v = env.get(key);
+        return v != null ? v : "";
+    }
+
+    /**
+     * Resolves a secret, preferring the file form (CHG-251).
+     *
+     * <p>Docker and Swarm secrets are mounted as FILES, so a secret-based deployment points
+     * {@code <KEY>_FILE} at the mount and leaves {@code <KEY>} unset — the idiomatic
+     * {@code _FILE} pattern (same as the official postgres/redis images, and the convention
+     * the Go execution bridge and the gateway's {@code gatewaySecret} already apply). The
+     * file wins when both are set.
+     *
+     * <p>A named-but-unreadable or empty file fails LOUD: the service must never fall back
+     * to an unset secret while appearing configured. Only a blank or absent file variable
+     * falls through to the plain variable.
+     */
+    private static String secretFromFile(Map<String, String> e, String key) {
+        String path = e.get(key + "_FILE");
+        if (path != null && !path.isBlank()) {
+            String trimmed;
+            try {
+                trimmed = Files.readString(Path.of(path.trim())).strip();
+            } catch (IOException ex) {
+                throw new IllegalArgumentException(key + "_FILE=" + path + " unreadable", ex);
+            }
+            if (trimmed.isEmpty()) {
+                throw new IllegalArgumentException(key + "_FILE=" + path + " is empty");
+            }
+            return trimmed;
+        }
+        return e.get(key);
+    }
+
+    private static String requiredSecret(Map<String, String> env, String key, List<String> errors) {
+        String v = secretFromFile(env, key);
+        if (v == null || v.isBlank()) {
+            errors.add(key + " is required but not set");
+            return "";
+        }
+        return v;
+    }
+
+    private static String optionalSecret(Map<String, String> env, String key) {
+        String v = secretFromFile(env, key);
         return v != null ? v : "";
     }
 

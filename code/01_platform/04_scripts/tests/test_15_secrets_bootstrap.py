@@ -33,6 +33,9 @@ SUPPLIED = {
     "aws_secret_access_key": "aws-secret-value",
 }
 O2_USER = "admin@example.com"
+# OpenObserve validates this value itself and panics on a weak one, so the
+# fixture carries a compliant password: lowercase, uppercase, digit, special.
+O2_PASSWORD = "Test-Passw0rd!"
 
 
 def stack_secret_names():
@@ -76,6 +79,7 @@ def values_file(tmp_path, extra=""):
     path = tmp_path / "vm-secrets.env"
     body = "# git-ignored values file\n"
     body += f"o2_user={O2_USER}\n"
+    body += f"o2_password={O2_PASSWORD}\n"
     body += "".join(f"{k}={v}\n" for k, v in SUPPLIED.items())
     body += extra
     path.write_text(body)
@@ -155,16 +159,50 @@ def test_o2_auth_basic_is_bare_base64_with_no_basic_prefix(tmp_path):
 
 
 def test_generated_secrets_are_distinct_and_non_empty(tmp_path):
-    """Three internal tokens plus the O2 password: each unique, none empty."""
+    """The two internal tokens: each unique, neither empty, both long enough."""
     result, log = run(tmp_path, "--values-file", values_file(tmp_path))
     assert result.returncode == 0, result.stdout + result.stderr
     created = {c["argv"][2]: c["stdin"] for c in calls(log)
                if c["argv"][:2] == ["secret", "create"]}
 
     generated = [created[n] for n in
-                 ("o2_password", "execution_bridge_auth_token", "gateway_shared_secret")]
+                 ("execution_bridge_auth_token", "gateway_shared_secret")]
     assert all(len(v) >= 32 for v in generated), "generated values are too short"
-    assert len(set(generated)) == 3, "generated values must not repeat"
+    assert len(set(generated)) == 2, "generated values must not repeat"
+    assert created["o2_password"] == O2_PASSWORD, (
+        "o2_password must be the supplied value, never a generated one: the stack "
+        "passes it to OpenObserve as ZO_ROOT_USER_PASSWORD from the deploy env")
+
+
+def test_o2_password_must_be_supplied_and_meet_the_policy(tmp_path):
+    """OpenObserve panics at startup on a weak password, so refuse it here.
+
+    Measured in the rehearsal: `ZO_ROOT_USER_PASSWORD is too weak: Password must
+    be 8-128 characters and contain at least one lowercase letter, one uppercase
+    letter, one digit, an[d special char]`, then `backend job init failed: channel
+    closed` — the container never serves. A hex value (what this script used to
+    generate) fails that policy because it has no uppercase and no special.
+    """
+    missing = tmp_path / "no-o2-value.env"
+    missing.write_text("o2_user=" + O2_USER + "\n"
+                       + "".join(f"{k}={v}\n" for k, v in SUPPLIED.items()))
+    result, log = run(tmp_path, "--values-file", str(missing))
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "o2_password" in (result.stdout + result.stderr)
+    assert not [c for c in calls(log) if c["argv"][:2] == ["secret", "create"]]
+
+    for weak in ("f" * 64, "Lowercase1", "NoDigitHere!", "Sh0rt!"):
+        result, log = run(tmp_path, "--values-file",
+                          values_file(tmp_path, extra=f"o2_password={weak}\n"))
+        assert result.returncode == 3, f"accepted the weak o2_password {weak!r}"
+        assert "policy" in (result.stdout + result.stderr)
+        assert not [c for c in calls(log) if c["argv"][:2] == ["secret", "create"]]
+
+    result, log = run(tmp_path, "--values-file", values_file(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+    created = {c["argv"][2]: c["stdin"] for c in calls(log)
+               if c["argv"][:2] == ["secret", "create"]}
+    assert created["o2_password"] == O2_PASSWORD
 
 
 def test_a_supplied_generated_secret_wins_over_generation(tmp_path):
@@ -241,6 +279,7 @@ def test_values_file_can_arrive_over_stdin_and_never_touch_disk(tmp_path):
     env = dict(os.environ)
     env["PATH"] = f"{bindir}{os.pathsep}{env['PATH']}"
     body = "o2_user=" + O2_USER + "\n" + "".join(f"{k}={v}\n" for k, v in SUPPLIED.items())
+    body += f"o2_password={O2_PASSWORD}\n"
 
     result = subprocess.run(["bash", SCRIPT, "--values-file", "/dev/stdin"],
                             input=body, capture_output=True, text=True, env=env)

@@ -20,6 +20,8 @@ SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(SCRIPTS, "image-publish.sh")
 STACK = os.path.join(SCRIPTS, "..", "01_docker", "docker-stack.yml")
 LOCK = os.path.join(SCRIPTS, "..", "01_docker", "runtime.lock")
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPTS)))
+GUIDE = os.path.join(REPO, "docs", "05_deployment", "PROD_VM_PROVISIONING.md")
 
 
 def run(*args, stdin=None):
@@ -143,6 +145,31 @@ def test_print_map_names_the_local_images_and_their_variables():
     assert pairs["NAUTILUS_IMAGE"] == "01_docker-nautilus:latest"
     assert pairs["EXECUTION_BRIDGE_IMAGE"] == "01_docker-execution-bridge:latest"
     assert pairs["EXECUTION_GATEWAY_IMAGE"] == "01_docker-execution-gateway:latest"
+    assert pairs["DDL_APPLY_IMAGE"] == "01_docker-ddl-apply:latest"
+
+
+def test_the_first_boot_catalog_step_runs_a_published_tool_image():
+    """CHG-256 — the runbook's first-boot DDL step must run an image this script pushes.
+
+    The step is not a stack service, so nothing else pins its image: it can name
+    a tool that exists only on the workstation, and the deploy then fails on VM1
+    with `docker run` against an empty catalog — with ingestion already
+    fail-closed, that is the state where no data loop can start.
+    """
+    guide = open(GUIDE).read()
+    marker = "### S7b — Apply the DDL catalog (first boot only)"
+    assert marker in guide, "the runbook must carry the first-boot catalog step"
+    step = guide.split(marker, 1)[1].split("### S8", 1)[0]
+
+    assert '"$DDL_APPLY_IMAGE" apply' in step, (
+        "the step must invoke the tool image by the variable this script publishes")
+    assert "DDL-APPLY-RESULT: PASS" in step, "the step must name the tool's own sentinel"
+    assert "allowRuntimeDdl=false" in step, (
+        "the step must say why it exists: ingestion refuses an empty catalog")
+
+    assert "DDL_APPLY_IMAGE" in dict(
+        line.split("=", 1) for line in run("--print-map").stdout.splitlines() if "=" in line
+    ), "the image the runbook runs must be in the push map"
 
 
 def test_self_check_passes_and_writes_nothing(tmp_path):

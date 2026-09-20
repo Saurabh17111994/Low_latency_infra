@@ -626,6 +626,353 @@ class TestTier2Hardening:
                     f"127.0.0.1, got {test!r}"
                 )
 
+    def test_fluss_binds_a_literal_and_advertises_a_name(self):
+        """Binding your own service name can never succeed (CHG-250, DEC-047 sibling).
+
+        Measured on the rehearsal Swarm: the coordinator logged ``Starting
+        coordinator-server as a console application on host <container-id>`` and
+        then ``java.io.IOException: Failed to start Netty server on endpoint
+        INTERNAL://fluss-coordinator:0`` / ``Caused by:
+        java.nio.channels.UnresolvedAddressException`` at Netty's
+        ``checkResolvable``. Swarm publishes a service's DNS name only for tasks
+        that are Running, so binding that name resolves to nothing on the first
+        attempt: the task can never become Running (Swarm kept it in Starting,
+        "failed 3x") and the coordinator never started. Pointing the same endpoint
+        at ``0.0.0.0`` removed the failure - the next error was an unrelated
+        placeholder S3 bucket - so both halves are pinned here:
+
+        1. **bind.listeners must be a literal** (``0.0.0.0``, ``127.0.0.1``, or an
+           empty host, Kafka-style "all interfaces"). Anything else is a name,
+           and a name we cannot resolve before we are Running deadlocks us.
+        2. **advertised.listeners must be the service's own name** - a literal
+           there would tell every client to dial itself.
+        D-A (same change, one layer deeper): the INTERNAL listener needs a fixed
+        port and an advertised name too. Port 0 publishes an ephemeral port, and
+        an unset advertised INTERNAL defaults to the bind value, so tablet-1
+        registered ``INTERNAL://0.0.0.0:40917`` and the coordinator dialled
+        0.0.0.0 refused, ongoing (run7). This test therefore also pins fixed
+        bind ports and requires ``internal.listener.name`` to name a listener
+        that is actually declared.
+        """
+        d = _load()
+        literals = {"0.0.0.0", "127.0.0.1", "::", ""}
+
+        def parse_listeners(key, props):
+            """(listener-name, host, port) triples for a NAME://host:port,... line."""
+            for line in props.splitlines():
+                stripped = line.strip()
+                if stripped.startswith(key + ":"):
+                    value = stripped.split(":", 1)[1]
+                    triples = []
+                    for entry in value.split(","):
+                        entry = entry.strip()
+                        if "://" not in entry:
+                            continue
+                        lname, rest = entry.split("://", 1)
+                        host, port = rest.rsplit(":", 1)
+                        triples.append((lname.strip(), host.strip(), port.strip()))
+                    return triples
+            return []
+
+        def prop_value(key, props):
+            for line in props.splitlines():
+                stripped = line.strip()
+                if stripped.startswith(key + ":"):
+                    return stripped.split(":", 1)[1].strip()
+            return ""
+
+        checked = 0
+        for name, svc in d["services"].items():
+            env = svc.get("environment") or {}
+            if not isinstance(env, dict):
+                continue
+            props = str(env.get("FLUSS_PROPERTIES") or "")
+            if "bind.listeners" not in props:
+                continue
+            checked += 1
+            bound = parse_listeners("bind.listeners", props)
+            assert bound, f"{name}: bind.listeners is missing"
+            for lname, host, port in bound:
+                assert host in literals, (
+                    f"{name}: bind.listeners must use a literal address, got "
+                    f"{host!r}. Swarm publishes a service name only for Running "
+                    f"tasks, so binding it fails the first attempt and the task "
+                    f"never reaches Running (measured: UnresolvedAddressException "
+                    f"on INTERNAL://fluss-coordinator:0). Use 0.0.0.0."
+                )
+                assert port != "0", (
+                    f"{name}: bind.listeners must use a fixed port, got :0 on "
+                    f"{lname}. Port 0 publishes an ephemeral port, and with a "
+                    f"wildcard bind the registered endpoint "
+                    f"(0.0.0.0:<ephemeral>) is undiallable - measured run7: "
+                    f"tablet-1 registered INTERNAL://0.0.0.0:40917 and the "
+                    f"coordinator's dials were refused. Use a fixed port."
+                )
+            advertised = parse_listeners("advertised.listeners", props)
+            assert advertised, f"{name}: advertised.listeners is missing"
+            for lname, host, port in advertised:
+                assert host not in literals, (
+                    f"{name}: advertised.listeners must be the resolvable service "
+                    f"name, not the literal {host!r} - clients would dial "
+                    f"themselves."
+                )
+                assert host == name, (
+                    f"{name}: advertised.listeners must equal the service name so "
+                    f"peers and clients resolve the same endpoint, got {host!r}."
+                )
+            internal = prop_value("internal.listener.name", props)
+            assert internal, (
+                f"{name}: internal.listener.name is missing - server-to-server "
+                f"traffic then falls back to an undocumented default."
+            )
+            declared = {triple[0] for triple in bound}
+            assert internal in declared, (
+                f"{name}: internal.listener.name={internal!r} names no declared "
+                f"bind listener {sorted(declared)} - the servers would chase a "
+                f"ghost endpoint."
+            )
+        assert checked >= 4, (
+            f"the four Fluss services (coordinator + 3 tablets) must declare "
+            f"listeners; checked {checked} - the stack or this test has drifted"
+        )
+
+    def test_flink_rpc_binds_the_port_peers_dial(self):
+        """Flink must bind its RPC port, not an ephemeral one (CHG-253, D-J).
+
+        Measured on the run8f rehearsal stack: the jobmanager was Running and
+        healthy with leadership granted, yet **no TaskManager ever registered**.
+        The taskmanager retried ``Could not resolve ResourceManager address
+        pekko.tcp://flink@flink-jobmanager:6123/user/rpc/resourcemanager_*`` until
+        ``RegistrationTimeoutException: Could not register at the ResourceManager
+        within ... PT5M`` killed it - a silent 1/3 -> 0/3 flap with the JM looking
+        fine. Probing the task container showed nothing listening on 6123 at all;
+        Pekko had bound a random port instead and advertised it:
+        ``Remoting started; listening on addresses
+        :[pekko.tcp://flink@flink-jobmanager:42353]``.
+
+        Cause, isolated by A/B on the deployed image: Flink 2.x splits the
+        advertised RPC port from the port that is actually bound, and the two
+        roles differ. A standalone jobmanager binds ``jobmanager.rpc.port``, but
+        **with ``high-availability.type: zookeeper`` it binds an ephemeral port**
+        (measured `…:35821` and `…:42955`) unless ``jobmanager.rpc.bind-port``
+        pins it - consistent with HA meaning the address is discovered through
+        ZooKeeper rather than dialled. A taskmanager binds ephemeral in every
+        case (measured 33255/33801/46237) unless ``taskmanager.rpc.bind-port``
+        pins it. Production is the HA jobmanager plus a statically addressed
+        taskmanager, i.e. the one combination that cannot work, in both
+        directions: the TM cannot reach the RM, and the RM cannot reach a
+        registered TM. Pin both roles to the same fixed port they advertise.
+        """
+        d = _load()
+
+        def prop_value(key, props):
+            for line in props.splitlines():
+                stripped = line.strip()
+                if stripped.startswith(key + ":"):
+                    return stripped.split(":", 1)[1].strip()
+            return ""
+
+        checked = 0
+        for name, svc in d["services"].items():
+            cmd = svc.get("command") or []
+            cmd_s = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            role = next(
+                (r for r in ("jobmanager", "taskmanager") if r in cmd_s), None
+            )
+            if role is None:
+                continue
+            env = svc.get("environment") or {}
+            props = str(env.get("FLINK_PROPERTIES") or "") if isinstance(env, dict) else ""
+            assert props, f"{name}: runs {role} without FLINK_PROPERTIES"
+            checked += 1
+            port_key = f"{role}.rpc.port"
+            bind_key = f"{role}.rpc.bind-port"
+            port = prop_value(port_key, props)
+            bind = prop_value(bind_key, props)
+            assert port, (
+                f"{name}: {port_key} is not pinned. The image default is 6123, "
+                f"but a peer's dial target must be a value this repo states - "
+                f"and it must match the bind port below."
+            )
+            assert bind, (
+                f"{name}: {bind_key} is missing, so Flink binds an ephemeral "
+                f"port while peers dial {port}. Measured run8f: Pekko listened "
+                f"on 42353, the taskmanager dialled 6123 and died with "
+                f"RegistrationTimeoutException PT5M - the JM looked healthy the "
+                f"whole time. Pin {bind_key} to {port}."
+            )
+            assert bind == port, (
+                f"{name}: {bind_key}={bind!r} but {port_key}={port!r} - the "
+                f"bound port and the advertised port must match, otherwise the "
+                f"published address has no listener."
+            )
+            assert bind != "0", (
+                f"{name}: {bind_key}: 0 means 'bind an ephemeral port' (Flink "
+                f"2.x default) - that is the defect this pins."
+            )
+        assert checked >= 2, (
+            f"the jobmanager and taskmanager must pin their RPC ports; checked "
+            f"{checked} - the stack or this test has drifted"
+        )
+
+    def test_taskmanager_reads_the_leader_through_the_same_ha_backend(self):
+        """Both roles need the same ``high-availability.*`` keys (CHG-255).
+
+        Measured run9, after ``jobmanager.rpc.bind-port`` was pinned: the JM
+        binds 6123, the TaskManager's registration message now *reaches* the
+        ResourceManager, and the RM throws it away:
+
+            FencingTokenException: Fencing token mismatch: Ignoring message
+            RemoteFencedMessage(00000000000000000000000000000000,
+            RemoteRpcInvocation(ResourceManagerGateway.registerTaskExecutor(…)))
+            because the fencing token 0…0 did not match the expected fencing
+            token 9f3175f098076291f8095be45eee44b3
+
+        The fencing token travels with the leader information that the HA
+        service hands out, so a TaskManager without ``high-availability.*``
+        discovers the ResourceManager statically, registers with token 0 and
+        never appears (``{"taskmanagers":[]}``). The keys are therefore needed
+        by BOTH roles, and must agree: a different ensemble, cluster id or root
+        path is a different election to read.
+        """
+
+        def ha_props(props):
+            out = {}
+            for line in props.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("high-availability.") and ":" in stripped:
+                    key, value = stripped.split(":", 1)
+                    out[key.strip()] = value.strip()
+            return out
+
+        blocks = {}
+        for name, svc in _load()["services"].items():
+            cmd = svc.get("command") or []
+            cmd_s = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            for role in ("jobmanager", "taskmanager"):
+                if role in cmd_s:
+                    env = svc.get("environment") or {}
+                    blocks[role] = ha_props(str(env.get("FLINK_PROPERTIES") or ""))
+
+        assert set(blocks) == {"jobmanager", "taskmanager"}, sorted(blocks)
+        jm_props = blocks["jobmanager"]
+        assert jm_props, "the jobmanager declares no high-availability.* keys"
+        for key in sorted(jm_props):
+            assert key in blocks["taskmanager"], (
+                f"taskmanager is missing {key!r}: it would then discover the "
+                f"ResourceManager statically and register with fencing token 0, "
+                f"which the ResourceManager rejects - mirror the jobmanager's "
+                f"HA keys."
+            )
+            assert blocks["taskmanager"][key] == jm_props[key], (
+                f"{key} differs between the roles: jobmanager="
+                f"{jm_props[key]!r} taskmanager={blocks['taskmanager'][key]!r} "
+                f"- both roles must read the same leader election state."
+            )
+
+    def test_interpolation_uses_only_the_portable_subset(self):
+        """Ban interpolation forms this docker renders as garbage (CHG-252, D-E).
+
+        Measured with a 5-line probe file (``interp-probe.yml``), same engine
+        that deploys the stack - plain ``${VAR}``, ``${VAR:-plain}`` without a
+        colon, empty ``${VAR:-}`` and short ``${VAR:?msg}`` all render
+        correctly, but three forms do not:
+
+        1. **nested defaults** ``${A:-${B}}`` render the inner reference
+           LITERAL (run8: ``state.savepoints.dir: ${CHECKPOINT_DIR}``,
+           ``SAVEPOINT_DIR=${CHECKPOINT_DIR}`` - Flink cannot parse that);
+        2. **``:?`` error text containing `` - ``** renders the text after the
+           dash as the VALUE (run8: ``CHECKPOINT_DIR= prod requires
+           s3://...``) - the jobmanager then dies at startup and the failure
+           looks like a storage problem;
+        3. **sibling-key references** (``SERVERS: ${BOOTSTRAP}``) read the
+           deploy env, never the sibling line, so they render EMPTY when the
+           deploy env lacks the key - duplicated literals plus this pin stay
+           in sync instead (``FLUSS_BOOTSTRAP_SERVERS`` equals a value that
+           ``FLUSS_BOOTSTRAP`` actually takes).
+        """
+        raw = STACK.read_text()
+        code_lines = [
+            (n, line.split("#", 1)[0])
+            for n, line in enumerate(raw.splitlines(), 1)
+            if line.split("#", 1)[0].strip()
+        ]
+        for n, line in code_lines:
+            assert not re.search(r"\${[^{}]*\${", line), (
+                f"line {n}: nested interpolation renders literal on this "
+                f"docker - use the proven-simple form. Got: {line.strip()!r}."
+            )
+            assert not re.search(r":\?[^}\n]* - ", line), (
+                f"line {n}: ':?' error text containing ' - ' renders the tail "
+                f"as the VALUE on this docker - shorten the message and move "
+                f"the guidance to a comment. Got: {line.strip()!r}."
+            )
+        bootstraps = set()
+        servers = set()
+        for n, line in code_lines:
+            m = re.match(r"\s+FLUSS_BOOTSTRAP: (\S+)\s*$", line)
+            if m:
+                assert not m.group(1).startswith("${"), (
+                    f"line {n}: FLUSS_BOOTSTRAP must be a literal so sibling "
+                    f"consumers can mirror it - interpolation reads the deploy "
+                    f"env, never sibling keys."
+                )
+                bootstraps.add(m.group(1))
+            m = re.match(r"\s+FLUSS_BOOTSTRAP_SERVERS: (\S+)\s*$", line)
+            if m:
+                assert not m.group(1).startswith("${"), (
+                    f"line {n}: FLUSS_BOOTSTRAP_SERVERS must be a literal - a "
+                    f"${{...}} reference renders EMPTY unless the deploy env "
+                    f"sets it (measured run8)."
+                )
+                servers.add(m.group(1))
+        assert servers, "no FLUSS_BOOTSTRAP_SERVERS lines found - the stack or this test has drifted"
+        assert servers <= bootstraps, (
+            f"FLUSS_BOOTSTRAP_SERVERS {sorted(servers)} names an endpoint no "
+            f"FLUSS_BOOTSTRAP takes {sorted(bootstraps)} - keep them in sync."
+        )
+
+    def test_properties_blocks_carry_no_comment_text(self):
+        """No ``#`` inside FLINK_PROPERTIES / FLUSS_PROPERTIES blocks (CHG-252).
+
+        Those are YAML block scalars: the text is handed to the service as-is,
+        so the YAML parser never sees a comment. Both consumers proved it in the
+        rehearsal:
+
+        * the Flink entrypoint loaded a prose line as a configuration property
+          (run8c: ``Loading configuration property: #CHG-252, savepoints=...``);
+        * a trailing ``# REHEARSAL-ONLY (production: s3://)`` note appended to a
+          path value was kept, and ``high-availability.storageDir`` became
+          ``file:/checkpoints/flink-ha#REHEARSAL-ONLY(production:s3:/)`` - a URI
+          with a fragment. The jobmanager then failed its ``JobResultStore``
+          accessibility check and exited 239 (run8c/run8d), which reads like a
+          storage outage and is not.
+
+        Unknown keys are merely tolerated by Flink, so a comment line is not
+        fatal today - but a path value carrying a fragment is, and one strict
+        parser is enough to turn the other kind fatal too. Keep prose above the
+        key, never inside the block.
+        """
+        raw = STACK.read_text()
+        lines = raw.splitlines()
+        blocks = 0
+        for n, line in enumerate(lines, 1):
+            if line.strip() not in ("FLINK_PROPERTIES: |", "FLUSS_PROPERTIES: |"):
+                continue
+            blocks += 1
+            for offset, inner in enumerate(lines[n:], 1):
+                if not inner.startswith("        "):
+                    break  # block ended
+                assert "#" not in inner, (
+                    f"line {n + offset}: '#' inside a properties block reaches "
+                    f"the service verbatim (no YAML comment semantics) - move "
+                    f"the prose above the key. Got: {inner.strip()!r}."
+                )
+        assert blocks == 6, (
+            f"expected 6 properties blocks (4 FLUSS + 2 FLINK), scanned {blocks} "
+            f"- the stack or this test has drifted"
+        )
+
     def test_every_service_healthcheck_or_documented_exception(self):
         d = _load()
         raw = STACK.read_text()

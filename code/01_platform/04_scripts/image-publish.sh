@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# image-publish.sh — push the six project-built images to a registry and emit
+# image-publish.sh — push the seven project-built images to a registry and emit
 # digest-pinned deploy-environment values.
 #
 # Why this exists: a locally built image that was never pushed has no registry
@@ -25,7 +25,12 @@ STACK="$REPO_ROOT/code/01_platform/01_docker/docker-stack.yml"
 LOCK="$REPO_ROOT/code/01_platform/01_docker/runtime.lock"
 DIGEST_PIN="$SCRIPT_DIR/digest-pin.sh"
 
-# The six project-built images the production stack takes from the environment.
+# The six project-built images the production stack takes from the environment,
+# plus the DDL-apply TOOL image (CHG-256). A fresh production cluster boots with
+# an empty Fluss catalog and ingestion refuses to start on one
+# (allowRuntimeDdl=false). The first-boot step that creates the catalog runs
+# outside the stack, so its image is never a `${X_IMAGE:?}` the stack demands --
+# without this entry nothing on the VMs can run it.
 #
 # FLINK_IMAGE and FLUSS_IMAGE are the BUILT runtime images, not the stock
 # upstream ones: the stock Flink image cannot run this job at all (CHG-179), and
@@ -40,6 +45,7 @@ IMAGE_MAP=(
 	"NAUTILUS_IMAGE=01_docker-nautilus:latest"
 	"EXECUTION_BRIDGE_IMAGE=01_docker-execution-bridge:latest"
 	"EXECUTION_GATEWAY_IMAGE=01_docker-execution-gateway:latest"
+	"DDL_APPLY_IMAGE=01_docker-ddl-apply:latest"
 )
 
 usage() {
@@ -162,7 +168,7 @@ self_check() {
 			echo "      build them: make images && make flink-image && make fluss-image"
 			rc=4
 		else
-			echo "PASS  all six images exist locally and are ready to push"
+			echo "PASS  all seven images exist locally and are ready to push"
 		fi
 	else
 		echo "SKIP  docker unavailable — image presence not checked"
