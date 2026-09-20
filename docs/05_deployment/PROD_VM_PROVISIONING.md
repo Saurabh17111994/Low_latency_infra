@@ -190,7 +190,7 @@ result (`09-production-swarm.md`).
 | Gap | What is missing | Blocks |
 | --- | --- | --- |
 | Image publication | `image-publish.sh` (CHG-247, seven images since CHG-256) pushes the project-built images and writes digest-pinned deploy values, and `digest-pin.sh` resolves digests against a plain-HTTP registry — rehearsed end-to-end against a **local** `registry:2` only. VM1's registry does not exist yet, so `.env` still carries bare tags and no digest-pinned production environment has been produced | S4 (publish), and therefore S7, S7b |
-| Host bootstrap + clock check | No script installs Docker/enables NTP; `prod_node_check.py` verifies reachability, disk and role/labels — **not** clock offset. The sysctl list S4 needs is itself undefined in this repository — decide and record it before the first boot | S4 |
+| Production sysctl list | `vm-bootstrap.sh` installs Docker, enables NTP and **fails** on an unsynchronised or drifting clock (CHG-266), so the remaining gap is the sysctl list itself — still undefined in this repository, decide and record it before the first boot | S4 |
 | EOD trigger | `eod_controller.py` is a one-shot; nothing schedules it. The requirement names a scheduled owner (`../02_requirements/06-operational.md` §6.8) | S11 |
 | Multi-node pre-deploy validation | `stack_selfcheck.sh` refuses to run when the swarm has more than one node ("refusing to label — single-host mimic, not a cluster"), so **nothing validates a real cluster's stack before `docker stack deploy`** | S7 |
 
@@ -408,6 +408,24 @@ that is a daemon setting, not a resolver limitation. If a resolution ever does f
 `digest: sha256:…` line `docker push` prints; note that `docker image inspect --format
 '{{json .RepoDigests}}'` records `repo@sha256:…` **without** the tag, so it is unambiguous only while
 that repository holds a single tag.
+
+**What is scripted, and what is not** (CHG-266). Steps 0–2 are one idempotent command, run on each
+of the four VMs, whenever it is re-run:
+```bash
+ssh <ssh-user>@<vm-ip> 'cd ~/arrow-infra && bash code/01_platform/04_scripts/vm-bootstrap.sh --apply'
+bash code/01_platform/04_scripts/vm-bootstrap.sh --check \
+     --registry <vm1-ip>:5000 --extra-free-ports 5000   # VM1; VM4 instead: --extra-free-ports 5080
+```
+It installs git and the clone, Docker Engine from Docker's repository, and chrony; the clock is
+asserted rather than assumed — `timedatectl` must report a synchronised clock **and** `chronyc
+tracking` an offset within 1 s (`--max-offset` tightens or loosens it). `--check` is read-only, exit
+code = number of FAILs, and also verifies that `docker` works without `sudo`, that `/var/log/syslog`
+belongs to group `adm` (CHG-263), that the Swarm ports are free, and that `daemon.json` declares the
+plain-HTTP registry.
+
+**Step 3 is the exception: the script never touches sysctls.** The list is still undefined (§6.1), so
+`--check` reports `[FAIL] sysctls …` until someone decides it — a host cannot be declared ready on a
+guess.
 
 **Exit:** `docker version` works on each node without `sudo`; `timedatectl` shows a synchronized
 clock; `curl -s http://<vm1-ip>:5000/v2/_catalog` lists the pushed repositories; every image
