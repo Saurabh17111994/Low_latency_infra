@@ -23,6 +23,14 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 SCRIPT = SCRIPTS / "eod-controller-test.sh"
 STATUS_RC = 2  # what eod_controller.py returns when its classpath is incomplete
 
+# The date the fake controller's `status` day lines carry. The script
+# defaults RUN_DATE to *today* in Asia/Kolkata (eod-controller-test.sh:37) and
+# then counts `^eod-controller:   day $RUN_DATE` lines to decide whether the
+# cycle recorded the day, so a test that runs the whole script must pin the
+# date to this value — otherwise it passes only on the day this file was
+# written (P6-072/P6-077 failed exactly that way from 2026-09-20 on).
+FIXTURE_DAY = "2026-09-19"
+
 FAKE_PYTHON3 = """#!/usr/bin/env bash
 # fake python3: serves the two call shapes the script makes (status / run)
 printf '%s\\n' "$*" >> "$FAKE_LOG"
@@ -44,6 +52,7 @@ case "$*" in
     printf 'eod-controller: RESULT=VERIFIED EXIT=0 TABLES=1 DAYS=%s\\n' "$n"
     i=0
     while [ "$i" -lt "$lines" ]; do
+      # the date here must equal FIXTURE_DAY (see its comment)
       printf 'eod-controller:   day 2026-09-19 state=%s retry=0 nextRetry=-\\n' "${FAKE_DAY_STATE:-VERIFIED}"
       i=$((i + 1))
     done
@@ -222,7 +231,8 @@ class DispatchTest(Wave45Base):
 
     def test_main_phase_is_dispatched(self) -> None:
         box = self.sandbox()
-        rc, out = box.run(f"EOD_TEST_PHASE=main bash {box.script}")
+        rc, out = box.run(f"EOD_TEST_PHASE=main bash {box.script}",
+                        RUN_DATE=FIXTURE_DAY)
         self.assertEqual(rc, 0, out)
         self.assertIn("=== main phase:", out)
         self.assertIn("ok    main: EOD cycle verified 1 day-record", out)
@@ -230,7 +240,8 @@ class DispatchTest(Wave45Base):
 
     def test_smoke_phase_is_dispatched(self) -> None:
         box = self.sandbox()
-        rc, out = box.run(f"EOD_TEST_PHASE=smoke bash {box.script}")
+        rc, out = box.run(f"EOD_TEST_PHASE=smoke bash {box.script}",
+                        RUN_DATE=FIXTURE_DAY)
         self.assertEqual(rc, 0, out)
         self.assertIn("=== smoke phase:", out)
         self.assertNotIn("=== main phase:", out)
