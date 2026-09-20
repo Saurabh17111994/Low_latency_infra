@@ -31,6 +31,9 @@ WORKLOAD = [
     "fluss-coordinator", "fluss-tablet-1", "fluss-tablet-2", "fluss-tablet-3",
     "flink-jobmanager", "flink-taskmanager", "ingestion",
     "execution-bridge", "execution-gateway", "nautilus",
+    # CHG-269: the EOD trigger is a workload, not an observability service — it
+    # needs Fluss, so it belongs on a worker like everything else that talks to it.
+    "eod-scheduler",
 ]
 OBSERVABILITY = ["otel-collector", "openobserve", "alert-consumer"]
 # Per-host agents (CHG-265): global mode IS their placement, so they carry no
@@ -1350,7 +1353,11 @@ class TestRestartBudget:
                "flink-jobmanager", "flink-taskmanager", "ingestion", "execution-bridge"}
     UNBOUNDED = {"zookeeper-1", "zookeeper-2", "zookeeper-3", "execution-gateway", "nautilus",
                  "otel-collector", "openobserve", "alert-consumer",
-                 "node-exporter", "cadvisor"}
+                 "node-exporter", "cadvisor",
+                 # CHG-269: the EOD trigger. Same reasoning as the alert consumer
+                 # (CHG-258): a stopped scheduler is a daily job that silently never
+                 # runs, so it restarts forever and the failure stays visible.
+                 "eod-scheduler"}
 
     def test_every_service_is_classified(self):
         services = set(_load()["services"])
@@ -1373,3 +1380,66 @@ class TestRestartBudget:
             assert "max_attempts" not in rp, (
                 f"{name}: infrastructure must not stop retrying — a stopped service here "
                 f"is a silent hole (quorum, metrics, alerts), not a visible failure")
+
+
+# ── CHG-269: the EOD controller has a scheduled owner ───────────────────────
+
+def test_the_eod_scheduler_is_the_owner_the_requirement_names():
+    """§6.13 wants a named service owning the EOD lifecycle; before this, nothing invoked it."""
+    block = service_block_raw(STACK.read_text(), "eod-scheduler")
+    # It runs the scheduler, not the image's DDL entrypoint.
+    assert 'entrypoint: ["python3", "/app/code/01_platform/04_scripts/eod_schedule.py"]' in block
+    # The image's CMD is `validate`, which the scheduler would take as its own
+    # argument and exit 2 — the command has to be overridden as well.
+    assert "command:" in block and "--at" in block and "--zone" in block
+    # The image that carries java + common/target/classes + the pinned jars.
+    assert "${DDL_APPLY_IMAGE:?" in block
+    # Exactly one: two schedulers would fire the same day twice.
+    assert "replicas: 1" in block
+
+
+def test_the_eod_scheduler_is_fail_closed_about_the_lake_and_the_tables():
+    block = service_block_raw(STACK.read_text(), "eod-scheduler")
+    assert 'EOD_OFFLOAD: "${EOD_OFFLOAD:-none}"' in block,         "the lake must stay off until an operator turns it on"
+    assert 'EOD_TABLES: "${EOD_TABLES:?' in block,         "which tables are EOD-eligible is an operator decision, not a default"
+
+
+def test_the_eod_scheduler_healthcheck_depends_on_nothing_but_itself():
+    """House rule 6 / DEC-047: a healthcheck must never depend on another service."""
+    block = service_block_raw(STACK.read_text(), "eod-scheduler")
+    probes = [l for l in block.splitlines() if "check-heartbeat" in l]
+    assert len(probes) == 1, probes
+    for other in ("openobserve", "fluss", "zookeeper", "alert-consumer", "otel-collector"):
+        assert other not in probes[0], f"the healthcheck reaches {other}: {probes[0]}"
+    assert "eod-scheduler-heartbeat" in block, "the probe and the loop must share one path"
+
+
+def test_the_scheduler_and_the_controller_agree_on_the_trading_day():
+    """An EOD run on the wrong day is a real defect class: both sides default to one zone."""
+    block = service_block_raw(STACK.read_text(), "eod-scheduler")
+    assert '"${EOD_ZONE:-Asia/Kolkata}"' in block
+    tool = (ROOT / "code/common/src/main/java/com/trading/common/schema/eod/EodControllerTool.java").read_text()
+    assert 'getOrDefault("EOD_ZONE", "Asia/Kolkata")' in tool,         "the controller and the trigger must not disagree about which day it is"
+
+
+def test_no_interpolation_message_contains_a_hyphen():
+    """A hyphen in a `${VAR:?...}` message corrupts the value it guards (measured).
+
+    `docker stack config` (Docker 29.4.0) parses `${V:?msg}` by splitting on `-`: the text
+    after the last hyphen becomes the *value* whenever V is set, and the message is truncated
+    in the error when it is not. Measured on a minimal file:
+
+        "${EOD_TABLES:?name the EOD-eligible tables}"  -> "eligible tables"
+        "${EOD_TABLES:?EOD_TABLES is unset-please set it}" -> "please set it"
+        "${EOD_TABLES:?name the eligible tables, comma separated}" -> the real value
+
+    A message is meant to be read by a human in a failure; silently becoming the service's
+    configuration is worse than the failure it was guarding.
+    """
+    raw = STACK.read_text()
+    offenders = [(m.group(1), m.group(2))
+                 for m in re.finditer(r"\$\{([A-Z0-9_]+):\?([^}]*)\}", raw) if "-" in m.group(2)]
+    assert not offenders, (
+        "these interpolation messages contain a hyphen, which replaces the value with the "
+        f"text after it: {offenders}"
+    )

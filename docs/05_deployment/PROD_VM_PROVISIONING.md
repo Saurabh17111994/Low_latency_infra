@@ -191,20 +191,22 @@ result (`09-production-swarm.md`).
 | --- | --- | --- |
 | Image publication | `image-publish.sh` (CHG-247, seven images since CHG-256) pushes the project-built images and writes digest-pinned deploy values, and `digest-pin.sh` resolves digests against a plain-HTTP registry — rehearsed end-to-end against a **local** `registry:2` only. VM1's registry does not exist yet, so `.env` still carries bare tags and no digest-pinned production environment has been produced | S4 (publish), and therefore S7, S7b |
 | Production sysctl list | `vm-bootstrap.sh` installs Docker, enables NTP and **fails** on an unsynchronised or drifting clock (CHG-266), so the remaining gap is the sysctl list itself — still undefined in this repository, decide and record it before the first boot | S4 |
-| EOD trigger | `eod_controller.py` is a one-shot; nothing schedules it. The requirement names a scheduled owner (`../02_requirements/06-operational.md` §6.8) | S11 |
+| EOD lake offload | The trigger exists now — the `eod-scheduler` stack service (CHG-269) runs `eod_controller.py` daily — but the lake path itself still needs the R2 bucket and keys, so the service ships with `EOD_OFFLOAD=none` and the manifest lifecycle is proven without offload | S11 |
 | Multi-node pre-deploy validation | `stack_selfcheck.sh` refuses to run when the swarm has more than one node ("refusing to label — single-host mimic, not a cluster"), so **nothing validates a real cluster's stack before `docker stack deploy`** | S7 |
 
 **Sizing caveat:** the final service-to-node CPU/RAM/IOPS/bandwidth allocation is `EVIDENCE-BLOCKED` until the production performance and one-VM-loss scenarios pass (§4 above). The 500 GB per-node disk figure is a starting allocation, not a proven sizing result.
 
 ### 6.2 The values a deploy must have — and what is missing today
 
-`stack_selfcheck.sh` refuses a deploy that carries placeholders: it demands 13 non-empty values
-(`required_vars`). Reproduced read-only on this repository, **5 are missing**:
+`stack_selfcheck.sh` refuses a deploy that carries placeholders: it demands 15 non-empty values
+(`required_vars`). Reproduced read-only on this repository, **7 are missing**:
 
 | Missing value | Why it is missing |
 | --- | --- |
 | `INGESTION_IMAGE`, `EXECUTION_BRIDGE_IMAGE`, `EXECUTION_GATEWAY_IMAGE`, `NAUTILUS_IMAGE` | built locally and never pushed, and the registry that would hold them exists only on VM1 (S4) — `image-publish.sh` produces digest-pinned values but has **not** run against a real VM1 (`runtime.lock` records the four as retired pins, CHG-218) |
 | `CHECKPOINT_DIR` | development runs `file:///checkpoints`; production needs an encrypted `s3://` prefix |
+| `DDL_APPLY_IMAGE` | built locally and never pushed, like the four above; CHG-269 made the EOD scheduler its first consumer, so a deploy that leaves it empty now stops at interpolation instead of starting a service |
+| `EOD_TABLES` | an operator decision with no default: which tables the EOD manifest covers. The repository's own EOD test uses `candle_closed` (7-day TTL, durable) |
 
 Present but **not yet immutable**: `FLUSS_IMAGE`, `FLINK_IMAGE` and `OPENOBSERVE_IMAGE` are bare tags
 in `.env` while `runtime.lock` holds their digests. The lock is the source of the digest; the deploy
@@ -759,7 +761,7 @@ make disaster-drills                   # DR-001..006; --dry-run first, --approve
 ### S11 — Operate `[PRODUCTION]`
 | Activity | Procedure |
 | --- | --- |
-| EOD | `eod_controller.py` must be run by a scheduled owner `[NOT BUILT]`; verify manifest counts/ranges/hashes then retention (`../06_operations/07-lake-archive-ops.md`) |
+| EOD | The `eod-scheduler` service fires `eod_controller.py` daily at `EOD_AT`/`EOD_ZONE` (defaults 23:30 Asia/Kolkata) with `EOD_TABLES`; it restarts forever, and its healthcheck reads its own heartbeat file (`--check-heartbeat --max-age 2700`) — no other service is involved. Set `EOD_OFFLOAD=lake` only once the R2 bucket and keys exist. Verify manifest counts/ranges/hashes then retention (`../06_operations/07-lake-archive-ops.md`) |
 | Routine checks | dashboard/alert review per `../06_operations/05-maintenance.md` §Routine checks |
 | Backup/restore | lake day restore via `r2-restore.sh`; platform-state backup/restore is **not yet evidenced** |
 | Maintenance window | `05-maintenance.md` §Planned maintenance (11 steps, gate halted first) |

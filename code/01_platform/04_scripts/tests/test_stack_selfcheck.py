@@ -31,6 +31,10 @@ REAL_ENV = {
     "ARROW_APP_ID": "123456",
     "ARROW_USER_ID": "12345678",
     "CHECKPOINT_DIR": "s3://real/checkpoints",
+    # CHG-269: the EOD scheduler consumes DDL_APPLY_IMAGE and refuses to guess
+    # which tables are EOD-eligible, so a real deploy carries both.
+    "DDL_APPLY_IMAGE": "ddl-apply@sha256:" + "1" * 64,
+    "EOD_TABLES": "candle_closed",
 }
 
 STUB = r"""#!/usr/bin/env bash

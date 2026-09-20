@@ -1233,3 +1233,53 @@ services:
       resources:
         limits: {cpus: "1", memory: 512M}
     command: ["python3", "/app/alert-consumer.py"]
+
+
+  eod-scheduler:
+    # SCH-23 / operational §6.13: the EOD controller is a one-shot and nothing
+    # scheduled it, so in production the manifest lifecycle never started. This is
+    # the scheduled owner: it sleeps until EOD_AT in EOD_ZONE, runs the controller,
+    # and keeps a heartbeat its own healthcheck reads. Durability stays the
+    # controller's — state and lease live in Fluss, so a second fire the same day is
+    # harmless by construction; this service decides only *when*.
+    #
+    # Same image as ddl-apply, deliberately: both one-shots need java,
+    # common/target/classes and the pinned jars, and the image already sets
+    # DDL_APPLY_M2_REPO for exactly that classpath (eod_controller.py honours it).
+    image: ${DDL_APPLY_IMAGE:?set DDL_APPLY_IMAGE to an immutable digest}
+    # The image's ENTRYPOINT is the DDL one-shot and its CMD is `validate`; this is
+    # the other one-shot, so both have to be overridden.
+    entrypoint: ["python3", "/app/code/01_platform/04_scripts/eod_schedule.py"]
+    command: ["--at", "${EOD_AT:-23:30}", "--zone", "${EOD_ZONE:-Asia/Kolkata}"]
+    networks: [trading-net]
+    environment:
+      FLUSS_BOOTSTRAP: fluss-coordinator:9123
+      # The heartbeat the healthcheck below reads: one path, both places.
+      EOD_HEARTBEAT: /tmp/eod-scheduler-heartbeat
+      # No default on purpose. Which tables are EOD-eligible is an operator
+      # decision, and the tool refuses to run without it (fail-closed).
+      EOD_TABLES: "${EOD_TABLES:?set EOD_TABLES to the eligible tables, comma separated}"
+      # Fail-closed: `none` runs the lifecycle without copying to the lake. Set
+      # `lake` only where R2 credentials are present.
+      EOD_OFFLOAD: "${EOD_OFFLOAD:-none}"
+    healthcheck:
+      # Its own heartbeat file — never another service (house rule 6). The window
+      # covers a whole controller run: a fire heartbeats at its start and end, and
+      # the lease TTL is 30 minutes, so a stale heartbeat means "stuck".
+      test: ["CMD", "python3", "/app/code/01_platform/04_scripts/eod_schedule.py",
+             "--check-heartbeat", "--max-age", "2700"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      <<: *deploy_workload
+      # Exactly one. Two schedulers would fire the same day twice — harmless
+      # because of the lease, but not what "once a day" means.
+      replicas: 1
+      # CHG-258 reasoning, applied to a schedule: a scheduler that gives up is a
+      # schedule that silently does not exist. Restarting forever is visible — task
+      # restarts and the container's own logs — while a service that stopped at
+      # 23:30 is invisible unless someone reads `docker service ls`.
+      restart_policy:
+        condition: any

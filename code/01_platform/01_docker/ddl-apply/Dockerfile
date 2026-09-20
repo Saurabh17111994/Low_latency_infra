@@ -102,10 +102,15 @@ COPY --from=builder /root/.m2/repository/org/slf4j/slf4j-api/2.0.9 \
     /opt/ddl-apply/m2/repository/org/slf4j/slf4j-api/2.0.9
 
 # Orchestrator + smoke + the non-root evidence-ownership gate + version pins.
+# Two one-shots share this image: DDL apply, and the EOD controller with the
+# scheduler that fires it (SCH-23 / operational §6.13). Both need the same three
+# things — java, common/target/classes, the pinned jars — so they ship together
+# rather than as a second image carrying the same 40 MB of classes.
 COPY code/01_platform/04_scripts/ddl_apply.py \
      code/01_platform/04_scripts/ddl_apply_smoke.py \
      code/01_platform/04_scripts/evidence_ownership_check.py \
      code/01_platform/04_scripts/eod_controller.py \
+     code/01_platform/04_scripts/eod_schedule.py \
      code/01_platform/04_scripts/versions.pin \
      /app/code/01_platform/04_scripts/
 # The engine's own python unit tests only (self-test runs the whole shipped

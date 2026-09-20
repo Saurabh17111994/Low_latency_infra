@@ -22,7 +22,10 @@ import subprocess
 import sys
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-M2_REPO = os.environ.get("EOD_M2_REPO", os.path.expanduser("~/.m2/repository"))
+# EOD_M2_REPO first (host runs), then the layout the ddl-apply image already sets for its own
+# tool — the same jars, so a container needs no extra configuration to find them.
+M2_REPO = (os.environ.get("EOD_M2_REPO") or os.environ.get("DDL_APPLY_M2_REPO")
+           or os.path.expanduser("~/.m2/repository"))
 
 # Pinned Fluss + Jackson versions — same set the ddl-apply engine uses
 # (ddl_apply.py JACKSON_VERSION/SLF4J_VERSION).

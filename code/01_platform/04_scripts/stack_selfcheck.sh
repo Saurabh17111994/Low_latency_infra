@@ -113,6 +113,9 @@ required_vars=(
   FLUSS_IMAGE FLINK_IMAGE INGESTION_IMAGE EXECUTION_BRIDGE_IMAGE
   EXECUTION_GATEWAY_IMAGE NAUTILUS_IMAGE OPENOBSERVE_IMAGE
   S3_WAREHOUSE_PATH R2_ENDPOINT R2_BUCKET ARROW_APP_ID ARROW_USER_ID CHECKPOINT_DIR
+  # CHG-269: the EOD scheduler is the first consumer of DDL_APPLY_IMAGE, and it
+  # refuses to guess which tables are EOD-eligible.
+  DDL_APPLY_IMAGE EOD_TABLES
 )
 if [ "${DEPLOY:-0}" = "1" ]; then
   missing=()
@@ -138,12 +141,14 @@ else
   : "${ARROW_APP_ID:=000000}"
   : "${ARROW_USER_ID:=00000000}"
   : "${CHECKPOINT_DIR:=s3://placeholder/checkpoints}"
+  : "${DDL_APPLY_IMAGE:=ddl-apply:unset}"
+  : "${EOD_TABLES:=placeholder-tables}"
   echo ">> compile-only: placeholder images/paths in use — a green stack config here is not evidence that a deploy is ready"
 fi
 export FLUSS_IMAGE FLINK_IMAGE INGESTION_IMAGE EXECUTION_BRIDGE_IMAGE \
        EXECUTION_GATEWAY_IMAGE NAUTILUS_IMAGE OPENOBSERVE_IMAGE \
        ZOOKEEPER_IMAGE S3_WAREHOUSE_PATH R2_ENDPOINT R2_BUCKET ARROW_APP_ID ARROW_USER_ID \
-       CHECKPOINT_DIR
+       CHECKPOINT_DIR DDL_APPLY_IMAGE EOD_TABLES
 
 # 4. Compile the stack (catches YAML/deploy-schema errors without starting).
 echo ">> docker stack config"
