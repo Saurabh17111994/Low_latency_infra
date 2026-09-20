@@ -963,7 +963,7 @@ class TestTier2Hardening:
             return out
 
         blocks = {}
-        for name, svc in _load()["services"].items():
+        for svc in _load()["services"].values():
             cmd = svc.get("command") or []
             cmd_s = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
             for role in ("jobmanager", "taskmanager"):
