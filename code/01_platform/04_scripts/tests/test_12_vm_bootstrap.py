@@ -241,13 +241,37 @@ def test_daemon_json_must_declare_the_registry():
         assert "does not list 10.0.0.9:5000" in run(node, "--check", "--registry", "10.0.0.9:5000").stdout
 
 
-def test_a_missing_or_invalid_daemon_json_is_a_failure():
+def test_a_missing_daemon_json_is_informational_without_a_local_registry():
+    """GHCR (Decision 2026-09-21) needs no daemon.json: HTTPS, pulled anonymously.
+
+    The previous rule failed such a host — which would have failed every node of a
+    healthy GHCR fleet at S3, before any of them could join the swarm.
+    """
     with tempfile.TemporaryDirectory() as t:
         node = make_node(Path(t))
-        assert "daemon.json is missing" in run(node, "--check").stdout
+        r = run(node, "--check")
+        assert "daemon.json is absent" in r.stdout
+        assert "daemon.json is missing" not in r.stdout
+        assert r.returncode == 0, r.stdout
+
+
+def test_a_missing_daemon_json_still_fails_for_a_declared_plain_http_registry():
+    """The original fail-closed rule: with a plain-HTTP registry declared, the entry is required."""
     with tempfile.TemporaryDirectory() as t:
-        node = make_node(Path(t), daemon_raw="{ this is not json")
-        assert "is not valid JSON" in run(node, "--check").stdout
+        node = make_node(Path(t))
+        r = run(node, "--check", "--registry", "10.0.0.1:5000")
+        assert r.returncode == 1, r.stdout
+        assert "declare the plain-HTTP registry 10.0.0.1:5000" in r.stdout
+
+
+def test_an_invalid_daemon_json_is_a_failure_with_or_without_a_registry():
+    """A malformed file is a real defect regardless of which registry the images come from."""
+    for extra in ([], ["--registry", "10.0.0.1:5000"]):
+        with tempfile.TemporaryDirectory() as t:
+            node = make_node(Path(t), daemon_raw="{ this is not json")
+            r = run(node, "--check", *extra)
+            assert "is not valid JSON" in r.stdout, r.stdout
+            assert r.returncode == 1, r.stdout
 
 
 def test_an_unknown_argument_is_refused():

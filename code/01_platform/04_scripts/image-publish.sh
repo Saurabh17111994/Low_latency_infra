@@ -10,9 +10,17 @@
 # Usage:
 #   ./image-publish.sh --registry HOST:PORT [--tag prod] [--env-registry HOST:PORT]
 #                      [--write-env FILE]
+#   ./image-publish.sh --registry https://ghcr.io/<owner> --env-registry ghcr.io/<owner> \
+#                      --write-env code/01_platform/01_docker/.env    # public GHCR (Decision 2026-09-21)
 #   ./image-publish.sh --print-map          # VAR=local-image, one per line
 #   ./image-publish.sh --merge-env FILE     # rewrite VAR=ref lines read on stdin
 #   ./image-publish.sh --self-check         # offline: map vs stack, no push
+#
+# The registry value may carry an owner path. The reachability probe uses its HOST
+# (`<host>/v2/`), because an owner path is not part of the v2 API root: probing
+# `ghcr.io/<owner>/v2/` answers 404, which used to stop the run with "bring it up on
+# VM1 first" for a registry that was healthy (CHG-274, measured 2026-09-21). A 401
+# means "auth-enabled registry" (GHCR) and passes — only the pushes need credentials.
 #
 # Exit: 0 ok | 2 usage or registry preflight refusal | 3 env file unusable |
 #       4 an image is missing locally or a push/digest failed
@@ -205,13 +213,20 @@ push_all() {
 		echo "FAIL: curl is required for the registry probe" >&2
 		return 2
 	fi
+	# The v2 API root lives at the registry HOST, never under the repository path.
+	# A GHCR target carries an owner path (`ghcr.io/<owner>`), so probing
+	# `https://ghcr.io/<owner>/v2/` answers 404 and the run stops with "bring it up
+	# on VM1 first" for a registry that is healthy — measured 2026-09-21, before
+	# this split, against a local registry under an owner path.
+	local registry_host="${registry%%/*}"
 	local code
-	code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${scheme}://${registry}/v2/" || true)"
+	code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "${scheme}://${registry_host}/v2/" || true)"
 	case "$code" in
 	200 | 401) ;; # 401 = auth-enabled registry; the probe only proves it answers
 	*)
-		echo "FAIL: no registry answered at ${scheme}://${registry}/v2/ (http ${code:-none})" >&2
-		echo "  bring it up on VM1 first (VM guide S4 step 5), then re-run." >&2
+		echo "FAIL: no registry answered at ${scheme}://${registry_host}/v2/ (http ${code:-none})" >&2
+		echo "  for a private registry bring it up first (VM guide S4 step 5); for GHCR check" >&2
+		echo "  network access to ghcr.io, then re-run." >&2
 		return 2
 		;;
 	esac

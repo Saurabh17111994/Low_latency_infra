@@ -248,9 +248,19 @@ check_ports() {
 }
 
 check_daemon_json() {
+    # Decision 2026-09-21: images come from an HTTPS registry (public GHCR), so a host with no
+    # daemon.json — or with no `insecure-registries` list — is CORRECT and must not fail. The
+    # earlier revision failed exactly those hosts ("the nodes cannot pull from the registry"),
+    # which would have failed every node of a healthy GHCR fleet at S3. `--registry HOST:PORT`
+    # still means "a plain-HTTP registry on purpose" and keeps the original fail-closed rule:
+    # the guard moved, it was not deleted.
     local f="$ROOT/etc/docker/daemon.json"
     if [ ! -f "$f" ]; then
-        bad "$f is missing — S4 step 5 declares the plain-HTTP registry there"
+        if [ -n "$REGISTRY" ]; then
+            bad "$f is missing — declare the plain-HTTP registry $REGISTRY there (S4 step 5)"
+        else
+            info "$f is absent: nothing to declare for an HTTPS registry (ghcr.io); --registry not given"
+        fi
         return
     fi
     if ! python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$f" 2>/dev/null; then
@@ -261,7 +271,7 @@ check_daemon_json() {
         if python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); e=d.get("insecure-registries") or []; sys.exit(0 if isinstance(e, list) and e else 1)' "$f"; then
             info "$f declares insecure-registries, but --registry was not given: membership not verified"
         else
-            bad "$f has no non-empty 'insecure-registries' list — the nodes cannot pull from the registry"
+            info "$f declares no insecure-registries: not needed for an HTTPS registry (ghcr.io)"
         fi
         return
     fi

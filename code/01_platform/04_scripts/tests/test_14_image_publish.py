@@ -15,6 +15,8 @@ be right *before* a registry exists:
 import os
 import re
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(SCRIPTS, "image-publish.sh")
@@ -192,3 +194,130 @@ def test_usage_error_exits_two():
     out = run()
     assert out.returncode == 2
     assert "usage" in (out.stdout + out.stderr).lower()
+
+
+# --- GHCR landing path (Decision 2026-09-21: public GHCR, anonymous pulls) ----
+# A real GHCR run differs from the local-registry rehearsal in exactly two ways:
+# the registry address carries an owner path (`ghcr.io/<owner>/<image>`), and its
+# probe answers **401** instead of 200 because the registry is auth-enabled. The
+# script already treats 401 as "answers" (the auth-challenge case) and separates
+# the push address from the deploy address with `--env-registry`. Both are pinned
+# here against fakes so the behaviour cannot silently regress before a VM exists.
+
+
+class _ChallengeHandler(BaseHTTPRequestHandler):
+    """Answers `/v2/` with 401 + Bearer challenge, like GHCR does.
+
+    Strictly path-bound: anything else is 404. A handler that challenged *every*
+    path would also accept a probe built from the owner path (`/<owner>/v2/`),
+    which is the bug this covers — a fake that answers everything passes the
+    broken script too.
+    """
+
+    def do_GET(self):  # noqa: N802 (http.server API)
+        if self.path == "/v2/":
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Bearer realm="https://ghcr.io/token"')
+        else:
+            self.send_response(404)
+        self.end_headers()
+
+    def log_message(self, *args):  # keep pytest output clean
+        pass
+
+
+FAKE_DOCKER = """#!/usr/bin/env bash
+# Fake docker: logs every call and answers the four verbs image-publish.sh uses.
+printf '%s\\n' "$*" >>"$FAKE_DOCKER_LOG"
+case "$1" in
+info) exit 0 ;;
+image)
+	[ "$2" = inspect ] && exit 0
+	exit 0
+	;;
+tag) exit 0 ;;
+push)
+	# a real push prints the digest it stored; stdout is not parsed
+	exit 0
+	;;
+buildx)
+	# digest-pin.sh asks for the manifest digest and parses stdout strictly
+	for arg in "$@"; do
+		case "$arg" in
+		*:*) ref="$arg" ;;
+		esac
+	done
+	printf '%s' "$ref" | sha256sum | awk '{print "sha256:" $1}'
+	exit 0
+	;;
+esac
+exit 0
+"""
+
+
+def _fake_docker(tmp_path):
+    """Put a fake `docker` first on PATH; return (env, log path)."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    exe = bindir / "docker"
+    exe.write_text(FAKE_DOCKER)
+    exe.chmod(0o755)
+    log = tmp_path / "docker.log"
+    env = dict(os.environ, PATH=f"{bindir}:{os.environ['PATH']}",
+               FAKE_DOCKER_LOG=str(log))
+    return env, log
+
+
+def test_owner_path_registry_with_a_401_probe_publishes_ghcr_refs(tmp_path):
+    """`--registry <host:port>/<owner> --env-registry ghcr.io/<owner>` must push
+    under the owner path and write the GHCR address, digest-pinned, into env."""
+    env, log = _fake_docker(tmp_path)
+
+    server = HTTPServer(("127.0.0.1", 0), _ChallengeHandler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        deploy_env = env_file(
+            tmp_path,
+            "\n".join(
+                ["# deploy environment", "STACK_NAME=prod"]
+                + [f"{var}=bare-tag:latest" for var in (
+                    "FLINK_IMAGE", "FLUSS_IMAGE", "INGESTION_IMAGE", "NAUTILUS_IMAGE",
+                    "EXECUTION_BRIDGE_IMAGE", "EXECUTION_GATEWAY_IMAGE", "DDL_APPLY_IMAGE")]
+                + ["# a comment that must survive", "CHECKPOINT_DIR=s3://bucket/checkpoints"]
+            ) + "\n",
+        )
+        out = subprocess.run(
+            ["bash", SCRIPT,
+             "--registry", f"http://127.0.0.1:{port}/saurabh17111994",
+             "--env-registry", "ghcr.io/saurabh17111994",
+             "--tag", "prod", "--write-env", deploy_env],
+            capture_output=True, text=True, env=env,
+        )
+    finally:
+        server.shutdown()
+
+    assert out.returncode == 0, out.stdout + out.stderr
+
+    # 1. the push went to the owner path on the probed host, not to ghcr.io
+    pushed = log.read_text()
+    for name in ("trading-flink-runtime", "01_docker-ingestion", "01_docker-ddl-apply"):
+        assert f"push 127.0.0.1:{port}/saurabh17111994/{name}:prod" in pushed, pushed
+    assert "push ghcr.io/" not in pushed, "the push must not go to the deploy address"
+
+    # 2. the deploy environment carries GHCR refs, each digest-pinned
+    written = open(deploy_env).read()
+    refs = re.findall(r"^[A-Z_]+IMAGE=(\S+)$", written, re.M)
+    assert len(refs) == 7, written
+    for ref in refs:
+        # the tag survives ahead of the digest — `name:prod@sha256:…` is what the
+        # local-registry publish already wrote (rehearsal.env), and the digest is
+        # what the pull resolves, so the tag is informative, not load-bearing
+        assert re.fullmatch(
+            r"ghcr\.io/saurabh17111994/[\w.\-/]+:prod@sha256:[0-9a-f]{64}", ref
+        ), ref
+
+    # 3. nothing else in the file moved
+    assert "# a comment that must survive" in written
+    assert "CHECKPOINT_DIR=s3://bucket/checkpoints" in written
+    assert "bare-tag:latest" not in written

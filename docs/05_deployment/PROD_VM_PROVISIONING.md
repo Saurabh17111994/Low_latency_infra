@@ -45,9 +45,9 @@ Local Compose commands are never production procedures (`../02_requirements/06-o
 **Disk:** 500 GB SSD per VM (workload VMs and the observability VM). Managers in v2 are
 small-footprint (≈10 GB disk, 2 CPU / 2 GB RAM per `09-production-swarm.md` §v2) — treat
 500 GB as the workload/observability floor, not a manager requirement.
-**VM1 also hosts the image registry** (≈3–4 GB of layers on top of its own images): in v2 that
-does not fit a ≈10 GB manager disk, so either give the registry node more disk or move the
-registry to a worker.
+**No VM hosts an image registry** (Decision 2026-09-21: images come from public GHCR, §6.1). The
+≈3–4 GB of layers that used to live on VM1 now live in GHCR, so the ≈10 GB manager disk is enough
+and no node carries registry data it must keep.
 
 **v1 baseline (ship-now, 4 VMs)** — same stack, different labels: `M1 M2 M3` are
 Manager+Worker (label `role=worker`; manager is a Swarm *role*, not a label, and a node holds
@@ -175,11 +175,11 @@ result (`09-production-swarm.md`).
 
 | Decision | Notes | Default |
 | --- | --- | --- |
-| Container registry | All nodes must pull the same digests | **`registry:2` on VM1** (`<vm1-ip>:5000`), brought up in S4: the other three nodes pull over the private network, the workstation pushes only through an SSH tunnel, and no registry credential exists on any VM. Record the resolved digests in the image lock |
+| Container registry | All nodes must pull the same digests | **Public GHCR packages** — `ghcr.io/<owner>/<image>:<tag>@sha256:…` (Decision 2026-09-21, revises the `registry:2`-on-VM1 choice). The workstation pushes with one classic PAT (`write:packages`/`read:packages`) after `docker login ghcr.io`; every node **pulls anonymously**, so no registry credential exists on any VM and no VM needs a daemon setting. Public packages are free (storage and transfer), the repo is public, and no image bakes a secret, so the images expose nothing the repo does not. Record the resolved digests in the image lock |
 | VM specs | Workload/observability floor is **500 GB disk**; a *learning* rig may be smaller, but perf evidence then remains unprovable | see §6.1 sizing caveat |
-| Checkpoint/savepoint target | Production **requires** `s3://` + encryption; `CHECKPOINT_DIR` must not be `file://` in prod | encrypted S3 bucket + prefix |
+| Checkpoint/savepoint target | Production **requires** `s3://` + encryption; `CHECKPOINT_DIR` must not be `file://` in prod | **Cloudflare R2**, one bucket with prefixes `checkpoints/` and `warehouse/` (Decision 2026-09-21): S3-compatible, no egress fee, and already the endpoint the stack takes |
 | Swarm ports | 2377/tcp, 7946/tcp+udp, 4789/udp open between VM1–VM3 | required |
-| Operator-access ports | `5000/tcp` on VM1 (registry) and `5080/tcp` on the OpenObserve node, each limited to the workstation's address | required by S4 step 4 |
+| Operator-access ports | `5080/tcp` on the OpenObserve node, limited to the workstation's address — `5000/tcp` is no longer needed now that the registry is GHCR and not VM1 | required by S4 step 4 |
 | Time sync | Platform halts itself beyond the configured clock-offset limit | NTP enabled on every VM |
 | Observability retention | Logs/metrics/traces retention drives the O2 VM's RAM | per `../08_implementation/10-observability.md` |
 
@@ -196,7 +196,7 @@ result (`09-production-swarm.md`).
 
 | Gap | What is missing | Blocks |
 | --- | --- | --- |
-| Image publication | `image-publish.sh` (CHG-247, seven images since CHG-256) pushes the project-built images and writes digest-pinned deploy values, and `digest-pin.sh` resolves digests against a plain-HTTP registry — rehearsed end-to-end against a **local** `registry:2` only. VM1's registry does not exist yet, so `.env` still carries bare tags and no digest-pinned production environment has been produced | S4 (publish), and therefore S7, S7b |
+| Image publication | `image-publish.sh` (CHG-247, seven images since CHG-256) pushes the project-built images and writes digest-pinned deploy values. Since CHG-274 its reachability probe uses the registry **host**, so an owner-path target such as `ghcr.io/<owner>` is probed correctly — before that fix the probe requested `<owner>/v2/`, answered 404, and stopped the run with "bring it up on VM1 first" for a healthy registry (measured 2026-09-21). Rehearsed against a local `registry:2` under a GHCR-shaped owner path and against a fake registry that answers 401 (the auth-challenge case); `vm-bootstrap.sh --check` no longer fails a host with no `insecure-registries` entry (CHG-274). **Not yet run against real GHCR**, so `.env` still carries bare tags and no digest-pinned production environment has been produced | S4 (publish), and therefore S7, S7b |
 | Executor's live clock source | `ChronycOffsetSource` (CHG-272) reads the host's `chronyc tracking` behind the existing `OffsetSource` trait and fails closed when it cannot — but the executor runs in a **container**, so production needs `chrony` in that image **and** the host's chrony socket reachable from it (and a decision about the socket's ownership, since it is root-owned). Neither can be proved without a VM, so `CLOCK_OFFSET_SOURCE` stays unset (fixed source) and the host clock is gated by `prod_node_check.py` at S3/S7 meanwhile | S7, before the first live order |
 | EOD lake offload | The trigger exists now — the `eod-scheduler` stack service (CHG-269) runs `eod_controller.py` daily — but the lake path itself still needs the R2 bucket and keys, so the service ships with `EOD_OFFLOAD=none` and the manifest lifecycle is proven without offload | S11 |
 
@@ -209,8 +209,8 @@ result (`09-production-swarm.md`).
 
 | Missing value | Why it is missing |
 | --- | --- |
-| `INGESTION_IMAGE`, `EXECUTION_BRIDGE_IMAGE`, `EXECUTION_GATEWAY_IMAGE`, `NAUTILUS_IMAGE` | built locally and never pushed, and the registry that would hold them exists only on VM1 (S4) — `image-publish.sh` produces digest-pinned values but has **not** run against a real VM1 (`runtime.lock` records the four as retired pins, CHG-218) |
-| `CHECKPOINT_DIR` | development runs `file:///checkpoints`; production needs an encrypted `s3://` prefix |
+| `INGESTION_IMAGE`, `EXECUTION_BRIDGE_IMAGE`, `EXECUTION_GATEWAY_IMAGE`, `NAUTILUS_IMAGE` | built locally and never pushed — `image-publish.sh` produces digest-pinned values but has **not** run against GHCR, so no digest-pinned production environment exists yet (`runtime.lock` records the four as retired pins, CHG-218) |
+| `CHECKPOINT_DIR` | development runs `file:///checkpoints`; production needs an encrypted `s3://` prefix — use the R2 bucket (Decision 2026-09-21), e.g. `s3://<bucket>/checkpoints` |
 | `DDL_APPLY_IMAGE` | built locally and never pushed, like the four above; CHG-269 made the EOD scheduler its first consumer, so a deploy that leaves it empty now stops at interpolation instead of starting a service |
 | `EOD_TABLES` | an operator decision with no default: which tables the EOD manifest covers. The repository's own EOD test uses `candle_closed` (7-day TTL, durable) |
 | `O2_PASSWORD` | OpenObserve's root password, interpolated into its environment (not a Swarm secret). `.env.example` ships it empty and `.env` carries no value either — CHG-271 added it to `required_vars`, where it was missing from every list, so the deploy stops at interpolation instead of starting an observability stack nobody can log into |
@@ -220,8 +220,8 @@ in `.env` while `runtime.lock` holds their digests. The lock is the source of th
 environment is what the nodes actually pull. Until those two agree, a deploy is tag-based, not
 digest-based.
 
-So S1 is not "build the images". It is **build them, publish them to the registry on VM1 (S4), and
-make every reference the deploy environment carries an immutable digest.**
+So S1 is not "build the images". It is **build them, publish them to GHCR (S4), and make every
+reference the deploy environment carries an immutable digest.**
 
 ## 7. The workflow at a glance
 
@@ -231,7 +231,7 @@ make every reference the deploy environment carries an immutable digest.**
 | S1 Build images | `[WORKSTATION]` | operator / CI | S0 green | nine images present locally (seven project-built + two third-party); build green |
 | S2 Create the VMs | `[PRODUCTION]` | **human only** | provider account, specs decided | 4 reachable VMs, SSH keys held, inventory JSON filled |
 | S3 Verify nodes | `[ACCEPTANCE]` | operator | S2 done | `prod_node_check.py --inventory …` exits 0 for every node |
-| S4 Bootstrap hosts + registry + publish | `[PRODUCTION]` + `[WORKSTATION]` | operator | S3 done | Docker + NTP + sysctls + ports on all 4; registry serving on VM1; every image reference digest-pinned **in the deploy environment** |
+| S4 Bootstrap hosts + publish | `[PRODUCTION]` + `[WORKSTATION]` | operator | S3 done | Docker + NTP + sysctls + ports on all 4; the seven images published to GHCR; every image reference digest-pinned **in the deploy environment** |
 | S5 Cluster init + labels | `[PRODUCTION]` | operator | S4 done | `docker node ls` = 3 managers + 1 worker, quorum 2/3, labels applied, swarm locked |
 | S6 Create the 9 secrets | `[PRODUCTION]` | operator | S5 done | `secrets-bootstrap.sh --check` prints `[PASS] all 9 secrets exist` |
 | S7 Deploy the stack | `[PRODUCTION]` | operator | S6 done | `stack_selfcheck.sh CLUSTER=1` green, then every service converges; placement matches labels; 2 Flink jobs running |
@@ -242,8 +242,8 @@ make every reference the deploy environment carries an immutable digest.**
 | S11 Operate | `[PRODUCTION]` | operator | S10 done | EOD verified, backups verified, maintenance/rollback/upgrade procedures usable |
 
 **Read it as a sequence:** the table order *is* the run order — `S0 → S11`, nothing started before
-its Entry is green. Two stages invert intuition: **S1 only builds** (publishing waits for S4, because
-the registry lives on VM1 and VM1 does not exist until S2), and **S5 sets the swarm lock**, because
+its Entry is green. Two stages invert intuition: **S1 only builds** (publishing waits for S4, so the
+seven images are pushed once, to the addresses the deploy environment will carry), and **S5 sets the swarm lock**, because
 `--autolock` is a `swarm init` flag and cannot be added afterwards without re-initialising.
 
 **Money path rule for every stage:** the executor gate stays `HALTED` until an authenticated single-operator approval (DEC-044) covers the *same* gate epoch and evidence hash. No stage here may enable order placement; automatic enablement and automatic resume are prohibited (`../02_requirements/06-operational.md` §6.1–6.2).
@@ -280,8 +280,8 @@ make test-all                      # component tests
 
 ### S1 — Build the images `[WORKSTATION]`
 **Entry:** S0 green.
-**Do:** build with the existing stamped builder. **Publishing deliberately waits for S4** — the
-registry lives on VM1, which does not exist until S2/S4, so there is nothing to push to yet.
+**Do:** build with the existing stamped builder. **Publishing deliberately waits for S4** — the seven
+images are pushed once, after the addresses the deploy environment will carry are known.
 ```bash
 make images                                                    # stamped build (six stack images)
 make ddl-image                                                 # the DDL-apply tool image (not a stack service)
@@ -308,8 +308,8 @@ python3 code/01_platform/04_scripts/prod_node_check.py --inventory prod_vms.json
 **Exit:** exit code 0. Drift is a provisioning defect: fix the node, not the checker.
 **Note:** role/labels are read by the node's own Swarm NodeID, so this check must be re-run after S5.
 
-### S4 — Bootstrap hosts, registry, publish `[PRODUCTION]` + `[WORKSTATION]` `[NOT BUILT]`
-**Entry:** S3 green. Run 0–4 **on all four VMs**; 5 on VM1 only; 6 from the workstation.
+### S4 — Bootstrap hosts, publish `[PRODUCTION]` + `[WORKSTATION]` `[NOT BUILT]`
+**Entry:** S3 green. Run 0–4 **on all four VMs**; 5–6 from the workstation.
 
 **0. Repository — the guide runs from the clone, on every node.** Nothing in this guide copies a file
 to a node by hand, and every later step executes from this clone.
@@ -371,12 +371,11 @@ what carries system messages). The collector mounts the host's `/var/log` **read
 `/var/log/*.log` plus `/var/log/syslog` (CHG-263: `syslog` has no `.log` suffix, so the glob alone
 would miss it). Open the Swarm ports between the four VM IPs
 only: `2377/tcp`, `7946/tcp+udp`, `4789/udp` — plus `22/tcp` from the workstation. Two service ports
-are deliberate exceptions, and each is limited to **one source address** instead of being open to the
-private network:
+is a deliberate exception, limited to **one source address** instead of being open to the private
+network:
 
 | Port | Binds on | Allowed source | Why | Where it is set |
 |---|---|---|---|---|
-| `5000/tcp` | VM1 | the workstation only | the four nodes pull images through it; the workstation pushes through an SSH tunnel | registry container in S4 step 5 + firewall |
 | `5080/tcp` | the node running `openobserve` (VM4 by label) | the operator's workstation only | the OpenObserve UI **is** the single pane of truth (CHG-260) | `ports:` in the stack (so it survives redeploys) + firewall |
 
 Everything else stays closed (§9 Security baseline). The OpenObserve port binds `0.0.0.0` on its node
@@ -384,52 +383,58 @@ because a stack file cannot express a loopback binding — `host_ip` is rejected
 `Additional property host_ip is not allowed` (measured 2026-09-20) — so the firewall rule, not the
 stack file, is what keeps it private.
 
-**5. Registry on VM1** — a plain container, **not** a Swarm service: a rolling service update must
-never take the registry down while the other nodes are pulling from it.
+**5. Registry: credentials on the workstation only** — the registry is public GHCR (Decision
+2026-09-21), so **no VM needs a registry credential and no VM needs a daemon setting**: `ghcr.io` is
+HTTPS and the packages are pulled anonymously. The only credential is the one you push with, and it
+stays on the workstation:
 ```bash
-# on VM1
-docker run -d --name registry --restart=always -p 5000:5000 \
-  -v /var/lib/registry:/var/lib/registry registry:2
-
-# on ALL FOUR VMs — Docker refuses to pull from a plain-HTTP registry unless it is declared.
-# MERGE into /etc/docker/daemon.json if it already exists; do not overwrite it.
-#   { "insecure-registries": ["<vm1-ip>:5000"] }
-sudo systemctl restart docker
+# on the WORKSTATION, once per release — a classic PAT with write:packages + read:packages
+echo "<PAT>" | docker login ghcr.io -u <github-user> --password-stdin
+docker logout ghcr.io      # optional: the push is done; the token need not stay cached
 ```
+A **private** package is the alternative, and it is the one to avoid here: it puts a credential on
+every node (a login, a token to distribute, a rotation you must not forget — an expired token is a
+deploy that stops with a pull error). A public package needs none of that and reveals nothing: the
+repository is public and no image bakes a secret.
 
-**6. Publish and pin** — from the workstation, through a tunnel, so port 5000 never opens to the
-internet. One command tags, pushes and digest-resolves the seven project-built images and rewrites the
-seven image lines in the deploy environment:
+If Docker Hub's anonymous pull limits ever bite on the third-party images (OpenObserve, ZooKeeper),
+the fallback is a local `registry:2` mirror plus `--registry <host:port>` on a worker — measure it,
+do not pre-build it.
+
+**6. Publish and pin** — from the workstation, in one command that tags, pushes and digest-resolves the
+seven project-built images and rewrites the seven image lines in the deploy environment:
 ```bash
-ssh -N -L 5000:localhost:5000 <ssh-user>@<vm1-ip> &      # keep running for the pushes
 bash code/01_platform/04_scripts/image-publish.sh \
-     --registry localhost:5000 --env-registry <vm1-ip>:5000 --tag prod \
+     --registry https://ghcr.io/<owner> --env-registry ghcr.io/<owner> --tag prod \
      --write-env code/01_platform/01_docker/.env
 ```
-`--env-registry` exists because the two addresses differ: the push goes through the tunnel as
-`localhost:5000`, while the deploy environment must carry `<vm1-ip>:5000` — a node resolving
-`localhost` reaches itself, not VM1. The digest is content-addressed, so it is the same either way.
-`--print-map` shows what it will push, `--self-check` verifies the set offline, and it refuses to run
-at all if the registry does not answer. The manual equivalent, image by image:
+`--env-registry` keeps the address that lands in the deploy environment separate from the address the
+push used. For GHCR the two are the same value, so the flag is belt-and-braces here; it matters when
+they differ, as with a local-mirror push that nodes must later pull from a different address. The
+digest is content-addressed, so it is identical either way. `--print-map` shows what it
+will push, `--self-check` verifies the set offline, and the reachability probe must see the registry
+**host** answer 200 or 401 — an owner path is not part of the `/v2/` probe (CHG-274). The manual
+equivalent, image by image:
 ```bash
-ssh -N -L 5000:localhost:5000 <ssh-user>@<vm1-ip> &      # keep running for the pushes
-docker tag  <project-built-image> localhost:5000/<project-built-image>
-docker push localhost:5000/<project-built-image>          # prints "digest: sha256:…" = the manifest digest
-bash code/01_platform/04_scripts/digest-pin.sh localhost:5000/<project-built-image>
+docker tag  <project-built-image> ghcr.io/<owner>/<project-built-image>
+docker push ghcr.io/<owner>/<project-built-image>         # prints "digest: sha256:…" = the manifest digest
+bash code/01_platform/04_scripts/digest-pin.sh ghcr.io/<owner>/<project-built-image>
 ```
 Push the seven project-built images (Flink runtime, Fluss runtime, the four app images, and the DDL-apply
 tool image S7b runs on VM1 — without it the catalog step has no image to run). The two
 third-party images (OpenObserve, ZooKeeper) come from their public registries at the digests
 `runtime.lock` already records — if either digest no longer resolves, mirror that image here too.
-Then write the digests into the deploy environment (§6.2) using **`<vm1-ip>:5000/…@sha256:…`**, not
-`localhost` — every node resolves `localhost` as itself, and only VM1 hosts the registry. The digest
-itself is identical whichever hostname the push went through.
+Then write the digests into the deploy environment (§6.2) using **`ghcr.io/<owner>/…@sha256:…`** — the
+name the registry itself serves and the name every node will pull. The digest is identical whichever
+address the push went through.
 
-**Note (measured 2026-09-19 against a local `registry:2` over plain HTTP):** `digest-pin.sh` resolved
+**Note (measured 2026-09-19 against a local `registry:2` over plain HTTP, and 2026-09-21 under a
+GHCR-shaped owner path):** `digest-pin.sh` resolved
 every pushed image with no extra flags, and its value matched the digest `docker push` printed;
 `docker pull <repo>@sha256:<digest>` then succeeded, while a wrong digest failed with "manifest
-unknown". A *remote* plain-HTTP registry still needs the `insecure-registries` entry from step 5 —
-that is a daemon setting, not a resolver limitation. If a resolution ever does fail, use the
+`unknown". A *remote* plain-HTTP registry (the local-mirror fallback in step 5) still needs an
+`insecure-registries` entry — that is a daemon setting, not a resolver limitation. If a
+resolution ever does fail, use the
 `digest: sha256:…` line `docker push` prints; note that `docker image inspect --format
 '{{json .RepoDigests}}'` records `repo@sha256:…` **without** the tag, so it is unambiguous only while
 that repository holds a single tag.
@@ -439,14 +444,16 @@ of the four VMs, whenever it is re-run:
 ```bash
 ssh <ssh-user>@<vm-ip> 'cd ~/arrow-infra && bash code/01_platform/04_scripts/vm-bootstrap.sh --apply'
 bash code/01_platform/04_scripts/vm-bootstrap.sh --check \
-     --registry <vm1-ip>:5000 --extra-free-ports 5000   # VM1; VM4 instead: --extra-free-ports 5080
+     --extra-free-ports 5080        # on the OpenObserve node (VM4); no VM serves a registry now
 ```
 It installs git and the clone, Docker Engine from Docker's repository, and chrony; the clock is
 asserted rather than assumed — `timedatectl` must report a synchronised clock **and** `chronyc
 tracking` an offset within 1 s (`--max-offset` tightens or loosens it). `--check` is read-only, exit
 code = number of FAILs, and also verifies that `docker` works without `sudo`, that `/var/log/syslog`
-belongs to group `adm` (CHG-263), that the Swarm ports are free, and that `daemon.json` declares the
-plain-HTTP registry.
+belongs to group `adm` (CHG-263), that the Swarm ports are free, and — only when `--registry HOST:PORT`
+is given, meaning a plain-HTTP registry on purpose — that `daemon.json` declares it. With GHCR there is
+nothing to declare, so a host with no `daemon.json` at all is reported as `[INFO]` instead of failing,
+which is what the previous rule did (CHG-274).
 
 **Step 3 applies the recorded list, and nothing else.** `--apply` writes the four rules of §6.1 to
 `/etc/sysctl.d/99-arrow-infra.conf` (rewriting only when the content changes) and applies them with
@@ -471,8 +478,10 @@ mystery), `--secrets-check` runs `secrets-bootstrap.sh --check`. `--expect dev` 
 production-only rules to `[INFO]`.
 
 **Exit:** `docker version` works on each node without `sudo`; `timedatectl` shows a synchronized
-clock; `curl -s http://<vm1-ip>:5000/v2/_catalog` lists the pushed repositories; every image
-reference in the deploy environment is `<vm1-ip>:5000/name@sha256:…`.
+clock; every image in the deploy environment resolves **anonymously** from GHCR — check it the way the
+nodes will (`docker logout ghcr.io` first, then `docker manifest inspect ghcr.io/<owner>/<image>:<tag>`),
+because that anonymous pull is what the whole four-node pull depends on; and every reference is
+`ghcr.io/<owner>/name:tag@sha256:…`.
 **Stop if:** clocks drift (the platform halts itself on offset violations and today's node checker
 will not catch it), or an image reference is still a bare tag.
 
@@ -582,8 +591,8 @@ docker stack deploy -c code/01_platform/01_docker/docker-stack.yml --with-regist
 docker stack services "$STACK_NAME"
 docker service ps <service> --no-trunc        # placement must match labels, not hostnames
 ```
-**Notes:** with the VM1 registry (S4) every node pulls over the private network and **no registry
-credential exists on any VM**; `--with-registry-auth` stays harmless. Use **one** stack name
+**Notes:** with GHCR (S4) every node pulls anonymously and **no registry credential exists on any
+VM**, so `--with-registry-auth` is unnecessary (harmless if left in place). Use **one** stack name
 everywhere — the checked script defaults to `prod`, the deployment docs show `trading`; pick one and
 never mix.
 **Expect:** replicas converge; nothing stuck at `0/N`; encrypted overlays and internal-only execution networks are the ones declared by the stack.
@@ -822,7 +831,7 @@ nothing to update. Do them once.
 | # | Item | Where | Done when |
 | --- | --- | --- | --- |
 | 1 | **Broker-side limits**: no fund withdrawal on the trading login, per-day order cap, maximum order size, login IP whitelist, and a separate market-data `app_id` for ingestion with no order rights | the broker's own settings | the trading login cannot withdraw and cannot place an oversized order; ingestion's `app_id` is rejected for order entry |
-| 2 | **CloudPe security group**: inbound `22/tcp` from the workstation IP only, the Swarm ports (`2377/tcp`, `7946/tcp+udp`, `4789/udp`) between the four VM IPs only, `5000/tcp` on VM1 and `5080/tcp` on the OpenObserve node **from the workstation IP only**, everything else denied; SSH keys only with password authentication off; 2FA on the CloudPe panel | CloudPe panel | a scan from outside shows nothing but SSH and the dashboard, which is exactly the two exceptions recorded in S4 step 4 |
+| 2 | **CloudPe security group**: inbound `22/tcp` from the workstation IP only, the Swarm ports (`2377/tcp`, `7946/tcp+udp`, `4789/udp`) between the four VM IPs only, `5080/tcp` on the OpenObserve node **from the workstation IP only**, everything else denied; SSH keys only with password authentication off; 2FA on the CloudPe panel | CloudPe panel | a scan from outside shows nothing but SSH and the dashboard, which is exactly the exception recorded in S4 step 4 |
 | 3 | **`--autolock` at `swarm init`** (S5) + Swarm secrets only + R2 temporary credentials | Docker / Cloudflare | the manager's Raft log and mTLS keys are unusable without `docker swarm unlock`; no static S3 key exists on any VM |
 
 **Notes that save a bad day:**
