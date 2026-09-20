@@ -1,32 +1,45 @@
 #!/usr/bin/env bash
-# stack_selfcheck.sh — one-host Swarm self-check for docker-stack.yml (M2 mimic).
+# stack_selfcheck.sh — Swarm self-check for docker-stack.yml: one-host mimic,
+# or validation-only against an existing multi-node cluster (CLUSTER=1, CHG-270).
 #
 # Purpose: exercise the PRODUCTION stack deploy path on a SINGLE host (no 4/7
 # VMs). This is the offline-prep bridge that proves `docker stack deploy`
 # succeeds against a real (local) Swarm, without needing the real rig. It is
 # NOT multi-VM HA evidence (SWARM-MGR-001..006 need a 3-manager quorum) — that
-# is M3.
+# is M3. CLUSTER=1 closes the other half: a real cluster's stack is validated
+# before `docker stack deploy`, instead of being refused as "not a mimic".
 #
 # What it does:
 #   1. Requires the docker CLI + a running daemon (SKIP otherwise).
-#   2. If not already a manager, `docker swarm init` on this single node.
-#   3. Labels this node `role=worker` + `observability=true` so the same
-#      constraint set the real cluster uses actually schedules here
+#   2. Default mode: `docker swarm init` when the swarm is not active.
+#      CLUSTER=1: refuse instead — a node that was meant to join a cluster must
+#      not become a one-node swarm of its own, which schedules nothing and looks
+#      healthy while it does it.
+#   3. Default mode: label this node `role=worker` + `observability=true` so the
+#      same constraint set the real cluster uses actually schedules here
 #      (`node.labels.role == worker`, plus the separate boolean
 #      `node.labels.observability == true`; a label key holds one value).
+#      CLUSTER=1: labels are read and verified, never written — a validator that
+#      mutates what it measures cannot report a real misconfiguration.
 #   4. `docker stack config -c <stack>` — compile the manifest (no services
 #      started). Exit non-zero on any stack error.
-#   5. Optional real deploy: DEPLOY=1 -> docker stack deploy -c <stack> prod.
-#   6. Teardown: DEPLOY=1 + DOWN=1 (the default) -> docker stack rm prod.
+#   5. CLUSTER=1 only: verify what a green `docker stack config` hides — every
+#      node Ready+Active, a live manager, and every `node.labels.… == …`
+#      constraint of the *rendered* stack satisfied by some node's labels
+#      (rendered, not source: anchors, per-service overrides and compose's own
+#      normalisation all land in the render).
+#   6. Optional real deploy: DEPLOY=1 -> docker stack deploy -c <stack> prod.
+#   7. Teardown: DEPLOY=1 + DOWN=1 (the default) -> docker stack rm prod.
 #      A validate-only run never removes anything (P6-019).
 #
 # Usage:
 #   ./stack_selfcheck.sh                  # validate (swarm init + stack config)
+#   ./stack_selfcheck.sh CLUSTER=1        # validate an existing real cluster
 #   ./stack_selfcheck.sh DEPLOY=1         # also deploy prod, then remove it
 #   ./stack_selfcheck.sh DEPLOY=1 DOWN=0  # deploy and leave the stack up
 #   DEPLOY=1 ./stack_selfcheck.sh         # env form (equivalent)
-# DEPLOY=, DOWN=, STACK= and STACK_NAME= are accepted as arguments or as the
-# environment; anything else is refused with exit 2.
+# DEPLOY=, DOWN=, CLUSTER=, STACK= and STACK_NAME= are accepted as arguments or
+# as the environment; anything else is refused with exit 2.
 set -euo pipefail
 
 # 0. Key=value overrides. The Makefile passes these positionally (P6-209), so
@@ -36,9 +49,10 @@ for arg in "$@"; do
   case "$arg" in
     DEPLOY=*)     DEPLOY="${arg#DEPLOY=}" ;;
     DOWN=*)       DOWN="${arg#DOWN=}" ;;
+    CLUSTER=*)    CLUSTER="${arg#CLUSTER=}" ;;
     STACK=*)      STACK="${arg#STACK=}" ;;
     STACK_NAME=*) STACK_NAME="${arg#STACK_NAME=}" ;;
-    *) echo "unknown argument: $arg (expected DEPLOY=1, DOWN=0, STACK=…, STACK_NAME=…)" >&2; exit 2 ;;
+    *) echo "unknown argument: $arg (expected DEPLOY=1, DOWN=0, CLUSTER=1, STACK=…, STACK_NAME=…)" >&2; exit 2 ;;
   esac
 done
 
@@ -54,7 +68,11 @@ if [ ! -f "$STACK" ]; then
   exit 1
 fi
 
-echo "== stack_selfcheck: one-host Swarm deploy path =="
+if [ "${CLUSTER:-0}" = "1" ]; then
+  echo "== stack_selfcheck: cluster validation path =="
+else
+  echo "== stack_selfcheck: one-host Swarm deploy path =="
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "SKIP: docker CLI not installed — run offline static check via make stack-selfcheck."
@@ -65,11 +83,25 @@ if ! docker info >/dev/null 2>&1; then
   exit 0
 fi
 
+# CLUSTER=1 is a validator. Deploying from it would also mean honouring the
+# default DOWN=1 afterwards, i.e. removing the production stack as a side effect
+# of a check (P6-019's lesson, one level up).
+if [ "${CLUSTER:-0}" = "1" ] && [ "${DEPLOY:-0}" = "1" ]; then
+  echo "FAIL: CLUSTER=1 is validation only — deploying and tearing down the stack is the runbook's own step, not this validator's" >&2
+  exit 2
+fi
+
 # 2. Ensure we are a swarm manager on this single node. Ask docker for its own
 #    opinion: a failing `docker node ls` can also mean "no permission", which
 #    must not become a `swarm init` on a host that is already in a swarm.
 swarm_state="$(docker info --format '{{.Swarm.LocalNodeState}}' 2>/dev/null || echo unknown)"
-if [ "$swarm_state" != "active" ]; then
+if [ "${CLUSTER:-0}" = "1" ]; then
+  if [ "$swarm_state" != "active" ]; then
+    echo "FAIL: CLUSTER=1 but the swarm is not active (state=${swarm_state}) — join this node to the cluster first; this script never runs 'docker swarm init' against a cluster" >&2
+    exit 1
+  fi
+  echo ">> cluster mode: swarm active"
+elif [ "$swarm_state" != "active" ]; then
   echo ">> swarm not active (state=${swarm_state}) — docker swarm init (single-node mimic)"
   docker swarm init --advertise-addr "${SWARM_ADVERTISE_ADDR:-127.0.0.1}"
 else
@@ -84,17 +116,24 @@ if [ -z "$node_id" ]; then
   exit 1
 fi
 node_count="$(docker node ls -q | wc -l | tr -d ' ')"
-if [ "${node_count:-0}" -gt 1 ]; then
-  echo "FAIL: swarm has $node_count nodes — refusing to label (single-host mimic, not a cluster)" >&2
-  exit 1
-fi
-echo ">> current node: $node_id (swarm nodes: $node_count)"
+if [ "${CLUSTER:-0}" = "1" ]; then
+  # Never write a label here: on a real cluster the labels are the bootstrap's
+  # business (`--label-add` at join time), and a validator that fixes what it
+  # measures cannot report a real misconfiguration.
+  echo ">> cluster mode: $node_count node(s) — labels are verified, never written"
+else
+  if [ "${node_count:-0}" -gt 1 ]; then
+    echo "FAIL: swarm has $node_count nodes — refusing to label (single-host mimic, not a cluster). For a real cluster use CLUSTER=1." >&2
+    exit 1
+  fi
+  echo ">> current node: $node_id (swarm nodes: $node_count)"
 
-# 3. Label the single node as both worker + observability, so every role-based
-#    constraint in the stack schedules on this one host (mirror of v1 M1-3).
-docker node update --label-add role=worker "$node_id" >/dev/null
-docker node update --label-add observability=true "$node_id" >/dev/null
-echo ">> labelled $node_id role=worker + observability=true"
+  # 3. Label the single node as both worker + observability, so every role-based
+  #    constraint in the stack schedules on this one host (mirror of v1 M1-3).
+  docker node update --label-add role=worker "$node_id" >/dev/null
+  docker node update --label-add observability=true "$node_id" >/dev/null
+  echo ">> labelled $node_id role=worker + observability=true"
+fi
 
 # 4b. Interpolation values for `docker stack config`. The stack marks all of
 #     these `:?`, so a validate-only run may fill them with obviously fake
@@ -151,9 +190,61 @@ export FLUSS_IMAGE FLINK_IMAGE INGESTION_IMAGE EXECUTION_BRIDGE_IMAGE \
        CHECKPOINT_DIR DDL_APPLY_IMAGE EOD_TABLES
 
 # 4. Compile the stack (catches YAML/deploy-schema errors without starting).
+#    The render is kept: CLUSTER=1 reads the placement constraints out of it, so
+#    the check sees exactly what `docker stack deploy` would see.
 echo ">> docker stack config"
-docker stack config -c "$STACK" >/dev/null
+rendered="$(docker stack config -c "$STACK")"
 echo "   stack config: OK"
+
+# 4c. CLUSTER=1: verify the cluster can actually run this stack. Two failures a
+#     green `docker stack config` hides: a node that cannot schedule (Down,
+#     Unreachable, Drain) and a placement constraint no node satisfies.
+if [ "${CLUSTER:-0}" = "1" ]; then
+  echo ">> cluster mode: verifying ${node_count} node(s)"
+  node_rows="$(docker node ls --format '{{.ID}}|{{.Status}}|{{.Availability}}|{{.ManagerStatus}}')"
+  bad_nodes="$(printf '%s\n' "$node_rows" | awk -F'|' 'NF>=4 && ($2!="Ready" || $3!="Active") {print "      " $1 " (" $2 ", " $3 ")"}')"
+  if [ -n "$bad_nodes" ]; then
+    echo "FAIL: node(s) not Ready+Active — tasks cannot schedule there:" >&2
+    printf '%s\n' "$bad_nodes" >&2
+    exit 1
+  fi
+  live_managers="$(printf '%s\n' "$node_rows" | awk -F'|' '$4=="Leader" || $4=="Reachable"' | wc -l | tr -d ' ')"
+  if [ "${live_managers:-0}" -eq 0 ]; then
+    echo "FAIL: no live manager in this swarm — nothing can accept the deploy" >&2
+    exit 1
+  fi
+  echo "   nodes Ready+Active; live managers: $live_managers"
+
+  constraints="$(printf '%s\n' "$rendered" \
+    | grep -oE 'node\.labels\.[A-Za-z0-9_.]+[[:space:]]*==[[:space:]]*[^][[:space:]]+' \
+    | sort -u || true)"
+  if [ -z "$constraints" ]; then
+    echo "   placement constraints in the rendered stack: none"
+  else
+    node_labels=""
+    while read -r id; do
+      [ -n "$id" ] || continue
+      node_labels="${node_labels}$(docker node inspect "$id" --format '{{json .Spec.Labels}}')"$'\n'
+    done <<< "$(docker node ls -q)"
+    unsatisfied=""
+    while read -r line; do
+      [ -n "$line" ] || continue
+      key="$(printf '%s' "$line" | awk -F'[[:space:]]*==[[:space:]]*' '{print $1}')"
+      value="$(printf '%s' "$line" | awk -F'[[:space:]]*==[[:space:]]*' '{print $2}' | tr -d "\"'")"
+      key="${key#node.labels.}"
+      if ! printf '%s\n' "$node_labels" | grep -qF "\"${key}\":\"${value}\""; then
+        unsatisfied="${unsatisfied}${line}"$'\n'
+      fi
+    done <<< "$constraints"
+    if [ -n "$unsatisfied" ]; then
+      echo "FAIL: no node satisfies these placement constraints — the stack would schedule nowhere:" >&2
+      printf '      %s\n' $unsatisfied >&2
+      echo "      fix at join time: docker node update --label-add <key>=<value> <node>" >&2
+      exit 1
+    fi
+    echo "   placement constraints satisfied: $(printf '%s\n' "$constraints" | wc -l | tr -d ' ')"
+  fi
+fi
 
 # 5. Optional real deploy.
 if [ "${DEPLOY:-0}" = "1" ]; then

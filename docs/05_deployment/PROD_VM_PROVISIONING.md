@@ -192,7 +192,6 @@ result (`09-production-swarm.md`).
 | Image publication | `image-publish.sh` (CHG-247, seven images since CHG-256) pushes the project-built images and writes digest-pinned deploy values, and `digest-pin.sh` resolves digests against a plain-HTTP registry — rehearsed end-to-end against a **local** `registry:2` only. VM1's registry does not exist yet, so `.env` still carries bare tags and no digest-pinned production environment has been produced | S4 (publish), and therefore S7, S7b |
 | Production sysctl list | `vm-bootstrap.sh` installs Docker, enables NTP and **fails** on an unsynchronised or drifting clock (CHG-266), so the remaining gap is the sysctl list itself — still undefined in this repository, decide and record it before the first boot | S4 |
 | EOD lake offload | The trigger exists now — the `eod-scheduler` stack service (CHG-269) runs `eod_controller.py` daily — but the lake path itself still needs the R2 bucket and keys, so the service ships with `EOD_OFFLOAD=none` and the manifest lifecycle is proven without offload | S11 |
-| Multi-node pre-deploy validation | `stack_selfcheck.sh` refuses to run when the swarm has more than one node ("refusing to label — single-host mimic, not a cluster"), so **nothing validates a real cluster's stack before `docker stack deploy`** | S7 |
 
 **Sizing caveat:** the final service-to-node CPU/RAM/IOPS/bandwidth allocation is `EVIDENCE-BLOCKED` until the production performance and one-VM-loss scenarios pass (§4 above). The 500 GB per-node disk figure is a starting allocation, not a proven sizing result.
 
@@ -227,7 +226,7 @@ make every reference the deploy environment carries an immutable digest.**
 | S4 Bootstrap hosts + registry + publish | `[PRODUCTION]` + `[WORKSTATION]` | operator | S3 done | Docker + NTP + sysctls + ports on all 4; registry serving on VM1; every image reference digest-pinned **in the deploy environment** |
 | S5 Cluster init + labels | `[PRODUCTION]` | operator | S4 done | `docker node ls` = 3 managers + 1 worker, quorum 2/3, labels applied, swarm locked |
 | S6 Create the 9 secrets | `[PRODUCTION]` | operator | S5 done | `secrets-bootstrap.sh --check` prints `[PASS] all 9 secrets exist` |
-| S7 Deploy the stack | `[PRODUCTION]` | operator | S6 done | every service converges; placement matches labels; 2 Flink jobs running |
+| S7 Deploy the stack | `[PRODUCTION]` | operator | S6 done | `stack_selfcheck.sh CLUSTER=1` green, then every service converges; placement matches labels; 2 Flink jobs running |
 | S7b Apply the DDL catalog (first boot only) | `[PRODUCTION]` | operator | S7 green, Fluss catalog still EMPTY | 27 manifest tables exist and `DDL-APPLY-RESULT: PASS` is recorded |
 | S8 Readiness verification | `[PRODUCTION]` | operator | S7b done | five readiness dimensions assessed **separately** and recorded |
 | S9 Data-loop smoke | `[PRODUCTION]` | operator | S8 done | ticks → raw table → candles → candidates proven on this deployment |
@@ -541,10 +540,14 @@ partial create leaves the stack half-deployable. To rotate: `docker secret rm <n
 then `docker service update --force <service>`.
 
 ### S7 — Deploy the stack `[PRODUCTION]`
-On a real cluster this is manual: `stack_selfcheck.sh` refuses to run with more than one node (§6.1), and
-`docker stack deploy` has **no** `--env-file` — values come from the shell environment.
+Validate before deploying (CHG-270). `CLUSTER=1` never runs `swarm init` and never writes a node label —
+a validator that fixes what it measures cannot report a real misconfiguration — and it fails on two things a
+green `docker stack config` cannot see: a node that is not Ready+Active, and a `node.labels.… == …`
+constraint no node satisfies. `docker stack deploy` has **no** `--env-file` — values come from the shell
+environment.
 ```bash
 # from VM1 only, in a shell that carries the real values
+bash code/01_platform/04_scripts/stack_selfcheck.sh CLUSTER=1   # nodes, live manager, placement constraints
 docker stack config -c code/01_platform/01_docker/docker-stack.yml >/dev/null   # compiles the manifest
 docker stack deploy -c code/01_platform/01_docker/docker-stack.yml --with-registry-auth "$STACK_NAME"
 docker stack services "$STACK_NAME"

@@ -37,6 +37,20 @@ REAL_ENV = {
     "EOD_TABLES": "candle_closed",
 }
 
+# The two constraints the real stack renders (measured 2026-09-21: 16 x
+# `role == worker`, 3 x `observability == true`).
+CONFIG_WITH_CONSTRAINTS = (
+    "services:\n"
+    "  fluss-tablet-1:\n"
+    "    deploy:\n"
+    "      placement:\n"
+    "        constraints: [node.labels.role == worker]\n"
+    "  openobserve:\n"
+    "    deploy:\n"
+    "      placement:\n"
+    "        constraints: [node.labels.observability == true]\n"
+)
+
 STUB = r"""#!/usr/bin/env bash
 # Stub docker: record argv, answer from STUB_* env vars.
 printf '%s\n' "$*" >> "$DOCKER_CALLS"
@@ -50,16 +64,28 @@ case "${1:-} ${2:-}" in
     exit 0 ;;
   "info ") exit 0 ;;
   "node ls")
-    if [ "${STUB_NODE_COUNT:-1}" = "1" ]; then echo stubnodeid; else printf 'nodeA\nnodeB\n'; fi
+    # `$1 $2` is only ever "node ls" — the format lives in $3.
+    if [ "${3:-}" = "--format" ]; then
+      printf '%s\n' "${STUB_NODE_ROWS:-nodeA|Ready|Active|Leader
+nodeB|Ready|Active|}"
+    elif [ "${STUB_NODE_COUNT:-1}" = "1" ]; then echo stubnodeid; else printf 'nodeA\nnodeB\n'; fi
     exit 0 ;;
   "node update"*)  exit 0 ;;
-  "node inspect"*) echo "role=worker observability=true"; exit 0 ;;
+  "node inspect"*)
+    case "$*" in
+      *json*) printf '%s\n' "${STUB_NODE_LABELS:-{\"role\":\"worker\",\"observability\":\"true\"}}" ;;
+      *)      echo "role=worker observability=true" ;;
+    esac
+    exit 0 ;;
   "swarm init"*)   exit "${STUB_SWARM_INIT_RC:-0}" ;;
   "stack ls")
     [ "${STUB_STACK_PRESENT:-0}" = "1" ] && printf '%s\n' "${STUB_STACK_NAME:-prod}"
     exit 0 ;;
   "stack rm"*)     exit "${STUB_STACK_RM_RC:-0}" ;;
-  "stack config"*) printf '%s\n' "${CHECKPOINT_DIR:-UNSET}" > "${STUB_CONFIG_MARK:-/dev/null}"; exit 0 ;;
+  "stack config"*)
+    printf '%s\n' "${CHECKPOINT_DIR:-UNSET}" > "${STUB_CONFIG_MARK:-/dev/null}"
+    printf '%s\n' "${STUB_CONFIG_OUT:-}"
+    exit 0 ;;
   "stack deploy"*) exit 0 ;;
 esac
 exit 0
@@ -161,6 +187,7 @@ class StackSelfcheckTest(unittest.TestCase):
         done = self.run_script(STUB_SWARM_STATE="active", STUB_NODE_COUNT="2")
         self.assertEqual(done.returncode, 1)
         self.assertIn("refusing to label", done.stderr)
+        self.assertIn("For a real cluster use CLUSTER=1", done.stderr)
         self.assertNotIn("node update", "\n".join(self.calls_made()))
 
     def test_the_label_uses_this_nodes_own_id(self):
@@ -218,6 +245,71 @@ class StackSelfcheckTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("compile-only: placeholder images/paths in use", done.stdout)
         self.assertEqual(self.config_mark.read_text().strip(), "s3://placeholder/checkpoints")
+
+    # --- CLUSTER=1: validation against a real cluster (M2 item 4, CHG-270) --
+
+    def run_cluster(self, *args, **stub_env):
+        """A healthy two-node cluster, with the stack rendered as production
+        renders it — the stub answers every question cluster mode asks."""
+        return self.run_script(
+            "CLUSTER=1", *args,
+            STUB_SWARM_STATE="active",
+            STUB_NODE_COUNT="2",
+            STUB_CONFIG_OUT=CONFIG_WITH_CONSTRAINTS,
+            **stub_env,
+        )
+
+    def test_cluster_mode_never_inits_or_labels_a_cluster(self):
+        """The validator must not mutate what it measures: no `swarm init` (a
+        second one-node swarm schedules nothing and looks healthy doing it) and
+        no `node update` (on a cluster the labels belong to its bootstrap)."""
+        done = self.run_cluster()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        calls = "\n".join(self.calls_made())
+        self.assertNotIn("swarm init", calls)
+        self.assertNotIn("node update", calls)
+        self.assertIn("labels are verified, never written", done.stdout)
+
+    def test_cluster_mode_green_on_a_healthy_cluster(self):
+        done = self.run_cluster()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("nodes Ready+Active; live managers: 1", done.stdout)
+        self.assertIn("placement constraints satisfied: 2", done.stdout)
+
+    def test_cluster_mode_fails_when_a_placement_label_is_missing(self):
+        """A green `docker stack config` says nothing about whether any node can
+        satisfy a constraint — this is the check that catches that."""
+        done = self.run_cluster(STUB_NODE_LABELS='{"role":"worker"}')
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("observability", done.stderr)
+        self.assertIn("schedule nowhere", done.stderr)
+
+    def test_cluster_mode_fails_on_a_node_that_cannot_schedule(self):
+        """Down/Unreachable/Drain still renders a valid stack file."""
+        done = self.run_cluster(STUB_NODE_ROWS="nodeA|Ready|Active|Leader\nnodeB|Down|Active|")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("not Ready+Active", done.stderr)
+        self.assertIn("nodeB", done.stderr)
+
+    def test_cluster_mode_fails_without_a_live_manager(self):
+        done = self.run_cluster(STUB_NODE_ROWS="nodeA|Ready|Active|\nnodeB|Ready|Active|")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("no live manager", done.stderr)
+
+    def test_cluster_mode_refuses_to_deploy(self):
+        """DOWN=1 is the default, so a deploy from a validator would remove the
+        production stack as a side effect of a check (P6-019, one level up)."""
+        done = self.run_cluster("DEPLOY=1", **REAL_ENV)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("validation only", done.stderr)
+        self.assertNotIn("stack deploy", "\n".join(self.calls_made()))
+
+    def test_cluster_mode_refuses_an_inactive_swarm(self):
+        done = self.run_script("CLUSTER=1", STUB_SWARM_STATE="inactive",
+                               STUB_CONFIG_OUT=CONFIG_WITH_CONSTRAINTS)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("not active", done.stderr)
+        self.assertNotIn("swarm init", "\n".join(self.calls_made()))
 
     def test_the_header_states_the_real_label_pair(self):
         """P6-551: the header claimed one label key held two values."""
