@@ -662,6 +662,26 @@ if [ -z "$PYTEST_SUMMARY" ] || grep -qE '^[0-9]+ (failed|error)|^ERROR ' "$PYTES
 fi
 echo "PASS: python pytest-only suites ($PYTEST_SUMMARY)" | tee -a "$SUMMARY"
 
+# ── Deploy-environment coherence (CHG-268) ────────────────────────────────
+# `docker stack deploy` interpolates the deploy environment silently: a missing
+# key becomes an empty string, and an image that only the stack file defaults is
+# a dev tag a production node would pull. This reads the *tracked* template (a
+# local .env is never committed, so gating on it would fail on a fresh clone)
+# against the stack file in dev mode — every ${VAR} the stack interpolates
+# without a default must exist in the template. It contacts nothing.
+DEPLOY_PREFLIGHT_LOG="$OUT_DIR/deploy-preflight.log"
+if ! timeout -k 30 120 python3 "$SCRIPT_DIR/deploy_preflight.py" \
+	--env-file "$SCRIPT_DIR/../01_docker/.env.example" --expect dev >"$DEPLOY_PREFLIGHT_LOG" 2>&1; then
+	echo "FAIL: deploy-environment preflight — see $DEPLOY_PREFLIGHT_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+# An empty pass is not evidence: the summary line must say zero failures.
+if ! grep -q '^0 failure(s)$' "$DEPLOY_PREFLIGHT_LOG"; then
+	echo "FAIL: deploy-environment preflight did not report '0 failure(s)' — see $DEPLOY_PREFLIGHT_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+echo "PASS: deploy-environment preflight (template vs stack file)" | tee -a "$SUMMARY"
+
 # ── 0d. Entrypoint harness (ING-INT-006) ───────────────────────────────────
 # docker-entrypoint.sh FATAL paths: missing FLUSS_BOOTSTRAP (2), missing
 # manifest (2), missing bridge binary (1) — exit codes AND messages must
