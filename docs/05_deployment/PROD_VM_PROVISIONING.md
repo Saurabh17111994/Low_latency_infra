@@ -197,8 +197,8 @@ result (`09-production-swarm.md`).
 
 ### 6.2 The values a deploy must have — and what is missing today
 
-`stack_selfcheck.sh` refuses a deploy that carries placeholders: it demands 15 non-empty values
-(`required_vars`). Reproduced read-only on this repository, **7 are missing**:
+`stack_selfcheck.sh` refuses a deploy that carries placeholders: it demands 16 non-empty values
+(`required_vars`). Reproduced read-only on this repository, **8 are missing**:
 
 | Missing value | Why it is missing |
 | --- | --- |
@@ -206,6 +206,7 @@ result (`09-production-swarm.md`).
 | `CHECKPOINT_DIR` | development runs `file:///checkpoints`; production needs an encrypted `s3://` prefix |
 | `DDL_APPLY_IMAGE` | built locally and never pushed, like the four above; CHG-269 made the EOD scheduler its first consumer, so a deploy that leaves it empty now stops at interpolation instead of starting a service |
 | `EOD_TABLES` | an operator decision with no default: which tables the EOD manifest covers. The repository's own EOD test uses `candle_closed` (7-day TTL, durable) |
+| `O2_PASSWORD` | OpenObserve's root password, interpolated into its environment (not a Swarm secret). `.env.example` ships it empty and `.env` carries no value either — CHG-271 added it to `required_vars`, where it was missing from every list, so the deploy stops at interpolation instead of starting an observability stack nobody can log into |
 
 Present but **not yet immutable**: `FLUSS_IMAGE`, `FLINK_IMAGE` and `OPENOBSERVE_IMAGE` are bare tags
 in `.env` while `runtime.lock` holds their digests. The lock is the source of the digest; the deploy

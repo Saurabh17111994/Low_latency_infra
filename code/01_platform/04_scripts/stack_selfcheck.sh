@@ -140,8 +140,11 @@ fi
 #     placeholders (real digests/endpoints come from .env + runtime.lock in
 #     production); DEPLOY=1 must get real ones — defaulting them to
 #     `*:unset`/`placeholder` is how an unpullable deploy "succeeds" (P6-208).
-#     Credentials are external Swarm secrets and deliberately have NO env
-#     fallback here (fail closed).
+#     Credentials that arrive as external Swarm secrets have NO env fallback
+#     here (fail closed). O2_PASSWORD is not one of those: the stack
+#     interpolates it straight into openobserve's environment, so it has to be
+#     present — without it `docker stack config` fails before any check runs
+#     (CHG-271).
 : "${ZOOKEEPER_IMAGE:=zookeeper:3.9.2}"     # real default in the stack
 # NOTE: the stack's own `VAR:?msg` guards do NOT fire for keys inside the
 # FLUSS_PROPERTIES block scalar (compose renders s3:///remote-data with the
@@ -155,6 +158,9 @@ required_vars=(
   # CHG-269: the EOD scheduler is the first consumer of DDL_APPLY_IMAGE, and it
   # refuses to guess which tables are EOD-eligible.
   DDL_APPLY_IMAGE EOD_TABLES
+  # CHG-271: the 16th `:?` variable of the stack. It was in no list, so a bare
+  # shell died at `docker stack config` before reaching a single check.
+  O2_PASSWORD
 )
 if [ "${DEPLOY:-0}" = "1" ]; then
   missing=()
@@ -182,12 +188,13 @@ else
   : "${CHECKPOINT_DIR:=s3://placeholder/checkpoints}"
   : "${DDL_APPLY_IMAGE:=ddl-apply:unset}"
   : "${EOD_TABLES:=placeholder-tables}"
+  : "${O2_PASSWORD:=placeholder-o2-password}"
   echo ">> compile-only: placeholder images/paths in use — a green stack config here is not evidence that a deploy is ready"
 fi
 export FLUSS_IMAGE FLINK_IMAGE INGESTION_IMAGE EXECUTION_BRIDGE_IMAGE \
        EXECUTION_GATEWAY_IMAGE NAUTILUS_IMAGE OPENOBSERVE_IMAGE \
        ZOOKEEPER_IMAGE S3_WAREHOUSE_PATH R2_ENDPOINT R2_BUCKET ARROW_APP_ID ARROW_USER_ID \
-       CHECKPOINT_DIR DDL_APPLY_IMAGE EOD_TABLES
+       CHECKPOINT_DIR DDL_APPLY_IMAGE EOD_TABLES O2_PASSWORD
 
 # 4. Compile the stack (catches YAML/deploy-schema errors without starting).
 #    The render is kept: CLUSTER=1 reads the placement constraints out of it, so

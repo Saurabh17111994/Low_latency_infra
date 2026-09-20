@@ -7,6 +7,7 @@ from STUB_* variables, so no daemon, swarm or stack is ever touched.
 
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import unittest
@@ -14,6 +15,9 @@ import unittest
 TESTS_DIR = pathlib.Path(__file__).resolve().parent
 SCRIPTS = TESTS_DIR.parent
 SCRIPT = SCRIPTS / "stack_selfcheck.sh"
+# The real stack file: the parity tests read its `:?` set, not the fake one that
+# setUp writes per test.
+STACK = SCRIPTS.parent / "01_docker" / "docker-stack.yml"
 
 # Real-looking values for the 13 `:?` vars docker-stack.yml requires. DEPLOY=1
 # refuses placeholders (P6-208), so every deploy test must supply these.
@@ -35,6 +39,8 @@ REAL_ENV = {
     # which tables are EOD-eligible, so a real deploy carries both.
     "DDL_APPLY_IMAGE": "ddl-apply@sha256:" + "1" * 64,
     "EOD_TABLES": "candle_closed",
+    # CHG-271: the stack's 16th `:?` variable — openobserve's root password.
+    "O2_PASSWORD": "real-o2-password",
 }
 
 # The two constraints the real stack renders (measured 2026-09-21: 16 x
@@ -84,6 +90,7 @@ nodeB|Ready|Active|}"
   "stack rm"*)     exit "${STUB_STACK_RM_RC:-0}" ;;
   "stack config"*)
     printf '%s\n' "${CHECKPOINT_DIR:-UNSET}" > "${STUB_CONFIG_MARK:-/dev/null}"
+    printf '%s\n' "${O2_PASSWORD:-UNSET}" > "${STUB_O2_MARK:-/dev/null}"
     printf '%s\n' "${STUB_CONFIG_OUT:-}"
     exit 0 ;;
   "stack deploy"*) exit 0 ;;
@@ -107,6 +114,7 @@ class StackSelfcheckTest(unittest.TestCase):
         self.stack = self.dir / "docker-stack.yml"
         self.stack.write_text("version: '3.8'\nservices: {}\n")
         self.config_mark = self.dir / "config-env.txt"
+        self.o2_mark = self.dir / "config-o2.txt"
 
     def run_script(self, *args, **stub_env):
         env = {
@@ -114,6 +122,7 @@ class StackSelfcheckTest(unittest.TestCase):
             "LC_ALL": "C",
             "DOCKER_CALLS": str(self.calls),
             "STUB_CONFIG_MARK": str(self.config_mark),
+            "STUB_O2_MARK": str(self.o2_mark),
         }
         env.update({k: str(v) for k, v in stub_env.items()})
         return subprocess.run(
@@ -310,6 +319,42 @@ class StackSelfcheckTest(unittest.TestCase):
         self.assertEqual(done.returncode, 1)
         self.assertIn("not active", done.stderr)
         self.assertNotIn("swarm init", "\n".join(self.calls_made()))
+
+    @staticmethod
+    def required_vars():
+        """The names in the script's `required_vars` array. Comment lines are
+        dropped (they name CHG ids and prose), and a line may hold several names
+        — the first one does."""
+        block = re.search(r"required_vars=\((.*?)\n\)", SCRIPT.read_text(), re.S).group(1)
+        body = "\n".join(l for l in block.splitlines() if not l.strip().startswith("#"))
+        return set(re.findall(r"[A-Z_][A-Z0-9_]+", body))
+
+    def test_every_interpolated_variable_the_stack_demands_is_required(self):
+        """CHG-271: `O2_PASSWORD` was the stack's 16th `:?` variable and appeared
+        in no list, so a bare shell died at `docker stack config` before any
+        check ran. Equality, not containment: a new `:?` in the stack must land
+        in `required_vars` in the same change."""
+        stack_vars = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*):\?", STACK.read_text()))
+        self.assertEqual(stack_vars, self.required_vars())
+
+    def test_every_required_variable_has_a_compile_only_placeholder(self):
+        """The other half: a name in `required_vars` with no placeholder still
+        breaks the offline path, which is the path this script exists for."""
+        placeholders = set(re.findall(r': "\$\{([A-Z_][A-Z0-9_]*):=', SCRIPT.read_text()))
+        self.assertEqual(set(), self.required_vars() - placeholders)
+
+    def test_compile_only_exports_an_o2_password_placeholder(self):
+        """The discriminating half of CHG-271: the value reaches the render."""
+        done = self.run_script()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(self.o2_mark.read_text().strip(), "placeholder-o2-password")
+
+    def test_deploy_without_o2_password_is_refused(self):
+        env = {k: v for k, v in REAL_ENV.items() if k != "O2_PASSWORD"}
+        done = self.run_script("DEPLOY=1", **env)
+        self.assertEqual(done.returncode, 2)
+        self.assertIn("O2_PASSWORD", done.stderr)
+        self.assertNotIn("stack deploy", "\n".join(self.calls_made()))
 
     def test_the_header_states_the_real_label_pair(self):
         """P6-551: the header claimed one label key held two values."""
