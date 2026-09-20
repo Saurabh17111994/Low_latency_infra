@@ -94,6 +94,14 @@ receivers:
           scrape_interval: 15s
           static_configs:
             - targets: ["cadvisor:8080"]
+        # CHG-259: ZooKeeper answers nothing but TCP port 2181 out of the box — a
+        # quorum or latency problem is invisible until something else times out.
+        # The pinned image bundles zookeeper-prometheus-metrics-3.9.2.jar, and
+        # ZOO_CFG_EXTRA turns the provider on at :7000/metrics per replica.
+        - job_name: infra-zookeeper
+          scrape_interval: 15s
+          static_configs:
+            - targets: ["zookeeper-1:7000", "zookeeper-2:7000", "zookeeper-3:7000"]
   # P8.2 (tracker 14): flink_logs stream from the flink-logs volume
   # (/opt/flink/log/<role>.log, plain-text log4j output). ID must use the
   # type/name syntax (filelog/flink), not a bare custom type name.
@@ -116,10 +124,14 @@ receivers:
         field: resource.service.name
         value: fluss
   # 2026-08-22 single-pane: infrastructure logs (host journald + container).
-  # Collector reads /data/infra/logs/*.log (infra-logs volume) and optional
-  # /var/log/*.log bind. Routes to infrastructure_logs stream (O2 header).
+  # CHG-263: the include list is now exactly what this container can open. The old
+  # list named two paths that produced nothing: `/data/infra/logs/*.log` lived in a
+  # named volume no service ever wrote to (the comment called the /var/log bind
+  # "optional" and no bind was declared anywhere), and `/var/log/syslog` — the system
+  # log itself, 47 MB and actively written on the rehearsal host — has no `.log`
+  # suffix, so the glob could never match it. Routes to infrastructure_logs (O2 header).
   filelog/infrastructure:
-    include: [/data/infra/logs/*.log, /var/log/*.log]
+    include: [/var/log/*.log, /var/log/syslog]
     start_at: end
     operators:
       - type: add

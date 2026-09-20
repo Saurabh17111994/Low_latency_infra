@@ -81,6 +81,12 @@ FLUSS_FLINK_CONNECTOR=fluss-flink-2.2
 
 # ---- Other registry images ----
 ZOOKEEPER_IMAGE=zookeeper:3.9.2@sha256:43d39109cbd4de394742efbfc162a8a0a93731e806374b71f3865f4ef4460a56
+# Observability host agents (CHG-257). Digests are the registry manifest digests
+# Docker recorded at pull time (RepoDigests) and were re-verified with
+# `docker pull <repo>@sha256:<digest>`; `docker manifest inspect` could not reach
+# either registry from the workstation, so the pull is the verification of record.
+NODE_EXPORTER_IMAGE=quay.io/prometheus/node-exporter:v1.8.2@sha256:4032c6d5bfd752342c3e631c2f1de93ba6b86c41db6b167b9a35372c139e7706
+CADVISOR_IMAGE=gcr.io/cadvisor/cadvisor:v0.49.1@sha256:3cde6faf0791ebf7b41d6f8ae7145466fed712ea6f252c935294d2608b1af388
 # The three local-build IDs that lived here are retired as pins (CHG-218) and kept as
 # comments for provenance — see the note above INGESTION_IMAGE for why.
 # NAUTILUS_IMAGE=01_docker-nautilus@sha256:0a65c5e0514388beaadf5322f8607bc29c352cc0c2bf5664ebfdd659221a0982

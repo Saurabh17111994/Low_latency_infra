@@ -295,7 +295,6 @@ volumes:
   # R-171: persistent ingestion JSON logs.
   ingestion-logs:
   # 2026-08-22 single-pane: infra logs (host/journald) for O2.
-  infra-logs:
   # P3.2 R2 lake dev — S3-compatible MinIO for E2E lake tiering (http://minio:9000)
   minio-data:
   # G6 alert routing — durable O2 alert delivery history (alert-consumer).
@@ -1140,6 +1139,9 @@ services:
     restart: unless-stopped
     networks: [trading-net]
     command: ["--config=/etc/otel-collector-config.yaml"]
+    # CHG-263: root:adm — the host logs are 640 syslog:adm and this image runs as
+    # uid 10001 by default (see docker-stack.yml for the full measurement).
+    user: "0:4"
     ports:
       - "4317:4317"
       - "4318:4318"
@@ -1157,7 +1159,13 @@ services:
       # fluss containers) read by the filelog/fluss receiver.
       - fluss-logs:/data/fluss/logs:ro
       # 2026-08-22 single-pane: infra logs volume for infrastructure_logs.
-      - infra-logs:/data/infra/logs:ro
+      # CHG-263: the host's log directory, read-only — the same contract as the swarm
+      # stack, so the development stream and the production stream carry the same
+      # thing. `user: "0:4"` below is what makes auth.log/kern.log readable.
+      - type: bind
+        source: /var/log
+        target: /var/log
+        read_only: true
     environment:
       O2_AUTH_BASIC: ${O2_AUTH_BASIC}
     depends_on: [openobserve]

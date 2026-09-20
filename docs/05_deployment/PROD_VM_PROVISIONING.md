@@ -166,6 +166,7 @@ result (`09-production-swarm.md`).
 | VM specs | Workload/observability floor is **500 GB disk**; a *learning* rig may be smaller, but perf evidence then remains unprovable | see §6.1 sizing caveat |
 | Checkpoint/savepoint target | Production **requires** `s3://` + encryption; `CHECKPOINT_DIR` must not be `file://` in prod | encrypted S3 bucket + prefix |
 | Swarm ports | 2377/tcp, 7946/tcp+udp, 4789/udp open between VM1–VM3 | required |
+| Operator-access ports | `5000/tcp` on VM1 (registry) and `5080/tcp` on the OpenObserve node, each limited to the workstation's address | required by S4 step 4 |
 | Time sync | Platform halts itself beyond the configured clock-offset limit | NTP enabled on every VM |
 | Observability retention | Logs/metrics/traces retention drives the O2 VM's RAM | per `../08_implementation/10-observability.md` |
 
@@ -334,9 +335,23 @@ chronyc tracking                       # expect a small System time offset
 list nobody recorded.
 
 **4. Logs and ports.** Application output must land in `/var/log/*.log` (the collector reads that
-path; there is **no** journald receiver configured). Open the Swarm ports between the four VM IPs
-only: `2377/tcp`, `7946/tcp+udp`, `4789/udp` — plus `22/tcp` from the workstation, and nothing else
-(§9 Security baseline).
+path; there is **no** journald receiver configured, so `/var/log/syslog` — not the journal — is
+what carries system messages). The collector mounts the host's `/var/log` **read-only** and reads
+`/var/log/*.log` plus `/var/log/syslog` (CHG-263: `syslog` has no `.log` suffix, so the glob alone
+would miss it). Open the Swarm ports between the four VM IPs
+only: `2377/tcp`, `7946/tcp+udp`, `4789/udp` — plus `22/tcp` from the workstation. Two service ports
+are deliberate exceptions, and each is limited to **one source address** instead of being open to the
+private network:
+
+| Port | Binds on | Allowed source | Why | Where it is set |
+|---|---|---|---|---|
+| `5000/tcp` | VM1 | the workstation only | the four nodes pull images through it; the workstation pushes through an SSH tunnel | registry container in S4 step 5 + firewall |
+| `5080/tcp` | the node running `openobserve` (VM4 by label) | the operator's workstation only | the OpenObserve UI **is** the single pane of truth (CHG-260) | `ports:` in the stack (so it survives redeploys) + firewall |
+
+Everything else stays closed (§9 Security baseline). The OpenObserve port binds `0.0.0.0` on its node
+because a stack file cannot express a loopback binding — `host_ip` is rejected at deploy time with
+`Additional property host_ip is not allowed` (measured 2026-09-20) — so the firewall rule, not the
+stack file, is what keeps it private.
 
 **5. Registry on VM1** — a plain container, **not** a Swarm service: a rolling service update must
 never take the registry down while the other nodes are pulling from it.
@@ -400,7 +415,7 @@ will not catch it), or an image reference is still a bare tag.
 docker swarm init --autolock --advertise-addr <vm1-ip>   # capture the join commands it prints
 # on VM2 and VM3 (MANAGER token)
 docker swarm join --token <manager-token> <vm1-ip>:2377
-# on VM4 (WORKER token) — it must join, or the three observability services have no node to land
+# on VM4 (WORKER token) — it must join, or the five observability services have no node to land
 # on and sit at 0/1 forever. A worker does not vote: the quorum stays 3 and VM4's loss cannot
 # elect a leader.
 docker swarm join --token <worker-token> <vm1-ip>:2377
@@ -412,7 +427,8 @@ docker node ls                                            # expect 3 managers + 
 # v2 only (dedicated managers): docker node update --availability drain m1 m2 m3
 ```
 **Why VM4 carries `observability` and not `role`:** the 13 workload services require
-`node.labels.role == worker` and the 3 observability services require
+`node.labels.role == worker` and the 5 observability services (collector, OpenObserve,
+alert-consumer, node-exporter, cAdvisor) require
 `node.labels.observability == true`. Leaving `role` off VM4 keeps the trading stack from being
 scheduled onto the observability VM; leaving `observability` off VM1–VM3 keeps OpenObserve off the
 workload nodes. Both directions matter.
@@ -516,6 +532,45 @@ never mix.
   exactly as a first production deploy does.
 - **Swarm configs are immutable.** Replacing the instrument manifest needs a new config name, or the
   deploy fails with "only updates to Labels are allowed".
+- **A scrape target with no service fails silently.** The collector scraped `node-exporter:9100` and
+  `cadvisor:8080` while the stack declared neither: every scrape failed with a warning in the collector
+  log, no deploy ever failed, and the infrastructure panels stayed empty. A missing scrape target is not
+  a deploy error — the stack test asserts that every name the collector scrapes is a service, and the
+  collector's own log is where a drifted target shows up (`Failed to scrape Prometheus endpoint`).
+- **`docker stack deploy` silently DROPS compose keys it cannot express.** Measured 2026-09-20:
+  `privileged: true` and `pid: host` compile, deploy with `rc=0`, and never reach the task — the running
+  container reports `privileged=false` and an empty pid mode, while every `volumes:` mount survives.
+  Anything security-relevant must therefore be verified on the running task (`docker inspect <task>`),
+  never inferred from the stack file. The stack omits both keys and says why.
+- **A `start-first` update needs a free slot, and without one it stalls silently.** The replicated-1
+  services pin `max_replicas_per_node: 1`; on a cluster where the only eligible node already runs the
+  replica (one-worker rehearsal, or production with two of three workers down) the new task stays
+  `Pending — no suitable node (max replicas per node)`, the service reports `update in progress`, and
+  the **old container keeps serving with the old configuration**. The deploy command exits 0 and the
+  change never lands; the log shows nothing. Remedies in order: give the update a free node (a healthy
+  cluster does this by itself), or roll that service with
+  `docker service update --update-order stop-first <service>` — safe for a 3-member quorum, which keeps
+  two members up — and watch `docker service ps <service>` for `Pending` after any deploy whose effect
+  you expect to see. On 2026-09-20 this hid a ZooKeeper configuration change for a full round.
+- **`configs:` paths are relative to the stack file, not to your shell.** The stack pulls in
+  `./otel-collector-config.swarm.yaml`, `./alert-consumer.py` and `./fluss-r2-secrets-from-file.sh`,
+  so deploying *a copy* of `docker-stack.yml` from another directory uses **that directory's** copies.
+  Measured 2026-09-20: the stack was rendered into `~/.p6v/reh/` and deployed from there while the
+  collector config was refreshed only in the repo — the deploy reported
+  `Updating service prod_otel-collector`, created **no new config version**, and the collector kept
+  running the previous file for hours. Deploy from `code/01_platform/01_docker/`, or copy all three
+  referenced files next to the stack file, and confirm the content landed with
+  the decoder in the next bullet (`base64 -d` is the wrong tool: this engine prints a byte array).
+- **A stack-managed `configs:` object is immutable, and a redeploy does NOT refresh it.** After the
+  paragraph above was fixed, the redeploy *still* changed nothing: `docker config ls` showed the same
+  two-hour-old object and no versioned copy, the collector task was never replaced, and decoding the
+  live config showed `job_name: flink | infra-host | infra-containers` — no `infra-zookeeper`. The
+  deploy compares the config **name**, not its bytes, so a new file silently has no effect. To apply a
+  config change either recreate the stack (`docker stack rm` then deploy — what S7b's first boot and
+  the rehearsals do), or change the config's **name** in the stack file and in the services that
+  reference it, so the deploy has something new to create. `docker config inspect` prints the payload
+  as a byte array on this engine; decode it before grepping:
+  `docker config inspect <name> --format '{{.Spec.Data}}' | python3 -c "import sys,re;print(bytes(int(n) for n in re.findall(r'\d+', sys.stdin.read())).decode())"`
 
 ### S7b — Apply the DDL catalog (first boot only) `[PRODUCTION]`
 **Entry:** S7 green on a cluster whose Fluss catalog is still empty.
@@ -576,6 +631,43 @@ extra. Measured on the rehearsal cluster (2026-09-20): the collector's four log 
 present, and the operator login (`ZO_ROOT_USER_EMAIL` + the deploy-environment `O2_PASSWORD`) answers
 `200` on `/api/default/streams`. An OpenObserve that answers `401`, or one that holds no log stream,
 fails this dimension.
+Host and container metrics come from the two per-node agents, `node-exporter` (`:9100`, host
+filesystems/CPU/memory through the `/host/*` mounts and `--path.rootfs`) and `cAdvisor` (`:8080`,
+container cgroups). Both are `mode: global`, both pin to `observability == true`, and each probes
+itself every 30 s — a probe that depends on another service is not a liveness check.
+ZooKeeper answers Prometheus on `:7000/metrics` per replica (`metricsProvider.className` +
+`metricsProvider.httpPort` in `ZOO_CFG_EXTRA`; the provider class ships in the pinned image, so this
+is configuration, not an extra component). That is what makes a quorum or latency problem visible:
+without it, the only signal from ZooKeeper is a TCP port that either accepts or does not.
+Host log files reach the pane through the collector's read-only `/var/log` mount, into the
+`infrastructure_logs` stream: `syslog`, `auth.log`, `kern.log` and the rest of `*.log` from the node
+the collector runs on. Two things about it are worth knowing before trusting a quiet stream:
+the collector runs as `user: "0:4"` (root:adm) for this — `auth.log` and `kern.log` are
+`640 syslog:adm` and a stack file cannot add a supplementary group (`group_add` is rejected), so the
+alternative was collecting nothing from those files; and **the mount is per node** — the collector
+is `mode: global` but pinned to `observability == true`, which in this topology is VM4 alone, so
+VM1–VM3 host logs are not in the pane. The services' own log volumes (`flink_logs`, `fluss_logs`,
+`platform_logs`) are named volumes, which Swarm keeps on the node that writes them, so the same
+boundary applies to them.
+
+**Opening the dashboard.** OpenObserve is the only service in the stack with a published port:
+`mode: host`, `published: 5080`, on the node that runs the task — VM4 by the S5 label. The S4 firewall
+table limits `5080` to the operator's address, which is the control; the stack file cannot bind
+loopback (`host_ip` is rejected, see S4 step 4). Two ways in, both fine:
+
+```bash
+# either tunnel (works even when the firewall rule has not been applied yet)
+ssh -N -L 5080:127.0.0.1:5080 <vm4-ip>      # leave running, open http://127.0.0.1:5080
+# or directly, if your workstation is the allowed source
+# http://<vm4-ip>:5080
+```
+
+The publish follows the node that currently runs the task, and is worth one command when nothing
+answers: `docker service ps prod_openobserve --format '{{.Node}} {{.CurrentState}}'`. Because the port
+lives in the stack file it survives redeploys; an ad-hoc `docker service update --publish-add` would
+not. The development compose stack publishes the same port, so run one at a time: on a workstation
+that runs both, stop the compose OpenObserve first (`make down`), or the Swarm task cannot bind `5080`
+and stays `Pending`.
 **Exit:** each dimension recorded as its own line of evidence. A healthy container is not sufficient for any higher dimension.
 **Stop if:** `CHECKPOINT_DIR` is not `s3://` in production — the job is designed to fail fast rather than run without durable checkpoints.
 
@@ -617,7 +709,7 @@ nothing to update. Do them once.
 | # | Item | Where | Done when |
 | --- | --- | --- | --- |
 | 1 | **Broker-side limits**: no fund withdrawal on the trading login, per-day order cap, maximum order size, login IP whitelist, and a separate market-data `app_id` for ingestion with no order rights | the broker's own settings | the trading login cannot withdraw and cannot place an oversized order; ingestion's `app_id` is rejected for order entry |
-| 2 | **CloudPe security group**: inbound `22/tcp` from the workstation IP only, the Swarm ports (`2377/tcp`, `7946/tcp+udp`, `4789/udp`) between the four VM IPs only, everything else denied; SSH keys only with password authentication off; 2FA on the CloudPe panel | CloudPe panel | a scan from outside shows nothing but SSH; `docker node ls` still shows all four nodes |
+| 2 | **CloudPe security group**: inbound `22/tcp` from the workstation IP only, the Swarm ports (`2377/tcp`, `7946/tcp+udp`, `4789/udp`) between the four VM IPs only, `5000/tcp` on VM1 and `5080/tcp` on the OpenObserve node **from the workstation IP only**, everything else denied; SSH keys only with password authentication off; 2FA on the CloudPe panel | CloudPe panel | a scan from outside shows nothing but SSH and the dashboard, which is exactly the two exceptions recorded in S4 step 4 |
 | 3 | **`--autolock` at `swarm init`** (S5) + Swarm secrets only + R2 temporary credentials | Docker / Cloudflare | the manager's Raft log and mTLS keys are unusable without `docker swarm unlock`; no static S3 key exists on any VM |
 
 **Notes that save a bad day:**

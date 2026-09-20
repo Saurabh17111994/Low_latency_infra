@@ -63,6 +63,15 @@ secrets:
 #       replicas: ...          # + service-specific overrides
 # Sub-map overrides (restart_policy/update_config/placement) still replace
 # those maps wholesale — override only what actually differs.
+#
+# Rollout order is per service class. A ZooKeeper member rolls STOP-FIRST: the
+# three members are pinned `max_replicas_per_node: 1`, and with start-first the
+# replacement task needs a second eligible node — on a one-worker cluster, or in
+# production with two of three workers down, it stays Pending while the old
+# container keeps serving the old configuration, and the deploy reports success
+# (measured 2026-09-20, CHG-259). Stopping one member of three keeps quorum, which
+# is what ZooKeeper's own rolling-restart guidance assumes. Everything else stays
+# start-first: those services benefit from overlapping the old and new task.
 x-deploy-workload: &deploy_workload
   placement:
     constraints: [node.labels.role == worker]
@@ -184,7 +193,7 @@ services:
       # listens on 2181 for Flink/Fluss. quorumListenOnAllIPs: bind the election
       # port without resolving our own service name. admin.*: pin the liveness
       # endpoint to loopback so it is never reachable from the network.
-      ZOO_CFG_EXTRA: "clientPort=2181 quorumListenOnAllIPs=true admin.serverAddress=127.0.0.1 admin.serverPort=8080"
+      ZOO_CFG_EXTRA: "clientPort=2181 quorumListenOnAllIPs=true admin.serverAddress=127.0.0.1 admin.serverPort=8080 metricsProvider.className=org.apache.zookeeper.metrics.prometheus.PrometheusMetricsProvider metricsProvider.httpPort=7000"
     deploy:
       replicas: 1
       placement:
@@ -192,7 +201,7 @@ services:
         max_replicas_per_node: 1
         preferences: [{spread: node.labels.role}]
       restart_policy: {condition: any}
-      update_config: {order: start-first, failure_action: rollback}
+      update_config: {order: stop-first, failure_action: rollback}
       resources:
         limits: {cpus: "1", memory: 2G}
     volumes:
@@ -212,7 +221,7 @@ services:
       ZOO_MY_ID: "2"
       # Whitespace separated (one zoo.cfg line per token) — see zookeeper-1.
       ZOO_SERVERS: "server.1=zookeeper-1:2888:3888 server.2=zookeeper-2:2888:3888 server.3=zookeeper-3:2888:3888"
-      ZOO_CFG_EXTRA: "clientPort=2181 quorumListenOnAllIPs=true admin.serverAddress=127.0.0.1 admin.serverPort=8080"
+      ZOO_CFG_EXTRA: "clientPort=2181 quorumListenOnAllIPs=true admin.serverAddress=127.0.0.1 admin.serverPort=8080 metricsProvider.className=org.apache.zookeeper.metrics.prometheus.PrometheusMetricsProvider metricsProvider.httpPort=7000"
     deploy:
       replicas: 1
       placement:
@@ -220,7 +229,7 @@ services:
         max_replicas_per_node: 1
         preferences: [{spread: node.labels.role}]
       restart_policy: {condition: any}
-      update_config: {order: start-first, failure_action: rollback}
+      update_config: {order: stop-first, failure_action: rollback}
       resources:
         limits: {cpus: "1", memory: 2G}
     volumes:
@@ -240,7 +249,7 @@ services:
       ZOO_MY_ID: "3"
       # Whitespace separated (one zoo.cfg line per token) — see zookeeper-1.
       ZOO_SERVERS: "server.1=zookeeper-1:2888:3888 server.2=zookeeper-2:2888:3888 server.3=zookeeper-3:2888:3888"
-      ZOO_CFG_EXTRA: "clientPort=2181 quorumListenOnAllIPs=true admin.serverAddress=127.0.0.1 admin.serverPort=8080"
+      ZOO_CFG_EXTRA: "clientPort=2181 quorumListenOnAllIPs=true admin.serverAddress=127.0.0.1 admin.serverPort=8080 metricsProvider.className=org.apache.zookeeper.metrics.prometheus.PrometheusMetricsProvider metricsProvider.httpPort=7000"
     deploy:
       replicas: 1
       placement:
@@ -248,7 +257,7 @@ services:
         max_replicas_per_node: 1
         preferences: [{spread: node.labels.role}]
       restart_policy: {condition: any}
-      update_config: {order: start-first, failure_action: rollback}
+      update_config: {order: stop-first, failure_action: rollback}
       resources:
         limits: {cpus: "1", memory: 2G}
     volumes:
@@ -993,6 +1002,90 @@ services:
   # joins Swarm as a Worker, these services pin to `observability == true` so they
   # never take core workload capacity; openobserve loss must never authorize
   # orders or erase durable audit (OPS-FAIL-001).
+  # x-note: the collector's prometheus receiver scrapes `node-exporter:9100` and
+  #   `cadvisor:8080` (jobs infra-host and infra-containers). Neither service was
+  #   in this file, so both jobs failed every 15 s and their panels stayed empty —
+  #   a missing scrape target warns, it does not break a deploy, which is why it
+  #   went unnoticed (CHG-257). Same placement as the collector: these are agents
+  #   of the observability host, not of the trading nodes.
+  node-exporter:
+    # Host metrics. The three host mounts plus --path.* are what make the numbers
+    # belong to the VM: without --path.rootfs the filesystem collectors read the
+    # container's own overlay root (P5-026).
+    # x-note: compose sets `pid: host` here; `docker stack deploy` DROPS it
+    #   (measured 2026-09-20: the running task reports pidmode empty, while the
+    #   three mounts survive). It is not needed for correct numbers because the
+    #   collectors read the mounted /host/proc and /host/sys (CHG-257).
+    image: ${NODE_EXPORTER_IMAGE:-quay.io/prometheus/node-exporter@sha256:4032c6d5bfd752342c3e631c2f1de93ba6b86c41db6b167b9a35372c139e7706}
+    networks: [trading-net]
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - --path.rootfs=/rootfs
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+      - --collector.filesystem.fs-types-exclude=^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs)$$
+    healthcheck:
+      # Self-probe only (DEC-047: never another service). Measured on the image
+      # 2026-09-20: `wget` exists in it and /-/healthy answers 200.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9100/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.labels.observability == true]
+      restart_policy:
+        condition: any
+      update_config:
+        order: start-first
+        failure_action: rollback
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+  cadvisor:
+    # Container metrics. The compose service is `privileged: true`; Swarm DROPS
+    # that key — measured 2026-09-20 on the task: privileged=false, while all five
+    # host mounts survive and cAdvisor reads cgroups through them (it recovered
+    # every container within a second of start). The key is not repeated here:
+    # config that does nothing is worse than no config, and a security reviewer
+    # would read `privileged: true` as a statement about the running task.
+    image: ${CADVISOR_IMAGE:-gcr.io/cadvisor/cadvisor@sha256:3cde6faf0791ebf7b41d6f8ae7145466fed712ea6f252c935294d2608b1af388}
+    networks: [trading-net]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    healthcheck:
+      # Self-probe only (DEC-047). Measured on the image 2026-09-20: `wget` exists
+      # and /healthz answers 200 without the host mounts, so the probe tests the
+      # process, not the data.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      mode: global
+      placement:
+        constraints: [node.labels.observability == true]
+      restart_policy:
+        condition: any
+      update_config:
+        order: start-first
+        failure_action: rollback
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
   otel-collector:
     # x-healthcheck: none (no shell in the image — verified: neither /bin/sh nor /busybox/sh
     #   can exec — so no in-container probe can run; liveness is the health_check extension
@@ -1015,14 +1108,46 @@ services:
     configs:
       - source: otel-collector-config
         target: /etc/otel-collector-config.yaml
+    # CHG-263: the filelog/infrastructure receiver reads host log files, so the
+    # collector needs the host's own /var/log (read-only) — without this mount it held
+    # three service volumes and nothing else, and `/var/log/*.log` matched nothing.
+    #   `user: "0:4"` (root:adm) is forced by measurement, not preference: auth.log and
+    #   kern.log are `640 syslog:adm`, boot.log is `600 root`, the image defaults to
+    #   uid 10001, and a stack file CANNOT add a supplementary group — `group_add` is
+    #   rejected ("Additional property group_add is not allowed"), while `user` is
+    #   accepted and lands on the task. Read-only, so the collector may read the logs
+    #   and cannot alter them. ZooKeeper, Fluss and OpenObserve already run as root in
+    #   this stack; the collector was the outlier.
+    user: "0:4"
     volumes:
       - ingestion-logs:/data/ingestion/logs:ro
       - flink-logs:/data/flink/logs:ro
       - fluss-logs:/data/fluss/logs:ro
+      - type: bind
+        source: /var/log
+        target: /var/log
+        read_only: true
 
   openobserve:
     image: ${OPENOBSERVE_IMAGE:?set OPENOBSERVE_IMAGE to an immutable digest}
     networks: [trading-net]
+    # CHG-260: exactly one published port in the whole stack, and it is the one
+    # the operator needs — OpenObserve is the single pane of truth, so its UI has
+    # to be reachable without editing a running service. `mode: host` keeps it on
+    # the node that actually runs the task instead of meshing it across the swarm.
+    #   Two measured constraints decide the shape (2026-09-20):
+    #   1. `host_ip` is NOT allowed in a stack file — the engine rejects the deploy
+    #      with "Additional property host_ip is not allowed", so a loopback-only
+    #      publish is not expressible at all (nor via --publish-add, whose grammar
+    #      has no host_ip either);
+    #   2. therefore the port binds 0.0.0.0:5080 on that node and the FIREWALL is
+    #      the control, not the stack file: S4 restricts 5080 to the operator's
+    #      address. The value of publishing here rather than by hand is that it
+    #      survives every redeploy.
+    ports:
+      - mode: host
+        published: 5080
+        target: 5080
     # x-healthcheck: none (static /openobserve binary, no shell/curl/wget, 
     # a CMD-SHELL probe can never run: exit=-1 with the status flipping to
     # unhealthy, so the dead probe was removed rather than repaired)
@@ -1078,6 +1203,13 @@ services:
       replicas: 1
       placement:
         constraints: [node.labels.observability == true]
+      # CHG-258: the workload budget does not fit an observability service. Four
+      # attempts in 120 s then stop means the alert path silently disappears when
+      # the webhook target is down longer than two minutes — the opposite of what
+      # a single pane of truth needs. Infrastructure retries forever; only the
+      # trading services stop and wait for an operator.
+      restart_policy:
+        condition: any
       resources:
         limits: {cpus: "1", memory: 512M}
     command: ["python3", "/app/alert-consumer.py"]

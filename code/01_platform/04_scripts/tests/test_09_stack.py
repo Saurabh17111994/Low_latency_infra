@@ -20,7 +20,7 @@ is M3 (multi-VM rig). These tests only gate M2 (offline prep → 1-host mimic).
 import re
 
 import yaml
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).parents[4]
 STACK = ROOT / "code/01_platform/01_docker/docker-stack.yml"
@@ -32,7 +32,9 @@ WORKLOAD = [
     "flink-jobmanager", "flink-taskmanager", "ingestion",
     "execution-bridge", "execution-gateway", "nautilus",
 ]
-OBSERVABILITY = ["otel-collector", "openobserve", "alert-consumer"]
+OBSERVABILITY = ["otel-collector", "openobserve", "alert-consumer",
+                 "node-exporter", "cadvisor"]
+COLLECTOR = ROOT / "code/01_platform/01_docker/otel-collector-config.swarm.yaml"
 
 def _load():
     return yaml.safe_load(STACK.read_text())
@@ -126,15 +128,105 @@ class TestPlacement:
 
 
 class TestNoComposeOnlyKeys:
-    """Keys that `docker stack deploy` ignores or rejects — must be absent."""
+    """Keys that `docker stack deploy` ignores or rejects — must be absent.
+
+    `ports` used to be listed here as well, which was true about policy and false
+    about the schema: the long syntax is valid in a Swarm stack and is how a
+    service gets published. CHG-260 moved it to TestPublishedPorts, which states
+    the policy ("loopback only, and only where the operator needs a UI") instead
+    of banning a key the deploy engine understands.
+    """
     FORBIDDEN = ["build", "depends_on", "container_name",
-                 "ports", "network_mode", "mac_address"]
+                 "network_mode", "mac_address"]
 
     def test_no_swarm_ignored_keys(self):
         d = _load()
         for name, svc in d["services"].items():
             for k in self.FORBIDDEN:
                 assert k not in svc, f"{name}: '{k}' is not valid in a Swarm deploy unit"
+
+
+class TestPublishedPorts:
+    """CHG-260 — the stack publishes exactly one port, on loopback, for the UI.
+
+    Everything else talks over the encrypted overlay, so nothing else may publish:
+    a port on a host interface is attack surface plus a firewall rule, and the
+    runbook's S4 table does not carry one for them. OpenObserve is the exception
+    because it is the single pane of truth and the operator has to open it — and
+    the exception is narrow enough to test: host mode (no ingress mesh), bound to
+    127.0.0.1 (SSH tunnel or node-local only), and named explicitly.
+    """
+
+    ALLOWED = {"openobserve": {5080}}
+
+    def test_only_the_allowed_service_publishes(self):
+        d = _load()["services"]
+        publishing = {n for n, svc in d.items() if "ports" in svc}
+        assert publishing == set(self.ALLOWED), (
+            f"services publishing ports: {sorted(publishing)} — the rule is "
+            f"{sorted(self.ALLOWED)}; add a firewall rule and a reason first")
+
+    def test_the_ui_port_is_host_mode_and_cannot_be_loopback(self):
+        """`host_ip` is a deploy-blocking key, measured on 2026-09-20.
+
+        The first version of this change tried `host_ip: 127.0.0.1` so the UI port
+        would bind loopback only. `docker stack deploy` refused the whole stack:
+
+            services.openobserve.ports.0 Additional property host_ip is not allowed
+
+        and `docker stack deploy`'s schema is the authority here, not compose's. A
+        loopback-only publish is therefore not expressible — `--publish-add` has no
+        host_ip either — so the firewall rule in S4 is what restricts this port, and
+        the test's job is to keep anyone from re-adding a key the engine rejects.
+        """
+        d = _load()["services"]
+        for name, ports in self.ALLOWED.items():
+            for entry in d[name]["ports"]:
+                assert entry["mode"] == "host", (
+                    f"{name}: ingress mode would round-robin the UI across nodes that "
+                    f"do not run it")
+                assert "host_ip" not in entry, (
+                    f"{name}: host_ip makes the deploy fail with 'Additional property "
+                    f"host_ip is not allowed' — the S4 firewall rule is the control")
+                assert entry["published"] in ports, (
+                    f"{name}: {entry['published']} is not a port this service is allowed to publish"
+                )
+                assert entry["target"] == entry["published"], (
+                    f"{name}: target and published diverge ({entry['target']} vs "
+                    f"{entry['published']}) — the firewall rule names one number")
+
+
+class TestQuorumRolloutOrder:
+    """CHG-262 — a quorum member must not need a free node to be replaced.
+
+    The ZooKeeper services pin `max_replicas_per_node: 1`. With `start-first` the
+    replacement task needs a *second* eligible node; measured 2026-09-20 on a
+    one-worker rehearsal cluster, where the replacement stayed
+    `Pending — no suitable node (max replicas per node)`, the service reported
+    `update in progress`, and the old container kept serving the old `zoo.cfg` —
+    so a configuration change never landed while the deploy exited 0. Stopping one
+    member of three keeps quorum, which is the rolling-restart order ZooKeeper
+    itself documents; the workload and observability services keep `start-first`
+    because overlapping their old and new task is exactly what you want there.
+    """
+
+    def test_zookeeper_members_roll_stop_first(self):
+        d = _load()["services"]
+        for name in sorted(n for n in d if n.startswith("zookeeper-")):
+            order = d[name]["deploy"]["update_config"]["order"]
+            assert order == "stop-first", (
+                f"{name}: a quorum member rolls stop-first — with start-first the "
+                f"replacement needs a second eligible node and can stall as Pending "
+                f"while the old task keeps serving (got {order})")
+
+    def test_the_rest_still_roll_start_first(self):
+        d = _load()["services"]
+        others = {n: svc["deploy"].get("update_config", {}).get("order")
+                  for n, svc in d.items() if not n.startswith("zookeeper-")}
+        started = sorted(n for n, o in others.items() if o == "start-first")
+        assert len(started) >= 12, (
+            f"only {len(started)} services roll start-first — the workload and "
+            f"observability classes are supposed to overlap old and new tasks")
 
 
 class TestNetworks:
@@ -477,6 +569,10 @@ class TestTier2Hardening:
         # Verified on the running dev container: Entrypoint [], CMD
         # [/openobserve], and it has served traffic for days with no command:.
         "openobserve": "openobserve CMD [/openobserve] is the server",
+        # Measured 2026-09-20: `docker image inspect gcr.io/cadvisor/cadvisor:v0.49.1`
+        # -> Entrypoint [/usr/bin/cadvisor, -logtostderr], CMD null. The image's own
+        # entrypoint is the server, so a command: here would duplicate its args.
+        "cadvisor": "cadvisor Entrypoint [/usr/bin/cadvisor -logtostderr] is the server",
         # Our own images set ENTRYPOINT to the server binary itself, so no
         # command: is needed - the default cannot be a help path.
         "ingestion": "Dockerfile ENTRYPOINT /app/docker-entrypoint.sh execs java IngestionService",
@@ -1021,3 +1117,223 @@ class TestTier2Hardening:
             "/run/secrets/execution_bridge_auth_token"
         assert "execution_bridge_auth_token" in svc.get("secrets", []), (
             "the secret must stay mounted")
+
+
+class TestCollectorScrapeTargets:
+    """CHG-257 — a scrape target with no service is a silent empty panel.
+
+    The collector scraped `node-exporter:9100` and `cadvisor:8080` for months while
+    the stack declared neither service: every scrape failed with a warning the
+    collector logs and nobody reads, and no deploy ever failed. The gap was found by
+    reading the running collector's log, not by a test — this class is that test.
+
+    A name is skipped only when it is genuinely not a service: a bind address, or a
+    loopback endpoint inside the collector's own process.
+    """
+
+    SKIP = {"", "0.0.0.0", "127.0.0.1", "localhost", "::"}
+
+    def _hosts(self):
+        cfg = yaml.safe_load(COLLECTOR.read_text())
+        found = set()
+
+        def harvest(block):
+            for job in block.get("config", {}).get("scrape_configs", []) or []:
+                for static in job.get("static_configs", []) or []:
+                    for t in static.get("targets", []) or []:
+                        found.add(str(t).rsplit(":", 1)[0])
+
+        for name, rec in (cfg.get("receivers") or {}).items():
+            if name.startswith("prometheus"):
+                harvest(rec)
+        for name, exp in (cfg.get("exporters") or {}).items():
+            ep = exp.get("endpoint")
+            if isinstance(ep, str) and "://" in ep:
+                found.add(ep.split("://", 1)[1].rsplit(":", 1)[0])
+        return {h for h in found if h not in self.SKIP and not h[0].isdigit()}
+
+    def test_every_scraped_host_is_a_stack_service(self):
+        services = set(_load()["services"])
+        unknown = sorted(h for h in self._hosts() if h not in services)
+        assert not unknown, (
+            f"the collector scrapes/exporters at {unknown}, which the stack does not "
+            f"declare — the receiver will warn every interval and the panels stay empty"
+        )
+
+    def test_zookeeper_metrics_port_matches_what_the_collector_scrapes(self):
+        """CHG-259 — the provider port and the scrape target are two files apart.
+
+        The provider class ships in the pinned image (checked in
+        zookeeper-prometheus-metrics-3.9.2.jar: org/apache/zookeeper/metrics/
+        prometheus/PrometheusMetricsProvider.class, serving GET /metrics), so the
+        switch is `ZOO_CFG_EXTRA`, and the entrypoint writes each whitespace-separated
+        token as its own zoo.cfg line. Changing the port in one file and not the other
+        is exactly the silent-empty-panel failure this class exists for.
+        """
+        d = _load()["services"]
+        scraped = self._hosts_with_ports()
+        for name in sorted(n for n in d if n.startswith("zookeeper-")):
+            tokens = d[name]["environment"]["ZOO_CFG_EXTRA"].split()
+            provider = [t for t in tokens if t.startswith("metricsProvider.className=")]
+            port = [t for t in tokens if t.startswith("metricsProvider.httpPort=")]
+            assert provider and port, f"{name}: no Prometheus metrics provider in ZOO_CFG_EXTRA"
+            assert provider[0].endswith("PrometheusMetricsProvider"), provider[0]
+            target = f"{name}:{port[0].split('=', 1)[1]}"
+            assert target in scraped, (
+                f"{name} publishes metrics at {target}, which the collector does not scrape "
+                f"(it scrapes {sorted(scraped)})")
+
+    def _hosts_with_ports(self):
+        cfg = yaml.safe_load(COLLECTOR.read_text())
+        found = set()
+        for name, rec in (cfg.get("receivers") or {}).items():
+            if not name.startswith("prometheus"):
+                continue
+            for job in rec.get("config", {}).get("scrape_configs", []) or []:
+                for static in job.get("static_configs", []) or []:
+                    for t in static.get("targets", []) or []:
+                        found.add(str(t))
+        return found
+
+    def test_infra_agents_report_on_the_host_not_the_container(self):
+        d = _load()["services"]
+        for name in ("node-exporter", "cadvisor"):
+            svc = d[name]
+            assert svc["deploy"]["mode"] == "global", (
+                f"{name} is a per-host agent: it must run on every observability node")
+            assert "@sha256:" in svc["image"], f"{name} must be digest-pinned"
+            assert svc["deploy"].get("restart_policy"), f"{name} needs a restart policy"
+        mounts = {m.split(":")[1] for m in d["node-exporter"]["volumes"]}
+        assert {"/host/proc", "/host/sys", "/rootfs"} <= mounts, (
+            "node-exporter must mount the host paths its --path.* flags point at, "
+            "or it reports the container's overlay as if it were the VM")
+        assert any("--path.rootfs=/rootfs" == a for a in d["node-exporter"]["command"]), (
+            "without --path.rootfs the filesystem collectors read the wrong root (P5-026)")
+        cad = {m.split(":")[1] for m in d["cadvisor"]["volumes"]}
+        assert "/var/lib/docker" in cad and "/sys" in cad, (
+            "cadvisor needs the host's docker directory and /sys to see cgroups")
+
+
+class TestCollectorHostLogs:
+    """CHG-263 — a log path the collector cannot open is a silent empty stream.
+
+    The same failure shape as `TestCollectorScrapeTargets`, one layer down: there a
+    receiver named a service the stack did not declare, here it names a *path* the
+    container cannot see. Nothing fails either way — a filelog receiver with no
+    readable file emits nothing, no stream is created, and every deploy stays green.
+
+    Measured 2026-09-20: `filelog/infrastructure` included `/data/infra/logs/*.log`
+    (a named volume no service ever wrote to, in the stack *and* the dev compose file)
+    and `/var/log/*.log` (a bind the collector never had — its own comment called that
+    bind "optional"), and `/var/log/syslog` has no `.log` suffix, so even with the bind
+    the system log was unreachable. These tests hold all three halves together.
+    """
+
+    def _include_dirs(self):
+        """Directory of every include pattern per filelog receiver, as POSIX paths.
+
+        The collector is Linux; the test may run anywhere, so paths are compared as
+        strings rather than resolved against the test host's filesystem.
+        """
+        cfg = yaml.safe_load(COLLECTOR.read_text())
+        dirs = {}
+        for name, rec in (cfg.get("receivers") or {}).items():
+            if not name.startswith("filelog"):
+                continue
+            for inc in rec.get("include") or []:
+                parent = str(PurePosixPath(str(inc)).parent)
+                dirs.setdefault(parent, set()).add(name)
+        return dirs
+
+    def _mounts(self):
+        """Mount target -> (source, read_only) for the collector service."""
+        out = {}
+        for m in _load()["services"]["otel-collector"].get("volumes") or []:
+            if isinstance(m, str):
+                parts = m.split(":")
+                # `source:target[:mode]` — a 2-part short form means read-write
+                out[parts[1]] = (parts[0], len(parts) > 2 and parts[2] == "ro")
+            else:
+                out[m["target"]] = (m.get("source"), bool(m.get("read_only")))
+        return out
+
+    def test_every_log_path_the_collector_reads_is_mounted(self):
+        mounts = self._mounts()
+        missing = {
+            d: sorted(r)
+            for d, r in self._include_dirs().items()
+            if d not in mounts
+        }
+        assert not missing, (
+            f"the collector reads {missing} but mounts only {sorted(mounts)} — the "
+            f"receiver emits nothing at all and the stream never appears in OpenObserve"
+        )
+
+    def test_the_only_host_path_the_collector_mounts_is_read_only_var_log(self):
+        """Reading host logs must not become write access to the host."""
+        binds = [
+            (target, src, ro)
+            for target, (src, ro) in self._mounts().items()
+            if isinstance(src, str) and src.startswith("/") and not src.startswith("/data/")
+        ]
+        assert binds == [("/var/log", "/var/log", True)], (
+            f"the collector's host mounts are {binds}; it may read /var/log and nothing "
+            f"else, read-only — a writable host mount would let a log parser change the host"
+        )
+
+    def test_the_collector_runs_as_a_user_that_can_open_those_files(self):
+        """`user` is forced by measurement: `group_add` is not expressible in a stack.
+
+        The files that matter are not world-readable on a stock Ubuntu host —
+        `/var/log/auth.log` and `/var/log/kern.log` are `640 syslog:adm`, `boot.log` is
+        `600 root` — while the image defaults to uid 10001. A stack file cannot add a
+        supplementary group (`group_add` is rejected with "Additional property group_add
+        is not allowed"), so the only expressible way to read them is `user`, and this
+        test requires that it is set deliberately rather than left to the image default.
+        """
+        svc = _load()["services"]["otel-collector"]
+        assert svc.get("user"), (
+            "the collector reads host logs that are 640 syslog:adm; without `user` it "
+            "runs as the image's uid 10001 and silently collects nothing"
+        )
+
+
+class TestRestartBudget:
+    """CHG-258 — a restart budget is a decision per service class, not a default.
+
+    Infrastructure must never give up: a stopped ZooKeeper loses quorum, a stopped
+    collector or agent puts a hole in the single pane, and a stopped alert consumer
+    drops the alert path — all silently, because `docker service ls` shows `0/1`
+    only if someone looks. The trading services are the other way round: four
+    attempts in 120 s and then stay down, so a service that cannot start after a
+    fixed configuration error stops churning and waits for an operator instead of
+    hiding a real failure behind an endless restart loop.
+    """
+
+    BOUNDED = {"fluss-coordinator", "fluss-tablet-1", "fluss-tablet-2", "fluss-tablet-3",
+               "flink-jobmanager", "flink-taskmanager", "ingestion", "execution-bridge"}
+    UNBOUNDED = {"zookeeper-1", "zookeeper-2", "zookeeper-3", "execution-gateway", "nautilus",
+                 "otel-collector", "openobserve", "alert-consumer",
+                 "node-exporter", "cadvisor"}
+
+    def test_every_service_is_classified(self):
+        services = set(_load()["services"])
+        assert services == self.BOUNDED | self.UNBOUNDED, (
+            "a new service must be added to the bounded or unbounded set — an "
+            "unclassified restart policy is how a service ends up retrying forever "
+            f"or stopping silently: {sorted(services ^ (self.BOUNDED | self.UNBOUNDED))}")
+
+    def test_trading_services_stop_retrying_after_a_bounded_budget(self):
+        d = _load()["services"]
+        for name in sorted(self.BOUNDED):
+            rp = d[name]["deploy"]["restart_policy"]
+            assert rp.get("max_attempts") and rp.get("window"), (
+                f"{name}: a trading service must bound its retries (max_attempts + window)")
+
+    def test_infrastructure_retries_forever(self):
+        d = _load()["services"]
+        for name in sorted(self.UNBOUNDED):
+            rp = d[name]["deploy"]["restart_policy"]
+            assert "max_attempts" not in rp, (
+                f"{name}: infrastructure must not stop retrying — a stopped service here "
+                f"is a silent hole (quorum, metrics, alerts), not a visible failure")

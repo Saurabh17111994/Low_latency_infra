@@ -346,6 +346,15 @@ At the 50,000 ticks/s baseline on the 4-VM Swarm topology (Observability VM, 48 
 Without a RAM cap, OpenObserve's ClickHouse-like storage can consume all available memory and starve the OTel Collector, which is the sole buffer for telemetry during backend outages. Superseded by `PERF-PROD-60000-001`.
 ### Acceptance checklist
 
+> **2026-09-20 correction (CHG-263):** the `infrastructure_logs` stream named in the evidence rows
+below was **empty**, not merely quiet. The collector's `filelog/infrastructure` receiver listed
+`/data/infra/logs/*.log` (a named volume no service ever wrote to, in the stack *and* the dev compose
+file) and `/var/log/*.log` (a bind that was never declared — the receiver's own comment called it
+"optional"), so it had nothing to read and OpenObserve never created the stream. The receiver now
+reads the host's `/var/log` through a read-only bind, as `user: "0:4"`, and the include list is
+exactly what that mount contains. Host logs are collected **per node**: the collector is pinned to
+the observability node, so a four-VM deployment covers VM4's host logs only.
+
 - [x] Every mandatory requirement has proving telemetry. (2026-08-24: `metrics` `logs` `traces` `infrastructure_logs` `flink_logs` `fluss_logs` `trading_alerts` 7 streams + `infra-host/cadvisor` + `jvm.*` via `OTLP 4317` — `collector validate` + `8 dashboards`)
 - [x] High-cardinality labels are bounded. (2026-08-24: `filter/top20-token-metrics` `METRICS_TOP20_TOKENS_REGEX a^` default drops per-token; `global+slot ALWAYS`; `8 dashboards` query `LIMIT` no `token` group-by)
 - [x] Redaction tests cover logs, traces, alerts, and support bundles. (2026-08-24: `test_seed_dashboards no_secrets` `StructuredLogEvent` `OtlpEmitterEscapingTest` `ObservabilityRegressionTest R-266` — credentials/tokens/raw packets never in `stream-name` or `attributes`)

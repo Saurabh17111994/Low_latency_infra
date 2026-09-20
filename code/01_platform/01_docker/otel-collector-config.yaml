@@ -101,10 +101,14 @@ receivers:
         field: resource.service.name
         value: fluss
   # 2026-08-22 single-pane: infrastructure logs (host journald + container).
-  # Collector reads /data/infra/logs/*.log (infra-logs volume) and optional
-  # /var/log/*.log bind. Routes to infrastructure_logs stream (O2 header).
+  # CHG-263: the include list is now exactly what this container can open. The old
+  # list named two paths that produced nothing: `/data/infra/logs/*.log` lived in a
+  # named volume no service ever wrote to (the comment called the /var/log bind
+  # "optional" and no bind was declared anywhere), and `/var/log/syslog` — the system
+  # log itself, 47 MB and actively written on the rehearsal host — has no `.log`
+  # suffix, so the glob could never match it. Routes to infrastructure_logs (O2 header).
   filelog/infrastructure:
-    include: [/data/infra/logs/*.log, /var/log/*.log]
+    include: [/var/log/*.log, /var/log/syslog]
     start_at: end
     operators:
       - type: add
