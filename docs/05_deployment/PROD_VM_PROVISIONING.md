@@ -60,12 +60,16 @@ trigger: `N>6` workers, sustained CPU >80%, or Raft election flaps.
 
 1. **No hostname pinning anywhere.** The stack places by `node.labels.role == worker` and
    `node.labels.observability == true` only. Never edit `docker-stack.yml` to name a host.
-   **Exception (CHG-265): the per-host agents carry no constraint at all.** `node-exporter`
-   and `cadvisor` are `mode: global`, so they run on every node including VM4; any label
-   here would exclude the nodes whose metrics must exist. Everything else keeps label
-   placement, and a hostname pin stays forbidden everywhere. They also take
-   `hostname: "{{.Node.Hostname}}"`, because otherwise every node's series reports the
-   container id as its own name;
+   **Exception (CHG-265, CHG-273): the per-host agents carry no constraint at all.**
+   `node-exporter`, `cadvisor` and `otel-collector-logs` are `mode: global`, so they run on
+   every node including VM4; any label here would exclude the nodes whose metrics and logs
+   must exist. All three take `hostname: "{{.Node.Hostname}}"`, because otherwise every
+   node's series and log lines report the container id as their own name. The other
+   observability services keep label placement, and a hostname pin stays forbidden
+   everywhere. The collector is split by transport (CHG-273) because one service cannot be
+   both: `otel-collector-logs` reads files that exist on exactly one node, while
+   `otel-collector` scrapes `tasks.*` — every node's agent — and must stay a single writer,
+   or each host metric is stored once per node;
    W4+ joins by labeling, not by stack rewrite (`test_09_stack.py` enforces this).
 2. **Manager quorum is 3** (tolerant of 1 loss). O1 (observability) is a worker, outside the
    manager quorum; its loss must never authorize orders or erase the durable audit.
@@ -478,9 +482,9 @@ will not catch it), or an image reference is still a bare tag.
 docker swarm init --autolock --advertise-addr <vm1-ip>   # capture the join commands it prints
 # on VM2 and VM3 (MANAGER token)
 docker swarm join --token <manager-token> <vm1-ip>:2377
-# on VM4 (WORKER token) — it must join, or the five observability services have no node to land
-# on and sit at 0/1 forever. A worker does not vote: the quorum stays 3 and VM4's loss cannot
-# elect a leader.
+# on VM4 (WORKER token) — it must join, or the label-placed observability services have no node
+# to land on and sit at 0/1 forever. A worker does not vote: the quorum stays 3 and VM4's loss
+# cannot elect a leader.
 docker swarm join --token <worker-token> <vm1-ip>:2377
 # on VM1: labels (never hostnames). A node holds ONE value per label key — a second --label-add
 # on the same key overwrites the first, so role=manager and role=worker cannot coexist on one node.
@@ -489,12 +493,14 @@ docker node update --label-add observability=true <vm4>   # x1: VM4 ONLY
 docker node ls                                            # expect 3 managers + 1 worker
 # v2 only (dedicated managers): docker node update --availability drain m1 m2 m3
 ```
-**Why VM4 carries `observability` and not `role`:** the 13 workload services require
-`node.labels.role == worker` and the 3 observability services (collector, OpenObserve,
-alert-consumer, node-exporter, cAdvisor) require
+**Why VM4 carries `observability` and not `role`:** the workload services require
+`node.labels.role == worker`, and the label-placed observability services — OpenObserve,
+`alert-consumer` and the network half of the collector — require
 `node.labels.observability == true`. Leaving `role` off VM4 keeps the trading stack from being
 scheduled onto the observability VM; leaving `observability` off VM1–VM3 keeps OpenObserve off the
-workload nodes. Both directions matter.
+workload nodes. Both directions matter. The three per-host agents (`node-exporter`, `cadvisor`,
+`otel-collector-logs`) sit outside this: `mode: global`, no constraint, so they land on all four
+nodes and need neither label (CHG-265, CHG-273).
 
 **Exit:** three managers `Reachable`, one Leader, one worker carrying the `observability` label, and
 `prod_node_check.py` re-run passes the label checks.
@@ -527,8 +533,9 @@ and that password. A value you do supply for either generated token wins over ge
 rotation is never fought. Keep the file outside the repository and delete it when the secrets exist.
 
 **`o2_auth_basic` is bare base64** — `base64("<o2-user>:<password>")`, with **no** `Basic ` prefix.
-The collector config writes the scheme itself (`Authorization: "Basic ${file:/run/secrets/o2_auth_basic}"`
-in `otel-collector-config.swarm.yaml`), so a prefixed value authenticates as `Basic Basic …` and
+The collector configs write the scheme themselves (`Authorization: "Basic ${file:/run/secrets/o2_auth_basic}"`
+in `otel-collector-config.swarm.yaml` and, since CHG-273, in `otel-collector-logs.swarm.yaml` — both
+services consume the same secret), so a prefixed value authenticates as `Basic Basic …` and
 OpenObserve answers 401 with nothing useful in the log. An earlier revision of this step said the
 opposite; the script derives the correct form and `--self-check` pins it.
 
@@ -620,7 +627,8 @@ never mix.
   two members up — and watch `docker service ps <service>` for `Pending` after any deploy whose effect
   you expect to see. On 2026-09-20 this hid a ZooKeeper configuration change for a full round.
 - **`configs:` paths are relative to the stack file, not to your shell.** The stack pulls in
-  `./otel-collector-config.swarm.yaml`, `./alert-consumer.py` and `./fluss-r2-secrets-from-file.sh`,
+  `./otel-collector-config.swarm.yaml`, `./otel-collector-logs.swarm.yaml`, `./alert-consumer.py` and
+  `./fluss-r2-secrets-from-file.sh`,
   so deploying *a copy* of `docker-stack.yml` from another directory uses **that directory's** copies.
   Measured 2026-09-20: the stack was rendered into `~/.p6v/reh/` and deployed from there while the
   collector config was refreshed only in the repo — the deploy reported
@@ -706,16 +714,26 @@ ZooKeeper answers Prometheus on `:7000/metrics` per replica (`metricsProvider.cl
 `metricsProvider.httpPort` in `ZOO_CFG_EXTRA`; the provider class ships in the pinned image, so this
 is configuration, not an extra component). That is what makes a quorum or latency problem visible:
 without it, the only signal from ZooKeeper is a TCP port that either accepts or does not.
-Host log files reach the pane through the collector's read-only `/var/log` mount, into the
-`infrastructure_logs` stream: `syslog`, `auth.log`, `kern.log` and the rest of `*.log` from the node
-the collector runs on. Two things about it are worth knowing before trusting a quiet stream:
-the collector runs as `user: "0:4"` (root:adm) for this — `auth.log` and `kern.log` are
-`640 syslog:adm` and a stack file cannot add a supplementary group (`group_add` is rejected), so the
-alternative was collecting nothing from those files; and **the mount is per node** — the collector
-is `mode: global` but pinned to `observability == true`, which in this topology is VM4 alone, so
-VM1–VM3 host logs are not in the pane. The services' own log volumes (`flink_logs`, `fluss_logs`,
-`platform_logs`) are named volumes, which Swarm keeps on the node that writes them, so the same
-boundary applies to them.
+Host log files reach the pane through a read-only `/var/log` mount, into the
+`infrastructure_logs` stream: `syslog`, `auth.log`, `kern.log` and the rest of `*.log`.
+One thing about it is worth knowing before trusting a quiet stream: the reading service runs as
+`user: "0:4"` (root:adm) for this — `auth.log` and `kern.log` are `640 syslog:adm` and a stack
+file cannot add a supplementary group (`group_add` is rejected), so the alternative was
+collecting nothing from those files.
+
+**The mount is per node, and that used to be a hole** (found 2026-09-20, closed by CHG-273).
+The bind mount and the service log volumes (`flink_logs`, `fluss_logs`, `platform_logs`) are
+node-local, and the single collector that held them was pinned to `observability == true` — VM4
+alone — so it read its own copies while VM1–VM3 wrote to directories nobody collected: an empty
+directory reads as silence, not as an error. Reading now lives in its own service,
+`otel-collector-logs`: `mode: global`, no constraint, so each node reads its own files. The same
+split answers the opposite requirement — `otel-collector` keeps the network half (Prometheus
+scrapes of `tasks.*`, plus the OTLP receivers) at exactly one replica, because a scraper on every
+node would store each host metric once per node and break `rate()` and `sum()` in every panel.
+`host.name` (`{{.Node.Hostname}}` via `HOSTNAME`) is what tells the nodes apart in one stream. The file
+half's own metrics (`otelcol_fileconsumer_*`) still go to the singleton's OTLP endpoint, so they are
+attributed to the singleton's host — the log records carry the node name, the collector's self-metrics do
+not (CHG-273, "Not verified").
 
 **Opening the dashboard.** OpenObserve is the only service in the stack with a published port:
 `mode: host`, `published: 5080`, on the node that runs the task — VM4 by the S5 label. The S4 firewall

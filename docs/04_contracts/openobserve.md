@@ -21,6 +21,11 @@
 
 - **Collector logs/traces target:** `http://otel-collector:4317` (OTLP gRPC).
 - **Collector metrics target:** `http://otel-collector:4318/v1/metrics` (OTLP/HTTP).
+- **Per-host file collection (CHG-273):** a second collector, `otel-collector-logs`, runs on every
+  node (`mode: global`) and owns every `filelog` receiver — the host's `/var/log` and the node-local
+  log volumes. It deliberately exposes **no** OTLP receiver: emitters keep targeting
+  `otel-collector`, and shipping logs to a per-node service would scatter one service's records
+  across nodes.
 - **OpenObserve UI/API:** `http://openobserve:5080`.
 - **Auth:** Basic Authentication, **read from environment variables** — never hardcoded.
 

@@ -14,13 +14,17 @@
 #     | docker secret create o2_auth_basic -
 # =============================================================================
 # =============================================================================
-# OTel Collector — ingestion telemetry bridge to OpenObserve
+# OTel Collector — NETWORK half: Prometheus scrapes + OTLP push (CHG-273).
+# One replica, pinned to the observability node: a single writer per series.
+# The per-host file half is otel-collector-logs.swarm.yaml / .yaml.
 #
 # Topology (observability-only; NEVER in the ingestion critical path):
 #   Java ingestion (OtlpMetricsEmitter) --OTLP/HTTP--> collector :4318
 #     --> otlphttp exporter --> openobserve :5080 /api/{org}/v1/metrics
-#   Java ingestion JSON logs (/data/ingestion/logs/*.json) --filelog receiver-->
-#     same pipeline --> openobserve (logs stream)
+#   Java ingestion JSON logs (/data/ingestion/logs/*.json): collected by the
+#     sibling service otel-collector-logs (mode: global, one replica per node)
+#     -- file receivers belong where the files are (CHG-273). Nothing that
+#     reads a file lives in this file.
 #
 # The collector normalizes the service's hand-rolled OTLP JSON into canonical
 # OTLP and holds the OpenObserve Basic auth (ingestion code carries no creds).
@@ -38,7 +42,10 @@
 # 2026-08-22 single-pane (10-observability.md re-scope): collector now owns
 # ALL project observability — trading + infra/JVM/host/container/traces. No
 # service bypasses it. Infra sources: node_exporter (host), cAdvisor
-# (containers), JVM OTel agent (jvm.*), host journald/filelog, OTLP traces.
+# (containers), JVM OTel agent (jvm.*), OTLP traces. Host journald/file logs
+# are read per node by otel-collector-logs (CHG-273): this singleton owns what
+# arrives over the network — Prometheus scrapes and OTLP push — because a
+# scraper that runs on every node would store every metric N times.
 #
 # T11 (streaming-3000 hardening, G3 Compute, 2026-08-22) — cardinality bounds:
 #   1. Metrics aggregation 15s: every metric series lands at a 15s cadence
@@ -64,17 +71,6 @@ receivers:
         endpoint: 0.0.0.0:4318
       grpc:
         endpoint: 0.0.0.0:4317
-  filelog:
-    include: [/data/ingestion/logs/*.json]
-    start_at: end
-    operators:
-      - type: json_parser
-        parse_to: body
-      - type: add
-        field: resource.service.name
-        value: ingestion
-      # Stream routing happens in the exporter via the stream-name HTTP
-      # header (O2 v0.91.5 ZO_GRPC_STREAM_HEADER_KEY) — not attributes.
   # P8 (tracker 14): scrape Flink PrometheusReporter endpoints. 2026-08-22
   # single-pane: also scrape infra exporters (node_exporter:9100,
   # cadvisor:8080) on the same trading-net. Collector holds O2 auth; all
@@ -107,41 +103,6 @@ receivers:
           scrape_interval: 15s
           static_configs:
             - targets: ["zookeeper-1:7000", "zookeeper-2:7000", "zookeeper-3:7000"]
-  # P8.2 (tracker 14): flink_logs stream from the flink-logs volume
-  # (/opt/flink/log/<role>.log, plain-text log4j output). ID must use the
-  # type/name syntax (filelog/flink), not a bare custom type name.
-  filelog/flink:
-    include: [/data/flink/logs/*.log]
-    start_at: beginning
-    operators:
-      - type: add
-        field: resource.service.name
-        value: flink
-  # P8.1 (tracker 14 box 827): fluss_logs stream from the fluss-logs volume
-  # (/opt/fluss/log/*.log — fluss--<role>-*.log log4j2 output, verified live
-  # 2026-08-11). Reads CoordinatorServer + TabletServer logs: connection,
-  # leadership, storage, replication, lake tiering.
-  filelog/fluss:
-    include: [/data/fluss/logs/*.log]
-    start_at: beginning
-    operators:
-      - type: add
-        field: resource.service.name
-        value: fluss
-  # 2026-08-22 single-pane: infrastructure logs (host journald + container).
-  # CHG-263: the include list is now exactly what this container can open. The old
-  # list named two paths that produced nothing: `/data/infra/logs/*.log` lived in a
-  # named volume no service ever wrote to (the comment called the /var/log bind
-  # "optional" and no bind was declared anywhere), and `/var/log/syslog` — the system
-  # log itself, 47 MB and actively written on the rehearsal host — has no `.log`
-  # suffix, so the glob could never match it. Routes to infrastructure_logs (O2 header).
-  filelog/infrastructure:
-    include: [/var/log/*.log, /var/log/syslog]
-    start_at: end
-    operators:
-      - type: add
-        field: resource.service.name
-        value: infra
 
 extensions:
   health_check:
@@ -160,50 +121,6 @@ exporters:
       initial_interval: 1s
       max_interval: 30s
       max_elapsed_time: 5m
-  # Logs route to O2's platform_logs stream via the stream-name HTTP header
-  # (ZO_GRPC_STREAM_HEADER_KEY, default "stream-name"; O2 v0.91.5 source
-  # src/handler/http/request/logs/ingest.rs otlp_logs_write — verified by
-  # direct probes + collector config 2026-08-11). OTLP attributes such as
-  # stream_name are NOT honored, so the header is the only routing mechanism.
-  otlphttp/openobserve-logs:
-    endpoint: http://openobserve:5080/api/default
-    headers:
-      Authorization: "Basic ${file:/run/secrets/o2_auth_basic}"
-      stream-name: platform_logs
-    compression: gzip
-    retry_on_failure:
-      enabled: true
-      initial_interval: 1s
-      max_interval: 30s
-      max_elapsed_time: 5m
-  # P8 (tracker 14): Flink metrics -> O2 Prometheus remote-write (the same
-  # O2 instance; PromQL queries hit /api/{org}/prometheus/api/v1/query — no
-  # _prometheus underscore; that route 404s, verified 2026-08-11).
-  # stream-name: flink_logs routes log records to the flink_logs stream
-  # (O2 v0.91.5 ZO_GRPC_STREAM_HEADER_KEY) instead of platform_logs.
-  otlphttp/openobserve-flink-logs:
-    endpoint: http://openobserve:5080/api/default
-    headers:
-      Authorization: "Basic ${file:/run/secrets/o2_auth_basic}"
-      stream-name: flink_logs
-    compression: gzip
-    retry_on_failure:
-      enabled: true
-      initial_interval: 1s
-      max_interval: 30s
-      max_elapsed_time: 5m
-  # P8.1 (tracker 14 box 827): Fluss server logs -> fluss_logs stream.
-  otlphttp/openobserve-fluss-logs:
-    endpoint: http://openobserve:5080/api/default
-    headers:
-      Authorization: "Basic ${file:/run/secrets/o2_auth_basic}"
-      stream-name: fluss_logs
-    compression: gzip
-    retry_on_failure:
-      enabled: true
-      initial_interval: 1s
-      max_interval: 30s
-      max_elapsed_time: 5m
   # P8.1 (tracker 14 box 828): SignalJob lifecycle alert events (OTLP logs
   # from the app) -> trading_alerts stream. O2 alert RULES (24, incl. the
   # SIGNAL-* set) route to destinations/webhooks in v0.91.5 — this stream is
@@ -214,18 +131,6 @@ exporters:
     headers:
       Authorization: "Basic ${file:/run/secrets/o2_auth_basic}"
       stream-name: trading_alerts
-    compression: gzip
-    retry_on_failure:
-      enabled: true
-      initial_interval: 1s
-      max_interval: 30s
-      max_elapsed_time: 5m
-  # 2026-08-22 single-pane: infrastructure logs -> infrastructure_logs stream.
-  otlphttp/openobserve-infra-logs:
-    endpoint: http://openobserve:5080/api/default
-    headers:
-      Authorization: "Basic ${file:/run/secrets/o2_auth_basic}"
-      stream-name: infrastructure_logs
     compression: gzip
     retry_on_failure:
       enabled: true
@@ -268,31 +173,6 @@ processors:
     check_interval: 1s
     limit_mib: 512
     spike_limit_mib: 128
-  # T11: keep errors/gaps at 100% and give every log record per-record
-  # sampling entropy. sampling.priority >= 100 forces the sampler to KEEP the
-  # record (probabilistic_sampler logs mode, v0.123.0: priority attr is
-  # interpreted as a percentage; absent -> configured sampling_percentage).
-  # The seed is the log4j2 event instant (always present in JsonLayout
-  # output), so the 1% decision is uniform per record, not per token.
-  transform/tick-sampling:
-    error_mode: ignore
-    log_statements:
-      - context: log
-        statements:
-          - >-
-            set(attributes["sampling.priority"], 100)
-            where severity_number >= SEVERITY_NUMBER_WARN
-            or body["level"] == "ERROR" or body["level"] == "WARN"
-          - >-
-            set(attributes["sampling.seed"],
-            Int(body["instant"]["epochSecond"]) * 1000000000
-            + Int(body["instant"]["nanoOfSecond"]))
-  # T11: 1% sample of tick (non-error) logs; priority records pass 100%.
-  probabilistic_sampler/tick:
-    sampling_percentage: 1
-    attribute_source: record
-    from_attribute: sampling.seed
-    sampling_priority: sampling.priority
   # T11: top-20 per-token sampler guard — DROP any datapoint carrying a
   # per-token label whose value is not in the allowlist regex. Global and
   # slot series (no token label) always pass. Applied to both metric
@@ -327,26 +207,6 @@ service:
       receivers: [prometheus]
       processors: [memory_limiter, batch/metrics, filter/top20-token-metrics]
       exporters: [prometheusremotewrite/openobserve]
-    # T11: tick logs sampled 1% (transform marks ERROR/WARN/gap records
-    # priority 100 -> kept; INFO tick records sampled 1%).
-    logs:
-      receivers: [filelog]
-      processors:
-        - memory_limiter
-        - batch
-        - transform/tick-sampling
-        - probabilistic_sampler/tick
-      exporters: [otlphttp/openobserve-logs]
-    # P8.2: flink file logs -> flink_logs stream.
-    logs/flink:
-      receivers: [filelog/flink]
-      processors: [memory_limiter, batch]
-      exporters: [otlphttp/openobserve-flink-logs]
-    # P8.1: fluss server logs -> fluss_logs stream.
-    logs/fluss:
-      receivers: [filelog/fluss]
-      processors: [memory_limiter, batch]
-      exporters: [otlphttp/openobserve-fluss-logs]
     # P8.1: SignalJob OTLP logs (startup-mode / schema-preflight events) ->
     # trading_alerts stream. The otlp receiver serves both HTTP (4318) and
     # gRPC (4317); OTLP logs arriving on either route to this pipeline.
@@ -354,11 +214,6 @@ service:
       receivers: [otlp]
       processors: [memory_limiter, batch]
       exporters: [otlphttp/openobserve-trading-alerts]
-    # 2026-08-22 single-pane: infra file logs -> infrastructure_logs stream.
-    logs/infrastructure:
-      receivers: [filelog/infrastructure]
-      processors: [memory_limiter, batch]
-      exporters: [otlphttp/openobserve-infra-logs]
     # 2026-08-22 single-pane: OTLP traces (gateway->nautilus->bridge,
     # SignalJob spans, sampled) -> traces stream. otlp receiver already
     # handles traces on both HTTP 4318 and gRPC 4317.

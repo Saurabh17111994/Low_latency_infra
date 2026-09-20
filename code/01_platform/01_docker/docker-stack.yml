@@ -154,8 +154,14 @@ volumes:
 # image is distroless; config must come from an overlay-mounted file, not a
 # host bind). The .swarm variant reads O2 creds via ${file:} instead of env.
 configs:
+  # CHG-273: the collector is split in two, and each half gets its own config.
+  # `otel-collector-config` = the network half (one replica: Prometheus scrapes +
+  # OTLP push). `otel-collector-logs-config` = the per-host file half (global:
+  # the filelog receivers), because a file belongs to exactly one node.
   otel-collector-config:
     file: ./otel-collector-config.swarm.yaml
+  otel-collector-logs-config:
+    file: ./otel-collector-logs.swarm.yaml
   alert-consumer-src:
     file: ./alert-consumer.py
   fluss-r2-secrets-bridge:
@@ -1006,8 +1012,10 @@ services:
   #   `cadvisor:8080` (jobs infra-host and infra-containers). Neither service was
   #   in this file, so both jobs failed every 15 s and their panels stayed empty —
   #   a missing scrape target warns, it does not break a deploy, which is why it
-  #   went unnoticed (CHG-257). Same placement as the collector: these are agents
-  #   of the observability host, not of the trading nodes.
+  #   went unnoticed (CHG-257). Both agents run on every node (CHG-265) and the
+  #   scrape that reaches them lives in the single-replica collector
+  #   (`tasks.node-exporter` / `tasks.cadvisor`, CHG-273) — a scraper on every
+  #   node would store each host metric once per node.
   node-exporter:
     # Host metrics. The three host mounts plus --path.* are what make the numbers
     # belong to the VM: without --path.rootfs the filesystem collectors read the
@@ -1107,14 +1115,23 @@ services:
           cpus: "1"
           memory: 1G
   otel-collector:
-    # x-healthcheck: none (no shell in the image — verified: neither /bin/sh nor /busybox/sh
-    #   can exec — so no in-container probe can run; liveness is the health_check extension
-    #   on 0.0.0.0:13133, otel-collector-config.yaml:116).
+    # CHG-273: the NETWORK half, and deliberately a singleton. `mode: global` with
+    # a placement constraint (what this service used to say) is a contradiction the
+    # engine resolves in favour of the constraint — one task, on the observability
+    # node — while reading as "every node" to a human. The two halves are now
+    # explicit: this one scrapes and receives, its sibling reads files.
+    #   Why one replica is not a limitation but a requirement: the prometheus
+    #   receiver scrapes `tasks.node-exporter` / `tasks.cadvisor`, i.e. EVERY node's
+    #   agent. Running this on four nodes would store each host metric four times
+    #   (wrong rate() and sum() in every panel), so the scraper is the single writer.
+    # x-healthcheck: none (no shell in the image — verified: neither /bin/sh nor
+    #   /busybox/sh can exec — so no in-container probe can run; liveness is the
+    #   health_check extension on 0.0.0.0:13133 in the collector config).
     image: otel/opentelemetry-collector-contrib@sha256:e39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2
     networks: [trading-net]
     command: ["--config=/etc/otel-collector-config.yaml"]
     deploy:
-      mode: global
+      replicas: 1
       placement:
         constraints: [node.labels.observability == true]
       restart_policy: {condition: any}
@@ -1128,16 +1145,51 @@ services:
     configs:
       - source: otel-collector-config
         target: /etc/otel-collector-config.yaml
-    # CHG-263: the filelog/infrastructure receiver reads host log files, so the
-    # collector needs the host's own /var/log (read-only) — without this mount it held
-    # three service volumes and nothing else, and `/var/log/*.log` matched nothing.
-    #   `user: "0:4"` (root:adm) is forced by measurement, not preference: auth.log and
-    #   kern.log are `640 syslog:adm`, boot.log is `600 root`, the image defaults to
-    #   uid 10001, and a stack file CANNOT add a supplementary group — `group_add` is
-    #   rejected ("Additional property group_add is not allowed"), while `user` is
-    #   accepted and lands on the task. Read-only, so the collector may read the logs
-    #   and cannot alter them. ZooKeeper, Fluss and OpenObserve already run as root in
-    #   this stack; the collector was the outlier.
+    # CHG-273: no host mounts and no `user:` here any more. Every file it used to
+    # read (the three node-local log volumes and the host's /var/log) now belongs to
+    # otel-collector-logs — one file, one reader, and no root-owned process that does
+    # not need to be one.
+
+  otel-collector-logs:
+    # CHG-273: the PER-HOST FILE half. Global and unconstrained on purpose: the
+    # filelog receivers read files that exist on exactly one node — the host's
+    # /var/log and the node-local named volumes (ingestion-logs, flink-logs,
+    # fluss-logs). The old single collector mounted its OWN copies of those volumes,
+    # so on four VMs the logs written on VM1-3 were collected from nowhere: the bind
+    # mount and the volumes are per node, and an empty directory reads as silence,
+    # not as an error. Same rule as node-exporter and cadvisor (CHG-265) — a per-host
+    # agent belongs on every node. Measured cost of the agent class, 2026-09-20:
+    # node-exporter 9.9 MiB, cadvisor 99.7 MiB per node; this one batches files and
+    # is bounded by memory_limiter at 512 MiB.
+    # x-healthcheck: none — same distroless image, so liveness is the health_check
+    #   extension on 0.0.0.0:13133; it exposes no port a probe could use.
+    image: otel/opentelemetry-collector-contrib@sha256:e39311df1f3d941923c00da79ac7ba6269124a870ee87e3c3ad24d60f8aee4d2
+    networks: [trading-net]
+    command: ["--config=/etc/otel-collector-logs.yaml"]
+    deploy:
+      mode: global
+      restart_policy: {condition: any}
+      update_config:
+        order: start-first
+        failure_action: rollback
+      resources:
+        limits: {cpus: "1", memory: 1G}
+    # CHG-273: the node's own name. The collector config's resource/node processor
+    # reads HOSTNAME (the container hostname) into `resource.host.name`, which is what
+    # tells four nodes' log lines apart in one O2 stream — the same mechanism
+    # node-exporter uses for `nodename`.
+    hostname: "{{.Node.Hostname}}"
+    secrets:
+      - o2_auth_basic
+    configs:
+      - source: otel-collector-logs-config
+        target: /etc/otel-collector-logs.yaml
+    # CHG-263: `user: "0:4"` (root:adm) is forced by measurement, not preference:
+    # auth.log and kern.log are `640 syslog:adm`, boot.log is `600 root`, the image
+    # defaults to uid 10001, and a stack file CANNOT add a supplementary group —
+    # `group_add` is rejected ("Additional property group_add is not allowed"), while
+    # `user` is accepted and lands on the task. Read-only, so the collector may read
+    # the logs and cannot alter them.
     user: "0:4"
     volumes:
       - ingestion-logs:/data/ingestion/logs:ro

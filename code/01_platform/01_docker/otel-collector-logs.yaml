@@ -1,0 +1,222 @@
+# =============================================================================
+# PER-HOST LOG COLLECTION — the global half of the collector split (CHG-273).
+#
+# Why this file exists (issue #54): the filelog receivers read files that belong
+# to ONE node — the host's /var/log and the node-local named volumes
+# (ingestion-logs, flink-logs, fluss-logs). A single collector pinned to the
+# observability node mounts *its own* copies of those volumes, so in a four-VM
+# deployment the logs written on VM1-3 were collected from nowhere: the bind
+# mount and the volumes are per node, and an empty directory reads as silence,
+# not as an error.
+#
+# So this service runs `mode: global` with NO placement constraint — the same
+# rule as node-exporter and cAdvisor (CHG-265): one replica per node, each
+# reading exactly the files that node has. Nothing here scrapes or receives
+# OTLP on purpose: a network collector must be a single writer, or every metric
+# lands N times (that half is otel-collector-config.swarm.yaml, one replica).
+#
+# Routing metadata: `resource.service.name` is set per receiver (ingestion /
+# flink / fluss / infra) and `resource.host.name` once for all four pipelines
+# (processor resource/node) from the container's HOSTNAME, which
+# docker-stack.yml pins to `{{.Node.Hostname}}`.
+#
+# This is the compose (dev) variant. otel-collector-logs.swarm.yaml is generated
+# from it (keep in sync); the ONLY difference is the credential source:
+#   compose (dev):  ${env:O2_AUTH_BASIC}                 (host .env value)
+#   stack  (prod):  ${file:/run/secrets/o2_auth_basic}   (Swarm secret content)
+# =============================================================================
+receivers:
+  filelog:
+    include: [/data/ingestion/logs/*.json]
+    start_at: end
+    operators:
+      - type: json_parser
+        parse_to: body
+      - type: add
+        field: resource.service.name
+        value: ingestion
+      # Stream routing happens in the exporter via the stream-name HTTP
+      # header (O2 v0.91.5 ZO_GRPC_STREAM_HEADER_KEY) — not attributes.
+  # P8.2 (tracker 14): flink_logs stream from the flink-logs volume
+  # (/opt/flink/log/<role>.log, plain-text log4j output). ID must use the
+  # type/name syntax (filelog/flink), not a bare custom type name.
+  filelog/flink:
+    include: [/data/flink/logs/*.log]
+    start_at: beginning
+    operators:
+      - type: add
+        field: resource.service.name
+        value: flink
+  # P8.1 (tracker 14 box 827): fluss_logs stream from the fluss-logs volume
+  # (/opt/fluss/log/*.log — fluss--<role>-*.log log4j2 output, verified live
+  # 2026-08-11). Reads CoordinatorServer + TabletServer logs: connection,
+  # leadership, storage, replication, lake tiering.
+  filelog/fluss:
+    include: [/data/fluss/logs/*.log]
+    start_at: beginning
+    operators:
+      - type: add
+        field: resource.service.name
+        value: fluss
+  # 2026-08-22 single-pane: infrastructure logs (host journald + container).
+  # CHG-263: the include list is now exactly what this container can open. The old
+  # list named two paths that produced nothing: `/data/infra/logs/*.log` lived in a
+  # named volume no service ever wrote to (the comment called the /var/log bind
+  # "optional" and no bind was declared anywhere), and `/var/log/syslog` — the system
+  # log itself, 47 MB and actively written on the rehearsal host — has no `.log`
+  # suffix, so the glob could never match it. Routes to infrastructure_logs (O2 header).
+  filelog/infrastructure:
+    include: [/var/log/*.log, /var/log/syslog]
+    start_at: end
+    operators:
+      - type: add
+        field: resource.service.name
+        value: infra
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+exporters:
+  # Logs route to O2's platform_logs stream via the stream-name HTTP header
+  # (ZO_GRPC_STREAM_HEADER_KEY, default "stream-name"; O2 v0.91.5 source
+  # src/handler/http/request/logs/ingest.rs otlp_logs_write — verified by
+  # direct probes + collector config 2026-08-11). OTLP attributes such as
+  # stream_name are NOT honored, so the header is the only routing mechanism.
+  otlphttp/openobserve-logs:
+    endpoint: http://openobserve:5080/api/default
+    headers:
+      Authorization: "Basic ${env:O2_AUTH_BASIC}"
+      stream-name: platform_logs
+    compression: gzip
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 5m
+  # stream-name: flink_logs routes log records to the flink_logs stream
+  # (O2 v0.91.5 ZO_GRPC_STREAM_HEADER_KEY) instead of platform_logs.
+  otlphttp/openobserve-flink-logs:
+    endpoint: http://openobserve:5080/api/default
+    headers:
+      Authorization: "Basic ${env:O2_AUTH_BASIC}"
+      stream-name: flink_logs
+    compression: gzip
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 5m
+  # P8.1 (tracker 14 box 827): Fluss server logs -> fluss_logs stream.
+  otlphttp/openobserve-fluss-logs:
+    endpoint: http://openobserve:5080/api/default
+    headers:
+      Authorization: "Basic ${env:O2_AUTH_BASIC}"
+      stream-name: fluss_logs
+    compression: gzip
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 5m
+  # 2026-08-22 single-pane: infrastructure logs -> infrastructure_logs stream.
+  otlphttp/openobserve-infra-logs:
+    endpoint: http://openobserve:5080/api/default
+    headers:
+      Authorization: "Basic ${env:O2_AUTH_BASIC}"
+      stream-name: infrastructure_logs
+    compression: gzip
+    retry_on_failure:
+      enabled: true
+      initial_interval: 1s
+      max_interval: 30s
+      max_elapsed_time: 5m
+
+processors:
+  batch:
+    send_batch_size: 512
+    timeout: 5s
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  # T11: keep errors/gaps at 100% and give every log record per-record
+  # sampling entropy. sampling.priority >= 100 forces the sampler to KEEP the
+  # record (probabilistic_sampler logs mode, v0.123.0: priority attr is
+  # interpreted as a percentage; absent -> configured sampling_percentage).
+  # The seed is the log4j2 event instant (always present in JsonLayout
+  # output), so the 1% decision is uniform per record, not per token.
+  transform/tick-sampling:
+    error_mode: ignore
+    log_statements:
+      - context: log
+        statements:
+          - >-
+            set(attributes["sampling.priority"], 100)
+            where severity_number >= SEVERITY_NUMBER_WARN
+            or body["level"] == "ERROR" or body["level"] == "WARN"
+          - >-
+            set(attributes["sampling.seed"],
+            Int(body["instant"]["epochSecond"]) * 1000000000
+            + Int(body["instant"]["nanoOfSecond"]))
+  # T11: 1% sample of tick (non-error) logs; priority records pass 100%.
+  probabilistic_sampler/tick:
+    sampling_percentage: 1
+    attribute_source: record
+    from_attribute: sampling.seed
+    sampling_priority: sampling.priority
+  # CHG-273: which node a log line came from. Every pipeline below reads files
+  # that exist on exactly one node, so without this tag a four-node deployment
+  # stores four indistinguishable streams in one O2 stream. HOSTNAME is the
+  # container's hostname, which the stack pins to `{{.Node.Hostname}}` (the same
+  # trick node-exporter uses for `nodename`); the `:-unknown` default keeps the
+  # collector starting if it is ever unset, instead of failing on env expansion.
+  resource/node:
+    attributes:
+      - key: host.name
+        value: ${env:HOSTNAME:-unknown}
+        action: upsert
+
+service:
+  extensions: [health_check]
+  pipelines:
+    # T11: tick logs sampled 1% (transform marks ERROR/WARN/gap records
+    # priority 100 -> kept; INFO tick records sampled 1%).
+    logs:
+      receivers: [filelog]
+      processors:
+        - memory_limiter
+        - batch
+        - resource/node
+        - transform/tick-sampling
+        - probabilistic_sampler/tick
+      exporters: [otlphttp/openobserve-logs]
+    # P8.2: flink file logs -> flink_logs stream.
+    logs/flink:
+      receivers: [filelog/flink]
+      processors: [memory_limiter, batch, resource/node]
+      exporters: [otlphttp/openobserve-flink-logs]
+    # P8.1: fluss server logs -> fluss_logs stream.
+    logs/fluss:
+      receivers: [filelog/fluss]
+      processors: [memory_limiter, batch, resource/node]
+      exporters: [otlphttp/openobserve-fluss-logs]
+    # 2026-08-22 single-pane: infra file logs -> infrastructure_logs stream.
+    logs/infrastructure:
+      receivers: [filelog/infrastructure]
+      processors: [memory_limiter, batch, resource/node]
+      exporters: [otlphttp/openobserve-infra-logs]
+  # Self-telemetry: the collector's own counters (notably
+  # otelcol_exporter_send_failed_log_records) must reach O2 too, or "logs
+  # stopped arriving" is invisible. This service has no OTLP receiver — by
+  # design, it must not be a network collector — so its self-metrics are sent
+  # to the singleton's OTLP endpoint and travel the metrics pipeline there.
+  telemetry:
+    metrics:
+      readers:
+        - periodic:
+            interval: 60000
+            exporter:
+              otlp:
+                protocol: http/protobuf
+                endpoint: http://otel-collector:4318

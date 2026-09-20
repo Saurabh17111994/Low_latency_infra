@@ -160,8 +160,8 @@ class ProdHardeningTest(unittest.TestCase):
         leaked = [str(p) for p in (ROOT / "code/02_services/01_ingestion").rglob("*.java")
                   if "O2_AUTH" in p.read_text()]
         self.assertEqual([], leaked, "PROD-009: ingestion must not hold O2 cred")
-        # filelog receiver is on collector, not ingestion
-        self.assertIn("filelog", ct)
+        # filelog receiver is on the per-host collector (CHG-273), not on ingestion
+        self.assertIn("filelog", (ROOT / "code/01_platform/01_docker/otel-collector-logs.yaml").read_text())
 
     def test_PROD_010_gate_monotonic_and_safety_halt_only_regress(self):
         """PROD-010: gate HALTED→RECONCILING→APPROVAL_PENDING→ENABLED, only safety_halt regresses."""

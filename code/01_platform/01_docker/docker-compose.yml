@@ -1131,6 +1131,10 @@ services:
   # per phase (INGESTION now; SIGNAL / EXECUTOR later). The collector is the
   # standard OTel transport — deliberately NOT in the ingestion critical path.
   otel-collector:
+    # CHG-273: the NETWORK half — one container (compose has no `mode: global`):
+    # Prometheus scrapes + OTLP push. The file receivers moved to
+    # otel-collector-logs below, so a four-VM deployment reads each node's own files
+    # instead of one collector reading its own copies of every node's volumes.
     image: otel/opentelemetry-collector-contrib:0.123.0
     env_file:
       - .env
@@ -1139,29 +1143,41 @@ services:
     restart: unless-stopped
     networks: [trading-net]
     command: ["--config=/etc/otel-collector-config.yaml"]
-    # CHG-263: root:adm — the host logs are 640 syslog:adm and this image runs as
-    # uid 10001 by default (see docker-stack.yml for the full measurement).
-    user: "0:4"
     ports:
       - "4317:4317"
       - "4318:4318"
     volumes:
       - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
-      # R-171/P8.2: collector reads the same ingestion JSON logs the ingestion
-      # service writes (filelog receiver, /data/ingestion/logs/*.json).
+    environment:
+      O2_AUTH_BASIC: ${O2_AUTH_BASIC}
+    depends_on: [openobserve]
+
+  otel-collector-logs:
+    # CHG-273: the PER-HOST FILE half. In the swarm stack this is `mode: global`;
+    # compose runs one node, so one container. `user: "0:4"` and the /var/log bind
+    # are the same contract as production (CHG-263).
+    image: otel/opentelemetry-collector-contrib:0.123.0
+    env_file:
+      - .env
+      - secrets.env
+
+    restart: unless-stopped
+    networks: [trading-net]
+    command: ["--config=/etc/otel-collector-logs.yaml"]
+    hostname: dev-node   # the resource/node processor tags log lines with this
+    # CHG-263: root:adm — the host logs are 640 syslog:adm and this image runs as
+    # uid 10001 by default (see docker-stack.yml for the full measurement).
+    user: "0:4"
+    volumes:
+      - ./otel-collector-logs.yaml:/etc/otel-collector-logs.yaml:ro
+      # R-171/P8.2: the same ingestion JSON logs the ingestion service writes.
       - ingestion-logs:/data/ingestion/logs:ro
-      # P8.2 (tracker 14): flink_logs stream — JobManager/TaskManager file
-      # logs (flink-logs volume, /opt/flink/log/*.log inside the flink
-      # containers) read by the flink_filelog receiver.
+      # P8.2 (tracker 14): flink_logs stream — JobManager/TaskManager file logs.
       - flink-logs:/data/flink/logs:ro
-      # P8.1 (tracker 14 box 827): fluss_logs stream — CoordinatorServer /
-      # TabletServer logs (fluss-logs volume, /opt/fluss/log/*.log inside the
-      # fluss containers) read by the filelog/fluss receiver.
+      # P8.1 (tracker 14 box 827): fluss_logs stream — CoordinatorServer/TabletServer logs.
       - fluss-logs:/data/fluss/logs:ro
-      # 2026-08-22 single-pane: infra logs volume for infrastructure_logs.
-      # CHG-263: the host's log directory, read-only — the same contract as the swarm
-      # stack, so the development stream and the production stream carry the same
-      # thing. `user: "0:4"` below is what makes auth.log/kern.log readable.
+      # 2026-08-22 single-pane: the host's log directory, read-only — the same
+      # contract as the swarm stack, so dev and production carry the same thing.
       - type: bind
         source: /var/log
         target: /var/log

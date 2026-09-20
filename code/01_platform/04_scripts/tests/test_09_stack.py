@@ -39,8 +39,10 @@ OBSERVABILITY = ["otel-collector", "openobserve", "alert-consumer"]
 # Per-host agents (CHG-265): global mode IS their placement, so they carry no
 # constraint. Every node runs them, which is the only way VM1-VM3 host and container
 # metrics exist — and it means a node added later is covered without an edit here.
-PER_HOST_AGENTS = ("node-exporter", "cadvisor")
+PER_HOST_AGENTS = ("node-exporter", "cadvisor", "otel-collector-logs")
 COLLECTOR = ROOT / "code/01_platform/01_docker/otel-collector-config.swarm.yaml"
+# CHG-273: the file-reading half has its own config and its own service.
+COLLECTOR_LOGS = ROOT / "code/01_platform/01_docker/otel-collector-logs.swarm.yaml"
 
 def _load():
     return yaml.safe_load(STACK.read_text())
@@ -123,10 +125,12 @@ class TestPlacement:
 
         A per-host agent is the one service class whose correct placement is "every
         node" — that is what `mode: global` means. A label constraint there is a
-        conditional that decides for a human, and both agents used to carry one
+        conditional that decides for a human, and each agent used to carry one
         (`observability == true`), so on four VMs the trading nodes' own host and
-        container metrics came from nowhere. Every other service is still placed by
-        label, and nothing may pin a hostname.
+        container metrics came from nowhere. CHG-273 added the third: the file-reading
+        collector, which under the same constraint read its own copies of every node's
+        log volumes while the other nodes' logs went uncollected. Every other service
+        is still placed by label, and nothing may pin a hostname.
         """
         d = _load()
         for name, svc in d["services"].items():
@@ -558,6 +562,7 @@ class TestTier2Hardening:
     # Services that may validly have NO swarm healthcheck, and must say why.
     HEALTHCHECK_ALLOWED_EXCEPTIONS = {
         "otel-collector",      # distroless — no shell, cannot run a CMD probe
+        "otel-collector-logs",  # same image; health_check extension on 0.0.0.0:13133
         "openobserve",         # static /openobserve binary, no shell/curl/wget
         "flink-taskmanager",   # no fixed external listener
         "execution-gateway",   # GATEWAY_BIND_PORT env-driven; readiness = GatewayReadiness
@@ -1225,7 +1230,8 @@ class TestCollectorScrapeTargets:
         for name in PER_HOST_AGENTS:
             assert d[name].get("hostname") == "{{.Node.Hostname}}", (
                 f"{name} must take the node's own hostname: node-exporter reads its UTS "
-                "name, measured as the container id (nodename=f77f64fd95c1) without this")
+                "name (measured as the container id, nodename=f77f64fd95c1, without it) "
+                "and the logs collector's resource/node processor reads HOSTNAME")
         swarm = yaml.safe_load(COLLECTOR.read_text())
         targets = {t for c in swarm["receivers"]["prometheus"]["config"]["scrape_configs"]
                    for sc in c.get("static_configs", []) for t in sc.get("targets", [])}
@@ -1236,10 +1242,10 @@ class TestCollectorScrapeTargets:
 
     def test_infra_agents_report_on_the_host_not_the_container(self):
         d = _load()["services"]
-        for name in ("node-exporter", "cadvisor"):
+        for name in PER_HOST_AGENTS:
             svc = d[name]
             assert svc["deploy"]["mode"] == "global", (
-                f"{name} is a per-host agent: it must run on every observability node")
+                f"{name} is a per-host agent: it must run on every node")
             assert "@sha256:" in svc["image"], f"{name} must be digest-pinned"
             assert svc["deploy"].get("restart_policy"), f"{name} needs a restart policy"
         mounts = {m.split(":")[1] for m in d["node-exporter"]["volumes"]}
@@ -1266,6 +1272,9 @@ class TestCollectorHostLogs:
     and `/var/log/*.log` (a bind the collector never had — its own comment called that
     bind "optional"), and `/var/log/syslog` has no `.log` suffix, so even with the bind
     the system log was unreachable. These tests hold all three halves together.
+    CHG-273 moved every filelog receiver and every host mount into
+    `otel-collector-logs`, so the halves now have to agree inside that service and its
+    config — which is where they are checked.
     """
 
     def _include_dirs(self):
@@ -1274,7 +1283,7 @@ class TestCollectorHostLogs:
         The collector is Linux; the test may run anywhere, so paths are compared as
         strings rather than resolved against the test host's filesystem.
         """
-        cfg = yaml.safe_load(COLLECTOR.read_text())
+        cfg = yaml.safe_load(COLLECTOR_LOGS.read_text())
         dirs = {}
         for name, rec in (cfg.get("receivers") or {}).items():
             if not name.startswith("filelog"):
@@ -1285,9 +1294,9 @@ class TestCollectorHostLogs:
         return dirs
 
     def _mounts(self):
-        """Mount target -> (source, read_only) for the collector service."""
+        """Mount target -> (source, read_only) for the file-reading service."""
         out = {}
-        for m in _load()["services"]["otel-collector"].get("volumes") or []:
+        for m in _load()["services"]["otel-collector-logs"].get("volumes") or []:
             if isinstance(m, str):
                 parts = m.split(":")
                 # `source:target[:mode]` — a 2-part short form means read-write
@@ -1330,9 +1339,9 @@ class TestCollectorHostLogs:
         is not allowed"), so the only expressible way to read them is `user`, and this
         test requires that it is set deliberately rather than left to the image default.
         """
-        svc = _load()["services"]["otel-collector"]
+        svc = _load()["services"]["otel-collector-logs"]
         assert svc.get("user"), (
-            "the collector reads host logs that are 640 syslog:adm; without `user` it "
+            "this service reads host logs that are 640 syslog:adm; without `user` it "
             "runs as the image's uid 10001 and silently collects nothing"
         )
 
@@ -1353,7 +1362,9 @@ class TestRestartBudget:
                "flink-jobmanager", "flink-taskmanager", "ingestion", "execution-bridge"}
     UNBOUNDED = {"zookeeper-1", "zookeeper-2", "zookeeper-3", "execution-gateway", "nautilus",
                  "otel-collector", "openobserve", "alert-consumer",
-                 "node-exporter", "cadvisor",
+                 # CHG-273: the per-host file collector — a stopped one is a silent hole
+                 # in the single pane, exactly like node-exporter and cadvisor.
+                 "otel-collector-logs", "node-exporter", "cadvisor",
                  # CHG-269: the EOD trigger. Same reasoning as the alert consumer
                  # (CHG-258): a stopped scheduler is a daily job that silently never
                  # runs, so it restarts forever and the failure stays visible.

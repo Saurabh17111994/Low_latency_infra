@@ -60,7 +60,9 @@ series exist only through the top-20 sampler.** At the 3,000-token envelope,
 naive per-token emission would create ~30,000 series (3,000 tokens × 10
 metrics) and break both OpenObserve and the dashboards. The collector
 (`code/01_platform/01_docker/otel-collector-config.yaml`,
-`otel-collector-config.swarm.yaml`) enforces the bound; no service bypasses it.
+`otel-collector-config.swarm.yaml`, plus the filelog halves
+`otel-collector-logs.yaml` / `otel-collector-logs.swarm.yaml` — the split is CHG-273) enforces the
+bound; no service bypasses it.
 
 | Bound | Mechanism | Config |
 | --- | --- | --- |

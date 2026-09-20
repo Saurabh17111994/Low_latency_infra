@@ -1,6 +1,8 @@
 """P5-027/028 — flink log4j rollover keeps the collector shipping contract.
 
-The otel-collector filelog/flink receiver includes /data/flink/logs/*.log.
+The per-host collector's filelog/flink receiver includes /data/flink/logs/*.log
+(CHG-273 moved every filelog receiver into otel-collector-logs; the contract is
+unchanged, only the file that holds it).
 Two silent-breakage modes guarded here:
   - P5-027: an unresolved ${sys:log.file} lookup writes a literal file
     named "log.file" in the cwd (never ships) — the fileName needs a
@@ -15,9 +17,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[4]
 LOG4J = ROOT / "code/01_platform/01_docker/flink-log4j-console.properties"
+# CHG-273: the file-reading half owns the filelog receivers.
 COLLECTORS = [
-    ROOT / "code/01_platform/01_docker/otel-collector-config.yaml",
-    ROOT / "code/01_platform/01_docker/otel-collector-config.swarm.yaml",
+    ROOT / "code/01_platform/01_docker/otel-collector-logs.yaml",
+    ROOT / "code/01_platform/01_docker/otel-collector-logs.swarm.yaml",
 ]
 
 
@@ -40,7 +43,7 @@ class FlinkLogShippingTests(unittest.TestCase):
 
     def test_collector_flink_glob_covers_rotated_names(self):
         """Contract pair: if either side changes, shipping breaks silently.
-        filePattern ends .log <=> collector includes *.log for /data/flink."""
+        filePattern ends .log <=> the file-reading collector includes *.log."""
         for c in COLLECTORS:
             m = re.search(r"filelog/flink:\s*\n\s*include:\s*\[([^\]]*)\]", c.read_text())
             self.assertIsNotNone(m, f"{c.name}: filelog/flink receiver missing")

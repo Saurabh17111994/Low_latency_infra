@@ -45,7 +45,8 @@ disk. The script uses that form, and `tests/test_15_secrets_bootstrap.py` assert
 appears in an argument.
 
 `o2_auth_basic` is **bare base64** — `base64("<o2-user>:<password>")` with no `Basic ` prefix —
-because `otel-collector-config.swarm.yaml` writes the scheme itself
+because the collector configs (`otel-collector-config.swarm.yaml` and, since CHG-273, the file-reading
+half `otel-collector-logs.swarm.yaml`) write the scheme themselves
 (`Authorization: "Basic ${file:/run/secrets/o2_auth_basic}"`). A prefixed value authenticates as
 `Basic Basic …` and answers 401.
 

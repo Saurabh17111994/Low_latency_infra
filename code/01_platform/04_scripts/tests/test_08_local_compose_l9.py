@@ -9,6 +9,8 @@ from pathlib import Path
 ROOT = Path(__file__).parents[4]
 COMPOSE = ROOT / "code/01_platform/01_docker/docker-compose.yml"
 COLLECTOR = ROOT / "code/01_platform/01_docker/otel-collector-config.yaml"
+# CHG-273: filelog receivers and the host-log mounts live in the per-host collector.
+COLLECTOR_LOGS = ROOT / "code/01_platform/01_docker/otel-collector-logs.yaml"
 PLATFORM_CONFIG = ROOT / "code/common/src/main/java/com/trading/common/config/PlatformConfig.java"
 INGESTION_METRICS = ROOT / "code/02_services/01_ingestion/src/main/java/com/trading/ingestion/telemetry/OtlpMetricsEmitter.java"
 GATE_RS = ROOT / "code/02_services/04_executor/src/gate.rs"
@@ -47,10 +49,12 @@ class ObservabilityL9Test(unittest.TestCase):
         """OBS-001: every required service emits telemetry to OTel collector / OpenObserve."""
         ct = collector_text()
         self.assertTrue(COLLECTOR.exists(), "OBS-001: otel-collector-config.yaml missing")
-        # collector has OTLP (ingestion), prometheus (Flink), filelog (ingestion/flink/fluss)
+        # collector has OTLP (ingestion) + prometheus (Flink); the filelog receivers
+        # (ingestion/flink/fluss) are the per-host half (CHG-273), so the "all three
+        # receiver classes exist" claim spans both configs.
         self.assertIn("otlp:", ct, "OBS-001: otlp receiver missing")
         self.assertIn("prometheus:", ct, "OBS-001: prometheus scrape missing")
-        self.assertIn("filelog", ct, "OBS-001: filelog receiver missing")
+        self.assertIn("filelog", COLLECTOR_LOGS.read_text(), "OBS-001: filelog receiver missing")
         self.assertIn("otel-collector", compose_text(), "OBS-001: collector service missing")
         self.assertIn("openobserve", compose_text(), "OBS-001: openobserve service missing")
         self.assertTrue(INGESTION_METRICS.exists(), "OBS-001: OtlpMetricsEmitter missing")
