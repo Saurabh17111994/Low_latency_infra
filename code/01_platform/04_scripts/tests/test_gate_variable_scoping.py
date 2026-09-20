@@ -39,6 +39,15 @@ def regions() -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
     step = None
     for line in GATE.read_text(encoding="utf-8").split("\n"):
+        if line.lstrip().startswith("#"):
+            continue
+        # A comment cannot read a variable, but it can contain ${VAR}-shaped text
+        # (CHG-268's step-3 note did). Scanning raw lines made that a false
+        # "step3 reads an unassigned variable" — the guard now skips full-line
+        # comments. Trailing comments are left alone: a `#` inside a quoted string
+        # is not a comment, and guessing here would hide real reads.
+        if line.lstrip().startswith("#"):
+            continue
         m = STEP.match(line)
         if m:
             step = m.group(1)
@@ -59,6 +68,8 @@ def reads() -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
     step = None
     for line in GATE.read_text(encoding="utf-8").split("\n"):
+        if line.lstrip().startswith("#"):
+            continue
         m = STEP.match(line)
         if m:
             step = m.group(1)
