@@ -427,6 +427,22 @@ plain-HTTP registry.
 `--check` reports `[FAIL] sysctls …` until someone decides it — a host cannot be declared ready on a
 guess.
 
+**Before deploying — after step 6 has just rewritten the deploy environment.** Compose interpolates
+that file silently, so a missing key becomes an empty string and a tag becomes "whatever the node
+happened to pull". The preflight runs first and only passes on a coherent environment (CHG-267):
+```bash
+python3 code/01_platform/04_scripts/deploy_preflight.py \
+     --env-file code/01_platform/01_docker/.env --expect production --check-lake --secrets-check
+```
+Exit code = number of FAILs. It checks the six values the platform cannot invent (the same six
+`stack_selfcheck.sh` requires after the fact), that `R2_ENDPOINT` is `https://` and `CHECKPOINT_DIR`
+is `s3://<bucket>/…` — a local path dies with the node that holds it — that every `${VAR}` the stack
+interpolates resolves to a non-empty value, and that every image a node would pull is pinned, judging
+the *effective* image so a stack-side default is checked too. `--check-lake` performs one signed LIST
+through `r2-list.sh` (missing or wrong R2 credentials become one line of output instead of a tiering
+mystery), `--secrets-check` runs `secrets-bootstrap.sh --check`. `--expect dev` demotes the
+production-only rules to `[INFO]`.
+
 **Exit:** `docker version` works on each node without `sudo`; `timedatectl` shows a synchronized
 clock; `curl -s http://<vm1-ip>:5000/v2/_catalog` lists the pushed repositories; every image
 reference in the deploy environment is `<vm1-ip>:5000/name@sha256:…`.
