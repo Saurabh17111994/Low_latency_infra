@@ -1,106 +1,80 @@
-# Docker Swarm Secret Sequence (Ingestion)
+# Docker Swarm secrets — creation, storage, rotation
 
-Applies to: `02_services/01_ingestion` deployment via Docker Swarm.
+Applies to the production stack (`code/01_platform/01_docker/docker-stack.yml`, deployed as `prod`).
+Supersedes the ingestion-era sequence, which created five names — two of them (`arrow_app_id`,
+`arrow_user_id`) not secrets at all, and two more absent from the stack entirely. §What is not a
+secret records what changed and why.
 
 ## Why secrets, not env
 
-Secrets must never appear in stack files, source, images, command lines,
-environment dumps, or telemetry (see `04-secrets-rotation.md` §Policy). The
-ingestion service reads the following credentials at runtime:
+Secrets must never appear in stack files, source, images, command lines, environment dumps, or
+telemetry (`docs/05_deployment/04-secrets-rotation.md` §Storage rules). The stack declares exactly
+nine names `external: true`, and `code/01_platform/04_scripts/secrets-bootstrap.sh --self-check`
+fails when its own list drifts from that block — the drift that fails a deploy with "secret not
+found". `--check` is the runtime form: it asks the cluster whether all nine exist.
 
-| Secret | Used by | Ingested as |
-|--------|---------|-------------|
-| `arrow_app_id` | Go bridge (SDK auth) | `ARROW_APP_ID` |
-| `arrow_app_secret` | Go bridge (autologin) | `ARROW_APP_SECRET` |
-| `arrow_user_id` | Go bridge (autologin) | `ARROW_USER_ID` |
-| `arrow_password` | Go bridge (autologin) | `ARROW_PASSWORD` |
-| `arrow_totp_key` | Go bridge (autologin TOTP) | `ARROW_TOTP_KEY` |
-| `fluss_bootstrap` | Java writers (coordinator) | `FLUSS_BOOTSTRAP` (not a secret, but pinned) |
+| Secret | Mounted by | How the consumer reads it |
+| --- | --- | --- |
+| `aws_access_key_id` · `aws_secret_access_key` | `fluss-coordinator`, `fluss-tablet-1/2/3`, `flink-jobmanager`, `flink-taskmanager` | `/run/secrets/…` via `AWS_ACCESS_KEY_ID_FILE` / `AWS_SECRET_ACCESS_KEY_FILE` |
+| `execution_bridge_auth_token` | `execution-bridge` | `EXECUTION_BRIDGE_AUTH_TOKEN_FILE` |
+| `arrow_app_secret` · `arrow_password` · `arrow_totp_key` | `ingestion` | `/run/secrets/arrow_*` |
+| `o2_password` · `o2_auth_basic` | `openobserve`, `otel-collector` | `/run/secrets/o2_*` |
+| `gateway_shared_secret` | `execution-gateway`, `nautilus` | `/run/secrets/gateway_shared_secret` |
 
-Autologin (`ARROW_USER_ID` + `ARROW_PASSWORD` + `ARROW_TOTP_KEY`) is the only
-supported path. Since 2026-08-24 `IngestionConfig` rejects a non-blank
-`ARROW_TOKEN` outright, so do not create that secret or export that variable —
-ingestion fails config validation before it connects.
+## Creation — one command, no secret on disk
 
-## Sequence
-
-### 1. Create the secrets (one-time)
-
-```
-docker secret create arrow_app_id     <(printf '%s' "<app-id>")
-docker secret create arrow_app_secret <(printf '%s' "<app-secret>")
-docker secret create arrow_user_id    <(printf '%s' "<user-id>")
-docker secret create arrow_password   <(printf '%s' "<password>")
-docker secret create arrow_totp_key   <(printf '%s' "<totp-key>")
-```
-
-Never pass secrets on a shell command line visible to `ps` — use the
-`<(printf …)` process substitution or an encrypted file.
-
-### 2. Reference secrets in the stack file
-
-```yaml
-services:
-  ingestion:
-    image: trading-platform/ingestion:<version>
-    secrets:
-      - arrow_app_id
-      - arrow_app_secret
-      - arrow_user_id
-      - arrow_password
-      - arrow_totp_key
-    environment:
-      # non-secret config only
-      FLUSS_BOOTSTRAP: "fluss-coordinator:9123"
-      ARROW_INSTRUMENT_MANIFEST: "/instruments/NSE_CM_EQUITY (1024).csv"
-    configs:
-      - source: instruments_1024
-        target: /instruments/NSE_CM_EQUITY (1024).csv
-
-secrets:
-  arrow_app_id:     { external: true }
-  arrow_app_secret: { external: true }
-  arrow_user_id:    { external: true }
-  arrow_password:   { external: true }
-  arrow_totp_key:   { external: true }
-
-configs:
-  instruments_1024:
-    file: ../../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv
-```
-
-### 3. Map Swarm secrets → env in the entrypoint
-
-Docker Swarm mounts secrets under `/run/secrets/<name>`. The ingestion
-`docker-entrypoint.sh` must export them before `exec java`:
+`code/01_platform/04_scripts/secrets-bootstrap.sh` creates all nine: five values from the operator,
+four generated on the host. The procedure and the values-file format are in
+`PROD_VM_PROVISIONING.md` §9 `S6`.
 
 ```bash
-export ARROW_APP_ID="$(cat /run/secrets/arrow_app_id)"
-export ARROW_APP_SECRET="$(cat /run/secrets/arrow_app_secret)"
-export ARROW_USER_ID="${ARROW_USER_ID:-$(cat /run/secrets/arrow_user_id)}"
-export ARROW_PASSWORD="${ARROW_PASSWORD:-$(cat /run/secrets/arrow_password)}"
-export ARROW_TOTP_KEY="${ARROW_TOTP_KEY:-$(cat /run/secrets/arrow_totp_key)}"
+ssh <ssh-user>@<vm1-ip> 'cd ~/arrow-infra && code/01_platform/04_scripts/secrets-bootstrap.sh \
+  --values-file /dev/stdin --o2-user <o2-user>' < ~/vm-secrets.env
+code/01_platform/04_scripts/secrets-bootstrap.sh --check   # [PASS] all 9 secrets exist
 ```
 
-### 4. Deploy
+### The idiom that looks safe and is not
 
-```
-docker stack deploy -c docker-stack.yml trading
-```
+`docker secret create app_secret <(printf '%s' "<value>")` — the form this document recommended
+before CHG-248 — runs `printf` in a subshell with the **secret as an argument**, which is exactly
+what `ps` exposes. `printf` with the value already in a variable is a shell builtin
+(`printf '%s' "$value" | docker secret create <name> -`): no child process, no argument list, no
+disk. The script uses that form, and `tests/test_15_secrets_bootstrap.py` asserts no value ever
+appears in an argument.
 
-### 5. Rotate (per `04-secrets-rotation.md`)
+`o2_auth_basic` is **bare base64** — `base64("<o2-user>:<password>")` with no `Basic ` prefix —
+because `otel-collector-config.swarm.yaml` writes the scheme itself
+(`Authorization: "Basic ${file:/run/secrets/o2_auth_basic}"`). A prefixed value authenticates as
+`Basic Basic …` and answers 401.
+
+## What is not a secret
+
+- `ARROW_APP_ID`, `ARROW_USER_ID` — plain `${…:?}` deploy values on the stack's `ingestion` service.
+- `FLUSS_BOOTSTRAP` — a plain address, not a credential.
+- `arrow_token` — removed 2026-08-24; the live bridge rejects a non-blank `ARROW_TOKEN` outright.
+  A Swarm secret of that name is a leftover: no service in the stack declares or mounts it. One
+  exists on the development node today, so this is a live example rather than a hypothetical.
+  `ConfigKeys.ARROW_TOKEN` still exists in `code/common` and is matched by the log-redaction
+  pattern; do not create the secret.
+
+## Rotation
 
 1. Open a change record (owner, expiry, rollback credential).
-2. Create the new secret under a versioned identity.
-3. Update the service to reference the new secret version.
-4. Validate auth, readiness, telemetry, and **no secret leakage**.
-5. Remove the old secret after the service is stable.
+2. Create the new secret under a versioned identity (`docker secret create <name>-v2 -`).
+3. Repoint the service and force it to re-read: `docker service update --force <service>`.
+4. Validate auth, readiness, telemetry, and no leakage (§Verification).
+5. Remove the old secret once the service is stable (`docker secret rm <name>`).
+
+Swarm secret values are immutable — there is no in-place update, so rotation is always
+create-new → repoint → remove-old. `secrets-bootstrap.sh` refuses when a name already exists instead
+of silently skipping it, because a skipped rotation looks deployed and keeps serving the old value.
 
 ## Verification (no secret leakage)
 
 | Check | Command |
-|-------|---------|
+| --- | --- |
 | No secrets in image | `docker history <image>` / `docker run --entrypoint env <image>` |
-| No secrets in logs | `docker service logs trading_ingestion \| grep -iE 'app_secret\|token='` (expect empty) |
+| No secrets in logs | `docker service logs prod_ingestion \| grep -iE 'app_secret\|token='` (expect empty) |
 | No secrets in telemetry | OpenObserve search for the secret prefix (expect empty) |
 | Secrets mounted | `docker exec <container> ls /run/secrets/` |
+| No value in an argument | `ps -ef \| grep <secret-name>` during creation (expect the command, never the value) |

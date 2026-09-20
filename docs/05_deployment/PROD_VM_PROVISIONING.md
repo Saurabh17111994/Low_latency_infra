@@ -115,8 +115,7 @@ result (`09-production-swarm.md`).
 
 | Gap | What is missing | Blocks |
 | --- | --- | --- |
-| Image publication | `runtime.lock` **exists** and is validated (`pin-check.sh` step 5/6 rejects bare tags; `digest-pin.sh` resolves a tag to its manifest digest) — but nothing wires the lock into the deploy environment (`.env` carries bare tags), and the four locally-built images were never pushed, so no registry digest exists to pin (CHG-218). The build plan for this item is owned by `../08_implementation/09-production-swarm.md` §Pre-deploy implementation items | S1 (build) and S4 (publish), and therefore S7 |
-| Secret bootstrap from one file | The stack requires 9 `external: true` secrets; the creation doc lists 5 differently-named examples. The stack file is authoritative for **names**; there is no single values file → creation step | S6 |
+| Image publication | `image-publish.sh` (CHG-247) pushes the six project-built images and writes digest-pinned deploy values, and `digest-pin.sh` resolves digests against a plain-HTTP registry — rehearsed end-to-end against a **local** `registry:2` only. VM1's registry does not exist yet, so `.env` still carries bare tags and no digest-pinned production environment has been produced | S4 (publish), and therefore S7 |
 | Host bootstrap + clock check | No script installs Docker/enables NTP; `prod_node_check.py` verifies reachability, disk and role/labels — **not** clock offset. The sysctl list S4 needs is itself undefined in this repository — decide and record it before the first boot | S4 |
 | EOD trigger | `eod_controller.py` is a one-shot; nothing schedules it. The requirement names a scheduled owner (`../02_requirements/06-operational.md` §6.8) | S11 |
 | Multi-node pre-deploy validation | `stack_selfcheck.sh` refuses to run when the swarm has more than one node ("refusing to label — single-host mimic, not a cluster"), so **nothing validates a real cluster's stack before `docker stack deploy`** | S7 |
@@ -130,7 +129,7 @@ result (`09-production-swarm.md`).
 
 | Missing value | Why it is missing |
 | --- | --- |
-| `INGESTION_IMAGE`, `EXECUTION_BRIDGE_IMAGE`, `EXECUTION_GATEWAY_IMAGE`, `NAUTILUS_IMAGE` | built locally and never pushed, so no registry manifest digest exists to pin (`runtime.lock` records them as retired pins, CHG-218) |
+| `INGESTION_IMAGE`, `EXECUTION_BRIDGE_IMAGE`, `EXECUTION_GATEWAY_IMAGE`, `NAUTILUS_IMAGE` | built locally and never pushed, and the registry that would hold them exists only on VM1 (S4) — `image-publish.sh` produces digest-pinned values but has **not** run against a real VM1 (`runtime.lock` records the four as retired pins, CHG-218) |
 | `CHECKPOINT_DIR` | development runs `file:///checkpoints`; production needs an encrypted `s3://` prefix |
 
 Present but **not yet immutable**: `FLUSS_IMAGE`, `FLINK_IMAGE` and `OPENOBSERVE_IMAGE` are bare tags
@@ -151,7 +150,7 @@ make every reference the deploy environment carries an immutable digest.**
 | S3 Verify nodes | `[ACCEPTANCE]` | operator | S2 done | `prod_node_check.py --inventory …` exits 0 for every node |
 | S4 Bootstrap hosts + registry + publish | `[PRODUCTION]` + `[WORKSTATION]` | operator | S3 done | Docker + NTP + sysctls + ports on all 4; registry serving on VM1; every image reference digest-pinned **in the deploy environment** |
 | S5 Cluster init + labels | `[PRODUCTION]` | operator | S4 done | `docker node ls` = 3 managers + 1 worker, quorum 2/3, labels applied, swarm locked |
-| S6 Create the 9 secrets | `[PRODUCTION]` | operator | S5 done | `docker secret ls` shows 9/9, names identical to the stack file |
+| S6 Create the 9 secrets | `[PRODUCTION]` | operator | S5 done | `secrets-bootstrap.sh --check` prints `[PASS] all 9 secrets exist` |
 | S7 Deploy the stack | `[PRODUCTION]` | operator | S6 done | every service converges; placement matches labels; 2 Flink jobs running |
 | S8 Readiness verification | `[PRODUCTION]` | operator | S7 done | five readiness dimensions assessed **separately** and recorded |
 | S9 Data-loop smoke | `[PRODUCTION]` | operator | S8 done | ticks → raw table → candles → candidates proven on this deployment |
@@ -224,7 +223,20 @@ python3 code/01_platform/04_scripts/prod_node_check.py --inventory prod_vms.json
 **Note:** role/labels are read by the node's own Swarm NodeID, so this check must be re-run after S5.
 
 ### S4 — Bootstrap hosts, registry, publish `[PRODUCTION]` + `[WORKSTATION]` `[NOT BUILT]`
-**Entry:** S3 green. Run 1–4 **on all four VMs**; 5 on VM1 only; 6 from the workstation.
+**Entry:** S3 green. Run 0–4 **on all four VMs**; 5 on VM1 only; 6 from the workstation.
+
+**0. Repository — the guide runs from the clone, on every node.** Nothing in this guide copies a file
+to a node by hand, and every later step executes from this clone.
+```bash
+sudo apt-get install -y git
+git clone https://github.com/Saurabh17111994/Low_latency_infra.git ~/arrow-infra
+cd ~/arrow-infra && git log -1 --format='%H %ci'   # record this commit in the change record
+```
+Cloned into the login user's home on purpose: no `sudo`, no ownership to repair, and the same user
+that runs Docker runs the scripts. Every node runs `main` from the public repository, so **the VMs
+see only what is pushed** — commit and push before bootstrapping, or a node runs older code than
+the workstation. A node without the clone fails at S6 (`secrets-bootstrap.sh: not found`) rather
+than silently running a stale copy.
 
 **1. Docker Engine** (Docker's official Ubuntu repository steps — follow the upstream page if a
 line has changed):
@@ -341,36 +353,46 @@ workload nodes. Both directions matter.
 That is the point — without it the Raft log and mTLS keys sit unencrypted on disk. Keep the unlock
 key where you keep the other secrets.
 
-### S6 — Create the nine secrets `[PRODUCTION]` `[NOT BUILT]` (bootstrap step)
-The stack declares exactly these `external: true` secrets — names are authoritative in `code/01_platform/01_docker/docker-stack.yml`:
+### S6 — Create the nine secrets `[PRODUCTION]` (bootstrap step)
+The stack declares exactly these `external: true` secrets — names are authoritative in
+`code/01_platform/01_docker/docker-stack.yml`, and `secrets-bootstrap.sh --check` fails if its own
+list ever diverges from it:
 ```text
 aws_access_key_id      aws_secret_access_key   o2_password        o2_auth_basic
 arrow_app_secret       arrow_password          arrow_totp_key
 execution_bridge_auth_token                   gateway_shared_secret
 ```
-**Do — five you hold, piped over SSH.** The value goes in on stdin, so it never reaches the VM's
-disk, either shell's history, or a process list on either machine. Never copy `.env` or
-`secrets.env` to a VM.
+**Do — one command, values piped over SSH.** The values file never lands on a VM's disk: the script
+reads it from stdin, and each value reaches `docker secret create` on stdin too, so it touches
+neither filesystem, neither shell history, nor either process list.
 ```bash
-printf '%s' "$VALUE" | ssh <ssh-user>@<vm1-ip> 'docker secret create arrow_password -'
-# the same for the other four: arrow_app_secret, arrow_totp_key,
-#                              aws_access_key_id, aws_secret_access_key
+ssh <ssh-user>@<vm1-ip> 'cd ~/arrow-infra && code/01_platform/04_scripts/secrets-bootstrap.sh \
+  --values-file /dev/stdin --o2-user admin@example.com' < ~/vm-secrets.env
 ```
-**Do — four generated on VM1 and never transported:**
-```bash
-O2PW="$(openssl rand -base64 24)"
-printf '%s' "$O2PW" | docker secret create o2_password -
-printf 'Basic %s' "$(printf 'admin:%s' "$O2PW" | base64 -w0)" | docker secret create o2_auth_basic -
-openssl rand -hex 32 | docker secret create execution_bridge_auth_token -
-openssl rand -hex 32 | docker secret create gateway_shared_secret -
-```
-`o2_auth_basic` is the **complete header value** `Basic <base64(user:password)>`, not bare base64 —
-that is the format the readers in `code/01_platform/04_scripts/` expect. `06-swarm-secrets.md` §1
-shows the older `< (printf …)` idiom and still lists ingestion-era names; the list above is the
-authoritative one.
+That file holds the five values only you have — one `KEY=VALUE` per line, any letter case:
+`arrow_app_secret`, `arrow_password`, `arrow_totp_key`, `aws_access_key_id`,
+`aws_secret_access_key`. The other four are generated on VM1: `o2_password`,
+`execution_bridge_auth_token`, `gateway_shared_secret`, and `o2_auth_basic` derived from the O2 user
+and that password. A value you do supply for any of those four wins over generation, so a hand
+rotation is never fought. Keep the file outside the repository and delete it when the secrets exist.
 
-**Exit:** `docker secret ls` shows 9/9 with exact name matches.
-**Stop if:** any name differs — `docker stack deploy` fails with "secret not found", and a partial create leaves the stack half-deployable.
+**`o2_auth_basic` is bare base64** — `base64("<o2-user>:<password>")`, with **no** `Basic ` prefix.
+The collector config writes the scheme itself (`Authorization: "Basic ${file:/run/secrets/o2_auth_basic}"`
+in `otel-collector-config.swarm.yaml`), so a prefixed value authenticates as `Basic Basic …` and
+OpenObserve answers 401 with nothing useful in the log. An earlier revision of this step said the
+opposite; the script derives the correct form and `--self-check` pins it.
+
+**Entrypoint paths are unchanged:** Swarm mounts secrets at `/run/secrets/<name>`, and the
+consumers read them from there (`AWS_ACCESS_KEY_ID_FILE`/`AWS_SECRET_ACCESS_KEY_FILE` for the six
+services that use S3, `EXECUTION_BRIDGE_AUTH_TOKEN_FILE` for the bridge, `arrow_*` for ingestion).
+`ARROW_APP_ID` and `ARROW_USER_ID` are **plain deploy values, not secrets** — the stack takes them
+as `${…:?}` environment entries, so no secret of those names belongs here.
+
+**Exit:** `secrets-bootstrap.sh --check` prints `[PASS] all 9 secrets exist`.
+**Stop if:** any name differs, or any already exists. Swarm secret values are immutable, so the
+script refuses rather than skipping: `docker stack deploy` fails with "secret not found", and a
+partial create leaves the stack half-deployable. To rotate: `docker secret rm <name>`, re-create,
+then `docker service update --force <service>`.
 
 ### S7 — Deploy the stack `[PRODUCTION]`
 On a real cluster this is manual: `stack_selfcheck.sh` refuses to run with more than one node (§6.1), and
