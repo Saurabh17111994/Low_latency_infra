@@ -13,6 +13,10 @@
 # tag that does not point at the published tip — otherwise the digests would be
 # labelled with a version they do not describe.
 #
+# A republish re-stamps all seven digests — measured 2026-09-21 over four consecutive fragments, 7/7 changed
+# each time — because the build is not byte-reproducible. Expect a full re-pin and a re-deploy, never a
+# delta; the image-publication row in the deployment guide carries the measurement.
+#
 # No secret is used. Every value below only has to parse: docker-compose.yml
 # refuses to interpolate without six ${VAR:?} values, and a build never pulls
 # them. The real values live in the operator's git-ignored deploy env.

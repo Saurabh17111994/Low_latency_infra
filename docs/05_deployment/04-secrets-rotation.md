@@ -11,6 +11,19 @@ This runbook covers broker/Arrow, Fluss, S3, OpenObserve, TLS, Swarm, and operat
 - Use an ignored `.env` file only with sandbox/test credentials.
 - Never commit `.env`, print it in logs, embed secrets in images, or use production credentials locally.
 - Local credentials must not grant live-money access.
+- **Known exception, dated 2026-09-21 — the live Arrow app is on this laptop.** `~/.env.arrow` (mode 600,
+  unchanged since 2026-08-21) holds `ARROW_APP_ID`, `ARROW_APP_SECRET`, `ARROW_PASSWORD` and
+  `ARROW_TOTP_KEY` for the live app, because the local ingestion pipeline needs them (TOTP autologin is the
+  only supported auth). The operator classified the app as live on 2026-09-21, so all three rules above are
+  knowingly broken until the rotation runs. Value-equality against the four real values found them in 48
+  files outside that file: 15 `logs/soak/monday-gates-*/compose-config.log` files (git-ignored; no commit
+  ever touched `logs/soak`), about 20 agent transcripts outside the repository, and the tracked document
+  `08_implementation/05-execution-core.md`, whose app id is therefore published. **The remedy is rotation,
+  not deletion** — a copied secret cannot be un-copied and a published app id cannot be unpublished — so
+  the two Arrow rows below rotate the app secret, the password and the TOTP key, and the app id rotates
+  with its pair. Timing is the operator's: rotating now ends local ingestion until VM day, when Fluss is
+  running on the VMs; rotating at VM day leaves a live trading login on an unencrypted laptop meanwhile.
+  Values are recorded here as names only, never printed.
 
 ### Production
 

@@ -149,7 +149,11 @@ Stop new simulated money-moving calls, record gate state, drain/reconcile test a
 - [x] Executor cannot place a live order under the local profile. (2026-08-21: `t8_sandbox_contract_check.py` 12/12 — `EXECUTION_ENABLED=false` never true, gate boots HALTED, `POST /v1/intents` 503 fail-closed; `test_PROD_010` gate-monotonic green after DEC-044 assertion fix)
 - [x] Health dimensions distinguish process health, readiness, job health, and trading readiness. (2026-08-24: `test_HEALTH_002` liveness UP / readiness DOWN + `008 Nautilus trading readiness not implied` PASS)
 - [x] Service-to-service network access matches the documented allowlist. (2026-08-21: `execution_network_check.py` PASS — bridge is the only order-path Arrow egress; `execution-net` internal, zero host ports)
-- [x] Local secrets are ignored, redacted, and sandbox-only. (2026-08-21: `t8_sandbox_contract_check.py` PASS — `.env.example` blank placeholders, ARROW creds only in ignored `.env`/`~/.env.arrow`, compose PROD suite SEC-010 green)
+- [x] Local secrets are ignored and redacted — **amended 2026-09-21: "sandbox-only" was wrong.**
+  `~/.env.arrow` holds the live Arrow app (dated exception in `05_deployment/04-secrets-rotation.md`), so
+  that file's contents are production material. What the check below proves is structural — where
+  credentials live and that `.env.example` carries placeholders — never that a file's contents are sandbox.
+  (2026-08-21: `t8_sandbox_contract_check.py` PASS — `.env.example` blank placeholders, ARROW creds only in ignored `.env`/`~/.env.arrow`, compose PROD suite SEC-010 green)
 - [x] 10-instrument fake-broker smoke: 10 random instruments → fake bridge (mimicking live broker: `PlaceOrder`/`Modify`/`Cancel` + `UNKNOWN`/`REJECT` + fill stream) → Nautilus order lifecycle + position → Fluss projections (`Order_Lifecycle`/`Positions`/`Order_Correlation`) → Babysitter observes (zero actions) — passes on local compose with **no live Arrow credentials** (`execution-t3` `disabled`/`fake`). (2026-08-24: `local_int_004_smoke.py --offline --instruments 10` PASS + `test_LOCAL_INT_004_offline_contract` PASS + `test_STREAM_003` 10 instruments PASS + `test_EXEC_012` projection consistency PASS)
 
 ### Implementation status — 2026-08-24 (offline CAN closed, Swarm/live blocked)

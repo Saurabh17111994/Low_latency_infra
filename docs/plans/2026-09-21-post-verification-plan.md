@@ -341,15 +341,31 @@ repository.
       CHG-289, replacing an earlier count of nine transcripts and 34 matches taken with an ad-hoc pattern
       set: the pi transcript tree (600 files) holds 139 value-shaped matches, the full `$HOME` sweep finds
       ~939 more across four agent tools' session trees, and shell history holds 13 — including the GitHub
-      token revoked on 2026-09-21, dead but still on disk. New transcripts are clean (T6). Nothing
-      production-class exists yet, so nothing needs rotating today — from VM day on, real values are entered
-      from the portal, not typed into a chat.
-      **Open, and the operator's to classify:** `~/.env.arrow` (mode 600, unchanged since 2026-08-21) holds
-      four credential-shaped values — `ARROW_APP_ID`, a 64-character `ARROW_APP_SECRET`, a 23-character
-      `ARROW_PASSWORD`, a 32-character `ARROW_TOTP_KEY` — and the local ingestion scripts read it. Live
-      app: the one production-class value that does rest here, rotated at VM day by the rotation log's
-      Arrow row. Paper or sandbox app: no action. Unused: delete it. Values appear here as length and
-      masked preview only, never printed.
+      token revoked on 2026-09-21, dead but still on disk. New transcripts are clean (T6). From VM day on, real
+      values are entered from the portal, not typed into a chat.
+      **Classified by the operator 2026-09-21: `~/.env.arrow` is the live app**, which makes the earlier
+      sentence here ("nothing production-class exists yet") wrong. The file (mode 600, unchanged since
+      2026-08-21) holds `ARROW_APP_ID`, a 64-character `ARROW_APP_SECRET`, a 23-character `ARROW_PASSWORD`
+      and a 32-character `ARROW_TOTP_KEY`. The rotation table maps the password and the TOTP key to the
+      *trading login*, so the file can log into the broker account — breaking `04-secrets-rotation.md`'s
+      storage rules while B1's broker-side limits are still open. Values appear here as length only, never
+      printed.
+      **The values are already copied beyond that file — measured 2026-09-21 by value-equality against the
+      four real values** (a bounded throwaway scan, because `values_at_rest_scan.py` searches names and
+      shapes, not values; T2's value-equality criterion is still unbuilt): 48 files outside the source, in
+      three groups — 15 `logs/soak/monday-gates-*/compose-config.log` files holding the password and TOTP
+      key (git-ignored, and no commit has ever touched `logs/soak`, so they never reached GitHub), ~20 pi
+      transcripts holding the password, TOTP key and app secret (outside the repository), and one *tracked*
+      document, `08_implementation/05-execution-core.md`, holding the live app id — that one is published.
+      The mechanism behind the logs is `docker compose config`: rendering the stack with real env values
+      prints the secrets into the log.
+      **Remedy, upgraded — and the timing is the operator's.** Deleting files cannot unpublish an app id or
+      kill a secret that has been copied, so **all four** Arrow values are rotated; the rotation log's
+      Arrow rows cover the app secret, the password and the TOTP key, and the app id rotates with its pair.
+      Rotating now ends local ingestion until VM day (Fluss is not running locally and no remaining PC-side
+      work needs it); rotating at VM day leaves a live trading login on an unencrypted laptop, and a live
+      app id published, for longer. The dated exception and the file list are recorded in
+      `04-secrets-rotation.md`.
 
 ### Task B5 — One rotation, executed and dated
 **Why:** rotation is the only answer to a read you cannot detect; a procedure without a date never runs.
@@ -473,6 +489,12 @@ expected objects, so SigV4, TLS and the file-based config all work.
       matching the recency rule `lake-guard.sh` applies (P6-439). Missing or unparseable stamps fail
       closed. Known limit: a later commit for a different day also satisfies it — proving which snapshot
       holds the day needs the manifest's contents, i.e. `r2-query.sh`/DuckDB, part of D1.
+- [x] Republish so the images carry the manifest rule — **done 2026-09-21**: publish run `35636450951`
+      (tag `v2026.09.21.1`) green in 10.2 minutes, fragment `856584f9` pulled fast-forward, all seven refs
+      re-verified by anonymous pull with an empty `DOCKER_CONFIG`. All seven digests changed, as they do on
+      every publish — the measurement and its cause are in the deployment guide's image-publication row.
+      The rule now ships in the three images that carry `common`: `ddl-apply` (also the eod-scheduler's
+      image), `ingestion` and `execution_gateway`.
 - [ ] Prove it against a local S3-compatible endpoint first, then against R2.
 - [ ] Flip `EOD_OFFLOAD` from `none`, with a change record.
 
