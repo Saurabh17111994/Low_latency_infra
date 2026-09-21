@@ -160,6 +160,32 @@ def test_a_non_image_variable_may_rely_on_its_default():
         assert run(Path(t), GOOD_ENV).returncode == 0
 
 
+def test_a_reference_that_exists_only_in_a_comment_is_not_interpolated():
+    with tempfile.TemporaryDirectory() as t:
+        stack = STACK.replace("services:", "services:\n# ${COMMENT_ONLY_VAR} is documented here, not interpolated")
+        r = run(Path(t), GOOD_ENV, stack)
+        assert r.returncode == 0, r.stdout
+        assert "COMMENT_ONLY_VAR" not in r.stdout
+
+
+def test_a_reference_inside_a_block_scalar_still_counts():
+    with tempfile.TemporaryDirectory() as t:
+        stack = STACK + """  properties:
+    FLUSS_PROPERTIES: |
+      bootstrap.servers=${BLOCK_VAR}
+"""
+        out = run(Path(t), GOOD_ENV, stack).stdout
+        assert "${BLOCK_VAR} is referenced by the stack with no default" in out
+
+
+def test_a_comment_does_not_hide_a_real_reference():
+    with tempfile.TemporaryDirectory() as t:
+        stack = STACK.replace("services:", "services:\n# ${MISSING_IMAGE} also appears in this comment")
+        stack = stack.replace("    image: ${APP_IMAGE}", "    image: ${MISSING_IMAGE}")
+        out = run(Path(t), GOOD_ENV, stack).stdout
+        assert "${MISSING_IMAGE} is referenced by the stack with no default" in out
+
+
 # ------------------------------------------------------------------ the two helpers
 
 def test_the_lake_is_not_contacted_without_the_flag():

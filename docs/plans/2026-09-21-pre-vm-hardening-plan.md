@@ -143,6 +143,12 @@ local swarm and record PASS/FAIL/WARN by name. Acceptance: the credential-bound 
 **2.6 Record OpenObserve's disk usage after the run.** Acceptance: a measured number that replaces
 the guess in the observability VM's sizing.
 
+> **Findings, 2026-09-21 (2.1).** The preflight refused the deck over `${FLUSS_BOOTSTRAP}`, which is only
+> mentioned in a comment; the rendered config sets all eleven values. The defect was in the checker, not the
+> deck: `stack_references()` scanned raw text, comments included. Fixed and measured in CHG-281, with the
+> earlier "seventeenth required variable" reading retracted in the same record. 2.1's acceptance holds:
+> rc=0, 43 references resolved, and every image a node pulls is digest-pinned.
+
 ### Phase 3 — the riders
 
 *My work, about half an hour.*

@@ -24,6 +24,7 @@ import re
 import shlex
 import subprocess
 import sys
+import yaml
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -86,7 +87,39 @@ def parse_env(text: str) -> dict[str, str]:
 
 
 def stack_references(text: str) -> dict[str, str | None]:
-    """Every ${VAR} the stack file interpolates -> the default it supplies, or None."""
+    """Every ${VAR} the stack file interpolates -> the default it supplies, or None.
+
+    Parsed as YAML rather than scanned as raw text. A ${VAR} that appears only inside a
+    comment is not interpolated by docker, and reporting one is a false alarm: the note
+    beside FLUSS_BOOTSTRAP in docker-stack.yml made this script fail a stack that
+    deploys correctly. Block scalars still count — their contents are values, not
+    comments.
+    """
+    try:
+        document = yaml.safe_load(text)
+    except yaml.YAMLError:
+        # Never under-report: if the file will not parse, fall back to the raw scan,
+        # which can only over-report.
+        return _references_in(text)
+    return _references_in_node(document)
+
+
+def _references_in_node(node: object) -> dict[str, str | None]:
+    """Collect references from every string in a parsed YAML document."""
+    found: dict[str, str | None] = {}
+    if isinstance(node, dict):
+        for key, value in node.items():
+            found.update(_references_in_node(key))
+            found.update(_references_in_node(value))
+    elif isinstance(node, list):
+        for item in node:
+            found.update(_references_in_node(item))
+    elif isinstance(node, str):
+        found.update(_references_in(node))
+    return found
+
+
+def _references_in(text: str) -> dict[str, str | None]:
     return {m.group(1): (m.group(3) if m.group(2) is not None else None) for m in VAR_REF.finditer(text)}
 
 
