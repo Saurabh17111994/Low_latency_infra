@@ -56,14 +56,92 @@ exactly one value per label key) and `O1` joins as a **worker** carrying `observ
 quorum stays 3. Per the DECISION 2026-08-20 in `docker-stack.yml`, adopt v2 only on a
 trigger: `N>6` workers, sustained CPU >80%, or Raft election flaps.
 
-## 1b. The single-node profile (the first production deploy)
+## 1b. The first production deploy: two machines
 
-The first deploy is **one VM** running the identical `docker-stack.yml` as a single-node swarm.
-Nothing here is a different stack: the number of rows in the node inventory *is* the topology
-(§1), so this profile is the v1 deck with three rows removed, and growing to v1 is three rows
-added back. It goes first because it exercises the whole trading loop on real hardware while the
-blast radius is one machine, and because the multi-VM step is then configuration only
-(`docker swarm join` plus labels), not a redesign.
+The first deploy is **two VMs** — one for the trading facility, one for observability. Nothing here
+is a different stack: the number of rows in the node inventory *is* the topology (§1), so this
+profile is the v1 deck with two rows removed (M2 and M3), and growing to v1 is those two rows added
+back. It goes first because the blast radius is two machines and the step after it is configuration
+only (`docker swarm join` plus labels), not a redesign.
+
+**Split the swarm roles: trading is the manager, observability is a worker.** With two managers,
+quorum is 2 of 2, so losing *either* machine freezes the control plane — the trading VM included.
+One manager plus one worker means losing the observability VM costs visibility, never trading. That
+asymmetry is the whole reason for the split, so accept it deliberately rather than by default.
+
+| Machine | Swarm role | Labels | Runs |
+| --- | --- | --- | --- |
+| trading | **manager** | `role=worker` | all 14 `role == worker` services (both Flink, three ZooKeeper, three Fluss tablets, the coordinator, ingestion, nautilus, the execution bridge and gateway, the eod-scheduler) plus one task of each global agent |
+| observability | worker | `observability=true` **only** | `otel-collector`, `openobserve`, `alert-consumer`, plus one task of each global agent |
+
+No trading service can land on the observability VM, because that machine does not carry
+`role=worker`; no observability service can land on the trading VM, because it does not carry
+`observability=true`. And `role=manager` must never appear as a **label** on either one — a node
+holds one value per label key, and nothing in the deck pins `role == manager`.
+
+```bash
+# trading VM
+docker swarm init --autolock --advertise-addr <trading-ip>
+docker node update --label-add role=worker <trading-node>
+docker swarm join-token worker            # prints the join command for the second machine
+
+# observability VM — with the token printed above
+docker swarm join --token <token> <trading-ip>:2377
+
+# back on the trading VM (only a manager can label a node)
+docker node update --label-add observability=true <obs-node>
+docker node ls                            # expect 1 manager + 1 worker, both Ready/Active
+```
+
+**The inventory is two rows.** Copy `code/01_platform/04_scripts/prod_vms.example.json` to
+`prod_vms.json` and keep exactly two entries:
+
+| Row | `name` | `role` | `swarm` | `labels` |
+| --- | --- | --- | --- | --- |
+| trading | the VM's hostname | `manager` | `true` | `{"role": "worker"}` |
+| observability | the VM's hostname | `worker` | `true` | `{"observability": "true"}` |
+
+Both rows are `swarm: true` — a label only exists on a joined node — and neither declares
+`expect_availability: drained`, because the manager runs workloads on this profile and is therefore
+active. `disk_min_gb: 500` on the trading VM (the v1 workload floor); size the observability VM by
+what `openobserve` actually keeps, and take that number from the rehearsal's own volume rather than
+guessing it.
+
+**Gate the shape before deploying it** — two checks, so a wrong inventory is caught before a deploy
+has to fail rather than after:
+
+```bash
+# offline: does every service have a home in this inventory?  (exit code = homeless services)
+python3 code/01_platform/04_scripts/placement_check.py \
+  --stack code/01_platform/01_docker/docker-stack.yml --inventory prod_vms.json
+
+# per node: labels, clock, disk
+python3 code/01_platform/04_scripts/prod_node_check.py --inventory prod_vms.json
+
+# on a cluster, validate instead of labelling: never runs `swarm init`, never writes a label
+CLUSTER=1 ./code/01_platform/04_scripts/stack_selfcheck.sh
+```
+
+`stack_selfcheck.sh` without `CLUSTER=1` refuses a multi-node swarm on purpose: its default mode is
+the single-node mimic, which initialises a swarm and labels *this* node. On a real cluster the mode
+is `CLUSTER=1`, which verifies every `node.labels.… == …` constraint of the rendered stack against
+the live nodes. Using the default mode here would try to turn a two-machine cluster into a one-node
+swarm.
+
+**What two machines prove that one cannot:** that the split works — every observability service on
+one machine, no trading service ever scheduled there (criterion 10 below) — and that losing the
+observability machine leaves trading untouched. **What they still do not prove:** Raft quorum or
+leader election, RPO/RTO, production throughput, and Flink redundancy (the
+`max_replicas_per_node: 1` WARN clears only with three eligible nodes). Two machines are not high
+availability: the trading VM is the only manager, so losing *it* stops the control plane.
+
+### The single-node fallback
+
+If the second machine is not available on the day, the fallback is **one VM** running the identical
+`docker-stack.yml` as a single-node swarm. Nothing here is a different stack: the number of rows in
+the node inventory *is* the topology (§1), so this profile is the v1 deck with three rows removed,
+and growing to v1 is three rows added back. It still exercises the whole trading loop on real
+hardware while the blast radius is one machine.
 
 **The one node carries both labels.** Fourteen services pin `node.labels.role == worker` and three
 pin `node.labels.observability == true` (`otel-collector`, `openobserve`, `alert-consumer`); three
@@ -146,7 +224,12 @@ a wait when it is not:
    stack must return to its replica counts unattended. On this profile that reboot is the only
    failure you can actually rehearse, so rehearse it.
 
-Passing all nine is what makes the four-VM deck a configuration change rather than a leap.
+10. On the two-machine profile only: no trading task ever runs on the observability VM (`docker
+    service ps` for the 14 workload services shows the trading node alone), and stopping the
+    observability VM's Docker daemon leaves every trading service running — the three observability
+    services go pending until that machine returns, which is the accepted trade for this split.
+
+Passing all of these is what makes the four-VM deck a configuration change rather than a leap.
 
 ## 2. Hard rules (fail = provisioning defect)
 

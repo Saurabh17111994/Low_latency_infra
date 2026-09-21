@@ -378,3 +378,11 @@ no:unittest` printed **431 passed**. Three conclusions:
 - **`skipped=` is not comparable across runs on its own.** Skips are optional live gates, so the
   number tracks which flags were armed in that shell; `test_skip_inventory.py` exists precisely to
   make the skips explainable rather than mysterious.
+
+**Topology changed (2026-09-21, your decision): the first deploy is two machines, not one.** A
+trading VM and an observability VM, where the Stage 4 row above reads "one VM". That row stays as
+written — it records what was decided when it was decided — and the two-machine profile now lives in
+`docs/plans/2026-09-21-pre-vm-hardening-plan.md`: the trading VM is the swarm manager carrying the
+`role=worker` label, the observability VM is a worker carrying `observability=true` only, and
+`PROD_VM_PROVISIONING.md` §1b documents both. The single-node profile remains the fallback, so
+nothing is lost if the second machine does not arrive on the day.
