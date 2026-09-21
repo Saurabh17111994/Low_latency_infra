@@ -256,6 +256,37 @@ collecting it.
 > What stays unproven is the trigger itself — it fires only on GitHub, so the first matching tag push is its
 > proof.
 
+> 4.6 corrected later the same day: the trigger fired, both ways. Publish run `35587874482` (tag on the tip)
+> went 12/12 green and committed the fragment as `f078077c`; the refusal run `35588955004` (tag behind the tip)
+> failed at the guard with steps 4–12 skipped. All seven digests were re-pulled anonymously — 7/7 with an
+> empty `DOCKER_CONFIG`, no credentials on this machine at all — and answered `HTTP 200` to an anonymous
+> registry manifest fetch. Trap worth keeping: a tag triggers the workflow only if the workflow *at that tag*
+> carries the trigger; the first refusal tag pointed at `69377745`, older than `fb5fc060`, and GitHub created
+> **no run at all** — silence, not a refusal. Recorded in CHG-285 and beside the release instructions in
+> `PROD_VM_PROVISIONING.md`.
+>
+> **`cluster_check.py` exercised on a real two-node swarm, 2026-09-21** — the last piece of the
+> "cluster-validate.sh + 2-node swarm" item. Its multi-node paths had unit coverage over *fabricated* node
+> data only, never a real multi-node Docker API. A throwaway two-node Docker-in-Docker swarm was built on this
+> PC (`dind-mgr` Leader with `role=worker`, `dind-wrk` with `observability=true`, mirroring the two real
+> machines) and six runs were taken. Evidence: `~/.p6v/evidence/dind-2node-20260921/`, which also carries the
+> rebuild recipe.
+>
+> | Run | What it exercises | Verdict |
+> | --- | --- | --- |
+> | 1 | a dying bind-mount task, a global service, a two-replica spread service, a topology-limited one, a stray publisher | 3 FAIL + 1 WARN, rc=3 |
+> | 3 | the same cluster with the faults removed | 0 FAIL, 1 WARN, rc=0 — it stops reporting |
+> | 4 | a drained node | drain WARN; global coverage still PASS (see below) |
+> | 5 / 6 | `--expect` against a two-row inventory, then a three-row one | rc=0 / rc=2, naming the coverage hole |
+>
+> Measured, not assumed: **the exit code is the number of FAILs** (`return len(report.failures)`; rc=3, 2, 0
+> across the runs), so `FAIL=0` is the acceptance line. Two results went against my own expectation and are
+> worth carrying to VM day: **draining a node does not stop its global-service task**, so coverage stays PASS
+> with a drain WARN — a PASS there is not "drained is harmless"; and the drain reproduced the 2026-09-20
+> motivating failure — a two-replica, one-per-node service left a task `Pending — no suitable node (1 node not
+> available …)`, reported as `replicas-complete` and `no-stuck-tasks` FAIL, quoting docker's own error text.
+> The tool classified all six runs as designed, so this note carries no code change and no change record.
+
 ---
 
 ## 2. What this plan cannot prove — and must never be quoted as proved
