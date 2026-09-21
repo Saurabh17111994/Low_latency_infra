@@ -87,9 +87,18 @@ public final class R2LakeTieringEodOffloadExecutor implements EodOffloadExecutor
      *  throw to FAILED_RETRYABLE with backoff instead of a bare NumberFormatException. */
     private static long parseSize(String line, int tab) {
         if (tab <= 0) return 0L;
+        // r2-list.sh emits key<TAB>size<TAB>LastModified (see its _r2_list header;
+        // the timestamp is what lets lake-guard.sh age-check a manifest). Only the
+        // second column is the size: parsing the whole tail assumed a two-column
+        // line the script never emits, so every live listing threw here and the
+        // day became FAILED_RETRYABLE forever (proven 2026-09-21 against a TLS
+        // S3 endpoint with a real listing).
+        String tail = line.substring(tab + 1);
+        int nextTab = tail.indexOf('\t');
+        String sizeField = (nextTab >= 0 ? tail.substring(0, nextTab) : tail).trim();
         final long size;
         try {
-            size = Long.parseLong(line.substring(tab + 1).trim());
+            size = Long.parseLong(sizeField);
         } catch (NumberFormatException badSize) {
             throw new IllegalStateException("malformed r2-list.sh line (bad size): [" + line + "]", badSize);
         }

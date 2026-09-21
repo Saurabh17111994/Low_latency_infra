@@ -1448,6 +1448,26 @@ def test_the_eod_scheduler_healthcheck_depends_on_nothing_but_itself():
     assert "eod-scheduler-heartbeat" in block, "the probe and the loop must share one path"
 
 
+def test_the_eod_scheduler_carries_what_lake_mode_needs():
+    """C2: `lake` mode is a read-only evidence check over r2-list.sh.
+
+    The script is already in the image (the entrypoint sits beside it) and reads
+    its config from files, so the service has to hand over both the values and
+    the two credential files the controller bridges from — and mount them, not
+    merely name them.
+    """
+    block = service_block_raw(STACK.read_text(), "eod-scheduler")
+    assert "R2_LIST_SCRIPT: /app/code/01_platform/04_scripts/r2-list.sh" in block
+    assert 'R2_LAKE_PREFIX: "${R2_LAKE_PREFIX:-lake}"' in block
+    for var in ("R2_ENDPOINT", "R2_BUCKET", "S3_WAREHOUSE_PATH"):
+        assert f'{var}: "${{{var}:?' in block, f"lake mode needs {var} to be required"
+    assert "FLUSS_DATABASE:" in block, "the evidence prefix is database-scoped"
+    assert "AWS_ACCESS_KEY_ID_FILE: /run/secrets/aws_access_key_id" in block
+    assert "AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key" in block
+    assert "      - aws_access_key_id" in block, "the secret must be mounted, not just named"
+    assert "      - aws_secret_access_key" in block
+
+
 def test_the_scheduler_and_the_controller_agree_on_the_trading_day():
     """An EOD run on the wrong day is a real defect class: both sides default to one zone."""
     block = service_block_raw(STACK.read_text(), "eod-scheduler")

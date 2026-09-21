@@ -1339,6 +1339,22 @@ services:
       # Fail-closed: `none` runs the lifecycle without copying to the lake. Set
       # `lake` only where R2 credentials are present.
       EOD_OFFLOAD: "${EOD_OFFLOAD:-none}"
+      # C2: what `lake` mode needs to read its evidence. r2-list.sh ships in the
+      # image beside the entrypoint; the controller writes its config files from
+      # these values and the two secret files, then removes them after the run.
+      # The three R2 values are required for the same reason the tiering services
+      # require them: a scheduler that cannot see the lake must not start.
+      R2_LIST_SCRIPT: /app/code/01_platform/04_scripts/r2-list.sh
+      R2_LAKE_PREFIX: "${R2_LAKE_PREFIX:-lake}"
+      R2_ENDPOINT: "${R2_ENDPOINT:?set R2_ENDPOINT for the lake offload}"
+      R2_BUCKET: "${R2_BUCKET:?set R2_BUCKET for the lake offload}"
+      S3_WAREHOUSE_PATH: "${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH for the lake offload}"
+      FLUSS_DATABASE: ${FLUSS_DATABASE:-default}
+      AWS_ACCESS_KEY_ID_FILE: /run/secrets/aws_access_key_id
+      AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
+    secrets:
+      - aws_access_key_id
+      - aws_secret_access_key
     healthcheck:
       # Its own heartbeat file — never another service (house rule 6). The window
       # covers a whole controller run: a fire heartbeats at its start and end, and

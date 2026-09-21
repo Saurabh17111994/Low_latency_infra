@@ -59,7 +59,8 @@ against R2. What R2 offers instead:
 | Query the lake (DuckDB, iceberg) | `bash code/01_platform/04_scripts/r2-query.sh "<sql>"` — operator tool: the SQL runs with your R2 credentials; exit 2 = bad usage/config, 1 = DuckDB failed |
 | List the lake objects (no aws cli) | `bash code/01_platform/04_scripts/r2-list.sh lake` (or `all`); sourcing it gives `r2_list_lake` / `r2_list_all` |
 | Pull one trading day to local parquet | `bash code/01_platform/04_scripts/r2-restore.sh <yyyyMMdd> [out.parquet]` |
-| EOD run with lake verification | `EOD_OFFLOAD=lake R2_LIST_SCRIPT="$PWD/code/01_platform/04_scripts/r2-list.sh" python3 code/01_platform/04_scripts/eod_controller.py run` |
+| EOD run with lake verification (host) | `EOD_OFFLOAD=lake R2_LIST_SCRIPT="$PWD/code/01_platform/04_scripts/r2-list.sh" python3 code/01_platform/04_scripts/eod_controller.py run` — reads the repo's own `01_docker/.env` and `secrets.env` |
+| EOD run with lake verification (stack) | set `EOD_OFFLOAD=lake` in the deploy environment (needs a change record) — `eod-scheduler` stages `r2-list.sh`'s config from its own variables and the `aws_*` secret files, and removes the staged files after every run |
 | Full guarded E2E tiering proof (smoke) — exit 0 = proof, 1 = verification failed, 2 = bad input; use 300s writes with `TIER_WAIT` so the run exceeds the 5-min freshness window + 1-min tier interval | `TIER_WAIT=420 bash code/01_platform/04_scripts/tiering-smoke.sh 300` |
 
 Canonical proof query (row count for a day):

@@ -440,8 +440,35 @@ manifest lifecycle is proven without offload.
 **Files:** `code/01_platform/04_scripts/eod_controller.py`, stack env, tests, R2 credentials path.
 **Depends on:** B3 (bucket hygiene), S11 evidence.
 
-- [ ] Scope the writer against the existing manifest format before writing code (the trigger exists, the
-      path does not — decide the smallest path that lands the manifest in the bucket).
+- [x] Scope the offload path before writing code — done 2026-09-21, and it is **not a writer**. There is
+      no manifest to land from here: the copy is performed continuously by the Fluss tiering job
+      (`datalake.iceberg.warehouse` + `remote.data.dir`), and `EOD_OFFLOAD=lake` only READS evidence —
+      the day's data objects and iceberg manifests, listed through `r2-list.sh`. The path that did not
+      exist was the wiring: a container has no `01_docker/.env` / `secrets.env` for `r2-list.sh` to read.
+- [ ] Wire the scheduler for that path: stage `r2-list.sh`'s config from the service environment and the
+      `aws_*` secret files, and give `eod-scheduler` the R2 variables (C2 wiring, 2026-09-21).
+
+**Found by the local proof** (2026-09-21, evidence in `~/.p6v/evidence/c2-lake-20260921/` — throwaway
+TLS MinIO, real-shaped listing): the Java evidence check could not read the script it shells out to.
+`r2-list.sh` emits `key<TAB>size<TAB>LastModified` — its own header says so, and
+`tests/test_lake_guard.py`'s `tsv()` helper calls that "the r2_list_lake TSV contract" — while
+`parseSize` parsed the whole tail after the first tab as the size. Every real listing therefore threw
+`IllegalStateException`, which the controller maps to FAILED_RETRYABLE: the day would retry forever and
+never reach VERIFIED. The Java fixtures were two-column, so the tests passed while the live path could
+not. Fixed 2026-09-21 (read the second column; two-column lines still parse). The same proof also
+confirms the script itself: `r2-list.sh` over TLS against a real S3 endpoint returned rc=0 with the
+expected objects, so SigV4, TLS and the file-based config all work.
+
+- [ ] Decide the manifest rule for `EOD_OFFLOAD=lake`. `R2LakeTieringEodOffloadExecutor` counts a
+      manifest only when its key contains `event_day=<day>`. Every other artifact scopes manifests by the
+      table's `metadata/` prefix with no day component: `lake-guard.sh` (`META_PREFIX=…/metadata/`),
+      `tiering-smoke.sh` (`metadata/.*\.avro`), and `test_lake_guard.py`'s stated TSV contract — and
+      Iceberg names manifest lists `metadata/snap-<id>-….avro`. Measured on a real-shaped listing with
+      two `.avro` objects present: `manifestFiles=0`, so `offload()` would report "no iceberg manifests —
+      snapshot not committed" for a day whose data is fully tiered. Recommended: drop the day-marker
+      clause (one line; it cannot cause a false pass, since a manifest must still exist, and it keeps
+      working if the day directory turns out to be real), and leave the freshness check where it already
+      lives (`lake-guard.sh`, P6-439).
 - [ ] Prove it against a local S3-compatible endpoint first, then against R2.
 - [ ] Flip `EOD_OFFLOAD` from `none`, with a change record.
 

@@ -9,6 +9,21 @@ import org.junit.jupiter.api.Test;
 class R2LakeTieringEodOffloadExecutorTest {
 
     @Test
+    void readsTheSizeColumnOfTheFormatTheScriptActuallyEmits() {
+        // r2-list.sh emits key<TAB>size<TAB>LastModified. Every fixture above is
+        // two-column, so parsing the whole tail as the size passed the tests and
+        // threw on every real listing; this case pins the third column, and the
+        // second line keeps proving the day filter while it does.
+        List<String> lines = List.of(
+                "lake/default/raw_table_1/data/event_day=20260831/x.parquet\t100\t2026-09-21T16:22:40.385Z",
+                "lake/default/raw_table_1/data/event_day=20260830/z.parquet\t50\t2026-09-21T16:22:40.399Z");
+        R2LakeTieringEodOffloadExecutor.DayEvidence e =
+                R2LakeTieringEodOffloadExecutor.parseEvidence(lines, "lake", "raw_table_1", "20260831");
+        assertEquals(1, e.dataObjects());
+        assertEquals(100, e.dataBytes());
+    }
+
+    @Test
     void parsesDayAndManifestEvidence() {
         List<String> lines = List.of(
                 "lake/default/raw_table_1/data/event_day=20260831/instrument_token_bucket=0/x.parquet\t100",
