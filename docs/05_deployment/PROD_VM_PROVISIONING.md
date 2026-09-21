@@ -618,6 +618,9 @@ tip, because the workflow builds that branch and records the digests there; `pub
 run and prints both commits if it does not. Use the tag when the publish is meant to mark a point, and the
 manual dispatch for ad-hoc runs.
 
+Tag an older commit and the guard refuses the run; tag a commit older than `fb5fc060` — the one that added
+this trigger — and no run starts at all, so a release tag always goes on the current tip.
+
 So on VM day, do not push by hand. Render the deploy environment from the committed fragment and
 its seven `VAR=ref` lines land with digests already attached:
 
