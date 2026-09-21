@@ -117,6 +117,26 @@ tests join it permanently, so every later wave is checked against all earlier on
   Lake tiering's *classloader* gap is closed (CHG-183); whether a real tiering
   job writes parquet to the lake prefix is still unproven - that needs the
   Flink tiering service plus a `table.datalake.enabled = true` table.
+  (ANNOTATED 2026-09-21, CHG-279/CHG-283: the host clause above is out of date. `docker node ls`
+  reports one node and one manager, this host as Leader, and `docker stack deploy` has now run
+  here twice - the production deck came up locally on 2026-09-21 (20 services, synthetic
+  credentials) and was recreated to apply CHG-283. What is still unproven is a deploy on the real
+  VMs; the sentence above describes the host as it was when the bullet was written.)
+- **Read a whole block to its end - never a fixed-width window.** A `grep -A8`, a window sized to
+  the version before the change, or a filter that skips a file type will silently omit lines and
+  produce a confident wrong reading. Three misreads in one session (2026-09-21): a service block
+  read through a fixed-width window, Dockerfiles skipped by an extension filter, and a `grep -A8`
+  that cut the ingestion block short. Read the block to its end, or grep the whole tree for the key.
+- **A Swarm config is immutable: only a fresh create applies an edit, and only a fresh create can
+  prove one.** `docker stack deploy` on a running stack keeps the old config. The sequence that
+  applies it is `docker stack rm`, wait for services, networks *and* configs to disappear, then
+  deploy. Measured 2026-09-21 (CHG-283): after a fresh create, one OpenObserve query carried both
+  the old label `tasks.node-exporter:9100` and the new one `10.0.1.27:9100`.
+- **A Prometheus `static_configs` target keeps ONE address; `dns_sd_configs` discovers every one.**
+  `tasks.<service>` resolves to every task, but a static target silently keeps a single address and
+  labels it with the name - so the job looks healthy while covering one node out of many. Measured
+  2026-09-21 (CHG-283) against a name with 8 addresses: static gave 1 target labelled with the name,
+  `dns_sd` gave 8 targets each labelled with its own address. On a single node the fault is invisible.
 
 ## Docs
 

@@ -229,6 +229,19 @@ collecting it.
 > `O2_PASSWORD` the API rejects the new value while the apps keep working through the `o2_auth_basic` secret;
 > (b) O2's `/api/{org}/_search` searches **logs** by default, so metrics need `?type=metrics` or it answers
 > 400 "Search stream not found".
+>
+> 4.5 needs no code and no decision: production pulls its seven images from GHCR by digest, so the rehearsal
+> registry's storage under `/tmp` costs a re-push and a re-pin **for rehearsal only** — which is what
+> `2026-09-21-ci-publish-and-single-node-rollout.md` row 4 already records. The row above stays as written;
+> this note is its resolution.
+>
+> 4.3 resolved 2026-09-21: the content of the three original `AGENTS.md` notes was never recorded anywhere —
+> the row above names the item, the todo store has no such entry, and the session transcript contains only a
+> note promising to confirm it later. Rather than invent them, three lessons measured in this session were
+> written instead, with the user's approval: read a whole block to its end, a Swarm config is immutable, and
+> `static_configs` keeps one address while `dns_sd_configs` discovers every one. The same edit annotates
+> `AGENTS.md`'s "Swarm worker with no manager / no `docker stack deploy` has ever run" clause, which was
+> measured false on 2026-09-21 (`docker node ls`: one node, one manager, this host Leader; two local deploys).
 
 ---
 
