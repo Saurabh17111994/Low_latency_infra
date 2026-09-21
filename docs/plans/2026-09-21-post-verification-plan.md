@@ -294,11 +294,20 @@ repository.
       destroy that server first (B4.5) and then delete `id_rsa` and `id_rsa.pub`. If the host must stay,
       add a passphrase in place (`ssh-keygen -p -f ~/.ssh/id_rsa`) — same public key, nothing to
       re-register.
-- [ ] **B4.5 Retire the legacy provider footprint.** Confirm `94.237.73.113` is no longer needed, destroy
-      it at the provider (which also stops it costing anything), secure that account with 2FA, then remove
-      the host block from `~/.ssh/config`, delete the key and clear its `known_hosts` entries.
+- [ ] **B4.5 Retire the legacy provider footprint.** *Dependency check done 2026-09-21: nothing needs it.*
+      Repo: the only occurrences of `94.237.73.113` are four lines in this plan — no code, script, workflow
+      or config names it, and `upcloud`/`94.237` appear nowhere else. Workstation: one `~/.ssh/config` host
+      block (`IdentityFile ~/.ssh/id_rsa` + `id_ed25519`), a backup of it, three `known_hosts` entries, one
+      Chrome extension ruleset that merely contains those octets, and one 2026-09-17 transcript where we
+      discussed the host. No crontab entry, no systemd unit, no `/etc/hosts` line, no docker context. So
+      destroying the server breaks nothing; the timing is yours. Then: remove the host block,
+      `ssh-keygen -R 94.237.73.113` (clears all three entries), delete `id_rsa*` (B4.4), and secure that
+      provider account with 2FA.
 - [ ] **B4.6 One dedicated SSH key for the VMs** (passphrase-protected, `ForwardAgent no`), separate from
-      the GitHub key; 2FA on GitHub, CloudPe, Cloudflare and the broker account.
+      the GitHub key; 2FA on GitHub, CloudPe, Cloudflare and the broker account. Next step (2026-09-21):
+      `ssh-keygen -t ed25519 -a 100 -f ~/.ssh/id_ed25519_vms -C "vm-key 2026-09-21"` — you set the
+      passphrase, twice (T5: an empty one must be refused). The `Host vm-*` block carrying
+      `IdentitiesOnly yes` and `ForwardAgent no` is written at S2, when the VM addresses exist.
 - [ ] **B4.7 Stop putting real credentials in a conversation.** Nine session transcripts already hold 34
       value-shaped matches for ARROW/aws/O2 secret patterns (values were only matched, never printed).
       Nothing production-class exists yet, so nothing needs rotating today — from VM day on, real values
@@ -377,8 +386,12 @@ file mount pins the inode, so a replaced sample would never be seen.
 - [x] Publish the number without publishing control: read-only directory mount, no socket, no package in the
       runtime image, `--check` fails on a missing or stale sample, and the first sample is best effort
       (a fresh node's chronyd may still be starting; the timer retries and `--check` stays red until it lands).
-- [ ] Republish through CI (`image-publish.sh --merge-env`) and update `NAUTILUS_IMAGE` — the binary changed,
-      so today's digest is stale (T10). **Must land before the first deploy.**
+- [x] Republish through CI (`image-publish.sh --merge-env`) and update `NAUTILUS_IMAGE` — **closed
+      2026-09-21 (T10):** publish run `35604569244` went green, the new fragment landed as commit
+      `0919f566` and was pulled fast-forward, and all seven refs were re-verified by anonymous pull with an
+      empty `DOCKER_CONFIG`. `NAUTILUS_IMAGE` now pins `sha256:387b795f5a20…`, the digest built from that
+      binary, re-checked anonymously against the registry today — identical. Landed before the first
+      deploy, as required.
 - [ ] On the VM: `vm-bootstrap.sh --check` reports a fresh fact, the executor logs
       `source = node-published clock fact`, and the gate halts when the file is removed and when it is aged
       past 30 s (the negative cases are the ones that must be proven).
@@ -514,8 +527,9 @@ Before the first live order, every row must have its evidence artifact, not an i
    two machines both addresses go into the broker portal. The rule that outlives the decision: adding a
    node means revisiting the portal the same day, or broker login fails silently.
 5. A go-ahead per phase — nothing above runs on its own.
-6. One workstation decision left: whether `94.237.73.113` can be destroyed (B4.5). The GitHub key work is
-   done (B4.3, 2026-09-21) and the reinstall is declined (B4.1), so nothing else here waits on you.
+6. Answered 2026-09-21: `94.237.73.113` **can** be destroyed — nothing in the repo or on this workstation
+   depends on it (evidence in B4.5), so the destroy is safe whenever you want it done. The GitHub key work
+   is done (B4.3, 2026-09-21) and the reinstall is declined (B4.1), so nothing else here waits on you.
 
 ### Two-factor checklist (your actions, in this order)
 
