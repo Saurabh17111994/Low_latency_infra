@@ -242,6 +242,19 @@ collecting it.
 > `static_configs` keeps one address while `dns_sd_configs` discovers every one. The same edit annotates
 > `AGENTS.md`'s "Swarm worker with no manager / no `docker stack deploy` has ever run" clause, which was
 > measured false on 2026-09-21 (`docker node ls`: one node, one manager, this host Leader; two local deploys).
+>
+> 4.4 corrected 2026-09-21 — the sentence above was only half of its acceptance. It checked that the deck
+> publishes 5080 and answers; it never checked the clash. Measured: `docker-compose.yml:1198` publishes
+> OpenObserve `"5080:5080"` and `docker-stack.yml:1234` publishes host-mode `5080`, and no overlay or env var
+> remaps either — so the dev Compose stack and the production deck cannot run on this machine at the same
+> time. Chosen port: 5080 in both; the constraint is one stack at a time. Recorded as FACT-017 in
+> `docs/ENVIRONMENT.md`.
+>
+> 4.6 done 2026-09-21 (CHG-285): a `v*` tag push now publishes the seven images alongside the manual dispatch.
+> The workflow still builds and records the default branch, so a tag names what is published;
+> `publish-tag-guard.sh` refuses a tag pointing anywhere else. 11 tests, both runners, three mutations caught.
+> What stays unproven is the trigger itself — it fires only on GitHub, so the first matching tag push is its
+> proof.
 
 ---
 

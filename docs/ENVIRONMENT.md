@@ -220,3 +220,12 @@ Verified: 2026-09-17 - live: docker logs on 01_docker-fluss-coordinator-1 show o
 Check: docker logs 01_docker-fluss-tablet-1 --since 2m 2>&1 | grep -c 'Deleting segments'
 Recheck when: the purge stops dropping+recreating raw_table_1, or holistic-measure.sh gains a post-purge readiness wait
 Each purge drops raw_table_1 and recreates it, so the table gets a new tableId and the coordinator re-registers its 16 buckets. The tablet then asynchronously tears down the PREVIOUS tableId's log segments for a second or more after the purge reports success. Purge and the first append can therefore overlap: in run 20260917-013752 ingestion started 1s after 'raw table purged' and its first append failed with FlussRuntimeException 'Failed to update metadata' at 20:08:19, while the tablet was still deleting the old table's segments. NOTE: an earlier version of this fact blamed the JM/TM recreate; that was wrong - the bursts track the purge, and a separate ~10-minute periodic task also re-registers.
+
+### FACT-017: the dev Compose stack and the production deck both bind OpenObserve 5080
+Status: LIVE
+Verified: 2026-09-21 - `grep -rn 5080 code/01_platform/01_docker/*.yml`: `docker-compose.yml:1198`
+publishes `"5080:5080"` (and `"5081:5081"`), `docker-stack.yml:1234` publishes host-mode `5080`. No
+overlay or environment variable remaps either, so the two stacks cannot run on this machine at the same
+time - the second one to start fails to bind. The chosen port stays 5080 in both: one stack at a time.
+Check: grep -q '"5080:5080"' code/01_platform/01_docker/docker-compose.yml && grep -q 'published: 5080' code/01_platform/01_docker/docker-stack.yml
+Recheck when: either file's openobserve port lines change

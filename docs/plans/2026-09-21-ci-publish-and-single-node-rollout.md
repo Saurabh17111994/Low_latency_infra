@@ -187,6 +187,13 @@ rows above, so the reasoning stays auditable.
   default branch — which either rewinds `main` or is rejected as a non-fast-forward — and a publish
   whose digests exist only in a run log is not durable. The tag trigger returns once the commit-back
   path has been proven by a dispatch run on the default branch.
+- **The `v*` tag trigger landed 2026-09-21 (CHG-285), because that condition was met.** Run `35567002862`
+  proved the commit-back path, so the design is unchanged in substance: the workflow still checks out the
+  default branch and commits the fragment there, which makes a tag a *name for* what is published rather than
+  a revision selector. `publish-tag-guard.sh` fails the run unless the tag points at that tip — the piece the
+  deferral note implied but did not have — so a tag left on an older commit cannot label digests it does not
+  describe. It peels annotated tags and fetches a tag the checkout lacks (`actions/checkout` does not fetch
+  tags), and it never reads `github.sha`, whose value on a tag push is unmeasured here.
 
 ## 4. Phases
 

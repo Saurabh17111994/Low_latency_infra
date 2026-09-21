@@ -613,6 +613,11 @@ exactly that — 13/13 steps, commit `24a061ad` — and a workstation with **no*
 resolved all seven `:prod` tags to those digests and pulled their manifests anonymously, which is
 all a node needs.
 
+**A `v*` tag push does the same thing (since 2026-09-21, CHG-285).** The tag must name the default branch
+tip, because the workflow builds that branch and records the digests there; `publish-tag-guard.sh` fails the
+run and prints both commits if it does not. Use the tag when the publish is meant to mark a point, and the
+manual dispatch for ad-hoc runs.
+
 So on VM day, do not push by hand. Render the deploy environment from the committed fragment and
 its seven `VAR=ref` lines land with digests already attached:
 
