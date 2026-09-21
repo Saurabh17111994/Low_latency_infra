@@ -314,6 +314,11 @@ testable — and none of them may be claimed before that.
 
 ### 9.2 Other pending items, in the order I would take them
 
+**Note (2026-09-21, during Stage 1).** The single-node profile listed in the stages above is
+**CHG-278**, not CHG-277: the first CI run failed on a locale-dependent compatibility-jar pin, and
+that fix took CHG-277 (`docs/05_deployment/change-records/CHG-277.md`). Only the plan's numbering
+moved; its content did not.
+
 None of these blocks the critical path.
 
 | # | Item | Why here |

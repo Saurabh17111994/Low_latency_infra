@@ -82,10 +82,14 @@ Iceberg's shaded parquet write path lazily loads the **un-shaded**
 the image gets only the `org/apache/hadoop/mapreduce/**` package.
 
 Deriving it beats committing a 494-class binary: the source is a checksummed
-Maven artifact, the extraction is `unzip` + `zip` with a pinned file mtime, and
-the result is verified against its own SHA256 — so the build fails loudly if a
-toolchain change alters the bytes. Two independent runs on 2026-09-16 produced
-byte-identical output.
+Maven artifact, the extraction is `unzip` + `zip` with a pinned file mtime **and
+a pinned collation** (`LC_ALL=C sort`), and the result is verified against its own
+SHA256 — so the build fails loudly if a toolchain change alters the bytes.
+Collation matters as much as the mtime: `sort` follows the caller's locale, so
+unpinned it ordered the same classes differently and the derived jar hashed to a
+different value. Measured 2026-09-21: `en_IN.UTF-8` gave `14c5a8e5…`, `C` gave
+`c19c414b…`, and the first CI run — a C-locale runner — failed the pin that the
+workstation had satisfied for weeks.
 
 ### Why `fluss-fs-hadoop-shaded` is not here
 

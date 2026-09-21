@@ -259,6 +259,17 @@ class FetchScriptTests(unittest.TestCase):
                          "the derivation must normalise file timestamps")
         self.assertRegex(self.text, r'DERIVE_MTIME="\d{12}"')
 
+    def test_derivation_pins_the_collation(self) -> None:
+        """Without a pinned collation the entry order follows the caller's locale.
+
+        Measured 2026-09-21: the same classes sorted under en_IN.UTF-8 hash to
+        14c5a8e5…, sorted under C to c19c414b…. The pin is the C form, so the
+        first CI run — a C-locale runner — failed a derivation that had passed on
+        the workstation for weeks. An unpinned `sort` reintroduces that.
+        """
+        self.assertRegex(self.text, r"LC_ALL=C sort",
+                         "the derivation must pin the sort collation, not inherit the locale")
+
     def test_the_unpublished_snapshot_jar_is_not_fetched(self) -> None:
         """fluss-fs-hadoop-shaded-0.9-SNAPSHOT cannot be checksum-pinned.
 

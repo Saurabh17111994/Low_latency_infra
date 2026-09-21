@@ -57,9 +57,12 @@ PINS=(
 )
 
 COMPAT_JAR="hadoop-mapreduce-compat-${MAPREDUCE_VERSION}.jar"
-# Pinned from an observed build (see the README) — the derivation is
-# reproducible, so this is a real regression guard, not documentation.
-COMPAT_SHA256="14c5a8e543a8232d26465d30579be82d929de373cb339b5e91cfdc60e1e42205"
+# Pinned from an observed build (see the README) — a real regression guard, not
+# documentation. The bytes below are what a *C-collation* sort of the entries
+# produces: measured 2026-09-21, the identical content sorted under en_IN.UTF-8
+# hashes to 14c5a8e543a8232d26465d30579be82d929de373cb339b5e91cfdc60e1e42205
+# instead, which is the trap the first CI run fell into.
+COMPAT_SHA256="c19c414bc07b610b6d42c1806a511526113036dc5b6bb0bf0c3c730a7ae989df"
 DERIVE_MTIME="198001010000"
 
 die() { echo "fetch-jars: $*" >&2; exit 1; }
@@ -125,10 +128,14 @@ derive_compat() {
 	(
 		cd "$work"
 		unzip -q "$dir/$src" 'org/apache/hadoop/mapreduce/*'
-		# Fixed mtime makes the zip bytes reproducible across runs; without it
-		# two builds of the same content differ and the pin below is useless.
+		# Fixed mtime makes the zip bytes reproducible across runs, and the
+		# pinned collation makes the *entry order* reproducible too: `sort`
+		# follows the caller's locale, so an unpinned sort ordered the same
+		# classes differently on a C-locale runner and the pin below failed
+		# (measured 2026-09-21 — the first CI run, against a pin that had held
+		# for weeks on the workstation's en_IN.UTF-8).
 		find org -exec touch -t "$DERIVE_MTIME" {} +
-		find org -type f | sort | zip -q -X -@ "$dir/$COMPAT_JAR"
+		find org -type f | LC_ALL=C sort | zip -q -X -@ "$dir/$COMPAT_JAR"
 	)
 	# Exactly mapreduce/** and nothing else: a stray mapred/** entry would
 	# reintroduce the hadoop 2.8.3 Configuration clash this jar exists to avoid.
