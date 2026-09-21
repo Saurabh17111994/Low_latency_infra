@@ -145,16 +145,17 @@ to all of them, and they are the rules this repository already uses:
 
 ### Workstation checks (task B4) — documented commands, not new code
 
-If any of these grows into a script, it lands with a change record and its own test.
+If any of these grows into a script, it lands with a change record and its own test. T2 and T6 have:
+CHG-289 and `code/01_platform/04_scripts/values_at_rest_scan.py`, with its tests.
 
 | ID | Test and pass criterion | Must-fail control | Evidence |
 | --- | --- | --- | --- |
 | T1 | ~~Disk encryption~~ — **withdrawn 2026-09-21: the reinstall is declined, permanently.** No encryption is planned, so there is nothing to verify; T2 carries the risk instead, and the residual is named in the Risks table | — nothing to run | the dated decision, recorded here rather than deleted |
-| T2 | No production value at rest (B4.2): a names-plus-patterns scan over `$HOME` returns zero hits for the production secret names while the container is unmounted | plant a decoy (`ARROW_APP_SECRET=dummy1234567890`) under the scan root; the scan must fail, then the decoy is removed | both runs, paired |
+| T2 | No production value at rest (B4.2): a names-plus-patterns scan over `$HOME` returns zero hits for the production secret names while the container is unmounted. **Criterion amended 2026-09-21:** "zero hits" is unachievable over a corpus that legitimately contains the names in fixtures, type stubs and shell history. What answers the question is value-equality against the real values, run at VM day once they exist | plant a decoy (`ARROW_APP_SECRET=dummy1234567890`) under the scan root; the scan must fail, then the decoy is removed — now two hermetic tests, plus a base64 guard that the path rule cannot swallow a real secret | **run 2026-09-21**: 509,050 files, 3,045 hits, of which 1,983 outside the repository and 23 documented decoys. Read rather than counted: 384 boto3 type stubs under editor extensions, ~939 chat transcripts from four agent tools, 159 token-shaped and nearly all test fixtures, 13 shell-history lines. Two limits stated, not glossed: 12,714 files over 2 MB skipped and 2,290 unreadable, so a zero could only ever describe the files read |
 | T3 | GitHub over SSH (B4.3): `ssh -T git@github.com` prints the account name, `git ls-remote --exit-code` returns 0, `~/.git-credentials` is gone and `credential.helper` is empty | the old path must now be dead: `git ls-remote https://…` must fail **after** the token is revoked | four command outputs |
 | T4 | Key retirement (B4.4/B4.5): `id_rsa*` absent, no `94.237.73.113` in `~/.ssh/config` or `known_hosts`, and a batch-mode SSH to that address fails | run the same assertions against a temp copy of the config with the block re-added; they must fail | grep output, both copies |
 | T5 | VM key (B4.6): `ssh-keygen -y -P ""` **fails** (a passphrase exists), key mode 600, `.pub` mode 644, `IdentitiesOnly yes` present | generate a throwaway passphrase-less key in a temp directory; the same command must succeed, proving the check detects it | **done 2026-09-21**, `IdentitiesOnly` excepted: the real key fails with *incorrect passphrase supplied to decrypt private key* (rc=255), the throwaway control succeeds (rc=0), modes 600/644, fingerprint `SHA256:2fUTiWFK…`. `IdentitiesOnly yes` arrives with the `Host vm-*` block at S2. Caveat recorded in B4.6: this workstation's gnome-keyring agent already holds the key and signs with it, so the passphrase does not gate use while the login keyring is unlocked |
-| T6 | No credentials in new transcripts (B4.7): the value-shaped scan over sessions created after this date returns zero matches | append a dummy `aws_secret_access_key = "dummy1234567890abcdef"` to a copied transcript; the scan must flag it | both runs |
+| T6 | No credentials in new transcripts (B4.7): the value-shaped scan over sessions created after this date returns zero matches | append a dummy `aws_secret_access_key = "dummy1234567890abcdef"` to a copied transcript; the scan must flag it | **passes, run 2026-09-21**: one transcript inside the window, zero hits; the planted control is flagged, and the same file is skipped once `--since` moves past it. The legacy tree (600 files) holds 139, which is what this check exists to stop growing |
 | T7 | 2FA armed (B4.6): a dated checklist with one row per account (GitHub, CloudPe, Cloudflare, broker) | not machine-checkable — recorded as a dated checklist, never quoted as a test | the checklist itself |
 
 ### Code tests
@@ -290,7 +291,9 @@ repository.
       TPM enrolment after first boot, two-reboot proof) is in the git history of this file:
       `git log -p -- docs/plans/2026-09-21-post-verification-plan.md`.
 - [ ] **B4.2 Production values never rest on this PC — permanent, not an interim.** Nothing
-      production-class exists here yet (no real ARROW values, no R2 token) and now nothing ever will:
+      production-class is *known* to exist here yet (no R2 token) and now nothing ever will — with one open
+      item: `~/.env.arrow` holds credential-shaped broker values and is the operator's to classify; if it is
+      a live app, this bullet's premise is already false for the broker pair and VM day rotates it (B4.7):
       create the real values at VM day on the VM, pipe them with `--values-file /dev/stdin`, and never
       type one into a chat (B4.7). The deploy environment's operator-supplied values (`CHECKPOINT_DIR`,
       `O2_PASSWORD`) are entered at S7 on the node, not here. A `cryptsetup` file container remains
@@ -334,10 +337,19 @@ repository.
       and upcloud keys already have that posture) or keep VM keys out of the keyring's reach.
       Remaining: the `Host vm-*` block carrying `IdentitiesOnly yes` and `ForwardAgent no`, written at S2
       when the addresses exist; 2FA on CloudPe, Cloudflare and the broker account (T7).
-- [ ] **B4.7 Stop putting real credentials in a conversation.** Nine session transcripts already hold 34
-      value-shaped matches for ARROW/aws/O2 secret patterns (values were only matched, never printed).
-      Nothing production-class exists yet, so nothing needs rotating today — from VM day on, real values
-      are entered from the portal, not typed into a chat.
+- [ ] **B4.7 Stop putting real credentials in a conversation.** Measured 2026-09-21 with the scanner from
+      CHG-289, replacing an earlier count of nine transcripts and 34 matches taken with an ad-hoc pattern
+      set: the pi transcript tree (600 files) holds 139 value-shaped matches, the full `$HOME` sweep finds
+      ~939 more across four agent tools' session trees, and shell history holds 13 — including the GitHub
+      token revoked on 2026-09-21, dead but still on disk. New transcripts are clean (T6). Nothing
+      production-class exists yet, so nothing needs rotating today — from VM day on, real values are entered
+      from the portal, not typed into a chat.
+      **Open, and the operator's to classify:** `~/.env.arrow` (mode 600, unchanged since 2026-08-21) holds
+      four credential-shaped values — `ARROW_APP_ID`, a 64-character `ARROW_APP_SECRET`, a 23-character
+      `ARROW_PASSWORD`, a 32-character `ARROW_TOTP_KEY` — and the local ingestion scripts read it. Live
+      app: the one production-class value that does rest here, rotated at VM day by the rotation log's
+      Arrow row. Paper or sandbox app: no action. Unused: delete it. Values appear here as length and
+      masked preview only, never printed.
 
 ### Task B5 — One rotation, executed and dated
 **Why:** rotation is the only answer to a read you cannot detect; a procedure without a date never runs.
