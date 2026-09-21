@@ -679,10 +679,10 @@ docker run --rm --network "container:$COORD" \
 ```
 **Expect:** `DDL-APPLY-RESULT: PASS exit=0`, then `evidence-ownership-check: PASS`, and exit code 0. The
 record (`apply.json`, `tables_applied: 27`) lands in the mounted directory.
-**Exit:** the catalog holds the 27 manifest tables. Then restart ingestion — its earlier task already
-exited and consumed Swarm's restart budget:
+**Exit:** the catalog holds the 27 manifest tables. Ingestion retries on its own (CHG-275: it no longer
+exhausts a restart budget on a prerequisite that arrives late, so the manual `docker service update
+--force prod_ingestion` this step used to need is retired), so only check it:
 ```bash
-docker service update --force prod_ingestion
 docker service ls --filter name=prod_ingestion            # 1/1 needs the vendor feed too, see below
 ```
 **Three measured traps:**
@@ -693,8 +693,10 @@ docker service ls --filter name=prod_ingestion            # 1/1 needs the vendor
   state (exit 2). Both travel in the environment, as above; the matrix path points at the manifest baked
   into the image, not at a host file.
 - `ingestion` reaching `1/1` also needs the Arrow vendor feed. With placeholder credentials the bridge is
-  rejected (`Login request failed … user not found`), the service drains with 0 ticks and stays `0/1`. This
-  step removes the schema failure; it is not a substitute for vendor credentials.
+  rejected (`Login request failed … user not found`), the service drains with 0 ticks and stays `0/1`,
+  restarting every 30 s (CHG-275) — a permanent error now looks like a loop rather than a stopped task,
+  which is the price of surviving the transient one above. This step removes the schema failure; it is
+  not a substitute for vendor credentials.
 **Rehearsed:** 2026-09-20 on the single-node rehearsal cluster (`run9`). This exact command returned
 `DDL-APPLY-RESULT: PASS exit=0` for 27 tables, and the following ingestion attempt reached the vendor
 (which answered `user not found` for the placeholder user) with Fluss writes accepted, including a

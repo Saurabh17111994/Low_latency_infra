@@ -1359,7 +1359,7 @@ class TestRestartBudget:
     """
 
     BOUNDED = {"fluss-coordinator", "fluss-tablet-1", "fluss-tablet-2", "fluss-tablet-3",
-               "flink-jobmanager", "flink-taskmanager", "ingestion", "execution-bridge"}
+               "flink-jobmanager", "flink-taskmanager", "execution-bridge"}
     UNBOUNDED = {"zookeeper-1", "zookeeper-2", "zookeeper-3", "execution-gateway", "nautilus",
                  "otel-collector", "openobserve", "alert-consumer",
                  # CHG-273: the per-host file collector — a stopped one is a silent hole
@@ -1368,7 +1368,15 @@ class TestRestartBudget:
                  # CHG-269: the EOD trigger. Same reasoning as the alert consumer
                  # (CHG-258): a stopped scheduler is a daily job that silently never
                  # runs, so it restarts forever and the failure stays visible.
-                 "eod-scheduler"}
+                 "eod-scheduler",
+                 # CHG-275: ingestion was the one service measured spending its budget on
+                 # a TRANSIENT prerequisite — the bridge crashed, and the DDL catalog it
+                 # reads is applied by a later step of the same deploy. Bounded retries
+                 # turned that into a manual `docker service update --force`; retrying
+                 # heals it. The other seven stay bounded: their failures are state or
+                 # credential errors a restart loop does not fix, and execution-bridge
+                 # emits orders, where churn is the safety case.
+                 "ingestion"}
 
     def test_every_service_is_classified(self):
         services = set(_load()["services"])

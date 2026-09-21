@@ -835,6 +835,16 @@ services:
     deploy:
       <<: *deploy_workload
       replicas: 1
+      # CHG-275: ingestion is the one service measured spending its restart budget on a
+      # TRANSIENT prerequisite — the bridge crashed, and the DDL catalog it reads is
+      # applied by a later step of the same deploy (S8). Bounded retries turned that into
+      # a manual `docker service update --force`; retrying heals it instead. This
+      # overrides the anchor's restart_policy sub-map wholesale (merge-key note at the
+      # top). `delay: 30s`, not the anchor's 5s: the failure it must survive lasts as long
+      # as the DDL step, and the JVM should not boot every five seconds while it waits.
+      restart_policy:
+        condition: any
+        delay: 30s
       resources:
         limits: {cpus: "4", memory: 4G}
     secrets:
