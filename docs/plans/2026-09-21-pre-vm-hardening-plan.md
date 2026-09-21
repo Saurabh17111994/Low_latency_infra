@@ -149,7 +149,41 @@ the guess in the observability VM's sizing.
 > earlier "seventeenth required variable" reading retracted in the same record. 2.1's acceptance holds:
 > rc=0, 43 references resolved, and every image a node pulls is digest-pinned.
 
+> **Findings, 2026-09-21 (2.4–2.6).** Two more, both in tooling rather than in the deck:
+>
+> (a) `stack_selfcheck.sh`'s `DEPLOY=1` mode **removes the stack afterwards** — `DOWN` defaults to `1` — so a
+> deploy typed that way comes up and then vanishes. S7 now names it and keeps `docker stack deploy`
+> authoritative. The `network not found` failure I hit on the first attempt was **already** documented in
+> S7's traps ("`docker stack rm` frees networks *and* configs asynchronously"); that half is a documentation
+> success, and an earlier report of mine overstated it as a gap.
+>
+> (b) `prod_node_check.py` died with an `AttributeError` when an inventory's `access` is a string rather than
+> an object. The schema is documented and the file-level default is `{}`; the failure mode should name the
+> mistake instead of crashing. Fixed with a shape check and a test (CHG-282).
+
 ### Phase 3 — the riders
+
+> **Findings, 2026-09-21 (3.1–3.2).** Both riders closed, neither needed a code change.
+>
+> (a) **The in-container clock check does not exist, and does not need to.** Neither the executor image nor the
+> ingestion image carries `chronyc` — probed directly, both give rc=127 with docker's own `exec: "chronyc":
+> executable file not found in $PATH`. That is not a gap: a container shares the host's clock, so discipline is
+> a host property, and it is already gated twice — `vm-bootstrap.sh` installs, enables and *verifies* chrony
+> (`chronyc tracking`, covered by `test_12_vm_bootstrap.py`), and `prod_node_check.py` reads the offset over
+> SSH on every node and fails closed when it cannot. What stays unprovable until VM day is a real host's
+> `chronyc tracking` output; nothing here can stand in for it.
+>
+> (b) **The rebuilt ingestion image starts cleanly; only the vendor feed is missing.** It walks the whole local
+> path in one run: 27 tables verified, Fluss connected with schema verified, manifest loaded (2433 instruments,
+> `approved=true`, fingerprint `20df0dc6f92b`), OTLP emitter started, quarantine writer connected. It is then
+> killed by its own healthcheck (`test -f /tmp/ingestion.ready`) — because that marker is written from
+> `health.isReady()`, which flips only on `CONNECTED to Arrow Trade … broker data flowing`. With dummy
+> `ARROW_*` credentials the task can never become healthy, so swarm kills and restarts it: fail-closed,
+> intended, and the documented "ingestion 1/1 needs real `ARROW_*`". No packaging defect.
+>
+> One trap worth knowing on VM day: a wrong `ARROW_*` shows up as a restart loop with `exit 143` and the phrase
+> `dockerexec: unhealthy container`, not as an error about credentials. The app's own log ends at
+> `quarantine-writer: connected` and says nothing more, so read the healthcheck's file gate, not the log.
 
 *My work, about half an hour.*
 

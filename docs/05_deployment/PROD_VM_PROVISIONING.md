@@ -797,6 +797,10 @@ docker service ps <service> --no-trunc        # placement must match labels, not
 VM**, so `--with-registry-auth` is unnecessary (harmless if left in place). Use **one** stack name
 everywhere — the checked script defaults to `prod`, the deployment docs show `trading`; pick one and
 never mix.
+`stack_selfcheck.sh` also has a `DEPLOY=1` mode, and it **removes the stack afterwards** unless you pass
+`DOWN=0`: its `DOWN` default is `1`, so `DEPLOY=1` alone deploys and then tears the stack down. Deploy with
+the `docker stack deploy` line above; reach for `DEPLOY=1 DOWN=0` only when you want the script's own
+checks and its deploy in one step.
 **Expect:** replicas converge; nothing stuck at `0/N`; encrypted overlays and internal-only execution networks are the ones declared by the stack.
 **Exit:** all services converge, and Flink shows exactly the expected jobs running.
 **Stop if:** a service reports "no suitable node" — that is a labelling problem (S5), not a scheduling problem.
