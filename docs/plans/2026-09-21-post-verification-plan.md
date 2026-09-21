@@ -54,9 +54,11 @@ opposite case — B4.1 encrypts it); `fail2ban`; authenticated NTP; Kubernetes/A
   repository already has.
 - **Assumptions:** the provider's hypervisor can read the VM at any time; the broker enforces its limits
   server-side; the workstation is the most valuable machine in the system.
-- **Unresolved decisions:** `EOD_TABLES` production list; chrony socket ownership inside the container;
-  durable rehearsal registry (keep or drop); a
-  `.gitignore` line for `prod_vms.json`.
+- **Decisions (all settled 2026-09-21):** `EOD_TABLES` stays `trades,quotes`, the value the deploy
+  environment already carries (add `candle_closed` only if the derived table belongs in the lake too);
+  the chrony socket is refused rather than deferred — C1/CHG-288 publishes a read-only clock fact; the
+  durable rehearsal registry is dropped, the guide keeping a local `registry:2` only as a
+  third-party-image mirror ("measure it, do not pre-build it"); `prod_vms.json` is in `.gitignore`.
 - **Authorization:** plan only — no gate or certification runs. Phase B/C/D/E are executed on an explicit
   go-ahead; code changes need a change record, docs-only changes do not.
 
@@ -491,11 +493,13 @@ Before the first live order, every row must have its evidence artifact, not an i
 
 1. The five ARROW values, the R2 bucket + scoped token, and the two VM IPs (Phase A).
 2. Broker-portal and CloudPe-panel sessions for B1 and B2.
-3. Two decisions left: the `EOD_TABLES` production list, and the rehearsal registry (keep or drop).
-   Settled since this list was written: R2 (a scoped, rotatable static pair — B3a) and the chrony socket
-   question — C1 publishes a read-only clock fact instead of mounting that socket (CHG-288).
-4. The broker whitelist scope decision (all workload IPs vs one stable egress address) — it must be made
-   before Phase E, and it is cheaper to decide it now.
+3. No decisions left. `EOD_TABLES` stays `trades,quotes` (the value the deploy environment already
+   carries) and the rehearsal registry is dropped. Settled since this list was written: R2 (a scoped,
+   rotatable static pair — B3a), the chrony socket question — C1 publishes a read-only clock fact instead
+   of mounting that socket (CHG-288) — and `EOD_TABLES` itself.
+4. The broker whitelist scope — **decided 2026-09-21: every node that can run the executor**, so with
+   two machines both addresses go into the broker portal. The rule that outlives the decision: adding a
+   node means revisiting the portal the same day, or broker login fails silently.
 5. A go-ahead per phase — nothing above runs on its own.
 6. Three workstation decisions: when to schedule the LUKS reinstall (before VM day), whether
    `94.237.73.113` can be destroyed, and the one-time step of adding a new public key to your GitHub

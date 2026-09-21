@@ -87,3 +87,5 @@ docs/08_implementation/14-candle-log-kv-replay-safety_2.md
 /CLAUDE.md
 /TASK_CONTEXT.md
 code/01_platform/01_docker/secrets.env
+# The real node inventory is generated per deploy; only the template is tracked.
+code/01_platform/04_scripts/prod_vms.json

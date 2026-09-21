@@ -351,7 +351,7 @@ result (`09-production-swarm.md`).
 
 | Decision | Notes | Default |
 | --- | --- | --- |
-| Container registry | All nodes must pull the same digests | **Public GHCR packages** — `ghcr.io/<owner>/<image>:<tag>@sha256:…` (Decision 2026-09-21, revises the `registry:2`-on-VM1 choice). The workstation pushes with one classic PAT (`write:packages`/`read:packages`) after `docker login ghcr.io`; every node **pulls anonymously**, so no registry credential exists on any VM and no VM needs a daemon setting. Public packages are free (storage and transfer), the repo is public, and no image bakes a secret, so the images expose nothing the repo does not. Record the resolved digests in the image lock |
+| Container registry | All nodes must pull the same digests | **Public GHCR packages** — `ghcr.io/<owner>/<image>:<tag>@sha256:…` (Decision 2026-09-21, revises the `registry:2`-on-VM1 choice). The CI workflow pushes with the `GITHUB_TOKEN` GitHub issues for that run, so no personal access token exists anywhere and no workstation login is needed; every node **pulls anonymously**, so no registry credential exists on any VM and no VM needs a daemon setting. Public packages are free (storage and transfer), the repo is public, and no image bakes a secret, so the images expose nothing the repo does not. Record the resolved digests in the image lock |
 | VM specs | Workload/observability floor is **250 GB disk**; a *learning* rig may be smaller, but perf evidence then remains unprovable | see §6.1 sizing caveat |
 | Checkpoint/savepoint target | Production **requires** `s3://` + encryption; `CHECKPOINT_DIR` must not be `file://` in prod | **Cloudflare R2**, one bucket with prefixes `checkpoints/` and `warehouse/` (Decision 2026-09-21): S3-compatible, no egress fee, and already the endpoint the stack takes |
 | Swarm ports | 2377/tcp, 7946/tcp+udp, 4789/udp open between VM1–VM3 | required |
@@ -363,7 +363,7 @@ result (`09-production-swarm.md`).
 
 - Secret values for the 9 names the stack demands (S6 in §9).
 - The node inventory JSON (`code/01_platform/04_scripts/prod_vms.example.json` is the template).
-- The deploy values listed in §6.2 — five are still missing.
+- The deploy values listed in §6.2 — measured 2026-09-21, only `CHECKPOINT_DIR` (needs the R2 bucket) and `O2_PASSWORD` (first boot) are still the operator's to supply; the image, endpoint and table values are in the published fragment.
 - SSH access to all four VMs.
 
 ## 6. What does not exist yet
@@ -381,7 +381,7 @@ result (`09-production-swarm.md`).
 ### 6.2 The values a deploy must have — and what is missing today
 
 `stack_selfcheck.sh` refuses a deploy that carries placeholders: it demands 16 non-empty values
-(`required_vars`). Reproduced read-only on this repository, **8 are missing**:
+(`required_vars`). Reproduced read-only on this repository on 2026-09-21, **8 were missing** — that table is the measurement of that day, not the current state; the **Correction** paragraph under it is the current state:
 
 | Missing value | Why it is missing |
 | --- | --- |
@@ -577,15 +577,14 @@ because a stack file cannot express a loopback binding — `host_ip` is rejected
 `Additional property host_ip is not allowed` (measured 2026-09-20) — so the firewall rule, not the
 stack file, is what keeps it private.
 
-**5. Registry: credentials on the workstation only** — the registry is public GHCR (Decision
-2026-09-21), so **no VM needs a registry credential and no VM needs a daemon setting**: `ghcr.io` is
-HTTPS and the packages are pulled anonymously. The only credential is the one you push with, and it
-stays on the workstation:
-```bash
-# on the WORKSTATION, once per release — a classic PAT with write:packages + read:packages
-echo "<PAT>" | docker login ghcr.io -u <github-user> --password-stdin
-docker logout ghcr.io      # optional: the push is done; the token need not stay cached
-```
+**5. Registry: nobody logs in, anywhere** — the registry is public GHCR (Decision 2026-09-21), so
+**no VM needs a registry credential and no VM needs a daemon setting**: `ghcr.io` is HTTPS and the
+packages are pulled anonymously. Publishing needs a credential too, and since 2026-09-21 that one is
+not yours: `.github/workflows/publish-images.yml` logs in with the workflow's own `GITHUB_TOKEN`,
+which GitHub issues for that run and expires with it. **There is no registry command to run on the
+workstation, and no personal access token exists**; the `docker login` kept in §6 is the labelled
+fallback for the day CI cannot publish, and nothing else uses it.
+
 A **private** package is the alternative, and it is the one to avoid here: it puts a credential on
 every node (a login, a token to distribute, a rotation you must not forget — an expired token is a
 deploy that stops with a pull error). A public package needs none of that and reveals nothing: the
@@ -595,12 +594,23 @@ If Docker Hub's anonymous pull limits ever bite on the third-party images (OpenO
 the fallback is a local `registry:2` mirror plus `--registry <host:port>` on a worker — measure it,
 do not pre-build it.
 
-**6. Publish and pin** — from the workstation, in one command that tags, pushes and digest-resolves the
-seven project-built images and rewrites the seven image lines in the deploy environment:
+**6. Publish and pin** — **run it from the browser; there is no command to type.** Actions →
+**publish-images** → **Run workflow** on the default branch (or push a `v*` tag on the tip) pushes all
+seven project-built images, resolves every digest from the registry and commits them to
+`code/01_platform/01_docker/images.published.env`; §6.2 records the measured runs. S4's job is then to
+merge that fragment into the deploy environment, which the block after this list does.
+
+**Fallback for the day CI cannot publish** (a changed registry, a broken runner image) — the same thing
+by hand, and the only path that wants a workstation registry login:
 ```bash
+# once per release, on the WORKSTATION — a classic PAT with write:packages + read:packages
+echo "${GHCR_PAT:?set a classic PAT for write packages and read packages}" \
+  | docker login ghcr.io -u "${GHCR_USER:?set your GitHub user}" --password-stdin
 bash code/01_platform/04_scripts/image-publish.sh \
-     --registry https://ghcr.io/<owner> --env-registry ghcr.io/<owner> --tag prod \
+     --registry "https://ghcr.io/${OWNER:?set your lowercase GitHub owner}" \
+     --env-registry "ghcr.io/${OWNER:?set your lowercase GitHub owner}" --tag prod \
      --write-env code/01_platform/01_docker/.env
+docker logout ghcr.io      # the push is done; the token need not stay cached
 ```
 `--env-registry` keeps the address that lands in the deploy environment separate from the address the
 push used. For GHCR the two are the same value, so the flag is belt-and-braces here; it matters when
@@ -657,7 +667,7 @@ runner image — written out in full so that day is not the day you learn the fl
 `invalid reference format: repository name (Saurabh17111994/…) must be lowercase` (measured
 2026-09-21) — and GitHub's `github.repository_owner` keeps the account's display casing, so an owner
 that came from the account page has to be lowercased before it is used. The CI workflow lowercases
-it; when you run the command by hand, `<owner>` means the lowercase form.
+it; in the fallback block above, `${OWNER:?}` must already carry the lowercase form.
 
 **Note (measured 2026-09-19 against a local `registry:2` over plain HTTP, and 2026-09-21 under a
 GHCR-shaped owner path):** `digest-pin.sh` resolved
