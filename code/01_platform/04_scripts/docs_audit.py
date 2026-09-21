@@ -68,8 +68,15 @@ Checks:
       `bash -n`, carries no `<...>` placeholder, references repository paths
       that exist, and starts every command with a word that resolves here, is a
       shell builtin, or is on TOOLS_NOT_ALWAYS_PRESENT.
+  C19 Alert catalogue vs provisioners (plan task T11, area B6a): the dossier's
+      "Alert catalogue" table agrees with what the provisioners define — a row
+      claiming a runtime alert names a real rule, and a provisioned `SEC-` rule
+      is named by a row — and the section's measured sentence ("provisions 47
+      rules — 20 `SIGNAL-*`, …") matches the provisioners it describes.
 """
 
+import ast
+import collections
 import glob
 import json
 import os
@@ -1381,6 +1388,157 @@ def c18_runbook_executability():
     )
 
 
+# ---------------------------------------------------------------------------
+# C19 — alert catalogue vs provisioners (plan task T11, area B6a). The dossier's
+# "Alert catalogue" table states, per security area, the mechanism that holds it
+# today and whether a runtime alert exists. That statement is about code, so it
+# is checked both ways, and the section's own measured sentence ("provisions 47
+# rules — 20 `SIGNAL-*`, …") is checked against the provisioners too, because it
+# is the evidence the eight areas rest on.
+
+OBSERVABILITY_DOC = os.path.join(DOCS_DIR, "08_implementation", "10-observability.md")
+O2_PROVISION = os.path.join(SCRIPTS_DIR, "o2-provision.py")
+POSITION_STATE_ALERTS = os.path.join(
+    ROOT, "code", "01_platform", "01_docker", "openobserve", "alerts",
+    "position-state-alerts.json",
+)
+CATALOGUE_HEADING = "#### Alert catalogue"
+# Measured over all eight real rows on 2026-09-21: every cell is one of these two
+# denials. Anything else is a claim, and a claim must name a provisioned rule.
+CATALOGUE_DENIAL_RE = re.compile(r"^(no\b|build-time\b)", re.IGNORECASE)
+CATALOGUE_COUNT_RE = re.compile(r"provisions (\d+) rules")
+CATALOGUE_PREFIX_RE = re.compile(r"(\d+) `([A-Z]+)-\*`")
+SECURITY_RULE_PREFIX = "SEC-"
+
+
+def catalogue_rows(text):
+    """[(area, runtime-alert cell)] from the catalogue table, or None when the
+    section is missing."""
+    parts = text.split(CATALOGUE_HEADING, 1)
+    if len(parts) != 2:
+        return None
+    body = parts[1].split("\n#### ", 1)[0]
+    rows = []
+    for line in body.split("\n"):
+        if not line.strip().startswith("|"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) != 4 or cells[0] == "Area" or set(cells[0]) <= set("-: "):
+            continue
+        rows.append((cells[0], cells[3]))
+    return rows
+
+
+def names_rule(text, name):
+    """True when `text` names exactly this rule: `ING-x-80` does not name
+    `ING-x-8`, and `ING-x-80-extra` does not name `ING-x-80`."""
+    return re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", text) is not None
+
+
+def o2_provision_alert_names():
+    """The rule names in o2-provision.py's ALERTS list, read with ast so quoted
+    prose cannot produce a false match (the same approach as
+    test_alert_threshold_parity.py). The catalogue's "provisions 47 rules"
+    sentence names this file, so it is counted against this file alone."""
+    names = []
+    source = safe_read(O2_PROVISION)
+    if source:
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            tree = None
+        for node in ast.walk(tree) if tree else []:
+            if isinstance(node, ast.Assign) and any(
+                getattr(target, "id", None) == "ALERTS" for target in node.targets
+            ):
+                for element in getattr(node.value, "elts", []):
+                    for keyword in getattr(element, "keywords", []):
+                        if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
+                            names.append(keyword.value.value)
+    return names
+
+
+def position_state_alert_names():
+    """The rule names in the position-state JSON provisioner."""
+    names = []
+    raw = safe_read_json(POSITION_STATE_ALERTS)
+    if isinstance(raw, list):
+        for entry in raw:
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+                names.append(entry["name"])
+    return names
+
+
+def provisioned_alert_names():
+    """Every rule name either provisioner defines — the set the catalogue table
+    is checked against."""
+    return o2_provision_alert_names() + position_state_alert_names()
+
+
+def alert_catalogue_problems(doc_text, rule_names):
+    """Everything wrong with the catalogue table against the provisioned rules."""
+    rows = catalogue_rows(doc_text)
+    if rows is None:
+        return [f"the dossier has no '{CATALOGUE_HEADING}' section"]
+    if not rows:
+        return ["the alert catalogue table has no security-area rows"]
+    if not rule_names:
+        return ["no provisioned alert rule was found in either provisioner"]
+    problems, claims = [], []
+    for area, runtime in rows:
+        if CATALOGUE_DENIAL_RE.match(runtime):
+            continue
+        claims.append(runtime)
+        if not any(names_rule(runtime, name) for name in rule_names):
+            problems.append(
+                f"{area}: claims a runtime alert that no provisioner defines ({runtime[:60]})"
+            )
+    for name in rule_names:
+        if name.startswith(SECURITY_RULE_PREFIX) and not any(
+            names_rule(claim, name) for claim in claims
+        ):
+            problems.append(f"{name}: provisioned, but no catalogue row names it")
+    return problems
+
+
+def alert_rule_count_problems(doc_text, rule_names):
+    """The catalogue's measured sentence against the provisioner it names."""
+    match = CATALOGUE_COUNT_RE.search(doc_text)
+    if not match:
+        return ["the catalogue's 'provisions N rules' claim is gone — restore it or update C19"]
+    problems = []
+    claimed_total = int(match.group(1))
+    if claimed_total != len(rule_names):
+        problems.append(
+            f"the catalogue claims {claimed_total} rules, the provisioners define {len(rule_names)}"
+        )
+    counted = collections.Counter(name.split("-")[0] for name in rule_names)
+    for claimed, prefix in CATALOGUE_PREFIX_RE.findall(doc_text):
+        if int(claimed) != counted.get(prefix, 0):
+            problems.append(
+                f"the catalogue claims {claimed} {prefix}-* rules, "
+                f"the provisioners define {counted.get(prefix, 0)}"
+            )
+    return problems
+
+
+def c19_alert_catalogue():
+    doc_text = safe_read(OBSERVABILITY_DOC)
+    if doc_text is None:
+        return check("C19 observability dossier readable", False, OBSERVABILITY_DOC)
+    names = provisioned_alert_names()
+    problems = alert_catalogue_problems(doc_text, names)
+    # The count sentence names o2-provision.py, so it is checked against that
+    # provisioner alone; the table is checked against both.
+    problems += alert_rule_count_problems(doc_text, o2_provision_alert_names())
+    rows = catalogue_rows(doc_text) or []
+    check(
+        f"C19 {len(rows)} security areas agree with {len(names)} provisioned rules",
+        not problems,
+        f"{len(problems)} problem(s): " + "; ".join(problems[:6]),
+    )
+
+
 def main():
     c1_manifest()
     c2_ownership_matrix()
@@ -1400,6 +1558,7 @@ def main():
     c16_env_key_drift()
     c17_env_facts_ledger()
     c18_runbook_executability()
+    c19_alert_catalogue()
     if failures:
         print(f"\ndocs-audit: {len(failures)} check(s) FAILED — fix before proceeding")
         return 1
