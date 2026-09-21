@@ -30,8 +30,10 @@ and password). The procedure and the values-file format are in
 `PROD_VM_PROVISIONING.md` §9 `S6`.
 
 ```bash
-ssh <ssh-user>@<vm1-ip> 'cd ~/arrow-infra && code/01_platform/04_scripts/secrets-bootstrap.sh \
-  --values-file /dev/stdin --o2-user <o2-user>' < ~/vm-secrets.env
+# the outer double quotes expand here; the inner single quotes keep the remote command intact
+ssh "${SSH_USER:?set the SSH user}@${VM1_IP:?set the VM1 public IPv4}" \
+  "cd ~/arrow-infra && code/01_platform/04_scripts/secrets-bootstrap.sh \
+  --values-file /dev/stdin --o2-user '${O2_ADMIN:?set the OpenObserve admin email}'" < ~/vm-secrets.env
 code/01_platform/04_scripts/secrets-bootstrap.sh --check   # [PASS] all 9 secrets exist
 ```
 

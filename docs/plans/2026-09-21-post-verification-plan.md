@@ -198,7 +198,8 @@ If any of these grows into a script, it lands with a change record and its own t
 
 ### Task B1 — Broker-side limits, verified by attempting to break them
 **Why:** this is the only control that caps the loss when a VM is read; everything else is convenience.
-**Files:** none — broker portal settings, recorded in the guide §9 item 1.
+**Files:** none — broker portal settings, recorded in the guide §9 item 1. The paste-ready sheet is
+guide §9 "B1 and B2 as paste-ready sheets": the settings table, the four refusals and the positive control.
 **Depends on:** VM day complete (the trading VM's IP must exist for the whitelist).
 
 - [ ] Disable withdrawal on the trading login; set the per-day order cap and maximum order size.
@@ -212,7 +213,8 @@ If any of these grows into a script, it lands with a change record and its own t
 
 ### Task B2 — Provider-side access, verified
 **Why:** the panel and the security group are what keep the VMs off the open internet; both are one-time.
-**Files:** none — CloudPe panel. Criteria are the guide §9 item 2.
+**Files:** none — CloudPe panel. Criteria are the guide §9 item 2; the rule table and the two-sided scan
+commands are in guide §9 "B1 and B2 as paste-ready sheets".
 **Depends on:** VMs created (Phase A).
 
 - [ ] 2FA on the CloudPe panel; unique password; billing alert on any new VM.
@@ -315,8 +317,12 @@ streams that exist; it does not watch for the absence of a good state.
 - [ ] Keep the three infrastructure-abuse alerts (unexpected outbound, sustained CPU anomaly, container
       restart) on the VM-day checklist. The first two have live sources (`node_network_transmit_bytes_total`,
       `node_cpu_seconds_total`); confirm a restart source before writing that rule.
-- [ ] Prove delivery once, locally, with a synthetic alert (task B6b), rather than assuming a rule reaches
-      `alert-store` because a dashboard shows it.
+- [x] Prove delivery once, locally, with a synthetic alert (task B6b), rather than assuming a rule reaches
+      `alert-store` because a dashboard shows it. DONE 2026-09-21 on the local stack: probe alert ->
+      dev-webhook -> durable JSONL record classified `severity=info class=other`, the malformed delivery
+      answered 400 with the consumer surviving it, and the probe was deleted. Log: `~/.p6v/b6b/b6b.log`.
+      Left for VM day: the same proof against the deployed consumer, and a real destination — the
+      dev-webhook still points at the noop receiver by design.
 
 ### Task B7 — Incident-response runbook
 **Why:** the day something looks wrong is the wrong day to design the response.
@@ -396,9 +402,12 @@ manifest lifecycle is proven without offload.
 **Files:** O2 dashboards; a checklist section (docs-only) in `PROD_VM_PROVISIONING.md` or the IR runbook.
 **Depends on:** B6.
 
-- [ ] Five-line morning check: order-cap hits, service restarts, disk/volume pressure, alert-store deltas,
-      unexpected logins.
-- [ ] Confirm every panel the operator needs is reachable only from the workstation address.
+- [x] Five-line morning check: order-cap hits, service restarts, disk/volume pressure, alert-store deltas,
+      unexpected logins — written 2026-09-21 as "The morning check — five lines" in the guide's S11. It
+      names only measured things: the `REJECTED` attempt phase, `prod_nautilus`, the consumer's
+      `python:3.11-slim` image, and port 9999 being unpublished.
+- [ ] Confirm every panel the operator needs is reachable only from the workstation address — this is
+      B2's two-sided scan, worth repeating after any firewall or network change and not only once.
 
 ## Phase E — grow to the v1 quorum
 
@@ -461,6 +470,10 @@ Before the first live order, every row must have its evidence artifact, not an i
   the production run stays part of the go-live gate (Phase F).
 - That TPM unlock resists a thief who also knows the login password, or that T2/T6 find every secret —
   they match known names and shapes only.
+- That every executable snippet in the repository parses. The scan covers the 74 fenced `bash`/`sh`
+  blocks under `docs/`. One exception is deliberate: a quoted `if` fragment inside the immutable record
+  CHG-245 is evidence, not a procedure to paste. Untagged blocks that mix a command with its expected
+  output are outside the scan by construction.
 
 ## Risks
 
@@ -478,8 +491,9 @@ Before the first live order, every row must have its evidence artifact, not an i
 
 1. The five ARROW values, the R2 bucket + scoped token, and the two VM IPs (Phase A).
 2. Broker-portal and CloudPe-panel sessions for B1 and B2.
-3. Three decisions left: the `EOD_TABLES` production list; the chrony socket ownership approach; and the
-   rehearsal registry (keep or drop). The R2 question is settled — a scoped, rotatable static pair (B3a).
+3. Two decisions left: the `EOD_TABLES` production list, and the rehearsal registry (keep or drop).
+   Settled since this list was written: R2 (a scoped, rotatable static pair — B3a) and the chrony socket
+   question — C1 publishes a read-only clock fact instead of mounting that socket (CHG-288).
 4. The broker whitelist scope decision (all workload IPs vs one stable egress address) — it must be made
    before Phase E, and it is cheaper to decide it now.
 5. A go-ahead per phase — nothing above runs on its own.

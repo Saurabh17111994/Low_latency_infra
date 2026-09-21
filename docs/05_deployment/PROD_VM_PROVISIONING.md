@@ -82,15 +82,15 @@ holds one value per label key, and nothing in the deck pins `role == manager`.
 
 ```bash
 # trading VM
-docker swarm init --autolock --advertise-addr <trading-ip>
-docker node update --label-add role=worker <trading-node>
+docker swarm init --autolock --advertise-addr "${TRADING_IP:?set the trading VM public IPv4}"
+docker node update --label-add role=worker "${TRADING_NODE:?set the trading VM node hostname}"
 docker swarm join-token worker            # prints the join command for the second machine
 
 # observability VM — with the token printed above
-docker swarm join --token <token> <trading-ip>:2377
+docker swarm join --token "${WORKER_TOKEN:?paste the token from the join command above}" "${TRADING_IP}:2377"
 
 # back on the trading VM (only a manager can label a node)
-docker node update --label-add observability=true <obs-node>
+docker node update --label-add observability=true "${OBS_NODE:?set the observability VM node hostname}"
 docker node ls                            # expect 1 manager + 1 worker, both Ready/Active
 ```
 
@@ -152,9 +152,9 @@ have nowhere to land.
 
 ```bash
 # on the one VM
-docker swarm init --autolock --advertise-addr <vm-ip>
-docker node update --label-add role=worker <node>
-docker node update --label-add observability=true <node>
+docker swarm init --autolock --advertise-addr "${VM_IP:?set the VM public IPv4}"
+docker node update --label-add role=worker "${NODE:?set the node hostname}"
+docker node update --label-add observability=true "${NODE}"
 docker node ls        # expect 1 manager
 ```
 
@@ -610,9 +610,11 @@ will push, `--self-check` verifies the set offline, and the reachability probe m
 **host** answer 200 or 401 — an owner path is not part of the `/v2/` probe (CHG-274). The manual
 equivalent, image by image:
 ```bash
-docker tag  <project-built-image> ghcr.io/<owner>/<project-built-image>
-docker push ghcr.io/<owner>/<project-built-image>         # prints "digest: sha256:…" = the manifest digest
-bash code/01_platform/04_scripts/digest-pin.sh ghcr.io/<owner>/<project-built-image>
+IMAGE="${IMAGE_NAME:?set the locally built project image name}"
+REF="ghcr.io/${OWNER:?set the GitHub owner}/${IMAGE}"
+docker tag  "$IMAGE" "$REF"
+docker push "$REF"         # prints "digest: sha256:…" = the manifest digest
+bash code/01_platform/04_scripts/digest-pin.sh "$REF"
 ```
 Push the seven project-built images (Flink runtime, Fluss runtime, the four app images, and the DDL-apply
 tool image S7b runs on VM1 — without it the catalog step has no image to run). The two
@@ -645,7 +647,7 @@ its seven `VAR=ref` lines land with digests already attached:
 
 ```bash
 bash code/01_platform/04_scripts/image-publish.sh \
-  --merge-env <your git-ignored deploy env> < code/01_platform/01_docker/images.published.env
+  --merge-env "${DEPLOY_ENV:?set the git ignored deploy env path}" < code/01_platform/01_docker/images.published.env
 ```
 
 The rest of this step is the fallback for the day CI cannot publish — a changed registry, a broken
@@ -671,7 +673,8 @@ that repository holds a single tag.
 **What is scripted, and what is not** (CHG-266). Steps 0–2 are one idempotent command, run on each
 of the four VMs, whenever it is re-run:
 ```bash
-ssh <ssh-user>@<vm-ip> 'cd ~/arrow-infra && bash code/01_platform/04_scripts/vm-bootstrap.sh --apply'
+ssh "${SSH_USER:?set the SSH user}@${VM_IP:?set the VM public IPv4}" \
+  'cd ~/arrow-infra && bash code/01_platform/04_scripts/vm-bootstrap.sh --apply'
 bash code/01_platform/04_scripts/vm-bootstrap.sh --check \
      --extra-free-ports 5080        # on the OpenObserve node (VM4); no VM serves a registry now
 ```
@@ -717,17 +720,17 @@ will not catch it), or an image reference is still a bare tag.
 ### S5 — Cluster init, labels, quorum `[PRODUCTION]`
 ```bash
 # on VM1 — --autolock is set HERE and only here: it is a swarm-init flag
-docker swarm init --autolock --advertise-addr <vm1-ip>   # capture the join commands it prints
+docker swarm init --autolock --advertise-addr "${VM1_IP:?set the VM1 public IPv4}"   # capture the join commands it prints
 # on VM2 and VM3 (MANAGER token)
-docker swarm join --token <manager-token> <vm1-ip>:2377
+docker swarm join --token "${MANAGER_TOKEN:?paste the manager token from the join command}" "${VM1_IP}:2377"
 # on VM4 (WORKER token) — it must join, or the label-placed observability services have no node
 # to land on and sit at 0/1 forever. A worker does not vote: the quorum stays 3 and VM4's loss
 # cannot elect a leader.
-docker swarm join --token <worker-token> <vm1-ip>:2377
+docker swarm join --token "${WORKER_TOKEN:?paste the worker token from the join command}" "${VM1_IP}:2377"
 # on VM1: labels (never hostnames). A node holds ONE value per label key — a second --label-add
 # on the same key overwrites the first, so role=manager and role=worker cannot coexist on one node.
-docker node update --label-add role=worker <node>         # x3: VM1, VM2, VM3 (v1: managers also run workloads)
-docker node update --label-add observability=true <vm4>   # x1: VM4 ONLY
+docker node update --label-add role=worker "${NODE:?set the node hostname}"       # x3: VM1, VM2, VM3 (v1: managers also run workloads)
+docker node update --label-add observability=true "${VM4:?set the VM4 node hostname}"   # x1: VM4 ONLY
 docker node ls                                            # expect 3 managers + 1 worker
 # v2 only (dedicated managers): docker node update --availability drain m1 m2 m3
 ```
@@ -760,7 +763,8 @@ execution_bridge_auth_token                   gateway_shared_secret
 reads it from stdin, and each value reaches `docker secret create` on stdin too, so it touches
 neither filesystem, neither shell history, nor either process list.
 ```bash
-ssh <ssh-user>@<vm1-ip> 'cd ~/arrow-infra && code/01_platform/04_scripts/secrets-bootstrap.sh \
+ssh "${SSH_USER:?set the SSH user}@${VM1_IP:?set the VM1 public IPv4}" \
+  'cd ~/arrow-infra && code/01_platform/04_scripts/secrets-bootstrap.sh \
   --values-file /dev/stdin --o2-user admin@example.com' < ~/vm-secrets.env
 ```
 That file holds the six values only you have — one `KEY=VALUE` per line, any letter case:
@@ -818,7 +822,7 @@ bash code/01_platform/04_scripts/stack_selfcheck.sh CLUSTER=1   # nodes, live ma
 docker stack config -c code/01_platform/01_docker/docker-stack.yml >/dev/null   # compiles the manifest
 docker stack deploy -c code/01_platform/01_docker/docker-stack.yml --with-registry-auth "$STACK_NAME"
 docker stack services "$STACK_NAME"
-docker service ps <service> --no-trunc        # placement must match labels, not hostnames
+docker service ps "${SERVICE:?set the service name}" --no-trunc   # placement must match labels, not hostnames
 ```
 **Notes:** with GHCR (S4) every node pulls anonymously and **no registry credential exists on any
 VM**, so `--with-registry-auth` is unnecessary (harmless if left in place). Use **one** stack name
@@ -907,7 +911,7 @@ loop cannot start. Nothing else in this sequence creates them.
 (exit 3), so this is a once-per-cluster step.
 **Do (on VM1):**
 ```bash
-REPO=<path to the cloned repo>
+REPO="$HOME/arrow-infra"          # the clone S4 step 0 made
 DDL_APPLY_IMAGE="$(sed -n 's/^DDL_APPLY_IMAGE=//p' "$REPO/code/01_platform/01_docker/.env")"
 COORD="$(docker ps -q -f name=prod_fluss-coordinator | head -1)"
 mkdir -p /var/lib/trading/ddl-apply-evidence
@@ -994,9 +998,9 @@ loopback (`host_ip` is rejected, see S4 step 4). Two ways in, both fine:
 
 ```bash
 # either tunnel (works even when the firewall rule has not been applied yet)
-ssh -N -L 5080:127.0.0.1:5080 <vm4-ip>      # leave running, open http://127.0.0.1:5080
+ssh -N -L 5080:127.0.0.1:5080 "${VM4_IP:?set the dashboard VM public IPv4}"   # leave running, open http://127.0.0.1:5080
 # or directly, if your workstation is the allowed source
-# http://<vm4-ip>:5080
+# http://${VM4_IP:?set the dashboard VM public IPv4}:5080
 ```
 
 The publish follows the node that currently runs the task, and is worth one command when nothing
@@ -1064,6 +1068,39 @@ make disaster-drills                   # DR-001..006; --dry-run first, --approve
 | Rollback | `03-rollback.md`: application-only / schema-or-state / infrastructure, each with its own preconditions |
 | Secret rotation | `04-secrets-rotation.md` §Rotation procedure (9 steps, gate halted for order-path credentials) |
 
+### The morning check — five lines, before the first decision of the day
+
+Nothing below is a daemon. You are the last line of detection (task D3), each line costs under a
+minute, and a line you cannot explain is a reason to hold trading for the day — not a reason to keep
+reading until something looks better.
+
+1. **Order-cap hits.** `docker service logs --since 12h prod_nautilus`, plus the broker's own rejection
+   notices. The executor records a refused attempt as a `REJECTED` phase in its durable attempt log.
+   Refusals you asked for (the four in B1's sheet) are noise; one you did not ask for stops the session.
+2. **Service restarts.** `docker stack services prod` — every service at N/N — then `docker service ps`
+   for whichever service is short, and read its task history: a service whose tasks are a run of exits
+   is usually the one whose log nobody has read yet.
+3. **Disk and volume pressure.** `df -h` on each node and `docker system df`; the trend against
+   yesterday is the signal, not a threshold. The volume set is the deck's own `prod_` volumes — one
+   growing without a matching EOD run means the offload is not happening.
+4. **Alert-store deltas.** The consumer keeps every delivery in its `alert-store` volume and answers
+   `GET /stats` on port 9999, which is not published to the host:
+
+   ```bash
+   docker exec "$(docker ps -qf name=prod_alert-consumer)" python3 -c "import urllib.request;print(urllib.request.urlopen('http://127.0.0.1:9999/stats').read().decode())"
+   ```
+
+   Measured 2026-09-21: it answers with `total`, `by_severity`, `by_class`, `last_delivery_at` and its own
+   note that the counts cover only the **last 512 KB** of history — so read the shape and the last-delivery
+   time, never the total as an all-time figure. A `last_delivery_at` that stops moving across a session in
+   which an alert should have fired is the failure: an armed rule nobody watched is not detection.
+5. **Unexpected logins.** `last -n 10` and `journalctl -u ssh --since yesterday` on each node, plus the
+   provider panel's own session list. Every address should be one you recognise; if one is not, the
+   security-incident section of `06_operations/01-runbooks.md` starts with containment, not curiosity.
+
+The panels stay reachable only from your workstation's address. That is B2's two-sided scan, which is
+worth repeating after any firewall or network change rather than every morning.
+
 ### Security baseline — three set-once items
 
 A rented VM's hypervisor can read a guest's memory, so the goal is **not** to prevent that — it is to
@@ -1089,6 +1126,78 @@ nothing to update. Do them once.
   an availability dependency bought for disk-only protection, while the design already keeps
   passwords out of files), `fail2ban` (pointless once password authentication is off), authenticated
   NTP (the platform already halts on clock offset). None of them stops a hypervisor memory read.
+
+#### B1 and B2 as paste-ready sheets
+
+Items 1 and 2 above are the whole external exposure story, and both are set once, by hand, in a portal.
+The settings and the attempts follow, so the work at VM day is execution rather than design.
+
+**Item 1 — the trading login, in the broker portal.**
+
+| Setting | Value | What it caps |
+| --- | --- | --- |
+| Withdrawal | disabled | a stolen login cannot move money out |
+| Maximum order size | the largest position you would knowingly accept from a bug | one bad order, not one bad day |
+| Orders per day | what the strategies can legitimately place, plus a small margin | a runaway loop keeps trading otherwise |
+| Login IP whitelist | the public IP of **every node that can run the executor** — today one, after the v1/v2 growth every workload VM | a read VM cannot trade from its own address |
+| Market-data `app_id` | a second app_id, subscriptions only, no order rights | ingestion's credential cannot trade even if its VM is read |
+
+Write the whitelist scope down with the date it was set. A whitelist that omits a future workload node
+does not fail loudly at provisioning — it fails as a refused login the first time that node needs to trade,
+which is the worst possible moment to discover it.
+
+**Item 1 evidence — four refusals and one success (T15).** Attempt these from the broker's own terminal or
+app, not through the platform: the platform's gate is halted until the first live order, so it cannot be
+the thing under test here.
+
+| # | Attempt | Expect | Capture |
+| --- | --- | --- | --- |
+| 1 | Withdraw any amount | refused, naming the disabled withdrawal | the refusal text or a screenshot |
+| 2 | Send an order above the size cap | refused, naming the cap | ditto |
+| 3 | Send an order from the market-data `app_id` | refused: no order rights on this app_id | ditto |
+| 4 | Log in from an address that is not whitelisted (phone hotspot) | refused: address not permitted | ditto |
+| 5 | **Positive control:** trade the smallest tradable quantity, inside the cap | **accepted** | the broker's own order confirmation |
+
+Row 5 is a real order with real money: smallest tradable quantity, during market hours, cancelled if it
+does not fill, and reconciled like any other fill. It exists because rows 1–4 look identical whether the
+limits work or the login is simply dead — if row 5 is refused too, T15 is **INCONCLUSIVE**, not passed.
+
+**Item 2 — the CloudPe security group.** CloudPe's default group allows all traffic and cannot be deleted,
+so create a custom group (it denies inbound by default) and attach it to every VM. Rules:
+
+| Direction | Protocol | Port | Source | Purpose |
+| --- | --- | --- | --- | --- |
+| Inbound | TCP | 22 | the workstation's public IPv4 | SSH from the workstation |
+| Inbound | TCP | 2377 | each VM IP | Swarm manager control |
+| Inbound | TCP | 7946 | each VM IP | node gossip |
+| Inbound | UDP | 7946 | each VM IP | node gossip |
+| Inbound | UDP | 4789 | each VM IP | overlay network (VXLAN) |
+| Inbound | TCP | 5080 | the workstation's public IPv4 | OpenObserve dashboard |
+| Inbound | anything | anything | anything | **add nothing** — the group's default is the deny |
+
+The rules are IPv4-only, so a VM carrying an IPv6 address is unfiltered: keep IPv6 off (a per-VM setting,
+not a rule). In the two-machine deploy the four Swarm rows name the two VM IPs; each VM added later needs
+its own IP in those rows, or the cluster cannot form.
+
+The two UDP rows cannot be proven by a probe — `nc -u` reports success whether or not anything is
+listening, so a "UDP filtered" claim would be unfounded. Their evidence is the cluster itself: nodes join,
+an overlay-network service runs, and the scan below shows no *other* inbound port open. Say that in the
+evidence instead of inventing a UDP test.
+
+**Item 2 evidence — the same scan from two vantage points (T16).** The negative side needs an address that
+is *not* whitelisted: a scan from the workstation says nothing about the outside. A phone hotspot is
+enough, and no scanner install is needed — `nc` and `curl` are standard.
+
+```bash
+IP="${VM_IP:?set the VM public IPv4}"
+nc -vz -w 5 "$IP" 22                            # from the workstation: connects
+curl -m 5 -sS -o /dev/null -w '%{http_code}\n' "http://$IP:5080"   # an HTTP status proves it answers
+for p in 2377 7946; do nc -vz -w 5 "$IP" "$p"; done                # VM-to-VM only: must not connect
+```
+
+From the hotspot, run the same two lines against ports 22 and 5080: **neither may connect**. A timeout and
+a refusal are both a pass; a successful connect is the failure. Store both outputs side by side — the
+workstation's `5080` answer is the positive control that keeps the hotspot's silence meaningful.
 
 ## 10. Evidence per stage
 

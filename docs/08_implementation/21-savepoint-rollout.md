@@ -38,8 +38,8 @@ the artifact, and restores from the fresh savepoint.
 
    ```bash
    docker compose exec -T \
-     -e STATE_RECOVERY_PATH=<savepoint> -e ALLOW_FULL_REPLAY=false \
-     [-e <job env forwarded from the caller>] \
+     -e STATE_RECOVERY_PATH="${SAVEPOINT:?set the savepoint path}" -e ALLOW_FULL_REPLAY=false \
+     # plus any -e the caller forwards (job-specific env), one flag per line
      flink-jobmanager flink run -d \
      -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar
    ```
@@ -92,7 +92,8 @@ make rollout-savepoint ARGS="JAR=/tmp/compute.jar"
 make rollout-savepoint ARGS="RECOVERY_PATH=file:/checkpoints/savepoints/savepoint-abc-123"
 
 # direct invocation
-code/01_platform/04_scripts/rollout-savepoint.sh --job-id <jid> --jar code/02_services/02_compute/target/compute.jar
+code/01_platform/04_scripts/rollout-savepoint.sh \
+  --job-id "${JOB_ID:?set the Flink job id}" --jar code/02_services/02_compute/target/compute.jar
 ```
 
 Overlays (p10 rehearsal, ...): `COMPOSE_FILE` accepts the base file and

@@ -274,8 +274,8 @@ Build it, then push it, then pin it:
 
 ```bash
 make flink-image                       # fetch + SHA256-verify + build + re-verify
-docker push <repo>:<tag>
-bash code/01_platform/04_scripts/digest-pin.sh <repo>:<tag>
+docker push "${REF:?set the remote image reference, e.g. ghcr.io/owner/flink-runtime:0.1.0}"
+bash code/01_platform/04_scripts/digest-pin.sh "$REF"
 # put the printed ref on FLINK_IMAGE in code/01_platform/01_docker/runtime.lock
 ```
 

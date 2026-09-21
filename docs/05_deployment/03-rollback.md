@@ -30,6 +30,54 @@ Allowed only when schemas, state serializers, connector behavior, interfaces, an
 - Verify changelog continuity, identity mappings, projections, and observability.
 - Keep the gate halted until reconciliation is complete.
 
+### Exact commands for a single-service digest rollback (drill D2)
+
+The bullets above are the procedure; the commands below are only its "deploy the
+previously approved immutable artifact" step. They do not replace the Safety rule: the
+gate stays `HALTED`, new money-moving calls stay halted, and reconciliation comes first
+(§Preconditions). Two shapes, picked by blast radius.
+
+**One service, imperative — what the drill uses, and the fastest emergency lever.**
+The deck stays declarative, but a single running service can be repointed without it.
+Prove the inspect template on your Docker version before trusting the rest of the
+block; if it prints nothing, the fallback on the next line is equivalent.
+
+```bash
+SERVICE="${SERVICE:?set the service name from docker service ls}"
+docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' "$SERVICE"
+# fallback if that prints nothing:  docker service inspect "$SERVICE" | grep -i image
+PREV_REF="${PREV_REF:?set the previous image ref with its sha256 digest}"
+NEW_REF="${NEW_REF:?set the image ref you are rolling back from}"
+docker service update --image "$PREV_REF" "$SERVICE"          # roll back
+docker service ls --format '{{.Name}}: {{.Replicas}}'         # wait for N/N
+docker service ps "$SERVICE" --format '{{.Name}}: {{.CurrentState}} on {{.Node}}'
+docker service update --image "$NEW_REF" "$SERVICE"           # forward again
+```
+
+- `docker service update --image` is a live spec change: the next `docker stack deploy`
+  from an unchanged environment reverts it. Know which of the two you intend to win.
+- `update_config.failure_action: rollback` reverts a spec whose tasks keep dying and
+  leaves `rollback_paused` visible in `docker service inspect` (guide S7 note). Check
+  for it before concluding the new image "did not help".
+- Volume, checkpoint, and secret handling is unchanged by a digest swap; do not delete
+  any of them as part of the rollback.
+
+**Whole stack, declarative — the ordinary release path.** Restore the previous digest
+pins in the deploy environment and re-deploy the deck; guide S5–S7 carries that
+`docker stack deploy` line and its `--with-registry-auth` requirement.
+
+**What drill D2 records.**
+
+1. Before: the service's image ref and `docker service ps` output.
+2. Roll back with the block above; wait for N/N and a Running task on the intended node.
+3. Run the readiness check you would run after any deploy (S8 dimensions) and record
+   its verdict.
+4. Roll forward the same way; wait for N/N again and re-run the readiness check.
+5. Record the commands as typed, both digests, both task listings, the readiness
+   verdicts, timestamps, and anything that surprised you — the runbook is corrected
+   from this list, not from memory.
+6. Both ends healthy, no data loss, gate still `HALTED` until reconciliation.
+
 ### Schema or state rollback
 
 A schema-breaking rollback is not a normal rolling deployment. It requires:
