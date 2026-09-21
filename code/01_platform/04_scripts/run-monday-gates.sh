@@ -587,8 +587,26 @@ echo "=== [2/19] docker compose config ===" | tee -a "$SUMMARY"
 # Same form as `make up` (see the Makefile COMPOSE variable): a bare `-f`
 # resolves a different config, so this step would validate the wrong stack.
 if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ] && [ -f "$COMPOSE_ENV_DIR/.env" ] && [ -f "$COMPOSE_ENV_DIR/secrets.env" ]; then
-	if ! docker compose --env-file "$COMPOSE_ENV_DIR/.env" --env-file "$COMPOSE_ENV_DIR/secrets.env" -f "$COMPOSE_FILE" config >"$COMPOSE_CONFIG_LOG" 2>&1; then
+	# The render is piped through a filter that replaces every resolved value with
+	# REDACTED. `docker compose config` interpolates, so logging it raw wrote the
+	# live Arrow password and TOTP key into 15 soak logs (measured 2026-09-21) and
+	# would have written a sixteenth. The render still runs — that is how a missing
+	# ${VAR:?} is caught — and the step still judges the *render's* status, which in
+	# a pipeline is not the pipeline's. Both slots are captured in one command:
+	# under `set -u` a second assignment resets PIPESTATUS and the second slot
+	# disappears. A redactor failure fails closed as well — an unfiltered log is
+	# not evidence that the config renders.
+	COMPOSE_RCS=()
+	docker compose --env-file "$COMPOSE_ENV_DIR/.env" --env-file "$COMPOSE_ENV_DIR/secrets.env" -f "$COMPOSE_FILE" config 2>&1 \
+		| python3 "$SCRIPT_DIR/compose_config_redact.py" \
+			--env-file "$COMPOSE_ENV_DIR/.env" --env-file "$COMPOSE_ENV_DIR/secrets.env" \
+			>"$COMPOSE_CONFIG_LOG" || COMPOSE_RCS=("${PIPESTATUS[@]}")
+	if [ "${COMPOSE_RCS[0]:-0}" -ne 0 ]; then
 		echo "FAIL: docker compose config invalid — see $COMPOSE_CONFIG_LOG" | tee -a "$SUMMARY"
+		gate_fail
+	fi
+	if [ "${COMPOSE_RCS[1]:-0}" -ne 0 ]; then
+		echo "FAIL: the config log was not redacted (rc=${COMPOSE_RCS[1]}) — $COMPOSE_CONFIG_LOG is not trustworthy" | tee -a "$SUMMARY"
 		gate_fail
 	fi
 	echo "PASS: docker compose config" | tee -a "$SUMMARY"
