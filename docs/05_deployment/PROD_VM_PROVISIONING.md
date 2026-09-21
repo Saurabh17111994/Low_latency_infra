@@ -831,6 +831,14 @@ checks and its deploy in one step.
   log, no deploy ever failed, and the infrastructure panels stayed empty. A missing scrape target is not
   a deploy error — the stack test asserts that every name the collector scrapes is a service, and the
   collector's own log is where a drifted target shows up (`Failed to scrape Prometheus endpoint`).
+  - **A scrape target that resolves to many addresses silently stays ONE target.** After the fix above, the
+    collector scraped the service names `tasks.node-exporter` and `tasks.cadvisor`, and a Prometheus
+    `static_configs` entry keeps only one address per name — measured 2026-09-21 against a real name holding
+    eight A records: 1 target labelled with the name, versus 8 targets with `dns_sd_configs`, one per address.
+    The fleet therefore reported as a single machine and no deploy and no panel said so. Both infra jobs now use
+    `dns_sd_configs` (CHG-283); the acceptance is one address per node, and it is a command:
+    `python3 code/01_platform/04_scripts/pernode_attribution_check.py --expect <node count>` — it fails if any
+    instance is still a `tasks.` name (CHG-286).
 - **`docker stack deploy` silently DROPS compose keys it cannot express.** Measured 2026-09-20:
   `privileged: true` and `pid: host` compile, deploy with `rc=0`, and never reach the task — the running
   container reports `privileged=false` and an empty pid mode, while every `volumes:` mount survives.
