@@ -71,6 +71,13 @@ levels could only add "worse", at up to 25 minutes each. Recorded as a deliberat
 | F — drop the drain wait on the *last* scenario | — (suggested here, **withdrawn the same day**) | the premise failed: three compute classes that create tables run live in step 16 on the bootstrap step 11 exported (`BabysitterPositionsRestoreIntegrationTest`, `CandleTelemetryOutageIntegrationTest`, `TabletKillChaosIntegrationTest`), and the drill-owned exclusions do not name them. The wait protects that step, so removing it would move the backlog onto them | **withdrawn — premise failed** |
 | G — run the smoke *before* the drill | — (suggested earlier, withdrawn) | total churn is unchanged; the wait would just move to the drill | **withdrawn** |
 
+> **Step 16 decided (2026-09-21):** the selection stays as it is and item F stays withdrawn — but the
+> premise is narrower than the row above states. Those three classes are each env-gated
+> (`COMPUTE_INT_TEST_T7` / `_P6` / `_TABLET_KILL`) and the gate exports none of them: in the
+> 2026-09-19 certificate each reports `Skipped: 1`, so the drain wait is load-bearing only in a run
+> that exports those gates. What step 16 selects versus what it actually runs is recorded in
+> `2026-09-18-certification-hygiene.md` §11.
+
 ## Also found while measuring
 
 - **The catalog-guard's `33/27 … extra tables are drift, not health` is six leaked scratch tables:**

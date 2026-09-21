@@ -220,3 +220,43 @@ next scheduled certification (§7) or any release run must certify this tree or 
   decides the seeder's descriptor size — read from `27_execution_intent.sql` at implementation.
 - Whether any of the 18 pytest files become order-dependent when run inside the gate (they
   passed standalone).
+
+## 11. Decision — step 16 keeps its selection; what it selects is not what it runs (2026-09-21)
+
+Step 16 is `[16/19] Compute module suite`: `mvn -o test` run from the compute module's own pom,
+because that module is deliberately outside the root reactor (R-272), guarded by `BUILD SUCCESS`, a
+`require_tests_run` check and a printed count line. It is the compute module's only coverage in a
+certificate, so what that coverage is — and is not — is worth stating once.
+
+**What it selects.** The compute pom declares no surefire `<excludes>`; the gate passes
+`-Dtest=$(surefire_exclude "$DRILL_OWNED_CLASSES_COMPUTE")`, which resolves to `!B4SignalIntentE2ETest`
+alone. Surefire's default set therefore runs, and that set *contains* three live classes that create
+tables: `BabysitterPositionsRestoreIntegrationTest` (5 `createTable`/`TablePath.of` sites),
+`CandleTelemetryOutageIntegrationTest` (8) and `TabletKillChaosIntegrationTest` (1).
+
+**What it actually runs.** Each of those three is gated by its own environment variable
+(`COMPUTE_INT_TEST_T7`, `COMPUTE_INT_TEST_P6`, `COMPUTE_INT_TEST_TABLET_KILL`), and the gate exports
+none of them. Measured in the 2026-09-19 certificate: each reports `Tests run: 1, Failures: 0,
+Errors: 0, Skipped: 1, Time elapsed: 0 s`, and step 16's own line reads `PASS: compute suite (Tests
+run: 529, Failures: 0, Errors: 0, Skipped: 17)`. The premise recorded with item F of
+`2026-09-18-ddl-apply-timing-and-concurrency.md` — "three compute classes that create tables run live
+in step 16 on the bootstrap step 11 exported" — therefore holds only in a run that exports those
+gates, not in a default one.
+
+**Decision.** Keep step 16 and its selection exactly as they are, and keep item F withdrawn: the
+premise is conditional rather than false — with the gates exported (the invocation
+`11-testing-and-release.md` documents) those classes do create tables against the bootstrap, so the
+last drain wait is load-bearing in exactly the runs where it matters. Reopening item F needs a
+live-enabled measurement, not a reading of the default run. No renumbering, no `--steps` change, and
+no line of `run-monday-gates.sh` is touched.
+
+**The gap this names.** In a default `make gate` those three classes are *written but not exercised*.
+`TabletKillChaosIntegrationTest` is driven by `chaos/chaos-03-tablet-kill.sh`, which sets its gate
+inline; the other two run only under a manual or live invocation that exports theirs. A green
+certificate therefore means "surefire's default set minus `B4SignalIntentE2ETest`" — not "the compute
+module", and not "the restore and outage paths were exercised".
+
+**Also not covered.** `DedupRocksDbThroughputMemoryIT` is a throughput/memory drill gated by
+`@EnabledIfEnvironmentVariable(COMPUTE_INT_TEST_DEDUP_ROCKSDB=true)` and run by hand as
+`COMPUTE_INT_TEST_DEDUP_ROCKSDB=true mvn -o -f code/02_services/02_compute/pom.xml test
+-Dtest=DedupRocksDbThroughputMemoryIT`. No gate step runs it either.
