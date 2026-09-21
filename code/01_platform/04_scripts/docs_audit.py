@@ -63,13 +63,21 @@ Checks:
   C16 Env-key doc drift (ING-UNIT-019): every env key in the ingestion
       dossier's "Configuration contract" table is read by IngestionConfig,
       the Go bridge, or another ingestion service source.
+  C18 Runbook executability (plan task T17, runbook B7): every shell-tagged
+      block in the provisioning guide and the operations runbooks passes
+      `bash -n`, carries no `<...>` placeholder, references repository paths
+      that exist, and starts every command with a word that resolves here, is a
+      shell builtin, or is on TOOLS_NOT_ALWAYS_PRESENT.
 """
 
 import glob
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 
 import change_control_check  # same directory; C14 record validator
@@ -1161,6 +1169,218 @@ def c17_env_facts_ledger():
           f"{len(rows)} rows ({live} live); " + ("; ".join(errors) if errors else "all ids sequential, all rows carry proof+expiry"))
 
 
+# ---------------------------------------------------------------------------
+# C18 — runbook executability (plan task T17, runbook B7). The operator pastes
+# these blocks, so a block that cannot run is a defect. Scope and rules were
+# measured, not assumed: a census of the guide plus every docs/06_operations
+# runbook (2026-09-21: 10 files, 33 shell-tagged blocks, 54 distinct command
+# words) is what named the parser requirements below — continuations, heredoc
+# bodies, quoted separators, `console` transcripts, `$VAR` first words — and
+# TOOLS_NOT_ALWAYS_PRESENT, which lists tools that legitimately live on a VM or
+# a CI runner but not on the workstation running this audit.
+
+RUNBOOK_SHELL_TAGS = ("bash", "sh", "shell")
+TOOLS_NOT_ALWAYS_PRESENT = {
+    "aws", "chronyc", "docker", "docker-compose", "journalctl", "mc", "scp",
+    "ssh", "systemctl",
+}
+RUNBOOK_SHELL_BUILTINS = {
+    ".", ":", "break", "case", "cd", "continue", "do", "done", "echo", "elif",
+    "else", "esac", "eval", "exec", "exit", "export", "false", "fi", "for",
+    "if", "in", "local", "printf", "read", "return", "set", "shift", "source",
+    "test", "then", "trap", "true", "ulimit", "umask", "unset", "wait", "while",
+}
+RUNBOOK_FENCE_RE = re.compile(r"^```([A-Za-z0-9_-]*)\s*$")
+RUNBOOK_HEREDOC_RE = re.compile(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
+RUNBOOK_PATH_RE = re.compile(
+    r"(?<![\w/.-])((?:code|docs|docker|infra)/[\w./-]+|docker-stack\.yml|images\.published\.env)"
+)
+# Files the runbooks tell the operator to write, so their absence from the
+# repository is correct rather than a broken reference (matched by basename).
+RUNBOOK_OPERATOR_INPUTS = {"prod_vms.json"}
+
+
+def runbook_docs():
+    """The runbooks the operator pastes from. C18 fails when this set is empty,
+    so a rename cannot quietly turn the check into a pass."""
+    docs = [os.path.join(DOCS_DIR, "05_deployment", "PROD_VM_PROVISIONING.md")]
+    docs += sorted(glob.glob(os.path.join(DOCS_DIR, "06_operations", "*.md")))
+    return docs
+
+
+def runbook_shell_blocks(text):
+    """[(first body line, [body lines])] for each bash/sh/shell fenced block.
+    `console` blocks hold a transcript — commands and their output together — so
+    they are not shell blocks; `bash -n` over one would fail on the output."""
+    blocks, body, tag, start = [], None, None, 0
+    for number, line in enumerate(text.split("\n"), 1):
+        match = RUNBOOK_FENCE_RE.match(line)
+        if match and body is None:
+            tag, body, start = match.group(1), [], number + 1
+        elif body is not None and line.strip().startswith("```"):
+            if tag in RUNBOOK_SHELL_TAGS:
+                blocks.append((start, body))
+            body, tag = None, None
+        elif body is not None:
+            body.append(line)
+    return blocks
+
+
+def runbook_commands(lines):
+    """The command strings in a block: continuations joined, heredoc bodies
+    dropped, trailing comments removed, and separators split only outside quotes
+    and outside `$( … )` (a quoted `|` is data, a substituted `|` is a pipe)."""
+    joined, heredoc = [], None
+    for line in lines:
+        if heredoc is not None:
+            if line.strip() == heredoc:
+                heredoc = None
+            continue
+        joined.append(line)
+        found = RUNBOOK_HEREDOC_RE.search(line)
+        if found:
+            heredoc = found.group(1)
+    text = "\n".join(joined).replace("\\\n", " ")
+    commands = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current, quote, depth = [], None, 0
+        padded = stripped + "\n"
+        for position, char in enumerate(padded):
+            previous = padded[position - 1] if position else ""
+            following = padded[position + 1] if position + 1 < len(padded) else ""
+            if quote:
+                current.append(char)
+                if char == quote:
+                    quote = None
+            elif char in "'\"":
+                quote = char
+                current.append(char)
+            elif char == "(":
+                depth += 1
+                current.append(char)
+            elif char == ")":
+                depth = max(0, depth - 1)
+                current.append(char)
+            elif char == "#" and (not current or current[-1] in " \t"):
+                break  # a trailing comment ends the command, `;` inside it included
+            elif (
+                char in ";|&\n"
+                and depth == 0
+                # `2>&1`, `>&2` and `&>file` are redirections, not separators
+                and not (char == "&" and (previous in "<>" or following in "<>"))
+            ):
+                commands.append("".join(current))
+                current = []
+            else:
+                current.append(char)
+    return commands
+
+
+def runbook_tool_word(command):
+    """The tool a command names: the first token that is not `sudo` and not a
+    `VAR=` assignment. Tokens are scanned with quotes and parentheses in mind,
+    because a value may hold spaces — `IMAGE="${IMAGE_NAME:?set the image name}"`
+    names IMAGE, not "the", and `O2_PASSWORD=$(grep x | cut -d= -f2)` is one
+    token up to its closing bracket."""
+    index, depth, quote = 0, 0, None
+    while index < len(command):
+        char = command[index]
+        if char.isspace():
+            index += 1
+            continue
+        start = index
+        while index < len(command):
+            inner = command[index]
+            if quote:
+                if inner == quote:
+                    quote = None
+            elif inner in "'\"":
+                quote = inner
+            elif inner == "(":
+                depth += 1
+            elif inner == ")":
+                depth = max(0, depth - 1)
+            elif inner.isspace() and depth == 0:
+                break
+            index += 1
+        token = command[start:index]
+        if token != "sudo" and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", token):
+            return token
+    return ""
+
+
+def runbook_problems(path):
+    """Every reason this runbook cannot be pasted, as readable strings. Empty
+    means clean."""
+    text = safe_read(path)
+    if text is None:
+        return [f"{path} is unreadable"]
+    blocks = runbook_shell_blocks(text)
+    problems = []
+    for start, lines in blocks:
+        body = "\n".join(lines)
+        for line in lines:
+            if "<" in line and ">" in line:
+                problems.append(
+                    f"{path}:{start}: placeholder in a shell block: {line.strip()[:70]}"
+                )
+                break
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
+            handle.write(body + "\n")
+            temp_path = handle.name
+        try:
+            result = subprocess.run(
+                ["bash", "-n", temp_path], capture_output=True, text=True
+            )
+        except OSError as exc:  # no bash here: fail closed rather than crash
+            os.unlink(temp_path)
+            problems.append(f"{path}:{start}: cannot run bash -n: {exc}")
+            continue
+        os.unlink(temp_path)
+        if result.returncode != 0:
+            first = (result.stderr.strip().split("\n") or [""])[0]
+            problems.append(f"{path}:{start}: bash -n rejects the block: {first[:90]}")
+        for reference in sorted(set(RUNBOOK_PATH_RE.findall(body))):
+            if os.path.basename(reference) in RUNBOOK_OPERATOR_INPUTS:
+                continue
+            if not os.path.exists(os.path.join(ROOT, reference)):
+                problems.append(
+                    f"{path}:{start}: referenced path does not exist: {reference}"
+                )
+        for command in runbook_commands(lines):
+            word = runbook_tool_word(command)
+            if not word or word.startswith(("$", "'", '"', "-")):
+                continue
+            if word in RUNBOOK_SHELL_BUILTINS or word in TOOLS_NOT_ALWAYS_PRESENT:
+                continue
+            if shutil.which(word) is None:
+                problems.append(f"{path}:{start}: no such command here: {word}")
+    return problems
+
+
+def c18_runbook_executability():
+    docs = runbook_docs()
+    if not docs:
+        return check("C18 runbook set found", False, "no runbook documents in scope")
+    # Vacuity is a property of the whole set, not of one file: six of the ten
+    # runbooks in scope carry no shell block at all, which is legitimate. Zero
+    # blocks across every file is not — a rename would have emptied the check.
+    blocks = sum(len(runbook_shell_blocks(safe_read(path) or "")) for path in docs)
+    if blocks == 0:
+        return check("C18 shell blocks found", False, f"0 blocks across {len(docs)} runbooks")
+    problems = []
+    for path in docs:
+        problems += runbook_problems(path)
+    check(
+        f"C18 {len(docs)} runbooks paste cleanly",
+        not problems,
+        f"{len(problems)} problem(s): " + "; ".join(problems[:6]),
+    )
+
+
 def main():
     c1_manifest()
     c2_ownership_matrix()
@@ -1179,6 +1399,7 @@ def main():
     c15_evidence_ownership()
     c16_env_key_drift()
     c17_env_facts_ledger()
+    c18_runbook_executability()
     if failures:
         print(f"\ndocs-audit: {len(failures)} check(s) FAILED — fix before proceeding")
         return 1

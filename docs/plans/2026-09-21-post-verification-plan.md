@@ -186,7 +186,7 @@ CHG-289 and `code/01_platform/04_scripts/values_at_rest_scan.py`, with its tests
 
 | ID | Test and pass criterion | Must-fail control | Evidence |
 | --- | --- | --- | --- |
-| T17 | Runbook executability (B7): every fenced shell block passes `bash -n`, every referenced repository path exists, and every command is either resolvable here or explicitly marked VM-side; a fresh reader can name the first three actions | a fixture runbook with a bogus path and a bogus command must fail the check | checker output + the reader's note |
+| T17 | Runbook executability (B7, implemented 2026-09-21 as docs-audit C18; 18 cases): every fenced shell block passes `bash -n`, every referenced repository path exists, and every command is either resolvable here or explicitly marked VM-side; a fresh reader can name the first three actions | a fixture runbook with a bogus path and a bogus command must fail the check | checker output + the reader's note |
 | T18 | Restore (D1): the restored artefact's checksum matches the source and the restore repeats into a clean scratch directory | flip one byte in a fixture copy; the checksum check must fail | checksums, both runs |
 | T19 | Rollback (D2, local): the previous digest is healthy, then the forward digest is healthy again — asserted with an application-level probe, not just "container running" | one step deliberately uses a wrong digest; the drill must detect it and the documented recovery must work | drill log |
 | T20 | Inventory shape (E, already run): `placement_check.py` exits 0 for both the two-row and the four-row inventories | delete a row or break a label in a fixture copy; the check must exit non-zero | rc values, both inventories |
