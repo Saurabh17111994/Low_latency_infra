@@ -110,6 +110,12 @@ def load_inventory(path):
     with open(path, encoding="utf-8") as fh:
         inv = json.load(fh)
     access = inv.setdefault("access", {})
+    if not isinstance(access, dict):
+        raise ValueError(
+            "inventory access must be an object (for example "
+            '{"ssh_user": "ubuntu", "ssh_port": 22}), got '
+            f"{type(access).__name__}: {access!r}"
+        )
     default_disk = inv.get("disk_min_gb", DEFAULT_DISK_MIN_GB)
     nodes = inv.get("nodes") or []
     if not nodes:
@@ -366,9 +372,15 @@ def main(argv=None):
         print(f"error: inventory file not found: {args.inventory}", file=sys.stderr)
         print("  (D1.3 provisions the VMs; until then run --self-check)", file=sys.stderr)
         return 2
-    inventory = load_inventory(args.inventory)
+    try:
+        inventory = load_inventory(args.inventory)
+        manager_host = _resolve_manager_host(inventory)
+    except ValueError as exc:
+        # An inventory the operator wrote wrong is a usage problem, not drift:
+        # exit 2 like a missing file, and never a traceback from inside a gate.
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     runner = RemoteRunner(inventory["access"])
-    manager_host = _resolve_manager_host(inventory)
     per_node = []
     for node in inventory["nodes"]:
         node_checks, ok = check_node(node, runner, manager_host=manager_host,

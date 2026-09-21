@@ -188,6 +188,31 @@ def test_load_inventory_validates_shape():
             pnc.load_inventory(inv_path)
 
 
+def test_load_inventory_rejects_a_non_object_access():
+    """A string where the schema wants an object must be a named failure, not an AttributeError."""
+    with tempfile.TemporaryDirectory() as tmp:
+        inv_path = os.path.join(tmp, "bad-access.json")
+        with open(inv_path, "w", encoding="utf-8") as fh:
+            json.dump({"access": "local", "nodes": [{"name": "n1", "host": "10.0.0.11"}]}, fh)
+        import pytest
+        with pytest.raises(ValueError) as exc:
+            pnc.load_inventory(inv_path)
+        assert "access" in str(exc.value)
+
+
+def test_cli_reports_a_bad_inventory_without_a_traceback(capsys):
+    """Exit 2 and one named line on stderr — the operator's file is the thing being described."""
+    with tempfile.TemporaryDirectory() as tmp:
+        inv_path = os.path.join(tmp, "bad-access.json")
+        with open(inv_path, "w", encoding="utf-8") as fh:
+            json.dump({"access": "local", "nodes": [{"name": "n1", "host": "10.0.0.11"}]}, fh)
+        rc = pnc.main(["--inventory", inv_path])
+        err = capsys.readouterr().err
+    assert rc == 2
+    assert "access" in err
+    assert "Traceback" not in err
+
+
 # ---------------------------------------------------------------------------
 # Wave 24 (P6-153 / P6-763 / P6-764): a worker must not be asked a manager-only
 # question, role/labels must be matched by NodeID, and the identity must come
