@@ -302,7 +302,7 @@ def test_worker_identity_comes_from_a_call_a_worker_can_answer():
 def test_example_inventory_marks_o1_as_a_joined_worker():
     """The template an operator copies must survive its own gate (CHG-246).
 
-    Three stack services pin `node.labels.observability == true` and thirteen pin
+    Three stack services pin `node.labels.observability == true` and fourteen pin
     `node.labels.role == worker`; a label only exists on a joined node, so an O1
     outside the swarm leaves those services with nowhere to land — and
     `swarm: false` skips the swarm check, so the gate passes without ever
@@ -330,6 +330,35 @@ def test_example_inventory_marks_o1_as_a_joined_worker():
     carriers = [n["name"] for n in inventory["nodes"]
                 if n.get("labels", {}).get("observability") == "true"]
     assert carriers == ["O1"]
+
+
+def test_example_inventory_labels_every_workload_capable_node_as_a_worker():
+    """A `role=manager` node label is never useful — it is the trap D5 named.
+
+    Nothing in the stack pins `node.labels.role == manager`; fourteen services pin
+    `role == worker`. A node holds one value per label key, so labelling a manager
+    `role=manager` does not merely fail to help — it excludes that node from every
+    workload service, which surfaces on deploy day as services stuck at 0/N. The
+    runbook's v1 deck labels M1-M3 `role=worker` for exactly this reason
+    ("v1 baseline" in `PROD_VM_PROVISIONING.md` section 1). A node's swarm role
+    belongs in the `role` field, which is what the swarm itself reports; a node
+    label is for placement only. A drained node accepts no new tasks either, so a
+    `role=worker` row must not declare `drained`.
+    """
+    with open(os.path.join(SCRIPTS, "prod_vms.example.json")) as fh:
+        inventory = json.load(fh)
+
+    for node in inventory["nodes"]:
+        labels = node.get("labels", {})
+        role = labels.get("role")
+        if role is not None:
+            assert role == "worker", (
+                f"{node['name']} carries role={role!r}: nothing pins role=manager, and "
+                "the fourteen workload services would have nowhere to land")
+        if role == "worker":
+            assert node.get("expect_availability") != "drained", (
+                f"{node['name']} is labelled role=worker but declared drained; a drained "
+                "node takes no new tasks, so the workload services cannot land there")
 
 
 # ------------------------------------------------------- the clock is measured, not labelled (CHG-272)

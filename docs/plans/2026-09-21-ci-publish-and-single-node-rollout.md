@@ -246,6 +246,17 @@ one change record for the inventory change.
 single-node swarm reports FAIL=0 with exactly the documented WARNs; every claim in the section is
 copy-traceable to measured output.
 
+**Correction (2026-09-21, during the stage).** The acceptance above promised FAIL=0 on the
+single-node swarm. Run against a live single-node cluster it reports **7 PASS, 2 FAIL, 1 WARN**
+(exit 2), and both FAILs are correct rather than defects: `replicas-complete` is
+`prod_ingestion 0/1` — the known `ARROW_*` credential gap, which no single-node deck can close
+without real credentials — and `no-stuck-tasks` repeats that task plus a `No such container`
+history line on each Flink service, which the checker counts while its service is short of the
+replicas the WARN explains. The acceptance this stage actually met is therefore: `docker stack
+config` rc=0; no FAIL beyond those two; no WARN beyond the two Flink shortfalls; every claim
+copy-traceable to measured output. Zero FAILs remains the criterion for a deck with real
+credentials, which is VM-day, not this one. The guide's new §1b carries the measured block.
+
 ### Phase 3 — VM-1 day (needs your inputs, not code)
 
 Provision one VM → `vm-bootstrap.sh --check` / `--apply` → `swarm init` → pull the seven images

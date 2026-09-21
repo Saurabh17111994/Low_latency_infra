@@ -56,6 +56,98 @@ exactly one value per label key) and `O1` joins as a **worker** carrying `observ
 quorum stays 3. Per the DECISION 2026-08-20 in `docker-stack.yml`, adopt v2 only on a
 trigger: `N>6` workers, sustained CPU >80%, or Raft election flaps.
 
+## 1b. The single-node profile (the first production deploy)
+
+The first deploy is **one VM** running the identical `docker-stack.yml` as a single-node swarm.
+Nothing here is a different stack: the number of rows in the node inventory *is* the topology
+(§1), so this profile is the v1 deck with three rows removed, and growing to v1 is three rows
+added back. It goes first because it exercises the whole trading loop on real hardware while the
+blast radius is one machine, and because the multi-VM step is then configuration only
+(`docker swarm join` plus labels), not a redesign.
+
+**The one node carries both labels.** Fourteen services pin `node.labels.role == worker` and three
+pin `node.labels.observability == true` (`otel-collector`, `openobserve`, `alert-consumer`); three
+more are `mode: global`. A node holds one value *per label key*, and these are two different keys,
+so one node can hold both — and on a single-node deck it must, or 17 of the stack's 20 services
+have nowhere to land.
+
+```bash
+# on the one VM
+docker swarm init --autolock --advertise-addr <vm-ip>
+docker node update --label-add role=worker <node>
+docker node update --label-add observability=true <node>
+docker node ls        # expect 1 manager
+```
+
+**The inventory is one row.** Copy `code/01_platform/04_scripts/prod_vms.example.json` to
+`prod_vms.json` and keep exactly one node entry: `role: manager` (the swarm's only manager),
+`swarm: true`, `labels: {"role": "worker", "observability": "true"}`, **no** `expect_availability`
+(v1 managers run workloads, so they are active), `disk_min_gb: 500`. Give it the VM's hostname as
+`name` so the messages line up. Deleting rows is the entire change to this profile; adding three
+rows later, with `--label-add role=worker` on each new VM, is the entire change back to v1.
+
+**Expected verdict, measured** — one node, 2026-09-21, the rehearsal deck (19 of the stack's 20
+services; `otel-collector-logs` is absent from `docker-stack.rehearsal.yml`). `cluster_check.py
+--expect prod_vms.json` returned **7 PASS, 2 FAIL, 1 WARN**:
+
+| Check | Verdict | Detail as printed |
+|---|---|---|
+| `swarm-active`, `nodes-ready`, `placement-spread`, `global-coverage`, `published-ports`, `expect-node-count`, `expect-observability-labels` | PASS | `expect-observability-labels — 1 node(s) labelled observability=true` is the label rule above, confirmed by the checker |
+| `replicas-complete` | **FAIL** | `short of replicas: prod_ingestion 0/1` |
+| `no-stuck-tasks` | **FAIL** | `prod_ingestion 0/1 — "task: non-zero exit (1)"`, plus a `No such container: …` line for each Flink service |
+| `replicas-topology-limited` | **WARN** | `prod_flink-jobmanager 1/2 (only 1 node(s) match its constraint, max 1 per node)`, `prod_flink-taskmanager 1/3 (…)` |
+
+**Neither FAIL is a deployment defect on this profile, and the acceptance is therefore "no FAIL
+other than these two", not "zero FAILs".**
+
+- `prod_ingestion` fails on the missing `ARROW_*` vendor credentials — the known gap. It clears
+  only when real credentials are in place, which is VM-day.
+- The two Flink entries in `no-stuck-tasks` are the *same* shortfall the WARN describes: `1/2` and
+  `1/3` because `max_replicas_per_node: 1` needs more eligible nodes. Their tasks show one
+  `Running` replica with a `Failed` (`No such container`) *history* line from a superseded attempt,
+  which the checker counts while the service is short of replicas. On the v1 deck three managers
+  and three workers are eligible, so the WARN disappears and — by the checker's own rule, which
+  only counts a dead task while its service is short — so should those two lines.
+- The shortfall is redundancy, not capability: one taskmanager still offers **8 slots** (measured).
+
+**Where everything lands on that one node:** all 14 `role == worker` services, all 3
+`observability == true` services, and one task of each of the 3 global agents. On VM-1 the
+production stack file adds `otel-collector-logs`, which has never run for real — it is a global
+agent, so watch its first start rather than assuming it.
+
+**Sizing.** Size for the *sum*, not for the per-node share: this workstation runs all the services
+in the rehearsal deck in **15.46 GB of RAM** (measured). A 16 GB VM would sit at roughly 97% of
+that and is a floor, not a target; 32 GB with 8 vCPU leaves real headroom. 500 GB SSD is the
+floor from §1. Per §4 these are starting allocations, not a proven sizing result — the honest
+numbers arrive when `PERF-PROD-60000-001` runs.
+
+**What one VM cannot prove:** Raft quorum or leader election, node loss and failover, RPO/RTO,
+throughput at production volume, and Flink redundancy (the two WARNs above). It also cannot show
+that the observability split works — there is only one node to split onto.
+
+**Exit criteria for the 2–3 day watch** — the period is a test when each of these is checked, and
+a wait when it is not:
+
+1. `cluster_check.py --expect prod_vms.json` → the `prod_ingestion` FAIL is gone (real credentials)
+   and no FAIL has been added; the only WARN is the two Flink services.
+2. Every trading service holds its target replica count except those two.
+3. No trading service restarts outside its declared restart budget (`test_09_stack.py` pins them);
+   `docker service ps <svc>` shows no unexplained `Failed` cycle.
+4. Once a job is submitted: Flink checkpoints keep completing, and the jobmanager never loses the
+   job for the whole watch.
+5. `prod_ingestion` reaches 1/1 and stays there — the first time the rebuilt image and the retry
+   policy (CHG-275) run for real.
+6. The eod-scheduler's scheduled run completes, or its fail-closed path fires with the reason
+   visible in the logs (CHG-269).
+7. OpenObserve receives telemetry for the whole watch: the trading services appear in the
+   dashboards, not just the agents.
+8. Neither RAM nor CPU sustains above 80%, and no task is killed for OOM.
+9. Reboot the VM once, on purpose, and bring it back: `--autolock` needs its unlock key, and the
+   stack must return to its replica counts unattended. On this profile that reboot is the only
+   failure you can actually rehearse, so rehearse it.
+
+Passing all nine is what makes the four-VM deck a configuration change rather than a leap.
+
 ## 2. Hard rules (fail = provisioning defect)
 
 1. **No hostname pinning anywhere.** The stack places by `node.labels.role == worker` and

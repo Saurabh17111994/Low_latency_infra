@@ -1,5 +1,5 @@
 {
-  "$comment": "D1.3: replace with the real provisioning addresses. prod_node_check.py --inventory prod_vms.json must exit 0 before D2.",
+  "$comment": "Template for prod_vms.json. One row per VM — the number of rows IS the topology: 1 row = the single-node profile, 4 rows (M1 M2 M3 O1) = the v1 ship-now deck, 7 rows = the v2 target with M1 M2 M3 drained (see 'v1 baseline' in PROD_VM_PROVISIONING.md section 1). Every node that must run workloads carries the label role=worker, never role=manager: a node holds one value per label key, and fourteen services pin node.labels.role == worker, so role=manager leaves them all unschedulable. A node's swarm role belongs in the role field below, which is what docker reports; a node label is for placement only. prod_node_check.py --inventory prod_vms.json must exit 0 before any deploy.",
   "access": {
     "ssh_user": "ubuntu",
     "ssh_port": 22,
@@ -13,27 +13,24 @@
       "host": "10.0.0.11",
       "role": "manager",
       "swarm": true,
-      "labels": { "role": "manager" },
-      "expect_availability": "drained",
-      "disk_min_gb": 10
+      "labels": { "role": "worker" },
+      "disk_min_gb": 500
     },
     {
       "name": "M2",
       "host": "10.0.0.12",
       "role": "manager",
       "swarm": true,
-      "labels": { "role": "manager" },
-      "expect_availability": "drained",
-      "disk_min_gb": 10
+      "labels": { "role": "worker" },
+      "disk_min_gb": 500
     },
     {
       "name": "M3",
       "host": "10.0.0.13",
       "role": "manager",
       "swarm": true,
-      "labels": { "role": "manager" },
-      "expect_availability": "drained",
-      "disk_min_gb": 10
+      "labels": { "role": "worker" },
+      "disk_min_gb": 500
     },
     {
       "name": "W1",
