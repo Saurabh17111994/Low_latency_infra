@@ -639,7 +639,7 @@ Execute the full P10.1 isolated rehearsal on the dev host (all 10 re-scoped boxe
 
 ## 3. Prerequisites (checked at Phase 0 entry)
 
-- [ ] Signal dual-sink implemented: candle **KV upsert** sink (PK `(instrument_token, window_start)`), `Signal_Candidates` LOG append sink, `Signal_Candidates_current` KV sink; `CandleGraphReplayIntegrationTest` re-scoped and green.
+- [x] Signal dual-sink implemented: candle **KV upsert** sink (PK `(instrument_token, tf, window_start)`), `Signal_Candidates` LOG append sink, `Signal_Candidates_current` KV sink; the candle-graph replay test re-scoped. _(Reconciled 2026-09-21 — the box had gone stale in both clauses and read as if the signal sinks were missing. Measured: `05_signal_candidates.sql` is the LOG ("immutable LOG — one row per fired signal, never updated"), `23_signal_candidates_current.sql` is the KV ("Why KV (2026-08-13, DEC-035)"), and both candle tables are KV with PK `(instrument_token, tf, window_start)` — this row omitted `tf`. The re-scope is recorded done and green 2026-08-13 in `08_implementation/04-signal-job.md` ("3/3, 134.9 s"); `CandleGraphReplayIntegrationTest` no longer exists under that name, and today the replay/KV coverage is in `SignalCurrentKvIdempotencyTest` and `B4SignalIntentE2ETest`. The other boxes in this section were not reconciled here.)_
 - [ ] P7 battery re-run on the new topology with evidence registered (`PERF-*` + `DEDUP-MEMORY-001` rows annotated).
 - [ ] Archived known-good checkpoint copied to a stable archive prefix (`s3a://…/p10-rehearsal/archive/`) BEFORE further live runs rotate it.
 - [ ] Live stack healthy; no other rehearsal/bench in flight.
