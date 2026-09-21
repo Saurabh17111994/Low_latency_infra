@@ -232,6 +232,15 @@ check were rewritten in CHG-274, and item 1 below was retargeted to GHCR with it
 
 **Not verified:** a real push to GHCR (needs the PAT) and any four-node pull.
 
+**Correction (2026-09-21, measured).** The push is verified and **no PAT was ever needed**:
+GitHub Actions publishes the seven images with its own `GITHUB_TOKEN`
+(`.github/workflows/publish-images.yml`, decision D1), and run `35567002862` on `e3ab030c`
+completed all 13 steps, then committed the digest fragment as `24a061ad`. With no registry
+credentials on the workstation, all seven `:prod` tags resolve to the digests recorded in
+`code/01_platform/01_docker/images.published.env`, and anonymous `docker manifest inspect`
+succeeds for each — so the four-node pull is the one part still unverified, and it is unverified
+only because there are no four nodes yet.
+
 ### Pre-deploy implementation items (the five mechanics the VM guide marks `[NOT BUILT]`)
 
 `docs/05_deployment/PROD_VM_PROVISIONING.md` §6.1 records five mechanics the

@@ -520,6 +520,27 @@ Then write the digests into the deploy environment (§6.2) using **`ghcr.io/<own
 name the registry itself serves and the name every node will pull. The digest is identical whichever
 address the push went through.
 
+**Since 2026-09-21 CI does this for you (measured).** The seven images are published by
+`.github/workflows/publish-images.yml` — in the browser, **Actions → publish-images → Run
+workflow** on the default branch. It logs in to GHCR with the workflow's own `GITHUB_TOKEN` (no PAT
+exists anywhere), builds all seven, resolves every digest from the registry with
+`image-publish.sh`, and commits them to `code/01_platform/01_docker/images.published.env` as
+`chore(images): record the published digests [skip ci]`. Run `35567002862` on `e3ab030c` did
+exactly that — 13/13 steps, commit `24a061ad` — and a workstation with **no** registry credentials
+resolved all seven `:prod` tags to those digests and pulled their manifests anonymously, which is
+all a node needs.
+
+So on VM day, do not push by hand. Render the deploy environment from the committed fragment and
+its seven `VAR=ref` lines land with digests already attached:
+
+```bash
+bash code/01_platform/04_scripts/image-publish.sh \
+  --merge-env <your git-ignored deploy env> < code/01_platform/01_docker/images.published.env
+```
+
+The rest of this step is the fallback for the day CI cannot publish — a changed registry, a broken
+runner image — written out in full so that day is not the day you learn the flags.
+
 **The owner path must be lowercase.** Docker refuses an uppercase repository name outright —
 `invalid reference format: repository name (Saurabh17111994/…) must be lowercase` (measured
 2026-09-21) — and GitHub's `github.repository_owner` keeps the account's display casing, so an owner

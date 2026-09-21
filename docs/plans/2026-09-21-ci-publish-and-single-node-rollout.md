@@ -330,6 +330,26 @@ testable — and none of them may be claimed before that.
 that fix took CHG-277 (`docs/05_deployment/change-records/CHG-277.md`). Only the plan's numbering
 moved; its content did not.
 
+**Stage 1 closed (2026-09-21, measured).** Run
+[`35567002862`](https://github.com/Saurabh17111994/Low_latency_infra/actions/runs/35567002862) —
+`workflow_dispatch`, head `e3ab030c`, attempt 1, **all 13 steps success, zero failed steps** —
+published the seven images and committed the digest fragment as `24a061ad`
+(`chore(images): record the published digests [skip ci]`). Verified against the registry with no
+credentials on this workstation: **7/7 `:prod` tags resolve to the digest recorded in the
+fragment** (`docker buildx imagetools inspect ghcr.io/saurabh17111994/<name>:prod`), and
+`docker manifest inspect` returned a manifest for all seven where it had returned `denied` before
+the push. Three corrections to the table above, each now backed by that run rather than by
+reasoning:
+
+- The carrier of those digests is `code/01_platform/01_docker/images.published.env` (D2's dated
+  correction below), **not** `runtime.lock` as the Stage 1 and Stage 2 acceptance cells say.
+- The package-visibility click was **not needed**: anonymous reads work as measured, so a VM
+  pulls by digest with no credential of any kind. (The anonymous *packages API* cannot confirm
+  this — it returns 401 even for public packages — so the pull itself is the evidence.)
+- Two things the plan could only argue are now demonstrated: CHG-277's locale fix builds on a
+  C-locale runner, and the commit-back step's `git push` succeeds, so the repository's Actions
+  workflow permission is set correctly.
+
 None of these blocks the critical path.
 
 | # | Item | Why here |
