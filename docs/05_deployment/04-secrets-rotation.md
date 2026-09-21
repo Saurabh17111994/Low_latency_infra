@@ -32,6 +32,12 @@ This runbook covers broker/Arrow, Fluss, S3, OpenObserve, TLS, Swarm, and operat
   files at all: the values sit in them without their names. They must be emptied or deleted as part of
   the rotation, not before it — `secrets.env` is what a local live run reads, and a backup of values
   being rotated away has no further use.
+  **Update 2026-09-22:** `.env.bak-20260828` is deleted — a redundant snapshot of values being rotated
+  away, mode 664 (the widest of the three copies), and nothing read it: only `.gitignore:32` and these
+  records named it. `secrets.env` stays until the rotation itself, for the reason above and one measured
+  the same day: compose delivers secrets to the local stack through that file, and `SecretGuard` names it
+  as the sanctioned local store, so emptying it early takes the local live path away before its
+  replacement exists.
 
 ### Production
 

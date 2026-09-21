@@ -153,7 +153,7 @@ CHG-289 and `code/01_platform/04_scripts/values_at_rest_scan.py`, with its tests
 | T1 | ~~Disk encryption~~ — **withdrawn 2026-09-21: the reinstall is declined, permanently.** No encryption is planned, so there is nothing to verify; T2 carries the risk instead, and the residual is named in the Risks table | — nothing to run | the dated decision, recorded here rather than deleted |
 | T2 | No production value at rest (B4.2): a names-plus-patterns scan over `$HOME` returns zero hits for the production secret names while the container is unmounted. **Criterion amended 2026-09-21:** "zero hits" is unachievable over a corpus that legitimately contains the names in fixtures, type stubs and shell history. What answers the question is value-equality against the real values, run at VM day once they exist — **implemented 2026-09-21** as `--values-file`: the values come from a 600-mode file outside the repository, are compared literally, are never printed and never previewed, a missing or unusable file is rc=2 rather than zero hits, and value mode does not skip large files (the name scan's 2 MB limit left 12,714 files unread in its 2026-09-21 run) | plant a decoy (`ARROW_APP_SECRET=dummy1234567890`) under the scan root; the scan must fail, then the decoy is removed — now two hermetic tests, plus a base64 guard that the path rule cannot swallow a real secret | **run 2026-09-21**: 509,050 files, 3,045 hits, of which 1,983 outside the repository and 23 documented decoys. Read rather than counted: 384 boto3 type stubs under editor extensions, ~939 chat transcripts from four agent tools, 159 token-shaped and nearly all test fixtures, 13 shell-history lines. Two limits stated, not glossed: 12,714 files over 2 MB skipped and 2,290 unreadable, so a zero could only ever describe the files read |
 | T3 | GitHub over SSH (B4.3): `ssh -T git@github.com` prints the account name, `git ls-remote --exit-code` returns 0, `~/.git-credentials` is gone and `credential.helper` is empty | the old path must now be dead: `git ls-remote https://…` must fail **after** the token is revoked | four command outputs |
-| T4 | Key retirement (B4.4/B4.5): `id_rsa*` absent, no `94.237.73.113` in `~/.ssh/config` or `known_hosts`, and a batch-mode SSH to that address fails | run the same assertions against a temp copy of the config with the block re-added; they must fail | grep output, both copies |
+| T4 | Key retirement (B4.4/B4.5): `id_rsa*` absent, no `94.237.73.113` in `~/.ssh/config` or `known_hosts`, and a batch-mode SSH to that address fails — **corrected 2026-09-22, measured on the workstation:** the file half reads false as the disk stands: `id_rsa` (2622 B, mode 600, dated 2025-07-25) and `id_rsa.pub` (581 B) are both present, and `~/.ssh/config` lines 1-7 still name the host. `known_hosts` holds no occurrence; the batch-mode SSH half was not re-measured. B4.4 and B4.5 order the removal *after* the destroy, so this row cannot read true until B4.5 completes — open, not met. | run the same assertions against a temp copy of the config with the block re-added; they must fail | grep output, both copies |
 | T5 | VM key (B4.6): `ssh-keygen -y -P ""` **fails** (a passphrase exists), key mode 600, `.pub` mode 644, `IdentitiesOnly yes` present | generate a throwaway passphrase-less key in a temp directory; the same command must succeed, proving the check detects it | **done 2026-09-21**, `IdentitiesOnly` excepted: the real key fails with *incorrect passphrase supplied to decrypt private key* (rc=255), the throwaway control succeeds (rc=0), modes 600/644, fingerprint `SHA256:2fUTiWFK…`. `IdentitiesOnly yes` arrives with the `Host vm-*` block at S2. Caveat recorded in B4.6: this workstation's gnome-keyring agent already holds the key and signs with it, so the passphrase does not gate use while the login keyring is unlocked |
 | T6 | No credentials in new transcripts (B4.7): the value-shaped scan over sessions created after this date returns zero matches | append a dummy `aws_secret_access_key = "dummy1234567890abcdef"` to a copied transcript; the scan must flag it | **passes, run 2026-09-21**: one transcript inside the window, zero hits; the planted control is flagged, and the same file is skipped once `--since` moves past it. The legacy tree (600 files) holds 139, which is what this check exists to stop growing |
 | T7 | 2FA armed (B4.6): a dated checklist with one row per account (GitHub, CloudPe, Cloudflare, broker) | not machine-checkable — recorded as a dated checklist, never quoted as a test | the checklist itself |
@@ -314,6 +314,10 @@ repository.
       destroy that server first (B4.5) and then delete `id_rsa` and `id_rsa.pub`. If the host must stay,
       add a passphrase in place (`ssh-keygen -p -f ~/.ssh/id_rsa`) — same public key, nothing to
       re-register.
+      *Measured 2026-09-22:* both files are still present (`id_rsa` 2622 bytes mode 600, `id_rsa.pub`
+      581 bytes mode 644, both dated 2025-07-25), so this item is open and waits on B4.5 by its own
+      order — a final visit to that host is what the key is for. The in-place passphrase above is the
+      option if the server is to stay.
 - [ ] **B4.5 Retire the legacy provider footprint.** *Dependency check done 2026-09-21: nothing needs it.*
       Repo: the only occurrences of `94.237.73.113` are four lines in this plan — no code, script, workflow
       or config names it, and `upcloud`/`94.237` appear nowhere else. Workstation: one `~/.ssh/config` host
@@ -323,6 +327,10 @@ repository.
       destroying the server breaks nothing; the timing is yours. Then: remove the host block,
       `ssh-keygen -R 94.237.73.113` (clears all three entries), delete `id_rsa*` (B4.4), and secure that
       provider account with 2FA.
+      **Update 2026-09-22:** the leftover list is one item shorter — `~/.ssh/config.bak-2026-09-21-ghkey`
+      (149 bytes, the legacy host block only, no key material) is deleted. It was a redundant copy of a
+      block the live config still carries, so it removed no capability. Still to remove *after* the
+      server is gone: the host block, the three `known_hosts` entries, and `id_rsa*`.
 - [ ] **B4.6 One dedicated SSH key for the VMs** (passphrase-protected, `ForwardAgent no`), separate from
       the GitHub key; 2FA on GitHub, CloudPe, Cloudflare and the broker account. *Key half done
       2026-09-21*: `ssh-keygen -t ed25519 -a 100 -f ~/.ssh/id_ed25519_vms -C "vm-key 2026-09-21"`, mode 600
@@ -366,6 +374,8 @@ repository.
       throwaway scan that produced it was not authoritative. A names-and-shapes scan cannot see those
       files at all, because the values sit in them without their names, which is why the check is now
       shipped as `--values-file` rather than re-run by hand.
+      **Update 2026-09-22:** `.env.bak-20260828` is deleted (redundant snapshot, mode 664, and nothing
+      in the repository or its scripts read it); `secrets.env` remains until the rotation itself.
       **Remedy, upgraded — and the timing is the operator's.** Deleting files cannot unpublish an app id or
       kill a secret that has been copied, so **all four** Arrow values are rotated; the rotation log's
       Arrow rows cover the app secret, the password and the TOTP key, and the app id rotates with its pair.
