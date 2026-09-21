@@ -454,10 +454,19 @@ mod tests {
 
         let mut vars = std::collections::HashMap::new();
         vars.insert("GATEWAY_ENDPOINT".to_string(), "http://gw:8080".to_string());
-        vars.insert("GATEWAY_SHARED_SECRET".to_string(), "plain-loses".to_string());
-        vars.insert("GATEWAY_SHARED_SECRET_FILE".to_string(), path.to_string_lossy().into_owned());
+        vars.insert(
+            "GATEWAY_SHARED_SECRET".to_string(),
+            "plain-loses".to_string(),
+        );
+        vars.insert(
+            "GATEWAY_SHARED_SECRET_FILE".to_string(),
+            path.to_string_lossy().into_owned(),
+        );
         apply_gateway_secret_file(&mut vars).unwrap();
-        assert_eq!(vars.get("GATEWAY_SHARED_SECRET").map(String::as_str), Some("from-file-sentinel"));
+        assert_eq!(
+            vars.get("GATEWAY_SHARED_SECRET").map(String::as_str),
+            Some("from-file-sentinel")
+        );
 
         let c = ServiceConfig::from_iter(vars).unwrap();
         assert_eq!(c.gateway_shared_secret, "from-file-sentinel");
@@ -471,15 +480,23 @@ mod tests {
         let mut missing = std::collections::HashMap::new();
         missing.insert(
             "GATEWAY_SHARED_SECRET_FILE".to_string(),
-            dir.join(format!("executor-secret-absent-{}", std::process::id())).to_string_lossy().into_owned(),
+            dir.join(format!("executor-secret-absent-{}", std::process::id()))
+                .to_string_lossy()
+                .into_owned(),
         );
         let err = apply_gateway_secret_file(&mut missing).unwrap_err();
-        assert!(err.to_string().contains("GATEWAY_SHARED_SECRET_FILE"), "got: {err}");
+        assert!(
+            err.to_string().contains("GATEWAY_SHARED_SECRET_FILE"),
+            "got: {err}"
+        );
 
         let empty_path = dir.join(format!("executor-secret-empty-{}", std::process::id()));
         std::fs::write(&empty_path, "  \n").unwrap();
         let mut empty = std::collections::HashMap::new();
-        empty.insert("GATEWAY_SHARED_SECRET_FILE".to_string(), empty_path.to_string_lossy().into_owned());
+        empty.insert(
+            "GATEWAY_SHARED_SECRET_FILE".to_string(),
+            empty_path.to_string_lossy().into_owned(),
+        );
         let err = apply_gateway_secret_file(&mut empty).unwrap_err();
         assert!(err.to_string().contains("is empty"), "got: {err}");
         std::fs::remove_file(&empty_path).ok();
@@ -491,7 +508,10 @@ mod tests {
         let mut vars = std::collections::HashMap::new();
         vars.insert("GATEWAY_SHARED_SECRET".to_string(), "plain".to_string());
         apply_gateway_secret_file(&mut vars).unwrap();
-        assert_eq!(vars.get("GATEWAY_SHARED_SECRET").map(String::as_str), Some("plain"));
+        assert_eq!(
+            vars.get("GATEWAY_SHARED_SECRET").map(String::as_str),
+            Some("plain")
+        );
     }
 
     #[test]
