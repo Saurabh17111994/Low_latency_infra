@@ -1233,12 +1233,27 @@ class TestCollectorScrapeTargets:
                 "name (measured as the container id, nodename=f77f64fd95c1, without it) "
                 "and the logs collector's resource/node processor reads HOSTNAME")
         swarm = yaml.safe_load(COLLECTOR.read_text())
-        targets = {t for c in swarm["receivers"]["prometheus"]["config"]["scrape_configs"]
-                   for sc in c.get("static_configs", []) for t in sc.get("targets", [])}
+        jobs = swarm["receivers"]["prometheus"]["config"]["scrape_configs"]
+        # CHG-283 moved the per-host agents off `static_configs`, because a
+        # `tasks.<service>` name resolves to EVERY task of the service while a
+        # static target keeps only one address. Both mechanisms name the same
+        # per-task DNS, so collect both and assert the NAME this test guards:
+        # the per-task form, never the bare service name (whose VIP resolves to
+        # one address, so one random node would be sampled per scrape).
+        targets = {t for c in jobs for sc in c.get("static_configs", [])
+                   for t in sc.get("targets", [])}
+        targets |= {f"{n}:{d.get('port')}" for c in jobs
+                    for d in c.get("dns_sd_configs", [])
+                    for n in (d.get("names") or [])}
         for name, port in (("node-exporter", 9100), ("cadvisor", 8080)):
+            assert f"{name}:{port}" not in targets, (
+                f"the collector must not scrape the bare `{name}:{port}`: that name "
+                "resolves to the VIP and would sample one random node per scrape "
+                "instead of all of them")
             assert f"tasks.{name}:{port}" in targets, (
-                f"the collector must scrape tasks.{name}:{port}; the bare name resolves to "
-                "the VIP and would sample one random node per scrape instead of all of them")
+                f"the collector must scrape tasks.{name}:{port} — the per-task name, "
+                "so every node is discovered (static_configs keeps one address per "
+                "name; dns_sd_configs discovers all of them)")
 
     def test_infra_agents_report_on_the_host_not_the_container(self):
         d = _load()["services"]
