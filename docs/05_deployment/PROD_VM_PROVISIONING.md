@@ -428,6 +428,12 @@ Then write the digests into the deploy environment (§6.2) using **`ghcr.io/<own
 name the registry itself serves and the name every node will pull. The digest is identical whichever
 address the push went through.
 
+**The owner path must be lowercase.** Docker refuses an uppercase repository name outright —
+`invalid reference format: repository name (Saurabh17111994/…) must be lowercase` (measured
+2026-09-21) — and GitHub's `github.repository_owner` keeps the account's display casing, so an owner
+that came from the account page has to be lowercased before it is used. The CI workflow lowercases
+it; when you run the command by hand, `<owner>` means the lowercase form.
+
 **Note (measured 2026-09-19 against a local `registry:2` over plain HTTP, and 2026-09-21 under a
 GHCR-shaped owner path):** `digest-pin.sh` resolved
 every pushed image with no extra flags, and its value matched the digest `docker push` printed;
