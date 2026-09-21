@@ -1067,7 +1067,7 @@ nothing to update. Do them once.
 | --- | --- | --- | --- |
 | 1 | **Broker-side limits**: no fund withdrawal on the trading login, per-day order cap, maximum order size, login IP whitelist, and a separate market-data `app_id` for ingestion with no order rights | the broker's own settings | the trading login cannot withdraw and cannot place an oversized order; ingestion's `app_id` is rejected for order entry |
 | 2 | **CloudPe security group**: inbound `22/tcp` from the workstation IP only, the Swarm ports (`2377/tcp`, `7946/tcp+udp`, `4789/udp`) between the four VM IPs only, `5080/tcp` on the OpenObserve node **from the workstation IP only**, everything else denied; SSH keys only with password authentication off; 2FA on the CloudPe panel | CloudPe panel | a scan from outside shows nothing but SSH and the dashboard, which is exactly the exception recorded in S4 step 4 |
-| 3 | **`--autolock` at `swarm init`** (S5) + Swarm secrets only + R2 temporary credentials | Docker / Cloudflare | the manager's Raft log and mTLS keys are unusable without `docker swarm unlock`; no static S3 key exists on any VM |
+| 3 | **`--autolock` at `swarm init`** (S5) + Swarm secrets only + a scoped, rotatable R2 token pair, rotated per `04-secrets-rotation.md` | Docker / Cloudflare | the manager's Raft log and mTLS keys are unusable without `docker swarm unlock`; the S3 pair exists only as a Swarm secret — never in an image, an env file or a host filesystem, and never account-wide. (Corrected 2026-09-21: this row previously claimed "temporary credentials", which the deck does not implement.) |
 
 **Notes that save a bad day:**
 

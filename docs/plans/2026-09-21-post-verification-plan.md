@@ -54,8 +54,8 @@ opposite case — B4.1 encrypts it); `fail2ban`; authenticated NTP; Kubernetes/A
   repository already has.
 - **Assumptions:** the provider's hypervisor can read the VM at any time; the broker enforces its limits
   server-side; the workstation is the most valuable machine in the system.
-- **Unresolved decisions:** `EOD_TABLES` production list; R2 short-lived vs rotated static credentials;
-  chrony socket ownership inside the container; durable rehearsal registry (keep or drop); a
+- **Unresolved decisions:** `EOD_TABLES` production list; chrony socket ownership inside the container;
+  durable rehearsal registry (keep or drop); a
   `.gitignore` line for `prod_vms.json`.
 - **Authorization:** plan only — no gate or certification runs. Phase B/C/D/E are executed on an explicit
   go-ahead; code changes need a change record, docs-only changes do not.
@@ -167,7 +167,7 @@ If any of these grows into a script, it lands with a change record and its own t
 | ID | Test and pass criterion | Must-fail control | Evidence |
 | --- | --- | --- | --- |
 | T13 | Rotation coverage (B5): the union of secret names demanded by the deck (`secrets:` plus `${VAR:?}`) equals the set named in `04-secrets-rotation.md` and the bootstrap script | add a fake demanded variable to a fixture copy of the deck; the check must fail | check output |
-| T14 | R2 wording (B3a): exactly one claim survives — short-lived credentials in both docs and deck, or the static pair documented as the accepted choice; never a mixture | a fixture copy containing the contradiction must be flagged | check output |
+| T14 | R2 wording (B3a, resolved 2026-09-21): the accepted choice — a scoped, rotatable static pair — is stated in `04-secrets-rotation.md`, and no document claims temporary credentials while the deck stores a static pair | reintroduce that claim in a fixture copy; the check must flag it | check output |
 
 ### Suites that can only run on VM day — specified now
 
@@ -227,8 +227,10 @@ If any of these grows into a script, it lands with a change record and its own t
 
 - [ ] Bucket-scoped token only (no account-wide token); note its expiry and scope.
 - [ ] Object versioning + a retention rule on the bucket; verify by deleting a test object and restoring its version.
-- [ ] Decide the open question: short-lived credentials, or a rotated static pair. Today the deck stores a
-      static pair while the guide §9 item 3 says "temporary credentials" — one of the two must change.
+- [x] **Decided 2026-09-21: a scoped, rotatable static pair is the accepted choice.** Temporary credentials
+      need a credential-minting service — a new component to run, watch and itself rotate. Guide §9 row 3 and
+      `04-secrets-rotation.md` now state the accepted pair; revisit only if R2's own short-lived tokens ever
+      remove the need for that service.
 - [ ] Record the read/write scope and the rotation date in the rotation log (task B5).
 
 ### Task B4 — Workstation hygiene (the machine every other control trusts)

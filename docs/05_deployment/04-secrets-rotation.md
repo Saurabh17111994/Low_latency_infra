@@ -43,6 +43,13 @@ This runbook covers broker/Arrow, Fluss, S3, OpenObserve, TLS, Swarm, and operat
 | OpenObserve | Services/operators | Telemetry only; cannot authorize orders |
 | TLS/mTLS material | Cross-host/service paths | Certificate chain, expiry, rotation, transport health |
 | Operator identities | Reconciliation/gate control | MFA/authentication, role, distinct approvals, audit |
+| Internal service auth | Execution bridge, Execution gateway | Both halves replaced on the same day; the gate halts, both services redeploy, and each resumes with a fresh epoch |
+
+Every Swarm secret created by `code/01_platform/04_scripts/secrets-bootstrap.sh` must map to a class
+above: `arrow_app_secret`, `arrow_password`, `arrow_totp_key` → the Arrow rows; `aws_access_key_id`,
+`aws_secret_access_key` → S3 checkpoint/lake; `o2_password`, `o2_auth_basic` → OpenObserve;
+`execution_bridge_auth_token`, `gateway_shared_secret` → internal service auth. (Added 2026-09-21: those
+last two had no class, so no procedure would ever have rotated them.)
 
 ## Failure behavior
 

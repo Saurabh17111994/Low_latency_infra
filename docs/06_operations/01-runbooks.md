@@ -262,6 +262,88 @@ drill evidence relies on), or run a measurement while the tablet shows
 4. If required safety evidence or alerting is unavailable, mark trading readiness false and halt according to policy.
 5. Recover telemetry, replay buffered data where supported, and verify alert delivery before closure.
 
+## Security incident — suspected credential exposure or unauthorised read
+
+**Trigger:** a security alert fires; the provider panel shows an access you did not make; a credential
+appears where it should not (chat, ticket, screenshot, sync folder); a VM becomes unreachable in a way
+you cannot explain; or you cannot account for a login.
+**Severity:** critical when broker, R2 or Swarm-secret material may be involved; warn otherwise.
+**Scope:** the broker trading login and its caps, the market-data `app_id`, `R2_BUCKET` and
+`S3_WAREHOUSE_PATH`, the OpenObserve credentials, the Swarm secrets, and the workstation that holds them.
+**Owner:** operator. **Acknowledgement target:** immediately — this is never queued behind other work.
+
+Stated once, because everything below follows from it: a provider can read a VM
+(`../05_deployment/PROD_VM_PROVISIONING.md` §9), so containment is what is available, not prevention. The
+purpose of this runbook is to make a read capped, revocable, and provable after the fact.
+
+### Evidence before intervention
+
+1. The alert record from the `alert-store` volume (`/data/alerts/alerts.jsonl`) and the O2 alert that fired.
+2. Broker-side history for the window: orders, rejections, logins, withdrawals. The broker's own log is
+   the authority here, not our telemetry.
+3. The CloudPe panel access log, and the security-group rules currently attached to the nodes.
+4. Per node: `docker node ls`, `docker service ls`, `docker service ps <service> --no-trunc`, and the
+   `journalctl` window for the suspect service.
+5. The last rotation date from the rotation log (`../05_deployment/04-secrets-rotation.md`).
+6. `git log --oneline -20` for the release in question, so the timeline names commits rather than guesses.
+
+Write the timeline as you go (`~/.p6v/evidence/incident-<date>/timeline.md`). An incident whose evidence
+was never written down cannot be closed.
+
+### Containment, in this order
+
+1. **Halt the gate first** (`## Gate halt`) if broker credentials, the clock, or order identity could be
+   involved. A halt is cheap; an unauthorised order is not.
+2. **Stop the order path**: scale the execution-side services to zero. Confirm the exact prefixed names
+   with `docker service ls`, then `docker service scale <stack>_nautilus=0 <stack>_execution-gateway=0`.
+3. **Revoke, then re-issue.** Rotation without revocation leaves the old credential live in someone
+   else's hands: broker password and TOTP seed, the market-data `app_id` secret, the R2 token, the O2
+   password.
+4. **Shadow the suspect machine.** If the workstation is in question, disconnect it and treat every
+   credential that has ever existed on it as exposed.
+5. **Remove a suspect node**: `docker node rm --force <node>`, destroy it at the provider, then rebuild
+   it (below). Do not try to clean a node you believe was read.
+
+If the Swarm is locked (`--autolock`), leave it locked until the incident is understood: an unlock hands
+the Raft log to whoever is holding the keyboard.
+
+### Rotate the four credential classes
+
+| Class | Where it lives | Procedure | Proof it took |
+| --- | --- | --- | --- |
+| Broker trading login and TOTP seed | broker portal; `arrow_password`, `arrow_totp_key` secrets | `../05_deployment/04-secrets-rotation.md` | a broker login succeeds with the new password and fails with the old one |
+| Market-data `app_id` secret | broker portal; `arrow_app_secret` secret | same | ingestion reconnects and its `ING-*` alerts clear |
+| R2 token pair | Cloudflare; `aws_access_key_id`, `aws_secret_access_key` secrets | same | `CHECKPOINT_DIR` writes and reads both succeed |
+| O2 password | CloudPe node `prod.env`; `O2_PASSWORD` | same | dashboard login works and the alert-routing selftest passes |
+
+### Rebuild a node from zero
+
+The rebuild path is the deployment path, so the recovery is exercised rather than improvised:
+
+```bash
+git clone "${CLONE_URL:?set the clone URL from the workstation}" && cd streaming_project_New
+bash code/01_platform/04_scripts/vm-bootstrap.sh       # host prep, chrony, docker, labels
+bash code/01_platform/04_scripts/secrets-bootstrap.sh  # swarm secrets from the real values
+# then the stages in ../05_deployment/PROD_VM_PROVISIONING.md §9, from S5 onwards
+```
+
+### Verification before closure
+
+- `python3 code/01_platform/04_scripts/cluster_check.py --expect prod_vms.json` reports `FAIL=0`.
+- The refusal tests re-run with their positive control (`../plans/2026-09-21-post-verification-plan.md` task B1).
+- Alert delivery is proven again (task B6b), rather than assumed from the dashboard.
+- A dated rotation-log entry names every class rotated and the next date.
+- The incident note closes with four sentences: what was exposed, what was rotated, what was rebuilt, and
+  what changed so that it cannot recur.
+
+### Escalation and abort criteria
+
+- Broker order-flow questions go to the broker's support desk, panel and RAM questions to CloudPe, token
+  questions to Cloudflare.
+- **Abort and stay halted** if a credential cannot be rotated (for example, portal access is missing):
+  never resume with a credential you could not revoke. Time halted is a cost; an unrevoked credential is
+  a risk that compounds.
+
 ## SignalJob (compute) operations
 
 Environment: the distributed SignalJob runs on the compose Flink cluster as a
