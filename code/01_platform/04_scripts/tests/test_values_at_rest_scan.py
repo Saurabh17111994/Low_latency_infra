@@ -16,7 +16,14 @@ never come from a scan that did not run (a missing root is rc=2, a bad date is
 rc=2), a hit inside this public repository is printed but only fails under
 `--strict`, and no output line ever carries the raw value.
 
-Pairs with CHG-289.
+The value-equality mode (`--values-file`) is exercised below as well. Names and
+shapes answer "is this secret named here"; they cannot answer "is this value
+here", and the leak found on 2026-09-21 was exactly that — 48 files held the
+values with no name beside most of them. The cases below cover the two ways that
+mode could quietly lie: a value it never searched (short, or a placeholder) and a
+file it never opened (over the size cap).
+
+Pairs with CHG-289 and CHG-295.
 """
 
 import json
@@ -254,3 +261,130 @@ def test_a_named_pipe_is_counted_not_opened(tmp_path):
     assert proc.returncode == 0, proc.stdout
     assert "skipped_special=1" in proc.stdout
     assert "hits=0" in proc.stdout
+
+
+# ── T2's value-equality mode (CHG-295) ──────────────────────────────────────
+# A value shaped like a real one, chosen so that its own fragments are not
+# something else's substrings: the "no fragment" case below asserts on the first
+# and last four characters, and `cdef` or `1234` would collide with hex or with a
+# line number.
+LIVE_VALUE = "Zq7-Live-Token-9x2k"
+LIVE_LINE = f"arrow_app_secret={LIVE_VALUE}\n"
+
+
+def values_file(tmp_path, body):
+    path = pathlib.Path(tmp_path) / "values.env"
+    path.write_text(body)
+    return path
+
+
+def test_value_mode_finds_a_value_whose_name_is_absent(tmp_path):
+    # The reason the mode exists: the value was copied into a file that never
+    # names it, so the name scan is clean and the value scan is not.
+    write(tmp_path, "scan/notes.txt", f"copied earlier: {LIVE_VALUE}\n")
+    vf = values_file(tmp_path, LIVE_LINE)
+    rc, out, _ = run("--root", str(tmp_path / "scan"))
+    assert rc == 0, out
+    assert "hits=0" in out
+    rc, out, _ = run("--root", str(tmp_path / "scan"), "--values-file", str(vf))
+    assert rc == 1, out
+    assert "arrow_app_secret" in out
+    assert "notes.txt:1" in out
+
+
+def test_value_mode_passes_when_the_value_is_absent(tmp_path):
+    write(tmp_path, "scan/notes.txt", "nothing to see here\n")
+    vf = values_file(tmp_path, LIVE_LINE)
+    rc, out, _ = run("--root", str(tmp_path / "scan"), "--values-file", str(vf))
+    assert rc == 0, out
+    assert "mode=values" in out
+    assert "hits=0" in out
+
+
+def test_value_mode_fails_on_a_hit_inside_the_repo(tmp_path):
+    # No --strict, unlike the name mode: a supplied list holds live values, so
+    # there are no decoys in it and a hit is a finding wherever the file sits.
+    # The plan documents the dummy, so the hit is inside this repository.
+    vf = values_file(tmp_path, "arrow_app_secret=dummy1234567890\n")
+    rc, out, _ = run("--root", str(PLAN_DIR), "--values-file", str(vf))
+    assert rc == 1, out
+    assert "in-repo" in out
+
+
+def test_a_missing_values_file_is_rc2(tmp_path):
+    rc, _, err = run("--root", str(tmp_path), "--values-file", str(tmp_path / "absent.env"))
+    assert rc == 2
+    assert "could not be read" in err
+
+
+def test_a_values_file_of_placeholders_alone_is_rc2(tmp_path):
+    vf = values_file(tmp_path, "arrow_app_secret=<app-id>\no2_password=${O2_PASSWORD}\n")
+    rc, _, err = run("--root", str(tmp_path), "--values-file", str(vf))
+    assert rc == 2
+    assert "no usable values" in err
+
+
+def test_a_short_value_is_counted_not_silently_dropped(tmp_path):
+    write(tmp_path, "scan/notes.txt", "nothing to see here\n")
+    vf = values_file(tmp_path, f"o2_password=abc\narrow_app_secret={LIVE_VALUE}\n")
+    rc, out, _ = run("--root", str(tmp_path / "scan"), "--values-file", str(vf))
+    assert rc == 0, out
+    assert "searched=1" in out
+    assert "ignored_short=1" in out
+
+
+def test_value_mode_does_not_skip_a_large_file(tmp_path):
+    # The leak scan's own gap: 243 files were skipped for size, and a value does
+    # not care how large the file around it is. The name-mode run is the control
+    # — it proves the cap is real, so this cannot pass by the cap having
+    # quietly vanished.
+    write(tmp_path, "scan/huge.log", "x" * (3 * 1024 * 1024) + f"\n{LIVE_VALUE}\n")
+    vf = values_file(tmp_path, LIVE_LINE)
+    rc, out, _ = run("--root", str(tmp_path / "scan"))
+    assert "skipped_big=1" in out, out
+    rc, out, _ = run("--root", str(tmp_path / "scan"), "--values-file", str(vf))
+    assert rc == 1, out
+    assert "huge.log:2" in out
+
+
+def test_the_value_and_its_fragments_never_reach_the_output(tmp_path):
+    write(tmp_path, "scan/notes.txt", f"{LIVE_VALUE}\n")
+    vf = values_file(tmp_path, LIVE_LINE)
+    rc, out, err = run("--root", str(tmp_path / "scan"), "--values-file", str(vf))
+    assert rc == 1
+    for text in (out, err):
+        assert LIVE_VALUE not in text
+        assert LIVE_VALUE[:4] not in text
+        assert LIVE_VALUE[-4:] not in text
+    # A masked preview is the name mode's convention and would still be four
+    # characters of a live value here, so value mode does not print the field.
+    assert "preview=" not in out
+
+
+def test_json_evidence_never_carries_the_value(tmp_path):
+    write(tmp_path, "scan/notes.txt", f"{LIVE_VALUE}\n")
+    vf = values_file(tmp_path, LIVE_LINE)
+    rc, out, _ = run("--root", str(tmp_path / "scan"), "--values-file", str(vf), "--json")
+    assert rc == 1
+    assert LIVE_VALUE not in out
+    payload = json.loads(out)
+    assert payload["mode"] == "values"
+    assert payload["counts"]["searched"] == 1
+
+
+def test_both_modes_together_is_rc2(tmp_path):
+    vf = values_file(tmp_path, LIVE_LINE)
+    rc, _, err = run("--root", str(tmp_path), "--values-file", str(vf),
+                     "--names", "o2_password")
+    assert rc == 2
+    assert "two modes" in err
+
+
+def test_quoted_comments_and_duplicates_in_the_values_file(tmp_path):
+    vf = values_file(tmp_path, f"# a comment\narrow_password=\"{LIVE_VALUE}\"\n"
+                              f"arrow_app_secret={LIVE_VALUE}\n")
+    write(tmp_path, "scan/notes.txt", f"{LIVE_VALUE}\n")
+    rc, out, _ = run("--root", str(tmp_path / "scan"), "--values-file", str(vf))
+    assert rc == 1, out
+    assert "searched=1" in out, "one value, however many names carry it"
+    assert "ignored_duplicate=1" in out

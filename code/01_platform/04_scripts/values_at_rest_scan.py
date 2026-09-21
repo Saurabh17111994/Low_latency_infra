@@ -9,7 +9,15 @@ scanner:
 * T6 — the same scan over session transcripts created after the
   values-never-rest-here decision returns zero matches.
 
-Four rules make the result mean something:
+* T2 also has a value-equality mode (`--values-file`). Names and shapes answer
+  "is this secret named here", which is not the question the leak asked: on
+  2026-09-21 the four live Arrow values sat in 48 files with no name beside most
+  of them. That mode compares values literally, prints no preview, fails on
+  every hit — a supplied list of live values has no decoys in it — and does not
+  skip large files, because a value does not care how large the file around it
+  is.
+
+Five rules make the result mean something:
 
 1. The value is never printed. A hit prints the name, the file, the line, the
    length and a masked preview using `audit_r2.mask_secret`'s convention.
@@ -24,12 +32,16 @@ Four rules make the result mean something:
    `~/.steam/steam.pipe` with `wchan=wait_for_partner`, which is the kernel
    function a process sleeps in while `open()` waits for a writer. Such a path
    is counted as `skipped_special` and never opened.
+5. Value mode fails closed on its own inputs. A missing, unreadable or
+   placeholder-only values file is rc=2, never "0 hits", and every value it
+   could not search — too short, a placeholder, a duplicate — is counted in the
+   report instead of being dropped.
 
 The nine names come from `secrets-bootstrap.sh --print-names`, the single
 authority the stack and its parity test already read, so a tenth secret cannot
 escape this scan by being added somewhere else.
 
-Pairs with CHG-289.
+Pairs with CHG-289 and CHG-295.
 """
 
 import argparse
@@ -60,6 +72,9 @@ SKIP_EXT = {
     ".rlib", ".rmeta", ".dylib", ".exe",
 }
 MAX_BYTES = 2 * 1024 * 1024
+# The floor for a value worth searching. Shared by `classify` and by the
+# value-equality mode so the two cannot drift apart.
+MIN_VALUE_LEN = 6
 
 # A value we would never call a secret. The plan's must-fail decoy
 # (`dummy1234567890`) is deliberately NOT here: it must trip the scan, which is
@@ -163,6 +178,48 @@ def load_names(explicit):
     return names
 
 
+def load_values(path):
+    """`--values-file`: NAME=value lines, read once, never echoed.
+
+    The file holds production values and lives outside this repository, so it is
+    read into memory, compared, and never printed — only the names of its values
+    and the paths of their hits reach the report.
+    """
+    try:
+        text = pathlib.Path(path).expanduser().read_text(errors="ignore")
+    except OSError as exc:
+        fail(
+            f"--values-file could not be read ({exc}); a scan without its "
+            "values is not a clean result"
+        )
+    values, ignored = {}, {"placeholder": 0, "short": 0, "duplicate": 0}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, raw = line.split("=", 1)
+        name = name.strip()
+        value = raw.strip().strip("\"'")
+        if not name or not value:
+            continue
+        if is_placeholder(value):
+            ignored["placeholder"] += 1
+            continue
+        if len(value) < MIN_VALUE_LEN:
+            ignored["short"] += 1
+            continue
+        if value in values:
+            ignored["duplicate"] += 1
+            continue
+        values[value] = name
+    if not values:
+        fail(
+            "--values-file supplied no usable values; a scan with nothing to "
+            "compare cannot certify anything"
+        )
+    return values, ignored
+
+
 def name_pattern(names):
     alt = "|".join(
         re.escape(n).replace("_", "[_-]")
@@ -185,9 +242,11 @@ def classify(raw):
         return "placeholder", value
     if PATH_LIKE.match(value):
         return "path", value
-    # 6, not 8: a seven-character password is still a password. The placeholder
-    # and path filters have already run, so the false-positive cost is low.
-    if len(value) < 6:
+    # MIN_VALUE_LEN, not 8: a seven-character password is still a password. The
+    # placeholder and path filters have already run, so the false-positive cost
+    # is low, and the value-equality mode shares this floor so the two cannot
+    # drift apart.
+    if len(value) < MIN_VALUE_LEN:
         return "short", value
     return "value", value
 
@@ -209,28 +268,51 @@ def file_date(path):
         return None
 
 
-def scan_file(path, pattern):
+def name_matcher(pattern):
+    """`find(line)` -> (label, value) pairs that survive classification."""
+    def find(line):
+        found = []
+        for match in pattern.finditer(line):
+            kind, value = classify(match.group("val"))
+            if kind == "value":
+                found.append((match.group("name"), value))
+        for shape_name, shape in SHAPES:
+            for match in shape.finditer(line):
+                kind, value = classify(match.group(1))
+                if kind == "value":
+                    found.append((shape_name, value))
+        return found
+    return find
+
+
+def value_matcher(value_map):
+    """`find(line)` -> (name, value) pairs, matched literally.
+
+    No classification here, deliberately. The two filters that make a *named*
+    value trustworthy — placeholder-shaped and path-shaped — are exactly the
+    ones that would drop a real value the operator supplied because it happens
+    to look like a reference or a path.
+    """
+    def find(line):
+        return [(name, value) for value, name in value_map.items() if value in line]
+    return find
+
+
+def scan_file(path, find):
     hits = []
     try:
         with path.open("r", errors="ignore") as handle:
             for lineno, line in enumerate(handle, 1):
-                for match in pattern.finditer(line):
-                    kind, value = classify(match.group("val"))
-                    if kind == "value":
-                        hits.append((lineno, match.group("name"), value))
-                        continue
-                for shape_name, shape in SHAPES:
-                    for match in shape.finditer(line):
-                        kind, value = classify(match.group(1))
-                        if kind == "value":
-                            hits.append((lineno, shape_name, value))
+                for label, value in find(line):
+                    hits.append((lineno, label, value))
     except OSError:
         return hits, False
     return hits, True
 
 
-def walk(root, since, names):
-    pattern = name_pattern(names)
+def walk(root, since, names=None, values=None, max_bytes=MAX_BYTES):
+    find = (value_matcher(values) if values is not None
+            else name_matcher(name_pattern(names)))
     stats = {"files": 0, "skipped_big": 0, "skipped_ext": 0, "unreadable": 0,
              "skipped_old": 0, "skipped_special": 0}
     results = []
@@ -252,7 +334,10 @@ def walk(root, since, names):
             if not stat.S_ISREG(info.st_mode):
                 stats["skipped_special"] += 1
                 continue
-            if info.st_size > MAX_BYTES:
+            # Value mode passes max_bytes=None: a value can sit in a file of any
+            # size, and skipping large files is exactly the gap that left 243
+            # files unread in the 2026-09-21 leak scan.
+            if max_bytes is not None and info.st_size > max_bytes:
                 stats["skipped_big"] += 1
                 continue
             if since is not None:
@@ -260,7 +345,7 @@ def walk(root, since, names):
                 if stamp is not None and stamp < since:
                     stats["skipped_old"] += 1
                     continue
-            hits, read_ok = scan_file(path, pattern)
+            hits, read_ok = scan_file(path, find)
             stats["files"] += 1
             if not read_ok:
                 stats["unreadable"] += 1
@@ -270,7 +355,7 @@ def walk(root, since, names):
                 results.append({
                     "class": cls, "path": str(path), "line": lineno,
                     "name": label, "length": len(value),
-                    "preview": mask(value),
+                    "preview": "" if values is not None else mask(value),
                     "decoy": bool(DECOY_VALUE.match(value)),
                 })
     return results, stats
@@ -284,6 +369,9 @@ def main(argv=None):
                         help="root to scan; repeatable (default: $HOME)")
     parser.add_argument("--names", default=None,
                         help="comma-separated names (default: secrets-bootstrap.sh)")
+    parser.add_argument("--values-file", default=None, dest="values_file",
+                        help="NAME=value file outside this repository: compare values "
+                             "instead of names, and fail on every hit")
     parser.add_argument("--since", default=None,
                         help="only files dated YYYY-MM-DD or later (T6)")
     parser.add_argument("--strict", action="store_true",
@@ -297,13 +385,25 @@ def main(argv=None):
         fail(f"not a directory: {', '.join(missing)}")
 
     since = parse_since(args.since) if args.since else None
-    names = load_names(args.names)
+    if args.values_file and args.names:
+        fail("--values-file and --names are two modes; pass one")
+    values, ignored = None, {"placeholder": 0, "short": 0, "duplicate": 0}
+    if args.values_file:
+        values, ignored = load_values(args.values_file)
+        names = sorted(values.values())
+    else:
+        names = load_names(args.names)
 
     hits, stats = [], {"files": 0, "skipped_big": 0, "skipped_ext": 0,
                        "unreadable": 0, "skipped_old": 0,
                        "skipped_special": 0}
     for root in roots:
-        root_hits, root_stats = walk(root, since, names)
+        root_hits, root_stats = walk(
+            root, since,
+            names=None if values is not None else names,
+            values=values,
+            max_bytes=None if values is not None else MAX_BYTES,
+        )
         hits.extend(root_hits)
         for key in stats:
             stats[key] += root_stats[key]
@@ -312,26 +412,44 @@ def main(argv=None):
     in_repo = [h for h in hits if h["class"] == "in-repo"]
     decoys = [h for h in hits if h["decoy"]]
     failed = bool(outside) or (args.strict and bool(in_repo))
+    if values is not None:
+        # A supplied list holds live values, not the plan's documented decoys, so
+        # every hit is a finding — inside this repository as much as outside it.
+        failed = bool(hits)
 
+    mode = "values" if values is not None else "names"
     if args.as_json:
         print(json.dumps({
+            "mode": mode,
             "roots": [str(r) for r in roots],
             "names": names,
             "since": args.since,
             "hits": hits,
             "counts": {"total": len(hits), "outside": len(outside),
                        "in_repo": len(in_repo), "decoys": len(decoys),
+                       "searched": len(values) if values is not None else 0,
+                       "ignored_placeholder": ignored["placeholder"],
+                       "ignored_short": ignored["short"],
+                       "ignored_duplicate": ignored["duplicate"],
                        **stats},
             "failed": failed,
         }, indent=2))
     else:
         for hit in sorted(hits, key=lambda h: (h["class"], h["path"], h["line"])):
+            # Value mode prints no preview: the name mode's masked preview is
+            # four characters of a live value, which is four too many when the
+            # value is real rather than a documented decoy.
+            preview = "" if values is not None else f" preview={hit['preview']}"
             print(f"HIT {hit['class']:<7} {hit['path']}:{hit['line']} "
-                  f"{hit['name']} len={hit['length']} preview={hit['preview']} "
+                  f"{hit['name']} len={hit['length']}{preview} "
                   f"decoy={'yes' if hit['decoy'] else 'no'}")
         print(
-            f"values_at_rest_scan: files={stats['files']} hits={len(hits)} "
+            f"values_at_rest_scan: mode={mode} files={stats['files']} "
+            f"searched={len(values) if values is not None else 0} hits={len(hits)} "
             f"outside={len(outside)} in-repo={len(in_repo)} decoys={len(decoys)} "
+            f"ignored_placeholder={ignored['placeholder']} "
+            f"ignored_short={ignored['short']} "
+            f"ignored_duplicate={ignored['duplicate']} "
             f"skipped_old={stats['skipped_old']} skipped_big={stats['skipped_big']} "
             f"skipped_ext={stats['skipped_ext']} "
             f"skipped_special={stats['skipped_special']} "

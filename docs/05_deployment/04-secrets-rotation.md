@@ -24,6 +24,14 @@ This runbook covers broker/Arrow, Fluss, S3, OpenObserve, TLS, Swarm, and operat
   with its pair. Timing is the operator's: rotating now ends local ingestion until VM day, when Fluss is
   running on the VMs; rotating at VM day leaves a live trading login on an unencrypted laptop meanwhile.
   Values are recorded here as names only, never printed.
+  **Correction, same day, measured once T2's value-equality mode existed:** that count was an
+  undercount. The same mode over the repository read 5,131 files and found four hits in two more files —
+  `code/01_platform/01_docker/secrets.env` (mode 600) and `code/01_platform/01_docker/.env.bak-20260828`,
+  both holding the password and the TOTP key. Both are git-ignored (`.gitignore:31`, `:32`, `:89`) and no
+  commit has ever touched either, so neither was published. A names-and-shapes scan cannot see those
+  files at all: the values sit in them without their names. They must be emptied or deleted as part of
+  the rotation, not before it — `secrets.env` is what a local live run reads, and a backup of values
+  being rotated away has no further use.
 
 ### Production
 
