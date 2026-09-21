@@ -22,8 +22,8 @@
 
 > **Read this first.** Stages `S5`–`S10` describe a path this project has **never executed**
 > (`09-production-swarm.md` M3 = `NOT FULLY`; M1 docs and M2 static checks only). Treat them as a
-> first-run procedure with a debugging budget, not as routine operation. Five mechanics they need do
-> not exist yet — they are listed in §6.1 and marked `[NOT BUILT]` at each use. §6.2 lists the exact
+> first-run procedure with a debugging budget, not as routine operation. The mechanics they need that
+> do not exist yet are listed in §6.1, each named against the stage it blocks. §6.2 lists the exact
 > values the deployment is still missing.
 
 **Environment label.** Every stage below carries exactly one: `[WORKSTATION]` · `[LOCAL]` · `[ACCEPTANCE]` · `[PRODUCTION]`.
@@ -371,7 +371,7 @@ result (`09-production-swarm.md`).
 
 | Gap | What is missing | Blocks |
 | --- | --- | --- |
-| Image publication | `image-publish.sh` (CHG-247, seven images since CHG-256) pushes the project-built images and writes digest-pinned deploy values. Since CHG-274 its reachability probe uses the registry **host**, so an owner-path target such as `ghcr.io/<owner>` is probed correctly — before that fix the probe requested `<owner>/v2/`, answered 404, and stopped the run with "bring it up on VM1 first" for a healthy registry (measured 2026-09-21). Rehearsed against a local `registry:2` under a GHCR-shaped owner path and against a fake registry that answers 401 (the auth-challenge case); `vm-bootstrap.sh --check` no longer fails a host with no `insecure-registries` entry (CHG-274). **Not yet run against real GHCR**, so `.env` still carries bare tags and no digest-pinned production environment has been produced | S4 (publish), and therefore S7, S7b |
+| Image publication | `image-publish.sh` (CHG-247, seven images since CHG-256) pushes the project-built images and writes digest-pinned deploy values. Since CHG-274 its reachability probe uses the registry **host**, so an owner-path target such as `ghcr.io/<owner>` is probed correctly — before that fix the probe requested `<owner>/v2/`, answered 404, and stopped the run with "bring it up on VM1 first" for a healthy registry (measured 2026-09-21). Rehearsed against a local `registry:2` under a GHCR-shaped owner path and against a fake registry that answers 401 (the auth-challenge case); `vm-bootstrap.sh --check` no longer fails a host with no `insecure-registries` entry (CHG-274). **Closed 2026-09-21: the publish has now run against real GHCR** — CI run `35587874482` published all seven images (12/12 steps), the digests are committed in `images.published.env`, and every image slot the deploy demands is digest-pinned: measured on the deploy environment the production-shaped local run used, 12/12 demanded values present and 8/8 image refs carrying `@sha256:`. The bare tags left in `.env` are dev-only — no node reads that file, because S4 renders the deploy environment with `--merge-env`. | nothing — no longer blocks S4, S7 or S7b |
 | Executor's live clock source | `ChronycOffsetSource` (CHG-272) reads the host's `chronyc tracking` behind the existing `OffsetSource` trait and fails closed when it cannot — but the executor runs in a **container**, so production needs `chrony` in that image **and** the host's chrony socket reachable from it (and a decision about the socket's ownership, since it is root-owned). Neither can be proved without a VM, so `CLOCK_OFFSET_SOURCE` stays unset (fixed source) and the host clock is gated by `prod_node_check.py` at S3/S7 meanwhile | S7, before the first live order |
 | EOD lake offload | The trigger exists now — the `eod-scheduler` stack service (CHG-269) runs `eod_controller.py` daily — but the lake path itself still needs the R2 bucket and keys, so the service ships with `EOD_OFFLOAD=none` and the manifest lifecycle is proven without offload | S11 |
 
@@ -397,6 +397,16 @@ digest-based.
 
 So S1 is not "build the images". It is **build them, publish them to GHCR (S4), and make every
 reference the deploy environment carries an immutable digest.**
+
+**Correction (2026-09-21).** The status paragraphs above were written before the publish path closed.
+Measured since: the seven published digests are committed in `images.published.env` (CI run
+`35587874482`, 12/12 steps) and every `image:` line in `docker-stack.yml` is a digest — either
+`${X_IMAGE:?…}`, which S4 fills from that fragment, or a literal `@sha256:` default for the
+third-party images. The deploy environment the production-shaped local run used carried 12/12
+demanded values with all eight image refs pinned, so a deploy rendered by S4 is digest-based; the
+bare tags remain only in `.env`, the dev input. `EOD_TABLES` is no longer missing either — that
+environment carries `trades,quotes`. What stays the operator's to supply at S7 is `CHECKPOINT_DIR`
+(with the R2 bucket, §5.1) and `O2_PASSWORD` (first boot).
 
 ## 7. The workflow at a glance
 
@@ -483,7 +493,7 @@ python3 code/01_platform/04_scripts/prod_node_check.py --inventory prod_vms.json
 **Exit:** exit code 0. Drift is a provisioning defect: fix the node, not the checker.
 **Note:** role/labels are read by the node's own Swarm NodeID, so this check must be re-run after S5.
 
-### S4 — Bootstrap hosts, publish `[PRODUCTION]` + `[WORKSTATION]` `[NOT BUILT]`
+### S4 — Bootstrap hosts, publish `[PRODUCTION]` + `[WORKSTATION]`
 **Entry:** S3 green. Run 0–4 **on all four VMs**; 5–6 from the workstation.
 
 **0. Repository — the guide runs from the clone, on every node.** Nothing in this guide copies a file
