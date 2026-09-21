@@ -153,7 +153,7 @@ If any of these grows into a script, it lands with a change record and its own t
 | T2 | No production value at rest (B4.2): a names-plus-patterns scan over `$HOME` returns zero hits for the production secret names while the container is unmounted | plant a decoy (`ARROW_APP_SECRET=dummy1234567890`) under the scan root; the scan must fail, then the decoy is removed | both runs, paired |
 | T3 | GitHub over SSH (B4.3): `ssh -T git@github.com` prints the account name, `git ls-remote --exit-code` returns 0, `~/.git-credentials` is gone and `credential.helper` is empty | the old path must now be dead: `git ls-remote https://…` must fail **after** the token is revoked | four command outputs |
 | T4 | Key retirement (B4.4/B4.5): `id_rsa*` absent, no `94.237.73.113` in `~/.ssh/config` or `known_hosts`, and a batch-mode SSH to that address fails | run the same assertions against a temp copy of the config with the block re-added; they must fail | grep output, both copies |
-| T5 | VM key (B4.6): `ssh-keygen -y -P ""` **fails** (a passphrase exists), key mode 600, `.pub` mode 644, `IdentitiesOnly yes` present | generate a throwaway passphrase-less key in a temp directory; the same command must succeed, proving the check detects it | two command outputs |
+| T5 | VM key (B4.6): `ssh-keygen -y -P ""` **fails** (a passphrase exists), key mode 600, `.pub` mode 644, `IdentitiesOnly yes` present | generate a throwaway passphrase-less key in a temp directory; the same command must succeed, proving the check detects it | **done 2026-09-21**, `IdentitiesOnly` excepted: the real key fails with *incorrect passphrase supplied to decrypt private key* (rc=255), the throwaway control succeeds (rc=0), modes 600/644, fingerprint `SHA256:2fUTiWFK…`. `IdentitiesOnly yes` arrives with the `Host vm-*` block at S2. Caveat recorded in B4.6: this workstation's gnome-keyring agent already holds the key and signs with it, so the passphrase does not gate use while the login keyring is unlocked |
 | T6 | No credentials in new transcripts (B4.7): the value-shaped scan over sessions created after this date returns zero matches | append a dummy `aws_secret_access_key = "dummy1234567890abcdef"` to a copied transcript; the scan must flag it | both runs |
 | T7 | 2FA armed (B4.6): a dated checklist with one row per account (GitHub, CloudPe, Cloudflare, broker) | not machine-checkable — recorded as a dated checklist, never quoted as a test | the checklist itself |
 
@@ -304,10 +304,19 @@ repository.
       `ssh-keygen -R 94.237.73.113` (clears all three entries), delete `id_rsa*` (B4.4), and secure that
       provider account with 2FA.
 - [ ] **B4.6 One dedicated SSH key for the VMs** (passphrase-protected, `ForwardAgent no`), separate from
-      the GitHub key; 2FA on GitHub, CloudPe, Cloudflare and the broker account. Next step (2026-09-21):
-      `ssh-keygen -t ed25519 -a 100 -f ~/.ssh/id_ed25519_vms -C "vm-key 2026-09-21"` — you set the
-      passphrase, twice (T5: an empty one must be refused). The `Host vm-*` block carrying
-      `IdentitiesOnly yes` and `ForwardAgent no` is written at S2, when the VM addresses exist.
+      the GitHub key; 2FA on GitHub, CloudPe, Cloudflare and the broker account. *Key half done
+      2026-09-21*: `ssh-keygen -t ed25519 -a 100 -f ~/.ssh/id_ed25519_vms -C "vm-key 2026-09-21"`, mode 600
+      (`.pub` 644, `~/.ssh` 700), fingerprint `SHA256:2fUTiWFKz33TmuOQ+N6tJo7sZBi3KMQo0vDIpZqATr4`;
+      T5's fail/control pair passed. *Caveat, measured the same minute:* the agent is gnome-keyring
+      (`SSH_AUTH_SOCK=/run/user/1000/keyring/ssh`) and it had already loaded the new key — `ssh-add -l`
+      lists it, `ssh-add -T` signs successfully (rc=0; man: "performing sign and verify operations"),
+      `ssh -v -F /dev/null` offers it as `explicit agent` with no passphrase prompt, and `ssh-add -d` is
+      refused by the agent, so it cannot be unloaded selectively. While the login keyring is unlocked the
+      key is therefore usable without its passphrase. How the agent got the decrypted key is *not*
+      established (assumption: gnome-keyring's ssh-key integration). Decide at S2: accept it (the GitHub
+      and upcloud keys already have that posture) or keep VM keys out of the keyring's reach.
+      Remaining: the `Host vm-*` block carrying `IdentitiesOnly yes` and `ForwardAgent no`, written at S2
+      when the addresses exist; 2FA on CloudPe, Cloudflare and the broker account (T7).
 - [ ] **B4.7 Stop putting real credentials in a conversation.** Nine session transcripts already hold 34
       value-shaped matches for ARROW/aws/O2 secret patterns (values were only matched, never printed).
       Nothing production-class exists yet, so nothing needs rotating today — from VM day on, real values
