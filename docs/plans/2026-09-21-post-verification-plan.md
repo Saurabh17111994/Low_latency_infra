@@ -26,11 +26,14 @@ redesign.
 8. The HA migration is proven to be a row-count change: the four-row v1 inventory passes
    `placement_check.py` (rc=0, every service has a home, three eligible nodes for every `role == worker`
    service) — measured 2026-09-21, see "The path from 1+1 to HA" below.
-9. The workstation holds no plaintext credential and no production value at rest: no token file, no
-   passphrase-less key, and either an encrypted disk (B4.1) or the paste-and-delete interim (B4.2).
+9. The workstation holds no plaintext credential and no production value at rest — **permanently**: no
+   token file, no passphrase-less key, and no production value ever written here (B4.2, made permanent
+   2026-09-21; the disk-encryption option was declined, so keeping values off this machine is the
+   control, not an interim step).
 
-**Non-goals.** A vault/secret-broker on the workstation; LUKS on the *VMs* (the workstation is the
-opposite case — B4.1 encrypts it); `fail2ban`; authenticated NTP; Kubernetes/Ansible/Terraform; v2
+**Non-goals.** A vault/secret-broker on the workstation; LUKS on the *VMs*; LUKS on the *workstation* —
+**declined 2026-09-21, permanently: this machine will not be reinstalled**; `fail2ban`; authenticated
+NTP; Kubernetes/Ansible/Terraform; v2
 (7 drained managers — trigger-gated, not planned here).
 
 ## Context
@@ -146,7 +149,7 @@ If any of these grows into a script, it lands with a change record and its own t
 
 | ID | Test and pass criterion | Must-fail control | Evidence |
 | --- | --- | --- | --- |
-| T1 | Disk encryption (B4.1): `lsblk -o FSTYPE` shows `crypto_LUKS` on the root device, `/etc/crypttab` binds the TPM device, and the machine reboots without a passphrase prompt | the same checks must report FAIL before the reinstall — proving they discriminate — and a live-USB boot must see only ciphertext | dated output, before and after |
+| T1 | ~~Disk encryption~~ — **withdrawn 2026-09-21: the reinstall is declined, permanently.** No encryption is planned, so there is nothing to verify; T2 carries the risk instead, and the residual is named in the Risks table | — nothing to run | the dated decision, recorded here rather than deleted |
 | T2 | No production value at rest (B4.2): a names-plus-patterns scan over `$HOME` returns zero hits for the production secret names while the container is unmounted | plant a decoy (`ARROW_APP_SECRET=dummy1234567890`) under the scan root; the scan must fail, then the decoy is removed | both runs, paired |
 | T3 | GitHub over SSH (B4.3): `ssh -T git@github.com` prints the account name, `git ls-remote --exit-code` returns 0, `~/.git-credentials` is gone and `credential.helper` is empty | the old path must now be dead: `git ls-remote https://…` must fail **after** the token is revoked | four command outputs |
 | T4 | Key retirement (B4.4/B4.5): `id_rsa*` absent, no `94.237.73.113` in `~/.ssh/config` or `known_hosts`, and a batch-mode SSH to that address fails | run the same assertions against a temp copy of the config with the block re-added; they must fail | grep output, both copies |
@@ -258,57 +261,35 @@ repository.
 
 **Chosen fixes — native, no new tool, nothing left to maintain afterwards:**
 
-- [ ] **B4.1 Disk encryption: LUKS + TPM auto-unlock at the next OS reinstall.** The tools are already
-      installed (`cryptsetup`, `systemd-cryptenroll`) and the machine has a TPM (`/dev/tpm0`), so the
-      installer's full-disk-encryption option plus `systemd-cryptenroll --tpm2-device=auto` gives
-      an encrypted disk that still boots without a passphrase: no daily friction, and a removed or resold
-      disk holds only ciphertext. **Schedule it before VM day**, so every production value is created on
-      an encrypted disk. Back up first: `~/.ssh`, `~/.p6v`, the repository, and (optionally)
-      `~/.pi/agent/sessions` — the whole set is a few hundred megabytes. Residual: a thief who also knows
-      the login password.
-
-      **How, in order — measured preconditions: `/dev/tpm0` present, `cryptsetup` and `systemd-cryptenroll`
-      installed, workstation is Linux Mint 22.1 (`UBUNTU_CODENAME=noble`, the Ubuntu 24.04 base).**
-
-      1. **Before touching the disk.** Push the repository and confirm a clean tree. Copy to an offline
-         USB stick: `~/.ssh`, `~/.p6v`, and **your password-manager vault if it is a local file** —
-         losing that costs more than losing the laptop. `~/.p6v` is not critical (the deploy environment
-         is rebuilt from the published fragment) and `id_rsa` is deliberately left behind, because B4.4
-         retires it. Optional: `~/.pi/agent/sessions`.
-      2. **Make the install medium first** (Linux Mint 22.1), boot it, and confirm the installer offers
-         full-disk encryption *before* erasing anything. **No encryption option = stop and take another
-         ISO.** A wiped disk you cannot encrypt is the one outcome this checklist exists to prevent.
-      3. **Install with encryption on.** The LUKS passphrase is separate from your login password and is
-         the one you must not lose: write it on paper. If the installer offers a recovery key, print it.
-         If it offers TPM-backed unlocking, take it; otherwise TPM comes in step 4. Skip any TPM variant
-         you have not read up on — the passphrase keyslot stays, always.
-      4. **After the first boot, bind the TPM** (this is the property T1 checks):
-         `sudo systemd-cryptenroll --tpm2-device=auto /dev/<luks-partition>`, then make sure
-         `/etc/crypttab` carries `tpm2-device=auto` for that device if the installer did not add it.
-         `sudo cryptsetup luksDump /dev/<luks-partition>` must still show **both** a password keyslot and
-         a TPM entry — do not delete the passphrase slot.
-      5. **Verify the property, not the intention.** Reboot twice: the second boot must reach the desktop
-         with no passphrase prompt. Then run T1's checks (`lsblk -o FSTYPE` shows `crypto_LUKS`;
-         `/etc/crypttab` binds the TPM device) and keep that dated output beside the pre-reinstall FAIL
-         run — the pair is the evidence, one run proves nothing.
-      6. **Rebuild the workstation:** `git clone` the repository, make a **fresh** GitHub key
-         (`ssh-keygen -t ed25519 -a 100 -f ~/.ssh/id_ed25519_github`), paste the public half into GitHub,
-         then delete the old key there. Cheaper and cleaner than restoring a key backup either way.
-         Install Docker only when the next local task needs it — publishing is CI-only now.
-      7. **What the TPM binding costs:** a firmware update or a Secure Boot change invalidates it, and the
-         machine then asks for the passphrase. That passphrase is the only thing between you and an
-         unrecoverable disk, so it lives on paper as well as in your head.
-- [ ] **B4.2 Until then, keep production values off this PC.** Nothing production-class exists yet (no
-      real ARROW values, no R2 token), so the interim is free: rehearse with throwaway values, create the
-      real ones at VM day, then delete the file once the swarm holds them. A `cryptsetup` file container
-      is the native fallback if a file must exist sooner, but it adds a mount step and still leaves the
-      session transcripts unencrypted — the reinstall is the endpoint, not the container.
-- [ ] **B4.3 Replace the plaintext GitHub credential with SSH.** Measured precondition: **no key on this
+- [ ] ~~**B4.1 Disk encryption: LUKS + TPM auto-unlock at the next OS reinstall.**~~ **DECLINED
+      2026-09-21 by the operator, permanently.** The workstation will not be reinstalled, so there is no
+      LUKS and no TPM binding to verify: T1 is withdrawn and the risk is *accepted* rather than
+      mitigated. Residual, stated plainly: anyone with physical access to this laptop, or a copy of its
+      disk, reads everything on it. The compensating rule is therefore absolute — **no production value
+      is ever written to this machine** (B4.2), real values are entered on the VMs and on the provider
+      and broker panels — and the secrets bootstrap accepts `--values-file /dev/stdin`, so a value can be
+      piped straight into a Swarm secret without ever touching a disk. If this is ever revisited, the
+      seven-step reinstall order (backup list, verify the installer offers encryption *before* erasing,
+      TPM enrolment after first boot, two-reboot proof) is in the git history of this file:
+      `git log -p -- docs/plans/2026-09-21-post-verification-plan.md`.
+- [ ] **B4.2 Production values never rest on this PC — permanent, not an interim.** Nothing
+      production-class exists here yet (no real ARROW values, no R2 token) and now nothing ever will:
+      create the real values at VM day on the VM, pipe them with `--values-file /dev/stdin`, and never
+      type one into a chat (B4.7). The deploy environment's operator-supplied values (`CHECKPOINT_DIR`,
+      `O2_PASSWORD`) are entered at S7 on the node, not here. A `cryptsetup` file container remains
+      available if a value ever must exist on this disk before a deploy, but it adds a mount step and
+      still leaves the session transcripts unencrypted.
+- [x] **B4.3 Replace the plaintext GitHub credential with SSH.** Measured precondition: **no key on this
       machine is registered with GitHub** (`ssh -T git@github.com` → `Permission denied (publickey)`).
       Order: generate a dedicated `id_ed25519_github` (passphrase-protected) → paste its `.pub` into
       GitHub → prove it (`ssh -T`) → `git remote set-url origin git@github.com:Saurabh17111994/Low_latency_infra.git`
       → prove a read (`git ls-remote`) → delete `~/.git-credentials` and unset `credential.helper` →
       revoke the stored token in GitHub. Maintenance afterwards: none.
+      **Done 2026-09-21 (measured):** `id_ed25519_github` generated and passphrase-protected, registered
+      on GitHub, `ssh -T git@github.com` answered as `Saurabh17111994`; the remote is
+      `git@github.com:Saurabh17111994/Low_latency_infra.git`; read, `git fetch` and a real push all
+      succeeded over SSH; `~/.git-credentials` deleted and `credential.helper` unset; the stored token
+      revoked in GitHub. Maintenance afterwards: none.
 - [ ] **B4.4 Retire the unencrypted `id_rsa`.** It is referenced only by the legacy host block, so
       destroy that server first (B4.5) and then delete `id_rsa` and `id_rsa.pub`. If the host must stay,
       add a passphrase in place (`ssh-keygen -p -f ~/.ssh/id_rsa`) — same public key, nothing to
@@ -519,7 +500,7 @@ Before the first live order, every row must have its evidence artifact, not an i
 | The workstation is the weakest link | one theft or one browser compromise undoes Tier 1 | B4, and rotate on any suspicion |
 | Alerts armed but unwatched | detection without response | D3's morning checklist |
 | Growing to HA without revisiting the broker IP whitelist | broker login silently fails on the new nodes | B1 records the whitelist scope; E1 checks it before the drill |
-| The reinstall slips past VM day | the deploy env and the ARROW values would then sit in plaintext on this PC | B4.1 before VM day, or B4.2's paste-and-delete interim |
+| No disk encryption, ever (declined 2026-09-21) | a stolen laptop or a copied disk yields whatever it holds, so nothing production-class may be stored on it | B4.2 is permanent: values are created on the VMs and piped, never written here. T2 (zero value-shaped hits under `$HOME`) is the standing check, and B7 is the incident runbook |
 
 ## What is needed from you
 
@@ -533,9 +514,8 @@ Before the first live order, every row must have its evidence artifact, not an i
    two machines both addresses go into the broker portal. The rule that outlives the decision: adding a
    node means revisiting the portal the same day, or broker login fails silently.
 5. A go-ahead per phase — nothing above runs on its own.
-6. Three workstation decisions: when to schedule the LUKS reinstall (before VM day), whether
-   `94.237.73.113` can be destroyed, and the one-time step of adding a new public key to your GitHub
-   account (B4.3).
+6. One workstation decision left: whether `94.237.73.113` can be destroyed (B4.5). The GitHub key work is
+   done (B4.3, 2026-09-21) and the reinstall is declined (B4.1), so nothing else here waits on you.
 
 ### Two-factor checklist (your actions, in this order)
 
@@ -551,12 +531,13 @@ outage, not a security win.
 | Broker | 2FA or device binding on the trading login; confirm the market-data `app_id` has no order rights | the broker's own recovery procedure, in the same places | this is the account that can move money |
 
 Then: put every recovery-code set into your password material (never a file in the repo), print one copy,
-and store that copy with the reinstall backup (B4.1). None of this needs the VMs to exist, so all four can
+and store that copy somewhere physical — the laptop will not be encrypted, so paper is the durable copy.
+None of this needs the VMs to exist, so all four can
 be done this week.
 
 ## What I would do first
 
-Order now, cheapest first: **B4** (three of its fixes take minutes; the reinstall is the only one that
-needs scheduling), then **C1** (the only item with a hard before-deploy deadline), then **B7** and
+Order now, cheapest first: **B4** (its remaining fixes take minutes; the disk-encryption item is declined,
+so nothing there needs scheduling), then **C1** (the only item with a hard before-deploy deadline), then **B7** and
 **B6's** alert list while the purchases are in flight — docs-only, usable on VM day, no gate run and no
 change record needed.
