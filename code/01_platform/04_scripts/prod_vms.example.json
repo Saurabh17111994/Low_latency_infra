@@ -6,7 +6,7 @@
     "ssh_key": "/home/saurabh/.ssh/id_ed25519",
     "connect_timeout_s": 8
   },
-  "disk_min_gb": 500,
+  "disk_min_gb": 250,
   "nodes": [
     {
       "name": "M1",
@@ -14,7 +14,7 @@
       "role": "manager",
       "swarm": true,
       "labels": { "role": "worker" },
-      "disk_min_gb": 500
+      "disk_min_gb": 250
     },
     {
       "name": "M2",
@@ -22,7 +22,7 @@
       "role": "manager",
       "swarm": true,
       "labels": { "role": "worker" },
-      "disk_min_gb": 500
+      "disk_min_gb": 250
     },
     {
       "name": "M3",
@@ -30,7 +30,7 @@
       "role": "manager",
       "swarm": true,
       "labels": { "role": "worker" },
-      "disk_min_gb": 500
+      "disk_min_gb": 250
     },
     {
       "name": "W1",

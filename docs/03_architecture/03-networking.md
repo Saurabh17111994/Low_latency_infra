@@ -18,7 +18,7 @@ exception and is not an order-path execution service.
 
 Docker Swarm uses separate encrypted overlay networks (`--opt encrypted` for `trading-net`, `execution-net`) or equivalent TLS. v1: the three workload VMs are Swarm Manager+Worker and host Fluss replicas/quorum and Flink capacity with anti-co-location (all three replicas across separate VMs, 2CPU/2GB manager reserved per VM). v2: M1-3 are Manager ONLY (drained), W1-3 (+W4+) are Workers. The observability VM (O1) hosts OpenObserve outside the Swarm and is not required for order-safety correctness. Same `docker-stack.yml` works for both via role labels.
 
-Each VM has a 500 GB SSD starting allocation. Final CPU, RAM, SSD IOPS/throughput, and network bandwidth are `EVIDENCE-BLOCKED` until `PERF-PROD-60000-001` and `FAIL-VM-LOSS-60000-001` pass.
+Each VM has a 250 GB SSD starting allocation. Final CPU, RAM, SSD IOPS/throughput, and network bandwidth are `EVIDENCE-BLOCKED` until `PERF-PROD-60000-001` and `FAIL-VM-LOSS-60000-001` pass.
 
 **Provider availability disclaimer:** A cloud provider's 99.99% uptime claim is not proof of application, broker-route, or order-path availability. Platform monitoring, broker-connectivity monitoring, recovery tests, and safe-halt behaviour must be independently proven.
 

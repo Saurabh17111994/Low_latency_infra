@@ -42,9 +42,9 @@ Local Compose commands are never production procedures (`../02_requirements/06-o
 | `W4+` | Worker (scale, optional) | `worker` | `role=worker` | joins with NO stack redesign |
 | `O1` | Observability | `worker` (joined, no vote) | `observability=true` | OpenObserve + telemetry; joined as a **worker**, so it never joins the manager quorum |
 
-**Disk:** 500 GB SSD per VM (workload VMs and the observability VM). Managers in v2 are
+**Disk:** 250 GB SSD per VM (workload VMs and the observability VM). Managers in v2 are
 small-footprint (≈10 GB disk, 2 CPU / 2 GB RAM per `09-production-swarm.md` §v2) — treat
-500 GB as the workload/observability floor, not a manager requirement.
+250 GB as the workload/observability floor, not a manager requirement.
 **No VM hosts an image registry** (Decision 2026-09-21: images come from public GHCR, §6.1). The
 ≈3–4 GB of layers that used to live on VM1 now live in GHCR, so the ≈10 GB manager disk is enough
 and no node carries registry data it must keep.
@@ -103,7 +103,7 @@ docker node ls                            # expect 1 manager + 1 worker, both Re
 
 Both rows are `swarm: true` — a label only exists on a joined node — and neither declares
 `expect_availability: drained`, because the manager runs workloads on this profile and is therefore
-active. `disk_min_gb: 500` on the trading VM (the v1 workload floor); size the observability VM by
+active. `disk_min_gb: 250` on the trading VM (the v1 workload floor); size the observability VM by
 what `openobserve` actually keeps, and take that number from the rehearsal's own volume rather than
 guessing it.
 
@@ -160,7 +160,7 @@ docker node ls        # expect 1 manager
 **The inventory is one row.** Copy `code/01_platform/04_scripts/prod_vms.example.json` to
 `prod_vms.json` and keep exactly one node entry: `role: manager` (the swarm's only manager),
 `swarm: true`, `labels: {"role": "worker", "observability": "true"}`, **no** `expect_availability`
-(v1 managers run workloads, so they are active), `disk_min_gb: 500`. Give it the VM's hostname as
+(v1 managers run workloads, so they are active), `disk_min_gb: 250`. Give it the VM's hostname as
 `name` so the messages line up. Deleting rows is the entire change to this profile; adding three
 rows later, with `--label-add role=worker` on each new VM, is the entire change back to v1.
 
@@ -195,7 +195,7 @@ agent, so watch its first start rather than assuming it.
 
 **Sizing.** Size for the *sum*, not for the per-node share: this workstation runs all the services
 in the rehearsal deck in **15.46 GB of RAM** (measured). A 16 GB VM would sit at roughly 97% of
-that and is a floor, not a target; 32 GB with 8 vCPU leaves real headroom. 500 GB SSD is the
+that and is a floor, not a target; 32 GB with 8 vCPU leaves real headroom. 250 GB SSD is the
 floor from §1. Per §4 these are starting allocations, not a proven sizing result — the honest
 numbers arrive when `PERF-PROD-60000-001` runs.
 
@@ -341,7 +341,7 @@ itself halts at, tightened or loosened with `--max-offset-ms`).
 
 The final service-to-node placement, CPU/RAM, SSD IOPS/throughput and network bandwidth
 are **`EVIDENCE-BLOCKED`** until `PERF-PROD-60000-001` and `FAIL-VM-LOSS-60000-001` pass
-on the real stack (D5/D4). 500 GB SSD per VM is a starting allocation, not a proven sizing
+on the real stack (D5/D4). 250 GB SSD per VM is a starting allocation, not a proven sizing
 result (`09-production-swarm.md`).
 
 ## 5. Prerequisites
@@ -351,7 +351,7 @@ result (`09-production-swarm.md`).
 | Decision | Notes | Default |
 | --- | --- | --- |
 | Container registry | All nodes must pull the same digests | **Public GHCR packages** — `ghcr.io/<owner>/<image>:<tag>@sha256:…` (Decision 2026-09-21, revises the `registry:2`-on-VM1 choice). The workstation pushes with one classic PAT (`write:packages`/`read:packages`) after `docker login ghcr.io`; every node **pulls anonymously**, so no registry credential exists on any VM and no VM needs a daemon setting. Public packages are free (storage and transfer), the repo is public, and no image bakes a secret, so the images expose nothing the repo does not. Record the resolved digests in the image lock |
-| VM specs | Workload/observability floor is **500 GB disk**; a *learning* rig may be smaller, but perf evidence then remains unprovable | see §6.1 sizing caveat |
+| VM specs | Workload/observability floor is **250 GB disk**; a *learning* rig may be smaller, but perf evidence then remains unprovable | see §6.1 sizing caveat |
 | Checkpoint/savepoint target | Production **requires** `s3://` + encryption; `CHECKPOINT_DIR` must not be `file://` in prod | **Cloudflare R2**, one bucket with prefixes `checkpoints/` and `warehouse/` (Decision 2026-09-21): S3-compatible, no egress fee, and already the endpoint the stack takes |
 | Swarm ports | 2377/tcp, 7946/tcp+udp, 4789/udp open between VM1–VM3 | required |
 | Operator-access ports | `5080/tcp` on the OpenObserve node, limited to the workstation's address — `5000/tcp` is no longer needed now that the registry is GHCR and not VM1 | required by S4 step 4 |
@@ -375,7 +375,7 @@ result (`09-production-swarm.md`).
 | Executor's live clock source | `ChronycOffsetSource` (CHG-272) reads the host's `chronyc tracking` behind the existing `OffsetSource` trait and fails closed when it cannot — but the executor runs in a **container**, so production needs `chrony` in that image **and** the host's chrony socket reachable from it (and a decision about the socket's ownership, since it is root-owned). Neither can be proved without a VM, so `CLOCK_OFFSET_SOURCE` stays unset (fixed source) and the host clock is gated by `prod_node_check.py` at S3/S7 meanwhile | S7, before the first live order |
 | EOD lake offload | The trigger exists now — the `eod-scheduler` stack service (CHG-269) runs `eod_controller.py` daily — but the lake path itself still needs the R2 bucket and keys, so the service ships with `EOD_OFFLOAD=none` and the manifest lifecycle is proven without offload | S11 |
 
-**Sizing caveat:** the final service-to-node CPU/RAM/IOPS/bandwidth allocation is `EVIDENCE-BLOCKED` until the production performance and one-VM-loss scenarios pass (§4 above). The 500 GB per-node disk figure is a starting allocation, not a proven sizing result.
+**Sizing caveat:** the final service-to-node CPU/RAM/IOPS/bandwidth allocation is `EVIDENCE-BLOCKED` until the production performance and one-VM-loss scenarios pass (§4 above). The 250 GB per-node disk figure is a starting allocation, not a proven sizing result.
 
 ### 6.2 The values a deploy must have — and what is missing today
 

@@ -22,7 +22,7 @@ Every latency report MUST include p50, p95, p99, UTC clock source, test duration
 
 The active instrument manifest is fixed at **3,000 instruments** for a trading session (runtime manifest changes require a controlled restart). Market-data arrival is variable: an instrument may receive fewer than ≈16.7 ticks/s, and no instrument may exceed **20 ticks/s**. The expected baseline is an average of **≈16.7 ticks/s per instrument** over the declared measurement window, or **50,000 ticks/s** across the manifest. The acceptance gate is **60,000 ticks/s sustained** (3,000 × 20, DEC-045); the 90,000 ticks/s peak campaign is RETIRED (DEC-036). Arrival spacing is not fixed and a 50 ms per-instrument schedule is prohibited as a production claim.
 
-Final machine sizing (CPU, RAM, disk I/O, network bandwidth) is evidence-gated by `PERF-PROD-60000-001` and the one-workload-VM-loss test. Current deployment allocations (500 GB SSD per VM) are a starting point, not a proven sizing result.
+Final machine sizing (CPU, RAM, disk I/O, network bandwidth) is evidence-gated by `PERF-PROD-60000-001` and the one-workload-VM-loss test. Current deployment allocations (250 GB SSD per VM) are a starting point, not a proven sizing result.
 
 | Scenario | Tick rate | Duration | Purpose |
 | --- | ---: | --- | --- |

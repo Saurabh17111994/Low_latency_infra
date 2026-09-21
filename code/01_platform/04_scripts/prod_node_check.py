@@ -8,7 +8,7 @@ the gate D1.3/D2 depends on.
 
 Per-Node checks:
   * reachability   — SSH connect (BatchMode; no password prompt ever)
-  * disk           — root filesystem size >= disk_min_gb (default 500, imported from
+  * disk           — root filesystem size >= disk_min_gb (default 250, imported from
                      PROD_VM_PROVISIONING.md; manager nodes may set a smaller floor)
   * clock          — measured, not labelled: `timedatectl` must report a synchronized clock and
                      `chronyc tracking` an offset within CLOCK_OFFSET_LIMIT_MS (default 200 ms, the
@@ -55,7 +55,7 @@ REPO_ROOT = os.path.abspath(
 )
 EVIDENCE_DIR_DEFAULT = os.path.join(REPO_ROOT, "logs", "nautilus-execution")
 
-DEFAULT_DISK_MIN_GB = 500  # PROD_VM_PROVISIONING.md §1 (workload/observability floor)
+DEFAULT_DISK_MIN_GB = 250  # PROD_VM_PROVISIONING.md §1 (workload/observability floor)
 # The platform's own limit: the executor halts at CLOCK_OFFSET_LIMIT_MS, default 200 ms
 # (clockwatch.rs). A node beyond it is not ready to run the platform, so this gate uses the
 # platform's number, not the looser 1 s TOTP tolerance of S4's bootstrap.
@@ -68,7 +68,7 @@ CLOCK_PROBE = ("timedatectl 2>/dev/null | grep -q 'System clock synchronized: ye
 # {
 #   "access": {"ssh_user": "ubuntu", "ssh_port": 22, "ssh_key": "/abs/or/omit",
 #              "connect_timeout_s": 8},
-#   "disk_min_gb": 500,            # optional global default
+#   "disk_min_gb": 250,            # optional global default
 #   "nodes": [
 #     {"name": "M1", "host": "10.0.0.11", "role": "manager", "swarm": true,
 #      "labels": {"role": "manager"}, "expect_availability": "drained",  # optional
@@ -393,7 +393,9 @@ def _self_check(args, utc_now, run_id):
         def __init__(self, access):
             self.access = access
             self.reachable = {"10.0.0.11", "10.0.0.21", "10.0.0.40"}
-            self.disks = {"10.0.0.11": 600, "10.0.0.21": 480, "10.0.0.40": 512}
+            # W1's 240 sits below the 250 floor on purpose: it is the only cover for
+            # check_node's disk-FAIL branch, so it must stay under the default floor.
+            self.disks = {"10.0.0.11": 600, "10.0.0.21": 240, "10.0.0.40": 512}
             # what each node's OWN daemon reports: hostname|state|manager?|NodeID
             self.identities = {
                 "10.0.0.11": ("M1", "active", True, "node-m1"),
@@ -434,12 +436,12 @@ def _self_check(args, utc_now, run_id):
              "labels": {"role": "manager"}, "expect_availability": "drained",
              "disk_min_gb": 10},
             {"name": "W1", "host": "10.0.0.21", "role": "worker", "swarm": True,
-             "labels": {"role": "worker"}, "disk_min_gb": 500},
+             "labels": {"role": "worker"}, "disk_min_gb": 250},
             # deliberately swarm:False — this fixture is the only cover for the
             # "not joined" branch. The shipped template marks O1 a joined worker
             # (CHG-246); do not copy this entry into prod_vms.json.
             {"name": "O1", "host": "10.0.0.40", "role": "observability", "swarm": False,
-             "labels": {"observability": "true"}, "disk_min_gb": 500},
+             "labels": {"observability": "true"}, "disk_min_gb": 250},
         ],
     }
     runner = FakeRunner(fake_inv["access"])
@@ -448,7 +450,7 @@ def _self_check(args, utc_now, run_id):
     # would "pass" while demonstrating nothing about label drift
     manager_host = _resolve_manager_host(fake_inv)
     per_node = []
-    expect_ok = {"M1": True, "W1": False, "O1": True}  # W1 disk 480<500 AND label drift
+    expect_ok = {"M1": True, "W1": False, "O1": True}  # W1 disk 240<250 AND label drift
     # say it before the per-node lines, so nobody reads this inventory as topology
     print("[self-check] FAKE inventory — classification proof only, not the shipped topology")
     for node in fake_inv["nodes"]:

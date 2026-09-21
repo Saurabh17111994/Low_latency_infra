@@ -23,20 +23,20 @@ Build this phase, then implement the tests in the second section before moving o
 | --- | --- | --- | --- |
 | M1 Architecture (docs) | DONE | v1 4VM / v2 7VM Option B role labels cross-check `docs_audit` + `docker-stack.yml 724L` doc tables match; `09` `M1` docs parity `test_09_stack.py StackShape 5 Placement 3` | Live docs review on provisioned Swarm (labels visible `docker node ls`) |
 | M2 Deployment (stack + 1-host mimic) | DONE | `docker-stack.yml` immutable digests `zookeeper@sha256:43d3…` `golang:1.24.5-alpine@sha256:daae04eb…`, `5 x-healthcheck` exceptions documented, `x-networks` encrypted `overlay` `attachable:false`, `secrets external:true`, `replicas 1→3` scale `31/31 PASS` `make test-09` + `docker compose config` parses; `stack_selfcheck.sh` `1-host swarm mimic` compile-only | `docker stack deploy` 7VM, `s3://tradingticks-aug-2026` `high-availability.type:zookeeper` `replication.factor=3` 8 `[ ]` placements, `SWARM-MGR-001..006` quorum 2/3 survive 1 loss |
-| M3 Production HA (4VM live) | NOT FULLY | `make up` `12 Running/Started` single-VM `replication.factor=1` HA disabled `file:///checkpoints` (dev) — proves dev path | `3-node ZK 3.9.2` `HA/recovery` `PERF-NODELOSS 50k tps 3k instr` `DR-001..006` `chaos-suite` encrypted S3 recovery, capacity `500GB SSD` proof — cannot on 1 VM (`08:34` `cannot prove replication/one-VM tolerance/encrypted S3 recovery/production capacity`) |
+| M3 Production HA (4VM live) | NOT FULLY | `make up` `12 Running/Started` single-VM `replication.factor=1` HA disabled `file:///checkpoints` (dev) — proves dev path | `3-node ZK 3.9.2` `HA/recovery` `PERF-NODELOSS 50k tps 3k instr` `DR-001..006` `chaos-suite` encrypted S3 recovery, capacity `250GB SSD` proof — cannot on 1 VM (`08:34` `cannot prove replication/one-VM tolerance/encrypted S3 recovery/production capacity`) |
 
 ### Placement model
 
 | Node class | Required workload | Disk |
 | --- | --- | --- |
-| Workload VM 1 | Fluss replica/quorum, ZooKeeper ensemble member (1 of 3), Flink capacity (JobManager/TaskManager), assigned services | 500 GB SSD |
-| Workload VM 2 | Fluss replica/quorum, ZooKeeper ensemble member (2 of 3), Flink capacity (JobManager/TaskManager), assigned services | 500 GB SSD |
-| Workload VM 3 | Fluss replica/quorum, ZooKeeper ensemble member (3 of 3), Flink capacity (JobManager/TaskManager), assigned services | 500 GB SSD |
-| Observability VM | OpenObserve and telemetry storage/collection | 500 GB SSD |
+| Workload VM 1 | Fluss replica/quorum, ZooKeeper ensemble member (1 of 3), Flink capacity (JobManager/TaskManager), assigned services | 250 GB SSD |
+| Workload VM 2 | Fluss replica/quorum, ZooKeeper ensemble member (2 of 3), Flink capacity (JobManager/TaskManager), assigned services | 250 GB SSD |
+| Workload VM 3 | Fluss replica/quorum, ZooKeeper ensemble member (3 of 3), Flink capacity (JobManager/TaskManager), assigned services | 250 GB SSD |
+| Observability VM | OpenObserve and telemetry storage/collection | 250 GB SSD |
 
 Fluss replicas cannot co-locate, and ZooKeeper ensemble members cannot co-locate: exactly one ZooKeeper node per workload VM. All three replicas of any critical Fluss/Flink role SHALL be placed across separate workload VMs via anti-co-location constraints. The 3-node ZooKeeper ensemble (quorum 2-of-3) and 3-node Fluss LOG-table replication survive loss of any single workload VM. OpenObserve loss must not authorize orders or erase local durable audit.
 
-The final service-to-node placement, CPU, RAM, SSD IOPS/throughput, and network bandwidth are `EVIDENCE-BLOCKED` until `PERF-PROD-60000-001` and `FAIL-VM-LOSS-60000-001` pass. Current allocations (500 GB SSD per VM) are a starting point, not a proven sizing result.
+The final service-to-node placement, CPU, RAM, SSD IOPS/throughput, and network bandwidth are `EVIDENCE-BLOCKED` until `PERF-PROD-60000-001` and `FAIL-VM-LOSS-60000-001` pass. Current allocations (250 GB SSD per VM) are a starting point, not a proven sizing result.
 
 ### Stack requirements
 

@@ -83,7 +83,7 @@ Source retention is at least three complete trading days and extends while the r
 ## Container runtime
 
 - Local development and integration use Docker Compose.
-- Production uses a four-VM Docker Swarm: v1: 3× Manager+Worker + 1 O2 (4 VMs), v2: 3× Manager ONLY + N≥3 Workers + 1 O2 (7 VMs) — same stack, see 09 v1→v2. Each v1 workload VM: 500 GB.
+- Production uses a four-VM Docker Swarm: v1: 3× Manager+Worker + 1 O2 (4 VMs), v2: 3× Manager ONLY + N≥3 Workers + 1 O2 (7 VMs) — same stack, see 09 v1→v2. Each v1 workload VM: 250 GB.
 - Production images use immutable digests; `latest` and version ranges are prohibited.
 - Production secrets use Docker Swarm secrets and least-privilege service identities.
 - Production network traffic uses mandatory encrypted overlay/TLS-protected transport for all sensitive paths (broker, Arrow REST, S3, operator control, secret delivery, and cross-host money-moving/state traffic). Exact mechanism remains evidence-gated but encryption is not optional.

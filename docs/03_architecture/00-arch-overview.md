@@ -130,7 +130,7 @@ A missing, mismatched, stale, or unauthorized cross-scope operation fails closed
 | Environment | Topology | Purpose |
 | --- | --- | --- |
 | Local/integration | Docker Compose, single host | Development, deterministic tests, component integration |
-| Production | Docker Swarm, v1 4 VMs → v2 7 VMs | v1: 3× Manager+Worker + 1 O2 (baseline). v2: 3× Manager ONLY + N≥3 Workers + 1 O2 (drained, same stack). Each VM: 500 GB SSD starting allocation. Final CPU, RAM, SSD IOPS/throughput, and network bandwidth are `EVIDENCE-BLOCKED` until `PERF-PROD-60000-001` and `FAIL-VM-LOSS-60000-001` pass. |
+| Production | Docker Swarm, v1 4 VMs → v2 7 VMs | v1: 3× Manager+Worker + 1 O2 (baseline). v2: 3× Manager ONLY + N≥3 Workers + 1 O2 (drained, same stack). Each VM: 250 GB SSD starting allocation. Final CPU, RAM, SSD IOPS/throughput, and network bandwidth are `EVIDENCE-BLOCKED` until `PERF-PROD-60000-001` and `FAIL-VM-LOSS-60000-001` pass. |
 
 Compose is not evidence of production HA. Production must prove three-node Fluss replication/quorum, anti-co-location (all three replicas of any critical Fluss/Flink role across separate VMs), encrypted S3 checkpoints, one-workload-VM loss tolerance, safe halt under five seconds, and data recovery under thirty seconds at 50,000 ticks/s (3,000 instruments). A cloud provider's uptime claim is not proof of application, broker-route, or order-path availability.
 
