@@ -26,10 +26,10 @@ class R2LakeTieringEodOffloadExecutorTest {
     @Test
     void parsesDayAndManifestEvidence() {
         List<String> lines = List.of(
-                "lake/default/raw_table_1/data/event_day=20260831/instrument_token_bucket=0/x.parquet\t100",
-                "lake/default/raw_table_1/data/event_day=20260831/instrument_token_bucket=1/y.parquet\t200",
-                "lake/default/raw_table_1/data/event_day=20260830/z.parquet\t50",
-                "lake/default/raw_table_1/metadata/event_day=20260831/snap-1.avro\t10");
+                "lake/default/raw_table_1/data/event_day=20260831/instrument_token_bucket=0/x.parquet\t100\t2026-08-31T12:00:00.000Z",
+                "lake/default/raw_table_1/data/event_day=20260831/instrument_token_bucket=1/y.parquet\t200\t2026-08-31T12:00:01.000Z",
+                "lake/default/raw_table_1/data/event_day=20260830/z.parquet\t50\t2026-08-30T12:00:00.000Z",
+                "lake/default/raw_table_1/metadata/snap-1.avro\t10\t2026-08-31T12:00:05.000Z");
         R2LakeTieringEodOffloadExecutor.DayEvidence e =
                 R2LakeTieringEodOffloadExecutor.parseEvidence(lines, "lake", "raw_table_1", "20260831");
         assertEquals(2, e.dataObjects());
@@ -40,14 +40,46 @@ class R2LakeTieringEodOffloadExecutorTest {
 
     @Test
     void staleManifestFromPriorDayDoesNotSatisfyNewDay() {
+        // Same property as before, now asked by time rather than by a day marker the
+        // metadata path cannot carry: the manifest was written before the day's data.
         List<String> lines = List.of(
-                "lake/default/raw_table_1/data/event_day=20260831/instrument_token_bucket=0/x.parquet\t100",
-                "lake/default/raw_table_1/metadata/snap-1.avro\t10",
-                "lake/default/raw_table_1/metadata/event_day=20260830/snap-0.avro\t10");
+                "lake/default/raw_table_1/data/event_day=20260831/x.parquet\t100\t2026-08-31T12:00:00.000Z",
+                "lake/default/raw_table_1/metadata/snap-1.avro\t10\t2026-08-30T12:00:00.000Z");
         R2LakeTieringEodOffloadExecutor.DayEvidence e =
                 R2LakeTieringEodOffloadExecutor.parseEvidence(lines, "lake", "raw_table_1", "20260831");
         assertEquals(1, e.dataObjects());
         assertEquals(0, e.manifestFiles());
+    }
+
+    @Test
+    void manifestWithoutATimestampIsNotEvidence() {
+        List<String> lines = List.of(
+                "lake/default/raw_table_1/data/event_day=20260831/x.parquet\t100\t2026-08-31T12:00:00.000Z",
+                "lake/default/raw_table_1/metadata/snap-1.avro\t10");
+        R2LakeTieringEodOffloadExecutor.DayEvidence e =
+                R2LakeTieringEodOffloadExecutor.parseEvidence(lines, "lake", "raw_table_1", "20260831");
+        assertEquals(0, e.manifestFiles(), "an undated manifest cannot prove the commit order");
+    }
+
+    @Test
+    void unparseableManifestTimestampIsNotEvidence() {
+        List<String> lines = List.of(
+                "lake/default/raw_table_1/data/event_day=20260831/x.parquet\t100\t2026-08-31T12:00:00.000Z",
+                "lake/default/raw_table_1/metadata/snap-1.avro\t10\tnot-a-timestamp");
+        R2LakeTieringEodOffloadExecutor.DayEvidence e =
+                R2LakeTieringEodOffloadExecutor.parseEvidence(lines, "lake", "raw_table_1", "20260831");
+        assertEquals(0, e.manifestFiles());
+    }
+
+    @Test
+    void undatedDataCannotBeOrderedAgainstAManifest() {
+        List<String> lines = List.of(
+                "lake/default/raw_table_1/data/event_day=20260831/x.parquet\t100",
+                "lake/default/raw_table_1/metadata/snap-1.avro\t10\t2026-08-31T12:00:05.000Z");
+        R2LakeTieringEodOffloadExecutor.DayEvidence e =
+                R2LakeTieringEodOffloadExecutor.parseEvidence(lines, "lake", "raw_table_1", "20260831");
+        assertEquals(1, e.dataObjects());
+        assertEquals(0, e.manifestFiles(), "without a data stamp the order cannot be proven");
     }
 
     @Test

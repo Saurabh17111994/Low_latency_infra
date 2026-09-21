@@ -459,16 +459,20 @@ not. Fixed 2026-09-21 (read the second column; two-column lines still parse). Th
 confirms the script itself: `r2-list.sh` over TLS against a real S3 endpoint returned rc=0 with the
 expected objects, so SigV4, TLS and the file-based config all work.
 
-- [ ] Decide the manifest rule for `EOD_OFFLOAD=lake`. `R2LakeTieringEodOffloadExecutor` counts a
-      manifest only when its key contains `event_day=<day>`. Every other artifact scopes manifests by the
-      table's `metadata/` prefix with no day component: `lake-guard.sh` (`META_PREFIX=…/metadata/`),
-      `tiering-smoke.sh` (`metadata/.*\.avro`), and `test_lake_guard.py`'s stated TSV contract — and
-      Iceberg names manifest lists `metadata/snap-<id>-….avro`. Measured on a real-shaped listing with
-      two `.avro` objects present: `manifestFiles=0`, so `offload()` would report "no iceberg manifests —
-      snapshot not committed" for a day whose data is fully tiered. Recommended: drop the day-marker
-      clause (one line; it cannot cause a false pass, since a manifest must still exist, and it keeps
-      working if the day directory turns out to be real), and leave the freshness check where it already
-      lives (`lake-guard.sh`, P6-439).
+- [x] Manifest rule for `EOD_OFFLOAD=lake` — decided 2026-09-21 and implemented (CHG-291): a manifest
+      counts only when its `LastModified` is newer than the day's newest data object. The disagreement
+      that forced the decision: the executor counted a manifest only when its key contained
+      `event_day=<day>`, while `lake-guard.sh` (`META_PREFIX=…/metadata/`), `tiering-smoke.sh`
+      (`metadata/.*\.avro`) and `test_lake_guard.py`'s stated TSV contract all scope manifests by the
+      table's `metadata/` prefix with no day component, and Iceberg names manifest lists
+      `metadata/snap-<id>-….avro`. Measured on a real-shaped listing with two `.avro` objects present:
+      `manifestFiles=0`, so `offload()` reported "no iceberg manifests" for a fully tiered day. The day
+      marker was deliberate — it answered "is this today's snapshot, or an old one?", pinned by
+      `staleManifestFromPriorDayDoesNotSatisfyNewDay` — so the rule was re-expressed by time rather than
+      dropped, using the `LastModified` column the parser was already reading and discarding, and
+      matching the recency rule `lake-guard.sh` applies (P6-439). Missing or unparseable stamps fail
+      closed. Known limit: a later commit for a different day also satisfies it — proving which snapshot
+      holds the day needs the manifest's contents, i.e. `r2-query.sh`/DuckDB, part of D1.
 - [ ] Prove it against a local S3-compatible endpoint first, then against R2.
 - [ ] Flip `EOD_OFFLOAD` from `none`, with a change record.
 

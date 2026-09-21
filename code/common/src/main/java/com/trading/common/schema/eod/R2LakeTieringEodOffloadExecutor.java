@@ -49,7 +49,9 @@ public final class R2LakeTieringEodOffloadExecutor implements EodOffloadExecutor
         this.database = (database == null || database.isBlank()) ? "default" : database;
     }
 
-    /** Evidence for one table-day parsed from r2-list.sh output (unit-testable). */
+    /** Evidence for one table-day parsed from r2-list.sh output (unit-testable).
+     *  manifestFiles counts the manifests that PROVE the snapshot — the ones
+     *  written after the day's newest data object (see parseEvidence). */
     record DayEvidence(long dataBytes, int dataObjects, int manifestFiles, String keysHash) {}
 
     static DayEvidence parseEvidence(List<String> lines, String prefix, String table, String day) {
@@ -60,8 +62,9 @@ public final class R2LakeTieringEodOffloadExecutor implements EodOffloadExecutor
             String table, String day) {
         String dataPrefix = prefix + "/" + database + "/" + table + "/data/event_day=" + day + "/";
         String metaPrefix = prefix + "/" + database + "/" + table + "/metadata/";
-        String dayMarker = "event_day=" + day;
-        long bytes = 0; int objects = 0; int manifests = 0;
+        long bytes = 0; int objects = 0;
+        java.time.Instant newestData = null;
+        java.util.List<java.time.Instant> manifestStamps = new java.util.ArrayList<>();
         MessageDigest md;
         try { md = MessageDigest.getInstance("SHA-256"); } catch (Exception e) { throw new IllegalStateException(e); }
         // P4-140: sort key+size pairs and delimit before hashing — the raw
@@ -73,13 +76,51 @@ public final class R2LakeTieringEodOffloadExecutor implements EodOffloadExecutor
             int tab = line.indexOf('\t');
             String key = tab > 0 ? line.substring(0, tab) : line;
             long size = parseSize(line, tab);
-            if (key.startsWith(dataPrefix)) { objects++; bytes += size; hashed.add(key + "\t" + size); }
-            else if (key.startsWith(metaPrefix) && key.endsWith(".avro")
-                    && key.contains(dayMarker)) { manifests++; }
+            java.time.Instant stamp = parseStamp(line, tab);
+            if (key.startsWith(dataPrefix)) {
+                objects++; bytes += size; hashed.add(key + "\t" + size);
+                if (stamp != null && (newestData == null || stamp.isAfter(newestData))) newestData = stamp;
+            } else if (key.startsWith(metaPrefix) && key.endsWith(".avro") && stamp != null) {
+                manifestStamps.add(stamp);
+            }
         }
         java.util.Collections.sort(hashed);
         for (String k : hashed) { md.update(k.getBytes(StandardCharsets.UTF_8)); md.update((byte) 0); }
+        // A manifest is evidence only when it was written AFTER the day's newest
+        // data object. That is the property the event_day= day marker was reaching
+        // for, and the one lake-guard.sh already applies by recency (P6-439: "a
+        // manifest count alone passes on arbitrarily old files"). It is also the
+        // honest question: the copy happened, then a snapshot was committed. The
+        // ceiling: a later commit for another day satisfies it too — proving which
+        // snapshot holds the day needs the manifest's contents, not a listing.
+        int manifests = 0;
+        for (java.time.Instant stamp : manifestStamps) {
+            if (newestData != null && stamp.isAfter(newestData)) manifests++;
+        }
         return new DayEvidence(bytes, objects, manifests, HexFormat.of().formatHex(md.digest()));
+    }
+
+    /** r2-list.sh's columns after the key: the size, then LastModified. A
+     *  two-column line yields a null timestamp. */
+    private static String[] columnsAfterKey(String line, int tab) {
+        String tail = line.substring(tab + 1);
+        int nextTab = tail.indexOf('\t');
+        if (nextTab < 0) return new String[] { tail.trim(), null };
+        return new String[] { tail.substring(0, nextTab).trim(), tail.substring(nextTab + 1).trim() };
+    }
+
+    /** The object's LastModified. Null when the line carries no usable stamp: an
+     *  unprovable timestamp is not evidence, but it is also not a malformed
+     *  listing, so this returns null where parseSize throws. */
+    private static java.time.Instant parseStamp(String line, int tab) {
+        if (tab <= 0) return null;
+        String stampField = columnsAfterKey(line, tab)[1];
+        if (stampField == null || stampField.isEmpty()) return null;
+        try {
+            return java.time.Instant.parse(stampField);
+        } catch (java.time.format.DateTimeParseException unparseable) {
+            return null;
+        }
     }
 
     /** Controlled parse of the r2-list.sh size column (P4-139): malformed or
@@ -93,9 +134,7 @@ public final class R2LakeTieringEodOffloadExecutor implements EodOffloadExecutor
         // line the script never emits, so every live listing threw here and the
         // day became FAILED_RETRYABLE forever (proven 2026-09-21 against a TLS
         // S3 endpoint with a real listing).
-        String tail = line.substring(tab + 1);
-        int nextTab = tail.indexOf('\t');
-        String sizeField = (nextTab >= 0 ? tail.substring(0, nextTab) : tail).trim();
+        String sizeField = columnsAfterKey(line, tab)[0];
         final long size;
         try {
             size = Long.parseLong(sizeField);
@@ -167,7 +206,7 @@ public final class R2LakeTieringEodOffloadExecutor implements EodOffloadExecutor
         }
         if (e.manifestFiles() == 0) {
             return OffloadResult.failure("R2 data objects exist for day " + day
-                    + " but no iceberg manifests — snapshot not committed");
+                    + " but no iceberg manifest is newer than them — snapshot not committed");
         }
         // P4-302 honesty: this is a read-only tiering check, not a copy —
         // there are no source offsets or Iceberg snapshot to populate, so
