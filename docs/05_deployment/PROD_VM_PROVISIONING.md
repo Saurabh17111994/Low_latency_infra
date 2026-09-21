@@ -481,9 +481,40 @@ plus the two third-party images (OpenObserve, ZooKeeper) are present locally.
 **Stop if:** any image is referenced by a mutable tag — production prohibits `latest`, floating tags and version ranges.
 
 ### S2 — Create the VMs `[PRODUCTION]` — human
-**Do:** create four VMs (cloud provider of choice) matching §5.1; record IPs, SSH user and key. Fill the inventory JSON.
-**Exit:** four reachable machines and a complete inventory file.
+**Do:** create the machines §1b calls for (**two** for the first production deploy: trading = manager + `role=worker`; observability = `role=worker` + `observability=true`) — or four if you are going straight to §1's v1 target; matching §5.1; record IPs, SSH user and key; fill the inventory JSON.
+**Exit:** reachable machines and a complete inventory file.
 **Note:** this step is human-only; it is `D1.3` in the provisioning doc, and it is the last thing that must happen before any cluster work.
+
+#### S2 click-order sheet
+
+| # | Panel | Create | Values that come out of it |
+| --- | --- | --- | --- |
+| 1 | CloudPe | **The SSH key first** — one dedicated, passphrase-protected key for the VMs (plan B4.6), public half ready to paste | `~/.ssh/id_ed25519_cloudpe.pub` |
+| 2 | CloudPe | **Trading VM** (manager + worker) | its address |
+| 3 | CloudPe | **Observability VM** (worker + `observability=true`) | its address |
+| 4 | CloudPe | **Security group** for both, to the §9 item 2 rules — not the provider default group | the two-sided scan stays clean |
+| 5 | Cloudflare R2 | **Bucket** with the prefixes `checkpoints/` and `warehouse/` | `R2_BUCKET`, `R2_ENDPOINT`, `S3_WAREHOUSE_PATH=s3://BUCKET/warehouse`, `CHECKPOINT_DIR=s3://BUCKET/checkpoints` |
+| 6 | Cloudflare R2 | **Scoped API token** — Object Read & Write, *that bucket only*, never account-wide | `aws_access_key_id`, `aws_secret_access_key` |
+| 7 | Broker portal | The app registration plus the §9 item 1 limits | `ARROW_APP_ID`, `ARROW_USER_ID`, `ARROW_APP_SECRET`, `ARROW_PASSWORD`, `ARROW_TOTP_KEY` |
+
+**Sizing and image (recommendation, not a measured result):** 8 vCPU / 32 GB / 250 GB SSD per node — the
+disk figure is a floor, not a target (§4). Image: **Ubuntu 24.04 LTS server, minimal**, the same
+generation the workstation is built on (Mint 22.1 = noble), so the bootstrap script meets the system it
+was tested against. Region: the one you already use, unless you have a measured reason otherwise — the
+broker's latency and its IP whitelist both live there.
+
+**Where each value lands.** These are two different files, and mixing them up is the mistake this sheet
+exists to prevent:
+
+| Destination | Values |
+| --- | --- |
+| Deploy environment (rendered at S4 step 6) | `R2_ENDPOINT`, `R2_BUCKET`, `S3_WAREHOUSE_PATH`, `CHECKPOINT_DIR`, `ARROW_APP_ID`, `ARROW_USER_ID`, `O2_PASSWORD` |
+| Secrets values file (S6 — piped on stdin, never written to a VM disk) | `arrow_app_secret`, `arrow_password`, `arrow_totp_key`, `aws_access_key_id`, `aws_secret_access_key`, `o2_password` |
+
+The R2 token is **not** a deploy value: the stack mounts that pair as files
+(`AWS_ACCESS_KEY_ID_FILE`, `AWS_SECRET_ACCESS_KEY_FILE`), which is why it belongs in the secrets file.
+`O2_PASSWORD` and `o2_password` are the same password in two places — the deploy value is OpenObserve's
+root login, the secret is what derives its `Basic` auth header. Set both from one value.
 
 ### S3 — Verify nodes `[ACCEPTANCE]`
 ```bash

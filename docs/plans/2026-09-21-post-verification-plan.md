@@ -260,12 +260,44 @@ repository.
 
 - [ ] **B4.1 Disk encryption: LUKS + TPM auto-unlock at the next OS reinstall.** The tools are already
       installed (`cryptsetup`, `systemd-cryptenroll`) and the machine has a TPM (`/dev/tpm0`), so the
-      installer's "Encrypt the Ubuntu installation" plus `systemd-cryptenroll --tpm2-device=auto` gives
+      installer's full-disk-encryption option plus `systemd-cryptenroll --tpm2-device=auto` gives
       an encrypted disk that still boots without a passphrase: no daily friction, and a removed or resold
       disk holds only ciphertext. **Schedule it before VM day**, so every production value is created on
       an encrypted disk. Back up first: `~/.ssh`, `~/.p6v`, the repository, and (optionally)
       `~/.pi/agent/sessions` — the whole set is a few hundred megabytes. Residual: a thief who also knows
       the login password.
+
+      **How, in order — measured preconditions: `/dev/tpm0` present, `cryptsetup` and `systemd-cryptenroll`
+      installed, workstation is Linux Mint 22.1 (`UBUNTU_CODENAME=noble`, the Ubuntu 24.04 base).**
+
+      1. **Before touching the disk.** Push the repository and confirm a clean tree. Copy to an offline
+         USB stick: `~/.ssh`, `~/.p6v`, and **your password-manager vault if it is a local file** —
+         losing that costs more than losing the laptop. `~/.p6v` is not critical (the deploy environment
+         is rebuilt from the published fragment) and `id_rsa` is deliberately left behind, because B4.4
+         retires it. Optional: `~/.pi/agent/sessions`.
+      2. **Make the install medium first** (Linux Mint 22.1), boot it, and confirm the installer offers
+         full-disk encryption *before* erasing anything. **No encryption option = stop and take another
+         ISO.** A wiped disk you cannot encrypt is the one outcome this checklist exists to prevent.
+      3. **Install with encryption on.** The LUKS passphrase is separate from your login password and is
+         the one you must not lose: write it on paper. If the installer offers a recovery key, print it.
+         If it offers TPM-backed unlocking, take it; otherwise TPM comes in step 4. Skip any TPM variant
+         you have not read up on — the passphrase keyslot stays, always.
+      4. **After the first boot, bind the TPM** (this is the property T1 checks):
+         `sudo systemd-cryptenroll --tpm2-device=auto /dev/<luks-partition>`, then make sure
+         `/etc/crypttab` carries `tpm2-device=auto` for that device if the installer did not add it.
+         `sudo cryptsetup luksDump /dev/<luks-partition>` must still show **both** a password keyslot and
+         a TPM entry — do not delete the passphrase slot.
+      5. **Verify the property, not the intention.** Reboot twice: the second boot must reach the desktop
+         with no passphrase prompt. Then run T1's checks (`lsblk -o FSTYPE` shows `crypto_LUKS`;
+         `/etc/crypttab` binds the TPM device) and keep that dated output beside the pre-reinstall FAIL
+         run — the pair is the evidence, one run proves nothing.
+      6. **Rebuild the workstation:** `git clone` the repository, make a **fresh** GitHub key
+         (`ssh-keygen -t ed25519 -a 100 -f ~/.ssh/id_ed25519_github`), paste the public half into GitHub,
+         then delete the old key there. Cheaper and cleaner than restoring a key backup either way.
+         Install Docker only when the next local task needs it — publishing is CI-only now.
+      7. **What the TPM binding costs:** a firmware update or a Secure Boot change invalidates it, and the
+         machine then asks for the passphrase. That passphrase is the only thing between you and an
+         unrecoverable disk, so it lives on paper as well as in your head.
 - [ ] **B4.2 Until then, keep production values off this PC.** Nothing production-class exists yet (no
       real ARROW values, no R2 token), so the interim is free: rehearse with throwaway values, create the
       real ones at VM day, then delete the file once the swarm holds them. A `cryptsetup` file container
