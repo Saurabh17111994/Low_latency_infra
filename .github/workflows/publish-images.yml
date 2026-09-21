@@ -6,10 +6,12 @@
 # personal access token. The runner's built-in GITHUB_TOKEN needs neither, and
 # public packages pull anonymously — so no registry credential exists on any VM.
 #
-# Trigger: manual only for now. A `v*` tag trigger is deliberate later work: a
-# tag-triggered run cannot safely commit the digest fragment to the default
-# branch (the tag may not be on it), and a publish whose digests exist only in a
-# log is not durable. See the plan's dated note on D3.
+# Trigger: a `v*` tag push or a manual dispatch. Either way this job checks out
+# the DEFAULT BRANCH and commits the fragment back to it, because a publish whose
+# digests exist only in a run log is not durable. A tag therefore names what gets
+# published instead of selecting a revision, and publish-tag-guard.sh refuses a
+# tag that does not point at the published tip — otherwise the digests would be
+# labelled with a version they do not describe.
 #
 # No secret is used. Every value below only has to parse: docker-compose.yml
 # refuses to interpolate without six ${VAR:?} values, and a build never pulls
@@ -18,6 +20,8 @@ name: publish-images
 
 on:
   workflow_dispatch:
+  push:
+    tags: ['v*']
 
 permissions:
   contents: write   # commit the digest fragment
@@ -47,6 +51,12 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
+
+      - name: A tag must name the tip that gets published
+        # Only a tag push reaches this step. The checkout above is the default branch, so a tag left
+        # on an older commit would publish — and durably record — digests it does not describe.
+        if: github.event_name == 'push'
+        run: bash code/01_platform/04_scripts/publish-tag-guard.sh "${{ github.ref_name }}"
 
       - name: Free runner disk
         # Two runtime images plus eight service images do not fit the default
