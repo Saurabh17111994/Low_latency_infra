@@ -388,3 +388,28 @@ def test_quoted_comments_and_duplicates_in_the_values_file(tmp_path):
     assert rc == 1, out
     assert "searched=1" in out, "one value, however many names carry it"
     assert "ignored_duplicate=1" in out
+
+def test_a_relative_root_still_classifies_repo_files_as_in_repo(tmp_path):
+    # Reported 2026-09-22, met in the field: with a relative --root every hit was
+    # labelled "outside" — including files inside this repository — because the
+    # classifier compared an absolute REPO_ROOT against relative walked paths.
+    # The label is not cosmetic: in name mode `failed` is derived from it.
+    fragment = ROOT / "code/01_platform/01_docker/images.published.env"
+    digest = next(t.split("@", 1)[1] for t in fragment.read_text().split()
+                  if "@sha256:" in t)
+    values_file = tmp_path / "values.env"
+    values_file.write_text(f"published_digest={digest}\n")
+
+    proc = subprocess.run(
+        [sys.executable, str(SCANNER), "--root", "code/01_platform/01_docker",
+         "--values-file", str(values_file), "--json"],
+        cwd=str(ROOT), capture_output=True, text=True,
+    )
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    data = json.loads(proc.stdout)
+    hits = [h for h in data["hits"] if h["name"] == "published_digest"]
+    assert hits, data["counts"]
+    assert {h["class"] for h in hits} == {"in-repo"}, data["hits"]
+    assert data["counts"]["in_repo"] == len(hits), data["counts"]
+    assert data["counts"]["outside"] == 0, data["counts"]
+    assert not hits[0]["path"].startswith("/"), "the root was relative; the path stays relative"

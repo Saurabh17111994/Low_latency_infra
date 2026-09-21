@@ -310,6 +310,18 @@ def scan_file(path, find):
     return hits, True
 
 
+def hit_class(path):
+    """Which side of this repository a hit sits on.
+
+    Both sides are resolved first, because `--root` may be given as a relative
+    path: comparing an absolute REPO_ROOT against a relative walked path labelled
+    every in-repository hit "outside" (reported 2026-09-22, where a repo-rooted
+    scan of 5,134 files reported all nine hits as outside). In name mode that
+    label also decides `failed`, so it is not a cosmetic field.
+    """
+    return "in-repo" if REPO_ROOT.resolve() in pathlib.Path(path).resolve().parents else "outside"
+
+
 def walk(root, since, names=None, values=None, max_bytes=MAX_BYTES):
     find = (value_matcher(values) if values is not None
             else name_matcher(name_pattern(names)))
@@ -351,7 +363,7 @@ def walk(root, since, names=None, values=None, max_bytes=MAX_BYTES):
                 stats["unreadable"] += 1
                 continue
             for lineno, label, value in hits:
-                cls = "in-repo" if REPO_ROOT in path.parents else "outside"
+                cls = hit_class(path)
                 results.append({
                     "class": cls, "path": str(path), "line": lineno,
                     "name": label, "length": len(value),
