@@ -13,7 +13,7 @@ wrong. Two further requirements are first-class here: the provider threat is met
 than prevention (see the threat model below), and the facility must reach an HA topology without a
 redesign.
 
-**Acceptance criteria** — all eight hold before the first live order:
+**Acceptance criteria** — all nine hold before the first live order:
 
 1. Broker-side limits verified by *attempting* each forbidden action (withdrawal, oversized order, order
    entry from the market-data `app_id`, login from a non-whitelisted address) and seeing it refused.
@@ -26,9 +26,12 @@ redesign.
 8. The HA migration is proven to be a row-count change: the four-row v1 inventory passes
    `placement_check.py` (rc=0, every service has a home, three eligible nodes for every `role == worker`
    service) — measured 2026-09-21, see "The path from 1+1 to HA" below.
+9. The workstation holds no plaintext credential and no production value at rest: no token file, no
+   passphrase-less key, and either an encrypted disk (B4.1) or the paste-and-delete interim (B4.2).
 
-**Non-goals.** A vault/secret-broker on the workstation; LUKS on the VMs; `fail2ban`; authenticated NTP;
-Kubernetes/Ansible/Terraform; v2 (7 drained managers — trigger-gated, not planned here).
+**Non-goals.** A vault/secret-broker on the workstation; LUKS on the *VMs* (the workstation is the
+opposite case — B4.1 encrypts it); `fail2ban`; authenticated NTP; Kubernetes/Ansible/Terraform; v2
+(7 drained managers — trigger-gated, not planned here).
 
 ## Context
 
@@ -121,6 +124,67 @@ while the observability services stay pinned to O1 alone.
    it loses the raft log.
 5. **Growth stays config-only**: rows + `docker swarm join` + labels; no stack redesign, no new images.
 
+## Test design — written before the implementation
+
+Every task names its test **before** the code exists, so implementation has a target. Three rules apply
+to all of them, and they are the rules this repository already uses:
+
+- **Written first, same commit**: a code task lands with its test in the same commit; a docs-only task
+  lands with its check (link, path, name, or set equality) run and recorded.
+- **Mutation discipline**: each test must (a) fail when the mechanism is broken and (b) assert its own
+  precondition — that the fixture was actually applied. A test that still passes with the mechanism
+  removed is a defect, not a pass.
+- **Hermetic**: no network, no real credentials, no wall-clock dependence. Canonical runners:
+  `python3 -m pytest code/01_platform/04_scripts/tests -q -p no:cacheprovider -p no:unittest` and the
+  crate's `cargo test`. Tests are **never counted** as certification.
+
+### Workstation checks (task B4) — documented commands, not new code
+
+If any of these grows into a script, it lands with a change record and its own test.
+
+| ID | Test and pass criterion | Must-fail control | Evidence |
+| --- | --- | --- | --- |
+| T1 | Disk encryption (B4.1): `lsblk -o FSTYPE` shows `crypto_LUKS` on the root device, `/etc/crypttab` binds the TPM device, and the machine reboots without a passphrase prompt | the same checks must report FAIL before the reinstall — proving they discriminate — and a live-USB boot must see only ciphertext | dated output, before and after |
+| T2 | No production value at rest (B4.2): a names-plus-patterns scan over `$HOME` returns zero hits for the production secret names while the container is unmounted | plant a decoy (`ARROW_APP_SECRET=dummy1234567890`) under the scan root; the scan must fail, then the decoy is removed | both runs, paired |
+| T3 | GitHub over SSH (B4.3): `ssh -T git@github.com` prints the account name, `git ls-remote --exit-code` returns 0, `~/.git-credentials` is gone and `credential.helper` is empty | the old path must now be dead: `git ls-remote https://…` must fail **after** the token is revoked | four command outputs |
+| T4 | Key retirement (B4.4/B4.5): `id_rsa*` absent, no `94.237.73.113` in `~/.ssh/config` or `known_hosts`, and a batch-mode SSH to that address fails | run the same assertions against a temp copy of the config with the block re-added; they must fail | grep output, both copies |
+| T5 | VM key (B4.6): `ssh-keygen -y -P ""` **fails** (a passphrase exists), key mode 600, `.pub` mode 644, `IdentitiesOnly yes` present | generate a throwaway passphrase-less key in a temp directory; the same command must succeed, proving the check detects it | two command outputs |
+| T6 | No credentials in new transcripts (B4.7): the value-shaped scan over sessions created after this date returns zero matches | append a dummy `aws_secret_access_key = "dummy1234567890abcdef"` to a copied transcript; the scan must flag it | both runs |
+| T7 | 2FA armed (B4.6): a dated checklist with one row per account (GitHub, CloudPe, Cloudflare, broker) | not machine-checkable — recorded as a dated checklist, never quoted as a test | the checklist itself |
+
+### Code tests
+
+| ID | Test and pass criterion | Must-fail control | Evidence |
+| --- | --- | --- | --- |
+| T8 | Clock parser (C1, hermetic unit): a valid `chronyc tracking` fixture parses to the expected offset; malformed output and a missing program (`rc=127`) both produce the typed fail-closed error | mutate the parser to accept garbage or to default the offset; the test must fail; the test also asserts the fixture was consumed | `cargo test` output |
+| T9 | Clock integration (C1, local): with the host socket mounted the executor reads a non-zero offset; with the socket removed the gate halts and reports the documented reason | the socket removal **is** the negative case; a halt without a stated reason fails | container logs + gate output |
+| T10 | Image identity (C1 republish): the new executor digest differs from the previous one and the deploy env pins the new digest | repin the old digest in a temp copy; the pin check must fail | pin-check output |
+| T11 | Seeder coverage (B6a): the seeded alert set equals the alert-contract set parsed from `10-observability.md`, Security family included; a second run duplicates nothing | drop one alert from the fixture; set equality must fail — the doc is read live, so a doc change breaks the test until the seeder is updated | test output + a local O2 query |
+| T12 | Alert delivery (B6b, local stack): a synthetic alert reaches `alert-store` inside the documented window (`alert-routing-selftest.py` on the local compose) | stop `alert-store`; delivery must retry and surface the failure — a silent drop fails the test | selftest output, both runs |
+
+### Doc-against-deck consistency checks
+
+| ID | Test and pass criterion | Must-fail control | Evidence |
+| --- | --- | --- | --- |
+| T13 | Rotation coverage (B5): the union of secret names demanded by the deck (`secrets:` plus `${VAR:?}`) equals the set named in `04-secrets-rotation.md` and the bootstrap script | add a fake demanded variable to a fixture copy of the deck; the check must fail | check output |
+| T14 | R2 wording (B3a): exactly one claim survives — short-lived credentials in both docs and deck, or the static pair documented as the accepted choice; never a mixture | a fixture copy containing the contradiction must be flagged | check output |
+
+### Suites that can only run on VM day — specified now
+
+| ID | Test and pass criterion | Must-fail control | Evidence |
+| --- | --- | --- | --- |
+| T15 | Broker refusals (B1): each forbidden action is refused with the expected message **and** a small allowed order succeeds as a positive control — without that control a dead API would look like a pass | if the positive control fails, the suite reports INCONCLUSIVE, never PASS | four refusal notes plus the control, dated |
+| T16 | Provider exposure (B2): a scan from a non-whitelisted address finds no service, while `5080` answers only from the workstation address | the workstation scan must succeed on `5080` — that is the positive control | both scan outputs |
+
+### Docs and rehearsals
+
+| ID | Test and pass criterion | Must-fail control | Evidence |
+| --- | --- | --- | --- |
+| T17 | Runbook executability (B7): every fenced shell block passes `bash -n`, every referenced repository path exists, and every command is either resolvable here or explicitly marked VM-side; a fresh reader can name the first three actions | a fixture runbook with a bogus path and a bogus command must fail the check | checker output + the reader's note |
+| T18 | Restore (D1): the restored artefact's checksum matches the source and the restore repeats into a clean scratch directory | flip one byte in a fixture copy; the checksum check must fail | checksums, both runs |
+| T19 | Rollback (D2, local): the previous digest is healthy, then the forward digest is healthy again — asserted with an application-level probe, not just "container running" | one step deliberately uses a wrong digest; the drill must detect it and the documented recovery must work | drill log |
+| T20 | Inventory shape (E, already run): `placement_check.py` exits 0 for both the two-row and the four-row inventories | delete a row or break a label in a fixture copy; the check must exit non-zero | rc values, both inventories |
+
 ## Phase A — prerequisites (tracked elsewhere, not re-planned)
 
 | Item | Tracked in | Gates |
@@ -168,14 +232,58 @@ while the observability services stay pinned to O1 alone.
 - [ ] Record the read/write scope and the rotation date in the rotation log (task B5).
 
 ### Task B4 — Workstation hygiene (the machine every other control trusts)
-**Why:** today the whole facility trusts this PC, which holds every plaintext secret.
-**Files:** `~/.ssh/`, the git-ignored deploy env and `secrets.env` (no file contents committed).
+**Why:** today the whole facility trusts this PC: it holds the deploy env, the SSH keys and every
+rehearsal secret, so a stolen laptop hands all of it over at once.
+**Files:** `~/.ssh/`, `~/.gitconfig`, `~/.p6v/`, `~/.pi/agent/sessions/` — no file contents are committed.
 **Depends on:** none.
 
-- [ ] Dedicated SSH key for the VMs, passphrase-protected, `ForwardAgent no`; the personal key is never on a VM.
-- [ ] Confirm whether the disk (or at least `$HOME`) is encrypted; if not, treat that as the highest-value fix.
-- [ ] Confirm the secret files are outside every cloud-sync/backup folder, and stay `chmod 600`.
-- [ ] 2FA (hardware key where possible) on GitHub, CloudPe, Cloudflare and the broker account.
+**Measured on this workstation, 2026-09-21** — four defects, five things already right:
+
+| Defect | Evidence |
+| --- | --- |
+| Disk is not encrypted | `lsblk`: root is plain `ext4` on a 931 GB NVMe; `0` LUKS devices |
+| The GitHub credential is plaintext | `credential.helper=store`; `~/.git-credentials` present (mode 600, value never read); the remote is `https://…` |
+| `id_rsa` has no passphrase | `ssh-keygen -y -P ""` succeeded; only the legacy host block references it |
+| Legacy provider access | `~/.ssh/config`: `Host 94.237.73.113`, `User root`, `id_rsa` + `id_ed25519` |
+
+Already right, keep them: the screen locks after 5 idle minutes (`lock-delay 0`) · no cloud-sync folder in
+`$HOME` · `~/.p6v/p2/prod.env` is mode 600 · `id_ed25519` is passphrase-protected · no secret is in the
+repository.
+
+**Chosen fixes — native, no new tool, nothing left to maintain afterwards:**
+
+- [ ] **B4.1 Disk encryption: LUKS + TPM auto-unlock at the next OS reinstall.** The tools are already
+      installed (`cryptsetup`, `systemd-cryptenroll`) and the machine has a TPM (`/dev/tpm0`), so the
+      installer's "Encrypt the Ubuntu installation" plus `systemd-cryptenroll --tpm2-device=auto` gives
+      an encrypted disk that still boots without a passphrase: no daily friction, and a removed or resold
+      disk holds only ciphertext. **Schedule it before VM day**, so every production value is created on
+      an encrypted disk. Back up first: `~/.ssh`, `~/.p6v`, the repository, and (optionally)
+      `~/.pi/agent/sessions` — the whole set is a few hundred megabytes. Residual: a thief who also knows
+      the login password.
+- [ ] **B4.2 Until then, keep production values off this PC.** Nothing production-class exists yet (no
+      real ARROW values, no R2 token), so the interim is free: rehearse with throwaway values, create the
+      real ones at VM day, then delete the file once the swarm holds them. A `cryptsetup` file container
+      is the native fallback if a file must exist sooner, but it adds a mount step and still leaves the
+      session transcripts unencrypted — the reinstall is the endpoint, not the container.
+- [ ] **B4.3 Replace the plaintext GitHub credential with SSH.** Measured precondition: **no key on this
+      machine is registered with GitHub** (`ssh -T git@github.com` → `Permission denied (publickey)`).
+      Order: generate a dedicated `id_ed25519_github` (passphrase-protected) → paste its `.pub` into
+      GitHub → prove it (`ssh -T`) → `git remote set-url origin git@github.com:Saurabh17111994/Low_latency_infra.git`
+      → prove a read (`git ls-remote`) → delete `~/.git-credentials` and unset `credential.helper` →
+      revoke the stored token in GitHub. Maintenance afterwards: none.
+- [ ] **B4.4 Retire the unencrypted `id_rsa`.** It is referenced only by the legacy host block, so
+      destroy that server first (B4.5) and then delete `id_rsa` and `id_rsa.pub`. If the host must stay,
+      add a passphrase in place (`ssh-keygen -p -f ~/.ssh/id_rsa`) — same public key, nothing to
+      re-register.
+- [ ] **B4.5 Retire the legacy provider footprint.** Confirm `94.237.73.113` is no longer needed, destroy
+      it at the provider (which also stops it costing anything), secure that account with 2FA, then remove
+      the host block from `~/.ssh/config`, delete the key and clear its `known_hosts` entries.
+- [ ] **B4.6 One dedicated SSH key for the VMs** (passphrase-protected, `ForwardAgent no`), separate from
+      the GitHub key; 2FA on GitHub, CloudPe, Cloudflare and the broker account.
+- [ ] **B4.7 Stop putting real credentials in a conversation.** Nine session transcripts already hold 34
+      value-shaped matches for ARROW/aws/O2 secret patterns (values were only matched, never printed).
+      Nothing production-class exists yet, so nothing needs rotating today — from VM day on, real values
+      are entered from the portal, not typed into a chat.
 
 ### Task B5 — One rotation, executed and dated
 **Why:** rotation is the only answer to a read you cannot detect; a procedure without a date never runs.
@@ -317,6 +425,10 @@ Before the first live order, every row must have its evidence artifact, not an i
 - That a provider read can be detected — it cannot; task B5's rotation is the compensating control.
 - That HA reduces exposure — it increases it: every added manager replicates the secrets. HA buys
   availability, and the containment model (caps, scoping, rotation) is what keeps that trade safe.
+- That a local rehearsal is a production proof: T19 and T20 exercise the mechanism on this workstation;
+  the production run stays part of the go-live gate (Phase F).
+- That TPM unlock resists a thief who also knows the login password, or that T2/T6 find every secret —
+  they match known names and shapes only.
 
 ## Risks
 
@@ -328,6 +440,7 @@ Before the first live order, every row must have its evidence artifact, not an i
 | The workstation is the weakest link | one theft or one browser compromise undoes Tier 1 | B4, and rotate on any suspicion |
 | Alerts armed but unwatched | detection without response | D3's morning checklist |
 | Growing to HA without revisiting the broker IP whitelist | broker login silently fails on the new nodes | B1 records the whitelist scope; E1 checks it before the drill |
+| The reinstall slips past VM day | the deploy env and the ARROW values would then sit in plaintext on this PC | B4.1 before VM day, or B4.2's paste-and-delete interim |
 
 ## What is needed from you
 
@@ -338,8 +451,13 @@ Before the first live order, every row must have its evidence artifact, not an i
 4. The broker whitelist scope decision (all workload IPs vs one stable egress address) — it must be made
    before Phase E, and it is cheaper to decide it now.
 5. A go-ahead per phase — nothing above runs on its own.
+6. Three workstation decisions: when to schedule the LUKS reinstall (before VM day), whether
+   `94.237.73.113` can be destroyed, and the one-time step of adding a new public key to your GitHub
+   account (B4.3).
 
 ## What I would do first
 
-While the purchases are in flight, the two PC-side artefacts are B7 (the incident-response page) and B6's
-alert list — both docs-only, both usable on VM day, neither needs a gate run or a change record.
+Order now, cheapest first: **B4** (three of its fixes take minutes; the reinstall is the only one that
+needs scheduling), then **C1** (the only item with a hard before-deploy deadline), then **B7** and
+**B6's** alert list while the purchases are in flight — docs-only, usable on VM day, no gate run and no
+change record needed.
