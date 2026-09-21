@@ -77,6 +77,31 @@ Original packet bytes, postback payloads, tokens, and credentials are never copi
 
 Test planned rotation, expired credentials, immediate revocation, failed refresh, service restart, overlapping credential validity, compromised credentials, unauthorized gate operations, and recovery after rotation. Prove that rotation cannot automatically enable order placement and that all money-moving audit remains reconstructable.
 
+## Rotation log
+
+The log is the evidence that a rotation happened, and the reminder that the next one is due. It lives
+outside the repository, with the password and recovery material: a log committed to a public repo would
+publish which classes were rotated and when — a map of the credentials worth attacking.
+
+One row per rotation, newest first. `Proof` is the check that showed the new value working; "deployed
+successfully" is not proof, because a deploy that left the old credential alive looks identical from the
+outside. No cadence is fixed yet: the first rotation sets it, and the `Next date` column is what makes it
+enforceable instead of remembered.
+
+```text
+| Date       | Class                 | Secrets replaced                                   | Proof                                                    | Next date  |
+|------------|-----------------------|----------------------------------------------------|----------------------------------------------------------|------------|
+| YYYY-MM-DD | Arrow trading login   | arrow_password, arrow_totp_key                     | broker login works with the new password, fails with the old | YYYY-MM-DD |
+| YYYY-MM-DD | Arrow market data     | arrow_app_secret                                   | ingestion reconnects and its ING-* alerts clear          | YYYY-MM-DD |
+| YYYY-MM-DD | R2 checkpoint/lake    | aws_access_key_id, aws_secret_access_key           | a CHECKPOINT_DIR write and read both succeed             | YYYY-MM-DD |
+| YYYY-MM-DD | OpenObserve           | o2_password, o2_auth_basic                         | dashboard login works, routing selftest passes           | YYYY-MM-DD |
+| YYYY-MM-DD | Internal service auth | execution_bridge_auth_token, gateway_shared_secret | bridge and gateway reconnect, gate resumes cleanly       | YYYY-MM-DD |
+| YYYY-MM-DD | Operator identities   | (broker portal)                                    | login plus 2FA, audit trail present                      | YYYY-MM-DD |
+```
+
+TLS/mTLS material has no row of its own: Docker Swarm manages that PKI, and the only action attached to it
+is keeping `--autolock` on (guide §9 row 3).
+
 ## References
 
 - Security requirements: `../02_requirements/03-non-functional.md` §3.6

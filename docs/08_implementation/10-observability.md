@@ -309,6 +309,31 @@ Storage and durability alerts cover Fluss replica/quorum or leader failure; disk
 
 Security alerts cover credential expiry/revocation/authentication exhaustion; TLS/certificate failure; secret exposure or redaction failure; unauthorized control operation; compromised identity; public exposure; image/SBOM/vulnerability policy failure; and audit-access anomalies. Affected money-moving paths halt until access, evidence, and reconciliation are verified.
 
+**What that coverage is, measured 2026-09-21.** The sentence above states a requirement. The mechanism
+that meets it today is not a runtime alert in any of the eight areas, because no service emits a security
+signal: `o2-provision.py` provisions 47 rules — 20 `SIGNAL-*`, 18 `ING-*`, 9 `INFRA-*` — and no rule in
+either provisioner names or describes a security fact. A rule over a stream nothing writes can never fire,
+and a rule that looks armed is worse than one that is obviously absent, so each area is listed with the
+mechanism that actually holds it:
+
+| Area | Mechanism that holds it today | Where | Runtime alert |
+| --- | --- | --- | --- |
+| Credential expiry, revocation, authentication exhaustion | the rotation log with its dated entries; broker-side day caps and the login IP whitelist; the gate halts on credential uncertainty | `05_deployment/04-secrets-rotation.md`, `05_deployment/PROD_VM_PROVISIONING.md` §9 row 1 | no — nothing emits the fact |
+| TLS/certificate failure | Docker Swarm's own internal PKI, rotated by Docker, unreadable at rest while the swarm is locked | guide §9 row 3 | no — there is no project certificate to watch |
+| Secret exposure or redaction failure | the pre-commit secret scan, the redaction tests, and the workstation scan | `code/01_platform/04_scripts/`, `plans/2026-09-21-post-verification-plan.md` task B4 | build-time, not runtime |
+| Unauthorized control operation | the executor refuses an unauthorized (but properly signed) approve; the operator-identity contract requires MFA and distinct approvals | `02_services/04_executor/src/http.rs`, `04-secrets-rotation.md` §Credential classes | no — the operation is refused, then nothing counts the refusal |
+| Compromised identity | broker limits, login IP whitelist, 2FA, and rotation on suspicion | guide §9 rows 1 and 3 | no |
+| Public exposure | the CloudPe security group on every node, IPv6 off, SSH key-only | guide §9 row 2 and its notes | no — checked at build time, not watched |
+| Image/SBOM/vulnerability policy failure | digest pinning, its test, and the publish pipeline's guard step | `code/01_platform/04_scripts/tests/test_digest_pin.py`, the publish workflow | build-time, not runtime |
+| Audit-access anomalies | the gate audit trail and the reconciliation records | `06_operations/01-runbooks.md` §Gate halt | no |
+
+The first two detectors worth building, once their emitters exist, are authentication exhaustion — the
+source is the component that already rejects the attempt, and it needs only a counter — and unauthorized
+control attempts, where the operation is already refused and only the count is missing. Until then the
+honest statement is: these eight areas are held by caps, locks, rotation and build-time gates, and a read
+detected in them is answered by containment and rotation, never by an alert. The response is in
+`06_operations/01-runbooks.md` §Security incident.
+
 #### Alert thresholds (per [Foundation task 7](./01-foundation.md))
 
 Every threshold below uses a **60-second consecutive breach window** before escalating (provider-side `for 60s`; the JVM-side container-memory gate reads the same bound from `common`):

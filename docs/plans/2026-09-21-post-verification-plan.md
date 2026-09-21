@@ -82,7 +82,7 @@ Phase B implements.
 | Threat | What stops it | Task | Residual risk |
 | --- | --- | --- | --- |
 | Provider reads disk or RAM | Nothing prevents it; caps, scoping, rotation and rebuildability contain it | B1, B3, B5, B7 | They see everything currently live |
-| Provider insider abuses the VM (spam, mining, an attack source) | No public services, custom security group, abuse alerts | B2, B6 | Proving it needs their logs |
+| Provider insider abuses the VM (spam, mining, an attack source) | No public services, the custom security group, key-only SSH, and an outbound-rate view from `node_network_transmit_bytes_total`; abuse *detection* arrives with the B6 emitters | B2, B6 | Proving it needs their logs |
 | Broker credential theft | Withdrawal off, order caps, IP whitelist, market-data `app_id` without order rights | B1, B5 | Capped trading until it is noticed |
 | Account takeover (GitHub / CloudPe / Cloudflare / broker) | 2FA everywhere, no PAT anywhere by design, billing alerts | B2, B4 | Only what 2FA itself fails to cover |
 | Workstation compromise or theft | Encryption, dedicated key, no sync folder, rotate on suspicion | B4, B5 | The PC holds plaintext by design |
@@ -159,7 +159,7 @@ If any of these grows into a script, it lands with a change record and its own t
 | T8 | Clock parser (C1, hermetic unit): a valid `chronyc tracking` fixture parses to the expected offset; malformed output and a missing program (`rc=127`) both produce the typed fail-closed error | mutate the parser to accept garbage or to default the offset; the test must fail; the test also asserts the fixture was consumed | `cargo test` output |
 | T9 | Clock integration (C1, local): with the host socket mounted the executor reads a non-zero offset; with the socket removed the gate halts and reports the documented reason | the socket removal **is** the negative case; a halt without a stated reason fails | container logs + gate output |
 | T10 | Image identity (C1 republish): the new executor digest differs from the previous one and the deploy env pins the new digest | repin the old digest in a temp copy; the pin check must fail | pin-check output |
-| T11 | Seeder coverage (B6a): the seeded alert set equals the alert-contract set parsed from `10-observability.md`, Security family included; a second run duplicates nothing | drop one alert from the fixture; set equality must fail — the doc is read live, so a doc change breaks the test until the seeder is updated | test output + a local O2 query |
+| T11 | Security coverage (B6a, resolved 2026-09-21): `10-observability.md` §Alert catalogue names, per security area, the mechanism that holds it and whether a runtime alert exists; that table must agree with the provisioners — an area claiming a runtime alert with no matching rule fails, and a provisioned security rule with no table row fails | add a `SEC-`-prefixed rule to a fixture copy of the provisioner, and change one table row to claim a runtime alert; the check must flag both | check output |
 | T12 | Alert delivery (B6b, local stack): a synthetic alert reaches `alert-store` inside the documented window (`alert-routing-selftest.py` on the local compose) | stop `alert-store`; delivery must retry and surface the failure — a silent drop fails the test | selftest output, both runs |
 
 ### Doc-against-deck consistency checks
@@ -297,14 +297,26 @@ repository.
 - [ ] Record the date and the next date (quarterly) in the rotation log.
 
 ### Task B6 — Arm the security alerts
-**Why:** the alert catalogue already defines security alerts; nothing is watching until they are wired.
-**Files:** `../08_implementation/10-observability.md` §Alert contract (source of definitions); O2 alert rules.
-**Depends on:** VM day complete (O2 running).
+**Why:** the alert catalogue states a coverage requirement; measured 2026-09-21, none of its eight areas has
+a runtime alert, and the reason sits upstream of O2 — no service emits a security signal. Wiring a rule over
+a stream nothing writes would create an alert that looks armed and can never fire.
+**Measured:** `o2-provision.py` provisions 47 rules (20 `SIGNAL-*`, 18 `ING-*`, 9 `INFRA-*`) and
+`seed_alerts.py` adds the `pos-state-*` corpus; no security rule and no security-shaped description exists in
+either. The Security **dashboards** did ship (2026-08-24, `10-observability.md` line 159) — a dashboard reads
+streams that exist; it does not watch for the absence of a good state.
+**Files:** `../08_implementation/10-observability.md` §Alert catalogue — now maps each area to its mechanism.
+**Depends on:** VM day for anything needing a live O2; an emitter for anything needing a signal.
 
-- [ ] Wire the security-category alerts that have a live source (credential expiry/revocation, secret
-      exposure/redaction, TLS failure, authentication exhaustion).
-- [ ] Prove delivery: force one alert and show it in `alert-store`.
-- [ ] Add the three infrastructure-abuse alerts: unexpected outbound, sustained CPU anomaly, container restart.
+- [x] **Resolved 2026-09-21: no rule is created now, and the document no longer implies one exists.** The
+      eight areas are held by caps, locks, rotation and build-time gates, and the catalogue table says so.
+- [ ] First detector to build **after the first live order**: authentication exhaustion, from the component
+      that already rejects the attempt. Counter first, rule second — never the reverse.
+- [ ] Second: unauthorized control attempts, where the operation is already refused and only the count is missing.
+- [ ] Keep the three infrastructure-abuse alerts (unexpected outbound, sustained CPU anomaly, container
+      restart) on the VM-day checklist. The first two have live sources (`node_network_transmit_bytes_total`,
+      `node_cpu_seconds_total`); confirm a restart source before writing that rule.
+- [ ] Prove delivery once, locally, with a synthetic alert (task B6b), rather than assuming a rule reaches
+      `alert-store` because a dashboard shows it.
 
 ### Task B7 — Incident-response runbook
 **Why:** the day something looks wrong is the wrong day to design the response.
@@ -407,7 +419,7 @@ Before the first live order, every row must have its evidence artifact, not an i
 | --- | --- | --- |
 | 1 | Broker cannot move money or exceed caps | B1 refusal notes, dated |
 | 2 | Market-data `app_id` cannot place orders | B1 refusal note |
-| 3 | Security alerts armed and delivered | B6 forced-alert capture in `alert-store` |
+| 3 | Security coverage is honest and delivery is proven: `10-observability.md` §Alert catalogue names each area's mechanism, and a synthetic alert reaches `alert-store` | B6 (resolved 2026-09-21) + B6b forced-alert capture |
 | 4 | Rotation dated, next date set | rotation log |
 | 5 | Backups restore with a checksum match | D1 record + measured RTO |
 | 6 | Rollback exercised | D2 commands + healthy ends |
@@ -448,14 +460,31 @@ Before the first live order, every row must have its evidence artifact, not an i
 
 1. The five ARROW values, the R2 bucket + scoped token, and the two VM IPs (Phase A).
 2. Broker-portal and CloudPe-panel sessions for B1 and B2.
-3. Four decisions: `EOD_TABLES` production list; R2 short-lived vs rotated static; the chrony socket
-   ownership approach; the rehearsal registry (keep or drop).
+3. Three decisions left: the `EOD_TABLES` production list; the chrony socket ownership approach; and the
+   rehearsal registry (keep or drop). The R2 question is settled — a scoped, rotatable static pair (B3a).
 4. The broker whitelist scope decision (all workload IPs vs one stable egress address) — it must be made
    before Phase E, and it is cheaper to decide it now.
 5. A go-ahead per phase — nothing above runs on its own.
 6. Three workstation decisions: when to schedule the LUKS reinstall (before VM day), whether
    `94.237.73.113` can be destroyed, and the one-time step of adding a new public key to your GitHub
    account (B4.3).
+
+### Two-factor checklist (your actions, in this order)
+
+Every portal that can move money, publish an image, or reach a VM gets a second factor — and each one must
+stay recoverable without the phone that is enrolled, because a lost phone with no recovery codes is an
+outage, not a security win.
+
+| Portal | Enable | Keep, and where | Why it matters here |
+| --- | --- | --- | --- |
+| GitHub | 2FA on the account | recovery codes in your password material, plus one printed copy | it is the identity the publish workflow runs as |
+| CloudPe | 2FA on the panel | recovery codes in the same two places | the panel is the break-glass path into every VM |
+| Cloudflare | 2FA on the account that holds the R2 bucket | recovery codes, and the R2 token's scope written down | R2 holds the checkpoints and the lake |
+| Broker | 2FA or device binding on the trading login; confirm the market-data `app_id` has no order rights | the broker's own recovery procedure, in the same places | this is the account that can move money |
+
+Then: put every recovery-code set into your password material (never a file in the repo), print one copy,
+and store that copy with the reinstall backup (B4.1). None of this needs the VMs to exist, so all four can
+be done this week.
 
 ## What I would do first
 
