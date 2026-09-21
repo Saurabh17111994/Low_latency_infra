@@ -361,3 +361,20 @@ None of these blocks the critical path.
 | 5 | Dev O2 vs rehearsal O2 `:5080` conflict | Small hygiene; it only bites when both stacks are up |
 | 6 | CHG-273 per-node attribution of the file-collector metrics | Must be fixed before any four-VM attribution claim is made |
 | 7 | VM-day verification riders — real `O2_PASSWORD`, in-container `chronyc`, the rebuilt ingestion image's first run | They need a real VM, so they ride stage 4 instead of blocking it |
+
+**Measured (2026-09-21, at `488f774a`) — item 2 above, settled.** The whole-tree sweep
+`python3 -m unittest discover -s code/01_platform/04_scripts/tests -p "test_*.py"` printed
+**`Ran 1809 tests in 361.075s`, `OK (skipped=18)`**, exit 0, zero `FAIL:`/`ERROR:` lines; the
+companion pass `python3 -m pytest code/01_platform/04_scripts/tests -q -p no:cacheprovider -p
+no:unittest` printed **431 passed**. Three conclusions:
+
+- **1797 has no source anywhere.** It appears in no file in this repository and in no saved log —
+  the `logs/` matches are unrelated numbers (an instrument CSV row `17971`, a diskstat counter).
+  It was never reproducible, so it is retired rather than explained.
+- **The count is a measurement, not a constant.** 1783 was the previous measured value, taken
+  before the commits that added tests; 1809 is today's. Record it against the commit it was
+  measured at — the discipline the change records already use — and it never needs "settling"
+  again.
+- **`skipped=` is not comparable across runs on its own.** Skips are optional live gates, so the
+  number tracks which flags were armed in that shell; `test_skip_inventory.py` exists precisely to
+  make the skips explainable rather than mysterious.
