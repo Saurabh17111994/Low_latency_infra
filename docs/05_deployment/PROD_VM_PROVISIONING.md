@@ -373,7 +373,7 @@ result (`09-production-swarm.md`).
 | Gap | What is missing | Blocks |
 | --- | --- | --- |
 | Image publication | `image-publish.sh` (CHG-247, seven images since CHG-256) pushes the project-built images and writes digest-pinned deploy values. Since CHG-274 its reachability probe uses the registry **host**, so an owner-path target such as `ghcr.io/<owner>` is probed correctly — before that fix the probe requested `<owner>/v2/`, answered 404, and stopped the run with "bring it up on VM1 first" for a healthy registry (measured 2026-09-21). Rehearsed against a local `registry:2` under a GHCR-shaped owner path and against a fake registry that answers 401 (the auth-challenge case); `vm-bootstrap.sh --check` no longer fails a host with no `insecure-registries` entry (CHG-274). **Closed 2026-09-21: the publish has now run against real GHCR** — CI run `35587874482` published all seven images (12/12 steps), the digests are committed in `images.published.env`, and every image slot the deploy demands is digest-pinned: measured on the deploy environment the production-shaped local run used, 12/12 demanded values present and 8/8 image refs carrying `@sha256:`. The bare tags left in `.env` are dev-only — no node reads that file, because S4 renders the deploy environment with `--merge-env`. | nothing — no longer blocks S4, S7 or S7b |
-| Executor's live clock source | `ChronycOffsetSource` (CHG-272) reads the host's `chronyc tracking` behind the existing `OffsetSource` trait and fails closed when it cannot — but the executor runs in a **container**, so production needs `chrony` in that image **and** the host's chrony socket reachable from it (and a decision about the socket's ownership, since it is root-owned). Neither can be proved without a VM, so `CLOCK_OFFSET_SOURCE` stays unset (fixed source) and the host clock is gated by `prod_node_check.py` at S3/S7 meanwhile | S7, before the first live order |
+| Executor's live clock source | **CHG-288 (2026-09-21): the node publishes the number; the executor never gets a socket.** `clock_offset_fact.sh` reads field 4 of `chronyc tracking` — the same field `--check` and `prod_node_check.py` read — and `arrow-clock-offset.timer` republishes it every 10 s to `/run/arrow-clock/offset`; the deck mounts that directory read-only and sets `CLOCK_OFFSET_SOURCE=clockfile` with a 30 s age limit. The socket route is refused rather than deferred: `/run/chrony` is `0700 _chrony:_chrony`, and the command socket is unauthenticated — it can move the clock the gate protects. Absent, stale, or unreadable sample → `Unmeasurable` → HALTED | shipped and unit-tested; the VM half (fresh fact, halt on removal and on ageing) is proved at S4/S7 |
 | EOD lake offload | The trigger exists now — the `eod-scheduler` stack service (CHG-269) runs `eod_controller.py` daily — but the lake path itself still needs the R2 bucket and keys, so the service ships with `EOD_OFFLOAD=none` and the manifest lifecycle is proven without offload | S11 |
 
 **Sizing caveat:** the final service-to-node CPU/RAM/IOPS/bandwidth allocation is `EVIDENCE-BLOCKED` until the production performance and one-VM-loss scenarios pass (§4 above). The 250 GB per-node disk figure is a starting allocation, not a proven sizing result.
@@ -529,6 +529,14 @@ sudo apt-get install -y chrony && sudo systemctl enable --now chrony
 timedatectl                            # expect "System clock synchronized: yes"
 chronyc tracking                       # expect a small System time offset
 ```
+
+`vm-bootstrap.sh --apply` also installs `arrow-clock-offset.timer` (CHG-288), which republishes that same
+offset every 10 s to `/run/arrow-clock/offset` — the only clock input the executor container gets. It
+cannot read chronyd's socket (the package owns `/run/chrony` as `0700 _chrony:_chrony`, and the socket can
+move the clock), so the node publishes a read-only *number* instead. `--check` fails when that file is
+missing or older than 30 s — the sample's age is the whole test, so an active timer whose last run failed is
+caught too. `--apply` publishes once immediately, best effort: on a fresh node chronyd may still be starting,
+and the timer retries every 10 s.
 
 **3. Sysctls — the recorded production list (CHG-272).** Four rules, each naming the failure it
 prevents. They are *comparisons*, not equalities: a host already tuned beyond a floor is ready, and

@@ -42,6 +42,19 @@ SYSCTL_RULES=(
 )
 SYSCTL_CONF="$ROOT/etc/sysctl.d/99-arrow-infra.conf"
 SYSCTL_HEADER="# arrow-infra production sysctls — runbook §6.1 (CHG-272). Do not hand-edit: vm-bootstrap.sh --apply rewrites this file."
+
+# The clock fact the executor's drift gate reads (CHG-288). The producer is a repo script, so the
+# number it publishes is reviewable and testable; the timer only decides when it runs.
+CLOCK_FACT_SRC="$REPO_DIR/code/01_platform/04_scripts/clock_offset_fact.sh"
+CLOCK_FACT_BIN="$ROOT/usr/local/bin/arrow-clock-offset"
+CLOCK_FACT_SERVICE="$ROOT/etc/systemd/system/arrow-clock-offset.service"
+CLOCK_FACT_TIMER="$ROOT/etc/systemd/system/arrow-clock-offset.timer"
+CLOCK_FACT_DIR="$ROOT/run/arrow-clock"
+CLOCK_FACT_INTERVAL="${VM_BOOTSTRAP_CLOCK_FACT_INTERVAL:-10s}"
+# The consumer's staleness limit (deck: CLOCK_OFFSET_MAX_AGE_S). Keep the two equal: a limit here
+# looser than the container's means this check passes while the gate is already halted.
+CLOCK_MAX_AGE_S="${VM_BOOTSTRAP_CLOCK_MAX_AGE_S:-30}"
+UNIT_CHANGED=0
 MODE="apply"
 FAILS=0
 
@@ -164,10 +177,88 @@ apply_sysctls() {
     run $SUDO sysctl --system || return 1
 }
 
+# --- CHG-288: publish the clock offset the executor's drift gate reads -------------
+
+# Write a unit file only when its bytes change, so an idempotent re-run does not restart units.
+write_unit() {
+    local target="$1" tmp
+    tmp="$(mktemp)"
+    cat > "$tmp"
+    if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
+        note "unchanged: $target"
+    elif run $SUDO cp "$tmp" "$target" && run $SUDO chmod 0644 "$target"; then
+        UNIT_CHANGED=$((UNIT_CHANGED + 1))
+    else
+        rm -f "$tmp"
+        return 1
+    fi
+    rm -f "$tmp"
+}
+
+# The executor container cannot read chronyd's command socket: the package makes /run/chrony
+# 0700 _chrony:_chrony, and the socket is unauthenticated — it can move the clock the gate is
+# protecting. So the node publishes the same number to a world-readable file, and the deck mounts
+# that directory read-only.
+apply_clock_fact() {
+    if [ ! -f "$CLOCK_FACT_SRC" ]; then
+        bad "missing $CLOCK_FACT_SRC — the clock fact cannot be installed"
+        return 1
+    fi
+    # `cp`+`chmod` rather than `install -m`: the same result, and it needs no tool the bootstrap's test
+    # harness stubs out (test_12 runs this function against fakes and asserts the file that appears).
+    run $SUDO mkdir -p "$(dirname "$CLOCK_FACT_BIN")" "$CLOCK_FACT_DIR" "$(dirname "$CLOCK_FACT_SERVICE")" || return 1
+    run $SUDO cp "$CLOCK_FACT_SRC" "$CLOCK_FACT_BIN" && run $SUDO chmod 0755 "$CLOCK_FACT_BIN" || return 1
+    write_unit "$CLOCK_FACT_SERVICE" <<EOF || return 1
+[Unit]
+Description=arrow-infra: publish the host clock offset for the executor drift gate (CHG-288)
+After=chrony.service
+
+[Service]
+Type=oneshot
+# Reads chronyd's command socket, which only root and _chrony may use. The published file is 0644:
+# the executor container (user nobody) gets the number, never the control channel.
+User=root
+Environment=CLOCK_OFFSET_DIR=$CLOCK_FACT_DIR
+ExecStart=$CLOCK_FACT_BIN
+EOF
+    write_unit "$CLOCK_FACT_TIMER" <<EOF || return 1
+[Unit]
+Description=arrow-infra: refresh the clock offset every $CLOCK_FACT_INTERVAL
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=$CLOCK_FACT_INTERVAL
+AccuracySec=1s
+Unit=arrow-clock-offset.service
+
+[Install]
+WantedBy=timers.target
+EOF
+    if [ "${UNIT_CHANGED:-0}" -gt 0 ]; then
+        run $SUDO systemctl daemon-reload || return 1
+    fi
+    # Enable only what is not already running; `is-active` and not `is-enabled`, because a timer that is
+    # enabled but stopped still needs `enable --now` to start it.
+    if $SUDO systemctl is-active --quiet arrow-clock-offset.timer 2>/dev/null; then
+        note "arrow-clock-offset.timer is already running"
+    else
+        run $SUDO systemctl enable --now arrow-clock-offset.timer || return 1
+    fi
+    # Publish once now, but do not fail the apply if it does not land: on a fresh node chronyd may still
+    # be starting and unable to answer, and the timer retries every $CLOCK_FACT_INTERVAL. The gate is
+    # `--check`, which fails on a missing or stale sample — apply's job is to have made it possible.
+    if $SUDO env CLOCK_OFFSET_DIR="$CLOCK_FACT_DIR" "$CLOCK_FACT_BIN" 2>&1 | sed 's/^/  /'; then
+        info "clock fact published to $CLOCK_FACT_DIR/offset, refreshed every $CLOCK_FACT_INTERVAL (stale after ${CLOCK_MAX_AGE_S}s)"
+    else
+        info "the first clock sample is not published yet (chronyc did not answer — chronyd may still be starting); the timer retries every $CLOCK_FACT_INTERVAL and 'vm-bootstrap.sh --check' keeps failing until a sample lands"
+    fi
+}
+
 do_apply() {
     apply_repo || return 1
     apply_docker || return 1
     apply_clock || return 1
+    apply_clock_fact || return 1
     apply_sysctls || return 1
     echo
     info "next: re-run this script with --check, then do S5 (docker swarm join) with a token from VM1"
@@ -207,6 +298,29 @@ check_clock() {
         bad "clock offset ${offset}s is beyond the ${MAX_OFFSET}s limit (TOTP halts the platform on drift)"
     else
         ok "clock offset ${offset}s is within ${MAX_OFFSET}s"
+    fi
+
+    # The executor's drift gate reads a published file (CHG-288): a missing or stale sample means
+    # the gate is HALTED — correct behaviour, but not "ready for S5".
+    local fact="$CLOCK_FACT_DIR/offset" fact_ms fact_at now age
+    if [ ! -f "$fact" ]; then
+        bad "$fact is missing — the executor's drift gate halts without a fresh sample"
+        return
+    fi
+    fact_ms=$(awk -F= '$1=="offset_ms"{print $2}' "$fact")
+    fact_at=$(awk -F= '$1=="measured_epoch_s"{print $2}' "$fact")
+    if [ -z "$fact_ms" ] || [ -z "$fact_at" ]; then
+        bad "$fact has no offset_ms/measured_epoch_s — the gate would read it as unmeasurable"
+        return
+    fi
+    now=$(date -u +%s)
+    age=$((now - fact_at))
+    if [ "$age" -gt "$CLOCK_MAX_AGE_S" ] || [ "$age" -lt "$((0 - CLOCK_MAX_AGE_S))" ]; then
+        bad "$fact is ${age}s old (limit ${CLOCK_MAX_AGE_S}s) — the timer stopped publishing; the gate halts"
+    else
+        # The sample's age is the whole truth: an active timer whose last run failed leaves the file
+        # stale all the same. Deliberately no `systemctl` here — `--check` only reads (test_12 asserts).
+        ok "clock fact is fresh (${age}s old, offset ${fact_ms} ms) — the executor's drift gate can measure"
     fi
 }
 

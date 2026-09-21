@@ -157,7 +157,7 @@ If any of these grows into a script, it lands with a change record and its own t
 | ID | Test and pass criterion | Must-fail control | Evidence |
 | --- | --- | --- | --- |
 | T8 | Clock parser (C1, hermetic unit): a valid `chronyc tracking` fixture parses to the expected offset; malformed output and a missing program (`rc=127`) both produce the typed fail-closed error | mutate the parser to accept garbage or to default the offset; the test must fail; the test also asserts the fixture was consumed | `cargo test` output |
-| T9 | Clock integration (C1, local): with the host socket mounted the executor reads a non-zero offset; with the socket removed the gate halts and reports the documented reason | the socket removal **is** the negative case; a halt without a stated reason fails | container logs + gate output |
+| T9 | Clock integration (C1, restated 2026-09-21): with a fresh fact file present the executor reads its value and sign; with the file removed, and separately with it aged past 30 s, the gate halts and the log names the source (`node-published clock fact`). Unit half done locally (three Rust cases + 13 producer cases); the VM half runs at S4/S7 | the removal and the ageing **are** the negative cases; a halt without a stated reason fails, and a pass with the file absent fails harder | `cargo test` output + `vm-bootstrap.sh --check` on the VM |
 | T10 | Image identity (C1 republish): the new executor digest differs from the previous one and the deploy env pins the new digest | repin the old digest in a temp copy; the pin check must fail | pin-check output |
 | T11 | Security coverage (B6a, resolved 2026-09-21): `10-observability.md` §Alert catalogue names, per security area, the mechanism that holds it and whether a runtime alert exists; that table must agree with the provisioners — an area claiming a runtime alert with no matching rule fails, and a provisioned security rule with no table row fails | add a `SEC-`-prefixed rule to a fixture copy of the provisioner, and change one table row to claim a runtime alert; the check must flag both | check output |
 | T12 | Alert delivery (B6b, local stack): a synthetic alert reaches `alert-store` inside the documented window (`alert-routing-selftest.py` on the local compose) | stop `alert-store`; delivery must retry and surface the failure — a silent drop fails the test | selftest output, both runs |
@@ -332,17 +332,35 @@ streams that exist; it does not watch for the absence of a good state.
 ## Phase C — deferred engineering (each needs a change record)
 
 ### Task C1 — Executor clock source (unblocks the first live order)
-**Why:** the guide's §6.1 row 2 records this as blocking the first live order; today it ships fail-closed.
-**Files:** `code/02_services/04_executor/Dockerfile` (runtime stage), `code/01_platform/01_docker/docker-stack.yml`
-(executor service: chrony socket bind-mount + `CLOCK_OFFSET_SOURCE`), the deploy env, executor tests.
-**Depends on:** VM day complete (the host's socket mode/ownership is the fact that only exists there).
+**Why:** the guide's §6.1 row 2 records this as blocking the first live order. Measured 2026-09-21: it was
+worse than "ships fail-closed" — the deck's `nautilus` service carried **no** `CLOCK_OFFSET_SOURCE`, so
+production would have run the default fixed-zero source and the drift gate could never have fired.
+**Mechanism changed (measured, CHG-288).** The socket bind-mount cannot work and must not: the Debian
+package owns `/run/chrony` as `0700 _chrony:_chrony`, and the command socket is unauthenticated — whoever
+can read it can also move the clock, so mounting it would hand clock control to the container the gate is
+protecting. The node publishes the number instead: `clock_offset_fact.sh` reads field 4 of
+`chronyc tracking` (the same field `vm-bootstrap.sh --check` and `prod_node_check.py` read), a 10 s systemd
+timer republishes it to `/run/arrow-clock/offset`, and the deck mounts that **directory** read-only — a
+file mount pins the inode, so a replaced sample would never be seen.
+**Files:** `04_scripts/clock_offset_fact.sh` + its test, `vm-bootstrap.sh`, `docker-stack.yml`,
+`src/clockwatch.rs`, `src/main.rs`, CHG-288. The runtime image is unchanged: no `chrony` package, no socket.
+**Depends on:** VM day only for the VM half of the proof.
 
-- [ ] Prove the mechanism locally first: a `chronyd` container plus the pinned executor image, with
-      `chronyc tracking` parsed through the existing `ChronycOffsetSource`.
-- [ ] Add the package + mount + env value; keep the fail-closed default for a missing socket.
-- [ ] Change record + tests; republish through CI (`image-publish.sh --merge-env`) and update the digest.
-- [ ] On the VM: `chronyc tracking` inside the container returns a non-empty offset, and the gate halts
-      when the socket is removed (the negative case is the one that must be proven).
+- [x] Local mechanism proof: 13 hermetic producer cases (value, sign, rounding at ±0.0005 s, five refusal
+      shapes, previous sample preserved on failure, Docker's leftover directory), three consumer cases (fresh
+      sample read, absent file halts, stale sample halts, drift still halts through the same gate), and four
+      bootstrap cases (missing sample names the file, aged sample names the age, `--apply` installs the
+      publisher and its timer and publishes a sample whose sign survives, a second `--apply` leaves the units
+      alone). 41 cases in one run. Must-fail controls: removing the producer's numeric validation fails
+      exactly 2 cases; making the staleness test never fire fails exactly the aged-sample case.
+- [x] Publish the number without publishing control: read-only directory mount, no socket, no package in the
+      runtime image, `--check` fails on a missing or stale sample, and the first sample is best effort
+      (a fresh node's chronyd may still be starting; the timer retries and `--check` stays red until it lands).
+- [ ] Republish through CI (`image-publish.sh --merge-env`) and update `NAUTILUS_IMAGE` — the binary changed,
+      so today's digest is stale (T10). **Must land before the first deploy.**
+- [ ] On the VM: `vm-bootstrap.sh --check` reports a fresh fact, the executor logs
+      `source = node-published clock fact`, and the gate halts when the file is removed and when it is aged
+      past 30 s (the negative cases are the ones that must be proven).
 
 ### Task C2 — EOD lake offload
 **Why:** `eod_controller.py` has no offload target today — the service ships `EOD_OFFLOAD=none`, so the
@@ -423,7 +441,7 @@ Before the first live order, every row must have its evidence artifact, not an i
 | 4 | Rotation dated, next date set | rotation log |
 | 5 | Backups restore with a checksum match | D1 record + measured RTO |
 | 6 | Rollback exercised | D2 commands + healthy ends |
-| 7 | Clock source live (`CLOCK_OFFSET_SOURCE=chronyc`) | C1 VM proof + negative case |
+| 7 | Clock source live (`CLOCK_OFFSET_SOURCE=clockfile`, fresh fact within 30 s) | C1: local unit proof done, VM proof + both negative cases |
 | 8 | Incident runbook executable | B7, dry-read by a fresh reader |
 | 9 | One-VM-loss drill on the real quorum | E3 RPO/RTO |
 | 10 | EOD verified on the deployment | guide S11 evidence |

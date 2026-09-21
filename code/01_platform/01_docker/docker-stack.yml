@@ -1012,6 +1012,18 @@ services:
       # false) so no command ever flows meanwhile.
       GATEWAY_ENDPOINT: http://execution-gateway:9180
       GATEWAY_PROTOCOL_VERSION: execution-gateway.v2
+      # CHG-288: the drift gate's offset comes from the file the node publishes
+      # (clock_offset_fact.sh, run every 10 s by arrow-clock-offset.timer), never from chronyd's
+      # command socket: the package owns /run/chrony as 0700 _chrony:_chrony, and the socket is
+      # unauthenticated — whoever can read it can also move the very clock this gate protects.
+      # The *directory* is mounted, so the reader resolves the name at open time and sees each new
+      # sample (a file mount would pin the inode and keep the first sample forever).
+      # Absent, stale, or unreadable sample -> Unmeasurable -> gate HALTED.
+      CLOCK_OFFSET_SOURCE: clockfile
+      CLOCK_OFFSET_FILE: /run/arrow-clock/offset
+      CLOCK_OFFSET_MAX_AGE_S: "30"
+    volumes:
+      - /run/arrow-clock:/run/arrow-clock:ro
 
   # ---- Observability (VM4 / O1: outside Swarm, not a scheduling dependency) -
   # In production O1 is a dedicated host (not part of the manager quorum). If O1

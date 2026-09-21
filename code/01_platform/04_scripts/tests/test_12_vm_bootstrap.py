@@ -12,11 +12,17 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SCRIPT = REPO_ROOT / "code/01_platform/04_scripts/vm-bootstrap.sh"
-CORE_TOOLS = ["awk", "grep", "sed", "stat", "id", "tr", "cat", "python3", "ls", "mkdir", "mv", "cmp"]
+PRODUCER = REPO_ROOT / "code/01_platform/04_scripts/clock_offset_fact.sh"
+# `bash`/`cp`/`chmod`/`date`/`env`/`mktemp`/`rm`/`dirname` joined this list with CHG-288: the bootstrap
+# now installs a producer script and runs it, and that script's `#!/usr/bin/env bash` has to resolve —
+# on a node it does. The fakes stay fakes: an absent fake is still an absent tool.
+CORE_TOOLS = ["awk", "grep", "sed", "stat", "id", "tr", "cat", "python3", "ls", "mkdir", "mv", "cmp",
+              "cp", "chmod", "date", "env", "mktemp", "rm", "dirname", "bash"]
 # The interpreter is launched by absolute path: the child PATH contains only fakes, so that an
 # absent fake means an absent tool and never accidentally reaches the real one.
 BASH = shutil.which("bash") or "/bin/bash"
@@ -58,6 +64,9 @@ def make_node(
     package_tools: bool = True,
     sysctls: dict[str, str] | None = None,
     sysctl: bool = True,
+    clock_fact: bool = True,
+    fact_age_s: int = 0,
+    fact_ms: str = "0",
 ):
     tmp.mkdir(parents=True, exist_ok=True)
     bin_dir, root, home = tmp / "bin", tmp / "root", tmp / "home"
@@ -66,7 +75,13 @@ def make_node(
     log = tmp / "commands.log"
     log.write_text("")
 
-    _fake(bin_dir, "git", 'echo "deadbee 2026-09-20 10:00:00 +0000"')
+    # `clone` has to produce a checkout, because the bootstrap installs a script out of the repository:
+    # a stub that only prints a revision would turn a real failure into a passing test (CHG-288).
+    _fake(bin_dir, "git", 'echo "deadbee 2026-09-20 10:00:00 +0000"\n'
+                         'case "$1" in clone)\n'
+                         '    mkdir -p "$3/.git" "$3/code/01_platform/04_scripts"\n'
+                         f'    cp "{PRODUCER}" "$3/code/01_platform/04_scripts/" ;;\n'
+                         'esac')
     if docker is not None:
         _fake(bin_dir, "docker", f'echo "{docker}"' if docker_works else "exit 1")
     if chronyc:
@@ -96,6 +111,16 @@ def make_node(
     repo_dir = tmp / "repo"
     if repo:
         (repo_dir / ".git").mkdir(parents=True)
+        (repo_dir / "code" / "01_platform" / "04_scripts").mkdir(parents=True)
+        shutil.copy2(PRODUCER, repo_dir / "code" / "01_platform" / "04_scripts" / PRODUCER.name)
+
+    if clock_fact:
+        # What a bootstrapped node has: the sample the executor's drift gate reads (CHG-288).
+        fact_dir = root / "run" / "arrow-clock"
+        fact_dir.mkdir(parents=True)
+        (fact_dir / "offset").write_text(f"offset_ms={fact_ms}\n"
+                                         f"measured_epoch_s={int(time.time()) - fact_age_s}\n"
+                                         "source=chronyc-tracking-field4\n")
 
     if syslog:
         path = root / "var" / "log" / "syslog"
@@ -225,6 +250,27 @@ def test_a_missing_syslog_is_a_failure():
     with tempfile.TemporaryDirectory() as t:
         node = make_node(Path(t), syslog=False, daemon={"insecure-registries": ["r:5000"]})
         assert "var/log/syslog is missing" in run(node, "--check").stdout
+
+
+def test_a_missing_clock_fact_is_a_failure_that_names_it():
+    """CHG-288: the node publishes the executor's clock sample. Without it the gate is halted — correct,
+    but the node is not ready, and an operator has to be told which file is missing."""
+    with tempfile.TemporaryDirectory() as t:
+        node = make_node(Path(t), clock_fact=False, daemon={"insecure-registries": ["r:5000"]})
+        r = run(node, "--check")
+        assert r.returncode == 1, r.stdout
+        assert "arrow-clock/offset is missing" in r.stdout
+        assert "drift gate halts" in r.stdout
+
+
+def test_a_stale_clock_fact_is_a_failure_naming_the_age():
+    """An aged sample is the same halt as no sample, and the report must not confuse the two: "31s old"
+    says the timer stopped, not that the clock is wrong."""
+    with tempfile.TemporaryDirectory() as t:
+        node = make_node(Path(t), fact_age_s=31, daemon={"insecure-registries": ["r:5000"]})
+        r = run(node, "--check")
+        assert r.returncode == 1, r.stdout
+        assert "old (limit 30s)" in r.stdout and "the gate halts" in r.stdout
 
 
 def test_a_missing_repository_clone_is_a_failure():
@@ -375,3 +421,42 @@ def test_the_script_and_the_runbook_list_the_same_sysctls():
     section = runbook.split("**3. Sysctls")[1].split("**4.")[0]
     in_runbook = set(re.findall(r"^\| `([a-z0-9_.]+)` \|", section, re.M))
     assert in_script == in_runbook, (in_script, in_runbook)
+
+
+def test_apply_installs_the_clock_producer_and_publishes_one_sample():
+    """CHG-288: apply installs the producer and its 10 s timer, then publishes a sample immediately — a
+    check that runs before the first tick must not report a false halt. The producer really runs here: the
+    sandbox has no chronyd, only a stub `chronyc tracking`."""
+    with tempfile.TemporaryDirectory() as t:
+        node = make_node(Path(t), offset="-1.5", clock_fact=False,
+                         daemon={"insecure-registries": ["r:5000"]})
+        r = run(node, "--apply")
+        assert r.returncode == 0, r.stdout + r.stderr
+        installed = node["root"] / "usr" / "local" / "bin" / "arrow-clock-offset"
+        assert installed.exists(), commands(node)
+        assert (installed.stat().st_mode & 0o777) == 0o755
+        assert installed.read_bytes() == PRODUCER.read_bytes()
+        timer = node["root"] / "etc" / "systemd" / "system" / "arrow-clock-offset.timer"
+        assert "OnUnitActiveSec=10s" in timer.read_text()
+        assert (timer.stat().st_mode & 0o777) == 0o644
+        assert "arrow-clock-offset.timer" in " | ".join(commands(node))
+        fact = node["root"] / "run" / "arrow-clock" / "offset"
+        body = fact.read_text()
+        # The stub said -1.5 s, so the published sample must say -1500 ms: sign and scale survive.
+        assert "offset_ms=-1500" in body, body
+        assert "source=chronyc-tracking-field4" in body
+        checked = run(node, "--check").stdout
+        assert "clock fact is fresh" in checked
+        assert "clock offset -1.5s is beyond the 1.0s limit" in checked
+
+
+def test_a_second_apply_leaves_the_clock_units_alone():
+    """Idempotency for the new artifact: identical bytes are not rewritten and nothing is enabled twice."""
+    with tempfile.TemporaryDirectory() as t:
+        node = make_node(Path(t), daemon={"insecure-registries": ["r:5000"]})
+        assert run(node, "--apply").returncode == 0
+        first = commands(node)
+        second = run(node, "--apply")
+        assert second.returncode == 0, second.stdout + second.stderr
+        assert "unchanged: " in second.stdout and "arrow-clock-offset.timer" in second.stdout
+        assert [c for c in commands(node)[len(first):] if "enable" in c] == []

@@ -16,8 +16,17 @@
 //! `CLOCK_OFFSET_SOURCE=chronyc`; the default stays the fixed source so a dev box without a
 //! disciplined clock keeps working, and a *selected but unreadable* chrony fails closed
 //! (`Unmeasurable` -> halt) rather than silently reporting zero (CHG-272).
+//!
+//! The container cannot run `chronyc` against the host's socket: the Debian package owns
+//! `/run/chrony` as `0700 _chrony:_chrony` (measured 2026-09-21 — a `nobody` process is denied even
+//! with the socket's group added), and the socket is unauthenticated, so whoever can read it can
+//! also move the clock the gate is protecting. Production therefore uses
+//! [`ClockFileOffsetSource`]: the node publishes the same number to a file (CHG-288), the deck
+//! mounts that directory read-only, and `CLOCK_OFFSET_SOURCE=clockfile` selects it.
 
 use anyhow::Result;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::gate::Gate;
 
@@ -95,6 +104,91 @@ impl OffsetSource for ChronycOffsetSource {
             anyhow::anyhow!(
                 "no readable 'System time' offset in `{} tracking` output",
                 self.program
+            )
+        })
+    }
+}
+
+/// Production offset source: the offset the node publishes, read from a file (CHG-288).
+///
+/// The producer is `04_scripts/clock_offset_fact.sh`, run every 10 s by
+/// `arrow-clock-offset.timer`: it reads field 4 of `chronyc tracking`'s `System time` line — the
+/// same field `vm-bootstrap.sh --check` and `prod_node_check.py` read — and publishes
+/// `offset_ms`, `measured_epoch_s` and the source line. The deck mounts the *directory* read-only
+/// (a file bind-mount would pin the inode, so the reader would keep seeing the first sample).
+///
+/// Every failure is an `Err`, so the monitor classifies it `Unmeasurable` and halts: an absent
+/// file, a line that will not parse, and a sample older than `max_age_s`. A stale sample describes
+/// a clock nobody is watching, and that is indistinguishable from a clock nobody is watching
+/// correctly. Silence is never read as a disciplined clock.
+#[derive(Debug, Clone)]
+pub struct ClockFileOffsetSource {
+    path: PathBuf,
+    max_age_s: i64,
+}
+
+impl ClockFileOffsetSource {
+    /// Where `arrow-clock-offset.timer` publishes on every node.
+    pub const DEFAULT_PATH: &'static str = "/run/arrow-clock/offset";
+
+    /// Three producer intervals: a sample survives one missed timer tick, not ten.
+    pub const DEFAULT_MAX_AGE_S: i64 = 30;
+
+    pub fn new(path: impl Into<PathBuf>, max_age_s: i64) -> Self {
+        Self {
+            path: path.into(),
+            max_age_s,
+        }
+    }
+
+    /// From `CLOCK_OFFSET_FILE` / `CLOCK_OFFSET_MAX_AGE_S`, with the documented defaults.
+    pub fn from_env() -> Self {
+        let path =
+            std::env::var("CLOCK_OFFSET_FILE").unwrap_or_else(|_| Self::DEFAULT_PATH.to_string());
+        let max_age_s = std::env::var("CLOCK_OFFSET_MAX_AGE_S")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(Self::DEFAULT_MAX_AGE_S);
+        Self::new(path, max_age_s)
+    }
+
+    /// Pure form: parse the published fact and judge its age against `now_epoch_s`.
+    ///
+    /// A small negative age is an NTP step-back across a sample (`now` earlier than the sample by
+    /// less than the limit). A large one is not rounding: it means the two timestamps disagree
+    /// about the time, which is exactly what this gate exists to notice.
+    fn parse_fact(text: &str, now_epoch_s: i64, max_age_s: i64) -> Option<i64> {
+        let mut offset_ms = None;
+        let mut measured_at = None;
+        for line in text.lines() {
+            match line.split_once('=') {
+                Some(("offset_ms", value)) => offset_ms = value.trim().parse::<i64>().ok(),
+                Some(("measured_epoch_s", value)) => measured_at = value.trim().parse::<i64>().ok(),
+                _ => {}
+            }
+        }
+        let age_s = now_epoch_s - measured_at?;
+        if age_s > max_age_s || age_s < -max_age_s {
+            return None;
+        }
+        offset_ms
+    }
+}
+
+impl OffsetSource for ClockFileOffsetSource {
+    fn sample_offset_ms(&mut self) -> Result<i64> {
+        let text = std::fs::read_to_string(&self.path)
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", self.path.display()))?;
+        let now_epoch_s = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| anyhow::anyhow!("host clock is before the epoch: {e}"))?
+            .as_secs() as i64;
+        Self::parse_fact(&text, now_epoch_s, self.max_age_s).ok_or_else(|| {
+            anyhow::anyhow!(
+                "no fresh offset_ms in {} (max age {} s)",
+                self.path.display(),
+                self.max_age_s
             )
         })
     }
@@ -375,5 +469,133 @@ mod tests {
         let mut m = DriftMonitor::new(200, Box::new(ChronycOffsetSource::with_program(program)));
         assert_eq!(m.enforce(&mut g), DriftStatus::Beyond(1500));
         assert_eq!(g.state(), ExecState::Halted);
+    }
+
+    // ------------------------------------------------ CHG-288: the node-published fact
+
+    /// Write a fact file the way `clock_offset_fact.sh` does.
+    fn fact_file(name: &str, body: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("clockfact-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("offset");
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn now_epoch_s() -> i64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+    }
+
+    #[test]
+    fn parses_the_published_fact_and_rejects_stale_or_broken_ones() {
+        let now = 1_700_000_000;
+        let published =
+            "offset_ms=-12\nmeasured_epoch_s=1700000000\nsource=chronyc-tracking-field4\n";
+        assert_eq!(
+            ClockFileOffsetSource::parse_fact(published, now, 30),
+            Some(-12)
+        );
+
+        // at the limit is still readable; one second past it is not
+        let at_limit = format!("offset_ms=250\nmeasured_epoch_s={}\n", now - 30);
+        assert_eq!(
+            ClockFileOffsetSource::parse_fact(&at_limit, now, 30),
+            Some(250)
+        );
+        let stale = format!("offset_ms=250\nmeasured_epoch_s={}\n", now - 31);
+        assert_eq!(ClockFileOffsetSource::parse_fact(&stale, now, 30), None);
+
+        // a small step-back is a step-back; a large one is two clocks disagreeing
+        let stepped = format!("offset_ms=1\nmeasured_epoch_s={}\n", now + 5);
+        assert_eq!(
+            ClockFileOffsetSource::parse_fact(&stepped, now, 30),
+            Some(1)
+        );
+        let backwards = format!("offset_ms=1\nmeasured_epoch_s={}\n", now + 31);
+        assert_eq!(ClockFileOffsetSource::parse_fact(&backwards, now, 30), None);
+
+        // a zero with no sample time, or an unreadable number, is never "clock is fine"
+        assert_eq!(
+            ClockFileOffsetSource::parse_fact("offset_ms=0\n", now, 30),
+            None
+        );
+        assert_eq!(
+            ClockFileOffsetSource::parse_fact(
+                "offset_ms=soon\nmeasured_epoch_s=1700000000\n",
+                now,
+                30
+            ),
+            None
+        );
+        assert_eq!(
+            ClockFileOffsetSource::parse_fact("measured_epoch_s=1700000000\nsource=x\n", now, 30),
+            None
+        );
+    }
+
+    #[test]
+    fn the_fact_source_reads_a_file_and_fails_closed_without_one() {
+        let fresh = fact_file(
+            "ok",
+            &format!(
+                "offset_ms=-46\nmeasured_epoch_s={}\nsource=chronyc-tracking-field4\n",
+                now_epoch_s()
+            ),
+        );
+        let mut source = ClockFileOffsetSource::new(&fresh, 30);
+        assert_eq!(source.sample_offset_ms().unwrap(), -46);
+
+        // an absent file is "cannot measure" — never a zero, and never a pass
+        let mut missing = ClockFileOffsetSource::new(fresh.with_file_name("absent"), 30);
+        assert!(missing.sample_offset_ms().is_err());
+        let mut gate = Gate::new();
+        let mut monitor = DriftMonitor::new(200, Box::new(missing));
+        assert!(matches!(
+            monitor.enforce(&mut gate),
+            DriftStatus::Unmeasurable(_)
+        ));
+        assert_eq!(
+            gate.state(),
+            ExecState::Halted,
+            "an absent fact must fail closed"
+        );
+
+        // a file nobody refreshed is stale, and staleness is also a halt
+        let stale = fact_file(
+            "stale",
+            &format!("offset_ms=5\nmeasured_epoch_s={}\n", now_epoch_s() - 3600),
+        );
+        let mut stale_source = ClockFileOffsetSource::new(stale, 30);
+        assert!(stale_source.sample_offset_ms().is_err());
+        let mut gate = Gate::new();
+        let mut monitor = DriftMonitor::new(200, Box::new(stale_source));
+        assert!(matches!(
+            monitor.enforce(&mut gate),
+            DriftStatus::Unmeasurable(_)
+        ));
+        assert_eq!(
+            gate.state(),
+            ExecState::Halted,
+            "a stale fact must fail closed"
+        );
+    }
+
+    #[test]
+    fn the_fact_source_drives_the_existing_enforcement() {
+        let drifting = fact_file(
+            "drift",
+            &format!(
+                "offset_ms=1500\nmeasured_epoch_s={}\nsource=chronyc-tracking-field4\n",
+                now_epoch_s()
+            ),
+        );
+        let mut gate = Gate::new();
+        let mut monitor =
+            DriftMonitor::new(200, Box::new(ClockFileOffsetSource::new(drifting, 30)));
+        assert_eq!(monitor.enforce(&mut gate), DriftStatus::Beyond(1500));
+        assert_eq!(gate.state(), ExecState::Halted);
     }
 }
