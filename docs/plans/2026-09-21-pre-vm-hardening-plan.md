@@ -210,6 +210,26 @@ credentials.
 Every code item: a change record, a test that fails before and passes after, and both runners
 collecting it.
 
+> **Findings, 2026-09-21 (4.1, 4.4).** 4.1 is done (CHG-283) and it was not a labelling nicety. CHG-273's
+> comment and `test_16`'s docstring both claimed `tasks.` "returns EVERY task of the service, so this one
+> collector scrapes all four nodes". A **static** target keeps only one of those addresses. Measured with a
+> throwaway Prometheus against a name with 8 addresses: `static_configs` → 1 target labelled with the name,
+> `dns_sd_configs` → 8 targets, one per address. So the collector scraped one arbitrary agent and labelled it
+> `tasks.node-exporter:9100` on every deploy — on two nodes the node that was reached would have been
+> indistinguishable from the node that never was. Locally invisible: one node, one agent, `1/1` either way.
+>
+> Fixed: both infra jobs use `dns_sd_configs`; `infra-zookeeper` stays static (three single-task services);
+> the compose config is untouched (single host). Proof after a fresh create — one query over the same stream
+> shows the changeover, `tasks.node-exporter:9100` (before) and `10.0.1.27:9100` (after), with
+> `node_uname_info.nodename = saurabh-MS-7D90` naming the node itself. **VM-day acceptance: that query returns
+> one address per node.**
+>
+> 4.4 verified: OpenObserve publishes 5080 host-mode and answers HTTP 308. Two traps for VM day: (a) O2 creates
+> its root credential on first boot and the **volume** remembers it — after a redeploy with a different
+> `O2_PASSWORD` the API rejects the new value while the apps keep working through the `o2_auth_basic` secret;
+> (b) O2's `/api/{org}/_search` searches **logs** by default, so metrics need `?type=metrics` or it answers
+> 400 "Search stream not found".
+
 ---
 
 ## 2. What this plan cannot prove — and must never be quoted as proved

@@ -7,10 +7,13 @@ The rule this file guards, and why it is not a style preference:
   service that reads files must run on **every** node (`mode: global`, no
   placement constraint) or the logs written on the other nodes are collected from
   nowhere: an empty directory reads as silence, not as an error.
-* A **scrape** of `tasks.node-exporter` / `tasks.cadvisor` reaches every node's
-  agent, so the service that scrapes must be a **single writer** or each host
-  metric is stored once per node and every `rate()` and `sum()` in a panel is
-  wrong.
+* The scrape jobs `infra-host` / `infra-containers` use `dns_sd_configs`, so
+  `tasks.node-exporter` / `tasks.cadvisor` yields **one target per agent** — every
+  node's agent, from one collector. (A static target for the same name keeps only
+  one address: measured 2026-09-21, CHG-283.) The service that scrapes must
+  therefore be a **single writer**, or every collector scrapes every agent and each
+  host metric is stored once per collector — and every `rate()` and `sum()` in a
+  panel is wrong.
 
 Those two requirements point in opposite directions, which is why the collector
 is two services. These tests fail if either half drifts back toward the other.
@@ -117,6 +120,28 @@ def test_the_otel_collector_service_name_still_exists(stack, compose):
     assert "otel-collector" in compose
     assert "otel-collector-logs" in stack["services"]
     assert "otel-collector-logs" in compose
+
+
+def test_the_infra_scrapes_discover_every_agent_not_just_one(network_cfg):
+    """CHG-283: a static target keeps ONE address of a multi-address name.
+
+    Measured 2026-09-21 on a name with 8 addresses: `static_configs` produced 1
+    target labelled with the name, `dns_sd_configs` produced 8 targets each
+    labelled with its own address. With the static form this singleton scraped one
+    arbitrary node and labelled it identically on every deploy, so the other nodes'
+    metrics were absent and the one that did arrive could not be told from them.
+    """
+    jobs = {j["job_name"]: j for j in network_cfg["receivers"]["prometheus"]["config"]["scrape_configs"]}
+    for job, name, port in (("infra-host", "tasks.node-exporter", 9100),
+                            ("infra-containers", "tasks.cadvisor", 8080)):
+        cfg = jobs[job]
+        assert "static_configs" not in cfg, (
+            f"{job} must not use a static target: for a name with several addresses it "
+            "scrapes one of them and labels it with the name"
+        )
+        assert cfg["dns_sd_configs"] == [{"names": [name], "type": "A", "port": port}], (
+            f"{job} must discover every agent by DNS, one target per address"
+        )
 
 
 def test_the_two_logs_config_variants_stay_in_sync():

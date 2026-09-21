@@ -1026,6 +1026,9 @@ services:
   #   scrape that reaches them lives in the single-replica collector
   #   (`tasks.node-exporter` / `tasks.cadvisor`, CHG-273) — a scraper on every
   #   node would store each host metric once per node.
+  #   CHG-283: those two jobs now use dns_sd_configs, because a static target for a
+  #   multi-address name scrapes one address and labels it with the name — one
+  #   node's numbers, labelled as if they were all of them.
   node-exporter:
     # Host metrics. The three host mounts plus --path.* are what make the numbers
     # belong to the VM: without --path.rootfs the filesystem collectors read the
