@@ -38,6 +38,13 @@ This runbook covers broker/Arrow, Fluss, S3, OpenObserve, TLS, Swarm, and operat
   the same day: compose delivers secrets to the local stack through that file, and `SecretGuard` names it
   as the sanctioned local store, so emptying it early takes the local live path away before its
   replacement exists.
+  **Same day, measured with the O2 values in the values file:** `o2_password` and `o2_auth_basic`
+  are in `secrets.env` (git-ignored, mode 600, never committed) and in three session transcripts —
+  2026-08-23, 2026-08-27 and 2026-09-17, the last two carrying the file's contents as pasted text.
+  No tracked file carries either value; the scan's only other hits were the seven published digests in
+  `images.published.env`, which is that file's purpose. So those two names are exposed locally, not
+  published — and whether the rotation's trigger reaches OpenObserve depends on one fact only the
+  operator has: is the value in `secrets.env` the production OpenObserve password or a local-stack one?
 
 ### Production
 
@@ -128,6 +135,63 @@ enforceable instead of remembered.
 
 TLS/mTLS material has no row of its own: Docker Swarm manages that PKI, and the only action attached to it
 is keeping `--autolock` on (guide §9 row 3).
+
+## What the home-wide scan measured — 2026-09-22
+
+T2's criterion had never been measured over the whole home directory; the figures in
+circulation came from three narrower roots. Measured now in value mode, four values (the two
+secrets, the user id and the app id from `~/.env.arrow`), root `/home/saurabh`: **229 hits in
+51 files** — 2 inside this repository, both in the git-ignored
+`code/01_platform/01_docker/secrets.env`, and 227 outside.
+
+| Location | Hits | What it is |
+| --- | --- | --- |
+| `~/.omp/agent/sessions` | 111 | transcripts of a second agent tool |
+| `~/.pi/agent/sessions` | 74 | transcripts of this tool |
+| `~/.config/manicode` | 20 | transcripts of a third tool |
+| `~/Jupyter_notebook` | 8 | sibling trees: `Arrow_broker/.env`, two older project copies |
+| `~/.commandcode` | 6 | file-history copies |
+| `~/.env.arrow` | 5 | the live local store |
+| `~/.local/share/Trash` | 3 | a deleted session file |
+| `~/.pi-lens` | 2 | a gitleaks cache |
+
+Coverage, so the number is read for what it is: 524,267 files read; `skipped_big: 0` (value
+mode has no size cap); 27,595 skipped by the extension policy; 583 special files; 2,290
+unreadable (0.4%) — that last figure is the honest residual, since a value could sit in one of
+them. No tracked or published file carries a value: the two in-repo hits are in a git-ignored
+file, and the repository's own value scan found only the seven published image digests in
+`images.published.env`, which is that file's purpose.
+
+**It is a floor, not a total.** Value mode searches the values it is given, and this run was
+given four. A fifth string carries the same name and a different value:
+
+| Name | File | Length | Shape |
+| --- | --- | --- | --- |
+| `ARROW_APP_SECRET` | `~/.env.arrow` | 64 | lowercase hex, 16 distinct characters |
+| `ARROW_APP_SECRET` | `code/01_platform/01_docker/secrets.env` | 64 | lowercase hex, 16 distinct characters, no shared prefix with the one above |
+
+Neither string is one repeated character, a word, or a recognised placeholder, so neither can
+be dismissed as a dummy. The disk cannot say whether two applications exist or whether the
+secret was reissued in the portal and only one file was updated. Either way both strings stay
+live until the application is retired, which is why the order of work below retires the
+application instead of rotating the string in place.
+
+### The app id is published, and cannot be recalled
+
+`ARROW_APP_ID` left the tree of this repository on 2026-09-21 (`5f9db548`), but removing a
+string from a tree does not unpublish it. Measured 2026-09-22: it appears twice in the
+published history of that document, and two sibling trees under `Jupyter_notebook` commit it
+in their own documentation — `streaming_project/docs/08_implementation/20-close-execution-service-gaps-plan.md`,
+a worktree of the public `github.com/Saurabh17111994/streaming_project.git`, and
+`streaming_project_p6/docs/08_implementation/05-execution-core.md`. Both trees are outside
+this repository and were not modified. In both, the value stores beside them
+(`Arrow_broker/.env`, `code/01_platform/01_docker/secrets.env`) are untracked, measured with
+`git ls-files`; a value scan of those trees has not been run, so this section does not claim
+they are secret-free.
+
+An identifier is not a secret, and the files that carry it are documentation. The measurement
+adds one thing: a published app id paired with any leaked secret is a working credential pair,
+and only broker-side retirement answers that.
 
 ## References
 
