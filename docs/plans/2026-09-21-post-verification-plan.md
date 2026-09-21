@@ -172,7 +172,7 @@ CHG-289 and `code/01_platform/04_scripts/values_at_rest_scan.py`, with its tests
 
 | ID | Test and pass criterion | Must-fail control | Evidence |
 | --- | --- | --- | --- |
-| T13 | Rotation coverage (B5): the union of secret names demanded by the deck (`secrets:` plus `${VAR:?}`) equals the set named in `04-secrets-rotation.md` and the bootstrap script | add a fake demanded variable to a fixture copy of the deck; the check must fail | check output |
+| T13 | Rotation coverage (B5): the union of secret names demanded by the deck (`secrets:` plus `${VAR:?}`) equals the set named in `04-secrets-rotation.md` and the bootstrap script — **checker built 2026-09-21 as C20 in `docs_audit.py`**, holding the deck's declared `secrets:` against the bootstrap's names in both directions; measured that day, the `${VAR:?}` half is not literally true (16 required variables, 15 of them image tags, paths and identifiers, only `O2_PASSWORD` a secret), so those are counted rather than classified | add a fake demanded variable to a fixture copy of the deck; the check must fail | check output |
 | T14 | R2 wording (B3a, resolved 2026-09-21): the accepted choice — a scoped, rotatable static pair — is stated in `04-secrets-rotation.md`, and no document claims temporary credentials while the deck stores a static pair | reintroduce that claim in a fixture copy; the check must flag it | check output |
 
 ### Suites that can only run on VM day — specified now

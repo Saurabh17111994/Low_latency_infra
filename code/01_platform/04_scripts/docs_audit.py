@@ -73,6 +73,13 @@ Checks:
       claiming a runtime alert names a real rule, and a provisioned `SEC-` rule
       is named by a row — and the section's measured sentence ("provisions 47
       rules — 20 `SIGNAL-*`, …") matches the provisioners it describes.
+  C20 Rotation coverage (plan task T13, runbook B5): the deck's declared
+      `secrets:` block equals the names `secrets-bootstrap.sh --print-names`
+      prints, in both directions, every bootstrap name is named by a row of
+      `04-secrets-rotation.md`, and a required variable that is a secret is
+      declared as one. Required variables that are not secrets (image tags,
+      paths, identifiers) are counted, not judged — the check cannot classify
+      them and does not pretend to.
 """
 
 import ast
@@ -1539,6 +1546,125 @@ def c19_alert_catalogue():
     )
 
 
+# C20 — rotation coverage (plan task T13, runbook B5). Three artifacts answer
+# "are the secrets the deploy demands the secrets the operator is told to
+# rotate?": the deck's secrets: block, secrets-bootstrap.sh --print-names, and
+# the rotation table. Measured 2026-09-21: the first two are the same nine names.
+STACK_DECK = os.path.join(ROOT, "code", "01_platform", "01_docker", "docker-stack.yml")
+ROTATION_DOC = os.path.join(DOCS_DIR, "05_deployment", "04-secrets-rotation.md")
+BOOTSTRAP_SCRIPT = os.path.join(SCRIPTS_DIR, "secrets-bootstrap.sh")
+# `${NAME:?message}` is how the deck demands a variable it cannot invent. The
+# message must not contain a hyphen (docker parses the first one as the error).
+REQUIRED_VAR_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):\?")
+DECLARED_SECRET_RE = re.compile(r"^  ([A-Za-z0-9_]+):")
+
+
+def deck_secret_names(deck_text):
+    """The keys of the deck's top-level `secrets:` block, in file order."""
+    names, inside = [], False
+    for line in deck_text.splitlines():
+        if re.match(r"^secrets:\s*$", line):
+            inside = True
+            continue
+        if not inside:
+            continue
+        if not line.strip():
+            continue
+        if not line.startswith(" "):
+            break  # a new top-level key ends the block
+        match = DECLARED_SECRET_RE.match(line)
+        if match:
+            names.append(match.group(1))
+    return names
+
+
+def deck_required_names(deck_text):
+    """Every distinct `${NAME:?}` the deck demands, sorted."""
+    return sorted(set(REQUIRED_VAR_RE.findall(deck_text)))
+
+
+def demanded_names_not_in_bootstrap(deck_text, bootstrap_names):
+    """Required variables that are not bootstrap secrets. Reported, not failed.
+
+    The deck demands image tags, paths and tables the same way it demands
+    secrets, and deciding which of those "look like" a secret is guesswork, so
+    this count goes into the check's message instead of into its verdict.
+    """
+    canonical = {name.lower() for name in bootstrap_names}
+    return {name for name in deck_required_names(deck_text) if name.lower() not in canonical}
+
+
+def rotation_rows(doc_text):
+    """The table rows of the rotation log — the rows are what T13 asks about."""
+    return [line for line in doc_text.splitlines() if line.lstrip().startswith("|")]
+
+
+def bootstrap_secret_names():
+    """The canonical names, from the script the stack and its parity test read."""
+    try:
+        proc = subprocess.run(
+            ["bash", BOOTSTRAP_SCRIPT, "--print-names"],
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [name for name in proc.stdout.split() if name]
+
+
+def rotation_coverage_problems(deck_text, doc_text, bootstrap_names):
+    """Every way the deck, the bootstrap and the rotation log can disagree."""
+    problems = []
+    if not bootstrap_names:
+        problems.append("the bootstrap script named no secret names at all")
+    declared = deck_secret_names(deck_text)
+    if not declared:
+        problems.append("the deck has no secrets: block — rotation coverage cannot be read")
+    rows = rotation_rows(doc_text)
+    if not rows:
+        problems.append("the rotation log has no table rows — coverage cannot be read")
+
+    canonical = {name.lower() for name in bootstrap_names}
+    lower_declared = {name.lower() for name in declared}
+    for name in sorted(set(bootstrap_names)):
+        if name not in declared:
+            problems.append(f"{name} is a bootstrap secret but the deck does not declare it")
+    for name in sorted(set(declared) - canonical):
+        problems.append(f"{name} is declared in the deck but the bootstrap does not name it")
+    # A secret handed in as a required variable must also be declared as a
+    # secret: the rotation log tells the operator to rotate the declared name.
+    for name in deck_required_names(deck_text):
+        if name.lower() in canonical and name.lower() not in lower_declared:
+            problems.append(
+                f"{name} is required by the deck but not declared in its secrets: block"
+            )
+    for name in sorted(set(bootstrap_names)):
+        if not any(names_rule(row, name) for row in rows):
+            problems.append(f"{name} is never named in a row of the rotation log")
+    return problems
+
+
+def c20_rotation_coverage():
+    deck = safe_read(STACK_DECK)
+    doc = safe_read(ROTATION_DOC)
+    if deck is None or doc is None:
+        return check(
+            "C20 deck and rotation log readable", False,
+            STACK_DECK if deck is None else ROTATION_DOC,
+        )
+    names = bootstrap_secret_names()
+    problems = rotation_coverage_problems(deck, doc, names)
+    declared = len(deck_secret_names(deck))
+    others = len(demanded_names_not_in_bootstrap(deck, names))
+    check(
+        f"C20 {declared} declared secrets match the bootstrap and the rotation log "
+        f"({others} further required variables are not secrets)",
+        not problems,
+        f"{len(problems)} problem(s): " + "; ".join(problems[:6]),
+    )
+
+
 def main():
     c1_manifest()
     c2_ownership_matrix()
@@ -1559,6 +1685,7 @@ def main():
     c17_env_facts_ledger()
     c18_runbook_executability()
     c19_alert_catalogue()
+    c20_rotation_coverage()
     if failures:
         print(f"\ndocs-audit: {len(failures)} check(s) FAILED — fix before proceeding")
         return 1
