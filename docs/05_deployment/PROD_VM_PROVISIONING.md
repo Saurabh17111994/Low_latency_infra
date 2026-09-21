@@ -19,6 +19,7 @@
 **Status:** Operational guide. It records *procedure*, never *readiness*.
 **Authority when documents disagree:** executable implementation and tests → active decisions (`../01_project/04-decisions.md`) → DDLs → build contracts (`../04_contracts/`) → detailed requirements (`../02_requirements/`) → this guide.
 **Status authority:** task/status truth lives in the live-readiness ledger (`../plans/2026-08-25-live-readiness-unified-plan.md`) and the deployment dossier (`../08_implementation/09-production-swarm.md`). This guide repeats no status and must not be used as evidence that a stage passed.
+Dated records this guide does not repeat: `../plans/2026-09-21-pre-vm-hardening-plan.md` (closed) and `../plans/2026-09-21-post-verification-plan.md` (proposed).
 
 > **Read this first.** Stages `S5`–`S10` describe a path this project has **never executed**
 > (`09-production-swarm.md` M3 = `NOT FULLY`; M1 docs and M2 static checks only). Treat them as a

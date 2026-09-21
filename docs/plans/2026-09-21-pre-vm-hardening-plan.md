@@ -1,6 +1,7 @@
 # Pre-VM hardening plan — everything that can be done without a server
 
-**Status:** proposed 2026-09-21. Nothing in this plan has been executed yet.
+**Status:** closed 2026-09-21. Phases 0–4 were executed with per-task evidence recorded inline; what
+stays unproven is listed in §2 and is never quoted as proved.
 
 **Goal:** close every remaining unknown that does *not* need a rented server, so that VM day is
 execution instead of discovery. Nothing here changes production behaviour; the production deploy
