@@ -16,6 +16,39 @@
 - The other nine 2d-TTL tables remain lake-disabled in dev (2026-08-13 note in
   `08_implementation/02-schema-storage.md`); only raw_table_1 is migrated.
 
+## Bucket behaviour: versioning, retention, restore
+
+Proven 2026-09-21 on the local MinIO — 15 checks, all green, evidence in
+`~/.p6v/evidence/b3-minio-20260921/` — because the R2 bucket did not exist yet. This is the
+behaviour the tiering writer relies on when it overwrites an object.
+
+- With versioning on, an overwrite never destroys the previous object: three writes of one
+  key produced three versionIds, and a plain read returned the newest bytes.
+- A delete without a versionId writes a delete marker. The object looks gone (a plain read
+  fails with `NoSuchKey`) while every version is still present.
+- **Restore path 1** — remove the delete marker and the key serves its newest bytes again.
+- **Restore path 2** — copy an older version forward (`CopySource.VersionId`) and the key
+  serves *those* bytes; the restore adds a version (3 → 4) instead of removing one.
+- A lifecycle rule expiring noncurrent versions reads back correctly. The expiry *event*
+  runs on a daily scanner, so a rehearsal proves the rule, not the deletion.
+- The control that makes the above meaningful: the same overwrite on a bucket **without**
+  versioning leaves the first payload unrecoverable. An overwriting writer is only safe
+  where versioning is on.
+
+**R2 differs from that picture, and the difference is the point.** `code/01_platform/04_scripts/audit_r2.py`
+recorded live on 2026-08-14 that R2 does not implement `PutBucketVersioning` and has no
+`ListObjectVersions` or versionId surface — so none of the S3 steps above can be executed
+against R2. What R2 offers instead:
+
+- **Versioning** is a bucket setting enabled through the Cloudflare dashboard / API /
+  Wrangler, then *observed* — not set over S3.
+- **Immutability** comes from *bucket locks*: prefix retention rules (duration / until-date /
+  indefinite) set through the Cloudflare API — `audit_r2.py provision --set-lock`, read back
+  by `audit_r2.py validate`.
+- **Restore** is therefore a Cloudflare-side operation, not an S3 one. The click path is
+  written down at S-day against the real bucket; until that happens, no runbook here may
+  claim an S3 restore works on R2.
+
 ## Daily / routine operations
 
 | Task | Command |

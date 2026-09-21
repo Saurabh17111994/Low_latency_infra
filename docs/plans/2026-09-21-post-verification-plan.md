@@ -233,12 +233,29 @@ commands are in guide §9 "B1 and B2 as paste-ready sheets".
 **Depends on:** R2 purchase (Phase A).
 
 - [ ] Bucket-scoped token only (no account-wide token); note its expiry and scope.
-- [ ] Object versioning + a retention rule on the bucket; verify by deleting a test object and restoring its version.
+- [ ] Object versioning + a retention rule on the bucket; verify by deleting a test object and restoring its
+      version. **Re-worded 2026-09-21 — on R2 that verification is not executable over S3.** `audit_r2.py`
+      measured live on 2026-08-14: R2 does not implement `PutBucketVersioning` and has no
+      `ListObjectVersions`/versionId surface; its WORM-equivalent is *bucket locks* (prefix retention rules
+      through the Cloudflare API). Executable form of this box: (a) versioning enabled in the R2 dashboard and
+      *observed*, (b) bucket-lock retention set via `audit_r2.py provision --set-lock` and read back by
+      `validate`, (c) the restore procedure written as R2 actually offers it, confirmed against the real bucket
+      at S-day — never assumed here.
+  - [x] Local mechanics proof (2026-09-21, local MinIO): three overwrites of one key produced three versionIds
+        and a plain read returned the newest bytes; a delete without a versionId wrote one delete marker and a
+        plain read failed (`NoSuchKey`) while the versions stayed; restore path 1 (remove the marker) served the
+        newest bytes again; restore path 2 (copy the oldest version forward) made the key serve the oldest bytes
+        and grew the version list 3 → 4; a noncurrent-version expiry rule read back as 30 days (the expiry
+        *event* runs on a daily scanner, so it is not observable in a rehearsal — stated as a limit). Must-fail
+        control: the same overwrite on an unversioned bucket leaves the first payload unrecoverable. 15 checks,
+        all green; evidence in `~/.p6v/evidence/b3-minio-20260921/`.
 - [x] **Decided 2026-09-21: a scoped, rotatable static pair is the accepted choice.** Temporary credentials
       need a credential-minting service — a new component to run, watch and itself rotate. Guide §9 row 3 and
       `04-secrets-rotation.md` now state the accepted pair; revisit only if R2's own short-lived tokens ever
       remove the need for that service.
-- [ ] Record the read/write scope and the rotation date in the rotation log (task B5).
+- [ ] Record the read/write scope and the rotation date in the rotation log (task B5). The scope is already
+      stated there (T14/B3a: a scoped, rotatable static pair, bucket-only, no account-wide token); the date
+      stays open until the first rotation, which needs the token — a purchase-day action, not a PC one.
 
 ### Task B4 — Workstation hygiene (the machine every other control trusts)
 **Why:** today the whole facility trusts this PC: it holds the deploy env, the SSH keys and every
