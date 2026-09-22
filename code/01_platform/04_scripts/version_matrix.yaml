@@ -548,3 +548,242 @@ boundaries:
       production audit durability.
     date: 2026-08-19
     status: PINNED_AWAITING_EXECUTION_SERVICE_EVIDENCE
+
+  # =====================================================================
+  # Re-records 2026-09-23 against Fluss 1.0.0 / Flink 2.2.1 (plan Stage 4, T4.1).
+  # The 2026-08-24 rows ABOVE are retained verbatim as the 0.9.1-era history;
+  # the blocks below supersede them for current claims. Every value here was
+  # observed on 2026-09-23 (evidence dirs: logs/soak/t40-scratch-20260923-020742,
+  # logs/soak/monday-gates-20260923-001918, logs/soak/upgrade-completeness-20260923-014843).
+  # =====================================================================
+
+  - compatibility_id: VM-JAVA-001
+    boundary: Java runtime
+    proposed_version: "17.0.19"
+    evidence_source: >-
+      Eclipse Temurin 17.0.19 (Adoptium, May 2026); Flink 2.2 requires Java 17.
+      Re-recorded 2026-09-23 for the Fluss 1.0.0 tree.
+    compatibility_class: COMPATIBLE
+    evidence_owner: Platform
+    evidence_method: >-
+      Capture running JVM version from the pinned base image; assert equals the
+      matrix; rebuild the whole tree from scratch on that JVM and run the suite.
+    source_artifact: >-
+      flink:2.2.1-scala_2.12-java17 (FLINK_IMAGE) resolves to
+      flink@sha256:1934ab4b984d0873ef46825b1140377eed34475904aa077062497712d6e259f8;
+      host java -version = openjdk 17.0.19 2026-04-21
+    fixture: >-
+      Laptop host + flink:2.2.1-scala_2.12-java17 image, 2026-09-23
+    scenario: >-
+      From-scratch clean compile of every module on this JVM (235 source files,
+      javac [debug deprecation release 17]); full Java suites (common 489,
+      ingestion 285, compute 419) plus the Python platform suite from the repo root
+    result: COMPATIBLE (17.0.19+10 exact on host and pinned image)
+    observed_behavior: >-
+      2026-09-23 from-scratch clean compile BUILD SUCCESS, 235 files compiled,
+      zero deprecation warnings, zero JVM-version errors; Flink 2.2.1 with
+      org.apache.fluss:fluss-client:1.0.0 resolves and runs on it. Python suite
+      2373 passed / 14 skipped; two cwd-sensitive tests failed from a non-root
+      cwd and were fixed in 3f9ee224 (script bugs, not test bugs).
+    limitations: >-
+      Flink/Fluss images referenced by tag in .env (digest pinning documented
+      there); docker-compose.yml requires FLINK_IMAGE/FLUSS_IMAGE. The historical
+      row above still names a Fluss 0.9.1 client JVM check - superseded by this block.
+    date: 2026-09-23
+    status: EVIDENCE_RECORDED_LIVE
+
+  - compatibility_id: VM-FLINK-SRV-003
+    boundary: Flink server/image
+    proposed_version: "2.2.1"
+    evidence_source: >-
+      Apache Flink 2.2.1 release (flink.apache.org, May 2026); re-verified
+      2026-09-23 on the Fluss 1.0.0 tree.
+    compatibility_class: COMPATIBLE
+    evidence_owner: Platform
+    evidence_method: >-
+      Pin the Flink image by digest; run the full acceptance gate (state backend,
+      checkpoint/restore, exactly-once) and exercise a live 1.0.0 connector job.
+    source_artifact: >-
+      FLINK_IMAGE=flink:2.2.1-scala_2.12-java17 in code/01_platform/01_docker/docker-compose.yml
+      resolves to flink@sha256:1934ab4b984d0873ef46825b1140377eed34475904aa077062497712d6e259f8;
+      acceptance gate logs/soak/monday-gates-20260923-001918 (19/19 PASS, 26.0 min,
+      tree ad3358760b2e4b5f); scratch cluster REST /overview reported flink-version
+      2.2.1, 1 taskmanager, 16 slots
+    fixture: >-
+      Docker Compose Flink 2.2.1 jobmanager + taskmanager (dev stack) and the
+      fluss10scratch cluster, 2026-09-23
+    scenario: >-
+      Full acceptance gate on this tree (checkpoint/restore + exactly-once +
+      catalog checks) plus a live Fluss-Flink 1.0.0 connector job checkpointing
+      against Fluss 1.0.0 on the scratch cluster
+    result: COMPATIBLE (checkpoint/restore + exactly-once on 2.2.1)
+    observed_behavior: >-
+      2026-09-23 gate run 19/19 PASS including checkpoint/restore and exactly-once;
+      a connector streaming job (insert into a Fluss LOG table) completed
+      checkpoint id 1 (GET /jobs/[jid]/checkpoints: restored 0, total 2,
+      completed 1) with Fluss source/sink checkpoint alignment; job cancelled
+      after evidence capture.
+    limitations: >-
+      Flink image pinned by tag in .env (digest recorded here); single-node
+      fixtures only - multi-node failover remains a topology boundary. One
+      startup checkpoint failure was observed before the completed one.
+    date: 2026-09-23
+    status: EVIDENCE_RECORDED_LIVE
+
+  - compatibility_id: VM-FLUSS-SRV-005
+    boundary: Fluss server
+    proposed_version: "1.0.0"
+    evidence_source: >-
+      Apache Fluss 1.0.0 (github.com/apache/fluss, 2026); re-verified live on
+      apache/fluss:1.0.0 on 2026-09-23 for Stage 4 (T4.1).
+    compatibility_class: COMPATIBLE_WITH_LIMITATION
+    evidence_owner: Platform
+    evidence_method: >-
+      Pin the Fluss server image by digest; bring up coordinator + tablet + ZooKeeper;
+      assert leader election, tablet registration, table service and the datalake
+      credential path; run scope-appropriate table tests.
+    source_artifact: >-
+      apache/fluss:1.0.0@sha256:ff461b45438033da4fd1c2556d3f978f3603bb3632fe075c2bd57388339a58cb
+      (identical to the Stage 1 pin); fluss10scratch compose cluster running
+      fluss-server-1.0.0.jar; coordinator leader elected (Coordinator leader
+      d6c92845, epoch 0) and tablet registered under /tabletservers/ids/ on 9124
+    fixture: Docker Compose Fluss 1.0.0 (ZooKeeper + coordinator + 1 tablet), 2026-09-23
+    scenario: >-
+      Scratch cluster (project fluss10scratch, empty catalog) brought up from the
+      canonical compose file; server readiness asserted from coordinator/tablet
+      logs; tables then created and served through the 1.0.0 Flink connector
+    result: >-
+      COMPATIBLE_WITH_LIMITATION (leader election, tablet registration, table
+      create/serve, static-credential S3 filesystem init all observed)
+    observed_behavior: >-
+      apache/fluss:1.0.0 coordinator elected itself leader and registered the
+      tablet; the tablet log shows "S3FileSystemPlugin - Using provided static
+      credentials", so the datalake credential path initialises on 1.0.0; LOG and
+      KV tables created and served via the connector; no object-store write was
+      attempted (no tiering job running) and the coordinator stayed healthy.
+    limitations: >-
+      Single tablet: replication/failover and policy-controlled lake
+      reconstruction remain UNKNOWN (multi-node plus tiered storage needed).
+      A real tiered write is the T7.2 cutover check. Retention live-alter is still
+      rejected by Admin.alterTable (unchanged from the historical row).
+    date: 2026-09-23
+    status: LIMITATION_RECORDED_REPLICATION_PENDING
+
+  - compatibility_id: VM-FLUSS-CLI-006
+    boundary: Fluss Java client
+    proposed_version: "1.0.0"
+    evidence_source: >-
+      Apache Fluss 1.0.0 client (Maven Central); re-verified 2026-09-23 against a
+      1.0.0 server for Stage 4 (T4.1).
+    compatibility_class: COMPATIBLE
+    evidence_owner: Platform
+    evidence_method: >-
+      Lock the fluss-client dependency; assert the resolved version equals the
+      server; exercise BYTES/VARBINARY, routing key and bucket key through the
+      client path on a live 1.0.0 cluster.
+    source_artifact: >-
+      org.apache.fluss:fluss-client:1.0.0 - the only Fluss artifact in the
+      resolved dependency tree of the bumped modules (zero 0.9 entries); exercised
+      end-to-end through fluss-flink-2.2-1.0.0.jar, which embeds the same client
+    fixture: >-
+      Scratch apache/fluss:1.0.0 cluster plus flink:2.2.1-scala_2.12-java17, 2026-09-23
+    scenario: >-
+      1.0.0 client path on the scratch cluster: catalog creation, LOG + KV table
+      DDL, streaming LOG insert, batch KV upsert, bounded reads; plus
+      "make ddl" validation of the 27-table DDL corpus
+    result: >-
+      COMPATIBLE (connect, DDL, LOG append, KV upsert and reads all succeed against
+      the 1.0.0 server)
+    observed_behavior: >-
+      CREATE CATALOG (type=fluss) connected to the coordinator on 9123; a LOG table
+      and a KV table were created; the streaming insert job ran (cancelled after
+      evidence) and the batch KV upsert, the KV select and the COUNT select all
+      reached FINISHED; make ddl reported the schema_manifest unchanged at 27 tables;
+      no client/server API breakage was observed.
+    limitations: >-
+      The full 9-step --apply-verified contract (raw ddl_apply.py with the ownership
+      check) is NOT re-issued in this pass: ddl_apply.py requires an existing
+      capability-evidence artifact whose only producer, ddl_apply_smoke.py (default
+      the COMPAT-FLUSS-005 evidence), needs the dev stack. Deferred, not waived.
+      Replication/failover is a server/topology boundary.
+    date: 2026-09-23
+    status: EVIDENCE_RECORDED
+
+  - compatibility_id: VM-FLUSS-CONN-007
+    boundary: Fluss Flink connector
+    proposed_version: "fluss-flink-2.2:1.0.0"
+    evidence_source: >-
+      Apache Fluss fluss-flink-2.2 1.0.0 (Maven Central); re-verified live
+      2026-09-23 against Fluss 1.0.0 + Flink 2.2.1 for Stage 4 (T4.1).
+    compatibility_class: COMPATIBLE
+    evidence_owner: Platform
+    evidence_method: >-
+      Lock the fluss-flink-2.2 connector dependency; assert it matches Flink 2.2 and
+      the server; run connector source/sink and checkpoint tests on a live cluster.
+    source_artifact: >-
+      fluss-flink-2.2-1.0.0.jar mounted at /opt/flink/lib by
+      code/01_platform/01_docker/docker-compose.yml; catalog created via
+      CREATE CATALOG fluss_catalog WITH ('type'='fluss')
+    fixture: >-
+      fluss10scratch: Fluss 1.0.0 (coordinator + tablet) with Flink 2.2.1
+      jobmanager/taskmanager, 2026-09-23
+    scenario: >-
+      Flink SQL session on the scratch cluster: create catalog, create LOG and KV
+      tables, streaming LOG insert, batch KV upsert, bounded reads, then observe
+      checkpoints on the running job
+    result: >-
+      COMPATIBLE (catalog + both table shapes, streaming sink, batch upsert/read,
+      one completed checkpoint)
+    observed_behavior: >-
+      The Fluss catalog and both table shapes were created; INSERT INTO the LOG table
+      ran as a streaming job (RUNNING at capture); insert-into-KV, the KV select and
+      the COUNT select all FINISHED. GET /jobs/[jid]/checkpoints returned
+      restored 0, total 2, in_progress 0, completed 1, failed 1 - a completed
+      checkpoint on the 1.0.0 connector (the failed one was a startup attempt and is
+      recorded, not hidden).
+    limitations: >-
+      Single-node cluster; multi-node replication/failover is a server boundary
+      (VM-ZK-013), not exercised here. The historical 48-checkpoint exactly-once run
+      remains the record for long-run checkpoint stability under the 0.9.x stack.
+    date: 2026-09-23
+    status: EVIDENCE_RECORDED_LIVE
+
+  - compatibility_id: VM-IMAGES-012
+    boundary: Base images
+    proposed_version: >-
+      eclipse-temurin:17.0.19_9-jdk | flink:2.2.1-scala_2.12-java17 |
+      apache/fluss:1.0.0
+    evidence_source: >-
+      Registry digests captured from the local daemon on 2026-09-23; SBOM records
+      as captured 2026-08-25 (not re-checked in this pass).
+    compatibility_class: UNKNOWN
+    evidence_owner: Platform
+    evidence_method: >-
+      Pin every image by registry digest plus SBOM; CI rejects latest, mutable tags
+      and unpinned deps.
+    source_artifact: >-
+      apache/fluss:1.0.0@sha256:ff461b45438033da4fd1c2556d3f978f3603bb3632fe075c2bd57388339a58cb
+      (equals the FLUSS_IMAGE pin);
+      flink:2.2.1-scala_2.12-java17@sha256:1934ab4b984d0873ef46825b1140377eed34475904aa077062497712d6e259f8;
+      localhost:5000/saurabh17111994/trading-flink-runtime:prod@sha256:66c5730fe7c62c95ce4843ab107237113f560e72193ce5025f9e8f0be0b1fa58
+    fixture: Local Docker daemon, 2026-09-23
+    scenario: >-
+      docker image inspect on every image in play (stock Fluss, stock Flink, derived
+      runtime images, published prod tag) plus the digest check from the publish step
+    result: >-
+      PARTIAL - digest pinning re-verified 2026-09-23 for the images in play; the
+      SBOM/OS-layer coverage is unchanged from the 2026-08-25 capture and was not
+      re-checked here.
+    observed_behavior: >-
+      apache/fluss:1.0.0 resolves to the Stage 1 digest exactly; flink:2.2.1 digest
+      captured; the published prod tag resolves to a pushed digest (7/7 digests
+      resolved anonymously during the 2026-09-23 publish); locally built
+      trading-fluss-runtime:0.1.0 and trading-flink-runtime:0.1.0 carry no RepoDigest
+      because they are derived locally.
+    limitations: >-
+      eclipse-temurin:17.0.19_9-jdk was not re-verified in this pass. The openobserve
+      attestation remains ABSENT (SPDX SBOM captured 2026-08-25); SBOM attestations
+      for the derived and published images remain Stage 9 ownership. Class stays
+      UNKNOWN until every image in the boundary is digest- and SBOM-covered.
+    date: 2026-09-23
+    status: PARTIAL_EVIDENCE_DIGEST_SBOM_OS_ONLY
