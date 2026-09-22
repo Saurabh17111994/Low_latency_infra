@@ -20,7 +20,7 @@ import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalRow;
 
-// Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
+// Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — 1.0.0 still has no client-visible KV compare-and-swap (its CAS uses are JVM/ZooKeeper-internal: the ZK `setData` guard and the `LogTablet`/`ScannerContext` loops), so single-active-owner still comes from deployment (ASM-EXE-005). Re-check on the next upgrade (DEC-052).
 /**
  * Fluss-backed {@link GateStateStore} — production writer for Execution_Gate v3 (CHG-044, T5).
  * Offline protocol is proven by {@link InMemoryGateStateStore}; this writer satisfies the
@@ -252,7 +252,7 @@ public final class FlussGateStateStore implements GateStateStore, AutoCloseable 
                     + ": durable holds " + (verify == null ? "no row"
                     : verify.ownerInstanceId() + "/" + verify.fenceToken())
                     + ", not " + owner + "/" + token
-                    + " — no durable CAS in Fluss 0.9.1, single-active-owner must come from deployment (ASM-EXE-005)");
+                    + " — no durable CAS in Fluss 0.9.1 or 1.0.0, single-active-owner must come from deployment (ASM-EXE-005)");
         }
     }
 

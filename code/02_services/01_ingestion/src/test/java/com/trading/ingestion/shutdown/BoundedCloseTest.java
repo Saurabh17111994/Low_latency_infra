@@ -18,7 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-// Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
+// Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — flush()/close is still unbounded in 1.0.0 (`fluss-client/.../write/RecordAccumulator.java:149`, unchanged since 0.9.1) and `TableWriter`/`UpsertWriter` still expose no `close()`. Re-check on the next upgrade (DEC-052).
 /**
  * The evidence writers' release path is bounded (2026-09-12).
  *
@@ -184,7 +184,7 @@ class BoundedCloseTest {
             String body = closeMethodBody(Files.readString(file, StandardCharsets.UTF_8));
             assertTrue(body.contains("BoundedClose.run("),
                     relative + ": close() does not release through BoundedClose — a bare "
-                            + "flush()/connection close is unbounded in Fluss 0.9.1 and would "
+                            + "flush()/connection close is unbounded in Fluss 1.0.0 (unchanged since 0.9.1) and would "
                             + "hang shutdown again:\n" + body);
         }
     }

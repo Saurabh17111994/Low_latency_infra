@@ -288,6 +288,7 @@ public final class InstrumentManifestWriter implements AutoCloseable {
         // above), because on the mid-loop failure path this is the only thing that
         // gives the un-awaited stragglers a chance to land — load-bearing, so it is
         // bounded rather than deleted (flush() and Connection.close() are both
+        // Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — flush()/close is still unbounded in 1.0.0 (`fluss-client/.../write/RecordAccumulator.java:149`, unchanged since 0.9.1) and `TableWriter`/`UpsertWriter` still expose no `close()`. Re-check on the next upgrade (DEC-052).
         // unbounded in Fluss 0.9.1; see BoundedClose).
         BoundedClose.run("instrument-manifest-writer", () -> {
             try {

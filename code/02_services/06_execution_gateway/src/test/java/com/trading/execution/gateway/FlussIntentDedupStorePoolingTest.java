@@ -27,6 +27,7 @@ import org.junit.jupiter.api.Test;
  * attempt's writer is never reused.
  *
  * <p>What this replaced: {@code record()} created a writer per attempt. On a timeout that writer
+ // Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — flush()/close is still unbounded in 1.0.0 (`fluss-client/.../write/RecordAccumulator.java:149`, unchanged since 0.9.1) and `TableWriter`/`UpsertWriter` still expose no `close()`. Re-check on the next upgrade (DEC-052).
  * could not be closed — Fluss 0.9.1 gives {@code TableWriter} no close, only {@code flush()} — so
  * every retry abandoned one, each holding a {@code Sender} with a pending record: the run-4b
  * storm shape, on the handoff path rather than the drill's.

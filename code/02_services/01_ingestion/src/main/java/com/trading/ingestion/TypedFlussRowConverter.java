@@ -180,7 +180,7 @@ final class TypedFlussRowConverter implements FlussRowConverter {
         // writer's side (it hands back a future without awaiting it), so the
         // flush is load-bearing — it is what gives buffered batches a chance to
         // land — and it is retained rather than deleted. flush() and
-        // Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
+        // Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — flush()/close is still unbounded in 1.0.0 (`fluss-client/.../write/RecordAccumulator.java:149`, unchanged since 0.9.1) and `TableWriter`/`UpsertWriter` still expose no `close()`. Re-check on the next upgrade (DEC-052).
         // connection.close() are both unbounded in Fluss 0.9.1; the whole
         // release is bounded here so a wedged cluster cannot hang shutdown.
         // See BoundedClose.

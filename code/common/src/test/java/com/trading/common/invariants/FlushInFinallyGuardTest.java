@@ -23,6 +23,7 @@ import org.junit.jupiter.api.io.TempDir;
  *
  * <p>The rule exists because Fluss's {@code TableWriter.flush()} is not a
  * per-writer flush: it awaits every pending batch on the connection and in
+ // Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — flush()/close is still unbounded in 1.0.0 (`fluss-client/.../write/RecordAccumulator.java:149`, unchanged since 0.9.1) and `TableWriter`/`UpsertWriter` still expose no `close()`. Re-check on the next upgrade (DEC-052).
  * 0.9.1-incubating that await is unbounded. In a {@code finally} it is a no-op
  * on success (the ack was already awaited) and on failure it blocks forever,
  * so it masks the bounded-timeout failure it looks like it guards against —

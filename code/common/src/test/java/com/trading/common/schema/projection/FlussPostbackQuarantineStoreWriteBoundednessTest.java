@@ -51,7 +51,8 @@ class FlussPostbackQuarantineStoreWriteBoundednessTest {
         });
 
         assertThat(writer.flushCalls())
-                .as("append must never call flush(): unbounded in Fluss 0.9.1 (see flush_guard.sh)")
+                // Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — flush()/close is still unbounded in 1.0.0 (`fluss-client/.../write/RecordAccumulator.java:149`, unchanged since 0.9.1) and `TableWriter`/`UpsertWriter` still expose no `close()`. Re-check on the next upgrade (DEC-052).
+                .as("append must never call flush(): unbounded in Fluss 1.0.0 (unchanged since 0.9.1; see flush_guard.sh)")
                 .isZero();
         // P3-167/P3-410: the process-local mirror is gone, so a failed append has no memory to
         // leave a row in. The read path consults the durable TABLE — against this stub that

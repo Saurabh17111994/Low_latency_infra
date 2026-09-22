@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
  * <p><b>Why this exists (2026-09-12).</b> The evidence writers (safety-halt,
  * quarantine, discontinuity, typed-tick) released with {@code writer.flush()}
  * and then closed their Table and Connection. Every one of those calls is
+ // Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — flush()/close is still unbounded in 1.0.0 (`fluss-client/.../write/RecordAccumulator.java:149`, unchanged since 0.9.1) and `TableWriter`/`UpsertWriter` still expose no `close()`. Re-check on the next upgrade (DEC-052).
  * unbounded in Fluss 0.9.1:
  *
  * <ul>

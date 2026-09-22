@@ -275,6 +275,7 @@ public final class SafetyHaltWriter implements SafetySink {
     @Override
     public void close() {
         // Bounded release (2026-09-12): flush() AND Connection.close() are both
+        // Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — flush()/close is still unbounded in 1.0.0 (`fluss-client/.../write/RecordAccumulator.java:149`, unchanged since 0.9.1) and `TableWriter`/`UpsertWriter` still expose no `close()`. Re-check on the next upgrade (DEC-052).
         // unbounded in Fluss 0.9.1, so both sit inside the deadline — bounding
         // only the flush would still leave shutdown wedged on the connection
         // release. The flush is kept (not deleted): RecordAccumulator.close()

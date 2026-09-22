@@ -498,7 +498,7 @@ class CompatFlussIntegrationTest {
     assertEquals("v2", latest.getString(1).toString(),
         "latest write wins; the row reflects the most recent upsert");
 
-    // Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
+    // Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — 1.0.0 still has no client-visible KV compare-and-swap (its CAS uses are JVM/ZooKeeper-internal: the ZK `setData` guard and the `LogTablet`/`ScannerContext` loops), so single-active-owner still comes from deployment (ASM-EXE-005). Re-check on the next upgrade (DEC-052).
     // There is no explicit CAS in the Fluss client 0.9.1 surface; the
     // stale-rejection guarantee is enforced at the projector layer
     // (KvStateUpdateProtocol) using source version/timestamp. Here we assert

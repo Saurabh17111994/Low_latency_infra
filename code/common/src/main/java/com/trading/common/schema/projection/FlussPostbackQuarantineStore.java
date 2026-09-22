@@ -96,6 +96,7 @@ public final class FlussPostbackQuarantineStore implements PostbackQuarantineSto
         v[11] = row.dispositionTs() == null ? null : row.dispositionTs();
         v[12] = bs(row.schemaVersion());
         // P3-502: pooled writer instead of one per append. TableWriter is not Closeable in
+        // Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — flush()/close is still unbounded in 1.0.0 (`fluss-client/.../write/RecordAccumulator.java:149`, unchanged since 0.9.1) and `TableWriter`/`UpsertWriter` still expose no `close()`. Re-check on the next upgrade (DEC-052).
         // Fluss 0.9.1 (flush only), so there is no handle to close — only one to reuse, and
         // the pool never lends the same handle to two callers.
         // D1: no per-record flush — see FlussWriteProfiles; .get() still returns only
