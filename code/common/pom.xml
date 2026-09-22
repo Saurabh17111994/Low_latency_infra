@@ -42,7 +42,7 @@
          compute via fluss-flink-2.2), so this does not change their runtime
          images. Also serves the integration-tagged CompatFluss* capability
          tests (real LOG/KV/changelog evidence against a live cluster).
-         The 0.9.1-incubating client jar is a self-contained shaded artifact
+         The 1.0.0 client jar is a self-contained shaded artifact
          (its own pom declares runtime deps test-scoped), so the fat-jar
          builds are unaffected.
          P6-645: optional, so a future consumer of `common` opts in explicitly

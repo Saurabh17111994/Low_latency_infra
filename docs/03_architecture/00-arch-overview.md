@@ -184,7 +184,7 @@ Every managed and durable state category must have a defined capacity budget for
 
 | State category | Cardinality bound | Serialized size/entry | Checkpoint contribution | Owner / cleanup |
 | --- | --- | --- | --- | --- |
-| Fingerprint dedup | entries = rate × dedup_horizon | ~64 B fingerprint + metadata | **Not a full copy** — Flink keeps only a bounded working cache; the authoritative set is a Fluss KV state table (DEC-038) | Fluss KV (authoritative) + Flink cache; expiry column/cleanup path (no per-key TTL in Fluss 0.9.1 — mechanism must be tested) |
+| Fingerprint dedup | entries = rate × dedup_horizon | ~64 B fingerprint + metadata | **Not a full copy** — Flink keeps only a bounded working cache; the authoritative set is a Fluss KV state table (DEC-038) | Fluss KV (authoritative) + Flink cache; expiry column/cleanup path (native per-key TTL exists in Fluss 1.0.0 — `table.kv.ttl`, not adopted here — mechanism must be tested) |
 | Candle/forming-bar windows | instruments × (allowed_lateness + window_size) / window_size | Per-instrument window accumulator | Small in-flight accumulator + `emitted` flag; final rows already Fluss KV | Flink (transient) + `feature_candles_15s` KV (durable) |
 | Active candidates | configurable max per instrument × instruments | Per-candidate record ~1 KB | Small; output already Fluss LOG/KV | Flink (working) + `Signal_Candidates`/`_current` (durable) |
 | ~~Portfolio reservations~~ | ~~max concurrent × portfolios~~ | ~~Per-reservation record ~512 B~~ | ~~Included in Signal checkpoint~~ | **REMOVED 2026-08-15 (CHG-005)** |

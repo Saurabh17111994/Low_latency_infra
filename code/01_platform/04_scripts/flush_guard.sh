@@ -92,7 +92,7 @@ done < <(find "$ROOT" -type d -name target -prune -o \
 
 if [ -n "$HITS" ]; then
 	echo "ERROR: .flush() inside a finally block — this masks bounded-timeout failures"
-	echo "(flush() is unbounded in Fluss 0.9.1; see the header of flush_guard.sh)."
+	echo "(flush() is unbounded in Fluss 1.0.0; see the header of flush_guard.sh)."
 	echo "Use a single bounded writer.<op>(row).get(timeout, MILLISECONDS) instead."
 	printf '%s' "$HITS"
 	exit 1

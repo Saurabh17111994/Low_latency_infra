@@ -5,7 +5,8 @@
 -- Bucket key: instrument_token (strict subset of the PK — per-ticker
 --   colocation, and the Fluss connector requires bucket.key ⊆ primary key).
 -- Retention: 60 seconds via table.log.ttl — covers the CHANGELOG only, not the
---   KV snapshots (P4-006: Fluss 0.9.1 has no per-key TTL, so sealed rows do NOT
+--   KV snapshots (P4-006: native per-key TTL exists in Fluss 1.0.0 —
+--   table.kv.ttl, not adopted on this table — so sealed rows do NOT
 --   auto-expire — "no cleanup job" was false; a seal-time DELETE path is future
 --   work. The writer holds windows in keyed state + processing-time timers, so
 --   the 60s log bound does not lose mid-window history; the closed history

@@ -33,7 +33,7 @@ an untracked working tree.
 
 ```bash
 make fluss-image                       # fetch + verify + build + re-verify
-make fluss-image FLUSS_RUNTIME_TAG=myrepo/fluss-runtime:0.9.1
+make fluss-image FLUSS_RUNTIME_TAG=myrepo/fluss-runtime:1.0.0
 ```
 
 Or manually:
@@ -42,15 +42,15 @@ Or manually:
 cd code/01_platform/01_docker/fluss-runtime
 bash fetch-jars.sh --dest /tmp/flr/jars
 cp Dockerfile /tmp/flr/
-docker build -t myrepo/fluss-runtime:0.9.1 /tmp/flr
+docker build -t myrepo/fluss-runtime:1.0.0 /tmp/flr
 bash fetch-jars.sh --verify /tmp/flr/jars     # offline re-check
 ```
 
 ## Publishing and pinning
 
 ```bash
-docker push myrepo/fluss-runtime:0.9.1
-bash code/01_platform/04_scripts/digest-pin.sh myrepo/fluss-runtime:0.9.1
+docker push myrepo/fluss-runtime:1.0.0
+bash code/01_platform/04_scripts/digest-pin.sh myrepo/fluss-runtime:1.0.0
 # then put the printed ref on FLUSS_IMAGE in runtime.lock
 ```
 

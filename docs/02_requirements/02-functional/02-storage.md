@@ -197,7 +197,7 @@ For each Fluss-owned Signal state table/domain, the design SHALL define, before 
 1. **Owner** — the single writing component (the Signal job).
 2. **Keys** — logical key and routing (`bucket.key`) with per-instrument colocation.
 3. **Update semantics** — upsert vs append; how replay converges.
-4. **TTL / cleanup** — bounded growth and the exact cleanup mechanism (Fluss 0.9.1 has no per-key TTL; an expiry column plus a cleanup path must be designed and tested, not assumed).
+4. **TTL / cleanup** — bounded growth and the exact cleanup mechanism (native per-key TTL exists in Fluss 1.0.0 — `table.kv.ttl` / `table.kv.ttl.time-column`; where it is not adopted, an expiry column plus a cleanup path must be designed and tested, not assumed).
 5. **Rebuild source** — the immutable LOG/audit that can reconstruct the state (e.g. `raw_table_1` replay within the dedup TTL window).
 6. **Versioning** — schema version and serialization contract.
 7. **Restart behavior** — how Flink restores its compact checkpoint, verifies Fluss state availability/compatibility, and rehydrates only the working state it needs.

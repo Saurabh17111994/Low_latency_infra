@@ -205,13 +205,13 @@ public class QuarantineWriter implements QuarantineSink {
     @Override
     public void close() {
         // Bounded release (2026-09-12): flush() AND Connection.close() are both
-        // unbounded in Fluss 0.9.1 — see BoundedClose. The flush is kept: it is
+        // unbounded in Fluss 1.0.0 — see BoundedClose. The flush is kept: it is
         // what gives an un-acked quarantine row a chance to land before close
         // discards it.
         BoundedClose.run("quarantine-writer", () -> {
             try {
                 writer.flush();
-                // AppendWriter (TableWriter) does not have close() in Fluss 0.9.1-incubating
+                // AppendWriter (TableWriter) does not have close() in Fluss 1.0.0
             } catch (Exception e) {
                 LOG.warn("quarantine-writer: close failed: {}", e.getMessage(), e);
             }

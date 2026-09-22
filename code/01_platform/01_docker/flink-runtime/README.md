@@ -30,7 +30,7 @@ and no per-node bind mount (which a Swarm stack cannot express portably anyway).
 
 ```bash
 make flink-image                       # fetch + verify + build + re-verify
-make flink-image FLINK_RUNTIME_TAG=myrepo/flink-runtime:0.9.1
+make flink-image FLINK_RUNTIME_TAG=myrepo/flink-runtime:1.0.0
 ```
 
 Or manually:
@@ -39,15 +39,15 @@ Or manually:
 cd code/01_platform/01_docker/flink-runtime
 bash fetch-jars.sh --dest /tmp/fr/jars
 cp Dockerfile core-site.xml 20-r2-secrets-from-file.sh /tmp/fr/
-docker build -t myrepo/flink-runtime:0.9.1 /tmp/fr
+docker build -t myrepo/flink-runtime:1.0.0 /tmp/fr
 bash fetch-jars.sh --verify /tmp/fr/jars     # offline re-check
 ```
 
 ## Publishing and pinning
 
 ```bash
-docker push myrepo/flink-runtime:0.9.1
-bash code/01_platform/04_scripts/digest-pin.sh myrepo/flink-runtime:0.9.1
+docker push myrepo/flink-runtime:1.0.0
+bash code/01_platform/04_scripts/digest-pin.sh myrepo/flink-runtime:1.0.0
 # then put the printed ref on FLINK_IMAGE in runtime.lock
 ```
 

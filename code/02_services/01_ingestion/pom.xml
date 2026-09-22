@@ -118,7 +118,7 @@
             <goals><goal>shade</goal></goals>
             <configuration>
               <!-- P1-052: fluss-client bundles a full slf4j-api 1.7 copy
-                   (org/slf4j/**, verified in fluss-client-0.9.1). Declaration
+                   (org/slf4j/**, verified in fluss-client-1.0.0). Declaration
                    order only affects the test classpath — the shaded fat jar
                    needs a structural exclusion or 1.7 classes collide with
                    our 2.x API (NoSuchMethodError/LinkageError, not just NOP).

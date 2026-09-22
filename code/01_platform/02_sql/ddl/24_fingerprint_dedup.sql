@@ -31,6 +31,10 @@
 -- Retired-table rulings (no live writer — notes only, revisit on reactivation):
 --   writer/cleanup contract (P4-074): expiry_ms = first_seen_ms + 60000,
 --     writer-set, min-across-races; cleanup scans expiry_ms.
+--   reactivation TTL (2026-09-22, scratch probe): prefer native table.kv.ttl
+--     (Fluss 1.0.0, create-time only — ALTER is rejected) over reviving the
+--     expiry column plus cleanup-scan contract. Probe: CREATE with ttl stores
+--     PT1H; time-column without ttl is rejected; all scratch tables dropped.
 --   first_seen race (P4-225): NOT ENFORCED PK = last-writer-wins; the writer
 --     MUST use insert-if-absent / keep-earliest first_seen_ms, never blind upsert.
 --   TTL mismatch (P4-227): 7d log vs 60s logical life is intentional while

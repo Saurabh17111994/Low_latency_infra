@@ -18,7 +18,7 @@ Ranking is not a separate job and the Signal job does not read feature tables ba
 
 ## Implementation checklist
 
-- [x] Pin Flink/Fluss connector and state/checkpoint versions. — Flink 2.2.1 / Fluss 0.9.1-incubating / fluss-flink-2.2 pinned in parent POM + `versions.pin`; connector boundary proven (T0: resolves, `FlussSource` builds, live KV read) — see `04-signal-job.md` §Connector and compile evidence.
+- [x] Pin Flink/Fluss connector and state/checkpoint versions. — Flink 2.2.1 / Fluss 1.0.0 / fluss-flink-2.2 pinned in parent POM + `versions.pin`; connector boundary proven (T0: resolves, `FlussSource` builds, live KV read) — see `04-signal-job.md` §Connector and compile evidence.
 - [x] Slot-scoped safety consumer shell (SAFETY-INT-001, 2026-08-09). — `SafetyHaltJob` + `SafetyStateTracker` + `SuppressionGate`; moves to broadcast state when decision operators land.
 - [x] Implement raw source/schema/validity and event-time watermarks. — `SignalJob` sources `raw_table_1` full-offset via `FlussSource` + `RowDataDeserializationSchema`; `RawValidationFunction` fail-closed gate (INSERT kind, pinned `schema_version`, VALID-prefixed validity, price > 0, qty ≥ 0, per-reason counters); `CandleWatermarkStrategy` bounded out-of-order 5 s + idle 15 s. Envelope 1,024 instruments / 20,480 ticks·s⁻¹.
 - [x] Implement bounded fingerprint deduplication. — `FingerprintDedupFunction`: keyed by `instrument_token`, MapState keyed `fingerprint_version|scope|fingerprint` → `DedupEntry(firstSeen, expiry)`; native `StateTtlConfig` expiry (`DEDUP_TTL_MS`, ProcessingTime, OnCreateAndWrite — CHG-023 item 2; the event-time timer + expiry-index era is historical) with `compute.dedup.first` / `compute.dedup.duplicates` counters.

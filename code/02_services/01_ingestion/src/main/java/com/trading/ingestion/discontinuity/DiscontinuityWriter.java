@@ -308,13 +308,13 @@ public class DiscontinuityWriter implements DiscontinuitySink {
     @Override
     public void close() {
         // Bounded release (2026-09-12): flush() AND the Connection/Table close are
-        // both unbounded in Fluss 0.9.1, so the whole release sits inside the
+        // both unbounded in Fluss 1.0.0, so the whole release sits inside the
         // deadline — see BoundedClose. The flush is kept: it is what gives an
         // un-acked discontinuity row a chance to land before close discards it.
         BoundedClose.run("discontinuity-writer", () -> {
             try {
                 writer.flush();
-                // AppendWriter (TableWriter) does not have close() in Fluss 0.9.1-incubating.
+                // AppendWriter (TableWriter) does not have close() in Fluss 1.0.0.
             } catch (Exception e) {
                 LOG.warn("discontinuity-writer: close failed: {}", e.getMessage());
             }

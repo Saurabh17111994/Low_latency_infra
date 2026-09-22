@@ -40,7 +40,7 @@ import org.slf4j.LoggerFactory;
  * </ul>
  *
  * <p>This class wraps the Fluss client table writer. The concrete Fluss
- * append API is version-gated on Fluss {@code 0.9.1-incubating}.
+ * append API is version-gated on Fluss {@code 1.0.0}.
  */
 public final class RawTickWriter implements AutoCloseable {
 

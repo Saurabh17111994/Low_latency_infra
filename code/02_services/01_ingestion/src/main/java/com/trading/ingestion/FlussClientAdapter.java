@@ -25,7 +25,7 @@ import org.slf4j.LoggerFactory;
  * Fluss client adapter — connects to a Fluss cluster and provides a row
  * converter backed by {@link AppendWriter} for {@code raw_table_1}.
  *
- * <h3>Real Fluss API (0.9.1-incubating)</h3>
+ * <h3>Real Fluss API (1.0.0)</h3>
  * <ol>
  *   <li>{@link ConnectionFactory#createConnection(Configuration)} — bootstrap</li>
  *   <li>{@link Connection#getTable(TablePath)} — access the LOG table</li>
@@ -268,8 +268,8 @@ class RealFlussRowConverter implements FlussRowConverter {
 
         return writer.append(row)
                 .thenApply(result -> {
-                    // P1-223: Fluss 0.9.1 AppendResult is an empty ack (no offset/bucket
-                    // fields — verified via javap against fluss-client-0.9.1-incubating);
+                    // P1-223: Fluss 1.0.0 AppendResult is an empty ack (no offset/bucket
+                    // fields — verified via javap against fluss-client-1.0.0);
                     // there is no server offset to propagate. tablePath is the table
                     // identifier, not the event_day partition.
                     long appendCount = 0; // counter is external (in tracker)
