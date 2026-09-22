@@ -584,6 +584,13 @@ class CompatFlussIntegrationTest {
     }
     CREATED_TABLES.add(tableName);
     Table table = connection.getTable(path);
+    // Placement gate. createTable above returns in ~10 ms, but that is "metadata written", not
+    // "writable": this table's 8 bucket leaders are elected afterwards, and under teardown load
+    // that takes 1-13 s. The loop below writes 400 rows with a 20 s budget per write, so without
+    // this gate the test fails on whichever append first meets a placement spike — measured
+    // 2026-09-22: 20.09 s TimeoutException on the very first append. This test creates its own
+    // table inline instead of via createTable(...), so it never received the CHG-212/CHG-213 gate.
+    awaitWritable(table, LOG_SCHEMA, "compat table " + tableName);
 
     AppendWriter w = table.newAppend().createWriter();
     {
@@ -639,6 +646,8 @@ class CompatFlussIntegrationTest {
     admin.createTable(hotPath, hotTd, false).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
     CREATED_TABLES.add(hotName);
     Table hotTable = connection.getTable(hotPath);
+    // Same gate for the negative control's own table (4 buckets, 200 constant-key writes).
+    awaitWritable(hotTable, LOG_SCHEMA, "compat hot table " + hotName);
     AppendWriter hw = hotTable.newAppend().createWriter();
     {
       for (int i = 0; i < 200; i++) {
