@@ -91,7 +91,15 @@ The previous single-axis status vocabulary (`Draft`, `Design-ready`, `Implementa
 > **E4 note (2026-08-21, CHG-078):** this table is the single `Current readiness` truth for the laptop-now cut. Live-money stays `Blocked` for every row until E5 single-operator (Saurabh, DEC-044) sign-off. `Production runtime` honest `Not-implemented/Untested` — requires the VM era (`D1→D7`). No row is claimed `Production-validated` on a laptop.
 
 > **Gate state (2026-09-22 — later than the rows above, so re-measure before quoting).** The gate is
-> **19 steps**, and the standing certificate is the 2026-09-22 run: `GATE RESULT: PASS — 19/19
+> **Update 2026-09-23 — the current standing certificate.** `GATE RESULT: PASS — 19/19 verified, 0
+> skipped` at `HEAD afa2fc4d`, in `logs/soak/monday-gates-20260923-001918/`: 26.0 min wall clock
+> (00:19:20 → 00:45:18), stack_generation `ad3358760b2e4b5f`, catalog 27/27, fingerprint
+> `d104d879cfc4e6b2:ad3358760b2e4b5f`. It carries the dedup-IT re-scope (`28becc01`) and the doc
+> corrections (`afa2fc4d`), and it certifies the commit the published images were built from — tag
+> `v2026.09.23`, publish run `35770015626`, fragment `e2590815`. It is 2.1 min faster than the run
+> below while carrying two more commits. The 2026-09-22 entry below stays as the run that measured
+> the gate optimization.
+> **19 steps**, and the previous certificate was the 2026-09-22 run: `GATE RESULT: PASS — 19/19
 > verified, 0 skipped` at `HEAD 1d3c2c9a`, in `logs/soak/monday-gates-20260922-223433/` (28.1 min
 > wall clock; fingerprint `8ec03dc6106d1601:3f8eca56cf6c5c52`, catalog 27/27, stack_generation
 > `3f8eca56cf6c5c52`). This is the certificate for the Fluss `0.9.1-incubating` → `1.0.0` upgrade and
@@ -106,7 +114,7 @@ The previous single-axis status vocabulary (`Draft`, `Design-ready`, `Implementa
 > certificate by `DEC-053` (`docs/plans/2026-09-22-fluss-1.0-native-adoption.md`), because a
 > certificate answers "does the same behaviour work on the new version", not "does new behaviour
 > work". A certificate is bound to the tree it names, so a later commit does not invalidate it — but
-> it does mean the next certifying gate must be run again before any claim moves past `1d3c2c9a`.
+> it does mean the next certifying gate must be run again before any claim moves past `afa2fc4d`.
 > Measure rather than assume: `git log --oneline f2faf565..1d3c2c9a` and
 > `git log --oneline f2faf565..1d3c2c9a -- code/01_platform/04_scripts tests Makefile`.
 > The per-change loop is `make gate-fast` (T0, ~4 min); a `make gate --steps …` subset run prints
