@@ -59,8 +59,12 @@ resolve_arrow_credentials() {
       600|400) ;;
       *) echo "!! $SECRETS_FILE has mode ${mode:-unknown} (want 600/400) — refusing to read it" >&2; exit 1 ;;
     esac
+    # A shellcheck directive only applies when the source is the sole command on
+    # its line: on a ';'-joined line shellcheck ignores it and SC1090 still fires.
+    set -a
     # shellcheck disable=SC1090
-    set -a; . "$SECRETS_FILE"; set +a
+    . "$SECRETS_FILE"
+    set +a
   fi
   if [ "$ARROW_FAKE_BROKER" = "1" ]; then
     export ARROW_USER_ID="${ARROW_USER_ID:-testd-user}" \

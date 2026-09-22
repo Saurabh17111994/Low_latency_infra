@@ -56,7 +56,13 @@ pipeline_validate_compose_bind_sources pipeline_fluss_port_open
 pipeline_compile_fluss_ready_probe pipeline_fluss_metadata_ready
 pipeline_wait_for_fluss_ready
 flink_metric_dump flink_wait_state"
-G2_MISSING="$( ( FAKETOOL_PORT=8899 RATE_HZ=10; source "$LIB" >/dev/null 2>&1;
+G2_MISSING="$( (
+    FAKETOOL_PORT=8899 RATE_HZ=10
+    # The directive must sit immediately above the source it annotates, and the
+    # source must be the sole command on its line: shellcheck ignores a directive
+    # when the source is one command among several on a ';'-joined line (SC1090).
+    # shellcheck source=pipeline-lib.sh
+    source "$LIB" >/dev/null 2>&1
     for fn in $G2_FUNCS; do declare -f "$fn" >/dev/null 2>&1 || printf '%s\n' "$fn"; done ) )"
 for fn in $G2_FUNCS; do
     if printf '%s\n' "$G2_MISSING" | grep -qx "$fn"; then
@@ -70,7 +76,14 @@ done
 # range is not usable here: the lib contains here-docs whose bodies include
 # col-0 braces, so `/^fn() {/,/^}/` can truncate or overrun. One helper, so the
 # readiness guards and the G19 wiring guards read the same source of truth.
-lib_fn_body() { ( FAKETOOL_PORT=8899 RATE_HZ=10; source "$LIB" >/dev/null 2>&1; declare -f "$1" ); }
+lib_fn_body() {
+    (
+        FAKETOOL_PORT=8899 RATE_HZ=10
+        # shellcheck source=pipeline-lib.sh
+        source "$LIB" >/dev/null 2>&1
+        declare -f "$1"
+    )
+}
 
 # ---- G17 (2026-09-01): Fluss readiness must precede table mutation. A
 # coordinator-only check accepts a live RPC endpoint while the tablet is
@@ -127,7 +140,12 @@ fi
 # comment-only lines dropped, and ONLY continuation lines joined — the old
 # sed+tr flattened every line, so a comment spliced into the chain still
 # satisfied every needle below.
-body="$( ( FAKETOOL_PORT=8899 RATE_HZ=10; source "$LIB" >/dev/null 2>&1; declare -f pipeline_submit_job ) | grep -v '^[[:space:]]*#' )"
+body="$( (
+    FAKETOOL_PORT=8899 RATE_HZ=10
+    # shellcheck source=pipeline-lib.sh
+    source "$LIB" >/dev/null 2>&1
+    declare -f pipeline_submit_job
+) | grep -v '^[[:space:]]*#' )"
 joined="$(printf '%s\n' "$body" | awk '{ if (cont) { line = line " " $0 } else { line = $0 } ; if ($0 ~ /\\$/) { cont = 1 } else { printf "%s\n", line; cont = 0 } }')"
 for needle in '-e ALLOW_FULL_REPLAY' '-e WATERMARK_OUT_OF_ORDER_MS' \
               '-e CHECKPOINT_TIMEOUT_MS' '-e PREVIEW_ENABLED=true' \
@@ -303,10 +321,10 @@ rm -rf "$OUT"
 # ---- G14 (2026-09-01): B6 artifact classpath guard must FIRE on the exact
 # P6-590: the ONE operational source (declared right where the first function
 # is called). Everything above is a file grep or a subshell.
-# shellcheck source=pipeline-lib.sh
 export OUT FAKETOOL_PORT RATE_HZ
 OUT="$(mktemp -d)"
 FAKETOOL_PORT=8899 RATE_HZ=10
+# shellcheck source=pipeline-lib.sh
 source "$LIB"
 
 # broken shape observed in C2. Use a temporary jar containing one Fluss class;

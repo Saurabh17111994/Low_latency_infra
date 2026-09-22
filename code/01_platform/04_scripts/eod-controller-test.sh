@@ -127,8 +127,9 @@ JAVAEOF
 # one (no parseable DAYS= line, e.g. a JVM/classpath death) is a failure, and it
 # carries a diagnostic line so it explains itself.
 eod_status() {
-  local out rc attempt why
-  for attempt in 1 2 3; do
+  local out rc why
+  # The retry counter is never read; only the number of attempts matters.
+  for _ in 1 2 3; do
     out="$(python3 "$EOD" status 2>&1)"; rc=$?
     if printf '%s\n' "$out" | grep -qE 'DAYS=[0-9]+'; then
       printf '%s\n' "$out"; return 0
