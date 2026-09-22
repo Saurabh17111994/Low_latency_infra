@@ -1153,7 +1153,12 @@ public final class DdlApplyTool {
      * <p>WHY (measured 2026-09-18, live single-tablet cluster): a dropped table's buckets are torn
      * down one at a time, ~1.5 s apart, with only ~65 ms of actual tablet work per bucket
      * (~0.65 buckets/s — the rest is the remote-log cleanup step, whose remote store here is
-     * Cloudflare R2). While that queue drains the coordinator does not bring up new replicas: a
+     * Cloudflare R2). 2026-09-22 UPDATE: that R2 share is no longer paid. The fast-iteration
+     * override (FLUSS_REMOTE_LOG_TASK_INTERVAL=0s, .env) makes RemoteLogManager.remoteDisabled()
+     * short-circuit before any remote work; the R2 round trips were ~52 of the gate's 83 minutes.
+     * A teardown now pays only the local ~65 ms per bucket. The queue below is still serialized
+     * and still worth waiting out - it is simply no longer R2-paced. While that queue drains the
+     * coordinator does not bring up new replicas: a
      * table created right after an apply had no replica for 8 minutes (table created 05:41:57, the
      * tablet only attempted its replica at 05:49:48 — by then the caller had given up and dropped
      * it, so the attempt died with SchemaNotExistException). Every phase after the apply inherited
