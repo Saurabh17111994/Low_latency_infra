@@ -351,7 +351,7 @@ Environment: the distributed SignalJob runs on the compose Flink cluster as a
 
 | Env | Pinned value | Meaning |
 | --- | --- | --- |
-| `DEDUP_TTL_MS` | `60000` | dedup expiry TTL |
+| `DEDUP_TTL_MS` | *(deprecated)* | No longer read since 2026-09-03 — the dedup bound is `DEDUP_WINDOW_ENTRIES` = 200 entries (CHG-303) |
 | `CANDLE_WINDOW_MS` | `15000` | candle aggregation window |
 | `CHECKPOINT_INTERVAL_MS` | `10000` | checkpoint cadence |
 | `CHECKPOINT_TIMEOUT_MS` | `30000` | checkpoint timeout |
@@ -593,6 +593,14 @@ Compute/SignalJob rules:
 > O2 (verified live 2026-08-17) and the cache gauges it watched were removed by
 > CHG-022. The retired Fluss table (`fingerprint_dedup`, DDL
 > `24_fingerprint_dedup.sql`) is retained on file but unused; no rule watches it.
+>
+> **SUPERSEDED 2026-09-03 (executed `c0c50ee6`; recorded 2026-09-23 as CHG-303 / DEC-054):** the
+> gauges named above no longer exist. `FingerprintDedupFunction` registers only the counters
+> `compute.dedup.first` / `compute.dedup.duplicates`, so **no dedup state-size gauge exists** and the
+> 6.5M envelope is void — the window is bounded at 200 entries per token by construction.
+> `SIGNAL-warn-dedup-state` watches the job's **last checkpoint size**
+> (`flink_jobmanager_job_lastcheckpointsize`); the rule row below and the in-rule comment in
+> `o2-provision.py` are the derivation of record.
 
 | Rule | Severity | Condition | Response | Recovery |
 | --- | --- | --- | --- | --- |

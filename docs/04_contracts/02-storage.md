@@ -42,6 +42,14 @@ Every table requires an explicit owner, schema version, retention policy, writer
 > the DDL (`24_fingerprint_dedup.sql`) is retained on file but unused. This
 > contract section is retained as the historical DEC-038 record. See
 > `docs/05_deployment/change-records/CHG-022.md`.
+>
+> **SUPERSEDED AGAIN (2026-09-03, executed `c0c50ee6`; recorded 2026-09-23 as CHG-303 /
+> DEC-054):** the fingerprint-dedup operator now holds **no managed state at all**. `MapState`,
+> the expiry index and `StateTtlConfig` are gone; the dedup bound is a per-token count window of
+> `DEDUP_WINDOW_ENTRIES` = 200 entries per token (~10 s horizon) kept as plain
+> operator-local fields and **intentionally not checkpointed**, so a savepoint
+> carries no dedup set. `DEDUP_TTL_MS` is no longer read anywhere in the compute service. The
+> table rows below stay as the historical DEC-038 record; the current contract is DEC-054.
 
 The fingerprint-dedup KV state table (proposed name `fingerprint_dedup`) is the **authoritative durable dedup set**: the Signal job is its single writer owner, and any Flink-side copy is derived working state only. This contract fixes ownership, keys, and semantics now; the physical DDL, the cleanup mechanism, and measured sizes land in the DEC-038 implementation stage and remain evidence-gated where noted below.
 

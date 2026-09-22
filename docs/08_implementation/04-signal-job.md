@@ -38,6 +38,14 @@
 > forming-bar Fluss ownership is UNCHANGED — only the dedup arm is superseded.
 > Details: `docs/05_deployment/change-records/CHG-022.md`, DEC-040 in
 > `docs/01_project/04-decisions.md`, `logs/tracker-14/16-signal-chain-e2e-investigation-20260817.md`.
+>
+> **HEAP-WINDOW SUPERSESSION (2026-09-03, executed `c0c50ee6`; recorded 2026-09-23 as CHG-303 /
+> DEC-054):** the Design-B design above is itself superseded. `FingerprintDedupFunction` (uid
+> `fingerprint-dedup-v2`) keeps per-token count windows of `DEDUP_WINDOW_ENTRIES` = 200 as plain
+> operator-local fields and requests **no managed state** — nothing dedup-related is checkpointed,
+> and `DEDUP_TTL_MS` is not read. The TTL / `StateTtlConfig` description above is historical.
+> Measured 2026-09-23 on the re-scoped integration test: checkpoint size 5876 B at 2k fingerprints vs
+> 4885 B at 10k (flat — no growth), restore-to-first-new-output 1154 ms against a 30 000 ms budget.
 
 Build this phase, then implement the tests in the second section before moving on.
 

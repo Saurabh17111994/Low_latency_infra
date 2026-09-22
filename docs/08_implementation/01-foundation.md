@@ -72,7 +72,7 @@ Per the `00-start-here.md` conflict rule (`docs/08_implementation/00-start-here.
 
 #### Implementation checklist
 
-- [x] Centralized config-constants module (all keys, no scattered literals); startup rejects DEDUP_TTL_MS!=60000 and CANDLE_WINDOW_MS!=15000.
+- [x] Centralized config-constants module (all keys, no scattered literals); startup rejects DEDUP_TTL_MS!=60000 and CANDLE_WINDOW_MS!=15000. *(2026-09-03: `DEDUP_TTL_MS` is no longer read by the compute service — CHG-303 / DEC-054; the dedup bound is `DEDUP_WINDOW_ENTRIES`.)*
   - Source: 01-foundation.md -> "Required configuration constants" (orig L37)
   - Design: Design-ready | Implementation: Implemented | Evidence: Untested | Live-money: Blocked
   - Location: code/common/src/main/java/com/trading/common/config/PlatformConfig.java
@@ -88,7 +88,7 @@ All constants are versioned runtime configuration. No numeric literals scattered
 | `MAX_PENDING_APPEND_RECORDS` | `50000` (validated 100..1000000) | Stop accepting at limit; set readiness false |
 | `MAX_PENDING_APPEND_BYTES` | `min(67108864, floor(container_memory_limit_bytes × 0.10))` | Stop accepting at limit; set readiness false |
 | `PENDING_APPEND_WARNING_PERCENT` | `80` | Emit warning alert; set readiness false at 80% of either limit |
-| `DEDUP_TTL_MS` | `60000` | One minute; reject startup for any other value |
+| `DEDUP_TTL_MS` | *(deprecated)* | No longer read (2026-09-03, CHG-303); the dedup bound is `DEDUP_WINDOW_ENTRIES` = 200 entries |
 | `CANDLE_WINDOW_MS` | `15000` | Fifteen seconds; reject startup for any other value |
 | `CHECKPOINT_INTERVAL_MS` | `10000` | Signal and Babysitter jobs |
 | `CHECKPOINT_TIMEOUT_MS` | `30000` | Signal and Babysitter jobs |
