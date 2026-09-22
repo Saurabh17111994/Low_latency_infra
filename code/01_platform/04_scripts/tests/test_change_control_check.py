@@ -393,6 +393,17 @@ class RepoIndexTests(unittest.TestCase):
     def test_path_suffix_resolves_to_the_real_file(self):
         hit = ccc.find_basename("04_scripts/docs_audit.py")
         self.assertTrue(hit and os.path.isfile(hit), hit)
+
+    def test_path_suffix_resolves_from_any_cwd(self):
+        """Path-shaped refs must resolve when the tool runs from another cwd."""
+        with tempfile.TemporaryDirectory() as tmp:
+            previous = os.getcwd()
+            os.chdir(tmp)
+            try:
+                hit = ccc.find_basename("04_scripts/docs_audit.py")
+            finally:
+                os.chdir(previous)
+        self.assertTrue(hit and os.path.isfile(hit), hit)
         self.assertTrue(hit.endswith("04_scripts/docs_audit.py"), hit)
 
     def test_path_suffix_that_matches_nothing_stays_unresolved(self):

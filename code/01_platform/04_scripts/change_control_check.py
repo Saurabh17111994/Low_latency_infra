@@ -187,7 +187,10 @@ def find_basename(name):
     by_basename, rel_paths = _repo_index()
     if "/" in name:
         tail = "/" + (name[2:] if name.startswith("./") else name)
-        return next((rel for rel in rel_paths if rel == name or rel.endswith(tail)), None)
+        rel = next((r for r in rel_paths if r == name or r.endswith(tail)), None)
+        # Same contract as the bare-name branch below: an absolute path under
+        # ROOT, so callers can stat it from any cwd.
+        return os.path.join(ROOT, rel) if rel else None
     rel = by_basename.get(name)
     return os.path.join(ROOT, rel) if rel else None
 

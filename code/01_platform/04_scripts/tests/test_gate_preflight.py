@@ -96,6 +96,10 @@ def _flags(argv: list[str]) -> set[tuple[str, str]]:
         if flag in ("--env-file", "-f", "--project-directory", "-p"):
             value = argv[index + 1]
             if flag != "-p":
+                # The Makefile's $(COMPOSE) spells these root-relative, so
+                # resolve against the repo root, never the process cwd.
+                if not os.path.isabs(value):
+                    value = os.path.join(gate_preflight.PROJECT_ROOT, value)
                 value = os.path.realpath(value)
             pairs.add((flag, value))
             index += 2
