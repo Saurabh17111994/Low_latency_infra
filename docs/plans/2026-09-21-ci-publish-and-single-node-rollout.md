@@ -1,9 +1,11 @@
 # CI image publishing and the single-node first deploy — plan (2026-09-21)
 
-**Status:** proposed — awaiting approval. Nothing has been implemented for this plan yet;
-every fact below was measured on this workstation on 2026-09-21.
-**Baseline:** `ab3b1664`, tree clean, three commits unpushed (`c580f13c`, `987b8c0e`, `ab3b1664`).
-**Next free change-record id:** CHG-276.
+**Status:** in progress — **Phase 1 (CI publish) closed 2026-09-21** (run `35567002862`); Phases 2–4
+stay live. Below is the plan as proposed, and every fact in it was measured on this workstation on
+2026-09-21; **§9.2** holds Phase 1's closure evidence and the corrections that run forced.
+**Baseline:** `ab3b1664` as proposed; Stage 0's push never happened, so the local tip is now 29
+commits ahead of `origin/main` (`b77d820b`).
+**Next free change-record id:** CHG-303 (CHG-276 and CHG-277 were both taken during Phase 1).
 **Parent item:** `docs/08_implementation/09-production-swarm.md` build-plan item 1 — "Publish
 every image and wire the lock into the deploy environment", retargeted to public GHCR by
 CHG-274. This plan completes that item and reorders the rollout so the first real deploy is
@@ -349,7 +351,8 @@ the push. Three corrections to the table above, each now backed by that run rath
 reasoning:
 
 - The carrier of those digests is `code/01_platform/01_docker/images.published.env` (D2's dated
-  correction below), **not** `runtime.lock` as the Stage 1 and Stage 2 acceptance cells say.
+  correction below), **not** `runtime.lock` as the Stage 1 and Stage 2 acceptance cells, the
+  Phase 1 **Files** line and workflow step 6 all say.
 - The package-visibility click was **not needed**: anonymous reads work as measured, so a VM
   pulls by digest with no credential of any kind. (The anonymous *packages API* cannot confirm
   this — it returns 401 even for public packages — so the pull itself is the evidence.)
