@@ -229,3 +229,10 @@ overlay or environment variable remaps either, so the two stacks cannot run on t
 time - the second one to start fails to bind. The chosen port stays 5080 in both: one stack at a time.
 Check: grep -q '"5080:5080"' code/01_platform/01_docker/docker-compose.yml && grep -q 'published: 5080' code/01_platform/01_docker/docker-stack.yml
 Recheck when: either file's openobserve port lines change
+
+### FACT-018: certifying gate speed needs the working-tree .env tiering override
+Status: LIVE
+Verified: 2026-09-22 - `grep FLUSS_REMOTE_LOG_TASK_INTERVAL code/01_platform/01_docker/.env` gives `0s`; effect measured in `DdlApplyTool.java:1188` comment (remote-store share ~52 of the 83 gate minutes; teardown now ~65 ms/bucket local)
+Check: grep -q "^FLUSS_REMOTE_LOG_TASK_INTERVAL=0s$" code/01_platform/01_docker/.env
+Recheck when: .env tiering keys change, the remote store returns, or the next certificate re-measures
+The `.env` is gitignored, so the repo alone does not reproduce certificate timing: without `FLUSS_REMOTE_LOG_TASK_INTERVAL=0s`, RemoteLogManager pays remote-store round trips on every bucket teardown. Any certifying run must assert this override first; quoting certificate speed without it is invalid.
