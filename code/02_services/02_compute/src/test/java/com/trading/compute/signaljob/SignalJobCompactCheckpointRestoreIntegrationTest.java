@@ -1,6 +1,5 @@
 package com.trading.compute.signaljob;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -40,50 +39,42 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 /**
- * Design-B checkpoint/restore + rescale validation (2026-08-16; rules C + D of
- * the state-authoritative dedup change): the dedup set is authoritative Flink
- * keyed state, checkpointed atomically with the source offset, so (a) a strict
- * restore reconstructs the COMPLETE dedup set and a replay of already-accepted
- * fingerprints is never re-accepted, and (b) a rescale restore (1 → 2) cannot
- * split identical keys across subtasks — keyBy(instrument_token) + Flink
- * key-group redistribution keep every record of a token on exactly one
- * subtask at any parallelism.
+ * Checkpoint-bounded + strict-restore validation for the heap-window dedup
+ * (`fingerprint-dedup-v2`, 2026-09-03): the per-token repeat windows are PLAIN
+ * FIELDS on the operator, intentionally not checkpointed ("intentional
+ * amnesia"), so (a) the checkpoint must stay bounded however many fingerprints
+ * are fed - the operator requests no managed state at all - and (b) a strict
+ * restore at a 1 -> 2 rescale must still submit and run, with every restored
+ * window starting EMPTY.
  *
- * <p>This REPLACES the DEC-038 SIG-STATE-001 compact-checkpoint test: under
- * the old bounded-cache design the checkpoint had to stay flat across dedup
- * cardinality (the Fluss table was authoritative); under design B the
- * checkpoint carries the full live set by construction, so the measured bytes
- * are evidence that the state IS checkpointed (job B = 5x the live set of job
- * A must produce a larger checkpoint), and the restore phase is the
- * functional proof that the checkpointed set is complete and correct.
- *
- * <p><b>The post-checkpoint replay window.</b> Records accepted AFTER the last
- * completed checkpoint are replayed on restore; their entries are not in the
- * restored state, so they re-pass downstream. The window is bounded by the
- * checkpoint interval (10 s) and is inherent to at-least-once recovery — it
- * existed identically under DEC-038 (post-checkpoint first-seen rows had not
- * reached a completed Fluss checkpoint either). This test validates the
- * PRE-checkpoint window: every fingerprint whose entry was checkpointed is
- * swallowed on replay, never re-accepted.
+ * <p><b>Why the re-fed rows all come back out.</b> A restored job starts with
+ * empty windows, so a deliberate full replay (this test) re-accepts every
+ * fingerprint - that is the design, not a defect. Production safety comes from
+ * checkpointed SOURCE OFFSETS: a restore resumes where the checkpoint left off,
+ * so already-emitted ticks are never replayed, and SignalJobConfig fails closed
+ * on a replay unless ALLOW_FULL_REPLAY=true (which this test sets to run the
+ * synthetic re-feed). This file asserted the RETIRED Design-B contract - "the
+ * checkpoint MUST grow with the live set" and "a replay is never re-accepted" -
+ * until 2026-09-23, when the 2026-09-03 rewrite (`c0c50ee6`) was reconciled
+ * here; it had been red since that rewrite.
  *
  * <p><b>Phases.</b> Job A (parallelism 2, 2,000 fingerprints) and job B
- * (parallelism 1, 10,000 fingerprints — the full live set on one subtask)
- * each emit, checkpoint once on top of the fully-built state, and are
- * cancelled with the checkpoint retained. Phase 3 restores job B's latest
- * checkpoint at 2x parallelism (1 → 2 rescale) and re-feeds all 10,000 + 2
- * new fingerprints: exactly the 2 NEW ones emit (a zero-state re-run would
- * emit all 10,002). Restore-submit → first-new-output duration must stay under
- * the 30 s checkpoint budget.
+ * (parallelism 1, 10,000 fingerprints - the full fed set on one key) each
+ * emit, checkpoint once, and are cancelled with the checkpoint retained.
+ * Phase 3 restores job B's latest checkpoint at 2x parallelism (1 -> 2
+ * rescale) and re-feeds all 10,000 + 2 new fingerprints: every re-fed
+ * fingerprint is re-accepted (empty windows), and the job stays RUNNING.
+ * Restore-submit -> first-output duration must stay under the 30 s budget.
  *
  * <p>Gate: {@code @EnabledIfEnvironmentVariable(COMPUTE_INT_TEST_SIG_STATE_RESTORE=true)}
- * — skipped in the normal suite (MiniCluster). Host-runnable: embedded
- * MiniCluster + {@code file://} checkpoints — no external cluster, no Fluss,
+ * - skipped in the normal suite (MiniCluster). Host-runnable: embedded
+ * MiniCluster + {@code file://} checkpoints - no external cluster, no Fluss,
  * no S3. Run:
  * {@code COMPUTE_INT_TEST_SIG_STATE_RESTORE=true mvn -o -f code/02_services/02_compute/pom.xml test -Dtest=SignalJobCompactCheckpointRestoreIntegrationTest}
  */
 @Tag("integration")
 @EnabledIfEnvironmentVariable(named = "COMPUTE_INT_TEST_SIG_STATE_RESTORE", matches = "true")
-@DisplayName("Design B: checkpointed dedup set survives restore + 1->2 rescale; replay never re-accepts")
+@DisplayName("heap-window dedup: checkpoint stays bounded at 5x fed cardinality; strict 1->2 restore runs with empty windows")
 class SignalJobCompactCheckpointRestoreIntegrationTest {
 
     /** Collects main-output fingerprints (accepted first-seen), parallel-safe. */
@@ -95,9 +86,10 @@ class SignalJobCompactCheckpointRestoreIntegrationTest {
     private static final int RUN_B_COUNT = 10_000;
 
     /**
-     * Wall-clock base for event times: every re-fed row must still be inside
-     * its 5-minute TTL at restore time, so the restored entries are still live
-     * (expiry = first_seen + TTL, first_seen based on the real clock).
+     * Wall-clock base for event times. The dedup window is a per-token COUNT
+     * window (DEDUP_WINDOW_ENTRIES, no TTL), so event-time spacing carries no
+     * expiry meaning here; the base just puts the 2 "new" rows after the
+     * re-fed block.
      */
     private static final long WALL_T0 = System.currentTimeMillis();
 
@@ -107,7 +99,8 @@ class SignalJobCompactCheckpointRestoreIntegrationTest {
 
     private static Map<String, String> env() {
         Map<String, String> env = new HashMap<>();
-        env.put("DEDUP_TTL_MS", "60000");
+        // No dedup-TTL key: unread since the 2026-09-03 heap rewrite - the
+        // window is a per-token COUNT bound (DEDUP_WINDOW_ENTRIES).
         env.put("CANDLE_WINDOW_MS", "15000");
         env.put("CHECKPOINT_INTERVAL_MS", "10000");
         env.put("CHECKPOINT_TIMEOUT_MS", "30000");
@@ -341,8 +334,8 @@ class SignalJobCompactCheckpointRestoreIntegrationTest {
     }
 
     @Test
-    @DisplayName("checkpointed dedup set survives restore + 1->2 rescale; replay never re-accepts; < 30s")
-    void checkpointedStateRestoresAndRescalesWithoutReacceptingReplay() throws Exception {
+    @DisplayName("checkpoint stays bounded at 5x fed cardinality; strict 1->2 restore runs with empty windows; < 30s")
+    void boundedCheckpointRestoresAndRescalesWithEmptyWindows() throws Exception {
         org.apache.logging.log4j.core.config.Configurator.setRootLevel(
                 org.apache.logging.log4j.Level.INFO);
         Path workDir = Files.createTempDirectory("sig-state-001-");
@@ -354,15 +347,18 @@ class SignalJobCompactCheckpointRestoreIntegrationTest {
             // parallelism 2 is a genuine 1 -> 2 rescale.
             long sB = runSizedJob(workDir, "jobB", "fp-b", RUN_B_COUNT, 1);
 
-            System.out.println("DESIGN-B[checkpoint-size] S(2k)=" + sA
+            System.out.println("HEAP-WINDOW[checkpoint-size] S(2k)=" + sA
                     + " bytes, S(10k)=" + sB + " bytes, ratio=" + (sB / (double) sA));
-            // Inverted DEC-038 invariant: the checkpoint MUST grow with the
-            // live set — the full dedup set is checkpointed state now. A flat
-            // checkpoint would mean the state is not being captured.
-            assertTrue(sB > sA,
-                    "checkpoint must carry the full live dedup set: 5x fingerprints "
-                            + "(2,000 -> 10,000) must grow the checkpoint from " + sA
-                            + " to more than " + sA + " bytes (got " + sB + ")");
+            // Bounded-checkpoint guard (the DEC-038-era shape, now for the
+            // heap-window design): the windows are plain fields that are never
+            // checkpointed, so 5x the fed cardinality must not grow the
+            // checkpoint. Growth would mean repeat state crept back into
+            // managed state - exactly the regression this file guards.
+            assertTrue(sB <= sA * 1.5,
+                    "checkpoint must not scale with the fed cardinality: the dedup windows "
+                            + "are intentionally not checkpointed, so " + RUN_B_COUNT
+                            + " fingerprints must keep the checkpoint near S(" + RUN_A_COUNT
+                            + ")=" + sA + " bytes (+50% headroom), got " + sB + " bytes");
 
             // ---- Phase 3: strict restore at 2x parallelism (1 -> 2 rescale) -
             String restore = latestCompletedCheckpoint(workDir.resolve("jobB"));
@@ -370,7 +366,7 @@ class SignalJobCompactCheckpointRestoreIntegrationTest {
             long restoreStart = System.nanoTime();
             runRestoreAndVerify(workDir, restore);
             long restoreMs = (System.nanoTime() - restoreStart) / 1_000_000L;
-            System.out.println("DESIGN-B[restore] restore-to-first-new-output="
+            System.out.println("HEAP-WINDOW[restore] restore-to-first-new-output="
                     + restoreMs + " ms (budget 30000)");
             assertTrue(restoreMs < 30_000L,
                     "restore must resume inside the 30 s budget, took " + restoreMs + " ms");
@@ -383,7 +379,8 @@ class SignalJobCompactCheckpointRestoreIntegrationTest {
      * Run one sized job (fresh MiniCluster): await all `count` first-seen
      * emitted + one completed checkpoint ON TOP of that state (retention 1
      * keeps exactly the latest chk-N on disk), then return the checkpoint's
-     * byte size.
+     * byte size. Those bytes are the graph's offset/watermark skeleton
+     * only - the dedup windows are never checkpointed.
      */
     private long runSizedJob(Path workDir, String runId, String fpPrefix, int count,
             int parallelism) throws Exception {
@@ -396,9 +393,9 @@ class SignalJobCompactCheckpointRestoreIntegrationTest {
             EMITTED.clear();
             JobClient job = submit(config, rows(fpPrefix, count, 1L, WALL_T0), false, null,
                     parallelism);
-            // State fully built FIRST (main output), then one completed
-            // checkpoint ON TOP of it — the measured bytes are the checkpoint
-            // that carries all `count` fingerprints' dedup state.
+            // Fed set fully emitted FIRST (main output), then one completed
+            // checkpoint ON TOP of it - the measured bytes must NOT carry the
+            // dedup set (plain fields, fingerprint-dedup-v2).
             awaitTrue(fpPrefix + ": all " + count + " first-seen emitted",
                     () -> EMITTED.size() == count);
             awaitCompletedCheckpoints(job, sub, 1);
@@ -412,10 +409,11 @@ class SignalJobCompactCheckpointRestoreIntegrationTest {
 
     /**
      * Fresh MiniCluster, strict restore at 2x parallelism (job B ran at 1),
-     * re-feed all 10,000 + 2 new. Every re-fed fingerprint whose entry was in
-     * the checkpoint must be swallowed (never re-accepted); only the 2 new
-     * pass. All rows share token 1 — the key-group redistribution across the
-     * 1 -> 2 rescale must keep the whole set on exactly one subtask.
+     * re-feed all 10,000 + 2 new. The restored windows are empty by design, so
+     * every re-fed fingerprint is re-accepted: the assertions are that the
+     * strict 1 -> 2 restore submits, the job keeps RUNNING, and the re-fed set
+     * comes back out (all rows share token 1, so key-group redistribution must
+     * keep the whole set on exactly one subtask).
      */
     private void runRestoreAndVerify(Path workDir, String restorePath) throws Exception {
         EMITTED.clear();
@@ -427,16 +425,20 @@ class SignalJobCompactCheckpointRestoreIntegrationTest {
         try {
             List<RowSpec> refeed = new ArrayList<>(rows("fp-b", 10_000, 1L, WALL_T0));
             refeed.addAll(rows("fp-new", 2, 1L, WALL_T0 + 20_000_000L));
+            java.util.Set<String> expectedFingerprints =
+                    refeed.stream().map(RowSpec::fingerprint).collect(Collectors.toSet());
             JobClient job = submit(config, refeed, true, restorePath, 2);
-            awaitTrue("restored job to pass exactly the 2 NEW fingerprints",
-                    () -> EMITTED.size() == 2);
-            List<String> emitted = new ArrayList<>(EMITTED);
-            List<String> expected = rows("fp-new", 2, 1L, WALL_T0 + 20_000_000L).stream()
-                    .map(RowSpec::fingerprint).sorted().collect(Collectors.toList());
-            assertEquals(expected, emitted.stream().sorted().collect(Collectors.toList()),
-                    "restored dedup state must swallow all 10,000 re-fed fingerprints "
-                            + "(no full replay) and pass exactly the new ones — a zero-state "
-                            + "re-run would have emitted all 10,002");
+            awaitTrue("restored job to re-emit every re-fed fingerprint",
+                    () -> EMITTED.containsAll(expectedFingerprints));
+            // Containment, not an exact count: the legacy test source runs one
+            // copy per subtask while the per-token window holds 200 entries, so
+            // a lagging copy can legitimately re-accept a row it already sent -
+            // and that re-acceptance is exactly what empty restored windows do.
+            assertTrue(EMITTED.containsAll(expectedFingerprints),
+                    "every re-fed fingerprint must be re-accepted after a restore: the restored "
+                            + "windows are empty by design (intentional amnesia); safety rests on "
+                            + "checkpointed source offsets, not restored windows. saw "
+                            + EMITTED.size() + " emissions for " + refeed.size() + " re-fed rows");
             assertTrue(job.getJobStatus().get(15, TimeUnit.SECONDS) == JobStatus.RUNNING,
                     "restored job must run (strict restore at 1 -> 2 did not fail)");
             cancelAndWait(job);
