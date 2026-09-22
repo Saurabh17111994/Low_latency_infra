@@ -1,6 +1,9 @@
 package com.trading.common.schema.fluss;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.admin.Admin;
@@ -63,6 +66,7 @@ public final class FlussPlacementAwait {
      */
     public static void awaitPlacement(
             Connection connection, Admin admin, String what, Duration budget) throws Exception {
+        dropAbandoned(admin);
         long deadline = System.currentTimeMillis() + budget.toMillis();
         Exception last = null;
         int attempt = 0;
@@ -74,17 +78,28 @@ public final class FlussPlacementAwait {
             TablePath path =
                     TablePath.of(
                             "default", "await_canary_" + Long.toHexString(System.nanoTime()));
+            boolean created = false;
             try {
                 admin.createTable(path, CANARY, false).get(30, TimeUnit.SECONDS);
+                created = true;
                 AppendWriter writer = connection.getTable(path).newAppend().createWriter();
                 writer.append(GenericRow.of(BinaryString.fromString("probe")))
                         .get(PROBE_APPEND_TIMEOUT_S, TimeUnit.SECONDS);
                 // The append resolved, so this canary holds no pending batch and is safe to drop.
                 dropQuietly(admin, path);
+                // Placement has resumed, so earlier attempts' canaries now have leaders and their
+                // batches have resolved — this is the moment they can be dropped without the
+                // Sender busy-loop.
+                dropAbandoned(admin);
                 System.out.printf("[await] %s placement ready after %d attempt(s)%n", what, attempt);
                 return;
             } catch (Exception e) {
                 last = e;
+                if (created) {
+                    // Deliberately NOT dropped here: see ABANDONED. Dropping now would make the
+                    // client Sender busy-loop on metadata for the whole cluster.
+                    ABANDONED.add(path);
+                }
                 Thread.sleep(PROBE_INTERVAL_MS);
             }
         }
@@ -97,6 +112,44 @@ public final class FlussPlacementAwait {
                         + " attempt(s)); last failure: "
                         + last,
                 last);
+    }
+
+    /**
+     * Canaries whose probe write failed. Such a canary may still hold a pending client batch, and
+     * dropping a table under a pending batch makes the client Sender busy-loop on metadata, so it
+     * is dropped later instead — once the cluster is demonstrably placing replicas again. Without
+     * this list every retry leaked one table into the catalog (measured 2026-09-22: 4 LOG fixtures
+     * needed 2 attempts each and left exactly 4 {@code await_canary_*} tables, 31/27 vs the
+     * manifest).
+     */
+    private static final List<TablePath> ABANDONED =
+            Collections.synchronizedList(new ArrayList<TablePath>());
+
+    /**
+     * Drops canaries abandoned by earlier attempts. Safe only once placement has resumed, because
+     * that is when their leaders exist and their pending batches have resolved. Called on entry
+     * (to clear stragglers from a previous gate) and after a successful probe.
+     */
+    private static void dropAbandoned(Admin admin) {
+        List<TablePath> pending;
+        synchronized (ABANDONED) {
+            if (ABANDONED.isEmpty()) {
+                return;
+            }
+            pending = new ArrayList<TablePath>(ABANDONED);
+            ABANDONED.clear();
+        }
+        int dropped = 0;
+        for (TablePath path : pending) {
+            try {
+                admin.dropTable(path, false).get(30, TimeUnit.SECONDS);
+                dropped++;
+            } catch (Exception ignored) {
+                // Best effort; a canary left behind is drift, not a failure of the test.
+            }
+        }
+        System.out.printf(
+                "[await] dropped %d/%d abandoned canary table(s)%n", dropped, pending.size());
     }
 
     private static void dropQuietly(Admin admin, TablePath path) {
