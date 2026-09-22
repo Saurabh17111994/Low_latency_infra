@@ -8,7 +8,7 @@
 # Never commit digests you cannot verify from the upstream registry.
 #
 # VERSIONS: aligned to the pinned version matrix (DEC-021, project memory #17).
-#   Fluss: 0.9.1-incubating | Flink: 2.2.1 | Java: 17.0.19 | Python: 3.11.9
+#   Fluss: 1.0.0 | Flink: 2.2.1 | Java: 17.0.19 | Python: 3.11.9
 #   OpenObserve: v0.91.5-amd64 (public.ecr.aws/zinclabs/openobserve)
 #
 # Last updated: 2026-09-18 (CHG-218: the four local-build image IDs are retired as pins and
@@ -22,7 +22,7 @@
 #   64-hex form — they carried 12-hex truncations)
 
 # ---- Container image versions (semantic tags; fill digests before production) ----
-FLUSS_IMAGE=apache/fluss:0.9.1-incubating@sha256:65f5513b33dde10ace4f8adb3956f17226a2a1e2663f92b3096e4769b0ee1d1c
+FLUSS_IMAGE=apache/fluss:1.0.0@sha256:ff461b45438033da4fd1c2556d3f978f3603bb3632fe075c2bd57388339a58cb
 FLINK_IMAGE=flink:2.2.1-scala_2.12-java17@sha256:1934ab4b984d0873ef46825b1140377eed34475904aa077062497712d6e259f8
 # NOTE (2026-09-15, digest-pin live probe): flink:2.2.1-scala_2.12-java17 tag
 # has moved upstream (index sha256:d2b6d48b..., 2026-09-09, new temurin base).
@@ -51,12 +51,12 @@ OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64@sha256:9e3da
 
 # ---- Library and runtime versions (from code/pom.xml dependency management) ----
 FLINK_VERSION=2.2.1
-FLUSS_VERSION=0.9.1-incubating
+FLUSS_VERSION=1.0.0
 JAVA_VERSION=17.0.19
 SCALA_BINARY_VERSION=2.12
 
 # ---- Fluss-Flink connector ----
-# Fluss 0.9.1-incubating ships connectors matching Flink minor: fluss-flink-2.2
+# Fluss 1.0.0 ships connectors matching Flink minor: fluss-flink-2.2
 FLUSS_FLINK_CONNECTOR=fluss-flink-2.2
 
 # ---- Arrow Trade protocol evidence ----

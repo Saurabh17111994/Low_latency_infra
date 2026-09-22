@@ -2,8 +2,8 @@
 # digest-pin.sh — resolve mutable image tags to immutable digests.
 #
 # Usage:
-#   ./digest-pin.sh apache/fluss:0.9.1-incubating
-#   → apache/fluss:0.9.1-incubating@sha256:<manifest-digest>
+#   ./digest-pin.sh apache/fluss:1.0.0
+#   → apache/fluss:1.0.0@sha256:<manifest-digest>
 #
 # Use this to fill the digest fields in runtime.lock before any production
 # deployment. CI SHALL reject any runtime.lock that still contains a bare

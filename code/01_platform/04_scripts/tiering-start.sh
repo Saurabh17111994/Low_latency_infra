@@ -18,7 +18,7 @@ set -euo pipefail
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 _DOCKER_DIR="$(cd "$_SCRIPT_DIR/../01_docker" && pwd)"
 JM=01_docker-flink-jobmanager-1
-TIERING_JAR=/opt/flink/lib/fluss-flink-tiering-0.9.1-incubating.jar
+TIERING_JAR=/opt/flink/lib/fluss-flink-tiering-1.0.0.jar
 ENTRY=org.apache.fluss.flink.tiering.FlussLakeTieringEntrypoint
 
 # --- config from the same files compose interpolates -------------------

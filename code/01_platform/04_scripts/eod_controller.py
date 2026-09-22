@@ -32,7 +32,7 @@ M2_REPO = (os.environ.get("EOD_M2_REPO") or os.environ.get("DDL_APPLY_M2_REPO")
 
 # Pinned Fluss + Jackson versions — same set the ddl-apply engine uses
 # (ddl_apply.py JACKSON_VERSION/SLF4J_VERSION).
-FLUSS_VERSION = os.environ.get("FLUSS_VERSION", "0.9.1-incubating")
+FLUSS_VERSION = os.environ.get("FLUSS_VERSION", "1.0.0")
 JACKSON_VERSION = os.environ.get("JACKSON_VERSION", "2.16.1")
 SLF4J_VERSION = os.environ.get("SLF4J_VERSION", "2.0.9")
 

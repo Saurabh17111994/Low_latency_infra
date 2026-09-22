@@ -8,13 +8,13 @@
 # Never commit digests you cannot verify from the upstream registry.
 #
 # VERSIONS: aligned to the pinned version matrix (DEC-021, project memory #17).
-#   Fluss: 0.9.1-incubating | Flink: 2.2.1 | Java: 17.0.19 | Python: 3.11.9
+#   Fluss: 1.0.0 | Flink: 2.2.1 | Java: 17.0.19 | Python: 3.11.9
 #   OpenObserve: v0.91.5-amd64 (public.ecr.aws/zinclabs/openobserve)
 #
 # Last updated: 2026-07-24 (pinned matrix aligned)
 
 # ---- Container image versions (semantic tags; fill digests before production) ----
-FLUSS_IMAGE=apache/fluss:0.9.1-incubating
+FLUSS_IMAGE=apache/fluss:1.0.0
 FLINK_IMAGE=flink:2.2.1-scala_2.12-java17
 OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64
 # INGESTION_IMAGE=  # built from code/02_services/01_ingestion — pin digest
@@ -23,12 +23,12 @@ OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64
 
 # ---- Library and runtime versions (from code/pom.xml dependency management) ----
 FLINK_VERSION=2.2.1
-FLUSS_VERSION=0.9.1-incubating
+FLUSS_VERSION=1.0.0
 JAVA_VERSION=17.0.19
 SCALA_BINARY_VERSION=2.12
 
 # ---- Fluss-Flink connector ----
-# Fluss 0.9.1-incubating ships connectors matching Flink minor: fluss-flink-2.2
+# Fluss 1.0.0 ships connectors matching Flink minor: fluss-flink-2.2
 FLUSS_FLINK_CONNECTOR=fluss-flink-2.2
 
 # ---- Arrow Trade protocol evidence ----

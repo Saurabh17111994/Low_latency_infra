@@ -39,14 +39,14 @@
 set -euo pipefail
 
 MAVEN_BASE="${FLUSS_MAVEN_BASE:-https://repo1.maven.org/maven2}"
-FLUSS_VERSION="0.9.1-incubating"
+FLUSS_VERSION="1.0.0"
 
 # --- The pins. name|sha256|maven-relative-path -----------------------------
 # Identical artifacts (and identical SHA256s) to the ones the Flink image
 # stages, so the two images cannot drift apart unnoticed.
 PINS=(
-	"fluss-fs-s3-${FLUSS_VERSION}.jar|9d85c2d83daa0ad5a7c3980162e96022154467f378b08333faa9d37beab682e3|org/apache/fluss/fluss-fs-s3/${FLUSS_VERSION}/fluss-fs-s3-${FLUSS_VERSION}.jar"
-	"fluss-fs-hdfs-${FLUSS_VERSION}.jar|04825f7dcba5768eb555c1acfc3d9f71c2cc2c42d6ba1a5e6e22dea6785f0ed4|org/apache/fluss/fluss-fs-hdfs/${FLUSS_VERSION}/fluss-fs-hdfs-${FLUSS_VERSION}.jar"
+	"fluss-fs-s3-${FLUSS_VERSION}.jar|5226480ec1905e7b90f5684fa7736580ed0be0de082697f82fb467bbe99a8a00|org/apache/fluss/fluss-fs-s3/${FLUSS_VERSION}/fluss-fs-s3-${FLUSS_VERSION}.jar"
+	"fluss-fs-hdfs-${FLUSS_VERSION}.jar|bea4937198ffb52827402b057d0afcc0de0be9b761e7c727c824c5d8e9218597|org/apache/fluss/fluss-fs-hdfs/${FLUSS_VERSION}/fluss-fs-hdfs-${FLUSS_VERSION}.jar"
 )
 
 die() { echo "fetch-jars: $*" >&2; exit 1; }

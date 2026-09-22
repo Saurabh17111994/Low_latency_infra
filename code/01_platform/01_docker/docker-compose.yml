@@ -418,10 +418,18 @@ services:
         datalake.iceberg.iceberg.hadoop.fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
         # R2 stall containment (2026-08-12): a wedged R2 socket must fail the
         # lake reader fast, not hang forever (plan Phase 3). In hadoop-aws
-        # 3.3.x fs.s3a.connection.timeout maps to the SDK SOCKET read timeout
+        # 3.4.3 fs.s3a.connection.timeout maps to the SDK SOCKET read timeout
         # (S3A default 200000 ms) and fs.s3a.connection.establish.timeout to
         # the TCP connect timeout (default 50000 ms); fs.s3a.socket.timeout is
-        # NOT read by S3AUtils.initConnectionSettings and must not be set.
+        # NOT read and must not be set.
+        #
+        # Re-verified against fluss-fs-s3-1.0.0.jar on 2026-09-22 for the 1.0
+        # upgrade: 1.0 moves S3A to AWS SDK v2 only (6659 v2 entries, 0 v1), so
+        # this mapping was at risk of silently reverting. It does not —
+        # org.apache.hadoop.fs.s3a.impl.AWSClientConfig still reads both keys,
+        # converts them to java.time.Duration, and applies them to the SDK v2
+        # ApacheHttpClient builder. fs.s3a.socket.timeout appears nowhere in the
+        # jar, so the "must not be set" rule still holds.
         # Values are unquoted integers: S3AUtils.intOption parses them and a
         # quoted string raises NumberFormatException on first S3 access.
         # Match the batch job's CANDLE_MIGRATION_S3_*_TIMEOUT_MS env defaults.
@@ -533,10 +541,18 @@ services:
         datalake.iceberg.iceberg.hadoop.fs.s3a.impl: org.apache.hadoop.fs.s3a.S3AFileSystem
         # R2 stall containment (2026-08-12): a wedged R2 socket must fail the
         # lake reader fast, not hang forever (plan Phase 3). In hadoop-aws
-        # 3.3.x fs.s3a.connection.timeout maps to the SDK SOCKET read timeout
+        # 3.4.3 fs.s3a.connection.timeout maps to the SDK SOCKET read timeout
         # (S3A default 200000 ms) and fs.s3a.connection.establish.timeout to
         # the TCP connect timeout (default 50000 ms); fs.s3a.socket.timeout is
-        # NOT read by S3AUtils.initConnectionSettings and must not be set.
+        # NOT read and must not be set.
+        #
+        # Re-verified against fluss-fs-s3-1.0.0.jar on 2026-09-22 for the 1.0
+        # upgrade: 1.0 moves S3A to AWS SDK v2 only (6659 v2 entries, 0 v1), so
+        # this mapping was at risk of silently reverting. It does not —
+        # org.apache.hadoop.fs.s3a.impl.AWSClientConfig still reads both keys,
+        # converts them to java.time.Duration, and applies them to the SDK v2
+        # ApacheHttpClient builder. fs.s3a.socket.timeout appears nowhere in the
+        # jar, so the "must not be set" rule still holds.
         # Values are unquoted integers: S3AUtils.intOption parses them and a
         # quoted string raises NumberFormatException on first S3 access.
         # Match the batch job's CANDLE_MIGRATION_S3_*_TIMEOUT_MS env defaults.
@@ -593,7 +609,7 @@ services:
       # only in hadoop-mapreduce-client-core. Do NOT mount the full
       # flink-shaded-hadoop-2-uber (2.8.3): its Configuration breaks fluss-fs-s3's
       # S3A (NoSuchMethodError getTimeDuration). This minimal jar carries ONLY
-      # org/apache/hadoop/mapreduce/** — Configuration stays the 3.3.x one
+      # org/apache/hadoop/mapreduce/** — Configuration stays the 3.4.3 one
       # bundled in fluss-fs-s3/fluss-fs-hadoop-shaded.
       - ./fluss-plugins/iceberg/hadoop-mapreduce-compat-2.8.5.jar:/opt/flink/lib/hadoop-mapreduce-compat-2.8.5.jar:ro
 
@@ -709,7 +725,7 @@ services:
       # only in hadoop-mapreduce-client-core. Do NOT mount the full
       # flink-shaded-hadoop-2-uber (2.8.3): its Configuration breaks fluss-fs-s3's
       # S3A (NoSuchMethodError getTimeDuration). This minimal jar carries ONLY
-      # org/apache/hadoop/mapreduce/** — Configuration stays the 3.3.x one
+      # org/apache/hadoop/mapreduce/** — Configuration stays the 3.4.3 one
       # bundled in fluss-fs-s3/fluss-fs-hadoop-shaded.
       - ./fluss-plugins/iceberg/hadoop-mapreduce-compat-2.8.5.jar:/opt/flink/lib/hadoop-mapreduce-compat-2.8.5.jar:ro
 

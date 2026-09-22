@@ -24,7 +24,7 @@ Iceberg's shaded parquet write path (`ParquetInputFormat` inside
 the tiering job dies with `NoClassDefFoundError` under sustained write volume.
 
 This minimal jar contains ONLY `org/apache/hadoop/mapreduce/**` (494 classes)
-so it cannot clash with the hadoop 3.3.x `Configuration` bundled in the
+so it cannot clash with the hadoop 3.4.3 `Configuration` bundled in the
 fluss-fs jars. Rebuild if lost:
 
 ```bash

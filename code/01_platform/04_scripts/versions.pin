@@ -16,7 +16,7 @@
 # and docs/08_implementation/12-version-compatibility-evidence.md.
 
 FLINK_VERSION=2.2.1
-FLUSS_VERSION=0.9.1-incubating
+FLUSS_VERSION=1.0.0
 ZOOKEEPER_VERSION=3.9.2
 # Python runtime pin (VM-PYTHON-002). The ddl-apply image must ship this exact
 # series — enforced by `ddl-apply version` (ddl-apply-run.sh). The 2026-08-24
@@ -46,8 +46,8 @@ EXECUTION_BRIDGE_SDK_TREE_SHA256=1ea24cd66aed0d020c5b4cb3e97082aafba511a670c5392
 # recorded") ----
 # sha256 of the pinned Maven artifacts as installed in ~/.m2 (recorded 2026-08-13;
 # re-run `sha256sum` on the same artifact path to verify reproducibility).
-FLUSS_CLIENT_JAR_SHA256=6921994a2067704ac714cb03cc727ff8448453815eda83b792cd6f937fc491d2
-FLUSS_FLINK_CONNECTOR_JAR_SHA256=5dddeb4cb9f21cd79fa1419b1cd76e2352a22726b17e7f181fecbbe9c7cb2f5e
+FLUSS_CLIENT_JAR_SHA256=a73101b243277f618f0acfd8a38eb31635f9cb903c040168809d480f575654c0
+FLUSS_FLINK_CONNECTOR_JAR_SHA256=8cad6d1342b7e2deaf3db7fe7fbc1911c05823a538517b58da32cc0e8601ed8e
 FLINK_STREAMING_JAVA_JAR_SHA256=bb41cde2d16324553210504d5a083bba8ff7396b8b6e5e7a41ec3377f4d8ece4
 FLINK_CLIENTS_JAR_SHA256=bba1942af113163ac32a9cfca2436f6c8f2568da1858d222c75bad285c7433be
 FLINK_RUNTIME_JAR_SHA256=cd60a8ae96d5baed7cf19a6637555cbbdc04739da8b3d26c9f828da3bb2b44e3

@@ -258,7 +258,7 @@ echo "SOAK-E2E: capture complete — evidence at $PHASE_OUT"
 # Those settings cannot travel as Fluss client options: FlussConnection forwards
 # only 'client.fs.'-prefixed keys, while the shipped S3 plugin matches only
 # 's3.', 's3a.' and 'fs.s3a.' and never strips 'client.fs.' (verified against
-# fluss-fs-s3-0.9.1-incubating.jar — the keys are ignored and every read fails
+# fluss-fs-s3-1.0.0.jar — the keys are ignored and every read fails
 # with NoAwsCredentialsException). Hadoop reads core-site.xml off the classpath,
 # which is the route that works; the credentials in it are ${env.NAME}
 # references, so no secret is stored in the repository.
@@ -273,7 +273,7 @@ gate_wire_probe_filesystem() {
   local plugin_dir="$COMPOSE_DIR/fluss-plugins/iceberg"
   local jar
   local -a jars=()
-  for jar in "$plugin_dir/fluss-fs-s3-0.9.1-incubating.jar" \
+  for jar in "$plugin_dir/fluss-fs-s3-1.0.0.jar" \
              "$plugin_dir/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar"; do
     [ -r "$jar" ] || { echo "SOAK-E2E: WARN no S3 plugin jar at $jar — the census can only read local segments; a tiered segment will under-count it. Install the plugin jars or accept local-only reads." >&2; return 0; }
     jars+=("$jar")

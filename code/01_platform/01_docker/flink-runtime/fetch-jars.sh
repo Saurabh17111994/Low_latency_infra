@@ -25,7 +25,7 @@
 # org.apache.hadoop.mapreduce.lib.input.FileInputFormat, which exists only in
 # hadoop-mapreduce-client-core (M-15/M-16, docs/06_operations/07-lake-archive-ops.md).
 # The full 2.8.5 jar also carries org/apache/hadoop/mapred/**, whose
-# Configuration would clash with the 3.3.x one bundled in the fluss-fs jars
+# Configuration would clash with the 3.4.3 one bundled in the fluss-fs jars
 # (NoSuchMethodError getTimeDuration). So the compat jar is DERIVED here: it is
 # exactly the org/apache/hadoop/mapreduce/** package, nothing else. File
 # timestamps are pinned so an independent run reproduces the same bytes, and
@@ -41,18 +41,18 @@
 set -euo pipefail
 
 MAVEN_BASE="${FLUSS_MAVEN_BASE:-https://repo1.maven.org/maven2}"
-FLUSS_VERSION="0.9.1-incubating"
+FLUSS_VERSION="1.0.0"
 MAPREDUCE_VERSION="2.8.5"
 
 # --- The pins. name|sha256|maven-relative-path -----------------------------
 # Every entry is verified before use; --verify checks the same table, so a
 # corrupted or substituted jar in an image layer is a hard failure.
 PINS=(
-	"fluss-flink-2.2-${FLUSS_VERSION}.jar|5dddeb4cb9f21cd79fa1419b1cd76e2352a22726b17e7f181fecbbe9c7cb2f5e|org/apache/fluss/fluss-flink-2.2/${FLUSS_VERSION}/fluss-flink-2.2-${FLUSS_VERSION}.jar"
-	"fluss-flink-tiering-${FLUSS_VERSION}.jar|54c2f4125a74bacb304d182760017502225b283b3d7364baa1c783b8f014cb4e|org/apache/fluss/fluss-flink-tiering/${FLUSS_VERSION}/fluss-flink-tiering-${FLUSS_VERSION}.jar"
-	"fluss-lake-iceberg-${FLUSS_VERSION}.jar|b9d8aa37a1a1a1eb14c1a365ae40e8114dcff26367cdc08156ae4f6d0d911d93|org/apache/fluss/fluss-lake-iceberg/${FLUSS_VERSION}/fluss-lake-iceberg-${FLUSS_VERSION}.jar"
-	"fluss-fs-s3-${FLUSS_VERSION}.jar|9d85c2d83daa0ad5a7c3980162e96022154467f378b08333faa9d37beab682e3|org/apache/fluss/fluss-fs-s3/${FLUSS_VERSION}/fluss-fs-s3-${FLUSS_VERSION}.jar"
-	"fluss-fs-hdfs-${FLUSS_VERSION}.jar|04825f7dcba5768eb555c1acfc3d9f71c2cc2c42d6ba1a5e6e22dea6785f0ed4|org/apache/fluss/fluss-fs-hdfs/${FLUSS_VERSION}/fluss-fs-hdfs-${FLUSS_VERSION}.jar"
+	"fluss-flink-2.2-${FLUSS_VERSION}.jar|8cad6d1342b7e2deaf3db7fe7fbc1911c05823a538517b58da32cc0e8601ed8e|org/apache/fluss/fluss-flink-2.2/${FLUSS_VERSION}/fluss-flink-2.2-${FLUSS_VERSION}.jar"
+	"fluss-flink-tiering-${FLUSS_VERSION}.jar|f0b85db9b6cfdad8658406e31ce3a2aae6ffa0cdff81ce22fffc919e4032160e|org/apache/fluss/fluss-flink-tiering/${FLUSS_VERSION}/fluss-flink-tiering-${FLUSS_VERSION}.jar"
+	"fluss-lake-iceberg-${FLUSS_VERSION}.jar|9b7e25d431510a4ea3d187a2161e40ec6e026d4c110d8ea863602001880c2670|org/apache/fluss/fluss-lake-iceberg/${FLUSS_VERSION}/fluss-lake-iceberg-${FLUSS_VERSION}.jar"
+	"fluss-fs-s3-${FLUSS_VERSION}.jar|5226480ec1905e7b90f5684fa7736580ed0be0de082697f82fb467bbe99a8a00|org/apache/fluss/fluss-fs-s3/${FLUSS_VERSION}/fluss-fs-s3-${FLUSS_VERSION}.jar"
+	"fluss-fs-hdfs-${FLUSS_VERSION}.jar|bea4937198ffb52827402b057d0afcc0de0be9b761e7c727c824c5d8e9218597|org/apache/fluss/fluss-fs-hdfs/${FLUSS_VERSION}/fluss-fs-hdfs-${FLUSS_VERSION}.jar"
 	"hadoop-mapreduce-client-core-${MAPREDUCE_VERSION}.jar|d68af4f03e9d64b14476119f939a660a89a9116732511f025eea59e079a9102f|org/apache/hadoop/hadoop-mapreduce-client-core/${MAPREDUCE_VERSION}/hadoop-mapreduce-client-core-${MAPREDUCE_VERSION}.jar"
 )
 

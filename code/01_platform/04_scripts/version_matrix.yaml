@@ -175,12 +175,14 @@ boundaries:
 
   - compatibility_id: VM-FLUSS-SRV-005
     boundary: Fluss server
-    proposed_version: "0.9.1-incubating"
+    proposed_version: "1.0.0"
     evidence_source: >-
-      Apache Fluss 0.9.1-incubating release
-      (github.com/apache/fluss, 2026) — official Docker image
-      apache/fluss:0.9.1-incubating
-    compatibility_class: COMPATIBLE_WITH_LIMITATION
+      1.0.0 upgrade target — RE-VERIFICATION PENDING (Stage 4 of
+      docs/plans/2026-09-22-fluss-1.0-upgrade.md). The evidence below was
+      recorded on 0.9.1-incubating and is retained as history.
+      Prior: Apache Fluss 0.9.1-incubating release
+      (github.com/apache/fluss, 2026) — official image apache/fluss:0.9.1-incubating
+    compatibility_class: UNKNOWN
     evidence_owner: Platform
     evidence_method: >-
       Pin Fluss server by digest; run LOG/KV table, partial_update,
@@ -250,9 +252,13 @@ boundaries:
 
   - compatibility_id: VM-FLUSS-CLI-006
     boundary: Fluss Java client
-    proposed_version: "0.9.1-incubating"
-    evidence_source: "Apache Fluss 0.9.1-incubating client (Maven Central)"
-    compatibility_class: COMPATIBLE
+    proposed_version: "1.0.0"
+    evidence_source: >-
+      1.0.0 upgrade target — RE-VERIFICATION PENDING (Stage 4 of
+      docs/plans/2026-09-22-fluss-1.0-upgrade.md). The evidence below was
+      recorded on 0.9.1-incubating and is retained as history.
+      Prior: Apache Fluss 0.9.1-incubating client (Maven Central)
+    compatibility_class: UNKNOWN
     evidence_owner: Platform
     evidence_method: >-
       Lock fluss-client dep; assert client equals server; exercise
@@ -292,11 +298,13 @@ boundaries:
 
   - compatibility_id: VM-FLUSS-CONN-007
     boundary: Fluss Flink connector
-    proposed_version: "fluss-flink-2.2:0.9.1-incubating"
+    proposed_version: "fluss-flink-2.2:1.0.0"
     evidence_source: >-
-      Apache Fluss fluss-flink-2.2 0.9.1-incubating
-      (Maven Central)
-    compatibility_class: COMPATIBLE
+      1.0.0 upgrade target — RE-VERIFICATION PENDING (Stage 4 of
+      docs/plans/2026-09-22-fluss-1.0-upgrade.md). The evidence below was
+      recorded on 0.9.1-incubating and is retained as history.
+      Prior: Apache Fluss fluss-flink-2.2 0.9.1-incubating (Maven Central)
+    compatibility_class: UNKNOWN
     evidence_owner: Platform
     evidence_method: >-
       Lock fluss-flink-2.2 connector dep; assert matches Flink 2.2 +
@@ -453,7 +461,7 @@ boundaries:
     boundary: Base images
     proposed_version: >-
       eclipse-temurin:17.0.19_9-jdk | flink:2.2.1-scala_2.12-java17 |
-      apache/fluss:0.9.1-incubating
+      apache/fluss:1.0.0
     evidence_source: "Registry digest / SBOM (to be captured)"
     compatibility_class: UNKNOWN
     evidence_owner: Platform
