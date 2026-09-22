@@ -10,6 +10,8 @@ defined in `11-testing-and-release.md`, states the pass condition, says where th
 result is recorded, and defines the gate that lets `make ddl` actually create the
 tables.
 
+> **1.0.0 note (2026-09-22):** every verdict below records 0.9.1-era evidence; 1.0.0 re-evidence is pending the final certificate — do not quote this matrix for 1.0.0.
+
 ## Status
 
 | Field | Value |

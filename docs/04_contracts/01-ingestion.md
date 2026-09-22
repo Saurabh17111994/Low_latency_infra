@@ -14,7 +14,7 @@ Two colocated processes in the same container consume the evidence-approved brok
 - Heartbeat: client sends `PONG` text every 3s; read timeout 5s
 - Auth: token from `/auth/app/authenticate-token` (24hr TTL, refreshable)
 - Swarm secret references in production
-- Exact go-arrow SDK version and Fluss 0.9.1-incubating Java client version
+- Exact go-arrow SDK version and Fluss 1.0.0 Java client version
 - NDJSON tick schema (versioned contract between Go bridge stdout and Java stdin)
 
 ## Outputs

@@ -4,10 +4,10 @@
 
 Technology choices are architectural targets. The following versions are now **confirmed** (DEC-021, 2026-07-23):
 
-- **Fluss:** 0.9.1-incubating
+- **Fluss:** 1.0.0
 - **Flink:** 2.2.1
 - **Java:** 17.0.19
-- **Flink-Fluss connector:** `fluss-flink-2.2-0.9.1-incubating.jar`
+- **Flink-Fluss connector:** `fluss-flink-2.2-1.0.0.jar`
 
 Arrow protocol evidence is available from the Go SDK (`github.com/arrow-trade/go-arrow`) and REST API docs (`docs.arrow.trade`). Exact container image digests remain deferred until build.
 
@@ -23,7 +23,7 @@ Fluss is the live streaming bus and operational storage layer.
 
 Required logical tables include `raw_table_1`, `feature_candles_15s`, `forming_bar`, `Signal_Candidates`, `Signal_Candidates_current`, `Order_Lifecycle`, `Positions`, `Fills`, `Postback_Projection_Ledger`, `Execution_Gate`, `Execution_Attempts`, `Order_Correlation`, `Execution_Audit`, `Safety_Halt_Requests`, `Postback_Quarantine`, `suspected_discontinuities`, `ingestion_quarantine`, and `instruments`. (`Ranking_Results`, `Trade_Decisions`, `Portfolio_Reservations` REMOVED 2026-08-15, CHG-005; `Position_Actions` is future phase only.)
 
-**Confirmed version:** Fluss 0.9.1-incubating. Features: `BYTES` column type, KV tables with `partial_update` and FULL changelog images, `$changelog` virtual tables for CDC/audit, Aggregation Merge Engine, Auto-Increment columns for dictionary tables, ARRAY/MAP/ROW/nested complex types, ALTER TABLE schema evolution (zero-copy append), Snapshot Leases for consumer-safe snapshots, Cluster Rebalance, Compacted LogFormat, Iceberg/Parquet/Lance lake formats, Azure Blob + ADLS Gen2 support, POJO Java client API. See [Fluss 0.9 release blog](https://fluss.apache.org/blog/releases/0.9/).
+**Confirmed version:** Fluss 1.0.0. Features (carried from the 0.9 confirmation; deviations flagged at cert): `BYTES` column type, KV tables with `partial_update` and FULL changelog images, `$changelog` virtual tables for CDC/audit, Aggregation Merge Engine, Auto-Increment columns for dictionary tables, ARRAY/MAP/ROW/nested complex types, ALTER TABLE schema evolution (zero-copy append), Snapshot Leases for consumer-safe snapshots, Cluster Rebalance, Compacted LogFormat, Iceberg/Parquet/Lance lake formats, Azure Blob + ADLS Gen2 support, POJO Java client API. See [Fluss 0.9 release blog](https://fluss.apache.org/blog/releases/0.9/).
 
 The exact server/client release is now pinned rather than evidence-gated.
 
@@ -38,7 +38,7 @@ Flink managed state and Fluss sink guarantees are exactly-once only at the teste
 
 **Confirmed version:** Flink 2.2.1 with Java 17 support (Java 17.0.19 is the pinned runtime). New in 2.2: VECTOR_SEARCH, Materialized Tables, Delta Joins, Balanced Tasks Scheduling. ⚠️ Flink 2.x has a significantly different DataStream API surface vs 1.x — existing 1.x code patterns must be migrated.
 
-Ingestion is one Java 17 service process from binary WebSocket decode through the supported Fluss 0.9.1-incubating Java client append path. The Arrow HFT market-data WebSocket (`wss://socket.arrow.trade`) uses a binary protocol with 2 modes (LTPC 40B, Full 196B), little-endian integers, zstd-compressed inbound, prices in **paise** (÷100 for rupees). No JSON on the market-data stream. Auth via `appID` + `token` query params, subscribe via JSON token IDs (≤1024 per connection, ≤512 per request). Heartbeat: client sends `PONG` text every 3s, stall timeout 15s. (The Standard feed `wss://ds.arrow.trade` was removed 2026-08-14.)
+Ingestion is one Java 17 service process from binary WebSocket decode through the supported Fluss 1.0.0 Java client append path. The Arrow HFT market-data WebSocket (`wss://socket.arrow.trade`) uses a binary protocol with 2 modes (LTPC 40B, Full 196B), little-endian integers, zstd-compressed inbound, prices in **paise** (÷100 for rupees). No JSON on the market-data stream. Auth via `appID` + `token` query params, subscribe via JSON token IDs (≤1024 per connection, ≤512 per request). Heartbeat: client sends `PONG` text every 3s, stall timeout 15s. (The Standard feed `wss://ds.arrow.trade` was removed 2026-08-14.)
 
 **No OpenAlgo.** DEC-006's direct-Executor wording is superseded by DEC-041/DEC-042: the Nautilus Execution Service commands a localhost-only go-arrow bridge, and only that bridge calls Arrow's native REST API.
 

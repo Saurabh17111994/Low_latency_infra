@@ -22,9 +22,9 @@ All interfaces are versioned contracts. Exact Arrow/Fluss protocol values are ev
 | ID | Assumption | Source |
 | --- | --- | --- |
 | ASM-IF-001 | Arrow postbacks expose `broker_order_id`, lifecycle status, and the submitted `remarks` value via the order-updates WebSocket (`wss://order-updates.arrow.trade`). | **Validated** — ASM-002 confirmed. |
-| ASM-IF-002 | Fluss `partial_update` and FULL changelog behavior match Fluss 0.9.1-incubating for KV projection interfaces. | Pinned version (0.9.1-incubating) confirmed to support these features. Integration test pending. |
+| ASM-IF-002 | Fluss `partial_update` and FULL changelog behavior match Fluss 1.0.0 for KV projection interfaces. | Pinned version (1.0.0) confirmed to support these features. Integration test pending. |
 | ASM-IF-003 | Arrow REST `POST /order/regular` returns deterministic order-submission responses with enough evidence to correlate broker order identity. | **Validated** — Response includes `orderNo` (system order ID). `GET /order/{id}` returns `exchangeOrderID`, full lifecycle. |
-| ASM-IF-004 | Fluss 0.9.1-incubating supports the required binary payload type (`BYTES`), KV state tables, changelog images, replication, retention extension, and lake tiering. | **Validated** — Confirmed in the Fluss 0.9 release notes. |
+| ASM-IF-004 | Fluss 1.0.0 supports the required binary payload type (`BYTES`), KV state tables, changelog images, replication, retention extension, and lake tiering. | Partially validated — feature set exercised by gate suites on 1.0.0 images; dedicated interface test pending. |
 | ASM-IF-005 | `client_order_ref` fits within Arrow's 16-character `remarks` field and is echoed reliably. | **Validated** — RISK-004 closed. Arrow docs confirm max 16 chars, echoed in REST responses and WS order updates. |
 | ASM-IF-006 | Fluss connector atomic visibility semantics are per-sink, not cross-sink, for the Signal job → Fluss output interfaces. | RISK-008 |
 | ASM-IF-007 | Flink and Fluss do not propagate distributed trace headers without version-specific evidence. Correlation IDs and audit IDs remain mandatory regardless. | REQ-OBS-001 |

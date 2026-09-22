@@ -16,8 +16,8 @@ Environment definitions must remain separate. Local Compose settings must never 
 
 v1: The three workload VMs are Manager+Worker and host:
 
-- A ZooKeeper ensemble node (one per VM; 3-node ensemble, quorum 2-of-3; Fluss metadata store — required by Fluss 0.9.1 — and Flink JobManager HA leadership)
-- Fluss coordinator/tablet capacity and three-node replication/quorum (LOG tables; KV tables are single-replica in Fluss 0.9.1 — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038))
+- A ZooKeeper ensemble node (one per VM; 3-node ensemble, quorum 2-of-3; Fluss metadata store — required by Fluss 0.9.1 and still by 1.0.0 — and Flink JobManager HA leadership)
+- Fluss coordinator/tablet capacity and three-node replication/quorum (LOG tables; KV tables are single-replica in Fluss 0.9.1 and 1.0.0 (standby replicas are an opt-in promotion aid only) — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038))
 - Flink JobManager (HA standby + leader via ZooKeeper)/TaskManager workload capacity according to the proven placement plan
 - Ingestion, Action Capture, Executor, and job deployment control as assigned by the Swarm stack
 

@@ -175,7 +175,7 @@ Creating secrets mutates cluster state - needs the operator's word, same
 as `swarm init`, `stack deploy`, and `docker push`.
 
 ### FACT-011: Fluss 0.9.1 tiers closed segments to R2 and commits the manifest; clients read them back from R2, but R2 is not a tablet restore source
-Status: LIVE
+Status: DEAD (superseded by FACT-018)
 Verified: 2026-09-16 - two-container trial with production FLUSS_PROPERTIES: 142 'Copied ... to remote storage as remote log segment' lines, ZK .../remote_logs held remote_log_manifest_path on s3:// and remote_log_end_offset 9923850, bucket listing after stop 833 objects / 66 MB / 208 .log
 Verified: 2026-09-16 - a second trial with table.log.tiered.local-segments 1 let cleanup delete the tiered local copies (local base offset 981794, manifest 0-981794), and a default-settings Flink SQL SELECT returned a write3 row at an offset below the local base (bounded 20005..520000, below 981794 under every candidate position) while the task manager logged 'Successfully downloaded remote log segment file' for all 17 remote segments: the client reads from R2
 Check: manual (needs a live R2-tiered Fluss trial; see CHG-182 and the plan 2026-09-16 Post-Completion)

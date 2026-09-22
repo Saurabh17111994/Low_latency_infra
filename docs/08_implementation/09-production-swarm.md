@@ -353,7 +353,7 @@ that lives on one machine.
 
 Evidence (all run 2026-09-16):
 
-- `docker run --rm apache/fluss:0.9.1-incubating` prints
+- `docker run --rm apache/fluss:1.0.0` prints
   `Usage: docker-entrypoint.sh (coordinatorServer|tabletServer)` and exits 0.
 - `docker stack config` rendered `command=None` for all four Fluss services
   before the fix; after, it renders `coordinatorServer` once and
@@ -446,7 +446,7 @@ the plan's *Post-Completion*,
   savepoint-restart; **no image rebuild per code change**. The image itself
   is the CHG-179 runtime image above — rebuild it only when the Flink/Fluss
   versions or the object-store wiring change.
-- Fluss data: hot segments stay on durable per-node volumes (`fluss-data`, `fluss-tablet-data-1/2/3`) with tested replication (LOG tables; KV tables are single-replica in Fluss 0.9.1 — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038)); tiered segments live in R2 at `s3://${R2_BUCKET}/remote-data`, readable from any node holding the credentials.
+- Fluss data: hot segments stay on durable per-node volumes (`fluss-data`, `fluss-tablet-data-1/2/3`) with tested replication (LOG tables; KV tables are single-replica in Fluss 0.9.1 and 1.0.0 (standby replicas are an opt-in promotion aid only) — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038)); tiered segments live in R2 at `s3://${R2_BUCKET}/remote-data`, readable from any node holding the credentials.
 - ZooKeeper ensemble members use durable per-node volumes; loss of one member is tolerated while quorum (2-of-3) holds.
 - Flink checkpoints/savepoints use encrypted versioned S3; Flink JobManager HA metadata (`high-availability.storageDir`) uses the same encrypted S3 store, with leadership in ZooKeeper.
 - Iceberg/audit storage uses encryption, versioning, and approved retention/lifecycle policy.

@@ -119,8 +119,7 @@ Two things the stop path guarantees, and one it does not:
 ## Execution_Gate recreate (v4 merge engine, CHG-122)
 
 **Trigger**: applying CHG-122 — adopting `table.merge-engine=versioned` on `fence_token`.
-`DdlApplyTool` only ever CREATEs and refuses a non-empty catalog, and Fluss 0.9.1 has no
-ALTER, so an options change requires drop + create.
+`DdlApplyTool` only ever CREATEs and refuses a non-empty catalog, and Fluss ALTER stays create-mostly in 1.0.0 (`table.kv.ttl` alter rejected — 2026-09-22 probe), so an options change requires drop + create unless proven alterable.
 
 **Scope and severity**: planned maintenance. Gate KV fence/lease state is destroyed; the
 audit carrier is not (Iceberg lake + the store's immutable audit log). Live money must
