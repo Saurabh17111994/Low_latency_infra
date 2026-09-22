@@ -37,6 +37,7 @@ import org.junit.jupiter.api.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+// Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
 /**
  * COMPAT-FLUSS-001 (docs/08_implementation/02-schema-storage.md SCH-12/SCH-13):
  * every approved DDL parses, applies, and is inspected on the pinned matrix —

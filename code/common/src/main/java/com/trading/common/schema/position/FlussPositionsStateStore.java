@@ -67,6 +67,7 @@ public final class FlussPositionsStateStore implements PositionsStateStore, Auto
 
     @Override
     public PositionSnapshot lookup(String positionId) throws Exception {
+        // Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
         // P4-311 note: Lookuper is a bare interface in Fluss 0.9.1 (no
         // AutoCloseable, no close()) — per-lookup creation holds no
         // releasable handle; nothing to close. Documented so the next audit

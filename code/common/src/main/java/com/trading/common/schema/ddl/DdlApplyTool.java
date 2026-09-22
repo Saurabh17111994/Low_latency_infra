@@ -48,6 +48,7 @@ import org.apache.fluss.types.DataTypes;
 import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.CloseableIterator;
 
+// Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
 /**
  * The DDL application contract engine (docs/08_implementation/02-schema-storage.md
  * "DDL application contract", 9 steps), invoked by {@code ddl_apply.py} when

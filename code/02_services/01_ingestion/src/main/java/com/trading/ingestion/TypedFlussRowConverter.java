@@ -180,6 +180,7 @@ final class TypedFlussRowConverter implements FlussRowConverter {
         // writer's side (it hands back a future without awaiting it), so the
         // flush is load-bearing — it is what gives buffered batches a chance to
         // land — and it is retained rather than deleted. flush() and
+        // Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
         // connection.close() are both unbounded in Fluss 0.9.1; the whole
         // release is bounded here so a wedged cluster cannot hang shutdown.
         // See BoundedClose.

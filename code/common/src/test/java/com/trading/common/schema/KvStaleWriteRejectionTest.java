@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 
+// Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
 /**
  * COMPAT-FLUSS-004 — the "rejected, quarantined, and audited" half of the KV
  * stale/regressive/conflict contract, exercised at the projector layer where

@@ -363,6 +363,7 @@ public final class FlussProjectionWriter implements ProjectionWriter {
         // unretried pre-warm can report success having warmed nothing at all (same probe, 3/8
         // iterations). BoundedRetry is the existing tool for exactly that transient.
         Table kv = table("Positions");
+        // Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
         // Lookuper is not Closeable in Fluss 0.9.1 (FlussProjectionLedgerStore notes the same),
         // so there is no handle to close - this is a one-shot startup read.
         RequestBudget.run(() -> kv.newLookup().createLookuper()

@@ -20,6 +20,7 @@ import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalRow;
 
+// Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
 /**
  * Fluss-backed {@link GateStateStore} — production writer for Execution_Gate v3 (CHG-044, T5).
  * Offline protocol is proven by {@link InMemoryGateStateStore}; this writer satisfies the

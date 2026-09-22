@@ -103,6 +103,7 @@ public final class FlussIntentDedupStore implements IntentDedupStore {
         // own rule, which is exactly what the old per-attempt creation did implicitly — so a
         // retry still gets a fresh writer. What changed is what happens to the abandoned one:
         // it used to leak, taking a Sender with the pending record with it, which is the
+        // Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
         // run-4b storm shape (a writer that cannot be closed because Fluss 0.9.1 gives it no
         // close) on the handoff path rather than on the drill's.
         RequestBudget.run(() -> writerPool.with(writer -> {

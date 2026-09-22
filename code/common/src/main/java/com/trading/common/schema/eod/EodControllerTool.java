@@ -34,6 +34,7 @@ import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.utils.CloseableIterator;
 
+// Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
 /**
  * EOD controller CLI (SCH-23): the thin runner over {@link EodPlanner} /
  * {@link EodController} against live Fluss tables, mirroring the ddl-apply

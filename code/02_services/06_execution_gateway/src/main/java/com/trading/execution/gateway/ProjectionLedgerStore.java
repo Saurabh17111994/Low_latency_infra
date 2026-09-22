@@ -35,6 +35,7 @@ public interface ProjectionLedgerStore extends AutoCloseable {
      * runtime gain. Callers must treat null as not-found, never dereference.
      */
     Entry lookup(String eventId) throws Exception;
+// Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
     /**
      * Unconditional last-write-wins upsert — {@code expectedPriorState} is
      * persisted <b>as an audit field, not as a concurrency guard</b> (it records

@@ -20,6 +20,7 @@ import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.utils.CloseableIterator;
 
+// Version note (2026-09-23): the 0.9.1 references in this file record the pre-1.0.0 baseline this code was written against, not a constraint of the running Fluss 1.0.0 — re-check them (DEC-052).
 /** Real Fluss raw-client implementation for gateway control reads.
  *
  * <p>Resource note (P3-065): Lookupers are <b>pooled per table</b>, not created per call.
