@@ -3,6 +3,7 @@ package com.trading.common.schema.projection;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import com.trading.common.schema.fluss.FlussPlacementAwait;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -32,6 +33,12 @@ class FlussPostbackQuarantineStoreIntegrationTest {
     private static final Duration TIMEOUT = Duration.ofSeconds(5);
     private static final int BUCKETS = 8;
 
+    /**
+     * Fixture-readiness budget for the pair to the LOG table: bounded and logged, asserts nothing.
+     * The same value the KV-side readiness gate uses (CHG-212, CHG-213).
+     */
+    private static final Duration READY_BUDGET = Duration.ofSeconds(240);
+
     @Test
     @DisplayName("WP-4 T1: FlussPostbackQuarantineStore appends a durable quarantine LOG row, read back via log scan")
     void appendedQuarantineRowSurvivesAndIsReadableFromFlussLog() throws Exception {
@@ -50,6 +57,12 @@ class FlussPostbackQuarantineStoreIntegrationTest {
             admin.createDatabase(db, DatabaseDescriptor.EMPTY, false)
                     .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
             createPostbackQuarantine(admin, db);
+            // createTable returns in ~10 ms, but that reports "metadata written", not "writable":
+            // the first write waits for the bucket leader, measured 2026-09-22 at 1-13 s under
+            // teardown load against this fixture's 5 s budget. Without this gate the test fails on a
+            // cold cluster for a reason it does not assert. Postback_Quarantine is a LOG table, so
+            // there is no primary key to probe -- see FlussPlacementAwait.
+            FlussPlacementAwait.awaitPlacement(conn, admin, "Postback_Quarantine", READY_BUDGET);
 
             QuarantinedPostback q = new QuarantinedPostback(
                     "quar-1", "pb-1", QuarantineReason.AMBIGUOUS_CORRELATION,

@@ -162,7 +162,14 @@ class CompatFlussIntegrationTest {
   private static void awaitWritable(Table table, Schema schema, String what) throws Exception {
     int[] pk = schema.getPrimaryKeyIndexes();
     if (pk.length == 0) {
-      System.out.printf("[await] %s skipped: no primary key to probe (LOG table)%n", what);
+      // LOG table: no key to look up, and a probe write would disturb the row-count assertions
+      // these tests make, so wait on a throwaway canary instead (see FlussPlacementAwait, same
+      // package). Before 2026-09-22 this branch RETURNED, which left every LOG fixture without a
+      // readiness gate — and LOG fixtures turned out to be the entire failure surface of the
+      // 1.0.0 drill: compatFluss002BytesRoundTrip and compatFluss003LogKvChangelog both died at
+      // 20.02 s on their first append to a fresh LOG table, while every KV table this helper does
+      // cover passed.
+      FlussPlacementAwait.awaitPlacement(connection, admin, what, READY_BUDGET);
       return;
     }
     Object[] probe = new Object[pk.length];
