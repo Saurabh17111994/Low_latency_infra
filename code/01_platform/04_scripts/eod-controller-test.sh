@@ -224,7 +224,7 @@ guards() {
   while [ "$attempts" -lt 3 ]; do
     attempts=$((attempts + 1))
     purge_state || true   # a VERIFIED day would make the holder a no-op
-    python3 "$EOD" run --offload mock --run-date "$RUN_DATE" --lease-ttl 60s \
+    python3 "$EOD" run --offload mock --run-date "$RUN_DATE" --lease-ttl "${EOD_LEASE_TTL_S:-60}s" \
       --tables "$EOD_TABLES" >/dev/null 2>&1 &
     bg=$!
     jvm=""
@@ -232,13 +232,13 @@ guards() {
       jvm="$(pgrep -P "$bg" 2>/dev/null | head -1)"
       [ -n "$jvm" ] && kill -STOP "$jvm" 2>/dev/null
     fi
-    eod run --offload mock --run-date "$RUN_DATE" --lease-ttl 60s \
+    eod run --offload mock --run-date "$RUN_DATE" --lease-ttl "${EOD_LEASE_TTL_S:-60}s" \
       --tables "$EOD_TABLES" >/dev/null 2>&1
     rc2=$?
     holder_alive=0
     kill -0 "$bg" 2>/dev/null && holder_alive=1
     [ -n "$jvm" ] && kill -CONT "$jvm" 2>/dev/null
-    wait_bounded "$bg" 60 || true
+    wait_bounded "$bg" "${EOD_LEASE_TTL_S:-60}" || true
     if [ "$rc2" = "5" ]; then
       ok "G-EOD-2 lease fencing: concurrent run refused (rc=5, attempt $attempts)"
       break

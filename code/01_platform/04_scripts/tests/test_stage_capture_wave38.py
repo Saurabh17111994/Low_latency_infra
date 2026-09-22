@@ -212,6 +212,10 @@ def test_probe_db_table_params(tmp_path):
     # ran under FLUSS_PROBE_CP. The 561 pin is the argv below.
     assert proc.returncode == 2, text
     assert "read-lag.tsv(header-only)" in text, text
+    # P1.5: the SHIPPED default must stay 20s. test_probe_hang_bounded overrides
+    # PROBE_TIMEOUT_S to run the same bound faster; this pins the default itself.
+    assert "PROBE_TIMEOUT_S:-20" in SCRIPT.read_text(), \
+        "stage-capture.sh probe timeout default changed"
     lines = argv.read_text().splitlines()
     lag = [l for l in lines if "FlussReadLagProbe" in l]
     assert lag, "read-lag probe never ran"
@@ -227,8 +231,10 @@ def test_probe_hang_bounded(tmp_path):
     # read-lag probe 60s; without the fix that tick blocks ~60s (wall >= 50).
     import time
     argv = tmp_path / "java-argv.txt"
+    # P1.5: same bound, shorter -- the test is that a hang is BOUNDED, not that
+    # the bound is 20s. The 20s default is asserted in test_probe_db_table_params.
     extra = {"FLUSS_PROBE_CP": "/tmp/fake-cp", "JAVA_ARGV": str(argv),
-             "JAVA_HANG": "1"}
+             "JAVA_HANG": "1", "PROBE_TIMEOUT_S": "5"}
     start = time.monotonic()
     proc, out, _ = _run(tmp_path, duration="25", extra_env=extra)
     elapsed = time.monotonic() - start

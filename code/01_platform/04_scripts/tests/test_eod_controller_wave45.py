@@ -441,7 +441,7 @@ eod() {
   printf 'eod-stub: %s\n' "$*"
   case "$*" in
     *"--offload none"*) return "${G1_RC:-2}" ;;
-    *"--lease-ttl 60s"*)
+    *"--lease-ttl "*)
       n=$(cat "$G2_COUNTER" 2>/dev/null || echo 0); n=$((n + 1))
       echo "$n" > "$G2_COUNTER"
       case "$n" in
@@ -456,6 +456,9 @@ eod() {
 """
 
     def _run_guards(self, **extra: str) -> tuple[int, str, Sandbox]:
+        # P1.5: the fencing tests wait out the lease window. The default stays 60s
+        # (asserted below); the tests run it at 5s so the same assertion costs seconds.
+        extra.setdefault("EOD_LEASE_TTL_S", "5")
         box = self.sandbox()
         mirror = subprocess.Popen(["sleep", "300"])
         self.addCleanup(mirror.kill)
@@ -472,6 +475,10 @@ eod() {
     def test_a_missed_window_is_retried_and_then_passes(self) -> None:
         rc, out, box = self._run_guards(G2_RC_1="0", G2_RC_2="5")
         self.assertIn("attempt 1: the holder finished before the concurrent run", out)
+        # P1.5: the SHIPPED lease window must stay 60s. The fencing tests override
+        # EOD_LEASE_TTL_S to run the same assertion faster; this pins the default.
+        self.assertIn("EOD_LEASE_TTL_S:-60", SCRIPT.read_text(),
+                      "eod-controller-test.sh lease ttl default changed")
         self.assertIn("ok    G-EOD-2 lease fencing: concurrent run refused (rc=5, attempt 2)", out)
         self.assertIn("GUARDS_RC=0", out)
 

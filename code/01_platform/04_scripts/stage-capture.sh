@@ -663,11 +663,11 @@ sample_probes() {
   # PROBE_RAW_TABLE like the KV probes take theirs, so read-lag and
   # consumer-read monitor the same tables and stay comparable.
   # Probe 1: raw log-end offsets (CP3 side). One Admin.listOffsets RPC.
-  timeout 20 java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+  timeout "${PROBE_TIMEOUT_S:-20}" java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
     FlussReadLagProbe "${PROBE_DB}" "${PROBE_RAW_TABLE}" "$PROBE_BOOTSTRAP" \
     >> "$OUT_DIR/read-lag.tsv" 2>"$OUT_DIR/probe-read-lag.err" || echo "!! WARN: FlussReadLagProbe failed this tick (see $OUT_DIR/probe-read-lag.err)" >&2
   # Probe 2: KV live lookups (CP9->CP10). 3 lookups, <=1/s aggregate.
-  timeout 20 java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+  timeout "${PROBE_TIMEOUT_S:-20}" java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
     FlussKvProbe "$PROBE_TABLE" 15000 "$PROBE_TOKENS" "$PROBE_BOOTSTRAP" \
     >> "$OUT_DIR/consumer-read.tsv" 2>"$OUT_DIR/probe-consumer.err" || echo "!! WARN: FlussKvProbe failed this tick (see $OUT_DIR/probe-consumer.err)" >&2
   # Probe 3: CLOSED candle table (CP9->CP10 for the closed leg).
@@ -676,7 +676,7 @@ sample_probes() {
   # reordered table fails loudly instead of reading whatever sits at index 5/12.
   # A partial sample (some tokens failed or missed) exits 3 and is warned below;
   # the rows that were read are still appended to the TSV.
-  timeout 20 java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+  timeout "${PROBE_TIMEOUT_S:-20}" java -Dlog.dir=/tmp/fluss-probe-logs -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
     FlussKvProbe "$PROBE_CLOSED_TABLE" 15000 "$PROBE_TOKENS" "$PROBE_BOOTSTRAP" \
     >> "$OUT_DIR/closed-read.tsv" 2>"$OUT_DIR/probe-closed.err" || echo "!! WARN: FlussKvProbe(closed) failed this tick (see $OUT_DIR/probe-closed.err)" >&2
 }

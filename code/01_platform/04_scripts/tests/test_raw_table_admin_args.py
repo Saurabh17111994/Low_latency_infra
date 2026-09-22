@@ -101,7 +101,8 @@ class RawTableAdminArgsTest(unittest.TestCase):
             # 20260101 stays the partition; the flag address is what gets dialled.
             try:
                 self.run_admin("add-partition", "20260101", "--bootstrap", f"127.0.0.1:{port}",
-                               timeout=30)
+                               timeout=5)   # P1.5: accepted is set on accept(), which is
+                                            # immediate; 30s was the CLI retry loop
             except Exception:                                   # noqa: BLE001 - the dial is the assertion
                 pass                                            # connection refused/closed -> fine
             worker.join(timeout=10)
