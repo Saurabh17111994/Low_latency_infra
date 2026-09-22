@@ -428,6 +428,41 @@ public final class DdlApplyTool {
                 // refuses to call the apply fully PASS unless the operator
                 // acknowledges the exact limited tables (see decideStatus).
                 if (!opts.skipSmoke) {
+                    // Pre-create every twin before the first smoke. A twin's replica is placed
+                    // asynchronously, and a smoke write to a twin created moments earlier waits for
+                    // that placement. Measured 2026-09-22 (27-table catalog, single tablet): the
+                    // per-twin wait fell 20s -> 5s as the run progressed and cost ~245s of the
+                    // sweep, while writes to tables that ALREADY have their replica stay at ~100ms
+                    // throughout (see drainScratchTeardown). Creating the twins up front overlaps
+                    // every placement with the creates themselves.
+                    //
+                    // Drop semantics are unchanged: a twin is still dropped only after its smoke
+                    // write RESOLVED (an unresolved write can hold a pending batch), and a twin
+                    // whose create failed here is recorded and skipped below rather than smoked.
+                    boolean[] twinReady = new boolean[ordered.size()];
+                    if (!opts.allowLiveSmoke) {
+                        for (int i = 0; i < ordered.size(); i++) {
+                            String target = targetNames.get(i);
+                            String smokeName = smokeTwinName(opts.prefix, ordered.get(i).tableName);
+                            try {
+                                if (dropIfExists(admin, smokeName)) {
+                                    scratchDropped++;
+                                }
+                                admin.createTable(TablePath.of("default", smokeName),
+                                        DdlText.toDescriptor(parsed.get(ordered.get(i).tableName)),
+                                        false).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                                twinReady[i] = true;
+                            } catch (Exception e) {
+                                String outcome = e.getMessage() == null
+                                        ? e.getClass().getSimpleName() : e.getMessage();
+                                records.get(i).smoke("twin create failed: " + outcome);
+                                if (!isKnownLimitation(outcome)) {
+                                    failures.add(target + " smoke failed: twin create failed: "
+                                            + outcome);
+                                }
+                            }
+                        }
+                    }
                     for (int i = 0; i < ordered.size(); i++) {
                         DdlText.ParsedDdl ddl = parsed.get(ordered.get(i).tableName);
                         String target = targetNames.get(i);
@@ -438,6 +473,9 @@ public final class DdlApplyTool {
                         // same descriptor and dropped immediately after.
                         String smokeName = opts.allowLiveSmoke ? target
                                 : smokeTwinName(opts.prefix, ordered.get(i).tableName);
+                        if (!opts.allowLiveSmoke && !twinReady[i]) {
+                            continue;   // the pre-create loop above already recorded this failure
+                        }
                         // A twin may only be dropped once its smoke write RESOLVED: an unresolved
                         // write can still hold a pending batch, and dropping the table under it
                         // makes Fluss's Sender spin on metadata forever (see WriteAwait).
@@ -448,13 +486,6 @@ public final class DdlApplyTool {
                                         + "fixture rows go to the REAL table " + target
                                         + " (LOG rows are undeletable; do NOT use on "
                                         + "consumer-bearing catalogs)");
-                            } else {
-                                if (dropIfExists(admin, smokeName)) {
-                                    scratchDropped++;
-                                }
-                                admin.createTable(TablePath.of("default", smokeName),
-                                        DdlText.toDescriptor(ddl), false)
-                                        .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
                             }
                             SmokeResult result = smokeRoundTrip(connection, admin, smokeName, ddl);
                             keepTwin = !result.writeResolved();
