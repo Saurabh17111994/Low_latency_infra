@@ -75,7 +75,7 @@ VERSIONS_PIN = os.path.join(SCRIPT_DIR, "versions.pin")
 MANIFEST_PATH = os.path.join(DDL_DIR, "schema_manifest.json")
 # Java apply-engine classpath (com.trading.common.schema.ddl.DdlApplyTool).
 # Versions mirror the parent pom properties (code/pom.xml jackson.version /
-# slf4j.version); fluss-client is the pinned 0.9.1-incubating shaded artifact.
+# slf4j.version); fluss-client is the pinned 1.0.0 shaded artifact.
 # DDL_APPLY_M2_REPO overrides the default ~/.m2/repository — the ddl-apply
 # container runs the engine as a non-root user (no root home) and bakes the
 # jars at /opt/ddl-apply/m2/repository via this env.

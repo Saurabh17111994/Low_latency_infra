@@ -674,10 +674,11 @@ class TieredReadWiringTests(unittest.TestCase):
         text = GATE_SCRIPT.read_text()
         self.assertIn("gate_wire_probe_filesystem", text,
                       "the gate must wire the probe filesystem before it runs the census")
-        self.assertIn("fluss-fs-s3-0.9.1-incubating.jar", text,
+        self.assertIn("fluss-fs-s3-1.0.0.jar", text,
                       "without the S3 plugin the probe cannot resolve s3:// at all")
-        self.assertIn("fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar", text,
-                      "the plugin's Hadoop dependency must be on the probe classpath too")
+        self.assertNotIn("hadoop-shaded", text,
+                         "the hadoop-shaded jar is gone in 1.0.0: its Hadoop classes "
+                         "already ship inside fluss-fs-s3/hdfs, and it was unpinnable")
         # The conf dir must reach the JVM that runs the census, not just the one
         # that compiles it — a compile-time-only classpath entry proves nothing.
         run_cp = [ln for ln in text.splitlines() if "FlussRuleCounter" in ln and "-cp" in ln]
@@ -692,7 +693,7 @@ class TieredReadWiringTests(unittest.TestCase):
         text = GATE_SCRIPT.read_text()
         self.assertNotIn("client.fs.s3", text,
                          "client.fs.s3.* keys are ignored by the S3 plugin (verified against "
-                         "fluss-fs-s3-0.9.1-incubating.jar); use core-site.xml instead")
+                         "fluss-fs-s3-1.0.0.jar); use core-site.xml instead")
 
     def test_the_committed_hadoop_config_holds_no_credentials(self) -> None:
         text = HADOOP_CONF.read_text()

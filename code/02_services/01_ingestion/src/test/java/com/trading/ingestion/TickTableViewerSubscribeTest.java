@@ -27,7 +27,10 @@ final class TickTableViewerSubscribeTest {
 
     private static PartitionInfo partition(long id, String day) {
         return new PartitionInfo(
-                id, new ResolvedPartitionSpec(List.of("event_day"), List.of(day)));
+                id,
+                new ResolvedPartitionSpec(List.of("event_day"), List.of(day)),
+                null, // remoteDataDir: unused by this test
+                2); // bucketCount: the two buckets subscribeFromLatest is given below
     }
 
     private static ListOffsetsResult offsetsFor(Collection<Integer> buckets) {

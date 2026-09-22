@@ -15,7 +15,7 @@
   layer, but the shipped S3 plugin recognises only 's3.', 's3a.' and 'fs.s3a.'
   — it never strips the 'client.fs.' prefix, so those keys are silently ignored
   and every client-side read fails with NoAwsCredentialsException. Verified
-  against fluss-fs-s3-0.9.1-incubating.jar. Hadoop reads this file off the
+  against fluss-fs-s3-1.0.0.jar. Hadoop reads this file off the
   classpath instead, which is the route that actually works.
 
   NO SECRETS HERE

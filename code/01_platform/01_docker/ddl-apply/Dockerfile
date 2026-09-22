@@ -50,7 +50,7 @@ RUN cd code && mvn -q -pl common package -DskipTests
 # (FLUSS_VERSION). A bump anywhere without the others breaks the COPY with a
 # confusing "file not found" — fail here with the real cause instead. The
 # jars are already resolved in the builder m2, so this is a pure path assert.
-ARG EXPECT_FLUSS=0.9.1-incubating
+ARG EXPECT_FLUSS=1.0.0
 ARG EXPECT_JACKSON=2.16.1
 ARG EXPECT_SLF4J=2.0.9
 RUN POM_FLUSS="$(sed -n 's/.*<fluss.version>\([^<]*\)<\/fluss.version>.*/\1/p' /src/code/pom.xml)" \
@@ -88,10 +88,10 @@ COPY --from=builder /src/code/common/target/classes /app/code/common/target/clas
 
 # The exact runtime jars, in a fixed non-home Maven layout (DDL_APPLY_M2_REPO
 # points build_tool_classpath at it — the non-root engine has no root home):
-# fluss-client is the shaded 0.9.1 artifact; jackson-databind pulls core +
+# fluss-client is the shaded 1.0.0 artifact; jackson-databind pulls core +
 # annotations; slf4j-api is the 5th entry.
-COPY --from=builder /root/.m2/repository/org/apache/fluss/fluss-client/0.9.1-incubating \
-    /opt/ddl-apply/m2/repository/org/apache/fluss/fluss-client/0.9.1-incubating
+COPY --from=builder /root/.m2/repository/org/apache/fluss/fluss-client/1.0.0 \
+    /opt/ddl-apply/m2/repository/org/apache/fluss/fluss-client/1.0.0
 COPY --from=builder /root/.m2/repository/com/fasterxml/jackson/core/jackson-databind/2.16.1 \
     /opt/ddl-apply/m2/repository/com/fasterxml/jackson/core/jackson-databind/2.16.1
 COPY --from=builder /root/.m2/repository/com/fasterxml/jackson/core/jackson-core/2.16.1 \

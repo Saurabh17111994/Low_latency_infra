@@ -610,7 +610,7 @@ class TestTier2Hardening:
     def test_every_service_declares_what_to_run(self):
         """CHG-181: a service whose image CMD is a usage/help path starts nothing.
 
-        Verified for ``apache/fluss:0.9.1-incubating`` (Entrypoint
+        Verified for ``apache/fluss:1.0.0`` (Entrypoint
         ``/docker-entrypoint.sh``, CMD ``help``): with no ``command:`` the
         container prints usage and **exits 0**, so Swarm reports the task as
         started while no server runs. The same defect class was fixed for Flink

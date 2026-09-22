@@ -179,9 +179,12 @@ class GatewayStartupPrewarmTest {
                 .column("id", DataTypes.STRING())
                 .primaryKey("id")
                 .build();
+        // Fluss 1.0 inserted remoteDataDir BEFORE the existing comment argument, so this
+        // now takes two nulls: (remoteDataDir, comment), then (createdTime, modifiedTime).
         TableInfo primaryKeyInfo = new TableInfo(
                 TablePath.of("kind_check_db", "Fills"), 1L, 1, primaryKeySchema,
-                List.of(), List.of(), 1, new Configuration(), new Configuration(), null, 0L, 0L);
+                List.of(), List.of(), 1, new Configuration(), new Configuration(),
+                null, null, 0L, 0L);
 
         // Fills is the first APPEND_TABLES entry, so the contradiction is hit before any writer is
         // minted - which is why nothing here needs closing.

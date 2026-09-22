@@ -10,6 +10,7 @@ import org.apache.fluss.client.lookup.Lookup;
 import org.apache.fluss.client.lookup.LookupResult;
 import org.apache.fluss.client.lookup.Lookuper;
 import org.apache.fluss.client.lookup.TypedLookuper;
+import org.apache.fluss.client.table.MultiTable;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.scanner.Scan;
 import org.apache.fluss.client.table.writer.Append;
@@ -219,6 +220,13 @@ final class FaultFlussStubs {
 
         @Override
         public Admin getAdmin() {
+            throw new UnsupportedOperationException("not used by the write paths");
+        }
+
+        // Added to the Connection interface in Fluss 1.0; the write paths under
+        // test are single-table, so this stays unimplemented by design.
+        @Override
+        public MultiTable getMultiTable() {
             throw new UnsupportedOperationException("not used by the write paths");
         }
 

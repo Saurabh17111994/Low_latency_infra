@@ -45,7 +45,7 @@
 #
 # P2-105: digest-pinned base — a tag-only FROM silently accepts an upstream
 # rebuild. Keep this in lockstep with runtime.lock's FLUSS_IMAGE.
-FROM apache/fluss:0.9.1-incubating@sha256:65f5513b33dde10ace4f8adb3956f17226a2a1e2663f92b3096e4769b0ee1d1c
+FROM apache/fluss:1.0.0@sha256:ff461b45438033da4fd1c2556d3f978f3603bb3632fe075c2bd57388339a58cb
 
 # The stock image defines no USER, so it runs as root and the plugin directory
 # (/opt/fluss/plugins/iceberg, owned by fluss:fluss) is writable. No USER
@@ -58,5 +58,5 @@ FROM apache/fluss:0.9.1-incubating@sha256:65f5513b33dde10ace4f8adb3956f17226a2a1
 # so the iceberg plugin only sees its own. Verified against the running stock
 # image: `Plugin loader with ID not found, creating it: iceberg` shows the
 # server creating that loader from this directory alone.
-COPY jars/fluss-fs-s3-0.9.1-incubating.jar   /opt/fluss/plugins/iceberg/
-COPY jars/fluss-fs-hdfs-0.9.1-incubating.jar /opt/fluss/plugins/iceberg/
+COPY jars/fluss-fs-s3-1.0.0.jar   /opt/fluss/plugins/iceberg/
+COPY jars/fluss-fs-hdfs-1.0.0.jar /opt/fluss/plugins/iceberg/

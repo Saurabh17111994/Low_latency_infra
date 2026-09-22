@@ -65,15 +65,16 @@ whole point of the digest, and why `runtime.lock` still holds the stock
 
 | Artifact | Source |
 |---|---|
-| `fluss-fs-s3-0.9.1-incubating.jar` | Maven Central |
-| `fluss-fs-hdfs-0.9.1-incubating.jar` | Maven Central |
+| `fluss-fs-s3-1.0.0.jar` | Maven Central |
+| `fluss-fs-hdfs-1.0.0.jar` | Maven Central |
 
 These are the same two artifacts, with the same SHA256 pins, that the Flink
 image stages — so the two images cannot silently drift apart.
 
 ### Why `fluss-fs-hadoop-shaded` is not here
 
-The dev compose mounts `fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar`, an
+The dev compose mounted `fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar` until
+2026-09-22 (when the 1.0.0 mounts replaced it), an
 **unpublished** module: HTTP 404 on Maven Central and on the Apache snapshot
 repository. A SNAPSHOT cannot be checksum-pinned, so it cannot be part of a
 reproducible image.

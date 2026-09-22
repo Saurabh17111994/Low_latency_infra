@@ -43,7 +43,7 @@ BRIDGE = RUNTIME / "20-r2-secrets-from-file.sh"
 README = RUNTIME / "README.md"
 STACK = REPO / "code/01_platform/01_docker/docker-stack.yml"
 
-FLUSS_VERSION = "0.9.1-incubating"
+FLUSS_VERSION = "1.0.0"
 
 # The pinned base image (P2-105: a tag-only FROM accepts upstream rebuilds).
 PINNED_BASE = (
@@ -271,7 +271,8 @@ class FetchScriptTests(unittest.TestCase):
                          "the derivation must pin the sort collation, not inherit the locale")
 
     def test_the_unpublished_snapshot_jar_is_not_fetched(self) -> None:
-        """fluss-fs-hadoop-shaded-0.9-SNAPSHOT cannot be checksum-pinned.
+        """fluss-fs-hadoop-shaded cannot be checksum-pinned (and is dropped in 1.0.0:
+    its Hadoop classes now ship inside fluss-fs-s3/hdfs).
 
         The name appears in this file's comments (explaining why it is absent),
         so only executable lines are checked — a commented-out download reads

@@ -273,11 +273,12 @@ gate_wire_probe_filesystem() {
   local plugin_dir="$COMPOSE_DIR/fluss-plugins/iceberg"
   local jar
   local -a jars=()
-  for jar in "$plugin_dir/fluss-fs-s3-1.0.0.jar" \
-             "$plugin_dir/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar"; do
-    [ -r "$jar" ] || { echo "SOAK-E2E: WARN no S3 plugin jar at $jar — the census can only read local segments; a tiered segment will under-count it. Install the plugin jars or accept local-only reads." >&2; return 0; }
-    jars+=("$jar")
-  done
+  # 1.0.0 mounts the S3 plugin only: its former sibling FS jar is gone from the
+  # compose mounts (rationale in the iceberg plugin README). Kept as an array so
+  # GATE_FS_CP below can take more entries again without restructuring this.
+  jar="$plugin_dir/fluss-fs-s3-1.0.0.jar"
+  [ -r "$jar" ] || { echo "SOAK-E2E: WARN no S3 plugin jar at $jar — the census can only read local segments; a tiered segment will under-count it. Install the plugin jars or accept local-only reads." >&2; return 0; }
+  jars+=("$jar")
   [ -r "$conf_dir/core-site.xml" ] || { echo "SOAK-E2E: WARN no $conf_dir/core-site.xml — the census can only read local segments." >&2; return 0; }
   # shellcheck source=./r2-env.sh
   . "$SCRIPT_DIR/r2-env.sh"

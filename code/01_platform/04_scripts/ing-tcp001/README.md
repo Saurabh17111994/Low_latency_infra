@@ -43,7 +43,7 @@ docker cp 01_docker-ingestion-1:/tmp/arrow-tick-counts.txt ./bridge.txt
 
 ## Probe build + run (against the live compose stack)
 
-Build (requires the Fluss client jar — e.g. `~/.m2/repository/.../fluss-client-0.9.1-incubating.jar`):
+Build (requires the Fluss client jar — e.g. `~/.m2/repository/.../fluss-client-1.0.0.jar`):
 
 ```bash
 javac -cp "$FLUSS_CLIENT_JAR" -d classes TokenCountReconcile.java
@@ -58,7 +58,7 @@ docker run --rm --network 01_docker_trading-net \
   -e FLUSS_BOOTSTRAP=fluss-coordinator:9123 \
   eclipse-temurin:17-jre \
   java --add-opens=java.base/java.nio=ALL-UNNAMED \
-    -cp "/probe/classes:/m2/org/apache/fluss/fluss-client/0.9.1-incubating/fluss-client-0.9.1-incubating.jar" \
+    -cp "/probe/classes:/m2/org/apache/fluss/fluss-client/1.0.0/fluss-client-1.0.0.jar" \
     TokenCountReconcile
 ```
 

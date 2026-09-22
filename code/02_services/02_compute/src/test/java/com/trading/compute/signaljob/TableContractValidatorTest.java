@@ -614,8 +614,10 @@ class TableContractValidatorTest {
 
     private static TableInfo info(String name, Schema.Builder sb, List<String> bucketKeys,
             int numBuckets) {
+        // Fluss 1.0 inserted remoteDataDir BEFORE comment: two nulls, then the timestamps.
         return new TableInfo(TablePath.of("default", name), 1L, 1, sb.build(), bucketKeys,
-                List.of(), numBuckets, new Configuration(), new Configuration(), null, 0L, 0L);
+                List.of(), numBuckets, new Configuration(), new Configuration(),
+                null, null, 0L, 0L);
     }
 
     private static org.apache.fluss.types.DataType dataType(String typeRoot, boolean notNull) {

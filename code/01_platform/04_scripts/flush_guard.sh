@@ -3,7 +3,7 @@
 #
 # Why this rule exists (2026-09-11): Fluss's TableWriter.flush() is not a
 # per-writer flush. It delegates to WriterClient.flush(), which awaits every
-# pending batch on the whole connection, and in 0.9.1-incubating that await is
+# pending batch on the whole connection, and in 1.0.0 that await is
 # unbounded (WriteBatch.RequestFuture.await() is a bare latch.await(); there is
 # no delivery timeout — RecordAccumulator carries a "TODO add deliveryTimeoutMs"
 # and a batch whose leader is unknown is never completed). See FlussWriteProfiles

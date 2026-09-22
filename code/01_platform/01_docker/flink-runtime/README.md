@@ -61,11 +61,11 @@ whole point of the digest.
 
 | Artifact | Source |
 |---|---|
-| `fluss-flink-2.2-0.9.1-incubating.jar` | Maven Central |
-| `fluss-flink-tiering-0.9.1-incubating.jar` | Maven Central |
-| `fluss-lake-iceberg-0.9.1-incubating.jar` | Maven Central |
-| `fluss-fs-s3-0.9.1-incubating.jar` | Maven Central |
-| `fluss-fs-hdfs-0.9.1-incubating.jar` | Maven Central |
+| `fluss-flink-2.2-1.0.0.jar` | Maven Central |
+| `fluss-flink-tiering-1.0.0.jar` | Maven Central |
+| `fluss-lake-iceberg-1.0.0.jar` | Maven Central |
+| `fluss-fs-s3-1.0.0.jar` | Maven Central |
+| `fluss-fs-hdfs-1.0.0.jar` | Maven Central |
 | `hadoop-mapreduce-client-core-2.8.5.jar` | Maven Central — input to the derived jar, not installed |
 | `hadoop-mapreduce-compat-2.8.5.jar` | **derived** in-image from the row above |
 
@@ -93,7 +93,8 @@ workstation had satisfied for weeks.
 
 ### Why `fluss-fs-hadoop-shaded` is not here
 
-The dev compose mounts `fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar`, which is an
+The dev compose mounted `fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar` until
+2026-09-22, when the 1.0.0 mounts replaced it. It is an
 **unpublished** build module — `fluss-fs-hadoop-shaded` 404s on Central, and the
 similarly named published `fluss-fs-hadoop` is an unrelated 10 KB stub. A
 SNAPSHOT cannot be checksum-pinned, so it cannot be part of a reproducible

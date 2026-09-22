@@ -4,13 +4,15 @@ All jars here are untracked host binaries (`*.jar` is gitignored), mounted into
 the flink-jobmanager / flink-taskmanager `/opt/flink/lib/` by
 `docker-compose.yml`.
 
-Downloaded (Fluss 0.9.1 / Flink 2.2 distribution artifacts):
-- `fluss-flink-2.2-0.9.1-incubating.jar`
-- `fluss-flink-tiering-0.9.1-incubating.jar`
-- `fluss-lake-iceberg-0.9.1-incubating.jar`
-- `fluss-fs-s3-0.9.1-incubating.jar`
-- `fluss-fs-hdfs-0.9.1-incubating.jar`
-- `fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar`
+Downloaded (Fluss 1.0.0 / Flink 2.2 distribution artifacts):
+- `fluss-flink-2.2-1.0.0.jar`
+- `fluss-flink-tiering-1.0.0.jar`
+- `fluss-lake-iceberg-1.0.0.jar`
+- `fluss-fs-s3-1.0.0.jar`
+- `fluss-fs-hdfs-1.0.0.jar`
+<!-- fluss-fs-hadoop-shaded removed 2026-09-22: all 12898 of its entries are
+     already inside fluss-fs-s3 + fluss-fs-hdfs, it declares no
+     FileSystemPlugin service, and a SNAPSHOT cannot be checksum-pinned. -->
 - `flink-shaded-hadoop-2-uber-2.8.3-10.0.jar` — NOT mounted; its hadoop 2.8.3
   `Configuration` breaks fluss-fs-s3's S3A (NoSuchMethodError getTimeDuration,
   M-16 in docs/06_operations/07-lake-archive-ops.md (CHG-117))

@@ -40,11 +40,11 @@ USER root
 # The Fluss connector (client + tiering builder + 2.2 adapter), the tiering
 # entrypoint, the Iceberg lake plugin, and the two filesystem plugins. All
 # verified against pinned SHA256s by fetch-jars.sh before the build sees them.
-COPY jars/fluss-flink-2.2-0.9.1-incubating.jar         /opt/flink/lib/
-COPY jars/fluss-flink-tiering-0.9.1-incubating.jar     /opt/flink/lib/
-COPY jars/fluss-lake-iceberg-0.9.1-incubating.jar      /opt/flink/lib/
-COPY jars/fluss-fs-s3-0.9.1-incubating.jar             /opt/flink/lib/
-COPY jars/fluss-fs-hdfs-0.9.1-incubating.jar           /opt/flink/lib/
+COPY jars/fluss-flink-2.2-1.0.0.jar         /opt/flink/lib/
+COPY jars/fluss-flink-tiering-1.0.0.jar     /opt/flink/lib/
+COPY jars/fluss-lake-iceberg-1.0.0.jar      /opt/flink/lib/
+COPY jars/fluss-fs-s3-1.0.0.jar             /opt/flink/lib/
+COPY jars/fluss-fs-hdfs-1.0.0.jar           /opt/flink/lib/
 # M-15/M-16: iceberg's shaded parquet write path lazily loads the un-shaded
 # org.apache.hadoop.mapreduce.lib.input.FileInputFormat. This jar is exactly
 # that package — never the full hadoop-mapreduce-client-core, whose

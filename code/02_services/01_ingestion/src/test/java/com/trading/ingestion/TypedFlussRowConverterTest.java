@@ -46,6 +46,11 @@ class TypedFlussRowConverterTest {
                 org.apache.fluss.metadata.TablePath tablePath) {
             throw new UnsupportedOperationException();
         }
+        // Fluss 1.0 added MultiTable to the Connection interface; this fake never
+        // exercises the multi-table path, so it stays unimplemented like its siblings.
+        @Override public org.apache.fluss.client.table.MultiTable getMultiTable() {
+            throw new UnsupportedOperationException();
+        }
         @Override public void close() { closed = true; }
     }
 

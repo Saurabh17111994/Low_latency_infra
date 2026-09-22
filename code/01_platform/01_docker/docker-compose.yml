@@ -343,9 +343,8 @@ services:
       # image ships both in their own plugin dirs; bind-mount them into the
       # iceberg plugin dir (docs: "add other jars required by datalake to
       # plugins/<fmt>/").
-      - ./fluss-plugins/iceberg/fluss-fs-s3-0.9.1-incubating.jar:/opt/fluss/plugins/iceberg/fluss-fs-s3-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-fs-hdfs-0.9.1-incubating.jar:/opt/fluss/plugins/iceberg/fluss-fs-hdfs-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:/opt/fluss/plugins/iceberg/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-s3-1.0.0.jar:/opt/fluss/plugins/iceberg/fluss-fs-s3-1.0.0.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-hdfs-1.0.0.jar:/opt/fluss/plugins/iceberg/fluss-fs-hdfs-1.0.0.jar:ro
     environment:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       FLUSS_COORDINATOR_HOST: fluss-coordinator
@@ -463,9 +462,8 @@ services:
       # P8.1 (tracker 14 box 827): fluss_logs stream — server logs volume.
       - fluss-logs:/opt/fluss/log
       # P3.2 lake tiering — same S3A + hdfs plugin overlay as the coordinator.
-      - ./fluss-plugins/iceberg/fluss-fs-s3-0.9.1-incubating.jar:/opt/fluss/plugins/iceberg/fluss-fs-s3-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-fs-hdfs-0.9.1-incubating.jar:/opt/fluss/plugins/iceberg/fluss-fs-hdfs-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:/opt/fluss/plugins/iceberg/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-s3-1.0.0.jar:/opt/fluss/plugins/iceberg/fluss-fs-s3-1.0.0.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-hdfs-1.0.0.jar:/opt/fluss/plugins/iceberg/fluss-fs-hdfs-1.0.0.jar:ro
     environment:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       FLUSS_COORDINATOR_HOST: fluss-coordinator
@@ -598,12 +596,11 @@ services:
       # connector (client + tiering builder + 2.2 adapter), fluss-flink-tiering
       # entrypoint, fluss-lake-iceberg plugin, and the s3a/hadoop trio the
       # fluss-coordinator already mounts under plugins/iceberg (P3.2).
-      - ./fluss-plugins/iceberg/fluss-flink-2.2-0.9.1-incubating.jar:/opt/flink/lib/fluss-flink-2.2-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-flink-tiering-0.9.1-incubating.jar:/opt/flink/lib/fluss-flink-tiering-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-lake-iceberg-0.9.1-incubating.jar:/opt/flink/lib/fluss-lake-iceberg-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-fs-s3-0.9.1-incubating.jar:/opt/flink/lib/fluss-fs-s3-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-fs-hdfs-0.9.1-incubating.jar:/opt/flink/lib/fluss-fs-hdfs-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:/opt/flink/lib/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:ro
+      - ./fluss-plugins/iceberg/fluss-flink-2.2-1.0.0.jar:/opt/flink/lib/fluss-flink-2.2-1.0.0.jar:ro
+      - ./fluss-plugins/iceberg/fluss-flink-tiering-1.0.0.jar:/opt/flink/lib/fluss-flink-tiering-1.0.0.jar:ro
+      - ./fluss-plugins/iceberg/fluss-lake-iceberg-1.0.0.jar:/opt/flink/lib/fluss-lake-iceberg-1.0.0.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-s3-1.0.0.jar:/opt/flink/lib/fluss-fs-s3-1.0.0.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-hdfs-1.0.0.jar:/opt/flink/lib/fluss-fs-hdfs-1.0.0.jar:ro
       # M-15/M-16 (2026-08-31): iceberg's shaded parwrite path lazily loads
       # org.apache.hadoop.mapreduce.lib.input.FileInputFormat; the class lives
       # only in hadoop-mapreduce-client-core. Do NOT mount the full
@@ -714,12 +711,11 @@ services:
       # connector (client + tiering builder + 2.2 adapter), fluss-flink-tiering
       # entrypoint, fluss-lake-iceberg plugin, and the s3a/hadoop trio the
       # fluss-coordinator already mounts under plugins/iceberg (P3.2).
-      - ./fluss-plugins/iceberg/fluss-flink-2.2-0.9.1-incubating.jar:/opt/flink/lib/fluss-flink-2.2-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-flink-tiering-0.9.1-incubating.jar:/opt/flink/lib/fluss-flink-tiering-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-lake-iceberg-0.9.1-incubating.jar:/opt/flink/lib/fluss-lake-iceberg-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-fs-s3-0.9.1-incubating.jar:/opt/flink/lib/fluss-fs-s3-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-fs-hdfs-0.9.1-incubating.jar:/opt/flink/lib/fluss-fs-hdfs-0.9.1-incubating.jar:ro
-      - ./fluss-plugins/iceberg/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:/opt/flink/lib/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar:ro
+      - ./fluss-plugins/iceberg/fluss-flink-2.2-1.0.0.jar:/opt/flink/lib/fluss-flink-2.2-1.0.0.jar:ro
+      - ./fluss-plugins/iceberg/fluss-flink-tiering-1.0.0.jar:/opt/flink/lib/fluss-flink-tiering-1.0.0.jar:ro
+      - ./fluss-plugins/iceberg/fluss-lake-iceberg-1.0.0.jar:/opt/flink/lib/fluss-lake-iceberg-1.0.0.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-s3-1.0.0.jar:/opt/flink/lib/fluss-fs-s3-1.0.0.jar:ro
+      - ./fluss-plugins/iceberg/fluss-fs-hdfs-1.0.0.jar:/opt/flink/lib/fluss-fs-hdfs-1.0.0.jar:ro
       # M-15/M-16 (2026-08-31): iceberg's shaded parwrite path lazily loads
       # org.apache.hadoop.mapreduce.lib.input.FileInputFormat; the class lives
       # only in hadoop-mapreduce-client-core. Do NOT mount the full

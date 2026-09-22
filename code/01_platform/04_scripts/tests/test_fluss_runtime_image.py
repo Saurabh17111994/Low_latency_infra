@@ -45,14 +45,14 @@ STACK = REPO / "code/01_platform/01_docker/docker-stack.yml"
 LOCK = REPO / "code/01_platform/01_docker/runtime.lock"
 FLINK_FETCH = REPO / "code/01_platform/01_docker/flink-runtime/fetch-jars.sh"
 
-FLUSS_VERSION = "0.9.1-incubating"
+FLUSS_VERSION = "1.0.0"
 
 # The pinned base image. Must equal runtime.lock's FLUSS_IMAGE: the derived
 # image is built FROM the very digest the stack would otherwise run, so the two
 # cannot silently diverge.
 PINNED_BASE = (
-    "apache/fluss:0.9.1-incubating@sha256:"
-    "65f5513b33dde10ace4f8adb3956f17226a2a1e2663f92b3096e4769b0ee1d1c"
+    "apache/fluss:1.0.0@sha256:"
+    "ff461b45438033da4fd1c2556d3f978f3603bb3632fe075c2bd57388339a58cb"
 )
 
 # Every jar the Dockerfile installs into /opt/fluss/plugins/iceberg/.
@@ -230,7 +230,8 @@ class FetchScriptTests(unittest.TestCase):
                          "the mismatch message must state the build is refused")
 
     def test_the_unpublished_snapshot_jar_is_not_fetched(self) -> None:
-        """fluss-fs-hadoop-shaded-0.9-SNAPSHOT is 404 on every public repo.
+        """fluss-fs-hadoop-shaded is 404 on every public repo (and is gone in 1.0.0:
+    its Hadoop classes now ship inside fluss-fs-s3/hdfs, so no mount needs it).
 
         The name appears in this file's comments (explaining why it is absent),
         so only executable lines are checked.

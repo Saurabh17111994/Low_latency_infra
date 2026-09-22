@@ -148,7 +148,7 @@ public class FlussPrefixReader {
                 }
                 // P6-731 note: the finding asks for try-with-resources here, but
                 // org.apache.fluss.client.lookup.Lookuper is not AutoCloseable in
-                // fluss-client 0.9.1-incubating — the interface has no close() method,
+                // fluss-client 1.0.0 — the interface has no close() method,
                 // so that remedy is not implementable. The lookuper holds no socket of
                 // its own; it is bounded by the Table/Connection try-with-resources
                 // that wraps this block and by the hard exit below.

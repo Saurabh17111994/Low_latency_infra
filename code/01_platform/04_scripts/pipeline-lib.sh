@@ -161,12 +161,11 @@ pipeline_validate_compose_bind_sources() {
     "flink-log4j-console.properties" \
     "flink-runtime/core-site.xml" \
     "alert-consumer.py" \
-    "fluss-plugins/iceberg/fluss-flink-2.2-0.9.1-incubating.jar" \
-    "fluss-plugins/iceberg/fluss-flink-tiering-0.9.1-incubating.jar" \
-    "fluss-plugins/iceberg/fluss-lake-iceberg-0.9.1-incubating.jar" \
-    "fluss-plugins/iceberg/fluss-fs-s3-0.9.1-incubating.jar" \
-    "fluss-plugins/iceberg/fluss-fs-hdfs-0.9.1-incubating.jar" \
-    "fluss-plugins/iceberg/fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar" \
+    "fluss-plugins/iceberg/fluss-flink-2.2-1.0.0.jar" \
+    "fluss-plugins/iceberg/fluss-flink-tiering-1.0.0.jar" \
+    "fluss-plugins/iceberg/fluss-lake-iceberg-1.0.0.jar" \
+    "fluss-plugins/iceberg/fluss-fs-s3-1.0.0.jar" \
+    "fluss-plugins/iceberg/fluss-fs-hdfs-1.0.0.jar" \
     "fluss-plugins/iceberg/hadoop-mapreduce-compat-2.8.5.jar"; do
     path="$LIB_COMPOSE_DIR/$relative"
     [ -f "$path" ] \

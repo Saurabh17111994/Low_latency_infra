@@ -13,7 +13,8 @@
 # filesystem — is what carries them.
 #
 # WHAT IS DELIBERATELY NOT HERE
-# fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar: the dev compose mounts it, but it is
+# fluss-fs-hadoop-shaded-0.9-SNAPSHOT.jar: the dev compose mounted it until
+# 2026-09-22, but it is
 # an unpublished build module — 404 on Maven Central AND on the Apache snapshot
 # repository. A SNAPSHOT cannot be checksum-pinned, so it cannot be part of a
 # reproducible image. All 12898 of its entries are already contained in the

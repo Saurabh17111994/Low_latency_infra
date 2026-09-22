@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.lookup.LookupResult;
 import org.apache.fluss.client.lookup.Lookuper;
+import org.apache.fluss.client.table.MultiTable;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.exception.NetworkException;
@@ -103,6 +104,10 @@ class FlussControlStateStoreFlakyLookupTest {
             throw new UnsupportedOperationException("not used in this test");
         }
         @Override public Table getTable(TablePath tablePath) { return new StubTable(lookuper); }
+        // Added to the Connection interface in Fluss 1.0; this stub drives the lookup path only.
+        @Override public MultiTable getMultiTable() {
+            throw new UnsupportedOperationException("not used in this test");
+        }
         @Override public void close() {}
     }
 
