@@ -244,6 +244,14 @@ LIVE_MARKER_BAD = re.compile(
     re.IGNORECASE,
 )
 
+# A transition claim "N→M" ("common 735→739", "compute 388→386") states a dated
+# CHANGE, not the current count. The arrow is this file's own change notation (see
+# the truth-constant comments above), so the claim span annotates itself the way
+# KIND_CHANGE annotates a reverted table kind. Without it, a change note inserted
+# right after a "current test truth" triple inherits the live marker and reports
+# LIVE-STALE (2026-09-22: the CHG-290 note at offset 67 of the C6 line).
+NUMERIC_TRANSITION = re.compile(r"\s*(?:→|->|-->)\s*\*{0,2}\d{2,4}(?!\d)")
+
 
 def live_marker_in(text: str) -> bool:
     """True when a genuine live-count marker ("now/current N") appears in
@@ -285,7 +293,12 @@ NUMERIC_MARKER = re.compile(
     r"removed from scope|out of scope|not in scope|de-scop|"
     r"deleted|removed|dropped|converted|conversion|re-scop|"
     r"\bCHG-\d{3}\b|\bDEC-\d{3}\b|"
-    r"2026-08-\d{2}",
+    # Any ISO date, not just 2026-08: the annotation reads "the count at that
+    # time", so it must not expire. The August-only form left every claim dated
+    # from 2026-09 on unannotated unless a CHG-/DEC- marker happened to land
+    # inside NUMERIC_WINDOW, which is why the 2026-09-21 note on the C6 line
+    # needed NUMERIC_TRANSITION to pass at all.
+    r"\d{4}-\d{2}-\d{2}",
     re.IGNORECASE,
 )
 
@@ -544,6 +557,11 @@ def classify_numeric(lines: list[str], idx: int, claim_type: str, m: re.Match,
     """Classification for numeric-drift claims: a date/historical marker within
     NUMERIC_WINDOW chars of the count token annotates it as 'at that time'."""
     line = lines[idx]
+    # The claim's own span declares a change ("common 735→739"): an arrow form is a
+    # change record, never a current-state count, so the live-marker rule below
+    # does not apply to it.
+    if NUMERIC_TRANSITION.match(line[m.end(): m.end() + 12]):
+        return "LINE-ANNOTATED"
     # A "now/current N" claim is a live current-state claim: a live marker
     # before the count overrides the date-window annotation (the masking
     # class — a stale live count parked next to an unrelated date was read as

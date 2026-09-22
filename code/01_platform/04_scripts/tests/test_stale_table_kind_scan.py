@@ -48,6 +48,25 @@ class LiveClaimClassificationTests(unittest.TestCase):
         self.assertIn(("live-count-stale", "LIVE-STALE"), tiers)
         self.assertNotIn(("test-count-stale", "LINE-ANNOTATED"), tiers)
 
+    def test_transition_claim_after_live_marker_is_a_change_record(self):
+        # 2026-09-22: a change note ("common 735→739 on 2026-09-21") inserted right
+        # after the C6 truth triple inherited the live "current" marker and
+        # reported LIVE-STALE. "N→M" is a change record, so the claim span
+        # annotates itself — the same way KIND_CHANGE annotates a reverted table
+        # kind — and the live-marker rule must not apply to it.
+        hits = scan_text(
+            "> **2026-09-14 current test truth:** unit suites green 739/475/530 "
+            "(common 735→739 on 2026-09-21 — the third-column parser case, "
+            "CHG-290; then 736→739 with the manifest stamp rule, CHG-291)\n")
+        tiers = claim_tiers(hits)
+        self.assertIn(("test-count-stale", "LINE-ANNOTATED"), tiers)
+        self.assertNotIn(("test-count-stale", "LIVE-STALE"), tiers)
+        # Control: the same construction WITHOUT the arrow is still a live claim.
+        ctrl = scan_text(
+            "> **2026-09-14 current test truth:** unit suites green 739/475/530 "
+            "(common 735 on 2026-09-21, CHG-290)\n")
+        self.assertIn(("test-count-stale", "LIVE-STALE"), claim_tiers(ctrl))
+
     def test_number_first_live_claim_unmasked(self):
         # "current ... N common" (number-first) was invisible to the old regex;
         # now it is a claim AND a live claim.
@@ -74,6 +93,20 @@ class LiveClaimClassificationTests(unittest.TestCase):
         hits = scan_text("fresh runs 2026-08-13: ingestion 180/0/7 skipped, all green\n")
         self.assertEqual(claim_tiers(hits),
                          {("test-count-stale", "LINE-ANNOTATED")})
+
+    def test_dates_after_august_2026_annotate(self):
+        # NUMERIC_MARKER used to hardcode 2026-08-\d{2}, so a claim dated from
+        # 2026-09 on had no recognized date annotation and was reported
+        # UNANNOTATED (a failing tier) unless a CHG-/DEC- marker happened to sit
+        # within NUMERIC_WINDOW. The annotation reads "the count at that time",
+        # so it must not expire with the calendar.
+        for date in ("2026-08-13", "2026-09-15", "2026-12-31", "2027-01-02"):
+            with self.subTest(date=date):
+                hits = scan_text(
+                    f"fresh runs {date}: ingestion 180/0/7 skipped, all green\n")
+                self.assertEqual(
+                    claim_tiers(hits), {("test-count-stale", "LINE-ANNOTATED")},
+                    f"a claim dated {date} must be LINE-ANNOTATED")
 
     def test_c6_citation_not_double_fired(self):
         # "current truth is N/N/N" is a C6-triple citation (checked by
