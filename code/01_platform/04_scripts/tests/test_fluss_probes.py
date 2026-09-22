@@ -88,33 +88,59 @@ def _runtime_classpath(tmp: Path) -> str:
         f"(exit {proc.returncode})\n{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
 
 
+# javac against the full Fluss client classpath costs 648ms (measured 2026-09-22,
+# 6 sources), and every ProbeTestBase subclass needs byte-identical output from the
+# same sources. That compile used to run once per subclass; it now runs once per
+# test process — ~3s of the gate's Python block.
+_COMPILED: tuple[Path, str] | None = None
+_SHARED_TMP: Path | None = None
+
+
+def _shared_tmp() -> Path:
+    """One temp dir for the shared compile, so the cache owns what it writes."""
+    global _SHARED_TMP
+    if _SHARED_TMP is None:
+        _SHARED_TMP = Path(tempfile.mkdtemp(prefix="w13-probes-shared."))
+    return _SHARED_TMP
+
+
+def _javac_fallback(proc: subprocess.CompletedProcess, classes: Path) -> None:
+    """Retry with the local m2 Fluss jars only; still a failure if that fails too."""
+    fallback = _m2_fluss_classpath()
+    retry = subprocess.run(["javac", "-nowarn", "-cp", fallback, "-d", str(classes)]
+                           + [str(PROBE_DIR / f"{n}.java") for n in PROBES],
+                           capture_output=True, text=True, timeout=300)
+    if retry.returncode != 0:
+        raise AssertionError(
+            "javac failed for the wave-13 probes.\n"
+            f"with FLUSS_PROBE_CP (ingestion classpath):\n{proc.stderr[-3000:]}\n"
+            f"with the m2 Fluss jars:\n{retry.stderr[-3000:]}")
+
+
+def _compiled_probes() -> tuple[Path, str]:
+    """(classes dir, classpath) for the probe sources — compiled once per test process."""
+    global _COMPILED
+    if _COMPILED is None:
+        tmp = _shared_tmp()
+        cp = _runtime_classpath(tmp)
+        classes = tmp / "classes"
+        classes.mkdir()
+        sources = [str(PROBE_DIR / f"{n}.java") for n in PROBES]
+        # W9a rule: a compile failure is an AssertionError with the compiler output,
+        # never a skip — a broken classpath must not look like "nothing to test".
+        proc = subprocess.run(["javac", "-nowarn", "-cp", cp, "-d", str(classes)] + sources,
+                              capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0:
+            _javac_fallback(proc, classes)
+        _COMPILED = (classes, cp)
+    return _COMPILED
+
+
 class ProbeTestBase(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.tmp = Path(tempfile.mkdtemp(prefix="w13-probes."))
-        cls.classes = cls.tmp / "classes"
-        cls.classes.mkdir()
-        cls.cp = _runtime_classpath(cls.tmp)
-        sources = [str(PROBE_DIR / f"{n}.java") for n in PROBES]
-        # W9a rule: a compile failure is an AssertionError with the compiler output,
-        # never a skip — a broken classpath must not look like "nothing to test".
-        proc = subprocess.run(["javac", "-nowarn", "-cp", cls.cp, "-d", str(cls.classes)] + sources,
-                              capture_output=True, text=True, timeout=300)
-        if proc.returncode != 0:
-            cls._javac_fallback(proc)
-
-    @classmethod
-    def _javac_fallback(cls, proc) -> None:
-        """Retry with the local m2 Fluss jars only; still a failure if that fails too."""
-        fallback = _m2_fluss_classpath()
-        retry = subprocess.run(["javac", "-nowarn", "-cp", fallback, "-d", str(cls.classes)]
-                               + [str(PROBE_DIR / f"{n}.java") for n in PROBES],
-                               capture_output=True, text=True, timeout=300)
-        if retry.returncode != 0:
-            raise AssertionError(
-                "javac failed for the wave-13 probes.\n"
-                f"with FLUSS_PROBE_CP (ingestion classpath):\n{proc.stderr[-3000:]}\n"
-                f"with the m2 Fluss jars:\n{retry.stderr[-3000:]}")
+        cls.classes, cls.cp = _compiled_probes()
 
     def run_probe(self, name: str, args: list[str], env: dict | None = None,
                   timeout: int = 60) -> subprocess.CompletedProcess:

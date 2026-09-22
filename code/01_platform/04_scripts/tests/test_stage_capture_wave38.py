@@ -6,6 +6,13 @@ t+40 bridge, t+65 bridge). FLUSS_PROBE_CP / INGESTION_JAVA_OUT stay unset so
 the JVM/file legs are skipped; JOB_ID comes from the stubbed overview
 (test-jid). Hermetic rule: no stub may touch the cluster (all exit from
 fixtures), so pre-fix runs can only fail fast, never write live state.
+
+Two cadences, chosen by what a test asserts. Tests that assert a COUNT of
+polls or ticks (the P6-216 debounce, 5 consecutive checkpoint failures, the
+t+5 bridge check, the 3s file deletion) keep the 8s / interval-5 default —
+their assertions are about how many times the loop ran. Tests that assert only
+an ARTIFACT (a parsed row, a healed offset, a probe argv, appended ids) run 3s
+at CAPTURE_INTERVAL_S=1: faster, and MORE sampled (3 ticks, not 1-2).
 """
 import json
 import os
@@ -157,7 +164,9 @@ def test_corrupt_offset_defaults_zero(tmp_path):
     out.mkdir()
     (out / ".ingestion-java.out.offset").write_text("garbage!!\n")
     j = _java_out(tmp_path)
-    proc, out, _ = _run(tmp_path, extra_env={"INGESTION_JAVA_OUT": str(j)})
+    proc, out, _ = _run(tmp_path, duration="3",
+                        extra_env={"INGESTION_JAVA_OUT": str(j),
+                                   "CAPTURE_INTERVAL_S": "1"})
     text = proc.stdout + proc.stderr
     assert proc.returncode == 0, text
     tsv = out / "ingestion.tsv"
@@ -174,7 +183,9 @@ def test_parse_failure_holds_offset(tmp_path):
     # the run (rc 2) because the enabled leg produced zero rows.
     j = _java_out(tmp_path, mode=0o000)
     try:
-        proc, out, _ = _run(tmp_path, extra_env={"INGESTION_JAVA_OUT": str(j)})
+        proc, out, _ = _run(tmp_path, duration="3",
+                            extra_env={"INGESTION_JAVA_OUT": str(j),
+                                       "CAPTURE_INTERVAL_S": "1"})
     finally:
         j.chmod(0o644)
     text = proc.stdout + proc.stderr
@@ -192,8 +203,9 @@ def test_probe_db_table_params(tmp_path):
     # keep their own tables (guards against over-editing the block).
     argv = tmp_path / "java-argv.txt"
     extra = {"FLUSS_PROBE_CP": "/tmp/fake-cp", "JAVA_ARGV": str(argv),
-             "PROBE_DB": "mydb", "PROBE_RAW_TABLE": "myraw"}
-    proc, out, _ = _run(tmp_path, extra_env=extra)
+             "PROBE_DB": "mydb", "PROBE_RAW_TABLE": "myraw",
+             "CAPTURE_INTERVAL_S": "1"}
+    proc, out, _ = _run(tmp_path, duration="3", extra_env=extra)
     text = proc.stdout + proc.stderr
     # The stub probes emit no rows, so the end-gate fails the run on the
     # rowless read-lag leg (rc 2) — expected: it proves the probes actually
@@ -257,7 +269,9 @@ def test_checkpoints_append_only_new_ids(tmp_path):
     # P6-564: cumulative history appends each id exactly once (old: full
     # history every tick, O(ticks x checkpoints) with duplicates).
     import json
-    proc, out, _ = _run(tmp_path, extra_env={"W38_CURL_CP_MODE": "grow"})
+    proc, out, _ = _run(tmp_path, duration="3",
+                        extra_env={"W38_CURL_CP_MODE": "grow",
+                                   "CAPTURE_INTERVAL_S": "1"})
     text = proc.stdout + proc.stderr
     assert proc.returncode == 0, text
     lines = (out / "flink-checkpoints.jsonl").read_text().splitlines()
