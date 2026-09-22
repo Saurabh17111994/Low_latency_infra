@@ -270,7 +270,7 @@
     {
       "table_name": "fingerprint_dedup",
       "ddl_path": "24_fingerprint_dedup.sql",
-      "ddl_sha256": "ea342cc671378895a86aac75e6f4641d0afd2565ace674823b98b1f7b8b05322",
+      "ddl_sha256": "cb13003821f344c5f9b17633350efecbc4a72bd590d29c5ce176fc3f59c8c91e",
       "table_kind": "KV",
       "primary_key": "instrument_token, fingerprint_version, event_fingerprint",
       "bucket_key": null,
@@ -354,7 +354,7 @@
     {
       "table_name": "candle_live",
       "ddl_path": "32_candle_live.sql",
-      "ddl_sha256": "6890fd87abe7ff3feae9f29bfe40555f4b1e62aa3f3d186ef726ad38d05a9870",
+      "ddl_sha256": "2ae7a4c1fb2bedf3da21038c9775d79ce1d520ff586bda763ce0f9af7999033b",
       "table_kind": "KV",
       "primary_key": "instrument_token, tf, window_start",
       "bucket_key": null,
