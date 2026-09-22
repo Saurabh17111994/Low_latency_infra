@@ -91,17 +91,24 @@ The previous single-axis status vocabulary (`Draft`, `Design-ready`, `Implementa
 > **E4 note (2026-08-21, CHG-078):** this table is the single `Current readiness` truth for the laptop-now cut. Live-money stays `Blocked` for every row until E5 single-operator (Saurabh, DEC-044) sign-off. `Production runtime` honest `Not-implemented/Untested` — requires the VM era (`D1→D7`). No row is claimed `Production-validated` on a laptop.
 
 > **Gate state (2026-09-22 — later than the rows above, so re-measure before quoting).** The gate is
-> **19 steps**, and the standing certificate is still the 2026-09-19 run: `GATE RESULT: PASS — 19/19
-> verified, 0 skipped` at `HEAD f2faf565`, in `logs/soak/monday-gates-20260919-092530/` (83 min
-> wall clock; step 9 live drills ~40 min on drain waits; step 11 runs three DDL-apply scenarios
-> ~33 min under the CHG-227 cap fix — verified in-band, not by a subset run).
-> **No certificate covers the current HEAD**: 120+ commits land after the certified tree — the Fluss
-> 0.9.1→1.0.0 upgrade (pins, image chain, API fixtures), gate hardening (configurable negative-path
-> waits, smoke-twin pre-create), CHG-299/300/301, and the Tier-5/TTL/decisions doc accuracy pass —
-> so the next certifying gate covers all of it. The single certifying 19/19 runs once, on a frozen
-> tree + fresh cluster, at the end of Stage 8; then Stage 9 cutover. Optimization is banked at ~1.2×
-> end-to-end (~36 min → ~29.8 min); the certificate re-measures it. Measure rather than assume: `git log --oneline f2faf565..HEAD` and
-> `git log --oneline f2faf565..HEAD -- code/01_platform/04_scripts tests Makefile`.
+> **19 steps**, and the standing certificate is the 2026-09-22 run: `GATE RESULT: PASS — 19/19
+> verified, 0 skipped` at `HEAD 1d3c2c9a`, in `logs/soak/monday-gates-20260922-223433/` (28.1 min
+> wall clock; fingerprint `8ec03dc6106d1601:3f8eca56cf6c5c52`, catalog 27/27, stack_generation
+> `3f8eca56cf6c5c52`). This is the certificate for the Fluss `0.9.1-incubating` → `1.0.0` upgrade and
+> the first clean end-to-end timing after the optimization: **83.4 → 28.1 min (2.97×)**, against the
+> predecessor run `logs/soak/monday-gates-20260919-092530/` at `f2faf565`. Steps 9 and 11 carried
+> 56.9 of the predecessor's 83.4 min (R2-paced drain waits) and are now 21.9 and 2.9 min; steps 1–8
+> and 12–19 together got ~3 min slower, so the remaining headroom is small. See `CHG-302`.
+> **What this certificate does not cover.** It was captured with
+> `remote.log.task-interval-duration=0s` (FACT-018, the gate-speed override), so **tiering to R2 is
+> off in the certified configuration and 1.0.0 tiering stays unverified** — `FACT-011` records that
+> as outstanding. No native 1.0.0 capability is covered either: those are sequenced after the
+> certificate by `DEC-053` (`docs/plans/2026-09-22-fluss-1.0-native-adoption.md`), because a
+> certificate answers "does the same behaviour work on the new version", not "does new behaviour
+> work". A certificate is bound to the tree it names, so a later commit does not invalidate it — but
+> it does mean the next certifying gate must be run again before any claim moves past `1d3c2c9a`.
+> Measure rather than assume: `git log --oneline f2faf565..1d3c2c9a` and
+> `git log --oneline f2faf565..1d3c2c9a -- code/01_platform/04_scripts tests Makefile`.
 > The per-change loop is `make gate-fast` (T0, ~4 min); a `make gate --steps …` subset run prints
 > `SUBSET RESULT` and **never** certifies. The certification-hygiene batch closed on that subset
 > evidence by decision (option B, `825e2dc5`) rather than by running the hour. The `13/13` rows
