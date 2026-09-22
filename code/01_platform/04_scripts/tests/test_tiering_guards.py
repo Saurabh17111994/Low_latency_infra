@@ -176,7 +176,9 @@ class TieringStartTest(unittest.TestCase):
         self.overview_file.write_text(overview(("f" * 32, "Fluss Lake Tiering", "RESTARTING")))
         result = self.run_start("--status")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("fixed-delay restart", result.stdout)
+        # 2026-09-23: the message is generic now — Fluss 1.0.0 sets the tiering
+        # strategy in its own code, so fixed-delay is no longer the only accepted form.
+        self.assertIn("with an accepted restart strategy", result.stdout)
 
     def test_status_ignores_terminal_and_unrelated_jobs(self):
         for name, state in (("Fluss Lake Tiering", "FINISHED"),
@@ -233,14 +235,24 @@ class TieringStartTest(unittest.TestCase):
 
     # ---- P6-250 / P6-633 / P6-634: submit, job id and state polling -------
 
-    def test_submit_asks_for_effectively_unbounded_fixed_delay_restarts(self):
+    def test_submit_leaves_the_restart_strategy_to_fluss_1_0(self):
+        # 2026-09-23 (found while upgrading to Fluss 1.0.0): the submit used to pin
+        # -Drestart-strategy.type=fixed-delay (+ attempts=2147483647, delay="30 s").
+        # Fluss 1.0.0's FlussLakeTiering sets RESTART_STRATEGY = exponential-delay in
+        # its own Flink Configuration and hands that fresh instance to
+        # getExecutionEnvironment(...), so the submitter's flags no longer take effect —
+        # they read as protection while doing nothing. What must never come back is a
+        # CAPPED strategy (P6-250: attempts=3 turned a TaskManager loss into a permanent
+        # tiering outage), and the script must accept the strategy Fluss owns.
         self.overview_file.write_text(OVERVIEW_NONE)
         self.run_start(STUB_SUBMIT_OUT="JobID " + "b" * 32 + "\n", STUB_STATE="RUNNING")
         argv = [a for call in self.recorded() for a in call]
         calls = "\n".join(argv)
-        self.assertIn("-Drestart-strategy.type=fixed-delay", calls)
-        self.assertIn("-Drestart-strategy.fixed-delay.attempts=2147483647", calls)
-        self.assertNotIn("-Drestart-strategy.fixed-delay.attempts=3", argv)
+        self.assertNotIn("-Drestart-strategy.", calls, "the dead restart-strategy flags are back")
+        self.assertNotIn("attempts=3", calls, "P6-250: a capped restart strategy is back")
+        script = START.read_text()
+        self.assertIn("exponential-delay", script)
+        self.assertIn("RestartStrategyOptions.RESTART_STRATEGY", script)
 
     def test_truncated_job_id_is_a_failed_submit_with_the_exit_status(self):
         self.overview_file.write_text(OVERVIEW_NONE)

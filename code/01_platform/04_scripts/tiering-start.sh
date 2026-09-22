@@ -88,6 +88,15 @@ tiering_has_restart_strategy() {
   # strategy". The REST API renders the token as "fixed-delay" or the label
   # "Restart with fixed delay (...)" depending on Flink version, and only those
   # forms — in the strategy field itself — may pass.
+  # 2026-09-23 (P6-250 update, Fluss 1.0.0): exponential-delay is ALSO accepted.
+  # Fluss 1.0.0 sets the tiering job's strategy in its own code — FlussLakeTiering
+  # builds a fresh org.apache.flink.configuration.Configuration and passes it to
+  # getExecutionEnvironment(...) with
+  # RestartStrategyOptions.RESTART_STRATEGY = exponential-delay (source comment: the
+  # job is stateless because offsets live in the server's LakeSnapshot, so it may
+  # restart indefinitely). A submitter's -D cannot override that. exponential-delay
+  # retries without an attempt cap, which is exactly what P6-250 protects — the
+  # service must never give up permanently — so it passes this check.
   printf '%s' "$config" | python3 -c '
 import json, sys
 try:
@@ -95,8 +104,10 @@ try:
 except Exception:
     sys.exit(1)
 values = [cfg.get("restart-strategy"), cfg.get("restart-strategy.type")]
-ok = any(v and ("fixed-delay" in str(v).lower() or "fixed delay" in str(v).lower())
-         for v in values)
+# Both accepted forms retry without an attempt cap: fixed-delay (the pre-1.0.0 pin)
+# and exponential-delay (what Fluss 1.0.0 sets in code).
+accepted = ("fixed-delay", "fixed delay", "exponential-delay", "exponential delay")
+ok = any(v and any(t in str(v).lower() for t in accepted) for v in values)
 sys.exit(0 if ok else 1)
 ' 2>/dev/null
 }
@@ -105,12 +116,12 @@ if [ "${1:-}" = "--status" ]; then
   JID="$(tiering_job_id)"
   if [ -n "$JID" ]; then
     if tiering_has_restart_strategy "$JID"; then
-      log "tiering job RUNNING with fixed-delay restart (job_id=$JID)"
+      log "tiering job RUNNING with an accepted restart strategy (job_id=$JID)"
       exit 0
     fi
     # P6-632: distinct exit codes so the smoke's GUARD-A pre-flight can tell
     # "no job at all" (1) from "job running with the wrong strategy" (2).
-    log "!! tiering job RUNNING without fixed-delay restart (job_id=$JID)"
+    log "!! tiering job RUNNING without an accepted restart strategy (job_id=$JID)"
     exit 2
   fi
   log "no RUNNING tiering job"
@@ -129,12 +140,12 @@ flock -n 9 || { echo "!! another tiering-start is in progress (lock $LOCK_FILE) 
 JID="$(tiering_job_id)"
 if [ -n "$JID" ]; then
   if tiering_has_restart_strategy "$JID"; then
-    log "tiering job already RUNNING with fixed-delay restart (job_id=$JID) — nothing to do"
+    log "tiering job already RUNNING with an accepted restart strategy (job_id=$JID) — nothing to do"
     exit 0
   fi
   # P6-632: give the operator the exact command instead of leaving the outage in
   # place, and exit 2 so callers can distinguish it from a real failure.
-  echo "!! tiering job $JID is RUNNING without fixed-delay restart — cancel it and resubmit:" >&2
+  echo "!! tiering job $JID is RUNNING without an accepted restart strategy — cancel it and resubmit:" >&2
   echo "     docker exec $JM flink cancel $JID && bash $0" >&2
   exit 2
 fi
@@ -173,18 +184,24 @@ log "submitting lake tiering job (iceberg -> $WAREHOUSE)"
 # with "No FileSystem for scheme s3". Region MUST be an R2 region
 # (auto/apac/eeur/enam); AWS names get InvalidRegionName -> HTTP 400
 # (proven: auto=200, ap-south-1=400).
-# P6-250: attempts=3 turned a TaskManager loss into a PERMANENT tiering outage
-# 90s later — the same permanent outage this strategy was added to remove, just
-# delayed. This job is a long-lived service, so the effective attempt count is
-# unbounded (Integer.MAX_VALUE, Flink's accepted maximum) with a 30s fixed delay;
-# `type=fixed-delay` is stated explicitly so a cluster default cannot change it.
+# P6-250 history: attempts=3 turned a TaskManager loss into a PERMANENT tiering
+# outage 90s later, so this submit used to pin `type=fixed-delay` with
+# attempts=2147483647 and a 30s delay. Those three -D flags are DEAD since Fluss
+# 1.0.0 and were removed on 2026-09-23: FlussLakeTiering builds a FRESH
+# org.apache.flink.configuration.Configuration and passes it to
+# getExecutionEnvironment(...), and in 1.0.0 it sets
+# RestartStrategyOptions.RESTART_STRATEGY = exponential-delay in that Configuration —
+# a submitter's -D cannot override it. Verified on the running 1.0.0 stack: the
+# JobMaster logs ExponentialDelayRestartBackoffTimeStrategy for this job while
+# -Dparallelism.default=2 from the same command line does apply.
+# What P6-250 protects still holds — exponential-delay retries without an attempt
+# cap, so the service cannot give up permanently — but the 30s cadence is gone.
+# Do NOT re-add the flags: they are silently ignored. tiering_has_restart_strategy()
+# accepts the strategy Fluss owns, and the smoke's GUARD-A accepts it too.
 if submit_out="$(docker exec "$JM" flink run -d \
   -c "$ENTRY" \
   -Dpipeline.name="Fluss Lake Tiering" \
   -Dparallelism.default=2 \
-  '-Drestart-strategy.type=fixed-delay' \
-  '-Drestart-strategy.fixed-delay.attempts=2147483647' \
-  '-Drestart-strategy.fixed-delay.delay=30 s' \
   "$TIERING_JAR" \
   --fluss.bootstrap.servers fluss-coordinator:9123 \
   --datalake.format iceberg \
@@ -228,10 +245,10 @@ for _ in $(seq 1 15); do
   case "$STATE" in
     RUNNING)
       if tiering_has_restart_strategy "$NEW_JID"; then
-        log "tiering job RUNNING with fixed-delay restart (job_id=$NEW_JID)"
+        log "tiering job RUNNING with an accepted restart strategy (job_id=$NEW_JID)"
         exit 0
       fi
-      echo "!! tiering job RUNNING but effective restart strategy is not fixed-delay" >&2
+      echo "!! tiering job RUNNING but its restart strategy is neither fixed-delay nor exponential-delay" >&2
       exit 1 ;;
     FAILED|CANCELED|FINISHED|SUSPENDED)
       echo "!! tiering job reached terminal state $STATE — fetching exception:" >&2

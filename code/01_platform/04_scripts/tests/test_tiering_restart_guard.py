@@ -7,17 +7,26 @@ ROOT = Path(__file__).resolve().parents[4]
 
 
 class TieringRestartGuardTest(unittest.TestCase):
-    def test_tiering_submit_pins_and_verifies_fixed_delay_restart(self):
+    def test_tiering_submit_and_guard_follow_fluss_1_0_restart_ownership(self):
         script = (ROOT / "code" / "01_platform" / "04_scripts" / "tiering-start.sh").read_text()
-        self.assertIn("-Drestart-strategy.type=fixed-delay", script)
-        # P6-250 (wave 8): `attempts=3` means the tiering service dies permanently
-        # after the third TaskManager loss — the same outage the restart strategy
-        # exists to prevent, just delayed. Verify the strategy against the parsed
-        # execution-config as well (P6-249), not against the raw response body.
-        self.assertIn("-Drestart-strategy.fixed-delay.attempts=2147483647", script)
-        self.assertIn("-Drestart-strategy.fixed-delay.delay=30 s", script)
+        # 2026-09-23 (Fluss 1.0.0 upgrade): from wave 8 until this change the submit
+        # pinned the strategy with three -D flags (fixed-delay, unbounded attempts,
+        # 30 s delay). Fluss 1.0.0's FlussLakeTiering now sets
+        # RestartStrategyOptions.RESTART_STRATEGY = exponential-delay inside the
+        # Configuration it passes to getExecutionEnvironment(...), which overrides the
+        # submitter — so the flags were removed as dead weight.
+        # The guard's job is unchanged: prove the effective strategy cannot give up
+        # permanently (P6-250), verified against the parsed execution-config (P6-249)
+        # rather than a raw-body grep. exponential-delay has no attempt cap, so it is
+        # accepted alongside fixed-delay.
+        self.assertNotIn("-Drestart-strategy.", script, "the dead restart-strategy flags are back")
+        # The prefix ban above covers any re-added flag, including a capped one.
+        self.assertIn("Do NOT re-add the flags", script,
+                      "the explanation for the removed flags is gone")
+        self.assertIn("exponential-delay", script)
+        self.assertIn("RestartStrategyOptions.RESTART_STRATEGY", script)
         self.assertIn("tiering_has_restart_strategy", script)
-        self.assertIn("without fixed-delay restart", script)
+        self.assertIn("without an accepted restart strategy", script)
         self.assertIn('json.load(sys.stdin).get("execution-config")', script)
 
     def test_tm_kill_drill_serializes_shared_cluster_ownership(self):

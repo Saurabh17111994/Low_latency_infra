@@ -122,7 +122,13 @@ class StaleFindingsStayFixedTest(unittest.TestCase):
     def test_tiering_guard_pins_the_real_messages_not_the_pattern_string(self):
         text = TIERING_TEST.read_text()
         self.assertNotIn("fixed[- ]delay", text, "P6-844: the grep-pattern literal is back")
-        self.assertIn("-Drestart-strategy.type=fixed-delay", text)
+        # 2026-09-23 (Fluss 1.0.0): the pinned string is no longer the -D flag this
+        # platform passed — Fluss 1.0.0 sets exponential-delay in its own code and
+        # overrides that flag. The guard test must pin the strategy now accepted plus
+        # the absence of the dead flag.
+        self.assertIn("exponential-delay", text)
+        self.assertNotIn("-Drestart-strategy.type=fixed-delay", text)
+        self.assertIn("tiering_has_restart_strategy", text)
 
     def test_smoke_contract_strings_match_between_test_and_script(self):
         script = TMKILL.read_text()

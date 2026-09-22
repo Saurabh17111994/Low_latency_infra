@@ -88,8 +88,20 @@ timeout 3 bash -c "echo > /dev/tcp/localhost/9123" 2>/dev/null \
 # feeding a cluster with NO tiering job — Fluss servers only coordinate;
 # the actual tiering is a Flink job started by tiering-start.sh. Without
 # this check every later verification fails and the run proves nothing.
-bash "$ROOT/code/01_platform/04_scripts/tiering-start.sh" --status \
-  || { echo "!! GUARD-A FAILED: no RUNNING tiering job — run tiering-start.sh first (the smoke cannot pass without it)"; exit 1; }
+# P6-632 note (2026-09-23): tiering-start.sh --status exits 1 for "no job" and 2 for
+# "job RUNNING with a strategy this smoke does not accept". The single old message said
+# "no RUNNING tiering job" for BOTH, which sent the 2026-09-23 upgrade diagnosis down
+# the wrong path (the job WAS running — Fluss 1.0.0 had changed the strategy it uses).
+if status_out="$(bash "$ROOT/code/01_platform/04_scripts/tiering-start.sh" --status 2>&1)"; then
+  :
+else
+  case "$?" in
+    2) echo "!! GUARD-A FAILED: a tiering job is RUNNING but its restart strategy is not accepted (fixed-delay or exponential-delay):" ;;
+    *) echo "!! GUARD-A FAILED: no RUNNING tiering job — run tiering-start.sh first (the smoke cannot pass without it):" ;;
+  esac
+  printf '%s\n' "$status_out" | sed 's/^/       /' >&2
+  exit 1
+fi
 
 # GUARD B (table not datalake-enabled): the 28-table corpus was applied
 # during a restack while the coordinator had no datalake.format, so Fluss
@@ -107,7 +119,7 @@ ZK_RAW="$(docker exec 01_docker-zookeeper-1 zkCli.sh get \
 ZK_TABLE="$(printf '%s\n' "$ZK_RAW" | grep -o 'table\.datalake\.enabled[^,}]*' | head -1 || true)"
 echo "ZK live property: ${ZK_TABLE:-<absent>}"
 printf '%s\n' "$ZK_TABLE" | grep -Eq 'table\.datalake\.enabled"?[[:space:]]*[=:][[:space:]]*"?true' \
-  || { echo "!! GUARD-B FAILED: raw_table_1 has table.datalake.enabled!=true in ZK — the tiering service will never pick it up. Fix: ALTER TABLE (see EnableTiering.java notes in /tmp/tiering-smoke or repo docs)."; exit 1; }
+  || { echo "!! GUARD-B FAILED: raw_table_1 has table.datalake.enabled!=true in ZK — the tiering service will never pick it up. Fix: the table must be DROPped and re-created with the option (or the proof run against a freshly created table) — Fluss 1.0.0 refuses to alter this option on tables created before the cluster enabled datalake (InvalidAlterTableException, fluss-client LakeEnableTableITCase); an ALTER cannot work."; exit 1; }
 
 # GUARD C (invalid R2 SigV4 region): R2 rejects AWS region names in the
 # credential scope with InvalidRegionName -> HTTP 400 on EVERY s3a request
