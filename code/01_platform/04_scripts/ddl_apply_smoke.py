@@ -76,7 +76,7 @@ sys.path.insert(0, SCRIPT_DIR)
 import ddl_apply  # noqa: E402  (reuse pins, DDL dir, classpath builder)
 
 REPO_ROOT = ddl_apply.REPO_ROOT
-# The composite-PK tables the raw 0.9.1 client cannot upsert (bucket key == PK,
+# The composite-PK tables the raw client could not upsert (bucket key == PK,
 # iceberg key encoder) — manifest-predicted by --ack-limitations auto. RESOLVED
 # by the owner-approved DDL fix (COMPAT-FLUSS-005): Order_Lifecycle /
 # Order_Correlation now use kv.format-version=2 + a single-field subset bucket
