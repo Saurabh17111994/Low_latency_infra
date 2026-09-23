@@ -892,3 +892,32 @@ Operational notes:
   stabilize before cancel/harvest — without it, F4/G7c read the kill
   backlog's lag tail as data loss (the 20260902-030521 "31 orphans" and
   20260902-034813 "1024 mismatches" were both this artifact).
+
+## Recreating the JobManager/TaskManager (image swap) on a non-HA stack
+
+The dev compose stack is a non-HA session cluster (`DEC-033`): the JobManager does not persist job
+graphs, and its blob store is container-local. **A JobManager restart therefore drops every running job.**
+The HA configuration exists in the Swarm stack (`docker-stack.yml`, `high-availability.type: zookeeper`
+with the 3-node quorum and an S3 `storageDir`), which is the three-VM stage, not this host.
+
+Correct sequence for an image swap:
+
+1. Check what is running -- only RUNNING counts, `FINISHED`/`CANCELED` jobs in `/jobs/overview` history
+   are not evidence: `curl -s http://<jm>:8081/jobs/overview`.
+2. For a job with irreplaceable state (SignalJob), take a savepoint first: `make rollout-savepoint`.
+   For the Babysitter (a no-op marker) that step is unnecessary.
+3. Recreate: `bash code/01_platform/04_scripts/stack-lock.sh docker compose --env-file
+   code/01_platform/01_docker/.env --env-file code/01_platform/01_docker/secrets.env -f
+   code/01_platform/01_docker/docker-compose.yml up -d --no-deps --force-recreate <services>`.
+4. **Re-submit the jobs** -- this is the step that is easy to forget:
+   `bash code/01_platform/04_scripts/stack-lock.sh docker compose ... up -d --no-deps --no-build compute`.
+   The launcher is idempotent: it skips any job whose Flink name is already RUNNING, never submits
+   SignalJob unless `COMPUTE_SUBMIT_SIGNAL=1`, and skips SafetyHaltJob when `SAFETY_MANIFEST_TOKENS` is
+   unset. Do not run it while a job of the same name is RUNNING and healthy.
+5. Verify: `/jobs/overview` shows the job RUNNING, and `/jobs/<jid>/checkpoints` shows a completed
+   checkpoint. The launcher's own readiness line can print `FATAL ... last completed=0` before the first
+   checkpoint lands; treat that as a warning and judge from the checkpoints endpoint.
+
+Observed recovery cost (2026-09-23, CHG-306): the Fluss pair needed ~88 s of leader assignment after a
+recreate, and a dropped Babysitter job needed one launcher run (~70 s) to be back RUNNING with a
+completed checkpoint.
