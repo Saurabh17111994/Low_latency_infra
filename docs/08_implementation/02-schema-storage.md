@@ -298,7 +298,7 @@ upstream is complete.
 > and R2 iceberg tiering is live with a day-partitioned lake layout
 > (`.../data/event_day=<yyyyMMdd>/instrument_token_bucket=<N>/*.parquet`).
 > The other nine tables keep the 2026-08-13 lake-disabled state. Partition
-> keys are frozen at CREATE (no ALTER path in 0.9.1; 1.0.0 ALTER surface re-verified only for `table.kv.ttl` — 2026-09-22 probe) — any further
+> keys are frozen at CREATE (the 1.0.0 ALTER surface is re-verified only for `table.kv.ttl` — 2026-09-22 probe) — any further
 > partitioning change is a drop/recreate via `fluss-repair/RawTableAdmin.java`
 > (archive the old lake prefix aside first or create collides with orphaned
 > R2 objects — see the T-7 precedent). Fluss API notes verified in source:

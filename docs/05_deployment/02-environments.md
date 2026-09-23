@@ -10,14 +10,24 @@
 
 Environment definitions must remain separate. Local Compose settings must never be used as evidence for production HA, security, durability, or capacity.
 
+
+## Stack versions
+
+The stack runs **Apache Fluss 1.0.0** (coordinator and tablets, via `FLUSS_IMAGE`), **Apache Flink 2.2.1**
+(Scala 2.12, Java 17), and **ZooKeeper 3.9.2**. The version is carried by the image: the Swarm stack mounts
+no Fluss jars at all (`T9.4`), and the dev Compose stack mounts only Fluss 1.0.0 plugin jars
+(`code/01_platform/01_docker/fluss-plugins/iceberg/*-1.0.0.jar`). Deploy pins and their resolved digests
+live in `code/01_platform/01_docker/images.published.env`; `code/01_platform/04_scripts/pin-check.sh`
+validates them.
+
 ## Production placement
 
 ### Workload VMs
 
 v1: The three workload VMs are Manager+Worker and host:
 
-- A ZooKeeper ensemble node (one per VM; 3-node ensemble, quorum 2-of-3; Fluss metadata store — required by Fluss 0.9.1 and still by 1.0.0 — and Flink JobManager HA leadership)
-- Fluss coordinator/tablet capacity and three-node replication/quorum (LOG tables; KV tables are single-replica in Fluss 0.9.1 and 1.0.0 (standby replicas are an opt-in promotion aid only) — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038))
+- A ZooKeeper ensemble node (one per VM; 3-node ensemble, quorum 2-of-3; Fluss metadata store, required by Fluss 1.0.0 — and Flink JobManager HA leadership)
+- Fluss coordinator/tablet capacity and three-node replication/quorum (LOG tables; KV tables are single-replica in Fluss 1.0.0 (standby replicas are an opt-in promotion aid only) — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038))
 - Flink JobManager (HA standby + leader via ZooKeeper)/TaskManager workload capacity according to the proven placement plan
 - Ingestion, Action Capture, Executor, and job deployment control as assigned by the Swarm stack
 

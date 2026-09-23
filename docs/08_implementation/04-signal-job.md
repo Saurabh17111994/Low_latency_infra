@@ -80,7 +80,7 @@ Build this phase, then implement the tests in the second section before moving o
 > `logs/tracker-14/p6-livesync-candle-kv-20260813.md`). Recreated again
 > 2026-08-13 at the DDL blueprint TTL: id 693 → 697, `table.log.ttl` 7d → 2d,
 datalake disabled on the live table (dev deviation vs DDL `enabled=true` —
-avoids the 0.9.1 create-only lake re-enable trap), preflight PASS on 697 —
+avoids the create-only lake re-enable trap), preflight PASS on 697 —
 evidence `logs/tracker-14/ttl-live-recreate-2d-20260813.md`. The same
 lake-off state applies to all ten recreated 2d tables (full id list +
 consequences: log-scan reads only, lake re-enable = documented recovery —
