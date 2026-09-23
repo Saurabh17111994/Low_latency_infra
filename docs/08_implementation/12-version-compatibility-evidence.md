@@ -199,3 +199,32 @@ This plan **documents** how to prove the versions. It does not run the tests.
 Until the Docker environment exists and boundaries 1–5 are executed and pass, the
 matrix stays `UNKNOWN` and `make ddl` continues to refuse table application. That
 is the intended fail-closed posture.
+
+## Scope of the Fluss 1.0 upgrade over this matrix (2026-09-23)
+
+The matrix has 15 boundaries and 22 records. Re-verified against 1.0.0 on 2026-09-23:
+`VM-JAVA-001`, `VM-FLINK-SRV-003`, `VM-FLUSS-SRV-005`, `VM-FLUSS-CLI-006`,
+`VM-FLUSS-CONN-007`, `VM-IMAGES-012` (the last deliberately left `UNKNOWN`).
+
+Four boundaries carry a `COMPATIBLE` record dated **before** the upgrade. None is inside
+its blast radius, and that is asserted here rather than left implicit:
+
+| Boundary | Record | Why the 1.0 upgrade cannot affect it |
+|---|---|---|
+| `VM-PYTHON-002` | Python runtime 3.11.9, 2026-08-25 | Covers the Python *interpreter/runtime image*, not a Fluss client. Checked 2026-09-23: no Fluss Python dependency is declared and no Python source imports `fluss`, so no Fluss binding is in play. |
+| `VM-FLINK-API-004` | Flink API, 2026-08-24 | Flink remains 2.2.1 across the upgrade (`versions.pin`), so the Flink API boundary is unchanged. |
+| `VM-BROKER-MKT-008` | Market data broker, 2026-08-13 | Not a Fluss component and not part of this upgrade. |
+| `VM-OPENOBS-011` | OpenObserve, 2026-08-24 | Observability sink, orthogonal to the Fluss client/server upgrade. |
+
+Five boundaries remain `UNKNOWN`/partial, none of them Fluss-1.0-specific, each with a
+named owner of the gap:
+
+| Boundary | State | What would close it |
+|---|---|---|
+| `VM-ZK-013` | Live stack evidence recorded 2026-09-23, class kept `UNKNOWN` | A multi-node ensemble failover drill. The partial record documents dev single-node bring-up only. |
+| `VM-BROKER-PBK-009` | `PINNED_AWAITING_EVIDENCE` placeholder | Private-broker conformance run; unchanged by this upgrade. |
+| `VM-ARROW-010` | Partial: no order round-trip; Arrow timeout/retry profile unpinned | Sandbox order work (market-hours + approval), unchanged by this upgrade. |
+| `VM-PERF-001` | Partial: mock-broker loopback only (loopback 50k, 2026-07-31) | The performance re-measurement items in the upgrade plan (`T6.1`); the 90k campaign is retired by `DEC-036`. |
+| `VM-NAUTILUS-014` | `PINNED_AWAITING_EXECUTION_SERVICE` | Its own v2 execution-service line: container digest capture and Go toolchain alignment. |
+
+No boundary's class was promoted by this pass.

@@ -835,3 +835,46 @@ boundaries:
       written to a temp dir and only the smoke log above is durable.
     date: 2026-09-23
     status: COMPATIBLE_APPLY_CONTRACT_REISSUED
+  - compatibility_id: VM-ZK-013
+    boundary: ZooKeeper
+    proposed_version: "3.9.2"
+    evidence_source: >-
+      Partial live evidence recorded 2026-09-23, superseding the undated placeholder
+      above, without promoting the class: the dev stack ran apache/zookeeper:3.9.2
+      under Fluss 1.0.0 through a full bring-up - coordinator leader election
+      (LeaderAndIsr issued), tablet registration, the 27-table catalog read and a
+      compute job submission.
+    compatibility_class: UNKNOWN
+    evidence_owner: Platform
+    evidence_method: >-
+      Observe the ZooKeeper server the Fluss coordinator and tablet depend on during a
+      real bring-up, then read the coordinator and tablet logs for session and election
+      activity rather than probing ZooKeeper directly.
+    source_artifact: >-
+      apache/zookeeper:3.9.2 container from code/01_platform/01_docker/docker-compose.yml;
+      Fluss 1.0.0 coordinator and tablet from apache/fluss:1.0.0.
+    fixture: >-
+      Dev compose stack, single ZooKeeper node, host port 2181; 27-table catalog in
+      ZooKeeper under /fluss/metadata/databases/default/tables.
+    scenario: >-
+      make up with the Fluss 1.0.0 stack, then confirm the coordinator elected itself
+      leader, the tablet registered under /tabletservers/ids, catalog-guard read 27/27
+      tables, and submit-jobs.sh placed a Flink job on the cluster.
+    result: >-
+      ZooKeeper 3.9.2 served Fluss 1.0.0 for every observed operation; the coordinator
+      issued LeaderAndIsr updates for existing buckets and the catalog read succeeded.
+    observed_behavior: >-
+      A ZooKeeper container left without a network produced the expected downstream
+      failure - coordinator unable to elect a leader, fluss-coordinator:9123 refusing
+      connections - which shows the dependency is real and observable, and that
+      re-attaching ZooKeeper restored service with no Fluss-side change. The catalog
+      probe keeps reading 27/27 from the ZooKeeper path even while Fluss is unreachable,
+      so this evidence is about ZooKeeper serving, not about Fluss health.
+    limitations: >-
+      Single-node, dev-compose topology only: no multi-node ensemble, failover,
+      session-expiry or rolling-restart drill, and no ZooKeeper version matrix. The
+      superseded record for this boundary carried no date and no limitations text at
+      all, which is why it is replaced rather than extended. Class stays UNKNOWN until
+      an ensemble failover test runs.
+    date: 2026-09-23
+    status: PARTIAL_EVIDENCE_LIVE_STACK_ONLY
