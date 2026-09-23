@@ -787,3 +787,51 @@ boundaries:
       UNKNOWN until every image in the boundary is digest- and SBOM-covered.
     date: 2026-09-23
     status: PARTIAL_EVIDENCE_DIGEST_SBOM_OS_ONLY
+  - compatibility_id: VM-FLUSS-CLI-006
+    boundary: Fluss Java client
+    proposed_version: "1.0.0"
+    evidence_source: >-
+      Apache Fluss 1.0.0 client path AND the nine-step --apply-verified DDL
+      contract, re-issued and passed on 2026-09-23 (Stage 4 / T4.1 gap closure).
+      Supersedes the earlier 2026-09-23 record, which still listed the contract
+      as not re-issued. Evidence:
+      logs/soak/t40-scratch-20260923-020742/t41g-ddl-smoke-rerun.log
+    compatibility_class: COMPATIBLE
+    evidence_owner: Platform
+    evidence_method: >-
+      ddl_apply_smoke.py driving the real orchestrator CLI `ddl_apply.py
+      --apply-verified` against the dev Fluss 1.0.0 coordinator, with the real
+      capability artifact auto-selected (logs/schema-compat/
+      composite-pk-raw-client-20260815.md) rather than a generated placeholder.
+    source_artifact: >-
+      fluss-client 1.0.0 (versions.pin FLUSS_CLIENT_JAR_SHA256=a73101b2...);
+      the smoke exercises the CLI, the sentinels, the in-band COMPAT-FLUSS-005
+      matrix assertion and the evidence ownership gate.
+    fixture: >-
+      Dev compose cluster (apache/fluss:1.0.0 coordinator + tablet, Flink 2.2.1,
+      catalog 27/27); scratch-prefixed catalogs ddlsmoke1790138261167181_ and
+      ddlsmoke1790138326167184_; S4 seeds an engine-uid-owned evidence record.
+    scenario: >-
+      Three scenarios executed end to end: S1 apply with the smoke write/read
+      disabled, S2 full apply with write/read, S4 containerized apply against a
+      pre-seeded bad-ownership record. Every apply asserts the exit-code/SENTINEL
+      contract and the capability matrix in band.
+    result: >-
+      PASS — S1 exit 0, S2 exit 0, S4 exit 1 via the in-band ownership gate
+      ("PASS (exit 1 - in-band ownership gate caught the seeded record)"); smoke
+      summary "ddl-apply-smoke: PASS - exit-code contract ... + sentinels +
+      evidence + the containerized bad-ownership drill".
+    observed_behavior: >-
+      On 1.0.0 the contract's terminal surface behaved as specified: a full PASS
+      at exit 0, the refusal path fail-closed at exit 1, and the capability
+      artifact recorded as matrix_evidence with its sha256. The catalog returned
+      to 27/27 with no leftover prefixed tables, and no ddl-apply container
+      remained. (Gate #2 had passed the same smoke at 00:19 the same night, so
+      this is a re-verification on the post-commit tree, not a first run.)
+    limitations: >-
+      Dev cluster only; the production cutover (T7.x) still owns the real apply.
+      Host-side runs cannot write the default evidence dir logs/ddl-apply because
+      it is owned by uid 10001 from containerized runs, so the per-apply JSON was
+      written to a temp dir and only the smoke log above is durable.
+    date: 2026-09-23
+    status: COMPATIBLE_APPLY_CONTRACT_REISSUED
