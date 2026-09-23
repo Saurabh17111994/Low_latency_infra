@@ -16,6 +16,10 @@
 #     "Failed to obtain security token" (+ "Region is not set") on failure. A table with
 #     no remote segments produces neither (observed 2026-09-23 on raw_table_1).
 #
+# LANE CORRECTION (2026-09-23): remote-LOG tiering writes to remote.data.dir
+# (remote-data/log/<db>/<table>-<tableId>/...), NOT to S3_WAREHOUSE_PATH. Phase 3 used to
+# poll the lake prefix, where it could never see a tiered segment; it now reads the dir
+# from remote.data.dir and fails loudly if that cannot be derived.
 # SAFETY: a trap always restores .env + the compose tablet override and recreates the
 # tablet with --no-deps (without it compose recreates zookeeper/coordinator and a
 # mid-removal name collision renames containers -- learned 2026-09-23).
@@ -24,6 +28,9 @@ cd "$(dirname "$0")/../../.."
 TS=$(date -u +%Y%m%dT%H%M%SZ)
 TABLE="rr_probe_$(date -u +%s)"
 ROWS=60000
+# 130 bytes/row -> ~7.8 MB, i.e. several 1mb segments. The first attempt wrote ~0.7 MB and
+# never rolled, so there was nothing to tier: fixed 2026-09-23.
+WAIT_SECS=900
 OUT="logs/soak/tiering-remote-read-$TS"
 mkdir -p "$OUT"
 JM=01_docker-flink-jobmanager-1
@@ -40,6 +47,7 @@ sql() { # sql <file>  -> runs it in the JM sql-client
 
 revert() {
   echo "  [revert] restoring .env + compose, recreating tablet, dropping $TABLE"
+  docker logs $TABLET > "$OUT/tablet-at-revert.log" 2>&1 || true   # the recreate discards it
   cp "$OUT/env.before" code/01_platform/01_docker/.env
   cp "$OUT/compose.before" code/01_platform/01_docker/docker-compose.yml
   printf 'SET '"'"'sql-client.execution.result-mode'"'"'='"'"'tableau'"'"';\nCREATE CATALOG fluss_catalog WITH ('"'"'type'"'"'='"'"'fluss'"'"','"'"'bootstrap.servers'"'"'='"'"'fluss-coordinator:9123'"'"');\nUSE CATALOG fluss_catalog;\nDROP TABLE IF EXISTS `default`.%s;\n' "$TABLE" > /tmp/.rr-drop.sql
@@ -115,7 +123,7 @@ echo; echo "=== phase 2: probe table forced to keep no local tiered segments ===
   python3 -c "
 rows=$ROWS
 for start in range(0, rows, 500):
-    vals = ','.join('(%d,\'v%d\')' % (i, i) for i in range(start, min(start+500, rows)))
+    vals = ','.join('(%d,\'v%d %s\')' % (i, i, 'pad' * 40) for i in range(start, min(start+500, rows)))
     print('INSERT INTO \`default\`.$TABLE VALUES %s;' % vals)
 "
 } > /tmp/.rr-create.sql
@@ -123,17 +131,48 @@ sql /tmp/.rr-create.sql > "$OUT/create.log" 2>&1
 echo "  create+insert done; errors: $(grep -ciE 'error|exception' "$OUT/create.log" || true)"
 grep -iE 'error|exception' "$OUT/create.log" | head -3 | cut -c1-150 | sed 's/^/    /' || true
 
-echo; echo "=== phase 3: wait for the segment to reach R2 ==="
+echo; echo "=== phase 3: wait for the probe's segments to reach the remote-log dir ==="
+# Remote-log tiering does NOT write under S3_WAREHOUSE_PATH (that is the lake): it writes
+# under remote.data.dir as remote-data/log/<db>/<table>-<tableId>/<bucket>/metadata/*.manifest.
+# The first version polled r2_list_lake -- the lake prefix -- so it read zero objects and
+# aborted even when tiering worked (false negative, 2026-09-23). Derive the dir from the
+# compose and refuse to run on anything still templated: a wrong prefix must never be able
+# to masquerade as "tiering did not run" again.
 source code/01_platform/04_scripts/r2-list.sh >/dev/null 2>&1 || true
-objs=0
-for i in $(seq 1 40); do
-  objs=$(r2_list_lake "$TABLE" 2>/dev/null | wc -l)
-  if [ "${objs:-0}" -gt 0 ]; then echo "  R2 objects for $TABLE: $objs (after $((i*15))s)"; break; fi
-  sleep 15
+RDD_RAW=$(grep -m1 -oE 'remote\.data\.dir:.*' code/01_platform/01_docker/docker-compose.yml | sed 's/^[^:]*: *//' | tr -d '\r' || true)
+case "$RDD_RAW" in
+  *'}')   RDD="${RDD_RAW##*\}}" ;;                   # templated: keep what follows the last '}'
+  s3://*) RDD="${RDD_RAW#s3://}"; RDD="${RDD#*/}" ;;  # literal bucket: drop the bucket part
+  *)      RDD="" ;;
+esac
+RDD="${RDD#/}"; RDD="${RDD%/}"
+case "$RDD" in
+  ""|*'$'*|*'{'*|*' '*) echo "!! cannot derive the remote-data prefix from remote.data.dir ('$RDD_RAW'); aborting (trap reverts)"; exit 1 ;;
+esac
+LOG_PREFIX="$RDD/log/default"
+echo "  polling $LOG_PREFIX/$TABLE-  (budget ${WAIT_SECS}s, 30s per iteration)"
+objs=0; i=0
+while [ $((i * 30)) -lt "$WAIT_SECS" ]; do
+  i=$((i + 1))
+  r2_list_lake "$LOG_PREFIX" > "$OUT/r2-remote-data" 2> "$OUT/r2-list.err" || true
+  objs=$(grep -c "^$LOG_PREFIX/$TABLE-" "$OUT/r2-remote-data" || true)
+  echo "  [$(date -u +%H:%M:%S)] iteration $i: ${objs:-0} object(s), elapsed $((i * 30))s"
+  if [ "${objs:-0}" -gt 0 ]; then break; fi
+  sleep 30
 done
-r2_list_lake "$TABLE" 2>/dev/null > "$OUT/r2-objects" || true
-echo "  tablet tiering errors: $(docker logs $TABLET 2>&1 | grep -ciE 'tiering.*(error|fail)' || true)"
-if [ "${objs:-0}" -eq 0 ]; then echo "!! no R2 objects -> tiering did not run; aborting (trap reverts)"; exit 1; fi
+grep "^$LOG_PREFIX/$TABLE-" "$OUT/r2-remote-data" > "$OUT/r2-objects" || true
+echo "  lister stderr -> $OUT/r2-list.err ($(wc -c < "$OUT/r2-list.err" 2>/dev/null || echo 0) bytes); objects -> $OUT/r2-objects"
+# The trap recreates the tablet, which discards this container's log: capture the server's
+# tiering lines now, because that evidence was lost in the previous run.
+docker logs $TABLET > "$OUT/tablet-during.log" 2>&1 || true
+echo "  tablet log: $OUT/tablet-during.log ($(grep -ciE 'remote|tier' "$OUT/tablet-during.log" || true) remote/tiering lines)"
+echo "  tablet tiering errors: $(grep -ciE 'tiering.*(error|fail)' "$OUT/tablet-during.log" || true)"
+if [ "${objs:-0}" -eq 0 ]; then
+  echo "!! no objects under $LOG_PREFIX/$TABLE- after ${WAIT_SECS}s -> tiering did not ship; aborting (trap reverts)"
+  echo "   the probe wrote ~$((ROWS * 130 / 1048576)) MB at log.segment.file-size=1mb, so a roll was expected."
+  echo "   check $OUT/tablet-during.log for roll/tier lines and $OUT/r2-list.err for a listing failure."
+  exit 1
+fi
 
 echo; echo "=== phase 4: read the table back (must fetch remote-only segments) ==="
 pre_jm=$(docker logs $JM 2>&1 | grep -c 'security token' || true)
