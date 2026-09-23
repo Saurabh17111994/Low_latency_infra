@@ -154,6 +154,10 @@ platform that owns the concern now decides the outcome.
 | 3 | `SignalJob.java:463` 128 MB block cache | **No change.** At most one clause noting the envelope it cites was the retired dedup. | It is a dated root-cause note about LOCAL execution (Flink's 128 MB managed-memory default thrashing the then-~628 MB envelope) whose remedy is a local-only passthrough, with the deployment authoritative. RocksDB-backed state is live today (`StrategyHostFunction` MapState; `ValueState`s in `MultiTimeframeSinks`, `TradeDecisionsSinks`, `PositionsObservationOperator`). Memory is not retuned without a measurement. |
 | 4 | letters inside DEC-040's options text | **Keep.** No change to the register. | That is the one place where option labels are meaningful. DEC-038 and DEC-040 already carry their supersessions (DEC-040: "SUPERSEDED IN PART 2026-09-03 ... see DEC-054"), so the register is already correct -- the fix is to stop citing the letters outside decisions. |
 
+Follow-up found while executing: moving the DDL made three historical records' `affected_artifacts`
+pointers dangle (CHG-003/022/116). The resolver's own guidance for a move is to point at the live path,
+so those citations now name `ddl/retired/` with a one-line note. Repaired in its own commit.
+
 Consequences for the steps above: section 5 step 1 is the manifest edit (8 Q1); the dashboards step is
 config-only (8 Q2); the test rename in section 5 is unaffected. Nothing in this plan changes runtime
 behaviour. Nothing in this plan changes runtime behaviour.

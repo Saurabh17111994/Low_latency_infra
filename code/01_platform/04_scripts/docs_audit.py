@@ -25,7 +25,7 @@ Checks:
       durability / LOG-control / ledger-skipped claims outside the dated
       decisions index; HFT frame sizes 40/196 B and ltpc+full-only mode switch;
       bridge ns->ms conversion; ledger + halt tables KV in manifest and DDL;
-      ledger live-in-dev evidence; 27 DDLs on file (29 minus the four retired by
+      ledger live-in-dev evidence; 26 DDLs on file (29 minus the four retired by
       a329247, plus the two candle KV DDLs 32/33) incl. the DEC-038 dedup DDL
       (24_fingerprint_dedup.sql) + SCH-19 instruction-index DDL
       (25_trade_instruction_state.sql) + SCH-23 EOD offload-state DDL
@@ -669,10 +669,11 @@ def c9_dec039_invariants():
     ) or ""
     check("C9 ledger live-in-dev evidence", "Postback_Projection_Ledger 705" in foundation)
 
-    # --- DEC-038 dedup + SCH-19 index + SCH-23 EOD + REQ-EXE-004 intent DDL; 26 DDLs ---
+    # --- SCH-19 index + SCH-23 EOD + REQ-EXE-004 intent DDL; 26 DDLs (the DEC-038 dedup
+    # DDL moved to ddl/retired/ on 2026-09-23 and is no longer applied -- see the C1 pin) ---
     sqls = sorted(f for f in os.listdir(DDL_DIR) if f.endswith(".sql"))
-    # 27: see the C1 pin. Both numbers are the same fact counted from either side.
-    check("C9 DDL count = 27", len(sqls) == 27, f"got {len(sqls)}")
+    # 26: see the C1 pin. Both numbers are the same fact counted from either side.
+    check("C9 DDL count = 26", len(sqls) == 26, f"got {len(sqls)}")
     check(
         "C9 dedup DDL on file",
         os.path.exists(os.path.join(DDL_DIR, "retired", "24_fingerprint_dedup.sql")),
