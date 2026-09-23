@@ -22,7 +22,7 @@ set -uo pipefail
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 ROOT="$(cd "$_SCRIPT_DIR/../../.." && pwd)"   # repo root: 04_scripts -> 01_platform -> code -> repo
-cd "$ROOT"
+cd "$ROOT" || exit 1
 DOCKER_DIR=code/01_platform/01_docker
 DC="docker compose --env-file $DOCKER_DIR/.env --env-file $DOCKER_DIR/secrets.env -f $DOCKER_DIR/docker-compose.yml"
 TABLET=01_docker-fluss-tablet-1
