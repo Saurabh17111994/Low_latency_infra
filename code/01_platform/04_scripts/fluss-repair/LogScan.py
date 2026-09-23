@@ -9,7 +9,9 @@ boundary was 670,345,400). This scanner walks the batches with the same
 arithmetic the server uses and reports the exact end of the last complete
 batch.
 
-Batch layout (Fluss 0.9, verified against DefaultLogRecordBatch):
+Batch layout (unchanged in Fluss 1.0.0; verified against DefaultLogRecordBatch,
+re-verified 2026-09-23 against 30 real 1.0.0 segments up to 198 MB, each walked
+to its exact end):
     48-byte header; batch total size = 12 + int32_le(header[8:12])
     (little-endian, confirmed against a known batch: bytes 24 09 00 00 = 2340).
 A header of all zero bytes is the preallocated tail marker.
