@@ -1,0 +1,56 @@
+# Second Fluss tablet, for the scratch window only (T6.4 standby-replica half, which needs >=2
+# tablets). The canonical stack runs one tablet; standby replicas need a second server to place a
+# replica on, and production defines three.
+#
+# Why this is a separate service rather than a scaled replica of `fluss-tablet`:
+#   * the canonical tablet pins its host port to 9124, so a second replica would fight for it;
+#   * its FLUSS_PROPERTIES hardcodes `tablet-server.id: 0`, and two servers must not share an id;
+#   * sharing its volumes would open the same RocksDB directory from two processes, which is not
+#     safe.
+#
+# Deliberately minimal: no host port (the test client runs inside the compose network), tiering
+# pointed at a container-local directory instead of R2 (tiering is off in this test), and no JFR
+# diagnostic instrumentation. Use as an override on top of the canonical file:
+#
+#   COMPOSE_PROJECT_NAME=fluss10scratch docker compose \
+#     --env-file code/01_platform/01_docker/.env \
+#     --env-file code/01_platform/01_docker/secrets.env \
+#     -f code/01_platform/01_docker/docker-compose.yml \
+#     -f code/01_platform/01_docker/docker-compose.tablet2.yml up -d
+#
+services:
+  fluss-tablet-2:
+    image: ${FLUSS_IMAGE:?set FLUSS_IMAGE to an immutable digest}
+    env_file:
+      - .env
+      - secrets.env
+    command: ["tabletServer"]
+    restart: unless-stopped
+    depends_on: [fluss-coordinator]
+    networks: [trading-net]
+    volumes:
+      # Own data dir: never share RocksDB state with the first tablet.
+      - fluss-tablet2-data:/tmp/fluss/data
+      - fluss-tablet2-logs:/opt/fluss/log
+    environment:
+      FLUSS_BOOTSTRAP: fluss-coordinator:9123
+      FLUSS_COORDINATOR_HOST: fluss-coordinator
+      FLUSS_TABLET_HOST: fluss-tablet-2
+      FLUSS_PROPERTIES: |
+        zookeeper.address: ${ZOOKEEPER_ADDRESS:-zookeeper:2181}
+        bind.listeners: INTERNAL://fluss-tablet-2:0, CLIENT://fluss-tablet-2:9124
+        advertised.listeners: CLIENT://fluss-tablet-2:9124
+        internal.listener.name: INTERNAL
+        # Must differ from the canonical tablet's 0, or registration collides.
+        tablet-server.id: 1
+        data.dir: /tmp/fluss/data
+        # A5 (2026-09-23): same parameterization as the canonical tablet — the standby test is
+        # only meaningful if BOTH servers that can lead produce snapshots. Default keeps 0s.
+        kv.snapshot.interval: ${FLUSS_KV_SNAPSHOT_INTERVAL:-0s}
+        # Local, not s3://... : this tablet does not do lake tiering, and pointing it at R2 would
+        # add a credential dependency this test does not need.
+        remote.data.dir: /tmp/fluss/remote-data
+
+volumes:
+  fluss-tablet2-data:
+  fluss-tablet2-logs:

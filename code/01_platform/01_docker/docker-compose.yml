@@ -487,7 +487,10 @@ services:
         advertised.listeners: CLIENT://fluss-tablet:9124
         internal.listener.name: INTERNAL
         tablet-server.id: 0
-        kv.snapshot.interval: 0s
+        # A5 (2026-09-23, native-adoption plan): parameterized so a scratch window can measure
+        # standby-replica promotion with snapshots on. The default keeps dev and production at the
+        # certified 0s, so an unchanged environment renders exactly as before.
+        kv.snapshot.interval: ${FLUSS_KV_SNAPSHOT_INTERVAL:-0s}
         data.dir: /tmp/fluss/data
         # W35x: tiered log segments go to Cloudflare R2 (same bucket/credentials
         # as the Lake warehouse). A container-local path is readable only from
@@ -520,6 +523,11 @@ services:
         # the tablet fails to start (Could not parse value '0').
         # Lake/tiering tests keep the 1m default (minio up).
         remote.log.task-interval-duration: ${FLUSS_REMOTE_LOG_TASK_INTERVAL:-1m}
+        # Tiering verification knob (tiering-1.0-verify.sh): tiering copies only CLOSED segments, so a
+        # small write proves nothing while the default segment is huge. The default here is upstream's own
+        # value - verified from ConfigOptions in fluss-server-1.0.0.jar (memoryType, defaultValue
+        # MemorySize.parse("1024m")) - so an unchanged environment renders exactly as before.
+        log.segment.file-size: ${FLUSS_LOG_SEGMENT_FILE_SIZE:-1024m}
         # Lake tiering (tracker 14 P3.2) — same datalake.* block as the
         # coordinator: datalake.iceberg.* → Iceberg catalog props,
         # iceberg.hadoop.* → Hadoop fs.s3a.* (R2). Credentials only via .env.
