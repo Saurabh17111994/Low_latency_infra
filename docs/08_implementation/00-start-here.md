@@ -109,8 +109,9 @@ The previous single-axis status vocabulary (`Draft`, `Design-ready`, `Implementa
 > and 12–19 together got ~3 min slower, so the remaining headroom is small. See `CHG-302`.
 > **What this certificate does not cover.** It was captured with
 > `remote.log.task-interval-duration=0s` (FACT-018, the gate-speed override), so **tiering to R2 is
-> off in the certified configuration and 1.0.0 tiering stays unverified** — `FACT-011` records that
-> as outstanding. No native 1.0.0 capability is covered either: those are sequenced after the
+> off in the certified configuration**. 1.0.0 tiering itself was re-verified **separately** on
+> 2026-09-23 (fresh-prefix R2 run, PASS, 0 tiering errors — `FACT-011`), outside this certificate.
+> No native 1.0.0 capability is covered either: those are sequenced after the
 > certificate by `DEC-053` (`docs/plans/2026-09-22-fluss-1.0-native-adoption.md`), because a
 > certificate answers "does the same behaviour work on the new version", not "does new behaviour
 > work". A certificate is bound to the tree it names, so a later commit does not invalidate it — but
