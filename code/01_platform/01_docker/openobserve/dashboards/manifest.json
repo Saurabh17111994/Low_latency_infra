@@ -94,7 +94,7 @@
       "software_versions": "OpenObserve v0.91.5-amd64; SignalJob ActiveSignalFeedbackFunction v1 (Option B strict, no TTL) + Position_State v1 (7 cols, 16 buckets)"
     },
     {
-      "title": "Dedup State — Design B (Flink keyed MapState, native TTL)",
+      "title": "Dedup — heap count-window (compute.dedup.first / .duplicates)",
       "file": "dedup-state.json",
       "folder": "default",
       "dashboard_version": 10,
@@ -109,7 +109,7 @@
         "metrics",
         "logs"
       ],
-      "software_versions": "OpenObserve v0.91.5-amd64; FingerprintDedupFunction Design-B v1 (CHG-022/023); no Fluss dedup store"
+      "software_versions": "OpenObserve v0.91.5-amd64; FingerprintDedupFunction heap count-window (DEC-054); no Fluss dedup store"
     },
     {
       "title": "Security and Platform — Host/Container/JVM/ZK/Swarm",
@@ -136,7 +136,7 @@
       "dashboard_version": 9,
       "query_version": "o2-sql-2026-08-22",
       "measurement_boundary": "slot: source throughput/lag, watermark, operator busy/idle/backpressure, checkpoint duration/size/failure/restore, decision p99 (panel present but unproduced — SIG-PERF-001 p99 half NOT_IMPLEMENTED), Design-B dedup counters",
-      "workload": "SignalJob (Flink) Prometheus 9249 + Design-B dedup counters (compute.dedup.first/.duplicates; the DEC-038 Fluss dedup table and its cache are removed) via otel-collector:4318",
+      "workload": "SignalJob (Flink) Prometheus 9249 + dedup counters (compute.dedup.first/.duplicates; the DEC-038 Fluss dedup table and its cache are removed) via otel-collector:4318",
       "duration": "dynamic dashboard window (relative)",
       "utc_clock": "host UTC; O2 _timestamp",
       "sample_count": "n/a (dynamic)",

@@ -1128,7 +1128,8 @@ ALERTS = [
     # compute_dedup_expiry_index_count — the expiry-index gauge is DELETED with
     # the index (expiry is native StateTtlConfig on the MapState now; no
     # event-time timers to stall). SIGNAL-warn-dedup-state above covers the
-    # same Design-B envelope on the live-set count (compute_dedup_state_count).
+    # same dedup envelope on the live-set count (compute_dedup_state_count; the
+# series belongs to the retired MapState design -- see the dedup anchors).
     dict(
         name="SIGNAL-warn-schema-rejected-rate",
         stream="flink_taskmanager_job_task_operator_compute_invalid_byreason_schema_version",

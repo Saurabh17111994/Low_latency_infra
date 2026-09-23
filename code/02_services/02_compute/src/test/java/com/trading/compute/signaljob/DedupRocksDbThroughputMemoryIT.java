@@ -38,7 +38,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
 /**
- * Design-B throughput + memory validation on the RocksDB state backend
+ * Throughput + memory validation of the RETIRED MapState dedup design (DEC-040) on the RocksDB state backend
  * (2026-08-16; rules E/F/G of the state-authoritative dedup change). Runs the
  * real dedup sub-graph (source → keyBy(token) → {@link FingerprintDedupFunction}
  * → collecting sink) on an embedded MiniCluster with the production backend —
@@ -72,7 +72,7 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  */
 @Tag("integration")
 @EnabledIfEnvironmentVariable(named = "COMPUTE_INT_TEST_DEDUP_ROCKSDB", matches = "true")
-@DisplayName("Design B: RocksDB dedup throughput >= 20480 rec/s; checkpoints < 30s; progressive state/memory growth")
+@DisplayName("RETIRED MapState dedup: RocksDB throughput >= 20480 rec/s; checkpoints < 30s; progressive state/memory growth")
 class DedupRocksDbThroughputMemoryIT {
 
     /** Collects main-output fingerprints (accepted first-seen), parallel-safe. */

@@ -1,7 +1,7 @@
 {
   "version": 8,
   "title": "Compute and Decision \u2014 Backpressure/Checkpoint/DEC-038",
-  "description": "SignalJob throughput/lag, watermarks, operator busy/idle/backpressure, checkpoint duration/size/failure/restore, plus the live Design-B dedup counters (compute.dedup.first/.duplicates; the DEC-038 Fluss dedup table is removed). Source: SignalJob Flink metrics via prometheus:9249 \u2192 metrics, logs via flink_logs/trading_alerts.",
+  "description": "SignalJob throughput/lag, watermarks, operator busy/idle/backpressure, checkpoint duration/size/failure/restore, plus the live dedup counters (compute.dedup.first/.duplicates; the DEC-038 Fluss dedup table is removed). Source: SignalJob Flink metrics via prometheus:9249 \u2192 metrics, logs via flink_logs/trading_alerts.",
   "folder_id": "default",
   "tabs": [
     {
@@ -111,8 +111,8 @@
         {
           "id": "C06",
           "type": "gauge",
-          "title": "Dedup accepted vs duplicate rate \u2014 compute.dedup.first / .duplicates (Design B)",
-          "description": "Design B (CHG-022/023): first-seen acceptances vs TTL-window duplicate drops; no cache hit-ratio (cache removed).",
+          "title": "Dedup accepted vs duplicate rate \u2014 compute.dedup.first / .duplicates (heap count-window)",
+          "description": "Heap count-window dedup (DEC-054): first-seen acceptances vs window duplicate drops; no cache hit-ratio (the cache was removed with the retired designs).",
           "config": {},
           "queryType": "sql",
           "queries": [

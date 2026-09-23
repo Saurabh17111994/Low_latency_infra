@@ -1,12 +1,12 @@
 {
   "version": 8,
-  "title": "Dedup State — Design B (Flink keyed MapState, native TTL)",
-  "description": "Design-B fingerprint dedup (CHG-022/023, 2026-08-17): the 1-minute dedup set is authoritative Flink keyed MapState with native StateTtlConfig (DEDUP_TTL_MS=60000, ProcessingTime, OnCreateAndWrite). No Fluss dedup table, no cache, no cleanup backlog, no rehydration (the DEC-038 Fluss store is removed). Counters (the only exported metrics): compute.dedup.first (accepted), compute.dedup.duplicates (dropped). The former gauges compute.dedup.state.count (live entries, TTL-resynced) and compute.dedup.state.bytes.estimate (RocksDB) NO LONGER EXIST — they went with the 2026-08-28 rename that turned the state-count gauge into a cumulative firsts counter, so FingerprintDedupFunction now registers exactly the two counters above and the live-entry count survives only as its internal G-DEDUP-2 guard (totalEntries). The two panels that measured live-set size were removed 2026-09-17 by the compute-identifier parity sweep (CHG-195) because they rendered empty; read state growth from compute.dedup.first and the checkpoint-size tile on the Compute dashboard. Source: FingerprintDedupFunction -> flink-metrics-otel -> otel-collector:4318 -> metrics.",
+  "title": "Dedup — heap count-window (compute.dedup.first / .duplicates)",
+  "description": "Fingerprint dedup, heap count-window (DEC-054, 2026-09-03): plain operator-local per-token windows, no managed state. Earlier designs (DEC-038 Fluss KV store; DEC-040 Flink keyed MapState + native TTL, 2026-08-17) are retired with native StateTtlConfig (DEDUP_TTL_MS=60000, ProcessingTime, OnCreateAndWrite). No Fluss dedup table, no cache, no cleanup backlog, no rehydration (the DEC-038 Fluss store is removed). Counters (the only exported metrics): compute.dedup.first (accepted), compute.dedup.duplicates (dropped). The former gauges compute.dedup.state.count (live entries, TTL-resynced) and compute.dedup.state.bytes.estimate (RocksDB) NO LONGER EXIST — they went with the 2026-08-28 rename that turned the state-count gauge into a cumulative firsts counter, so FingerprintDedupFunction now registers exactly the two counters above and the live-entry count survives only as its internal G-DEDUP-2 guard (totalEntries). The two panels that measured live-set size were removed 2026-09-17 by the compute-identifier parity sweep (CHG-195) because they rendered empty; read state growth from compute.dedup.first and the checkpoint-size tile on the Compute dashboard. Source: FingerprintDedupFunction -> flink-metrics-otel -> otel-collector:4318 -> metrics.",
   "folder_id": "default",
   "tabs": [
     {
       "tabId": "dedup",
-      "name": "Dedup State (Design B)",
+      "name": "Dedup State (heap count-window)",
       "panels": [
         {
           "id": "D03",

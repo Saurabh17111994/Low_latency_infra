@@ -461,7 +461,7 @@ public final class SignalJob {
             }
             // E2E root cause (2026-08-17): under LOCAL execution (no
             // flink-conf.yaml) Flink defaults taskmanager.memory.managed.size
-            // to 128 MB TOTAL — the RocksDB block cache for the Design-B dedup
+            // to 128 MB TOTAL — the RocksDB block cache for the dedup envelope of the
             // envelope (~628 MB at 20 480 t/s × 300 s) thrashes inside that
             // pool and throughput collapses to ≈ the feed rate, so the E2E job
             // never catches the backlog tail. Explicit passthrough

@@ -710,7 +710,7 @@ public record SignalJobConfig(
      * set by flink-conf.yaml (dev compose: {@code taskmanager.memory.process.size}
      * 3g → managed fraction ≈ 1.2 GB); under LOCAL execution (no conf file)
      * Flink falls back to 128 MB TOTAL managed memory, which starves the
-     * RocksDB block cache for the Design-B dedup envelope (~628 MB at
+     * RocksDB block cache for the dedup envelope of the retired MapState design (~628 MB at
      * 20 480 t/s × 300 s) and collapses throughput to ≈ the feed rate.
      *
      * <p>This key is a passthrough for exactly that case: when set, the value
