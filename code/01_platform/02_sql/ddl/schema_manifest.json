@@ -268,20 +268,6 @@
       "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
-      "table_name": "fingerprint_dedup",
-      "ddl_path": "24_fingerprint_dedup.sql",
-      "ddl_sha256": "cb13003821f344c5f9b17633350efecbc4a72bd590d29c5ce176fc3f59c8c91e",
-      "table_kind": "KV",
-      "primary_key": "instrument_token, fingerprint_version, event_fingerprint",
-      "bucket_key": null,
-      "compatibility_class": "UNKNOWN",
-      "validated_matrix": "VM-FLUSS-CONN-007",
-      "schema_version": "1",
-      "writer_owner": "Signal job",
-      "retention_policy": "7d",
-      "lake_policy": "off"
-    },
-    {
       "table_name": "trade_instruction_state",
       "ddl_path": "25_trade_instruction_state.sql",
       "ddl_sha256": "94cb25e799be0e319e53dc2da05e10f238d22f7f02814c13253438073a4a9a34",

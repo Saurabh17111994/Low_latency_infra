@@ -99,11 +99,13 @@ Plus two one-line pointers: in `docs/01_project/04-decisions.md` (above the tabl
 4. **Live docs, artifact sense:** in `09-production-swarm.md`, `11-testing-and-release.md`, the
    runbook, and `SignalJob.java`/`SignalJobConfig.java`/`o2-provision.py` comments -- replace the label
    with "dual-sink signal build"; keep every operational instruction verbatim.
-5. **Test rename:** `DedupRocksDbThroughputMemoryIT` -> `DedupHeapWindowThroughputMemoryIT`, together
-   with its `@DisplayName`, its gate env var `COMPUTE_INT_TEST_DEDUP_ROCKSDB`, and the comment
-   reference in `SignalJob.java:458`. Precondition: a reference grep over `Makefile`, CI config,
-   scripts, and docs; the two change records and the dated plan that name the old class stay as they
-   are.
+5. **Test rename -- WITHDRAWN 2026-09-23 on inspection.** The class name is accurate: its own javadoc
+   and `@DisplayName` say "Design-B throughput + memory validation on the RocksDB state backend", and
+   it measures exactly that (state count, checkpoint bytes, RocksDB local-dir footprint). Renaming it
+   to "heap-window" would have made the name a lie in the other direction, since the current operator
+   holds no managed state. It is env-gated (`COMPUTE_INT_TEST_DEDUP_ROCKSDB`), so it is already
+   parked in practice. Open question for the operator: retire the drill, or rewrite it for the
+   heap-window operator -- not a rename.
 6. **Do-not-rename comments:** on the `fingerprint-dedup-v2` uid and on any load-bearing name that
    looks stale, stating it is a state-compatibility contract.
 7. **Dashboards:** relabel panels only; verify no panel or alert still queries

@@ -39,7 +39,7 @@ import org.junit.jupiter.api.Test;
 class FingerprintDedupTableColumnsAgreementTest {
 
     /** CWD is the compute module dir; DDLs live two levels up under code/01_platform. */
-    private static final Path DDL_DIR = Path.of("../../01_platform/02_sql/ddl").toAbsolutePath();
+    private static final Path DDL_DIR = Path.of("../../01_platform/02_sql/ddl/retired").toAbsolutePath();
     private static final String DDL_FILE = "24_fingerprint_dedup.sql";
 
     /** Column name + type + rest-of-line (NOT NULL clause) per DDL column line. */

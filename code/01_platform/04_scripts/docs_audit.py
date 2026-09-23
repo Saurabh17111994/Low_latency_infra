@@ -149,11 +149,12 @@ def c1_manifest():
     if m is None:
         return check("C1 manifest readable", False, p)
     tables = m.get("tables", [])
-    # 27 since a329247 retired four signal-cutover DDLs (03, 04, 30, 31) and the
-    # two candle KV tables (32, 33) landed. The pin is deliberate and is NOT made
-    # redundant by the agreement checks below: only the pin notices a table being
-    # dropped from BOTH lists at once.
-    check("C1 manifest has 27 tables", len(tables) == 27, f"got {len(tables)}")
+    # 26 since 2026-09-23 moved the parked fingerprint_dedup DDL to
+    # ddl/retired/ (out of the applier's *.sql enumeration) and dropped its
+    # manifest entry. The pin is deliberate and is NOT made redundant by the
+    # agreement checks below: only the pin notices a table being dropped from
+    # BOTH lists at once.
+    check("C1 manifest has 26 tables", len(tables) == 26, f"got {len(tables)}")
     # The literal above went stale (29 held for four retired tables) because
     # nothing tied the manifest to the DDL directory. These two do.
     ddl_names = {_ddl_table_name(f) for f in os.listdir(DDL_DIR) if f.endswith(".sql")}
@@ -292,7 +293,7 @@ def surefire_total(module_dir, test_src_dir=None):
     # Only classes the plain `mvn test` would select may be counted. A report
     # whose class surefire never picks up (an *IT held for a targeted run)
     # otherwise sits in the total until someone notices: that is how a
-    # 2026-09-05 report for DedupRocksDbThroughputMemoryIT made compute read
+    # 2026-09-05 report for DedupHeapWindowThroughputMemoryIT made compute read
     # 539 against a 538-test run. No module here overrides the defaults
     # (Test*, *Test, *Tests, *TestCase); nested classes report under their outer.
     plain_includes = re.compile(r"^(?:Test.*|.*Tests?|.*TestCase)$")
@@ -674,7 +675,7 @@ def c9_dec039_invariants():
     check("C9 DDL count = 27", len(sqls) == 27, f"got {len(sqls)}")
     check(
         "C9 dedup DDL on file",
-        os.path.exists(os.path.join(DDL_DIR, "24_fingerprint_dedup.sql")),
+        os.path.exists(os.path.join(DDL_DIR, "retired", "24_fingerprint_dedup.sql")),
     )
     check(
         "C9 instruction-index DDL on file",

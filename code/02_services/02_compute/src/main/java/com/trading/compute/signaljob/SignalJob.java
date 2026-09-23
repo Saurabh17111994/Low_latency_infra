@@ -243,6 +243,7 @@ public final class SignalJob {
                 // heap-window operator (which requests no managed state).
                 // Restoring an old checkpoint fails closed via the
                 // no-allowNonRestoredState rule — clean start required.
+                // Do NOT rename this uid: it is a state-compatibility contract.
                 .uid("fingerprint-dedup-v2");
 
         // Step-2 latency observability (2026-09-03): per-tick exact age.

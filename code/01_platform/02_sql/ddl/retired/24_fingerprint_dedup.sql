@@ -1,13 +1,15 @@
--- fingerprint_dedup: HISTORICAL DDL — DO NOT APPLY (P4-073). Retired
--- 2026-08-17 by Design B: the dedup set is authoritative Flink keyed state
--- (FingerprintDedupFunction, heap-window operator — SignalJob "State-
--- authoritative dedup"); this table is no longer a SignalJob startup
--- dependency. Retained as the DDL record only. Auto-apply tooling MUST skip
--- this file; if manifest-listed, that entry is stale and must be removed.
+-- fingerprint_dedup: PARKED DDL -- DO NOT APPLY (P4-073). Retired 2026-08-17 by
+-- DEC-040 / CHG-022: the dedup set moved to Flink keyed state. That design was
+-- itself retired 2026-09-03 (`c0c50ee6`, DEC-054): the current dedup is the heap
+-- count-window operator (`FingerprintDedupFunction`, uid fingerprint-dedup-v2),
+-- which holds no managed state at all. Nothing reads or writes this table.
+--   Moved to ddl/retired/ on 2026-09-23 and removed from schema_manifest.json:
+--   `ddl_apply.py` enumerates *.sql in the DDL directory, so as long as this file
+--   sat there it would be created in every fresh corpus. Retained as the DDL record.
 --   the dedup set is authoritative Flink keyed state; this table is no longer a SignalJob
 --   startup dependency — kept on file as the DDL record). One row per accepted fingerprint
 --   within its logical TTL (DEC-038; docs/08_implementation/04-signal-job.md
---   "Design — fingerprint_dedup dedup state table")
+--   "Retired designs and their names")
 -- Owner: Signal job
 -- Type: KV state table (PK instrument_token, fingerprint_version, event_fingerprint)
 -- Bucket key: instrument_token (PK prefix — per-instrument colocation; the Fluss
