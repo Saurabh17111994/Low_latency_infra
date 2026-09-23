@@ -616,6 +616,10 @@ full-audit:
 pin-check:
 	@bash code/01_platform/04_scripts/pin-check.sh
 
+# CHG-304: off-hours (outside 09:15-15:30 IST) the submitted job gets MULTITF_SESSION_BYPASS=true,
+# because the session filter would otherwise drop every tick before any state is touched: the candle
+# path aggregates nothing and the smoke inject gate's late half can never move. In-session the filter
+# stays ON. A smoke that aggregated nothing now fails loudly instead of printing SMOKE PASS.
 # Wave 36: the holistic measurement harness produced the end-to-end zero-loss
 # evidence, and until now nothing named it — it had no target and no entry in
 # docs/commands/COMMANDS.md, so it was only reachable by someone who already

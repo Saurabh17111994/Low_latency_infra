@@ -95,7 +95,7 @@ new envelope must name is `/healthz` `gate_epoch`.
 | All local-compose checks | `make test-all` | L0–L11 pytest suites |
 | Pin discipline | `make pin-check` | Version pin audit (matrix shape, SNAPSHOT ban) |
 | Static script hygiene | `make static-check` | `bash -n` + shellcheck on every repo shell script |
-| Holistic measurement (end-to-end zero-loss evidence) | `make holistic` | `holistic-measure.sh`: raw<->candle parity over `candle_closed` (recounts the raw table, does not trust a counter), dedup/late inject gates, latency legs, G8 fingerprint. Needs the stack up and a **quiet** cluster; exit 0 means every *measurable* gate passed — legs the live schema cannot measure print `UNAVAILABLE`, not a failure (CHG-184/191/192/194) |
+| Holistic measurement (end-to-end zero-loss evidence) | `make holistic` | `holistic-measure.sh`: raw<->candle parity over `candle_closed` (recounts the raw table, does not trust a counter), dedup/late inject gates, latency legs, G8 fingerprint. Needs the stack up and a **quiet** cluster; exit 0 means every *measurable* gate passed — legs the live schema cannot measure print `UNAVAILABLE`, not a failure (CHG-184/191/192/194)  Off-hours (outside 09:15-15:30 IST) it sets `MULTITF_SESSION_BYPASS` for the submitted job, and a smoke that aggregated nothing now fails instead of printing `SMOKE PASS` (CHG-304)|
 | Same, short phases | `make holistic-quick` | `SMOKE_S=60 MAIN_S=300` — quick verdict after a change |
 | 09 stack offline validation | `make test-09` | `docker-stack.yml` static checks (label-only placement, encrypted overlays) |
 | Stack self-check | `make stack-selfcheck` | One-host swarm mimic + `docker stack config` |

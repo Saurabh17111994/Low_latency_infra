@@ -119,6 +119,40 @@ if [ "$MULTITF_ENABLED" != "true" ]; then
   fail "MULTITF_ENABLED='$MULTITF_ENABLED': the smoke inject gate and the G7 audit both read compute.candles.late.dropped, which only exists when the multi-tf-aggregator is wired. With the candle path off the late-drop assertion is unsatisfiable, so this run is refused instead of failing later with a misleading counter mismatch."
 fi
 
+# CHG-304: the candle path must actually AGGREGATE for this harness's gates to
+# mean anything, and off-hours it did not. TimeframeBucket filters every tick
+# outside 09:15:00.000-15:30:00.000 IST BEFORE any state is touched, so the
+# multi-tf aggregator emitted nothing, every candle sink stayed at 0/0, and
+# `compute.candles.late.dropped` could not move: an injected 90s-late frame looks
+# like the token's first tick, and a fresh slot takes no lateness branch (the
+# monotonic gate needs a NEWER event time already in that slot, and the session
+# branch mutates no state - MultiTimeframeAggregateFunction L287-302).
+# Run 2026-09-23-174053 printed "SMOKE PASS" over exactly that state, and the
+# 0.9.1 run 2026-09-19-010036 had the same shape (aggregator out=0, sinks 0/0,
+# late counter flat across all 8 subtasks), so it is not a version difference.
+# SignalJobConfig declares MULTITF_SESSION_BYPASS for this ("against the 15s
+# fake-broker feed OUTSIDE market hours"); stage-soak-e2e.sh sets it and this
+# harness never did. In-session the filter stays ON, so a daytime measurement is
+# production-faithful; off-hours the bypass is what makes the candle path run.
+session_is_open() {  # $1 = IST minutes since midnight
+  [ "$1" -ge 555 ] && [ "$1" -lt 930 ]   # 09:15 inclusive, 15:30 exclusive
+}
+
+ist_minutes_now() {
+  local hm
+  hm="$(TZ=Asia/Kolkata date +%H%M 2>/dev/null)" || return 1
+  case "$hm" in [0-9][0-9][0-9][0-9]) ;; *) return 1 ;; esac
+  echo "$(( 10#${hm%??} * 60 + 10#${hm#??} ))"
+}
+
+_ist_now="$(ist_minutes_now)" || fail "cannot read the IST clock (date +%H%M) - refusing to guess the session state"
+if session_is_open "$_ist_now"; then
+  export MULTITF_SESSION_BYPASS="${MULTITF_SESSION_BYPASS:-false}"
+  echo "[session] OPEN ${_ist_now}min IST - candle-path session filter ON (production-faithful)"
+else
+  export MULTITF_SESSION_BYPASS="${MULTITF_SESSION_BYPASS:-true}"
+  echo "[session] CLOSED ${_ist_now}min IST - MULTITF_SESSION_BYPASS=${MULTITF_SESSION_BYPASS} so the candle path aggregates (production never bypasses)"
+fi
 # CHG-194: the analyzer needs to know whether Signal_Candidates has a writer at
 # all. It is the strategy host's only output, so with the host off an empty read
 # is the expected state rather than a failed probe. pipeline-lib.sh already
@@ -492,15 +526,53 @@ for item in data:
   done <<< "$vids"
 }
 
+# CHG-304: a green smoke phase only proves the containers stayed alive. Reject
+# the run when the candle path demonstrably emitted nothing, because every
+# downstream number (throughput series, inject gate, G7 audit) then describes a
+# pipeline that aggregated no tick. 120s is the floor below which a window may
+# legitimately not have closed yet (the quick diagnostic phase runs 60s).
+smoke_produced_output() {  # $1 = phase dir, $2 = phase length in seconds
+  local dir="$1" phase_s="$2" agg_out
+  if [ "$phase_s" -lt 120 ]; then
+    echo "[smoke-gate] phase ${phase_s}s < 120s - aggregator-output check SKIPPED (a window may not have closed)"
+    return 0
+  fi
+  if [ ! -r "$dir/metrics-final.txt" ]; then
+    echo "[smoke-gate] no metrics-final.txt - aggregator-output check UNAVAILABLE (not passed)"
+    return 0
+  fi
+  agg_out="$(awk -F'|' '$1 ~ /multi-tf-aggregator/ {gsub(/ /,"",$3); print $3+0; exit}' "$dir/metrics-final.txt")"
+  if [ -z "$agg_out" ]; then
+    echo "[smoke-gate] no multi-tf-aggregator row - aggregator-output check UNAVAILABLE (not passed)"
+    return 0
+  fi
+  if [ "$agg_out" -le 0 ]; then
+    {
+      echo "!! SMOKE FAIL: the multi-tf-aggregator emitted 0 records in ${phase_s}s - the candle path aggregated nothing."
+      echo "   Off-hours this is the 09:15-15:30 IST session filter (see MULTITF_SESSION_BYPASS above): every tick is"
+      echo "   dropped before any state is touched, so no candle, preview or late drop can exist and the inject gate's"
+      echo "   late half can never move. Fix the session state, do not chase the counters."
+    } >&2
+    return 1
+  fi
+  echo "[smoke-gate] multi-tf-aggregator emitted ${agg_out} records in ${phase_s}s"
+  return 0
+}
 # ---------------------------------------------------------------- phases
 PHASE_OUT="$ROOT/logs/tracker-14/holistic-measure-$(date +%Y%m%d-%H%M%S)"
 OUT="$PHASE_OUT"
 mkdir -p "$OUT/smoke" "$OUT/main"
-echo "=== holistic-measure start $(date -Iseconds) smoke=${SMOKE_S}s main=${MAIN_S}s poll=${POLL_S}s ==="
+printf 'MULTITF_SESSION_BYPASS=%s ist_minutes_now=%s session_open=%s\n' \
+  "$MULTITF_SESSION_BYPASS" "$_ist_now" "$(session_is_open "$_ist_now" && echo true || echo false)" > "$PHASE_OUT/session.txt"
+echo "=== holistic-measure start $(date -Iseconds) smoke=${SMOKE_S}s main=${MAIN_S}s poll=${POLL_S}s session_bypass=${MULTITF_SESSION_BYPASS} ==="
 
 # ---------- Phase A: smoke (gate — main does NOT run if this fails) ------
 if OUT="$PHASE_OUT/smoke" run_phase smoke "$SMOKE_S"; then
-  echo "SMOKE PASS — proceeding to main measurement"
+  if ! smoke_produced_output "$PHASE_OUT/smoke" "$SMOKE_S"; then
+    echo "SMOKE FAIL - main measurement SKIPPED (the candle path aggregated nothing; see smoke-gate output above)" >&2
+    exit 1
+  fi
+  echo "SMOKE PASS - proceeding to main measurement"
 else
   echo "SMOKE FAIL — main measurement SKIPPED (a broken pipeline must not produce confident-looking numbers)" >&2
   exit 1
