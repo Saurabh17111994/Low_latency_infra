@@ -62,7 +62,7 @@ revert() {
 }
 trap revert EXIT
 
-echo; echo "=== phase 1: tablet overrides (tiering on, 1mb segments) ==="
+echo; echo "=== phase 1: tablet overrides (tiering on, window segment size) ==="
 python3 - <<'PY'
 import pathlib
 p = pathlib.Path("code/01_platform/01_docker/.env"); s = p.read_text()
@@ -70,8 +70,8 @@ old = "FLUSS_REMOTE_LOG_TASK_INTERVAL=0s\n"
 assert s.count(old) == 1, f"interval line not found exactly once: {s.count(old)}"
 s = s.replace(old, "FLUSS_REMOTE_LOG_TASK_INTERVAL=1m\n")
 if "FLUSS_LOG_SEGMENT_FILE_SIZE" not in s:
-    s = s.rstrip("\n") + "\n\n# tiering-remote-read-verify.sh (2026-09-23): window-only override so a few\n# thousand rows roll a segment (tiering copies rolled segments only). Reverted by the trap.\nFLUSS_LOG_SEGMENT_FILE_SIZE=1mb\n"
-p.write_text(s); print("  .env: interval 0s->1m, segment file size 1mb")
+    s = s.rstrip("\n") + "\n\n# tiering-remote-read-verify.sh (2026-09-23): window-only override so a few\n# thousand rows roll a segment (tiering copies rolled segments only). Reverted by the trap.\nFLUSS_LOG_SEGMENT_FILE_SIZE=128kb\n"
+p.write_text(s); print("  .env: interval 0s->1m, segment file size 128kb")
 PY
 python3 - <<'PY'
 import pathlib, re
@@ -183,7 +183,9 @@ pre_jm=$(docker logs $JM 2>&1 | grep -c 'security token' || true)
   echo "USE CATALOG fluss_catalog;"
   echo "SELECT COUNT(*) AS rows_read FROM \`default\`.$TABLE;"
 } > /tmp/.rr-read.sql
+t0=$(date +%s%N)
 sql /tmp/.rr-read.sql > "$OUT/read.log" 2>&1
+read_ms=$(( ( $(date +%s%N) - t0 ) / 1000000 ))   # client wall-clock for the whole query, not per-segment fetch
 read_rows=$(grep -oE '\|[[:space:]]*[0-9]+[[:space:]]*\|' "$OUT/read.log" | head -1 | tr -dc '0-9' || true)
 if [ -z "$read_rows" ]; then read_rows=$(grep -oE '^ *[0-9]+ *\|' "$OUT/read.log" | head -1 | tr -dc '0-9' || true); fi
 if [ -z "$read_rows" ]; then echo "  !! could not parse the row count; last 12 lines of read.log:"; tail -12 "$OUT/read.log" | sed 's/^/    /'; fi
@@ -198,6 +200,7 @@ docker logs 01_docker-fluss-coordinator-1 2>&1 | grep -iE 'security token|sessio
 
 echo; echo "=== phase 5: revert ==="
 echo "  rows_read=$read_rows written=$ROWS r2_objects=$objs"
+echo "  read wall-clock: ${read_ms:-?} ms for the SELECT COUNT(*) (client-side; T6.3's local-vs-remote comparison needs a reader job + metrics)"
 if [ "${read_rows:-0}" = "$ROWS" ]; then
   RESULT="TIERING-REMOTE-READ: PASS -- $ROWS rows written, $ROWS read back through a table with table.log.tiered.local-segments=1 + local-ttl=1s (remote-only after expiry); check the token lines above for whether the R2 mint succeeded"
 else
