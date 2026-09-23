@@ -22,8 +22,8 @@
 #   64-hex form — they carried 12-hex truncations)
 
 # ---- Container image versions (semantic tags; fill digests before production) ----
-FLUSS_IMAGE=apache/fluss:1.0.0@sha256:ff461b45438033da4fd1c2556d3f978f3603bb3632fe075c2bd57388339a58cb
-FLINK_IMAGE=flink:2.2.1-scala_2.12-java17@sha256:1934ab4b984d0873ef46825b1140377eed34475904aa077062497712d6e259f8
+FLUSS_IMAGE=ghcr.io/saurabh17111994/trading-fluss-runtime:prod@sha256:e1bf98e6c58514641f1baa75c9f62534c64b7eb2e811a53b333c1ca007d52645
+FLINK_IMAGE=ghcr.io/saurabh17111994/trading-flink-runtime:prod@sha256:70b04617bea29ea927d4e4daec4366854af7ed497a6a14ca2fa08bfd487d96b3
 # NOTE (2026-09-15, digest-pin live probe): flink:2.2.1-scala_2.12-java17 tag
 # has moved upstream (index sha256:d2b6d48b..., 2026-09-09, new temurin base).
 # Lock keeps 1934ab4b... (2026-08-21, still resolves) — deliberate drift, not

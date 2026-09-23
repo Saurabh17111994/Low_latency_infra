@@ -187,3 +187,26 @@ Record release/configuration digests, timeline, failure trigger, gate transition
 - Runtime requirements: `../02_requirements/02-functional/09-platform-runtime.md` §§REQ-PF-007–REQ-PF-009
 - Executor contract: `../04_contracts/07-executor.md`
 - Storage contract: `../04_contracts/02-storage.md`
+
+
+### For the 1.0.0 cutover (2026-09-23, CHG-306)
+
+The production pin moved to the 1.0-built wrappers. This host runs a compose stack, not Swarm, so the
+drill above becomes a recreate rather than a `docker service update`. Capture the current refs first,
+then restore the deploy env and recreate only the affected services:
+
+```bash
+NEW_REF=ghcr.io/saurabh17111994/trading-fluss-runtime:prod@sha256:e1bf98e6c58514641f1baa75c9f62534c64b7eb2e811a53b333c1ca007d52645                 # what is running now
+PREV_REF=apache/fluss:1.0.0@sha256:ff461b45438033da4fd1c2556d3f978f3603bb3632fe075c2bd57388339a58cb   # the stock base this host ran before the flip; present locally, no pull
+cp logs/soak/cutover-20260923T145327Z/env.before code/01_platform/01_docker/.env
+git checkout code/01_platform/01_docker/runtime.lock
+bash code/01_platform/04_scripts/stack-lock.sh docker compose \
+  --env-file code/01_platform/01_docker/.env --env-file code/01_platform/01_docker/secrets.env \
+  -f code/01_platform/01_docker/docker-compose.yml \
+  up -d --no-deps --force-recreate fluss-coordinator fluss-tablet
+```
+
+A 0.9.1 rollback additionally needs the recorded pre-1.0 **wrapper** digests
+`sha256:80c0e52fc88644bdc44791343f06561e273c3f6bfdcd6c1e3d42a8aa3c8e80ec` / `sha256:d7490df6e32eb50f29a0245d7a2ae19382343a8a91853bcea6bf6f39fd961211` plus the local wrappers `acfe030bd1a3` /
+`25619cfb0fbd`: the publish overwrote the mutable `:prod` tags. After any recreate of the Fluss pair,
+expect ~88 s of read failures (`LeaderNotAvailableException`) while the coordinator assigns leaders.
