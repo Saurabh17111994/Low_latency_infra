@@ -27,7 +27,7 @@ validates them.
 v1: The three workload VMs are Manager+Worker and host:
 
 - A ZooKeeper ensemble node (one per VM; 3-node ensemble, quorum 2-of-3; Fluss metadata store, required by Fluss 1.0.0 — and Flink JobManager HA leadership)
-- Fluss coordinator/tablet capacity and three-node replication/quorum (LOG tables; KV tables are single-replica in Fluss 1.0.0 (standby replicas are an opt-in promotion aid only) — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038))
+- Fluss coordinator/tablet capacity and three-node replication/quorum (LOG tables; KV tables are single-replica in Fluss 1.0.0 (standby replicas are an opt-in promotion aid only; single-replica is deliberate — `DEC-055` — not an inherited default) — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038))
 - Flink JobManager (HA standby + leader via ZooKeeper)/TaskManager workload capacity according to the proven placement plan
 - Ingestion, Action Capture, Executor, and job deployment control as assigned by the Swarm stack
 
