@@ -918,10 +918,19 @@ Correct sequence for an image swap:
    The launcher is idempotent: it skips any job whose Flink name is already RUNNING, never submits
    SignalJob unless `COMPUTE_SUBMIT_SIGNAL=1`, and skips SafetyHaltJob when `SAFETY_MANIFEST_TOKENS` is
    unset. Do not run it while a job of the same name is RUNNING and healthy.
+   To replace a job's *code or configuration* (for example a new jar) that skip is a trap: the launcher
+   sees the old job still RUNNING and does nothing. Cancel it first, then run the step-4 command:
+   `curl -s -X PATCH "http://<jm>:8081/jobs/<jid>?mode=cancel"`. Measured 2026-09-23 (CHG-306):
+   cancel -> launcher -> RUNNING took ~10 s, the first checkpoint landed ~60 s later, and there was no
+   duplicate submission.
 5. Verify: `/jobs/overview` shows the job RUNNING, and `/jobs/<jid>/checkpoints` shows a completed
    checkpoint. The launcher's own readiness line can print `FATAL ... last completed=0` before the first
    checkpoint lands; treat that as a warning and judge from the checkpoints endpoint.
 
 Observed recovery cost (2026-09-23, CHG-306): the Fluss pair needed ~88 s of leader assignment after a
 recreate, and a dropped Babysitter job needed one launcher run (~70 s) to be back RUNNING with a
-completed checkpoint.
+completed checkpoint. A later pair recreate the same evening took longer: a client saw `Leader not found
+after retry` for roughly 6-8 minutes while every table bucket re-elected. Treat ~88 s as the best case,
+not the expected one, and judge readiness from a client (`/jobs/<jid>/checkpoints`, or a `SELECT` through
+sql-client) rather than from container status -- both Fluss containers reported `running` throughout the
+slow window.

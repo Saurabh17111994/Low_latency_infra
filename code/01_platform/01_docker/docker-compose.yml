@@ -396,6 +396,14 @@ services:
         s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
         s3.path.style.access: true
         s3.connection.ssl.enabled: true
+        # The S3 delegation-token provider (fluss-fs-s3) reads Hadoop-style keys, not
+        # Fluss's s3.* names: S3DelegationTokenProvider.REGION_KEY = fs.s3a.region. Mirror the
+        # s3.* values above so the coordinator/tablet can mint file-access tokens.
+        fs.s3a.region: ${AWS_REGION:-auto}
+        fs.s3a.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        fs.s3a.path.style.access: true
+        fs.s3a.access.key: $${env.AWS_ACCESS_KEY_ID}
+        fs.s3a.secret.key: $${env.AWS_SECRET_ACCESS_KEY}
         # Lake tiering (tracker 14 P3.2): datalake.* is the server-side lakehouse
         # config; datalake.iceberg.* becomes the Iceberg catalog properties and
         # iceberg.hadoop.* the Hadoop fs.s3a.* config (R2). Credentials arrive
@@ -512,6 +520,14 @@ services:
         s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
         s3.path.style.access: true
         s3.connection.ssl.enabled: true
+        # The S3 delegation-token provider (fluss-fs-s3) reads Hadoop-style keys, not
+        # Fluss's s3.* names: S3DelegationTokenProvider.REGION_KEY = fs.s3a.region. Mirror the
+        # s3.* values above so the coordinator/tablet can mint file-access tokens.
+        fs.s3a.region: ${AWS_REGION:-auto}
+        fs.s3a.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        fs.s3a.path.style.access: true
+        fs.s3a.access.key: $${env.AWS_ACCESS_KEY_ID}
+        fs.s3a.secret.key: $${env.AWS_SECRET_ACCESS_KEY}
         # 2026-08-30 burst root cause (A2b v3): LogTieringTask copies rolled
         # segments to remote.data.dir — on this single-NVMe dev box that is
         # read+write on the SAME disk at 150-200 MB/s, saturating it and
