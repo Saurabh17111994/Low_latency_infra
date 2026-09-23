@@ -764,5 +764,67 @@ class CandleReaderGuardTests(unittest.TestCase):
                          [], "java ran with no token list to look up")
 
 
+class G7cReconcileTests(unittest.TestCase):
+    """CHG-305: a per-window shortfall is loss only if the drop counter cannot
+    explain it.
+
+    The 2026-09-23 T6.2 run failed G7c on 1188 of 62,464 windows while the same
+    output's G7b note attributed the difference to natural re-feeds the monotonic
+    gate drops (and counts) by design. Before this, any per-window difference was
+    fatal because the raw baseline still held those dropped ticks.
+    """
+
+    def setUp(self):
+        self.m = load_analyze()
+
+    def test_a_shortfall_covered_by_counted_drops_passes(self):
+        failure, note = self.m.g7c_reconcile(3900, 0, 6699)
+        self.assertIsNone(failure)
+        self.assertIn("shortfall=3900", note)
+        self.assertIn("6699 counted drop(s)", note)
+
+    def test_an_unexplained_shortfall_fails(self):
+        failure, note = self.m.g7c_reconcile(7000, 0, 6699)
+        self.assertEqual(note, "")
+        self.assertIn("301 tick(s) are unaccounted for", failure)
+
+    def test_no_counted_drops_tolerate_no_shortfall(self):
+        self.assertIsNone(self.m.g7c_reconcile(0, 0, 0)[0])
+        self.assertIsNotNone(self.m.g7c_reconcile(1, 0, 0)[0])
+
+    def test_the_impossible_direction_fails_even_with_huge_drops(self):
+        # A candle cannot count ticks the raw table never held - no allowance
+        # may excuse that, so the invariant is checked before the allowance.
+        failure, _ = self.m.g7c_reconcile(0, 2, 10 ** 6)
+        self.assertIsNotNone(failure)
+        self.assertIn("exceed the raw recount", failure)
+
+    def test_g7c_compare_reports_the_totals_it_used(self):
+        # One token, two closed windows. The earlier one is the LATEST-mode
+        # partial entry window, so it is excluded from the exact comparison (and
+        # from the totals); only the later window contributes.
+        ws1, ws2 = 1790167335000, 1790167485000
+        tok = 583
+        win_ticks = {(tok, ws1): 150, (tok, ws2): 150}
+        win_vol = {(tok, ws1): 3481, (tok, ws2): 3620}
+        final = {(tok, ws1): (146, 3400), (tok, ws2): (147, 3427)}
+        stats = {}
+        mismatch, compared, _skipped = self.m.g7c_compare(
+            win_ticks, win_vol, final, 1790167000000, 1790168000000,
+            stats=stats)
+        self.assertEqual(compared, 2)
+        self.assertEqual(len(mismatch), 1)          # ws2 only; ws1 is partial
+        self.assertEqual(stats["compared_raw_ticks"], 150)
+        self.assertEqual(stats["compared_candle_ticks"], 147)
+        self.assertEqual(stats["shortfall"], 3)
+        self.assertEqual(stats["candle_excess"], 0)
+
+    def test_a_perfect_run_reconciles_to_zero(self):
+        # The pre-change reading of a clean run: no shortfall, nothing counted.
+        failure, note = self.m.g7c_reconcile(0, 0, 0)
+        self.assertIsNone(failure)
+        self.assertIn("shortfall=0", note)
+
+
 if __name__ == "__main__":
     unittest.main()

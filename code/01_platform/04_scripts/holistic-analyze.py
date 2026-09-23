@@ -202,7 +202,7 @@ def counter_deltas(path):
 
 
 def g7c_compare(win_ticks, win_vol, final_by_key, run_start, run_end,
-                event_horizon=None):
+                event_horizon=None, stats=None):
     """G7c: per (token, 15s window) final-candle vs raw-recount parity.
 
     Returns (mismatch_messages, compared_count, startup_skipped_count).
@@ -259,12 +259,57 @@ def g7c_compare(win_ticks, win_vol, final_by_key, run_start, run_end,
         # the raw recount exactly.
         if ws == first_candle_window[token]:
             continue
+        if stats is not None:
+            # CHG-305: only pairs that must match EXACTLY feed the totals
+            # reconciliation (the partial first window above is excluded); the
+            # diagnostic per-window list below is a different consumer.
+            stats["compared_raw_ticks"] = stats.get("compared_raw_ticks", 0) + exp_ticks
+            stats["compared_candle_ticks"] = stats.get("compared_candle_ticks", 0) + fticks
+            stats["shortfall"] = stats.get("shortfall", 0) + max(0, exp_ticks - fticks)
+            stats["candle_excess"] = stats.get("candle_excess", 0) + max(0, fticks - exp_ticks)
         if fticks != exp_ticks or fvol != win_vol[key]:
             mismatch.append(
                 f"window {ws} token {token}: candle ticks={fticks} "
                 f"vol={fvol} vs raw recount ticks={exp_ticks} "
                 f"vol={win_vol[key]}")
     return mismatch, compared, startup_skipped
+
+
+def g7c_reconcile(shortfall, candle_excess, drop_delta):
+    """G7c totals reconciliation (CHG-305): is the shortfall accounted for?
+
+    On 2026-09-23 the T6.2 run failed this leg on 1188 of 62,464 windows while the
+    same output's G7b note explained the difference: the aggregator's monotonic
+    gate drops out-of-order re-feeds by design and counts them, and the per-window
+    comparison subtracted none of that. Per-window attribution is impossible (the
+    counter is a job metric, not a per-key ledger), so the guard is one strict
+    invariant plus a totals reconciliation:
+
+      * a candle can never count more ticks than the raw recount holds, whatever
+        the counters say - that direction is impossible and always fails;
+      * the ticks missing from fully-closed windows must be covered by the
+        in-window drop counter. Ticks the counter never counted are unaccounted
+        for, which is what loss looks like.
+
+    Volume is deliberately not reconciled: a window's raw volume includes the
+    dropped ticks' volume, so a volume shortfall carries no independent signal.
+
+    One-sided by construction: drops of ticks that were already counted (re-feeds
+    of a live tick) inflate the allowance, so a pass means "no loss this
+    measurement can see", not "every drop was necessary". Returns
+    (failure_message_or_None, note).
+    """
+    if candle_excess > 0:
+        return (f"G7c: {candle_excess} candle tick(s) exceed the raw recount "
+                "- a candle counted ticks that never landed", "")
+    if shortfall > drop_delta:
+        return (f"G7c: {shortfall} raw tick(s) missing from fully-closed "
+                f"windows but only {drop_delta} drop(s) were counted - "
+                f"{shortfall - drop_delta} tick(s) are unaccounted for", "")
+    return None, (f"shortfall={shortfall} raw tick(s) covered by {drop_delta} "
+                  f"counted drop(s) ({drop_delta - shortfall} of them were ticks "
+                  "already counted, i.e. re-feeds, so this is not a per-window "
+                  "equality claim)")
 
 
 # G7c parity compares candle_closed against the raw recount. The 15s family is
@@ -1686,9 +1731,10 @@ def main():
 
     # compare fully-closed windows inside the run window (module-level
     # g7c_compare - unit-tested in tests/test_holistic_g7_parity.py)
+    g7c_stats = {}
     mismatch, compared, startup_skipped = g7c_compare(
         win_ticks, win_vol, final_by_key, run_start, run_end,
-        event_horizon=event_horizon or None)
+        event_horizon=event_horizon or None, stats=g7c_stats)
     parity_failure = g7c_measurement_guard(raw_read_ok, compared, candle_read_ok)
     if parity_failure:
         failures.append(parity_failure)
@@ -1743,7 +1789,9 @@ def main():
             f"so rejections mean a validation-rule regression or a "
             f"corrupt feed silently dropping ticks before candles")
     print(f"- G7c parity: {compared} fully-closed (token,window) pairs "
-          f"compared candle-vs-raw, {len(mismatch)} mismatches")
+          f"compared candle-vs-raw, {len(mismatch)} informational mismatch(es); "
+          f"tick shortfall={g7c_stats.get('shortfall', 0)} vs "
+          f"{late_delta:.0f} counted drop(s) in-window")
     if startup_skipped:
         print(f"- G7c note: {startup_skipped} (token,window) pair(s) before "
               f"the first final candle — LATEST-mode startup skip "
@@ -1770,17 +1818,31 @@ def main():
     for _note in g7b_notes:
         print(_note)
     if mismatch:
+        # CHG-305: informational. This list diffs against a raw baseline that still
+        # contains the ticks the aggregator dropped by design, so the reconciliation
+        # below decides pass/fail; the list stays for localisation.
         for msg in mismatch[:10]:
-            failures.append(f"G7c: {msg}")
+            print(f"- G7c detail: {msg}")
         if len(mismatch) > 10:
-            failures.append(f"G7c: ...and {len(mismatch) - 10} more "
-                            "window mismatches")
-    elif parity_failure is None:
-        print("- G7: data-quality guards passed (dedup exact, late-drop "
-              "covered, tick-set parity exact)")
-    else:
-        print("- G7: data-quality guards NOT EVALUATED — the parity guard "
+            print(f"- G7c detail: ...and {len(mismatch) - 10} more window mismatches")
+    # CHG-305: a shortfall is loss only when the aggregator's own drop counter cannot
+    # explain it. Exact duplicates are already excluded from the raw baseline by the
+    # fingerprint dedupe, and validation rejections are asserted separately by F6 -
+    # so compute.candles.late.dropped (monotonic gate, older window, slot cap,
+    # session filter) is the whole allowance.
+    g7c_failure, g7c_note = g7c_reconcile(
+        g7c_stats.get("shortfall", 0), g7c_stats.get("candle_excess", 0),
+        int(late_delta))
+    if g7c_failure:
+        failures.append(g7c_failure)
+    if g7c_note:
+        print(f"- G7c reconciliation: {g7c_note}")
+    if parity_failure is not None:
+        print("- G7: data-quality guards NOT EVALUATED - the parity guard "
               "above names which side was unavailable")
+    elif not g7c_failure:
+        print("- G7: data-quality guards passed (dedup exact, late-drop "
+              "covered, tick-set parity reconciled)")
 
 
     if unavailable:
