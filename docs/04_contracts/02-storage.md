@@ -34,7 +34,8 @@ Every table requires an explicit owner, schema version, retention policy, writer
 
 > **SUPERSEDED (2026-08-17, CHG-022 / DEC-040):** the dedup arm of DEC-038 is
 > superseded — the fingerprint dedup set is authoritative **Flink keyed state**
-> (Design B: `MapState` keyed `version|token|fingerprint` + expiry index + one
+> (Flink keyed `MapState` + state-TTL, DEC-040; itself retired 2026-09-03 by DEC-054
+> — see Retired designs and their names; was keyed `version|token|fingerprint` + expiry index + one
 > event-time timer per entry — **2026-08-17, CHG-023 item 2: the index +
 > timers are REMOVED — expiry is native `StateTtlConfig` on the MapState**),
 > not a Fluss KV table. The `fingerprint_dedup`

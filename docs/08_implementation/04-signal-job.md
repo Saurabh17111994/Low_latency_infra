@@ -47,6 +47,19 @@
 > Measured 2026-09-23 on the re-scoped integration test: checkpoint size 5876 B at 2k fingerprints vs
 > 4885 B at 10k (flat — no growth), restore-to-first-new-output 1154 ms against a 30 000 ms budget.
 
+### Retired designs and their names
+
+The options once called **Design A** and **Design B** are both retired; the letters are option labels
+from DEC-040 and must not be used as mechanism names.
+
+| label | what it was | decided | retired by |
+| --- | --- | --- | --- |
+| Design A | Fluss KV-table dedup (`fingerprint_dedup`) | DEC-038 (2026-08-14) | DEC-040 / CHG-022 (2026-08-17) |
+| Design B | Flink keyed `MapState` + native `StateTtlConfig` | DEC-040 / CHG-022 (2026-08-17) | `c0c50ee6` (2026-09-03), DEC-054, CHG-303 |
+
+Current dedup: heap count-window (`FingerprintDedupFunction`, uid `fingerprint-dedup-v2`, DEC-054).
+The words "Design-B artifact" / "DB2" in dated material mean today's **dual-sink signal build**.
+
 Build this phase, then implement the tests in the second section before moving on.
 
 ## What to build
@@ -1101,7 +1114,7 @@ game. The same reasoning applies to `forming_bar` (KV, PK `instrument_token`).
 **Root cause 1 — harness memory gap (FIXED, CHG-021):** under local/embedded
 execution (no `flink-conf.yaml`), Flink defaults `taskmanager.memory.managed.size`
 to **128 MB total** (32 MB/slot at p4, 16 MB at p8), starving the RocksDB block
-cache + memtables. The Design-B dedup envelope is 20 480 t/s × 300 s ≈ 6.1M entries
+cache + memtables. The dedup envelope is 20 480 t/s × 300 s ≈ 6.1M entries
 ≈ **628 MB** of RocksDB state; a 16–32 MB block cache cannot hold even a fraction
 of it, so throughput collapses to ~20k/s ≈ the live feed rate, the backlog never
 drains, the source never reaches the live tail, and every candle is an UPSERT of a

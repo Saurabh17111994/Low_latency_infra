@@ -575,16 +575,20 @@ alerts have no first-class severity field — severity rides the rule-name prefi
 continuously; while a condition holds, fires repeat on the ~30–75 s window
 cadence. **24 rules provisioned (8 ING- ingestion + 16 SIGNAL- compute), verified live 2026-08-17** (the prior "26 = 9 + 17" count included the never-existing `SIGNAL-warn-dedup-cache-hit`; the dedup pair was re-provisioned the same day — see the banner below).
 
+> Vocabulary: **Design A** / **Design B** are option labels from DEC-040, not mechanism names; the
+> current dedup is the heap count-window. See [Retired designs and their names](../08_implementation/04-signal-job.md#retired-designs-and-their-names).
+
 Compute/SignalJob rules:
 
 > **DEDUP ALERTS RETARGETED (2026-08-17, CHG-022 / DEC-040):** the dedup set is
-> authoritative Flink keyed state (Design B) — the `fingerprint_dedup` Fluss
+> authoritative Flink keyed state (`MapState` + `StateTtlConfig`, DEC-040; itself retired 2026-09-03 by
+> DEC-054 — see the anchor linked above) — the `fingerprint_dedup` Fluss
 > table and the bounded-cache gauges no longer exist. The two real rules
 > (`SIGNAL-warn-dedup-state`, `SIGNAL-warn-dedup-expiry`) were re-provisioned the
 > same day to watch the Flink `FingerprintDedupFunction` gauges
 > (`compute_dedup_state_count` / `compute_dedup_expiry_index_count` — the series
-> Design B keeps) with the threshold re-based from the DEC-038 250k cache cap to
-> the **Design-B envelope ≈ 6.5M** (20 480 t/s × 300 s TTL ≈ 6.1M + headroom).
+> that design kept) with the threshold re-based from the DEC-038 250k cache cap to
+> the **dedup envelope ≈ 6.5M** (20 480 t/s × 300 s TTL ≈ 6.1M + headroom).
 > **CHG-023 item 2 (2026-08-17): `SIGNAL-warn-dedup-expiry` is RETIRED — its
 > series (`compute_dedup_expiry_index_count`) is deleted with the expiry index;
 > expiry is native `StateTtlConfig` (no event-time timers to stall), and

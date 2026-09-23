@@ -4,6 +4,9 @@ This file indexes active project decisions. Detailed implementation belongs in c
 
 ## Active decisions
 
+> Vocabulary: the letters **Design A** / **Design B** are option labels from DEC-040, never
+> mechanism names. See [Retired designs and their names](../08_implementation/04-signal-job.md#retired-designs-and-their-names).
+
 | ID      | Decision                                                                                                                                                                                                                                       | Reason                                                                                                                                              | Trade-off                                                                                                 |
 | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | DEC-001 | Fluss is the live streaming bus and storage layer. LOG tables hold immutable events; KV tables hold current operational state.                                                                                                                 | One data plane and native changelog consumption.                                                                                                    | Requires strict table and column ownership.                                                               |
