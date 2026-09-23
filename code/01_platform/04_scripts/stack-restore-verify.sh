@@ -85,9 +85,9 @@ jobs_up=0
 python3 -c "import json,sys; d=json.load(open('$OUT/flink-jobs.json')); sys.exit(0 if any(j.get('status')=='RUNNING' for j in d.get('jobs',[])) else 1)" 2>/dev/null && jobs_up=1
 echo "  make up rc=${MKRC:-?} | containers=$upcount | catalog-guard 27/27=$catalog_ok | JM->coordinator=$jm_open | job RUNNING=$jobs_up"
 if [ "${MKRC:-1}" = 0 ] && [ "$upcount" -gt 0 ] && [ "$catalog_ok" = 1 ] && [ "$jm_open" = 1 ]; then
-  echo "  RESTORE VERDICT: OK — the dev stack is reachable and the catalog guard is green"
+  echo "  RESTORE VERDICT: OK — the dev stack is reachable and the catalog guard is green" | tee "$OUT/verdict.txt"
 else
-  echo "  RESTORE VERDICT: FAILED — the dev stack is NOT certified; do not trust anything downstream"
+  echo "  RESTORE VERDICT: FAILED — the dev stack is NOT certified; do not trust anything downstream" | tee "$OUT/verdict.txt"
   exit 3
 fi
 echo DONE
