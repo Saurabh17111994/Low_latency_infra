@@ -106,7 +106,7 @@ for i in $(seq 1 24); do
   if ! grep -qiE 'leader not found|exception|error|timeout' "$OUT/settle-$i.log"; then
     ready=yes; echo "  pair writable after $((i*15))s"; break
   fi
-  echo "  attempt $i: $(grep -oiE 'Leader not found[^,]*|UnknownHostException|Exception|timeout' "$OUT/settle-$i.log" | head -1)"; sleep 15
+  echo "  attempt $i: $(grep -oiE 'Leader not found[^,]*|UnknownHostException|Exception|timeout' "$OUT/settle-$i.log" | head -1)"; sleep 15 || true
 done
 [ "$ready" = yes ] || { echo "!! the Fluss pair never became writable; aborting (trap reverts)"; exit 1; }
 
@@ -193,7 +193,7 @@ echo "  rows read: ${read_rows:-<none>}  (written: $ROWS)"
 echo "  read errors: $(grep -ciE 'exception|Region is not set|Failed to obtain|UnknownHost' "$OUT/read.log" || true)"
 grep -iE 'exception|Region is not set|Failed to obtain|UnknownHost' "$OUT/read.log" | head -3 | cut -c1-150 | sed 's/^/    /' || true
 echo "  client-side token lines in the JM log:"
-docker logs $JM 2>&1 | grep -iE 'security token|New security tokens|Region is not set|Failed to obtain' | tail -5 | cut -c1-160 | sed 's/^/    /'
+docker logs $JM 2>&1 | grep -iE 'security token|New security tokens|Region is not set|Failed to obtain' | tail -5 | cut -c1-160 | sed 's/^/    /' || true
 echo "  (token lines before this read: $pre_jm)"
 echo "  server-side token/mint lines:"
 docker logs 01_docker-fluss-coordinator-1 2>&1 | grep -iE 'security token|session credential|Region is not set|Failed to get file access' | tail -4 | cut -c1-160 | sed 's/^/    /' || true
