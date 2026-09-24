@@ -12,7 +12,7 @@ PASS=0; FAIL=0
 # run_case name scenario expect_rc expect_grep [port] [jm_value]
 run_case() {
 	local name="$1" scenario="$2" expect_rc="$3" expect_grep="$4"
-	local port="${5:-8081}" jm="${6:-127.0.0.1}"
+	local port="${5:-8081}" jm="${6:-127.0.0.1}" submit_signal="${7:-0}"
 	local jar out rc stub
 	jar="$(mktemp)"; echo dummy > "$jar"
 	STUB_SCENARIO="$scenario" STUB_PORT="$port" python3 "${DIR}/stub-jm.py" & stub=$!
@@ -20,7 +20,7 @@ run_case() {
 		curl -fsS "http://127.0.0.1:${port}/v1/config" >/dev/null 2>&1 && break
 		sleep 0.1
 	done
-	out=$(FLINK_JOBMANAGER="$jm" COMPUTE_SUBMIT_SIGNAL=0 \
+	out=$(FLINK_JOBMANAGER="$jm" COMPUTE_SUBMIT_SIGNAL="${submit_signal}" \
 		COMPUTE_JAR="$jar" bash "$LAUNCHER" 2>&1)
 	rc=$?
 	kill "$stub" 2>/dev/null; wait "$stub" 2>/dev/null
@@ -56,6 +56,11 @@ run_case "dead-run-fatal" dead-run 1 "FATAL — .* submit failed"
 # --- P2-082: terminal-only states ---
 # CANCELING is transient — old code FATALed on first CANCELING; new keeps polling.
 run_case "cancel-then-running-transient" cancel-then-running 0 "launcher finished — jobs submitted"
+# 2026-09-24 regression: the live overview is ONE line. A CANCELED job followed by
+# a RUNNING one made the object-spanning greedy regex report the CANCELED job as
+# RUNNING, so the launcher silently skipped a needed resubmit. It must now SUBMIT.
+run_case "overview-compact-two-jobs-submits-canceled" overview-two-jobs-compact 0 \
+	"submitting signal-job-compute" 18082 "http://127.0.0.1:18082" 1
 # FAILED is terminal — must stop with FATAL, not poll 30x.
 run_case "job-fails-terminal" job-fails 1 "entered terminal state FAILED"
 

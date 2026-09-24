@@ -4,7 +4,7 @@ Serves adversarial-but-valid JSON (pretty-printed, nested data.filename,
 camelCase jobId, spaced colons) plus scripted transient/permanent failures
 and state sequences. Scenario via STUB_SCENARIO:
   happy | flaky-polls | dead-upload | dead-run
-  | cancel-then-running | job-fails
+  | cancel-then-running | job-fails | overview-two-jobs-compact
 """
 import json
 import os
@@ -50,6 +50,20 @@ class H(BaseHTTPRequestHandler):
         if path == "/v1/config":
             return self._send(200, {})
         if path == "/jobs/overview":
+            if SCENARIO == "overview-two-jobs-compact":
+                # The live endpoint answers on ONE line. A CANCELED job followed by a
+                # RUNNING one is exactly what exposed the object-spanning greedy regex
+                # in job_already_running -- pretty-printed JSON hid it.
+                body = json.dumps({"jobs": [
+                    {"jid": "a" * 32, "name": "signal-job-compute", "state": "CANCELED"},
+                    {"jid": "b" * 32, "name": "Babysitter Positions observer", "state": "RUNNING"},
+                ]}, separators=(",", ":")).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             return self._send(200, {"jobs": []})
         if path == "/jobs/abc123":
             if self._should_fail(path):

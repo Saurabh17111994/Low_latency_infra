@@ -189,10 +189,21 @@ job_already_running() {
 	local overview
 	# P2-200: timeouts here too — a hung overview must not wedge idempotency.
 	overview=$(curl -fsS --connect-timeout 5 --max-time 15 "http://${JM}/jobs/overview" 2>/dev/null) || return 1
-	printf '%s' "${overview}" \
-		| grep -oE '\{"jid":"[0-9a-f]{32}".*?"state":"(RUNNING|[A-Z_]+)"' \
-		| grep -F "\"name\":\"${expected}\"" \
-		| grep -q '"state":"RUNNING"'
+	# 2026-09-24: the live /jobs/overview is a SINGLE line and ERE has no lazy
+	# quantifier, so the previous .*? pattern spanned every following job: with
+	# one CANCELED job first and any later job RUNNING it reported the CANCELED
+	# job as RUNNING, and the launcher silently skipped a needed submit while
+	# still printing "jobs submitted". Match inside one object only - jq when
+	# available, else the [^}]* bound used by rollout-savepoint.sh.
+	if command -v jq >/dev/null 2>&1; then
+		printf '%s' "${overview}" \
+			| jq -e --arg n "${expected}" '.jobs[] | select(.name==$n and .state=="RUNNING")' >/dev/null 2>&1
+	else
+		printf '%s' "${overview}" \
+			| grep -oE '\{"jid":"[0-9a-f]{32}"[^}]*' \
+			| grep -F "\"name\":\"${expected}\"" \
+			| grep -qF '"state":"RUNNING"'
+	fi
 }
 
 submit_job() {
