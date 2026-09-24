@@ -147,6 +147,12 @@ ddl:
 	@echo "(Plain 'make ddl' only validates; run 'make ddl APPLY=1 EVIDENCE=<file>' to execute the contract.)"
 
 up:
+	@echo "verifying deployed artifacts before the recreate (SKIP when an image is not built here)"
+	@$(STACK_LOCK) python3 code/01_platform/04_scripts/deployed_artifact_verify.py \
+		--target ingestion --image 01_docker-ingestion:latest
+	@$(STACK_LOCK) python3 code/01_platform/04_scripts/deployed_artifact_verify.py \
+		--target compute --image 01_docker-compute:latest \
+		--jar code/02_services/02_compute/target/compute.jar
 	$(STACK_LOCK) $(COMPOSE) up -d
 	@bash code/01_platform/04_scripts/catalog-guard.sh \
 		|| echo "!!! catalog-guard: catalog NOT healthy — see messages above. Fix before trading."
