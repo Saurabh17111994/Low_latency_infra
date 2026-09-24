@@ -1,6 +1,7 @@
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
 import org.apache.fluss.client.admin.Admin;
+import org.apache.fluss.client.admin.OffsetSpec.LatestSpec;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.writer.UpsertWriter;
 import org.apache.fluss.config.Configuration;
@@ -11,7 +12,9 @@ import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericRow;
 import org.apache.fluss.types.DataTypes;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -45,6 +48,12 @@ import java.util.concurrent.TimeUnit;
  * count never agrees the seeder fails loudly — a real finding about the count path, not test
  * flakiness.
  *
+ * <p>Placement is waited for, not raced. {@code createTable} returning means the table exists, not
+ * that a leader serves its buckets: this cluster has been measured taking 67 s to place a replica
+ * (and documented taking 8 minutes), while the write bound below is 30 s. {@link #awaitServing}
+ * absorbs that gap before the first write, and the write itself stays bounded, so a fixture that
+ * never lands still fails loudly instead of after an ever-wider wait.
+ *
  * <p>These tables live in the live catalog, so both subcommands are idempotent: {@code create}
  * drops before creating, and the test drops them in a {@code finally}-equivalent cleanup even
  * when it fails. A leaked fixture would show up in the catalog guard's count.
@@ -62,6 +71,16 @@ public final class ProbeFixtureSeeder {
 
     private static final String DEFAULT_BOOTSTRAP = "localhost:9123";
     private static final long TIMEOUT_MS = 30_000;
+
+    /**
+     * How long a freshly created table may take to get a live leader on every bucket. Measured
+     * 2026-09-24: 67 s, while the coordinator logged ~1,900 "No any live replica" lines/min. The
+     * wait belongs here - generous - and not in {@link #TIMEOUT_MS}, which must stay a bound on a
+     * slow write rather than on a slow cluster.
+     */
+    private static final long SERVING_WAIT_MS = 120_000;
+    /** Pacing between placement probes; each probe is one RPC per bucket. */
+    private static final long SERVING_POLL_MS = 200;
     /** How long the server's own row count may take to agree before that is a failure. */
     private static final long COUNT_WAIT_MS = 20_000;
     private static final long COUNT_POLL_MS = 250;
@@ -105,6 +124,8 @@ public final class ProbeFixtureSeeder {
             throws Exception {
         TablePath path = TablePath.of("default", name);
         admin.createTable(path, descriptor(), false).get(TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        // The table EXISTS now, which is not the same as writable: find the leader first.
+        awaitServing(admin, path, name);
         try (Table table = conn.getTable(path)) {
             UpsertWriter writer = table.newUpsert().createWriter();
             for (String id : ids) {
@@ -137,6 +158,56 @@ public final class ProbeFixtureSeeder {
         // after a create that never got that far.
         admin.dropTable(TablePath.of("default", name), true)
                 .get(TIMEOUT_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Wait until a live leader serves every bucket of a freshly created table.
+     *
+     * <p>{@code createTable} returning means the table exists, not that it can be written: the
+     * coordinator registers the buckets and the tablets then take leadership. Since {@link
+     * #TIMEOUT_MS} bounds a slow WRITE, the placement wait happens here instead, before the first
+     * write, with a budget of its own. {@code listOffsets} is a read, so re-issuing it while the
+     * cluster places replicas is safe; a wait that never ends fails closed, naming the table.
+     */
+    private static void awaitServing(Admin admin, TablePath path, String name) throws Exception {
+        int bucketCount =
+                admin.getTableInfo(path).get(TIMEOUT_MS, TimeUnit.MILLISECONDS).getNumBuckets();
+        List<Integer> buckets = new ArrayList<>(bucketCount);
+        for (int b = 0; b < bucketCount; b++) {
+            buckets.add(b);
+        }
+        long deadline = System.currentTimeMillis() + SERVING_WAIT_MS;
+        long startMillis = System.currentTimeMillis();
+        Throwable lastFailure = null;
+        while (true) {
+            try {
+                admin.listOffsets(path, buckets, new LatestSpec())
+                        .all()
+                        .get(Math.max(1L, deadline - System.currentTimeMillis()),
+                                TimeUnit.MILLISECONDS);
+                // A healthy table is served in ~0 s, so a real wait is the placement backlog this
+                // gate exists for. stderr keeps it clear of the counts the test parses on stdout.
+                if (System.currentTimeMillis() - startMillis > 1_000) {
+                    System.err.println("fixture: " + name + " became writable after "
+                            + (System.currentTimeMillis() - startMillis) / 1000 + "s (placement"
+                            + " backlog)");
+                }
+                return;
+            } catch (InterruptedException e) {
+                throw e;
+            } catch (Exception e) {
+                // Transient while the cluster places replicas: record it and probe again.
+                lastFailure = e instanceof ExecutionException && e.getCause() != null
+                        ? e.getCause() : e;
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                throw new IllegalStateException("no leader serves every bucket of " + name + " ("
+                        + bucketCount + " bucket(s)) after " + SERVING_WAIT_MS + "ms: the cluster"
+                        + " is not placing replicas, so the fixture cannot be written",
+                        lastFailure);
+            }
+            Thread.sleep(SERVING_POLL_MS);
+        }
     }
 
     /**

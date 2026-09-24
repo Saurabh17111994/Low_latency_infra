@@ -200,6 +200,40 @@ class ProbeCompileTests(ProbeTestBase):
             self.assertTrue((self.classes / f"{name}.class").is_file(), f"{name}.class missing")
 
 
+class SeederPlacementPins(unittest.TestCase):
+    """2026-09-24: the fixture's first write must wait for a leader, not only for createTable.
+
+    Step 3 of the certifying gate failed twice on ProbeFixtureSeeder.java:115 - an upsert issued
+    right after createTable, bounded at 30 s, while the coordinator logged ~1,900 "No any live
+    replica" lines/min. createTable returning means the table exists; it does not mean a leader
+    serves its buckets, and before this the seeder had no probe for that (DdlApplyTool does, via
+    awaitServing). Structural pins, in the style of the FlussSignalLatency ones: no W35X_PROBE_SRC
+    override, because that red leg pins FlussSignalLatency only.
+    """
+
+    SRC = PROBE_DIR / "ProbeFixtureSeeder.java"
+
+    def test_the_first_write_is_preceded_by_a_writability_wait(self) -> None:
+        src = self.SRC.read_text(encoding="utf-8")
+        wait = src.index("awaitServing(admin, path, name)")
+        write = src.index("writer.upsert(")
+        self.assertLess(wait, write,
+                        "the fixture write must be gated on placement, not issued blind: a "
+                        "createTable that returned is not evidence that a leader is serving")
+
+    def test_the_write_bound_was_not_widened_to_absorb_the_stall(self) -> None:
+        src = self.SRC.read_text(encoding="utf-8")
+        self.assertIn("TIMEOUT_MS = 30_000", src,
+                      "keep the write bound a bound on a slow write; absorb placement in the wait")
+        self.assertIn("SERVING_WAIT_MS = 120_000", src,
+                      "the placement wait needs its own, wider budget")
+
+    def test_the_placement_gate_fails_closed_naming_the_table(self) -> None:
+        src = self.SRC.read_text(encoding="utf-8")
+        self.assertIn("no leader serves every bucket of", src,
+                      "a wait that never ends must name the table and fail, not write anyway")
+
+
 class SentinelTests(ProbeTestBase):
     """P6-080: a failure after startup must still print __END__ and exit non-zero."""
 
