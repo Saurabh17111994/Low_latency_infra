@@ -50,6 +50,11 @@ import org.slf4j.LoggerFactory;
 class DdlSmokeTwinSweepTest {
 
     private static final Logger LOG = LoggerFactory.getLogger(DdlSmokeTwinSweepTest.class);
+    /**
+     * Same half-budget as {@code DdlApplyTool.TIMEOUT} - raise the two together. Placement backlogs
+     * are absorbed before the write by the tool's {@code awaitServing} gate, so this stays the bound
+     * on a slow write rather than on a slow cluster.
+     */
     private static final java.time.Duration TIMEOUT = java.time.Duration.ofSeconds(30);
 
     private static String bootstrap;

@@ -19,13 +19,17 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
 import org.apache.fluss.client.admin.Admin;
+import org.apache.fluss.client.admin.OffsetSpec.LatestSpec;
 import org.apache.fluss.client.lookup.Lookuper;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.scanner.batch.BatchScanner;
@@ -100,6 +104,17 @@ public final class DdlApplyTool {
     private static final ObjectMapper JSON = new ObjectMapper()
             .enable(SerializationFeature.INDENT_OUTPUT);
 
+    /**
+     * Bound on one smoke write settling. {@code WriteAwait.await} applies it twice (the same
+     * future is awaited once more on timeout - the write is never re-issued), so this is the
+     * half-budget.
+     *
+     * <p>Placement stalls are absorbed BEFORE the write by {@link #awaitServing}, so this stays the
+     * bound on a slow write rather than on a slow cluster. It was briefly raised to 180 s on
+     * 2026-09-24 against a 67 s placement stall (see {@link #awaitServing} for the measurement) and
+     * put back: any tolerance wide enough to cover the worst stall the coordinator can produce is
+     * an arms race, and it leaves the failure message ambiguous.
+     */
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
 
     /**
@@ -122,6 +137,21 @@ public final class DdlApplyTool {
 
     /** Bound on waiting for a partitioned table's auto-created partitions (normally well under 1s). */
     private static final Duration AUTO_PARTITION_WAIT = Duration.ofSeconds(30);
+
+    /**
+     * Bound on waiting for a twin's buckets to be served by a live leader before smoking it (see
+     * {@link #awaitServing}). Measured 2026-09-24: a healthy cluster needs none of it - the smoke
+     * path fits inside {@link #TIMEOUT} - while a twin created behind a 51-table teardown waited
+     * 67 s for its assignment to reach the tablet. Comfortably inside this budget, and it fails
+     * closed rather than writing into a bucket that has no leader.
+     */
+    private static final Duration SERVING_WAIT = Duration.ofSeconds(120);
+
+    /**
+     * Pacing between serving probes. Each probe fans out one RPC per bucket (16 for most twins), so
+     * a tight loop would be a request storm; the same 200 ms {@link #awaitAutoPartition} sleeps.
+     */
+    private static final long SERVING_RETRY_MILLIS = 200;
 
     private DdlApplyTool() {}
 
@@ -928,6 +958,10 @@ public final class DdlApplyTool {
         if (partition != null) {
             applyPartitionValues(ddl, partition, values);
         }
+        // Both branches below write straight away, so prove the target buckets are actually served
+        // first (see awaitServing): a twin the tablet has not picked up yet would otherwise burn the
+        // write's own budget and report the ambiguous "write unresolved".
+        awaitServing(admin, name, partition);
         if (ddl.primaryKey().isEmpty()) {
             AppendWriter writer = table.newAppend().createWriter();
             // No flush in a finally here (2026-09-11): flush() is unbounded in Fluss
@@ -994,6 +1028,85 @@ public final class DdlApplyTool {
                         + "s — auto-partition created none, so the smoke cannot target one");
             }
             Thread.sleep(200);
+        }
+    }
+
+    /**
+     * Waits until every bucket of the twin is served by a live leader, i.e. until the table is
+     * actually writable, before the smoke writes to it. Creating a table is asynchronous on the
+     * SERVER side: the coordinator registers a bucket assignment and the tablet acts on it later,
+     * so "the partition metadata exists" (what {@link #awaitAutoPartition} proves) does not imply
+     * "a leader serves those buckets".
+     *
+     * <p>Measured 2026-09-24 11:18 UTC, gate step 11 scenario 2: raw_table_1's twin got its
+     * partition at 11:18:42.531 and the coordinator registered the assignment at 11:18:42.540, but
+     * the tablet only attempted the replica at 11:19:49.126 - 67 s later, while the coordinator
+     * logged hundreds of "No any live replica" a minute as the previous scenario's 51-table
+     * teardown drained. The write's 60 s half-budget expired ~6 s before that, so the smoke failed
+     * with "write unresolved" while the other 25 twins (created earlier, placed earlier) were fine.
+     * Only raw_table_1 and safety_halt_requests are partitioned, so only they carry this second
+     * asynchronous step.
+     *
+     * <p>{@code listOffsets} is served by the bucket's leader and {@code all()} completes only when
+     * every bucket has answered, so this is the writability predicate itself rather than a proxy
+     * (the teardown canary proves placement of a different, unpartitioned table, and it adds a
+     * table to the very queue it waits on). The get() is bounded because an untimed one hangs on a
+     * stalled admin RPC - the P1-008 doctrine in {@code TickTableViewer} - and a probe that does
+     * not settle is re-issued, which is safe here because it is a READ, unlike the smoke write,
+     * which is never re-issued (see {@link WriteAwait}).
+     */
+    private static void awaitServing(Admin admin, String name, PartitionInfo partition)
+            throws Exception {
+        TablePath path = TablePath.of("default", name);
+        int bucketCount = partition == null
+                ? info(admin, name).getNumBuckets() : partition.getBucketCount();
+        List<Integer> buckets = new ArrayList<>(bucketCount);
+        for (int b = 0; b < bucketCount; b++) {
+            buckets.add(b);
+        }
+        awaitServing(name + " (" + bucketCount + " bucket(s))",
+                () -> (partition == null
+                        ? admin.listOffsets(path, buckets, new LatestSpec())
+                        : admin.listOffsets(path, partition.getPartitionName(), buckets,
+                                new LatestSpec())).all(),
+                SERVING_WAIT);
+    }
+
+    /**
+     * The deadline loop of {@link #awaitServing}, split out so a fake probe can drive it without a
+     * cluster ({@link DdlSmokeTwinSweepUnitTest}).
+     */
+    static void awaitServing(String what, Supplier<CompletableFuture<?>> probe, Duration budget)
+            throws Exception {
+        long deadline = System.currentTimeMillis() + budget.toMillis();
+        long startMillis = System.currentTimeMillis();
+        Throwable lastFailure = null;
+        while (true) {
+            try {
+                probe.get().get(Math.max(1L, deadline - System.currentTimeMillis()),
+                        TimeUnit.MILLISECONDS);
+                // A healthy twin is served in ~0 s, so any real wait is the placement backlog this
+                // gate exists for: say so, or a passing run cannot show that the gate did anything.
+                if (System.currentTimeMillis() - startMillis > 1_000) {
+                    System.out.println("ddl-apply: " + what + " became writable after "
+                            + (System.currentTimeMillis() - startMillis) / 1000 + "s (placement"
+                            + " backlog)");
+                }
+                return;
+            } catch (InterruptedException e) {
+                throw e;
+            } catch (Exception e) {
+                // A failed or timed-out RPC is transient while the cluster places replicas, so
+                // record it and probe again rather than failing the smoke here.
+                lastFailure = e instanceof ExecutionException && e.getCause() != null
+                        ? e.getCause() : e;
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                throw new IllegalStateException(what + " is not writable after "
+                        + budget.toSeconds() + "s: no leader serves every bucket, so the cluster"
+                        + " is not placing replicas and the smoke cannot write", lastFailure);
+            }
+            Thread.sleep(SERVING_RETRY_MILLIS);
         }
     }
 
