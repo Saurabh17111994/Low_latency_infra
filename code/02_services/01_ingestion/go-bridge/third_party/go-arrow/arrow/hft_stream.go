@@ -543,9 +543,13 @@ type HFTFullTick struct {
 	ChangeFlag int32
 	OIDayHigh  int64
 	OIDayLow   int64
-	// CAS trailer trio, standard feed only. Pointers, not flag+value: a nil says
-	// "no closing-auction frame in this tick", which is a different fact from
-	// imbalance_qty == 0 (a balanced book during the auction).
+	// CAS trailer trio. Standard feed only, verified from the framing: the standard
+	// wire appends a 16-byte trailer to every mode after ~15:15 IST and streams.go
+	// decides it by frame length (241/249 + 16 = 257/265), while the HFT wire's
+	// frames are fixed size (hftSizeLTP 40 / hftSizeFull 196 / hftSizeResponse 540)
+	// and carry no trailer. Pointers, not flag+value: a nil says "no closing-auction
+	// frame in this tick", which is a different fact from imbalance_qty == 0 (a
+	// balanced book during the auction).
 	ImbalanceQty    *int64
 	IndicativeClose *int64
 	RefPrice        *int64
