@@ -421,6 +421,40 @@ Order key is `(event_time, deterministic_fingerprint_order)`. Price and quantity
 
 **Volume semantics (v4):** `volume` sums `raw_table_1.volume_delta` -- the quantity traded since the previous tick for that token -- on `TRADE` rows with a positive delta, in both `CandleAggregateFunction` and `MultiTimeframeAggregateFunction`. It is deliberately not `last_qty`: that is a single trade's size, so it under-counts batched trades and repeats on every no-trade periodic snapshot, which is why a snapshot used to look like a trade. A NULL `volume_delta` means the baseline is unknown (first tick of a connection) and contributes nothing. See the v4 section in `03-ingestion.md`.
 
+#### Late-tick drop: measured cost to candle volume and OHLC (2026-09-24)
+
+Candle production requires `MULTITF_ENABLED=true` in the JM/TM environment
+(`SignalJobConfig` reads `System.getenv()`; the launcher's `-e` cannot reach a session-cluster
+job, and compose defaults the flag to false). With the flag off, `candle_live`/`candle_closed`
+have no writer at all - that is a configuration gap, not a runtime failure.
+
+The aggregate drops a tick whose `event_time` is not newer than the previous tick for the same
+instrument slot (the monotonic gate in `MultiTimeframeAggregateFunction`, counted loud). It
+returns before any accumulation, so a dropped tick reaches neither volume nor OHLC.
+`ALLOWED_LATENESS_MS` (default 5000) does **not** recover these rows - it only governs when the
+per-timeframe emitted maps are evicted - so raising it does not change this loss.
+
+Measured on the live dev stack (standard/free-plan feed, `ARROW_FEED=token`), 2026-09-24:
+
+| Observation | Value |
+| --- | --- |
+| Rows dropped as late, counter `compute.candles.late.dropped` | 66,815 over ~40 min |
+| Share of all rows dropped as late (estimated from the observed tick rate) | ~2.7% |
+| Judged windows losing volume | 276 of 1,639 (17%), losing 6.0% of volume and 8.7% of trade rows on those windows |
+| Judged windows losing an OHLC extreme | 48 of 1,736 (2.8%), all on the low side in this sample |
+| Windows whose candle range was wider than the raw rows' range | 0 of 1,736 (a subset can never be wider - sanity check) |
+
+Every difference is one-directional (candle <= the raw rows): a dropped tick is absent, never
+double-counted. Established three independent ways that agree - the reject branch in code, an
+independent raw accumulation over the same table, and the live counter - and confirmed exactly
+where windows were complete (904 of ~1,650 judged pairs matched on both volume and tick count).
+
+Accepted by the owner on 2026-09-24 as a documented limitation rather than a defect: candle
+volume can understate a window's traded volume by a few percent, and a window's low (less often
+its high) can be missing, whenever ticks arrive out of event-time order for that instrument. The
+side output `candle-late-dropped` is emitted but unconsumed (debug only); the counter above is
+the monitoring hook.
+
 ### Forming-bar and candidate interface
 
 Typed in-process update includes:
