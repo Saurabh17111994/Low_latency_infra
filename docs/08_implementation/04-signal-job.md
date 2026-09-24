@@ -897,6 +897,26 @@ Implements plan.md §"Slot-scoped safety propagation" for the Signal Job: consum
 - **v3 DDL applied live via the offline gate.** The dev cluster's `Safety_Halt_Requests` was still a LOG table (in-code `DdlBootstrap.SAFETY_HALT_SCHEMA` had no primary key), which rejects PK lookup. Dropped the pre-v3 LOG table and created the v3 KV table (`pk=[halt_request_id]`, 4 buckets, 21 columns). Datalake props from the DDL were skipped — this dev cluster has no lake catalog. `SafetyHaltWriter` switched `newAppend()` → `newUpsert()` (a KV table rejects `AppendWriter`; a duplicate `halt_request_id` is the R-089 upsert no-op), `observe` became generic, and `DdlBootstrap.SAFETY_HALT_SCHEMA` now declares the PK so a fresh cluster creates KV. Ingestion suite: 171 tests, 0 failures.
 - **SAFETY-INT-001 passed** (`logs/safety-int-001/safety-int-001-20260809-122201.out`): KV upsert of an UNSAFE row → primary-key lookup (the client rejects `lookupBy` when lookup columns equal the physical PK) → production `SafetyHaltRowDataBridge` + `SafetyHaltRequestParser` + `SafetyStateTracker` → `NEW_UNSAFE`, tokens `[1000, 1001, 1]` suppressed and `999999` not; then RECOVERED at epoch+1 → `RECOVERED`, tokens admitted.
 
+### Live-stack status (2026-09-24): what the safety consumer's evidence covers
+
+The fail-closed behaviour above is verified by `SAFETY-INT-001` on its own harness
+(2026-08-09), not by observation of a running production stack. Recording the boundary
+explicitly, because "not submitted" is not "fails closed":
+
+- `submit-jobs.sh` submits `SafetyHaltJob` **only** when `SAFETY_MANIFEST_TOKENS` is set;
+  without it the launcher skips the job with a warning (it is the safety consumer, not a
+  data-path job).
+- In the current dev stack the variable is unset, and `/jobs/overview` lists exactly two
+  RUNNING jobs: `Babysitter Positions observer` and `signal-job-compute`. So this stack
+  exercises no safety-consumer path at all, and no live claim about it should be read
+  into the numbers reported elsewhere in this file.
+- To produce live fail-closed evidence: set `SAFETY_MANIFEST_TOKENS` as a **container-level**
+  env var (the launcher reads `System.getenv()` in the JobManager JVM, so
+  `docker compose run -e` cannot reach it), relaunch, then upsert an `UNSAFE` row into
+  `Safety_Halt_Requests` and confirm the consumer suppresses new orders for that slot and
+  discards in-flight ones. That is a change to a trading-safety path and is therefore a
+  deliberate, reviewed action rather than part of routine verification.
+
 ### Deferred (documented, not stubbed)
 
 
