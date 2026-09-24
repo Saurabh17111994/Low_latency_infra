@@ -35,6 +35,10 @@ import org.apache.fluss.row.InternalRow;
 public class CandleVerify {
     static int highBias = 0, lowBias = 0, rangeWider = 0;
     static int absentNoTrades = 0;
+    // How stale the missing window is, in tf periods since the newest closed
+    // window (0 = the most recently closed one). A job that emits on the
+    // watermark would leave the newest windows missing; a real gap would not.
+    static long[] absentAge = new long[17];
 
     private static final Duration POLL = Duration.ofSeconds(2);
     private static final Duration ADMIN = Duration.ofSeconds(5);
@@ -185,6 +189,8 @@ public class CandleVerify {
                     if (e.getValue().tradeRows == 0) {
                         absentNoTrades++;
                     }
+                    long periods = latestWindow > window ? (latestWindow - window) / tfMillis : 0;
+                    absentAge[(int) Math.min(periods, 16)]++;
                     continue;
                 }
                 int volumeIdx = col("volume", "candle_closed");
@@ -214,6 +220,13 @@ public class CandleVerify {
                             + ", rows=" + e.getValue().rows + ") -> " + (ok ? "MATCH" : "MISMATCH"));
                 }
             }
+                        StringBuilder ages = new StringBuilder();
+            for (int i = 0; i < absentAge.length; i++) {
+                if (absentAge[i] > 0) {
+                    ages.append(ages.length() == 0 ? "" : " ").append(i == 16 ? "16+" : String.valueOf(i)).append(":").append(absentAge[i]);
+                }
+            }
+            System.out.println("ABSENT by age in tf periods (0 = newest closed): " + ages);
             System.out.println("ABSENT windows with zero TRADE rows: " + absentNoTrades + " of " + absent + " (the rest have trades but no candle row)");
             System.out.println("OHLC judged=" + judged + " high_short_of_raw=" + highBias + " low_above_raw=" + lowBias + " range_wider_than_raw=" + rangeWider);
             System.out.println("SUMMARY judged=" + judged + " matched=" + matched
