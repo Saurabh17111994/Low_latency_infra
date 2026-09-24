@@ -43,13 +43,14 @@ FETCH = RUNTIME / "fetch-jars.sh"
 README = RUNTIME / "README.md"
 STACK = REPO / "code/01_platform/01_docker/docker-stack.yml"
 LOCK = REPO / "code/01_platform/01_docker/runtime.lock"
+PUBLISHED = REPO / "code/01_platform/01_docker/images.published.env"
 FLINK_FETCH = REPO / "code/01_platform/01_docker/flink-runtime/fetch-jars.sh"
 
 FLUSS_VERSION = "1.0.0"
 
-# The pinned base image. Must equal runtime.lock's FLUSS_IMAGE: the derived
-# image is built FROM the very digest the stack would otherwise run, so the two
-# cannot silently diverge.
+# The pinned upstream base. The stack no longer runs it directly - runtime.lock
+# pins the derived wrapper (see test_lock_agrees_with_the_published_record) - but
+# the Dockerfile must still build FROM this exact digest.
 PINNED_BASE = (
     "apache/fluss:1.0.0@sha256:"
     "ff461b45438033da4fd1c2556d3f978f3603bb3632fe075c2bd57388339a58cb"
@@ -112,18 +113,33 @@ class DockerfileTests(unittest.TestCase):
         self.assertIn(PINNED_BASE, froms[0],
                       "base image must be pinned by digest, not by tag alone")
 
-    def test_base_matches_the_digest_the_stack_would_otherwise_run(self) -> None:
-        """The derived image supersedes FLUSS_IMAGE, so they must agree.
+    def test_lock_agrees_with_the_published_record(self) -> None:
+        """runtime.lock's Fluss pin must be the ref the publish workflow recorded.
 
-        If runtime.lock moves to a different Fluss digest and this FROM does
-        not, the stack silently runs an older Fluss than the one it advertises.
+        The wrapper supersedes upstream Fluss, so the Dockerfile FROM (upstream
+        base) and this pin (the wrapper) name different things by design: after
+        the 2026-09-23 flip to the 1.0-built wrappers they cannot be equal, and
+        the old "they must agree" assertion was measuring a retired invariant.
+        What must hold is that the repo's committed pin and the registry-derived
+        publish record agree. A half-applied flip (pin moved but
+        images.published.env not re-rendered, or the reverse) would otherwise
+        ship one wrapper to CI and another to prod.
+
+        Not covered here, on purpose: the upstream base stays digest-pinned in
+        the sibling test above, and freshness against the sources is the build
+        stamp / staleness check's job, not this file's.
         """
         lock = LOCK.read_text(encoding="utf-8")
         m = re.search(r"^FLUSS_IMAGE=(\S+)", lock, re.M)
         self.assertIsNotNone(m, "FLUSS_IMAGE must be defined in runtime.lock")
-        self.assertEqual(m.group(1), PINNED_BASE,
-                         "the Dockerfile FROM and runtime.lock's FLUSS_IMAGE must be the "
-                         "same digest — otherwise the two drift apart silently")
+        published = PUBLISHED.read_text(encoding="utf-8")
+        p = re.search(r"^FLUSS_IMAGE=(\S+)", published, re.M)
+        self.assertIsNotNone(p, "FLUSS_IMAGE must be defined in images.published.env")
+        self.assertEqual(
+            m.group(1), p.group(1),
+            "runtime.lock and images.published.env must name the same Fluss wrapper - a "
+            "half-applied pin flip would ship different images to CI and prod",
+        )
 
     def test_every_expected_jar_is_installed_into_the_iceberg_plugin_dir(self) -> None:
         """plugins/iceberg is the only directory the iceberg loader can see.
