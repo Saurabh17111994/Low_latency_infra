@@ -20,6 +20,14 @@
 # manifest), so the assertions pin observable behaviour rather than file text.
 # No live stack, no docker, no network beyond 127.0.0.1.
 #
+# Process view: the launcher's duplicate-ingestion guard scans the host with
+# `pgrep -f com.trading.ingestion.IngestionService`, and a host's root PID
+# namespace sees every container process - so while the platform runs, the
+# guard finds the deployed container JVM and the launcher refuses to start at
+# all. This harness owns its process view like it owns its other tooling: the
+# guard's pattern is answered from the harness's own world, and every other
+# pattern delegates to the real pgrep so the launcher still sees its children.
+#
 # Run directly:  bash test_ingestion_launchers.sh
 
 set -u
@@ -47,6 +55,13 @@ bad() { echo "FAIL: $1"; FAILED=1; }
 assert_eq() { # $1=got $2=want $3=label
 	if [ "$1" != "$2" ]; then
 		bad "$3 — got exit=$1 want exit=$2"
+		# A bare "got exit=1 want exit=0" cannot explain itself in a gate log:
+		# the line that says why sits inside the captured output.
+		if [ -n "${4:-}" ]; then
+			echo "--- launcher output ---"
+			printf '%s\n' "$4"
+			echo "-----------------------"
+		fi
 		return 1
 	fi
 	ok "$3 (exit=$1)"
@@ -92,6 +107,31 @@ fi
 exit "${STUB_JAVA_EXIT:-0}"
 STUB
 chmod +x "$TMP/bin/java"
+
+# Stub pgrep: the guard above scans the whole host, and the host's root PID
+# namespace sees every container process, so the real pgrep finds the deployed
+# ingestion JVM whenever the platform is up. Answer the guard's pattern from
+# the harness's own world (no other JVM), and let STUB_PGREP_HIT report one so
+# case 9 can prove the guard itself still fires. Every other pattern delegates
+# to the real pgrep, so the launcher still sees the children it started - its
+# stale-bridge cleanup must not be blinded. /usr/bin/pgrep is safe to name:
+# the runs below use PATH="$TMP/bin:/usr/bin:/bin".
+cat > "$TMP/bin/pgrep" <<'STUB'
+#!/usr/bin/env bash
+for arg in "$@"; do
+	case "$arg" in
+	*com.trading.ingestion.IngestionService*)
+		if [ -n "${STUB_PGREP_HIT:-}" ]; then
+			echo "${STUB_PGREP_HIT}"
+			exit 0
+		fi
+		exit 1
+		;;
+	esac
+done
+exec /usr/bin/pgrep "$@"
+STUB
+chmod +x "$TMP/bin/pgrep"
 
 # The launcher derives JAR and ARROW_BRIDGE_BIN from CODE_DIR, and both must
 # exist for the preflight to pass. Build a minimal stub CODE_DIR tree that
@@ -210,7 +250,7 @@ MODE400="$TMP/secrets-400.env"
 cp "$SECRETS" "$MODE400"
 chmod 400 "$MODE400"
 split_run "$(run_full SECRETS_FILE="$MODE400" STUB_JAVA_EXIT=7)"
-assert_eq "$RUN_EXIT" 7 "mode 400 secrets accepted, child exit code propagated"
+assert_eq "$RUN_EXIT" 7 "mode 400 secrets accepted, child exit code propagated" "$RUN_OUT"
 
 # ── Case 5: credentials reach the child, ARROW_TOKEN does not (P6-027) ───────
 # Also proves the child's exit code is the launcher's (P6-686): a non-zero
@@ -218,7 +258,7 @@ assert_eq "$RUN_EXIT" 7 "mode 400 secrets accepted, child exit code propagated"
 echo "=== case 5: child environment + exit code (P6-027, P6-686) ==="
 rm -f "$TMP/child-env.txt"
 split_run "$(run_full STUB_JAVA_EXIT=0)"
-assert_eq "$RUN_EXIT" 0 "clean child exits 0"
+assert_eq "$RUN_EXIT" 0 "clean child exits 0" "$RUN_OUT"
 if [ -r "$TMP/child-env.txt" ]; then
 	CHILD_ENV="$(cat "$TMP/child-env.txt")"
 	assert_contains "$CHILD_ENV" "ARROW_APP_ID=app-id-value" "ARROW_APP_ID reaches the child"
@@ -370,8 +410,26 @@ REL_OUT="$(env -i \
 	STUB_JAVA_EXIT=0 \
 	bash "$REL/repo/code/run-ingestion-full.sh" 2>&1)"
 REL_RC=$?
-assert_eq "$REL_RC" 0 "relocated checkout runs without an absolute manifest default"
+assert_eq "$REL_RC" 0 "relocated checkout runs without an absolute manifest default" "$REL_OUT"
 assert_not_contains "$REL_OUT" "/home/" "no /home/<user> path in the relocated run"
+
+# ── Case 9: a duplicate ingestion JVM is still refused (R-080, P6-291) ───────
+# The stub pgrep keeps the deployed container's JVM out of this harness's
+# world; this case pins the other half, so that isolation can never quietly
+# disable the guard: when pgrep does report another IngestionService, the
+# launcher must refuse to start rather than risk a second writer on the same
+# Fluss tables.
+echo "=== case 9: a duplicate ingestion JVM must be refused (R-080, P6-291) ==="
+rm -f "$TMP/child-env.txt"
+split_run "$(run_full STUB_PGREP_HIT=999999)"
+assert_eq "$RUN_EXIT" 1 "duplicate start is refused" "$RUN_OUT"
+assert_contains "$RUN_OUT" "already running" "the refusal names the running process"
+assert_contains "$RUN_OUT" "double-write risk" "the refusal states the double-write risk"
+if [ -s "$TMP/child-env.txt" ]; then
+	bad "the guard refused the launch but the child JVM ran anyway"
+else
+	ok "no child JVM was started"
+fi
 
 # ── Verdict ──────────────────────────────────────────────────────────────────
 echo
