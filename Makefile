@@ -153,7 +153,8 @@ up:
 	# exits 1, and the on-failure policy retries into the same wall - the feed stays down
 	# until it is started again against a healthy Fluss layer. Nothing makes ingestion wait
 	# for Fluss readiness and the Fluss services publish no healthcheck, so the fix (a
-	# readiness wait) is its own decision. Recovery: docker compose up -d --no-deps ingestion.
+	# readiness wait) is its own decision. Recovery: recreate the ingestion service alone and
+	# skip its dependencies (do not recreate the Fluss layer with it).
 	@echo "verifying deployed artifacts before the recreate (SKIP when an image is not built here)"
 	@$(STACK_LOCK) python3 code/01_platform/04_scripts/deployed_artifact_verify.py \
 		--target ingestion --image 01_docker-ingestion:latest
