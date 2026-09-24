@@ -9,8 +9,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"strings"
 	"google.golang.org/protobuf/proto"
+	"strings"
 	"testing"
 
 	"github.com/trading/arrow-bridge/marketdata"
@@ -137,25 +137,25 @@ func tickMapsFrom(t *testing.T, out string) []map[string]any {
 			bidPx := ev.GetBidPx()
 			askPx := ev.GetAskPx()
 			m := map[string]any{
-				"feed":             ev.GetFeed(),
-				"mode":             ev.GetMode(),
-				"token":            ev.GetToken(),
-				"ltp_paise":        ev.GetLtpPaise(),
-				"close_paise":      ev.GetClosePaise(),
-				"open_paise":       ev.GetOpenPaise(),
-				"high_paise":       ev.GetHighPaise(),
-				"low_paise":        ev.GetLowPaise(),
-				"vwap_paise":       ev.GetVwapPaise(),
-				"ltq":              ev.GetLtq(),
-				"volume":           ev.GetVolume(),
-				"total_buy_qty":    ev.GetTotalBuyQty(),
-				"total_sell_qty":   ev.GetTotalSellQty(),
-				"open_interest":    ev.GetOpenInterest(),
-				"ts_ms":            ev.GetTsMs(),
-				"bid_px":           bidPx,
-				"ask_px":           askPx,
-				"raw_payload":      base64.StdEncoding.EncodeToString(ev.GetRawPayload()),
-				"payload_hash":     hex.EncodeToString(ev.GetPayloadHash()),
+				"feed":           ev.GetFeed(),
+				"mode":           ev.GetMode(),
+				"token":          ev.GetToken(),
+				"ltp_paise":      ev.GetLtpPaise(),
+				"close_paise":    ev.GetClosePaise(),
+				"open_paise":     ev.GetOpenPaise(),
+				"high_paise":     ev.GetHighPaise(),
+				"low_paise":      ev.GetLowPaise(),
+				"vwap_paise":     ev.GetVwapPaise(),
+				"ltq":            ev.GetLtq(),
+				"volume":         ev.GetVolume(),
+				"total_buy_qty":  ev.GetTotalBuyQty(),
+				"total_sell_qty": ev.GetTotalSellQty(),
+				"open_interest":  ev.GetOpenInterest(),
+				"ts_ms":          ev.GetTsMs(),
+				"bid_px":         bidPx,
+				"ask_px":         askPx,
+				"raw_payload":    base64.StdEncoding.EncodeToString(ev.GetRawPayload()),
+				"payload_hash":   hex.EncodeToString(ev.GetPayloadHash()),
 			}
 			ticks = append(ticks, m)
 		}

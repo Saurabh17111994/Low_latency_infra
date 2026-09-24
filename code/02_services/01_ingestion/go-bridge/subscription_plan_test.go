@@ -174,8 +174,8 @@ func TestIngRes002PlanBoundaries(t *testing.T) {
 // tokens (the plan's union invariant, exercised directly).
 func TestIngRes002ValidateRequestUnionRejects(t *testing.T) {
 	cases := []struct {
-		name  string
-		slot  SlotAssignment
+		name string
+		slot SlotAssignment
 	}{
 		{
 			name: "duplicate token across requests",

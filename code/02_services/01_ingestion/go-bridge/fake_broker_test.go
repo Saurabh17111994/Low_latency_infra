@@ -81,16 +81,16 @@ func eventsFrom(t *testing.T, output string) []map[string]any {
 		}
 		cr := c.Control
 		events = append(events, map[string]any{
-			"record_type":        cr.GetRecordType(),
-			"event":              cr.GetEvent(),
-			"state":              cr.GetState(),
-			"slot_id":            cr.GetSlotId(),
-			"connection_id":      cr.GetConnectionId(),
-			"connection_epoch":   cr.GetConnectionEpoch(),
-			"assigned_tokens":    cr.GetAssignedTokens(),
+			"record_type":         cr.GetRecordType(),
+			"event":               cr.GetEvent(),
+			"state":               cr.GetState(),
+			"slot_id":             cr.GetSlotId(),
+			"connection_id":       cr.GetConnectionId(),
+			"connection_epoch":    cr.GetConnectionEpoch(),
+			"assigned_tokens":     cr.GetAssignedTokens(),
 			"acknowledged_tokens": cr.GetAcknowledgedTokens(),
-			"rejected_tokens":    cr.GetRejectedTokens(),
-			"reason":             cr.GetReason(),
+			"rejected_tokens":     cr.GetRejectedTokens(),
+			"reason":              cr.GetReason(),
 		})
 	}
 	return events
