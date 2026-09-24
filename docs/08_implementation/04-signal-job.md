@@ -441,8 +441,8 @@ Measured on the live dev stack (standard/free-plan feed, `ARROW_FEED=token`), 20
 | Rows dropped as late, counter `compute.candles.late.dropped` | 66,815 over ~40 min |
 | Share of all rows dropped as late (estimated from the observed tick rate) | ~2.7% |
 | Judged windows losing volume | 276 of 1,639 (17%), losing 6.0% of volume and 8.7% of trade rows on those windows |
-| Judged windows losing an OHLC extreme | 48 of 1,736 (2.8%), all on the low side in this sample |
-| Windows whose candle range was wider than the raw rows' range | 0 of 1,736 (a subset can never be wider - sanity check) |
+| Judged windows losing an OHLC extreme | 37-48 of 1,730-1,750 (2.1-2.8%) across three runs, every case on the low side |
+| Windows whose candle range was wider than the raw rows' range | 0 in all three runs (a subset can never be wider - sanity check) |
 
 Every difference is one-directional (candle <= the raw rows): a dropped tick is absent, never
 double-counted. Established three independent ways that agree - the reject branch in code, an
@@ -454,6 +454,14 @@ volume can understate a window's traded volume by a few percent, and a window's 
 its high) can be missing, whenever ticks arrive out of event-time order for that instrument. The
 side output `candle-late-dropped` is emitted but unconsumed (debug only); the counter above is
 the monitoring hook.
+
+Windows that carry raw rows but no candle row are not a gap: recorded by age, they are
+always the one or two most recently closed windows (389 of 389 in one run, at ages 1 and
+2, none older). The job writes a candle only once the watermark passes
+`windowEnd + allowed lateness`, so the freshest windows are simply not in the table yet
+when a reader looks; a probe must exclude them or it will report them as missing forever.
+Re-measure with `code/01_platform/04_scripts/candle-verify.sh --minutes 3 --timeframe ONE_M`,
+which does not trust the job's own counters.
 
 ### Forming-bar and candidate interface
 
