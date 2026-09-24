@@ -24,7 +24,7 @@ import (
 // format, not a transport.
 // All prices in integer paise (₹1 = 100 paise). Timestamps in epoch ms.
 type Tick struct {
-	Feed   string `json:"feed"` // "hft" (the only feed since the Standard feed was removed 2026-08-14)
+	Feed   string `json:"feed"` // "hft" or "token": the feed that produced this row (ARROW_FEED)
 	Mode   string `json:"mode"` // "ltp", "ltpc", "quote", "full"
 	Token  int32  `json:"token"`
 	LTP    int32  `json:"ltp_paise"`
@@ -52,6 +52,20 @@ type Tick struct {
 	AskSize [5]int32  `json:"ask_qty"`
 	BidOrd  [5]uint16 `json:"bid_orders"`
 	AskOrd  [5]uint16 `json:"ask_orders"`
+
+	// --- v4 full-mode fields (raw_table_1 indexes 21-71). omitempty keeps the
+	// golden corpus byte-identical: a zero/absent value writes no JSON at all,
+	// exactly like a field that does not exist.
+	LowerLimit  int32  `json:"lower_limit_paise,omitempty"`
+	UpperLimit  int32  `json:"upper_limit_paise,omitempty"`
+	LTTms       int64  `json:"ltt_ms,omitempty"`
+	ChangeFlag  int32  `json:"change_flag,omitempty"`
+	OIDayHigh   int64  `json:"oi_day_high,omitempty"`
+	OIDayLow    int64  `json:"oi_day_low,omitempty"`
+	Imbalance   *int64 `json:"imbalance_qty,omitempty"`
+	Indicative  *int64 `json:"indicative_close_paise,omitempty"`
+	RefPrice    *int64 `json:"ref_price_paise,omitempty"`
+	VolumeDelta *int64 `json:"volume_delta,omitempty"`
 }
 
 // bridgeEmitter is the transport emitter. It is deliberately nil until main()
@@ -420,6 +434,11 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 	// same read goroutine, so lastDecoded holds the exact decompressed packet
 	// bytes for the next tick callback. This preserves the plan's raw_payload
 	// invariant: decoded JSON must not replace the original broker packet bytes.
+	// v4: one volume tracker per epoch (see volume_delta.go) and the
+	// truthful feed name (see supervisor.go) — both feed the v4 columns.
+	deltaOf := newVolumeDeltaTracker()
+	feedName := bridgeFeedName()
+
 	var lastDecoded []byte
 	go stream.ReadHFTWithFrame(readCtx,
 		func(t arrow.HFTLTPTick) {
@@ -428,9 +447,12 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 			// flush / frame-too-large / transport write) must never
 			// silently drop ticks.
 			if err := emitter.EmitTick(Tick{
-				Feed: "hft", Mode: "ltpc", Token: t.Token,
+				Feed: feedName, Mode: "ltpc", Token: t.Token,
 				LTP: t.LTP, VWAP: t.VWAP, Volume: t.Volume,
 				ATV: t.ATV, BTV: t.BTV,
+				VolumeDelta: deltaOf.deltaFor(t.Token, t.Volume),
+				// Same instant as TS below: on this packet LTT IS the tick timestamp.
+				LTTms: int64(t.LTT / 1_000),
 				// P1-023: LTT is microseconds — /1e3 yields ms like the
 				// full path (TS ns /1e6). The old /1e6 emitted SECONDS,
 				// 1000x below every full tick's ts_ms.
@@ -443,12 +465,17 @@ func runHFTEpoch(ctx context.Context, streamFactory hftStreamFactory, slot SlotA
 			lastFrameNanos.Store(time.Now().UnixNano())
 			// P1-212: surface emit failures — see the LTP path above.
 			if err := emitter.EmitTick(Tick{
-				Feed: "hft", Mode: "full", Token: t.Token,
+				Feed: feedName, Mode: "full", Token: t.Token,
 				LTP: t.LTP, LTQ: t.LTQ, VWAP: t.VWAP,
 				Open: t.Open, High: t.High, Close: t.Close, Low: t.Low,
 				TBQ: t.TBQ, TSQ: t.TSQ, Volume: t.Volume,
 				OI: int64(t.OI), ATV: t.ATV, BTV: t.BTV,
-				BidPx: t.BidPx, AskPx: t.AskPx,
+				LowerLimit: t.DprL, UpperLimit: t.DprH,
+				LTTms:      t.LTTms,
+				ChangeFlag: t.ChangeFlag, OIDayHigh: t.OIDayHigh, OIDayLow: t.OIDayLow,
+				Imbalance: t.ImbalanceQty, Indicative: t.IndicativeClose, RefPrice: t.RefPrice,
+				VolumeDelta: deltaOf.deltaFor(t.Token, t.Volume),
+				BidPx:       t.BidPx, AskPx: t.AskPx,
 				BidSize: t.BidSize, AskSize: t.AskSize,
 				BidOrd: t.BidOrd, AskOrd: t.AskOrd,
 				TS: int64(t.TS / 1_000_000),

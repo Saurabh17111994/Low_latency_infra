@@ -222,6 +222,9 @@ class RealFlussRowConverter implements FlussRowConverter {
 
         Instant now = Instant.now();
         RawTick raw = packet.raw();
+        // v4: read the delta once and use that same value for the stored column and for
+        // the label, so the two can never disagree.
+        Long volumeDelta = packet.volumeDelta();
 
         GenericRow row = GenericRow.of(
                 // partition (v3: daily yyyyMMdd IST — order MUST match DDL)
@@ -245,9 +248,16 @@ class RealFlussRowConverter implements FlussRowConverter {
                 // R-244: explicit enum comparison — the substring match on
                 // validity().name().contains("NON_TRADE") silently reclassified
                 // any future enum whose name merely contained the substring.
-                bs(packet.validity() == com.trading.ingestion.model.ValidityClassification.VALID_NON_TRADE ? "QUOTE" : "TRADE"),
+                // v4: same rule as IngestionService's fingerprint input and the typed
+                // path. The validity-only rule labelled every non-QUOTE row TRADE,
+                // including zero-delta snapshots: the live read-back on 2026-09-24 found
+                // 9 of 12 TRADE rows carrying volume_delta=0, which is what made
+                // `WHERE tick_type = 'TRADE'` over-count by roughly 6x.
+                bs((packet.validity() == com.trading.ingestion.model.ValidityClassification.VALID_TRADE
+                        && volumeDelta != null && volumeDelta > 0) ? "TRADE" : "QUOTE"),
                 packet.lastPricePaise(),                            // last_price_paise BIGINT
-                packet.volume(),                                    // last_qty BIGINT
+                packet.lastQty(),                                    // last_qty BIGINT = LTQ (P0: was packet.volume() — cumulative volume, which made
+                //   CandleAggregateFunction:102 sum cumulative volume into candle volume)
                 // payload preservation
                 raw != null ? raw.rawPayload() : new byte[0],               // raw_payload BYTES (P1-087: retained copy)
                 bs(raw != null ? raw.payloadHash() : ""),           // payload_hash STRING
@@ -256,7 +266,62 @@ class RealFlussRowConverter implements FlussRowConverter {
                 // provenance
                 bs(packet.validity().name()),                       // validity_state STRING
                 bs(packet.validityReason() != null ? packet.validityReason() : ""), // validity_reason
-                bs(String.valueOf(packet.schemaVersion()))          // schema_version STRING
+                bs(String.valueOf(packet.schemaVersion())),         // schema_version STRING
+                // --- v4: full-mode field capture, DDL order (indexes 21-71), all ---
+                // --- BIGINT NULL. Absent values are boxed nulls from the packet, ---
+                // --- never 0: "this feed does not report it" is not a fact about ---
+                // --- the market, and 0 is a real value for every column here. ---
+                packet.ohlcOpenPaise(),            // open_paise — day open (both feeds)
+                packet.ohlcHighPaise(),            // high_paise — day high (both feeds)
+                packet.ohlcLowPaise(),             // low_paise — day low (both feeds)
+                packet.ohlcClosePaise(),           // close_paise — PREVIOUS close (both feeds)
+                packet.averagePricePaise(),        // vwap_paise — both feeds
+                packet.volume(),                   // volume — CUMULATIVE day volume (both feeds)
+                volumeDelta,                       // volume_delta — NULL = baseline unknown; sum THIS for candle volume
+                packet.totalBuyQty(),              // total_buy_qty — both feeds
+                packet.totalSellQty(),             // total_sell_qty — both feeds
+                packet.openInterest(),             // open_interest — both feeds
+                packet.bidPx()[0],                 // bid_px_1 — depth ladder, 0 = empty level
+                packet.bidPx()[1],                 // bid_px_2 — depth ladder, 0 = empty level
+                packet.bidPx()[2],                 // bid_px_3 — depth ladder, 0 = empty level
+                packet.bidPx()[3],                 // bid_px_4 — depth ladder, 0 = empty level
+                packet.bidPx()[4],                 // bid_px_5 — depth ladder, 0 = empty level
+                packet.bidQty()[0],                // bid_qty_1 — depth ladder, 0 = empty level
+                packet.bidQty()[1],                // bid_qty_2 — depth ladder, 0 = empty level
+                packet.bidQty()[2],                // bid_qty_3 — depth ladder, 0 = empty level
+                packet.bidQty()[3],                // bid_qty_4 — depth ladder, 0 = empty level
+                packet.bidQty()[4],                // bid_qty_5 — depth ladder, 0 = empty level
+                packet.bidOrd()[0],                // bid_ord_1 — depth ladder, 0 = empty level
+                packet.bidOrd()[1],                // bid_ord_2 — depth ladder, 0 = empty level
+                packet.bidOrd()[2],                // bid_ord_3 — depth ladder, 0 = empty level
+                packet.bidOrd()[3],                // bid_ord_4 — depth ladder, 0 = empty level
+                packet.bidOrd()[4],                // bid_ord_5 — depth ladder, 0 = empty level
+                packet.askPx()[0],                 // ask_px_1 — depth ladder, 0 = empty level
+                packet.askPx()[1],                 // ask_px_2 — depth ladder, 0 = empty level
+                packet.askPx()[2],                 // ask_px_3 — depth ladder, 0 = empty level
+                packet.askPx()[3],                 // ask_px_4 — depth ladder, 0 = empty level
+                packet.askPx()[4],                 // ask_px_5 — depth ladder, 0 = empty level
+                packet.askQty()[0],                // ask_qty_1 — depth ladder, 0 = empty level
+                packet.askQty()[1],                // ask_qty_2 — depth ladder, 0 = empty level
+                packet.askQty()[2],                // ask_qty_3 — depth ladder, 0 = empty level
+                packet.askQty()[3],                // ask_qty_4 — depth ladder, 0 = empty level
+                packet.askQty()[4],                // ask_qty_5 — depth ladder, 0 = empty level
+                packet.askOrd()[0],                // ask_ord_1 — depth ladder, 0 = empty level
+                packet.askOrd()[1],                // ask_ord_2 — depth ladder, 0 = empty level
+                packet.askOrd()[2],                // ask_ord_3 — depth ladder, 0 = empty level
+                packet.askOrd()[3],                // ask_ord_4 — depth ladder, 0 = empty level
+                packet.askOrd()[4],                // ask_ord_5 — depth ladder, 0 = empty level
+                packet.changeFlag(),               // change_flag — standard feed only -> NULL on HFT
+                packet.oiDayHigh(),                // oi_day_high — standard feed only
+                packet.oiDayLow(),                 // oi_day_low — standard feed only
+                packet.lowerLimitPaise(),          // lower_limit_paise — both feeds; NULL = not published
+                packet.upperLimitPaise(),          // upper_limit_paise — both feeds; NULL = not published
+                packet.imbalanceQty(),             // imbalance_qty — closing-auction only; NULL when no CAS frame
+                packet.indicativeClosePaise(),     // indicative_close_paise — closing-auction only
+                packet.refPricePaise(),            // ref_price_paise — closing-auction only
+                packet.lastTradedTimeMs(),         // last_traded_time — epoch ms; NULL = unknown
+                packet.atv(),                      // atv — HFT only -> NULL on the standard feed
+                packet.btv()                      // btv — HFT only
         );
         // P1-220: fail loud on arity drift — mirrors TypedFlussRowConverter's
         // static parity check (SC2) so a miscounted GenericRow.of edit fails

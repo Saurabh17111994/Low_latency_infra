@@ -48,8 +48,11 @@ class RawTable1DdlSchemaVersionTest {
     @Test
     @DisplayName("parser reads a future version header (mismatch would be caught, not silently passed)")
     void parserDetectsVersionBump() {
-        String futureHeader = "-- raw_table_1\n-- Schema version: 4\n--\n";
-        assertThat(parseSchemaVersion(futureHeader)).isEqualTo("4");
+        // "5" is a genuinely future label: the point is that a header the build does
+        // not implement parses fine and then MISMATCHES the pinned version, instead of
+        // being silently accepted. (It said "4" until v4 made that the real version.)
+        String futureHeader = "-- raw_table_1\n-- Schema version: 5\n--\n";
+        assertThat(parseSchemaVersion(futureHeader)).isEqualTo("5");
         assertThat(parseSchemaVersion(futureHeader))
                 .isNotEqualTo(PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION);
     }

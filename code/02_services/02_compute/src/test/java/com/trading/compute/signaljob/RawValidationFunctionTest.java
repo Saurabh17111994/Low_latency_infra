@@ -78,14 +78,17 @@ class RawValidationFunctionTest {
 
     @Test
     void rejectsUnknownSchemaVersion() {
+        // v4 (2026-09-24): "4" is the current label now, so the unknown one has to
+        // be a label this build does not know -- the point of the guard is that no
+        // mismatch is ever accepted silently.
         RowData row = TestRawRows.row(2885L, 1_750_000_000_000L, "fp-1", "TRADE", 100, 5);
-        assertEquals("schema-version", fn.invalidReason(TestRawRows.withSchemaVersion(row, "4")));
+        assertEquals("schema-version", fn.invalidReason(TestRawRows.withSchemaVersion(row, "5")));
     }
 
     @Test
     void rejectsLegacyV1LabelUnderDefaultConfig() {
         // Pre-fix ingestion labeled the v2-shaped row "1" (TickPacket.schemaVersion=1).
-        // Under the v3-only contract that label stays rejected — no silent acceptance
+        // Under the v4-only contract that label stays rejected — no silent acceptance
         // of a label that would mask a future producer regression.
         RowData row = TestRawRows.row(2885L, 1_750_000_000_000L, "fp-1", "TRADE", 100, 5);
         assertEquals("schema-version", fn.invalidReason(TestRawRows.withSchemaVersion(row, "1")));

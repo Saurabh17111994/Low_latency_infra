@@ -531,6 +531,36 @@ type HFTFullTick struct {
 	TS      uint64
 	ATV     uint32
 	BTV     uint32
+	// LTTms is the last-traded-time in epoch ms, converted by whoever knows the
+	// source unit: this file's parser (wire field 36:40 is a 32-bit epoch SECONDS
+	// value — too narrow to be ms) and the standard-feed adapter (seconds too).
+	// 0 = unknown.
+	LTTms int64
+
+	// --- fields the HFT wire format does not carry at all. The standard
+	// (free-plan) adapter fills them so one row shape serves both feeds; this
+	// parser leaves them zero, and the emit path reports that as "absent", not 0.
+	ChangeFlag int32
+	OIDayHigh  int64
+	OIDayLow   int64
+	// CAS trailer trio, standard feed only. Pointers, not flag+value: a nil says
+	// "no closing-auction frame in this tick", which is a different fact from
+	// imbalance_qty == 0 (a balanced book during the auction).
+	ImbalanceQty    *int64
+	IndicativeClose *int64
+	RefPrice        *int64
+}
+
+// LTTmsFromSeconds converts an epoch-seconds last-traded-time to epoch ms.
+// ok=false when the value cannot be an epoch (before 2001-09-09) — both feeds
+// report LTT in seconds, but a wrong unit must degrade to "unknown" rather than
+// to a fabricated 1970 timestamp in the row.
+func LTTmsFromSeconds(sec int64) (int64, bool) {
+	const plausibleMin = 1_000_000_000 // 2001-09-09T01:46:40Z
+	if sec < plausibleMin {
+		return 0, false
+	}
+	return sec * 1000, true
 }
 
 func parseHFTFull(data []byte) (HFTFullTick, error) {
@@ -565,6 +595,9 @@ func parseHFTFull(data []byte) (HFTFullTick, error) {
 	t.TS = binary.LittleEndian.Uint64(data[180:188])
 	t.ATV = binary.LittleEndian.Uint32(data[188:192])
 	t.BTV = binary.LittleEndian.Uint32(data[192:196])
+	if ms, ok := LTTmsFromSeconds(int64(t.LTT)); ok {
+		t.LTTms = ms
+	}
 	return t, nil
 }
 

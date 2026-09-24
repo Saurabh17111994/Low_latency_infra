@@ -141,6 +141,15 @@ public final class IngestionService {
      *  distinct from {@code writer.lastAppendSuccessEpochMs()} (acks). When
      *  accepted keeps advancing but acks stop, the Fluss sender is wedged. */
     private volatile long lastAcceptedEpochMs = 0L;
+    /**
+     * P1 cold-start baseline: time of the FIRST accepted tick.
+     *  The zero-ack watchdog cannot baseline "no append has EVER been acked" on
+     *  lastAcceptedEpochMs (it moves every tick, so the age would never grow) nor on
+     *  Long.MAX_VALUE (which fired the guard ~1s into a healthy cold start, killing
+     *  the first append during partition creation). Set once; the writer is final and
+     *  never resets its ack clock, so this cannot go stale.
+     */
+    private volatile long firstAcceptedEpochMs = 0L;
     private volatile long lastFrameNanos;
     private volatile long lastResourceRefreshNanos;
     /** P1-246: last wall-clock stamp fed to the heap gate — clamps NTP
@@ -561,9 +570,7 @@ public final class IngestionService {
                 if (!running || shuttingDown) return;
                 long now = System.currentTimeMillis();
                 long sinceAccepted = lastAcceptedEpochMs > 0 ? now - lastAcceptedEpochMs : Long.MAX_VALUE;
-                long sinceAck = writer.lastAppendSuccessEpochMs() > 0
-                        ? now - writer.lastAppendSuccessEpochMs()
-                        : Long.MAX_VALUE;
+                long sinceAck = zeroAckAgeMs(now, writer.lastAppendSuccessEpochMs(), firstAcceptedEpochMs);
                 boolean brokerActive = health.isBrokerConnected()
                         && sinceAccepted < config.zeroAckTimeoutMs;
                 // Only fire when the writer is demonstrably being fed (recent
@@ -571,6 +578,9 @@ public final class IngestionService {
                 // i.e. genuine wedge, not a quiet feed. Also require at least one
                 // accepted tick since start (lastAcceptedEpochMs > 0) so a
                 // never-started writer does not false-trip.
+                // Cold start (no ack ever) measures from the first accepted
+                // tick instead of infinity, so a slow FIRST append is not a wedge.
+                // See zeroAckAgeMs.
                 if (brokerActive && lastAcceptedEpochMs > 0 && sinceAck >= config.zeroAckTimeoutMs) {
                     String reason = String.format(
                             "ZERO-ACK: accepted ticks flowing for %dms but no Fluss append ack for %dms "
@@ -1128,7 +1138,12 @@ public final class IngestionService {
 
             ValidityClassification validity;
             String validityReason = null;
-            if (!"hft".equals(ev.getFeed())) {
+            // v4: the bridge names the feed it is actually running ("hft", or the
+            // standard free-plan stream "token"). It used to hardcode "hft" for both,
+            // so this gate only ever saw one value; now the value is truthful and both
+            // known feeds must pass. The label is also persisted as protocol_version,
+            // which is why an unknown one is still quarantined rather than accepted.
+            if (!"hft".equals(ev.getFeed()) && !"token".equals(ev.getFeed())) {
                 quarantineWriter.write(packetBytes,
                         QuarantineWriter.Reason.INVALID_SCHEMA,
                         "unknown broker protocol version: " + (ev.getFeed().isEmpty() ? "<null>" : ev.getFeed()),
@@ -1155,7 +1170,17 @@ public final class IngestionService {
                 return;
             }
 
-            String tickType = (validity == ValidityClassification.VALID_TRADE) ? "TRADE" : "QUOTE";
+            // v4: tick_type must describe the ROW, not the subscription mode. Every
+            // full-mode snapshot used to be labelled TRADE because the mode was
+            // "full" even when nothing had traded since the previous snapshot — so
+            // `WHERE tick_type = 'TRADE'` over-counted by roughly 6x, and the candle
+            // gates leaned on last_qty > 0 to compensate. TRADE now requires a
+            // positive volume_delta, the same quantity the candles sum. validity_state
+            // keeps its own meaning: the decode/value validation outcome for the row's
+            // mode (VALID_TRADE = this row's mode is trade-capable).
+            Long volumeDelta = ev.hasVolumeDelta() ? ev.getVolumeDelta() : null;
+            String tickType = (validity == ValidityClassification.VALID_TRADE
+                    && volumeDelta != null && volumeDelta > 0) ? "TRADE" : "QUOTE";
             FingerprintBuilder.Result fp = FingerprintBuilder.build(
                     batchConnectionEpoch,
                     (long) ev.getToken(),
@@ -1198,6 +1223,7 @@ public final class IngestionService {
                     .eventTime(Instant.ofEpochMilli(ev.getTsMs()))
                     .ingestTs(Instant.now())
                     .lastPricePaise(ev.getLtpPaise())
+                    .lastQty(ev.getLtq())
                     .volume(ev.getVolume())
                     .ohlcOpenPaise(ev.getOpenPaise())
                     .ohlcHighPaise(ev.getHighPaise())
@@ -1208,6 +1234,31 @@ public final class IngestionService {
                     .connectionId(batchConnectionId == null || batchConnectionId.isEmpty() ? "arrow-bridge" : batchConnectionId)
                     .connectionEpoch(batchConnectionEpoch)
                     .instanceId(instanceId)
+                    // v4 full-mode fields. Presence decides NULL: the Go side only
+                    // sets a field when the active feed (or this particular tick, for
+                    // the closing-auction trio) actually carried it, so hasX() is the
+                    // difference between "0" and "not reported".
+                    .totalBuyQty(ev.getTotalBuyQty())
+                    .totalSellQty(ev.getTotalSellQty())
+                    .volumeDelta(volumeDelta)
+                    .changeFlag(ev.hasChangeFlag() ? (long) ev.getChangeFlag() : null)
+                    .oiDayHigh(ev.hasOiDayHigh() ? ev.getOiDayHigh() : null)
+                    .oiDayLow(ev.hasOiDayLow() ? ev.getOiDayLow() : null)
+                    .imbalanceQty(ev.hasImbalanceQty() ? ev.getImbalanceQty() : null)
+                    .indicativeClosePaise(ev.hasIndicativeClosePaise() ? ev.getIndicativeClosePaise() : null)
+                    .refPricePaise(ev.hasRefPricePaise() ? ev.getRefPricePaise() : null)
+                    .lowerLimitPaise(ev.getLowerLimitPaise())
+                    .upperLimitPaise(ev.getUpperLimitPaise())
+                    .lastTradedTimeMs(ev.getLttMs())
+                    .atv(ev.hasAtv() ? ev.getAtv() : null)
+                    .btv(ev.hasBtv() ? ev.getBtv() : null)
+                    .depth(
+                            depthLadder(ev.getBidPxCount(), ev::getBidPx),
+                            depthLadder(ev.getBidQtyCount(), ev::getBidQty),
+                            depthLadder(ev.getBidOrdersCount(), ev::getBidOrders),
+                            depthLadder(ev.getAskPxCount(), ev::getAskPx),
+                            depthLadder(ev.getAskQtyCount(), ev::getAskQty),
+                            depthLadder(ev.getAskOrdersCount(), ev::getAskOrders))
                     .build();
 
             // T6-3/A-B: submit via bounded queue[i] → writer worker[i].
@@ -1220,6 +1271,9 @@ public final class IngestionService {
                 metrics.incrementAcknowledgedLoss();
             } else {
                 lastAcceptedEpochMs = System.currentTimeMillis();
+                if (firstAcceptedEpochMs == 0L) {
+                    firstAcceptedEpochMs = lastAcceptedEpochMs;
+                }
             }
 
             metrics.recordTick(packetBytes.length);
@@ -2021,6 +2075,41 @@ public final class IngestionService {
 
     /** Freshness classification for a broker timestamp vs. receive time. */
     enum FreshnessDecision { FRESH, STALE, FUTURE }
+
+    /**
+     * Age in ms of the "no successful Fluss append ack" condition.
+     *
+     * <p>Baseline is the last ack when one exists. Before ANY ack it is the first
+     * accepted tick: the old {@code Long.MAX_VALUE} made the 1s watchdog fire ~1s after
+     * the first accepted tick, killing a healthy cold start whose first append was still
+     * creating the day partition (observed live). A sender that never acks is still caught
+     * once the full zeroAckTimeoutMs window elapses. Returns MAX_VALUE when nothing has
+     * been accepted yet, preserving the never-started-writer guard.
+     */
+    /**
+     * Reads one depth ladder, zero-filling the levels the wire did not carry.
+     *
+     * <p>A tick whose book has fewer than {@link TickPacket#DEPTH_LEVELS} levels --
+     * or none at all, which is what a quote-only or ladder-less tick looks like on
+     * the wire -- must still append, with 0 in the missing levels. Indexing the
+     * protobuf accessors directly ({@code ev.getBidPx(0)}..{@code (4)}) threw
+     * IndexOutOfBoundsException on an empty ladder and the whole tick was dropped
+     * as a processing error; all six ladders go through here so no caller can
+     * re-introduce that. The values the feed does not have stay 0 in the row, which
+     * is also what the bridge emits for a level that is not in the book.
+     */
+    static long[] depthLadder(int count, java.util.function.IntFunction<Number> levelAt) {
+        long[] ladder = new long[TickPacket.DEPTH_LEVELS];
+        for (int i = 0; i < Math.min(TickPacket.DEPTH_LEVELS, count); i++) {
+            ladder[i] = levelAt.apply(i).longValue();
+        }
+        return ladder;
+    }
+
+    static long zeroAckAgeMs(long now, long lastAckMs, long firstAcceptedMs) {
+        long baseline = lastAckMs > 0 ? lastAckMs : firstAcceptedMs;
+        return baseline > 0 ? now - baseline : Long.MAX_VALUE;
+    }
 
     /**
      * Pure freshness gate: a tick whose broker timestamp is older than

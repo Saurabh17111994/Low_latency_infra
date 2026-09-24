@@ -14,6 +14,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import com.trading.common.schema.RawTableSchema;
 
 /**
  * ING-SCHEMA-001: managed writers append exactly the columns declared in their
@@ -98,10 +99,12 @@ class SchemaAgreementTest {
     // ---- Phase 6 guards (G5): DDLs tell the truth ----------------
 
     @Test
-    @DisplayName("raw_table_1 v3 declares exactly the 21 written columns (R-054/R-231; v3 event_day first, CHG-117)")
-    void rawTableV3ColumnCount() throws IOException {
+    @DisplayName("raw_table_1 v4 declares the frozen 21-column v3 prefix, then the appended full-mode block (CHG-117, v4 2026-09-24)")
+    void rawTableV4ColumnCount() throws IOException {
         List<String> cols = parseColumns(readDdl("02_raw_table_1.sql"));
-        String[] want = {
+        // The frozen v3 prefix, spelled out so a reordering of the original
+        // columns can never pass by agreeing with the schema class alone.
+        String[] v3Prefix = {
                 "event_day",
                 "event_fingerprint", "fingerprint_version", "connection_id",
                 "connection_epoch", "instrument_token", "exchange", "symbol",
@@ -109,11 +112,16 @@ class SchemaAgreementTest {
                 "last_price_paise", "last_qty", "raw_payload", "payload_hash",
                 "decoder_version", "protocol_version", "validity_state",
                 "validity_reason", "schema_version"};
-        assertEquals(want.length, cols.size(),
-                "raw_table_1 must have " + want.length + " columns (R-054/R-231 removed the never-populated quote and option fields; v3 added event_day first — CHG-117); got: " + cols);
-        for (int i = 0; i < want.length; i++) {
-            assertEquals(want[i], cols.get(i), "column " + i);
+        for (int i = 0; i < v3Prefix.length; i++) {
+            assertEquals(v3Prefix[i], cols.get(i), "v3 prefix column " + i + " must never move");
         }
+        // v4 appended the full-mode capture block after schema_version. The DDL
+        // and the schema class are the same contract, so compare them whole
+        // rather than restating 51 names here: order-exact, count-exact.
+        assertEquals(RawTableSchema.COLUMNS, cols,
+                "02_raw_table_1.sql must declare exactly RawTableSchema.COLUMNS, in order");
+        assertEquals(RawTableSchema.COLUMNS.size(), cols.size(),
+                "raw_table_1 column count (v4: 21 v3 columns + 51 appended); got: " + cols);
     }
 
     @Test

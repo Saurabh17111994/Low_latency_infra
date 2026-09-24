@@ -28,9 +28,14 @@ import com.trading.common.schema.RawTableSchema;
 final class TickTableViewerColumnsTest {
 
     @Test
-    void schemaIsV3EventDayFirst() {
-        assertEquals(21, RawTableSchema.COLUMNS.size());
+    void schemaIsV4EventDayFirst() {
+        // v4 (2026-09-24): the v3 layout is frozen at the front and the full-mode
+        // capture block is appended after it.
+        assertEquals(72, RawTableSchema.COLUMNS.size());
+        assertEquals(21, RawTableSchema.FROZEN_PREFIX_COLUMNS);
         assertEquals("event_day", RawTableSchema.COLUMNS.get(0));
+        assertEquals("volume_delta", RawTableSchema.COLUMNS.get(27));
+        assertEquals("btv", RawTableSchema.COLUMNS.get(71));
     }
 
     @Test

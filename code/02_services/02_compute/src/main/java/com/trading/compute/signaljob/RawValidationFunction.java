@@ -152,6 +152,12 @@ public class RawValidationFunction extends RichFlatMapFunction<RowData, RowData>
                 && row.getLong(RawTableColumns.LAST_QTY) < 0) {
             return "negative-qty";
         }
+        // v4: volume_delta is what candles sum, so a negative one is as fatal as a
+        // negative last_qty. NULL is legal (unknown baseline), 0 means no trade.
+        if (!row.isNullAt(RawTableColumns.VOLUME_DELTA)
+                && row.getLong(RawTableColumns.VOLUME_DELTA) < 0) {
+            return "negative-volume-delta";
+        }
         // Tracker 14 P6.3: keep event_time inside the window arithmetic range.
         // windowEnd + allowedLateness must not overflow Long (EventTimeTrigger),
         // and the bounded-out-of-orderness watermark must not underflow.

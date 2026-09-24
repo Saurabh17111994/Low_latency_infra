@@ -84,6 +84,25 @@ class ProtoTransportTest {
                         .exchange("NSE").segment("CM").lotSize(1).manifestVersion(1).build());
     }
 
+    /** Fake quarantine: records the reasons it was asked to write. */
+    static final class CountingQuarantine implements QuarantineSink {
+        final List<QuarantineWriter.Reason> reasons = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void write(byte[] rawPayload, QuarantineWriter.Reason reason, String detail) {
+            reasons.add(reason);
+        }
+
+        @Override
+        public void write(byte[] rawPayload, QuarantineWriter.Reason reason, String detail,
+                          Long instrumentToken, String exchange, String symbol) {
+            reasons.add(reason);
+        }
+
+        @Override
+        public void close() {}
+    }
+
     private static QuarantineSink noopQuarantine() {
         return new QuarantineSink() {
             public void write(byte[] rawPayload, QuarantineWriter.Reason reason, String detail) {}
@@ -140,10 +159,15 @@ class ProtoTransportTest {
     }
 
     private static IngestionService makeService(CountingConverter converter) throws Exception {
+        return makeService(converter, noopQuarantine());
+    }
+
+    private static IngestionService makeService(CountingConverter converter, QuarantineSink quarantine)
+            throws Exception {
         IngestionConfig config = buildConfig("localhost:9123");
         NtpClockChecker clock = new NtpClockChecker("127.0.0.1:9", 100, false);
         return new IngestionService("t6-test", instruments(), converter, config, clock,
-                noopQuarantine(), noopDiscontinuity(), noopSafety());
+                quarantine, noopDiscontinuity(), noopSafety());
     }
 
     private static String sha256Hex(byte[] data) {
@@ -418,6 +442,54 @@ class ProtoTransportTest {
             Thread.sleep(5);
         }
     }
+    // ---- v4: the feed label decides protocol_version AND acceptance ----
+
+    @Test
+    @DisplayName("v4: the standard feed is accepted instead of being dropped by the feed gate")
+    void tokenFeedIsAccepted() throws Exception {
+        CountingConverter converter = new CountingConverter();
+        CountingQuarantine quarantine = new CountingQuarantine();
+        IngestionService service = makeService(converter, quarantine);
+        Method processTickEvent = IngestionService.class.getDeclaredMethod("processTickEvent",
+                com.trading.ingestion.transport.TickEvent.class, String.class, long.class);
+        processTickEvent.setAccessible(true);
+
+        // The label became truthful in v4: before it, the bridge claimed "hft" for
+        // both feeds, so a standard-feed tick looked like a protocol violation.
+        processTickEvent.invoke(service,
+                protoTick(TOKEN_A, System.currentTimeMillis(), 100, "full").toBuilder()
+                        .setFeed("token").build(),
+                "slot-0", 1L);
+        awaitDrain(service, converter, 1);
+        assertEquals(1, converter.appendCalls.get(),
+                "a standard-feed tick must be appended, not quarantined");
+        assertEquals(0, quarantine.reasons.size(),
+                "no quarantine reason for a valid standard-feed tick, got " + quarantine.reasons);
+        // protocol_version itself is written by FlussClientAdapter from packet.raw()
+        // (a stub converter carries no RawTick); that mapping is covered by the Go
+        // bridge tests and re-checked against live rows after the v4 window.
+    }
+
+    @Test
+    @DisplayName("v4: an unknown feed label is quarantined as INVALID_SCHEMA, never appended")
+    void unknownFeedIsQuarantined() throws Exception {
+        CountingConverter converter = new CountingConverter();
+        CountingQuarantine quarantine = new CountingQuarantine();
+        IngestionService service = makeService(converter, quarantine);
+        Method processTickEvent = IngestionService.class.getDeclaredMethod("processTickEvent",
+                com.trading.ingestion.transport.TickEvent.class, String.class, long.class);
+        processTickEvent.setAccessible(true);
+
+        processTickEvent.invoke(service,
+                protoTick(TOKEN_A, System.currentTimeMillis(), 100, "full").toBuilder()
+                        .setFeed("derivatives").build(),
+                "slot-0", 1L);
+
+        assertEquals(0, converter.appendCalls.get(), "an unknown feed must not reach the table");
+        assertEquals(List.of(QuarantineWriter.Reason.INVALID_SCHEMA), quarantine.reasons,
+                "an unknown feed must be quarantined, not silently dropped");
+    }
+
     // ---- T8 staged latencies ----
 
     @Test

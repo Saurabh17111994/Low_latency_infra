@@ -297,10 +297,13 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             return;
         }
 
-        // Trade gate: TRADE && qty>0 only mutates OHLC (reuse CandleAggregateFunction semantics)
+        // Trade gate: TRADE && qty>0 only mutates OHLC (reuse CandleAggregateFunction
+        // semantics). v4: qty is volume_delta — the quantity traded since the previous
+        // tick — not last_qty, which is one trade's size and repeats on every
+        // no-trade snapshot. NULL (unknown baseline) is treated as 0 volume.
         StringData tickTypeData = tick.getString(RawTableColumns.TICK_TYPE);
         String tickTypeStr = tickTypeData == null ? null : tickTypeData.toString();
-        long qty = tick.isNullAt(RawTableColumns.LAST_QTY) ? 0L : tick.getLong(RawTableColumns.LAST_QTY);
+        long qty = tick.isNullAt(RawTableColumns.VOLUME_DELTA) ? 0L : tick.getLong(RawTableColumns.VOLUME_DELTA);
         boolean isTrade = "TRADE".equals(tickTypeStr) && qty > 0;
 
         if (!isTrade) {

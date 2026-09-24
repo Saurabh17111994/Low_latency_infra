@@ -36,7 +36,32 @@ type Tick struct {
 	AskSz  [5]int32
 	BidOrd [5]uint16
 	AskOrd [5]uint16
+
+	// v4 full-mode fields. LowerLimit/UpperLimit/LTTms are reported by both feeds
+	// (0 LTTms = unknown). The rest are feed-specific or per-tick conditional and
+	// carry presence so the row can store NULL: see ToTickEvent.
+	LowerLimit  int32
+	UpperLimit  int32
+	LTTms       int64
+	ChangeFlag  int32
+	OIDayHigh   int64
+	OIDayLow    int64
+	Imbalance   *int64
+	Indicative  *int64
+	RefPrice    *int64
+	VolumeDelta *int64
 }
+
+// Feed names carried on the wire (bridge supervisor.go). Duplicated as literals
+// rather than imported to keep this package free of a bridge import cycle; the
+// T1 mapping tests lock the behaviour these two strings select.
+const (
+	feedStandard = "token"
+	feedHFT      = "hft"
+)
+
+func optI64(v int64) *int64 { return &v }
+func optI32(v int32) *int32 { return &v }
 
 // ToTickEvent maps a Tick to a proto TickEvent. Field-by-field, locked by
 // T1-P1. Prices stay integer paise — never float.
@@ -69,7 +94,33 @@ func (t Tick) ToTickEvent(slotID string, connID string, epoch uint64, receivedMs
 		TotalSellQty:      t.TSQ,
 		OpenInterest:      t.OI,
 		RawPayload:        raw,
+		// Both feeds report these, so they need no presence: a limit of 0 paise is
+		// not a value the exchange publishes, and 0 ltt_ms cannot be an epoch.
+		LowerLimitPaise: int64(t.LowerLimit),
+		UpperLimitPaise: int64(t.UpperLimit),
+		LttMs:           t.LTTms,
 	}
+	// v4 feed-specific presence. Which of these exist is a property of the feed,
+	// and this function is the only place that sees both the value and the feed
+	// name, so the decision lives here and Java only honours presence. A tick with
+	// neither feed name (synthetic corpora) deliberately sets nothing, which keeps
+	// existing golden frames byte-identical.
+	switch t.Feed {
+	case feedStandard:
+		ev.ChangeFlag = optI32(t.ChangeFlag)
+		ev.OiDayHigh = optI64(t.OIDayHigh)
+		ev.OiDayLow = optI64(t.OIDayLow)
+	case feedHFT:
+		ev.Atv = optI64(int64(t.ATV))
+		ev.Btv = optI64(int64(t.BTV))
+	}
+	// Conditional in both feeds: the closing-auction trio arrives only when the
+	// tick carried the trailer, and volume_delta is unknown for a token's first
+	// tick in an epoch.
+	ev.ImbalanceQty = t.Imbalance
+	ev.IndicativeClosePaise = t.Indicative
+	ev.RefPricePaise = t.RefPrice
+	ev.VolumeDelta = t.VolumeDelta
 	// depth arrays — fixed 5 (Q-O2). Zero values preserved exactly.
 	ev.BidPx = append([]int32(nil), t.BidPx[:]...)
 	ev.AskPx = append([]int32(nil), t.AskPx[:]...)

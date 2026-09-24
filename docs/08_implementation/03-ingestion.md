@@ -70,6 +70,7 @@ The pipe is the kernel's stdin/stdout — not a message queue, not a network hop
 | `ARROW_HFT_RECONNECT_MAX_SECONDS` | No | Reconnect max backoff — if set, must equal `30` (pinned) |
 | `ARROW_HFT_AUTH_REFRESH_ATTEMPTS` | No | Auth refresh retries — if set, must equal `3` (pinned) |
 | `ARROW_HFT_MIN_ACTIVE_SLOTS` | No | Minimum active slots before not-ready — if set, must equal `1` (pinned) |
+| `ARROW_FEED` | No | Feed selection for the Go bridge: `hft` (default) drives the HFT stream; `token` drives the standard token market-data stream (`ltp`/`ltpc`/`quote`/`full`). Case-insensitive and space-trimmed; anything else is treated as `hft` |
 | `ARROW_HFT_MULTI_CONNECTION_APPROVED` | No | Multi-socket approval flag (default false); rejected in `prod` |
 | `INGESTION_ALLOW_DEGRADED` | No | Degraded-mode approval flag (default false); rejected in `prod` |
 | `GO_ARROW_SDK_VERSION` | No | Pinned go-arrow SDK version tag `v0.0.0-20260622-7cce1630`; if unset the pinned version is used (warning logged) |
@@ -96,6 +97,16 @@ The pipe is the kernel's stdin/stdout — not a message queue, not a network hop
 | `NTP_SERVER` | No | Comma-separated NTP servers for the clock check (default `ntp.ubuntu.com,time.google.com,in.pool.ntp.org`) |
 
 Missing required configuration makes readiness false. Production never falls back to demo credentials or a guessed endpoint.
+
+**Feed selection (2026-09-24):** `ARROW_FEED=token` routes the slots through the standard
+token market-data stream instead of HFT. This was added after measurement: with the HFT plan
+ended, every HFT subscription returned `PLAN_NOT_SUBSCRIBED` (`E_ALL_INVALID`, 512/512 tokens
+rejected) while the standard stream accepted the same token and delivered ticks. The adapter
+lives in `go-bridge/token_slot.go` and bridges only the four `hftStream` methods; the
+supervisor, subscription plan, transport and the entire downstream pipeline (Java ingestion,
+`raw_table_1`, compute) are reused unchanged. The default is `hft`, so an unset variable
+changes nothing. Under `token`, the HFT-only keys (`ARROW_HFT_LATENCY_MS`, heartbeat, multi
+connection) have no effect.
 
 **Config notes (2026-08-14, fixed):** every `ARROW_HFT_*` key in the table is now read AND enforced by the Go bridge (in addition to the Java startup validation). Pinned keys (`ARROW_HFT_CONNECTIONS`, `ARROW_HFT_MAX_TOKENS_PER_CONNECTION`, `ARROW_HFT_MAX_TOKENS_PER_REQUEST`, `ARROW_HFT_HEARTBEAT_SECONDS`, `ARROW_HFT_RECONNECT_BASE_SECONDS`, `ARROW_HFT_RECONNECT_MAX_SECONDS`, `ARROW_HFT_AUTH_REFRESH_ATTEMPTS`, `ARROW_HFT_MIN_ACTIVE_SLOTS`) fail bridge startup with a clear FATAL message if set to any value other than the pin. Tunable keys are honored at runtime: `ARROW_HFT_STALL_TIMEOUT_SECONDS` (5-60 s) drives the feed-stall watchdog, `ARROW_HFT_SUBSCRIPTION_RESPONSE_TIMEOUT_SECONDS` (1-60 s) drives the subscription-response wait, `ARROW_HFT_LATENCY_MS` drives the tick interval. (The bridge previously read an undocumented `ARROW_HFT_RESPONSE_TIMEOUT_MS`; that key is removed — the documented seconds key is the only one.)
 
@@ -129,6 +140,51 @@ receive proto frame from stdin
 Ingestion appends an accepted raw packet even if its fingerprint was seen before. Compute performs bounded logical deduplication (the durable dedup set is Fluss-authoritative under DEC-038). No time-based or record-count-based application batching is permitted: each accepted tick is submitted individually. The Fluss client may coalesce rows into transport batches, bounded at 20 ms linger (`client.writer.batch-timeout`).
 
 > **Broker burst cadence (2026-08-26, Arrow HFT protocol docs):** `latency` is the per-symbol tick interval (project `ARROW_HFT_LATENCY_MS=50` → 1 tick per stock per 50 ms); broker frames are zstd-compressed and multiple instrument ticks are **concatenated in a single message**. So 1,024/3,000 instruments arrive as one burst block every 50 ms, not spread across the window. The `client.writer.batch-timeout=20 ms` linger therefore splits a 50 ms burst into ~2–3 partial sends. This is a documented tuning-mismatch candidate (align to 50 ms), not a proven bottleneck — measurement (below) does not show the single reader+writer choking at the target rate.
+
+### v4 full-mode field capture (2026-09-24)
+
+`raw_table_1` is v4: 72 columns. Indexes 0-20 are the v3 layout, unchanged and
+never renumbered; the 51 columns at 21-71 capture every full-mode field the
+bridge already carried but the table dropped -- 10 headline scalars, a flat
+5-level bid/ask ladder, and 11 feed-specific fields. All 51 are `BIGINT NULL` and
+appended at the end, so a pre-v4 row reads NULL there and nothing was rewritten.
+
+**NULL is not 0.** The two feeds populate different subsets of those columns, so
+absence is recorded as NULL, never as 0:
+
+| Field group | standard (`token`) | HFT |
+|---|---|---|
+| open/high/low/close/vwap/volume/volume_delta/tbq/tsq/oi, depth ladder, price band, last_traded_time | yes | yes |
+| `change_flag`, `oi_day_high`, `oi_day_low` | yes | NULL |
+| `imbalance_qty`, `indicative_close_paise`, `ref_price_paise` | closing-auction window only | NULL |
+| `atv`, `btv` | NULL | yes |
+
+Presence is decided on the Go side (`marketdata.ToTickEvent`), the only place
+that sees both the value and the feed, and travels on the wire as proto3
+`optional`; Java only has to honour it. Depth levels are always written (a level
+the book does not have is 0), matching the zero ladders the bridge already emits.
+
+**`volume_delta` is the traded quantity for a tick** -- the difference between the
+per-token cumulative day volume and its value on the previous tick for the same
+token. Both feeds report cumulative volume, so a periodic snapshot with no trade
+repeats the previous value: measured on the standard stream, 5 of 6 repeated
+tokens had a zero volume change and were still stored as `TRADE` rows. The delta
+makes "nothing traded" explicit (0) and "baseline unknown" explicit (NULL -- the
+first tick of an epoch for that token, or a counter that moved backwards). Candle
+volume sums **this**, never `last_qty`: a single trade's size under-counts when
+several trades land between two snapshots.
+
+**`tick_type` describes the row, not the subscription mode.** A full-mode snapshot
+is `TRADE` only when `volume_delta > 0`, otherwise `QUOTE`. `validity_state` keeps
+its own meaning -- the decode/value validation outcome for the row's mode. Before
+this, every full-mode row was `TRADE` because the subscription mode was `full`,
+so `WHERE tick_type = 'TRADE'` over-counted by roughly the ratio of snapshots to
+trades.
+
+**`protocol_version` is truthful.** It records the feed that produced the row
+(`hft` or `token`); the bridge previously hardcoded `hft` for both, so
+standard-feed rows claimed the HFT protocol. Ingestion accepts both labels and
+still quarantines anything else as `UNKNOWN_VERSION` (`INVALID_SCHEMA`).
 
 ### Future: 3-connection / 3000-instrument scaling plan (deferred — NOT to be implemented now)
 

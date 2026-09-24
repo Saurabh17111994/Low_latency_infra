@@ -78,6 +78,35 @@ class CandleAggregateFunctionTest {
     }
 
     @Test
+    void volumeComesFromVolumeDeltaNotLastQty() {
+        // v4: the traded quantity for a tick is volume_delta. last_qty is a single
+        // trade's size, so a tick whose last trade was 9999 lots but whose day
+        // counter advanced by 7 must contribute 7 -- summing last_qty would
+        // over-count every snapshot the feed repeats.
+        CandleAccumulator acc = agg.createAccumulator();
+        RowData row = TestRawRows.withVolumeDelta(trade(T0 + 1000, "fp-v4", 100, 9999L), 7L);
+        agg.add(row, acc);
+
+        assertEquals(7, acc.volume);
+        assertEquals(1, acc.tickCount);
+        assertEquals(100, acc.closePaise);
+    }
+
+    @Test
+    void nullVolumeDeltaAddsNoVolumeButStillSetsOhlc() {
+        // NULL volume_delta = the baseline is unknown (first tick of a connection).
+        // The row still takes part in OHLC; it adds nothing to volume or tick_count,
+        // because inventing a number there is worse than skipping it.
+        CandleAccumulator acc = agg.createAccumulator();
+        RowData row = TestRawRows.withVolumeDelta(trade(T0 + 1000, "fp-null", 101, 4L), null);
+        agg.add(row, acc);
+
+        assertEquals(101, acc.closePaise);
+        assertEquals(0, acc.volume);
+        assertEquals(0, acc.tickCount);
+    }
+
+    @Test
     void mergeCombinesBothPartialsByOrderKey() {
         CandleAccumulator a = agg.createAccumulator();
         agg.add(trade(T0 + 1000, "fp-a", 100, 1), a);

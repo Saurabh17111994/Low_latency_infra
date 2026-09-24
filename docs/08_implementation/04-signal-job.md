@@ -419,6 +419,8 @@ Active candle state SHALL NOT contain a list, collection, array, or map of indiv
 
 Order key is `(event_time, deterministic_fingerprint_order)`. Price and quantity validation occurs before aggregation. Overflow/invalid numeric behavior is explicit and tested.
 
+**Volume semantics (v4):** `volume` sums `raw_table_1.volume_delta` -- the quantity traded since the previous tick for that token -- on `TRADE` rows with a positive delta, in both `CandleAggregateFunction` and `MultiTimeframeAggregateFunction`. It is deliberately not `last_qty`: that is a single trade's size, so it under-counts batched trades and repeats on every no-trade periodic snapshot, which is why a snapshot used to look like a trade. A NULL `volume_delta` means the baseline is unknown (first tick of a connection) and contributes nothing. See the v4 section in `03-ingestion.md`.
+
 ### Forming-bar and candidate interface
 
 Typed in-process update includes:

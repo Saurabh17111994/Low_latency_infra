@@ -58,6 +58,7 @@ private static final long serialVersionUID = 0L;
             com.trading.ingestion.transport.TickEvent.class, com.trading.ingestion.transport.TickEvent.Builder.class);
   }
 
+  private int bitField0_;
   public static final int SLOT_ID_FIELD_NUMBER = 1;
   @SuppressWarnings("serial")
   private volatile java.lang.Object slotId_ = "";
@@ -248,7 +249,7 @@ private static final long serialVersionUID = 0L;
   private long feedSequenceLocal_ = 0L;
   /**
    * <pre>
-   * connection-local sequence (Q15: verify packet has real seq first)
+   * P1-281: BEST-EFFORT connection-local provenance (gap evidence + logging only — FlussClientAdapter persists NO sequence column in the 21-col row; broker resets/duplicates must never be treated as authoritative downstream).
    * </pre>
    *
    * <code>int64 feed_sequence_local = 6;</code>
@@ -587,6 +588,10 @@ private static final long serialVersionUID = 0L;
   /**
    * <pre>
    * payload preservation (Q3, Q6) — never base64
+   * P1-320: BROKER-CONTROLLED, max 241B (full-tick mode); broker packet
+   * bytes pass through the bridge ungated per-event (MaxBytes is a flush
+   * TARGET, not a cap — batch.go:29-30). Bounded only at frame level
+   * (64MiB post-marshal gate + 1M event-count gate, see above).
    * </pre>
    *
    * <code>bytes raw_payload = 24;</code>
@@ -823,6 +828,306 @@ private static final long serialVersionUID = 0L;
     return goEmitMs_;
   }
 
+  public static final int CHANGE_FLAG_FIELD_NUMBER = 33;
+  private int changeFlag_ = 0;
+  /**
+   * <pre>
+   * --- v4: full-mode field capture. Every field below is stored as a BIGINT
+   * NULL column at raw_table_1 index 33-44 (raw_table_1 indexes 21-71 in DDL
+   * order). "Absent" and "0" are different facts: the optional fields carry
+   * presence so the row can say NULL. The emit path decides it (marketdata
+   * ToTickEvent) because that is the one place that sees both the value and the
+   * feed; Java only has to honour presence. Which fields are optional is not
+   * cosmetic - change_flag 0, oi_day_high 0, imbalance_qty 0 and volume_delta 0
+   * are all real values, so a plain field would make "not reported" look like
+   * data. Everything not marked optional is reported by BOTH feeds.
+   * </pre>
+   *
+   * <code>optional int32 change_flag = 33;</code>
+   * @return Whether the changeFlag field is set.
+   */
+  @java.lang.Override
+  public boolean hasChangeFlag() {
+    return ((bitField0_ & 0x00000001) != 0);
+  }
+  /**
+   * <pre>
+   * --- v4: full-mode field capture. Every field below is stored as a BIGINT
+   * NULL column at raw_table_1 index 33-44 (raw_table_1 indexes 21-71 in DDL
+   * order). "Absent" and "0" are different facts: the optional fields carry
+   * presence so the row can say NULL. The emit path decides it (marketdata
+   * ToTickEvent) because that is the one place that sees both the value and the
+   * feed; Java only has to honour presence. Which fields are optional is not
+   * cosmetic - change_flag 0, oi_day_high 0, imbalance_qty 0 and volume_delta 0
+   * are all real values, so a plain field would make "not reported" look like
+   * data. Everything not marked optional is reported by BOTH feeds.
+   * </pre>
+   *
+   * <code>optional int32 change_flag = 33;</code>
+   * @return The changeFlag.
+   */
+  @java.lang.Override
+  public int getChangeFlag() {
+    return changeFlag_;
+  }
+
+  public static final int OI_DAY_HIGH_FIELD_NUMBER = 34;
+  private long oiDayHigh_ = 0L;
+  /**
+   * <pre>
+   * standard feed only (MarketTick.OIDayHigh)
+   * </pre>
+   *
+   * <code>optional int64 oi_day_high = 34;</code>
+   * @return Whether the oiDayHigh field is set.
+   */
+  @java.lang.Override
+  public boolean hasOiDayHigh() {
+    return ((bitField0_ & 0x00000002) != 0);
+  }
+  /**
+   * <pre>
+   * standard feed only (MarketTick.OIDayHigh)
+   * </pre>
+   *
+   * <code>optional int64 oi_day_high = 34;</code>
+   * @return The oiDayHigh.
+   */
+  @java.lang.Override
+  public long getOiDayHigh() {
+    return oiDayHigh_;
+  }
+
+  public static final int OI_DAY_LOW_FIELD_NUMBER = 35;
+  private long oiDayLow_ = 0L;
+  /**
+   * <pre>
+   * standard feed only (MarketTick.OIDayLow)
+   * </pre>
+   *
+   * <code>optional int64 oi_day_low = 35;</code>
+   * @return Whether the oiDayLow field is set.
+   */
+  @java.lang.Override
+  public boolean hasOiDayLow() {
+    return ((bitField0_ & 0x00000004) != 0);
+  }
+  /**
+   * <pre>
+   * standard feed only (MarketTick.OIDayLow)
+   * </pre>
+   *
+   * <code>optional int64 oi_day_low = 35;</code>
+   * @return The oiDayLow.
+   */
+  @java.lang.Override
+  public long getOiDayLow() {
+    return oiDayLow_;
+  }
+
+  public static final int LOWER_LIMIT_PAISE_FIELD_NUMBER = 36;
+  private long lowerLimitPaise_ = 0L;
+  /**
+   * <pre>
+   * both feeds: standard LowerLimit / HFT DprL
+   * </pre>
+   *
+   * <code>int64 lower_limit_paise = 36;</code>
+   * @return The lowerLimitPaise.
+   */
+  @java.lang.Override
+  public long getLowerLimitPaise() {
+    return lowerLimitPaise_;
+  }
+
+  public static final int UPPER_LIMIT_PAISE_FIELD_NUMBER = 37;
+  private long upperLimitPaise_ = 0L;
+  /**
+   * <pre>
+   * both feeds: standard UpperLimit / HFT DprH
+   * </pre>
+   *
+   * <code>int64 upper_limit_paise = 37;</code>
+   * @return The upperLimitPaise.
+   */
+  @java.lang.Override
+  public long getUpperLimitPaise() {
+    return upperLimitPaise_;
+  }
+
+  public static final int IMBALANCE_QTY_FIELD_NUMBER = 38;
+  private long imbalanceQty_ = 0L;
+  /**
+   * <pre>
+   * CAS trailer trio: standard feed only, appended to every mode from ~15:15 IST.
+   * optional because "no CAS frame yet" must reach the row as NULL, not as 0
+   * (imbalance_qty 0 during the auction means a balanced book, which is not the
+   * same fact as "outside the auction window").
+   * </pre>
+   *
+   * <code>optional int64 imbalance_qty = 38;</code>
+   * @return Whether the imbalanceQty field is set.
+   */
+  @java.lang.Override
+  public boolean hasImbalanceQty() {
+    return ((bitField0_ & 0x00000008) != 0);
+  }
+  /**
+   * <pre>
+   * CAS trailer trio: standard feed only, appended to every mode from ~15:15 IST.
+   * optional because "no CAS frame yet" must reach the row as NULL, not as 0
+   * (imbalance_qty 0 during the auction means a balanced book, which is not the
+   * same fact as "outside the auction window").
+   * </pre>
+   *
+   * <code>optional int64 imbalance_qty = 38;</code>
+   * @return The imbalanceQty.
+   */
+  @java.lang.Override
+  public long getImbalanceQty() {
+    return imbalanceQty_;
+  }
+
+  public static final int INDICATIVE_CLOSE_PAISE_FIELD_NUMBER = 39;
+  private long indicativeClosePaise_ = 0L;
+  /**
+   * <code>optional int64 indicative_close_paise = 39;</code>
+   * @return Whether the indicativeClosePaise field is set.
+   */
+  @java.lang.Override
+  public boolean hasIndicativeClosePaise() {
+    return ((bitField0_ & 0x00000010) != 0);
+  }
+  /**
+   * <code>optional int64 indicative_close_paise = 39;</code>
+   * @return The indicativeClosePaise.
+   */
+  @java.lang.Override
+  public long getIndicativeClosePaise() {
+    return indicativeClosePaise_;
+  }
+
+  public static final int REF_PRICE_PAISE_FIELD_NUMBER = 40;
+  private long refPricePaise_ = 0L;
+  /**
+   * <code>optional int64 ref_price_paise = 40;</code>
+   * @return Whether the refPricePaise field is set.
+   */
+  @java.lang.Override
+  public boolean hasRefPricePaise() {
+    return ((bitField0_ & 0x00000020) != 0);
+  }
+  /**
+   * <code>optional int64 ref_price_paise = 40;</code>
+   * @return The refPricePaise.
+   */
+  @java.lang.Override
+  public long getRefPricePaise() {
+    return refPricePaise_;
+  }
+
+  public static final int LTT_MS_FIELD_NUMBER = 41;
+  private long lttMs_ = 0L;
+  /**
+   * <pre>
+   * last traded time, epoch MS: normalized per feed (standard LTT is seconds, HFT is microseconds)
+   * </pre>
+   *
+   * <code>int64 ltt_ms = 41;</code>
+   * @return The lttMs.
+   */
+  @java.lang.Override
+  public long getLttMs() {
+    return lttMs_;
+  }
+
+  public static final int ATV_FIELD_NUMBER = 42;
+  private long atv_ = 0L;
+  /**
+   * <pre>
+   * HFT only (average traded value)
+   * </pre>
+   *
+   * <code>optional int64 atv = 42;</code>
+   * @return Whether the atv field is set.
+   */
+  @java.lang.Override
+  public boolean hasAtv() {
+    return ((bitField0_ & 0x00000040) != 0);
+  }
+  /**
+   * <pre>
+   * HFT only (average traded value)
+   * </pre>
+   *
+   * <code>optional int64 atv = 42;</code>
+   * @return The atv.
+   */
+  @java.lang.Override
+  public long getAtv() {
+    return atv_;
+  }
+
+  public static final int BTV_FIELD_NUMBER = 43;
+  private long btv_ = 0L;
+  /**
+   * <pre>
+   * HFT only (traded value)
+   * </pre>
+   *
+   * <code>optional int64 btv = 43;</code>
+   * @return Whether the btv field is set.
+   */
+  @java.lang.Override
+  public boolean hasBtv() {
+    return ((bitField0_ & 0x00000080) != 0);
+  }
+  /**
+   * <pre>
+   * HFT only (traded value)
+   * </pre>
+   *
+   * <code>optional int64 btv = 43;</code>
+   * @return The btv.
+   */
+  @java.lang.Override
+  public long getBtv() {
+    return btv_;
+  }
+
+  public static final int VOLUME_DELTA_FIELD_NUMBER = 44;
+  private long volumeDelta_ = 0L;
+  /**
+   * <pre>
+   * Per-tick traded quantity = cumulative day volume minus the previous tick's for
+   * the same token. 0 = no trade happened; unset = baseline unknown (first tick of
+   * the process for that token, or a counter reset). Candle volume must sum THIS;
+   * summing ltq (a last-trade size) under-counts batched trades.
+   * </pre>
+   *
+   * <code>optional int64 volume_delta = 44;</code>
+   * @return Whether the volumeDelta field is set.
+   */
+  @java.lang.Override
+  public boolean hasVolumeDelta() {
+    return ((bitField0_ & 0x00000100) != 0);
+  }
+  /**
+   * <pre>
+   * Per-tick traded quantity = cumulative day volume minus the previous tick's for
+   * the same token. 0 = no trade happened; unset = baseline unknown (first tick of
+   * the process for that token, or a counter reset). Candle volume must sum THIS;
+   * summing ltq (a last-trade size) under-counts batched trades.
+   * </pre>
+   *
+   * <code>optional int64 volume_delta = 44;</code>
+   * @return The volumeDelta.
+   */
+  @java.lang.Override
+  public long getVolumeDelta() {
+    return volumeDelta_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -957,6 +1262,42 @@ private static final long serialVersionUID = 0L;
     }
     if (goEmitMs_ != 0L) {
       output.writeInt64(32, goEmitMs_);
+    }
+    if (((bitField0_ & 0x00000001) != 0)) {
+      output.writeInt32(33, changeFlag_);
+    }
+    if (((bitField0_ & 0x00000002) != 0)) {
+      output.writeInt64(34, oiDayHigh_);
+    }
+    if (((bitField0_ & 0x00000004) != 0)) {
+      output.writeInt64(35, oiDayLow_);
+    }
+    if (lowerLimitPaise_ != 0L) {
+      output.writeInt64(36, lowerLimitPaise_);
+    }
+    if (upperLimitPaise_ != 0L) {
+      output.writeInt64(37, upperLimitPaise_);
+    }
+    if (((bitField0_ & 0x00000008) != 0)) {
+      output.writeInt64(38, imbalanceQty_);
+    }
+    if (((bitField0_ & 0x00000010) != 0)) {
+      output.writeInt64(39, indicativeClosePaise_);
+    }
+    if (((bitField0_ & 0x00000020) != 0)) {
+      output.writeInt64(40, refPricePaise_);
+    }
+    if (lttMs_ != 0L) {
+      output.writeInt64(41, lttMs_);
+    }
+    if (((bitField0_ & 0x00000040) != 0)) {
+      output.writeInt64(42, atv_);
+    }
+    if (((bitField0_ & 0x00000080) != 0)) {
+      output.writeInt64(43, btv_);
+    }
+    if (((bitField0_ & 0x00000100) != 0)) {
+      output.writeInt64(44, volumeDelta_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -1148,6 +1489,54 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeInt64Size(32, goEmitMs_);
     }
+    if (((bitField0_ & 0x00000001) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt32Size(33, changeFlag_);
+    }
+    if (((bitField0_ & 0x00000002) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(34, oiDayHigh_);
+    }
+    if (((bitField0_ & 0x00000004) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(35, oiDayLow_);
+    }
+    if (lowerLimitPaise_ != 0L) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(36, lowerLimitPaise_);
+    }
+    if (upperLimitPaise_ != 0L) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(37, upperLimitPaise_);
+    }
+    if (((bitField0_ & 0x00000008) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(38, imbalanceQty_);
+    }
+    if (((bitField0_ & 0x00000010) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(39, indicativeClosePaise_);
+    }
+    if (((bitField0_ & 0x00000020) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(40, refPricePaise_);
+    }
+    if (lttMs_ != 0L) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(41, lttMs_);
+    }
+    if (((bitField0_ & 0x00000040) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(42, atv_);
+    }
+    if (((bitField0_ & 0x00000080) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(43, btv_);
+    }
+    if (((bitField0_ & 0x00000100) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeInt64Size(44, volumeDelta_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -1227,6 +1616,57 @@ private static final long serialVersionUID = 0L;
         != other.getGoReceivedMs()) return false;
     if (getGoEmitMs()
         != other.getGoEmitMs()) return false;
+    if (hasChangeFlag() != other.hasChangeFlag()) return false;
+    if (hasChangeFlag()) {
+      if (getChangeFlag()
+          != other.getChangeFlag()) return false;
+    }
+    if (hasOiDayHigh() != other.hasOiDayHigh()) return false;
+    if (hasOiDayHigh()) {
+      if (getOiDayHigh()
+          != other.getOiDayHigh()) return false;
+    }
+    if (hasOiDayLow() != other.hasOiDayLow()) return false;
+    if (hasOiDayLow()) {
+      if (getOiDayLow()
+          != other.getOiDayLow()) return false;
+    }
+    if (getLowerLimitPaise()
+        != other.getLowerLimitPaise()) return false;
+    if (getUpperLimitPaise()
+        != other.getUpperLimitPaise()) return false;
+    if (hasImbalanceQty() != other.hasImbalanceQty()) return false;
+    if (hasImbalanceQty()) {
+      if (getImbalanceQty()
+          != other.getImbalanceQty()) return false;
+    }
+    if (hasIndicativeClosePaise() != other.hasIndicativeClosePaise()) return false;
+    if (hasIndicativeClosePaise()) {
+      if (getIndicativeClosePaise()
+          != other.getIndicativeClosePaise()) return false;
+    }
+    if (hasRefPricePaise() != other.hasRefPricePaise()) return false;
+    if (hasRefPricePaise()) {
+      if (getRefPricePaise()
+          != other.getRefPricePaise()) return false;
+    }
+    if (getLttMs()
+        != other.getLttMs()) return false;
+    if (hasAtv() != other.hasAtv()) return false;
+    if (hasAtv()) {
+      if (getAtv()
+          != other.getAtv()) return false;
+    }
+    if (hasBtv() != other.hasBtv()) return false;
+    if (hasBtv()) {
+      if (getBtv()
+          != other.getBtv()) return false;
+    }
+    if (hasVolumeDelta() != other.hasVolumeDelta()) return false;
+    if (hasVolumeDelta()) {
+      if (getVolumeDelta()
+          != other.getVolumeDelta()) return false;
+    }
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -1330,6 +1770,59 @@ private static final long serialVersionUID = 0L;
     hash = (37 * hash) + GO_EMIT_MS_FIELD_NUMBER;
     hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
         getGoEmitMs());
+    if (hasChangeFlag()) {
+      hash = (37 * hash) + CHANGE_FLAG_FIELD_NUMBER;
+      hash = (53 * hash) + getChangeFlag();
+    }
+    if (hasOiDayHigh()) {
+      hash = (37 * hash) + OI_DAY_HIGH_FIELD_NUMBER;
+      hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+          getOiDayHigh());
+    }
+    if (hasOiDayLow()) {
+      hash = (37 * hash) + OI_DAY_LOW_FIELD_NUMBER;
+      hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+          getOiDayLow());
+    }
+    hash = (37 * hash) + LOWER_LIMIT_PAISE_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+        getLowerLimitPaise());
+    hash = (37 * hash) + UPPER_LIMIT_PAISE_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+        getUpperLimitPaise());
+    if (hasImbalanceQty()) {
+      hash = (37 * hash) + IMBALANCE_QTY_FIELD_NUMBER;
+      hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+          getImbalanceQty());
+    }
+    if (hasIndicativeClosePaise()) {
+      hash = (37 * hash) + INDICATIVE_CLOSE_PAISE_FIELD_NUMBER;
+      hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+          getIndicativeClosePaise());
+    }
+    if (hasRefPricePaise()) {
+      hash = (37 * hash) + REF_PRICE_PAISE_FIELD_NUMBER;
+      hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+          getRefPricePaise());
+    }
+    hash = (37 * hash) + LTT_MS_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+        getLttMs());
+    if (hasAtv()) {
+      hash = (37 * hash) + ATV_FIELD_NUMBER;
+      hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+          getAtv());
+    }
+    if (hasBtv()) {
+      hash = (37 * hash) + BTV_FIELD_NUMBER;
+      hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+          getBtv());
+    }
+    if (hasVolumeDelta()) {
+      hash = (37 * hash) + VOLUME_DELTA_FIELD_NUMBER;
+      hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+          getVolumeDelta());
+    }
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -1459,6 +1952,7 @@ private static final long serialVersionUID = 0L;
     public Builder clear() {
       super.clear();
       bitField0_ = 0;
+      bitField1_ = 0;
       slotId_ = "";
       mode_ = "";
       token_ = 0;
@@ -1491,6 +1985,18 @@ private static final long serialVersionUID = 0L;
       payloadHash_ = com.google.protobuf.ByteString.EMPTY;
       goReceivedMs_ = 0L;
       goEmitMs_ = 0L;
+      changeFlag_ = 0;
+      oiDayHigh_ = 0L;
+      oiDayLow_ = 0L;
+      lowerLimitPaise_ = 0L;
+      upperLimitPaise_ = 0L;
+      imbalanceQty_ = 0L;
+      indicativeClosePaise_ = 0L;
+      refPricePaise_ = 0L;
+      lttMs_ = 0L;
+      atv_ = 0L;
+      btv_ = 0L;
+      volumeDelta_ = 0L;
       return this;
     }
 
@@ -1519,6 +2025,7 @@ private static final long serialVersionUID = 0L;
       com.trading.ingestion.transport.TickEvent result = new com.trading.ingestion.transport.TickEvent(this);
       buildPartialRepeatedFields(result);
       if (bitField0_ != 0) { buildPartial0(result); }
+      if (bitField1_ != 0) { buildPartial1(result); }
       onBuilt();
       return result;
     }
@@ -1636,6 +2143,57 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x80000000) != 0)) {
         result.goEmitMs_ = goEmitMs_;
       }
+    }
+
+    private void buildPartial1(com.trading.ingestion.transport.TickEvent result) {
+      int from_bitField1_ = bitField1_;
+      int to_bitField0_ = 0;
+      if (((from_bitField1_ & 0x00000001) != 0)) {
+        result.changeFlag_ = changeFlag_;
+        to_bitField0_ |= 0x00000001;
+      }
+      if (((from_bitField1_ & 0x00000002) != 0)) {
+        result.oiDayHigh_ = oiDayHigh_;
+        to_bitField0_ |= 0x00000002;
+      }
+      if (((from_bitField1_ & 0x00000004) != 0)) {
+        result.oiDayLow_ = oiDayLow_;
+        to_bitField0_ |= 0x00000004;
+      }
+      if (((from_bitField1_ & 0x00000008) != 0)) {
+        result.lowerLimitPaise_ = lowerLimitPaise_;
+      }
+      if (((from_bitField1_ & 0x00000010) != 0)) {
+        result.upperLimitPaise_ = upperLimitPaise_;
+      }
+      if (((from_bitField1_ & 0x00000020) != 0)) {
+        result.imbalanceQty_ = imbalanceQty_;
+        to_bitField0_ |= 0x00000008;
+      }
+      if (((from_bitField1_ & 0x00000040) != 0)) {
+        result.indicativeClosePaise_ = indicativeClosePaise_;
+        to_bitField0_ |= 0x00000010;
+      }
+      if (((from_bitField1_ & 0x00000080) != 0)) {
+        result.refPricePaise_ = refPricePaise_;
+        to_bitField0_ |= 0x00000020;
+      }
+      if (((from_bitField1_ & 0x00000100) != 0)) {
+        result.lttMs_ = lttMs_;
+      }
+      if (((from_bitField1_ & 0x00000200) != 0)) {
+        result.atv_ = atv_;
+        to_bitField0_ |= 0x00000040;
+      }
+      if (((from_bitField1_ & 0x00000400) != 0)) {
+        result.btv_ = btv_;
+        to_bitField0_ |= 0x00000080;
+      }
+      if (((from_bitField1_ & 0x00000800) != 0)) {
+        result.volumeDelta_ = volumeDelta_;
+        to_bitField0_ |= 0x00000100;
+      }
+      result.bitField0_ |= to_bitField0_;
     }
 
     @java.lang.Override
@@ -1833,6 +2391,42 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getGoEmitMs() != 0L) {
         setGoEmitMs(other.getGoEmitMs());
+      }
+      if (other.hasChangeFlag()) {
+        setChangeFlag(other.getChangeFlag());
+      }
+      if (other.hasOiDayHigh()) {
+        setOiDayHigh(other.getOiDayHigh());
+      }
+      if (other.hasOiDayLow()) {
+        setOiDayLow(other.getOiDayLow());
+      }
+      if (other.getLowerLimitPaise() != 0L) {
+        setLowerLimitPaise(other.getLowerLimitPaise());
+      }
+      if (other.getUpperLimitPaise() != 0L) {
+        setUpperLimitPaise(other.getUpperLimitPaise());
+      }
+      if (other.hasImbalanceQty()) {
+        setImbalanceQty(other.getImbalanceQty());
+      }
+      if (other.hasIndicativeClosePaise()) {
+        setIndicativeClosePaise(other.getIndicativeClosePaise());
+      }
+      if (other.hasRefPricePaise()) {
+        setRefPricePaise(other.getRefPricePaise());
+      }
+      if (other.getLttMs() != 0L) {
+        setLttMs(other.getLttMs());
+      }
+      if (other.hasAtv()) {
+        setAtv(other.getAtv());
+      }
+      if (other.hasBtv()) {
+        setBtv(other.getBtv());
+      }
+      if (other.hasVolumeDelta()) {
+        setVolumeDelta(other.getVolumeDelta());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -2086,6 +2680,66 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x80000000;
               break;
             } // case 256
+            case 264: {
+              changeFlag_ = input.readInt32();
+              bitField1_ |= 0x00000001;
+              break;
+            } // case 264
+            case 272: {
+              oiDayHigh_ = input.readInt64();
+              bitField1_ |= 0x00000002;
+              break;
+            } // case 272
+            case 280: {
+              oiDayLow_ = input.readInt64();
+              bitField1_ |= 0x00000004;
+              break;
+            } // case 280
+            case 288: {
+              lowerLimitPaise_ = input.readInt64();
+              bitField1_ |= 0x00000008;
+              break;
+            } // case 288
+            case 296: {
+              upperLimitPaise_ = input.readInt64();
+              bitField1_ |= 0x00000010;
+              break;
+            } // case 296
+            case 304: {
+              imbalanceQty_ = input.readInt64();
+              bitField1_ |= 0x00000020;
+              break;
+            } // case 304
+            case 312: {
+              indicativeClosePaise_ = input.readInt64();
+              bitField1_ |= 0x00000040;
+              break;
+            } // case 312
+            case 320: {
+              refPricePaise_ = input.readInt64();
+              bitField1_ |= 0x00000080;
+              break;
+            } // case 320
+            case 328: {
+              lttMs_ = input.readInt64();
+              bitField1_ |= 0x00000100;
+              break;
+            } // case 328
+            case 336: {
+              atv_ = input.readInt64();
+              bitField1_ |= 0x00000200;
+              break;
+            } // case 336
+            case 344: {
+              btv_ = input.readInt64();
+              bitField1_ |= 0x00000400;
+              break;
+            } // case 344
+            case 352: {
+              volumeDelta_ = input.readInt64();
+              bitField1_ |= 0x00000800;
+              break;
+            } // case 352
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -2102,6 +2756,7 @@ private static final long serialVersionUID = 0L;
       return this;
     }
     private int bitField0_;
+    private int bitField1_;
 
     private java.lang.Object slotId_ = "";
     /**
@@ -2514,7 +3169,7 @@ private static final long serialVersionUID = 0L;
     private long feedSequenceLocal_ ;
     /**
      * <pre>
-     * connection-local sequence (Q15: verify packet has real seq first)
+     * P1-281: BEST-EFFORT connection-local provenance (gap evidence + logging only — FlussClientAdapter persists NO sequence column in the 21-col row; broker resets/duplicates must never be treated as authoritative downstream).
      * </pre>
      *
      * <code>int64 feed_sequence_local = 6;</code>
@@ -2526,7 +3181,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * connection-local sequence (Q15: verify packet has real seq first)
+     * P1-281: BEST-EFFORT connection-local provenance (gap evidence + logging only — FlussClientAdapter persists NO sequence column in the 21-col row; broker resets/duplicates must never be treated as authoritative downstream).
      * </pre>
      *
      * <code>int64 feed_sequence_local = 6;</code>
@@ -2542,7 +3197,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * connection-local sequence (Q15: verify packet has real seq first)
+     * P1-281: BEST-EFFORT connection-local provenance (gap evidence + logging only — FlussClientAdapter persists NO sequence column in the 21-col row; broker resets/duplicates must never be treated as authoritative downstream).
      * </pre>
      *
      * <code>int64 feed_sequence_local = 6;</code>
@@ -3465,6 +4120,10 @@ private static final long serialVersionUID = 0L;
     /**
      * <pre>
      * payload preservation (Q3, Q6) — never base64
+     * P1-320: BROKER-CONTROLLED, max 241B (full-tick mode); broker packet
+     * bytes pass through the bridge ungated per-event (MaxBytes is a flush
+     * TARGET, not a cap — batch.go:29-30). Bounded only at frame level
+     * (64MiB post-marshal gate + 1M event-count gate, see above).
      * </pre>
      *
      * <code>bytes raw_payload = 24;</code>
@@ -3477,6 +4136,10 @@ private static final long serialVersionUID = 0L;
     /**
      * <pre>
      * payload preservation (Q3, Q6) — never base64
+     * P1-320: BROKER-CONTROLLED, max 241B (full-tick mode); broker packet
+     * bytes pass through the bridge ungated per-event (MaxBytes is a flush
+     * TARGET, not a cap — batch.go:29-30). Bounded only at frame level
+     * (64MiB post-marshal gate + 1M event-count gate, see above).
      * </pre>
      *
      * <code>bytes raw_payload = 24;</code>
@@ -3493,6 +4156,10 @@ private static final long serialVersionUID = 0L;
     /**
      * <pre>
      * payload preservation (Q3, Q6) — never base64
+     * P1-320: BROKER-CONTROLLED, max 241B (full-tick mode); broker packet
+     * bytes pass through the bridge ungated per-event (MaxBytes is a flush
+     * TARGET, not a cap — batch.go:29-30). Bounded only at frame level
+     * (64MiB post-marshal gate + 1M event-count gate, see above).
      * </pre>
      *
      * <code>bytes raw_payload = 24;</code>
@@ -3984,6 +4651,666 @@ private static final long serialVersionUID = 0L;
     public Builder clearGoEmitMs() {
       bitField0_ = (bitField0_ & ~0x80000000);
       goEmitMs_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private int changeFlag_ ;
+    /**
+     * <pre>
+     * --- v4: full-mode field capture. Every field below is stored as a BIGINT
+     * NULL column at raw_table_1 index 33-44 (raw_table_1 indexes 21-71 in DDL
+     * order). "Absent" and "0" are different facts: the optional fields carry
+     * presence so the row can say NULL. The emit path decides it (marketdata
+     * ToTickEvent) because that is the one place that sees both the value and the
+     * feed; Java only has to honour presence. Which fields are optional is not
+     * cosmetic - change_flag 0, oi_day_high 0, imbalance_qty 0 and volume_delta 0
+     * are all real values, so a plain field would make "not reported" look like
+     * data. Everything not marked optional is reported by BOTH feeds.
+     * </pre>
+     *
+     * <code>optional int32 change_flag = 33;</code>
+     * @return Whether the changeFlag field is set.
+     */
+    @java.lang.Override
+    public boolean hasChangeFlag() {
+      return ((bitField1_ & 0x00000001) != 0);
+    }
+    /**
+     * <pre>
+     * --- v4: full-mode field capture. Every field below is stored as a BIGINT
+     * NULL column at raw_table_1 index 33-44 (raw_table_1 indexes 21-71 in DDL
+     * order). "Absent" and "0" are different facts: the optional fields carry
+     * presence so the row can say NULL. The emit path decides it (marketdata
+     * ToTickEvent) because that is the one place that sees both the value and the
+     * feed; Java only has to honour presence. Which fields are optional is not
+     * cosmetic - change_flag 0, oi_day_high 0, imbalance_qty 0 and volume_delta 0
+     * are all real values, so a plain field would make "not reported" look like
+     * data. Everything not marked optional is reported by BOTH feeds.
+     * </pre>
+     *
+     * <code>optional int32 change_flag = 33;</code>
+     * @return The changeFlag.
+     */
+    @java.lang.Override
+    public int getChangeFlag() {
+      return changeFlag_;
+    }
+    /**
+     * <pre>
+     * --- v4: full-mode field capture. Every field below is stored as a BIGINT
+     * NULL column at raw_table_1 index 33-44 (raw_table_1 indexes 21-71 in DDL
+     * order). "Absent" and "0" are different facts: the optional fields carry
+     * presence so the row can say NULL. The emit path decides it (marketdata
+     * ToTickEvent) because that is the one place that sees both the value and the
+     * feed; Java only has to honour presence. Which fields are optional is not
+     * cosmetic - change_flag 0, oi_day_high 0, imbalance_qty 0 and volume_delta 0
+     * are all real values, so a plain field would make "not reported" look like
+     * data. Everything not marked optional is reported by BOTH feeds.
+     * </pre>
+     *
+     * <code>optional int32 change_flag = 33;</code>
+     * @param value The changeFlag to set.
+     * @return This builder for chaining.
+     */
+    public Builder setChangeFlag(int value) {
+      
+      changeFlag_ = value;
+      bitField1_ |= 0x00000001;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * --- v4: full-mode field capture. Every field below is stored as a BIGINT
+     * NULL column at raw_table_1 index 33-44 (raw_table_1 indexes 21-71 in DDL
+     * order). "Absent" and "0" are different facts: the optional fields carry
+     * presence so the row can say NULL. The emit path decides it (marketdata
+     * ToTickEvent) because that is the one place that sees both the value and the
+     * feed; Java only has to honour presence. Which fields are optional is not
+     * cosmetic - change_flag 0, oi_day_high 0, imbalance_qty 0 and volume_delta 0
+     * are all real values, so a plain field would make "not reported" look like
+     * data. Everything not marked optional is reported by BOTH feeds.
+     * </pre>
+     *
+     * <code>optional int32 change_flag = 33;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearChangeFlag() {
+      bitField1_ = (bitField1_ & ~0x00000001);
+      changeFlag_ = 0;
+      onChanged();
+      return this;
+    }
+
+    private long oiDayHigh_ ;
+    /**
+     * <pre>
+     * standard feed only (MarketTick.OIDayHigh)
+     * </pre>
+     *
+     * <code>optional int64 oi_day_high = 34;</code>
+     * @return Whether the oiDayHigh field is set.
+     */
+    @java.lang.Override
+    public boolean hasOiDayHigh() {
+      return ((bitField1_ & 0x00000002) != 0);
+    }
+    /**
+     * <pre>
+     * standard feed only (MarketTick.OIDayHigh)
+     * </pre>
+     *
+     * <code>optional int64 oi_day_high = 34;</code>
+     * @return The oiDayHigh.
+     */
+    @java.lang.Override
+    public long getOiDayHigh() {
+      return oiDayHigh_;
+    }
+    /**
+     * <pre>
+     * standard feed only (MarketTick.OIDayHigh)
+     * </pre>
+     *
+     * <code>optional int64 oi_day_high = 34;</code>
+     * @param value The oiDayHigh to set.
+     * @return This builder for chaining.
+     */
+    public Builder setOiDayHigh(long value) {
+      
+      oiDayHigh_ = value;
+      bitField1_ |= 0x00000002;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * standard feed only (MarketTick.OIDayHigh)
+     * </pre>
+     *
+     * <code>optional int64 oi_day_high = 34;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearOiDayHigh() {
+      bitField1_ = (bitField1_ & ~0x00000002);
+      oiDayHigh_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private long oiDayLow_ ;
+    /**
+     * <pre>
+     * standard feed only (MarketTick.OIDayLow)
+     * </pre>
+     *
+     * <code>optional int64 oi_day_low = 35;</code>
+     * @return Whether the oiDayLow field is set.
+     */
+    @java.lang.Override
+    public boolean hasOiDayLow() {
+      return ((bitField1_ & 0x00000004) != 0);
+    }
+    /**
+     * <pre>
+     * standard feed only (MarketTick.OIDayLow)
+     * </pre>
+     *
+     * <code>optional int64 oi_day_low = 35;</code>
+     * @return The oiDayLow.
+     */
+    @java.lang.Override
+    public long getOiDayLow() {
+      return oiDayLow_;
+    }
+    /**
+     * <pre>
+     * standard feed only (MarketTick.OIDayLow)
+     * </pre>
+     *
+     * <code>optional int64 oi_day_low = 35;</code>
+     * @param value The oiDayLow to set.
+     * @return This builder for chaining.
+     */
+    public Builder setOiDayLow(long value) {
+      
+      oiDayLow_ = value;
+      bitField1_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * standard feed only (MarketTick.OIDayLow)
+     * </pre>
+     *
+     * <code>optional int64 oi_day_low = 35;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearOiDayLow() {
+      bitField1_ = (bitField1_ & ~0x00000004);
+      oiDayLow_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private long lowerLimitPaise_ ;
+    /**
+     * <pre>
+     * both feeds: standard LowerLimit / HFT DprL
+     * </pre>
+     *
+     * <code>int64 lower_limit_paise = 36;</code>
+     * @return The lowerLimitPaise.
+     */
+    @java.lang.Override
+    public long getLowerLimitPaise() {
+      return lowerLimitPaise_;
+    }
+    /**
+     * <pre>
+     * both feeds: standard LowerLimit / HFT DprL
+     * </pre>
+     *
+     * <code>int64 lower_limit_paise = 36;</code>
+     * @param value The lowerLimitPaise to set.
+     * @return This builder for chaining.
+     */
+    public Builder setLowerLimitPaise(long value) {
+      
+      lowerLimitPaise_ = value;
+      bitField1_ |= 0x00000008;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * both feeds: standard LowerLimit / HFT DprL
+     * </pre>
+     *
+     * <code>int64 lower_limit_paise = 36;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearLowerLimitPaise() {
+      bitField1_ = (bitField1_ & ~0x00000008);
+      lowerLimitPaise_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private long upperLimitPaise_ ;
+    /**
+     * <pre>
+     * both feeds: standard UpperLimit / HFT DprH
+     * </pre>
+     *
+     * <code>int64 upper_limit_paise = 37;</code>
+     * @return The upperLimitPaise.
+     */
+    @java.lang.Override
+    public long getUpperLimitPaise() {
+      return upperLimitPaise_;
+    }
+    /**
+     * <pre>
+     * both feeds: standard UpperLimit / HFT DprH
+     * </pre>
+     *
+     * <code>int64 upper_limit_paise = 37;</code>
+     * @param value The upperLimitPaise to set.
+     * @return This builder for chaining.
+     */
+    public Builder setUpperLimitPaise(long value) {
+      
+      upperLimitPaise_ = value;
+      bitField1_ |= 0x00000010;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * both feeds: standard UpperLimit / HFT DprH
+     * </pre>
+     *
+     * <code>int64 upper_limit_paise = 37;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearUpperLimitPaise() {
+      bitField1_ = (bitField1_ & ~0x00000010);
+      upperLimitPaise_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private long imbalanceQty_ ;
+    /**
+     * <pre>
+     * CAS trailer trio: standard feed only, appended to every mode from ~15:15 IST.
+     * optional because "no CAS frame yet" must reach the row as NULL, not as 0
+     * (imbalance_qty 0 during the auction means a balanced book, which is not the
+     * same fact as "outside the auction window").
+     * </pre>
+     *
+     * <code>optional int64 imbalance_qty = 38;</code>
+     * @return Whether the imbalanceQty field is set.
+     */
+    @java.lang.Override
+    public boolean hasImbalanceQty() {
+      return ((bitField1_ & 0x00000020) != 0);
+    }
+    /**
+     * <pre>
+     * CAS trailer trio: standard feed only, appended to every mode from ~15:15 IST.
+     * optional because "no CAS frame yet" must reach the row as NULL, not as 0
+     * (imbalance_qty 0 during the auction means a balanced book, which is not the
+     * same fact as "outside the auction window").
+     * </pre>
+     *
+     * <code>optional int64 imbalance_qty = 38;</code>
+     * @return The imbalanceQty.
+     */
+    @java.lang.Override
+    public long getImbalanceQty() {
+      return imbalanceQty_;
+    }
+    /**
+     * <pre>
+     * CAS trailer trio: standard feed only, appended to every mode from ~15:15 IST.
+     * optional because "no CAS frame yet" must reach the row as NULL, not as 0
+     * (imbalance_qty 0 during the auction means a balanced book, which is not the
+     * same fact as "outside the auction window").
+     * </pre>
+     *
+     * <code>optional int64 imbalance_qty = 38;</code>
+     * @param value The imbalanceQty to set.
+     * @return This builder for chaining.
+     */
+    public Builder setImbalanceQty(long value) {
+      
+      imbalanceQty_ = value;
+      bitField1_ |= 0x00000020;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * CAS trailer trio: standard feed only, appended to every mode from ~15:15 IST.
+     * optional because "no CAS frame yet" must reach the row as NULL, not as 0
+     * (imbalance_qty 0 during the auction means a balanced book, which is not the
+     * same fact as "outside the auction window").
+     * </pre>
+     *
+     * <code>optional int64 imbalance_qty = 38;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearImbalanceQty() {
+      bitField1_ = (bitField1_ & ~0x00000020);
+      imbalanceQty_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private long indicativeClosePaise_ ;
+    /**
+     * <code>optional int64 indicative_close_paise = 39;</code>
+     * @return Whether the indicativeClosePaise field is set.
+     */
+    @java.lang.Override
+    public boolean hasIndicativeClosePaise() {
+      return ((bitField1_ & 0x00000040) != 0);
+    }
+    /**
+     * <code>optional int64 indicative_close_paise = 39;</code>
+     * @return The indicativeClosePaise.
+     */
+    @java.lang.Override
+    public long getIndicativeClosePaise() {
+      return indicativeClosePaise_;
+    }
+    /**
+     * <code>optional int64 indicative_close_paise = 39;</code>
+     * @param value The indicativeClosePaise to set.
+     * @return This builder for chaining.
+     */
+    public Builder setIndicativeClosePaise(long value) {
+      
+      indicativeClosePaise_ = value;
+      bitField1_ |= 0x00000040;
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>optional int64 indicative_close_paise = 39;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearIndicativeClosePaise() {
+      bitField1_ = (bitField1_ & ~0x00000040);
+      indicativeClosePaise_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private long refPricePaise_ ;
+    /**
+     * <code>optional int64 ref_price_paise = 40;</code>
+     * @return Whether the refPricePaise field is set.
+     */
+    @java.lang.Override
+    public boolean hasRefPricePaise() {
+      return ((bitField1_ & 0x00000080) != 0);
+    }
+    /**
+     * <code>optional int64 ref_price_paise = 40;</code>
+     * @return The refPricePaise.
+     */
+    @java.lang.Override
+    public long getRefPricePaise() {
+      return refPricePaise_;
+    }
+    /**
+     * <code>optional int64 ref_price_paise = 40;</code>
+     * @param value The refPricePaise to set.
+     * @return This builder for chaining.
+     */
+    public Builder setRefPricePaise(long value) {
+      
+      refPricePaise_ = value;
+      bitField1_ |= 0x00000080;
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>optional int64 ref_price_paise = 40;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearRefPricePaise() {
+      bitField1_ = (bitField1_ & ~0x00000080);
+      refPricePaise_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private long lttMs_ ;
+    /**
+     * <pre>
+     * last traded time, epoch MS: normalized per feed (standard LTT is seconds, HFT is microseconds)
+     * </pre>
+     *
+     * <code>int64 ltt_ms = 41;</code>
+     * @return The lttMs.
+     */
+    @java.lang.Override
+    public long getLttMs() {
+      return lttMs_;
+    }
+    /**
+     * <pre>
+     * last traded time, epoch MS: normalized per feed (standard LTT is seconds, HFT is microseconds)
+     * </pre>
+     *
+     * <code>int64 ltt_ms = 41;</code>
+     * @param value The lttMs to set.
+     * @return This builder for chaining.
+     */
+    public Builder setLttMs(long value) {
+      
+      lttMs_ = value;
+      bitField1_ |= 0x00000100;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * last traded time, epoch MS: normalized per feed (standard LTT is seconds, HFT is microseconds)
+     * </pre>
+     *
+     * <code>int64 ltt_ms = 41;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearLttMs() {
+      bitField1_ = (bitField1_ & ~0x00000100);
+      lttMs_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private long atv_ ;
+    /**
+     * <pre>
+     * HFT only (average traded value)
+     * </pre>
+     *
+     * <code>optional int64 atv = 42;</code>
+     * @return Whether the atv field is set.
+     */
+    @java.lang.Override
+    public boolean hasAtv() {
+      return ((bitField1_ & 0x00000200) != 0);
+    }
+    /**
+     * <pre>
+     * HFT only (average traded value)
+     * </pre>
+     *
+     * <code>optional int64 atv = 42;</code>
+     * @return The atv.
+     */
+    @java.lang.Override
+    public long getAtv() {
+      return atv_;
+    }
+    /**
+     * <pre>
+     * HFT only (average traded value)
+     * </pre>
+     *
+     * <code>optional int64 atv = 42;</code>
+     * @param value The atv to set.
+     * @return This builder for chaining.
+     */
+    public Builder setAtv(long value) {
+      
+      atv_ = value;
+      bitField1_ |= 0x00000200;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * HFT only (average traded value)
+     * </pre>
+     *
+     * <code>optional int64 atv = 42;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearAtv() {
+      bitField1_ = (bitField1_ & ~0x00000200);
+      atv_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private long btv_ ;
+    /**
+     * <pre>
+     * HFT only (traded value)
+     * </pre>
+     *
+     * <code>optional int64 btv = 43;</code>
+     * @return Whether the btv field is set.
+     */
+    @java.lang.Override
+    public boolean hasBtv() {
+      return ((bitField1_ & 0x00000400) != 0);
+    }
+    /**
+     * <pre>
+     * HFT only (traded value)
+     * </pre>
+     *
+     * <code>optional int64 btv = 43;</code>
+     * @return The btv.
+     */
+    @java.lang.Override
+    public long getBtv() {
+      return btv_;
+    }
+    /**
+     * <pre>
+     * HFT only (traded value)
+     * </pre>
+     *
+     * <code>optional int64 btv = 43;</code>
+     * @param value The btv to set.
+     * @return This builder for chaining.
+     */
+    public Builder setBtv(long value) {
+      
+      btv_ = value;
+      bitField1_ |= 0x00000400;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * HFT only (traded value)
+     * </pre>
+     *
+     * <code>optional int64 btv = 43;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearBtv() {
+      bitField1_ = (bitField1_ & ~0x00000400);
+      btv_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private long volumeDelta_ ;
+    /**
+     * <pre>
+     * Per-tick traded quantity = cumulative day volume minus the previous tick's for
+     * the same token. 0 = no trade happened; unset = baseline unknown (first tick of
+     * the process for that token, or a counter reset). Candle volume must sum THIS;
+     * summing ltq (a last-trade size) under-counts batched trades.
+     * </pre>
+     *
+     * <code>optional int64 volume_delta = 44;</code>
+     * @return Whether the volumeDelta field is set.
+     */
+    @java.lang.Override
+    public boolean hasVolumeDelta() {
+      return ((bitField1_ & 0x00000800) != 0);
+    }
+    /**
+     * <pre>
+     * Per-tick traded quantity = cumulative day volume minus the previous tick's for
+     * the same token. 0 = no trade happened; unset = baseline unknown (first tick of
+     * the process for that token, or a counter reset). Candle volume must sum THIS;
+     * summing ltq (a last-trade size) under-counts batched trades.
+     * </pre>
+     *
+     * <code>optional int64 volume_delta = 44;</code>
+     * @return The volumeDelta.
+     */
+    @java.lang.Override
+    public long getVolumeDelta() {
+      return volumeDelta_;
+    }
+    /**
+     * <pre>
+     * Per-tick traded quantity = cumulative day volume minus the previous tick's for
+     * the same token. 0 = no trade happened; unset = baseline unknown (first tick of
+     * the process for that token, or a counter reset). Candle volume must sum THIS;
+     * summing ltq (a last-trade size) under-counts batched trades.
+     * </pre>
+     *
+     * <code>optional int64 volume_delta = 44;</code>
+     * @param value The volumeDelta to set.
+     * @return This builder for chaining.
+     */
+    public Builder setVolumeDelta(long value) {
+      
+      volumeDelta_ = value;
+      bitField1_ |= 0x00000800;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * Per-tick traded quantity = cumulative day volume minus the previous tick's for
+     * the same token. 0 = no trade happened; unset = baseline unknown (first tick of
+     * the process for that token, or a counter reset). Candle volume must sum THIS;
+     * summing ltq (a last-trade size) under-counts batched trades.
+     * </pre>
+     *
+     * <code>optional int64 volume_delta = 44;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearVolumeDelta() {
+      bitField1_ = (bitField1_ & ~0x00000800);
+      volumeDelta_ = 0L;
       onChanged();
       return this;
     }

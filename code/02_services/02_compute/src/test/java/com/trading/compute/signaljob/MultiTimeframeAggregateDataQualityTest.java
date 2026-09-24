@@ -154,8 +154,10 @@ public class MultiTimeframeAggregateDataQualityTest {
         for (RowData row : ticks) {
             long et = row.getLong(RawTableColumns.EVENT_TIME);
             String tt = row.getString(RawTableColumns.TICK_TYPE).toString();
-            long qty = row.isNullAt(RawTableColumns.LAST_QTY) ? 0 : row.getLong(RawTableColumns.LAST_QTY);
-            // reuse TRADE filter semantics per task: only TRADE && qty>0 contributes to OHLCV in aggregator
+            // v4: the aggregator's volume source is VOLUME_DELTA (NULL = baseline
+            // unknown, contributes nothing); last_qty is only a single trade's size.
+            long qty = row.isNullAt(RawTableColumns.VOLUME_DELTA) ? 0 : row.getLong(RawTableColumns.VOLUME_DELTA);
+            // reuse the aggregator's volume gate: only TRADE && qty>0 adds volume
             if (!"TRADE".equals(tt) || qty <= 0) continue;
             if (!TimeframeBucket.isInSession(et)) continue;
             for (Timeframe tf : Timeframe.values()) {
@@ -184,7 +186,7 @@ public class MultiTimeframeAggregateDataQualityTest {
                     long p = r.getLong(RawTableColumns.LAST_PRICE_PAISE);
                     high = Math.max(high, p);
                     low = Math.min(low, p);
-                    long q = r.getLong(RawTableColumns.LAST_QTY);
+                    long q = r.isNullAt(RawTableColumns.VOLUME_DELTA) ? 0 : r.getLong(RawTableColumns.VOLUME_DELTA);
                     vol += q;
                 }
                 ExpectedCandle ec = new ExpectedCandle();

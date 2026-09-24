@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,6 +40,35 @@ type slotOutcome struct {
 	reason   string
 }
 
+// Feed family names. Exactly one is active per process (ARROW_FEED), and
+// ToTickEvent keys feed-specific presence off this name, so "which feed am I"
+// must be answered the same way in both places.
+const (
+	feedHFT      = "hft"
+	feedStandard = "token"
+)
+
+// bridgeFeedName reports the feed family this process is running. Before v4 the
+// ticks hardcoded "hft" even when the standard stream was driving them.
+func bridgeFeedName() string {
+	if feedUsesTokenStream() {
+		return feedStandard
+	}
+	return feedHFT
+}
+
+// feedUsesTokenStream reports whether the standard (free-plan) token market-data
+// stream should drive the slots instead of HFT. Default is off, deliberately: with
+// ARROW_FEED unset the HFT path is exactly what it was before this switch existed,
+// including the ARROW_HFT_URL fake-broker override the resilience tests rely on.
+//
+// Set ARROW_FEED=token on an account whose HFT plan has ended (measured 2026-09-24:
+// HFT subscriptions return PLAN_NOT_SUBSCRIBED while the standard stream accepts and
+// delivers ticks). Nothing else in the pipeline changes; see token_slot.go.
+func feedUsesTokenStream() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("ARROW_FEED")), "token")
+}
+
 // streamFactoryFor builds the production stream factory for one slot.
 // ARROW_HFT_URL is a development/test-only override to point the bridge at a
 // local fake broker; production uses the SDK constant via NewStreamsWithHFT.
@@ -46,6 +76,9 @@ func streamFactoryFor(client *arrow.Client, _ int) func() (hftStream, error) {
 	return func() (hftStream, error) {
 		if override := os.Getenv("ARROW_HFT_URL"); override != "" {
 			return client.ConnectHFTDataStreamURL(override)
+		}
+		if feedUsesTokenStream() {
+			return newTokenStream(client)
 		}
 		streams, err := client.NewStreamsWithHFT()
 		if err != nil {

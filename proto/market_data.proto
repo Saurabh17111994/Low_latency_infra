@@ -100,6 +100,36 @@ message TickEvent {
   // transport-only provenance for the T8 latency budget):
   int64  go_received_ms = 31;  // T1: Go bridge receipt (source of received_ms)
   int64  go_emit_ms = 32;      // T6: Go batcher Add (before proto marshal/write)
+
+  // --- v4: full-mode field capture. Every field below is stored as a BIGINT
+  // NULL column at raw_table_1 index 33-44 (raw_table_1 indexes 21-71 in DDL
+  // order). "Absent" and "0" are different facts: the optional fields carry
+  // presence so the row can say NULL. The emit path decides it (marketdata
+  // ToTickEvent) because that is the one place that sees both the value and the
+  // feed; Java only has to honour presence. Which fields are optional is not
+  // cosmetic - change_flag 0, oi_day_high 0, imbalance_qty 0 and volume_delta 0
+  // are all real values, so a plain field would make "not reported" look like
+  // data. Everything not marked optional is reported by BOTH feeds.
+  optional int32  change_flag = 33;        // standard feed only (MarketTick.ChangeFlag); no HFT equivalent
+  optional int64  oi_day_high = 34;        // standard feed only (MarketTick.OIDayHigh)
+  optional int64  oi_day_low = 35;         // standard feed only (MarketTick.OIDayLow)
+  int64  lower_limit_paise = 36;  // both feeds: standard LowerLimit / HFT DprL
+  int64  upper_limit_paise = 37;  // both feeds: standard UpperLimit / HFT DprH
+  // CAS trailer trio: standard feed only, appended to every mode from ~15:15 IST.
+  // optional because "no CAS frame yet" must reach the row as NULL, not as 0
+  // (imbalance_qty 0 during the auction means a balanced book, which is not the
+  // same fact as "outside the auction window").
+  optional int64 imbalance_qty = 38;
+  optional int64 indicative_close_paise = 39;
+  optional int64 ref_price_paise = 40;
+  int64  ltt_ms = 41;             // last traded time, epoch MS: normalized per feed (standard LTT is seconds, HFT is microseconds)
+  optional int64  atv = 42;                // HFT only (average traded value)
+  optional int64  btv = 43;                // HFT only (traded value)
+  // Per-tick traded quantity = cumulative day volume minus the previous tick's for
+  // the same token. 0 = no trade happened; unset = baseline unknown (first tick of
+  // the process for that token, or a counter reset). Candle volume must sum THIS;
+  // summing ltq (a last-trade size) under-counts batched trades.
+  optional int64 volume_delta = 44;
 }
 
 // ── Control records (Q20) — ride the same transport, distinguished by type ───

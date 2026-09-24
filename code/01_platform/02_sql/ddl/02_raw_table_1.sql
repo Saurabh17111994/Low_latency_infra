@@ -12,7 +12,21 @@
 -- dropped in a rewrite while the header still claimed offload)
 -- Scope: none (global market data, not per-account — P4-013: raw ticks carry
 -- no account_scope_id column; no per-account projection is possible)
--- Schema version: 3
+-- Schema version: 4
+-- v4 (2026-09-24, full-mode field capture): the bridge already carried every
+-- full-mode field and this table stored only 4 of them. The 51 columns at
+-- indexes 21-71 now capture all of them, so ONE schema serves BOTH feeds (the
+-- standard free-plan stream and HFT). Appended AFTER schema_version so indexes
+-- 0-20 never move -- the positional contract spans common/RawTableSchema,
+-- compute/RawTableColumns (boot-refusing static validator) and both converters.
+-- All NULL: pre-v4 rows have no value, and the feeds populate different subsets.
+-- NULL means "this feed does not provide it", never a silent 0.
+-- Depth is flat (5 levels x px/qty/ord, no arrays) so sum(bid_qty_*) stays a
+-- plain query. volume_delta is the per-tick traded quantity (difference of the
+-- cumulative Volume; 0 = no trade, NULL = baseline unknown); candle volume must
+-- sum THAT, never last_qty. Feed coverage: change_flag, oi_day_high,
+-- oi_day_low, imbalance_qty, indicative_close_paise, ref_price_paise = standard
+-- stream only; atv, btv = HFT only; the other 42 columns come from both.
 --
 -- v3 (2026-08-31, daily-partition migration — docs/plans/2026-08-31-r2-daily-
 -- partitioning-and-archive-plan.md): event_day added as FIRST column and
@@ -86,7 +100,58 @@ CREATE TABLE raw_table_1 (
     protocol_version        STRING      NOT NULL,
     validity_state          STRING      NOT NULL,
     validity_reason         STRING,
-    schema_version          STRING      NOT NULL
+    schema_version          STRING      NOT NULL,
+    open_paise               BIGINT      NULL, -- day open
+    high_paise               BIGINT      NULL, -- day high
+    low_paise                BIGINT      NULL, -- day low
+    close_paise              BIGINT      NULL, -- PREVIOUS close, not today's
+    vwap_paise               BIGINT      NULL, -- MarketTick.AvgPrice / HFT VWAP
+    volume                   BIGINT      NULL, -- CUMULATIVE day volume
+    volume_delta             BIGINT      NULL, -- traded qty since the previous tick for this token; 0 = no trade; NULL = unknown (first tick / after reconnect). Sum THIS for candle volume, never last_qty
+    total_buy_qty            BIGINT      NULL, -- TBQ
+    total_sell_qty           BIGINT      NULL, -- TSQ
+    open_interest            BIGINT      NULL, -- OI
+    bid_px_1                 BIGINT      NULL,
+    bid_px_2                 BIGINT      NULL,
+    bid_px_3                 BIGINT      NULL,
+    bid_px_4                 BIGINT      NULL,
+    bid_px_5                 BIGINT      NULL,
+    bid_qty_1                BIGINT      NULL,
+    bid_qty_2                BIGINT      NULL,
+    bid_qty_3                BIGINT      NULL,
+    bid_qty_4                BIGINT      NULL,
+    bid_qty_5                BIGINT      NULL,
+    bid_ord_1                BIGINT      NULL,
+    bid_ord_2                BIGINT      NULL,
+    bid_ord_3                BIGINT      NULL,
+    bid_ord_4                BIGINT      NULL,
+    bid_ord_5                BIGINT      NULL,
+    ask_px_1                 BIGINT      NULL,
+    ask_px_2                 BIGINT      NULL,
+    ask_px_3                 BIGINT      NULL,
+    ask_px_4                 BIGINT      NULL,
+    ask_px_5                 BIGINT      NULL,
+    ask_qty_1                BIGINT      NULL,
+    ask_qty_2                BIGINT      NULL,
+    ask_qty_3                BIGINT      NULL,
+    ask_qty_4                BIGINT      NULL,
+    ask_qty_5                BIGINT      NULL,
+    ask_ord_1                BIGINT      NULL,
+    ask_ord_2                BIGINT      NULL,
+    ask_ord_3                BIGINT      NULL,
+    ask_ord_4                BIGINT      NULL,
+    ask_ord_5                BIGINT      NULL,
+    change_flag              BIGINT      NULL, -- standard stream only; HFT has no equivalent
+    oi_day_high              BIGINT      NULL, -- standard stream only
+    oi_day_low               BIGINT      NULL, -- standard stream only
+    lower_limit_paise        BIGINT      NULL, -- MarketTick.LowerLimit / HFT DprL
+    upper_limit_paise        BIGINT      NULL, -- MarketTick.UpperLimit / HFT DprH
+    imbalance_qty            BIGINT      NULL, -- CAS trailer, standard stream only, ~15:15 IST onward
+    indicative_close_paise   BIGINT      NULL, -- CAS trailer, standard stream only
+    ref_price_paise          BIGINT      NULL, -- CAS trailer, standard stream only
+    last_traded_time         BIGINT      NULL, -- EPOCH MS: standard LTT is seconds (x1000), HFT LTT is microseconds (/1000)
+    atv                      BIGINT      NULL, -- HFT only
+    btv                      BIGINT      NULL -- HFT only
 ) PARTITIONED BY (event_day) WITH (
     'bucket.num' = '16',
     'bucket.key' = 'instrument_token',

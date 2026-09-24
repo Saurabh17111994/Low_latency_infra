@@ -68,7 +68,8 @@ class CandleHotPathFixTest {
         }
 
         String tickType = row.getString(RawTableColumns.TICK_TYPE).toString();
-        long qty = row.isNullAt(RawTableColumns.LAST_QTY) ? 0L : row.getLong(RawTableColumns.LAST_QTY);
+        // v4 volume source: VOLUME_DELTA, not last_qty (see 08_implementation/03-ingestion.md).
+        long qty = row.isNullAt(RawTableColumns.VOLUME_DELTA) ? 0L : row.getLong(RawTableColumns.VOLUME_DELTA);
         if ("TRADE".equals(tickType) && qty > 0) {
             acc.volume += qty;
             acc.tickCount++;

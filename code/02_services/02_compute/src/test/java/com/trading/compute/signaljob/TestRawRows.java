@@ -6,8 +6,14 @@ import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.data.StringData;
 
 /**
- * Test fixture builder for {@code raw_table_1} v3 rows (21 columns, DDL order).
+ * Test fixture builder for {@code raw_table_1} v4 rows (72 columns, DDL order).
  * Only the columns the operators read need values; the rest default to null.
+ *
+ * <p>{@code qty} is the tick's traded quantity. Since v4 (2026-09-24) the volume
+ * source is {@link RawTableColumns#VOLUME_DELTA} -- the quantity traded since the
+ * previous tick -- and {@code last_qty} is a single trade's size. A tick that
+ * carries one trade reports both, so this builder sets both from {@code qty};
+ * {@link #withVolumeDelta} exists for the cases where the two must differ.
  */
 final class TestRawRows {
 
@@ -26,6 +32,7 @@ final class TestRawRows {
         row.setField(RawTableColumns.TICK_TYPE, StringData.fromString(tickType));
         row.setField(RawTableColumns.LAST_PRICE_PAISE, pricePaise);
         row.setField(RawTableColumns.LAST_QTY, qty);
+        row.setField(RawTableColumns.VOLUME_DELTA, qty);
         row.setField(RawTableColumns.VALIDITY_STATE, StringData.fromString("VALID_TRADE"));
         row.setField(RawTableColumns.SCHEMA_VERSION,
                 StringData.fromString(PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION));
@@ -51,6 +58,13 @@ final class TestRawRows {
 
     static RowData withQty(RowData base, long qty) {
         ((GenericRowData) base).setField(RawTableColumns.LAST_QTY, qty);
+        ((GenericRowData) base).setField(RawTableColumns.VOLUME_DELTA, qty);
+        return base;
+    }
+
+    /** Sets only the v4 volume source, leaving {@code last_qty} as it is. */
+    static RowData withVolumeDelta(RowData base, Long volumeDelta) {
+        ((GenericRowData) base).setField(RawTableColumns.VOLUME_DELTA, volumeDelta);
         return base;
     }
 

@@ -1,5 +1,7 @@
 package com.trading.common.config;
 
+import com.trading.common.schema.RawTableSchema;
+
 import java.util.Map;
 import java.util.Set;
 
@@ -37,13 +39,17 @@ public final class PlatformConfig {
 
     // ---- raw_table_1 schema contract ----
     /**
-     * Authoritative {@code raw_table_1.schema_version} value — DDL 02_raw_table_1.sql
-     * "Schema version: 3" (the 21-column v3 layout with event_day partitioning).
-     * Ingestion writes
-     * this value and SignalJob's {@code RAW_SCHEMA_VERSION} default derives from it,
-     * so the producer label and the consumer default cannot drift apart.
+     * Authoritative {@code raw_table_1.schema_version} value. Ingestion writes this
+     * value and SignalJob's {@code RAW_SCHEMA_VERSION} default derives from it, so the
+     * producer label and the consumer default cannot drift apart.
+     *
+     * <p>Delegates to {@link RawTableSchema#ROW_SCHEMA_VERSION} rather than repeating
+     * the literal: the DDL header, the writer layout and the reader's compliance check
+     * all key off one number, and a v5 bump that missed this constant would make every
+     * row claim the wrong version — exactly the drift the four-way schema contract
+     * exists to prevent (it happened here for v3 -> v4: this literal stayed "3").
      */
-    public static final String RAW_TABLE_1_SCHEMA_VERSION = "3";
+    public static final String RAW_TABLE_1_SCHEMA_VERSION = RawTableSchema.ROW_SCHEMA_VERSION;
 
     // ---- dedup / candles (reject-startup values) ----
     // G-DEDUP-4 (2026-09-03 redesign): per-token recent-fingerprint bound for

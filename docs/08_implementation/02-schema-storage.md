@@ -307,6 +307,21 @@ upstream is complete.
 > auto-partition DAY naming is `yyyyMMdd`; client dynamic partitioning
 > (on by default) creates today's partition on first write. Ops surface and
 > known failure modes: `06_operations/07-lake-archive-ops.md`.
+>
+> **raw_table_1 v4 (2026-09-24):** the table now stores every full-mode field the
+> bridge already carried: 51 columns appended after `schema_version` (indexes
+> 0-20 unchanged), all `BIGINT NULL`, taking the contract to 72 columns. Applied
+> as an in-place `ALTER TABLE ... ADD COLUMN` on the live table (203 MB/day of
+> rows per day-partition -- a drop/recreate would have needed the archive dance
+> for no benefit), so partition keys, retention and the lake layout are
+> untouched, and a pre-v4 row reads NULL in every appended column.
+>
+> The contract files move together or the service refuses to boot:
+> `common/RawTableSchema`, `compute/RawTableColumns` (static validator),
+> `02_raw_table_1.sql`, `schema_manifest.json`, plus `PlatformConfig` and
+> `TypedFlussRowConverter.TickRow`, which are each verified against the schema at
+> class load. See `08_implementation/03-ingestion.md` for the per-feed NULL matrix
+> and the `volume_delta` / `tick_type` semantics.
 
 #### Phase D: Runtime enforcement (straddles Ingestion, Signal, Executor phases)
 

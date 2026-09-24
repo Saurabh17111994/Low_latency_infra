@@ -70,6 +70,24 @@ class TypedFlussRowConverterTest {
     }
 
     @Test
+    @DisplayName("v4: tick_type needs a positive volume_delta, not just TRADE validity")
+    void tickTypeFollowsVolumeDeltaNotValidity() throws Exception {
+        FakeTypedWriter writer = new FakeTypedWriter();
+        TypedFlussRowConverter converter =
+                new TypedFlussRowConverter(writer, new FakeConnection(), "default.raw_table_1");
+        converter.append(TickPacketFixtures.validTrade(1)).get();
+        converter.append(TickPacketFixtures.validTradeWithQty(2, 25L, 100L, 0L)).get();
+        assertEquals("TRADE", writer.rows.get(0).tick_type,
+                "a trade tick that moved quantity is a TRADE");
+        assertEquals("QUOTE", writer.rows.get(1).tick_type,
+                "VALID_TRADE validity with a zero delta must NOT be TRADE: the v4 live read-back "
+                        + "found 4 of 4 TRADE rows carrying volume_delta=0, which is exactly what made "
+                        + "`WHERE tick_type = 'TRADE'` over-count by ~6x");
+        assertEquals(0L, (long) writer.rows.get(1).volume_delta,
+                "the delta itself is still stored as given — only the label is honest now");
+    }
+
+    @Test
     @DisplayName("P1-074: CancellationException survives without a RuntimeException wrap")
     void cancellationIdentityPreserved() {
         FakeTypedWriter writer = new FakeTypedWriter();
@@ -120,5 +138,18 @@ class TypedFlussRowConverterTest {
         converter.close(); // idempotent
         assertEquals(List.of("flush", "connection"), order,
                 "flush before connection, exactly once");
+    }
+
+    @Test
+    @DisplayName("P0: last_qty carries LTQ, never cumulative volume")
+    void lastQtyIsLtqNotVolume() throws Exception {
+        FakeTypedWriter writer = new FakeTypedWriter();
+        TypedFlussRowConverter converter =
+                new TypedFlussRowConverter(writer, new FakeConnection(), "default.raw_table_1");
+        // LTQ 62 vs cumulative volume 9,000,000 - the shape a real tick has.
+        converter.append(TickPacketFixtures.validTradeWithQty(1, 62L, 9_000_000L)).get();
+        assertEquals(62L, writer.rows.get(0).last_qty,
+                "last_qty must be LTQ: filling it from volume made "
+                        + "CandleAggregateFunction:102 sum cumulative volume into candle volume");
     }
 }

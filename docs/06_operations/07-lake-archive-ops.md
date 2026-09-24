@@ -6,7 +6,7 @@
 
 ## Scope
 
-- **Table**: `default.raw_table_1` v3 — 21 columns, `event_day STRING`
+- **Table**: `default.raw_table_1` v4 — 72 columns (indexes 0-20 unchanged as v3; 51 full-mode columns appended at 21-71, all BIGINT NULL), `event_day STRING`
   (yyyyMMdd, Asia/Kolkata) first, `PARTITIONED BY (event_day)`, auto-partition
   DAY (precreate 2 / retention 7d), bucket key `instrument_token` (16 buckets),
   `table.datalake.enabled=true`.

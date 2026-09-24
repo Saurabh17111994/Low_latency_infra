@@ -7,11 +7,17 @@ import java.util.List;
 /**
  * Physical column layout of {@code raw_table_1} as consumed by the Signal job.
  *
- * <p>Must mirror {@code code/01_platform/02_sql/ddl/02_raw_table_1.sql} v3 (21
+ * <p>Must mirror {@code code/01_platform/02_sql/ddl/02_raw_table_1.sql} v4 (72
  * columns) exactly. The Fluss source's {@code RowDataDeserializationSchema}
  * produces rows in table column order, so field indexes are the DDL positions.
  * v2 (R-054/R-231) removed the quote (bid/ask) and option columns — do not
- * re-add indexes for them.
+ * v2 indexes are NOT reused and must not be, but v4 brings quote data back as the
+ * flat bid_/ask_ block at indexes 31-60.
+ *
+ * <p>Only the columns this job reads get a named constant. Order for the rest is
+ * still enforced: {@link #validateSchemaContract} compares all 72 names against
+ * {@link RawTableSchema#COLUMNS} at class load, so a shift cannot go unnoticed.
+ * Add a constant when you add a reader, not in advance.
  */
 public final class RawTableColumns {
 
@@ -39,15 +45,32 @@ public final class RawTableColumns {
     public static final int VALIDITY_REASON = 19;
     public static final int SCHEMA_VERSION = 20;
 
-    public static final int FIELD_COUNT = 21;
+    // --- v4: full-mode field capture (indexes 21-71, all BIGINT NULL) ---
+    /**
+     * Traded qty since the previous tick for this token: 0 = no trade, NULL = unknown
+     * baseline. Candle volume sums THIS; {@link #LAST_QTY} is a last-trade size, not an
+     * increment, so summing it under-counts batched trades.
+     */
+    public static final int VOLUME_DELTA = 27;
+
+    public static final int FIELD_COUNT = 72;
 
     /** DDL column names in index order (diagnostics). Do not expose mutably. */
     private static final String[] NAMES = {
-        "event_day", "event_fingerprint", "fingerprint_version", "connection_id",
-        "connection_epoch", "instrument_token", "exchange", "symbol", "event_time",
-        "ingest_ts", "ack_ts", "tick_type", "last_price_paise", "last_qty", "raw_payload",
-        "payload_hash", "decoder_version", "protocol_version", "validity_state",
-        "validity_reason", "schema_version"
+         "event_day", "event_fingerprint", "fingerprint_version", "connection_id",
+         "connection_epoch", "instrument_token", "exchange", "symbol", "event_time",
+         "ingest_ts", "ack_ts", "tick_type", "last_price_paise", "last_qty", "raw_payload",
+         "payload_hash", "decoder_version", "protocol_version", "validity_state",
+         "validity_reason", "schema_version", "open_paise", "high_paise", "low_paise",
+         "close_paise", "vwap_paise", "volume", "volume_delta", "total_buy_qty",
+         "total_sell_qty", "open_interest", "bid_px_1", "bid_px_2", "bid_px_3", "bid_px_4",
+         "bid_px_5", "bid_qty_1", "bid_qty_2", "bid_qty_3", "bid_qty_4", "bid_qty_5",
+         "bid_ord_1", "bid_ord_2", "bid_ord_3", "bid_ord_4", "bid_ord_5", "ask_px_1",
+         "ask_px_2", "ask_px_3", "ask_px_4", "ask_px_5", "ask_qty_1", "ask_qty_2", "ask_qty_3",
+         "ask_qty_4", "ask_qty_5", "ask_ord_1", "ask_ord_2", "ask_ord_3", "ask_ord_4",
+         "ask_ord_5", "change_flag", "oi_day_high", "oi_day_low", "lower_limit_paise",
+         "upper_limit_paise", "imbalance_qty", "indicative_close_paise", "ref_price_paise",
+         "last_traded_time", "atv", "btv"
     };
 
     public static final List<String> COLUMN_NAMES = List.copyOf(Arrays.asList(NAMES));
@@ -75,6 +98,7 @@ public final class RawTableColumns {
         check(VALIDITY_STATE == RawTableSchema.COLUMNS.indexOf("validity_state"), "VALIDITY_STATE");
         check(VALIDITY_REASON == RawTableSchema.COLUMNS.indexOf("validity_reason"), "VALIDITY_REASON");
         check(SCHEMA_VERSION == RawTableSchema.COLUMNS.indexOf("schema_version"), "SCHEMA_VERSION");
+        check(VOLUME_DELTA == RawTableSchema.COLUMNS.indexOf("volume_delta"), "VOLUME_DELTA");
     }
 
     private static void check(boolean ok, String col) {

@@ -103,9 +103,14 @@ type MarketTick struct {
 	// Closing Auction Session (CAS) trailer fields — appended (+16 bytes) to
 	// every mode after ~15:15 IST (imbalance_qty i64 + indicative_close i32 +
 	// ref_price i32). Zero unless a CAS frame was parsed.
-	ImbalanceQty      int64        `json:"imbalanceQty,omitempty"`
-	IndicativeClose   int32        `json:"indicativeClose,omitempty"`
-	RefPrice          int32        `json:"refPrice,omitempty"`
+	ImbalanceQty    int64 `json:"imbalanceQty,omitempty"`
+	IndicativeClose int32 `json:"indicativeClose,omitempty"`
+	RefPrice        int32 `json:"refPrice,omitempty"`
+	// HasCAS reports whether those three came off the wire. The parser decides by
+	// frame length (13/17/93/241/249 carry no trailer, 29/33/109/257/265 do), so
+	// without this flag "the auction reported a balanced book" (0) and "we are not
+	// in the auction window" (absent) reach a row as the same zero.
+	HasCAS bool `json:"hasCAS,omitempty"`
 }
 
 type DataStream struct {
@@ -321,6 +326,7 @@ func ParseMarketTick(data []byte) (MarketTick, error) {
 		return MarketTick{}, fmt.Errorf("unsupported market tick base size: %d (frame %d)", len(base), len(data))
 	}
 	if len(cas) == 16 {
+		tick.HasCAS = true
 		tick.ImbalanceQty = beI64(cas[0:8])
 		tick.IndicativeClose = beI32(cas[8:12])
 		tick.RefPrice = beI32(cas[12:16])

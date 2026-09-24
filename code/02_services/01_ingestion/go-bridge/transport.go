@@ -96,6 +96,11 @@ func (t Tick) toMarketTick() marketdata.Tick {
 		ATV: t.ATV, BTV: t.BTV, OI: t.OI, TS: t.TS,
 		BidPx: t.BidPx, AskPx: t.AskPx, BidSz: t.BidSize, AskSz: t.AskSize,
 		BidOrd: t.BidOrd, AskOrd: t.AskOrd,
+		// v4 full-mode fields (see convert.go ToTickEvent for their presence rules)
+		LowerLimit: t.LowerLimit, UpperLimit: t.UpperLimit, LTTms: t.LTTms,
+		ChangeFlag: t.ChangeFlag, OIDayHigh: t.OIDayHigh, OIDayLow: t.OIDayLow,
+		Imbalance: t.Imbalance, Indicative: t.Indicative, RefPrice: t.RefPrice,
+		VolumeDelta: t.VolumeDelta,
 	}
 }
 

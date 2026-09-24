@@ -4,13 +4,13 @@
     {
       "table_name": "raw_table_1",
       "ddl_path": "02_raw_table_1.sql",
-      "ddl_sha256": "d4d4292b74ae42520d361979b51e4b9c382fd1a9279d381afb3fc03d67353e07",
+      "ddl_sha256": "75dfea3755972ce90a4aa3143215ef6575c52a1679b4220b6d5f377178b8a34f",
       "table_kind": "LOG",
       "bucket_key": "instrument_token",
       "primary_key": null,
       "compatibility_class": "UNKNOWN",
       "validated_matrix": "VM-FLUSS-SRV-005",
-      "schema_version": "3",
+      "schema_version": "4",
       "writer_owner": "Ingestion",
       "retention_policy": "9d",
       "lake_policy": "off"

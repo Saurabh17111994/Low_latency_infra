@@ -99,7 +99,7 @@ public interface TickEventOrBuilder extends
 
   /**
    * <pre>
-   * connection-local sequence (Q15: verify packet has real seq first)
+   * P1-281: BEST-EFFORT connection-local provenance (gap evidence + logging only — FlussClientAdapter persists NO sequence column in the 21-col row; broker resets/duplicates must never be treated as authoritative downstream).
    * </pre>
    *
    * <code>int64 feed_sequence_local = 6;</code>
@@ -306,6 +306,10 @@ public interface TickEventOrBuilder extends
   /**
    * <pre>
    * payload preservation (Q3, Q6) — never base64
+   * P1-320: BROKER-CONTROLLED, max 241B (full-tick mode); broker packet
+   * bytes pass through the bridge ungated per-event (MaxBytes is a flush
+   * TARGET, not a cap — batch.go:29-30). Bounded only at frame level
+   * (64MiB post-marshal gate + 1M event-count gate, see above).
    * </pre>
    *
    * <code>bytes raw_payload = 24;</code>
@@ -415,4 +419,217 @@ public interface TickEventOrBuilder extends
    * @return The goEmitMs.
    */
   long getGoEmitMs();
+
+  /**
+   * <pre>
+   * --- v4: full-mode field capture. Every field below is stored as a BIGINT
+   * NULL column at raw_table_1 index 33-44 (raw_table_1 indexes 21-71 in DDL
+   * order). "Absent" and "0" are different facts: the optional fields carry
+   * presence so the row can say NULL. The emit path decides it (marketdata
+   * ToTickEvent) because that is the one place that sees both the value and the
+   * feed; Java only has to honour presence. Which fields are optional is not
+   * cosmetic - change_flag 0, oi_day_high 0, imbalance_qty 0 and volume_delta 0
+   * are all real values, so a plain field would make "not reported" look like
+   * data. Everything not marked optional is reported by BOTH feeds.
+   * </pre>
+   *
+   * <code>optional int32 change_flag = 33;</code>
+   * @return Whether the changeFlag field is set.
+   */
+  boolean hasChangeFlag();
+  /**
+   * <pre>
+   * --- v4: full-mode field capture. Every field below is stored as a BIGINT
+   * NULL column at raw_table_1 index 33-44 (raw_table_1 indexes 21-71 in DDL
+   * order). "Absent" and "0" are different facts: the optional fields carry
+   * presence so the row can say NULL. The emit path decides it (marketdata
+   * ToTickEvent) because that is the one place that sees both the value and the
+   * feed; Java only has to honour presence. Which fields are optional is not
+   * cosmetic - change_flag 0, oi_day_high 0, imbalance_qty 0 and volume_delta 0
+   * are all real values, so a plain field would make "not reported" look like
+   * data. Everything not marked optional is reported by BOTH feeds.
+   * </pre>
+   *
+   * <code>optional int32 change_flag = 33;</code>
+   * @return The changeFlag.
+   */
+  int getChangeFlag();
+
+  /**
+   * <pre>
+   * standard feed only (MarketTick.OIDayHigh)
+   * </pre>
+   *
+   * <code>optional int64 oi_day_high = 34;</code>
+   * @return Whether the oiDayHigh field is set.
+   */
+  boolean hasOiDayHigh();
+  /**
+   * <pre>
+   * standard feed only (MarketTick.OIDayHigh)
+   * </pre>
+   *
+   * <code>optional int64 oi_day_high = 34;</code>
+   * @return The oiDayHigh.
+   */
+  long getOiDayHigh();
+
+  /**
+   * <pre>
+   * standard feed only (MarketTick.OIDayLow)
+   * </pre>
+   *
+   * <code>optional int64 oi_day_low = 35;</code>
+   * @return Whether the oiDayLow field is set.
+   */
+  boolean hasOiDayLow();
+  /**
+   * <pre>
+   * standard feed only (MarketTick.OIDayLow)
+   * </pre>
+   *
+   * <code>optional int64 oi_day_low = 35;</code>
+   * @return The oiDayLow.
+   */
+  long getOiDayLow();
+
+  /**
+   * <pre>
+   * both feeds: standard LowerLimit / HFT DprL
+   * </pre>
+   *
+   * <code>int64 lower_limit_paise = 36;</code>
+   * @return The lowerLimitPaise.
+   */
+  long getLowerLimitPaise();
+
+  /**
+   * <pre>
+   * both feeds: standard UpperLimit / HFT DprH
+   * </pre>
+   *
+   * <code>int64 upper_limit_paise = 37;</code>
+   * @return The upperLimitPaise.
+   */
+  long getUpperLimitPaise();
+
+  /**
+   * <pre>
+   * CAS trailer trio: standard feed only, appended to every mode from ~15:15 IST.
+   * optional because "no CAS frame yet" must reach the row as NULL, not as 0
+   * (imbalance_qty 0 during the auction means a balanced book, which is not the
+   * same fact as "outside the auction window").
+   * </pre>
+   *
+   * <code>optional int64 imbalance_qty = 38;</code>
+   * @return Whether the imbalanceQty field is set.
+   */
+  boolean hasImbalanceQty();
+  /**
+   * <pre>
+   * CAS trailer trio: standard feed only, appended to every mode from ~15:15 IST.
+   * optional because "no CAS frame yet" must reach the row as NULL, not as 0
+   * (imbalance_qty 0 during the auction means a balanced book, which is not the
+   * same fact as "outside the auction window").
+   * </pre>
+   *
+   * <code>optional int64 imbalance_qty = 38;</code>
+   * @return The imbalanceQty.
+   */
+  long getImbalanceQty();
+
+  /**
+   * <code>optional int64 indicative_close_paise = 39;</code>
+   * @return Whether the indicativeClosePaise field is set.
+   */
+  boolean hasIndicativeClosePaise();
+  /**
+   * <code>optional int64 indicative_close_paise = 39;</code>
+   * @return The indicativeClosePaise.
+   */
+  long getIndicativeClosePaise();
+
+  /**
+   * <code>optional int64 ref_price_paise = 40;</code>
+   * @return Whether the refPricePaise field is set.
+   */
+  boolean hasRefPricePaise();
+  /**
+   * <code>optional int64 ref_price_paise = 40;</code>
+   * @return The refPricePaise.
+   */
+  long getRefPricePaise();
+
+  /**
+   * <pre>
+   * last traded time, epoch MS: normalized per feed (standard LTT is seconds, HFT is microseconds)
+   * </pre>
+   *
+   * <code>int64 ltt_ms = 41;</code>
+   * @return The lttMs.
+   */
+  long getLttMs();
+
+  /**
+   * <pre>
+   * HFT only (average traded value)
+   * </pre>
+   *
+   * <code>optional int64 atv = 42;</code>
+   * @return Whether the atv field is set.
+   */
+  boolean hasAtv();
+  /**
+   * <pre>
+   * HFT only (average traded value)
+   * </pre>
+   *
+   * <code>optional int64 atv = 42;</code>
+   * @return The atv.
+   */
+  long getAtv();
+
+  /**
+   * <pre>
+   * HFT only (traded value)
+   * </pre>
+   *
+   * <code>optional int64 btv = 43;</code>
+   * @return Whether the btv field is set.
+   */
+  boolean hasBtv();
+  /**
+   * <pre>
+   * HFT only (traded value)
+   * </pre>
+   *
+   * <code>optional int64 btv = 43;</code>
+   * @return The btv.
+   */
+  long getBtv();
+
+  /**
+   * <pre>
+   * Per-tick traded quantity = cumulative day volume minus the previous tick's for
+   * the same token. 0 = no trade happened; unset = baseline unknown (first tick of
+   * the process for that token, or a counter reset). Candle volume must sum THIS;
+   * summing ltq (a last-trade size) under-counts batched trades.
+   * </pre>
+   *
+   * <code>optional int64 volume_delta = 44;</code>
+   * @return Whether the volumeDelta field is set.
+   */
+  boolean hasVolumeDelta();
+  /**
+   * <pre>
+   * Per-tick traded quantity = cumulative day volume minus the previous tick's for
+   * the same token. 0 = no trade happened; unset = baseline unknown (first tick of
+   * the process for that token, or a counter reset). Candle volume must sum THIS;
+   * summing ltq (a last-trade size) under-counts batched trades.
+   * </pre>
+   *
+   * <code>optional int64 volume_delta = 44;</code>
+   * @return The volumeDelta.
+   */
+  long getVolumeDelta();
 }

@@ -8,11 +8,20 @@ import org.apache.flink.table.data.StringData;
  * OHLCV aggregation over one 15-second event-time window (REQ-FC-002).
  *
  * <p>Every accepted row contributes to OHLC through its
- * {@code last_price_paise} — trades AND quotes, since the schema-v2 raw rows
- * carry no bid/ask depth (R-054/R-231); the last price is the only price a
- * quote carries. Volume and {@code tick_count} accumulate ONLY on
- * {@code tick_type = 'TRADE'} rows with {@code last_qty > 0}; quote rows and
- * zero-quantity trades contribute neither.
+ * {@code last_price_paise} — trades AND quotes; the last price is the only price
+ * a quote carries. (v4 stores bid/ask depth, so a future version may prefer a
+ * quote midpoint; v2/v3 rows have 0 ladders and R-054/R-231 removed the columns,
+ * which is why the last price is used here.)
+ *
+ * <p>Volume and {@code tick_count} accumulate ONLY on {@code tick_type = 'TRADE'}
+ * rows with a positive {@code volume_delta} — the quantity traded since the
+ * previous tick for that token. It is deliberately NOT {@code last_qty}: that is
+ * a single trade's size, so it under-counts when several trades land between two
+ * snapshots, and on a snapshot with no trade at all it repeats the previous value
+ * and made every periodic snapshot look like a trade (measured on the standard
+ * stream: 5 of 6 repeated tokens had a zero volume change). A NULL
+ * {@code volume_delta} means the baseline is unknown (first tick of a connection)
+ * and is never treated as 0 volume.
  *
  * <p>Open and close are taken from the row with the smallest / largest
  * {@code (event_time, event_fingerprint)} order key, not from arrival order —
@@ -97,7 +106,10 @@ public class CandleAggregateFunction implements AggregateFunction<RowData, Candl
         // zero decode (byte compare == string compare for UTF-8).
         // P2-019: constant-first equals — a null tick_type is non-TRADE, not NPE.
         StringData tickType = row.getString(RawTableColumns.TICK_TYPE);
-        long qty = row.isNullAt(RawTableColumns.LAST_QTY) ? 0L : row.getLong(RawTableColumns.LAST_QTY);
+        // v4: the traded quantity since the previous tick, not a single trade's size.
+        // NULL (unknown baseline) stays 0 here on purpose: we cannot know how much
+        // traded, and inventing the cumulative volume would be worse than skipping.
+        long qty = row.isNullAt(RawTableColumns.VOLUME_DELTA) ? 0L : row.getLong(RawTableColumns.VOLUME_DELTA);
         if (TRADE.equals(tickType) && qty > 0) {
             acc.volume += qty;
             acc.tickCount++;

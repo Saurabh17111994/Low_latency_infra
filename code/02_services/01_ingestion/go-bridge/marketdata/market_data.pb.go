@@ -132,7 +132,7 @@ type TickEvent struct {
 	Feed              string `protobuf:"bytes,29,opt,name=feed,proto3" json:"feed,omitempty"`                                                      // "hft" (Go Tick.Feed, not persisted to row but carried for parity)
 	TsMs              int64  `protobuf:"varint,4,opt,name=ts_ms,json=tsMs,proto3" json:"ts_ms,omitempty"`                                          // exchange timestamp (source time, preserved — Q29)
 	ReceivedMs        int64  `protobuf:"varint,5,opt,name=received_ms,json=receivedMs,proto3" json:"received_ms,omitempty"`                        // T1 (Go receipt)
-	FeedSequenceLocal int64  `protobuf:"varint,6,opt,name=feed_sequence_local,json=feedSequenceLocal,proto3" json:"feed_sequence_local,omitempty"` // connection-local sequence (Q15: verify packet has real seq first)
+	FeedSequenceLocal int64  `protobuf:"varint,6,opt,name=feed_sequence_local,json=feedSequenceLocal,proto3" json:"feed_sequence_local,omitempty"` // P1-281: BEST-EFFORT connection-local provenance (gap evidence + logging only — FlussClientAdapter persists NO sequence column in the 21-col row; broker resets/duplicates must never be treated as authoritative downstream).
 	// market data — prices are integer paise, never float (doc §28)
 	LtpPaise     int64    `protobuf:"varint,7,opt,name=ltp_paise,json=ltpPaise,proto3" json:"ltp_paise,omitempty"`
 	ClosePaise   int64    `protobuf:"varint,8,opt,name=close_paise,json=closePaise,proto3" json:"close_paise,omitempty"`
@@ -152,6 +152,10 @@ type TickEvent struct {
 	BidOrders    []uint32 `protobuf:"varint,22,rep,packed,name=bid_orders,json=bidOrders,proto3" json:"bid_orders,omitempty"` // Go [5]uint16 — uint32 for proto3 (no uint16)
 	AskOrders    []uint32 `protobuf:"varint,23,rep,packed,name=ask_orders,json=askOrders,proto3" json:"ask_orders,omitempty"`
 	// payload preservation (Q3, Q6) — never base64
+	// P1-320: BROKER-CONTROLLED, max 241B (full-tick mode); broker packet
+	// bytes pass through the bridge ungated per-event (MaxBytes is a flush
+	// TARGET, not a cap — batch.go:29-30). Bounded only at frame level
+	// (64MiB post-marshal gate + 1M event-count gate, see above).
 	RawPayload         []byte `protobuf:"bytes,24,opt,name=raw_payload,json=rawPayload,proto3" json:"raw_payload,omitempty"` // EXACT original broker packet bytes
 	FingerprintVersion string `protobuf:"bytes,25,opt,name=fingerprint_version,json=fingerprintVersion,proto3" json:"fingerprint_version,omitempty"`
 	EventFingerprint   string `protobuf:"bytes,26,opt,name=event_fingerprint,json=eventFingerprint,proto3" json:"event_fingerprint,omitempty"` // computed in Java (Q19); Go does NOT compute
@@ -161,8 +165,37 @@ type TickEvent struct {
 	PayloadHash []byte `protobuf:"bytes,30,opt,name=payload_hash,json=payloadHash,proto3" json:"payload_hash,omitempty"`
 	// T8 staged-latency timestamps (ms epoch, monotonic — never persisted,
 	// transport-only provenance for the T8 latency budget):
-	GoReceivedMs  int64 `protobuf:"varint,31,opt,name=go_received_ms,json=goReceivedMs,proto3" json:"go_received_ms,omitempty"` // T1: Go bridge receipt (source of received_ms)
-	GoEmitMs      int64 `protobuf:"varint,32,opt,name=go_emit_ms,json=goEmitMs,proto3" json:"go_emit_ms,omitempty"`             // T6: Go batcher Add (before proto marshal/write)
+	GoReceivedMs int64 `protobuf:"varint,31,opt,name=go_received_ms,json=goReceivedMs,proto3" json:"go_received_ms,omitempty"` // T1: Go bridge receipt (source of received_ms)
+	GoEmitMs     int64 `protobuf:"varint,32,opt,name=go_emit_ms,json=goEmitMs,proto3" json:"go_emit_ms,omitempty"`             // T6: Go batcher Add (before proto marshal/write)
+	// --- v4: full-mode field capture. Every field below is stored as a BIGINT
+	// NULL column at raw_table_1 index 33-44 (raw_table_1 indexes 21-71 in DDL
+	// order). "Absent" and "0" are different facts: the optional fields carry
+	// presence so the row can say NULL. The emit path decides it (marketdata
+	// ToTickEvent) because that is the one place that sees both the value and the
+	// feed; Java only has to honour presence. Which fields are optional is not
+	// cosmetic - change_flag 0, oi_day_high 0, imbalance_qty 0 and volume_delta 0
+	// are all real values, so a plain field would make "not reported" look like
+	// data. Everything not marked optional is reported by BOTH feeds.
+	ChangeFlag      *int32 `protobuf:"varint,33,opt,name=change_flag,json=changeFlag,proto3,oneof" json:"change_flag,omitempty"`            // standard feed only (MarketTick.ChangeFlag); no HFT equivalent
+	OiDayHigh       *int64 `protobuf:"varint,34,opt,name=oi_day_high,json=oiDayHigh,proto3,oneof" json:"oi_day_high,omitempty"`             // standard feed only (MarketTick.OIDayHigh)
+	OiDayLow        *int64 `protobuf:"varint,35,opt,name=oi_day_low,json=oiDayLow,proto3,oneof" json:"oi_day_low,omitempty"`                // standard feed only (MarketTick.OIDayLow)
+	LowerLimitPaise int64  `protobuf:"varint,36,opt,name=lower_limit_paise,json=lowerLimitPaise,proto3" json:"lower_limit_paise,omitempty"` // both feeds: standard LowerLimit / HFT DprL
+	UpperLimitPaise int64  `protobuf:"varint,37,opt,name=upper_limit_paise,json=upperLimitPaise,proto3" json:"upper_limit_paise,omitempty"` // both feeds: standard UpperLimit / HFT DprH
+	// CAS trailer trio: standard feed only, appended to every mode from ~15:15 IST.
+	// optional because "no CAS frame yet" must reach the row as NULL, not as 0
+	// (imbalance_qty 0 during the auction means a balanced book, which is not the
+	// same fact as "outside the auction window").
+	ImbalanceQty         *int64 `protobuf:"varint,38,opt,name=imbalance_qty,json=imbalanceQty,proto3,oneof" json:"imbalance_qty,omitempty"`
+	IndicativeClosePaise *int64 `protobuf:"varint,39,opt,name=indicative_close_paise,json=indicativeClosePaise,proto3,oneof" json:"indicative_close_paise,omitempty"`
+	RefPricePaise        *int64 `protobuf:"varint,40,opt,name=ref_price_paise,json=refPricePaise,proto3,oneof" json:"ref_price_paise,omitempty"`
+	LttMs                int64  `protobuf:"varint,41,opt,name=ltt_ms,json=lttMs,proto3" json:"ltt_ms,omitempty"` // last traded time, epoch MS: normalized per feed (standard LTT is seconds, HFT is microseconds)
+	Atv                  *int64 `protobuf:"varint,42,opt,name=atv,proto3,oneof" json:"atv,omitempty"`            // HFT only (average traded value)
+	Btv                  *int64 `protobuf:"varint,43,opt,name=btv,proto3,oneof" json:"btv,omitempty"`            // HFT only (traded value)
+	// Per-tick traded quantity = cumulative day volume minus the previous tick's for
+	// the same token. 0 = no trade happened; unset = baseline unknown (first tick of
+	// the process for that token, or a counter reset). Candle volume must sum THIS;
+	// summing ltq (a last-trade size) under-counts batched trades.
+	VolumeDelta   *int64 `protobuf:"varint,44,opt,name=volume_delta,json=volumeDelta,proto3,oneof" json:"volume_delta,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -417,6 +450,90 @@ func (x *TickEvent) GetGoReceivedMs() int64 {
 func (x *TickEvent) GetGoEmitMs() int64 {
 	if x != nil {
 		return x.GoEmitMs
+	}
+	return 0
+}
+
+func (x *TickEvent) GetChangeFlag() int32 {
+	if x != nil && x.ChangeFlag != nil {
+		return *x.ChangeFlag
+	}
+	return 0
+}
+
+func (x *TickEvent) GetOiDayHigh() int64 {
+	if x != nil && x.OiDayHigh != nil {
+		return *x.OiDayHigh
+	}
+	return 0
+}
+
+func (x *TickEvent) GetOiDayLow() int64 {
+	if x != nil && x.OiDayLow != nil {
+		return *x.OiDayLow
+	}
+	return 0
+}
+
+func (x *TickEvent) GetLowerLimitPaise() int64 {
+	if x != nil {
+		return x.LowerLimitPaise
+	}
+	return 0
+}
+
+func (x *TickEvent) GetUpperLimitPaise() int64 {
+	if x != nil {
+		return x.UpperLimitPaise
+	}
+	return 0
+}
+
+func (x *TickEvent) GetImbalanceQty() int64 {
+	if x != nil && x.ImbalanceQty != nil {
+		return *x.ImbalanceQty
+	}
+	return 0
+}
+
+func (x *TickEvent) GetIndicativeClosePaise() int64 {
+	if x != nil && x.IndicativeClosePaise != nil {
+		return *x.IndicativeClosePaise
+	}
+	return 0
+}
+
+func (x *TickEvent) GetRefPricePaise() int64 {
+	if x != nil && x.RefPricePaise != nil {
+		return *x.RefPricePaise
+	}
+	return 0
+}
+
+func (x *TickEvent) GetLttMs() int64 {
+	if x != nil {
+		return x.LttMs
+	}
+	return 0
+}
+
+func (x *TickEvent) GetAtv() int64 {
+	if x != nil && x.Atv != nil {
+		return *x.Atv
+	}
+	return 0
+}
+
+func (x *TickEvent) GetBtv() int64 {
+	if x != nil && x.Btv != nil {
+		return *x.Btv
+	}
+	return 0
+}
+
+func (x *TickEvent) GetVolumeDelta() int64 {
+	if x != nil && x.VolumeDelta != nil {
+		return *x.VolumeDelta
 	}
 	return 0
 }
@@ -722,7 +839,7 @@ const file_market_data_proto_rawDesc = "" +
 	"\n" +
 	"created_ms\x18\x04 \x01(\x03R\tcreatedMs\x12-\n" +
 	"\x06events\x18\x05 \x03(\v2\x15.marketdata.TickEventR\x06events\x12,\n" +
-	"\x12batch_payload_hash\x18\x06 \x01(\fR\x10batchPayloadHash\"\xf1\a\n" +
+	"\x12batch_payload_hash\x18\x06 \x01(\fR\x10batchPayloadHash\"\xc7\f\n" +
 	"\tTickEvent\x12\x17\n" +
 	"\aslot_id\x18\x01 \x01(\tR\x06slotId\x12\x12\n" +
 	"\x04mode\x18\x02 \x01(\tR\x04mode\x12\x14\n" +
@@ -765,7 +882,30 @@ const file_market_data_proto_rawDesc = "" +
 	"\fpayload_hash\x18\x1e \x01(\fR\vpayloadHash\x12$\n" +
 	"\x0ego_received_ms\x18\x1f \x01(\x03R\fgoReceivedMs\x12\x1c\n" +
 	"\n" +
-	"go_emit_ms\x18  \x01(\x03R\bgoEmitMs\"\xf5\x05\n" +
+	"go_emit_ms\x18  \x01(\x03R\bgoEmitMs\x12$\n" +
+	"\vchange_flag\x18! \x01(\x05H\x00R\n" +
+	"changeFlag\x88\x01\x01\x12#\n" +
+	"\voi_day_high\x18\" \x01(\x03H\x01R\toiDayHigh\x88\x01\x01\x12!\n" +
+	"\n" +
+	"oi_day_low\x18# \x01(\x03H\x02R\boiDayLow\x88\x01\x01\x12*\n" +
+	"\x11lower_limit_paise\x18$ \x01(\x03R\x0flowerLimitPaise\x12*\n" +
+	"\x11upper_limit_paise\x18% \x01(\x03R\x0fupperLimitPaise\x12(\n" +
+	"\rimbalance_qty\x18& \x01(\x03H\x03R\fimbalanceQty\x88\x01\x01\x129\n" +
+	"\x16indicative_close_paise\x18' \x01(\x03H\x04R\x14indicativeClosePaise\x88\x01\x01\x12+\n" +
+	"\x0fref_price_paise\x18( \x01(\x03H\x05R\rrefPricePaise\x88\x01\x01\x12\x15\n" +
+	"\x06ltt_ms\x18) \x01(\x03R\x05lttMs\x12\x15\n" +
+	"\x03atv\x18* \x01(\x03H\x06R\x03atv\x88\x01\x01\x12\x15\n" +
+	"\x03btv\x18+ \x01(\x03H\aR\x03btv\x88\x01\x01\x12&\n" +
+	"\fvolume_delta\x18, \x01(\x03H\bR\vvolumeDelta\x88\x01\x01B\x0e\n" +
+	"\f_change_flagB\x0e\n" +
+	"\f_oi_day_highB\r\n" +
+	"\v_oi_day_lowB\x10\n" +
+	"\x0e_imbalance_qtyB\x19\n" +
+	"\x17_indicative_close_paiseB\x12\n" +
+	"\x10_ref_price_paiseB\x06\n" +
+	"\x04_atvB\x06\n" +
+	"\x04_btvB\x0f\n" +
+	"\r_volume_delta\"\xf5\x05\n" +
 	"\rControlRecord\x12\x1f\n" +
 	"\vrecord_type\x18\x01 \x01(\tR\n" +
 	"recordType\x12)\n" +
@@ -832,6 +972,7 @@ func file_market_data_proto_init() {
 	if File_market_data_proto != nil {
 		return
 	}
+	file_market_data_proto_msgTypes[1].OneofWrappers = []any{}
 	file_market_data_proto_msgTypes[3].OneofWrappers = []any{
 		(*TransportFrame_MarketBatch)(nil),
 		(*TransportFrame_Control)(nil),

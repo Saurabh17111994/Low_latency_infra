@@ -71,6 +71,59 @@ final class TypedFlussRowConverter implements FlussRowConverter {
         public String validity_state;
         public String validity_reason;
         public String schema_version;
+        // --- v4 (indexes 21-71): all BIGINT NULL. Boxed Long so "absent" is
+        // --- distinguishable from 0, which is a real value for each of them. ---
+        public Long open_paise;
+        public Long high_paise;
+        public Long low_paise;
+        public Long close_paise;
+        public Long vwap_paise;
+        public Long volume;
+        public Long volume_delta;
+        public Long total_buy_qty;
+        public Long total_sell_qty;
+        public Long open_interest;
+        public Long bid_px_1;
+        public Long bid_px_2;
+        public Long bid_px_3;
+        public Long bid_px_4;
+        public Long bid_px_5;
+        public Long bid_qty_1;
+        public Long bid_qty_2;
+        public Long bid_qty_3;
+        public Long bid_qty_4;
+        public Long bid_qty_5;
+        public Long bid_ord_1;
+        public Long bid_ord_2;
+        public Long bid_ord_3;
+        public Long bid_ord_4;
+        public Long bid_ord_5;
+        public Long ask_px_1;
+        public Long ask_px_2;
+        public Long ask_px_3;
+        public Long ask_px_4;
+        public Long ask_px_5;
+        public Long ask_qty_1;
+        public Long ask_qty_2;
+        public Long ask_qty_3;
+        public Long ask_qty_4;
+        public Long ask_qty_5;
+        public Long ask_ord_1;
+        public Long ask_ord_2;
+        public Long ask_ord_3;
+        public Long ask_ord_4;
+        public Long ask_ord_5;
+        public Long change_flag;
+        public Long oi_day_high;
+        public Long oi_day_low;
+        public Long lower_limit_paise;
+        public Long upper_limit_paise;
+        public Long imbalance_qty;
+        public Long indicative_close_paise;
+        public Long ref_price_paise;
+        public Long last_traded_time;
+        public Long atv;
+        public Long btv;
     }
 
     // SC2 (2026-08-29): the POJO above is the SDK's reflection target, so its
@@ -117,9 +170,16 @@ final class TypedFlussRowConverter implements FlussRowConverter {
         // P1-061: 0 = unknown (R-010), aligned with the generic path (0L) —
         // NULL-vs-0 divergence broke IS NULL vs =0 queries across A/B modes.
         row.ack_ts = 0L;
-        row.tick_type = packet.validity() == com.trading.ingestion.model.ValidityClassification.VALID_NON_TRADE ? "QUOTE" : "TRADE";
+        // v4: identical rule to the generic path (IngestionService.processTickEvent) --
+        // TRADE means this tick actually moved quantity, which is the same quantity the
+        // candles sum. The old validity-only rule labelled every non-QUOTE row TRADE,
+        // including zero-delta snapshots, so `WHERE tick_type = 'TRADE'` over-counted
+        // roughly 6x (live read-back 2026-09-24: 4 of 4 TRADE rows had volume_delta=0).
+        Long volumeDelta = packet.volumeDelta();
+        row.tick_type = (packet.validity() == com.trading.ingestion.model.ValidityClassification.VALID_TRADE
+                && volumeDelta != null && volumeDelta > 0) ? "TRADE" : "QUOTE";
         row.last_price_paise = packet.lastPricePaise();
-        row.last_qty = packet.volume();
+        row.last_qty = packet.lastQty();
         row.raw_payload = raw != null ? raw.rawPayload() : new byte[0]; // P1-087: retained copy
         row.payload_hash = raw != null ? raw.payloadHash() : "";
         row.decoder_version = raw != null ? raw.decoderVersion() : "go-arrow-sdk";
@@ -127,6 +187,58 @@ final class TypedFlussRowConverter implements FlussRowConverter {
         row.validity_state = packet.validity().name();
         row.validity_reason = packet.validityReason() != null ? packet.validityReason() : "";
         row.schema_version = String.valueOf(packet.schemaVersion());
+        // v4: see FlussClientAdapter.append — the boxed values carry NULL through.
+        row.open_paise = packet.ohlcOpenPaise();
+        row.high_paise = packet.ohlcHighPaise();
+        row.low_paise = packet.ohlcLowPaise();
+        row.close_paise = packet.ohlcClosePaise();
+        row.vwap_paise = packet.averagePricePaise();
+        row.volume = packet.volume();
+        row.volume_delta = packet.volumeDelta();
+        row.total_buy_qty = packet.totalBuyQty();
+        row.total_sell_qty = packet.totalSellQty();
+        row.open_interest = packet.openInterest();
+        row.bid_px_1 = packet.bidPx()[0];
+        row.bid_px_2 = packet.bidPx()[1];
+        row.bid_px_3 = packet.bidPx()[2];
+        row.bid_px_4 = packet.bidPx()[3];
+        row.bid_px_5 = packet.bidPx()[4];
+        row.bid_qty_1 = packet.bidQty()[0];
+        row.bid_qty_2 = packet.bidQty()[1];
+        row.bid_qty_3 = packet.bidQty()[2];
+        row.bid_qty_4 = packet.bidQty()[3];
+        row.bid_qty_5 = packet.bidQty()[4];
+        row.bid_ord_1 = packet.bidOrd()[0];
+        row.bid_ord_2 = packet.bidOrd()[1];
+        row.bid_ord_3 = packet.bidOrd()[2];
+        row.bid_ord_4 = packet.bidOrd()[3];
+        row.bid_ord_5 = packet.bidOrd()[4];
+        row.ask_px_1 = packet.askPx()[0];
+        row.ask_px_2 = packet.askPx()[1];
+        row.ask_px_3 = packet.askPx()[2];
+        row.ask_px_4 = packet.askPx()[3];
+        row.ask_px_5 = packet.askPx()[4];
+        row.ask_qty_1 = packet.askQty()[0];
+        row.ask_qty_2 = packet.askQty()[1];
+        row.ask_qty_3 = packet.askQty()[2];
+        row.ask_qty_4 = packet.askQty()[3];
+        row.ask_qty_5 = packet.askQty()[4];
+        row.ask_ord_1 = packet.askOrd()[0];
+        row.ask_ord_2 = packet.askOrd()[1];
+        row.ask_ord_3 = packet.askOrd()[2];
+        row.ask_ord_4 = packet.askOrd()[3];
+        row.ask_ord_5 = packet.askOrd()[4];
+        row.change_flag = packet.changeFlag();
+        row.oi_day_high = packet.oiDayHigh();
+        row.oi_day_low = packet.oiDayLow();
+        row.lower_limit_paise = packet.lowerLimitPaise();
+        row.upper_limit_paise = packet.upperLimitPaise();
+        row.imbalance_qty = packet.imbalanceQty();
+        row.indicative_close_paise = packet.indicativeClosePaise();
+        row.ref_price_paise = packet.refPricePaise();
+        row.last_traded_time = packet.lastTradedTimeMs();
+        row.atv = packet.atv();
+        row.btv = packet.btv();
 
         return writer.append(row)
                 .thenApply(result -> new RawTickWriter.AppendResult(0, tablePath))
