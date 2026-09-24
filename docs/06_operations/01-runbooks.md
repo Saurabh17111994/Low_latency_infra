@@ -119,7 +119,15 @@ Two things the stop path guarantees, and one it does not:
 ## Execution_Gate recreate (v4 merge engine, CHG-122)
 
 **Trigger**: applying CHG-122 — adopting `table.merge-engine=versioned` on `fence_token`.
-`DdlApplyTool` only ever CREATEs and refuses a non-empty catalog, and Fluss ALTER stays create-mostly in 1.0.0 (`table.kv.ttl` alter rejected — 2026-09-22 probe), so an options change requires drop + create unless proven alterable.
+`DdlApplyTool` only ever CREATEs and refuses a non-empty catalog, and `table.merge-engine` is not in
+Fluss 1.0.0's 14-option ALTER allowlist (`FlussConfigUtils.ALTERABLE_TABLE_OPTIONS`), so this options
+change requires drop + create. The general rule is no longer "an options change requires drop +
+create": since the 2026-09-25 A1 probe, allowlisted options ALTER in place — `table.log.ttl` and
+`table.datalake.enabled` (on tables created after the cluster gained `datalake.format`) verified
+accepted and in force, evidence `logs/soak/a1-alter-probe-20260924T190226Z/`. Three cases still
+recreate: `table.kv.ttl` and `table.replication.factor` (both refused by name), and
+`table.datalake.enabled` on tables created **before** cluster datalake enablement (e.g.
+`raw_table_1` — guard B in `tiering-smoke.sh`).
 
 **Scope and severity**: planned maintenance. Gate KV fence/lease state is destroyed; the
 audit carrier is not (Iceberg lake + the store's immutable audit log). Live money must

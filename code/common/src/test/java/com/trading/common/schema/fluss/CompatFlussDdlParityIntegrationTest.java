@@ -221,7 +221,10 @@ class CompatFlussDdlParityIntegrationTest {
         // checksum — must be honored by the effective table, with exactly two
         // carve-outs: bucket.num / bucket.key are distribution (distributedBy,
         // not properties), and table.datalake.enabled is the documented dev
-        // deviation (forced false; lake-enable is create-only in 0.9.1). The
+        // deviation (forced false — dev runs without the lake and its tables
+        // predate cluster datalake enablement; NOT a create-only limit, 1.0.0
+        // can alter it on post-enablement tables: A1 probe 2026-09-25,
+        // logs/soak/a1-alter-probe-20260924T190226Z/). The
         // coordinator may stamp extras (replication.factor, cluster-inherited
         // datalake.format, kv.format-version) — those are not asserted.
         Map<String, String> effectiveOptions = info.getProperties().toMap();

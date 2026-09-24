@@ -24,10 +24,15 @@ import org.apache.fluss.types.DataTypes;
  *
  * <p>Dev deviation (deliberate, matches the live dev cluster): when a DDL
  * declares {@code table.datalake.enabled=true}, the applied descriptor forces
- * {@code false} — Fluss 0.9.1 lake-enable is create-only and collides with
- * orphaned R2 lake objects. Production DDLs keep {@code enabled=true} (the
- * blueprint); the dev cluster and this parser deviate, documented in
- * docs/08_implementation/02-schema-storage.md Phase C lake-state note.
+ * {@code false} — dev runs without the lake and the live tables were created
+ * before the cluster gained {@code datalake.format}, so the option is not
+ * alterable on them; recreating lake-enabled also collides with orphaned R2
+ * lake objects. (Not a create-only limit: 1.0.0 can ALTER the option in place
+ * on tables created after enablement — A1 probe 2026-09-25,
+ * logs/soak/a1-alter-probe-20260924T190226Z/.) Production DDLs keep
+ * {@code enabled=true} (the blueprint); the dev cluster and this parser
+ * deviate, documented in docs/08_implementation/02-schema-storage.md Phase C
+ * lake-state note.
  */
 public final class DdlText {
 

@@ -119,7 +119,7 @@ ZK_RAW="$(docker exec 01_docker-zookeeper-1 zkCli.sh get \
 ZK_TABLE="$(printf '%s\n' "$ZK_RAW" | grep -o 'table\.datalake\.enabled[^,}]*' | head -1 || true)"
 echo "ZK live property: ${ZK_TABLE:-<absent>}"
 printf '%s\n' "$ZK_TABLE" | grep -Eq 'table\.datalake\.enabled"?[[:space:]]*[=:][[:space:]]*"?true' \
-  || { echo "!! GUARD-B FAILED: raw_table_1 has table.datalake.enabled!=true in ZK — the tiering service will never pick it up. Fix: the table must be DROPped and re-created with the option (or the proof run against a freshly created table) — Fluss 1.0.0 refuses to alter this option on tables created before the cluster enabled datalake (InvalidAlterTableException, fluss-client LakeEnableTableITCase); an ALTER cannot work."; exit 1; }
+  || { echo "!! GUARD-B FAILED: raw_table_1 has table.datalake.enabled!=true in ZK — the tiering service will never pick it up. Fix: the table must be DROPped and re-created with the option (or the proof run against a freshly created table) — Fluss 1.0.0 refuses to alter this option on tables created before the cluster enabled datalake (InvalidAlterTableException, fluss-client LakeEnableTableITCase); an ALTER cannot work on this table — a table created after enablement can be enabled in place (A1 probe 2026-09-25, logs/soak/a1-alter-probe-20260924T190226Z/)."; exit 1; }
 
 # GUARD C (invalid R2 SigV4 region): R2 rejects AWS region names in the
 # credential scope with InvalidRegionName -> HTTP 400 on EVERY s3a request

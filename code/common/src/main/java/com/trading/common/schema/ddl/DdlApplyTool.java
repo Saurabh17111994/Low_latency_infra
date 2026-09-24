@@ -871,8 +871,12 @@ public final class DdlApplyTool {
         // be honored by the effective table, with exactly two carve-outs:
         //   * bucket.num / bucket.key are distribution, expressed via
         //     distributedBy, never table properties (Fluss rejects them);
-        //   * table.datalake.enabled is the documented dev deviation: lake-
-        //     enable is create-only in 0.9.1, so applies force it to false.
+        //   * table.datalake.enabled is the documented dev deviation: dev runs
+        //     without the lake and its live tables were created before the
+        //     cluster gained datalake.format, so applies force it to false.
+        //     NOT a create-only limit: 1.0.0 CAN alter it in place on tables
+        //     created after enablement — A1 probe 2026-09-25,
+        //     logs/soak/a1-alter-probe-20260924T190226Z/.
         // The coordinator may STAMP extra properties on top (replication.factor,
         // cluster-inherited datalake.format, kv.format-version) — those are not
         // asserted (reverse parity is impossible by design).
