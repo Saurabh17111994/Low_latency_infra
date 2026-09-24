@@ -24,13 +24,14 @@ IMAGE="${IMAGE:-01_docker-ingestion:latest}"
 NETWORK="${NETWORK:-01_docker_trading-net}"
 BOOTSTRAP="${BOOTSTRAP:-fluss-coordinator:9123}"
 CP_FILE="$ROOT/code/02_services/01_ingestion/target/cp.txt"
-PROBE="$SCRIPT_DIR/fluss-probes/CandleVerify.java"
+PROBE_NAME="CandleVerify"
+PROBE="$SCRIPT_DIR/fluss-probes/$PROBE_NAME.java"
 BUILD_DIR="${BUILD_DIR:-}"
 MINUTES=""
 TIMEFRAME="ONE_M"
 
 usage() {
-  echo "usage: candle-verify.sh --minutes <n> [--timeframe TF] [--bootstrap host:port] [--image REF] [--network NAME]" >&2
+  echo "usage: candle-verify.sh --minutes <n> [--timeframe TF] [--bootstrap host:port] [--image REF] [--network NAME] [--probe CLASS]" >&2
   exit 2
 }
 
@@ -38,6 +39,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --minutes)   [ $# -ge 2 ] || usage; MINUTES="$2"; shift 2 ;;
     --timeframe) [ $# -ge 2 ] || usage; TIMEFRAME="$2"; shift 2 ;;
+    --probe)     [ $# -ge 2 ] || usage; PROBE_NAME="$2"; PROBE="$SCRIPT_DIR/fluss-probes/$PROBE_NAME.java"; shift 2 ;;
     --bootstrap) [ $# -ge 2 ] || usage; BOOTSTRAP="$2"; shift 2 ;;
     --image)     [ $# -ge 2 ] || usage; IMAGE="$2"; shift 2 ;;
     --network)   [ $# -ge 2 ] || usage; NETWORK="$2"; shift 2 ;;
@@ -62,19 +64,29 @@ mkdir -p "$BUILD_DIR"
 # container then fails with "ClassNotFoundException: CandleVerify" - a confusing
 # symptom that costs a whole run. The mount is read-only, so 0755 is enough.
 chmod 755 "$BUILD_DIR"
-cp "$PROBE" "$BUILD_DIR/CandleVerify.java"
+[ -f "$PROBE" ] || { echo "candle-verify.sh: no such probe: $PROBE" >&2; exit 3; }
+cp "$PROBE" "$BUILD_DIR/$PROBE_NAME.java"
 
-javac -nowarn -cp "$(cat "$CP_FILE")" -d "$BUILD_DIR" "$BUILD_DIR/CandleVerify.java"
+javac -nowarn -cp "$(cat "$CP_FILE")" -d "$BUILD_DIR" "$BUILD_DIR/$PROBE_NAME.java"
 if [ $? -ne 0 ]; then
   echo "candle-verify.sh: compile failed" >&2
   [ "$own_build_dir" -eq 1 ] && rm -rf "$BUILD_DIR"
   exit 4
 fi
 
+# Each probe takes its own argv: CandleVerify wants a timeframe, EventDayProbe does
+# not. Built with set --/"$@" rather than a joined string, so no argument ever depends
+# on word-splitting.
+if [ "$PROBE_NAME" = "CandleVerify" ]; then
+  set -- "$MINUTES" "$TIMEFRAME"
+else
+  set -- "$MINUTES"
+fi
+
 # No exec here: the temp dir has to be cleaned up after docker returns.
 docker run --rm --network "$NETWORK" -v "$BUILD_DIR:/tmp/probe:ro" \
   --entrypoint java "$IMAGE" --add-opens=java.base/java.nio=ALL-UNNAMED \
-  -cp /tmp/probe:/app/ingestion.jar CandleVerify "$MINUTES" "$TIMEFRAME" --bootstrap "$BOOTSTRAP"
+  -cp /tmp/probe:/app/ingestion.jar "$PROBE_NAME" "$@" --bootstrap "$BOOTSTRAP"
 rc=$?
 [ "$own_build_dir" -eq 1 ] && rm -rf "$BUILD_DIR"
 exit "$rc"
