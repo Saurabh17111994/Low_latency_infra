@@ -147,6 +147,13 @@ ddl:
 	@echo "(Plain 'make ddl' only validates; run 'make ddl APPLY=1 EVIDENCE=<file>' to execute the contract.)"
 
 up:
+	# HAZARD (2026-09-24): when this recreates the Fluss layer, fluss-coordinator and
+	# fluss-tablet come back with no elected leader for raw_table_1's buckets. The
+	# ingestion container restarts into that window, logs LeaderNotAvailableException,
+	# exits 1, and the on-failure policy retries into the same wall - the feed stays down
+	# until it is started again against a healthy Fluss layer. Nothing makes ingestion wait
+	# for Fluss readiness and the Fluss services publish no healthcheck, so the fix (a
+	# readiness wait) is its own decision. Recovery: docker compose up -d --no-deps ingestion.
 	@echo "verifying deployed artifacts before the recreate (SKIP when an image is not built here)"
 	@$(STACK_LOCK) python3 code/01_platform/04_scripts/deployed_artifact_verify.py \
 		--target ingestion --image 01_docker-ingestion:latest
