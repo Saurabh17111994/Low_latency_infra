@@ -76,6 +76,19 @@ tests join it permanently, so every later wave is checked against all earlier on
 5. **Done = green gate with the wave's tests inside it**, then tick the findings
    in the audit file with `Fixed:` + commit evidence.
 
+## Plan trackers - standing execution protocol
+
+`docs/plans/2026-09-22-fluss-1.0-upgrade.md` and `docs/plans/2026-09-22-fluss-1.0-native-adoption.md`
+are **live trackers**: `## 0. Live tracker` in each is the single source of truth, item blocks are the
+evidence, and the native-adoption plan mirrors each marker at its own item location.
+
+When the operator says to implement an item (e.g. `A2`, `B16-L3`, `F8-4`) or a group ("Wave 0", "the
+offline ones") from either plan, apply `docs/plans/2026-09-24-plan-execution-protocol.md`
+automatically - do not make the operator restate the rules. It covers: verify-first, marker-based
+classification, window approvals, state-based post-conditions, smoke-before-run, landing (test + CHG +
+doc), the marker flips, and the operator-approval list. Tracker hygiene:
+`code/01_platform/04_scripts/plan_tracker.py --plan <plan> --write` / `--check`.
+
 ## Hazards
 
 - DDL in `code/01_platform/02_sql/ddl/` is reconciled proposals, NOT applied anywhere —
