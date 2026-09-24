@@ -2,7 +2,7 @@
 # ddl-apply-concurrency-bench.sh — how does the DDL apply behave when N of them run at once?
 #
 # Why: the certificate's step 11 is three full manifest applies (S1 full, S2 no-ack, S4
-# container bad-ownership) and the drill applies the same 27-table manifest again, so the
+# container bad-ownership) and the drill applies the same manifest again, so the
 # apply path is the largest single block of live work in the gate. The evidence report's
 # section 6 asked the obvious question — is any of it parallelisable, and what does the
 # cluster do when it is? — and this is the measurement, not the answer: it runs N applies

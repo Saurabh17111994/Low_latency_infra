@@ -19,7 +19,7 @@ regression coverage. This smoke provides it by running the REAL orchestrator CLI
       kv.format-version=2 + single-field subset bucket key — the former S3
       ran the IDENTICAL full apply as S2 with the no-op flag and asserted
       the same sentinels plus ack_mode, so it proved nothing S2 does not;
-      removed to save one full 27-table live cycle). The
+        removed to save one full live apply cycle). The
       refusal/acknowledgment machinery (exit 6 / exit 1) stays unit-tested
       for any FUTURE table that re-introduces bucket key == PK.
   S4  containerized    mounts a PRE-SEEDED bad-ownership evidence record
@@ -85,6 +85,14 @@ REPO_ROOT = ddl_apply.REPO_ROOT
 # the prediction list empty; the acknowledgment machinery stays unit-tested for
 # any future table shape that re-introduces bucket key == PK.
 EXPECTED_LIMITED = []
+# The applied-table count every full-PASS scenario must report. 26 since
+# 2026-09-23 moved the parked fingerprint_dedup DDL out of the applier's *.sql
+# enumeration (e75f92bc, 27 -> 26). Kept as a pinned number rather than read
+# back from schema_manifest.json, for the reason docs_audit C1 gives: only a
+# pin notices a table disappearing from the manifest and the DDL dir at once.
+# One constant for both scenarios — when that retirement updated only
+# docs_audit's copy of this number, step 11 failed here on the next run.
+APPLIED_TABLES = 26
 # Real capability evidence when present (enrich_evidence just records path+sha).
 REAL_EVIDENCE = os.path.join(
     REPO_ROOT, "logs", "schema-compat", "composite-pk-raw-client-20260815.md"
@@ -517,7 +525,7 @@ def main():
                    expect_rc=0,
                    expect_parts=[
                        "DDL-APPLY-RESULT: PASS exit=0",
-                       "ddl-apply: RESULT=PASS EXIT=0 TABLES=27 MANIFEST="],
+                         f"ddl-apply: RESULT=PASS EXIT=0 TABLES={APPLIED_TABLES} MANIFEST="],
                    expect_absent=["PASS_WITH_LIMITATION", "LIMITATION"],
                    check_evidence={"status": "PASS",
                                    "acknowledged_limitations": [],
@@ -534,7 +542,7 @@ def main():
                    expect_rc=0,
                    expect_parts=[
                        "DDL-APPLY-RESULT: PASS exit=0",
-                       "ddl-apply: RESULT=PASS EXIT=0 TABLES=27 MANIFEST="],
+                         f"ddl-apply: RESULT=PASS EXIT=0 TABLES={APPLIED_TABLES} MANIFEST="],
                    expect_absent=["PASS_WITH_LIMITATION", "LIMITATION",
                                   "REFUSED"],
                    check_evidence={"status": "PASS",

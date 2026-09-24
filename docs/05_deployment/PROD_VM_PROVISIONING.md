@@ -945,7 +945,7 @@ checks and its deploy in one step.
 ### S7b — Apply the DDL catalog (first boot only) `[PRODUCTION]`
 **Entry:** S7 green on a cluster whose Fluss catalog is still empty.
 **Why this step exists:** the stack deploys no DDL step of its own. `ingestion` starts with
-`allowRuntimeDdl=false` and exits fail-closed (`Fluss schema verification failed`) while the 27 tables of
+`allowRuntimeDdl=false` and exits fail-closed (`Fluss schema verification failed`) while the 26 tables of
 `02_sql/ddl/schema_manifest.json` are missing, so on a fresh cluster it never reaches `1/1` and the data
 loop cannot start. Nothing else in this sequence creates them.
 **Precondition — check it, do not assume it:** the catalog is EMPTY. The tool refuses a populated catalog
