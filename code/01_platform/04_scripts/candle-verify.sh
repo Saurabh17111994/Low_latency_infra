@@ -19,7 +19,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 IMAGE="${IMAGE:-01_docker-ingestion:latest}"
-NETWORK="${NETWORK:-01_docker-trading-net}"
+# Compose names it <project>_<network>: project = the compose directory name,
+# network = trading-net as defined in code/01_platform/01_docker/docker-compose.yml.
+NETWORK="${NETWORK:-01_docker_trading-net}"
 BOOTSTRAP="${BOOTSTRAP:-fluss-coordinator:9123}"
 CP_FILE="$ROOT/code/02_services/01_ingestion/target/cp.txt"
 PROBE="$SCRIPT_DIR/fluss-probes/CandleVerify.java"
@@ -56,6 +58,10 @@ if [ -z "$BUILD_DIR" ]; then
   own_build_dir=1
 fi
 mkdir -p "$BUILD_DIR"
+# mktemp creates 0700, which the container's non-root user cannot traverse, and the
+# container then fails with "ClassNotFoundException: CandleVerify" - a confusing
+# symptom that costs a whole run. The mount is read-only, so 0755 is enough.
+chmod 755 "$BUILD_DIR"
 cp "$PROBE" "$BUILD_DIR/CandleVerify.java"
 
 javac -nowarn -cp "$(cat "$CP_FILE")" -d "$BUILD_DIR" "$BUILD_DIR/CandleVerify.java"
