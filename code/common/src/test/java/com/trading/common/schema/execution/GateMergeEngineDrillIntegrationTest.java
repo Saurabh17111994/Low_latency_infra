@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.trading.common.model.GateState;
 import com.trading.common.schema.ddl.DdlText;
+import com.trading.common.schema.fluss.FlussPlacementAwait;
 import com.trading.common.schema.ownership.ExecutionGateColumns;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -73,6 +74,13 @@ class GateMergeEngineDrillIntegrationTest {
     private static final String DDL_FILE = "11_execution_gate.sql";
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
 
+    /**
+     * Fixture-readiness budget: bounded and logged, asserts nothing (CHG-212, CHG-213). The
+     * write budget above is left alone - a fresh table is waited for, never given more time to
+     * fail in.
+     */
+    private static final Duration READY_BUDGET = Duration.ofSeconds(240);
+
     private static String bootstrap;
     private static Connection connection;
     private static final List<String> CREATED = new ArrayList<>();
@@ -128,6 +136,13 @@ class GateMergeEngineDrillIntegrationTest {
         TableDescriptor descriptor = DdlText.toDescriptor(parsedDdl(), !datalakeEnabled);
         connection.getAdmin().createTable(TablePath.of("default", name), descriptor, false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        // Created is not usable: the first upsert waits for this table's bucket leaders, which
+        // is exactly the wait a 20 s write budget loses (gate step 9, 2026-09-24).
+        FlussPlacementAwait.awaitServing(
+                connection.getAdmin(),
+                TablePath.of("default", name),
+                "scratch " + name,
+                READY_BUDGET);
         CREATED.add(name);
         return name;
     }

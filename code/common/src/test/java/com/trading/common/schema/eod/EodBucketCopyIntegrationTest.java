@@ -3,6 +3,7 @@ package com.trading.common.schema.eod;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.trading.common.schema.fluss.FlussPlacementAwait;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -65,6 +66,13 @@ class EodBucketCopyIntegrationTest {
     private static final String PREFIX = "compat_test_eodcopy_";
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
 
+    /**
+     * Fixture-readiness budget: bounded and logged, asserts nothing (CHG-212, CHG-213). The
+     * write budget above is left alone - a fresh table is waited for, never given more time to
+     * fail in.
+     */
+    private static final Duration READY_BUDGET = Duration.ofSeconds(240);
+
     /** Two buckets, so the copy really uses its per-bucket worker pool. */
     private static final int BUCKETS = 2;
 
@@ -113,6 +121,11 @@ class EodBucketCopyIntegrationTest {
                 .build();
         connection.getAdmin().createTable(TablePath.of("default", name), td, false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                connection.getAdmin(),
+                TablePath.of("default", name),
+                "eod copy table " + name,
+                READY_BUDGET);
         CREATED_TABLES.add(name);
     }
 

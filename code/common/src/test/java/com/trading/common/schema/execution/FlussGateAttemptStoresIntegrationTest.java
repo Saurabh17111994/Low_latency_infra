@@ -7,6 +7,7 @@ import com.trading.common.model.GateState;
 import com.trading.common.schema.execution.AttemptStore.PrepareRequest;
 import com.trading.common.schema.execution.AttemptStore.PrepareResult;
 import com.trading.common.schema.execution.GateStateStore.FenceResult;
+import com.trading.common.schema.fluss.FlussPlacementAwait;
 import com.trading.common.schema.ownership.ExecutionAttemptsColumns;
 import com.trading.common.schema.ownership.ExecutionGateColumns;
 import java.time.Duration;
@@ -73,6 +74,14 @@ class FlussGateAttemptStoresIntegrationTest {
 
     private static final String PREFIX = "wp3_gate_atm_";
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
+
+    /**
+     * Fixture-readiness budget: bounded and logged, asserts nothing (CHG-212, CHG-213). The
+     * write budget above is left alone - a fresh table is waited for, never given more time to
+     * fail in.
+     */
+    private static final Duration READY_BUDGET = Duration.ofSeconds(240);
+
     private static final long NOW = 1_700_000_000_000L;
 
     private static String bootstrap;
@@ -135,6 +144,10 @@ class FlussGateAttemptStoresIntegrationTest {
                 throw e;
             }
         }
+        // The stores below are opened on these fresh tables, and a store's first
+        // fence/lease write is bounded by TIMEOUT, not by the placement window.
+        FlussPlacementAwait.awaitServing(
+                connection.getAdmin(), path, "store table " + name, READY_BUDGET);
         CREATED_TABLES.add(name);
         return name;
     }

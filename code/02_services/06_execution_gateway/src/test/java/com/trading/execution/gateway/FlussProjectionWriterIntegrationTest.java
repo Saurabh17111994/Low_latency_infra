@@ -1,6 +1,7 @@
 package com.trading.execution.gateway;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import com.trading.common.schema.fluss.FlussPlacementAwait;
 
 import java.time.Duration;
 import java.util.HashMap;
@@ -48,6 +49,14 @@ class FlussProjectionWriterIntegrationTest {
     private static final String ACCOUNT = "acct-live-proj";
     private static final String PARTITION = "part-live-proj";
     private static final Duration TIMEOUT = Duration.ofSeconds(5);
+
+    /**
+     * Fixture-readiness budget: bounded and logged, asserts nothing (CHG-212, CHG-213). The
+     * write budget above is left alone - a fresh table is waited for, never given more time to
+     * fail in.
+     */
+    private static final Duration READY_BUDGET = Duration.ofSeconds(240);
+
 
     @Test
     @DisplayName("WP-4: postback -> normalized envelope -> real FlussProjectionWriter lands projection rows")
@@ -308,6 +317,11 @@ class FlussProjectionWriterIntegrationTest {
         admin.createTable(TablePath.of(db, "Fills"),
                 TableDescriptor.builder().schema(s).distributedBy(8, "postback_event_id").build(), false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Fills"),
+                "Fills in " + db,
+                READY_BUDGET);
     }
 
     static void createOrderLifecycle(Admin admin, String db) throws Exception {
@@ -332,6 +346,11 @@ class FlussProjectionWriterIntegrationTest {
         admin.createTable(TablePath.of(db, "Order_Lifecycle"),
                 TableDescriptor.builder().schema(s).distributedBy(8, "account_scope_id").build(), false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Order_Lifecycle"),
+                "Order_Lifecycle in " + db,
+                READY_BUDGET);
     }
 
     static void createPositions(Admin admin, String db) throws Exception {
@@ -358,6 +377,11 @@ class FlussProjectionWriterIntegrationTest {
         admin.createTable(TablePath.of(db, "Positions"),
                 TableDescriptor.builder().schema(s).distributedBy(8, "position_id").build(), false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Positions"),
+                "Positions in " + db,
+                READY_BUDGET);
     }
 
     static void createPositionState(Admin admin, String db) throws Exception {
@@ -376,6 +400,11 @@ class FlussProjectionWriterIntegrationTest {
         admin.createTable(TablePath.of(db, "Position_State"),
                 TableDescriptor.builder().schema(s).distributedBy(16, "instrument_token").build(), false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Position_State"),
+                "Position_State in " + db,
+                READY_BUDGET);
     }
 
     static void createOrderCorrelation(Admin admin, String db) throws Exception {
@@ -396,6 +425,11 @@ class FlussProjectionWriterIntegrationTest {
         admin.createTable(TablePath.of(db, "Order_Correlation"),
                 TableDescriptor.builder().schema(s).distributedBy(8, "instruction_id").build(), false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Order_Correlation"),
+                "Order_Correlation in " + db,
+                READY_BUDGET);
     }
 
     static void createExecutionAudit(Admin admin, String db) throws Exception {
@@ -416,5 +450,10 @@ class FlussProjectionWriterIntegrationTest {
         admin.createTable(TablePath.of(db, "Execution_Audit"),
                 TableDescriptor.builder().schema(s).distributedBy(8, "audit_event_id").build(), false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Execution_Audit"),
+                "Execution_Audit in " + db,
+                READY_BUDGET);
     }
 }

@@ -2,6 +2,7 @@ package com.trading.execution.gateway;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
+import com.trading.common.schema.fluss.FlussPlacementAwait;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -37,6 +38,14 @@ import org.junit.jupiter.api.Tag;
 @Tag("integration")
 class GatewayFlussDurableReplayIntegrationTest {
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
+
+    /**
+     * Fixture-readiness budget: bounded and logged, asserts nothing (CHG-212, CHG-213). The
+     * write budget above is left alone - a fresh table is waited for, never given more time to
+     * fail in.
+     */
+    private static final Duration READY_BUDGET = Duration.ofSeconds(240);
+
 
     /**
      * Fixture readiness bound. Both ledger tests create their table milliseconds
@@ -316,6 +325,11 @@ class GatewayFlussDurableReplayIntegrationTest {
                 .schema(schema).distributedBy(8, "instruction_id").build();
         admin.createTable(TablePath.of(db, "Execution_Intent"), td, false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Execution_Intent"),
+                "Execution_Intent in " + db,
+                READY_BUDGET);
     }
 
     private static void createIntentProcessedKv(Admin admin, Connection conn, String db) throws Exception {
@@ -331,6 +345,11 @@ class GatewayFlussDurableReplayIntegrationTest {
                 .schema(schema).distributedBy(8, "instruction_id").build();
         admin.createTable(TablePath.of(db, "Execution_Intent_Processed"), td, false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Execution_Intent_Processed"),
+                "Execution_Intent_Processed in " + db,
+                READY_BUDGET);
     }
 
     private static void createProjectionLedgerKv(Admin admin, Connection conn, String db) throws Exception {
@@ -350,6 +369,11 @@ class GatewayFlussDurableReplayIntegrationTest {
                 .schema(schema).distributedBy(8, "postback_event_id").build();
         admin.createTable(TablePath.of(db, "Postback_Projection_Ledger"), td, false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Postback_Projection_Ledger"),
+                "Postback_Projection_Ledger in " + db,
+                READY_BUDGET);
     }
 
     private static NormalizedExecutionEvent event(String eventId) {

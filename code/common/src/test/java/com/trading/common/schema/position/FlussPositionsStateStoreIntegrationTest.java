@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.trading.common.model.PositionState;
+import com.trading.common.schema.fluss.FlussPlacementAwait;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -40,6 +41,13 @@ class FlussPositionsStateStoreIntegrationTest {
 
     private static final String PREFIX = "compat_test_pos_";
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
+
+    /**
+     * Fixture-readiness budget: bounded and logged, asserts nothing (CHG-212, CHG-213). The
+     * write budget above is left alone - a fresh table is waited for, never given more time to
+     * fail in.
+     */
+    private static final Duration READY_BUDGET = Duration.ofSeconds(240);
 
     private static String bootstrap;
     private static Connection connection;
@@ -107,6 +115,8 @@ class FlussPositionsStateStoreIntegrationTest {
                 throw e;
             }
         }
+        FlussPlacementAwait.awaitServing(
+                connection.getAdmin(), path, "positions table " + name, READY_BUDGET);
         CREATED_TABLES.add(name);
         return name;
     }

@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import com.trading.common.schema.ownership.ExecutionGateColumns;
+import com.trading.common.schema.fluss.FlussPlacementAwait;
 import com.trading.common.schema.fluss.WriteAwait;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -56,6 +57,14 @@ class B4HaltedIntentConsumeDeferE2ETest {
      * fails at 40s while the cluster is merely slow.
      */
     private static final Duration TIMEOUT = Duration.ofSeconds(45);
+
+    /**
+     * Fixture-readiness budget: bounded and logged, asserts nothing (CHG-212, CHG-213). The
+     * write budget above is left alone - a fresh table is waited for, never given more time to
+     * fail in.
+     */
+    private static final Duration READY_BUDGET = Duration.ofSeconds(240);
+
 
     /**
      * Fixture readiness bound: the five tables are created milliseconds before the
@@ -248,6 +257,11 @@ class B4HaltedIntentConsumeDeferE2ETest {
                 .schema(schema).distributedBy(8, "instruction_id").build();
         admin.createTable(TablePath.of(db, "Execution_Intent"), td, false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Execution_Intent"),
+                "Execution_Intent in " + db,
+                READY_BUDGET);
     }
 
     /** Execution_Intent_Processed KV — the durable dedup index (28_ DDL). */
@@ -264,6 +278,11 @@ class B4HaltedIntentConsumeDeferE2ETest {
                 .schema(schema).distributedBy(8, "instruction_id").build();
         admin.createTable(TablePath.of(db, "Execution_Intent_Processed"), td, false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Execution_Intent_Processed"),
+                "Execution_Intent_Processed in " + db,
+                READY_BUDGET);
     }
 
     /**
@@ -282,6 +301,11 @@ class B4HaltedIntentConsumeDeferE2ETest {
                 .schema(schema).distributedBy(8, "execution_partition_id").build();
         admin.createTable(TablePath.of(db, "Execution_Gate"), td, false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Execution_Gate"),
+                "Execution_Gate in " + db,
+                READY_BUDGET);
     }
 
     /** The production Execution_Gate shape, built from the single canonical column definition. */
@@ -321,6 +345,11 @@ class B4HaltedIntentConsumeDeferE2ETest {
                 .schema(schema).distributedBy(8, "execution_attempt_id").build();
         admin.createTable(TablePath.of(db, "Execution_Attempts"), td, false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Execution_Attempts"),
+                "Execution_Attempts in " + db,
+                READY_BUDGET);
     }
 
     /** Order_Lifecycle KV — EMPTY; nothing may be written while HALTED. */
@@ -335,6 +364,11 @@ class B4HaltedIntentConsumeDeferE2ETest {
                 .schema(schema).distributedBy(8, "account_scope_id").build();
         admin.createTable(TablePath.of(db, "Order_Lifecycle"), td, false)
                 .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        FlussPlacementAwait.awaitServing(
+                admin,
+                TablePath.of(db, "Order_Lifecycle"),
+                "Order_Lifecycle in " + db,
+                READY_BUDGET);
     }
 
     /** A canonical, validator-passing intent row (mirror of the signal-job write). */
