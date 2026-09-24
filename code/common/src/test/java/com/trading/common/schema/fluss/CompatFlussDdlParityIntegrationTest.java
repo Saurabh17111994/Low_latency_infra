@@ -91,7 +91,8 @@ class CompatFlussDdlParityIntegrationTest {
         manifest = MAPPER.readValue(
                 ddlDir.resolve("schema_manifest.json").toFile(), SchemaManifest.class);
         assertNotNull(manifest.tables, "manifest must carry tables");
-        assertEquals(27, manifest.tables.size(), "approved manifest must hold 27 tables");
+        // 26 since e75f92bc retired the parked fingerprint_dedup DDL (was 27).
+        assertEquals(26, manifest.tables.size(), "approved manifest must hold 26 tables");
         try {
             Configuration conf = new Configuration();
             conf.setString("bootstrap.servers", bootstrap);
