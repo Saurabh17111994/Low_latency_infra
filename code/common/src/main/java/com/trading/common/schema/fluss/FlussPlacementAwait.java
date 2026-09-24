@@ -46,7 +46,15 @@ import org.apache.fluss.types.DataTypes;
  * declares common's test-jar, so a test-scope helper was invisible to the gateway drills that
  * failed to compile - the same reason {@link WriteAwait} sits here. It imports nothing
  * test-scoped, so shipping it costs the jar nothing but the class file.
+ *
+ * <p>retry-exempt-file: this class is fixture-readiness support, not the runtime path - every caller
+ * is a drill or fixture class (2026-09-25: nine call sites, all under src/test). The bounded loop in
+ * this class IS the retry: it polls a caller-supplied deadline and fails loudly when it expires, so
+ * routing these probes through {@link BoundedRetry} would hand them the 2 s live-traffic request
+ * deadline that policy exists to enforce, and abort waits that legitimately take 11-95 ms to create
+ * a table and up to 41 s to place its buckets (measured on the 1.0.0 drill, 2026-09-24).
  */
+
 public final class FlussPlacementAwait {
 
     private FlussPlacementAwait() {}
