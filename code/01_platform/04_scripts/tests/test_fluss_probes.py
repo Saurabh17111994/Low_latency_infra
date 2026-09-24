@@ -234,6 +234,41 @@ class SeederPlacementPins(unittest.TestCase):
                       "a wait that never ends must name the table and fail, not write anyway")
 
 
+class ProbeStatsLeaderWaitPins(unittest.TestCase):
+    """2026-09-24: both census probes must wait out a bucket leader that is not there yet.
+
+    The CHG-221 fixture test failed with "Failed to get row count for the table
+    'default.zz_probe_fixture_intent'" / "Caused by: LeaderNotAvailableException: Server -1 is not
+    found in metadata cache" - seconds after the seeder had written the rows AND read the count
+    itself, so the table was real and the probe's own JVM simply hit a not-yet-placed bucket.
+
+    In Fluss 1.0.0 that failure is retriable but arrives wrapped: LeaderNotAvailableException is an
+    InvalidMetadataException (so a RetriableException), while FlussAdmin.getTableStats resolves the
+    bucket leader synchronously in sendTableStatsRequest and its catch (Exception) re-wraps it as a
+    FlussRuntimeException, which is NOT retriable. The client's own retry therefore never sees it
+    and no config can restore it: the caller has to retry, and has to look through the wrapper.
+    """
+
+    def _source(self, name: str) -> str:
+        return (PROBE_DIR / f"{name}.java").read_text(encoding="utf-8")
+
+    def test_both_probes_wait_out_a_missing_leader(self) -> None:
+        for name in ("FlussSignalLatency", "FlussRuleCounter"):
+            src = self._source(name)
+            self.assertIn("LeaderNotAvailableException", src,
+                          f"{name} must recognise the retriable no-leader failure")
+            self.assertIn("leaderNotAvailable(", src,
+                          f"{name} must walk the cause chain: Fluss wraps it in a wrapper that is "
+                          "not itself retriable")
+            self.assertIn("COUNT_WAIT_MS", src,
+                          f"{name} needs a bounded wait, not an unbounded one")
+
+    def test_the_count_still_fails_loudly_when_it_never_becomes_readable(self) -> None:
+        for name in ("FlussSignalLatency", "FlussRuleCounter"):
+            self.assertIn("could not read the server's row count for", self._source(name),
+                          f"{name} must still fail the census instead of skipping the statistic")
+
+
 class SentinelTests(ProbeTestBase):
     """P6-080: a failure after startup must still print __END__ and exit non-zero."""
 

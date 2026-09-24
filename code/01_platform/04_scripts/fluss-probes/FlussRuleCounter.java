@@ -255,6 +255,12 @@ public class FlussRuleCounter {
         return total;
     }
 
+    /** Budget for waiting out a bucket that has no leader yet (see {@link #tableRowCount}). */
+    private static final long COUNT_WAIT_MS = 60_000;
+    /** Per-call bound, so one stalled admin RPC cannot swallow the whole budget. */
+    private static final long COUNT_GET_MS = 10_000;
+    private static final long COUNT_POLL_MS = 250;
+
     /**
      * The number of rows Fluss itself reports for the table.
      *
@@ -264,16 +270,43 @@ public class FlussRuleCounter {
      * tiered storage.
      */
     private static long tableRowCount(Admin admin, TablePath path) throws Exception {
-        try {
-            TableStats stats = admin.getTableStats(path).get(60, java.util.concurrent.TimeUnit.SECONDS);
-            return stats.getRowCount();
-        } catch (java.util.concurrent.ExecutionException e) {
-            // An unreadable statistic would silently disable the check, so it is
-            // reported as a failure of the census rather than skipped.
-            throw new IllegalStateException("could not read the server's row count for " + path
-                    + " — this census compares its read against that count, so it does not run"
-                    + " without one: " + e.getCause(), e);
+        long deadline = System.currentTimeMillis() + COUNT_WAIT_MS;
+        while (true) {
+            try {
+                TableStats stats = admin.getTableStats(path)
+                        .get(COUNT_GET_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+                return stats.getRowCount();
+            } catch (Exception e) {
+                if (!leaderNotAvailable(e) || System.currentTimeMillis() >= deadline) {
+                    // An unreadable statistic would silently disable the check, so it is
+                    // reported as a failure of the census rather than skipped.
+                    throw new IllegalStateException("could not read the server's row count for "
+                            + path + " — this census compares its read against that count, so it"
+                            + " does not run without one: " + e, e);
+                }
+                // A table created moments ago can still have no bucket leader, and 1.0.0's
+                // FlussAdmin.getTableStats reports exactly that as a synchronous
+                // LeaderNotAvailableException re-wrapped in a NON-retriable FlussRuntimeException
+                // (sendTableStatsRequest throws; the caller's catch (Exception) wraps it), so the
+                // client's own retry never sees the retriable cause. Not-yet-placed is not a
+                // disagreement about the count: wait for the leader, bounded by COUNT_WAIT_MS.
+                Thread.sleep(COUNT_POLL_MS);
+            }
         }
+    }
+
+    /**
+     * True when the failure is the retriable "no leader for that bucket yet" one, however deep the
+     * client wrapped it: {@code LeaderNotAvailableException} is an InvalidMetadataException, which
+     * Fluss declares retriable, while the FlussRuntimeException above it is not.
+     */
+    private static boolean leaderNotAvailable(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof org.apache.fluss.exception.LeaderNotAvailableException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
