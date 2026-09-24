@@ -910,6 +910,15 @@ explicitly, because "not submitted" is not "fails closed":
   RUNNING jobs: `Babysitter Positions observer` and `signal-job-compute`. So this stack
   exercises no safety-consumer path at all, and no live claim about it should be read
   into the numbers reported elsewhere in this file.
+- The gate's decisions have no reader yet. `SuppressionGate` publishes `ALLOW` /
+  `SUPPRESS_NEW` / `DISCARD_INFLIGHT` per token, and every caller of it is inside the safety
+  package itself; the execution bridge that would enforce those decisions is not part of this
+  stack. So what a live consumer run can demonstrate today is "row consumed, tracker applied,
+  decision published" - not "an order was blocked", and the difference matters when this
+  section is cited as trading-safety evidence.
+- What *is* enforced, and now pinned by a test: in `DEPLOYMENT_ENV=production` the launcher
+  refuses to start without `SAFETY_MANIFEST_TOKENS` (FATAL, exit 1, before the safety job is
+  considered). Running without the safety consumer is a configuration error, not a warning.
 - To produce live fail-closed evidence: set `SAFETY_MANIFEST_TOKENS` as a **container-level**
   env var (the launcher reads `System.getenv()` in the JobManager JVM, so
   `docker compose run -e` cannot reach it), relaunch, then upsert an `UNSAFE` row into

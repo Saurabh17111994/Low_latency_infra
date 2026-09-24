@@ -9,10 +9,11 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 LAUNCHER="${DIR}/../submit-jobs.sh"
 PASS=0; FAIL=0
 
-# run_case name scenario expect_rc expect_grep [port] [jm_value]
+# run_case name scenario expect_rc expect_grep [port] [jm_value] [submit_signal] [extra_env]
+# extra_env is a word-split assignment list, e.g. "DEPLOYMENT_ENV=production STATE_BACKEND=rocksdb".
 run_case() {
 	local name="$1" scenario="$2" expect_rc="$3" expect_grep="$4"
-	local port="${5:-8081}" jm="${6:-127.0.0.1}" submit_signal="${7:-0}"
+	local port="${5:-8081}" jm="${6:-127.0.0.1}" submit_signal="${7:-0}" extra_env="${8:-}"
 	local jar out rc stub
 	jar="$(mktemp)"; echo dummy > "$jar"
 	STUB_SCENARIO="$scenario" STUB_PORT="$port" python3 "${DIR}/stub-jm.py" & stub=$!
@@ -20,7 +21,8 @@ run_case() {
 		curl -fsS "http://127.0.0.1:${port}/v1/config" >/dev/null 2>&1 && break
 		sleep 0.1
 	done
-	out=$(FLINK_JOBMANAGER="$jm" COMPUTE_SUBMIT_SIGNAL="${submit_signal}" \
+	# shellcheck disable=SC2086 # extra_env is a deliberate word-split assignment list
+	out=$(env $extra_env FLINK_JOBMANAGER="$jm" COMPUTE_SUBMIT_SIGNAL="${submit_signal}" \
 		COMPUTE_JAR="$jar" bash "$LAUNCHER" 2>&1)
 	rc=$?
 	kill "$stub" 2>/dev/null; wait "$stub" 2>/dev/null
@@ -63,6 +65,13 @@ run_case "overview-compact-two-jobs-submits-canceled" overview-two-jobs-compact 
 	"submitting signal-job-compute" 18082 "http://127.0.0.1:18082" 1
 # FAILED is terminal — must stop with FATAL, not poll 30x.
 run_case "job-fails-terminal" job-fails 1 "entered terminal state FAILED"
+
+# 2026-09-24 (P2-003, safety): production must never silently run without the safety
+# consumer. Stub JM and a valid prod config so the earlier submission steps succeed and
+# the safety branch is the one that decides; SAFETY_MANIFEST_TOKENS is deliberately unset.
+run_case "production-without-safety-tokens-fails-closed" happy 1 \
+	"SAFETY_MANIFEST_TOKENS is required in DEPLOYMENT_ENV=production" 18083 "http://127.0.0.1:18083" 1 \
+	"DEPLOYMENT_ENV=production STATE_BACKEND=rocksdb CHECKPOINT_DIR=s3://bucket/k AWS_ACCESS_KEY_ID=x AWS_SECRET_ACCESS_KEY=y S3_ENDPOINT=z"
 
 # --- P2-198: production gates (exit before any JM contact) ---
 run_gate "backend-case-variant-rejected" "STATE_BACKEND=HashMap" "STATE_BACKEND must be 'rocksdb'"
