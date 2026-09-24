@@ -145,6 +145,10 @@ SITES: list[tuple[str, str, str, str]] = [
     ("code/01_platform/04_scripts/stage-soak-e2e.sh", "secrets.env restart flink-taskmanager", "FLAGS_DIR", ""),
     ("code/01_platform/04_scripts/stage-soak-e2e.sh", "is STALE (build stamp", "TEXT", "message"),
     ("code/01_platform/04_scripts/stage-soak-e2e.sh", "secrets.env exec -T flink-taskmanager sh -c", "FLAGS_DIR", ""),
+    ("code/01_platform/04_scripts/stack-restore-verify.sh", "docker compose --env-file", "FLAGS",
+     "the restore verifier renders the stack config to read the three window property lines back; "
+     "it passes both --env-file flags and -f explicitly (added by the A4 rehearsal, 2026-09-23, "
+     "without a registry row until now)"),
     ("code/01_platform/04_scripts/t9_order_sandbox.py", "probes go through", "TEXT", "docstring"),
     ("code/01_platform/04_scripts/tests/test_08_local_compose_l0.py", "config must succeed (YAML parses", "TEXT", "docstring"),
     ("code/01_platform/04_scripts/tests/test_08_local_compose_l2.py", "invocation, and", "TEXT", "comment in docstring"),
