@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
+import com.trading.common.config.PlatformConfig;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -288,13 +289,13 @@ class B4SignalIntentE2ETest {
 
     private static GenericRow rawRow(long token, String symbol, long eventTime, int price) {
         String fingerprint = "fp-" + token + "-" + eventTime;
-        return GenericRow.of(
-                // 21 columns, DDL order (RawTableColumns indices):
-                // event_day, event_fingerprint, fingerprint_version, connection_id,
-                // connection_epoch, instrument_token, exchange, symbol, event_time,
-                // ingest_ts, ack_ts, tick_type, last_price_paise, last_qty,
-                // raw_payload, payload_hash, decoder_version, protocol_version,
-                // validity_state, validity_reason, schema_version.
+        // v4 layout: 72 columns, DDL order, addressed by RawTableColumns index so a
+        // column appended later cannot silently shift a value. Only the columns the
+        // pipeline reads carry values; the rest stay null, as the live writers leave
+        // them. A v3-width row is refused outright by the live table now: "The field
+        // count of the row does not match the table schema. Expected: 72, Actual:
+        // 21" (observed 2026-09-24, step 9 of the gate, `make drill-live`).
+        Object[] v = new Object[RawTableColumns.FIELD_COUNT];
                 // event_day MUST be the IST yyyyMMdd of event_time: raw_table_1
                 // is auto-partitioned by event_day and a running source only
                 // tails partitions it discovered at startup. A stale literal
@@ -310,11 +311,34 @@ class B4SignalIntentE2ETest {
                 // raw-validation, so candle_live/candle_closed stayed empty and
                 // this test failed with "rows are not reaching the candle leg"
                 // (observed 2026-09-12; the pipeline itself was healthy).
-                bs(EVENT_DAY_FMT.format(Instant.ofEpochMilli(eventTime))),
-                bs(fingerprint), bs("v2"), bs("e2e"), 1L, token,
-                bs("NSE"), bs(symbol), eventTime, eventTime, eventTime, bs("TRADE"),
-                (long) price, 1L, new byte[] {1, 2}, bs("h-" + fingerprint),
-                bs("1"), bs("v1"), bs("VALID_TRADE"), bs("FRESH"), bs("3"));
+        v[RawTableColumns.EVENT_DAY] = bs(EVENT_DAY_FMT.format(Instant.ofEpochMilli(eventTime)));
+        v[RawTableColumns.EVENT_FINGERPRINT] = bs(fingerprint);
+        v[RawTableColumns.FINGERPRINT_VERSION] = bs("v2");
+        v[RawTableColumns.CONNECTION_ID] = bs("e2e");
+        v[RawTableColumns.CONNECTION_EPOCH] = 1L;
+        v[RawTableColumns.INSTRUMENT_TOKEN] = token;
+        v[RawTableColumns.EXCHANGE] = bs("NSE");
+        v[RawTableColumns.SYMBOL] = bs(symbol);
+        v[RawTableColumns.EVENT_TIME] = eventTime;
+        v[RawTableColumns.INGEST_TS] = eventTime;
+        v[RawTableColumns.ACK_TS] = eventTime;
+        v[RawTableColumns.TICK_TYPE] = bs("TRADE");
+        v[RawTableColumns.LAST_PRICE_PAISE] = (long) price;
+        v[RawTableColumns.LAST_QTY] = 1L;
+        v[RawTableColumns.RAW_PAYLOAD] = new byte[] {1, 2};
+        v[RawTableColumns.PAYLOAD_HASH] = bs("h-" + fingerprint);
+        v[RawTableColumns.DECODER_VERSION] = bs("1");
+        v[RawTableColumns.PROTOCOL_VERSION] = bs("v1");
+        v[RawTableColumns.VALIDITY_STATE] = bs("VALID_TRADE");
+        v[RawTableColumns.VALIDITY_REASON] = bs("FRESH");
+        // The running version, never a literal: raw-validation drops any other
+        // value, so a literal left behind by a schema bump makes every row vanish
+        // without an error (the trap documented on the constant, v3 -> v4).
+        v[RawTableColumns.SCHEMA_VERSION] = bs(PlatformConfig.RAW_TABLE_1_SCHEMA_VERSION);
+        // v4: candles sum VOLUME_DELTA (LAST_QTY is one trade's size). These crafted
+        // ticks carry a single trade each, so both are 1.
+        v[RawTableColumns.VOLUME_DELTA] = 1L;
+        return GenericRow.of(v);
     }
 
     // ---- fluss reads ----
