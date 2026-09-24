@@ -79,6 +79,32 @@ drift_lines() {
     done <<<"$out"
 }
 
+# Print the extras that are NOT covered by KNOWN_EXTRA_PATTERNS, one per line, so the
+# caller can decide "tolerated" (empty output) from "new drift" (anything printed).
+# $1 = live comma-separated names. Best-effort like drift_lines(): if the tool cannot
+# run, print nothing and let the caller keep its over-count behaviour.
+unexpected_extras() {
+    local names="$1" out _line name pat
+    [ -n "$names" ] || return 0
+    out="$(python3 "$ROOT/code/01_platform/04_scripts/catalog_drift.py" \
+        --manifest "$MANIFEST" --live "$names" 2>/dev/null || true)"
+    [ -n "$out" ] || return 0
+    while IFS= read -r _line; do
+        case "$_line" in
+            "extra:"*) name="$(printf '%s' "${_line#extra:}" | tr -d '[:space:]')" ;;
+            *) continue ;;
+        esac
+        [ -n "$name" ] || continue
+        for pat in "${KNOWN_EXTRA_PATTERNS[@]}"; do
+            # shellcheck disable=SC2254 # $pat is intentionally an unquoted glob
+            case "$name" in
+                $pat) continue 2 ;;
+            esac
+        done
+        printf '%s\n' "$name"
+    done <<<"$out"
+}
+
 # ── Config ────────────────────────────────────────────────────────────────
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 COMPOSE_DIR="${COMPOSE_PROJECT_DIR:-$ROOT/code/01_platform/01_docker}"
@@ -86,6 +112,15 @@ COMPOSE=(docker compose --env-file "$COMPOSE_DIR/.env" --env-file "$COMPOSE_DIR/
 ZK_PATH="${ZK_PATH:-/fluss/metadata/databases/default/tables}"
 ZK_CLI="${ZK_CLI:-}"
 MANIFEST="$ROOT/code/01_platform/02_sql/ddl/schema_manifest.json"
+# Extras that are known and tolerated, so a drifted catalog does not stop every run
+# forever. This is a record of existing state, not permission to create more: an extra
+# that is not listed here still reports and exits 3. Every pattern needs an origin and
+# a reason, and should be evicted once its cause is gone.
+#   rr_settle_*        scratch tables left behind by tiering-remote-read-verify.sh
+#                      (per-run suffix, so the count varies)
+#   fingerprint_dedup  retired table that still holds live data; nothing references it,
+#                      and dropping a table is a separate decision (never auto-apply)
+KNOWN_EXTRA_PATTERNS=("rr_settle_*" "fingerprint_dedup")
 # Matrix evidence for the apply. The dispatcher (ddl-apply-run.sh, P4-167) owns
 # this flag: it REFUSES --matrix-evidence/--apply-verified on the command line
 # and reads DDL_APPLY_MATRIX_EVIDENCE only. Default = the in-image manifest,
@@ -224,9 +259,18 @@ if [ "$LIVE" -eq "$EXPECTED_TABLES" ]; then
 fi
 
 if [ "$LIVE" -gt "$EXPECTED_TABLES" ]; then
+    UNEXPECTED="$(unexpected_extras "$LIVE_NAMES" | tr '\n' ' ' | sed 's/ *$//')"
+    if [ -z "$UNEXPECTED" ]; then
+        log "catalog has MORE tables than the manifest describes ($LIVE/$EXPECTED_TABLES) but"
+        log "every extra matches KNOWN_EXTRA_PATTERNS (${KNOWN_EXTRA_PATTERNS[*]}) — tolerated,"
+        log "nothing to apply. Evict a pattern once its cause is gone."
+        drift_lines "$LIVE_NAMES" "extra"
+        exit 0
+    fi
     log "catalog has MORE tables than the manifest describes ($LIVE/$EXPECTED_TABLES) —"
     log "not applying: extra tables are drift, not health. Compare the manifest with"
     log "'make ddl' and reconcile the extras."
+    log "unexpected extra(s), not covered by KNOWN_EXTRA_PATTERNS: $UNEXPECTED"
     drift_lines "$LIVE_NAMES" "extra"
     log "To drop one that nothing references, use the DDL tool's own cleanup by prefix:"
     log "  java -cp \$FLUSS_PROBE_CP com.trading.common.schema.ddl.DdlApplyTool \\"

@@ -245,5 +245,32 @@ class CatalogGuardTests(unittest.TestCase):
                 self.assertFalse(line.endswith(" 5"), line)
 
 
+    def test_known_extras_are_tolerated_and_do_not_trigger_an_apply(self):
+        # Live > expected, but every extra is one we have attributed (see
+        # KNOWN_EXTRA_PATTERNS). Tolerated: the guard reports and moves on, and must
+        # never reach the DDL path on the strength of a tolerated extra.
+        out = self.run_guard(before="fingerprint_dedup, rr_settle_9f2", expected="1")
+        self.assertEqual(out.returncode, 0, out.stderr + out.stdout)
+        self.assertIn("KNOWN_EXTRA_PATTERNS", out.stdout)
+        self.assertIn("rr_settle_9f2", out.stdout)  # named, not hidden
+        self.assertFalse(self.applied(), "tolerated extras must not run DDL")
+
+    def test_a_new_extra_is_named_and_still_blocks(self):
+        out = self.run_guard(
+            before="fingerprint_dedup, rr_settle_9f2, brand_new_table", expected="1"
+        )
+        self.assertEqual(out.returncode, 3, out.stderr + out.stdout)
+        self.assertIn(
+            "unexpected extra(s), not covered by KNOWN_EXTRA_PATTERNS: brand_new_table",
+            out.stdout,
+        )
+
+    def test_a_known_extra_does_not_mask_a_partial_catalog(self):
+        # The allowlist excuses extra tables only. A catalog missing tables is still a
+        # stop, or a tolerated extra would become a way to hide an incomplete DDL.
+        out = self.run_guard(before="fingerprint_dedup", expected="3")
+        self.assertEqual(out.returncode, 3, out.stderr + out.stdout)
+        self.assertIn("catalog PARTIAL (1/3)", out.stdout)
+
 if __name__ == "__main__":
     unittest.main()
