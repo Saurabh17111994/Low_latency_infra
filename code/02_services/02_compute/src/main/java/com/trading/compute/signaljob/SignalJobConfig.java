@@ -112,6 +112,12 @@ public record SignalJobConfig(
         boolean multiTfSignalContextEnabled,
         String candleLiveTable,
         String candleClosedTable,
+        // 2026-09-26 S5→S6 latency workstream (native fetch/flush tuning;
+        // see docs/plans/2026-09-26-signal-source-latency-tuning.md).
+        long flussScannerFetchMaxBytes,
+        long flussScannerFetchMaxBytesForBucket,
+        long flussScannerFetchWaitMaxTimeMs,
+        long bufferTimeoutMs,
         StartupMode startupMode,
         boolean strategyHostEnabled,
         List<String> strategyIds) implements Serializable {
@@ -157,6 +163,25 @@ public record SignalJobConfig(
                 booleanValue(env, "MULTITF_SIGNAL_CONTEXT_ENABLED", false);
         String candleLiveTable = stringEnv(env, "CANDLE_LIVE_TABLE", "candle_live");
         String candleClosedTable = stringEnv(env, "CANDLE_CLOSED_TABLE", "candle_closed");
+        // 2026-09-26 S5→S6 latency workstream: native fetch/flush tuning.
+        // The Fluss scanner's fetch chunk caps how long a raw tick waits in
+        // Fluss before the source emits it (measured 2026-09-26 at 48.5k
+        // rows/s: standing backlog 600-960 records ≈ 100-260 ms of the S6
+        // 316 ms p50 with Fluss's 1 MiB per-bucket default). The Flink
+        // output-buffer flush timeout added ~40-55 ms per shuffle hop
+        // (measured: empty queues, zero backpressure, operators 88-95 %
+        // idle). Both are defaults-on and env-tunable for A/B runs.
+        long flussScannerFetchMaxBytes = flussScannerFetchMaxBytes(env);
+        long flussScannerFetchMaxBytesForBucket = flussScannerFetchMaxBytesForBucket(env);
+        if (flussScannerFetchMaxBytesForBucket > flussScannerFetchMaxBytes) {
+            throw new IllegalStateException(
+                    "Config FLUSS_SCANNER_FETCH_MAX_BYTES_FOR_BUCKET ("
+                            + flussScannerFetchMaxBytesForBucket
+                            + ") must be <= FLUSS_SCANNER_FETCH_MAX_BYTES ("
+                            + flussScannerFetchMaxBytes + ") — Fluss rejects the pair");
+        }
+        long flussScannerFetchWaitMaxTimeMs = flussScannerFetchWaitMaxTimeMs(env);
+        long bufferTimeoutMs = bufferTimeoutMs(env);
         // Strategy host (plug-and-play strategies, 2026-09-05): comma-separated
         // rule ids the strategy-host operator runs. Unknown ids, duplicates,
         // and host-on-with-empty-list all fail startup fast — a topology that
@@ -245,6 +270,10 @@ public record SignalJobConfig(
                 multiTfSignalContextEnabled,
                 candleLiveTable,
                 candleClosedTable,
+                flussScannerFetchMaxBytes,
+                flussScannerFetchMaxBytesForBucket,
+                flussScannerFetchWaitMaxTimeMs,
+                bufferTimeoutMs,
                 mode,
                 strategyHostEnabled,
                 strategyIds);
@@ -299,6 +328,26 @@ public record SignalJobConfig(
     /** Fluss table for candle_closed (default candle_closed). */
     public String candleClosedTable() {
         return candleClosedTable;
+    }
+
+    /** Fluss scanner request cap in bytes (default 512 KiB; Fluss default 16 MiB). */
+    public long flussScannerFetchMaxBytes() {
+        return flussScannerFetchMaxBytes;
+    }
+
+    /** Fluss scanner per-bucket cap in bytes (default 128 KiB; Fluss default 1 MiB). */
+    public long flussScannerFetchMaxBytesForBucket() {
+        return flussScannerFetchMaxBytesForBucket;
+    }
+
+    /** Fluss scanner server-side wait cap in ms (default 20; Fluss default 500). */
+    public long flussScannerFetchWaitMaxTimeMs() {
+        return flussScannerFetchWaitMaxTimeMs;
+    }
+
+    /** Flink {@code execution.buffer-timeout} in ms (default 10; Flink default 100). */
+    public long bufferTimeoutMs() {
+        return bufferTimeoutMs;
     }
 
     /** Startup-mode gate (CANDLE-KV-REPLAY-001 A3.3). */
@@ -1104,6 +1153,29 @@ public record SignalJobConfig(
                     + "(default " + defaultValue + "), got " + value);
         }
         return value;
+    }
+
+    // ── 2026-09-26 S5→S6 latency workstream: native fetch/flush tuning ──────
+    // (docs/plans/2026-09-26-signal-source-latency-tuning.md). The Fluss
+    // scanner returns fetched records in chunks; the standing backlog is one
+    // chunk deep, so the chunk size IS the per-tick wait. Flink's output
+    // buffer flushes on a timer (default 100 ms) at every shuffle hop; both
+    // were measured as the S6 cost with the runtime >85 % idle.
+
+    private static long flussScannerFetchMaxBytes(Map<String, String> env) {
+        return positiveLong(env, "FLUSS_SCANNER_FETCH_MAX_BYTES", 512L * 1024);
+    }
+
+    private static long flussScannerFetchMaxBytesForBucket(Map<String, String> env) {
+        return positiveLong(env, "FLUSS_SCANNER_FETCH_MAX_BYTES_FOR_BUCKET", 128L * 1024);
+    }
+
+    private static long flussScannerFetchWaitMaxTimeMs(Map<String, String> env) {
+        return positiveLong(env, "FLUSS_SCANNER_FETCH_WAIT_MAX_TIME_MS", 20L);
+    }
+
+    private static long bufferTimeoutMs(Map<String, String> env) {
+        return positiveLong(env, "BUFFER_TIMEOUT_MS", 10L);
     }
 
     private static long longValue(Map<String, String> env, String key, long defaultValue) {

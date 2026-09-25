@@ -138,6 +138,14 @@ public final class ConfigKeys {
     public static final String STRATEGIES = "STRATEGIES";
     public static final String CANDLE_LIVE_TABLE = "CANDLE_LIVE_TABLE";
     public static final String CANDLE_CLOSED_TABLE = "CANDLE_CLOSED_TABLE";
+    // 2026-09-26 S5→S6 latency workstream (native fetch/flush tuning).
+    public static final String FLUSS_SCANNER_FETCH_MAX_BYTES =
+            "FLUSS_SCANNER_FETCH_MAX_BYTES";
+    public static final String FLUSS_SCANNER_FETCH_MAX_BYTES_FOR_BUCKET =
+            "FLUSS_SCANNER_FETCH_MAX_BYTES_FOR_BUCKET";
+    public static final String FLUSS_SCANNER_FETCH_WAIT_MAX_TIME_MS =
+            "FLUSS_SCANNER_FETCH_WAIT_MAX_TIME_MS";
+    public static final String BUFFER_TIMEOUT_MS = "BUFFER_TIMEOUT_MS";
     public static final String UNCERTAINTY_JOURNAL_PATH = "UNCERTAINTY_JOURNAL_PATH";
     public static final String WARN = "WARN";
     public static final String WATERMARK_OUT_OF_ORDER_MS = "WATERMARK_OUT_OF_ORDER_MS";

@@ -7,6 +7,7 @@ import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.ExecutionOptions;
 import org.apache.flink.configuration.ExternalizedCheckpointRetention;
 import org.apache.flink.configuration.RestartStrategyOptions;
 import org.apache.flink.configuration.StateBackendOptions;
@@ -17,6 +18,8 @@ import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.data.RowData;
 import org.apache.fluss.client.initializer.OffsetsInitializer;
+import org.apache.fluss.config.ConfigOptions;
+import org.apache.fluss.config.MemorySize;
 import org.apache.fluss.flink.sink.FlussSink;
 import org.apache.fluss.flink.sink.serializer.RowDataSerializationSchema;
 import org.apache.fluss.flink.source.FlussSource;
@@ -210,12 +213,17 @@ public final class SignalJob {
         env.getCheckpointConfig().setExternalizedCheckpointRetention(
                 ExternalizedCheckpointRetention.RETAIN_ON_CANCELLATION);
 
+        LOG.info("signal-job: fluss source fetch tuning maxBytes={} perBucket={} waitMaxMs={} "
+                        + "(flink bufferTimeoutMs={})",
+                config.flussScannerFetchMaxBytes(), config.flussScannerFetchMaxBytesForBucket(),
+                config.flussScannerFetchWaitMaxTimeMs(), config.bufferTimeoutMs());
         FlussSource<RowData> source = FlussSource.<RowData>builder()
                 .setBootstrapServers(config.bootstrapServers())
                 .setDatabase(config.database())
                 .setTable(config.rawTable())
                 .setStartingOffsets(rawSourceOffsets(config.startupMode()))
                 .setDeserializationSchema(new RowDataDeserializationSchema())
+                .setFlussConfig(flussSourceConfiguration(config))
                 .build();
 
         WatermarkStrategy<RowData> watermarks = CandleWatermarkStrategy.of(config);
@@ -406,6 +414,26 @@ public final class SignalJob {
     }
 
     /**
+     * Native Fluss client fetch tuning for the raw-table source (2026-09-26
+     * S5→S6 latency workstream). The connector merges this Configuration
+     * into its own connection config (bootstrap servers and table properties
+     * are layered on top by the builder), and the caps make the scanner emit
+     * one SHORT fetch chunk instead of one large one — the measured S6 cost
+     * was a standing one-chunk backlog (600-960 records ≈ 100-260 ms at
+     * 48.5k rows/s with Fluss's 1 MiB per-bucket default).
+     */
+    static org.apache.fluss.config.Configuration flussSourceConfiguration(SignalJobConfig config) {
+        org.apache.fluss.config.Configuration conf = new org.apache.fluss.config.Configuration();
+        conf.set(ConfigOptions.CLIENT_SCANNER_LOG_FETCH_MAX_BYTES,
+                new MemorySize(config.flussScannerFetchMaxBytes()));
+        conf.set(ConfigOptions.CLIENT_SCANNER_LOG_FETCH_MAX_BYTES_FOR_BUCKET,
+                new MemorySize(config.flussScannerFetchMaxBytesForBucket()));
+        conf.set(ConfigOptions.CLIENT_SCANNER_LOG_FETCH_WAIT_MAX_TIME,
+                Duration.ofMillis(config.flussScannerFetchWaitMaxTimeMs()));
+        return conf;
+    }
+
+    /**
      * Production runtime options (tracker 14 P4.1/P4.2), extracted from the
      * config into the Flink {@link Configuration}: state backend (rocksdb in
      * production, hashmap dev-only — validated by
@@ -504,6 +532,14 @@ public final class SignalJob {
                 ? config.taskManagerNetworkMemoryMax() : "256m";
         flinkConfig.setString("taskmanager.memory.network.max", netMax);
         flinkConfig.setString("taskmanager.memory.network.min", netMax);
+        // 2026-09-26 S5→S6 latency workstream: Flink's default output-buffer
+        // flush timeout (100 ms) dominated the per-shuffle-hop waits once the
+        // operators were proven idle (busy 5-12 %, zero backpressure, empty
+        // queues; measured +40-55 ms p50 per hop, 198 ms to the closed sink).
+        // 10 ms keeps topology/checkpoint semantics unchanged and the runtime
+        // has the headroom for the extra flushes.
+        flinkConfig.set(ExecutionOptions.BUFFER_TIMEOUT,
+                Duration.ofMillis(config.bufferTimeoutMs()));
         if (config.savepointDir() != null && !config.savepointDir().isBlank()) {
             flinkConfig.set(CheckpointingOptions.SAVEPOINT_DIRECTORY, config.savepointDir());
         }
