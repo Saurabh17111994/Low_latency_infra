@@ -260,6 +260,9 @@ func main() {
 	// further work or return) so the ING-TCP-001 shutdown report cannot be
 	// lost to a goroutine/main exit race.
 	maybeReportFinalTickCounts()
+	// P1-158 discipline: stop the age-flush ticker BEFORE the final drain so
+	// no batch can be written after the bridge_shutdown marker.
+	bridgeEmitter.StopAgeFlush()
 	// T6: drain any pending batched ticks BEFORE the shutdown marker so the
 	// Java reader sees the complete stream (proto mode: Flush writes the
 	// final MarketDataBatch frame).

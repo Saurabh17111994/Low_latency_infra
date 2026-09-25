@@ -46,6 +46,10 @@ type Transport interface {
 	SetManifestFingerprint(fp string)
 	SetSlotTokenHash(slotID, hash string)
 	Flush() error // drain pending batched ticks (shutdown)
+	// StopAgeFlush stops the T2 age-flush ticker. The shutdown path calls it
+	// BEFORE the final drain so no batch can be written after the
+	// bridge_shutdown marker (P1-158 discipline). Safe to call more than once.
+	StopAgeFlush()
 	Close() error
 }
 
@@ -59,6 +63,12 @@ type ProtoEmitter struct {
 	// slot-identity map for control records
 	fingerprint     string
 	tokenHashBySlot map[string]string
+	// T2 age-flush ticker (wired 2026-09-26, CHG-316): bounds a partial
+	// batch's wait at MaxAge instead of the next tick's arrival.
+	ageStop     chan struct{}
+	ageDone     chan struct{}
+	ageStopOnce sync.Once
+	ageErrAt    time.Time // read/written by the ticker goroutine only
 }
 
 // NewProtoEmitter creates a proto emitter with the locked T2 batch limits.
@@ -66,6 +76,73 @@ func NewProtoEmitter(w io.Writer, batcher *Batcher) *ProtoEmitter {
 	e := &ProtoEmitter{w: w, tokenHashBySlot: map[string]string{}}
 	e.batcher = batcher
 	return e
+}
+
+// newProtoEmitterWithLimits builds a proto emitter from explicit T2 limits,
+// wires the flush callback (P1-005 lock order: batcher -> emitter) and starts
+// the age-flush ticker. initBridgeEmitter passes the env-tuned limits; tests
+// pass tiny MaxAge to drive the ticker deterministically.
+func newProtoEmitterWithLimits(w io.Writer, limits BatchLimits) *ProtoEmitter {
+	e := &ProtoEmitter{w: w, tokenHashBySlot: map[string]string{}}
+	e.batcher = NewBatcher(limits, func(batch *marketdata.MarketDataBatch) error {
+		// synchronous flush under batcher lock — write the frame
+		// holding e.mu so header+body are atomic vs control frames.
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		return protoWriteFrame(w, batch)
+	}, nil)
+	e.startAgeFlush(limits.MaxAge)
+	return e
+}
+
+// startAgeFlush runs the T2 age-flush ticker: every interval it advances the
+// batcher clock so a partial batch (< MaxEvents/MaxBytes) is flushed within
+// MaxAge instead of waiting for the next tick to arrive. Wired 2026-09-26
+// (CHG-316): with the ticker missing, the remainder of each burst waited for
+// the next tick — measured S1 p90 481 ms at a 2 Hz feed (one 500 ms period).
+// The interval is the batcher's MaxAge (BRIDGE_BATCH_MAX_AGE_MS, 1 ms..1 s).
+func (e *ProtoEmitter) startAgeFlush(interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	e.ageStop, e.ageDone = stop, done
+	go func() {
+		defer close(done)
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if err := e.batcher.Tick(time.Now()); err != nil {
+					// Broken pipe etc.: flushLocked retains the batch and a
+					// later tick retries it, so this is a bounded log — at
+					// most one line per second, never a data-path throw.
+					now := time.Now()
+					if now.Sub(e.ageErrAt) >= time.Second {
+						e.ageErrAt = now
+						fmt.Fprintf(os.Stderr, "arrow-bridge: age-flush failed: %v\n", err)
+					}
+				}
+			}
+		}
+	}()
+}
+
+// StopAgeFlush stops the age-flush ticker and waits for it to exit; safe to
+// call more than once, and called before the final drain so no batch can be
+// written after the bridge_shutdown marker.
+func (e *ProtoEmitter) StopAgeFlush() {
+	if e.ageStop == nil {
+		return
+	}
+	e.ageStopOnce.Do(func() {
+		close(e.ageStop)
+		<-e.ageDone
+	})
 }
 
 // writeFrame writes one length-prefixed TransportFrame. Caller holds mu.
@@ -218,8 +295,9 @@ func (e *ProtoEmitter) Flush() error {
 	return e.batcher.Flush()
 }
 
-// Close drains the batcher (idempotent with Flush).
+// Close stops the age-flush ticker and drains the batcher (idempotent with Flush).
 func (e *ProtoEmitter) Close() error {
+	e.StopAgeFlush()
 	return e.Flush()
 }
 
@@ -237,24 +315,14 @@ func initBridgeEmitter(w io.Writer) Transport {
 	case "proto", "grpc":
 		fmt.Fprintf(os.Stderr, "arrow-bridge: transport=proto frames (TRANSPORT=%s)\n", v)
 		// K1 (2026-08-29): batch limits are env-tunable; unset = O-2 defaults.
-		// P1-005 fail-fast: the emitter exists BEFORE the batcher so the
-		// flush callback can serialize every wire write on e.mu. Lock order
-		// is always batcher -> emitter (this callback runs under b.mu);
-		// no path takes e.mu and then calls into the batcher, so this
-		// cannot deadlock. Control frames already hold e.mu in EmitEvent/
-		// EmitMetrics — without this, a tick flush and a control write
-		// interleave mid-frame and Java sees a bad length prefix.
-		e := &ProtoEmitter{w: w, tokenHashBySlot: map[string]string{}}
-		e.batcher = NewBatcher(batchLimitsFromEnv(func(format string, args ...any) {
+		// P1-005 fail-fast: the flush callback serializes every wire write on
+		// e.mu (lock order batcher -> emitter); control frames already hold
+		// e.mu in EmitEvent/EmitMetrics — without this, a tick flush and a
+		// control write interleave mid-frame and Java sees a bad length
+		// prefix. newProtoEmitterWithLimits also starts the age-flush ticker.
+		return newProtoEmitterWithLimits(w, batchLimitsFromEnv(func(format string, args ...any) {
 			fmt.Fprintf(os.Stderr, "arrow-bridge: "+format+"\n", args...)
-		}), func(batch *marketdata.MarketDataBatch) error {
-			// synchronous flush under batcher lock — write the frame
-			// holding e.mu so header+body are atomic vs control frames.
-			e.mu.Lock()
-			defer e.mu.Unlock()
-			return protoWriteFrame(w, batch)
-		}, nil)
-		return e
+		}))
 	default:
 		// TRANSPORT unset, "pipe", or unknown: fail loudly instead of
 		// silently falling back to a line transport. Proto is the only transport.
