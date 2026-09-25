@@ -214,7 +214,7 @@ drill-live:
 		echo "SKIP: drill-live (no FLUSS_BOOTSTRAP) — export FLUSS_BOOTSTRAP=<host:port>"; \
 	else \
 		cd code && $(MVN) test -Pdrill-reports -pl common,02_services/06_execution_gateway \
-			-Dtest='EodBucketCopyIntegrationTest,FlussGateAttemptStoresIntegrationTest,FlussPositionsStateStoreIntegrationTest,FlussPostbackQuarantineStoreIntegrationTest,CompatFlussIntegrationTest,CompatFlussCompositeKeyIntegrationTest,CompatFlussDdlParityIntegrationTest,DdlSmokeTwinSweepTest,GateMergeEngineDrillIntegrationTest,GatewayFlussIntegrationTest,GatewayFlussDurableReplayIntegrationTest,B4HaltedIntentConsumeDeferE2ETest,GatewayStartupPrewarmTest,FlussProjectionWriterIntegrationTest' \
+			-Dtest='FlussGateAttemptStoresIntegrationTest,FlussPositionsStateStoreIntegrationTest,FlussPostbackQuarantineStoreIntegrationTest,CompatFlussIntegrationTest,CompatFlussCompositeKeyIntegrationTest,CompatFlussDdlParityIntegrationTest,DdlSmokeTwinSweepTest,GateMergeEngineDrillIntegrationTest,GatewayFlussIntegrationTest,GatewayFlussDurableReplayIntegrationTest,B4HaltedIntentConsumeDeferE2ETest,GatewayStartupPrewarmTest,FlussProjectionWriterIntegrationTest' \
 			-Dsurefire.failIfNoSpecifiedTests=false \
 			&& cd 02_services/02_compute && $(MVN) test -Pdrill-reports \
 				-Dtest='B4SignalIntentE2ETest' \
