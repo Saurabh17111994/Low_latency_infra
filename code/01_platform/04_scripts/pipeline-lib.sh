@@ -790,32 +790,17 @@ import org.apache.fluss.client.admin.Admin;
 import org.apache.fluss.client.admin.OffsetSpec;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.PartitionInfo;
-import org.apache.fluss.metadata.PartitionSpec;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.LocalDate;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 public class TablePurge {
-    /**
-     * The DDL's own time zone, so "today" matches the partitions the
-     * coordinator would name. Falling back to the DDL's declared default keeps
-     * a table without the option working instead of throwing.
-     */
-    static String timeZone(DdlText.ParsedDdl parsed) {
-        String tz = parsed.options().get("table.auto-partition.time-zone");
-        return (tz == null || tz.isBlank()) ? "UTC" : tz;
-    }
-
     /**
      * Ask the WRITE path for this table and return null when it answers, or a
      * one-line reason while it does not.
@@ -837,7 +822,12 @@ public class TablePurge {
                 List<PartitionInfo> parts =
                         admin.listPartitionInfos(tp).get(15, TimeUnit.SECONDS);
                 if (parts.isEmpty()) {
-                    return "no partitions";
+                    // CHG-310: a purged partitioned table legitimately has no
+                    // partitions - the next append creates the day (the 1.0
+                    // client does it on write). There is no bucket to probe,
+                    // so the table is not blocked; the writer's retry covers
+                    // any transient churn on the partition it creates.
+                    return null;
                 }
                 for (PartitionInfo p : parts) {
                     admin.listOffsets(tp, p.getPartitionName(), buckets,
@@ -886,21 +876,20 @@ public class TablePurge {
             // Dropping partitions empties the table just as completely: the
             // dropped partitions' segments go with them.
             //
-            // The current day's partition is then re-created here, and that
-            // step is load-bearing rather than tidiness. Fluss's
-            // auto-partitioning (table.auto-partition.enabled=true) does NOT
-            // create a partition on the write that needs it - it runs on the
-            // coordinator's periodic sweep - so a table left with zero
-            // partitions answers the next append with
+            // CHG-310: the current day is NOT re-created here. That manual
+            // pre-create was added under the pre-1.0 stack (CHG-188), where a
+            // table left with zero partitions answered the next append with
             //   PartitionNotExistException: Table partition
             //   'default.raw_table_1(p=20260917)' does not exist
-            // Measured with the harness's own timing (purge, wait 50s of
-            // bring-up, append): without pre-creating, the append failed and
-            // the partition was still absent afterwards; pre-creating the
-            // current IST day first made the same append succeed.
-            // The pre-create also matches what the DDL asks for: it declares
-            // 'table.auto-partition.num-precreate' = '2', i.e. a purged table
-            // is expected to carry the current day ready to accept writes.
+            // because auto-partitioning runs on the coordinator's sweep, not
+            // on the write. On 1.0 the CLIENT creates the partition on the
+            // append that needs it (DynamicPartitionCreator, default on;
+            // measured 2026-09-25 with a fresh client after the drop:
+            // "Dynamically creating partition ..." then the append succeeded
+            // in 258 ms and the partition was present right after). Every
+            // caller purges BEFORE it starts a writer (see
+            // pipeline_purge_raw_table), so the append always comes from a
+            // fresh client - the measured case.
             TableInfo live = null;
             try {
                 live = admin.getTableInfo(tp).get(10, TimeUnit.SECONDS);
@@ -929,22 +918,7 @@ public class TablePurge {
                         System.out.println("partition drop skipped: " + e.getCause());
                     }
                 }
-                // Put the current day back so the next append has somewhere to
-                // land; see the P6-484 note above for why this is required
-                // rather than left to auto-partitioning.
-                String today = LocalDate.now(ZoneId.of(timeZone(parsed)))
-                        .format(DateTimeFormatter.ofPattern("yyyyMMdd"));
-                try {
-                    admin.createPartition(tp,
-                            new PartitionSpec(Map.of(live.getPartitionKeys().get(0), today)), true)
-                            .get(60, TimeUnit.SECONDS);
-                } catch (Exception e) {
-                    // Already there (a second purge in the same day) is fine;
-                    // anything else means the append will fail loudly on its
-                    // own, so this stays non-fatal.
-                    System.out.println("partition pre-create skipped: " + e.getMessage());
-                }
-                System.out.println("PURGED " + tp + " (partitions=" + dropped + ", day=" + today + ")");
+                System.out.println("PURGED " + tp + " (partitions=" + dropped + ")");
             } else {
                 try {
                     admin.dropTable(tp, false).get(60, TimeUnit.SECONDS);

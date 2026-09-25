@@ -288,16 +288,17 @@ def test_purge_helper_clears_a_partitioned_table_by_dropping_partitions():
         "the purge no longer stops to consider dropping partitions"
     assert "isPartitioned()" in text, \
         "the purge no longer checks whether the table is partitioned"
-    # Auto-partitioning does not create the partition the next append needs —
-    # it runs on the coordinator's periodic sweep — so the purge has to leave
-    # the current day ready, or the harness's append (which happens ~50s later,
-    # after bring-up) fails with PartitionNotExistException. Measured: without
-    # the pre-create the append failed and the partition was still absent
-    # afterwards; with it the same append succeeded.
-    assert "createPartition" in text, \
-        "the purge no longer pre-creates the current day's partition"
-    assert "table.auto-partition.time-zone" in text, \
-        "the pre-created day is not named in the DDL's own time zone"
+    # CHG-310: the manual pre-create is gone. It existed for the pre-1.0
+    # stack, where a table with zero partitions failed the next append with
+    # PartitionNotExistException because auto-partitioning only runs on the
+    # coordinator's sweep. On 1.0 the CLIENT creates the partition on the
+    # append that needs it — measured 2026-09-25 with a fresh client after the
+    # drop: "Dynamically creating partition", append OK in 258 ms, partition
+    # present right after. Every caller purges before it starts a writer, so
+    # the append always comes from a fresh client. Pinned as an absence so a
+    # manual create cannot creep back in silently.
+    assert "createPartition" not in text, \
+        "the purge pre-creates a partition again; 1.0 creates it on append (CHG-310)"
     # The fallback has to stay: a rewritten DDL can only be applied by a real
     # recreate, so the drop+create path must survive alongside the new branch.
     assert "admin.dropTable(tp, false)" in text and "admin.createTable(tp," in text, \
