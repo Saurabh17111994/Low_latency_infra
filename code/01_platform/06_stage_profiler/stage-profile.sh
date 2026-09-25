@@ -21,7 +21,7 @@
 #   phase main:  same bring-up -> capture -> raw sample -> teardown
 #   report:      profile.md + profile.tsv + presence.json at OUT_ROOT
 #
-# Env knobs (defaults): NSE_PATH (full 2433 universe), RATE_HZ=20,
+# Env knobs (defaults): NSE_PATH (full 2433 universe), RATE_HZ=2,
 # SMOKE_S=120, MAIN_S=900, PHASES=smoke,main (e.g. PHASES=smoke runs only the
 # verified-smoke phase and reports it), INGESTION_CONTAINERS=3,
 # PROBE_TOKEN_COUNT=12, RAW_SAMPLE_ROWS_PER_BUCKET=2000, WARMUP_S=45,
@@ -37,7 +37,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 NSE_PATH="${NSE_PATH:-$ROOT/../Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY.csv}"
-RATE_HZ="${RATE_HZ:-20}"
+RATE_HZ="${RATE_HZ:-2}"
 SMOKE_S="${SMOKE_S:-120}"
 MAIN_S="${MAIN_S:-900}"
 PHASES="${PHASES:-smoke,main}"

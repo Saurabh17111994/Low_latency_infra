@@ -133,6 +133,9 @@ public final class ConfigKeys {
     public static final String MULTITF_LIVE_SNAPSHOT_INTERVAL_MS = "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS";
     public static final String MULTITF_SESSION_BYPASS = "MULTITF_SESSION_BYPASS";
     public static final String MULTITF_SIGNAL_CONTEXT_ENABLED = "MULTITF_SIGNAL_CONTEXT_ENABLED";
+
+    /** Fast per-tick live feed to the strategy host (low-latency signal path, default true). */
+    public static final String MULTITF_FAST_LIVE_FEED = "MULTITF_FAST_LIVE_FEED";
     public static final String N7_RULE_ID = "N7_RULE_ID";
     public static final String STRATEGY_HOST_ENABLED = "STRATEGY_HOST_ENABLED";
     public static final String STRATEGIES = "STRATEGIES";

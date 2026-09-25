@@ -11,6 +11,7 @@ import org.apache.flink.api.common.state.MapState;
 import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.metrics.Counter;
+import org.apache.flink.metrics.Histogram;
 import org.apache.flink.streaming.api.functions.co.KeyedCoProcessFunction;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.util.Collector;
@@ -88,6 +89,8 @@ public class StrategyHostFunction
     private transient Counter droppedOversize;
     private transient Map<String, Counter> emittedByRule;
     private transient Map<String, HostMetrics> sharedMetrics;
+    /** In-memory signal-read age: tick event-time -> strategy evaluation (low-latency KPI). */
+    private transient Histogram liveAge;
 
     // Heap mirrors for tests that bypass the metric registry.
     private transient long emittedHeap;
@@ -117,6 +120,11 @@ public class StrategyHostFunction
                 getRuntimeContext().getMetricGroup().counter("compute.strategy.dropped.unkeyed");
         droppedOversize =
                 getRuntimeContext().getMetricGroup().counter("compute.strategy.dropped.oversize");
+        // Low-latency KPI (2026-09-26): tick event-time -> in-memory signal
+        // read, sampled at evaluation. Same histogram shape as
+        // compute.latency.ingest_to_monitor.
+        liveAge = getRuntimeContext().getMetricGroup()
+                .histogram("compute.latency.tick_to_strategy", LatencyHistograms.create());
         emittedByRule = new HashMap<>();
         // P2-174: one metrics handle per rule per subtask, shared by every
         // slot — not one HostMetrics per (token, ruleId).
@@ -137,6 +145,11 @@ public class StrategyHostFunction
         HostSlot slot = slotFor(ctx.getCurrentKey());
         if (slot == null) {
             return;
+        }
+        // Low-latency KPI: age of the tick this in-memory read is based on.
+        long evtTime = live.getLong(CandleLiveColumns.LAST_EVENT_TIME);
+        if (liveAge != null && evtTime > 0L) {
+            liveAge.update(Math.max(0L, System.currentTimeMillis() - evtTime));
         }
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: one strategy must not starve the others — isolate,

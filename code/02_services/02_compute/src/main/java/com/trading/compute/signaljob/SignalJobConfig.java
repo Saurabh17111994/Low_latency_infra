@@ -110,6 +110,10 @@ public record SignalJobConfig(
         long liveSnapshotIntervalMs,
         boolean multiTfSessionBypass,
         boolean multiTfSignalContextEnabled,
+        // 2026-09-26 low-latency signal path: per-tick forming row to the
+        // strategy host in memory (no snapshot-cadence wait). The 1s LIVE_TAG
+        // mirror stream is untouched. MULTITF_FAST_LIVE_FEED, default true.
+        boolean multiTfFastLiveFeed,
         String candleLiveTable,
         String candleClosedTable,
         // 2026-09-26 S5→S6 latency workstream (native fetch/flush tuning;
@@ -161,6 +165,11 @@ public record SignalJobConfig(
         // the side-output for direct-construction tests and a future consumer.
         boolean multiTfSignalContextEnabled =
                 booleanValue(env, "MULTITF_SIGNAL_CONTEXT_ENABLED", false);
+        // Low-latency signal path (2026-09-26): emit the smallest-TF forming
+        // row on every accepted trade tick to a fast side output consumed by
+        // the strategy host in memory. Default true; set false for the old
+        // snapshot-cadence feed (measurement/rollback kill-switch).
+        boolean multiTfFastLiveFeed = booleanValue(env, "MULTITF_FAST_LIVE_FEED", true);
         String candleLiveTable = stringEnv(env, "CANDLE_LIVE_TABLE", "candle_live");
         String candleClosedTable = stringEnv(env, "CANDLE_CLOSED_TABLE", "candle_closed");
         // 2026-09-26 S5→S6 latency workstream: native fetch/flush tuning.
@@ -268,6 +277,7 @@ public record SignalJobConfig(
                 liveSnapshotIntervalMs,
                 multiTfSessionBypass,
                 multiTfSignalContextEnabled,
+                multiTfFastLiveFeed,
                 candleLiveTable,
                 candleClosedTable,
                 flussScannerFetchMaxBytes,
@@ -318,6 +328,11 @@ public record SignalJobConfig(
     /** Live snapshot interval for the multi-TF aggregator (default 1000ms). */
     public long liveSnapshotIntervalMs() {
         return liveSnapshotIntervalMs;
+    }
+
+    /** Fast per-tick live feed to the strategy host (default true). */
+    public boolean multiTfFastLiveFeed() {
+        return multiTfFastLiveFeed;
     }
 
     /** Fluss table for candle_live (default candle_live). */

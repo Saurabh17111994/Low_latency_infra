@@ -278,11 +278,17 @@ public final class SignalJob {
         DataStream<RowData> multiTfLive = null;
         DataStream<RowData> strategySignals = null;
         if (config.multiTfEnabled()) {
+            // Low-latency signal path (2026-09-26): the strategy host reads
+            // the per-tick in-memory feed; the 1s snapshot stream stays the
+            // Fluss mirror. MULTITF_FAST_LIVE_FEED=false restores the old
+            // snapshot feed without a code change.
+            boolean fastLive = config.strategyHostEnabled() && config.multiTfFastLiveFeed();
             SingleOutputStreamOperator<RowData> aggregator = monitored
                     .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))
                     .process(new MultiTimeframeAggregateFunction(config.liveSnapshotIntervalMs(),
                             config.multiTfSessionBypass(),
-                            config.multiTfSignalContextEnabled()))
+                            config.multiTfSignalContextEnabled(),
+                            fastLive))
                     .returns(CandleClosedColumns.ROW_TYPE_INFO)
                     .name("multi-tf-aggregator")
                     .uid("multi-tf-aggregator-v1");
@@ -313,7 +319,10 @@ public final class SignalJob {
             // retired n7-signal branch used. The stub smoke id is LOG-only
             // by filter design.
             if (config.strategyHostEnabled()) {
-                strategySignals = multiTfLive
+                DataStream<RowData> hostLive = fastLive
+                        ? aggregator.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TICK_TAG)
+                        : multiTfLive;
+                strategySignals = hostLive
                         .connect(multiTfClosed)
                         .keyBy(
                                 live -> live.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),

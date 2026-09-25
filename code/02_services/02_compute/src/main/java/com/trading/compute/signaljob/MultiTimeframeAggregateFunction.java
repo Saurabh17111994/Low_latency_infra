@@ -61,6 +61,14 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     /** Side-output for live-candle refresh: per-TF forming RowData in {@link CandleLiveColumns} layout. */
     public static final OutputTag<RowData> LIVE_TAG = new OutputTag<RowData>("candle-live") {};
 
+    /**
+     * Fast per-tick live feed (2026-09-26 low-latency signal path): the
+     * smallest-TF forming row emitted on every accepted trade tick. Consumed
+     * by the strategy host in memory — never written to Fluss. The 1s
+     * {@link #LIVE_TAG} snapshot stays the mirror cadence.
+     */
+    public static final OutputTag<RowData> LIVE_TICK_TAG = new OutputTag<RowData>("candle-live-tick") {};
+
     /** Side-output for in-JVM signal context: heap snapshot per TRADE tick (forming + last-15 rings per TF). */
     public static final OutputTag<MultiTimeframeSignalContext> SIGNAL_TAG =
             new OutputTag<MultiTimeframeSignalContext>("signal-context") {};
@@ -94,6 +102,14 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
      */
     private final boolean signalContextEnabled;
 
+    /**
+     * Low-latency signal path (2026-09-26): when true, every accepted trade
+     * tick emits the smallest-TF forming row to {@link #LIVE_TICK_TAG} so the
+     * strategy host reads in-memory state at tick latency instead of the
+     * snapshot cadence. The 1s {@link #LIVE_TAG} mirror is unaffected.
+     */
+    private final boolean emitLiveTick;
+
     /** Reused aggregation math — TRADE-only volume/tickCount lives here (D2). */
     private final CandleAggregateFunction aggregate = new CandleAggregateFunction();
 
@@ -108,6 +124,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     private transient Counter emittedCounter;
     private transient Counter restoredTimerNoopCounter;
     private transient Counter liveEmittedCounter;
+    private transient Counter liveTickEmittedCounter;
 
     /** Per-key slot holder. */
     static final class Slot implements Serializable {
@@ -146,10 +163,16 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
 
     public MultiTimeframeAggregateFunction(long liveSnapshotIntervalMs, boolean sessionBypass,
             boolean signalContextEnabled) {
+        this(liveSnapshotIntervalMs, sessionBypass, signalContextEnabled, false);
+    }
+
+    public MultiTimeframeAggregateFunction(long liveSnapshotIntervalMs, boolean sessionBypass,
+            boolean signalContextEnabled, boolean emitLiveTick) {
         Preconditions.checkArgument(liveSnapshotIntervalMs > 0, "liveSnapshotIntervalMs must be >0");
         this.liveSnapshotIntervalMs = liveSnapshotIntervalMs;
         this.sessionBypass = sessionBypass;
         this.signalContextEnabled = signalContextEnabled;
+        this.emitLiveTick = emitLiveTick;
     }
 
     @Override
@@ -163,6 +186,8 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             emittedCounter = getRuntimeContext().getMetricGroup().counter("compute.candles.emitted");
             restoredTimerNoopCounter = getRuntimeContext().getMetricGroup().counter("compute.candles.restored_timer_noop");
             liveEmittedCounter = getRuntimeContext().getMetricGroup().counter("compute.candles.live.emitted");
+            liveTickEmittedCounter =
+                    getRuntimeContext().getMetricGroup().counter("compute.candles.live.tick.emitted");
         } catch (Exception ignored) {
             // harness may not provide metrics
         }
@@ -583,6 +608,24 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         slot.state.lastEventTime = eventTime;
         if (!tick.isNullAt(RawTableColumns.EVENT_FINGERPRINT)) {
             slot.state.lastFingerprint = tick.getString(RawTableColumns.EVENT_FINGERPRINT).toString();
+        }
+
+        // Fast per-tick live feed (2026-09-26 low-latency signal path): one
+        // smallest-TF forming row per accepted trade — the strategy host reads
+        // it in memory at tick latency. The Fluss mirror keeps the 1s LIVE_TAG
+        // cadence and is not affected.
+        if (emitLiveTick) {
+            int fastOrd = Timeframe.FIFTEEN_S.ordinal();
+            long fastWs = slot.windowStarts[fastOrd];
+            CandleAccumulator fastAcc = slot.state.forming(Timeframe.FIFTEEN_S);
+            if (fastWs != Long.MIN_VALUE && fastAcc.firstEventTime != Long.MAX_VALUE) {
+                ctx.output(LIVE_TICK_TAG,
+                        buildLiveRow(key, Timeframe.FIFTEEN_S, fastWs,
+                                fastWs + Timeframe.FIFTEEN_S.windowMs(), fastAcc));
+                if (liveTickEmittedCounter != null) {
+                    liveTickEmittedCounter.inc();
+                }
+            }
         }
 
         // SIGNAL_TAG side-output: snapshot AFTER mutation (Decision 6 signals consume forming per-tick).

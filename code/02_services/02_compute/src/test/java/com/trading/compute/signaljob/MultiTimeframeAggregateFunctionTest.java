@@ -98,6 +98,41 @@ class MultiTimeframeAggregateFunctionTest {
     }
 
     @Test
+    @DisplayName("low-latency: fast live feed emits one LIVE_TICK_TAG row per accepted trade with fresh OHLC")
+    void fastLiveTickFeedEmitsPerTrade() throws Exception {
+        fn = new MultiTimeframeAggregateFunction(LIVE_INTERVAL, false, true, true);
+        harness = ProcessFunctionTestHarnesses.forKeyedProcessFunction(
+                fn,
+                row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN),
+                Types.LONG);
+        harness.open();
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0); // in-session, aligned for all 6 TFs
+
+        harness.processElement(trade(T0 + 1_000L, "fp-fast-1", 100_00L, 10L), T0 + 1_000L);
+        harness.processElement(trade(T0 + 2_000L, "fp-fast-2", 102_00L, 7L), T0 + 2_000L);
+
+        List<RowData> fast = new ArrayList<>();
+        harness.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TICK_TAG)
+                .forEach(r -> fast.add(r.getValue()));
+        assertEquals(2, fast.size(), "one fast live row per accepted trade tick");
+        RowData second = fast.get(1);
+        assertEquals(TOKEN, second.getLong(CandleLiveColumns.INSTRUMENT_TOKEN));
+        assertEquals(Timeframe.FIFTEEN_S.code(), second.getString(CandleLiveColumns.TF).toString());
+        assertEquals(100_00L, second.getLong(CandleLiveColumns.OPEN_PAISE));
+        assertEquals(102_00L, second.getLong(CandleLiveColumns.HIGH_PAISE));
+        assertEquals(102_00L, second.getLong(CandleLiveColumns.CLOSE_PAISE));
+        assertEquals(17L, second.getLong(CandleLiveColumns.VOLUME));
+        assertEquals(T0 + 2_000L, second.getLong(CandleLiveColumns.LAST_EVENT_TIME));
+
+        // Quote-only ticks carry no OHLC mutation and must not emit.
+        harness.processElement(quote(T0 + 3_000L, "fp-fast-q", 103_00L), T0 + 3_000L);
+        List<RowData> afterQuote = new ArrayList<>();
+        harness.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TICK_TAG)
+                .forEach(r -> afterQuote.add(r.getValue()));
+        assertEquals(2, afterQuote.size(), "quote tick must not emit a fast live row");
+    }
+
+    @Test
     @DisplayName("smoke: 3 trades in one 1m bucket → closed OHLCV, live per TF, signal per trade, quote/pre-open dropped, late no duplicate")
     void smoke() throws Exception {
         open();

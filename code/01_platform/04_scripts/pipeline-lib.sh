@@ -1150,6 +1150,8 @@ pipeline_submit_job() {
     -e CANDLE_LIVE_TABLE="${CANDLE_LIVE_TABLE:-candle_live}" \
     -e CANDLE_CLOSED_TABLE="${CANDLE_CLOSED_TABLE:-candle_closed}" \
     -e MULTITF_LIVE_SNAPSHOT_INTERVAL_MS="${MULTITF_LIVE_SNAPSHOT_INTERVAL_MS:-1000}" \
+    -e MULTITF_FAST_LIVE_FEED="${MULTITF_FAST_LIVE_FEED:-true}" \
+    -e BUFFER_TIMEOUT_MS="${BUFFER_TIMEOUT_MS:-10}" \
     flink-jobmanager flink run -d "${extra_flags[@]}" \
       -c com.trading.compute.signaljob.SignalJob /opt/flink/jobs/compute.jar 2>&1)" || submit_rc=$?
   if [ "$submit_rc" -ne 0 ]; then

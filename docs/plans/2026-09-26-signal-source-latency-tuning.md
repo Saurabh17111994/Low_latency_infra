@@ -97,3 +97,30 @@ Smoke `logs/stage-profile-20260926-015049` (200 s) + record run
 - Verification: `SourceFetchLatencyTuningTest` 6/6; full compute module suite
   green (76 report files, 0 failures); common `ConfigGuardTest` green;
   profiler 36/36 offline; `docs-audit` C6 re-measured compute 532→538.
+
+## 7. Low-latency in-memory signal feed + 2 Hz profile (CHG-316 + CHG-317)
+
+Operator KPI: **broker tick → signal operator reading Flink state in memory**
+(the candle mirrors are explicitly out of scope). The synthetic feed moved from
+20 to 2 ticks/s per stock (`stage-profile.sh` `RATE_HZ` default 2) and three
+states were measured on the full 2 433-instrument universe (200 s each, same
+image and job config):
+
+| state | `tick_to_strategy` p50 | p95 | p99 | evidence |
+|---|---|---|---|---|
+| snapshot feed (1 s timer) | 564 ms | 1 592 ms | 2 288 ms | `logs/stage-profile-20260926-034308/` |
+| fast per-tick feed, before bridge fix | 66 ms | 551 ms | 576 ms | `logs/stage-profile-20260926-031649/` |
+| fast feed + bridge age flush | 49 ms | 80 ms | 93 ms | `logs/stage-profile-20260926-033605/` |
+
+- **CHG-316**: per-tick `LIVE_TICK_TAG` side output to the strategy host (Fluss
+  mirror untouched), the `compute.latency.tick_to_strategy` KPI, the
+  `MULTITF_FAST_LIVE_FEED` kill switch (default true), and the profiler
+  `RATE_HZ=2` default.
+- **CHG-317**: the bridge T2 age flush (`MaxAge`, default 1 ms) had no
+  production caller; wiring the ticker collapsed the one-tick-period shoulder
+  the 2 Hz feed exposed (S1 p90 481→9 ms, S3 p90 479→4 ms, S5 p99 534→56 ms).
+- Throughput parity: ~4.87 k rows/s at 2 Hz in every run; presence gate PASS.
+- Remaining levers: the checkpoint-bound sink tail (~0.9–1.2 s p95/p99 on the
+  sinks; ~1.5 % of the timeline) and the fake-broker volume semantics (per-frame
+  qty vs cumulative volume → ~49 % of rows are non-positive-volume and do not
+  participate in signal generation).
