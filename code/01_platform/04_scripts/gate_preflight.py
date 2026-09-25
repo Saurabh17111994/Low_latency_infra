@@ -23,7 +23,20 @@ Checks
      at least the manifest's table count (the wiped-catalog class);
   4. stack — the containers the live steps need are running, and the
      stack-generation stamp (container ids + images + catalog count + convergence)
-     is printed for attribution in SUMMARY.txt.
+     is printed for attribution in SUMMARY.txt;
+  5. drill-cost config — the tablet's effective remote.data.dir is read from its
+     rendered server.yaml. While remote-log tiering is off (0s) a remote URI is
+     pure cost: every KV bucket delete probes S3 (~1 s/bucket) on the tablet's
+     single replica-state-change thread, and placements queue behind it (781 s of
+     backlog measured on the prewarm drill, 2026-09-25). Local is required then;
+     the tiering lanes set the R2 URI only inside their own recreate windows;
+  6. orphan dirs — the tablet must carry no empty, non-live database/table
+     directories. Fluss never deletes a dropped database's directory, so every
+     drill iteration leaks one; they fed a SchemaNotExist retry storm on restart.
+     Read-only via tablet-orphan-sweep.py --check (the drill step sweeps its own
+     leftovers with the same script);
+  7. tablet registry — advisory when /fluss/tabletservers/tables clearly leaks
+     (stale drop entries accumulate until a tablet restart reconciles them).
 
 Exit codes: 0 = verified; 1 = drift (do not start the gate); 2 = prerequisite
 missing (the caller must record a SKIP, never a pass — see run-monday-gates.sh).
@@ -50,7 +63,18 @@ MANIFEST = os.path.join(PROJECT_ROOT, "code", "01_platform", "02_sql", "ddl",
 REQUIRED_SERVICES = ("fluss-coordinator", "fluss-tablet", "zookeeper")
 ZK_CONTAINER = "01_docker-zookeeper-1"
 ZK_PATH = "/fluss/metadata/databases/default/tables"
+ZK_DATABASES = "/fluss/metadata/databases"
+ZK_REGISTRY = "/fluss/tabletservers/tables"
 ZK_CLI = "/apache-zookeeper-3.9.2-bin/bin/zkCli.sh"
+TABLET_CONTAINER = "01_docker-fluss-tablet-1"
+ORPHAN_SWEEP = os.path.join(SCRIPT_DIR, "tablet-orphan-sweep.py")
+
+# A URI scheme on remote.data.dir while remote-log tiering is off is pure drill cost:
+# every KV bucket deletion then probes S3 (~1 s/bucket) on the tablet's single
+# replica-state-change thread, and placements queue behind it. Measured 2026-09-25:
+# 781 s of placement backlog in the prewarm drill (thread dump: KvManager
+# .deleteRemoteKvSnapshot -> HadoopFileSystem.exists -> S3A HEAD/LIST).
+REMOTE_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 
 def canonical_compose() -> list[str]:
@@ -202,6 +226,72 @@ def manifest_tables() -> int | None:
         return None
 
 
+def tablet_remote_dir() -> tuple[str | None, str | None]:
+    """(remote.data.dir, remote.log.task-interval-duration) from the running tablet.
+
+    The rendered server.yaml carries remote.data.dir twice (image base + injected
+    FLUSS_PROPERTIES); the last occurrence is the effective one, so the loop
+    overwrites. (None, None) when the tablet cannot be read.
+    """
+    result = run(["docker", "exec", TABLET_CONTAINER, "sh", "-c",
+                  "grep -E '^[[:space:]]*(remote[.]data[.]dir|"
+                  "remote[.]log[.]task-interval-duration):' /opt/fluss/conf/server.yaml"])
+    if result.returncode != 0:
+        return None, None
+    remote_dir = interval = None
+    for line in result.stdout.splitlines():
+        key, _, value = line.strip().partition(":")
+        if key == "remote.data.dir":
+            remote_dir = value.strip()
+        elif key == "remote.log.task-interval-duration":
+            interval = value.strip()
+    return remote_dir, interval
+
+
+def drill_cost_verdict(remote_dir: str, interval: str | None) -> str:
+    """Empty when the drill-cost contract holds, else the drift text.
+
+    Local paths (or file://) are always fine. A remote URI is fine while
+    remote-log tiering is enabled (a tiering window); with tiering off it is pure
+    cost and the prewarm drill pays it in placement backlog.
+    """
+    if not REMOTE_SCHEME.match(remote_dir) or remote_dir.startswith("file:"):
+        return ""
+    if interval is not None and interval in ("0", "0s"):
+        return (f"tablet remote.data.dir is {remote_dir} while remote-log tiering is off "
+                f"({interval}) — every KV bucket deletion then probes S3 (~1 s/bucket) and "
+                f"placements queue behind it (+13 min on the prewarm drill, 2026-09-25). "
+                f"Fix: set FLUSS_REMOTE_DATA_DIR=/tmp/fluss-remote-data in "
+                f"code/01_platform/01_docker/.env and recreate the tablet (`make up`), or run "
+                f"the tiering lane, which sets the R2 URI for its own recreate window")
+    return ""
+
+
+def orphan_dir_verdict() -> tuple[str | None, list[str], list[str]]:
+    """(drift, prereq, lines) from tablet-orphan-sweep.py --check (read-only).
+
+    Fluss never deletes a dropped database's directory, so drill fixtures leak
+    empty dirs; on restart they fed a SchemaNotExist retry storm. The check is
+    delegated so `make drill-live` and this preflight share one definition of
+    "orphan".
+    """
+    if not os.path.isfile(ORPHAN_SWEEP):
+        return None, [], []
+    result = run([sys.executable, ORPHAN_SWEEP, "--check"])
+    lines = (result.stdout or "").strip().splitlines()
+    if result.returncode == 1:
+        found = [line.strip() for line in lines if "orphan:" in line]
+        shown = "; ".join(found[:3]) + (f" (+{len(found) - 3} more)" if len(found) > 3 else "")
+        return (f"tablet has orphan fixture directories ({shown}) — remove them with "
+                f"`python3 code/01_platform/04_scripts/tablet-orphan-sweep.py --sweep`; "
+                f"`make drill-live` sweeps its own leftovers automatically"), [], lines
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        return None, [f"cannot verify tablet orphan directories: "
+                      f"{detail[-1] if detail else 'no output'}"], []
+    return None, [], lines
+
+
 def main(certifying: bool = True) -> int:
     drift: list[str] = []
     prereq: list[str] = []
@@ -256,6 +346,28 @@ def main(certifying: bool = True) -> int:
         drift.append(f"catalog has {live}/{expected} tables (wiped or partial) — run `make up`")
     else:
         print(f"  OK    catalog {live}/{expected} tables")
+
+    if not prereq:
+        remote_dir, interval = tablet_remote_dir()
+        if remote_dir is None:
+            prereq.append("cannot read remote.data.dir from the running tablet "
+                          "(needed to verify the drill-cost configuration)")
+        else:
+            cost = drill_cost_verdict(remote_dir, interval)
+            if cost:
+                drift.append(cost)
+            elif REMOTE_SCHEME.match(remote_dir) and not remote_dir.startswith("file:"):
+                print(f"  OK    tablet remote.data.dir {remote_dir} with remote-log tiering "
+                      f"{interval}")
+            else:
+                print(f"  OK    tablet remote.data.dir local ({remote_dir}), remote-log tiering "
+                      f"{interval or 'unset'}")
+        orphan_drift, orphan_prereq, orphan_lines = orphan_dir_verdict()
+        prereq.extend(orphan_prereq)
+        if orphan_drift:
+            drift.append(orphan_drift)
+        for index, line in enumerate(orphan_lines):
+            print(f"  {'INFO' if index == 0 else '    '}  {line.strip()}")
 
     rows = stack_containers() if not prereq else []
     by_service = {row.get("Service"): row for row in rows}

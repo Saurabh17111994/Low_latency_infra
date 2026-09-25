@@ -209,6 +209,11 @@ test-ingestion:
 # target/surefire-reports against the documented plain-suite triple, and a live
 # run rewrites those same class XMLs with real (non-zero) test counts.
 # Env-gated: SKIPPED (exit 0) when FLUSS_BOOTSTRAP is unset.
+# The fixture hygiene guard (DrillFixtureHygieneTest, common module) runs in a
+# separate invocation AFTER the drills — the reactor would otherwise run common
+# first, before there is anything to check — and the orphan-dir sweep then removes
+# the empty directories the drops leave behind (Fluss never deletes a dropped
+# database's directory; 177 had accumulated by 2026-09-25 and stalled a restart).
 drill-live:
 	@if [ -z "$$FLUSS_BOOTSTRAP" ]; then \
 		echo "SKIP: drill-live (no FLUSS_BOOTSTRAP) — export FLUSS_BOOTSTRAP=<host:port>"; \
@@ -219,6 +224,14 @@ drill-live:
 			&& cd 02_services/02_compute && $(MVN) test -Pdrill-reports \
 				-Dtest='B4SignalIntentE2ETest' \
 				-Dsurefire.failIfNoSpecifiedTests=false; \
+		rc=$$?; \
+		cd "$(CURDIR)" && $(MVN) -f code/pom.xml test -Pdrill-reports -pl common \
+			-Dtest='DrillFixtureHygieneTest' \
+			-Dsurefire.failIfNoSpecifiedTests=false; \
+		hygiene_rc=$$?; \
+		python3 code/01_platform/04_scripts/tablet-orphan-sweep.py --sweep || true; \
+		if [ $$rc -ne 0 ]; then exit $$rc; fi; \
+		exit $$hygiene_rc; \
 	fi
 
 # audit_r2.py unit tests (stdlib unittest — SigV4 golden vector, config
