@@ -4,35 +4,20 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
 import org.apache.fluss.client.admin.Admin;
-import org.apache.fluss.client.table.Table;
-import org.apache.fluss.client.table.scanner.batch.BatchScanner;
-import org.apache.fluss.client.table.writer.UpsertWriter;
 import org.apache.fluss.config.Configuration;
-import org.apache.fluss.metadata.Schema;
-import org.apache.fluss.metadata.TableBucket;
-import org.apache.fluss.metadata.TableDescriptor;
+import org.apache.fluss.metadata.TableChange;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
-import org.apache.fluss.row.GenericRow;
-import org.apache.fluss.row.InternalRow;
-import org.apache.fluss.types.DataType;
-import org.apache.fluss.utils.CloseableIterator;
 
 // Version note (2026-09-23): the 0.9.1 claims in this file were re-checked against Fluss 1.0.0 and still hold — flush()/close is still unbounded in 1.0.0 (`fluss-client/.../write/RecordAccumulator.java:149`, unchanged since 0.9.1) and `TableWriter`/`UpsertWriter` still expose no `close()`. Re-check on the next upgrade (DEC-052).
 /**
@@ -45,8 +30,8 @@ import org.apache.fluss.utils.CloseableIterator;
  * eod-controller status    read-only per-table plan + day-state summary
  * eod-controller run       advance due days through the offload state machine
  *                          (creates the run-date PENDING record per table)
- * eod-controller extend    retention-extension recipe; --apply performs the
- *                          shadow-table rewrite drill
+ * eod-controller extend    retention-extension recipe; --apply applies the
+ *                          table.log.ttl ALTER
  * eod-controller reconcile re-verify COMMITTED/VERIFYING days (crash-resume)
  * eod-controller reset     FAILED_MANUAL -> PENDING (requires --approve)
  * }</pre>
@@ -55,22 +40,17 @@ import org.apache.fluss.utils.CloseableIterator;
  * 2 extension required (or retryable days), 3 pending work (status),
  * 4 usage/approval-required, 5 lease held by another controller.
  *
- * <p>The retention-extension mechanism honors the Fluss 0.9.1 boundary:
- * {@code table.log.ttl} is create-time only (verified 2026-08-13), so an
- * extension is a controlled rewrite — {@code extend --apply} creates a shadow
- * table with the extended create-time TTL ({@code name__eod_ext_<date>}),
- * copies the current rows, and verifies count parity. The swap (pointing
- * consumers at the shadow, or drop+recreate under the same name) stays an
- * operator-approved step — the drill measures the copy before production
- * assumptions harden.
+ * <p>Retention extension is one ALTER: Fluss 1.0.0 accepts
+ * {@code table.log.ttl} and enforces it on existing sealed segments (A1 probe
+ * GREEN 2026-09-25 — accepted + in force in ZK; A2 probe GREEN 2026-09-25 —
+ * enforced expiry follows the ALTER in both directions). {@code extend
+ * --apply} therefore runs {@code Admin.alterTable} only — no shadow table, no
+ * row copy, no swap. The 0.9.1 create-only boundary (verified 2026-08-13) is
+ * retired.
  */
 public final class EodControllerTool {
 
     private static final Duration TIMEOUT = Duration.ofSeconds(30);
-    /** Parallel copy workers (CHG-099): capped at the bucket count. */
-    static final int COPY_THREADS = 16;
-    /** Async upserts in flight per worker before awaiting acks. */
-    static final int COPY_WRITE_BATCH = 500;
 
     /**
      * EOD-eligible live tables — now 7d TTL (T8 G1/G4 hardened 2026-08-22 — was
@@ -78,7 +58,7 @@ public final class EodControllerTool {
      * tables for backward compat, but the storage contract is 7 calendar days
      * + block-delete-unverified guard: Fluss TTL delete is BLOCKED until the
      * iceberg manifest is VERIFIED; otherwise the controller extends retention
-     * via the shadow-rewrite drill and fires a critical alert.
+     * via one {@code table.log.ttl} ALTER and fires a critical alert.
      *
      * <p>{@code candle_closed} (DDL 33) replaced the retired
      * {@code feature_candles_15s} in the default scope (multi-timeframe
@@ -152,8 +132,7 @@ public final class EodControllerTool {
             return switch (opts.subcommand) {
                 case "status" -> status(opts, liveTtlsFor.apply("status"), zone, now);
                 case "run" -> run(opts, liveTtlsFor.apply("run"), zone, runDate, now, nowMs);
-                case "extend" -> extend(opts, connection, admin, liveTtlsFor.apply("extend"),
-                        zone, now);
+                case "extend" -> extend(opts, admin, liveTtlsFor.apply("extend"), zone, now);
                 case "reconcile" -> reconcile(opts, liveTtlsFor.apply("reconcile"), now);
                 case "reset" -> reset(opts, now);
                 default -> usage();
@@ -259,13 +238,12 @@ public final class EodControllerTool {
         }
     }
 
-    private static int extend(Options opts, Connection connection, Admin admin,
+    private static int extend(Options opts, Admin admin,
             Map<String, Duration> liveTtls, ZoneId zone, Instant now) throws Exception {
         try (FlussEodStateStore store = FlussEodStateStore.open(opts.bootstrap, opts.database,
                 opts.stateTable, TIMEOUT)) {
-            // P4-121/122: extend --apply mutates state (shadow create + bulk
-            // copy) — it must hold the single-writer lease like run/reconcile,
-            // or a concurrent run races the shadow check-then-create.
+            // P4-121/122: extend --apply mutates state (retention ALTER) — it
+            // must hold the single-writer lease like run/reconcile.
             if (opts.apply && !opts.dryRun) {
                 String myToken = token();
                 Lease lease = store.acquireLease(myToken, now.toEpochMilli(),
@@ -290,21 +268,18 @@ public final class EodControllerTool {
                 required = true;
                 Duration live = liveTtls.get(p.table());
                 Duration newTtl = EodRetentionPolicy.extendedTtl(live, opts.extension);
-                String shadow = p.table() + "__eod_ext_"
-                        + now.atZone(zone).toLocalDate().format(DateTimeFormatter.BASIC_ISO_DATE);
                 // Block-guard: this table's delete is currently BLOCKED — the
-                // protected bound is unverified, so the shadow rewrite (extended
-                // 7d + extra) must succeed before the old table is allowed to
+                // protected bound is unverified, so the ALTER (extended 7d +
+                // extra) must succeed before the old data is allowed to
                 // expire. The alert below makes the hold observable.
                 System.err.println("eod-controller: ALERT CRITICAL — block-guard extend for "
                         + p.table() + " liveTtl=" + live + " -> newTtl=" + newTtl
                         + " — Fluss delete BLOCKED until VERIFIED (iceberg manifest)");
                 System.out.println("eod-controller: extend " + p.table()
                         + " liveTtl=" + live + " newTtl=" + newTtl
-                        + " shadow=" + shadow + " margin=" + p.plan().marginMs() + "ms");
+                        + " margin=" + p.plan().marginMs() + "ms");
                 if (opts.apply && !opts.dryRun) {
-                    if (!performRewrite(connection, admin, opts.database, p.table(),
-                            shadow, newTtl, TIMEOUT.toMillis())) {
+                    if (!alterTtl(admin, opts.database, p.table(), newTtl, TIMEOUT.toMillis())) {
                         appliedAll = false;
                     }
                 }
@@ -410,254 +385,30 @@ public final class EodControllerTool {
         return exit;
     }
 
-    // ── extend rewrite drill (live) ───────────────────────────────────────
+    // ── extend: retention ALTER (live) ───────────────────────────────────────
 
     /**
-     * The controlled-rewrite drill: create the shadow table with the extended
-     * create-time TTL (same schema/PK/distribution, lake disabled like the
-     * live dev tables), copy every current row via the raw client, and verify
-     * count parity. The swap stays an operator step — 0.9.1 has no rename.
-     * Returns true when the shadow was created and the copy reconciles.
+     * Apply the extended retention with one {@code Admin.alterTable} —
+     * {@code table.log.ttl} is alterable and enforced in Fluss 1.0.0 (A1 probe
+     * GREEN 2026-09-25: accepted + in force in ZK; A2 probe GREEN 2026-09-25:
+     * enforced expiry follows the ALTER for existing sealed segments, both
+     * directions). No shadow table, no row copy, no swap. Returns true when the
+     * ALTER was accepted.
      */
-    static boolean performRewrite(Connection connection, Admin admin, String database,
-            String table, String shadow, Duration newTtl, long timeoutMs) throws Exception {
-        TablePath livePath = TablePath.of(database, table);
-        TablePath shadowPath = TablePath.of(database, shadow);
-        TableInfo live = admin.getTableInfo(livePath)
-                .get(timeoutMs, TimeUnit.MILLISECONDS);
+    static boolean alterTtl(Admin admin, String database, String table, Duration newTtl,
+            long timeoutMs) {
+        String ttl = ttlOption(newTtl);
         try {
-            admin.getTableInfo(shadowPath).get(timeoutMs, TimeUnit.MILLISECONDS);
-            System.err.println("eod-controller: shadow " + shadow + " already exists — "
-                    + "drop it (or rename) before re-running the drill");
-            return false;
-        } catch (ExecutionException e) {
-            // P4-118/123: proceed ONLY on not-exists. A bare catch(Exception)
-            // mistook timeouts/auth failures for "absent" and built the copy
-            // on a lie.
-            if (!(e.getCause() instanceof org.apache.fluss.exception.TableNotExistException)) {
-                throw new RuntimeException("eod-controller: shadow existence check failed for "
-                        + shadow, e);
-            }
-            // shadow absent — proceed
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw e;
-        }
-
-        Schema schema = live.getSchema();
-        TableDescriptor.Builder tb = TableDescriptor.builder()
-                .schema(schema)
-                .distributedBy(live.getNumBuckets(),
-                        live.getBucketKeys().toArray(String[]::new));
-        // Keep the create-time options that matter for a rewrite: the extended
-        // TTL is the point; kv.format-version rides along; lake stays disabled
-        // (create-only — same dev deviation as the live tables).
-        String kvFormat = live.getProperties().toMap().get("table.kv.format-version");
-        if (kvFormat != null) {
-            tb.property("table.kv.format-version", kvFormat);
-        }
-        tb.property("table.log.ttl", ttlOption(newTtl));
-        admin.createTable(shadowPath, tb.build(), false)
-                .get(timeoutMs, TimeUnit.MILLISECONDS);
-        System.out.println("eod-controller: created shadow " + shadow + " ttl=" + newTtl);
-
-        Table liveTable = connection.getTable(livePath);
-        Table shadowTable = connection.getTable(shadowPath);
-        long copied = copyBucketsParallel(liveTable, shadowTable, live, schema, timeoutMs);
-        long liveCount = scanCount(liveTable, live, timeoutMs);
-        long shadowCount = scanCount(shadowTable,
-                admin.getTableInfo(shadowPath).get(timeoutMs, TimeUnit.MILLISECONDS), timeoutMs);
-        System.out.println("eod-controller: shadow copy rows=" + copied
-                + " liveCount=" + liveCount + " shadowCount=" + shadowCount);
-        if (liveCount != shadowCount || copied != liveCount) {
-            System.err.println("eod-controller: shadow copy does not reconcile "
-                    + "(live=" + liveCount + " shadow=" + shadowCount + " copied=" + copied + ")");
-            return false;
-        }
-        return true;
-    }
-
-    /**
-     * Parallel bucket copy (CHG-099): one worker per bucket (capped at
-     * {@link #COPY_THREADS}), each with its own {@code UpsertWriter} and
-     * batched async acks ({@link #COPY_WRITE_BATCH} futures per await). The
-     * old single-threaded path awaited every row's ack before the next —
-     * one RTT per row, ~10 rows/s (measured 2026-08-24 on a 385k-row table).
-     * Batching + 16-way parallelism targets thousands of rows/s. Correctness
-     * contract unchanged: per-bucket full scan + PK upserts (idempotent) +
-     * final flush, then the caller's count parity. (Note: a Flink bounded
-     * source is NOT viable on lake-disabled tables in fluss 0.9.1-incubating —
-     * the enumerator throws "Batch only supports when table option
-     * 'table.datalake.enabled' is set to true" — so the copy stays on the
-     * raw client, where the batch scanner is supported.)
-     */
-    static long copyBucketsParallel(Table liveTable, Table shadowTable, TableInfo info,
-            Schema schema, long timeoutMs) throws Exception {
-        int buckets = info.getNumBuckets();
-        ExecutorService pool = Executors.newFixedThreadPool(Math.min(buckets, COPY_THREADS));
-        List<Future<Long>> futures = new ArrayList<>();
-        for (int b = 0; b < buckets; b++) {
-            final int bucketId = b;
-            futures.add(pool.submit(
-                    () -> copyBucket(liveTable, shadowTable, info, schema, bucketId, timeoutMs)));
-        }
-        long copied = 0;
-        // P4-119/124: one shared deadline across buckets (not timeout*buckets
-        // stacked), cancel on failure, shutdownNow + await — the old
-        // sequential f.get(timeout*4) could block buckets*timeout (hours) and
-        // the bare shutdown() leaked workers on failure.
-        long deadlineNanos = System.nanoTime()
-                + TimeUnit.MILLISECONDS.toNanos(timeoutMs * 4);
-        try {
-            for (Future<Long> f : futures) {
-                long remaining = TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime());
-                copied += f.get(Math.max(1, remaining), TimeUnit.MILLISECONDS);
-            }
-        } catch (ExecutionException | java.util.concurrent.TimeoutException e) {
-            for (Future<Long> f : futures) {
-                f.cancel(true);
-            }
-            Throwable cause = (e instanceof ExecutionException && e.getCause() != null)
-                    ? e.getCause() : e;
-            throw new RuntimeException("eod-controller: bucket copy failed: " + cause, cause);
-        } finally {
-            pool.shutdownNow();
-            pool.awaitTermination(30, TimeUnit.SECONDS);
-        }
-        return copied;
-    }
-
-    private static long copyBucket(Table liveTable, Table shadowTable, TableInfo info,
-            Schema schema, int bucketId, long timeoutMs) throws Exception {
-        TableBucket bucket = new TableBucket(info.getTableId(), bucketId);
-        // P4-279/282 note: the writer is flush()-only in Fluss 0.9.1 (no AutoCloseable
-        // — verified by decompile in Group F), so there is nothing to close.
-        // 2026-09-11: the flush-in-finally that used to be here is removed. Its old
-        // justification ("cannot mask the copy exception because awaitBatch already
-        // propagated any ack failure") held only on the success path — and there the
-        // flush was a no-op, since awaitBatch had already awaited every future. On the
-        // timeout path it was the opposite of harmless: the futures are still in the
-        // accumulator, so flush() awaited them with no timeout and the TimeoutException
-        // never propagated (see FlussWriteProfiles for why that wait is unbounded).
-        // Written-through is unchanged: the last awaitBatch below still runs, and it is
-        // what makes every row durable before this method returns.
-        UpsertWriter writer = shadowTable.newUpsert().createWriter();
-        long copied = 0;
-        List<CompletableFuture<?>> batch = new ArrayList<>();
-        try (BatchScanner scanner = liveTable.newScan()
-                     .limit(Integer.MAX_VALUE)
-                     .createBatchScanner(bucket)) {
-            // pollBatch returns one time-bounded batch; repeat until empty
-            // (a null/empty batch = scan of this bucket exhausted) —
-            // measured 2026-08-24: a single pollBatch under 16-way
-            // write contention yielded only ~6.8% of the rows (uniform
-            // sample), while the drain loop reads the full bucket.
-            while (true) {
-                boolean any = false;
-                try (CloseableIterator<InternalRow> it =
-                        scanner.pollBatch(Duration.ofMillis(250))) {
-                    while (it != null && it.hasNext()) {
-                        InternalRow row = it.next();
-                        batch.add(writer.upsert(GenericRow.of(toValues(row, schema))));
-                        if (batch.size() == COPY_WRITE_BATCH) {
-                            awaitBatch(batch, timeoutMs);
-                        }
-                        copied++;
-                        any = true;
-                    }
-                }
-                if (!any) {
-                    break;
-                }
-            }
-        }
-        awaitBatch(batch, timeoutMs);
-        System.out.println("eod-controller: copy bucket=" + bucketId + " rows=" + copied);
-        return copied;
-    }
-
-    private static void awaitBatch(List<CompletableFuture<?>> batch, long timeoutMs)
-            throws Exception {
-        // P4-120/125: one timeout for the whole batch (allOf), not
-        // batch-size × timeout sequential — a slow ack stalled everything.
-        try {
-            CompletableFuture.allOf(batch.toArray(CompletableFuture[]::new))
+            admin.alterTable(TablePath.of(database, table),
+                    List.of(TableChange.set("table.log.ttl", ttl)), false)
                     .get(timeoutMs, TimeUnit.MILLISECONDS);
-        } finally {
-            batch.clear();
+            System.out.println("eod-controller: ALTER " + table + " table.log.ttl=" + ttl);
+            return true;
+        } catch (Exception e) {
+            System.err.println("eod-controller: ALTER table.log.ttl=" + ttl
+                    + " failed for " + table + ": " + e);
+            return false;
         }
-    }
-
-    /** Row → Object[] in schema order (raw-client upsert values). */
-    private static Object[] toValues(InternalRow row, Schema schema) {
-        List<Schema.Column> columns = schema.getColumns();
-        Object[] out = new Object[columns.size()];
-        for (int i = 0; i < columns.size(); i++) {
-            if (row.isNullAt(i)) {
-                out[i] = null;
-                continue;
-            }
-            DataType type = columns.get(i).getDataType();
-                // P4-117/126: map the full Fluss TypeRoot set — the old 7-type
-            // switch threw mid-copy AFTER the shadow was created (partial
-            // shadow + failed drill) on any TIMESTAMP/DATE/DECIMAL table.
-            // Complex nests (ARRAY/MAP/ROW) ride a FieldGetter passthrough.
-            org.apache.fluss.row.InternalRow.FieldGetter nested =
-                    org.apache.fluss.row.InternalRow.createFieldGetter(type, i);
-            out[i] = switch (type.getTypeRoot()) {
-                case CHAR, STRING -> row.getString(i);
-                case BOOLEAN -> row.getBoolean(i);
-                case BINARY, BYTES -> row.getBytes(i);
-                case DECIMAL -> row.getDecimal(i,
-                        ((org.apache.fluss.types.DecimalType) type).getPrecision(),
-                        ((org.apache.fluss.types.DecimalType) type).getScale());
-                case TINYINT -> row.getByte(i);
-                case SMALLINT -> row.getShort(i);
-                case INTEGER -> row.getInt(i);
-                case BIGINT -> row.getLong(i);
-                case FLOAT -> row.getFloat(i);
-                case DOUBLE -> row.getDouble(i);
-                case DATE -> row.getInt(i);
-                case TIME_WITHOUT_TIME_ZONE -> row.getInt(i);
-                case TIMESTAMP_WITHOUT_TIME_ZONE -> row.getTimestampNtz(i, 6);
-                case TIMESTAMP_WITH_LOCAL_TIME_ZONE -> row.getTimestampLtz(i, 6);
-                default -> nested.getFieldOrNull(row);
-            };
-        }
-        return out;
-    }
-
-    private static long scanCount(Table table, TableInfo info, long timeoutMs) throws Exception {
-        // P4-116/127: drain like copyBucket — one pollBatch is one batch, not
-        // the bucket. The old single-poll undercounted (false EXTEND_FAILED
-        // parity failure) and NPEd on it.hasNext() when pollBatch returned
-        // null for an empty/exhausted bucket.
-        // P4-278 note: copy-then-count has no snapshot isolation — live writes
-        // between copy and count flake exact parity on hot tables. The drill
-        // requires a quiesced source (hold the lease / pause writers first).
-        long count = 0;
-        for (int b = 0; b < info.getNumBuckets(); b++) {
-            TableBucket bucket = new TableBucket(info.getTableId(), b);
-            try (BatchScanner scanner = table.newScan()
-                         .limit(Integer.MAX_VALUE)
-                         .createBatchScanner(bucket)) {
-                while (true) {
-                    boolean any = false;
-                    try (CloseableIterator<InternalRow> it =
-                            scanner.pollBatch(Duration.ofMillis(250))) {
-                        while (it != null && it.hasNext()) {
-                            it.next();
-                            count++;
-                            any = true;
-                        }
-                    }
-                    if (!any) {
-                        break;
-                    }
-                }
-            }
-        }
-        return count;
     }
 
     /** Render a Duration as a Fluss TTL option value (2d / 1h / 30m / 5000ms). */
@@ -717,7 +468,7 @@ public final class EodControllerTool {
                   --schema-version <v> (env EOD_SCHEMA_VERSION, default 1)
                   --offload none|mock|lake  (env EOD_OFFLOAD, default none — fail-closed)
                   --table <name>       (reset: single table scope)
-                  --apply              (extend: perform the shadow rewrite drill)
+                  --apply              (extend: apply the table.log.ttl ALTER)
                   --dry-run            (run/extend: print, don't write)
                   --approve            (reset: destructive approval)
                 exit: 0 ok, 1 failure, 2 extension/retryable, 3 pending work,

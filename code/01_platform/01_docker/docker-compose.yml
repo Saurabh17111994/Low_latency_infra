@@ -549,6 +549,10 @@ services:
         # value - verified from ConfigOptions in fluss-server-1.0.0.jar (memoryType, defaultValue
         # MemorySize.parse("1024m")) - so an unchanged environment renders exactly as before.
         log.segment.file-size: ${FLUSS_LOG_SEGMENT_FILE_SIZE:-1024m}
+        # A2/A2b probes: retention cleanup runs every 5min by default (read at tablet
+        # start), which hides a 4min-TTL expiry for up to 5min. Probes render 30s for
+        # their window only; the default and every revert stay upstream's 5min.
+        log.retention.check-interval: ${FLUSS_RETENTION_CHECK_INTERVAL:-5min}
         # Lake tiering (tracker 14 P3.2) — same datalake.* block as the
         # coordinator: datalake.iceberg.* → Iceberg catalog props,
         # iceberg.hadoop.* → Hadoop fs.s3a.* (R2). Credentials only via .env.

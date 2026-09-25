@@ -21,7 +21,7 @@ import java.util.stream.Collectors;
  * <p><b>T8 G1/G4 7d hardening (2026-08-22)</b>: live DDL TTL is now 7d (was 2d)
  * plus a <b>block-delete-unverified guard</b>: Fluss TTL delete is BLOCKED
  * until the iceberg manifest for that trading day is VERIFIED; otherwise the
- * controller extends retention (shadow-rewrite with extended TTL) and fires a
+ * controller extends retention (one table.log.ttl ALTER) and fires a
  * critical alert. The EOD fail Fri → Fri-Sun must survive 7d even when the
  * S3/Iceberg offload is delayed. See {@link EodPlanner} protected bound and
  * {@link EodRetentionPolicy#requiresExtension}.

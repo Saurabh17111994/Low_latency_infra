@@ -15,7 +15,7 @@ import java.util.regex.Pattern;
  * <p><b>T8 G1/G4 7d hardening (2026-08-22)</b>: live DDL TTL is 7d (was 2d) +
  * block-delete-unverified guard — source data for a trading day cannot expire
  * while its iceberg manifest is unverified; unverified days always extend
- * (shadow rewrite) and fire a critical alert.
+ * (one table.log.ttl ALTER) and fire a critical alert.
  *
  * <p>Load-bearing rules encoded here (updated 7d):
  *
@@ -28,10 +28,10 @@ import java.util.regex.Pattern;
  *       retryable, or under reconciliation.</li>
  * </ul>
  *
- * <p>Because Fluss 0.9.1 {@code table.log.ttl} is create-only (verified
- * 2026-08-13: {@code Admin.alterTable} rejects it), an actual extension is a
- * controlled table rewrite with an extended create-time TTL —
- * {@link #extendedTtl} computes the new TTL for that rewrite.
+ * <p>Fluss 1.0.0 {@code table.log.ttl} is alterable and enforced (A1 probe
+ * GREEN 2026-09-25: accepted + in force in ZK; A2 probe GREEN 2026-09-25:
+ * enforced expiry follows the ALTER) — {@link #extendedTtl} computes the new
+ * TTL for that single ALTER.
  */
 public final class EodRetentionPolicy {
 
@@ -71,7 +71,7 @@ public final class EodRetentionPolicy {
         return marginMs < safetyFloorMs;
     }
 
-    /** New create-time TTL for the controlled rewrite: base live TTL + extension. */
+    /** New TTL for the retention ALTER: base live TTL + extension. */
     public static Duration extendedTtl(Duration baseLiveTtl, Duration extension) {
         java.util.Objects.requireNonNull(baseLiveTtl, "baseLiveTtl must not be null");
         java.util.Objects.requireNonNull(extension, "extension must not be null");

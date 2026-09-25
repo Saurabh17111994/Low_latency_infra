@@ -255,7 +255,7 @@ drill evidence relies on), or run a measurement while the tablet shows
 ## EOD offload failure
 
 1. Mark the manifest unverified/retryable and emit a critical storage alert.
-2. Extend or preserve Fluss retention for affected source data.
+2. Extend or preserve Fluss retention for affected source data (one `table.log.ttl` ALTER - A2/CHG-307; the 0.9.1 shadow rewrite is retired).
 3. Capture table/schema version, date, source range, rows/bytes, checksums, commit state, S3 errors, and expiry margin.
 4. Retry with approved bounded backoff.
 5. Verify the Iceberg commit and manifest before marking success.
