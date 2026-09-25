@@ -220,26 +220,43 @@ class ProdHardeningTest(unittest.TestCase):
         pins the new form: both servers name the same remote.data.dir, that value
         is the env-interpolated bucket URI, and the container-local path (which
         only THAT container can read — the bug W35x fixed) must NOT come back.
+
+        2026-09-25 (drill cost): the value is parameterized on
+        FLUSS_REMOTE_DATA_DIR so the dev .env can pin it local while remote-log
+        tiering is off (a remote URI costs an S3 HEAD+LIST per KV bucket delete
+        on the tablet's single replica-state-change thread). The DEFAULT above
+        stays the shared R2 URI; only the dev override may select local, and the
+        tiering lanes set it back to R2 inside their recreate windows.
         """
         text = compose_text()
         self.assertIn("${R2_BUCKET", text, "PROD-013: remote.data.dir must use the R2 bucket")
+        r2_defaults = re.findall(
+            r"remote\.data\.dir: \$\{FLUSS_REMOTE_DATA_DIR:-s3://\$\{R2_BUCKET", text)
         self.assertGreaterEqual(
-            text.count("remote.data.dir: s3://${R2_BUCKET"),
+            len(r2_defaults),
             2,
-            "PROD-013: coordinator AND tablet must both point remote.data.dir at the same R2 bucket",
+            "PROD-013: coordinator AND tablet must both default remote.data.dir at the same R2 bucket",
         )
         self.assertNotIn(
-            "remote.data.dir: /tmp/fluss/remote-data",
+            "remote.data.dir: /tmp/fluss-remote-data",
             text,
-            "PROD-013: a container-local remote.data.dir is readable only from inside "
-            "that container, so other readers silently lose the tiered rows",
+            "PROD-013: a container-local remote.data.dir must never be the default — "
+            "only the dev .env may select it while remote-log tiering is off",
         )
-        # The path must be the same string in both services, or they disagree.
-        remote_dirs = re.findall(r"remote\.data\.dir:\s*(\S+)", text)
+        # The expression must be the same string in both services, or they disagree.
+        remote_dirs = re.findall(r"remote\.data\.dir:[ \t]*(.+)$", text, re.MULTILINE)
         self.assertEqual(
             len(set(remote_dirs)),
             1,
             f"PROD-013: coordinator and tablet disagree on remote.data.dir: {sorted(set(remote_dirs))}",
+        )
+        # The tracked dev template must carry the local override (fresh `make env`
+        # clones then run drill-fast); production/tiering envs override it to R2.
+        env_example = (ROOT / "code/01_platform/01_docker/.env.example").read_text()
+        self.assertIn(
+            "FLUSS_REMOTE_DATA_DIR=/tmp/fluss-remote-data",
+            env_example,
+            "PROD-013/dev: .env.example must pin the remote dir local for the dev stack",
         )
 
     def test_PROD_014_ten_vs_1024_instrument_manifest(self):

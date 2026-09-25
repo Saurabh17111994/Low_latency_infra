@@ -46,14 +46,15 @@ sql() { # sql <file>  -> runs it in the JM sql-client
 }
 
 revert() {
-  echo "  [revert] restoring .env + compose, recreating tablet, dropping $TABLE"
+  echo "  [revert] restoring .env + compose, recreating tablet, dropping $TABLE${SETTLE:+ and $SETTLE}"
   docker logs $TABLET > "$OUT/tablet-at-revert.log" 2>&1 || true   # the recreate discards it
   cp "$OUT/env.before" code/01_platform/01_docker/.env
   cp "$OUT/compose.before" code/01_platform/01_docker/docker-compose.yml
-  printf 'SET '"'"'sql-client.execution.result-mode'"'"'='"'"'tableau'"'"';\nCREATE CATALOG fluss_catalog WITH ('"'"'type'"'"'='"'"'fluss'"'"','"'"'bootstrap.servers'"'"'='"'"'fluss-coordinator:9123'"'"');\nUSE CATALOG fluss_catalog;\nDROP TABLE IF EXISTS `default`.%s;\n' "$TABLE" > /tmp/.rr-drop.sql
+  printf 'SET '"'"'sql-client.execution.result-mode'"'"'='"'"'tableau'"'"';\nCREATE CATALOG fluss_catalog WITH ('"'"'type'"'"'='"'"'fluss'"'"','"'"'bootstrap.servers'"'"'='"'"'fluss-coordinator:9123'"'"');\nUSE CATALOG fluss_catalog;\nDROP TABLE IF EXISTS `default`.%s;\nDROP TABLE IF EXISTS `default`.%s;\n' "$TABLE" "${SETTLE:-rr_settle_none}" > /tmp/.rr-drop.sql
   ( sql /tmp/.rr-drop.sql > "$OUT/drop.log" 2>&1 || true )
   bash code/01_platform/04_scripts/stack-lock.sh $DC up -d --no-deps --force-recreate fluss-tablet > "$OUT/tablet-revert.log" 2>&1 || true
-  if grep -q '^FLUSS_REMOTE_LOG_TASK_INTERVAL=0s' code/01_platform/01_docker/.env; then
+  if grep -q '^FLUSS_REMOTE_LOG_TASK_INTERVAL=0s' code/01_platform/01_docker/.env \
+     && grep -q '^FLUSS_REMOTE_DATA_DIR=/tmp/fluss-remote-data' code/01_platform/01_docker/.env; then
     revert_ok=yes
   else
     revert_ok=no
@@ -64,14 +65,23 @@ trap revert EXIT
 
 echo; echo "=== phase 1: tablet overrides (tiering on, window segment size) ==="
 python3 - <<'PY'
-import pathlib
+import pathlib, re
 p = pathlib.Path("code/01_platform/01_docker/.env"); s = p.read_text()
 old = "FLUSS_REMOTE_LOG_TASK_INTERVAL=0s\n"
 assert s.count(old) == 1, f"interval line not found exactly once: {s.count(old)}"
 s = s.replace(old, "FLUSS_REMOTE_LOG_TASK_INTERVAL=1m\n")
+# 2026-09-25 (drill cost): the dev .env pins the remote dir local for drills and
+# gates; this window verifies the R2 read path, so it must select the bucket URI.
+bucket = re.search(r"^R2_BUCKET=(.+)$", s, re.MULTILINE)
+assert bucket, "R2_BUCKET line not found in .env"
+assert len(re.findall(r"^FLUSS_REMOTE_DATA_DIR=", s, re.MULTILINE)) == 1, \
+    ".env must carry exactly one FLUSS_REMOTE_DATA_DIR line"
+s = re.sub(r"^FLUSS_REMOTE_DATA_DIR=.*$",
+           "FLUSS_REMOTE_DATA_DIR=s3://%s/remote-data" % bucket.group(1).strip(),
+           s, count=1, flags=re.MULTILINE)
 if "FLUSS_LOG_SEGMENT_FILE_SIZE" not in s:
     s = s.rstrip("\n") + "\n\n# tiering-remote-read-verify.sh (2026-09-23): window-only override so a few\n# thousand rows roll a segment (tiering copies rolled segments only). Reverted by the trap.\nFLUSS_LOG_SEGMENT_FILE_SIZE=128kb\n"
-p.write_text(s); print("  .env: interval 0s->1m, segment file size 128kb")
+p.write_text(s); print("  .env: interval 0s->1m, remote dir -> R2, segment file size 128kb")
 PY
 python3 - <<'PY'
 import pathlib, re
@@ -87,7 +97,10 @@ else:
 PY
 bash code/01_platform/04_scripts/stack-lock.sh $DC up -d --no-deps --force-recreate fluss-tablet > "$OUT/tablet-recreate.log" 2>&1
 echo "  tablet recreated; config during window:"
-docker exec "$TABLET" sh -c 'grep -E "task-interval|segment.file-size" /opt/fluss/conf/server.yaml' | sed 's/^/    /'
+docker exec "$TABLET" sh -c 'grep -E "task-interval|segment.file-size|remote.data.dir" /opt/fluss/conf/server.yaml' > "$OUT/tablet-config.during" 2>&1 || true
+sed 's/^/    /' "$OUT/tablet-config.during"
+grep -q "remote.data.dir: s3://" "$OUT/tablet-config.during" \
+  || { echo "!! remote.data.dir is not the R2 URI during the window (dev .env override lost?)"; exit 1; }
 
 echo; echo "=== phase 1.5: wait for leader election to settle (measured up to ~8 min after a pair recreate) ==="
 SETTLE="rr_settle_$(date -u +%s)"
@@ -97,10 +110,13 @@ for i in $(seq 1 24); do
     echo "SET 'sql-client.execution.result-mode'='tableau';"
     echo "CREATE CATALOG fluss_catalog WITH ('type'='fluss','bootstrap.servers'='fluss-coordinator:9123');"
     echo "USE CATALOG fluss_catalog;"
+    # Drop-if-exists FIRST: a DROP that failed after a previous attempt (leader not
+    # found) used to leave the table behind, and every later attempt then failed on
+    # CREATE — five such leftovers had accumulated by 2026-09-25 (CHG-312).
+    echo "DROP TABLE IF EXISTS \`default\`.$SETTLE;"
     echo "CREATE TABLE \`default\`.$SETTLE (id BIGINT) WITH ('bucket.num' = '1');"
     echo "INSERT INTO \`default\`.$SETTLE VALUES (1);"
     echo "SELECT COUNT(*) AS n FROM \`default\`.$SETTLE;"
-    echo "DROP TABLE \`default\`.$SETTLE;"
   } > /tmp/.rr-settle.sql
   sql /tmp/.rr-settle.sql > "$OUT/settle-$i.log" 2>&1 || true
   if ! grep -qiE 'leader not found|exception|error|timeout' "$OUT/settle-$i.log"; then
@@ -109,6 +125,15 @@ for i in $(seq 1 24); do
   echo "  attempt $i: $(grep -oiE 'Leader not found[^,]*|UnknownHostException|Exception|timeout' "$OUT/settle-$i.log" | head -1)"; sleep 15 || true
 done
 [ "$ready" = yes ] || { echo "!! the Fluss pair never became writable; aborting (trap reverts)"; exit 1; }
+# The settle table did its job; drop it now so a successful run leaves nothing
+# behind (the trap drops it again defensively).
+{
+  echo "SET 'sql-client.execution.result-mode'='tableau';"
+  echo "CREATE CATALOG fluss_catalog WITH ('type'='fluss','bootstrap.servers'='fluss-coordinator:9123');"
+  echo "USE CATALOG fluss_catalog;"
+  echo "DROP TABLE IF EXISTS \`default\`.$SETTLE;"
+} > /tmp/.rr-settle-drop.sql
+sql /tmp/.rr-settle-drop.sql > "$OUT/settle-drop.log" 2>&1 || true
 
 echo; echo "=== phase 2: probe table forced to keep no local tiered segments ==="
 {
@@ -140,6 +165,11 @@ echo; echo "=== phase 3: wait for the probe's segments to reach the remote-log d
 # to masquerade as "tiering did not run" again.
 source code/01_platform/04_scripts/r2-list.sh >/dev/null 2>&1 || true
 RDD_RAW=$(grep -m1 -oE 'remote\.data\.dir:.*' code/01_platform/01_docker/docker-compose.yml | sed 's/^[^:]*: *//' | tr -d '\r' || true)
+# 2026-09-25 (drill cost): the compose form is parameterized,
+# ${FLUSS_REMOTE_DATA_DIR:-<uri>}; resolve to the default URI before deriving below.
+case "$RDD_RAW" in
+  '${FLUSS_REMOTE_DATA_DIR:-'*'}') RDD_RAW="${RDD_RAW#*:-}"; RDD_RAW="${RDD_RAW%\}}" ;;
+esac
 case "$RDD_RAW" in
   *'}')   RDD="${RDD_RAW##*\}}" ;;                   # templated: keep what follows the last '}'
   s3://*) RDD="${RDD_RAW#s3://}"; RDD="${RDD#*/}" ;;  # literal bucket: drop the bucket part

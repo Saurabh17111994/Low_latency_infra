@@ -200,9 +200,39 @@ class B4HaltedIntentConsumeDeferE2ETest {
                             // best-effort scratch cleanup
                         }
                     }
+                    sweepOlderHaltedScratch(admin, db);
                 }
             }
         });
+    }
+
+    /**
+     * Self-heal (CHG-312): at most one {@code b4_halted_*} scratch may survive — this
+     * run's keep. Older keeps from previous runs are swept only after this run's
+     * keep/drop decision, never mid-run: the only writer that can still hold a
+     * pending batch is this run's (the 2026-09-18 Sender storm), and it belongs to
+     * {@code currentDb}. Best-effort; a failure leaves the older DB for the
+     * {@code DrillFixtureHygieneTest} guard to report.
+     */
+    private static void sweepOlderHaltedScratch(Admin admin, String currentDb) {
+        try {
+            for (String db : admin.listDatabases().get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
+                if (!db.startsWith("b4_halted_") || db.equals(currentDb)) {
+                    continue;
+                }
+                try {
+                    admin.dropDatabase(db, false, true)
+                            .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+                    System.out.println("b4-halted: swept older scratch DB " + db);
+                } catch (Exception e) {
+                    System.out.println("b4-halted: could not sweep older scratch DB " + db
+                            + " (" + e + ") — the hygiene guard will report it");
+                }
+            }
+        } catch (Exception e) {
+            System.out.println("b4-halted: could not list databases for the scratch sweep ("
+                    + e + ")");
+        }
     }
 
     private static GatewayConfig config(String db) {

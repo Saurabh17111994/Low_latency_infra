@@ -394,7 +394,19 @@ services:
         # NOTE: values are unquoted on purpose — this file is parsed by
         # GlobalConfiguration's line splitter, not a YAML parser, so quotes
         # would end up inside the value (a quoted "true" is not read as true).
-        remote.data.dir: s3://${R2_BUCKET:?set R2_BUCKET for tiering}/remote-data
+        # 2026-09-25 (drill cost, thread-dump proven): the remote dir is a
+        # parameter, not a literal. The default stays the shared R2 URI
+        # (production/tiering, PROD-013); the dev .env sets
+        # FLUSS_REMOTE_DATA_DIR=/tmp/fluss-remote-data. Why: with remote-log
+        # tiering disabled (0s) a remote URI buys nothing, but every KV bucket
+        # deletion still runs KvManager.deleteRemoteKvSnapshot ->
+        # HadoopFileSystem.exists (S3 HEAD+LIST, ~1 s per bucket) on the
+        # tablet's single replica-state-change thread, which serializes with
+        # placements — measured +13 min on the prewarm drill (781 s of
+        # placement backlog, 2026-09-25). The tiering lanes set the R2 URI
+        # inside their own recreate window (tiering-1.0-verify.sh,
+        # tiering-remote-read-verify.sh).
+        remote.data.dir: ${FLUSS_REMOTE_DATA_DIR:-s3://${R2_BUCKET:?set R2_BUCKET for tiering}/remote-data}
         s3.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
         s3.endpoint.region: ${AWS_REGION:-auto}
         s3.access-key: $${env.AWS_ACCESS_KEY_ID}
@@ -518,7 +530,19 @@ services:
         # so the secret text never lands in this config file, which
         # GlobalConfiguration logs value-by-value at INFO. See the coordinator
         # block for the full note.
-        remote.data.dir: s3://${R2_BUCKET:?set R2_BUCKET for tiering}/remote-data
+        # 2026-09-25 (drill cost, thread-dump proven): the remote dir is a
+        # parameter, not a literal. The default stays the shared R2 URI
+        # (production/tiering, PROD-013); the dev .env sets
+        # FLUSS_REMOTE_DATA_DIR=/tmp/fluss-remote-data. Why: with remote-log
+        # tiering disabled (0s) a remote URI buys nothing, but every KV bucket
+        # deletion still runs KvManager.deleteRemoteKvSnapshot ->
+        # HadoopFileSystem.exists (S3 HEAD+LIST, ~1 s per bucket) on the
+        # tablet's single replica-state-change thread, which serializes with
+        # placements — measured +13 min on the prewarm drill (781 s of
+        # placement backlog, 2026-09-25). The tiering lanes set the R2 URI
+        # inside their own recreate window (tiering-1.0-verify.sh,
+        # tiering-remote-read-verify.sh).
+        remote.data.dir: ${FLUSS_REMOTE_DATA_DIR:-s3://${R2_BUCKET:?set R2_BUCKET for tiering}/remote-data}
         s3.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
         s3.endpoint.region: ${AWS_REGION:-auto}
         s3.access-key: $${env.AWS_ACCESS_KEY_ID}

@@ -37,9 +37,9 @@ echo "=== tiering-1.0-verify start $(date -Iseconds)  table=$TABLE  out=$OUT"
 
 # ---------------- phase 0: snapshot the pre-state ----------------
 cp "$DOCKER_DIR/.env" "$OUT/env.before"
-grep -n "FLUSS_REMOTE_LOG_TASK_INTERVAL\|log.segment" "$DOCKER_DIR/.env" > "$OUT/env-relevant.before" 2>&1 || true
+grep -n "FLUSS_REMOTE_LOG_TASK_INTERVAL\|FLUSS_REMOTE_DATA_DIR\|log.segment" "$DOCKER_DIR/.env" > "$OUT/env-relevant.before" 2>&1 || true
 docker inspect "$TABLET" > "$OUT/tablet-inspect.before.json" 2>&1 || true
-docker exec "$TABLET" sh -c 'grep -E "task-interval|segment.file-size" /opt/fluss/conf/server.yaml' > "$OUT/tablet-config.before" 2>&1 || true
+docker exec "$TABLET" sh -c 'grep -E "task-interval|segment.file-size|remote.data.dir" /opt/fluss/conf/server.yaml' > "$OUT/tablet-config.before" 2>&1 || true
 bash code/01_platform/04_scripts/tiering-start.sh --status > "$OUT/tiering-job.before" 2>&1
 echo "  job before: $(head -1 "$OUT/tiering-job.before")"
 # R2 baseline for this name: must be zero objects under a prefix that does not exist yet
@@ -57,7 +57,7 @@ revert() {
   cp "$OUT/env.before" "$DOCKER_DIR/.env" && echo "  [1/4] .env restored from snapshot"
   bash code/01_platform/04_scripts/stack-lock.sh $DC up -d --no-deps --force-recreate fluss-tablet > "$OUT/revert-tablet.log" 2>&1 \
     && echo "  [2/4] tablet recreated (certified config)" || echo "  [2/4] !! tablet recreate FAILED - see $OUT/revert-tablet.log"
-  docker exec "$TABLET" sh -c 'grep -E "task-interval|segment.file-size" /opt/fluss/conf/server.yaml' > "$OUT/tablet-config.after" 2>&1 || true
+  docker exec "$TABLET" sh -c 'grep -E "task-interval|segment.file-size|remote.data.dir" /opt/fluss/conf/server.yaml' > "$OUT/tablet-config.after" 2>&1 || true
   echo "  [2/4] tablet config now: $(tr '\n' ' ' < "$OUT/tablet-config.after")"
   if [ -n "${JID:-}" ]; then
     docker exec "$JM" flink cancel "$JID" > "$OUT/revert-cancel.log" 2>&1 \
@@ -78,16 +78,25 @@ trap revert EXIT
 # ---------------- phase 1: tablet overrides (one recreate) ----------------
 echo; echo "=== phase 1: tablet overrides — task interval 1m, segment size 1mb ==="
 python3 - <<'PY'
-import pathlib
+import pathlib, re
 p = pathlib.Path("code/01_platform/01_docker/.env")
 s = p.read_text()
 old = "FLUSS_REMOTE_LOG_TASK_INTERVAL=0s\n"
 assert s.count(old) == 1, f"interval line not found exactly once: {s.count(old)}"
 s = s.replace(old, "FLUSS_REMOTE_LOG_TASK_INTERVAL=1m\n")
+# 2026-09-25 (drill cost): the dev .env pins the remote dir local for drills and
+# gates; this window verifies the R2 form, so it must select the shared bucket URI.
+bucket = re.search(r"^R2_BUCKET=(.+)$", s, re.MULTILINE)
+assert bucket, "R2_BUCKET line not found in .env"
+assert len(re.findall(r"^FLUSS_REMOTE_DATA_DIR=", s, re.MULTILINE)) == 1, \
+    ".env must carry exactly one FLUSS_REMOTE_DATA_DIR line"
+s = re.sub(r"^FLUSS_REMOTE_DATA_DIR=.*$",
+           "FLUSS_REMOTE_DATA_DIR=s3://%s/remote-data" % bucket.group(1).strip(),
+           s, count=1, flags=re.MULTILINE)
 if "FLUSS_LOG_SEGMENT_FILE_SIZE" not in s:
     s = s.rstrip("\n") + "\n\n# tiering-1.0-verify.sh (2026-09-23): window-only override so a few thousand\n# rows roll a segment (tiering copies rolled segments only). Reverted by the script.\nFLUSS_LOG_SEGMENT_FILE_SIZE=1mb\n"
 p.write_text(s)
-print("  .env: interval 0s->1m, segment file size 1mb added")
+print("  .env: interval 0s->1m, remote dir -> R2, segment file size 1mb added")
 PY
 # the segment size needs a property line in the tablet service; add it next to the interval
 python3 - <<'PY'
@@ -109,9 +118,10 @@ PY
 bash code/01_platform/04_scripts/stack-lock.sh $DC up -d --no-deps --force-recreate fluss-tablet > "$OUT/tablet-recreate.log" 2>&1 \
   && echo "  tablet recreated" || { echo "!! tablet recreate failed"; tail -5 "$OUT/tablet-recreate.log"; exit 1; }
 sleep 12
-docker exec "$TABLET" sh -c 'grep -E "task-interval|segment.file-size" /opt/fluss/conf/server.yaml' > "$OUT/tablet-config.during" 2>&1 || true
+docker exec "$TABLET" sh -c 'grep -E "task-interval|segment.file-size|remote.data.dir" /opt/fluss/conf/server.yaml' > "$OUT/tablet-config.during" 2>&1 || true
 echo "  tablet config during window: $(tr '\n' ' ' < "$OUT/tablet-config.during")"
 grep -q "1m" "$OUT/tablet-config.during" || { echo "!! interval override did not take effect"; exit 1; }
+grep -q "remote.data.dir: s3://" "$OUT/tablet-config.during" || { echo "!! remote.data.dir is not the R2 URI during the window (dev .env override lost?)"; exit 1; }
 
 # ---------------- phase 2: tiering job ----------------
 echo; echo "=== phase 2: start the tiering job (GUARD-A of the smoke) ==="
