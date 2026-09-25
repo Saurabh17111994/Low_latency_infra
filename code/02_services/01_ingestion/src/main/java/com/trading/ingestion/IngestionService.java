@@ -1391,6 +1391,16 @@ public final class IngestionService {
                 LOG.error("ingestion: {}", reason);
                 requestFatalStop(reason);
             }
+            case SERVER_REJECTED -> {
+                // B5: the server refused the row itself — its event_day is
+                // older than the table's auto-partition retention. The record
+                // is undeliverable by construction: count it as a dropped tick
+                // and keep running. Never halt on a data condition.
+                errorCount.incrementAndGet();
+                metrics.incrementDecodeError("append_server_rejected");
+                LOG.warn("ingestion: append SERVER-REJECTED — record dropped (detail={})",
+                        outcome.detail());
+            }
             case SUCCESS -> lastTickSnapshot = new DiscontinuityWriter.LastTickSnapshot(
                     outcome.eventTime().toEpochMilli(),
                     outcome.fingerprint(),

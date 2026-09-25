@@ -30,7 +30,9 @@ import org.slf4j.LoggerFactory;
  *   <li>Arrow payloads are never compressed in the ingestion→Fluss path</li>
  *   <li>Raw ingestion does not deduplicate fingerprints; Compute owns logical dedup</li>
  *   <li>Retry with exponential backoff (100, 200, 400 ms; up to {@code MAX_RETRY_ATTEMPTS}) for RETRYABLE
- *       failures; FATAL failures halt immediately</li>
+ *       failures; FATAL failures halt immediately; a server-rejected record
+ *       (1.0 auto-partition retention) is dropped and counted, never retried
+ *       and never halted</li>
  *   <li>On timeout the outcome is {@code UNCERTAIN} — ingestion cannot prove
  *       whether Fluss persisted the row; Compute owns logical dedup</li>
  *   <li>{@link #write(TickPacket)} is asynchronous: it submits the append and
@@ -94,7 +96,7 @@ public final class RawTickWriter implements AutoCloseable {
         });
     }
 
-    /** Receives every terminal append outcome (SUCCESS, UNCERTAIN, FAILED, FATAL). */
+    /** Receives every terminal append outcome (SUCCESS, UNCERTAIN, FAILED, FATAL, SERVER_REJECTED). */
     @FunctionalInterface
     public interface OutcomeListener {
         void onOutcome(AppendOutcome outcome);
@@ -235,6 +237,20 @@ public final class RawTickWriter implements AutoCloseable {
         }
 
         RetryClassifier.Classification retry = RetryClassifier.classify(cause);
+
+        if (retry == RetryClassifier.Classification.REJECTED) {
+            // B5: Fluss 1.0 refuses a write to a partition older than the
+            // table's retention. The record can never be accepted — drop and
+            // count it, and keep the writer running. Halting here would let
+            // one bad feed timestamp stop ingestion.
+            tracker.onAppendFailure(rowBytes);
+            errorCount.incrementAndGet();
+            LOG.warn("raw-writer: append SERVER-REJECTED — record dropped "
+                            + "(table={}, fp={}, detail={})",
+                    tableName, fp12(packet), cause.getMessage());
+            completeOutcome(AppendOutcome.serverRejected(packet, acceptTime, rowBytes, cause));
+            return;
+        }
 
         if (retry == RetryClassifier.Classification.FATAL) {
             // Fatal → no retry, halt the append path
@@ -418,7 +434,16 @@ public final class RawTickWriter implements AutoCloseable {
 
     // ---- outcome type ----
 
-    public enum Status { SUCCESS, UNCERTAIN, FAILED, FATAL, REJECTED, SKIPPED, ACCEPTED }
+    public enum Status {
+        SUCCESS, UNCERTAIN, FAILED, FATAL,
+        /**
+         * The server refused the record itself (Fluss 1.0 auto-partition:
+         * the row's partition is older than the table's retention). The
+         * record is dropped and counted; the writer keeps running.
+         */
+        SERVER_REJECTED,
+        REJECTED, SKIPPED, ACCEPTED
+    }
 
     public record AppendOutcome(
             Status status,
@@ -461,6 +486,17 @@ public final class RawTickWriter implements AutoCloseable {
             return new AppendOutcome(Status.FATAL, packet.eventTime(), acceptTime, null, rowBytes,
                     "FATAL: " + msg, -1, -1, packet.eventFingerprint(),
                     packet.instrumentToken(), packet.exchange(), packet.tradingSymbol());
+        }
+
+        /** Server refused the record (1.0 auto-partition retention) — dropped, not fatal. */
+        static AppendOutcome serverRejected(TickPacket packet, Instant acceptTime,
+                                            int rowBytes, Throwable e) {
+            String msg = e.getMessage();
+            if (msg == null) msg = e.getClass().getSimpleName();
+            return new AppendOutcome(Status.SERVER_REJECTED, packet.eventTime(), acceptTime,
+                    null, rowBytes, "SERVER-REJECTED: " + msg, -1, -1,
+                    packet.eventFingerprint(), packet.instrumentToken(),
+                    packet.exchange(), packet.tradingSymbol());
         }
 
         // P1-112/117: ... and FAILED (retries-exhausted stays correlatable).

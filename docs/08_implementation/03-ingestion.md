@@ -241,7 +241,7 @@ Fingerprint identity is best-effort, not broker-global identity ([`DEC-012`](../
 - At 100% of either pending limit: stop broker reads/subscriptions, keep readiness false, emit a critical event, and preserve an acknowledged-loss/uncertainty record. Silently discarding data is prohibited.
 - Pending counters SHALL decrease only after the append completes, whether successful or failed.
 - Record receive time, append-start time, append-acknowledgement time, append outcome, record size, and error class for every append outcome.
-- Retryable append failures retry with exponential backoff (100, 200, 400 ms) up to 3 attempts; fatal failures do not retry. A timeout outcome is `UNCERTAIN` (the row may already be persisted) and is never retried. Classification uses the pinned `RetryClassifier`.
+- Retryable append failures retry with exponential backoff (100, 200, 400 ms) up to 3 attempts; fatal failures do not retry. A timeout outcome is `UNCERTAIN` (the row may already be persisted) and is never retried. Classification uses the pinned `RetryClassifier`. A server-side record rejection (Fluss 1.0 auto-partition: `InvalidPartitionException` "out-of-date", B5) is classified `REJECTED`: the record is dropped and counted (`SERVER_REJECTED` outcome; `append_server_rejected` metric) and the writer keeps running — never retried, never fatal (CHG-309).
 - No unbounded custom queue is permitted.
 - Arrow payloads SHALL NOT be compressed in the ingestion-to-Fluss path.
 - TCP flow control is not described as lossless without a broker test.

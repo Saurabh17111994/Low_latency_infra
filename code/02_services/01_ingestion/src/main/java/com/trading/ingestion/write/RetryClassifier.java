@@ -8,6 +8,11 @@ package com.trading.ingestion.write;
  * recovery: network timeouts, temporary tablet unavailability, coordinator
  * re-election, connection reset.
  *
+ * <h3>Rejected</h3>
+ * The server refused the record itself — Fluss 1.0 auto-partition retention
+ * ({@code InvalidPartitionException}, "out-of-date"). The row can never be
+ * accepted: the writer drops and counts it and keeps running.
+ *
  * <h3>Fatal</h3>
  * Failures that cannot succeed on retry and should trigger the halt gate:
  * authentication failure, table not found, schema mismatch, authorization
@@ -23,6 +28,12 @@ public final class RetryClassifier {
     public enum Classification {
         /** Safe to retry — transient error. */
         RETRYABLE,
+        /**
+         * The server rejected the record itself (Fluss 1.0 auto-partition:
+         * the row's partition is older than the table's retention). The row
+         * can never be accepted — drop and count it; never retry, never halt.
+         */
+        REJECTED,
         /** Fatal — halt the append path, open the safety gate. */
         FATAL
     }
@@ -45,12 +56,17 @@ public final class RetryClassifier {
 
         // Walk the entire cause chain; a fatal cause anywhere wins.
         boolean sawRetryable = false;
+        boolean sawRejected = false;
         Throwable current = t;
         while (current != null) {
             String msg = current.getMessage();
             String name = current.getClass().getName();
 
             if (isFatal(name, msg)) return Classification.FATAL;
+            // Server-side record rejections are noted the same way: a deeper
+            // fatal cause still wins, and the record is dropped rather than
+            // retried (a retry can never succeed).
+            if (isServerRejected(name, msg)) sawRejected = true;
             // Recognized transient patterns are noted — the walk continues so
             // a deeper fatal cause is not masked by a retryable wrapper.
             if (isRetryable(name, msg)) sawRetryable = true;
@@ -63,6 +79,9 @@ public final class RetryClassifier {
         // runs the Fluss client's built-in retries are exhausted, and an
         // unclassified failure means we cannot prove the append is safe to
         // retry. For money-safety evidence, open the halt gate.
+        // B5: a server-rejected record (1.0 auto-partition retention) is the
+        // one non-fatal, non-retryable outcome — drop it.
+        if (sawRejected) return Classification.REJECTED;
         return sawRetryable ? Classification.RETRYABLE : Classification.FATAL;
     }
 
@@ -106,6 +125,22 @@ public final class RetryClassifier {
                     || lower.contains("allocate new segment");
         }
         return false;
+    }
+
+    /**
+     * Server-side record rejection — the row is permanently undeliverable.
+     *
+     * <p>Fluss 1.0 refuses a write to a partition older than the table's
+     * auto-partition retention ({@code InvalidPartitionException}:
+     * "Partition value '...' is out-of-date. The earliest retained partition
+     * is '...'."; B5). Matched narrowly — class plus the out-of-date message —
+     * so every other invalid-partition/spec failure keeps the R-285
+     * fail-closed rule.
+     */
+    private static boolean isServerRejected(String name, String msg) {
+        return name.contains("InvalidPartition")
+                && msg != null
+                && msg.toLowerCase(java.util.Locale.ROOT).contains("out-of-date");
     }
 
     /** Fatal patterns — return true if this link of the chain is fatal. */

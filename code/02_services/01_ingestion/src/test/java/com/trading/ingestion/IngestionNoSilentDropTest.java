@@ -2,6 +2,7 @@ package com.trading.ingestion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.trading.ingestion.config.IngestionConfig;
@@ -124,6 +125,62 @@ class IngestionNoSilentDropTest {
                 "every appended packet carries a fingerprint");
         assertFalse(converter.packets.stream().anyMatch(p -> p.raw() == null || p.raw().rawPayload() == null),
                 "every appended packet preserves the raw payload bytes");
+    }
+
+    @Test
+    @DisplayName("1.0 retention: a server-rejected (out-of-date) append is counted, not fatal — service stays up")
+    void serverRejectedAppendIsCountedNotFatal() throws Exception {
+        // B5: Fluss 1.0 refuses a write to a partition older than the table's
+        // retention. The record is undeliverable by construction: the service
+        // must drop and COUNT it (no silent drop) and must not halt — one bad
+        // feed timestamp cannot be allowed to stop ingestion.
+        IngestionConfig config = buildConfig("localhost:9123");
+        final AtomicInteger calls = new AtomicInteger();
+        FlussRowConverter converter = new FlussRowConverter() {
+            @Override
+            public CompletableFuture<RawTickWriter.AppendResult> append(
+                    com.trading.ingestion.model.TickPacket packet) {
+                if (calls.incrementAndGet() == 1) {
+                    return CompletableFuture.failedFuture(
+                            new org.apache.fluss.exception.InvalidPartitionException(
+                                    "Partition value '20260913' is out-of-date. "
+                                            + "The earliest retained partition is '20260920'."));
+                }
+                return CompletableFuture.completedFuture(new RawTickWriter.AppendResult(1, "p0"));
+            }
+
+            @Override
+            public int estimatedRowSize(com.trading.ingestion.model.TickPacket packet) {
+                return 256;
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        IngestionService service = new IngestionService(
+                "ing-reject", instruments(), converter, config,
+                new NtpClockChecker("127.0.0.1:9", 100, false),
+                noopQuarantine(), noopDiscontinuity(), noopSafety());
+
+        long now = System.currentTimeMillis();
+        service.processTickEvent(tick("hft", "ltpc", TOKEN_A, now, 100), "hft-0", 1L);
+        service.processTickEvent(tick("hft", "ltpc", TOKEN_B, now, 200), "hft-0", 1L);
+
+        // Ticks route through the bounded worker queue, so wait for both to
+        // reach the converter and for the drop to be counted.
+        long deadline = System.currentTimeMillis() + 5000;
+        while (calls.get() < 2 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(2, calls.get(), "both ticks reached the writer");
+
+        while (errorCount(service) < 1 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals(1, errorCount(service), "the rejected record is counted, never silent");
+        assertNull(fatalStopReason(service), "a server-rejected record must NOT halt the service");
+        assertEquals(0, service.tracker().pendingRecords(), "no leaked reservation");
     }
 
     /** Expected outcome of one corpus line (the test's own classification). */
@@ -295,6 +352,12 @@ class IngestionNoSilentDropTest {
         Field f = IngestionService.class.getDeclaredField("errorCount");
         f.setAccessible(true);
         return ((AtomicLong) f.get(service)).get();
+    }
+
+    private static String fatalStopReason(IngestionService service) throws Exception {
+        Field f = IngestionService.class.getDeclaredField("fatalStopReason");
+        f.setAccessible(true);
+        return ((java.util.concurrent.atomic.AtomicReference<String>) f.get(service)).get();
     }
 
     private static long decodeErrors(IngestionService service) throws Exception {

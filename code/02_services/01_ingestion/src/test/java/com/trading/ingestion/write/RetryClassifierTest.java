@@ -165,4 +165,50 @@ class RetryClassifierTest {
                 new java.net.ConnectException("Connection refused")),
                 "genuine connection failures still retry (bounded MAX=3 at the writer)");
     }
+
+    // ---- 1.0 auto-partition retention (B5): a server-rejected record is dropped, not fatal ----
+
+    @Test
+    @DisplayName("1.0 retention: out-of-date partition is REJECTED — drop the record, never halt")
+    void outOfDatePartitionIsRejected() {
+        // Fluss 1.0 rejects a write whose partition is older than the table's
+        // retention (B5; 0.9.1 accepted these). The row can never be accepted:
+        // the writer must drop and count it, not open the halt gate.
+        Throwable t = new org.apache.fluss.exception.InvalidPartitionException(
+                "Partition value '20260913' is out-of-date. "
+                        + "The earliest retained partition is '20260920'.");
+        assertEquals(Classification.REJECTED, RetryClassifier.classify(t));
+    }
+
+    @Test
+    @DisplayName("out-of-date rejection wins over a retryable wrapper (retry can never succeed)")
+    void outOfDateWinsOverRetryableWrapper() {
+        Throwable inner = new org.apache.fluss.exception.InvalidPartitionException(
+                "Partition value '20260913' is out-of-date. "
+                        + "The earliest retained partition is '20260920'.");
+        Throwable outer = new ExecutionException("connection reset", inner);
+        assertEquals(Classification.REJECTED, RetryClassifier.classify(outer));
+    }
+
+    @Test
+    @DisplayName("generic InvalidPartition (not out-of-date) still fails closed FATAL")
+    void genericInvalidPartitionStaysFatal() {
+        // Only the retention rejection is droppable; every other invalid
+        // partition/spec failure keeps the R-285 fail-closed rule.
+        assertEquals(Classification.FATAL,
+                RetryClassifier.classify(new org.apache.fluss.exception.InvalidPartitionException(
+                        "Partition spec is invalid: missing partition key")));
+    }
+
+    @Test
+    @DisplayName("a fatal cause still wins over an out-of-date rejection (money-safety first)")
+    void fatalWinsOverOutOfDate() {
+        class FakeInvalidPartitionException extends RuntimeException {
+            FakeInvalidPartitionException(String m, Throwable c) { super(m, c); }
+        }
+        Throwable t = new FakeInvalidPartitionException(
+                "Partition value '20260913' is out-of-date.",
+                new AuthenticationException("invalid credentials"));
+        assertEquals(Classification.FATAL, RetryClassifier.classify(t));
+    }
 }

@@ -216,4 +216,44 @@ class FailFastGuardsTest {
         assertEquals(0, h.tracker().pendingRecords());
         h.writer.close();
     }
+
+    @Test
+    @DisplayName("1.0 retention: out-of-date append is SERVER_REJECTED — dropped, counted, writer stays up")
+    void outOfDateAppendIsDroppedNotFatal() throws Exception {
+        // B5: Fluss 1.0 refuses a write to a partition older than the table's
+        // retention. The record can never be accepted — the writer must drop
+        // and count it and keep accepting; halting would let one bad feed
+        // timestamp stop ingestion.
+        final java.util.concurrent.atomic.AtomicInteger calls =
+                new java.util.concurrent.atomic.AtomicInteger();
+        FlussRowConverter firstRejectedThenOk = new FlussRowConverter() {
+            @Override
+            public CompletableFuture<RawTickWriter.AppendResult> append(TickPacket packet) {
+                if (calls.incrementAndGet() == 1) {
+                    return CompletableFuture.failedFuture(
+                            new org.apache.fluss.exception.InvalidPartitionException(
+                                    "Partition value '20260913' is out-of-date. "
+                                            + "The earliest retained partition is '20260920'."));
+                }
+                return CompletableFuture.completedFuture(new RawTickWriter.AppendResult(2L, "p0"));
+            }
+            @Override public int estimatedRowSize(TickPacket packet) { return 100; }
+            @Override public void close() {}
+        };
+
+        Harness h = harness(firstRejectedThenOk);
+        h.writer().write(TickPacketFixtures.validTrade(7));
+        RawTickWriter.AppendOutcome dropped = awaitOutcome(h);
+        assertEquals(RawTickWriter.Status.SERVER_REJECTED, dropped.status(),
+                "an out-of-date append must surface as a dropped record, not FATAL");
+        assertEquals(1, calls.get(), "no retry — the server can never accept this record");
+        assertEquals(1, h.writer().errorCount(), "the drop is counted");
+        assertEquals(0, h.tracker().pendingRecords(), "reservation released on the drop");
+
+        // The writer keeps working: the next tick appends and acks normally.
+        h.writer().write(TickPacketFixtures.validTrade(8));
+        h.writer().drain();
+        assertEquals(1, h.writer().appendCount(), "the writer stays up after a drop");
+        h.writer().close();
+    }
 }
