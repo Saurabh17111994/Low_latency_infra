@@ -291,7 +291,6 @@ ALLOWLIST_STREAM_EXACT = {
     "flink_taskmanager_job_task_operator_numlaterecordsdropped",
     "flink_taskmanager_job_task_operator_sourceidletime",
     "flink_taskmanager_job_task_operator_watermarklag",
-    "flink_taskmanager_job_task_operator_fluss_reader_bucket_currentoffset",
     "flink_jobmanager_numregisteredtaskmanagers",
     "flink_jobmanager_job_numberoffailedcheckpoints",
     "flink_taskmanager_job_task_numrecordsinpersecond",

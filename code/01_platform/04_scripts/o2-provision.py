@@ -546,10 +546,10 @@ DASHBOARDS = [
                 "flink_taskmanager_job_task_busytimemspersecond",
             ),
             (
-                "Fluss reader current offset (source lag proxy)",
+                "Fluss reader current fetch event time lag (source lag proxy)",
                 "promql",
-                "max(flink_taskmanager_job_task_operator_fluss_reader_bucket_currentoffset)",
-                "flink_taskmanager_job_task_operator_fluss_reader_bucket_currentoffset",
+                "max(flink_taskmanager_job_task_operator_currentfetcheventtimelag)",
+                "flink_taskmanager_job_task_operator_currentfetcheventtimelag",
             ),
             (
                 "Operator watermark lag (ms)",
