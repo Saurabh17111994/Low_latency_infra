@@ -222,3 +222,63 @@ data-path code. Reverting = stop passing `FEED=real`.
 
 Implementation + tests + docs ≈ 2–3 h. Dry run ≈ 15 min. Monday live run
 30–60 min (smoke + main).
+
+## 9. Monday runbook (in-session, full universe)
+
+### Pre-checks (T-15 min)
+
+1. **Trading day?** NSE holiday calendar. A holiday shows up as a smoke
+   presence failure, not as a guard error — do not start on one.
+2. **Stack up** (`make up` if not). The profiler preflight re-checks Fluss +
+   taskmanager, but a cold stack costs ~2 min of the best window.
+3. **Image current.** The loadgen image was rebuilt 2026-09-26
+   (stamp `90bab706…`). If any `code/02_services/01_ingestion` or `go-bridge`
+   source changes before Monday, rebuild it — the preflight fails closed on a
+   stale stamp.
+4. **Clock.** Host offset < ~10 ms (`timedatectl` / chrony). S1/S5 compare host
+   receive time with broker time; a drifted host skews every number.
+5. **Credentials** stay in `.env`/`secrets.env`; the run never prints them.
+
+### T-0: the one command (inside 09:15–15:30 IST)
+
+```
+FEED=real INGESTION_CONTAINERS=1 PHASES=smoke,main SMOKE_S=300 MAIN_S=900 \
+  bash code/01_platform/06_stage_profiler/stage-profile.sh
+```
+
+No `ALLOW_OFFHOURS_REAL` in-session — if the guard blocks, the clock is wrong.
+
+### First 2 minutes — abort table
+
+| minute | expected line | if it does not appear |
+|---|---|---|
+| 0:00–0:10 | `preflight (smoke): Fluss ready, fresh taskmanager, image stamp` | stack down or stale image — fix and rerun |
+| 0:10–1:00 | four `purging …` / `… purged` pairs | a purge failure is fatal; read the failing line |
+| 1:00–1:10 | `fleet (real): 2433 instruments -> 1 container x 3 slots` then `fleet up (real): subscriptions confirmed (3 slots, 2433 tokens)` | grab `…/smoke/capture/j1-0/java.out`; the CHG-320 gate message names the reason; the sum must be 2 433 |
+| 1:10–1:30 | `SignalJob submitted: job_id=…` | check the jobmanager log |
+| 1:30–2:00 | `warm-up: raw log advancing (a -> b)`, `b > a` | **no advance after ~3 min → Ctrl-C**; do not burn the main window on a dead feed |
+
+Same-minute `java.out` spot checks:
+
+```
+grep -c "VALID_TRADE requires lastPricePaise > 0" …/smoke/capture/j1-0/java.out  # expect 0 (CHG-321)
+grep "HFT subscribed" …/smoke/capture/j1-0/java.out                            # expect 3 lines, sum 2 433
+```
+
+### Then it runs itself
+
+- smoke 300 s → presence gate. PASS → main 900 s starts automatically; FAIL →
+  the run stops and prints the failing legs in `smoke-presence.json`. If only
+  S1/S8 are thin, rerun the smoke with `PROBE_TOKEN_COUNT=25` (the first 12 CSV
+  rows include illiquid names).
+- main 900 s → `REPORT: logs/stage-profile-*/profile.md`.
+
+### Read the report correctly
+
+- S2/S3/S4/S6/S7/S9 are the tight numbers; S1/S5 are **bounds** (broker event
+  time has 1-second resolution) and must not be compared with the fake ladder's
+  ms figures.
+- Throughput is live full-mode cadence (≈1 Hz/token) — its own mode, not the
+  2 Hz fake pin.
+- Keep as evidence: `profile.md`, `smoke-presence.json`, `j1-0/java.out`,
+  `stages/`, and the launcher log; `session.txt` records the guard decision.
