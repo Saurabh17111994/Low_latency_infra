@@ -128,7 +128,15 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
   as an operator decision.
 - [L] **P4-4** — Monday in-session validation: real feed, decided universe,
   the command as the sole entry point; evidence + comparison to the profiling
-  ladder.
+  ladder. **Approved 2026-09-27: the assistant runs it.**
+  - **Checklist (2026-09-28 IST):** 09:00-09:10 `make day ARGS="start"`
+    (converge — the stack is left running 24×7) -> `logs/day/monday-20260928/start.log`;
+    during the session `make day ARGS="status"` at ~09:20 (post-open), ~12:00
+    (midday) and ~15:00 (late) -> `status-*.log`. Pass conditions: I3
+    (ingestion appends) and I4 (downstream flow) show movement, I8 green,
+    I5 checkpoint age < 2× interval. Capture the SignalJob's latest checkpoint
+    path (I9) and compare ingestion timing/rates to the full-universe
+    profiling ladder evidence; record deltas in `logs/day/monday-20260928/notes.md`.
 - [-] **P4-5** — optional systemd timer for automatic morning start —
   trigger-gated: revisit after ≥5 consecutive green daily runs.
 - [x] **P4-6** — (option A, approved 2026-09-26; outside the original P4 list)
