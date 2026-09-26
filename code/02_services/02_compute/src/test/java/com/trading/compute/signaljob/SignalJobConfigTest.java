@@ -25,6 +25,22 @@ class SignalJobConfigTest {
         return env;
     }
 
+    /**
+     * CHG-318: native unaligned checkpoints landed after the 2026-09-26
+     * falsification at 2 Hz (checkpoint-window p99 814 -> 430 ms, steady state
+     * unchanged). Default true; false is the kill switch; junk fails closed.
+     */
+    @Test
+    void unalignedCheckpointsDefaultTrueWithKillSwitch() {
+        assertTrue(SignalJobConfig.from(env()).unalignedCheckpoints());
+        Map<String, String> aligned = env();
+        aligned.put("UNALIGNED_CHECKPOINTS", "false");
+        assertFalse(SignalJobConfig.from(aligned).unalignedCheckpoints());
+        Map<String, String> bogus = env();
+        bogus.put("UNALIGNED_CHECKPOINTS", "yes");
+        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(bogus));
+    }
+
     @Test
     void acceptsPinnedValuesAndDefaultsForTuning() {
         SignalJobConfig cfg = SignalJobConfig.from(env());

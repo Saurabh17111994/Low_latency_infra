@@ -47,6 +47,8 @@ public final class ConfigKeys {
     public static final String CHECKPOINT_DIR = "CHECKPOINT_DIR";
     public static final String CHECKPOINT_INTERVAL_MS = "CHECKPOINT_INTERVAL_MS";
     public static final String CHECKPOINT_TIMEOUT_MS = "CHECKPOINT_TIMEOUT_MS";
+    /** Native unaligned checkpoints, default true (CHG-318; false = kill switch). */
+    public static final String UNALIGNED_CHECKPOINTS = "UNALIGNED_CHECKPOINTS";
     public static final String CLOCK_CHECK_REQUIRED = "CLOCK_CHECK_REQUIRED";
     public static final String CLOCK_OFFSET_LIMIT_MS = "CLOCK_OFFSET_LIMIT_MS";
     public static final String CNC = "CNC";

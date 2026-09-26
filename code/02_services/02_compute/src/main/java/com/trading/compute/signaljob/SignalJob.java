@@ -208,6 +208,11 @@ public final class SignalJob {
         env.enableCheckpointing(config.checkpointIntervalMs(), CheckpointingMode.EXACTLY_ONCE);
         env.getCheckpointConfig().setCheckpointTimeout(config.checkpointTimeoutMs());
         env.getCheckpointConfig().setMaxConcurrentCheckpoints(config.maxConcurrentCheckpoints());
+        // CHG-318: native unaligned checkpoints — barriers overtake in-flight
+        // data instead of waiting for alignment (measured checkpoint-window
+        // p99 814 -> 430 ms @ 2 Hz; steady state unchanged). Kill switch:
+        // UNALIGNED_CHECKPOINTS=false in the submitting environment.
+        env.getCheckpointConfig().enableUnalignedCheckpoints(config.unalignedCheckpoints());
         // A deliberate cancel/restart must retain the completed checkpoint named by
         // STATE_RECOVERY_PATH; deleting it would silently force an unsafe offset-0 replay.
         env.getCheckpointConfig().setExternalizedCheckpointRetention(

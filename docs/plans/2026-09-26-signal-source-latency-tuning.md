@@ -119,8 +119,15 @@ image and job config):
 - **CHG-317**: the bridge T2 age flush (`MaxAge`, default 1 ms) had no
   production caller; wiring the ticker collapsed the one-tick-period shoulder
   the 2 Hz feed exposed (S1 p90 481→9 ms, S3 p90 479→4 ms, S5 p99 534→56 ms).
+- **CHG-318**: native unaligned checkpoints landed (job-level
+  `UNALIGNED_CHECKPOINTS`, default true; `false` = kill switch). Falsification
+  `100925` vs aligned baseline `033605`: checkpoint-window p99 814→430 ms
+  (−47 %), spike mean 532→350 ms (−34 %), worst p99.9 847→436 ms, steady state
+  and throughput unchanged. The reduction matches the alignment share from the
+  phase data (156 of 451 ms), so the residual spike is the sink-side start-delay.
 - Throughput parity: ~4.87 k rows/s at 2 Hz in every run; presence gate PASS.
-- Remaining levers: the checkpoint-bound sink tail (~0.9–1.2 s p95/p99 on the
-  sinks; ~1.5 % of the timeline) and the fake-broker volume semantics (per-frame
+- Remaining levers: the **sink-side start-delay** component of the checkpoint
+  spike (residual p99 ~276–430 ms; no native Flink flag removes it — cadence
+  change 10 s→30/60 s or accept) and the fake-broker volume semantics (per-frame
   qty vs cumulative volume → ~49 % of rows are non-positive-volume and do not
   participate in signal generation).

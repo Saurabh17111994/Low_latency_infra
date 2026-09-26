@@ -69,6 +69,10 @@ public record SignalJobConfig(
         long checkpointIntervalMs,
         long checkpointTimeoutMs,
         int maxConcurrentCheckpoints,
+        // 2026-09-26 CHG-318: native unaligned checkpoints — barriers overtake
+        // in-flight data, removing the alignment wait. Default true; the
+        // kill switch is UNALIGNED_CHECKPOINTS=false.
+        boolean unalignedCheckpoints,
         int restartMaxAttempts,
         long restartDelayMs,
         String checkpointDir,
@@ -235,6 +239,7 @@ public record SignalJobConfig(
                 checkpointIntervalMs(env),
                 checkpointTimeoutMs(env),
                 maxConcurrentCheckpoints(env),
+                unalignedCheckpoints(env),
                 restartMaxAttempts(env),
                 restartDelayMs(env),
                 checkpointDir(env),
@@ -513,6 +518,18 @@ public record SignalJobConfig(
                     + "1..4 (dev), got " + v);
         }
         return v;
+    }
+
+    /**
+     * Unaligned checkpoints (CHG-318, 2026-09-26): native Flink feature that
+     * lets checkpoint barriers overtake in-flight data, removing the alignment
+     * wait. Default true — the 2026-09-26 falsification at 2 Hz measured the
+     * checkpoint-window p99 falling 814 -> 430 ms with steady-state latency
+     * unchanged (docs/plans/2026-09-26-signal-source-latency-tuning.md §7).
+     * Kill switch for savepoint/maintenance workflows: UNALIGNED_CHECKPOINTS=false.
+     */
+    private static boolean unalignedCheckpoints(Map<String, String> env) {
+        return booleanValue(env, "UNALIGNED_CHECKPOINTS", true);
     }
 
     /**

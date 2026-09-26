@@ -278,19 +278,20 @@ else
 fi
 rm -rf "$G10DIR"
 
-# ---- G12 (2026-08-31): B5 experiment integrity — when
-# UNALIGNED_CHECKPOINTS=true is set, the submit MUST carry the unaligned
-# flag; without it, a "B5 experiment run" silently measures the baseline
-# and closes the lever on fabricated evidence.
+# ---- G12 (2026-08-31, landed CHG-318 2026-09-26): the unaligned-checkpoint
+# kill switch must reach the job — pipeline-lib passes UNALIGNED_CHECKPOINTS
+# through with default ON (the job reads the same key; false disables for
+# savepoint/maintenance workflows). If the pass-through breaks, the kill
+# switch silently has no effect and a run cannot be taken back to aligned.
 PL="$LIB"
 grep -q 'UNALIGNED_CHECKPOINTS' "$PL" \
-    && grep -q 'execution.checkpointing.unaligned=true' "$PL" \
-    && ok "G12 unaligned flag wiring present in pipeline_submit_job" \
-    || bad "G12 UNALIGNED_CHECKPOINTS wiring missing — B5 experiments run the baseline by mistake"
-# flag default must be OFF (baseline unchanged unless requested)
-grep -q '\${UNALIGNED_CHECKPOINTS:-false}' "$PL" \
-    && ok "G12 unaligned flag defaults OFF (baseline preserved)" \
-    || bad "G12 unaligned flag not default-OFF — every run would be unaligned"
+    && grep -q -- '-e UNALIGNED_CHECKPOINTS=' "$PL" \
+    && ok "G12 unaligned pass-through present in pipeline_submit_job" \
+    || bad "G12 UNALIGNED_CHECKPOINTS pass-through missing — kill switch would not reach the job"
+# default must be ON (CHG-318 landing; false is the documented kill switch)
+grep -q '\${UNALIGNED_CHECKPOINTS:-true}' "$PL" \
+    && ok "G12 unaligned defaults ON with false kill switch" \
+    || bad "G12 unaligned default is not ON — landed behavior missing"
 # phase gauge sampler must exist in the measure script
 grep -q 'checkpointStartDelayNanos\|tm-prom-cp-phases' "$HM" \
     && ok "G12 checkpoint-phase gauge sampler present" \

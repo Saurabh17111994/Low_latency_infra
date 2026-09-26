@@ -1083,10 +1083,10 @@ pipeline_submit_job() {
   # matches the code default. NOTE: keep comments OUT of the continued
   # command — a '#' line between backslash continuations broke the whole
   # submit ("requires at least 2 args", observed 2026-08-30).
-  # B5 Phase-1 (2026-08-31): UNALIGNED_CHECKPOINTS=true appends the
-  # unaligned-checkpoint flag to the submit (falsification test — the
-  # backpressure audit predicts no effect, but a negative result closes
-  # the lever with evidence). Default OFF: baseline behavior unchanged.
+  # CHG-318 (2026-09-26): unaligned checkpoints landed. The job reads
+  # UNALIGNED_CHECKPOINTS itself (default true; false is the kill switch for
+  # savepoint/maintenance workflows) — the B5 falsification at 2 Hz measured
+  # checkpoint-window p99 814 -> 430 ms with steady-state latency unchanged.
   local extra_flags=(-Dmetrics.latency.interval="${LATENCY_TRACKING_MS:-2000}")
   # Tolerable checkpoint failures (2026-09-02): a TM-kill drill's catch-up
   # replay backpressures the pipeline and a checkpoint can EXPIRE (barriers
@@ -1119,9 +1119,6 @@ pipeline_submit_job() {
     extra_flags+=(-Dstate.backend.rocksdb.memory.write-buffer-ratio="${ROCKSDB_WRITE_BUFFER_RATIO}")
     extra_flags+=(-Dstate.backend.rocksdb.threads.write="${ROCKSDB_THREADS_WRITE}")
   fi
-  if [ "${UNALIGNED_CHECKPOINTS:-false}" = "true" ]; then
-    extra_flags+=(-Dexecution.checkpointing.unaligned=true)
-  fi
   submit_out="$("${COMPOSE[@]}" exec -T \
     -e ALLOW_FULL_REPLAY="${ALLOW_FULL_REPLAY:-false}" \
     -e DEPLOYMENT_ENV=dev \
@@ -1131,6 +1128,7 @@ pipeline_submit_job() {
     -e DEDUP_WINDOW_ENTRIES="${DEDUP_WINDOW_ENTRIES:-200}" -e CANDLE_WINDOW_MS=15000 \
     -e WATERMARK_OUT_OF_ORDER_MS="${WATERMARK_OUT_OF_ORDER_MS:-500}" \
     -e CHECKPOINT_INTERVAL_MS="${CHECKPOINT_INTERVAL_MS:-60000}" -e CHECKPOINT_TIMEOUT_MS="${CHECKPOINT_TIMEOUT_MS:-30000}" -e MAX_CONCURRENT_CHECKPOINTS=1 \
+    -e UNALIGNED_CHECKPOINTS="${UNALIGNED_CHECKPOINTS:-true}" \
     -e PREVIEW_ENABLED=true -e PREVIEW_INTERVAL_MS="${PREVIEW_INTERVAL_MS:-500}" \
     -e RESTART_MAX_ATTEMPTS="${RESTART_MAX_ATTEMPTS:-3}" \
     -e RESTART_DELAY_MS="${RESTART_DELAY_MS:-30000}" \
