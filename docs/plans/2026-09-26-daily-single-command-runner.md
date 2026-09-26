@@ -1,7 +1,20 @@
 # Daily single-command runner — plan (final product + build plan)
 
-**Created:** 2026-09-26 · **Status:** scoped — evidence gathered, design chosen;
-**no implementation before the §0 decisions (D1–D6) close.**
+**Created:** 2026-09-26 · **Status:** decisions locked 2026-09-26 (D1–D6,
+all recommended); implementation started with P1-1.
+
+**User decisions locked (2026-09-26):**
+1. **D1** — execution mode **offline/halted** (orders off; paper/sandbox stays a
+   separate release-gated step).
+2. **D2** — daily universe **full 2 433 @ 3 sockets in dev** (production
+   single-socket policy untouched).
+3. **D3** — lifecycle: **one manual morning command; stack left running 24×7**;
+   no timer in v1.
+4. **D4** — daily actions: **`start`/`status`/`stop` only**; savepoint stays an
+   explicit command; EOD stays with the `eod-controller` service.
+5. **D5** — success bar: **nine checks I1–I9; pre-session data checks report
+   PENDING, exit 0**.
+6. **D6** — interface: **`make day ARGS="..."` + `day-run.sh`**.
 
 **Operator goal (2026-09-26):** one command that makes the full local platform —
 tick ingestion → Fluss → Flink SignalJob (candles + signals in one job) —
@@ -37,20 +50,19 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
 | `[?]` | needs an operator decision before it can start |
 | `[-]` | no action — trigger-gated or superseded (trigger recorded) |
 
-#### D — Operator decisions (block everything downstream)
+#### D — Operator decisions (decided 2026-09-26, all recommended)
 
-- [?] **D1** — Execution posture for v1: offline/halted (recommended) vs
-  paper/sandbox (release-gated window required).
-- [?] **D2** — Daily universe: full 2 433 @ 3 sockets in dev (recommended) vs
-  the 1 024 @ 1 socket approved subset.
-- [?] **D3** — Lifecycle: manual command, stack left running 24×7 (recommended)
-  vs start/stop tied to market hours vs scheduled.
-- [?] **D4** — Daily extras: v1 = `start`/`status`/`stop` only; savepoint and
-  EOD offload stay explicit ops actions (recommended) vs folded into `stop`.
-- [?] **D5** — Success bar: the nine invariants I1–I9 (§Overview); pre-session
-  data predicates report PENDING (warn, exit 0) (recommended) vs fail-closed.
-- [?] **D6** — Interface name: `make day ARGS="start|status|stop"` +
-  `day-run.sh` (recommended) vs another naming.
+- [x] **D1** — Execution posture: **offline/halted** (orders off; paper/sandbox
+  stays a separate release-gated step).
+- [x] **D2** — Daily universe: **full 2 433 @ 3 sockets in dev** (production
+  single-socket policy untouched).
+- [x] **D3** — Lifecycle: **one manual morning command; stack left running
+  24×7**; no timer in v1.
+- [x] **D4** — Daily actions: **`start`/`status`/`stop` only**; savepoint stays
+  an explicit command; EOD stays with the `eod-controller` service.
+- [x] **D5** — Success bar: **nine checks I1–I9; pre-session data checks report
+  PENDING, exit 0**.
+- [x] **D6** — Interface: **`make day ARGS="..."` + `day-run.sh`**.
 
 #### P1 — Platform start-safety (no decision needed)
 
@@ -59,23 +71,23 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
 - [ ] **P1-2** — ingestion: capacity/policy check surfaced at start with a
   precise operator message (tokens vs sockets, approval flag, prod policy).
 
-#### P2 — Config truth (needs D1/D2)
+#### P2 — Config truth
 
-- [?] **P2-1** — universe/socket daily contract mapping `full|approved` onto the
+- [ ] **P2-1** — universe/socket daily contract mapping `full|approved` onto the
   existing env knobs, effective-manifest verification, production policy
   untouched (CHG-320).
-- [?] **P2-2** — execution-posture guard: runner never sets live flags; refuses
+- [ ] **P2-2** — execution-posture guard: runner never sets live flags; refuses
   the execution profile if any enablement flag is present on a dev host.
 
-#### P3 — Orchestrator interface (needs D3–D6)
+#### P3 — Orchestrator interface
 
-- [?] **P3-1** — `code/01_platform/04_scripts/day-run.sh start|status|stop`:
+- [ ] **P3-1** — `code/01_platform/04_scripts/day-run.sh start|status|stop`:
   sequencing, idempotency, singleton guard, fail-closed exit codes.
-- [?] **P3-2** — verification predicates + status board (pure functions +
+- [ ] **P3-2** — verification predicates + status board (pure functions +
   read-only probes; session-aware data predicate).
-- [?] **P3-3** — tests in `code/01_platform/04_scripts/tests/` (auto-discovered
+- [ ] **P3-3** — tests in `code/01_platform/04_scripts/tests/` (auto-discovered
   by the gate; docker/flink CLIs stubbed).
-- [?] **P3-4** — `make day` thin target (interface only, no logic).
+- [ ] **P3-4** — `make day` thin target (interface only, no logic).
 
 #### P4 — Ops integration and validation
 
@@ -95,12 +107,12 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| D — Operator decisions (block everything downstream) | 6 | 0 | 0 | 0 | 0 | 6 | 0 |
+| D — Operator decisions (decided 2026-09-26, all recommended) | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 | P1 — Platform start-safety (no decision needed) | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
-| P2 — Config truth (needs D1/D2) | 2 | 0 | 0 | 0 | 0 | 2 | 0 |
-| P3 — Orchestrator interface (needs D3–D6) | 4 | 0 | 0 | 0 | 0 | 4 | 0 |
+| P2 — Config truth | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
+| P3 — Orchestrator interface | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | P4 — Ops integration and validation | 5 | 0 | 0 | 3 | 1 | 0 | 1 |
-| **Total** | **19** | **0** | **0** | **5** | **1** | **12** | **1** |
+| **Total** | **19** | **6** | **0** | **11** | **1** | **0** | **1** |
 
 ## Overview — the final product
 
