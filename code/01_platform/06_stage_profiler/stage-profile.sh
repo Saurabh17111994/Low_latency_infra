@@ -48,6 +48,14 @@ RAW_SAMPLE_ROWS_PER_BUCKET="${RAW_SAMPLE_ROWS_PER_BUCKET:-2000}"
 MULTITF_ENABLED="${MULTITF_ENABLED:-true}"
 FLINK_REST_URL="${FLINK_REST_URL:-http://localhost:8081}"
 PROBE_BOOTSTRAP="${PROBE_BOOTSTRAP:-localhost:9123}"
+# FEED=faketool (default): the 2 Hz fake broker (unchanged).
+# FEED=real: one ingestion container against the real broker DataStream
+#   (wss://ds.arrow.trade, ARROW_FEED=token, mode full); slots = ceil(rows/1024)
+#   bridge connections inside that one process (2 433 -> 3 x 811). Market-hours
+#   only for measurement; ALLOW_OFFHOURS_REAL=1 permits a bring-up-only dry run.
+FEED="${FEED:-faketool}"
+ALLOW_OFFHOURS_REAL="${ALLOW_OFFHOURS_REAL:-0}"
+BRINGUP_ONLY="${BRINGUP_ONLY:-0}"
 RUN_TS="$(date +%Y%m%d-%H%M%S)"
 OUT_ROOT="${OUT:-$ROOT/logs/stage-profile-$RUN_TS}"
 
@@ -70,6 +78,18 @@ UNIVERSE_ROWS=0
 
 say() { printf 'stage-profile: %s\n' "$*"; }
 fail() { printf 'stage-profile: FAIL — %s\n' "$*" >&2; exit 1; }
+
+# Read one KEY=value from the stack .env without docker's env-file parsing:
+# strips an inline ` # comment`, surrounding whitespace and quotes. Used for
+# the two non-secret real-broker identifiers; secrets come from secrets.env.
+stack_env_value() {
+  local key="$1" line
+  line="$(grep -E "^${key}=" "$STACK_DIR/.env" 2>/dev/null | head -1 || true)"
+  [ -n "$line" ] || return 0
+  line="${line#*=}"
+  line="${line%%#*}"
+  printf '%s' "$(printf '%s' "$line" | tr -d '[:space:]"'"'"'')"
+}
 
 usage() {
   awk 'NR > 3 && /^set -euo pipefail/{exit} NR > 3 {sub(/^# ?/, ""); print}' \
@@ -172,6 +192,22 @@ purge_tables() {
 
 # ── fleet, job, capture, sample ─────────────────────────────────────────────
 
+# FEED=real market-hours guard: DataStream carries live ticks only during the
+# NSE session; outside it the broker re-sends stale snapshots, which Java's
+# ARROW_MAX_EVENT_AGE_MS gate drops — a capture run would fail its presence
+# gate by design. ALLOW_OFFHOURS_REAL=1 permits a wiring dry run (pair with
+# BRINGUP_ONLY=1).
+real_market_hours_guard() {
+  [ "$ALLOW_OFFHOURS_REAL" = "1" ] && return 0
+  local now_ist ist_min
+  now_ist="$(TZ=Asia/Kolkata date +%H%M)"
+  ist_min=$((10#${now_ist:0:2} * 60 + 10#${now_ist:2:2}))
+  if [ "$ist_min" -ge 555 ] && [ "$ist_min" -le 930 ]; then
+    return 0
+  fi
+  fail "FEED=real is outside the NSE session (09:15-15:30 IST) — live ticks only then; set ALLOW_OFFHOURS_REAL=1 (with BRINGUP_ONLY=1) for a wiring dry run"
+}
+
 start_fleet() {
   local out="$PHASE_DIR/capture"
   local rows per_slice i sfx t c
@@ -181,6 +217,76 @@ start_fleet() {
     || fail "universe rows ($rows) not divisible by INGESTION_CONTAINERS ($INGESTION_CONTAINERS)"
   per_slice=$((rows / INGESTION_CONTAINERS))
   UNIVERSE_ROWS="$rows"
+
+  # ── real broker branch (FEED=real) ──────────────────────────────────────
+  # ONE container, `slots` bridge connections inside it (the bridge caps a
+  # connection at 1024 tokens). The full universe file is used unfiltered.
+  if [ "$FEED" = "real" ]; then
+    real_market_hours_guard
+    [ "$INGESTION_CONTAINERS" -eq 1 ] \
+      || fail "FEED=real runs ONE ingestion container (got INGESTION_CONTAINERS=$INGESTION_CONTAINERS; set it to 1)"
+    local slots=$(( (rows + 1023) / 1024 ))
+    [ "$slots" -ge 1 ] && [ "$slots" -le 3 ] \
+      || fail "FEED=real: $rows tokens exceed the 3 x 1024 slots capacity"
+    # Non-secret identifiers from the stack .env, read explicitly: `docker run
+    # --env-file .env` does NOT strip inline comments, and .env has one on
+    # ARROW_INSTRUMENT_TOKENS. Secrets stay in secrets.env via --env-file.
+    local real_app_id real_user_id
+    real_app_id="$(stack_env_value ARROW_APP_ID)"
+    real_user_id="$(stack_env_value ARROW_USER_ID)"
+    [ -n "$real_app_id" ] || fail "FEED=real needs ARROW_APP_ID in $STACK_DIR/.env"
+    [ -n "$real_user_id" ] || fail "FEED=real needs ARROW_USER_ID in $STACK_DIR/.env"
+    say "fleet (real): $rows instruments -> 1 container x $slots slots (max 1024 tokens/slot, unfiltered universe)"
+    cp "$NSE_PATH" "$out/manifest-00.csv"
+    mkdir -p "$out/j1-0"
+    docker run -d --name "${ING_PREFIX}0" --network "$LIB_TRADING_NET" \
+      -v "$out":/run -v "$out/j1-0":/logs \
+      -e LOG_DIR=/logs -e READINESS_FILE_PATH="/run/ingestion-0.loadtest.ready" \
+      -e ARROW_BRIDGE_BIN=/app/arrow-bridge -e TRANSPORT=proto -e SECRETS_VIA_ENV_FILE=1 \
+      -e DEPLOYMENT_ENV=dev \
+      --env-file "$LIB_SECRETS_FILE" \
+      -e "ARROW_APP_ID=$real_app_id" -e "ARROW_USER_ID=$real_user_id" \
+      -e ARROW_FEED=token \
+      -e "ARROW_HFT_CONNECTIONS=$slots" -e ARROW_HFT_MULTI_CONNECTION_APPROVED=true \
+      -e INSTRUMENT_MANIFEST_PATH=/run/manifest-00.csv \
+      -e FLUSS_BOOTSTRAP=fluss-coordinator:9123 -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 \
+      -e RAW_TABLE_NAME=raw_table_1 \
+      -e ARROW_MAX_EVENT_AGE_MS=5000 -e ARROW_MAX_FUTURE_EVENT_SKEW_MS=2000 \
+      -e CLOCK_CHECK_REQUIRED=false \
+      -e OTEL_COLLECTOR_HOST=otel-collector:4318 -e METRICS_LOCAL_LOG=1 \
+      -e FLUSS_WRITER_MODE=generic -e FLUSS_WRITERS=1 -e FLUSS_WRITER_BATCH_SIZE_BYTES=0 \
+      -e ARROW_TICK_COUNTS=30 "$LIB_LOADGEN_IMAGE" \
+      java --add-opens=java.base/java.nio=ALL-UNNAMED -Xms512m -Xmx512m \
+        -XX:MaxDirectMemorySize=512m \
+        '-Xlog:gc*,safepoint:file=/logs/gc.log:time,uptime,level,tags' -Dlog.dir=/logs \
+        -cp /app/ingestion.jar com.trading.ingestion.IngestionService >/dev/null
+    docker logs -f "${ING_PREFIX}0" > "$out/j1-0/java.out" 2>&1 &
+    LOG_PIDS+=("$!")
+    for t in $(seq 1 60); do
+      [ -f "$out/ingestion-0.loadtest.ready" ] && break
+      if [ "$(docker inspect -f '{{.State.Running}}' "${ING_PREFIX}0" 2>/dev/null)" != "true" ]; then
+        fail "${ING_PREFIX}0 exited before readiness — last log lines: $(tail -3 "$out/j1-0/java.out" | tr '\n' '|')"
+      fi
+      [ "$t" -eq 60 ] && fail "${ING_PREFIX}0 readiness file never appeared"
+      sleep 2
+    done
+    # Token mode logs one "HFT subscribed <n> tokens" line per slot (811 x 3
+    # for the 2 433 universe). Wait for every slot AND for the summed counts to
+    # equal the universe, not for one exact per-container number.
+    local got_slots got_tokens
+    for t in $(seq 1 90); do
+      got_slots="$(grep -c 'HFT subscribed' "$out/j1-0/java.out" 2>/dev/null || true)"
+      got_tokens="$(grep -o 'HFT subscribed [0-9]* tokens' "$out/j1-0/java.out" 2>/dev/null \
+        | awk '{s+=$3} END {print s+0}')"
+      if [ "${got_slots:-0}" -ge "$slots" ] && [ "${got_tokens:-0}" -eq "$rows" ]; then break; fi
+      [ "$t" -eq 90 ] && fail "${ING_PREFIX}0 never confirmed $slots slot subscriptions totalling $rows tokens (slots=${got_slots:-0} tokens=${got_tokens:-0})"
+      sleep 2
+    done
+    say "fleet up (real): subscriptions confirmed (${got_slots} slots, ${got_tokens} tokens)"
+    return 0
+  fi
+  # ── end real broker branch ──────────────────────────────────────────────
+
   say "fleet: $rows instruments -> $INGESTION_CONTAINERS x $per_slice (rate ${RATE_HZ}Hz)"
   head -1 "$NSE_PATH" > "$out/header.csv"
   tail -n +2 "$NSE_PATH" | split -l "$per_slice" -d -a2 - "$out/slice_"
@@ -299,7 +405,7 @@ run_capture() {
   JOB_ID="$JOB_ID" DURATION_S="$secs" \
     INGESTION_JAVA_OUT="$PHASE_DIR/capture/j1-0/java.out" \
     FLUSS_PROBE_CP="$CP" OUT_DIR="$PHASE_DIR/stages" PROBE_TOKENS="$TOKENS" \
-    FLINK_REST_URL="$FLINK_REST_URL" RATE_HZ="$RATE_HZ" \
+    FLINK_REST_URL="$FLINK_REST_URL" RATE_HZ="$CAPTURE_RATE_HZ" \
     bash "$CAPTURE_SH" >"$PHASE_DIR/stage-capture.log" 2>&1 \
     || fail "stage-capture failed (see $PHASE_DIR/stage-capture.log)"
   say "capture done ($(wc -l < "$PHASE_DIR/stages/stages.tsv" 2>/dev/null || echo 0) Flink rows)"
@@ -326,6 +432,12 @@ run_phase() {
   preflight
   purge_tables
   start_fleet
+  if [ "${BRINGUP_ONLY:-0}" = "1" ]; then
+    say "BRINGUP_ONLY=1 — fleet and subscriptions confirmed, no capture; tearing down"
+    stop_fleet
+    say "bring-up-only: PASS"
+    exit 0
+  fi
   submit_job
   compile_probes
   warmup
@@ -341,8 +453,21 @@ check_only() {
   local rows
   rows="$(tail -n +2 "$NSE_PATH" | grep -c . || true)"
   [ "$rows" -gt 0 ] || fail "universe has no data rows"
-  [ $((rows % INGESTION_CONTAINERS)) -eq 0 ] \
-    || fail "universe rows ($rows) not divisible by $INGESTION_CONTAINERS"
+  case "$FEED" in
+    faketool | real) ;;
+    *) fail "FEED must be 'faketool' or 'real' (got '$FEED')" ;;
+  esac
+  local slots=0
+  if [ "$FEED" = "real" ]; then
+    [ "$INGESTION_CONTAINERS" -eq 1 ] \
+      || fail "FEED=real runs ONE ingestion container (got INGESTION_CONTAINERS=$INGESTION_CONTAINERS; set it to 1)"
+    slots=$(( (rows + 1023) / 1024 ))
+    [ "$slots" -ge 1 ] && [ "$slots" -le 3 ] \
+      || fail "FEED=real: $rows tokens exceed the 3 x 1024 slots capacity"
+  else
+    [ $((rows % INGESTION_CONTAINERS)) -eq 0 ] \
+      || fail "universe rows ($rows) not divisible by $INGESTION_CONTAINERS"
+  fi
   [ -r "$CP_FILE" ] || fail "missing Fluss classpath file: $CP_FILE (build ingestion first)"
   [ -r "$CAPTURE_SH" ] || fail "missing $CAPTURE_SH"
   [ -r "$PROFILE_PY" ] || fail "missing $PROFILE_PY"
@@ -350,7 +475,11 @@ check_only() {
   command -v javac >/dev/null || fail "javac not on PATH"
   command -v python3 >/dev/null || fail "python3 not on PATH"
   python3 "$PROFILE_PY" stages >/dev/null || fail "stage_profiler.py does not run"
-  say "check-only OK: $rows instruments -> $INGESTION_CONTAINERS x $((rows / INGESTION_CONTAINERS)); smoke ${SMOKE_S}s, main ${MAIN_S}s"
+  if [ "$FEED" = "real" ]; then
+    say "check-only OK: $rows instruments -> FEED=real 1 container x $slots slots; smoke ${SMOKE_S}s, main ${MAIN_S}s"
+  else
+    say "check-only OK: $rows instruments -> $INGESTION_CONTAINERS x $((rows / INGESTION_CONTAINERS)); smoke ${SMOKE_S}s, main ${MAIN_S}s"
+  fi
 }
 
 # ── main ────────────────────────────────────────────────────────────────────
@@ -362,6 +491,20 @@ TOKENS="$(awk -F, -v n="$PROBE_TOKEN_COUNT" \
 if [ "${CHECK_ONLY:-0}" = "1" ]; then
   check_only
   exit 0
+fi
+
+# FEED validation runs in both paths (a typo must fail before anything starts).
+case "$FEED" in
+  faketool | real) ;;
+  *) fail "FEED must be 'faketool' or 'real' (got '$FEED')" ;;
+esac
+FEED_LABEL="${RATE_HZ} Hz fake broker"
+CAPTURE_RATE_HZ="$RATE_HZ"
+if [ "$FEED" = "real" ]; then
+  FEED_LABEL="real broker DataStream full"
+  # Full-mode DataStream delivers ~1 Hz per token (measured 2026-09-24); the
+  # value is a label for stage-capture's rate_hz field, not a pacing input.
+  CAPTURE_RATE_HZ=1
 fi
 
 # Off-hours runs: mirror holistic-measure.sh — when the 09:15-15:30 IST session
@@ -384,7 +527,7 @@ say "[session] open=$_session_open ist_minutes=$_ist_min MULTITF_SESSION_BYPASS=
 mkdir -p "$OUT_ROOT"
 printf 'MULTITF_SESSION_BYPASS=%s ist_minutes_now=%s session_open=%s\n' \
   "$MULTITF_SESSION_BYPASS" "$_ist_min" "$_session_open" > "$OUT_ROOT/session.txt"
-say "universe: $NSE_PATH @ ${RATE_HZ}Hz (smoke ${SMOKE_S}s, main ${MAIN_S}s)"
+say "universe: $NSE_PATH, ${FEED_LABEL} (smoke ${SMOKE_S}s, main ${MAIN_S}s)"
 say "evidence: $OUT_ROOT"
 
 if [[ ",$PHASES," == *",smoke,"* ]]; then
@@ -398,7 +541,7 @@ if [[ ",$PHASES," == *",smoke,"* ]]; then
   fi
   if [[ ",$PHASES," != *",main,"* ]]; then
     python3 "$PROFILE_PY" report --phase "$OUT_ROOT/smoke" --out "$OUT_ROOT" \
-      --title "Stage profile (smoke) — ${UNIVERSE_ROWS} instruments @ ${RATE_HZ}Hz, ${SMOKE_S}s"
+      --title "Stage profile (smoke) — ${UNIVERSE_ROWS} instruments, ${FEED_LABEL}, ${SMOKE_S}s"
     say "REPORT: $OUT_ROOT/profile.md"
     exit 0
   fi
@@ -407,6 +550,6 @@ fi
 if [[ ",$PHASES," == *",main,"* ]]; then
   run_phase main "$MAIN_S"
   python3 "$PROFILE_PY" report --phase "$OUT_ROOT/main" --out "$OUT_ROOT" \
-    --title "Stage profile — ${UNIVERSE_ROWS} instruments @ ${RATE_HZ}Hz, ${MAIN_S}s"
+    --title "Stage profile — ${UNIVERSE_ROWS} instruments, ${FEED_LABEL}, ${MAIN_S}s"
   say "REPORT: $OUT_ROOT/profile.md"
 fi

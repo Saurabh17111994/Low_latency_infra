@@ -30,6 +30,35 @@ Defaults: full universe (`NSE_CM_EQUITY.csv`, 2 433 stocks), `RATE_HZ=20`
 
 Evidence: `logs/stage-profile-<timestamp>/`.
 
+## Real broker mode (`FEED=real`, 2026-09-26)
+
+Same ladder, same report — the data comes from the real broker DataStream
+(`wss://ds.arrow.trade`, `ARROW_FEED=token`, mode `full`) instead of the fake
+broker:
+
+```
+FEED=real INGESTION_CONTAINERS=1 \
+  bash code/01_platform/06_stage_profiler/stage-profile.sh
+```
+
+- **One container, N slots.** The bridge caps one connection at 1 024 tokens
+  (`subscription_plan.go`), so the 2 433-stock universe runs as
+  `slots = ceil(rows/1024)` = 3 bridge connections inside that one container
+  (3 × 811), with `ARROW_HFT_MULTI_CONNECTION_APPROVED=true` (dev-only policy
+  gate; production rejects multi-connection). The full `NSE_PATH` file is used
+  unfiltered — no per-slice manifests, no token filtering.
+- **Market hours only.** Outside 09:15–15:30 IST the DataStream re-sends stale
+  snapshots, which the ingestion staleness gate (`ARROW_MAX_EVENT_AGE_MS`)
+  drops; `FEED=real` therefore refuses to start outside the session unless
+  `ALLOW_OFFHOURS_REAL=1`.
+- **Off-hours wiring dry run** (no capture, no presence claims):
+  `FEED=real INGESTION_CONTAINERS=1 ALLOW_OFFHOURS_REAL=1 BRINGUP_ONLY=1 …`
+  starts the fleet, waits for the readiness marker and for **all** slot
+  subscription confirmations, then tears down.
+- Real cadence in `full` mode is ≈1 Hz per token (measured 2026-09-24), so
+  throughput is not comparable with the 2 Hz fake ladder; the report title and
+  the capture `rate_hz` label say "real broker DataStream full".
+
 ## What it measures (S1..S9)
 
 | Step | Boundary | Latency source | Throughput source |

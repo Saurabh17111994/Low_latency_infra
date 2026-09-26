@@ -366,5 +366,84 @@ class PromTest(unittest.TestCase):
         self.assertEqual({"Sink: candle_live": 100.0}, sp.tracker_counts_by_task(samples, job_id="j"))
 
 
+SHELL_PATH = pathlib.Path(__file__).resolve().parents[1] / "stage-profile.sh"
+
+
+class ShellFeedContractTest(unittest.TestCase):
+    """FEED=faketool|real contract pinned in the shell orchestrator.
+
+    The shell half cannot run without docker/cluster; these assertions pin the
+    static contract the live dry run then exercises (guards, env wiring, the
+    slot-vs-container confirmation rule). Read as text on purpose: no shell
+    interpreter, no docker, no network.
+    """
+
+    def setUp(self):
+        self.text = SHELL_PATH.read_text(encoding="utf-8")
+
+    def _real_branch(self):
+        start = self.text.index("# ── real broker branch (FEED=real)")
+        end = self.text.index("# ── end real broker branch")
+        self.assertLess(start, end)
+        return self.text[start:end]
+
+    def test_feed_defaults_to_faketool(self):
+        self.assertIn('FEED="${FEED:-faketool}"', self.text)
+
+    def test_invalid_feed_fails_before_anything_starts(self):
+        self.assertIn("FEED must be 'faketool' or 'real'", self.text)
+
+    def test_real_branch_uses_the_real_datasream_and_stack_credentials(self):
+        branch = self._real_branch()
+        self.assertIn("-e ARROW_FEED=token", branch)
+        self.assertIn("stack_env_value ARROW_APP_ID", branch)
+        self.assertIn("stack_env_value ARROW_USER_ID", branch)
+        self.assertIn('--env-file "$LIB_SECRETS_FILE"', branch)
+        self.assertIn("ARROW_HFT_MULTI_CONNECTION_APPROVED=true", branch)
+
+    def test_real_branch_feeds_the_full_unfiltered_universe(self):
+        branch = self._real_branch()
+        self.assertIn('cp "$NSE_PATH" "$out/manifest-00.csv"', branch)
+        self.assertIn("unfiltered universe", branch)
+
+    def test_real_branch_never_sets_fake_broker_vars(self):
+        branch = self._real_branch()
+        self.assertNotIn("ARROW_FAKE_BROKER", branch)
+        self.assertNotIn("ARROW_HFT_URL", branch)
+
+    def test_real_slots_cover_the_2433_universe(self):
+        self.assertIn("slots=$(( (rows + 1023) / 1024 ))", self.text)
+        self.assertIn("3 x 1024 slots capacity", self.text)
+
+    def test_real_requires_exactly_one_container(self):
+        self.assertIn("FEED=real runs ONE ingestion container", self.text)
+
+    def test_market_hours_guard_blocks_offhours_without_the_escape_hatch(self):
+        self.assertIn('ALLOW_OFFHOURS_REAL="${ALLOW_OFFHOURS_REAL:-0}"', self.text)
+        self.assertIn("09:15-15:30 IST", self.text)
+        self.assertIn("555", self.text)
+        self.assertIn("930", self.text)
+
+    def test_bringup_only_stops_after_subscription_confirmation(self):
+        self.assertIn('BRINGUP_ONLY="${BRINGUP_ONLY:-0}"', self.text)
+        self.assertIn("bring-up-only: PASS", self.text)
+
+    def test_confirmation_waits_for_all_slots_not_one_container_line(self):
+        branch = self._real_branch()
+        self.assertIn("grep -c 'HFT subscribed'", branch)
+        self.assertIn("got_tokens", branch)
+
+    def test_real_branch_uses_brace_form_for_the_single_container_name(self):
+        # `$ING_PREFIX0` parses as an unbound variable under `set -u`
+        # (caught by the 2026-09-26 dry run); the digit-suffixed name must use
+        # the braced form `${ING_PREFIX}0`.
+        branch = self._real_branch()
+        self.assertIn("${ING_PREFIX}0", branch)
+        self.assertNotIn("$ING_PREFIX0", branch)
+
+    def test_fake_path_still_uses_the_exact_per_container_grep(self):
+        self.assertIn('grep -qF "HFT subscribed $per_slice"', self.text)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
