@@ -244,6 +244,25 @@ ensure_jar_dir() { # <service> <jar path in container>
 		|| die "could not create $dir in $service (required before compose cp)"
 }
 
+# CHG-327: the restore proof is searched from a FIXED anchor (taken just before
+# submission) and is never truncated by a tail cap. The 2026-09-26 CHG-326
+# drill showed why: the old check combined a sliding 30-second window with an
+# 800-line tail, and TaskManager startup churn pushed the restore lines out of
+# both within seconds — a healthy restore (JM "Restoring job <id> from
+# Savepoint", TM "Restoring state for 4 split(s)") was declared untrusted. The
+# anchor is computed once per rollout; the poll window only grows.
+utc_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+restore_evidence_lines() { # <since-iso> <new-job-id> -> matching lines
+	local since_ts="$1" jobid="$2"
+	{
+		compose logs --since "$since_ts" flink-jobmanager 2>/dev/null \
+			| grep -E "Restoring job $jobid from Savepoint" || true
+		compose logs --since "$since_ts" flink-taskmanager 2>/dev/null \
+			| grep -E 'Restoring state for [0-9]+ split|Starting to restore from state handle' || true
+	}
+}
+
 # Prometheus sampling of the dedup evidence (best-effort). Prints a single
 # line: firsts_cumulative first_total dup_total (empty when unavailable).
 # 2026-08-28 gauge remediation: the gauge formerly named
@@ -471,6 +490,9 @@ for name in $JOB_ENV_NAMES; do
 	[ -n "${!name:-}" ] && exec_args+=(-e "$name=${!name}")
 done
 log "submitting with STATE_RECOVERY_PATH=$SAVEPOINT_PATH and ALLOW_FULL_REPLAY=false (restore mode)"
+# CHG-327: fixed restore-evidence anchor — computed ONCE, before submission,
+# so the poll window can never slide past the JM/TM restore lines.
+restore_since="$(utc_iso)"
 submit_output="$(compose "${exec_args[@]}" flink-jobmanager flink run -d -c "$ENTRY_CLASS" "$JAR_IN_CONTAINER" 2>&1)" \
 	|| die "flink run failed — see output above; restore path: $SAVEPOINT_PATH"
 
@@ -491,36 +513,27 @@ else
 	# The SignalJob startup-mode INFO line does not reach the client stdout
 	# or the client log file under this compose/exec deploy (log4j file
 	# appenders + CLI stdout routing — observed 2026-08-22). The
-	# authoritative restore proof is Flink's own TaskManager restore lines
-	# ('Restoring state for N split(s)' + 'Starting to restore from state
-	# handle ... <savepoint>'), observed ~30s after submit. NOTE: docker
-	# compose logs --since rejects duration strings ("30s") and accepts
-	# RFC3339 timestamps only (verified 2026-08-22), so compute the window.
+	# authoritative restore proof is the JobManager's own
+	# 'Restoring job <id> from Savepoint ...' line, corroborated by the
+	# TaskManager's 'Restoring state for N split(s)' lines (~30s after
+	# submit). NOTE: docker compose logs --since rejects duration strings
+	# ("30s") and accepts RFC3339 timestamps only (verified 2026-08-22);
+	# the anchor is fixed at submit time and untruncated (CHG-327 — the old
+	# sliding 30-second window plus an 800-line tail cap lost the lines
+	# under TM startup churn and rejected a healthy restore).
 	restore_proven=0
 	for _ in $(seq 1 15); do
-		# P6-505: GNU date -d dies on BSD/macOS (tablet/dev) and set -e
-		# aborts the restore-proof loop. Prefer GNU, then BSD -v, then a
-		# duration string docker accepts as a last resort.
-		if since_ts="$(date -u -d '-30 seconds' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"; then
-			:
-		elif since_ts="$(date -u -v-30S +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)"; then
-			:
-		else
-			since_ts="2m"
-		fi
-		tm_restore="$(compose logs --since "$since_ts" --tail 800 flink-taskmanager 2>/dev/null \
-			| grep -E 'Restoring state for [0-9]+ split|Starting to restore from state handle' || true)"
-		if [ -n "$tm_restore" ]; then
+		if [ -n "$(restore_evidence_lines "$restore_since" "$NEW_JOB_ID")" ]; then
 			restore_proven=1
 			break
 		fi
 		sleep 5
 	done
 	if [ "$restore_proven" = "1" ]; then
-		log "restore confirmed via TaskManager restore lines (split restore + state handle from the savepoint)"
+		log "restore confirmed from logs since $restore_since (JM Savepoint line and/or TaskManager split restore)"
 	else
 		printf '%s\n' "$submit_output" | tee -a "$EVIDENCE" >&2
-		die "no restore evidence: client log lacks 'startup mode = RESTORE' and TM logs show no restore lines — refusing to trust the restore"
+		die "no restore evidence: client log lacks 'startup mode = RESTORE' and logs since $restore_since show no JM/TM restore lines — refusing to trust the restore"
 	fi
 fi
 

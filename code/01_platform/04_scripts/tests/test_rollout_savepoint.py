@@ -306,6 +306,47 @@ class RolloutHarness(unittest.TestCase):
             'if [ "$state_after" -lt $(( STATE_BEFORE / 2 )) ]; then echo FIRE; else echo PASS; fi;; esac')
         self.assertEqual(r.stdout.strip(), "PASS")
 
+    # --- CHG-327: restore evidence must be searched in a FIXED, untruncated
+    # window --- The 2026-09-26 CHG-326 drill: the restore succeeded (JM
+    # "Restoring job <id> from Savepoint 2339", TM "Restoring state for 4
+    # split(s)") but the checker's sliding now-30s window plus --tail 800
+    # missed the lines under TaskManager startup churn and declared the
+    # healthy restore untrusted.
+    def test_restore_evidence_lines_finds_jm_and_tm_lines(self):
+        jid = "a" * 32
+        self.env["STUB_LOGS"] = (
+            "flink-jobmanager-1  | 2026-01-01 00:00:10 INFO  CheckpointCoordinator [] - "
+            f"Restoring job {jid} from Savepoint 2339 @ 0 for {jid} "
+            "located at file:/checkpoints/x/chk-2339.\n"
+            "flink-taskmanager-1 | 2026-01-01 00:00:10 INFO  AbstractStreamOperator [] - "
+            "Restoring state for 4 split(s) to reader.\n")
+        r = self.run_helper(f'restore_evidence_lines "2026-01-01T00:00:00Z" "{jid}"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("Restoring job", r.stdout)
+        self.assertIn("Restoring state for 4 split(s)", r.stdout)
+
+    def test_restore_evidence_window_is_not_truncated(self):
+        jid = "a" * 32
+        self.env["STUB_LOGS"] = "x\n"
+        self.run_helper(f'restore_evidence_lines "2026-01-01T00:00:00Z" "{jid}"')
+        calls = (self.t / "docker.calls").read_text()
+        logs_calls = [ln for ln in calls.splitlines() if " logs " in ln]
+        self.assertTrue(logs_calls, "restore evidence must query the logs")
+        for call in logs_calls:
+            self.assertIn("--since", call)
+            self.assertNotIn("--tail", call,
+                             "CHG-327: --tail truncates the restore line out of the window")
+
+    def test_utc_iso_is_rfc3339_utc(self):
+        r = self.run_helper("utc_iso")
+        self.assertRegex(r.stdout.strip(), r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+
+    def test_restore_evidence_static_pins(self):
+        self.assertIn('restore_since="$(utc_iso)"', SRC)
+        self.assertIn('restore_evidence_lines "$restore_since" "$NEW_JOB_ID"', SRC)
+        self.assertNotIn("'-30 seconds'", SRC, "CHG-327: no sliding evidence window")
+        self.assertNotIn("--tail 800", SRC, "CHG-327: no truncating tail on the evidence query")
+
     # --- static pins: guards that only fire in a live rollout ---
     def test_static_pins(self):
         pins = {
@@ -319,8 +360,6 @@ class RolloutHarness(unittest.TestCase):
             "P6-503 JOB_ID hex": '*[!0-9a-f]*) die "invalid JOB_ID',
             "P6-503 jq body": '\'{"target-directory":$d,"cancel-job":false}\'',
             "P6-504 savepoint retry": '|| true)"\n\t\t\t[ -n "$response" ] || { sleep 5; continue; }',
-            "P6-505 BSD date": 'date -u -v-30S',
-            "P6-505 duration fallback": 'since_ts="2m"',
             "P6-506 T0 retry": 'T0_DEDUP="$(sample_dedup || true)"',
             "P6-507 HIT_SAMPLE_S wait": '[ "$HIT_SAMPLE_S" -gt 0 ] && sleep "$HIT_SAMPLE_S"',
             "P6-508 gate per-side": 'case "$state_after" in \'\'|*[!0-9]*) nonnum=1',
