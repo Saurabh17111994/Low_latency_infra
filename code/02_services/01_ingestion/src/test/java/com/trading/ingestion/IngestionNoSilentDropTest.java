@@ -84,6 +84,9 @@ class IngestionNoSilentDropTest {
         corpus.add(new Line(tick("hft", "full", TOKEN_A, now, 100), Outcome.APPEND));
         corpus.add(new Line(tick("hft", "ltpc", TOKEN_B, now, 200), Outcome.APPEND));
         corpus.add(new Line(tick("hft", "quote", TOKEN_A, now, 0), Outcome.APPEND)); // VALID_NON_TRADE → QUOTE
+        // Real DataStream full-mode snapshot of a scrip that has not traded yet
+        // carries ltp_paise = 0 — a quote row, not an invalid trade (CHG-321).
+        corpus.add(new Line(tick("token", "full", TOKEN_B, now, 0), Outcome.APPEND)); // full + LTP 0 → VALID_NON_TRADE → QUOTE
         // ---- quarantined classes (must never reach the writer) ----
         corpus.add(new Line(tick("standard", "ltp", TOKEN_A, now, 100), Outcome.QUARANTINE_METRIC)); // unknown feed
         corpus.add(new Line(tick("hft", "ltpc", 999_999L, now, 100), Outcome.QUARANTINE_METRIC));   // missing instrument
@@ -119,7 +122,7 @@ class IngestionNoSilentDropTest {
 
         // The appended set is exactly the valid corpus subset.
         assertEquals(expectedAppends, converter.packets.size());
-        assertEquals(List.of(TOKEN_A, TOKEN_B, TOKEN_A),
+        assertEquals(List.of(TOKEN_A, TOKEN_B, TOKEN_A, TOKEN_B),
                 converter.packets.stream().map(p -> p.instrumentToken()).toList());
         assertTrue(converter.packets.stream().allMatch(p -> p.eventFingerprint() != null),
                 "every appended packet carries a fingerprint");

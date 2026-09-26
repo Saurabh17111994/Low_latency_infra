@@ -181,6 +181,14 @@ this, every full-mode row was `TRADE` because the subscription mode was `full`,
 so `WHERE tick_type = 'TRADE'` over-counted by roughly the ratio of snapshots to
 trades.
 
+**Zero-price full snapshots are quotes (CHG-321).** A `full`-mode snapshot whose
+scrip has not traded yet carries `ltp_paise = 0` on the real DataStream (before
+the first trade of the day, illiquid scrips, off-hours). It is classified
+`VALID_NON_TRADE` and stored as `QUOTE`; `ltp`/`ltpc` modes still require a
+positive price (`INVALID_VALUES`). Before this, `full` was always `VALID_TRADE`,
+so `TickPacket.validate` rejected the row and the service quarantined it as an
+`INTERNAL_ERROR` instead of storing a valid quote.
+
 **`protocol_version` is truthful.** It records the feed that produced the row
 (`hft` or `token`); the bridge previously hardcoded `hft` for both, so
 standard-feed rows claimed the HFT protocol. Ingestion accepts both labels and

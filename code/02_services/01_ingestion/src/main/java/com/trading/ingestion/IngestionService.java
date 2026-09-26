@@ -1156,7 +1156,15 @@ public final class IngestionService {
                 validity = ValidityClassification.INVALID_VALUES;
                 validityReason = "ltp_paise <= 0";
             } else if (mode.equals("ltp") || mode.equals("ltpc") || mode.equals("full")) {
-                validity = ValidityClassification.VALID_TRADE;
+                // CHG-321: a full-mode snapshot of a scrip that has not traded yet
+                // carries ltp_paise = 0 on the real DataStream (before the first
+                // trade of the day, illiquid scrips, off-hours). It is a valid
+                // quote row, not an invalid trade: labelling it VALID_TRADE made
+                // TickPacket.validate reject it and quarantine an INTERNAL_ERROR.
+                // ltp/ltpc keep their positive-price requirement above.
+                validity = ev.getLtpPaise() > 0
+                        ? ValidityClassification.VALID_TRADE
+                        : ValidityClassification.VALID_NON_TRADE;
             } else {
                 validity = ValidityClassification.VALID_NON_TRADE;
             }
