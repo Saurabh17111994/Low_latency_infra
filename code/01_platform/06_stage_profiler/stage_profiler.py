@@ -112,7 +112,7 @@ class Stage:
 STAGES: tuple[Stage, ...] = (
     Stage(
         "S1",
-        "fake broker -> Java accept",
+        "broker -> Java accept",
         "raw_table_1 rows: ingest_ts - event_time (bounded sample)",
         "bridge tick counts + tick.throughput delta",
     ),

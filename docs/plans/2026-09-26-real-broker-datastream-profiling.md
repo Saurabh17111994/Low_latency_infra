@@ -2,7 +2,10 @@
 
 **Status:** implementation landed 2026-09-26 (CHG-319 profiler mode +
 CHG-320 native multi-socket; Go suite green, profiler tests 48/48); off-hours
-bring-up dry run PASSED; market-hours measurement pending (next NSE session).
+bring-up dry run PASSED; **off-hours DataStream chain smoke PASSED 2026-09-26**
+on the 14-token active subset (real ticks -> raw -> candles -> feature tables,
+presence every stage, zero classifier errors after CHG-321); market-hours
+full-universe measurement pending (next NSE session).
 **User decisions locked:**
 1. Add `FEED=real` to the stage profiler.
 2. DataStream mode uses the full **2 433**-stock universe
@@ -38,6 +41,16 @@ real trade/quote mix.
   snapshots only** (984/1024 manifest tokens, one stale tick each, ~18.5 h old;
   the 22 NSE `NSETEST` test scrips re-send unchanged values every ~40 s).
   Not a live test feed.
+- Off-hours DataStream is **not uniformly stale** (probes 2026-09-26, 75–110 s
+  windows): most scrips send one last-close snapshot, but the liquid set (SBIN,
+  RELIANCE, INFY, ITC, HDFCBANK, TCS, ICICIBANK, WIPRO, …) streams
+  periodically with fresh LTT and advancing cumulative volume — 14/30 sampled
+  tokens would pass the 5 s freshness gate, and 8/8 active names produced
+  volume-advancing (TRADE-eligible) rows: 195 in 75 s, RELIANCE 81, SBIN 43.
+  So an off-hours DataStream chain test is possible on the active subset; the
+  in-session run remains the authoritative measurement. Evidence
+  `logs/real-broker-probe-20260926/probe7-datastream-acceptable.txt`,
+  `probe8-trades-vs-quotes.txt`, `datastream-active.csv`.
 - No 24x7/demo/paper feed documented or reachable on this account.
 
 ### 2.2 Profiler flow and fake-only pieces (`stage-profile.sh`)
@@ -93,6 +106,12 @@ real trade/quote mix.
   (`IngestionService.java:754-762`). So one manifest file drives both the
   expected instrument set and the actual subscription set.
 - `READINESS_FILE_PATH` marker is written by the service (`:335`).
+- Full-mode snapshots with `ltp_paise = 0` (a scrip that has not traded yet)
+  were classified `VALID_TRADE` and then quarantined as `INTERNAL_ERROR` by
+  `TickPacket.validate`; fixed in **CHG-321** — they are now
+  `VALID_NON_TRADE` and stored as `QUOTE` (candles accumulate only
+  `tick_type = 'TRADE'`, so nothing downstream changes). Found by the real
+  bring-up dry run (`VALID_TRADE requires lastPricePaise > 0`).
 - `ARROW_MAX_EVENT_AGE_MS` (profiler passes 5000) is the staleness/quarantine
   gate (`:1089`) — off-hours stale snapshots are dropped **by design**, so
   off-hours cannot produce S1–S9 samples.
@@ -164,6 +183,13 @@ manifest for the measurement and note the cap; the profiler mode is unaffected.
        `logs/real-broker-probe-20260926/`).
 7. [ ] Market-hours run (next session): smoke 200–300 s → if clean, main 900 s;
        same evidence format; report real p50/p95/p99 beside the fake numbers.
+8. [x] Off-hours DataStream chain smoke 2026-09-26 11:45 IST, 14-token active
+       subset (`datastream-active.csv`, 1 slot): presence PASS every stage —
+       1 590 appends, 1 591 S1 samples, 1 323 post-dedup, 56 closed-candle
+       reads; zero `VALID_TRADE` errors after CHG-321. Evidence
+       `logs/stage-profile-20260926-114535/`. Caveat: off-hours broker stream
+       + second-granular event time — S1/S5 are bounds, S2/S3/S4/S6/S7/S9 are
+       the tight numbers; not comparable with the in-session run.
 
 ## 5. Risks / open issues (need decision or verification)
 
@@ -177,6 +203,7 @@ manifest for the measurement and note the cap; the profiler mode is unaffected.
 | 5 | Real cadence ≈1 Hz/token full mode → throughput not comparable to the 2 Hz fake ladder | report as its own mode; do not rebaseline fake numbers |
 | 6 | `ARROW_HFT_CONNECTIONS=3` under `ARROW_FEED=token` (3 WS from one process) is untested in the profiler shape | dry run + subscription confirmation check |
 | 7 | Safety | market-data only; `EXECUTION_INTENT_ENABLED=false`; no order APIs used |
+| 8 | Real DataStream event time has **1-second resolution** (`LTT` at second granularity, normalized to ms), so S1/S5 absolute latencies are quantized to ~1 s and not comparable with the fake ladder | report S2/S3/S4/S6/S7/S9 for tight latency; keep S1/S5 as bounds; measured off-hours: S2 0 ms, S3 1 ms, S4 4 ms, S6 23 ms, S7 16 ms medians |
 
 ## 6. Out of scope
 
