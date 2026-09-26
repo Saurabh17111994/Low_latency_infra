@@ -384,6 +384,21 @@ public final class IngestionService {
             LOG.warn("ingestion: clock check failed: {} — falling back to wall-clock sanity", e.getMessage());
         }
 
+        // 2b. Bounded Fluss readiness wait (CHG-322). Compose can start ingestion
+        //     while raw_table_1's buckets have no elected leader; without this
+        //     wait the schema step below fails, exits 1, and the on-failure policy
+        //     retries into the same wall (the documented `make up` hazard).
+        //     Retryable-only; fatal fails fast; FLUSS_STARTUP_WAIT_MS=0 disables.
+        if (config.flussStartupWaitMs > 0) {
+            try {
+                FlussStartupReadiness.awaitReady(
+                        config.flussBootstrap, config.rawTableName, config.flussStartupWaitMs);
+            } catch (Exception e) {
+                LOG.error("ingestion: FATAL — Fluss readiness wait failed: {}", e.toString());
+                System.exit(1);
+            }
+        }
+
         // 3. Schema verification — read-only by default; DDL mutation only when
         //    ALLOW_RUNTIME_DDL=true (local development only).
         boolean schemaOk = config.allowRuntimeDdl

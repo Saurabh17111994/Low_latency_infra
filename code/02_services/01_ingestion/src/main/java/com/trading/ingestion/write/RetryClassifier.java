@@ -99,6 +99,23 @@ public final class RetryClassifier {
         return false;
     }
 
+    /**
+     * True when any link of the chain marks the table as absent (CHG-322).
+     *
+     * <p>The startup readiness wait treats a missing table as "not a readiness
+     * problem": the schema step owns create-or-report, so the wait ends and
+     * lets it run. The append path still classifies this FATAL — see
+     * {@link #classify(Throwable)}.
+     */
+    public static boolean isTableMissing(Throwable t) {
+        for (Throwable current = t; current != null; current = current.getCause()) {
+            if (isTableMissing(current.getClass().getName(), current.getMessage())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Recognized transient patterns — the Fluss client usually recovers. */
     private static boolean isRetryable(String name, String msg) {
         // B125: bare contains("Connect") also matched manager/connector
@@ -143,6 +160,23 @@ public final class RetryClassifier {
                 && msg.toLowerCase(java.util.Locale.ROOT).contains("out-of-date");
     }
 
+    /**
+     * Table-absent patterns, shared by {@link #isFatal(String, String)} and
+     * {@link #isTableMissing(Throwable)} (CHG-322).
+     */
+    private static boolean isTableMissing(String name, String msg) {
+        if (name.contains("TableNotExist")
+                || name.contains("NoSuchTable")
+                || name.contains("UnknownTable")) {
+            return true;
+        }
+        if (msg != null) {
+            String lower = msg.toLowerCase(java.util.Locale.ROOT);
+            return lower.contains("table") && lower.contains("not found");
+        }
+        return false;
+    }
+
     /** Fatal patterns — return true if this link of the chain is fatal. */
     private static boolean isFatal(String name, String msg) {
         // B125: interrupts fail at once — a thread told to stop must never
@@ -155,9 +189,7 @@ public final class RetryClassifier {
                 || name.contains("Security")) {
             return true;
         }
-        if (name.contains("TableNotExist")
-                || name.contains("NoSuchTable")
-                || name.contains("UnknownTable")) {
+        if (isTableMissing(name, msg)) {
             return true;
         }
         // R-3xx stale-handle guard: a partition/table-bucket reference that no
@@ -180,9 +212,6 @@ public final class RetryClassifier {
         }
         if (msg != null) {
             String lower = msg.toLowerCase(java.util.Locale.ROOT);
-            if (lower.contains("table") && lower.contains("not found")) {
-                return true;
-            }
             if (lower.contains("unauthorized")
                     || lower.contains("forbidden")
                     || lower.contains("access denied")) {

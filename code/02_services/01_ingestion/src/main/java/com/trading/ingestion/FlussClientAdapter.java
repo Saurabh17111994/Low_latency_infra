@@ -153,7 +153,8 @@ final class FlussClientAdapter {
         }
     }
 
-    private static TablePath parseTablePath(String tablePath) {
+    // CHG-322: package-private so FlussStartupReadiness reuses the same path parsing.
+    static TablePath parseTablePath(String tablePath) {
         // P1-221: reject bad input with a clear error instead of an NPE
         // (null) or obscure downstream failure (multi-dot / empty parts).
         if (tablePath == null || tablePath.isBlank()) {

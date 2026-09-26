@@ -88,6 +88,7 @@ The pipe is the kernel's stdin/stdout — not a message queue, not a network hop
 | `CLOCK_OFFSET_LIMIT_MS` | Yes | 2000 ms (2s) code default (T10 NTP 2s gate); configurable via env; drift >2s → not-ready, future ticks >2s → quarantine per slot |
 | `DEPLOY_ENV` | No | Deployment environment (default `dev`); `prod` rejects `INGESTION_ALLOW_DEGRADED=true` and `ARROW_HFT_MULTI_CONNECTION_APPROVED=true` |
 | `ALLOW_RUNTIME_DDL` | No | `true` = DdlBootstrap may create missing tables at startup (local dev); default `false` = verify-only |
+| `FLUSS_STARTUP_WAIT_MS` | No | Bounded startup wait (ms, default 180000, range 0-600000) before schema verification: retries a read-only raw-table metadata probe while Fluss elects leaders (CHG-322); `0` disables the wait and restores the fail-fast path |
 | `CLOCK_CHECK_REQUIRED` | No | `true` = clock offset outside `CLOCK_OFFSET_LIMIT_MS` is FATAL at startup (exit 1); default `false` |
 | `UNCERTAINTY_JOURNAL_PATH` | No | Writable journal path (default `~/.local/state/trading-platform/ingestion/uncertainty-journal.jsonl`; container default `/data/ingestion/uncertainty-journal.jsonl`) |
 | `ACCOUNT_SCOPE_ID` | No | Account scope stamped on safety-halt evidence rows (default `QP3796`) |
@@ -114,13 +115,14 @@ connection) have no effect.
 
 1. Validate configuration and exact versions.
 2. Initialize telemetry without logging secrets.
-3. Connect to Fluss and validate required table/schema version.
-4. Load exactly one approved instrument manifest snapshot.
-5. Validate every active row and routing field.
-6. Validate the Go arrow-bridge binary exists and is runnable; a missing or non-runnable binary is a FATAL startup error (clear message, non-zero exit).
-7. Start arrow-bridge as subprocess with configured auth env vars.
-8. Java sniffs bridge's stdout (proto frames only).
-9. Enter READY only after recent successful Fluss append acknowledgement and acceptable clock offset.
+3. Bounded Fluss readiness wait (CHG-322): retry a read-only raw-table metadata probe while Fluss elects leaders (retryable-only per `RetryClassifier`, fail-closed, bounded by `FLUSS_STARTUP_WAIT_MS`; a missing table is left to the schema step).
+4. Connect to Fluss and validate required table/schema version.
+5. Load exactly one approved instrument manifest snapshot.
+6. Validate every active row and routing field.
+7. Validate the Go arrow-bridge binary exists and is runnable; a missing or non-runnable binary is a FATAL startup error (clear message, non-zero exit).
+8. Start arrow-bridge as subprocess with configured auth env vars.
+9. Java sniffs bridge's stdout (proto frames only).
+10. Enter READY only after recent successful Fluss append acknowledgement and acceptable clock offset.
 
 ### Packet processing algorithm
 

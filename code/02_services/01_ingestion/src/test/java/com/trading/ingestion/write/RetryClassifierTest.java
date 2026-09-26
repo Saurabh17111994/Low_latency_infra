@@ -1,6 +1,8 @@
 package com.trading.ingestion.write;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.trading.ingestion.write.RetryClassifier.Classification;
 import java.util.concurrent.ExecutionException;
@@ -210,5 +212,41 @@ class RetryClassifierTest {
                 "Partition value '20260913' is out-of-date.",
                 new AuthenticationException("invalid credentials"));
         assertEquals(Classification.FATAL, RetryClassifier.classify(t));
+    }
+
+    // ---- CHG-322: table-absent helper for the startup readiness wait ----
+
+    @Test
+    @DisplayName("CHG-322: isTableMissing sees the TableNotExist class shape")
+    void isTableMissingSeesClass() {
+        class FakeTableNotExistException extends RuntimeException {}
+        assertTrue(RetryClassifier.isTableMissing(new FakeTableNotExistException()));
+    }
+
+    @Test
+    @DisplayName("CHG-322: isTableMissing sees the 'table ... not found' message")
+    void isTableMissingSeesMessage() {
+        assertTrue(RetryClassifier.isTableMissing(
+                new RuntimeException("table default.raw_table_1 not found")));
+    }
+
+    @Test
+    @DisplayName("CHG-322: isTableMissing walks the cause chain (typed class + message shapes)")
+    void isTableMissingWalksChain() {
+        class FakeTableNotExistException extends RuntimeException {}
+        assertTrue(RetryClassifier.isTableMissing(
+                new ExecutionException("getTableInfo failed", new FakeTableNotExistException())));
+        assertTrue(RetryClassifier.isTableMissing(
+                new ExecutionException("getTableInfo failed",
+                        new RuntimeException("table default.raw_table_1 not found"))));
+    }
+
+    @Test
+    @DisplayName("CHG-322: isTableMissing is false for auth and for retryable shapes")
+    void isTableMissingStaysNarrow() {
+        assertFalse(RetryClassifier.isTableMissing(
+                new AuthenticationException("invalid credentials")));
+        assertFalse(RetryClassifier.isTableMissing(
+                new RuntimeException("leader not available, re-electing")));
     }
 }

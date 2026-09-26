@@ -49,6 +49,8 @@ public final class IngestionConfig {
     public final String arrowInstrumentTokens;
     public final String flussBootstrap;
     public final String rawTableName;
+    /** CHG-322: bounded startup wait for Fluss readiness before schema verification (ms; 0 = disabled). */
+    public final int flussStartupWaitMs;
     public final int maxBatchRecords;
     public final int maxBatchWaitMs;
     /** Fluss AppendWriter batch linger (O-2 RESOLVED: 1ms). */
@@ -111,6 +113,7 @@ public final class IngestionConfig {
         this.arrowInstrumentTokens = b.arrowInstrumentTokens;
         this.flussBootstrap = b.flussBootstrap;
         this.rawTableName = b.rawTableName;
+        this.flussStartupWaitMs = b.flussStartupWaitMs;
         this.maxBatchRecords = b.maxBatchRecords;
         this.maxBatchWaitMs = b.maxBatchWaitMs;
         this.flussWriterBatchTimeoutMs = b.flussWriterBatchTimeoutMs;
@@ -203,6 +206,11 @@ public final class IngestionConfig {
         // ---- Fluss ----
         b.flussBootstrap = required(env, "FLUSS_BOOTSTRAP", errors);
         b.rawTableName = required(env, "RAW_TABLE_NAME", errors);
+        // CHG-322: bounded startup readiness wait — Compose can start ingestion
+        // into the Fluss no-leader window (the `make up` hazard). 0 disables the
+        // wait and restores the pre-CHG-322 fail-fast path.
+        b.flussStartupWaitMs = intRange(
+                env, "FLUSS_STARTUP_WAIT_MS", 180_000, 0, 600_000, errors);
 
         // ---- Batching (max bounds; app-level batching stays off at the
         // defaults — the Fluss client owns transport-level coalescing) ----
@@ -343,6 +351,7 @@ public final class IngestionConfig {
         m.put("ARROW_INSTRUMENT_TOKENS", arrowInstrumentTokens.isBlank() ? "(synthetic)" : "***");
         m.put("FLUSS_BOOTSTRAP", flussBootstrap);
         m.put("RAW_TABLE_NAME", rawTableName);
+        m.put("FLUSS_STARTUP_WAIT_MS", flussStartupWaitMs);
         m.put("INGESTION_MAX_BATCH_RECORDS", maxBatchRecords);
         m.put("INGESTION_MAX_BATCH_WAIT_MS", maxBatchWaitMs);
         m.put("FLUSS_WRITER_BATCH_TIMEOUT_MS", flussWriterBatchTimeoutMs);
@@ -657,6 +666,7 @@ public final class IngestionConfig {
         String arrowInstrumentTokens = "";
         String flussBootstrap = "fluss-coordinator:9123";
         String rawTableName = "raw_table_1";
+        int flussStartupWaitMs = 180_000; // CHG-322: bounded Fluss readiness wait
         int maxBatchRecords = 1, maxBatchWaitMs;
         int maxPendingRecords = (int) MAX_PENDING_RECORDS;
         long maxPendingBytes = MAX_PENDING_BYTES; // 192 MiB — T2 3k default
