@@ -441,6 +441,20 @@ public final class IngestionService {
                 manifestResult.fingerprint().substring(0, Math.min(12, manifestResult.fingerprint().length())));
         List<Instrument> instruments = manifestResult.instruments();
 
+        // 4b. Subscription capacity / multi-socket policy preflight (CHG-323).
+        //     Mirrors the Go bridge gates (BuildSubscriptionPlan capacity;
+        //     multiSocketAllowedByPolicy, CHG-320) so a config the bridge would
+        //     refuse fails here with the effective numbers, before the bridge
+        //     starts. The bridge gates stay as the last line of defense.
+        java.util.Optional<String> subscriptionViolation = SubscriptionPreflight.violation(
+                instruments.size(), config.arrowHftConnections,
+                config.arrowHftMaxTokensPerConnection, config.production,
+                config.arrowHftMultiConnectionApproved);
+        if (subscriptionViolation.isPresent()) {
+            LOG.error("ingestion: FATAL — {}", subscriptionViolation.get());
+            System.exit(1);
+        }
+
         // 5. Create the service
         IngestionService service = new IngestionService(
                 instanceId, instruments, converter, config, clock);

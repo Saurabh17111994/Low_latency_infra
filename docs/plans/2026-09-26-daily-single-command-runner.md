@@ -71,8 +71,10 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
   Landed CHG-322 (2026-09-26): 9 new + 4 classifier tests, `make test` green
   (ingestion 508), static-check + docs-audit green; the compose-recreate drill
   runs with P4-3.
-- [ ] **P1-2** — ingestion: capacity/policy check surfaced at start with a
+- [x] **P1-2** — ingestion: capacity/policy check surfaced at start with a
   precise operator message (tokens vs sockets, approval flag, prod policy).
+  Landed CHG-323 (2026-09-26): `SubscriptionPreflight` + 8 tests, `make test`
+  green (ingestion 516), static-check + docs-audit green.
 
 #### P2 — Config truth
 
@@ -111,11 +113,11 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | D — Operator decisions (decided 2026-09-26, all recommended) | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
-| P1 — Platform start-safety (no decision needed) | 2 | 1 | 0 | 1 | 0 | 0 | 0 |
+| P1 — Platform start-safety (no decision needed) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | P2 — Config truth | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | P3 — Orchestrator interface | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | P4 — Ops integration and validation | 5 | 0 | 0 | 3 | 1 | 0 | 1 |
-| **Total** | **19** | **7** | **0** | **10** | **1** | **0** | **1** |
+| **Total** | **19** | **8** | **0** | **9** | **1** | **0** | **1** |
 
 ## Overview — the final product
 

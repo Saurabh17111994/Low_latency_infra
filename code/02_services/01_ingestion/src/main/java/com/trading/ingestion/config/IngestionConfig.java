@@ -100,6 +100,8 @@ public final class IngestionConfig {
     public final int arrowHftAuthRefreshAttempts;
     public final int arrowHftMinActiveSlots;
     public final boolean arrowHftMultiConnectionApproved;
+    /** CHG-323: DEPLOYMENT_ENV parsed as production (drives the single-socket policy). */
+    public final boolean production;
     public final boolean ingestionAllowDegraded;
 
     private IngestionConfig(Builder b) {
@@ -145,6 +147,7 @@ public final class IngestionConfig {
         this.arrowHftAuthRefreshAttempts = b.arrowHftAuthRefreshAttempts;
         this.arrowHftMinActiveSlots = b.arrowHftMinActiveSlots;
         this.arrowHftMultiConnectionApproved = b.arrowHftMultiConnectionApproved;
+        this.production = b.production;
         this.ingestionAllowDegraded = b.ingestionAllowDegraded;
     }
 
@@ -300,6 +303,7 @@ public final class IngestionConfig {
         }
         boolean production = "prod".equalsIgnoreCase(deployEnv)
                 || "production".equalsIgnoreCase(deployEnv);
+        b.production = production;
         if (production) {
             if (b.ingestionAllowDegraded) {
                 errors.add("INGESTION_ALLOW_DEGRADED must be false in production");
@@ -692,6 +696,7 @@ public final class IngestionConfig {
         int arrowHftAuthRefreshAttempts = 3;
         int arrowHftMinActiveSlots = 1;
         boolean arrowHftMultiConnectionApproved;
+        boolean production;
         boolean ingestionAllowDegraded;
 
         IngestionConfig build() {

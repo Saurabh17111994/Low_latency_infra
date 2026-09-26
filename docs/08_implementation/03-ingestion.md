@@ -60,7 +60,7 @@ The pipe is the kernel's stdin/stdout — not a message queue, not a network hop
 | `ARROW_TICK_COUNTS` | No | Per-token emitted-tick counters for count-based losslessness evidence (ING-TCP-001); value = stderr report interval seconds (default 60); unset = off |
 | `ARROW_MAX_EVENT_AGE_MS` | Yes | Max age of a broker tick relative to receive time before it is quarantined as STALE (ms); positive long, no default — must be set |
 | `ARROW_MAX_FUTURE_EVENT_SKEW_MS` | Yes | Max future skew of a broker tick relative to receive time before it is quarantined as FUTURE (ms); positive long, no default — must be set |
-| `ARROW_HFT_CONNECTIONS` | No | HFT socket count, `1`..`3` (default `1`); values `> 1` require `ARROW_HFT_MULTI_CONNECTION_APPROVED=true` and a non-production `DEPLOYMENT_ENV` (both Java and Go enforce; blank/prod fail closed — CHG-320) |
+| `ARROW_HFT_CONNECTIONS` | No | HFT socket count, `1`..`3` (default `1`); values `> 1` require `ARROW_HFT_MULTI_CONNECTION_APPROVED=true` and a non-production `DEPLOYMENT_ENV` (both Java and Go enforce; blank/prod fail closed — CHG-320); the startup preflight adds the effective-manifest capacity check before the bridge starts (CHG-323) |
 | `ARROW_HFT_MAX_TOKENS_PER_CONNECTION` | No | Max instruments per connection — if set, must equal `1024` (pinned) |
 | `ARROW_HFT_MAX_TOKENS_PER_REQUEST` | No | Max instruments per subscription request — if set, must equal `512` (pinned) |
 | `ARROW_HFT_HEARTBEAT_SECONDS` | No | Heartbeat interval — if set, must equal `3` (pinned) |
@@ -71,7 +71,7 @@ The pipe is the kernel's stdin/stdout — not a message queue, not a network hop
 | `ARROW_HFT_AUTH_REFRESH_ATTEMPTS` | No | Auth refresh retries — if set, must equal `3` (pinned) |
 | `ARROW_HFT_MIN_ACTIVE_SLOTS` | No | Minimum active slots before not-ready — if set, must equal `1` (pinned) |
 | `ARROW_FEED` | No | Feed selection for the Go bridge: `hft` (default) drives the HFT stream; `token` drives the standard token market-data stream (`ltp`/`ltpc`/`quote`/`full`). Case-insensitive and space-trimmed; anything else is treated as `hft` |
-| `ARROW_HFT_MULTI_CONNECTION_APPROVED` | No | Multi-socket approval flag (default false); rejected in `prod` |
+| `ARROW_HFT_MULTI_CONNECTION_APPROVED` | No | Multi-socket approval flag (default false); rejected in `prod`; the startup preflight requires it for `ARROW_HFT_CONNECTIONS > 1` (CHG-323) |
 | `INGESTION_ALLOW_DEGRADED` | No | Degraded-mode approval flag (default false); rejected in `prod` |
 | `GO_ARROW_SDK_VERSION` | No | Pinned go-arrow SDK version tag `v0.0.0-20260622-7cce1630`; if unset the pinned version is used (warning logged) |
 | `FLUSS_BOOTSTRAP` | Yes | Pinned environment endpoint (e.g. fluss-coordinator:9123) |
@@ -118,11 +118,12 @@ connection) have no effect.
 3. Bounded Fluss readiness wait (CHG-322): retry a read-only raw-table metadata probe while Fluss elects leaders (retryable-only per `RetryClassifier`, fail-closed, bounded by `FLUSS_STARTUP_WAIT_MS`; a missing table is left to the schema step).
 4. Connect to Fluss and validate required table/schema version.
 5. Load exactly one approved instrument manifest snapshot.
-6. Validate every active row and routing field.
-7. Validate the Go arrow-bridge binary exists and is runnable; a missing or non-runnable binary is a FATAL startup error (clear message, non-zero exit).
-8. Start arrow-bridge as subprocess with configured auth env vars.
-9. Java sniffs bridge's stdout (proto frames only).
-10. Enter READY only after recent successful Fluss append acknowledgement and acceptable clock offset.
+6. Subscription preflight (CHG-323): the effective manifest token count must fit `ARROW_HFT_CONNECTIONS × ARROW_HFT_MAX_TOKENS_PER_CONNECTION`, and more than one socket requires `ARROW_HFT_MULTI_CONNECTION_APPROVED=true` outside production; a violation is FATAL with the effective numbers before the bridge starts.
+7. Validate every active row and routing field.
+8. Validate the Go arrow-bridge binary exists and is runnable; a missing or non-runnable binary is a FATAL startup error (clear message, non-zero exit).
+9. Start arrow-bridge as subprocess with configured auth env vars.
+10. Java sniffs bridge's stdout (proto frames only).
+11. Enter READY only after recent successful Fluss append acknowledgement and acceptable clock offset.
 
 ### Packet processing algorithm
 
@@ -214,6 +215,7 @@ still quarantines anything else as `UNKNOWN_VERSION` (`INVALID_SCHEMA`).
 **Multi-socket policy (CHG-320, 2026-09-26 — approval-based, native):**
 
 - `go-bridge/main.go` `runHFT`: extra slots are refused unless `multiSocketAllowedByPolicy()` approves them — `ARROW_HFT_MULTI_CONNECTION_APPROVED=true` AND a non-production `DEPLOYMENT_ENV`/`DEPLOY_ENV` (blank fails closed; `prod`/`production` refuse). Mirrors the Java `IngestionConfig` gate; refusal keeps the original FATAL message and the `single_socket_policy_violation` disconnect emit, and `BuildSubscriptionPlan`'s `len(tokens) <= slots*1024` remains the hard capacity bound.
+- Java startup preflight (CHG-323, 2026-09-26): `IngestionService.main` step 4b runs `SubscriptionPreflight.violation(effectiveTokens, ARROW_HFT_CONNECTIONS, ARROW_HFT_MAX_TOKENS_PER_CONNECTION, production, approved)` before the bridge starts. Production + multi-socket, dev multi-socket without approval, or `tokens > connections × 1024` (e.g. the 2 433-row manifest on one socket) fail FATAL with the effective numbers and the fix. The Go gates stay the last line of defense; the preflight only moves the failure earlier and makes the message actionable.
 - **Do NOT change**: the Java reader, `RawTickWriter`, `FlussClientAdapter`, table contract, or fingerprints. All sockets funnel to the same writer and same `raw_table_1`; dedup stays as-is (fingerprint already includes connection scope).
 
 **Wiring checklist (state after CHG-320):**
