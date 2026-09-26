@@ -60,7 +60,7 @@ The pipe is the kernel's stdin/stdout — not a message queue, not a network hop
 | `ARROW_TICK_COUNTS` | No | Per-token emitted-tick counters for count-based losslessness evidence (ING-TCP-001); value = stderr report interval seconds (default 60); unset = off |
 | `ARROW_MAX_EVENT_AGE_MS` | Yes | Max age of a broker tick relative to receive time before it is quarantined as STALE (ms); positive long, no default — must be set |
 | `ARROW_MAX_FUTURE_EVENT_SKEW_MS` | Yes | Max future skew of a broker tick relative to receive time before it is quarantined as FUTURE (ms); positive long, no default — must be set |
-| `ARROW_HFT_CONNECTIONS` | No | HFT socket count — if set, must equal `1` (pinned) |
+| `ARROW_HFT_CONNECTIONS` | No | HFT socket count, `1`..`3` (default `1`); values `> 1` require `ARROW_HFT_MULTI_CONNECTION_APPROVED=true` and a non-production `DEPLOYMENT_ENV` (both Java and Go enforce; blank/prod fail closed — CHG-320) |
 | `ARROW_HFT_MAX_TOKENS_PER_CONNECTION` | No | Max instruments per connection — if set, must equal `1024` (pinned) |
 | `ARROW_HFT_MAX_TOKENS_PER_REQUEST` | No | Max instruments per subscription request — if set, must equal `512` (pinned) |
 | `ARROW_HFT_HEARTBEAT_SECONDS` | No | Heartbeat interval — if set, must equal `3` (pinned) |
@@ -201,16 +201,16 @@ still quarantines anything else as `UNKNOWN_VERSION` (`INVALID_SCHEMA`).
 | One raw table | All slots → one proto stream (T6) → one `RawTickWriter` → one `raw_table_1` | Java `IngestionService` |
 | Per-slot fidelity | `slot_id`/`connection_id`/`connection_epoch` on every event | bridge events |
 
-**The single deliberate guard (the only change required to enable 3 sockets):**
+**Multi-socket policy (CHG-320, 2026-09-26 — approval-based, native):**
 
-- `go-bridge/main.go` `runHFT`: `if len(plan.Slots) != 1` → `FATAL: approved for exactly one Arrow HFT socket`. This is a **policy gate**, not a design gap. Enabling 3 sockets means relaxing it to allow `len(plan.Slots) <= MaxHFTConnections` (and honoring the existing `ARROW_HFT_MULTI_CONNECTION_APPROVED` flag).
+- `go-bridge/main.go` `runHFT`: extra slots are refused unless `multiSocketAllowedByPolicy()` approves them — `ARROW_HFT_MULTI_CONNECTION_APPROVED=true` AND a non-production `DEPLOYMENT_ENV`/`DEPLOY_ENV` (blank fails closed; `prod`/`production` refuse). Mirrors the Java `IngestionConfig` gate; refusal keeps the original FATAL message and the `single_socket_policy_violation` disconnect emit, and `BuildSubscriptionPlan`'s `len(tokens) <= slots*1024` remains the hard capacity bound.
 - **Do NOT change**: the Java reader, `RawTickWriter`, `FlussClientAdapter`, table contract, or fingerprints. All sockets funnel to the same writer and same `raw_table_1`; dedup stays as-is (fingerprint already includes connection scope).
 
-**Wiring checklist when implementing (governed):**
+**Wiring checklist (state after CHG-320):**
 
 1. Build a 3-slot `SubscriptionPlan` (token slice of the full approved manifest across `Slots`); verify the plan fingerprint matches the manifest router.
-2. Set `ARROW_HFT_CONNECTIONS=3` and `ARROW_HFT_MULTI_CONNECTION_APPROVED=true`; confirm `DEPLOY_ENV`/policy accepts it (currently rejected in `prod`).
-3. Relax the single-socket gate only after approval; keep the FATAL behavior for `len(Slots) > MaxHFTConnections` as a hard safety bound.
+2. Set `ARROW_HFT_CONNECTIONS=3` and `ARROW_HFT_MULTI_CONNECTION_APPROVED=true`; `DEPLOYMENT_ENV=dev` accepts it (`prod`/`production` still refuse; blank fails closed).
+3. Gate is approval-based since CHG-320; `len(Slots) > MaxHFTConnections` stays a hard plan error.
 4. Confirm per-slot epoch/slot_id routing so duplicates across sockets are still deduped correctly (they are — fingerprint + scope).
 5. Re-run the throughput/memory probes at the 3000-instrument, 3-socket envelope before any live go-live.
 

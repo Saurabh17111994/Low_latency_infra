@@ -318,18 +318,22 @@ func runHFT(ctx context.Context, cancel context.CancelFunc, client *arrow.Client
 		cancel()
 		return
 	}
-	// Production policy: exactly one Arrow HFT socket is approved for this
-	// phase. Multi-slot is exercised by tests (runHFTSupervisor) and the
-	// deferred multi-connection phase; here we refuse to start.
+	// Deployment policy (CHG-320): one socket is always allowed; extra sockets
+	// require the documented approval — ARROW_HFT_MULTI_CONNECTION_APPROVED=true
+	// in a non-production deployment — mirroring the Java IngestionConfig gate.
+	// Blank/unknown deployments fail closed; production stays single-socket.
 	if len(plan.Slots) != 1 {
-		slot := plan.Slots[0]
-		logf("FATAL: this deployment is approved for exactly one Arrow HFT socket; planned=%d", len(plan.Slots))
-		// R-177: a deployment/policy violation is NOT a credential failure —
-		// emit disconnect (non-auth vocabulary) so alerting keyed on
-		// auth_failure does not fire for a non-credential condition.
-		_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "disconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: 1, State: string(SlotTerminal), Reason: "single_socket_policy_violation", ReceivedTsMs: time.Now().UnixMilli()})
-		cancel()
-		return
+		if ok, reason := multiSocketAllowedByPolicy(); !ok {
+			slot := plan.Slots[0]
+			logf("FATAL: this deployment is approved for exactly one Arrow HFT socket; planned=%d (%s)", len(plan.Slots), reason)
+			// R-177: a deployment/policy violation is NOT a credential failure —
+			// emit disconnect (non-auth vocabulary) so alerting keyed on
+			// auth_failure does not fire for a non-credential condition.
+			_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "disconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: 1, State: string(SlotTerminal), Reason: "single_socket_policy_violation", ReceivedTsMs: time.Now().UnixMilli()})
+			cancel()
+			return
+		}
+		logf("multi-socket approved: slots=%d", len(plan.Slots))
 	}
 	runHFTSupervisor(ctx, client, plan, latencyMs, responseTimeout, refreshAuth, logf)
 }
@@ -898,6 +902,34 @@ func hftRange(logf func(string, ...any), key string, defVal, min, max int) int {
 		os.Exit(exitFatalStart)
 	}
 	return n
+}
+
+// multiSocketAllowedByPolicy mirrors the Java IngestionConfig gate for more
+// than one Arrow socket (CHG-320): an explicit approval flag AND a
+// non-production deployment. Blank or unknown deployments fail CLOSED, so an
+// unlabeled process never opens extra sockets. Single-socket runs never
+// consult this.
+func multiSocketAllowedByPolicy() (bool, string) {
+	raw := strings.TrimSpace(os.Getenv("ARROW_HFT_MULTI_CONNECTION_APPROVED"))
+	switch strings.ToLower(raw) {
+	case "true":
+		// approved — still needs a non-production deployment below
+	case "false", "":
+		return false, "set ARROW_HFT_MULTI_CONNECTION_APPROVED=true to approve extra sockets"
+	default:
+		return false, "ARROW_HFT_MULTI_CONNECTION_APPROVED must be true or false"
+	}
+	deploy := strings.TrimSpace(os.Getenv("DEPLOYMENT_ENV"))
+	if deploy == "" {
+		deploy = strings.TrimSpace(os.Getenv("DEPLOY_ENV"))
+	}
+	switch strings.ToLower(deploy) {
+	case "prod", "production":
+		return false, "production deployments stay single-socket"
+	case "":
+		return false, "DEPLOYMENT_ENV is required for multi-socket approval (blank is fail-closed)"
+	}
+	return true, ""
 }
 
 func parseTokensEnv(key string) []int32 {
