@@ -141,6 +141,16 @@ class RolloutHarness(unittest.TestCase):
         return subprocess.run(["bash", "-c", cmd], env=self.env, capture_output=True,
                               text=True, timeout=timeout)
 
+    # --- CHG-325: fresh-JM restore must create the jar dir before compose cp ---
+    # The 2026-09-26 daily-runner dry run found `compose cp` failing on a
+    # freshly created JobManager: /opt/flink/jobs existed only because earlier
+    # submits had created it. Restore after a real stop/start never deployed.
+    def test_ensure_jar_dir_mkdirs_before_copy(self):
+        r = self.run_helper('ensure_jar_dir flink-jobmanager /opt/flink/jobs/compute.jar')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        calls = (self.t / "docker.calls").read_text()
+        self.assertIn("exec -T flink-jobmanager mkdir -p /opt/flink/jobs", calls)
+
     # --- P6-167: job_state reads top-level .state, not a vertex state ---
     def test_job_state_reads_top_level_state(self):
         job = {"jid": "b" * 32, "name": "signal-job-compute", "state": "RUNNING",

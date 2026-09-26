@@ -232,6 +232,18 @@ compose() { # docker compose wrapper honoring file/project overrides
 	fi
 }
 
+# CHG-325: a freshly created JobManager has no JAR directory -- it existed in
+# long-lived containers only because earlier submits created it (pipeline-lib
+# does `mkdir -p /opt/flink/jobs` before its own copy). Without this, the
+# restore path after a real stop/start died at `compose cp` and the SignalJob
+# was never deployed (found by the 2026-09-26 daily-runner dry run).
+ensure_jar_dir() { # <service> <jar path in container>
+	local service="$1" jar_path="$2" dir
+	dir="$(dirname "$jar_path")"
+	compose exec -T "$service" mkdir -p "$dir" \
+		|| die "could not create $dir in $service (required before compose cp)"
+}
+
 # Prometheus sampling of the dedup evidence (best-effort). Prints a single
 # line: firsts_cumulative first_total dup_total (empty when unavailable).
 # 2026-08-28 gauge remediation: the gauge formerly named
@@ -450,6 +462,7 @@ if [ "$DRY_RUN" = "1" ]; then
 	exit 0
 fi
 
+ensure_jar_dir flink-jobmanager "$JAR_IN_CONTAINER"
 compose cp "$JAR" "flink-jobmanager:$JAR_IN_CONTAINER"
 log "jar copied to flink-jobmanager:$JAR_IN_CONTAINER"
 
