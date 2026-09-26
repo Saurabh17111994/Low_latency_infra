@@ -78,30 +78,54 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
 
 #### P2 — Config truth
 
-- [ ] **P2-1** — universe/socket daily contract mapping `full|approved` onto the
+- [x] **P2-1** — universe/socket daily contract mapping `full|approved` onto the
   existing env knobs, effective-manifest verification, production policy
-  untouched (CHG-320).
-- [ ] **P2-2** — execution-posture guard: runner never sets live flags; refuses
+  untouched (CHG-320). Landed CHG-324 (2026-09-26): `day_run.resolve_universe`
+  expands the selection, the compose ingestion service passes
+  `ARROW_HFT_MULTI_CONNECTION_APPROVED` through, and the board's I7 compares
+  the **effective** manifest (the JVM's own "manifest loaded" log line) with
+  the contract.
+- [x] **P2-2** — execution-posture guard: runner never sets live flags; refuses
   the execution profile if any enablement flag is present on a dev host.
+  Landed CHG-324: `posture_violations` (shell + .env precedence) refuses
+  `start` (exit 3) and the I6/I7 predicates audit the running containers.
 
 #### P3 — Orchestrator interface
 
-- [ ] **P3-1** — `code/01_platform/04_scripts/day-run.sh start|status|stop`:
-  sequencing, idempotency, singleton guard, fail-closed exit codes.
-- [ ] **P3-2** — verification predicates + status board (pure functions +
-  read-only probes; session-aware data predicate).
-- [ ] **P3-3** — tests in `code/01_platform/04_scripts/tests/` (auto-discovered
-  by the gate; docker/flink CLIs stubbed).
-- [ ] **P3-4** — `make day` thin target (interface only, no logic).
+- [x] **P3-1** — `code/01_platform/04_scripts/day-run.sh start|status|stop`:
+  sequencing, idempotency, singleton guard, fail-closed exit codes. Landed
+  CHG-324: `day-run.sh` + `day_run.py` (start ordering up -> ready -> SignalJob
+  -> execution profile -> verify; stop preserves state; `ALLOW_FRESH` gate).
+- [x] **P3-2** — verification predicates + status board (pure functions +
+  read-only probes; session-aware data predicate). Landed CHG-324: I1-I9
+  evaluator over a facts snapshot; probes are compose ps/config, Flink REST,
+  the maintained `FlussReadLagProbe` (passive listOffsets), JM container state
+  listing, and bounded log scans; off-session I3/I4 report PENDING.
+- [x] **P3-3** — tests in `code/01_platform/04_scripts/tests/` (auto-discovered
+  by the gate; docker/flink CLIs stubbed). Landed CHG-324: 29 tests in
+  `test_day_run.py` with module-level Runner/Collector fakes (no stack needed).
+- [x] **P3-4** — `make day` thin target (interface only, no logic). Landed
+  CHG-324: prints `$(COMPOSE)` into `DAY_COMPOSE` and execs `day-run.sh`.
 
 #### P4 — Ops integration and validation
 
-- [ ] **P4-1** — runbook: daily path + failure→native-recovery playbook
-  (each failing invariant maps to an existing recovery action).
-- [ ] **P4-2** — dossier/doc updates (local-compose profile, operational
-  strategy) with `make docs-audit` green.
-- [ ] **P4-3** — off-hours dry run on the local stack: full chain via the single
-  command; rerun = no-op; recovery demo; evidence under `logs/`.
+- [x] **P4-1** — runbook: daily path + failure→native-recovery playbook
+  (each failing invariant maps to an existing recovery action). Landed CHG-324:
+  `docs/06_operations/01-runbooks.md` §Daily single-command runner (contract,
+  invariant→recovery table, first-morning procedure).
+- [x] **P4-2** — dossier/doc updates (local-compose profile, operational
+  strategy) with `make docs-audit` green. Landed CHG-324: execution-core
+  local-compose note, ingestion dossier runbook pointer; docs-audit green.
+- [x] **P4-3** — off-hours dry run on the local stack: full chain via the single
+  command; rerun = no-op; recovery demo; evidence under `logs/`. Landed
+  CHG-324 (2026-09-26), evidence `logs/day/dry-run-20260926/`: `start`
+  PENDING 7/9 exit 0 (15/15 services, effective manifest 2433, execution
+  HALTED); rerun kept the same SignalJob id; `stop` preserved checkpoints; the
+  post-stop restore reached RUNNING + checkpoint (needs CHG-325). Findings:
+  stale-image preflight gate, Flink checkpoint payload key, fresh-JM jar dir
+  (CHG-325), and an ingestion write-path startup flap (zero-ack then FATAL
+  "Failed to update metadata", self-healing via restart policy) recorded in §5
+  as an operator decision.
 - [L] **P4-4** — Monday in-session validation: real feed, decided universe,
   the command as the sole entry point; evidence + comparison to the profiling
   ladder.
@@ -114,10 +138,10 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
 |---|---|---|---|---|---|---|---|
 | D — Operator decisions (decided 2026-09-26, all recommended) | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 | P1 — Platform start-safety (no decision needed) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| P2 — Config truth | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
-| P3 — Orchestrator interface | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| P4 — Ops integration and validation | 5 | 0 | 0 | 3 | 1 | 0 | 1 |
-| **Total** | **19** | **8** | **0** | **9** | **1** | **0** | **1** |
+| P2 — Config truth | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+| P3 — Orchestrator interface | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
+| P4 — Ops integration and validation | 5 | 3 | 0 | 0 | 1 | 0 | 1 |
+| **Total** | **19** | **17** | **0** | **0** | **1** | **0** | **1** |
 
 ## Overview — the final product
 
@@ -337,6 +361,14 @@ action from the runbook.
 - Fresh SignalJob submit without state can duplicate/count-again; the runner's
   default is refuse-and-report (P3-1).
 - Pre-session start must not look broken; PENDING semantics are explicit (D5).
+- **Startup write-path flap (found 2026-09-26, P4-3):** on a fresh Fluss
+  recreate, ingestion's first appends hit the zero-ack watchdog (~18 s) and
+  then `FATAL append: Failed to update metadata`; the container restart policy
+  revives it and the feed recovers in ~30 s, but I8 stays red for the
+  15-minute log window. Recommendation (operator decision before
+  implementing): a bounded **write-path startup grace** -- classify/retry
+  metadata-class append failures for a bounded window after start, mirroring
+  CHG-322's read-readiness wait -- as a CHG-326-class change.
 - Next free CHG numbers are assigned at land time; the plan names classes, not
   fixed numbers.
 

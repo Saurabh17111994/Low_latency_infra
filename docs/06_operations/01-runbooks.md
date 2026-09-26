@@ -88,6 +88,68 @@ Existing positions may remain monitored, but no new money-moving call is permitt
     Trading is live only when `GET /healthz` reports `gate_state: ENABLED` **and** `trading_ready: true`.
 11. Transition to `ENABLED` only after that approval.
 
+## Daily single-command runner (`make day`)
+
+The daily path is one command with three verbs (plan
+`docs/plans/2026-09-26-daily-single-command-runner.md`, CHG-324):
+
+```bash
+make day ARGS="start"     # preflight -> stack -> SignalJob -> execution -> verify -> board
+make day ARGS="status"    # read-only board, safe to run any time
+make day ARGS="stop"      # graceful stop; checkpoints/volumes preserved
+```
+
+- **Universe (dev).** `start` defaults to `UNIVERSE=full` — the unfiltered
+  2 433-row manifest on `ARROW_HFT_CONNECTIONS=3` with the dev-only
+  `ARROW_HFT_MULTI_CONNECTION_APPROVED=true` (CHG-320). `UNIVERSE=approved`
+  selects the N=1 1 024-row manifest. Production stays single-socket; `full`
+  is refused when `DEPLOYMENT_ENV=prod|production` (CHG-323 enforces the same
+  bound inside the JVM). The runner verifies the **effective** manifest the
+  ingestion JVM loaded (its log line), not the file it passed.
+- **Execution posture.** The runner brings up the `execution-t3` profile only
+  in its designed offline posture and never flips a gate flag. If
+  `EXECUTION_ENABLED=true` or `EXECUTION_BRIDGE_MODE=live` is present in the
+  effective config, `start` refuses (exit 3) and the board reports I6/I7 red.
+  Live orders remain blocked by `docs/06_operations/08-live-readiness-gaps.md`
+  (DEC-044 prohibits auto-enable/auto-resume).
+- **SignalJob singleton.** Exactly one is ever observed. Running -> keep; none
+  + savepoint/checkpoint state -> restore through
+  `make rollout-savepoint ARGS="RECOVERY_PATH=<path>"` (the native path); none
+  + no state -> refuse unless `ALLOW_FRESH=1` (dev bootstrap starts at LATEST,
+  no backlog replay); two -> fail with the cancel action.
+- **Exit codes.** 0 = GREEN or PENDING; 1 = RED (first failing invariant named
+  with its recovery action); 3 = fail-closed preflight/SignalJob refusal;
+  4 = another writer holds the stack lock. `make` reports a red board as exit
+  2. Off-session (outside Mon-Fri 09:15-15:30 IST) the data predicates I3/I4
+  report PENDING and do not fail the run — Monday in-session is authoritative.
+- **Evidence.** Every run writes `logs/day/<timestamp>-<verb>/board.txt` and
+  `facts.json`.
+
+### Invariant -> native recovery
+
+| Invariant | Symptom on the board | Native recovery |
+|---|---|---|
+| I1 stack | services missing | `make up`; `make logs SVC=<service>` |
+| I2 fluss | metadata probe failed | wait / re-run `make up`; crash-looping tablet -> `code/01_platform/04_scripts/fluss-repair/repair-tablet.sh` |
+| I3 ingestion | raw appends stalled | §Broker market-data disconnect; `make logs SVC=ingestion`; check `ARROW_FEED`/broker token in `.env` |
+| I4 data-flow | candles/signals not moving | §Flink job or checkpoint failure; `make rollout-savepoint` (restore, no state loss) |
+| I5 signaljob | not exactly one / stale checkpoint | §SignalJob (compute) operations — Start (normal RESTORE); duplicates: cancel via Flink REST |
+| I6 execution | profile down or live flags | `COMPOSE_PROFILES=execution-t3 make up`; never set the flags |
+| I7 config | effective manifest mismatch / live flag | check `UNIVERSE` / `INSTRUMENT_MANIFEST_HOST_PATH`; unset the flag |
+| I8 errors | FATAL/BRIDGE_CRASH/backpressure lines | map the line via §Broker market-data disconnect / §Checkpoint failure (SignalJob) |
+| I9 restart | no savepoint/checkpoint | start again (a checkpoint appears within 2x interval); `make rollout-savepoint` |
+
+### First morning (P4-4 validation) and reruns
+
+1. `make day ARGS="start"` before 09:15 IST; confirm the universe line reads
+   `tokens=2433 sockets=3`.
+2. After 09:15, `make day ARGS="status"` must show I3/I4 moving; a second
+   `start` must be a no-op (idempotent).
+3. Record the board snapshot under `logs/day/`.
+
+A rerun of `start` is always safe: `make up` is idempotent, the SignalJob is
+kept when running, and a restore never creates a second job.
+
 ## Stopping or restarting the executor
 
 The executor drains for ~15 s before it exits: the Nautilus kernel waits up to 10 s for residual

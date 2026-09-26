@@ -32,6 +32,8 @@
 ## Implementation status (2026-08-24 — offline done, live blocked)
 
 > Single-VM laptop (`make up` 12 long-running containers of 18 compose services — 3 `execution-t3` profile-gated + 2 one-shot `ddl-apply`/`eod-controller` + `minio-init` exit; `fluss-coordinator:9123` reachable) can now make every `Partially done` row `Fully done offline`. Live Fluss single-VM prove (`FLUSS_BOOTSTRAP`) and Arrow market `RCF-EQ×1` remain live-money blockers (order proven to Arrow 2026-08-25 — sandbox margin only).
+>
+> CHG-324: `make day ARGS="start"` (daily runner; runbook §Daily single-command runner) brings all 15 long-running services up in one command — the 12 above plus the 3 `execution-t3` services in their designed offline posture — restores the SignalJob through the native savepoint/checkpoint path when state exists, and verifies invariants I1–I9.
 
 | Area | Done offline on laptop (evidence) | Still not done (needs live) |
 |---|---|---|

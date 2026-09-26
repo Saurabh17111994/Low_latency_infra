@@ -12,7 +12,7 @@ STACK_LOCK := bash code/01_platform/04_scripts/stack-lock.sh
 # fails obscurely). Set MVN_FLAGS=-o when the local cache is warm.
 MVN := mvn $(MVN_FLAGS)
 
-.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite gate-fast check-image-stale check-image-stale-fast images branch-check proto flink-image fluss-image
+.PHONY: help env ddl up down logs build clean cep-check cep-check-module test test-ingestion test-audit-r2 drill-live execution-network-check gate gate-order static-check docs-audit stale-tables full-audit pin-check ddl-apply-smoke ddl-image evidence-ownership-check test-09 stack-selfcheck stack-config seed-dashboards rollout-savepoint chaos-suite gate-fast check-image-stale check-image-stale-fast images branch-check proto flink-image fluss-image day
 
 # P6-302: these recipes create no file of their own name, so a stray file in the
 # repo root would make make treat the target as up to date and skip the recipe.
@@ -163,6 +163,12 @@ up:
 	$(STACK_LOCK) $(COMPOSE) up -d
 	@bash code/01_platform/04_scripts/catalog-guard.sh \
 		|| echo "!!! catalog-guard: catalog NOT healthy — see messages above. Fix before trading."
+
+# Daily single-command runner (plan 2026-09-26, CHG-324): thin interface only,
+# all logic lives in code/01_platform/04_scripts/day_run.py.
+#   make day ARGS="start|status|stop"
+day:
+	@DAY_COMPOSE='$(COMPOSE)' bash code/01_platform/04_scripts/day-run.sh $(ARGS)
 
 down:
 	$(STACK_LOCK) $(COMPOSE) down
