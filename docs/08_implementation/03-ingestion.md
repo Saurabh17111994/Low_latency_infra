@@ -89,6 +89,7 @@ The pipe is the kernel's stdin/stdout — not a message queue, not a network hop
 | `DEPLOY_ENV` | No | Deployment environment (default `dev`); `prod` rejects `INGESTION_ALLOW_DEGRADED=true` and `ARROW_HFT_MULTI_CONNECTION_APPROVED=true` |
 | `ALLOW_RUNTIME_DDL` | No | `true` = DdlBootstrap may create missing tables at startup (local dev); default `false` = verify-only |
 | `FLUSS_STARTUP_WAIT_MS` | No | Bounded startup wait (ms, default 180000, range 0-600000) before schema verification: retries a read-only raw-table metadata probe while Fluss elects leaders (CHG-322); `0` disables the wait and restores the fail-fast path |
+| `INGESTION_WRITE_STARTUP_GRACE_MS` | No | Bounded write-path startup grace (ms, default 180000, range 0-600000; CHG-326): the first appends retry the metadata-not-ready class ("Failed to update metadata" — Fluss metadata not resolvable yet) while no append has been acked; the zero-ack watchdog stands down in the same window. `0` disables it (exact pre-CHG-326 behavior: R-285 FATAL, restart policy revives). The default matches `FLUSS_STARTUP_WAIT_MS` (read-side bound) |
 | `CLOCK_CHECK_REQUIRED` | No | `true` = clock offset outside `CLOCK_OFFSET_LIMIT_MS` is FATAL at startup (exit 1); default `false` |
 | `UNCERTAINTY_JOURNAL_PATH` | No | Writable journal path (default `~/.local/state/trading-platform/ingestion/uncertainty-journal.jsonl`; container default `/data/ingestion/uncertainty-journal.jsonl`) |
 | `ACCOUNT_SCOPE_ID` | No | Account scope stamped on safety-halt evidence rows (default `QP3796`) |
@@ -124,6 +125,8 @@ connection) have no effect.
 9. Start arrow-bridge as subprocess with configured auth env vars.
 10. Java sniffs bridge's stdout (proto frames only).
 11. Enter READY only after recent successful Fluss append acknowledgement and acceptable clock offset.
+
+**Write-path startup grace (CHG-326):** the 2026-09-26 daily-runner dry run showed the first appends after a fresh start failing with `Failed to update metadata` (an availability symptom with no retryable keyword → R-285 FATAL → restart loop). Inside `INGESTION_WRITE_STARTUP_GRACE_MS` after the first append, and only while no append has been acked, the writer retries that one class with capped backoff; the zero-ack watchdog stands down for the same window (it would otherwise read the deliberate un-acked retries as a wedge). Once an ack exists, or the window expires, wedge detection and the fail-closed FATAL classification are unchanged.
 
 ### Packet processing algorithm
 

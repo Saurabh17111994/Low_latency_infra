@@ -116,6 +116,31 @@ public final class RetryClassifier {
         return false;
     }
 
+    /**
+     * True when any link of the chain is the Fluss client's metadata-refresh
+     * failure: {@code Failed to update metadata} (CHG-326).
+     *
+     * <p>That condition is an availability symptom — the coordinator/tablet
+     * metadata is not resolvable yet at a cold start — but it carries no
+     * retryable keyword, so R-285 fails it closed and the container restarts.
+     * {@link RawTickWriter} may retry it inside the bounded startup grace;
+     * outside the grace, or after the first acked append, the existing FATAL
+     * classification applies unchanged. Deliberately narrow: the stale-handle
+     * fatal patterns (NotLeaderOrFollower / PartitionNotExist /
+     * UnknownTableOrBucket) are NOT covered — a post-success stale handle must
+     * keep halting per R-3xx.
+     */
+    public static boolean isMetadataNotReady(Throwable t) {
+        for (Throwable current = t; current != null; current = current.getCause()) {
+            String msg = current.getMessage();
+            if (msg != null
+                    && msg.toLowerCase(java.util.Locale.ROOT).contains("update metadata")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** Recognized transient patterns — the Fluss client usually recovers. */
     private static boolean isRetryable(String name, String msg) {
         // B125: bare contains("Connect") also matched manager/connector

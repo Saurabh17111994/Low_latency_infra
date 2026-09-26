@@ -56,6 +56,28 @@ class IngestionConfigTest {
     }
 
     @Test
+    @DisplayName("INGESTION_WRITE_STARTUP_GRACE_MS default = 180s; 0 disables (CHG-326)")
+    void writeStartupGraceDefaultAndDisable() {
+        java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
+        env.put("ARROW_APP_ID", "test-app");
+        env.put("DEPLOYMENT_ENV", "dev");
+        env.put("ARROW_APP_SECRET", "test-secret");
+        env.put("ARROW_USER_ID", "test-user");
+        env.put("ARROW_PASSWORD", "test-pass");
+        env.put("ARROW_TOTP_KEY", "JBSWY3DPEHPK3PXP");
+        env.put("FLUSS_BOOTSTRAP", "localhost:9123");
+        env.put("RAW_TABLE_NAME", "raw_table_1");
+        env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
+        env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
+        IngestionConfig cfg = IngestionConfig.validateFrom(env);
+        assertEquals(180_000L, cfg.writeStartupGraceMs,
+                "default write-path startup grace is 180s (matches FLUSS_STARTUP_WAIT_MS)");
+        env.put("INGESTION_WRITE_STARTUP_GRACE_MS", "0");
+        assertEquals(0L, IngestionConfig.validateFrom(env).writeStartupGraceMs,
+                "0 disables the grace (exact pre-CHG-326 fail-closed behavior)");
+    }
+
+    @Test
     @DisplayName("CLOCK_OFFSET_LIMIT_MS = 2000ms (T10 2s gate)")
     void clockOffsetLimit() {
         assertEquals(2000L, IngestionConfig.CLOCK_OFFSET_LIMIT_MS);

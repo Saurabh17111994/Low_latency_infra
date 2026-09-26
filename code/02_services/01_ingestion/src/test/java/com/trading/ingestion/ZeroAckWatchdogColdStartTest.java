@@ -1,6 +1,7 @@
 package com.trading.ingestion;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.junit.jupiter.api.DisplayName;
@@ -68,5 +69,26 @@ class ZeroAckWatchdogColdStartTest {
         long exactly = IngestionService.zeroAckAgeMs(firstAccepted + TIMEOUT, 0L, firstAccepted);
         assertTrue(justUnder < TIMEOUT, "the first append gets almost the whole window");
         assertTrue(exactly >= TIMEOUT, "and is caught at the window boundary");
+    }
+
+    @Test
+    @DisplayName("CHG-326: the write startup grace suppresses the watchdog while no ack exists")
+    void writeGraceSuppressesColdStart() {
+        assertTrue(IngestionService.zeroAckSuppressed(30_000L, 0L),
+                "inside the grace with no ack ever, a no-ack window is not a wedge");
+    }
+
+    @Test
+    @DisplayName("CHG-326: after the first ack the grace never masks a wedge")
+    void postSuccessWedgeIsNotSuppressed() {
+        assertFalse(IngestionService.zeroAckSuppressed(30_000L, 1L),
+                "once an append was acked, a stall is a genuine wedge again");
+    }
+
+    @Test
+    @DisplayName("CHG-326: once the grace expires the watchdog keeps its full authority")
+    void expiredGraceDoesNotSuppress() {
+        assertFalse(IngestionService.zeroAckSuppressed(0L, 0L),
+                "the grace is bounded: expiry restores fail-fast wedge detection");
     }
 }

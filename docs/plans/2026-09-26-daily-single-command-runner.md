@@ -131,6 +131,18 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
   ladder.
 - [-] **P4-5** — optional systemd timer for automatic morning start —
   trigger-gated: revisit after ≥5 consecutive green daily runs.
+- [x] **P4-6** — (option A, approved 2026-09-26; outside the original P4 list)
+  bounded write-path startup grace from P4-3's fourth finding. Landed CHG-326:
+  `INGESTION_WRITE_STARTUP_GRACE_MS` (default 180 s; `0` disables) retries the
+  metadata-not-ready class for the first appends while nothing has been acked,
+  and the zero-ack watchdog stands down in the same window; expiry restores
+  the R-285 FATAL. Evidence: red/green + drill under `logs/chg-326/`.
+- [x] **P4-7** — (same drill, second finding) restore-evidence check false
+  negative: the CHG-326 drill's restore was healthy (JM Savepoint line + TM
+  split-restore lines, job RUNNING) but the rollout's sliding 30-second log
+  window plus 800-line tail cap lost the evidence and failed the run closed.
+  Landed CHG-327: fixed submit-time anchor, untruncated JM+TM evidence,
+  failing-first tests (25/25). Evidence: `logs/chg-327/`.
 
 **Roll-up**
 
@@ -140,8 +152,8 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
 | P1 — Platform start-safety (no decision needed) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | P2 — Config truth | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | P3 — Orchestrator interface | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
-| P4 — Ops integration and validation | 5 | 3 | 0 | 0 | 1 | 0 | 1 |
-| **Total** | **19** | **17** | **0** | **0** | **1** | **0** | **1** |
+| P4 — Ops integration and validation | 7 | 5 | 0 | 0 | 1 | 0 | 1 |
+| **Total** | **21** | **19** | **0** | **0** | **1** | **0** | **1** |
 
 ## Overview — the final product
 
@@ -361,14 +373,15 @@ action from the runbook.
 - Fresh SignalJob submit without state can duplicate/count-again; the runner's
   default is refuse-and-report (P3-1).
 - Pre-session start must not look broken; PENDING semantics are explicit (D5).
-- **Startup write-path flap (found 2026-09-26, P4-3):** on a fresh Fluss
+- **Startup write-path flap (found 2026-09-26, P4-3; RESOLVED by CHG-326,
+  option A approved 2026-09-26):** on a fresh Fluss
   recreate, ingestion's first appends hit the zero-ack watchdog (~18 s) and
   then `FATAL append: Failed to update metadata`; the container restart policy
-  revives it and the feed recovers in ~30 s, but I8 stays red for the
-  15-minute log window. Recommendation (operator decision before
-  implementing): a bounded **write-path startup grace** -- classify/retry
-  metadata-class append failures for a bounded window after start, mirroring
-  CHG-322's read-readiness wait -- as a CHG-326-class change.
+  revived it and the feed recovered in ~30 s, but I8 stayed red for the
+  15-minute log window. CHG-326 adds the bounded **write-path startup grace**:
+  inside `INGESTION_WRITE_STARTUP_GRACE_MS` (default 180 s, `0` disables) and
+  only while no append has been acked, the metadata-not-ready class is retried
+  and the zero-ack watchdog stands down; expiry restores the R-285 FATAL.
 - Next free CHG numbers are assigned at land time; the plan names classes, not
   fixed numbers.
 

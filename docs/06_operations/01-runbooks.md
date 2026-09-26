@@ -136,7 +136,7 @@ make day ARGS="stop"      # graceful stop; checkpoints/volumes preserved
 | I5 signaljob | not exactly one / stale checkpoint | §SignalJob (compute) operations — Start (normal RESTORE); duplicates: cancel via Flink REST |
 | I6 execution | profile down or live flags | `COMPOSE_PROFILES=execution-t3 make up`; never set the flags |
 | I7 config | effective manifest mismatch / live flag | check `UNIVERSE` / `INSTRUMENT_MANIFEST_HOST_PATH`; unset the flag |
-| I8 errors | FATAL/BRIDGE_CRASH/backpressure lines | map the line via §Broker market-data disconnect / §Checkpoint failure (SignalJob) |
+| I8 errors | FATAL/BRIDGE_CRASH/backpressure lines | map the line via §Broker market-data disconnect / §Checkpoint failure (SignalJob); the cold-start `update metadata` flap is covered by `INGESTION_WRITE_STARTUP_GRACE_MS` (CHG-326, default 180 s; 0 disables) |
 | I9 restart | no savepoint/checkpoint | start again (a checkpoint appears within 2x interval); `make rollout-savepoint` |
 
 ### First morning (P4-4 validation) and reruns

@@ -80,6 +80,14 @@ public final class IngestionConfig {
      *  wedged-Fluss-sender hang whose append futures never complete (no
      *  per-append failure is ever surfaced). 0 = disabled. Default 10s. */
     public final long zeroAckTimeoutMs;
+    /** CHG-326: bounded write-path startup grace (ms). The FIRST appends after
+     *  start may retry the metadata-not-ready class (Fluss coordinator/tablet
+     *  metadata not resolvable yet) for this long, and only while no append
+     *  has been acked. 0 = disabled (exact pre-CHG-326 fail-closed behavior).
+     *  Default 180s — matches FLUSS_STARTUP_WAIT_MS (the read-side bound);
+     *  the 2026-09-26 drill observed a fresh-Fluss metadata outage that
+     *  outlasted a 60s window and recovered within ~105s. */
+    public final long writeStartupGraceMs;
     public final long clockOffsetLimitMs;
     public final long arrowMaxEventAgeMs;
     public final long arrowMaxFutureEventSkewMs;
@@ -129,6 +137,7 @@ public final class IngestionConfig {
         this.appendTimeout = b.appendTimeout;
         this.drainDeadline = b.drainDeadline;
         this.zeroAckTimeoutMs = b.zeroAckTimeoutMs;
+        this.writeStartupGraceMs = b.writeStartupGraceMs;
         this.clockOffsetLimitMs = b.clockOffsetLimitMs;
         this.arrowMaxEventAgeMs = b.arrowMaxEventAgeMs;
         this.arrowMaxFutureEventSkewMs = b.arrowMaxFutureEventSkewMs;
@@ -268,6 +277,11 @@ public final class IngestionConfig {
         // Zero-ack watchdog: 0 = disabled. Default 10s.
         b.zeroAckTimeoutMs = longRange(env, "INGESTION_ZERO_ACK_TIMEOUT_MS",
                 10_000L, 0L, 300_000L, errors);
+        // CHG-326: bounded write-path startup grace (metadata-not-ready retry
+        // before the first ack). 0 = disabled (pre-CHG-326 behavior). The
+        // 180s default matches FLUSS_STARTUP_WAIT_MS (see the drill note).
+        b.writeStartupGraceMs = longRange(env, "INGESTION_WRITE_STARTUP_GRACE_MS",
+                180_000L, 0L, 600_000L, errors);
         b.clockOffsetLimitMs = longRange(env, "CLOCK_OFFSET_LIMIT_MS",
                 CLOCK_OFFSET_LIMIT_MS, 10L, 60_000L, errors);
         b.arrowMaxEventAgeMs = requiredLong(env, "ARROW_MAX_EVENT_AGE_MS", errors);
@@ -369,6 +383,7 @@ public final class IngestionConfig {
         m.put("APPEND_TIMEOUT_SECONDS", appendTimeout);
         m.put("DRAIN_DEADLINE_SECONDS", drainDeadline.getSeconds());
         m.put("INGESTION_ZERO_ACK_TIMEOUT_MS", zeroAckTimeoutMs);
+        m.put("INGESTION_WRITE_STARTUP_GRACE_MS", writeStartupGraceMs);
         m.put("CLOCK_OFFSET_LIMIT_MS", clockOffsetLimitMs);
         m.put("ARROW_MAX_EVENT_AGE_MS", arrowMaxEventAgeMs);
         m.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", arrowMaxFutureEventSkewMs);
@@ -678,6 +693,7 @@ public final class IngestionConfig {
         Duration appendTimeout = Duration.ofSeconds(5);
         Duration drainDeadline = Duration.ofSeconds(2);
         long zeroAckTimeoutMs = 10_000L; // zero-ack watchdog (0 = disabled)
+        long writeStartupGraceMs = 180_000L; // CHG-326 write-path startup grace
         long clockOffsetLimitMs = CLOCK_OFFSET_LIMIT_MS; // T10: 2s default
         long arrowMaxEventAgeMs;
         long arrowMaxFutureEventSkewMs;

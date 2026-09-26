@@ -275,7 +275,8 @@ public final class IngestionService {
         });
         this.writer = new RawTickWriter(flussWriter, tracker, config.rawTableName,
                 config.appendTimeout,
-                config.drainDeadline); // drain deadline (DRAIN_DEADLINE_SECONDS)
+                config.drainDeadline,
+                Duration.ofMillis(config.writeStartupGraceMs)); // CHG-326 write-path startup grace
         // Async append completions (throughput plan Phase 2): metrics, error
         // counters, and discontinuity evidence are driven by the writer's
         // completion callback — write() no longer blocks on the Fluss ack.
@@ -602,6 +603,13 @@ public final class IngestionService {
                 long sinceAck = zeroAckAgeMs(now, writer.lastAppendSuccessEpochMs(), firstAcceptedEpochMs);
                 boolean brokerActive = health.isBrokerConnected()
                         && sinceAccepted < config.zeroAckTimeoutMs;
+                // CHG-326: inside the bounded write-path startup grace (and
+                // only until the first ack) the writer deliberately holds
+                // records un-acked while Fluss metadata is unresolved — not a
+                // wedge. Once an ack exists or the grace expires, the watchdog
+                // keeps its full authority (the cold-start baseline below).
+                boolean startupGraceActive = zeroAckSuppressed(
+                        writer.startupGraceRemainingMs(), writer.lastAppendSuccessEpochMs());
                 // Only fire when the writer is demonstrably being fed (recent
                 // accepted ticks) but has produced NO ack for the full window —
                 // i.e. genuine wedge, not a quiet feed. Also require at least one
@@ -610,7 +618,8 @@ public final class IngestionService {
                 // Cold start (no ack ever) measures from the first accepted
                 // tick instead of infinity, so a slow FIRST append is not a wedge.
                 // See zeroAckAgeMs.
-                if (brokerActive && lastAcceptedEpochMs > 0 && sinceAck >= config.zeroAckTimeoutMs) {
+                if (brokerActive && lastAcceptedEpochMs > 0 && sinceAck >= config.zeroAckTimeoutMs
+                        && !startupGraceActive) {
                     String reason = String.format(
                             "ZERO-ACK: accepted ticks flowing for %dms but no Fluss append ack for %dms "
                                     + "(lastAccept=%dms ago) — wedged sender, restarting to re-resolve metadata",
@@ -2156,6 +2165,16 @@ public final class IngestionService {
     static long zeroAckAgeMs(long now, long lastAckMs, long firstAcceptedMs) {
         long baseline = lastAckMs > 0 ? lastAckMs : firstAcceptedMs;
         return baseline > 0 ? now - baseline : Long.MAX_VALUE;
+    }
+
+    /**
+     * CHG-326: true while the zero-ack watchdog must stand down for the
+     * bounded write-path startup grace (grace running AND no append ever
+     * acked). Once an ack exists — or the grace has expired — this is false
+     * and the watchdog keeps its full wedge-detection authority.
+     */
+    static boolean zeroAckSuppressed(long startupGraceRemainingMs, long lastAppendSuccessEpochMs) {
+        return startupGraceRemainingMs > 0 && lastAppendSuccessEpochMs == 0;
     }
 
     /**

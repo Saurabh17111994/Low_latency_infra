@@ -32,7 +32,8 @@ import org.slf4j.LoggerFactory;
  *   <li>Retry with exponential backoff (100, 200, 400 ms; up to {@code MAX_RETRY_ATTEMPTS}) for RETRYABLE
  *       failures; FATAL failures halt immediately; a server-rejected record
  *       (1.0 auto-partition retention) is dropped and counted, never retried
- *       and never halted</li>
+ *       and never halted; the metadata-not-ready class is additionally
+ *       retried inside the bounded cold-start grace (CHG-326, see below)</li>
  *   <li>On timeout the outcome is {@code UNCERTAIN} — ingestion cannot prove
  *       whether Fluss persisted the row; Compute owns logical dedup</li>
  *   <li>{@link #write(TickPacket)} is asynchronous: it submits the append and
@@ -52,6 +53,10 @@ public final class RawTickWriter implements AutoCloseable {
     static final int MAX_RETRY_ATTEMPTS = 3;
     /** Initial backoff delay between retries (ms). Doubles each attempt. */
     static final long BASE_RETRY_BACKOFF_MS = 100;
+    /** CHG-326: base backoff (ms) between bounded startup-grace retries. */
+    static final long GRACE_RETRY_BACKOFF_MS = 250;
+    /** CHG-326: cap (ms) for the startup-grace retry backoff. */
+    static final long GRACE_RETRY_MAX_BACKOFF_MS = 1_000;
 
     private final FlussRowConverter rowConverter;
     private final AppendTracker tracker;
@@ -66,6 +71,12 @@ public final class RawTickWriter implements AutoCloseable {
      *  keeps sending indicates a wedged Fluss sender (append futures hang
      *  in-flight, never completing) that no per-append path can observe. */
     private volatile long lastAppendSuccessEpochMs = 0L;
+    /** CHG-326: bounded write-path startup grace (0 = disabled/legacy). */
+    private final long startupGraceMs;
+    /** CHG-326: epoch (ms) of the FIRST append submission. Lazily set — the
+     *  grace window starts with the first DATA, not with writer construction:
+     *  the bridge can take minutes to connect after the JVM starts. */
+    private final AtomicLong firstAppendEpochMs = new AtomicLong(0);
     private volatile boolean closed;
 
     /** Schedules per-attempt timeouts and retry resubmissions (daemon threads). */
@@ -84,11 +95,30 @@ public final class RawTickWriter implements AutoCloseable {
                          String tableName,
                          Duration appendTimeout,
                          Duration drainDeadline) {
+        // Pre-CHG-326 behavior exactly: no startup grace.
+        this(rowConverter, tracker, tableName, appendTimeout, drainDeadline, Duration.ZERO);
+    }
+
+    /**
+     * CHG-326 constructor: adds the bounded write-path startup grace.
+     *
+     * @param startupGrace window after the first append in which the
+     *                     metadata-not-ready class may be retried while no
+     *                     append has been acked yet; {@link Duration#ZERO}
+     *                     disables it (legacy, fail-closed FATAL immediately)
+     */
+    public RawTickWriter(FlussRowConverter rowConverter,
+                         AppendTracker tracker,
+                         String tableName,
+                         Duration appendTimeout,
+                         Duration drainDeadline,
+                         Duration startupGrace) {
         this.rowConverter = rowConverter;
         this.tracker = tracker;
         this.tableName = tableName;
         this.appendTimeout = appendTimeout;
         this.drainDeadline = drainDeadline;
+        this.startupGraceMs = startupGrace != null ? Math.max(0L, startupGrace.toMillis()) : 0L;
         this.scheduler = Executors.newScheduledThreadPool(2, r -> {
             Thread t = new Thread(r, "raw-writer-async");
             t.setDaemon(true);
@@ -154,6 +184,8 @@ public final class RawTickWriter implements AutoCloseable {
         Instant acceptTime = Instant.now();
 
         // 4. Submit asynchronously (no per-row blocking on the ack)
+        // CHG-326: start the bounded startup-grace clock with the first append.
+        firstAppendEpochMs.compareAndSet(0L, System.currentTimeMillis());
         submitAppend(packet, rowBytes, acceptTime, 1);
         return AppendOutcome.accepted(rowBytes, acceptTime);
     }
@@ -253,6 +285,35 @@ public final class RawTickWriter implements AutoCloseable {
         }
 
         if (retry == RetryClassifier.Classification.FATAL) {
+            // CHG-326: bounded write-path startup grace. Only the cold start
+            // (no append ever acked) retries the metadata-not-ready class —
+            // the availability window at the first appends after a fresh
+            // start. The window is bounded: once it expires the failure is
+            // FATAL exactly as before, and a stale handle after ANY success
+            // stays FATAL per R-3xx (the post-success check below).
+            long graceLeft = startupGraceRemainingMs();
+            if (graceLeft > 0 && lastAppendSuccessEpochMs == 0L
+                    && RetryClassifier.isMetadataNotReady(cause)) {
+                long backoffMs = graceBackoffMs(attempt);
+                LOG.warn("raw-writer: append metadata not ready — startup-grace retry "
+                                + "(table={}, remaining={}ms, backoff={}ms, attempt={})",
+                        tableName, graceLeft, backoffMs, attempt);
+                try {
+                    scheduler.schedule(
+                            () -> submitAppend(packet, rowBytes, acceptTime, attempt + 1),
+                            backoffMs, TimeUnit.MILLISECONDS);
+                } catch (java.util.concurrent.RejectedExecutionException shutdown) {
+                    // Same containment as the RETRYABLE path: never leak the
+                    // reservation when the scheduler is already down.
+                    tracker.onAppendFailure(rowBytes);
+                    errorCount.incrementAndGet();
+                    LOG.warn("raw-writer: retry impossible, scheduler shut down (table={})",
+                            tableName);
+                    completeOutcome(AppendOutcome.failed(packet, acceptTime, rowBytes, shutdown));
+                }
+                return;
+            }
+
             // Fatal → no retry, halt the append path
             tracker.onAppendFailure(rowBytes);
             errorCount.incrementAndGet();
@@ -322,6 +383,32 @@ public final class RawTickWriter implements AutoCloseable {
     public long errorCount() { return errorCount.get(); }
     public long uncertainCount() { return uncertainCount.get(); }
     public long lastAppendSuccessEpochMs() { return lastAppendSuccessEpochMs; }
+
+    /**
+     * CHG-326: milliseconds left in the bounded write-path startup grace.
+     *
+     * <p>Returns 0 when the grace is disabled (pre-CHG-326 behavior) or has
+     * expired. Before the first append the configured window is returned
+     * unattended (the clock has not started; the zero-ack watchdog cannot fire
+     * before an accept anyway).
+     */
+    public long startupGraceRemainingMs() {
+        if (startupGraceMs <= 0) {
+            return 0L;
+        }
+        long first = firstAppendEpochMs.get();
+        if (first == 0L) {
+            return startupGraceMs;
+        }
+        long elapsed = System.currentTimeMillis() - first;
+        return elapsed >= startupGraceMs ? 0L : startupGraceMs - elapsed;
+    }
+
+    /** CHG-326: bounded, capped backoff between startup-grace retries. */
+    private static long graceBackoffMs(int attempt) {
+        long shift = Math.min(Math.max(attempt - 1, 0), 2); // 250 → 500 → 1000 cap
+        return Math.min(GRACE_RETRY_BACKOFF_MS << shift, GRACE_RETRY_MAX_BACKOFF_MS);
+    }
 
     /**
      * Wait for pending appends to complete, up to the drain deadline.

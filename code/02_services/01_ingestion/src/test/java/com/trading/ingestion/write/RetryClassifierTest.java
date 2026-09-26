@@ -249,4 +249,25 @@ class RetryClassifierTest {
         assertFalse(RetryClassifier.isTableMissing(
                 new RuntimeException("leader not available, re-electing")));
     }
+
+    @Test
+    @DisplayName("CHG-326: isMetadataNotReady recognizes the metadata class across the chain")
+    void metadataNotReadyIsRecognized() {
+        assertTrue(RetryClassifier.isMetadataNotReady(
+                new RuntimeException("Failed to update metadata")));
+        assertTrue(RetryClassifier.isMetadataNotReady(
+                new ExecutionException("wrapper",
+                        new IllegalStateException("failed to UPDATE METADATA"))));
+    }
+
+    @Test
+    @DisplayName("CHG-326: isMetadataNotReady is narrow — stale handles and transients are not it")
+    void metadataNotReadyStaysNarrow() {
+        class FakeNotLeaderOrFollowerException extends RuntimeException {}
+        assertFalse(RetryClassifier.isMetadataNotReady(
+                new FakeNotLeaderOrFollowerException()));
+        assertFalse(RetryClassifier.isMetadataNotReady(
+                new RuntimeException("connection reset")));
+        assertFalse(RetryClassifier.isMetadataNotReady(null));
+    }
 }
