@@ -1,7 +1,9 @@
 package com.trading.execution.gateway;
 
+import com.trading.common.model.GateState;
 import com.trading.common.schema.execution.FlussAttemptStore;
 import com.trading.common.schema.execution.FlussGateStateStore;
+import com.trading.common.schema.execution.GateRow;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -22,11 +24,14 @@ public final class GatewayStartup {
      * The stores the running process actually uses, held open for its lifetime and closed in
      * reverse open order.
      *
-     * <p>Deliberately does NOT include the gate/attempt stores: no code path reads them, so holding
-     * those handles idle for the process lifetime was misleading beside the hydration comment
-     * (P3-275). They are proven to exist by {@link #probeAuthorityTables} and closed immediately.
+     * <p>H2-5/D2 (CHG-334): the gate store is now held and authoritative — the {@code /v1/gate}
+     * report endpoint writes the durable row through it, and the row is created HALTED here at
+     * startup (before the intent replay) so the forward leg's {@code NOT_FOUND} can no longer
+     * flip {@code flussReady=false} for the process lifetime (CHG-331 attempt 3). The attempt
+     * store is still probe-only: no code path reads it.
      */
-    public record Stores(FlussControlStateStore controls,
+    public record Stores(FlussGateStateStore gates,
+                         FlussControlStateStore controls,
                          FlussProjectionWriter projections,
                          FlussProjectionLedgerStore ledger) implements AutoCloseable {
         @Override
@@ -34,6 +39,7 @@ public final class GatewayStartup {
             ledger.close();
             projections.close();
             controls.close();
+            gates.close();
         }
     }
 
@@ -41,12 +47,31 @@ public final class GatewayStartup {
      * Opens the durable Fluss stores. The only place the running gateway talks to Fluss, and the
      * single point the executionEnabled gate has to precede to keep a disabled gateway offline
      * (P3-060).
+     *
+     * <p>The gate row is created here if absent and left untouched if present
+     * ({@code init} never clobbers a fenced gate, P3-151) — a previously ENABLED row is
+     * transitioned to HALTED by the executor's boot report, not by the gateway.
      */
     public static Stores openStores(GatewayConfig config) throws Exception {
+        FlussGateStateStore gates = FlussGateStateStore.open(
+                config.flussBootstrap(), config.flussDatabase(), config.gateTable(),
+                config.requestTimeout(), Set.of(GatewayHttpServer.SINGLE_OPERATOR));
+        gates.init(bootGateRow(config, System.currentTimeMillis()));
         return new Stores(
+                gates,
                 FlussControlStateStore.open(config),
                 FlussProjectionWriter.open(config),
                 FlussProjectionLedgerStore.open(config));
+    }
+
+    /**
+     * The HALTED, unfenced row created at startup. Epoch 0, no owner, fence token 0 (never
+     * fenced) — it authorizes nothing; only a reported approval can enable it. Evidence is null
+     * on purpose: the first approval defines the binding (P3-151).
+     */
+    static GateRow bootGateRow(GatewayConfig config, long nowTs) {
+        return new GateRow(config.executionPartitionId(), config.accountScopeId(), GateState.HALTED,
+                0L, "gateway boot", null, null, null, null, null, 0L, null, null, null, nowTs, null);
     }
 
     /**

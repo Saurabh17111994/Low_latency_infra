@@ -59,6 +59,10 @@ class ExecutionCommandGateHaltVerificationTest {
             if (expected == null ? rejectUnconditional : rejectConditional) return delegate.read(p);
             return delegate.halt(p, expected, reason, ev, now);
         }
+        @Override public GateRow transition(String p, GateRow expected, GateState target,
+                String reason, String ev, long now) {
+            return delegate.transition(p, expected, target, reason, ev, now);
+        }
         @Override public void audit(AuditRecord r) { delegate.audit(r); }
         @Override public List<AuditRecord> auditLog() { return delegate.auditLog(); }
     }

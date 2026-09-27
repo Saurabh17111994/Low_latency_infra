@@ -370,6 +370,27 @@ public final class FlussGateStateStore implements GateStateStore, AutoCloseable 
     @Override public synchronized List<AuditRecord> auditLog() { return delegate.auditLog(); }
 
     /**
+     * Durable leg of the sanctioned forward step (H2-5): durable-first exactly like
+     * {@link #halt} — hydrate from the durable row, decide, persist, then verify the write
+     * landed (the VERSIONED merge engine drops a lower token and still reports SUCCESS).
+     * A transition preserves the fence columns, so the write carries the current ordering
+     * token and equal versions are accepted; the epoch bump is what
+     * {@link #verifyPersisted} checks landed.
+     */
+    @Override public synchronized GateRow transition(String partitionId, GateRow expected,
+            GateState target, String reason, String evidenceHash, long nowTs) {
+        GateRow durable = lookupGateOrThrow(partitionId);
+        if (durable != null) delegate.hydrate(durable);
+        GateRow before = delegate.read(partitionId);
+        GateRow r = delegate.transition(partitionId, expected, target, reason, evidenceHash, nowTs);
+        if (r != null && r != before) {
+            persistOrRollback(r, before);
+            verifyPersisted(partitionId, r, false);
+        }
+        return r;
+    }
+
+    /**
      * P3-139/P3-145: the durable write is the commit and never swallows. A
      * failure means memory and Fluss would diverge, so roll the in-memory row
      * back to {@code before} and rethrow — the caller must not see in-memory

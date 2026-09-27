@@ -1,5 +1,6 @@
 package com.trading.common.schema.execution;
 
+import com.trading.common.model.GateState;
 import java.util.List;
 
 /**
@@ -220,6 +221,34 @@ public interface GateStateStore {
             String evidenceHash, long nowTs) {
         return halt(partitionId, expected, reason, evidenceHash, nowTs, null);
     }
+
+    /**
+     * One sanctioned forward step of the gate state machine
+     * ({@code HALTED → RECONCILING → APPROVAL_PENDING → ENABLED}), durable and
+     * epoch-incrementing exactly like {@link #halt}.
+     *
+     * <p>Why this exists: the enablement path is the three forward steps, and the
+     * store previously had no mutator for the first two, so nothing in production
+     * could ever produce an {@code APPROVAL_PENDING} row — which is the only state
+     * {@link #approveAndEnableIfComplete} promotes from. The H2-5 gate-row wiring
+     * needs them: the executor reports its approved transition, and the durable
+     * writer records the sanctioned path rather than jumping {@code HALTED → ENABLED}
+     * (a jump {@link GateState#legalTargets()} declares illegal, and the rule the
+     * Rust {@code gate.rs} enforces structurally).
+     *
+     * <p>Legality is delegated to {@link GateState#legalTargets()} — the single
+     * source of truth the validator also uses. An illegal step is a no-op: the
+     * current (unchanged) row is returned, with no epoch bump and no write, so
+     * the caller must compare the returned row's state to {@code target} to know
+     * what happened. A stale {@code expected} (CAS witness, same rule as
+     * {@link #halt}) is likewise a no-op returning the current row.
+     *
+     * @param expected CAS witness; {@code null} means "no generation check"
+     * @return the row after the step (or the unchanged current row), or {@code null}
+     *         when no row exists for the partition
+     */
+    /* @Nullable */ GateRow transition(String partitionId, GateRow expected, GateState target,
+            String reason, String evidenceHash, long nowTs);
 
     /** Append an immutable audit/evidence event. */
     void audit(AuditRecord record);

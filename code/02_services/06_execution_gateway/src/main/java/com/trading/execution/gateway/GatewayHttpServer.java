@@ -16,7 +16,16 @@ import java.util.function.Consumer;
 
 /** Minimal private endpoint; no Arrow route or broker client exists in this JVM. */
 public final class GatewayHttpServer implements AutoCloseable {
-    private static final String SINGLE_OPERATOR = "saurabh";
+    private static final org.slf4j.Logger LOG =
+            org.slf4j.LoggerFactory.getLogger(GatewayHttpServer.class);
+    static final String SINGLE_OPERATOR = "saurabh";
+    /**
+     * H2-5/D2: the largest lease a gate report may ask the durable row to carry. The executor's
+     * own TTL is 30 s (renew every 10 s); a request beyond two minutes is a misconfiguration, and
+     * honoring it would leave a dead executor's fence authorizing forwards for that long. Reject,
+     * never clamp: a wrong config must be visible, not silently rounded.
+     */
+    static final long MAX_GATE_LEASE_MS = 120_000L;
     /**
      * P3-290: inbound HTTP bodies are attacker-controlled — an unbounded
      * readAllBytes() lets one large POST OOM the gateway before auth/validation.
@@ -132,6 +141,7 @@ public final class GatewayHttpServer implements AutoCloseable {
         server.createContext("/healthz", this::health);
         server.createContext("/readyz", this::ready);
         server.createContext("/v1/events", this::events);
+        server.createContext("/v1/gate", this::gateReport);
         server.createContext("/control/approve", this::approve);
     }
     public void start() { server.start(); }
@@ -238,6 +248,215 @@ public final class GatewayHttpServer implements AutoCloseable {
         GateRow fresh = gateStore.read(partitionId);
         if (fresh != null && fresh.state() != GateState.HALTED)
             gateStore.halt(partitionId, fresh, reason, evidenceHash, now);
+    }
+
+    // POST /v1/gate — the executor's durable gate-transition report (H2-5/D2, CHG-334).
+    //
+    // The executor owns the gate DECISION (its DEC-044 envelope is verified there, before it
+    // reports); this endpoint owns the durable RECORD. It walks the sanctioned enablement path
+    // on the store and returns the persisted row, which the executor adopts — so the row, the
+    // epoch the forward leg sends, and the executor's control epoch cannot drift. Fail-closed:
+    // disabled gateway 503, non-authoritative store 501, bad signature 401, stale/illegal
+    // transition 409 with no mutation, store failure 503 (the executor stays HALTED).
+    private void gateReport(HttpExchange x) throws IOException {
+        if (!"POST".equalsIgnoreCase(x.getRequestMethod())) {
+            reply(x, 405, "{\"error\":\"method not allowed\"}"); return;
+        }
+        if (!config.executionEnabled()) {
+            reply(x, 503, "{\"error\":\"execution disabled via EXECUTION_ENABLED\"}"); return;
+        }
+        if (!gateStoreAuthoritative) {
+            reply(x, 501, "{\"error\":\"no durable gate store wired; gate reports are not "
+                    + "available in this deployment\"}");
+            return;
+        }
+        String body = readCapped(x);
+        if (body == null) return;
+        GatewayProtocol.Verification v =
+                protocol.verify(body, config.protocolVersion(), System.currentTimeMillis());
+        if (!v.accepted()) { reply(x, 401, v.reason()); return; }
+        GatewayProtocol.Envelope e = v.envelope();
+        // Endpoint/type pin: the shared allowlist admits intents/events too, so a report must
+        // declare itself here — never be consumed as a projection event by mistake.
+        if (!"GATE_REPORT".equals(e.messageType())) {
+            reply(x, 400, "{\"error\":\"message_type must be GATE_REPORT\"}"); return;
+        }
+        if (!config.executionPartitionId().equals(e.executionPartitionId())
+                || !config.accountScopeId().equals(e.accountScopeId())) {
+            reply(x, 409, "{\"error\":\"partition/scope mismatch\",\"outcome\":\"SCOPE_MISMATCH\"}");
+            return;
+        }
+        JsonNode p = e.payload();
+        String transition = p.path("transition").asText("");
+        String owner = p.path("owner_instance_id").asText("");
+        String principal = p.path("principal").asText("");
+        String reason = p.path("reason").asText("");
+        String evidence = p.path("evidence_hash").asText("");
+        long leaseMs = p.path("lease_ms").isNumber() ? p.path("lease_ms").asLong() : 0L;
+        long now = System.currentTimeMillis();
+        try {
+            switch (transition) {
+                case "BOOT_HALT" -> bootHalt(x, reason, now);
+                case "APPROVE" -> approveReported(x, e, owner, principal, evidence, leaseMs, now);
+                case "HALT" -> haltReported(x, reason, evidence, now);
+                case "RENEW" -> renewReported(x, owner, e.fenceToken(), leaseMs, now);
+                default -> reply(x, 400, "{\"error\":\"unknown transition\"}");
+            }
+        } catch (RuntimeException storeFailure) {
+            // The durable write is the commit (P3-139/P3-145): a store failure must never be
+            // reported as an applied transition. 503 is retryable; the executor stays HALTED
+            // or keeps renewing only after this answers success.
+            LOG.warn("gate report {} failed for partition {}", transition, e.executionPartitionId(),
+                    storeFailure);
+            reply(x, 503, "{\"error\":\"gate store unavailable\"}");
+        }
+    }
+
+    /** Boot: the row must exist and be HALTED. Never authorizes anything by itself. */
+    private void bootHalt(HttpExchange x, String reason, long now) throws IOException {
+        String partition = config.executionPartitionId();
+        GateRow row = gateStore.read(partition);
+        if (row == null) {
+            row = gateStore.init(new GateRow(partition, config.accountScopeId(), GateState.HALTED,
+                    0L, reason.isBlank() ? "executor boot" : reason, null, null, null, null, null,
+                    0L, null, null, null, now, null));
+        }
+        if (row.state() != GateState.HALTED) {
+            // A restart must never resume: transition the durable row to HALTED (fence retained
+            // as the ordering version, owner/lease cleared, epoch +1) — DEC-044, no auto-resume.
+            row = gateStore.halt(partition, row, reason.isBlank() ? "executor boot" : reason,
+                    null, now);
+        }
+        if (row == null) { reply(x, 404, "{\"error\":\"no gate row\"}"); return; }
+        replyRow(x, 200, "HALTED", row);
+    }
+
+    /** Approve: the sanctioned path, then the existing single-operator promotion to ENABLED. */
+    private void approveReported(HttpExchange x, GatewayProtocol.Envelope e, String owner,
+            String principal, String evidence, long leaseMs, long now) throws IOException {
+        String partition = config.executionPartitionId();
+        if (owner.isBlank() || principal.isBlank() || evidence.isBlank()) {
+            reply(x, 400, "{\"error\":\"owner_instance_id, principal, evidence_hash required\"}");
+            return;
+        }
+        if (leaseMs <= 0 || leaseMs > MAX_GATE_LEASE_MS) {
+            reply(x, 400, "{\"error\":\"lease_ms out of range (1.." + MAX_GATE_LEASE_MS + ")\"}");
+            return;
+        }
+        GateRow row = gateStore.read(partition);
+        if (row == null) {
+            row = gateStore.init(new GateRow(partition, config.accountScopeId(), GateState.HALTED,
+                    0L, "gate report before boot", null, null, null, null, null, 0L, null, null,
+                    null, now, null));
+        }
+        if (row.state() == GateState.ENABLED) {
+            // Idempotent: this approved generation is already durable. Never re-mint the fence —
+            // a retried report must not invalidate the live lease.
+            replyRow(x, 200, "ALREADY_ENABLED", row);
+            return;
+        }
+        if (row.epoch() != e.gateEpoch()) {
+            reply(x, 409, "{\"error\":\"stale report: epoch " + e.gateEpoch() + " != durable "
+                    + row.epoch() + "\",\"outcome\":\"EPOCH_MISMATCH\"}");
+            return;
+        }
+        GateStateStore.FenceResult fence = gateStore.acquire(partition, owner, leaseMs, now);
+        if (fence.conflict()) {
+            reply(x, 409, "{\"error\":\"" + fence.reason() + "\",\"outcome\":\"FENCE_CONFLICT\"}");
+            return;
+        }
+        row = gateStore.read(partition);
+        if (row.state() == GateState.HALTED) {
+            row = gateStore.transition(partition, row, GateState.RECONCILING, "executor approval",
+                    null, now);
+        }
+        if (row.state() == GateState.RECONCILING) {
+            row = gateStore.transition(partition, row, GateState.APPROVAL_PENDING,
+                    "executor approval", null, now);
+        }
+        if (row.state() != GateState.APPROVAL_PENDING) {
+            reply(x, 409, "{\"error\":\"cannot approve from " + row.state() + "\",\"outcome\":\""
+                    + row.state() + "\"}");
+            return;
+        }
+        // The approval names the CURRENT durable epoch — the sanctioned path advanced it.
+        GateStateStore.ApprovalResult res = gateStore.approveAndEnableIfComplete(
+                partition, principal, row.epoch(), evidence, now);
+        switch (res.outcome()) {
+            case APPLIED -> {
+                GateRow enabled = res.row();
+                if (enabled.state() != GateState.ENABLED) {
+                    // Defensive: promotion is the only APPLIED outcome from APPROVAL_PENDING.
+                    reply(x, 409, "{\"error\":\"approval recorded but not enabled\",\"outcome\":\""
+                            + enabled.state() + "\"}");
+                    return;
+                }
+                replyRow(x, 200, "ENABLED", enabled);
+            }
+            case ALREADY_APPLIED -> replyRow(x, 200, "ALREADY_ENABLED", res.row());
+            case UNAUTHORIZED, EVIDENCE_MISMATCH, EPOCH_MISMATCH -> {
+                // Fail-closed parity with /control/approve: a wrong principal or a package the
+                // gate has not bound halts the row rather than leaving a fenced partial state.
+                haltUnlessHalted(partition, "gate report " + res.outcome().name().toLowerCase(),
+                        evidence, now);
+                reply(x, 409, "{\"error\":\"" + res.reason() + "\",\"outcome\":\""
+                        + res.outcome().name() + "\"}");
+            }
+            default -> reply(x, 409, "{\"error\":\"" + res.reason() + "\",\"outcome\":\""
+                    + res.outcome().name() + "\"}");
+        }
+    }
+
+    /** Halt: unconditional (a delayed halt must still fence a live gate) and idempotent. */
+    private void haltReported(HttpExchange x, String reason, String evidence, long now)
+            throws IOException {
+        String partition = config.executionPartitionId();
+        GateRow row = gateStore.read(partition);
+        if (row == null) {
+            row = gateStore.init(new GateRow(partition, config.accountScopeId(), GateState.HALTED,
+                    0L, reason.isBlank() ? "executor halt" : reason, null, null, null, null, null,
+                    0L, null, null, null, now, null));
+        }
+        row = gateStore.halt(partition, null, reason.isBlank() ? "executor halt" : reason,
+                evidence.isBlank() ? null : evidence, now);
+        if (row == null) { reply(x, 404, "{\"error\":\"no gate row\"}"); return; }
+        replyRow(x, 200, "HALTED", row);
+    }
+
+    /** Renew: extends the current holder's lease; a conflict is the executor's cue to halt. */
+    private void renewReported(HttpExchange x, String owner, String fenceToken, long leaseMs, long now)
+            throws IOException {
+        String partition = config.executionPartitionId();
+        if (owner.isBlank() || leaseMs <= 0 || leaseMs > MAX_GATE_LEASE_MS) {
+            reply(x, 400, "{\"error\":\"owner_instance_id and lease_ms (1.." + MAX_GATE_LEASE_MS
+                    + ") required\"}");
+            return;
+        }
+        long token;
+        try {
+            token = Long.parseLong(fenceToken);
+        } catch (NumberFormatException ex) {
+            reply(x, 400, "{\"error\":\"fence_token must be numeric\"}"); return;
+        }
+        GateStateStore.FenceResult res = gateStore.renew(partition, owner, token, leaseMs, now);
+        if (res.conflict()) {
+            reply(x, 409, "{\"error\":\"" + res.reason() + "\",\"outcome\":\"FENCE_CONFLICT\"}");
+            return;
+        }
+        replyRow(x, 200, "RENEWED", res.row());
+    }
+
+    /** The persisted row the executor adopts (state/epoch/fence/lease), plus the outcome. */
+    private void replyRow(HttpExchange x, int code, String outcome, GateRow row) throws IOException {
+        java.util.LinkedHashMap<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("outcome", outcome);
+        out.put("state", row.state().name());
+        out.put("epoch", row.epoch());
+        out.put("fence_token", row.fenceToken());
+        out.put("owner_instance_id", row.ownerInstanceId());
+        out.put("lease_expires_ts", row.leaseExpiresTs());
+        out.put("transition_ts", row.transitionTs());
+        reply(x, code, mapper.writeValueAsString(out));
     }
 
     /** P3-290: one capped read for both handlers; 413 before JSON/verify. */

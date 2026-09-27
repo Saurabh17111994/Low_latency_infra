@@ -304,6 +304,31 @@ public final class InMemoryGateStateStore implements GateStateStore {
     }
 
     @Override
+    public synchronized GateRow transition(String partitionId, GateRow expected, GateState target,
+                                           String reason, String evidenceHash, long nowTs) {
+        Objects.requireNonNull(target, "target");
+        GateRow row = rows.get(partitionId);
+        if (row == null) {
+            return null;
+        }
+        // Same CAS rule as halt: a stale witness never advances a newer generation.
+        if (expected != null && row.epoch() != expected.epoch()) {
+            return row;
+        }
+        // Legality is the canonical table's — the store never invents a transition.
+        // Illegal step: no mutation, no epoch bump, current row returned.
+        if (!row.state().legalTargets().contains(target)) {
+            return row;
+        }
+        GateRow next = row.withState(target, reason,
+                evidenceHash == null ? row.evidenceHash() : evidenceHash, nowTs);
+        rows.put(partitionId, next);
+        audit(new AuditRecord(partitionId, "TRANSITION", nowTs, next.epoch(), next.fenceToken(),
+                row.state() + "->" + target + (reason == null ? "" : " " + reason), evidenceHash));
+        return next;
+    }
+
+    @Override
     public synchronized void audit(AuditRecord record) {
         audit.add(record);
     }

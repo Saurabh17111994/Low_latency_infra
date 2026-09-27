@@ -132,7 +132,7 @@ public final class ExecutionGatewayMain {
                         payload -> applyProjection(() -> {
                             applier.apply(mapper.treeToValue(payload, NormalizedExecutionEvent.class));
                             return null;
-                        }, readiness))) {
+                        }, readiness), stores.gates(), true)) {
                     LOG.warn("execution-gateway started; execution readiness still depends on Execution_Gate=ENABLED");
                     Thread readerThread = new Thread(() -> {
                         runReaderLoop(() -> reader.poll(config.pollTimeout()), readiness, readerFailed);

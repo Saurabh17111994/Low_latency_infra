@@ -31,9 +31,14 @@ public final class GatewayProtocol {
      * P3-078: the only accepted intent message types. An unknown message_type
      * verifies the HMAC fine but must never drive execution — allowlist at
      * verify, not trust at the call site.
+     *
+     * <p>H2-5/D2 (CHG-334): {@code GATE_REPORT} joins the list — the executor's durable
+     * gate-transition report ({@code /v1/gate}). It is HMAC-bound like the others; the
+     * endpoint additionally checks the type, so a report can never be consumed as a
+     * projection event by mistake.
      */
     static final java.util.Set<String> ALLOWED_MESSAGE_TYPES =
-            java.util.Set.of("EXECUTION_INTENT", "EXECUTION_EVENT");
+            java.util.Set.of("EXECUTION_INTENT", "EXECUTION_EVENT", "GATE_REPORT");
     /**
      * P3-078: freshness bounds (all in epoch-ms). TTL caps how long a stolen
      * envelope stays replayable; the future-skew bound caps a far-future
