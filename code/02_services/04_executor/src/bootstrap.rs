@@ -132,6 +132,10 @@ mod tests {
             durable_audit_enabled: false,
             durable_dir: "data/durable".into(),
             execution_partition_id: None,
+            account_scope_id: "dev-scope".into(),
+            gate_lease_ttl_ms: 30_000,
+            gate_lease_renew_ms: 10_000,
+            executor_instance_id: "exec-test".into(),
         }
     }
 
@@ -166,8 +170,8 @@ mod tests {
         rt.gate.enable(1).unwrap();
     }
 
-    #[test]
-    fn begin_shutdown_halts_the_gate_before_draining() {
+    #[tokio::test]
+    async fn begin_shutdown_halts_the_gate_before_draining() {
         // P3-185: a draining service must never still be armed to execute. Shutdown used to
         // only flip the draining flag, so an ENABLED gate kept accepting `/v1/intents` through
         // the shared snapshot while `/readyz` reported 503 — a fail-open drain.
@@ -175,7 +179,7 @@ mod tests {
         enable_runtime_gate(&mut rt);
         // The served snapshot is the surface the intent route checks; enable it too so the test
         // covers the live approval path, not just the in-process gate.
-        rt.state.approve("saurabh", "ev-shutdown").unwrap();
+        rt.state.approve("saurabh", "ev-shutdown").await.unwrap();
         assert_eq!(rt.gate_state(), ExecState::Enabled);
         assert_eq!(rt.health_json()["gate_state"], "ENABLED");
 
@@ -228,14 +232,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn drift_halt_also_halts_the_served_snapshot() {
+    #[tokio::test]
+    async fn drift_halt_also_halts_the_served_snapshot() {
         // D4: `enforce_clock_drift` halted only the in-process gate, while `/v1/intents` checks
         // the shared snapshot. A drift halt therefore left the live intent route forwarding and
         // `/healthz` reporting ENABLED — fail-open, the same shape P3-185 fixed for shutdown.
         let mut rt = Runtime::init(halted_config()).unwrap();
         enable_runtime_gate(&mut rt);
-        rt.state.approve("saurabh", "ev-drift").unwrap();
+        rt.state.approve("saurabh", "ev-drift").await.unwrap();
         assert_eq!(rt.gate_state(), ExecState::Enabled);
         assert_eq!(rt.health_json()["gate_state"], "ENABLED");
 

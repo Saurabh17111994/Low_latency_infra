@@ -38,6 +38,7 @@ use crate::durable::LiveAttemptStore;
 use crate::events;
 use crate::executiongate::{Attempt, AttemptPhase, Claim};
 use crate::gate::ExecState;
+use crate::gate_report::GateReporter;
 use crate::gateway_protocol;
 use crate::intent;
 
@@ -77,6 +78,11 @@ pub struct ServerState {
     /// `Execution_Intent_Processed` dedup remains the only one. `Some` means an order is not sent
     /// until its attempt is recorded on disk.
     attempts: Option<Arc<dyn LiveAttemptStore>>,
+    /// H2-5/D2 (CHG-334): the durable gate reporter. `None` is the offline/flag-off behaviour —
+    /// gate transitions stay local, exactly as before. `Some` makes approval durable-first: the
+    /// gateway writes the `Execution_Gate` row and the executor adopts the persisted epoch/fence,
+    /// so the row and this process cannot drift.
+    reporter: Option<Arc<GateReporter>>,
 }
 
 impl std::fmt::Debug for ServerState {
@@ -85,6 +91,7 @@ impl std::fmt::Debug for ServerState {
             .field("inner", &self.inner)
             .field("forwarder", &self.forwarder.is_some())
             .field("attempts", &self.attempts.is_some())
+            .field("gate_reporter", &self.reporter.is_some())
             .finish()
     }
 }
@@ -115,6 +122,15 @@ struct Snapshot {
     /// the signed control envelope. It starts at 1 (0 is never current) and every gate transition
     /// bumps it, so an envelope captured before the transition names a stale epoch and is refused.
     control_epoch: u64,
+    /// H2-5/D2 (CHG-334): the durable row's fence token this process adopted (0 = unfenced).
+    /// Sent on halt/renew reports; the gateway validates it against the row.
+    fence_token: u64,
+    /// H2-5/D2: the adopted lease horizon (epoch ms) — the row's `lease_expires_ts`.
+    lease_expires_ts: Option<i64>,
+    /// H2-5/D2: true once the boot `BOOT_HALT` report landed and the durable epoch was adopted.
+    /// Until then `/healthz` reports the local epoch, and an approval would be refused by the
+    /// gateway's epoch check — surfaced so the operator waits for the durable generation.
+    gate_hydrated: bool,
     /// P3-209: idle deadline for the request read phase; production pins 5 s, tests shrink it.
     connection_timeout: std::time::Duration,
 }
@@ -137,10 +153,14 @@ impl ServerState {
                 enabled_evidence: None,
                 authorized_operator: Self::operator_from_env(),
                 control_epoch: 1,
+                fence_token: 0,
+                lease_expires_ts: None,
+                gate_hydrated: false,
                 connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
             attempts: None,
+            reporter: None,
         }
     }
 
@@ -180,10 +200,14 @@ impl ServerState {
                 enabled_evidence: None,
                 authorized_operator: Self::operator_from_env(),
                 control_epoch: 1,
+                fence_token: 0,
+                lease_expires_ts: None,
+                gate_hydrated: false,
                 connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
             attempts: None,
+            reporter: None,
         }
     }
 
@@ -231,6 +255,15 @@ impl ServerState {
         self
     }
 
+    /// Attaches the durable gate reporter (H2-5/D2, CHG-334). Absent (default) keeps the local
+    /// gate transitions (offline/flag-off); present makes approval durable-first against the
+    /// gateway's `Execution_Gate` row and starts the boot + lease-renew keeper.
+    #[must_use]
+    pub fn with_gate_reporter(mut self, reporter: Arc<GateReporter>) -> Self {
+        self.reporter = Some(reporter);
+        self
+    }
+
     /// Sets the gateway base URL for normalized event emission (A2.4 leg). Empty (default)
     /// disables emission — the 202 then reports `event_emission: disabled`.
     #[must_use]
@@ -257,29 +290,80 @@ impl ServerState {
     /// (the full `Gate` state machine is exercised in tests; the server surface is
     /// HALTED-until-sanctioned-approval). Callers on the HTTP surface pass an identity that
     /// `verify_control` already checked against the signature-covered payload.
-    pub fn approve(&self, approver: &str, evidence_hash: &str) -> Result<(), String> {
+    pub async fn approve(&self, approver: &str, evidence_hash: &str) -> Result<(), String> {
+        // Local validation under the lock; the durable report then runs outside it (await).
+        let (epoch, reporter) = {
+            let s = match self.inner.lock() {
+                Ok(s) => s,
+                Err(_) => return Err("snapshot lock poisoned".to_string()),
+            };
+            if approver.is_empty() || approver != s.authorized_operator {
+                return Err(format!(
+                    "approver {approver:?} is not the authorized operator"
+                ));
+            }
+            if evidence_hash.is_empty() {
+                return Err("evidence hash required".to_string());
+            }
+            if s.operator_review_required {
+                return Err("operator review required — re-approval forbidden".to_string());
+            }
+            // Fail-closed: only HALTED can be advanced (a gate already ENABLED stays; a
+            // RECONCILING/APPROVAL_PENDING snapshot is not part of the server surface).
+            if s.gate == ExecState::Enabled {
+                return Ok(()); // idempotent — already approved
+            }
+            if s.gate != ExecState::Halted {
+                return Err(format!("cannot approve from {}", s.gate.as_str()));
+            }
+            (s.control_epoch, self.reporter.clone())
+        };
+
+        // H2-5/D2: durable-first. With a reporter attached, the gateway writes the
+        // Execution_Gate row (sanctioned path + single-operator promotion) and we adopt its
+        // epoch/fence/lease; a failed report refuses the approval — the gate stays HALTED.
+        if let Some(reporter) = reporter {
+            let ack = reporter.approve(epoch, approver, evidence_hash).await?;
+            if !ack.is_enabled() {
+                return Err(format!(
+                    "durable gate did not enable (state {}, outcome {})",
+                    ack.state, ack.outcome
+                ));
+            }
+            let mut s = match self.inner.lock() {
+                Ok(s) => s,
+                Err(_) => return Err("snapshot lock poisoned".to_string()),
+            };
+            // A concurrent halt (or another approval) won while the report was in flight: the
+            // durable row is authoritative, so the local snapshot must not claim ENABLED.
+            if s.gate != ExecState::Halted || s.control_epoch != epoch {
+                return Err("gate changed while the durable approval was in flight".to_string());
+            }
+            s.gate = ExecState::Enabled;
+            s.control_epoch = ack.epoch;
+            s.fence_token = ack.fence_token;
+            s.lease_expires_ts = ack.lease_expires_ts;
+            // P3-019: a new approval epoch re-arms the UNKNOWN watchdog.
+            s.unknown_first_seen = None;
+            s.approved_by = Some(approver.to_string());
+            s.enabled_evidence = Some(evidence_hash.to_string());
+            tracing::info!(
+                approver,
+                evidence = evidence_hash,
+                epoch = ack.epoch,
+                fence_token = ack.fence_token,
+                "DEC-044 approval recorded durably: gate=ENABLED (gateway row adopted)"
+            );
+            return Ok(());
+        }
+
+        // No reporter (offline/flag-off): the local transition, unchanged.
         let mut s = match self.inner.lock() {
             Ok(s) => s,
             Err(_) => return Err("snapshot lock poisoned".to_string()),
         };
-        if approver.is_empty() || approver != s.authorized_operator {
-            return Err(format!(
-                "approver {approver:?} is not the authorized operator"
-            ));
-        }
-        if evidence_hash.is_empty() {
-            return Err("evidence hash required".to_string());
-        }
-        if s.operator_review_required {
-            return Err("operator review required — re-approval forbidden".to_string());
-        }
-        // Fail-closed: only HALTED can be advanced (a gate already ENABLED stays; a
-        // RECONCILING/APPROVAL_PENDING snapshot is not part of the server surface).
-        if s.gate == ExecState::Enabled {
-            return Ok(()); // idempotent — already approved
-        }
-        if s.gate != ExecState::Halted {
-            return Err(format!("cannot approve from {}", s.gate.as_str()));
+        if s.gate != ExecState::Halted || s.control_epoch != epoch {
+            return Err("gate changed while the approval was in flight".to_string());
         }
         s.gate = ExecState::Enabled;
         // P3-019: a new approval epoch re-arms the UNKNOWN watchdog — without this,
@@ -299,16 +383,134 @@ impl ServerState {
 
     /// The sanctioned safety halt: returns the gate to `HALTED` from any state and
     /// invalidates the approval + bound evidence (fail-closed — re-enable re-approves).
+    ///
+    /// H2-5/D2: the local halt is immediate (it is fail-safe on its own) and the durable `HALT`
+    /// report is retried in the background — if it never lands, the row's lease expires (30 s
+    /// TTL) and the gateway's forward leg defers. A halt is never blocked on the network.
     pub fn safety_halt(&self, reason: &str) {
-        if let Ok(mut s) = self.inner.lock() {
+        let (epoch, reporter) = {
+            let Ok(mut s) = self.inner.lock() else {
+                return;
+            };
             s.gate = ExecState::Halted;
             s.approved_by = None;
             s.enabled_evidence = None;
             s.operator_review_required = false;
+            s.lease_expires_ts = None;
+            s.fence_token = 0;
             // P3-020: a halt is a transition — envelopes minted before it are spent.
             s.bump_control_epoch();
-            tracing::warn!("gate safety-halted: {reason}");
-        }
+            (s.control_epoch, self.reporter.clone())
+        };
+        tracing::warn!("gate safety-halted: {reason}");
+        let Some(reporter) = reporter else {
+            return;
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::error!(
+                "no tokio runtime to report the durable gate halt — the row's lease will expire \
+                 and the gateway will defer until it does"
+            );
+            return;
+        };
+        let reason = reason.to_string();
+        let state = self.clone();
+        handle.spawn(async move {
+            // 15 attempts x 2 s covers a gateway restart inside the 30 s lease TTL.
+            for attempt in 1..=15u32 {
+                match reporter.halt(epoch, 0, &reason, "").await {
+                    Ok(ack) => {
+                        if let Ok(mut s) = state.inner.lock() {
+                            // Keep the local epoch in lockstep with the durable one (never
+                            // regress — a stale local term must not roll the generation back).
+                            if s.gate == ExecState::Halted && ack.epoch > s.control_epoch {
+                                s.control_epoch = ack.epoch;
+                            }
+                        }
+                        tracing::info!(state = %ack.state, epoch = ack.epoch,
+                            "durable gate halt applied");
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(attempt, error = %e,
+                            "durable gate halt report failed; retrying");
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            tracing::error!(
+                "durable gate halt report did not land after 15 attempts — the row's lease will \
+                 expire and the gateway will defer until it does"
+            );
+        });
+    }
+
+    /// H2-5/D2: spawns the durable gate keeper — the boot `BOOT_HALT` report (retried until the
+    /// gateway answers, hydrating the durable epoch/fence) and the lease-renew loop (renew
+    /// interval / TTL, halt-on-loss). A no-op when no reporter is attached (offline/flag-off).
+    pub fn spawn_gate_keeper(&self) {
+        let Some(reporter) = self.reporter.clone() else {
+            return;
+        };
+        let state = self.clone();
+        tokio::spawn(async move {
+            // Boot: retry until the gateway answers. The gateway may be disabled for a long
+            // time; the executor serves HALTED meanwhile, which is safe.
+            let mut backoff = std::time::Duration::from_millis(500);
+            loop {
+                let epoch = state.snapshot().control_epoch;
+                match reporter.boot_halt(epoch).await {
+                    Ok(ack) => {
+                        if let Ok(mut s) = state.inner.lock() {
+                            // BOOT_HALT always answers HALTED; adopt defensively from the ack.
+                            s.gate = if ack.is_enabled() {
+                                ExecState::Enabled
+                            } else {
+                                ExecState::Halted
+                            };
+                            s.control_epoch = ack.epoch;
+                            s.fence_token = ack.fence_token;
+                            s.lease_expires_ts = ack.lease_expires_ts;
+                            s.gate_hydrated = true;
+                        }
+                        tracing::info!(
+                            epoch = ack.epoch,
+                            state = %ack.state,
+                            "durable gate row adopted at boot (epoch hydrated)"
+                        );
+                        break;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "boot gate report failed; retrying");
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(std::time::Duration::from_secs(5));
+                    }
+                }
+            }
+
+            // Lease renew loop: only while ENABLED. The first failed renewal safety-halts.
+            let renew_every = std::time::Duration::from_millis(reporter.renew_ms().max(1_000));
+            loop {
+                tokio::time::sleep(renew_every).await;
+                let (enabled, epoch, fence) = {
+                    let s = state.snapshot();
+                    (s.gate == ExecState::Enabled, s.control_epoch, s.fence_token)
+                };
+                if !enabled {
+                    continue;
+                }
+                match reporter.renew(epoch, fence).await {
+                    Ok(ack) => {
+                        if let Ok(mut s) = state.inner.lock() {
+                            s.lease_expires_ts = ack.lease_expires_ts;
+                        }
+                    }
+                    Err(e) => {
+                        state.safety_halt(&format!("lease renewal failed: {e}"));
+                    }
+                }
+            }
+        });
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -326,6 +528,9 @@ impl ServerState {
             enabled_evidence: None,
             authorized_operator: Self::operator_from_env(),
             control_epoch: 1,
+            fence_token: 0,
+            lease_expires_ts: None,
+            gate_hydrated: false,
             connection_timeout: CONNECTION_READ_TIMEOUT,
         })
     }
@@ -406,6 +611,9 @@ impl Clone for Snapshot {
             enabled_evidence: self.enabled_evidence.clone(),
             authorized_operator: self.authorized_operator.clone(),
             control_epoch: self.control_epoch,
+            fence_token: self.fence_token,
+            lease_expires_ts: self.lease_expires_ts,
+            gate_hydrated: self.gate_hydrated,
             connection_timeout: self.connection_timeout,
         }
     }
@@ -427,6 +635,9 @@ pub fn health_json(state: &ServerState) -> serde_json::Value {
         "enabled_evidence": s.enabled_evidence,
         // P3-020: the epoch a signed approve/halt envelope must name (see the module doc).
         "gate_epoch": s.control_epoch,
+        // H2-5/D2: true once the boot report landed and the durable epoch was adopted; before
+        // that an approval is refused by the gateway's epoch check, so wait for it.
+        "durable_gate": s.gate_hydrated,
     })
 }
 
@@ -964,7 +1175,7 @@ async fn route(state: &ServerState, method: &str, path: &str, body: &str) -> Vec
                 Ok(req) => req,
                 Err(resp) => return resp,
             };
-            match state.approve(&req.operator, &req.evidence) {
+            match state.approve(&req.operator, &req.evidence).await {
                 Ok(()) => json(
                     200,
                     &serde_json::json!({
@@ -1457,6 +1668,7 @@ mod tests {
         state.safety_halt("operator halt after UNKNOWN");
         state
             .approve("saurabh", "evidence-epoch-2")
+            .await
             .expect("re-approval in the new epoch");
         assert_eq!(
             state.snapshot().gate,
@@ -2407,5 +2619,226 @@ mod tests {
         drop(state);
         drop(store);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── H2-5/D2 (CHG-334): the durable gate report path ─────────────────────────────────────────
+
+    /// A signed `GATE_APPROVE` envelope naming `epoch` (the /v1/approve control request).
+    async fn approve_request(secret: &str, epoch: u64, operator: &str, evidence: &str) -> String {
+        use crate::gateway_protocol::{encode_envelope, sha256_hex, Envelope};
+        let payload = serde_json::json!({ "operator": operator, "evidence": evidence });
+        let payload_json = serde_json::to_string(&payload).unwrap();
+        let env = Envelope {
+            protocol_version: "execution-gateway.v1".into(),
+            message_type: "GATE_APPROVE".into(),
+            request_id: format!("approve-{epoch}-{operator}"),
+            account_scope_id: "acc-1".into(),
+            execution_partition_id: "part-1".into(),
+            payload_hash: sha256_hex(payload_json.as_bytes()),
+            gate_epoch: epoch as i64,
+            fence_token: "0".into(),
+            deadline_epoch_ms: 9_999_999_999_999,
+            payload,
+            authentication: String::new(),
+        };
+        let encoded = encode_envelope(secret, &env).unwrap();
+        format!(
+            "POST /v1/approve HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+            encoded.len(),
+            encoded
+        )
+    }
+
+    fn test_reporter(addr: std::net::SocketAddr) -> crate::gate_report::GateReporter {
+        crate::gate_report::GateReporter::new(
+            format!("http://{addr}"),
+            "secret".into(),
+            "execution-gateway.v1".into(),
+            "part-1".into(),
+            "acc-1".into(),
+            "exec-1".into(),
+            30_000,
+            10_000,
+        )
+    }
+
+    /// One-shot gateway stub: captures the request and replies with the given status + body.
+    async fn gateway_stub(
+        status: &'static str,
+        reply_body: &'static str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::mpsc::UnboundedReceiver<String>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let handle = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 4096];
+            let mut expected: Option<usize> = None;
+            loop {
+                let n = tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut chunk))
+                    .await
+                    .expect("timed out reading the gate report")
+                    .unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if expected.is_none() {
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                        let len = head
+                            .split("content-length:")
+                            .nth(1)
+                            .and_then(|v| v.trim().split(' ').next())
+                            .and_then(|d| d.parse::<usize>().ok())
+                            .unwrap_or(0);
+                        expected = Some(pos + 4 + len);
+                    }
+                }
+                if let Some(end) = expected {
+                    if buf.len() >= end {
+                        break;
+                    }
+                }
+            }
+            tx.send(String::from_utf8_lossy(&buf).to_string()).unwrap();
+            let resp = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply_body}",
+                reply_body.len()
+            );
+            s.write_all(resp.as_bytes()).await.unwrap();
+        });
+        (addr, rx, handle)
+    }
+
+    #[tokio::test]
+    async fn durable_approve_adopts_the_gateway_row() {
+        let (gw_addr, mut rx, gw) = gateway_stub(
+            "200 OK",
+            r#"{"outcome":"ENABLED","state":"ENABLED","epoch":3,"fence_token":7,"owner_instance_id":"exec-1","lease_expires_ts":9999999999999}"#,
+        )
+        .await;
+        let state = ServerState::with_gateway_auth(
+            ExecState::Halted,
+            "secret".into(),
+            "execution-gateway.v1".into(),
+        )
+        .with_authorized_operator("saurabh")
+        .with_gate_reporter(Arc::new(test_reporter(gw_addr)));
+        let addr = spawn_server(state.clone()).await;
+
+        let (status, body) =
+            raw_request(addr, &approve_request("secret", 1, "saurabh", "ev-1").await).await;
+        assert_eq!(status, 200, "body: {body}");
+        let snap = state.snapshot();
+        assert_eq!(snap.gate, ExecState::Enabled);
+        // The durable row is authoritative: its epoch/fence/lease are adopted, not the local ones.
+        assert_eq!(snap.control_epoch, 3, "durable epoch adopted");
+        assert_eq!(snap.fence_token, 7, "durable fence adopted");
+        assert_eq!(snap.lease_expires_ts, Some(9_999_999_999_999));
+        assert_eq!(snap.approved_by.as_deref(), Some("saurabh"));
+        let req = rx.recv().await.expect("gateway got the report");
+        assert!(req.starts_with("POST /v1/gate HTTP/1.1"), "req: {req}");
+        assert!(req.contains("\"transition\":\"APPROVE\""), "req: {req}");
+        assert!(req.contains("\"principal\":\"saurabh\""), "req: {req}");
+        gw.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn durable_approve_refuses_when_the_report_conflicts() {
+        let (gw_addr, _rx, gw) = gateway_stub(
+            "409 Conflict",
+            r#"{"error":"stale report: epoch 1 != durable 3","outcome":"EPOCH_MISMATCH"}"#,
+        )
+        .await;
+        let state = ServerState::with_gateway_auth(
+            ExecState::Halted,
+            "secret".into(),
+            "execution-gateway.v1".into(),
+        )
+        .with_authorized_operator("saurabh")
+        .with_gate_reporter(Arc::new(test_reporter(gw_addr)));
+        let addr = spawn_server(state.clone()).await;
+
+        let (status, body) =
+            raw_request(addr, &approve_request("secret", 1, "saurabh", "ev-1").await).await;
+        assert_eq!(status, 403, "body: {body}");
+        // Durable-first: a failed report never completes locally.
+        assert_eq!(state.snapshot().gate, ExecState::Halted);
+        gw.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gate_keeper_hydrates_the_durable_epoch_at_boot() {
+        let (gw_addr, mut rx, gw) = gateway_stub(
+            "200 OK",
+            r#"{"outcome":"HALTED","state":"HALTED","epoch":5,"fence_token":0}"#,
+        )
+        .await;
+        let state = ServerState::with_gateway_auth(
+            ExecState::Halted,
+            "secret".into(),
+            "execution-gateway.v1".into(),
+        )
+        .with_gate_reporter(Arc::new(test_reporter(gw_addr)));
+        state.spawn_gate_keeper();
+
+        for _ in 0..100 {
+            if state.snapshot().gate_hydrated {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let snap = state.snapshot();
+        assert!(
+            snap.gate_hydrated,
+            "the boot report must hydrate the durable epoch"
+        );
+        assert_eq!(
+            snap.control_epoch, 5,
+            "the durable epoch is adopted at boot"
+        );
+        assert_eq!(snap.gate, ExecState::Halted);
+        let req = rx.recv().await.expect("gateway got the boot report");
+        assert!(req.contains("\"transition\":\"BOOT_HALT\""), "req: {req}");
+        gw.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn safety_halt_reports_the_halt_in_the_background() {
+        let (gw_addr, mut rx, gw) = gateway_stub(
+            "200 OK",
+            r#"{"outcome":"HALTED","state":"HALTED","epoch":5,"fence_token":3}"#,
+        )
+        .await;
+        let state = ServerState::with_gateway_auth(
+            ExecState::Enabled,
+            "secret".into(),
+            "execution-gateway.v1".into(),
+        )
+        .with_gate_reporter(Arc::new(test_reporter(gw_addr)));
+
+        state.safety_halt("test halt");
+        // The local halt is immediate; the durable report is retried in the background.
+        assert_eq!(state.snapshot().gate, ExecState::Halted);
+        let req = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("the halt report must be sent")
+            .unwrap();
+        assert!(req.contains("\"transition\":\"HALT\""), "req: {req}");
+        // The durable halt's epoch is adopted, so the local term cannot drift from the row.
+        for _ in 0..100 {
+            if state.snapshot().control_epoch == 5 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(state.snapshot().control_epoch, 5);
+        gw.await.unwrap();
     }
 }

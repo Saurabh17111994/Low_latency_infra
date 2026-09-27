@@ -31,8 +31,31 @@ use nautilus_execution_service::{
     durable::{DurableClients, DurableFlags},
     engine::{BridgeSelection, LiveNodeRuntime},
     gate::ExecState,
+    gate_report::GateReporter,
     http, shutdown, telemetry,
 };
+
+/// H2-5/D2 (CHG-334): builds the durable gate reporter when every required setting is present.
+///
+/// The partition names the row, so its absence disables the reporter (the caller logs the
+/// fallback: approvals would stay process-local, and the gateway would never see the row). The
+/// gateway endpoint and the shared secret already gate each other in config parsing.
+fn gate_reporter_from_config(config: &ServiceConfig) -> Option<GateReporter> {
+    let partition = config.execution_partition_id.clone()?;
+    if config.gateway_endpoint.trim().is_empty() || config.gateway_shared_secret.trim().is_empty() {
+        return None;
+    }
+    Some(GateReporter::new(
+        config.gateway_endpoint.clone(),
+        config.gateway_shared_secret.clone(),
+        config.protocol_version.clone(),
+        partition,
+        config.account_scope_id.clone(),
+        config.executor_instance_id.clone(),
+        config.gate_lease_ttl_ms,
+        config.gate_lease_renew_ms,
+    ))
+}
 
 /// Builds the route's bridge transport (T4a sync forward) from the same selection the node's
 /// exec client uses: the deterministic fake (offline slice, seeded with an Accept script) or
@@ -112,6 +135,8 @@ async fn main() -> anyhow::Result<()> {
     let route_forwarder: http::BridgeForwarder =
         Arc::new(tokio::sync::Mutex::new(build_route_forwarder(&selection)));
     let gateway_endpoint = config.gateway_endpoint.clone();
+    // H2-5/D2: build the reporter before `config` moves into Runtime::init.
+    let gate_reporter = gate_reporter_from_config(&config);
     let mut runtime = Runtime::init(config)?;
     // Nautilus's kernel registers the process-wide `log` logger (LoggerConfig owns
     // set_boxed_logger); our own tracing subscriber registers a `log` bridge
@@ -162,7 +187,7 @@ async fn main() -> anyhow::Result<()> {
     let state = runtime
         .server_state()
         .with_forwarder(route_forwarder)
-        .with_gateway_endpoint(gateway_endpoint);
+        .with_gateway_endpoint(gateway_endpoint.clone());
     // Workstream-D swap: with the attempts flag on, the live forward leg claims and records the
     // attempt before the bridge sees the order, and answers retries from the record. With the flag
     // off there is no guard here (the gateway's own dedup index is the only one) — unchanged.
@@ -173,6 +198,32 @@ async fn main() -> anyhow::Result<()> {
         }
         None => state,
     };
+    // H2-5/D2 (CHG-334): arm the durable gate reporter. With it, approval writes Execution_Gate
+    // through the gateway and this process adopts the persisted epoch/fence — the row the
+    // gateway's forward leg reads can no longer be missing. Without it, approvals stay local
+    // (offline/flag-off) and the gateway never sees the row.
+    let state = match gate_reporter {
+        Some(reporter) => {
+            tracing::info!(
+                instance = reporter.instance_id(),
+                lease_ttl_ms = reporter.lease_ttl_ms(),
+                renew_ms = reporter.renew_ms(),
+                "durable gate reporter armed (approval writes Execution_Gate via the gateway)"
+            );
+            state.with_gate_reporter(Arc::new(reporter))
+        }
+        None => {
+            if !gateway_endpoint.trim().is_empty() {
+                tracing::warn!(
+                    "durable gate reporter NOT armed — needs GATEWAY_ENDPOINT + \
+                     GATEWAY_SHARED_SECRET + EXECUTION_PARTITION_ID; approvals stay process-local \
+                     and the gateway will not see an Execution_Gate row"
+                );
+            }
+            state
+        }
+    };
+    state.spawn_gate_keeper();
     let mut server = tokio::spawn(http::serve(addr, state));
 
     // B8 clock-drift safety. The source is selected by CLOCK_OFFSET_SOURCE (CHG-272, CHG-288):

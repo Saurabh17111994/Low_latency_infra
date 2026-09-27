@@ -11,6 +11,7 @@ pub mod execution;
 pub mod executiongate;
 pub mod executor_offline_contract;
 pub mod gate;
+pub mod gate_report;
 pub mod gateway_protocol;
 pub mod health;
 pub mod http;

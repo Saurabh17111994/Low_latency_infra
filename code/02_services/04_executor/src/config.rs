@@ -77,6 +77,19 @@ pub struct ServiceConfig {
     /// The partition this executor owns, from `EXECUTION_PARTITION_ID`. Required exactly when the
     /// durable gate is enabled: without it there is no partition whose row the executor could own.
     pub execution_partition_id: Option<String>,
+    /// H2-5/D2: the account scope written into the durable gate row (`ACCOUNT_SCOPE_ID`), the same
+    /// value the gateway's own config carries — the gateway rejects a report whose scope differs.
+    pub account_scope_id: String,
+    /// H2-5/D2: the fence lease TTL reported to the gateway (`GATE_LEASE_TTL_MS`, default 30 s).
+    /// The gateway writes it as `lease_expires_ts`; the executor renews every
+    /// `gate_lease_renew_ms`, and the first failed renewal safety-halts.
+    pub gate_lease_ttl_ms: u64,
+    /// H2-5/D2: the lease renew interval (`GATE_LEASE_RENEW_MS`, default 10 s). Must be below the
+    /// TTL or a renewal could never keep the lease live.
+    pub gate_lease_renew_ms: u64,
+    /// H2-5/D2: this instance's owner id in the durable row (`EXECUTOR_INSTANCE_ID`). The default
+    /// is per-process, which is enough because a restart's boot halt clears the fence first.
+    pub executor_instance_id: String,
     /// Max |host-clock offset vs UTC| in ms before the drift monitor safety-halts (B8).
     /// Mirrors compose `CLOCK_OFFSET_LIMIT_MS` (ingestion default 200 — see CHG-064).
     pub clock_offset_limit_ms: i64,
@@ -99,6 +112,10 @@ impl std::fmt::Debug for ServiceConfig {
             .field("durable_audit_enabled", &self.durable_audit_enabled)
             .field("durable_dir", &self.durable_dir)
             .field("execution_partition_id", &self.execution_partition_id)
+            .field("account_scope_id", &self.account_scope_id)
+            .field("gate_lease_ttl_ms", &self.gate_lease_ttl_ms)
+            .field("gate_lease_renew_ms", &self.gate_lease_renew_ms)
+            .field("executor_instance_id", &self.executor_instance_id)
             .field("clock_offset_limit_ms", &self.clock_offset_limit_ms)
             .finish()
     }
@@ -162,6 +179,30 @@ impl ServiceConfig {
             );
         }
 
+        // H2-5/D2: the fence lease parameters and the owner identity the durable gate row carries.
+        // Fail closed on a renewal that cannot keep the lease live (renew >= ttl) and on a TTL
+        // beyond the gateway's cap — a wrong value must be visible at boot, not at renewal time.
+        let gate_lease_ttl_ms = get("GATE_LEASE_TTL_MS")
+            .map(|v| v.parse::<u64>())
+            .transpose()?
+            .unwrap_or(30_000);
+        if gate_lease_ttl_ms == 0 || gate_lease_ttl_ms > 120_000 {
+            bail!(
+                "GATE_LEASE_TTL_MS must be in 1..=120000 (got {gate_lease_ttl_ms}) — it is the \
+                 fence lease the gateway writes into Execution_Gate"
+            );
+        }
+        let gate_lease_renew_ms = get("GATE_LEASE_RENEW_MS")
+            .map(|v| v.parse::<u64>())
+            .transpose()?
+            .unwrap_or(10_000);
+        if gate_lease_renew_ms == 0 || gate_lease_renew_ms >= gate_lease_ttl_ms {
+            bail!(
+                "GATE_LEASE_RENEW_MS must be in 1..GATE_LEASE_TTL_MS (got {gate_lease_renew_ms} vs \
+                 ttl {gate_lease_ttl_ms}) — a renewal at or beyond the TTL cannot keep the lease live"
+            );
+        }
+
         Ok(Self {
             gateway_endpoint: gateway,
             bridge_endpoint: bridge,
@@ -186,6 +227,13 @@ impl ServiceConfig {
             // Sibling of compose `EXECUTION_PARTITION_ID`. Absent stays absent: the durable gate
             // path refuses to start rather than inventing a partition name.
             execution_partition_id: get("EXECUTION_PARTITION_ID").map(str::to_string),
+            account_scope_id: get("ACCOUNT_SCOPE_ID").unwrap_or("dev-scope").to_string(),
+            gate_lease_ttl_ms,
+            gate_lease_renew_ms,
+            executor_instance_id: get("EXECUTOR_INSTANCE_ID")
+                .map(str::to_string)
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| format!("executor-{}", std::process::id())),
         })
     }
 
@@ -222,6 +270,10 @@ mod tests {
             durable_audit_enabled: false,
             durable_dir: "data/durable".into(),
             execution_partition_id: None,
+            account_scope_id: "dev-scope".into(),
+            gate_lease_ttl_ms: 30_000,
+            gate_lease_renew_ms: 10_000,
+            executor_instance_id: "exec-test".into(),
             gateway_endpoint: "http://gw:8080".into(),
             bridge_endpoint: "http://bridge:8787".into(),
             bridge_auth_token: String::new(),
