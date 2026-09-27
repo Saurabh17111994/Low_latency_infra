@@ -915,6 +915,38 @@ restart-refresh** (a restarted process would re-mint). Both closed now:
   prepared-before-bridge / exactly-one and cross-restart zero-duplicate claims now hold on the durable
   store against real Fluss, not just offline.
 
+**H2-5 landing (2026-09-27, CHG-334/335/336/337) — the deployed gate-row writer.** The
+2026-08-21 "wired" note above described the durable writers existing and being opened by the
+gateway, but **no deployed component wrote the row**: nautilus ran the in-memory gate (compose
+sets no `DURABLE_*` flags) and the gateway wired the non-authoritative placeholder, so the
+gateway's forward leg flipped `readiness.fluss(false, "key not found")` on the live table
+(CHG-331 attempt 3). The row is now written on every gate transition, natively, with the
+executor staying on `execution-net` (design D2: the gateway is the execution core's Fluss
+writer, as it already is for every other execution table):
+
+- **Gateway (CHG-334):** the enabled startup path opens `FlussGateStateStore` authoritatively
+  and `init`s the HALTED boot row (epoch 1, unfenced) **before** the intent replay, so a
+  missing row can no longer flip readiness; a new signed `POST /v1/gate` accepts
+  `BOOT_HALT` / `APPROVE` / `HALT` / `RENEW` reports, walks the sanctioned
+  `HALTED → RECONCILING → APPROVAL_PENDING → ENABLED` path (the common store gained
+  `transition(...)` for the first two steps — nothing previously produced `APPROVAL_PENDING`),
+  and returns the persisted row.
+- **Executor (CHG-335):** `gate_report.rs` signs and posts the reports over the existing
+  private channel; approval is durable-first (a failed report refuses the transition); boot
+  reports `BOOT_HALT` and adopts the durable epoch (`/healthz durable_gate`); safety halts
+  report in the background; a 30 s lease is renewed every 10 s and the first failed renewal
+  safety-halts.
+- **Config (CHG-336):** `EXECUTION_PARTITION_ID` / `ACCOUNT_SCOPE_ID` on nautilus in both
+  decks (matching the gateway); the runbook hop page documents `durable_gate` + the lease
+  semantics.
+- **Evidence:** H2-2 paper drill attempt 4 (2026-09-27) — `/readyz` 200, `BOOT_HALT` epoch 1,
+  approve → `ENABLED` epoch 3 / fence 1, `RENEW` every 10 s, t9 live PASS
+  (`event_emission:accepted`, `Order_Lifecycle` 0→1), halt epoch 4 / fence 2
+  (`logs/exec-hop/paper-drill-20260927/`).
+- **CHG-337:** the locked-posture boot retry logs the first failure at WARN, the rest at
+  DEBUG, with a 30 s backoff cap (the 24×7 default sits locked, so a WARN every 5 s was
+  ~17k lines/day of noise).
+
 ### WP-4 — T6: Fluss-backed projection writers + Rust emitter + T1 quarantine + differential parity (Java + Rust) — **DONE (live-verified + cross-language parity, CHG-052)**
 
 - **What's built:** pure-JVM projection engine + ledger (426 tests green); gateway `FlussProjectionWriter`/`FlussProjectionLedgerStore`.

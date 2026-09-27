@@ -1,7 +1,9 @@
 # Executor gate row — native wiring (scope doc, H2-5)
 
-**Created:** 2026-09-27 · **Status:** approved 2026-09-27 — **D2** (gateway-written),
-fence/lease TTL 30 s / renew 10 s / halt-on-loss accepted. Implementing (S1→S5).
+**Created:** 2026-09-27 · **Status:** landed 2026-09-27 — **D2** (gateway-written),
+fence/lease TTL 30 s / renew 10 s / halt-on-loss accepted. S1–S4 done; the S4 acceptance (the
+H2-2 paper drill attempt 4) **PASSED**; follow-up CHG-337 (locked-posture retry quieting)
+landed.
 
 **Source:** plan `docs/plans/2026-09-27-execution-mode-hop-paper-sandbox.md` H2-5, finding
 from CHG-331 attempt 3. Operator decision 2026-09-27: native path (no gateway semantic
@@ -220,3 +222,24 @@ protocol shape below is the approved one.
 - [x] If D1: network decision — not applicable.
 - [x] Fence/lease parameters: TTL 30 s / renew 10 s / halt-on-loss accepted.
 - [x] Slice order S1→S4 accepted; S4 re-runs the H2-2 drill as the acceptance test.
+
+## 9. S4 acceptance (2026-09-27)
+
+The H2-2 paper drill attempt 4 passed end-to-end on the rebuilt images (gateway
+`6d4218273f8f`, nautilus `e77b10ee8ef8`); full narrative in
+`logs/exec-hop/paper-drill-20260927/notes.md`:
+
+| Step | Observed |
+|---|---|
+| Enabled gateway boot | `/readyz` 200 (row created before the replay; no `key not found`) |
+| Executor boot report | `BOOT_HALT` applied, row adopted, `/healthz durable_gate:true`, epoch 1 |
+| Signed approve (epoch 1) | `ENABLED` epoch 3 / fence 1 — the sanctioned path HALTED(1)→RECONCILING(2)→APPROVAL_PENDING(3)→ENABLED(3); executor adopted 3 |
+| Lease | `RENEW` applied every ~10 s, TTL 30 s |
+| `t9_order_sandbox.py --live` | **PASS** — place 202 + `event_emission:accepted`, `Order_Lifecycle` 0→1, cancel 202 |
+| Signed halt (epoch 3) | `HALTED` epoch 4 / fence 2; halt ACK epoch adopted locally |
+| Revert | gateway `/readyz` 503, bridge `disabled`, nautilus `HALTED` epoch 4 |
+
+Follow-up CHG-337: the locked-posture boot retry now logs the first failure at WARN and the
+rest at DEBUG with a 30 s backoff cap (measured in the drill: a WARN every 5 s, ~17k lines/day
+for an expected posture), covered by `gate_keeper_retries_a_refused_boot_report_then_hydrates`
+and a live boot smoke (one WARN in 25 s; enable → hydration of the existing row).

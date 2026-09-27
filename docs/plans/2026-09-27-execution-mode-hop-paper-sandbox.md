@@ -1,7 +1,8 @@
 # Execution mode hop — paper ↔ sandbox readiness (plan)
 
-**Created:** 2026-09-27 · **Status:** active — H4-1/H2-4 landed; H2-2 drill re-run gated by
-H2-5 (operator decision pending).
+**Created:** 2026-09-27 · **Status:** active — H2-1…H2-5 landed; the paper drill passed
+(attempt 4). Remaining: H3-2 (funded broker window), H4-2 (honesty sweep), the Monday P4-4
+market-hours window.
 
 **Operator goal (2026-09-27):** make sure paper and sandbox are fully implemented, so that
 when it is time we only *change configuration* and can hop between `disabled` / paper /
@@ -64,7 +65,7 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   plus fills/positions when present), cancel, evidence; correct gate epoch; update the
   stale test pin (failing-first). Landed CHG-329: red 6 tests → green 20/20; `/healthz`
   gate+epoch, fresh identities, log-end poll, distinct-id cancel, evidence JSON.
-- [L] **H2-2** — Paper drill: `EXECUTION_BRIDGE_MODE=fake` + signed approve → harness →
+- [x] **H2-2** — Paper drill: `EXECUTION_BRIDGE_MODE=fake` + signed approve → harness →
   assert rows → signed halt → mode `disabled` → offline posture verified; evidence under
   `logs/exec-hop/paper-drill-<date>/`. Attempt 1 (2026-09-27, CHG-331): bridge leg proven
   (202 + fake broker id); projection leg gated — gateway `/v1/events` 503 under
@@ -72,13 +73,20 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   enabled but failed closed on an invalid `Execution_Intent` row — the `instruction_id`
   contract break (H2-4); reverted. Attempt 3 (2026-09-27, after CHG-333): the validator fix
   proven (all 9 rows accepted, reader reached the forward leg) but blocked by H2-5 — the
-  missing `Execution_Gate` row keeps `/readyz` 503; reverted. Re-run after H2-5.
-- [L] **H2-3** — Projection enablement for the paper drill (operator decision): decouple the
+  missing `Execution_Gate` row keeps `/readyz` 503; reverted. **Attempt 4 (2026-09-27, after
+  CHG-334/335/336): PASS** — the durable row exists before the replay (`/readyz` 200),
+  `BOOT_HALT` hydrated epoch 1, the signed approve walked the sanctioned path to `ENABLED`
+  epoch 3, `RENEW` every ~10 s, `t9_order_sandbox.py --live` PASS (`event_emission:accepted`,
+  `Order_Lifecycle` 0→1, cancel 202), signed halt epoch 4 / fence 2, reverted to the offline
+  posture. Evidence `logs/exec-hop/paper-drill-20260927/attempt4/` + `notes.md`.
+- [x] **H2-3** — Projection enablement for the paper drill (operator decision): decouple the
   gateway master switch (`GATEWAY_EXECUTION_ENABLED`, default false; gateway service only,
   nautilus keeps its boot guard), align the harness required tables (`Order_Lifecycle`
   required; attempts/fills/positions reported), extend `t8` + the runbook hop page, then
-  re-run H2-2 in a second short window. Landed 2026-09-27 (CHG-332); drill re-run pending
-  H2-5 (attempt 3 proved the enable path reaches the forward leg).
+  re-run H2-2 in a second short window. Landed 2026-09-27 (CHG-332); the drill re-run landed
+  with attempt 4: the gateway enabled alone, `/readyz` 200, `/v1/events` accepted the
+  lifecycle event (`event_emission:accepted`) and `Order_Lifecycle` grew 0→1 — the decoupled
+  switch is proven end-to-end.
 - [x] **H2-4** — `instruction_id` contract break (operator decision 2026-09-27, option A:
   widen the validator to the canonical format). The compute builder emits
   `ei-v1-<sha256>` (70 chars) while the gateway validator capped at 64
@@ -89,7 +97,7 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   `test_instruction_id_contract.py` 3/3; dossier grammar; gateway image rebuilt
   (`make images`). Live half proven in CHG-331 attempt 3 (the reader accepted all 9 real
   rows and reached the forward leg); the drill itself is gated by H2-5.
-- [~] **H2-5** — `Execution_Gate` has no writer in the deployed topology (finding from
+- [x] **H2-5** — `Execution_Gate` has no writer in the deployed topology (finding from
   CHG-331 attempt 3; operator decision 2026-09-27: native path — no gateway semantic
   exception, no data cleanup). The gateway's forward leg looks up the durable gate row in
   Fluss (`NautilusIntentClient` → `FlussControlStateStore`); the row does not exist
@@ -104,7 +112,13 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   durable-first adoption; 30 s lease / 10 s renew / halt-on-loss). Landed: S1 gateway writer +
   endpoint (CHG-334 `8121c535`, boot-epoch follow-up `f08a8926`), S2 executor durable-first
   reports (CHG-335 `aae8c17c`), S3 compose/stack env + runbook (CHG-336). S4 — image rebuild +
-  the H2-2 drill re-run — is the acceptance test.
+  the H2-2 drill re-run — is the acceptance test. **S4 PASSED** (attempt 4, 2026-09-27
+  ~11:23–11:26 UTC): `/readyz` 200 on the enabled boot (row created before the replay);
+  `BOOT_HALT` adopted epoch 1; signed approve wrote the sanctioned path `ENABLED` epoch 3 /
+  fence 1 and the executor adopted it; `RENEW` every ~10 s; t9 live **PASS**
+  (`event_emission:accepted`, `Order_Lifecycle` 0→1); signed halt epoch 4 / fence 2; both
+  switches reverted to the fail-closed defaults. Follow-up CHG-337 quiets the locked-posture
+  boot retries (first WARN then DEBUG, 30 s cap) + the retry-then-hydrate test.
 
 #### H3 — Sandbox readiness (funded window)
 
@@ -131,10 +145,10 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | H1 — Switch contract (offline) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| H2 — Paper proof (deployed stack, `fake` mode) | 5 | 2 | 1 | 0 | 2 | 0 | 0 |
+| H2 — Paper proof (deployed stack, `fake` mode) | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
 | H3 — Sandbox readiness (funded window) | 2 | 0 | 0 | 1 | 1 | 0 | 0 |
 | H4 — Decisions and follow-ups | 3 | 1 | 0 | 1 | 0 | 0 | 1 |
-| **Total** | **12** | **5** | **1** | **2** | **3** | **0** | **1** |
+| **Total** | **12** | **8** | **0** | **2** | **1** | **0** | **1** |
 
 ## Overview — the final product
 

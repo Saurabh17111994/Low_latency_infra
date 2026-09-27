@@ -456,7 +456,13 @@ impl ServerState {
         tokio::spawn(async move {
             // Boot: retry until the gateway answers. The gateway may be disabled for a long
             // time; the executor serves HALTED meanwhile, which is safe.
+            //
+            // CHG-337: the 24×7 default has the gateway locked, so this retry can legitimately
+            // run for hours (measured: the first drill attempt logged a WARN every 5 s while
+            // locked — ~17k lines/day for an expected posture). The FIRST failure is loud; the
+            // rest stay at debug, and the eventual adoption line is the success signal.
             let mut backoff = std::time::Duration::from_millis(500);
+            let mut attempts: u64 = 0;
             loop {
                 let epoch = state.snapshot().control_epoch;
                 match reporter.boot_halt(epoch).await {
@@ -476,14 +482,28 @@ impl ServerState {
                         tracing::info!(
                             epoch = ack.epoch,
                             state = %ack.state,
+                            attempts = attempts + 1,
                             "durable gate row adopted at boot (epoch hydrated)"
                         );
                         break;
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "boot gate report failed; retrying");
+                        attempts += 1;
+                        if attempts == 1 {
+                            tracing::warn!(
+                                error = %e,
+                                "boot gate report failed; retrying quietly (gateway may be locked)"
+                            );
+                        } else {
+                            tracing::debug!(
+                                attempt = attempts,
+                                error = %e,
+                                "boot gate report retry"
+                            );
+                        }
                         tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(std::time::Duration::from_secs(5));
+                        // 30 s cap: a locked gateway is an expected posture, not an incident.
+                        backoff = (backoff * 2).min(std::time::Duration::from_secs(30));
                     }
                 }
             }
@@ -2714,6 +2734,98 @@ mod tests {
             s.write_all(resp.as_bytes()).await.unwrap();
         });
         (addr, rx, handle)
+    }
+
+    /// Two-shot gateway stub: refuses the first report (as a locked gateway does), then answers.
+    async fn gateway_stub_two(
+        replies: Vec<(&'static str, &'static str)>,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            for (status, reply_body) in replies {
+                let (mut s, _) = listener.accept().await.unwrap();
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let mut expected: Option<usize> = None;
+                loop {
+                    let n =
+                        tokio::time::timeout(std::time::Duration::from_secs(5), s.read(&mut chunk))
+                            .await
+                            .expect("timed out reading the report")
+                            .unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if expected.is_none() {
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                            let len = head
+                                .split("content-length:")
+                                .nth(1)
+                                .and_then(|v| v.trim().split(' ').next())
+                                .and_then(|d| d.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            expected = Some(pos + 4 + len);
+                        }
+                    }
+                    if let Some(end) = expected {
+                        if buf.len() >= end {
+                            break;
+                        }
+                    }
+                }
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply_body}",
+                    reply_body.len()
+                );
+                s.write_all(resp.as_bytes()).await.unwrap();
+            }
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn gate_keeper_retries_a_refused_boot_report_then_hydrates() {
+        // CHG-337: the live sequence — a locked gateway refuses the first boot report, the
+        // keeper backs off and retries, and the durable epoch is adopted once it answers.
+        let (gw_addr, gw) = gateway_stub_two(vec![
+            (
+                "503 Service Unavailable",
+                r#"{"error":"execution disabled via EXECUTION_ENABLED"}"#,
+            ),
+            (
+                "200 OK",
+                r#"{"outcome":"HALTED","state":"HALTED","epoch":7,"fence_token":0}"#,
+            ),
+        ])
+        .await;
+        let state = ServerState::with_gateway_auth(
+            ExecState::Halted,
+            "secret".into(),
+            "execution-gateway.v1".into(),
+        )
+        .with_gate_reporter(Arc::new(test_reporter(gw_addr)));
+        state.spawn_gate_keeper();
+
+        for _ in 0..250 {
+            if state.snapshot().gate_hydrated {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let snap = state.snapshot();
+        assert!(
+            snap.gate_hydrated,
+            "the retry must hydrate once the gateway answers"
+        );
+        assert_eq!(
+            snap.control_epoch, 7,
+            "the durable epoch is adopted after a retry"
+        );
+        assert_eq!(snap.gate, ExecState::Halted);
+        gw.await.unwrap();
     }
 
     #[tokio::test]
