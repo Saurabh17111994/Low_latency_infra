@@ -35,7 +35,13 @@ S3b landed (CHG-350 — sink wiring, flags, preflight validator, rollout forward
 tooling; compute suite 586 run / 0 failures / 18 env-gated skips; runner tests 9 passed) and
 dev smoke PASSED 2026-09-27: 162,816 emitted = 162,816 sink records = 162,817 table rows
 (one upsert-check row), zero failures — evidence `logs/feature-layer-smoke-20260927/`.
-Next: S4 latency re-measure (layer on, same feed) — then the Monday items.
+S4 landed (CHG-351 — `tick→strategy` A/B at real-life scale, full 2,433-instrument universe at
+2 Hz = 4,866 ticks/s, two runs per side: median unaffected (OFF 58/64 vs ON 65/63 ms), calm
+p95/p99 equal (≈92/102 vs ≈93–96/102), but layer ON raises 250–500 ms tail-burst frequency
+(3/16 vs 12/16 probe windows); production-rate re-check + possible sink tuning flagged —
+evidence `logs/feature-layer-s4-20260927/REPORT.md`).
+Next: Monday items — P4-4 real-tick day run; real-tick latency settling; then the Group A
+offline queue.
 
 ## How to add or remove a feature (the only procedure)
 

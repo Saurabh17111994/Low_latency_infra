@@ -115,6 +115,8 @@ Tests use the full 3,000-instrument production manifest, connection count, subsc
 
 Every report includes p50/p95/p99, UTC clock source/offset, sample duration, failures/restarts included, workload, and exact versions. Candle window waiting is reported separately.
 
+Feature-layer regression note (2026-09-28, dev): full 2,433-instrument fake feed at 4,866 ticks/s, stored feature layer off vs on (two 240 s runs each). Median and calm-window p95/p99 were unchanged; the layer raised the frequency of 250–500 ms tail bursts (probe windows with p95 > 200 ms: 3/16 off vs 12/16 on). The SLO above is defined at 50,000 ticks/s / 3,000 instruments, so the feature layer must be re-measured at that workload and any sink tuning applied before production enablement (evidence: `logs/feature-layer-s4-20260927/REPORT.md`).
+
 ## 3.2 Availability and recovery
 
 - Production SHALL tolerate loss of any one workload VM at the normal workload without violating the tested durability posture.
