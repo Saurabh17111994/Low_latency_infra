@@ -67,12 +67,22 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   assert rows → signed halt → mode `disabled` → offline posture verified; evidence under
   `logs/exec-hop/paper-drill-<date>/`. Attempt 1 (2026-09-27, CHG-331): bridge leg proven
   (202 + fake broker id); projection leg gated — gateway `/v1/events` 503 under
-  `EXECUTION_ENABLED=false`; halted + reverted cleanly. Re-run after H2-3.
-- [?] **H2-3** — Projection enablement for the paper drill (operator decision): decouple the
+  `EXECUTION_ENABLED=false`; halted + reverted cleanly. Attempt 2 (2026-09-27): gateway
+  enabled but failed closed on an invalid `Execution_Intent` row — the `instruction_id`
+  contract break (H2-4); reverted. Re-run after H2-4.
+- [L] **H2-3** — Projection enablement for the paper drill (operator decision): decouple the
   gateway master switch (`GATEWAY_EXECUTION_ENABLED`, default false; gateway service only,
   nautilus keeps its boot guard), align the harness required tables (`Order_Lifecycle`
   required; attempts/fills/positions reported), extend `t8` + the runbook hop page, then
-  re-run H2-2 in a second short window.
+  re-run H2-2 in a second short window. Landed 2026-09-27 (CHG-332); drill re-run pending.
+- [?] **H2-4** — `instruction_id` contract break (operator decision): the compute builder
+  emits `ei-v1-<sha256>` (70 chars) while the gateway validator caps at 64
+  (`IntentValidator`, P3-094); the gateway fails closed on the live intent rows, so the
+  compute→gateway intent path has never run end to end (CHG-331 attempt 2). Proposed:
+  widen the validator to the canonical format + pin a cross-service test (real builder id
+  → validator) + a contract-doc grammar; then rebuild the gateway image and re-run the
+  H2-2 drill. Alternative: shorten the producer id to ≤64 and clean the live
+  `Execution_Intent` rows.
 
 #### H3 — Sandbox readiness (funded window)
 
@@ -99,10 +109,10 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | H1 — Switch contract (offline) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| H2 — Paper proof (deployed stack, `fake` mode) | 3 | 1 | 0 | 0 | 1 | 1 | 0 |
+| H2 — Paper proof (deployed stack, `fake` mode) | 4 | 1 | 0 | 0 | 2 | 1 | 0 |
 | H3 — Sandbox readiness (funded window) | 2 | 0 | 0 | 1 | 1 | 0 | 0 |
 | H4 — Decisions and follow-ups | 3 | 1 | 0 | 1 | 0 | 0 | 1 |
-| **Total** | **10** | **4** | **0** | **2** | **2** | **1** | **1** |
+| **Total** | **11** | **4** | **0** | **2** | **3** | **1** | **1** |
 
 ## Overview — the final product
 

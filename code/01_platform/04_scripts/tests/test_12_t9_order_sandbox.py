@@ -205,8 +205,8 @@ def test_live_halted_gate_reports_unwired_before_signing():
 
 
 def test_live_full_round_trip_passes():
-    """The A2.6 target: gate ENABLED, place 202 with a broker id, required
-    tables show the appended rows, cancel acknowledged — PASS (exit 0)."""
+    """The A2.6 target: gate ENABLED, place 202 with a broker id,
+    Order_Lifecycle shows the appended row, cancel acknowledged — PASS (exit 0)."""
     old = _live_env()
     try:
         transport = t9.FakeTransport([_healthz(), _place_202(), _cancel_202()])
@@ -284,6 +284,55 @@ def test_live_no_table_growth_fails():
                                       require_stack=False, poll_timeout_s=0)
         assert (code, cls) == (1, "FAIL"), f"{cls}/{note}"
         assert "no append" in note.lower()
+    finally:
+        _restore_env(old)
+
+
+def test_live_gateway_event_refusal_fails_with_the_reason():
+    """CHG-331's real failure mode: a 202 whose lifecycle event the gateway
+    refused must FAIL immediately with the gateway reason — not wait out the
+    poll and report a bare 'no append'."""
+    old = _live_env()
+    try:
+        body = json.loads(_place_202()[1])
+        body["event_emission"] = ("failed: gateway /v1/events responded 503: "
+                                  "execution disabled via EXECUTION_ENABLED")
+        transport = t9.FakeTransport([_healthz(), (202, json.dumps(body))])
+        code, cls, note = t9.run_live(
+            transport=transport,
+            probe=t9.FakeFlussProbe({"Order_Lifecycle": [10, 11]}),
+            require_stack=False, poll_timeout_s=0)
+        assert (code, cls) == (1, "FAIL"), f"{cls}/{note}"
+        assert "gateway" in note.lower() and "503" in note
+        assert len(transport.calls) == 2  # healthz + place; no cancel on a failed emit
+    finally:
+        _restore_env(old)
+
+
+def test_live_required_table_is_order_lifecycle_only():
+    """CHG-332: Order_Lifecycle is the projection of the route's emitted event —
+    the only Fluss table this direct-to-nautilus route can grow. Attempts/Fills/
+    Positions are reported, never required."""
+    old = _live_env()
+    try:
+        transport = t9.FakeTransport([_healthz(), _place_202(), _cancel_202()])
+        code, cls, note = t9.run_live(
+            transport=transport,
+            probe=t9.FakeFlussProbe({"Order_Lifecycle": [10, 11]}),
+            require_stack=False)
+        assert (code, cls) == (0, "PASS"), f"{cls}/{note}"
+        assert note["tables"]["required"] == ["Order_Lifecycle"]
+        assert "Execution_Attempts" in note["tables"]["optional"]
+
+        # An attempt-only append must NOT satisfy the assert.
+        transport = t9.FakeTransport([_healthz(), _place_202()])
+        code, cls, note = t9.run_live(
+            transport=transport,
+            probe=t9.FakeFlussProbe({"Execution_Attempts": [5, 6],
+                                     "Order_Lifecycle": [10, 10]}),
+            require_stack=False, poll_timeout_s=0)
+        assert (code, cls) == (1, "FAIL"), f"{cls}/{note}"
+        assert "Order_Lifecycle" in note
     finally:
         _restore_env(old)
 

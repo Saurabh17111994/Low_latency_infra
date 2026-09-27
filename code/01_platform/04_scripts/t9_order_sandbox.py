@@ -11,21 +11,26 @@ Three honest layers (same philosophy as t8_sandbox_contract_check.py, which this
 harness REUSES by running it as the first offline check):
 
   1. OFFLINE (default, runs today, no containers): static contract checks —
-     t8 12/12 reuse, `execution-t3` compose shape (internal execution-net, zero
-     host ports, bridge mode defaults `disabled`, nautilus EXECUTION_ENABLED
-     false), A2.1 premise (SignalJobConfig EXECUTION_INTENT_ENABLED settable,
-     DurableIntentDispatcher + NautilusIntentClient wired), the three DDL tables
-     with their poll columns, the T9_APPROVED_BY placement gate, and the gateway
-     envelope signing port pinned to a REAL JVM vector (see JW_* below).
+     t8 contract reuse (all checks), `execution-t3` compose shape (internal
+     execution-net, zero host ports, bridge mode defaults `disabled`, nautilus
+     EXECUTION_ENABLED false, gateway projection switch decoupled as
+     GATEWAY_EXECUTION_ENABLED false), A2.1 premise (SignalJobConfig
+     EXECUTION_INTENT_ENABLED settable, DurableIntentDispatcher +
+     NautilusIntentClient wired), the three DDL tables with their poll columns,
+     the T9_APPROVED_BY placement gate, and the gateway envelope signing port
+     pinned to a REAL JVM vector (see JW_* below).
 
   2. LIVE (`--live`): /healthz gate+epoch -> place -> poll -> cancel against
      the in-network stack. Transport runs inside the compose network (the
      profile publishes NO host ports — T8 gate 3 — so probes go through
      `docker compose exec`/`docker run --network <execution-net>`), and the
      table poll reuses the maintained `FlussReadLagProbe` log-end counter (the
-     same host pattern day_run.py uses). Classification is honest:
-       exit 0  = full round-trip asserted (broker_order_id + client_order_ref
-                 echo + required tables appended + cancel acked) — A2.6 target.
+     same host pattern day_run.py uses). The hop also opens the gateway's
+     projection intake (`GATEWAY_EXECUTION_ENABLED=true`, CHG-332) so the
+     route's emitted lifecycle event lands in `Order_Lifecycle` — the required
+     table. Classification is honest:
+       exit 0  = full round-trip asserted (broker_order_id + Order_Lifecycle
+                 appended + cancel acked) — A2.6 target.
        exit 3  = LIVE-CHAIN-UNWIRED — the stack is reachable but the gate is not
                  ENABLED (approve first with `--sign-control approve --post`) or
                  the bridge answered HALTED; never a false PASS.
@@ -54,7 +59,7 @@ Wire contract (documented, cross-pinned to both implementations):
 
 Usage:
   python3 t9_order_sandbox.py                    # offline contract (exit 0)
-  python3 t9_order_sandbox.py --live             # in-network place->poll->cancel (gate ENABLED required)
+  python3 t9_order_sandbox.py --live             # in-network place->poll->cancel (gate ENABLED + gateway intake required)
   python3 t9_order_sandbox.py --self-check       # offline + fake-live demo
   python3 t9_order_sandbox.py --sign-control approve --operator saurabh \
       --evidence CHG-131                        # DEC-044 control envelope on stdout
@@ -88,13 +93,16 @@ SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 COMPOSE = os.path.join(ROOT, "code", "01_platform", "01_docker", "docker-compose.yml")
 EVIDENCE_DIR_DEFAULT = os.path.join(ROOT, "logs", "nautilus-execution")
 
-# Live-leg table assertions: the required tables must show appended rows after a
-# 202; optional ones are reported (the fake lifecycle may not fill/position).
+# Live-leg table assertions: the required table must show appended rows after a
+# 202; the others are reported. Order_Lifecycle is the gateway projection of the
+# route's emitted lifecycle event — the only Fluss table this direct-to-nautilus
+# route can grow (Execution_Attempts belongs to the gateway's own intent path,
+# and nautilus keeps its attempt store in a file; CHG-331/CHG-332).
 FLUSS_PROBE_SRC = os.path.join(SCRIPTS, "fluss-probes", "FlussReadLagProbe.java")
 FLUSS_CP_FILE = os.path.join(ROOT, "code", "02_services", "01_ingestion",
                              "target", "cp.txt")
-LIVE_ASSERT_TABLES = ("Execution_Attempts", "Order_Lifecycle")
-LIVE_OPTIONAL_TABLES = ("Fills", "Positions")
+LIVE_ASSERT_TABLES = ("Order_Lifecycle",)
+LIVE_OPTIONAL_TABLES = ("Execution_Attempts", "Fills", "Positions")
 LIVE_POLL_TIMEOUT_S = 30
 LIVE_POLL_INTERVAL_S = 2
 
@@ -824,6 +832,11 @@ def run_live(transport=None, probe=None, secret="local-dev-only", now=None,
     broker_order_id = str(doc.get("broker_order_id", "")).strip()
     if not doc.get("accepted") or not broker_order_id:
         return 1, "FAIL", f"202 without accepted+broker_order_id: {body[:200]}"
+    emission = str(doc.get("event_emission", ""))
+    if emission.lower().startswith("failed"):
+        return 1, "FAIL", ("gateway refused the lifecycle event: " + emission
+                           + " — the hop needs the gateway projection intake "
+                             "(GATEWAY_EXECUTION_ENABLED=true, CHG-332)")
     print(f"place accepted: broker_order_id={broker_order_id} "
           f"attempt={doc.get('execution_attempt_id', '')} "
           f"event_emission={doc.get('event_emission', '')}", file=sys.stderr)

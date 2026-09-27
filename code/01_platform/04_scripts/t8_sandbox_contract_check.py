@@ -24,6 +24,12 @@ exit-gate properties that are provable WITHOUT a Docker daemon or live cluster:
  10. Hop matrix — daily stays:   the daily runner refuses `fake`/`live` and
                                  `EXECUTION_ENABLED=true` (D1: the hop is a
                                  separate sanctioned procedure).
+  11. Hop matrix — gateway switch: the gateway's projection intake
+                                  (`/v1/events`) has its own variable
+                                  (`GATEWAY_EXECUTION_ENABLED`, default false),
+                                  decoupled from the executor's boot guard, so a
+                                  sanctioned window can open the projection while
+                                  the executor still boots `HALTED` (CHG-332).
 
 Exit code is 0 only when every check passes; machine-readable summary on the
 last line (prefix `t8-sandbox-contract:`). Mirrors the APP/change-control
@@ -252,6 +258,28 @@ def main():
     except (subprocess.SubprocessError, ValueError, IndexError) as exc:
         check("daily runner refuses fake/live/enabled postures (D1)", False, str(exc))
 
+    # 11. Hop matrix — gateway projection switch (CHG-332). The gateway's master
+    #     switch is its own variable, default false, so a sanctioned window can open
+    #     /v1/events while nautilus keeps its boot guard (which refuses true at boot).
+    gw = services.get("execution-gateway", {})
+    gw_env = gw.get("environment") or {}
+    gw_switch = gw_env.get("EXECUTION_ENABLED") if isinstance(gw_env, dict) else None
+    naut = services.get("nautilus", {})
+    naut_env = naut.get("environment") or {}
+    naut_switch = naut_env.get("EXECUTION_ENABLED") if isinstance(naut_env, dict) else None
+    check(
+        "gateway projection switch decoupled (GATEWAY_EXECUTION_ENABLED, default false)",
+        isinstance(gw_switch, str) and "GATEWAY_EXECUTION_ENABLED" in gw_switch
+        and _substitution_default(gw_switch) == "false",
+        f"gateway EXECUTION_ENABLED={gw_switch!r}",
+    )
+    check(
+        "nautilus boot guard stays on EXECUTION_ENABLED (not the gateway switch)",
+        isinstance(naut_switch, str) and "GATEWAY_EXECUTION_ENABLED" not in naut_switch
+        and _substitution_default(naut_switch) == "false",
+        f"nautilus EXECUTION_ENABLED={naut_switch!r}",
+    )
+
     summary = f"t8-sandbox-contract: all {len(FAILURES) == 0 and 'checks pass' or f'{len(FAILURES)} check(s) FAILED'}"
     print(summary)
     sys.exit(1 if FAILURES else 0)
@@ -264,6 +292,12 @@ def _read_text(path):
             return fh.read()
     except OSError:
         return None
+
+
+def _substitution_default(value):
+    """The default of a `${VAR:-default}` compose value, or None when absent."""
+    m = re.match(r"^\$\{[^:}]+:-([^}]*)\}$", str(value))
+    return m.group(1) if m else None
 
 
 def _go_case_body(src, mode):

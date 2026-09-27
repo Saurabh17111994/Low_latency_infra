@@ -770,10 +770,10 @@ or `MemoryUtil` `InaccessibleObjectException` (`--add-opens` missing); later `in
 
 ### Execution mode hop — `disabled` / `fake` (paper) / `live` (sandbox)
 
-The hop is a configuration change on the bridge plus the executor's signed gate — no code
-change (plan `docs/plans/2026-09-27-execution-mode-hop-paper-sandbox.md`). The daily runner
-deliberately refuses all of it (D1, `day_run.posture_violations`); the hop is a separate,
-sanctioned procedure — do not run `make day` during a drill window.
+The hop is a configuration change on the bridge and the gateway plus the executor's signed
+gate — no code change (plan `docs/plans/2026-09-27-execution-mode-hop-paper-sandbox.md`).
+The daily runner deliberately refuses all of it (D1, `day_run.posture_violations`); the hop
+is a separate, sanctioned procedure — do not run `make day` during a drill window.
 
 | Mode | What runs | How to select | Orders reach Arrow? |
 |---|---|---|---|
@@ -781,36 +781,50 @@ sanctioned procedure — do not run `make day` during a drill window.
 | `fake` (paper) | bridge's offline `FakeBroker` (place/modify/cancel succeed; no market data) | `EXECUTION_BRIDGE_MODE=fake` | never — the fake branch constructs no Arrow client, and only the bridge is on `arrow-egress` |
 | `live` (sandbox/real) | real Arrow AutoLogin + order API | `EXECUTION_BRIDGE_MODE=live` + `ARROW_*` in the bridge only | yes — only after the signed gate approval |
 
-Independently of the mode, the executor gate boots `HALTED`, and only a signed `GATE_APPROVE`
-envelope naming the current `/healthz` `gate_epoch` moves it to `ENABLED`; `GATE_HALT`
-returns to safe (DEC-044 single operator). Every accepted control action bumps the epoch, so
-re-read `/healthz` before the next control action.
+The hop has two more switches (CHG-331/CHG-332). The **gateway projection intake**
+(`/v1/events`, the writer of `Order_Lifecycle`) is fail-closed behind the gateway's own
+`GATEWAY_EXECUTION_ENABLED` (default `false`) — a *separate* variable because nautilus
+refuses its boot flag set true at boot; never set the gateway switch on the executor.
+Independently, the executor gate boots `HALTED`, and only a signed `GATE_APPROVE` envelope
+naming the current `/healthz` `gate_epoch` moves it to `ENABLED`; `GATE_HALT` returns to
+safe (DEC-044 single operator). Every accepted control action bumps the epoch, so re-read
+`/healthz` before the next control action.
 
-**Hop to paper (the paper drill).** Run from the repo root; `--out` keeps the evidence.
+**Hop to paper (the paper drill).** Run from the repo root. Use the canonical compose form
+(both env files — the bridge token must match the running stack) and `--no-deps` so only
+the named service is recreated; never run a full `up` while a switch is set.
 
-1. Bridge to fake (the shell value overrides the compose default):
-   `cd code/01_platform/01_docker && EXECUTION_BRIDGE_MODE=fake docker compose --profile execution-t3 up -d execution-bridge`
-2. Read the epoch: `docker run --rm --network 01_docker_execution-net curlimages/curl -s http://nautilus:9190/healthz` → `gate_epoch` (starts 1).
-3. Approve (signed, audited):
+1. Gateway projection intake on:
+   `GATEWAY_EXECUTION_ENABLED=true docker compose --env-file code/01_platform/01_docker/.env --env-file code/01_platform/01_docker/secrets.env -f code/01_platform/01_docker/docker-compose.yml --profile execution-t3 up -d --no-deps execution-gateway`
+   (confirm it answers: `docker run --rm --network 01_docker_execution-net curlimages/curl -s -o /dev/null -w '%{http_code}' http://execution-gateway:9180/readyz` → `200`).
+2. Bridge to fake (the shell value overrides the compose default):
+   `EXECUTION_BRIDGE_MODE=fake docker compose --env-file code/01_platform/01_docker/.env --env-file code/01_platform/01_docker/secrets.env -f code/01_platform/01_docker/docker-compose.yml --profile execution-t3 up -d --no-deps execution-bridge`
+3. Read the epoch: `docker run --rm --network 01_docker_execution-net curlimages/curl -s http://nautilus:9190/healthz` → `gate_epoch` (starts 1).
+4. Approve (signed, audited):
    `T9_APPROVED_BY=saurabh python3 code/01_platform/04_scripts/t9_order_sandbox.py --sign-control approve --operator saurabh --evidence CHG-<id> --gate-epoch <epoch> --post`
-4. Drill:
+5. Drill:
    `T9_APPROVED_BY=saurabh python3 code/01_platform/04_scripts/t9_order_sandbox.py --live --out logs/exec-hop/paper-drill-<date>`
-   (healthz gate check → place RCF-EQ ×1 → poll `Execution_Attempts`/`Order_Lifecycle` → cancel;
+   (healthz gate check → place RCF-EQ ×1 → poll `Order_Lifecycle` → cancel;
    exit 0 = asserted, 3 = gate not `ENABLED`, 2 = blocked/probe-unreadable, 1 = failed assert).
-5. Revert — always, in this order:
+6. Revert — always, in this order:
    a. re-read the epoch (approve bumped it), then signed halt:
       `T9_APPROVED_BY=saurabh python3 code/01_platform/04_scripts/t9_order_sandbox.py --sign-control halt --operator saurabh --evidence CHG-<id> --reason "paper drill complete" --gate-epoch <new epoch> --post`
-   b. bridge back to the default: `docker compose --profile execution-t3 up -d execution-bridge` (with `EXECUTION_BRIDGE_MODE` unset → `disabled`).
-   c. confirm: `/healthz` `HALTED`, bridge `/healthz` `"mode":"disabled"`, then `make day ARGS="status"` shows the offline execution posture again (I6).
+   b. gateway back to the fail-closed default: `docker compose --env-file code/01_platform/01_docker/.env --env-file code/01_platform/01_docker/secrets.env -f code/01_platform/01_docker/docker-compose.yml --profile execution-t3 up -d --no-deps execution-gateway` (`GATEWAY_EXECUTION_ENABLED` unset → `false`).
+   c. bridge back to the default: `docker compose --env-file code/01_platform/01_docker/.env --env-file code/01_platform/01_docker/secrets.env -f code/01_platform/01_docker/docker-compose.yml --profile execution-t3 up -d --no-deps execution-bridge` (`EXECUTION_BRIDGE_MODE` unset → `disabled`).
+   d. confirm: nautilus `/healthz` `HALTED`, bridge `/healthz` `"mode":"disabled"`, then `make day ARGS="status"` shows the offline execution posture again (I6).
 
-**Hop to sandbox.** The same five steps with `EXECUTION_BRIDGE_MODE=live` and the real
-credentials — the *same* harness command, which is the paper↔sandbox parity proof. Requires a
-funded account and market hours; this is the only path that places a real broker order, and it
-is release-gated (`docs/06_operations/08-live-readiness-gaps.md`).
+**Hop to sandbox.** The same six steps with `EXECUTION_BRIDGE_MODE=live` and the real
+credentials — the *same* harness command, which is the paper↔sandbox parity proof. Requires
+a funded account and market hours; this is the only path that places a real broker order,
+and it is release-gated (`docs/06_operations/08-live-readiness-gaps.md`). Note the gateway's
+`IntentReader` replays `Execution_Intent` from offset zero (durable dedup skips committed
+rows): with the gate `ENABLED`, a pending intent is forwarded — a fake order in paper mode,
+a real order in the live sandbox, so settle the intent table before a live window.
 
 **Offline checks before any hop:** `python3 code/01_platform/04_scripts/t8_sandbox_contract_check.py`
 (defaults fail-closed, mode-switch branches, `fake` Arrow-free, signed control routes,
-daily-runner refusal) and `python3 code/01_platform/04_scripts/t9_order_sandbox.py --offline`.
+decoupled gateway switch, daily-runner refusal) and
+`python3 code/01_platform/04_scripts/t9_order_sandbox.py --offline`.
 
 ### Retention and audit — policy approval (WP-7 T0)
 

@@ -1010,9 +1010,12 @@ services:
       GATEWAY_REQUEST_TIMEOUT_MS: "2000"
       GATEWAY_POLL_TIMEOUT_MS: "250"
       # CHG-092: GatewayConfig.fromEnv reads EXECUTION_ENABLED (default false, fail-closed);
-      # without this mapping the gateway stays locked even when .env flips — /v1/events and
-      # /control/approve would 503. Default false preserves the .env.example safety rule.
-      EXECUTION_ENABLED: ${EXECUTION_ENABLED:-false}
+      # without this mapping the gateway stays locked — /v1/events and /control/approve
+      # would 503. CHG-332: the gateway's master switch is its OWN variable so a sanctioned
+      # paper/sandbox window can open the projection intake while nautilus keeps its boot
+      # guard (the Rust config refuses the flag set true at boot). Default false preserves
+      # the .env.example safety rule.
+      EXECUTION_ENABLED: ${GATEWAY_EXECUTION_ENABLED:-false}
   nautilus:
     profiles: [execution-t3]
     build:

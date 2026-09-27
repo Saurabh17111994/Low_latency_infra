@@ -149,7 +149,9 @@ class P6_575_576_795SandboxContract(unittest.TestCase):
     def test_true_forms_are_caught_including_substitution_and_quotes(self) -> None:
         for text in ("EXECUTION_ENABLED: true", "EXECUTION_ENABLED=true",
                      'EXECUTION_ENABLED: "true"', "EXECUTION_ENABLED: 'true'",
-                     "EXECUTION_ENABLED: ${EXECUTION_ENABLED:-true}"):
+                     "EXECUTION_ENABLED: ${EXECUTION_ENABLED:-true}",
+                     "EXECUTION_ENABLED: ${GATEWAY_EXECUTION_ENABLED:-true}",
+                     "GATEWAY_EXECUTION_ENABLED: true"):
             with self.subTest(text=text):
                 self.assertTrue(t8._EXEC_ENABLED_TRUE_RE.search(text), text)
 
@@ -212,6 +214,23 @@ class HopMatrixChecks(unittest.TestCase):
         for needle in ('"/v1/approve"', '"/v1/halt"', "GATE_APPROVE",
                        "GATE_HALT"):
             self.assertIn(needle, src)
+
+    def test_real_compose_gateway_switch_is_decoupled_and_false(self) -> None:
+        """CHG-332: the gateway's projection switch is its own variable (default
+        false), so a sanctioned window can open /v1/events while the executor
+        keeps its boot guard (which refuses EXECUTION_ENABLED=true)."""
+        if not HAVE_YAML:
+            self.skipTest("PyYAML not installed")
+        compose = yaml.safe_load(Path(t8.COMPOSE).read_text(encoding="utf-8"))
+        services = compose["services"]
+        gw = (services["execution-gateway"].get("environment") or {})[
+            "EXECUTION_ENABLED"]
+        naut = (services["nautilus"].get("environment") or {})[
+            "EXECUTION_ENABLED"]
+        self.assertIn("GATEWAY_EXECUTION_ENABLED", gw)
+        self.assertEqual(t8._substitution_default(gw), "false")
+        self.assertNotIn("GATEWAY_EXECUTION_ENABLED", naut)
+        self.assertEqual(t8._substitution_default(naut), "false")
 
     def test_daily_runner_refuses_fake_live_and_enabled(self) -> None:
         import day_run  # same scripts dir (sys.path insert above)
