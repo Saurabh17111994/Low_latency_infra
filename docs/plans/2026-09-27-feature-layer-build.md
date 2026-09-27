@@ -31,9 +31,11 @@
 Progress: S1 landed (CHG-347); S2 landed (CHG-348 — features wired into `StrategyHostFunction`,
 shared `FeatureView`, fail-open counters; compute suite 572 run / 0 failures / 18 env-gated skips);
 S3a landed (CHG-349 — DDL proposal + column contract + host side output, no sink/cluster yet).
-S3b offline half landed (CHG-350 — sink wiring, flags, preflight validator, rollout forwarding;
-compute suite 586 run / 0 failures / 18 env-gated skips) — dev table creation + smoke pending
-operator choice of the apply route (DDL hazard).
+S3b landed (CHG-350 — sink wiring, flags, preflight validator, rollout forwarding, runner
+tooling; compute suite 586 run / 0 failures / 18 env-gated skips; runner tests 9 passed) and
+dev smoke PASSED 2026-09-27: 162,816 emitted = 162,816 sink records = 162,817 table rows
+(one upsert-check row), zero failures — evidence `logs/feature-layer-smoke-20260927/`.
+Next: S4 latency re-measure (layer on, same feed) — then the Monday items.
 
 ## How to add or remove a feature (the only procedure)
 
