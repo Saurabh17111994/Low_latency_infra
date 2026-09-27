@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""t9_order_sandbox.py — T9_ORDER_SANDBOX integration harness (skeleton, A2.5).
+"""t9_order_sandbox.py — T9_ORDER_SANDBOX integration harness (A2.5).
 
-The A2 goal: prove gateway -> Nautilus -> bridge -> Arrow `POST /order/regular`
-round-trip against the broker SANDBOX with ONE real order (BI-EQ x1, INPUT-11
-safe instrument, BILCARE LTD.), then cancel. This harness encodes that contract
-and runs it the moment the A2.2 stack profile is up and A2.3/A2.4 are live.
+The A2 goal: prove the in-network order path — nautilus `/v1/intents` -> bridge
+-> broker — with ONE order (RCF-EQ x1, INPUT-11 safe instrument; BILCARE/BI-EQ
+was delisted and replaced 2026-08-25), then cancel. The same command runs
+against `EXECUTION_BRIDGE_MODE=fake` (paper drill) and `=live` (sandbox), so the
+paper and sandbox runs differ only in the mode value and the funded account.
 
 Three honest layers (same philosophy as t8_sandbox_contract_check.py, which this
 harness REUSES by running it as the first offline check):
@@ -17,18 +18,17 @@ harness REUSES by running it as the first offline check):
      with their poll columns, the T9_APPROVED_BY placement gate, and the gateway
      envelope signing port pinned to a REAL JVM vector (see JW_* below).
 
-  2. LIVE (`--live`): place->poll->assert->cancel against the in-network stack.
-     Transport runs inside the compose network (the profile publishes NO host
-     ports — T8 gate 3 — so probes go through `docker compose exec`/
-     `docker run --network <execution-net>`). Classification is honest:
+  2. LIVE (`--live`): /healthz gate+epoch -> place -> poll -> cancel against
+     the in-network stack. Transport runs inside the compose network (the
+     profile publishes NO host ports — T8 gate 3 — so probes go through
+     `docker compose exec`/`docker run --network <execution-net>`), and the
+     table poll reuses the maintained `FlussReadLagProbe` log-end counter (the
+     same host pattern day_run.py uses). Classification is honest:
        exit 0  = full round-trip asserted (broker_order_id + client_order_ref
-                 echo + tables populated + cancel acked) — the A2.6 target.
-       exit 3  = LIVE-CHAIN-UNWIRED — the stack is reachable but the code path
-                 stops before execution: nautilus currently ACKNOWLEDGES a
-                 valid envelope without executing (http.rs "For T4, acknowledge
-                 without executing (no LiveNode wiring yet)"), so the bridge
-                 leg and the poll-can-assert cannot complete until that wiring
-                 lands (plan Workstream A/B). Never reported as a false PASS.
+                 echo + required tables appended + cancel acked) — A2.6 target.
+       exit 3  = LIVE-CHAIN-UNWIRED — the stack is reachable but the gate is not
+                 ENABLED (approve first with `--sign-control approve --post`) or
+                 the bridge answered HALTED; never a false PASS.
        exit 1  = a real failure (401 envelope rejected by the real verifier,
                  contract drift, broken chain).
        exit 2  = BLOCKED (docker/daemon/stack missing, T9_APPROVED_BY absent).
@@ -54,7 +54,7 @@ Wire contract (documented, cross-pinned to both implementations):
 
 Usage:
   python3 t9_order_sandbox.py                    # offline contract (exit 0)
-  python3 t9_order_sandbox.py --live             # in-network place->poll->cancel
+  python3 t9_order_sandbox.py --live             # in-network place->poll->cancel (gate ENABLED required)
   python3 t9_order_sandbox.py --self-check       # offline + fake-live demo
   python3 t9_order_sandbox.py --sign-control approve --operator saurabh \
       --evidence CHG-131                        # DEC-044 control envelope on stdout
@@ -68,7 +68,7 @@ action in the same process needs the new value. A stale epoch is rejected 401,
 which is the intended behaviour: an envelope minted for an older gate state must
 not act on a newer one.
 Env: T9_APPROVED_BY=saurabh (placement gate — fail closed without), T9_RUN_LIVE=1.
-Exit: 0 = PASS, 1 = FAIL, 2 = BLOCKED, 3 = LIVE-CHAIN-UNWIRED.
+Exit: 0 = PASS, 1 = FAIL, 2 = BLOCKED, 3 = LIVE-CHAIN-UNWIRED (gate not ENABLED).
 """
 
 import argparse
@@ -77,13 +77,26 @@ import hashlib
 import hmac
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 COMPOSE = os.path.join(ROOT, "code", "01_platform", "01_docker", "docker-compose.yml")
 EVIDENCE_DIR_DEFAULT = os.path.join(ROOT, "logs", "nautilus-execution")
+
+# Live-leg table assertions: the required tables must show appended rows after a
+# 202; optional ones are reported (the fake lifecycle may not fill/position).
+FLUSS_PROBE_SRC = os.path.join(SCRIPTS, "fluss-probes", "FlussReadLagProbe.java")
+FLUSS_CP_FILE = os.path.join(ROOT, "code", "02_services", "01_ingestion",
+                             "target", "cp.txt")
+LIVE_ASSERT_TABLES = ("Execution_Attempts", "Order_Lifecycle")
+LIVE_OPTIONAL_TABLES = ("Fills", "Positions")
+LIVE_POLL_TIMEOUT_S = 30
+LIVE_POLL_INTERVAL_S = 2
 
 # RCF x1 safe instrument (live-verified 2026-08-25) and the placement gate.
 # NOTE: the original t9paper INPUT-11 instrument BILCARE (token 762583) is
@@ -354,7 +367,11 @@ class DockerExecTransport(Transport):
                "-X", method]
         for k, v in (headers or {}).items():
             cmd += ["-H", f"{k}: {v}"]
-        cmd += ["--data-binary", "@-", url]
+        # A GET carries no body: --data-binary would force Content-Length: 0
+        # (and a form content-type) onto the health read.
+        if body is not None:
+            cmd += ["--data-binary", "@-"]
+        cmd += [url]
         try:
             p = subprocess.run(cmd, input=body or "", capture_output=True,
                                text=True, timeout=60)
@@ -408,13 +425,14 @@ def _read_text(path):
 def offline_contract():
     """All checks provable today without containers. Returns list of failures."""
     errs = list(FAILURES)
-    # 0. REUSE the t8 harness verbatim (A2.5 requirement) — 12/12 must pass.
+    # 0. REUSE the t8 harness verbatim (A2.5 requirement) — every check passes.
     t8 = subprocess.run([sys.executable,
                          os.path.join(SCRIPTS, "t8_sandbox_contract_check.py")],
                         capture_output=True, text=True)
     t8_ok = t8.returncode == 0
-    check("t8 sandbox contract reused (12/12)", t8_ok,
-          "exit 0 (12/12)" if t8_ok else f"exit {t8.returncode}")
+    t8_tail = (t8.stdout or "").strip().splitlines()
+    check("t8 sandbox contract reused", t8_ok,
+          (t8_tail[-1] if t8_ok and t8_tail else f"exit {t8.returncode}"))
     if not t8_ok:
         errs.append("t8 sandbox contract failed; "
                     + "; ".join(t8.stdout.splitlines()[-3:]))
@@ -533,7 +551,7 @@ def offline_contract():
 
 
 # ---------------------------------------------------------------------------
-# Live place -> poll -> assert -> cancel (in-network, T4 wall aware)
+# Live gate check -> place -> poll -> cancel (in-network)
 # ---------------------------------------------------------------------------
 
 class FakeTransport(Transport):
@@ -543,10 +561,98 @@ class FakeTransport(Transport):
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
+        self.bodies = []
 
     def http_json(self, method, url, body=None, headers=None):
         self.calls.append((method, url))
+        self.bodies.append(body)
         return self.responses.pop(0)
+
+
+class FlussLogEndProbe:
+    """Reads a table's total appended-record count via the maintained
+    fluss-probes/FlussReadLagProbe (the same host pattern day_run.py uses:
+    classpath from the ingestion target, bootstrap localhost:9123).
+
+    Returns (count, error): a missing classpath, a failed compile, a missing
+    table or a failed read all come back as (None, reason) — never an
+    exception, so the caller can classify BLOCKED honestly.
+    """
+
+    def __init__(self, workdir=None, bootstrap="localhost:9123"):
+        self.workdir = workdir or tempfile.mkdtemp(prefix="t9-fluss-probe-")
+        self.bootstrap = bootstrap
+        self._cp = None
+
+    def _classpath(self):
+        if self._cp is None:
+            try:
+                with open(FLUSS_CP_FILE, encoding="utf-8") as fh:
+                    self._cp = fh.read().strip()
+            except OSError:
+                self._cp = ""
+        return self._cp or None
+
+    def log_end(self, table):
+        cp = self._classpath()
+        if not cp:
+            return None, (f"probe-unavailable: classpath missing ({FLUSS_CP_FILE}); "
+                          "run `make test` to build it")
+        cls = os.path.join(self.workdir, "FlussReadLagProbe.class")
+        if not os.path.exists(cls) or os.path.getmtime(cls) < os.path.getmtime(FLUSS_PROBE_SRC):
+            javac = shutil.which("javac")
+            if not javac:
+                return None, "probe-unavailable: javac not found on PATH"
+            try:
+                r = subprocess.run([javac, "-cp", cp, "-d", self.workdir,
+                                    FLUSS_PROBE_SRC],
+                                   capture_output=True, text=True, timeout=120)
+            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+                return None, f"probe-unavailable: compile failed: {exc}"
+            if r.returncode != 0:
+                return None, f"probe-unavailable: compile failed: {r.stderr[:200]}"
+        try:
+            p = subprocess.run(
+                ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                 "--add-opens=java.base/java.nio=ALL-UNNAMED",
+                 "-cp", f"{self.workdir}:{cp}", "FlussReadLagProbe",
+                 "default", table, self.bootstrap],
+                capture_output=True, text=True, timeout=30)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            return None, f"probe-unavailable: {exc}"
+        lines = [ln for ln in (p.stdout or "").splitlines() if ln.strip()]
+        if p.returncode not in (0, 3) or not lines:
+            return None, f"probe failed: {(p.stderr or 'no sample').strip()[:200]}"
+        parts = lines[-1].split("\t")
+        if len(parts) < 5:
+            return None, f"probe failed: unexpected output {lines[-1][:120]!r}"
+        try:
+            return int(parts[-1]), ""
+        except ValueError:
+            return None, f"probe failed: bad count {parts[-1]!r}"
+
+
+class FakeFlussProbe:
+    """Programmed counts per table per read (self-check/tests — never live).
+
+    `samples[table]` is a list of counts consumed in order; the last value
+    repeats once the list is down to one entry, so a poll loop terminates
+    deterministically. A missing/None entry reports probe-unavailable/failed.
+    """
+
+    def __init__(self, samples):
+        self.samples = {k: list(v) for k, v in samples.items()}
+        self.calls = []
+
+    def log_end(self, table):
+        self.calls.append(table)
+        series = self.samples.get(table)
+        if not series:
+            return None, f"probe-unavailable: no programmed sample for {table}"
+        value = series.pop(0) if len(series) > 1 else series[0]
+        if value is None:
+            return None, f"probe failed: {table} unavailable"
+        return value, ""
 
 
 def compose_svcs_up(profile="execution-t3"):
@@ -617,11 +723,24 @@ def sign_control(action, operator=APPROVED_OPERATOR, evidence="", reason="",
     return 1, "FAIL", f"{spec['route']} refused the envelope ({status}): {body}"
 
 
-def run_live(transport=None, secret="local-dev-only", now=None,
-             require_stack=True):
-    """place BI-EQ x1 -> poll assert tables -> cancel. Returns (exit_code,
-    classifier, notes). Classifier is one of PASS / LIVE-CHAIN-UNWIRED /
-    FAIL / BLOCKED."""
+def _read_log_end(probe, table):
+    """(count, error) from a probe; a broken probe is BLOCKED, not a traceback."""
+    try:
+        return probe.log_end(table)
+    except Exception as exc:  # noqa: BLE001 — the boundary must classify
+        return None, f"probe-unavailable: {exc}"
+
+
+def run_live(transport=None, probe=None, secret="local-dev-only", now=None,
+             require_stack=True, poll_timeout_s=LIVE_POLL_TIMEOUT_S,
+             out_dir=None, run_id=None):
+    """Gate check -> place RCF-EQ x1 -> poll the assert tables -> cancel.
+
+    Returns (exit_code, classifier, notes). Classifier is one of PASS /
+    LIVE-CHAIN-UNWIRED / FAIL / BLOCKED. The gate state and control epoch are
+    READ from /healthz — never assumed; a HALTED gate is refused before any
+    envelope is signed (approve first via --sign-control approve --post).
+    """
     if not approval_gate():
         print("blocked: T9_APPROVED_BY=saurabh not set — placement refused "
               "(fail closed)", file=sys.stderr)
@@ -632,40 +751,152 @@ def run_live(transport=None, secret="local-dev-only", now=None,
         return 2, "BLOCKED", "stack not up"
     if transport is None:
         transport = DockerExecTransport()
+    if probe is None:
+        probe = FlussLogEndProbe()
     now = now if now is not None else _dt.datetime.now(_dt.timezone.utc)
+    now_ms = int(now.timestamp() * 1000)
+    run_tag = run_id or now.strftime("%Y%m%d-%H%M%S")
 
-    payload = bieq_payload()
-    deadline = int(now.timestamp() * 1000) + 120_000
+    # 1. Gate state + control epoch from /healthz (never assumed).
+    status, body = transport.http_json("GET", "http://nautilus:9190/healthz")
+    if status == 0:
+        return 2, "BLOCKED", f"probe tool unavailable — {body}"
+    if status != 200:
+        return 1, "FAIL", f"/healthz returned {status}: {body[:200]}"
+    try:
+        health = json.loads(body)
+    except ValueError:
+        return 1, "FAIL", f"/healthz not JSON: {body[:120]}"
+    gate = str(health.get("gate_state", "")).upper()
+    epoch = health.get("gate_epoch")
+    if gate != "ENABLED":
+        print(f"LIVE-CHAIN-UNWIRED: gate {gate or 'UNKNOWN'} — approve first: "
+              f"t9_order_sandbox.py --sign-control approve --operator "
+              f"{APPROVED_OPERATOR} --evidence <CHG> --post", file=sys.stderr)
+        return 3, "LIVE-CHAIN-UNWIRED", f"gate {gate or 'UNKNOWN'}"
+    if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
+        return 1, "FAIL", f"/healthz gate_epoch unusable: {epoch!r}"
+
+    # 2. Baseline log-end counts (maintained FlussReadLagProbe, day_run pattern).
+    baseline = {}
+    for table in LIVE_ASSERT_TABLES + LIVE_OPTIONAL_TABLES:
+        baseline[table] = _read_log_end(probe, table)
+    unreadable = [t for t in LIVE_ASSERT_TABLES if baseline[t][0] is None]
+    if unreadable:
+        return 2, "BLOCKED", ("required table(s) unreadable: "
+                              + "; ".join(f"{t}: {baseline[t][1]}" for t in unreadable))
+
+    # 3. Place. Fresh instruction identity per run: a retry of a consumed
+    #    identity is answered from the durable record (202/409), and re-using an
+    #    instruction with a different payload is a contract violation — never a
+    #    second order (claim_for_send, http.rs).
+    instruction_id = f"T9-SB-{run_tag}"
+    request_hash = hashlib.sha256(f"place|{run_tag}|{now_ms}".encode()).hexdigest()
+    payload = bieq_payload(instruction_id=instruction_id, request_hash=request_hash)
     env_json, _, _ = encode_envelope(
-        secret, PROTOCOL_VERSION, EXECUTION_INTENT_MSG, "t9-sb-run-0001",
-        "dev-scope", "dev-partition", payload, 0, "t9-fence-0001", deadline)
-
+        secret, PROTOCOL_VERSION, EXECUTION_INTENT_MSG, f"t9-sb-{run_tag}",
+        "dev-scope", "dev-partition", payload, epoch, "t9-fence-0001",
+        now_ms + 120_000)
     status, body = transport.http_json(
         "POST", "http://nautilus:9190/v1/intents", body=env_json,
         headers={"Content-Type": "application/json"})
+    place = {"status": status, "body": body}
     if status == 0:
-        print(f"BLOCKED: probe tool unavailable — {body}")
-        return 2, "BLOCKED", f"probe tool unavailable: {body}"
+        return 2, "BLOCKED", f"probe tool unavailable — {body}"
     if status == 401:
-        print("FAIL: envelope rejected by nautilus verifier — parity broke: "
-              f"{body}")
-        return 1, "FAIL", "envelope rejected"
+        return 1, "FAIL", f"envelope rejected by nautilus verifier: {body[:200]}"
+    if status == 409:
+        return 1, "FAIL", f"place rejected: {body[:200]}"
     if status == 503:
-        print("LIVE-CHAIN-UNWIRED: nautilus reachable but gate not ENABLED "
-              f"(expected HALTED until approval): {body}")
-        return 3, "LIVE-CHAIN-UNWIRED", "gate HALTED"
-    if status == 202:
-        # nautilus acknowledges — but http.rs has NO bridge forwarding yet
-        # ("For T4, acknowledge without executing (no LiveNode wiring yet)").
-        # The place->poll->assert->cancel full chain therefore CANNOT pass
-        # today; we report this honestly instead of faking a round-trip.
-        print("LIVE-CHAIN-UNWIRED: nautilus accepted envelope (202) but the "
-              "bridge/Arrow leg is unwired (T4 wall, http.rs) — poll of "
-              "Execution_Intent/Order_Lifecycle/Execution_Attempts + cancel "
-              "require A2.3/A2.4 wiring; nothing was executed")
-        return 3, "LIVE-CHAIN-UNWIRED", "T4 wall (no LiveNode wiring)"
-    print(f"FAIL: unexpected status {status}: {body}")
-    return 1, "FAIL", f"status {status}"
+        try:
+            doc = json.loads(body)
+        except ValueError:
+            doc = {}
+        if str(doc.get("gate_state", "")).upper() == "HALTED":
+            return 3, "LIVE-CHAIN-UNWIRED", "gate HALTED"
+        return 1, "FAIL", f"bridge UNKNOWN: {body[:200]}"
+    if status != 202:
+        return 1, "FAIL", f"unexpected status {status}: {body[:200]}"
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        return 1, "FAIL", f"202 body not JSON: {body[:120]}"
+    broker_order_id = str(doc.get("broker_order_id", "")).strip()
+    if not doc.get("accepted") or not broker_order_id:
+        return 1, "FAIL", f"202 without accepted+broker_order_id: {body[:200]}"
+    print(f"place accepted: broker_order_id={broker_order_id} "
+          f"attempt={doc.get('execution_attempt_id', '')} "
+          f"event_emission={doc.get('event_emission', '')}", file=sys.stderr)
+
+    # 4. Poll until the required tables show the appended rows (bounded).
+    samples = []
+    deadline_mono = time.monotonic() + max(0.0, poll_timeout_s)
+    grown = False
+    while True:
+        round_counts = {t: _read_log_end(probe, t)[0] for t in LIVE_ASSERT_TABLES}
+        samples.append(dict(round_counts))
+        grown = all(
+            round_counts[t] is not None
+            and baseline[t][0] is not None
+            and round_counts[t] > baseline[t][0]
+            for t in LIVE_ASSERT_TABLES)
+        if grown or time.monotonic() >= deadline_mono:
+            break
+        time.sleep(LIVE_POLL_INTERVAL_S)
+    if not grown:
+        return 1, "FAIL", ("no append observed in " + "/".join(LIVE_ASSERT_TABLES)
+                           + f" within {poll_timeout_s}s: {samples}")
+
+    # Optional tables are reported, not required (the fake lifecycle may not
+    # fill/position; only the live broker session settles that).
+    optional = {}
+    for table in LIVE_OPTIONAL_TABLES:
+        count, err = _read_log_end(probe, table)
+        optional[table] = {"before": baseline[table][0], "after": count,
+                           "error": err}
+
+    # 5. Cancel with a DISTINCT instruction id: same instruction + different
+    #    payload is a contract violation (halts), not a retry.
+    cancel_payload = dict(payload)
+    cancel_payload.update({
+        "instruction_id": f"{instruction_id}-C",
+        "action": "cancel",
+        "broker_order_id": broker_order_id,
+        "request_hash": hashlib.sha256(
+            f"cancel|{run_tag}|{broker_order_id}".encode()).hexdigest(),
+    })
+    cancel_env, _, _ = encode_envelope(
+        secret, PROTOCOL_VERSION, EXECUTION_INTENT_MSG, f"t9-sb-{run_tag}-c",
+        "dev-scope", "dev-partition", cancel_payload, epoch, "t9-fence-0001",
+        now_ms + 120_000)
+    status, body = transport.http_json(
+        "POST", "http://nautilus:9190/v1/intents", body=cancel_env,
+        headers={"Content-Type": "application/json"})
+    cancel = {"status": status, "body": body}
+    if status != 202:
+        return 1, "FAIL", f"cancel not acknowledged ({status}): {body[:200]}"
+    print(f"cancel acknowledged: {body[:200]}", file=sys.stderr)
+
+    evidence = {
+        "run_id": run_tag,
+        "classifier": "PASS",
+        "healthz": health,
+        "instruction_id": instruction_id,
+        "broker_order_id": broker_order_id,
+        "place": place,
+        "poll_samples": samples,
+        "optional_tables": optional,
+        "cancel": cancel,
+        "tables": {"required": list(LIVE_ASSERT_TABLES),
+                   "optional": list(LIVE_OPTIONAL_TABLES)},
+    }
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"live-{run_tag}-t9-order-sandbox.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(evidence, fh, indent=2)
+        print(f"evidence: {path}", file=sys.stderr)
+    return 0, "PASS", evidence
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +959,7 @@ def main(argv=None):
     if args.self_check:
         return _self_check(args.out, run_id)
     if args.live:
-        code, cls, note = run_live()
+        code, cls, note = run_live(out_dir=args.out, run_id=run_id)
         print(f"result: {cls}")
         return code
     errs = offline_contract()
@@ -737,8 +968,8 @@ def main(argv=None):
             print(f"FAIL: {e}")
         print(f"t9-order-sandbox-contract: {len(errs)} check(s) FAILED")
         return 1
-    print("t9-order-sandbox-contract: all checks pass (skeleton staged; live "
-          "leg awaits A2.2/A2.3/A2.4 + T4 bridge wiring)")
+    print("t9-order-sandbox-contract: all checks pass (offline contract; "
+          "--live needs the execution-t3 stack with the gate ENABLED)")
     return 0
 
 
@@ -747,31 +978,63 @@ def _self_check(out_dir, run_id):
     if errs:
         print("self-check FAIL:", "; ".join(errs))
         return 1
-    # Fake-transport classification demo (no network).
-    responses = [
-        (202, '{"accepted": true, "gate_state": "ENABLED"}'),  # T4 wall
-        (503, '{"accepted": false, "reason": "gate HALTED"}'),
-        (401, '{"accepted": false, "reason": "authentication failed"}'),
+    # Fake-transport classification demos (no network, no stack).
+    place_202 = (202, json.dumps({
+        "accepted": True, "gate_state": "ENABLED", "action": "place",
+        "instruction_id": "T9-SB-selfcheck", "execution_attempt_id": "attempt-1",
+        "client_order_ref": "cor-1", "broker_order_id": "fake-broker-order-1",
+        "order_status": "ACCEPTED", "event_emission": "accepted"}))
+    cancel_202 = (202, json.dumps({
+        "accepted": True, "action": "cancel",
+        "broker_order_id": "fake-broker-order-1"}))
+    demos = [
+        ("full round-trip", [
+            (200, json.dumps({"gate_state": "ENABLED", "gate_epoch": 2})),
+            place_202, cancel_202],
+         {"Execution_Attempts": [5, 6], "Order_Lifecycle": [10, 11],
+          "Fills": [3, 3], "Positions": [2, 2]}, 0, "PASS"),
+        ("gate HALTED", [
+            (200, json.dumps({"gate_state": "HALTED", "gate_epoch": 1}))],
+         {}, 3, "LIVE-CHAIN-UNWIRED"),
+        ("auth failure", [
+            (200, json.dumps({"gate_state": "ENABLED", "gate_epoch": 2})),
+            (401, '{"accepted": false, "reason": "authentication failed"}')],
+         {"Execution_Attempts": [1], "Order_Lifecycle": [1]}, 1, "FAIL"),
+        ("bridge UNKNOWN", [
+            (200, json.dumps({"gate_state": "ENABLED", "gate_epoch": 2})),
+            (503, json.dumps({"accepted": False, "outcome": "UNKNOWN",
+                              "reason": "bridge UNKNOWN outcome",
+                              "gate_state": "ENABLED"}))],
+         {"Execution_Attempts": [1], "Order_Lifecycle": [1]}, 1, "FAIL"),
+        ("no table growth", [
+            (200, json.dumps({"gate_state": "ENABLED", "gate_epoch": 2})),
+            place_202],
+         {"Execution_Attempts": [5, 5, 5, 5],
+          "Order_Lifecycle": [10, 10, 10, 10]}, 1, "FAIL"),
     ]
-    for i, r in enumerate(responses):
+    results = []
+    for name, responses, samples, want_code, want_cls in demos:
         old = os.environ.get("T9_APPROVED_BY")
         os.environ["T9_APPROVED_BY"] = APPROVED_OPERATOR
-        code, cls, note = run_live(transport=FakeTransport([r]),
-                                   require_stack=False)
-        if old is None:
-            os.environ.pop("T9_APPROVED_BY", None)
-        else:
-            os.environ["T9_APPROVED_BY"] = old
-        expected = {202: 3, 503: 3, 401: 1}[r[0]]
-        if code != expected:
-            print(f"self-check FAIL: status {r[0]} classified {cls} (exit {code}), "
-                  f"expected {'UNWIRED(3)' if expected == 3 else 'FAIL(1)'}")
+        try:
+            code, cls, note = run_live(transport=FakeTransport(responses),
+                                       probe=FakeFlussProbe(samples),
+                                       require_stack=False, poll_timeout_s=0)
+        finally:
+            if old is None:
+                os.environ.pop("T9_APPROVED_BY", None)
+            else:
+                os.environ["T9_APPROVED_BY"] = old
+        if (code, cls) != (want_code, want_cls):
+            print(f"self-check FAIL: {name} classified {cls} (exit {code}), "
+                  f"expected {want_cls} ({want_code})")
             return 1
-        print(f"[self-check] status {r[0]} -> {cls} (exit {code}) OK")
+        results.append({"demo": name, "exit": code, "classifier": cls})
+        print(f"[self-check] {name} -> {cls} (exit {code}) OK")
     # Approval gate blocks placement without the flag.
     os.environ.pop("T9_APPROVED_BY", None)
-    code, cls, _ = run_live(transport=FakeTransport(responses),
-                            require_stack=False)
+    code, cls, _ = run_live(transport=FakeTransport([]),
+                            probe=FakeFlussProbe({}), require_stack=False)
     if code != 2 or cls != "BLOCKED":
         print(f"self-check FAIL: approval gate did not block (exit {code})")
         return 1
@@ -779,14 +1042,18 @@ def _self_check(out_dir, run_id):
     evidence = {
         "work_item_id": f"A2.5-T9-SANDBOX-{run_id}",
         "artifact": f"logs/nautilus-execution/a2-t9-sandbox-harness-{run_id[:8]}.md",
-        "status": "harness staged; live leg gated on A2.2/A2.3/A2.4 + T4 wiring",
+        "status": "harness live leg complete: healthz gate+epoch, place, "
+                  "table poll, cancel",
         "jvm_parity": {"payload_hash_ok": True, "auth_ok": True,
                        "source": "real GatewayProtocol.java (jackson 2.16.1), "
                                  "run 2026-08-21"},
         "offline_checks": "t8 reuse 12/12; compose shape; A2.1 premise; DDL "
                           "poll columns; signing parity",
-        "live_classifier": "202/503 -> LIVE-CHAIN-UNWIRED (exit 3); 401 -> FAIL; "
-                           "no T9_APPROVED_BY -> BLOCKED (exit 2)",
+        "live_classifier": "gate HALTED -> LIVE-CHAIN-UNWIRED (exit 3); "
+                           "202+table growth+cancel -> PASS (exit 0); "
+                           "401/409/UNKNOWN/no-growth -> FAIL (exit 1); "
+                           "no T9_APPROVED_BY or unreadable table -> BLOCKED (exit 2)",
+        "demos": results,
     }
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"self-check-{run_id}-t9-order-sandbox.json")

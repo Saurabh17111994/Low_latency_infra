@@ -38,10 +38,10 @@ def test_offline_contract_exit_zero():
 
 def test_t8_harness_reused():
     """A2.5 explicitly reuses t8_sandbox_contract_check.py — the harness must
-    run it as its first check (12/12)."""
+    run it as its first check (all checks; the count is the checker's)."""
     out = subprocess.run([sys.executable, HARNESS, "--offline"],
                          capture_output=True, text=True)
-    assert "t8 sandbox contract reused (12/12)" in out.stdout
+    assert "t8 sandbox contract reused" in out.stdout
     assert "[PASS] t8 sandbox contract reused" in out.stdout
 
 
@@ -151,31 +151,156 @@ def test_approval_gate_blocks_without_flag():
             os.environ["T9_APPROVED_BY"] = old
 
 
-def test_live_classifier_t4_wall_and_failures():
-    """202/503 -> LIVE-CHAIN-UNWIRED (exit 3, honest — not a fake PASS);
-    401 -> FAIL (exit 1)."""
+def _live_env(flag="saurabh"):
+    """Set T9_APPROVED_BY for a test and return the old value for restore."""
     old = os.environ.get("T9_APPROVED_BY")
-    os.environ["T9_APPROVED_BY"] = "saurabh"
-    # sendWithFence-equivalent envelope must be produced for every call — the
-    # classifier is transport-independent, so FakeTransport suffices.
-    cases = [
-        ((202, '{"accepted": true}'), 3, "T4 wall (no LiveNode wiring)"),
-        ((503, '{"accepted": false, "reason": "gate HALTED"}'), 3, "gate HALTED"),
-        ((401, '{"accepted": false, "reason": "authentication failed"}'), 1,
-         "envelope rejected"),
-    ]
+    if flag is None:
+        os.environ.pop("T9_APPROVED_BY", None)
+    else:
+        os.environ["T9_APPROVED_BY"] = flag
+    return old
+
+
+def _restore_env(old):
+    if old is None:
+        os.environ.pop("T9_APPROVED_BY", None)
+    else:
+        os.environ["T9_APPROVED_BY"] = old
+
+
+def _healthz(state="ENABLED", epoch=2):
+    return (200, json.dumps({"gate_state": state, "gate_epoch": epoch,
+                             "process_alive": True,
+                             "trading_ready": state == "ENABLED"}))
+
+
+def _place_202():
+    return (202, json.dumps({
+        "accepted": True, "gate_state": "ENABLED", "action": "place",
+        "instruction_id": "T9-SB-0001", "execution_attempt_id": "attempt-0001",
+        "client_order_ref": "cor-0001",
+        "broker_order_id": "fake-broker-order-1",
+        "order_status": "ACCEPTED", "event_emission": "accepted"}))
+
+
+def _cancel_202():
+    return (202, json.dumps({"accepted": True, "action": "cancel",
+                             "broker_order_id": "fake-broker-order-1"}))
+
+
+def test_live_halted_gate_reports_unwired_before_signing():
+    """A HALTED gate is refused from /healthz before any placement envelope
+    is signed or sent — exit 3 (approve first), never a placement."""
+    old = _live_env()
     try:
-        for (status, body), want_code, want_note in cases:
-            code, cls, note = t9.run_live(transport=t9.FakeTransport([(status, body)]),
-                                          require_stack=False)
-            assert code == want_code, f"status {status}: {cls}/{note}"
-            assert cls in ("LIVE-CHAIN-UNWIRED", "FAIL")
-            assert note == want_note
+        transport = t9.FakeTransport([_healthz(state="HALTED", epoch=1)])
+        code, cls, note = t9.run_live(transport=transport,
+                                      probe=t9.FakeFlussProbe({}),
+                                      require_stack=False)
+        assert (code, cls) == (3, "LIVE-CHAIN-UNWIRED"), f"{cls}/{note}"
+        assert "HALTED" in note
+        assert all("/v1/intents" not in call[1] for call in transport.calls)
     finally:
-        if old is None:
-            os.environ.pop("T9_APPROVED_BY", None)
-        else:
-            os.environ["T9_APPROVED_BY"] = old
+        _restore_env(old)
+
+
+def test_live_full_round_trip_passes():
+    """The A2.6 target: gate ENABLED, place 202 with a broker id, required
+    tables show the appended rows, cancel acknowledged — PASS (exit 0)."""
+    old = _live_env()
+    try:
+        transport = t9.FakeTransport([_healthz(), _place_202(), _cancel_202()])
+        probe = t9.FakeFlussProbe({
+            "Execution_Attempts": [5, 6],
+            "Order_Lifecycle": [10, 11],
+            "Fills": [3, 3],
+            "Positions": [2, 2],
+        })
+        code, cls, note = t9.run_live(transport=transport, probe=probe,
+                                      require_stack=False)
+        assert (code, cls) == (0, "PASS"), f"{cls}/{note}"
+        assert transport.calls[0] == ("GET", "http://nautilus:9190/healthz")
+        intents = [c for c in transport.calls if c[1].endswith("/v1/intents")]
+        assert len(intents) == 2, transport.calls  # place + cancel
+    finally:
+        _restore_env(old)
+
+
+def test_live_signs_place_with_healthz_epoch():
+    """The envelope's gate_epoch is READ from /healthz — a hard-coded epoch
+    would sign a stale control identity (the old harness signed 0)."""
+    old = _live_env()
+    try:
+        transport = t9.FakeTransport([_healthz(epoch=7), _place_202(),
+                                      _cancel_202()])
+        code, cls, _ = t9.run_live(
+            transport=transport,
+            probe=t9.FakeFlussProbe({"Execution_Attempts": [1, 2],
+                                     "Order_Lifecycle": [1, 2]}),
+            require_stack=False)
+        assert (code, cls) == (0, "PASS")
+        place_envelope = json.loads(transport.bodies[1])
+        assert place_envelope["gate_epoch"] == 7
+    finally:
+        _restore_env(old)
+
+
+def test_live_rejects_401_409_and_unknown():
+    """401 (parity) and 409 (rejected) are FAIL; a 503 bridge UNKNOWN with the
+    gate ENABLED is FAIL too (only a HALTED gate is UNWIRED)."""
+    old = _live_env()
+    try:
+        cases = [
+            ((401, '{"accepted": false, "reason": "authentication failed"}'),
+             1, "FAIL"),
+            ((409, '{"accepted": false, "outcome": "REJECTED", '
+                   '"reason": "rejected by venue"}'), 1, "FAIL"),
+            ((503, '{"accepted": false, "outcome": "UNKNOWN", '
+                   '"reason": "bridge UNKNOWN outcome", '
+                   '"gate_state": "ENABLED"}'), 1, "FAIL"),
+        ]
+        for (status, body), want_code, want_cls in cases:
+            transport = t9.FakeTransport([_healthz(), (status, body)])
+            code, cls, note = t9.run_live(
+                transport=transport,
+                probe=t9.FakeFlussProbe({"Execution_Attempts": [1],
+                                         "Order_Lifecycle": [1]}),
+                require_stack=False)
+            assert (code, cls) == (want_code, want_cls), \
+                f"status {status}: {cls}/{note}"
+    finally:
+        _restore_env(old)
+
+
+def test_live_no_table_growth_fails():
+    """A 202 whose required tables never grow is a FAIL — an accepted bridge
+    call is not the same as a projected order row."""
+    old = _live_env()
+    try:
+        transport = t9.FakeTransport([_healthz(), _place_202()])
+        probe = t9.FakeFlussProbe({"Execution_Attempts": [5, 5, 5, 5],
+                                   "Order_Lifecycle": [10, 10, 10, 10]})
+        code, cls, note = t9.run_live(transport=transport, probe=probe,
+                                      require_stack=False, poll_timeout_s=0)
+        assert (code, cls) == (1, "FAIL"), f"{cls}/{note}"
+        assert "no append" in note.lower()
+    finally:
+        _restore_env(old)
+
+
+def test_live_probe_unavailable_blocks():
+    """An unreadable required table is BLOCKED (exit 2): the assert cannot be
+    made, so the harness must not report PASS or FAIL."""
+    old = _live_env()
+    try:
+        transport = t9.FakeTransport([_healthz()])
+        code, cls, note = t9.run_live(transport=transport,
+                                      probe=t9.FakeFlussProbe({}),
+                                      require_stack=False)
+        assert (code, cls) == (2, "BLOCKED"), f"{cls}/{note}"
+        assert "unreadable" in note
+    finally:
+        _restore_env(old)
 
 
 def test_cli_self_check_exit_zero_writes_evidence():
