@@ -85,7 +85,7 @@ fn main() -> Result<()> {
                 "audit offload encrypted with real SHA-256 integrity root; restore verified",
                 "legal hold / 1y deletion governance applied",
                 "shadow compare broker/Nautilus/Fluss all expected_match, 0 new broker commands",
-                "engine_exercised: false - real sandbox round-trip awaits LiveNode wiring",
+                "engine_exercised: false - deployed fake-bridge drill is the paper evidence (H4-1, 2026-09-27); in-process engine out of scope",
             ],
         }),
     ));

@@ -188,16 +188,16 @@ def _cancel_202():
                              "broker_order_id": "fake-broker-order-1"}))
 
 
-def test_live_halted_gate_reports_unwired_before_signing():
+def test_live_halted_gate_reports_not_enabled_before_signing():
     """A HALTED gate is refused from /healthz before any placement envelope
-    is signed or sent — exit 3 (approve first), never a placement."""
+    is signed or sent — exit 3 GATE-NOT-ENABLED (approve first), never a placement."""
     old = _live_env()
     try:
         transport = t9.FakeTransport([_healthz(state="HALTED", epoch=1)])
         code, cls, note = t9.run_live(transport=transport,
                                       probe=t9.FakeFlussProbe({}),
                                       require_stack=False)
-        assert (code, cls) == (3, "LIVE-CHAIN-UNWIRED"), f"{cls}/{note}"
+        assert (code, cls) == (3, "GATE-NOT-ENABLED"), f"{cls}/{note}"
         assert "HALTED" in note
         assert all("/v1/intents" not in call[1] for call in transport.calls)
     finally:
@@ -247,7 +247,7 @@ def test_live_signs_place_with_healthz_epoch():
 
 def test_live_rejects_401_409_and_unknown():
     """401 (parity) and 409 (rejected) are FAIL; a 503 bridge UNKNOWN with the
-    gate ENABLED is FAIL too (only a HALTED gate is UNWIRED)."""
+    gate ENABLED is FAIL too (exit 3 GATE-NOT-ENABLED is only for a HALTED gate)."""
     old = _live_env()
     try:
         cases = [

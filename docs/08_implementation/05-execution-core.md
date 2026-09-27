@@ -772,13 +772,13 @@ task to complete and do not authorize live orders.
   work begins.
 
 
-> **Offline vs live boundary (unchanged):** Every `T0–T8` row is `FULLY DONE offline+single-VM` on laptop (`make up` 12 long-running/18 compose services, `FLUSS_BOOTSTRAP=fluss-coordinator:9123` live single-VM green). Only `T9` (`RCF-EQ×1` live Arrow place proven to Arrow 2026-08-25 — `MARGIN ERROR`, sandbox unfunded; WS fill/reconciliation/shadow + single-operator enablement pending funded re-run) and the running-`LiveNode` event path (`WP-2` deferred) still need market/4VM.
+> **Offline vs live boundary (updated 2026-09-27):** Every `T0–T8` row is `FULLY DONE offline+single-VM` on laptop (`make up` 12 long-running/18 compose services, `FLUSS_BOOTSTRAP=fluss-coordinator:9123` live single-VM green). The running-`LiveNode` event path is **WP-2 DONE** (hosted `LiveNodeRuntime` in `engine.rs`, started by `main.rs`; CHG-054/079) and the deployed paper drill passed 2026-09-27 (H2-2, attempt 4). Only `T9` still needs market/4VM (`RCF-EQ×1` live Arrow place proven to Arrow 2026-08-25 — `MARGIN ERROR`, sandbox unfunded; WS fill/reconciliation/shadow + single-operator enablement pending funded re-run).
 
 ---
 
 ## Close-gaps continuation — WP-0–WP-7 — integrated from `20`
 
-> Source: `20-close-execution-service-gaps-plan.md` (231 lines). Each WP is ordered, owns disjoint file sets, and is deterministic/offline except `T9`/`WP-2` live pieces. Appendix below is verbatim from `20` §§1–8 (status now `2026-08-21/24` live-verified).
+> Source: `20-close-execution-service-gaps-plan.md` (231 lines). Each WP is ordered, owns disjoint file sets, and is deterministic/offline except the `T9` live-evidence piece. Appendix below is verbatim from `20` §§1–8 (status now `2026-08-21/24` live-verified; WP-2 landed 2026-08-21, CHG-054/079).
 
 ### Original 20 header — now integrated (see wrapper § Close-gaps continuation above) — verbatim excerpt follows
 > **ROLE — WORKING PLAN (2026-08-21):** executable backlog for everything the
@@ -815,7 +815,7 @@ task to complete and do not authorize live orders.
 | T1 | Enabled-graph Fluss append proof; durable quarantine/audit writer | WP-4 (with gateway) | **DONE (live-verified)** | `FlussPostbackQuarantineStore` + env-gated live test (`LogScanner` reads `Postback_Quarantine` row) + differential parity `positions_oracle.json` `cargo test differentially` cross-language (CHG-052 `3f4594d`) |
 | T2 | Live Compose wiring of the Java gateway; broker exactly-once across crash (-> T5) | WP-6 / WP-3 | **DONE (live wiring)** | `06_execution_gateway` on `[trading-net, execution-net]` with `--add-opens=java.base/java.nio=ALL-UNNAMED`, `GatewayHttpServer` `/healthz` 200, `FLUSS_BOOTSTRAP` DNS, `docker compose --profile execution-t3 up` live Fluss `9123` (WP-6 `e5f2a8c`+`53b9988`) — exactly-once crash gap deferred to T5 fence (correctly) |
 | T3 | Cross-container runtime probe (gateway -> bridge -> Rust -> postback -> Fluss) | WP-6 | **DONE (probe)** | `bridge:8787/healthz` `UP disabled` + `gateway:9180/healthz` 200 on both nets + `nautilus:9190/healthz` `HALTED` + `POST /v1/intents` `503`/`401` private probes + `t8_sandbox_contract_check.py` 12/12 PASS (WP-6) |
-| T4 | Executor Dockerfile; boot-HALTED binary; **running `LiveNode` event path (deferred by user)** | WP-1 / WP-2 | **DONE (WP-1) + DEFERRED (WP-2)** | WP-1: `src/bootstrap.rs`+`http.rs` (`/healthz`+`/readyz`, draining 503), `main.rs` `Runtime::init` HALTED, `Dockerfile` `rust:1.97.1` (WP-1); WP-2 `LiveNodeBuilder` now constructs via `FakeBridge`+`CacheView` (`780a643` `live_node_builds_with_bridge_client` proves `build` succeeds) — full `LiveNode::run` event loop stays **DEFERRED per user scope** |
+| T4 | Executor Dockerfile; boot-HALTED binary; **running `LiveNode` event path (deferred by user)** | WP-1 / WP-2 | **DONE (WP-1 + WP-2)** | WP-1: `src/bootstrap.rs`+`http.rs` (`/healthz`+`/readyz`, draining 503), `main.rs` `Runtime::init` HALTED, `Dockerfile` `rust:1.97.1` (WP-1); WP-2: `LiveNodeBuilder` constructs via `FakeBridge`+`CacheView` (`780a643`), the `HttpBridgeClient` transport is selectable (CHG-079), and `main.rs` hosts `LiveNodeRuntime::run_forever` (`engine.rs`; hosted-run-loop tests) — **full WP-2 DONE 2026-08-21**; the deployed paper drill passed 2026-09-27 (H2-2, attempt 4) |
 | T5 | Fluss-backed `GateStateStore`/`AttemptStore` writers; env-gated gateway->Fluss integration | WP-3 | **DONE (writers glued + restart)** | `FlussGateStateStore`+`FlussAttemptStore` with `attemptRefreshOnRecovery`, `InMemory*` hydration, `ExecutionCommandGate` durable protocol, `cargo`+`mvn -o` green (CHG-051; WP-3) |
 | T6 | Fluss-backed projection writers; Rust normalized Nautilus envelope emitter | WP-4 | **DONE (live-verified)** | `FlussProjectionWriter`+`Ledger` live-verified (`FlussProjectionWriterIntegrationTest` reads back `Positions`/`Order_Lifecycle`), `src/projection/mod.rs` i64 parity + `differential_parity.rs` vs Java oracle (CHG-052) |
 | T7 | Env-gated MiniCluster + live Fluss restore run; `submit-jobs.sh` launcher | WP-5 | **DONE (live restore + launcher)** | `BabysitterJob` `RETAIN_ON_CANCELLATION` + `BABYSITTER_STATE_RECOVERY_PATH`, env-gated `COMPUTE_INT_TEST_T7` MiniCluster restore green, `submit-jobs.sh` waits `counts.completed>0` (CHG-053 `830d109`) |
@@ -856,7 +856,7 @@ wire types) so the Rust protocol matches the real Go bridge byte-for-byte.
   pinned Nautilus git deps + rust image; runs in WP-6 compose / CI).
 - **CHG on completion:** CHG-050.
 
-### WP-2 — Rust: running-`LiveNode` event path (T4 live boundary) — **DEFERRED (user choice)**
+### WP-2 — Rust: running-`LiveNode` event path (T4 live boundary) — **DONE 2026-08-21 (CHG-054/079)**
 
 > **DONE 2026-08-21 (CHG-054, commit 780a643 — user-approved after WP-6):**
 > `BridgeExecutionClientFactory::create` now builds a real `ExecutionClientCore`
@@ -866,8 +866,11 @@ wire types) so the Rust protocol matches the real Go bridge byte-for-byte.
 > because `CacheView` is the intended sharing handle. `LiveNodeBuilder::from_config`
 > → `add_exec_client` → `build` now succeeds and logs `Registered ExecutionClient-exec`
 > (`cargo test --offline` 79 lib pass, new `live_node_builds_with_bridge_client`). The
-> production `HttpBridgeClient` and `LiveNode::run` loop remain deferred, but the OMS/
-> risk/portfolio/reconciliation surface is proven constructible offline.
+> production `HttpBridgeClient` became selectable the same day (CHG-079) and the hosted
+> `LiveNode::run` loop landed in `engine.rs`/`main.rs` (`LiveNodeRuntime::run_forever`,
+> hosted-run-loop tests) — **WP-2 fully DONE**; the OMS/risk/portfolio/reconciliation
+> surface is proven constructible offline, and the deployed paper drill passed 2026-09-27
+> (H2-2, attempt 4).
 
 ### WP-3 — T5: Fluss-backed gate/attempt writers (Java) — **DONE** (completed 2026-08-21: glued + restart-refresh)
 
@@ -900,7 +903,7 @@ restart-refresh** (a restarted process would re-mint). Both closed now:
      `GatewayConfig` (`EXECUTION_GATE_TABLE`/`EXECUTION_ATTEMPTS_TABLE`, shared Fluss client) in the
      try-with-resources, failing fast at boot if the v3 DDL tables are absent, and registers
      readiness. (Constructing `ExecutionCommandGate` against them is the executor bridge order path,
-     WP-2 — no production `BridgeCaller` exists yet, so that is not seeded with a fake.)
+     WP-2 — no production `BridgeCaller` existed at this pass, so that is not seeded with a fake.)
   2. **Restart-refresh (hydration)** — `InMemoryGateStateStore.hydrate` (install row + seed the
      monotonic fence sequence), `InMemoryAttemptStore.hydrate` (rebuild identity + replay-key
      indexes); `FlussGateStateStore.read/init` and `FlussAttemptStore.prepare/transition/resolveUnknown`
@@ -958,7 +961,7 @@ writer, as it already is for every other execution table):
   - **Gateway-protocol HMAC envelope parity (Java ↔ Rust, NEW 2026-08-24):** `GatewayProtocolParityTest` (Java, 5/5) + 5 parity tests in `gateway_protocol.rs` (14/14 scoped incl. 8 pre-existing) — byte-identical canonicalization proven on a deliberately non-alphabetical payload (`{"zulu":"z","alpha":"a","qty":100}`): payload_json, sha256 payload_hash, HMAC auth, outer field order all equal; Rust `verify(Java token)` + Java `verify(Rust token)` both accepted; no canonicalization defect; preserve_order (Cargo.toml L39) retained.
 - **What to do:** *(all done)*
   1. ✅ Wire projection writers to Fluss (env-gated int test): postback -> normalized envelope -> idempotent `Postback_Projection_Ledger` + fill/lifecycle/position projections; no arithmetic in JVM/Rust.
-  2. ✅ Rust normalized Nautilus-envelope emitter from `bridge/client.rs` (maps `ReportEnvelope` -> projection rows) — the exact seam WP-2 will reuse.
+  2. ✅ Rust normalized Nautilus-envelope emitter from `bridge/client.rs` (maps `ReportEnvelope` -> projection rows) — the exact seam WP-2 reuses.
   3. ✅ T1 durable quarantine/audit writer closes here.
 - **Tests / gate:** common Maven green; env-gated gateway projection + T1 quarantine int tests green (live); `cargo test --offline` + `clippy -D warnings` + `fmt --check` clean; differential parity vs `PositionProjectorDriver` oracle holds cross-language.
 - **CHG:** CHG-052 (reopened for steps 2-3 + parity, now records full WP-4 completion).
@@ -995,7 +998,7 @@ WP-0 done ---> WP-1 (executor image+boot) ---> WP-6 (compose, needs WP-1 image)
                  +---> WP-3 (Fluss gate writers) ---> WP-4 (needs WP-3 stores + emitter)
                  |
                  +---> WP-5 (Babysitter, Flink -- parallel to 3/4)
-WP-7 (cross-cutting, any time)   WP-2 (running LiveNode -- after WP-6, deferred per scope)
+WP-7 (cross-cutting, any time)   WP-2 (running LiveNode -- after WP-6; landed 2026-08-21, CHG-054/079)
 ```
 
 ## 5. Verification commands (run after each WP)
@@ -1013,9 +1016,9 @@ python t8_sandbox_contract_check.py                                             
 
 | 19-plan unchecked item | Closed by |
 | --- | --- |
-| Custom `ExecutionClient` lifecycle + bridge protocol tests | WP-2 (deferred) |
+| Custom `ExecutionClient` lifecycle + bridge protocol tests | WP-2 (DONE 2026-08-21; hosted `LiveNodeRuntime`) |
 | Rust service starts `HALTED` | WP-1 |
-| Nautilus only production authority | WP-2 (deferred) |
+| Nautilus only production authority | WP-2 (DONE 2026-08-21; hosted `LiveNodeRuntime`) |
 | Fluss projections + ledger recover idempotently | WP-4 |
 | Local Compose runs full sandbox topology, no live route | WP-6 |
 | Restart/unknown/fencing/duplicate/quarantine/recovery evidence + runbooks | WP-7 |

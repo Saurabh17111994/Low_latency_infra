@@ -31,9 +31,10 @@ harness REUSES by running it as the first offline check):
      table. Classification is honest:
        exit 0  = full round-trip asserted (broker_order_id + Order_Lifecycle
                  appended + cancel acked) — A2.6 target.
-       exit 3  = LIVE-CHAIN-UNWIRED — the stack is reachable but the gate is not
-                 ENABLED (approve first with `--sign-control approve --post`) or
-                 the bridge answered HALTED; never a false PASS.
+       exit 3  = GATE-NOT-ENABLED — the chain is wired and proven (H2-2), but the
+                 gate is not ENABLED (approve first with
+                 `--sign-control approve --post`) or the bridge answered HALTED;
+                 never a false PASS.
        exit 1  = a real failure (401 envelope rejected by the real verifier,
                  contract drift, broken chain).
        exit 2  = BLOCKED (docker/daemon/stack missing, T9_APPROVED_BY absent).
@@ -73,7 +74,7 @@ action in the same process needs the new value. A stale epoch is rejected 401,
 which is the intended behaviour: an envelope minted for an older gate state must
 not act on a newer one.
 Env: T9_APPROVED_BY=saurabh (placement gate — fail closed without), T9_RUN_LIVE=1.
-Exit: 0 = PASS, 1 = FAIL, 2 = BLOCKED, 3 = LIVE-CHAIN-UNWIRED (gate not ENABLED).
+Exit: 0 = PASS, 1 = FAIL, 2 = BLOCKED, 3 = GATE-NOT-ENABLED (gate not ENABLED).
 """
 
 import argparse
@@ -745,7 +746,7 @@ def run_live(transport=None, probe=None, secret="local-dev-only", now=None,
     """Gate check -> place RCF-EQ x1 -> poll the assert tables -> cancel.
 
     Returns (exit_code, classifier, notes). Classifier is one of PASS /
-    LIVE-CHAIN-UNWIRED / FAIL / BLOCKED. The gate state and control epoch are
+    GATE-NOT-ENABLED / FAIL / BLOCKED. The gate state and control epoch are
     READ from /healthz — never assumed; a HALTED gate is refused before any
     envelope is signed (approve first via --sign-control approve --post).
     """
@@ -778,10 +779,10 @@ def run_live(transport=None, probe=None, secret="local-dev-only", now=None,
     gate = str(health.get("gate_state", "")).upper()
     epoch = health.get("gate_epoch")
     if gate != "ENABLED":
-        print(f"LIVE-CHAIN-UNWIRED: gate {gate or 'UNKNOWN'} — approve first: "
+        print(f"GATE-NOT-ENABLED: gate {gate or 'UNKNOWN'} — approve first: "
               f"t9_order_sandbox.py --sign-control approve --operator "
               f"{APPROVED_OPERATOR} --evidence <CHG> --post", file=sys.stderr)
-        return 3, "LIVE-CHAIN-UNWIRED", f"gate {gate or 'UNKNOWN'}"
+        return 3, "GATE-NOT-ENABLED", f"gate {gate or 'UNKNOWN'}"
     if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 1:
         return 1, "FAIL", f"/healthz gate_epoch unusable: {epoch!r}"
 
@@ -821,7 +822,7 @@ def run_live(transport=None, probe=None, secret="local-dev-only", now=None,
         except ValueError:
             doc = {}
         if str(doc.get("gate_state", "")).upper() == "HALTED":
-            return 3, "LIVE-CHAIN-UNWIRED", "gate HALTED"
+            return 3, "GATE-NOT-ENABLED", "gate HALTED"
         return 1, "FAIL", f"bridge UNKNOWN: {body[:200]}"
     if status != 202:
         return 1, "FAIL", f"unexpected status {status}: {body[:200]}"
@@ -1008,7 +1009,7 @@ def _self_check(out_dir, run_id):
           "Fills": [3, 3], "Positions": [2, 2]}, 0, "PASS"),
         ("gate HALTED", [
             (200, json.dumps({"gate_state": "HALTED", "gate_epoch": 1}))],
-         {}, 3, "LIVE-CHAIN-UNWIRED"),
+         {}, 3, "GATE-NOT-ENABLED"),
         ("auth failure", [
             (200, json.dumps({"gate_state": "ENABLED", "gate_epoch": 2})),
             (401, '{"accepted": false, "reason": "authentication failed"}')],
@@ -1062,7 +1063,7 @@ def _self_check(out_dir, run_id):
                                  "run 2026-08-21"},
         "offline_checks": "t8 reuse 12/12; compose shape; A2.1 premise; DDL "
                           "poll columns; signing parity",
-        "live_classifier": "gate HALTED -> LIVE-CHAIN-UNWIRED (exit 3); "
+        "live_classifier": "gate HALTED -> GATE-NOT-ENABLED (exit 3); "
                            "202+table growth+cancel -> PASS (exit 0); "
                            "401/409/UNKNOWN/no-growth -> FAIL (exit 1); "
                            "no T9_APPROVED_BY or unreadable table -> BLOCKED (exit 2)",

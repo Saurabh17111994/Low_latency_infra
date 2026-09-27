@@ -7,8 +7,10 @@
 //! instrument table, one scenario classifier, one bootstrap and one hashing scheme.
 //!
 //! Honesty contract of this module: the T9 paper bins are **offline** — no order is ever
-//! submitted to a broker and no `SandboxExecutionClient` round-trip is executed yet (that
-//! awaits `LiveNode` wiring, plan Workstream A/B). Every per-order row is therefore a
+//! submitted to a broker and the in-process `SandboxExecutionClient` round-trip is not
+//! exercised (operator decision H4-1, 2026-09-27: the deployed fake-bridge drill is the
+//! paper evidence; the in-process engine stays out of scope unless a release row later
+//! requires `engine_exercised: true`). Every per-order row is therefore a
 //! *scripted scenario vector* (an `expected_*` outcome, not an observation), and every bundle
 //! carries `harness.engine_exercised: false`. The `evidence_hash` is a real SHA-256 over the
 //! canonical serialized evidence body (minus its own self-referential field), so "evidence
@@ -468,7 +470,7 @@ impl Run {
                 "motor": "offline scenario generator (no LiveNode wired)",
                 "engine_exercised": false,
                 "shadow_new_broker_commands_emitted": 0,
-                "note": "Rows are scripted scenario vectors; a real SandboxExecutionClient place/modify/cancel round-trip awaits LiveNode wiring (plan Workstream A/B).",
+                "note": "Rows are scripted scenario vectors; the in-process SandboxExecutionClient place/modify/cancel round-trip is not exercised by decision H4-1 (2026-09-27) — the deployed fake-bridge drill is the paper evidence.",
             },
             "retention_policy": RETENTION_POLICY,
             "reviewers": REVIEWERS,

@@ -104,7 +104,7 @@ fn main() -> Result<()> {
                 "UNKNOWN rows demand explicit reconciliation, no auto-retry",
                 "shadow positions projected from scripted outcomes (expected_match)",
                 "shadow: 0 new broker commands emitted while gate HALTED",
-                "engine_exercised: false - real sandbox round-trip awaits LiveNode wiring",
+                "engine_exercised: false - deployed fake-bridge drill is the paper evidence (H4-1, 2026-09-27); in-process engine out of scope",
             ],
         }),
     ));

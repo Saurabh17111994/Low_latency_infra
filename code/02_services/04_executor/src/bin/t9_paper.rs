@@ -14,7 +14,9 @@ use serde_json::json;
 
 fn main() -> Result<()> {
     // Compile probe: the pinned sandbox client config resolves against nautilus-sandbox.
-    // The engine itself is not exercised until LiveNode wiring (plan Workstream A/B).
+    // The engine itself is not exercised by decision H4-1 (2026-09-27): the deployed
+    // fake-bridge drill is the paper evidence; revisit only if a release row requires
+    // `engine_exercised: true`.
     let _sandbox_cfg = SandboxExecutionClientConfig::default();
 
     let run = Run::start("t9-paper")?;

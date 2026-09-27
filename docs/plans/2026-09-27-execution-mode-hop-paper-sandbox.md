@@ -1,8 +1,8 @@
 # Execution mode hop — paper ↔ sandbox readiness (plan)
 
 **Created:** 2026-09-27 · **Status:** active — H2-1…H2-5 landed; the paper drill passed
-(attempt 4). Remaining: H3-2 (funded broker window), H4-2 (honesty sweep), the Monday P4-4
-market-hours window.
+(attempt 4); the H4-2 honesty sweep landed (CHG-340). Remaining: H3-2 (funded broker
+window), the Monday P4-4 market-hours window.
 
 **Operator goal (2026-09-27):** make sure paper and sandbox are fully implemented, so that
 when it is time we only *change configuration* and can hop between `disabled` / paper /
@@ -17,7 +17,7 @@ signal→intent policy (implemented, off by default).
 
 **Related:**
 - `docs/08_implementation/05-execution-core.md` — execution dossier (chain truth; T4/WP-2
-  status drift + a stale "Workstream A/B" reference are fixed in H4-2).
+  status drift + a stale "Workstream A/B" reference fixed in H4-2, CHG-340).
 - `code/01_platform/04_scripts/t8_sandbox_contract_check.py` — offline switch-safety
   contract (12/12 PASS today; H1-2 extends it).
 - `code/01_platform/04_scripts/t9_order_sandbox.py` — signed-envelope harness (offline
@@ -134,9 +134,13 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
 - [x] **H4-1** — Paper evidence flavor: **(A) the deployed fake-bridge drill is the paper
   evidence** (operator decision 2026-09-27); the in-process `nautilus-sandbox` engine stays
   out of scope (B deferred unless a release row later requires `engine_exercised: true`).
-- [ ] **H4-2** — Honesty-notes refresh after H2-2: `t9_order_sandbox.py` exit-3 premise,
+- [x] **H4-2** — Honesty-notes refresh after H2-2: `t9_order_sandbox.py` exit-3 premise,
   `t9paper` "awaits LiveNode wiring" + the missing "Workstream A/B" reference, dossier
-  T4/WP-2 drift.
+  T4/WP-2 drift. Landed 2026-09-27 (CHG-340): exit-3 classifier renamed
+  `GATE-NOT-ENABLED` (the chain is wired and proven; only the gate posture is classified),
+  the t9paper notes now cite the H4-1 decision, the dossier T4/WP-2 rows read DONE
+  (hosted `LiveNodeRuntime`, CHG-054/079); test pins 22/22, self-check PASS, 336 Rust lib
+  pass, docs gates green.
 - [-] **H4-3** — Live-money enablement — release-gated, not this plan (trigger: H3-2 green
   + the `08-live-readiness-gaps.md` rows + approvals).
 
@@ -147,8 +151,8 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
 | H1 — Switch contract (offline) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | H2 — Paper proof (deployed stack, `fake` mode) | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
 | H3 — Sandbox readiness (funded window) | 2 | 0 | 0 | 1 | 1 | 0 | 0 |
-| H4 — Decisions and follow-ups | 3 | 1 | 0 | 1 | 0 | 0 | 1 |
-| **Total** | **12** | **8** | **0** | **2** | **1** | **0** | **1** |
+| H4 — Decisions and follow-ups | 3 | 2 | 0 | 0 | 0 | 0 | 1 |
+| **Total** | **12** | **9** | **0** | **1** | **1** | **0** | **1** |
 
 ## Overview — the final product
 
