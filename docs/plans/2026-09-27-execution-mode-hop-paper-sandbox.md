@@ -65,7 +65,14 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   gate+epoch, fresh identities, log-end poll, distinct-id cancel, evidence JSON.
 - [L] **H2-2** — Paper drill: `EXECUTION_BRIDGE_MODE=fake` + signed approve → harness →
   assert rows → signed halt → mode `disabled` → offline posture verified; evidence under
-  `logs/exec-hop/paper-drill-<date>/`.
+  `logs/exec-hop/paper-drill-<date>/`. Attempt 1 (2026-09-27, CHG-331): bridge leg proven
+  (202 + fake broker id); projection leg gated — gateway `/v1/events` 503 under
+  `EXECUTION_ENABLED=false`; halted + reverted cleanly. Re-run after H2-3.
+- [?] **H2-3** — Projection enablement for the paper drill (operator decision): decouple the
+  gateway master switch (`GATEWAY_EXECUTION_ENABLED`, default false; gateway service only,
+  nautilus keeps its boot guard), align the harness required tables (`Order_Lifecycle`
+  required; attempts/fills/positions reported), extend `t8` + the runbook hop page, then
+  re-run H2-2 in a second short window.
 
 #### H3 — Sandbox readiness (funded window)
 
@@ -92,10 +99,10 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | H1 — Switch contract (offline) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| H2 — Paper proof (deployed stack, `fake` mode) | 2 | 1 | 0 | 0 | 1 | 0 | 0 |
+| H2 — Paper proof (deployed stack, `fake` mode) | 3 | 1 | 0 | 0 | 1 | 1 | 0 |
 | H3 — Sandbox readiness (funded window) | 2 | 0 | 0 | 1 | 1 | 0 | 0 |
 | H4 — Decisions and follow-ups | 3 | 1 | 0 | 1 | 0 | 0 | 1 |
-| **Total** | **9** | **4** | **0** | **2** | **2** | **0** | **1** |
+| **Total** | **10** | **4** | **0** | **2** | **2** | **1** | **1** |
 
 ## Overview — the final product
 
