@@ -1,11 +1,12 @@
 # Executor gate row — native wiring (scope doc, H2-5)
 
-**Created:** 2026-09-27 · **Status:** draft — awaiting operator approval (design choice D1/D2
-+ network decision). No code written from this doc yet.
+**Created:** 2026-09-27 · **Status:** approved 2026-09-27 — **D2** (gateway-written),
+fence/lease TTL 30 s / renew 10 s / halt-on-loss accepted. Implementing (S1→S5).
 
 **Source:** plan `docs/plans/2026-09-27-execution-mode-hop-paper-sandbox.md` H2-5, finding
 from CHG-331 attempt 3. Operator decision 2026-09-27: native path (no gateway semantic
-exception, no data cleanup).
+exception, no data cleanup); realization **D2** (the executor stays isolated; the gateway is
+the execution core's Fluss writer, as it already is for every other execution table).
 
 **Goal:** make `Execution_Gate` a live, single-source durable row again — written on every
 gate transition by the execution core — so the gateway's intent path and readiness work by
@@ -82,6 +83,31 @@ compose and the production deck already enforce, reuses the only built+tested ga
 the repo, and adds no dependency; its cost is a small internal protocol whose failure mode is
 already fail-closed (no gateway → no enablement).
 
+**Decision (2026-09-27, operator): D2.** D1 is recorded as the rejected alternative (it
+needs a network-boundary change and a new Rust dependency for no functional gain). The
+protocol shape below is the approved one.
+
+### D2 protocol (pinned)
+
+1. **Gateway boot (execution-enabled path only):** open `FlussGateStateStore` and `init` the
+   row (create HALTED/unfenced if absent; never clobber an existing row). The row therefore
+   exists **before** the pending-intent replay runs, which removes the `key not found`
+   readiness race entirely. The store is held authoritative for the process lifetime.
+2. **New endpoint `POST /v1/gate`** on the gateway (same bearer + canonical-signature
+   machinery as `/v1/events`): the executor reports one of `BOOT_HALT`, `APPROVE`, `HALT`,
+   `RENEW` with `partition_id`, `account_scope_id`, `owner_instance_id`, `epoch`,
+   `fence_token` (RENEW), `reason`, `evidence_hash`, `now_ms`. The gateway validates
+   monotonicity/ownership and writes through the store, then returns the persisted row
+   (state, epoch, fence_token, owner_instance_id, lease_expires_ts, transition_ts).
+3. **Executor (durable-first):** after the signed envelope is verified locally (DEC-044
+   checks unchanged), the transition is *requested* from the gateway; the executor adopts the
+   returned epoch/fence/lease and only then completes the local transition. Any store/network
+   failure refuses the transition (approve) or keeps/forces HALTED (halt) — fail-closed.
+4. **Boot:** the executor reports `BOOT_HALT` (retried with backoff until the gateway answers)
+   and hydrates its `control_epoch` from the response (never resets to 1).
+5. **Lease:** while ENABLED, `RENEW` every 10 s with TTL 30 s; the first failed renewal
+   safety-halts the executor (and reports `HALT`).
+
 ## 3. Semantics (either design; mirrors the Java reference writer)
 
 1. **Single source of truth:** the `Execution_Gate` row (v3, 17 columns,
@@ -151,12 +177,10 @@ already fail-closed (no gateway → no enablement).
 
 | Slice | Region | Content |
 |---|---|---|
-| S1 | DDL/semantics pin (test-only) | Pin the v3 column set + writer obligations the store must satisfy (agreement test vs the DDL; no DDL edit). |
-| S2 | Executor gate model | Fence/lease fields + durable-first transitions + boot hydrate/halt (unit-tested with a fake store). |
-| S3a (D1) | Rust Fluss store | `fluss-rs` dependency + `FlussGateStore` implementing the trait + image/compose wiring + live env-gated test. |
-| S3b (D2) | Gateway gate writer | Wire `FlussGateStateStore` into the gateway (authoritative) + the report endpoint + the executor's reporter; ACK adoption. |
-| S4 | Compose/env + runbook | Enable the store in the execution-t3 profile; document the operator flow (no config change at hop time). |
-| S5 | Live proof | H2-2 drill re-run on the new wiring (the paper drill is the acceptance test). |
+| S1 | Gateway gate writer + endpoint (Java) | Wire `FlussGateStateStore` into the enabled startup path (init HALTED, authoritative) + `POST /v1/gate` report endpoint with monotonicity validation + failing-first tests. |
+| S2 | Executor reporter + adoption (Rust) | Gate-report client over the existing signed channel; durable-first `approve`/`safety_halt`; boot `BOOT_HALT` + epoch hydrate; RENEW loop (10 s / 30 s TTL) with halt-on-loss + unit tests. |
+| S3 | Compose/env + runbook | Enable the store in the execution-t3 profile; document the operator flow (no config change at hop time). |
+| S4 | Live proof | H2-2 drill re-run on the new wiring (the paper drill is the acceptance test); mark H2-2/H2-3 `[x]`. |
 
 ## 6. Test plan
 
@@ -174,23 +198,25 @@ already fail-closed (no gateway → no enablement).
 
 ## 7. Risks / open questions
 
-1. **Network boundary (D1 only):** attaching the executor to Fluss reverses a deployed
-   isolation rule — needs an explicit operator decision and an `execution-network-check`
-   update if chosen.
-2. **Enablement coupling (D2 only):** enabling requires the gateway reachable; failure is
-   fail-closed (executor stays HALTED). Accepted?
-3. **Fence/lease parameters:** lease TTL, renewal interval, and halt-on-loss behavior need
-   pinned values (proposal: TTL 30 s, renew every 10 s, halt on first failed renewal).
-4. **fluss-rs (D1 only):** async runtime/threading compatibility with the Nautilus kernel;
-   image build fetches the crate via `cargo fetch --locked` (needs network at build).
-5. **Two-store reconciliation:** none in either design — the row is the only durable gate
-   state (D1: written by the executor; D2: written by the gateway from the executor's report).
-6. **B4 test pin:** unchanged in both designs (a missing row stays fail-closed); D2 adds the
-   report path, which needs its own failing-first tests.
+1. **Network boundary (D1 only):** rejected with D1 — no network change in this workstream.
+2. **Enablement coupling (D2, accepted):** enabling requires the gateway reachable; failure is
+   fail-closed (executor stays HALTED). The gateway is already the intent-path dependency.
+3. **Fence/lease parameters (decided):** TTL 30 s, renew every 10 s, safety halt on the first
+   failed renewal.
+4. **fluss-rs (D1 only):** not applicable — D2 adds no dependency.
+5. **Two-store reconciliation:** none — the row is the only durable gate state; the gateway is
+   its only writer, the executor's gate is a cache of it.
+6. **B4 test pin:** unchanged (a missing row stays fail-closed, and with the boot `init` it can
+   no longer occur in the enabled path); the report endpoint gets its own failing-first tests.
+7. **Boot-race residual:** the executor's `BOOT_HALT` retry can lag the gateway's boot by a few
+   seconds; until it lands the row may be `ENABLED` from a previous life while the executor is
+   HALTED. The forward leg then gets a nautilus 503 → DEFERRED (not a violation), and the next
+   report converges the row to HALTED — benign, bounded, fail-closed.
 
-## 8. Approval request
+## 8. Approval (2026-09-27)
 
-- [ ] Design: **D2 (recommended)** / D1 / other.
-- [ ] If D1: network decision (dedicated Fluss control network / `trading-net`).
-- [ ] Fence/lease parameters (proposal above) accepted.
-- [ ] Slice order S1→S5 accepted; S5 re-runs the H2-2 drill as the acceptance test.
+- [x] Design: **D2** chosen (D1 rejected: network-boundary change + new dependency for no
+  functional gain).
+- [x] If D1: network decision — not applicable.
+- [x] Fence/lease parameters: TTL 30 s / renew 10 s / halt-on-loss accepted.
+- [x] Slice order S1→S4 accepted; S4 re-runs the H2-2 drill as the acceptance test.

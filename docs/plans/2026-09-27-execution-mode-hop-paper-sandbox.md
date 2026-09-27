@@ -89,7 +89,7 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   `test_instruction_id_contract.py` 3/3; dossier grammar; gateway image rebuilt
   (`make images`). Live half proven in CHG-331 attempt 3 (the reader accepted all 9 real
   rows and reached the forward leg); the drill itself is gated by H2-5.
-- [?] **H2-5** — `Execution_Gate` has no writer in the deployed topology (finding from
+- [~] **H2-5** — `Execution_Gate` has no writer in the deployed topology (finding from
   CHG-331 attempt 3; operator decision 2026-09-27: native path — no gateway semantic
   exception, no data cleanup). The gateway's forward leg looks up the durable gate row in
   Fluss (`NautilusIntentClient` → `FlussControlStateStore`); the row does not exist
@@ -97,13 +97,12 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   flags) and no other component writes the table, while the gateway wires the
   non-authoritative placeholder. A missing row flips `readiness.fluss(false, "key not
   found")` → `/readyz` 503 → `/v1/events` refuses → the projection leg cannot run while
-  pending intents exist. Scope doc
-  `docs/plans/2026-09-27-executor-gate-row-native.md` written: the executor cannot reach
-  Fluss today (execution-net only; Fluss is trading-net), so the native path has two
-  realizations — D1 executor writes Fluss directly (`fluss-rs`; needs a network-boundary
-  decision) or D2 executor reports transitions and the gateway writes the row with the
-  existing Java `FlussGateStateStore` (recommended: keeps the boundary, no new
-  dependency). Awaiting the design decision; then slices S1–S5 and the H2-2 drill re-run.
+  pending intents exist. **Decision 2026-09-27: D2** (gateway-written; executor stays
+  isolated, gateway is the execution core's Fluss writer). Scope doc
+  `docs/plans/2026-09-27-executor-gate-row-native.md` pins the protocol (gateway boot
+  `init`s the row HALTED before the replay; new `POST /v1/gate` report endpoint; executor
+  durable-first adoption; 30 s lease / 10 s renew / halt-on-loss). Implementing S1→S4
+  (CHG-334+); S4 re-runs the H2-2 drill as the acceptance test.
 
 #### H3 — Sandbox readiness (funded window)
 
@@ -130,10 +129,10 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | H1 — Switch contract (offline) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| H2 — Paper proof (deployed stack, `fake` mode) | 5 | 2 | 0 | 0 | 2 | 1 | 0 |
+| H2 — Paper proof (deployed stack, `fake` mode) | 5 | 2 | 1 | 0 | 2 | 0 | 0 |
 | H3 — Sandbox readiness (funded window) | 2 | 0 | 0 | 1 | 1 | 0 | 0 |
 | H4 — Decisions and follow-ups | 3 | 1 | 0 | 1 | 0 | 0 | 1 |
-| **Total** | **12** | **5** | **0** | **2** | **3** | **1** | **1** |
+| **Total** | **12** | **5** | **1** | **2** | **3** | **0** | **1** |
 
 ## Overview — the final product
 
