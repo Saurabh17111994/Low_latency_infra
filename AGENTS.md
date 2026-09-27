@@ -102,9 +102,13 @@ doc), the marker flips, and the operator-approval list. Tracker hygiene:
   Executor stays isolated from market-data networks; `make execution-network-check`
   verifies. Never add casual network attachments.
 - Service status varies — check the dossier before assuming behavior exists:
-  `01_ingestion` implemented+validated; `02_compute` Slice 1 + 2.1 only;
+  `01_ingestion` implemented+validated; `02_compute` raw→dedup→multi-timeframe
+  candles (15 s/30 s/1 m/3 m/5 m/15 m) + strategy host (`n7-range-breakout-v1`)
+  + optional `Execution_Intent`, all behind rollout flags default off (the 15 s
+  candle era is retired — see `docs/08_implementation/04-signal-job.md`);
   `04_executor` (Rust Nautilus) + `06_execution_bridge` + `06_execution_gateway`
-  implemented offline, flag-gated. (`03_action_capture` retired 2026-09-10 —
+  implemented and flag-gated, paper path live-proven 2026-09-27 (H2-5 drill);
+  live-money remains disabled. (`03_action_capture` retired 2026-09-10 —
   capture path runs in the Execution Core: go-arrow bridge + executor + `common`
   projection + gateway.)
 - Canonical data facts (DEC-039): feed modes `ltpc` (40 B) + `full` (196 B);
