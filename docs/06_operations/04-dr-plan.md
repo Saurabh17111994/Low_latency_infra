@@ -29,11 +29,11 @@ Operational projections must be rebuildable from immutable events/audit or have 
 
 ### Process or container failure
 
-Restart from the approved immutable artifact and tested checkpoint/savepoint. Verify state, offsets, projections, changelog continuity, readiness dimensions, and telemetry. For the Signal job, verify Fluss authoritative state after the compact checkpoint restore and rehydrate the dedup working cache (DEC-038). Executor state uncertainty starts `HALTED`.
+Restart from the approved immutable artifact and tested checkpoint/savepoint. Verify state, offsets, projections, changelog continuity, readiness dimensions, and telemetry. For the Signal job, verify Fluss authoritative state after the compact checkpoint restore (dedup is operator-local and intentionally not restored — DEC-054). Executor state uncertainty starts `HALTED`.
 
 ### Flink JobManager/TaskManager or checkpoint-store failure
 
-Keep the order gate halted if signal or changelog continuity is uncertain. Restore the compact Flink checkpoint from S3, verify Fluss authoritative-state availability and compatibility (dedup state table, candle/signal tables), rehydrate the dedup working cache from Fluss, verify dedup/window/forming-bar state and sink visibility, then reconcile before resume. (**Ranking/instruction continuity REMOVED 2026-08-15, CHG-005.**) (DEC-038, 2026-08-14: the Flink checkpoint is not a second complete copy of the durable Signal business state.)
+Keep the order gate halted if signal or changelog continuity is uncertain. Restore the compact Flink checkpoint from S3, verify Fluss authoritative-state availability and compatibility (candle/signal/intent tables), verify multi-TF window state and sink visibility, then reconcile before resume (dedup is operator-local and intentionally not restored — DEC-054). (**Ranking/instruction continuity REMOVED 2026-08-15, CHG-005.**) (DEC-038, 2026-08-14: the Flink checkpoint is not a second complete copy of the durable Signal business state.)
 
 ### Fluss tablet, quorum, or workload VM loss
 

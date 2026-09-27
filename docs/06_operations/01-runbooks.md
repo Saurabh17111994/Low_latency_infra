@@ -257,9 +257,9 @@ Automatic resume and approval reuse across epochs are prohibited.
 
 1. Identify the affected job, checkpoint, source offsets, watermark, state size, failure, and sink status.
 2. Halt the order path if state continuity or instruction correctness is uncertain.
-3. Restore the compact checkpoint from the tested encrypted S3 checkpoint/savepoint (DEC-038: the checkpoint holds source offsets, watermarks, timers, in-flight windows, and working-cache metadata — not the full dedup set).
-4. Verify Fluss authoritative-state availability and compatibility (dedup state table, candle/signal tables); rehydrate the dedup working cache from Fluss.
-5. Verify window, forming-bar, and source state consistency; verify the Fluss dedup table holds the accepted set (checkpoint did not duplicate it). (**Ranking state REMOVED 2026-08-15, CHG-005.**)
+3. Restore the compact checkpoint from the tested encrypted S3 checkpoint/savepoint (DEC-038/DEC-054: the checkpoint holds source offsets, watermarks, timers, and in-flight windows — the dedup window is intentionally not checkpointed and rebuilds from live ticks).
+4. Verify Fluss authoritative-state availability and compatibility (candle/signal/intent tables).
+5. Verify multi-TF window and source state consistency; dedup is operator-local (DEC-054) — a restore never duplicates a durable dedup set because none exists. (**Ranking state REMOVED 2026-08-15, CHG-005.**)
 6. Verify no duplicate immutable instruction and no unaccounted partial sink visibility.
 7. If restoration or Fluss-state verification cannot be proven, remain not ready and execute the approved reset/replay procedure.
 8. Reconcile before any gate resume.
@@ -531,7 +531,7 @@ Trigger: `SIGNAL-crit-checkpoint-failed` (failed checkpoints > 0) or
    (`STATE_RECOVERY_PATH` = `file:///tmp/p8-checkpoints/<jobid>/chk-N`), never
    from a checkpoint at/after the failure.
 4. `allowNonRestoredState` is forbidden — the restore must be exact.
-5. Verify dedup, window, forming-bar, and source state consistency, then resume
+5. Verify multi-TF window and source state consistency (dedup is operator-local and rebuilds — DEC-054), then resume
    normal operation. Closure: checkpoints advancing, 0 failed, alert recovered.
 
 ## Schema-preflight failure
@@ -540,7 +540,7 @@ Trigger: DDL/version preflight blocks startup (validation/contract gate).
 
 1. Capture the failing table, expected vs actual schema, and version matrix
    state.
-2. Check the table contract fields: PK, routing, bucket count, and the full column/type/nullability set (`TableContractValidator`, re-targeted by the 2026-08-13 re-scope to `feature_candles_15s` KV PK exactly `(instrument_token, window_start)` + `Signal_Candidates` LOG + `Signal_Candidates_current` KV PK `[instrument_token]` — SIGNAL-SCHEMA-001, implemented).
+2. Check the table contract fields: PK, routing, bucket count, and the full column/type/nullability set (`TableContractValidator`: `Signal_Candidates` LOG + `Signal_Candidates_current` KV PK `[instrument_token]`; `candle_live`/`candle_closed` KV PK `(instrument_token, tf, window_start)` when multi-TF is enabled; `Execution_Intent` LOG when intent is enabled — SIGNAL-SCHEMA-001, implemented; candle targets added by the 2026-09-05 cutover).
 3. Do NOT bypass the gate; reconcile the DDL/schema with the manifest
    (`ddl_apply.py --force` regeneration must be byte-identical) and re-run.
 4. Closure: preflight passes, job starts in the intended mode.

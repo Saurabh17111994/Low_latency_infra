@@ -38,7 +38,7 @@ These behaviors are conscious trade-offs accepted by the platform:
 
 - **Partial cross-table visibility:** A single Flink checkpoint commits source offsets and all sinks, but atomic visibility across multiple LOG and KV tables is not assumed. Consumers downstream of the Signal job tolerate partial visibility and reconcile using stable IDs, versions, and the Executor's duplicate guard.
 - **At-least-once external calls with reconciliation:** Broker REST calls and postback delivery are at-least-once or uncertain. Unknown outcomes are never automatically retried. Reconciliation is mandatory before release or retry.
-- **In-process interfaces are not network contracts:** The Compute → forming-bar handoff is a typed in-job state/event boundary, not a Fluss round trip. It shares the Signal job checkpoint and is not subject to network interface versioning. (**The Business Logic ↔ Ranking interface is REMOVED 2026-08-15, CHG-005.**)
+- **In-process interfaces are not network contracts:** The Compute → strategy-host candle handoff is a typed in-job state/event boundary, not a Fluss round trip. It shares the Signal job checkpoint and is not subject to network interface versioning. (**The Business Logic ↔ Ranking interface is REMOVED 2026-08-15, CHG-005.**)
 - **Broker REST is not exactly-once:** Arrow REST calls are protected by the durable attempt protocol, gate verification, and post-call reconciliation — not by Flink checkpointing semantics.
 - **Trace propagation is capability-gated:** Distributed tracing is used where supported but not required for MVP. Correlation IDs and audit IDs are mandatory on every interface regardless of tracing capability.
 - **Protocol values are now confirmed:** Arrow WS binary format, REST contract, and postback WS format are validated from Go SDK and REST API docs. These are no longer hypotheses.
@@ -67,7 +67,7 @@ The following capabilities are explicitly NOT owned by the Interface Requirement
 - **Payload:** original packet bytes plus normalized typed fields, hash, decoder/protocol version, fingerprint/version, timestamps, and validity state
 - **Failure:** bounded retry under pinned client policy; uncertainty is counted and alerting/readiness is affected
 
-Ingestion never claims raw logical deduplication. Compute performs bounded fingerprint deduplication; the durable dedup set is Fluss-authoritative (DEC-038).
+Ingestion never claims raw logical deduplication. Compute performs bounded fingerprint deduplication; the dedup set is operator-local and intentionally not checkpointed (DEC-054; the DEC-038 Fluss-authoritative design is superseded).
 
 ## 5.2 Fluss → Signal Flink job
 
@@ -77,14 +77,15 @@ Ingestion never claims raw logical deduplication. Compute performs bounded finge
 - **State key:** instrument plus fingerprint scope
 - **Watermark:** tested bounded out-of-orderness profile
 
-The job filters eligible trades, deduplicates best-effort, emits final candles, and passes forming-bar state in-process to Business Logic. It does not read feature tables back for strategy execution.
+The job filters eligible trades, deduplicates best-effort, emits multi-timeframe live/closed candles, and passes them in-process to the strategy host. It does not read feature tables back for strategy execution.
 
 ## 5.3 Signal job → Fluss
 
 The Signal job writes:
 
-- `feature_candles_15s` final KV upsert rows (PK `(instrument_token, window_start)` — sole candle output, 2026-08-13 conversion)
+- `candle_live` forming KV upsert rows + `candle_closed` final KV rows (PK `(instrument_token, tf, window_start)` — multi-TF since the 2026-09-05 cutover)
 - `Signal_Candidates` immutable LOG rows
+- `Execution_Intent` immutable LOG rows when `EXECUTION_INTENT_ENABLED=true`
 - ~~`Ranking_Results` immutable LOG rows~~ — **REMOVED 2026-08-15 (CHG-005)**
 - ~~Immutable `Trade_Decisions` instruction records~~ — **REMOVED 2026-08-15 (CHG-005)**
 
@@ -113,7 +114,7 @@ Future actions are immutable `Position_Actions` events with `action_id`, `positi
 
 ## 5.7 Instructions/actions → Executor
 
-Executor consumes ~~immutable `Trade_Decisions`~~ (**REMOVED 2026-08-15, CHG-005**) and, after MVP, `Position_Actions`. For each event it verifies schema/version, identity, expiry, ~~reservation~~ (**REMOVED 2026-08-15, CHG-005**), gate state, and duplicate request hash.
+Executor consumes ~~immutable `Trade_Decisions`~~ (**REMOVED 2026-08-15, CHG-005**) and, after MVP, `Position_Actions`. For each event it verifies schema/version, identity, expiry, ~~reservation~~ (**REMOVED 2026-08-15, CHG-005**), gate state, and duplicate request hash. **(Updated 2026-09-27: the current path is `Execution_Intent` → the execution core (gateway + executor); see `08_implementation/05-execution-core.md`. The `Trade_Decisions`/`Position_Actions` wording above records the pre-2026-09 design.)**
 
 A modified instruction under the same `instruction_id` is a contract violation and causes halt/quarantine. Executor writes only execution-owned state: `Execution_Gate`, `Execution_Attempts`, `Order_Correlation`, and `Execution_Audit`.
 

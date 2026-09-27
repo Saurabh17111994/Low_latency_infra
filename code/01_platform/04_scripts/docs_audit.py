@@ -397,7 +397,7 @@ REQ_FILES = {  # domain (as used in the matrix tables) -> (prefix, requirement f
 }
 NFR_DOMAIN = "Non-functional"
 
-INVENTORY_FILES = [  # all four table inventories must list both tables (DEC-039)
+INVENTORY_FILES = [  # all four table inventories must list the candle pair + ingestion_quarantine (DEC-039; CHG-339)
     "02_requirements/04-data.md",
     "03_architecture/00-arch-overview.md",
     "03_architecture/02-data-pipeline.md",
@@ -701,14 +701,17 @@ def c9_dec039_invariants():
         "fingerprint_dedup" in rb and "24_fingerprint_dedup.sql" in rb,
     )
 
-    # --- inventories include forming_bar + ingestion_quarantine ---
+    # --- inventories include the candle pair + ingestion_quarantine ---
+    # (CHG-339: `forming_bar` retired 2026-09-05; the multi-TF candle pair
+    # `candle_live`/`candle_closed` replaced `feature_candles_15s`/`forming_bar`.)
     missing_inv = []
     for f in INVENTORY_FILES:
         body = safe_read(os.path.join(DOCS_DIR, f)) or ""
-        for tbl in ("forming_bar", "ingestion_quarantine"):
+        for tbl in ("candle_live", "candle_closed", "ingestion_quarantine"):
             if tbl not in body:
                 missing_inv.append(f"{f}: {tbl}")
-    check("C9 inventories include both tables", not missing_inv, f"{missing_inv}")
+    check("C9 inventories include the candle pair + ingestion_quarantine",
+          not missing_inv, f"{missing_inv}")
 
 
 # ---------------------------------------------------------------------------

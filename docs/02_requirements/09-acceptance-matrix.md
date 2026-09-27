@@ -79,23 +79,23 @@ Every SHALL statement in every requirement MUST have a specific test or evidence
 | `AC-FC-003` | REQ-FC-006 | Full | — | Empty windows; invalid-event-only windows | No row emitted for empty/invalid windows | `test/compute/empty-window/` report | `NOT_IMPLEMENTED` |
 | `AC-FC-004` | REQ-FC-006, REQ-FC-011 | Full | — | Late events after finalization | Discarded and counted; no correction row | `test/compute/final-only/` report | `NOT_IMPLEMENTED` |
 | `AC-FC-005` | REQ-FC-005 | Full | — | Identical input snapshot | Deterministic tie ordering; same OHLCV output | `test/compute/deterministic-ties/` report | `NOT_IMPLEMENTED` |
-| `AC-FC-006` | REQ-FC-008 | Full | — | Checkpoint restore | No state duplication within tested boundary; dedup/window/forming-bar state restored | `test/compute/checkpoint-restore/` report | `NOT_IMPLEMENTED` |
+| `AC-FC-006` | REQ-FC-008 | Full | — | Checkpoint restore | No state duplication within tested boundary; multi-TF window state restored (dedup intentionally not restored — DEC-054) | `test/compute/checkpoint-restore/` report | `NOT_IMPLEMENTED` |
 | `AC-FC-007` | REQ-FC-009, REQ-PF-009 | Full | — | variable 50,000 ticks/s average baseline (3,000 instruments; ≈16.7 ticks/s/instrument average) | Backpressure bounded; checkpoint stable | `test/capacity/signal-throughput/` report | `NOT_IMPLEMENTED` |
 | `AC-FC-008` | REQ-FC-009 | Full | — | Checkpoint or state continuity uncertain | Order path safely halted per Executor contract | `test/compute/safe-halt/` report | `NOT_IMPLEMENTED` |
 | `AC-FC-009` | REQ-FC-004 | Full | — | Source idleness, reconnect, reassignment | Watermark recovers; no stale window finalization | `test/compute/source-idleness/` report | `NOT_IMPLEMENTED` |
 | `AC-FC-010` | REQ-FC-012 | Full | — | Dedup TTL shorter than declared horizon | Configuration rejected at deployment | `test/compute/dedup-ttl-reject/` report | `NOT_IMPLEMENTED` |
 | `AC-FC-011` | REQ-FC-012 | Full | — | variable 50,000 ticks/s average baseline (3,000 instruments; ≈16.7 ticks/s/instrument average) | State growth documented; checkpoint size bounded; cleanup progress observed | `test/compute/state-growth/` report | `NOT_IMPLEMENTED` |
-| `AC-FC-012` | REQ-FC-001 | Full | — | Verification scan: no advanced feature columns, no CEP, no current-price inputs | Only 15s OHLCV + forming-bar state in Compute output; `feature_candles_15s` table name fixed; granularity change requires migration | `test/compute/mvp-scope/` report | `NOT_IMPLEMENTED` |
+| `AC-FC-012` | REQ-FC-001 | Full | — | Verification scan: no advanced feature columns, no CEP, no current-price inputs | Only multi-TF OHLCV + live/closed candle state in Compute output; `candle_live`/`candle_closed` table names fixed; timeframe-set change requires migration | `test/compute/mvp-scope/` report | `NOT_IMPLEMENTED` |
 | `AC-FC-013` | REQ-FC-002 | Full | — | Mixed trade/quote stream | Trades+quotes update forming candle OHLC from `last_price_paise` (schema v2 has no bid/ask columns); volume and tick_count increment only on TRADE rows (`last_qty > 0`); invalid rows excluded with reason metric | `test/compute/source-classification/` report | `NOT_IMPLEMENTED` |
-| `AC-FC-014` | REQ-FC-007 | Full | — | Typed forming-bar handoff → Business Logic receives event | Forming-bar event contains instrument, window boundaries, current OHLCV, event timestamp, fingerprint; no Fluss round trip | `test/compute/forming-bar-handoff/` report | `NOT_IMPLEMENTED` |
-| `AC-FC-015` | REQ-FC-013 | Full | — | Typed closed-candle + forming-bar events delivered in-job | Both event types carry instrument, portfolio_id, window boundaries, schema/config versions, deterministic ordering metadata | `test/compute/closed-candle-handoff/` report | `NOT_IMPLEMENTED` |
+| `AC-FC-014` | REQ-FC-007 | Full | — | Typed live-candle handoff → strategy host receives event | Live event contains instrument, window boundaries, current OHLCV, event timestamp, fingerprint; no Fluss round trip | `test/compute/forming-bar-handoff/` report | `NOT_IMPLEMENTED` |
+| `AC-FC-015` | REQ-FC-013 | Full | — | Typed closed-candle + live (forming) candle events delivered in-job | Both event types carry instrument, window boundaries, schema/config versions, deterministic ordering metadata | `test/compute/closed-candle-handoff/` report | `NOT_IMPLEMENTED` |
 | `AC-FC-016` | REQ-FC-010 | Indirect | — | Covered by AC-FC-001 through AC-FC-015 above | All required metrics present; all acceptance criteria proven | `test/compute/acceptance-summary/` report | `NOT_IMPLEMENTED` |
 
 ### Business Logic
 
 | Acceptance ID | Requirement | Coverage type | Uncovered criteria | Fixture / Workload | Threshold | Evidence Artifact | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `AC-SS-001` | REQ-SS-002 | Full | — | Forming-bar pattern trigger | Correct detection; candidate created with strategy/version | `test/signal/forming-bar/` report | `NOT_IMPLEMENTED` |
+| `AC-SS-001` | REQ-SS-002 | Full | — | Strategy candle-pattern trigger (strategy host) | Correct detection; candidate created with strategy/version | `test/signal/forming-bar/` report | `NOT_IMPLEMENTED` |
 | `AC-SS-002` | REQ-SS-002, REQ-SS-007 | Full | — | Identical input snapshot | Same pattern detection result; deterministic replay | `test/signal/deterministic-replay/` report | `NOT_IMPLEMENTED` |
 | `AC-SS-003` | REQ-SS-003 | Full | — | All candidate evaluations | Candidate audit record written for every evaluation (selected or rejected) | `test/signal/candidate-audit/` report | `NOT_IMPLEMENTED` |
 | `AC-SS-004` | REQ-SS-004 | Full | — | Changed winning parameters | New instruction_id created; prior instruction superseded/cancelled | `test/signal/instruction-lifecycle/` report | `NOT_IMPLEMENTED` |

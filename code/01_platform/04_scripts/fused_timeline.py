@@ -91,17 +91,19 @@ def _prom_range(query, start_s, end_s, step_s, auth):
 
 
 # RocksDB: (column, metric suffix, hot-operator substrings). The operator
-# segment in the metric name is matched against these substrings; the dedup
-# and forming-bar operators are the per-record-cost hot spots under study.
+# segment in the metric name is matched against these substrings. The strategy
+# host (`strategy-host-emitted-ids`) is the only current managed-state operator
+# in the Signal job: the dedup operator holds no managed state (DEC-054) and
+# the forming-bar path is retired (2026-09-05 cutover).
 RDB_SIGNALS = [
-    ("rdb_compact", "num_running_compactions", ("fingerprint_dedup", "forming_bar")),
-    ("rdb_pending", "compaction_pending", ("fingerprint_dedup", "forming_bar")),
-    ("rdb_flush", "num_running_flushes", ("fingerprint_dedup", "forming_bar")),
-    ("rdb_sst_gib", "total_sst_files_size", ("fingerprint_dedup", "forming_bar")),
-    ("rdb_memtable_gib", "size_all_mem_tables", ("fingerprint_dedup", "forming_bar")),
-    ("rdb_pending_cpt_gib", "estimate_pending_compaction_bytes", ("fingerprint_dedup", "forming_bar")),
-    ("rdb_keys", "estimate_num_keys", ("fingerprint_dedup", "forming_bar")),
-    ("rdb_l0_versions", "num_live_versions", ("fingerprint_dedup", "forming_bar")),
+    ("rdb_compact", "num_running_compactions", ("strategy-host",)),
+    ("rdb_pending", "compaction_pending", ("strategy-host",)),
+    ("rdb_flush", "num_running_flushes", ("strategy-host",)),
+    ("rdb_sst_gib", "total_sst_files_size", ("strategy-host",)),
+    ("rdb_memtable_gib", "size_all_mem_tables", ("strategy-host",)),
+    ("rdb_pending_cpt_gib", "estimate_pending_compaction_bytes", ("strategy-host",)),
+    ("rdb_keys", "estimate_num_keys", ("strategy-host",)),
+    ("rdb_l0_versions", "num_live_versions", ("strategy-host",)),
 ]
 
 

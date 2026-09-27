@@ -2,7 +2,7 @@
 
 ## 1.1 Purpose
 
-The Streaming Trading Data Platform ingests live market data, computes event-time candles and forming-bar signals with Apache Flink, stores streaming events and operational state in Apache Fluss, submits approved immutable instructions through the Executor via Arrow's REST API, captures broker postbacks independently, and preserves eligible history in encrypted Apache Iceberg/S3 storage.
+The Streaming Trading Data Platform ingests live market data, computes multi-timeframe event-time candles and strategy signals with Apache Flink, stores streaming events and operational state in Apache Fluss, submits approved immutable instructions through the Executor via Arrow's REST API, captures broker postbacks independently, and preserves eligible history in encrypted Apache Iceberg/S3 storage.
 
 The system has two distinct safety postures:
 
@@ -15,7 +15,7 @@ The system has two distinct safety postures:
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------ |
 | Ingestion            | Broker connection, protocol decoding, normalized typed tick placement, original packet preservation, bounded fingerprinting, suspected discontinuity records | Candle computation, strategy, order placement                |
 | Fluss storage        | Tables, DDL, distribution, retention, changelog, replication, lake tiering                                                                                   | Strategy or broker calls                                     |
-| Signal Flink job     | Computes/operates: dedup, event-time candles, forming-bar detection, candidates — durable dedup/candle/signal state is Fluss-authoritative (DEC-038); Flink keeps bounded working + recovery state. **Ranking/Reservations/Decisions REMOVED 2026-08-15 (CHG-005)** | Broker REST calls, authoritative fill capture                |
+| Signal Flink job     | Computes/operates: dedup, multi-timeframe event-time candles, strategy-host signal detection, candidates — durable candle/signal state is Fluss-authoritative (DEC-038); dedup is operator-local (DEC-054); Flink keeps bounded working + recovery state. **Ranking/Reservations/Decisions REMOVED 2026-08-15 (CHG-005); the 15 s candle/forming-bar path RETIRED 2026-09-05** | Broker REST calls, authoritative fill capture                |
 | Action Capture       | Broker postback intake, immutable postback audit, order-lifecycle projection, identity correlation quarantine                                                | Strategy, broker submission                         |
 | Babysitter Flink job | Position-management evaluation; no-op in MVP; future structured actions                                                                                      | New entry strategy, lifecycle authority, direct broker calls |
 | Executor             | Changelog intake, durable order gate, attempt ledger, ID mapping, reconciliation, controlled execution state, Arrow REST calls                             | Strategy scoring, authoritative fill capture                 |
@@ -30,7 +30,7 @@ Arrow market-data stream
   → raw_table_1 LOG
   → Signal Flink job
       ├─ bounded fingerprint deduplication
-      ├─ event-time candle and forming-bar state
+      ├─ multi-timeframe event-time candle state
       ├─ candidate audit
           → Executor durable order gate
           → Arrow REST

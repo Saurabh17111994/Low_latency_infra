@@ -87,10 +87,12 @@ An overloaded `order_id` is prohibited.
 | Table                       | Type           | Writer               | Live retention                                            | Lake/audit                             |
 | --------------------------- | -------------- | -------------------- | --------------------------------------------------------- | -------------------------------------- |
 | `raw_table_1`               | LOG            | Ingestion            | ≤7 complete trading days (ceiling); extend while offload unverified | EOD Iceberg                            |
-| `feature_candles_15s`       | KV (PK `(instrument_token, window_start)` — 2026-08-13 conversion; sole candle output) | Signal job           | ≤7 complete trading days (ceiling); extend while offload unverified | EOD Iceberg                            |
-| `forming_bar`               | KV (PK `instrument_token`) | Signal job           | Current state only (Slice 2.2 consumer — DEC-038 durable home) | Rebuilt from raw_table_1 replay        |
+| `candle_live`               | KV (PK `(instrument_token, tf, window_start)` — forming snapshots, 60 s) | Signal job           | 60 s log TTL (transient)                                  | No lake (transient)                    |
+| `candle_closed`             | KV (first-write-wins, PK `(instrument_token, tf, window_start)` — closed rows) | Signal job           | ≤7 complete trading days (ceiling); extend while offload unverified | EOD Iceberg                            |
+| `feature_candles_15s`, `forming_bar` | ~~KV~~ | ~~Signal job~~ | ~~≤7 days / current state~~ | ~~EOD Iceberg / raw replay~~ — **RETIRED 2026-09-05 (multi-TF cutover; replaced by `candle_live`/`candle_closed`)** |
 | `Signal_Candidates`         | LOG            | Signal job           | ≤7 complete trading days                                  | EOD Iceberg                            |
 | `Signal_Candidates_current` | KV             | Signal job           | Current state plus rebuild window                         | Rebuilt from LOG audit                |
+| `Execution_Intent`          | LOG            | Signal job (strategy host, `EXECUTION_INTENT_ENABLED`) | Operational replay window                                 | Policy-controlled durable offload      |
 | `Ranking_Results`           | ~~LOG~~            | ~~Signal job~~           | ~~≤7 complete trading days~~                                  | ~~EOD Iceberg~~ — **REMOVED 2026-08-15 (CHG-005)** |
 | `Trade_Decisions`           | ~~immutable feed~~ | ~~Signal job~~           | ~~Until consumed plus replay buffer~~          | ~~Execution audit links~~ — **REMOVED 2026-08-15 (CHG-005)** |
 | `Fills`               | LOG            | Action Capture       | ≥3 complete trading days                                  | Encrypted audit under approved policy  |
@@ -119,9 +121,9 @@ Logical table names use Pascal_Snake_Case (e.g. ~~`Trade_Decisions`~~ — REMOVE
 
 Required fields: event/ingest/ack timestamps, instrument/routing data, verified typed trade/depth data, `connection_id`, `connection_epoch`, `event_fingerprint`, `fingerprint_version`, original packet bytes, payload hash, decoder/protocol version, validity state/reason, and schema version. Broker sequence is not required.
 
-### `feature_candles_15s`
+### `candle_live` / `candle_closed`
 
-Required fields: instrument, window start/end, OHLCV, tick count, algorithm/configuration version, output timestamp, and schema version. One final row per non-empty accepted window; no MVP correction rows.
+Required fields (both): instrument, `tf`, window start/end, OHLCV, tick count, last event time/fingerprint, and schema version. `candle_live` is a KV upsert overwritten at the 1 s snapshot cadence (60 s log TTL, transient); `candle_closed` holds one final row per non-empty accepted window per timeframe (first-write-wins, immutable; no MVP correction rows; 7 d + EOD Iceberg). **(The single-timeframe `feature_candles_15s` schema is RETIRED 2026-09-05 — replaced by the two above.)**
 
 ### `Signal_Candidates`
 

@@ -18,7 +18,7 @@ Use the repository authority order defined in [`../01_project/00-index.md`](../0
 
 The requirements in this directory enforce these decisions:
 
-- One signal Flink job performs candle computation and forming-bar detection. **(In-operator ranking and instruction publication REMOVED 2026-08-15, CHG-005.)**
+- One signal Flink job performs multi-timeframe candle computation and strategy-host signal detection. **(In-operator ranking and instruction publication REMOVED 2026-08-15, CHG-005; the 15 s candle/forming-bar path RETIRED 2026-09-05.)**
 - One separate Babysitter Flink job is a checkpointed no-op in MVP.
 - Order correlation uses `instruction_id`, `client_order_ref`, and `broker_order_id`.
 - No broker tick or postback sequence is assumed.

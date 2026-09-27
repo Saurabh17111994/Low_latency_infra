@@ -53,7 +53,7 @@ The following capabilities are explicitly NOT in MVP scope:
 
 - **Multi-broker support:** MVP supports exactly one evidence-approved broker integration.
 - **BSE and currency derivatives:** MVP covers NSE and MCX market-data scope only.
-- **250+ feature columns and pattern-feature libraries:** MVP computes 15-second OHLCV candles plus forming-bar state. Advanced features are deferred.
+- **250+ feature columns and pattern-feature libraries:** MVP computes multi-timeframe OHLCV candles (15 s / 30 s / 1 m / 3 m / 5 m / 15 m). Advanced features are deferred; the operator decision of 2026-09-27 (Q2 = stored layer) schedules SMA/RSI/relative-volume features as a stored Fluss layer after the multi-TF path is proven in dev.
 - ~~**ML-based ranking or dynamic weight adjustment:** MVP uses static, versioned weight configuration~~ — **REMOVED 2026-08-15 (CHG-005).**
 - **Strategy authoring, backtesting, or configuration UI:** MVP uses hardcoded or configuration-file strategy definitions.
 - **Charting and end-user notification features:** MVP includes operational alerts only; end-user trading alerts are not in scope.

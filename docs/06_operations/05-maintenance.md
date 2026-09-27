@@ -28,7 +28,7 @@ Requires immutable image digest, exact dependency/version matrix, unit/integrati
 
 ### Flink job update
 
-Verify serializer/state compatibility, checkpoint/savepoint restore, source offsets, dedup/window/forming-bar state, and sink behavior. (**Ranking state and instruction-duplication risk REMOVED 2026-08-15, CHG-005.**) Under DEC-038 also verify the Fluss dedup state-table schema/serialization compatibility and the rehydration path (restart must rehydrate the dedup working cache from Fluss; Fluss unavailability/incompatibility keeps the job fail-closed). Any uncertainty keeps the affected path not ready and the gate halted.
+Verify serializer/state compatibility, checkpoint/savepoint restore, source offsets, multi-TF window state, and sink behavior. (**Ranking state and instruction-duplication risk REMOVED 2026-08-15, CHG-005.**) **(SUPERSEDED 2026-09-03, DEC-054: dedup is an operator-local per-token count window, intentionally not checkpointed; there is no Fluss dedup table and no rehydration path — the window rebuilds from live ticks.)** Any uncertainty keeps the affected path not ready and the gate halted.
 
 ### Fluss schema or DDL change
 

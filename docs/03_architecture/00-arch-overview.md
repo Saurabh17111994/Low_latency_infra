@@ -14,7 +14,7 @@ The architecture is **blocked for live-money use** until the evidence-gated Arro
 
 ## System purpose
 
-The platform ingests supported NSE and MCX market data, computes event-time 15-second candles and forming-bar signals in Apache Flink, ranks active setups in the same Signal job, publishes immutable instructions through Apache Fluss, and submits approved instructions through a durable Executor calling Arrow's REST API directly.
+The platform ingests supported NSE and MCX market data, computes multi-timeframe event-time candles (15 s / 30 s / 1 m / 3 m / 5 m / 15 m) and runs strategy signals in the same Signal job, publishes immutable candidates and execution intents through Apache Fluss, and submits approved instructions through a durable Executor calling Arrow's REST API directly. **(Updated 2026-09-27: the 15 s single-timeframe candle/forming-bar path is RETIRED — 2026-09-05 cutover; ranking was removed earlier, CHG-005.)**
 
 It independently captures broker postbacks, builds order-lifecycle and fill-derived position state, runs a checkpointed Babysitter no-op in MVP, and offloads eligible immutable history to encrypted Iceberg/S3 storage.
 
@@ -25,7 +25,7 @@ The platform has two safety postures:
 
 ## Scope and non-goals
 
-MVP includes one evidence-approved broker integration, the supported NSE/MCX instrument manifest, raw packet preservation, bounded best-effort fingerprinting, event-time candles, forming-bar detection, immutable candidates, durable execution state, independent postback capture, fill-derived positions, Babysitter no-op wiring, operational observability, and verified EOD offload. **(In-operator ranking and immutable ranking/instruction records REMOVED 2026-08-15, CHG-005.)**
+MVP includes one evidence-approved broker integration, the supported NSE/MCX instrument manifest, raw packet preservation, bounded best-effort fingerprinting, multi-timeframe event-time candles, strategy-host signal detection, immutable candidates, durable execution state, independent postback capture, fill-derived positions, Babysitter no-op wiring, operational observability, and verified EOD offload. **(In-operator ranking and immutable ranking/instruction records REMOVED 2026-08-15, CHG-005. Forming-bar detection RETIRED 2026-09-05; the strategy host replaced it.)**
 
 MVP does not include multi-broker support, BSE/currency derivatives, strategy authoring, backtesting, business analytics, Kubernetes, automatic live gap backfill, or automatic order-path resume. Real Babysitter actions are deferred until the structured action contract and safety tests are approved. **(ML ranking REMOVED 2026-08-15, CHG-005.)**
 
@@ -37,8 +37,8 @@ Arrow market-data WebSocket
   → raw_table_1 LOG
   → Signal Flink job
       ├─ bounded fingerprint deduplication
-      ├─ event-time 15-second candle state
-      ├─ forming-bar detection
+      ├─ multi-timeframe event-time candle state (15 s / 30 s / 1 m / 3 m / 5 m / 15 m)
+      ├─ strategy-host signal detection
       ├─ candidate audit
       ├─ Signal_Candidates LOG
       ├─ Signal_Candidates_current KV
@@ -184,8 +184,8 @@ Every managed and durable state category must have a defined capacity budget for
 
 | State category | Cardinality bound | Serialized size/entry | Checkpoint contribution | Owner / cleanup |
 | --- | --- | --- | --- | --- |
-| Fingerprint dedup | entries = rate × dedup_horizon | ~64 B fingerprint + metadata | **Not a full copy** — Flink keeps only a bounded working cache; the authoritative set is a Fluss KV state table (DEC-038) | Fluss KV (authoritative) + Flink cache; expiry column/cleanup path (native per-key TTL exists in Fluss 1.0.0 — `table.kv.ttl`, not adopted here — mechanism must be tested) |
-| Candle/forming-bar windows | instruments × (allowed_lateness + window_size) / window_size | Per-instrument window accumulator | Small in-flight accumulator + `emitted` flag; final rows already Fluss KV | Flink (transient) + `feature_candles_15s` KV (durable) |
+| Fingerprint dedup | entries = 200 per token (`DEDUP_WINDOW_ENTRIES`) | ~64 B fingerprint + metadata | **None** — operator-local count window, intentionally not checkpointed (DEC-054) | Flink operator-local (transient); rebuilt from live ticks on restore |
+| Multi-TF candle windows | instruments × 6 TFs × (allowed_lateness + window_size) / window_size | Per-instrument, per-timeframe accumulator | Small in-flight accumulators; closed rows already Fluss KV | Flink (transient) + `candle_closed` KV (durable) + `candle_live` mirror |
 | Active candidates | configurable max per instrument × instruments | Per-candidate record ~1 KB | Small; output already Fluss LOG/KV | Flink (working) + `Signal_Candidates`/`_current` (durable) |
 | ~~Portfolio reservations~~ | ~~max concurrent × portfolios~~ | ~~Per-reservation record ~512 B~~ | ~~Included in Signal checkpoint~~ | **REMOVED 2026-08-15 (CHG-005)** |
 | Execution attempts | active + reconciliation window | Per-attempt record ~1 KB | N/A (KV durable state) | Fluss KV durable state |
@@ -193,7 +193,7 @@ Every managed and durable state category must have a defined capacity budget for
 | Postback quarantine | unresolved records | Per-quarantine entry ~2 KB | N/A (LOG durable state) | Fluss LOG durable state |
 | Suspected discontinuities | operational investigation window | Per-discontinuity ~512 B | N/A (LOG durable state) | Fluss LOG durable state |
 
-All bounds that depend on external configuration (instruments, portfolios, rate) must be workload-validated at the variable 50,000 ticks/s average baseline with every instrument capped at 20 ticks/s. (The 90,000 ticks/s peak is retired, DEC-036; 60,000 ticks/s gate, DEC-045.) State categories without a measured bound are evidence-gated until measurement. The dedup checkpoint contribution above is a target — the actual checkpoint size after externalization must be measured, not asserted (DEC-038).
+All bounds that depend on external configuration (instruments, portfolios, rate) must be workload-validated at the variable 50,000 ticks/s average baseline with every instrument capped at 20 ticks/s. (The 90,000 ticks/s peak is retired, DEC-036; 60,000 ticks/s gate, DEC-045.) State categories without a measured bound are evidence-gated until measurement. The dedup checkpoint contribution above is none — the operator-local window is intentionally not checkpointed (DEC-054).
 
 ## Required logical state inventory
 
@@ -202,10 +202,11 @@ The architecture mandates these logical tables before physical DDL generation:
 | Table | Type | Writer |
 | --- | --- | --- |
 | `raw_table_1` | LOG | Ingestion |
-| `feature_candles_15s` | KV (PK `instrument_token, window_start` — sole candle output, 2026-08-13) | Signal job |
-| `forming_bar` | KV (PK `instrument_token`) | Signal job |
+| `candle_live` | KV (PK `instrument_token, tf, window_start` — forming snapshots, 60 s) | Signal job |
+| `candle_closed` | KV (PK `instrument_token, tf, window_start` — closed rows, first-write-wins, 7 d + lake tiering) | Signal job |
 | `Signal_Candidates` | LOG | Signal job |
 | `Signal_Candidates_current` | KV | Signal job |
+| `Execution_Intent` | LOG | Signal job (strategy host, `EXECUTION_INTENT_ENABLED`) |
 | `Ranking_Results` | ~~LOG~~ | ~~Signal job~~ — **REMOVED 2026-08-15 (CHG-005)** |
 | `Trade_Decisions` | ~~Immutable feed~~ | ~~Signal job~~ — **REMOVED 2026-08-15 (CHG-005)** |
 | `Portfolio_Reservations` | ~~KV/logical state~~ | ~~Signal job~~ — **REMOVED 2026-08-15 (CHG-005)** |
