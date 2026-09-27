@@ -379,6 +379,7 @@ class RolloutHarness(unittest.TestCase):
             # drop them, so a rollout silently reverted those flags).
             "multi-TF env forwarded": 'MULTITF_ENABLED MULTITF_SESSION_BYPASS MULTITF_SIGNAL_CONTEXT_ENABLED',
             "strategy env forwarded": 'STRATEGY_HOST_ENABLED STRATEGIES',
+            "feature env forwarded": 'FEATURE_LAYER_ENABLED FEATURE_TABLE',
             "execution identity forwarded": 'ACCOUNT_SCOPE_ID EXECUTION_PARTITION_ID EXECUTION_PRODUCT_TYPE',
         }
         missing = [k for k, v in pins.items() if v not in SRC]

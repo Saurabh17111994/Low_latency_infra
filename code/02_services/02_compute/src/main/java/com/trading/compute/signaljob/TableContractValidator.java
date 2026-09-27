@@ -61,6 +61,7 @@ public final class TableContractValidator {
     private static final String DEDUP_CONTRACT = "DEC-038, DEDUP-SCHEMA-001";
     private static final String MULTITF_CANDLE_CONTRACT =
             "2026-09-05 multi-TF aggregator Phase 0, CANDLE-MULTITF-001";
+    private static final String FEATURE_VALUES_CONTRACT = "DEC-057, FEATURE-VALUES-SCHEMA-001";
 
     private TableContractValidator() {}
 
@@ -183,6 +184,27 @@ public final class TableContractValidator {
         validateRouting(info,
                 CandleClosedColumns.COLUMN_NAMES.get(CandleClosedColumns.INSTRUMENT_TOKEN),
                 16, MULTITF_CANDLE_CONTRACT);
+    }
+
+    /**
+     * DDL 34 (proposal) contract for the stored feature layer (DEC-056/057):
+     * KV table, PK {@code (instrument_token, tf, window_start)}, 4 columns with
+     * a single {@code features MAP<INT, DOUBLE>} column, 16 buckets routed by
+     * {@code instrument_token}. Fed by {@link SignalJob#preflightTableContracts}
+     * when {@code FEATURE_LAYER_ENABLED=true}.
+     */
+    public static void validateFeatureValuesTable(TableInfo info) {
+        List<String> expectedPk = List.of(
+                FeatureValuesColumns.COLUMN_NAMES.get(FeatureValuesColumns.INSTRUMENT_TOKEN),
+                FeatureValuesColumns.COLUMN_NAMES.get(FeatureValuesColumns.TF),
+                FeatureValuesColumns.COLUMN_NAMES.get(FeatureValuesColumns.WINDOW_START));
+        requireExactPrimaryKey(info, expectedPk, FEATURE_VALUES_CONTRACT);
+        validateSchema(info, FeatureValuesColumns.COLUMN_NAMES,
+                FeatureValuesColumns.TYPE_ROOTS, "4-column v1 feature_values",
+                FEATURE_VALUES_CONTRACT);
+        validateRouting(info,
+                FeatureValuesColumns.COLUMN_NAMES.get(FeatureValuesColumns.INSTRUMENT_TOKEN),
+                16, FEATURE_VALUES_CONTRACT);
     }
 
     /**

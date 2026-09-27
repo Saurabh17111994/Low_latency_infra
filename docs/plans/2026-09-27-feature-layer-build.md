@@ -31,6 +31,9 @@
 Progress: S1 landed (CHG-347); S2 landed (CHG-348 — features wired into `StrategyHostFunction`,
 shared `FeatureView`, fail-open counters; compute suite 572 run / 0 failures / 18 env-gated skips);
 S3a landed (CHG-349 — DDL proposal + column contract + host side output, no sink/cluster yet).
+S3b offline half landed (CHG-350 — sink wiring, flags, preflight validator, rollout forwarding;
+compute suite 586 run / 0 failures / 18 env-gated skips) — dev table creation + smoke pending
+operator choice of the apply route (DDL hazard).
 
 ## How to add or remove a feature (the only procedure)
 

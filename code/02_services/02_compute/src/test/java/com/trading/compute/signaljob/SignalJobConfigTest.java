@@ -972,4 +972,41 @@ class SignalJobConfigTest {
                 () -> SignalJobConfig.from(env));
         assertTrue(e.getMessage().contains("MULTITF_SIGNAL_CONTEXT_ENABLED"), e.getMessage());
     }
+
+    // ── feature layer flags (DEC-056/057, 2026-09-27) ──
+
+    @Test
+    void featureLayerDefaultsOffWithDefaultTable() {
+        SignalJobConfig cfg = SignalJobConfig.from(env());
+        assertFalse(cfg.featureLayerEnabled(), "feature layer is opt-in");
+        assertEquals("feature_values", cfg.featureTable());
+    }
+
+    @Test
+    void featureLayerRequiresTheStrategyHost() {
+        Map<String, String> bad = env();
+        bad.put("FEATURE_LAYER_ENABLED", "true");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(bad));
+        assertTrue(e.getMessage().contains("STRATEGY_HOST_ENABLED"), e.getMessage());
+    }
+
+    @Test
+    void featureLayerWithHostAcceptsACustomTable() {
+        Map<String, String> ok = env();
+        ok.put("FEATURE_LAYER_ENABLED", "true");
+        ok.put("STRATEGY_HOST_ENABLED", "true");
+        ok.put("STRATEGIES", "n7-range-breakout-v1");
+        ok.put("FEATURE_TABLE", "feature_values_dev");
+        SignalJobConfig cfg = SignalJobConfig.from(ok);
+        assertTrue(cfg.featureLayerEnabled());
+        assertEquals("feature_values_dev", cfg.featureTable());
+    }
+
+    @Test
+    void blankFeatureTableIsRejected() {
+        Map<String, String> bad = env();
+        bad.put("FEATURE_TABLE", "   ");
+        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(bad));
+    }
 }

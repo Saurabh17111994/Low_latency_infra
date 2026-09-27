@@ -128,7 +128,11 @@ public record SignalJobConfig(
         long bufferTimeoutMs,
         StartupMode startupMode,
         boolean strategyHostEnabled,
-        List<String> strategyIds) implements Serializable {
+        List<String> strategyIds,
+        // 2026-09-27 feature layer (DEC-056/057): the strategy host emits one
+        // stored row per closed window (feature_values). Requires the host.
+        boolean featureLayerEnabled,
+        String featureTable) implements Serializable {
 
     public static SignalJobConfig fromEnv() {
         // G1 (2026-08-29): every declared config key must actually be read.
@@ -207,6 +211,18 @@ public record SignalJobConfig(
             throw new IllegalStateException("Config STRATEGY_HOST_ENABLED=true requires a "
                     + "non-empty STRATEGIES list (comma-separated rule ids, known: "
                     + Strategies.knownIds() + ")");
+        }
+        // Feature layer (DEC-056/057, 2026-09-27): the stored layer is computed
+        // inside the strategy host, so enabling it without the host is a config
+        // error, not a silent no-op.
+        boolean featureLayerEnabled = booleanValue(env, "FEATURE_LAYER_ENABLED", false);
+        String featureTable = env.getOrDefault("FEATURE_TABLE", "feature_values").trim();
+        if (featureLayerEnabled && !strategyHostEnabled) {
+            throw new IllegalStateException("Config FEATURE_LAYER_ENABLED=true requires "
+                    + "STRATEGY_HOST_ENABLED=true (features are computed in the strategy host)");
+        }
+        if (featureTable.isEmpty()) {
+            throw new IllegalStateException("Config FEATURE_TABLE must be non-blank");
         }
         // P2-166/167: single-resolve the S3 triple once — endpoint + both
         // secrets from the same read, null unless an s3:// URI is actually
@@ -291,7 +307,9 @@ public record SignalJobConfig(
                 bufferTimeoutMs,
                 mode,
                 strategyHostEnabled,
-                strategyIds);
+                strategyIds,
+                featureLayerEnabled,
+                featureTable);
     }
 
     /**
@@ -348,6 +366,16 @@ public record SignalJobConfig(
     /** Fluss table for candle_closed (default candle_closed). */
     public String candleClosedTable() {
         return candleClosedTable;
+    }
+
+    /** True when the host emits stored feature rows (FEATURE_LAYER_ENABLED, default false). */
+    public boolean featureLayerEnabled() {
+        return featureLayerEnabled;
+    }
+
+    /** Fluss table for stored feature rows (default feature_values). */
+    public String featureTable() {
+        return featureTable;
     }
 
     /** Fluss scanner request cap in bytes (default 512 KiB; Fluss default 16 MiB). */

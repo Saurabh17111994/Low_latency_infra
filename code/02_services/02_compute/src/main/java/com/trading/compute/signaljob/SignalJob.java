@@ -327,15 +327,38 @@ public final class SignalJob {
                 DataStream<RowData> hostLive = fastLive
                         ? aggregator.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TICK_TAG)
                         : multiTfLive;
-                strategySignals = hostLive
+                SingleOutputStreamOperator<RowData> hostOutput = hostLive
                         .connect(multiTfClosed)
                         .keyBy(
                                 live -> live.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
                                 closed -> closed.getLong(CandleClosedColumns.INSTRUMENT_TOKEN))
-                        .process(new StrategyHostFunction(config, config.strategyIds()))
+                        .process(new StrategyHostFunction(
+                                config, config.strategyIds(), config.featureLayerEnabled()))
                         .returns(SignalCandidatesTableColumns.ROW_TYPE_INFO)
                         .name("strategy-host")
                         .uid("strategy-host-v1");
+                strategySignals = hostOutput;
+
+                // Feature layer (DEC-056/057): one stored row per closed window,
+                // emitted by the host and sunk on its own operator so sink
+                // backpressure never reaches the strategy fan-out.
+                if (config.featureLayerEnabled()) {
+                    hostOutput
+                            .getSideOutput(StrategyHostFunction.FEATURE_ROWS)
+                            .sinkTo(FlussSink.<RowData>builder()
+                                    .setBootstrapServers(config.bootstrapServers())
+                                    .setDatabase(config.database())
+                                    .setTable(config.featureTable())
+                                    .setSerializationSchema(
+                                            new RowDataSerializationSchema(false, false))
+                                    .setOption("client.request-timeout",
+                                            config.sinkWriteStallTimeoutMs() + "ms")
+                                    .setOption("client.writer.retries",
+                                            String.valueOf(config.writerRetries()))
+                                    .build())
+                            .name("feature-values-sink")
+                            .uid("feature-values-sink-v1");
+                }
 
                 strategySignals
                         .sinkTo(FlussSink.<RowData>builder()
@@ -693,6 +716,17 @@ public final class SignalJob {
                 LOG.info("signal-job: {}",
                         TableContractValidator.schemaReport(
                                 candleClosed, CandleClosedColumns.COLUMN_NULLABLE_IN_DDL));
+            }
+            if (config.featureLayerEnabled()) {
+                org.apache.fluss.metadata.TableInfo featureValues = conn
+                        .getTable(org.apache.fluss.metadata.TablePath.of(
+                                config.database(), config.featureTable()))
+                        .getTableInfo();
+                TableContractValidator.validateFeatureValuesTable(featureValues);
+                LOG.info("signal-job: feature_values contract OK ({})", config.featureTable());
+                LOG.info("signal-job: {}",
+                        TableContractValidator.schemaReport(
+                                featureValues, FeatureValuesColumns.COLUMN_NULLABLE_IN_DDL));
             }
             if (config.executionIntentEnabled()) {
                 org.apache.fluss.metadata.TableInfo executionIntent = conn
