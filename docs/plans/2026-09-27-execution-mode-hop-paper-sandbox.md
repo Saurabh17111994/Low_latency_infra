@@ -47,18 +47,22 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
 
 #### H1 — Switch contract (offline)
 
-- [ ] **H1-1** — Hop matrix page in the runbook: modes × gate states × exact env values,
+- [x] **H1-1** — Hop matrix page in the runbook: modes × gate states × exact env values,
   hop and revert command sequences, safety invariants; cross-linked from the dossier.
-- [ ] **H1-2** — Offline hop-contract checks: extend `t8_sandbox_contract_check.py` so the
+  Landed CHG-330: `01-runbooks.md` §Execution mode hop + dossier update banner.
+- [x] **H1-2** — Offline hop-contract checks: extend `t8_sandbox_contract_check.py` so the
   matrix is machine-checked (defaults fail-closed, hop requires explicit env, `fake` never
   egresses, control routes exist behind signed envelopes, daily runner refuses enablement).
+  Landed CHG-330: +6 checks (mode branches, `fake` Arrow-free, credentialed `live`, signed
+  control routes, daily-runner refusal), wave43 `HopMatrixChecks` +6 tests.
 
 #### H2 — Paper proof (deployed stack, `fake` mode)
 
-- [L] **H2-1** — Fix + complete the `t9_order_sandbox.py` live leg for today's code:
+- [x] **H2-1** — Fix + complete the `t9_order_sandbox.py` live leg for today's code:
   202 = executed (bridge report), poll→assert (Fluss `Execution_Attempts`/`Order_Lifecycle`,
   plus fills/positions when present), cancel, evidence; correct gate epoch; update the
-  stale test pin (failing-first).
+  stale test pin (failing-first). Landed CHG-329: red 6 tests → green 20/20; `/healthz`
+  gate+epoch, fresh identities, log-end poll, distinct-id cancel, evidence JSON.
 - [L] **H2-2** — Paper drill: `EXECUTION_BRIDGE_MODE=fake` + signed approve → harness →
   assert rows → signed halt → mode `disabled` → offline posture verified; evidence under
   `logs/exec-hop/paper-drill-<date>/`.
@@ -74,9 +78,9 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
 
 #### H4 — Decisions and follow-ups
 
-- [?] **H4-1** — Paper evidence flavor: (A, recommended) the deployed fake-bridge drill is
-  the paper evidence; (B) additionally wire the in-process `nautilus-sandbox` engine into
-  the T9 paper bins so `engine_exercised: true` observed fills exist.
+- [x] **H4-1** — Paper evidence flavor: **(A) the deployed fake-bridge drill is the paper
+  evidence** (operator decision 2026-09-27); the in-process `nautilus-sandbox` engine stays
+  out of scope (B deferred unless a release row later requires `engine_exercised: true`).
 - [ ] **H4-2** — Honesty-notes refresh after H2-2: `t9_order_sandbox.py` exit-3 premise,
   `t9paper` "awaits LiveNode wiring" + the missing "Workstream A/B" reference, dossier
   T4/WP-2 drift.
@@ -87,11 +91,11 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| H1 — Switch contract (offline) | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
-| H2 — Paper proof (deployed stack, `fake` mode) | 2 | 0 | 0 | 0 | 2 | 0 | 0 |
+| H1 — Switch contract (offline) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+| H2 — Paper proof (deployed stack, `fake` mode) | 2 | 1 | 0 | 0 | 1 | 0 | 0 |
 | H3 — Sandbox readiness (funded window) | 2 | 0 | 0 | 1 | 1 | 0 | 0 |
-| H4 — Decisions and follow-ups | 3 | 0 | 0 | 1 | 0 | 1 | 1 |
-| **Total** | **9** | **0** | **0** | **4** | **3** | **1** | **1** |
+| H4 — Decisions and follow-ups | 3 | 1 | 0 | 1 | 0 | 0 | 1 |
+| **Total** | **9** | **4** | **0** | **2** | **2** | **0** | **1** |
 
 ## Overview — the final product
 

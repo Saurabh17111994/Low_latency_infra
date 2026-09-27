@@ -15,6 +15,7 @@
 > Update 2026-08-25: Rust lib count re-counted **196** (CHG-102; was 164/168); live order path proven to Arrow (`RCF-EQ×1` `26082501010305` — BILCARE/`BI-EQ` delisted) — broker `MARGIN ERROR` (sandbox unfunded), auth is AutoLogin (`ARROW_TOKEN` removed).
 > Update 2026-08-25 (CHG-106): `/v1/intents` `action: "amend"` implemented — `amend_envelope_from_payload` (modify, requires `broker_order_id` + amended order block) + router wiring + round-trip/422 tests; Rust 196 → **206** (cargo test 206/206, clippy/fmt clean). Cancel was already wired; amend closes the place/modify/cancel lifecycle.
 > Update 2026-08-25 (CHG-107): `CLOCK_OFFSET_LIMIT_MS` now enforced in the live boot loop — `main.rs` arms a periodic `DriftMonitor` (default 30s, `CLOCK_DRIFT_CHECK_INTERVAL_S`) with `FixedOffsetSource(0)` offline (NTP in Workstream D); Rust 206 → **207**.
+> Update 2026-09-27: execution-mode hop (`disabled`/`fake`/`live`) is a config-only procedure — runbook `docs/06_operations/01-runbooks.md` §Execution mode hop; plan `docs/plans/2026-09-27-execution-mode-hop-paper-sandbox.md`. The t9 harness live leg now reads gate+epoch from `/healthz` and asserts the required-table appends (no more "T4 wall" classification); `t8_sandbox_contract_check.py` covers the hop matrix (mode branches, `fake` Arrow-free, signed control routes, daily-runner refusal).
 
 <!-- markdownlint-disable MD013 -->
 

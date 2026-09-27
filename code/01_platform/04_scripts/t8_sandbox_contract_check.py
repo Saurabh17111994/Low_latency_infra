@@ -15,14 +15,25 @@ exit-gate properties that are provable WITHOUT a Docker daemon or live cluster:
   6. No production credentials:  .env.example secrets are blank placeholders.
   7. Checkpoint readiness gate:  submit-jobs.sh waits for a completed Flink
                                  checkpoint (counts.completed > 0) after RUNNING.
+  8. Hop matrix — bridge switch: `disabled`/`fake`/`live` branches exist;
+                                 `fake` selects the offline FakeBroker (no
+                                 Arrow client); `live` requires credentials.
+  9. Hop matrix — signed gate:   the executor exposes signed `/v1/approve` +
+                                 `/v1/halt` control routes (DEC-044), so a
+                                 mode hop still needs a signed approval.
+ 10. Hop matrix — daily stays:   the daily runner refuses `fake`/`live` and
+                                 `EXECUTION_ENABLED=true` (D1: the hop is a
+                                 separate sanctioned procedure).
 
 Exit code is 0 only when every check passes; machine-readable summary on the
 last line (prefix `t8-sandbox-contract:`). Mirrors the APP/change-control
 contract-check convention. Read-only — never mutates the stack.
 """
 
+import json
 import os
 import re
+import subprocess
 import sys
 
 try:
@@ -32,9 +43,14 @@ except ImportError:  # pragma: no cover
     sys.exit(2)
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 COMPOSE = os.path.join(ROOT, "code", "01_platform", "01_docker", "docker-compose.yml")
 ENV_EXAMPLE = os.path.join(ROOT, "code", "01_platform", "01_docker", ".env.example")
 SUBMIT = os.path.join(ROOT, "code", "02_services", "02_compute", "submit-jobs.sh")
+BRIDGE_MAIN = os.path.join(ROOT, "code", "02_services", "06_execution_bridge",
+                           "go-bridge", "main.go")
+EXECUTOR_HTTP = os.path.join(ROOT, "code", "02_services", "04_executor", "src",
+                             "http.rs")
 
 # P6-575: also catch the substitution-default and quoted forms, e.g.
 # ${EXECUTION_ENABLED:-true} or EXECUTION_ENABLED: "true".
@@ -168,9 +184,96 @@ def main():
             "no ARROW_* in launcher",
         )
 
+    # 8. Hop matrix — the bridge mode switch exists and `fake` stays offline.
+    bridge_src = _read_text(BRIDGE_MAIN)
+    if bridge_src is None:
+        check("bridge main.go readable", False, f"missing at {BRIDGE_MAIN}")
+    else:
+        branches = {m: f'case "{m}":' in bridge_src
+                    for m in ("disabled", "fake", "live")}
+        check(
+            "bridge mode switch has disabled/fake/live branches",
+            all(branches.values()),
+            f"branches={branches}",
+        )
+        fake_branch = _go_case_body(bridge_src, "fake")
+        check(
+            "mode=fake selects the offline FakeBroker (no Arrow client)",
+            "NewFakeBroker()" in fake_branch
+            and "arrow.NewClient" not in fake_branch
+            and "NewArrowBroker" not in fake_branch,
+            "FakeBroker only" if "NewFakeBroker()" in fake_branch else "branch not found",
+        )
+        live_branch = _go_case_body(bridge_src, "live")
+        check(
+            "mode=live requires Arrow credentials (fails closed without)",
+            "ARROW_APP_ID" in live_branch and "ARROW_USER_ID" in live_branch
+            and "AutoLogin" in live_branch,
+            "credentialed AutoLogin path",
+        )
+
+    # 9. Hop matrix — gate enablement is a signed DEC-044 action.
+    http_src = _read_text(EXECUTOR_HTTP)
+    if http_src is None:
+        check("executor http.rs readable", False, f"missing at {EXECUTOR_HTTP}")
+    else:
+        check(
+            "executor exposes signed /v1/approve + /v1/halt control routes",
+            '"/v1/approve"' in http_src and '"/v1/halt"' in http_src,
+            "control routes wired",
+        )
+        check(
+            "control envelopes are signed (GATE_APPROVE/GATE_HALT constants)",
+            "GATE_APPROVE" in http_src and "GATE_HALT" in http_src,
+            "signed message types present",
+        )
+
+    # 10. Hop matrix — the daily runner refuses paper/live enablement (D1).
+    #     Behavioral: call the runner's own posture predicate in a subprocess.
+    probe = (
+        "import json, day_run;"
+        "print(json.dumps({"
+        "'fake': bool(day_run.posture_violations({'EXECUTION_BRIDGE_MODE': 'fake'})),"
+        "'live': bool(day_run.posture_violations({'EXECUTION_BRIDGE_MODE': 'live'})),"
+        "'enabled': bool(day_run.posture_violations({'EXECUTION_ENABLED': 'true'})),"
+        "'disabled_ok': not day_run.posture_violations("
+        "{'EXECUTION_BRIDGE_MODE': 'disabled', 'EXECUTION_ENABLED': 'false'})"
+        "}))"
+    )
+    try:
+        r = subprocess.run([sys.executable, "-c", probe], cwd=SCRIPTS_DIR,
+                           capture_output=True, text=True, timeout=30)
+        data = json.loads(r.stdout.strip().splitlines()[-1]) if r.returncode == 0 else {}
+        ok = (data.get("fake") is True and data.get("live") is True
+              and data.get("enabled") is True and data.get("disabled_ok") is True)
+        detail = ("refused fake/live/enabled" if ok
+                  else f"missed={data or (r.stderr or '').strip()[:160]}")
+        check("daily runner refuses fake/live/enabled postures (D1)", ok, detail)
+    except (subprocess.SubprocessError, ValueError, IndexError) as exc:
+        check("daily runner refuses fake/live/enabled postures (D1)", False, str(exc))
+
     summary = f"t8-sandbox-contract: all {len(FAILURES) == 0 and 'checks pass' or f'{len(FAILURES)} check(s) FAILED'}"
     print(summary)
     sys.exit(1 if FAILURES else 0)
+
+
+def _read_text(path):
+    """File text, or None when unreadable — a moved file fails a check, not the script."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _go_case_body(src, mode):
+    """The body of `case "<mode>":` up to the next case/default at the same level."""
+    start = src.find(f'case "{mode}":')
+    if start == -1:
+        return ""
+    rest = src[start:]
+    nxt = re.search(r'\n\s*(?:case "|default:)', rest)
+    return rest[:nxt.start()] if nxt else rest
 
 
 def _nonblank_env(text, key):

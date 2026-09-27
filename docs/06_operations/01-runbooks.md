@@ -768,6 +768,50 @@ or `MemoryUtil` `InaccessibleObjectException` (`--add-opens` missing); later `in
 
 **Recovery:** no live order path while `mode=disabled`. For T8, the `UP disabled` health is success.
 
+### Execution mode hop — `disabled` / `fake` (paper) / `live` (sandbox)
+
+The hop is a configuration change on the bridge plus the executor's signed gate — no code
+change (plan `docs/plans/2026-09-27-execution-mode-hop-paper-sandbox.md`). The daily runner
+deliberately refuses all of it (D1, `day_run.posture_violations`); the hop is a separate,
+sanctioned procedure — do not run `make day` during a drill window.
+
+| Mode | What runs | How to select | Orders reach Arrow? |
+|---|---|---|---|
+| `disabled` (default) | bridge answers `broker_disabled` to every command | nothing — compose default | never |
+| `fake` (paper) | bridge's offline `FakeBroker` (place/modify/cancel succeed; no market data) | `EXECUTION_BRIDGE_MODE=fake` | never — the fake branch constructs no Arrow client, and only the bridge is on `arrow-egress` |
+| `live` (sandbox/real) | real Arrow AutoLogin + order API | `EXECUTION_BRIDGE_MODE=live` + `ARROW_*` in the bridge only | yes — only after the signed gate approval |
+
+Independently of the mode, the executor gate boots `HALTED`, and only a signed `GATE_APPROVE`
+envelope naming the current `/healthz` `gate_epoch` moves it to `ENABLED`; `GATE_HALT`
+returns to safe (DEC-044 single operator). Every accepted control action bumps the epoch, so
+re-read `/healthz` before the next control action.
+
+**Hop to paper (the paper drill).** Run from the repo root; `--out` keeps the evidence.
+
+1. Bridge to fake (the shell value overrides the compose default):
+   `cd code/01_platform/01_docker && EXECUTION_BRIDGE_MODE=fake docker compose --profile execution-t3 up -d execution-bridge`
+2. Read the epoch: `docker run --rm --network 01_docker_execution-net curlimages/curl -s http://nautilus:9190/healthz` → `gate_epoch` (starts 1).
+3. Approve (signed, audited):
+   `T9_APPROVED_BY=saurabh python3 code/01_platform/04_scripts/t9_order_sandbox.py --sign-control approve --operator saurabh --evidence CHG-<id> --gate-epoch <epoch> --post`
+4. Drill:
+   `T9_APPROVED_BY=saurabh python3 code/01_platform/04_scripts/t9_order_sandbox.py --live --out logs/exec-hop/paper-drill-<date>`
+   (healthz gate check → place RCF-EQ ×1 → poll `Execution_Attempts`/`Order_Lifecycle` → cancel;
+   exit 0 = asserted, 3 = gate not `ENABLED`, 2 = blocked/probe-unreadable, 1 = failed assert).
+5. Revert — always, in this order:
+   a. re-read the epoch (approve bumped it), then signed halt:
+      `T9_APPROVED_BY=saurabh python3 code/01_platform/04_scripts/t9_order_sandbox.py --sign-control halt --operator saurabh --evidence CHG-<id> --reason "paper drill complete" --gate-epoch <new epoch> --post`
+   b. bridge back to the default: `docker compose --profile execution-t3 up -d execution-bridge` (with `EXECUTION_BRIDGE_MODE` unset → `disabled`).
+   c. confirm: `/healthz` `HALTED`, bridge `/healthz` `"mode":"disabled"`, then `make day ARGS="status"` shows the offline execution posture again (I6).
+
+**Hop to sandbox.** The same five steps with `EXECUTION_BRIDGE_MODE=live` and the real
+credentials — the *same* harness command, which is the paper↔sandbox parity proof. Requires a
+funded account and market hours; this is the only path that places a real broker order, and it
+is release-gated (`docs/06_operations/08-live-readiness-gaps.md`).
+
+**Offline checks before any hop:** `python3 code/01_platform/04_scripts/t8_sandbox_contract_check.py`
+(defaults fail-closed, mode-switch branches, `fake` Arrow-free, signed control routes,
+daily-runner refusal) and `python3 code/01_platform/04_scripts/t9_order_sandbox.py --offline`.
+
 ### Retention and audit — policy approval (WP-7 T0)
 
 **Baseline:** audit and money-moving evidence (execution, order, fill, gate, correlation, approval, reconciliation, future position-action) is retained **at least one year** (CHG-038/DEC-043, `SAURABH-1Y-APPROVAL-2026-08-20`). Longer retention applies when the approved jurisdictional, contractual, legal-hold, or operational policy requires it. Storage is Cloudflare R2 with WORM-equivalent bucket lock (`audit_r2.py provision --set-lock`), not S3 Object Lock.

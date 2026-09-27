@@ -175,5 +175,55 @@ class P6_575_576_795SandboxContract(unittest.TestCase):
                 self.assertTrue(nonblank(text, "ARROW_X"), text)
 
 
+class HopMatrixChecks(unittest.TestCase):
+    """Plan 2026-09-27 H1-2: hop-matrix checks are falsifiable and the real
+    tree satisfies them — a refactor that removes a mode branch or lets `fake`
+    construct an Arrow client fails here before any live drill."""
+
+    def test_go_case_body_extracts_only_the_branch(self) -> None:
+        src = ('case "disabled":\n\treturn NewFakeBrokerWithDisabledResult()\n'
+               'case "fake":\n\treturn NewFakeBroker()\n'
+               'case "live":\n\treturn arrow.NewClient(x)\n'
+               'default:\n\treturn nil\n')
+        fake = t8._go_case_body(src, "fake")
+        self.assertIn("NewFakeBroker()", fake)
+        self.assertNotIn("NewFakeBrokerWithDisabledResult", fake)
+        self.assertNotIn("arrow.NewClient", fake)
+
+    def test_missing_branch_extracts_empty(self) -> None:
+        self.assertEqual(t8._go_case_body('case "live":\n', "fake"), "")
+
+    def test_real_bridge_fake_branch_is_arrow_free(self) -> None:
+        src = Path(t8.BRIDGE_MAIN).read_text(encoding="utf-8")
+        fake = t8._go_case_body(src, "fake")
+        self.assertIn("NewFakeBroker()", fake)
+        self.assertNotIn("arrow.NewClient", fake)
+        self.assertNotIn("NewArrowBroker", fake)
+
+    def test_real_bridge_live_branch_requires_credentials(self) -> None:
+        src = Path(t8.BRIDGE_MAIN).read_text(encoding="utf-8")
+        live = t8._go_case_body(src, "live")
+        self.assertIn("ARROW_APP_ID", live)
+        self.assertIn("ARROW_USER_ID", live)
+        self.assertIn("AutoLogin", live)
+
+    def test_real_executor_control_routes_are_signed(self) -> None:
+        src = Path(t8.EXECUTOR_HTTP).read_text(encoding="utf-8")
+        for needle in ('"/v1/approve"', '"/v1/halt"', "GATE_APPROVE",
+                       "GATE_HALT"):
+            self.assertIn(needle, src)
+
+    def test_daily_runner_refuses_fake_live_and_enabled(self) -> None:
+        import day_run  # same scripts dir (sys.path insert above)
+        self.assertTrue(day_run.posture_violations(
+            {"EXECUTION_BRIDGE_MODE": "fake"}))
+        self.assertTrue(day_run.posture_violations(
+            {"EXECUTION_BRIDGE_MODE": "live"}))
+        self.assertTrue(day_run.posture_violations(
+            {"EXECUTION_ENABLED": "true"}))
+        self.assertFalse(day_run.posture_violations(
+            {"EXECUTION_BRIDGE_MODE": "disabled", "EXECUTION_ENABLED": "false"}))
+
+
 if __name__ == "__main__":
     unittest.main()
