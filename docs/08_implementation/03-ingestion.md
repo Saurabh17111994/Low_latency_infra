@@ -178,7 +178,10 @@ tokens had a zero volume change and were still stored as `TRADE` rows. The delta
 makes "nothing traded" explicit (0) and "baseline unknown" explicit (NULL -- the
 first tick of an epoch for that token, or a counter that moved backwards). Candle
 volume sums **this**, never `last_qty`: a single trade's size under-counts when
-several trades land between two snapshots.
+several trades land between two snapshots. The local fake broker (`faketool`)
+reports cumulative volume on the same wire field (CHG-343) -- its LTQ stays the
+per-tick quantity -- so a local run exercises the real delta semantics instead
+of feeding the tracker a counter that moved backwards.
 
 **`tick_type` describes the row, not the subscription mode.** A full-mode snapshot
 is `TRADE` only when `volume_delta > 0`, otherwise `QUOTE`. `validity_state` keeps

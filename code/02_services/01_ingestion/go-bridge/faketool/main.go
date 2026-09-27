@@ -99,6 +99,12 @@ func main() {
 	// the shared connection counter must be atomic or concurrent/reconnecting
 	// clients race on it.
 	var connections atomic.Int32
+	// Q1=B: per-token CUMULATIVE day volume, shared across connections — a
+	// real broker's counter survives reconnects, and both real feeds report
+	// cumulative volume (bridge volumeDeltaTracker = cumulative_now − prev).
+	// A fresh random qty per frame made the tracker see a backwards counter
+	// (nil) or random increments, so candles summed noise.
+	volumes := newVolumeLedger()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -295,14 +301,19 @@ func main() {
 								p += int32(rand.IntN(21) - 10) // ±10 paise noise
 								prices[tok] = p
 								// Every frame carries a real traded quantity: LTQ (12:16)
-								// and Volume (64:72). Without it every tick arrives as a
-								// TRADE with last_qty=0 and the candle's tick_count/volume
-								// stay zero (E2E assertion 2026-08-17).
+								// is this tick's qty and Volume (64:72) is the
+								// per-token CUMULATIVE day volume, so the bridge's
+								// volume_delta (cumulative − prev) yields the
+								// per-tick quantity. Without it every tick arrives
+								// as a TRADE with last_qty=0 and the candle's
+								// tick_count/volume stay zero (E2E assertion
+								// 2026-08-17); a non-cumulative value made the
+								// delta nil/random (Q1=B, 2026-09-27).
 								qty := uint32(1 + rand.IntN(50))
 								binary.LittleEndian.PutUint32(frame[4:8], tok)
 								binary.LittleEndian.PutUint32(frame[8:12], uint32(p))
 								binary.LittleEndian.PutUint32(frame[12:16], qty)
-								binary.LittleEndian.PutUint64(frame[64:72], uint64(qty))
+								binary.LittleEndian.PutUint64(frame[64:72], volumes.add(tok, qty))
 								binary.LittleEndian.PutUint64(frame[180:188], uint64(time.Now().UnixNano()))
 								lastFrames.Store(tok, append([]byte(nil), frame...))
 								if err := send(frame); err != nil {
@@ -370,7 +381,7 @@ func main() {
 									// window late-drops it.
 									binary.LittleEndian.PutUint32(late[8:12], uint32(15050+i))
 									binary.LittleEndian.PutUint32(late[12:16], uint32(7+i))
-									binary.LittleEndian.PutUint64(late[64:72], uint64(7+i))
+									binary.LittleEndian.PutUint64(late[64:72], volumes.add(tok, uint32(7+i)))
 									binary.LittleEndian.PutUint64(late[180:188],
 										uint64(time.Now().UnixNano()-int64(*injectLateMs)*int64(time.Millisecond)))
 									if err := send(late); err != nil {
@@ -400,9 +411,10 @@ func main() {
 					tickerFrame[2] = hftPktFull
 					binary.LittleEndian.PutUint32(tickerFrame[4:8], 757614)
 					binary.LittleEndian.PutUint32(tickerFrame[8:12], 15050)
-					// Traded quantity so candles carry real volume/tick_count.
+					// LTQ is this tick's 25; Volume is the per-token cumulative
+					// counter, bumped per tick below (Q1=B cumulative semantics).
 					binary.LittleEndian.PutUint32(tickerFrame[12:16], 25)
-					binary.LittleEndian.PutUint64(tickerFrame[64:72], 25)
+					binary.LittleEndian.PutUint64(tickerFrame[64:72], 0)
 					wg.Add(1)
 					go func() {
 						defer wg.Done()
@@ -414,6 +426,7 @@ func main() {
 								return
 							case <-t.C:
 							}
+							binary.LittleEndian.PutUint64(tickerFrame[64:72], volumes.add(757614, 25))
 							binary.LittleEndian.PutUint64(tickerFrame[180:188], uint64(time.Now().UnixNano()))
 							if err := send(tickerFrame); err != nil {
 								logf("ticker send failed: %v", err)
@@ -463,9 +476,9 @@ func main() {
 					full[2] = hftPktFull
 					binary.LittleEndian.PutUint32(full[4:8], 757614) // token present in approved CSV
 					binary.LittleEndian.PutUint32(full[8:12], 15050)
-					// Traded quantity so candles carry real volume/tick_count.
+					// LTQ is this frame's 25; Volume is the cumulative counter.
 					binary.LittleEndian.PutUint32(full[12:16], 25)
-					binary.LittleEndian.PutUint64(full[64:72], 25)
+					binary.LittleEndian.PutUint64(full[64:72], volumes.add(757614, 25))
 					// A real broker stamps every frame with send-time nanoseconds
 					// (bridge ts_ms = ts/1e6). Without it ts_ms=0 and the
 					// ingestion freshness gate quarantines every tick as
@@ -486,11 +499,12 @@ func main() {
 						if !sleepOrDone(300 * time.Millisecond) {
 							return
 						}
-						binary.LittleEndian.PutUint32(full[4:8], uint32(int64(tok)))
-						// Per-token qty so every burst frame carries real volume.
+						tokID := uint32(int64(tok))
+						binary.LittleEndian.PutUint32(full[4:8], tokID)
+						// Per-token LTQ; Volume is the cumulative counter.
 						qty := uint32(1 + rand.IntN(50))
 						binary.LittleEndian.PutUint32(full[12:16], qty)
-						binary.LittleEndian.PutUint64(full[64:72], uint64(qty))
+						binary.LittleEndian.PutUint64(full[64:72], volumes.add(tokID, qty))
 						binary.LittleEndian.PutUint64(full[180:188], uint64(time.Now().UnixNano()))
 						if err := send(full); err != nil {
 							logf("send snapshot tick failed at %d: %v", snapshotSent, err)
