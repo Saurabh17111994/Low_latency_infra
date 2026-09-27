@@ -154,7 +154,9 @@ SITES: list[tuple[str, str, str, str]] = [
      "the restore verifier renders the stack config to read the three window property lines back; "
      "it passes both --env-file flags and -f explicitly (added by the A4 rehearsal, 2026-09-23, "
      "without a registry row until now)"),
-    ("code/01_platform/04_scripts/t9_order_sandbox.py", "probes go through", "TEXT", "docstring"),
+    ("code/01_platform/04_scripts/t9_order_sandbox.py", "docker compose exec`/`docker run --network", "TEXT",
+     "docstring: transport prose naming the in-network exec/run forms, not an invocation "
+     "(rewrapped 2026-09-27 by CHG-329; the anchor moved off the 'probes go through' line)"),
     ("code/01_platform/04_scripts/tests/test_08_local_compose_l0.py", "config must succeed (YAML parses", "TEXT", "docstring"),
     ("code/01_platform/04_scripts/tests/test_08_local_compose_l2.py", "invocation, and", "TEXT", "comment in docstring"),
     ("code/01_platform/04_scripts/tests/test_compose_config_redact.py", "interpolates, so logging its output", "TEXT",
