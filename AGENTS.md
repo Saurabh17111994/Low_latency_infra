@@ -94,6 +94,14 @@ doc), the marker flips, and the operator-approval list. Tracker hygiene:
 - DDL in `code/01_platform/02_sql/ddl/` is reconciled proposals, NOT applied anywhere —
   blocked until pinned Fluss/Flink compatibility and schema lifecycle tests pass. Never
   apply DDL or describe schemas as live.
+- **The feature registry is append-only (DEC-057).** Add a feature by appending one
+  `FeatureDef` line at the end of `FeatureRegistry.FEATURES` plus one `<id>\t<name>` line in
+  `code/02_services/02_compute/src/test/resources/feature-registry-pins.tsv`; remove one by
+  setting its status to `RETIRED` (never delete, renumber, rename, reorder or reuse an id —
+  stored rows are keyed by id). A registry change touches nothing else: no DDL, no sink, no
+  strategy, no flag. `FeatureRegistryPinTest` fails with the exact fix in the message;
+  retired entries are excluded from computation and new rows. Registry Javadoc:
+  `code/02_services/02_compute/src/main/java/com/trading/compute/feature/FeatureRegistry.java`.
 - Container images are digest-pinned (`FLUSS_IMAGE` must be an immutable digest). Never
   swap digests for moving tags. `make pin-check` enforces this.
 - Compose base is `docker-compose.yml` with overlays (bench/p7/p10/soak) that override

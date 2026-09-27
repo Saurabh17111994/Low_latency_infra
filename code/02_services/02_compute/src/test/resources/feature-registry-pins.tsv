@@ -1,0 +1,8 @@
+# Feature registry pin ledger (DEC-057) — append-only.
+# Format: <id><TAB><name>
+# Add a feature: append its line here too (next id). Remove a feature: change the registry
+# line's status to RETIRED and KEEP this line. Never rename, renumber, reorder or delete an
+# existing line — stored rows are keyed by id (feature-registry-pins, FeatureRegistryPinTest).
+0	last_price
+1	sma_close_20
+2	rsi_close_14
