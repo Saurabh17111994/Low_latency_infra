@@ -1012,6 +1012,11 @@ services:
       # false) so no command ever flows meanwhile.
       GATEWAY_ENDPOINT: http://execution-gateway:9180
       GATEWAY_PROTOCOL_VERSION: execution-gateway.v2
+      # H2-5/D2 (CHG-334/CHG-335): the durable gate row this executor owns — same values the
+      # execution-gateway service carries (see its environment block). A mismatch is refused
+      # (409) and an absent partition leaves the durable reporter unarmed.
+      EXECUTION_PARTITION_ID: dev-partition
+      ACCOUNT_SCOPE_ID: dev-scope
       # CHG-288: the drift gate's offset comes from the file the node publishes
       # (clock_offset_fact.sh, run every 10 s by arrow-clock-offset.timer), never from chronyd's
       # command socket: the package owns /run/chrony as 0700 _chrony:_chrony, and the socket is

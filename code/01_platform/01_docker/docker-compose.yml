@@ -1040,6 +1040,12 @@ services:
       GATEWAY_ENDPOINT: http://execution-gateway:9180
       GATEWAY_SHARED_SECRET: ${GATEWAY_SHARED_SECRET:-local-dev-only}
       GATEWAY_PROTOCOL_VERSION: execution-gateway.v2
+      # H2-5/D2 (CHG-334/CHG-335): the durable gate row this executor owns. Must match the
+      # gateway's EXECUTION_PARTITION_ID / ACCOUNT_SCOPE_ID above — a report naming another
+      # partition or scope is refused (409), and without the partition the durable reporter is
+      # not armed (approvals would stay process-local and the gateway would never see the row).
+      EXECUTION_PARTITION_ID: ${EXECUTION_PARTITION_ID:-dev-partition}
+      ACCOUNT_SCOPE_ID: ${ACCOUNT_SCOPE_ID:-dev-scope}
       # WP-2 remainder (2026-08-21): BRIDGE_ENDPOINT (above) selects the production
       # HttpBridgeClient transport; this token authenticates to the private execution-bridge.
       # Same source as the bridge's own EXECUTION_BRIDGE_AUTH_TOKEN so both sides agree.

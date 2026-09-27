@@ -101,8 +101,10 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   isolated, gateway is the execution core's Fluss writer). Scope doc
   `docs/plans/2026-09-27-executor-gate-row-native.md` pins the protocol (gateway boot
   `init`s the row HALTED before the replay; new `POST /v1/gate` report endpoint; executor
-  durable-first adoption; 30 s lease / 10 s renew / halt-on-loss). Implementing S1→S4
-  (CHG-334+); S4 re-runs the H2-2 drill as the acceptance test.
+  durable-first adoption; 30 s lease / 10 s renew / halt-on-loss). Landed: S1 gateway writer +
+  endpoint (CHG-334 `8121c535`, boot-epoch follow-up `f08a8926`), S2 executor durable-first
+  reports (CHG-335 `aae8c17c`), S3 compose/stack env + runbook (CHG-336). S4 — image rebuild +
+  the H2-2 drill re-run — is the acceptance test.
 
 #### H3 — Sandbox readiness (funded window)
 

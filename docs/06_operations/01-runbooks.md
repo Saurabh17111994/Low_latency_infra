@@ -790,6 +790,16 @@ naming the current `/healthz` `gate_epoch` moves it to `ENABLED`; `GATE_HALT` re
 safe (DEC-044 single operator). Every accepted control action bumps the epoch, so re-read
 `/healthz` before the next control action.
 
+The executor's gate transitions are **durable** (H2-5/D2, CHG-334/CHG-335): nautilus reports
+`BOOT_HALT` / `APPROVE` / `HALT` / `RENEW` to the gateway's signed `POST /v1/gate`, the
+gateway writes the `Execution_Gate` row in Fluss through the production store, and nautilus
+adopts the persisted epoch/fence/lease — the row the gateway's forward leg reads can no
+longer be missing (the CHG-331 `key not found` readiness flip). `/healthz` exposes
+`durable_gate`: **read `gate_epoch` only when it is `true`** — before that the epoch is
+process-local and an approval is refused by the gateway's epoch check. While `ENABLED` the
+fence lease is 30 s, renewed every 10 s; the first failed renewal safety-halts the executor,
+and an expired lease makes the gateway defer (never forward).
+
 **Hop to paper (the paper drill).** Run from the repo root. Use the canonical compose form
 (both env files — the bridge token must match the running stack) and `--no-deps` so only
 the named service is recreated; never run a full `up` while a switch is set.
@@ -799,7 +809,7 @@ the named service is recreated; never run a full `up` while a switch is set.
    (confirm it answers: `docker run --rm --network 01_docker_execution-net curlimages/curl -s -o /dev/null -w '%{http_code}' http://execution-gateway:9180/readyz` → `200`).
 2. Bridge to fake (the shell value overrides the compose default):
    `EXECUTION_BRIDGE_MODE=fake docker compose --env-file code/01_platform/01_docker/.env --env-file code/01_platform/01_docker/secrets.env -f code/01_platform/01_docker/docker-compose.yml --profile execution-t3 up -d --no-deps execution-bridge`
-3. Read the epoch: `docker run --rm --network 01_docker_execution-net curlimages/curl -s http://nautilus:9190/healthz` → `gate_epoch` (starts 1).
+3. Read the epoch: `docker run --rm --network 01_docker_execution-net curlimages/curl -s http://nautilus:9190/healthz` → `durable_gate` must be `true` (the boot report landed), then `gate_epoch` (starts 1; the durable row's generation).
 4. Approve (signed, audited):
    `T9_APPROVED_BY=saurabh python3 code/01_platform/04_scripts/t9_order_sandbox.py --sign-control approve --operator saurabh --evidence CHG-<id> --gate-epoch <epoch> --post`
 5. Drill:
