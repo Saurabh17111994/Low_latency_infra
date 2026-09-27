@@ -90,17 +90,20 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   (`make images`). Live half proven in CHG-331 attempt 3 (the reader accepted all 9 real
   rows and reached the forward leg); the drill itself is gated by H2-5.
 - [?] **H2-5** — `Execution_Gate` has no writer in the deployed topology (finding from
-  CHG-331 attempt 3; needs an operator decision). The gateway's forward leg looks up the
-  durable gate row in Fluss (`NautilusIntentClient` → `FlussControlStateStore`); the row
-  does not exist because the executor's deployed store is the file-backed `FileGateStore`
-  (`DURABLE_GATE_ENABLED`) and the Fluss-backed swaps (Workstream D) are designed but
-  unbuilt (`durable.rs`), while the gateway wires the non-authoritative placeholder. A
-  missing row flips `readiness.fluss(false, "key not found")` → `/readyz` 503 →
-  `/v1/events` refuses → the projection leg cannot run while pending intents exist.
-  Options: (A) build the executor's Fluss gate writer (native target design; Rust
-  workstream), (B) gateway treats a missing row as the documented "gate not published →
-  DEFERRED" without flipping `flussReady` (small; deliberate B4-pin update), (C) clean the
-  9 B4 leftover intents (ops only; the wiring gap remains).
+  CHG-331 attempt 3; operator decision 2026-09-27: native path — no gateway semantic
+  exception, no data cleanup). The gateway's forward leg looks up the durable gate row in
+  Fluss (`NautilusIntentClient` → `FlussControlStateStore`); the row does not exist
+  because the deployed nautilus runs the in-memory gate (compose sets no `DURABLE_*`
+  flags) and no other component writes the table, while the gateway wires the
+  non-authoritative placeholder. A missing row flips `readiness.fluss(false, "key not
+  found")` → `/readyz` 503 → `/v1/events` refuses → the projection leg cannot run while
+  pending intents exist. Scope doc
+  `docs/plans/2026-09-27-executor-gate-row-native.md` written: the executor cannot reach
+  Fluss today (execution-net only; Fluss is trading-net), so the native path has two
+  realizations — D1 executor writes Fluss directly (`fluss-rs`; needs a network-boundary
+  decision) or D2 executor reports transitions and the gateway writes the row with the
+  existing Java `FlussGateStateStore` (recommended: keeps the boundary, no new
+  dependency). Awaiting the design decision; then slices S1–S5 and the H2-2 drill re-run.
 
 #### H3 — Sandbox readiness (funded window)
 
