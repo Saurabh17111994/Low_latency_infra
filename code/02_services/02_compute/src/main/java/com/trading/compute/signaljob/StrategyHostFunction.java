@@ -14,8 +14,11 @@ import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.Histogram;
 import org.apache.flink.streaming.api.functions.co.KeyedCoProcessFunction;
+import org.apache.flink.table.data.GenericMapData;
+import org.apache.flink.table.data.GenericRowData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.util.Collector;
+import org.apache.flink.util.OutputTag;
 import org.apache.flink.util.Preconditions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -74,11 +77,21 @@ public class StrategyHostFunction
     private static final MapStateDescriptor<String, Long> EMITTED_IDS_DESC =
             new MapStateDescriptor<>("strategy-host-emitted-ids", Types.STRING, Types.LONG);
 
+    /**
+     * Side output of the DEC-056 stored layer: one row per closed window
+     * carrying every ready feature for that timeframe. Wired to the feature
+     * sink in {@code SignalJob}; empty snapshots emit nothing.
+     */
+    public static final OutputTag<RowData> FEATURE_ROWS = new OutputTag<RowData>("feature-rows") {};
+
     /** Validated strategy ids, registration order (from config). */
     private final List<String> strategyIds;
 
     /** Job config handed to strategy constructors (rule identity, quantities). */
     private final SignalJobConfig config;
+
+    /** True when the host emits {@link #FEATURE_ROWS} (feature layer enabled). */
+    private final boolean featureRowsEnabled;
 
     /** Per-instrument heap slots — intentional amnesia, not checkpointed. */
     private final Map<Long, HostSlot> slots = new HashMap<>();
@@ -97,6 +110,7 @@ public class StrategyHostFunction
     private transient Counter featureTickUpdates;
     private transient Counter featureCloseUpdates;
     private transient Counter featureFailures;
+    private transient Counter featureRowsEmitted;
 
     // Heap mirrors for tests that bypass the metric registry.
     private transient long emittedHeap;
@@ -107,11 +121,23 @@ public class StrategyHostFunction
     private transient long featureTickUpdatesHeap;
     private transient long featureCloseUpdatesHeap;
     private transient long featureFailuresHeap;
+    private transient long featureRowsEmittedHeap;
     private final transient Map<String, Long> skippedPoisonHeap = new HashMap<>();
 
     public StrategyHostFunction(SignalJobConfig config, List<String> strategyIds) {
+        this(config, strategyIds, false);
+    }
+
+    /**
+     * @param featureRowsEnabled true to emit {@link #FEATURE_ROWS} on each closed
+     *     window ({@code FEATURE_LAYER_ENABLED}); false keeps the host exactly as
+     *     before this feature layer existed
+     */
+    public StrategyHostFunction(
+            SignalJobConfig config, List<String> strategyIds, boolean featureRowsEnabled) {
         this.config = Preconditions.checkNotNull(config, "config");
         this.strategyIds = List.copyOf(Preconditions.checkNotNull(strategyIds, "strategyIds"));
+        this.featureRowsEnabled = featureRowsEnabled;
     }
 
     @Override
@@ -140,6 +166,8 @@ public class StrategyHostFunction
                 getRuntimeContext().getMetricGroup().counter("compute.features.updates.close");
         featureFailures =
                 getRuntimeContext().getMetricGroup().counter("compute.features.failed");
+        featureRowsEmitted =
+                getRuntimeContext().getMetricGroup().counter("compute.features.rows.emitted");
         emittedByRule = new HashMap<>();
         // P2-174: one metrics handle per rule per subtask, shared by every
         // slot — not one HostMetrics per (token, ruleId).
@@ -192,6 +220,9 @@ public class StrategyHostFunction
         }
         // DEC-056: close features update before the fan-out (same contract as the tick path).
         updateFeaturesOnClose(slot, closed);
+        if (featureRowsEnabled) {
+            emitFeatureRow(ctx, slot, closed);
+        }
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: same isolation on the closed path.
             try {
@@ -449,6 +480,40 @@ public class StrategyHostFunction
         featureFailures.inc();
         featureFailuresHeap++;
         LOG.warn("strategy-host: feature update failed kind={}: {}", kind, e.toString());
+    }
+
+    /**
+     * DEC-056 stored layer: emit one row per closed window carrying every ready
+     * feature of that timeframe. An empty snapshot emits nothing (the table
+     * never carries a placeholder). A failure here is counted, never delivered
+     * into the strategy fan-out.
+     */
+    private void emitFeatureRow(Context ctx, HostSlot slot, RowData closed) {
+        try {
+            Timeframe tf = Timeframe.fromCode(closed.getString(CandleClosedColumns.TF).toString());
+            Map<Integer, Double> snapshot = new HashMap<>();
+            slot.features.snapshot(tf, snapshot);
+            if (snapshot.isEmpty()) {
+                return;
+            }
+            GenericRowData row = new GenericRowData(FeatureValuesColumns.FIELD_COUNT);
+            row.setField(FeatureValuesColumns.INSTRUMENT_TOKEN, ctx.getCurrentKey());
+            row.setField(FeatureValuesColumns.TF, closed.getString(CandleClosedColumns.TF));
+            row.setField(
+                    FeatureValuesColumns.WINDOW_START,
+                    closed.getLong(CandleClosedColumns.WINDOW_START));
+            row.setField(FeatureValuesColumns.FEATURES, new GenericMapData(snapshot));
+            ctx.output(FEATURE_ROWS, row);
+            featureRowsEmitted.inc();
+            featureRowsEmittedHeap++;
+        } catch (Exception e) {
+            countFeatureFailure("emit", e);
+        }
+    }
+
+    /** Test seam: feature rows emitted to the stored layer by this subtask. */
+    long featureRowsEmittedForTest() {
+        return featureRowsEmittedHeap;
     }
 
     /** Test seam: live strategy instance for one instrument. */

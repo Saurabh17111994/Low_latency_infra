@@ -24,11 +24,13 @@
 |---|---|---|
 | S1 (CHG-347) | Registry + SPI + `PerInstrumentFeatures` + first computers (`last_price`, `sma_close_20`, `rsi_close_14`); pure Java, no Flink | Unit tests: registry validation, tick/close routing, snapshot contents, SMA/RSI math, allocation-free update loop shape |
 | S2 (CHG-348) | Host wiring: update features in `processElement1/2`, expose a read-only `FeatureView` to strategies, metrics | Host harness tests (existing `StrategyHostFunctionTest` pattern) + no behavior change for N7 (side-by-side) |
-| S3 (CHG-349) | DDL 34 (proposal) + dev apply + writer operator + sink + flags + rollout forwarding | Offline tests + dev smoke: rows appear with the expected keys; a second close overwrites the same PK (upsert) |
-| S4 (CHG-350) | Re-measure `tick→strategy` vs p50 49 / p99 93 ms; dossier + `03-non-functional.md` notes | Bounded profiling run with the feed on; evidence under `logs/` |
+| S3a (CHG-349) | DDL 34 proposal + `FeatureValuesColumns` + DDL-agreement pin + host `FEATURE_ROWS` side output (off by default) | Offline: agreement tests + emission tests; `make ddl` validate clean |
+| S3b (CHG-350) | Fluss sink wiring in `SignalJob` + startup table validator + flags (`FEATURE_LAYER_ENABLED`, `FEATURE_TABLE`) + rollout forwarding + dev table + smoke | Offline tests + dev smoke: rows appear with expected keys; re-close upserts the same PK |
+| S4 (CHG-351) | Re-measure `tick→strategy` vs p50 49 / p99 93 ms; dossier + `03-non-functional.md` notes | Bounded profiling run with the feed on; evidence under `logs/` |
 
 Progress: S1 landed (CHG-347); S2 landed (CHG-348 — features wired into `StrategyHostFunction`,
-shared `FeatureView`, fail-open counters; compute suite 572 run / 0 failures / 18 env-gated skips).
+shared `FeatureView`, fail-open counters; compute suite 572 run / 0 failures / 18 env-gated skips);
+S3a landed (CHG-349 — DDL proposal + column contract + host side output, no sink/cluster yet).
 
 ## How to add or remove a feature (the only procedure)
 

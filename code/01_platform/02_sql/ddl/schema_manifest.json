@@ -364,6 +364,20 @@
       "writer_owner": "Signal job",
       "retention_policy": "7d",
       "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+    },
+    {
+      "table_name": "feature_values",
+      "ddl_path": "34_feature_values.sql",
+      "ddl_sha256": "e4b1896b8429e9d9b3ccc01f06297bd8e0e50970d362fb3006aaa3e01034742d",
+      "table_kind": "KV",
+      "primary_key": "instrument_token, tf, window_start",
+      "bucket_key": null,
+      "compatibility_class": "UNKNOWN",
+      "validated_matrix": "VM-FLUSS-SRV-005",
+      "schema_version": "1",
+      "writer_owner": "Signal job",
+      "retention_policy": "7d",
+      "lake_policy": "enabled=false"
     }
   ]
 }
