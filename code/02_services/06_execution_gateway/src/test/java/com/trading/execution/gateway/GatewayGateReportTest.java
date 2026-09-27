@@ -130,7 +130,8 @@ class GatewayGateReportTest {
         assertTrue(r.body().contains("HALTED"), r.body());
         assertNotNull(gates.read("p1"));
         assertEquals(GateState.HALTED, gates.read("p1").state());
-        assertEquals(0L, gates.read("p1").epoch());
+        // epoch 1, not 0: the executor's gate model rejects 0 as a sentinel (H2-5/D2)
+        assertEquals(1L, gates.read("p1").epoch());
     }
 
     @Test

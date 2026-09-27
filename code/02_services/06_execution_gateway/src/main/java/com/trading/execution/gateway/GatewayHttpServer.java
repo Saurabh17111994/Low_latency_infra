@@ -318,7 +318,7 @@ public final class GatewayHttpServer implements AutoCloseable {
         GateRow row = gateStore.read(partition);
         if (row == null) {
             row = gateStore.init(new GateRow(partition, config.accountScopeId(), GateState.HALTED,
-                    0L, reason.isBlank() ? "executor boot" : reason, null, null, null, null, null,
+                    1L, reason.isBlank() ? "executor boot" : reason, null, null, null, null, null,
                     0L, null, null, null, now, null));
         }
         if (row.state() != GateState.HALTED) {
@@ -346,7 +346,7 @@ public final class GatewayHttpServer implements AutoCloseable {
         GateRow row = gateStore.read(partition);
         if (row == null) {
             row = gateStore.init(new GateRow(partition, config.accountScopeId(), GateState.HALTED,
-                    0L, "gate report before boot", null, null, null, null, null, 0L, null, null,
+                    1L, "gate report before boot", null, null, null, null, null, 0L, null, null,
                     null, now, null));
         }
         if (row.state() == GateState.ENABLED) {
@@ -414,7 +414,7 @@ public final class GatewayHttpServer implements AutoCloseable {
         GateRow row = gateStore.read(partition);
         if (row == null) {
             row = gateStore.init(new GateRow(partition, config.accountScopeId(), GateState.HALTED,
-                    0L, reason.isBlank() ? "executor halt" : reason, null, null, null, null, null,
+                    1L, reason.isBlank() ? "executor halt" : reason, null, null, null, null, null,
                     0L, null, null, null, now, null));
         }
         row = gateStore.halt(partition, null, reason.isBlank() ? "executor halt" : reason,

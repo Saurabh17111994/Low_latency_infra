@@ -65,13 +65,15 @@ public final class GatewayStartup {
     }
 
     /**
-     * The HALTED, unfenced row created at startup. Epoch 0, no owner, fence token 0 (never
+     * The HALTED, unfenced row created at startup. Epoch 1, no owner, fence token 0 (never
      * fenced) — it authorizes nothing; only a reported approval can enable it. Evidence is null
-     * on purpose: the first approval defines the binding (P3-151).
+     * on purpose: the first approval defines the binding (P3-151). Epoch 1 rather than 0: the
+     * executor's gate model rejects 0 as a sentinel ("no term declared"), so the durable
+     * generation starts at 1 and the executor adopts it at boot.
      */
     static GateRow bootGateRow(GatewayConfig config, long nowTs) {
         return new GateRow(config.executionPartitionId(), config.accountScopeId(), GateState.HALTED,
-                0L, "gateway boot", null, null, null, null, null, 0L, null, null, null, nowTs, null);
+                1L, "gateway boot", null, null, null, null, null, 0L, null, null, null, nowTs, null);
     }
 
     /**
