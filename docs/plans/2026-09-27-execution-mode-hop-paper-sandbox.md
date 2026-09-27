@@ -1,7 +1,7 @@
 # Execution mode hop — paper ↔ sandbox readiness (plan)
 
-**Created:** 2026-09-27 · **Status:** active — H4-1/H2-4 decided; H2-2 drill re-run pending
-(H2-4 landed CHG-333).
+**Created:** 2026-09-27 · **Status:** active — H4-1/H2-4 landed; H2-2 drill re-run gated by
+H2-5 (operator decision pending).
 
 **Operator goal (2026-09-27):** make sure paper and sandbox are fully implemented, so that
 when it is time we only *change configuration* and can hop between `disabled` / paper /
@@ -70,12 +70,15 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   (202 + fake broker id); projection leg gated — gateway `/v1/events` 503 under
   `EXECUTION_ENABLED=false`; halted + reverted cleanly. Attempt 2 (2026-09-27): gateway
   enabled but failed closed on an invalid `Execution_Intent` row — the `instruction_id`
-  contract break (H2-4); reverted. Re-run after H2-4.
+  contract break (H2-4); reverted. Attempt 3 (2026-09-27, after CHG-333): the validator fix
+  proven (all 9 rows accepted, reader reached the forward leg) but blocked by H2-5 — the
+  missing `Execution_Gate` row keeps `/readyz` 503; reverted. Re-run after H2-5.
 - [L] **H2-3** — Projection enablement for the paper drill (operator decision): decouple the
   gateway master switch (`GATEWAY_EXECUTION_ENABLED`, default false; gateway service only,
   nautilus keeps its boot guard), align the harness required tables (`Order_Lifecycle`
   required; attempts/fills/positions reported), extend `t8` + the runbook hop page, then
-  re-run H2-2 in a second short window. Landed 2026-09-27 (CHG-332); drill re-run pending.
+  re-run H2-2 in a second short window. Landed 2026-09-27 (CHG-332); drill re-run pending
+  H2-5 (attempt 3 proved the enable path reaches the forward leg).
 - [x] **H2-4** — `instruction_id` contract break (operator decision 2026-09-27, option A:
   widen the validator to the canonical format). The compute builder emits
   `ei-v1-<sha256>` (70 chars) while the gateway validator capped at 64
@@ -84,7 +87,20 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   CHG-333: `INSTRUCTION_ID` = `ei-v1-[0-9a-f]{64}` OR `[A-Za-z0-9_-]{1,64}`; gateway
   tests red 2 → 18/18; compute pin mutation 69≠70 → 10/10; new cross-service
   `test_instruction_id_contract.py` 3/3; dossier grammar; gateway image rebuilt
-  (`make images`). H2-2 drill re-run is the live proof.
+  (`make images`). Live half proven in CHG-331 attempt 3 (the reader accepted all 9 real
+  rows and reached the forward leg); the drill itself is gated by H2-5.
+- [?] **H2-5** — `Execution_Gate` has no writer in the deployed topology (finding from
+  CHG-331 attempt 3; needs an operator decision). The gateway's forward leg looks up the
+  durable gate row in Fluss (`NautilusIntentClient` → `FlussControlStateStore`); the row
+  does not exist because the executor's deployed store is the file-backed `FileGateStore`
+  (`DURABLE_GATE_ENABLED`) and the Fluss-backed swaps (Workstream D) are designed but
+  unbuilt (`durable.rs`), while the gateway wires the non-authoritative placeholder. A
+  missing row flips `readiness.fluss(false, "key not found")` → `/readyz` 503 →
+  `/v1/events` refuses → the projection leg cannot run while pending intents exist.
+  Options: (A) build the executor's Fluss gate writer (native target design; Rust
+  workstream), (B) gateway treats a missing row as the documented "gate not published →
+  DEFERRED" without flipping `flussReady` (small; deliberate B4-pin update), (C) clean the
+  9 B4 leftover intents (ops only; the wiring gap remains).
 
 #### H3 — Sandbox readiness (funded window)
 
@@ -111,10 +127,10 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | H1 — Switch contract (offline) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| H2 — Paper proof (deployed stack, `fake` mode) | 4 | 2 | 0 | 0 | 2 | 0 | 0 |
+| H2 — Paper proof (deployed stack, `fake` mode) | 5 | 2 | 0 | 0 | 2 | 1 | 0 |
 | H3 — Sandbox readiness (funded window) | 2 | 0 | 0 | 1 | 1 | 0 | 0 |
 | H4 — Decisions and follow-ups | 3 | 1 | 0 | 1 | 0 | 0 | 1 |
-| **Total** | **11** | **5** | **0** | **2** | **3** | **0** | **1** |
+| **Total** | **12** | **5** | **0** | **2** | **3** | **1** | **1** |
 
 ## Overview — the final product
 
