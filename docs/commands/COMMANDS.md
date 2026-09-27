@@ -113,6 +113,7 @@ new envelope must name is `/healthz` `gate_epoch`.
 | Deploy job code | `make rollout-savepoint` | Submit the freshly built jar to the running cluster + restore from savepoint (the native job-update path) |
 | EOD controller | `python3 code/01_platform/04_scripts/eod_controller.py <status\|run\|extend\|reconcile\|reset>` | End-of-day lifecycle controller (SCH-23) |
 | Savepoint rollout | `make rollout-savepoint ARGS="..."` | Flink job update with dedup-state continuity (G5/T12) |
+| Signal-path dev switch | Edit `01_docker/.env` (`STRATEGY_HOST_ENABLED` / `STRATEGIES` / `EXECUTION_INTENT_ENABLED`) then `make up` | Applies the strategy host + execution intent flags to the flink services (compose `flink-common` anchor); a later `make up` keeps them only while the `.env` lines are present, and `make rollout-savepoint` restores inherit the container env (CHG-344) |
 | Chaos suite | `make chaos-suite` | 4 failure drills: slot / TM / tablet / VM kill |
 | Disaster drills | `make disaster-drills ARGS="--dry-run"` | Fault-injection practice runs (needs `--approve` to touch stack) |
 | Seed dashboards | `make seed-dashboards` | Idempotent OpenObserve dashboard provisioning (D7) |

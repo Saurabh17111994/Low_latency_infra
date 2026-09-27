@@ -73,6 +73,24 @@ x-flink-common: &flink-common
     # write candle_live/candle_closed (SignalJobConfig reads System.getenv(), so
     # this must be in the JM/TM environment, not the launcher's).
     MULTITF_ENABLED: ${MULTITF_ENABLED:-false}
+    # Strategy host + execution intent (2026-09-27 dev turn-on, Q3(a)). Same
+    # recreate contract as MULTITF_ENABLED: SignalJobConfig reads these from the
+    # job process environment, so they live in this shared anchor (jobmanager,
+    # taskmanager, compute launcher), not on the launcher's command line.
+    # STRATEGY_HOST_ENABLED=false keeps the topology byte-identical; true
+    # requires a non-empty STRATEGIES list (SignalJobConfig fails fast
+    # otherwise). EXECUTION_INTENT_ENABLED=true requires the execution identity
+    # below — blank values fail closed in SignalJobConfig. The defaults here
+    # are OFF and match the gateway/nautilus dev identity (dev-scope /
+    # dev-partition) so turning intent on needs only the three switches.
+    STRATEGY_HOST_ENABLED: ${STRATEGY_HOST_ENABLED:-false}
+    STRATEGIES: ${STRATEGIES:-}
+    EXECUTION_INTENT_ENABLED: ${EXECUTION_INTENT_ENABLED:-false}
+    ACCOUNT_SCOPE_ID: ${ACCOUNT_SCOPE_ID:-dev-scope}
+    EXECUTION_PARTITION_ID: ${EXECUTION_PARTITION_ID:-dev-partition}
+    EXECUTION_PRODUCT_TYPE: ${EXECUTION_PRODUCT_TYPE:-CNC}
+    EXECUTION_TIME_IN_FORCE: ${EXECUTION_TIME_IN_FORCE:-DAY}
+    CONFIGURATION_VERSION: ${CONFIGURATION_VERSION:-1.0.0}
     # G4 Durability T9: checkpoint storage contract
     # - Dev (default): keeps local durable volume via flink-checkpoints:/checkpoints
     #   (CHECKPOINT_DIR=file:///checkpoints via CheckpointingOptions.CHECKPOINTS_DIRECTORY;

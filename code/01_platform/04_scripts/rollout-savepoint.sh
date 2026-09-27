@@ -114,6 +114,12 @@ MAX_CONCURRENT_CHECKPOINTS RESTART_MAX_ATTEMPTS RESTART_DELAY_MS CHECKPOINT_DIR 
 SAVEPOINT_DIR DEPLOYMENT_ENV STATE_BACKEND PARALLELISM FLUSS_BOOTSTRAP_SERVERS \
 FLUSS_DATABASE EXECUTION_INTENT_ENABLED CONFIGURATION_VERSION \
 SIGNAL_STRATEGY_ID SIGNAL_STRATEGY_VERSION N7_RULE_ID \
+MULTITF_ENABLED MULTITF_SESSION_BYPASS MULTITF_SIGNAL_CONTEXT_ENABLED \
+MULTITF_FAST_LIVE_FEED MULTITF_LIVE_SNAPSHOT_INTERVAL_MS \
+CANDLE_LIVE_TABLE CANDLE_CLOSED_TABLE \
+STRATEGY_HOST_ENABLED STRATEGIES \
+ACCOUNT_SCOPE_ID EXECUTION_PARTITION_ID EXECUTION_PRODUCT_TYPE \
+EXECUTION_TIME_IN_FORCE EXECUTION_INTENT_TABLE \
 OTEL_COLLECTOR_HOST INSTRUMENT_MANIFEST_PATH"
 
 TS="$(date +%Y%m%d-%H%M%S)"
@@ -494,7 +500,13 @@ log "submitting with STATE_RECOVERY_PATH=$SAVEPOINT_PATH and ALLOW_FULL_REPLAY=f
 # so the poll window can never slide past the JM/TM restore lines.
 restore_since="$(utc_iso)"
 submit_output="$(compose "${exec_args[@]}" flink-jobmanager flink run -d -c "$ENTRY_CLASS" "$JAR_IN_CONTAINER" 2>&1)" \
-	|| die "flink run failed — see output above; restore path: $SAVEPOINT_PATH"
+	|| {
+		# CHG-344: the output was CAPTURED, not shown — "see output above" was
+		# a dead end in the evidence log (2026-09-27: a restore-path failure
+		# left no cause in the rollout log). Print it before dying.
+		printf '%s\n' "$submit_output" | tee -a "$EVIDENCE" >&2
+		die "flink run failed — output above; restore path: $SAVEPOINT_PATH"
+	}
 
 NEW_JOB_ID="$(printf '%s\n' "$submit_output" | sed -n 's/.*JobID \([0-9a-f]\{32\}\).*/\1/p' | head -n 1)"
 if [ -z "$NEW_JOB_ID" ]; then

@@ -108,8 +108,10 @@ public class CandleVerify {
             Map<String, Acc> acc = new LinkedHashMap<>();
             // I subscribe AFTER the job does, so the window in progress at subscription time
             // was only partly observed by me: judging it would under-count and look like a
-            // mismatch. Judge only windows that begin after the first one I see.
-            long[] firstWindow = {Long.MAX_VALUE};
+            // mismatch. The scan may also replay backlog rows older than my subscription, so
+            // "the first window I see" is not a safe boundary; skip by wall-clock time.
+            // Any window that started before I subscribed may be partial.
+            long subscribedAt = System.currentTimeMillis();
             try (LogScanner scanner = raw.newScan().createLogScanner()) {
                 subscribeFromLatest(admin, scanner, TablePath.of("default", RawTableSchema.TABLE), buckets);
                 long deadline = System.nanoTime() + minutes * 60_000_000_000L;
@@ -122,9 +124,6 @@ public class CandleVerify {
                         InternalRow row = record.getRow();
                         long token = row.getLong(tokenIdx);
                         long window = Math.floorDiv(row.getLong(eventTimeIdx), tfMillis) * tfMillis;
-                        if (window < firstWindow[0]) {
-                            firstWindow[0] = window;
-                        }
                         Acc a = acc.computeIfAbsent(token + ":" + window, k -> new Acc());
                         long delta = row.isNullAt(deltaIdx) ? 0L : row.getLong(deltaIdx);
                         String type = row.isNullAt(tickTypeIdx) ? "" : row.getString(tickTypeIdx).toString();
@@ -166,8 +165,8 @@ public class CandleVerify {
                 if (window >= latestWindow) {
                     continue;   // still open -- the job may not have closed it yet
                 }
-                if (window <= firstWindow[0]) {
-                    continue;   // partially observed by me, or the job's own first window
+                if (window < subscribedAt) {
+                    continue;   // started before I subscribed -> I may have missed its first rows
                 }
                 judged++;
                 org.apache.fluss.client.lookup.LookupResult res;

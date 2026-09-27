@@ -371,6 +371,15 @@ class RolloutHarness(unittest.TestCase):
             "P6-168 timeout validation": 'die "$label: invalid timeout',
             "P6-168 all terminals": 'FAILED|CANCELED|FINISHED|SUSPENDED',
             "P6-168 transient retry": 'job_state "$jobid" 2>/dev/null || true',
+            # CHG-344: a failed `flink run` must print the captured output —
+            # the old "see output above" pointed at nothing in the log.
+            "submit failure shows output": 'printf \'%s\\n\' "$submit_output" | tee -a "$EVIDENCE" >&2',
+            # CHG-344: the rollout must be able to forward the multi-TF /
+            # strategy-host / execution-intent knobs per run (the list used to
+            # drop them, so a rollout silently reverted those flags).
+            "multi-TF env forwarded": 'MULTITF_ENABLED MULTITF_SESSION_BYPASS MULTITF_SIGNAL_CONTEXT_ENABLED',
+            "strategy env forwarded": 'STRATEGY_HOST_ENABLED STRATEGIES',
+            "execution identity forwarded": 'ACCOUNT_SCOPE_ID EXECUTION_PARTITION_ID EXECUTION_PRODUCT_TYPE',
         }
         missing = [k for k, v in pins.items() if v not in SRC]
         self.assertEqual(missing, [], f"static pins missing: {missing}")

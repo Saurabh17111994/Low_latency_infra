@@ -24,6 +24,12 @@
 >   smoke id is LOG-only).
 > - Rollout flags, all default OFF: `MULTITF_ENABLED`, `STRATEGY_HOST_ENABLED`,
 >   `EXECUTION_INTENT_ENABLED` (`STRATEGIES` must list the rule ids).
+> - Dev switch (2026-09-27, CHG-344): the flags live in the compose
+>   `flink-common` env anchor (`code/01_platform/01_docker/docker-compose.yml`,
+>   defaults OFF) and are set for dev in `01_docker/.env`; a `make up` recreate
+>   applies them to jobmanager/taskmanager/compute, and a `make rollout-savepoint`
+>   restore inherits them (the job reads them from its process environment).
+>   Turning them off = remove the `.env` lines + recreate.
 > - Low-latency feed (2026-09-26, CHG-316/317/318): per-tick `LIVE_TICK_TAG`
 >   in-memory feed to the strategy host (`MULTITF_FAST_LIVE_FEED`, default true),
 >   bridge T2 age-flush wiring, native unaligned checkpoints
