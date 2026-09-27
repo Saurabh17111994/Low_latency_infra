@@ -1,6 +1,7 @@
 # Execution mode hop — paper ↔ sandbox readiness (plan)
 
-**Created:** 2026-09-27 · **Status:** draft — awaiting operator approval (H4-1 decision + H2-2 drill window).
+**Created:** 2026-09-27 · **Status:** active — H4-1/H2-4 decided; H2-2 drill re-run pending
+(H2-4 landed CHG-333).
 
 **Operator goal (2026-09-27):** make sure paper and sandbox are fully implemented, so that
 when it is time we only *change configuration* and can hop between `disabled` / paper /
@@ -75,14 +76,15 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
   nautilus keeps its boot guard), align the harness required tables (`Order_Lifecycle`
   required; attempts/fills/positions reported), extend `t8` + the runbook hop page, then
   re-run H2-2 in a second short window. Landed 2026-09-27 (CHG-332); drill re-run pending.
-- [?] **H2-4** — `instruction_id` contract break (operator decision): the compute builder
-  emits `ei-v1-<sha256>` (70 chars) while the gateway validator caps at 64
-  (`IntentValidator`, P3-094); the gateway fails closed on the live intent rows, so the
-  compute→gateway intent path has never run end to end (CHG-331 attempt 2). Proposed:
-  widen the validator to the canonical format + pin a cross-service test (real builder id
-  → validator) + a contract-doc grammar; then rebuild the gateway image and re-run the
-  H2-2 drill. Alternative: shorten the producer id to ≤64 and clean the live
-  `Execution_Intent` rows.
+- [x] **H2-4** — `instruction_id` contract break (operator decision 2026-09-27, option A:
+  widen the validator to the canonical format). The compute builder emits
+  `ei-v1-<sha256>` (70 chars) while the gateway validator capped at 64
+  (`IntentValidator`, P3-094); the gateway failed closed on the live intent rows, so the
+  compute→gateway intent path had never run end to end (CHG-331 attempt 2). Landed
+  CHG-333: `INSTRUCTION_ID` = `ei-v1-[0-9a-f]{64}` OR `[A-Za-z0-9_-]{1,64}`; gateway
+  tests red 2 → 18/18; compute pin mutation 69≠70 → 10/10; new cross-service
+  `test_instruction_id_contract.py` 3/3; dossier grammar; gateway image rebuilt
+  (`make images`). H2-2 drill re-run is the live proof.
 
 #### H3 — Sandbox readiness (funded window)
 
@@ -109,10 +111,10 @@ item ID; verify-first, marker discipline, smoke-before-run, test + CHG + doc,
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | H1 — Switch contract (offline) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| H2 — Paper proof (deployed stack, `fake` mode) | 4 | 1 | 0 | 0 | 2 | 1 | 0 |
+| H2 — Paper proof (deployed stack, `fake` mode) | 4 | 2 | 0 | 0 | 2 | 0 | 0 |
 | H3 — Sandbox readiness (funded window) | 2 | 0 | 0 | 1 | 1 | 0 | 0 |
 | H4 — Decisions and follow-ups | 3 | 1 | 0 | 1 | 0 | 0 | 1 |
-| **Total** | **11** | **4** | **0** | **2** | **3** | **1** | **1** |
+| **Total** | **11** | **5** | **0** | **2** | **3** | **0** | **1** |
 
 ## Overview — the final product
 

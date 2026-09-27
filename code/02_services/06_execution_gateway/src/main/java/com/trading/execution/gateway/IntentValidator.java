@@ -9,8 +9,14 @@ public final class IntentValidator {
     // P3-485: precompiled — String.matches() recompiles per intent on this hot path.
     private static final java.util.regex.Pattern REQUEST_HASH =
             java.util.regex.Pattern.compile("[0-9a-fA-F]{64}");
+    // CHG-333: the canonical compute-minted form is `ei-v1-` + 64 lowercase sha256
+    // hex chars (70 total; ExecutionIntentBuilder) — the original {1,64} bound
+    // rejected every real intent, so the gateway halted at offset 0 (CHG-331
+    // attempt 2). Accept the canonical form OR a bounded client id (harness/manual
+    // ids stay <=64). The grammar is pinned cross-service by
+    // code/01_platform/04_scripts/tests/test_instruction_id_contract.py.
     private static final java.util.regex.Pattern INSTRUCTION_ID =
-            java.util.regex.Pattern.compile("^[A-Za-z0-9_-]{1,64}$");
+            java.util.regex.Pattern.compile("^(?:ei-v1-[0-9a-f]{64}|[A-Za-z0-9_-]{1,64})$");
 
     public static void validate(IntentRecord i, String accountScope, String partition, long nowMs) {
         Objects.requireNonNull(i, "intent");

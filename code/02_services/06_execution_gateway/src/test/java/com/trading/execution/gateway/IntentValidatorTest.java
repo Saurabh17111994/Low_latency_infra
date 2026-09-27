@@ -113,4 +113,40 @@ class IntentValidatorTest {
                 .hasMessageContaining("limit order requires positive");
     }
 
+    // --- CHG-333: canonical cross-service id grammar ---
+    // The compute builder mints `ei-v1-` + 64 lowercase sha256 hex (70 chars). The
+    // old {1,64} bound rejected every real intent and halted the gateway at offset 0
+    // (CHG-331 attempt 2); the cross-service pin lives in
+    // code/01_platform/04_scripts/tests/test_instruction_id_contract.py.
+    private static final String CANONICAL_ID = "ei-v1-" + "0123456789abcdef".repeat(4);
+
+    private static IntentRecord withId(String id) {
+        return new IntentRecord(id, "c", "t", "acct", "part", 1, "NSE", "ABC", "BUY", 2,
+                "MARKET", null, "MIS", "DAY", "s", "1", "cfg", 1, 10_000L, VALID_HASH, null, "1", 0);
+    }
+
+    @Test void acceptsCanonicalComputeInstructionId() {
+        assertThatCode(() -> IntentValidator.validate(withId(CANONICAL_ID), "acct", "part", 100))
+                .doesNotThrowAnyException();
+    }
+    @Test void acceptsCanonicalSupersedesInstructionId() {
+        IntentRecord i = new IntentRecord("i", "c", "t", "acct", "part", 1, "NSE", "ABC", "BUY", 2,
+                "MARKET", null, "MIS", "DAY", "s", "1", "cfg", 1, 10_000L, VALID_HASH,
+                CANONICAL_ID, "1", 0);
+        assertThatCode(() -> IntentValidator.validate(i, "acct", "part", 100)).doesNotThrowAnyException();
+    }
+    @Test void rejectsNonCanonicalInstructionIds() {
+        // 65-char client id: past the client bound and not the canonical form.
+        assertThatThrownBy(() -> IntentValidator.validate(withId("i".repeat(65)), "acct", "part", 100))
+                .hasMessageContaining("invalid instruction_id");
+        // Canonical prefix with the wrong digest length (63 hex, 69 chars).
+        assertThatThrownBy(() -> IntentValidator.validate(withId("ei-v1-" + "a".repeat(63)),
+                "acct", "part", 100))
+                .hasMessageContaining("invalid instruction_id");
+        // Uppercase hex is not the minted canonical form (HexFormat.of() emits lowercase).
+        assertThatThrownBy(() -> IntentValidator.validate(withId("ei-v1-" + "A".repeat(64)),
+                "acct", "part", 100))
+                .hasMessageContaining("invalid instruction_id");
+    }
+
 }

@@ -161,6 +161,14 @@ The reader validates schema, scope, expiry, request hash, identity uniqueness, a
 continuity before creating a Nautilus order. A repeated `instruction_id` with different content is
 a contract violation: quarantine, audit, halt, and no broker call.
 
+`instruction_id` grammar (CHG-333, pinned cross-service by
+`code/01_platform/04_scripts/tests/test_instruction_id_contract.py`): the canonical Signal-minted
+form is `ei-v1-` + 64 lowercase sha256 hex characters (70 chars, `ExecutionIntentBuilder`);
+bounded client ids (harness/manual operations) remain `[A-Za-z0-9_-]{1,64}`. The gateway
+`IntentValidator` accepts exactly those two forms for `instruction_id` and
+`supersedes_instruction_id`, with per-side pins `ExecutionIntentBuilderTest` (producer) and
+`IntentValidatorTest` (consumer).
+
 ### Nautilus to go-arrow bridge
 
 The bridge protocol maps native Nautilus execution commands to the already pinned Go SDK. Nautilus

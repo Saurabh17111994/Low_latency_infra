@@ -165,6 +165,17 @@ class ExecutionIntentBuilderTest {
                 ExecutionIntentBuilder.identityContent(nse).contains("ei-id-v2"));
     }
 
+    @Test
+    void instructionIdMatchesCanonicalGrammar() {
+        // CHG-333 cross-service pin: the gateway IntentValidator accepts exactly
+        // `ei-v1-` + 64 lowercase hex (70 chars) for instruction_id and
+        // supersedes_instruction_id. Drift on either side also fails
+        // code/01_platform/04_scripts/tests/test_instruction_id_contract.py.
+        String id = ExecutionIntentBuilder.instructionId(sample());
+        assertEquals(70, id.length(), id);
+        org.junit.jupiter.api.Assertions.assertTrue(id.matches("ei-v1-[0-9a-f]{64}"), id);
+    }
+
     private static GenericRowData candidate(String tradeContextId) {
         GenericRowData row = new GenericRowData(SignalCandidatesTableColumns.FIELD_COUNT);
         row.setField(SignalCandidatesTableColumns.CANDIDATE_ID, StringData.fromString("candidate-1"));
