@@ -27,6 +27,9 @@
 | S3 (CHG-349) | DDL 34 (proposal) + dev apply + writer operator + sink + flags + rollout forwarding | Offline tests + dev smoke: rows appear with the expected keys; a second close overwrites the same PK (upsert) |
 | S4 (CHG-350) | Re-measure `tick→strategy` vs p50 49 / p99 93 ms; dossier + `03-non-functional.md` notes | Bounded profiling run with the feed on; evidence under `logs/` |
 
+Progress: S1 landed (CHG-347); S2 landed (CHG-348 — features wired into `StrategyHostFunction`,
+shared `FeatureView`, fail-open counters; compute suite 572 run / 0 failures / 18 env-gated skips).
+
 ## How to add or remove a feature (the only procedure)
 
 Append-only ids (DEC-057); the guards are runtime validation, a pin ledger, and this section.

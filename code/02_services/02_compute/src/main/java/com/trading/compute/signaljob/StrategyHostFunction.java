@@ -1,5 +1,6 @@
 package com.trading.compute.signaljob;
 
+import com.trading.compute.feature.PerInstrumentFeatures;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
@@ -92,12 +93,20 @@ public class StrategyHostFunction
     /** In-memory signal-read age: tick event-time -> strategy evaluation (low-latency KPI). */
     private transient Histogram liveAge;
 
+    /** DEC-056 feature-layer counters (per subtask). */
+    private transient Counter featureTickUpdates;
+    private transient Counter featureCloseUpdates;
+    private transient Counter featureFailures;
+
     // Heap mirrors for tests that bypass the metric registry.
     private transient long emittedHeap;
     private transient long suppressedHeap;
     private transient long failedStrategyHeap;
     private transient long droppedUnkeyedHeap;
     private transient long droppedOversizeHeap;
+    private transient long featureTickUpdatesHeap;
+    private transient long featureCloseUpdatesHeap;
+    private transient long featureFailuresHeap;
     private final transient Map<String, Long> skippedPoisonHeap = new HashMap<>();
 
     public StrategyHostFunction(SignalJobConfig config, List<String> strategyIds) {
@@ -125,6 +134,12 @@ public class StrategyHostFunction
         // compute.latency.ingest_to_monitor.
         liveAge = getRuntimeContext().getMetricGroup()
                 .histogram("compute.latency.tick_to_strategy", LatencyHistograms.create());
+        featureTickUpdates =
+                getRuntimeContext().getMetricGroup().counter("compute.features.updates.tick");
+        featureCloseUpdates =
+                getRuntimeContext().getMetricGroup().counter("compute.features.updates.close");
+        featureFailures =
+                getRuntimeContext().getMetricGroup().counter("compute.features.failed");
         emittedByRule = new HashMap<>();
         // P2-174: one metrics handle per rule per subtask, shared by every
         // slot — not one HostMetrics per (token, ruleId).
@@ -151,11 +166,14 @@ public class StrategyHostFunction
         if (liveAge != null && evtTime > 0L) {
             liveAge.update(Math.max(0L, System.currentTimeMillis() - evtTime));
         }
+        // DEC-056: features update before the fan-out so every strategy reads the
+        // fresh value; a failing feature update is counted, never blocks delivery.
+        updateFeaturesOnTick(slot, live, evtTime);
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: one strategy must not starve the others — isolate,
             // count, and continue to the next strategy.
             try {
-                s.onLiveTick(live, new DedupCollector(out, s.ruleId()));
+                s.onLiveTick(live, slot.features, new DedupCollector(out, s.ruleId()));
             } catch (Exception e) {
                 countFailedStrategy();
                 LOG.warn("strategy-host: dropping failed onLiveTick rule={} token={}: {}",
@@ -172,10 +190,12 @@ public class StrategyHostFunction
         if (slot == null) {
             return;
         }
+        // DEC-056: close features update before the fan-out (same contract as the tick path).
+        updateFeaturesOnClose(slot, closed);
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: same isolation on the closed path.
             try {
-                s.onClosedCandle(closed, new DedupCollector(out, s.ruleId()));
+                s.onClosedCandle(closed, slot.features, new DedupCollector(out, s.ruleId()));
             } catch (Exception e) {
                 countFailedStrategy();
                 LOG.warn("strategy-host: dropping failed onClosedCandle rule={} token={}: {}",
@@ -209,6 +229,9 @@ public class StrategyHostFunction
     /** One slot per instrument: one strategy instance per registered id. */
     static final class HostSlot {
         final Map<String, SignalStrategy> strategies = new LinkedHashMap<>();
+
+        /** DEC-056: this instrument's shared feature state — computed once, read by every strategy. */
+        final PerInstrumentFeatures features = new PerInstrumentFeatures();
     }
 
     /**
@@ -378,10 +401,81 @@ public class StrategyHostFunction
         droppedOversizeHeap++;
     }
 
+    /**
+     * DEC-056 feature update on the live tick. A throwing computer is counted
+     * and dropped — it must never kill the subtask or block the strategy
+     * fan-out (same isolation contract as strategies themselves).
+     */
+    private void updateFeaturesOnTick(HostSlot slot, RowData live, long eventTimeMs) {
+        try {
+            slot.features.onTick(
+                    eventTimeMs,
+                    live.getLong(CandleLiveColumns.CLOSE_PAISE),
+                    live.getLong(CandleLiveColumns.VOLUME),
+                    live.getInt(CandleLiveColumns.TICK_COUNT));
+            featureTickUpdates.inc();
+            featureTickUpdatesHeap++;
+        } catch (Exception e) {
+            countFeatureFailure("tick", e);
+        }
+    }
+
+    /**
+     * DEC-056 feature update on the closed candle, before the fan-out. The
+     * timeframe comes from the row; an unknown code is counted, never thrown
+     * into the fan-out.
+     */
+    private void updateFeaturesOnClose(HostSlot slot, RowData closed) {
+        try {
+            Timeframe tf = Timeframe.fromCode(closed.getString(CandleClosedColumns.TF).toString());
+            slot.features.onClosedCandle(
+                    tf,
+                    closed.getLong(CandleClosedColumns.WINDOW_START),
+                    closed.getLong(CandleClosedColumns.WINDOW_END),
+                    closed.getLong(CandleClosedColumns.OPEN_PAISE),
+                    closed.getLong(CandleClosedColumns.HIGH_PAISE),
+                    closed.getLong(CandleClosedColumns.LOW_PAISE),
+                    closed.getLong(CandleClosedColumns.CLOSE_PAISE),
+                    closed.getLong(CandleClosedColumns.VOLUME),
+                    closed.getInt(CandleClosedColumns.TICK_COUNT));
+            featureCloseUpdates.inc();
+            featureCloseUpdatesHeap++;
+        } catch (Exception e) {
+            countFeatureFailure("close", e);
+        }
+    }
+
+    private void countFeatureFailure(String kind, Exception e) {
+        featureFailures.inc();
+        featureFailuresHeap++;
+        LOG.warn("strategy-host: feature update failed kind={}: {}", kind, e.toString());
+    }
+
     /** Test seam: live strategy instance for one instrument. */
     SignalStrategy strategyForTest(long token, String ruleId) {
         HostSlot slot = slots.get(token);
         return slot == null ? null : slot.strategies.get(ruleId);
+    }
+
+    /** Test seam: one instrument's shared feature state, or null when no slot exists. */
+    PerInstrumentFeatures featuresForTest(long token) {
+        HostSlot slot = slots.get(token);
+        return slot == null ? null : slot.features;
+    }
+
+    /** Test seam: tick feature updates applied by this subtask. */
+    long featureTickUpdatesForTest() {
+        return featureTickUpdatesHeap;
+    }
+
+    /** Test seam: close feature updates applied by this subtask. */
+    long featureCloseUpdatesForTest() {
+        return featureCloseUpdatesHeap;
+    }
+
+    /** Test seam: feature updates dropped by the fail-open guard. */
+    long featureFailuresForTest() {
+        return featureFailuresHeap;
     }
 
     /** Test seam: forwarded emission count (metric-registry bypass). */

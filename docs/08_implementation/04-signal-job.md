@@ -398,6 +398,10 @@ Actual chaining is performance-tested; logical boundaries remain explicit for me
 
 Deployment SHALL reject unbounded or too-short `DEDUP_TTL`, missing production checkpoint storage, unbounded checkpoint restart retry, and any deviation from pinned values.
 
+### Feature layer — shared registry + strategy view (DEC-056/DEC-057, slices S1–S2)
+
+`com.trading.compute.feature` owns the registry (one `FeatureDef` line per feature: stable id, name, ACTIVE/RETIRED, TICK/CLOSE cadence, declared timeframes, computer factory) and the per-instrument state (`PerInstrumentFeatures`: `double[] tickLatest` + `double[feature][tf]` close values, one preallocated computer per slot, O(1) allocation-free updates, NaN-until-ready). The strategy host creates one state per instrument slot and updates it on the live tick and on each closed candle **before** the strategy fan-out, so every strategy reads the same fresh values through the new feature-aware default overloads of `SignalStrategy` — `onLiveTick(RowData, FeatureView, Collector)` and `onClosedCandle(RowData, FeatureView, Collector)`; the defaults delegate to the legacy two-argument methods, so existing strategies (N7, stub-smoke) are unchanged (pinned by `StrategyHostFeaturesTest`). New counters `compute.features.updates.tick`, `compute.features.updates.close`, `compute.features.failed`; a failing feature update is counted and dropped, never blocks signal delivery. Adding/removing a feature is one registry line + one pin-ledger line — ids are append-only and removal is status `RETIRED`, never a delete (guard: `FeatureRegistryPinTest` + the AGENTS.md hazard + the registry Javadoc). Storage (`feature_values`, `MAP<INT,DOUBLE>`, writer operator, rollout flags) is slice S3 and is not wired yet.
+
 ### Event-time contract
 
 - Event time is the verified UTC broker timestamp.

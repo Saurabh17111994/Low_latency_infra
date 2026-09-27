@@ -21,7 +21,7 @@ import java.util.Map;
  * collection growth — they run on the tick path (48k ticks/s at the HFT
  * universe) and must stay flat.
  */
-public final class PerInstrumentFeatures {
+public final class PerInstrumentFeatures implements FeatureView {
 
     private final boolean[] isTick;
     private final double[] tickLatest;
@@ -62,6 +62,7 @@ public final class PerInstrumentFeatures {
      * Latest value of {@code featureId} for {@code tf}, or NaN when not ready.
      * TICK features are timeframe-independent — {@code tf} is ignored for them.
      */
+    @Override
     public double latest(int featureId, Timeframe tf) {
         FeatureDef def = FeatureRegistry.byId(featureId); // bounds check
         if (def.status() != FeatureStatus.ACTIVE) {

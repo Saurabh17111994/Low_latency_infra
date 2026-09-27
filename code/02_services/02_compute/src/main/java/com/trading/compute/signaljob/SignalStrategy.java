@@ -1,5 +1,6 @@
 package com.trading.compute.signaljob;
 
+import com.trading.compute.feature.FeatureView;
 import java.io.Serializable;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.util.Collector;
@@ -57,4 +58,26 @@ public interface SignalStrategy extends Serializable {
      * point in the N7 shape.
      */
     void onLiveTick(RowData live, Collector<RowData> out) throws Exception;
+
+    /**
+     * Feature-aware overload (DEC-056): the same live tick plus the shared
+     * {@link FeatureView} for this instrument. The host calls <b>this</b>
+     * method when it is overridden; the default delegates to
+     * {@link #onLiveTick(RowData, Collector)}, so existing strategies keep
+     * working unchanged. Override one or the other, not both.
+     */
+    default void onLiveTick(RowData live, FeatureView features, Collector<RowData> out)
+            throws Exception {
+        onLiveTick(live, out);
+    }
+
+    /**
+     * Feature-aware overload (DEC-056): the closed candle plus the shared
+     * {@link FeatureView}. Same delegation contract as
+     * {@link #onLiveTick(RowData, FeatureView, Collector)}.
+     */
+    default void onClosedCandle(RowData closed, FeatureView features, Collector<RowData> out)
+            throws Exception {
+        onClosedCandle(closed, out);
+    }
 }
