@@ -36,6 +36,7 @@ unless a command says otherwise.
 | **Disable trading (kill-switch)** | `POST /v1/halt` with a signed envelope — recipe below | Gate → HALTED instantly; all orders refused. Same authentication as approve (`message_type: GATE_HALT`); the signed `reason` is the halt note recorded in the log. |
 | Place sandbox order + cancel (round-trip proof) | `python3 code/01_platform/04_scripts/t9_order_sandbox.py --live` | The live order harness: place → poll → assert → cancel against the broker sandbox. Needs funded margin. Exit 0 = full round-trip; 3 = gate not enabled; 1 = real failure; 2 = blocked. |
 | Offline order contract check | `python3 code/01_platform/04_scripts/t9_order_sandbox.py` | 12/12 static checks, no containers (reuses `t8_sandbox_contract_check.py`) |
+| Intent guard before a hop | `python3 code/01_platform/04_scripts/t9_order_sandbox.py --intent-guard --mode paper\|live` | Reports pending `Execution_Intent` rows the gateway forwards at the next `ENABLED` window; paper warns, live refuses when a pending row is older than 1 h (Q4). |
 | Execution topology check | `make execution-network-check` | Verifies execution-net/arrow-egress isolation (T8 gate 3) |
 
 ### Approve / halt the gate (P3-020: both routes are authenticated)

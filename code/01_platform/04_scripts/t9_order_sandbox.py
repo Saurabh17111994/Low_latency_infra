@@ -100,8 +100,13 @@ EVIDENCE_DIR_DEFAULT = os.path.join(ROOT, "logs", "nautilus-execution")
 # route can grow (Execution_Attempts belongs to the gateway's own intent path,
 # and nautilus keeps its attempt store in a file; CHG-331/CHG-332).
 FLUSS_PROBE_SRC = os.path.join(SCRIPTS, "fluss-probes", "FlussReadLagProbe.java")
+INTENT_PROBE_SRC = os.path.join(SCRIPTS, "fluss-probes", "IntentPendingProbe.java")
 FLUSS_CP_FILE = os.path.join(ROOT, "code", "02_services", "01_ingestion",
                              "target", "cp.txt")
+# Q4 hop guard: a pending (uncommitted) Execution_Intent older than this is
+# stale — the gateway's IntentReader cannot tell old from new, so at the next
+# ENABLED window it forwards the row (fake order in paper, real in live).
+INTENT_GUARD_MAX_AGE_MS = 3600_000
 LIVE_ASSERT_TABLES = ("Order_Lifecycle",)
 LIVE_OPTIONAL_TABLES = ("Execution_Attempts", "Fills", "Positions")
 LIVE_POLL_TIMEOUT_S = 30
@@ -641,6 +646,163 @@ class FlussLogEndProbe:
             return None, f"probe failed: bad count {parts[-1]!r}"
 
 
+def parse_intent_probe_output(stdout):
+    """(rows, error) from IntentPendingProbe stdout. rows =
+    [(instruction_id, created_ts, expiry_ts)]; the trailing SUMMARY count must
+    match the rows — a mismatch is a probe failure, never a silent pass."""
+    rows, summary = [], None
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("\t")
+        if parts[0] == "SUMMARY":
+            summary = parts
+            continue
+        if len(parts) < 3:
+            return None, f"probe failed: unexpected output {line[:120]!r}"
+        try:
+            rows.append((parts[0], int(parts[1]), int(parts[2])))
+        except ValueError:
+            return None, f"probe failed: bad row {line[:120]!r}"
+    if summary is None or len(summary) < 2:
+        return None, "probe failed: no SUMMARY line"
+    try:
+        if int(summary[1]) != len(rows):
+            return None, (f"probe failed: SUMMARY {summary[1]} != "
+                          f"{len(rows)} row(s)")
+    except ValueError:
+        return None, f"probe failed: bad SUMMARY {summary[:2]!r}"
+    return rows, ""
+
+
+class FlussIntentProbe:
+    """Reads PENDING Execution_Intent rows via fluss-probes/IntentPendingProbe
+    (LOG scan minus the gateway's durable Execution_Intent_Processed commit
+    index — the same authority the gateway's dispatcher reads).
+
+    Returns (rows, error) where rows = [(instruction_id, created_ts, expiry_ts)]
+    with expiry_ts = -1 for null. A missing classpath, a failed compile, a
+    missing table or a failed scan all come back as (None, reason) — the guard
+    classifies BLOCKED honestly, never a pass.
+    """
+
+    def __init__(self, workdir=None, bootstrap="localhost:9123"):
+        self.workdir = workdir or tempfile.mkdtemp(prefix="t9-intent-probe-")
+        self.bootstrap = bootstrap
+        self._cp = None
+
+    def _classpath(self):
+        if self._cp is None:
+            try:
+                with open(FLUSS_CP_FILE, encoding="utf-8") as fh:
+                    self._cp = fh.read().strip()
+            except OSError:
+                self._cp = ""
+        return self._cp or None
+
+    def pending(self):
+        cp = self._classpath()
+        if not cp:
+            return None, (f"probe-unavailable: classpath missing ({FLUSS_CP_FILE}); "
+                          "run `make test` to build it")
+        cls = os.path.join(self.workdir, "IntentPendingProbe.class")
+        if not os.path.exists(cls) or os.path.getmtime(cls) < os.path.getmtime(INTENT_PROBE_SRC):
+            javac = shutil.which("javac")
+            if not javac:
+                return None, "probe-unavailable: javac not found on PATH"
+            try:
+                r = subprocess.run([javac, "-cp", cp, "-d", self.workdir,
+                                    INTENT_PROBE_SRC],
+                                   capture_output=True, text=True, timeout=120)
+            except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+                return None, f"probe-unavailable: compile failed: {exc}"
+            if r.returncode != 0:
+                return None, f"probe-unavailable: compile failed: {r.stderr[:200]}"
+        try:
+            p = subprocess.run(
+                ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",
+                 "--add-opens=java.base/java.nio=ALL-UNNAMED",
+                 "-cp", f"{self.workdir}:{cp}", "IntentPendingProbe",
+                 "default", "Execution_Intent", "Execution_Intent_Processed",
+                 self.bootstrap],
+                capture_output=True, text=True, timeout=60)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            return None, f"probe-unavailable: {exc}"
+        if p.returncode != 0:
+            return None, f"probe failed: {(p.stderr or 'no output').strip()[:200]}"
+        return parse_intent_probe_output(p.stdout or "")
+
+
+def classify_intent_guard(rows, mode, now_ms, max_age_ms=INTENT_GUARD_MAX_AGE_MS):
+    """Q4 hop guard over pending Execution_Intent rows (uncommitted).
+
+    A pending row is FORWARDABLE when it is not expired (MVP intents carry a
+    null expiry_ts, so they never expire; the gateway's validator drops expired
+    rows, so those cannot be forwarded). Verdicts:
+
+      CLEAN   — nothing forwardable;
+      FRESH   — pending rows exist, all younger than the threshold: proceed;
+      WARN    — stale pending rows in paper: proceed, they become fake orders;
+      REFUSED — stale pending rows in live: the hop must not proceed, they
+                would become real orders at stale prices.
+    """
+    active = [r for r in rows if not (0 < r[2] <= now_ms)]
+    expired = len(rows) - len(active)
+    if not active:
+        if expired:
+            return "CLEAN", (f"{expired} expired pending row(s) ignored — the "
+                             "gateway drops expired intents")
+        return "CLEAN", "no pending intents"
+    oldest = min(r[1] for r in active)
+    age_ms = max(0, now_ms - oldest)
+    detail = f"{len(active)} pending intent(s), oldest {age_ms // 1000}s old"
+    if age_ms <= max_age_ms:
+        return "FRESH", detail
+    if mode == "live":
+        return "REFUSED", (detail + f" — older than {max_age_ms // 1000}s; a "
+                           "live hop would forward them as real orders (settle "
+                           "them first, e.g. with a paper hop)")
+    return "WARN", (detail + f" — older than {max_age_ms // 1000}s; a paper "
+                    "hop forwards them as fake orders")
+
+
+def run_intent_guard(probe=None, mode="live", now=None):
+    """Q4 pre-hop guard. Returns (exit_code, classifier, notes).
+
+    Run BEFORE enabling the gateway: once the gate is ENABLED the gateway's
+    IntentReader replays Execution_Intent from offset zero and forwards every
+    uncommitted row, so a refusal at drill time would be too late. Exit codes:
+    0 = proceed (CLEAN / FRESH / WARN-paper), 2 = BLOCKED (live refused, or the
+    probe is unavailable).
+    """
+    if probe is None:
+        probe = FlussIntentProbe()
+    now_ms = int((now or _dt.datetime.now(_dt.timezone.utc)).timestamp() * 1000)
+    rows, err = probe.pending()
+    if rows is None:
+        return 2, "BLOCKED", err
+    verdict, detail = classify_intent_guard(rows, mode, now_ms)
+    if verdict == "REFUSED":
+        return 2, "STALE-INTENTS", detail
+    return 0, verdict, detail
+
+
+class FakeIntentProbe:
+    """Programmed pending rows for self-check/tests (never live). `rows=None`
+    reports probe-unavailable; otherwise rows is a list of
+    (instruction_id, created_ts, expiry_ts) with -1 for a null expiry."""
+
+    def __init__(self, rows=None):
+        self.rows = rows
+        self.calls = []
+
+    def pending(self):
+        self.calls.append("pending")
+        if self.rows is None:
+            return None, "probe-unavailable: programmed failure"
+        return list(self.rows), ""
+
+
 class FakeFlussProbe:
     """Programmed counts per table per read (self-check/tests — never live).
 
@@ -922,6 +1084,13 @@ def main(argv=None):
     ap.add_argument("--offline", action="store_true", help="offline contract (default)")
     ap.add_argument("--live", action="store_true", help="in-network place->cancel")
     ap.add_argument("--self-check", action="store_true", help="offline + fake-live demo")
+    ap.add_argument("--intent-guard", action="store_true",
+                    help="Q4 pre-hop guard: report pending Execution_Intent "
+                         "rows (uncommitted) with ages; warn in paper, refuse "
+                         "in live when older than the threshold")
+    ap.add_argument("--mode", choices=("paper", "live"), default="live",
+                    help="intended hop mode for --intent-guard (default live = "
+                         "fail closed)")
     ap.add_argument("--out", default=EVIDENCE_DIR_DEFAULT)
     ap.add_argument("--sign-control", choices=sorted(CONTROL_ACTIONS),
                     metavar="ACTION",
@@ -970,6 +1139,10 @@ def main(argv=None):
               f"{CONTROL_ACTIONS[args.sign_control]['message_type']} envelope"
               f"{sent}", file=sys.stderr)
         return 0
+    if args.intent_guard:
+        code, cls, note = run_intent_guard(mode=args.mode)
+        print(f"intent-guard[{args.mode}]: {cls} — {note}")
+        return code
     if args.self_check:
         return _self_check(args.out, run_id)
     if args.live:
@@ -1053,6 +1226,32 @@ def _self_check(out_dir, run_id):
         print(f"self-check FAIL: approval gate did not block (exit {code})")
         return 1
     print("[self-check] approval gate blocks without T9_APPROVED_BY OK")
+    # Q4 intent-guard demos (pure classifier + fake probe, no Fluss).
+    guard_now_ms = 1_800_000_000_000
+    guard_now = _dt.datetime.fromtimestamp(guard_now_ms / 1000, _dt.timezone.utc)
+    guard_demos = [
+        ("live + stale pending", "live",
+         [("ei-1", guard_now_ms - 2 * 3600_000, -1)], 2, "STALE-INTENTS"),
+        ("paper + stale pending", "paper",
+         [("ei-1", guard_now_ms - 2 * 3600_000, -1)], 0, "WARN"),
+        ("live + fresh pending", "live",
+         [("ei-1", guard_now_ms - 60_000, -1)], 0, "FRESH"),
+        ("live + expired only", "live",
+         [("ei-1", guard_now_ms - 2 * 3600_000, guard_now_ms - 3600_000)],
+         0, "CLEAN"),
+        ("probe unavailable", "live", None, 2, "BLOCKED"),
+    ]
+    guard_results = []
+    for name, mode, rows, want_code, want_cls in guard_demos:
+        code, cls, note = run_intent_guard(probe=FakeIntentProbe(rows),
+                                           mode=mode, now=guard_now)
+        ok = (code, cls) == (want_code, want_cls)
+        print(f"[self-check] intent guard {name} -> {cls} (exit {code}) "
+              f"{'OK' if ok else 'FAIL'}")
+        guard_results.append({"case": name, "mode": mode, "exit": code,
+                              "classifier": cls, "ok": ok})
+        if not ok:
+            return 1
     evidence = {
         "work_item_id": f"A2.5-T9-SANDBOX-{run_id}",
         "artifact": f"logs/nautilus-execution/a2-t9-sandbox-harness-{run_id[:8]}.md",
@@ -1068,6 +1267,8 @@ def _self_check(out_dir, run_id):
                            "401/409/UNKNOWN/no-growth -> FAIL (exit 1); "
                            "no T9_APPROVED_BY or unreadable table -> BLOCKED (exit 2)",
         "demos": results,
+        "intent_guard": {"max_age_ms": INTENT_GUARD_MAX_AGE_MS,
+                         "demos": guard_results},
     }
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, f"self-check-{run_id}-t9-order-sandbox.json")

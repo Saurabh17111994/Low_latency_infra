@@ -804,6 +804,13 @@ and an expired lease makes the gateway defer (never forward).
 (both env files — the bridge token must match the running stack) and `--no-deps` so only
 the named service is recreated; never run a full `up` while a switch is set.
 
+0. Intent guard (Q4) — **before any switch**: `python3 code/01_platform/04_scripts/t9_order_sandbox.py --intent-guard --mode paper`
+   (use `--mode live` before a sandbox hop). It reads pending `Execution_Intent` rows
+   (uncommitted, unexpired) that the gateway's `IntentReader` will forward at the next
+   `ENABLED` window — the gateway cannot tell old from new: paper **warns**, live **refuses**
+   when any pending row is older than 1 h. Run it before step 1 — once the gate is `ENABLED`
+   the forwarding has already happened. Settle stale rows with a paper hop (they become fake
+   orders) or leave them to expire; never open a live window with them pending.
 1. Gateway projection intake on:
    `GATEWAY_EXECUTION_ENABLED=true docker compose --env-file code/01_platform/01_docker/.env --env-file code/01_platform/01_docker/secrets.env -f code/01_platform/01_docker/docker-compose.yml --profile execution-t3 up -d --no-deps execution-gateway`
    (confirm it answers: `docker run --rm --network 01_docker_execution-net curlimages/curl -s -o /dev/null -w '%{http_code}' http://execution-gateway:9180/readyz` → `200`).
@@ -829,7 +836,8 @@ a funded account and market hours; this is the only path that places a real brok
 and it is release-gated (`docs/06_operations/08-live-readiness-gaps.md`). Note the gateway's
 `IntentReader` replays `Execution_Intent` from offset zero (durable dedup skips committed
 rows): with the gate `ENABLED`, a pending intent is forwarded — a fake order in paper mode,
-a real order in the live sandbox, so settle the intent table before a live window.
+a real order in the live sandbox. Step 0's guard (`--mode live`) refuses the hop while a
+pending intent older than 1 h exists, so settle the intent table before a live window.
 
 **Offline checks before any hop:** `python3 code/01_platform/04_scripts/t8_sandbox_contract_check.py`
 (defaults fail-closed, mode-switch branches, `fake` Arrow-free, signed control routes,

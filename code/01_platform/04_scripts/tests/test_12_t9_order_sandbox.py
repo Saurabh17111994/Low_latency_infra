@@ -425,3 +425,60 @@ def test_sign_control_cli_refuses_without_evidence():
     assert rc.returncode == 1, f"{rc.stdout}\n{rc.stderr}"
     assert rc.stdout.strip() == ""
     assert "evidence" in rc.stderr
+
+
+def test_intent_guard_classifies_pending_ages():
+    """Q4: the guard's pure classifier — fresh pending proceeds, stale pending
+    warns in paper and refuses in live, expired rows are ignored (the gateway's
+    validator drops them, so they cannot be forwarded)."""
+    now = 1_800_000_000_000
+    stale = [("ei-1", now - 2 * 3600_000, -1)]
+    fresh = [("ei-1", now - 60_000, -1)]
+    expired = [("ei-1", now - 2 * 3600_000, now - 3600_000)]
+    assert t9.classify_intent_guard([], "live", now)[0] == "CLEAN"
+    assert t9.classify_intent_guard(stale, "paper", now)[0] == "WARN"
+    assert t9.classify_intent_guard(stale, "live", now)[0] == "REFUSED"
+    assert t9.classify_intent_guard(fresh, "live", now)[0] == "FRESH"
+    assert t9.classify_intent_guard(expired, "live", now)[0] == "CLEAN"
+    # MVP intents carry null expiry (-1): stale + unexpired = REFUSED in live.
+    assert t9.classify_intent_guard([("ei-1", now - 2 * 3600_000, -1)],
+                                    "live", now)[0] == "REFUSED"
+
+
+def test_intent_guard_run_refuses_live_and_warns_paper():
+    """Q4: exit codes — live stale refuses (2/STALE-INTENTS), paper stale
+    proceeds (0/WARN), probe failure blocks (2/BLOCKED), fresh proceeds."""
+    now = _dt.datetime.fromtimestamp(1_800_000_000, _dt.timezone.utc)
+    stale = [("ei-1", 1_800_000_000_000 - 2 * 3600_000, -1)]
+    code, cls, _ = t9.run_intent_guard(probe=t9.FakeIntentProbe(stale),
+                                       mode="live", now=now)
+    assert (code, cls) == (2, "STALE-INTENTS")
+    code, cls, _ = t9.run_intent_guard(probe=t9.FakeIntentProbe(stale),
+                                       mode="paper", now=now)
+    assert (code, cls) == (0, "WARN")
+    code, cls, _ = t9.run_intent_guard(
+        probe=t9.FakeIntentProbe([("ei-1", 1_800_000_000_000 - 60_000, -1)]),
+        mode="live", now=now)
+    assert (code, cls) == (0, "FRESH")
+    code, cls, _ = t9.run_intent_guard(probe=t9.FakeIntentProbe(None),
+                                       mode="live", now=now)
+    assert (code, cls) == (2, "BLOCKED")
+
+
+def test_intent_guard_probe_parser_rejects_summary_mismatch():
+    """Q4: the probe-output parser — the SUMMARY count must match the rows; a
+    mismatch or a missing summary is a probe failure (BLOCKED), never a silent
+    pass."""
+    rows, err = t9.parse_intent_probe_output(
+        "ei-1\t1790000000000\t-1\n"
+        "SUMMARY\t1\t1790000000000\t1790000000000\n")
+    assert err == "", err
+    assert rows == [("ei-1", 1790000000000, -1)]
+    rows, err = t9.parse_intent_probe_output(
+        "ei-1\t1790000000000\t-1\n"
+        "SUMMARY\t2\t1790000000000\t1790000000000\n")
+    assert rows is None
+    assert "SUMMARY" in err
+    rows, err = t9.parse_intent_probe_output("ei-1\t1790000000000\t-1\n")
+    assert rows is None
+    assert "SUMMARY" in err

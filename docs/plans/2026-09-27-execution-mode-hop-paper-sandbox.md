@@ -317,6 +317,10 @@ Success = all five:
 4. The daily runner is untouched and keeps refusing enablement (D1).
 5. H3-2 is the only real-broker call in this plan: funded account, market hours, operator
    present, evidence archived.
+6. The hop preflight runs the intent guard (`--intent-guard --mode paper|live`, Q4 decision
+   2026-09-27, CHG-342): pending uncommitted `Execution_Intent` rows are forwarded at the
+   next `ENABLED` window (the gateway cannot tell old from new); paper warns, live refuses
+   when a pending row is older than 1 h.
 
 ## 5. Evidence and landing
 
