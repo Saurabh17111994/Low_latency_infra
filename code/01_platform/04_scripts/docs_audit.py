@@ -149,12 +149,14 @@ def c1_manifest():
     if m is None:
         return check("C1 manifest readable", False, p)
     tables = m.get("tables", [])
-    # 26 since 2026-09-23 moved the parked fingerprint_dedup DDL to
-    # ddl/retired/ (out of the applier's *.sql enumeration) and dropped its
-    # manifest entry. The pin is deliberate and is NOT made redundant by the
-    # agreement checks below: only the pin notices a table being dropped from
-    # BOTH lists at once.
-    check("C1 manifest has 26 tables", len(tables) == 26, f"got {len(tables)}")
+    # 27 since 2026-09-27: DDL 34 feature_values (feature layer S3a, CHG-349;
+    # a sanctioned unapplied proposal) joined both the manifest and the ddl/
+    # enumeration. 26 held since 2026-09-23, when the parked fingerprint_dedup
+    # DDL moved to ddl/retired/ (out of the applier's *.sql enumeration) and
+    # its manifest entry was dropped. The pin is deliberate and is NOT made
+    # redundant by the agreement checks below: only the pin notices a table
+    # being dropped from BOTH lists at once.
+    check("C1 manifest has 27 tables", len(tables) == 27, f"got {len(tables)}")
     # The literal above went stale (29 held for four retired tables) because
     # nothing tied the manifest to the DDL directory. These two do.
     ddl_names = {_ddl_table_name(f) for f in os.listdir(DDL_DIR) if f.endswith(".sql")}
@@ -669,11 +671,12 @@ def c9_dec039_invariants():
     ) or ""
     check("C9 ledger live-in-dev evidence", "Postback_Projection_Ledger 705" in foundation)
 
-    # --- SCH-19 index + SCH-23 EOD + REQ-EXE-004 intent DDL; 26 DDLs (the DEC-038 dedup
-    # DDL moved to ddl/retired/ on 2026-09-23 and is no longer applied -- see the C1 pin) ---
+    # --- SCH-19 index + SCH-23 EOD + REQ-EXE-004 intent DDL; 27 DDLs (the DEC-038 dedup
+    # DDL moved to ddl/retired/ on 2026-09-23 and is no longer applied; DDL 34 feature_values
+    # joined on 2026-09-27 as a sanctioned unapplied proposal -- see the C1 pin) ---
     sqls = sorted(f for f in os.listdir(DDL_DIR) if f.endswith(".sql"))
-    # 26: see the C1 pin. Both numbers are the same fact counted from either side.
-    check("C9 DDL count = 26", len(sqls) == 26, f"got {len(sqls)}")
+    # 27: see the C1 pin. Both numbers are the same fact counted from either side.
+    check("C9 DDL count = 27", len(sqls) == 27, f"got {len(sqls)}")
     check(
         "C9 dedup DDL on file",
         os.path.exists(os.path.join(DDL_DIR, "retired", "24_fingerprint_dedup.sql")),
