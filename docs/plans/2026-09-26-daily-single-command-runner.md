@@ -148,7 +148,14 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
     feed's 0-1,000 ms second-quantized event time (F5); late-drop share 4.5%
     whole-session vs the ~2.7% accepted baseline (F6). Deltas, findings and
     evidence paths in `logs/day/monday-20260928/notes.md`; I5 false RED fixed
-    en route (CHG-352). F1/F2/F5 stay open operator decisions.
+    en route (CHG-352). **F1/F2/F5 fixed 2026-09-28:** CHG-355 (ready ceiling
+    240 s → `DAY_READY_TIMEOUT_S` = 3600 s, state-based), CHG-356 (zero-ack
+    grace covers the whole window; startup budgets 180 s → 3600 s), CHG-357
+    (committed latency probe; the KPI note separates the ms-exact
+    `ingest_to_monitor` from the second-quantized `tick_to_strategy`). F6 = no
+    action (accepted baseline); F7 (disk alarm/runbook) stays open. Evening
+    drills found and fixed F8 (KV snapshots → CHG-359) and F9 (readiness-probe
+    memory → CHG-360).
 - [-] **P4-5** — optional systemd timer for automatic morning start —
   trigger-gated: revisit after ≥5 consecutive green daily runs.
 - [x] **P4-6** — (option A, approved 2026-09-26; outside the original P4 list)
