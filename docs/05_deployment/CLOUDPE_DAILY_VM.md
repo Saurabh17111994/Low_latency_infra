@@ -52,12 +52,16 @@ What it does — and does not do:
 
 | Does | Does not |
 |---|---|
-| installs Docker + compose plugin (if missing) and enables it | start the stack |
+| installs Docker + compose plugin (if missing), python3 + tzdata for the host scheduler, and enables Docker | start the stack |
 | writes `.env` from `.env.example` with the real R2 endpoint/bucket/warehouse | write any secret |
-| writes `.env.vm` from `.env.vm.example` (fresh start, 15:45 EOD, stop gate) | run the EOD |
+| writes `.env.vm` from `.env.vm.example` (fresh start, 15:45 EOD, compose runner, stop gate) | run the EOD |
 | installs + enables the `trading-eod` systemd unit | change the code |
 
-The script warns when the project image set is missing; that is what §2.4 loads.
+The script warns when the project image set is missing; that is what §2.4 loads. `--check`
+additionally proves the in-image toolchain before you snapshot — the ingestion JDK and
+`/app/probe/FlussReadLagProbe.class`, the EOD image's java + controller + m2 repo, and the
+`.env.vm` runner/fresh-start/stop-gate keys — so a snapshot that boots a VM unable to run the day
+fails here instead of at 09:15.
 
 ### 2.4 Load the images (from the dev PC — no builds, no registry)
 
@@ -104,7 +108,7 @@ The image is the artifact. Rebuild it when code or images change (repeat
 | 3 | Start: `cd /opt/trading/streaming_project && make day ARGS="start"` — fresh start (`ALLOW_FRESH=1` from `.env.vm`), ready in ~2–4 min (87 s measured software path) |
 | 4 | Provision observability — a fresh OpenObserve starts **empty**: `python3 code/01_platform/04_scripts/o2-provision.py` (destination + dashboards + 47 rules) then `python3 code/01_platform/04_scripts/seed_alerts.py` (position-state + storage/disk rules). Off-session, a few metric-stream rules 404 (they need streams the signal job only emits when signals flow) — the disk/ING/INFRA safety rules are already in; re-run when the feed is live. Without this the day runs blind — measured 2026-09-28: zero alerts loaded while the data disk reached 85.13% |
 | 5 | Start lake tiering: `bash code/01_platform/04_scripts/tiering-start.sh` — without it the day's parquet never reaches R2 (idempotent; check `--status`) |
-| 6 | Let the day run. At **15:45 IST** the `trading-eod` unit runs the EOD controller (`EOD_OFFLOAD=lake`) and records the success to `/var/lib/trading/eod-last-run` |
+| 6 | Let the day run. At **15:45 IST** the `trading-eod` unit runs the EOD controller **in the `eod-controller` compose service** (`EOD_RUNNER=compose` from `.env.vm` — the VM has no host JDK/m2) with `EOD_OFFLOAD=lake`, and records the success to `/var/lib/trading/eod-last-run` |
 | 7 | After the archive: `make day ARGS="stop"` — the gate refuses until today's record exists ("EOD archive confirmed …"), then the stack goes down |
 | 8 | Destroy the VM. The day's data is in R2 — verify: `bash code/01_platform/04_scripts/r2-list.sh all` |
 
@@ -130,7 +134,7 @@ launch is boring enough to script.
 
 | Symptom | Meaning | Fix |
 |---|---|---|
-| `stop` RED: "today's EOD->R2 archive is not confirmed" | the 15:45 run failed or never fired | `systemctl status trading-eod`; run `EOD_OFFLOAD=lake python3 code/01_platform/04_scripts/eod_controller.py run`; re-run `stop`; `DAY_STOP_FORCE=1` only when the loss is deliberate |
+| `stop` RED: "today's EOD->R2 archive is not confirmed" | the 15:45 run failed or never fired | `systemctl status trading-eod`; re-run the unit's path once: `set -a; . code/01_platform/01_docker/.env.vm; set +a; EOD_RUNNER=compose python3 code/01_platform/04_scripts/eod_schedule.py --once`; re-run `stop`; `DAY_STOP_FORCE=1` only when the loss is deliberate |
 | `start` refused: "no savepoint/checkpoint" | `.env.vm` missing (no `ALLOW_FRESH=1`) | `cp .env.vm.example .env.vm` |
 | "no RUNNING tiering job" | the day's parquet will not reach R2 | `bash code/01_platform/04_scripts/tiering-start.sh`; if it dies, `docs/06_operations/07-lake-archive-ops.md` §Recovery |
 | compose starts **building** an image | the image set was not loaded | repeat §2.4, then rebuild the golden image |

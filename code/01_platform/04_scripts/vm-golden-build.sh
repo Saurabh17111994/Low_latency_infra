@@ -4,9 +4,9 @@
 #
 # Run ON the build VM, as root, with the repo already present (git clone or
 # rsync — docs/05_deployment/CLOUDPE_DAILY_VM.md §2). It installs Docker if
-# missing, writes `.env` / `.env.vm` from their committed templates, and
-# installs + enables the trading-eod systemd unit (fires at EOD_AT from
-# `.env.vm`; records its last clean run for the `stop` gate).
+# missing, the host toolchain (python3 + tzdata), writes `.env` / `.env.vm`
+# from their committed templates, and installs + enables the trading-eod
+# unit (fires at EOD_AT from `.env.vm`; records its last clean run for `stop`).
 #
 # It NEVER writes secrets and NEVER starts the stack.
 #
@@ -15,8 +15,8 @@
 #       --r2-endpoint https://<account-id>.r2.cloudflarestorage.com \
 #       --r2-bucket <bucket>
 #
-#   --check   inventory only: fail unless Docker and the project image set are
-#             present and the env files exist; change nothing. Run it again
+#   --check   inventory only: fail unless Docker, the project images + their
+#             toolchain and env files are present; change nothing. Run again
 #             after loading images, before snapshotting.
 set -euo pipefail
 
@@ -90,6 +90,28 @@ if [ "$CHECK" = 1 ]; then
   [ -f "$ENV_DIR/.env" ] || fail "--check: .env missing (run without --check first)"
   [ -f "$ENV_DIR/.env.vm" ] || fail "--check: .env.vm missing (run without --check first)"
   [ -z "$missing" ] || fail "--check: image set incomplete: $missing (load it, then re-run)"
+  # C3-5: the snapshot must own the whole daily toolchain. Prove it inside the
+  # images before the volume is snapshotted — a snapshot missing the in-image
+  # JDK, the probe class or the EOD m2 repo cannot be repaired later without
+  # rebuilding and reloading the image set.
+  docker run --rm --entrypoint java 01_docker-ingestion -version >/dev/null 2>&1 \
+    || fail "--check: java missing in the ingestion image"
+  docker run --rm --entrypoint sh 01_docker-ingestion \
+    -c 'test -f /app/probe/FlussReadLagProbe.class' >/dev/null 2>&1 \
+    || fail "--check: /app/probe/FlussReadLagProbe.class missing in the ingestion image"
+  docker run --rm --entrypoint sh 01_docker-eod-controller \
+    -c 'java -version >/dev/null 2>&1 && test -f /app/code/01_platform/04_scripts/eod_controller.py && test -d /opt/ddl-apply/m2/repository' \
+    >/dev/null 2>&1 \
+    || fail "--check: the EOD image is missing java, the controller script or the m2 repo"
+  docker run --rm --entrypoint python3 01_docker-eod-controller \
+    /app/code/01_platform/04_scripts/eod_controller.py --help >/dev/null 2>&1 \
+    || fail "--check: eod_controller.py --help fails inside the EOD image"
+  grep -q '^EOD_RUNNER=compose$' "$ENV_DIR/.env.vm" \
+    || fail "--check: .env.vm must set EOD_RUNNER=compose (no host JDK/m2 on the VM)"
+  grep -q '^ALLOW_FRESH=1$' "$ENV_DIR/.env.vm" \
+    || fail "--check: .env.vm must set ALLOW_FRESH=1 (fresh disk every morning)"
+  grep -q '^DAY_STOP_REQUIRE_EOD=1$' "$ENV_DIR/.env.vm" \
+    || fail "--check: .env.vm must set DAY_STOP_REQUIRE_EOD=1 (archive before the disk dies)"
   say "--check: OK — nothing was changed"
   exit 0
 fi
@@ -118,6 +140,18 @@ else
   fi
 fi
 systemctl enable --now docker >/dev/null
+
+# ---- host toolchain ---------------------------------------------------------
+# The daily flow keeps timing, the heartbeat and the last-run stamp on the host
+# (trading-eod unit) and shells every JVM/data step into containers, so the host
+# needs python3 (tzdata for zoneinfo) and nothing else. A recipe-built fresh VM
+# has neither guaranteed.
+if ! command -v python3 >/dev/null 2>&1 || [ ! -d /usr/share/zoneinfo ]; then
+  say "installing python3 + tzdata (the host scheduler needs both)"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -qq
+  apt-get install -y -qq python3 tzdata >/dev/null
+fi
 
 # ---- env files -------------------------------------------------------------
 if [ ! -f "$ENV_DIR/.env" ]; then

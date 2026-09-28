@@ -13,6 +13,9 @@ controller's state table and lease, so a second fire on the same day is harmless
   the service loop:   python3 eod_schedule.py --at 23:30 --zone Asia/Kolkata
   container health:   python3 eod_schedule.py --check-heartbeat --max-age 120
 
+Runner: host python by default; the golden VM sets `EOD_RUNNER=compose` (`.env.vm`), which runs the
+controller in the one-shot `eod-controller` compose service — no host JDK or m2 repo needed.
+
 Exit codes: the controller's own code for --once (0 = clean), 0 for --dry-run, 0 fresh / 1 stale for
 --check-heartbeat, 2 for a usage or configuration error.
 """
@@ -22,6 +25,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -113,8 +117,45 @@ def write_last_run(path: Path | None, zone_name: str,
         print(f"eod-schedule: WARN cannot write last-run {path}: {exc}", file=sys.stderr)
 
 
-def run_controller(controller: Path, controller_args: list[str]) -> int:
-    cmd = [sys.executable, str(controller)] + controller_args
+def compose_command(compose_file: str, controller_args: list[str]) -> list[str]:
+    """C3-3: the canonical compose form for the one-shot EOD service.
+
+    ``DAY_COMPOSE`` (the Makefile's registered compose form, exported by
+    ``make day``) wins when present; otherwise both env files are derived from
+    the stack file's directory. The literals are separate list elements — the
+    same shape the daily runner uses — and the stack file must exist before
+    this is called.
+    """
+    override = os.environ.get("DAY_COMPOSE", "").strip()
+    if override:
+        base = shlex.split(override)
+    else:
+        stack = Path(compose_file)
+        base = [
+            "docker", "compose",
+            "--env-file", str(stack.parent / ".env"),
+            "--env-file", str(stack.parent / "secrets.env"),
+            "-f", str(stack),
+        ]
+    return base + ["run", "--rm", "-T", "eod-controller"] + (controller_args or ["run"])
+
+
+def run_controller(controller: Path, controller_args: list[str],
+                   runner: str = "host", compose_file: str = "") -> int:
+    """Run the controller once: host python (default) or the eod-controller compose service.
+
+    The compose service exists for hosts without the JDK/m2 repo (the golden VM);
+    timing, the heartbeat and the last-run stamp stay in this process either way.
+    """
+    if runner == "compose":
+        stack = Path(compose_file)
+        if not stack.is_file():
+            print(f"eod-schedule: ERROR stack file not found: {stack} "
+                  "(set EOD_COMPOSE_FILE or --compose-file)", file=sys.stderr)
+            return 2
+        cmd = compose_command(str(stack), controller_args)
+    else:
+        cmd = [sys.executable, str(controller)] + controller_args
     print(f"eod-schedule: run {controller_args[0] if controller_args else ''} -> {' '.join(cmd)}", flush=True)
     try:
         proc = subprocess.run(cmd, env=os.environ.copy())
@@ -126,21 +167,22 @@ def run_controller(controller: Path, controller_args: list[str]) -> int:
 
 def fire(controller: Path, controller_args: list[str], retries: int, delay: float,
          heartbeat: Path, last_run: Path | None = None,
-         zone_name: str = DEFAULT_ZONE) -> int:
+         zone_name: str = DEFAULT_ZONE, runner: str = "host",
+         compose_file: str = "") -> int:
     """Run the controller, retrying a failed process with exponential backoff.
 
     Retrying the *process* is not a substitute for the controller's own backoff: a crash before it
     can record state leaves nothing to resume from, and that is exactly the case this covers.
     """
     write_heartbeat(heartbeat)
-    rc = run_controller(controller, controller_args)
+    rc = run_controller(controller, controller_args, runner, compose_file)
     attempt = 0
     while rc != 0 and attempt < retries:
         attempt += 1
         wait = delay * (2 ** (attempt - 1))
         print(f"eod-schedule: rc={rc}, retry {attempt}/{retries} in {wait:.0f}s", flush=True)
         time.sleep(wait)
-        rc = run_controller(controller, controller_args)
+        rc = run_controller(controller, controller_args, runner, compose_file)
     write_heartbeat(heartbeat)
     if rc == 0:
         write_last_run(last_run, zone_name)
@@ -159,6 +201,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help=f"trading zone (env EOD_ZONE; default {DEFAULT_ZONE})")
     p.add_argument("--controller", default=str(Path(__file__).resolve().parent / "eod_controller.py"),
                    help="the one-shot controller to invoke (default: the sibling eod_controller.py)")
+    p.add_argument("--runner", choices=("host", "compose"),
+                   default=os.environ.get("EOD_RUNNER", "host"),
+                   help="how to execute the controller: host python (default) or the "
+                        "eod-controller compose service (env EOD_RUNNER)")
+    p.add_argument("--compose-file", default=os.environ.get(
+                       "EOD_COMPOSE_FILE",
+                       str(Path(__file__).resolve().parents[1] / "01_docker" / "docker-compose.yml")),
+                   help="stack file for --runner compose (env EOD_COMPOSE_FILE)")
     p.add_argument("--controller-arg", action="append", default=[], dest="controller_args",
                    help="argument passed through to the controller (repeatable; default: run). "
                         "A value that starts with a dash needs the = form: --controller-arg=--offload")
@@ -216,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"eod-schedule: controller {controller} not found", file=sys.stderr)
             return 2
         return fire(controller, controller_args, args.max_retries, args.retry_delay,
-                    heartbeat, last_run, args.zone)
+                    heartbeat, last_run, args.zone, args.runner, args.compose_file)
 
     if not controller.is_file():
         print(f"eod-schedule: controller {controller} not found", file=sys.stderr)
@@ -235,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
             write_heartbeat(heartbeat)
         # Recompute after the fire: a clock jump or a suspended container must not re-select it.
         fire(controller, controller_args, args.max_retries, args.retry_delay,
-             heartbeat, last_run, args.zone)
+             heartbeat, last_run, args.zone, args.runner, args.compose_file)
 
 
 if __name__ == "__main__":

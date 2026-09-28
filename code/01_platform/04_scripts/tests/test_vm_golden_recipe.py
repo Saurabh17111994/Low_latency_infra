@@ -48,6 +48,28 @@ class VmGoldenRecipeTests(unittest.TestCase):
                           "project image set (compose would otherwise build)")
         self.assertIn("--check", text)
 
+    def test_profile_selects_the_compose_eod_runner(self):
+        text = VM_ENV.read_text()
+        self.assertRegex(text, r"(?m)^EOD_RUNNER=compose$",
+                         "the fresh VM has no host JDK/m2, so the EOD controller must run "
+                         "in the eod-controller compose service")
+
+    def test_check_proves_the_in_image_toolchain_before_the_snapshot(self):
+        text = SCRIPT.read_text()
+        for probe in (
+            "--entrypoint java",
+            "test -f /app/probe/FlussReadLagProbe.class'",
+            "test -f /app/code/01_platform/04_scripts/eod_controller.py",
+            "test -d /opt/ddl-apply/m2/repository'",
+            "eod_controller.py --help",
+            "^EOD_RUNNER=compose$",
+        ):
+            self.assertIn(probe, text,
+                          f"--check must prove {probe!r} before the volume is snapshotted")
+        self.assertIn("python3 tzdata", text,
+                      "the golden build must install the host scheduler toolchain "
+                      "(python3 + tzdata for zoneinfo)")
+
     def test_guide_keeps_the_daily_commands_and_the_safe_to_destroy_rule(self):
         text = DOC.read_text()
         self.assertIn('make day ARGS="start"', text)

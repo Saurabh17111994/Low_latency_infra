@@ -1152,8 +1152,20 @@ services:
     networks: [trading-net]
     depends_on: [fluss-coordinator, fluss-tablet]
     environment:
-      FLUSS_BOOTSTRAP: fluss-coordinator:9123
-      EOD_M2_REPO: /opt/ddl-apply/m2/repository
+      - FLUSS_BOOTSTRAP=fluss-coordinator:9123
+      - EOD_M2_REPO=/opt/ddl-apply/m2/repository
+      # C3-4: the pass-through the comment above promises. The list form passes a
+      # variable only when it is set in the invoking environment, so an unset
+      # EOD_TABLES stays unset (null) and the tool's fail-closed check fires —
+      # an empty `${EOD_TABLES:-}` would be present-but-empty and change that.
+      - EOD_DATABASE
+      - EOD_STATE_TABLE
+      - EOD_TABLES
+      - EOD_TTL
+      - EOD_SAFETY_FLOOR
+      - EOD_EXTENSION
+      - EOD_OFFLOAD
+      - EOD_ZONE
     command: ["python3", "/app/code/01_platform/04_scripts/eod_controller.py"]
 
   # ── Disabled services (uncomment as each phase is built) ────────────────

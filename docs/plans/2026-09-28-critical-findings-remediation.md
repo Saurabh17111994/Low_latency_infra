@@ -33,8 +33,8 @@ Where a body section and this list disagree, this list wins.
 |---|---|---|---|---|---|---|---|
 | C1 — live postback mapping (fills/cancels/rejects must never be dropped) | 7 | 7 | 0 | 0 | 0 | 0 | 0 |
 | C2 — broker secrets must never reach day evidence | 5 | 4 | 0 | 0 | 0 | 0 | 1 |
-| C3 — golden image must run the daily paths without a host JDK | 8 | 2 | 1 | 4 | 1 | 0 | 0 |
-| **Total** | **20** | **13** | **1** | **4** | **1** | **0** | **1** |
+| C3 — golden image must run the daily paths without a host JDK | 8 | 7 | 0 | 0 | 1 | 0 | 0 |
+| **Total** | **20** | **18** | **0** | **0** | **1** | **0** | **1** |
 
 #### C1 — live postback mapping (fills/cancels/rejects must never be dropped)
 
@@ -87,20 +87,20 @@ Where a body section and this list disagree, this list wins.
   (`docker compose exec -T ingestion java … FlussReadLagProbe … fluss-coordinator:9123`); the
   host `javac` + `target/cp.txt` dependency is deleted.
   (DECIDED 2026-09-28 — container path on every host, PC and VM; §9.)
-- [ ] **C3-3** — `eod_schedule.py` gains `--runner host|compose` (env `EOD_RUNNER`, default
+- [x] **C3-3** — `eod_schedule.py` gains `--runner host|compose` (env `EOD_RUNNER`, default
   `host`): compose mode runs the existing one-shot service —
   `docker compose -f <file> run --rm -T eod-controller run` — while timing, heartbeat and the
   `EOD_LAST_RUN_FILE` stamp stay on the host.
-- [ ] **C3-4** — Compose `eod-controller` service passes the `EOD_*` variables through
+- [x] **C3-4** — Compose `eod-controller` service passes the `EOD_*` variables through
   explicitly (`EOD_DATABASE`, `EOD_STATE_TABLE`, `EOD_TABLES`, `EOD_TTL`, `EOD_SAFETY_FLOOR`,
   `EOD_EXTENSION`, `EOD_OFFLOAD`, `EOD_ZONE`); today the comment claims it, the block does not.
-- [ ] **C3-5** — `vm-golden-build.sh`: install `python3` + `tzdata` when missing; extend
+- [x] **C3-5** — `vm-golden-build.sh`: install `python3` + `tzdata` when missing; extend
   `--check` to assert the in-image toolchain the daily flow uses (JRE, probe class, EOD tool +
   java + m2 layout, scheduler compose mode) and fail **before** the snapshot, not at 09:00.
-- [ ] **C3-6** — Docs: `CLOUDPE_DAILY_VM.md` (§2/§3 + the failure-mode row that says to run the
+- [x] **C3-6** — Docs: `CLOUDPE_DAILY_VM.md` (§2/§3 + the failure-mode row that says to run the
   host EOD command), `.env.vm.example` (`EOD_RUNNER=compose`, `EOD_COMPOSE_FILE`), EOD runbook
   sections.
-- [~] **C3-7** — Tests: scheduler compose runner (stubbed docker), golden-recipe pins extended,
+- [x] **C3-7** — Tests: scheduler compose runner (stubbed docker), golden-recipe pins extended,
   day_run probe command builder.
 - [L] **C3-8** — On-VM rehearsal: one throwaway CloudPe VM built by the recipe; `--check` PASS;
   `make day ARGS="start"` / `status` / `stop` in a non-market window prove the probe path and

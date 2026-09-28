@@ -219,3 +219,103 @@ def test_write_last_run_creates_parents_and_a_disabled_path_is_a_noop(tmp_path):
     eod.write_last_run(target, "Asia/Kolkata")
     assert target.is_file()
     eod.write_last_run(None, "Asia/Kolkata")  # disabled: no error, nothing written
+
+
+# ── the compose runner (C3-3) ────────────────────────────────────────────────
+# A recipe-built fresh VM has no host JDK / m2 repo, so the daily EOD controller must run in its
+# existing compose service. These tests pin the exact command and the refuse-before-exec path.
+
+
+class _Proc:
+    returncode = 0
+
+
+def _stack_file(directory: Path) -> Path:
+    stack = directory / "docker-compose.yml"
+    stack.write_text("services: {}\n")
+    return stack
+
+
+def test_compose_runner_builds_the_canonical_command(tmp_path, monkeypatch):
+    stack = _stack_file(tmp_path)
+    calls = []
+
+    def fake_run(cmd, env=None):
+        calls.append(cmd)
+        return _Proc()
+
+    monkeypatch.delenv("DAY_COMPOSE", raising=False)
+    monkeypatch.setattr(eod.subprocess, "run", fake_run)
+    rc = eod.run_controller(tmp_path / "controller.py", ["run"],
+                            runner="compose", compose_file=str(stack))
+    assert rc == 0
+    assert calls == [[
+        "docker", "compose",
+        "--env-file", str(tmp_path / ".env"),
+        "--env-file", str(tmp_path / "secrets.env"),
+        "-f", str(stack),
+        "run", "--rm", "-T", "eod-controller", "run",
+    ]], calls
+
+
+def test_compose_runner_prefers_day_compose_when_exported(tmp_path, monkeypatch):
+    stack = _stack_file(tmp_path)
+    calls = []
+    monkeypatch.setenv("DAY_COMPOSE",
+                       "docker compose --env-file x/.env --env-file x/secrets.env "
+                       "-f x/docker-compose.yml")
+    monkeypatch.setattr(eod.subprocess, "run",
+                        lambda cmd, env=None: calls.append(cmd) or _Proc())
+    rc = eod.run_controller(tmp_path / "controller.py", ["run"],
+                            runner="compose", compose_file=str(stack))
+    assert rc == 0
+    assert calls[0][:8] == ["docker", "compose", "--env-file", "x/.env",
+                            "--env-file", "x/secrets.env", "-f",
+                            "x/docker-compose.yml"]
+    assert calls[0][-5:] == ["run", "--rm", "-T", "eod-controller", "run"]
+
+
+def test_compose_runner_refuses_a_missing_stack_file(tmp_path, monkeypatch):
+    def never(*_args, **_kwargs):
+        raise AssertionError("a missing stack file must be refused before exec")
+
+    monkeypatch.setattr(eod.subprocess, "run", never)
+    rc = eod.run_controller(tmp_path / "controller.py", ["run"],
+                            runner="compose",
+                            compose_file=str(tmp_path / "nope.yml"))
+    assert rc == 2
+
+
+def test_the_runner_defaults_to_host_and_eod_runner_can_select_compose(monkeypatch):
+    monkeypatch.delenv("EOD_RUNNER", raising=False)
+    assert eod.parse_args([]).runner == "host"
+    assert Path(eod.parse_args([]).compose_file).name == "docker-compose.yml"
+    monkeypatch.setenv("EOD_RUNNER", "compose")
+    assert eod.parse_args([]).runner == "compose"
+
+
+def test_once_with_the_compose_runner_execs_the_eod_service(tmp_path):
+    """The whole path: --once --runner compose must reach the one-shot eod-controller service."""
+    stack = _stack_file(tmp_path)
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    log = tmp_path / "docker.log"
+    docker = fake / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {log}\n"
+        "exit 0\n"
+    )
+    docker.chmod(0o755)
+    controller = tmp_path / "controller.py"
+    controller.write_text("# compose mode runs the in-image copy; this file is only the repo check\n")
+    env = {"PATH": f"{fake}:{os.environ['PATH']}", "EOD_RUNNER": "compose", "DAY_COMPOSE": ""}
+    r = _run(tmp_path, "--once", "--controller", str(controller),
+             "--compose-file", str(stack), "--heartbeat", str(tmp_path / "hb"),
+             env=env)
+    assert r.returncode == 0, r.stderr
+    line = log.read_text().strip()
+    assert f"--env-file {tmp_path / '.env'}" in line, line
+    assert "secrets.env" in line, line
+    assert f"-f {stack}" in line, line
+    assert line.endswith("run --rm -T eod-controller run"), line
