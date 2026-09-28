@@ -358,14 +358,18 @@ services:
     ports: ["9123:9123"]
     volumes:
       - fluss-data:/data
-      # W35x: remote.data.dir is Cloudflare R2 (S3), so there is no local
-      # remote-data volume any more — tiered segments and the tiering manifest
-      # live in the bucket, where any client holding the R2 credentials can
-      # read them. ServerBase initialises filesystems through
-      # PluginUtils.createPluginManagerFromRootFolder($FLUSS_HOME/plugins), and
-      # the image already ships plugins/s3/fluss-fs-s3-*.jar, so s3:// resolves
-      # with no extra mount. The old fluss-remote-data volume is left in place
-      # (unmounted, not deleted) so pre-switch segments stay on disk.
+      # W35x: remote.data.dir defaults to Cloudflare R2 (S3) — tiered segments
+      # and the tiering manifest live in the bucket, where any client holding
+      # the R2 credentials can read them. ServerBase initialises filesystems
+      # through PluginUtils.createPluginManagerFromRootFolder($FLUSS_HOME/
+      # plugins), and the image already ships plugins/s3/fluss-fs-s3-*.jar, so
+      # s3:// resolves with no extra mount.
+      # F8 (2026-09-28): in dev, remote.data.dir is /tmp/fluss-remote-data and
+      # holds the KV snapshots the tablet needs for fast cold-start recovery
+      # (and, when lake snapshots run, the offsets file the getLakeSnapshot RPC
+      # reads — keep this volume shared with the tablet). With an s3:// URI the
+      # mount is unused.
+      - fluss-remote-data:/tmp/fluss-remote-data
       # P8.1 (tracker 14 box 827): fluss_logs stream — server logs volume.
       - fluss-logs:/opt/fluss/log
       # P3.2 lake tiering: the iceberg plugin classloader needs hadoop-aws/S3A
@@ -505,10 +509,14 @@ services:
       - fluss-data:/data
       # P3.2: tablet log data must survive container recreation.
       - fluss-tablet-data:/tmp/fluss/data
-      # W35x: the local remote-data volume is gone — tiering writes to R2 (see
-      # remote.data.dir below). Unmounting it is what makes the container's view
-      # and every other reader's view the same bytes; the volume itself is left
-      # on disk so pre-switch segments are not destroyed.
+      # F8 (2026-09-28): the KV snapshot store must survive container recreation.
+      # Without it, every cold start logs "No snapshot found" and replays the whole
+      # retained changelog (measured 22m56s, dominated by candle_live: ~90s x 16
+      # buckets). The dev .env points remote.data.dir at /tmp/fluss-remote-data;
+      # mounting the volume persists the snapshots. Production (docker-stack.yml)
+      # still writes to R2 and this mount is simply unused there; the W35x note on
+      # the coordinator stands for the s3:// path.
+      - fluss-remote-data:/tmp/fluss-remote-data
       # P8.1 (tracker 14 box 827): fluss_logs stream — server logs volume.
       - fluss-logs:/opt/fluss/log
       # P3.2 lake tiering — same S3A + hdfs plugin overlay as the coordinator.

@@ -163,6 +163,19 @@ lifecycle avoids the cold path entirely.
 A rerun of `start` is always safe: `make up` is idempotent, the SignalJob is
 kept when running, and a restore never creates a second job.
 
+**F8 landed (2026-09-28):** the dev stack now snapshots KV state every 1 minute
+(`FLUSS_KV_SNAPSHOT_INTERVAL=1m`) into the persistent `fluss-remote-data` volume
+mounted on the tablet *and* the coordinator, so a same-day restart loads the
+latest snapshot and replays at most the minute after it instead of the whole
+retained changelog. Verified on this box: the snapshot store survives a
+stop/start, and the recovered tablet logs `Download kv snapshot CompletedSnapshot
+…` for every bucket that has one (evidence `logs/cold-start-fresh-20260928/`;
+fresh-start rehearsal: stop 51 s, start 87 s). A fresh empty cluster has nothing
+to replay either way — this bounds restarts *after* data has accumulated
+(`make day ARGS="start"` on a wiped host stays fast for the same reason).
+Production (`docker-stack.yml`) keeps remote data on R2 and the compose default
+stays `0s`; the interval is an explicit switch, not a default.
+
 ## Stopping or restarting the executor
 
 The executor drains for ~15 s before it exits: the Nautilus kernel waits up to 10 s for residual
