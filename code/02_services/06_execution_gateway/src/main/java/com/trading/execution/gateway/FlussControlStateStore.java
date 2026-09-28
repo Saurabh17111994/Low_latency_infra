@@ -146,8 +146,11 @@ public final class FlussControlStateStore implements ControlStateStore {
             Table table = table(config.haltTable());
             FlussHandlePool<UpsertWriter> pool = writerPools.computeIfAbsent(config.haltTable(),
                     n -> new FlussHandlePool<>(() -> table.newUpsert().createWriter()));
-            pool.with(writer -> writer.upsert(updated)
-                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS));
+            // C5 guard: the same bounded retry the lookup path uses — the upsert future IS the
+            // write's acknowledgement, so a transient Fluss failure must not kill the consumer
+            // without the retry budget every other await site gets. Exhaustion still throws.
+            pool.with(writer -> RequestBudget.run(() -> writer.upsert(updated)
+                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS)));
         } catch (Exception e) {
             throw new IllegalStateException("cannot record safety halt application", e);
         }
