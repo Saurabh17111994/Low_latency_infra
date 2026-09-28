@@ -66,6 +66,16 @@ EXECUTION_PROFILE = "execution-t3"
 SIGNAL_JOB_NAME = "signal-job-compute"
 COMPANION_JOB_NAMES = ("Babysitter Positions observer", "Safety-halt consumer")
 CHECKPOINT_INTERVAL_MS = 10_000  # compose pin (CHECKPOINT_INTERVAL_MS)
+# F1 (2026-09-28): ceiling for the ready wait. The wait itself is state-based
+# (all services are running + Fluss metadata readable + Flink reachable, two
+# consecutive good polls), so the ceiling only bounds how long a stuck start may
+# wait. MEASURED 2026-09-28 (off-hours cold-start drill, real feed, 58.6M raw
+# records): the tablet needed 22 min 56 s to serve raw_table_1 - dominated by
+# candle_live/candle_closed KV changelog replay ("No snapshot found" per bucket),
+# so a 900 s ceiling went RED while recovery was still progressing. Default is
+# 60 min (~2.6x margin); the structural fix is reducing KV replay/retention (F8),
+# not a longer wait. Warm starts still exit in seconds.
+DEFAULT_READY_TIMEOUT_S = 3600
 FLINK_JOBMANAGER = "flink-jobmanager"
 EXECUTION_SERVICES = ("execution-bridge", "execution-gateway", "nautilus")
 
@@ -885,7 +895,7 @@ def universe_env(universe: Universe) -> dict:
 
 
 def wait_ready(collector: Collector, universe: Universe, runner: Runner,
-               timeout_s: int = 240) -> None:
+               timeout_s: int = DEFAULT_READY_TIMEOUT_S) -> None:
     """Bounded wait for stack services + Flink REST + Fluss metadata."""
     deadline = time.time() + timeout_s
     last = "starting"
@@ -988,7 +998,8 @@ def cmd_start(runner: Runner, make_collector) -> int:
         runner.make("up", env=env)
         collector = make_collector(runner)
         wait_ready(collector, universe, runner,
-                   timeout_s=int(os.environ.get("DAY_READY_TIMEOUT_S", "240")))
+                   timeout_s=int(os.environ.get("DAY_READY_TIMEOUT_S",
+                                                str(DEFAULT_READY_TIMEOUT_S))))
         ensure_signaljob(collector, runner, env, allow_fresh=_allow_fresh())
         # Phase 2: execution-t3 chain in its offline posture (profile-gated;
         # the runner only starts it, it never flips the gate flags).

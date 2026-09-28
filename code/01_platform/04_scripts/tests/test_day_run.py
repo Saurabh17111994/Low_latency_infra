@@ -333,6 +333,34 @@ class CommandFlowTests(unittest.TestCase):
         self.assertTrue(any(call["env"].get("COMPOSE_PROFILES") == "execution-t3"
                             for call in runner.calls if "make" in call["argv"]))
 
+    def test_start_ready_wait_default_covers_cold_start(self):
+        # F1 (2026-09-28): the off-hours cold-start drill measured 22 min 56 s of
+        # tablet recovery (candle_live/candle_closed KV changelog replay) and the
+        # 900s ceiling went RED while recovery was still progressing. The wait is
+        # state-based (it exits as soon as the stack is ready), so the ceiling is
+        # a cold-start budget, not a target.
+        seen = []
+        with mock.patch.object(
+                day_run, "wait_ready",
+                side_effect=lambda c, u, r, timeout_s: seen.append(timeout_s)):
+            rc = day_run.main(["start"], runner=FakeRunner(),
+                              collector_factory=lambda r: FakeCollector())
+        self.assertEqual(rc, 0)
+        self.assertEqual([3600], seen,
+                         "the default ready-wait ceiling must cover a measured "
+                         "cold-start recovery (~23 min) with margin")
+
+    def test_start_ready_wait_honours_env_override(self):
+        seen = []
+        with mock.patch.dict(os.environ, {"DAY_READY_TIMEOUT_S": "1234"}), \
+                mock.patch.object(
+                    day_run, "wait_ready",
+                    side_effect=lambda c, u, r, timeout_s: seen.append(timeout_s)):
+            rc = day_run.main(["start"], runner=FakeRunner(),
+                              collector_factory=lambda r: FakeCollector())
+        self.assertEqual(rc, 0)
+        self.assertEqual([1234], seen, "DAY_READY_TIMEOUT_S must override the default")
+
     def test_start_restores_from_state(self):
         runner = FakeRunner()
         collector = FakeCollector(

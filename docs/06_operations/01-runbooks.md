@@ -147,6 +147,19 @@ make day ARGS="stop"      # graceful stop; checkpoints/volumes preserved
    `start` must be a no-op (idempotent).
 3. Record the board snapshot under `logs/day/`.
 
+**Cold starts are the slow path (F1, 2026-09-28):** after a host reboot or any
+fully stopped stack, the Fluss tablet must finish recovering every table before
+it serves `raw_table_1` metadata. Measured off-hours with the real feed at 58.6M
+raw records: **22 min 56 s**, dominated by the `candle_live`/`candle_closed` KV
+changelog replay ("No snapshot found" per bucket; the structural fix is F8 —
+KV snapshots/segment sizing — not a longer wait). `start` waits up to
+`DAY_READY_TIMEOUT_S` (default 3600 s; the wait is state-based and exits as soon
+as the stack is ready) and prints a `waiting ...` line every 5 s. The ingestion
+write grace uses the same default; if a recovery ever outruns the 150k pending
+cap at off-hours accept rates (~40 min), ingestion back-pressures (readiness
+false, no loss) instead of failing. Warm starts exit in seconds; the 24×7
+lifecycle avoids the cold path entirely.
+
 A rerun of `start` is always safe: `make up` is idempotent, the SignalJob is
 kept when running, and a restore never creates a second job.
 
