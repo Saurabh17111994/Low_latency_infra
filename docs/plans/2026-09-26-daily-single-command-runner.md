@@ -8,8 +8,13 @@ all recommended); implementation started with P1-1.
    separate release-gated step).
 2. **D2** — daily universe **full 2 433 @ 3 sockets in dev** (production
    single-socket policy untouched).
-3. **D3** — lifecycle: **one manual morning command; stack left running 24×7**;
-   no timer in v1.
+3. **D3** — lifecycle: **one manual morning command**; the stack runs while the
+   machine runs. **Amended 2026-09-28:** the *"left running 24×7"* clause is
+   retired — the production VM is rented for market hours and destroyed at the
+   end of the trading day, so every morning starts from an empty disk
+   (`.env.vm` sets `ALLOW_FRESH=1`; CHG-361/CHG-362); the dev PC keeps its disk
+   and restores on start. There is no *start* timer: the only timer is the VM's
+   15:45 IST EOD archive.
 4. **D4** — daily actions: **`start`/`status`/`stop` only**; savepoint stays an
    explicit command; EOD stays with the `eod-controller` service.
 5. **D5** — success bar: **nine checks I1–I9; pre-session data checks report
@@ -56,8 +61,11 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
   stays a separate release-gated step).
 - [x] **D2** — Daily universe: **full 2 433 @ 3 sockets in dev** (production
   single-socket policy untouched).
-- [x] **D3** — Lifecycle: **one manual morning command; stack left running
-  24×7**; no timer in v1.
+- [x] **D3** — Lifecycle: **one manual morning command**; amended 2026-09-28
+  (was "stack left running 24×7"): the stack runs while the machine runs — VM =
+  fresh disk daily (`ALLOW_FRESH=1` via `.env.vm`, CHG-361), PC = restart on
+  power-on with its disk kept; the only timer is the VM's 15:45 IST EOD
+  (CHG-362).
 - [x] **D4** — Daily actions: **`start`/`status`/`stop` only**; savepoint stays
   an explicit command; EOD stays with the `eod-controller` service.
 - [x] **D5** — Success bar: **nine checks I1–I9; pre-session data checks report
@@ -130,7 +138,8 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
   the command as the sole entry point; evidence + comparison to the profiling
   ladder. **Approved 2026-09-27: the assistant runs it.**
   - **Checklist (2026-09-28 IST):** 09:00-09:10 `make day ARGS="start"`
-    (converge — the stack is left running 24×7) -> `logs/day/monday-20260928/start.log`;
+    (converge — the stack was left running for the session; the "24×7" posture
+    was retired after this run, see D3) -> `logs/day/monday-20260928/start.log`;
     during the session `make day ARGS="status"` at ~09:20 (post-open), ~12:00
     (midday) and ~15:00 (late) -> `status-*.log`. Pass conditions: I3
     (ingestion appends) and I4 (downstream flow) show movement, I8 green,

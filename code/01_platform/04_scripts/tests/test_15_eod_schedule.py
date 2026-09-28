@@ -181,3 +181,41 @@ def test_an_unparseable_heartbeat_is_unhealthy_rather_than_fresh(tmp_path):
     hb.write_text("not a timestamp\n")
     r = _run(tmp_path, "--check-heartbeat", "--heartbeat", str(hb))
     assert r.returncode == 1
+
+
+# ── the last-run record (the ephemeral-VM stop gate reads it) ────────────────
+
+def test_once_records_the_last_successful_run_in_the_trading_zone(tmp_path):
+    controller, _ = _fake_controller(tmp_path, [0])
+    record = tmp_path / "eod-last-run"
+    r = _run(tmp_path, "--once", "--controller", str(controller),
+             "--heartbeat", str(tmp_path / "hb"), "--last-run", str(record))
+    assert r.returncode == 0, r.stderr
+    stamp = dt.datetime.fromisoformat(record.read_text().strip())
+    assert stamp.utcoffset() == dt.timedelta(hours=5, minutes=30), \
+        "the stamp carries the trading zone, so `today` means the trading day"
+    assert stamp.date() == dt.datetime.now(KOLKATA).date()
+
+
+def test_a_failed_run_never_records_success(tmp_path):
+    controller, _ = _fake_controller(tmp_path, [1])
+    record = tmp_path / "eod-last-run"
+    r = _run(tmp_path, "--once", "--controller", str(controller),
+             "--heartbeat", str(tmp_path / "hb"), "--last-run", str(record),
+             "--max-retries", "0", "--retry-delay", "0")
+    assert r.returncode == 1
+    assert not record.exists(), "a failed day must never read as archived"
+
+
+def test_the_last_run_record_is_optional(tmp_path):
+    controller, _ = _fake_controller(tmp_path, [0])
+    r = _run(tmp_path, "--once", "--controller", str(controller),
+             "--heartbeat", str(tmp_path / "hb"))
+    assert r.returncode == 0, r.stderr
+
+
+def test_write_last_run_creates_parents_and_a_disabled_path_is_a_noop(tmp_path):
+    target = tmp_path / "deep" / "dir" / "eod-last-run"
+    eod.write_last_run(target, "Asia/Kolkata")
+    assert target.is_file()
+    eod.write_last_run(None, "Asia/Kolkata")  # disabled: no error, nothing written

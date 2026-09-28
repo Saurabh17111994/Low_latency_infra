@@ -19,6 +19,7 @@ node_modules/
 **/.env
 **/.env.*
 !**/.env.example
+!**/.env.vm.example
 docker/.env
 config/*.local.*
 **/config/*.local.*

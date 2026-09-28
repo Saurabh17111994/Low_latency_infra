@@ -46,6 +46,9 @@ STACK = ROOT / "code" / "01_platform" / "01_docker"
 ENV_FILE = STACK / ".env"
 SECRETS_FILE = STACK / "secrets.env"
 COMPOSE_FILE = STACK / "docker-compose.yml"
+# Ephemeral-VM profile (gitignored; template: .env.vm.example). Loaded by
+# load_vm_env at start, so the daily VM needs no flags on the morning command.
+VM_ENV_FILE = STACK / ".env.vm"
 STACK_LOCK = ROOT / "code" / "01_platform" / "04_scripts" / "stack-lock.sh"
 FLUSS_PROBE_SRC = (ROOT / "code" / "01_platform" / "04_scripts" / "fluss-probes"
                    / "FlussReadLagProbe.java")
@@ -183,6 +186,26 @@ def effective_value(key: str, default: str = "") -> str:
         return os.environ[key]
     value = parse_env_file(ENV_FILE).get(key, "")
     return value if value != "" else default
+
+
+def load_vm_env(path=None) -> int:
+    """Load the ephemeral-VM profile (``01_docker/.env.vm``) into the environment.
+
+    The profile carries the settings that make a fresh daily VM need no flags:
+    fresh start allowed, the EOD schedule, and the stop gate. See
+    ``.env.vm.example``. Shell values always win -- a key already present in
+    ``os.environ`` is never overwritten, so ``ALLOW_FRESH=0 make day ...`` still
+    refuses. The dev PC has no profile file; there this is a no-op. Returns the
+    number of keys applied.
+    """
+    path = pathlib.Path(path) if path is not None else pathlib.Path(
+        os.environ.get("DAY_VM_ENV_FILE", str(VM_ENV_FILE)))
+    applied = 0
+    for key, value in parse_env_file(path).items():
+        if key not in os.environ:
+            os.environ[key] = value
+            applied += 1
+    return applied
 
 
 def resolve_universe(mode: str, deploy_env: str, counts: dict) -> Universe:
@@ -1091,7 +1114,52 @@ def cmd_status(runner: Runner, make_collector) -> int:
     return EXIT_RED if any(not c.ok and not c.pending for c in checks) else EXIT_OK
 
 
+def _eod_archive_stamp() -> str | None:
+    """The last successful EOD run's stamp, when the VM profile records one."""
+    path = os.environ.get("EOD_LAST_RUN_FILE", "").strip()
+    if not path:
+        return None
+    try:
+        stamp = pathlib.Path(path).read_text().strip()
+    except OSError:
+        return None
+    return stamp or None
+
+
+def _eod_stop_gate(runner: Runner) -> int | None:
+    """Refuse ``stop`` when today's EOD archive is not confirmed (VM profile).
+
+    Ephemeral-VM only (``DAY_STOP_REQUIRE_EOD=1``): the VM disk dies with the
+    stack, so stop is the last chance to keep the day. The scheduler records
+    its last clean controller run to ``EOD_LAST_RUN_FILE``; a stamp from
+    another day means today's archive has not run. The override is explicit:
+    ``DAY_STOP_FORCE=1``.
+    """
+    if os.environ.get("DAY_STOP_REQUIRE_EOD", "0") != "1":
+        return None
+    stamp = _eod_archive_stamp()
+    today = dt.datetime.now(IST).strftime("%Y-%m-%d")
+    if stamp and stamp.startswith(today):
+        runner.emit(f"[day] stop        OK   EOD archive confirmed {stamp}")
+        return None
+    if os.environ.get("DAY_STOP_FORCE", "0") == "1":
+        runner.emit("[day] stop        WARN EOD archive NOT confirmed "
+                    f"(last success: {stamp or 'none'}) -- DAY_STOP_FORCE=1, "
+                    "stopping anyway; the day may be lost")
+        return None
+    runner.emit(f"[day] stop        RED  today's EOD->R2 archive is not confirmed "
+                f"(last success: {stamp or 'none'})")
+    runner.emit("[day]             INFO run the EOD now, then re-run stop:")
+    runner.emit("[day]             INFO EOD_OFFLOAD=lake EOD_TABLES=<tables> "
+                "python3 code/01_platform/04_scripts/eod_controller.py run")
+    runner.emit("[day]             INFO override deliberately with DAY_STOP_FORCE=1")
+    return EXIT_RED
+
+
 def cmd_stop(runner: Runner, make_collector) -> int:
+    gate = _eod_stop_gate(runner)
+    if gate is not None:
+        return gate
     collector = make_collector(runner)
     state = collector.state_paths()
     savepoint = state.get("latest_savepoint")
@@ -1136,6 +1204,7 @@ def _allow_fresh() -> bool:
 
 
 def main(argv=None, runner: Runner | None = None, collector_factory=None) -> int:
+    load_vm_env()  # .env.vm profile: fresh-start + EOD settings on the daily VM
     parser = argparse.ArgumentParser(
         prog="make day ARGS=", add_help=True,
         description="daily single-command platform runner (start|status|stop)")

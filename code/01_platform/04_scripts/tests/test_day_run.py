@@ -633,5 +633,102 @@ class WaitReadyProbeTests(unittest.TestCase):
         self.assertTrue(all(kw.get("readiness") for kw in seen))
 
 
+# --------------------------------------------------------------------------
+# ephemeral-VM profile (A/B) and the EOD stop gate (D), 2026-09-28
+# --------------------------------------------------------------------------
+
+
+class VmProfileTests(unittest.TestCase):
+    def test_profile_applies_but_the_shell_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = pathlib.Path(tmp) / ".env.vm"
+            profile.write_text(
+                "# ephemeral vm profile\n"
+                "ALLOW_FRESH=1\n"
+                "EOD_AT=15:45\n"
+                'EOD_TABLES="candle_closed"\n')
+            with mock.patch.dict(os.environ, {"EOD_AT": "23:30"}, clear=False):
+                for key in ("ALLOW_FRESH", "EOD_TABLES"):
+                    os.environ.pop(key, None)
+                applied = day_run.load_vm_env(profile)
+                self.assertEqual(applied, 2)
+                self.assertEqual(os.environ["ALLOW_FRESH"], "1")
+                self.assertEqual(os.environ["EOD_TABLES"], "candle_closed")
+                self.assertEqual(os.environ["EOD_AT"], "23:30",
+                                 "an explicit shell value must never be overwritten")
+
+    def test_absent_profile_is_a_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(day_run.load_vm_env(pathlib.Path(tmp) / "absent"), 0)
+
+    def test_main_loads_the_vm_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profile = pathlib.Path(tmp) / ".env.vm"
+            profile.write_text("DAY_TEST_VM_KEY=applied\n")
+            with mock.patch.dict(os.environ, {"DAY_VM_ENV_FILE": str(profile)},
+                                 clear=False), \
+                    mock.patch.object(day_run, "cmd_status",
+                                      lambda runner, factory: 0):
+                os.environ.pop("DAY_TEST_VM_KEY", None)
+                rc = day_run.main(["status"], runner=day_run.Runner(out=io.StringIO()))
+                self.assertEqual(os.environ.get("DAY_TEST_VM_KEY"), "applied")
+        self.assertEqual(rc, 0)
+
+
+class StopEodGateTests(unittest.TestCase):
+    """D: on the daily VM `stop` refuses until the day's EOD is confirmed."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.record = pathlib.Path(self._tmp.name) / "eod-last-run"
+
+    def _stop(self, runner, **env):
+        patched = {"DAY_EVIDENCE_DIR": os.path.join(self._tmp.name, "evidence")}
+        patched.update(env)
+        collector = lambda r: FakeCollector(  # noqa: E731 - matches the suite style
+            state={"latest_savepoint": None, "latest_checkpoint": None})
+        with mock.patch.dict(os.environ, patched, clear=False):
+            return day_run.cmd_stop(runner, collector)
+
+    def test_refuses_when_today_has_no_confirmed_archive(self):
+        self.record.write_text("2026-09-27T15:45:00+05:30\n")  # yesterday
+        runner = FakeRunner()
+        rc = self._stop(runner, DAY_STOP_REQUIRE_EOD="1",
+                        EOD_LAST_RUN_FILE=str(self.record))
+        self.assertEqual(rc, day_run.EXIT_RED)
+        self.assertNotIn("down", runner.targets(),
+                         "the stack must stay up when the day is not archived")
+
+    def test_refuses_when_no_record_exists_at_all(self):
+        runner = FakeRunner()
+        rc = self._stop(runner, DAY_STOP_REQUIRE_EOD="1",
+                        EOD_LAST_RUN_FILE=str(self.record))
+        self.assertEqual(rc, day_run.EXIT_RED)
+        self.assertFalse(runner.targets())
+
+    def test_stops_when_today_is_confirmed(self):
+        self.record.write_text(day_run.dt.datetime.now(day_run.IST).isoformat() + "\n")
+        runner = FakeRunner()
+        rc = self._stop(runner, DAY_STOP_REQUIRE_EOD="1",
+                        EOD_LAST_RUN_FILE=str(self.record))
+        self.assertEqual(rc, day_run.EXIT_OK)
+        self.assertIn("down", runner.targets())
+
+    def test_dev_pc_keeps_the_ungated_stop(self):
+        runner = FakeRunner()
+        rc = self._stop(runner)  # no DAY_STOP_REQUIRE_EOD: unchanged behaviour
+        self.assertEqual(rc, day_run.EXIT_OK)
+        self.assertIn("down", runner.targets())
+
+    def test_force_override_is_deliberate(self):
+        self.record.write_text("2026-09-27T15:45:00+05:30\n")
+        runner = FakeRunner()
+        rc = self._stop(runner, DAY_STOP_REQUIRE_EOD="1", DAY_STOP_FORCE="1",
+                        EOD_LAST_RUN_FILE=str(self.record))
+        self.assertEqual(rc, day_run.EXIT_OK)
+        self.assertIn("down", runner.targets())
+
+
 if __name__ == "__main__":
     unittest.main()

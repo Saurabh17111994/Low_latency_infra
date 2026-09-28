@@ -157,8 +157,10 @@ KV snapshots/segment sizing — not a longer wait). `start` waits up to
 as the stack is ready) and prints a `waiting ...` line every 5 s. The ingestion
 write grace uses the same default; if a recovery ever outruns the 150k pending
 cap at off-hours accept rates (~40 min), ingestion back-pressures (readiness
-false, no loss) instead of failing. Warm starts exit in seconds; the 24×7
-lifecycle avoids the cold path entirely.
+false, no loss) instead of failing. Warm starts exit in seconds; a box left
+running avoids the cold path entirely, while the production VM is a fresh disk
+every morning — there the cold path is the normal one, and the measured 87 s
+fresh start plus the `.env.vm` profile (CHG-361/CHG-362) covers it.
 
 A rerun of `start` is always safe: `make up` is idempotent, the SignalJob is
 kept when running, and a restore never creates a second job.

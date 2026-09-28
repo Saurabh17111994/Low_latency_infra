@@ -94,6 +94,25 @@ def heartbeat_age(path: Path, now: dt.datetime | None = None) -> float | None:
     return ((now or dt.datetime.now(dt.timezone.utc)) - stamp).total_seconds()
 
 
+def write_last_run(path: Path | None, zone_name: str,
+                   now: dt.datetime | None = None) -> None:
+    """Record the moment of a successful controller run.
+
+    The ephemeral-VM stop gate reads this file to prove the day was archived
+    before the disk dies. Disabled unless EOD_LAST_RUN_FILE / --last-run names
+    it; a failed write is a warning, never a run failure. The stamp carries the
+    trading zone, so "today" means the trading day, not the host's clock.
+    """
+    if path is None:
+        return
+    stamp = now or dt.datetime.now(zone(zone_name))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(stamp.isoformat() + "\n")
+    except OSError as exc:
+        print(f"eod-schedule: WARN cannot write last-run {path}: {exc}", file=sys.stderr)
+
+
 def run_controller(controller: Path, controller_args: list[str]) -> int:
     cmd = [sys.executable, str(controller)] + controller_args
     print(f"eod-schedule: run {controller_args[0] if controller_args else ''} -> {' '.join(cmd)}", flush=True)
@@ -106,7 +125,8 @@ def run_controller(controller: Path, controller_args: list[str]) -> int:
 
 
 def fire(controller: Path, controller_args: list[str], retries: int, delay: float,
-         heartbeat: Path) -> int:
+         heartbeat: Path, last_run: Path | None = None,
+         zone_name: str = DEFAULT_ZONE) -> int:
     """Run the controller, retrying a failed process with exponential backoff.
 
     Retrying the *process* is not a substitute for the controller's own backoff: a crash before it
@@ -123,6 +143,7 @@ def fire(controller: Path, controller_args: list[str], retries: int, delay: floa
         rc = run_controller(controller, controller_args)
     write_heartbeat(heartbeat)
     if rc == 0:
+        write_last_run(last_run, zone_name)
         print("eod-schedule: EOD RUN OK", flush=True)
     else:
         print(f"eod-schedule: EOD RUN FAILED rc={rc} after {attempt} retr(ies) — the day is not "
@@ -146,6 +167,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--days", type=int, default=3, help="how many fire times --dry-run prints")
     p.add_argument("--heartbeat", default=os.environ.get("EOD_HEARTBEAT", DEFAULT_HEARTBEAT),
                    help="heartbeat file (env EOD_HEARTBEAT)")
+    p.add_argument("--last-run", default=os.environ.get("EOD_LAST_RUN_FILE", ""),
+                   help="record the last successful controller run here "
+                        "(env EOD_LAST_RUN_FILE; empty disables)")
     p.add_argument("--check-heartbeat", action="store_true",
                    help="report whether the heartbeat is fresh, then exit (container health)")
     p.add_argument("--max-age", type=float, default=120.0,
@@ -177,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     at = parse_at(args.at)
     controller = Path(args.controller)
     controller_args = args.controller_args or ["run"]
+    last_run = Path(args.last_run) if args.last_run.strip() else None
 
     if args.dry_run:
         cursor = now
@@ -190,7 +215,8 @@ def main(argv: list[str] | None = None) -> int:
         if not controller.is_file():
             print(f"eod-schedule: controller {controller} not found", file=sys.stderr)
             return 2
-        return fire(controller, controller_args, args.max_retries, args.retry_delay, heartbeat)
+        return fire(controller, controller_args, args.max_retries, args.retry_delay,
+                    heartbeat, last_run, args.zone)
 
     if not controller.is_file():
         print(f"eod-schedule: controller {controller} not found", file=sys.stderr)
@@ -208,7 +234,8 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(min(remaining, args.sleep_chunk))
             write_heartbeat(heartbeat)
         # Recompute after the fire: a clock jump or a suspended container must not re-select it.
-        fire(controller, controller_args, args.max_retries, args.retry_delay, heartbeat)
+        fire(controller, controller_args, args.max_retries, args.retry_delay,
+             heartbeat, last_run, args.zone)
 
 
 if __name__ == "__main__":
