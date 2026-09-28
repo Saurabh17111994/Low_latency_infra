@@ -86,6 +86,10 @@ const (
 	exitRequested  = 0
 	exitSupervisor = 1
 	exitFatalStart = 2
+	// H2-3: a terminal runtime failure (deployment/policy violation, every slot
+	// terminal, auth exhausted) exits 3 after the normal drain. A requested stop
+	// (SIGINT/SIGTERM from the operator or the parent JVM) stays 0.
+	exitTerminalRuntime = 3
 )
 
 // HFT runtime tuning, set once from env in main() (see the policy block).
@@ -209,8 +213,27 @@ func main() {
 	_ = hftPin(logf, "ARROW_HFT_MIN_ACTIVE_SLOTS", 1)
 	logf("HFT policy: response_timeout=%s stall_timeout=%s heartbeat=%s", responseTimeout, stallTimeout, heartbeatInterval)
 
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// H2-3: a terminal runtime failure must not look like a requested shutdown. The
+	// signal is tracked separately from the context so main() can tell "operator/JVM asked
+	// us to stop" (exit 0) from "the runtime failed terminally" (exit 3 after the drain).
+	// The handler reproduces signal.NotifyContext's contract: the first signal cancels the
+	// context, a second force-exits (a stuck drain must not survive a repeated SIGTERM).
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	sigCh := make(chan os.Signal, 2)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	go func() {
+		if _, ok := <-sigCh; !ok {
+			return
+		}
+		signalShutdown.Store(true)
+		cancel()
+		if sig, ok := <-sigCh; ok {
+			signal.Stop(sigCh)
+			_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
+		}
+	}()
 
 	// Count-based losslessness evidence (ING-TCP-001): ARROW_TICK_COUNTS=<sec>
 	// enables per-token emitted-tick counters, reported on the interval and at
@@ -251,7 +274,7 @@ func main() {
 		logf("tick counters enabled (interval=%ds)", interval)
 	}
 
-	runHFT(ctx, cancel, client, plan, latencyMs, responseTimeout, refreshAuth, logf)
+	terminal := runHFT(ctx, cancel, client, plan, latencyMs, responseTimeout, refreshAuth, logf)
 	// Drain point: all EmitTick/EmitEvent calls are synchronous and ordered
 	// under the emitter mutex, so the bridge_shutdown event below is
 	// guaranteed to be the last frame. Duplicate shutdown paths are
@@ -271,7 +294,26 @@ func main() {
 	}
 	emitShutdownEvent()
 	_ = bridgeEmitter.Close()
+	// H2-3: the drain is complete. A requested stop (SIGTERM/SIGINT) exits 0;
+	// a terminal runtime failure exits 3 so the parent's restart policy and the
+	// operator see the truth about why the bridge ended.
+	if code := bridgeExitCode(terminal, signalShutdown.Load()); code != exitRequested {
+		logf("terminal runtime failure after drain: exiting %d", code)
+		os.Exit(code)
+	}
 }
+
+// bridgeExitCode maps the run outcome to the process exit code (H2-3): a terminal
+// runtime failure exits exitTerminalRuntime unless a signal already requested the stop.
+func bridgeExitCode(terminal, signalShutdown bool) int {
+	if terminal && !signalShutdown {
+		return exitTerminalRuntime
+	}
+	return exitRequested
+}
+
+// signalShutdown records that the process received SIGINT/SIGTERM (a requested stop).
+var signalShutdown atomic.Bool
 
 // maybeReportFinalTickCounts emits the ING-TCP-001 shutdown report exactly
 // once, and only when tick counters are enabled (P1-209: the unconditional
@@ -313,10 +355,10 @@ func emitShutdownEvent() {
 	})
 }
 
-func runHFT(ctx context.Context, cancel context.CancelFunc, client *arrow.Client, plan SubscriptionPlan, latencyMs int, responseTimeout time.Duration, refreshAuth func(context.Context) error, logf func(string, ...any)) {
+func runHFT(ctx context.Context, cancel context.CancelFunc, client *arrow.Client, plan SubscriptionPlan, latencyMs int, responseTimeout time.Duration, refreshAuth func(context.Context) error, logf func(string, ...any)) bool {
 	if len(plan.Slots) == 0 {
 		cancel()
-		return
+		return false
 	}
 	// Deployment policy (CHG-320): one socket is always allowed; extra sockets
 	// require the documented approval — ARROW_HFT_MULTI_CONNECTION_APPROVED=true
@@ -331,11 +373,15 @@ func runHFT(ctx context.Context, cancel context.CancelFunc, client *arrow.Client
 			// auth_failure does not fire for a non-credential condition.
 			_ = bridgeEmitter.EmitEvent(BridgeEvent{Event: "disconnect", SlotID: slot.SlotID, ConnectionID: slot.ConnectionID, ConnectionEpoch: 1, State: string(SlotTerminal), Reason: "single_socket_policy_violation", ReceivedTsMs: time.Now().UnixMilli()})
 			cancel()
-			return
+			// H2-3: a deployment/policy violation is terminal for the runtime — the
+			// process must not exit 0 as if an operator had asked it to stop.
+			return true
 		}
 		logf("multi-socket approved: slots=%d", len(plan.Slots))
 	}
-	runHFTSupervisor(ctx, client, plan, latencyMs, responseTimeout, refreshAuth, logf)
+	// H2-3: any terminal slot outcome makes the runtime terminal; the caller maps
+	// that to exitTerminalRuntime unless a signal requested the stop.
+	return runHFTSupervisor(ctx, client, plan, latencyMs, responseTimeout, refreshAuth, logf) > 0
 }
 
 func runReconnectLoop(ctx context.Context, run func(uint64) bool, onRetry func(uint64, time.Duration), wait func(context.Context, time.Duration)) {

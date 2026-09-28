@@ -700,7 +700,11 @@ public final class IngestionService {
 
                             @Override
                             public void onControl(com.trading.ingestion.transport.ControlRecord control) {
-                                handleFrameArrival();
+                                // H2-3: a control frame proves the socket is up, not that market
+                                // data flows — it must NOT refresh the data-frame staleness clock
+                                // (bridge_metrics arrives every 10 s and kept an ACTIVE-but-silent
+                                // feed looking fresh forever).
+                                handleControlArrival();
                                 handleControlRecord(control);
                             }
                         });
@@ -723,11 +727,10 @@ public final class IngestionService {
                 }
 
                 int exitCode = bridgeProcess.waitFor();
-                // A shutdown-begun exit is a requested exit: the hook is
-                // tearing the bridge down, so a non-zero code (e.g. the
-                // forced-kill fallback, exit 137) must not be logged as a
-                // crash nor trigger a restart.
-                boolean requested = exitCode == 0 || !running || shutdownStarted.get();
+                // H2-3: only an explicit teardown makes an exit "requested". The old rule also
+                // trusted exit 0, so a bridge that died silently (or exited 0 after a terminal
+                // runtime failure) read as a clean, operator-requested stop.
+                boolean requested = !running || shutdownStarted.get();
                 recordBridgeExit(exitCode, requested, restartCount);
                 stderrThread.join(5_000);
 
@@ -760,8 +763,18 @@ public final class IngestionService {
                     metrics.setBridgeConnected(false);
                     break;
                 case TERMINAL:
-                    LOG.error("ingestion: bridge exited unexpectedly {} time(s) — terminal (exitCode={})",
-                            restartCount + 1, exitCode);
+                    // H2-3: the restart budget is spent — record the fatal reason (BRIDGE_CRASH)
+                    // and let the loop's normal shutdown run; main() exits non-zero on
+                    // fatalStopReason. Never call requestFatalStop from here: it would run
+                    // shutdown() on the bridge-loop thread and join itself.
+                    String fatal = "BRIDGE_CRASH: bridge exited unexpectedly "
+                            + (restartCount + 1) + " time(s) (exitCode=" + exitCode + ")";
+                    LOG.error("ingestion: {}", fatal);
+                    if (fatalStopReason.compareAndSet(null, fatal)) {
+                        health.markNotAlive();
+                        metrics.setIngestionReady(false);
+                        updateReadinessFile();
+                    }
                     bridgeLoopDone = true;
                     break;
                 default: // NO_RESTART — normal shutdown
@@ -831,11 +844,13 @@ public final class IngestionService {
     /**
      * Bridge restart policy (plan §IngestionService): an unexpected exit is
      * restarted once; a second unexpected exit in the same process is terminal;
-     * a requested exit (code 0 or shutdown begun) is never restarted.
+     * a requested exit (an explicit teardown) is never restarted. H2-3: exit 0
+     * without an explicit teardown is still unexpected — the Go bridge now exits
+     * 3 on terminal runtime failures and 0 only for requested/completed runs.
      */
     static BridgeRestartDecision bridgeRestartDecision(boolean running, boolean shutdownInProgress,
                                                        int exitCode, int restartCount) {
-        if (!running || shutdownInProgress || exitCode == 0) return BridgeRestartDecision.NO_RESTART;
+        if (!running || shutdownInProgress) return BridgeRestartDecision.NO_RESTART;
         return restartCount >= MAX_BRIDGE_RESTARTS
                 ? BridgeRestartDecision.TERMINAL
                 : BridgeRestartDecision.RESTART;
@@ -1018,6 +1033,20 @@ public final class IngestionService {
             metrics.setBridgeConnected(true);
         }
         health.setLastFrameReceived(nowNanos);
+    }
+
+    /**
+     * H2-3: control-frame arrival. The transport is up; the market-data clock is deliberately
+     * untouched, so readiness falls after the data-frame stall window even while control records
+     * keep arriving (the control clock must never mask a silent feed).
+     */
+    private void handleControlArrival() {
+        if (!health.isBrokerConnected()) {
+            LOG.info("ingestion: bridge control frame received — transport up "
+                    + "(market-data freshness is judged by the data-frame clock)");
+            health.setBrokerConnected(true);
+            metrics.setBridgeConnected(true);
+        }
     }
 
     /**

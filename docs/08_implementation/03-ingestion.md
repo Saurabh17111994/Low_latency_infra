@@ -276,7 +276,7 @@ When Fluss latency, retry count, pending records, or pending bytes cross a confi
 
 | Failure | Required behavior |
 | --- | --- |
-| Go bridge crash | Java detects the crash (stdin EOF / non-zero exit code), logs `BRIDGE_CRASH`, records a `DROP` discontinuity, restarts the bridge once, then stops cleanly (exit 0); not-ready is signalled by clearing the readiness marker |
+| Go bridge crash | Java detects the crash (stdin EOF / non-zero exit code), logs `BRIDGE_CRASH`, records a `DROP` discontinuity, restarts the bridge once, then goes fatal with a `BRIDGE_CRASH` `fatalStopReason` and a non-zero process exit; not-ready is signalled by clearing the readiness marker. H2-3: only an explicit teardown (`shutdownStarted`) makes an exit "requested" — exit 0 without one is still a silent bridge death, and the Go bridge itself exits `exitTerminalRuntime=3` on terminal runtime failures (deployment/policy violation, all slots terminal, auth exhausted) after the normal drain, while SIGINT/SIGTERM stays 0 |
 | Go bridge auth failure | Exit immediately with error to stderr; Java exits on pipe close |
 | Missing instrument | Quarantine; do not append keyed raw row |
 | Invalid trade values | Append evidence marked invalid; Compute excludes |
@@ -310,6 +310,7 @@ Logs include service, instance, connection scope, decoder/protocol version, mani
 - `ING-FAIL-001` reconnect/resubscribe/epoch.
 - `ING-FAIL-002` bounded append backpressure (80% warning, 100% critical halt, no unrecorded drop).
 - H2-2: one drop path for every acknowledged loss — a writer-side REJECTED/SKIPPED/throw or a full bounded queue counts into `append.acknowledged.loss` plus an `APPEND_DROPPED` decode reason; the first drop episode pins one durable uncertainty-journal record and requests the fail-fast stop from a daemon thread (never inline on the writer worker, which `shutdown()` joins); a `SKIPPED` drop during shutdown is counted, not treated as a fault.
+- H2-3: control frames prove the socket, data frames prove the feed — a control record (`bridge_metrics`, lifecycle events) never refreshes the market-data staleness clock, so an ACTIVE slot with no ticks goes stale and readiness falls within the 15 s data-frame window even while control frames keep arriving.
 - `ING-FAIL-003` forced shutdown and uncertainty accounting.
 - `ING-TCP-001` count-based broker TCP losslessness: 15-min market-hours run on the single production connection; per-token bridge emitted-tick counts (`ARROW_TICK_COUNTS`, stderr reports + final report persisted to `ARROW_TICK_COUNTS_FILE`) reconciled against per-token Fluss rows (`TokenCountReconcile` probe: raw_table_1 LogScanner + ingestion_quarantine BatchScanner; `reconcile-compare.py --exact --sink total`) — exact equality per token proves no loss. **Market-hours proof PASS 2026-08-14** (epoch 08:24:06–08:39:06Z: bridge 646,102 = sink 646,102; 1024/1024 tokens exact; evidence `logs/tracker-14/losslessness-markethours-20260814.md`). Instrumentation validated live 2026-08-13 post-close (3 HFT-1024 epochs: 3,072 emitted = 3,072 stored; evidence `logs/tracker-14/losslessness-validation-20260813.md`).
 - `ING-PERF-001` variable 50,000 ticks/s average-baseline full session; append accept→ack p99 <5 ms (code budget `P99_BUDGET_NS`, `PerfBaselineTest#appendHotPathP99`).

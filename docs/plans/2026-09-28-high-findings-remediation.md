@@ -33,12 +33,12 @@ Where a body section and this list disagree, this list wins.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
-| H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check | 4 | 2 | 0 | 2 | 0 | 0 | 0 |
+| H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check | 4 | 3 | 0 | 1 | 0 | 0 | 0 |
 | H3 — production deck parity with the dev deck | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H4 — evidence and release gates must not lie | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H6 — machine facts and their drift guard | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
-| **Total** | **22** | **7** | **0** | **15** | **0** | **0** | **0** |
+| **Total** | **22** | **8** | **0** | **14** | **0** | **0** | **0** |
 
 #### H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth
 
@@ -80,11 +80,11 @@ Where a body section and this list disagree, this list wins.
   tracker halt, then requests a fatal stop **from a daemon thread** (inline = self-deadlock);
   `SKIPPED` during shutdown is counted, not a stop; queue-full branch routes into the same handler.
   (P1-11.) — CHG-379
-- [ ] **H2-3** — Go terminal failures stop pretending to be a clean shutdown: exit
+- [x] **H2-3** — Go terminal failures stop pretending to be a clean shutdown: exit
   `exitTerminalRuntime=3` after the normal drain (SIGTERM stays 0); Java trusts only
   `shutdownStarted` as "requested", restarts once then goes fatal with `fatalStopReason` +
   `BRIDGE_CRASH`; freshness clock splits control vs data frames — ACTIVE with no market data goes
-  stale in 15 s. (P1-12.)
+  stale in 15 s. (P1-12.) — CHG-380
 - [ ] **H2-4** — Per-slot token-hash comparison: replicate the Go carve Java-side (sorted tokens,
   1024/slot) and compare `TokenSetHash.of(slice)` against `assigned_token_set_hash`;
   verdicts `MATCH` / `MISMATCH` (real drift, existing metric) / `UNKNOWN_SLOT` / `EMPTY_SLICE`

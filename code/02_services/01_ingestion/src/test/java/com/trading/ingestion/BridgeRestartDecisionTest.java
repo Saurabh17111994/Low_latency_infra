@@ -10,7 +10,9 @@ import org.junit.jupiter.api.Test;
  * ING-UNIT-012: bridge restart policy (plan §IngestionService).
  *
  * <p>An unexpected exit is restarted once; a second unexpected exit in the same
- * process is terminal; a requested exit (code 0) or shutdown is never restarted.
+ * process is terminal; an explicit teardown is never restarted. H2-3: exit 0
+ * without an explicit teardown is unexpected too — the Go bridge exits 3 on
+ * terminal runtime failures and 0 only for requested/completed runs.
  */
 @DisplayName("ING-UNIT-012: bridge restart policy")
 class BridgeRestartDecisionTest {
@@ -32,11 +34,25 @@ class BridgeRestartDecisionTest {
     }
 
     @Test
-    @DisplayName("clean exit code 0 is never restarted")
-    void cleanExitNeverRestarts() {
-        assertEquals(BridgeRestartDecision.NO_RESTART,
+    @DisplayName("H2-3: an unrequested exit 0 is unexpected, not a clean shutdown")
+    void unrequestedZeroExitIsUnexpected() {
+        assertEquals(BridgeRestartDecision.RESTART,
                 IngestionService.bridgeRestartDecision(true, false, 0, 0),
-                "requested/clean exit must not restart");
+                "exit 0 without an explicit teardown is a silent bridge death");
+        assertEquals(BridgeRestartDecision.TERMINAL,
+                IngestionService.bridgeRestartDecision(true, false, 0, 1),
+                "the second unrequested exit 0 is terminal");
+    }
+
+    @Test
+    @DisplayName("the bridge's terminal exit code 3 restarts once, then goes terminal")
+    void terminalRuntimeExitCodeIsUnexpected() {
+        assertEquals(BridgeRestartDecision.RESTART,
+                IngestionService.bridgeRestartDecision(true, false, 3, 0),
+                "the Go terminal-runtime exit must trigger the one restart");
+        assertEquals(BridgeRestartDecision.TERMINAL,
+                IngestionService.bridgeRestartDecision(true, false, 3, 1),
+                "a second terminal exit is fatal");
     }
 
     @Test

@@ -121,8 +121,8 @@ class BridgeCrashLoopE2ETest {
         // ---- plan pass result: restarts exactly once, then exits ----
         assertTrue(logs.contains("restarting bridge after unexpected exit (attempt 1 of 2)"),
                 "first crash must restart (attempt 1 of 2)");
-        assertTrue(logs.contains("bridge exited unexpectedly 2 time(s) — terminal"),
-                "second crash must be terminal");
+        assertTrue(logs.contains("BRIDGE_CRASH: bridge exited unexpectedly 2 time(s)"),
+                "second crash must be terminal and recorded as BRIDGE_CRASH with the fatal reason");
         assertTrue(logs.contains("bridge loop ended (ticks=0, errors=0, restarts=1)"),
                 "the loop report must show exactly one restart");
         assertTrue(logs.contains("ingestion: drained"), "shutdown must complete the drain report");
