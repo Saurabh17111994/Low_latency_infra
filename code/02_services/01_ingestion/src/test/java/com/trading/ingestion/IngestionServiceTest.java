@@ -3,6 +3,7 @@ package com.trading.ingestion;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.protobuf.ByteString;
@@ -402,6 +403,58 @@ class IngestionServiceTest {
                 "stale tick must be quarantined");
         assertTrue(quarantine.reasons.contains(QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP),
                 "future tick must be quarantined");
+    }
+
+    // ---- H2-2: one drop path for every acknowledged loss ----
+
+    @Test
+    @DisplayName("H2-2: a writer drop is counted, journaled once, and stopped off-thread")
+    void writerDropIsCountedJournaledAndStoppedOffThread() throws Exception {
+        java.nio.file.Path journal = java.nio.file.Files.createTempFile("ing-h2-2", ".jsonl");
+        java.nio.file.Files.deleteIfExists(journal); // the service creates it on first write
+        IngestionConfig config = buildConfigWith(java.util.Map.of(
+                "UNCERTAINTY_JOURNAL_PATH", journal.toString()));
+        IngestionService service = new IngestionService(
+                "ing-h2-2", instruments(), new RecordingConverter(), config,
+                new NtpClockChecker("127.0.0.1:9", 100, false),
+                noopQuarantine(), noopDiscontinuity(), noopSafety());
+
+        long startedAt = System.nanoTime();
+        service.onWriterDrop("REJECTED", "tracker halted at 100%");
+        long elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L;
+        assertTrue(elapsedMs < 1_000L,
+                "the fatal stop must not run inline on the caller thread (shutdown joins the "
+                        + "writer worker); onWriterDrop took " + elapsedMs + "ms");
+        service.onWriterDrop("REJECTED", "a second drop must not double the episode");
+
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
+        while (service.fatalStopReason() == null && System.nanoTime() < deadline) {
+            Thread.sleep(5);
+        }
+        assertEquals("acknowledged writer drop (REJECTED): tracker halted at 100%",
+                service.fatalStopReason(),
+                "the fatal stop must run off the caller thread and name the first drop");
+        long dropEntries = java.nio.file.Files.exists(journal)
+                ? java.nio.file.Files.readAllLines(journal).stream()
+                        .filter(line -> line.contains("\"reason\":\"drop:REJECTED"))
+                        .count()
+                : 0;
+        assertEquals(1, dropEntries, "one durable uncertainty record per drop episode");
+    }
+
+    @Test
+    @DisplayName("H2-2: a SKIPPED drop during shutdown is counted, never a stop")
+    void shutdownSkippedDropIsCountedNotFatal() throws Exception {
+        IngestionConfig config = buildConfig();
+        IngestionService service = new IngestionService(
+                "ing-h2-2b", instruments(), new RecordingConverter(), config,
+                new NtpClockChecker("127.0.0.1:9", 100, false),
+                noopQuarantine(), noopDiscontinuity(), noopSafety());
+
+        service.onWriterDrop("SKIPPED", "writer closed by the shutdown drain");
+
+        Thread.sleep(150);
+        assertNull(service.fatalStopReason(), "a shutdown SKIPPED is a shed, not a fault");
     }
 
     private static IngestionConfig buildConfig() throws Exception {

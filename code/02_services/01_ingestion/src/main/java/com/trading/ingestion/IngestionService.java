@@ -123,6 +123,8 @@ public final class IngestionService {
     private final AtomicLong frameCount = new AtomicLong(0);
     private final AtomicLong errorCount = new AtomicLong(0);
     private final AtomicBoolean shutdownStarted = new AtomicBoolean(false);
+    /** H2-2: one durable uncertainty record (and one fatal stop) per drop episode. */
+    private final AtomicBoolean dropJournaled = new AtomicBoolean(false);
     private volatile boolean running;
     /** Set on graceful shutdown (shutdown() or the shutdown hook) so an expected
      *  bridge exit during shutdown is not recorded as a BRIDGE_EXIT halt. */
@@ -301,7 +303,8 @@ public final class IngestionService {
             this.queues[i] = new BoundedQueue(
                     config.maxPendingBytes / writerCount,
                     (int) Math.min(config.maxPendingRecords / writerCount, Integer.MAX_VALUE));
-            this.writerWorkers[i] = new WriterWorker(queues[i], writer, config.drainDeadline);
+            this.writerWorkers[i] = new WriterWorker(queues[i], writer, config.drainDeadline,
+                    this::onWriterDrop);
             this.writerWorkers[i].start();
         }
 
@@ -1319,8 +1322,10 @@ public final class IngestionService {
             int rowBytes = packetBytes.length + 64; // conservative row estimate
             int qi = (int) ((long) ev.getToken() % writerCount);
             if (!queues[qi].offer(packet, rowBytes)) {
-                LOG.warn("ingestion: tick rejected (queue full) token={}", (long) ev.getToken());
-                metrics.incrementAcknowledgedLoss();
+                // H2-2: the queue-full drop routes into the same shared handler as the
+                // writer-side REJECTED/THREW drops — one accounting, one journal record,
+                // one fail-fast stop, never a metric-only silent loss.
+                onWriterDrop("QUEUE_FULL", "queue " + qi + " full (token=" + ev.getToken() + ")");
             } else {
                 lastAcceptedEpochMs = System.currentTimeMillis();
                 if (firstAcceptedEpochMs == 0L) {
@@ -1492,6 +1497,54 @@ public final class IngestionService {
         // fatalStopReason after runWithBridge returns and exits 1 itself. A
         // System.exit(1) on THIS thread would race main's natural exit(0) —
         // the exact bug where the container came down 0 instead of 1.
+    }
+
+    /** Test/diagnostic seam (H2-2): the first fatal reason, or null. */
+    String fatalStopReason() {
+        return fatalStopReason.get();
+    }
+
+    /**
+     * H2-2: one drop path for every acknowledged loss — a writer-side non-ACCEPTED outcome or
+     * throw, or a full bounded queue on the reader. The loss is counted, its first episode pins
+     * ONE durable uncertainty-journal record, and the fail-fast stop is requested from a daemon
+     * thread: the caller is often the writer worker itself, and {@link #shutdown()} joins that
+     * worker, so an inline stop would self-deadlock. A drop during shutdown (SKIPPED) is counted
+     * and shed — a draining queue running out of budget is expected, not a new fault.
+     */
+    void onWriterDrop(String status, String detail) {
+        metrics.incrementAcknowledgedLoss();
+        metrics.incrementDecodeError("APPEND_DROPPED");
+        LOG.error("ingestion: ACKNOWLEDGED LOSS status={} detail={} (counted, never silent)",
+                status, detail);
+        if (shutdownStarted.get() || "SKIPPED".equals(status)) {
+            return; // counted; a shedding drain is not a new fault
+        }
+        // The first drop episode owns the durable record and the stop. A halted tracker
+        // rejects every tick, so per-drop work here would be an O(ticks) storm.
+        if (!dropJournaled.compareAndSet(false, true)) {
+            return;
+        }
+        // Pin the counters now: the drain may time out on an un-acking Fluss, and this
+        // record is what survives the restart.
+        if (!journal.write(new UncertaintyJournal.Entry(
+                instanceId,
+                Instant.now(),
+                tracker.totalAccepted(),
+                tracker.totalAppended(),
+                tracker.totalFailed(),
+                tracker.totalRejected(),
+                tracker.totalBytesAccepted(),
+                tracker.pendingRecords(),
+                tracker.pendingBytes(),
+                "drop:" + status + ":" + detail))) {
+            LOG.error("ingestion: drop uncertainty record NOT persisted (journal write failed)");
+        }
+        Thread stopper = new Thread(
+                () -> requestFatalStop("acknowledged writer drop (" + status + "): " + detail),
+                "ingestion-drop-stop");
+        stopper.setDaemon(true);
+        stopper.start();
     }
 
     /**

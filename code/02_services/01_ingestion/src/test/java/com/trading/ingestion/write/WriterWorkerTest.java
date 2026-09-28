@@ -190,6 +190,25 @@ class WriterWorkerTest {
     }
 
     @Test
+    @DisplayName("H2-2: every sync drop is reported to the shared drop sink")
+    void syncDropsAreReportedToTheSink() throws Exception {
+        CountingConverter conv = new CountingConverter();
+        AppendTracker tracker = new AppendTracker();
+        BoundedQueue queue = new BoundedQueue(1_000_000, 100_000);
+        RawTickWriter writer = makeWriter(conv, tracker);
+        java.util.List<String> drops = new java.util.concurrent.CopyOnWriteArrayList<>();
+        WriterWorker worker = new WriterWorker(queue, writer, Duration.ofSeconds(5),
+                (status, detail) -> drops.add(status + "|" + detail));
+        writer.close(); // every subsequent write() returns SKIPPED
+        assertTrue(queue.offer(TickPacketFixtures.validTrade(1), 100));
+        worker.start();
+        worker.close();
+        assertEquals(1, worker.syncDropCount());
+        assertEquals(1, drops.size(), "the shared sink must see the acknowledged loss");
+        assertTrue(drops.get(0).startsWith("SKIPPED|"), drops.get(0));
+    }
+
+    @Test
     @DisplayName("P1-129: write() throw is counted and drain continues (no poison loop)")
     void writeThrowIsCountedAndDrainContinues() throws Exception {
         // Converter whose size estimate throws once, then behaves.

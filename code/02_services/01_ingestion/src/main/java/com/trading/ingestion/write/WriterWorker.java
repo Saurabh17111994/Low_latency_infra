@@ -44,6 +44,18 @@ public final class WriterWorker implements AutoCloseable {
     // write() throw after dequeue). Counted as acknowledged loss — never
     // silent. No requeue: a throwing packet would poison-loop the drain.
     private final AtomicLong syncDropCount = new AtomicLong();
+    // H2-2: every acknowledged loss is also reported to one shared sink, so the
+    // service can count it durably, journal the episode once, and stop — the
+    // per-worker counter alone was invisible to metrics/health.
+    private final DropSink dropSink;
+
+    /** H2-2: receives every acknowledged loss (non-ACCEPTED sync outcome or write throw). */
+    @FunctionalInterface
+    public interface DropSink {
+        void onDrop(String status, String detail);
+    }
+
+    private static final DropSink NOOP_DROP_SINK = (status, detail) -> { };
     // B128: queued-but-never-dequeued packets left behind by an interrupt
     // drain (new arrivals past the snapshot). B130: queue depth at
     // close-timeout. Both counted, never silent.
@@ -51,9 +63,16 @@ public final class WriterWorker implements AutoCloseable {
     private final AtomicLong drainTimeoutAbandoned = new AtomicLong();
 
     public WriterWorker(BoundedQueue queue, RawTickWriter writer, Duration drainDeadline) {
+        this(queue, writer, drainDeadline, NOOP_DROP_SINK);
+    }
+
+    /** H2-2: same worker, every acknowledged loss reported to {@code dropSink}. */
+    public WriterWorker(BoundedQueue queue, RawTickWriter writer, Duration drainDeadline,
+                        DropSink dropSink) {
         this.queue = queue;
         this.writer = writer;
         this.closeBudget = drainDeadline;
+        this.dropSink = dropSink == null ? NOOP_DROP_SINK : dropSink;
         this.thread = new Thread(this::run, "writer-worker");
         this.thread.setDaemon(true);
     }
@@ -91,6 +110,7 @@ public final class WriterWorker implements AutoCloseable {
                 syncDropCount.incrementAndGet();
                 LOG.warning("writer-worker: sync drop status=" + outcome.status()
                         + " detail=" + outcome.detail());
+                dropSink.onDrop(outcome.status().name(), outcome.detail());
             }
         } catch (Exception e) {
             // P1-129: narrowed from Throwable — Error propagates, never
@@ -99,6 +119,7 @@ public final class WriterWorker implements AutoCloseable {
             // throwing packet would poison-loop).
             syncDropCount.incrementAndGet();
             LOG.severe("writer-worker: write threw, packet counted as loss: " + e);
+            dropSink.onDrop("THREW", String.valueOf(e));
         }
     }
 
