@@ -12,8 +12,9 @@ import org.junit.jupiter.api.Test;
  * SCH-20 pin for {@link FillEventMapper}: a Fills LOG row (08_fills.sql v2,
  * 23 columns by {@link FillsColumns} index) maps to the projector's
  * {@link FillEvent} with the caller-resolved context; non-fill rows are
- * filtered out; {@code sourceVersion} pins to {@code receive_time} and
- * {@code eventTimeMs} falls back to it when broker event time is absent.
+ * filtered out; {@code sourceVersion} pins to {@link FillEventMapper#fillVersion}
+ * (receive time + identity mix, H1-5) and {@code eventTimeMs} falls back to it
+ * when broker event time is absent.
  */
 class FillEventMapperTest {
 
@@ -56,11 +57,75 @@ class FillEventMapperTest {
         assertThat(e.accountScopeId()).isEqualTo("acc-1");
         assertThat(e.fillQty()).isEqualTo(100L);
         assertThat(e.fillPricePaise()).isEqualTo(10050L);
-        // sourceEventId = postback_event_id; sourceVersion = receive_time
+        // sourceEventId = postback_event_id; sourceVersion = receive_time + identity mix (H1-5)
         assertThat(e.sourceEventId()).isEqualTo("pb-42");
-        assertThat(e.sourceVersion()).isEqualTo(1_700_000_000_150L);
+        assertThat(e.sourceVersion())
+                .isEqualTo(FillEventMapper.fillVersion(1_700_000_000_150L, "pb-42"));
         // eventTimeMs prefers broker event time
         assertThat(e.eventTimeMs()).isEqualTo(1_700_000_000_100L);
+    }
+
+    // ── H1-5: same-millisecond distinct fills no longer collide ─────────────────────────────────
+
+    @Test
+    void h1_5_sameMillisecondDistinctFillsGetDistinctVersions() {
+        long receive = 1_700_000_000_150L;
+        FillEvent a = FillEventMapper.mapIfFill(
+                fillsRow("pb-a", "acc-1", "tc-9", 100L, 10050L, null, receive), POSITION_ID, ctx())
+                .orElseThrow();
+        FillEvent b = FillEventMapper.mapIfFill(
+                fillsRow("pb-b", "acc-1", "tc-9", 100L, 10050L, null, receive), POSITION_ID, ctx())
+                .orElseThrow();
+
+        assertThat(a.sourceVersion())
+                .as("two distinct same-ms fills must not carry the equal version that reads CONFLICT")
+                .isNotEqualTo(b.sourceVersion());
+        assertThat(Math.floorDiv(a.sourceVersion(), FillEventMapper.VERSION_SLOTS_PER_MILLIS))
+                .isEqualTo(receive);
+        assertThat(Math.floorDiv(b.sourceVersion(), FillEventMapper.VERSION_SLOTS_PER_MILLIS))
+                .isEqualTo(receive);
+        // The version stays inside the fill's own millisecond: ordering across ms is unchanged.
+        assertThat(a.sourceVersion())
+                .isBetween(receive * FillEventMapper.VERSION_SLOTS_PER_MILLIS,
+                        receive * FillEventMapper.VERSION_SLOTS_PER_MILLIS
+                                + FillEventMapper.VERSION_SLOTS_PER_MILLIS - 1);
+    }
+
+    @Test
+    void h1_5_replayYieldsTheIdenticalVersion() {
+        long receive = 1_700_000_000_150L;
+        FillEvent first = FillEventMapper.mapIfFill(
+                fillsRow("pb-r", "acc-1", "tc-9", 100L, 10050L, null, receive), POSITION_ID, ctx())
+                .orElseThrow();
+        FillEvent replay = FillEventMapper.mapIfFill(
+                fillsRow("pb-r", "acc-1", "tc-9", 100L, 10050L, null, receive), POSITION_ID, ctx())
+                .orElseThrow();
+        assertThat(replay.sourceVersion()).isEqualTo(first.sourceVersion());
+    }
+
+    @Test
+    void h1_5_formulaAndBoundsArePinned() {
+        long receive = 1_700_000_000_150L;
+        long expectedMix = Math.floorMod(FillEventMapper.fnv1a64("pb-42"),
+                FillEventMapper.VERSION_SLOTS_PER_MILLIS);
+        assertThat(FillEventMapper.fillVersion(receive, "pb-42"))
+                .isEqualTo(receive * FillEventMapper.VERSION_SLOTS_PER_MILLIS + expectedMix);
+
+        // Bounds: the scaled version is a signed long, so the receive time is range-checked
+        // rather than allowed to wrap into a negative version (which the projector reads as
+        // UNKNOWN -> VIOLATION).
+        assertThat(FillEventMapper.fillVersion(0L, "pb-1")).isBetween(0L, 999_999L);
+        assertThat(FillEventMapper.fillVersion(FillEventMapper.MAX_VERSION_RECEIVE_TIME_MS, "pb-1"))
+                .isPositive();
+        assertThatThrownBy(() -> FillEventMapper.fillVersion(-1L, "pb-1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("non-negative");
+        assertThatThrownBy(() -> FillEventMapper.fillVersion(
+                FillEventMapper.MAX_VERSION_RECEIVE_TIME_MS + 1, "pb-1"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("version range");
+        assertThatThrownBy(() -> FillEventMapper.fillVersion(receive, " "))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

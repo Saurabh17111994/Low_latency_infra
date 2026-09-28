@@ -474,6 +474,13 @@ Every received postback receives a platform `postback_event_id` and versioned
 immutable audit). Same `postback_event_id` with different content is a contract violation:
 quarantine, audit, alert. No `postback_seq` or broker-global event identity is assumed.
 
+For position projection, a fill's `sourceVersion` is not the bare receive timestamp (H1-5): it is
+the receive millisecond scaled by 1,000,000 plus a 6-digit mix of `postback_event_id`
+(`FillEventMapper.fillVersion`), so two distinct fills received in the same millisecond carry
+distinct versions instead of colliding into CONFLICT + scope halt. A replayed row yields the
+identical version (DUPLICATE), an equal version with different content remains the loud CONFLICT,
+and ordering across milliseconds is unchanged because the mix is bounded.
+
 Correlation resolves in this order:
 1. Verified `broker_order_id` mapping in `Order_Correlation`.
 2. Verified echoed `client_order_ref` mapped to one attempt/instruction.

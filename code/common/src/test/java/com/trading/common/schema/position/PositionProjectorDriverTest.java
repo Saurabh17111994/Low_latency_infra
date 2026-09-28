@@ -32,18 +32,20 @@ class PositionProjectorDriverTest {
         return new FillContext(side, INSTRUMENT, EXCHANGE, SYMBOL);
     }
 
-    private static GenericRow row(String postbackEventId, long qty, long price, long version) {
+    private static GenericRow row(String postbackEventId, long qty, long price, long receiveTime) {
         return GenericRow.of(
                 bs(postbackEventId), bs("fp-1"), bs("1"), bs(ACCOUNT), bs("bro-1"),
                 bs("ins-1"), bs("att-1"), bs("tc-1"), bs("FILLED"), 1L, 0L, qty, price,
-                bs("f-1"), version, version, version, new byte[] {1}, bs("h-1"),
+                bs("f-1"), receiveTime, receiveTime, receiveTime, new byte[] {1}, bs("h-1"),
                 bs("CORRELATED"), bs(""), bs("1"), bs("2"));
     }
 
+    /** Direct path: the version is built with the same H1-5 formula the row path uses. */
     private static FillEvent fill(String positionId, String side, long qty, long price,
-            long version, String eventId) {
+            long receiveTime, String eventId) {
         return new FillEvent(positionId, "tc-1", ACCOUNT, INSTRUMENT, EXCHANGE, SYMBOL,
-                side, qty, price, eventId, version, NOW);
+                side, qty, price, eventId,
+                FillEventMapper.fillVersion(receiveTime, eventId), NOW);
     }
 
     private static PositionProjectorDriver.PositionKey key(String side) {
@@ -65,7 +67,8 @@ class PositionProjectorDriverTest {
 
         assertThat(first.outcome()).isEqualTo(PositionProjectorDriver.FeedOutcome.APPLIED);
         assertThat(stale.outcome()).isEqualTo(PositionProjectorDriver.FeedOutcome.STALE);
-        assertThat(stale.reason()).contains("f-1").contains("current version 2");
+        assertThat(stale.reason()).contains("f-1")
+                .contains("current version " + FillEventMapper.fillVersion(2L, "f-1"));
     }
 
     @Test
@@ -79,7 +82,7 @@ class PositionProjectorDriverTest {
         assertThat(s.state()).isEqualTo(PositionState.OPEN);
         assertThat(s.openQuantity()).isEqualTo(100L);
         assertThat(s.averageEntryPaise()).isEqualTo(10050L);
-        assertThat(s.sourceVersion()).isEqualTo(1L);
+        assertThat(s.sourceVersion()).isEqualTo(FillEventMapper.fillVersion(1L, "pb-1"));
         assertThat(s.schemaVersion()).isEqualTo("2");
     }
 
@@ -150,7 +153,8 @@ class PositionProjectorDriverTest {
         assertThat(r.outcome()).isEqualTo(PositionProjectorDriver.FeedOutcome.STALE);
         // no mutation
         assertThat(driver.snapshot(id).openQuantity()).isEqualTo(100L);
-        assertThat(driver.snapshot(id).sourceVersion()).isEqualTo(5L);
+        assertThat(driver.snapshot(id).sourceVersion())
+                .isEqualTo(FillEventMapper.fillVersion(5L, "pb-1"));
     }
 
     @Test
@@ -218,9 +222,42 @@ class PositionProjectorDriverTest {
         assertThat(r.positionId()).isEqualTo("pos-acc-1-123-BUY-1");
         PositionSnapshot s = driver.snapshot(r.positionId());
         assertThat(s.sourceEventId()).isEqualTo("pb-1");
-        assertThat(s.sourceVersion()).isEqualTo(7L);
+        assertThat(s.sourceVersion()).isEqualTo(FillEventMapper.fillVersion(7L, "pb-1"));
         assertThat(s.createdTs()).isEqualTo(NOW);
         assertThat(s.lastUpdateTs()).isEqualTo(NOW);
+    }
+
+    // --- H1-5: same-millisecond distinct fills no longer collide into a halt ---
+
+    @Test
+    void h1_5_sameMillisecondFillsBothApplyAndTheReplayIsDuplicate() {
+        long receive = NOW;
+        // The fixture ids sort in arrival order under the identity mix, asserted here so a hash
+        // change that reorders them fails loudly instead of surfacing as a confusing STALE.
+        assertThat(FillEventMapper.fillVersion(receive, "pb-a"))
+                .isLessThan(FillEventMapper.fillVersion(receive, "pb-b"));
+
+        // P1-13's exact shape: two distinct fills in ONE receive millisecond. Before H1-5 both
+        // carried sourceVersion = receive_time, so the second read equal-version/different-content
+        // -> CONFLICT -> quarantine + permanent scope halt. Now each carries its identity mix.
+        PositionProjectorDriver.FeedResult first = driver.feed(
+                row("pb-a", 100L, 10050L, receive), ctx(FillEvent.SIDE_BUY), NOW);
+        PositionProjectorDriver.FeedResult second = driver.feed(
+                row("pb-b", 50L, 10150L, receive), ctx(FillEvent.SIDE_BUY), NOW);
+        assertThat(first.outcome()).isEqualTo(PositionProjectorDriver.FeedOutcome.APPLIED);
+        assertThat(second.outcome()).isEqualTo(PositionProjectorDriver.FeedOutcome.APPLIED);
+        assertThat(driver.snapshot(first.positionId()).openQuantity()).isEqualTo(150L);
+        assertThat(driver.snapshot(first.positionId()).sourceVersion())
+                .isEqualTo(FillEventMapper.fillVersion(receive, "pb-b"));
+
+        // Replaying the latest fill is the identical version the projector reads as DUPLICATE:
+        // no further booking, no halt. (A lower-mix same-ms peer is a soft STALE, never the
+        // CONFLICT/halt this finding is about; a truncated-mix collision stays a loud CONFLICT —
+        // PositionProjectorTest.sameVersionDifferentContentIsConflictViolation.)
+        PositionProjectorDriver.FeedResult replay = driver.feed(
+                row("pb-b", 50L, 10150L, receive), ctx(FillEvent.SIDE_BUY), NOW);
+        assertThat(replay.outcome()).isEqualTo(PositionProjectorDriver.FeedOutcome.DUPLICATE);
+        assertThat(driver.snapshot(first.positionId()).openQuantity()).isEqualTo(150L);
     }
 
     // --- P3-166: re-entry must not be minted from the prior state alone ---

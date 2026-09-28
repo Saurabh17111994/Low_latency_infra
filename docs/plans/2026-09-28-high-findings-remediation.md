@@ -32,13 +32,13 @@ Where a body section and this list disagree, this list wins.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 3 | 0 | 2 | 0 | 0 | 0 |
+| H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 4 | 0 | 1 | 0 | 0 | 0 |
 | H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | H3 — production deck parity with the dev deck | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H4 — evidence and release gates must not lie | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H6 — machine facts and their drift guard | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
-| **Total** | **22** | **3** | **0** | **19** | **0** | **0** | **0** |
+| **Total** | **22** | **4** | **0** | **18** | **0** | **0** | **0** |
 
 #### H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth
 
@@ -65,10 +65,10 @@ Where a body section and this list disagree, this list wins.
   halt + metrics (`order_unknown`, `unresolved_attempt`), emit **no** order event — the order stays
   pre-send (`Initialized`), no capacity release; reconciliation (contract §Reconciliation) resolves
   it, and only the operator may emit a rejection with evidence. (P0-5.) — CHG-369
-- [ ] **H1-5** — Fill identity version: `sourceVersion = receiveTime*1_000_000 +
+- [x] **H1-5** — Fill identity version: `sourceVersion = receiveTime*1_000_000 +
   floorMod(fnv1a64(postbackEventId), 1_000_000)` in `FillEventMapper`, bounds-checked; same-ms
   distinct fills get distinct versions, replay yields the identical version, a hash collision
-  degrades to today's loud `CONFLICT` (never a silent drop). (P1-13.)
+  degrades to today's loud `CONFLICT` (never a silent drop). (P1-13.) — CHG-373
 
 #### H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check
 
