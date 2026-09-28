@@ -419,5 +419,73 @@ class CommandFlowTests(unittest.TestCase):
         self.assertIn("[day] verdict", board_file.read_text())
 
 
+class CheckpointSamplingTests(unittest.TestCase):
+    """P4-4 finding (2026-09-28): I5 must report the checkpoint age observed at
+    sample time. In-session collection spends 20s+ in Fluss probes *after*
+    reading the checkpoint; recomputing the age at evaluate time turned a
+    healthy ~9s checkpoint age into a false ~60-70s RED."""
+
+    def test_age_sampled_with_the_checkpoint_read(self):
+        clock = [1_000_000.0]
+
+        class _Runner:
+            def http_json(self, url, timeout=10):
+                now_ms = int(clock[0] * 1000)
+                return {"counts": {"completed": 1},
+                        "latest": {"completed": {
+                            "latest_ack_timestamp": now_ms - 5000,
+                            "trigger_timestamp": now_ms - 6000}}}
+
+        class _Probe(day_run.Collector):
+            def __init__(self):
+                super().__init__(runner=_Runner(), window_s=20)
+
+            def services(self):
+                return {"fluss-coordinator": {"state": "running"}}
+
+            def expected_services(self):
+                return []
+
+            def jobs(self):
+                return [{"id": "j1", "name": day_run.SIGNAL_JOB_NAME,
+                         "state": "RUNNING"}]
+
+            def state_paths(self):
+                return {}
+
+            def container_env(self, services):
+                return {}
+
+            def nautilus_halted(self):
+                return False
+
+            def log_errors(self, since):
+                return []
+
+            def effective_tokens(self, ingestion_running):
+                return 2433
+
+            def fluss_log_end(self, table, workdir):
+                clock[0] += 10.0  # each probe leg costs wall clock
+                return {"ok": True, "log_end": 1000}
+
+        def fake_time():
+            return clock[0]
+
+        def fake_sleep(seconds):
+            clock[0] += float(seconds)
+
+        with mock.patch.object(day_run.time, "time", fake_time), mock.patch.object(
+                day_run.time, "sleep", fake_sleep):
+            facts = _Probe().collect(
+                samples=True, evidence_dir=pathlib.Path(tempfile.mkdtemp()))
+            age = day_run._checkpoint_age_ms(facts)
+
+        # The collection burns 80s of wall clock (20s window + 6 probes x 10s)
+        # after the checkpoint read; the age must stay at the ~5s observed.
+        self.assertIsNotNone(age)
+        self.assertLess(age, 10_000)
+
+
 if __name__ == "__main__":
     unittest.main()

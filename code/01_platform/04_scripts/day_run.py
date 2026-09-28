@@ -314,7 +314,11 @@ def _checkpoint_age_ms(facts: Facts) -> int | None:
     for job in facts.jobs:
         if job.get("name") != SIGNAL_JOB_NAME:
             continue
-        end = (facts.checkpoints.get(job.get("id"), {}) or {}).get("latest_completed_ms")
+        cp = facts.checkpoints.get(job.get("id"), {}) or {}
+        sampled = cp.get("age_ms")
+        if sampled is not None:
+            return int(sampled)  # observed with the checkpoint read (P4-4 fix)
+        end = cp.get("latest_completed_ms")
         if end:
             return int(time.time() * 1000) - int(end)
     return None
@@ -666,6 +670,10 @@ class Collector:
             latest_ack = _completed_checkpoint_ms(data)
             out[job["id"]] = {
                 "latest_completed_ms": latest_ack,
+                # Age observed at read time (P4-4 fix): collection keeps
+                # working for 20s+ after this point (Fluss probes), so an
+                # evaluate-time recomputation reported a false I5 RED.
+                "age_ms": (int(time.time() * 1000) - latest_ack) if latest_ack else None,
                 "counts": data.get("counts", {}),
             }
         return out
