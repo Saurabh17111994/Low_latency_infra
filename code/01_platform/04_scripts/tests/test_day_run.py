@@ -16,6 +16,7 @@ import io
 import json
 import os
 import pathlib
+import stat
 import subprocess
 import sys
 import tempfile
@@ -189,6 +190,75 @@ class PostureTests(unittest.TestCase):
         bad = day_run.posture_violations({"EXECUTION_ENABLED": "true",
                                           "EXECUTION_BRIDGE_MODE": "live"})
         self.assertEqual(len(bad), 2)
+
+
+class EvidenceSecrecyTests(unittest.TestCase):
+    """C2 (audit 2026-09-28): day evidence must never carry broker credentials."""
+
+    def test_container_env_returns_only_the_posture_allowlist(self):
+        class InspectRunner(day_run.Runner):
+            def compose(self, args, env=None, check=True, timeout=300):
+                return "cid-1\n"
+
+            def run(self, argv, env=None, check=True, capture=True, timeout=1800):
+                return json.dumps([
+                    "EXECUTION_ENABLED=false",
+                    "EXECUTION_BRIDGE_MODE=disabled",
+                    "ARROW_APP_SECRET=super-secret",
+                    "ARROW_PASSWORD=hunter2",
+                    "ARROW_TOTP_KEY=ABCDEF",
+                    "EXECUTION_BRIDGE_TOKEN=tok-123",
+                    "PATH=/usr/bin",
+                ])
+
+        collector = day_run.Collector(InspectRunner())
+        env = collector.container_env(["execution-bridge"])
+        self.assertEqual(env, {"execution-bridge": {
+            "EXECUTION_ENABLED": "false",
+            "EXECUTION_BRIDGE_MODE": "disabled",
+        }})
+        self.assertEqual(day_run.POSTURE_ENV_KEYS,
+                         ("EXECUTION_ENABLED", "EXECUTION_BRIDGE_MODE"))
+
+    def test_redact_evidence_scrubs_credential_keys_only(self):
+        scrubbed = day_run.redact_evidence({
+            "container_env": {"ARROW_PASSWORD": "hunter2",
+                              "EXECUTION_ENABLED": "false"},
+            "effective_tokens": 2433,
+            "universe": {"mode": "full", "tokens": 2433},
+            "notes": ["nautilus_halted"],
+            "nested": [{"API_KEY": "k-1"}, "plain"],
+        })
+        self.assertEqual(scrubbed["container_env"], {
+            "ARROW_PASSWORD": "[REDACTED]", "EXECUTION_ENABLED": "false"})
+        self.assertEqual(scrubbed["effective_tokens"], 2433)
+        self.assertEqual(scrubbed["universe"]["tokens"], 2433)
+        self.assertEqual(scrubbed["notes"], ["nautilus_halted"])
+        self.assertEqual(scrubbed["nested"], [{"API_KEY": "[REDACTED]"}, "plain"])
+
+    def test_write_evidence_scrubs_secrets_and_restricts_permissions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            evidence_dir = pathlib.Path(tmp) / "ev"
+            with mock.patch.dict(os.environ,
+                                 {"DAY_EVIDENCE_DIR": str(evidence_dir)}):
+                facts = make_facts(container_env={
+                    "execution-bridge": {
+                        "EXECUTION_BRIDGE_MODE": "disabled",
+                        "ARROW_APP_SECRET": "super-secret",
+                        "ARROW_PASSWORD": "hunter2",
+                        "ARROW_TOTP_KEY": "ABCDEF",
+                        "EXECUTION_BRIDGE_TOKEN": "tok-123",
+                    }})
+                written = day_run.write_evidence("start", "board text", facts)
+            body = (written / "facts.json").read_text()
+            for secret in ("super-secret", "hunter2", "ABCDEF", "tok-123"):
+                self.assertNotIn(secret, body)
+            self.assertIn("[REDACTED]", body)
+            self.assertEqual(stat.S_IMODE(written.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE((written / "facts.json").stat().st_mode),
+                             0o600)
+            self.assertEqual(stat.S_IMODE((written / "board.txt").stat().st_mode),
+                             0o600)
 
 
 class CheckpointPayloadTests(unittest.TestCase):

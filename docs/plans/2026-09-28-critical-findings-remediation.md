@@ -32,9 +32,9 @@ Where a body section and this list disagree, this list wins.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | C1 — live postback mapping (fills/cancels/rejects must never be dropped) | 7 | 7 | 0 | 0 | 0 | 0 | 0 |
-| C2 — broker secrets must never reach day evidence | 5 | 0 | 0 | 4 | 0 | 0 | 1 |
+| C2 — broker secrets must never reach day evidence | 5 | 4 | 0 | 0 | 0 | 0 | 1 |
 | C3 — golden image must run the daily paths without a host JDK | 8 | 0 | 0 | 7 | 1 | 0 | 0 |
-| **Total** | **20** | **7** | **0** | **11** | **1** | **0** | **1** |
+| **Total** | **20** | **11** | **0** | **7** | **1** | **0** | **1** |
 
 #### C1 — live postback mapping (fills/cancels/rejects must never be dropped)
 
@@ -66,13 +66,13 @@ Where a body section and this list disagree, this list wins.
 
 #### C2 — broker secrets must never reach day evidence
 
-- [ ] **C2-1** — `day_run.container_env()` reads an explicit posture allowlist only
+- [x] **C2-1** — `day_run.container_env()` reads an explicit posture allowlist only
   (`EXECUTION_ENABLED`, `EXECUTION_BRIDGE_MODE`) instead of the service's full `Config.Env`.
-- [ ] **C2-2** — Defense in depth: a redaction pass (key-name pattern) applied to the evidence
+- [x] **C2-2** — Defense in depth: a redaction pass (key-name pattern) applied to the evidence
   payload before it is written, and evidence permissions `0700` directory / `0600` files.
-- [ ] **C2-3** — Tests: allowlist output, scrubber, "written file contains no secret value",
+- [x] **C2-3** — Tests: allowlist output, scrubber, "written file contains no secret value",
   and permissions.
-- [ ] **C2-4** — Containment: redact/purge the already-written `logs/day/*/facts.json` files that
+- [x] **C2-4** — Containment: redact/purge the already-written `logs/day/*/facts.json` files that
   contain the three broker secret keys (measured 2026-09-28: 10 files under `logs/day/`).
 - [-] **C2-5** — Credential rotation: **operator decision 2026-09-28 — later, not now**
   (trigger = operator schedule). The password / TOTP seed / gateway-bridge tokens were written to

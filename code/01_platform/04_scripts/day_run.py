@@ -264,6 +264,13 @@ def count_manifest_rows(path) -> int:
     return count
 
 
+# C2-1: posture auditing needs exactly these two flags. Day evidence copies only
+# this allowlist out of a container's environment — never the full Config.Env,
+# which carries broker credentials (ARROW_APP_SECRET / ARROW_PASSWORD /
+# ARROW_TOTP_KEY / bridge tokens) for the execution services.
+POSTURE_ENV_KEYS = ("EXECUTION_ENABLED", "EXECUTION_BRIDGE_MODE")
+
+
 def posture_violations(env: dict) -> list:
     """P2-2: live-enablement flags the runner must never set or tolerate.
 
@@ -775,6 +782,7 @@ class Collector:
 
     # -- container env (posture audit) -------------------------------------
     def container_env(self, services) -> dict:
+        """C2-1: the posture allowlist only — a container's full env carries credentials."""
         out = {}
         for svc in services:
             try:
@@ -784,8 +792,9 @@ class Collector:
                 raw = self.runner.run(
                     ["docker", "inspect", "--format", "{{json .Config.Env}}", cid],
                     check=False)
-                out[svc] = dict(
+                full = dict(
                     entry.split("=", 1) for entry in json.loads(raw) if "=" in entry)
+                out[svc] = {key: full[key] for key in POSTURE_ENV_KEYS if key in full}
             except (subprocess.CalledProcessError, json.JSONDecodeError, ValueError):
                 continue
         return out
@@ -1180,17 +1189,52 @@ def cmd_stop(runner: Runner, make_collector) -> int:
     return EXIT_OK
 
 
+_SECRET_KEY_RE = re.compile(
+    r"(?i)(SECRET|TOKEN|PASSWORD|TOTP|CREDENTIAL|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTH)")
+
+
+def redact_evidence(payload):
+    """C2-2: defense in depth — scrub string values whose key looks like a credential.
+
+    Posture checks read the raw allowlisted values before this runs; only the
+    written copy is filtered. Non-string values (counts, booleans) are left
+    alone: credential material is text, and redacting an int would corrupt a
+    fact the board depends on.
+    """
+    if isinstance(payload, dict):
+        return {
+            key: ("[REDACTED]"
+                  if isinstance(value, str) and _SECRET_KEY_RE.search(str(key))
+                  else redact_evidence(value))
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [redact_evidence(item) for item in payload]
+    return payload
+
+
 def write_evidence(verb: str, board: str, facts: Facts | None) -> pathlib.Path:
-    """Evidence under logs/day/<timestamp>-<verb>/ (plan §4): board + facts."""
+    """Evidence under logs/day/<timestamp>-<verb>/ (plan §4): board + facts.
+
+    C2-2: the directory is 0700 and every file 0600, and the facts payload is
+    scrubbed before it is written — evidence is copied for audits, so it must
+    not carry broker credentials even though the local disk is private.
+    """
     stamp = dt.datetime.now(IST).strftime("%Y%m%d-%H%M%S")
     directory = pathlib.Path(os.environ.get(
         "DAY_EVIDENCE_DIR", EVIDENCE_ROOT / f"{stamp}-{verb}"))
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / "board.txt").write_text(board + "\n")
+    os.chmod(directory, 0o700)
+    board_path = directory / "board.txt"
+    board_path.write_text(board + "\n")
+    os.chmod(board_path, 0o600)
     if facts is not None:
         payload = dataclasses.asdict(facts)
         payload["session"] = facts.session
-        (directory / "facts.json").write_text(json.dumps(payload, indent=2, default=str))
+        facts_path = directory / "facts.json"
+        facts_path.write_text(json.dumps(redact_evidence(payload), indent=2,
+                                         default=str))
+        os.chmod(facts_path, 0o600)
     return directory
 
 
