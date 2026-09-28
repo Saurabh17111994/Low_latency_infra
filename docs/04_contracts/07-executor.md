@@ -33,7 +33,17 @@ Owned Fluss state: `Execution_Gate`, `Execution_Attempts`, `Order_Correlation`, 
 
 Default/restart-uncertain state is `HALTED`. States are `HALTED → RECONCILING → APPROVAL_PENDING →
 ENABLED`, with `ENABLED → HALTED` on uncertainty. Every broker-facing command validates current
-gate epoch. Halt blocks calls within five seconds.
+gate epoch. Halt blocks calls within five seconds. An unresolved `UNKNOWN` escalates to an
+operator-review halt after the 15 s reconcile window and pushes the durable `HALT` report as soon as
+it fires (M1-2) — the row's 30 s lease expiry is a backstop, not the first notice.
+
+Every accepted intent is re-validated at the send instant (M1-1), under the same lock the bridge
+send takes and before any durable attempt is claimed, so a refused request leaves no attempt
+behind: a halt between acceptance and send answers 503 (`GATE_HALTED`); once the durable boot row
+is adopted, an envelope whose epoch, fence token, or lease is not the current generation answers
+409 (`STALE_EPOCH` / `FENCE_MISMATCH`) and halts — it is never sent; an envelope naming another
+partition answers 403 (`WRONG_PARTITION`) and is counted, and a foreign sender cannot halt the gate
+(no denial of service).
 
 Resume requires broker/order, position/fill, offsets/continuity, Signal checkpoint, and
 unknown-attempt reconciliation, followed by a single-operator (Saurabh, DEC-044) authorized

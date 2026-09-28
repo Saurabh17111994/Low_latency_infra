@@ -131,6 +131,10 @@ struct Snapshot {
     /// Until then `/healthz` reports the local epoch, and an approval would be refused by the
     /// gateway's epoch check — surfaced so the operator waits for the durable generation.
     gate_hydrated: bool,
+    /// M1-1: the partition this executor owns (`EXECUTION_PARTITION_ID`), checked against the
+    /// forwarded envelope under the send lock. `None` = not configured (flag-off/paper): the
+    /// envelope's partition cannot be checked and the gate-only path stands.
+    execution_partition_id: Option<String>,
     /// P3-209: idle deadline for the request read phase; production pins 5 s, tests shrink it.
     connection_timeout: std::time::Duration,
 }
@@ -156,6 +160,7 @@ impl ServerState {
                 fence_token: 0,
                 lease_expires_ts: None,
                 gate_hydrated: false,
+                execution_partition_id: None,
                 connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
@@ -203,6 +208,7 @@ impl ServerState {
                 fence_token: 0,
                 lease_expires_ts: None,
                 gate_hydrated: false,
+                execution_partition_id: None,
                 connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
@@ -261,6 +267,30 @@ impl ServerState {
     #[must_use]
     pub fn with_gate_reporter(mut self, reporter: Arc<GateReporter>) -> Self {
         self.reporter = Some(reporter);
+        self
+    }
+
+    /// M1-1: the partition this executor owns (`EXECUTION_PARTITION_ID`). Checked against the
+    /// forwarded envelope under the send lock; `None`/blank keeps the gate-only path (no partition
+    /// configured — flag-off/paper runs cannot check one).
+    #[must_use]
+    pub fn with_execution_partition(self, partition: Option<String>) -> Self {
+        if let Ok(mut s) = self.inner.lock() {
+            s.execution_partition_id = partition.filter(|p| !p.trim().is_empty());
+        }
+        self
+    }
+
+    /// M1-1 tests: adopt a durable term as if the boot report had hydrated it (the boot keeper in
+    /// `spawn_gate_keeper` is the production path).
+    #[cfg(test)]
+    fn with_hydrated_term(self, epoch: u64, fence: u64, lease_expires_ts: Option<i64>) -> Self {
+        if let Ok(mut s) = self.inner.lock() {
+            s.control_epoch = epoch;
+            s.fence_token = fence;
+            s.lease_expires_ts = lease_expires_ts;
+            s.gate_hydrated = true;
+        }
         self
     }
 
@@ -388,7 +418,7 @@ impl ServerState {
     /// report is retried in the background — if it never lands, the row's lease expires (30 s
     /// TTL) and the gateway's forward leg defers. A halt is never blocked on the network.
     pub fn safety_halt(&self, reason: &str) {
-        let (epoch, reporter) = {
+        let epoch = {
             let Ok(mut s) = self.inner.lock() else {
                 return;
             };
@@ -400,10 +430,18 @@ impl ServerState {
             s.fence_token = 0;
             // P3-020: a halt is a transition — envelopes minted before it are spent.
             s.bump_control_epoch();
-            (s.control_epoch, self.reporter.clone())
+            s.control_epoch
         };
         tracing::warn!("gate safety-halted: {reason}");
-        let Some(reporter) = reporter else {
+        self.report_durable_halt(epoch, reason);
+    }
+
+    /// M1-2: pushes a durable `HALT` report for `epoch` in the background. Shared by the immediate
+    /// safety halt and the UNKNOWN escalation — the escalation used to halt only locally and let
+    /// the gateway keep serving from the row until its 30 s lease expired. A no-op without a
+    /// reporter; a missing tokio runtime is loud, with the lease expiry as the backstop.
+    fn report_durable_halt(&self, epoch: u64, reason: &str) {
+        let Some(reporter) = self.reporter.clone() else {
             return;
         };
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
@@ -551,6 +589,7 @@ impl ServerState {
             fence_token: 0,
             lease_expires_ts: None,
             gate_hydrated: false,
+            execution_partition_id: None,
             connection_timeout: CONNECTION_READ_TIMEOUT,
         })
     }
@@ -579,29 +618,145 @@ impl ServerState {
     /// Escalation hook: force the gate back to HALTED (safety halt from any state)
     /// and raise the operator-review flag. Idempotent; a no-op when the outcome was
     /// resolved (first-seen cleared) or already escalated.
+    ///
+    /// M1-2: the durable `HALT` report is pushed here (not only by `safety_halt`), so the gateway
+    /// stops forwarding as soon as this fires instead of waiting out the row's 30 s lease. It is
+    /// reported even when the local gate was already HALTED: an earlier report may have been lost
+    /// and the row could still read ENABLED.
     fn escalate_unknown_review(&self) {
-        let mut s = match self.inner.lock() {
-            Ok(s) => s,
-            Err(_) => return,
+        let epoch = {
+            let Ok(mut s) = self.inner.lock() else {
+                return;
+            };
+            let Some(t0) = s.unknown_first_seen else {
+                return;
+            };
+            if t0.elapsed() < s.unknown_escalation || s.operator_review_required {
+                return;
+            }
+            if s.gate != ExecState::Halted {
+                // Forced safety halt from any state (gate invariant: uncertain → HALTED).
+                s.gate = ExecState::Halted;
+                // P3-020: a forced halt is a transition — spend the epoch too, so no envelope
+                // minted while the gate was ENABLED can be presented afterwards.
+                s.bump_control_epoch();
+            }
+            s.operator_review_required = true;
+            // M1-2: the escalation is an operator action item, so it is counted (not just logged).
+            crate::telemetry::METRICS
+                .unknown_escalated
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::error!(
+                "UNKNOWN bridge outcome unresolved for >= {:?}: gate force-HALTED, operator review required before re-enable",
+                s.unknown_escalation
+            );
+            s.control_epoch
         };
-        let Some(t0) = s.unknown_first_seen else {
-            return;
-        };
-        if t0.elapsed() < s.unknown_escalation || s.operator_review_required {
-            return;
-        }
-        if s.gate != ExecState::Halted {
-            // Forced safety halt from any state (gate invariant: uncertain → HALTED).
-            s.gate = ExecState::Halted;
-            // P3-020: a forced halt is a transition — spend the epoch too, so no envelope
-            // minted while the gate was ENABLED can be presented afterwards.
-            s.bump_control_epoch();
-        }
-        s.operator_review_required = true;
-        tracing::error!(
-            "UNKNOWN bridge outcome unresolved for >= {:?}: gate force-HALTED, operator review required before re-enable",
-            s.unknown_escalation
+        self.report_durable_halt(
+            epoch,
+            "UNKNOWN bridge outcome unresolved: operator review required before re-enable",
         );
+    }
+
+    /// M1-1 (P0-3 residue): the last look before the claim and the send, taken under the forwarder
+    /// lock the send uses. The route's pre-check ran before that lock; a halt (operator, lease
+    /// loss, UNKNOWN escalation) can land in between, so the order is judged against the state it
+    /// actually sends under. `None` = proceed; `Some((status, doc))` = answer with the refusal.
+    ///
+    /// Ordering is `recheck -> claim -> send`: a refused request must leave no durable attempt
+    /// behind, because a claimed-but-never-sent SUBMITTING record would be a permanent ambiguity.
+    ///
+    /// The term checks (epoch/fence/lease) run only once the durable boot row has been adopted
+    /// (`gate_hydrated`): before that the local epoch is not the durable generation, so comparing
+    /// would refuse legitimate orders. A wrong partition never halts — it is a routing/config
+    /// error, not evidence that our generation is stale — and it is counted.
+    fn recheck_send(
+        &self,
+        envelope: &gateway_protocol::Envelope,
+    ) -> Option<(u16, serde_json::Value)> {
+        let s = self.snapshot();
+        if s.gate != ExecState::Enabled {
+            return Some((
+                503,
+                serde_json::json!({
+                    "accepted": false,
+                    "outcome": "GATE_HALTED",
+                    "reason": "gate is not ENABLED at send time",
+                    "gate_state": s.gate.as_str(),
+                }),
+            ));
+        }
+        if let Some(mine) = s.execution_partition_id.as_deref() {
+            if envelope.execution_partition_id != mine {
+                crate::telemetry::METRICS
+                    .order_denied_wrong_partition
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Some((
+                    403,
+                    serde_json::json!({
+                        "accepted": false,
+                        "outcome": "WRONG_PARTITION",
+                        "reason": format!(
+                            "envelope names partition {:?}, this executor owns {mine:?}",
+                            envelope.execution_partition_id
+                        ),
+                        "gate_state": s.gate.as_str(),
+                    }),
+                ));
+            }
+        }
+        if s.gate_hydrated {
+            let epoch_matches =
+                envelope.gate_epoch >= 0 && envelope.gate_epoch as u64 == s.control_epoch;
+            if !epoch_matches {
+                self.safety_halt(&format!(
+                    "stale gate epoch on /v1/intents: envelope {} != current {}",
+                    envelope.gate_epoch, s.control_epoch
+                ));
+                return Some((
+                    409,
+                    serde_json::json!({
+                        "accepted": false,
+                        "outcome": "STALE_EPOCH",
+                        "reason": "the envelope's gate epoch is not the durable generation's",
+                        "gate_state": ExecState::Halted.as_str(),
+                    }),
+                ));
+            }
+            let fence = envelope.fence_token.parse::<u64>().ok();
+            if fence != Some(s.fence_token) {
+                self.safety_halt(&format!(
+                    "fence mismatch on /v1/intents: envelope {:?} != current {}",
+                    envelope.fence_token, s.fence_token
+                ));
+                return Some((
+                    409,
+                    serde_json::json!({
+                        "accepted": false,
+                        "outcome": "FENCE_MISMATCH",
+                        "reason": "the envelope's fence token is not the one this generation adopted",
+                        "gate_state": ExecState::Halted.as_str(),
+                    }),
+                ));
+            }
+            let now = now_ms();
+            if !s.lease_expires_ts.is_some_and(|expires| now <= expires) {
+                self.safety_halt(&format!(
+                    "durable gate lease is not live at send time (lease_expires_ts={:?}, now={now})",
+                    s.lease_expires_ts
+                ));
+                return Some((
+                    409,
+                    serde_json::json!({
+                        "accepted": false,
+                        "outcome": "STALE_EPOCH",
+                        "reason": "the durable gate lease has expired",
+                        "gate_state": ExecState::Halted.as_str(),
+                    }),
+                ));
+            }
+        }
+        None
     }
 }
 
@@ -634,6 +789,7 @@ impl Clone for Snapshot {
             fence_token: self.fence_token,
             lease_expires_ts: self.lease_expires_ts,
             gate_hydrated: self.gate_hydrated,
+            execution_partition_id: self.execution_partition_id.clone(),
             connection_timeout: self.connection_timeout,
         }
     }
@@ -1043,24 +1199,32 @@ async fn route(state: &ServerState, method: &str, path: &str, body: &str) -> Vec
                     );
                 }
             };
-            // Scope the bridge lock to the send only: a concurrent /v1/intents must not
-            // serialize behind the gateway emission round-trip (a hung gateway would
-            // otherwise stall every subsequent order submit).
+            // M1-1: hold the bridge lock from the last re-check through the claim and the send.
+            // The pre-check above ran before this lock and a halt can land in between, so the
+            // order is judged against the state it actually sends under; and the claim sits
+            // behind the re-check, so a refused request leaves no durable attempt behind.
+            // (The gateway event emission after the send stays outside: it must not stall
+            // concurrent order submits.)
             //
-            // D-swap: with a durable guard attached, the attempt is claimed and recorded BEFORE the
-            // send — a request the store cannot record is refused here and never reaches the bridge.
-            let guarded = match &state.attempts {
-                None => None,
-                Some(attempts) => {
-                    match claim_for_send(state, attempts, &cmd_env, &envelope.payload_hash) {
-                        GuardOutcome::Send(attempt) => Some((Arc::clone(attempts), attempt)),
-                        GuardOutcome::Refuse(status, doc) => return json(status, &doc),
-                    }
-                }
-            };
-            let submit = {
+            // D-swap: with a durable guard attached, the attempt is claimed and recorded BEFORE
+            // the send — a request the store cannot record is refused here and never reaches the
+            // bridge.
+            let (guarded, submit) = {
                 let mut guard = forwarder.lock().await;
-                guard.send_command(cmd_env.clone()).await
+                if let Some((status, doc)) = state.recheck_send(&envelope) {
+                    return json(status, &doc);
+                }
+                let guarded = match &state.attempts {
+                    None => None,
+                    Some(attempts) => {
+                        match claim_for_send(state, attempts, &cmd_env, &envelope.payload_hash) {
+                            GuardOutcome::Send(attempt) => Some((Arc::clone(attempts), attempt)),
+                            GuardOutcome::Refuse(status, doc) => return json(status, &doc),
+                        }
+                    }
+                };
+                let submit = guard.send_command(cmd_env.clone()).await;
+                (guarded, submit)
             };
             // The terminal phase is recorded from the same report the response is built from, so a
             // later retry of this attempt is answered from durable truth instead of being re-sent.
@@ -3015,5 +3179,241 @@ mod tests {
         }
         assert_eq!(state.snapshot().control_epoch, 5);
         gw.await.unwrap();
+    }
+
+    // ── M1-2: the UNKNOWN escalation reports the durable halt ───────────────────────────────────
+
+    #[tokio::test]
+    async fn m1_2_unknown_escalation_reports_the_durable_halt() {
+        let (gw_addr, mut rx, gw) = gateway_stub(
+            "200 OK",
+            r#"{"outcome":"HALTED","state":"HALTED","epoch":9,"fence_token":0}"#,
+        )
+        .await;
+        let state = ServerState::with_gateway_auth(
+            ExecState::Enabled,
+            "secret".into(),
+            "execution-gateway.v1".into(),
+        )
+        .with_gate_reporter(Arc::new(test_reporter(gw_addr)))
+        .with_unknown_escalation(std::time::Duration::from_millis(40));
+
+        state.record_unknown_outcome();
+        wait_for_unknown_escalation(&state).await;
+        // The local halt lands through the watchdog; the durable HALT must land with it, not when
+        // the row's lease expires (that was the finding: the gateway kept serving up to 30 s).
+        let req = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("the escalation must report the durable halt")
+            .unwrap();
+        assert!(req.contains("\"transition\":\"HALT\""), "req: {req}");
+        assert!(state.snapshot().operator_review_required);
+        gw.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn m1_2_unknown_escalation_reports_even_when_already_halted() {
+        let (gw_addr, mut rx, gw) = gateway_stub(
+            "200 OK",
+            r#"{"outcome":"HALTED","state":"HALTED","epoch":4,"fence_token":0}"#,
+        )
+        .await;
+        let state = ServerState::with_gateway_auth(
+            ExecState::Halted,
+            "secret".into(),
+            "execution-gateway.v1".into(),
+        )
+        .with_gate_reporter(Arc::new(test_reporter(gw_addr)))
+        .with_unknown_escalation(std::time::Duration::from_millis(40));
+
+        state.record_unknown_outcome();
+        wait_for_unknown_escalation(&state).await;
+        // The gate was already HALTED locally: an earlier report may have been lost and the row
+        // could still read ENABLED, so the escalation still pushes the halt.
+        let req = tokio::time::timeout(std::time::Duration::from_secs(3), rx.recv())
+            .await
+            .expect("a lost earlier report must not keep the row serving")
+            .unwrap();
+        assert!(req.contains("\"transition\":\"HALT\""), "req: {req}");
+        gw.await.unwrap();
+    }
+
+    /// M1-2: the escalation is counted. Run standalone the delta is exactly one; in a full suite
+    /// the counter is process-wide and the sibling escalation tests may land concurrently, so the
+    /// committed assertion is a lower bound (the mutation check runs this test in isolation).
+    #[test]
+    fn m1_2_escalation_counts_unknown_escalated() {
+        let before = crate::telemetry::METRICS
+            .unknown_escalated
+            .load(Ordering::Relaxed);
+        let state = ServerState::new(ExecState::Enabled);
+        {
+            let mut s = state.inner.lock().unwrap();
+            s.unknown_first_seen =
+                Some(std::time::Instant::now() - std::time::Duration::from_secs(20));
+        }
+        state.escalate_unknown_review();
+        assert_eq!(state.snapshot().gate, ExecState::Halted);
+        assert!(state.snapshot().operator_review_required);
+        let after = crate::telemetry::METRICS
+            .unknown_escalated
+            .load(Ordering::Relaxed);
+        assert!(after > before, "the escalation must be counted");
+    }
+
+    // ── M1-1: the send-time re-check (recheck -> claim -> send) ─────────────────────────────────
+
+    fn recheck_envelope(
+        epoch: i64,
+        fence: &str,
+        partition: &str,
+    ) -> crate::gateway_protocol::Envelope {
+        crate::gateway_protocol::Envelope {
+            protocol_version: "execution-gateway.v1".into(),
+            message_type: "EXECUTION_INTENT".into(),
+            request_id: "req-recheck".into(),
+            account_scope_id: "acc-1".into(),
+            execution_partition_id: partition.into(),
+            payload_hash: "h".into(),
+            gate_epoch: epoch,
+            fence_token: fence.into(),
+            deadline_epoch_ms: 9_999_999_999_999,
+            payload: serde_json::json!({}),
+            authentication: String::new(),
+        }
+    }
+
+    #[test]
+    fn m1_1_recheck_refuses_when_the_gate_halts_before_send() {
+        let state = ServerState::new(ExecState::Enabled);
+        assert!(state
+            .recheck_send(&recheck_envelope(1, "1", "part-1"))
+            .is_none());
+        state.safety_halt("operator halt between pre-check and send");
+        let (status, doc) = state
+            .recheck_send(&recheck_envelope(1, "1", "part-1"))
+            .expect("a halt must refuse the send");
+        assert_eq!(status, 503, "doc: {doc}");
+        assert_eq!(doc["outcome"], "GATE_HALTED");
+    }
+
+    #[test]
+    fn m1_1_recheck_refuses_a_stale_epoch_and_halts() {
+        let state =
+            ServerState::new(ExecState::Enabled).with_hydrated_term(7, 3, Some(now_ms() + 30_000));
+        let (status, doc) = state
+            .recheck_send(&recheck_envelope(6, "3", "part-1"))
+            .expect("a stale epoch must refuse");
+        assert_eq!(status, 409, "doc: {doc}");
+        assert_eq!(doc["outcome"], "STALE_EPOCH");
+        assert_eq!(state.snapshot().gate, ExecState::Halted);
+    }
+
+    #[test]
+    fn m1_1_recheck_refuses_a_fence_mismatch_and_halts() {
+        let state =
+            ServerState::new(ExecState::Enabled).with_hydrated_term(7, 3, Some(now_ms() + 30_000));
+        let (status, doc) = state
+            .recheck_send(&recheck_envelope(7, "4", "part-1"))
+            .expect("a fence mismatch must refuse");
+        assert_eq!(status, 409, "doc: {doc}");
+        assert_eq!(doc["outcome"], "FENCE_MISMATCH");
+        assert_eq!(state.snapshot().gate, ExecState::Halted);
+
+        // An unparseable fence is the same refusal, never a pass.
+        let state =
+            ServerState::new(ExecState::Enabled).with_hydrated_term(7, 3, Some(now_ms() + 30_000));
+        let (_, doc) = state
+            .recheck_send(&recheck_envelope(7, "not-a-number", "part-1"))
+            .expect("an unparseable fence must refuse");
+        assert_eq!(doc["outcome"], "FENCE_MISMATCH");
+    }
+
+    #[test]
+    fn m1_1_recheck_refuses_an_expired_lease() {
+        let state =
+            ServerState::new(ExecState::Enabled).with_hydrated_term(7, 3, Some(now_ms() - 1));
+        let (status, doc) = state
+            .recheck_send(&recheck_envelope(7, "3", "part-1"))
+            .expect("an expired lease must refuse");
+        assert_eq!(status, 409, "doc: {doc}");
+        assert_eq!(doc["outcome"], "STALE_EPOCH");
+        assert_eq!(state.snapshot().gate, ExecState::Halted);
+
+        // A missing lease is not live either.
+        let state = ServerState::new(ExecState::Enabled).with_hydrated_term(7, 3, None);
+        assert!(state
+            .recheck_send(&recheck_envelope(7, "3", "part-1"))
+            .is_some());
+    }
+
+    #[test]
+    fn m1_1_recheck_accepts_a_matching_generation() {
+        let state =
+            ServerState::new(ExecState::Enabled).with_hydrated_term(7, 3, Some(now_ms() + 30_000));
+        assert!(state
+            .recheck_send(&recheck_envelope(7, "3", "part-1"))
+            .is_none());
+        assert_eq!(state.snapshot().gate, ExecState::Enabled);
+    }
+
+    #[test]
+    fn m1_1_recheck_ignores_the_term_before_hydration() {
+        // Flag-off/paper: no durable generation was adopted, so a stale-looking epoch is not
+        // evidence that we are stale — the local gate check is the whole gate.
+        let state = ServerState::new(ExecState::Enabled);
+        assert!(state
+            .recheck_send(&recheck_envelope(999, "junk", "part-1"))
+            .is_none());
+    }
+
+    #[test]
+    fn m1_1_wrong_partition_is_403_and_never_halts() {
+        let before = crate::telemetry::METRICS
+            .order_denied_wrong_partition
+            .load(Ordering::Relaxed);
+        let state = ServerState::new(ExecState::Enabled)
+            .with_execution_partition(Some("dev-partition".into()))
+            .with_hydrated_term(7, 3, Some(now_ms() + 30_000));
+        let (status, doc) = state
+            .recheck_send(&recheck_envelope(7, "3", "part-other"))
+            .expect("a wrong partition must refuse");
+        assert_eq!(status, 403, "doc: {doc}");
+        assert_eq!(doc["outcome"], "WRONG_PARTITION");
+        assert_eq!(
+            state.snapshot().gate,
+            ExecState::Enabled,
+            "a routing error must not halt the gate"
+        );
+        let after = crate::telemetry::METRICS
+            .order_denied_wrong_partition
+            .load(Ordering::Relaxed);
+        assert_eq!(after, before + 1, "the refusal is counted");
+        // The matching partition passes on to the term checks and the send.
+        assert!(state
+            .recheck_send(&recheck_envelope(7, "3", "dev-partition"))
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn m1_1_a_refused_send_leaves_no_durable_attempt() {
+        let dir = guard_scratch_dir();
+        let store = Arc::new(FileAttemptStore::open(&dir.join(ATTEMPTS_LOG)).unwrap());
+        let guard = live_guard(&store);
+        let state = enabled_state(fake_forwarder(CommandScript::Accept))
+            .with_attempts(Arc::clone(&guard))
+            .with_hydrated_term(7, 3, Some(now_ms() + 30_000));
+        let body = intent_body().await;
+        let (status, resp) = post_intent(&state, &body).await;
+        assert_eq!(status, 409, "body: {resp}");
+        assert!(resp.contains("\"outcome\":\"STALE_EPOCH\""), "body: {resp}");
+        assert_eq!(state.snapshot().gate, ExecState::Halted);
+        assert!(
+            !store.has_instruction("T9-SB-0001", "place"),
+            "a refused send must leave no durable attempt behind (recheck -> claim -> send)"
+        );
+        drop(state);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

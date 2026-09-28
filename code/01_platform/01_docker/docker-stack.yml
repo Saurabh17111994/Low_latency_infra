@@ -1015,11 +1015,13 @@ services:
       # false) so no command ever flows meanwhile.
       GATEWAY_ENDPOINT: http://execution-gateway:9180
       GATEWAY_PROTOCOL_VERSION: execution-gateway.v2
-      # H2-5/D2 (CHG-334/CHG-335): the durable gate row this executor owns — same values the
-      # execution-gateway service carries (see its environment block). A mismatch is refused
-      # (409) and an absent partition leaves the durable reporter unarmed.
-      EXECUTION_PARTITION_ID: dev-partition
-      ACCOUNT_SCOPE_ID: dev-scope
+      # H2-5/D2 (CHG-334/CHG-335); M1-1: the durable gate row and the forwarded envelope both carry
+      # this partition/scope, so the executor must resolve them exactly as the gateway does — the
+      # same expressions as the gateway's environment block (M1-1 refuses a foreign partition with
+      # 403 and H2-5 refuses a foreign report row). A mismatch is refused (409) and an absent
+      # partition leaves the durable reporter unarmed.
+      EXECUTION_PARTITION_ID: ${EXECUTION_PARTITION_ID:-prod-partition}
+      ACCOUNT_SCOPE_ID: ${ACCOUNT_SCOPE_ID:-prod-scope}
       # H1-3: the durable attempt guard is ON in this deck too (it landed OFF, CHG-136). The
       # journal must survive container recreation, so it sits on the nautilus-durable volume
       # below; the code default stays OFF for bare runs.

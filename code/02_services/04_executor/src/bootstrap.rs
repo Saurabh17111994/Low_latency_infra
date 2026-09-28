@@ -53,7 +53,10 @@ impl Runtime {
                 config.gateway_shared_secret.clone(),
                 config.protocol_version.clone(),
             )
-        };
+        }
+        // M1-1: the partition this process owns, when the deployment configures one (both decks
+        // do). The forward leg refuses an envelope naming another partition under the send lock.
+        .with_execution_partition(config.execution_partition_id.clone());
         Ok(Self {
             config,
             gate,

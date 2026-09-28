@@ -441,11 +441,17 @@ no active attempt → PREPARED (request hash + client ref + gate epoch + fence)
   second submission. A changed hash under the same `(instruction_id, action)` is a contract
   violation: quarantine, audit, halt. A place, its later modify, and its cancel share the
   `instruction_id` but are distinct actions with independent claim streams (M1-5).
+- The gate is re-checked at the send instant, under the forwarder lock and before the durable
+  claim (M1-1): a halt answers 503; once the durable boot row is adopted, a stale epoch, fence,
+  or lease answers 409 and halts without sending; a foreign partition answers 403 and is counted
+  without halting (a wrong sender cannot DoS the gate). A refused request leaves no attempt behind.
 - Intake validation (reader): schema/version, canonical identity/content hash, expiry/freshness,
   supersession/cancellation, and no unresolved attempt/request-hash conflict — enqueue only if
   gate and fencing permit (applies to future `Position_Actions` and control rows).
 - `UNKNOWN` is non-terminal: it blocks new submissions and resolves only through explicit
-  reconciliation — never auto-retry (DEC-011, DEC-030).
+  reconciliation — never auto-retry (DEC-011, DEC-030). The 15 s reconcile window escalates to
+  operator review and pushes the durable `HALT` report as it fires (M1-2), counted as
+  `unknown_escalated`; the durable row's 30 s lease expiry is a backstop, not the first notice.
 
 ### Order lifecycle (Nautilus OMS → normalized vocabulary)
 

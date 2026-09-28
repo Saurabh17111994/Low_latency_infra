@@ -34,25 +34,25 @@ Where a body section and this list disagree, this list wins.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| M1 — execution follow-ups (the layer under H1) | 6 | 1 | 0 | 5 | 0 | 0 | 0 |
+| M1 — execution follow-ups (the layer under H1) | 6 | 3 | 0 | 3 | 0 | 0 | 0 |
 | M2 — ops tooling truth | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
 | M3 — compute correctness and configuration | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | M4 — ingestion gates and accounting | 6 | 0 | 0 | 6 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **1** | **0** | **30** | **0** | **0** | **0** |
+| **Total** | **31** | **3** | **0** | **28** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
-- [ ] **M1-1** — `/v1/intents` re-verifies the adopted gate identity **inside the forwarder lock,
+- [x] **M1-1** — `/v1/intents` re-verifies the adopted gate identity **inside the forwarder lock,
   before `claim_for_send`**: `recheck_send(&Envelope)` re-reads the in-memory snapshot; HALTED →
   503; when hydrated, epoch/fence/lease mismatch → 409 + `safety_halt`; foreign partition → 403
   `WRONG_PARTITION` (metric, no halt — a foreign sender must not DoS the gate). (E1; contract
-  07:105-112.)
-- [ ] **M1-2** — UNKNOWN escalation reports the durable halt: extract `report_durable_halt` from
+  07:105-112.) — CHG-375
+- [x] **M1-2** — UNKNOWN escalation reports the durable halt: extract `report_durable_halt` from
   `safety_halt` and call it from `escalate_unknown_review` after the 15 s reconcile window (keep
-  `operator_review_required` and the epoch bump; add `unknown_escalated` metric). (E2.)
+  `operator_review_required` and the epoch bump; add `unknown_escalated` metric). (E2.) — CHG-375
 - [ ] **M1-3** — One shared report flow: a process-wide `BridgeSession` built once in `main.rs`;
   the single `take_reports` dispatcher routes route-owned refs to the route handler (booked once +
   gateway `/v1/events`), node-owned refs to the node channel, and unknown refs to one-place halt.
