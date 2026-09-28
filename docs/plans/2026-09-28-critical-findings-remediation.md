@@ -31,22 +31,22 @@ Where a body section and this list disagree, this list wins.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| C1 — live postback mapping (fills/cancels/rejects must never be dropped) | 7 | 0 | 0 | 7 | 0 | 0 | 0 |
+| C1 — live postback mapping (fills/cancels/rejects must never be dropped) | 7 | 4 | 1 | 2 | 0 | 0 | 0 |
 | C2 — broker secrets must never reach day evidence | 5 | 0 | 0 | 4 | 0 | 0 | 1 |
 | C3 — golden image must run the daily paths without a host JDK | 8 | 0 | 0 | 7 | 1 | 0 | 0 |
-| **Total** | **20** | **0** | **0** | **18** | **1** | **0** | **1** |
+| **Total** | **20** | **4** | **1** | **13** | **1** | **0** | **1** |
 
 #### C1 — live postback mapping (fills/cancels/rejects must never be dropped)
 
-- [ ] **C1-1** — Canonical postback event vocabulary + one shared, machine-readable fixture
+- [x] **C1-1** — Canonical postback event vocabulary + one shared, machine-readable fixture
   (`code/testdata/postback-report-types.json`): every Arrow `reportType`/`orderStatus` combination
   from `docs/04_contracts/arrow_broker.md` maps to exactly one canonical `event_type`
   (`order_filled` / `order_canceled` / `order_rejected` / `order_accepted` / `order_unknown`).
-- [ ] **C1-2** — Bridge normalization (`postback.go`): publish `event_type` (canonical) alongside
+- [x] **C1-2** — Bridge normalization (`postback.go`): publish `event_type` (canonical) alongside
   the untouched raw `report_type` (fingerprint stays pinned to the raw value, contract 06) and a
   new optional `reject_reason`; unknown or absent Arrow vocabulary → `event_type="order_unknown"`
   (fail-closed, never a silent success).
-- [ ] **C1-3** — Fill payload mapping on the real postback shape: when `fillQuantity`/`fillPrice`
+- [x] **C1-3** — Fill payload mapping on the real postback shape: when `fillQuantity`/`fillPrice`
   are absent (Arrow postbacks carry `fillShares`/`averagePrice` — contract `arrow_broker.md`
   §4), the bridge fills `fill_quantity`/`fill_price` from `fillShares`/`averagePrice` so the
   executor never fabricates and never halts on a valid live fill.
@@ -56,11 +56,11 @@ Where a body section and this list disagree, this list wins.
   (DECIDED 2026-09-28 — fail-closed halt confirmed, §9.)
 - [ ] **C1-5** — `FakeBridge` emits the canonical `event_type` too, so fake and live paths share
   one vocabulary; existing behavior tests keep passing unchanged.
-- [ ] **C1-6** — Cross-boundary guard tests: Go test iterates the shared fixture; Rust test
+- [~] **C1-6** — Cross-boundary guard tests: Go test iterates the shared fixture; Rust test
   iterates the same fixture and asserts the dispatch action per canonical value plus halt on
   unknown/missing; a gate-discovered Python test asserts the fixture covers the contract's Arrow
   vocabulary exactly.
-- [ ] **C1-7** — Contract/dossier update: `06-action-capture.md` (raw `report_type` stays the
+- [x] **C1-7** — Contract/dossier update: `06-action-capture.md` (raw `report_type` stays the
   fingerprint key; canonical `event_type` is the dispatch key) and `07-executor.md` (mapping
   table + fail-closed rule).
 

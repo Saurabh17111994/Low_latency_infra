@@ -1,0 +1,87 @@
+{
+  "comment": "Shared postback vocabulary fixture (C1, audit 2026-09-28). Each case is one Arrow postback input shape -> the canonical event_type it must map to, plus the bridge's normalized fill/reject values. Consumed by go-bridge/postback_normalization_test.go, executor client.rs dispatch tests (via include_str!), and the gate-discovered test_postback_contract_fixture.py. Arrow inputs follow docs/04_contracts/arrow_broker.md section 4: the real fill fields are fillShares/averagePrice; fillQuantity/fillPrice are the legacy pair and win when both are present.",
+  "cases": [
+    {
+      "name": "accepted_new_ack",
+      "arrow": {"id": "BRK-1", "remarks": "REF-1", "token": "3045", "orderStatus": "OPEN", "reportType": "NewAck"},
+      "event_type": "order_accepted",
+      "normalized": {"fill_quantity": "", "fill_price": "", "reject_reason": ""}
+    },
+    {
+      "name": "accepted_pending_new",
+      "arrow": {"id": "BRK-2", "remarks": "REF-2", "orderStatus": "PENDING", "reportType": "PendingNew"},
+      "event_type": "order_accepted",
+      "normalized": {"fill_quantity": "", "fill_price": "", "reject_reason": ""}
+    },
+    {
+      "name": "filled_real_arrow_shape",
+      "arrow": {
+        "id": "BRK-3", "remarks": "REF-3", "token": "3045",
+        "orderStatus": "COMPLETE", "reportType": "Fill",
+        "fillShares": "2", "averagePrice": "15050",
+        "exchangeOrderID": "EX-1", "exchangeUpdateTime": "2026-08-19T10:00:00Z"
+      },
+      "event_type": "order_filled",
+      "normalized": {"fill_quantity": "2", "fill_price": "15050", "reject_reason": ""}
+    },
+    {
+      "name": "filled_legacy_pair_wins_when_present",
+      "arrow": {
+        "id": "BRK-4", "remarks": "REF-4",
+        "orderStatus": "COMPLETE", "reportType": "Fill",
+        "fillShares": "2", "averagePrice": "15050",
+        "fillQuantity": "3", "fillPrice": "100"
+      },
+      "event_type": "order_filled",
+      "normalized": {"fill_quantity": "3", "fill_price": "100", "reject_reason": ""}
+    },
+    {
+      "name": "filled_complete_without_report_type",
+      "arrow": {"id": "BRK-5", "remarks": "REF-5", "orderStatus": "COMPLETE", "fillShares": "2", "averagePrice": "15050"},
+      "event_type": "order_filled",
+      "normalized": {"fill_quantity": "2", "fill_price": "15050", "reject_reason": ""}
+    },
+    {
+      "name": "filled_without_payload_halts_downstream",
+      "arrow": {"id": "BRK-6", "remarks": "REF-6", "orderStatus": "OPEN", "reportType": "Fill"},
+      "event_type": "order_filled",
+      "normalized": {"fill_quantity": "", "fill_price": "", "reject_reason": ""}
+    },
+    {
+      "name": "canceled",
+      "arrow": {"id": "BRK-7", "remarks": "REF-7", "orderStatus": "CANCELLED", "reportType": "Canceled"},
+      "event_type": "order_canceled",
+      "normalized": {"fill_quantity": "", "fill_price": "", "reject_reason": ""}
+    },
+    {
+      "name": "canceled_alias",
+      "arrow": {"id": "BRK-8", "remarks": "REF-8", "orderStatus": "CANCELLED", "reportType": "Cancelled"},
+      "event_type": "order_canceled",
+      "normalized": {"fill_quantity": "", "fill_price": "", "reject_reason": ""}
+    },
+    {
+      "name": "rejected_with_reason",
+      "arrow": {"id": "BRK-9", "remarks": "REF-9", "orderStatus": "REJECTED", "reportType": "Rejected", "rejectReason": "RMS: margin shortfall"},
+      "event_type": "order_rejected",
+      "normalized": {"fill_quantity": "", "fill_price": "", "reject_reason": "RMS: margin shortfall"}
+    },
+    {
+      "name": "rejected_status_only",
+      "arrow": {"id": "BRK-10", "remarks": "REF-10", "orderStatus": "REJECTED", "rejectReason": "RMS: price band"},
+      "event_type": "order_rejected",
+      "normalized": {"fill_quantity": "", "fill_price": "", "reject_reason": "RMS: price band"}
+    },
+    {
+      "name": "unknown_report_type",
+      "arrow": {"id": "BRK-11", "remarks": "REF-11", "orderStatus": "OPEN", "reportType": "Mystery"},
+      "event_type": "order_unknown",
+      "normalized": {"fill_quantity": "", "fill_price": "", "reject_reason": ""}
+    },
+    {
+      "name": "unknown_missing_vocabulary",
+      "arrow": {},
+      "event_type": "order_unknown",
+      "normalized": {"fill_quantity": "", "fill_price": "", "reject_reason": ""}
+    }
+  ]
+}

@@ -86,6 +86,8 @@ type ReportEnvelope struct {
 	PostbackEventID     string          `json:"postback_event_id,omitempty"`
 	OrderStatus         string          `json:"order_status,omitempty"`
 	ReportType          string          `json:"report_type,omitempty"`
+	EventType           string          `json:"event_type,omitempty"`
+	RejectReason        string          `json:"reject_reason,omitempty"`
 	FillShares          string          `json:"fill_shares,omitempty"`
 	AveragePrice        string          `json:"average_price,omitempty"`
 	FillPrice           string          `json:"fill_price,omitempty"`

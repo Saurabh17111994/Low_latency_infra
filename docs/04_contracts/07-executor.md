@@ -96,6 +96,28 @@ Reusing a `request_id` with different content returns `request_id_reuse_violatio
 Arrow. The cache is process-local; restart recovery remains the responsibility of the durable
 Execution Attempt and reconciliation protocol.
 
+#### Postback vocabulary (executor dispatch key)
+
+Arrow postbacks arrive on `/v1/events` with `command=postback`. The bridge normalizes the raw Arrow
+pair (`reportType`, `orderStatus`) into exactly one canonical `event_type`; the raw pair stays
+carried for audit and for the fingerprint (contract 06, raw `report_type` only):
+
+| Canonical `event_type` | Arrow input | Executor action |
+| --- | --- | --- |
+| `order_filled` | `reportType=Fill` (any status), or `COMPLETE` with fill fields | book the fill from the normalized `fill_quantity`/`fill_price` |
+| `order_canceled` | `reportType=Canceled` (or `Cancelled`) | emit `order_canceled` |
+| `order_rejected` | `reportType=Rejected` or `orderStatus=REJECTED` | emit `order_rejected`, carrying `reject_reason` |
+| `order_accepted` | `reportType=NewAck` / `PendingNew` | counted; no state change |
+| `order_unknown` | anything else | safety-halt + warning + counter (fail closed) |
+
+Dispatch is fail-closed: a postback whose `event_type` is missing (an older bridge, or the
+documented rollback window) or is none of the five values above safety-halts the gate instead of
+being dropped. Non-postback stream reports (reconcile echoes) are not lifecycle events and are
+ignored. The same vocabulary is pinned machine-readably in
+`code/testdata/postback-report-types.json`, consumed by the Go bridge tests and the executor
+dispatch tests; contracts 06/07 and that fixture are checked against each other by a
+gate-discovered Python test.
+
 The bridge's `disabled` mode is the default and carries no Arrow credentials or route. `fake` mode
 is test-only. `live` mode is an explicit process configuration in which only the Go process loads
 Arrow credentials and opens the Arrow REST/order-update connections. Neither mode changes the

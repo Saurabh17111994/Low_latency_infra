@@ -227,11 +227,51 @@ func nextBackoff(current, maximum time.Duration) time.Duration {
 	return next
 }
 
+// Canonical postback event vocabulary. The executor dispatches on EventType and
+// safety-halts on anything else (docs/04_contracts/07-executor.md), so an Arrow
+// value that is not recognized below surfaces as a loud stop, never a silent drop.
+const (
+	EventOrderFilled   = "order_filled"
+	EventOrderCanceled = "order_canceled"
+	EventOrderRejected = "order_rejected"
+	EventOrderAccepted = "order_accepted"
+	EventOrderUnknown  = "order_unknown"
+)
+
+// postbackEventType maps Arrow's (reportType, orderStatus) pair onto the canonical
+// vocabulary. Precedence: rejected > canceled > filled > accepted > unknown.
+func postbackEventType(update map[string]any) string {
+	reportType := strings.ToLower(strings.TrimSpace(stringField(update, "reportType")))
+	orderStatus := strings.ToLower(strings.TrimSpace(stringField(update, "orderStatus")))
+	switch {
+	case reportType == "rejected" || orderStatus == "rejected":
+		return EventOrderRejected
+	case reportType == "canceled" || reportType == "cancelled":
+		return EventOrderCanceled
+	case reportType == "fill":
+		return EventOrderFilled
+	case orderStatus == "complete" && hasPostbackFillPayload(update):
+		return EventOrderFilled
+	case reportType == "newack" || reportType == "pendingnew":
+		return EventOrderAccepted
+	default:
+		return EventOrderUnknown
+	}
+}
+
+func hasPostbackFillPayload(update map[string]any) bool {
+	return stringField(update, "fillShares") != "" ||
+		stringField(update, "averagePrice") != "" ||
+		stringField(update, "fillQuantity") != "" ||
+		stringField(update, "fillPrice") != ""
+}
+
 // NormalizeOrderUpdate maps Arrow's JSON postback shape without making the
 // bridge a position engine. Unknown lifecycle values become UNKNOWN.
 func NormalizeOrderUpdate(update map[string]any) ReportEnvelope {
 	status := stringField(update, "orderStatus")
 	reportType := stringField(update, "reportType")
+	eventType := postbackEventType(update)
 	outcome := OutcomeUnknown
 	reason := "unknown_order_update"
 	if knownOrderStatus(status) || knownReportType(reportType) {
@@ -250,6 +290,8 @@ func NormalizeOrderUpdate(update map[string]any) ReportEnvelope {
 		BrokerOrderID:   stringField(update, "id"),
 		ExchangeOrderID: stringField(update, "exchangeOrderID"),
 		OrderStatus:     status, ReportType: reportType,
+		EventType:       eventType,
+		RejectReason:    stringField(update, "rejectReason"),
 		FillShares:      stringField(update, "fillShares"),
 		AveragePrice:    stringField(update, "averagePrice"),
 		FillPrice:       stringField(update, "fillPrice"),
@@ -280,6 +322,18 @@ func NormalizeOrderUpdate(update map[string]any) ReportEnvelope {
 		return report
 	}
 	report.PostbackEventID = eventID
+	// C1-3: Arrow's documented fill fields are fillShares/averagePrice; the executor
+	// books from fill_quantity/fill_price. Normalize once here — AFTER the fingerprint —
+	// so the identity keeps hashing the raw input (contract 06) while the executor
+	// never sees an empty payload on a valid live fill. The raw fields stay carried.
+	if report.EventType == EventOrderFilled {
+		if report.FillQuantity == "" {
+			report.FillQuantity = report.FillShares
+		}
+		if report.FillPrice == "" {
+			report.FillPrice = report.AveragePrice
+		}
+	}
 	return report
 }
 

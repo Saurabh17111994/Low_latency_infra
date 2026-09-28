@@ -72,6 +72,12 @@ Exactly seven identity keys participate (`id`, `remarks`, `status`, `report_type
 values serialize as `""`. An all-empty identity is a contract violation: fail closed rather than
 collapsing every bad postback onto `sha256("")`.
 
+The identity hashes Arrow's **raw** `report_type` value. The canonical `event_type` (contract 07)
+is a dispatch key only and SHALL NOT participate in the fingerprint, and the bridge's fill
+normalization (`fillShares`/`averagePrice` copied into `fill_quantity`/`fill_price` when the legacy
+pair is absent) likewise leaves the identity untouched — the raw input is what hashes. Vector 1
+above is the canonical Fill shape and stays byte-for-byte valid after normalization.
+
 Known-good vectors (Go-computed, pinned 2026-09-10):
 
 | Input (7-key map) | SHA-256 |
