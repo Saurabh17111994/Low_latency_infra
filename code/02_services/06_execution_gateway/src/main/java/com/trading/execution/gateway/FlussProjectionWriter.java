@@ -1,7 +1,11 @@
 package com.trading.execution.gateway;
 
+import com.trading.common.model.OrderLifecycleState;
+import com.trading.common.schema.execution.GateStateStore;
 import com.trading.common.schema.fluss.BoundedRetry;
 import com.trading.common.schema.fluss.FlussHandlePool;
+import com.trading.common.schema.ownership.OrderLifecycleColumns;
+import com.trading.common.schema.projection.OrderLifecycleSnapshot;
 
 import java.time.Duration;
 import java.util.List;
@@ -12,6 +16,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
+import org.apache.fluss.client.lookup.Lookuper;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.writer.AppendWriter;
 import org.apache.fluss.client.table.writer.UpsertWriter;
@@ -19,9 +24,13 @@ import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.BinaryString;
 import org.apache.fluss.row.GenericRow;
+import org.apache.fluss.row.InternalRow;
 
 /** Explicit serializers for normalized execution images and independent writes. */
 public final class FlussProjectionWriter implements ProjectionWriter {
+    private static final java.util.logging.Logger LOG =
+            java.util.logging.Logger.getLogger(FlussProjectionWriter.class.getName());
+
     private final Connection connection;
     private final GatewayConfig config;
     private final Duration timeout;
@@ -29,6 +38,12 @@ public final class FlussProjectionWriter implements ProjectionWriter {
     // single-thread confinement; GatewayHttpServer drives concurrent applies.
     private final Map<String, Table> tables = new ConcurrentHashMap<>();
     private final PostbackQuarantineStore quarantineStore;
+    // M1-6: the durable partition-halt sink for lifecycle conflicts (nullable for warm-up/offline
+    // writers — the gate still refuses the write and quarantines; only the durable halt is absent,
+    // and that is logged loudly). The lookup seam defaults to the Fluss-backed pooled reader.
+    private final GateStateStore gates;
+    private final OrderLifecycleWriteGate.StoredRowLookup lifecycleLookup;
+    private volatile OrderLifecycleWriteGate lifecycleGate;
     // P3-071: in-run guard for Fills append idempotency — retry after a crash
     // between the Fills append and the ledger put must not duplicate the LOG
     // row. Fluss LOG has no PK, so dedup by fingerprint before re-appending.
@@ -37,6 +52,8 @@ public final class FlussProjectionWriter implements ProjectionWriter {
     // (P3-070) — a single cached writer would be a cross-call hazard on this path.
     private final Map<String, FlussHandlePool<AppendWriter>> appendPools = new ConcurrentHashMap<>();
     private final Map<String, FlussHandlePool<UpsertWriter>> upsertPools = new ConcurrentHashMap<>();
+    // M1-6: pooled Lookuper per table for the versioned lifecycle read-evaluate-write.
+    private final Map<String, FlussHandlePool<Lookuper>> lookuperPools = new ConcurrentHashMap<>();
 
     public static FlussProjectionWriter open(GatewayConfig config) {
         try {
@@ -58,14 +75,39 @@ public final class FlussProjectionWriter implements ProjectionWriter {
         } catch (Exception e) { throw new IllegalStateException("cannot open projection writer", e); }
     }
 
+    /** M1-6: production open — the durable gate store is the halt sink for lifecycle conflicts. */
+    public static FlussProjectionWriter open(GatewayConfig config, GateStateStore gates) {
+        try {
+            Configuration c = new Configuration(); c.setString("bootstrap.servers", config.flussBootstrap());
+            // D1: bulk-path linger via FlussWriteProfiles (throughput-leaning, not order-critical).
+            com.trading.common.schema.fluss.FlussWriteProfiles.bulkPath(c);
+            return new FlussProjectionWriter(ConnectionFactory.createConnection(c), config,
+                    config.requestTimeout(), null, gates, null);
+        } catch (Exception e) { throw new IllegalStateException("cannot open projection writer", e); }
+    }
+
     FlussProjectionWriter(Connection connection, GatewayConfig config, Duration timeout) {
-        this(connection, config, timeout, null);
+        this(connection, config, timeout, null, null, null);
     }
 
     FlussProjectionWriter(Connection connection, GatewayConfig config, Duration timeout,
                           PostbackQuarantineStore quarantineStore) {
+        this(connection, config, timeout, quarantineStore, null, null);
+    }
+
+    /**
+     * M1-6 test/open seam: {@code gates} is the durable halt sink for lifecycle conflicts
+     * (nullable for warm-up writers — the gate still refuses the write, loudly), and
+     * {@code lifecycleLookup} overrides the stored-row reader (nullable = the Fluss-backed pooled
+     * lookup).
+     */
+    FlussProjectionWriter(Connection connection, GatewayConfig config, Duration timeout,
+                          PostbackQuarantineStore quarantineStore, GateStateStore gates,
+                          OrderLifecycleWriteGate.StoredRowLookup lifecycleLookup) {
         this.connection = connection; this.config = config; this.timeout = timeout;
         this.quarantineStore = quarantineStore;
+        this.gates = gates;
+        this.lifecycleLookup = lifecycleLookup;
     }
 
     @Override public void writeAudit(NormalizedExecutionEvent e) throws Exception {
@@ -82,7 +124,9 @@ public final class FlussProjectionWriter implements ProjectionWriter {
         } else if (e.fill() != null) {
             append("Fills", fillRow(e));
         }
-        if (e.lifecycle() != null) upsert("Order_Lifecycle", lifecycleRow(e));
+        // M1-6: versioned read-evaluate-write, not a blind upsert — a stale or conflicting
+        // lifecycle event must never regress the stored row (see OrderLifecycleWriteGate).
+        if (e.lifecycle() != null) lifecycleGate().apply(e);
         if (e.correlation() != null) upsert("Order_Correlation", correlationRow(e));
     }
     @Override public void writePosition(NormalizedExecutionEvent e) throws Exception {
@@ -204,12 +248,99 @@ public final class FlussProjectionWriter implements ProjectionWriter {
                 f.originalPayload() == null ? new byte[0] : f.originalPayload(), bs(f.payloadHash()),
                 bs(f.correlationState()), bs(f.correlationReason()), bs(f.decoderVersion()), bs("2"));
     }
-    private GenericRow lifecycleRow(NormalizedExecutionEvent e) {
-        var l = e.lifecycle();
-        return GenericRow.of(bs(e.accountScopeId()), bs(l.brokerOrderId()), bs(l.instructionId()),
-                bs(l.executionAttemptId()), bs(l.tradeContextId()), bs(l.normalizedState()), l.cumulativeQty(),
-                l.pendingQty(), l.averageFillPricePaise(), bs(e.postbackEventId()), l.sourceVersion(),
-                l.sourceEventTime(), l.lastReceiveTime(), bs(l.correlationState()), bs("2"));
+    private GenericRow lifecycleRow(OrderLifecycleSnapshot l) {
+        return GenericRow.of(bs(l.accountScopeId()), bs(l.brokerOrderId()), bs(l.instructionId()),
+                bs(l.executionAttemptId()), bs(l.tradeContextId()), bs(l.normalizedState().name()),
+                l.cumulativeQty(), l.pendingQty(), l.averageFillPricePaise(), bs(l.sourceEventId()),
+                l.sourceVersion(), l.sourceEventTime(), l.lastReceiveTime(), bs(l.correlationState()),
+                bs(l.schemaVersion()));
+    }
+
+    /** M1-6: the versioned read-evaluate-write gate, built once on the first lifecycle write. */
+    private OrderLifecycleWriteGate lifecycleGate() {
+        OrderLifecycleWriteGate gate = lifecycleGate;
+        if (gate != null) {
+            return gate;
+        }
+        synchronized (this) {
+            if (lifecycleGate == null) {
+                OrderLifecycleWriteGate.StoredRowLookup lookup = lifecycleLookup != null
+                        ? lifecycleLookup : this::lookupLifecycleRow;
+                OrderLifecycleWriteGate.PartitionHalt haltSink = gates == null ? null
+                        : (partitionId, reason, evidence) -> gates.halt(
+                                partitionId, null, reason, evidence, System.currentTimeMillis());
+                lifecycleGate = new OrderLifecycleWriteGate(lookup, haltSink,
+                        this::upsertLifecycleRow,
+                        (event, detail) -> LOG.warning("Order_Lifecycle stale event ignored ("
+                                + event.postbackEventId() + "): " + detail),
+                        this::writeQuarantine,
+                        System::currentTimeMillis);
+            }
+            return lifecycleGate;
+        }
+    }
+
+    private void upsertLifecycleRow(OrderLifecycleSnapshot next) throws Exception {
+        upsert("Order_Lifecycle", lifecycleRow(next));
+    }
+
+    /**
+     * The Fluss-backed stored-row read: pooled {@link Lookuper} over the full composite key
+     * (account_scope_id, broker_order_id), decoded into the projector's snapshot. Any failure —
+     * transport, decode, invariant breach — surfaces as
+     * {@link OrderLifecycleLookupUnavailableException} so the caller answers 503 and refuses the
+     * write instead of blind-upserting.
+     */
+    private OrderLifecycleSnapshot lookupLifecycleRow(String accountScopeId, String brokerOrderId)
+            throws Exception {
+        try {
+            Table kv = table("Order_Lifecycle");
+            FlussHandlePool<Lookuper> pool = lookuperPools.computeIfAbsent("Order_Lifecycle",
+                    n -> new FlussHandlePool<>(() -> kv.newLookup().createLookuper()));
+            InternalRow row = pool.with(lookuper -> RequestBudget.run(() -> lookuper
+                    .lookup(GenericRow.of(BinaryString.fromString(accountScopeId),
+                            BinaryString.fromString(brokerOrderId)))
+                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS)
+                    .getSingletonRow()));
+            return row == null ? null : decodeLifecycleRow(row);
+        } catch (OrderLifecycleLookupUnavailableException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new OrderLifecycleLookupUnavailableException(
+                    "Order_Lifecycle lookup failed for " + accountScopeId + "/" + brokerOrderId, e);
+        }
+    }
+
+    private static OrderLifecycleSnapshot decodeLifecycleRow(InternalRow row)
+            throws OrderLifecycleLookupUnavailableException {
+        String stateRaw = row.getString(OrderLifecycleColumns.NORMALIZED_STATE).toString();
+        OrderLifecycleState state = OrderLifecycleWriteGate.canonicalState(stateRaw);
+        if (state == null) {
+            throw new OrderLifecycleLookupUnavailableException(
+                    "stored Order_Lifecycle state is not canonical: " + stateRaw, null);
+        }
+        return new OrderLifecycleSnapshot(
+                row.getString(OrderLifecycleColumns.ACCOUNT_SCOPE_ID).toString(),
+                row.getString(OrderLifecycleColumns.BROKER_ORDER_ID).toString(),
+                nullableString(row, OrderLifecycleColumns.INSTRUCTION_ID),
+                nullableString(row, OrderLifecycleColumns.EXECUTION_ATTEMPT_ID),
+                nullableString(row, OrderLifecycleColumns.TRADE_CONTEXT_ID),
+                state,
+                row.getLong(OrderLifecycleColumns.CUMULATIVE_QTY),
+                row.getLong(OrderLifecycleColumns.PENDING_QTY),
+                row.isNullAt(OrderLifecycleColumns.AVERAGE_FILL_PRICE_PAISE)
+                        ? 0L : row.getLong(OrderLifecycleColumns.AVERAGE_FILL_PRICE_PAISE),
+                row.getString(OrderLifecycleColumns.SOURCE_EVENT_ID).toString(),
+                row.getLong(OrderLifecycleColumns.SOURCE_VERSION),
+                row.isNullAt(OrderLifecycleColumns.SOURCE_EVENT_TIME)
+                        ? 0L : row.getLong(OrderLifecycleColumns.SOURCE_EVENT_TIME),
+                row.getLong(OrderLifecycleColumns.LAST_RECEIVE_TIME),
+                row.getString(OrderLifecycleColumns.CORRELATION_STATE).toString(),
+                row.getString(OrderLifecycleColumns.SCHEMA_VERSION).toString());
+    }
+
+    private static String nullableString(InternalRow row, int index) {
+        return row.isNullAt(index) ? null : row.getString(index).toString();
     }
     private GenericRow positionRow(NormalizedExecutionEvent e) {
         var p = e.position();
@@ -417,6 +548,10 @@ public final class FlussProjectionWriter implements ProjectionWriter {
         appendPools.clear();
         upsertPools.values().forEach(FlussHandlePool::close);
         upsertPools.clear();
+        // M1-6: same rule for the lifecycle lookup handles — a Lookuper held past the table
+        // close is a dead reference, and a lookup still in flight must not be re-pooled.
+        lookuperPools.values().forEach(FlussHandlePool::close);
+        lookuperPools.clear();
         Exception failure = null;
         for (Table t : List.copyOf(tables.values())) {
             try { t.close(); } catch (Exception e) {

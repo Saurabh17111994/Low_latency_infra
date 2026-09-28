@@ -30,6 +30,45 @@ pub const ACTOR_NAUTILUS: &str = "nautilus";
 /// Event envelope message type (canonicalized; the gateway verifies hash+auth, not the tag).
 pub const EVENT_MESSAGE_TYPE: &str = "EXECUTION_EVENT";
 
+/// H1-5 family (M1-6): version slots one millisecond of receive time owns (the mix width).
+const VERSION_SLOTS_PER_MILLIS: i64 = 1_000_000;
+
+/// Largest receive time whose scaled version cannot overflow a signed long (H1-5 bound).
+const MAX_VERSION_RECEIVE_TIME_MS: i64 =
+    (i64::MAX - (VERSION_SLOTS_PER_MILLIS - 1)) / VERSION_SLOTS_PER_MILLIS;
+
+/// FNV-1a 64-bit over the UTF-8 bytes of `value` — the H1-5 identity mix (byte-identical to the
+/// Java `FillEventMapper.fnv1a64`, so a Rust-emitted version compares against a Java-written one).
+fn fnv1a64(value: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// The projection version of an emitted lifecycle event (M1-6): the H1-5 construction,
+/// `received_ts_ms * 1_000_000 + floorMod(fnv1a64(postback_event_id), 1_000_000)`, identical to
+/// the Java `FillEventMapper.fillVersion` family. Two distinct events received in the same
+/// millisecond carry distinct versions (the collision that used to read as CONFLICT + halt);
+/// a replay of the same id yields the identical version (DUPLICATE).
+///
+/// The receive time is clamped into the version range instead of overflowing: a negative or
+/// absurd stamp is a loud warning and a deterministic value, never a wrapped version.
+fn lifecycle_source_version(received_ts_ms: i64, postback_event_id: &str) -> i64 {
+    let clamped = received_ts_ms.clamp(0, MAX_VERSION_RECEIVE_TIME_MS);
+    if clamped != received_ts_ms {
+        tracing::warn!(
+            received_ts_ms,
+            "lifecycle source version receive time out of range; clamped to {}",
+            clamped
+        );
+    }
+    let identity_mix = (fnv1a64(postback_event_id) % VERSION_SLOTS_PER_MILLIS as u64) as i64;
+    clamped * VERSION_SLOTS_PER_MILLIS + identity_mix
+}
+
 /// Builds a normalized lifecycle+correlation event image for a routed place ack.
 ///
 /// `trade_context_id` is read from the verified payload; quantities come from the
@@ -96,7 +135,7 @@ pub fn lifecycle_event_value(
             "cumulativeQty": 0,
             "pendingQty": pending_qty,
             "averageFillPricePaise": serde_json::Value::Null,
-            "sourceVersion": 1,
+            "sourceVersion": lifecycle_source_version(report.received_ts_ms, &postback_event_id),
             "sourceEventTime": now_ms,
             "lastReceiveTime": now_ms,
             "correlationState": "VERIFIED",
@@ -432,5 +471,98 @@ mod tests {
             "request body was truncated: {request}"
         );
         server.await.unwrap();
+    }
+
+    // ── M1-6: the emitted lifecycle source version is the H1-5 family ──────────────────────────
+
+    /// Cross-language pin: the mix is FNV-1a 64 of the id mod 1e6 and the version is
+    /// `received_ts_ms * 1_000_000 + mix` — the exact Java `FillEventMapper.fillVersion`
+    /// construction (H1-5), so a Rust-emitted lifecycle version and a Java-written fill version
+    /// on the same clock cannot drift into a protocol CONFLICT.
+    #[test]
+    fn m1_6_source_version_pins_the_h1_5_vector() {
+        let recv = 1_700_000_000_000i64;
+        assert_eq!(
+            lifecycle_source_version(recv, "pb-a"),
+            1_700_000_000_000_562_525
+        );
+        assert_eq!(
+            lifecycle_source_version(recv, "pb-b"),
+            1_700_000_000_000_677_892
+        );
+        assert_eq!(
+            lifecycle_source_version(recv, "pb-1"),
+            1_700_000_000_000_408_397
+        );
+        assert_eq!(
+            lifecycle_source_version(recv, "pb-2"),
+            1_700_000_000_000_523_764
+        );
+        assert_eq!(
+            lifecycle_source_version(recv, "pb-42"),
+            1_700_000_000_000_612_276
+        );
+    }
+
+    /// Two distinct ids received in the same millisecond carry distinct versions, a replay is
+    /// identical, and the receive millisecond still owns the high digits (ordering across
+    /// milliseconds is unchanged; the mix stays below 1e6).
+    #[test]
+    fn m1_6_same_millisecond_ids_get_distinct_stable_versions() {
+        let recv = 1_700_000_000_000i64;
+        assert_ne!(
+            lifecycle_source_version(recv, "pb-a"),
+            lifecycle_source_version(recv, "pb-b")
+        );
+        assert_eq!(
+            lifecycle_source_version(recv, "pb-42"),
+            lifecycle_source_version(recv, "pb-42"),
+            "a replay of the same id yields the identical version"
+        );
+        assert_eq!(
+            lifecycle_source_version(recv, "pb-a") / VERSION_SLOTS_PER_MILLIS,
+            recv,
+            "the receive millisecond owns the high digits"
+        );
+    }
+
+    /// The emitting site carries the formula version, not a constant: the event image and the
+    /// helper are one behavior.
+    #[test]
+    fn m1_6_lifecycle_event_carries_the_formula_version() {
+        let mut rep = report();
+        rep.received_ts_ms = 1_700_000_000_123;
+        let event = lifecycle_event_value(
+            &rep,
+            &place_env(),
+            "acc-1",
+            "part-1",
+            1,
+            "tc-1",
+            1_700_000_000_500,
+        );
+        let postback_id = event["postbackEventId"].as_str().expect("postback id");
+        let expected = lifecycle_source_version(rep.received_ts_ms, postback_id);
+        assert_eq!(
+            event["lifecycle"]["sourceVersion"]
+                .as_i64()
+                .expect("version"),
+            expected
+        );
+        assert_ne!(expected, 1, "the hardcoded-version era is over");
+    }
+
+    /// Bounds: a negative or absurd receive time is clamped into the version range — a
+    /// deterministic, non-negative version, never a wrapped one.
+    #[test]
+    fn m1_6_version_bounds_are_clamped_not_overflowed() {
+        assert_eq!(
+            lifecycle_source_version(-1, "pb-a"),
+            lifecycle_source_version(0, "pb-a")
+        );
+        assert_eq!(
+            lifecycle_source_version(i64::MAX, "pb-a"),
+            MAX_VERSION_RECEIVE_TIME_MS * VERSION_SLOTS_PER_MILLIS + 562_525
+        );
     }
 }

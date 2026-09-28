@@ -468,6 +468,26 @@ public final class GatewayHttpServer implements AutoCloseable {
         }
         return new String(raw, StandardCharsets.UTF_8);
     }
+    /** M1-6: the stored-row lookup failure marker, possibly wrapped by the projection caller. */
+    static boolean causedByLookupUnavailable(Throwable failure) {
+        for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+            if (cause instanceof OrderLifecycleLookupUnavailableException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * M1-6: a refused lifecycle lookup is a transient read failure — 503 (retryable) — while every
+     * other projection failure stays 500. The distinction is the difference between "retry this
+     * event" and "a projection bug needs a human"; getting it backwards either hides a bug or
+     * turns a Fluss blip into data loss.
+     */
+    static int projectionFailureStatus(Throwable failure) {
+        return causedByLookupUnavailable(failure) ? 503 : 500;
+    }
+
     private void events(HttpExchange x) throws IOException {
         if (!"POST".equalsIgnoreCase(x.getRequestMethod())) { reply(x, 405, "method not allowed"); return; }
         // Fail-closed: when execution is disabled the bridge is disabled and the gateway remains HALTED.
@@ -517,7 +537,13 @@ public final class GatewayHttpServer implements AutoCloseable {
             readiness.durableWrites(false, String.valueOf(consumerFailure.getMessage()));
             // P3-063: the failing write owns this false, not the shed.
             shedActive.set(false);
-            reply(x, 500, "{\"error\":\"projection failed\"}");
+            // M1-6: a lifecycle lookup failure means the versioned gate could not read the stored
+            // row, so the write was refused — retryable, answered 503. It must not read as a
+            // permanent projection bug (500), and it must never fall back to a blind upsert.
+            int status = projectionFailureStatus(consumerFailure);
+            reply(x, status, status == 503
+                    ? "{\"error\":\"projection lookup unavailable\"}"
+                    : "{\"error\":\"projection failed\"}");
         } finally {
             // P3-294: the decrement-then-separate-snapshot-then-set is a
             // cross-atomic check-then-act — a concurrent shed can set false

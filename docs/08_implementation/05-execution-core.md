@@ -490,6 +490,17 @@ distinct versions instead of colliding into CONFLICT + scope halt. A replayed ro
 identical version (DUPLICATE), an equal version with different content remains the loud CONFLICT,
 and ordering across milliseconds is unchanged because the mix is bounded.
 
+The same construction applies to the executor's normalized lifecycle events (M1-6): the sync ack
+emitted to the gateway carries `received_ts_ms × 1e6 + mix(postback_event_id)`. On the gateway side
+the `Order_Lifecycle` write is no longer a blind upsert: `FlussProjectionWriter` reads the stored
+row for the full `(account_scope_id, broker_order_id)` composite key (pooled Lookuper),
+serializes the read-evaluate-write per key, and applies `OrderLifecycleProjector` — APPLIED →
+upsert the projected snapshot; DUPLICATE/STALE → no write (STALE logged with both versions);
+CONFLICT/REGRESSION/UNKNOWN → `Postback_Quarantine` + partition halt (epoch+1). A lookup failure
+refuses the write and is answered 503, never a fallback upsert. The executor's wire vocabulary
+(`ACCEPTED`, `CANCELED`, `COMPLETE`, …) is mapped onto the closed `OrderLifecycleState` set at the
+gate; an unmapped word is UNKNOWN → quarantine + halt (vocabulary drift fails closed).
+
 Correlation resolves in this order:
 1. Verified `broker_order_id` mapping in `Order_Correlation`.
 2. Verified echoed `client_order_ref` mapped to one attempt/instruction.

@@ -60,7 +60,7 @@ public final class GatewayStartup {
         return new Stores(
                 gates,
                 FlussControlStateStore.open(config),
-                FlussProjectionWriter.open(config),
+                FlussProjectionWriter.open(config, gates),
                 FlussProjectionLedgerStore.open(config));
     }
 

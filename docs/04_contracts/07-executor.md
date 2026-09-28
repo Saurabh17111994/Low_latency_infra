@@ -148,6 +148,12 @@ venue `postback_event_id`s per order, books the first delivery, and counts the a
 id is mandatory, so that shape exists only in the documented rollback window. The dedup key is
 never synthesized from quantity/price: that would silently suppress legitimate partial fills.
 
+The normalized lifecycle image the executor emits to the gateway `/v1/events` carries
+`sourceVersion` in the same H1-5 family (M1-6): `received_ts_ms × 1,000,000 + floorMod(fnv1a64(
+postbackEventId), 1,000,000)`. Two distinct attempts acknowledged in the same millisecond carry
+distinct versions; a re-emission of the same attempt carries the identical version (the gateway
+reads it as DUPLICATE); a receive stamp outside the version range is clamped, never wrapped.
+
 The bridge's `disabled` mode is the default and carries no Arrow credentials or route. `fake` mode
 is test-only. `live` mode is an explicit process configuration in which only the Go process loads
 Arrow credentials and opens the Arrow REST/order-update connections. Neither mode changes the

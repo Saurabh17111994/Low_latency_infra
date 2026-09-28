@@ -34,14 +34,14 @@ Where a body section and this list disagree, this list wins.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| M1 — execution follow-ups (the layer under H1) | 6 | 4 | 0 | 2 | 0 | 0 | 0 |
+| M1 — execution follow-ups (the layer under H1) | 6 | 5 | 0 | 1 | 0 | 0 | 0 |
 | M2 — ops tooling truth | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
 | M3 — compute correctness and configuration | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | M4 — ingestion gates and accounting | 6 | 0 | 0 | 6 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **4** | **0** | **27** | **0** | **0** | **0** |
+| **Total** | **31** | **5** | **0** | **26** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -65,10 +65,10 @@ Where a body section and this list disagree, this list wins.
   `action = cmd_env.command`; same action + same hash → `Duplicate` (409, no send); same action +
   different hash → `ContractViolation` (halt); a different action claims fresh. Journal gains an
   additive `action` field. **Precondition for H1-3's flag flip.** (E5.) — CHG-371
-- [ ] **M1-6** — `Order_Lifecycle` goes through the versioned projector: pooled lookup +
+- [x] **M1-6** — `Order_Lifecycle` goes through the versioned projector: pooled lookup +
   `OrderLifecycleProjector.apply` (APPLIED → upsert; DUPLICATE/STALE → no-op; CONFLICT/REGRESSION/
   UNKNOWN → quarantine + partition halt), per-key serialization; the producer's `sourceVersion`
-  becomes the H1-5-shaped `eventTs·1e6 + hash(postback_event_id) mod 1e6`. (E6.)
+  becomes the H1-5-shaped `eventTs·1e6 + hash(postback_event_id) mod 1e6`. (E6.) — CHG-377
 
 #### M2 — ops tooling truth
 
