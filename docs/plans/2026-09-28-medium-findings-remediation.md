@@ -34,14 +34,14 @@ Where a body section and this list disagree, this list wins.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| M1 — execution follow-ups (the layer under H1) | 6 | 3 | 0 | 3 | 0 | 0 | 0 |
+| M1 — execution follow-ups (the layer under H1) | 6 | 4 | 0 | 2 | 0 | 0 | 0 |
 | M2 — ops tooling truth | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
 | M3 — compute correctness and configuration | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | M4 — ingestion gates and accounting | 6 | 0 | 0 | 6 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **3** | **0** | **28** | **0** | **0** | **0** |
+| **Total** | **31** | **4** | **0** | **27** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -58,9 +58,9 @@ Where a body section and this list disagree, this list wins.
   gateway `/v1/events`), node-owned refs to the node channel, and unknown refs to one-place halt.
   On socket drop: `missed_window` counter + Tier-11 reconciler on reconnect — never a fake replay
   buffer. (E3.)
-- [ ] **M1-4** — Fill idempotence: per-order `seen_fills` (cap 64 FIFO) keyed by
+- [x] **M1-4** — Fill idempotence: per-order `seen_fills` (cap 64 FIFO) keyed by
   `postback_event_id`; a duplicate is counted (`fill_duplicate`) and returned before booking;
-  empty id keeps today's path plus a `fill_without_postback_id` counter. (E4.)
+  empty id keeps today's path plus a `fill_without_postback_id` counter. (E4.) — CHG-376
 - [x] **M1-5** — Action-scoped durable claim: key becomes `(instruction_id, action)` with
   `action = cmd_env.command`; same action + same hash → `Duplicate` (409, no send); same action +
   different hash → `ContractViolation` (halt); a different action claims fresh. Journal gains an

@@ -223,6 +223,9 @@ pub struct BridgeExecutionClient {
     orders: Rc<RefCell<HashMap<ClientOrderId, VenueOrderId>>>,
     /// Mapping from deterministic `client_order_ref` (remarks) to `ClientOrderId` for fill correlation.
     client_refs: Rc<RefCell<HashMap<String, ClientOrderId>>>,
+    /// M1-4: per-order FIFO window of the venue postback ids already booked (`FILL_ID_WINDOW`), so
+    /// a replayed fill can never double-book the position or emit a second fill event.
+    seen_fills: Rc<RefCell<HashMap<ClientOrderId, VecDeque<String>>>>,
     /// Node-driven progress counter (P3-223): bumped on every mass-status callback the live
     /// runtime makes, so an observer outside the node can tell a running loop from a wedged one
     /// whose running flag never clears.
@@ -273,6 +276,7 @@ impl BridgeExecutionClient {
             })),
             orders: Rc::new(RefCell::new(HashMap::new())),
             client_refs: Rc::new(RefCell::new(HashMap::new())),
+            seen_fills: Rc::new(RefCell::new(HashMap::new())),
             progress: Rc::new(Cell::new(0)),
             positions: Rc::new(RefCell::new(HashMap::new())),
             shutdown_watch: crate::shutdown::ShutdownWatch::default(),
@@ -774,7 +778,46 @@ impl BridgeExecutionClient {
         Ok(parsed)
     }
 
+    /// M1-4: the per-order fill-id window size. 64 is far beyond any replay episode the venue
+    /// protocol produces, and it bounds memory per order without timestamps or scans.
+    const FILL_ID_WINDOW: usize = 64;
+
+    /// Records a fill's venue postback id for `order` and answers whether it is new (M1-4). The
+    /// window is a bounded FIFO: the oldest id is forgotten only when a newer distinct fill
+    /// arrives once the window is full.
+    fn record_fill_id(&self, order: ClientOrderId, postback_event_id: &str) -> bool {
+        let mut seen = self.seen_fills.borrow_mut();
+        let window = seen.entry(order).or_default();
+        if window.iter().any(|id| id == postback_event_id) {
+            return false;
+        }
+        if window.len() == Self::FILL_ID_WINDOW {
+            window.pop_front();
+        }
+        window.push_back(postback_event_id.to_string());
+        true
+    }
+
     fn handle_fill(&self, order: &OrderAny, report: &ReportEnvelope, ts_event: UnixNanos) {
+        // M1-4: per-order idempotence before anything is booked. The venue's postback id keys the
+        // replay window; a duplicate is absorbed here (counted, warned — no position change, no
+        // event, no halt). A missing id keeps the legacy path and is counted. The key is never
+        // synthesized from qty/price: that would silently suppress legitimate partial fills.
+        if report.postback_event_id.is_empty() {
+            crate::telemetry::METRICS
+                .fill_without_postback_id
+                .fetch_add(1, Ordering::Relaxed);
+        } else if !self.record_fill_id(order.client_order_id(), &report.postback_event_id) {
+            crate::telemetry::METRICS
+                .fill_duplicate
+                .fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                "duplicate order_filled for {} (postback_event_id={:?}): already booked, ignoring",
+                order.client_order_id(),
+                report.postback_event_id
+            );
+            return;
+        }
         let venue_order_id = VenueOrderId::new(&report.broker_order_id);
         let trade_id = if report.postback_event_id.is_empty() {
             TradeId::new(format!("T{}", ts_event))
@@ -1585,6 +1628,8 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn h1_2_timeout_is_unknown_exactly_one_call_halt_and_no_terminal_event() {
         use nautilus_common::clients::ExecutionClient;
+        use nautilus_common::messages::ExecutionEvent;
+        use nautilus_model::events::OrderEventAny;
         use std::sync::atomic::Ordering;
 
         let fake = crate::bridge::FakeBridge::new();
@@ -1604,9 +1649,15 @@ mod tests {
         client.connect().await.expect("connect");
         enable_gate(&client);
 
-        let rejected_before = crate::telemetry::METRICS
-            .order_rejected
-            .load(Ordering::Relaxed);
+        // Tap the node's execution-event stream: "no terminal event" is order-scoped evidence.
+        // The process-global `order_rejected` counter is shared with parallel tests, so a
+        // zero-delta assertion on it is a race (observed flake 2026-09-29, 1 in 15 runs).
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        nautilus_common::live::runner::replace_exec_event_sender(tx);
+        client
+            .start()
+            .expect("start installs the prepared event sender");
+
         let unknown_before = crate::telemetry::METRICS
             .order_unknown
             .load(Ordering::Relaxed);
@@ -1627,6 +1678,17 @@ mod tests {
             .process_pending()
             .await
             .expect("an ambiguous send is handled (halted), not surfaced as a phantom retry");
+
+        let mut rejected_events = 0usize;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, ExecutionEvent::Order(OrderEventAny::Rejected(_))) {
+                rejected_events += 1;
+            }
+        }
+        assert_eq!(
+            rejected_events, 0,
+            "H1-4: an ambiguous outcome must never emit a terminal OrderRejected event"
+        );
 
         assert_eq!(
             calls.load(Ordering::SeqCst),
@@ -1654,14 +1716,6 @@ mod tests {
                 - unresolved_before
                 >= 1,
             "the ambiguous send remains an unresolved attempt"
-        );
-        assert_eq!(
-            crate::telemetry::METRICS
-                .order_rejected
-                .load(Ordering::Relaxed)
-                - rejected_before,
-            0,
-            "H1-4: an ambiguous outcome must not emit a terminal rejection"
         );
         drop(client);
     }
@@ -1695,9 +1749,6 @@ mod tests {
             .start()
             .expect("start installs the prepared event sender");
 
-        let rejected_before = crate::telemetry::METRICS
-            .order_rejected
-            .load(Ordering::Relaxed);
         let unknown_before = crate::telemetry::METRICS
             .order_unknown
             .load(Ordering::Relaxed);
@@ -1735,14 +1786,6 @@ mod tests {
                 .load(Ordering::Relaxed)
                 - unknown_before
                 >= 1
-        );
-        assert_eq!(
-            crate::telemetry::METRICS
-                .order_rejected
-                .load(Ordering::Relaxed)
-                - rejected_before,
-            0,
-            "an ambiguous outcome must not be reported as a decided rejection"
         );
         drop(client);
     }
@@ -2081,6 +2124,133 @@ mod tests {
         assert_eq!(
             client2.position(&instrument_id),
             rust_decimal::Decimal::from(0)
+        );
+    }
+
+    /// M1-4 fixture: an ENABLED client with the fixture order correlated under `REF-M14`.
+    fn m1_4_fill_fixture() -> (BridgeExecutionClient, InstrumentId) {
+        let (client, instrument_id, client_order_id, _order) =
+            roundtrip_fixture(crate::bridge::FakeBridge::new(), &[]);
+        enable_gate(&client);
+        client
+            .client_refs
+            .borrow_mut()
+            .insert("REF-M14".into(), client_order_id);
+        (client, instrument_id)
+    }
+
+    fn m1_4_fill(postback_event_id: &str, qty: &str) -> ReportEnvelope {
+        ReportEnvelope {
+            command: "postback".into(),
+            client_order_ref: "REF-M14".into(),
+            broker_order_id: "BRK-1".into(),
+            event_type: Some("order_filled".into()),
+            postback_event_id: postback_event_id.into(),
+            fill_quantity: Some(qty.into()),
+            fill_price: Some("100".into()),
+            ..ReportEnvelope::default()
+        }
+    }
+
+    /// M1-4: the same venue postback id delivered twice books once — no position change, no
+    /// event, no halt — and the absorbed duplicate is counted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn m1_4_duplicate_fill_is_ignored_not_booked() {
+        let (client, instrument_id) = m1_4_fill_fixture();
+
+        client.handle_report(m1_4_fill("PB-1", "10"));
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(10)
+        );
+        let after_first = crate::telemetry::METRICS
+            .fill_duplicate
+            .load(Ordering::Relaxed);
+
+        client.handle_report(m1_4_fill("PB-1", "10"));
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(10),
+            "a replayed fill must not double-book the position"
+        );
+        assert_ne!(
+            client.gate_state(),
+            ExecState::Halted,
+            "a replay is absorbed, not treated as ambiguity"
+        );
+        assert!(
+            crate::telemetry::METRICS
+                .fill_duplicate
+                .load(Ordering::Relaxed)
+                > after_first,
+            "the absorbed duplicate is counted"
+        );
+    }
+
+    /// M1-4: distinct venue postback ids are distinct fills and accumulate.
+    #[tokio::test(flavor = "current_thread")]
+    async fn m1_4_distinct_fill_ids_accumulate() {
+        let (client, instrument_id) = m1_4_fill_fixture();
+        client.handle_report(m1_4_fill("PB-1", "10"));
+        client.handle_report(m1_4_fill("PB-2", "10"));
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(20),
+            "distinct venue postbacks are distinct fills"
+        );
+    }
+
+    /// M1-4: a fill with no venue postback id keeps the legacy path (books, counted) — the id is
+    /// mandatory at the bridge, so this is the rollback-window shape, never a normal one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn m1_4_empty_postback_id_keeps_the_legacy_path_and_is_counted() {
+        let (client, instrument_id) = m1_4_fill_fixture();
+        let before = crate::telemetry::METRICS
+            .fill_without_postback_id
+            .load(Ordering::Relaxed);
+        client.handle_report(m1_4_fill("", "10"));
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(10),
+            "the legacy path still books"
+        );
+        assert!(
+            crate::telemetry::METRICS
+                .fill_without_postback_id
+                .load(Ordering::Relaxed)
+                > before,
+            "the missing-id shape is counted"
+        );
+    }
+
+    /// M1-4: the window is a bounded FIFO — only the 64 most recent ids suppress. An older replay
+    /// is re-admitted (bounded memory beats an unbounded id set; the venue never replays that far),
+    /// while the newest still suppresses.
+    #[tokio::test(flavor = "current_thread")]
+    async fn m1_4_fill_window_is_a_bounded_fifo() {
+        let (client, instrument_id) = m1_4_fill_fixture();
+        for i in 0..=64 {
+            client.handle_report(m1_4_fill(&format!("PB-{i}"), "1"));
+        }
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(65)
+        );
+
+        // PB-0 fell out of the 64-window when PB-64 arrived.
+        client.handle_report(m1_4_fill("PB-0", "1"));
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(66),
+            "the evicted oldest id is re-admitted"
+        );
+
+        // PB-64 is the newest and still suppresses.
+        client.handle_report(m1_4_fill("PB-64", "1"));
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(66),
+            "the newest id stays in the window"
         );
     }
 

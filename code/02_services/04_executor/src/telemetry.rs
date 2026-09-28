@@ -28,6 +28,10 @@ pub struct Metrics {
     pub order_denied_wrong_partition: AtomicU64,
     /// M1-2: UNKNOWN windows that escalated to operator review after the reconcile timer.
     pub unknown_escalated: AtomicU64,
+    /// M1-4: fill postbacks absorbed because this order had already booked that venue postback id.
+    pub fill_duplicate: AtomicU64,
+    /// M1-4: fill postbacks with no venue postback id (legacy/rollback shape) — booked, counted.
+    pub fill_without_postback_id: AtomicU64,
     /// Number of times the gate was safety-halted.
     pub gate_safety_halt: AtomicU64,
     /// Asynchronous bridge reports drained (fills, cancels).
@@ -63,6 +67,8 @@ impl Metrics {
             order_unknown: self.order_unknown.load(Ordering::Relaxed),
             order_denied_wrong_partition: self.order_denied_wrong_partition.load(Ordering::Relaxed),
             unknown_escalated: self.unknown_escalated.load(Ordering::Relaxed),
+            fill_duplicate: self.fill_duplicate.load(Ordering::Relaxed),
+            fill_without_postback_id: self.fill_without_postback_id.load(Ordering::Relaxed),
             gate_safety_halt: self.gate_safety_halt.load(Ordering::Relaxed),
             report_received: self.report_received.load(Ordering::Relaxed),
             report_event_accepted: self.report_event_accepted.load(Ordering::Relaxed),
@@ -83,6 +89,8 @@ pub struct MetricsSnapshot {
     pub order_unknown: u64,
     pub order_denied_wrong_partition: u64,
     pub unknown_escalated: u64,
+    pub fill_duplicate: u64,
+    pub fill_without_postback_id: u64,
     pub gate_safety_halt: u64,
     pub report_received: u64,
     pub report_event_accepted: u64,
@@ -100,6 +108,8 @@ pub static METRICS: Metrics = Metrics {
     order_unknown: AtomicU64::new(0),
     order_denied_wrong_partition: AtomicU64::new(0),
     unknown_escalated: AtomicU64::new(0),
+    fill_duplicate: AtomicU64::new(0),
+    fill_without_postback_id: AtomicU64::new(0),
     gate_safety_halt: AtomicU64::new(0),
     report_received: AtomicU64::new(0),
     report_event_accepted: AtomicU64::new(0),

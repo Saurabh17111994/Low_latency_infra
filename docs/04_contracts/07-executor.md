@@ -141,6 +141,13 @@ ignored. The same vocabulary is pinned machine-readably in
 dispatch tests; contracts 06/07 and that fixture are checked against each other by a
 gate-discovered Python test.
 
+Repeated delivery of a fill is absorbed per order (M1-4): the executor keeps the 64 most recent
+venue `postback_event_id`s per order, books the first delivery, and counts the absorbed replay
+(`fill_duplicate`) with no position change, no second event, and no halt. A fill with no
+`postback_event_id` keeps the legacy path and is counted (`fill_without_postback_id`) — the bridge
+id is mandatory, so that shape exists only in the documented rollback window. The dedup key is
+never synthesized from quantity/price: that would silently suppress legitimate partial fills.
+
 The bridge's `disabled` mode is the default and carries no Arrow credentials or route. `fake` mode
 is test-only. `live` mode is an explicit process configuration in which only the Go process loads
 Arrow credentials and opens the Arrow REST/order-update connections. Neither mode changes the

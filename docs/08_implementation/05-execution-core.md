@@ -463,7 +463,10 @@ effect (Nautilus fill dedup); older versions cannot regress state; conflicting/r
 moves the record to `UNKNOWN`, halts affected flow, and alerts.
 
 The per-update transition protocol is explicit (custom policy layered on the OMS):
-1. Exact-duplicate source event → no duplicate effect.
+1. Exact-duplicate source event → no duplicate effect. Fill postbacks are absorbed per order by
+   the last 64 venue `postback_event_id`s (bounded FIFO; the replay is counted `fill_duplicate`,
+   books nothing, emits nothing, never halts). A fill without the id keeps the legacy path and is
+   counted (`fill_without_postback_id`) — the key is never synthesized from quantity/price (M1-4).
 2. Older source version → stale-evidence metric/audit; no regression.
 3. Equal version with conflicting content → `UNKNOWN`, quarantine, halt.
 4. Terminal-state regression → reject, quarantine, halt.
