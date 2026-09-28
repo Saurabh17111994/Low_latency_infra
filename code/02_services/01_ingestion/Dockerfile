@@ -32,6 +32,11 @@ COPY 02_services/06_execution_gateway/pom.xml ./02_services/06_execution_gateway
 RUN --mount=type=cache,target=/root/.m2 mvn -q dependency:go-offline -pl 02_services/01_ingestion -am 2>/dev/null || true
 COPY 02_services/01_ingestion/src ./02_services/01_ingestion/src
 RUN --mount=type=cache,target=/root/.m2 mvn -q -DskipTests package -pl 02_services/01_ingestion -am
+# C3-1: bake the daily Fluss probe into the image. The VM has no host JDK, and
+# the shaded ingestion.jar already carries the Fluss client classes the probe
+# imports, so the build toolchain that produced the jar also produces the probe.
+COPY 01_platform/04_scripts/fluss-probes/FlussReadLagProbe.java /src/probe/
+RUN javac -cp /src/02_services/01_ingestion/target/ingestion.jar -d /probe-classes /src/probe/FlussReadLagProbe.java
 
 # Stage 3: Runtime
 # P1-135: pinned (2026-09-08, imagetools inspect).
@@ -39,6 +44,8 @@ FROM eclipse-temurin:17-jre@sha256:13cc28a6cc72a38ce1f00c906be3580c1a3e604b8984d
 WORKDIR /app
 COPY --from=go-builder /arrow-bridge /app/arrow-bridge
 COPY --from=java-builder /src/02_services/01_ingestion/target/ingestion.jar /app/ingestion.jar
+# C3-1: the probe class the daily runner execs inside this container.
+COPY --from=java-builder /probe-classes/FlussReadLagProbe.class /app/probe/
 COPY 02_services/01_ingestion/docker-entrypoint.sh /app/docker-entrypoint.sh
 # 2026-08-22 single-pane: OTel Javaagent for JVM metrics (jvm.*) → collector.
 # Agent is downloaded at build so image stays self-contained; same endpoint as gateway.

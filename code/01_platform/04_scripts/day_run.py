@@ -29,7 +29,6 @@ import os
 import pathlib
 import re
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -50,9 +49,6 @@ COMPOSE_FILE = STACK / "docker-compose.yml"
 # load_vm_env at start, so the daily VM needs no flags on the morning command.
 VM_ENV_FILE = STACK / ".env.vm"
 STACK_LOCK = ROOT / "code" / "01_platform" / "04_scripts" / "stack-lock.sh"
-FLUSS_PROBE_SRC = (ROOT / "code" / "01_platform" / "04_scripts" / "fluss-probes"
-                   / "FlussReadLagProbe.java")
-CP_FILE = ROOT / "code" / "02_services" / "01_ingestion" / "target" / "cp.txt"
 IMAGE_STALENESS_CHECK = (ROOT / "code" / "01_platform" / "04_scripts"
                          / "image_staleness_check.py")
 EVIDENCE_ROOT = ROOT / "logs" / "day"
@@ -800,37 +796,35 @@ class Collector:
         return out
 
     # -- fluss passive probe ----------------------------------------------
-    def _compile_fluss_probe(self, workdir: pathlib.Path) -> str:
-        cls = workdir / "FlussReadLagProbe.class"
-        src = FLUSS_PROBE_SRC
-        cp = CP_FILE.read_text().strip() if CP_FILE.exists() else ""
-        if not cp:
-            raise FileNotFoundError(
-                f"classpath file missing: {CP_FILE} (run `make test` or "
-                "`cd code && mvn -q -pl 02_services/01_ingestion -am package -DskipTests`)")
-        if not cls.exists() or cls.stat().st_mtime < src.stat().st_mtime:
-            javac = shutil.which("javac")
-            if not javac:
-                raise FileNotFoundError("javac not found on PATH")
-            subprocess.run([javac, "-cp", cp, "-d", str(workdir), str(src)],
-                           check=True, capture_output=True, text=True, timeout=120)
-        return cp
+    def fluss_log_end(self, table: str) -> dict:
+        """C3-2: the probe runs inside the running ingestion container.
 
-    def fluss_log_end(self, table: str, workdir: pathlib.Path) -> dict:
+        The class is baked into the image (`/app/probe/FlussReadLagProbe.class`)
+        and the shaded `/app/ingestion.jar` carries the Fluss client, so the
+        same command works on the dev PC and on a golden VM — no host JDK and no
+        host-built classpath file. A failed exec is reported as not-ok (the board
+        stays PENDING) rather than guessed.
+        """
         try:
-            cp = self._compile_fluss_probe(workdir)
-            proc = subprocess.run(
-                ["java", "--add-opens=java.base/java.lang=ALL-UNNAMED",
+            out = self.runner.compose(
+                ["exec", "-T", "ingestion", "java",
+                 "--add-opens=java.base/java.lang=ALL-UNNAMED",
                  "--add-opens=java.base/java.nio=ALL-UNNAMED",
-                 "-cp", f"{workdir}:{cp}", "FlussReadLagProbe",
-                 "default", table, "localhost:9123"],
-                capture_output=True, text=True, timeout=30)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-                FileNotFoundError) as exc:
+                 "-cp", "/app/ingestion.jar:/app/probe", "FlussReadLagProbe",
+                 "default", table, "fluss-coordinator:9123"],
+                check=True, timeout=30)
+        except subprocess.CalledProcessError as exc:
+            # The probe exits 3 when some partitions fail but still prints the
+            # sample; any other non-zero exit is a real failure.
+            if exc.returncode == 3 and exc.output:
+                out = exc.output
+            else:
+                return {"ok": False, "error": (exc.output or str(exc)).strip()[:200]}
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
             return {"ok": False, "error": str(exc)[:200]}
-        lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
-        if proc.returncode not in (0, 3) or not lines:
-            return {"ok": False, "error": (proc.stderr or "no sample").strip()[:200]}
+        lines = [ln for ln in (out or "").splitlines() if ln.strip()]
+        if not lines:
+            return {"ok": False, "error": "no sample"}
         parts = lines[-1].split("\t")
         if len(parts) < 5:
             return {"ok": False, "error": f"unexpected probe output: {lines[-1][:120]}"}
@@ -879,10 +873,8 @@ class Collector:
             return False
 
     # -- full snapshot -----------------------------------------------------
-    def collect(self, universe: dict | None = None, evidence_dir: pathlib.Path | None = None,
-                samples: bool | None = None, readiness: bool = False) -> Facts:
-        evidence_dir = evidence_dir or (EVIDENCE_ROOT / "collect")
-        evidence_dir.mkdir(parents=True, exist_ok=True)
+    def collect(self, universe: dict | None = None, samples: bool | None = None,
+                readiness: bool = False) -> Facts:
         session = session_now()
         facts = Facts(session=session, universe=universe or {})
         facts.expected = self.expected_services()
@@ -894,7 +886,7 @@ class Collector:
             # logs; log scans, container envs, state paths and the other-table
             # probes are board facts, not readiness gates. Keep the wait loop
             # to services + the one table it gates on.
-            facts.fluss["raw"] = self.fluss_log_end("raw_table_1", evidence_dir)
+            facts.fluss["raw"] = self.fluss_log_end("raw_table_1")
             facts.fluss["window_s"] = self.window_s
             return facts
         facts.checkpoints = self.checkpoints(facts.jobs)
@@ -911,14 +903,14 @@ class Collector:
         for key, table in (("raw", "raw_table_1"),
                            ("candles", "feature_candles_15s"),
                            ("signals", "Signal_Candidates")):
-            first = self.fluss_log_end(table, evidence_dir)
+            first = self.fluss_log_end(table)
             facts.fluss[key] = first
         if want_samples and facts.fluss.get("raw", {}).get("ok"):
             time.sleep(self.window_s)
             for key, table in (("raw", "raw_table_1"),
                                ("candles", "feature_candles_15s"),
                                ("signals", "Signal_Candidates")):
-                second = self.fluss_log_end(table, evidence_dir)
+                second = self.fluss_log_end(table)
                 if second.get("ok") and facts.fluss.get(key, {}).get("ok"):
                     facts.fluss[key] = {
                         "ok": True,

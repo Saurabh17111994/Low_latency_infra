@@ -33,8 +33,8 @@ Where a body section and this list disagree, this list wins.
 |---|---|---|---|---|---|---|---|
 | C1 — live postback mapping (fills/cancels/rejects must never be dropped) | 7 | 7 | 0 | 0 | 0 | 0 | 0 |
 | C2 — broker secrets must never reach day evidence | 5 | 4 | 0 | 0 | 0 | 0 | 1 |
-| C3 — golden image must run the daily paths without a host JDK | 8 | 0 | 0 | 7 | 1 | 0 | 0 |
-| **Total** | **20** | **11** | **0** | **7** | **1** | **0** | **1** |
+| C3 — golden image must run the daily paths without a host JDK | 8 | 2 | 1 | 4 | 1 | 0 | 0 |
+| **Total** | **20** | **13** | **1** | **4** | **1** | **0** | **1** |
 
 #### C1 — live postback mapping (fills/cancels/rejects must never be dropped)
 
@@ -81,9 +81,9 @@ Where a body section and this list disagree, this list wins.
 
 #### C3 — golden image must run the daily paths without a host JDK
 
-- [ ] **C3-1** — Bake `FlussReadLagProbe.class` into the ingestion image (compile in the
+- [x] **C3-1** — Bake `FlussReadLagProbe.class` into the ingestion image (compile in the
   `java-builder` stage against the shaded `ingestion.jar`, COPY to `/app/probe/`).
-- [ ] **C3-2** — `day_run` runs the probe through the running ingestion container
+- [x] **C3-2** — `day_run` runs the probe through the running ingestion container
   (`docker compose exec -T ingestion java … FlussReadLagProbe … fluss-coordinator:9123`); the
   host `javac` + `target/cp.txt` dependency is deleted.
   (DECIDED 2026-09-28 — container path on every host, PC and VM; §9.)
@@ -100,7 +100,7 @@ Where a body section and this list disagree, this list wins.
 - [ ] **C3-6** — Docs: `CLOUDPE_DAILY_VM.md` (§2/§3 + the failure-mode row that says to run the
   host EOD command), `.env.vm.example` (`EOD_RUNNER=compose`, `EOD_COMPOSE_FILE`), EOD runbook
   sections.
-- [ ] **C3-7** — Tests: scheduler compose runner (stubbed docker), golden-recipe pins extended,
+- [~] **C3-7** — Tests: scheduler compose runner (stubbed docker), golden-recipe pins extended,
   day_run probe command builder.
 - [L] **C3-8** — On-VM rehearsal: one throwaway CloudPe VM built by the recipe; `--check` PASS;
   `make day ARGS="start"` / `status` / `stop` in a non-market window prove the probe path and

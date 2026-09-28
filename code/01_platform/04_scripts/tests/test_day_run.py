@@ -563,7 +563,7 @@ class CheckpointSamplingTests(unittest.TestCase):
             def effective_tokens(self, ingestion_running):
                 return 2433
 
-            def fluss_log_end(self, table, workdir):
+            def fluss_log_end(self, table):
                 clock[0] += 10.0  # each probe leg costs wall clock
                 return {"ok": True, "log_end": 1000}
 
@@ -575,8 +575,7 @@ class CheckpointSamplingTests(unittest.TestCase):
 
         with mock.patch.object(day_run.time, "time", fake_time), mock.patch.object(
                 day_run.time, "sleep", fake_sleep):
-            facts = _Probe().collect(
-                samples=True, evidence_dir=pathlib.Path(tempfile.mkdtemp()))
+            facts = _Probe().collect(samples=True)
             age = day_run._checkpoint_age_ms(facts)
 
         # The collection burns 80s of wall clock (20s window + 6 probes x 10s)
@@ -630,6 +629,45 @@ class StreamRunner(day_run.Runner):
                 yield from lines
 
 
+class ProbeContainerTests(unittest.TestCase):
+    """C3-2: the daily Fluss probe runs through the ingestion container."""
+
+    def test_fluss_log_end_execs_the_probe_in_the_ingestion_container(self):
+        class ProbeRunner(StreamRunner):
+            def run(self, argv, env=None, check=True, capture=True, timeout=1800):
+                argv = [str(a) for a in argv]
+                self.calls.append(argv)
+                if "exec" in argv:
+                    return ("1790619364842\tdefault\traw_table_1\t3\t12\t1000\n"
+                            "1790619364842\tdefault\traw_table_1\t3\t12\t1000\n")
+                return ""
+
+        runner = ProbeRunner()
+        collector = day_run.Collector(runner)
+        result = collector.fluss_log_end("raw_table_1")
+        self.assertEqual(result, {"ok": True, "log_end": 1000,
+                                  "sampled_at_ms": 1790619364842})
+        exec_call = next(call for call in runner.calls if "exec" in call)
+        index = exec_call.index("exec")
+        self.assertEqual(exec_call[index:index + 9], [
+            "exec", "-T", "ingestion", "java",
+            "--add-opens=java.base/java.lang=ALL-UNNAMED",
+            "--add-opens=java.base/java.nio=ALL-UNNAMED",
+            "-cp", "/app/ingestion.jar:/app/probe", "FlussReadLagProbe",
+        ])
+        self.assertEqual(exec_call[-3:], ["default", "raw_table_1",
+                                          "fluss-coordinator:9123"])
+
+    def test_probe_failure_is_reported_not_guessed(self):
+        class BrokenRunner(StreamRunner):
+            def run(self, argv, env=None, check=True, capture=True, timeout=1800):
+                raise subprocess.CalledProcessError(1, list(argv), output="boom")
+
+        result = day_run.Collector(BrokenRunner()).fluss_log_end("raw_table_1")
+        self.assertFalse(result["ok"])
+        self.assertIn("boom", result["error"])
+
+
 class ReadinessCollectTests(unittest.TestCase):
     def _collector(self, **kwargs):
         runner = StreamRunner(**kwargs)
@@ -641,7 +679,7 @@ class ReadinessCollectTests(unittest.TestCase):
             config_services=["fluss-tablet", "ingestion", "flink-jobmanager"],
             lines={"fluss-tablet": ["FATAL tablet exploded"]})
         with mock.patch.object(day_run.Collector, "fluss_log_end",
-                               lambda self, table, workdir: {"ok": True, "log_end": 7}):
+                               lambda self, table: {"ok": True, "log_end": 7}):
             facts = collector.collect(readiness=True)
         self.assertEqual(sorted(facts.fluss), ["raw", "window_s"])
         self.assertFalse(runner.streams)
@@ -654,7 +692,7 @@ class ReadinessCollectTests(unittest.TestCase):
             lines={"fluss-tablet": ["FATAL tablet exploded"],
                    "ingestion": ["manifest loaded (instruments=2433)"]})
         with mock.patch.object(day_run.Collector, "fluss_log_end",
-                               lambda self, table, workdir: {"ok": True, "log_end": 7}):
+                               lambda self, table: {"ok": True, "log_end": 7}):
             facts = collector.collect(samples=False)
         self.assertEqual(sorted(k for k in facts.fluss if k != "window_s"),
                          ["candles", "raw", "signals"])
