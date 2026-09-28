@@ -144,6 +144,9 @@ SITES: list[tuple[str, str, str, str]] = [
      "pins the invocation rather than the redirect: both --env-file flags and -f must still be here"),
     ("code/01_platform/04_scripts/run-monday-gates.sh", "docker compose version", "TEXT",
      "gate step 18 capability probe — asks whether the compose plugin exists, never invokes the stack"),
+    ("code/01_platform/04_scripts/vm-golden-build.sh", "docker compose version", "TEXT",
+     "CHG-362 golden-image build capability probe — asks whether the compose plugin exists, never "
+     "invokes the stack"),
     ("code/01_platform/04_scripts/stage-a2-baseline.sh", '"${COMPOSE[@]}" up -d flink-jobmanager', "VAR",
      "P6-554: bring-up via the compose array (P6-468), not a bare docker-compose FLAGS line"),
     ("code/01_platform/04_scripts/stage-soak-e2e.sh", "secrets.env exec -T flink-jobmanager flink cancel", "FLAGS_DIR", ""),
