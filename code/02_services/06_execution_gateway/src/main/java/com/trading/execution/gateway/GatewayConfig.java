@@ -29,7 +29,8 @@ public record GatewayConfig(
         String executionPartitionId,
         boolean executionEnabled,
         int maxPendingProjectionRecords,
-        Duration requestBudget) {
+        Duration requestBudget,
+        int safetyHaltPollMs) {
 
     public GatewayConfig {
         require(flussBootstrap, "FLUSS_BOOTSTRAP");
@@ -66,6 +67,11 @@ public record GatewayConfig(
         if (requestBudget.isZero() || requestBudget.isNegative()) {
             throw new IllegalArgumentException("GATEWAY_REQUEST_BUDGET_MS must be positive");
         }
+        // H1-1: the safety-halt consumer polls on this period. Zero/negative would busy-loop the
+        // replay and starve the Fluss client it shares with the intent path; refuse it at startup.
+        if (safetyHaltPollMs <= 0) {
+            throw new IllegalArgumentException("SAFETY_HALT_POLL_MS must be positive");
+        }
         // C2: the request budget must fit at least one attempt plus the backoff that follows it.
         // Below that it cannot retry anything, and truncated to zero it would shed every call
         // after a single attempt with no backoff applied at all - the same "the wait never
@@ -98,6 +104,14 @@ public record GatewayConfig(
     public static final int DEFAULT_MAX_PENDING_PROJECTION_RECORDS = 1000;
 
     /**
+     * H1-1 default safety-halt consumer poll period. One second bounds how long a durable halt
+     * request (e.g. the executor's clock-drift halt, reported while the gateway's in-process flag
+     * is gone) can sit unapplied; the recorded decision accepted this cost on the ban-risk path
+     * (D6, 2026-09-28).
+     */
+    public static final int DEFAULT_SAFETY_HALT_POLL_MS = 1000;
+
+    /**
      * Legacy 18-arg constructor: defaults MAX_PENDING_PROJECTION_RECORDS to the
      * dossier default. New code should pass it explicitly or use fromEnvironment.
      */
@@ -111,7 +125,7 @@ public record GatewayConfig(
                 correlationTable, ledgerTable, haltTable, bindHost, bindPort, nautilusEndpoint,
                 protocolVersion, sharedSecret, requestTimeout, pollTimeout, accountScopeId,
                 executionPartitionId, executionEnabled, DEFAULT_MAX_PENDING_PROJECTION_RECORDS,
-                defaultRequestBudget(requestTimeout));
+                defaultRequestBudget(requestTimeout), DEFAULT_SAFETY_HALT_POLL_MS);
     }
 
     /**
@@ -182,7 +196,10 @@ public record GatewayConfig(
                 Map.entry("EXECUTION_PARTITION_ID", requiredEnv("EXECUTION_PARTITION_ID")),
                 Map.entry("EXECUTION_ENABLED", env("EXECUTION_ENABLED", "false")),
                 Map.entry("MAX_PENDING_PROJECTION_RECORDS",
-                        env("MAX_PENDING_PROJECTION_RECORDS", "1000"))));
+                        env("MAX_PENDING_PROJECTION_RECORDS", "1000")),
+                // H1-1: the durable safety-halt consumer's poll period (ms).
+                Map.entry("SAFETY_HALT_POLL_MS",
+                        env("SAFETY_HALT_POLL_MS", Integer.toString(DEFAULT_SAFETY_HALT_POLL_MS)))));
     }
 
     static GatewayConfig from(Map<String, String> e) {
@@ -204,7 +221,10 @@ public record GatewayConfig(
                 e.get("MAX_PENDING_PROJECTION_RECORDS") == null
                         ? DEFAULT_MAX_PENDING_PROJECTION_RECORDS
                         : integer(e, "MAX_PENDING_PROJECTION_RECORDS"),
-                requestBudget);
+                requestBudget,
+                e.get("SAFETY_HALT_POLL_MS") == null
+                        ? DEFAULT_SAFETY_HALT_POLL_MS
+                        : integer(e, "SAFETY_HALT_POLL_MS"));
     }
 
     private static boolean parseExecutionEnabled(String value) {
@@ -307,7 +327,8 @@ public record GatewayConfig(
                 + ", executionPartitionId=" + executionPartitionId
                 + ", executionEnabled=" + executionEnabled
                 + ", maxPendingProjectionRecords=" + maxPendingProjectionRecords
-                + ", requestBudget=" + requestBudget + "]";
+                + ", requestBudget=" + requestBudget
+                + ", safetyHaltPollMs=" + safetyHaltPollMs + "]";
     }
 
     /**

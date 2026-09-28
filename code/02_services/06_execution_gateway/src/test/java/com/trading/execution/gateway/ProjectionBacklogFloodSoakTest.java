@@ -48,7 +48,8 @@ class ProjectionBacklogFloodSoakTest {
                 "execution-gateway.v1", "secret1234567890123456",
                 Duration.ofMillis(2000), Duration.ofMillis(250), "acct1", "p1",
                 /* executionEnabled */ true, /* maxPendingProjectionRecords */ 4,
-                GatewayConfig.defaultRequestBudget(Duration.ofMillis(2000)));
+                GatewayConfig.defaultRequestBudget(Duration.ofMillis(2000)),
+                GatewayConfig.DEFAULT_SAFETY_HALT_POLL_MS);
         GatewayReadiness readiness = new GatewayReadiness();
         // Main arms these once tables open; the soak isolates durableWrites dynamics.
         readiness.fluss(true, "ok");
@@ -160,7 +161,8 @@ class ProjectionBacklogFloodSoakTest {
                 "execution-gateway.v1", "secret1234567890123456",
                 Duration.ofMillis(2000), Duration.ofMillis(250), "acct1", "p1",
                 /* executionEnabled */ true, /* maxPendingProjectionRecords */ 4,
-                GatewayConfig.defaultRequestBudget(Duration.ofMillis(2000)));
+                GatewayConfig.defaultRequestBudget(Duration.ofMillis(2000)),
+                GatewayConfig.DEFAULT_SAFETY_HALT_POLL_MS);
         GatewayReadiness readiness = new GatewayReadiness();
         readiness.fluss(true, "ok");
         readiness.protocol(true, "ok");

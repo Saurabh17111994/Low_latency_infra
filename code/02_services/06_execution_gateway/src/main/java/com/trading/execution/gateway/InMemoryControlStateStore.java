@@ -27,22 +27,52 @@ public final class InMemoryControlStateStore implements ControlStateStore {
     private final List<InternalRow> rawRows = new ArrayList<>();
     void addRawRow(InternalRow row){ rawRows.add(java.util.Objects.requireNonNull(row)); }
 
+    /**
+     * H1-1: the durable application writeback, keyed by halt_request_id. Replays emit the written
+     * row so a second pass sees the terminal result — exactly what the live KV upsert produces.
+     */
+    private final Map<String, InternalRow> applicationWriteback = new LinkedHashMap<>();
+
+    @Override public void recordApplication(InternalRow row, String applicationResult, long appliedTs){
+        String id = SafetyHaltRows.haltRequestId(row);
+        applicationWriteback.put(id, SafetyHaltRows.withApplication(row, applicationResult, appliedTs));
+    }
+
+    /** Test accessor: the recorded application_result for a halt id, or null while OPEN. */
+    String applicationResult(String haltRequestId){
+        InternalRow r = applicationWriteback.get(haltRequestId);
+        return r == null ? null : r.getString(SafetyHaltRows.IDX_APPLICATION_RESULT).toString();
+    }
+
+    /** Test accessor: the recorded applied_ts for a halt id, or null while OPEN. */
+    Long appliedTs(String haltRequestId){
+        InternalRow r = applicationWriteback.get(haltRequestId);
+        return r == null || r.isNullAt(SafetyHaltRows.IDX_APPLIED_TS) ? null : r.getLong(SafetyHaltRows.IDX_APPLIED_TS);
+    }
+
+    /** Applies any recorded writeback over the row the replay is about to emit. */
+    private InternalRow current(InternalRow row){
+        InternalRow updated = applicationWriteback.get(SafetyHaltRows.haltRequestId(row));
+        return updated == null ? row : updated;
+    }
+
     @Override public Lookup lookup(String t, List<Object> k){
         // P3-304: serve halt-table point reads from byId so the index is live
         // (written AND read); anything else stays NOT_FOUND offline.
         if ("Safety_Halt_Requests".equals(t) && k != null && k.size() == 1 && k.get(0) != null) {
             SafetyHaltRequest r = byId.get(String.valueOf(k.get(0)));
-            if (r != null) return new Lookup(Status.FOUND, toRow(r), "ok");
+            if (r != null) return new Lookup(Status.FOUND, current(toRow(r)), "ok");
         }
         return new Lookup(Status.NOT_FOUND,null,"offline");
     }
 
     @Override public void replaySafetyHalts(Consumer<InternalRow> c){
-        // Emit typed halts as 21-col DDL rows (offline Fluss wire), then any raw rows
+        // Emit typed halts as 21-col DDL rows (offline Fluss wire), then any raw rows; rows with
+        // a recorded application result are emitted as written (H1-1).
         for (SafetyHaltRequest r : List.copyOf(halts)) {
-            c.accept(toRow(r));
+            c.accept(current(toRow(r)));
         }
-        for (InternalRow r : List.copyOf(rawRows)) c.accept(r);
+        for (InternalRow r : List.copyOf(rawRows)) c.accept(current(r));
     }
     public void replaySafetyHaltsTyped(Consumer<SafetyHaltRequest> c){ List.copyOf(halts).forEach(c); }
     @Override public void close(){}
@@ -53,7 +83,8 @@ public final class InMemoryControlStateStore implements ControlStateStore {
      * <p>P3-305: test-only placeholder — v[17] (assigned_token_set_hash) reuses
      * evidenceHash because SafetyHaltRequest carries no assigned-hash field.
      * Do not feed these rows to slot-identity validation (it requires a real
-     * assigned hash); the gateway decoder ignores cols 11,12,17,19,20.
+     * assigned hash); the gateway decoder reads cols 11 (application_result) and
+     * 12 (applied_ts) for the H1-1 consumer and ignores cols 17, 19, 20.
      */
     public static InternalRow toRow(SafetyHaltRequest r) {
         Object[] v = new Object[21];

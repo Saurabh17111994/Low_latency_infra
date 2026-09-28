@@ -78,6 +78,7 @@ public final class ExecutionGatewayMain {
         // instead of being reachable only through a live SIGTERM.
         GatewayShutdown shutdown = new GatewayShutdown();
         AtomicBoolean readerFailed = new AtomicBoolean(false);
+        AtomicBoolean haltConsumerFailed = new AtomicBoolean(false);
         shutdown.installHook();
 
         if (!config.executionEnabled()) {
@@ -123,6 +124,20 @@ public final class ExecutionGatewayMain {
                 }
             })) {
                 reader.subscribeFromBeginning();
+                // H1-1: the durable Safety_Halt_Requests consumer. The boot replay runs here,
+                // synchronously, before readiness claims Fluss usable — a store failure refuses
+                // startup rather than leaving a gateway that forwards orders past a durable halt.
+                // The daemon then keeps applying rows written while we run (the executor's
+                // durable HALT can land on a gateway whose in-process flag is gone).
+                SafetyHaltTailConsumer haltConsumer = new SafetyHaltTailConsumer(
+                        stores.controls(), stores.gates(), config.executionPartitionId(),
+                        config.safetyHaltPollMs(), t -> {
+                            haltConsumerFailed.set(true);
+                            readiness.fail("safety halt consumer stopped: " + t);
+                            shutdown.signalStop();
+                        });
+                haltConsumer.replayOnce();
+                Thread haltThread = haltConsumer.start();
                 // C1: pay the post-CREATE window before readiness claims Fluss is usable and
                 // before the port opens, so a user request is never the first writer to a table.
                 GatewayStartup.prewarmTables(config);
@@ -155,6 +170,9 @@ public final class ExecutionGatewayMain {
                     // exactly the ambiguity these two lines exist to remove.
                     System.err.println("execution-gateway draining: stopping the intent reader");
                     shutdown.drainReader(readerThread, GatewayShutdown.READER_JOIN_MILLIS);
+                    System.err.println("execution-gateway draining: stopping the safety halt consumer");
+                    shutdown.drainThread(haltThread, GatewayShutdown.READER_JOIN_MILLIS,
+                            "safety halt consumer");
                     System.err.println("execution-gateway draining: closing intent reader and Fluss stores");
                 }
             }
@@ -162,11 +180,12 @@ public final class ExecutionGatewayMain {
         // Every try-with-resources above has now closed (reader, then stores) before the hook stops
         // waiting, so a SIGTERM drains rather than being cut off mid-close.
         shutdown.markCleaned();
-        if (readerFailed.get()) {
-            // P3-064: a dead reader must not present as a clean shutdown, or an orchestrator will
-            // leave a gateway whose execution path is silently gone. Exiting non-zero after cleanup
-            // is what makes the restart happen.
-            LOG.error("execution-gateway exiting non-zero: intent reader stopped ({})",
+        if (readerFailed.get() || haltConsumerFailed.get()) {
+            // P3-064 / H1-1: a dead reader or halt consumer must not present as a clean shutdown,
+            // or an orchestrator will leave a gateway whose execution path (intents, or the halt
+            // reader that stops them) is silently gone. Exiting non-zero is what restarts it.
+            LOG.error("execution-gateway exiting non-zero: {} ({})",
+                    readerFailed.get() ? "intent reader stopped" : "safety halt consumer stopped",
                     readiness.snapshot().reason());
             System.exit(1);
         }

@@ -417,6 +417,19 @@ cannot become acceptable. An accepted request enters `HALTED`, increments the ga
 records source/evidence in audit. The order path independently detects stale mandatory health even
 if the halt-request stream is unavailable.
 
+The gateway side of the same contract (H1-1, CHG-370): `SafetyHaltTailConsumer` runs a synchronous
+boot replay before readiness (a throw refuses startup) and then a 1 s daemon poll
+(`SAFETY_HALT_POLL_MS`, default 1000, refused if non-positive). Every pass rebuilds the
+greatest-seen `source_epoch` per `(source_component, source_instance)` from rows already recorded
+`APPLIED` (restart-safe without offsets) and applies the still-`OPEN` rows greatest-epoch-first;
+lower epochs are `REJECTED` as stale. Only `UNSAFE` rows halt — `RECOVERED` rows are audited with
+no gate effect and never auto-enable — and only halts addressed to the gateway's own
+`execution_partition_id` with the gate row's account scope are applied. Apply order is gate first,
+audit second: `application_result`/`applied_ts` are written back to the KV row, so a crash between
+the two re-applies idempotently on restart; a row whose gate row is unreadable stays `OPEN` for
+the next pass. A dead consumer fails readiness and exits the process non-zero (same contract as a
+dead intent reader).
+
 ### Attempt protocol (custom, on Nautilus order state)
 
 ```text

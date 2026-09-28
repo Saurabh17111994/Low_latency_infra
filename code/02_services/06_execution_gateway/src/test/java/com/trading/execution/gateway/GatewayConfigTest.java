@@ -35,6 +35,20 @@ class GatewayConfigTest {
     }
 
     /**
+     * H1-1: the durable safety-halt consumer's poll period — default 1000 ms; a zero/negative
+     * value would busy-loop the replay and starve the shared Fluss client, so it is refused by
+     * name at the config boundary.
+     */
+    @Test void safetyHaltPollMsDefaultsTo1000AndMustBePositive() {
+        assertThat(GatewayConfig.from(values()).safetyHaltPollMs()).isEqualTo(1000);
+        Map<String, String> tuned = values(); tuned.put("SAFETY_HALT_POLL_MS", "250");
+        assertThat(GatewayConfig.from(tuned).safetyHaltPollMs()).isEqualTo(250);
+        Map<String, String> zero = values(); zero.put("SAFETY_HALT_POLL_MS", "0");
+        assertThatThrownBy(() -> GatewayConfig.from(zero))
+                .hasMessageContaining("SAFETY_HALT_POLL_MS must be positive");
+    }
+
+    /**
      * C2: the request budget is one site's full retry budget (3 x timeout + backoff), granted to
      * the whole request. Derived, so raising GATEWAY_REQUEST_TIMEOUT_MS cannot leave it behind.
      */
@@ -129,7 +143,7 @@ class GatewayConfigTest {
                 "Order_Correlation", "Postback_Projection_Ledger", "Safety_Halt_Requests",
                 "127.0.0.1", 9180, "http://127.0.0.1:9190/v1/intents", "execution-gateway.v1",
                 "private", null, Duration.ofMillis(250), "acct", "part", false, 1000,
-                Duration.ofMillis(6600)))
+                Duration.ofMillis(6600), GatewayConfig.DEFAULT_SAFETY_HALT_POLL_MS))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("GATEWAY_REQUEST_TIMEOUT_MS");
         assertThatThrownBy(() -> new GatewayConfig(
@@ -137,7 +151,7 @@ class GatewayConfigTest {
                 "Order_Correlation", "Postback_Projection_Ledger", "Safety_Halt_Requests",
                 "127.0.0.1", 9180, "http://127.0.0.1:9190/v1/intents", "execution-gateway.v1",
                 "private", Duration.ofMillis(2000), null, "acct", "part", false, 1000,
-                Duration.ofMillis(6600)))
+                Duration.ofMillis(6600), GatewayConfig.DEFAULT_SAFETY_HALT_POLL_MS))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("GATEWAY_POLL_TIMEOUT_MS");
         assertThatThrownBy(() -> new GatewayConfig(
@@ -145,7 +159,7 @@ class GatewayConfigTest {
                 "Order_Correlation", "Postback_Projection_Ledger", "Safety_Halt_Requests",
                 "127.0.0.1", 9180, "http://127.0.0.1:9190/v1/intents", "execution-gateway.v1",
                 "private", Duration.ofMillis(2000), Duration.ofMillis(250), "acct", "part", false,
-                1000, null))
+                1000, null, GatewayConfig.DEFAULT_SAFETY_HALT_POLL_MS))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("GATEWAY_REQUEST_BUDGET_MS");
         assertThatThrownBy(() -> GatewayConfig.defaultRequestBudget(null))

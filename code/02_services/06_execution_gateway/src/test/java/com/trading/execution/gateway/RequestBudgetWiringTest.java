@@ -46,7 +46,8 @@ class RequestBudgetWiringTest {
                 "execution-gateway.v1", SECRET,
                 Duration.ofMillis(2000), Duration.ofMillis(250), "acct1", "p1",
                 /* executionEnabled */ true, /* maxPendingProjectionRecords */ 16,
-                GatewayConfig.defaultRequestBudget(Duration.ofMillis(2000)));
+                GatewayConfig.defaultRequestBudget(Duration.ofMillis(2000)),
+                GatewayConfig.DEFAULT_SAFETY_HALT_POLL_MS);
     }
 
     @Test

@@ -141,6 +141,9 @@ class GatewayConfigExecutionFlagTest {
                 return new Lookup(Status.NOT_FOUND, null, "ok");
             }
             @Override public void replaySafetyHalts(java.util.function.Consumer<InternalRow> c) {}
+            @Override public void recordApplication(InternalRow row, String result, long appliedTs) {
+                throw new UnsupportedOperationException("this test store does not persist application results");
+            }
             @Override public void close() {}
         };
 

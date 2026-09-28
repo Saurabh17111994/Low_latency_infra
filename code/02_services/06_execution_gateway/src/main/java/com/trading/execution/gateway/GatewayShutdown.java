@@ -70,23 +70,31 @@ final class GatewayShutdown {
     }
 
     /**
-     * Stops the poll thread and waits for it to leave the loop.
+     * Stops a poll thread and waits for it to leave the loop.
      *
-     * @return false when the thread ignored the interrupt and is still running — main is then about
-     *     to close the reader underneath it, which is exactly the ConcurrentModificationException
+     * <p>Used by the intent reader and (H1-1) the safety-halt consumer: both hold Fluss scanners
+     * that must not be closed from another thread, so the drain has to be visible and bounded.
+     *
+     * @return false when the thread ignored the interrupt and is still running — main is then
+     *     about to close stores underneath it, which is exactly the ConcurrentModificationException
      *     this guard makes visible instead of silent
      */
-    boolean drainReader(Thread readerThread, long joinMillis) {
-        readerThread.interrupt();
+    boolean drainThread(Thread thread, long joinMillis, String label) {
+        thread.interrupt();
         try {
-            readerThread.join(joinMillis);
+            thread.join(joinMillis);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        if (readerThread.isAlive()) {
-            LOG.warn("intent reader did not stop within {}ms; closing the reader under it", joinMillis);
+        if (thread.isAlive()) {
+            LOG.warn("{} did not stop within {}ms; closing under it", label, joinMillis);
             return false;
         }
         return true;
+    }
+
+    /** {@link #drainThread} for the intent reader. */
+    boolean drainReader(Thread readerThread, long joinMillis) {
+        return drainThread(readerThread, joinMillis, "intent reader");
     }
 }

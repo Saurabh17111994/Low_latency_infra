@@ -32,23 +32,23 @@ Where a body section and this list disagree, this list wins.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 2 | 0 | 3 | 0 | 0 | 0 |
+| H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 3 | 0 | 2 | 0 | 0 | 0 |
 | H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | H3 — production deck parity with the dev deck | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H4 — evidence and release gates must not lie | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H6 — machine facts and their drift guard | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
-| **Total** | **22** | **2** | **0** | **20** | **0** | **0** | **0** |
+| **Total** | **22** | **3** | **0** | **19** | **0** | **0** | **0** |
 
 #### H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth
 
-- [ ] **H1-1** — Wire the halt consumer into the gateway: new `SafetyHaltTailConsumer` built in
+- [x] **H1-1** — Wire the halt consumer into the gateway: new `SafetyHaltTailConsumer` built in
   `ExecutionGatewayMain` after `openStores` (:105) and **before** `applyStartupReadiness(:129, true)`;
   synchronous boot replay (a throw refuses startup); 1 s daemon poll (`SAFETY_HALT_POLL_MS`);
   `gates.halt(expected=row)` first, durable audit second; greatest per-source epoch rebuilt from
   APPLIED rows (stale epoch → `REJECTED` + warn); scope check includes `execution_partition_id`;
   `RECOVERED` is audit-only (never auto-enables); consumer death = readiness fail + non-zero exit.
-  (P0-2; contract 07 §114-123.)
+  (P0-2; contract 07 §114-123.) — CHG-370
 - [x] **H1-2** — Transport taxonomy at the executor→bridge boundary: `SendFailure::{NotSent,
   Unknown}`; only pre-dispatch failures may retry (connect/DNS, serialization, HTTP
   400/401/403/404/409/500-fingerprint); timeout/EOF/reset/malformed/other-5xx are `Unknown` →

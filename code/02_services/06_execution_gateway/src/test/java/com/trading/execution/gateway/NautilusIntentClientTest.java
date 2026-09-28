@@ -17,6 +17,9 @@ class NautilusIntentClientTest {
                     BinaryString.fromString("reason"), null, null, null, null, 1L, BinaryString.fromString("2"));
             public Lookup lookup(String table, List<Object> key) { return new Lookup(Status.FOUND, gate, "ok"); }
             public void replaySafetyHalts(java.util.function.Consumer<InternalRow> c) {}
+            public void recordApplication(InternalRow row, String result, long appliedTs) {
+                throw new UnsupportedOperationException("this test store does not persist application results");
+            }
             public void close() {}
         };
         try {
@@ -44,6 +47,9 @@ class NautilusIntentClientTest {
                     BinaryString.fromString("2"));
             public Lookup lookup(String table, List<Object> key) { return new Lookup(Status.FOUND, gate, "ok"); }
             public void replaySafetyHalts(java.util.function.Consumer<InternalRow> c) {}
+            public void recordApplication(InternalRow row, String result, long appliedTs) {
+                throw new UnsupportedOperationException("this test store does not persist application results");
+            }
             public void close() {}
         };
         try {

@@ -152,6 +152,18 @@ incrementing the gate epoch on an applied halt. Stale, malformed, or cross-scope
 rejected and audited. The core SHALL independently detect stale mandatory health even if the
 halt-request stream is unavailable.
 
+The Gateway SHALL consume the same durable table, because its in-process halt flag is lost on
+restart: a synchronous boot replay (a store failure refuses startup) followed by a 1 s default poll
+(`SAFETY_HALT_POLL_MS`). Each pass rebuilds the greatest-seen `source_epoch` per
+`(source_component, source_instance)` from rows already `APPLIED` — restart-safe with no offset
+state — and rejects a lower epoch as stale. A halt is applied only when the request's
+`execution_partition_id` is the gateway's own and the account scope matches the gate row; only
+`UNSAFE` rows halt (`RECOVERED` is audited with no gate effect and never auto-enables). The gate
+halt is applied first and the outcome is audited second on the row itself
+(`application_result`/`applied_ts`, KV upsert), so a crash between the two re-applies idempotently
+on restart; a row whose gate row is temporarily unreadable stays `OPEN` and is retried. A consumer
+that dies fails readiness and exits the process non-zero.
+
 ## Reconciliation capability
 
 Reconciliation uses Arrow REST endpoints (DEC-023) through the go-arrow bridge: `GET /user/orders`,

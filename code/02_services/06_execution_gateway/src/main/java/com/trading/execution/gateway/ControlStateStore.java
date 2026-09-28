@@ -29,6 +29,15 @@ public interface ControlStateStore extends AutoCloseable {
      * return means the scan drained, not that every row applied.
      */
     void replaySafetyHalts(Consumer<InternalRow> consumer);
+    /**
+     * H1-1: durably records the application outcome of one safety-halt row — columns 11/12
+     * ({@code application_result}/{@code applied_ts}) — preserving every other column. Callers
+     * invoke this only for rows still {@code OPEN}, or to retry their own write after a crash
+     * between the gate halt and this audit; the durable result is what stops the 1 s replay from
+     * re-applying the same halt forever. Implementations MUST upsert the KV row (never append)
+     * and MUST NOT touch the gate.
+     */
+    void recordApplication(InternalRow row, String applicationResult, long appliedTs);
     @Override void close() throws Exception;
 
     default Lookup lookup(String tableName, Object... keyFields) {

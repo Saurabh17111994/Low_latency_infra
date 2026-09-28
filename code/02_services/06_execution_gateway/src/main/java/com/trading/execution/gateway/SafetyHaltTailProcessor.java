@@ -32,6 +32,16 @@ public final class SafetyHaltTailProcessor {
     private static final int IDX_MANIFEST_FINGERPRINT = 16;
     private static final int IDX_STATE = 18;
 
+    // H1-1 application-state columns/values (DDL v3, same row by design).
+    static final int IDX_APPLICATION_RESULT = 11;
+    static final int IDX_APPLIED_TS = 12;
+    /** The writer stamps every fresh row with this; the consumer is the only writer of the rest. */
+    public static final String RESULT_OPEN = "OPEN";
+    public static final String RESULT_APPLIED = "APPLIED";
+    public static final String RESULT_REJECTED = "REJECTED";
+    /** {@code state} value that halts; the only value with a gate effect. */
+    public static final String STATE_UNSAFE = "UNSAFE";
+
     private final GateStateStore gates;
     private final Set<String> appliedIds = new HashSet<>();
     public SafetyHaltTailProcessor(GateStateStore gates){ this.gates=gates; }
@@ -108,6 +118,21 @@ public final class SafetyHaltTailProcessor {
         String s = o.toString();
         if (s.isEmpty()) throw new IllegalArgumentException("blank at " + idx);
         return s;
+    }
+
+    /** A decoded halt row plus its durable application state (H1-1). */
+    public record Decoded(SafetyHaltRequest request, String applicationResult, Long appliedTs) {}
+
+    /**
+     * H1-1: decodes columns 11/12 ({@code application_result}/{@code applied_ts}) alongside the
+     * request. Same fail-closed contract as {@link #apply(InternalRow, long)} — any malformed row
+     * throws, so the consumer can leave it untouched rather than mis-read its state.
+     */
+    public static Decoded decodeWithApplication(InternalRow r) {
+        SafetyHaltRequest req = decodeRow(r);
+        String result = getRequiredString(r, IDX_APPLICATION_RESULT);
+        Long appliedTs = r.isNullAt(IDX_APPLIED_TS) ? null : r.getLong(IDX_APPLIED_TS);
+        return new Decoded(req, result, appliedTs);
     }
 
     private static String getNullableString(InternalRow r, int idx) {

@@ -12,6 +12,7 @@ import org.apache.fluss.client.ConnectionFactory;
 import org.apache.fluss.client.lookup.Lookuper;
 import org.apache.fluss.client.table.Table;
 import org.apache.fluss.client.table.scanner.batch.BatchScanner;
+import org.apache.fluss.client.table.writer.UpsertWriter;
 import org.apache.fluss.config.Configuration;
 import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TablePath;
@@ -40,6 +41,9 @@ public final class FlussControlStateStore implements ControlStateStore {
     // P3-065: one bounded handle pool per table, same concurrent-map reasoning as
     // `tables` (computeIfAbsent from the request path, snapshot on close).
     private final Map<String, FlussHandlePool<Lookuper>> lookuperPools = new ConcurrentHashMap<>();
+    // H1-1: upsert writers for the halt table's application writeback. Same pool reasoning:
+    // @NotThreadSafe handle, concurrent callers, no close lifecycle on the handle itself.
+    private final Map<String, FlussHandlePool<UpsertWriter>> writerPools = new ConcurrentHashMap<>();
 
     public static FlussControlStateStore open(GatewayConfig config) throws Exception {
         Configuration c = new Configuration();
@@ -129,6 +133,26 @@ public final class FlussControlStateStore implements ControlStateStore {
     private static Object value(Object value) {
         return value instanceof String s ? BinaryString.fromString(s) : value;
     }
+
+    /**
+     * H1-1: upsert the halt row with columns 11/12 written. The upsert future is the write's
+     * acknowledgement — a failure must throw so the consumer dies loudly (readiness + exit)
+     * instead of replaying an unrecorded halt forever.
+     */
+    @Override
+    public void recordApplication(InternalRow row, String applicationResult, long appliedTs) {
+        GenericRow updated = SafetyHaltRows.withApplication(row, applicationResult, appliedTs);
+        try {
+            Table table = table(config.haltTable());
+            FlussHandlePool<UpsertWriter> pool = writerPools.computeIfAbsent(config.haltTable(),
+                    n -> new FlussHandlePool<>(() -> table.newUpsert().createWriter()));
+            pool.with(writer -> writer.upsert(updated)
+                    .get(timeout.toMillis(), TimeUnit.MILLISECONDS));
+        } catch (Exception e) {
+            throw new IllegalStateException("cannot record safety halt application", e);
+        }
+    }
+
     @Override public void close() throws Exception {
         // P3-065 / CHG-223: close the pools first — nothing to close on the handle (Lookuper
         // is not Closeable), but holding them past the table close would leave dead references
@@ -137,6 +161,10 @@ public final class FlussControlStateStore implements ControlStateStore {
             pool.close();
         }
         lookuperPools.clear();
+        for (FlussHandlePool<UpsertWriter> pool : List.copyOf(writerPools.values())) {
+            pool.close();
+        }
+        writerPools.clear();
         // P3-066: collect, don't abort — one table failing must not leak the
         // rest or the connection; snapshot first (concurrent map).
         Exception failure = null;
