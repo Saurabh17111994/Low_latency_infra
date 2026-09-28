@@ -522,6 +522,25 @@ public final class DdlBootstrap {
             .build();
 
     /**
+     * Full 4-column KV schema for feature_values matching DDL 34
+     * (34_feature_values.sql, feature layer DEC-056/DEC-057): PK
+     * (instrument_token, tf, window_start); {@code features} is
+     * MAP&lt;INT, DOUBLE&gt; keyed by the append-only registry feature id.
+     * Columns mirror {@code com.trading.compute.signaljob.FeatureValuesColumns}
+     * — the shared contract the feature sink serializes against. Registry-only
+     * (compute-owned, A4.4): existence-checked, never bootstrap-created.
+     */
+    private static final Schema FEATURE_VALUES_SCHEMA = Schema.newBuilder()
+            .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("tf", org.apache.fluss.types.DataTypes.STRING())
+            .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("features", org.apache.fluss.types.DataTypes.MAP(
+                    org.apache.fluss.types.DataTypes.INT(),
+                    org.apache.fluss.types.DataTypes.DOUBLE()))
+            .primaryKey("instrument_token", "tf", "window_start")
+            .build();
+
+    /**
      * Minimal placeholder schema for platform tables whose owning service is
      * not built yet. These tables are only existence-checked at runtime — the
      * full DDL (applied by the offline DDL gate) is authoritative for their
@@ -591,6 +610,17 @@ public final class DdlBootstrap {
                                     .property("table.datalake.freshness", "5min")
                                     .property("table.datalake.auto-compaction", "true")
                                     .property("table.kv.format-version", "2")
+                                    .build()),
+                    // Feature layer (DDL 34 proposal, DEC-056/DEC-057): the
+                    // strategy host writes one row per (instrument, tf, window);
+                    // registry-only like the other compute-owned tables.
+                    Map.entry("feature_values",
+                            TableDescriptor.builder()
+                                    .schema(FEATURE_VALUES_SCHEMA)
+                                    .distributedBy(16, "instrument_token")
+                                    .property("table.log.ttl", "7d")
+                                    .property("table.kv.format-version", "2")
+                                    .property("table.datalake.enabled", "false")
                                     .build()),
                     Map.entry("Signal_Candidates",
                             TableDescriptor.builder().schema(SIGNAL_CANDIDATES_SCHEMA).distributedBy(16, "instrument_token").build()),

@@ -36,6 +36,14 @@ class DdlTextFailFastTest {
     }
 
     @Test
+    @DisplayName("composite MAP<INT, DOUBLE> parses (CHG-358: DDL 34 feature_values)")
+    void mapTypeParses() {
+        DdlText.ParsedDdl parsed = DdlText.parse(ddl("a MAP<INT, DOUBLE> NOT NULL"), "p.sql");
+        assertEquals(DataTypes.MAP(DataTypes.INT(), DataTypes.DOUBLE()),
+                parsed.columns().get(0).type());
+    }
+
+    @Test
     @DisplayName("IF NOT EXISTS and quoted names (P4-106)")
     void ifNotExists() {
         DdlText.ParsedDdl parsed = DdlText.parse(

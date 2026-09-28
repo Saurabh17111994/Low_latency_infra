@@ -67,7 +67,8 @@ public final class DdlText {
     private static final Pattern PARTITIONED_BY =
             Pattern.compile("PARTITIONED\\s+BY\\s*\\(([^)]+)\\)", Pattern.CASE_INSENSITIVE);
     private static final Pattern COLUMN_LINE = Pattern.compile(
-            "^\\s*([a-zA-Z0-9_]+)\\s+([a-zA-Z]+(?:\\s*\\([^)]*\\))?)\\s*(?:NOT\\s+NULL|NULL)?\\s*,?\\s*$",
+            "^\\s*([a-zA-Z0-9_]+)\\s+([a-zA-Z]+(?:\\s*(?:\\([^)]*\\)|<[^>]*>))?)"
+                    + "\\s*(?:NOT\\s+NULL|NULL)?\\s*,?\\s*$",
             Pattern.CASE_INSENSITIVE);
     private static final Pattern WITH_CLAUSE =
             Pattern.compile("\\)\\s*WITH\\b", Pattern.CASE_INSENSITIVE);
@@ -262,7 +263,10 @@ public final class DdlText {
     }
 
     private static DataType type(String name, String sourcePath) {
-        String base = name.replaceAll("\\s*\\(.*\\)$", "").toUpperCase(java.util.Locale.ROOT);
+        // Strip a parameter list (DECIMAL(10,2)) or composite parameters
+        // (MAP<INT, DOUBLE>) before matching the base type name.
+        String base = name.replaceAll("\\s*(\\(.*\\)|<.*>)$", "")
+                .toUpperCase(java.util.Locale.ROOT);
         return switch (base) {
             case "STRING" -> DataTypes.STRING();
             case "BIGINT" -> DataTypes.BIGINT();
@@ -280,6 +284,20 @@ public final class DdlText {
                             Integer.parseInt(params.group(2)));
                 }
                 yield DataTypes.DECIMAL(38, 18);
+            }
+            case "MAP" -> {
+                // One nesting level only: <scalar, scalar>. A nested generic
+                // (e.g. MAP<INT, ARRAY<DOUBLE>>) fails here loudly instead of
+                // silently mis-parsing — extend with a test when a DDL first
+                // needs it.
+                Matcher params = Pattern.compile("<\\s*([^,<>]+)\\s*,\\s*([^<>]+)\\s*>")
+                        .matcher(name);
+                if (!params.find()) {
+                    throw new IllegalArgumentException(
+                            sourcePath + ": MAP needs <key, value>: " + name);
+                }
+                yield DataTypes.MAP(type(params.group(1), sourcePath),
+                        type(params.group(2), sourcePath));
             }
             case "VARCHAR", "CHAR" -> DataTypes.STRING();
             case "TINYINT" -> DataTypes.TINYINT();

@@ -133,12 +133,32 @@ class DdlBootstrapSchemaAgreementTest {
         for (String computeTable : List.of(
                 "candle_live", "candle_closed",
                 "Signal_Candidates", "Signal_Candidates_current",
+                "feature_values",
                 "Ranking_Results", "Trade_Decisions",
                 "Portfolio_Reservations")) {
             assertFalse(DdlBootstrap.ownedTables().contains(computeTable),
                     computeTable + " is a compute-owned table — DdlBootstrap must not own it "
                             + "(A4.4, CANDLE-KV-REPLAY-001 P4)");
         }
+    }
+
+    @Test
+    @DisplayName("feature_values is registry-only and matches DDL 34 (CHG-349/CHG-358)")
+    void featureValuesRegistryMatchesDdl() throws IOException {
+        TableDescriptor featureValues = DdlBootstrap.tableRegistry().get("feature_values");
+        assertNotNull(featureValues,
+                "registry must carry the compute-owned feature_values entry (DDL 34)");
+        assertEquals(4, featureValues.getSchema().getColumns().size(),
+                "feature_values schema must declare instrument_token/tf/window_start/features");
+        assertEquals(List.of("instrument_token", "tf", "window_start"),
+                featureValues.getSchema().getPrimaryKeyColumnNames(),
+                "feature_values PK must be exactly (instrument_token, tf, window_start)");
+        assertEquals(List.of("instrument_token"), featureValues.getBucketKeys(),
+                "feature_values must be distributed by instrument_token");
+        assertEquals(4, parseColumns(readDdl(ddlFileFor("feature_values"))).size(),
+                "in-code schema must match DDL 34's column count");
+        assertFalse(DdlBootstrap.ownedTables().contains("feature_values"),
+                "feature_values is compute-owned — ensureTables must never create it (A4.4)");
     }
 
     @Test
@@ -208,8 +228,12 @@ class DdlBootstrapSchemaAgreementTest {
     /** Extract the top-level CREATE TABLE column names in declared order. */
     private static List<String> parseColumns(String ddl) {
         List<String> out = new ArrayList<>();
+        // CHG-358: MAP joins the type set (DDL 34 feature_values) and \b keeps
+        // a type token from matching a longer word (INT vs INTERVAL).
         Pattern col = Pattern.compile(
-                "^\\s*([a-z_][a-z0-9_]*)\\s+(STRING|BIGINT|INT|BYTES|DOUBLE|FLOAT|BOOLEAN)",
+                "^\\s*([a-z_][a-z0-9_]*)\\s+"
+                        + "(STRING|BIGINT|INT|BYTES|DOUBLE|FLOAT|BOOLEAN|MAP"
+                        + "|TIMESTAMP_LTZ|TIMESTAMP|DATE|DECIMAL|VARCHAR|CHAR|TINYINT|SMALLINT|TIME)\\b",
                 Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
         Matcher m = col.matcher(ddl);
         while (m.find()) {

@@ -100,10 +100,12 @@ class SchemaComplianceFullSuiteTest {
         .isTrue();
     SchemaManifest manifest =
         new ObjectMapper().readValue(Files.readAllBytes(manifestPath), SchemaManifest.class);
-    // 26 since e75f92bc retired the parked fingerprint_dedup DDL from the apply
-    // path (it was 27). Kept explicit rather than derived, so an unintended
-    // addition or removal fails here instead of silently moving the target.
-    assertThat(manifest.tables).hasSize(26);
+    // 27 since CHG-349 added DDL 34 feature_values (a sanctioned unapplied
+    // proposal) to the manifest AND the ddl/ enumeration; 26 held since
+    // e75f92bc retired the parked fingerprint_dedup DDL (was 27). Kept explicit
+    // rather than derived, so an unintended addition or removal fails here
+    // instead of silently moving the target.
+    assertThat(manifest.tables).hasSize(27);
     Map<String, String> boundaries = new HashMap<>();
     for (SchemaManifestEntry e : manifest.tables) {
       assertThat(e.ddlSha256).as(e.tableName + " ddl_sha256").isNotBlank();
