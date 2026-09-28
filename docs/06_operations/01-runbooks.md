@@ -178,6 +178,13 @@ to replay either way — this bounds restarts *after* data has accumulated
 Production (`docker-stack.yml`) keeps remote data on R2 and the compose default
 stays `0s`; the interval is an explicit switch, not a default.
 
+**Daily VM (CloudPe, CHG-362):** the production VM is a fresh disk every
+morning — build the golden image once, launch it daily, inject `secrets.env`,
+`make day ARGS="start"` (fresh, no flags: `.env.vm`), start tiering, let the
+15:45 IST EOD archive to R2, then `make day ARGS="stop"` — the gate refuses to
+stop until today's archive is confirmed. Full recipe:
+`docs/05_deployment/CLOUDPE_DAILY_VM.md`.
+
 ## Stopping or restarting the executor
 
 The executor drains for ~15 s before it exits: the Nautilus kernel waits up to 10 s for residual
