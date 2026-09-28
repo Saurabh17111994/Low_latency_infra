@@ -69,6 +69,13 @@ ENV EXECUTION_ENABLED=false \
 # runtime user instead, and HOME is set because some runtime libraries look it up and `nobody`
 # has no home directory (P3-414).
 RUN chown -R nobody:nogroup /app
+
+# H1-3: the durable attempt journal lives at /data/durable on a named volume. Docker seeds a new
+# named volume from the image's directory — ownership included — so creating the directory owned
+# by the runtime user is what lets the guard's journal survive container recreation. Without it
+# the volume root is root-owned, and the enabled flag fails closed at boot (EACCES) instead of
+# trading without a duplicate guard.
+RUN mkdir -p /data/durable && chown -R nobody:nogroup /data/durable
 ENV HOME=/tmp
 USER nobody
 

@@ -32,13 +32,13 @@ Where a body section and this list disagree, this list wins.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 4 | 0 | 1 | 0 | 0 | 0 |
+| H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
 | H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | H3 — production deck parity with the dev deck | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H4 — evidence and release gates must not lie | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H6 — machine facts and their drift guard | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
-| **Total** | **22** | **4** | **0** | **18** | **0** | **0** | **0** |
+| **Total** | **22** | **5** | **0** | **17** | **0** | **0** | **0** |
 
 #### H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth
 
@@ -54,13 +54,13 @@ Where a body section and this list disagree, this list wins.
   400/401/403/404/409/500-fingerprint); timeout/EOF/reset/malformed/other-5xx are `Unknown` →
   **no retry** + durable UNKNOWN + safety halt propagated process-wide via `with_halt_notifier`
   (same pattern as `shutdown_watch`). (P0-3; contract 07 §44-47.) — CHG-369
-- [ ] **H1-3** — Durable attempt guard ON in both decks: `DURABLE_ATTEMPTS_ENABLED: "true"`,
+- [x] **H1-3** — Durable attempt guard ON in both decks: `DURABLE_ATTEMPTS_ENABLED: "true"`,
   `DURABLE_DIR=/data/durable`, named volume `nautilus-durable` in compose **and** stack; code
   default stays OFF for bare runs; fail-closed already holds (unopenable dir = boot error;
   unrecordable claim = 503, zero bridge calls); flip only after H1-2/H1-4, during a halted window.
   (P0-4; CHG-136 deferral.) **Precondition (Medium plan M1-5):** the action-scoped claim key must
   land before this flip — with the guard ON, the current instruction-only key halts legitimate
-  cancel/amend.
+  cancel/amend. — CHG-374
 - [x] **H1-4** — `UNKNOWN` is never a terminal rejection: on `BridgeOutcome::Unknown` keep the
   halt + metrics (`order_unknown`, `unresolved_attempt`), emit **no** order event — the order stays
   pre-send (`Initialized`), no capacity release; reconciliation (contract §Reconciliation) resolves

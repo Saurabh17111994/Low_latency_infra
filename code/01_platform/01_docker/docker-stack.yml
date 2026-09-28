@@ -144,6 +144,9 @@ volumes:
   flink-checkpoints:
   flink-logs:
   fluss-logs:
+  # H1-3: the executor's durable attempt journal (duplicate-submission guard), node-local to the
+  # executor's pinned worker; a recreation on the same node keeps the journal.
+  nautilus-durable:
   openobserve-data:
   ingestion-logs:
   # G6 alert routing — durable O2 alert delivery history (alert-consumer).
@@ -1017,6 +1020,11 @@ services:
       # (409) and an absent partition leaves the durable reporter unarmed.
       EXECUTION_PARTITION_ID: dev-partition
       ACCOUNT_SCOPE_ID: dev-scope
+      # H1-3: the durable attempt guard is ON in this deck too (it landed OFF, CHG-136). The
+      # journal must survive container recreation, so it sits on the nautilus-durable volume
+      # below; the code default stays OFF for bare runs.
+      DURABLE_ATTEMPTS_ENABLED: "true"
+      DURABLE_DIR: /data/durable
       # CHG-288: the drift gate's offset comes from the file the node publishes
       # (clock_offset_fact.sh, run every 10 s by arrow-clock-offset.timer), never from chronyd's
       # command socket: the package owns /run/chrony as 0700 _chrony:_chrony, and the socket is
@@ -1029,6 +1037,9 @@ services:
       CLOCK_OFFSET_MAX_AGE_S: "30"
     volumes:
       - /run/arrow-clock:/run/arrow-clock:ro
+      # H1-3: the durable attempt journal (named volume, node-local to the executor's pinned
+      # worker; Docker seeds it nobody-owned from the image path).
+      - nautilus-durable:/data/durable
 
   # ---- Observability (VM4 / O1: outside Swarm, not a scheduling dependency) -
   # In production O1 is a dedicated host (not part of the manager quorum). If O1

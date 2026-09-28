@@ -329,6 +329,9 @@ volumes:
   minio-data:
   # G6 alert routing — durable O2 alert delivery history (alert-consumer).
   alert-store:
+  # H1-3: the executor's durable attempt journal (duplicate-submission guard). Named volume so a
+  # container recreation keeps the journal; Docker seeds it nobody-owned from the image path.
+  nautilus-durable:
 
 services:
   # ---- ZooKeeper: metadata store for Fluss -----------------------------
@@ -1083,6 +1086,17 @@ services:
       # HttpBridgeClient transport; this token authenticates to the private execution-bridge.
       # Same source as the bridge's own EXECUTION_BRIDGE_AUTH_TOKEN so both sides agree.
       BRIDGE_AUTH_TOKEN: ${EXECUTION_BRIDGE_AUTH_TOKEN:-local-only}
+      # H1-3: the Workstream-D durable attempt guard is ON in this deck (it landed OFF in CHG-136).
+      # A gateway/bridge restart previously relied on the gateway's dedup table and the bridge's
+      # restart-lost cache; with the guard ON the executor refuses a second send from its own
+      # journal. The code default stays OFF for bare runs; an unopenable dir is a boot error, and
+      # an unrecordable claim is a 503 with zero bridge calls (fail-closed).
+      DURABLE_ATTEMPTS_ENABLED: "true"
+      DURABLE_DIR: /data/durable
+    volumes:
+      # H1-3: named volume — the journal must outlive container recreation, which is the exact
+      # restart the guard exists for. Seeded nobody-owned from the image path (04_executor/Dockerfile).
+      - nautilus-durable:/data/durable
 
   # ---- DDL apply contract (one-shot, dev/CI) ------------------------------
   # The full 9-step DDL application contract engine (DdlApplyTool + ddl_apply.py
