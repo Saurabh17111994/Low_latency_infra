@@ -91,25 +91,31 @@ impl AttemptStore for RecordingAttempts {
         drop(ids);
         self.inner.put(attempt)
     }
-    fn has_duplicate(&self, instruction_id: &str, request_hash: &str) -> bool {
-        self.inner.has_duplicate(instruction_id, request_hash)
+    fn has_duplicate(&self, instruction_id: &str, action: &str, request_hash: &str) -> bool {
+        self.inner
+            .has_duplicate(instruction_id, action, request_hash)
     }
-    fn has_instruction(&self, instruction_id: &str) -> bool {
-        self.inner.has_instruction(instruction_id)
+    fn has_instruction(&self, instruction_id: &str, action: &str) -> bool {
+        self.inner.has_instruction(instruction_id, action)
     }
     fn try_claim(
         &self,
         attempt_id: &str,
         instruction_id: &str,
+        action: &str,
         request_hash: &str,
         client_order_ref: &str,
     ) -> anyhow::Result<Claim> {
         // D1 moved the insert into `try_claim`, so this is now where an attempt id first becomes
         // durable: record it here as well as in `put`, or `unique_ids` would silently count
         // nothing. The dedup keeps updates from being counted twice.
-        let claim =
-            self.inner
-                .try_claim(attempt_id, instruction_id, request_hash, client_order_ref)?;
+        let claim = self.inner.try_claim(
+            attempt_id,
+            instruction_id,
+            action,
+            request_hash,
+            client_order_ref,
+        )?;
         if let Claim::Claimed(attempt) = &claim {
             let mut ids = self.ids.borrow_mut();
             if !ids.contains(&attempt.attempt_id) {
@@ -125,6 +131,7 @@ fn command(attempt: &str, instruction: &str, hash: &str, epoch: u64, fence: u64)
         execution_attempt_id: attempt.into(),
         account_scope_id: "acc".into(),
         instruction_id: instruction.into(),
+        action: "place".into(),
         execution_partition_id: PARTITION.into(),
         request_hash: hash.into(),
         client_order_ref: format!("E-{attempt}"),

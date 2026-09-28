@@ -448,13 +448,20 @@ mod tests {
     #[test]
     fn attempt_state_is_shared_across_handles() {
         let clients = DurableClients::new_in_memory(DurableFlags::all_on());
-        let a = Attempt::new("a-1", "ins-1", "h-1", "E-a-1", AttemptPhase::Prepared);
+        let a = Attempt::new(
+            "a-1",
+            "ins-1",
+            "place",
+            "h-1",
+            "E-a-1",
+            AttemptPhase::Prepared,
+        );
         clients.attempt_store.put(&a).unwrap();
         // Second handle reading the same attempt.
         let restarted: Arc<dyn AttemptStore> = clients.attempt_mem.clone();
         let got = restarted.get("a-1").unwrap();
         assert_eq!(got.phase, AttemptPhase::Prepared);
-        assert!(restarted.has_duplicate("ins-1", "h-1"));
+        assert!(restarted.has_duplicate("ins-1", "place", "h-1"));
     }
 
     // ── Journal: append through the trait object, read back through a second handle
@@ -547,7 +554,7 @@ mod tests {
             let clients = DurableClients::open_for_service(&dir, flags, None).unwrap();
             let claim = clients
                 .attempt_store
-                .try_claim("a-1", "ins-1", "h-1", "E-a-1")
+                .try_claim("a-1", "ins-1", "place", "h-1", "E-a-1")
                 .unwrap();
             assert!(matches!(claim, Claim::Claimed(_)));
         } // the process "exits": the store is dropped and the lock released
@@ -572,7 +579,7 @@ mod tests {
         assert_eq!(
             restarted
                 .attempt_store
-                .try_claim("a-2", "ins-1", "h-1", "E-a-2")
+                .try_claim("a-2", "ins-1", "place", "h-1", "E-a-2")
                 .unwrap(),
             Claim::Duplicate
         );

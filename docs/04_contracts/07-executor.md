@@ -42,7 +42,12 @@ approval of the same evidence hash/epoch.
 ## Attempt protocol
 
 Persist `PREPARED` attempt, immutable request hash, `client_order_ref` (deterministic, ≤16 chars
-for Arrow `remarks` field), and gate epoch before commanding the bridge. Timeout, disconnect,
+for Arrow `remarks` field), and gate epoch before commanding the bridge. The durable identity is
+action-scoped (M1-5): `attempt_id` is the primary key, `(instruction_id, action, request_hash)` is
+unique, and a different request hash under the same `(instruction_id, action)` is a contract
+violation. The action is the bridge command (`place` / `modify` / `cancel`); a place, its later
+modify, and its cancel share the `instruction_id` but are distinct money movements, so each is its
+own claim stream and never a contract violation. Timeout, disconnect,
 malformed response, crash window, or ambiguous response produces `UNKNOWN`, halts, and forbids
 automatic retry until broker non-acceptance or verified idempotency is proven.
 

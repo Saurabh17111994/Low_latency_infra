@@ -70,6 +70,9 @@ fn lock<T>(state: &Mutex<T>) -> Result<MutexGuard<'_, T>> {
 struct AttemptRecord {
     attempt_id: String,
     instruction_id: String,
+    /// M1-5, additive: absent only in records written before the action-scoped identity shipped.
+    #[serde(default = "default_action")]
+    action: String,
     request_hash: String,
     client_order_ref: String,
     phase: String,
@@ -79,11 +82,20 @@ struct AttemptRecord {
     reason: Option<String>,
 }
 
+/// Default for pre-M1-5 records. The durable attempt path ships behind a flag that has never been
+/// enabled in a deployed environment (H1-3 is the flip), and before M1-5 the first claim for an
+/// instruction was the only claim that could exist for it — every pre-upgrade record is therefore
+/// a `place`-class claim. A journal with no such history is unaffected.
+fn default_action() -> String {
+    "place".to_string()
+}
+
 impl AttemptRecord {
     fn of(attempt: &Attempt) -> Self {
         Self {
             attempt_id: attempt.attempt_id.clone(),
             instruction_id: attempt.instruction_id.clone(),
+            action: attempt.action.clone(),
             request_hash: attempt.request_hash.clone(),
             client_order_ref: attempt.client_order_ref.clone(),
             phase: attempt.phase.as_str().to_string(),
@@ -96,6 +108,7 @@ impl AttemptRecord {
         Ok(Attempt {
             attempt_id: self.attempt_id,
             instruction_id: self.instruction_id,
+            action: self.action,
             request_hash: self.request_hash,
             client_order_ref: self.client_order_ref,
             // An unknown phase is not guessed at: a record this build cannot interpret means the
@@ -317,38 +330,46 @@ pub struct FileAttemptStore {
 struct AttemptInner {
     log: JsonlLog,
     // Same three indexes as `InMemoryAttemptStore`, kept in step with the log. `by_id` is the
-    // primary key; `dup` is `instruction_id -> request hashes`; `by_instruction` is the
-    // `instruction_id` existence index. Nested sets rather than tuple keys so the lookups borrow.
+    // primary key; `dup` is `instruction_id -> action -> request hashes`; `by_instruction` is the
+    // `(instruction_id, action)` existence index (M1-5). Nested sets rather than tuple keys so the
+    // lookups borrow.
     by_id: HashMap<String, Attempt>,
-    dup: HashMap<String, HashSet<String>>,
-    by_instruction: HashMap<String, ()>,
+    dup: HashMap<String, HashMap<String, HashSet<String>>>,
+    by_instruction: HashMap<String, HashSet<String>>,
 }
 
 impl AttemptInner {
     /// Folds one record into the indexes. A later record for the same `attempt_id` supersedes the
     /// earlier one (that is how a phase transition is stored); a *second claim* of an
-    /// `(instruction_id, request_hash)` already in the log means two actors wrote this file, which
-    /// is exactly what the lock exists to prevent, so it is refused rather than replayed.
+    /// `(instruction_id, action, request_hash)` already in the log means two actors wrote this
+    /// file, which is exactly what the lock exists to prevent, so it is refused rather than
+    /// replayed.
     fn fold(&mut self, attempt: Attempt) -> Result<()> {
         if !self.by_id.contains_key(&attempt.attempt_id) {
             if self
                 .dup
                 .get(&attempt.instruction_id)
+                .and_then(|actions| actions.get(&attempt.action))
                 .is_some_and(|hashes| hashes.contains(&attempt.request_hash))
             {
                 bail!(
-                    "attempt log records two attempts for instruction {} and hash {}: \
+                    "attempt log records two attempts for instruction {}, action {} and hash {}: \
                      this file was written by more than one actor",
                     attempt.instruction_id,
+                    attempt.action,
                     attempt.request_hash
                 );
             }
             self.dup
                 .entry(attempt.instruction_id.clone())
                 .or_default()
+                .entry(attempt.action.clone())
+                .or_default()
                 .insert(attempt.request_hash.clone());
             self.by_instruction
-                .insert(attempt.instruction_id.clone(), ());
+                .entry(attempt.instruction_id.clone())
+                .or_default()
+                .insert(attempt.action.clone());
         }
         self.by_id.insert(attempt.attempt_id.clone(), attempt);
         Ok(())
@@ -409,20 +430,26 @@ impl AttemptStore for FileAttemptStore {
     // A poisoned lock has no safe `false` here — "no duplicate" would authorise a second send — so
     // these two answer `true` (refuse) when they cannot read the index. `try_claim` below never
     // guesses: it fails outright.
-    fn has_duplicate(&self, instruction_id: &str, request_hash: &str) -> bool {
+    fn has_duplicate(&self, instruction_id: &str, action: &str, request_hash: &str) -> bool {
         lock(&self.inner)
             .map(|inner| {
                 inner
                     .dup
                     .get(instruction_id)
+                    .and_then(|actions| actions.get(action))
                     .is_some_and(|hashes| hashes.contains(request_hash))
             })
             .unwrap_or(true)
     }
 
-    fn has_instruction(&self, instruction_id: &str) -> bool {
+    fn has_instruction(&self, instruction_id: &str, action: &str) -> bool {
         lock(&self.inner)
-            .map(|inner| inner.by_instruction.contains_key(instruction_id))
+            .map(|inner| {
+                inner
+                    .by_instruction
+                    .get(instruction_id)
+                    .is_some_and(|actions| actions.contains(action))
+            })
             .unwrap_or(true)
     }
 
@@ -430,6 +457,7 @@ impl AttemptStore for FileAttemptStore {
         &self,
         attempt_id: &str,
         instruction_id: &str,
+        action: &str,
         request_hash: &str,
         client_order_ref: &str,
     ) -> Result<Claim> {
@@ -443,16 +471,22 @@ impl AttemptStore for FileAttemptStore {
         if inner
             .dup
             .get(instruction_id)
+            .and_then(|actions| actions.get(action))
             .is_some_and(|hashes| hashes.contains(request_hash))
         {
             return Ok(Claim::Duplicate);
         }
-        if inner.by_instruction.contains_key(instruction_id) {
+        if inner
+            .by_instruction
+            .get(instruction_id)
+            .is_some_and(|actions| actions.contains(action))
+        {
             return Ok(Claim::ContractViolation);
         }
         let attempt = Attempt::new(
             attempt_id,
             instruction_id,
+            action,
             request_hash,
             client_order_ref,
             AttemptPhase::Prepared,
@@ -566,7 +600,9 @@ mod tests {
         let path = attempts_log(&dir);
         let claimed = {
             let store = FileAttemptStore::open(&path).unwrap();
-            let Claim::Claimed(attempt) = store.try_claim("a-1", "ins-1", "h-1", "c-1").unwrap()
+            let Claim::Claimed(attempt) = store
+                .try_claim("a-1", "ins-1", "place", "h-1", "c-1")
+                .unwrap()
             else {
                 panic!("a fresh identity must claim");
             };
@@ -595,15 +631,21 @@ mod tests {
 
         // And the recovered view still classifies: same id resumes, same identity duplicates.
         assert_eq!(
-            reopened.try_claim("a-1", "ins-1", "h-1", "c-1").unwrap(),
+            reopened
+                .try_claim("a-1", "ins-1", "place", "h-1", "c-1")
+                .unwrap(),
             Claim::Existing(recovered)
         );
         assert_eq!(
-            reopened.try_claim("a-2", "ins-1", "h-1", "c-2").unwrap(),
+            reopened
+                .try_claim("a-2", "ins-1", "place", "h-1", "c-2")
+                .unwrap(),
             Claim::Duplicate
         );
         assert_eq!(
-            reopened.try_claim("a-3", "ins-1", "h-9", "c-3").unwrap(),
+            reopened
+                .try_claim("a-3", "ins-1", "place", "h-9", "c-3")
+                .unwrap(),
             Claim::ContractViolation
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -688,7 +730,9 @@ mod tests {
         let path = attempts_log(&dir);
         {
             let store = FileAttemptStore::open(&path).unwrap();
-            store.try_claim("a-1", "ins-1", "h-1", "c-1").unwrap();
+            store
+                .try_claim("a-1", "ins-1", "place", "h-1", "c-1")
+                .unwrap();
         }
         // A death inside the next append: a half-written line with no trailing newline.
         {
@@ -755,7 +799,9 @@ mod tests {
         let dir = scratch_dir();
         let nested = dir.join("not").join("there").join("yet");
         let store = FileAttemptStore::open(&nested.join("attempts.jsonl")).unwrap();
-        store.try_claim("a-1", "ins-1", "h-1", "c-1").unwrap();
+        store
+            .try_claim("a-1", "ins-1", "place", "h-1", "c-1")
+            .unwrap();
         let gate = FileGateStore::open(&nested.join("gate.jsonl")).unwrap();
         assert!(gate.read("p-1").is_none());
         assert!(nested.is_dir(), "the store created its own directory");
@@ -790,7 +836,13 @@ mod tests {
                         // by accident of scheduling.
                         barrier.wait();
                         store
-                            .try_claim(&format!("a-{i}"), "ins-1", "h-1", &format!("c-{i}"))
+                            .try_claim(
+                                &format!("a-{i}"),
+                                "ins-1",
+                                "place",
+                                "h-1",
+                                &format!("c-{i}"),
+                            )
                             .unwrap()
                     })
                 })
@@ -815,6 +867,102 @@ mod tests {
             .count();
         assert_eq!(present, 1, "only the winning claim is durable");
         drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M1-5: the action is part of the durable identity. Both an instruction's place and its
+    /// modify survive a reopen with their actions, and the classification stays action-scoped
+    /// against the replayed log (same action + same hash duplicate, same action + new hash
+    /// violation, different action fresh).
+    #[test]
+    fn m1_5_action_round_trips_and_stays_scoped_after_reopen() {
+        let dir = scratch_dir();
+        let path = dir.join("attempts.jsonl");
+        {
+            let store = FileAttemptStore::open(&path).unwrap();
+            assert!(matches!(
+                store
+                    .try_claim("a-place", "ins-1", "place", "h-place", "c-1")
+                    .unwrap(),
+                Claim::Claimed(_)
+            ));
+            assert!(matches!(
+                store
+                    .try_claim("a-mod", "ins-1", "modify", "h-mod", "c-2")
+                    .unwrap(),
+                Claim::Claimed(_)
+            ));
+        }
+
+        let reopened = FileAttemptStore::open(&path).unwrap();
+        assert_eq!(reopened.get("a-place").unwrap().action, "place");
+        assert_eq!(reopened.get("a-mod").unwrap().action, "modify");
+        assert_eq!(
+            reopened
+                .try_claim("a-place-2", "ins-1", "place", "h-place", "c-3")
+                .unwrap(),
+            Claim::Duplicate
+        );
+        assert_eq!(
+            reopened
+                .try_claim("a-place-3", "ins-1", "place", "h-other", "c-4")
+                .unwrap(),
+            Claim::ContractViolation
+        );
+        assert_eq!(
+            reopened
+                .try_claim("a-mod-2", "ins-1", "modify", "h-mod", "c-5")
+                .unwrap(),
+            Claim::Duplicate
+        );
+        // Cancel of the same instruction was never claimed, so it is fresh — the pre-M1-5 log
+        // would have refused it as a changed instruction payload.
+        assert!(matches!(
+            reopened
+                .try_claim("a-can", "ins-1", "cancel", "h-can", "c-6")
+                .unwrap(),
+            Claim::Claimed(_)
+        ));
+        drop(reopened);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M1-5 is an additive format change: a journal line written before the `action` field
+    /// existed must still load, and it must load *as a place claim* — before M1-5 the first claim
+    /// for an instruction was the only claim that could exist, so the fence it represents is the
+    /// place stream. A replayed place under it stays a duplicate; a changed place hash stays a
+    /// violation.
+    #[test]
+    fn m1_5_a_pre_m1_5_journal_line_loads_as_a_place_claim() {
+        let dir = scratch_dir();
+        let path = dir.join("attempts.jsonl");
+        std::fs::write(
+            &path,
+            "{\"attempt_id\":\"a-legacy\",\"instruction_id\":\"ins-1\",\"request_hash\":\"h-1\",\
+             \"client_order_ref\":\"c-1\",\"phase\":\"PREPARED\"}\n",
+        )
+        .unwrap();
+
+        let store = FileAttemptStore::open(&path).unwrap();
+        let recovered = store.get("a-legacy").expect("the legacy line must load");
+        assert_eq!(
+            recovered.action, "place",
+            "absent action defaults to the place stream"
+        );
+        assert!(store.has_duplicate("ins-1", "place", "h-1"));
+        assert_eq!(
+            store
+                .try_claim("a-2", "ins-1", "place", "h-1", "c-2")
+                .unwrap(),
+            Claim::Duplicate
+        );
+        assert_eq!(
+            store
+                .try_claim("a-3", "ins-1", "place", "h-9", "c-3")
+                .unwrap(),
+            Claim::ContractViolation
+        );
+        drop(store);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

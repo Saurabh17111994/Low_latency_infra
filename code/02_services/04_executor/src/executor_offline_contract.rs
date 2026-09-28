@@ -62,6 +62,7 @@ mod tests {
             execution_attempt_id: attempt_id.into(),
             account_scope_id: "acc".into(),
             instruction_id: "ins-1".into(),
+            action: "place".into(),
             execution_partition_id: PARTITION.into(),
             request_hash: "h-1".into(),
             client_order_ref: format!("E-{attempt_id}"),
@@ -298,19 +299,19 @@ mod tests {
         let rebuild = |j: &[(&str, &str, &str, &str)]| {
             let s = InMemoryAttemptStore::new();
             for (att, instr, hash, cref) in j {
-                let a = Attempt::new(att, instr, hash, cref, AttemptPhase::Prepared);
+                let a = Attempt::new(att, instr, "place", hash, cref, AttemptPhase::Prepared);
                 s.put(&a).unwrap();
             }
             s
         };
         let r1 = rebuild(&journal);
         let r2 = rebuild(&journal);
-        assert!(r1.has_duplicate("instr-1", "hash-1"));
-        assert!(r2.has_duplicate("instr-1", "hash-1"));
-        assert!(r1.has_duplicate("instr-2", "hash-2"));
-        assert!(r2.has_duplicate("instr-2", "hash-2"));
+        assert!(r1.has_duplicate("instr-1", "place", "hash-1"));
+        assert!(r2.has_duplicate("instr-1", "place", "hash-1"));
+        assert!(r1.has_duplicate("instr-2", "place", "hash-2"));
+        assert!(r2.has_duplicate("instr-2", "place", "hash-2"));
         // both stores see same instruction set
-        assert!(r1.has_instruction("instr-1") && r2.has_instruction("instr-1"));
+        assert!(r1.has_instruction("instr-1", "place") && r2.has_instruction("instr-1", "place"));
         // P3-447: the same builder must accept a borrowed array/slice, not only `Vec` (the
         // previous `&Vec<...>` parameter rejected this call).
         let array = [
@@ -318,7 +319,7 @@ mod tests {
             ("attempt-2", "instr-2", "hash-2", "C-2"),
         ];
         let r3 = rebuild(&array);
-        assert!(r3.has_duplicate("instr-1", "hash-1"));
-        assert!(r3.has_instruction("instr-2"));
+        assert!(r3.has_duplicate("instr-1", "place", "hash-1"));
+        assert!(r3.has_instruction("instr-2", "place"));
     }
 }

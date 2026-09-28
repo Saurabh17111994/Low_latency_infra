@@ -437,9 +437,10 @@ no active attempt → PREPARED (request hash + client ref + gate epoch + fence)
                  → SUBMITTING → ACCEPTED | REJECTED | CANCELLED | UNKNOWN
 ```
 
-- A duplicate `(instruction_id, request_hash)` returns the existing attempt — never a second
-  submission. Changed content under an existing instruction identity is a contract violation:
-  quarantine, audit, halt.
+- A duplicate `(instruction_id, action, request_hash)` returns the existing attempt — never a
+  second submission. A changed hash under the same `(instruction_id, action)` is a contract
+  violation: quarantine, audit, halt. A place, its later modify, and its cancel share the
+  `instruction_id` but are distinct actions with independent claim streams (M1-5).
 - Intake validation (reader): schema/version, canonical identity/content hash, expiry/freshness,
   supersession/cancellation, and no unresolved attempt/request-hash conflict — enqueue only if
   gate and fencing permit (applies to future `Position_Actions` and control rows).

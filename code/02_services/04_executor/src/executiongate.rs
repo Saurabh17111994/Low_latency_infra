@@ -52,6 +52,9 @@ impl AttemptPhase {
 pub struct Attempt {
     pub attempt_id: String,
     pub instruction_id: String,
+    /// The bridge command this attempt is (`place` / `modify` / `cancel`): one instruction may
+    /// carry several actions, each its own claim stream (M1-5).
+    pub action: String,
     pub request_hash: String,
     pub client_order_ref: String,
     pub phase: AttemptPhase,
@@ -63,6 +66,7 @@ impl Attempt {
     pub fn new(
         attempt_id: &str,
         instruction_id: &str,
+        action: &str,
         request_hash: &str,
         client_order_ref: &str,
         phase: AttemptPhase,
@@ -70,6 +74,7 @@ impl Attempt {
         Self {
             attempt_id: attempt_id.to_string(),
             instruction_id: instruction_id.to_string(),
+            action: action.to_string(),
             request_hash: request_hash.to_string(),
             client_order_ref: client_order_ref.to_string(),
             phase,
@@ -84,18 +89,24 @@ impl Attempt {
 /// **Atomicity contract (P3-201).** The claim path is `get` →
 /// `has_duplicate`/`has_instruction` → `put` as it stood before D1. That sequence is safe only
 /// while this store has a single actor: two actors sharing one store can both observe "nothing
-/// durable for this `(instruction_id, request_hash)`" and both call the bridge, breaking
+/// durable for this `(instruction_id, action, request_hash)`" and both call the bridge, breaking
 /// exactly-once. Any store reachable by more than one actor — a durable/remote store shared
 /// between executors, or a restarted process running alongside its predecessor — MUST make
-/// classify-and-claim atomic for one `(instruction_id, request_hash)`.
+/// classify-and-claim atomic for one `(instruction_id, action, request_hash)`.
 ///
 /// The entry point is now [`AttemptStore::try_claim`]: classify + insert in one call returning
 /// claimed / existing / duplicate / contract-violation, called by [`ExecutionGate::execute`] in
 /// place of the check-then-act pair. A contract stated only in a comment does not bind a remote
 /// implementation. The key layout it fixes — resume by `attempt_id`, duplicate by
-/// `instruction_id` + `request_hash`, existence by `instruction_id` — is the decision the durable
-/// implementation has to carry, and the load-bearing part is that a durable store performs the
-/// classification and the insert as ONE durable operation.
+/// `(instruction_id, action, request_hash)`, existence by `(instruction_id, action)` — is the
+/// decision the durable implementation has to carry, and the load-bearing part is that a durable
+/// store performs the classification and the insert as ONE durable operation.
+///
+/// **Action-scoped identity (M1-5).** A place, its later modify, and its cancel share the
+/// `instruction_id` but are distinct money movements, so the identity includes the action
+/// (`cmd_env.command`). Same action + same hash is a duplicate; same action + a different hash is
+/// a contract violation; a *different action* is always a fresh claim — before this, a modify
+/// after a place was misread as a replay with changed content and halted the gate.
 /// Result of an atomic classify-and-claim ([`AttemptStore::try_claim`], P3-201).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Claim {
@@ -103,9 +114,10 @@ pub enum Claim {
     Claimed(Attempt),
     /// This `attempt_id` is already durable — resume from its phase, never a second bridge call.
     Existing(Attempt),
-    /// Another attempt already carries this `(instruction_id, request_hash)` — no new call.
+    /// Another attempt already carries this `(instruction_id, action, request_hash)` — no new call.
     Duplicate,
-    /// This `instruction_id` is durable with a different `request_hash` — contract violation.
+    /// This `(instruction_id, action)` is durable with a different `request_hash` — contract
+    /// violation.
     ContractViolation,
 }
 
@@ -113,27 +125,28 @@ pub trait AttemptStore {
     fn get(&self, attempt_id: &str) -> Option<Attempt>;
     /// Persists create/update and returns `Ok` only after the durable acknowledgement.
     fn put(&self, attempt: &Attempt) -> Result<()>;
-    /// True when an attempt with this `(instruction_id, request_hash)` already exists.
-    fn has_duplicate(&self, instruction_id: &str, request_hash: &str) -> bool;
-    /// True when any attempt with this `instruction_id` exists (regardless of hash).
-    fn has_instruction(&self, instruction_id: &str) -> bool;
+    /// True when an attempt with this `(instruction_id, action, request_hash)` already exists.
+    fn has_duplicate(&self, instruction_id: &str, action: &str, request_hash: &str) -> bool;
+    /// True when any attempt with this `(instruction_id, action)` exists (regardless of hash).
+    fn has_instruction(&self, instruction_id: &str, action: &str) -> bool;
     /// Classifies the identity and, when it is new, claims it — in one operation (P3-201).
     ///
     /// This is the whole of `get` → `has_duplicate`/`has_instruction` → `put` from
     /// [`ExecutionGate::execute`] as a single call, because that check-then-act sequence is safe
     /// only while the store has one actor: two actors sharing one store can both observe "nothing
-    /// durable for this `(instruction_id, request_hash)`" and both call the bridge.
+    /// durable for this `(instruction_id, action)`" and both call the bridge.
     ///
     /// **Key layout** (the decision a durable implementation must make deliberately): `attempt_id`
-    /// is the primary key; `(instruction_id, request_hash)` must be unique; a different
-    /// `request_hash` under an existing `instruction_id` is a contract violation. A store reachable
-    /// by more than one actor MUST implement this as one durable conditional insert against those
-    /// keys — not as a read followed by a write. The claim always mints `PREPARED`: a caller cannot
-    /// claim straight into a later phase.
+    /// is the primary key; `(instruction_id, action, request_hash)` must be unique; a different
+    /// `request_hash` under the same `(instruction_id, action)` is a contract violation. A store
+    /// reachable by more than one actor MUST implement this as one durable conditional insert
+    /// against those keys — not as a read followed by a write. The claim always mints `PREPARED`: a
+    /// caller cannot claim straight into a later phase.
     fn try_claim(
         &self,
         attempt_id: &str,
         instruction_id: &str,
+        action: &str,
         request_hash: &str,
         client_order_ref: &str,
     ) -> Result<Claim>;
@@ -209,6 +222,8 @@ pub struct Command {
     pub execution_attempt_id: String,
     pub account_scope_id: String,
     pub instruction_id: String,
+    /// The bridge action (`place` / `modify` / `cancel`): part of the claim identity (M1-5).
+    pub action: String,
     pub execution_partition_id: String,
     pub request_hash: String,
     pub client_order_ref: String,
@@ -285,13 +300,15 @@ impl ExecutionGate {
         let resume: Option<Attempt> = match self.attempts.try_claim(
             &cmd.execution_attempt_id,
             &cmd.instruction_id,
+            &cmd.action,
             &cmd.request_hash,
             &cmd.client_order_ref,
         )? {
-            // Another attempt already carries the same (instruction_id, request_hash): a different
-            // attempt id for the same logical order => duplicate, no new call.
+            // Another attempt already carries the same (instruction_id, action, request_hash): a
+            // different attempt id for the same logical order => duplicate, no new call.
             Claim::Duplicate => return Ok(Outcome::Duplicate),
-            // Same instruction but a different request hash → contract violation: halt, no call.
+            // Same (instruction_id, action) but a different request hash → contract violation:
+            // halt, no call.
             Claim::ContractViolation => {
                 self.halt(cmd)?;
                 return Ok(Outcome::ContractViolation);
@@ -324,6 +341,7 @@ impl ExecutionGate {
         self.attempts.put(&Attempt::new(
             &cmd.execution_attempt_id,
             &cmd.instruction_id,
+            &cmd.action,
             &cmd.request_hash,
             &cmd.client_order_ref,
             AttemptPhase::Submitting,
@@ -362,6 +380,7 @@ impl ExecutionGate {
         self.attempts.put(&Attempt {
             attempt_id: cmd.execution_attempt_id.clone(),
             instruction_id: cmd.instruction_id.clone(),
+            action: cmd.action.clone(),
             request_hash: cmd.request_hash.clone(),
             client_order_ref: cmd.client_order_ref.clone(),
             phase: terminal,
@@ -409,10 +428,11 @@ impl ExecutionGate {
 #[derive(Debug, Default, Clone)]
 pub struct InMemoryAttemptStore {
     by_id: RefCell<HashMap<String, Attempt>>,
-    // instruction_id -> request hashes. Nested so both lookups borrow (`&str`), keeping
-    // the hot `has_duplicate` path allocation-free (P3-446).
-    dup: RefCell<HashMap<String, HashSet<String>>>,
-    by_instruction: RefCell<HashMap<String, ()>>,
+    // instruction_id -> action -> request hashes. Nested so every lookup borrows (`&str`), keeping
+    // the hot `has_duplicate` path allocation-free (P3-446) and action-scoped (M1-5).
+    dup: RefCell<HashMap<String, HashMap<String, HashSet<String>>>>,
+    // instruction_id -> actions that have an attempt.
+    by_instruction: RefCell<HashMap<String, HashSet<String>>>,
 }
 
 impl InMemoryAttemptStore {
@@ -433,25 +453,34 @@ impl AttemptStore for InMemoryAttemptStore {
             .borrow_mut()
             .entry(attempt.instruction_id.clone())
             .or_default()
+            .entry(attempt.action.clone())
+            .or_default()
             .insert(attempt.request_hash.clone());
         self.by_instruction
             .borrow_mut()
-            .insert(attempt.instruction_id.clone(), ());
+            .entry(attempt.instruction_id.clone())
+            .or_default()
+            .insert(attempt.action.clone());
         Ok(())
     }
-    fn has_duplicate(&self, instruction_id: &str, request_hash: &str) -> bool {
+    fn has_duplicate(&self, instruction_id: &str, action: &str, request_hash: &str) -> bool {
         self.dup
             .borrow()
             .get(instruction_id)
+            .and_then(|actions| actions.get(action))
             .is_some_and(|hashes| hashes.contains(request_hash))
     }
-    fn has_instruction(&self, instruction_id: &str) -> bool {
-        self.by_instruction.borrow().contains_key(instruction_id)
+    fn has_instruction(&self, instruction_id: &str, action: &str) -> bool {
+        self.by_instruction
+            .borrow()
+            .get(instruction_id)
+            .is_some_and(|actions| actions.contains(action))
     }
     fn try_claim(
         &self,
         attempt_id: &str,
         instruction_id: &str,
+        action: &str,
         request_hash: &str,
         client_order_ref: &str,
     ) -> Result<Claim> {
@@ -466,17 +495,19 @@ impl AttemptStore for InMemoryAttemptStore {
                 .dup
                 .borrow()
                 .get(instruction_id)
+                .and_then(|actions| actions.get(action))
                 .is_some_and(|hashes| hashes.contains(request_hash))
             {
                 return Ok(Claim::Duplicate);
             }
-            if self.by_instruction.borrow().contains_key(instruction_id) {
+            if self.has_instruction(instruction_id, action) {
                 return Ok(Claim::ContractViolation);
             }
         }
         let attempt = Attempt::new(
             attempt_id,
             instruction_id,
+            action,
             request_hash,
             client_order_ref,
             AttemptPhase::Prepared,
@@ -611,6 +642,7 @@ mod tests {
             execution_attempt_id: attempt_id.into(),
             account_scope_id: "acc".into(),
             instruction_id: "ins-1".into(),
+            action: "place".into(),
             execution_partition_id: PARTITION.into(),
             request_hash: "h-1".into(),
             client_order_ref: format!("E-{attempt_id}"),
@@ -786,7 +818,10 @@ mod tests {
         let store = InMemoryAttemptStore::new();
 
         // Fresh identity: exactly one PREPARED attempt, returned to the caller.
-        let Claim::Claimed(claimed) = store.try_claim("a-1", "ins-1", "h-1", "c-1").unwrap() else {
+        let Claim::Claimed(claimed) = store
+            .try_claim("a-1", "ins-1", "place", "h-1", "c-1")
+            .unwrap()
+        else {
             panic!("a fresh identity must claim");
         };
         assert_eq!(claimed.phase, AttemptPhase::Prepared);
@@ -795,13 +830,17 @@ mod tests {
         // Same attempt id again: resume material, not a second claim — and the phase the store
         // holds at that moment is what comes back (it is the durable state that wins).
         assert_eq!(
-            store.try_claim("a-1", "ins-1", "h-1", "c-1").unwrap(),
+            store
+                .try_claim("a-1", "ins-1", "place", "h-1", "c-1")
+                .unwrap(),
             Claim::Existing(claimed.clone())
         );
 
         // Different attempt id, same (instruction_id, request_hash): duplicate.
         assert_eq!(
-            store.try_claim("a-2", "ins-1", "h-1", "c-2").unwrap(),
+            store
+                .try_claim("a-2", "ins-1", "place", "h-1", "c-2")
+                .unwrap(),
             Claim::Duplicate
         );
 
@@ -809,13 +848,116 @@ mod tests {
         // win over this one — a repeated (instruction, hash) is the duplicate case even though the
         // instruction also exists.
         assert_eq!(
-            store.try_claim("a-3", "ins-1", "h-9", "c-3").unwrap(),
+            store
+                .try_claim("a-3", "ins-1", "place", "h-9", "c-3")
+                .unwrap(),
             Claim::ContractViolation
         );
 
         // A rejected claim leaves nothing behind: the store still holds exactly the one attempt.
         assert_eq!(store.get("a-2"), None);
         assert_eq!(store.get("a-3"), None);
+    }
+
+    // M1-5: the claim identity is action-scoped. A modify after a place on one instruction is a
+    // fresh claim (its own hash stream); only a changed hash within the SAME action is a violation.
+    #[test]
+    fn m1_5_claim_identity_is_action_scoped() {
+        let store = InMemoryAttemptStore::new();
+
+        let Claim::Claimed(place) = store
+            .try_claim("a-place", "ins-1", "place", "h-place", "c-1")
+            .unwrap()
+        else {
+            panic!("a fresh place must claim");
+        };
+        assert_eq!(place.action, "place");
+
+        // The place's own stream fences replays: same action, same hash -> duplicate…
+        assert_eq!(
+            store
+                .try_claim("a-place-2", "ins-1", "place", "h-place", "c-2")
+                .unwrap(),
+            Claim::Duplicate
+        );
+        // …and same action, different hash -> violation.
+        assert_eq!(
+            store
+                .try_claim("a-place-3", "ins-1", "place", "h-other", "c-3")
+                .unwrap(),
+            Claim::ContractViolation
+        );
+
+        // A modify of the same instruction is a distinct money movement, not a changed payload.
+        let Claim::Claimed(modify) = store
+            .try_claim("a-mod", "ins-1", "modify", "h-mod", "c-1")
+            .unwrap()
+        else {
+            panic!("a modify after a place must be a fresh claim (M1-5)")
+        };
+        assert_eq!(modify.action, "modify");
+        assert_eq!(modify.phase, AttemptPhase::Prepared);
+        // The modify's stream is independently fenced now.
+        assert_eq!(
+            store
+                .try_claim("a-mod-2", "ins-1", "modify", "h-mod-other", "c-1")
+                .unwrap(),
+            Claim::ContractViolation
+        );
+
+        // Cancel is fresh too, and all three actions coexist for one instruction.
+        assert!(matches!(
+            store
+                .try_claim("a-can", "ins-1", "cancel", "h-can", "c-1")
+                .unwrap(),
+            Claim::Claimed(_)
+        ));
+        assert!(store.has_instruction("ins-1", "place"));
+        assert!(store.has_instruction("ins-1", "modify"));
+        assert!(store.has_instruction("ins-1", "cancel"));
+        assert!(!store.has_instruction("ins-1", "place-modify"));
+    }
+
+    // M1-5 end-to-end through the durable protocol: place -> modify -> replayed modify. Before
+    // the fix the modify was misread as a changed payload and halted the gate; now both reach the
+    // bridge exactly once and the replay of the modify is a duplicate.
+    #[test]
+    fn m1_5_place_then_modify_is_two_calls_and_a_duplicate() {
+        let total_handle = Rc::new(Cell::new(0));
+        let bridge = Rc::new(CountingBridge::new(Rc::clone(&total_handle), false));
+        let attempts: Rc<dyn AttemptStore> = Rc::new(InMemoryAttemptStore::new());
+        let mut gate = ExecutionGate::new(attempts, shared_gates(), bridge);
+
+        let place = cmd("a-place");
+        assert_eq!(
+            gate.execute(&place, CrashHooks::default()).unwrap(),
+            Outcome::Accepted
+        );
+
+        let modify = Command {
+            execution_attempt_id: "a-mod".into(),
+            action: "modify".into(),
+            request_hash: "h-mod".into(),
+            ..cmd("a-mod")
+        };
+        assert_eq!(
+            gate.execute(&modify, CrashHooks::default()).unwrap(),
+            Outcome::Accepted,
+            "a modify after a place must not halt as a contract violation"
+        );
+        assert_eq!(total_handle.get(), 2);
+
+        // The gateway's ordinary retry after an unacknowledged modify response: response lost,
+        // same modify content under a new attempt id -> duplicate, no third call, no halt.
+        let modify_retry = Command {
+            execution_attempt_id: "a-mod-2".into(),
+            ..modify.clone()
+        };
+        assert_eq!(
+            gate.execute(&modify_retry, CrashHooks::default()).unwrap(),
+            Outcome::Duplicate
+        );
+        assert_eq!(total_handle.get(), 2);
     }
 
     // P3-446: the duplicate index is consulted on every fresh `execute` that reaches the
@@ -828,6 +970,7 @@ mod tests {
             .put(&Attempt::new(
                 "a-1",
                 "ins-1",
+                "place",
                 "h-1",
                 "E-a-1",
                 AttemptPhase::Prepared,
@@ -835,7 +978,7 @@ mod tests {
             .unwrap();
 
         let before = allocations();
-        let duplicate = store.has_duplicate("ins-1", "h-1");
+        let duplicate = store.has_duplicate("ins-1", "place", "h-1");
         let after = allocations();
         assert!(duplicate, "the stored pair must still be detected");
         assert_eq!(
@@ -845,7 +988,7 @@ mod tests {
         );
 
         let before = allocations();
-        let other = store.has_duplicate("ins-2", "h-1");
+        let other = store.has_duplicate("ins-2", "place", "h-1");
         let after = allocations();
         assert!(!other, "an unseen instruction must not be a duplicate");
         assert_eq!(
@@ -1301,6 +1444,7 @@ mod tests {
             .put(&Attempt::new(
                 "a-c10",
                 "ins-1",
+                "place",
                 "h-1",
                 "E-a-c10",
                 AttemptPhase::Accepted,

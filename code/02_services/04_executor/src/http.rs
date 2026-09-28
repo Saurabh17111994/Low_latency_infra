@@ -809,19 +809,22 @@ enum GuardOutcome {
 /// Durable pre-call persistence and duplicate guard for the live forward leg (Workstream-D swap).
 ///
 /// The identity is the gateway's own: the attempt id [`intent`] mints per attempt, the
-/// `instruction_id` from the payload, and the signed `payload_hash` — the same `(instruction_id, n)`
-/// pair the Java `Execution_Intent_Processed` dedup keys on, which `gateway_protocol::verify` has
-/// already checked against the payload it covers. Nothing is sent until a SUBMITTING record for this
-/// attempt is on disk:
+/// `instruction_id` from the payload, the bridge `command` as the action (M1-5: a place, its
+/// modify, and its cancel share the instruction but are distinct money movements), and the signed
+/// `payload_hash` — the same action-scoped pair the Java `Execution_Intent_Processed` dedup keys
+/// on, which `gateway_protocol::verify` has already checked against the payload it covers. Nothing
+/// is sent until a SUBMITTING record for this attempt is on disk:
 ///
 /// * `Claimed` — new identity: record SUBMITTING, then send.
 /// * `Existing` — this attempt id is already recorded. `ACCEPTED`/`REJECTED` answer from it with no
 ///   second call; `PREPARED` proves no call was made (the record is written *before* the send and a
 ///   failed write refuses instead of sending), so the send resumes; `SUBMITTING`/`UNKNOWN` is
 ///   ambiguous — the bridge may have seen this order — so it halts the gate rather than retrying.
-/// * `Duplicate` — same instruction *and* payload under another attempt id: the gateway's ordinary
-///   retry after an unacknowledged response. Refuse, do not halt; the order is in a known state.
-/// * `ContractViolation` — same instruction, different payload: an operational fault, so it halts.
+/// * `Duplicate` — same instruction *and action* *and* payload under another attempt id: the
+///   gateway's ordinary retry after an unacknowledged response. Refuse, do not halt; the order is
+///   in a known state.
+/// * `ContractViolation` — same instruction and action, different payload: an operational fault,
+///   so it halts. A different action is a fresh claim, never a violation.
 fn claim_for_send(
     state: &ServerState,
     attempts: &Arc<dyn LiveAttemptStore>,
@@ -831,6 +834,7 @@ fn claim_for_send(
     let attempt = match attempts.try_claim(
         &cmd_env.execution_attempt_id,
         &cmd_env.instruction_id,
+        &cmd_env.command,
         payload_hash,
         &cmd_env.client_order_ref,
     ) {
@@ -2328,16 +2332,17 @@ mod tests {
         fn put(&self, _attempt: &Attempt) -> Result<()> {
             anyhow::bail!("durable store unavailable")
         }
-        fn has_duplicate(&self, _instruction_id: &str, _request_hash: &str) -> bool {
+        fn has_duplicate(&self, _instruction_id: &str, _action: &str, _request_hash: &str) -> bool {
             true
         }
-        fn has_instruction(&self, _instruction_id: &str) -> bool {
+        fn has_instruction(&self, _instruction_id: &str, _action: &str) -> bool {
             true
         }
         fn try_claim(
             &self,
             _attempt_id: &str,
             _instruction_id: &str,
+            _action: &str,
             _request_hash: &str,
             _client_order_ref: &str,
         ) -> Result<Claim> {
@@ -2536,7 +2541,7 @@ mod tests {
         // A new process over the same directory: empty memory, empty bridge, same log.
         let store = Arc::new(FileAttemptStore::open(&path).unwrap());
         assert!(
-            store.has_instruction("T9-SB-0001"),
+            store.has_instruction("T9-SB-0001", "place"),
             "the attempt outlived the process that wrote it"
         );
         let sends_second = Arc::new(AtomicU64::new(0));
@@ -2646,6 +2651,53 @@ mod tests {
             state.snapshot().gate,
             ExecState::Halted,
             "an unresolved attempt halts the gate for reconciliation"
+        );
+        drop(state);
+        drop(store);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M1-5: the live guard is action-scoped. A place claims its instruction's place stream; an
+    /// amend of the same instruction is a fresh money movement with its own hash stream — before
+    /// this it was misread as a changed payload (`CONTRACT_VIOLATION` + halt) and never reached
+    /// the bridge.
+    #[tokio::test]
+    async fn m1_5_an_amend_after_a_place_is_a_fresh_claim() {
+        let dir = guard_scratch_dir();
+        let store = Arc::new(FileAttemptStore::open(&dir.join(ATTEMPTS_LOG)).unwrap());
+        let guard = live_guard(&store);
+        let state =
+            enabled_state(fake_forwarder(CommandScript::Accept)).with_attempts(Arc::clone(&guard));
+
+        let place_payload: serde_json::Value = serde_json::from_str(&bieq_payload_json()).unwrap();
+        let place = intent::place_envelope_from_payload(&place_payload).unwrap();
+        let GuardOutcome::Send(mut settled) = claim_for_send(&state, &guard, &place, "hash-place")
+        else {
+            panic!("a fresh place must be sent");
+        };
+        settled.phase = AttemptPhase::Accepted;
+        settled.broker_order_id = Some("BRK-0001".into());
+        store.put(&settled).unwrap();
+
+        let mut amend_payload = place_payload.clone();
+        amend_payload["broker_order_id"] = serde_json::json!("BRK-0001");
+        amend_payload["quantity"] = serde_json::json!(2);
+        let amend = intent::amend_envelope_from_payload(&amend_payload).unwrap();
+        assert_eq!(
+            amend.instruction_id, place.instruction_id,
+            "the amend must share the instruction to pin the identity question"
+        );
+
+        match claim_for_send(&state, &guard, &amend, "hash-amend") {
+            GuardOutcome::Send(attempt) => assert_eq!(attempt.action, "modify"),
+            GuardOutcome::Refuse(status, doc) => {
+                panic!("an amend after a place must be a fresh claim, got {status}: {doc}")
+            }
+        }
+        assert_eq!(
+            state.snapshot().gate,
+            ExecState::Enabled,
+            "a legitimate amend is not a contract violation and must not halt the gate"
         );
         drop(state);
         drop(store);
