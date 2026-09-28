@@ -56,7 +56,7 @@ class IngestionConfigTest {
     }
 
     @Test
-    @DisplayName("INGESTION_WRITE_STARTUP_GRACE_MS default = 180s; 0 disables (CHG-326)")
+    @DisplayName("INGESTION_WRITE_STARTUP_GRACE_MS default = 3600s; 0 disables (CHG-326/CHG-356)")
     void writeStartupGraceDefaultAndDisable() {
         java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
         env.put("ARROW_APP_ID", "test-app");
@@ -70,11 +70,33 @@ class IngestionConfigTest {
         env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
         env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
         IngestionConfig cfg = IngestionConfig.validateFrom(env);
-        assertEquals(180_000L, cfg.writeStartupGraceMs,
-                "default write-path startup grace is 180s (matches FLUSS_STARTUP_WAIT_MS)");
+        assertEquals(3_600_000L, cfg.writeStartupGraceMs,
+                "default write-path startup grace is 3600s (matches FLUSS_STARTUP_WAIT_MS; "
+                        + "must cover the measured 22m56s cold-start recovery — CHG-356)");
         env.put("INGESTION_WRITE_STARTUP_GRACE_MS", "0");
         assertEquals(0L, IngestionConfig.validateFrom(env).writeStartupGraceMs,
                 "0 disables the grace (exact pre-CHG-326 fail-closed behavior)");
+    }
+
+    @Test
+    @DisplayName("FLUSS_STARTUP_WAIT_MS default = 3600s; 0 disables (CHG-322/CHG-356)")
+    void flussStartupWaitDefaultAndDisable() {
+        java.util.Map<String, String> env = new java.util.LinkedHashMap<>();
+        env.put("ARROW_APP_ID", "test-app");
+        env.put("DEPLOYMENT_ENV", "dev");
+        env.put("ARROW_APP_SECRET", "test-secret");
+        env.put("ARROW_USER_ID", "test-user");
+        env.put("ARROW_PASSWORD", "test-pass");
+        env.put("ARROW_TOTP_KEY", "JBSWY3DPEHPK3PXP");
+        env.put("FLUSS_BOOTSTRAP", "localhost:9123");
+        env.put("RAW_TABLE_NAME", "raw_table_1");
+        env.put("ARROW_MAX_EVENT_AGE_MS", "5000");
+        env.put("ARROW_MAX_FUTURE_EVENT_SKEW_MS", "2000");
+        assertEquals(3_600_000, IngestionConfig.validateFrom(env).flussStartupWaitMs,
+                "default read-side startup wait is 3600s (cold-start recovery budget — CHG-356)");
+        env.put("FLUSS_STARTUP_WAIT_MS", "0");
+        assertEquals(0, IngestionConfig.validateFrom(env).flussStartupWaitMs,
+                "0 disables the wait (pre-CHG-322 fail-fast path)");
     }
 
     @Test

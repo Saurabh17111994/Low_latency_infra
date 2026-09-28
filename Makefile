@@ -147,13 +147,17 @@ ddl:
 	@echo "(Plain 'make ddl' only validates; run 'make ddl APPLY=1 EVIDENCE=<file>' to execute the contract.)"
 
 up:
-	# FIXED (CHG-322): when this recreates the Fluss layer, fluss-coordinator and
-	# fluss-tablet come back with no elected leader for raw_table_1's buckets. Ingestion
-	# now waits at startup (FLUSS_STARTUP_WAIT_MS, default 180000 ms) for the raw table's
-	# metadata to become readable, and only then runs its schema step - it no longer exits
-	# into the on-failure wall. Set FLUSS_STARTUP_WAIT_MS=0 to restore the old fail-fast
-	# path. If ingestion still ends up down, recover by recreating the ingestion service
-	# alone and skipping its dependencies (do not recreate the Fluss layer with it).
+	# FIXED (CHG-322, extended by CHG-356): when this recreates the Fluss layer,
+	# fluss-coordinator and fluss-tablet come back with no elected leader for
+	# raw_table_1's buckets and the tablet recovers every table before it serves
+	# metadata (measured 22 min 56 s off-hours at 58.6M raw records, 2026-09-28).
+	# Ingestion waits at startup (FLUSS_STARTUP_WAIT_MS, default 3600000 ms) for
+	# the raw table's metadata to become readable, and its write-path grace covers
+	# the whole recovery (INGESTION_WRITE_STARTUP_GRACE_MS, default 3600000 ms) -
+	# it no longer exits into the on-failure wall. Set either to 0 to restore the
+	# old fail-fast paths. If ingestion still ends up down, recover by recreating
+	# the ingestion service alone and skipping its dependencies (do not recreate
+	# the Fluss layer with it).
 	@echo "verifying deployed artifacts before the recreate (SKIP when an image is not built here)"
 	@$(STACK_LOCK) python3 code/01_platform/04_scripts/deployed_artifact_verify.py \
 		--target ingestion --image 01_docker-ingestion:latest

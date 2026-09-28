@@ -218,11 +218,16 @@ public final class IngestionConfig {
         // ---- Fluss ----
         b.flussBootstrap = required(env, "FLUSS_BOOTSTRAP", errors);
         b.rawTableName = required(env, "RAW_TABLE_NAME", errors);
-        // CHG-322: bounded startup readiness wait — Compose can start ingestion
-        // into the Fluss no-leader window (the `make up` hazard). 0 disables the
-        // wait and restores the pre-CHG-322 fail-fast path.
+        // CHG-322/CHG-356: bounded startup readiness wait — Compose can start
+        // ingestion into the Fluss no-leader window (the `make up` hazard). The
+        // default must cover a cold-start replay: MEASURED 2026-09-28 (off-hours
+        // drill, real feed, 58.6M raw records) 22 min 56 s to serve raw_table_1,
+        // dominated by candle_live/candle_closed KV changelog replay; the old
+        // 180s/900s budgets failed while recovery was still progressing. Default
+        // 60 min, operator range to 2 h. 0 disables the wait and restores the
+        // pre-CHG-322 fail-fast path.
         b.flussStartupWaitMs = intRange(
-                env, "FLUSS_STARTUP_WAIT_MS", 180_000, 0, 600_000, errors);
+                env, "FLUSS_STARTUP_WAIT_MS", 3_600_000, 0, 7_200_000, errors);
 
         // ---- Batching (max bounds; app-level batching stays off at the
         // defaults — the Fluss client owns transport-level coalescing) ----
@@ -277,11 +282,17 @@ public final class IngestionConfig {
         // Zero-ack watchdog: 0 = disabled. Default 10s.
         b.zeroAckTimeoutMs = longRange(env, "INGESTION_ZERO_ACK_TIMEOUT_MS",
                 10_000L, 0L, 300_000L, errors);
-        // CHG-326: bounded write-path startup grace (metadata-not-ready retry
-        // before the first ack). 0 = disabled (pre-CHG-326 behavior). The
-        // 180s default matches FLUSS_STARTUP_WAIT_MS (see the drill note).
+        // CHG-326/CHG-356: bounded write-path startup grace (metadata-not-ready
+        // retry while Fluss recovers, plus zero-ack-watchdog stand-down for the
+        // WHOLE window — an early ack does not re-arm it). 0 = disabled (pre-
+        // CHG-326 behavior). Default matches FLUSS_STARTUP_WAIT_MS (60 min):
+        // MEASURED 2026-09-28 cold-start recovery 22 min 56 s; the old 900 s grace
+        // expired mid-recovery and the container failed closed once. At off-hours
+        // accept rates (~63 ticks/s) the 150k pending cap back-pressures near
+        // ~40 min — no loss, readiness turns false; in-session cold starts are
+        // outages by definition.
         b.writeStartupGraceMs = longRange(env, "INGESTION_WRITE_STARTUP_GRACE_MS",
-                180_000L, 0L, 600_000L, errors);
+                3_600_000L, 0L, 7_200_000L, errors);
         b.clockOffsetLimitMs = longRange(env, "CLOCK_OFFSET_LIMIT_MS",
                 CLOCK_OFFSET_LIMIT_MS, 10L, 60_000L, errors);
         b.arrowMaxEventAgeMs = requiredLong(env, "ARROW_MAX_EVENT_AGE_MS", errors);
@@ -685,7 +696,7 @@ public final class IngestionConfig {
         String arrowInstrumentTokens = "";
         String flussBootstrap = "fluss-coordinator:9123";
         String rawTableName = "raw_table_1";
-        int flussStartupWaitMs = 180_000; // CHG-322: bounded Fluss readiness wait
+        int flussStartupWaitMs = 3_600_000; // CHG-322/CHG-356: bounded Fluss readiness wait
         int maxBatchRecords = 1, maxBatchWaitMs;
         int maxPendingRecords = (int) MAX_PENDING_RECORDS;
         long maxPendingBytes = MAX_PENDING_BYTES; // 192 MiB — T2 3k default
@@ -693,7 +704,7 @@ public final class IngestionConfig {
         Duration appendTimeout = Duration.ofSeconds(5);
         Duration drainDeadline = Duration.ofSeconds(2);
         long zeroAckTimeoutMs = 10_000L; // zero-ack watchdog (0 = disabled)
-        long writeStartupGraceMs = 180_000L; // CHG-326 write-path startup grace
+        long writeStartupGraceMs = 3_600_000L; // CHG-326/CHG-356: write-path startup grace
         long clockOffsetLimitMs = CLOCK_OFFSET_LIMIT_MS; // T10: 2s default
         long arrowMaxEventAgeMs;
         long arrowMaxFutureEventSkewMs;

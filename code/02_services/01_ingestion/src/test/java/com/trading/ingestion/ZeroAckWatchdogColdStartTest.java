@@ -74,21 +74,26 @@ class ZeroAckWatchdogColdStartTest {
     @Test
     @DisplayName("CHG-326: the write startup grace suppresses the watchdog while no ack exists")
     void writeGraceSuppressesColdStart() {
-        assertTrue(IngestionService.zeroAckSuppressed(30_000L, 0L),
+        assertTrue(IngestionService.zeroAckSuppressed(30_000L),
                 "inside the grace with no ack ever, a no-ack window is not a wedge");
     }
 
     @Test
-    @DisplayName("CHG-326: after the first ack the grace never masks a wedge")
-    void postSuccessWedgeIsNotSuppressed() {
-        assertFalse(IngestionService.zeroAckSuppressed(30_000L, 1L),
-                "once an append was acked, a stall is a genuine wedge again");
+    @DisplayName("CHG-356: an early ack must not re-arm the watchdog inside the startup grace")
+    void earlyAckDoesNotShrinkTheGrace() {
+        // 2026-09-28 cold start (reproduced in the container log): the first
+        // append was acked while the Fluss tablet was still replaying; the old
+        // rule treated that single ack as "startup over", the next 10.9s ack
+        // gap killed a healthy container, and on-failure:3 exhausted into a
+        // crash loop. The whole bounded window is the grace.
+        assertTrue(IngestionService.zeroAckSuppressed(30_000L),
+                "one early ack must not turn the rest of the startup window into a wedge");
     }
 
     @Test
     @DisplayName("CHG-326: once the grace expires the watchdog keeps its full authority")
     void expiredGraceDoesNotSuppress() {
-        assertFalse(IngestionService.zeroAckSuppressed(0L, 0L),
+        assertFalse(IngestionService.zeroAckSuppressed(0L),
                 "the grace is bounded: expiry restores fail-fast wedge detection");
     }
 }

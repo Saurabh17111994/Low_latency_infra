@@ -603,13 +603,16 @@ public final class IngestionService {
                 long sinceAck = zeroAckAgeMs(now, writer.lastAppendSuccessEpochMs(), firstAcceptedEpochMs);
                 boolean brokerActive = health.isBrokerConnected()
                         && sinceAccepted < config.zeroAckTimeoutMs;
-                // CHG-326: inside the bounded write-path startup grace (and
-                // only until the first ack) the writer deliberately holds
-                // records un-acked while Fluss metadata is unresolved — not a
-                // wedge. Once an ack exists or the grace expires, the watchdog
-                // keeps its full authority (the cold-start baseline below).
+                // CHG-326/CHG-356: inside the bounded write-path startup grace
+                // the writer deliberately holds records un-acked while Fluss
+                // recovers — not a wedge. The grace is the whole bounded window:
+                // a single early ack does NOT re-arm the watchdog (the 2026-09-28
+                // cold start: one acked append, then a 10.9s gap while the tablet
+                // still replayed, killed a healthy container into a crash loop).
+                // After expiry the watchdog keeps full authority (the baseline
+                // below).
                 boolean startupGraceActive = zeroAckSuppressed(
-                        writer.startupGraceRemainingMs(), writer.lastAppendSuccessEpochMs());
+                        writer.startupGraceRemainingMs());
                 // Only fire when the writer is demonstrably being fed (recent
                 // accepted ticks) but has produced NO ack for the full window —
                 // i.e. genuine wedge, not a quiet feed. Also require at least one
@@ -2168,13 +2171,17 @@ public final class IngestionService {
     }
 
     /**
-     * CHG-326: true while the zero-ack watchdog must stand down for the
-     * bounded write-path startup grace (grace running AND no append ever
-     * acked). Once an ack exists — or the grace has expired — this is false
-     * and the watchdog keeps its full wedge-detection authority.
+     * CHG-326/CHG-356: true while the zero-ack watchdog must stand down for the
+     * bounded write-path startup grace. The grace is one window: it starts with
+     * the writer's first append and ends when it expires — an ack inside it does
+     * not shrink it. Rationale (2026-09-28 cold start, reproduced from the
+     * container log): one acked append re-armed the watchdog, the next 10.9 s
+     * ack gap killed a healthy container while Fluss was still replaying its
+     * log, and `on-failure:3` exhausted. Once the grace has expired, this is
+     * false and the watchdog keeps its full wedge-detection authority.
      */
-    static boolean zeroAckSuppressed(long startupGraceRemainingMs, long lastAppendSuccessEpochMs) {
-        return startupGraceRemainingMs > 0 && lastAppendSuccessEpochMs == 0;
+    static boolean zeroAckSuppressed(long startupGraceRemainingMs) {
+        return startupGraceRemainingMs > 0;
     }
 
     /**
