@@ -515,5 +515,123 @@ class CheckpointSamplingTests(unittest.TestCase):
         self.assertLess(age, 10_000)
 
 
+# --------------------------------------------------------------------------
+# readiness probe memory safety
+# 2026-09-28: the 5s readiness poll ran the full collector, whose log reads
+# captured whole `docker compose logs` outputs (4 services x 15 minutes plus
+# the entire ingestion log) into strings. During a 36-minute Fluss recovery
+# the runner reached 12 GB RSS + 16 GB swap and thrashed the host. The poll
+# uses a readiness-only snapshot now, and the log readers stream line by line.
+# --------------------------------------------------------------------------
+
+
+class StreamRunner(day_run.Runner):
+    """Runner double: keeps whole-output captures and streamed reads apart."""
+
+    def __init__(self, lines=None, services=(), config_services=()):
+        super().__init__(out=io.StringIO())
+        self.calls = []
+        self.streams = []
+        self.lines = dict(lines or {})
+        self.services = list(services)
+        self.config_services = list(config_services)
+
+    def run(self, argv, env=None, check=True, capture=True, timeout=1800):
+        argv = [str(a) for a in argv]
+        self.calls.append(argv)
+        if "ps" in argv:
+            return "\n".join(
+                json.dumps({"Service": s, "State": "running",
+                            "Health": "", "Name": f"01_docker-{s}-1"})
+                for s in self.services)
+        if "config" in argv:
+            return json.dumps({"services": {
+                s: {"restart": "unless-stopped"} for s in self.config_services}})
+        return ""
+
+    def http_json(self, url, timeout=10):
+        return {"jobs": []}
+
+    def compose_lines(self, args, env=None):
+        args = [str(a) for a in args]
+        self.streams.append(args)
+        for service, lines in self.lines.items():
+            if service in args:
+                yield from lines
+
+
+class ReadinessCollectTests(unittest.TestCase):
+    def _collector(self, **kwargs):
+        runner = StreamRunner(**kwargs)
+        return day_run.Collector(runner), runner
+
+    def test_readiness_collect_skips_log_reads_and_other_tables(self):
+        collector, runner = self._collector(
+            services=["fluss-tablet", "ingestion", "flink-jobmanager"],
+            config_services=["fluss-tablet", "ingestion", "flink-jobmanager"],
+            lines={"fluss-tablet": ["FATAL tablet exploded"]})
+        with mock.patch.object(day_run.Collector, "fluss_log_end",
+                               lambda self, table, workdir: {"ok": True, "log_end": 7}):
+            facts = collector.collect(readiness=True)
+        self.assertEqual(sorted(facts.fluss), ["raw", "window_s"])
+        self.assertFalse(runner.streams)
+        self.assertFalse([argv for argv in runner.calls if "logs" in argv])
+
+    def test_full_collect_reads_logs_by_streaming_not_capture(self):
+        collector, runner = self._collector(
+            services=["fluss-tablet", "ingestion", "flink-jobmanager"],
+            config_services=["fluss-tablet", "ingestion", "flink-jobmanager"],
+            lines={"fluss-tablet": ["FATAL tablet exploded"],
+                   "ingestion": ["manifest loaded (instruments=2433)"]})
+        with mock.patch.object(day_run.Collector, "fluss_log_end",
+                               lambda self, table, workdir: {"ok": True, "log_end": 7}):
+            facts = collector.collect(samples=False)
+        self.assertEqual(sorted(k for k in facts.fluss if k != "window_s"),
+                         ["candles", "raw", "signals"])
+        self.assertTrue(runner.streams)
+        self.assertFalse([argv for argv in runner.calls if "logs" in argv])
+        self.assertIn("FATAL tablet exploded", facts.log_errors)
+        self.assertEqual(facts.effective_tokens, 2433)
+
+    def test_log_errors_bounds_hits(self):
+        collector, _ = self._collector(
+            lines={"fluss-tablet": [f"FATAL boom {i}" for i in range(200)]})
+        hits = collector.log_errors("15m")
+        self.assertTrue(hits)
+        self.assertLessEqual(len(hits), day_run.MAX_LOG_ERROR_HITS)
+
+    def test_effective_tokens_keeps_the_last_manifest_line(self):
+        collector, _ = self._collector(
+            lines={"ingestion": ["manifest loaded (instruments=100)",
+                                 "manifest loaded (instruments=2433)"]})
+        self.assertEqual(collector.effective_tokens(True), 2433)
+        self.assertIsNone(collector.effective_tokens(False))
+
+    def test_nautilus_halted_detects_the_marker(self):
+        halted, _ = self._collector(lines={"nautilus": ["INFO up", "gate HALTED"]})
+        self.assertTrue(halted.nautilus_halted())
+        quiet, _ = self._collector(lines={"nautilus": ["INFO up"]})
+        self.assertFalse(quiet.nautilus_halted())
+
+
+class WaitReadyProbeTests(unittest.TestCase):
+    def test_wait_ready_polls_with_the_readiness_snapshot(self):
+        seen = []
+
+        class _C:
+            def collect(self, **kwargs):
+                seen.append(kwargs)
+                return make_facts()
+
+        universe = day_run.Universe(mode="full", tokens=2433, connections=3,
+                                    approval=True, manifest=pathlib.Path("/tmp/m.csv"),
+                                    deploy_env="dev")
+        with mock.patch.object(day_run.time, "sleep", lambda *_: None):
+            day_run.wait_ready(_C(), universe, day_run.Runner(out=io.StringIO()),
+                               timeout_s=10)
+        self.assertEqual(len(seen), 2)  # two consecutive good polls
+        self.assertTrue(all(kw.get("readiness") for kw in seen))
+
+
 if __name__ == "__main__":
     unittest.main()

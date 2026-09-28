@@ -84,6 +84,9 @@ EXECUTION_SERVICES = ("execution-bridge", "execution-gateway", "nautilus")
 ERROR_LOG_PATTERNS = ("FATAL", "BRIDGE_CRASH", "backpressure critical")
 ERROR_LOG_SERVICES = ("ingestion", "flink-jobmanager",
                       "fluss-coordinator", "fluss-tablet")
+# The board only needs a bounded error sample; a recovery can write far more
+# than any reader should hold (2026-09-28 memory incident: 12 GB RSS).
+MAX_LOG_ERROR_HITS = 50
 
 MANIFEST_LOADED_RE = re.compile(r"manifest loaded \(instruments=(\d+)")
 
@@ -579,6 +582,43 @@ class Runner:
             merged.update(env)
         return self.run(base + list(args), env=merged, check=check, timeout=timeout)
 
+    def run_stream(self, argv, env=None):
+        """Like ``run(capture=True)`` but yields stdout line by line.
+
+        Log readers must tolerate policy-heavy outputs — a Fluss recovery can
+        write GBs into the 15-minute window the board reads. Capturing that
+        whole output is what ballooned the runner to 12 GB RSS + 16 GB swap on
+        2026-09-28; this holds one line at a time. Stopping the generator early
+        terminates the child (the log readers break on early hits)."""
+        argv = [str(a) for a in argv]
+        self.commands.append(list(argv))
+        merged = dict(os.environ)
+        if env:
+            merged.update(env)
+        proc = subprocess.Popen(argv, cwd=str(ROOT), env=merged,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                text=True)
+        try:
+            if proc.stdout is None:  # pragma: no cover - PIPE guarantees a stream
+                return
+            for line in proc.stdout:
+                yield line.rstrip("\n")
+        finally:
+            if proc.stdout is not None:
+                proc.stdout.close()
+            proc.wait()
+
+    def compose_lines(self, args, env=None):
+        base = shlex.split(os.environ.get("DAY_COMPOSE", "")) or [
+            "docker", "compose",
+            "--env-file", str(ENV_FILE), "--env-file", str(SECRETS_FILE),
+            "-f", str(COMPOSE_FILE),
+        ]
+        merged = {"COMPOSE_PROFILES": EXECUTION_PROFILE}
+        if env:
+            merged.update(env)
+        yield from self.run_stream(base + list(args), env=merged)
+
     def make(self, target, args="", env=None, check=True, timeout=1800):
         argv = ["make", "-C", str(ROOT), target]
         if args:
@@ -766,41 +806,49 @@ class Collector:
 
     # -- logs --------------------------------------------------------------
     def log_errors(self, since: str) -> list:
-        try:
-            raw = self.runner.compose(
-                ["logs", "--no-log-prefix", "--since", since,
-                 *ERROR_LOG_SERVICES], check=False)
-        except subprocess.CalledProcessError:
-            return []
+        """Stream the error-service logs; keep only a bounded sample of hits.
+
+        ``compose_lines`` (not ``compose``) is deliberate: during a recovery
+        these services write far more than the evidence needs, and the old
+        whole-output capture held the entire 15-minute window of four services
+        in memory (2026-09-28)."""
         hits = []
-        for line in (raw or "").splitlines():
-            if any(pattern in line for pattern in ERROR_LOG_PATTERNS):
-                hits.append(line.strip())
+        try:
+            for line in self.runner.compose_lines(
+                    ["logs", "--no-log-prefix", "--since", since,
+                     *ERROR_LOG_SERVICES]):
+                if any(pattern in line for pattern in ERROR_LOG_PATTERNS):
+                    hits.append(line.strip())
+                    if len(hits) >= MAX_LOG_ERROR_HITS:
+                        break
+        except (OSError, subprocess.SubprocessError):
+            return hits
         return hits
 
     def effective_tokens(self, ingestion_running: bool) -> int | None:
         if not ingestion_running:
             return None  # exited container logs are last run's truth, not today's
-        try:
-            raw = self.runner.compose(
-                ["logs", "--no-log-prefix", "ingestion"], check=False)
-        except subprocess.CalledProcessError:
-            return None
         found = None
-        for match in MANIFEST_LOADED_RE.finditer(raw or ""):
-            found = int(match.group(1))
+        try:
+            for line in self.runner.compose_lines(
+                    ["logs", "--no-log-prefix", "ingestion"]):
+                match = MANIFEST_LOADED_RE.search(line)
+                if match:
+                    found = int(match.group(1))
+        except (OSError, subprocess.SubprocessError):
+            return found
         return found
 
     def nautilus_halted(self) -> bool:
         try:
-            raw = self.runner.compose(["logs", "--no-log-prefix", "nautilus"], check=False)
-        except subprocess.CalledProcessError:
+            return any("gate HALTED" in line for line in self.runner.compose_lines(
+                ["logs", "--no-log-prefix", "nautilus"]))
+        except (OSError, subprocess.SubprocessError):
             return False
-        return "gate HALTED" in (raw or "")
 
     # -- full snapshot -----------------------------------------------------
     def collect(self, universe: dict | None = None, evidence_dir: pathlib.Path | None = None,
-                samples: bool | None = None) -> Facts:
+                samples: bool | None = None, readiness: bool = False) -> Facts:
         evidence_dir = evidence_dir or (EVIDENCE_ROOT / "collect")
         evidence_dir.mkdir(parents=True, exist_ok=True)
         session = session_now()
@@ -808,6 +856,15 @@ class Collector:
         facts.expected = self.expected_services()
         facts.services = self.services()
         facts.jobs = self.jobs()
+        if readiness:
+            # Readiness-only snapshot (2026-09-28 memory incident): the wait
+            # loop calls this every 5s while a recovery may be writing GBs of
+            # logs; log scans, container envs, state paths and the other-table
+            # probes are board facts, not readiness gates. Keep the wait loop
+            # to services + the one table it gates on.
+            facts.fluss["raw"] = self.fluss_log_end("raw_table_1", evidence_dir)
+            facts.fluss["window_s"] = self.window_s
+            return facts
         facts.checkpoints = self.checkpoints(facts.jobs)
         facts.state = self.state_paths()
         facts.container_env = self.container_env(EXECUTION_SERVICES)
@@ -901,7 +958,7 @@ def wait_ready(collector: Collector, universe: Universe, runner: Runner,
     last = "starting"
     stable = 0
     while time.time() < deadline:
-        facts = collector.collect(universe=dataclasses.asdict(universe), samples=False)
+        facts = collector.collect(universe=dataclasses.asdict(universe), readiness=True)
         running = {n for n, info in facts.services.items() if info.get("state") == "running"}
         missing = [s for s in facts.expected
                    if s not in running and s not in EXECUTION_SERVICES]
