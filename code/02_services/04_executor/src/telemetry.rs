@@ -21,6 +21,9 @@ pub struct Metrics {
     pub order_denied: AtomicU64,
     /// Orders rejected by the bridge (or failed closed on an unknown outcome).
     pub order_rejected: AtomicU64,
+    /// Orders whose bridge outcome was UNKNOWN (ambiguous): unresolved, never a terminal
+    /// rejection — reconciliation or the true postback resolves them (H1-4).
+    pub order_unknown: AtomicU64,
     /// Number of times the gate was safety-halted.
     pub gate_safety_halt: AtomicU64,
     /// Asynchronous bridge reports drained (fills, cancels).
@@ -53,6 +56,7 @@ impl Metrics {
             order_submitted: self.order_submitted.load(Ordering::Relaxed),
             order_denied: self.order_denied.load(Ordering::Relaxed),
             order_rejected: self.order_rejected.load(Ordering::Relaxed),
+            order_unknown: self.order_unknown.load(Ordering::Relaxed),
             gate_safety_halt: self.gate_safety_halt.load(Ordering::Relaxed),
             report_received: self.report_received.load(Ordering::Relaxed),
             report_event_accepted: self.report_event_accepted.load(Ordering::Relaxed),
@@ -70,6 +74,7 @@ pub struct MetricsSnapshot {
     pub order_submitted: u64,
     pub order_denied: u64,
     pub order_rejected: u64,
+    pub order_unknown: u64,
     pub gate_safety_halt: u64,
     pub report_received: u64,
     pub report_event_accepted: u64,
@@ -84,6 +89,7 @@ pub static METRICS: Metrics = Metrics {
     order_submitted: AtomicU64::new(0),
     order_denied: AtomicU64::new(0),
     order_rejected: AtomicU64::new(0),
+    order_unknown: AtomicU64::new(0),
     gate_safety_halt: AtomicU64::new(0),
     report_received: AtomicU64::new(0),
     report_event_accepted: AtomicU64::new(0),

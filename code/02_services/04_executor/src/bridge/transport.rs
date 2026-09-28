@@ -30,7 +30,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
-use super::client::{BridgeClient, BridgeReportStream, BRIDGE_REPORT_BUFFER};
+use super::client::{BridgeClient, BridgeReportStream, SendFailure, BRIDGE_REPORT_BUFFER};
 use super::protocol::{CommandEnvelope, ReportEnvelope};
 
 // --- RFC 6455 opcodes (subset we speak: text, ping, pong, close). ---
@@ -42,30 +42,41 @@ const OP_PONG: u8 = 0xA;
 const MAX_WS_FRAME: usize = 1 << 20;
 
 /// A parsed HTTP/1.1 response (status + headers + raw body).
+#[derive(Debug)]
 pub(crate) struct HttpResponse {
     pub(crate) status: u16,
     pub(crate) body: Vec<u8>,
 }
 
 /// Minimal loopback HTTP/1.1 request (no redirects, no TLS, `Connection: close`).
+///
+/// Every failure is classified for the retry taxonomy (H1-2): a failure that provably happened
+/// before any request byte was written is [`SendFailure::NotSent`] (safe to retry); a failure
+/// after that point — write, read timeout, or a malformed/unparseable response — is
+/// [`SendFailure::Unknown`] (never retry).
 async fn http_request(
     method: &str,
     url: &str,
     auth_token: &str,
     body_json: &[u8],
-) -> Result<HttpResponse> {
-    let (host, port, path) = parse_url(url)?;
+) -> Result<HttpResponse, SendFailure> {
+    let (host, port, path) = parse_url(url).map_err(SendFailure::not_sent)?;
     let addrs = tokio::net::lookup_host((host.as_str(), port))
         .await
-        .with_context(|| format!("resolve bridge host {host}:{port}"))?;
+        .with_context(|| format!("resolve bridge host {host}:{port}"))
+        .map_err(SendFailure::not_sent)?;
     let addr = addrs
         .into_iter()
         .next()
-        .ok_or_else(|| anyhow::anyhow!("bridge host {host}:{port} resolved to nothing"))?;
+        .ok_or_else(|| anyhow::anyhow!("bridge host {host}:{port} resolved to nothing"))
+        .map_err(SendFailure::not_sent)?;
     let mut stream = TcpStream::connect(addr)
         .await
-        .with_context(|| format!("connect to bridge {addr}"))?;
-    stream.set_nodelay(true)?;
+        .with_context(|| format!("connect to bridge {addr}"))
+        .map_err(SendFailure::not_sent)?;
+    stream
+        .set_nodelay(true)
+        .map_err(|e| SendFailure::not_sent(anyhow::Error::from(e).context("set TCP_NODELAY")))?;
 
     let head = format!(
         "{method} {path} HTTP/1.1\r\n\
@@ -77,9 +88,15 @@ async fn http_request(
          \r\n",
         body_json.len()
     );
-    stream.write_all(head.as_bytes()).await?;
-    stream.write_all(body_json).await?;
-    stream.flush().await?;
+    stream.write_all(head.as_bytes()).await.map_err(|e| {
+        SendFailure::unknown(anyhow::Error::from(e).context("write bridge request head"))
+    })?;
+    stream.write_all(body_json).await.map_err(|e| {
+        SendFailure::unknown(anyhow::Error::from(e).context("write bridge request body"))
+    })?;
+    stream.flush().await.map_err(|e| {
+        SendFailure::unknown(anyhow::Error::from(e).context("flush bridge request"))
+    })?;
 
     let mut buf = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -99,9 +116,10 @@ async fn http_request(
         Ok::<_, io::Error>(())
     })
     .await
-    .map_err(|_| anyhow::anyhow!("bridge read timeout"))??;
+    .map_err(|_| SendFailure::unknown(anyhow::anyhow!("bridge read timeout")))?
+    .map_err(|e| SendFailure::unknown(anyhow::Error::from(e).context("read bridge response")))?;
 
-    parse_http_response(&buf)
+    parse_http_response(&buf).map_err(SendFailure::unknown)
 }
 
 /// Minimal loopback HTTP/1.1 `POST`.
@@ -109,13 +127,34 @@ pub(crate) async fn http_post(
     url: &str,
     auth_token: &str,
     body_json: &[u8],
-) -> Result<HttpResponse> {
+) -> Result<HttpResponse, SendFailure> {
     http_request("POST", url, auth_token, body_json).await
 }
 
 /// Minimal loopback HTTP/1.1 `GET`.
-async fn http_get(url: &str, auth_token: &str) -> Result<HttpResponse> {
+async fn http_get(url: &str, auth_token: &str) -> Result<HttpResponse, SendFailure> {
     http_request("GET", url, auth_token, b"").await
+}
+
+/// Classifies a non-200 bridge command status for the retry taxonomy (H1-2).
+///
+/// The bridge answers `400` malformed, `401` unauthorized, `404` unknown route, `409`
+/// request-id reuse, and its `500 fingerprint_failed` guard **before** it dispatches the command
+/// to the broker (`server.go:handleCommand`) — the command provably did not execute, so a bounded
+/// retry is safe. Every other status (including a dispatch-time 500/timeout) may have been
+/// produced after the command reached the venue; the outcome is ambiguous and never retried.
+///
+/// The one body token matched is the bridge's fixed machine reason `"fingerprint_failed"` (a
+/// protocol constant, not free text); the status code alone cannot separate pre-dispatch from
+/// post-dispatch 500s.
+fn classify_command_status(status: u16, body: &[u8]) -> SendFailure {
+    let reason = String::from_utf8_lossy(body);
+    let error = || anyhow::anyhow!("bridge command rejected with status {status}: {reason}");
+    match status {
+        400 | 401 | 403 | 404 | 409 => SendFailure::not_sent(error()),
+        500 if reason.contains("fingerprint_failed") => SendFailure::not_sent(error()),
+        _ => SendFailure::unknown(error()),
+    }
 }
 
 fn parse_url(url: &str) -> Result<(String, u16, String)> {
@@ -636,18 +675,26 @@ impl BridgeClient for HttpBridgeClient {
         Ok(())
     }
 
-    async fn send_command(&mut self, envelope: CommandEnvelope) -> Result<ReportEnvelope> {
+    async fn send_command(
+        &mut self,
+        envelope: CommandEnvelope,
+    ) -> Result<ReportEnvelope, SendFailure> {
         let url = format!("{}/v1/commands", self.base_url.trim_end_matches('/'));
-        let body = serde_json::to_vec(&envelope)?;
+        // Serialization happens before any byte leaves the process: NotSent.
+        let body = serde_json::to_vec(&envelope).map_err(|e| {
+            SendFailure::not_sent(anyhow::Error::from(e).context("serialize command"))
+        })?;
         let resp = http_post(&url, &self.auth_token, &body).await?;
-        anyhow::ensure!(
-            resp.status == 200,
-            "bridge command rejected with status {}: {}",
-            resp.status,
-            String::from_utf8_lossy(&resp.body)
-        );
-        let report: ReportEnvelope = serde_json::from_slice(&resp.body)
-            .with_context(|| "bridge returned an unparseable report envelope")?;
+        if resp.status != 200 {
+            return Err(classify_command_status(resp.status, &resp.body));
+        }
+        // A 200 with an unparseable body: the bridge already accepted and may have dispatched
+        // the command, so this is Unknown — never retried.
+        let report: ReportEnvelope = serde_json::from_slice(&resp.body).map_err(|e| {
+            SendFailure::unknown(
+                anyhow::Error::from(e).context("bridge returned an unparseable report envelope"),
+            )
+        })?;
         Ok(report)
     }
 
@@ -1201,6 +1248,122 @@ mod tests {
         let mut client = HttpBridgeClient::new("http://127.0.0.1:18788".into(), "wrong".into());
         let err = client.send_command(command_env()).await.unwrap_err();
         assert!(err.to_string().contains("401"), "got: {err}");
+        // H1-2: 401 is emitted before dispatch — the command never ran, so a bounded retry is
+        // safe. The class, not the message, is the contract.
+        assert!(
+            matches!(err, SendFailure::NotSent(_)),
+            "a pre-dispatch 401 must be NotSent: {err:?}"
+        );
+    }
+
+    /// H1-2 taxonomy table: every pre-dispatch bridge status is `NotSent` (retry-safe); every
+    /// other status is `Unknown` (never retry). The pre-dispatch set is the bridge's actual
+    /// `handleCommand` ordering (`server.go`): 400 malformed/invalid, 401 unauthorized, 404
+    /// unknown route, 409 request-id reuse, and the 500 `fingerprint_failed` guard.
+    #[test]
+    fn h1_2_status_taxonomy_matches_the_bridge_dispatch_boundary() {
+        for status in [400u16, 401, 403, 404, 409] {
+            let failure = classify_command_status(status, b"{\"reason\":\"x\"}");
+            assert!(
+                failure.is_not_sent(),
+                "status {status} is pre-dispatch and retry-safe: {failure:?}"
+            );
+        }
+        assert!(
+            classify_command_status(500, br#"{"reason":"fingerprint_failed"}"#).is_not_sent(),
+            "the bridge's fingerprint guard runs before dispatch"
+        );
+        // The same status without the fingerprint token may be a dispatch-time failure.
+        assert!(matches!(
+            classify_command_status(500, br#"{"reason":"dispatch_timeout"}"#),
+            SendFailure::Unknown(_)
+        ));
+        for status in [201u16, 429, 500, 502, 503, 504] {
+            let failure = classify_command_status(status, b"{\"reason\":\"x\"}");
+            assert!(
+                matches!(failure, SendFailure::Unknown(_)),
+                "status {status} may be post-dispatch and must never be retried: {failure:?}"
+            );
+        }
+    }
+
+    /// H1-2: a connection refused before any byte is retry-safe (`NotSent`).
+    #[tokio::test]
+    async fn h1_2_connect_refused_is_not_sent() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener); // nothing is listening on `addr` now
+        let err = http_post(&format!("http://{addr}/v1/commands"), "tok", b"{}")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SendFailure::NotSent(_)),
+            "connect refused must be NotSent: {err:?}"
+        );
+    }
+
+    /// H1-2: an EOF before any response byte is `Unknown` — the request was fully written, so
+    /// the bridge may have dispatched it; retrying could double-execute.
+    #[tokio::test]
+    async fn h1_2_eof_after_send_is_unknown() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await; // swallow the request, then close unanswered
+        });
+        let err = http_post(&format!("http://{addr}/v1/commands"), "tok", b"{}")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SendFailure::Unknown(_)),
+            "EOF after a written request is ambiguous: {err:?}"
+        );
+    }
+
+    /// H1-2: a malformed response is `Unknown` — a reply arrived that cannot be trusted.
+    #[tokio::test]
+    async fn h1_2_malformed_response_is_unknown() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock.write_all(b"NOT-HTTP\r\n\r\n").await;
+            let _ = sock.flush().await;
+        });
+        let err = http_post(&format!("http://{addr}/v1/commands"), "tok", b"{}")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, SendFailure::Unknown(_)),
+            "a malformed response must never be retried: {err:?}"
+        );
+    }
+
+    /// H1-2 end to end: a post-dispatch 503 (bridge overloaded/unavailable) is `Unknown` and the
+    /// command is never re-sent; only the pre-dispatch statuses are retryable.
+    #[tokio::test]
+    async fn h1_2_bridge_503_is_unknown() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
+                .await;
+            let _ = sock.flush().await;
+        });
+        let mut client = HttpBridgeClient::new(format!("http://{addr}"), "tok".into());
+        let err = client.send_command(command_env()).await.unwrap_err();
+        assert!(
+            matches!(err, SendFailure::Unknown(_)),
+            "a 503 may be post-dispatch and must never be retried: {err:?}"
+        );
     }
 
     #[test]

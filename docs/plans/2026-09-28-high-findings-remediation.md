@@ -32,13 +32,13 @@ Where a body section and this list disagree, this list wins.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
+| H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 2 | 0 | 3 | 0 | 0 | 0 |
 | H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | H3 — production deck parity with the dev deck | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H4 — evidence and release gates must not lie | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H6 — machine facts and their drift guard | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
-| **Total** | **22** | **0** | **0** | **22** | **0** | **0** | **0** |
+| **Total** | **22** | **2** | **0** | **20** | **0** | **0** | **0** |
 
 #### H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth
 
@@ -49,11 +49,11 @@ Where a body section and this list disagree, this list wins.
   APPLIED rows (stale epoch → `REJECTED` + warn); scope check includes `execution_partition_id`;
   `RECOVERED` is audit-only (never auto-enables); consumer death = readiness fail + non-zero exit.
   (P0-2; contract 07 §114-123.)
-- [ ] **H1-2** — Transport taxonomy at the executor→bridge boundary: `SendFailure::{NotSent,
+- [x] **H1-2** — Transport taxonomy at the executor→bridge boundary: `SendFailure::{NotSent,
   Unknown}`; only pre-dispatch failures may retry (connect/DNS, serialization, HTTP
   400/401/403/404/409/500-fingerprint); timeout/EOF/reset/malformed/other-5xx are `Unknown` →
   **no retry** + durable UNKNOWN + safety halt propagated process-wide via `with_halt_notifier`
-  (same pattern as `shutdown_watch`). (P0-3; contract 07 §44-47.)
+  (same pattern as `shutdown_watch`). (P0-3; contract 07 §44-47.) — CHG-369
 - [ ] **H1-3** — Durable attempt guard ON in both decks: `DURABLE_ATTEMPTS_ENABLED: "true"`,
   `DURABLE_DIR=/data/durable`, named volume `nautilus-durable` in compose **and** stack; code
   default stays OFF for bare runs; fail-closed already holds (unopenable dir = boot error;
@@ -61,10 +61,10 @@ Where a body section and this list disagree, this list wins.
   (P0-4; CHG-136 deferral.) **Precondition (Medium plan M1-5):** the action-scoped claim key must
   land before this flip — with the guard ON, the current instruction-only key halts legitimate
   cancel/amend.
-- [ ] **H1-4** — `UNKNOWN` is never a terminal rejection: on `BridgeOutcome::Unknown` keep the
+- [x] **H1-4** — `UNKNOWN` is never a terminal rejection: on `BridgeOutcome::Unknown` keep the
   halt + metrics (`order_unknown`, `unresolved_attempt`), emit **no** order event — the order stays
   pre-send (`Initialized`), no capacity release; reconciliation (contract §Reconciliation) resolves
-  it, and only the operator may emit a rejection with evidence. (P0-5.)
+  it, and only the operator may emit a rejection with evidence. (P0-5.) — CHG-369
 - [ ] **H1-5** — Fill identity version: `sourceVersion = receiveTime*1_000_000 +
   floorMod(fnv1a64(postbackEventId), 1_000_000)` in `FillEventMapper`, bounds-checked; same-ms
   distinct fills get distinct versions, replay yields the identical version, a hash collision

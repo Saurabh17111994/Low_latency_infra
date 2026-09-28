@@ -46,6 +46,7 @@ use nautilus_model::{
 };
 use sha2::{Digest, Sha256};
 
+use crate::bridge::client::SendFailure;
 use crate::resilience::{AttemptError, RetryConfig, RetryError, RetryOrchestrator};
 
 /// Deterministic broker-facing reference: sha256(format_version|instruction_id|execution_attempt_id) 14 hex chars.
@@ -157,6 +158,51 @@ struct PendingJob {
     envelope: CommandEnvelope,
 }
 
+/// The bound halt callback: receives the human-readable halt reason.
+type HaltCallback = Rc<dyn Fn(&str)>;
+
+/// Process-wide safety-halt fan-out (H1-2).
+///
+/// The execution client is boxed inside the Nautilus node, so a transport-level halt it applies
+/// cannot reach the served `ServerState` that `/v1/intents` and `/healthz` read. Same ownership
+/// pattern as `ShutdownWatch`: the service binds this cell to the served surface once, and every
+/// halt the client raises propagates there — where `ServerState::safety_halt` also writes the
+/// durable HALT through the gate reporter, so the gateway's forward leg stops too.
+#[derive(Clone, Default)]
+pub struct HaltNotifier(Rc<RefCell<Option<HaltCallback>>>);
+
+impl HaltNotifier {
+    /// An already-bound notifier.
+    pub fn new(notify: impl Fn(&str) + 'static) -> Self {
+        let cell = Self::default();
+        cell.bind(notify);
+        cell
+    }
+
+    /// Binds (or rebinds) the process surface that receives halt reasons.
+    pub fn bind(&self, notify: impl Fn(&str) + 'static) {
+        *self.0.borrow_mut() = Some(Rc::new(notify));
+    }
+
+    /// Fans a halt out to the bound surface. An unbound notifier (offline slice / unit tests) is
+    /// a deliberate no-op: the client's own gate has already halted, and there is no served
+    /// surface to stop.
+    pub fn notify(&self, reason: &str) {
+        let handler = self.0.borrow().clone();
+        if let Some(handler) = handler {
+            handler(reason);
+        }
+    }
+}
+
+impl std::fmt::Debug for HaltNotifier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HaltNotifier")
+            .field("bound", &self.0.borrow().is_some())
+            .finish()
+    }
+}
+
 /// The custom Nautilus execution client.
 ///
 /// Deliberately non-`Send`: it owns `Rc`/`RefCell` state (cache view, gate, bridge, report stream,
@@ -189,6 +235,9 @@ pub struct BridgeExecutionClient {
     /// Clean-shutdown evidence (D7), recorded by the terminal `stop()` hook and read by the
     /// service after the node's run loop returns, when this client is no longer reachable.
     shutdown_watch: crate::shutdown::ShutdownWatch,
+    /// Process-wide halt fan-out (H1-2): a transport-ambiguous outcome must stop the served
+    /// forward leg, not only this client's boxed gate.
+    halt_notifier: HaltNotifier,
     /// Whether the clean-shutdown sequence has already run (D7).
     ///
     /// Deliberately *not* `core.is_stopped()`: that is `!is_started()`, which is already `true`
@@ -227,6 +276,7 @@ impl BridgeExecutionClient {
             progress: Rc::new(Cell::new(0)),
             positions: Rc::new(RefCell::new(HashMap::new())),
             shutdown_watch: crate::shutdown::ShutdownWatch::default(),
+            halt_notifier: HaltNotifier::default(),
             shutdown_ran: false,
         }
     }
@@ -266,6 +316,16 @@ impl BridgeExecutionClient {
     pub fn with_shutdown_watch(self, watch: crate::shutdown::ShutdownWatch) -> Self {
         Self {
             shutdown_watch: watch,
+            ..self
+        }
+    }
+
+    /// H1-2: adopts the process-wide halt fan-out cell, so a transport-ambiguous outcome stops
+    /// the served forward leg (and its durable gate report) too.
+    #[must_use]
+    pub fn with_halt_notifier(self, notifier: HaltNotifier) -> Self {
+        Self {
+            halt_notifier: notifier,
             ..self
         }
     }
@@ -348,6 +408,14 @@ impl BridgeExecutionClient {
         crate::telemetry::METRICS
             .gate_safety_halt
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Applies a safety halt **and** fans it out process-wide (H1-2). Every ambiguity halt in
+    /// this client uses this form: stopping only the boxed gate would leave `/v1/intents`
+    /// forwarding orders on the served snapshot.
+    pub fn safety_halt_with_reason(&self, reason: &str) {
+        self.safety_halt();
+        self.halt_notifier.notify(reason);
     }
 
     /// Number of bridge jobs currently queued but not yet round-tripped.
@@ -443,7 +511,14 @@ impl BridgeExecutionClient {
                             let mut b = bridge.borrow_mut();
                             match b.send_command(envelope).await {
                                 Ok(report) => Ok(report),
-                                Err(e) => Err(AttemptError::Transient(e.to_string())),
+                                // H1-2: only a provably-not-sent failure may be retried.
+                                Err(SendFailure::NotSent(e)) => {
+                                    Err(AttemptError::Transient(e.to_string()))
+                                }
+                                // H1-2: ambiguous — the retry loop must not re-invoke it.
+                                Err(SendFailure::Unknown(e)) => {
+                                    Err(AttemptError::Unknown(e.to_string()))
+                                }
                             }
                         }
                     },
@@ -459,6 +534,23 @@ impl BridgeExecutionClient {
                 Err(RetryError::Exhausted { attempts }) => {
                     attempts_used = attempts;
                     None
+                }
+                Err(RetryError::Unknown) => {
+                    // H1-2/H1-4: an ambiguous send is never retried by the loop above. Halt
+                    // process-wide (durable HALT via the served surface), count it, and emit
+                    // **no** terminal order event: the order stays pre-send (`Initialized`) and
+                    // reconciliation — or the true async postback — resolves it. A synthetic
+                    // rejection here would tell the OMS an order is dead while it may be live.
+                    self.safety_halt_with_reason(
+                        "bridge command outcome UNKNOWN; safety-halted, awaiting reconciliation",
+                    );
+                    crate::telemetry::METRICS
+                        .order_unknown
+                        .fetch_add(1, Ordering::Relaxed);
+                    crate::telemetry::METRICS
+                        .unresolved_attempt
+                        .fetch_add(1, Ordering::Relaxed);
+                    return Ok(());
                 }
                 Err(err) => {
                     return Err(anyhow::anyhow!(
@@ -539,15 +631,20 @@ impl BridgeExecutionClient {
                     .fetch_add(1, Ordering::Relaxed);
             }
             BridgeOutcome::Unknown => {
-                // Ambiguous outcome — including a `Success` with no usable broker order id: fail
-                // closed and halt.
-                self.gate.borrow_mut().safety_halt();
-                self.emitter.emit_order_rejected(
-                    &order,
-                    &format!("{}: UNKNOWN bridge outcome; safety-halted", reply.outcome),
-                    ts_event,
-                    false,
+                // H1-4: an ambiguous outcome is unresolved, not rejected. Halt process-wide,
+                // count it, and emit **no** order event: the broker may already hold a live
+                // order, and a synthetic rejection would release capacity against a real
+                // position. Reconciliation (contract §Reconciliation) resolves it via the
+                // deterministic `client_order_ref`; only the operator may reject with evidence.
+                self.safety_halt_with_reason(
+                    "bridge report outcome UNKNOWN; safety-halted, awaiting reconciliation",
                 );
+                crate::telemetry::METRICS
+                    .order_unknown
+                    .fetch_add(1, Ordering::Relaxed);
+                crate::telemetry::METRICS
+                    .unresolved_attempt
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
         Ok(())
@@ -587,7 +684,7 @@ impl BridgeExecutionClient {
                 report.report_type,
                 report.broker_order_id
             );
-            self.gate.borrow_mut().safety_halt();
+            self.safety_halt_with_reason("uncorrelated bridge report; safety-halted");
             return;
         };
         let Ok(order) = self.core.get_order(&client_order_id) else {
@@ -596,7 +693,7 @@ impl BridgeExecutionClient {
                  rather than dropping it",
                 client_order_id
             );
-            self.gate.borrow_mut().safety_halt();
+            self.safety_halt_with_reason("bridge report for an uncached order; safety-halted");
             return;
         };
         let ts_event = self.clock.get_time_ns();
@@ -645,7 +742,9 @@ impl BridgeExecutionClient {
                         order.client_order_id(),
                         other
                     );
-                    self.gate.borrow_mut().safety_halt();
+                    self.safety_halt_with_reason(
+                        "bridge postback with a missing or unrecognized event_type; safety-halted",
+                    );
                 } else {
                     tracing::debug!(
                         "ignoring non-postback bridge report for {} (command={:?}, report_type={:?})",
@@ -1355,14 +1454,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn resilient_bridge_retries_transient_timeouts_then_place_succeeds() {
+    async fn h1_2_not_sent_failures_retry_then_place_succeeds() {
         use nautilus_common::clients::ExecutionClient;
         use std::sync::atomic::Ordering;
 
-        // Two transient transport timeouts, then the bridge accepts and fills.
+        // Two provably-not-sent transport failures (connect refused), then the bridge accepts
+        // and fills. H1-2: only this class may be retried.
         let scripts = vec![
-            crate::bridge::CommandScript::Timeout,
-            crate::bridge::CommandScript::Timeout,
+            crate::bridge::CommandScript::Unreachable("connect refused".into()),
+            crate::bridge::CommandScript::Unreachable("connect refused".into()),
             crate::bridge::CommandScript::AcceptThenFill,
         ];
         let (client, instrument_id, _client_order_id, order) =
@@ -1416,16 +1516,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn resilient_bridge_bounded_attempts_surface_without_phantom_success() {
+    async fn h1_2_exhausted_not_sent_surfaces_without_halting() {
         use nautilus_common::clients::ExecutionClient;
         use std::sync::atomic::Ordering;
 
-        // The bridge is persistently down (every attempt times out).
+        // The bridge is persistently unreachable (connect refused on every attempt).
         let scripts = vec![
-            crate::bridge::CommandScript::Timeout,
-            crate::bridge::CommandScript::Timeout,
-            crate::bridge::CommandScript::Timeout,
-            crate::bridge::CommandScript::Timeout,
+            crate::bridge::CommandScript::Unreachable("connect refused".into()),
+            crate::bridge::CommandScript::Unreachable("connect refused".into()),
+            crate::bridge::CommandScript::Unreachable("connect refused".into()),
+            crate::bridge::CommandScript::Unreachable("connect refused".into()),
         ];
         let (client, _instrument_id, _client_order_id, order) =
             roundtrip_fixture(crate::bridge::FakeBridge::new(), &scripts);
@@ -1459,10 +1559,14 @@ mod tests {
             result.is_err(),
             "bounded retries must surface, not fabricate success"
         );
-        // Bounded behavior is the proof (`result` is Err, never a phantom success). The retry
-
-        // counter is populated too, but its exact value is not cross-test deterministic because
-        // `METRICS` is process-global and parallel tests share it.
+        // H1-2: a not-sent command is not ambiguous — the gate stays armed (no safety halt),
+        // because nothing reached the broker; the failed job is accounted by the pump.
+        assert!(
+            client.gate.borrow().can_execute(),
+            "a provably-not-sent failure must not safety-halt the gate"
+        );
+        // The retry counter is populated too, but its exact value is not cross-test deterministic
+        // because `METRICS` is process-global and parallel tests share it.
         assert!(
             crate::telemetry::METRICS
                 .bridge_transport_retries
@@ -1470,6 +1574,216 @@ mod tests {
                 - retries_before
                 >= 1,
             "retransmissions were counted before exhaustion surfaced"
+        );
+        drop(client);
+    }
+
+    /// H1-2: a timeout is an ambiguous send outcome — exactly one bridge call, a process-wide
+    /// safety halt, an unresolved attempt, and **no** retransmission. This is the guard that
+    /// replaces `resilient_bridge_retries_transient_timeouts_then_place_succeeds`, which
+    /// encoded the defect (a stalled command was retried in a loop).
+    #[tokio::test(flavor = "current_thread")]
+    async fn h1_2_timeout_is_unknown_exactly_one_call_halt_and_no_terminal_event() {
+        use nautilus_common::clients::ExecutionClient;
+        use std::sync::atomic::Ordering;
+
+        let fake = crate::bridge::FakeBridge::new();
+        let calls = fake.calls_handle();
+        let scripts = vec![
+            crate::bridge::CommandScript::Timeout,
+            crate::bridge::CommandScript::Timeout, // must stay unconsumed: no retry
+        ];
+        let (client, instrument_id, _client_order_id, order) = roundtrip_fixture(fake, &scripts);
+        let mut client = client.with_resilience_config(crate::resilience::RetryConfig {
+            max_attempts: 4,
+            base_backoff_ms: 1,
+            cap_backoff_ms: 5,
+            breaker_threshold: 100,
+            breaker_cooldown_ms: 1000,
+        });
+        client.connect().await.expect("connect");
+        enable_gate(&client);
+
+        let rejected_before = crate::telemetry::METRICS
+            .order_rejected
+            .load(Ordering::Relaxed);
+        let unknown_before = crate::telemetry::METRICS
+            .order_unknown
+            .load(Ordering::Relaxed);
+        let unresolved_before = crate::telemetry::METRICS
+            .unresolved_attempt
+            .load(Ordering::Relaxed);
+
+        let submit = SubmitOrder::from_order(
+            &order,
+            TraderId::from("TRADER-001"),
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+        );
+        client.submit_order(submit).expect("place enqueued");
+        client
+            .process_pending()
+            .await
+            .expect("an ambiguous send is handled (halted), not surfaced as a phantom retry");
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "an UNKNOWN outcome must invoke the bridge exactly once, never retry"
+        );
+        assert_eq!(client.gate_state(), ExecState::Halted);
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(0),
+            "no fill may be booked for an ambiguous outcome"
+        );
+        assert!(
+            crate::telemetry::METRICS
+                .order_unknown
+                .load(Ordering::Relaxed)
+                - unknown_before
+                >= 1,
+            "the ambiguous outcome is counted"
+        );
+        assert!(
+            crate::telemetry::METRICS
+                .unresolved_attempt
+                .load(Ordering::Relaxed)
+                - unresolved_before
+                >= 1,
+            "the ambiguous send remains an unresolved attempt"
+        );
+        assert_eq!(
+            crate::telemetry::METRICS
+                .order_rejected
+                .load(Ordering::Relaxed)
+                - rejected_before,
+            0,
+            "H1-4: an ambiguous outcome must not emit a terminal rejection"
+        );
+        drop(client);
+    }
+
+    /// H1-4: an envelope-level UNKNOWN (the bridge answered "outcome unknown") is unresolved,
+    /// not a rejection. The order stays pre-send, no `OrderRejected` event reaches the node's
+    /// event stream, and the halt fans out — a synthetic rejection would tell the OMS an order
+    /// is dead while it may be live at the broker.
+    #[tokio::test(flavor = "current_thread")]
+    async fn h1_4_envelope_unknown_halts_without_a_terminal_order_event() {
+        use nautilus_common::clients::ExecutionClient;
+        use nautilus_common::messages::ExecutionEvent;
+        use nautilus_model::events::OrderEventAny;
+        use std::sync::atomic::Ordering;
+
+        let fake = crate::bridge::FakeBridge::new();
+        let calls = fake.calls_handle();
+        let scripts = vec![crate::bridge::CommandScript::Unknown(
+            "ambiguous_state".into(),
+        )];
+        let (client, instrument_id, _client_order_id, order) = roundtrip_fixture(fake, &scripts);
+        let mut client = client;
+        client.connect().await.expect("connect");
+        enable_gate(&client);
+
+        // Tap the node's execution-event stream: with the defect restored, this path emitted
+        // `OrderRejected` — the observable failure the metric alone cannot see.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        nautilus_common::live::runner::replace_exec_event_sender(tx);
+        client
+            .start()
+            .expect("start installs the prepared event sender");
+
+        let rejected_before = crate::telemetry::METRICS
+            .order_rejected
+            .load(Ordering::Relaxed);
+        let unknown_before = crate::telemetry::METRICS
+            .order_unknown
+            .load(Ordering::Relaxed);
+
+        let submit = SubmitOrder::from_order(
+            &order,
+            TraderId::from("TRADER-001"),
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+        );
+        client.submit_order(submit).expect("place enqueued");
+        client.process_pending().await.expect("handled fail-closed");
+
+        let mut rejected_events = 0usize;
+        while let Ok(event) = rx.try_recv() {
+            if matches!(event, ExecutionEvent::Order(OrderEventAny::Rejected(_))) {
+                rejected_events += 1;
+            }
+        }
+        assert_eq!(
+            rejected_events, 0,
+            "H1-4: an ambiguous outcome must never emit a terminal OrderRejected event"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(client.gate_state(), ExecState::Halted);
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(0)
+        );
+        assert!(
+            crate::telemetry::METRICS
+                .order_unknown
+                .load(Ordering::Relaxed)
+                - unknown_before
+                >= 1
+        );
+        assert_eq!(
+            crate::telemetry::METRICS
+                .order_rejected
+                .load(Ordering::Relaxed)
+                - rejected_before,
+            0,
+            "an ambiguous outcome must not be reported as a decided rejection"
+        );
+        drop(client);
+    }
+
+    /// H1-2: the halt a transport-ambiguous outcome raises is fanned out to the process-wide
+    /// surface (so `/v1/intents` stops forwarding), not only to the client's boxed gate.
+    #[tokio::test(flavor = "current_thread")]
+    async fn h1_2_unknown_fans_the_halt_out_process_wide() {
+        use nautilus_common::clients::ExecutionClient;
+
+        let seen: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let notifier = HaltNotifier::new({
+            let seen = Rc::clone(&seen);
+            move |reason: &str| seen.borrow_mut().push(reason.to_string())
+        });
+        let scripts = vec![crate::bridge::CommandScript::Timeout];
+        let (client, _instrument_id, _client_order_id, order) =
+            roundtrip_fixture(crate::bridge::FakeBridge::new(), &scripts);
+        let mut client = client.with_halt_notifier(notifier);
+        client.connect().await.expect("connect");
+        enable_gate(&client);
+
+        let submit = SubmitOrder::from_order(
+            &order,
+            TraderId::from("TRADER-001"),
+            None,
+            None,
+            UUID4::new(),
+            UnixNanos::default(),
+        );
+        client.submit_order(submit).expect("place enqueued");
+        client.process_pending().await.expect("halted, not failed");
+        let reasons = seen.borrow().clone();
+        assert_eq!(
+            reasons.len(),
+            1,
+            "exactly one halt notification: {reasons:?}"
+        );
+        assert!(
+            reasons[0].contains("UNKNOWN"),
+            "the reason must name the ambiguity: {reasons:?}"
         );
         drop(client);
     }
@@ -1522,7 +1836,8 @@ mod tests {
         use nautilus_common::clients::ExecutionClient;
 
         let scripts = vec![
-            crate::bridge::CommandScript::Timeout, // place: exhausts its one attempt
+            // place: provably not sent, so it exhausts its one attempt without halting
+            crate::bridge::CommandScript::Unreachable("connect refused".into()),
             crate::bridge::CommandScript::Reject("trailing modify rejected".into()),
         ];
         let (client, instrument_id, client_order_id, order) =

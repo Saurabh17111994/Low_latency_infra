@@ -5,11 +5,14 @@
 //! `code/02_services/06_execution_bridge/go-bridge/fake_broker.go`.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Context as _};
 use async_trait::async_trait;
 use tracing::debug;
 
+use super::client::SendFailure;
 use super::client::{BridgeClient, BridgeReportStream, BRIDGE_REPORT_BUFFER};
 use super::protocol::{Command, CommandEnvelope, ReportEnvelope, RECORD_REPORT};
 
@@ -26,8 +29,12 @@ pub enum CommandScript {
     Reject(String),
     /// A response the service cannot classify as success or rejection.
     Unknown(String),
-    /// No reply within the command window (bridge stall).
+    /// No reply within the command window (bridge stall). A stall is ambiguous — the command
+    /// may already have been dispatched — so it is `SendFailure::Unknown`: never retried (H1-2).
     Timeout,
+    /// The command provably never reached the bridge (transport refused before dispatch). Safe
+    /// to retry (`SendFailure::NotSent`).
+    Unreachable(String),
 }
 
 /// The order-status value used in reports (mirrors the bridge's `order_status` strings).
@@ -69,7 +76,9 @@ pub struct FakeBridge {
     reports_rx: Option<BridgeReportStream>,
     orders: HashMap<String, OrderRecord>,
     counter: u64,
-    commands: u64,
+    /// Shared with any handle taken via [`FakeBridge::calls_handle`] before the bridge is boxed,
+    /// so tests can assert an exact `send_command` call count (H1-2 exactly-once guards).
+    commands: Arc<AtomicU64>,
     place_calls: u64,
     modify_calls: u64,
     cancel_calls: u64,
@@ -87,7 +96,7 @@ impl FakeBridge {
             reports_rx: None,
             orders: HashMap::new(),
             counter: 0,
-            commands: 0,
+            commands: Arc::new(AtomicU64::new(0)),
             place_calls: 0,
             modify_calls: 0,
             cancel_calls: 0,
@@ -100,7 +109,14 @@ impl FakeBridge {
 
     /// Total number of commands received (place/modify/cancel/query/reconcile).
     pub fn command_count(&self) -> u64 {
-        self.commands
+        self.commands.load(Ordering::Relaxed)
+    }
+
+    /// A handle to the live `send_command` call counter, taken before the bridge is boxed into a
+    /// client. The counter advances on entry for every command, scripted or not, so a test can
+    /// assert an exact call count (H1-2: Unknown must be exactly one call, never a retry).
+    pub fn calls_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.commands)
     }
 
     /// Number of Place commands received.
@@ -198,7 +214,10 @@ impl BridgeClient for FakeBridge {
         Ok(())
     }
 
-    async fn send_command(&mut self, envelope: CommandEnvelope) -> anyhow::Result<ReportEnvelope> {
+    async fn send_command(
+        &mut self,
+        envelope: CommandEnvelope,
+    ) -> Result<ReportEnvelope, SendFailure> {
         // Lenient validation for reconcile QueryOrder by client_order_ref (offline): the
         // protocol requires broker_order_id for QueryOrder, but reconcile by deterministic
         // client_order_ref (remarks) carries only client_order_ref. Treat that as valid
@@ -213,12 +232,12 @@ impl BridgeClient for FakeBridge {
                     && envelope.client_order_ref.len() <= 16;
                 if !(is_query_by_ref && msg.contains("broker_order_id is required for query-order"))
                 {
-                    return Err(anyhow!("invalid command: {e}"));
+                    return Err(SendFailure::not_sent(anyhow!("invalid command: {e}")));
                 }
             }
         }
 
-        self.commands += 1;
+        self.commands.fetch_add(1, Ordering::Relaxed);
         // Per-command introspection for engine_reconcile_test: proves UNKNOWN never retries Place
         let cmd_for_count = envelope.command().unwrap_or(Command::Place);
         match cmd_for_count {
@@ -234,18 +253,26 @@ impl BridgeClient for FakeBridge {
 
         let script = self.scripts.pop_front();
         let Some(script) = script else {
-            return Err(anyhow!(
+            // Nothing was dispatched: an unscripted command is a test-setup error, reported as
+            // NotSent so the bounded retry path still surfaces it without halting.
+            return Err(SendFailure::not_sent(anyhow!(
                 "fake bridge: unexpected command {}",
                 envelope.command
-            ));
+            )));
         };
 
-        let cmd = envelope
-            .command()
-            .ok_or_else(|| anyhow!("unsupported command {}", envelope.command))?;
+        let cmd = envelope.command().ok_or_else(|| {
+            SendFailure::not_sent(anyhow!("unsupported command {}", envelope.command))
+        })?;
 
         match script {
-            CommandScript::Timeout => Err(anyhow!("fake bridge: command {} timed out", cmd)),
+            CommandScript::Timeout => Err(SendFailure::unknown(anyhow!(
+                "fake bridge: command {} timed out",
+                cmd
+            ))),
+            CommandScript::Unreachable(reason) => Err(SendFailure::not_sent(anyhow!(
+                "fake bridge: command {cmd} not sent: {reason}"
+            ))),
             CommandScript::Reject(reason) => Ok(ReportEnvelope {
                 record_type: RECORD_REPORT.to_string(),
                 contract_version: 1,
@@ -271,9 +298,15 @@ impl BridgeClient for FakeBridge {
             CommandScript::ReconcileSnapshot(snapshot) => Ok(self
                 .emit_reconcile_snapshot(cmd, &envelope, &snapshot)
                 .await),
-            CommandScript::Accept => self.handle_accept(cmd, envelope).await,
+            CommandScript::Accept => self
+                .handle_accept(cmd, envelope)
+                .await
+                .map_err(SendFailure::not_sent),
             CommandScript::AcceptThenFill => {
-                let report = self.handle_accept(cmd, envelope.clone()).await?;
+                let report = self
+                    .handle_accept(cmd, envelope.clone())
+                    .await
+                    .map_err(SendFailure::not_sent)?;
                 self.emit_fill(&envelope).await;
                 Ok(report)
             }
@@ -750,14 +783,28 @@ mod tests {
         );
     }
 
+    /// H1-2: the fake's failure scripts carry the same taxonomy the transport does — a stall is
+    /// ambiguous (`Unknown`, never retry), a refused connection is `NotSent` (retry-safe).
     #[tokio::test]
-    async fn timeout_returns_error() {
+    async fn timeout_is_unknown_and_unreachable_is_not_sent() {
         let mut b = FakeBridge::new();
         b.connect().await.unwrap();
-        b.script(CommandScript::Timeout);
         let mut env = place_env();
         env.command = Command::Place.as_str().to_string();
-        assert!(b.send_command(env).await.is_err());
+
+        b.script(CommandScript::Timeout);
+        let err = b.send_command(env.clone()).await.unwrap_err();
+        assert!(
+            matches!(err, SendFailure::Unknown(_)),
+            "a stalled command is ambiguous: {err:?}"
+        );
+
+        b.script(CommandScript::Unreachable("connect refused".into()));
+        let err = b.send_command(env).await.unwrap_err();
+        assert!(
+            matches!(err, SendFailure::NotSent(_)),
+            "a refused connection is provably not sent: {err:?}"
+        );
     }
 
     #[tokio::test]

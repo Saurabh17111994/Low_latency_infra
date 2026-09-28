@@ -166,10 +166,15 @@ impl CircuitBreaker {
     }
 }
 
-/// Outcome of a single dependency attempt: transient (retryable) vs terminal (never retry).
+/// Outcome of a single dependency attempt: transient (retryable), unknown (ambiguous — never
+/// retryable), or terminal (never retry).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttemptError {
     Transient(String),
+    /// The dependency may already have processed the call; its outcome cannot be resolved
+    /// locally. Never retried — surfaced immediately so the caller can fail closed (halt and
+    /// reconcile) instead of re-issuing a money-moving command.
+    Unknown(String),
     Terminal(String),
 }
 
@@ -184,6 +189,8 @@ pub enum RetryError {
     BreakerOpen,
     /// A terminal failure (no retry).
     Terminal,
+    /// An ambiguous outcome (no retry): the dependency may have processed the call.
+    Unknown,
 }
 
 /// Idempotency guard (RESILIENCE-007): once a key reaches a terminal/done outcome it is
@@ -306,6 +313,12 @@ impl RetryOrchestrator {
                     self.guard.mark(key);
                     return Err(RetryError::Terminal);
                 }
+                Err(AttemptError::Unknown(_)) => {
+                    // An ambiguous call must never be re-invoked, including by a later caller
+                    // with the same key: mark it done so the guard answers Duplicate.
+                    self.guard.mark(key);
+                    return Err(RetryError::Unknown);
+                }
                 Err(AttemptError::Transient(_)) => {
                     self.breaker.record_failure(now());
                     if budget.exhausted() || self.breaker.is_open() {
@@ -326,9 +339,10 @@ impl RetryOrchestrator {
     /// Deliberately does **not** consult the in-memory idempotency guard: once-only /
     /// duplicate avoidance for the money-moving bridge call is owned by the durable
     /// executiongate + safety gate + bridge dedup. Only clearly-transient transport `Err`s
-    /// must be mapped to [`AttemptError::Transient`] by the caller; a broker decision that
-    /// yields an envelope (Success/Rejected/Unknown) is returned as `Ok` and is **never**
-    /// re-issued — in particular an `Unknown` outcome must fail closed, not retry.
+    /// must be mapped to [`AttemptError::Transient`] by the caller; a send whose outcome is
+    /// ambiguous must map to [`AttemptError::Unknown`] (returned as [`RetryError::Unknown`]
+    /// with no retry — H1-2), and a broker decision that yields an envelope
+    /// (Success/Rejected/Unknown) is returned as `Ok` and is **never** re-issued.
     ///
     /// Returns `(value, attempts_used)` on success, else a [`RetryError`].
     pub async fn execute_async<T, F, Fut>(
@@ -359,6 +373,7 @@ impl RetryOrchestrator {
                     return Ok((value, attempts));
                 }
                 Err(AttemptError::Terminal(_)) => return Err(RetryError::Terminal),
+                Err(AttemptError::Unknown(_)) => return Err(RetryError::Unknown),
                 Err(AttemptError::Transient(_)) => {
                     self.breaker.record_failure(now());
                     if budget.exhausted() || self.breaker.is_open() {
@@ -730,6 +745,54 @@ mod tests {
         assert!(
             guard.done("first"),
             "a key still inside the window survives"
+        );
+    }
+
+    /// H1-2: an ambiguous attempt (dependency may have processed the call) is returned as
+    /// `RetryError::Unknown` without a second invocation — the retry loop must never re-issue it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn h1_2_async_unknown_is_never_retried() {
+        let mut o = RetryOrchestrator::new(RetryConfig {
+            max_attempts: 4,
+            base_backoff_ms: 1,
+            cap_backoff_ms: 5,
+            breaker_threshold: 100,
+            breaker_cooldown_ms: 1000,
+        });
+        let calls = std::cell::Cell::new(0u32);
+        let mut attempt = || {
+            calls.set(calls.get() + 1);
+            async { Err::<i64, AttemptError>(AttemptError::Unknown("timeout".into())) }
+        };
+        assert_eq!(
+            o.execute_async(|| 0, &mut attempt).await,
+            Err(RetryError::Unknown)
+        );
+        assert_eq!(calls.get(), 1, "an unknown outcome must be attempted once");
+    }
+
+    /// H1-2 sync counterpart: the idempotency guard closes the key, so even a later call with
+    /// the same key answers `Duplicate` instead of re-invoking the dependency.
+    #[test]
+    fn h1_2_sync_unknown_marks_the_key_done() {
+        let mut o = RetryOrchestrator::new(RetryConfig {
+            max_attempts: 4,
+            base_backoff_ms: 1,
+            cap_backoff_ms: 5,
+            breaker_threshold: 100,
+            breaker_cooldown_ms: 1000,
+        });
+        let mut attempt = || Err::<i64, AttemptError>(AttemptError::Unknown("reset".into()));
+        assert_eq!(
+            o.execute("key-1", || 0, &mut attempt),
+            Err(RetryError::Unknown)
+        );
+        // The key is now done; a repeat call is refused without invoking the attempt.
+        let mut must_not_run =
+            || -> Result<i64, AttemptError> { panic!("an ambiguous key must not be re-invoked") };
+        assert_eq!(
+            o.execute("key-1", || 0, &mut must_not_run),
+            Err(RetryError::Duplicate)
         );
     }
 }

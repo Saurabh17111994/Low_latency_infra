@@ -30,6 +30,7 @@ use nautilus_execution_service::{
     config::ServiceConfig,
     durable::{DurableClients, DurableFlags},
     engine::{BridgeSelection, LiveNodeRuntime},
+    execution::HaltNotifier,
     gate::ExecState,
     gate_report::GateReporter,
     http, shutdown, telemetry,
@@ -145,7 +146,14 @@ async fn main() -> anyhow::Result<()> {
     // service aborts at boot. Tracing still works: set_global_default is a separate
     // system; only the `log` bridge is skipped. `init_logging` is infallible by design
     // (no `Result`): "already installed" is the ordinary case on this boot path.
-    let mut node = LiveNodeRuntime::build_with_bridge(selection)?;
+    // H1-2: the node's execution client halts on an ambiguous bridge outcome; bind that halt to
+    // the served surface this process answers `/v1/intents` and `/healthz` on, so the forward
+    // leg stops too (`ServerState::safety_halt` is local + durable via the gate reporter).
+    let halt_notifier = HaltNotifier::new({
+        let state = runtime.server_state();
+        move |reason: &str| state.safety_halt(reason)
+    });
+    let mut node = LiveNodeRuntime::build_with_bridge_and_halt(selection, halt_notifier)?;
 
     telemetry::init_logging("info");
     telemetry::METRICS.record_restart();

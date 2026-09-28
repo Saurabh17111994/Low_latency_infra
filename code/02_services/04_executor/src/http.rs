@@ -33,7 +33,7 @@ use anyhow::{Context as _, Result};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use crate::bridge::{BridgeClient, ReportOutcome};
+use crate::bridge::{BridgeClient, ReportOutcome, SendFailure};
 use crate::durable::LiveAttemptStore;
 use crate::events;
 use crate::executiongate::{Attempt, AttemptPhase, Claim};
@@ -1169,14 +1169,22 @@ async fn route(state: &ServerState, method: &str, path: &str, body: &str) -> Vec
                     )
                 }
                 Err(e) => {
+                    // H1-2: an UNKNOWN send outcome on the forward leg means the broker may
+                    // already hold the order — halt the served surface immediately (durable
+                    // HALT via the reporter) instead of only arming the 15 s review timer. A
+                    // provably-not-sent failure keeps today's 503 + escalation, no halt.
+                    let unknown = matches!(e, SendFailure::Unknown(_));
                     state.record_unknown_outcome();
+                    if unknown {
+                        state.safety_halt("bridge send outcome UNKNOWN on /v1/intents");
+                    }
                     json(
                         503,
                         &serde_json::json!({
                             "accepted": false,
                             "outcome": "UNKNOWN",
                             "reason": e.to_string(),
-                            "gate_state": snap.gate.as_str(),
+                            "gate_state": state.snapshot().gate.as_str(),
                         }),
                     )
                 }
@@ -2291,7 +2299,10 @@ mod tests {
             self.inner.disconnect().await
         }
 
-        async fn send_command(&mut self, envelope: CommandEnvelope) -> Result<ReportEnvelope> {
+        async fn send_command(
+            &mut self,
+            envelope: CommandEnvelope,
+        ) -> Result<ReportEnvelope, crate::bridge::SendFailure> {
             self.sends.fetch_add(1, Ordering::SeqCst);
             let phase = self
                 .store

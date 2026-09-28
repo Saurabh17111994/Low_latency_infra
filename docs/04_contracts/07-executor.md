@@ -89,7 +89,15 @@ Every accepted command returns `record_type=execution_report` and exactly one ex
 | --- | --- | --- |
 | `SUCCESS` | Verified broker response; place requires nonblank `data.orderNo` | Nautilus may advance its own state after durable recording |
 | `REJECTED` | Local validation rejection or documented broker rejection | No place retry without a new approved attempt |
-| `UNKNOWN` | Timeout, transport failure, 401/403/408/429/5xx, malformed/ambiguous response, or unknown postback state | No automatic retry; reconcile first and halt as required |
+| `UNKNOWN` | Dispatch-time transport failure (timeout, reset/EOF, malformed/ambiguous response, or any status not proven pre-dispatch) or unknown postback state | No automatic retry; reconcile first and halt as required |
+
+A command that provably never reached the bridge's dispatch point is not an outcome: DNS/TCP
+connect failure, serialization failure, and the bridge's pre-dispatch rejections (`400`, `401`,
+`403`, `404`, `409`, `500 fingerprint_failed`) are classified `NotSent` by the executor and may be
+bounded-retried; only an exhausted budget surfaces as an unresolved attempt (H1-2 in the
+2026-09-28 remediation plan). Timeout, write/read reset or EOF after the request bytes were sent,
+a malformed response, and any other status are `Unknown`: the command may have reached the venue,
+so it is never auto-retried, the safety gate halts process-wide, and reconciliation resolves it.
 
 Repeated `request_id` with identical content returns the cached report without a second broker call.
 Reusing a `request_id` with different content returns `request_id_reuse_violation` and never reaches

@@ -125,6 +125,8 @@ pub struct BridgeExecutionClientFactory {
     progress: ProgressWatch,
     /// Clean-shutdown evidence cell handed to every client this factory creates (D7).
     shutdown: crate::shutdown::ShutdownWatch,
+    /// Process-wide halt fan-out handed to every client this factory creates (H1-2).
+    halt: crate::execution::client::HaltNotifier,
 }
 
 impl BridgeExecutionClientFactory {
@@ -135,6 +137,7 @@ impl BridgeExecutionClientFactory {
             gate: GateWatch(Rc::new(RefCell::new(Gate::new()))),
             progress: ProgressWatch::default(),
             shutdown: crate::shutdown::ShutdownWatch::default(),
+            halt: crate::execution::client::HaltNotifier::default(),
         }
     }
 }
@@ -235,7 +238,8 @@ impl ExecutionClientFactory for BridgeExecutionClientFactory {
         let client = BridgeExecutionClient::new(core, bridge)
             .with_gate(Rc::clone(&self.gate.0))
             .with_progress_ticks(Rc::clone(&self.progress.0))
-            .with_shutdown_watch(self.shutdown.clone());
+            .with_shutdown_watch(self.shutdown.clone())
+            .with_halt_notifier(self.halt.clone());
         // Observe the gate the client actually booted into: the runtime's fail-closed report is
         // derived from this observation, not from a constant (P3-439).
         self.boot_gate.record(client.gate_state());
@@ -316,6 +320,19 @@ impl LiveNodeRuntime {
     /// Constructs the node with an explicit bridge transport selection (WP-2 remainder:
     /// the production path passes `BridgeSelection::from_config(&config)`).
     pub fn build_with_bridge(selection: BridgeSelection) -> Result<Self> {
+        Self::build_with_bridge_and_halt(
+            selection,
+            crate::execution::client::HaltNotifier::default(),
+        )
+    }
+
+    /// H1-2: like [`Self::build_with_bridge`], but the constructed client's safety halts fan
+    /// out through `halt` (the service binds it to the served `ServerState`, whose own
+    /// `safety_halt` also writes the durable HALT through the gate reporter).
+    pub fn build_with_bridge_and_halt(
+        selection: BridgeSelection,
+        halt: crate::execution::client::HaltNotifier,
+    ) -> Result<Self> {
         let cfg = EngineFactory::build_node_config();
         let builder = LiveNodeBuilder::from_config(cfg)?;
         let boot_gate = BootGate::default();
@@ -332,6 +349,7 @@ impl LiveNodeRuntime {
                 gate: gate_watch.clone(),
                 progress: progress.clone(),
                 shutdown: shutdown_watch.clone(),
+                halt,
             }),
             Box::new(BridgeClientConfig),
         )?;
@@ -415,7 +433,7 @@ pub mod reconcile {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::bridge::protocol::{Command, CommandEnvelope, ReportEnvelope};
-    use crate::bridge::BridgeClient;
+    use crate::bridge::{BridgeClient, SendFailure};
     use crate::execution::client::{classify_bridge_report, BridgeOutcome};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -457,15 +475,17 @@ pub mod reconcile {
     static MASS_ENVELOPE_SEQ: AtomicU64 = AtomicU64::new(0);
 
     /// Maps a bridge reply to a decision; a failed round-trip keeps its own error instead of
-    /// being flattened into a fabricated `UNKNOWN` report (P3-194).
-    fn classify_or_transport(result: anyhow::Result<ReportEnvelope>) -> ReconcileDecision {
+    /// being flattened into a fabricated `UNKNOWN` report (P3-194). The error's class
+    /// (`NotSent`/`Unknown`) is not needed here — the reconcile sweep surfaces the reason either
+    /// way; the class decides retry safety only on the command path (H1-2).
+    fn classify_or_transport(result: Result<ReportEnvelope, SendFailure>) -> ReconcileDecision {
         match result {
             Ok(rep) => match classify_bridge_report(&rep) {
                 BridgeOutcome::Accepted => ReconcileDecision::Accepted,
                 BridgeOutcome::Rejected => ReconcileDecision::Rejected,
                 BridgeOutcome::Unknown => ReconcileDecision::StillUnknownHalted,
             },
-            Err(e) => ReconcileDecision::TransportFailure(e.to_string()),
+            Err(e) => ReconcileDecision::TransportFailure(e.source_error().to_string()),
         }
     }
 
@@ -805,6 +825,7 @@ mod tests {
             gate: GateWatch::default(),
             progress: ProgressWatch::default(),
             shutdown: crate::shutdown::ShutdownWatch::default(),
+            halt: crate::execution::client::HaltNotifier::default(),
         };
         let _client = factory
             .create("exec", &BridgeClientConfig, cache)
@@ -822,7 +843,7 @@ mod tests {
     struct ProbeBridge {
         connected: bool,
         sent_ids: Vec<String>,
-        replies: VecDeque<anyhow::Result<ReportEnvelope>>,
+        replies: VecDeque<Result<ReportEnvelope, crate::bridge::client::SendFailure>>,
     }
 
     impl ProbeBridge {
@@ -834,12 +855,14 @@ mod tests {
             }
         }
 
-        fn script(&mut self, reply: anyhow::Result<ReportEnvelope>) {
+        fn script(&mut self, reply: Result<ReportEnvelope, crate::bridge::client::SendFailure>) {
             self.replies.push_back(reply);
         }
 
         fn script_bridge_error(&mut self, reason: &str) {
-            self.script(Err(anyhow::anyhow!(reason.to_string())));
+            self.script(Err(crate::bridge::client::SendFailure::not_sent(
+                anyhow::anyhow!(reason.to_string()),
+            )));
         }
 
         /// Envelope ids of the trailing mass snapshots sent so far.
@@ -871,11 +894,13 @@ mod tests {
         async fn send_command(
             &mut self,
             envelope: CommandEnvelope,
-        ) -> anyhow::Result<ReportEnvelope> {
+        ) -> Result<ReportEnvelope, crate::bridge::client::SendFailure> {
             self.sent_ids.push(envelope.request_id.clone());
             match self.replies.pop_front() {
                 Some(reply) => reply,
-                None => Err(anyhow::anyhow!("probe bridge: no scripted reply")),
+                None => Err(crate::bridge::client::SendFailure::not_sent(
+                    anyhow::anyhow!("probe bridge: no scripted reply"),
+                )),
             }
         }
 

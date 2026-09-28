@@ -9,7 +9,7 @@ pub mod fake;
 pub mod protocol;
 pub mod transport;
 
-pub use client::{BridgeClient, BridgeReportStream};
+pub use client::{BridgeClient, BridgeReportStream, SendFailure};
 pub use fake::{CommandScript, FakeBridge};
 pub use protocol::{
     Command, CommandEnvelope, OrderCommand, OrderCommandError, OrderType, Product, ReportEnvelope,

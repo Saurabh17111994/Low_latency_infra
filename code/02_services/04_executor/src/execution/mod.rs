@@ -8,4 +8,4 @@
 
 pub mod client;
 
-pub use client::BridgeExecutionClient;
+pub use client::{BridgeExecutionClient, HaltNotifier};

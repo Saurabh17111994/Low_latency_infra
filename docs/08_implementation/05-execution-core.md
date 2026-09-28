@@ -262,6 +262,15 @@ order linked to the same trade context; it is not a mutation of the original ord
 An unknown attempt is never blindly retried. A retry requires proof that the broker did not accept
 the original request or an evidence-approved broker idempotency mechanism.
 
+Transport failures are classified at the send boundary (H1-2, 2026-09-28 remediation): a failure
+that provably happened before any command byte was written (DNS/TCP connect, serialization, or the
+bridge's pre-dispatch rejections) is `NotSent` and may be bounded-retried — an exhausted budget
+surfaces as an unresolved attempt without halting. A timeout, write/read reset or EOF after send,
+malformed response, or any other status is `Unknown`: it is never retried, the safety gate halts
+process-wide (served forward leg included, through the client's halt notifier), and **no** terminal
+order event is emitted — the order stays pre-send, and reconciliation (contract §Reconciliation) or
+the true async postback resolves it (H1-4).
+
 ## Position-management model
 
 Nautilus owns the position calculation path:
