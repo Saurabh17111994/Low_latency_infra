@@ -336,12 +336,15 @@ impl FakeBridge {
                     record_type: RECORD_REPORT.to_string(),
                     contract_version: 1,
                     request_id: envelope.request_id.clone(),
-                    command: Command::Cancel.as_str().to_string(),
+                    // Postbacks carry the canonical vocabulary and the postback command marker,
+                    // exactly like the real bridge (contract 07).
+                    command: "postback".to_string(),
                     outcome: "SUCCESS".to_string(),
                     client_order_ref: envelope.client_order_ref.clone(),
                     broker_order_id: envelope.broker_order_id.clone(),
                     order_status: Some(FakeOrderStatus::Canceled.as_str().to_string()),
                     report_type: Some("order_canceled".to_string()),
+                    event_type: Some("order_canceled".to_string()),
                     ..ReportEnvelope::default()
                 })
                 .await;
@@ -467,7 +470,9 @@ impl FakeBridge {
             record_type: RECORD_REPORT.to_string(),
             contract_version: 1,
             request_id: envelope.request_id.clone(),
-            command: Command::Place.as_str().to_string(),
+            // Postbacks carry the canonical vocabulary and the postback command marker,
+            // exactly like the real bridge (contract 07).
+            command: "postback".to_string(),
             outcome: "SUCCESS".to_string(),
             // Echo `remarks` (= client_order_ref) so the service can correlate the
             // asynchronous fill back to the order (Arrow postback contract).
@@ -475,6 +480,7 @@ impl FakeBridge {
             broker_order_id,
             order_status: Some(FakeOrderStatus::Filled.as_str().to_string()),
             report_type: Some("order_filled".to_string()),
+            event_type: Some("order_filled".to_string()),
             fill_quantity: Some(order.quantity.clone()),
             fill_price: Some(if order.price.is_empty() {
                 "100".to_string()
@@ -804,6 +810,8 @@ mod tests {
         let mut reports = b.take_reports().expect("report stream available");
         let report = reports.try_recv().expect("canceled report emitted");
         assert_eq!(report.report_type.as_deref(), Some("order_canceled"));
+        assert_eq!(report.event_type.as_deref(), Some("order_canceled"));
+        assert_eq!(report.command, "postback");
         assert_eq!(report.order_status.as_deref(), Some("CANCELED"));
         assert_eq!(report.broker_order_id, broker_id);
         assert_eq!(report.client_order_ref, "CLIENT-1");
@@ -835,6 +843,8 @@ mod tests {
         let mut reports = b.take_reports().expect("report stream available");
         let fill = reports.try_recv().expect("async fill report emitted");
         assert_eq!(fill.report_type.as_deref(), Some("order_filled"));
+        assert_eq!(fill.event_type.as_deref(), Some("order_filled"));
+        assert_eq!(fill.command, "postback");
         assert_eq!(fill.order_status.as_deref(), Some("FILLED"));
         // Arrow postback contract: the fill must echo our `remarks` (= client_order_ref)
         // so the service can correlate it back to the placed order.

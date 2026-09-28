@@ -125,5 +125,19 @@ class PostbackContractFixtureTest(unittest.TestCase):
             self.assertIn("arrow", case, f"case {case.get('name')!r} lost its arrow input")
             self.assertIn("name", case, f"case {case.get('name')!r} lost its name")
 
+    def test_rust_include_path_points_at_the_fixture(self) -> None:
+        """The Rust side embeds this exact relative path; keep both ends pinned."""
+        client = (ROOT / "code/02_services/04_executor/src/execution/client.rs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('env!("CARGO_MANIFEST_DIR")', client,
+                      "the executor dispatch test must embed the fixture manifest-relative")
+        self.assertIn(
+            '/../../testdata/postback-report-types.json',
+            client,
+            "the executor dispatch test must embed code/testdata/postback-report-types.json",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

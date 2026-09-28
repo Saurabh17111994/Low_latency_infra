@@ -601,14 +601,60 @@ impl BridgeExecutionClient {
         };
         let ts_event = self.clock.get_time_ns();
 
-        match report.report_type.as_deref() {
+        // C1-4: dispatch on the canonical `event_type` the bridge computes from Arrow's raw
+        // (reportType, orderStatus) pair (contract 07). The old match read `report_type` — a
+        // vocabulary only the fake bridge ever produced — so real fills/cancels/rejects fell
+        // into `_ => {}` and were dropped in silence.
+        match report.event_type.as_deref() {
             Some("order_filled") => self.handle_fill(&order, &report, ts_event),
             Some("order_canceled") => {
                 let venue_order_id = VenueOrderId::new(&report.broker_order_id);
                 self.emitter
                     .emit_order_canceled(&order, Some(venue_order_id), ts_event);
             }
-            _ => {}
+            Some("order_rejected") => {
+                let reason = report
+                    .reject_reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())
+                    .unwrap_or("broker rejected the order");
+                self.emitter
+                    .emit_order_rejected(&order, reason, ts_event, false);
+                crate::telemetry::METRICS
+                    .order_rejected
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            Some("order_accepted") => {
+                crate::telemetry::METRICS
+                    .report_event_accepted
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            other => {
+                // Fail closed on the postback stream: a missing event_type (old bridge, or the
+                // documented rollback window) or an unrecognized value (Arrow vocabulary drift)
+                // is ambiguous, and halting is loud and safe. Non-postback stream traffic (e.g.
+                // reconcile echoes) is not a lifecycle event and stays ignored.
+                if report.command == "postback" {
+                    crate::telemetry::METRICS
+                        .report_event_unknown
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!(
+                        "bridge postback for {} has a missing or unrecognized event_type {:?}: \
+                         safety-halting rather than dropping it",
+                        order.client_order_id(),
+                        other
+                    );
+                    self.gate.borrow_mut().safety_halt();
+                } else {
+                    tracing::debug!(
+                        "ignoring non-postback bridge report for {} (command={:?}, report_type={:?})",
+                        order.client_order_id(),
+                        report.command,
+                        report.report_type
+                    );
+                }
+            }
         }
     }
 
@@ -1659,7 +1705,7 @@ mod tests {
         // the raw ref as a ClientOrderId, failed `get_order`, and returned in silence.
         let report = ReportEnvelope {
             client_order_ref: "NO-SUCH-REF".to_string(),
-            report_type: Some("order_filled".to_string()),
+            event_type: Some("order_filled".to_string()),
             broker_order_id: "BRK-1".to_string(),
             fill_quantity: Some("10".to_string()),
             fill_price: Some("100".to_string()),
@@ -1720,6 +1766,160 @@ mod tests {
         assert_eq!(
             client2.position(&instrument_id),
             rust_decimal::Decimal::from(0)
+        );
+    }
+
+    /// C1-4/C1-6: the executor dispatches on the canonical `event_type` the shared fixture pins.
+    /// Every canonical value has an explicit action; a postback with a missing or unrecognized
+    /// value safety-halts and counts the drift (fail closed), so a new Arrow word can never be
+    /// dropped in silence again.
+    #[tokio::test(flavor = "current_thread")]
+    async fn c1_dispatch_follows_the_shared_fixture() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../testdata/postback-report-types.json"
+        )))
+        .expect("shared postback fixture parses");
+        let cases = fixture["cases"].as_array().expect("fixture cases");
+        assert!(!cases.is_empty(), "fixture must not be empty");
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap_or("?");
+            let event_type = case["event_type"].as_str().expect("event_type");
+            let arrow_ref = case["arrow"]["remarks"].as_str().unwrap_or("REF-UNKNOWN");
+            let fill_quantity = case["normalized"]["fill_quantity"].as_str().unwrap_or("");
+            let fill_price = case["normalized"]["fill_price"].as_str().unwrap_or("");
+            let reject_reason = case["normalized"]["reject_reason"].as_str().unwrap_or("");
+
+            let (client, instrument_id, client_order_id, _order) =
+                roundtrip_fixture(crate::bridge::FakeBridge::new(), &[]);
+            enable_gate(&client);
+            client
+                .client_refs
+                .borrow_mut()
+                .insert(arrow_ref.to_string(), client_order_id);
+
+            let report = ReportEnvelope {
+                command: "postback".to_string(),
+                client_order_ref: arrow_ref.to_string(),
+                broker_order_id: "BRK-1".to_string(),
+                event_type: Some(event_type.to_string()),
+                reject_reason: (!reject_reason.is_empty()).then(|| reject_reason.to_string()),
+                fill_quantity: (!fill_quantity.is_empty()).then(|| fill_quantity.to_string()),
+                fill_price: (!fill_price.is_empty()).then(|| fill_price.to_string()),
+                ..ReportEnvelope::default()
+            };
+            client.handle_report(report);
+
+            let halted = client.gate_state() == ExecState::Halted;
+            match event_type {
+                "order_filled" if !fill_quantity.is_empty() && !fill_price.is_empty() => {
+                    assert!(!halted, "{name}: a usable fill must book, not halt");
+                    assert_eq!(
+                        client.position(&instrument_id),
+                        fill_quantity
+                            .parse::<rust_decimal::Decimal>()
+                            .expect("fixture quantity"),
+                        "{name}: the fill books the normalized quantity"
+                    );
+                }
+                "order_filled" => {
+                    assert!(halted, "{name}: a fill without a usable payload must halt");
+                    assert_eq!(
+                        client.position(&instrument_id),
+                        rust_decimal::Decimal::from(0)
+                    );
+                }
+                "order_unknown" => {
+                    assert!(halted, "{name}: an unrecognized postback must safety-halt");
+                }
+                "order_canceled" | "order_rejected" | "order_accepted" => {
+                    assert!(!halted, "{name}: {event_type} must not halt the gate");
+                }
+                other => panic!("fixture case {name} uses a non-canonical event_type {other}"),
+            }
+        }
+    }
+
+    /// C1-4: the runtime evidence for a fail-closed postback stream — a hit on the drift counter
+    /// and a halted gate — plus the two exemptions: `order_accepted` is counted (no state change)
+    /// and non-postback stream traffic (reconcile echoes) stays ignored.
+    #[tokio::test(flavor = "current_thread")]
+    async fn c1_unknown_postback_halts_and_counts_drift() {
+        use std::sync::atomic::Ordering;
+
+        let (client, _instrument_id, client_order_id, _order) =
+            roundtrip_fixture(crate::bridge::FakeBridge::new(), &[]);
+        enable_gate(&client);
+        client
+            .client_refs
+            .borrow_mut()
+            .insert("REF-DRIFT".into(), client_order_id);
+
+        let unknown_before = crate::telemetry::METRICS
+            .report_event_unknown
+            .load(Ordering::Relaxed);
+
+        // Missing event_type with command=postback: the old bridge / rollback-window shape.
+        client.handle_report(ReportEnvelope {
+            command: "postback".into(),
+            client_order_ref: "REF-DRIFT".into(),
+            broker_order_id: "BRK-1".into(),
+            ..ReportEnvelope::default()
+        });
+        assert_eq!(
+            client.gate_state(),
+            ExecState::Halted,
+            "a postback without event_type must halt, not vanish"
+        );
+        assert!(
+            crate::telemetry::METRICS
+                .report_event_unknown
+                .load(Ordering::Relaxed)
+                > unknown_before,
+            "the protocol-drift halt must be counted"
+        );
+
+        // Non-postback stream traffic (a reconcile echo) is not a lifecycle event: ignored,
+        // never a halt.
+        let (client2, _instrument_id2, client_order_id2, _order2) =
+            roundtrip_fixture(crate::bridge::FakeBridge::new(), &[]);
+        enable_gate(&client2);
+        client2
+            .client_refs
+            .borrow_mut()
+            .insert("REF-RC".into(), client_order_id2);
+        client2.handle_report(ReportEnvelope {
+            command: "reconcile_orders".into(),
+            client_order_ref: "REF-RC".into(),
+            broker_order_id: "BRK-1".into(),
+            report_type: Some("order_status".into()),
+            ..ReportEnvelope::default()
+        });
+        assert_eq!(
+            client2.gate_state(),
+            ExecState::Enabled,
+            "non-postback stream reports must not halt the gate"
+        );
+
+        // order_accepted is counted, not halted.
+        let accepted_before = crate::telemetry::METRICS
+            .report_event_accepted
+            .load(Ordering::Relaxed);
+        client2.handle_report(ReportEnvelope {
+            command: "postback".into(),
+            client_order_ref: "REF-RC".into(),
+            broker_order_id: "BRK-1".into(),
+            event_type: Some("order_accepted".into()),
+            ..ReportEnvelope::default()
+        });
+        assert_eq!(client2.gate_state(), ExecState::Enabled);
+        assert!(
+            crate::telemetry::METRICS
+                .report_event_accepted
+                .load(Ordering::Relaxed)
+                > accepted_before,
+            "an accepted postback is counted, never dropped silently"
         );
     }
 

@@ -25,6 +25,10 @@ pub struct Metrics {
     pub gate_safety_halt: AtomicU64,
     /// Asynchronous bridge reports drained (fills, cancels).
     pub report_received: AtomicU64,
+    /// Bridge postbacks with `event_type=order_accepted` (counted; no state change).
+    pub report_event_accepted: AtomicU64,
+    /// Bridge postbacks whose `event_type` was missing or unrecognized (protocol-drift halt).
+    pub report_event_unknown: AtomicU64,
     /// Bridge jobs abandoned at shutdown without reaching the broker.
     pub unresolved_attempt: AtomicU64,
     /// Explicit retransmissions of a bridge command beyond its first attempt (transport retries).
@@ -40,7 +44,7 @@ impl Metrics {
     }
 
     /// An approximate point-in-time snapshot of every counter: each counter is read with a
-    /// single `Relaxed` load (individually consistent), but the eight loads happen in sequence,
+    /// single `Relaxed` load (individually consistent), but the ten loads happen in sequence,
     /// so a concurrent `fetch_add` can land between two of them and the returned values need not
     /// correspond to any single instant. Benign for monotonic OTLP counters, which only ever
     /// grow and are never compared against each other.
@@ -51,6 +55,8 @@ impl Metrics {
             order_rejected: self.order_rejected.load(Ordering::Relaxed),
             gate_safety_halt: self.gate_safety_halt.load(Ordering::Relaxed),
             report_received: self.report_received.load(Ordering::Relaxed),
+            report_event_accepted: self.report_event_accepted.load(Ordering::Relaxed),
+            report_event_unknown: self.report_event_unknown.load(Ordering::Relaxed),
             unresolved_attempt: self.unresolved_attempt.load(Ordering::Relaxed),
             bridge_transport_retries: self.bridge_transport_retries.load(Ordering::Relaxed),
             restart: self.restart.load(Ordering::Relaxed),
@@ -66,6 +72,8 @@ pub struct MetricsSnapshot {
     pub order_rejected: u64,
     pub gate_safety_halt: u64,
     pub report_received: u64,
+    pub report_event_accepted: u64,
+    pub report_event_unknown: u64,
     pub unresolved_attempt: u64,
     pub bridge_transport_retries: u64,
     pub restart: u64,
@@ -78,6 +86,8 @@ pub static METRICS: Metrics = Metrics {
     order_rejected: AtomicU64::new(0),
     gate_safety_halt: AtomicU64::new(0),
     report_received: AtomicU64::new(0),
+    report_event_accepted: AtomicU64::new(0),
+    report_event_unknown: AtomicU64::new(0),
     unresolved_attempt: AtomicU64::new(0),
     bridge_transport_retries: AtomicU64::new(0),
     restart: AtomicU64::new(0),
@@ -181,6 +191,8 @@ mod tests {
                 + s.order_rejected
                 + s.gate_safety_halt
                 + s.report_received
+                + s.report_event_accepted
+                + s.report_event_unknown
                 + s.unresolved_attempt
                 + s.restart
         };

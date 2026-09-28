@@ -575,6 +575,12 @@ pub struct ReportEnvelope {
     pub order_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_type: Option<String>,
+    /// Canonical postback event vocabulary the executor dispatches on (contract 07).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+    /// Broker rejection reason carried through from the postback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject_reason: Option<String>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub fill_shares: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]

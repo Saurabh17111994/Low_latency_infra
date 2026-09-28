@@ -31,10 +31,10 @@ Where a body section and this list disagree, this list wins.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| C1 — live postback mapping (fills/cancels/rejects must never be dropped) | 7 | 4 | 1 | 2 | 0 | 0 | 0 |
+| C1 — live postback mapping (fills/cancels/rejects must never be dropped) | 7 | 7 | 0 | 0 | 0 | 0 | 0 |
 | C2 — broker secrets must never reach day evidence | 5 | 0 | 0 | 4 | 0 | 0 | 1 |
 | C3 — golden image must run the daily paths without a host JDK | 8 | 0 | 0 | 7 | 1 | 0 | 0 |
-| **Total** | **20** | **4** | **1** | **13** | **1** | **0** | **1** |
+| **Total** | **20** | **7** | **0** | **11** | **1** | **0** | **1** |
 
 #### C1 — live postback mapping (fills/cancels/rejects must never be dropped)
 
@@ -50,13 +50,13 @@ Where a body section and this list disagree, this list wins.
   are absent (Arrow postbacks carry `fillShares`/`averagePrice` — contract `arrow_broker.md`
   §4), the bridge fills `fill_quantity`/`fill_price` from `fillShares`/`averagePrice` so the
   executor never fabricates and never halts on a valid live fill.
-- [ ] **C1-4** — Executor dispatch on `event_type` (`client.rs::handle_report`): explicit arms for
+- [x] **C1-4** — Executor dispatch on `event_type` (`client.rs::handle_report`): explicit arms for
   filled/canceled/rejected/accepted; **any missing or unrecognized value halts the gate**
   (protocol-drift sentinel) with a metric and an audit reason — replaces the current `_ => {}`.
   (DECIDED 2026-09-28 — fail-closed halt confirmed, §9.)
-- [ ] **C1-5** — `FakeBridge` emits the canonical `event_type` too, so fake and live paths share
+- [x] **C1-5** — `FakeBridge` emits the canonical `event_type` too, so fake and live paths share
   one vocabulary; existing behavior tests keep passing unchanged.
-- [~] **C1-6** — Cross-boundary guard tests: Go test iterates the shared fixture; Rust test
+- [x] **C1-6** — Cross-boundary guard tests: Go test iterates the shared fixture; Rust test
   iterates the same fixture and asserts the dispatch action per canonical value plus halt on
   unknown/missing; a gate-discovered Python test asserts the fixture covers the contract's Arrow
   vocabulary exactly.

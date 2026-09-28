@@ -1157,6 +1157,8 @@ mod tests {
                 postback_event_id: String::new(),
                 order_status: Some("ACCEPTED".into()),
                 report_type: None,
+                event_type: None,
+                reject_reason: None,
                 fill_shares: String::new(),
                 average_price: String::new(),
                 fill_price: None,
