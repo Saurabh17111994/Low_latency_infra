@@ -1816,6 +1816,7 @@ def provision_alerts():
         if existing and isinstance(existing, dict)
         else set()
     )
+    created = failed = 0
     for spec in ALERTS:
         name = spec["name"]
         if name in names:
@@ -1866,7 +1867,19 @@ def provision_alerts():
             "row_template_type": "String",
         }
         status, resp = v2api("POST", body)
+        if status in (200, 201):
+            created += 1
+        else:
+            failed += 1
         print(f"{status} create alert {name}: {json.dumps(resp)[:200]}")
+    if failed:
+        # F7 (2026-09-28): a rule that silently does not exist is worse than no
+        # rule. Off-session, some compute metric streams do not exist yet, so
+        # these failures are expected on a fresh stack — but they must be
+        # visible and re-run once the feed is live.
+        print(f"alerts: created={created} failed={failed} — failed rules need their "
+              f"metric streams (off-session compute streams appear once signals flow); "
+              f"re-run when live")
 
 
 if __name__ == "__main__":

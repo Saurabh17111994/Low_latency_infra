@@ -1,0 +1,60 @@
+[
+  {
+    "name": "storage-crit-fluss-disk-write-locked",
+    "stream_type": "logs",
+    "stream_name": "fluss_logs",
+    "is_real_time": false,
+    "query_condition": {
+      "type": "sql",
+      "sql": "SELECT body, log_file_name, host_name FROM \"fluss_logs\" WHERE str_match(body, 'data disk usage reached|DISK_WRITE_LOCKED')",
+      "promql": null,
+      "promql_condition": null,
+      "aggregation": null,
+      "vrl_function": null
+    },
+    "trigger_condition": {
+      "period": 5,
+      "operator": ">=",
+      "threshold": 1,
+      "frequency": 1,
+      "silence": 30,
+      "frequency_type": "minutes",
+      "timezone": "UTC",
+      "tolerance_in_secs": null
+    },
+    "enabled": true,
+    "description": "CRITICAL storage: Fluss rejected writes - a backing data disk reached the 85% write limit ('data disk usage reached ...' / DISK_WRITE_LOCKED). Appends time out client-side (UNCERTAIN) and raw_table_1 log_end stops. The lock is sticky: while the process runs, writes resume only below the recover ratio (write-recover-ratio, 0.80 default); a tablet restart re-evaluates at the current usage. Recovery runbook: docs/06_operations/07-lake-archive-ops.md 'Recovery: Fluss write-locked'. Early warning: INFRA-crit-disk-20 (free <20%). Provisioned by seed_alerts.py from openobserve/alerts/storage-alerts.json.",
+    "destinations": [
+      "dev-webhook"
+    ]
+  },
+  {
+    "name": "storage-crit-ingestion-append-blocked",
+    "stream_type": "logs",
+    "stream_name": "platform_logs",
+    "is_real_time": false,
+    "query_condition": {
+      "type": "sql",
+      "sql": "SELECT body, service_name FROM \"platform_logs\" WHERE str_match(body, 'DISK_WRITE_LOCKED|append UNCERTAIN')",
+      "promql": null,
+      "promql_condition": null,
+      "aggregation": null,
+      "vrl_function": null
+    },
+    "trigger_condition": {
+      "period": 5,
+      "operator": ">=",
+      "threshold": 3,
+      "frequency": 1,
+      "silence": 30,
+      "frequency_type": "minutes",
+      "timezone": "UTC",
+      "tolerance_in_secs": null
+    },
+    "enabled": true,
+    "description": "CRITICAL storage: ingestion appends are failing in the client (DISK_WRITE_LOCKED / append UNCERTAIN, >=3 in 5m). Same cause and runbook as storage-crit-fluss-disk-write-locked: the Fluss data disk is at or over its write limit - free space below the recover ratio and confirm log_end advances. This is the ingestion-side net for the case where the tablet log line alone is missed.",
+    "destinations": [
+      "dev-webhook"
+    ]
+  }
+]

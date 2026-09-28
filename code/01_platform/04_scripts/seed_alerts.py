@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
-"""seed_alerts — idempotent OpenObserve alert provisioning for Position State.
+"""seed_alerts — idempotent OpenObserve alert provisioning from the JSON corpus.
 
-Ensures every alert in ``code/01_platform/01_docker/openobserve/alerts/position-state-alerts.json``
-exists in the configured OpenObserve org. Mirrors ``seed_dashboards.py`` credential gate.
+Ensures every alert in ``code/01_platform/01_docker/openobserve/alerts/*.json``
+exists in the configured OpenObserve org: position-state, storage/disk, and any
+later corpus added to that directory. Mirrors ``seed_dashboards.py`` credential gate.
+
+A fresh OpenObserve (the daily VM, or after a fresh start wiped the O2 volume)
+has NO alerts and NO destination until the provisioning runs — see
+``docs/05_deployment/CLOUDPE_DAILY_VM.md`` §3 and ``07-lake-archive-ops.md``.
 
   O2_API_URL  (default http://localhost:5080)
   O2_ORG      (default default)
@@ -25,6 +30,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 ALERT_FILE = ROOT / "code/01_platform/01_docker/openobserve/alerts/position-state-alerts.json"
+ALERT_DIR = ALERT_FILE.parent
+
+
+def default_alert_files() -> list[Path]:
+    """Every alert corpus in the alerts directory (sorted by file name).
+
+    A single file per domain keeps the diff reviewable; the seeder carries
+    whichever corpora exist, so adding a domain is adding a file.
+    """
+    return sorted(ALERT_DIR.glob("*.json"))
 
 
 def _b64(s: str) -> str:
@@ -57,6 +72,9 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--dry-run", action="store_true", help="print plan, change nothing")
     p.add_argument("--force", action="store_true", help="PUT existing alerts")
+    p.add_argument("--file", action="append", default=[], metavar="PATH",
+                   help="seed only these files (repeatable; default: every "
+                        "*.json in openobserve/alerts/)")
     args = p.parse_args()
 
     pwd = os.environ.get("O2_PASSWORD", "")
@@ -67,27 +85,40 @@ def main() -> int:
     org = os.environ.get("O2_ORG", "default")
     user = os.environ.get("O2_USER", "admin@example.com")
 
-    if not ALERT_FILE.exists():
-        print(f"exit 3: alert file missing: {ALERT_FILE}", file=sys.stderr)
+    files = [Path(f) for f in args.file] if args.file else default_alert_files()
+    if not files:
+        print(f"exit 3: no alert files under {ALERT_DIR}", file=sys.stderr)
         return 3
-    try:
-        alerts = json.loads(ALERT_FILE.read_text())
-    except (OSError, json.JSONDecodeError) as e:
-        print(f"exit 3: cannot load {ALERT_FILE}: {e}", file=sys.stderr)
-        return 3
-    if not isinstance(alerts, list) or not alerts:
-        print("exit 3: alert file must be a non-empty JSON array", file=sys.stderr)
-        return 3
-    for a in alerts:
-        if not isinstance(a, dict):
-            print(f"exit 3: alert file elements must be objects, got {type(a).__name__}", file=sys.stderr)
+    alerts: list[dict] = []
+    owners: dict[str, Path] = {}
+    for path in files:
+        try:
+            part = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"exit 3: cannot load {path}: {e}", file=sys.stderr)
             return 3
-        # stream_type is printed below and sent to O2: validate it here so a typo
-        # is exit 3, not a KeyError traceback (P6-779).
-        for field in ("name", "stream_name", "stream_type"):
-            if not a.get(field):
-                print(f"exit 3: alert missing {field}: {a}", file=sys.stderr)
+        if not isinstance(part, list) or not part:
+            print(f"exit 3: {path} must be a non-empty JSON array", file=sys.stderr)
+            return 3
+        for a in part:
+            if not isinstance(a, dict):
+                print(f"exit 3: {path} elements must be objects, got {type(a).__name__}",
+                      file=sys.stderr)
                 return 3
+            # stream_type is printed below and sent to O2: validate it here so a typo
+            # is exit 3, not a KeyError traceback (P6-779).
+            for field in ("name", "stream_name", "stream_type"):
+                if not a.get(field):
+                    print(f"exit 3: alert missing {field}: {a}", file=sys.stderr)
+                    return 3
+            # Two corpora claiming one name would make "which rule is live?"
+            # unanswerable; fail closed instead of last-file-wins.
+            if a["name"] in owners:
+                print(f"exit 3: duplicate alert name {a['name']!r} in {path} "
+                      f"(also in {owners[a['name']]})", file=sys.stderr)
+                return 3
+            owners[a["name"]] = path
+            alerts.append(a)
 
     # The list is a read-only GET, so dry-run fetches it too: a plan that says
     # "create" for an alert that already exists is a wrong plan (P6-778).
@@ -105,7 +136,7 @@ def main() -> int:
     else:
         print(f"warn: list alerts failed ({status}): {body[:200]} — treating as empty", file=sys.stderr)
 
-    created = updated = untouched = 0
+    created = updated = untouched = failed = 0
     for alert in alerts:
         name = alert["name"]
         exists = name in existing
@@ -122,8 +153,14 @@ def main() -> int:
         if not exists:
             status, body = _api(base, org, user, pwd, "v2/alerts", "POST", alert)
             if status not in (200, 201):
-                print(f"exit 1: create {name} failed ({status}): {body[:400]}", file=sys.stderr)
-                return 1
+                # One domain's rules must not block another's: a fresh O2 does
+                # not have every metric stream yet (off-session compute streams
+                # appear once signals flow), and the storage/disk rules must
+                # still seed. The exit code stays non-zero when anything failed.
+                print(f"warn: create {name} failed ({status}): {body[:200]} — continuing",
+                      file=sys.stderr)
+                failed += 1
+                continue
             created += 1
         elif args.force:
             # PUT needs the id O2 assigned; without one the update cannot happen.
@@ -136,15 +173,17 @@ def main() -> int:
                 if status == 200:
                     updated += 1
                 else:
-                    print(f"exit 1: update {name} failed ({status}): {body[:400]}", file=sys.stderr)
-                    return 1
+                    print(f"warn: update {name} failed ({status}): {body[:200]} — continuing",
+                          file=sys.stderr)
+                    failed += 1
             else:
                 untouched += 1
         else:
             untouched += 1
 
-    print(f"RESULT: created={created} updated={updated} untouched={untouched} ({len(alerts)} alerts)")
-    return 0
+    print(f"RESULT: created={created} updated={updated} untouched={untouched} "
+          f"failed={failed} ({len(alerts)} alerts)")
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

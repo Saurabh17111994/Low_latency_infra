@@ -162,7 +162,12 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
     grace covers the whole window; startup budgets 180 s → 3600 s), CHG-357
     (committed latency probe; the KPI note separates the ms-exact
     `ingest_to_monitor` from the second-quantized `tick_to_strategy`). F6 = no
-    action (accepted baseline); F7 (disk alarm/runbook) stays open. Evening
+    action (accepted baseline); **F7 fixed 2026-09-28 — CHG-363:** verification
+    found the 80% usage rule existed in the catalog but had never been
+    provisioned (0 deliveries at 85.13% disk); a fresh O2 now gets provisioned
+    as a morning step, the lock alerts (`storage-crit-fluss-disk-write-locked`,
+    `storage-crit-ingestion-append-blocked`) and the write-locked runbook +
+    capacity review landed. Evening
     drills found and fixed F8 (KV snapshots → CHG-359) and F9 (readiness-probe
     memory → CHG-360).
 - [-] **P4-5** — optional systemd timer for automatic morning start —

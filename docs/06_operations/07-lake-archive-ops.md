@@ -94,6 +94,65 @@ with `R2_ENV_FILE` / `R2_SECRETS_FILE`, and r2-query's binary with `DUCKDB_BIN`.
 A listing that cannot be trusted (auth failure, error document, truncated page
 without a continuation token) exits non-zero; it never reports "no objects".
 
+## Recovery: Fluss write-locked (data disk at the write limit)
+
+**Symptom.** Appends stop: clients log `append UNCERTAIN` after the append
+timeout (5 s), `raw_table_1` log_end freezes, the board shows I3/I4 PENDING (no
+data flow). Tablet logs carry `data disk usage reached 85.xx% (limit: 85.00%)`;
+the rejection name in the client is `DISK_WRITE_LOCKED`.
+
+**What is in force (pinned 1.0.0 defaults, re-read from `ConfigOptions` in the
+native-adoption plan).** `server.data-disk.write-limit-ratio` **0.85** — every
+append/KV write is rejected once a backing disk reaches it.
+`.write-recover-ratio` **0.80** — while the process keeps running, writes resume
+only once usage falls below it, so the lock is *sticky*. `.check-interval`
+30 s. All three are dynamic-reconfigurable at runtime. Measured 2026-09-28:
+locked at `/` 85.13%; the drill's tablet restart re-evaluated at 84% (< 0.85)
+and unlocked — a restart is the fast path once the disk is under the limit.
+
+**Recover.**
+1. Confirm the cause — the tablet log line above, or the
+   `storage-crit-fluss-disk-write-locked` delivery in the alert history
+   (`03-alert-routing.md`).
+2. Free space safely: `docker builder prune -f`, `docker image prune -f`
+   (measured 43.3 GB reclaimed on 2026-09-28). Never touch Fluss volumes,
+   tablet data or evidence.
+3. Get under the limit: restart the tablet once usage is below 0.85 and it
+   re-evaluates immediately; otherwise free space until the running process
+   falls below the recover line (on the 916 GB host, 0.85 -> 0.80 is ~46 GB).
+4. Confirm recovery: `raw_table_1` log_end advances and ingestion appends
+   succeed (`docker logs ...-ingestion-1 | grep -i uncertain` goes quiet).
+
+**Alerts.** `INFRA-crit-disk-20` warns at free < 20% (usage > 80%) — it must be
+provisioned on a fresh OpenObserve (`o2-provision.py`).
+`storage-crit-fluss-disk-write-locked` (tablet stream) and
+`storage-crit-ingestion-append-blocked` (ingestion stream) carry the lock
+itself, from `seed_alerts.py` (`openobserve/alerts/storage-alerts.json`).
+Verified 2026-09-28: the running O2 had **zero** rules and had never provisioned
+the 80% rule (0 deliveries across 78,892 alert records while the disk was at
+85.13%) — nothing could fire. A fresh stack (the daily VM) has no alerts until
+provisioning runs — `docs/05_deployment/CLOUDPE_DAILY_VM.md` §3.
+
+### Capacity review (2026-09-28)
+
+- Host disk 916 GB; Fluss data, OpenObserve and the Docker volumes all live on
+  `/`. Measured during the incident: Fluss tablet volume 142.8 GB (raw_table_1
+  98 GB, candle_live 28 GB, KV tables the rest), OpenObserve 19.25 GB,
+  fluss-logs 9.0 GB, zookeeper 2.35 GB, Flink logs 1.65 GB, plus 45 GB builder
+  cache / 19 GB images (pruneable at any time).
+- Fluss writes lock at 0.85 (~779 GB used) and recover below 0.80 (~733 GB);
+  the 2026-09-25 reading was 70-75% used — one busy week reaches the lock.
+- Retention today: `candle_live` log TTL 60 s, `candle_closed` 7 d, `raw_table_1`
+  9 d (`table.log.ttl` and `table.auto-partition.num-retention`).
+- **Open action (operator):** measure one real week's growth before changing
+  retention — `node_filesystem_avail_bytes` is already scraped into O2, so the
+  number is a query, not a guess. The 2026-09-28 record lists raw day partitions
+  of 1.3 / 13 / 85 GB — a spread one real session does not explain (test/replay
+  volume likely); re-measure before sizing retention from any single window.
+- On the daily VM the disk only ever holds one day: the tiering job moves
+  parquet to R2 continuously. Size the boot volume for at least 2x a measured
+  day (the recipe recommends 100 GB).
+
 ## Recovery: restore a trading day
 
 `r2-restore.sh <yyyyMMdd>` exports the day-folder parquet (partition-pruned

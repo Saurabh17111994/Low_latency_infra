@@ -53,12 +53,17 @@ class SeedAlertsWave25Test(unittest.TestCase):
     def setUp(self):
         os.environ["O2_PASSWORD"] = "test-password"
         self._api, self._file = mod._api, mod.ALERT_FILE
+        self._discover = mod.default_alert_files
         self.dir = Path(tempfile.mkdtemp(prefix="w25-alerts-"))
         self.file = self.dir / "alerts.json"
+        # The corpus discovery is the seam: point it at the temp file so these
+        # tests never read the repo's real corpora (P6-538 semantics kept).
+        mod.default_alert_files = lambda: [self.file]
         self.out, self.err = io.StringIO(), io.StringIO()
 
     def tearDown(self):
         mod._api, mod.ALERT_FILE = self._api, self._file
+        mod.default_alert_files = self._discover
 
     def _run(self, alerts=None, argv=("seed",), api: _Api | None = None) -> int:
         if alerts is not None:
@@ -79,7 +84,7 @@ class SeedAlertsWave25Test(unittest.TestCase):
         self.assertIn("must be objects", self.err.getvalue())
 
     def test_an_unreadable_file_exits_three(self):
-        mod.ALERT_FILE = self.dir  # a directory: read_text raises OSError
+        mod.default_alert_files = lambda: [self.dir]  # a directory: read_text raises OSError
         mod._api = _Api()
         with mock.patch.object(sys, "argv", ["seed"]), contextlib.redirect_stderr(self.err):
             self.assertEqual(3, mod.main())

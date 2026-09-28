@@ -102,10 +102,11 @@ The image is the artifact. Rebuild it when code or images change (repeat
 | 1 | Create a VM **from the image** (dashboard; §5 has the API note) |
 | 2 | Inject secrets (never baked into the image): `scp code/01_platform/01_docker/secrets.env root@<vm>:/opt/trading/streaming_project/code/01_platform/01_docker/secrets.env` |
 | 3 | Start: `cd /opt/trading/streaming_project && make day ARGS="start"` — fresh start (`ALLOW_FRESH=1` from `.env.vm`), ready in ~2–4 min (87 s measured software path) |
-| 4 | Start lake tiering: `bash code/01_platform/04_scripts/tiering-start.sh` — without it the day's parquet never reaches R2 (idempotent; check `--status`) |
-| 5 | Let the day run. At **15:45 IST** the `trading-eod` unit runs the EOD controller (`EOD_OFFLOAD=lake`) and records the success to `/var/lib/trading/eod-last-run` |
-| 6 | After the archive: `make day ARGS="stop"` — the gate refuses until today's record exists ("EOD archive confirmed …"), then the stack goes down |
-| 7 | Destroy the VM. The day's data is in R2 — verify: `bash code/01_platform/04_scripts/r2-list.sh all` |
+| 4 | Provision observability — a fresh OpenObserve starts **empty**: `python3 code/01_platform/04_scripts/o2-provision.py` (destination + dashboards + 47 rules) then `python3 code/01_platform/04_scripts/seed_alerts.py` (position-state + storage/disk rules). Off-session, a few metric-stream rules 404 (they need streams the signal job only emits when signals flow) — the disk/ING/INFRA safety rules are already in; re-run when the feed is live. Without this the day runs blind — measured 2026-09-28: zero alerts loaded while the data disk reached 85.13% |
+| 5 | Start lake tiering: `bash code/01_platform/04_scripts/tiering-start.sh` — without it the day's parquet never reaches R2 (idempotent; check `--status`) |
+| 6 | Let the day run. At **15:45 IST** the `trading-eod` unit runs the EOD controller (`EOD_OFFLOAD=lake`) and records the success to `/var/lib/trading/eod-last-run` |
+| 7 | After the archive: `make day ARGS="stop"` — the gate refuses until today's record exists ("EOD archive confirmed …"), then the stack goes down |
+| 8 | Destroy the VM. The day's data is in R2 — verify: `bash code/01_platform/04_scripts/r2-list.sh all` |
 
 ## 4. What lives where
 
@@ -132,4 +133,5 @@ launch is boring enough to script.
 | `stop` RED: "today's EOD->R2 archive is not confirmed" | the 15:45 run failed or never fired | `systemctl status trading-eod`; run `EOD_OFFLOAD=lake python3 code/01_platform/04_scripts/eod_controller.py run`; re-run `stop`; `DAY_STOP_FORCE=1` only when the loss is deliberate |
 | `start` refused: "no savepoint/checkpoint" | `.env.vm` missing (no `ALLOW_FRESH=1`) | `cp .env.vm.example .env.vm` |
 | "no RUNNING tiering job" | the day's parquet will not reach R2 | `bash code/01_platform/04_scripts/tiering-start.sh`; if it dies, `docs/06_operations/07-lake-archive-ops.md` §Recovery |
-| compose starts **building** an image | the image set was not loaded | repeat §2.3, then rebuild the golden image |
+| compose starts **building** an image | the image set was not loaded | repeat §2.4, then rebuild the golden image |
+| No alert fires all day | the fresh OpenObserve was never provisioned | §3 step 4 (`o2-provision.py` + `seed_alerts.py`) |

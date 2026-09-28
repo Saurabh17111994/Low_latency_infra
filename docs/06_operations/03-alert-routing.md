@@ -61,9 +61,15 @@ and the consumer stays alive. Offline unit tests:
 
 - Provisioned by `o2-provision.py` (ING/SIGNAL/INFRA, incl. the G1
   `SIGNAL-warn-source-volume-drop` — source rate < 50% of design for 5 min)
-  and `seed_alerts.py` (pos-state). Full rule table with thresholds:
+  and `seed_alerts.py` (every corpus under `openobserve/alerts/`: pos-state +
+  storage/disk — `storage-crit-fluss-disk-write-locked`,
+  `storage-crit-ingestion-append-blocked`). Full rule table with thresholds:
   `./02-ingestion-alerting.md` + the catalogs in the two scripts.
 - Destination provisioning: `o2-provision.py provision_destination()`.
+- **A fresh OpenObserve starts empty** (fresh start / daily VM): no destination,
+  no rules. After the stack is up run `o2-provision.py` (destination + dashboards
+  + 47 rules) and then `seed_alerts.py` (JSON corpora) — measured 2026-09-28:
+  the data disk reached 85.13% with zero alerts loaded, so nothing fired.
 
 ## Known behaviors (not defects)
 
