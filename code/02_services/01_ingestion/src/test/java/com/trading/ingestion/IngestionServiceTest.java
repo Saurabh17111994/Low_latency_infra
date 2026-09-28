@@ -349,6 +349,61 @@ class IngestionServiceTest {
         public void close() {}
     }
 
+    // ---- H2-1: bad-time ticks are terminal inside the freshness grace ----
+
+    private static TickEvent badTimeTick(int token, long tsMs, long receivedMs, byte[] payload) {
+        return TickEvent.newBuilder()
+                .setSlotId("hft-0")
+                .setMode("full")
+                .setToken(token)
+                .setFeed("hft")
+                .setTsMs(tsMs)
+                .setReceivedMs(receivedMs)
+                .setFeedSequenceLocal(17)
+                .setLtpPaise(234500)
+                .setClosePaise(234200)
+                .setOpenPaise(233100)
+                .setHighPaise(235000)
+                .setLowPaise(233000)
+                .setVwapPaise(234100)
+                .setLtq(50)
+                .setVolume(125000)
+                .setOpenInterest(0)
+                .setRawPayload(ByteString.copyFrom(payload))
+                .setPayloadHash(ByteString.copyFrom(
+                        sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                .build();
+    }
+
+    @Test
+    @DisplayName("H2-1: a stale/future tick inside the grace is quarantined and never appended")
+    void badTimeTicksInsideFreshnessGraceAreTerminal() throws Exception {
+        IngestionConfig config = buildConfig(); // age 5000 ms, future skew 2000 ms
+        RecordingConverter converter = new RecordingConverter();
+        RecordingQuarantine quarantine = new RecordingQuarantine();
+        IngestionService service = new IngestionService(
+                "ing-h2-1", instruments(), converter, config,
+                new NtpClockChecker("127.0.0.1:9", 100, false),
+                quarantine, noopDiscontinuity(), noopSafety());
+        service.armFreshnessGrace();
+
+        byte[] payload = "raw-bytes".getBytes(StandardCharsets.UTF_8);
+        long now = System.currentTimeMillis();
+        // 60 s old -> STALE; 60 s ahead -> FUTURE. Both inside the 30 s grace window.
+        service.processTickEvent(badTimeTick(3045, now - 60_000L, now, payload), "hft-0", 1L);
+        service.processTickEvent(badTimeTick(3045, now + 60_000L, now, payload), "hft-0", 1L);
+
+        // The disposition is synchronous on this path, but a fall-through would append on the
+        // async writer; give that a moment to surface before asserting its absence.
+        Thread.sleep(100);
+        assertEquals(0, converter.appendCalls.get(),
+                "a bad-time tick must never reach the append path, grace or not");
+        assertTrue(quarantine.reasons.contains(QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP),
+                "stale tick must be quarantined");
+        assertTrue(quarantine.reasons.contains(QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP),
+                "future tick must be quarantined");
+    }
+
     private static IngestionConfig buildConfig() throws Exception {
         java.util.Map<String, String> env = new java.util.HashMap<>();
         env.put("DEPLOYMENT_ENV", "dev");

@@ -58,8 +58,8 @@ The pipe is the kernel's stdin/stdout — not a message queue, not a network hop
 | `ARROW_HFT_LATENCY_MS` | No | HFT tick interval ms (default 50, range 50-60000) |
 | `ARROW_INSTRUMENT_TOKENS` | No | Comma-separated instrument tokens; empty = synthetic 50-instrument dev set |
 | `ARROW_TICK_COUNTS` | No | Per-token emitted-tick counters for count-based losslessness evidence (ING-TCP-001); value = stderr report interval seconds (default 60); unset = off |
-| `ARROW_MAX_EVENT_AGE_MS` | Yes | Max age of a broker tick relative to receive time before it is quarantined as STALE (ms); positive long, no default — must be set |
-| `ARROW_MAX_FUTURE_EVENT_SKEW_MS` | Yes | Max future skew of a broker tick relative to receive time before it is quarantined as FUTURE (ms); positive long, no default — must be set |
+| `ARROW_MAX_EVENT_AGE_MS` | Yes | Max age of a broker tick relative to receive time before it is quarantined as STALE (ms); positive long, no default — must be set. The verdict is terminal (H2-1): a non-FRESH tick is quarantined and refused, never appended; the 30 s post-subscription freshness grace suppresses only the quality-unsafe halt evidence |
+| `ARROW_MAX_FUTURE_EVENT_SKEW_MS` | Yes | Max future skew of a broker tick relative to receive time before it is quarantined as FUTURE (ms); positive long, no default — must be set. Same terminal disposition as STALE (H2-1) |
 | `ARROW_HFT_CONNECTIONS` | No | HFT socket count, `1`..`3` (default `1`); values `> 1` require `ARROW_HFT_MULTI_CONNECTION_APPROVED=true` and a non-production `DEPLOYMENT_ENV` (both Java and Go enforce; blank/prod fail closed — CHG-320); the startup preflight adds the effective-manifest capacity check before the bridge starts (CHG-323) |
 | `ARROW_HFT_MAX_TOKENS_PER_CONNECTION` | No | Max instruments per connection — if set, must equal `1024` (pinned) |
 | `ARROW_HFT_MAX_TOKENS_PER_REQUEST` | No | Max instruments per subscription request — if set, must equal `512` (pinned) |

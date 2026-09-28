@@ -200,8 +200,11 @@ public final class IngestionService {
     /** A1: one-time freshness-gate grace window (ms epoch) set on subscription_ack.
      *  Startup snapshot burst + subscription latency can exceed the 5s freshness
      *  window in the first seconds; within the grace window stale/future ticks
-     *  are still quarantined but do not halt processing. */
+     *  are still quarantined AND refused (H2-1) — only the quality-unsafe halt
+     *  evidence is suppressed. */
     private volatile long gracePeriodUntilMs = 0L;
+    /** The single freshness-grace window every arming site opens (H2-1). */
+    static final long FRESHNESS_GRACE_MS = 30_000L;
     private final AtomicLong connectionEpoch = new AtomicLong(0);
     private volatile DiscontinuityWriter.LastTickSnapshot lastTickSnapshot;
     /** Current arrow-bridge subprocess, so shutdown can signal it (SIGTERM) and
@@ -561,7 +564,7 @@ public final class IngestionService {
         // subscription_ack arrives (observed: STALE at +1.9s, ack at +2.0s),
         // so arming only on the ack leaves a ~50ms race window where the
         // startup transient still halts. Arming here covers connect + reconnect.
-        gracePeriodUntilMs = System.currentTimeMillis() + 30_000L;
+        armFreshnessGrace();
         LOG.info("freshness gate grace period armed at bridge launch (30s)");
 
         // R-108: broker-staleness must be detected even while the frame read blocks
@@ -1128,27 +1131,27 @@ public final class IngestionService {
             }
             FreshnessDecision fd = classifyFreshness(ev.getTsMs(), receiveTsMs,
                     config.arrowMaxFutureEventSkewMs, config.arrowMaxEventAgeMs);
-            if (fd == FreshnessDecision.FUTURE) {
-                quarantineWriter.write(packetBytes, QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP,
-                        "event timestamp exceeds receive time", (long) ev.getToken(), null, null);
-                // P1-305: mirror the STALE path — FUTURE quarantine must also be
-                // visible to decode-error dashboards (future-timestamp drift).
-                metrics.incrementDecodeError("FUTURE_BROKER_TIMESTAMP");
+            // H2-1: the freshness verdict is terminal. A non-FRESH tick is quarantined, counted,
+            // and returned whether or not the startup grace is open; the grace exists because the
+            // first post-subscription seconds can legitimately carry a skewed broker clock, and it
+            // suppresses only the quality-unsafe emission, never the disposition. Before this, the
+            // `return` sat inside the grace check, so a stale/future tick inside the window fell
+            // through to the append path — bad-time data reached the trade path.
+            if (fd != FreshnessDecision.FRESH) {
+                boolean future = fd == FreshnessDecision.FUTURE;
+                QuarantineWriter.Reason reason = future
+                        ? QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP
+                        : QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP;
+                quarantineWriter.write(packetBytes, reason,
+                        future ? "event timestamp exceeds receive time"
+                               : "event timestamp is older than configured age",
+                        (long) ev.getToken(), null, null);
+                // P1-305: mirror both paths into decode-error dashboards (timestamp drift).
+                metrics.incrementDecodeError(reason.name());
                 if (!inFreshnessGracePeriod()) {
-                    emitQualityUnsafe(ev.getSlotId(), batchConnectionEpoch,
-                            QuarantineWriter.Reason.FUTURE_BROKER_TIMESTAMP);
-                    return;
+                    emitQualityUnsafe(ev.getSlotId(), batchConnectionEpoch, reason);
                 }
-            }
-            if (fd == FreshnessDecision.STALE) {
-                quarantineWriter.write(packetBytes, QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP,
-                        "event timestamp is older than configured age", (long) ev.getToken(), null, null);
-                metrics.incrementDecodeError("STALE_BROKER_TIMESTAMP");
-                if (!inFreshnessGracePeriod()) {
-                    emitQualityUnsafe(ev.getSlotId(), batchConnectionEpoch,
-                            QuarantineWriter.Reason.STALE_BROKER_TIMESTAMP);
-                    return;
-                }
+                return;
             }
 
             // P1-226: wire tokens are strictly positive int32 (manifest
@@ -1590,7 +1593,7 @@ public final class IngestionService {
             // snapshot burst + subscription latency (which exceeds the 5s freshness
             // window in the first seconds) cannot trigger the STALE_BROKER_TIMESTAMP
             // safety halt before the feed catches up.
-            gracePeriodUntilMs = System.currentTimeMillis() + 30_000L;
+            armFreshnessGrace();
             LOG.info("freshness gate grace period active (30s)");
         }
         if ("bridge_shutdown".equals(event.event())) {
@@ -2201,6 +2204,16 @@ public final class IngestionService {
     /** A1: true while the one-time post-subscription freshness-gate grace window is open. */
     private boolean inFreshnessGracePeriod() {
         return System.currentTimeMillis() < gracePeriodUntilMs;
+    }
+
+    /**
+     * H2-1 seam + single arming point: opens the 30 s post-subscription freshness-grace window.
+     * While it is open a bad-time tick is still quarantined, counted, and refused; only the
+     * {@code emitQualityUnsafe} halt evidence is suppressed (the startup snapshot burst can
+     * legitimately look stale before the feed catches up). The window never changes disposition.
+     */
+    void armFreshnessGrace() {
+        gracePeriodUntilMs = System.currentTimeMillis() + FRESHNESS_GRACE_MS;
     }
 
     // ---- helpers ----

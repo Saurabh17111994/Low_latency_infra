@@ -33,12 +33,12 @@ Where a body section and this list disagree, this list wins.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
-| H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
+| H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check | 4 | 1 | 0 | 3 | 0 | 0 | 0 |
 | H3 — production deck parity with the dev deck | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H4 — evidence and release gates must not lie | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H6 — machine facts and their drift guard | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
-| **Total** | **22** | **5** | **0** | **17** | **0** | **0** | **0** |
+| **Total** | **22** | **6** | **0** | **16** | **0** | **0** | **0** |
 
 #### H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth
 
@@ -72,9 +72,9 @@ Where a body section and this list disagree, this list wins.
 
 #### H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check
 
-- [ ] **H2-1** — Freshness grace becomes quarantine-only: any non-FRESH decision quarantines,
+- [x] **H2-1** — Freshness grace becomes quarantine-only: any non-FRESH decision quarantines,
   counts, and **returns** — always; grace only suppresses the UNSAFE halt. One branch replaces the
-  two fall-through blocks; `armFreshnessGrace()` test seam; dossier sentence updated. (P1-6.)
+  two fall-through blocks; `armFreshnessGrace()` test seam; dossier sentence updated. (P1-6.) — CHG-378
 - [ ] **H2-2** — One drop path for backpressure: `WriterWorker` gets a drop sink; the service
   counts `acknowledged_loss` + `APPEND_DROPPED`, writes one durable uncertainty journal record on
   tracker halt, then requests a fatal stop **from a daemon thread** (inline = self-deadlock);
