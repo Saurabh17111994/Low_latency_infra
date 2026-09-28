@@ -126,7 +126,7 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
   (CHG-325), and an ingestion write-path startup flap (zero-ack then FATAL
   "Failed to update metadata", self-healing via restart policy) recorded in §5
   as an operator decision.
-- [L] **P4-4** — Monday in-session validation: real feed, decided universe,
+- [x] **P4-4** — Monday in-session validation: real feed, decided universe,
   the command as the sole entry point; evidence + comparison to the profiling
   ladder. **Approved 2026-09-27: the assistant runs it.**
   - **Checklist (2026-09-28 IST):** 09:00-09:10 `make day ARGS="start"`
@@ -137,6 +137,18 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
     I5 checkpoint age < 2× interval. Capture the SignalJob's latest checkpoint
     path (I9) and compare ingestion timing/rates to the full-universe
     profiling ladder evidence; record deltas in `logs/day/monday-20260928/notes.md`.
+  - **Landed 2026-09-28 (local, CHG-353):** preflight refused once on stale
+    build stamps, then a Fluss cold-start replay outlasted the 240 s ready
+    window (F1/F2; target "start before 09:15" missed, feed live 09:44-09:48).
+    Board **GREEN 9/9 at 10:00, 12:00 and 15:00** (status-1010/1200/1500.log):
+    I3 +26.2-44.8k rows/20 s, I4 signals +160-233/20 s, I5 2.6-8.5 s, I8 clean,
+    I7 manifest 2433, I9 savepoint-c5dfdb-cbde090e2402. Midday and late
+    captures ran unattended from a scheduler. Real-feed rate 1,125-1,640 rows/s
+    vs the ladder's 4,866/s; latency KPI median 496-640 ms including the token
+    feed's 0-1,000 ms second-quantized event time (F5); late-drop share 4.5%
+    whole-session vs the ~2.7% accepted baseline (F6). Deltas, findings and
+    evidence paths in `logs/day/monday-20260928/notes.md`; I5 false RED fixed
+    en route (CHG-352). F1/F2/F5 stay open operator decisions.
 - [-] **P4-5** — optional systemd timer for automatic morning start —
   trigger-gated: revisit after ≥5 consecutive green daily runs.
 - [x] **P4-6** — (option A, approved 2026-09-26; outside the original P4 list)
@@ -160,8 +172,8 @@ test + CHG + doc, `plan_tracker.py --write/--check`.
 | P1 — Platform start-safety (no decision needed) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | P2 — Config truth | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | P3 — Orchestrator interface | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
-| P4 — Ops integration and validation | 7 | 5 | 0 | 0 | 1 | 0 | 1 |
-| **Total** | **21** | **19** | **0** | **0** | **1** | **0** | **1** |
+| P4 — Ops integration and validation | 7 | 6 | 0 | 0 | 0 | 0 | 1 |
+| **Total** | **21** | **20** | **0** | **0** | **0** | **0** | **1** |
 
 ## Overview — the final product
 
