@@ -3,9 +3,9 @@
 
 A plan marked up in place but whose summary table is maintained by hand drifts
 within a day. This keeps the table derived: it parses the markers under
-`## 0. Live tracker`, counts them per `#### ` group, and rewrites the `|`-row
-block that follows the "**Roll-up**" line. The sentence above the table is left
-alone, so a refresh only ever changes the rows.
+`## 0. Live tracker` (indented or not), counts them per `#### ` group, and
+rewrites the `|`-row block that follows the "**Roll-up**" line. The sentence
+above the table is left alone, so a refresh only ever changes the rows.
 
 Usage:
     python3 plan_tracker.py --plan docs/plans/<plan>.md --write   # refresh the table
@@ -18,12 +18,21 @@ from __future__ import annotations
 
 import argparse
 import pathlib
+import re
 import sys
 
 # (marker, column label) — order fixes the column order in the emitted table.
 MARKERS = [("x", "done"), ("~", "wip"), (" ", "todo"), ("L", "live"), ("?", "decide"), ("-", "skip")]
 VALID = {m for m, _ in MARKERS}
 GROUP = "#### "
+# L2-2: markers may be indented (nested detail items), so the count and the unknown-marker
+# validation share one anchored regex instead of `startswith("- [")` at column 0.
+MARKER_RE = re.compile(r"^\s*- \[(.)\]")
+
+
+def markers_in(lines: list[str]) -> list[str]:
+    """Every marker character in `lines`, in order, indented or not."""
+    return [m.group(1) for m in (MARKER_RE.match(l) for l in lines) if m]
 
 
 def parse(text: str) -> tuple[list[str], dict[str, list[str]]]:
@@ -37,7 +46,7 @@ def parse(text: str) -> tuple[list[str], dict[str, list[str]]]:
     groups: dict[str, list[str]] = {}
     for chunk in text[start:end].split("\n" + GROUP)[1:]:
         title = chunk.splitlines()[0].strip()
-        marks = [l[3] for l in chunk.splitlines() if l.startswith("- [") and len(l) > 4 and l[4] == "]"]
+        marks = markers_in(chunk.splitlines())
         if marks:
             groups[title] = marks
             order.append(title)
@@ -83,8 +92,7 @@ def main() -> int:
 
     text = args.plan.read_text(encoding="utf-8")
     lines = text.split("\n")
-    bad = sorted({m for m in (l[3] for l in lines if l.startswith("- [") and len(l) > 4 and l[4] == "]")
-                  if m not in VALID})
+    bad = sorted(set(markers_in(lines)) - VALID)
     if bad:
         print(f"plan_tracker: unknown marker(s) {bad}; valid are {sorted(VALID)}", file=sys.stderr)
         return 2

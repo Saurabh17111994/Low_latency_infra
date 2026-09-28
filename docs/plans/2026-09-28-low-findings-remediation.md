@@ -33,12 +33,12 @@ Where a body section and this list disagree, this list wins.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | L1 — execution: mass-status honesty | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
-| L2 — ops tooling: lint scope and tracker wiring | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
+| L2 — ops tooling: lint scope and tracker wiring | 2 | 1 | 0 | 1 | 0 | 0 | 0 |
 | L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | L4 — ingestion: config doc parity and final-report atomicity | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | L5 — common/mock: semantics and naming truth | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | L6 — infra/DDL: guards, parity, docs | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| **Total** | **17** | **0** | **0** | **17** | **0** | **0** | **0** |
+| **Total** | **17** | **1** | **0** | **16** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
@@ -56,12 +56,12 @@ Where a body section and this list disagree, this list wins.
   fallback; an empty enumeration fails closed; the Prometheus float-trap scan widens to the repo
   root; root entry scripts (`start-all.sh`, `run-ingestion.sh`, `show-ticks.sh`) are now checked.
   (A one-time lint repair of those scripts ships in the same commit if needed.)
-- [ ] **L2-2** — `plan_tracker.py` gains a consumer and nested-marker support: shared marker regex
+- [x] **L2-2** — `plan_tracker.py` gains a consumer and nested-marker support: shared marker regex
   `^\s*- \[(.)\]` in both the count and the unknown-marker validation; gate step 3 test discovers
   tracker plans by anchored `^## 0\. Live tracker\s*$` + the Overview section heading, asserts
   discovery ≥ 2 and
   includes the AGENTS-named trackers, then runs `--check` per plan (no gate-script edit, no new
-  numbered step). Unit tests cover nested markers, stale tables, prose traps, round-trip.
+  numbered step). Unit tests cover nested markers, stale tables, prose traps, round-trip. — CHG-372
 
 #### L3 — compute: doc currency, gate pins, watchdog, tick features
 
