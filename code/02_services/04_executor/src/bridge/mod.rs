@@ -7,6 +7,7 @@
 pub mod client;
 pub mod fake;
 pub mod protocol;
+pub mod session;
 pub mod transport;
 
 pub use client::{BridgeClient, BridgeReportStream, SendFailure};
@@ -15,4 +16,5 @@ pub use protocol::{
     Command, CommandEnvelope, OrderCommand, OrderCommandError, OrderType, Product, ReportEnvelope,
     ReportOutcome, TransactionType, Validity, PROTOCOL_VERSION, RECORD_COMMAND, RECORD_REPORT,
 };
+pub use session::{BridgeSession, Registry, ReportOwner, RouteContext, SessionHandle};
 pub use transport::HttpBridgeClient;
