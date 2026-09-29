@@ -26,15 +26,31 @@ REPO = os.path.dirname(os.path.dirname(os.path.dirname(SCRIPTS)))
 GUIDE = os.path.join(REPO, "docs", "05_deployment", "PROD_VM_PROVISIONING.md")
 
 
-def run(*args, stdin=None):
+def run(*args, stdin=None, env=None):
+    proc_env = dict(os.environ)
+    if env:
+        proc_env.update(env)
     return subprocess.run(["bash", SCRIPT, *args], input=stdin,
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, env=proc_env)
 
 
 def env_file(tmp_path, body):
     path = tmp_path / ".env"
     path.write_text(body)
     return str(path)
+
+
+def fixture_io(tmp_path, stack, lock):
+    """Point image-publish.sh at fixture stack/lock files (the IMAGE_PUBLISH_* seam)."""
+    stack_path = tmp_path / "fixture-stack.yml"
+    stack_path.write_text(stack)
+    lock_path = tmp_path / "fixture-runtime.lock"
+    lock_path.write_text(lock)
+    return {"IMAGE_PUBLISH_STACK": str(stack_path), "IMAGE_PUBLISH_LOCK": str(lock_path)}
+
+
+def stack_demanding(var):
+    return f"services:\n  app:\n    image: ${{{var}:?}}\n"
 
 
 SAMPLE_ENV = """# deploy environment
@@ -50,7 +66,8 @@ def test_merge_env_replaces_the_line_and_preserves_the_rest(tmp_path):
     path = env_file(tmp_path, SAMPLE_ENV)
     ref = "10.0.0.11:5000/trading-flink-runtime:prod@sha256:" + "a" * 64
 
-    result = run("--merge-env", path, stdin=f"FLINK_IMAGE={ref}\n")
+    result = run("--merge-env", path, stdin=f"FLINK_IMAGE={ref}\n",
+                 env=fixture_io(tmp_path, stack_demanding("FLINK_IMAGE"), ""))
     assert result.returncode == 0, result.stderr
 
     text = open(path).read()
@@ -66,7 +83,8 @@ def test_merge_env_appends_a_variable_that_is_absent(tmp_path):
     path = env_file(tmp_path, SAMPLE_ENV)
     ref = "10.0.0.11:5000/01_docker-ingestion:prod@sha256:" + "b" * 64
 
-    result = run("--merge-env", path, stdin=f"INGESTION_IMAGE={ref}\n")
+    result = run("--merge-env", path, stdin=f"INGESTION_IMAGE={ref}\n",
+                 env=fixture_io(tmp_path, stack_demanding("INGESTION_IMAGE"), ""))
     assert result.returncode == 0, result.stderr
 
     lines = open(path).read().splitlines()
@@ -81,10 +99,11 @@ def test_merge_env_is_idempotent(tmp_path):
     path = env_file(tmp_path, SAMPLE_ENV)
     ref = "10.0.0.11:5000/01_docker-nautilus:prod@sha256:" + "c" * 64
     updates = f"NAUTILUS_IMAGE={ref}\n"
+    env = fixture_io(tmp_path, stack_demanding("NAUTILUS_IMAGE"), "")
 
-    assert run("--merge-env", path, stdin=updates).returncode == 0
+    assert run("--merge-env", path, stdin=updates, env=env).returncode == 0
     once = open(path).read()
-    assert run("--merge-env", path, stdin=updates).returncode == 0
+    assert run("--merge-env", path, stdin=updates, env=env).returncode == 0
     twice = open(path).read()
 
     assert once == twice
@@ -98,6 +117,78 @@ def test_merge_env_refuses_a_missing_file(tmp_path):
     assert result.returncode == 3
     assert "not found" in (result.stderr + result.stdout).lower()
     assert not os.path.exists(missing)
+
+
+def test_merge_env_overlays_lock_pinned_images_stdin_does_not_cover(tmp_path):
+    """M6-2: the push covers the app images; O2 must still land digest-pinned.
+
+    .env.example carries the bare O2 tag, and nothing in the deploy path replaced
+    it — the lock pinned the digest while the deploy env kept the tag.
+    """
+    lock_ref = "public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64@sha256:" + "e" * 64
+    path = env_file(tmp_path, SAMPLE_ENV
+                    + "OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64\n")
+    ref = "10.0.0.11:5000/trading-flink-runtime:prod@sha256:" + "a" * 64
+
+    result = run("--merge-env", path, stdin=f"FLINK_IMAGE={ref}\n",
+                 env=fixture_io(tmp_path,
+                                stack_demanding("FLINK_IMAGE")
+                                + "  o2:\n    image: ${OPENOBSERVE_IMAGE:?}\n",
+                                f"OPENOBSERVE_IMAGE={lock_ref}\n"))
+    assert result.returncode == 0, result.stderr
+
+    text = open(path).read()
+    assert f"FLINK_IMAGE={ref}" in text
+    assert f"OPENOBSERVE_IMAGE={lock_ref}" in text
+    assert "OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64\n" not in text
+
+
+def test_merge_env_refuses_a_demanded_image_covered_by_neither(tmp_path):
+    """M6-2: exit 3 rather than leave a bare/unset image variable in the deploy env."""
+    path = env_file(tmp_path, SAMPLE_ENV)
+    ref = "10.0.0.11:5000/trading-flink-runtime:prod@sha256:" + "a" * 64
+
+    result = run("--merge-env", path, stdin=f"FLINK_IMAGE={ref}\n",
+                 env=fixture_io(tmp_path,
+                                stack_demanding("FLINK_IMAGE")
+                                + "  ingestion:\n    image: ${INGESTION_IMAGE:?}\n",
+                                ""))
+    assert result.returncode == 3
+    assert "INGESTION_IMAGE" in (result.stderr + result.stdout)
+    assert "INGESTION_IMAGE" not in open(path).read()
+
+
+def test_merge_env_refuses_a_bare_lock_value(tmp_path):
+    """M6-2: a bare tag in the lock is not a pin — the merge must not copy it in."""
+    path = env_file(tmp_path, SAMPLE_ENV)
+    ref = "10.0.0.11:5000/trading-flink-runtime:prod@sha256:" + "a" * 64
+
+    result = run("--merge-env", path, stdin=f"FLINK_IMAGE={ref}\n",
+                 env=fixture_io(tmp_path,
+                                stack_demanding("FLINK_IMAGE")
+                                + "  o2:\n    image: ${OPENOBSERVE_IMAGE:?}\n",
+                                "OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64\n"))
+    assert result.returncode == 3
+    assert "OPENOBSERVE_IMAGE" in (result.stderr + result.stdout)
+
+
+def test_coverage_check_mode_names_an_uncovered_demanded_image(tmp_path):
+    """M6-2: pin-check [5/6] calls this mode — shape alone is not coverage."""
+    ok = run("--coverage-check")
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "PASS" in ok.stdout
+
+    bad = run("--coverage-check",
+              env=fixture_io(tmp_path, stack_demanding("NOBODY_PUSHES_IMAGE"), ""))
+    assert bad.returncode == 4
+    assert "NOBODY_PUSHES_IMAGE" in bad.stdout + bad.stderr
+
+    # a bare tag in the lock is not a pin — it must not count as coverage either
+    bare = run("--coverage-check",
+               env=fixture_io(tmp_path, stack_demanding("OPENOBSERVE_IMAGE"),
+                              "OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64\n"))
+    assert bare.returncode == 4
+    assert "OPENOBSERVE_IMAGE" in bare.stdout + bare.stderr
 
 
 def test_every_stack_image_variable_is_covered():
@@ -305,17 +396,22 @@ def test_owner_path_registry_with_a_401_probe_publishes_ghcr_refs(tmp_path):
         assert f"push 127.0.0.1:{port}/saurabh17111994/{name}:prod" in pushed, pushed
     assert "push ghcr.io/" not in pushed, "the push must not go to the deploy address"
 
-    # 2. the deploy environment carries GHCR refs, each digest-pinned
+    # 2. the deploy environment carries GHCR refs, each digest-pinned; the
+    # lock-pinned O2 the push does not cover is overlaid from runtime.lock (M6-2)
     written = open(deploy_env).read()
     refs = re.findall(r"^[A-Z_]+IMAGE=(\S+)$", written, re.M)
-    assert len(refs) == 7, written
-    for ref in refs:
+    pushed_refs = [ref for ref in refs if ref.startswith("ghcr.io/")]
+    assert len(pushed_refs) == 7, written
+    for ref in pushed_refs:
         # the tag survives ahead of the digest — `name:prod@sha256:…` is what the
         # local-registry publish already wrote (rehearsal.env), and the digest is
         # what the pull resolves, so the tag is informative, not load-bearing
         assert re.fullmatch(
             r"ghcr\.io/saurabh17111994/[\w.\-/]+:prod@sha256:[0-9a-f]{64}", ref
         ), ref
+    lock_o2 = re.search(r"^OPENOBSERVE_IMAGE=(\S+)$", open(LOCK).read(), re.M).group(1)
+    assert f"OPENOBSERVE_IMAGE={lock_o2}" in written, written
+    assert all("@sha256:" in ref for ref in refs), written
 
     # 3. nothing else in the file moved
     assert "# a comment that must survive" in written

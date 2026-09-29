@@ -21,6 +21,20 @@ SRC = (REPO / "code/01_platform/04_scripts/pin-check.sh").read_text()
 
 REAL_PIN = (REPO / "code/01_platform/04_scripts/versions.pin").read_text()
 REAL_LOCK = (REPO / "code/01_platform/01_docker/runtime.lock").read_text()
+SRC_PUBLISH = (REPO / "code/01_platform/04_scripts/image-publish.sh").read_text()
+
+# M6-2: pin-check [5/6] now also runs image-publish.sh --coverage-check. The
+# sandbox stack demands FLUSS/FLINK (covered by the push map) and O2 (only the
+# lock can cover it), so the coverage rule is exercised against the lock fixture.
+STACK_FIXTURE = """\
+services:
+  fluss:
+    image: ${FLUSS_IMAGE:?}
+  flink:
+    image: ${FLINK_IMAGE:?}
+  o2:
+    image: ${OPENOBSERVE_IMAGE:?}
+"""
 
 STUB_PASS = '#!/usr/bin/env bash\nexit 0\n'
 
@@ -34,6 +48,7 @@ class PinCheckHarness(unittest.TestCase):
         scripts.mkdir(parents=True)
         docker.mkdir(parents=True)
         (repo / "code/01_platform/04_scripts/pin-check.sh").write_text(SRC)
+        (scripts / "image-publish.sh").write_text(SRC_PUBLISH)
         for stub in ("version_matrix_verify.py", "corpus-pin.sh",
                      "pom-snapshot-scan.py", "rust_toolchain_pin_check.sh"):
             p = scripts / stub
@@ -41,6 +56,7 @@ class PinCheckHarness(unittest.TestCase):
                          else '#!/usr/bin/env python3\nimport sys; sys.exit(0)\n')
             p.chmod(0o755)
         (scripts / "version_matrix.yaml").write_text("stub: true\n")
+        (docker / "docker-stack.yml").write_text(STACK_FIXTURE)
         self.pin = scripts / "versions.pin"
         self.lock = docker / "runtime.lock"
         self.repo = repo
@@ -96,6 +112,16 @@ class PinCheckHarness(unittest.TestCase):
         self.assertNotIn("FAIL", sec, sec)
         self.assertIn("all digest-pinned", sec)
 
+    # M6-2: every pinned line is not coverage — the stack also demands O2, which
+    # only the lock can cover.
+    def test_a_demanded_image_missing_from_the_lock_fails_check_5(self):
+        lock = ("FLUSS_IMAGE=repo:1@sha256:" + "a" * 64 + "\n"
+                "FLINK_IMAGE=repo:1@sha256:" + "b" * 64 + "\n")
+        r = self.run_check(lock_text=lock)
+        sec = self.section(r.stdout + r.stderr, "[5/6]")
+        self.assertIn("FAIL", sec, sec)
+        self.assertIn("OPENOBSERVE_IMAGE", sec)
+
     def test_zero_refs_fail_closed(self):
         r = self.run_check(lock_text="# no images here\nFOO=bar\n")
         sec = self.section(r.stdout + r.stderr, "[5/6]")
@@ -104,10 +130,12 @@ class PinCheckHarness(unittest.TestCase):
 
     def test_fully_pinned_lock_passes(self):
         good = ("FLUSS_IMAGE=apache/fluss:0.9.1@sha256:" + "a" * 64 + "\n"
-                "  export FLINK_IMAGE = flink:2.2.1@sha256:" + "b" * 64 + "  # trailing comment\n")
+                "  export FLINK_IMAGE = flink:2.2.1@sha256:" + "b" * 64 + "  # trailing comment\n"
+                "OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5@sha256:" + "c" * 64 + "\n")
         r = self.run_check(lock_text=good)
         sec = self.section(r.stdout + r.stderr, "[5/6]")
-        self.assertIn("OK: 2 image refs", sec, sec)
+        self.assertIn("OK: 3 image refs", sec, sec)
+        self.assertNotIn("FAIL", sec, sec)
 
     # P6-139: odd-but-real refs are COUNTED (old filter skipped them silently).
     def test_normalised_refs_are_counted_not_skipped(self):

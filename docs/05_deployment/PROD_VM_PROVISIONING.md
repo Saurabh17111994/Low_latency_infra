@@ -691,6 +691,13 @@ bash code/01_platform/04_scripts/image-publish.sh \
   --merge-env "${DEPLOY_ENV:?set the git ignored deploy env path}" < code/01_platform/01_docker/images.published.env
 ```
 
+The merge is authoritative, not cosmetic (M6-2): every `${X_IMAGE:?}` the stack demands that the
+fragment does not carry is overlaid from `runtime.lock` when the lock pins it with a digest — the
+bare O2 tag `.env.example` ships cannot survive a merge — and a demanded image covered by neither
+the fragment nor the lock is exit 3, before the file is touched. `make pin-check` ([5/6]) runs the
+same coverage rule offline, so a stack that demands an image nothing publishes or pins fails on the
+workstation, not on VM1.
+
 The rest of this step is the fallback for the day CI cannot publish — a changed registry, a broken
 runner image — written out in full so that day is not the day you learn the flags.
 
@@ -745,7 +752,10 @@ Exit code = number of FAILs. It checks the six values the platform cannot invent
 `stack_selfcheck.sh` requires after the fact), that `R2_ENDPOINT` is `https://` and `CHECKPOINT_DIR`
 is `s3://<bucket>/…` — a local path dies with the node that holds it — that every `${VAR}` the stack
 interpolates resolves to a non-empty value, and that every image a node would pull is pinned, judging
-the *effective* image so a stack-side default is checked too. `--check-lake` performs one signed LIST
+the *effective* image so a stack-side default is checked too. Every `*_IMAGE` the lock pins must also
+equal the lock's ref (M6-2): the lock records the image that was tested, and a deploy environment
+that overrides it — even with another digest — is running something nothing in this repo verified.
+`--check-lake` performs one signed LIST
 through `r2-list.sh` (missing or wrong R2 credentials become one line of output instead of a tiering
 mystery), `--secrets-check` runs `secrets-bootstrap.sh --check`. `--expect dev` demotes the
 production-only rules to `[INFO]`.

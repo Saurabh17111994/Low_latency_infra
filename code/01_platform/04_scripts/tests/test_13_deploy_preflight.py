@@ -146,6 +146,28 @@ def test_a_pinned_upstream_default_is_left_alone():
         assert r.returncode == 0, r.stdout
 
 
+def test_a_deploy_env_that_overrides_a_lock_pinned_image_fails():
+    """M6-2: the lock pins the image that was tested — a different tag is a different image."""
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        lock = write(tmp, "runtime.lock",
+                     f"OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64@{DIGEST}\n")
+        text = GOOD_ENV + f"OPENOBSERVE_IMAGE=public.ecr.aws/zinclabs/openobserve:v0.91.6-amd64@{DIGEST}\n"
+        r = run(tmp, text, STACK, "--lock-file", str(lock))
+        assert r.returncode >= 1
+        assert any("OPENOBSERVE_IMAGE" in line and "runtime.lock" in line
+                   for line in failures(r.stdout)), r.stdout
+
+
+def test_a_deploy_env_that_matches_the_lock_is_left_alone():
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        ref = f"public.ecr.aws/zinclabs/openobserve:v0.91.5-amd64@{DIGEST}"
+        lock = write(tmp, "runtime.lock", f"OPENOBSERVE_IMAGE={ref}\n")
+        r = run(tmp, GOOD_ENV + f"OPENOBSERVE_IMAGE={ref}\n", STACK, "--lock-file", str(lock))
+        assert r.returncode == 0, r.stdout
+
+
 # ------------------------------------------------------------------ the stack's own references
 
 def test_an_image_the_stack_references_without_a_default_must_be_set():

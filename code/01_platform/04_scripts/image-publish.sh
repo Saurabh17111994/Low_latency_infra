@@ -15,6 +15,7 @@
 #   ./image-publish.sh --print-map          # VAR=local-image, one per line
 #   ./image-publish.sh --merge-env FILE     # rewrite VAR=ref lines read on stdin
 #   ./image-publish.sh --self-check         # offline: map vs stack, no push
+#   ./image-publish.sh --coverage-check     # offline: every ${X_IMAGE:?} covered
 #
 # The registry value may carry an owner path. The reachability probe uses its HOST
 # (`<host>/v2/`), because an owner path is not part of the v2 API root: probing
@@ -29,8 +30,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-STACK="$REPO_ROOT/code/01_platform/01_docker/docker-stack.yml"
-LOCK="$REPO_ROOT/code/01_platform/01_docker/runtime.lock"
+# The stack/lock paths resolve from this script's location (production). The
+# IMAGE_PUBLISH_* overrides exist so the offline tests can point at fixtures;
+# nothing in the deploy path sets them.
+STACK="${IMAGE_PUBLISH_STACK:-$REPO_ROOT/code/01_platform/01_docker/docker-stack.yml}"
+LOCK="${IMAGE_PUBLISH_LOCK:-$REPO_ROOT/code/01_platform/01_docker/runtime.lock}"
 DIGEST_PIN="$SCRIPT_DIR/digest-pin.sh"
 
 # The six project-built images the production stack takes from the environment,
@@ -68,6 +72,12 @@ print_map() {
 # Every other line — comments, unrelated variables, order — is preserved, and a
 # variable that already exists is replaced in place rather than duplicated, so
 # re-running is idempotent.
+#
+# M6-2: stdin alone is not enough. Every ${X_IMAGE:?} the stack demands that
+# stdin does not cover is overlaid from runtime.lock when the lock pins it with
+# a digest; a demanded var covered by neither is exit 3 — the file would
+# otherwise keep a bare tag (measured: .env.example's O2 tag) and the deploy
+# would fail later with a message about a variable, not about the image.
 merge_env() {
 	local file="$1"
 	if [ ! -f "$file" ]; then
@@ -79,6 +89,60 @@ merge_env() {
 	updates="$(mktemp)"
 	out="$(mktemp)"
 	cat >"$updates"
+	if ! python3 -c '
+import re, sys
+
+updates_path, stack_path, lock_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+def assignments(path):
+    out = {}
+    try:
+        with open(path) as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw or raw.startswith("#") or "=" not in raw:
+                    continue
+                key, value = raw.split("=", 1)
+                out[key.strip()] = value.strip()
+    except OSError:
+        pass
+    return out
+
+updates = assignments(updates_path)
+try:
+    with open(stack_path) as fh:
+        stack = fh.read()
+except OSError:
+    sys.stderr.write("FAIL: cannot read the stack at %s\n" % stack_path)
+    sys.exit(3)
+demanded = sorted(set(re.findall(r"\$\{([A-Z_]+_IMAGE):\?", stack)))
+if not demanded:
+    sys.stderr.write("FAIL: no ${X_IMAGE:?} references found in %s\n" % stack_path)
+    sys.exit(3)
+lock = assignments(lock_path)
+refused = []
+for var in demanded:
+    if updates.get(var):
+        continue
+    locked = lock.get(var, "")
+    if "@sha256:" in locked:
+        updates[var] = locked
+    else:
+        refused.append(var)
+if refused:
+    sys.stderr.write(
+        "FAIL: the stack demands " + " ".join(refused) +
+        " — not supplied on stdin and not digest-pinned in runtime.lock\n"
+        "  publish them first (image-publish.sh --registry ... --write-env ...)\n")
+    sys.exit(3)
+with open(updates_path, "w") as fh:
+    for key, value in updates.items():
+        fh.write(key + "=" + value + "\n")
+' "$updates" "$STACK" "$LOCK"; then
+		rm -f "$updates" "$out"
+		echo "FAIL: could not overlay $file" >&2
+		return 3
+	fi
 	if ! python3 -c '
 import re, sys
 
@@ -121,29 +185,40 @@ sys.stdout.write("\n".join(result) + "\n")
 	echo ">> rewrote $file" >&2
 }
 
-self_check() {
-	local rc=0
-	echo "== image-publish self-check (offline) =="
-
-	local demanded pushed pinned
+# Every ${X_IMAGE:?} the stack demands must be either pushed by this script
+# (IMAGE_MAP) or digest-pinned in runtime.lock. Shape is not coverage: a lock
+# where every line is pinned can still leave a demanded image uncovered, and the
+# deploy then dies with "set X_IMAGE to an immutable digest" after the lock
+# looked perfect. Offline; no docker needed (M6-2, also run by pin-check [5/6]).
+coverage_check() {
+	local demanded pushed pinned uncovered
+	# `|| true`: grep exits 1 on zero matches and set -e/pipefail would abort
+	# silently (measured with an empty lock fixture) instead of reaching the
+	# "could not read" / "uncovered" reports below.
 	demanded="$(grep -oE '\$\{[A-Z_]+_IMAGE:\?' "$STACK" 2>/dev/null \
-		| sed -E 's/^\$\{//; s/:\?$//' | sort -u)"
+		| sed -E 's/^\$\{//; s/:\?$//' | sort -u || true)"
 	if [ -z "$demanded" ]; then
 		echo "FAIL  could not read \${X_IMAGE:?} references from $STACK"
 		return 4
 	fi
 	pushed="$(print_map | cut -d= -f1 | sort -u)"
 	pinned="$(sed -E -e 's/^[[:space:]]+//' -e 's/^export([[:space:]]+|$)//' "$LOCK" 2>/dev/null \
-		| grep -E '^[A-Za-z0-9_]+_IMAGE=.*@sha256:' | cut -d= -f1 | sort -u)"
+		| grep -E '^[A-Za-z0-9_]+_IMAGE=.*@sha256:' | cut -d= -f1 | sort -u || true)"
 
-	local uncovered
 	uncovered="$(comm -23 <(printf '%s\n' "$demanded") <(printf '%s\n%s\n' "$pushed" "$pinned" | sort -u))"
 	if [ -n "$uncovered" ]; then
 		echo "FAIL  the stack demands $(printf '%s' "$uncovered" | tr '\n' ' ')— not pushed here and not pinned in runtime.lock"
-		rc=4
-	else
-		echo "PASS  every \${X_IMAGE:?} the stack demands is pushed here or pinned in runtime.lock"
+		return 4
 	fi
+	echo "PASS  every \${X_IMAGE:?} the stack demands is pushed here or pinned in runtime.lock"
+	return 0
+}
+
+self_check() {
+	local rc=0
+	echo "== image-publish self-check (offline) =="
+
+	coverage_check || rc=4
 
 	# The stock upstream images are the trap this script exists to close.
 	local stock=""
@@ -301,6 +376,10 @@ while [ $# -gt 0 ]; do
 		mode="self-check"
 		shift
 		;;
+	--coverage-check)
+		mode="coverage-check"
+		shift
+		;;
 	--merge-env)
 		mode="merge-env"
 		write_env="${2:-}"
@@ -357,6 +436,7 @@ done
 case "$mode" in
 print-map) print_map ;;
 self-check) self_check ;;
+coverage-check) coverage_check ;;
 merge-env) merge_env "$write_env" ;;
 "")
 	if [ -z "$registry" ]; then

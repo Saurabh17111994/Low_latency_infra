@@ -8,7 +8,8 @@
 #   2. broker corpus integrity (corpus-pin.sh --verify)
 #   3. external SNAPSHOT ban (pom-snapshot-scan.py)
 #   4. platform version pins (versions.pin: no latest/TO_BE_PINNED)
-#   5. runtime.lock image refs all digest-pinned (no bare tags)
+#   5. runtime.lock image refs all digest-pinned (no bare tags) and every
+#      ${X_IMAGE:?} the stack demands covered by the lock or the push map (M6-2)
 #   6. Rust toolchain version agreement (rust_toolchain_pin_check.sh, P3-418)
 # Exit 0 only when all six pass. Run as `make pin-check`.
 
@@ -86,6 +87,16 @@ else
 		else
 			echo "  OK: $n image refs all digest-pinned"
 		fi
+	fi
+	# M6-2: shape is not coverage. Every ${X_IMAGE:?} the stack demands must be
+	# covered by the lock or by image-publish.sh's push map — a lock whose every
+	# line is pinned can still leave a demanded image uncovered, and the deploy
+	# then dies on a bare/unset variable after the lock looked perfect.
+	if [ -f "$REPO_ROOT/code/01_platform/04_scripts/image-publish.sh" ]; then
+		bash "$REPO_ROOT/code/01_platform/04_scripts/image-publish.sh" --coverage-check || rc=1
+	else
+		echo "FAIL: image-publish.sh missing — cannot check stack image coverage"
+		rc=1
 	fi
 fi
 

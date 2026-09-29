@@ -29,6 +29,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_STACK = HERE.parents[0] / "01_docker" / "docker-stack.yml"
+DEFAULT_LOCK = HERE.parents[0] / "01_docker" / "runtime.lock"
 DEFAULT_R2_LIST = HERE / "r2-list.sh"
 DEFAULT_SECRETS_CHECK = HERE / "secrets-bootstrap.sh"
 
@@ -167,7 +168,7 @@ def check_production_values(env: dict[str, str], report: Report) -> None:
 
 
 def check_images(env: dict[str, str], refs: dict[str, str | None], expect: str,
-                 report: Report) -> None:
+                 report: Report, lock: dict[str, str] | None = None) -> None:
     """Judge the image a node would actually pull: the environment's value, else the stack's default."""
     effective: dict[str, str] = {}
     for var, default in refs.items():
@@ -196,7 +197,17 @@ def check_images(env: dict[str, str], refs: dict[str, str | None], expect: str,
                 f"a digest is the image that was tested")
     pinned = sorted(k for k, v in ours.items() if DIGEST.search(v))
     upstream = sorted(k for k in effective if k not in ours and k not in loopback)
-    if not loopback and not [k for k, v in ours.items() if not DIGEST.search(v)]:
+    # M6-2: the lock is the tested image set. When a lock-pinned image would be
+    # pulled as anything else — even as another digest — the deploy runs an image
+    # nothing in this repo verified. (The retired local-build app images are not
+    # in the lock; image-publish.sh --merge-env enforces that they are supplied.)
+    lock = lock or {}
+    lock_mismatches = [k for k in sorted(set(effective) & set(lock))
+                       if lock[k] and DIGEST.search(lock[k]) and effective[k] != lock[k]]
+    for key in lock_mismatches:
+        verdict(f"{key}={effective[key]} differs from runtime.lock's {lock[key]} — the lock pins the "
+                f"image that was tested; re-pin the lock deliberately if this override is intended")
+    if not loopback and not [k for k, v in ours.items() if not DIGEST.search(v)] and not lock_mismatches:
         report.ok(f"every image a node would pull is pinned: {len(pinned)} digest-pinned, "
                   f"{len(upstream)} upstream image(s) left to their author (tag or digest)")
 
@@ -250,6 +261,8 @@ def build_report(args: argparse.Namespace) -> Report:
     env_file, secrets_file, stack_file = Path(args.env_file), Path(args.secrets_file), Path(args.stack_file)
     check_env_file(env_file, report)
     env = parse_env(env_file.read_text()) if env_file.is_file() else {}
+    lock_file = Path(args.lock_file)
+    lock = parse_env(lock_file.read_text()) if lock_file.is_file() else {}
     refs: dict[str, str | None] = {}
     if stack_file.is_file():
         refs = stack_references(stack_file.read_text())
@@ -260,7 +273,7 @@ def build_report(args: argparse.Namespace) -> Report:
         check_production_values(env, report)
     else:
         report.info("--expect dev: the production-only value checks are skipped")
-    check_images(env, refs, args.expect, report)
+    check_images(env, refs, args.expect, report, lock)
     if args.check_lake:
         check_lake(env_file, secrets_file, Path(args.r2_list), dict(**__import__("os").environ), report)
     else:
@@ -277,6 +290,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--secrets-file", default=str(HERE.parents[0] / "01_docker" / "secrets.env"),
                         help="the secrets file the R2 helper reads (never printed)")
     parser.add_argument("--stack-file", default=str(DEFAULT_STACK))
+    parser.add_argument("--lock-file", default=str(DEFAULT_LOCK),
+                        help="runtime.lock — the tested image refs the deploy environment must match")
     parser.add_argument("--expect", choices=("production", "dev"), default="production")
     parser.add_argument("--check-lake", action="store_true", help="perform one real signed LIST")
     parser.add_argument("--secrets-check", action="store_true", help="also run secrets-bootstrap.sh --check")
