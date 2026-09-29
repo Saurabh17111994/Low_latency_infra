@@ -27,6 +27,7 @@ COMPUTE = ROOT / "code/02_services/02_compute/src/main/java/com/trading/compute/
 CONFIG = COMPUTE / "SignalJobConfig.java"
 CONFIG_TEST = (ROOT / "code/02_services/02_compute/src/test/java/com/trading/compute/"
                       "signaljob/SignalJobConfigTest.java")
+PLATFORM_CONFIG = ROOT / "code/common/src/main/java/com/trading/common/config/PlatformConfig.java"
 
 DOSSIER = ROOT / "docs/08_implementation/04-signal-job.md"
 CONTRACT = ROOT / "docs/04_contracts/03-compute.md"
@@ -89,3 +90,49 @@ def test_lateness_and_idleness_defaults_stay_documented():
     text = REQUIREMENTS.read_text()
     assert "allowed lateness (default 5 s)" in text
     assert "source idleness (default 15 s)" in text
+
+
+# ---------------------------------------------------------------------------
+# L3-1: the dedup bound is DEDUP_WINDOW_ENTRIES (DEC-054) — the dossier must say so
+
+
+def _platform_int_constant(name: str) -> int:
+    match = re.search(rf"int {name} = ([0-9_]+);", PLATFORM_CONFIG.read_text())
+    assert match, f"{name} not found in PlatformConfig"
+    return int(match.group(1).replace("_", ""))
+
+
+def _config_contract_section() -> str:
+    """The live configuration table: from its heading to the next level-3 heading."""
+    dossier = DOSSIER.read_text()
+    start = dossier.index("### Configuration contract")
+    rest = dossier[start:]
+    return rest[: rest.index("\n### ", 1)]
+
+
+def test_the_live_config_table_carries_one_dedup_bound_row_equal_to_the_constant():
+    bound = _platform_int_constant("DEDUP_WINDOW_ENTRIES")
+    assert bound == 200, "the platform dedup bound moved — re-check DEC-054 before editing docs"
+    section = _config_contract_section()
+    rows = [line for line in section.splitlines() if line.startswith("| `DEDUP_WINDOW_ENTRIES`")]
+    assert len(rows) == 1, f"exactly one DEDUP_WINDOW_ENTRIES row belongs in the live table: {rows}"
+    assert f"`{bound}`" in rows[0], rows[0]
+    ttl_rows = [line for line in section.splitlines() if line.startswith("| `DEDUP_TTL_MS`")]
+    assert not ttl_rows, \
+        f"DEDUP_TTL_MS is retired (DEC-054); a live config-table row is back: {ttl_rows}"
+
+
+def test_every_sig_unit_003_line_names_the_dedup_bound():
+    for i, line in enumerate(DOSSIER.read_text().splitlines(), 1):
+        if "SIG-UNIT-003" in line:
+            assert "DEDUP_WINDOW_ENTRIES" in line, (
+                f"04-signal-job.md:{i}: SIG-UNIT-003 is the dedup-bound requirement — "
+                f"the line must name DEDUP_WINDOW_ENTRIES: {line[:140]}")
+
+
+def test_the_dossier_banner_covers_every_ttl_mention():
+    dossier = DOSSIER.read_text()
+    flat = re.sub(r"[\s>]+", " ", dossier)  # markdown wraps lines; compare flattened
+    assert ("Every `DEDUP_TTL_MS`, `60 000`/`60000` and `StateTtlConfig` mention in this dossier"
+            in flat), "the heap-window banner must mark every TTL/StateTtlConfig mention historical"
+    assert "`DEDUP_WINDOW_ENTRIES` = 200" in flat, "the banner must name the live bound"
