@@ -92,7 +92,12 @@ EXPECTED_LIMITED = []
 # pin notices a table disappearing from the manifest and the DDL dir at once.
 # One constant for both scenarios — when that retirement updated only
 # docs_audit's copy of this number, step 11 failed here on the next run.
-APPLIED_TABLES = 26
+# 2026-09-27: DDL 34 feature_values (sanctioned unapplied proposal, CHG-349)
+# joined both lists -> 27. That update again touched docs_audit's copies and
+# not this one, so step 11 failed 40 min into the 2026-09-29 certificate run;
+# AppliedTablesPinTest now ties this constant to the corpus and fails in
+# step 3 with the fix instead.
+APPLIED_TABLES = 27
 # Real capability evidence when present (enrich_evidence just records path+sha).
 REAL_EVIDENCE = os.path.join(
     REPO_ROOT, "logs", "schema-compat", "composite-pk-raw-client-20260815.md"

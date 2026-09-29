@@ -195,5 +195,33 @@ class DockerProbeTest(unittest.TestCase):
         self.assertIn("compose config invalid", reason)
 
 
+class AppliedTablesPinTest(unittest.TestCase):
+    """APPLIED_TABLES is a deliberate second copy of the table count (docs_audit's
+    C1 manifest pin and C9 DDL-count pin are the others): only a literal notices a
+    table dropped from the manifest AND the ddl/ enumeration at once, which is why
+    it is not read back from either. The literal went stale twice — 2026-09-23
+    (dedup retirement, 27->26) and 2026-09-27 (feature_values joined, 26->27) —
+    and both times only step 11's live apply noticed, deep into a certificate run.
+    This ties the constant to the corpus so such a change fails in step 3 with the
+    fix in the message; the literal itself keeps its job at step 11 (live output
+    vs pin), so an intentional table-count change still has to touch it.
+    """
+
+    def test_the_pin_matches_the_manifest_and_the_ddl_dir(self) -> None:
+        import json
+
+        ddl_dir = ROOT / "code/01_platform/02_sql/ddl"
+        manifest = json.loads((ddl_dir / "schema_manifest.json").read_text(encoding="utf-8"))
+        sqls = [f for f in os.listdir(ddl_dir) if f.endswith(".sql")]
+        self.assertEqual(
+            smoke.APPLIED_TABLES, len(manifest["tables"]),
+            "APPLIED_TABLES and schema_manifest.json disagree — update the constant in "
+            "ddl_apply_smoke.py and docs_audit's C1/C9 copies in the same change")
+        self.assertEqual(
+            smoke.APPLIED_TABLES, len(sqls),
+            "APPLIED_TABLES and the ddl/ enumeration disagree — update the constant in "
+            "ddl_apply_smoke.py and docs_audit's C1/C9 copies in the same change")
+
+
 if __name__ == "__main__":
     unittest.main()
