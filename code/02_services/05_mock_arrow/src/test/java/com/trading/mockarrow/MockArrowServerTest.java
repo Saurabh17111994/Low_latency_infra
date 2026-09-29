@@ -20,8 +20,12 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.stream.LongStream;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
@@ -70,9 +74,20 @@ class MockArrowServerTest {
             for (int i = 0; i < parsed.size(); i++) {
                 assertTrue(parsed.get(i).isObject(), "line is not a JSON object: " + lines.get(i));
             }
-            assertTrue(parsed.stream()
-                            .anyMatch(node -> node.has("instrument_token") && node.has("last_price_paise")),
-                    "no line carried the expected tick keys: " + lines);
+            // M5-2: the mock's keys must equal the committed canonical fixture —
+            // the fixture is what the Go strict-decode test consumes, so drift
+            // here would let the two dialects diverge silently.
+            JsonNode fixture = MAPPER.readTree(Files.readString(
+                    Path.of("..", "..", "testdata", "mock-tick-sample.json")));
+            Set<String> fixtureKeys = new TreeSet<>();
+            fixture.fieldNames().forEachRemaining(fixtureKeys::add);
+            assertFalse(fixtureKeys.isEmpty(), "the fixture must carry the canonical keys");
+            for (JsonNode node : parsed) {
+                Set<String> keys = new TreeSet<>();
+                node.fieldNames().forEachRemaining(keys::add);
+                assertEquals(fixtureKeys, keys,
+                        "every tick line must carry exactly the canonical fixture keys");
+            }
         } finally {
             if (client != null) {
                 try {

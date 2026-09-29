@@ -25,6 +25,16 @@ import java.util.concurrent.atomic.AtomicLong;
  * (newline-delimited JSON) — a batch is written as N lines, never as a JSON
  * array, matching what the NDJSON parser consumes.
  *
+ * <p>M5-2: the emitted keys are the canonical decoded-tick dialect — the proto
+ * {@code TickEvent} / Go {@code Tick} names ({@code feed}, {@code mode},
+ * {@code token}, {@code ts_ms}, {@code ltp_paise}, OHLC in paise, five-element
+ * {@code bid_px}/{@code ask_px}/{@code bid_qty}/{@code ask_qty}/
+ * {@code bid_orders}/{@code ask_orders} ladders). A fake broker must speak what
+ * the real feeds speak; the committed fixture
+ * {@code code/testdata/mock-tick-sample.json} is decoded strictly by the Go
+ * Tick reader in the gate, and {@code test_mock_tick_contract.py} pins the key
+ * set against the proto.
+ *
  * <p>R-071: the scheduler ticks every 10 ms (100 batches/s); the effective
  * rate is {@code batchSize × 100}, where
  * {@code batchSize = ceil(instruments × tickRatePerSec / 100)}. Pass
@@ -247,20 +257,29 @@ public class MockArrowServer {
             long now = System.currentTimeMillis();
 
             Map<String, Object> tick = new LinkedHashMap<>();
-            tick.put("instrument_token", inst);
-            tick.put("exchange_ts", now);
-            tick.put("last_price_paise", pricePaise);
-            tick.put("last_qty", 1 + ThreadLocalRandom.current().nextInt(100));
-            tick.put("change_pct", round2((pricePaise - basePrices.get(inst)) * 100.0 / basePrices.get(inst)));
+            // M5-2: the canonical decoded-tick dialect (proto TickEvent / Go Tick).
+            // A fake broker must speak what the real feeds speak: the old private
+            // vocabulary (instrument_token/exchange_ts/ohlc_*/nested depth_*) had no
+            // in-repo consumer and could not be decoded by the Go Tick reader.
+            tick.put("feed", "token");   // standard (datastream) dialect: OHLC + depth ladders
+            tick.put("mode", "full");    // ladders + OHLC present
+            tick.put("token", inst);
+            tick.put("ts_ms", now);
+            tick.put("ltp_paise", pricePaise);
+            tick.put("close_paise", pricePaise);
+            tick.put("open_paise", pricePaise - ThreadLocalRandom.current().nextInt(201));
+            tick.put("high_paise", pricePaise + ThreadLocalRandom.current().nextInt(301));
+            tick.put("low_paise", pricePaise - ThreadLocalRandom.current().nextInt(301));
+            tick.put("ltq", 1 + ThreadLocalRandom.current().nextInt(100));
             tick.put("volume", 1000L + ThreadLocalRandom.current().nextInt(50000));
-            tick.put("buy_quantity", 100 + ThreadLocalRandom.current().nextInt(5000));
-            tick.put("sell_quantity", 100 + ThreadLocalRandom.current().nextInt(5000));
-            tick.put("ohlc_open_paise", pricePaise - ThreadLocalRandom.current().nextInt(201));
-            tick.put("ohlc_high_paise", pricePaise + ThreadLocalRandom.current().nextInt(301));
-            tick.put("ohlc_low_paise", pricePaise - ThreadLocalRandom.current().nextInt(301));
-            tick.put("ohlc_close_paise", pricePaise);
-            tick.put("depth_buy", generateDepth(pricePaise, -1, 5));
-            tick.put("depth_sell", generateDepth(pricePaise + 5, 1, 5));
+            tick.put("total_buy_qty", 100 + ThreadLocalRandom.current().nextInt(5000));
+            tick.put("total_sell_qty", 100 + ThreadLocalRandom.current().nextInt(5000));
+            tick.put("bid_px", priceLadder(pricePaise, -1));
+            tick.put("ask_px", priceLadder(pricePaise + 5, 1));
+            tick.put("bid_qty", qtyLadder());
+            tick.put("ask_qty", qtyLadder());
+            tick.put("bid_orders", ordersLadder());
+            tick.put("ask_orders", ordersLadder());
             batch.add(tick);
         }
 
@@ -318,20 +337,28 @@ public class MockArrowServer {
     }
 
     /** Generate depth levels in paise. direction: -1 = buy (below mid), 1 = sell (above mid) */
-    private List<Map<String, Object>> generateDepth(long midPricePaise, int direction, int levels) {
-        var depth = new ArrayList<Map<String, Object>>(levels);
-        for (int i = 0; i < levels; i++) {
-            long offset = 5L * (i + 1); // 0.05 rupees = 5 paise per level
-            Map<String, Object> level = new LinkedHashMap<>();
-            level.put("price_paise", midPricePaise + direction * offset);
-            level.put("qty", 100 + ThreadLocalRandom.current().nextInt(5000));
-            depth.add(level);
+    private static List<Long> priceLadder(long midPricePaise, int direction) {
+        List<Long> ladder = new ArrayList<>(5);
+        for (int i = 0; i < 5; i++) {
+            ladder.add(midPricePaise + direction * 5L * (i + 1)); // 0.05 rupees = 5 paise per level
         }
-        return depth;
+        return ladder;
     }
 
-    private double round2(double v) {
-        return Math.round(v * 100.0) / 100.0;
+    private static List<Long> qtyLadder() {
+        List<Long> ladder = new ArrayList<>(5);
+        for (int i = 0; i < 5; i++) {
+            ladder.add(100L + ThreadLocalRandom.current().nextInt(5000));
+        }
+        return ladder;
+    }
+
+    private static List<Integer> ordersLadder() {
+        List<Integer> ladder = new ArrayList<>(5);
+        for (int i = 0; i < 5; i++) {
+            ladder.add(1 + ThreadLocalRandom.current().nextInt(50));
+        }
+        return ladder;
     }
 
     public long getTickCount() { return tickCounter.get(); }
