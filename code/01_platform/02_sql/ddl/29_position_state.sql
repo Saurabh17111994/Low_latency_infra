@@ -10,7 +10,7 @@
 --   was 7d, contradicting the indefinite-block design; TTL expired the
 --   changelog a fresh deploy/scale replays after >7d idle. Position TTL
 --   policy: block lives until CLOSED/ADMIN_CLEAR; the stuck-ACTIVE alert
---   (position-state-alerts.json) is the expiry signal, not TTL)
+--   (the retired position-state alert corpus, H3-3) was the expiry signal, not TTL)
 -- Lake: EOD Iceberg offload (like Signal_Candidates_current)
 -- Scope: account_scope_id (P4-238 v2: portfolio_id REMOVED CHG-005)
 -- Schema version: 2 (v2: composite PK + source_version + status contract)
@@ -31,8 +31,8 @@
 -- ADMIN_CLEAR (exact, uppercase). CLOSED/ADMIN_CLEAR MUST set
 -- closed_ts+closed_reason; OPEN MUST leave them NULL. Unknown states are
 -- quarantined + halted, never defaulted to OPEN (a typo must not block an
--- instrument forever). ADMIN_CLEAR is the ops break-glass value (runbook +
--- position-state-alerts.json), not a gateway value.
+-- instrument forever). ADMIN_CLEAR is the ops break-glass value (runbook
+-- RB-POS-001, now HISTORICAL after H3-3), not a gateway value.
 -- Ordering (P4-089 v2): blind LWW upsert is stale-unsafe — the writer MUST
 -- ignore-if-older on source_version (monotonic per (account, token)).
 

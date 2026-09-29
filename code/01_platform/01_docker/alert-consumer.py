@@ -64,9 +64,9 @@ def classify(name: str) -> tuple[str, str]:
 
     Convention (docs/06_operations/02-ingestion-alerting.md + o2-provision.py):
     names are PREFIX-SEVERITY-description, e.g. SIGNAL-crit-checkpoint-failed,
-    INFRA-warn-host-cpu-80, ING-crit-bridge-disconnected. pos-state-* alerts
-    (position-state-alerts.json) carry no severity infix -> warn (they are
-    investigation prompts, not pages).
+    INFRA-warn-host-cpu-80, ING-crit-bridge-disconnected. The retired pos-state-*
+    alerts (corpus removed 2026-09-29, H3-3) carried no severity infix -> warn;
+    the branch stays for any stored rule of that shape.
     """
     m = re.match(r"^([A-Za-z]+)-([a-z]+)-", name or "")
     if m and m.group(2) in ("crit", "error", "warn"):

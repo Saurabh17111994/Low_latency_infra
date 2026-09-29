@@ -2,8 +2,8 @@
 """seed_alerts — idempotent OpenObserve alert provisioning from the JSON corpus.
 
 Ensures every alert in ``code/01_platform/01_docker/openobserve/alerts/*.json``
-exists in the configured OpenObserve org: position-state, storage/disk, and any
-later corpus added to that directory. Mirrors ``seed_dashboards.py`` credential gate.
+exists in the configured OpenObserve org (the storage/disk corpus today, and any
+later corpus added to that directory). Mirrors ``seed_dashboards.py`` credential gate.
 
 A fresh OpenObserve (the daily VM, or after a fresh start wiped the O2 volume)
 has NO alerts and NO destination until the provisioning runs — see
@@ -29,8 +29,7 @@ import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-ALERT_FILE = ROOT / "code/01_platform/01_docker/openobserve/alerts/position-state-alerts.json"
-ALERT_DIR = ALERT_FILE.parent
+ALERT_DIR = ROOT / "code/01_platform/01_docker/openobserve/alerts"
 
 
 def default_alert_files() -> list[Path]:

@@ -889,6 +889,17 @@ decoupled gateway switch, daily-runner refusal) and
 
 ## Position State — stuck ACTIVE (indefinite block) — RB-POS-001
 
+> **RETIRED 2026-09-29 (H3-3).** The active-signal subsystem this runbook operates
+> (`ActiveSignalFeedbackFunction`, the `compute.signal.*` metrics, and the
+> `active-signal-admin-clear` event) was deleted in `0f3e5952`; the three seeded
+> Position_State alert rules and their corpus were retired with it (the
+> producer-existence guard in `test_alert_threshold_parity.py` now fails if a
+> seeded rule names no live producer). This section is kept as historical
+> evidence of the retired design — it is not an operative procedure. A
+> position-state alert returns only when the executor's OTLP sink is real
+> (today it is a NullSink), so a substitute `gate_safety_halt` rule would be a
+> second dead rule.
+
 **Scope:** instrument_token (16 buckets, Fluss `Position_State` KV PK exactly `[instrument_token]`, `bucket.key=instrument_token`). **Severity:** Warning → Critical if trading blocked. **Owner:** Trading Ops + Execution Gateway owner (Nautilus). **Gate impact:** SignalJob suppresses next signal for that instrument forever until `Position_State.status=CLOSED` or `ADMIN_CLEAR` arrives (no TTL, `ValueState` survives restarts/checkpoints). Intentional stuck = liveness cost for correctness.
 
 **Preconditions:** `ActiveSignalFeedbackFunction` is live (`SignalJob` CoProcess: Input1 signals, Input2 `Position_State` changelog `OffsetsInitializer.full()`). `TableContractValidator` passed (PK/bucket/schema). `flink-metrics-otel` -> `otel-collector:4318/v1/metrics` -> `metrics` + `ComputeAlertLogs` -> `trading_alerts` healthy.

@@ -69,10 +69,13 @@ class StorageAlertCorpusTests(unittest.TestCase):
         # a single timeout is normal noise; the incident produced a stream of them
         self.assertGreaterEqual(rule["trigger_condition"]["threshold"], 2)
 
-    def test_the_seeder_discovers_every_corpus(self):
+    def test_the_seeder_discovers_every_live_corpus(self):
         names = {p.name for p in mod.default_alert_files()}
-        self.assertIn("position-state-alerts.json", names)
         self.assertIn("storage-alerts.json", names)
+        self.assertNotIn(
+            "position-state-alerts.json", names,
+            "H3-3: the position-state corpus is retired — its producers were deleted in 0f3e5952",
+        )
 
     def test_duplicate_rule_names_fail_closed(self):
         rule = {"name": "dup-rule", "stream_type": "metrics", "stream_name": "up"}

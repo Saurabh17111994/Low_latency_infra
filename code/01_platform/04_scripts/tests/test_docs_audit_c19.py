@@ -138,17 +138,22 @@ def test_the_real_dossier_agrees_with_the_real_provisioners():
     o2_names = docs_audit.o2_provision_alert_names()
     assert doc is not None, docs_audit.OBSERVABILITY_DOC
     assert len(o2_names) == 47, f"expected 47 rules in o2-provision.py, found {len(o2_names)}"
-    assert len(names) == 50, f"expected 47 + 3 provisioned rules, found {len(names)}"
+    # H3-3/CHG-392: the position-state corpus was retired — its three rules named
+    # producers deleted in 0f3e5952. The provisioned set is the o2 set alone until a
+    # corpus with live rules lands (test_alert_threshold_parity guards the producers).
+    assert names == o2_names, f"expected one provisioner's rules, found {len(names)}"
     assert docs_audit.alert_catalogue_problems(doc, names) == []
     # The sentence names o2-provision.py, so it is counted against that file.
     assert docs_audit.alert_rule_count_problems(doc, o2_names) == []
 
 
 def test_the_count_sentence_is_scoped_to_the_provisioner_it_names():
-    # "o2-provision.py provisions 47 rules" is about that file; adding rules to
-    # the position-state JSON must not make it look wrong.
+    # "o2-provision.py provisions 47 rules" is about that file; a second corpus must
+    # not make it look wrong. The function is set-agnostic — the caller passes the
+    # named provisioner's set (c19_alert_catalogue) — so the union shape is simulated
+    # with one extra rule. (The position-state corpus was retired in H3-3.)
     problems = docs_audit.alert_rule_count_problems(
-        _count_doc(47, 20, 18, 9), docs_audit.provisioned_alert_names()
+        _count_doc(47, 20, 18, 9), _names(extra=["OTHER-warn-example"])
     )
     assert any("claims 47 rules" in p for p in problems), "the scope guard is the point"
 

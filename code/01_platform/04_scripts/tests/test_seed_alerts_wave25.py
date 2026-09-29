@@ -52,7 +52,7 @@ class _Api:
 class SeedAlertsWave25Test(unittest.TestCase):
     def setUp(self):
         os.environ["O2_PASSWORD"] = "test-password"
-        self._api, self._file = mod._api, mod.ALERT_FILE
+        self._api = mod._api
         self._discover = mod.default_alert_files
         self.dir = Path(tempfile.mkdtemp(prefix="w25-alerts-"))
         self.file = self.dir / "alerts.json"
@@ -62,13 +62,12 @@ class SeedAlertsWave25Test(unittest.TestCase):
         self.out, self.err = io.StringIO(), io.StringIO()
 
     def tearDown(self):
-        mod._api, mod.ALERT_FILE = self._api, self._file
+        mod._api = self._api
         mod.default_alert_files = self._discover
 
     def _run(self, alerts=None, argv=("seed",), api: _Api | None = None) -> int:
         if alerts is not None:
             self.file.write_text(alerts if isinstance(alerts, str) else json.dumps(alerts))
-        mod.ALERT_FILE = self.file
         mod._api = api or _Api()
         with mock.patch.object(sys, "argv", list(argv)), \
                 contextlib.redirect_stdout(self.out), contextlib.redirect_stderr(self.err):

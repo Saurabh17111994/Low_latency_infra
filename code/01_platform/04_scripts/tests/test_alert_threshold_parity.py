@@ -36,8 +36,8 @@ HONEST LIMITATIONS (recorded, not hidden)
 -----------------------------------------
 * The anchors pin the CONSTANTS (Java literals, compose pin, runbook rows), not
   a parsed Java AST — the Java side is regex-scanned with tight patterns.
-* Position-state alert thresholds (>100 active count etc.) have no Java
-  constant to tie to; they are anchored to their own JSON corpus instead.
+* The retired position-state corpus (H3-3) no longer exists; every remaining
+  seeded rule is checked for a live producer by the H3-3 test below.
 * Only the value axis is guarded here; stream names are guarded by the
   compute-identifier suite, delivery by the G6 routing selftest.
 
@@ -56,7 +56,7 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 REPO = SCRIPTS.parents[2]
 O2_PROVISION = SCRIPTS / "o2-provision.py"
 COMPOSE = REPO / "code/01_platform/01_docker/docker-compose.yml"
-ALERTS_JSON = REPO / "code/01_platform/01_docker/openobserve/alerts/position-state-alerts.json"
+ALERT_DIR = REPO / "code/01_platform/01_docker/openobserve/alerts"
 JAVA_DIR = REPO / "code/common/src/main/java/com/trading/common"
 
 # ---------------------------------------------------------------------------
@@ -183,14 +183,67 @@ def _spec_threshold(name: str) -> tuple[str, int]:
     raise AssertionError(f"{name}: unrecognised threshold shape")
 
 
-def _position_state_promql_threshold(name: str) -> tuple[str, int]:
-    """(operator, value) from the position-state alerts JSON corpus."""
-    data = json.loads(_read(ALERTS_JSON))
-    for a in data:
-        if a.get("name") == name:
-            pc = a["query_condition"]["promql_condition"]
-            return pc["operator"], int(pc["value"])
-    raise AssertionError(f"anchor lost: {name} missing from {ALERTS_JSON.name}")
+# -- H3-3 producer existence: a seeded rule must name something live ---------
+
+# PromQL function/keyword tokens are not producers.
+_PROMQL_NON_PRODUCERS = {
+    "sum", "rate", "avg", "min", "max", "count", "increase", "irate", "delta",
+    "avg_over_time", "max_over_time", "min_over_time", "sum_over_time",
+    "count_over_time", "histogram_quantile", "absent", "by", "without", "on",
+    "ignoring", "group_left", "group_right", "and", "or", "unless", "value",
+}
+# Flink's own metric prefixes: our code names the operator-specific suffix.
+_FLINK_PREFIXES = (
+    "flink_taskmanager_job_task_operator_",
+    "flink_jobmanager_job_",
+    "flink_taskmanager_",
+    "flink_",
+)
+
+
+def _producer_files() -> list[Path]:
+    """The files that can be a metric/stream producer.
+
+    Main sources and platform configs only: the alert corpus and dashboards are
+    not producers, and a name only a test mentions is not live.
+    """
+    code = REPO / "code"
+    files = set()
+    files.update(p for p in code.glob("**/src/main/**/*.java") if "target" not in p.parts)
+    files.update(
+        p for p in (code / "02_services/04_executor/src").rglob("*.rs")
+        if "target" not in p.parts
+    )
+    files.update(
+        p for p in code.glob("02_services/**/*.go")
+        if not p.name.endswith("_test.go") and "third_party" not in p.parts
+    )
+    files.update((code / "01_platform/01_docker").glob("*.yml"))
+    files.update((code / "01_platform/01_docker").glob("*.yaml"))
+    files.update((code / "01_platform/04_scripts").glob("*.py"))
+    return sorted(files)
+
+
+def _strip_flink_prefix(name: str) -> str:
+    for prefix in _FLINK_PREFIXES:
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+def _rule_producer_identifiers(rule: dict) -> set[str]:
+    """Every metric/stream identifier this rule needs a live producer for."""
+    idents: set[str] = set()
+    stream = rule.get("stream_name") or ""
+    if stream:
+        idents.add(_strip_flink_prefix(stream))
+    condition = rule.get("query_condition") or {}
+    for token in re.findall(r"[a-zA-Z_:][a-zA-Z0-9_:]*", condition.get("promql") or ""):
+        if token.lower() not in _PROMQL_NON_PRODUCERS:
+            idents.add(_strip_flink_prefix(token))
+    for quoted in re.findall(r'FROM\s+"([^"]+)"', condition.get("sql") or "", re.IGNORECASE):
+        idents.add(quoted)
+    return {i for i in idents if i}
 
 
 # ---------------------------------------------------------------------------
@@ -300,14 +353,33 @@ class ThresholdParity(unittest.TestCase):
         self.assertEqual(80, warn)
         self.assertEqual(90, crit)
 
-    # -- JSON-corpus-anchored rows -------------------------------------------
+    # -- Seeded-corpus producer existence (H3-3) ------------------------------
 
-    def test_position_state_active_count_threshold_matches_its_corpus(self):
-        """pos-state-high-active-count: >100 active signals — the corpus is the
-        only pin today (no Java constant); this test IS the second copy."""
-        op, value = _position_state_promql_threshold("pos-state-high-active-count")
-        self.assertEqual(">", op)
-        self.assertEqual(100, value)
+    def test_every_seeded_alert_has_a_live_producer(self):
+        """H3-3: every rule in every corpus under openobserve/alerts/ must name a
+        metric/stream a repo producer still emits.
+
+        The 2026-09-05 active-signal cutover deleted the producers but left the
+        three position-state rules seeding `enabled: true` forever; nothing joined
+        the two sets. A rule whose identifier appears nowhere in the producer tree
+        can never fire — and worse, reads as coverage. The check is offline: the
+        identifier must appear in a main source or platform config under `code/`
+        (the alert corpus and dashboards are not producers, and a name only a test
+        mentions is not live). A name mentioned only inside an inline test module
+        still counts as present — this is an existence probe, not an emitter proof.
+        """
+        producer_text = "\n".join(_read(p) for p in _producer_files())
+        checked = 0
+        for corpus in sorted(ALERT_DIR.glob("*.json")):
+            for rule in json.loads(_read(corpus)):
+                for ident in _rule_producer_identifiers(rule):
+                    checked += 1
+                    self.assertTrue(
+                        ident in producer_text,
+                        f"{corpus.name}:{rule.get('name')} names {ident!r}, which no "
+                        "producer under code/ emits — the rule can never fire",
+                    )
+        self.assertGreater(checked, 0, "no seeded alert identifier was checked")
 
     # -- Contract- and runbook-anchored rows ---------------------------------
 

@@ -1413,10 +1413,6 @@ def c18_runbook_executability():
 
 OBSERVABILITY_DOC = os.path.join(DOCS_DIR, "08_implementation", "10-observability.md")
 O2_PROVISION = os.path.join(SCRIPTS_DIR, "o2-provision.py")
-POSITION_STATE_ALERTS = os.path.join(
-    ROOT, "code", "01_platform", "01_docker", "openobserve", "alerts",
-    "position-state-alerts.json",
-)
 CATALOGUE_HEADING = "#### Alert catalogue"
 # Measured over all eight real rows on 2026-09-21: every cell is one of these two
 # denials. Anything else is a claim, and a claim must name a provisioned rule.
@@ -1473,21 +1469,11 @@ def o2_provision_alert_names():
     return names
 
 
-def position_state_alert_names():
-    """The rule names in the position-state JSON provisioner."""
-    names = []
-    raw = safe_read_json(POSITION_STATE_ALERTS)
-    if isinstance(raw, list):
-        for entry in raw:
-            if isinstance(entry, dict) and isinstance(entry.get("name"), str):
-                names.append(entry["name"])
-    return names
-
-
 def provisioned_alert_names():
-    """Every rule name either provisioner defines — the set the catalogue table
-    is checked against."""
-    return o2_provision_alert_names() + position_state_alert_names()
+    """Every rule name the provisioner defines — the set the catalogue table is
+    checked against. The retired position-state corpus (H3-3) is not a
+    provisioner any more; its rules had no live producer and are gone."""
+    return o2_provision_alert_names()
 
 
 def alert_catalogue_problems(doc_text, rule_names):
@@ -1498,7 +1484,7 @@ def alert_catalogue_problems(doc_text, rule_names):
     if not rows:
         return ["the alert catalogue table has no security-area rows"]
     if not rule_names:
-        return ["no provisioned alert rule was found in either provisioner"]
+        return ["no provisioned alert rule was found in the provisioner"]
     problems, claims = [], []
     for area, runtime in rows:
         if CATALOGUE_DENIAL_RE.match(runtime):
@@ -1544,7 +1530,8 @@ def c19_alert_catalogue():
     names = provisioned_alert_names()
     problems = alert_catalogue_problems(doc_text, names)
     # The count sentence names o2-provision.py, so it is checked against that
-    # provisioner alone; the table is checked against both.
+    # provisioner alone; the table is checked against every provisioned rule
+    # (H3-3: the position-state corpus was retired, so the set is o2's today).
     problems += alert_rule_count_problems(doc_text, o2_provision_alert_names())
     rows = catalogue_rows(doc_text) or []
     check(
