@@ -118,6 +118,19 @@ class PythonGateShape(unittest.TestCase):
             fails = (not has_ok) or has_bad
             self.assertEqual(fails, must_fail, f"wrong verdict for {body!r}")
 
+    def test_python_caches_are_swept_before_discovery(self) -> None:
+        """A .pyc records mtime at whole-second granularity + size, so a
+        same-size literal edited twice within one second (a mutation check
+        flipping 26<->27) leaves a cache the RESTORED source matches while the
+        cache still holds the mutated value — every import then reads the old
+        constant (2026-09-29, CHG-438: the applied-table pin read 26 on a tree
+        whose source and commit said 27; one full certifying run lost). Step 3
+        must sweep code/__pycache__ before discovery so imports compile fresh.
+        """
+        self.assertIn(
+            'find "$PROJECT_ROOT/code" -type d -name __pycache__ -prune -exec rm -rf {} +',
+            SRC, "step 3 lost its __pycache__ sweep — stale bytecode can lie to imports")
+
 
 class StaticStepShape(unittest.TestCase):
     def test_shellcheck_probe_runs_once(self) -> None:

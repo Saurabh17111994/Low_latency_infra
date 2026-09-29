@@ -650,6 +650,15 @@ fi
 fi
 if step_active 3; then
 echo "=== [3/19] Python unit suites (reconcile-compare ING-TCP-002 + gate helpers) ===" | tee -a "$SUMMARY"
+# Stale bytecode is a silent liar: a .pyc records its source's mtime at
+# whole-second granularity plus its size, so two same-size edits of a literal
+# within one second (a mutation check flipping 26<->27) leave a cache that
+# matches the RESTORED source by (mtime, size) while still holding the mutated
+# constant — every later import reads the old value (2026-09-29, CHG-438: the
+# applied-table pin read 26 on a tree whose source and commit said 27, costing
+# one full certifying run). Sweep the caches under code/ before discovery (9
+# dirs) so imports compile from source; nothing changes sources mid-gate.
+find "$PROJECT_ROOT/code" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 # CHG-199: 600, not 300. The suite needs ~295s on a quiet tree and EXCEEDS
 # 300s under gate load (full stack up) — measured 2026-09-17: timeout-killed
 # at step 3 with zero FAIL/ERROR lines. The budget must cover the conditions
