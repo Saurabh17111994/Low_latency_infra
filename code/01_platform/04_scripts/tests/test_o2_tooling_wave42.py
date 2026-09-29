@@ -198,6 +198,75 @@ class O2ProvisionTest(unittest.TestCase):
 
         return api
 
+    # --- M2-3: unreadable lists are not empty lists; failures are fatal ---
+
+    def test_destination_list_failure_is_fatal_and_posts_nothing(self):
+        calls = []
+
+        def api(method, path, body=None):
+            calls.append((method, path))
+            return 500, "boom"
+
+        with mock.patch.object(self.mod, "api", api):
+            out = io.StringIO()
+            with mock.patch("sys.stdout", out):
+                rc = self.mod.provision_destination()
+        self.assertEqual(1, rc)
+        self.assertEqual([("GET", "/alerts/destinations")], calls,
+                         "an unreadable list must refuse before any POST")
+        self.assertIn("refusing to POST", out.getvalue())
+
+    def test_alerts_list_failure_is_fatal_and_posts_nothing(self):
+        calls = []
+
+        def api_raw(method, url, body=None):
+            calls.append(method)
+            return 500, "boom"
+
+        with mock.patch.object(self.mod, "api_raw", api_raw):
+            out = io.StringIO()
+            with mock.patch("sys.stdout", out):
+                rc = self.mod.provision_alerts()
+        self.assertEqual(1, rc)
+        self.assertEqual(["GET"], calls, "no alert POST may follow a failed list read")
+        self.assertIn("refusing to POST", out.getvalue())
+
+    def test_alert_stream_not_found_is_deferred_not_fatal(self):
+        def api_raw(method, url, body=None):
+            if method == "GET":
+                return 200, {"list": []}
+            return 404, "Stream flink_taskmanager_job_task_operator_x not found"
+
+        with mock.patch.object(self.mod, "api_raw", api_raw):
+            out = io.StringIO()
+            with mock.patch("sys.stdout", out):
+                rc = self.mod.provision_alerts()
+        self.assertEqual(0, rc, "stream-not-found alerts are deferred, not fatal")
+        self.assertIn("deferred", out.getvalue())
+
+    def test_retention_put_failure_is_fatal(self):
+        def api(method, path, body=None):
+            if method == "GET":
+                return 200, {"list": [{"name": "s1", "settings": {}}]}
+            return 500, "boom"
+
+        with mock.patch.object(self.mod, "api", api):
+            out = io.StringIO()
+            with mock.patch("sys.stdout", out):
+                rc = self.mod.provision_retention()
+        self.assertGreaterEqual(rc, 1, "a failed retention PUT must be fatal")
+
+    def test_retention_list_failure_is_fatal(self):
+        def api(method, path, body=None):
+            return 500, "boom"
+
+        with mock.patch.object(self.mod, "api", api):
+            out = io.StringIO()
+            with mock.patch("sys.stdout", out):
+                rc = self.mod.provision_retention()
+        self.assertGreaterEqual(rc, 1)
+        self.assertIn("retention not synced", out.getvalue())
+
     def test_dashboard_get_with_non_dict_body_is_reported_not_raised(self):
         # api() returns a raw string body on HTTPError, so full.get() would raise
         # AttributeError and abort the whole provisioning run.

@@ -1349,12 +1349,17 @@ def provision_retention():
     type. Partial PUT (stream settings merge — verified live: other settings
     fields survive). Skips streams already at the target value."""
     changed = 0
+    fatal = 0
     for stype, days in RETENTION_DAYS.items():
         status, resp = api("GET", f"/streams?type={stype}")
-        if status != 200:
-            print(f"{status} list streams type={stype}: {str(resp)[:200]}")
+        # M2-3: an unreadable list is fatal — retention silently skipped is a
+        # policy that exists only on paper.
+        if status != 200 or not isinstance(resp, dict):
+            print(f"{status} list streams type={stype} failed — retention not synced: "
+                  f"{str(resp)[:200]}")
+            fatal += 1
             continue
-        streams = resp.get("list", []) if isinstance(resp, dict) else []
+        streams = resp.get("list", [])
         for s in streams:
             name = s["name"]
             cur = s.get("settings", {}).get("data_retention", 0)
@@ -1372,11 +1377,13 @@ def provision_retention():
                 print(
                     f"{st} set retention {stype}/{name} (cur={cur}): {str(body)[:200]}"
                 )
+                fatal += 1
     print(
         f"retention sync: {changed} stream(s) updated "
         f"(policy {json.dumps(RETENTION_DAYS)}; alert rules live in the O2 "
         f"meta store, not stream retention)"
     )
+    return fatal
 
 
 def api(method, path, body=None):
@@ -1633,14 +1640,18 @@ def provision_dashboards() -> int:
     return failures
 
 
-def provision_destination():
+def provision_destination() -> int:
     # v0.91.5 route: /api/{org}/alerts/destinations (not /destinations); list
     # response is a raw JSON array.
-    _, existing = api("GET", "/alerts/destinations")
-    names = {d.get("name") for d in existing} if isinstance(existing, list) else set()
+    status, existing = api("GET", "/alerts/destinations")
+    # M2-3: an unreadable list is not an empty list — refuse before any POST.
+    if status != 200 or not isinstance(existing, list):
+        print(f"{status} list destinations failed — refusing to POST: {str(existing)[:200]}")
+        return 1
+    names = {d.get("name") for d in existing}
     if "dev-webhook" in names:
         print("destination exists: dev-webhook")
-        return
+        return 0
     body = {
         "name": "dev-webhook",
         # localhost = O2's own netns: the compose alert-consumer service
@@ -1660,6 +1671,10 @@ def provision_destination():
     }
     status, resp = api("POST", "/alerts/destinations", body)
     print(f"{status} create destination dev-webhook: {json.dumps(resp)[:200]}")
+    if status not in (200, 201):
+        print("ERROR: destination dev-webhook was not created")
+        return 1
+    return 0
 
 
 # O2 refuses alerts on streams that don't exist yet ("Stream X not found").
@@ -1810,13 +1825,13 @@ def provision_alerts():
     v2api = lambda method, body=None: api_raw(
         method, f"{BASE}/api/v2/{ORG}/alerts", body
     )
-    _, existing = v2api("GET")
-    names = (
-        {a.get("name") for a in existing.get("list", [])}
-        if existing and isinstance(existing, dict)
-        else set()
-    )
-    created = failed = 0
+    status, existing = v2api("GET")
+    # M2-3: an unreadable list is not an empty list — refuse before any POST.
+    if status != 200 or not isinstance(existing, dict):
+        print(f"{status} list alerts failed — refusing to POST: {str(existing)[:200]}")
+        return 1
+    names = {a.get("name") for a in existing.get("list", [])}
+    created = failed = deferred = 0
     for spec in ALERTS:
         name = spec["name"]
         if name in names:
@@ -1869,9 +1884,16 @@ def provision_alerts():
         status, resp = v2api("POST", body)
         if status in (200, 201):
             created += 1
+        elif status in (400, 404) and "not found" in str(resp).lower():
+            # M2-3: the stream does not exist yet (off-session compute streams
+            # appear once signals flow) — deferred, not fatal.
+            deferred += 1
         else:
             failed += 1
         print(f"{status} create alert {name}: {json.dumps(resp)[:200]}")
+    if deferred:
+        print(f"alerts: {deferred} deferred — their metric streams do not exist yet; "
+              f"re-run when live")
     if failed:
         # F7 (2026-09-28): a rule that silently does not exist is worse than no
         # rule. Off-session, some compute metric streams do not exist yet, so
@@ -1880,21 +1902,28 @@ def provision_alerts():
         print(f"alerts: created={created} failed={failed} — failed rules need their "
               f"metric streams (off-session compute streams appear once signals flow); "
               f"re-run when live")
+    return failed
 
 
-if __name__ == "__main__":
+def main(argv=None) -> int:
+    """M2-3: one entry point with an int exit — 0 only when nothing failed.
+
+    0 = provisioned (deferred stream-not-found alerts included), 1 = a fatal
+    failure, 2 = the offline --check corpus is invalid.
+    """
+    argv = sys.argv[1:] if argv is None else list(argv)
     # --check: offline fail-fast validation of the COMMAND corpus (CI gate).
     # Requires O2_AUTH_BASIC only to satisfy the import-time env guard;
     # makes no network calls.
-    if "--check" in sys.argv:
+    if "--check" in argv:
         problems = validate_command_spec()
         if problems:
             print("ERROR: COMMAND - Command Center spec is invalid:")
             for p in problems:
                 print(f"  - {p}")
-            sys.exit(2)
+            return 2
         print("COMMAND spec check: OK")
-        sys.exit(0)
+        return 0
     # Health gate: O2 must be reachable and credentials valid.
     # Route is GET /config (v0.91.5 nests config under /config, not /api/{org}).
     req = urllib.request.Request(f"{BASE}/config", headers=HEADERS, method="GET")
@@ -1913,14 +1942,19 @@ if __name__ == "__main__":
         status, payload = 0, str(e)
     if status != 200:
         print(f"ERROR: OpenObserve not ready (GET /config -> {status}): {payload}")
-        sys.exit(1)
+        return 1
     print(f"OpenObserve reachable: {json.dumps(json.loads(payload))[:160]}")
-    provision_destination()
-    dash_failures = provision_dashboards()
+    fatal = provision_destination()
+    fatal += provision_dashboards()
     seed_streams()
-    provision_alerts()
-    provision_retention()
-    if dash_failures:
-        print(f"ERROR: {dash_failures} dashboard(s) failed to converge (see above)")
-        sys.exit(1)
+    fatal += provision_alerts()
+    fatal += provision_retention()
+    if fatal:
+        print(f"ERROR: {fatal} provisioning failure(s) (see above)")
+        return 1
     print("done")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
