@@ -18,13 +18,13 @@
     {
       "table_name": "Signal_Candidates",
       "ddl_path": "05_signal_candidates.sql",
-      "ddl_sha256": "be5693237200c8a9d87562c50e63dcc32417f341c42c90a36821803d2deb7de2",
+      "ddl_sha256": "898ab0e953a7071df41f755f4e41418977af4ef0bc87bd54d3b026997e0362a4",
       "table_kind": "LOG",
       "bucket_key": "instrument_token",
       "primary_key": null,
       "compatibility_class": "UNKNOWN",
       "validated_matrix": "VM-FLUSS-CONN-007",
-      "schema_version": "3",
+      "schema_version": "2",
       "writer_owner": "Signal job",
       "retention_policy": "7d",
       "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
@@ -256,13 +256,13 @@
     {
       "table_name": "Signal_Candidates_current",
       "ddl_path": "23_signal_candidates_current.sql",
-      "ddl_sha256": "69df61715206d895d86ee466932f27f92d7fad4a49a7becb0fd8ecd983650d25",
+      "ddl_sha256": "b816c682b7af1baa6937a603401edf4890d154e527f3ba5fd9d78c13db38675b",
       "table_kind": "KV",
       "primary_key": "instrument_token",
       "bucket_key": null,
       "compatibility_class": "UNKNOWN",
       "validated_matrix": "VM-FLUSS-CONN-007",
-      "schema_version": "1",
+      "schema_version": "2",
       "writer_owner": "Signal job",
       "retention_policy": "7d",
       "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
@@ -326,7 +326,7 @@
     {
       "table_name": "Position_State",
       "ddl_path": "29_position_state.sql",
-      "ddl_sha256": "c19706e09798f615953553ace534e366d0b12fcde9d6fc043ffefdcbe668a3fa",
+      "ddl_sha256": "adef59a9db0ae285bbe675f628928764c14261c7cfea941f17369336c4b5a202",
       "table_kind": "KV",
       "primary_key": "account_scope_id, instrument_token",
       "bucket_key": null,

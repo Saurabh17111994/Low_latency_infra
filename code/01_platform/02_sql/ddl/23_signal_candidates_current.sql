@@ -28,7 +28,11 @@
 --   extend path when included explicitly (same P4-018 note as the LOG twin)
 -- Scope: none (global pre-portfolio signal — P4-016; portfolio scoping starts
 --   at Trade_Decisions; single active row per instrument_token BY DESIGN, P4-003)
--- Schema version: 1
+-- Schema version: 2
+--
+-- Domain contract: schema_version writer-set '2' — the same row contract as the
+--   05 LOG twin (SignalCandidatesTableColumns.SCHEMA_VERSION_V2); the KV shape
+--   differs only in the primary key, never in the row fields.
 --
 -- Single-active semantics (P4-003 — deliberate, not a missing column): one row
 -- per instrument_token; a supersession upserts the same key. Cross-portfolio /

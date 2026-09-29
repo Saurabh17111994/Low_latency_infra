@@ -72,6 +72,28 @@ class SignalCurrentDdlContractTest {
     private static final Pattern COLUMN = Pattern.compile(
             "^\\s*([a-z_][a-z0-9_]*)\\s+(STRING|BIGINT|INT|BYTES|DOUBLE|FLOAT|BOOLEAN)\\b",
             Pattern.CASE_INSENSITIVE | Pattern.MULTILINE);
+    /** M5-1: the row contract version in the DDL header. */
+    private static final Pattern SCHEMA_VERSION_HEADER = Pattern.compile(
+            "^--\\s*Schema version:\\s*(\\d+)", Pattern.MULTILINE);
+    /** M5-1: the domain line naming what the writer sets. */
+    private static final Pattern SCHEMA_VERSION_WRITER = Pattern.compile(
+            "schema_version writer-set '(\\d+)'");
+
+    @Test
+    @DisplayName("M5-1: both signal DDLs pin row schema_version 2 (header + writer-set line)")
+    void bothDdlsPinRowSchemaVersionTwo() throws IOException {
+        String log = readDdl("05_signal_candidates.sql");
+        String kv = readDdl("23_signal_candidates_current.sql");
+        assertEquals("2", schemaVersionHeader(log),
+                "the LOG header must carry the row contract version the writer sets "
+                        + "(the v2/v3 notes below it are table-kind history)");
+        assertEquals("2", schemaVersionHeader(kv),
+                "the KV header must carry the same row contract version as the LOG twin");
+        assertEquals("2", schemaVersionWriter(log),
+                "the LOG domain line must say schema_version writer-set '2'");
+        assertEquals("2", schemaVersionWriter(kv),
+                "the KV domain line must say schema_version writer-set '2'");
+    }
 
     @Test
     @DisplayName("LOG DDL stays LOG: no primary key, instrument_token bucket, 22 shared columns")
@@ -174,6 +196,18 @@ class SignalCurrentDdlContractTest {
     private static String logTtl(String ddl) {
         Matcher m = LOG_TTL.matcher(ddl);
         return m.find() ? m.group(1) : null;
+    }
+
+    private static String schemaVersionHeader(String ddl) {
+        Matcher m = SCHEMA_VERSION_HEADER.matcher(ddl);
+        assertTrue(m.find(), "DDL must declare '-- Schema version: <n>'");
+        return m.group(1);
+    }
+
+    private static String schemaVersionWriter(String ddl) {
+        Matcher m = SCHEMA_VERSION_WRITER.matcher(ddl);
+        assertTrue(m.find(), "DDL must declare schema_version writer-set '<n>'");
+        return m.group(1);
     }
 
     /** Top-level column names in declared order. */

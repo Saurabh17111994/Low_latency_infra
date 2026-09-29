@@ -9,13 +9,14 @@
 --   previously claimed EOD offload while the property is 5-min tiering)
 -- Scope: none (global pre-portfolio signal; portfolio scoping starts at
 --   Trade_Decisions — P4-016: header previously claimed portfolio_id with no column)
--- Schema version: 3
+-- Schema version: 2 (row contract; the v2/v3 notes below are TABLE-KIND
+--   history — LOG -> KV -> LOG — not row-schema revisions)
 --
 -- Domain contract (P4-174 — Fluss has no CHECK/DEFAULT; enforced in job code):
 --   detection_ts/evaluation_ts epoch-millis UTC, evaluation_ts >= detection_ts;
 --   quantity > 0; action ENTRY|CANCEL, side BUY|SELL, order_type MARKET|LIMIT
 --   (LIMIT requires limit_price_paise — enforced in ExecutionIntentBuilder.validate
---   + TradeDecisionBuilder.requireValid); schema_version writer-set '3'.
+--   + TradeDecisionBuilder.requireValid); schema_version writer-set '2'.
 -- Dedup authority (P4-017): candidate_id is the logical identity; producer
 --   retries reuse the same id and StrategyHostFunction.emittedIds (checkpointed
 --   MapState keyed by candidate_id) suppresses re-emission before either sink;
