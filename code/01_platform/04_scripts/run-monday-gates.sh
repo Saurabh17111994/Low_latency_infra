@@ -202,6 +202,11 @@ GATE_TOTAL=19   # keep in step with the [N/19] labels (checked against the banne
 GATE_SKIPS=0
 SKIPPED_STEPS=""
 note_skip() { GATE_SKIPS=$((GATE_SKIPS + 1)); SKIPPED_STEPS="$SKIPPED_STEPS $1"; }
+# H4-3: a WARN that skips work must record the skip in the same call — the verdict
+# subtracts GATE_SKIPS, so an uncounted WARN certifies a step that never ran. The
+# WARN for an absent shellcheck binary in step 1 is the deliberate exception
+# (bash -n still runs, so that step is partially verified, not skipped).
+warn_skip() { note_skip "$1"; echo "WARN: $2" | tee -a "$SUMMARY"; }
 
 # --steps parsing: a set of step numbers, empty = every step. Ranges are checked
 # against GATE_TOTAL so a typo can not silently run fewer steps than the caller
@@ -611,7 +616,7 @@ if command -v docker >/dev/null 2>&1 && [ -f "$COMPOSE_FILE" ] && [ -f "$COMPOSE
 	fi
 	echo "PASS: docker compose config" | tee -a "$SUMMARY"
 else
-	echo "WARN: compose file or env files missing ($COMPOSE_ENV_DIR) — skipping compose config" | tee -a "$SUMMARY"
+	warn_skip 2 "compose file or env files missing ($COMPOSE_ENV_DIR) — skipping compose config"
 fi
 
 # ── 0c. Python unit suites (tests/ — incl. ING-TCP-002 reconcile-compare) ────
@@ -779,11 +784,10 @@ if command -v docker >/dev/null 2>&1 && [ -f "$CODE_DIR/02_services/01_ingestion
 		docker rmi ingestion-gate-smoke:local >/dev/null 2>&1 || true
 		echo "PASS: docker build smoke (ingestion image from reactor root)" | tee -a "$SUMMARY"
 	else
-		echo "WARN: base images not cached and network likely unavailable — " \
-			"skipping build smoke (CI with network runs it)" | tee -a "$SUMMARY"
+		warn_skip 7 "base images not cached and network likely unavailable — skipping build smoke (CI with network runs it)"
 	fi
 else
-	echo "WARN: docker unavailable or Dockerfile missing — skipping build smoke" | tee -a "$SUMMARY"
+	warn_skip 7 "docker unavailable or Dockerfile missing — skipping build smoke"
 fi
 
 # ── 5b. CHG-101: stale-image guard — no compose build: image may be older
