@@ -38,10 +38,10 @@ Where a body section and this list disagree, this list wins.
 | M2 — ops tooling truth | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
 | M3 — compute correctness and configuration | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | M4 — ingestion gates and accounting | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
-| M5 — DDL/mock parity pins | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
+| M5 — DDL/mock parity pins | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **21** | **0** | **10** | **0** | **0** | **0** |
+| **Total** | **31** | **23** | **0** | **8** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -135,15 +135,15 @@ Where a body section and this list disagree, this list wins.
 
 #### M5 — DDL/mock parity pins
 
-- [ ] **M5-1** — `Signal_Candidates` row version is `"2"` everywhere: fix the DDL headers/prose
+- [x] **M5-1** — `Signal_Candidates` row version is `"2"` everywhere: fix the DDL headers/prose
   (05 → 2 with the table-kind-v3 note; 23 → 2), regenerate the manifest offline (one regeneration
   shared with M6-1), and pin Java constant == both DDL headers == both domain lines == both
-  manifest entries. (CM1.)
-- [ ] **M5-2** — Mock broker speaks the canonical decoded-tick dialect: rebind the emitted keys to
+  manifest entries. (CM1.) — CHG-411
+- [x] **M5-2** — Mock broker speaks the canonical decoded-tick dialect: rebind the emitted keys to
   proto `TickEvent`/Go `Tick` names (`token`, `ts_ms`, `ltp_paise`, 5-element ladders, …; drop
   `change_pct`, nested `depth_*`, `ohlc_*`), keep framing/pacing; add a committed
   `code/testdata/mock-tick-sample.json` consumed by a strict Go decode test and a Python key-set
-  pin. Lands after H5-2/H5-3. (CM2.)
+  pin. Lands after H5-2/H5-3. (CM2.) — CHG-412
 
 #### M6 — infra/DDL/rehearsal parity
 
