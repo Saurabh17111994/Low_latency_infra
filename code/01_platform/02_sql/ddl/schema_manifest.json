@@ -13,7 +13,7 @@
       "schema_version": "4",
       "writer_owner": "Ingestion",
       "retention_policy": "9d",
-      "lake_policy": "off"
+      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Signal_Candidates",

@@ -148,35 +148,115 @@ def enforce_version_gate(versions):
 
 
 def parse_bucket_key(ddl_text):
-    match = re.search(r"'bucket\.key'\s*=\s*'([^']*)'", ddl_text)
+    match = re.search(r"'bucket\.key'\s*=\s*'([^']*)'", strip_sql_comments(ddl_text))
     return match.group(1) if match else None
 
 
+def strip_sql_comments(text):
+    """Remove `--` line comments that are OUTSIDE single-quoted strings.
+
+    M6-1: comments are not SQL, but they can contain `)`, `;` or option-like
+    text. Measured: 02_raw_table_1.sql's 'table.log.ttl' line ends with
+    "... (was 7d); keep > num-retention + EOD SLA" — the old non-greedy WITH
+    regex stopped at that `);` and dropped every later option, so the manifest
+    recorded raw_table_1.lake_policy = "off" while the DDL enables the
+    datalake. The scan is quote-aware in both directions: a comment may contain
+    quotes, and a quoted value may contain `--`.
+    """
+    out = []
+    i = 0
+    length = len(text)
+    in_quote = False
+    while i < length:
+        ch = text[i]
+        if in_quote:
+            if ch == "'":
+                if i + 1 < length and text[i + 1] == "'":
+                    out.append("''")  # escaped quote inside a string
+                    i += 2
+                    continue
+                in_quote = False
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "'":
+            in_quote = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "-" and i + 1 < length and text[i + 1] == "-":
+            newline = text.find("\n", i)
+            if newline == -1:
+                break
+            out.append("\n")
+            i = newline + 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def parse_primary_key(ddl_text):
-    match = re.search(r"PRIMARY KEY\s*\(([^)]+)\)", ddl_text)
+    match = re.search(r"PRIMARY KEY\s*\(([^)]+)\)", strip_sql_comments(ddl_text))
     return match.group(1).strip() if match else None
 
 
 def parse_table_name(ddl_text):
-    match = re.search(r"CREATE TABLE (\w+)", ddl_text)
+    match = re.search(r"CREATE TABLE (\w+)", strip_sql_comments(ddl_text))
     return match.group(1) if match else None
+
+
+def _balanced_with_body(text, open_paren_index):
+    """The WITH body from just after the opening paren to its balancing `)`, quote-aware."""
+    depth = 0
+    in_quote = False
+    i = open_paren_index
+    while i < len(text):
+        ch = text[i]
+        if in_quote:
+            if ch == "'":
+                if i + 1 < len(text) and text[i + 1] == "'":
+                    i += 2
+                    continue
+                in_quote = False
+            i += 1
+            continue
+        if ch == "'":
+            in_quote = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_paren_index + 1:i]
+        i += 1
+    raise ValueError("unbalanced parentheses in the WITH block")
 
 
 def parse_with_options(ddl_text):
     """Extract the WITH (...) options block as an ordered dict.
 
     Our DDLs write options as 'key' = 'value' pairs (single-quoted, dotted
-    keys). Everything between the closing paren of the column list and the
-    final ';' is the WITH block.
+    keys). M6-1: comments are stripped first (quote-aware) and the block is
+    scanned to its balancing close paren — a `);` inside a comment must never
+    truncate the option list. Fail-closed: when the DDL names
+    'table.datalake.enabled' but the parsed options do not carry it, the parser
+    refuses rather than emit a manifest that says the lake is off.
     """
-    match = re.search(r"\)\s*WITH\s*\((.*?)\)\s*;", ddl_text, re.DOTALL)
+    stripped = strip_sql_comments(ddl_text)
+    match = re.search(r"\)\s*WITH\s*\(", stripped)
     if not match:
         return {}
+    body = _balanced_with_body(stripped, match.end() - 1)
     options = {}
     # Keys are dotted option names and may contain hyphens
     # (e.g. 'table.datalake.auto-compaction'); values are single-quoted.
-    for key, value in re.findall(r"'([a-zA-Z0-9_.-]+)'\s*=\s*'([^']*)'", match.group(1)):
+    for key, value in re.findall(r"'([a-zA-Z0-9_.-]+)'\s*=\s*'([^']*)'", body):
         options[key] = value
+    if "'table.datalake.enabled'" in stripped and "table.datalake.enabled" not in options:
+        raise ValueError(
+            "DDL names 'table.datalake.enabled' but the WITH parser did not read it — "
+            "refusing to emit a manifest with a wrong lake_policy")
     return options
 
 
