@@ -600,10 +600,13 @@ loadtest-20k-regression:
 	echo "$$OUT"; \
 	DIR=$$(echo "$$OUT" | grep -oE 'logs/tracker-14/loadtest-[0-9-]+' | head -1); \
 	[ -n "$$DIR" ] || { echo "loadtest-20k-regression: FAIL — no output dir" >&2; exit 1; }; \
-	APPENDED=$$(grep -oE 'appended=[0-9]+' "$$DIR"/j1/java.out 2>/dev/null | tail -1 | cut -d= -f2); \
-	UNSAFE=$$(grep -c 'UNSAFE' "$$DIR"/j1/java.out 2>/dev/null || echo 0); \
-	echo "loadtest-20k-regression: appended=$${APPENDED:-0} unsafe=$$UNSAFE"; \
-	[ "$${APPENDED:-0}" -ge 5500000 ] || { echo "loadtest-20k-regression: FAIL — appended $${APPENDED:-0} < 5.5M" >&2; exit 1; }; \
+	EVIDENCE="$$DIR/j1/java.out"; \
+	[ -f "$$EVIDENCE" ] || { echo "loadtest-20k-regression: FAIL — evidence file missing: $$EVIDENCE" >&2; exit 1; }; \
+	APPENDED=$$(grep -oE 'appended=[0-9]+' "$$EVIDENCE" | tail -1 | cut -d= -f2); \
+	[ -n "$$APPENDED" ] || { echo "loadtest-20k-regression: FAIL — no appended= line in $$EVIDENCE" >&2; exit 1; }; \
+	UNSAFE=$$(grep -c 'UNSAFE' "$$EVIDENCE" || true); \
+	echo "loadtest-20k-regression: appended=$$APPENDED unsafe=$$UNSAFE"; \
+	[ "$$APPENDED" -ge 5500000 ] || { echo "loadtest-20k-regression: FAIL — appended $$APPENDED < 5.5M" >&2; exit 1; }; \
 	[ "$$UNSAFE" -eq 0 ] || { echo "loadtest-20k-regression: FAIL — $$UNSAFE UNSAFE halts" >&2; exit 1; }; \
 	echo "loadtest-20k-regression: PASS (appended=$$APPENDED, unsafe=0)"
 

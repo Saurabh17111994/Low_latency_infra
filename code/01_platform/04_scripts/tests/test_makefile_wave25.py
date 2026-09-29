@@ -21,7 +21,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[4]
 MAKEFILE = REPO / "Makefile"
 SCRIPTS_REL = "code/01_platform/04_scripts"
-TOOLS = ("bash", "find", "sort", "mktemp", "head", "cat", "rm", "grep", "printf", "sed", "seq")
+TOOLS = ("bash", "find", "sort", "mktemp", "head", "tail", "cat", "rm", "grep", "printf", "sed", "seq", "cut", "mkdir")
 MAKE = shutil.which("make") or "/usr/bin/make"
 # P6-302's evidence: the recipe targets that were missing from .PHONY.
 WERE_MISSING = """
@@ -200,6 +200,72 @@ class LoadtestPreflightTargetTest(unittest.TestCase):
         self.assertIn("check-loadtest-env: OK (preflight passed)", proc.stdout)
         self.assertIn("preflight line 20", proc.stdout)
         self.assertNotIn("preflight line 21", proc.stdout, "head -20 truncation lost")
+
+
+LOADTEST_20K_STUB = """#!/bin/bash
+# H4-1: the regression target reads THIS run's evidence file. The env vars let each
+# test pick the shape: missing evidence, missing appended=, low count, UNSAFE halts.
+DIR="logs/tracker-14/loadtest-2026-09-29"
+mkdir -p "$DIR/j1"
+if [ "${W25_NO_EVIDENCE:-0}" != "1" ]; then
+  {
+    [ -n "${W25_APPENDED:-}" ] && echo "appended=${W25_APPENDED}"
+    i=0
+    while [ "$i" -lt "${W25_UNSAFE:-0}" ]; do echo "UNSAFE halt observed"; i=$((i + 1)); done
+  } > "$DIR/j1/java.out"
+fi
+echo "run dir: $DIR"
+exit 0
+"""
+
+
+class LoadtestRegressionGateTest(unittest.TestCase):
+    """H4-1 (P1-2): the 20k gate must read its evidence, not certify a missing log.
+
+    Three defects, one shape — a verdict that cannot be trusted:
+
+    * `UNSAFE=$(grep -c … || echo 0)` printed `0\\n0` when java.out was absent (the
+      count's own zero plus the fallback), so `[ … -eq 0 ]` aborted with "integer
+      expression expected" — a clean run failed for the wrong reason;
+    * an empty `appended=` was read through `:-0`, so a missing line looked like a
+      low count;
+    * nothing asserted the evidence file existed, so the "evidence" could be absent
+      entirely while the recipe still printed a verdict.
+    """
+
+    def _run(self, **env):
+        box = _Sandbox(loadtest=True)
+        box._write_script("loadtest-run.sh", LOADTEST_20K_STUB)
+        try:
+            return box.make("loadtest-20k-regression", env)
+        finally:
+            box.cleanup()
+
+    def test_a_clean_run_passes(self):
+        proc = self._run(W25_APPENDED="5500000")
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertIn("loadtest-20k-regression: PASS (appended=5500000, unsafe=0)", proc.stdout)
+        self.assertNotIn("integer expression expected", proc.stderr)
+
+    def test_unsafe_halts_fail(self):
+        proc = self._run(W25_APPENDED="5500000", W25_UNSAFE="3")
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("FAIL — 3 UNSAFE halts", proc.stderr)
+
+    def test_a_missing_evidence_file_fails(self):
+        proc = self._run(W25_APPENDED="5500000", W25_NO_EVIDENCE="1")
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("evidence file missing", proc.stderr)
+
+    def test_a_missing_appended_line_fails(self):
+        proc = self._run()  # the file exists, but it carries no appended= line
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("no appended= line", proc.stderr)
+
+    def test_a_low_count_fails(self):
+        proc = self._run(W25_APPENDED="100")
+        self.assertNotEqual(0, proc.returncode)
+        self.assertIn("FAIL — appended 100 < 5.5M", proc.stderr)
 
 
 class IngestionCleanTargetTest(unittest.TestCase):
