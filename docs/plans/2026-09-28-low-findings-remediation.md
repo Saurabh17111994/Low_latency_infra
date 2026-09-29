@@ -36,9 +36,9 @@ Where a body section and this list disagree, this list wins.
 | L2 — ops tooling: lint scope and tracker wiring | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | L4 — ingestion: config doc parity and final-report atomicity | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| L5 — common/mock: semantics and naming truth | 4 | 1 | 0 | 3 | 0 | 0 | 0 |
+| L5 — common/mock: semantics and naming truth | 4 | 2 | 0 | 2 | 0 | 0 | 0 |
 | L6 — infra/DDL: guards, parity, docs | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| **Total** | **17** | **10** | **0** | **7** | **0** | **0** | **0** |
+| **Total** | **17** | **11** | **0** | **6** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
@@ -105,9 +105,9 @@ Where a body section and this list disagree, this list wins.
 - [x] **L5-1** — `requiresHalt(STALE)` tells the truth: `REGRESSION || CONFLICT || UNKNOWN`
   (STALE is a non-halting soft reject, matching every production switch); javadoc and the stale
   `PositionProjector` prose corrected. Lands with/before M1-6 so one semantic vocabulary holds. — CHG-426
-- [ ] **L5-2** — Safety-halt parser never saturates: reject via the true exclusive bound
+- [x] **L5-2** — Safety-halt parser never saturates: reject via the true exclusive bound
   `2^63` (`0x1p63`) — non-finite, non-integral, below `-2^63`, or ≥ `2^63` all throw; the Float
-  branch widens to `double`; the largest representable value below the bound is accepted exactly.
+  branch widens to `double`; the largest representable value below the bound is accepted exactly. — CHG-427
 - [ ] **L5-3** — Positions average-price encoding one truth: the DDL sentence becomes
   "`average_*_paise = 0` iff the matching quantity is 0; legacy SQL NULL reads as 0"; the
   `PositionSnapshot` constructor enforces the invariant; the gateway writer canonicalizes

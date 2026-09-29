@@ -137,16 +137,25 @@ public final class SafetyHaltRequestParser {
             }
         }
         if (value instanceof Double d) {
-            if (!Double.isFinite(d) || d % 1 != 0 || d < Long.MIN_VALUE || d > Long.MAX_VALUE) {
+            // L5-2: the exclusive upper bound is 2^63 (0x1p63). Comparing with
+            // `Long.MAX_VALUE` promotes it to 2^63, so d == 2^63 passed and
+            // d.longValue() saturated to Long.MAX_VALUE — a wire value beyond the
+            // long range silently became a valid one. The lower bound -2^63 IS
+            // representable (Long.MIN_VALUE), so it stays inclusive.
+            if (!Double.isFinite(d) || d % 1 != 0 || d < -0x1p63 || d >= 0x1p63) {
                 throw new ParseException(col + " must be an integral long, got " + describe(value));
             }
             return d.longValue();
         }
         if (value instanceof Float f) {
-            if (!Float.isFinite(f) || f % 1 != 0 || f < Long.MIN_VALUE || f > Long.MAX_VALUE) {
+            // L5-2: widen to double — a float near the bound rounds exactly to
+            // 2^63, which the same exclusive check must reject (and a float that
+            // IS in range widens exactly).
+            double d = f;
+            if (!Double.isFinite(d) || d % 1 != 0 || d < -0x1p63 || d >= 0x1p63) {
                 throw new ParseException(col + " must be an integral long, got " + describe(value));
             }
-            return f.longValue();
+            return (long) d;
         }
         throw new ParseException(col + " must be a number, got " + describe(value));
     }

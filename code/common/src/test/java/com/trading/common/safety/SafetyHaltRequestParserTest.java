@@ -84,6 +84,47 @@ class SafetyHaltRequestParserTest {
         assertTrue(e5.getMessage().contains("connection_epoch"));
     }
 
+    @Test
+    @DisplayName("L5-2: the long bound is exclusive 2^63 — no saturation")
+    void longBoundIsExclusiveTwoToTheSixtyThree() {
+        // (double) Long.MAX_VALUE rounds UP to 2^63; the old `d > Long.MAX_VALUE`
+        // accepted it and longValue() saturated it to Long.MAX_VALUE.
+        Object[] beyond = {
+            (double) Long.MAX_VALUE, // 2^63 exactly
+            0x1p63,                  // 2^63
+            Double.MAX_VALUE,
+            (float) Long.MAX_VALUE,  // 2^63 as float
+            0x1p63f,                 // 2^63 as float
+            Float.MAX_VALUE,
+            Double.NaN,
+            Double.POSITIVE_INFINITY,
+            Double.NEGATIVE_INFINITY,
+            Math.scalb(-1.0, 63) - 2048.0, // below -2^63
+        };
+        for (Object value : beyond) {
+            Map<String, Object> row = unsafeRow("hft-0", 5L, "FEED_STALLED");
+            row.put(SafetyHaltRequestParser.COL_CONNECTION_EPOCH, value);
+            assertThrows(SafetyHaltRequestParser.ParseException.class,
+                    () -> SafetyHaltRequestParser.parse(row),
+                    "must reject " + value);
+        }
+    }
+
+    @Test
+    @DisplayName("L5-2: the largest value below the bound is accepted exactly")
+    void largestValueBelowTheBoundIsAcceptedExactly() {
+        double below = Math.nextDown(0x1p63); // 2^63 - 1024
+        Map<String, Object> row = unsafeRow("hft-0", 5L, "FEED_STALLED");
+        row.put(SafetyHaltRequestParser.COL_CONNECTION_EPOCH, below);
+        assertEquals(9223372036854774784L, SafetyHaltRequestParser.parse(row).connectionEpoch());
+        assertEquals((long) below, SafetyHaltRequestParser.parse(row).connectionEpoch());
+
+        // A float in range widens exactly.
+        Map<String, Object> viaFloat = unsafeRow("hft-0", 5L, "FEED_STALLED");
+        viaFloat.put(SafetyHaltRequestParser.COL_CONNECTION_EPOCH, 5.0f);
+        assertEquals(5L, SafetyHaltRequestParser.parse(viaFloat).connectionEpoch());
+    }
+
     private static Map<String, Object> unsafeRow(String slotId, long epoch, String reason) {
         Map<String, Object> row = baseRow(slotId, epoch);
         row.put(SafetyHaltRequestParser.COL_STATE, "UNSAFE");
