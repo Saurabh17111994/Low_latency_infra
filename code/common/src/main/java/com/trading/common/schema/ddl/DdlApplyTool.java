@@ -19,6 +19,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -44,11 +45,15 @@ import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.metadata.TableDescriptor;
 import org.apache.fluss.row.BinaryString;
+import org.apache.fluss.row.GenericMap;
 import org.apache.fluss.row.GenericRow;
+import org.apache.fluss.row.InternalArray;
+import org.apache.fluss.row.InternalMap;
 import org.apache.fluss.row.InternalRow;
 import org.apache.fluss.types.DataType;
 import org.apache.fluss.types.DataTypeRoot;
 import org.apache.fluss.types.DataTypes;
+import org.apache.fluss.types.MapType;
 import org.apache.fluss.types.RowType;
 import org.apache.fluss.utils.CloseableIterator;
 
@@ -1202,6 +1207,13 @@ public final class DdlApplyTool {
             case BYTES -> new byte[] {(byte) (index + 1), 2};
             case DOUBLE -> 1.0d + index;
             case BOOLEAN -> true;
+            // feature_values (2026-09-27, DEC-056/057): MAP<INT, DOUBLE> keyed by
+            // the append-only registry id. One deterministic entry whose key and
+            // value come from the declared child types — recursion keeps future
+            // map shapes covered instead of hard-coding INT/DOUBLE here.
+            case MAP -> new GenericMap(Map.of(
+                    defaultValue(((MapType) type).getKeyType(), index),
+                    defaultValue(((MapType) type).getValueType(), index)));
             // Forward-cover arms (no TIMESTAMP/DATE/DECIMAL/CHAR column exists
             // in today's 27 DDLs; DdlText.type() maps them for future DDLs):
             // values must match what isSmokeFixtureRow/copyFieldValue expect.
@@ -1467,6 +1479,33 @@ public final class DdlApplyTool {
                 case TIME_WITHOUT_TIME_ZONE -> {
                     if (row.getInt(i) != ((Number) want).intValue()) {
                         return false;
+                    }
+                }
+                case MAP -> {
+                    // GenericMap.equals recognises only another GenericMap, but the
+                    // sweep reads live rows back (a ColumnarMap), so compare
+                    // structurally through the canonical element getters — the same
+                    // conversion the tiering path uses.
+                    InternalMap got = row.getMap(i);
+                    InternalMap wantMap = (InternalMap) want;
+                    if (got == null || got.size() != wantMap.size()) {
+                        return false;
+                    }
+                    MapType mapType = (MapType) type;
+                    InternalArray.ElementGetter keyGetter =
+                            InternalArray.createDeepElementGetter(mapType.getKeyType());
+                    InternalArray.ElementGetter valueGetter =
+                            InternalArray.createDeepElementGetter(mapType.getValueType());
+                    InternalArray wantKeys = wantMap.keyArray();
+                    InternalArray wantValues = wantMap.valueArray();
+                    for (int k = 0; k < wantKeys.size(); k++) {
+                        if (!Objects.equals(keyGetter.getElementOrNull(wantKeys, k),
+                                    keyGetter.getElementOrNull(got.keyArray(), k))
+                                || !Objects.equals(
+                                        valueGetter.getElementOrNull(wantValues, k),
+                                        valueGetter.getElementOrNull(got.valueArray(), k))) {
+                            return false;
+                        }
                     }
                 }
                 default -> {
