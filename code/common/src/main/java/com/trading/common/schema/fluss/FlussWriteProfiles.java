@@ -129,7 +129,7 @@ public final class FlussWriteProfiles {
      * and lifecycle writes. Previously 5ms, on the assumption that a longer
      * linger bought batching on these higher-volume paths. The 2026-09-11
      * serialized probe disproved that: every bulk caller awaits its own ack
-     * (FlussProjectionLedgerStore.java:69, FlussProjectionWriter.java:147/151,
+     * (execution-gateway FlussProjectionLedgerStore.put, FlussProjectionWriter.java:147/151,
      * PostbackQuarantineStore.java:107, FlussPositionsStateStore.java:102,
      * FlussPostbackQuarantineStore.java:93), so a batch never fills and the
      * extra ~4ms was pure added latency per write. Held equal to the money-path

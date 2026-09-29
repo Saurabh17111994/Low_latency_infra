@@ -36,9 +36,9 @@ Where a body section and this list disagree, this list wins.
 | L2 — ops tooling: lint scope and tracker wiring | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | L4 — ingestion: config doc parity and final-report atomicity | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| L5 — common/mock: semantics and naming truth | 4 | 3 | 0 | 1 | 0 | 0 | 0 |
+| L5 — common/mock: semantics and naming truth | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | L6 — infra/DDL: guards, parity, docs | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| **Total** | **17** | **12** | **0** | **5** | **0** | **0** | **0** |
+| **Total** | **17** | **13** | **0** | **4** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
@@ -113,12 +113,12 @@ Where a body section and this list disagree, this list wins.
   `PositionSnapshot` constructor enforces the invariant; the gateway writer canonicalizes
   null→0 when the matching quantity is 0 and rejects null-with-quantity>0 (fail-closed). No
   reader distinguishes 0 from NULL today, so no consumer changes. — CHG-428
-- [ ] **L5-4** — The common `FlussProjectionLedgerStore` is deleted (it opens a Connection/Table
+- [x] **L5-4** — The common `FlussProjectionLedgerStore` is deleted (it opens a Connection/Table
   then delegates to an in-memory map — the name promises durability it does not provide). The
   in-memory oracle (`InMemoryProjectionLedgerStore`) stays; durability belongs to the gateway
   store + `Postback_Projection_Ledger` single writer (H1-1/M1-6 keep that invariant). Guard: a
   gate-discovered check that no Fluss-named ledger exists outside the gateway and the common
-  interface is only implemented in memory.
+  interface is only implemented in memory. — CHG-429
 
 #### L6 — infra/DDL: guards, parity, docs
 
