@@ -54,7 +54,7 @@ What it does — and does not do:
 |---|---|
 | installs Docker + compose plugin (if missing), python3 + tzdata for the host scheduler, and enables Docker | start the stack |
 | writes `.env` from `.env.example` with the real R2 endpoint/bucket/warehouse | write any secret |
-| writes `.env.vm` from `.env.vm.example` (fresh start, 15:45 EOD, compose runner, stop gate, live DataStream channel via `ARROW_FEED=token`) | run the EOD |
+| writes `.env.vm` from `.env.vm.example` (fresh start, dev+full universe (2433 tokens, 3 sockets), 15:45 EOD, compose runner, stop gate, live DataStream channel via `ARROW_FEED=token`) | run the EOD |
 | installs + enables the `trading-eod` systemd unit | change the code |
 
 The script warns when the project image set is missing; that is what §2.4 loads. `--check`
@@ -62,6 +62,12 @@ additionally proves the in-image toolchain before you snapshot — the ingestion
 `/app/probe/FlussReadLagProbe.class`, the EOD image's java + controller + m2 repo, and the
 `.env.vm` runner/fresh-start/stop-gate keys — so a snapshot that boots a VM unable to run the day
 fails here instead of at 09:15.
+
+The daily VM intentionally runs the **dev + full** universe (`DEPLOYMENT_ENV=dev`,
+`UNIVERSE=full` from `.env.vm`): the real 2433-instrument NSE cash manifest over the three
+approved dev sockets, multi-connection approved. This is a recorded decision (H4-2), not an
+accidental default — `day_run.resolve_universe` still refuses `UNIVERSE=full` under
+`DEPLOYMENT_ENV=prod|production` (CHG-320), and that refusal stays.
 
 ### 2.4 Load the images (from the dev PC — no builds, no registry)
 

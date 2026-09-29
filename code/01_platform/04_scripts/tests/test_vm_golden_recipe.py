@@ -70,6 +70,27 @@ class VmGoldenRecipeTests(unittest.TestCase):
                       "the golden build must install the host scheduler toolchain "
                       "(python3 + tzdata for zoneinfo)")
 
+    def test_profile_records_the_daily_dev_full_operating_mode(self):
+        """H4-2 (P1-3): the daily VM intentionally runs the dev multi-socket universe.
+
+        The profile left DEPLOYMENT_ENV/UNIVERSE unset, so the effective mode came
+        from day_run defaults (dev + full, 2433 tokens, 3 sockets) — a working mode
+        that read as an accident. The decision is now recorded in the profile and the
+        guide; the pre-existing production refusal (CHG-320) stays.
+        """
+        text = VM_ENV.read_text()
+        self.assertRegex(text, r"(?m)^DEPLOYMENT_ENV=dev$")
+        self.assertRegex(text, r"(?m)^UNIVERSE=full$")
+        self.assertIn("2433", text)
+        self.assertIn("three approved dev sockets", text)
+        self.assertIn("CHG-320", text)
+
+    def test_guide_repeats_the_daily_universe(self):
+        text = DOC.read_text()
+        self.assertIn("2433", text)
+        self.assertIn("UNIVERSE=full", text)
+        self.assertIn("DEPLOYMENT_ENV=dev", text)
+
     def test_guide_keeps_the_daily_commands_and_the_safe_to_destroy_rule(self):
         text = DOC.read_text()
         self.assertIn('make day ARGS="start"', text)
