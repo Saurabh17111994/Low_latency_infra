@@ -39,9 +39,9 @@ Where a body section and this list disagree, this list wins.
 | M3 — compute correctness and configuration | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | M4 — ingestion gates and accounting | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
+| M6 — infra/DDL/rehearsal parity | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **23** | **0** | **8** | **0** | **0** | **0** |
+| **Total** | **31** | **26** | **0** | **5** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -147,19 +147,19 @@ Where a body section and this list disagree, this list wins.
 
 #### M6 — infra/DDL/rehearsal parity
 
-- [ ] **M6-1** — WITH-block parser stops truncating: strip `--` comments (outside quotes) and scan
+- [x] **M6-1** — WITH-block parser stops truncating: strip `--` comments (outside quotes) and scan
   to the balancing close paren; fail-closed emission refuses a manifest when
   `'table.datalake.enabled'` is present but parsed away; regenerate (only `raw_table_1.lake_policy`
-  changes to enabled) and add a DDL↔manifest parity test for every entry. (N1.)
-- [ ] **M6-2** — O2 digest enforced end to end: `image-publish.sh --merge-env` overlays every
+  changes to enabled) and add a DDL↔manifest parity test for every entry. (N1.) — CHG-413
+- [x] **M6-2** — O2 digest enforced end to end: `image-publish.sh --merge-env` overlays every
   `${X_IMAGE:?}` the stack demands from `runtime.lock` (missing/bare in lock = error);
   `deploy_preflight` requires deploy-env `*_IMAGE` to equal the lock ref; pin-check extends to
   every demanded `*_IMAGE`. One certifying `docker pull` at landing; digest failure = STOP, never
-  invent one. (N2.)
-- [ ] **M6-3** — p10 rehearsal remaps all base ports: otel `14317/14318`, OpenObserve
+  invent one. (N2.) — CHG-414
+- [x] **M6-3** — p10 rehearsal remaps all base ports: otel `14317/14318`, OpenObserve
   `15080/15081`, MinIO `19000/19001` via `!override`; a guard proves no base-published port is
   left unremapped and the rehearsal stack cannot collide with base or prod ports (supersede
-  FACT-017 append-only). (N3.)
+  FACT-017 append-only). (N3.) — CHG-415
 
 #### M7 — docs currency and its guard
 
