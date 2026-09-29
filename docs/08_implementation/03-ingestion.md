@@ -70,7 +70,7 @@ The pipe is the kernel's stdin/stdout — not a message queue, not a network hop
 | `ARROW_HFT_RECONNECT_MAX_SECONDS` | No | Reconnect max backoff — if set, must equal `30` (pinned) |
 | `ARROW_HFT_AUTH_REFRESH_ATTEMPTS` | No | Auth refresh retries — if set, must equal `3` (pinned) |
 | `ARROW_HFT_MIN_ACTIVE_SLOTS` | No | Minimum active slots before not-ready — if set, must equal `1` (pinned) |
-| `ARROW_FEED` | No | Feed selection for the Go bridge: `hft` (default) drives the HFT stream; `token` drives the standard token market-data stream (`ltp`/`ltpc`/`quote`/`full`). Case-insensitive and space-trimmed; anything else is treated as `hft` |
+| `ARROW_FEED` | No | Feed selection for the Go bridge: `token` (standard DataStream — the live channel on this account) or `hft` (the HFT stream). Case-insensitive and space-trimmed; anything else is treated as `hft` (the code default — fail-safe for a direct run). Deployment pins (2026-09-29): `docker-stack.yml` and the compose base pass `${ARROW_FEED:-token}` through, `.env.vm.example` and `day_run.py`'s effective env pin `token`; `ARROW_HFT_URL` (fake broker) still wins over the selector |
 | `ARROW_HFT_MULTI_CONNECTION_APPROVED` | No | Multi-socket approval flag (default false); rejected in `prod`; the startup preflight requires it for `ARROW_HFT_CONNECTIONS > 1` (CHG-323) |
 | `INGESTION_ALLOW_DEGRADED` | No | Degraded-mode approval flag (default false); rejected in `prod` |
 | `GO_ARROW_SDK_VERSION` | No | Pinned go-arrow SDK version tag `v0.0.0-20260622-7cce1630`; if unset the pinned version is used (warning logged) |
@@ -110,6 +110,16 @@ supervisor, subscription plan, transport and the entire downstream pipeline (Jav
 `raw_table_1`, compute) are reused unchanged. The default is `hft`, so an unset variable
 changes nothing. Under `token`, the HFT-only keys (`ARROW_HFT_LATENCY_MS`, heartbeat, multi
 connection) have no effect.
+
+**Deployment pins (2026-09-29):** the channel is a first-class deployment fact, not a manual
+`.env` edit. `docker-stack.yml` and `docker-compose.yml` pass `ARROW_FEED` through with the
+live-channel default (`${ARROW_FEED:-token}` — Swarm ignores `env_file`, so the stack key is the
+only path into the deck; without it the deck silently ran the code default `hft`), and the daily
+VM pins `token` in `.env.vm.example` and in `day_run.py`'s effective `make up` environment. The
+Go code default with the variable unset stays `hft` (fail-safe for a direct run), and
+`ARROW_HFT_URL` still overrides both for the fake-broker ladders. Both channels stay selectable:
+`ARROW_FEED=hft` is the only edit needed to switch back. Guard:
+`code/01_platform/04_scripts/tests/test_feed_channel_contract.py`.
 
 **Config notes (2026-08-14, fixed):** every `ARROW_HFT_*` key in the table is now read AND enforced by the Go bridge (in addition to the Java startup validation). Pinned keys (`ARROW_HFT_CONNECTIONS`, `ARROW_HFT_MAX_TOKENS_PER_CONNECTION`, `ARROW_HFT_MAX_TOKENS_PER_REQUEST`, `ARROW_HFT_HEARTBEAT_SECONDS`, `ARROW_HFT_RECONNECT_BASE_SECONDS`, `ARROW_HFT_RECONNECT_MAX_SECONDS`, `ARROW_HFT_AUTH_REFRESH_ATTEMPTS`, `ARROW_HFT_MIN_ACTIVE_SLOTS`) fail bridge startup with a clear FATAL message if set to any value other than the pin. Tunable keys are honored at runtime: `ARROW_HFT_STALL_TIMEOUT_SECONDS` (5-60 s) drives the feed-stall watchdog, `ARROW_HFT_SUBSCRIPTION_RESPONSE_TIMEOUT_SECONDS` (1-60 s) drives the subscription-response wait, `ARROW_HFT_LATENCY_MS` drives the tick interval. (The bridge previously read an undocumented `ARROW_HFT_RESPONSE_TIMEOUT_MS`; that key is removed — the documented seconds key is the only one.)
 

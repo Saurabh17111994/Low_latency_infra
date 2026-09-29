@@ -2,12 +2,12 @@
 
 ## Boundary
 
-Two colocated processes in the same container consume the evidence-approved broker stream: a Go arrow-bridge (Arrow Go SDK for auth, WebSocket, binary decode, zstd decompression) pipes NDJSON to Java IngestionService (validate, fingerprint, Fluss append). Original packet bytes are preserved as raw_payload, approved fields are mapped into typed columns, a versioned bounded fingerprint is calculated, and each accepted tick is appended to `raw_table_1` individually through the supported Fluss Java client.
+Two colocated processes in the same container consume the evidence-approved broker stream: a Go arrow-bridge (Arrow Go SDK for auth, WebSocket, binary decode, zstd decompression) pipes length-prefixed proto frames (`proto/market_data.proto`, T6 — NDJSON removed 2026-08-29) to Java IngestionService (validate, fingerprint, Fluss append). Original packet bytes are preserved as raw_payload, approved fields are mapped into typed columns, a versioned bounded fingerprint is calculated, and each accepted tick is appended to `raw_table_1` individually through the supported Fluss Java client.
 
 ## Inputs
 
 - Versioned instrument manifest (loaded from an operator-approved Arrow `GET /all` or `GET /nse` CSV; static for the trading session — a change applies via controlled restart, ASM-ING-003)
-- Arrow market-data WebSocket: `wss://socket.arrow.trade?appID=X&token=Y&zstd=1` (HFT feed — the Standard feed `wss://ds.arrow.trade` was removed 2026-08-14)
+- Arrow market-data WebSocket — exactly one feed family per process, selected with `ARROW_FEED`: the HFT feed `wss://socket.arrow.trade?appID=X&token=Y&zstd=1` (`hft`) or the standard token/DataStream feed `wss://ds.arrow.trade` (`ARROW_FEED=token`, the live channel on this account). Both adapt onto the same slot supervisor and downstream pipeline; deployment pins `token` (see the ingestion dossier "Feed selection")
 - Binary protocol: HFT modes — LTPC (40 bytes), Full (196 bytes), little-endian, zstd-compressed
 - Prices in **paise** (int32, ÷100 for rupees); raw frame timestamps in **nanoseconds (unix)**, converted by the bridge to UTC **epoch milliseconds** (`ts_ms` — the platform's canonical unit; never seconds)
 - Subscribe via JSON: `{"code":"sub","mode":"full","full":[tokens]}`
@@ -15,7 +15,7 @@ Two colocated processes in the same container consume the evidence-approved brok
 - Auth: token from `/auth/app/authenticate-token` (24hr TTL, refreshable)
 - Swarm secret references in production
 - Exact go-arrow SDK version and Fluss 1.0.0 Java client version
-- NDJSON tick schema (versioned contract between Go bridge stdout and Java stdin)
+- Proto tick schema (`TickEvent` in `proto/market_data.proto` — the live transport between the Go bridge and Java; the retired NDJSON schema is kept for reference only)
 
 ## Outputs
 

@@ -887,6 +887,15 @@ services:
       # shutdown — stderr-only reports die with SIGPIPE). Host path so the
       # reconcile can read it after the container stops.
       ARROW_TICK_COUNTS_FILE: ${ARROW_TICK_COUNTS_FILE:-/tmp/arrow-tick-counts.txt}
+      # Dual-channel selector (2026-09-24 token feed; pinned 2026-09-29): the
+      # bridge runs exactly ONE feed family per process. `token` = the standard
+      # DataStream (wss://ds.arrow.trade — the live channel on this account);
+      # `hft` = the HFT stream (wss://socket.arrow.trade). Both ride the same
+      # slot supervisor, proto transport and Java admission path; the feed label
+      # is persisted as protocol_version. The deployment defaults to the live
+      # channel; a fake broker still wins through ARROW_HFT_URL
+      # (streamFactoryFor checks that override first).
+      ARROW_FEED: ${ARROW_FEED:-token}
       ARROW_HFT_LATENCY_MS: ${ARROW_HFT_LATENCY_MS:-50}
       # T0 3-slot (streaming-3000): env-driven slot count N=1..3. Default 1
       # keeps single-socket 1024 working; N=3 shards a single CSV (3000 rows)

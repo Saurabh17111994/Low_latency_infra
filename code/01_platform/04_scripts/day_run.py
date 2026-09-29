@@ -975,6 +975,12 @@ def universe_env(universe: Universe) -> dict:
         # M4-1 (SCH-22): the daily VM reads the real feed — a truncated CSV
         # below the approved-universe minimum must refuse startup.
         "INSTRUMENT_MANIFEST_MIN_COUNT": "1024",
+        # Dual-channel selector (2026-09-29): the daily VM runs the live
+        # DataStream channel; HFT stays one env override away. Compose
+        # interpolates this into the container (the VM's `.env` has no
+        # ARROW_FEED), so the daily path cannot silently default to the dead
+        # HFT plan.
+        "ARROW_FEED": "token",
     }
 
 
