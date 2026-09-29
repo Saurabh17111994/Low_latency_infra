@@ -548,8 +548,12 @@ only the latest version in Babysitter state.
 
 ## Reconciliation and unknown outcomes
 
-- On connect, mass-status reconciliation: order-status reports, fill reports, and position-status
-  reports are generated through the adapter and applied to the OMS (Nautilus `reconcile_execution_mass_status`).
+- On connect, the executor answers Nautilus's mass-status request with `Ok(None)` — "no mass status
+  available" — so the node skips reconciliation for this client and startup continues (L1-1). The
+  granular fill/position generators fail with `MASS_STATUS_UNSUPPORTED` instead of returning empty
+  histories a caller could read as "no fills"/"no positions". Serving real mass status
+  (token→instrument mapping, Arrow normalizers) is B7 / Workstream-D work; the Tier-11
+  `reconcile_execution_mass_status` sweep stays the read-only unknown-outcome path.
 - Open-order checks re-query orders without a terminal event; in-flight tracking detects
   submissions that never got an ack; recent-fills dedup prevents double-counted fills.
 - Failure classification is explicit: `not_sent`, `ambiguous`, `venue_rejected` — only a verified

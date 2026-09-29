@@ -115,9 +115,10 @@ fn live_node_runtime_sustained_soak() {
                         "gate left HALTED mid-soak (after {:?})",
                         started.elapsed()
                     );
-                    // Measured: the node drives the mass-status callbacks in bursts (one
-                    // reconciliation round is 3 calls), so strict monotonicity per 500ms sample
-                    // would be flaky. Per sample the counter must not go backwards; the strict
+                    // L1-1: one reconciliation round is ONE mass-status call (the aggregate
+                    // override records one tick; the granular generators are no longer composed),
+                    // so strict monotonicity per 500ms sample would still be flaky on a loaded
+                    // runner. Per sample the counter must not go backwards; the strict
                     // "it advanced" check is over the whole leg, which is what a wedged loop fails.
                     let ticks = progress_watch.ticks();
                     assert!(

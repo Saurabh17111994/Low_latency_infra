@@ -32,22 +32,22 @@ Where a body section and this list disagree, this list wins.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| L1 — execution: mass-status honesty | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
+| L1 — execution: mass-status honesty | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
 | L2 — ops tooling: lint scope and tracker wiring | 2 | 1 | 0 | 1 | 0 | 0 | 0 |
 | L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | L4 — ingestion: config doc parity and final-report atomicity | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | L5 — common/mock: semantics and naming truth | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | L6 — infra/DDL: guards, parity, docs | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| **Total** | **17** | **1** | **0** | **16** | **0** | **0** | **0** |
+| **Total** | **17** | **2** | **0** | **15** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
-- [ ] **L1-1** — Mass-status becomes honest instead of empty: override `generate_mass_status` →
+- [x] **L1-1** — Mass-status becomes honest instead of empty: override `generate_mass_status` →
   one `record_tick()` + WARN `mass_status=unavailable` + `Ok(None)` (Nautilus's native "no mass
   status available" — the OMS skips reconciliation instead of reconciling against fabricated
   emptiness, and startup does not abort); the two granular generators return a typed
   `MASS_STATUS_UNSUPPORTED` error, never `Ok(vec![])`; fix the dossier claim and the soak comment
-  (1 tick/round, not 3). (Known P3-200; real serving stays B7/Workstream-D work.)
+  (1 tick/round, not 3). (Known P3-200; real serving stays B7/Workstream-D work.) — CHG-418
 
 #### L2 — ops tooling: lint scope and tracker wiring
 

@@ -41,7 +41,7 @@ use nautilus_model::{
     identifiers::{AccountId, ClientId, ClientOrderId, InstrumentId, TradeId, Venue, VenueOrderId},
     instruments::Instrument,
     orders::{Order, OrderAny},
-    reports::{FillReport, OrderStatusReport, PositionStatusReport},
+    reports::{ExecutionMassStatus, FillReport, OrderStatusReport, PositionStatusReport},
     types::{AccountBalance, Currency, MarginBalance, Price, Quantity},
 };
 use sha2::{Digest, Sha256};
@@ -1317,16 +1317,35 @@ impl ExecutionClient for BridgeExecutionClient {
         Ok(reports)
     }
 
+    /// P3-200 / L1-1: the executor serves no Nautilus mass status, and says so.
+    ///
+    /// `Ok(None)` is Nautilus's native "no mass status available": the live node logs a warning
+    /// and skips reconciliation for this client without aborting startup (unlike `Err`). The
+    /// default composition would instead call the granular generators below and hand the OMS a
+    /// fabricated empty history — the OMS would reconcile real state against "no fills". Serving
+    /// real mass status (token→instrument mapping, Arrow normalizers) stays B7 / Workstream-D
+    /// work; until then, one tick per round still pumps the report stream.
+    async fn generate_mass_status(
+        &self,
+        _lookback_mins: Option<u64>,
+    ) -> Result<Option<ExecutionMassStatus>> {
+        self.record_tick();
+        tracing::warn!(
+            "mass_status=unavailable: the executor serves no Nautilus mass status; reconciliation is skipped"
+        );
+        Ok(None)
+    }
+
     async fn generate_fill_reports(&self, cmd: GenerateFillReports) -> Result<Vec<FillReport>> {
         self.record_tick();
         let _ = cmd;
-        // P3-200: still a stub, and deliberately NOT an error. The Nautilus runtime's periodic
-        // mass-status reconciliation calls this on every loop tick: returning Err here kills the
-        // node loop before it can handle a stop request (engine.rs's runtime_hosted_run_loop_*
-        // tests fail with "Failed to get mass status from exec"). The silent empty history is the
-        // real defect — it is fixed by serving fills from a durable source (B7 / Workstream D),
-        // not by failing a loop that cannot act on the failure.
-        Ok(Vec::new())
+        // L1-1: never an empty Ok — a direct caller would read it as "no fills" and reconcile
+        // against fabricated emptiness. The runtime's mass-status path uses the aggregate
+        // override above (`Ok(None)`), so this Err cannot kill the node loop.
+        bail!(
+            "MASS_STATUS_UNSUPPORTED: the executor serves no fill reports; mass status is \
+             unavailable until the durable fill source lands (B7 / Workstream D)"
+        )
     }
 
     async fn generate_position_status_reports(
@@ -1335,9 +1354,12 @@ impl ExecutionClient for BridgeExecutionClient {
     ) -> Result<Vec<PositionStatusReport>> {
         self.record_tick();
         let _ = cmd;
-        // P3-200: same contract as generate_fill_reports — the runtime's mass-status path calls
-        // this per tick, so it must not Err. Empty positions is the stub's risk, not a claim.
-        Ok(Vec::new())
+        // L1-1: same contract as generate_fill_reports — an empty Ok would claim the account
+        // holds nothing. The aggregate override keeps the loop alive.
+        bail!(
+            "MASS_STATUS_UNSUPPORTED: the executor serves no position status reports; mass status \
+             is unavailable until positions are served (B7 / Workstream D)"
+        )
     }
 }
 
@@ -2514,5 +2536,60 @@ mod tests {
         );
         assert_eq!(order_type, BridgeOrderType::Lmt);
         assert_eq!(validity, Validity::Day);
+    }
+
+    /// L1-1: the executor answers "no mass status available" (`Ok(None)`) and records exactly one
+    /// tick — it does not compose empty granular reports into a fabricated mass status.
+    #[tokio::test(flavor = "current_thread")]
+    async fn l1_1_mass_status_is_unavailable_not_fabricated() {
+        use nautilus_common::clients::ExecutionClient;
+
+        let (client, _instrument_id, _client_order_id, _order) =
+            roundtrip_fixture(crate::bridge::FakeBridge::new(), &[]);
+        let before = client.progress_ticks();
+
+        let result = client.generate_mass_status(Some(5)).await;
+        assert!(
+            matches!(result, Ok(None)),
+            "the executor must answer Ok(None) (Nautilus: no mass status available), not {result:?}"
+        );
+        assert_eq!(
+            client.progress_ticks(),
+            before + 1,
+            "one mass-status tick per round"
+        );
+    }
+
+    /// L1-1: the granular generators fail with the `MASS_STATUS_UNSUPPORTED` marker — a direct
+    /// caller can never mistake emptiness for "no fills" / "no positions".
+    #[tokio::test(flavor = "current_thread")]
+    async fn l1_1_granular_generators_fail_with_the_unsupported_marker() {
+        use nautilus_common::clients::ExecutionClient;
+        use nautilus_common::messages::execution::{
+            GenerateFillReportsBuilder, GeneratePositionStatusReportsBuilder,
+        };
+
+        let (client, _instrument_id, _client_order_id, _order) =
+            roundtrip_fixture(crate::bridge::FakeBridge::new(), &[]);
+
+        let fill_cmd = GenerateFillReportsBuilder::default()
+            .ts_init(UnixNanos::default())
+            .build()
+            .expect("fill command");
+        let err = client
+            .generate_fill_reports(fill_cmd)
+            .await
+            .expect_err("an empty fill history must be an error, not Ok(vec![])");
+        assert!(err.to_string().contains("MASS_STATUS_UNSUPPORTED"), "{err}");
+
+        let position_cmd = GeneratePositionStatusReportsBuilder::default()
+            .ts_init(UnixNanos::default())
+            .build()
+            .expect("position command");
+        let err = client
+            .generate_position_status_reports(&position_cmd)
+            .await
+            .expect_err("an empty position set must be an error, not Ok(vec![])");
+        assert!(err.to_string().contains("MASS_STATUS_UNSUPPORTED"), "{err}");
     }
 }
