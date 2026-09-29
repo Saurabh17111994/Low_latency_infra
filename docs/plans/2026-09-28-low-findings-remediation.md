@@ -35,10 +35,10 @@ Where a body section and this list disagree, this list wins.
 | L1 — execution: mass-status honesty | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
 | L2 — ops tooling: lint scope and tracker wiring | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
-| L4 — ingestion: config doc parity and final-report atomicity | 2 | 1 | 0 | 1 | 0 | 0 | 0 |
+| L4 — ingestion: config doc parity and final-report atomicity | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | L5 — common/mock: semantics and naming truth | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | L6 — infra/DDL: guards, parity, docs | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| **Total** | **17** | **8** | **0** | **9** | **0** | **0** | **0** |
+| **Total** | **17** | **9** | **0** | **8** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
@@ -94,11 +94,11 @@ Where a body section and this list disagree, this list wins.
   ING-FAIL-010 default/range and the ING-TCP-003 citation (deleted NDJSON tests → surviving
   `tickcounts*_test.go`); append "superseded by B130" to the dated configuration audit. Guard: a
   dossier↔config parity test with a fail-closed key registry. — CHG-424
-- [ ] **L4-2** — The tick-count final report can no longer be clobbered or truncated:
+- [x] **L4-2** — The tick-count final report can no longer be clobbered or truncated:
   `reportTickCounts` takes the report lock **first**, then snapshots under the counter lock, so
   the file always holds the newest complete snapshot; writes go through a temp-file + fsync +
   atomic rename helper (a crash mid-write can no longer leave a 0-byte report); the final `Once`
-  stays; a test hook sits after the snapshot under the lock.
+  stays; a test hook sits after the snapshot under the lock. — CHG-425
 
 #### L5 — common/mock: semantics and naming truth
 

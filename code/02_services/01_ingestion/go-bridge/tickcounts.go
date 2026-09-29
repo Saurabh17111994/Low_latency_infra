@@ -15,6 +15,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -60,22 +61,60 @@ func recordTickCount(token int32) {
 // multiple bounded lines instead of one long one.
 var tickCountChunkSize = 20
 
+// tickReportAfterSnapshotHook, when non-nil, runs after the map snapshot is
+// taken under tickReportMu and before the report is formatted/written.
+// Test-only seam (L4-2): it lets a test hold one report mid-flight and prove a
+// second report cannot interleave an older snapshot into the file.
+var tickReportAfterSnapshotHook func()
+
+// writeTickReportAtomic replaces path with data atomically: a temp file in the
+// same directory, write, fsync, close, chmod 0644, rename. A crash or an error
+// mid-write leaves the previous complete report in place — the reconcile reads
+// the file as evidence, so a truncated or 0-byte file must never be possible.
+func writeTickReportAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeded
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
 func reportTickCounts() {
-	// P1-210: snapshot under the lock, sort + format AFTER unlock — the
-	// report must never stall the per-tick recordTickCount hot path
-	// (ProtoEmitter.EmitTick) while sorting/formatting thousands of lines.
+	// L4-2: the REPORT lock is taken FIRST, then the snapshot under the counter
+	// lock. The old order (snapshot, release, then lock) let a slower report
+	// write an older snapshot after a newer one — the interval ticker and the
+	// final Once can race — so the file could hold stale counts. The report lock
+	// never touches the per-tick recordTickCount hot path (that uses
+	// tickCountsMu only), so the snapshot copy stays the only counter critical
+	// section.
+	tickReportMu.Lock()
+	defer tickReportMu.Unlock()
 	tickCountsMu.Lock()
 	snapshot := make(map[int32]int64, len(tickCounts))
 	for t, n := range tickCounts {
 		snapshot[t] = n
 	}
 	tickCountsMu.Unlock()
-	// P1-211: serialize file+stderr writes (see tickReportMu) — the
-	// interval ticker and the final Once report can run concurrently, and
-	// without this a stale interval write finishing last clobbers the
-	// authoritative final snapshot.
-	tickReportMu.Lock()
-	defer tickReportMu.Unlock()
+	if tickReportAfterSnapshotHook != nil {
+		tickReportAfterSnapshotHook()
+	}
 	keys := make([]int32, 0, len(snapshot))
 	for t := range snapshot {
 		keys = append(keys, t)
@@ -109,7 +148,9 @@ func reportTickCounts() {
 	// closes the child's pipe streams as soon as its own shutdown begins, so
 	// a stderr write after that point dies with SIGPIPE (exit 141) and the
 	// ING-TCP-001 reconcile would lose the epoch count. The file survives.
-	if err := os.WriteFile(tickCountsFilePath, []byte(buf.String()), 0o644); err != nil {
+	// L4-2: the write is atomic (temp + fsync + rename) — a crash mid-write
+	// can no longer leave a truncated or 0-byte report.
+	if err := writeTickReportAtomic(tickCountsFilePath, []byte(buf.String())); err != nil {
 		fmt.Fprintf(os.Stderr, "arrow-tick-counts: WARN file write failed %s: %v\n", tickCountsFilePath, err)
 	}
 	// Then mirror to stderr (best-effort; may die on SIGPIPE if the parent

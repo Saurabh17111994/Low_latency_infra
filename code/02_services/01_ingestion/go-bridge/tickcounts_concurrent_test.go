@@ -85,3 +85,52 @@ func TestReportTickCountsConcurrentReports(t *testing.T) {
 		t.Fatalf("report missing totals, got %q", raw)
 	}
 }
+
+// L4-2: with a varying map, the final synchronous report must match the final
+// map exactly — the file never lags the newest complete snapshot.
+func TestReportTickCountsConcurrentVariableMap(t *testing.T) {
+	tickCountsMu.Lock()
+	tickCounts = map[int32]int64{}
+	oldPath := tickCountsFilePath
+	tickCountsFilePath = filepath.Join(t.TempDir(), "arrow-tick-counts.txt")
+	tickCountsMu.Unlock()
+	defer func() {
+		tickCountsMu.Lock()
+		tickCountsFilePath = oldPath
+		tickCounts = nil
+		tickCountsMu.Unlock()
+	}()
+
+	var wg sync.WaitGroup
+	for w := int32(0); w < 8; w++ {
+		wg.Add(1)
+		go func(base int32) {
+			defer wg.Done()
+			for i := int32(0); i < 500; i++ {
+				recordTickCount(base + i%250)
+				if i%50 == 0 {
+					reportTickCounts()
+				}
+			}
+		}(w * 250)
+	}
+	wg.Wait()
+	reportTickCounts() // authoritative final snapshot
+
+	raw, err := os.ReadFile(tickCountsFilePath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	tickCountsMu.Lock()
+	wantTotal := int64(0)
+	for _, n := range tickCounts {
+		wantTotal += n
+	}
+	tickCountsMu.Unlock()
+	if !strings.Contains(string(raw), fmt.Sprintf("total=%d", wantTotal)) {
+		t.Fatalf("the file must hold the final snapshot: got %q want total=%d", raw, wantTotal)
+	}
+	if !strings.HasSuffix(string(raw), "\n") {
+		t.Fatalf("the final report must be complete, got %q", raw)
+	}
+}
