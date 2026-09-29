@@ -148,6 +148,11 @@ volumes:
   zk-data-1:
   zk-data-2:
   zk-data-3:
+  # L6-4: the ZK transaction log — one per member, beside the data volume
+  # (compose parity; the 2026-09-05 catalog-loss class).
+  zk-datalog-1:
+  zk-datalog-2:
+  zk-datalog-3:
   fluss-data:
   fluss-tablet-data-1:
   fluss-tablet-data-2:
@@ -226,6 +231,11 @@ services:
         limits: {cpus: "1", memory: 2G}
     volumes:
       - zk-data-1:/data
+      # L6-4: ZK holds the Fluss catalog; the datalog holds the uncommitted
+      # transaction log. Compose has kept both since the 2026-09-05 catalog
+      # loss (a missing named volume deleted the catalog on `down`); the
+      # stack must mirror both targets, per member.
+      - zk-datalog-1:/datalog
 
   zookeeper-2:
     image: ${ZOOKEEPER_IMAGE:-zookeeper@sha256:43d39109cbd4de394742efbfc162a8a0a93731e806374b71f3865f4ef4460a56}
@@ -254,6 +264,8 @@ services:
         limits: {cpus: "1", memory: 2G}
     volumes:
       - zk-data-2:/data
+      # L6-4: see zookeeper-1 — data + datalog, never a shared volume.
+      - zk-datalog-2:/datalog
 
   zookeeper-3:
     image: ${ZOOKEEPER_IMAGE:-zookeeper@sha256:43d39109cbd4de394742efbfc162a8a0a93731e806374b71f3865f4ef4460a56}
@@ -282,6 +294,8 @@ services:
         limits: {cpus: "1", memory: 2G}
     volumes:
       - zk-data-3:/data
+      # L6-4: see zookeeper-1 — data + datalog, never a shared volume.
+      - zk-datalog-3:/datalog
 
   # ---- Fluss: streaming bus + storage + lake tier --------------------------
   fluss-coordinator:

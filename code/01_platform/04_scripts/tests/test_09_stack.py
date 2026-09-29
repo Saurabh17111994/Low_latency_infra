@@ -24,6 +24,7 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).parents[4]
 STACK = ROOT / "code/01_platform/01_docker/docker-stack.yml"
+COMPOSE = ROOT / "code/01_platform/01_docker/docker-compose.yml"
 
 # Workload services: must place on role==worker, never pinned to a hostname.
 WORKLOAD = [
@@ -290,8 +291,53 @@ class TestVolumes:
         for v in ("fluss-data",
                   "fluss-tablet-data-1", "fluss-tablet-data-2", "fluss-tablet-data-3",
                   "flink-checkpoints", "flink-logs", "fluss-logs",
-                  "openobserve-data", "ingestion-logs"):
+                  "openobserve-data", "ingestion-logs",
+                  # L6-4: ZK holds the Fluss catalog — data AND datalog per member
+                  "zk-data-1", "zk-data-2", "zk-data-3",
+                  "zk-datalog-1", "zk-datalog-2", "zk-datalog-3"):
             assert v in vols, f"durable volume {v} missing from stack"
+
+    def test_zookeeper_data_and_datalog_targets_match_compose(self):
+        """L6-4: ZK keeps the Fluss catalog; the 2026-09-05 catalog-loss class
+        was a missing named volume. Compose mounts /data + /datalog from two
+        distinct named volumes; every stack member must mirror both targets on
+        its own volumes — a missing datalog (or a shared one) re-opens the
+        class on the deck that actually runs production."""
+        compose = yaml.safe_load(COMPOSE.read_text())
+        compose_targets = {}
+        for m in compose["services"]["zookeeper"].get("volumes", []) or []:
+            src, target = m.split(":", 1)
+            compose_targets[target] = src
+        assert set(compose_targets) == {"/data", "/datalog"}, (
+            f"compose zookeeper targets {sorted(compose_targets)} — the deck this "
+            "test mirrors changed shape")
+        assert compose_targets["/data"] != compose_targets["/datalog"], (
+            "compose must keep data and datalog on distinct volumes")
+
+        d = _load()
+        declared = set(d.get("volumes", {}))
+        seen: dict[str, str] = {}  # volume source -> the member that mounts it
+        for i in (1, 2, 3):
+            name = f"zookeeper-{i}"
+            targets = {}
+            for m in d["services"][name].get("volumes", []) or []:
+                src, target = m.split(":", 1)
+                targets[target] = src
+            assert set(targets) == set(compose_targets), (
+                f"{name} mounts {sorted(targets)} but compose mounts "
+                f"{sorted(compose_targets)} — both /data and /datalog are required")
+            assert targets["/data"] != targets["/datalog"], (
+                f"{name}: data and datalog must be distinct volumes "
+                "(a shared volume mixes the snapshot and the transaction log)")
+            for target, src in targets.items():
+                assert src in declared, (
+                    f"{name}: volume {src!r} is mounted but not declared under "
+                    "top-level volumes — Swarm would reject the deploy")
+                assert src not in seen, (
+                    f"{name} and {seen[src]} share volume {src!r} — every ZK member "
+                    "must keep its own data and datalog (P5-001: a shared volume "
+                    "corrupts the member that mounts it second)")
+                seen[src] = name
 
     def test_no_local_remote_data_volume(self):
         """Tiered segments live on R2 - a node-local volume cannot serve reads."""

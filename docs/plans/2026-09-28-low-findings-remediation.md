@@ -37,8 +37,8 @@ Where a body section and this list disagree, this list wins.
 | L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | L4 — ingestion: config doc parity and final-report atomicity | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | L5 — common/mock: semantics and naming truth | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
-| L6 — infra/DDL: guards, parity, docs | 4 | 3 | 0 | 1 | 0 | 0 | 0 |
-| **Total** | **17** | **16** | **0** | **1** | **0** | **0** | **0** |
+| L6 — infra/DDL: guards, parity, docs | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
+| **Total** | **17** | **17** | **0** | **0** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
@@ -136,10 +136,10 @@ Where a body section and this list disagree, this list wins.
   delete the stub/`instruments.csv` claims, the removed `ARROW_INSTRUMENT_MANIFESTS` key, and the
   dead `manifests/README.md` / `docs/09_data_gaps.md` links. Guards: extend
   `test_p5_env_contract.py` + a gate-discovered README link/key test. — CHG-432
-- [ ] **L6-4** — Swarm ZooKeeper keeps its transaction log: add `zk-datalog-1/2/3` volumes and
+- [x] **L6-4** — Swarm ZooKeeper keeps its transaction log: add `zk-datalog-1/2/3` volumes and
   `/datalog` mounts beside `/data` for all three members (compose already does this — the 2026-09-05
   catalog-loss class); guard: the existing stack volumes test gains data+datalog target parity
-  against the compose deck (reuse H3-2's parity helper if it lands first).
+  against the compose deck (reuse H3-2's parity helper if it lands first). — CHG-433
 
 ## Overview
 
