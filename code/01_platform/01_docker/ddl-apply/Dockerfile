@@ -38,6 +38,11 @@ COPY code/02_services/06_execution_gateway/pom.xml /src/code/02_services/06_exec
 RUN cd code && (mvn -q -pl common dependency:go-offline -DskipTests || echo "WARN: go-offline pre-fetch incomplete — package below re-resolves (P4-324)")
 # Engine sources.
 COPY code/common /src/code/common
+# The DDL corpus the runtime stage ships: the twin-sweep unit guard walks every
+# committed DDL's column types through the smoke machinery (CHG-435), so the
+# builder must carry the same tree the image serves. Before the test layer, so a
+# DDL change re-runs the shipped-engine tests.
+COPY code/01_platform/02_sql/ddl /src/code/01_platform/02_sql/ddl
 # P4-325: gate the shipped engine — DDL-contract unit tests only (all
 # cluster-free: DdlApplyTool status/twin-sweep-unit/DdlText x2, matrix pin,
 # manifest serialization). The two live halves (DdlSmokeTwinSweepTest,
