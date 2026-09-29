@@ -208,6 +208,14 @@ impl BridgeSession {
     }
 }
 
+impl std::fmt::Debug for SessionHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionHandle")
+            .field("connected", &self.is_connected())
+            .finish()
+    }
+}
+
 #[async_trait]
 impl BridgeClient for SessionHandle {
     fn is_connected(&self) -> bool {

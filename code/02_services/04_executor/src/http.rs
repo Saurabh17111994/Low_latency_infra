@@ -73,6 +73,11 @@ pub type BridgeForwarder = Arc<tokio::sync::Mutex<Box<dyn BridgeClient + Send>>>
 pub struct ServerState {
     inner: Arc<Mutex<Snapshot>>,
     forwarder: Option<BridgeForwarder>,
+    /// M1-3: shared correlation registry. The sync forward leg registers a `Route` owner for
+    /// every command it sends, so the session dispatcher can book that command's postbacks
+    /// instead of halting on an unknown ref. `None` keeps the pre-session behaviour (offline
+    /// construction / tests that never build a session).
+    registry: Option<crate::bridge::Registry>,
     /// Durable attempt guard for the live forward leg (Workstream-D swap, flag-gated). `None` is the
     /// flag-OFF behaviour: no durable guard here at all, and the gateway's own durable
     /// `Execution_Intent_Processed` dedup remains the only one. `Some` means an order is not sent
@@ -90,9 +95,68 @@ impl std::fmt::Debug for ServerState {
         f.debug_struct("ServerState")
             .field("inner", &self.inner)
             .field("forwarder", &self.forwarder.is_some())
+            .field("registry", &self.registry.is_some())
             .field("attempts", &self.attempts.is_some())
             .field("gate_reporter", &self.reporter.is_some())
             .finish()
+    }
+}
+
+/// M1-3: production route-postback emitter. Reads the live gateway snapshot and emits the
+/// normalized lifecycle image on the session dispatcher's spawned task. An empty gateway
+/// endpoint is the offline/paper posture: the postback is booked (dispatched) but not emitted.
+pub struct ServerStateRouteEmitter {
+    state: ServerState,
+}
+
+impl ServerStateRouteEmitter {
+    #[must_use]
+    pub fn new(state: ServerState) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::bridge::session::RoutePostbackEmitter for ServerStateRouteEmitter {
+    async fn emit(
+        &self,
+        report: &crate::bridge::ReportEnvelope,
+        ctx: &crate::bridge::RouteContext,
+    ) {
+        let snap = self.state.snapshot();
+        if snap.gateway_endpoint.trim().is_empty() {
+            tracing::debug!(
+                ref_ = %report.client_order_ref,
+                "route postback booked; event emission disabled (no GATEWAY_ENDPOINT)"
+            );
+            return;
+        }
+        let now = now_ms();
+        let event = events::lifecycle_event_value(
+            report,
+            &ctx.place,
+            &ctx.account_scope_id,
+            &ctx.execution_partition_id,
+            ctx.gate_epoch,
+            &ctx.trade_context_id,
+            now,
+        );
+        if let Err(e) = events::emit_event(
+            &snap.gateway_endpoint,
+            &snap.shared_secret,
+            &snap.protocol_version,
+            &event,
+            now,
+        )
+        .await
+        {
+            tracing::warn!(
+                ref_ = %report.client_order_ref,
+                error = %e,
+                "route postback event emission failed (the postback was booked; the gateway \
+                 projection may lag until the next lifecycle image)"
+            );
+        }
     }
 }
 
@@ -164,6 +228,7 @@ impl ServerState {
                 connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
+            registry: None,
             attempts: None,
             reporter: None,
         }
@@ -212,6 +277,7 @@ impl ServerState {
                 connection_timeout: CONNECTION_READ_TIMEOUT,
             })),
             forwarder: None,
+            registry: None,
             attempts: None,
             reporter: None,
         }
@@ -250,6 +316,16 @@ impl ServerState {
     #[must_use]
     pub fn with_forwarder(mut self, forwarder: BridgeForwarder) -> Self {
         self.forwarder = Some(forwarder);
+        self
+    }
+
+    /// Attaches the shared correlation registry (M1-3). The sync forward leg registers every
+    /// command's `client_order_ref` as a `Route` owner before it sends, so the session
+    /// dispatcher books that command's postbacks. Absent (default) keeps the pre-session
+    /// behaviour: no ownership is published.
+    #[must_use]
+    pub fn with_registry(mut self, registry: crate::bridge::Registry) -> Self {
+        self.registry = Some(registry);
         self
     }
 
@@ -1223,6 +1299,30 @@ async fn route(state: &ServerState, method: &str, path: &str, body: &str) -> Vec
                         }
                     }
                 };
+                // M1-3: publish route ownership before the send so a postback that lands the
+                // instant the bridge dispatches the command is correlated (the session
+                // dispatcher would otherwise halt on an unknown ref).
+                if let Some(registry) = &state.registry {
+                    if let Ok(mut registry) = registry.lock() {
+                        registry.insert(
+                            cmd_env.client_order_ref.clone(),
+                            crate::bridge::ReportOwner::Route(Box::new(
+                                crate::bridge::RouteContext {
+                                    place: cmd_env.clone(),
+                                    account_scope_id: envelope.account_scope_id.clone(),
+                                    execution_partition_id: envelope.execution_partition_id.clone(),
+                                    gate_epoch: envelope.gate_epoch,
+                                    trade_context_id: envelope
+                                        .payload
+                                        .get("trade_context_id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                },
+                            )),
+                        );
+                    }
+                }
                 let submit = guard.send_command(cmd_env.clone()).await;
                 (guarded, submit)
             };
@@ -1777,6 +1877,34 @@ mod tests {
         let ref_ = v["client_order_ref"].as_str().unwrap();
         assert_eq!(ref_.len(), 14, "deterministic 14-hex ref: {ref_}");
         assert!(ref_.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    /// M1-3: a successful route send publishes the command's ref as a `Route` owner before the
+    /// bridge sees it, so the session dispatcher books its postbacks instead of halting on an
+    /// unknown ref (and the context carries what the gateway emission needs).
+    #[tokio::test]
+    async fn m1_3_route_send_registers_the_ref_for_the_session_dispatcher() {
+        let registry: crate::bridge::Registry =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let state = enabled_state(fake_forwarder(CommandScript::Accept))
+            .with_registry(Arc::clone(&registry));
+        let addr = spawn_server(state).await;
+        let req = encoded_bieq_request("s3cr3t").await;
+        let (s, b) = raw_request(addr, &req).await;
+        assert_eq!(s, 202, "body: {b}");
+        let v: serde_json::Value = serde_json::from_str(&b).unwrap();
+        let ref_ = v["client_order_ref"].as_str().unwrap().to_string();
+
+        let registry = registry.lock().unwrap();
+        match registry.get(&ref_) {
+            Some(crate::bridge::ReportOwner::Route(ctx)) => {
+                assert_eq!(
+                    ctx.place.client_order_ref, ref_,
+                    "the context carries the sent command"
+                );
+            }
+            other => panic!("the sent ref must be registered as Route, got {other:?}"),
+        }
     }
 
     #[tokio::test]

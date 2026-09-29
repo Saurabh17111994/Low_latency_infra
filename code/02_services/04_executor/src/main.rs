@@ -23,7 +23,7 @@ const HTTP_DRAIN_GRACE_SECS: u64 = 5;
 
 use nautilus_execution_service::{
     bootstrap::Runtime,
-    bridge::{BridgeClient, CommandScript, FakeBridge, HttpBridgeClient},
+    bridge::{BridgeClient, CommandScript, FakeBridge, HttpBridgeClient, SessionHandle},
     clockwatch::{
         ChronycOffsetSource, ClockFileOffsetSource, DriftMonitor, FixedOffsetSource, OffsetSource,
     },
@@ -58,11 +58,11 @@ fn gate_reporter_from_config(config: &ServiceConfig) -> Option<GateReporter> {
     ))
 }
 
-/// Builds the route's bridge transport (T4a sync forward) from the same selection the node's
-/// exec client uses: the deterministic fake (offline slice, seeded with an Accept script) or
-/// the production `HttpBridgeClient`. The forwarder is fail-closed by construction — it is
-/// only ever reached when the route's gate is ENABLED.
-fn build_route_forwarder(selection: &BridgeSelection) -> Box<dyn BridgeClient + Send> {
+/// M1-3: builds the one bridge transport the session owns (the route forward leg and the node
+/// share it through the session handle). The offline fake is seeded with an Accept script, as
+/// the route forwarder was before the session; production uses `HttpBridgeClient`. Fail-closed
+/// by construction — the forward path is only reached when the route's gate is ENABLED.
+fn build_session_client(selection: &BridgeSelection) -> Box<dyn BridgeClient + Send> {
     match selection {
         BridgeSelection::Fake => {
             let mut fake = FakeBridge::new();
@@ -133,8 +133,6 @@ async fn main() -> anyhow::Result<()> {
     // approval advances the gate.
     let selection = BridgeSelection::from_config(&config);
     let bridge_mode = selection.mode();
-    let route_forwarder: http::BridgeForwarder =
-        Arc::new(tokio::sync::Mutex::new(build_route_forwarder(&selection)));
     let gateway_endpoint = config.gateway_endpoint.clone();
     // H2-5/D2: build the reporter before `config` moves into Runtime::init.
     let gate_reporter = gate_reporter_from_config(&config);
@@ -153,7 +151,27 @@ async fn main() -> anyhow::Result<()> {
         let state = runtime.server_state();
         move |reason: &str| state.safety_halt(reason)
     });
-    let mut node = LiveNodeRuntime::build_with_bridge_and_halt(selection, halt_notifier)?;
+    // M1-3: ONE bridge session — the route forward leg and the node share this handle, so the
+    // route's postbacks finally have a consumer (before, the route client never opened the
+    // report stream: the audit's "second dial / lost route fill").
+    let registry: nautilus_execution_service::bridge::Registry =
+        Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let session_halt: nautilus_execution_service::bridge::session::SessionHalt = {
+        let state = runtime.server_state();
+        Arc::new(move |reason: &str| state.safety_halt(reason))
+    };
+    let route_emitter: Arc<dyn nautilus_execution_service::bridge::session::RoutePostbackEmitter> =
+        Arc::new(http::ServerStateRouteEmitter::new(runtime.server_state()));
+    let session = SessionHandle::new(
+        build_session_client(&selection),
+        Arc::clone(&registry),
+        Some(session_halt),
+        Some(route_emitter),
+    );
+    let route_forwarder: http::BridgeForwarder =
+        Arc::new(tokio::sync::Mutex::new(Box::new(session.clone())));
+    let mut node =
+        LiveNodeRuntime::build_with_session(session, Arc::clone(&registry), halt_notifier)?;
 
     telemetry::init_logging("info");
     telemetry::METRICS.record_restart();
@@ -195,6 +213,7 @@ async fn main() -> anyhow::Result<()> {
     let state = runtime
         .server_state()
         .with_forwarder(route_forwarder)
+        .with_registry(registry)
         .with_gateway_endpoint(gateway_endpoint.clone());
     // Workstream-D swap: with the attempts flag on, the live forward leg claims and records the
     // attempt before the bridge sees the order, and answers retries from the record. With the flag

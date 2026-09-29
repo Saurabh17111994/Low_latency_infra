@@ -117,6 +117,12 @@ impl ProgressWatch {
 #[derive(Debug, Clone)]
 pub struct BridgeExecutionClientFactory {
     selection: BridgeSelection,
+    /// M1-3: when set, `create` uses this shared session handle instead of building a
+    /// per-client transport — the route and the node then share one dial and one dispatcher.
+    session: Option<crate::bridge::SessionHandle>,
+    /// M1-3: shared correlation registry handed to the node client so its refs are published
+    /// to the session dispatcher.
+    registry: Option<crate::bridge::Registry>,
     /// Receives the boot gate of the client `create` constructs (P3-439).
     boot_gate: BootGate,
     /// The safety gate handed to every client this factory creates (P3-025).
@@ -133,12 +139,27 @@ impl BridgeExecutionClientFactory {
     fn new(selection: BridgeSelection) -> Self {
         Self {
             selection,
+            session: None,
+            registry: None,
             boot_gate: BootGate::default(),
             gate: GateWatch(Rc::new(RefCell::new(Gate::new()))),
             progress: ProgressWatch::default(),
             shutdown: crate::shutdown::ShutdownWatch::default(),
             halt: crate::execution::client::HaltNotifier::default(),
         }
+    }
+
+    /// M1-3: build clients over the shared session (one dial) and publish node refs to the
+    /// correlation registry the session dispatcher reads.
+    #[must_use]
+    pub fn with_session(
+        mut self,
+        session: crate::bridge::SessionHandle,
+        registry: crate::bridge::Registry,
+    ) -> Self {
+        self.session = Some(session);
+        self.registry = Some(registry);
+        self
     }
 }
 
@@ -228,18 +249,25 @@ impl ExecutionClientFactory for BridgeExecutionClientFactory {
             None,
             cache,
         );
-        let bridge: Box<dyn crate::bridge::BridgeClient> = match self.selection {
-            BridgeSelection::Fake => Box::new(FakeBridge::new()),
-            BridgeSelection::Http {
-                ref base_url,
-                ref auth_token,
-            } => Box::new(HttpBridgeClient::new(base_url.clone(), auth_token.clone())),
+        let bridge: Box<dyn crate::bridge::BridgeClient> = match &self.session {
+            // M1-3: the production path — the route and the node share one session/one dial.
+            Some(session) => Box::new(session.clone()),
+            None => match self.selection {
+                BridgeSelection::Fake => Box::new(FakeBridge::new()),
+                BridgeSelection::Http {
+                    ref base_url,
+                    ref auth_token,
+                } => Box::new(HttpBridgeClient::new(base_url.clone(), auth_token.clone())),
+            },
         };
-        let client = BridgeExecutionClient::new(core, bridge)
+        let mut client = BridgeExecutionClient::new(core, bridge)
             .with_gate(Rc::clone(&self.gate.0))
             .with_progress_ticks(Rc::clone(&self.progress.0))
             .with_shutdown_watch(self.shutdown.clone())
             .with_halt_notifier(self.halt.clone());
+        if let Some(registry) = &self.registry {
+            client = client.with_report_registry(registry.clone());
+        }
         // Observe the gate the client actually booted into: the runtime's fail-closed report is
         // derived from this observation, not from a constant (P3-439).
         self.boot_gate.record(client.gate_state());
@@ -333,6 +361,27 @@ impl LiveNodeRuntime {
         selection: BridgeSelection,
         halt: crate::execution::client::HaltNotifier,
     ) -> Result<Self> {
+        Self::build_with_factory(selection, None, None, halt)
+    }
+
+    /// M1-3: builds the node over the shared bridge session the route leg also holds (one dial,
+    /// one dispatcher), publishing the node's `client_order_ref`s to `registry`.
+    ///
+    /// `selection` is unused on this path — the session already wraps the selected transport.
+    pub fn build_with_session(
+        session: crate::bridge::SessionHandle,
+        registry: crate::bridge::Registry,
+        halt: crate::execution::client::HaltNotifier,
+    ) -> Result<Self> {
+        Self::build_with_factory(BridgeSelection::Fake, Some(session), Some(registry), halt)
+    }
+
+    fn build_with_factory(
+        selection: BridgeSelection,
+        session: Option<crate::bridge::SessionHandle>,
+        registry: Option<crate::bridge::Registry>,
+        halt: crate::execution::client::HaltNotifier,
+    ) -> Result<Self> {
         let cfg = EngineFactory::build_node_config();
         let builder = LiveNodeBuilder::from_config(cfg)?;
         let boot_gate = BootGate::default();
@@ -345,6 +394,8 @@ impl LiveNodeRuntime {
             Some("exec".to_string()),
             Box::new(BridgeExecutionClientFactory {
                 selection,
+                session,
+                registry,
                 boot_gate: boot_gate.clone(),
                 gate: gate_watch.clone(),
                 progress: progress.clone(),
@@ -820,6 +871,8 @@ mod tests {
         let cache = CacheView::new(Rc::new(RefCell::new(Cache::default())));
         let boot_gate = BootGate::default();
         let factory = BridgeExecutionClientFactory {
+            session: None,
+            registry: None,
             selection: BridgeSelection::Fake,
             boot_gate: boot_gate.clone(),
             gate: GateWatch::default(),

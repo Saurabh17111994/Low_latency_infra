@@ -241,6 +241,10 @@ pub struct BridgeExecutionClient {
     /// Process-wide halt fan-out (H1-2): a transport-ambiguous outcome must stop the served
     /// forward leg, not only this client's boxed gate.
     halt_notifier: HaltNotifier,
+    /// M1-3: shared correlation registry (session dispatcher + route leg). `None` keeps the
+    /// pre-session behaviour (offline/test construction): reports are consumed from the bridge's
+    /// own stream and no ownership is published.
+    report_registry: Option<crate::bridge::Registry>,
     /// Whether the clean-shutdown sequence has already run (D7).
     ///
     /// Deliberately *not* `core.is_stopped()`: that is `!is_started()`, which is already `true`
@@ -281,6 +285,7 @@ impl BridgeExecutionClient {
             positions: Rc::new(RefCell::new(HashMap::new())),
             shutdown_watch: crate::shutdown::ShutdownWatch::default(),
             halt_notifier: HaltNotifier::default(),
+            report_registry: None,
             shutdown_ran: false,
         }
     }
@@ -334,6 +339,17 @@ impl BridgeExecutionClient {
         }
     }
 
+    /// M1-3: publish this client's `client_order_ref`s to the shared session registry so the
+    /// dispatcher routes their postbacks to the node leg (and its one-place unknown-ref halt
+    /// never fires for our own orders).
+    #[must_use]
+    pub fn with_report_registry(self, registry: crate::bridge::Registry) -> Self {
+        Self {
+            report_registry: Some(registry),
+            ..self
+        }
+    }
+
     /// The clean-shutdown report recorded by [`Self::stop`] (D7), if the sequence has run.
     #[must_use]
     pub fn shutdown_report(&self) -> Option<crate::shutdown::ShutdownReport> {
@@ -346,9 +362,12 @@ impl BridgeExecutionClient {
         self.progress.get()
     }
 
-    /// Count one node-driven tick (see [`Self::progress_ticks`]).
+    /// Count one node-driven tick (see [`Self::progress_ticks`]) and pump the report stream
+    /// (M1-3): the Nautilus mass-status callbacks are the intraday cadence, so a postback that
+    /// arrived between ticks is booked here instead of waiting for shutdown's `flush_reports`.
     fn record_tick(&self) {
         self.progress.set(self.progress.get().wrapping_add(1));
+        self.drain_reports();
     }
 
     /// Returns a reference to the shared safety gate.
@@ -957,6 +976,16 @@ impl BridgeExecutionClient {
         self.client_refs
             .borrow_mut()
             .insert(envelope.client_order_ref.clone(), order.client_order_id());
+        // M1-3: publish ownership so the session dispatcher routes this ref's postbacks to the
+        // node leg; without it the dispatcher's unknown-ref halt would fire on our own fill.
+        if let Some(registry) = &self.report_registry {
+            if let Ok(mut registry) = registry.lock() {
+                registry.insert(
+                    envelope.client_order_ref.clone(),
+                    crate::bridge::ReportOwner::Node,
+                );
+            }
+        }
         envelope.order = Some(
             OrderCommand::new(self.core.venue.as_str(), &symbol)
                 .with_side(side)
@@ -2150,6 +2179,49 @@ mod tests {
             fill_price: Some("100".into()),
             ..ReportEnvelope::default()
         }
+    }
+
+    /// M1-3: a report that arrived between mass-status ticks is booked by the next tick — before
+    /// the fix it sat in the channel until shutdown's `flush_reports`, so an intraday fill was
+    /// invisible to the node (position, events) for the whole session.
+    #[tokio::test(flavor = "current_thread")]
+    async fn m1_3_reports_are_pumped_between_mass_status_ticks() {
+        let (client, instrument_id, client_order_id, _order) =
+            roundtrip_fixture(crate::bridge::FakeBridge::new(), &[]);
+        enable_gate(&client);
+        client
+            .client_refs
+            .borrow_mut()
+            .insert("REF-M13".into(), client_order_id);
+        // Feed the client's report stream directly — in production the session dispatcher does
+        // this hand-off.
+        let (tx, rx) = tokio::sync::mpsc::channel(crate::bridge::client::BRIDGE_REPORT_BUFFER);
+        *client.reports.borrow_mut() = Some(rx);
+        tx.send(ReportEnvelope {
+            command: "postback".into(),
+            client_order_ref: "REF-M13".into(),
+            broker_order_id: "BRK-1".into(),
+            event_type: Some("order_filled".into()),
+            postback_event_id: "pb-m13".into(),
+            fill_quantity: Some("10".into()),
+            fill_price: Some("100".into()),
+            ..ReportEnvelope::default()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(0),
+            "the fill is queued, not yet booked"
+        );
+        client.record_tick();
+        assert_eq!(
+            client.position(&instrument_id),
+            rust_decimal::Decimal::from(10),
+            "the mass-status tick must pump and book the queued fill"
+        );
+        assert_ne!(client.gate_state(), ExecState::Halted);
     }
 
     /// M1-4: the same venue postback id delivered twice books once — no position change, no
