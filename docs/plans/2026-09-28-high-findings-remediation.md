@@ -37,8 +37,8 @@ Where a body section and this list disagree, this list wins.
 | H3 — production deck parity with the dev deck | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
 | H4 — evidence and release gates must not lie | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
-| H6 — machine facts and their drift guard | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
-| **Total** | **22** | **16** | **0** | **6** | **0** | **0** | **0** |
+| H6 — machine facts and their drift guard | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
+| **Total** | **22** | **19** | **0** | **3** | **0** | **0** | **0** |
 
 #### H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth
 
@@ -139,16 +139,16 @@ Where a body section and this list disagree, this list wins.
 
 #### H6 — machine facts and their drift guard
 
-- [ ] **H6-1** — Supersede FACT-009/FACT-014 via `env_facts.py replace`: new rows claim the pushed
+- [x] **H6-1** — Supersede FACT-009/FACT-014 via `env_facts.py replace`: new rows claim the pushed
   GHCR digests recorded in `runtime.lock:25-26` (CHG-306 + T9.2 proof); append the AGENTS.md
-  annotation; LIVE rows are never edited in place. (P1-14.)
-- [ ] **H6-2** — Supersede FACT-001/FACT-012: one-node Swarm with this host as Leader; two local
+  annotation; LIVE rows are never edited in place. (P1-14.) — CHG-400
+- [x] **H6-2** — Supersede FACT-001/FACT-012: one-node Swarm with this host as Leader; two local
   `docker stack deploy` runs on 2026-09-21; a real-VM deploy remains unproven; host-state checks
-  re-measured at implementation. (P1-14.)
-- [ ] **H6-3** — Drift guard `tests/test_env_fact_claims.py`: LIVE `Claim: VAR=value` must match
+  re-measured at implementation. (P1-14.) — CHG-400
+- [x] **H6-3** — Drift guard `tests/test_env_fact_claims.py`: LIVE `Claim: VAR=value` must match
   `runtime.lock` (unknown claim variable = fail-closed); stale-phrase rule catches "unpushed"-style
   prose against a pushed digest; plan-anchor rule keeps FACT-001/012 from going stale again.
-  (P1-14.)
+  (P1-14.) — CHG-401
 
 ## Overview
 
