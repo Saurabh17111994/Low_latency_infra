@@ -36,9 +36,9 @@ Where a body section and this list disagree, this list wins.
 | L2 — ops tooling: lint scope and tracker wiring | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | L4 — ingestion: config doc parity and final-report atomicity | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| L5 — common/mock: semantics and naming truth | 4 | 2 | 0 | 2 | 0 | 0 | 0 |
+| L5 — common/mock: semantics and naming truth | 4 | 3 | 0 | 1 | 0 | 0 | 0 |
 | L6 — infra/DDL: guards, parity, docs | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| **Total** | **17** | **11** | **0** | **6** | **0** | **0** | **0** |
+| **Total** | **17** | **12** | **0** | **5** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
@@ -108,11 +108,11 @@ Where a body section and this list disagree, this list wins.
 - [x] **L5-2** — Safety-halt parser never saturates: reject via the true exclusive bound
   `2^63` (`0x1p63`) — non-finite, non-integral, below `-2^63`, or ≥ `2^63` all throw; the Float
   branch widens to `double`; the largest representable value below the bound is accepted exactly. — CHG-427
-- [ ] **L5-3** — Positions average-price encoding one truth: the DDL sentence becomes
+- [x] **L5-3** — Positions average-price encoding one truth: the DDL sentence becomes
   "`average_*_paise = 0` iff the matching quantity is 0; legacy SQL NULL reads as 0"; the
   `PositionSnapshot` constructor enforces the invariant; the gateway writer canonicalizes
   null→0 when the matching quantity is 0 and rejects null-with-quantity>0 (fail-closed). No
-  reader distinguishes 0 from NULL today, so no consumer changes.
+  reader distinguishes 0 from NULL today, so no consumer changes. — CHG-428
 - [ ] **L5-4** — The common `FlussProjectionLedgerStore` is deleted (it opens a Connection/Table
   then delegates to an in-memory map — the name promises durability it does not provide). The
   in-memory oracle (`InMemoryProjectionLedgerStore`) stays; durability belongs to the gateway

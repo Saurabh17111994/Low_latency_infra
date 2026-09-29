@@ -1,6 +1,6 @@
 package com.trading.execution.gateway;
 
-/** Normalized Nautilus event. Values are already authoritative images; the gateway does not derive them. */
+/** Normalized Nautilus event. Values are already authoritative images; the gateway does not derive them — the one exception is the stored average-price encoding, canonicalized to 0 iff the matching quantity is 0 (L5-3, FlussProjectionWriter.canonicalAveragePaise). */
 public record NormalizedExecutionEvent(
         String postbackEventId, String accountScopeId, String executionPartitionId,
         long gateEpoch, String actorId, String eventType, long eventTs,

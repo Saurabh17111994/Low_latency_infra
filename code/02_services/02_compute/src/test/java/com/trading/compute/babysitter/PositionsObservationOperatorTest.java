@@ -48,8 +48,12 @@ class PositionsObservationOperatorTest {
 
     private static PositionSnapshot snap(String pid, String event, long version,
             long open, long closed, long lastUpdate) {
+        // L5-3: the canonical encoding — a live quantity carries a price, a flat
+        // side carries 0 (the record enforces it now).
+        long avgEntry = open == 0 ? 0L : 10_050L;
+        long avgExit = closed == 0 ? 0L : 11_000L;
         return new PositionSnapshot(pid, "tc", "acct", 7L, "NSE", "TEST", "BUY",
-                PositionState.OPEN, open, closed, 0L, 0L, event, version, 1_000L,
+                PositionState.OPEN, open, closed, avgEntry, avgExit, event, version, 1_000L,
                 lastUpdate, PositionsColumns.SCHEMA_VERSION_V2);
     }
 

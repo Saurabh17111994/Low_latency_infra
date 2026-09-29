@@ -24,8 +24,10 @@ final class TestPositionsRows {
         r.setField(PositionsColumns.STATE, StringData.fromString(state));
         r.setField(PositionsColumns.OPEN_QUANTITY, open);
         r.setField(PositionsColumns.CLOSED_QUANTITY, closed);
-        r.setField(PositionsColumns.AVERAGE_ENTRY_PAISE, null);
-        r.setField(PositionsColumns.AVERAGE_EXIT_PAISE, null);
+        // L5-3: the canonical encoding — a live quantity carries a price, a flat
+        // side stays NULL (the deserializer reads NULL as 0).
+        r.setField(PositionsColumns.AVERAGE_ENTRY_PAISE, open == 0 ? null : 250_000L);
+        r.setField(PositionsColumns.AVERAGE_EXIT_PAISE, closed == 0 ? null : 260_000L);
         r.setField(PositionsColumns.SOURCE_EVENT_ID, StringData.fromString(eventId));
         r.setField(PositionsColumns.SOURCE_VERSION, version);
         r.setField(PositionsColumns.CREATED_TS, 1_000L);

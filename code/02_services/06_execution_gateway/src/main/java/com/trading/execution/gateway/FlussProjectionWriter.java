@@ -342,12 +342,37 @@ public final class FlussProjectionWriter implements ProjectionWriter {
     private static String nullableString(InternalRow row, int index) {
         return row.isNullAt(index) ? null : row.getString(index).toString();
     }
-    private GenericRow positionRow(NormalizedExecutionEvent e) {
+    /** Package-private for the L5-3 encoding tests (no instance state). */
+    static GenericRow positionRow(NormalizedExecutionEvent e) {
         var p = e.position();
+        // L5-3: canonical average-price encoding (10_positions.sql): 0 iff the
+        // matching quantity is 0. A null with a live quantity is a decoder bug —
+        // fail closed, never write NULL beside a live quantity (no reader
+        // distinguishes 0 from NULL).
+        long avgEntryPaise =
+                canonicalAveragePaise(p.averageEntryPaise(), p.openQuantity(), "average_entry_paise");
+        long avgExitPaise =
+                canonicalAveragePaise(p.averageExitPaise(), p.closedQuantity(), "average_exit_paise");
         return GenericRow.of(bs(p.positionId()), bs(p.tradeContextId()), bs(e.accountScopeId()), p.instrumentToken(),
                 bs(p.exchange()), bs(p.symbol()), bs(p.side()), bs(p.state()), p.openQuantity(), p.closedQuantity(),
-                p.averageEntryPaise(), p.averageExitPaise(), bs(e.postbackEventId()), p.sourceVersion(),
+                avgEntryPaise, avgExitPaise, bs(e.postbackEventId()), p.sourceVersion(),
                 p.createdTs(), p.lastUpdateTs(), bs("2"));
+    }
+
+    /**
+     * L5-3: the canonical average-price value for a stored position row. A flat
+     * side (quantity 0) maps any incoming value — null legacy or a leftover
+     * price — to 0; a live quantity with a null price fails closed.
+     */
+    static long canonicalAveragePaise(Long value, long quantity, String column) {
+        if (quantity == 0) {
+            return 0L;
+        }
+        if (value == null) {
+            throw new IllegalStateException(column + " is NULL with quantity=" + quantity
+                    + " — the canonical encoding requires a price when the quantity is non-zero");
+        }
+        return value;
     }
     private GenericRow correlationRow(NormalizedExecutionEvent e) {
         var c = e.correlation();

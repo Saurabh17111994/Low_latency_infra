@@ -1,6 +1,7 @@
 package com.trading.common.schema.position;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.trading.common.model.PositionState;
 import java.lang.reflect.Method;
@@ -11,8 +12,11 @@ import org.junit.jupiter.api.Test;
 
 /**
  * P4-352: {@code FlussPositionsStateStore.toSnapshot} must decode NULL avg
- * prices (nullable in DDL — NULL iff the matching quantity is 0) as 0L
- * instead of crashing on {@code getLong}.
+ * prices (nullable in DDL) as 0L instead of crashing on {@code getLong}.
+ * L5-3: the canonical encoding is 0 iff the matching quantity is 0, so a
+ * legacy NULL is legitimate only where the quantity is 0 — a NULL beside a
+ * live quantity is corrupt data and fails closed through the record
+ * invariant instead of silently becoming a zero price.
  */
 class FlussPositionsStateStoreDecodeTest {
 
@@ -58,9 +62,23 @@ class FlussPositionsStateStoreDecodeTest {
 
     @Test
     void nullAvgEntryDecodesAsZero() throws Exception {
+        // A legitimate legacy NULL: the matching quantity is 0 (flat side), so
+        // the decoded 0 is the canonical value.
         GenericRow row = fullRow();
+        row.setField(PositionsColumns.OPEN_QUANTITY, 0L);
         row.setField(PositionsColumns.AVERAGE_ENTRY_PAISE, null);
         PositionSnapshot s = toSnapshot(row);
         assertThat(s.averageEntryPaise()).isZero();
+    }
+
+    @Test
+    void nullAvgEntryWithALiveQuantityFailsClosed() throws Exception {
+        // L5-3: NULL decoded to 0 beside a live quantity is corrupt data, not a
+        // zero price — the record invariant rejects it.
+        GenericRow row = fullRow();
+        row.setField(PositionsColumns.AVERAGE_ENTRY_PAISE, null);
+        assertThatThrownBy(() -> toSnapshot(row))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("average_entry_paise");
     }
 }

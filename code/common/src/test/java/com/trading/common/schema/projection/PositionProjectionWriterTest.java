@@ -12,9 +12,13 @@ class PositionProjectionWriterTest {
 
     private static NautilusPositionEvent event(long seq, String side, long open, long closed,
             PositionState state) {
+        // L5-3: the canonical encoding — a live quantity carries a price, a flat
+        // side carries 0 (PositionSnapshot enforces it).
+        long avgEntry = open == 0 ? 0L : 1000L;
+        long avgExit = closed == 0 ? 0L : 900L;
         return new NautilusPositionEvent(
                 "pos-1", "tc-1", "acc-1", 1001L, "CME", "wti", side, state,
-                open, closed, 1000L, 900L, "evt-" + seq, seq, NOW);
+                open, closed, avgEntry, avgExit, "evt-" + seq, seq, NOW);
     }
 
     @Test
@@ -46,7 +50,7 @@ class PositionProjectionWriterTest {
         // Same content (same source event id) at an older version: benign replay.
         NautilusPositionEvent older = new NautilusPositionEvent(
                 "pos-1", "tc-1", "acc-1", 1001L, "CME", "wti", "BUY",
-                PositionState.OPEN, 10, 0, 1000L, 900L, "evt-2", 1L, NOW);
+                PositionState.OPEN, 10, 0, 1000L, 0L, "evt-2", 1L, NOW);
         PositionProjectionWriter.PositionWriteResult stale = PositionProjectionWriter.apply(
                 first.snapshot(), older, NOW);
         assertThat(stale.outcome()).isEqualTo(PositionProjectionWriter.Outcome.STALE);
@@ -95,7 +99,7 @@ class PositionProjectionWriterTest {
         PositionProjectionWriter.PositionWriteResult first = PositionProjectionWriter.apply(null, e1, NOW);
         NautilusPositionEvent conflicting = new NautilusPositionEvent(
                 "pos-1", "tc-1", "acc-1", 1001L, "CME", "wti", "BUY",
-                PositionState.OPEN, 20, 0, 1000L, 900L, "evt-DIFFERENT", 1L, NOW);
+                PositionState.OPEN, 20, 0, 1000L, 0L, "evt-DIFFERENT", 1L, NOW);
         PositionProjectionWriter.PositionWriteResult r =
                 PositionProjectionWriter.apply(first.snapshot(), conflicting, NOW);
         assertThat(r.outcome()).isEqualTo(PositionProjectionWriter.Outcome.VIOLATION);

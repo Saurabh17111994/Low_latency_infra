@@ -94,4 +94,14 @@ class PositionsColumnsAgreementTest {
         assertThat(ddl).containsIgnoringCase("Schema version: 2");
         assertThat(PositionsColumns.SCHEMA_VERSION_V2).isEqualTo("2");
     }
+
+    @Test
+    void ddlPinsTheCanonicalAveragePriceEncoding() throws IOException {
+        // L5-3: the sentence the writer + record enforce: the stored value is 0
+        // iff the matching quantity is 0, and a legacy SQL NULL reads as 0.
+        String ddl = Files.readString(DDL_DIR.resolve(DDL_FILE), StandardCharsets.UTF_8);
+        assertThat(ddl).contains("the canonical value is 0 iff the");
+        assertThat(ddl).contains("matching quantity is 0");
+        assertThat(ddl).contains("legacy SQL NULL reads");
+    }
 }

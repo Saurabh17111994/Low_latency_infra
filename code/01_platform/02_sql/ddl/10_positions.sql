@@ -20,10 +20,12 @@
 --     last-writer-wins on source_version + dedup on source_event_id, enforced
 --     in PositionProjector.apply via KvStateUpdateProtocol.evaluate (STALE/
 --     REGRESSION rejected) — see P4-036.
---   average_entry/exit_paise BIGINT paise, nullable: NULL iff the matching
---     quantity is 0 (entry NULL iff open=0, exit NULL iff closed=0); fractional
---     paise TRUNCATES on every fill — accepted for now, revisit DECIMAL(18,4)
---     only if compounding PnL error proves material (P4-187).
+--   average_entry/exit_paise BIGINT paise: the canonical value is 0 iff the
+--     matching quantity is 0 (entry 0 iff open=0, exit 0 iff closed=0); the
+--     DDL column stays nullable for legacy rows, and a legacy SQL NULL reads
+--     as 0 (P4-352). Fractional paise TRUNCATES on every fill — accepted for
+--     now, revisit DECIMAL(18,4) only if compounding PnL error proves
+--     material (P4-187).
 --   created_ts/last_update_ts: epoch-millis, last_update_ts >= created_ts;
 --     schema_version writer-set '2' (DDL Schema version in this header).
 --     Prefer TIMESTAMP_LTZ(3)/INT DEFAULT only with a full recreate (P4-188).
