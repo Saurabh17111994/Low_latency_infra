@@ -516,21 +516,17 @@ if step_active 1; then
 echo "=== [1/19] Static checks (bash -n, shellcheck, harness guards) ===" | tee -a "$SUMMARY"
 : >"$STATIC_LOG"
 STATIC_FAIL=0
-# Every repo shell script (excludes third_party vendored sources).
-# Enumerated via a temp file (process substitution < <() needs /dev/fd which
-# some sandboxes/CI chroots do not provide), with a `git ls-files` fallback
-# for environments where find/sort cannot load their shared libraries.
+# Every repo shell script (L2-1): one enumeration shared with `make static-check`
+# (`lint-enumeration.sh`, repo-rooted `git ls-files`, target/third_party
+# excluded, empty list fails closed). The temp file avoids process substitution
+# (< <() needs /dev/fd which some sandboxes/CI chroots do not provide).
 _script_list=$(mktemp)
 SCRIPTS=()
 BASH_MAJOR="${BASH_VERSINFO[0]:-0}"
-if ! (cd "$CODE_DIR" && find . -name '*.sh' -not -path '*/target/*' -not -path '*/third_party/*' 2>/dev/null | sort 2>/dev/null) >"$_script_list"; then
+if ! bash "$PROJECT_ROOT/code/01_platform/04_scripts/lint-enumeration.sh" >"$_script_list" 2>>"$STATIC_LOG"; then
 	: >"$_script_list"
 fi
 if [ "$BASH_MAJOR" -ge 4 ]; then mapfile -t SCRIPTS <"$_script_list"; else while IFS= read -r _l; do SCRIPTS+=("$_l"); done <"$_script_list"; fi
-if [ "${#SCRIPTS[@]}" -eq 0 ]; then
-	(cd "$CODE_DIR" && git ls-files '*.sh' 2>/dev/null | grep -v -E '(^|/)(target|third_party)/') >"$_script_list" || true
-	if [ "$BASH_MAJOR" -ge 4 ]; then mapfile -t SCRIPTS <"$_script_list"; else while IFS= read -r _l; do SCRIPTS+=("$_l"); done <"$_script_list"; fi
-fi
 rm -f "$_script_list"
 SHELLCHECK_OK=0
 if command -v shellcheck >/dev/null 2>&1; then
@@ -543,12 +539,12 @@ if [ "${#SCRIPTS[@]}" -eq 0 ]; then
 	gate_fail
 fi
 for s in "${SCRIPTS[@]}"; do
-	if ! bash -n "$CODE_DIR/$s" >>"$STATIC_LOG" 2>&1; then
+	if ! bash -n "$PROJECT_ROOT/$s" >>"$STATIC_LOG" 2>&1; then
 		echo "FAIL: bash -n $s" | tee -a "$STATIC_LOG"
 		STATIC_FAIL=1
 	fi
 	if [ "$SHELLCHECK_OK" = "1" ]; then
-		if ! shellcheck -S warning "$CODE_DIR/$s" >>"$STATIC_LOG" 2>&1; then
+		if ! shellcheck -S warning "$PROJECT_ROOT/$s" >>"$STATIC_LOG" 2>&1; then
 			echo "FAIL: shellcheck $s" | tee -a "$STATIC_LOG"
 			STATIC_FAIL=1
 		fi

@@ -33,12 +33,12 @@ Where a body section and this list disagree, this list wins.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | L1 — execution: mass-status honesty | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
-| L2 — ops tooling: lint scope and tracker wiring | 2 | 1 | 0 | 1 | 0 | 0 | 0 |
+| L2 — ops tooling: lint scope and tracker wiring | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | L4 — ingestion: config doc parity and final-report atomicity | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | L5 — common/mock: semantics and naming truth | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | L6 — infra/DDL: guards, parity, docs | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| **Total** | **17** | **2** | **0** | **15** | **0** | **0** | **0** |
+| **Total** | **17** | **3** | **0** | **14** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
@@ -51,11 +51,11 @@ Where a body section and this list disagree, this list wins.
 
 #### L2 — ops tooling: lint scope and tracker wiring
 
-- [ ] **L2-1** — One lint enumeration for both sites: `git ls-files '*.sh'` from the repo root
+- [x] **L2-1** — One lint enumeration for both sites: `git ls-files '*.sh'` from the repo root
   (exclude `target`/`third_party`), replacing the `code/`-rooted `find` and its code-rooted
   fallback; an empty enumeration fails closed; the Prometheus float-trap scan widens to the repo
   root; root entry scripts (`start-all.sh`, `run-ingestion.sh`, `show-ticks.sh`) are now checked.
-  (A one-time lint repair of those scripts ships in the same commit if needed.)
+  (A one-time lint repair of those scripts ships in the same commit if needed.) — CHG-419
 - [x] **L2-2** — `plan_tracker.py` gains a consumer and nested-marker support: shared marker regex
   `^\s*- \[(.)\]` in both the count and the unknown-marker validation; gate step 3 test discovers
   tracker plans by anchored `^## 0\. Live tracker\s*$` + the Overview section heading, asserts

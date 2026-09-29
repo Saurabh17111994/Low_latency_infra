@@ -518,7 +518,8 @@ gate-order:
 
 # Phase 8 G4: static script hygiene without needing the full gate.
 static-check:
-	@set -e; fail=0; for s in $$(find code -name '*.sh' -not -path '*/target/*' -not -path '*/third_party/*' | sort); do \
+	@set -e; fail=0; scripts=$$(bash code/01_platform/04_scripts/lint-enumeration.sh) || { echo "static-check: script enumeration failed (see above)" >&2; exit 1; }; \
+	for s in $$scripts; do \
 		bash -n "$$s" || fail=1; \
 		if command -v shellcheck >/dev/null 2>&1; then \
 			shellcheck -S warning "$$s" || fail=1; \
@@ -530,9 +531,10 @@ static-check:
 	# Flag the pattern ONLY when it appears near a metrics scrape (curl to a \
 	# :9249/:9250/:9090 endpoint or a file named *metrics*) — the same pattern \
 	# on a config file / test log (e.g. MAX_BRIDGE_RESTARTS=3) is fine. \
+	# L2-1: scanned from the repo root, so the root entry scripts are covered too. \
 	if command -v rg >/dev/null 2>&1; then \
 		tmp=$$(mktemp); \
-		if rg -n 'grep -o[EP]?.*(\[0-9\]|\\d).*(9250|9249|9090|prom|metrics)|(9250|9249|9090|prom|metrics).*grep -o[EP]?.*(\[0-9\]|\\d)' code --glob '*.sh' -g '!**/target/**' >"$$tmp"; then \
+		if rg -n 'grep -o[EP]?.*(\[0-9\]|\\d).*(9250|9249|9090|prom|metrics)|(9250|9249|9090|prom|metrics).*grep -o[EP]?.*(\[0-9\]|\\d)' . --glob '*.sh' -g '!**/target/**' -g '!**/third_party/**' >"$$tmp"; then \
 			echo "static-check: Prometheus float-trap pattern found (grep -oE '[0-9]+$$'):" >&2; \
 			cat "$$tmp" >&2; \
 			fail=1; \
