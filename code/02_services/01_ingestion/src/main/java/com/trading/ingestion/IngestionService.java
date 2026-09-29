@@ -18,6 +18,7 @@ import com.trading.ingestion.model.Instrument;
 import com.trading.ingestion.model.RawTick;
 import com.trading.ingestion.model.TickPacket;
 import com.trading.ingestion.model.ValidityClassification;
+import com.trading.ingestion.quarantine.AsyncQuarantineSink;
 import com.trading.ingestion.quarantine.QuarantineSink;
 import com.trading.ingestion.quarantine.QuarantineWriter;
 import com.trading.ingestion.safety.SafetySink;
@@ -347,8 +348,17 @@ public final class IngestionService {
 
         // Quarantine + discontinuity writers (Phase 2b). Test seam: substitute
         // sinks (ING-DQ-010) bypass the Fluss-connection requirement.
+        // M4-4: the direct QuarantineWriter calls append() on the reader thread
+        // (Fluss's memory-pool wait can park it for 30 s, R-297), so the
+        // production path is wrapped: records enter a bounded queue with a
+        // non-blocking offer and ONE daemon writer delivers them. Overflow (or
+        // a post-close write) routes into the shared H2-2 drop handler as
+        // QUARANTINE_OVERFLOW — counted, journaled once, fail-fast stop.
         this.quarantineWriter = quarantineSink != null
-                ? quarantineSink : new QuarantineWriter(config.flussBootstrap, instanceId);
+                ? quarantineSink
+                : new AsyncQuarantineSink(
+                        new QuarantineWriter(config.flussBootstrap, instanceId),
+                        this::onWriterDrop);
         this.discontinuityWriter = discontinuitySink != null
                 ? discontinuitySink : new DiscontinuityWriter(
                         config.flussBootstrap, instanceId, "arrow-bridge", connectionEpoch);

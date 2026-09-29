@@ -37,11 +37,11 @@ Where a body section and this list disagree, this list wins.
 | M1 — execution follow-ups (the layer under H1) | 6 | 5 | 0 | 1 | 0 | 0 | 0 |
 | M2 — ops tooling truth | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
 | M3 — compute correctness and configuration | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| M4 — ingestion gates and accounting | 6 | 1 | 0 | 5 | 0 | 0 | 0 |
+| M4 — ingestion gates and accounting | 6 | 2 | 0 | 4 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **6** | **0** | **25** | **0** | **0** | **0** |
+| **Total** | **31** | **7** | **0** | **24** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -122,9 +122,9 @@ Where a body section and this list disagree, this list wins.
   level with episode hysteresis; 80% → readiness false (`HealthProbe` queue dimension); 100% →
   readiness false + the H2-2 shared handler exactly once (the rejected offer is counted at the
   offer site; the episode's durable record + stop stay CAS-once). (I3.) — CHG-382
-- [ ] **M4-4** — Quarantine no longer stalls the reader: `AsyncQuarantineSink` decorator
+- [x] **M4-4** — Quarantine no longer stalls the reader: `AsyncQuarantineSink` decorator
   (bounded queue, default 4096, one daemon writer); `write()` is a non-blocking offer; overflow →
-  the H2-2 shared handler (`QUARANTINE_OVERFLOW`); `close()` drains and counts. (I4.)
+  the H2-2 shared handler (`QUARANTINE_OVERFLOW`); `close()` drains and counts. (I4.) — CHG-383
 - [ ] **M4-5** — Startup grace retries the whole window: drop `lastAppendSuccessEpochMs == 0L`;
   metadata-not-ready retries inside the bounded grace regardless of an intervening ack; expiry
   FATAL, other classes immediate; dossier updated, CHG-326 clause marked superseded. (I5.)
