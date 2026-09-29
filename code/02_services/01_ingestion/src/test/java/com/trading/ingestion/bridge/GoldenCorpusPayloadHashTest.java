@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Base64;
+import java.util.HexFormat;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -91,6 +92,31 @@ class GoldenCorpusPayloadHashTest {
         assertEquals(PayloadHashValidator.Result.HASH_MISMATCH,
                 PayloadHashValidator.validate(tamperedB64, g.payloadHash()),
                 "tampered golden must be rejected");
+    }
+
+    @Test
+    @DisplayName("M4-6: the proto byte[] path validates golden frames with the 32-byte digest")
+    void goldenPacketsValidateOnProtoBytePath() throws IOException {
+        for (String name : new String[] {"full-tick", "ltp-tick"}) {
+            Golden g = loadGolden(name);
+            byte[] digest = HexFormat.of().parseHex(g.payloadHash());
+            assertEquals(32, digest.length, "golden payload_hash must be a 32-byte SHA-256 digest");
+            assertEquals(PayloadHashValidator.Result.VALID,
+                    PayloadHashValidator.validate(g.frame(), digest),
+                    "golden " + g.name() + " must validate on the proto byte[] path");
+        }
+    }
+
+    @Test
+    @DisplayName("M4-6: a tampered golden frame is rejected on the proto byte[] path")
+    void tamperedGoldenRejectedOnProtoBytePath() throws IOException {
+        Golden g = loadGolden("full-tick");
+        byte[] tampered = g.frame().clone();
+        tampered[8] ^= 0x01; // flip one bit of the LTP field
+        byte[] digest = HexFormat.of().parseHex(g.payloadHash());
+        assertEquals(PayloadHashValidator.Result.HASH_MISMATCH,
+                PayloadHashValidator.validate(tampered, digest),
+                "tampered golden must be rejected on the proto byte[] path");
     }
 
     @Test

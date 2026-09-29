@@ -30,6 +30,7 @@ Two colocated processes in the same container consume the evidence-approved brok
 - Raw events are not deduplicated at ingestion.
 - Arrow provides no broker sequence/event ID — confirmed by Go SDK + REST docs. Fingerprint dedup (DEC-012) is correct.
 - Original binary payload bytes are never replaced by canonical JSON.
+- Payload integrity is verified at tick admission: the `payload_hash` bytes (SHA-256 computed once in the Go bridge over `raw_payload`) must match the packet before any other gate — missing → `MISSING_PAYLOAD_HASH` quarantine, mismatch → `HASH_MISMATCH`, malformed length → `INVALID_SCHEMA`; never append. There is no off switch (M4-6).
 - Memory/backlog are bounded; exact client internals remain version-gated.
 
 ## Failure behavior

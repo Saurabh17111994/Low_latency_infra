@@ -22,7 +22,6 @@ import com.trading.ingestion.write.RawTickWriter;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -240,26 +239,12 @@ class IngestionNoSilentDropTest {
                 .setLtpPaise(ltpPaise)
                 .setVolume(100)
                 .setRawPayload(ByteString.copyFrom(FRAME_PAYLOAD))
-                .setPayloadHash(ByteString.copyFrom(sha256Hex(FRAME_PAYLOAD).getBytes(StandardCharsets.UTF_8)))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(FRAME_PAYLOAD)))
                 .build();
     }
 
     private static final byte[] FRAME_PAYLOAD =
             new byte[] {0x01, 0x02, 0x03, 0x04, (byte) 0xFF, 0x00, 0x10};
-
-    private static String sha256Hex(byte[] data) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(data);
-            StringBuilder sb = new StringBuilder(digest.length * 2);
-            for (byte b : digest) {
-                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
 
     // ---- no-op evidence sinks (ING-DQ-010 default-run seam) ----
 

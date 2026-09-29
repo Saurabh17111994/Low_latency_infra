@@ -94,6 +94,9 @@ message TickEvent {
   string protocol_version = 28;  // SET IN JAVA at row-build (not from Go)
 
   // payload integrity (Q5): sha256 of raw_payload, computed ONCE in Go
+  // (32 bytes); Java verifies it at tick admission before any other gate
+  // (M4-6, always-on: missing -> MISSING_PAYLOAD_HASH quarantine, mismatch ->
+  // HASH_MISMATCH, malformed length -> INVALID_SCHEMA; never append)
   bytes payload_hash = 30;
 
   // T8 staged-latency timestamps (ms epoch, monotonic — never persisted,

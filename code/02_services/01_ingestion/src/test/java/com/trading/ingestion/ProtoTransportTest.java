@@ -35,7 +35,6 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -170,18 +169,6 @@ class ProtoTransportTest {
                 quarantine, noopDiscontinuity(), noopSafety());
     }
 
-    private static String sha256Hex(byte[] data) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] d = md.digest(data);
-            StringBuilder sb = new StringBuilder(d.length * 2);
-            for (byte b : d) sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-            return sb.toString();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
     /** One proto TickEvent (mirrors Go emitter mapping). */
     private static TickEvent protoTick(long token, long tsMs, long ltpPaise, String mode) {
         return TickEvent.newBuilder()
@@ -195,7 +182,7 @@ class ProtoTransportTest {
                 .setLtpPaise(ltpPaise)
                 .setVolume(100)
                 .setRawPayload(ByteString.copyFrom(FRAME_PAYLOAD))
-                .setPayloadHash(ByteString.copyFrom(sha256Hex(FRAME_PAYLOAD).getBytes(StandardCharsets.UTF_8)))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(FRAME_PAYLOAD)))
                 .build();
     }
 
@@ -512,7 +499,7 @@ class ProtoTransportTest {
                         .setFeedSequenceLocal(1).setLtpPaise(100).setVolume(100)
                         .setRawPayload(com.google.protobuf.ByteString.copyFrom(FRAME_PAYLOAD))
                         .setPayloadHash(com.google.protobuf.ByteString.copyFrom(
-                                sha256Hex(FRAME_PAYLOAD).getBytes(StandardCharsets.UTF_8)))
+                                ProtoTickFactory.sha256(FRAME_PAYLOAD)))
                         .build();
         // Call the 5-arg overload directly to pass frameRead/batchCreated.
         Method m5 = IngestionService.class.getDeclaredMethod("processTickEvent",

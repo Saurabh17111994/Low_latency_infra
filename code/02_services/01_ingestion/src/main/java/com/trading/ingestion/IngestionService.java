@@ -4,6 +4,7 @@ import com.trading.ingestion.config.IngestionConfig;
 import com.trading.ingestion.bridge.BridgeEvent;
 import com.trading.ingestion.bridge.BridgeMetrics;
 import com.trading.ingestion.bridge.BrokerQuarantine;
+import com.trading.ingestion.bridge.PayloadHashValidator;
 import com.trading.ingestion.discontinuity.DiscontinuitySink;
 import com.trading.ingestion.discontinuity.SequenceGapMonitor;
 import com.trading.ingestion.discontinuity.DiscontinuityWriter;
@@ -1207,6 +1208,28 @@ public final class IngestionService {
         try {
             long receiveTsMs = ev.getReceivedMs() > 0 ? ev.getReceivedMs() : System.currentTimeMillis();
             byte[] packetBytes = ev.getRawPayload().toByteArray();
+
+            // M4-6: payload integrity is not optional. The tick's own bytes must
+            // hash to the digest the bridge computed (Go: batch.go, once per
+            // raw packet) before ANY other admission work (freshness,
+            // instrument, validity, append). Missing hash → MISSING_PAYLOAD_HASH;
+            // malformed → INVALID_SCHEMA; mismatch → HASH_MISMATCH — all
+            // quarantined + counted, never appended. There is no off switch.
+            PayloadHashValidator.Result hashResult = PayloadHashValidator.validate(
+                    packetBytes, ev.getPayloadHash().toByteArray());
+            if (hashResult != PayloadHashValidator.Result.VALID) {
+                QuarantineWriter.Reason hashReason = switch (hashResult) {
+                    case MISSING_HASH -> QuarantineWriter.Reason.MISSING_PAYLOAD_HASH;
+                    case HASH_MISMATCH -> QuarantineWriter.Reason.HASH_MISMATCH;
+                    default -> QuarantineWriter.Reason.INVALID_SCHEMA;
+                };
+                quarantineWriter.write(packetBytes, hashReason,
+                        "payload integrity " + hashResult.name().toLowerCase(java.util.Locale.ROOT)
+                                + " (raw_payload must hash to payload_hash)",
+                        (long) ev.getToken(), null, null);
+                metrics.incrementDecodeError(hashReason.name());
+                return;
+            }
 
             // T8 staged latencies (contract §7.9): decode/batching/ipc are
             // measured here against the proto provenance timestamps.

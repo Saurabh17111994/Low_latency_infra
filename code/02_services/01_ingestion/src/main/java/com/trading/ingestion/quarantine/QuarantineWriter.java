@@ -84,6 +84,8 @@ public class QuarantineWriter implements QuarantineSink {
         FUTURE_BROKER_TIMESTAMP,
         STALE_BROKER_TIMESTAMP,
         HASH_MISMATCH,
+        /** M4-6: the tick carried no payload hash at all (proto3 default). */
+        MISSING_PAYLOAD_HASH,
         /** Ingestion-internal processing exception. */
         INTERNAL_ERROR,
         /** Canonical fingerprint could not be computed. */

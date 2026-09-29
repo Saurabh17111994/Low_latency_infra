@@ -82,13 +82,4 @@ public final class ProtoTickFactory {
             throw new RuntimeException(e);
         }
     }
-
-    /** UTF-8 bytes of the sha256 hex (the wire contract's payload_hash). */
-    public static ByteString sha256HexBytes(byte[] in) {
-        StringBuilder sb = new StringBuilder();
-        for (byte b : sha256(in)) {
-            sb.append(String.format("%02x", b));
-        }
-        return ByteString.copyFrom(sb.toString().getBytes(StandardCharsets.UTF_8));
-    }
 }

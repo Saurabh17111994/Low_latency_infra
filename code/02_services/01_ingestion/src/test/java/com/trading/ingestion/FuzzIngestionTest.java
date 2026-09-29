@@ -25,7 +25,6 @@ import java.io.ByteArrayInputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -236,7 +235,7 @@ class FuzzIngestionTest {
         rnd.nextBytes(payload);
         b.setRawPayload(ByteString.copyFrom(payload));
         if (rnd.nextInt(10) < 8) {
-            b.setPayloadHash(ByteString.copyFrom(sha256Hex(payload).getBytes(StandardCharsets.UTF_8)));
+            b.setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(payload)));
         }
         return b.build();
     }
@@ -255,7 +254,7 @@ class FuzzIngestionTest {
                 .setLtpPaise(ltpPaise)
                 .setVolume(100)
                 .setRawPayload(ByteString.copyFrom(payload))
-                .setPayloadHash(ByteString.copyFrom(sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(payload)))
                 .build();
     }
 
@@ -273,7 +272,7 @@ class FuzzIngestionTest {
                 .setLtpPaise(1 + rnd.nextInt(500_000))
                 .setVolume(100)
                 .setRawPayload(ByteString.copyFrom(new byte[]{1, 2, 3}))
-                .setPayloadHash(ByteString.copyFrom(sha256Hex(new byte[]{1, 2, 3}).getBytes(StandardCharsets.UTF_8)))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(new byte[]{1, 2, 3})))
                 .build();
     }
 
@@ -292,7 +291,7 @@ class FuzzIngestionTest {
                 .setLtpPaise(1 + rnd.nextInt(500_000))
                 .setVolume(100)
                 .setRawPayload(ByteString.copyFrom(payload))
-                .setPayloadHash(ByteString.copyFrom("ZZZ".getBytes(StandardCharsets.UTF_8)))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(new byte[]{9, 9, 9, 9})))
                 .build();
     }
 
@@ -309,7 +308,7 @@ class FuzzIngestionTest {
                 .setLtpPaise(100)
                 .setVolume(100)
                 .setRawPayload(ByteString.copyFrom(new byte[]{9, 9}))
-                .setPayloadHash(ByteString.copyFrom(sha256Hex(new byte[]{9, 9}).getBytes(StandardCharsets.UTF_8)))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(new byte[]{9, 9})))
                 .build();
     }
 
@@ -338,20 +337,6 @@ class FuzzIngestionTest {
                         .exchange("NSE").segment("CM").lotSize(1).manifestVersion(1).build(),
                 new Instrument.Builder().instrumentToken(TOKEN_B).tradingSymbol("SYM2-EQ")
                         .exchange("NSE").segment("CM").lotSize(1).manifestVersion(1).build());
-    }
-
-    private static String sha256Hex(byte[] data) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(data);
-            StringBuilder sb = new StringBuilder(digest.length * 2);
-            for (byte b : digest) {
-                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
     }
 
     // ---- counting sinks (ING-DQ-010 no-op seam, but counting) ----

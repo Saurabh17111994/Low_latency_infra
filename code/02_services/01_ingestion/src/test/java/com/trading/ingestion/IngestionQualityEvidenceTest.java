@@ -46,7 +46,7 @@ class IngestionQualityEvidenceTest {
         String[] expected = {
                 "MALFORMED_JSON", "INVALID_SCHEMA", "MISSING_INSTRUMENT",
                 "INVALID_VALUES", "FUTURE_BROKER_TIMESTAMP", "STALE_BROKER_TIMESTAMP",
-                "HASH_MISMATCH", "INTERNAL_ERROR",
+                "HASH_MISMATCH", "MISSING_PAYLOAD_HASH", "INTERNAL_ERROR",
                 "FINGERPRINT_FAILURE",
         };
         QuarantineWriter.Reason[] actual = QuarantineWriter.Reason.values();

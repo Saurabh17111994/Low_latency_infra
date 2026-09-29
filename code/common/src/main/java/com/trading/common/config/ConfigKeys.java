@@ -89,7 +89,6 @@ public final class ConfigKeys {
     public static final String INGESTION_ALLOW_DEGRADED = "INGESTION_ALLOW_DEGRADED";
     public static final String INGESTION_MAX_BATCH_RECORDS = "INGESTION_MAX_BATCH_RECORDS";
     public static final String INGESTION_MAX_BATCH_WAIT_MS = "INGESTION_MAX_BATCH_WAIT_MS";
-    public static final String INGEST_VALIDATE_PAYLOAD_HASH = "INGEST_VALIDATE_PAYLOAD_HASH";
     public static final String JVM_HEAP_PERCENT = "JVM_HEAP_PERCENT";
     public static final String MAX_CONCURRENT_CHECKPOINTS = "MAX_CONCURRENT_CHECKPOINTS";
     public static final String MAX_PENDING_APPEND_BYTES = "MAX_PENDING_APPEND_BYTES";

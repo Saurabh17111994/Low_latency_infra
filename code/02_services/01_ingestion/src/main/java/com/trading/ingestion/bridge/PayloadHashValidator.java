@@ -25,6 +25,8 @@ public final class PayloadHashValidator {
         MALFORMED_PAYLOAD,
         /** payload_hash missing or not a lowercase SHA-256 hex digest. */
         MALFORMED_HASH,
+        /** M4-6: the tick carried no payload hash at all (proto3 default). */
+        MISSING_HASH,
         /** SHA-256 of decoded bytes does not match payload_hash. */
         HASH_MISMATCH
     }
@@ -82,6 +84,32 @@ public final class PayloadHashValidator {
             return Result.HASH_MISMATCH;
         }
         return Result.VALID;
+    }
+
+    /**
+     * M4-6: byte[] path for the proto transport. {@code TickEvent.raw_payload}
+     * and {@code TickEvent.payload_hash} are raw bytes on the wire — the Go
+     * bridge writes the 32-byte SHA-256 digest ({@code batch.go}: {@code h[:]}
+     * of {@code sha256.Sum256(raw)}) — so the admission gate must not
+     * round-trip through Base64/hex strings.
+     *
+     * <p>Empty hash = missing (proto3 default) → {@link Result#MISSING_HASH};
+     * any length other than 32 → {@link Result#MALFORMED_HASH}; digest
+     * mismatch → {@link Result#HASH_MISMATCH}. The 540 B packet bound is
+     * enforced first (P1-076).
+     */
+    public static Result validate(byte[] packet, byte[] expectedHash) {
+        if (packet == null || packet.length == 0 || packet.length > MAX_PACKET_BYTES) {
+            return Result.MALFORMED_PAYLOAD;
+        }
+        if (expectedHash == null || expectedHash.length == 0) {
+            return Result.MISSING_HASH;
+        }
+        if (expectedHash.length != 32) {
+            return Result.MALFORMED_HASH;
+        }
+        return MessageDigest.isEqual(sha256(packet), expectedHash)
+                ? Result.VALID : Result.HASH_MISMATCH;
     }
 
     /**

@@ -74,7 +74,7 @@ class IngestionServiceTest {
                 .addBidPx(234400).addBidPx(234300).addBidPx(234200).addBidPx(234100).addBidPx(234000)
                 .addAskPx(234600).addAskPx(234700).addAskPx(234800).addAskPx(234900).addAskPx(235000)
                 .setRawPayload(ByteString.copyFrom(payload))
-                .setPayloadHash(ByteString.copyFrom(sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(payload)))
                 .build();
 
         service.processTickEvent(ev, "hft-0", 1L);
@@ -127,7 +127,7 @@ class IngestionServiceTest {
                 .setVolume(125000)
                 .setOpenInterest(0)
                 .setRawPayload(ByteString.copyFrom(payload))
-                .setPayloadHash(ByteString.copyFrom(sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(payload)))
                 .build();
 
         service.processTickEvent(ev, "hft-0", 1L);
@@ -231,7 +231,7 @@ class IngestionServiceTest {
                 .setLtpPaise(234500)
                 .setVolume(125000)
                 .setRawPayload(ByteString.copyFrom(payload))
-                .setPayloadHash(ByteString.copyFrom(sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(payload)))
                 .build();
 
         service.processTickEvent(ev, "hft-0", 1L);
@@ -279,7 +279,7 @@ class IngestionServiceTest {
                 .setLtpPaise(234500)
                 .setVolume(125000)
                 .setRawPayload(ByteString.copyFrom(payload))
-                .setPayloadHash(ByteString.copyFrom(sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(payload)))
                 .build();
 
         service.processTickEvent(ev, "hft-0", 1L);
@@ -371,8 +371,7 @@ class IngestionServiceTest {
                 .setVolume(125000)
                 .setOpenInterest(0)
                 .setRawPayload(ByteString.copyFrom(payload))
-                .setPayloadHash(ByteString.copyFrom(
-                        sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(payload)))
                 .build();
     }
 
@@ -643,7 +642,7 @@ class IngestionServiceTest {
     }
 
     @Test
-    @DisplayName("P1-249: omitted Go payload hash quarantines instead of building a blank-hash RawTick")
+    @DisplayName("P1-249/M4-6: omitted Go payload hash quarantines at admission instead of building a blank-hash RawTick")
     void blankPayloadHashQuarantined() throws Exception {
         IngestionConfig config = buildConfig();
         RecordingConverter converter = new RecordingConverter();
@@ -678,7 +677,8 @@ class IngestionServiceTest {
             service.processTickEvent(ev, "hft-0", 1L);
             assertEquals(1, quarantine.reasons.size(),
                     "blank hash must quarantine (old code: 0 writes, tick appended with \"\" hash)");
-            assertEquals(QuarantineWriter.Reason.INVALID_VALUES, quarantine.reasons.get(0));
+            assertEquals(QuarantineWriter.Reason.MISSING_PAYLOAD_HASH, quarantine.reasons.get(0),
+                    "M4-6: the admission gate owns the missing hash, before any validity check");
             assertEquals(0, converter.appendCalls.get(), "quarantined tick must never append");
         } finally {
             invokeShutdown(service);
@@ -747,7 +747,7 @@ class IngestionServiceTest {
                     .setLtpPaise(234500)
                     .setVolume(125000)
                     .setRawPayload(ByteString.copyFrom(payload))
-                    .setPayloadHash(ByteString.copyFrom(sha256Hex(payload).getBytes(StandardCharsets.UTF_8)))
+                    .setPayloadHash(ByteString.copyFrom(ProtoTickFactory.sha256(payload)))
                     .build();
 
             service.processTickEvent(ev, "hft-0", 1L);

@@ -66,9 +66,6 @@ public final class IngestionConfig {
      *  0 = unset (Fluss client default). Batch sweep (Exp 4): 16/64/256/1024
      *  events → maps to batch-size bytes via the Fluss accumulator. */
     public final int flussWriterBatchSizeBytes;
-    /** Per-tick SHA-256 payload validation (A2 decision: keep, config-optional).
-     *  true=validate (safety default); false=skip recompute (perf, proto path). */
-    public final boolean validatePayloadHash;
     /** M4-1 (SCH-22): minimum instrument rows a parsed manifest must carry
      *  (default 1; production profiles and the daily VM pin 1024). Below the
      *  minimum the service refuses to start — a truncated/partial CSV must not
@@ -135,7 +132,6 @@ public final class IngestionConfig {
         this.flussWriterMode = b.flussWriterMode;
         this.flussWriters = b.flussWriters;
         this.flussWriterBatchSizeBytes = b.flussWriterBatchSizeBytes;
-        this.validatePayloadHash = b.validatePayloadHash;
         this.instrumentManifestMinCount = b.instrumentManifestMinCount;
         this.maxPendingRecords = b.maxPendingRecords;
         this.maxPendingBytes = b.maxPendingBytes;
@@ -260,7 +256,6 @@ public final class IngestionConfig {
         b.flussWriters = intRange(env, "FLUSS_WRITERS", 1, 1, 8, errors);
         // A/B bench (Exp 4): client.writer.batch-size in bytes; 0 = unset.
         b.flussWriterBatchSizeBytes = intRange(env, "FLUSS_WRITER_BATCH_SIZE_BYTES", 0, 0, 16_777_216, errors);
-        b.validatePayloadHash = boolEnv(env, "INGEST_VALIDATE_PAYLOAD_HASH", true, errors);
         // M4-1 (SCH-22): parsed-manifest minimum; below it startup is FATAL.
         b.instrumentManifestMinCount =
                 intRange(env, "INSTRUMENT_MANIFEST_MIN_COUNT", 1, 1, 1_000_000, errors);
@@ -396,7 +391,6 @@ public final class IngestionConfig {
         m.put("FLUSS_WRITER_MODE", flussWriterMode);
         m.put("FLUSS_WRITERS", flussWriters);
         m.put("FLUSS_WRITER_BATCH_SIZE_BYTES", flussWriterBatchSizeBytes);
-        m.put("INGEST_VALIDATE_PAYLOAD_HASH", validatePayloadHash);
         m.put("INSTRUMENT_MANIFEST_MIN_COUNT", instrumentManifestMinCount);
         m.put("MAX_PENDING_APPEND_RECORDS", maxPendingRecords);
         m.put("MAX_PENDING_APPEND_BYTES", maxPendingBytes);
@@ -699,7 +693,6 @@ public final class IngestionConfig {
         String flussWriterMode = "generic"; // A/B: locked default is generic
         int flussWriters = 1; // A/B: locked default is 1 (single writer worker)
         int flussWriterBatchSizeBytes = 0; // A/B: 0 = client default batch size
-        boolean validatePayloadHash = true; // A2: keep validation, default on
         int instrumentManifestMinCount = 1; // M4-1: SCH-22 minimum (dev default; prod/VM pin 1024)
         String arrowAppId = "", arrowAppSecret = "", arrowToken = "";
         String arrowUserId = "", arrowPassword = "", arrowTotpKey = "";

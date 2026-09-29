@@ -37,11 +37,11 @@ Where a body section and this list disagree, this list wins.
 | M1 — execution follow-ups (the layer under H1) | 6 | 5 | 0 | 1 | 0 | 0 | 0 |
 | M2 — ops tooling truth | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
 | M3 — compute correctness and configuration | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| M4 — ingestion gates and accounting | 6 | 5 | 0 | 1 | 0 | 0 | 0 |
+| M4 — ingestion gates and accounting | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **10** | **0** | **21** | **0** | **0** | **0** |
+| **Total** | **31** | **11** | **0** | **20** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -128,10 +128,10 @@ Where a body section and this list disagree, this list wins.
 - [x] **M4-5** — Startup grace retries the whole window: drop `lastAppendSuccessEpochMs == 0L`;
   metadata-not-ready retries inside the bounded grace regardless of an intervening ack; expiry
   FATAL, other classes immediate; dossier updated, CHG-326 clause marked superseded. (I5.) — CHG-386
-- [ ] **M4-6** — Payload hashes verified always-on: a byte[] `PayloadHashValidator` path at the
+- [x] **M4-6** — Payload hashes verified always-on: a byte[] `PayloadHashValidator` path at the
   earliest tick admission point (missing → `MISSING_PAYLOAD_HASH` quarantine; mismatch →
   `HASH_MISMATCH` quarantine + metric; never append); delete the
-  `INGEST_VALIDATE_PAYLOAD_HASH` flag (integrity is not optional). (I6.)
+  `INGEST_VALIDATE_PAYLOAD_HASH` flag (integrity is not optional). (I6.) — CHG-387
 
 #### M5 — DDL/mock parity pins
 
