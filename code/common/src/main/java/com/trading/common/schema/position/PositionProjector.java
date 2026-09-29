@@ -23,9 +23,9 @@ import java.util.Objects;
  *   <li>State is derived from the quantities ({@link PositionLifecycle#derive})
  *       and the transition from the prior state is validated.</li>
  *   <li>{@code source_version} is the monotone sequence: older than the
- *       current → STALE (rejected + halt); equal with identical content →
- *       DUPLICATE (no-op); equal with different content → CONFLICT
- *       (UNKNOWN + halt); newer → APPLIED.</li>
+ *       current → STALE (rejected + quarantined — a soft replay, no halt);
+ *       equal with identical content → DUPLICATE (no-op); equal with
+ *       different content → CONFLICT (UNKNOWN + halt); newer → APPLIED.</li>
  * </ul>
  */
 public final class PositionProjector {

@@ -42,16 +42,17 @@ class KvStateUpdateProtocolTest {
   }
 
   @Test
-  void conflictAndStaleRequireHalt() {
-    // CONFLICT → halt (version collision with different content)
+  void haltTruthTableMatchesEveryProductionSwitch() {
+    // Halting outcomes: divergence signals that must stop the key.
     assertThat(KvStateUpdateProtocol.requiresHalt(KvStateUpdateProtocol.Outcome.CONFLICT)).isTrue();
-    // STALE → halt (older version rejected — must not overwrite newer state)
-    assertThat(KvStateUpdateProtocol.requiresHalt(KvStateUpdateProtocol.Outcome.STALE)).isTrue();
-    // REGRESSION → halt (value moved backward unexpectedly)
     assertThat(KvStateUpdateProtocol.requiresHalt(KvStateUpdateProtocol.Outcome.REGRESSION)).isTrue();
-    // UNKNOWN → halt (ambiguous; quarantine + halt)
     assertThat(KvStateUpdateProtocol.requiresHalt(KvStateUpdateProtocol.Outcome.UNKNOWN)).isTrue();
-    // APPLIED and DUPLICATE do not require halt
+    // STALE is a non-halting soft reject (L5-1): rejected + quarantined, but a
+    // re-delivered old event must not halt the key — every production switch
+    // (PositionProjector, PositionProjectionWriter, OrderLifecycleProjector,
+    // PositionsObservationOperator) routes it to a soft "stale" result.
+    assertThat(KvStateUpdateProtocol.requiresHalt(KvStateUpdateProtocol.Outcome.STALE)).isFalse();
+    // Clean outcomes never halt.
     assertThat(KvStateUpdateProtocol.requiresHalt(KvStateUpdateProtocol.Outcome.APPLIED)).isFalse();
     assertThat(KvStateUpdateProtocol.requiresHalt(KvStateUpdateProtocol.Outcome.DUPLICATE)).isFalse();
   }

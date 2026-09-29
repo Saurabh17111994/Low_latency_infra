@@ -37,16 +37,17 @@ public final class KvStateUpdateProtocol {
     }
 
     /**
-     * A non-clean outcome requires halt + quarantine.
+     * Whether an outcome requires the halt + quarantine path.
      *
-     * <p>Note: production halt semantics live at the call sites, which switch
-     * on {@link Outcome} directly ({@code PositionProjector},
-     * {@code PositionProjectionWriter}, {@code OrderLifecycleProjector},
-     * {@code PositionsObservationOperator}) — every one of them already treats
-     * STALE as a non-halting soft reject. Keep this method consistent with
-     * those switches if it gains callers.
+     * <p>STALE is a <b>non-halting soft reject</b>: an older version is refused
+     * and quarantined, but a re-delivered old event is not a divergence signal —
+     * it must not halt the key. This matches every production switch
+     * ({@code PositionProjector}, {@code PositionProjectionWriter},
+     * {@code OrderLifecycleProjector}, {@code PositionsObservationOperator}),
+     * which all route STALE to a soft "stale" result and halt only on
+     * REGRESSION, CONFLICT or UNKNOWN.
      */
     public static boolean requiresHalt(Outcome o) {
-        return o != Outcome.APPLIED && o != Outcome.DUPLICATE;
+        return o == Outcome.REGRESSION || o == Outcome.CONFLICT || o == Outcome.UNKNOWN;
     }
 }

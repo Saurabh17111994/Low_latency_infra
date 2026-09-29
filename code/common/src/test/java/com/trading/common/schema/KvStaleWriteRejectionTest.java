@@ -20,7 +20,8 @@ import org.junit.jupiter.api.Test;
  * <ul>
  *   <li>a newer write applies and advances the store;</li>
  *   <li>a stale write is REJECTED — the store is unchanged and a stale
- *       version can never resurrect or overwrite newer state;</li>
+ *       version can never resurrect or overwrite newer state (a soft reject:
+ *       quarantined, but it does not halt the key — L5-1);</li>
  *   <li>a regressive write is REJECTED;</li>
  *   <li>a conflict is REJECTED and raises the halt signal;</li>
  *   <li>an idempotent duplicate is a no-op, not a rejection;</li>
@@ -66,7 +67,9 @@ class KvStaleWriteRejectionTest {
           break; // no-op — store unchanged, nothing quarantined
         default:
           // STALE / REGRESSION / CONFLICT / UNKNOWN → rejected: the store is
-          // unchanged, the attempt is quarantined, and the key halts.
+          // unchanged and the attempt is quarantined. The key halts only for
+          // the requiresHalt outcomes (REGRESSION / CONFLICT / UNKNOWN) —
+          // STALE is a soft replay of an old event, not a divergence (L5-1).
           quarantined.add("v" + incomingVersion + ":" + incomingContent);
           if (KvStateUpdateProtocol.requiresHalt(outcome)) {
             halted = true;
@@ -98,7 +101,7 @@ class KvStaleWriteRejectionTest {
     // Rejected: the store must not regress to the older version.
     assertThat(s.version).isEqualTo(2);
     assertThat(s.content).isEqualTo("b");
-    assertThat(s.halted).as("stale write must halt the key").isTrue();
+    assertThat(s.halted).as("a stale replay is a soft reject — no halt (L5-1)").isFalse();
     assertThat(s.quarantined).containsExactly("v1:b");
   }
 
