@@ -35,10 +35,10 @@ Where a body section and this list disagree, this list wins.
 | L1 — execution: mass-status honesty | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
 | L2 — ops tooling: lint scope and tracker wiring | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
-| L4 — ingestion: config doc parity and final-report atomicity | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
+| L4 — ingestion: config doc parity and final-report atomicity | 2 | 1 | 0 | 1 | 0 | 0 | 0 |
 | L5 — common/mock: semantics and naming truth | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | L6 — infra/DDL: guards, parity, docs | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| **Total** | **17** | **7** | **0** | **10** | **0** | **0** | **0** |
+| **Total** | **17** | **8** | **0** | **9** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
@@ -88,12 +88,12 @@ Where a body section and this list disagree, this list wins.
 
 #### L4 — ingestion: config doc parity and final-report atomicity
 
-- [ ] **L4-1** — Ingestion dossier/config parity: drain deadline documented as **2 s** default
+- [x] **L4-1** — Ingestion dossier/config parity: drain deadline documented as **2 s** default
   (range 1–300, B130 shared close budget; was 30 s); the `DEPLOY_ENV` row corrected to canonical
   `DEPLOYMENT_ENV` (fail-closed on blank, legacy alias, compose/entrypoint default `dev`); fix the
   ING-FAIL-010 default/range and the ING-TCP-003 citation (deleted NDJSON tests → surviving
   `tickcounts*_test.go`); append "superseded by B130" to the dated configuration audit. Guard: a
-  dossier↔config parity test with a fail-closed key registry.
+  dossier↔config parity test with a fail-closed key registry. — CHG-424
 - [ ] **L4-2** — The tick-count final report can no longer be clobbered or truncated:
   `reportTickCounts` takes the report lock **first**, then snapshots under the counter lock, so
   the file always holds the newest complete snapshot; writes go through a temp-file + fsync +
