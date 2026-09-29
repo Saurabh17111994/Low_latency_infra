@@ -36,12 +36,12 @@ Where a body section and this list disagree, this list wins.
 |---|---|---|---|---|---|---|---|
 | M1 — execution follow-ups (the layer under H1) | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 | M2 — ops tooling truth | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
-| M3 — compute correctness and configuration | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
+| M3 — compute correctness and configuration | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | M4 — ingestion gates and accounting | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **17** | **0** | **14** | **0** | **0** | **0** |
+| **Total** | **31** | **21** | **0** | **10** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -92,21 +92,21 @@ Where a body section and this list disagree, this list wins.
 
 #### M3 — compute correctness and configuration
 
-- [ ] **M3-1** — `ALLOWED_LATENESS_MS` wired into the aggregator: a `allowedLatenessMs` field +
+- [x] **M3-1** — `ALLOWED_LATENESS_MS` wired into the aggregator: a `allowedLatenessMs` field +
   canonical 5-arg constructor + `SignalJobConfig.DEFAULT_ALLOWED_LATENESS_MS = 5_000L`; the three
   hardcoded `5_000L` sites (eviction, lateness gate, emitted-map bound) use the field;
-  `SignalJob` passes `config.allowedLatenessMs()`. (C1.)
-- [ ] **M3-2** — Windows close only on event time: the boundary branch in `onTimer` is gated on
+  `SignalJob` passes `config.allowedLatenessMs()`. (C1.) — CHG-410
+- [x] **M3-2** — Windows close only on event time: the boundary branch in `onTimer` is gated on
   `domain == TimeDomain.EVENT_TIME`, so a processing-time fire can never truncate a candle
-  (~1/15 000 per slot start today); finalization always waits for the watermark. (C2.)
-- [ ] **M3-3** — Flag coherence fail-closed: `STRATEGY_HOST_ENABLED=true` requires
+  (~1/15 000 per slot start today); finalization always waits for the watermark. (C2.) — CHG-410
+- [x] **M3-3** — Flag coherence fail-closed: `STRATEGY_HOST_ENABLED=true` requires
   `MULTITF_ENABLED=true` (throw at config load, mirroring `FEATURE_LAYER_ENABLED`); the
   strategies-set-but-host-off warning is hoisted out of the multiTf branch with both flags named.
-  (C3.)
-- [ ] **M3-4** — One watermark truth: keep the code default **500 ms**, update the six doc
+  (C3.) — CHG-410
+- [x] **M3-4** — One watermark truth: keep the code default **500 ms**, update the six doc
   locations that say 5 s, append DEC-058 (default, rationale, real-feed revisit trigger), record
   the conflict resolution in `01-foundation.md`; a doc-parity test pins the config defaults to the
-  dossier/contract. (C4; DECIDED 2026-09-28 — keep 500 ms, fix the docs.)
+  dossier/contract. (C4; DECIDED 2026-09-28 — keep 500 ms, fix the docs.) — CHG-410
 
 #### M4 — ingestion gates and accounting
 
