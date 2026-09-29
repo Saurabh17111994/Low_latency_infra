@@ -189,9 +189,9 @@ func main() {
 	var allTokens []int32
 	for _, s := range plan.Slots {
 		allTokens = append(allTokens, s.Tokens...)
-		bridgeEmitter.SetSlotTokenHash(s.SlotID, tokenSetHash(s.Tokens))
+		bridgeEmitter.SetSlotTokenHash(s.SlotID, TokenSetHash(s.Tokens))
 	}
-	bridgeEmitter.SetManifestFingerprint(tokenSetHash(allTokens))
+	bridgeEmitter.SetManifestFingerprint(TokenSetHash(allTokens))
 
 	// HFT policy keys — every key below is read from env and enforced here,
 	// mirroring the Java IngestionConfig exactInt/intRange checks so a wrong

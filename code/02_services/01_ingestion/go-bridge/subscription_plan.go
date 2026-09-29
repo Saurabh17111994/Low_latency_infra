@@ -101,17 +101,20 @@ func BuildSubscriptionPlan(tokens []int32, slots, connectionLimit, requestLimit 
 	return plan, nil
 }
 
-// tokenSetHash returns the lowercase SHA-256 hex digest of a token set:
+// TokenSetHash returns the lowercase SHA-256 hex digest of a token set:
 // tokens sorted ascending, each encoded as 8 big-endian bytes. This is
 // byte-identical to SafetyHaltWriter.computeAssignedTokenHash, which is what
-// IngestionService compares BOTH bridge fields against: the bridge is handed
+// IngestionService compares the manifest_fingerprint against and, per slice,
+// the assigned_token_set_hash (H2-4); the shared fixture
+// code/testdata/slot-token-hashes.json pins both implementations together.
+// The bridge is handed
 // tokens only (ARROW_INSTRUMENT_TOKENS, the G3 handoff), so the token-set
 // digest is the strongest thing either side can compute. It is NOT
 // InstrumentManifestLoader.computeFingerprint — that one also folds in
 // tradingSymbol/exchange/segment/lotSize, which never reach this process; the
 // manifest-level check runs Java-side and fail-closed (isManifestApproved).
 // The sort+hash happens here so both emitted fields share one implementation.
-func tokenSetHash(tokens []int32) string {
+func TokenSetHash(tokens []int32) string {
 	ordered := append([]int32(nil), tokens...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
 	h := sha256.New()

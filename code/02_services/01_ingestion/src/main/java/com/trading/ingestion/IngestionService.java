@@ -192,6 +192,8 @@ public final class IngestionService {
     private final SafetySink safetyHaltWriter;
     private final String manifestFingerprint;
     private final String assignedTokenSetHash;
+    /** H2-4: per-slot carve of the same tokens; the bridge reports per-slot digests. */
+    private final com.trading.ingestion.safety.TokenSetHash slotTokenSetHash;
     /** Tokens of the loaded manifest, subscription order (G3 handoff). */
     private final java.util.List<Long> subscriptionTokens;
     private final java.util.Set<String> safetyEmitted = java.util.concurrent.ConcurrentHashMap.newKeySet();
@@ -335,6 +337,14 @@ public final class IngestionService {
         this.assignedTokenSetHash = com.trading.ingestion.safety.SafetyHaltWriter
                 .computeAssignedTokenHash(instruments.stream()
                         .map(Instrument::instrumentToken).toList());
+        // H2-4: the bridge's assigned_token_set_hash is the digest of ONE slot's
+        // carved slice (go-bridge/main.go SetSlotTokenHash), never the full set.
+        // Carve Java-side exactly like BuildSubscriptionPlan (sorted, slices of
+        // arrowHftMaxTokensPerConnection, ids hft-{i}) so processBridgeEvent
+        // compares like with like.
+        this.slotTokenSetHash = com.trading.ingestion.safety.TokenSetHash.carve(
+                instruments.stream().map(Instrument::instrumentToken).toList(),
+                config.arrowHftConnections, config.arrowHftMaxTokensPerConnection);
         String accountScope = System.getenv().getOrDefault("ACCOUNT_SCOPE_ID", "QP3796");
         this.safetyHaltWriter = safetySink != null
                 ? safetySink : new com.trading.ingestion.safety.SafetyHaltWriter(
@@ -1610,10 +1620,12 @@ public final class IngestionService {
         metrics.setChildProcessAlive(true);
 
         // Slot-identity cross-check (plan §Slot-scoped safety propagation):
-        // the bridge's manifest_fingerprint / assigned_token_set_hash must
-        // match Java's digests over the SAME input. Warn-only — the event is
-        // never rejected, because Go/Java token sets can legitimately differ
-        // in dev synthetic mode. Both sides are hex digests (no secrets).
+        // the bridge's manifest_fingerprint must match Java's full-set digest
+        // and assigned_token_set_hash must match Java's PER-SLOT carved digest
+        // (H2-4 — the bridge shards like BuildSubscriptionPlan). Warn-only —
+        // the event is never rejected, because Go/Java token sets can
+        // legitimately differ in dev synthetic mode. Both sides are hex
+        // digests (no secrets).
         //
         // P6-486: compare like with like. `manifestFingerprint` is
         // InstrumentManifestLoader.computeFingerprint — a digest over each
@@ -1638,11 +1650,27 @@ public final class IngestionService {
                     event.manifestFingerprint(), assignedTokenSetHash);
             metrics.incrementDecodeError("FINGERPRINT_MISMATCH");
         }
-        if (!assignedTokenSetHash.equals(event.assignedTokenSetHash())) {
-            LOG.warn("ingestion: bridge assigned_token_set_hash mismatch (slot={}, epoch={}): got={} want={} — cross-check only, event not rejected",
-                    event.slotId(), event.connectionEpoch(),
-                    event.assignedTokenSetHash(), assignedTokenSetHash);
-            metrics.incrementDecodeError("TOKEN_HASH_MISMATCH");
+        // H2-4: per-slot verdict against the carved slice (never the full-set
+        // digest — that false-positived TOKEN_HASH_MISMATCH on every ack of any
+        // multi-slot plan). Warn-only: the event is never rejected.
+        switch (slotTokenSetHash.verdict(event.slotId(), event.assignedTokenSetHash())) {
+            case MATCH -> { }
+            case MISMATCH -> {
+                LOG.warn("ingestion: bridge assigned_token_set_hash mismatch (slot={}, epoch={}): got={} want={} — cross-check only, event not rejected",
+                        event.slotId(), event.connectionEpoch(),
+                        event.assignedTokenSetHash(), slotTokenSetHash.expectedHash(event.slotId()));
+                metrics.incrementDecodeError("TOKEN_HASH_MISMATCH");
+            }
+            case UNKNOWN_SLOT -> {
+                LOG.warn("ingestion: bridge assigned_token_set_hash for an unknown slot (slot={}, epoch={}): the bridge's slot layout drifted from the carved plan — cross-check only, event not rejected",
+                        event.slotId(), event.connectionEpoch());
+                metrics.incrementDecodeError("TOKEN_HASH_UNKNOWN_SLOT");
+            }
+            case EMPTY_SLICE -> {
+                LOG.warn("ingestion: bridge assigned_token_set_hash for an empty carved slice (slot={}, epoch={}): slot layout drift — cross-check only, event not rejected",
+                        event.slotId(), event.connectionEpoch());
+                metrics.incrementDecodeError("TOKEN_HASH_EMPTY_SLICE");
+            }
         }
 
         // ---- Slot-scoped safety propagation (plan Amendment §Slot-scoped safety) ----

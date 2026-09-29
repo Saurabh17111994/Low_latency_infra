@@ -228,14 +228,14 @@ func TestIngRes002ValidateRequestUnionRejects(t *testing.T) {
 // symbol/exchange/segment/lotSize the bridge never receives).
 func TestTokenSetHashMatchesJavaVector(t *testing.T) {
 	const want = "ca73761ddabfffcbe51170be0b07f67bafcdbed202545c60707573d36dc935b4"
-	if got := tokenSetHash([]int32{3, 1, 2}); got != want {
-		t.Fatalf("tokenSetHash({3,1,2}) = %s, want %s — Java's "+
+	if got := TokenSetHash([]int32{3, 1, 2}); got != want {
+		t.Fatalf("TokenSetHash({3,1,2}) = %s, want %s — Java's "+
 			"computeAssignedTokenHash and the field IngestionService compares "+
 			"manifest_fingerprint against use this exact scheme", got, want)
 	}
 	// Order must not matter: the slots are carved from a sorted plan, and Java
 	// sorts before hashing too.
-	if got := tokenSetHash([]int32{1, 2, 3}); got != want {
-		t.Fatalf("tokenSetHash is order-sensitive: {1,2,3} = %s", got)
+	if got := TokenSetHash([]int32{1, 2, 3}); got != want {
+		t.Fatalf("TokenSetHash is order-sensitive: {1,2,3} = %s", got)
 	}
 }
