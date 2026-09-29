@@ -407,5 +407,56 @@ class ProdHardeningTest(unittest.TestCase):
             "check it — unregistered, a missing file becomes an OCI exit 127",
         )
 
+    def test_o2_root_password_is_fail_closed(self):
+        """L6-1: the dev deck refuses to start with an empty O2 root password.
+
+        `ZO_ROOT_USER_PASSWORD: ${O2_PASSWORD}` substituted the empty string
+        silently, so OpenObserve came up with an unusable root password and the
+        failure surfaced far from the cause. The `:?` form fails at
+        compose-config time and names the fix.
+        """
+        block = service_block(compose_text(), "openobserve")
+        self.assertIn(
+            "${O2_PASSWORD:?set O2_PASSWORD in .env/secrets.env "
+            "(make env + secrets-bootstrap.sh)}",
+            block,
+            "L6-1: compose must refuse an empty O2_PASSWORD with the fix named",
+        )
+        self.assertIsNone(
+            re.search(r"\$\{O2_PASSWORD\}", block),
+            "L6-1: a bare ${O2_PASSWORD} would substitute empty",
+        )
+
+    def test_o2_password_example_is_empty_with_a_required_comment(self):
+        """L6-1: the example keeps O2_PASSWORD empty and marks it REQUIRED.
+
+        A placeholder here would satisfy the `:?` guard with a fake password —
+        exactly the silent path the guard exists to close.
+        """
+        text = (ROOT / "code/01_platform/01_docker/.env.example").read_text()
+        lines = text.splitlines()
+        values = [l for l in lines if l.startswith("O2_PASSWORD=")]
+        self.assertEqual(
+            ["O2_PASSWORD="],
+            values,
+            "L6-1: O2_PASSWORD must stay empty in the example (no placeholder)",
+        )
+        idx = lines.index("O2_PASSWORD=")
+        context = "\n".join(lines[max(0, idx - 4):idx + 1])
+        self.assertIn(
+            "REQUIRED",
+            context,
+            "L6-1: the example must mark O2_PASSWORD as REQUIRED",
+        )
+
+    def test_stack_keeps_the_o2_password_guard(self):
+        """L6-1: the Swarm deck's existing guard must not regress."""
+        stack = (ROOT / "code/01_platform/01_docker/docker-stack.yml").read_text()
+        self.assertIn(
+            "${O2_PASSWORD:?set O2_PASSWORD}",
+            stack,
+            "L6-1: the stack refuses an empty O2_PASSWORD; keep it",
+        )
+
 if __name__ == "__main__":
     unittest.main()

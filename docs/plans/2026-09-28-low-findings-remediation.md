@@ -37,8 +37,8 @@ Where a body section and this list disagree, this list wins.
 | L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | L4 — ingestion: config doc parity and final-report atomicity | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | L5 — common/mock: semantics and naming truth | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
-| L6 — infra/DDL: guards, parity, docs | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| **Total** | **17** | **13** | **0** | **4** | **0** | **0** | **0** |
+| L6 — infra/DDL: guards, parity, docs | 4 | 1 | 0 | 3 | 0 | 0 | 0 |
+| **Total** | **17** | **14** | **0** | **3** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
@@ -122,10 +122,10 @@ Where a body section and this list disagree, this list wins.
 
 #### L6 — infra/DDL: guards, parity, docs
 
-- [ ] **L6-1** — Dev compose refuses an empty O2 root password: `ZO_ROOT_USER_PASSWORD:
+- [x] **L6-1** — Dev compose refuses an empty O2 root password: `ZO_ROOT_USER_PASSWORD:
   ${O2_PASSWORD:?set O2_PASSWORD in .env/secrets.env (make env + secrets-bootstrap.sh)}`; the
   example keeps `O2_PASSWORD=` empty with a REQUIRED comment (no placeholder that satisfies the
-  guard); guard asserts the `:?` form + empty example + the stack's existing guard.
+  guard); guard asserts the `:?` form + empty example + the stack's existing guard. — CHG-430
 - [ ] **L6-2** — `29_position_state.sql` gets `'table.kv.format-version' = '2'` (composite PK +
   subset bucket key is writable only with v2; six other DDLs already carry it), and
   `DdlApplyTool.isPredictedLimited` is tightened to require the option for that cell; regenerate

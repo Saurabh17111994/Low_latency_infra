@@ -1358,7 +1358,7 @@ services:
       - "5081:5081"
     environment:
       ZO_ROOT_USER_EMAIL: ${O2_USER:-admin@example.com}
-      ZO_ROOT_USER_PASSWORD: ${O2_PASSWORD}
+      ZO_ROOT_USER_PASSWORD: ${O2_PASSWORD:?set O2_PASSWORD in .env/secrets.env (make env + secrets-bootstrap.sh)}
       # Dev: O2 default holds data 600s in the WAL before it is searchable
       # (ZO_MAX_FILE_RETENTION_TIME=600). 60s keeps dev data visible within
       # a minute; production overrides this via .env.
