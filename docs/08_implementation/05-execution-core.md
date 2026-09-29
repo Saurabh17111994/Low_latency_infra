@@ -1007,8 +1007,13 @@ writer, as it already is for every other execution table):
   `x-execution-identity` mapping — gateway + nautilus merge it (compose also feeds the
   compute path through the flink-common anchor) — so the two sides cannot diverge while
   operator overrides still reach both. `test_09_stack.py::TestExecutionIdentityParity`
-  pins equal, non-literal values; the executor's half of the same finding (no invented
-  `dev-scope` fallback, 409 `SCOPE_MISMATCH` non-retryable) lands with the executor slice.
+  pins equal, non-literal values.
+- **Executor identity refusal (H3-1, CHG-395):** `ACCOUNT_SCOPE_ID` has no `dev-scope`
+  fallback any more — `ServiceConfig` refuses to boot a half-set identity (partition
+  without scope, or scope without partition) instead of inventing one. A gateway 409
+  `SCOPE_MISMATCH` is a typed `GateReportError::ScopeMismatch`: the boot keeper logs an
+  ERROR naming both keys and stops retrying, so readiness stays `durable_gate=false`
+  instead of hiding a configuration mismatch behind the locked-gateway posture.
 - **Evidence:** H2-2 paper drill attempt 4 (2026-09-27) — `/readyz` 200, `BOOT_HALT` epoch 1,
   approve → `ENABLED` epoch 3 / fence 1, `RENEW` every 10 s, t9 live PASS
   (`event_emission:accepted`, `Order_Lifecycle` 0→1), halt epoch 4 / fence 2

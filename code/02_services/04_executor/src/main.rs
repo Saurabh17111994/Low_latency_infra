@@ -45,6 +45,9 @@ use nautilus_execution_service::{
 /// gateway endpoint and the shared secret already gate each other in config parsing.
 fn gate_reporter_from_config(config: &ServiceConfig) -> Option<GateReporter> {
     let partition = config.execution_partition_id.clone()?;
+    // H3-1: config parsing refuses a partition without a scope, so this `?` can only fire if
+    // that invariant is ever loosened; the reporter stays unarmed rather than inventing one.
+    let scope = config.account_scope_id.clone()?;
     if config.gateway_endpoint.trim().is_empty() || config.gateway_shared_secret.trim().is_empty() {
         return None;
     }
@@ -53,7 +56,7 @@ fn gate_reporter_from_config(config: &ServiceConfig) -> Option<GateReporter> {
         config.gateway_shared_secret.clone(),
         config.protocol_version.clone(),
         partition,
-        config.account_scope_id.clone(),
+        scope,
         config.executor_instance_id.clone(),
         config.gate_lease_ttl_ms,
         config.gate_lease_renew_ms,

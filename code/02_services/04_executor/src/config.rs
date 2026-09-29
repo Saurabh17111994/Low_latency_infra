@@ -79,7 +79,9 @@ pub struct ServiceConfig {
     pub execution_partition_id: Option<String>,
     /// H2-5/D2: the account scope written into the durable gate row (`ACCOUNT_SCOPE_ID`), the same
     /// value the gateway's own config carries — the gateway rejects a report whose scope differs.
-    pub account_scope_id: String,
+    /// H3-1: absent stays absent, like `execution_partition_id` — the two are one identity and
+    /// config parsing refuses a half-set pair rather than inventing the other half.
+    pub account_scope_id: Option<String>,
     /// H2-5/D2: the fence lease TTL reported to the gateway (`GATE_LEASE_TTL_MS`, default 30 s).
     /// The gateway writes it as `lease_expires_ts`; the executor renews every
     /// `gate_lease_renew_ms`, and the first failed renewal safety-halts.
@@ -203,6 +205,21 @@ impl ServiceConfig {
             );
         }
 
+        // H3-1: the two halves of one execution identity are set together or not at all. A
+        // partition without a scope used to boot with an invented `dev-scope`; the reporter
+        // armed with a half-identity and the gateway's 409 was swallowed by the retry loop.
+        let execution_partition_id = get("EXECUTION_PARTITION_ID").map(str::to_string);
+        let account_scope_id = get("ACCOUNT_SCOPE_ID").map(str::to_string);
+        if execution_partition_id.is_some() != account_scope_id.is_some() {
+            bail!(
+                "EXECUTION_PARTITION_ID and ACCOUNT_SCOPE_ID are one execution identity and \
+                 must be set together (partition set: {}, scope set: {}) — the executor never \
+                 invents either half",
+                execution_partition_id.is_some(),
+                account_scope_id.is_some()
+            );
+        }
+
         Ok(Self {
             gateway_endpoint: gateway,
             bridge_endpoint: bridge,
@@ -224,10 +241,10 @@ impl ServiceConfig {
             // Only consulted when a durable flag is ON; the flag path fails closed if the directory
             // cannot be opened or created, so a bad value is reported at the store, not swallowed.
             durable_dir: get("DURABLE_DIR").unwrap_or("data/durable").to_string(),
-            // Sibling of compose `EXECUTION_PARTITION_ID`. Absent stays absent: the durable gate
-            // path refuses to start rather than inventing a partition name.
-            execution_partition_id: get("EXECUTION_PARTITION_ID").map(str::to_string),
-            account_scope_id: get("ACCOUNT_SCOPE_ID").unwrap_or("dev-scope").to_string(),
+            // Sibling of compose `ACCOUNT_SCOPE_ID`. Absent stays absent: the durable gate path
+            // refuses to start rather than inventing an identity half.
+            execution_partition_id,
+            account_scope_id,
             gate_lease_ttl_ms,
             gate_lease_renew_ms,
             executor_instance_id: get("EXECUTOR_INSTANCE_ID")
@@ -270,7 +287,7 @@ mod tests {
             durable_audit_enabled: false,
             durable_dir: "data/durable".into(),
             execution_partition_id: None,
-            account_scope_id: "dev-scope".into(),
+            account_scope_id: Some("dev-scope".into()),
             gate_lease_ttl_ms: 30_000,
             gate_lease_renew_ms: 10_000,
             executor_instance_id: "exec-test".into(),
@@ -335,6 +352,38 @@ mod tests {
         .unwrap();
         assert_eq!(c.gateway_shared_secret, "s3cr3t");
         assert_eq!(c.protocol_version, "execution-gateway.v1");
+    }
+
+    /// H3-1 (P0-7): the partition and the account scope are one execution identity. A
+    /// partition without a scope used to boot with an invented `dev-scope`, which armed the
+    /// durable reporter with a half-identity and let the gateway's 409 SCOPE_MISMATCH be
+    /// swallowed by the boot retry loop. Absent stays absent; half-set refuses at boot.
+    #[test]
+    fn a_half_set_execution_identity_refuses_to_boot() {
+        let err = ServiceConfig::from_iter(kv(&[("EXECUTION_PARTITION_ID", "p1")]))
+            .expect_err("a partition without a scope must refuse to boot");
+        assert!(
+            err.to_string().contains("ACCOUNT_SCOPE_ID"),
+            "the refusal must name the missing half: {err}"
+        );
+        let err = ServiceConfig::from_iter(kv(&[("ACCOUNT_SCOPE_ID", "acc")]))
+            .expect_err("a scope without a partition must refuse too");
+        assert!(
+            err.to_string().contains("EXECUTION_PARTITION_ID"),
+            "the refusal must name the missing half: {err}"
+        );
+        // Both halves boot together and are carried verbatim.
+        let c = ServiceConfig::from_iter(kv(&[
+            ("EXECUTION_PARTITION_ID", "p1"),
+            ("ACCOUNT_SCOPE_ID", "acc"),
+        ]))
+        .unwrap();
+        assert_eq!(c.execution_partition_id.as_deref(), Some("p1"));
+        assert_eq!(c.account_scope_id.as_deref(), Some("acc"));
+        // Neither half: the health-only default still boots.
+        let c = ServiceConfig::from_iter(kv(&[])).unwrap();
+        assert!(c.execution_partition_id.is_none());
+        assert!(c.account_scope_id.is_none());
     }
 
     /// P3-193 sibling (follow-on commit): `ServiceConfig` carries `BRIDGE_AUTH_TOKEN` and the

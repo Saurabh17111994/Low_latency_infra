@@ -103,6 +103,40 @@ impl std::fmt::Debug for GateReporter {
     }
 }
 
+/// Why a gate report failed. `ScopeMismatch` is terminal: the gateway's identity differs from
+/// the envelope's, and no retry can fix a configuration mismatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateReportError {
+    /// The gateway answered 409 with `SCOPE_MISMATCH`: this executor's `ACCOUNT_SCOPE_ID` /
+    /// `EXECUTION_PARTITION_ID` do not match the gateway's own identity.
+    ScopeMismatch {
+        account_scope: String,
+        partition: String,
+        body: String,
+    },
+    /// Any other failure (transport, non-2xx, unparseable ack) — retryable as before.
+    Other(String),
+}
+
+impl std::fmt::Display for GateReportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ScopeMismatch {
+                account_scope,
+                partition,
+                body,
+            } => write!(
+                f,
+                "gateway /v1/gate responded 409 SCOPE_MISMATCH: account_scope_id={account_scope} \
+                 execution_partition_id={partition}: {body}"
+            ),
+            Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for GateReportError {}
+
 impl GateReporter {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -148,12 +182,15 @@ impl GateReporter {
         epoch: u64,
         fence_token: u64,
         payload: &serde_json::Value,
-    ) -> Result<GateAck, String> {
+    ) -> Result<GateAck, GateReportError> {
         if self.gateway_endpoint.trim().is_empty() {
-            return Err("gate report disabled (no GATEWAY_ENDPOINT)".to_string());
+            return Err(GateReportError::Other(
+                "gate report disabled (no GATEWAY_ENDPOINT)".to_string(),
+            ));
         }
-        let payload_json = serde_json::to_string(payload)
-            .map_err(|e| format!("gate report payload serialization failed: {e}"))?;
+        let payload_json = serde_json::to_string(payload).map_err(|e| {
+            GateReportError::Other(format!("gate report payload serialization failed: {e}"))
+        })?;
         let envelope = Envelope {
             protocol_version: self.protocol_version.clone(),
             message_type: GATE_REPORT_MESSAGE_TYPE.to_string(),
@@ -172,20 +209,33 @@ impl GateReporter {
             payload: payload.clone(),
             authentication: String::new(),
         };
-        let body = encode_envelope(&self.shared_secret, &envelope).map_err(|e| e.to_string())?;
+        let body = encode_envelope(&self.shared_secret, &envelope)
+            .map_err(|e| GateReportError::Other(e.to_string()))?;
         let url = format!("{}/v1/gate", self.gateway_endpoint.trim_end_matches('/'));
         let resp = http_post(&url, "", body.as_bytes())
             .await
-            .map_err(|e| e.to_string())?;
-        if !(200..300).contains(&resp.status) {
-            let text = String::from_utf8_lossy(&resp.body);
-            return Err(format!(
-                "gateway /v1/gate responded {}: {}",
-                resp.status,
-                text.trim().chars().take(200).collect::<String>()
-            ));
+            .map_err(|e| GateReportError::Other(e.to_string()))?;
+        let text = String::from_utf8_lossy(&resp.body)
+            .trim()
+            .chars()
+            .take(200)
+            .collect::<String>();
+        // H3-1: the gateway's refusal of a foreign identity is named and terminal — retrying
+        // cannot fix a configuration mismatch, so it must not look like a locked gateway.
+        if resp.status == 409 && text.contains("SCOPE_MISMATCH") {
+            return Err(GateReportError::ScopeMismatch {
+                account_scope: self.account_scope.clone(),
+                partition: self.partition.clone(),
+                body: text,
+            });
         }
-        let ack = GateAck::parse(&resp.body)?;
+        if !(200..300).contains(&resp.status) {
+            return Err(GateReportError::Other(format!(
+                "gateway /v1/gate responded {}: {}",
+                resp.status, text
+            )));
+        }
+        let ack = GateAck::parse(&resp.body).map_err(GateReportError::Other)?;
         tracing::info!(
             transition,
             outcome = %ack.outcome,
@@ -198,7 +248,9 @@ impl GateReporter {
     }
 
     /// Boot: the row must exist and be HALTED; the ack's epoch is the one this process adopts.
-    pub async fn boot_halt(&self, epoch: u64) -> Result<GateAck, String> {
+    /// H3-1: the error stays typed so the keeper can tell a 409 SCOPE_MISMATCH (terminal) from
+    /// a locked gateway (retryable).
+    pub async fn boot_halt(&self, epoch: u64) -> Result<GateAck, GateReportError> {
         self.report(
             "BOOT_HALT",
             epoch,
@@ -232,6 +284,7 @@ impl GateReporter {
             }),
         )
         .await
+        .map_err(|e| e.to_string())
     }
 
     /// A safety halt: unconditional on the gateway side (a delayed halt still fences a live gate).
@@ -254,6 +307,7 @@ impl GateReporter {
             }),
         )
         .await
+        .map_err(|e| e.to_string())
     }
 
     /// Lease renewal: keeps the fence live while ENABLED. A conflict means the executor must halt.
@@ -269,6 +323,7 @@ impl GateReporter {
             }),
         )
         .await
+        .map_err(|e| e.to_string())
     }
 }
 
@@ -426,6 +481,34 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("409"), "err: {err}");
         assert!(err.contains("EPOCH_MISMATCH"), "err: {err}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_409_scope_mismatch_is_a_named_non_retryable_error() {
+        // H3-1: the keeper's decision is this classification — a locked gateway is `Other`
+        // (retry), a foreign identity is `ScopeMismatch` (stop and stay unhydrated).
+        let (addr, _rx, server) = capture_once(
+            "409 Conflict",
+            r#"{"error":"partition/scope mismatch","outcome":"SCOPE_MISMATCH"}"#,
+        )
+        .await;
+        let err = reporter(addr)
+            .boot_halt(1)
+            .await
+            .expect_err("409 must fail");
+        match &err {
+            GateReportError::ScopeMismatch {
+                account_scope,
+                partition,
+                ..
+            } => {
+                assert_eq!(account_scope.as_str(), "dev-scope");
+                assert_eq!(partition.as_str(), "dev-partition");
+            }
+            other => panic!("expected ScopeMismatch, got {other:?}"),
+        }
+        assert!(err.to_string().contains("409 SCOPE_MISMATCH"), "{err}");
         server.await.unwrap();
     }
 

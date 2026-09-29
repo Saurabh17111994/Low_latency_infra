@@ -135,7 +135,7 @@ mod tests {
             durable_audit_enabled: false,
             durable_dir: "data/durable".into(),
             execution_partition_id: None,
-            account_scope_id: "dev-scope".into(),
+            account_scope_id: Some("dev-scope".into()),
             gate_lease_ttl_ms: 30_000,
             gate_lease_renew_ms: 10_000,
             executor_instance_id: "exec-test".into(),

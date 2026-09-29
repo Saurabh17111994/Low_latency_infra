@@ -38,7 +38,7 @@ use crate::durable::LiveAttemptStore;
 use crate::events;
 use crate::executiongate::{Attempt, AttemptPhase, Claim};
 use crate::gate::ExecState;
-use crate::gate_report::GateReporter;
+use crate::gate_report::{GateReportError, GateReporter};
 use crate::gateway_protocol;
 use crate::intent;
 
@@ -598,6 +598,24 @@ impl ServerState {
                             state = %ack.state,
                             attempts = attempts + 1,
                             "durable gate row adopted at boot (epoch hydrated)"
+                        );
+                        break;
+                    }
+                    Err(GateReportError::ScopeMismatch {
+                        account_scope,
+                        partition,
+                        ..
+                    }) => {
+                        // H3-1: the gateway's identity differs from ours; no retry can fix a
+                        // configuration mismatch. Stop the loop — readiness stays
+                        // durable_gate=false until the deploy's identity is aligned.
+                        tracing::error!(
+                            account_scope_id = %account_scope,
+                            execution_partition_id = %partition,
+                            "durable gate identity mismatch (409 SCOPE_MISMATCH): refusing to \
+                             retry; readiness stays durable_gate=false — align \
+                             ACCOUNT_SCOPE_ID / EXECUTION_PARTITION_ID with the gateway and \
+                             restart"
                         );
                         break;
                     }
@@ -3022,6 +3040,94 @@ mod tests {
             encoded.len(),
             encoded
         )
+    }
+
+    /// H3-1 (P0-7): multi-shot gateway stub that answers every request with 409
+    /// SCOPE_MISMATCH and reports each accepted connection on the channel.
+    async fn scope_mismatch_stub() -> (
+        std::net::SocketAddr,
+        tokio::sync::mpsc::UnboundedReceiver<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = match listener.accept().await {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let mut expected: Option<usize> = None;
+                loop {
+                    let n = match tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        s.read(&mut chunk),
+                    )
+                    .await
+                    {
+                        Ok(Ok(n)) => n,
+                        _ => break,
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if expected.is_none() {
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+                            let len = head
+                                .split("content-length:")
+                                .nth(1)
+                                .and_then(|v| v.trim().split(' ').next())
+                                .and_then(|d| d.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            expected = Some(pos + 4 + len);
+                        }
+                    }
+                    if let Some(end) = expected {
+                        if buf.len() >= end {
+                            break;
+                        }
+                    }
+                }
+                let _ = tx.send(());
+                let body = r#"{"error":"partition/scope mismatch","outcome":"SCOPE_MISMATCH"}"#;
+                let resp = format!(
+                    "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = s.write_all(resp.as_bytes()).await;
+            }
+        });
+        (addr, rx)
+    }
+
+    #[tokio::test]
+    async fn a_scope_mismatch_stops_the_boot_keeper_and_leaves_the_gate_unhydrated() {
+        // H3-1: a 409 SCOPE_MISMATCH is an operator configuration error, not a locked
+        // gateway. The old loop retried forever (backoff starts at 500 ms), so a second
+        // connection arriving here is the defect; readiness must stay durable_gate=false.
+        let (addr, mut hits) = scope_mismatch_stub().await;
+        let state =
+            ServerState::new(ExecState::Halted).with_gate_reporter(Arc::new(test_reporter(addr)));
+        state.spawn_gate_keeper();
+        tokio::time::timeout(std::time::Duration::from_secs(3), hits.recv())
+            .await
+            .expect("the keeper never sent the boot report")
+            .expect("stub channel closed");
+        let second =
+            tokio::time::timeout(std::time::Duration::from_millis(1_200), hits.recv()).await;
+        assert!(
+            second.is_err(),
+            "the keeper retried after 409 SCOPE_MISMATCH — a configuration mismatch must \
+             stop the loop"
+        );
+        assert!(
+            !state.snapshot().gate_hydrated,
+            "readiness must stay durable_gate=false after the refusal"
+        );
     }
 
     fn test_reporter(addr: std::net::SocketAddr) -> crate::gate_report::GateReporter {
