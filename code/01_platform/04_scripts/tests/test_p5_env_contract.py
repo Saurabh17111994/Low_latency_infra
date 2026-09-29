@@ -8,6 +8,8 @@ The plural ARROW_INSTRUMENT_MANIFESTS had NO reader — an unbuilt T1
 alternative removed 2026-09-09 (single-CSV auto-shard supersedes it).
 These guards keep infra files defining the real keys and stop the dead
 plural (one letter from the live singular) from drifting back.
+L6-3: the instruments README is contract surface too — it must name the live
+keys and never the dead plural (see also tests/test_instruments_readme.py).
 """
 import unittest
 from pathlib import Path
@@ -53,6 +55,17 @@ class EnvContractTests(unittest.TestCase):
         loader = (ROOT / "code/02_services/01_ingestion/src/main/java/com/"
                   "trading/ingestion/InstrumentManifestLoader.java").read_text()
         self.assertIn('getenv("INSTRUMENT_MANIFEST_PATH")', loader)
+
+    def test_instruments_readme_states_the_live_contract(self):
+        """L6-3: the README is contract surface too — it described a removed
+        key and a fixture tree that does not exist. It must name the live keys
+        and never resurrect the dead plural."""
+        readme = (ROOT / "code/01_platform/05_instruments/README.md").read_text()
+        self.assertNotIn(DEAD_KEY, readme,
+                         f"README.md: {DEAD_KEY} is dead (no reader) — "
+                         f"use ARROW_INSTRUMENT_MANIFEST (singular)")
+        for key in ("ARROW_INSTRUMENT_MANIFEST", "INSTRUMENT_MANIFEST_PATH"):
+            self.assertIn(key, readme, f"README.md must name the live key {key}")
 
 
 if __name__ == "__main__":
