@@ -147,6 +147,12 @@ doc), the marker flips, and the operator-approval list. Tracker hygiene:
   here twice - the production deck came up locally on 2026-09-21 (20 services, synthetic
   credentials) and was recreated to apply CHG-283. What is still unproven is a deploy on the real
   VMs; the sentence above describes the host as it was when the bullet was written.)
+  (ANNOTATED 2026-09-29, CHG-400: the two digest-pin clauses above are out of date as well.
+  FACT-009/FACT-014 were superseded in `docs/ENVIRONMENT.md` (FACT-019/020): T9.2 resolved all
+  seven 1.0-built digests anonymously from GHCR on 2026-09-23, and `runtime.lock:25-26` pins the
+  pushed wrapper digests; CHG-306 recreated the servers on them. The runtime residuals stand:
+  a real-VM deploy is still unproven, and whether a real tiering job writes parquet to the lake
+  prefix is still unproven. Do not read the pin supersession as a production-deploy proof.)
 - **Read a whole block to its end - never a fixed-width window.** A `grep -A8`, a window sized to
   the version before the change, or a filter that skips a file type will silently omit lines and
   produce a confident wrong reading. Three misreads in one session (2026-09-21): a service block

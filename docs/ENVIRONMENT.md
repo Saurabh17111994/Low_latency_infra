@@ -62,7 +62,7 @@ Recheck when: <the event that kills this fact>
 ## Ledger
 
 ### FACT-001: this PC is a Swarm worker, not a manager
-Status: LIVE
+Status: DEAD (superseded by next row: this PC is a one-node Swarm and this host is its Leader)
 Verified: 2026-09-16 - `docker info` shows `ControlAvailable=false`,
 `NodeID` empty, `Managers=0`; `docker service ls` and `docker node ls` both
 fail with "This node is not a swarm manager".
@@ -157,7 +157,7 @@ placeholders, never values. Never print secret values; load into shell
 vars only.
 
 ### FACT-009: FLINK_IMAGE digest pin lives in runtime.lock, re-pin blocked on push
-Status: LIVE
+Status: DEAD (superseded by next row: FLINK_IMAGE pins the pushed trading-flink-runtime:prod digest)
 Verified: 2026-09-16 - `code/01_platform/01_docker/runtime.lock` line 19
 names the digest-pinned Flink image; CHG-179 section 5 (push before pin).
 Check: grep -q FLINK_IMAGE code/01_platform/01_docker/runtime.lock
@@ -189,7 +189,7 @@ table.log.tiered.local-segments must be > 0: LogTablet rejects 0, so a 0 never e
 Production gives each tablet its own data volume (fluss-tablet-data-1/2/3:/tmp/fluss/data), so ordinary restarts and reschedules keep the local log; R2 is a tiering target and lakehouse feed, not node recovery.
 
 ### FACT-012: production Fluss tiering is proven in isolated trials only - no real stack deploy has ever run
-Status: LIVE
+Status: DEAD (superseded by next row: production deploy is proven locally, not on the real VMs)
 Verified: 2026-09-16 - CHG-182 (docker stack config render + two-container trials); docker info on this host shows no manager (FACT-001)
 Check: manual (needs a Swarm manager - this host is a worker, see FACT-001)
 Recheck when: a real docker stack deploy runs on the 4-VM Swarm
@@ -203,7 +203,7 @@ Recheck when: plugin jars are mounted in docker-stack.yml, or the datalake.* key
 Log/KV tiering to R2 does NOT need these jars (FACT-011 proves it works without them). Lake tiering does. Whether it works in production as written is unverified and out of CHG-182 scope - do not assume it works, and do not 'fix' it by adding the keys again; they are already present and the gap is the missing jars.
 
 ### FACT-014: lake-tiering plugins exist in a derived image, but FLUSS_IMAGE still names the stock one
-Status: LIVE
+Status: DEAD (superseded by next row: FLUSS_IMAGE pins the pushed trading-fluss-runtime:prod digest)
 Verified: 2026-09-16 - CHG-183: built trading-fluss-runtime:0.1.0 and drove it against real R2; stock image exits NoClassDefFoundError Configurable, derived image starts with the Iceberg catalog loaded
 Check: test -f code/01_platform/01_docker/fluss-runtime/Dockerfile && grep -q 'plugins/iceberg' code/01_platform/01_docker/fluss-runtime/Dockerfile
 Recheck when: FLUSS_IMAGE in runtime.lock points at a pushed derived image, or fluss-runtime/ is removed
@@ -238,3 +238,33 @@ Verified: 2026-09-22 - `grep FLUSS_REMOTE_LOG_TASK_INTERVAL code/01_platform/01_
 Check: grep -q "^FLUSS_REMOTE_LOG_TASK_INTERVAL=0s$" code/01_platform/01_docker/.env
 Recheck when: .env tiering keys change, the remote store returns, or the next certificate re-measures
 The `.env` is gitignored, so the repo alone does not reproduce certificate timing: without `FLUSS_REMOTE_LOG_TASK_INTERVAL=0s`, RemoteLogManager pays remote-store round trips on every bucket teardown. Any certifying run must assert this override first; quoting certificate speed without it is invalid.
+
+### FACT-019: FLINK_IMAGE pins the pushed trading-flink-runtime:prod digest
+Status: LIVE
+Verified: 2026-09-29 - runtime.lock:26 pins ghcr.io/saurabh17111994/trading-flink-runtime:prod@sha256:70b04617bea29ea927d4e4daec4366854af7ed497a6a14ca2fa08bfd487d96b3; T9.2 (2026-09-23) resolved all seven 1.0-built digests anonymously from GHCR; CHG-306 recreated the JM/TM on it
+Check: grep -q 'FLINK_IMAGE=ghcr.io/saurabh17111994/trading-flink-runtime:prod@sha256:' code/01_platform/01_docker/runtime.lock
+Recheck when: the Flink image re-pins, or runtime.lock stops naming the pushed wrapper
+Claim: FLINK_IMAGE=ghcr.io/saurabh17111994/trading-flink-runtime:prod@sha256:70b04617bea29ea927d4e4daec4366854af7ed497a6a14ca2fa08bfd487d96b3
+The pin moved from the stock flink:2.2.1 digest to the 1.0-built wrapper after the 2026-09-23 publish; the digest is a pushed GHCR manifest, not a local image ID. Supersedes FACT-009 (built locally before the push).
+
+### FACT-020: FLUSS_IMAGE pins the pushed trading-fluss-runtime:prod digest
+Status: LIVE
+Verified: 2026-09-29 - runtime.lock:25 pins ghcr.io/saurabh17111994/trading-fluss-runtime:prod@sha256:e1bf98e6c58514641f1baa75c9f62534c64b7eb2e811a53b333c1ca007d52645; CHG-306 recreated the coordinator/tablets on it and make pin-check passed; T9.2 resolved it anonymously from GHCR
+Check: grep -q 'FLUSS_IMAGE=ghcr.io/saurabh17111994/trading-fluss-runtime:prod@sha256:' code/01_platform/01_docker/runtime.lock
+Recheck when: the Fluss image re-pins, or runtime.lock stops naming the pushed wrapper
+Claim: FLUSS_IMAGE=ghcr.io/saurabh17111994/trading-fluss-runtime:prod@sha256:e1bf98e6c58514641f1baa75c9f62534c64b7eb2e811a53b333c1ca007d52645
+The derived image (fluss-fs-s3 + fluss-fs-hdfs baked into plugins/iceberg/) is pushed and pinned, so the classloader gap FACT-014 recorded is closed at the pin level; whether a real tiering job writes parquet is still unproven (needs the Flink tiering service + a table with table.datalake.enabled). Supersedes FACT-014 (still names the stock digest).
+
+### FACT-021: this PC is a one-node Swarm and this host is its Leader
+Status: LIVE
+Verified: 2026-09-29 - docker info --format '{{.Swarm.ControlAvailable}} {{.Swarm.LocalNodeState}}' -> 'true active'; docker node ls -> one node (saurabh-MS-7D90, engine 29.4.0), MANAGER STATUS Leader
+Check: test "$(docker info --format '{{.Swarm.ControlAvailable}}')" = true
+Recheck when: any docker swarm init/join/leave, or the manager role moves off this PC
+Supersedes FACT-001 (which described an orphaned worker whose manager had gone away). Measured 2026-09-21 and re-measured 2026-09-29: one node, this host is Leader, and two local docker stack deploy runs happened on 2026-09-21 (CHG-279/CHG-283); no services are currently deployed. The host-state drift class is guarded by tests/test_env_fact_claims.py.
+
+### FACT-022: production deploy is proven locally, not on the real VMs
+Status: LIVE
+Verified: 2026-09-29 - the 2026-09-21 local stack deploys (CHG-279/CHG-283) plus CHG-182's two-container trials; no deploy on the 4-VM Swarm has ever run
+Check: manual (needs the 4-VM rig; the local single-node Swarm is not that rig)
+Recheck when: a docker stack deploy runs on the 4-VM Swarm
+Supersedes FACT-012 (which claimed the local deploys had never happened). Two local docker stack deploy runs happened on 2026-09-21 on this one-node Swarm (CHG-279/CHG-283: the production deck came up locally, 20 services, synthetic credentials, then was recreated to apply CHG-283). What remains unproven is a deploy on the real VMs - the 4-VM Swarm has never been exercised, and FACT-002 is the topology decision, not evidence of a running cluster.
