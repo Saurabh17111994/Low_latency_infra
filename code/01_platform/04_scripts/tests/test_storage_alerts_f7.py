@@ -147,9 +147,18 @@ class WriteLockRunbookTests(unittest.TestCase):
         self.assertIn("re-run when live", src)
 
     def test_daily_vm_recipe_provisions_observability(self):
+        # M2-1 (CHG-407) made provision-observability.sh the single entry point:
+        # the recipe no longer names the two tools, it names the wrapper. Assert
+        # both halves — the recipe calls the wrapper, and the wrapper still runs
+        # o2-provision.py + seed_alerts.py under set -e — so "the recipe
+        # provisions observability" cannot regress to a name that provisions
+        # nothing.
         text = RECIPE.read_text()
-        self.assertIn("o2-provision.py", text)
-        self.assertIn("seed_alerts.py", text)
+        self.assertIn("provision-observability.sh", text)
+        wrapper = (SCRIPTS / "provision-observability.sh").read_text()
+        # the invocation, not just the name: a comment naming the tool proves nothing
+        self.assertIn('python3 "$ROOT/code/01_platform/04_scripts/o2-provision.py"', wrapper)
+        self.assertIn('python3 "$ROOT/code/01_platform/04_scripts/seed_alerts.py"', wrapper)
 
 
 if __name__ == "__main__":
