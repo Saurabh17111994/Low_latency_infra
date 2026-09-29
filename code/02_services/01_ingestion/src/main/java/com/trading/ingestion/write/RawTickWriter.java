@@ -285,15 +285,15 @@ public final class RawTickWriter implements AutoCloseable {
         }
 
         if (retry == RetryClassifier.Classification.FATAL) {
-            // CHG-326: bounded write-path startup grace. Only the cold start
-            // (no append ever acked) retries the metadata-not-ready class —
-            // the availability window at the first appends after a fresh
-            // start. The window is bounded: once it expires the failure is
-            // FATAL exactly as before, and a stale handle after ANY success
-            // stays FATAL per R-3xx (the post-success check below).
+            // CHG-326 bounded write-path startup grace; M4-5 (2026-09-29): NOT
+            // cold-start only. An intervening ack does not close the window —
+            // CHG-356 proved an ack does not mean the tablet finished replaying
+            // — so the metadata-not-ready class retries for the whole bounded
+            // window. The window is bounded: once it expires the failure is
+            // FATAL exactly as before, and every other fatal class (including
+            // the stale-handle patterns) stays immediate.
             long graceLeft = startupGraceRemainingMs();
-            if (graceLeft > 0 && lastAppendSuccessEpochMs == 0L
-                    && RetryClassifier.isMetadataNotReady(cause)) {
+            if (graceLeft > 0 && RetryClassifier.isMetadataNotReady(cause)) {
                 long backoffMs = graceBackoffMs(attempt);
                 LOG.warn("raw-writer: append metadata not ready — startup-grace retry "
                                 + "(table={}, remaining={}ms, backoff={}ms, attempt={})",

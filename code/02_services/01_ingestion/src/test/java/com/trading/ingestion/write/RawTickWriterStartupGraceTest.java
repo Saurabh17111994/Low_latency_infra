@@ -1,6 +1,7 @@
 package com.trading.ingestion.write;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.trading.ingestion.TickPacketFixtures;
@@ -24,12 +25,13 @@ import org.junit.jupiter.api.Test;
  * the JVM exited and the container restart policy revived it twice before the
  * feed stabilized.
  *
- * <p>Contract under test: inside a bounded window after the FIRST append, and
- * only while no append has ever been acked, the metadata-not-ready class is
- * retried; every other fatal class, the post-success path, and the expired
- * grace keep the exact pre-CHG-326 behavior (FATAL).
+ * <p>Contract under test (M4-5 amended): inside a bounded window after the
+ * FIRST append, the metadata-not-ready class is retried regardless of an
+ * intervening ack (an ack does not mean the tablet finished replaying); every
+ * other fatal class, and the expired grace, keep the exact pre-CHG-326
+ * behavior (FATAL).
  */
-@DisplayName("CHG-326: write-path startup grace (metadata-not-ready, bounded, cold start only)")
+@DisplayName("CHG-326/M4-5: write-path startup grace (metadata-not-ready, bounded, whole window)")
 class RawTickWriterStartupGraceTest {
 
     /** Fails the first {@code failures} appends with {@code cause}, then succeeds. */
@@ -57,6 +59,34 @@ class RawTickWriterStartupGraceTest {
 
     private static final Throwable METADATA =
             new RuntimeException("Failed to update metadata");
+
+    /** Succeeds the first {@code successes} appends, fails the next
+     *  {@code failures} with {@code cause}, then succeeds — the early-ack
+     *  shape of a real cold start (CHG-356). */
+    static final class EarlyAckThenFlakyConverter implements FlussRowConverter {
+        private final AtomicInteger calls = new AtomicInteger();
+        private final int successes;
+        private final int failures;
+        private final Throwable cause;
+
+        EarlyAckThenFlakyConverter(int successes, int failures, Throwable cause) {
+            this.successes = successes;
+            this.failures = failures;
+            this.cause = cause;
+        }
+
+        @Override
+        public CompletableFuture<RawTickWriter.AppendResult> append(TickPacket packet) {
+            int call = calls.incrementAndGet();
+            if (call > successes && call <= successes + failures) {
+                return CompletableFuture.failedFuture(cause);
+            }
+            return CompletableFuture.completedFuture(new RawTickWriter.AppendResult(1L, "p0"));
+        }
+
+        @Override public int estimatedRowSize(TickPacket packet) { return 100; }
+        @Override public void close() {}
+    }
 
     private record Harness(RawTickWriter writer, AppendTracker tracker,
                            CountDownLatch done,
@@ -140,5 +170,33 @@ class RawTickWriterStartupGraceTest {
         assertEquals(0, h.writer().startupGraceRemainingMs(),
                 "the window starts with the first append (the bridge may connect minutes later)");
         h.writer().close();
+    }
+
+    @Test
+    @DisplayName("an early ack does not close the window — later metadata failures still retry")
+    void earlyAckDoesNotEndTheGrace() throws Exception {
+        AppendTracker tracker = new AppendTracker();
+        RawTickWriter writer = new RawTickWriter(
+                new EarlyAckThenFlakyConverter(1, 3, METADATA), tracker,
+                "default.raw_table_1", Duration.ofSeconds(5), Duration.ofSeconds(10),
+                Duration.ofSeconds(60));
+        java.util.concurrent.BlockingQueue<RawTickWriter.AppendOutcome> outcomes =
+                new java.util.concurrent.LinkedBlockingQueue<>();
+        writer.setOutcomeListener(outcomes::add);
+
+        writer.write(TickPacketFixtures.validTrade(36));
+        RawTickWriter.AppendOutcome first = outcomes.poll(5, TimeUnit.SECONDS);
+        assertNotNull(first, "the early append must reach a terminal outcome");
+        assertEquals(RawTickWriter.Status.SUCCESS, first.status(), "the early append acks");
+        assertTrue(writer.lastAppendSuccessEpochMs() > 0, "the ack is recorded");
+
+        writer.write(TickPacketFixtures.validTrade(37));
+        RawTickWriter.AppendOutcome second = outcomes.poll(5, TimeUnit.SECONDS);
+        assertNotNull(second, "the second append must reach a terminal outcome");
+        assertEquals(RawTickWriter.Status.SUCCESS, second.status(),
+                "an intervening ack must not close the metadata-retry window "
+                        + "(an ack does not mean the tablet finished replaying)");
+        assertEquals(0, tracker.pendingRecords(), "reservation released on success");
+        writer.close();
     }
 }
