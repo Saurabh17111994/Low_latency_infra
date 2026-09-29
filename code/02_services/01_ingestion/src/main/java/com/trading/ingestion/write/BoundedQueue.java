@@ -28,10 +28,10 @@ public final class BoundedQueue {
     public static final int DEFAULT_MAX_RECORDS = 150_000;
     public static final double WARNING_PERCENT = 0.80;
 
-    /** Receives queue-level backpressure events (80% warn / 100% halt). */
+    /** Receives queue-level backpressure events (80% warn / 100% halt / resume). */
     public interface QueueListener {
         void onQueueEvent(Level level, long records, long bytes, long maxRecords, long maxBytes);
-        enum Level { WARNING, CRITICAL }
+        enum Level { WARNING, CRITICAL, RESUMED }
     }
 
     private final ArrayDeque<Entry> queue = new ArrayDeque<>();
@@ -162,8 +162,31 @@ public final class BoundedQueue {
         return new OfferResult(true, null);
     }
 
+    /**
+     * M4-3/P1-011/012: reset the warn + halt episode when back under 80% — the
+     * halt clears here so drains recover, and the strict below-80% edge is the
+     * hysteresis that keeps alerts from flapping at the boundary. Returns a
+     * RESUMED event when an episode actually ends (WARNING and/or CRITICAL had
+     * fired); the caller fires it AFTER unlock, same P1-104/106 discipline as
+     * {@link #offer}. Null when there was no episode.
+     */
+    private PendingEvent clearEpisodeLocked() {
+        if (queuedBytes < maxBytes * WARNING_PERCENT
+                && queue.size() < maxRecords * WARNING_PERCENT) {
+            boolean episode = warningFired || halted;
+            warningFired = false;
+            halted = false;
+            if (episode) {
+                return new PendingEvent(QueueListener.Level.RESUMED, queue.size(), queuedBytes);
+            }
+        }
+        return null;
+    }
+
     /** Block until an item is available. Returns null when closed and drained. */
     public Entry take() throws InterruptedException {
+        PendingEvent fire;
+        Entry e;
         lock.lock();
         try {
             while (queue.isEmpty() && !closed) {
@@ -172,41 +195,42 @@ public final class BoundedQueue {
             if (queue.isEmpty()) {
                 return null;
             }
-            Entry e = queue.removeFirst();
+            e = queue.removeFirst();
             queuedBytes -= e.rowBytes();
-            // reset warn + halt episode when back under 80% (P1-011/012: the
-            // halt clears here, so drains recover; hysteresis avoids alert
-            // flapping at the boundary)
-            if (queuedBytes < maxBytes * WARNING_PERCENT
-                    && queue.size() < maxRecords * WARNING_PERCENT) {
-                warningFired = false;
-                halted = false;
-            }
-            return e;
+            // M4-3: an episode that ends returns a RESUMED event, fired after unlock.
+            fire = clearEpisodeLocked();
         } finally {
             lock.unlock();
         }
+        if (fire != null) {
+            listener.onQueueEvent(fire.level(), fire.records(), fire.bytes(),
+                    maxRecords, maxBytes);
+        }
+        return e;
     }
 
     /** Non-blocking poll; returns null if empty. */
     public Entry poll() {
+        PendingEvent fire;
+        Entry e = null;
         lock.lock();
         try {
-            if (queue.isEmpty()) {
-                return null;
+            if (!queue.isEmpty()) {
+                e = queue.removeFirst();
+                queuedBytes -= e.rowBytes();
             }
-            Entry e = queue.removeFirst();
-            queuedBytes -= e.rowBytes();
-            // same episode reset as take(): polls drain too (P1-011/012)
-            if (queuedBytes < maxBytes * WARNING_PERCENT
-                    && queue.size() < maxRecords * WARNING_PERCENT) {
-                warningFired = false;
-                halted = false;
-            }
-            return e;
+            // M4-3: an empty queue is below every threshold, so an active
+            // episode ends here even when there was nothing to drain (e.g. a
+            // single oversized row rejected on an empty queue).
+            fire = clearEpisodeLocked();
         } finally {
             lock.unlock();
         }
+        if (fire != null) {
+            listener.onQueueEvent(fire.level(), fire.records(), fire.bytes(),
+                    maxRecords, maxBytes);
+        }
+        return e;
     }
 
     public int size() {

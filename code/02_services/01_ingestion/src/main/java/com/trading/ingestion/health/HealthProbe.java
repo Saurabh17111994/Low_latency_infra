@@ -22,6 +22,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>Broker connection is subscribed and receiving (recent frame)</li>
  *   <li>Subscription is complete (all manifest instruments subscribed)</li>
  *   <li>Clock offset is within policy (≤2000 ms / 2s, T10) — verified via {@link NtpClockChecker}</li>
+ *   <li>No bounded queue is in an active backpressure episode (M4-3: 80% warning or 100% halt)</li>
  * </ol>
  */
 public final class HealthProbe {
@@ -125,6 +126,24 @@ public final class HealthProbe {
 
     /** Memory gate open (not blocked) — true unless the heap monitor declared a sustained breach. */
     public boolean isMemoryReady() { return !memoryBlocked.get(); }
+
+    // M4-3: bounded queues in an active backpressure episode (>=80% warning or
+    // 100% halt). Written by the queue listeners (reader thread), read by the
+    // readiness probes; empty = every queue below the warning band.
+    private final java.util.Set<Integer> blockedQueues = ConcurrentHashMap.newKeySet();
+
+    /**
+     * M4-3: mark one bounded queue as blocked (WARNING/CRITICAL) or resumed.
+     * Readiness is false while ANY queue is in an episode, so a full queue or a
+     * stalled writer can never leave the service "ready".
+     */
+    public void setQueueBlocked(int queueIndex, boolean blocked) {
+        if (blocked) {
+            blockedQueues.add(queueIndex);
+        } else {
+            blockedQueues.remove(queueIndex);
+        }
+    }
 
     /**
      * Telemetry readiness: the OTLP collector is reachable and the most recent
@@ -234,6 +253,7 @@ public final class HealthProbe {
                 && brokerConnected.get()
                 && subscriptionComplete.get()
                 && !memoryBlocked.get()
+                && blockedQueues.isEmpty()
                 && isDataReady()
                 && isFrameRecent()
                 && isClockOk();
@@ -269,6 +289,8 @@ public final class HealthProbe {
         m.put("telemetry_ready", otlpHealthy.get());
         m.put("memory_blocked", memoryBlocked.get());
         m.put("memory_ready", !memoryBlocked.get());
+        m.put("queue_blocked", !blockedQueues.isEmpty());
+        m.put("queue_blocked_indexes", new java.util.TreeSet<>(blockedQueues));
         m.put("frame_recent", isFrameRecent());
         // P1-248: one atomic snapshot read — offset and ok always come from
         // the SAME check (the writer publishes complete records; two

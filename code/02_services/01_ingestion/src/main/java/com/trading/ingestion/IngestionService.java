@@ -302,9 +302,30 @@ public final class IngestionService {
         // budget — a full copy per queue would let N queues hold N x the
         // Q17 total (e.g. 384MiB for N=2). Floor division only undershoots.
         for (int i = 0; i < writerCount; i++) {
+            final int queueIndex = i;
             this.queues[i] = new BoundedQueue(
                     config.maxPendingBytes / writerCount,
                     (int) Math.min(config.maxPendingRecords / writerCount, Integer.MAX_VALUE));
+            // M4-3: the queue's own 80%/100% listener was never wired — a queue
+            // at the warning band or a stalled writer left readiness true. The
+            // listener marks THIS queue blocked (readiness false + marker sync)
+            // and RESUMED clears it after the drain. The rejected packet itself
+            // is counted once by the offer site's shared drop handler (never
+            // here: an episode signal is not a record loss).
+            this.queues[i].setListener((level, recs, byt, mr, mb) -> {
+                health.setQueueBlocked(queueIndex,
+                        level != BoundedQueue.QueueListener.Level.RESUMED);
+                if (level == BoundedQueue.QueueListener.Level.RESUMED) {
+                    LOG.info("ingestion: queue {} backpressure resumed ({}/{} records, {}/{} bytes)",
+                            queueIndex, recs, mr, byt, mb);
+                } else {
+                    LOG.warn("ingestion: queue {} backpressure {} ({}/{} records, {}/{} bytes)",
+                            queueIndex, level, recs, mr, byt, mb);
+                }
+                // R-246 pattern: keep the readiness marker in sync during silent
+                // degradation even when no bridge event arrives.
+                updateReadinessFile();
+            });
             this.writerWorkers[i] = new WriterWorker(queues[i], writer, config.drainDeadline,
                     this::onWriterDrop);
             this.writerWorkers[i].start();

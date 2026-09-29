@@ -37,11 +37,11 @@ Where a body section and this list disagree, this list wins.
 | M1 — execution follow-ups (the layer under H1) | 6 | 5 | 0 | 1 | 0 | 0 | 0 |
 | M2 — ops tooling truth | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
 | M3 — compute correctness and configuration | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| M4 — ingestion gates and accounting | 6 | 0 | 0 | 6 | 0 | 0 | 0 |
+| M4 — ingestion gates and accounting | 6 | 1 | 0 | 5 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **5** | **0** | **26** | **0** | **0** | **0** |
+| **Total** | **31** | **6** | **0** | **25** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -118,9 +118,10 @@ Where a body section and this list disagree, this list wins.
 - [ ] **M4-2** — Control-record contract version validated: one `CONTROL_CONTRACT_VERSION = 2`;
   unknown/missing/0 on the wire → quarantine `INVALID_SCHEMA` +
   `CONTROL_VERSION_MISMATCH` + return — never processed as v2. (I2.)
-- [ ] **M4-3** — Queue listener wired: `queues[i].setListener` for every queue; a new `RESUMED`
+- [x] **M4-3** — Queue listener wired: `queues[i].setListener` for every queue; a new `RESUMED`
   level with episode hysteresis; 80% → readiness false (`HealthProbe` queue dimension); 100% →
-  readiness false + the H2-2 shared handler exactly once. (I3.)
+  readiness false + the H2-2 shared handler exactly once (the rejected offer is counted at the
+  offer site; the episode's durable record + stop stay CAS-once). (I3.) — CHG-382
 - [ ] **M4-4** — Quarantine no longer stalls the reader: `AsyncQuarantineSink` decorator
   (bounded queue, default 4096, one daemon writer); `write()` is a non-blocking offer; overflow →
   the H2-2 shared handler (`QUARANTINE_OVERFLOW`); `close()` drains and counts. (I4.)

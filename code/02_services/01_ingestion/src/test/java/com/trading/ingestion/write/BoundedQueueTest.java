@@ -278,4 +278,56 @@ class BoundedQueueTest {
         org.junit.jupiter.api.Assertions.assertEquals(8, q.size(), "enqueue stands despite listener throw");
         org.junit.jupiter.api.Assertions.assertEquals(800, q.queuedBytes());
     }
+
+    @Test
+    @DisplayName("M4-3: RESUMED fires once when a WARNING episode clears, then re-arms")
+    void resumedFiresOncePerWarningEpisode() {
+        BoundedQueue q = new BoundedQueue(1000, 10);
+        List<BoundedQueue.QueueListener.Level> events = new ArrayList<>();
+        q.setListener((level, r, b, mr, mb) -> events.add(level));
+        for (int i = 0; i < 8; i++) {
+            assertTrue(q.offer(TickPacketFixtures.validTrade(i), 100), "fill to the 80% band");
+        }
+        assertEquals(List.of(BoundedQueue.QueueListener.Level.WARNING), events,
+                "warning episode open");
+        // First poll below 80% (7 x 100 = 700) ends the episode: RESUMED once.
+        assertTrue(q.poll() != null, "poll drains");
+        assertEquals(List.of(BoundedQueue.QueueListener.Level.WARNING,
+                        BoundedQueue.QueueListener.Level.RESUMED),
+                events, "resume fires once when the episode clears");
+        // Staying below the threshold does not re-fire.
+        assertTrue(q.poll() != null, "poll drains");
+        assertEquals(2, events.size(), "no resume spam below the threshold");
+        // Re-saturate: a NEW episode warns again.
+        for (int i = 0; i < 3; i++) {
+            assertTrue(q.offer(TickPacketFixtures.validTrade(10 + i), 100), "refill to the 80% band");
+        }
+        assertEquals(List.of(BoundedQueue.QueueListener.Level.WARNING,
+                        BoundedQueue.QueueListener.Level.RESUMED,
+                        BoundedQueue.QueueListener.Level.WARNING),
+                events, "second episode warns again");
+    }
+
+    @Test
+    @DisplayName("M4-3: RESUMED closes a CRITICAL (halt) episode after the drain")
+    void resumedFiresAfterCriticalEpisode() {
+        BoundedQueue q = new BoundedQueue(1000, 10);
+        List<BoundedQueue.QueueListener.Level> events = new ArrayList<>();
+        q.setListener((level, r, b, mr, mb) -> events.add(level));
+        for (int i = 0; i < 10; i++) {
+            assertTrue(q.offer(TickPacketFixtures.validTrade(i), 100), "fill to 100%");
+        }
+        assertFalse(q.offer(TickPacketFixtures.validTrade(10), 100), "reject beyond 100%");
+        assertEquals(List.of(BoundedQueue.QueueListener.Level.WARNING,
+                        BoundedQueue.QueueListener.Level.CRITICAL),
+                events, "warning then critical");
+        while (q.poll() != null) {
+            // drain fully
+        }
+        assertEquals(List.of(BoundedQueue.QueueListener.Level.WARNING,
+                        BoundedQueue.QueueListener.Level.CRITICAL,
+                        BoundedQueue.QueueListener.Level.RESUMED),
+                events, "resume closes the halt episode exactly once");
+        assertFalse(q.isHalted(), "halt cleared");
+    }
 }

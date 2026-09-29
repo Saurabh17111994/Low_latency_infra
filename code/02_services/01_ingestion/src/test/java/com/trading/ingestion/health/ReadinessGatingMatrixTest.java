@@ -9,14 +9,14 @@ import org.junit.jupiter.api.Test;
 
 /**
  * ING-INT-005: exhaustive READY gating matrix (plan G8 — no-false-positive
- * proof). {@code HealthProbe.isReady()} ANDs eight dimensions — liveness,
- * Fluss, tracker, broker, subscription, data, frame recency, clock — and this
- * suite walks EVERY one of them: readiness is false when any single dimension
- * is false and true only when all are. The pre-M3 tests covered only a subset
- * of combinations, so a dimension silently dropped from the AND would have
- * gone unnoticed.
+ * proof). {@code HealthProbe.isReady()} ANDs every readiness dimension —
+ * liveness, Fluss, tracker, broker, subscription, memory, queue backpressure,
+ * data, frame recency, clock — and this suite walks EVERY one of them:
+ * readiness is false when any single dimension is false and true only when all
+ * are. The pre-M3 tests covered only a subset of combinations, so a dimension
+ * silently dropped from the AND would have gone unnoticed.
  *
- * <p>Fully-ready baseline (all eight true): a tracker below the 80% warning
+ * <p>Fully-ready baseline (all true): a tracker below the 80% warning
  * threshold, an ACTIVE slot with full acknowledgement and a recent frame, a
  * recent global frame timestamp, and a null clock checker (no checker
  * configured → clock dimension passes). Each gating test flips exactly one
@@ -171,6 +171,21 @@ class ReadinessGatingMatrixTest {
         assertFalse(probe.isReady(), "sustained heap-high must refuse READY");
         assertFalse((Boolean) probe.diagnostics().get("memory_ready"),
                 "diagnostics must surface the closed memory gate");
+    }
+
+    @Test
+    @DisplayName("queue backpressure episode blocks readiness (M4-3)")
+    void queueBlockedBlocksReadiness() {
+        HealthProbe probe = fullyReady();
+        assertTrue(probe.isReady(), "baseline must be READY");
+        probe.setQueueBlocked(0, true);
+        assertFalse(probe.isReady(), "a queue in an 80%/100% episode must refuse READY");
+        assertTrue((Boolean) probe.diagnostics().get("queue_blocked"),
+                "diagnostics must surface the blocked queue");
+        probe.setQueueBlocked(0, false);
+        assertTrue(probe.isReady(), "RESUMED restores READY");
+        assertFalse((Boolean) probe.diagnostics().get("queue_blocked"),
+                "diagnostics must clear after resume");
     }
 
     /** A probe with every readiness dimension true (clock = no checker → OK). */
