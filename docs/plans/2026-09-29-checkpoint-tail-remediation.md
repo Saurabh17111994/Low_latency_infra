@@ -1,8 +1,8 @@
 # Checkpoint-tail remediation (signal job) — p99 ≤ 100 ms at the 10 s production cadence
 
 **Date:** 2026-09-29
-**Status:** operator-approved 2026-09-29; CT-1..CT-3 done; CT-4A in progress (changelog state
-backend — verified config-only against the pinned dist, no image change)
+**Status:** operator-approved 2026-09-29; CT-1..CT-3 done; CT-4A measured green on the
+production-intended filesystem storage (full gate pending); CT-5/CT-6/CT-7 open
 **Baseline evidence:** `logs/stage-profile-20260929-174239/` (900 s, 60 s cadence, tree `eb3026ad`)
 and gate certificate `logs/soak/monday-gates-20260929-180026` (19/19, 0 skipped)
 
@@ -27,7 +27,7 @@ the cause natively.
 
 #### P3 - root-cause fix (one branch only)
 
-- [~] **CT-4A** Branch A: changelog state backend trial + restore drill (implemented as rollout flag `CHANGELOG_STATE_BACKEND`; unit tests green; restore drill + smoke + 900 s pending). Gate step-9 blocker diagnosed 2026-09-29: the B4 drill's `scanLog` truncated on the first empty poll (false negative on a lived-in cluster; rule fire + row proven present on the tablet) — fixed test-only in CHG-442, `make drill-live` green (exit 0). Drills 2026-09-29 (CHG-443): OFF→ON adoption green (intermediate jar: 56 completed checkpoints; final jar: restore + first checkpoint, then a pre-purge-epoch anchor stalled — operational anchor rule recorded), ON→OFF green (7/7). Findings folded in: restore must set `claim-mode=CLAIM`; changelog storage selection is TaskManager-level (job keys are no-ops; trial runs TM `memory`; `flink-dstl-dfs` plugin + TM config are the production prerequisite). Smoke 200 s + 900 s next.
+- [~] **CT-4A** Branch A: changelog state backend trial + restore drill (implemented as rollout flag `CHANGELOG_STATE_BACKEND`; unit tests green; restore drill + smoke + 900 s pending). Gate step-9 blocker diagnosed 2026-09-29: the B4 drill's `scanLog` truncated on the first empty poll (false negative on a lived-in cluster; rule fire + row proven present on the tablet) — fixed test-only in CHG-442, `make drill-live` green (exit 0). Drills 2026-09-29 (CHG-443): OFF→ON adoption green (intermediate jar: 56 completed checkpoints; final jar: restore + first checkpoint, then a pre-purge-epoch anchor stalled — operational anchor rule recorded), ON→OFF green (7/7). Findings folded in: restore must set `claim-mode=CLAIM`; changelog storage selection is TaskManager-level (job keys are no-ops; `flink-dstl-dfs` plugin + TM config are the production prerequisite). First 900 s attempt (TM `memory` storage, CHG-444): failed closed at t+315 s — each checkpoint re-serialized the accumulated changelog (state_size 1.5 MB → 38 MB in 3 min, 49 MB metadata) and the payload transfers broke the TM/JM RPC (Pekko association errors → cp19–22 expired → failover). CHG-444 switched the dev cluster to the production-intended filesystem storage (plugin mounted on the taskmanager + `state.changelog.storage: filesystem` in FLINK_PROPERTIES); smoke + 900 s re-running on it. **Final (fs storage, 900 s @ 10 s, job `18dca0ea`):** 95/95 checkpoints COMPLETED; metadata 494 KB; e2e p50 50 ms; window p99_max median 93 ms — 0/60 windows p95 > 100 ms, 6/60 p99 > 100 ms (worst 211) vs CT-2 52/60 (worst 933); host sync p99 20 / max 51 ms / 0 records > 100 ms (CT-2: p99 663 / max 1157 / 1819); throughput 4,865 rows/s, presence PASS. **S1/S2/S3 met; S4 gate pending — marker flips on the gate certificate.**
 - [ ] **CT-4B** Branch B: Fluss signal-sink linger 1 ms (`client.writer.batch-timeout`)
 
 #### P4 - insurance
@@ -165,6 +165,17 @@ Implemented behind the default-off rollout flag `CHANGELOG_STATE_BACKEND` read b
 preconditions (`STATE_BACKEND=rocksdb`, `MAX_CONCURRENT_CHECKPOINTS=1`) and base path
 `<CHECKPOINT_DIR>/changelog`. Both submit paths forward it: `pipeline-lib.sh` (runs) and
 `rollout-savepoint.sh` (`JOB_ENV_NAMES`, for the enable/disable drill).
+
+**Trial result (2026-09-29, 900 s @ 10 s, filesystem storage).** The FIT's `filesystem` storage is
+now real in the dev cluster (CHG-444: plugin + cluster properties; the memory storage is unusable
+at this cadence — each checkpoint re-serialized the accumulated changelog, `state_size`
+1.5 MB → 38 MB in 3 min, 49 MB metadata, and the payload transfers broke the TM/JM RPC).
+Measured on filesystem: checkpoint metadata **494 KB**, checkpoint e2e p50 **50 ms** (memory:
+167→1227 ms; RocksDB: 200–750 ms), 95/95 COMPLETED, host sync p99 **20 ms** / max 51 ms / zero
+records > 100 ms (RocksDB: p99 663 / max 1157 ms / 1819 records > 100 ms). Window `p99_max`
+median **93 ms**; 6/60 windows > 100 ms (worst 211) vs CT-2 52/60 (worst 933). Throughput
+4 865 rows/s unchanged. S1/S2/S3 met; residual p999 excursions correlate with the signal-sink
+batch queue ~101–110 ms (CT-5 headroom candidate).
 
 ### CT-4B — Fluss sink linger 1 ms (Branch B only)
 

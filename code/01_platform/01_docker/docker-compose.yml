@@ -216,6 +216,11 @@ x-flink-common: &flink-common
     # string '"true"' (literal quotes) -> Flink's boolean parse fails with
     # "Could not parse value '\"true\"' for key '...'" and RocksDB jobs die at
     # JobMaster init (observed 2026-09-04; guarded by check_flink_properties.py).
+    # CT-4A (CHG-444): the two state.changelog keys below are read by the
+    # TASKMANAGER from this cluster config, not from job config (verified in
+    # the 2.2.1 bytecode: TaskExecutorStateChangelogStoragesManager takes
+    # taskManagerConfiguration). filesystem storage needs the flink-dstl-dfs
+    # plugin mounted on the taskmanager — see flink-plugins/dstl-dfs/README.md.
     FLINK_PROPERTIES: |
       jobmanager.rpc.address: flink-jobmanager
       rest.address: flink-jobmanager
@@ -247,6 +252,8 @@ x-flink-common: &flink-common
       state.backend.rocksdb.metrics.cur-size-active-mem-table: true
       state.backend.rocksdb.metrics.num-entries-immutable-mem-table: true
       state.backend.rocksdb.metrics.block-cache-pinned-usage: true
+      state.changelog.storage: filesystem
+      state.changelog.dstl.dfs.base-path: file:///checkpoints/changelog
     DEDUP_TTL_MS: "60000"
     CANDLE_WINDOW_MS: "15000"
     CHECKPOINT_INTERVAL_MS: "10000"
@@ -806,6 +813,12 @@ services:
       # below, so the TM needs the S3 settings, not a volume.
       - ./flink-runtime/core-site.xml:/etc/hadoop/conf/core-site.xml:ro
       - ./flink-log4j-console.properties:/opt/flink/conf/log4j-console.properties:ro
+      # CT-4A (CHG-444): changelog filesystem-storage plugin. The stock
+      # flink:2.2.1 image does not ship flink-dstl-dfs, so
+      # state.changelog.storage: filesystem fails at storage creation on the
+      # TaskManager without this plugin jar (provenance:
+      # flink-plugins/dstl-dfs/README.md).
+      - ./flink-plugins/dstl-dfs/flink-dstl-dfs-2.2.1.jar:/opt/flink/plugins/dstl-dfs/flink-dstl-dfs-2.2.1.jar:ro
       # Lake tiering service jars (Flink job classpath): fluss-flink-2.2 fat
       # connector (client + tiering builder + 2.2 adapter), fluss-flink-tiering
       # entrypoint, fluss-lake-iceberg plugin, and the s3a/hadoop trio the
