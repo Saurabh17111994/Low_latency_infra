@@ -3,6 +3,7 @@ package com.trading.mockarrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import ch.qos.logback.classic.Level;
@@ -128,6 +129,73 @@ class MockArrowServerTest {
                 "P3-468: startup log advertises a WebSocket server: " + startup);
         assertTrue(startup.stream().anyMatch(m -> m.contains("tcp://") && m.contains("NDJSON")),
                 "P3-468: startup log must advertise the raw-TCP NDJSON endpoint: " + startup);
+    }
+
+    /**
+     * H5-2 (DEC-045): the mock must never exceed the 20/s-per-instrument cap the
+     * production profile is validated at. The retired mapping gave PEAK 30/s and
+     * re-derived the profile from the rate, so the workload shape and the wire cap
+     * were the same knob.
+     */
+    @Test
+    void constructorRejectsARateAboveTheDec045Cap() {
+        var ex = assertThrows(IllegalArgumentException.class,
+                () -> new MockArrowServer(freePort(), 30, List.of(100000L), 7L));
+        assertTrue(ex.getMessage().contains("DEC-045"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("20"), ex.getMessage());
+    }
+
+    @Test
+    void peakKeepsTheCapAndItsArrivalShape() throws Exception {
+        var server = new MockArrowServer(freePort(), MockArrowServer.PER_INSTRUMENT_CAP,
+                List.of(100000L), 7L, SyntheticWorkload.Profile.PEAK);
+        assertEquals(20, server.configuredRate(),
+                "PEAK must keep the DEC-045 wire cap; it selects the arrival shape, not the rate");
+        assertEquals(SyntheticWorkload.Profile.PEAK, server.configuredProfile());
+    }
+
+    @Test
+    void measuredAggregateStaysWithinTheCap() throws Exception {
+        int instruments = 10;
+        int port = freePort();
+        var server = new MockArrowServer(port, MockArrowServer.PER_INSTRUMENT_CAP,
+                LongStream.range(0, instruments).map(i -> 100000L + i).boxed().toList(),
+                42L, SyntheticWorkload.Profile.PEAK);
+        Socket client = null;
+        try {
+            server.start();
+            client = new Socket();
+            client.connect(new InetSocketAddress("127.0.0.1", port), READ_TIMEOUT_MS);
+            client.setSoTimeout(500);
+            var reader = new BufferedReader(
+                    new InputStreamReader(client.getInputStream(), StandardCharsets.UTF_8));
+            long start = System.nanoTime();
+            int lines = 0;
+            while ((System.nanoTime() - start) < 1_100_000_000L) {
+                try {
+                    if (reader.readLine() != null) {
+                        lines++;
+                    }
+                } catch (SocketTimeoutException e) {
+                    // keep counting until the measurement window ends
+                }
+            }
+            // ~1.1 s at 10 instruments × 20/s ≈ 220 lines; the retired PEAK=30 gave
+            // ~330. 25% headroom over the cap keeps the assertion stable while still
+            // catching the old mapping.
+            int bound = (int) (instruments * MockArrowServer.PER_INSTRUMENT_CAP * 1.1 * 1.25);
+            assertTrue(lines <= bound,
+                    "measured " + lines + " lines in ~1.1 s (bound " + bound
+                            + ") — above the DEC-045 per-instrument cap");
+        } finally {
+            if (client != null) {
+                try {
+                    client.close();
+                } catch (IOException ignored) {
+                }
+            }
+            server.stop();
+        }
     }
 
     /** Bounded read: never blocks past the socket read timeout, never hangs the suite. */

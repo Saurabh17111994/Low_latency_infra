@@ -37,6 +37,16 @@ public class MockArrowServer {
 
     private final int port;
     private final int tickRatePerSec;
+
+    /**
+     * DEC-045 per-instrument wire cap: the mock must never exceed the rate the
+     * production profile is validated at. PEAK changes the arrival shape, never
+     * the rate.
+     */
+    static final int PER_INSTRUMENT_CAP = 20;
+
+    /** The configured arrival shape (DEC-045) — PEAK/BASELINE pacing, not a rate. */
+    private final SyntheticWorkload.Profile profile;
     private final List<Long> instruments;
     private final SyntheticWorkload workload;
     private final AtomicLong tickCounter = new AtomicLong(0);
@@ -52,15 +62,30 @@ public class MockArrowServer {
     private final Map<Long, Long> basePrices = new HashMap<>();
 
     public MockArrowServer(int port, int tickRatePerSec, Collection<Long> instruments) {
-        this(port, tickRatePerSec, instruments, DEFAULT_SEED);
+        this(port, tickRatePerSec, instruments, DEFAULT_SEED, SyntheticWorkload.Profile.BASELINE);
     }
 
     public MockArrowServer(int port, int tickRatePerSec, Collection<Long> instruments, long seed) {
+        this(port, tickRatePerSec, instruments, seed, SyntheticWorkload.Profile.BASELINE);
+    }
+
+    /**
+     * @param profile the arrival shape (DEC-045); the RATE stays capped at
+     *     {@link #PER_INSTRUMENT_CAP} — PEAK changes pacing, never the wire cap
+     * @throws IllegalArgumentException when {@code tickRatePerSec} is outside
+     *     {@code 1..PER_INSTRUMENT_CAP}
+     */
+    public MockArrowServer(int port, int tickRatePerSec, Collection<Long> instruments,
+            long seed, SyntheticWorkload.Profile profile) {
+        if (tickRatePerSec < 1 || tickRatePerSec > PER_INSTRUMENT_CAP) {
+            throw new IllegalArgumentException("tickRatePerSec must be in 1.."
+                    + PER_INSTRUMENT_CAP + " (DEC-045 per-instrument cap; got "
+                    + tickRatePerSec + ")");
+        }
         this.port = port;
         this.tickRatePerSec = tickRatePerSec;
         this.instruments = List.copyOf(instruments);
-        SyntheticWorkload.Profile profile = tickRatePerSec >= 30
-                ? SyntheticWorkload.Profile.PEAK : SyntheticWorkload.Profile.BASELINE;
+        this.profile = profile;
         this.workload = new SyntheticWorkload(new SyntheticWorkload.Config(
                 this.instruments, seed, profile, System.currentTimeMillis()));
         SplittableRandom rng = new SplittableRandom(seed);
@@ -267,7 +292,9 @@ public class MockArrowServer {
             throw new IllegalArgumentException("unknown MOCK_ARROW_PROFILE: " + profileName, e);
         }
         long seed = Long.parseLong(requireEnv("MOCK_ARROW_SEED"));
-        int rate = profile == SyntheticWorkload.Profile.PEAK ? 30 : 20;
+        // DEC-045: the wire rate is capped per instrument; the profile selects the
+        // arrival shape only (the retired mapping gave PEAK 30/s, above the cap).
+        int rate = PER_INSTRUMENT_CAP;
         int numInstruments = Integer.parseInt(
             System.getenv().getOrDefault("MOCK_ARROW_INSTRUMENTS", "50"));
 
@@ -277,7 +304,7 @@ public class MockArrowServer {
             instruments.add(100000L + i * 100L);
         }
 
-        var server = new MockArrowServer(port, rate, instruments, seed);
+        var server = new MockArrowServer(port, rate, instruments, seed, profile);
         server.start();
 
         Runtime.getRuntime().addShutdownHook(new Thread(server::stop));
@@ -290,5 +317,15 @@ public class MockArrowServer {
             throw new IllegalArgumentException(key + " is required");
         }
         return value;
+    }
+
+    /** Test/observability seam: the configured per-instrument rate (≤ the cap). */
+    int configuredRate() {
+        return tickRatePerSec;
+    }
+
+    /** Test/observability seam: the configured arrival shape. */
+    SyntheticWorkload.Profile configuredProfile() {
+        return profile;
     }
 }
