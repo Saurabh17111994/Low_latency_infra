@@ -469,10 +469,24 @@ public class StrategyHostFunction
     /**
      * DEC-056 feature update on the live tick. A throwing computer is counted
      * and dropped — it must never kill the subtask or block the strategy
-     * fan-out (same isolation contract as strategies themselves).
+     * fan-out (same isolation contract as strategies themselves). L3-4: only
+     * the canonical tick timeframe updates the timeframe-independent TICK
+     * features; the other five forming rows of a fallback snapshot still fan
+     * out to strategies but do not touch them.
      */
     private void updateFeaturesOnTick(HostSlot slot, RowData live, long eventTimeMs) {
         try {
+            Timeframe tf = Timeframe.fromCode(live.getString(CandleLiveColumns.TF).toString());
+            // L3-4: the MULTITF_FAST_LIVE_FEED=false fallback feeds all six TF
+            // forming rows of one snapshot into this operator. TICK features are
+            // timeframe-independent (one computer per instrument), so feeding every
+            // row recomputed the same value and counted six updates per snapshot;
+            // only the canonical tick timeframe updates them. Every row still fans
+            // out to strategies (the caller's loop is unchanged). An unparseable TF
+            // is counted like the close path — never thrown into the fan-out.
+            if (tf != Timeframe.FIFTEEN_S) {
+                return;
+            }
             slot.features.onTick(
                     eventTimeMs,
                     live.getLong(CandleLiveColumns.CLOSE_PAISE),

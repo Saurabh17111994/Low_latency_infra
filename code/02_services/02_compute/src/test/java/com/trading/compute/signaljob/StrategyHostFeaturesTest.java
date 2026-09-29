@@ -173,6 +173,58 @@ class StrategyHostFeaturesTest {
                 () -> probe.lastView.latest("no-such-feature", Timeframe.ONE_M));
     }
 
+    private static RowData liveCode(long token, String tfCode, long ws, long price, long volume, int ticks) {
+        GenericRowData r = (GenericRowData) live(token, Timeframe.FIFTEEN_S, ws, price, volume, ticks);
+        r.setField(CandleLiveColumns.TF, StringData.fromString(tfCode));
+        return r;
+    }
+
+    @Test
+    void snapshotFallbackFeedsTickFeaturesOncePerSnapshot() throws Exception {
+        // L3-4: the MULTITF_FAST_LIVE_FEED=false fallback feeds all six forming
+        // rows of one snapshot into the host. TICK features are
+        // timeframe-independent, so exactly one row may update them — the
+        // canonical FIFTEEN_S row — while all six still fan out to strategies.
+        open(FeatureProbe.RULE_ID);
+        Timeframe[] tfs = {
+            Timeframe.FIFTEEN_S,
+            Timeframe.THIRTY_S,
+            Timeframe.ONE_M,
+            Timeframe.THREE_M,
+            Timeframe.FIVE_M,
+            Timeframe.FIFTEEN_M,
+        };
+        for (int i = 0; i < tfs.length; i++) {
+            harness.processElement1(live(TOKEN, tfs[i], 0L, 100L + i, 10L, 1), 1_000L + i);
+        }
+
+        assertEquals(6, probe().liveCalls, "every TF row still fans out to strategies");
+        assertEquals(
+                1,
+                function.featureTickUpdatesForTest(),
+                "one tick-feature update per snapshot, not six (L3-4)");
+        assertEquals(
+                100.0,
+                function.featuresForTest(TOKEN).latest(0, Timeframe.FIFTEEN_S),
+                1e-9,
+                "the FIFTEEN_S forming value must be the one fed to the tick feature");
+        assertEquals(
+                100.0,
+                probe().lastPrice,
+                1e-9,
+                "every strategy reads the shared tick value (the FIFTEEN_S one)");
+    }
+
+    @Test
+    void invalidLiveTimeframeIsCountedAndDoesNotBlockDelivery() throws Exception {
+        open(FeatureProbe.RULE_ID);
+        harness.processElement1(liveCode(TOKEN, "NOPE", 0L, 777L, 10L, 1), 1_000L);
+
+        assertEquals(0, function.featureTickUpdatesForTest());
+        assertEquals(1, function.featureFailuresForTest());
+        assertEquals(1, probe().liveCalls, "strategy delivery must survive a feature failure");
+    }
+
     @Test
     void closedCandleUpdatesCloseFeaturesPerTimeframe() throws Exception {
         open(FeatureProbe.RULE_ID);
