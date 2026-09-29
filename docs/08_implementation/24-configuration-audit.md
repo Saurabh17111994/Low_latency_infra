@@ -18,7 +18,7 @@ The biggest gaps are not "missing env vars" but **fragmentation** (config split 
 |---|-------|----------|-----------------|-----------------|
 | M1 | `1ms / 256 / 64KiB` batch limits | `go-bridge/batch.go:37-39` | Proto frame batching (latency-vs-throughput) | "Locked O-2 defaults" but no env override — a pure tuning knob that requires code change to sweep |
 | M2 | `ARROW_HFT_LATENCY_MS` default `50` | `IngestionConfig.java` | Broker tick interval | Default fine but it's the single most experiment-sensitive value; range `50..60000` hardcoded |
-| M3 | `WATERMARK_OUT_OF_ORDER_MS=5000`, `ALLOWED_LATENESS_MS=5000`, `SOURCE_IDLE_MS=15000` | `SignalJobConfig.java:157-159` | Flink watermark/lateness | env-overridable already; but the *defaults* are in code, so a deploy that forgets them silently uses 5s — OK for dev, risky for prod |
+| M3 | `WATERMARK_OUT_OF_ORDER_MS=500`, `ALLOWED_LATENESS_MS=5000`, `SOURCE_IDLE_MS=15000` | `SignalJobConfig.java:157-159` | Flink watermark/lateness | env-overridable already; but the *defaults* are in code, so a deploy that forgets them silently uses 500 ms — OK for dev, risky for prod |
 | M4 | `PARALLELISM` default `8` | `SignalJobConfig.java:711` | Flink job parallelism | Hardcoded default 8; should be per-deployment |
 | M5 | `CHECKPOINT_INTERVAL_MS=10000`, `CHECKPOINT_TIMEOUT_MS=30000`, `MAX_CONCURRENT_CHECKPOINTS=1` | `PlatformConfig.java:49-51` | Checkpoint contract | Pinned via `requirePinnedLong` — but these are *operational* values that a deployment might legitimately need to tune; the pin forces code change |
 | M6 | `RESTART_MAX_ATTEMPTS=3`, `RESTART_DELAY_MS=30000` | `PlatformConfig.java:64-65` | Restart strategy | Same — pinned, but restart budget is environment-specific |

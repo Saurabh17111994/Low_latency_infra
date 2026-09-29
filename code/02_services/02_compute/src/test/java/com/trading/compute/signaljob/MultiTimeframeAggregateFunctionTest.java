@@ -369,6 +369,42 @@ class MultiTimeframeAggregateFunctionTest {
                 "without the soak flag an out-of-session tick must stay dropped");
     }
 
+    @Test
+    @DisplayName("M3-1: the configured allowedLatenessMs drives emitted-map eviction (0 = evict at window end)")
+    void configuredLatenessControlsEmittedMapEviction() throws Exception {
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0); // aligned for all 6 TFs
+        openWith(new MultiTimeframeAggregateFunction(LIVE_INTERVAL, false, true, false, 0L));
+        harness.processElement(trade(T0 + 2_000L, "fp-lat-a", 100_00L, 10L), T0 + 2_000L);
+        harness.processWatermark(new Watermark(T0 + 15_000L));
+        assertEquals(1, fn.emittedSizeForTest(TOKEN, Timeframe.FIFTEEN_S),
+                "the watermark closes the 15s window into the emitted map");
+        // lateness=0: the next watermark past the window end makes the entry
+        // evictable, and the next element runs the lazy eviction scan (P2-144).
+        harness.processWatermark(new Watermark(T0 + 15_001L));
+        harness.processElement(trade(T0 + 16_000L, "fp-lat-b", 101_00L, 5L), T0 + 16_000L);
+        assertEquals(0, fn.emittedSizeForTest(TOKEN, Timeframe.FIFTEEN_S),
+                "lateness=0 must evict an emitted window as soon as the watermark passes its end");
+    }
+
+    @Test
+    @DisplayName("M3-2: a processing-time fire aligned with a window end never closes the window")
+    void processingTimeTimerNeverClosesWindow() throws Exception {
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0); // aligned for all 6 TFs
+        openWith(new MultiTimeframeAggregateFunction(LIVE_INTERVAL));
+        // Park the processing clock so the first live processing-time timer lands
+        // exactly on the 15s window end — the collision (1 in ~15 000 per slot
+        // start) the ungated boundary loop treated as a close.
+        harness.setProcessingTime(T0 + 14_000L);
+        harness.processElement(trade(T0 + 2_000L, "fp-proc", 100_00L, 10L), T0 + 2_000L);
+        harness.setProcessingTime(T0 + 15_000L); // fires the aligned processing-time timer
+        assertTrue(mainRows().isEmpty(),
+                "a processing-time fire must not close a window: " + mainRows());
+        // The event-time watermark is the only close authority.
+        harness.processWatermark(new Watermark(T0 + 15_000L));
+        List<RowData> closed15 = closedForTf(mainRows(), Timeframe.FIFTEEN_S.code());
+        assertEquals(1, closed15.size(), "the watermark closes the window exactly once");
+    }
+
     private void openWith(MultiTimeframeAggregateFunction f) throws Exception {
         fn = f;
         harness = ProcessFunctionTestHarnesses.forKeyedProcessFunction(

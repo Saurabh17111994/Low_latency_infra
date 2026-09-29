@@ -110,6 +110,13 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
      */
     private final boolean emitLiveTick;
 
+    /**
+     * M3-1: out-of-orderness tolerance from {@code ALLOWED_LATENESS_MS}. Before
+     * this field existed the three arithmetic sites hardcoded 5 000 ms, so a
+     * deployment that configured a different tolerance was silently ignored.
+     */
+    private final long allowedLatenessMs;
+
     /** Reused aggregation math — TRADE-only volume/tickCount lives here (D2). */
     private final CandleAggregateFunction aggregate = new CandleAggregateFunction();
 
@@ -168,11 +175,25 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
 
     public MultiTimeframeAggregateFunction(long liveSnapshotIntervalMs, boolean sessionBypass,
             boolean signalContextEnabled, boolean emitLiveTick) {
+        this(liveSnapshotIntervalMs, sessionBypass, signalContextEnabled, emitLiveTick,
+                SignalJobConfig.DEFAULT_ALLOWED_LATENESS_MS);
+    }
+
+    /**
+     * Canonical constructor (M3-1): {@code allowedLatenessMs} is the same
+     * tolerance {@link SignalJobConfig} parsed from {@code ALLOWED_LATENESS_MS}
+     * — eviction, the late-window gate and the emitted-map bound must all use
+     * it, or the configured value only half-exists.
+     */
+    public MultiTimeframeAggregateFunction(long liveSnapshotIntervalMs, boolean sessionBypass,
+            boolean signalContextEnabled, boolean emitLiveTick, long allowedLatenessMs) {
         Preconditions.checkArgument(liveSnapshotIntervalMs > 0, "liveSnapshotIntervalMs must be >0");
+        Preconditions.checkArgument(allowedLatenessMs >= 0, "allowedLatenessMs must be >=0");
         this.liveSnapshotIntervalMs = liveSnapshotIntervalMs;
         this.sessionBypass = sessionBypass;
         this.signalContextEnabled = signalContextEnabled;
         this.emitLiveTick = emitLiveTick;
+        this.allowedLatenessMs = allowedLatenessMs;
     }
 
     @Override
@@ -284,7 +305,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         long watermark = ctx.timerService().currentWatermark();
         if (watermark != Long.MIN_VALUE && watermark != slot.lastEvictedWatermark) {
             slot.lastEvictedWatermark = watermark;
-            long allowedLatenessMs = 5_000L; // matches SignalJobConfig.ALLOWED_LATENESS_MS default
+            long allowedLatenessMs = this.allowedLatenessMs;
             for (Timeframe tf : Timeframe.values()) {
                 int ord = tf.ordinal();
                 long windowMs = tf.windowMs();
@@ -455,7 +476,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             if (currStart != Long.MIN_VALUE && newStart < currStart) {
                 long windowEnd = newStart + tf.windowMs();
                 long watermark2 = ctx.timerService().currentWatermark();
-                long allowedLatenessMs2 = 5_000L;
+                long allowedLatenessMs2 = allowedLatenessMs;
                 if (watermark2 != Long.MIN_VALUE && windowEnd + allowedLatenessMs2 < watermark2) {
                     if (lateDroppedCounter != null) lateDroppedCounter.inc();
                     continue;
@@ -683,7 +704,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             }
             if (minKey == null) break;
             if (watermark3 != Long.MIN_VALUE
-                    && minKey + tf.windowMs() + 5_000L < watermark3) {
+                    && minKey + tf.windowMs() + allowedLatenessMs < watermark3) {
                 slot.emitted[tf.ordinal()].remove(minKey);
             } else {
                 break;
@@ -784,77 +805,83 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             // Continue to boundary handling but forming already cleared, so no duplicate.
         }
 
-        // Event-time boundary timers: timestamp corresponds to windowEnd = windowStart + tfMs
-        // For each TF, check pending and forming
-        for (Timeframe tf : Timeframe.values()) {
-            int ord = tf.ordinal();
-            long windowMs = tf.windowMs();
-            long windowStartForTimer = timestamp - windowMs;
+        // M3-2: boundary closes are event-time only — a processing-time fire whose
+        // timestamp happens to align with a window end (1 in ~15 000 per slot start
+        // for the 15s TF) must never close a candle early; finalization always waits
+        // for the watermark.
+        if (domain == TimeDomain.EVENT_TIME) {
+            // Event-time boundary timers: timestamp corresponds to windowEnd = windowStart + tfMs
+            // For each TF, check pending and forming
+            for (Timeframe tf : Timeframe.values()) {
+                int ord = tf.ordinal();
+                long windowMs = tf.windowMs();
+                long windowStartForTimer = timestamp - windowMs;
 
-            // Skip boundary handling if timestamp was sessionClose (already handled) and windowStartForTimer would duplicate
-            // But we still need to handle pending that may align to same timestamp and not yet handled via sessionClose path
-            // For sessionClose, we already drained pending, so skip
+                // Skip boundary handling if timestamp was sessionClose (already handled) and windowStartForTimer would duplicate
+                // But we still need to handle pending that may align to same timestamp and not yet handled via sessionClose path
+                // For sessionClose, we already drained pending, so skip
 
-            // Check pending first
-            CandleAccumulator pendAcc = slot.pending[ord].remove(windowStartForTimer);
-            if (pendAcc != null) {
-                if (slot.emitted[ord].containsKey(windowStartForTimer)) {
-                    if (restoredTimerNoopCounter != null) restoredTimerNoopCounter.inc();
+                // Check pending first
+                CandleAccumulator pendAcc = slot.pending[ord].remove(windowStartForTimer);
+                if (pendAcc != null) {
+                    if (slot.emitted[ord].containsKey(windowStartForTimer)) {
+                        if (restoredTimerNoopCounter != null) restoredTimerNoopCounter.inc();
+                        continue;
+                    }
+                    if (pendAcc.firstEventTime == Long.MAX_VALUE) {
+                        continue;
+                    }
+                    long we = windowStartForTimer + windowMs;
+                    closeAndEmit(key, tf, windowStartForTimer, we, pendAcc, ctx, out, slot);
                     continue;
                 }
-                if (pendAcc.firstEventTime == Long.MAX_VALUE) {
-                    continue;
-                }
-                long we = windowStartForTimer + windowMs;
-                closeAndEmit(key, tf, windowStartForTimer, we, pendAcc, ctx, out, slot);
-                continue;
-            }
 
-            long currStart = slot.windowStarts[ord];
-            if (currStart == windowStartForTimer) {
-                CandleAccumulator acc = slot.state.forming(tf);
-                if (acc.firstEventTime == Long.MAX_VALUE) {
-                    // No data: just clear
+                long currStart = slot.windowStarts[ord];
+                if (currStart == windowStartForTimer) {
+                    CandleAccumulator acc = slot.state.forming(tf);
+                    if (acc.firstEventTime == Long.MAX_VALUE) {
+                        // No data: just clear
+                        slot.windowStarts[ord] = Long.MIN_VALUE;
+                        setForming(tf, new CandleAccumulator(), slot);
+                        continue;
+                    }
+                    if (slot.emitted[ord].containsKey(currStart)) {
+                        if (restoredTimerNoopCounter != null) restoredTimerNoopCounter.inc();
+                        slot.windowStarts[ord] = Long.MIN_VALUE;
+                        setForming(tf, new CandleAccumulator(), slot);
+                        continue;
+                    }
+                    long we = currStart + windowMs;
+                    closeAndEmit(key, tf, currStart, we, acc, ctx, out, slot);
                     slot.windowStarts[ord] = Long.MIN_VALUE;
                     setForming(tf, new CandleAccumulator(), slot);
+                    // Clear discontinuity marker on clean close if this was the gapEnd
+                    // Per design: cleared only by a clean boundary close where gapEnd == windowStart
+                    // We approximate: if discontinuityPending and lastDiscontinuityEventTime < we, clear? Simpler clear after any successful close
+                    // Leave as is for now — but for smoke we can clear after first close to indicate gap healed
+                    if (slot.state.discontinuityPending) {
+                        // Heuristic: gap considered healed after one full bucket close without further gaps
+                        slot.state.discontinuityPending = false;
+                    }
                     continue;
                 }
-                if (slot.emitted[ord].containsKey(currStart)) {
-                    if (restoredTimerNoopCounter != null) restoredTimerNoopCounter.inc();
-                    slot.windowStarts[ord] = Long.MIN_VALUE;
-                    setForming(tf, new CandleAccumulator(), slot);
-                    continue;
-                }
-                long we = currStart + windowMs;
-                closeAndEmit(key, tf, currStart, we, acc, ctx, out, slot);
-                slot.windowStarts[ord] = Long.MIN_VALUE;
-                setForming(tf, new CandleAccumulator(), slot);
-                // Clear discontinuity marker on clean close if this was the gapEnd
-                // Per design: cleared only by a clean boundary close where gapEnd == windowStart
-                // We approximate: if discontinuityPending and lastDiscontinuityEventTime < we, clear? Simpler clear after any successful close
-                // Leave as is for now — but for smoke we can clear after first close to indicate gap healed
-                if (slot.state.discontinuityPending) {
-                    // Heuristic: gap considered healed after one full bucket close without further gaps
-                    slot.state.discontinuityPending = false;
-                }
-                continue;
-            }
 
-            // Stale timer: no pending nor forming match. Only count as restored noop if this timestamp was expected as a boundary timer
-            // To avoid counting live timers as stale, skip counting when isLiveEvent||isLiveProc||isSessionClose
-            if (!isLiveEvent && !isLiveProc && !isSessionClose) {
-                // Heuristic: if timestamp could be a boundary timer for this TF (i.e., timestamp % windowMs == appropriate alignment?),
-                // but we have no history of registered timers, so we cannot know if this was ever registered.
-                // For heap-like restored_amnesia, we count every stale boundary fire that finds no slot state.
-                // We'll count only if slot has ever had any window for this TF (to avoid counting random live timestamps)
-                // However for robustness we only count when there is no live and the timestamp looks like a plausible windowEnd
-                // We choose to not increment for non-matching timers to keep metric quiet, unless slot had pending/emitted history.
-                // For now, only increment if the timestamp is not a live/session timer and the slot had some emitted history
-                // This keeps test quiet.
-                // Uncomment to enable loud noop:
-                // if (restoredTimerNoopCounter != null && (slot.emitted[ord].size() > 0 || slot.pending[ord].size()>0)) {
-                //     restoredTimerNoopCounter.inc();
-                // }
+                // Stale timer: no pending nor forming match. Only count as restored noop if this timestamp was expected as a boundary timer
+                // To avoid counting live timers as stale, skip counting when isLiveEvent||isLiveProc||isSessionClose
+                if (!isLiveEvent && !isLiveProc && !isSessionClose) {
+                    // Heuristic: if timestamp could be a boundary timer for this TF (i.e., timestamp % windowMs == appropriate alignment?),
+                    // but we have no history of registered timers, so we cannot know if this was ever registered.
+                    // For heap-like restored_amnesia, we count every stale boundary fire that finds no slot state.
+                    // We'll count only if slot has ever had any window for this TF (to avoid counting random live timestamps)
+                    // However for robustness we only count when there is no live and the timestamp looks like a plausible windowEnd
+                    // We choose to not increment for non-matching timers to keep metric quiet, unless slot had pending/emitted history.
+                    // For now, only increment if the timestamp is not a live/session timer and the slot had some emitted history
+                    // This keeps test quiet.
+                    // Uncomment to enable loud noop:
+                    // if (restoredTimerNoopCounter != null && (slot.emitted[ord].size() > 0 || slot.pending[ord].size()>0)) {
+                    //     restoredTimerNoopCounter.inc();
+                    // }
+                }
             }
         }
 

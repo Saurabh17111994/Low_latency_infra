@@ -49,6 +49,7 @@ class StrategyHostConfigTest {
     void hostOnWithStubParses() {
         Map<String, String> env = env();
         env.put("STRATEGY_HOST_ENABLED", "true");
+        env.put("MULTITF_ENABLED", "true");
         env.put("STRATEGIES", StubSmokeStrategy.RULE_ID);
         SignalJobConfig cfg = SignalJobConfig.from(env);
         assertTrue(cfg.strategyHostEnabled());

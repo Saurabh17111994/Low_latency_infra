@@ -9,6 +9,7 @@ import com.trading.common.config.PlatformConfig;
 import com.trading.common.schema.CandleTableSchema;
 import java.util.HashMap;
 import java.util.Map;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 /** Fixed-scope and config-contract enforcement (PlatformConfig / REQ-FC-006). */
@@ -996,11 +997,28 @@ class SignalJobConfigTest {
         Map<String, String> ok = env();
         ok.put("FEATURE_LAYER_ENABLED", "true");
         ok.put("STRATEGY_HOST_ENABLED", "true");
+        ok.put("MULTITF_ENABLED", "true");
         ok.put("STRATEGIES", "n7-range-breakout-v1");
         ok.put("FEATURE_TABLE", "feature_values_dev");
         SignalJobConfig cfg = SignalJobConfig.from(ok);
         assertTrue(cfg.featureLayerEnabled());
         assertEquals("feature_values_dev", cfg.featureTable());
+    }
+
+    @Test
+    @DisplayName("M3-3: STRATEGY_HOST_ENABLED=true requires MULTITF_ENABLED=true (fail closed)")
+    void hostRequiresMultiTf() {
+        Map<String, String> bad = env();
+        bad.put("STRATEGY_HOST_ENABLED", "true");
+        bad.put("STRATEGIES", "n7-range-breakout-v1");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(bad));
+        assertTrue(e.getMessage().contains("STRATEGY_HOST_ENABLED"), e.getMessage());
+        assertTrue(e.getMessage().contains("MULTITF_ENABLED"), e.getMessage());
+
+        // The coherent pair parses — the rule is composition, not a ban.
+        bad.put("MULTITF_ENABLED", "true");
+        assertTrue(SignalJobConfig.from(bad).strategyHostEnabled());
     }
 
     @Test

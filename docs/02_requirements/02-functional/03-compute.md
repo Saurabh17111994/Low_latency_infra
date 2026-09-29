@@ -26,7 +26,7 @@ The Signal Flink job consumes `raw_table_1`, performs bounded best-effort dedupl
 | --- | --- | --- |
 | ASM-CMP-001 | TCP preserves order within each Arrow WebSocket connection, and the `raw_table_1` append order is sufficient for deterministic event-time replay under an identical input snapshot. | ASM-001 |
 | ASM-CMP-002 | The pinned Flink version's RocksDB (or equivalent managed state backend) and S3 checkpoint storage behave as specified under the workload envelope. | REQ-FC-008 |
-| ASM-CMP-003 | The configured watermark out-of-orderness (default 5 s), allowed lateness (default 5 s), and source idleness (default 15 s) are sufficient for the tested broker stream profile. | REQ-FC-004 |
+| ASM-CMP-003 | The configured watermark out-of-orderness (default 500 ms), allowed lateness (default 5 s), and source idleness (default 15 s) are sufficient for the tested broker stream profile. | REQ-FC-004 |
 | ASM-CMP-004 | The Fluss connector provides per-partition source offset, watermark, and idleness semantics compatible with the event-time contract. | REQ-FC-004, RISK-008 |
 | ASM-CMP-005 | Fingerprint collisions and identical-legitimate-event collapses remain within the measured and accepted rate under production workload. | RISK-001 |
 | ASM-CMP-006 | The dedup state TTL covers the worst-case ingestion retry, connector replay/rewind, checkpoint restore rewind, broker replay, and approved operational replay interval plus documented safety margin. | REQ-FC-012 |
@@ -87,7 +87,7 @@ Dedup state TTL is **exactly 1 minute (60000 ms)**. The deployment SHALL reject 
 ## REQ-FC-004: Event-time and watermarks
 
 - Event time is UTC epoch milliseconds from the verified broker timestamp.
-- Default watermark strategy is bounded out-of-orderness of 5 seconds, configurable only with a tested deployment profile.
+- Default watermark strategy is bounded out-of-orderness of 500 milliseconds (single-timeline rule 2026-08-30: the 5 s default produced p95≈5.7 s end-to-end), configurable only with a tested deployment profile.
 - Default allowed lateness is 5 seconds after the watermark, configurable with a tested profile.
 - Source idleness is 15 seconds by default and must be configured per source partition.
 - A source without a valid timestamp cannot advance the event-time watermark.

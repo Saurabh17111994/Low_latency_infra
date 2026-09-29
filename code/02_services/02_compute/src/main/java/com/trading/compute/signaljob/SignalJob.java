@@ -293,7 +293,8 @@ public final class SignalJob {
                     .process(new MultiTimeframeAggregateFunction(config.liveSnapshotIntervalMs(),
                             config.multiTfSessionBypass(),
                             config.multiTfSignalContextEnabled(),
-                            fastLive))
+                            fastLive,
+                            config.allowedLatenessMs()))
                     .returns(CandleClosedColumns.ROW_TYPE_INFO)
                     .name("multi-tf-aggregator")
                     .uid("multi-tf-aggregator-v1");
@@ -389,11 +390,17 @@ public final class SignalJob {
                                         .build())
                         .name("strategy-host-candidates-current-sink")
                         .uid("strategy-host-candidates-current-sink");
-            } else if (!config.strategyIds().isEmpty()) {
-                LOG.warn("signal-job: STRATEGIES is set ({}) but STRATEGY_HOST_ENABLED=false — "
-                        + "no strategy-host branch wired; listed strategies will NOT run",
-                        config.strategyIds());
             }
+        }
+
+        // M3-3: hoisted out of the multiTf branch — a strategies list with the
+        // host off is just as inert when MULTITF_ENABLED=false, and the old
+        // placement made that case silent. Both flags are named.
+        if (!config.strategyHostEnabled() && !config.strategyIds().isEmpty()) {
+            LOG.warn("signal-job: STRATEGIES is set ({}) but STRATEGY_HOST_ENABLED=false "
+                    + "(MULTITF_ENABLED={}) — no strategy-host branch wired; listed "
+                    + "strategies will NOT run",
+                    config.strategyIds(), config.multiTfEnabled());
         }
 
 

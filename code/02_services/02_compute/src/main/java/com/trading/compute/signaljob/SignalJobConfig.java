@@ -134,6 +134,13 @@ public record SignalJobConfig(
         boolean featureLayerEnabled,
         String featureTable) implements Serializable {
 
+    /**
+     * M3-1: the default out-of-orderness tolerance in one place — the config
+     * default and the aggregator's timer/eviction arithmetic must not drift
+     * (three hardcoded literals made ALLOWED_LATENESS_MS unplumbed).
+     */
+    public static final long DEFAULT_ALLOWED_LATENESS_MS = 5_000L;
+
     public static SignalJobConfig fromEnv() {
         // G1 (2026-08-29): every declared config key must actually be read.
         // P2-162: read first, THEN assert — the guard scans the source tree
@@ -211,6 +218,15 @@ public record SignalJobConfig(
             throw new IllegalStateException("Config STRATEGY_HOST_ENABLED=true requires a "
                     + "non-empty STRATEGIES list (comma-separated rule ids, known: "
                     + Strategies.knownIds() + ")");
+        }
+        // M3-3: the host consumes the multi-TF live/closed streams. With
+        // MULTITF_ENABLED=false no branch would be wired, so every listed
+        // strategy would silently not run — fail at config load instead.
+        if (strategyHostEnabled && !multiTfEnabled) {
+            throw new IllegalStateException("Config STRATEGY_HOST_ENABLED=true requires "
+                    + "MULTITF_ENABLED=true — the strategy host reads the multi-TF "
+                    + "live/closed streams; with MULTITF_ENABLED=false no strategy-host "
+                    + "branch would be wired and the listed strategies would never run");
         }
         // Feature layer (DEC-056/057, 2026-09-27): the stored layer is computed
         // inside the strategy host, so enabling it without the host is a config
@@ -1275,7 +1291,7 @@ public record SignalJobConfig(
      * first layer. Zero lateness stays valid (no tolerance).
      */
     private static long allowedLatenessMs(Map<String, String> env) {
-        long value = longValue(env, "ALLOWED_LATENESS_MS", 5_000L);
+        long value = longValue(env, "ALLOWED_LATENESS_MS", DEFAULT_ALLOWED_LATENESS_MS);
         if (value < 0) {
             throw new IllegalStateException(
                     "Config ALLOWED_LATENESS_MS must be >= 0, got " + value);
