@@ -8,6 +8,16 @@
 **Reader's summary:** `../06_operations/08-live-readiness-gaps.md` — one page of the live-money gate rows and their sources. Task status stays in this file; that page repeats none of it.
 **Constraints:** Single-VM `docker-compose.yml` only (16 containers: `zookeeper` single, `fluss-coordinator/tablet` single, `flink-jobmanager/taskmanager` single, `minio` local `s3://`, `openobserve` `v0.91.5`, `otel-collector` `0.123.0`). No `docker-stack.yml` quorum, no `replication.factor=3`, no encrypted `S3` HA, no `PERF-PROD-60000` prod sizing. Live money stays `HALTED` (DEC-044 `saurabh` single-operator gate; executor boots halted — `EXECUTION_ENABLED=true` rejected at boot).
 
+> **Supersession banner (2026-09-29, M7-2 — additive, nothing below is rewritten).** This plan's
+> execution-contract era ended with the Fluss `0.9.1-incubating` → `1.0.0` upgrade. Version claims
+> below (Fluss 0.9.1, `versions.pin` 0.9.1-incubating, the `pin-check 4/4` era, 13-step gate
+> references) are historical. The live trackers are now
+> [`2026-09-22-fluss-1.0-upgrade.md`](./2026-09-22-fluss-1.0-upgrade.md) (Fluss 1.0.0) and
+> [`2026-09-22-fluss-1.0-native-adoption.md`](./2026-09-22-fluss-1.0-native-adoption.md); the gate
+> is **19 steps** since 2026-09-22 and the standing certificate is `19/19 verified, 0 skipped`
+> (2026-09-23, `CHG-302`). The `U*` checkboxes below stay exactly as measured — dated evidence,
+> never rewritten to the new era.
+
 ---
 
 ## 📌 LIVE TRACKER (this file is the ledger — flip boxes as you verify)

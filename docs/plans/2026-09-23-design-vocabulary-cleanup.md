@@ -1,6 +1,6 @@
 # Design-vocabulary cleanup -- retire the letters, keep the history
 
-**Status:** APPROVED with decisions (2026-09-23). Nothing executed yet.
+**Status:** EXECUTED 2026-09-23 (verified 2026-09-29) — all three commit-split commits landed: `5725cc38` (docs vocabulary pass), `e75f92bc` (Q1: DDL 24 relocated to `ddl/retired/`, manifest entry removed, C1 pin/assert updated), `d606e70e` (the section-6 guard + remaining live relabels), plus the follow-up pointer repair `8ae3bb67` (CHG-003/022/116 repointed at `ddl/retired/`). The guard `code/01_platform/04_scripts/tests/test_design_vocabulary_guard.py` is green (3 passed, 2026-09-29) and the compute suite stayed green. Section-8 decisions applied: Q1 manifest entry removed via the relocation; Q2 config-only relabel; Q3 no change; Q4 letters kept in DEC-040.
 **Owner:** agent (implementer). Operator approved the section-8 decisions 2026-09-23.
 **Prepared by:** the session that inventoried the Design-A/Design-B references.
 

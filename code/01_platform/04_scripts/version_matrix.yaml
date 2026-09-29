@@ -8,8 +8,10 @@
 #   * They are NOT verified pins. Every row's compatibility_class is
 #     UNKNOWN until the capability tests in 11-testing-and-release.md
 #     run and pass.
-#   * versions.pin (consumed by `make ddl`) still holds TO_BE_PINNED
-#     placeholders, so the DDL gate stays blocked until verified.
+#   * versions.pin (consumed by `make ddl`) pins Flink 2.2.1 and Fluss 1.0.0 —
+#     no TO_BE_PINNED placeholders; the DDL gate's version precondition holds.
+#     A row's compatibility_class still stays UNKNOWN until its capability
+#     tests in 11-testing-and-release.md run and pass.
 #   * Populate result / observed_behavior / limitations / date only
 #     from an approved artifact, lockfile, sandbox capture, or test.
 #

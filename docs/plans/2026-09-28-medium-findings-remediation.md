@@ -40,8 +40,8 @@ Where a body section and this list disagree, this list wins.
 | M4 — ingestion gates and accounting | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
-| M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **26** | **0** | **5** | **0** | **0** | **0** |
+| M7 — docs currency and its guard | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
+| **Total** | **31** | **31** | **0** | **0** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -163,20 +163,20 @@ Where a body section and this list disagree, this list wins.
 
 #### M7 — docs currency and its guard
 
-- [ ] **M7-1** — `00-start-here.md`: retitle the 2026-08-21 readiness snapshot as historical,
+- [x] **M7-1** — `00-start-here.md`: retitle the 2026-08-21 readiness snapshot as historical,
   26 → 27 tables and 26/26 → 27/27, 13/13 → 19/19, remove the retired 15 s-candle era and Action
-  Capture rows, fix the dead `ddl/03_feature_candles_15s.sql` reference to `32_/33_`. (D1.)
-- [ ] **M7-2** — `live-readiness-unified-plan.md`: additive supersession banner (Fluss 1.0.0 per
-  the 2026-09-22 upgrade plan, gate 19 steps, U-row checkboxes stay dated evidence). (D2.)
-- [ ] **M7-3** — `02-environments.md`: remove the three Action Capture mentions, note capture runs
-  in the Execution Core (`03_action_capture` retired 2026-09-10). (D3.)
-- [ ] **M7-4** — `version_matrix.yaml`: header says `versions.pin` pins Flink 2.2.1 / Fluss
-  1.0.0 (no `TO_BE_PINNED`); no row edits. (D4.)
-- [ ] **M7-5** — `2026-09-23-design-vocabulary-cleanup.md`: status → EXECUTED with the four
+  Capture rows, fix the dead `ddl/03_feature_candles_15s.sql` reference to `32_/33_`. (D1.) — CHG-416
+- [x] **M7-2** — `live-readiness-unified-plan.md`: additive supersession banner (Fluss 1.0.0 per
+  the 2026-09-22 upgrade plan, gate 19 steps, U-row checkboxes stay dated evidence). (D2.) — CHG-416
+- [x] **M7-3** — `02-environments.md`: remove the three Action Capture mentions, note capture runs
+  in the Execution Core (`03_action_capture` retired 2026-09-10). (D3.) — CHG-416
+- [x] **M7-4** — `version_matrix.yaml`: header says `versions.pin` pins Flink 2.2.1 / Fluss
+  1.0.0 (no `TO_BE_PINNED`); no row edits. (D4.) — CHG-416
+- [x] **M7-5** — `2026-09-23-design-vocabulary-cleanup.md`: status → EXECUTED with the four
   commits and the green guard; plus the cross-cutting currency guard: docs-audit C1 leg (readiness
   table vs manifest), C5 leg (retired-live phrases with banner exemption), C7 leg (matrix claim vs
   `versions.pin`), and gate-discovered `tests/test_doc_currency_claims.py` (gate count, dead DDL
-  refs, snapshot-sovereignty). (D5 + cross-cutting.)
+  refs, snapshot-sovereignty). (D5 + cross-cutting.) — CHG-416
 
 ## Overview
 

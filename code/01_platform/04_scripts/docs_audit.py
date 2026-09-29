@@ -182,6 +182,20 @@ def c1_manifest():
     check("C1 all entries have compatibility_class", not bad_compat, f"{bad_compat}")
     check("C1 LOG entries have bucket_key", not bad_routing, f"{bad_routing}")
 
+    # M7-5: the readiness snapshot's DDL row must quote the manifest's table count.
+    # It went stale for a month (26 while the manifest held 27) because nothing tied
+    # the two together; a dropped table could hide in a wrong number.
+    readiness = safe_read(os.path.join(DOCS_DIR, "08_implementation", "00-start-here.md")) or ""
+    row = next((ln for ln in readiness.splitlines() if ln.startswith("| DDL/schema |")), "")
+    doc_tables = re.findall(r"(\d+) tables", row)
+    live = re.search(r"(\d+)/(\d+) live", row)
+    check(
+        "C1 readiness snapshot quotes the manifest table count",
+        bool(doc_tables) and doc_tables[0] == str(len(tables))
+        and bool(live) and live.group(1) == live.group(2) == str(len(tables)),
+        f"doc={doc_tables[0] if doc_tables else '?'} manifest={len(tables)}",
+    )
+
 
 def c2_ownership_matrix():
     p = os.path.join(
@@ -277,6 +291,38 @@ def c5_stale_phrases():
     check("C5 no stale phrases in docs", not hits, "; ".join(hits[:5]))
 
 
+# M7-5: current-truth docs must not carry a retired component name unmarked. The
+# scan is scoped to the docs an operator reads for "what is true now" — the
+# contracts/requirements/architecture trees legitimately keep the historical
+# component name as a design-era identifier, and the plans/change-records trees
+# are dated history by construction.
+CURRENCY_DOCS = [
+    os.path.join("08_implementation", "00-start-here.md"),
+    os.path.join("05_deployment", "02-environments.md"),
+    os.path.join("05_deployment", "PROD_VM_PROVISIONING.md"),
+    "ENVIRONMENT.md",
+    os.path.join("commands", "COMMANDS.md"),
+]
+RETIRED_LIVE_PHRASES = ["Action Capture"]
+RETIREMENT_MARKERS = ("retired", "deleted", "historical", "removed", "superseded",
+                      "no longer", "deprecated", "archived")
+
+
+def c5_retired_live_phrases():
+    hits = []
+    for rel in CURRENCY_DOCS:
+        path = os.path.join(DOCS_DIR, rel)
+        txt = safe_read(path)
+        if txt is None:
+            hits.append(f"{rel}: unreadable")
+            continue
+        for i, line in enumerate(txt.splitlines(), 1):
+            for phrase in RETIRED_LIVE_PHRASES:
+                if phrase in line and not any(m in line.lower() for m in RETIREMENT_MARKERS):
+                    hits.append(f"{rel}:{i}: '{phrase}'")
+    check("C5 retired phrases in current-truth docs are marked", not hits, "; ".join(hits[:5]))
+
+
 def _is_gated_class(test_src_dir, report_path):
     """True when the report is stale — its class no longer exists in the
     current test source tree (renamed/deleted, e.g. the candle->signal KV
@@ -366,6 +412,15 @@ def c7_version_pins():
         ok and not bad,
         f"flink={flink.group(1) if flink else '?'} fluss={fluss.group(1) if fluss else '?'}",
     )
+    # M7-5: the matrix header claimed versions.pin still held TO_BE_PINNED
+    # placeholders long after the pins were real. The header's claim must match
+    # the file; only a negated mention ("no TO_BE_PINNED placeholders") may stay.
+    matrix = safe_read(os.path.join(SCRIPTS_DIR, "version_matrix.yaml")) or ""
+    header = matrix.split("matrix_metadata:", 1)[0]
+    claimed = [ln.strip() for ln in header.splitlines()
+               if "TO_BE_PINNED" in ln and not re.search(r"\b(no|not|never|without)\b", ln)]
+    check("C7 matrix header does not claim placeholder pins", not claimed,
+          "; ".join(claimed[:2]))
 
 
 # ---------------------------------------------------------------------------
@@ -1669,6 +1724,7 @@ def main():
     c3_schema_state_diagram()
     c4_compat_vocabulary()
     c5_stale_phrases()
+    c5_retired_live_phrases()
     c6_test_counts()
     c7_version_pins()
     c8_acceptance_matrix()

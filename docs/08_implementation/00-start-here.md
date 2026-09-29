@@ -50,7 +50,7 @@ Documentation-complete is not code-complete. A checklist item may be marked docu
 | [`02-schema-storage.md`](./02-schema-storage.md) | Data tables/storage instructions and their test design | 3 |
 | [`03-ingestion.md`](./03-ingestion.md) | Ingestion instructions and test design | 4 |
 | [`04-signal-job.md`](./04-signal-job.md) | Signal-job instructions and test design | 5 |
-| [`05-execution-core.md`](./05-execution-core.md) | Execution Core — integrated Action Capture + Babysitter + Executor (Nautilus → go-arrow bridge → Arrow) | 6–7 |
+| [`05-execution-core.md`](./05-execution-core.md) | Execution Core — integrated Babysitter + Executor (Nautilus → go-arrow bridge → Arrow) | 6–7 |
 | [`08-local-compose.md`](./08-local-compose.md) | Local runtime instructions and test design | 8 |
 | [`09-production-swarm.md`](./09-production-swarm.md) | Production runtime instructions and test design | 9 |
 | [`10-observability.md`](./10-observability.md) | Monitoring/operations instructions and test design | 10 |
@@ -74,19 +74,25 @@ A dossier may be Design-ready, Evidence-blocked, and Live-money blocked simultan
 
 The previous single-axis status vocabulary (`Draft`, `Design-ready`, `Implementation-ready`, `Evidence-blocked`, `Validated`, `Superseded`) is superseded by the 4-dimension banner above. Existing dossiers using the old vocabulary remain valid until their next revision.
 
-## Current readiness — reconciled 2026-08-21 (E4)
+## Readiness snapshot — reconciled 2026-08-21 (E4), historical; numbers refreshed 2026-09-29
+
+> **This is a dated snapshot, not the current certificate.** It is kept because the per-area
+> status vocabulary and the E4 reconciliation are still the frame the dossiers use. Current
+> truth: the standing certificate in "Gate state" below, and the dossiers themselves. Where a
+> number is load-bearing today (table count, gate size) it has been refreshed with its date;
+> the dated per-row evidence stays as measured.
 
 | Area | Design status | Implementation status | Evidence status | Live-money status |
 | --- | --- | --- | --- | --- |
 | Architecture and ownership | Design-ready | Implemented | Tested-in-sandbox | Blocked |
 | Broker protocols | Design-ready | Implemented (error half VERIFIED: TOTP `execution-auth-001` len 238 + re-auth `reauth.go` + Arrow REST error 401/UNKNOWN/duplicate — `a1-*`/`a4-*`; success half `RCF-EQ ×1` live place proven 2026-08-25 `26082501010305` — sandbox margin shortfall ₹10500) | Tested-in-sandbox (error half) | Blocked |
-| DDL/schema | Design-ready | Implemented (26 tables, `ddl_sha256` + `compatibility_class`, composite-PK matrix, 26/26 live on dev Fluss) | Tested-in-sandbox (`compat-fluss-*` + matrix verifier + live DDL drills) | Blocked |
+| DDL/schema | Design-ready | Implemented (27 tables, `ddl_sha256` + `compatibility_class`, composite-PK matrix, 27/27 live on dev Fluss; 26→27 on 2026-09-27 when DDL 34 `feature_values` joined — CHG-349) | Tested-in-sandbox (`compat-fluss-*` + matrix verifier + live DDL drills) | Blocked |
 | Ingestion | Design-ready | Implemented (285 ingestion + 489 common tests; losslessness + 1800 s soak proven) | Tested-in-sandbox (10,716 rows fake→Fluss, 49k tps synthetic envelope, `full-audit` C6 `489/285/419`) | Blocked |
-| Signal job | Design-ready | Implemented (Slice 1 candles + Slice 2.1 signal LIVE smoke — 205k candles/1,074 instruments/48 ckpt; `SIG-FAIL-001` ckpt-failure + `feature_candles_15s` KV-only) | Tested-in-sandbox (envelope + `make gate`/`full-audit` green) | Blocked |
-| Execution Core (Action Capture + Babysitter + Executor — Nautilus + go-arrow bridge, 2026-08-21) | Design-ready (re-scoped CHG-028) | Implemented (WP-0..8 DONE: `LiveNodeRuntime` 1800 s soak B1, crash fence B2, gate lifecycle B3, durable 4 clients B7, clock drift B8; multi-conn C1..C4 synthetic `48,660 tps`; T9 `RCF-EQ ×1` live order proven to Arrow 2026-08-25 — `MARGIN ERROR`, sandbox unfunded) | Tested-in-sandbox (196 Rust lib + 18.7 s/1.12 s Go + 247 Java; `make gate` 13/13 2026-08-25) | Blocked |
+| Signal job | Design-ready | Implemented (multi-timeframe candles 15 s–15 m (`32_candle_live`/`33_candle_closed`) + strategy host `n7-range-breakout-v1` + optional `Execution_Intent`, behind rollout flags; `SIG-FAIL-001` ckpt-failure; the 15 s candle era is retired — see `04-signal-job.md`) | Tested-in-sandbox (envelope + `make gate`/`full-audit` green) | Blocked |
+| Execution Core (Babysitter + Executor — Nautilus + go-arrow bridge, 2026-08-21) | Design-ready (re-scoped CHG-028) | Implemented (WP-0..8 DONE: `LiveNodeRuntime` 1800 s soak B1, crash fence B2, gate lifecycle B3, durable 4 clients B7, clock drift B8; multi-conn C1..C4 synthetic `48,660 tps`; T9 `RCF-EQ ×1` live order proven to Arrow 2026-08-25 — `MARGIN ERROR`, sandbox unfunded) | Tested-in-sandbox (196 Rust lib + 18.7 s/1.12 s Go + 247 Java; `make gate` 13/13 on 2026-08-25, standing certificate 19/19 since 2026-09-23) | Blocked |
 | Local runtime | Design-ready | Implemented (`t8` 12/12 + `execution_network_check` PASS on `--profile execution-t3`; Swarm duties on holder) | Tested-in-sandbox | Blocked |
 | Production runtime | Design-ready | Not-implemented (needs prod VMs D1 — `BLOCKED: needs prod VMs`) | Untested (`PERF-PROD-60000`/`FAIL-VM-LOSS`/`DR-001..006`/`D7` await prod stack) | Blocked |
-| Test/evidence program | Design-ready | Implemented (`RELEASE_EVIDENCE_2026-08-21.md` + 13-item package; every AC has a pointer — E5c; `full-audit`/`pin-check`/`cep-check` green) | Tested-in-sandbox (`make gate` 2026-08-21 `ALL GATES PASSED`; **`make gate` re-captured 2026-08-25 13/13 PASS** `logs/soak/monday-gates-20260825-203040/` — CHG-103) | Blocked |
+| Test/evidence program | Design-ready | Implemented (`RELEASE_EVIDENCE_2026-08-21.md` + 13-item package; every AC has a pointer — E5c; `full-audit`/`pin-check`/`cep-check` green) | Tested-in-sandbox (`make gate` 2026-08-21 `ALL GATES PASSED`; **`make gate` re-captured 2026-08-25 13/13 PASS** `logs/soak/monday-gates-20260825-203040/` — CHG-103; the gate is 19 steps since 2026-09-22 and the standing certificate is 19/19, 2026-09-23) | Blocked |
 
 > **E4 note (2026-08-21, CHG-078):** this table is the single `Current readiness` truth for the laptop-now cut. Live-money stays `Blocked` for every row until E5 single-operator (Saurabh, DEC-044) sign-off. `Production runtime` honest `Not-implemented/Untested` — requires the VM era (`D1→D7`). No row is claimed `Production-validated` on a laptop.
 
@@ -130,7 +136,7 @@ The previous single-axis status vocabulary (`Draft`, `Design-ready`, `Implementa
 3. Validate DDL capability and schema lifecycle.
 4. Implement ingestion and test fixtures.
 5. Implement the Signal job.
-6. Implement the Execution Core (Action Capture + Babysitter + Executor) as the last functional work, with broker calls disabled until safety tests pass — see `05-execution-core.md`.
+6. Implement the Execution Core (Babysitter + Executor) as the last functional work, with broker calls disabled until safety tests pass — see `05-execution-core.md`.
 8. Implement local integration runtime.
 9. Implement production Swarm and operational controls.
 10. Produce the release evidence package.
@@ -194,7 +200,7 @@ Read these **in order** before writing any code:
 
 ### Phase 3: Signal Job 🔴 NEXT
 
-- > Head start: Slice 1 (raw source → validation → dedup → 15 s candles → `feature_candles_15s`) is implemented with 25 green tests and live-smoke-verified 2026-08-09 (205,146 candles, 1,074 instruments, 48 checkpoints); see [`04-signal-job.md`](./04-signal-job.md) §Slice 1 evidence. The slot-scoped safety consumer shell (`SafetyHaltJob` + `SafetyStateTracker` + `SuppressionGate` in `common`) is also implemented and live-verified — SAFETY-INT-001 passed 2026-08-09. Remaining: forming-bar handoff + Business Logic (Slice 2). ~~Ranking/Reservations/Decisions (Slice 3)~~ — **REMOVED 2026-08-15 (CHG-005, not deferred).**
+- > Head start: Slice 1 (raw source → validation → dedup → candles) is implemented with 25 green tests and live-smoke-verified 2026-08-09 (205,146 candles, 1,074 instruments, 48 checkpoints); see [`04-signal-job.md`](./04-signal-job.md) §Slice 1 evidence. The 15 s candle era it landed on is retired (2026-09-05); the current candle tables are `32_candle_live`/`33_candle_closed` (multi-timeframe 15 s–15 m). The slot-scoped safety consumer shell (`SafetyHaltJob` + `SafetyStateTracker` + `SuppressionGate` in `common`) is also implemented and live-verified — SAFETY-INT-001 passed 2026-08-09. Remaining: forming-bar handoff + Business Logic (Slice 2). ~~Ranking/Reservations/Decisions (Slice 3)~~ — **REMOVED 2026-08-15 (CHG-005, not deferred).**
 
 Read these **in order** before writing any code:
 
@@ -204,7 +210,7 @@ Read these **in order** before writing any code:
 | **Contract** | [`../04_contracts/04-business-logic.md`](../04_contracts/04-business-logic.md) | Feature compute, candidate detection, filtering rules |
 | **Contract** | [`../04_contracts/10-ranking.md`](../04_contracts/10-ranking.md) | **REMOVED 2026-08-15 (CHG-005 — in-operator ranking out of scope, not deferred); stub retained for cross-reference** |
 | **Dossier** | [`04-signal-job.md`](./04-signal-job.md) | How to build — state layout, dedup, candle (**ranking/reservation/decisions REMOVED 2026-08-15, CHG-005**) |
-| **DDL** | `code/01_platform/02_sql/ddl/03_feature_candles_15s.sql`, `05_signal_candidates.sql` (**`06_ranking_results.sql`, `07_trade_decisions.sql`, `15_portfolio_reservations.sql` REMOVED from scope 2026-08-15, CHG-005 — DDL files retained as reserved schema: still in `schema_manifest.json` and applied by the 2026-08-24 scratch run, but never written by any job**) | Physical schemas |
+| **DDL** | `code/01_platform/02_sql/ddl/32_candle_live.sql`, `33_candle_closed.sql`, `05_signal_candidates.sql` (**`06_ranking_results.sql`, `07_trade_decisions.sql`, `15_portfolio_reservations.sql` REMOVED from scope 2026-08-15, CHG-005 — DDL files retained as reserved schema: still in `schema_manifest.json` and applied by the 2026-08-24 scratch run, but never written by any job**) | Physical schemas |
 
 **What to build (in-order, inside one Flink job):**
 
@@ -218,7 +224,7 @@ Read these **in order** before writing any code:
 
 ---
 
-### Phase 4+5: Execution Core (Action Capture + Babysitter + Executor) 🔴 NEXT AFTER SIGNAL
+### Phase 4+5: Execution Core (Babysitter + Executor) 🔴 NEXT AFTER SIGNAL
 
 Read these **in order** before writing any code:
 

@@ -29,7 +29,7 @@ v1: The three workload VMs are Manager+Worker and host:
 - A ZooKeeper ensemble node (one per VM; 3-node ensemble, quorum 2-of-3; Fluss metadata store, required by Fluss 1.0.0 — and Flink JobManager HA leadership)
 - Fluss coordinator/tablet capacity and three-node replication/quorum (LOG tables; KV tables are single-replica in Fluss 1.0.0 (standby replicas are an opt-in promotion aid only; single-replica is deliberate — `DEC-055` — not an inherited default) — durability via Fluss remote storage + rebuild from audit (Flink checkpoints hold only small working/recovery state — DEC-038))
 - Flink JobManager (HA standby + leader via ZooKeeper)/TaskManager workload capacity according to the proven placement plan
-- Ingestion, Action Capture, Executor, and job deployment control as assigned by the Swarm stack
+- Ingestion, the Execution Core (capture + execution — the capture path runs in the Execution Core; `03_action_capture` retired 2026-09-10), and job deployment control as assigned by the Swarm stack
 
 Fluss replicas cannot co-locate on one workload VM. All three replicas of any critical Fluss/Flink role SHALL be placed across separate workload VMs via anti-co-location constraints. The placement plan must specify resources, update order, restart policy, shutdown grace, health checks, and persistent volume ownership.
 
@@ -65,7 +65,7 @@ A healthy container is not sufficient for any higher readiness state.
 
 ## Local Compose expectations
 
-Local Compose may include one Fluss coordinator/tablet, Flink control/workers, ingestion, Action Capture, Executor, OpenObserve, and job submission components. It is intended for deterministic development and sandbox testing.
+Local Compose may include one Fluss coordinator/tablet, Flink control/workers, ingestion, the Execution Core, OpenObserve, and job submission components. It is intended for deterministic development and sandbox testing.
 
 Local configuration:
 
@@ -81,7 +81,7 @@ Local configuration:
 2. Validate ZooKeeper ensemble quorum (2-of-3), then Fluss quorum, replication, tablets, and required schemas.
 3. Start Flink control/workers (JobManager HA leader elected via ZooKeeper) and verify checkpoint + HA metadata storage.
 4. Deploy Signal and Babysitter jobs from pinned artifacts.
-5. Verify ingestion manifest/subscriptions and Action Capture protocol readiness.
+5. Verify ingestion manifest/subscriptions and the Execution Core capture protocol readiness.
 6. Start Executor with gate `HALTED`; verify durable state, mappings, continuity, Arrow REST, and telemetry.
 7. Complete reconciliation and verify all unknown attempts are resolved. (**Reservations REMOVED 2026-08-15, CHG-005.**)
 8. Obtain the single-operator (Saurabh, DEC-044) authenticated approval for the same evidence hash/epoch.
