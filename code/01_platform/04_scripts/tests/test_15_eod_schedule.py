@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 SCRIPT = Path(__file__).resolve().parents[1] / "eod_schedule.py"
 SPEC = importlib.util.spec_from_file_location("eod_schedule", SCRIPT)
 eod = importlib.util.module_from_spec(SPEC)
+sys.modules["eod_schedule"] = eod  # dataclasses resolves cls.__module__ via sys.modules
 SPEC.loader.exec_module(eod)
 
 KOLKATA = ZoneInfo("Asia/Kolkata")
@@ -95,6 +96,44 @@ def test_a_malformed_time_or_unknown_zone_is_a_configuration_error():
     assert _run(Path("/tmp"), "--at", "25:00", "--dry-run").returncode == 2
     assert _run(Path("/tmp"), "--at", "2330", "--dry-run").returncode == 2
     assert _run(Path("/tmp"), "--zone", "Mars/Olympus", "--dry-run").returncode == 2
+
+
+# ── M2-2 catch-up: a passed slot with no success is not skipped to tomorrow ──
+
+def test_catch_up_due_matrix():
+    at = dt.time(15, 45)
+    before_slot = dt.datetime(2026, 9, 29, 9, 0, tzinfo=KOLKATA)
+    after_slot = dt.datetime(2026, 9, 29, 16, 30, tzinfo=KOLKATA)
+    today = after_slot.date().isoformat()
+    yesterday = (after_slot.date() - dt.timedelta(days=1)).isoformat()
+
+    assert not eod.catch_up_due(before_slot, at, KOLKATA, eod.EodState()), \
+        "before the slot: wait"
+    assert eod.catch_up_due(after_slot, at, KOLKATA, eod.EodState()), \
+        "no record at all: the slot was missed — catch up"
+    assert not eod.catch_up_due(after_slot, at, KOLKATA,
+                                eod.EodState(slot_date=today, rc=0)), \
+        "today's slot already succeeded"
+    assert eod.catch_up_due(after_slot, at, KOLKATA,
+                            eod.EodState(slot_date=today, rc=1)), \
+        "today's slot failed: same-day retry"
+    assert eod.catch_up_due(after_slot, at, KOLKATA,
+                            eod.EodState(slot_date=yesterday, rc=0)), \
+        "yesterday's success is not today's"
+    assert eod.catch_up_due(after_slot, at, KOLKATA,
+                            eod.EodState(slot_date=today, rc=None)), \
+        "an attempt with no recorded outcome is not a success"
+
+
+def test_state_round_trips_and_an_unreadable_file_is_empty_not_clean(tmp_path):
+    path = tmp_path / "state.json"
+    assert eod.read_state(path) == eod.EodState(), "missing state is empty"
+    saved = eod.EodState(slot_date="2026-09-29", last_attempt_at="2026-09-29T10:00:00Z",
+                         rc=1, missed=True, catch_up=True)
+    eod.write_state(path, saved)
+    assert eod.read_state(path) == saved
+    path.write_text("{not json")
+    assert eod.read_state(path) == eod.EodState(), "corrupt state reads as never-attempted"
 
 
 # ── firing ───────────────────────────────────────────────────────────────────
@@ -181,6 +220,46 @@ def test_an_unparseable_heartbeat_is_unhealthy_rather_than_fresh(tmp_path):
     hb.write_text("not a timestamp\n")
     r = _run(tmp_path, "--check-heartbeat", "--heartbeat", str(hb))
     assert r.returncode == 1
+
+
+def test_check_heartbeat_with_last_run_distinguishes_dead_from_unarchived(tmp_path):
+    """M2-2: a fresh heartbeat proves the scheduler is alive — not that the day archived.
+
+    With --last-run the check fails when the latest passed slot has no success
+    stamp, and the message says which of the two states it is."""
+    hb = tmp_path / "hb"
+    record = tmp_path / "eod-last-run"
+    now_local = dt.datetime.now(KOLKATA)
+    passed_at = (now_local - dt.timedelta(minutes=2)).strftime("%H:%M")
+
+    hb.write_text((dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=600)).isoformat() + "\n")
+    dead = _run(tmp_path, "--check-heartbeat", "--heartbeat", str(hb),
+                "--last-run", str(record), "--at", passed_at, "--zone", "Asia/Kolkata")
+    assert dead.returncode == 1
+    assert "scheduler dead" in dead.stdout
+
+    hb.write_text(dt.datetime.now(dt.timezone.utc).isoformat() + "\n")
+    unarchived = _run(tmp_path, "--check-heartbeat", "--heartbeat", str(hb),
+                      "--last-run", str(record), "--at", passed_at, "--zone", "Asia/Kolkata")
+    assert unarchived.returncode == 1
+    assert "EOD not archived" in unarchived.stdout
+
+    record.write_text(dt.datetime.now(KOLKATA).isoformat() + "\n")
+    archived = _run(tmp_path, "--check-heartbeat", "--heartbeat", str(hb),
+                    "--last-run", str(record), "--at", passed_at, "--zone", "Asia/Kolkata")
+    assert archived.returncode == 0, archived.stdout
+    assert "fresh" in archived.stdout
+
+
+def test_check_heartbeat_without_last_run_stays_pure_liveness(tmp_path):
+    """The container healthcheck must not turn red for a not-yet-archived day."""
+    hb = tmp_path / "hb"
+    hb.write_text(dt.datetime.now(dt.timezone.utc).isoformat() + "\n")
+    now_local = dt.datetime.now(KOLKATA)
+    passed_at = (now_local - dt.timedelta(minutes=2)).strftime("%H:%M")
+    r = _run(tmp_path, "--check-heartbeat", "--heartbeat", str(hb),
+             "--at", passed_at, "--zone", "Asia/Kolkata")
+    assert r.returncode == 0, r.stdout
 
 
 # ── the last-run record (the ephemeral-VM stop gate reads it) ────────────────

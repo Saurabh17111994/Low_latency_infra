@@ -1405,6 +1405,11 @@ services:
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       # The heartbeat the healthcheck below reads: one path, both places.
       EOD_HEARTBEAT: /tmp/eod-scheduler-heartbeat
+      # M2-2: per-slot outcome, so a slot that passed with no success (a task
+      # restart at the wrong moment, or a failed fire) is caught up the same
+      # day. Container-local: a recreated task loses it and then re-evaluates
+      # from the slot clock — the controller's lease/state owns idempotency.
+      EOD_STATE_FILE: /tmp/eod-state.json
       # No default on purpose. Which tables are EOD-eligible is an operator
       # decision, and the tool refuses to run without it (fail-closed).
       EOD_TABLES: "${EOD_TABLES:?set EOD_TABLES to the eligible tables, comma separated}"

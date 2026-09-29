@@ -120,7 +120,7 @@ The image is the artifact. Rebuild it when code or images change (repeat
 | 3 | Start: `cd /opt/trading/streaming_project && make day ARGS="start"` — fresh start (`ALLOW_FRESH=1` from `.env.vm`), ready in ~2–4 min (87 s measured software path) |
 | 4 | Provision observability — a fresh OpenObserve starts **empty**: `bash code/01_platform/04_scripts/provision-observability.sh` (destination + dashboards + 47 rules + storage/disk alerts + retention; refuses without `secrets.env` and derives `O2_AUTH_BASIC` from `O2_PASSWORD`). Off-session, a few metric-stream rules are deferred (they need streams the signal job only emits when signals flow) — the disk/ING/INFRA safety rules are already in; re-run when the feed is live. Without this the day runs blind — measured 2026-09-28: zero alerts loaded while the data disk reached 85.13% |
 | 5 | Start lake tiering: `bash code/01_platform/04_scripts/tiering-start.sh` — without it the day's parquet never reaches R2 (idempotent; check `--status`) |
-| 6 | Let the day run. At **15:45 IST** the `trading-eod` unit runs the EOD controller **in the `eod-controller` compose service** (`EOD_RUNNER=compose` from `.env.vm` — the VM has no host JDK/m2) with `EOD_OFFLOAD=lake`, and records the success to `/var/lib/trading/eod-last-run` |
+| 6 | Let the day run. At **15:45 IST** the `trading-eod` unit runs the EOD controller **in the `eod-controller` compose service** (`EOD_RUNNER=compose` from `.env.vm` — the VM has no host JDK/m2) with `EOD_OFFLOAD=lake`, and records the success to `/var/lib/trading/eod-last-run`. M2-2: the per-slot outcome also lands in `/var/lib/trading/eod-state.json`, so a slot missed while the VM was down (or a failed fire) is **caught up the same day** — the loop fires it at start, retries every `EOD_RETRY_DELAY_SEC` (900 s) until it succeeds, and logs `CATCH-UP` loudly. The controller's lease/state keeps the extra fire idempotent |
 | 7 | After the archive: `make day ARGS="stop"` — the gate refuses until today's record exists ("EOD archive confirmed …"), then the stack goes down |
 | 8 | Destroy the VM. The day's data is in R2 — verify: `bash code/01_platform/04_scripts/r2-list.sh all` |
 
@@ -131,6 +131,7 @@ The image is the artifact. Rebuild it when code or images change (repeat
 | Market data (parquet) | R2 `lake/...` (Fluss tiering) | **yes** |
 | EOD manifest/state | Fluss during the day; lake evidence in R2 | state dies with Fluss; the archive is the evidence | 
 | EOD last-run record | `/var/lib/trading/eod-last-run` | no (re-read by the stop gate the same day) |
+| EOD slot state (M2-2) | `/var/lib/trading/eod-state.json` | no (durable across scheduler restarts within the day) |
 | Flink checkpoints | local volume | no — every morning is a fresh start by design |
 | Secrets | `secrets.env`, injected at boot | no |
 | Golden image | CloudPe Images | **yes** |
@@ -146,7 +147,7 @@ launch is boring enough to script.
 
 | Symptom | Meaning | Fix |
 |---|---|---|
-| `stop` RED: "today's EOD->R2 archive is not confirmed" | the 15:45 run failed or never fired | `systemctl status trading-eod`; re-run the unit's path once: `set -a; . code/01_platform/01_docker/.env.vm; set +a; EOD_RUNNER=compose python3 code/01_platform/04_scripts/eod_schedule.py --once`; re-run `stop`; `DAY_STOP_FORCE=1` only when the loss is deliberate |
+| `stop` RED: "today's EOD->R2 archive is not confirmed" | the 15:45 run failed or never fired | `systemctl status trading-eod`; `python3 code/01_platform/04_scripts/eod_schedule.py --check-heartbeat --last-run /var/lib/trading/eod-last-run` says whether the scheduler is dead or the day is merely unarchived (M2-2); a live scheduler retries on its own (`/var/lib/trading/eod-state.json` has the slot outcome); re-run the unit's path once: `set -a; . code/01_platform/01_docker/.env.vm; set +a; EOD_RUNNER=compose python3 code/01_platform/04_scripts/eod_schedule.py --once`; re-run `stop`; `DAY_STOP_FORCE=1` only when the loss is deliberate |
 | `start` refused: "no savepoint/checkpoint" | `.env.vm` missing (no `ALLOW_FRESH=1`) | `cp .env.vm.example .env.vm` |
 | "no RUNNING tiering job" | the day's parquet will not reach R2 | `bash code/01_platform/04_scripts/tiering-start.sh`; if it dies, `docs/06_operations/07-lake-archive-ops.md` §Recovery |
 | compose starts **building** an image | the image set was not loaded | repeat §2.4, then rebuild the golden image |

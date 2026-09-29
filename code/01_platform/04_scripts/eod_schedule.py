@@ -23,7 +23,9 @@ Exit codes: the controller's own code for --once (0 = clean), 0 for --dry-run, 0
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime as dt
+import json
 import os
 import shlex
 import subprocess
@@ -36,6 +38,7 @@ DEFAULT_AT = "23:30"
 DEFAULT_ZONE = "Asia/Kolkata"
 DEFAULT_HEARTBEAT = "/tmp/eod-scheduler-heartbeat"
 DEFAULT_SLEEP_CHUNK_SEC = 60.0
+DEFAULT_RETRY_DELAY_SEC = 900.0
 
 
 def _die(message: str) -> None:
@@ -115,6 +118,80 @@ def write_last_run(path: Path | None, zone_name: str,
         path.write_text(stamp.isoformat() + "\n")
     except OSError as exc:
         print(f"eod-schedule: WARN cannot write last-run {path}: {exc}", file=sys.stderr)
+
+
+def read_last_run(path: Path) -> dt.datetime | None:
+    """The last-run stamp, or None when missing/unreadable (unverified, not clean)."""
+    try:
+        return dt.datetime.fromisoformat(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+@dataclasses.dataclass
+class EodState:
+    """M2-2: durable per-slot outcome, so a missed/failed slot is caught up.
+
+    ``slot_date`` is the trading-zone date the record belongs to; ``rc`` is the
+    last controller exit code (None = never attempted).
+    """
+
+    slot_date: str = ""
+    last_attempt_at: str = ""
+    rc: int | None = None
+    missed: bool = False
+    catch_up: bool = False
+
+
+def read_state(path: Path | None) -> EodState:
+    if path is None:
+        return EodState()
+    try:
+        raw = json.loads(path.read_text())
+        return EodState(
+            slot_date=str(raw.get("slot_date", "")),
+            last_attempt_at=str(raw.get("last_attempt_at", "")),
+            rc=(None if raw.get("rc") is None else int(raw["rc"])),
+            missed=bool(raw.get("missed", False)),
+            catch_up=bool(raw.get("catch_up", False)),
+        )
+    except (OSError, ValueError, TypeError):
+        return EodState()
+
+
+def write_state(path: Path | None, state: EodState) -> None:
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(dataclasses.asdict(state)) + "\n")
+    except OSError as exc:
+        print(f"eod-schedule: WARN cannot write state {path}: {exc}", file=sys.stderr)
+
+
+def catch_up_due(now: dt.datetime, at: dt.time, tz: ZoneInfo, state: EodState) -> bool:
+    """M2-2: True when the latest passed slot has no success and it is still its day.
+
+    Before today's local slot the scheduler waits (False). After it, False only
+    when the state records rc==0 for that same date — a missed slot (the
+    scheduler was down at the time) or a failed one (rc != 0) must run now, and
+    the controller's lease/state keeps the re-fire idempotent.
+    """
+    local = now.astimezone(tz)
+    slot = local.replace(hour=at.hour, minute=at.minute, second=0, microsecond=0)
+    if slot > local:
+        return False
+    return not (state.slot_date == local.date().isoformat() and state.rc == 0)
+
+
+def sleep_with_heartbeat(seconds: float, heartbeat: Path, chunk: float) -> None:
+    """Sleep in chunks, refreshing the heartbeat — a long retry must not look dead."""
+    remaining = seconds
+    while remaining > 0:
+        step = min(remaining, max(1.0, chunk))
+        time.sleep(step)
+        write_heartbeat(heartbeat)
+        remaining -= step
 
 
 def compose_command(compose_file: str, controller_args: list[str]) -> list[str]:
@@ -220,8 +297,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--last-run", default=os.environ.get("EOD_LAST_RUN_FILE", ""),
                    help="record the last successful controller run here "
                         "(env EOD_LAST_RUN_FILE; empty disables)")
+    p.add_argument("--state", default=os.environ.get("EOD_STATE_FILE", ""),
+                   help="durable slot-state JSON for catch-up/retries "
+                        "(env EOD_STATE_FILE; empty disables the state record)")
+    p.add_argument("--retry-delay-sec", type=float,
+                   default=float(os.environ.get("EOD_RETRY_DELAY_SEC",
+                                                DEFAULT_RETRY_DELAY_SEC)),
+                   help="same-day retry delay after a failed/missed slot, seconds "
+                        "(env EOD_RETRY_DELAY_SEC)")
     p.add_argument("--check-heartbeat", action="store_true",
-                   help="report whether the heartbeat is fresh, then exit (container health)")
+                   help="report whether the heartbeat is fresh, then exit (container health). "
+                        "With --last-run it also fails when the latest passed slot has no "
+                        "success stamp (EOD not archived vs scheduler dead)")
     p.add_argument("--max-age", type=float, default=120.0,
                    help="seconds a heartbeat may age before --check-heartbeat calls it stale")
     p.add_argument("--max-retries", type=int, default=3, help="process-level retries after a failure")
@@ -239,11 +326,28 @@ def main(argv: list[str] | None = None) -> int:
     if args.check_heartbeat:
         age = heartbeat_age(heartbeat, now)
         if age is None:
-            print(f"eod-schedule: heartbeat {heartbeat} missing or unreadable")
+            print(f"eod-schedule: heartbeat {heartbeat} missing or unreadable "
+                  f"— scheduler dead")
             return 1
         if age > args.max_age:
-            print(f"eod-schedule: heartbeat {heartbeat} is stale ({age:.0f}s > {args.max_age:.0f}s)")
+            print(f"eod-schedule: heartbeat {heartbeat} is stale ({age:.0f}s > "
+                  f"{args.max_age:.0f}s) — scheduler dead or wedged")
             return 1
+        if args.last_run.strip():
+            # M2-2: with a last-run file, freshness alone is not enough — a live
+            # scheduler that never archived the day must read unhealthy too.
+            check_tz = zone(args.zone)
+            check_at = parse_at(args.at)
+            local = now.astimezone(check_tz)
+            slot = local.replace(hour=check_at.hour, minute=check_at.minute,
+                                 second=0, microsecond=0)
+            stamp = read_last_run(Path(args.last_run))
+            if slot <= local and (stamp is None
+                                  or stamp.astimezone(check_tz).date() != local.date()):
+                print(f"eod-schedule: heartbeat is fresh but the {args.at} {args.zone} "
+                      f"slot for {local.date()} has no success stamp in {args.last_run} "
+                      f"— EOD not archived (scheduler alive)")
+                return 1
         print(f"eod-schedule: heartbeat {heartbeat} is fresh ({age:.0f}s)")
         return 0
 
@@ -272,11 +376,47 @@ def main(argv: list[str] | None = None) -> int:
         print(f"eod-schedule: controller {controller} not found", file=sys.stderr)
         return 2
 
+    state_path = Path(args.state) if args.state.strip() else None
+    state = read_state(state_path)
     print(f"eod-schedule: scheduling {controller_args[0]} at {args.at} {args.zone}; "
-          f"heartbeat {heartbeat}; pid {os.getpid()}", flush=True)
+          f"heartbeat {heartbeat}; state {state_path or 'disabled'}; pid {os.getpid()}",
+          flush=True)
     write_heartbeat(heartbeat, now)
     while True:
-        target = next_fire(dt.datetime.now(dt.timezone.utc), at, tz)
+        loop_now = dt.datetime.now(dt.timezone.utc)
+        if catch_up_due(loop_now, at, tz, state):
+            # M2-2: a slot that passed with no success (the scheduler was down at
+            # the time, or the fire failed) runs now — the controller's lease/state
+            # makes the extra fire idempotent.
+            local_date = loop_now.astimezone(tz).date().isoformat()
+            first_attempt = state.slot_date != local_date
+            state.slot_date = local_date
+            state.last_attempt_at = loop_now.isoformat()
+            if first_attempt:
+                state.missed = True
+            state.catch_up = True
+            if first_attempt:
+                print(f"eod-schedule: CATCH-UP — the {args.at} {args.zone} slot for "
+                      f"{local_date} has no success record; firing now", flush=True)
+            else:
+                print(f"eod-schedule: retrying today's {args.at} slot "
+                      f"(last rc={state.rc})", flush=True)
+            rc = fire(controller, controller_args, args.max_retries, args.retry_delay,
+                      heartbeat, last_run, args.zone, args.runner, args.compose_file)
+            state.rc = rc
+            if rc == 0:
+                # The slot WAS missed — keep that fact; catch_up only says the
+                # catch-up attempt is over.
+                state.catch_up = False
+                write_state(state_path, state)
+                continue
+            write_state(state_path, state)
+            print(f"eod-schedule: slot {local_date} still failed (rc={rc}); same-day "
+                  f"retry in {args.retry_delay_sec:.0f}s", flush=True)
+            sleep_with_heartbeat(args.retry_delay_sec, heartbeat, args.sleep_chunk)
+            continue
+        target = next_fire(loop_now, at, tz)
+        print(f"eod-schedule: next fire {target.isoformat()} ({target.tzinfo})", flush=True)
         while True:
             remaining = (target - dt.datetime.now(dt.timezone.utc)).total_seconds()
             if remaining <= 0:
@@ -284,8 +424,18 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(min(remaining, args.sleep_chunk))
             write_heartbeat(heartbeat)
         # Recompute after the fire: a clock jump or a suspended container must not re-select it.
-        fire(controller, controller_args, args.max_retries, args.retry_delay,
-             heartbeat, last_run, args.zone, args.runner, args.compose_file)
+        state.slot_date = target.astimezone(tz).date().isoformat()
+        state.last_attempt_at = dt.datetime.now(dt.timezone.utc).isoformat()
+        state.missed = False
+        state.catch_up = False
+        rc = fire(controller, controller_args, args.max_retries, args.retry_delay,
+                  heartbeat, last_run, args.zone, args.runner, args.compose_file)
+        state.rc = rc
+        write_state(state_path, state)
+        if rc != 0:
+            print(f"eod-schedule: slot {state.slot_date} failed (rc={rc}); same-day retry "
+                  f"in {args.retry_delay_sec:.0f}s", flush=True)
+            sleep_with_heartbeat(args.retry_delay_sec, heartbeat, args.sleep_chunk)
 
 
 if __name__ == "__main__":

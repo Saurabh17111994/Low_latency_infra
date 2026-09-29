@@ -137,7 +137,7 @@ Failure runbooks SHALL distinguish fault injection, detector threshold, detectio
 
 ## 6.13 EOD controller ownership
 
-A named service or scheduled job SHALL own EOD manifest creation, verification, retry/backoff, retention extension, expiry protection, storage-pressure alerts, and manual reconciliation. Its state and ownership SHALL be durable and included in the schema/operations acceptance tests.
+A named service or scheduled job SHALL own EOD manifest creation, verification, retry/backoff, retention extension, expiry protection, storage-pressure alerts, and manual reconciliation. Its state and ownership SHALL be durable and included in the schema/operations acceptance tests. A slot that passed with no recorded success SHALL be caught up within the same trading day (the controller's lease keeps the re-fire idempotent), and the scheduler's health signal SHALL distinguish a dead scheduler from a live one whose day is not yet archived.
 
 ## 6.10 Release gates
 

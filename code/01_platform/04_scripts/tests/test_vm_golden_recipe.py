@@ -28,6 +28,9 @@ class VmGoldenRecipeTests(unittest.TestCase):
         self.assertRegex(text, r"(?m)^EOD_AT=15:45$")
         self.assertRegex(text, r"(?m)^EOD_OFFLOAD=lake$")
         self.assertRegex(text, r"(?m)^DAY_STOP_REQUIRE_EOD=1$")
+        self.assertRegex(text, r"(?m)^EOD_STATE_FILE=/var/lib/trading/eod-state\.json$",
+                         "M2-2: the slot state must be durable, not in /tmp")
+        self.assertRegex(text, r"(?m)^EOD_RETRY_DELAY_SEC=\d+$")
 
     def test_unit_reads_the_profile_and_never_bakes_secrets(self):
         text = SCRIPT.read_text()
