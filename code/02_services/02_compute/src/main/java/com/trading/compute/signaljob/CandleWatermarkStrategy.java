@@ -42,13 +42,18 @@ public final class CandleWatermarkStrategy {
         // a row the gate would reject must never reach the watermark first.
         long maxSafeEventTime = Long.MAX_VALUE
                 - config.candleWindowMs() - config.allowedLatenessMs() - 1;
+        // L3-3: one state supplier per strategy (one per subtask after Flink
+        // serializes/deserializes it) — every generator created on that subtask
+        // shares the episode latch and the job-wide last-event clock.
+        SourceIdleWatchdogState.Supplier idleStateSupplier = new SourceIdleWatchdogState.Supplier();
         return WatermarkStrategy.<RowData>forGenerator(
                         context ->
                                 new SourceIdleWatchdogGenerator(
                                         boundedOutOfOrderGenerator(
                                                 config.outOfOrderMs(), maxSafeEventTime),
                                         config.sourceIdleMs(),
-                                        config.sourceIdleAlertMs()))
+                                        config.sourceIdleAlertMs(),
+                                        idleStateSupplier))
                 .withIdleness(Duration.ofMillis(config.sourceIdleMs()))
                 .withTimestampAssigner((row, timestamp) -> {
                     // P2-022: null event_time never poisons the watermark —

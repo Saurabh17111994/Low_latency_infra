@@ -2,6 +2,7 @@ package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -10,7 +11,6 @@ import org.apache.flink.api.common.eventtime.Watermark;
 import org.apache.flink.api.common.eventtime.WatermarkGenerator;
 import org.apache.flink.api.common.eventtime.WatermarkOutput;
 import org.apache.flink.table.data.RowData;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -37,22 +37,24 @@ class SourceIdleWatchdogGeneratorTest {
 
     private final AtomicLong clock = new AtomicLong(1_000_000L);
 
+    /** L3-3: the per-subtask state every generator in a test shares. */
+    private SourceIdleWatchdogState.Supplier stateSupplier;
+
+    private SourceIdleWatchdogState state;
+
     private WatermarkGenerator<RowData> generator;
 
     @BeforeEach
     void setUp() {
-        SourceIdleWatchdogGenerator.resetEpisodeForTest();
+        stateSupplier = new SourceIdleWatchdogState.Supplier();
+        state = stateSupplier.get();
         generator =
                 new SourceIdleWatchdogGenerator(
                         CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L),
                         15_000L,
                         60_000L,
-                        clock::get);
-    }
-
-    @AfterEach
-    void tearDown() {
-        SourceIdleWatchdogGenerator.resetEpisodeForTest();
+                        clock::get,
+                        stateSupplier);
     }
 
     @Test
@@ -64,7 +66,7 @@ class SourceIdleWatchdogGeneratorTest {
         generator.onPeriodicEmit(output);
         generator.onPeriodicEmit(output);
 
-        assertFalse(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+        assertFalse(state.episodeReportedForTest(),
                 "no idle episode while records flow");
         // Watermark emission unchanged: bounded-out-of-orderness still emits
         // 4_999 then 5_999 (event-driven, tracker-14 design).
@@ -78,7 +80,7 @@ class SourceIdleWatchdogGeneratorTest {
 
         generator.onPeriodicEmit(new RecordingOutput());
 
-        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+        assertTrue(state.episodeReportedForTest(),
                 "episode latch must be set after the first alert");
     }
 
@@ -87,13 +89,13 @@ class SourceIdleWatchdogGeneratorTest {
         generator.onEvent(null, 10_000L, new RecordingOutput());
         clock.set(clock.get() + 61_000L);
         generator.onPeriodicEmit(new RecordingOutput());
-        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest());
+        assertTrue(state.episodeReportedForTest());
 
         // Keep idling — later periodic ticks must NOT re-alert (one per episode).
         clock.set(clock.get() + 61_000L);
         generator.onPeriodicEmit(new RecordingOutput());
         generator.onPeriodicEmit(new RecordingOutput());
-        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+        assertTrue(state.episodeReportedForTest(),
                 "no repeat alerts inside one idle episode");
     }
 
@@ -102,18 +104,18 @@ class SourceIdleWatchdogGeneratorTest {
         generator.onEvent(null, 10_000L, new RecordingOutput());
         clock.set(clock.get() + 61_000L);
         generator.onPeriodicEmit(new RecordingOutput());
-        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest());
+        assertTrue(state.episodeReportedForTest());
 
         // A record arrives: episode ends, latch re-arms.
         clock.set(clock.get() + 5_000L);
         generator.onEvent(null, 12_000L, new RecordingOutput());
-        assertFalse(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+        assertFalse(state.episodeReportedForTest(),
                 "a record must clear the episode latch (resume)");
 
         // New idle episode after the resume must alert again.
         clock.set(clock.get() + 61_000L);
         generator.onPeriodicEmit(new RecordingOutput());
-        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+        assertTrue(state.episodeReportedForTest(),
                 "a fresh idle episode after resume must alert again");
     }
 
@@ -122,7 +124,7 @@ class SourceIdleWatchdogGeneratorTest {
         generator.onEvent(null, 10_000L, new RecordingOutput());
         clock.set(clock.get() + 59_999L); // 1 ms under the 60 s threshold
         generator.onPeriodicEmit(new RecordingOutput());
-        assertFalse(SourceIdleWatchdogGenerator.episodeReportedForTest());
+        assertFalse(state.episodeReportedForTest());
     }
 
     @Test
@@ -132,7 +134,7 @@ class SourceIdleWatchdogGeneratorTest {
         // alerts even though onEvent never ran.
         clock.set(clock.get() + 61_000L);
         generator.onPeriodicEmit(new RecordingOutput());
-        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+        assertTrue(state.episodeReportedForTest(),
                 "idle measured from source-open (no records ever) must alert");
     }
 
@@ -271,13 +273,15 @@ class SourceIdleWatchdogGeneratorTest {
                         CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L),
                         15_000L,
                         60_000L,
-                        clock::get);
+                        clock::get,
+                        stateSupplier);
         WatermarkGenerator<RowData> quiet =
                 new SourceIdleWatchdogGenerator(
                         CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L),
                         15_000L,
                         60_000L,
-                        clock::get);
+                        clock::get,
+                        stateSupplier);
         RecordingOutput liveOut = new RecordingOutput();
         RecordingOutput quietOut = new RecordingOutput();
 
@@ -287,7 +291,7 @@ class SourceIdleWatchdogGeneratorTest {
             clock.set(clock.get() + 10_000L);
             live.onEvent(null, 11_000L + i, liveOut);
             quiet.onPeriodicEmit(quietOut);
-            assertFalse(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+            assertFalse(state.episodeReportedForTest(),
                     "a quiet split must not alert while records flow anywhere (tick " + i + ")");
         }
         // Per-split idle marking still applies — only the job-wide alert is gated.
@@ -296,7 +300,7 @@ class SourceIdleWatchdogGeneratorTest {
         // The feed then stops everywhere: the same quiet split must alert.
         clock.set(clock.get() + 61_000L);
         quiet.onPeriodicEmit(quietOut);
-        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+        assertTrue(state.episodeReportedForTest(),
                 "full-job silence must still alert from a quiet split");
     }
 
@@ -314,7 +318,7 @@ class SourceIdleWatchdogGeneratorTest {
         clock.set(clock.get() - 30_000L);
         generator.onPeriodicEmit(output);
         assertEquals(0, output.idleCalls, "a backward step must not mark idle");
-        assertFalse(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+        assertFalse(state.episodeReportedForTest(),
                 "a backward step must not alert");
 
         // Normal operation resumes from the resynced stamp: both thresholds
@@ -322,7 +326,7 @@ class SourceIdleWatchdogGeneratorTest {
         clock.set(clock.get() + 91_000L);
         generator.onPeriodicEmit(output);
         assertEquals(1, output.idleCalls, "idle marking recovers after resync");
-        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest(),
+        assertTrue(state.episodeReportedForTest(),
                 "alerting recovers after resync");
     }
 
@@ -348,21 +352,100 @@ class SourceIdleWatchdogGeneratorTest {
     }
 
     @Test
-    void constructorRearmsEpisodeLatch() {
+    void aFreshStateRearmsEpisodeLatch() {
         generator.onEvent(null, 10_000L, new RecordingOutput());
         clock.set(clock.get() + 61_000L);
         generator.onPeriodicEmit(new RecordingOutput());
-        assertTrue(SourceIdleWatchdogGenerator.episodeReportedForTest());
+        assertTrue(state.episodeReportedForTest());
 
-        // A fresh job (new generator, e.g. restart in a reused JVM) must report
-        // its first idle episode instead of inheriting the set latch.
+        // A fresh JOB (new strategy/supplier, e.g. a restart in a reused JVM) must
+        // report its first idle episode instead of inheriting the set latch.
+        SourceIdleWatchdogState.Supplier freshSupplier = new SourceIdleWatchdogState.Supplier();
         new SourceIdleWatchdogGenerator(
                 CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L),
                 15_000L,
                 60_000L,
-                clock::get);
-        assertFalse(SourceIdleWatchdogGenerator.episodeReportedForTest(),
-                "construction must re-arm the first-episode alert");
+                clock::get,
+                freshSupplier);
+        assertFalse(freshSupplier.get().episodeReportedForTest(),
+                "a fresh job must start with a clean episode latch");
+    }
+
+    // ------------------------------------------------------------------
+    // L3-3: one state per subtask — a second generator (split reassignment /
+    // rebuilt reader) must inherit the latch and the job clock, not reset them.
+    // ------------------------------------------------------------------
+
+    @Test
+    void secondGeneratorOnTheSameSubtaskSharesTheEpisodeLatch() {
+        generator.onEvent(null, 10_000L, new RecordingOutput());
+        clock.set(clock.get() + 61_000L);
+        generator.onPeriodicEmit(new RecordingOutput());
+        assertTrue(state.episodeReportedForTest(), "first episode reported");
+
+        // The runtime creates another generator on the same subtask.
+        WatermarkGenerator<RowData> second =
+                new SourceIdleWatchdogGenerator(
+                        CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L),
+                        15_000L,
+                        60_000L,
+                        clock::get,
+                        stateSupplier);
+
+        assertTrue(state.episodeReportedForTest(),
+                "construction of a second generator must not re-arm the latch (L3-3)");
+        clock.set(clock.get() + 61_000L);
+        second.onPeriodicEmit(new RecordingOutput());
+        assertTrue(state.episodeReportedForTest(), "still one episode, no re-alert");
+
+        second.onEvent(null, 12_000L, new RecordingOutput());
+        assertFalse(state.episodeReportedForTest(),
+                "a record on the second generator clears the shared episode once");
+    }
+
+    @Test
+    void secondGeneratorOnTheSameSubtaskDoesNotResetTheJobClock() {
+        generator.onEvent(null, 10_000L, new RecordingOutput()); // job clock = 1_000_000
+        clock.set(clock.get() + 61_000L);
+
+        // Pre-fix, this construction restamped the job clock to now and masked the
+        // 61 s of silence; the shared state keeps the original stamp.
+        new SourceIdleWatchdogGenerator(
+                CandleWatermarkStrategy.boundedOutOfOrderGenerator(5_000L),
+                15_000L,
+                60_000L,
+                clock::get,
+                stateSupplier);
+
+        generator.onPeriodicEmit(new RecordingOutput());
+        assertTrue(state.episodeReportedForTest(),
+                "the job clock must survive a second construction on the subtask (L3-3)");
+    }
+
+    @Test
+    void theStateSupplierIsSerializableAndDeserializesFresh() throws Exception {
+        // The strategy ships the supplier inside the serialized WatermarkStrategy;
+        // a non-serializable supplier fails job submission, and a non-transient
+        // state would leak a previous subtask's latch into a restored one.
+        SourceIdleWatchdogState.Supplier supplier = new SourceIdleWatchdogState.Supplier();
+        supplier.get().stampJobClockOnce(123L);
+        supplier.get().reportEpisodeOnce();
+
+        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+        try (java.io.ObjectOutputStream out = new java.io.ObjectOutputStream(bytes)) {
+            out.writeObject(supplier);
+        }
+        SourceIdleWatchdogState.Supplier copy;
+        try (java.io.ObjectInputStream in =
+                new java.io.ObjectInputStream(new java.io.ByteArrayInputStream(bytes.toByteArray()))) {
+            copy = (SourceIdleWatchdogState.Supplier) in.readObject();
+        }
+
+        assertNotSame(supplier.get(), copy.get());
+        assertFalse(copy.get().episodeReportedForTest(),
+                "a deserialized subtask must start with a clean episode latch");
+        assertEquals(0L, copy.get().jobLastEventWallClockMs(),
+                "a deserialized subtask must start with a clean job clock");
     }
 
     private static final class RecordingOutput implements WatermarkOutput {

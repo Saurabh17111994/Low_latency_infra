@@ -34,11 +34,11 @@ Where a body section and this list disagree, this list wins.
 |---|---|---|---|---|---|---|---|
 | L1 — execution: mass-status honesty | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
 | L2 — ops tooling: lint scope and tracker wiring | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 2 | 0 | 2 | 0 | 0 | 0 |
+| L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 3 | 0 | 1 | 0 | 0 | 0 |
 | L4 — ingestion: config doc parity and final-report atomicity | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | L5 — common/mock: semantics and naming truth | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | L6 — infra/DDL: guards, parity, docs | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| **Total** | **17** | **5** | **0** | **12** | **0** | **0** | **0** |
+| **Total** | **17** | **6** | **0** | **11** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
@@ -75,11 +75,11 @@ Where a body section and this list disagree, this list wins.
   asserting `N>0 / Failures: 0 / Errors: 0 / Skipped: 0` per class — a dead cluster or missing
   flag fails instead of skipping. Record the conflict with the 2026-09-18 decision not to touch
   step 16 in `01-foundation.md`. — CHG-421
-- [ ] **L3-3** — Idle-watchdog state is per subtask, not per construction: introduce
+- [x] **L3-3** — Idle-watchdog state is per subtask, not per construction: introduce
   `SourceIdleWatchdogState` (episode latch + job last-event clock) held by a serializable
   supplier; the first generator created in a subtask stamps it and every later split generator on
   that subtask shares it; the constructor resets are deleted, so a runtime split can no longer
-  re-arm the latch and mask idleness.
+  re-arm the latch and mask idleness. — CHG-422
 - [ ] **L3-4** — Snapshot-fallback tick features stop being inflated 6×: feed `onTick` only for
   the canonical tick timeframe (FIFTEEN_S) when resolving `CandleLiveColumns.TF`, while all six
   TF rows still fan out to strategies; `compute.features.updates.tick` increments only on an
