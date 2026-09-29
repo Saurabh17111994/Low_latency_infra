@@ -2,6 +2,8 @@ package com.trading.compute.signaljob;
 
 import com.trading.compute.feature.PerInstrumentFeatures;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -74,8 +76,20 @@ public class StrategyHostFunction
     /** P2-058 horizon: newest-N ids kept per (rule, tf) ledger on compaction. */
     static final int EMITTED_IDS_RETAIN_PER_LEDGER = 16;
 
+    /**
+     * H5-1: ids written after the upgrade live in one map per rule, so pruning
+     * scans one rule's ledger instead of the whole subtask map. The legacy
+     * descriptor below stays registered (read-only) so a pre-upgrade
+     * checkpoint's ids still suppress.
+     */
+    private static final String EMITTED_IDS_V2_PREFIX = "strategy-host-emitted-ids-v2/";
+
     private static final MapStateDescriptor<String, Long> EMITTED_IDS_DESC =
             new MapStateDescriptor<>("strategy-host-emitted-ids", Types.STRING, Types.LONG);
+
+    private static MapStateDescriptor<String, Long> emittedIdsV2Desc(String ruleId) {
+        return new MapStateDescriptor<>(EMITTED_IDS_V2_PREFIX + ruleId, Types.STRING, Types.LONG);
+    }
 
     /**
      * Side output of the DEC-056 stored layer: one row per closed window
@@ -97,6 +111,15 @@ public class StrategyHostFunction
     private final Map<Long, HostSlot> slots = new HashMap<>();
 
     private transient MapState<String, Long> emittedIds;
+    /** H5-1: per-rule ledgers for ids written after the upgrade (lazy). */
+    private transient Map<String, MapState<String, Long>> emittedIdsByRule;
+    /** H5-1: new ids since the last prune, per rule (transient, not checkpointed). */
+    private transient Map<String, Integer> emittedIdsSincePrune;
+    /** H5-1 test seam: prune scans performed (must stay ~emissions / horizon). */
+    private transient long pruneScans;
+    /** H5-1 test seam: a legacy id to seed on the next collect (keyed context active). */
+    private transient String seedLegacyOnNextCollectId;
+    private transient long seedLegacyOnNextCollectTs;
     private transient Counter suppressed;
     private transient Counter failedStrategy;
     private transient Counter droppedUnkeyed;
@@ -148,6 +171,9 @@ public class StrategyHostFunction
         }
         slots.clear();
         emittedIds = getRuntimeContext().getMapState(EMITTED_IDS_DESC);
+        emittedIdsByRule = new HashMap<>();
+        emittedIdsSincePrune = new HashMap<>();
+        pruneScans = 0;
         suppressed = getRuntimeContext().getMetricGroup().counter("compute.strategy.suppressed");
         failedStrategy =
                 getRuntimeContext().getMetricGroup().counter("compute.strategy.failed");
@@ -326,9 +352,19 @@ public class StrategyHostFunction
                 LOG.warn("strategy-host: dropping unkeyed emission rule={}", ruleId);
                 return;
             }
+            if (seedLegacyOnNextCollectId != null) {
+                try {
+                    emittedIds.put(seedLegacyOnNextCollectId, seedLegacyOnNextCollectTs);
+                } catch (Exception e) {
+                    throw new IllegalStateException("strategy-host legacy seed failed", e);
+                }
+                seedLegacyOnNextCollectId = null;
+            }
+            MapState<String, Long> ruleLedger;
             boolean seen;
             try {
-                seen = emittedIds.contains(id);
+                ruleLedger = ruleLedger(ruleId);
+                seen = emittedIds.contains(id) || ruleLedger.contains(id);
             } catch (Exception e) {
                 throw new IllegalStateException("strategy-host emitted-ids read failed", e);
             }
@@ -345,15 +381,19 @@ public class StrategyHostFunction
                 long detTs = row.isNullAt(SignalCandidatesTableColumns.DETECTION_TS)
                         ? System.currentTimeMillis()
                         : row.getLong(SignalCandidatesTableColumns.DETECTION_TS);
-                emittedIds.put(id, detTs);
+                ruleLedger.put(id, detTs);
             } catch (Exception e) {
                 throw new IllegalStateException("strategy-host emitted-ids write failed", e);
             }
-            // P2-058: opportunistic horizon-compaction — one extra state read
-            // per emission path, full ledger scan only past 2x the retain
-            // horizon, so the steady-state cost is ~zero.
+            // H5-1: prune this rule's ledger every EMITTED_IDS_RETAIN_PER_LEDGER new
+            // ids — the emission path never scans the map, and the legacy map is
+            // never rewritten.
             try {
-                maybeCompactEmittedIds(ruleId);
+                int since = emittedIdsSincePrune.merge(ruleId, 1, Integer::sum);
+                if (since >= EMITTED_IDS_RETAIN_PER_LEDGER) {
+                    emittedIdsSincePrune.put(ruleId, 0);
+                    pruneRuleLedger(ruleLedger);
+                }
             } catch (Exception e) {
                 throw new IllegalStateException("strategy-host emitted-ids compact failed", e);
             }
@@ -371,43 +411,37 @@ public class StrategyHostFunction
         }
     }
 
-    /**
-     * P2-058 horizon-compaction: keep the newest
-     * {@link #EMITTED_IDS_RETAIN_PER_LEDGER} ids whose key starts with
-     * {@code ruleId + "|"}. N7 candidate ids embed
-     * {@code rule|token|tf|windowStart|side} (see
-     * {@link N7RangeBreakoutStrategy#candidateIdFor}), so the ledger groups
-     * one rule's replays and the detection-ts value orders them. Non-N7 id
-     * shapes (no pipe prefix) never match a ledger and are kept — compaction
-     * only deletes what it can prove stale, never what it cannot parse.
-     */
-    private void maybeCompactEmittedIds(String ruleId) throws Exception {
-        String prefix = ruleId + "|";
-        // Fast path: count ledger entries; only scan fully past 2x horizon.
-        int count = 0;
-        for (String key : emittedIds.keys()) {
-            if (key.startsWith(prefix) && ++count > 2 * EMITTED_IDS_RETAIN_PER_LEDGER) {
-                break;
-            }
+    /** H5-1: the per-rule ledger, created on first use. */
+    private MapState<String, Long> ruleLedger(String ruleId) throws Exception {
+        MapState<String, Long> ledger = emittedIdsByRule.get(ruleId);
+        if (ledger == null) {
+            ledger = getRuntimeContext().getMapState(emittedIdsV2Desc(ruleId));
+            emittedIdsByRule.put(ruleId, ledger);
         }
-        if (count <= 2 * EMITTED_IDS_RETAIN_PER_LEDGER) {
+        return ledger;
+    }
+
+    /**
+     * H5-1 horizon-compaction: keep the newest
+     * {@link #EMITTED_IDS_RETAIN_PER_LEDGER} ids of ONE rule's ledger, evicting
+     * the oldest detection-ts entries; a null value is never evicted. Called once
+     * per {@link #EMITTED_IDS_RETAIN_PER_LEDGER} new ids for that rule, so the
+     * emission path never scans the map.
+     */
+    private void pruneRuleLedger(MapState<String, Long> ledger) throws Exception {
+        pruneScans++;
+        List<Map.Entry<String, Long>> entries = new ArrayList<>();
+        for (Map.Entry<String, Long> e : ledger.entries()) {
+            entries.add(e);
+        }
+        if (entries.size() <= EMITTED_IDS_RETAIN_PER_LEDGER) {
             return;
         }
-        String oldestKey = null;
-        long oldestTs = Long.MAX_VALUE;
-        for (String key : emittedIds.keys()) {
-            if (!key.startsWith(prefix)) {
-                continue;
-            }
-            Long ts = emittedIds.get(key);
-            long t = ts == null ? Long.MAX_VALUE : ts;
-            if (t < oldestTs) {
-                oldestTs = t;
-                oldestKey = key;
-            }
-        }
-        if (oldestKey != null) {
-            emittedIds.remove(oldestKey);
+        entries.removeIf(e -> e.getValue() == null);
+        entries.sort(Comparator.comparingLong(e -> e.getValue()));
+        int evict = entries.size() - EMITTED_IDS_RETAIN_PER_LEDGER;
+        for (int i = 0; i < evict; i++) {
+            ledger.remove(entries.get(i).getKey());
         }
     }
 
@@ -568,13 +602,29 @@ public class StrategyHostFunction
         return droppedOversizeHeap;
     }
 
-    /** Test seam: emitted-ids entries for this key (P2-058 bound). */
+    /** Test seam: emitted-ids entries across the legacy and per-rule ledgers (P2-058/H5-1). */
     long emittedIdsSizeForTest() throws Exception {
         long n = 0;
         for (String ignored : emittedIds.keys()) {
             n++;
         }
+        for (MapState<String, Long> ledger : emittedIdsByRule.values()) {
+            for (String ignored : ledger.keys()) {
+                n++;
+            }
+        }
         return n;
+    }
+
+    /** Test seam: prune scans performed (H5-1 — must stay ~emissions / horizon). */
+    long pruneScansForTest() {
+        return pruneScans;
+    }
+
+    /** Test seam: seed a legacy (pre-upgrade) id on the next collect, inside the keyed context. */
+    void seedLegacyOnNextCollectForTest(String id, long detTs) {
+        this.seedLegacyOnNextCollectId = id;
+        this.seedLegacyOnNextCollectTs = detTs;
     }
 
     /** Test seam: shared metrics handle for one rule (P2-174). */

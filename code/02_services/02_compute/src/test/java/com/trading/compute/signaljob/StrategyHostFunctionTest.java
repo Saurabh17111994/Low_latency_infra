@@ -373,12 +373,40 @@ class StrategyHostFunctionTest {
         public void onClosedCandle(RowData closed, Collector<RowData> out) {
             long detTs = closed.getLong(CandleClosedColumns.LAST_EVENT_TIME);
             GenericRowData row = new GenericRowData(SignalCandidatesTableColumns.FIELD_COUNT);
-            // N7-shaped ledger key: rule|token|tf|seq — compaction groups it.
+            // H5-1: the REAL id shape — N7RangeBreakoutStrategy.candidateIdFor emits a
+            // UUID over rule|token|tf|windowStart|side. The previous fixture used a
+            // pipe-prefixed fake, which pinned a compaction that could never fire on
+            // real data (the audit finding).
             row.setField(SignalCandidatesTableColumns.CANDIDATE_ID, StringData.fromString(
-                    RULE_ID + "|" + closed.getLong(CandleClosedColumns.INSTRUMENT_TOKEN)
-                            + "|" + closed.getString(CandleClosedColumns.TF) + "|" + (seq++)));
+                    N7RangeBreakoutStrategy.candidateIdFor(RULE_ID,
+                            closed.getLong(CandleClosedColumns.INSTRUMENT_TOKEN),
+                            Timeframe.FIFTEEN_S, seq++, "BUY")));
             row.setField(SignalCandidatesTableColumns.RULE_ID, StringData.fromString(RULE_ID));
             row.setField(SignalCandidatesTableColumns.DETECTION_TS, detTs);
+            out.collect(row);
+        }
+    }
+
+    /** Fixed-id emitter — one constant candidate id, for the legacy-restore path. */
+    static final class Fixed implements SignalStrategy {
+        static final String RULE_ID = "test-fixed-v1";
+        static final String ID = "legacy-fixed-id";
+
+        @Override
+        public String ruleId() {
+            return RULE_ID;
+        }
+
+        @Override
+        public void onLiveTick(RowData live, Collector<RowData> out) {}
+
+        @Override
+        public void onClosedCandle(RowData closed, Collector<RowData> out) {
+            GenericRowData row = new GenericRowData(SignalCandidatesTableColumns.FIELD_COUNT);
+            row.setField(SignalCandidatesTableColumns.CANDIDATE_ID, StringData.fromString(ID));
+            row.setField(SignalCandidatesTableColumns.RULE_ID, StringData.fromString(RULE_ID));
+            row.setField(SignalCandidatesTableColumns.DETECTION_TS,
+                    closed.getLong(CandleClosedColumns.LAST_EVENT_TIME));
             out.collect(row);
         }
     }
@@ -386,6 +414,7 @@ class StrategyHostFunctionTest {
     static {
         Strategies.registerForTest(Exploder.RULE_ID, (config, metrics) -> new Exploder());
         Strategies.registerForTest(Churner.RULE_ID, (config, metrics) -> new Churner());
+        Strategies.registerForTest(Fixed.RULE_ID, (config, metrics) -> new Fixed());
     }
 
     @Test
@@ -415,7 +444,7 @@ class StrategyHostFunctionTest {
     }
 
     @Test
-    @DisplayName("distinct ids compact to the retain horizon (P2-058)")
+    @DisplayName("real UUID ids compact to the retain horizon (P2-058/H5-1)")
     void emittedIdsCompactsDistinctIds() throws Exception {
         open(Churner.RULE_ID);
         long token = 999L;
@@ -423,9 +452,25 @@ class StrategyHostFunctionTest {
             in2(closed(token, Timeframe.FIFTEEN_S, i * 15_000L, 100L));
         }
         assertEquals(40, harness.getOutput().size());
-        // 40 distinct ledger ids compact to <= 2x retain horizon (32).
+        // 40 distinct UUID ids compact to <= 2x the retain horizon (32)...
         assertTrue(function.emittedIdsSizeForTest()
                 <= 2L * StrategyHostFunction.EMITTED_IDS_RETAIN_PER_LEDGER);
+        // ...and the prune ran once per horizon, not per emission: 40 ids / 16 = 2.
+        assertEquals(2L, function.pruneScansForTest());
+    }
+
+    @Test
+    @DisplayName("a pre-upgrade ledger entry still suppresses (H5-1 restore path)")
+    void legacyEmittedIdStillSuppresses() throws Exception {
+        open(Fixed.RULE_ID);
+        long token = 4242L;
+        // Simulate a restored checkpoint: the legacy map holds this id by the time the
+        // next row reaches the dedup collector (seeded inside the keyed context).
+        function.seedLegacyOnNextCollectForTest(Fixed.ID, 0L);
+        in2(closed(token, Timeframe.FIFTEEN_S, 0L, 100L));
+        assertEquals(0, harness.getOutput().size(),
+                "an id present in the legacy ledger must still suppress after the upgrade");
+        assertEquals(1L, function.suppressedForTest());
     }
 
     @Test

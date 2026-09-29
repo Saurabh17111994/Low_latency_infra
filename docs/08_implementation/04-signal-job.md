@@ -22,6 +22,15 @@
 >   `StrategyHostFunction` runs the `STRATEGIES`-listed rules
 >   (`n7-range-breakout-v1` is the first registered real strategy; the stub
 >   smoke id is LOG-only).
+> - Dedup state (H5-1, CHG-402): the host dedups on `candidate_id` in one managed
+>   `MapState` per rule (`strategy-host-emitted-ids-v2/<ruleId>`), pruned once per
+>   16 new ids for that rule (oldest detection-ts evicted; a null value is never
+>   evicted). The legacy `strategy-host-emitted-ids` map stays registered and
+>   read-only, so a pre-upgrade checkpoint's ids still suppress and old
+>   checkpoints restore unchanged (the v2 maps start empty). `N7RangeBreakoutStrategy
+>   .candidateIdFor` emits a UUID, so the retired pipe-prefix compaction could
+>   never match real ids — the old code scanned the whole map per emission and
+>   pruned nothing.
 > - Rollout flags, all default OFF: `MULTITF_ENABLED`, `STRATEGY_HOST_ENABLED`,
 >   `EXECUTION_INTENT_ENABLED` (`STRATEGIES` must list the rule ids).
 > - Dev switch (2026-09-27, CHG-344): the flags live in the compose
