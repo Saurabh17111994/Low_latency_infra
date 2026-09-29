@@ -105,6 +105,13 @@ class _Sandbox:
         self.dir = Path(tempfile.mkdtemp(prefix="w25-make-"))
         (self.dir / SCRIPTS_REL).mkdir(parents=True)
         shutil.copy2(MAKEFILE, self.dir / "Makefile")
+        # L2-1: `make static-check` enumerates its script list through
+        # lint-enumeration.sh (shared with gate step 1). The sandbox is not a
+        # git work tree, and these tests are about the float-trap scan, so the
+        # stub enumerates the sandbox's own stub scripts. If the recipe's call
+        # path ever changes, the stub is bypassed and the tests fail loudly.
+        self._write_script("lint-enumeration.sh",
+                           "#!/bin/sh\nfind code -name '*.sh' -type f | sort\n")
         self.bin = self.dir / "bin"
         self.bin.mkdir()
         for tool in TOOLS:

@@ -92,6 +92,20 @@ import time
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
 SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 COMPOSE = os.path.join(ROOT, "code", "01_platform", "01_docker", "docker-compose.yml")
+STACK_DIR = os.path.join(ROOT, "code", "01_platform", "01_docker")
+
+
+def _compose_cmd(compose, *args):
+    """The one compose form (B1): both env files + the stack file.
+
+    L6-1: `docker compose -f` alone reads only `.env`; a required interpolation
+    var that lives in `secrets.env` (O2_PASSWORD since L6-1) hard-fails the
+    render. Every compose call in this tool goes through here.
+    """
+    return ["docker", "compose",
+            "--env-file", os.path.join(STACK_DIR, ".env"),
+            "--env-file", os.path.join(STACK_DIR, "secrets.env"),
+            "-f", compose, *args]
 EVIDENCE_DIR_DEFAULT = os.path.join(ROOT, "logs", "nautilus-execution")
 
 # Live-leg table assertions: the required table must show appended rows after a
@@ -363,9 +377,8 @@ class DockerExecTransport(Transport):
         return subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
     def exec(self, service, shell):
-        return self._run(["docker", "compose", "-f", self.compose,
-                          "--profile", self.profile, "exec", "-T", service,
-                          "sh", "-lc", shell])
+        return self._run(_compose_cmd(self.compose, "--profile", self.profile,
+                                      "exec", "-T", service, "sh", "-lc", shell))
 
     def _network(self):
         """Resolve the execution-net compose network name (project-prefixed)."""
@@ -417,8 +430,8 @@ def check(name, ok, detail):
 
 def _compose_json():
     return json.loads(subprocess.check_output(
-        ["docker", "compose", "-f", COMPOSE, "--profile", "execution-t3",
-         "config", "--format", "json"], text=True))
+        _compose_cmd(COMPOSE, "--profile", "execution-t3", "config", "--format", "json"),
+        text=True))
 
 
 def _all_failures(errs):
@@ -829,8 +842,8 @@ class FakeFlussProbe:
 def compose_svcs_up(profile="execution-t3"):
     try:
         out = subprocess.check_output(
-            ["docker", "compose", "-f", COMPOSE, "--profile", profile,
-             "ps", "--format", "json"], text=True, timeout=30)
+            _compose_cmd(COMPOSE, "--profile", profile, "ps", "--format", "json"),
+            text=True, timeout=30)
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
     return "execution-bridge" in out and "nautilus" in out

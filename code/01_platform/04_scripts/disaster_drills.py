@@ -39,6 +39,7 @@ import time
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))))
 COMPOSE_FILE = "code/01_platform/01_docker/docker-compose.yml"
+STACK_DIR = os.path.join(REPO_ROOT, "code", "01_platform", "01_docker")
 DEFAULT_PROJECT = "01_docker"
 EVIDENCE_DIR = "logs/disaster-drills"
 O2_URL = "http://localhost:5080/api/default/dashboards"
@@ -79,9 +80,21 @@ def redact(text):
     return text
 
 
+def compose_cmd(*args):
+    """The one compose form (B1/L6-1): both env files + the stack file.
+
+    `docker compose -f` alone reads only .env, and a required interpolation var
+    that lives in secrets.env (O2_PASSWORD) hard-fails the render. Drill steps
+    are stored as command lists, so they are built here and stay canonical.
+    """
+    return ["docker", "compose",
+            "--env-file", os.path.join(STACK_DIR, ".env"),
+            "--env-file", os.path.join(STACK_DIR, "secrets.env"),
+            "-f", os.path.join(REPO_ROOT, COMPOSE_FILE), *args]
+
+
 def compose(*args, timeout=90):
-    return run(["docker", "compose", "-f", os.path.join(REPO_ROOT, COMPOSE_FILE),
-                *args], timeout=timeout)
+    return run(compose_cmd(*args), timeout=timeout)
 
 
 def docker(*args, timeout=60):
@@ -247,11 +260,9 @@ DRILLS = [
                                    "parity unchanged)."),
         "pre": [("fluss-validate", "Fluss schemas readable (baseline)"),
                 ("zk", "ZooKeeper healthy (baseline)")],
-        "fault": [["docker", "compose", "-f", os.path.join(REPO_ROOT, COMPOSE_FILE),
-                   "stop", "fluss-coordinator"]],
+        "fault": [compose_cmd("stop", "fluss-coordinator")],
         "during": [("fluss", "Fluss metadata probe during outage (expect unavailable)")],
-        "recovery": [["docker", "compose", "-f", os.path.join(REPO_ROOT, COMPOSE_FILE),
-                      "start", "fluss-coordinator"]],
+        "recovery": [compose_cmd("start", "fluss-coordinator")],
         "post": [("fluss", "Fluss schemas readable post-recovery"),
                  ("zk", "ZooKeeper quorum healthy post-recovery"),
                  ("gateway_running", "Executor gateway survived (no crash)")],
@@ -267,11 +278,9 @@ DRILLS = [
                                    "recover with no committed loss."),
         "pre": [("fluss-validate", "Fluss schemas readable (baseline)"),
                 ("zk", "ZooKeeper healthy (baseline)")],
-        "fault": [["docker", "compose", "-f", os.path.join(REPO_ROOT, COMPOSE_FILE),
-                   "stop", "fluss-tablet"]],
+        "fault": [compose_cmd("stop", "fluss-tablet")],
         "during": [("fluss", "Fluss probe during tablet outage (record; may stay green)")],
-        "recovery": [["docker", "compose", "-f", os.path.join(REPO_ROOT, COMPOSE_FILE),
-                      "start", "fluss-tablet"]],
+        "recovery": [compose_cmd("start", "fluss-tablet")],
         "post": [("fluss", "Fluss schemas readable post-recovery"),
                  ("zk", "ZooKeeper healthy post-recovery")],
         "bound_s": 60,
@@ -287,12 +296,10 @@ DRILLS = [
                                    "and full reads recover; no committed loss (parity)."),
         "pre": [("fluss-validate", "Fluss schemas readable (baseline)"),
                 ("zk", "ZooKeeper healthy (baseline)")],
-        "fault": [["docker", "compose", "-f", os.path.join(REPO_ROOT, COMPOSE_FILE),
-                   "stop", "zookeeper"]],
+        "fault": [compose_cmd("stop", "zookeeper")],
         "during": [("zk", "ZK probe during outage (expect dead)"),
                    ("fluss", "Fluss probe during ZK quorum loss (record)")],
-        "recovery": [["docker", "compose", "-f", os.path.join(REPO_ROOT, COMPOSE_FILE),
-                      "start", "zookeeper"]],
+        "recovery": [compose_cmd("start", "zookeeper")],
         "post": [("zk", "ZooKeeper quorum healthy post-recovery"),
                  ("fluss", "Fluss schemas readable post-recovery"),
                  ("gateway_running", "Executor gateway survived (no crash)")],
@@ -309,12 +316,10 @@ DRILLS = [
                                    "Dashboards intentionally unreachable until restore."),
         "pre": [("o2", "O2 API reachable (baseline)"),
                 ("fluss-validate", "Fluss schemas readable (baseline)")],
-        "fault": [["docker", "compose", "-f", os.path.join(REPO_ROOT, COMPOSE_FILE),
-                   "stop", "openobserve"]],
+        "fault": [compose_cmd("stop", "openobserve")],
         "during": [("o2", "O2 API during outage (expect unreachable)"),
                    ("fluss", "Fluss data path during outage (must stay green)")],
-        "recovery": [["docker", "compose", "-f", os.path.join(REPO_ROOT, COMPOSE_FILE),
-                      "start", "openobserve"]],
+        "recovery": [compose_cmd("start", "openobserve")],
         "post": [("o2", "O2 API reachable post-recovery (dashboards intact)"),
                  ("fluss", "Fluss schemas readable post-recovery"),
                  ("gateway_running", "Executor gateway unchanged across the outage")],
@@ -330,8 +335,7 @@ DRILLS = [
                                    "restart is a single clean boot (no duplicate-run evidence)."),
         "pre": [("gateway_running", "Executor gateway running (baseline)"),
                 ("gateway_fail_closed_log", "Baseline log shows fail-closed markers")],
-        "fault": [["docker", "compose", "-f", os.path.join(REPO_ROOT, COMPOSE_FILE),
-                   "restart", "execution-gateway"]],
+        "fault": [compose_cmd("restart", "execution-gateway")],
         "during": [],
         "recovery": [],
         "post": [("gateway_running", "Executor gateway back up post-restart"),

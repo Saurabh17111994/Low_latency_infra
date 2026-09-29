@@ -541,11 +541,18 @@ STATIC_FAIL=0
 # excluded, empty list fails closed). The temp file avoids process substitution
 # (< <() needs /dev/fd which some sandboxes/CI chroots do not provide).
 _script_list=$(mktemp)
+_enum_err=$(mktemp)
 SCRIPTS=()
 BASH_MAJOR="${BASH_VERSINFO[0]:-0}"
-if ! bash "$PROJECT_ROOT/code/01_platform/04_scripts/lint-enumeration.sh" >"$_script_list" 2>>"$STATIC_LOG"; then
+# The enumeration's diagnostic is a static-check failure, so it belongs in
+# STATIC_LOG — via an explicit FAIL block, not a bare stderr redirection into
+# the step log (the evidence-separation guard forbids redirections there; a
+# non-static stage must never appear in it).
+if ! bash "$PROJECT_ROOT/code/01_platform/04_scripts/lint-enumeration.sh" >"$_script_list" 2>"$_enum_err"; then
 	: >"$_script_list"
+	{ echo "FAIL: script enumeration failed (lint-enumeration.sh):"; sed 's/^/  /' "$_enum_err"; } | tee -a "$STATIC_LOG" >&2
 fi
+rm -f "$_enum_err"
 if [ "$BASH_MAJOR" -ge 4 ]; then mapfile -t SCRIPTS <"$_script_list"; else while IFS= read -r _l; do SCRIPTS+=("$_l"); done <"$_script_list"; fi
 rm -f "$_script_list"
 SHELLCHECK_OK=0

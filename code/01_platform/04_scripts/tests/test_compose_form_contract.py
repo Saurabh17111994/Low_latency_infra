@@ -29,6 +29,7 @@ Any site that matches none of these fails the test with file:line:text.
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 import unittest
@@ -225,6 +226,60 @@ class ComposeFormContract(unittest.TestCase):
                 elif kind == "VAR":
                     self.assertRegex(cmd, r"(\$\(COMPOSE\)|COMPOSE\[@\]|\$COMPOSE\b)",
                                      f"{f}:{line}: not using the canonical compose variable")
+
+    # Python sites whose literal cannot carry the flags statically: the builder
+    # appends the pair conditionally. Each exemption needs a reason, and a stale
+    # exemption (no flagged literal left) fails the test.
+    PY_ALLOW = {
+        "code/01_platform/04_scripts/ddl_apply_smoke.py":
+            "_compose_base() appends BOTH env files for every file that exists and "
+            "deliberately skips a missing one so compose raises its own accurate "
+            "required-variable error on a partial checkout",
+    }
+
+    def test_python_list_form_calls_carry_both_env_files(self) -> None:
+        """B1/L6-1: tools build compose commands as Python list literals, which
+        the shell-form scanner above cannot see. A literal naming both "docker"
+        and "compose" must carry both --env-file entries and the stack file —
+        `docker compose -f` alone reads only .env, so a required interpolation
+        var that lives in secrets.env (O2_PASSWORD since L6-1) hard-fails the
+        render (it did: t9_order_sandbox.py, 2026-09-29). Test files are out of
+        scope — fixtures append or simulate the flags; this guards shipped
+        tools."""
+        flagged: list[str] = []
+        flagged_files: set[str] = set()
+        for rel in _tracked_scripts():
+            if not rel.endswith(".py") or "/tests/" in rel:
+                continue
+            text = (ROOT / rel).read_text(encoding="utf-8", errors="replace")
+            try:
+                tree = ast.parse(text)
+            except SyntaxError:
+                continue
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.List):
+                    continue
+                consts = [e.value for e in node.elts
+                          if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+                if "docker" not in consts or "compose" not in consts:
+                    continue
+                seg = ast.get_source_segment(text, node) or ""
+                env_ok = seg.count("--env-file") >= 2 and (
+                    "secrets.env" in seg or "SECRETS_FILE" in seg)
+                stack_ok = any(f in consts for f in ("-f", "--file"))
+                if not env_ok or not stack_ok:
+                    flagged.append(f"{rel}:{node.lineno}")
+                    flagged_files.add(rel)
+        missing = [site for site in flagged
+                   if site.rsplit(":", 1)[0] not in self.PY_ALLOW]
+        self.assertEqual(
+            missing, [],
+            "Python compose list(s) without the one form (both --env-file flags "
+            "+ -f):\n  " + "\n  ".join(missing))
+        stale = sorted(f for f in self.PY_ALLOW if f not in flagged_files)
+        self.assertEqual(stale, [], "stale PY_ALLOW entries — the flagged "
+                         "pattern is gone; drop the exemption:\n  "
+                         + "\n  ".join(stale))
 
     def test_definitions_are_canonical(self) -> None:
         text = {rel: (ROOT / rel).read_text(encoding="utf-8") for rel, _p, _v in DEFS}
