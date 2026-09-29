@@ -73,6 +73,11 @@ public record SignalJobConfig(
         // in-flight data, removing the alignment wait. Default true; the
         // kill switch is UNALIGNED_CHECKPOINTS=false.
         boolean unalignedCheckpoints,
+        // CT-4A (docs/plans/2026-09-29-checkpoint-tail-remediation.md): the
+        // changelog state backend snapshots only the changelog at checkpoint
+        // time instead of flushing the full RocksDB state — the measured
+        // 400-600 ms synchronous pause at the 10 s cadence (2026-09-29).
+        boolean changelogStateBackend,
         int restartMaxAttempts,
         long restartDelayMs,
         String checkpointDir,
@@ -272,6 +277,7 @@ public record SignalJobConfig(
                 checkpointTimeoutMs(env),
                 maxConcurrentCheckpoints(env),
                 unalignedCheckpoints(env),
+                changelogStateBackend(env),
                 restartMaxAttempts(env),
                 restartDelayMs(env),
                 checkpointDir(env),
@@ -574,6 +580,18 @@ public record SignalJobConfig(
      */
     private static boolean unalignedCheckpoints(Map<String, String> env) {
         return booleanValue(env, "UNALIGNED_CHECKPOINTS", true);
+    }
+
+    /**
+     * Changelog state backend (CT-4A, 2026-09-29). Uploads state changes
+     * continuously; a checkpoint snapshots only the changelog, so the
+     * synchronous phase no longer flushes the full RocksDB state. Default off
+     * (rollout flag). Requires {@code STATE_BACKEND=rocksdb} and
+     * {@code MAX_CONCURRENT_CHECKPOINTS=1} (Flink limits). Enable/disable are
+     * both restore-safe from a savepoint or retained checkpoint (2.2.1 docs).
+     */
+    private static boolean changelogStateBackend(Map<String, String> env) {
+        return booleanValue(env, "CHANGELOG_STATE_BACKEND", false);
     }
 
     /**

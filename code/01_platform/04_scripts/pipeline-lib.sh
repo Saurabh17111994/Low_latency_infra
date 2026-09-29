@@ -1092,6 +1092,10 @@ pipeline_submit_job() {
   # UNALIGNED_CHECKPOINTS itself (default true; false is the kill switch for
   # savepoint/maintenance workflows) — the B5 falsification at 2 Hz measured
   # checkpoint-window p99 814 -> 430 ms with steady-state latency unchanged.
+  # CT-4A (2026-09-29): the changelog state backend is an opt-in rollout flag.
+  # The job reads CHANGELOG_STATE_BACKEND itself (default false; true enables
+  # it for the checkpoint-tail trial, docs/plans/2026-09-29-checkpoint-tail-
+  # remediation.md) — passed through below so a submit environment can drive it.
   local extra_flags=(-Dmetrics.latency.interval="${LATENCY_TRACKING_MS:-2000}")
   # Tolerable checkpoint failures (2026-09-02): a TM-kill drill's catch-up
   # replay backpressures the pipeline and a checkpoint can EXPIRE (barriers
@@ -1134,6 +1138,7 @@ pipeline_submit_job() {
     -e WATERMARK_OUT_OF_ORDER_MS="${WATERMARK_OUT_OF_ORDER_MS:-500}" \
     -e CHECKPOINT_INTERVAL_MS="${CHECKPOINT_INTERVAL_MS:-60000}" -e CHECKPOINT_TIMEOUT_MS="${CHECKPOINT_TIMEOUT_MS:-30000}" -e MAX_CONCURRENT_CHECKPOINTS=1 \
     -e UNALIGNED_CHECKPOINTS="${UNALIGNED_CHECKPOINTS:-true}" \
+    -e CHANGELOG_STATE_BACKEND="${CHANGELOG_STATE_BACKEND:-false}" \
     -e PREVIEW_ENABLED=true -e PREVIEW_INTERVAL_MS="${PREVIEW_INTERVAL_MS:-500}" \
     -e RESTART_MAX_ATTEMPTS="${RESTART_MAX_ATTEMPTS:-3}" \
     -e RESTART_DELAY_MS="${RESTART_DELAY_MS:-30000}" \

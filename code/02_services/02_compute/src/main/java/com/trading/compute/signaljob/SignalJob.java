@@ -11,6 +11,7 @@ import org.apache.flink.configuration.ExecutionOptions;
 import org.apache.flink.configuration.ExternalizedCheckpointRetention;
 import org.apache.flink.configuration.RestartStrategyOptions;
 import org.apache.flink.configuration.StateBackendOptions;
+import org.apache.flink.configuration.StateChangelogOptions;
 import org.apache.flink.configuration.StateRecoveryOptions;
 import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.datastream.DataStream;
@@ -563,6 +564,44 @@ public final class SignalJob {
                     "state.backend.rocksdb.metrics.estimate-table-readers-mem", "true");
         } else {
             flinkConfig.set(StateBackendOptions.STATE_BACKEND, "hashmap");
+        }
+        // CT-4A (docs/plans/2026-09-29-checkpoint-tail-remediation.md): the
+        // changelog state backend uploads state changes continuously, so a
+        // checkpoint snapshots only the changelog; the full RocksDB state is
+        // materialized in the background (periodic materialize, default
+        // 10 min). Measured motivation: the synchronous RocksDB snapshot
+        // blocks every stateful subtask 400-600 ms per checkpoint at the 10 s
+        // cadence (logs/stage-profile-20260929-193355), and that pause is what
+        // pushes tick->strategy p99 past 100 ms. The production-pinned backend
+        // and single-concurrent-checkpoint contract are preconditions — a run
+        // that cannot honour them fails closed instead of degrading silently.
+        if (config.changelogStateBackend()) {
+            if (!"rocksdb".equals(config.stateBackend())) {
+                throw new IllegalStateException("Config CHANGELOG_STATE_BACKEND=true requires "
+                        + "STATE_BACKEND=rocksdb, got '" + config.stateBackend()
+                        + "' — heap state has no changelog to snapshot");
+            }
+            if (config.maxConcurrentCheckpoints() != 1) {
+                throw new IllegalStateException("Config CHANGELOG_STATE_BACKEND=true requires "
+                        + "MAX_CONCURRENT_CHECKPOINTS=1, got "
+                        + config.maxConcurrentCheckpoints()
+                        + " — Flink limits the changelog to one concurrent checkpoint");
+            }
+            String changelogBase = config.checkpointDir();
+            if (changelogBase == null || changelogBase.isBlank()) {
+                throw new IllegalStateException("Config CHANGELOG_STATE_BACKEND=true requires a "
+                        + "checkpoint directory — state.changelog.dstl.dfs.base-path derives "
+                        + "from it");
+            }
+            flinkConfig.set(StateChangelogOptions.ENABLE_STATE_CHANGE_LOG, true);
+            flinkConfig.set(StateChangelogOptions.STATE_CHANGE_LOG_STORAGE, "filesystem");
+            // FsStateChangelogOptions.BASE_PATH — key verified against the
+            // pinned 2.2.1 dist jar; the class itself is not on the compute
+            // compile classpath (same discipline as rocksdb.localdir above).
+            flinkConfig.setString("state.changelog.dstl.dfs.base-path",
+                    changelogBase.endsWith("/")
+                            ? changelogBase + "changelog"
+                            : changelogBase + "/changelog");
         }
         // Streaming-3000 T3 G3: network max 256m for p=8 (Fluss 16 buckets →
         // 8 slots, hash(token) rebalance). Local MiniCluster defaults to

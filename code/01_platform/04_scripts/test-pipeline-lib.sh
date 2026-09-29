@@ -829,6 +829,19 @@ out="$(python3 "$ft" --capture "$G28DIR" 2>&1)"; rc=$?
   && ok "G28e no-window refusal -> exit 3 with reason" \
   || bad "G28e no-window should exit 3, got $rc: $out"
 
+# ---- G29 (2026-09-29, CT-4A): the changelog-state-backend rollout flag must
+# reach the job — pipeline-lib passes CHANGELOG_STATE_BACKEND through with
+# default OFF (SignalJobConfig reads the same key; true enables the changelog
+# state backend for docs/plans/2026-09-29-checkpoint-tail-remediation.md).
+# If the pass-through breaks, the flag silently has no effect and the CT-4A
+# trial/rollback cannot be driven from the submit environment.
+grep -q -- '-e CHANGELOG_STATE_BACKEND=' "$LIB" \
+    && ok "G29 changelog flag pass-through present in pipeline_submit_job" \
+    || bad "G29 CHANGELOG_STATE_BACKEND pass-through missing — the trial flag would not reach the job"
+grep -q '\${CHANGELOG_STATE_BACKEND:-false}' "$LIB" \
+    && ok "G29 changelog defaults OFF (opt-in rollout flag)" \
+    || bad "G29 changelog default is not OFF — the flag must stay opt-in"
+
 echo "---"
 echo "guards: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

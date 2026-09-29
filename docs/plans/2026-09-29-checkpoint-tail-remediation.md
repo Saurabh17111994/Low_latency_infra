@@ -1,7 +1,8 @@
 # Checkpoint-tail remediation (signal job) — p99 ≤ 100 ms at the 10 s production cadence
 
 **Date:** 2026-09-29
-**Status:** operator-approved 2026-09-29; CT-1 in progress
+**Status:** operator-approved 2026-09-29; CT-1..CT-3 done; CT-4A in progress (changelog state
+backend — verified config-only against the pinned dist, no image change)
 **Baseline evidence:** `logs/stage-profile-20260929-174239/` (900 s, 60 s cadence, tree `eb3026ad`)
 and gate certificate `logs/soak/monday-gates-20260929-180026` (19/19, 0 skipped)
 
@@ -21,12 +22,12 @@ the cause natively.
 
 #### P2 - 10 s baseline and branch decision
 
-- [~] **CT-2** 10 s baseline: 200 s smoke + 900 s record with phases (env `CHECKPOINT_INTERVAL_MS=10000`; smoke done as CT-1 verification, 900 s record in flight)
-- [ ] **CT-3** Branch decision recorded from CT-2 data (rule in the item block)
+- [x] **CT-2** 10 s baseline: 200 s smoke + 900 s record with phases (env `CHECKPOINT_INTERVAL_MS=10000`; record `logs/stage-profile-20260929-193355`: `run-meta` `checkpoint_interval_ms=10000`, 95 checkpoints / 6,840 subtask rows, presence PASS). KPI `tick_to_strategy`: calm snapshots p50 36–40 / p99 60–67 ms; spike snapshots p99 250–930 ms; busiest-subtask p95/p98/p99 > 100 ms in **52/60** snapshots (p50 0/60)
+- [x] **CT-3** Branch decision recorded from CT-2 data (rule in the item block) — **Branch A (state-side), decision below**
 
 #### P3 - root-cause fix (one branch only)
 
-- [ ] **CT-4A** Branch A: changelog state backend trial + restore drill
+- [~] **CT-4A** Branch A: changelog state backend trial + restore drill (implemented as rollout flag `CHANGELOG_STATE_BACKEND`; unit tests green; gate + drill + smoke + 900 s pending)
 - [ ] **CT-4B** Branch B: Fluss signal-sink linger 1 ms (`client.writer.batch-timeout`)
 
 #### P4 - insurance
@@ -45,12 +46,12 @@ the cause natively.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | P1 - phase capture tooling | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
-| P2 - 10 s baseline and branch decision | 2 | 0 | 1 | 1 | 0 | 0 | 0 |
-| P3 - root-cause fix (one branch only) | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
+| P2 - 10 s baseline and branch decision | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+| P3 - root-cause fix (one branch only) | 2 | 0 | 1 | 1 | 0 | 0 | 0 |
 | P4 - insurance | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
 | P5 - cadence decision | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
 | P6 - close-out | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
-| **Total** | **8** | **1** | **1** | **6** | **0** | **0** | **0** |
+| **Total** | **8** | **3** | **1** | **4** | **0** | **0** | **0** |
 
 ## Overview
 
@@ -124,6 +125,25 @@ both present -> A first, re-measure, then B.
 **WRONG IF** — the phases cannot separate the two; then the fallback evidence (metrics +
 logs) decides and the limitation is recorded.
 
+**Decision (2026-09-29, run `logs/stage-profile-20260929-193355`)** — **Branch A: the pause is
+the checkpoint's own synchronous state snapshot (`sy`)**, spread evenly over all 8 subtasks (max-sync
+subtask histogram is flat — no hot partition):
+
+| operator | sync p50 | sync max | async p50 |
+|---|---|---|---|
+| `multi-tf-aggregator` | 622 ms | 1,157 ms | — |
+| `strategy-host → canonical-signal-filter` | 424 ms | 713 ms | ~80–560 ms |
+| `candle-closed-first-write-wins` | 421 ms | 851 ms | 428 ms |
+| `fingerprint-dedup` | 32 ms | 66 ms | 578 ms |
+| sinks / source | ≤ 5 ms | — | ≤ 5 ms |
+
+Statistic (91 cps with a KPI window): host sync > 300 ms (n=69) → median KPI p99 **442 ms**;
+host sync ≤ 100 ms (n=10) → median KPI p99 **92 ms**. Start-delay ≈ 3 ms, alignment ≈ 0–12 ms,
+state is tiny (≤ 8 MB total, ≤ 4.6 KB/cp persisted), disk is NVMe — the cost is the per-checkpoint
+flush mechanics, not data volume. **CT-4B (Fluss sink linger) is ruled out**: sink sync ≈ 0 and
+the candidates-sink `batchQueueTimeMs` gauge stays flat at ~101 ms (the default linger) with no
+checkpoint-window spike.
+
 ### CT-4A — changelog state backend (Branch A only)
 
 **GIVES YOU** — continuous state materialization so the checkpoint's own sync/async phases
@@ -136,6 +156,14 @@ Exactly-once unchanged.
 **ACTION** — restore drill -> smoke -> 900 s at 10 s; compare against CT-2.
 **WRONG IF** — the run shows memory growth beyond the TM budget, checkpoint failures, or no
 p99 improvement; revert (one config line) and move to CT-5.
+
+**Feasibility (2026-09-29) — config-only, no image change.** The changelog classes ship inside
+the pinned distribution (`flink-dist-2.2.1.jar` contains all 62 `org/apache/flink/state/changelog/*`
+classes; keys verified against `StateChangelogOptions` and `FsStateChangelogOptions.BASE_PATH`).
+Implemented behind the default-off rollout flag `CHANGELOG_STATE_BACKEND` read by
+`SignalJobConfig` and translated in `SignalJob.applyRuntimeOptions` with fail-closed
+preconditions (`STATE_BACKEND=rocksdb`, `MAX_CONCURRENT_CHECKPOINTS=1`) and base path
+`<CHECKPOINT_DIR>/changelog`.
 
 ### CT-4B — Fluss sink linger 1 ms (Branch B only)
 

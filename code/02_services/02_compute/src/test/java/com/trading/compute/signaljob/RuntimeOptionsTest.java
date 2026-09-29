@@ -11,6 +11,7 @@ import java.util.Map;
 import org.apache.flink.configuration.CheckpointingOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.StateBackendOptions;
+import org.apache.flink.configuration.StateChangelogOptions;
 import org.apache.flink.configuration.StateRecoveryOptions;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -323,5 +324,69 @@ class RuntimeOptionsTest {
         assertNull(flinkConfig.getString("fs.s3a.secret.key", null));
         assertNull(flinkConfig.getString("fs.s3a.aws.credentials.provider", null),
                 "no object-store URI → no S3 config, not even a default provider");
+    }
+
+    // ── CT-4A (docs/plans/2026-09-29-checkpoint-tail-remediation.md) ──────
+    // Changelog state backend: measured 2026-09-29, the RocksDB snapshot's
+    // synchronous phase costs 400-600 ms per checkpoint on every stateful
+    // operator at the 10 s cadence, and that pause is what the SLO trips on.
+    // With changelog the checkpoint snapshots only the changelog; the state
+    // backend is materialized in the background (verified against the pinned
+    // 2.2.1 dist: StateChangelogOptions + FsStateChangelogOptions.BASE_PATH).
+
+    @Test
+    @DisplayName("CT-4A: CHANGELOG_STATE_BACKEND=true → filesystem changelog under the checkpoint dir")
+    void changelogAppliedWhenEnabled() {
+        Map<String, String> env = env();
+        env.put("STATE_BACKEND", "rocksdb");
+        env.put("CHANGELOG_STATE_BACKEND", "true");
+        SignalJobConfig config = SignalJobConfig.from(env);
+        Configuration flinkConfig = new Configuration();
+        SignalJob.applyRuntimeOptions(config, flinkConfig);
+
+        assertTrue(flinkConfig.get(StateChangelogOptions.ENABLE_STATE_CHANGE_LOG),
+                "state.changelog.enabled must be on");
+        assertEquals("filesystem",
+                flinkConfig.get(StateChangelogOptions.STATE_CHANGE_LOG_STORAGE),
+                "only filesystem storage is production-supported (memory is tests-only)");
+        // Key verified against FsStateChangelogOptions.BASE_PATH in the pinned
+        // 2.2.1 dist (the class is not on the compute compile classpath, so the
+        // string key carries the same comment discipline as rocksdb.localdir).
+        assertEquals("file:///checkpoints/changelog",
+                flinkConfig.getString("state.changelog.dstl.dfs.base-path", null));
+    }
+
+    @Test
+    @DisplayName("CT-4A: changelog is off by default (no keys written)")
+    void changelogOffByDefault() {
+        Map<String, String> env = env();
+        env.put("STATE_BACKEND", "rocksdb");
+        SignalJobConfig config = SignalJobConfig.from(env);
+        Configuration flinkConfig = new Configuration();
+        SignalJob.applyRuntimeOptions(config, flinkConfig);
+
+        assertFalse(flinkConfig.get(StateChangelogOptions.ENABLE_STATE_CHANGE_LOG));
+        assertNull(flinkConfig.getString("state.changelog.dstl.dfs.base-path", null));
+    }
+
+    @Test
+    @DisplayName("CT-4A: changelog requires rocksdb + max-concurrent-checkpoints=1 (fail closed)")
+    void changelogPreconditionsFailClosed() {
+        Map<String, String> hashmap = env();
+        hashmap.put("STATE_BACKEND", "hashmap");
+        hashmap.put("CHANGELOG_STATE_BACKEND", "true");
+        SignalJobConfig hm = SignalJobConfig.from(hashmap);
+        IllegalStateException e1 = assertThrows(IllegalStateException.class,
+                () -> SignalJob.applyRuntimeOptions(hm, new Configuration()));
+        assertTrue(e1.getMessage().contains("STATE_BACKEND=rocksdb"), e1.getMessage());
+
+        Map<String, String> twoCps = env();
+        twoCps.put("STATE_BACKEND", "rocksdb");
+        twoCps.put("MAX_CONCURRENT_CHECKPOINTS", "2");
+        twoCps.put("CHANGELOG_STATE_BACKEND", "true");
+        SignalJobConfig cp2 = SignalJobConfig.from(twoCps);
+        IllegalStateException e2 = assertThrows(IllegalStateException.class,
+                () -> SignalJob.applyRuntimeOptions(cp2, new Configuration()));
+        assertTrue(e2.getMessage().contains("MAX_CONCURRENT_CHECKPOINTS=1"), e2.getMessage());
     }
 }
