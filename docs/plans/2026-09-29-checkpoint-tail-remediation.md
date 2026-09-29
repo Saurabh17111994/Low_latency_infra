@@ -27,7 +27,7 @@ the cause natively.
 
 #### P3 - root-cause fix (one branch only)
 
-- [~] **CT-4A** Branch A: changelog state backend trial + restore drill (implemented as rollout flag `CHANGELOG_STATE_BACKEND`; unit tests green; gate + drill + smoke + 900 s pending)
+- [~] **CT-4A** Branch A: changelog state backend trial + restore drill (implemented as rollout flag `CHANGELOG_STATE_BACKEND`; unit tests green; restore drill + smoke + 900 s pending). Gate step-9 blocker diagnosed 2026-09-29: the B4 drill's `scanLog` truncated on the first empty poll (false negative on a lived-in cluster; rule fire + row proven present on the tablet) — fixed test-only in CHG-442, `make drill-live` green (exit 0)
 - [ ] **CT-4B** Branch B: Fluss signal-sink linger 1 ms (`client.writer.batch-timeout`)
 
 #### P4 - insurance

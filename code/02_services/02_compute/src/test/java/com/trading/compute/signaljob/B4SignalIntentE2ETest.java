@@ -23,13 +23,16 @@ import org.apache.flink.core.execution.JobClient;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.fluss.client.Connection;
 import org.apache.fluss.client.ConnectionFactory;
+import org.apache.fluss.client.admin.OffsetSpec.LatestSpec;
 import org.apache.fluss.client.lookup.LookupResult;
 import org.apache.fluss.client.lookup.Lookuper;
 import org.apache.fluss.client.table.Table;
+import org.apache.fluss.client.table.scanner.ScanRecord;
 import org.apache.fluss.client.table.scanner.log.LogScanner;
 import org.apache.fluss.client.table.scanner.log.ScanRecords;
 import org.apache.fluss.client.table.writer.AppendWriter;
 import org.apache.fluss.config.Configuration;
+import org.apache.fluss.metadata.TableBucket;
 import org.apache.fluss.metadata.TableInfo;
 import org.apache.fluss.metadata.TablePath;
 import org.apache.fluss.row.BinaryString;
@@ -391,22 +394,66 @@ class B4SignalIntentE2ETest {
         return out;
     }
 
+    /**
+     * Full-log drain (one pass, all buckets).
+     *
+     * <p>Drain contract, measured 2026-09-29: an empty poll means "no progress within the poll
+     * timeout", NOT "end of log" — fetches for later buckets can still be in flight. The old loop
+     * broke on the first empty poll and silently truncated multi-bucket scans on a lived-in
+     * cluster (B4 tokens are clock-derived, so one run's row can sit in a late bucket while
+     * another's sits in an early bucket: failing token read 0/5 times with the old loop, 1/1 with
+     * this drain, row proven present on the tablet at its fire time). A scan therefore polls until
+     * every bucket has consumed up to the log end observed at scan start (exclusive upper bound
+     * from {@link ScanRecords#consumedUpToOffset}), or the 20 s deadline.
+     */
     private static void scanLog(Connection conn, String tableName,
                                 java.util.function.Consumer<InternalRow> fn) throws Exception {
         Table table = conn.getTable(TablePath.of("default", tableName));
         TableInfo info = table.getTableInfo();
+        int numBuckets = info.getNumBuckets();
+        List<Integer> bucketIds = new ArrayList<>(numBuckets);
+        for (int b = 0; b < numBuckets; b++) {
+            bucketIds.add(b);
+        }
+        Map<Integer, Long> endOffsets = conn.getAdmin()
+                .listOffsets(TablePath.of("default", tableName), bucketIds, new LatestSpec())
+                .all().get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+        Map<Integer, Long> consumed = new HashMap<>();
         try (LogScanner scanner = table.newScan().createLogScanner()) {
-            for (int bucket = 0; bucket < info.getNumBuckets(); bucket++) {
+            for (int bucket = 0; bucket < numBuckets; bucket++) {
                 scanner.subscribe(bucket, 0L);
             }
             long deadline = System.currentTimeMillis() + 20_000;
             while (System.currentTimeMillis() < deadline) {
                 ScanRecords records = scanner.poll(Duration.ofMillis(500));
-                if (records == null || records.isEmpty()) {
-                    break;
+                if (records != null && !records.isEmpty()) {
+                    for (ScanRecord r : records) {
+                        fn.accept(r.getRow());
+                    }
                 }
-                for (var r : records) {
-                    fn.accept(r.getRow());
+                for (int bucket = 0; bucket < numBuckets; bucket++) {
+                    Long consumedTo = records == null
+                            ? null
+                            : records.consumedUpToOffset(
+                                    new TableBucket(info.getTableId(), bucket));
+                    if (consumedTo != null) {
+                        consumed.merge(bucket, consumedTo, Math::max);
+                    }
+                }
+                boolean drained = true;
+                for (int bucket = 0; bucket < numBuckets; bucket++) {
+                    Long end = endOffsets.get(bucket);
+                    if (end == null || end <= 0L) {
+                        continue; // nothing was ever written to this bucket
+                    }
+                    Long seen = consumed.get(bucket);
+                    if (seen == null || seen < end) {
+                        drained = false;
+                        break;
+                    }
+                }
+                if (drained) {
+                    return;
                 }
             }
         }
