@@ -903,6 +903,9 @@ services:
       # Single-manifest fallback — env-driven with default to the N=1 approved
       # 1024 CSV. Overridable via host env for 3000 single-CSV sharding.
       INSTRUMENT_MANIFEST_PATH: ${INSTRUMENT_MANIFEST_PATH:-/instruments/NSE_CM_EQUITY.csv}
+      # M4-1 (SCH-22): dev keeps the code default (1); the daily VM and the
+      # production stack pin 1024 explicitly.
+      INSTRUMENT_MANIFEST_MIN_COUNT: ${INSTRUMENT_MANIFEST_MIN_COUNT:-1}
       ARROW_INSTRUMENT_MANIFEST: ${ARROW_INSTRUMENT_MANIFEST:-/instruments/NSE_CM_EQUITY.csv}
       # IngestionConfig treats these as required (no code default) — the
       # container must pass them or the Java service exits at startup.

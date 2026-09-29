@@ -479,8 +479,14 @@ public final class IngestionService {
                 com.trading.ingestion.telemetry.Tracing.span("ingestion.manifest-load")) {
             manifestResult = InstrumentManifestLoader.loadDefault();
         }
-        if (manifestResult.instruments().isEmpty()) {
-            LOG.error("ingestion: FATAL — manifest load returned empty instrument set");
+        // M4-1 (SCH-22): a parsable manifest below INSTRUMENT_MANIFEST_MIN_COUNT
+        // is FATAL — a truncated/partial CSV must not silently subscribe a
+        // subset (the old check refused only an empty set). Subscription is
+        // unconditional on a parsable, non-empty, minimum-meeting CSV.
+        java.util.Optional<String> belowMinimum = InstrumentManifestLoader.belowMinimum(
+                manifestResult, config.instrumentManifestMinCount);
+        if (belowMinimum.isPresent()) {
+            LOG.error("ingestion: FATAL — {}", belowMinimum.get());
             System.exit(1);
         }
         LOG.info("ingestion: manifest loaded (instruments={}, approved={}, version={}, fingerprint={})",

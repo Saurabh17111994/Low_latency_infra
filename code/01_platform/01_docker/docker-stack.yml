@@ -890,6 +890,9 @@ services:
       ARROW_HFT_CONNECTIONS: ${ARROW_HFT_CONNECTIONS:-1}
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
       INSTRUMENT_MANIFEST_PATH: ${INSTRUMENT_MANIFEST_PATH:-/instruments/NSE_CM_EQUITY.csv}
+      # M4-1 (SCH-22): production pins the approved-universe minimum (1024
+      # rows); a truncated CSV must not silently subscribe a subset.
+      INSTRUMENT_MANIFEST_MIN_COUNT: ${INSTRUMENT_MANIFEST_MIN_COUNT:-1024}
       ARROW_INSTRUMENT_MANIFEST: ${ARROW_INSTRUMENT_MANIFEST:-/instruments/NSE_CM_EQUITY.csv}
       RAW_TABLE_NAME: ${RAW_TABLE_NAME:-raw_table_1}
       ARROW_MAX_EVENT_AGE_MS: ${ARROW_MAX_EVENT_AGE_MS:-5000}

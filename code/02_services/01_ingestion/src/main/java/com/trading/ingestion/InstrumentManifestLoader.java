@@ -84,7 +84,7 @@ final class InstrumentManifestLoader {
     static ManifestResult loadFromPath(String path, String manifestVersion) {
         // P1-227: version from INSTRUMENT_MANIFEST_VERSION, not a hardcoded
         // 1 — a refreshed daily CSV is a NEW approved version (R-247); the
-        // hardcode made the version check in isManifestApproved vacuous.
+        // hardcode made the (now-deleted) version check vacuous.
         // Unset/blank keeps 1 (today's behavior); explicit garbage refuses
         // the load fail-closed instead of silently versioning it as 1.
         int version;
@@ -115,7 +115,7 @@ final class InstrumentManifestLoader {
      *
      * <p>R-247: the manifest version is a parameter, not a hardcoded 1 — a
      * refreshed daily Arrow CSV is a NEW approved version; pinning 1 forever
-     * made the version check in {@link #isManifestApproved} vacuous.
+     * made the version check vacuous.
      *
      * <p>R-283: reads are pinned to UTF-8 (the platform default charset would
      * mangle an Excel-exported CSV on a non-UTF-8 host) and a UTF-8 BOM on
@@ -294,42 +294,24 @@ final class InstrumentManifestLoader {
     }
 
     /**
-     * Validate that a loaded manifest matches the expected approved version.
+     * M4-1 (SCH-22): the parsed-manifest gate. A manifest is usable only when
+     * it parsed to at least {@code minCount} instrument rows — a truncated or
+     * partial CSV must refuse startup instead of silently subscribing a
+     * subset. The exact version/count/fingerprint match this replaced had zero
+     * call sites; the live requirement is parse + minimum (default 1;
+     * production profiles and the daily VM pin 1024).
      *
-     * <p>One approved manifest version defines the active subscription state.
-     * If the loaded manifest count or fingerprint differs from expected,
-     * ingestion readiness must remain false until reconfigured.
+     * @return refusal message when the manifest is below the minimum, empty
+     *         when it may be used
      */
-    static boolean isManifestApproved(ManifestResult result,
-                                       int expectedVersion,
-                                       int expectedCount,
-                                       String expectedFingerprint) {
-        if (result == null || result.instruments().isEmpty()) {
-            LOG.error("instrument-manifest: validation failed — empty manifest");
-            return false;
+    static java.util.Optional<String> belowMinimum(ManifestResult result, int minCount) {
+        int loaded = result == null ? 0 : result.instrumentCount();
+        if (loaded < minCount) {
+            return java.util.Optional.of("manifest below minimum: " + loaded
+                    + " instrument(s) loaded, INSTRUMENT_MANIFEST_MIN_COUNT=" + minCount
+                    + " — a partial/truncated CSV must not subscribe a subset");
         }
-
-        if (result.version() != expectedVersion) {
-            LOG.error("instrument-manifest: version mismatch — loaded={}, expected={}",
-                    result.version(), expectedVersion);
-            return false;
-        }
-
-        if (result.instrumentCount() != expectedCount) {
-            LOG.error("instrument-manifest: instrument count mismatch — loaded={}, expected={}",
-                    result.instrumentCount(), expectedCount);
-            return false;
-        }
-
-        if (!result.fingerprint().equals(expectedFingerprint)) {
-            LOG.error("instrument-manifest: fingerprint mismatch — manifest content differs from approved version");
-            return false;
-        }
-
-        LOG.info("instrument-manifest: approved (version={}, instruments={}, fingerprint={})",
-                result.version(), result.instrumentCount(),
-                result.fingerprint().substring(0, Math.min(12, result.fingerprint().length())));
-        return true;
+        return java.util.Optional.empty();
     }
 
     /**

@@ -381,4 +381,50 @@ class ManifestLoadTest {
         assertFalse(r.approved(), "zero token must refuse the load");
     }
 
+    // ---- M4-1 (SCH-22): parsed-manifest minimum gate ----
+
+    @Test
+    @DisplayName("M4-1: a parsed sub-minimum manifest is refused with the effective numbers")
+    void subMinimumManifestIsRefused(@TempDir Path dir) throws Exception {
+        Path csv = dir.resolve("sub-min.csv");
+        Files.writeString(csv,
+                "Token,TradingSymbol,Exchange,LotSize\n"
+                        + "3045,RELIANCE-EQ,NSE,1\n"
+                        + "1333,HDFCBANK-EQ,NSE,1\n"
+                        + "11536,TCS-EQ,NSE,1\n");
+        InstrumentManifestLoader.ManifestResult result =
+                InstrumentManifestLoader.loadFromPath(csv.toString(), 1);
+        assertEquals(3, result.instrumentCount());
+        java.util.Optional<String> refusal = InstrumentManifestLoader.belowMinimum(result, 1024);
+        assertTrue(refusal.isPresent(), "3 parsed rows must be below the 1024 minimum");
+        assertTrue(refusal.get().contains("3 instrument(s)"), refusal.get());
+        assertTrue(refusal.get().contains("INSTRUMENT_MANIFEST_MIN_COUNT=1024"), refusal.get());
+    }
+
+    @Test
+    @DisplayName("M4-1: the minimum is inclusive; a failed/empty load always refuses")
+    void minimumBoundary(@TempDir Path dir) throws Exception {
+        StringBuilder rows = new StringBuilder("Token,TradingSymbol,Exchange,LotSize\n");
+        for (int i = 1; i <= 1024; i++) {
+            rows.append(100_000 + i).append(",SYM").append(i).append(",NSE,1\n");
+        }
+        Path atMin = dir.resolve("at-min.csv");
+        Files.writeString(atMin, rows.toString());
+        InstrumentManifestLoader.ManifestResult at =
+                InstrumentManifestLoader.loadFromPath(atMin.toString(), 1);
+        assertEquals(1024, at.instrumentCount());
+        assertTrue(InstrumentManifestLoader.belowMinimum(at, 1024).isEmpty(),
+                "exactly the minimum passes");
+        assertTrue(InstrumentManifestLoader.belowMinimum(at, 1025).isPresent(),
+                "one above the configured minimum refuses");
+
+        Path empty = dir.resolve("empty.csv");
+        Files.writeString(empty, "Token,TradingSymbol,Exchange,LotSize\n");
+        InstrumentManifestLoader.ManifestResult failed =
+                InstrumentManifestLoader.loadFromPath(empty.toString(), 1);
+        assertEquals(0, failed.instrumentCount());
+        assertTrue(InstrumentManifestLoader.belowMinimum(failed, 1).isPresent(),
+                "zero rows always refuse, even at minimum 1");
+    }
+
 }

@@ -972,6 +972,9 @@ def universe_env(universe: Universe) -> dict:
         "ARROW_HFT_CONNECTIONS": str(universe.connections),
         "ARROW_HFT_MULTI_CONNECTION_APPROVED": "true" if universe.approval else "false",
         "DEPLOYMENT_ENV": universe.deploy_env or "dev",
+        # M4-1 (SCH-22): the daily VM reads the real feed — a truncated CSV
+        # below the approved-universe minimum must refuse startup.
+        "INSTRUMENT_MANIFEST_MIN_COUNT": "1024",
     }
 
 
