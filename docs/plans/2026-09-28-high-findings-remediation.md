@@ -35,10 +35,10 @@ Where a body section and this list disagree, this list wins.
 | H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
 | H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | H3 — production deck parity with the dev deck | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
-| H4 — evidence and release gates must not lie | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
+| H4 — evidence and release gates must not lie | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H6 — machine facts and their drift guard | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
-| **Total** | **22** | **12** | **0** | **10** | **0** | **0** | **0** |
+| **Total** | **22** | **16** | **0** | **6** | **0** | **0** | **0** |
 
 #### H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth
 
@@ -109,20 +109,20 @@ Where a body section and this list disagree, this list wins.
 
 #### H4 — evidence and release gates must not lie
 
-- [ ] **H4-1** — `loadtest-20k-regression`: the evidence file and an `appended=` line are
+- [x] **H4-1** — `loadtest-20k-regression`: the evidence file and an `appended=` line are
   mandatory (missing = FAIL); count with `grep -c … || true` so zero hits is a pass; `UNSAFE>0`
-  fails. (P1-2.)
-- [ ] **H4-2** — Daily VM mode is explicit and recorded: **DECIDED 2026-09-28 — the daily CloudPe
+  fails. (P1-2.) — CHG-396
+- [x] **H4-2** — Daily VM mode is explicit and recorded: **DECIDED 2026-09-28 — the daily CloudPe
   VM intentionally runs the dev multi-socket universe** (`DEPLOYMENT_ENV=dev`, `UNIVERSE=full`:
   2433 tokens, 3 sockets, multi-connection approval). `.env.vm.example` and the VM guide state
   this operating mode explicitly (a decision, not an accidental default); the planned
-  production-posture refusals and golden pins are dropped. No behavior change. (P1-3.)
-- [ ] **H4-3** — WARN-skips are counted: shared `warn_skip()` calls `note_skip` then prints;
+  production-posture refusals and golden pins are dropped. No behavior change. (P1-3.) — CHG-397
+- [x] **H4-3** — WARN-skips are counted: shared `warn_skip()` calls `note_skip` then prints;
   steps 2 and 7 use it; the verdict can no longer print a certificate with unrecorded skips;
-  static invariant + behavioral tests. (P1-4.)
-- [ ] **H4-4** — `audit_r2.py` exits non-zero on its own FAIL: `validate` returns
+  static invariant + behavioral tests. (P1-4.) — CHG-398
+- [x] **H4-4** — `audit_r2.py` exits non-zero on its own FAIL: `validate` returns
   `0 if result=="PASS" else 1` (evidence still written); `provision` returns 1 when a bucket_lock
-  READ/SET actually failed (`NOT_SET`/`UNSUPPORTED` stay non-fatal). (P1-5.)
+  READ/SET actually failed (`NOT_SET`/`UNSUPPORTED` stay non-fatal). (P1-5.) — CHG-399
 
 #### H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery
 
