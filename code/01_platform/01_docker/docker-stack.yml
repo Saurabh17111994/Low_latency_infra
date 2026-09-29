@@ -330,6 +330,9 @@ services:
       # an unset advertised INTERNAL defaults to the bind value, so tablet-1
       # registered INTERNAL://0.0.0.0:40917 and the coordinator dialled 0.0.0.0
       # refused, ongoing (run7). 9122 is adjacent to CLIENT 9123, overlay-only.
+      # H3-2 (P0-8): the block below mirrors the five fs.s3a.* keys compose carries —
+      # fluss-fs-s3's delegation-token provider reads Hadoop-style keys, not Fluss's
+      # s3.* names. Prose stays OUT of the block scalar (CHG-252).
       FLUSS_PROPERTIES: |
         zookeeper.address: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
         bind.listeners: INTERNAL://0.0.0.0:9122,CLIENT://0.0.0.0:9123
@@ -342,6 +345,11 @@ services:
         s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
         s3.path.style.access: true
         s3.connection.ssl.enabled: true
+        fs.s3a.region: ${AWS_REGION:-auto}
+        fs.s3a.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        fs.s3a.path.style.access: true
+        fs.s3a.access.key: $${env.AWS_ACCESS_KEY_ID}
+        fs.s3a.secret.key: $${env.AWS_SECRET_ACCESS_KEY}
         datalake.format: ${DATALAKE_FORMAT:-iceberg}
         datalake.iceberg.type: hadoop
         datalake.iceberg.warehouse: ${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH for lake tiering}
@@ -415,6 +423,9 @@ services:
       # D-A: INTERNAL needs a fixed port (9125, adjacent to CLIENT 9124) and an
       # advertised name - port 0 + unset advertised INTERNAL registered
       # INTERNAL://0.0.0.0:<ephemeral>, which no peer can dial (run7).
+      # H3-2 (P0-8): the block below mirrors the five fs.s3a.* keys compose carries —
+      # fluss-fs-s3's delegation-token provider reads Hadoop-style keys, not Fluss's
+      # s3.* names. Prose stays OUT of the block scalar (CHG-252).
       FLUSS_PROPERTIES: |
         zookeeper.address: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
         bind.listeners: INTERNAL://0.0.0.0:9125, CLIENT://0.0.0.0:9124
@@ -430,6 +441,11 @@ services:
         s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
         s3.path.style.access: true
         s3.connection.ssl.enabled: true
+        fs.s3a.region: ${AWS_REGION:-auto}
+        fs.s3a.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        fs.s3a.path.style.access: true
+        fs.s3a.access.key: $${env.AWS_ACCESS_KEY_ID}
+        fs.s3a.secret.key: $${env.AWS_SECRET_ACCESS_KEY}
         datalake.format: ${DATALAKE_FORMAT:-iceberg}
         datalake.iceberg.type: hadoop
         datalake.iceberg.warehouse: ${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH for lake tiering}
@@ -490,6 +506,9 @@ services:
       # D-A: INTERNAL needs a fixed port (9125, adjacent to CLIENT 9124) and an
       # advertised name - port 0 + unset advertised INTERNAL registered
       # INTERNAL://0.0.0.0:<ephemeral>, which no peer can dial (run7).
+      # H3-2 (P0-8): the block below mirrors the five fs.s3a.* keys compose carries —
+      # fluss-fs-s3's delegation-token provider reads Hadoop-style keys, not Fluss's
+      # s3.* names. Prose stays OUT of the block scalar (CHG-252).
       FLUSS_PROPERTIES: |
         zookeeper.address: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
         bind.listeners: INTERNAL://0.0.0.0:9125, CLIENT://0.0.0.0:9124
@@ -505,6 +524,11 @@ services:
         s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
         s3.path.style.access: true
         s3.connection.ssl.enabled: true
+        fs.s3a.region: ${AWS_REGION:-auto}
+        fs.s3a.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        fs.s3a.path.style.access: true
+        fs.s3a.access.key: $${env.AWS_ACCESS_KEY_ID}
+        fs.s3a.secret.key: $${env.AWS_SECRET_ACCESS_KEY}
         datalake.format: ${DATALAKE_FORMAT:-iceberg}
         datalake.iceberg.type: hadoop
         datalake.iceberg.warehouse: ${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH for lake tiering}
@@ -565,6 +589,9 @@ services:
       # D-A: INTERNAL needs a fixed port (9125, adjacent to CLIENT 9124) and an
       # advertised name - port 0 + unset advertised INTERNAL registered
       # INTERNAL://0.0.0.0:<ephemeral>, which no peer can dial (run7).
+      # H3-2 (P0-8): the block below mirrors the five fs.s3a.* keys compose carries —
+      # fluss-fs-s3's delegation-token provider reads Hadoop-style keys, not Fluss's
+      # s3.* names. Prose stays OUT of the block scalar (CHG-252).
       FLUSS_PROPERTIES: |
         zookeeper.address: zookeeper-1:2181,zookeeper-2:2181,zookeeper-3:2181
         bind.listeners: INTERNAL://0.0.0.0:9125, CLIENT://0.0.0.0:9124
@@ -580,6 +607,11 @@ services:
         s3.secret-key: $${env.AWS_SECRET_ACCESS_KEY}
         s3.path.style.access: true
         s3.connection.ssl.enabled: true
+        fs.s3a.region: ${AWS_REGION:-auto}
+        fs.s3a.endpoint: ${R2_ENDPOINT:?set R2_ENDPOINT for tiering}
+        fs.s3a.path.style.access: true
+        fs.s3a.access.key: $${env.AWS_ACCESS_KEY_ID}
+        fs.s3a.secret.key: $${env.AWS_SECRET_ACCESS_KEY}
         datalake.format: ${DATALAKE_FORMAT:-iceberg}
         datalake.iceberg.type: hadoop
         datalake.iceberg.warehouse: ${S3_WAREHOUSE_PATH:?set S3_WAREHOUSE_PATH for lake tiering}

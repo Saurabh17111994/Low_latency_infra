@@ -336,6 +336,15 @@ Two traps, both recorded in CHG-183:
 - **`datalake.iceberg.iceberg.hadoop.fs.s3.impl` (and the `s3a` twin) are
   required.** Without them the classloader is fixed but startup fails
   `No FileSystem for scheme "s3"` — which reads like the same bug and is not.
+- **The five `fs.s3a.*` delegation-token keys must exist in BOTH decks** (H3-2,
+  CHG-393). `fluss-fs-s3`'s `S3DelegationTokenProvider` reads Hadoop-style keys,
+  not Fluss's `s3.*` names (`S3DelegationTokenProvider.REGION_KEY = fs.s3a.region`):
+  region, endpoint, path-style, access key, secret key. CHG-306 mirrored them into
+  compose only, so the dev deck could mint file-access tokens while the production
+  deck could not — a lake read that works in dev and fails in production. All four
+  stack Fluss blocks now mirror the same five keys, and
+  `test_09_stack.py::TestR2DelegationKeys` pins compose == stack per role (the
+  three split tablets count as one role), so the decks cannot drift apart again.
 
 ### The Fluss startup fix (CHG-182 fixes CHG-181 — Tasks 1-4)
 

@@ -540,6 +540,69 @@ class TestTier1ProductionConfig:
             "fencing requirement must be recorded in the stack"
 
 
+class TestR2DelegationKeys:
+    """H3-2 (P0-8): the five `fs.s3a.*` delegation-token keys exist in every Fluss
+    block of BOTH decks, with identical values per role.
+
+    `fluss-fs-s3`'s S3DelegationTokenProvider reads Hadoop-style keys, not Fluss's
+    `s3.*` names (`S3DelegationTokenProvider.REGION_KEY = fs.s3a.region`), and CHG-306
+    mirrored them into compose only — so the dev deck could mint file-access tokens
+    while the production deck could not: a lake read that works in dev and fails in
+    production. This test keeps the two decks from drifting apart again (the stack's
+    three split tablets count as one role).
+    """
+
+    COMPOSE = ROOT / "code/01_platform/01_docker/docker-compose.yml"
+    KEYS = (
+        "fs.s3a.region",
+        "fs.s3a.endpoint",
+        "fs.s3a.path.style.access",
+        "fs.s3a.access.key",
+        "fs.s3a.secret.key",
+    )
+
+    @staticmethod
+    def _fs_s3a(props):
+        """The `fs.s3a.*` key -> raw value map of one FLUSS_PROPERTIES block."""
+        out = {}
+        for line in props.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("fs.s3a."):
+                key, _, value = stripped.partition(":")
+                out[key.strip()] = value.strip()
+        return out
+
+    def test_stack_fs_s3a_mirror_matches_compose(self):
+        stack = _load()["services"]
+        compose = yaml.safe_load(self.COMPOSE.read_text())["services"]
+        stack_roles = {
+            "coordinator": self._fs_s3a(
+                stack["fluss-coordinator"]["environment"]["FLUSS_PROPERTIES"]),
+            "tablet": self._fs_s3a(
+                stack["fluss-tablet-1"]["environment"]["FLUSS_PROPERTIES"]),
+        }
+        for name in ("fluss-tablet-2", "fluss-tablet-3"):
+            assert self._fs_s3a(
+                stack[name]["environment"]["FLUSS_PROPERTIES"]) == stack_roles["tablet"], (
+                f"{name}: the three split tablets must carry identical fs.s3a.* values")
+        compose_roles = {
+            "coordinator": self._fs_s3a(
+                compose["fluss-coordinator"]["environment"]["FLUSS_PROPERTIES"]),
+            "tablet": self._fs_s3a(
+                compose["fluss-tablet"]["environment"]["FLUSS_PROPERTIES"]),
+        }
+        for role in ("coordinator", "tablet"):
+            got, want = stack_roles[role], compose_roles[role]
+            for key in self.KEYS:
+                assert key in got, (
+                    f"stack {role}: FLUSS_PROPERTIES missing {key} — fluss-fs-s3's "
+                    "delegation-token provider reads Hadoop-style keys, so without it "
+                    "the production deck cannot mint file-access tokens (H3-2)")
+                assert got[key] == want[key], (
+                    f"{role}: {key} stack={got[key]!r} compose={want[key]!r} — the two "
+                    "decks must carry identical delegation-token values")
+
+
 class TestTier2Hardening:
     """M2 completion 2/2 — Tier-2 stack hardening (L2 acceptance-criteria gaps).
 
