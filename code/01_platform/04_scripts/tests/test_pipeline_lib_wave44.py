@@ -23,7 +23,7 @@ GUARDS = SCRIPTS / "test-pipeline-lib.sh"
 REAL_LIB = SCRIPTS / "pipeline-lib.sh"
 REPO = SCRIPTS.parents[2]
 REAL_COMPOSE = REPO / "code" / "01_platform" / "01_docker" / "docker-compose.yml"
-CLEAN = "guards: 134 passed, 0 failed"
+CLEAN = "guards: 136 passed, 0 failed"
 
 
 def run_guards(lib: Path = REAL_LIB, compose: Path | None = None) -> tuple[int, str]:

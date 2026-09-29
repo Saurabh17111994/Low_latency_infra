@@ -163,7 +163,8 @@ classes; keys verified against `StateChangelogOptions` and `FsStateChangelogOpti
 Implemented behind the default-off rollout flag `CHANGELOG_STATE_BACKEND` read by
 `SignalJobConfig` and translated in `SignalJob.applyRuntimeOptions` with fail-closed
 preconditions (`STATE_BACKEND=rocksdb`, `MAX_CONCURRENT_CHECKPOINTS=1`) and base path
-`<CHECKPOINT_DIR>/changelog`.
+`<CHECKPOINT_DIR>/changelog`. Both submit paths forward it: `pipeline-lib.sh` (runs) and
+`rollout-savepoint.sh` (`JOB_ENV_NAMES`, for the enable/disable drill).
 
 ### CT-4B — Fluss sink linger 1 ms (Branch B only)
 

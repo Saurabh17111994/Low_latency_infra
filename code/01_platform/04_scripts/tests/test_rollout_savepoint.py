@@ -381,6 +381,10 @@ class RolloutHarness(unittest.TestCase):
             "strategy env forwarded": 'STRATEGY_HOST_ENABLED STRATEGIES',
             "feature env forwarded": 'FEATURE_LAYER_ENABLED FEATURE_TABLE',
             "execution identity forwarded": 'ACCOUNT_SCOPE_ID EXECUTION_PARTITION_ID EXECUTION_PRODUCT_TYPE',
+            # CT-4A (2026-09-29): the changelog state backend flag must survive
+            # a savepoint rollout both directions (enable on restore, disable
+            # on rollback) — the list is the only forwarding path.
+            "changelog env forwarded": 'INSTRUMENT_MANIFEST_PATH CHANGELOG_STATE_BACKEND"',
         }
         missing = [k for k, v in pins.items() if v not in SRC]
         self.assertEqual(missing, [], f"static pins missing: {missing}")
