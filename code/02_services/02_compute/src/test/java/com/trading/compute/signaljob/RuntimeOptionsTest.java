@@ -13,6 +13,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.StateBackendOptions;
 import org.apache.flink.configuration.StateChangelogOptions;
 import org.apache.flink.configuration.StateRecoveryOptions;
+import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -332,10 +333,17 @@ class RuntimeOptionsTest {
     // operator at the 10 s cadence, and that pause is what the SLO trips on.
     // With changelog the checkpoint snapshots only the changelog; the state
     // backend is materialized in the background (verified against the pinned
-    // 2.2.1 dist: StateChangelogOptions + FsStateChangelogOptions.BASE_PATH).
+    // 2.2.1 dist: StateChangelogOptions).
+    //
+    // Storage selection is deliberately NOT set here: TaskExecutor builds the
+    // per-job changelog storage from the TaskManager configuration
+    // (TaskExecutorStateChangelogStoragesManager.stateChangelogStorageForJob),
+    // so a job-level state.changelog.storage is a silent no-op. Measured
+    // 2026-09-29: the deployed job carried filesystem while the TM log said
+    // "Creating a changelog storage with name 'memory'" (CHG-443).
 
     @Test
-    @DisplayName("CT-4A: CHANGELOG_STATE_BACKEND=true → filesystem changelog under the checkpoint dir")
+    @DisplayName("CT-4A: CHANGELOG_STATE_BACKEND=true enables the changelog; storage stays TM-level")
     void changelogAppliedWhenEnabled() {
         Map<String, String> env = env();
         env.put("STATE_BACKEND", "rocksdb");
@@ -346,14 +354,13 @@ class RuntimeOptionsTest {
 
         assertTrue(flinkConfig.get(StateChangelogOptions.ENABLE_STATE_CHANGE_LOG),
                 "state.changelog.enabled must be on");
-        assertEquals("filesystem",
-                flinkConfig.get(StateChangelogOptions.STATE_CHANGE_LOG_STORAGE),
-                "only filesystem storage is production-supported (memory is tests-only)");
-        // Key verified against FsStateChangelogOptions.BASE_PATH in the pinned
-        // 2.2.1 dist (the class is not on the compute compile classpath, so the
-        // string key carries the same comment discipline as rocksdb.localdir).
-        assertEquals("file:///checkpoints/changelog",
-                flinkConfig.getString("state.changelog.dstl.dfs.base-path", null));
+        // Both keys are read by the TaskManager, never by this job config;
+        // writing them here would be silently ignored (the exact trap the
+        // 2026-09-29 adoption drill hit — backend on, storage still memory).
+        assertFalse(flinkConfig.toMap().containsKey("state.changelog.storage"),
+                "storage is a TaskManager deployment property — a job-level value is ignored");
+        assertFalse(flinkConfig.toMap().containsKey("state.changelog.dstl.dfs.base-path"),
+                "base path is a TaskManager deployment property — a job-level value is ignored");
     }
 
     @Test
@@ -366,7 +373,8 @@ class RuntimeOptionsTest {
         SignalJob.applyRuntimeOptions(config, flinkConfig);
 
         assertFalse(flinkConfig.get(StateChangelogOptions.ENABLE_STATE_CHANGE_LOG));
-        assertNull(flinkConfig.getString("state.changelog.dstl.dfs.base-path", null));
+        assertFalse(flinkConfig.toMap().containsKey("state.changelog.storage"));
+        assertFalse(flinkConfig.toMap().containsKey("state.changelog.dstl.dfs.base-path"));
     }
 
     @Test
@@ -388,5 +396,59 @@ class RuntimeOptionsTest {
         IllegalStateException e2 = assertThrows(IllegalStateException.class,
                 () -> SignalJob.applyRuntimeOptions(cp2, new Configuration()));
         assertTrue(e2.getMessage().contains("MAX_CONCURRENT_CHECKPOINTS=1"), e2.getMessage());
+    }
+
+    @Test
+    @DisplayName("CT-4A: changelog adoption on restore claims the restored state")
+    void changelogRestoreClaimsState() {
+        Map<String, String> env = env();
+        env.put("STATE_BACKEND", "rocksdb");
+        env.put("CHANGELOG_STATE_BACKEND", "true");
+        env.put("ALLOW_FULL_REPLAY", "false");
+        env.put("STATE_RECOVERY_PATH", "file:///checkpoints/job/chk-95");
+        SignalJobConfig config = SignalJobConfig.from(env);
+        Configuration flinkConfig = new Configuration();
+        SignalJob.applyRuntimeOptions(config, flinkConfig);
+
+        // NO_CLAIM makes the coordinator schedule a FULL_CHECKPOINT on the next
+        // trigger and the changelog backend refuses one (CT-4A drill 2026-09-29:
+        // 4/4 first checkpoints failed with "does not support enforcing a full
+        // snapshot"); CLAIM owns the restored state instead of re-snapshotting.
+        assertEquals(RecoveryClaimMode.CLAIM,
+                flinkConfig.get(StateRecoveryOptions.RESTORE_MODE),
+                "changelog adoption on restore must claim the restored state");
+    }
+
+    @Test
+    @DisplayName("CT-4A: changelog fresh start leaves the claim mode at its default")
+    void changelogFreshStartKeepsDefaultClaimMode() {
+        Map<String, String> env = env();
+        env.put("STATE_BACKEND", "rocksdb");
+        env.put("CHANGELOG_STATE_BACKEND", "true");
+        SignalJobConfig config = SignalJobConfig.from(env);
+        Configuration flinkConfig = new Configuration();
+        SignalJob.applyRuntimeOptions(config, flinkConfig);
+
+        // DEFAULT is NO_CLAIM, so a get() comparison would pass even if the code
+        // wrote NO_CLAIM explicitly — the pin is that the key stays unwritten.
+        assertFalse(flinkConfig.toMap().containsKey("execution.state-recovery.claim-mode"),
+                "no restore path → no claim mode written (fresh start untouched)");
+    }
+
+    @Test
+    @DisplayName("CT-4A: changelog-off restore keeps the default claim mode (disable direction)")
+    void changelogOffRestoreKeepsDefaultClaimMode() {
+        Map<String, String> env = env();
+        env.put("STATE_BACKEND", "rocksdb");
+        env.put("ALLOW_FULL_REPLAY", "false");
+        env.put("STATE_RECOVERY_PATH", "file:///checkpoints/job/chk-101");
+        SignalJobConfig config = SignalJobConfig.from(env);
+        Configuration flinkConfig = new Configuration();
+        SignalJob.applyRuntimeOptions(config, flinkConfig);
+
+        // The disable direction restores changelog state into rocksdb, where the
+        // forced full snapshot is supported — the default mode must stay untouched.
+        assertFalse(flinkConfig.toMap().containsKey("execution.state-recovery.claim-mode"),
+                "changelog off → claim mode must not be written");
     }
 }

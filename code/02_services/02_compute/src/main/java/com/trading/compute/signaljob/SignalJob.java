@@ -13,6 +13,7 @@ import org.apache.flink.configuration.RestartStrategyOptions;
 import org.apache.flink.configuration.StateBackendOptions;
 import org.apache.flink.configuration.StateChangelogOptions;
 import org.apache.flink.configuration.StateRecoveryOptions;
+import org.apache.flink.core.execution.RecoveryClaimMode;
 import org.apache.flink.streaming.api.CheckpointingMode;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
@@ -587,21 +588,31 @@ public final class SignalJob {
                         + config.maxConcurrentCheckpoints()
                         + " — Flink limits the changelog to one concurrent checkpoint");
             }
-            String changelogBase = config.checkpointDir();
-            if (changelogBase == null || changelogBase.isBlank()) {
-                throw new IllegalStateException("Config CHANGELOG_STATE_BACKEND=true requires a "
-                        + "checkpoint directory — state.changelog.dstl.dfs.base-path derives "
-                        + "from it");
-            }
             flinkConfig.set(StateChangelogOptions.ENABLE_STATE_CHANGE_LOG, true);
-            flinkConfig.set(StateChangelogOptions.STATE_CHANGE_LOG_STORAGE, "filesystem");
-            // FsStateChangelogOptions.BASE_PATH — key verified against the
-            // pinned 2.2.1 dist jar; the class itself is not on the compute
-            // compile classpath (same discipline as rocksdb.localdir above).
-            flinkConfig.setString("state.changelog.dstl.dfs.base-path",
-                    changelogBase.endsWith("/")
-                            ? changelogBase + "changelog"
-                            : changelogBase + "/changelog");
+            // Storage selection is a TaskManager deployment property, NOT a job
+            // option: TaskExecutor builds the per-job changelog storage from
+            // taskManagerConfiguration.getConfiguration() (verified in the
+            // 2.2.1 bytecode: TaskExecutor ->
+            // TaskExecutorStateChangelogStoragesManager.stateChangelogStorageForJob),
+            // so a job-level state.changelog.storage / dstl base path is
+            // silently ignored. Measured 2026-09-29 (CT-4A drill redeploy): the
+            // job config carried filesystem while the TM logged "Creating a
+            // changelog storage with name 'memory'". The dev trial therefore
+            // runs on TM memory; production adoption requires the
+            // flink-dstl-dfs plugin on the TaskManager plugins/ classpath plus
+            // state.changelog.storage: filesystem and the dstl.dfs.base-path
+            // in the TaskManager configuration (CHG-443).
+            // CT-4A drill 2026-09-29: adopting the changelog on a restore needs
+            // CLAIM. In NO_CLAIM mode the coordinator schedules a FULL_CHECKPOINT
+            // on the next trigger (the restored files are not owned), and this
+            // backend refuses one ("does not support enforcing a full snapshot"
+            // — the first 4/4 checkpoints of the restore drill failed before
+            // this line). CLAIM owns the restored state instead of
+            // re-snapshotting it; the disable direction (flag off) keeps the
+            // default mode, where RocksDB supports the forced full snapshot.
+            if (config.stateRecoveryPath() != null && !config.stateRecoveryPath().isBlank()) {
+                flinkConfig.set(StateRecoveryOptions.RESTORE_MODE, RecoveryClaimMode.CLAIM);
+            }
         }
         // Streaming-3000 T3 G3: network max 256m for p=8 (Fluss 16 buckets →
         // 8 slots, hash(token) rebalance). Local MiniCluster defaults to
