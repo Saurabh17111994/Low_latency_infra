@@ -166,7 +166,7 @@ up:
 		--jar code/02_services/02_compute/target/compute.jar
 	$(STACK_LOCK) $(COMPOSE) up -d
 	@bash code/01_platform/04_scripts/catalog-guard.sh \
-		|| echo "!!! catalog-guard: catalog NOT healthy — see messages above. Fix before trading."
+		|| { echo "!!! catalog-guard: catalog NOT healthy — see messages above. Fix before trading."; exit 1; }
 
 # Daily single-command runner (plan 2026-09-26, CHG-324): thin interface only,
 # all logic lives in code/01_platform/04_scripts/day_run.py.

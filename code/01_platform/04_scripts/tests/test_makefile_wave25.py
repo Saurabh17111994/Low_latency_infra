@@ -172,6 +172,46 @@ class BranchGuardCommentTest(unittest.TestCase):
         self.assertNotIn("low-latency branch", comment)
 
 
+class UpTargetGuardTest(unittest.TestCase):
+    """M2-4 (O4): a failed catalog guard must fail `make up`.
+
+    The recipe ended the guard line with `|| echo "!!!"` — `echo` succeeds, so the
+    target exited 0 while the catalog was unhealthy and the operator kept trading on
+    a catalog the guard had just refused. The guard's own exit status is the verdict.
+    """
+
+    def _guard_line(self):
+        body = _recipe(MAKEFILE.read_text(), "up")
+        lines = body.splitlines()
+        idx = next((i for i, l in enumerate(lines) if "catalog-guard.sh" in l), None)
+        self.assertIsNotNone(idx, "the up recipe must run the catalog guard")
+        joined = lines[idx]
+        while joined.rstrip().endswith("\\") and idx + 1 < len(lines):
+            idx += 1
+            joined = joined.rstrip().rstrip("\\") + " " + lines[idx].strip()
+        return joined.strip().lstrip("@")
+
+    def test_the_guard_is_not_swallowed_by_an_echo(self):
+        line = self._guard_line()
+        self.assertNotIn("|| echo", line,
+                         "echo's status wins — the guard's failure would read as success")
+        self.assertIn("exit 1", line, "a failed guard must exit non-zero")
+
+    def test_a_failing_guard_fails_the_target(self):
+        box = _Sandbox()
+        try:
+            box._write_script("catalog-guard.sh",
+                              "#!/bin/bash\necho 'catalog NOT healthy' >&2\nexit 3\n")
+            proc = subprocess.run(
+                ["bash", "-c", self._guard_line()], cwd=box.dir,
+                capture_output=True, text=True, env={**os.environ, "PATH": str(box.bin)})
+        finally:
+            box.cleanup()
+        self.assertNotEqual(0, proc.returncode,
+                            "the guard's exit status must fail the up target")
+        self.assertIn("catalog NOT healthy", proc.stderr + proc.stdout)
+
+
 class LoadtestPreflightTargetTest(unittest.TestCase):
     """P6-303: `|| true` after `| head` made a broken environment look green."""
 
