@@ -123,6 +123,12 @@ public final class IngestionService {
     private final Map<Long, Instrument> instrumentMap;
     private final AtomicLong frameCount = new AtomicLong(0);
     private final AtomicLong errorCount = new AtomicLong(0);
+    /** M4-2 (I2): the control-record contract version this service accepts —
+     *  one constant, the same value as the bridge-event contract. A control
+     *  record with any other value (including the proto3 default 0) is
+     *  quarantined and never processed. */
+    static final int CONTROL_CONTRACT_VERSION = BridgeEvent.CONTRACT_VERSION;
+
     private final AtomicBoolean shutdownStarted = new AtomicBoolean(false);
     /** H2-2: one durable uncertainty record (and one fatal stop) per drop episode. */
     private final AtomicBoolean dropJournaled = new AtomicBoolean(false);
@@ -1103,13 +1109,27 @@ public final class IngestionService {
      * quarantined, never allowed to corrupt market-data processing.
      */
     private void handleControlRecord(com.trading.ingestion.transport.ControlRecord cr) {
+        // M4-2 (I2): the record's OWN contract version is the gate. Unknown,
+        // missing (proto3 default 0) or any other value is quarantined as
+        // INVALID_SCHEMA + CONTROL_VERSION_MISMATCH and returns HERE — nothing
+        // downstream (slot health, metrics, bridge events) ever sees it, so a
+        // wrong-version record can never be processed as v2 (fail-closed).
+        if (cr.getContractVersion() != CONTROL_CONTRACT_VERSION) {
+            byte[] raw = cr.getRawPayload() == null ? new byte[0] : cr.getRawPayload().toByteArray();
+            quarantineWriter.write(raw, QuarantineWriter.Reason.INVALID_SCHEMA,
+                    "control record contract_version=" + cr.getContractVersion()
+                            + " (expected " + CONTROL_CONTRACT_VERSION + ")",
+                    0L, null, null);
+            metrics.incrementDecodeError("CONTROL_VERSION_MISMATCH");
+            return;
+        }
         String rt = cr.getRecordType();
         try {
             switch (rt) {
                 case "bridge_event" -> {
                     BridgeEvent event = new BridgeEvent(
                             cr.getEvent(),
-                            BridgeEvent.CONTRACT_VERSION,
+                            cr.getContractVersion(),
                             cr.getSlotId(),
                             cr.getConnectionId(),
                             cr.getConnectionEpoch(),
@@ -1676,11 +1696,10 @@ public final class IngestionService {
         // the run for it. Verified against a live run's own token slice: Go's
         // reported value equals Java's computeAssignedTokenHash exactly
         // (4914b8f1…), while computeFingerprint's (c68f50f7…) covers fields the
-        // bridge is never given. The manifest-level drift check still happens,
-        // one level up and fail-closed, in InstrumentManifestLoader
-        // .isManifestApproved (version + count + computeFingerprint against the
-        // approved manifest); this cross-check covers bridge/Java token-set
-        // agreement, which is what both sides can actually compute.
+        // bridge is never given. The manifest-level check is the M4-1
+        // parsed-minimum gate (InstrumentManifestLoader.belowMinimum); this
+        // cross-check covers bridge/Java token-set agreement, which is what
+        // both sides can actually compute.
         if (!assignedTokenSetHash.equals(event.manifestFingerprint())) {
             LOG.warn("ingestion: bridge manifest_fingerprint mismatch (slot={}, epoch={}): got={} want={} (token-set digest) — cross-check only, event not rejected",
                     event.slotId(), event.connectionEpoch(),

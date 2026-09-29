@@ -9,6 +9,7 @@
 //   T7-F15 rollback under failure → NDJSON path still works after proto fails
 //   T7-L1  loss bound accounting → acknowledged-loss counted, ≤1s bound provable
 //   T7-D1  duplicates/at-least-once → measurable, no exactly-once claim
+//   T7-F16 wrong control-record contract version → quarantine + metric, never processed as v2
 
 package com.trading.ingestion;
 
@@ -316,5 +317,72 @@ class FailureMatrixTest {
         // the queue (150k) + tracker (150k) + Go buffer bound loss well
         // under 1s of feed.
         assertEquals(10, q.size(), "queue holds exactly its budget");
+    }
+
+    // ---- T7-F16: wrong control-record contract version ----
+
+    @Test
+    @DisplayName("T7-F16: a v3 control frame is quarantined at decode, never processed as v2")
+    void wrongControlContractVersionQuarantined() throws Exception {
+        List<String> reasons = new CopyOnWriteArrayList<>();
+        QuarantineSink capturing = new QuarantineSink() {
+            public void write(byte[] rawPayload, QuarantineWriter.Reason reason, String detail) {
+                reasons.add(reason.name());
+            }
+            public void write(byte[] rawPayload, QuarantineWriter.Reason reason, String detail,
+                              Long instrumentToken, String exchange, String symbol) {
+                reasons.add(reason.name());
+            }
+            public void close() {}
+        };
+        IngestionConfig config = buildConfig("localhost:9123");
+        IngestionService service = new IngestionService("t7-f16", instruments(),
+                new CountingConverter(), config,
+                new NtpClockChecker("127.0.0.1:9", 100, false),
+                capturing, noopDiscontinuity(), noopSafety());
+        com.trading.ingestion.transport.ControlRecord v3 =
+                com.trading.ingestion.transport.ControlRecord.newBuilder()
+                        .setRecordType("bridge_event").setContractVersion(3)
+                        .setEvent("slot_state").setSlotId("hft-0").setConnectionId("conn-1")
+                        .setConnectionEpoch(1).setState("ACTIVE")
+                        .setAssignedTokens(1).setAcknowledgedTokens(1).setRejectedTokens(0)
+                        .setReason("").setReceivedTsMs(System.currentTimeMillis())
+                        .setManifestFingerprint("a".repeat(64))
+                        .setAssignedTokenSetHash("a".repeat(64))
+                        .build();
+        TransportFrame frame = TransportFrame.newBuilder()
+                .setProtocolVersion(1).setControl(v3).build();
+        byte[] payload = frame.toByteArray();
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(payload.length + 4);
+        bos.write(java.nio.ByteBuffer.allocate(4)
+                .order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(payload.length).array());
+        bos.write(payload);
+
+        Method handle = IngestionService.class.getDeclaredMethod(
+                "handleControlRecord", com.trading.ingestion.transport.ControlRecord.class);
+        handle.setAccessible(true);
+        ProtoFrameReader reader = new ProtoFrameReader(new ByteArrayInputStream(bos.toByteArray()),
+                new ProtoFrameReader.FrameHandler() {
+                    @Override public void onMarketBatch(MarketDataBatch b) {
+                        throw new AssertionError("no market batch expected");
+                    }
+                    @Override public void onControl(
+                            com.trading.ingestion.transport.ControlRecord c) {
+                        try {
+                            handle.invoke(service, c);
+                        } catch (Exception e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+                });
+        assertTrue(reader.sniffProto(), "the control frame is proto");
+        reader.readLoop();
+
+        assertEquals(List.of("INVALID_SCHEMA"), reasons,
+                "a v3 control record must be quarantined at decode");
+        assertTrue(service.metrics().buildMetricsJson().contains("CONTROL_VERSION_MISMATCH"),
+                "the mismatch must be counted");
+        assertFalse((Boolean) service.health().diagnostics().get("broker_connected"),
+                "a v3 control record must not be processed as v2");
     }
 }

@@ -219,7 +219,7 @@ The two identity hashes use the same encoding as `SafetyHaltWriter.computeAssign
 | `active_sockets` | `int` | currently open broker sockets (open/close counted by the bridge, so orphaned sockets are visible) |
 | `go_goroutines` | `int` | `runtime.NumGoroutine()` — leak detection evidence |
 
-Java maps these onto `bridge.reconnect_consecutive`, `bridge.active_sockets`, `bridge.go_goroutines` gauges. A `bridge_metrics` line with an unknown `contract_version` is a protocol error (thrown, like unknown event versions). Missing/zero `ts_ms` is rejected. Any other `record_type` yields `Optional.empty()` — never a rejection.
+Java maps these onto `bridge.reconnect_consecutive`, `bridge.active_sockets`, `bridge.go_goroutines` gauges. A `bridge_metrics` line with an unknown/missing `contract_version` is quarantined `INVALID_SCHEMA` + `CONTROL_VERSION_MISMATCH` before routing (M4-2, rule 9) — never applied, never thrown. Missing/zero `ts_ms` is rejected. Any other `record_type` yields `Optional.empty()` — never a rejection.
 
 ## Broker quarantine record
 
@@ -251,9 +251,9 @@ Java hash-validates `raw_payload` against `payload_hash` and persists to `ingest
 6. **No duplicate ticks assumed to be identical.** Two ticks with the same `token`+`ltp_paise`+`ts_ms` but different `ltq` or `bid_px` are different events.
 7. **raw_payload is the exact decompressed broker packet bytes** (Base64), never the JSON line. `payload_hash` is their SHA-256.
 8. **One record per line, atomic writes.** The emitter serializes complete lines; three slot goroutines may emit concurrently.
-9. **Java errors:** malformed JSON → quarantine + `decode.errors`; unknown lifecycle version/event → fatal protocol failure; valid tick with bad business values → quarantine; valid lifecycle event → state/evidence/metrics update.
+9. **Java errors:** malformed JSON → quarantine + `decode.errors`; unknown/missing control `contract_version` → quarantine `INVALID_SCHEMA` + `decode.errors{CONTROL_VERSION_MISMATCH}` and return — never processed as v2 (M4-2); unknown lifecycle `event` → fatal protocol failure; valid tick with bad business values → quarantine; valid lifecycle event → state/evidence/metrics update.
 10. **Records are additive within a contract version.** Unknown `record_type` values fall through to the next parser (quarantine, then metrics, then tick bind) and are never silently dropped or rejected; `bridge_metrics` is routed before the GoTick bind. New fields on known records are additive JSON keys — strict consumers require them, lenient consumers (Go `omitempty`) may omit.
-11. **`bridge_metrics` lines must never be quarantined as `INVALID_SCHEMA`** — a metrics line bound as a GoTick has `feed=""`, so routing order is part of the contract.
+11. **`bridge_metrics` lines must never be quarantined as `INVALID_SCHEMA`** — a metrics line bound as a GoTick has `feed=""`, so routing order is part of the contract. The one exception is the M4-2 contract-version gate (rule 9): a control record whose `contract_version` is unknown/missing/0 is quarantined before routing.
 
 ## Versioning
 

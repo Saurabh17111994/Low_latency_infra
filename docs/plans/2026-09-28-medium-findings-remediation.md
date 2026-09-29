@@ -37,11 +37,11 @@ Where a body section and this list disagree, this list wins.
 | M1 — execution follow-ups (the layer under H1) | 6 | 5 | 0 | 1 | 0 | 0 | 0 |
 | M2 — ops tooling truth | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
 | M3 — compute correctness and configuration | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| M4 — ingestion gates and accounting | 6 | 3 | 0 | 3 | 0 | 0 | 0 |
+| M4 — ingestion gates and accounting | 6 | 4 | 0 | 2 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **8** | **0** | **23** | **0** | **0** | **0** |
+| **Total** | **31** | **9** | **0** | **22** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -115,9 +115,9 @@ Where a body section and this list disagree, this list wins.
   1024 in the production profiles and the daily VM profile — the VM reads the real feed)
   enforced at startup (below minimum = FATAL); document
   subscription as unconditional on a parsable, non-empty CSV meeting the minimum. (I1.) — CHG-384
-- [ ] **M4-2** — Control-record contract version validated: one `CONTROL_CONTRACT_VERSION = 2`;
+- [x] **M4-2** — Control-record contract version validated: one `CONTROL_CONTRACT_VERSION = 2`;
   unknown/missing/0 on the wire → quarantine `INVALID_SCHEMA` +
-  `CONTROL_VERSION_MISMATCH` + return — never processed as v2. (I2.)
+  `CONTROL_VERSION_MISMATCH` + return — never processed as v2. (I2.) — CHG-385
 - [x] **M4-3** — Queue listener wired: `queues[i].setListener` for every queue; a new `RESUMED`
   level with episode hysteresis; 80% → readiness false (`HealthProbe` queue dimension); 100% →
   readiness false + the H2-2 shared handler exactly once (the rejected offer is counted at the
