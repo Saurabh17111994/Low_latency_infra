@@ -88,7 +88,7 @@
     {
       "table_name": "Positions",
       "ddl_path": "10_positions.sql",
-      "ddl_sha256": "d82041bd5837c56329eb92a4b7bfdec88e4ae5906e96a16175f005299f45fee6",
+      "ddl_sha256": "e58601213674fc206cc120f38cecb51487f5e89c2c95e2dd9f7a95f7ee3cee81",
       "table_kind": "KV",
       "primary_key": "position_id",
       "bucket_key": null,
@@ -326,7 +326,7 @@
     {
       "table_name": "Position_State",
       "ddl_path": "29_position_state.sql",
-      "ddl_sha256": "adef59a9db0ae285bbe675f628928764c14261c7cfea941f17369336c4b5a202",
+      "ddl_sha256": "4a5cd03ed0aa482fc956a51c083fee01fb1c10a22593114bd8f39561fcd97efa",
       "table_kind": "KV",
       "primary_key": "account_scope_id, instrument_token",
       "bucket_key": null,

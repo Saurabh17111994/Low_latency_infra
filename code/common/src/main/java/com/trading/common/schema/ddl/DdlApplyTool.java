@@ -679,13 +679,20 @@ public final class DdlApplyTool {
 
     /**
      * Predict, from the DDL alone, whether the raw client will be unable to
-     * upsert this table (the COMPAT-FLUSS-005 failing cell): a KV table with a
-     * COMPOSITE primary key whose bucket key equals the PK (default bucket
-     * key). With the (cluster-inherited) iceberg datalake format, such tables
-     * use {@code IcebergKeyEncoder} for the PK, which requires exactly one
-     * field; {@code kv.format-version=2} + a single-field subset bucket key
-     * lifts it. Single-field-PK tables and composite-PK tables with a subset
-     * bucket key are always raw-client writable.
+     * upsert this table (the COMPAT-FLUSS-005 failing cells). With the
+     * (cluster-inherited) iceberg datalake format, {@code IcebergKeyEncoder}
+     * requires exactly one key field:
+     *
+     * <ul>
+     *   <li>a composite PK whose bucket key equals the PK (the default) fails
+     *       at every {@code table.kv.format-version};</li>
+     *   <li>a composite PK with a proper-subset bucket key is writable ONLY
+     *       with {@code table.kv.format-version=2} — L6-2: this predicate
+     *       previously ignored the option and called every subset table
+     *       writable (29_position_state.sql had the subset bucket key but only
+     *       a comment about the format version);</li>
+     *   <li>single-field-PK tables are always raw-client writable.</li>
+     * </ul>
      */
     static boolean isPredictedLimited(DdlText.ParsedDdl ddl) {
         if (ddl.primaryKey().size() <= 1) {
@@ -696,7 +703,10 @@ public final class DdlApplyTool {
         for (String part : ddl.bucketKey().split(",")) {
             bucket.add(part.trim());
         }
-        return pk.equals(bucket);
+        if (pk.equals(bucket)) {
+            return true;
+        }
+        return !"2".equals(ddl.options().get("table.kv.format-version"));
     }
 
     /**

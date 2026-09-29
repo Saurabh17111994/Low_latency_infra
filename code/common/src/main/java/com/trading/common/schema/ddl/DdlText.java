@@ -75,8 +75,59 @@ public final class DdlText {
     private static final Pattern OPTION =
             Pattern.compile("'([a-zA-Z0-9_.-]+)'\\s*=\\s*'([^']*)'");
 
+    /**
+     * Remove {@code --} line comments outside single-quoted strings — the Java
+     * twin of {@code ddl_apply.py:strip_sql_comments} (M6-1) added in L6-2.
+     * Quote-aware in both directions: a comment may contain quotes, and a
+     * quoted value may contain {@code --}. A comment's text is never SQL: no
+     * option, primary key, or table name may come from it.
+     *
+     * <p>Measured: {@code 29_position_state.sql} carried
+     * {@code -- ... add 'table.kv.format-version' = '2' ...} inside its WITH
+     * block, and the option regex read it as present while the comment-aware
+     * Python manifest parser did not — two parses of one file disagreed.
+     */
+    static String stripSqlComments(String text) {
+        StringBuilder out = new StringBuilder(text.length());
+        boolean inQuote = false;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (inQuote) {
+                if (c == '\'') {
+                    if (i + 1 < text.length() && text.charAt(i + 1) == '\'') {
+                        out.append("''"); // escaped quote inside a string
+                        i++;
+                        continue;
+                    }
+                    inQuote = false;
+                }
+                out.append(c);
+                continue;
+            }
+            if (c == '\'') {
+                inQuote = true;
+                out.append(c);
+                continue;
+            }
+            if (c == '-' && i + 1 < text.length() && text.charAt(i + 1) == '-') {
+                int newline = text.indexOf('\n', i);
+                if (newline == -1) {
+                    break;
+                }
+                out.append('\n');
+                i = newline;
+                continue;
+            }
+            out.append(c);
+        }
+        return out.toString();
+    }
+
     /** Parse a DDL file's text into the model; throws on structural problems. */
     public static ParsedDdl parse(String text, String sourcePath) {
+        // L6-2: comments are not SQL — strip them before any pattern runs, so
+        // a commented-out option can never become a real one.
+        text = stripSqlComments(text);
         Matcher create = CREATE_TABLE.matcher(text);
         if (!create.find()) {
             throw new IllegalArgumentException(sourcePath + ": no CREATE TABLE");

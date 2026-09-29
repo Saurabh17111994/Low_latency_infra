@@ -133,6 +133,12 @@ class DdlApplyToolStatusTest {
         return new ParsedDdl("t", List.of(), pk, 4, bucketKey, Map.of(), "t.sql");
     }
 
+    private static ParsedDdl ddl(List<String> pk, String bucketKey, String kvFormatVersion) {
+        Map<String, String> options = kvFormatVersion == null
+                ? Map.of() : Map.of("table.kv.format-version", kvFormatVersion);
+        return new ParsedDdl("t", List.of(), pk, 4, bucketKey, options, "t.sql");
+    }
+
     @Test
     @DisplayName("prediction: composite PK + default bucket key (= PK) is the limited cell")
     void compositeDefaultBucketKeyIsPredictedLimited() {
@@ -147,14 +153,31 @@ class DdlApplyToolStatusTest {
     }
 
     @Test
+    @DisplayName("prediction: a subset bucket key without kv.format-version=2 is the limited cell")
+    void compositeSubsetWithoutFormatVersionIsPredictedLimited() {
+        // L6-2: the subset cell is writable only WITH the format version — the
+        // matrix cell "v1 + single-field subset bucket key" fails with the same
+        // IcebergKeyEncoder error as the default-bucket cells.
+        assertTrue(DdlApplyTool.isPredictedLimited(ddl(
+                List.of("account_scope_id", "instrument_token"), "account_scope_id")),
+                "Position_State shape without kv.format-version=2 must be predicted limited");
+        assertTrue(DdlApplyTool.isPredictedLimited(ddl(
+                List.of("account_scope_id", "instrument_token"), "account_scope_id", "1")),
+                "v1 + subset bucket key is the failing matrix cell");
+        assertFalse(DdlApplyTool.isPredictedLimited(ddl(
+                List.of("account_scope_id", "instrument_token"), "account_scope_id", "2")),
+                "v2 + subset bucket key is the writable matrix cell");
+    }
+
+    @Test
     @DisplayName("prediction: composite PK + subset bucket key or single-field PK are writable")
     void compositeSubsetAndSinglePkNotPredictedLimited() {
         assertFalse(DdlApplyTool.isPredictedLimited(ddl(
-                List.of("instrument_token", "window_start"), "instrument_token")),
-                "feature_candles_15s shape (subset bucket key) must NOT be limited");
+                List.of("instrument_token", "window_start"), "instrument_token", "2")),
+                "feature_candles_15s shape (subset bucket key + v2) must NOT be limited");
         assertFalse(DdlApplyTool.isPredictedLimited(ddl(
-                List.of("instrument_token", "manifest_version"), "instrument_token")),
-                "instruments shape (subset bucket key) must NOT be limited");
+                List.of("instrument_token", "manifest_version"), "instrument_token", "2")),
+                "instruments shape (subset bucket key + v2) must NOT be limited");
         assertFalse(DdlApplyTool.isPredictedLimited(ddl(List.of("halt_request_id"),
                 "halt_request_id")),
                 "single-field PK (Safety_Halt_Requests) must NOT be limited");

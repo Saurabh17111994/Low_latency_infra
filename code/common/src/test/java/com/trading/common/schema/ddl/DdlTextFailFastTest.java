@@ -1,6 +1,7 @@
 package com.trading.common.schema.ddl;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -94,5 +95,35 @@ class DdlTextFailFastTest {
                 DdlText.toDescriptor(parsed).getProperties().get("table.datalake.enabled"));
         assertEquals("true", DdlText.toDescriptor(parsed, false).getProperties()
                 .get("table.datalake.enabled"));
+    }
+
+    @Test
+    @DisplayName("a commented-out option is not an option (L6-2)")
+    void commentedOptionIsNotAnOption() {
+        DdlText.ParsedDdl parsed = DdlText.parse(
+                "CREATE TABLE t (\na BIGINT NOT NULL\n) WITH (\n"
+                        + "'bucket.num' = '1',\n"
+                        + "'bucket.key' = 'a', -- add 'table.kv.format-version' = '2' later\n"
+                        + "'table.log.ttl' = '1d'\n)",
+                "p.sql");
+        assertFalse(parsed.options().containsKey("table.kv.format-version"),
+                "a commented option must never be applied — 29_position_state.sql carried "
+                        + "the format version only in a comment");
+        assertEquals("1d", parsed.options().get("table.log.ttl"),
+                "the option after the comment must survive");
+    }
+
+    @Test
+    @DisplayName("quoted -- and a comment's PRIMARY KEY never leak into SQL (L6-2)")
+    void quotesAndCommentsDoNotLeakIntoSql() {
+        DdlText.ParsedDdl parsed = DdlText.parse(
+                "CREATE TABLE t (\na BIGINT NOT NULL,\nb BIGINT NOT NULL -- PRIMARY KEY (b)\n"
+                        + ") WITH (\n'bucket.num' = '1',\n'bucket.key' = 'a',\n"
+                        + "'table.log.ttl' = '1d -- keep'\n)",
+                "p.sql");
+        assertEquals(List.of(), parsed.primaryKey(),
+                "a comment's PRIMARY KEY must not become the table's PK");
+        assertEquals("1d -- keep", parsed.options().get("table.log.ttl"),
+                "a quoted value may contain -- without being truncated");
     }
 }
