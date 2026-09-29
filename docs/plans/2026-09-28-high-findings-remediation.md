@@ -36,9 +36,9 @@ Where a body section and this list disagree, this list wins.
 | H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
 | H3 — production deck parity with the dev deck | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
 | H4 — evidence and release gates must not lie | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
-| H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
+| H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
 | H6 — machine facts and their drift guard | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
-| **Total** | **22** | **19** | **0** | **3** | **0** | **0** | **0** |
+| **Total** | **22** | **22** | **0** | **0** | **0** | **0** | **0** |
 
 #### H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth
 
@@ -126,16 +126,16 @@ Where a body section and this list disagree, this list wins.
 
 #### H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery
 
-- [ ] **H5-1** — N7 dedup state is bounded: `strategy-host-emitted-ids` stays as read-only legacy;
+- [x] **H5-1** — N7 dedup state is bounded: `strategy-host-emitted-ids` stays as read-only legacy;
   new ids go to one `MapState` per rule (`strategy-host-emitted-ids-v2/<ruleId>`); dedup reads both;
   prune only the triggering rule's map after 16 new ids (oldest `detTs`, null never evicted); no
-  full scan per emission; old checkpoints restore unchanged. (P1-7.)
-- [ ] **H5-2** — Mock PEAK honors the DEC-045 20/s/instrument cap: local `PER_INSTRUMENT_CAP=20`;
+  full scan per emission; old checkpoints restore unchanged. (P1-7.) — CHG-402
+- [x] **H5-2** — Mock PEAK honors the DEC-045 20/s/instrument cap: local `PER_INSTRUMENT_CAP=20`;
   constructor rejects a higher rate; PEAK no longer re-derives its profile from the rate; the
-  workload keeps the 51–54 ms arrival shape. (P1-9.)
-- [ ] **H5-3** — Per-session single-writer mock delivery: bounded outbox (64 batches) + one daemon
+  workload keeps the 51–54 ms arrival shape. (P1-9.) — CHG-403
+- [x] **H5-3** — Per-session single-writer mock delivery: bounded outbox (64 batches) + one daemon
   writer per client; `offer` drops on overflow (marked); a 5 s no-progress watchdog evicts stalled
-  sessions; the shared delivery pool is deleted. (P1-10.)
+  sessions; the shared delivery pool is deleted. (P1-10.) — CHG-404
 
 #### H6 — machine facts and their drift guard
 
