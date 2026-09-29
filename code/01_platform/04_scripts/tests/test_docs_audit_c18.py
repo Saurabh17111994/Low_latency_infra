@@ -187,3 +187,10 @@ def test_the_check_fails_when_no_shell_block_exists_anywhere(tmp_path, monkeypat
         assert docs_audit.failures, "a set with no shell block at all must not pass silently"
     finally:
         docs_audit.failures[:] = saved
+
+
+def test_the_daily_vm_guide_is_in_the_runbook_set():
+    # M2-1: the guide carries the day's paste path (the one provisioning wrapper),
+    # so it is checked like the operator runbooks.
+    docs = docs_audit.runbook_docs()
+    assert any(d.endswith("CLOUDPE_DAILY_VM.md") for d in docs), docs

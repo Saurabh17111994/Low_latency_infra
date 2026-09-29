@@ -44,7 +44,7 @@ public network, your SSH key).
 ```bash
 sudo bash /opt/trading/streaming_project/code/01_platform/04_scripts/vm-golden-build.sh \
   --repo /opt/trading/streaming_project \
-  --r2-endpoint https://<account-id>.r2.cloudflarestorage.com \
+  --r2-endpoint "https://${R2_ACCOUNT_ID:?set R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
   --r2-bucket tradingticks-aug-2026
 ```
 
@@ -74,7 +74,8 @@ accidental default — `day_run.resolve_universe` still refuses `UNIVERSE=full` 
 List exactly what the stack needs (run this on the dev PC):
 
 ```bash
-cd <repo>
+: "${REPO:?set REPO to the repo checkout}"
+cd "$REPO"
 COMPOSE_PROFILES=execution-t3 docker compose \
   --env-file code/01_platform/01_docker/.env \
   --env-file code/01_platform/01_docker/secrets.env \
@@ -84,8 +85,13 @@ COMPOSE_PROFILES=execution-t3 docker compose \
 Stream them to the VM (one command; nothing is written to disk on the PC):
 
 ```bash
-docker save $(<the list above>) | zstd -T0 -1 | \
-  ssh saurabh@<vm> 'zstd -dc | sudo docker load'
+: "${REPO:?set REPO to the repo checkout}" "${VM_HOST:?set VM_HOST to the VM hostname}"
+cd "$REPO"
+docker save $(COMPOSE_PROFILES=execution-t3 docker compose \
+    --env-file code/01_platform/01_docker/.env \
+    --env-file code/01_platform/01_docker/secrets.env \
+    -f code/01_platform/01_docker/docker-compose.yml config --images | sort -u) | \
+  zstd -T0 -1 | ssh "saurabh@$VM_HOST" 'zstd -dc | sudo docker load'
 ```
 
 (The VM needs `zstd`; Docker's install step in §2.3 already added it.)
@@ -112,7 +118,7 @@ The image is the artifact. Rebuild it when code or images change (repeat
 | 1 | Create a VM **from the image** (dashboard; §5 has the API note) |
 | 2 | Inject secrets (never baked into the image): `scp code/01_platform/01_docker/secrets.env root@<vm>:/opt/trading/streaming_project/code/01_platform/01_docker/secrets.env` |
 | 3 | Start: `cd /opt/trading/streaming_project && make day ARGS="start"` — fresh start (`ALLOW_FRESH=1` from `.env.vm`), ready in ~2–4 min (87 s measured software path) |
-| 4 | Provision observability — a fresh OpenObserve starts **empty**: `python3 code/01_platform/04_scripts/o2-provision.py` (destination + dashboards + 47 rules) then `python3 code/01_platform/04_scripts/seed_alerts.py` (position-state + storage/disk rules). Off-session, a few metric-stream rules 404 (they need streams the signal job only emits when signals flow) — the disk/ING/INFRA safety rules are already in; re-run when the feed is live. Without this the day runs blind — measured 2026-09-28: zero alerts loaded while the data disk reached 85.13% |
+| 4 | Provision observability — a fresh OpenObserve starts **empty**: `bash code/01_platform/04_scripts/provision-observability.sh` (destination + dashboards + 47 rules + storage/disk alerts + retention; refuses without `secrets.env` and derives `O2_AUTH_BASIC` from `O2_PASSWORD`). Off-session, a few metric-stream rules are deferred (they need streams the signal job only emits when signals flow) — the disk/ING/INFRA safety rules are already in; re-run when the feed is live. Without this the day runs blind — measured 2026-09-28: zero alerts loaded while the data disk reached 85.13% |
 | 5 | Start lake tiering: `bash code/01_platform/04_scripts/tiering-start.sh` — without it the day's parquet never reaches R2 (idempotent; check `--status`) |
 | 6 | Let the day run. At **15:45 IST** the `trading-eod` unit runs the EOD controller **in the `eod-controller` compose service** (`EOD_RUNNER=compose` from `.env.vm` — the VM has no host JDK/m2) with `EOD_OFFLOAD=lake`, and records the success to `/var/lib/trading/eod-last-run` |
 | 7 | After the archive: `make day ARGS="stop"` — the gate refuses until today's record exists ("EOD archive confirmed …"), then the stack goes down |
@@ -144,4 +150,4 @@ launch is boring enough to script.
 | `start` refused: "no savepoint/checkpoint" | `.env.vm` missing (no `ALLOW_FRESH=1`) | `cp .env.vm.example .env.vm` |
 | "no RUNNING tiering job" | the day's parquet will not reach R2 | `bash code/01_platform/04_scripts/tiering-start.sh`; if it dies, `docs/06_operations/07-lake-archive-ops.md` §Recovery |
 | compose starts **building** an image | the image set was not loaded | repeat §2.4, then rebuild the golden image |
-| No alert fires all day | the fresh OpenObserve was never provisioned | §3 step 4 (`o2-provision.py` + `seed_alerts.py`) |
+| No alert fires all day | the fresh OpenObserve was never provisioned | §3 step 4 (`provision-observability.sh`) |

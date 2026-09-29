@@ -1226,6 +1226,9 @@ def runbook_docs():
     """The runbooks the operator pastes from. C18 fails when this set is empty,
     so a rename cannot quietly turn the check into a pass."""
     docs = [os.path.join(DOCS_DIR, "05_deployment", "PROD_VM_PROVISIONING.md")]
+    # M2-1: the daily-VM guide is an operator runbook too — it carries the paste
+    # path for the whole day, so its shell blocks are checked like the others.
+    docs += [os.path.join(DOCS_DIR, "05_deployment", "CLOUDPE_DAILY_VM.md")]
     docs += sorted(glob.glob(os.path.join(DOCS_DIR, "06_operations", "*.md")))
     return docs
 
