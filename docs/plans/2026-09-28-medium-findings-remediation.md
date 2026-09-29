@@ -35,13 +35,13 @@ Where a body section and this list disagree, this list wins.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | M1 — execution follow-ups (the layer under H1) | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
-| M2 — ops tooling truth | 5 | 3 | 0 | 2 | 0 | 0 | 0 |
+| M2 — ops tooling truth | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
 | M3 — compute correctness and configuration | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | M4 — ingestion gates and accounting | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **15** | **0** | **16** | **0** | **0** | **0** |
+| **Total** | **31** | **17** | **0** | **14** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -76,19 +76,19 @@ Where a body section and this list disagree, this list wins.
   `secrets.env`, sources `.env` + `secrets.env`, derives `O2_AUTH_BASIC` from `O2_PASSWORD` when
   absent, then runs `o2-provision.py` and `seed_alerts.py` under `set -e`; the daily guide's step 4
   becomes that script and the guide joins the docs-audit runbook set. (O1.) — CHG-407
-- [ ] **M2-2** — EOD catch-up and honest heartbeat: durable state records the passed slot and
+- [x] **M2-2** — EOD catch-up and honest heartbeat: durable state records the passed slot and
   outcome; a missed/failed 15:45 slot is retried (catch-up at start, retry every
   `EOD_RETRY_DELAY_SEC` within the trading day); `--check-heartbeat --last-run` fails when the
   latest passed slot has no success stamp (scheduler-dead vs not-archived distinguished).
-  (O2; DECIDED 2026-09-28 — catch-up run + same-day retries.)
+  (O2; DECIDED 2026-09-28 — catch-up run + same-day retries.) — CHG-409
 - [x] **M2-3** — `o2-provision.py` stops treating unreadable as empty: a non-200/undecodable list
   read is fatal **before any POST**; stream-not-found POSTs are counted `deferred` (exit 0);
   every other POST, destination, or retention failure is fatal; `main(argv) -> int`. (O3.) — CHG-406
 - [x] **M2-4** — `make up` fails closed when the catalog guard fails
   (`|| { echo …; exit 1; }`), no longer swallowing the verdict with `|| echo "!!!"`. (O4.) — CHG-405
-- [ ] **M2-5** — `day_run` probes fail closed: `EnvProbe(values, failures)`, `log_errors`/
+- [x] **M2-5** — `day_run` probes fail closed: `EnvProbe(values, failures)`, `log_errors`/
   `effective_tokens` raise `ProbeUnavailable`, facts record probe failures, and I6/I7/I8 require
-  “not failed” (amber, not green). Lands with/after C2-1 (same function). (O5.)
+  “not failed” (amber, not green). Lands with/after C2-1 (same function). (O5.) — CHG-408
 
 #### M3 — compute correctness and configuration
 
