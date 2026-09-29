@@ -837,6 +837,17 @@ Short operational Fluss TTL and policy-controlled audit retention are separate c
 
 ### Test requirements
 
+**Gate step 16 conflict note (L3-2, 2026-09-29).** The 2026-09-18 certification-hygiene decision
+("keep step 16 and its selection exactly as they are … no line of `run-monday-gates.sh` is touched",
+`docs/plans/2026-09-18-certification-hygiene.md:246-251`) is **partially superseded**: step 16's
+existing suite, `-Dtest` selection, exclusions and log line stay byte-identical, and L3-2 appends a
+second targeted invocation (`COMPUTE_INT_TEST_P6=true`, `FLUSS_BOOTSTRAP`/`FLUSS_BOOTSTRAP_SERVERS`,
+`SignalJobOperatorUidTest,TradeDecisionsSinksUidTest`) guarded by `require_class_clean`
+(`N>0, Failures: 0, Errors: 0, Skipped: 0`). The decision's core — no renumbering, no `--steps`
+change, no change to the default selection — stands; what changes is that the restore-graph UID pins
+are no longer *written but not exercised* in a default `make gate` (the gap the decision itself
+named). See CHG-421.
+
 #### Implementation checklist
 
 - [x] Schema/storage test suite implemented (DDL parse/apply, parity, routing skew, immutable dup/mutation, KV stale, changelog/partial-update, checkpoint/replay, clean-break, EOD, 7-yr reconstruction).

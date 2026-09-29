@@ -159,6 +159,7 @@ SHUTDOWN_LOG="$OUT_DIR/shutdown-regression.log"
 GATEWAY_LOG="$OUT_DIR/gateway-suite.log"
 NAUTILUS_LOG="$OUT_DIR/nautilus-suite.log"
 COMPUTE_LOG="$OUT_DIR/compute-suite.log"
+COMPUTE_UID_PIN_LOG="$OUT_DIR/compute-uid-pin.log"
 MOCK_ARROW_LOG="$OUT_DIR/mock-arrow-suite.log"
 COMPOSE_CONFIG_LOG="$OUT_DIR/compose-config.log"
 DOCKER_BUILD_LOG="$OUT_DIR/docker-build-smoke.log"
@@ -322,6 +323,25 @@ require_class_ran() { # $1 = maven log, $2 = fully.qualified.Class, $3 = step la
 	hits="$(strip_ansi "$1" | grep -cE "^\[INFO\] Tests run: [1-9][0-9]*, .* -- in $2$")" || hits=0
 	if [ "${hits:-0}" -lt 1 ]; then
 		echo "FAIL: $3 — $2 ran no tests (renamed, moved, or dropped by surefire); a BUILD SUCCESS without it is not a pass — see $1" | tee -a "$SUMMARY"
+		gate_fail
+	fi
+}
+# L3-2: a class that RAN but skipped is not proof. `require_class_ran` accepts
+# "Skipped: N" as long as the class reported a line; the UID-pin classes exist to
+# run against a live Fluss (their @EnabledIfEnvironmentVariable gate + a
+# connection-assumption that skips when the cluster is down), so a dead cluster
+# or a missing COMPUTE_INT_TEST_P6 must fail here, not certify as "Skipped: 2".
+# This is require_class_ran plus the skipped count pinned to 0.
+require_class_clean() { # $1 = maven log, $2 = fully.qualified.Class, $3 = step label
+	local line
+	line="$(strip_ansi "$1" | grep -E "^\[INFO\] Tests run: .* -- in $2$" | tail -1)" || line=""
+	if [ -z "$line" ]; then
+		echo "FAIL: $3 — $2 reported no class summary (renamed, moved, or dropped by surefire) — see $1" | tee -a "$SUMMARY"
+		gate_fail
+		return
+	fi
+	if ! printf '%s\n' "$line" | grep -qE 'Tests run: [1-9][0-9]*, Failures: 0, Errors: 0, Skipped: 0,'; then
+		echo "FAIL: $3 — $2 must run clean (N>0, 0 failures/errors/skips): $line — see $1" | tee -a "$SUMMARY"
 		gate_fail
 	fi
 }
@@ -1049,6 +1069,33 @@ if ! grep -q "BUILD SUCCESS" "$COMPUTE_LOG"; then
 fi
 require_tests_run "$COMPUTE_LOG" "step 16 (compute suite)"
 echo "PASS: compute suite ($(grep -aoE 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' "$COMPUTE_LOG" | tail -1))" | tee -a "$SUMMARY"
+
+# L3-2: the restore-graph UID pins actually run. SignalJobOperatorUidTest and
+# TradeDecisionsSinksUidTest are @EnabledIfEnvironmentVariable(COMPUTE_INT_TEST_P6)
+# — the default suite above skips them, and the operator test additionally skips
+# on an unreachable Fluss (assumeTrue), so a renamed UID or a dead cluster could
+# certify green while the checkpoint-restore anchors drift. Targeted second
+# invocation inside step 16 (no new numbered step, the existing selection
+# untouched); `require_class_clean` turns a skip into a failure. `-Pdrill-reports`
+# keeps the live per-class XMLs out of the default reports dir, which C6 sums as
+# the plain-suite triple (the pom's drill-reports profile comment). Conflict with
+# the 2026-09-18 certification-hygiene decision ("no line of run-monday-gates.sh
+# is touched") recorded in 01-foundation.md.
+if ! (cd "$COMPUTE_DIR" && COMPUTE_INT_TEST_P6=true \
+	FLUSS_BOOTSTRAP="${FLUSS_BOOTSTRAP:-localhost:9123}" \
+	FLUSS_BOOTSTRAP_SERVERS="${FLUSS_BOOTSTRAP_SERVERS:-localhost:9123}" \
+	timeout -k 60 "$JAVA_TIMEOUT_SEC" mvn -o test -Pdrill-reports \
+	"-Dtest=SignalJobOperatorUidTest,TradeDecisionsSinksUidTest") >"$COMPUTE_UID_PIN_LOG" 2>&1; then
+	echo "FAIL: compute UID-pin suite — see $COMPUTE_UID_PIN_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+if ! grep -q "BUILD SUCCESS" "$COMPUTE_UID_PIN_LOG"; then
+	echo "FAIL: compute UID-pin suite did not report BUILD SUCCESS — see $COMPUTE_UID_PIN_LOG" | tee -a "$SUMMARY"
+	gate_fail
+fi
+require_class_clean "$COMPUTE_UID_PIN_LOG" "com.trading.compute.signaljob.SignalJobOperatorUidTest" "step 16 (UID pins)"
+require_class_clean "$COMPUTE_UID_PIN_LOG" "com.trading.compute.signaljob.TradeDecisionsSinksUidTest" "step 16 (UID pins)"
+echo "PASS: compute UID pins ($(grep -aoE 'Tests run: [0-9]+, Failures: [0-9]+, Errors: [0-9]+, Skipped: [0-9]+' "$COMPUTE_UID_PIN_LOG" | tail -1))" | tee -a "$SUMMARY"
 fi
 
 # Step 17 (2026-09-14): the pin discipline the rest of the certificate assumes. `gate-fast` has

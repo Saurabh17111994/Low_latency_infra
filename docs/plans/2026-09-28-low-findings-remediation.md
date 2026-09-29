@@ -34,11 +34,11 @@ Where a body section and this list disagree, this list wins.
 |---|---|---|---|---|---|---|---|
 | L1 — execution: mass-status honesty | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
 | L2 — ops tooling: lint scope and tracker wiring | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 1 | 0 | 3 | 0 | 0 | 0 |
+| L3 — compute: doc currency, gate pins, watchdog, tick features | 4 | 2 | 0 | 2 | 0 | 0 | 0 |
 | L4 — ingestion: config doc parity and final-report atomicity | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | L5 — common/mock: semantics and naming truth | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | L6 — infra/DDL: guards, parity, docs | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
-| **Total** | **17** | **4** | **0** | **13** | **0** | **0** | **0** |
+| **Total** | **17** | **5** | **0** | **12** | **0** | **0** | **0** |
 
 #### L1 — execution: mass-status honesty
 
@@ -69,12 +69,12 @@ Where a body section and this list disagree, this list wins.
   and recipe export with `DEDUP_WINDOW_ENTRIES=200` (DEC-054), keep `SIG-UNIT-003` only as the
   requirement id, and extend the banner so all later TTL mentions are historical; guarded by a
   dossier-currency test (joins M3-4's parity test if that lands first). — CHG-420
-- [ ] **L3-2** — The restore-graph UID pins actually run in the gate: step 16 gains a targeted
+- [x] **L3-2** — The restore-graph UID pins actually run in the gate: step 16 gains a targeted
   second invocation with `COMPUTE_INT_TEST_P6=true` + `FLUSS_BOOTSTRAP(_SERVERS)` running
   `SignalJobOperatorUidTest,TradeDecisionsSinksUidTest`, plus a `require_class_clean` guard
   asserting `N>0 / Failures: 0 / Errors: 0 / Skipped: 0` per class — a dead cluster or missing
   flag fails instead of skipping. Record the conflict with the 2026-09-18 decision not to touch
-  step 16 in `01-foundation.md`.
+  step 16 in `01-foundation.md`. — CHG-421
 - [ ] **L3-3** — Idle-watchdog state is per subtask, not per construction: introduce
   `SourceIdleWatchdogState` (episode latch + job last-event clock) held by a serializable
   supplier; the first generator created in a subtask stamps it and every later split generator on
