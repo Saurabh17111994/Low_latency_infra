@@ -70,6 +70,15 @@ pub trait RoutePostbackEmitter: Send + Sync {
 /// same `ServerState::safety_halt`.
 pub type SessionHalt = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// Hooks the session installs on its transport (M1-3 S2). The intake loop calls `on_drop`
+/// once per live stream that ended; the session's callback counts the missed window and
+/// reconciles once (never a replay buffer).
+#[derive(Default)]
+pub struct TransportHooks {
+    /// Set by the session once it exists; called on every dropped live stream.
+    pub on_drop: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+}
+
 /// The single bridge session (M1-3).
 pub struct BridgeSession {
     inner: AsyncMutex<SessionInner>,
@@ -116,6 +125,19 @@ impl SessionHandle {
             halt,
             emitter,
         }))
+    }
+
+    /// M1-3 S2: installs the drop hook on the transport that feeds this session. The callback
+    /// counts the missed window and reconciles once per dropped stream.
+    pub fn install_transport_hooks(&self, hooks: &Arc<TransportHooks>) {
+        let weak = Arc::downgrade(&self.0);
+        if let Ok(mut slot) = hooks.on_drop.lock() {
+            *slot = Some(Arc::new(move || {
+                if let Some(session) = weak.upgrade() {
+                    tokio::spawn(session.reconcile_after_reconnect());
+                }
+            }));
+        }
     }
 }
 
@@ -204,6 +226,38 @@ impl BridgeSession {
     fn halt(&self, reason: &str) {
         if let Some(halt) = &self.halt {
             halt(reason);
+        }
+    }
+
+    /// M1-3 S2: a live report stream dropped — run the Tier-11 reconcile once with the refs the
+    /// registry knows. Postbacks lost in the gap are resolved by query; nothing is replayed or
+    /// invented. The reconcile rides the HTTP command path, so it does not wait for the report
+    /// stream to reconnect.
+    async fn reconcile_after_reconnect(self: Arc<Self>) {
+        let refs: Vec<String> = self
+            .registry
+            .lock()
+            .map(|registry| {
+                registry
+                    .iter()
+                    .filter(|(_, owner)| matches!(owner, ReportOwner::Node))
+                    .map(|(ref_, _)| ref_.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut handle = SessionHandle(Arc::clone(&self));
+        match crate::engine::reconcile::reconcile_execution_mass_status(&mut handle, &refs).await {
+            Ok(report) => tracing::info!(
+                refs = refs.len(),
+                orders = report.orders.len(),
+                mass_envelope_id = %report.mass_envelope_id,
+                "bridge session: reconciled after a dropped report stream"
+            ),
+            Err(e) => tracing::warn!(
+                refs = refs.len(),
+                error = %e,
+                "bridge session: reconcile after a dropped report stream failed"
+            ),
         }
     }
 }
@@ -359,6 +413,7 @@ mod tests {
         registry: Registry,
         halt: Arc<HaltRecorder>,
         emitted: mpsc::UnboundedReceiver<(ReportEnvelope, RouteContext)>,
+        sent: Arc<Mutex<Vec<CommandEnvelope>>>,
     }
 
     fn harness() -> (Harness, SessionHandle) {
@@ -366,6 +421,7 @@ mod tests {
         let connects = Arc::clone(&transport.connects);
         let take_calls = Arc::clone(&transport.take_calls);
         let report_tx = transport.report_tx.clone();
+        let sent = Arc::clone(&transport.sent);
         let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
         let halt = Arc::new(HaltRecorder::default());
         let halt_seam: SessionHalt = {
@@ -393,6 +449,7 @@ mod tests {
                 registry,
                 halt,
                 emitted: emitted_rx,
+                sent,
             },
             session,
         )
@@ -545,5 +602,64 @@ mod tests {
             .expect("emitter channel open");
         assert_eq!(got.0.event_type.as_deref(), Some("order_canceled"));
         assert!(!h.halt.halted.load(Ordering::Relaxed));
+    }
+
+    /// M1-3 S2: a dropped report stream reconciles once with the refs the registry knows — one
+    /// query per node ref plus the mass-status command; route refs are not queried (their parity
+    /// authority is the gateway projection, not the node's order state).
+    #[tokio::test]
+    async fn drop_hook_reconciles_once_with_the_registry_refs() {
+        let (h, session) = harness();
+        session.clone().connect().await.unwrap();
+        h.registry
+            .lock()
+            .unwrap()
+            .insert("node-ref-a".to_string(), ReportOwner::Node);
+        h.registry
+            .lock()
+            .unwrap()
+            .insert("node-ref-b".to_string(), ReportOwner::Node);
+        h.registry.lock().unwrap().insert(
+            "route-ref-x".to_string(),
+            ReportOwner::Route(Box::new(route_ctx())),
+        );
+
+        let hooks = Arc::new(TransportHooks::default());
+        session.install_transport_hooks(&hooks);
+        let on_drop = hooks
+            .on_drop
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the session must install the drop hook");
+        // The transport calls this on every dropped live stream (pinned by the transport test).
+        on_drop();
+
+        let mut sent = Vec::new();
+        for _ in 0..200 {
+            sent = h.sent.lock().unwrap().clone();
+            if sent.len() >= 3 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            sent.len(),
+            3,
+            "one query per node ref + the mass command, nothing else: {sent:?}"
+        );
+        let mut queried: Vec<&str> = sent
+            .iter()
+            .filter(|env| env.command == "query-order")
+            .map(|env| env.client_order_ref.as_str())
+            .collect();
+        queried.sort_unstable();
+        assert_eq!(queried, vec!["node-ref-a", "node-ref-b"]);
+        assert_eq!(
+            sent.iter()
+                .filter(|env| env.command == "reconcile-orders")
+                .count(),
+            1
+        );
     }
 }

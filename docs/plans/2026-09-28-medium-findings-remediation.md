@@ -34,14 +34,14 @@ Where a body section and this list disagree, this list wins.
 
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
-| M1 — execution follow-ups (the layer under H1) | 6 | 5 | 0 | 1 | 0 | 0 | 0 |
+| M1 — execution follow-ups (the layer under H1) | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 | M2 — ops tooling truth | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
 | M3 — compute correctness and configuration | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | M4 — ingestion gates and accounting | 6 | 6 | 0 | 0 | 0 | 0 | 0 |
 | M5 — DDL/mock parity pins | 2 | 0 | 0 | 2 | 0 | 0 | 0 |
 | M6 — infra/DDL/rehearsal parity | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | M7 — docs currency and its guard | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
-| **Total** | **31** | **11** | **0** | **20** | **0** | **0** | **0** |
+| **Total** | **31** | **12** | **0** | **19** | **0** | **0** | **0** |
 
 #### M1 — execution follow-ups (the layer under H1)
 
@@ -53,11 +53,11 @@ Where a body section and this list disagree, this list wins.
 - [x] **M1-2** — UNKNOWN escalation reports the durable halt: extract `report_durable_halt` from
   `safety_halt` and call it from `escalate_unknown_review` after the 15 s reconcile window (keep
   `operator_review_required` and the epoch bump; add `unknown_escalated` metric). (E2.) — CHG-375
-- [ ] **M1-3** — One shared report flow: a process-wide `BridgeSession` built once in `main.rs`;
+- [x] **M1-3** — One shared report flow: a process-wide `BridgeSession` built once in `main.rs`;
   the single `take_reports` dispatcher routes route-owned refs to the route handler (booked once +
   gateway `/v1/events`), node-owned refs to the node channel, and unknown refs to one-place halt.
   On socket drop: `missed_window` counter + Tier-11 reconciler on reconnect — never a fake replay
-  buffer. (E3.)
+  buffer. (E3.) — CHG-389/390/391
 - [x] **M1-4** — Fill idempotence: per-order `seen_fills` (cap 64 FIFO) keyed by
   `postback_event_id`; a duplicate is counted (`fill_duplicate`) and returned before booking;
   empty id keeps today's path plus a `fill_without_postback_id` counter. (E4.) — CHG-376

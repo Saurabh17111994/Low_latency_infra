@@ -22,6 +22,8 @@
 use std::io;
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
 use sha1::{Digest, Sha1};
@@ -32,6 +34,7 @@ use tokio::task::JoinHandle;
 
 use super::client::{BridgeClient, BridgeReportStream, SendFailure, BRIDGE_REPORT_BUFFER};
 use super::protocol::{CommandEnvelope, ReportEnvelope};
+use super::session::TransportHooks;
 
 // --- RFC 6455 opcodes (subset we speak: text, ping, pong, close). ---
 const OP_TEXT: u8 = 0x1;
@@ -577,6 +580,7 @@ async fn report_intake_loop(
     reconnect_min: Duration,
     reconnect_max: Duration,
     read_timeout: Duration,
+    hooks: Option<Arc<TransportHooks>>,
 ) {
     let mut delay = reconnect_min;
     loop {
@@ -586,6 +590,20 @@ async fn report_intake_loop(
         let clean = ws_stream_once(&url, &auth_token, &tx, read_timeout)
             .await
             .is_ok();
+        // M1-3 S2: a live stream ended (server close, read timeout, corrupt frame) — count the
+        // missed window and let the session reconcile. A failed *connect* is not a window
+        // (nothing was live to lose), and a shutdown close is not either (the receiver is gone).
+        if clean && !tx.is_closed() {
+            crate::telemetry::METRICS
+                .missed_window
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(hooks) = &hooks {
+                let on_drop = hooks.on_drop.lock().ok().and_then(|slot| slot.clone());
+                if let Some(on_drop) = on_drop {
+                    on_drop();
+                }
+            }
+        }
         tokio::time::sleep(delay).await;
         delay = if clean {
             reconnect_min
@@ -607,6 +625,9 @@ pub struct HttpBridgeClient {
     reconnect_min: Duration,
     reconnect_max: Duration,
     read_timeout: Duration,
+    /// M1-3 S2: session drop hooks (missed-window counting + reconcile). `None` (default)
+    /// keeps the pre-session behaviour: drops are not surfaced to anyone.
+    hooks: Option<Arc<TransportHooks>>,
 }
 
 impl std::fmt::Debug for HttpBridgeClient {
@@ -632,7 +653,15 @@ impl HttpBridgeClient {
             // The Go bridge pings every 20 s and expects a pong within its 60 s read window;
             // honouring a wider window here means we only drop a truly dead lifeline.
             read_timeout: Duration::from_secs(65),
+            hooks: None,
         }
+    }
+
+    /// M1-3 S2: installs the session's drop hooks on this transport.
+    #[must_use]
+    pub fn with_hooks(mut self, hooks: Arc<TransportHooks>) -> Self {
+        self.hooks = Some(hooks);
+        self
     }
 
     /// Test-facing knobs: shrink the reconnect backoff so reconnect tests run in milliseconds.
@@ -715,6 +744,7 @@ impl BridgeClient for HttpBridgeClient {
             min,
             max,
             read_timeout,
+            self.hooks.clone(),
         ));
         self.reports_tx = Some(tx);
         self.intake = Some(intake);
@@ -1062,6 +1092,98 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "no duplicate envelopes after reconnect"
+        );
+        let _ = client.disconnect().await;
+        server.await.unwrap();
+    }
+
+    /// M1-3 S2: a dropped live stream fires the session drop hook (missed window) and the
+    /// reconnect still delivers the next postback — a drop is counted and reconciled, never
+    /// replayed.
+    #[tokio::test]
+    async fn dropped_stream_fires_the_session_drop_hook_and_reconnects() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            // Lifeline 1: one fill, then slam the door (the drop under test).
+            let (mut s1, _) = listener.accept().await.unwrap();
+            let head = read_http_head(&mut s1).await;
+            s1.write_all(ws_101_reply(&head).as_bytes()).await.unwrap();
+            write_server_frame(
+                &mut s1,
+                OP_TEXT,
+                ws_report("REF-HOOK-A", "order_filled", "FILLED").as_bytes(),
+            )
+            .await
+            .unwrap();
+            drop(s1);
+            // Lifeline 2: the client must come back and receive the next postback.
+            let (mut s2, _) = listener.accept().await.unwrap();
+            let head = read_http_head(&mut s2).await;
+            s2.write_all(ws_101_reply(&head).as_bytes()).await.unwrap();
+            write_server_frame(
+                &mut s2,
+                OP_TEXT,
+                ws_report("REF-HOOK-B", "order_canceled", "CANCELED").as_bytes(),
+            )
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        });
+
+        let hooks = Arc::new(TransportHooks::default());
+        let drops = Arc::new(AtomicU64::new(0));
+        *hooks.on_drop.lock().unwrap() = Some({
+            let drops = Arc::clone(&drops);
+            Arc::new(move || {
+                drops.fetch_add(1, Ordering::Relaxed);
+            })
+        });
+        let metric_before = crate::telemetry::METRICS
+            .missed_window
+            .load(Ordering::Relaxed);
+
+        let mut client =
+            HttpBridgeClient::new(format!("http://127.0.0.1:{port}"), "tok_123".to_string())
+                .with_reconnect(Duration::from_millis(25), Duration::from_millis(100))
+                .with_hooks(Arc::clone(&hooks));
+        let mut rx = client.take_reports().expect("report stream");
+        let a = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timeout waiting for REF-HOOK-A")
+            .expect("stream closed");
+        assert_eq!(a.client_order_ref, "REF-HOOK-A");
+
+        for _ in 0..200 {
+            if drops.load(Ordering::Relaxed) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            drops.load(Ordering::Relaxed),
+            1,
+            "one dropped live stream, one hook call"
+        );
+        assert!(
+            crate::telemetry::METRICS
+                .missed_window
+                .load(Ordering::Relaxed)
+                > metric_before,
+            "the drop must count a missed window"
+        );
+
+        let b = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .expect("timeout waiting for REF-HOOK-B after reconnect")
+            .expect("stream closed");
+        assert_eq!(b.client_order_ref, "REF-HOOK-B");
+        assert_eq!(
+            drops.load(Ordering::Relaxed),
+            1,
+            "the second lifeline has not dropped yet"
         );
         let _ = client.disconnect().await;
         server.await.unwrap();

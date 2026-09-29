@@ -23,7 +23,9 @@ const HTTP_DRAIN_GRACE_SECS: u64 = 5;
 
 use nautilus_execution_service::{
     bootstrap::Runtime,
-    bridge::{BridgeClient, CommandScript, FakeBridge, HttpBridgeClient, SessionHandle},
+    bridge::{
+        BridgeClient, CommandScript, FakeBridge, HttpBridgeClient, SessionHandle, TransportHooks,
+    },
     clockwatch::{
         ChronycOffsetSource, ClockFileOffsetSource, DriftMonitor, FixedOffsetSource, OffsetSource,
     },
@@ -62,7 +64,10 @@ fn gate_reporter_from_config(config: &ServiceConfig) -> Option<GateReporter> {
 /// share it through the session handle). The offline fake is seeded with an Accept script, as
 /// the route forwarder was before the session; production uses `HttpBridgeClient`. Fail-closed
 /// by construction — the forward path is only reached when the route's gate is ENABLED.
-fn build_session_client(selection: &BridgeSelection) -> Box<dyn BridgeClient + Send> {
+fn build_session_client(
+    selection: &BridgeSelection,
+    hooks: &Arc<TransportHooks>,
+) -> Box<dyn BridgeClient + Send> {
     match selection {
         BridgeSelection::Fake => {
             let mut fake = FakeBridge::new();
@@ -72,7 +77,10 @@ fn build_session_client(selection: &BridgeSelection) -> Box<dyn BridgeClient + S
         BridgeSelection::Http {
             base_url,
             auth_token,
-        } => Box::new(HttpBridgeClient::new(base_url.clone(), auth_token.clone())),
+        } => Box::new(
+            HttpBridgeClient::new(base_url.clone(), auth_token.clone())
+                .with_hooks(Arc::clone(hooks)),
+        ),
     }
 }
 
@@ -162,12 +170,15 @@ async fn main() -> anyhow::Result<()> {
     };
     let route_emitter: Arc<dyn nautilus_execution_service::bridge::session::RoutePostbackEmitter> =
         Arc::new(http::ServerStateRouteEmitter::new(runtime.server_state()));
+    // M1-3 S2: the transport counts a dropped report stream and asks the session to reconcile.
+    let transport_hooks = Arc::new(TransportHooks::default());
     let session = SessionHandle::new(
-        build_session_client(&selection),
+        build_session_client(&selection, &transport_hooks),
         Arc::clone(&registry),
         Some(session_halt),
         Some(route_emitter),
     );
+    session.install_transport_hooks(&transport_hooks);
     let route_forwarder: http::BridgeForwarder =
         Arc::new(tokio::sync::Mutex::new(Box::new(session.clone())));
     let mut node =

@@ -16,5 +16,7 @@ pub use protocol::{
     Command, CommandEnvelope, OrderCommand, OrderCommandError, OrderType, Product, ReportEnvelope,
     ReportOutcome, TransactionType, Validity, PROTOCOL_VERSION, RECORD_COMMAND, RECORD_REPORT,
 };
-pub use session::{BridgeSession, Registry, ReportOwner, RouteContext, SessionHandle};
+pub use session::{
+    BridgeSession, Registry, ReportOwner, RouteContext, SessionHandle, TransportHooks,
+};
 pub use transport::HttpBridgeClient;

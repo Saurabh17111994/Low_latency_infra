@@ -452,6 +452,17 @@ no active attempt → PREPARED (request hash + client ref + gate epoch + fence)
   reconciliation — never auto-retry (DEC-011, DEC-030). The 15 s reconcile window escalates to
   operator review and pushes the durable `HALT` report as it fires (M1-2), counted as
   `unknown_escalated`; the durable row's 30 s lease expiry is a backstop, not the first notice.
+- One bridge session owns the single transport (M1-3): `main` builds one `BridgeSession` over the
+  selected feed, and the route forwarder and the node client share its handle — the route's
+  postbacks have a consumer for the first time (before, the route client never opened the report
+  stream, so a route fill/cancel/reject had no reader). The dispatcher routes by
+  `client_order_ref` through one registry: route refs are booked and emitted to the gateway as
+  normalized lifecycle events (spawned task, never blocking the stream); node refs are handed to
+  the node's bounded consumer channel (full/closed = halt); unknown refs and unrecognized route
+  postbacks halt in one place. The Nautilus mass-status tick pumps the node's report stream, so an
+  intraday postback is booked without waiting for shutdown. A dropped report stream counts
+  `missed_window` and triggers the Tier-11 reconcile once with the registry's node refs — query,
+  never a replay buffer.
 
 ### Order lifecycle (Nautilus OMS → normalized vocabulary)
 

@@ -40,6 +40,9 @@ pub struct Metrics {
     pub report_event_accepted: AtomicU64,
     /// Bridge postbacks whose `event_type` was missing or unrecognized (protocol-drift halt).
     pub report_event_unknown: AtomicU64,
+    /// M1-3 S2: live report streams that dropped (each drop opens a window in which a postback
+    /// could be lost; the session reconciles once per drop).
+    pub missed_window: AtomicU64,
     /// Bridge jobs abandoned at shutdown without reaching the broker.
     pub unresolved_attempt: AtomicU64,
     /// Explicit retransmissions of a bridge command beyond its first attempt (transport retries).
@@ -73,6 +76,7 @@ impl Metrics {
             report_received: self.report_received.load(Ordering::Relaxed),
             report_event_accepted: self.report_event_accepted.load(Ordering::Relaxed),
             report_event_unknown: self.report_event_unknown.load(Ordering::Relaxed),
+            missed_window: self.missed_window.load(Ordering::Relaxed),
             unresolved_attempt: self.unresolved_attempt.load(Ordering::Relaxed),
             bridge_transport_retries: self.bridge_transport_retries.load(Ordering::Relaxed),
             restart: self.restart.load(Ordering::Relaxed),
@@ -95,6 +99,7 @@ pub struct MetricsSnapshot {
     pub report_received: u64,
     pub report_event_accepted: u64,
     pub report_event_unknown: u64,
+    pub missed_window: u64,
     pub unresolved_attempt: u64,
     pub bridge_transport_retries: u64,
     pub restart: u64,
@@ -114,6 +119,7 @@ pub static METRICS: Metrics = Metrics {
     report_received: AtomicU64::new(0),
     report_event_accepted: AtomicU64::new(0),
     report_event_unknown: AtomicU64::new(0),
+    missed_window: AtomicU64::new(0),
     unresolved_attempt: AtomicU64::new(0),
     bridge_transport_retries: AtomicU64::new(0),
     restart: AtomicU64::new(0),
