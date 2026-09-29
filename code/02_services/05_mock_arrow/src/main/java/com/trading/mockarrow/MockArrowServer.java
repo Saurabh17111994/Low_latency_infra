@@ -54,8 +54,14 @@ public class MockArrowServer {
     private volatile boolean running = false;
     private ScheduledExecutorService tickScheduler;
 
-    /** R-142: decoupled per-client delivery — a stalled client can never stall tick pacing. */
-    private final ExecutorService deliveryPool;
+    /** H5-3: per-session outbox bound (batches); overflow drops and counts. */
+    static final int SESSION_OUTBOX_CAPACITY = 64;
+
+    /** H5-3: a session with no write progress for this long is evicted. */
+    static final long SESSION_STALLED_AFTER_MS = 5_000;
+
+    /** H5-3: watchdog cadence — how often stalled sessions are swept. */
+    static final long SESSION_SWEEP_INTERVAL_MS = 1_000;
 
     // Per-instrument price state for realistic walks (in paise)
     private final Map<Long, Long> prices = new ConcurrentHashMap<>();
@@ -94,19 +100,6 @@ public class MockArrowServer {
             basePrices.put(inst, base);
             prices.put(inst, base);
         }
-
-        // R-142 + P3-030: worker pool for per-client delivery (bounded: one
-        // task per client per tick batch). Created here, before any thread can
-        // run: the accept thread and the 0-delay tick scheduler both touch it,
-        // so a late assignment could be seen as null — and a throwing periodic
-        // task is permanently suppressed by the scheduler. final also
-        // guarantees safe publication.
-        this.deliveryPool = Executors.newFixedThreadPool(
-                Math.max(4, Runtime.getRuntime().availableProcessors()), r -> {
-                    Thread t = new Thread(r, "mock-arrow-delivery");
-                    t.setDaemon(true);
-                    return t;
-                });
     }
 
     public void start() throws IOException {
@@ -134,23 +127,105 @@ public class MockArrowServer {
         long intervalMs = 10;
         tickScheduler = Executors.newSingleThreadScheduledExecutor();
         tickScheduler.scheduleAtFixedRate(this::generateTicks, 0, intervalMs, TimeUnit.MILLISECONDS);
+        // H5-3: evict sessions that stopped making write progress; closing the socket
+        // unblocks a wedged write so its writer thread can exit.
+        tickScheduler.scheduleAtFixedRate(this::sweepStalledSessions,
+                SESSION_SWEEP_INTERVAL_MS, SESSION_SWEEP_INTERVAL_MS, TimeUnit.MILLISECONDS);
     }
 
     // Connected clients
     private final List<ClientSession> clients = new CopyOnWriteArrayList<>();
 
-    private record ClientSession(Socket socket, BufferedWriter writer, long connectedAt) {}
+    /**
+     * H5-3: one session owns a bounded outbox and ONE daemon writer. The retired
+     * shared pool had an unbounded queue and no write deadline, so a stalled
+     * client grew the heap and kept a pool thread forever.
+     */
+    private final class ClientSession {
+        private final Socket socket;
+        private final BufferedWriter writer;
+        private final ArrayBlockingQueue<String> outbox =
+                new ArrayBlockingQueue<>(SESSION_OUTBOX_CAPACITY);
+        private final AtomicLong lastProgressMs = new AtomicLong(System.currentTimeMillis());
+        private final AtomicLong droppedBatches = new AtomicLong();
+        private final Thread writerThread;
+        private volatile boolean writesPaused; // H5-3 test seam only
+
+        ClientSession(Socket socket, BufferedWriter writer) {
+            this.socket = socket;
+            this.writer = writer;
+            this.writerThread = new Thread(this::writeLoop, "mock-arrow-session-writer");
+            this.writerThread.setDaemon(true);
+            this.writerThread.start();
+        }
+
+        /** Queue one batch; false when the bounded outbox is full (dropped, counted). */
+        boolean offer(String batch) {
+            if (outbox.offer(batch)) {
+                return true;
+            }
+            droppedBatches.incrementAndGet();
+            return false;
+        }
+
+        long lastProgressMs() {
+            return lastProgressMs.get();
+        }
+
+        long droppedBatches() {
+            return droppedBatches.get();
+        }
+
+        void close() {
+            try {
+                writer.close();
+            } catch (IOException ignored) {
+            }
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+            }
+            writerThread.interrupt();
+        }
+
+        /** H5-3 test seam: stop this session's writer so the watchdog sees a real stall. */
+        void pauseWritesForTest() {
+            writesPaused = true;
+        }
+
+        private void writeLoop() {
+            try {
+                while (running) {
+                    if (writesPaused) {
+                        Thread.sleep(200);
+                        continue;
+                    }
+                    String batch = outbox.poll(1, TimeUnit.SECONDS);
+                    if (batch == null) {
+                        continue; // no work; the sweep evicts a wedged socket
+                    }
+                    // R-040: the batch already ends every tick with '\n' — write it
+                    // as-is; an extra separator would put a blank line between batches.
+                    writer.write(batch);
+                    writer.flush();
+                    lastProgressMs.set(System.currentTimeMillis());
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (IOException e) {
+                log.debug("mock-arrow: session writer stopped ({}): {}",
+                        socket.getRemoteSocketAddress(), e.toString());
+                close();
+                clients.remove(this);
+            }
+        }
+    }
 
     private void handleClient(Socket client) {
-        // P3-469: only the timestamp was ever read from the throwaway
-        // ClientSession; keep it as a plain value instead of constructing a
-        // null-writer session that was never registered in `clients`.
-        long connectedAt = System.currentTimeMillis();
         try {
             var writer = new BufferedWriter(
                 new OutputStreamWriter(client.getOutputStream(), StandardCharsets.UTF_8));
-            var session = new ClientSession(client, writer, connectedAt);
-            clients.add(session);
+            clients.add(new ClientSession(client, writer));
         } catch (IOException e) {
             // R-180: never leak the accepted socket on writer setup failure.
             log.error("Failed to setup client writer — closing socket", e);
@@ -203,39 +278,33 @@ public class MockArrowServer {
         String json = ndjson.toString();
         tickCounter.addAndGet(batch.size());
 
-        // R-142: per-client delivery runs on the worker pool, NOT the tick
-        // scheduler — a slow/stalled client previously blocked generateTicks()
-        // (and therefore tick generation for every client) for as long as its
-        // write/flush took. The scheduler only enqueues the batch; delivery is
-        // decoupled and never stalls tick pacing.
+        // H5-3: the scheduler only enqueues into each session's bounded outbox; the
+        // session's own daemon writer does the write+flush, so a slow client can
+        // never stall tick pacing and its queue can never grow without bound.
         int expected = clients.size();
         for (var session : clients) {
-            deliveryPool.execute(() -> deliver(session, json));
+            if (!session.offer(json)) {
+                log.debug("mock-arrow: outbox full for {} — batch dropped ({} total)",
+                        session.socket.getRemoteSocketAddress(), session.droppedBatches());
+            }
         }
-        // If delivery is queued behind a stalled client, the scheduler still
-        // advances; the dead-client sweep in deliver() keeps the list bounded.
         if (expected > 0) {
             log.debug("mock-arrow: enqueued {} deliveries for batch of {}",
                     expected, batch.size());
         }
     }
 
-    /** Write one batch to one session; removes and closes it on I/O failure. */
-    private void deliver(ClientSession session, String json) {
-        try {
-            // R-040: the wire contract is one JSON object per line — the
-            // batch string already ends every tick with '\n', so no extra
-            // separator (e.g. newLine()) may be appended here; it would put a
-            // blank line between batches.
-            session.writer.write(json);
-            session.writer.flush();
-        } catch (IOException e) {
-            clients.remove(session);
-            try {
-                session.socket.close();
-            } catch (IOException ignored) {
+    /** H5-3: evict sessions with no write progress for {@link #SESSION_STALLED_AFTER_MS}. */
+    private void sweepStalledSessions() {
+        long now = System.currentTimeMillis();
+        for (var session : clients) {
+            long idleMs = now - session.lastProgressMs();
+            if (idleMs > SESSION_STALLED_AFTER_MS) {
+                log.warn("mock-arrow: evicting stalled client {} (no write progress for {} ms)",
+                        session.socket.getRemoteSocketAddress(), idleMs);
+                session.close();
+                clients.remove(session);
             }
-            log.debug("mock-arrow: dropped stalled client");
         }
     }
 
@@ -270,11 +339,9 @@ public class MockArrowServer {
     public void stop() {
         running = false;
         if (tickScheduler != null) tickScheduler.shutdownNow();
-        // R-142: stop delivery workers too so the JVM can exit promptly.
-        if (deliveryPool != null) deliveryPool.shutdownNow();
+        // H5-3: close each session (its writer thread exits on the closed socket).
         for (var c : clients) {
-            try { c.writer.close(); } catch (IOException ignored) {}
-            try { c.socket.close(); } catch (IOException ignored) {}
+            c.close();
         }
         clients.clear();
         try { serverSocket.close(); } catch (IOException ignored) {}
@@ -327,5 +394,22 @@ public class MockArrowServer {
     /** Test/observability seam: the configured arrival shape. */
     SyntheticWorkload.Profile configuredProfile() {
         return profile;
+    }
+
+    /** Test seam: live session count (H5-3 eviction tests). */
+    int sessionCountForTest() {
+        return clients.size();
+    }
+
+    /**
+     * Test seam (H5-3): stop ONE session's writer so the real watchdog sees a
+     * genuine stall — a kernel-buffer wedge needs timing that would flake the test.
+     */
+    void pauseSessionWritesForTest(Socket client) {
+        for (var session : clients) {
+            if (session.socket.getPort() == client.getLocalPort()) {
+                session.pauseWritesForTest();
+            }
+        }
     }
 }
