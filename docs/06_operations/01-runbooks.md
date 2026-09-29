@@ -139,6 +139,14 @@ make day ARGS="stop"      # graceful stop; checkpoints/volumes preserved
 | I8 errors | FATAL/BRIDGE_CRASH/backpressure lines | map the line via §Broker market-data disconnect / §Checkpoint failure (SignalJob); the cold-start `update metadata` flap is covered by `INGESTION_WRITE_STARTUP_GRACE_MS` (CHG-326/CHG-356, default 3600 s; 0 disables) |
 | I9 restart | no savepoint/checkpoint | start again (a checkpoint appears within 2x interval); `make rollout-savepoint` |
 
+A probe that cannot read its source is **amber, not green** (M2-5): I6 reports
+`posture probe failed` when a container env is unreadable, I7 reports `manifest probe
+failed — effective token count unverified`, and I8 reports `log scan failed — error
+budget unverified`. The board's `facts.json` carries `env_probe_failures`,
+`log_scan_failed` and `manifest_probe_failed`; the recovery is to restore the read path
+(`make logs SVC=ingestion`, then re-run `make day ARGS="status"`), never to trust the
+blank as clean.
+
 ### First morning (P4-4 validation) and reruns
 
 1. `make day ARGS="start"` before 09:15 IST; confirm the universe line reads

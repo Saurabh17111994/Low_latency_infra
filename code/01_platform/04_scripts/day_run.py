@@ -149,6 +149,22 @@ class Facts:
     universe: dict = dataclasses.field(default_factory=dict)
     session: dict = dataclasses.field(default_factory=dict)
     notes: list = dataclasses.field(default_factory=list)
+    # M2-5: probe failures are facts too — "unverified" must never read as "clean".
+    env_probe_failures: list = dataclasses.field(default_factory=list)
+    log_scan_failed: bool = False
+    manifest_probe_failed: bool = False
+
+
+class ProbeUnavailable(RuntimeError):
+    """A probe could not read its source. Unverified — never 'empty'/'none'."""
+
+
+@dataclasses.dataclass
+class EnvProbe:
+    """Posture env probe result: the allowlist values + per-service failures."""
+
+    values: dict = dataclasses.field(default_factory=dict)
+    failures: list = dataclasses.field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -465,10 +481,14 @@ def evaluate(facts: Facts) -> list:
             flags_ok = False
             flag_detail.append(f"{svc}: {','.join(bad)}")
     halted = bool(facts.notes and "nautilus_halted" in facts.notes)
-    exec_ok = len(exec_running) == len(EXECUTION_SERVICES) and flags_ok and halted
+    exec_ok = (len(exec_running) == len(EXECUTION_SERVICES) and flags_ok and halted
+               and not facts.env_probe_failures)
     if len(exec_running) != len(EXECUTION_SERVICES):
         detail = (f"profile up={len(exec_running)}/{len(EXECUTION_SERVICES)} "
                   "(not started)")
+    elif facts.env_probe_failures:
+        detail = ("posture probe failed — live flags unverified: "
+                  + "; ".join(facts.env_probe_failures))
     elif flag_detail:
         detail = "live flags set: " + "; ".join(flag_detail)
     elif not halted:
@@ -488,9 +508,17 @@ def evaluate(facts: Facts) -> list:
             live.append(f"{svc}: {bad}")
     universe = facts.universe or {}
     expected_tokens = universe.get("tokens")
-    manifest_ok = (facts.effective_tokens is None or expected_tokens is None
-                   or facts.effective_tokens == expected_tokens)
-    if not live and manifest_ok:
+    manifest_ok = (not facts.manifest_probe_failed
+                   and (facts.effective_tokens is None or expected_tokens is None
+                        or facts.effective_tokens == expected_tokens))
+    manifest_note = next((n for n in facts.notes
+                          if n.startswith("manifest_probe_failed:")), "")
+    if not live and facts.manifest_probe_failed:
+        config_detail = (f"{manifest_note or 'manifest probe failed'} — effective "
+                         "token count unverified")
+        config_recovery = ("re-run status once the ingestion container logs are readable "
+                           "(make logs SVC=ingestion)")
+    elif not live and manifest_ok:
         effective = (facts.effective_tokens if facts.effective_tokens is not None
                      else "n/a (ingestion not running)")
         config_detail = (f"effective-manifest={effective}; expected {expected_tokens}; "
@@ -510,11 +538,15 @@ def evaluate(facts: Facts) -> list:
         recovery=config_recovery,
     ))
 
+    log_scan_note = next((n for n in facts.notes
+                          if n.startswith("log_scan_failed:")), "")
     checks.append(Check(
-        "I8", "errors", not facts.log_errors,
-        ("no FATAL/BRIDGE_CRASH/backpressure-critical lines in the window"
-         if not facts.log_errors else
-         f"{len(facts.log_errors)} error line(s): {facts.log_errors[0][:120]}"),
+        "I8", "errors", not facts.log_errors and not facts.log_scan_failed,
+        (f"{log_scan_note or 'log scan failed'} — error budget unverified"
+         if facts.log_scan_failed else
+         ("no FATAL/BRIDGE_CRASH/backpressure-critical lines in the window"
+          if not facts.log_errors else
+          f"{len(facts.log_errors)} error line(s): {facts.log_errors[0][:120]}")),
         recovery="make logs SVC=ingestion  (runbook daily section maps each line to an action)",
     ))
 
@@ -777,9 +809,12 @@ class Collector:
         }
 
     # -- container env (posture audit) -------------------------------------
-    def container_env(self, services) -> dict:
-        """C2-1: the posture allowlist only — a container's full env carries credentials."""
-        out = {}
+    def container_env(self, services) -> EnvProbe:
+        """C2-1: the posture allowlist only — a container's full env carries credentials.
+
+        M2-5: a service whose env cannot be read is a probe FAILURE, not an empty
+        env — an empty dict would read as "no live flags" and pass the posture check."""
+        probe = EnvProbe()
         for svc in services:
             try:
                 cid = self.runner.compose(["ps", "-q", svc], check=False).strip()
@@ -790,10 +825,12 @@ class Collector:
                     check=False)
                 full = dict(
                     entry.split("=", 1) for entry in json.loads(raw) if "=" in entry)
-                out[svc] = {key: full[key] for key in POSTURE_ENV_KEYS if key in full}
-            except (subprocess.CalledProcessError, json.JSONDecodeError, ValueError):
-                continue
-        return out
+                probe.values[svc] = {key: full[key] for key in POSTURE_ENV_KEYS
+                                     if key in full}
+            except (subprocess.CalledProcessError, json.JSONDecodeError, ValueError,
+                    OSError, subprocess.SubprocessError) as exc:
+                probe.failures.append(f"{svc}: {exc}")
+        return probe
 
     # -- fluss passive probe ----------------------------------------------
     def fluss_log_end(self, table: str) -> dict:
@@ -847,8 +884,9 @@ class Collector:
                     hits.append(line.strip())
                     if len(hits) >= MAX_LOG_ERROR_HITS:
                         break
-        except (OSError, subprocess.SubprocessError):
-            return hits
+        except (OSError, subprocess.SubprocessError) as exc:
+            # M2-5: a failed scan is NOT "no errors" — it is unverified.
+            raise ProbeUnavailable(f"log scan failed: {exc}") from exc
         return hits
 
     def effective_tokens(self, ingestion_running: bool) -> int | None:
@@ -861,8 +899,9 @@ class Collector:
                 match = MANIFEST_LOADED_RE.search(line)
                 if match:
                     found = int(match.group(1))
-        except (OSError, subprocess.SubprocessError):
-            return found
+        except (OSError, subprocess.SubprocessError) as exc:
+            # M2-5: unreadable logs are unverified, not "no manifest line".
+            raise ProbeUnavailable(f"manifest probe failed: {exc}") from exc
         return found
 
     def nautilus_halted(self) -> bool:
@@ -891,13 +930,23 @@ class Collector:
             return facts
         facts.checkpoints = self.checkpoints(facts.jobs)
         facts.state = self.state_paths()
-        facts.container_env = self.container_env(EXECUTION_SERVICES)
+        env_probe = self.container_env(EXECUTION_SERVICES)
+        facts.container_env = env_probe.values
+        facts.env_probe_failures = env_probe.failures
         if self.nautilus_halted():
             facts.notes.append("nautilus_halted")
-        facts.log_errors = self.log_errors(
-            f"{os.environ.get('DAY_LOG_WINDOW_MIN', '15')}m")
+        try:
+            facts.log_errors = self.log_errors(
+                f"{os.environ.get('DAY_LOG_WINDOW_MIN', '15')}m")
+        except ProbeUnavailable as exc:
+            facts.log_scan_failed = True
+            facts.notes.append(f"log_scan_failed: {exc}")
         ingestion_running = facts.services.get("ingestion", {}).get("state") == "running"
-        facts.effective_tokens = self.effective_tokens(ingestion_running)
+        try:
+            facts.effective_tokens = self.effective_tokens(ingestion_running)
+        except ProbeUnavailable as exc:
+            facts.manifest_probe_failed = True
+            facts.notes.append(f"manifest_probe_failed: {exc}")
 
         want_samples = session["open"] if samples is None else samples
         for key, table in (("raw", "raw_table_1"),

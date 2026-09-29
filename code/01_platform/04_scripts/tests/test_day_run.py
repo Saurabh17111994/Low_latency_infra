@@ -212,11 +212,12 @@ class EvidenceSecrecyTests(unittest.TestCase):
                 ])
 
         collector = day_run.Collector(InspectRunner())
-        env = collector.container_env(["execution-bridge"])
-        self.assertEqual(env, {"execution-bridge": {
+        probe = collector.container_env(["execution-bridge"])
+        self.assertEqual(probe.values, {"execution-bridge": {
             "EXECUTION_ENABLED": "false",
             "EXECUTION_BRIDGE_MODE": "disabled",
         }})
+        self.assertEqual(probe.failures, [])
         self.assertEqual(day_run.POSTURE_ENV_KEYS,
                          ("EXECUTION_ENABLED", "EXECUTION_BRIDGE_MODE"))
 
@@ -368,6 +369,31 @@ class EvaluateTests(unittest.TestCase):
         checks = day_run.evaluate(make_facts(
             state={"latest_savepoint": None, "latest_checkpoint": None}))
         self.assertFalse(next(c for c in checks if c.ident == "I9").ok)
+
+    # --- M2-5: a failed probe is amber, never green ---
+
+    def test_env_probe_failure_is_amber_not_green(self):
+        checks = day_run.evaluate(make_facts(
+            env_probe_failures=["execution-gateway: CalledProcessError(1)"]))
+        i6 = next(c for c in checks if c.ident == "I6")
+        self.assertFalse(i6.ok, "an unread posture env must not pass I6")
+        self.assertIn("posture probe failed", i6.detail)
+
+    def test_log_scan_failure_is_amber_not_green(self):
+        checks = day_run.evaluate(make_facts(
+            log_scan_failed=True,
+            notes=["log_scan_failed: log scan failed: docker gone"]))
+        i8 = next(c for c in checks if c.ident == "I8")
+        self.assertFalse(i8.ok, "an unread error window must not pass I8")
+        self.assertIn("unverified", i8.detail)
+
+    def test_manifest_probe_failure_is_amber_not_green(self):
+        checks = day_run.evaluate(make_facts(
+            manifest_probe_failed=True,
+            notes=["manifest_probe_failed: manifest probe failed: docker gone"]))
+        i7 = next(c for c in checks if c.ident == "I7")
+        self.assertFalse(i7.ok, "an unread manifest window must not pass I7")
+        self.assertIn("unverified", i7.detail)
 
 
 # --------------------------------------------------------------------------
@@ -552,7 +578,7 @@ class CheckpointSamplingTests(unittest.TestCase):
                 return {}
 
             def container_env(self, services):
-                return {}
+                return day_run.EnvProbe()
 
             def nautilus_halted(self):
                 return False
@@ -666,6 +692,45 @@ class ProbeContainerTests(unittest.TestCase):
         result = day_run.Collector(BrokenRunner()).fluss_log_end("raw_table_1")
         self.assertFalse(result["ok"])
         self.assertIn("boom", result["error"])
+
+
+class ProbeFailClosedTests(unittest.TestCase):
+    """M2-5: a probe that cannot read raises `ProbeUnavailable`; collect records it."""
+
+    def test_log_errors_raises_probe_unavailable(self):
+        class BrokenLogs(StreamRunner):
+            def compose_lines(self, args, env=None):
+                raise OSError("docker gone")
+
+        with self.assertRaises(day_run.ProbeUnavailable):
+            day_run.Collector(BrokenLogs()).log_errors("15m")
+
+    def test_effective_tokens_raises_probe_unavailable(self):
+        class BrokenLogs(StreamRunner):
+            def compose_lines(self, args, env=None):
+                raise OSError("docker gone")
+
+        with self.assertRaises(day_run.ProbeUnavailable):
+            day_run.Collector(BrokenLogs()).effective_tokens(True)
+
+    def test_collect_records_a_failed_env_probe(self):
+        class BrokenInspect(StreamRunner):
+            def run(self, argv, env=None, check=True, capture=True, timeout=1800):
+                if "inspect" in [str(a) for a in argv]:
+                    raise subprocess.CalledProcessError(
+                        1, [str(a) for a in argv], output="boom")
+                return super().run(argv, env=env, check=check, capture=capture,
+                                   timeout=timeout)
+
+        collector = day_run.Collector(BrokenInspect(
+            services=["execution-bridge", "execution-gateway", "nautilus"]))
+        with mock.patch.object(day_run.Collector, "fluss_log_end",
+                               lambda self, table: {"ok": True, "log_end": 7}):
+            facts = collector.collect(samples=False)
+        self.assertTrue(facts.env_probe_failures,
+                        "a failed inspect must land in facts, not vanish")
+        self.assertTrue(any("execution-bridge" in f for f in facts.env_probe_failures),
+                        facts.env_probe_failures)
 
 
 class ReadinessCollectTests(unittest.TestCase):
