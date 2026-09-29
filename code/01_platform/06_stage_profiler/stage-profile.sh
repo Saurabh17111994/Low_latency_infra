@@ -62,6 +62,10 @@ OUT_ROOT="${OUT:-$ROOT/logs/stage-profile-$RUN_TS}"
 SCRIPTS_DIR="$ROOT/code/01_platform/04_scripts"
 STACK_DIR="$ROOT/code/01_platform/01_docker"
 CAPTURE_SH="$SCRIPTS_DIR/stage-capture.sh"
+# CT-1 (docs/plans/2026-09-29-checkpoint-tail-remediation.md): the summary
+# checkpoint endpoint's phase fields are null; only the details endpoint
+# carries per-subtask phases, and only while the job is alive.
+CP_PHASE_TOOL="$SCRIPTS_DIR/cp_phase_capture.py"
 PROFILE_PY="$SCRIPT_DIR/stage_profiler.py"
 CP_FILE="$ROOT/code/02_services/01_ingestion/target/cp.txt"
 
@@ -70,6 +74,7 @@ ING_PREFIX="sp-ingestion-"
 LOG_PIDS=()
 JOB_ID=""
 CP=""
+CP_PHASES_PID=""
 PROBE_BIN=""
 PHASE_NAME=""
 PHASE_DIR=""
@@ -116,6 +121,10 @@ stop_fleet() {
   if [ -n "${FAKETOOL_LOG_PID:-}" ]; then
     kill "$FAKETOOL_LOG_PID" 2>/dev/null || true
     FAKETOOL_LOG_PID=""
+  fi
+  if [ -n "${CP_PHASES_PID:-}" ]; then
+    kill "$CP_PHASES_PID" 2>/dev/null || true
+    CP_PHASES_PID=""
   fi
   if [ -n "${PHASE_DIR:-}" ] && [ -d "$PHASE_DIR/capture" ]; then
     mkdir -p "$PHASE_DIR/capture/ticks"
@@ -411,6 +420,34 @@ run_capture() {
   say "capture done ($(wc -l < "$PHASE_DIR/stages/stages.tsv" 2>/dev/null || echo 0) Flink rows)"
 }
 
+# CT-1: per-subtask checkpoint phases, sampled while the job is alive (the
+# checkpoint history is rolling; a cancel loses it). Started before the
+# warm-up so the first checkpoints are covered; ended by a stop file so the
+# wait costs at most one poll interval. Fails closed: a terminal checkpoint
+# without a phase record is a failed capture, not a silent gap.
+start_cp_phase_sampler() {
+  local secs="$1"
+  say "checkpoint phase sampler: /jobs/\$JOB_ID/checkpoints/details (capture window)"
+  python3 "$CP_PHASE_TOOL" --rest-url "$FLINK_REST_URL" --job-id "$JOB_ID" \
+    --out-dir "$PHASE_DIR/stages" --stop-file "$PHASE_DIR/.cp-phases-stop" \
+    --duration "$((secs + WARMUP_S + 600))" \
+    >"$PHASE_DIR/stages-cp-phases.log" 2>&1 &
+  CP_PHASES_PID=$!
+}
+
+wait_cp_phase_sampler() {
+  [ -n "${CP_PHASES_PID:-}" ] || return 0
+  touch "$PHASE_DIR/.cp-phases-stop"
+  local rc=0 n
+  wait "$CP_PHASES_PID" || rc=$?
+  CP_PHASES_PID=""
+  [ "$rc" -eq 0 ] || fail "checkpoint phase capture failed (rc=$rc, see $PHASE_DIR/stages-cp-phases.log)"
+  n="$(wc -l < "$PHASE_DIR/stages/cp-phases-detail.jsonl" 2>/dev/null || true)"
+  [ "${n:-0}" -gt 0 ] \
+    || fail "checkpoint phase capture wrote no records (see $PHASE_DIR/stages-cp-phases.log)"
+  say "checkpoint phase capture: ${n} checkpoints"
+}
+
 sample_raw() {
   say "S1 raw sample: RawSampleReader raw_table_1 (${PROBE_TOKEN_COUNT} tokens x ${RAW_SAMPLE_ROWS_PER_BUCKET}/bucket)"
   if ! timeout 120 java \
@@ -440,8 +477,10 @@ run_phase() {
   fi
   submit_job
   compile_probes
+  start_cp_phase_sampler "$secs"
   warmup
   run_capture "$secs"
+  wait_cp_phase_sampler
   sample_raw
   stop_fleet
   say "phase '$PHASE_NAME' done"
@@ -470,6 +509,7 @@ check_only() {
   fi
   [ -r "$CP_FILE" ] || fail "missing Fluss classpath file: $CP_FILE (build ingestion first)"
   [ -r "$CAPTURE_SH" ] || fail "missing $CAPTURE_SH"
+  [ -r "$CP_PHASE_TOOL" ] || fail "missing $CP_PHASE_TOOL"
   [ -r "$PROFILE_PY" ] || fail "missing $PROFILE_PY"
   command -v docker >/dev/null || fail "docker not on PATH"
   command -v javac >/dev/null || fail "javac not on PATH"

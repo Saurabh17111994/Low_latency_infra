@@ -109,6 +109,12 @@ code/01_platform/06_stage_profiler/
   tests/                offline unit tests (36, no stack needed)
 ```
 
+Per-subtask checkpoint phases come from `04_scripts/cp_phase_capture.py`, run
+by `stage-profile.sh` for the capture window (CT-1 of
+`docs/plans/2026-09-29-checkpoint-tail-remediation.md`); the summary endpoint's
+phase fields are null, and the details endpoint is only fetchable while the job
+is alive.
+
 ```
 logs/stage-profile-<ts>/
   smoke/                smoke phase evidence + the presence gate verdict
@@ -117,6 +123,8 @@ logs/stage-profile-<ts>/
     capture/raw-sample.jsonl     S1 sample rows (RawSampleReader)
     capture/ticks/               per-container tick counts (teardown)
     stages/                      stage-capture.sh evidence (prom, probes, ...)
+                                 + cp-phases-detail.jsonl (per-checkpoint,
+                                   per-subtask phases; cp_phase_capture.py)
   profile.md profile.tsv presence.json    the single report
 ```
 
