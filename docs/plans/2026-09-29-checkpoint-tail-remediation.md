@@ -1,8 +1,9 @@
 # Checkpoint-tail remediation (signal job) — p99 ≤ 100 ms at the 10 s production cadence
 
 **Date:** 2026-09-29
-**Status:** operator-approved 2026-09-29; CT-1..CT-3 done; CT-4A measured green on the
-production-intended filesystem storage (full gate pending); CT-5/CT-6/CT-7 open
+**Status:** complete 2026-09-30 — CT-1..CT-7 closed; CT-4A green and gate-certified
+(`logs/soak/monday-gates-20260929-235738`, 19/19, 0 skipped); CT-5/CT-6 remain available
+operator options (S1 met at the 10 s cadence)
 **Baseline evidence:** `logs/stage-profile-20260929-174239/` (900 s, 60 s cadence, tree `eb3026ad`)
 and gate certificate `logs/soak/monday-gates-20260929-180026` (19/19, 0 skipped)
 
@@ -27,31 +28,31 @@ the cause natively.
 
 #### P3 - root-cause fix (one branch only)
 
-- [~] **CT-4A** Branch A: changelog state backend trial + restore drill (implemented as rollout flag `CHANGELOG_STATE_BACKEND`; unit tests green; restore drill + smoke + 900 s pending). Gate step-9 blocker diagnosed 2026-09-29: the B4 drill's `scanLog` truncated on the first empty poll (false negative on a lived-in cluster; rule fire + row proven present on the tablet) — fixed test-only in CHG-442, `make drill-live` green (exit 0). Drills 2026-09-29 (CHG-443): OFF→ON adoption green (intermediate jar: 56 completed checkpoints; final jar: restore + first checkpoint, then a pre-purge-epoch anchor stalled — operational anchor rule recorded), ON→OFF green (7/7). Findings folded in: restore must set `claim-mode=CLAIM`; changelog storage selection is TaskManager-level (job keys are no-ops; `flink-dstl-dfs` plugin + TM config are the production prerequisite). First 900 s attempt (TM `memory` storage, CHG-444): failed closed at t+315 s — each checkpoint re-serialized the accumulated changelog (state_size 1.5 MB → 38 MB in 3 min, 49 MB metadata) and the payload transfers broke the TM/JM RPC (Pekko association errors → cp19–22 expired → failover). CHG-444 switched the dev cluster to the production-intended filesystem storage (plugin mounted on the taskmanager + `state.changelog.storage: filesystem` in FLINK_PROPERTIES); smoke + 900 s re-running on it. **Final (fs storage, 900 s @ 10 s, job `18dca0ea`):** 95/95 checkpoints COMPLETED; metadata 494 KB; e2e p50 50 ms; window p99_max median 93 ms — 0/60 windows p95 > 100 ms, 6/60 p99 > 100 ms (worst 211) vs CT-2 52/60 (worst 933); host sync p99 20 / max 51 ms / 0 records > 100 ms (CT-2: p99 663 / max 1157 / 1819); throughput 4,865 rows/s, presence PASS. **S1/S2/S3 met; S4 gate pending — marker flips on the gate certificate.**
+- [x] **CT-4A** Branch A: changelog state backend trial + restore drill (implemented as rollout flag `CHANGELOG_STATE_BACKEND`; unit tests green; restore drill + smoke + 900 s pending). Gate step-9 blocker diagnosed 2026-09-29: the B4 drill's `scanLog` truncated on the first empty poll (false negative on a lived-in cluster; rule fire + row proven present on the tablet) — fixed test-only in CHG-442, `make drill-live` green (exit 0). Drills 2026-09-29 (CHG-443): OFF→ON adoption green (intermediate jar: 56 completed checkpoints; final jar: restore + first checkpoint, then a pre-purge-epoch anchor stalled — operational anchor rule recorded), ON→OFF green (7/7). Findings folded in: restore must set `claim-mode=CLAIM`; changelog storage selection is TaskManager-level (job keys are no-ops; `flink-dstl-dfs` plugin + TM config are the production prerequisite). First 900 s attempt (TM `memory` storage, CHG-444): failed closed at t+315 s — each checkpoint re-serialized the accumulated changelog (state_size 1.5 MB → 38 MB in 3 min, 49 MB metadata) and the payload transfers broke the TM/JM RPC (Pekko association errors → cp19–22 expired → failover). CHG-444 switched the dev cluster to the production-intended filesystem storage (plugin mounted on the taskmanager + `state.changelog.storage: filesystem` in FLINK_PROPERTIES); smoke + 900 s re-running on it. **Final (fs storage, 900 s @ 10 s, job `18dca0ea`):** 95/95 checkpoints COMPLETED; metadata 494 KB; e2e p50 50 ms; window p99_max median 93 ms — 0/60 windows p95 > 100 ms, 6/60 p99 > 100 ms (worst 211) vs CT-2 52/60 (worst 933); host sync p99 20 / max 51 ms / 0 records > 100 ms (CT-2: p99 663 / max 1157 / 1819); throughput 4,865 rows/s, presence PASS. **S1/S2/S3 met; S4: gate PASS `logs/soak/monday-gates-20260929-235738` (19/19, 0 skipped, 2026-09-30).**
 - [ ] **CT-4B** Branch B: Fluss signal-sink linger 1 ms (`client.writer.batch-timeout`)
 
 #### P4 - insurance
 
-- [ ] **CT-5** Buffer debloat config trial (optional; only if S1 is not cleanly met)
+- [ ] **CT-5** Buffer debloat config trial (optional; only if S1 is not cleanly met) — S1 met: not required for the 100 ms target; available as a headroom option if p99 < 50 ms becomes a requirement (operator decision, never silent)
 
 #### P5 - cadence decision
 
-- [ ] **CT-6** Cadence 10 s -> 30/60 s (only if S1 still fails after CT-4/CT-5; operator decision + REQ-FC-006)
+- [ ] **CT-6** Cadence 10 s -> 30/60 s (only if S1 still fails after CT-4/CT-5; operator decision + REQ-FC-006) — S1 met at 10 s: not needed unless the operator chooses it
 
 #### P6 - close-out
 
-- [ ] **CT-7** Final per-goal report + dossier/plan updates
+- [x] **CT-7** Final per-goal report + dossier/plan updates (delivered 2026-09-30 with the CT-4A gate certificate; dossier row updated; tracker check green)
 
 **Roll-up**
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | P1 - phase capture tooling | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
 | P2 - 10 s baseline and branch decision | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| P3 - root-cause fix (one branch only) | 2 | 0 | 1 | 1 | 0 | 0 | 0 |
+| P3 - root-cause fix (one branch only) | 2 | 1 | 0 | 1 | 0 | 0 | 0 |
 | P4 - insurance | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
 | P5 - cadence decision | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
-| P6 - close-out | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
-| **Total** | **8** | **3** | **1** | **4** | **0** | **0** | **0** |
+| P6 - close-out | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
+| **Total** | **8** | **5** | **0** | **3** | **0** | **0** | **0** |
 
 ## Overview
 
