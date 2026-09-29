@@ -34,11 +34,11 @@ Where a body section and this list disagree, this list wins.
 |---|---|---|---|---|---|---|---|
 | H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth | 5 | 5 | 0 | 0 | 0 | 0 | 0 |
 | H2 — ingestion: bad-time ticks, invisible drops, silent exits, token cross-check | 4 | 4 | 0 | 0 | 0 | 0 | 0 |
-| H3 — production deck parity with the dev deck | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
+| H3 — production deck parity with the dev deck | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
 | H4 — evidence and release gates must not lie | 4 | 0 | 0 | 4 | 0 | 0 | 0 |
 | H5 — compute/mock pinned bounds: dedup state, rate cap, client delivery | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
 | H6 — machine facts and their drift guard | 3 | 0 | 0 | 3 | 0 | 0 | 0 |
-| **Total** | **22** | **9** | **0** | **13** | **0** | **0** | **0** |
+| **Total** | **22** | **12** | **0** | **10** | **0** | **0** | **0** |
 
 #### H1 — execution money path: halts, retry ambiguity, duplicates, terminal truth
 
@@ -95,17 +95,17 @@ Where a body section and this list disagree, this list wins.
 
 #### H3 — production deck parity with the dev deck
 
-- [ ] **H3-1** — One execution identity in the stack: top-level `x-execution-identity` anchor
+- [x] **H3-1** — One execution identity in the stack: top-level `x-execution-identity` anchor
   merged into gateway + nautilus environments; no literal `dev-*` fallback in Rust (partition set
   without scope = boot refusal); executor treats `409 SCOPE_MISMATCH` as non-retryable and stops
-  the retry loop with a named error + readiness `durable_gate=false`. (P0-7.)
-- [ ] **H3-2** — Mirror the five `fs.s3a.*` keys (region, endpoint, path-style, access key, secret
+  the retry loop with a named error + readiness `durable_gate=false`. (P0-7.) — CHG-394, CHG-395
+- [x] **H3-2** — Mirror the five `fs.s3a.*` keys (region, endpoint, path-style, access key, secret
   key) into all four stack `FLUSS_PROPERTIES` blocks; parity test pins compose == stack per role.
-  (P0-8; CHG-306.)
-- [ ] **H3-3** — Retire the three seeded Position_State alert rules + corpus file and mark
+  (P0-8; CHG-306.) — CHG-393
+- [x] **H3-3** — Retire the three seeded Position_State alert rules + corpus file and mark
   RB-POS-001 retired (DECIDED 2026-09-28 — retire; their producers were deleted in `0f3e5952`,
   and a substitute `gate_safety_halt` rule would be dead on arrival while executor OTLP is a
-  NullSink); guard: every seeded alert must name a live producer. (P1-8.)
+  NullSink); guard: every seeded alert must name a live producer. (P1-8.) — CHG-392
 
 #### H4 — evidence and release gates must not lie
 
