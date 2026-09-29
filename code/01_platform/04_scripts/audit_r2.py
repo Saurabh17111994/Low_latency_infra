@@ -430,6 +430,11 @@ class R2Client:
 # ---------------------------------------------------------------------------
 # Provisioning + validation
 # ---------------------------------------------------------------------------
+# H4-4: the step prefix that marks an attempted bucket-lock read/set as FAILED (as
+# opposed to NOT_SET without Cloudflare config) — main turns it into exit 1.
+BUCKET_LOCK_FAILED = "READ/SET FAILED"
+
+
 def provision(config, client, cf_lock=None, set_lock=False, audit_prefix="audit/"):
     """Idempotent provisioning. Never destructive: existing buckets, versioning
     settings, and lifecycle rules are left untouched. Bucket locks are READ
@@ -483,7 +488,7 @@ def provision(config, client, cf_lock=None, set_lock=False, audit_prefix="audit/
                 steps.append(("bucket_lock", f"{len(rules)} rule(s) read (not modified): "
                                               f"{[r.get('id') for r in rules]}"))
         except UnsupportedFeature as exc:
-            steps.append(("bucket_lock", f"READ/SET FAILED ({exc})"))
+            steps.append(("bucket_lock", f"{BUCKET_LOCK_FAILED} ({exc})"))
     else:
         steps.append(("bucket_lock",
                       "NOT_SET (WORM-equivalent 'bucket locks' need CLOUDFLARE_API_TOKEN + "
@@ -687,10 +692,15 @@ def main(argv=None):
               "'bucket lock' state will be recorded as NOT_CHECKED")
     try:
         if args.mode == "provision":
+            lock_failed = False
             for step, value in provision(config, client, cf_lock,
                                          args.set_lock, args.audit_prefix):
                 print(f"provision {step}: {value}")
-            return 0
+                if step == "bucket_lock" and value.startswith(BUCKET_LOCK_FAILED):
+                    lock_failed = True
+            # H4-4: an attempted bucket-lock read/set that failed is a real failure;
+            # NOT_SET (no Cloudflare config) stays non-fatal.
+            return 1 if lock_failed else 0
         evidence = validate(config, client, run_id, utc_now, cf_lock)
     except R2Error as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -709,7 +719,9 @@ def main(argv=None):
     for limitation in evidence["limitations"]:
         print(f"limitation: {limitation}")
     print(f"evidence: {evidence_path}")
-    return 0
+    # H4-4: the exit status follows the verdict; the evidence is already written, so a
+    # FAIL is a result the caller can gate on, not an abort that loses the record.
+    return 0 if evidence["result"] == "PASS" else 1
 
 
 if __name__ == "__main__":

@@ -108,6 +108,11 @@ Checks recorded (probe objects live under `_audit_probe/` and are purged):
 Result is `PASS` only when bucket_exists + object_io_probe pass; every caveat is
 recorded in `limitations`.
 
+The process exit follows the verdict (H4-4): `validate` exits 0 on `PASS` and 1 on `FAIL` — the
+evidence JSON is written either way, so a FAIL is a result a caller can gate on rather than an
+abort that loses the record. `provision` exits 1 when an attempted bucket-lock read/set fails;
+`NOT_SET` (no Cloudflare config) and `UNSUPPORTED` remain recorded limitations.
+
 ## Evidence file convention
 
 - Location: `logs/audit-r2/<UTC-run-id>-audit-r2-evidence.json`

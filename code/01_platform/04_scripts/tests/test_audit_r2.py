@@ -5,6 +5,7 @@ Run: python3 -m unittest discover -s code/01_platform/04_scripts/tests -v
 """
 import datetime
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -526,6 +527,63 @@ class SignedHeadersTest(unittest.TestCase):
                 # the same endpoint netloc the signature used.
                 continue
             self.assertIn(name, seen, f"{name} is signed but never sent")
+
+
+class MainExitCodeTest(unittest.TestCase):
+    """H4-4 (P1-5): the process exit must follow the verdict.
+
+    `validate` wrote a FAIL evidence record and returned 0; `provision` recorded
+    `bucket_lock: READ/SET FAILED (…)` and returned 0. An exit status that is
+    hardcoded success while the verdict lives in the JSON is the same class as a
+    test that never runs — nothing downstream can gate on it.
+    """
+
+    @staticmethod
+    def _env_file(with_cf=False):
+        fh = tempfile.NamedTemporaryFile("w", suffix=".env", delete=False)
+        fh.write("R2_ENDPOINT=https://acct.r2.cloudflarestorage.com\n"
+                 "R2_BUCKET=audit\nAWS_REGION=auto\n"
+                 "AWS_ACCESS_KEY_ID=AKIA\nAWS_SECRET_ACCESS_KEY=S\n")
+        if with_cf:
+            fh.write("CLOUDFLARE_API_TOKEN=t\nCLOUDFLARE_ACCOUNT_ID=a\n")
+        fh.close()
+        return fh.name
+
+    def _run(self, argv, client):
+        path = self._env_file(with_cf="--set-lock" in argv)
+        self.addCleanup(os.unlink, path)
+        with mock.patch.object(audit_r2, "R2Client", return_value=client):
+            return audit_r2.main(argv + ["--env-file", path])
+
+    def test_validate_fail_exits_nonzero_and_still_writes_evidence(self):
+        client = FakeClient(io_fail=True)
+        client.created = True
+        with tempfile.TemporaryDirectory() as out:
+            rc = self._run(["validate", "--out", out], client)
+            self.assertEqual(rc, 1, "a FAIL verdict must exit non-zero")
+            files = os.listdir(out)
+            self.assertEqual(len(files), 1, f"evidence still written: {files}")
+            with open(os.path.join(out, files[0])) as fh:
+                self.assertEqual(json.load(fh)["result"], "FAIL")
+
+    def test_validate_pass_exits_zero(self):
+        client = FakeClient()
+        client.created = True
+        with tempfile.TemporaryDirectory() as out:
+            rc = self._run(["validate", "--out", out], client)
+        self.assertEqual(rc, 0)
+
+    def test_provision_bucket_lock_failure_exits_nonzero(self):
+        client = FakeClient()
+        with mock.patch.object(audit_r2, "cf_get_bucket_lock",
+                               side_effect=audit_r2.UnsupportedFeature("boom")):
+            rc = self._run(["provision", "--set-lock"], client)
+        self.assertEqual(rc, 1, "an attempted read/set that failed must fail the run")
+
+    def test_provision_not_set_stays_non_fatal(self):
+        client = FakeClient()
+        rc = self._run(["provision"], client)
+        self.assertEqual(rc, 0, "NOT_SET (no Cloudflare config) is a limitation, not a failure")
 
 
 if __name__ == "__main__":
