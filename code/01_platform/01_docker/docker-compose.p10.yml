@@ -33,3 +33,21 @@ services:
 
   flink-taskmanager:
     ports: !override ["19250:9249"]
+
+  # M6-3: the observability trio published host ports too and the overlay used to
+  # leave them alone, so a p10 rehearsal collided with the live dev stack on
+  # 4317/4318, 5080/5081 and 9000/9001. Same band as the rest: 1xxxx.
+  otel-collector:
+    ports: !override
+      - "14317:4317"
+      - "14318:4318"
+
+  openobserve:
+    ports: !override
+      - "15080:5080"
+      - "15081:5081"
+
+  minio:
+    ports: !override
+      - "19000:9000"
+      - "19001:9001"

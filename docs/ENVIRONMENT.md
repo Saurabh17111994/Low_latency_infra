@@ -224,7 +224,7 @@ Recheck when: the purge stops dropping+recreating raw_table_1, or holistic-measu
 Each purge drops raw_table_1 and recreates it, so the table gets a new tableId and the coordinator re-registers its 16 buckets. The tablet then asynchronously tears down the PREVIOUS tableId's log segments for a second or more after the purge reports success. Purge and the first append can therefore overlap: in run 20260917-013752 ingestion started 1s after 'raw table purged' and its first append failed with FlussRuntimeException 'Failed to update metadata' at 20:08:19, while the tablet was still deleting the old table's segments. NOTE: an earlier version of this fact blamed the JM/TM recreate; that was wrong - the bursts track the purge, and a separate ~10-minute periodic task also re-registers.
 
 ### FACT-017: the dev Compose stack and the production deck both bind OpenObserve 5080
-Status: LIVE
+Status: DEAD (superseded by next row: the p10 rehearsal overlay remaps every base host port; base and the deck still share O2 5080)
 Verified: 2026-09-21 - `grep -rn 5080 code/01_platform/01_docker/*.yml`: `docker-compose.yml:1198`
 publishes `"5080:5080"` (and `"5081:5081"`), `docker-stack.yml:1234` publishes host-mode `5080`. No
 overlay or environment variable remaps either, so the two stacks cannot run on this machine at the same
@@ -268,3 +268,11 @@ Verified: 2026-09-29 - the 2026-09-21 local stack deploys (CHG-279/CHG-283) plus
 Check: manual (needs the 4-VM rig; the local single-node Swarm is not that rig)
 Recheck when: a docker stack deploy runs on the 4-VM Swarm
 Supersedes FACT-012 (which claimed the local deploys had never happened). Two local docker stack deploy runs happened on 2026-09-21 on this one-node Swarm (CHG-279/CHG-283: the production deck came up locally, 20 services, synthetic credentials, then was recreated to apply CHG-283). What remains unproven is a deploy on the real VMs - the 4-VM Swarm has never been exercised, and FACT-002 is the topology decision, not evidence of a running cluster.
+
+### FACT-023: the p10 rehearsal overlay remaps every base host port; base and the deck still share O2 5080
+Status: LIVE
+Verified: 2026-09-29 - test_p10_rehearsal_ports.py green: all 8 base port-bearing services appear in docker-compose.p10.yml, p10 host ports are unique, all in 1xxxx, and disjoint from base ports and the deck's published 5080
+Check: python3 -m pytest code/01_platform/04_scripts/tests/test_p10_rehearsal_ports.py -q
+Recheck when: the base compose, the p10 overlay, or the deck's published ports change
+Claim: docker-compose.p10.yml remaps zookeeper 12181, fluss 19123/19124, flink 18081/19249/19250, otel 14317/14318, OpenObserve 15080/15081 and MinIO 19000/19001 — every base port-bearing service.
+The base dev Compose stack and the production deck still both bind OpenObserve 5080, so those two cannot run together; the p10 rehearsal can, because no p10 host port touches a base or deck port. Supersedes FACT-017.
