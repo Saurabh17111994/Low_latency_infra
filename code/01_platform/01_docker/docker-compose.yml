@@ -31,6 +31,13 @@
 x-manifest: &manifest "${INSTRUMENT_MANIFEST_HOST_PATH:-/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/Arrow_broker/instruments/cash_stocks/NSE_CM_EQUITY (1024).csv}"
 x-manifest-dir: &manifest-dir "${INSTRUMENT_MANIFESTS_HOST_DIR:-/home/saurabh/Jupyter_notebook/Flink_Fluss_Infrastructure/Arrow_broker/instruments/cash_stocks}"
 
+# H3-1 (P0-7): ONE execution identity (see the stack's anchor for the full rationale).
+# Dev defaults match the gateway/nautilus identity; the compute (execution-intent) path
+# merges the same pair, so all three cannot diverge while operator overrides reach all.
+x-execution-identity: &execution_identity
+  ACCOUNT_SCOPE_ID: ${ACCOUNT_SCOPE_ID:-dev-scope}
+  EXECUTION_PARTITION_ID: ${EXECUTION_PARTITION_ID:-dev-partition}
+
 x-fluss-common: &fluss-common
   restart: unless-stopped
   networks: [trading-net]
@@ -80,14 +87,13 @@ x-flink-common: &flink-common
     # STRATEGY_HOST_ENABLED=false keeps the topology byte-identical; true
     # requires a non-empty STRATEGIES list (SignalJobConfig fails fast
     # otherwise). EXECUTION_INTENT_ENABLED=true requires the execution identity
-    # below — blank values fail closed in SignalJobConfig. The defaults here
-    # are OFF and match the gateway/nautilus dev identity (dev-scope /
-    # dev-partition) so turning intent on needs only the three switches.
+    # — blank values fail closed in SignalJobConfig. The pair comes from the one
+    # top-level x-execution-identity anchor (H3-1) the gateway and nautilus merge
+    # too, so all three cannot diverge; the switches above are the only opt-in.
     STRATEGY_HOST_ENABLED: ${STRATEGY_HOST_ENABLED:-false}
     STRATEGIES: ${STRATEGIES:-}
     EXECUTION_INTENT_ENABLED: ${EXECUTION_INTENT_ENABLED:-false}
-    ACCOUNT_SCOPE_ID: ${ACCOUNT_SCOPE_ID:-dev-scope}
-    EXECUTION_PARTITION_ID: ${EXECUTION_PARTITION_ID:-dev-partition}
+    <<: *execution_identity
     EXECUTION_PRODUCT_TYPE: ${EXECUTION_PRODUCT_TYPE:-CNC}
     EXECUTION_TIME_IN_FORCE: ${EXECUTION_TIME_IN_FORCE:-DAY}
     # Feature layer (DEC-056/DEC-057, 2026-09-27). OFF by default: the strategy
@@ -1053,8 +1059,7 @@ services:
       NAUTILUS_PRIVATE_ENDPOINT: http://nautilus:9190/v1/intents
       GATEWAY_PROTOCOL_VERSION: execution-gateway.v2
       GATEWAY_SHARED_SECRET: ${GATEWAY_SHARED_SECRET:-local-dev-only}
-      ACCOUNT_SCOPE_ID: ${ACCOUNT_SCOPE_ID:-dev-scope}
-      EXECUTION_PARTITION_ID: ${EXECUTION_PARTITION_ID:-dev-partition}
+      <<: *execution_identity
       GATEWAY_REQUEST_TIMEOUT_MS: "2000"
       GATEWAY_POLL_TIMEOUT_MS: "250"
       # CHG-092: GatewayConfig.fromEnv reads EXECUTION_ENABLED (default false, fail-closed);
@@ -1092,8 +1097,8 @@ services:
       # gateway's EXECUTION_PARTITION_ID / ACCOUNT_SCOPE_ID above — a report naming another
       # partition or scope is refused (409), and without the partition the durable reporter is
       # not armed (approvals would stay process-local and the gateway would never see the row).
-      EXECUTION_PARTITION_ID: ${EXECUTION_PARTITION_ID:-dev-partition}
-      ACCOUNT_SCOPE_ID: ${ACCOUNT_SCOPE_ID:-dev-scope}
+      # H3-1: both sides now read the pair from the one x-execution-identity anchor.
+      <<: *execution_identity
       # WP-2 remainder (2026-08-21): BRIDGE_ENDPOINT (above) selects the production
       # HttpBridgeClient transport; this token authenticates to the private execution-bridge.
       # Same source as the bridge's own EXECUTION_BRIDGE_AUTH_TOKEN so both sides agree.

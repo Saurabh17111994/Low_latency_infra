@@ -568,7 +568,7 @@ class TestR2DelegationKeys:
         for line in props.splitlines():
             stripped = line.strip()
             if stripped.startswith("fs.s3a."):
-                key, _, value = stripped.partition(":")
+                key, value = stripped.split(":", 1)
                 out[key.strip()] = value.strip()
         return out
 
@@ -601,6 +601,61 @@ class TestR2DelegationKeys:
                 assert got[key] == want[key], (
                     f"{role}: {key} stack={got[key]!r} compose={want[key]!r} — the two "
                     "decks must carry identical delegation-token values")
+
+
+class TestExecutionIdentityParity:
+    """H3-1 (P0-7): the money-path services carry ONE execution identity.
+
+    The identity is a pair — account scope + the partition the durable gate row belongs
+    to — and the gateway refuses a report whose pair does not match its own (409
+    SCOPE_MISMATCH). CHG-336 wrote the executor's half as literals while the gateway
+    interpolated, and nothing compared the two: a literal on one side is a boot that can
+    never arm the durable gate, and the retry loop hid it. Both decks define the pair
+    once in a top-level `x-execution-identity` anchor; this test pins that the services
+    merge that anchor and that the values are equal and non-literal.
+    """
+
+    COMPOSE = ROOT / "code/01_platform/01_docker/docker-compose.yml"
+    KEYS = ("ACCOUNT_SCOPE_ID", "EXECUTION_PARTITION_ID")
+
+    @staticmethod
+    def _identity(env):
+        return {k: env.get(k) for k in TestExecutionIdentityParity.KEYS}
+
+    def test_stack_gateway_and_nautilus_share_one_identity(self):
+        raw = STACK.read_text()
+        d = _load()["services"]
+        gw = self._identity(d["execution-gateway"]["environment"])
+        na = self._identity(d["nautilus"]["environment"])
+        assert gw == na, (
+            f"gateway={gw} nautilus={na} — one identity, one anchor (H3-1); a report "
+            "naming another pair is refused (409 SCOPE_MISMATCH)")
+        for key, value in gw.items():
+            assert value and value.startswith("${"), (
+                f"{key}={value!r} must be an operator-overridable expression — a "
+                "literal cannot follow an override and can never arm the durable gate")
+        assert "x-execution-identity: &execution_identity" in raw, (
+            "the stack must define the one x-execution-identity anchor")
+        for name in ("execution-gateway", "nautilus"):
+            assert "<<: *execution_identity" in service_block_raw(raw, name), (
+                f"{name}: must merge the top-level x-execution-identity anchor so the "
+                "two can never diverge")
+
+    def test_compose_compute_gateway_and_nautilus_share_one_identity(self):
+        d = yaml.safe_load(self.COMPOSE.read_text())["services"]
+        gw = self._identity(d["execution-gateway"]["environment"])
+        na = self._identity(d["nautilus"]["environment"])
+        assert gw == na, f"compose gateway={gw} nautilus={na} — identities must match"
+        for name in ("flink-jobmanager", "flink-taskmanager"):
+            # The compute path merges the pair through the flink-common anchor; a job
+            # that turns EXECUTION_INTENT_ENABLED on emits intents carrying this pair.
+            assert self._identity(d[name]["environment"]) == gw, (
+                f"compose {name} identity differs from the gateway's — a forwarded "
+                "intent naming another pair is refused (409)")
+        for name in ("execution-gateway", "nautilus"):
+            assert all(str(v).startswith("${") for v in self._identity(
+                d[name]["environment"]).values()), (
+                f"compose {name}: identity values must stay operator-overridable")
 
 
 class TestTier2Hardening:

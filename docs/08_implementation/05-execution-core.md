@@ -1003,6 +1003,12 @@ writer, as it already is for every other execution table):
 - **Config (CHG-336):** `EXECUTION_PARTITION_ID` / `ACCOUNT_SCOPE_ID` on nautilus in both
   decks (matching the gateway); the runbook hop page documents `durable_gate` + the lease
   semantics.
+- **One identity anchor (H3-1, CHG-394):** both decks define the pair once in a top-level
+  `x-execution-identity` mapping — gateway + nautilus merge it (compose also feeds the
+  compute path through the flink-common anchor) — so the two sides cannot diverge while
+  operator overrides still reach both. `test_09_stack.py::TestExecutionIdentityParity`
+  pins equal, non-literal values; the executor's half of the same finding (no invented
+  `dev-scope` fallback, 409 `SCOPE_MISMATCH` non-retryable) lands with the executor slice.
 - **Evidence:** H2-2 paper drill attempt 4 (2026-09-27) — `/readyz` 200, `BOOT_HALT` epoch 1,
   approve → `ENABLED` epoch 3 / fence 1, `RENEW` every 10 s, t9 live PASS
   (`event_emission:accepted`, `Order_Lifecycle` 0→1), halt epoch 4 / fence 2
