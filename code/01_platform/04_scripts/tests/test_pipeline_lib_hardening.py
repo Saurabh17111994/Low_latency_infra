@@ -19,6 +19,7 @@ import shutil
 import socket
 import re
 import subprocess
+import sys
 import tempfile
 import textwrap
 import time
@@ -93,13 +94,24 @@ def run_lib(tmp_path: Path, script: str, *, timeout: int = 60,
     root = tmp_path / "root"
     (root / "code" / "02_services" / "02_compute" / "target").mkdir(parents=True, exist_ok=True)
     (root / "code" / "02_services" / "02_compute" / "target" / "compute.jar").write_text("jar")
-    # The loadgen stamp's three listed inputs (P6-143).
-    for rel in ("code/02_services/01_ingestion/Dockerfile.loadgen",
+    # The loadgen stamp's listed inputs (P6-143) and, since CHG-439, the
+    # checker the stamp delegates to: the stamp is now
+    # image_staleness_check.py's value over the compose-declared COPY set, so
+    # the fixture carries the checker, the compose file it reads the loadgen
+    # service from, and the reactor parent + common tree it hashes.
+    for rel in ("code/pom.xml",
+                "code/02_services/01_ingestion/Dockerfile.loadgen",
                 "code/02_services/01_ingestion/pom.xml",
                 "code/02_services/06_execution_gateway/pom.xml"):
         p = root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("x")
+    (root / "code" / "common").mkdir(parents=True, exist_ok=True)
+    for rel in ("code/01_platform/04_scripts/image_staleness_check.py",
+                "code/01_platform/01_docker/docker-compose.yml"):
+        dst = root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(REPO / rel, dst)
     out = tmp_path / "out"
     out.mkdir(exist_ok=True)
     env = {
@@ -212,6 +224,28 @@ def test_stamp_computes_a_digest_when_inputs_exist(tmp_path):
     r = run_lib(tmp_path, 'pipeline_loadgen_input_stamp')
     assert r.returncode == 0
     assert len(r.stdout.strip()) == 64
+
+
+def test_stamp_is_the_checkers_stamp(tmp_path):
+    """CHG-439: one definition. G27b's value must equal the checker's value for
+    the same tree — the checker's is what `make images` exports as the compose
+    build arg and bakes into the image label. Before CHG-439 the hand-kept list
+    and the checker disagreed by construction, so whichever builder ran last
+    decided which check passed (2026-09-29: after `make images` the stage
+    profiler refused the image the gate had just certified; measured
+    853c415b… vs b2e950fa…). This pins the delegation — a re-implemented stamp
+    fails here, in step 3, seconds after the edit.
+    """
+    r = run_lib(tmp_path, 'pipeline_loadgen_input_stamp')
+    assert r.returncode == 0, r.stderr
+    checker = tmp_path / "root" / "code/01_platform/04_scripts/image_staleness_check.py"
+    out = subprocess.run(
+        [sys.executable, str(checker), "--git-root", str(tmp_path / "root"),
+         "--service", "loadgen", "--print-stamps-env"],
+        capture_output=True, text=True, check=True).stdout.strip()
+    assert out == f"LOADGEN_BUILD_STAMP={r.stdout.strip()}", (
+        "the G27b stamp and the checker's stamp disagree — one fact, one "
+        "computation (CHG-439)")
 
 
 # ── P6-146/P6-475: credentials and the evidence mount ────────────────────────

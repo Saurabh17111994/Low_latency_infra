@@ -304,35 +304,40 @@ pipeline_wait_for_fluss_ready() {
 #       OLD code and produce a bogus baseline
 #   (c) guards red: test-pipeline-lib.sh failing — running on a known-bad
 #       harness contradicts the every-fix-pinned-by-a-guard policy
-# G27b helper: sha256 over EVERY build input of the loadgen image (the
-# exact set the Dockerfile COPYs). Sorted file list -> per-file sha ->
-# final digest, so any content change flips the stamp.
+# G27b helper: the loadgen image's build stamp. CHG-439 (2026-09-29): it IS
+# the checker's stamp (image_staleness_check.py) — the same computation `make
+# images` exports into the compose build arg and the image label. This function
+# used to keep its own hand-written input list, which disagreed with the
+# checker's by construction (it missed code/pom.xml and the build context's
+# .dockerignore, and excluded the host-built Go binaries by name instead of by
+# git-ignore), so whichever builder ran last decided which check passed: after
+# any `make images` this G27b preflight refused the image the gate had just
+# certified (measured 2026-09-29: checker b2e950fa… vs hand-kept 853c415b… —
+# the stage-profiler smoke refused to measure). One fact, one computation.
 pipeline_loadgen_input_stamp() {
-  # P6-143: the three explicitly listed inputs must EXIST. A deleted
-  # Dockerfile/pom contributed nothing to the file list and the stamp was then
-  # computed from whatever remained (fail-open). Ceiling: paths containing a
-  # NEWLINE are still unsupported (the list is newline-separated); spaces are
-  # safe because the list is piped to sha256sum NUL-separated below.
+  # P6-143: the listed inputs must EXIST. A deleted Dockerfile/pom left the
+  # checker hashing whatever remained (fail-open), and every consumer then
+  # compared the image against a stamp of a different input set.
   local f
   for f in "$ROOT/code/02_services/01_ingestion/Dockerfile.loadgen" \
            "$ROOT/code/02_services/01_ingestion/pom.xml" \
-           "$ROOT/code/02_services/06_execution_gateway/pom.xml"; do
+           "$ROOT/code/02_services/06_execution_gateway/pom.xml" \
+           "$ROOT/code/pom.xml"; do
     [ -f "$f" ] || { pipeline_fail "loadgen build input missing: $f (the build stamp cannot be computed)"; return 1; }
   done
-  { # everything the Dockerfile COPYs from go-bridge (go/mod/sum, *.go,
-    # marketdata, vendored third_party) EXCEPT the host-built arrow-bridge
-    # binary and test binaries — they are build OUTPUTS on the host, not
-    # image inputs, and would flip the stamp spuriously.
-    find "$ROOT/code/02_services/01_ingestion/go-bridge" \
-        -type f ! -name 'arrow-bridge' ! -name '*.test' -print 2>/dev/null
-    find "$ROOT/code/02_services/01_ingestion/src" -type f -print 2>/dev/null
-    printf '%s\n' \
-      "$ROOT/code/02_services/01_ingestion/Dockerfile.loadgen" \
-      "$ROOT/code/02_services/01_ingestion/pom.xml" \
-      "$ROOT/code/02_services/06_execution_gateway/pom.xml"
-    find "$ROOT/code/common" -type f -name '*.java' -print 2>/dev/null
-  } | sort | grep -v '^$' | tr '\n' '\0' | xargs -0 -r sha256sum 2>/dev/null \
-    | sha256sum | cut -d' ' -f1
+  local stamp
+  stamp="$(python3 "$ROOT/code/01_platform/04_scripts/image_staleness_check.py" \
+        --git-root "$ROOT" --service loadgen --print-stamps-env 2>/dev/null \
+      | sed -n 's/^LOADGEN_BUILD_STAMP=//p' | head -1)"
+  case "$stamp" in
+    "") pipeline_fail "loadgen build stamp: image_staleness_check.py printed no LOADGEN_BUILD_STAMP line (file missing or unreadable compose)"; return 1 ;;
+    *[!0-9a-f]*) pipeline_fail "loadgen build stamp is not a hex digest ('$stamp')"; return 1 ;;
+  esac
+  if [ "${#stamp}" -ne 64 ]; then
+    pipeline_fail "loadgen build stamp has ${#stamp} hex chars, expected 64 (sha256)"
+    return 1
+  fi
+  printf '%s\n' "$stamp"
 }
 
 pipeline_verify_loadgen_image() {
