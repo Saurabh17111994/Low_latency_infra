@@ -1,7 +1,9 @@
 # W3-d design note — state-churn cut (timer-driven changelog volume)
 
-- **Status:** design pass complete (verify-first); implementation not started.
-  Operator approved the design pass 2026-09-30 ("do the state-cut design").
+- **Status:** implemented (CHG-460, commit `4f065d30`): scan-driven live mirrors replace the
+  per-key live timers; failing-first test + mutation check green, full compute suite 638/0.
+  Smoke + 900 s round pending. Operator approved the design pass and the implementation
+  2026-09-30.
 - **Filed:** 2026-09-30
 - **Supersedes:** the earlier one-line W3-d framing ("shrink candle structs / fingerprint
   strings") — **that premise is obsolete** (see "Correction" below).
