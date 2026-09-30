@@ -31,23 +31,28 @@ COMPOSE = REPO / "code" / "01_platform" / "01_docker" / "docker-compose.yml"
 
 def test_changelog_base_path_wiped_per_phase() -> None:
     """CHG-458: the FS changelog base path is a persistent shared volume; without
-    a per-phase wipe, post-restart runs see stale files (457-465 "state is not
-    in tracking" WARNs/window) and the path grows unbounded (1.9 GB/day). The
-    profiler preflight must wipe it, fail-closed."""
+    a per-phase wipe, post-restart runs see stale files and the path grows
+    unbounded (1.9 GB/day). The profiler preflight must wipe it, fail-closed.
+    (The 457-465/round "state is not in tracking" WARNs proved intra-run and
+    are NOT the stale-file artifact; the wipe's rationale is hygiene.)"""
     src = PROFILER.read_text(encoding="utf-8")
     assert "/checkpoints/changelog && mkdir -p /checkpoints/changelog" in src, (
         "the per-phase changelog wipe is gone from stage-profile.sh preflight"
     )
 
 
-def test_changelog_preemptive_persist_threshold_is_pinned() -> None:
-    """CHG-458: 1 MB preemptive persist (pinned 2.2.1 default: 5 MB) starts the
-    changelog upload before the checkpoint-time burst and shrinks the async
-    phase. Option name verified in the pinned flink-dstl-dfs-2.2.1.jar bytecode
+def test_changelog_preemptive_persist_threshold_stays_at_default() -> None:
+    """CHG-459 (revert of the CHG-458 tuning): the 1 MB preemptive-persist
+    threshold showed no KPI win, a checkpoint-e2e median regression (57 vs
+    37 ms) and a registry-WARN amplification (1297 vs 457-465/round) in
+    logs/chg458-main-20260930-135319. The key must stay unset — the pinned
+    2.2.1 default (5 MB) applies — unless a future CHG brings its own
+    evidence. Option verified in the pinned flink-dstl-dfs-2.2.1.jar bytecode
     (FsStateChangelogOptions)."""
     src = COMPOSE.read_text(encoding="utf-8")
-    assert "state.changelog.dstl.dfs.preemptive-persist-threshold: 1MB" in src, (
-        "the CHG-458 preemptive-persist threshold is gone from docker-compose.yml"
+    assert "state.changelog.dstl.dfs.preemptive-persist-threshold:" not in src, (
+        "a preemptive-persist-threshold override is back in docker-compose.yml "
+        "without CHG evidence"
     )
 
 

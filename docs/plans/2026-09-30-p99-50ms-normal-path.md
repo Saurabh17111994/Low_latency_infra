@@ -230,6 +230,21 @@ changelog wipe in the profiler preflight + `state.changelog.dstl.dfs.preemptive-
 tested with the **host quiet** (OpenObserve stopped during runs — operator-approved
 diagnostic).
 
+**ROUND RESULT (900 s, CHG-458 wipe + 1 MB threshold, `logs/chg458-main-20260930-135319`,
+host quiet):** body flat — ingest 25/55/65 (0/60 > 100), tick 33/67.6/78 (5/60 > 100);
+4 876 rows/s; TM/tablet CPU 274 %/118 % vs 266 %/112 % (flat), memory flat; GC slightly
+better (209 events / 38.6 ms vs 245 / 44.3); **checkpoint e2e regressed 37 → 57 ms med**
+(p90/max flat); state med 78 vs 94 MB (mechanical: smaller accumulation between the more
+frequent persists); **registry WARNs 1 297 vs 457-465/round** (intra-run, amplified by the
+extra persist files). → **no KPI response + e2e median regression + WARN amplification:
+the 1 MB threshold is a non-winner → REVERTED to the pinned 5 MB default (CHG-459); the
+per-phase preflight wipe stays** (hygiene, fail-closed, exonerated — the WARNs are
+intra-run). **W3-d design pass (same day, read-only) then found the actual churn source:**
+the aggregate function's per-key live-mirror timers re-register 2×/s per active key
+(~4 900 timer-state mutations/s ≈ 20 MB/min of changelog, 94 MB checkpoint state) — see
+`docs/plans/2026-09-30-w3d-state-churn-design.md`; implementation in progress: scan-driven
+live mirrors, no per-key timers (CHG-460).
+
 ### W4 — TM CPU contention / slot isolation (design)
 
 **GIVES YOU** — addresses the suspected second half of the single-subtask stalls: the

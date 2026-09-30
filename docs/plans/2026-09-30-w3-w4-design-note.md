@@ -82,6 +82,7 @@ windows in 900 s, in two measured classes:
 | **W3-c** | materialization cadence/stagger tuning (periodic-materialize default 10 min; size trigger not yet pinned) | fewer/shorter rounds | config; longer restores | restore drills |
 | **W3-c (closed 2026-09-30)** | tried 30 min (CHG-454) in two 900 s rounds: no KPI gain; only the startup materialization batch occurred either way (the scheduler staggers the rest outside the window) | none measured | cost seen: changelog base path 1.9 GB, longer restore replay | **reverted (CHG-457)** |
 | **W3-d** | aggregator state-size reduction | cheaper materialization | code/design; correctness review | full gate; DEC-056 features untouched |
+| **W3-d (design done 2026-09-30)** | re-scoped after verify-first: the candle/dedup structures are heap-only (never checkpointed); the real churn is the **per-key live-mirror timers** (~4 900 state mutations/s → ~20 MB/min changelog, 94 MB checkpoint state). Fix = operator-scope live mirrors (scan) — expected ≥85 % churn cut, same observable behavior | changelog/disk/checkpoint/CPU all drop | code change in `MultiTimeframeAggregateFunction` + failing-first tests | see `2026-09-30-w3d-state-churn-design.md`; gate when un-deferred |
 | **W4'** | container CPU isolation (cpuset/pinning) | only if W3-i attributes outliers to host scheduling | compose change; dev-only finding | production sizing note |
 
 ## 5. Recommended sequence
