@@ -29,7 +29,10 @@ filters, sink UIDs stay, config 82/0/0 + UID pins 4/0/0, mutation-checked) ·
 merged-only writes proven live: `candle_features` +57,263 while
 `candle_live`/`candle_closed`/`feature_values` each +0; 498,110 sealed context
 hits / 23,959 forming-absents; 32/0 checkpoints; stack reverted) ·
-W-C7/W-C5a pending.
+**W-C7 landed** (`CHG-481`: the three legacy tables dropped from dev —
+list/drop/readback through the confirm-gated probe, tool `d23e01ad` + 11 runner
+tests; `candle_features` still live and growing) · **W-C5a + the single full
+gate pending**.
 
 **Cadence (revised 2026-09-30, operator):** scoped checks per slice; **one full
 `make gate` at the cutover** (W-C5a certifying run) and one final full run after
