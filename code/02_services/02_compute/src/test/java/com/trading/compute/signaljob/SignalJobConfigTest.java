@@ -910,6 +910,29 @@ class SignalJobConfigTest {
     }
 
     @Test
+    void candleContextSourceDefaultsAndParses() {
+        // W-C1 (Wave C cutover, docs/plans/2026-09-30-wave-c-merged-cutover.md):
+        // the strategy-context fetch source is explicit — legacy candle_closed
+        // until the cutover flip, candle_features + sealed-only afterwards.
+        assertEquals("candle_closed", SignalJobConfig.from(env()).candleContextTable(),
+                "CANDLE_CONTEXT_TABLE default candle_closed");
+        assertFalse(SignalJobConfig.from(env()).candleContextSealedOnly(),
+                "CANDLE_CONTEXT_SEALED_ONLY default false");
+
+        Map<String, String> env = env();
+        env.put("CANDLE_CONTEXT_TABLE", " candle_features ");
+        env.put("CANDLE_CONTEXT_SEALED_ONLY", "true");
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertEquals("candle_features", cfg.candleContextTable());
+        assertTrue(cfg.candleContextSealedOnly());
+
+        Map<String, String> blank = env();
+        blank.put("CANDLE_CONTEXT_TABLE", "   ");
+        assertEquals("candle_closed", SignalJobConfig.from(blank).candleContextTable(),
+                "blank CANDLE_CONTEXT_TABLE falls back to the legacy default");
+    }
+
+    @Test
     void mergedCandleFeaturesDefaultsOffAndParses() {
         // Wave B/DEC-059: the merged candle_features write path is opt-in; the
         // old candle/feature tables stay authoritative until the cutover.

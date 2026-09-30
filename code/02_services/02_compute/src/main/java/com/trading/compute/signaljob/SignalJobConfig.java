@@ -133,6 +133,11 @@ public record SignalJobConfig(
         String candleLiveTable,
         String candleClosedTable,
         String mergedCandleTable,
+        // Wave C (docs/plans/2026-09-30-wave-c-merged-cutover.md): the strategy
+        // context fetch source — legacy candle_closed until the cutover flip;
+        // candle_features + sealed-only (finished windows only) after.
+        String candleContextTable,
+        boolean candleContextSealedOnly,
         // 2026-09-26 S5→S6 latency workstream (native fetch/flush tuning;
         // see docs/plans/2026-09-26-signal-source-latency-tuning.md).
         long flussScannerFetchMaxBytes,
@@ -221,6 +226,12 @@ public record SignalJobConfig(
         if (mergedCandleTable.isEmpty()) {
             throw new IllegalStateException("Config MERGED_CANDLE_TABLE must be non-blank");
         }
+        // Wave C (docs/plans/2026-09-30-wave-c-merged-cutover.md): the strategy
+        // context fetch source is explicit — legacy candle_closed until the
+        // cutover flip; candle_features + sealed-only (finished windows) after.
+        String candleContextTable = stringEnv(env, "CANDLE_CONTEXT_TABLE", "candle_closed");
+        boolean candleContextSealedOnly =
+                booleanValue(env, "CANDLE_CONTEXT_SEALED_ONLY", false);
         // 2026-09-26 S5→S6 latency workstream: native fetch/flush tuning.
         // The Fluss scanner's fetch chunk caps how long a raw tick waits in
         // Fluss before the source emits it (measured 2026-09-26 at 48.5k
@@ -378,6 +389,8 @@ public record SignalJobConfig(
                 candleLiveTable,
                 candleClosedTable,
                 mergedCandleTable,
+                candleContextTable,
+                candleContextSealedOnly,
                 flussScannerFetchMaxBytes,
                 flussScannerFetchMaxBytesForBucket,
                 flussScannerFetchWaitMaxTimeMs,

@@ -16,6 +16,9 @@ code map, slices, tests and decisions before any production-code edit.
 - Wave B is complete and live-proven (`CHG-475`); the legacy path is still
   authoritative today (dual-write was only ever transient).
 
+**Progress:** **W-C1 landed** (`CHG-476`: context reader switch — config +
+sealed-only decode, 109/0/0 scoped, mutation-checked) · W-C2..W-C5 pending.
+
 ## Verify-first census (tree `a68e54ff`, re-verified 2026-09-30)
 
 **Writers (legacy):**

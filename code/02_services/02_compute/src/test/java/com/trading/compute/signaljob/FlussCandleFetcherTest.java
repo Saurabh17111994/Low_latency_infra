@@ -116,4 +116,83 @@ class FlussCandleFetcherTest {
 
         assertNull(future.join());
     }
+
+    // ---- W-C1 (docs/plans/2026-09-30-wave-c-merged-cutover.md): merged source ----
+
+    /** DDL 35 column order: candle_closed's 15 columns + features + sealed. */
+    private static GenericRow mergedRow(long token, String tf, long windowStart, boolean sealed) {
+        GenericRow row = candleRow(token, tf, windowStart);
+        GenericRow merged = new GenericRow(17);
+        for (int i = 0; i < 15; i++) {
+            merged.setField(i, row.getField(i));
+        }
+        merged.setField(15, null); // features — not decoded by the fetcher
+        merged.setField(16, sealed);
+        return merged;
+    }
+
+    @Test
+    @DisplayName("sealed-only: a sealed candle_features row decodes the same candle fields")
+    void sealedOnlyDecodesSealedMergedRow() {
+        FakeLookuper lookuper = new FakeLookuper();
+        FlussCandleFetcher fetcher = new FlussCandleFetcher(lookuper, null, true);
+
+        CompletableFuture<ContextCandle> future =
+                fetcher.fetch(new ContextKey(42L, Timeframe.ONE_M, 111_000L));
+        lookuper.result.complete(
+                new LookupResult(mergedRow(42L, "ONE_M", 111_000L, true)));
+        ContextCandle candle = future.join();
+
+        assertNotNull(candle, "sealed row must decode");
+        assertEquals(42L, candle.token());
+        assertEquals(Timeframe.ONE_M, candle.tf());
+        assertEquals(111_000L, candle.windowStart());
+        assertEquals(171_000L, candle.windowEnd());
+        assertEquals(1_020L, candle.closePaise());
+        assertEquals(7_777L, candle.volume());
+        assertEquals(21, candle.tickCount());
+        assertEquals(170_000L, candle.lastEventTime());
+    }
+
+    @Test
+    @DisplayName("sealed-only: a forming candle_features row is absent (retried after cooldown)")
+    void sealedOnlyTreatsFormingRowAsAbsent() {
+        FakeLookuper lookuper = new FakeLookuper();
+        FlussCandleFetcher fetcher = new FlussCandleFetcher(lookuper, null, true);
+
+        CompletableFuture<ContextCandle> future =
+                fetcher.fetch(new ContextKey(42L, Timeframe.ONE_M, 111_000L));
+        lookuper.result.complete(
+                new LookupResult(mergedRow(42L, "ONE_M", 111_000L, false)));
+
+        assertNull(future.join(), "a forming row is not a finished window");
+    }
+
+    @Test
+    @DisplayName("sealed-only: a legacy row without the sealed column is rejected, not decoded")
+    void sealedOnlyRejectsLegacyRowMissingSealedColumn() {
+        FakeLookuper lookuper = new FakeLookuper();
+        FlussCandleFetcher fetcher = new FlussCandleFetcher(lookuper, null, true);
+
+        CompletableFuture<ContextCandle> future =
+                fetcher.fetch(new ContextKey(42L, Timeframe.ONE_M, 111_000L));
+        // 15-column candle_closed row: sealed-only against it is contract drift.
+        lookuper.result.complete(new LookupResult(candleRow(42L, "ONE_M", 111_000L)));
+
+        assertNull(future.join(), "missing sealed column must fail closed, never throw");
+    }
+
+    @Test
+    @DisplayName("default (legacy) mode ignores the sealed column — byte-identical behavior")
+    void defaultModeDecodesMergedRowWithoutSealedFilter() {
+        FakeLookuper lookuper = new FakeLookuper();
+        FlussCandleFetcher fetcher = new FlussCandleFetcher(lookuper, null);
+
+        CompletableFuture<ContextCandle> future =
+                fetcher.fetch(new ContextKey(42L, Timeframe.ONE_M, 111_000L));
+        lookuper.result.complete(
+                new LookupResult(mergedRow(42L, "ONE_M", 111_000L, false)));
+
+        assertNotNull(future.join(), "without sealed-only a row decodes regardless of sealed");
+    }
 }
