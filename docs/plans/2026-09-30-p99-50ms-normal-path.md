@@ -209,6 +209,20 @@ tick tail tracks the **filesystem-changelog machinery** (uploads/registry/snapsh
 GC/host/materialization-rounds. Next bundle (operator-approved): **CT-4B** (signal-sink
 linger 1 ms) + **CT-5** (buffer debloat), CHG-455/456.
 
+**ROUND RESULT (900 s, CT-4B + CT-5, CHG-455/456, `logs/ct45-main-20260930-131344`):** body
+≈ flat-to-slightly-better (ingest 23/53/63, tick 31/65/77 — tick −3 ms at every percentile,
+noise-level); spikes persist — 4/60 > 100 ms (steady 100 / 455 / 121; worst steady outlier
+**455 vs 236**, worse); the startup spike (601 ms) sits 10 s after the first materialization
+batch with psi-cpu 13.0 (first host-CPU-pressure sighting); rows/s flat (4 866); 94/94 cps;
+TM GC better (36.3 ms / 238 events vs 44.3 / 295); TM CPU avg +8 %; tablet CPU avg flat;
+memory flat; **checkpoint e2e regressed 37 → 82 ms med (state size flat)**. → **no
+demonstrated win + a checkpoint-cost regression: CT-4B/CT-5 are non-winners → revert
+recommended** (operator decision). W3-c gets its second no-gain data point (25 min window:
+one materialization batch again, steady spikes persist) → revert also on the table.
+Next candidate: changelog path (wipe base path per run + `dstl.dfs` upload/cleanup tuning)
+— the e2e regression, the 465 registry WARNs and the TM ~300 % spike clusters all point
+there; optional host-quiet diagnostic (OpenObserve bursts, psi-cpu 13.0 at startup spike).
+
 ### W4 — TM CPU contention / slot isolation (design)
 
 **GIVES YOU** — addresses the suspected second half of the single-subtask stalls: the
