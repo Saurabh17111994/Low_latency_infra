@@ -116,8 +116,8 @@ final class ScratchTables {
             List<String> pk, int bucketCount, String what, Duration timeout) throws Exception {
         TableDescriptor td = TableDescriptor.builder()
                 .schema(schema)
-                // LOG tables: instrument_token routing (mirrors raw_table_1 /
-                // candle_closed). KV tables: bucket key must be a subset
+                // LOG tables: instrument_token routing (mirrors raw_table_1).
+                // KV tables: bucket key must be a subset
                 // of the PK — the current-state KV uses instrument_token (DDL 23).
                 .distributedBy(bucketCount, pk == null ? "instrument_token" : pk.get(0))
                 .build();

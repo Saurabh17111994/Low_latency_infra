@@ -18,8 +18,8 @@ import org.junit.jupiter.api.Test;
  * Unit tests for {@link FlussCandleFetcher} — the native Fluss lookup seam
  * behind {@link ContextProvider} (C1, docs/plans/2026-09-30-strategy-context-live-fetch.md).
  *
- * <p>Pins the two halves that must match the deployed {@code candle_closed}
- * contract (DDL 33): the lookup key row is exactly the primary key
+ * <p>Pins the two halves that must match the deployed {@code candle_features}
+ * contract (DDL 35, DEC-059): the lookup key row is exactly the primary key
  * {@code (instrument_token, tf, window_start)} in order, and the decoded
  * candle reads the DDL column indexes. The lookuper is a fake — no cluster.
  */
@@ -119,7 +119,7 @@ class FlussCandleFetcherTest {
 
     // ---- W-C1 (docs/plans/2026-09-30-wave-c-merged-cutover.md): merged source ----
 
-    /** DDL 35 column order: candle_closed's 15 columns + features + sealed. */
+    /** DDL 35 column order: the candle contract's 15 columns + features + sealed. */
     private static GenericRow mergedRow(long token, String tf, long windowStart, boolean sealed) {
         GenericRow row = candleRow(token, tf, windowStart);
         GenericRow merged = new GenericRow(17);
@@ -176,7 +176,7 @@ class FlussCandleFetcherTest {
 
         CompletableFuture<ContextCandle> future =
                 fetcher.fetch(new ContextKey(42L, Timeframe.ONE_M, 111_000L));
-        // 15-column candle_closed row: sealed-only against it is contract drift.
+        // 15-column candle contract row: sealed-only against it is contract drift.
         lookuper.result.complete(new LookupResult(candleRow(42L, "ONE_M", 111_000L)));
 
         assertNull(future.join(), "missing sealed column must fail closed, never throw");

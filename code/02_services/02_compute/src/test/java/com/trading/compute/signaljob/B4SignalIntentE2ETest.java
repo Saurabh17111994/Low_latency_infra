@@ -311,7 +311,7 @@ class B4SignalIntentE2ETest {
                 // raw validation gate both fail closed on anything outside
                 // {VALID_TRADE, VALID_NON_TRADE}, and the drop is counted, not
                 // logged. A stale "VALID" here made every burst row vanish at
-                // raw-validation, so candle_live/candle_closed stayed empty and
+                // raw-validation, so candle_features stayed empty and
                 // this test failed with "rows are not reaching the candle leg"
                 // (observed 2026-09-12; the pipeline itself was healthy).
         v[RawTableColumns.EVENT_DAY] = bs(EVENT_DAY_FMT.format(Instant.ofEpochMilli(eventTime)));
@@ -358,11 +358,12 @@ class B4SignalIntentE2ETest {
         return n[0];
     }
 
-    // Smoke milestone: closed FIFTEEN_S candles for the token (KV prefix
-    // lookup — candle_closed PK starts with instrument_token). One RPC, no
-    // full-table scan, so the smoke loop can afford it every 5th sample.
+    // Smoke milestone: sealed FIFTEEN_S candles for the token (KV prefix
+    // lookup — candle_features PK starts with instrument_token; forming rows
+    // are skipped so the count only moves when a window closes).
+    // One RPC, no full-table scan, so the smoke loop can afford it every 5th sample.
     private static int countCandles(Connection conn, long token) throws Exception {
-        Table candles = conn.getTable(TablePath.of("default", "candle_closed"));
+        Table candles = conn.getTable(TablePath.of("default", "candle_features"));
         Lookuper lookuper =
                 candles.newLookup().lookupBy("instrument_token").createLookuper();
         LookupResult res = lookuper.lookup(GenericRow.of(token))
@@ -372,8 +373,9 @@ class B4SignalIntentE2ETest {
         }
         int n = 0;
         for (Object row : res.getRowList()) {
-            if (row instanceof InternalRow r && !r.isNullAt(CandleClosedColumns.TF)
-                    && "FIFTEEN_S".equals(r.getString(CandleClosedColumns.TF).toString())) {
+            if (row instanceof InternalRow r && !r.isNullAt(MergedCandleFeaturesColumns.TF)
+                    && "FIFTEEN_S".equals(r.getString(MergedCandleFeaturesColumns.TF).toString())
+                    && r.getBoolean(MergedCandleFeaturesColumns.SEALED)) {
                 n++;
             }
         }
@@ -460,7 +462,7 @@ class B4SignalIntentE2ETest {
     }
 
     private static void requirePlatformTables(Connection conn) throws Exception {
-        String[] names = {"raw_table_1", "candle_live", "candle_closed",
+        String[] names = {"raw_table_1", "candle_features",
                 "Signal_Candidates", "Signal_Candidates_current",
                 "Trade_Decisions", "Execution_Intent"};
         for (String n : names) {

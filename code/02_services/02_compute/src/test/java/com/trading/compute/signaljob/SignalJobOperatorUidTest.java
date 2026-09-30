@@ -154,8 +154,9 @@ class SignalJobOperatorUidTest {
     void legacyCandleSinkUidsAreRetired() throws Exception {
         // Wave C W-C5a (DEC-059 end state): the guarded legacy sinks and their
         // guard filters are gone for good, and the end-state graph builds
-        // without candle_live/candle_closed existing anywhere (both were
-        // dropped on dev in W-C7 — this leg proves no code path needs them).
+        // without the retired candle tables existing anywhere (candle_live/
+        // candle_closed were dropped on dev in W-C7 — this leg proves no code
+        // path needs them; candle_features is the single live candle table).
         String suffix = String.valueOf(System.nanoTime());
         String candleName = "p6_uid_" + suffix + "_candle";
         String signalName = "p6_uid_" + suffix + "_sig";
