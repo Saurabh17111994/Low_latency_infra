@@ -33,7 +33,8 @@ PROBE_DIR = ROOT / "code/01_platform/04_scripts/fluss-probes"
 # CHG-221: ProbeFixtureSeeder is not a probe, but this list is the only place the
 # probe sources are compiled, and the fixture legs need it on the same classpath.
 PROBES = ["FlussPrefixReader", "FlussReadLagProbe", "FlussKvProbe", "FlussRuleCounter",
-          "FlussSignalLatency", "ProbeFixtureSeeder"]
+          "FlussSignalLatency", "ProbeFixtureSeeder", "FlussReadabilityProbe",
+          "FlussTableStatsProbe"]
 INGESTION = ROOT / "code/02_services/01_ingestion"
 BOOTSTRAP = "localhost:9123"
 DEAD = "127.0.0.1:9"          # nothing listens here; connection refused, no wait
@@ -198,6 +199,42 @@ class ProbeCompileTests(ProbeTestBase):
     def test_all_four_probes_compile(self) -> None:
         for name in PROBES:
             self.assertTrue((self.classes / f"{name}.class").is_file(), f"{name}.class missing")
+
+
+class ReadabilityProbeContractTest(ProbeTestBase):
+    """CHG-461: the readability probe fails closed on unusable input, before any RPC.
+
+    A bad invocation must exit 2 with the reason on stderr — never a silent
+    default, an empty sample file, or a connection attempt.
+    """
+
+    def test_missing_args_is_an_input_error(self) -> None:
+        proc = self.run_probe("FlussReadabilityProbe", [])
+        self.assertEqual(2, proc.returncode, proc.stderr)
+        self.assertIn("usage", proc.stderr)
+
+    def test_no_usable_token_is_an_input_error(self) -> None:
+        proc = self.run_probe(
+            "FlussReadabilityProbe", [DEAD, ",", str(self.tmp / "readability"), "60"]
+        )
+        self.assertEqual(2, proc.returncode, proc.stderr)
+        self.assertIn("no usable token", proc.stderr)
+
+    def test_zero_duration_is_an_input_error(self) -> None:
+        proc = self.run_probe(
+            "FlussReadabilityProbe", [DEAD, "4", str(self.tmp / "readability"), "0"]
+        )
+        self.assertEqual(2, proc.returncode, proc.stderr)
+        self.assertIn("duration_s must be > 0", proc.stderr)
+
+
+class TableStatsProbeContractTest(ProbeTestBase):
+    """CHG-461: the census leg refuses an empty table list before connecting."""
+
+    def test_empty_table_list_is_an_input_error(self) -> None:
+        proc = self.run_probe("FlussTableStatsProbe", [DEAD, ", ,"])
+        self.assertEqual(2, proc.returncode, proc.stderr)
+        self.assertIn("no usable table", proc.stderr)
 
 
 class SeederPlacementPins(unittest.TestCase):

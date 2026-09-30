@@ -6,7 +6,7 @@ Every line here is new code: no existing file is imported, sourced, or edited.
 
 This module is the offline half of the profiler — the half a unit test can pin:
 
-* the S1..S9 stage registry (which hop is measured, from which native source);
+* the S1..S12 stage registry (which hop is measured, from which native source);
 * percentiles with the same nearest-rank semantics the existing analyzer uses,
   so "p90" means the same thing in every report;
 * sample summaries for both row samples (computed here) and Java/Flink
@@ -163,6 +163,24 @@ STAGES: tuple[Stage, ...] = (
         "whole path (event time -> feature row)",
         "last-operator tracker latency (Flink latency tracking)",
         "raw rows/s vs feature rows/s",
+    ),
+    Stage(
+        "S10",
+        "table readability — live candles (tick -> fresh-reader visible)",
+        "liveread.tsv staleness samples, per-timeframe (CHG-461)",
+        "samples/s per timeframe",
+    ),
+    Stage(
+        "S11",
+        "table readability — closed candles + features (window close -> first read)",
+        "closeread.tsv / featureread.tsv first-sighting latency, per timeframe (CHG-461)",
+        "windows/s per timeframe; feature rows/s",
+    ),
+    Stage(
+        "S12",
+        "state growth — full platform (Flink + Fluss)",
+        "first..last growth rate of state-growth.tsv (CHG-461)",
+        "changelog/RocksDB/tablet bytes + per-table rows",
     ),
 )
 
@@ -464,6 +482,13 @@ DEFAULT_PRESENCE_RULES: tuple[PresenceRule, ...] = (
     PresenceRule("S7.tracker", 1, "per-operator tracker latency samples"),
     PresenceRule("S8.feature_read", 1, "candle window reads"),
     PresenceRule("S9.last_sink", 1, "last-operator tracker latency samples"),
+    # CHG-461: the readability matrix + state growth are measurement outputs;
+    # an empty leg must refuse the main phase the same way S1..S9 do.
+    PresenceRule("S10.live_read", 1, "per-timeframe live readability samples"),
+    PresenceRule("S11.closed_read", 1, "closed-candle close->read rows"),
+    PresenceRule("S11.feature_read", 1, "feature close->read rows"),
+    PresenceRule("S12.state_growth", 1, "state-growth samples (bytes + table rows)"),
+    PresenceRule("S12.state_tf", 1, "per-timeframe state rows (rows/bytes per tf)"),
 )
 
 
@@ -694,6 +719,418 @@ def close_to_visible(tsv_text: str) -> list[float]:
     return [seen - window_end for seen, window_end in first.values()]
 
 
+# ── CHG-461: readability matrix + state growth ──────────────────────────────
+
+#: The multi-TF grid (mirrors FeatureRegistry/CandleLiveColumns).
+TF_ORDER = ("FIFTEEN_S", "THIRTY_S", "ONE_M", "THREE_M", "FIVE_M", "FIFTEEN_M")
+TF_MS = {
+    "FIFTEEN_S": 15_000,
+    "THIRTY_S": 30_000,
+    "ONE_M": 60_000,
+    "THREE_M": 180_000,
+    "FIVE_M": 300_000,
+    "FIFTEEN_M": 900_000,
+}
+#: Registry ids -> names (append-only, DEC-057).
+FEATURE_NAMES = {0: "last_price", 1: "sma_close_20", 2: "rsi_close_14"}
+#: Operator-approved stored-data SLO (2026-09-30): p99 <= 75 ms in EVERY
+#: window of EVERY timeframe, not just the 15 s grid.
+READABILITY_SLO_MS = 75.0
+
+
+def _tsv_data_rows(text: str):
+    for line in text.splitlines():
+        if not line.strip() or line.startswith("epoch_ms"):
+            continue
+        yield line.split("\t")
+
+
+def parse_liveread(text: str) -> list[tuple[str, int, float]]:
+    """liveread.tsv -> [(tf, window_start, staleness_ms)].
+
+    Negative staleness (feed clock ahead of wall clock, a documented synthetic
+    feed artifact) is dropped, never clamped to 0 — a fake 0 would fabricate
+    headroom against the SLO.
+    """
+    rows: list[tuple[str, int, float]] = []
+    for parts in _tsv_data_rows(text):
+        if len(parts) < 7:
+            continue
+        try:
+            window_start = int(parts[3])
+            staleness = float(parts[6])
+        except ValueError:
+            continue
+        if staleness < 0 or parts[2] not in TF_MS:
+            continue
+        rows.append((parts[2], window_start, staleness))
+    return rows
+
+
+def parse_closeread(text: str) -> dict[str, list[float]]:
+    """closeread.tsv -> per-TF window_close -> first_read latencies (ms)."""
+    out: dict[str, list[float]] = {tf: [] for tf in TF_ORDER}
+    for parts in _tsv_data_rows(text):
+        if len(parts) < 6 or parts[2] not in out:
+            continue
+        try:
+            out[parts[2]].append(float(parts[5]))
+        except ValueError:
+            continue
+    return out
+
+
+def parse_featureread(text: str) -> tuple[dict[str, list[float]], dict[str, list[float]]]:
+    """featureread.tsv -> (per-TF latencies, per-feature-name latencies).
+
+    A stored feature row carries its features as a map, so every feature id in
+    the row shares the row's readability latency; the per-feature split here is
+    "which windows carried this feature", not a second measurement.
+    """
+    per_tf: dict[str, list[float]] = {tf: [] for tf in TF_ORDER}
+    per_feature: dict[str, list[float]] = {name: [] for name in FEATURE_NAMES.values()}
+    for parts in _tsv_data_rows(text):
+        if len(parts) < 7:
+            continue
+        try:
+            latency = float(parts[6])
+        except ValueError:
+            continue
+        if parts[2] in per_tf:
+            per_tf[parts[2]].append(latency)
+        for fid in parts[5].split(","):
+            fid = fid.strip()
+            if fid.isdigit():
+                name = FEATURE_NAMES.get(int(fid), f"feature_{fid}")
+                per_feature.setdefault(name, []).append(latency)
+    return per_tf, per_feature
+
+
+def values_by_tf(rows: Sequence[tuple[str, int, float]]) -> dict[str, list[float]]:
+    out: dict[str, list[float]] = {tf: [] for tf in TF_ORDER}
+    for tf, _, value in rows:
+        out.setdefault(tf, []).append(value)
+    return out
+
+
+def live_window_stats(
+    rows: Sequence[tuple[str, int, float]],
+) -> dict[str, tuple[int, int, float | None]]:
+    """Per-TF window scoring for the live leg: (windows, windows>SLO, worst p99).
+
+    The SLO is per window of every timeframe; for a live sample that window is
+    the timeframe window it was taken in, and its score is the p99 of the
+    staleness samples inside it.
+    """
+    by_window: dict[tuple[str, int], list[float]] = {}
+    for tf, window_start, staleness in rows:
+        by_window.setdefault((tf, window_start), []).append(staleness)
+    out: dict[str, tuple[int, int, float | None]] = {}
+    for (tf, _), values in by_window.items():
+        worst = pct(values, 99)
+        n_windows, n_over, prev_worst = out.get(tf, (0, 0, None))
+        out[tf] = (
+            n_windows + 1,
+            n_over + (1 if worst > READABILITY_SLO_MS else 0),
+            worst if prev_worst is None else max(prev_worst, worst),
+        )
+    return out
+
+
+def close_window_stats(
+    per_tf: Mapping[str, Sequence[float]],
+) -> dict[str, tuple[int, int, float | None]]:
+    """Per-TF scoring for close-cadenced legs: one stored row = one window."""
+    out: dict[str, tuple[int, int, float | None]] = {}
+    for tf, values in per_tf.items():
+        if not values:
+            continue
+        out[tf] = (
+            len(values),
+            sum(1 for v in values if v > READABILITY_SLO_MS),
+            max(values),
+        )
+    return out
+
+
+def summary_line(stats: Mapping[str, tuple[int, int, float | None]]) -> str:
+    """'worst <tf> p99=X over Y windows (Z >75ms)' across the timeframe grid."""
+    if not stats:
+        return "no samples"
+    worst_tf = max(stats, key=lambda tf: stats[tf][2] if stats[tf][2] is not None else -1)
+    n_windows = sum(v[0] for v in stats.values())
+    n_over = sum(v[1] for v in stats.values())
+    return (
+        f"worst {worst_tf} p99={fmt_num(stats[worst_tf][2])} ms over {n_windows} window(s),"
+        f" {n_over} > {READABILITY_SLO_MS:.0f} ms"
+    )
+
+
+_ROCKSDB_DIR_RE = re.compile(r"job_[0-9a-f]+_op_(.+)__\d+_\d+(?:__uuid_.*)?$")
+
+
+def _state_key(layer: str, key: str) -> str:
+    """Collapse per-run identifiers so a series survives across runs.
+
+    RocksDB dirs are per-subtask; the operator name is the stable part, and
+    the series below sums its subtasks per sample. Fluss tablet dirs carry a
+    numeric table id ('candle_closed-20644') that a recreate changes.
+    """
+    if layer == "flink.rocksdb.bytes":
+        m = _ROCKSDB_DIR_RE.match(key)
+        return m.group(1) if m else key
+    if layer in ("fluss.tablet.bytes", "fluss.table.rows"):
+        return re.sub(r"-\d+$", "", key)
+    return key
+
+
+def parse_state_growth(text: str) -> list[tuple[int, str, str, float]]:
+    """state-growth.tsv -> [(epoch_ms, layer, normalized key, value)]."""
+    rows: list[tuple[int, str, str, float]] = []
+    for parts in _tsv_data_rows(text):
+        if len(parts) < 4:
+            continue
+        try:
+            epoch, value = int(parts[0]), float(parts[3])
+        except ValueError:
+            continue
+        rows.append((epoch, parts[1], _state_key(parts[1], parts[2]), value))
+    return rows
+
+
+def state_growth_series(
+    rows: Sequence[tuple[int, str, str, float]],
+) -> dict[tuple[str, str], list[tuple[int, float]]]:
+    """-> {(layer, key): [(epoch_ms, value)]} with same-epoch rows summed.
+
+    Subtasks of one operator each emit a row per sample; their sum is the
+    operator's on-disk state, so the series must aggregate before it reads a
+    growth rate.
+    """
+    totals: dict[tuple[str, str, int], float] = {}
+    for epoch, layer, key, value in rows:
+        slot = (layer, key, epoch)
+        totals[slot] = totals.get(slot, 0.0) + value
+    series: dict[tuple[str, str], list[tuple[int, float]]] = {}
+    for (layer, key, epoch), value in totals.items():
+        series.setdefault((layer, key), []).append((epoch, value))
+    for points in series.values():
+        points.sort()
+    return series
+
+
+def growth_rate(points: Sequence[tuple[int, float]]) -> tuple[float, float, float] | None:
+    """(first, last, per-minute rate) over a locally sampled series."""
+    if len(points) < 2:
+        return None
+    (t0, v0), (t1, v1) = points[0], points[-1]
+    if t1 <= t0:
+        return None
+    return v0, v1, (v1 - v0) / ((t1 - t0) / 60_000.0)
+
+
+def human_bytes(value: float) -> str:
+    sign = "-" if value < 0 else ""
+    v = abs(value)
+    if v >= 1e9:
+        return f"{sign}{v / 1e9:.2f} GB"
+    if v >= 1e6:
+        return f"{sign}{v / 1e6:.1f} MB"
+    if v >= 1e3:
+        return f"{sign}{v / 1e3:.1f} KB"
+    return f"{sign}{v:.0f} B"
+
+
+def _readability_detail_tables(
+    live: Sequence[tuple[str, int, float]],
+    closed: Mapping[str, Sequence[float]],
+    features: Mapping[str, Sequence[float]],
+    feature_by_name: Mapping[str, Sequence[float]],
+) -> str:
+    live_by_tf = values_by_tf(live)
+    live_windows = live_window_stats(live)
+    closed_windows = close_window_stats(closed)
+    lines = [
+        "",
+        "### Per-timeframe readability, fresh reader (CHG-461; SLO p99 <= "
+        f"{READABILITY_SLO_MS:.0f} ms in every window of every timeframe)",
+        "",
+        "| tf | live samples | live p50 | live p95 | live p99 | live windows"
+        " | live windows >SLO | live worst window p99 | closed rows | closed p50"
+        " | closed p95 | closed p99 | closed >SLO | feature rows | feature p50"
+        " | feature p95 | feature p99 | feature >SLO |",
+        "|" + "|".join("---" for _ in range(18)) + "|",
+    ]
+    for tf in TF_ORDER:
+        live_values = live_by_tf.get(tf, [])
+        live_sum = Summary.of(live_values) if live_values else None
+        n_windows, n_over, worst = live_windows.get(tf, (0, 0, None))
+        closed_values = list(closed.get(tf, []))
+        closed_sum = Summary.of(closed_values) if closed_values else None
+        feature_values = list(features.get(tf, []))
+        feature_sum = Summary.of(feature_values) if feature_values else None
+        closed_over = sum(1 for v in closed_values if v > READABILITY_SLO_MS)
+        feature_over = sum(1 for v in feature_values if v > READABILITY_SLO_MS)
+        lines.append("| " + " | ".join([
+            tf,
+            str(len(live_values)),
+            fmt_num(live_sum.p50) if live_sum else PLACEHOLDER,
+            fmt_num(live_sum.p95) if live_sum else PLACEHOLDER,
+            fmt_num(live_sum.p99) if live_sum else PLACEHOLDER,
+            str(n_windows),
+            str(n_over),
+            fmt_num(worst) if worst is not None else PLACEHOLDER,
+            str(len(closed_values)),
+            fmt_num(closed_sum.p50) if closed_sum else PLACEHOLDER,
+            fmt_num(closed_sum.p95) if closed_sum else PLACEHOLDER,
+            fmt_num(closed_sum.p99) if closed_sum else PLACEHOLDER,
+            str(closed_over) if closed_values else PLACEHOLDER,
+            str(len(feature_values)),
+            fmt_num(feature_sum.p50) if feature_sum else PLACEHOLDER,
+            fmt_num(feature_sum.p95) if feature_sum else PLACEHOLDER,
+            fmt_num(feature_sum.p99) if feature_sum else PLACEHOLDER,
+            str(feature_over) if feature_values else PLACEHOLDER,
+        ]) + " |")
+    lines += ["", "Closed-window SLO scoring (one stored row = one window):", ""]
+    for tf in TF_ORDER:
+        c = closed_windows.get(tf)
+        f = close_window_stats({tf: list(features.get(tf, []))}).get(tf)
+        if not c and not f:
+            continue
+        lines.append(
+            f"- {tf}: closed {c[0] if c else 0} window(s),"
+            f" {c[1] if c else 0} > SLO, worst {fmt_num(c[2]) if c else PLACEHOLDER} ms"
+            f" | features {f[0] if f else 0} window(s),"
+            f" {f[1] if f else 0} > SLO, worst {fmt_num(f[2]) if f else PLACEHOLDER} ms"
+        )
+    lines += [
+        "",
+        "### Per-feature readability (stored feature row; window close -> first read)",
+        "",
+        "| feature | rows | p50 | p95 | p99 | rows >SLO | worst |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for name, values in feature_by_name.items():
+        usable = list(values)
+        s = Summary.of(usable) if usable else None
+        lines.append("| " + " | ".join([
+            name,
+            str(len(usable)),
+            fmt_num(s.p50) if s else PLACEHOLDER,
+            fmt_num(s.p95) if s else PLACEHOLDER,
+            fmt_num(s.p99) if s else PLACEHOLDER,
+            str(sum(1 for v in usable if v > READABILITY_SLO_MS)) if usable else PLACEHOLDER,
+            fmt_num(max(usable)) if usable else PLACEHOLDER,
+        ]) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def _state_growth_detail_table(
+    series: Mapping[tuple[str, str], Sequence[tuple[int, float]]],
+) -> str:
+    lines = [
+        "",
+        "### State growth (first -> last over the capture; CHG-461)",
+        "",
+        "| layer | key | first | last | delta | per min |",
+        "|---|---|---|---|---|---|",
+    ]
+    for layer, key in sorted(series):
+        rate = growth_rate(series[(layer, key)])
+        if rate is None:
+            continue
+        first, last, per_min = rate
+        if layer.endswith(".bytes"):
+            cells = [
+                human_bytes(first),
+                human_bytes(last),
+                human_bytes(last - first),
+                f"{per_min / 1e6:+.2f} MB/min",
+            ]
+        else:
+            cells = [
+                f"{first:,.0f}",
+                f"{last:,.0f}",
+                f"{last - first:+,.0f}",
+                f"{per_min:+,.0f}/min",
+            ]
+        lines.append("| " + " | ".join([layer, key, *cells]) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def parse_state_tf(text: str) -> list[tuple[int, str, str, float, float]]:
+    """state-tf.tsv / state-tf-live.tsv -> [(epoch_ms, table, tf, rows, bytes)].
+
+    ``bytes == -1`` means the source carries no size (the KV snapshot census
+    row API has none); it must render as a placeholder, never as a stored zero.
+    """
+    rows: list[tuple[int, str, str, float, float]] = []
+    for parts in _tsv_data_rows(text):
+        if len(parts) < 5:
+            continue
+        try:
+            epoch = int(parts[0])
+            rows_value = float(parts[3])
+            bytes_value = float(parts[4])
+        except ValueError:
+            continue
+        rows.append((epoch, parts[1], parts[2], rows_value, bytes_value))
+    return rows
+
+
+def tf_state_series(
+    rows: Sequence[tuple[int, str, str, float, float]],
+) -> dict[tuple[str, str], list[tuple[int, float, float]]]:
+    """(table, tf) -> [(epoch_ms, rows, bytes)] sorted by epoch."""
+    series: dict[tuple[str, str], list[tuple[int, float, float]]] = {}
+    for epoch, table, tf, rows_value, bytes_value in rows:
+        series.setdefault((table, tf), []).append((epoch, rows_value, bytes_value))
+    for points in series.values():
+        points.sort()
+    return series
+
+
+def tf_state_rate(
+    points: Sequence[tuple[int, float, float]],
+) -> tuple[float, float, float, float] | None:
+    """(first_rows, last_rows, rows_per_min, last_bytes) over a state series."""
+    if len(points) < 2:
+        return None
+    (t0, r0, _), (t1, r1, last_bytes) = points[0], points[-1]
+    if t1 <= t0:
+        return None
+    return r0, r1, (r1 - r0) / ((t1 - t0) / 60_000.0), last_bytes
+
+
+def _tf_state_detail_table(
+    series: Mapping[tuple[str, str], Sequence[tuple[int, float, float]]],
+) -> str:
+    lines = [
+        "",
+        "### Per-timeframe state growth (CHG-461)",
+        "",
+        "| table | tf | rows first | rows last | rows delta | rows /min | last bytes |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    order = {tf: i for i, tf in enumerate(TF_ORDER)}
+    keys = sorted(series, key=lambda k: (k[0], order.get(k[1], len(order))))
+    for table, tf in keys:
+        rate = tf_state_rate(series[(table, tf)])
+        if rate is None:
+            continue
+        first, last, per_min, last_bytes = rate
+        lines.append("| " + " | ".join([
+            table,
+            tf,
+            f"{first:,.0f}",
+            f"{last:,.0f}",
+            f"{last - first:+,.0f}",
+            f"{per_min:+,.0f}",
+            PLACEHOLDER if last_bytes < 0 else human_bytes(last_bytes),
+        ]) + " |")
+    return "\n".join(lines) + "\n"
+
+
 def _read(path: Path) -> str:
     try:
         return path.read_text(errors="replace")
@@ -778,6 +1215,32 @@ def collect_counts(phase: Path) -> dict[str, int]:
     closed = _phase_closed_lags(stages_dir)
     if closed:
         counts["S8.feature_read"] = len(closed)
+
+    # CHG-461: the readability matrix + state-growth legs are part of the
+    # smoke's fail-closed posture — a capture whose new probes silently
+    # produced nothing must refuse the main phase, not render an empty table.
+    live_read = parse_liveread(_read(stages_dir / "liveread.tsv"))
+    if live_read:
+        counts["S10.live_read"] = len(live_read)
+    closed_read = sum(
+        len(values) for values in parse_closeread(_read(stages_dir / "closeread.tsv")).values()
+    )
+    if closed_read:
+        counts["S11.closed_read"] = closed_read
+    feature_read = sum(
+        len(values)
+        for values in parse_featureread(_read(stages_dir / "featureread.tsv"))[0].values()
+    )
+    if feature_read:
+        counts["S11.feature_read"] = feature_read
+    state_rows = parse_state_growth(_read(stages_dir / "state-growth.tsv"))
+    if state_rows:
+        counts["S12.state_growth"] = len(state_rows)
+    state_tf = parse_state_tf(_read(stages_dir / "state-tf.tsv")) + parse_state_tf(
+        _read(stages_dir / "state-tf-live.tsv")
+    )
+    if state_tf:
+        counts["S12.state_tf"] = len(state_tf)
     return counts
 
 
@@ -979,9 +1442,78 @@ def build_report(phase: Path) -> tuple[list[ProfileRow], str, dict[str, int]]:
         rows.append(ProfileRow("S9", STAGES[8].boundary, PLACEHOLDER, None,
                                source="sink tracker absent"))
 
+    # CHG-461: per-timeframe readability (fresh reader) + full-platform state
+    # growth. S10/S11 are the operator-approved SLO carriers: p99 <= 75 ms in
+    # every window of every timeframe; S12 shows where state is accumulating.
+    live_rows = parse_liveread(_read(stages_dir / "liveread.tsv"))
+    closed_matrix = parse_closeread(_read(stages_dir / "closeread.tsv"))
+    feature_matrix, feature_by_name = parse_featureread(_read(stages_dir / "featureread.tsv"))
+    live_values = [v for _, _, v in live_rows]
+    live_stats = live_window_stats(live_rows)
+    closed_stats = close_window_stats(closed_matrix)
+    feature_stats = close_window_stats(feature_matrix)
+    rows.append(
+        ProfileRow(
+            "S10",
+            STAGES[9].boundary,
+            f"{len(live_rows)} samples, {sum(v[0] for v in live_stats.values())} window(s)",
+            Summary.of(live_values) if live_values else None,
+            source="fresh-reader live staleness (read - last_event_time); "
+            + summary_line(live_stats),
+        )
+    )
+    closed_values = [v for values in closed_matrix.values() for v in values]
+    feature_values = [v for values in feature_matrix.values() for v in values]
+    rows.append(
+        ProfileRow(
+            "S11",
+            STAGES[10].boundary,
+            f"{len(closed_values)} closed + {len(feature_values)} feature window(s)",
+            Summary.of(closed_values) if closed_values else None,
+            source="window close -> first read; closed: "
+            + summary_line(closed_stats)
+            + "; features: "
+            + summary_line(feature_stats),
+        )
+    )
+    state_series = state_growth_series(parse_state_growth(_read(stages_dir / "state-growth.tsv")))
+    tf_state = tf_state_series(
+        parse_state_tf(_read(stages_dir / "state-tf.tsv"))
+        + parse_state_tf(_read(stages_dir / "state-tf-live.tsv"))
+    )
+    byte_growths = []
+    for (layer, key), points in state_series.items():
+        rate = growth_rate(points)
+        if rate is not None and layer.endswith(".bytes"):
+            byte_growths.append((rate[2], layer, key))
+    tf_note = f"; {len(tf_state)} per-TF series" if tf_state else ""
+    if byte_growths:
+        worst_rate, worst_layer, worst_key = max(byte_growths)
+        rows.append(
+            ProfileRow(
+                "S12",
+                STAGES[11].boundary,
+                f"{len(state_series)} state series" + tf_note,
+                None,
+                source=f"fastest growth: {worst_layer} {worst_key}"
+                f" {worst_rate / 1e6:+.2f} MB/min (see the growth tables below)",
+            )
+        )
+    else:
+        rows.append(ProfileRow("S12", STAGES[11].boundary, PLACEHOLDER + tf_note, None,
+                               source="state-growth.tsv absent or every series has <2 samples"))
+
     details = _java_detail_table(per)
     if tracks:
         details += "\n" + _tracker_detail_table(tracks, track_counts)
+    if live_rows or closed_values or feature_values:
+        details += _readability_detail_tables(
+            live_rows, closed_matrix, feature_matrix, feature_by_name
+        )
+    if state_series:
+        details += _state_growth_detail_table(state_series)
+    if tf_state:
+        details += _tf_state_detail_table(tf_state)
     return rows, details, counts
 
 
@@ -994,7 +1526,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         description="Greenfield stage profiler — pure report core (offline).",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("stages", help="print the S1..S9 registry")
+    sub.add_parser("stages", help="print the S1..S12 registry")
     java = sub.add_parser("java", help="summarize one java.out OTLP log")
     java.add_argument("path", help="path to a j1-*/java.out file")
     presence = sub.add_parser("presence", help="run the smoke presence gate on a phase dir")

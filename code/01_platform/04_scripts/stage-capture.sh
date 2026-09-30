@@ -61,6 +61,23 @@ PROBE_RAW_TABLE="${PROBE_RAW_TABLE:-raw_table_1}"
 PROBE_TOKENS="${PROBE_TOKENS:-4,7,13,17,19}"
 PROBE_BOOTSTRAP="${PROBE_BOOTSTRAP:-localhost:9123}"
 
+# CHG-461 readability + state-growth facility (2026-09-30). The readability
+# probe is long-lived (tail candle_closed/feature_values at sub-ms resolution,
+# point-sample candle_live per timeframe); the state sampler records
+# changelog/RocksDB/tablet bytes and per-table row counts on a slower cadence
+# so a latency round sees a small, fixed measurement duty cycle instead of a
+# per-tick disk traversal.
+READ_PROBE_TOKENS="${READ_PROBE_TOKENS:-$PROBE_TOKENS}"       # token sample per live sweep
+READ_PROBE_BUCKETS="${READ_PROBE_BUCKETS:-0,1}"               # of 16 per the DDLs
+READ_PROBE_LIVE_MS="${READ_PROBE_LIVE_MS:-1000}"              # live-sweep cadence
+STATE_SAMPLE_EVERY_TICKS="${STATE_SAMPLE_EVERY_TICKS:-3}"     # 5s tick -> 15s state rows
+STATE_TABLET_EVERY="${STATE_TABLET_EVERY:-2}"                 # tablet du every 2nd state sample
+STATE_TABLES="${STATE_TABLES:-candle_live,candle_closed,feature_values,Signal_Candidates,Signal_Candidates_current}"
+STATE_TF_CENSUS_EVERY="${STATE_TF_CENSUS_EVERY:-1}"           # every state sample -> per-TF KV census (smoke #3 ran once in 200s at 4)
+STATE_TF_TABLES="${STATE_TF_TABLES:-candle_live}"             # TTL-bounded tables whose CURRENT rows per TF matter
+TM_CONTAINER_FILTER="${TM_CONTAINER_FILTER:-flink-taskmanager}"
+TABLET_CONTAINER_FILTER="${TABLET_CONTAINER_FILTER:-fluss-tablet}"
+
 mkdir -p "$OUT_DIR"
 
 # ---------------------------------------------------------------------------
@@ -217,6 +234,18 @@ echo -e "epoch_ms\tmetric\tpresent" > "$OUT_DIR/metric-availability.tsv"
   [ -n "$FLUSS_PROBE_CP" ] && echo "read-lag.tsv"
   [ -n "$FLUSS_PROBE_CP" ] && echo "consumer-read.tsv"
   [ -n "$FLUSS_PROBE_CP" ] && echo "closed-read.tsv"
+  # CHG-461: readability matrix + state growth. The readability TSVs fill
+  # continuously and are WARN-only on emptiness (same posture as
+  # consumer-read/closed-read: a sample-boundary gap is not a dead chain, and
+  # the probe's own stderr + line counts still make a dead leg visible).
+  [ -n "$FLUSS_PROBE_CP" ] && echo "liveread.tsv"
+  [ -n "$FLUSS_PROBE_CP" ] && echo "closeread.tsv"
+  [ -n "$FLUSS_PROBE_CP" ] && echo "featureread.tsv"
+  [ -n "$FLUSS_PROBE_CP" ] && echo "state-growth.tsv"
+  # CHG-461 per-timeframe state: cumulative rows/bytes from the readability
+  # probe's tails (all buckets) + the periodic candle_live KV census.
+  [ -n "$FLUSS_PROBE_CP" ] && echo "state-tf.tsv"
+  [ -n "$FLUSS_PROBE_CP" ] && echo "state-tf-live.tsv"
 } > "$OUT_DIR/.expected-outputs"
 
 # B2 output files (headers). Files exist (possibly empty) whenever the
@@ -228,6 +257,15 @@ if [ -n "$FLUSS_PROBE_CP" ]; then
   echo -e "epoch_ms\ttable\tpartitions\tbuckets\tlog_end_sum" > "$OUT_DIR/read-lag.tsv"
   echo -e "epoch_ms\ttoken\twindow_start\toutput_ts\tlast_event_ts\tread_lag_ms" > "$OUT_DIR/consumer-read.tsv"
   echo -e "epoch_ms\ttoken\twindow_start\toutput_ts\tlast_event_ts\tread_lag_ms" > "$OUT_DIR/closed-read.tsv"
+  # CHG-461 headers (the readability probe appends; it only writes a header
+  # itself when the file is missing/empty, so a fresh capture and a resumed
+  # capture both stay single-header).
+  echo -e "epoch_ms\ttoken\ttf\twindow_start\twindow_end\tlast_event_time\tstaleness_ms" > "$OUT_DIR/liveread.tsv"
+  echo -e "epoch_ms\ttoken\ttf\twindow_start\twindow_end\tlatency_ms" > "$OUT_DIR/closeread.tsv"
+  echo -e "epoch_ms\ttoken\ttf\twindow_start\twindow_end\tfeature_ids\tlatency_ms" > "$OUT_DIR/featureread.tsv"
+  echo -e "epoch_ms\tlayer\tkey\tvalue" > "$OUT_DIR/state-growth.tsv"
+  echo -e "epoch_ms\ttable\ttf\trows\tbytes" > "$OUT_DIR/state-tf.tsv"
+  echo -e "epoch_ms\ttable\ttf\trows\tbytes" > "$OUT_DIR/state-tf-live.tsv"
 fi
 
 
@@ -643,11 +681,12 @@ PYEOF
   fi
 }
 
-# Compile the two B2 probes once (fail fast if the classpath is broken).
+# Compile the B2 probes once (fail fast if the classpath is broken).
+# CHG-461 adds the readability-matrix probe and the table-stats census leg.
 FLUSS_PROBE_BIN="$OUT_DIR/probes"
 if [ -n "$FLUSS_PROBE_CP" ]; then
   mkdir -p "$FLUSS_PROBE_BIN"
-  for src in FlussReadLagProbe FlussKvProbe; do
+  for src in FlussReadLagProbe FlussKvProbe FlussReadabilityProbe FlussTableStatsProbe; do
     javac -cp "$FLUSS_PROBE_CP" -d "$FLUSS_PROBE_BIN" \
       "$FLUSS_PROBE_DIR/$src.java" > "$OUT_DIR/javac-$src.log" 2>&1 \
       || { echo "!! FAIL: B2 probe $src compile failed — see $OUT_DIR/javac-$src.log (FLUSS_PROBE_CP broken?)" >&2; exit 1; }
@@ -681,6 +720,78 @@ sample_probes() {
     >> "$OUT_DIR/closed-read.tsv" 2>"$OUT_DIR/probe-closed.err" || echo "!! WARN: FlussKvProbe(closed) failed this tick (see $OUT_DIR/probe-closed.err)" >&2
 }
 
+# CHG-461 state-growth sampler (approved 2026-09-30): "state growth for the
+# full project" as a time series next to the latency TSVs, long format
+# (epoch_ms, layer, key, value) so layers can be added without a schema
+# change:
+#   flink.changelog.bytes   <job dir>      du -sk /checkpoints/changelog/*
+#   flink.rocksdb.bytes     <op/subtask>   du -sk /tmp/flink-rocksdb/*
+#   fluss.tablet.bytes      <table-id dir> du -sk /tmp/fluss/data/<db>/*
+#   fluss.table.rows        <table>        Admin.getTableStats (one RPC each)
+# The per-checkpoint state_size series already lives in flink-checkpoints
+# .jsonl; these rows are the filesystem + table faces of the same question.
+# A layer that fails to sample is a LOUD warn and a missing tick — never a
+# made-up zero. Cadence: every STATE_SAMPLE_EVERY_TICKS ticks.
+sample_state_growth() {
+  STATE_SAMPLE_N=$(( ${STATE_SAMPLE_N:-0} + 1 ))
+  local sample_n="$STATE_SAMPLE_N"
+  local epoch; epoch="$(date +%s%3N)"
+  local tm_ctr tablet_ctr kb dir
+  tm_ctr="$(docker ps -q --filter "name=$TM_CONTAINER_FILTER" | head -1)"
+  if [ -n "$tm_ctr" ]; then
+    docker exec "$tm_ctr" sh -c 'du -sk /checkpoints/changelog/* 2>/dev/null' 2>/dev/null | \
+      while read -r kb dir; do
+        [ -n "$kb" ] && printf '%s\tflink.changelog.bytes\t%s\t%s\n' "$epoch" "$(basename "$dir")" "$((kb * 1024))"
+      done >> "$OUT_DIR/state-growth.tsv" \
+      || echo "!! WARN: state-growth: changelog du failed (taskmanager $tm_ctr)" >&2
+    docker exec "$tm_ctr" sh -c 'du -sk /tmp/flink-rocksdb/* 2>/dev/null' 2>/dev/null | \
+      while read -r kb dir; do
+        [ -n "$kb" ] && printf '%s\tflink.rocksdb.bytes\t%s\t%s\n' "$epoch" "$(basename "$dir")" "$((kb * 1024))"
+      done >> "$OUT_DIR/state-growth.tsv" \
+      || echo "!! WARN: state-growth: RocksDB du failed (taskmanager $tm_ctr)" >&2
+  else
+    echo "!! WARN: state-growth: no taskmanager container (filter $TM_CONTAINER_FILTER)" >&2
+  fi
+  if [ "${STATE_TABLET_EVERY:-2}" -gt 0 ] \
+      && [ $(( sample_n % STATE_TABLET_EVERY )) -eq 0 ]; then
+    tablet_ctr="$(docker ps -q --filter "name=$TABLET_CONTAINER_FILTER" | head -1)"
+    if [ -n "$tablet_ctr" ]; then
+      docker exec "$tablet_ctr" sh -c 'du -sk /tmp/fluss/data/*/* 2>/dev/null' 2>/dev/null | \
+        while read -r kb dir; do
+          [ -n "$kb" ] && printf '%s\tfluss.tablet.bytes\t%s\t%s\n' "$epoch" "$(basename "$dir")" "$((kb * 1024))"
+        done >> "$OUT_DIR/state-growth.tsv" \
+        || echo "!! WARN: state-growth: tablet du failed (tablet $tablet_ctr)" >&2
+    else
+      echo "!! WARN: state-growth: no tablet container (filter $TABLET_CONTAINER_FILTER)" >&2
+    fi
+  fi
+  if [ -n "$FLUSS_PROBE_CP" ] && [ -n "$STATE_TABLES" ]; then
+    timeout "${PROBE_TIMEOUT_S:-20}" java -Dlog.dir=/tmp/fluss-probe-logs \
+      -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+      FlussTableStatsProbe "$PROBE_BOOTSTRAP" "$STATE_TABLES" \
+      2>>"$OUT_DIR/probe-table-stats.err" | \
+      while IFS=$'\t' read -r e table rows; do
+        [ -n "$e" ] && printf '%s\tfluss.table.rows\t%s\t%s\n' "$e" "$table" "$rows"
+      done >> "$OUT_DIR/state-growth.tsv" \
+      || echo "!! WARN: state-growth: FlussTableStatsProbe failed this tick (see $OUT_DIR/probe-table-stats.err)" >&2
+  fi
+  # CHG-461 per-timeframe state: candle_live's CURRENT rows per TF via a KV
+  # snapshot scan (TTL-bounded, so the scan stays small) every
+  # STATE_TF_CENSUS_EVERY state samples. Rows are exact; bytes stay -1 (the
+  # snapshot row API carries no size). The tail-based per-TF state for
+  # candle_closed/feature_values is written by the readability probe itself
+  # (all buckets counted, latency logging stays sampled).
+  if [ -n "$FLUSS_PROBE_CP" ] && [ -n "$STATE_TF_TABLES" ] \
+      && [ "${STATE_TF_CENSUS_EVERY:-1}" -gt 0 ] \
+      && [ $(( sample_n % STATE_TF_CENSUS_EVERY )) -eq 0 ]; then
+    timeout "${PROBE_TIMEOUT_S:-20}" java -Dlog.dir=/tmp/fluss-probe-logs \
+      -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+      FlussTableStatsProbe "$PROBE_BOOTSTRAP" "$STATE_TF_TABLES" "$PROBE_DB" tf-census \
+      2>>"$OUT_DIR/probe-tf-census.err" >> "$OUT_DIR/state-tf-live.tsv" \
+      || echo "!! WARN: state-growth: tf-census failed this tick (see $OUT_DIR/probe-tf-census.err)" >&2
+  fi
+}
+
 START=$(date +%s)
 
 # Host per-op disk latency probe (2026-09-02 decline hunt): 2s-cadence
@@ -695,6 +806,21 @@ IO_PROBE_STAGES_DIR="$OUT_DIR" \
 bash "$HERE_SC/io-latency-probe.sh" "$OUT_DIR" "$((DURATION_S + 30))" \
   "$IO_PROBE_DEVICE" >"$IO_PROBE_LOG" 2>&1 &
 IO_PROBE_PID=$!
+
+# CHG-461: the readability-matrix probe is long-lived — it must cover every
+# window of the phase, so it is started with the capture (not per tick) and
+# stopped after the loop. Duration is a backstop; the inline stop below is
+# the normal path. stderr carries per-lookup/per-poll failures.
+READ_PROBE_PID=""
+if [ -n "$FLUSS_PROBE_CP" ]; then
+  java --add-opens=java.base/java.nio=ALL-UNNAMED -Dlog.dir=/tmp/fluss-probe-logs \
+    -cp "$FLUSS_PROBE_BIN:$FLUSS_PROBE_CP" \
+    FlussReadabilityProbe "$PROBE_BOOTSTRAP" "$READ_PROBE_TOKENS" "$OUT_DIR" \
+      "$((DURATION_S + 20))" "$READ_PROBE_BUCKETS" "$READ_PROBE_LIVE_MS" \
+    >>"$OUT_DIR/probe-readability.out" 2>>"$OUT_DIR/probe-readability.err" &
+  READ_PROBE_PID=$!
+  echo "stage-capture: readability probe started (pid $READ_PROBE_PID, tokens=$READ_PROBE_TOKENS buckets=$READ_PROBE_BUCKETS)"
+fi
 
 # Stop the probe on the way out (P6-562). Every fail-fast exit between here and
 # the tail `wait` (job left RUNNING, dead legs, evidence incomplete) used to
@@ -725,6 +851,21 @@ io_probe_cleanup() {
     kill -KILL "$IO_PROBE_PID" 2>/dev/null || true
   fi
   IO_PROBE_PID=""
+  # CHG-461: the readability probe is stopped the same bounded way (TERM,
+  # ~5s grace, KILL); its writers flush every loop iteration, so at most the
+  # last few hundred ms of samples are lost. Only this trap — the normal path
+  # stops it inline after the capture loop, before the evidence check.
+  if [ -n "$READ_PROBE_PID" ] && kill -0 "$READ_PROBE_PID" 2>/dev/null; then
+    echo "stage-capture: stopping the readability probe (pid $READ_PROBE_PID) — capture is ending early" >&2
+    kill -TERM "$READ_PROBE_PID" 2>/dev/null || true
+    local _j
+    for _j in $(seq 1 50); do
+      kill -0 "$READ_PROBE_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -KILL "$READ_PROBE_PID" 2>/dev/null || true
+  fi
+  READ_PROBE_PID=""
   exit "$rc"
 }
 trap 'io_probe_cleanup $?' EXIT
@@ -755,6 +896,15 @@ while :; do
     fi
   fi
   sample_tick || echo "warn: one sample tick failed (continuing)"
+
+  # CHG-461: state-growth sampling on a slower cadence than the latency
+  # probes (du traversals + N Admin RPCs would otherwise stack onto every
+  # tick of a quiet-host round).
+  TICK_N=$(( ${TICK_N:-0} + 1 ))
+  if [ "$STATE_SAMPLE_EVERY_TICKS" -gt 0 ] \
+      && [ $(( TICK_N % STATE_SAMPLE_EVERY_TICKS )) -eq 0 ]; then
+    sample_state_growth || echo "warn: one state-growth sample failed (continuing)"
+  fi
 
   # Requested-vs-served report, once. The requested list is a superset of what any
   # single topology serves: a flag-gated branch, or a counter owned by the
@@ -911,6 +1061,20 @@ print(json.dumps({"count": len(new),
   sleep "$CAPTURE_INTERVAL_S"
 done
 
+# CHG-461: stop the readability probe now that the capture window is closed
+# (bounded TERM wait; its writers flush every loop iteration, so a stop
+# between writes loses nothing material). Cleared so the EXIT trap cannot
+# signal a recycled pid.
+if [ -n "$READ_PROBE_PID" ] && kill -0 "$READ_PROBE_PID" 2>/dev/null; then
+  kill -TERM "$READ_PROBE_PID" 2>/dev/null || true
+  for _i in $(seq 1 50); do
+    kill -0 "$READ_PROBE_PID" 2>/dev/null || break
+    sleep 0.1
+  done
+  kill -KILL "$READ_PROBE_PID" 2>/dev/null || true
+fi
+READ_PROBE_PID=""
+
 # ---------------------------------------------------------------------------
 # Post-run evidence verification (2026-09-04). Every declared output file
 # must have data rows — a header-only or missing file means that leg was
@@ -931,7 +1095,7 @@ if [ -s "$OUT_DIR/.expected-outputs" ]; then
     # rows existed, sampler just never hit the window). Real operator
     # counts live in stages.tsv; the gate reads tables directly.
     case "$f" in
-      consumer-read.tsv|closed-read.tsv)
+      consumer-read.tsv|closed-read.tsv|liveread.tsv|closeread.tsv|featureread.tsv|state-tf.tsv|state-tf-live.tsv)
         [ "$rows" -gt 0 ] || echo "!! WARN: $f header-only at end of run — sampler empty-sample, not proof of dead chain (see stages.tsv + gate)." >&2
         ;;
       *)

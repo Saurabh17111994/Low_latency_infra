@@ -1,5 +1,17 @@
 # p99 < 50 ms normal-path latency (signal job) — SLO on `compute.latency.ingest_to_monitor`
 
+> **SCOPE UPDATE (operator, 2026-09-30, later the same day):** the target is now
+> **p99 ≤ 75 ms in every window of every timeframe** — not only the 15 s grid —
+> and the measured surface is the **fresh-reader readability matrix**: live
+> candles per timeframe (tick → visible), closed candles per timeframe (window
+> close → first read), and the stored features (window close → first read).
+> "Readable" = a fresh reader sees the row (operator decision, Option A).
+> The **state-growth meter** (full platform: Flink + Fluss + containers) was
+> added in the same decision. Facility scope, design and evidence plan:
+> `docs/plans/2026-09-30-readability-and-state-growth-measurement.md`
+> (implementation: CHG-461). Everything below is the earlier 50 ms round
+> history — it remains the evidence base for the per-tick legs.
+
 **Date:** 2026-09-30
 **Status:** operator-approved 2026-09-30. Rounds start only when their window opens;
 go/no-go after each round's report.

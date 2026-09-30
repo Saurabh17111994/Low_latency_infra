@@ -87,8 +87,8 @@ class FormatTest(unittest.TestCase):
 
 
 class RegistryTest(unittest.TestCase):
-    def test_nine_stages_s1_to_s9_in_order(self):
-        self.assertEqual([f"S{i}" for i in range(1, 10)], [s.sid for s in sp.STAGES])
+    def test_stages_s1_to_s12_in_order(self):
+        self.assertEqual([f"S{i}" for i in range(1, 13)], [s.sid for s in sp.STAGES])
 
     def test_every_stage_names_both_sources(self):
         for stage in sp.STAGES:
@@ -100,6 +100,7 @@ class RegistryTest(unittest.TestCase):
         table = sp.registry_table()
         self.assertIn("| S1 |", table)
         self.assertIn("| S9 |", table)
+        self.assertIn("| S12 |", table)
         self.assertEqual(len(sp.STAGES) + 2, len(table.strip().splitlines()))
 
 
@@ -126,7 +127,131 @@ class PresenceTest(unittest.TestCase):
 
     def test_default_rules_cover_every_step_prefix(self):
         prefixes = {rule.key.split(".", 1)[0] for rule in sp.DEFAULT_PRESENCE_RULES}
-        self.assertEqual({f"S{i}" for i in range(1, 10)}, prefixes)
+        self.assertEqual({f"S{i}" for i in range(1, 13)}, prefixes)
+
+
+class ReadabilityMatrixTest(unittest.TestCase):
+    """CHG-461: the latency matrix parsers + the per-window 75 ms scoring."""
+
+    def test_live_rows_drop_negative_staleness_not_clamp(self):
+        text = (
+            "epoch_ms\ttoken\ttf\twindow_start\twindow_end\tlast_event_time\tstaleness_ms\n"
+            "1000\t4\tFIFTEEN_S\t900\t15000\t0\t0\n"
+            "1001\t4\tFIFTEEN_S\t900\t15000\t0\t-7\n"
+            "1002\t7\tONE_M\t0\t60000\t0\t12\n"
+            "1003\t7\tBOGUS\t0\t0\t0\t5\n"
+        )
+        self.assertEqual(
+            [("FIFTEEN_S", 900, 0.0), ("ONE_M", 0, 12.0)], sp.parse_liveread(text)
+        )
+
+    def test_live_window_stats_score_every_tf_window(self):
+        rows = [
+            ("FIFTEEN_S", 900, 1.0),
+            ("FIFTEEN_S", 900, 2.0),
+            ("FIFTEEN_S", 915, 200.0),
+            ("FIFTEEN_S", 915, 100.0),
+            ("ONE_M", 0, 3.0),
+        ]
+        stats = sp.live_window_stats(rows)
+        # window 915's p99 is over the 75 ms SLO; window 900 passes.
+        self.assertEqual((2, 1, 200.0), stats["FIFTEEN_S"])
+        self.assertEqual((1, 0, 3.0), stats["ONE_M"])
+
+    def test_closeread_groups_by_tf(self):
+        text = (
+            "epoch_ms\ttoken\ttf\twindow_start\twindow_end\tlatency_ms\n"
+            "1\t4\tFIFTEEN_S\t0\t15000\t40\n"
+            "2\t4\tFIFTEEN_S\t0\t15000\t30\n"
+            "3\t7\tFIVE_M\t0\t300000\t900\n"
+        )
+        out = sp.parse_closeread(text)
+        self.assertEqual([40.0, 30.0], out["FIFTEEN_S"])
+        self.assertEqual([900.0], out["FIVE_M"])
+
+    def test_featureread_expands_feature_ids(self):
+        text = (
+            "epoch_ms\ttoken\ttf\twindow_start\twindow_end\tfeature_ids\tlatency_ms\n"
+            "1\t4\tONE_M\t0\t60000\t0,1\t12\n"
+        )
+        per_tf, per_feature = sp.parse_featureread(text)
+        self.assertEqual([12.0], per_tf["ONE_M"])
+        self.assertEqual([12.0], per_feature["last_price"])
+        self.assertEqual([12.0], per_feature["sma_close_20"])
+        self.assertEqual([], per_feature["rsi_close_14"])
+
+    def test_close_window_stats_counts_over_slo(self):
+        stats = sp.close_window_stats({"ONE_M": [10.0, 80.0, 20.0]})
+        self.assertEqual((3, 1, 80.0), stats["ONE_M"])
+
+    def test_summary_line_names_worst_tf(self):
+        line = sp.summary_line({"ONE_M": (3, 1, 80.0), "FIVE_M": (1, 0, 40.0)})
+        self.assertIn("ONE_M", line)
+        self.assertIn("80.0", line)
+        self.assertIn("> 75 ms", line)
+
+
+class StateGrowthTest(unittest.TestCase):
+    """CHG-461: state-growth series normalization + growth-rate math."""
+
+    def test_rocksdb_dirs_normalize_to_operator_and_sum_subtasks(self):
+        text = (
+            "epoch_ms\tlayer\tkey\tvalue\n"
+            "1000\tflink.rocksdb.bytes\tjob_ab_op_KeyedProcessOperator_x__1_8__uuid_u1\t100\n"
+            "1000\tflink.rocksdb.bytes\tjob_ab_op_KeyedProcessOperator_x__2_8__uuid_u2\t300\n"
+            "1000\tflink.changelog.bytes\tjob_ab\t50\n"
+            "2000\tflink.rocksdb.bytes\tjob_ab_op_KeyedProcessOperator_x__1_8__uuid_u3\t140\n"
+            "2000\tflink.rocksdb.bytes\tjob_ab_op_KeyedProcessOperator_x__2_8__uuid_u4\t360\n"
+            "2000\tflink.changelog.bytes\tjob_ab\t110\n"
+        )
+        series = sp.state_growth_series(sp.parse_state_growth(text))
+        self.assertEqual(
+            [(1000, 400.0), (2000, 500.0)],
+            series[("flink.rocksdb.bytes", "KeyedProcessOperator_x")],
+        )
+        self.assertEqual(
+            [(1000, 50.0), (2000, 110.0)], series[("flink.changelog.bytes", "job_ab")]
+        )
+        rate = sp.growth_rate(series[("flink.changelog.bytes", "job_ab")])
+        self.assertEqual((50.0, 110.0), rate[:2])
+        self.assertAlmostEqual(3600.0, rate[2])  # 60 B over 1 s = 3600 B/min
+
+    def test_tablet_dir_key_drops_the_table_id_suffix(self):
+        rows = sp.parse_state_growth(
+            "epoch_ms\tlayer\tkey\tvalue\n"
+            "1\tfluss.tablet.bytes\tcandle_closed-20644\t4096\n"
+            "1\tfluss.table.rows\tSignal_Candidates-20642\t7\n"
+        )
+        self.assertEqual(
+            [("candle_closed", 4096.0), ("Signal_Candidates", 7.0)],
+            [(key, value) for _, _, key, value in rows],
+        )
+
+    def test_single_sample_has_no_growth_rate(self):
+        self.assertIsNone(sp.growth_rate([(1, 10.0)]))
+
+    def test_parse_state_tf_keeps_unknown_bytes_negative(self):
+        text = (
+            "epoch_ms\ttable\ttf\trows\tbytes\n"
+            "1000\tcandle_closed\tFIFTEEN_S\t100\t5000\n"
+            "1000\tcandle_live\tFIFTEEN_S\t42\t-1\n"
+        )
+        rows = sp.parse_state_tf(text)
+        self.assertEqual(2, len(rows))
+        self.assertEqual((1000, "candle_live", "FIFTEEN_S", 42.0, -1.0), rows[1])
+
+    def test_tf_state_series_groups_and_rates(self):
+        rows = [
+            (1000, "candle_closed", "FIFTEEN_S", 100.0, 5000.0),
+            (61000, "candle_closed", "FIFTEEN_S", 220.0, 11000.0),
+            (1000, "candle_closed", "ONE_M", 50.0, 2500.0),
+        ]
+        series = sp.tf_state_series(rows)
+        rate = sp.tf_state_rate(series[("candle_closed", "FIFTEEN_S")])
+        self.assertEqual((100.0, 220.0), rate[:2])
+        self.assertAlmostEqual(120.0, rate[2])  # 120 rows over one minute
+        self.assertEqual(11000.0, rate[3])
+        self.assertIsNone(sp.tf_state_rate([(1, 1.0, -1.0)]))
 
 
 class RenderTest(unittest.TestCase):
