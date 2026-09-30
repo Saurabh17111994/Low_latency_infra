@@ -176,6 +176,18 @@ environment is a single TM — label findings as dev-only until a production dec
 **ACTION** — map → design → approval → implement → measure.
 **WRONG IF** — no mapping reproduces; close as not reproducible, record it, rely on W3.
 
+**VERIFY-FIRST (2026-09-30, read-only):** the premise does **not reproduce**. Flink's
+per-task busy metric (`flink_taskmanager_job_task_busyTimeMsPerSecond`; unit is **ms/s**,
+so 1 000 = 100 %) shows the candle-live sink's **hottest subtask at 59–92 ms/s (≈ 6–9 %)**
+across the night baseline, control, W1 and the combined smoke; every other operator
+≤ 51 ms/s; back-pressure 0 everywhere. The "72–87 %" in the analysis/plan reads as a
+**unit misread** (ms/s taken as %) unless it came from a measurement not captured here —
+recompute before relying on it. The busy metric does not cover background threads
+(materialization/compaction) or GC — the likely residence of the stalls. W4 stays
+design-only until W3's GC instrumentation either proves a contention mechanism (then the
+fix is likely JVM/tuning, not slot isolation) or the mapping stays unreproduced (then close
+per the WRONG IF and rely on W3).
+
 ### W5 — Structural hop reduction (only if W1–W4 miss 50 ms)
 
 **GIVES YOU** — removes or merges one shuffle on the tick path (e.g. the host reading the
@@ -212,6 +224,12 @@ numbers, the remaining driver, and mark S1 unmet with evidence (never silently).
 2. After each round's report: go/no-go for the next lever.
 3. Before any code change (W1 default adoption, W3, W4, W5): explicit approval + CHG.
 4. Production adoption: separate deploy approval; no silent default flips.
+5. **2026-09-30 (operator):** sequence approved — after the W1+W2 combined report, proceed
+   to **W3 and W4** (design notes first, per point 3), then run a combined **W1–W4** 900 s
+   round as the certification attempt. **W5** stays the fallback if that round misses
+   `p99 ≤ 50 ms`. W4's stated premise (sink 72–87 % busy) did not reproduce in the
+   verify-first pass; its real content is the GC/background-thread investigation unless a
+   contention mechanism is proven.
 
 ## Evidence map
 
