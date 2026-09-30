@@ -221,6 +221,12 @@ x-flink-common: &flink-common
     # the 2.2.1 bytecode: TaskExecutorStateChangelogStoragesManager takes
     # taskManagerConfiguration). filesystem storage needs the flink-dstl-dfs
     # plugin mounted on the taskmanager — see flink-plugins/dstl-dfs/README.md.
+    # W3-c (CHG-454): the background materialization of the changelog into
+    # RocksDB is what produces the mid-spike class (aggregator 91-216 ms per
+    # event, 1-2 staggered rounds/subtask per 900 s at the 10 min default).
+    # 30 min removes the in-window rounds; the trade is a larger single
+    # materialization later and a longer restore replay — production adoption
+    # needs the restore drill (design note W3-c guardrail).
     FLINK_PROPERTIES: |
       jobmanager.rpc.address: flink-jobmanager
       rest.address: flink-jobmanager
@@ -254,6 +260,7 @@ x-flink-common: &flink-common
       state.backend.rocksdb.metrics.block-cache-pinned-usage: true
       state.changelog.storage: filesystem
       state.changelog.dstl.dfs.base-path: file:///checkpoints/changelog
+      state.changelog.periodic-materialize.interval: 30 min
     DEDUP_TTL_MS: "60000"
     CANDLE_WINDOW_MS: "15000"
     CHECKPOINT_INTERVAL_MS: "10000"
@@ -768,6 +775,7 @@ services:
         --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
         --add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED
         -Xlog:gc*,safepoint:file=/opt/flink/log/gc.log:time,uptime,level,tags:filecount=5,filesize=50m
+        -XX:MaxGCPauseMillis=20
         -XX:StartFlightRecording=settings=profile,duration=900s,filename=/opt/flink/log/tm-diag.jfr,maxsize=1g
       # CHG-180 (2026-09-16): the task manager reads tiered Fluss data itself.
       # remote.data.dir is an s3:// URI (see the coordinator/tablet above), so a

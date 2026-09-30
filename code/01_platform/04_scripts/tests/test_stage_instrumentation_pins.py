@@ -26,6 +26,33 @@ REPO = Path(__file__).resolve().parents[4]
 PROFILER = (
     REPO / "code" / "01_platform" / "06_stage_profiler" / "stage-profile.sh"
 )
+COMPOSE = REPO / "code" / "01_platform" / "01_docker" / "docker-compose.yml"
+
+
+def test_changelog_materialization_interval_is_pinned() -> None:
+    """W3-c (CHG-454): the changelog's background materialization produces the
+    mid-spike class (91-216 ms per event, 1-2 staggered rounds/subtask per
+    900 s at the 10 min default). The interval key must stay in the shared
+    FLINK_PROPERTIES block (a TASKMANAGER-read cluster key, CHG-444) or the
+    10 min default silently returns. Production adoption additionally needs
+    the restore drill (design-note W3-c guardrail)."""
+    src = COMPOSE.read_text(encoding="utf-8")
+    assert "state.changelog.periodic-materialize.interval: 30 min" in src, (
+        "the W3-c changelog materialization interval is gone from docker-compose.yml"
+    )
+
+
+def test_tm_g1_pause_target_is_pinned() -> None:
+    """W3-a (CHG-453): the TM runs a fixed 2.15 GiB heap with G1's default
+    200 ms pause target; the instrumented round measured 40-48 ms pauses at the
+    tick spike windows. ``-XX:MaxGCPauseMillis=20`` is the approved lever — pin
+    it here so a compose edit cannot silently revert the tuning. Applying it
+    needs a container recreate (`docker compose up -d flink-taskmanager`); the
+    profiler's per-phase `restart` alone would keep the old env."""
+    src = COMPOSE.read_text(encoding="utf-8")
+    assert "-XX:MaxGCPauseMillis=20" in src, (
+        "the TM G1 pause target (W3-a) is gone from docker-compose.yml"
+    )
 
 
 def _src() -> str:
