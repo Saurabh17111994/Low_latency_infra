@@ -117,6 +117,40 @@ class ContextProbeStrategyTest {
     }
 
     @Test
+    @DisplayName("C4: first ready retains the derived scalar once and warms up behind it")
+    void readyRetainsScalarAndWarmsUpOnce() throws Exception {
+        openHost();
+        harness.processElement1(live(777L, Timeframe.FIFTEEN_S, 120_000L, 1_000L), 120_500L);
+        ContextProbeStrategy probe = (ContextProbeStrategy) function.strategyForTest(
+                777L, ContextProbeStrategy.RULE_ID);
+        assertNotNull(probe);
+
+        CompletableFuture<ContextCandle> scheduled =
+                fetcher.of(new ContextKey(777L, Timeframe.FIFTEEN_S, 105_000L));
+        assertNotNull(scheduled, "scheduled keys: " + fetcher.keys());
+        scheduled.complete(candle(777L, Timeframe.FIFTEEN_S, 105_000L, 900L));
+        harness.setProcessingTime(10_000L);
+
+        ContextProvider provider = function.contextProviderForTest();
+        assertNotNull(provider);
+        assertEquals(1L, provider.metrics().warmups.getCount(), "one warm-up on first touch");
+        assertEquals(3L, provider.metrics().fetches.getCount(),
+                "the fetch plus the two warmed windows");
+        assertEquals(2, provider.pendingCount(), "the two windows behind are in flight");
+        assertEquals(1, provider.scalarCount());
+        assertTrue(function.contextViewForTest().hasScalar(777L, "prevClosePaise"));
+        assertEquals(900L, function.contextViewForTest().scalar(777L, "prevClosePaise"),
+                "the scalar is the fetched candle's close — deterministic input");
+
+        // A later live tick re-evaluates but never re-warms or re-derives.
+        harness.processElement1(
+                live(777L, Timeframe.FIFTEEN_S, 120_000L, 1_010L, 122_000L), 122_500L);
+        assertEquals(1L, provider.metrics().warmups.getCount(), "warm-up is once per token");
+        assertEquals(1, provider.scalarCount());
+        assertEquals(2, probe.readyBeforeCloseForTest());
+    }
+
+    @Test
     @DisplayName("C3: a ready value never fires on a live snapshot at or past the close")
     void readyAtTheCloseNeverEmits() throws Exception {
         openHost();

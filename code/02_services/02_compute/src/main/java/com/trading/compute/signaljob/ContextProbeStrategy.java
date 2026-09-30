@@ -39,6 +39,9 @@ public final class ContextProbeStrategy implements SignalStrategy {
     static final String READY_BEFORE_CLOSE = "ready_before_close";
     static final String READY_AFTER_CLOSE = "ready_after_close";
 
+    /** C4: retained derived scalar name (the fetched candle's close). */
+    static final String SCALAR_PREV_CLOSE = "prevClosePaise";
+
     private final SignalJobConfig config;
     private final Metrics metrics;
 
@@ -121,6 +124,14 @@ public final class ContextProbeStrategy implements SignalStrategy {
             return; // one logical signal per (token, window)
         }
         lastEmitted.put(tf, previous);
+        // C4: on first touch retain the deterministic derived scalar (a pure
+        // function of the immutable fetched candle) and warm up the two
+        // windows behind the fetched one — decision #4's escape hatch beyond
+        // raw slices; the provider stores, it never derives.
+        if (!context.hasScalar(token, SCALAR_PREV_CLOSE)) {
+            context.retainScalar(token, SCALAR_PREV_CLOSE, candle.closePaise());
+            context.warmUp(token, tf, previous - tf.windowMs(), 2);
+        }
         out.collect(buildRow(tf, windowStart, previous, candle, lastEventTime));
     }
 

@@ -54,6 +54,16 @@
 >   `strategy/ctx-probe-v1.{misses,ready_before_close,ready_after_close,emitted,
 >   suppressed}` counters; it is registered but inert unless a `STRATEGIES` list
 >   names it (`docs/plans/2026-09-30-strategy-context-live-fetch.md`).
+>   C4 (CHG-448) adds the compact-derivation API: `slice(token, tf,
+>   newestWindowStart, count)` (≤ 64 windows, cached entries served, missing
+>   ones scheduled), `warmUp(...)` (schedule without reading; counted as
+>   `compute.context.warmups`), and retained derived scalars
+>   (`retainScalar`/`hasScalar`/`scalar` over a fixed 4096-entry LRU;
+>   `compute.context.scalar.writes|evictions`, gauge
+>   `compute.context.scalars`) — the approved path beyond ~500 raw windows per
+>   (instrument, timeframe) (decision #4). Retained values must be pure
+>   functions of immutable closed candles (deterministic re-derivation after a
+>   restore); the provider stores, it never derives.
 > - Dev switch (2026-09-27, CHG-344): the flags live in the compose
 >   `flink-common` env anchor (`code/01_platform/01_docker/docker-compose.yml`,
 >   defaults OFF) and are set for dev in `01_docker/.env`; a `make up` recreate

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.ArrayList;
@@ -363,6 +364,122 @@ class ContextProviderTest {
         completeLast(k1);
         provider().drainArrivals();
         assertFalse(provider().hasPendingForToken(1L), "resolved transfers stop counting");
+    }
+
+    // ── C4: slice / warm-up / scalars ───────────────────────────────────────
+
+    @Test
+    @DisplayName("slice serves cached windows and schedules exactly the missing ones")
+    void sliceServesCachedAndSchedulesTheRest() {
+        ContextView view = provider().view();
+        ContextKey newest = key(1L, Timeframe.ONE_M, 180_000L);
+        ContextKey middle = key(1L, Timeframe.ONE_M, 120_000L);
+        ContextKey oldest = key(1L, Timeframe.ONE_M, 60_000L);
+
+        assertNull(view.candle(1L, Timeframe.ONE_M, 180_000L)); // schedules the newest
+        completeLast(newest);
+        assertEquals(1, provider().drainArrivals().size());
+
+        List<ContextCandle> slice = view.slice(1L, Timeframe.ONE_M, 180_000L, 3);
+        assertEquals(3, slice.size());
+        assertNotNull(slice.get(0), "the cached newest window is served");
+        assertNull(slice.get(1), "the missing window is pending");
+        assertNull(slice.get(2), "the missing window is pending");
+        assertEquals(3, fetcher.fetchCount, "only the two missing windows were scheduled");
+
+        completeLast(middle);
+        completeLast(oldest);
+        provider().drainArrivals();
+        slice = view.slice(1L, Timeframe.ONE_M, 180_000L, 3);
+        assertNotNull(slice.get(1));
+        assertNotNull(slice.get(2));
+        assertEquals(3, fetcher.fetchCount, "a full slice schedules nothing");
+    }
+
+    @Test
+    @DisplayName("slice and warm-up refuse unbounded counts")
+    void sliceAndWarmUpRefuseUnboundedCounts() {
+        ContextView view = provider().view();
+        assertThrows(IllegalArgumentException.class,
+                () -> view.slice(1L, Timeframe.ONE_M, 180_000L, -1));
+        assertThrows(IllegalArgumentException.class,
+                () -> view.slice(1L, Timeframe.ONE_M, 180_000L, ContextView.MAX_SLICE + 1));
+        assertThrows(IllegalArgumentException.class,
+                () -> view.warmUp(1L, Timeframe.ONE_M, 180_000L, ContextView.MAX_SLICE + 1));
+    }
+
+    @Test
+    @DisplayName("warm-up schedules the slice without reading and is counted")
+    void warmUpSchedulesWithoutReadingAndCounts() {
+        ContextView view = provider().view();
+        view.warmUp(2L, Timeframe.ONE_M, 180_000L, 4);
+        assertEquals(4, fetcher.fetchCount, "one fetch per requested window");
+        assertEquals(4L, provider().metrics().fetches.getCount());
+        assertEquals(1L, provider().metrics().warmups.getCount());
+
+        view.warmUp(2L, Timeframe.ONE_M, 180_000L, 4);
+        assertEquals(4, fetcher.fetchCount, "single flight — a pending window is never re-fetched");
+        assertEquals(2L, provider().metrics().warmups.getCount());
+    }
+
+    @Test
+    @DisplayName("scalars retain, read back, and evict the eldest at the cap")
+    void scalarsRetainAndEvictAtTheCap() {
+        for (int i = 0; i < ContextProvider.SCALAR_CAP; i++) {
+            provider().putScalar(new ContextProvider.ScalarKey(1L, "s" + i), i);
+        }
+        assertEquals(ContextProvider.SCALAR_CAP, provider().scalarCount());
+        assertEquals(1L, provider().getScalar(new ContextProvider.ScalarKey(1L, "s1")));
+
+        provider().putScalar(new ContextProvider.ScalarKey(1L, "overflow"), 42L);
+
+        assertEquals(ContextProvider.SCALAR_CAP, provider().scalarCount(), "the cap holds");
+        assertNull(provider().getScalar(new ContextProvider.ScalarKey(1L, "s0")),
+                "the least recently used scalar was evicted");
+        assertEquals(42L, provider().getScalar(new ContextProvider.ScalarKey(1L, "overflow")));
+        assertEquals(1L, provider().metrics().scalarEvictions.getCount());
+        assertEquals((long) ContextProvider.SCALAR_CAP + 1L,
+                provider().metrics().scalarWrites.getCount());
+    }
+
+    @Test
+    @DisplayName("scalar reads refresh the LRU order")
+    void scalarAccessRefreshesLruOrder() {
+        for (int i = 0; i < ContextProvider.SCALAR_CAP; i++) {
+            provider().putScalar(new ContextProvider.ScalarKey(1L, "s" + i), i);
+        }
+        assertEquals(5L, provider().getScalar(new ContextProvider.ScalarKey(1L, "s5")));
+        provider().putScalar(new ContextProvider.ScalarKey(1L, "s-new"), 7L);
+
+        assertNull(provider().getScalar(new ContextProvider.ScalarKey(1L, "s0")));
+        assertEquals(5L, provider().getScalar(new ContextProvider.ScalarKey(1L, "s5")),
+                "a recently read scalar survives the eviction");
+        assertEquals(7L, provider().getScalar(new ContextProvider.ScalarKey(1L, "s-new")));
+    }
+
+    @Test
+    @DisplayName("C4 memory audit: scalar and slice caps stay inside the approved budget")
+    void scalarAndSliceCapsStayInsideTheApprovedBudget() {
+        // Decision #4: ≤ 8 MB per subtask for the raw context; scalars are the
+        // escape hatch beyond ~500 windows per (instrument, timeframe).
+        assertTrue(ContextProvider.SCALAR_CAP <= 4096, "scalar entries stay bounded");
+        assertTrue(ContextView.MAX_SLICE <= 64, "one slice stays bounded");
+        assertTrue(ContextProvider.SCALAR_CAP * 96L < (8L << 20),
+                "4096 scalars x ~96 B stays far inside the 8 MB decision-#4 budget");
+    }
+
+    @Test
+    @DisplayName("the disabled view schedules nothing and has no scalars")
+    void disabledViewIsInert() {
+        ContextView disabled = ContextView.disabled();
+        assertFalse(disabled.isEnabled());
+        assertTrue(disabled.slice(1L, Timeframe.ONE_M, 180_000L, 3)
+                .stream().allMatch(java.util.Objects::isNull));
+        disabled.warmUp(1L, Timeframe.ONE_M, 180_000L, 3);
+        disabled.retainScalar(1L, "x", 5L);
+        assertFalse(disabled.hasScalar(1L, "x"));
+        assertEquals(0L, disabled.scalar(1L, "x"));
+        assertEquals(0, fetcher.fetchCount, "the disabled view never fetches");
     }
 
     // ── fakes ───────────────────────────────────────────────────────────────

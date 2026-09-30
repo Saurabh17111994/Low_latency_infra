@@ -53,6 +53,17 @@ final class ContextProvider implements AutoCloseable {
     /** Insertion-order cap for the cooldown map: evicting early only allows an earlier retry. */
     private static final int MAX_COOLDOWN_ENTRIES = 4096;
 
+    /**
+     * C4 (decision #4): fixed cap on retained derived scalars per subtask.
+     * Scalars are the approved escape hatch beyond ~500 raw windows per
+     * (instrument, timeframe); 4096 entries at ~96 B each is ~0.4 MB, far
+     * inside the 8 MB per-subtask context budget.
+     */
+    static final int SCALAR_CAP = 4096;
+
+    /** C4: one retained derived scalar, scoped to its instrument. */
+    record ScalarKey(long token, String name) {}
+
     /** Completion published by a Fluss client thread; consumed only by drainArrivals(). */
     private record Arrival(long fetchSeq, ContextCandle candle, Throwable error) {}
 
@@ -85,6 +96,13 @@ final class ContextProvider implements AutoCloseable {
 
     /** Cross-thread hand-off: client threads write, the mailbox thread drains. */
     private final ConcurrentHashMap<ContextKey, Arrival> arrivals = new ConcurrentHashMap<>();
+
+    /**
+     * C4: retained derived scalars (mailbox-owned, access-ordered LRU with a
+     * fixed cap). Values must be pure functions of immutable closed candles —
+     * the provider stores, it never derives.
+     */
+    private final Map<ScalarKey, Long> scalars = new LinkedHashMap<>(64, 0.75f, true);
 
     private long cacheBytesUsed;
     private long fetchSeq;
@@ -256,6 +274,37 @@ final class ContextProvider implements AutoCloseable {
         fetcher.close();
     }
 
+    // ── C4: retained scalars (mailbox thread only) ───────────────────────
+
+    /** Retains one derived scalar; the cap evicts the least recently used entry. */
+    void putScalar(ScalarKey key, long value) {
+        scalars.put(key, value); // access-ordered: an existing key is refreshed too
+        metrics.scalarWrites.inc();
+        while (scalars.size() > SCALAR_CAP) {
+            Iterator<Map.Entry<ScalarKey, Long>> eldest = scalars.entrySet().iterator();
+            if (!eldest.hasNext()) {
+                break;
+            }
+            eldest.next();
+            eldest.remove();
+            metrics.scalarEvictions.inc();
+        }
+    }
+
+    /** The retained scalar, or {@code null} when absent; a read refreshes LRU order. */
+    Long getScalar(ScalarKey key) {
+        return scalars.get(key);
+    }
+
+    int scalarCount() {
+        return scalars.size();
+    }
+
+    /** C4: counted once per warm-up call (the windows show up as fetch/miss counters). */
+    void countWarmUp() {
+        metrics.warmups.inc();
+    }
+
     // ── test seams (mailbox-thread reads) ────────────────────────────────
 
     ContextMetrics metrics() {
@@ -288,6 +337,9 @@ final class ContextProvider implements AutoCloseable {
         final Counter rejected;
         final Counter cooldownSkips;
         final Counter evictions;
+        final Counter warmups;
+        final Counter scalarWrites;
+        final Counter scalarEvictions;
 
         ContextMetrics(MetricGroup group, ContextProvider provider) {
             this.requests = group.counter("compute.context.requests");
@@ -302,9 +354,13 @@ final class ContextProvider implements AutoCloseable {
             this.rejected = group.counter("compute.context.rejected");
             this.cooldownSkips = group.counter("compute.context.cooldown.skips");
             this.evictions = group.counter("compute.context.evictions");
+            this.warmups = group.counter("compute.context.warmups");
+            this.scalarWrites = group.counter("compute.context.scalar.writes");
+            this.scalarEvictions = group.counter("compute.context.scalar.evictions");
             group.gauge("compute.context.inflight", (Gauge<Long>) () -> (long) provider.pendingCount());
             group.gauge("compute.context.cache.bytes", (Gauge<Long>) provider::cacheBytesUsed);
             group.gauge("compute.context.cache.entries", (Gauge<Long>) () -> (long) provider.cacheCount());
+            group.gauge("compute.context.scalars", (Gauge<Long>) () -> (long) provider.scalarCount());
         }
     }
 }
