@@ -1,11 +1,10 @@
 # R2 archive selection — one config list rules (per table, never one merged lake table)
 
 **Date:** 2026-09-30
-**Status:** operator requirement + approved design 2026-09-30 ("One list rules
-it"). Supersedes DEC-059's "one lake table" clause — recorded as **DEC-060**.
-Implementation starts now, test-first, one CHG per commit; the change rides the
-next full gate together with Wave A and the two gate-hygiene fixes from
-2026-09-30.
+**Status:** **implemented 2026-09-30 (S1-S5; CHG-464..467)** — certified with
+the next full gate. Operator requirement + approved design 2026-09-30 ("One
+list rules it"); supersedes DEC-059's "one lake table" clause — recorded as
+**DEC-060**. Test-first, one CHG per commit.
 
 ## Requirement (operator, 2026-09-30)
 
@@ -80,6 +79,29 @@ next full gate together with Wave A and the two gate-hygiene fixes from
   enabled-table copy proof; the real-VM tiering proof stays out of scope
   (recorded FACTs). This plan's claim is the selection contract and the
   fail-closed enforcement, not that parquet lands on production R2.
+
+## Closure (2026-09-30, CHG-464..467)
+
+- **S1** `CHG-464`: selection core (`r2_archive_selection.py`) + 12 tests
+  (failing-first).
+- **S2** `CHG-465`: `EodControllerTool tiering` (`--list` / `--set on|off`) +
+  `r2_archive_sync.py` (dry-run default, `--apply`); live-proven on dev —
+  `candle_closed` enabled then disabled again (both ALTER directions with
+  readback), `raw_table_1` refused (stale Iceberg table name — recreate the
+  table or archive/move the stale objects aside first, never delete) with the
+  sync reporting it and exiting 1.
+- **S3** `CHG-466`: fail-closed preflight guard; live line
+  `OK archive selection: 0 of 28 tables enabled, none outside the configured
+  list (EOD_TABLES unset -> nothing may be enabled)`; scoped preflight PASS.
+- **S4** `CHG-467`: 18 definitions ship `enabled=false` (opt-in), manifest
+  regenerated, contract/runbook/dossier updated (the runbook gains the
+  selection section), docs-audit all green (truth 769/559/638).
+- **S5** (this closure): dev readback shows the as-found state (all disabled;
+  `--tables candle_closed` dry-run: `enable candle_closed`); the ddl-apply
+  image is rebuilt for the final gate.
+- **Caveat (recorded):** the copy engine remains the Fluss tiering job — the
+  real-VM parquet proof stays out of scope (recorded FACTs); this change is the
+  selection contract and its enforcement.
 
 ## Risks / rollback
 
