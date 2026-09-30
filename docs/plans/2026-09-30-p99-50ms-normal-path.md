@@ -55,10 +55,10 @@ downstream of the KPI point and is out of scope.
   snapshot, both KPIs) — done 2026-09-30, `logs/50ms-analysis-20260930/analysis.md`;
   pass state 0/60 at 50 ms.
 
-#### P2 - lever rounds (one variable per round)
+#### P2 - lever rounds (combined-first for ready env levers, operator-approved 2026-09-30; one-variable-per-round as fallback)
 
-- [~] **W1** Fluss source fetch window 20 → 2 ms (env-only trial)
-- [ ] **W2** Output-buffer flush timer 10 → 2–5 ms / buffer-debloat (env/config trial)
+- [~] **W1** Fluss source fetch window 20 → 2 ms (env-only trial; control round in flight)
+- [~] **W2** Output-buffer flush timer 10 → 2 ms (env-only trial; measured combined with W1)
 - [ ] **W3** Checkpoint materialization churn (design first, then config/code)
 - [ ] **W4** TM CPU contention / slot isolation (design)
 - [ ] **W5** Structural hop reduction (only if W1–W4 miss 50 ms; design first)
@@ -72,9 +72,9 @@ downstream of the KPI point and is out of scope.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | P1 - measurement lock | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
-| P2 - lever rounds (one variable per round) | 5 | 0 | 1 | 4 | 0 | 0 | 0 |
+| P2 - lever rounds (combined-first for ready env levers, operator-approved 2026-09-30; one-variable-per-round as fallback) | 5 | 0 | 2 | 3 | 0 | 0 | 0 |
 | P3 - certification | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
-| **Total** | **7** | **1** | **1** | **5** | **0** | **0** | **0** |
+| **Total** | **7** | **1** | **2** | **4** | **0** | **0** | **0** |
 
 ## Overview
 
@@ -123,25 +123,33 @@ value, record the failed round, fall back to an intermediate value (5 ms) as one
 
 **ROUND RESULT (2026-09-30, CHG-449):** smoke + 900 s at 2 ms ran clean (fetchLatencyMs
 20 → 2 ms, errors 0, throughput 4 866 rows/s, 95/95 checkpoints). Medians improved on both
-KPIs (ingest p50 33 → 29, p99 med 75 → 71; tick p50 47 → 45, p99 med 93 → 89). Two of 60
-windows carried > 100 ms stalls (ingest/worst 416 ms) that are **not attributable to the
-lever** — the same class appears at the 20 ms default today (`logs/context-c4-smoke-…`:
-2/13 windows, max 186 ms) — but the magnitude exceeded anything seen at 20 ms so far
-(recorded, not hidden). Not an SLO pass (0/60 ≤ 50 ms). Marker stays `[~]` pending the
-operator's go/no-go; proposed next: one 20 ms control run (same protocol, same
-time-of-day) to bound today's tail rate before W2.
+KPIs (ingest p50 33 → 29, p99 med 75 → 71; tick p50 47 → 45, p99 med 93 → 89). The 20 ms
+control run (same day, same protocol, `logs/w1-control-main-20260930-104228`) resolved the
+tail question: the control carries the same class **more heavily** (1/60 ingest > 100 ms,
+max 243; **19/60** tick > 100, max 273) than W1 (2/60 ingest, max 416; 7/60 tick, max 434)
+⇒ **W1 passes**; the spikes are environmental, not lever-caused. Not an SLO pass
+(0/60 ≤ 50 ms). Marker stays `[~]` until the operator's deferred gate; next: the
+operator-approved combined W1+W2 round (CHG-450).
 
 ### W2 — Output-buffer flush timer / debloat (env/config trial)
 
 **GIVES YOU** — cuts up to ~9 ms of worst-case wait per network hop (3 hops on the tick path).
 **FIT** — `BUFFER_TIMEOUT_MS` 10 → 2–5 (existing env key; default
-`SignalJobConfig.java:1271-1272`; applied `SignalJob.java:635-636`). Buffer-debloat
-(`taskmanager.network.memory.buffer-debloat.enabled`, the former CT-5 lever) is a
-**separate** run only if the timeout alone is not enough — one variable per round.
+`SignalJobConfig.java:1334-1335` — verified 2026-09-30; applied `SignalJob.java:635-636`).
+Buffer-debloat (`taskmanager.network.memory.buffer-debloat.enabled`, the former CT-5 lever)
+is a **separate** run only if the timeout alone is not enough.
 **COST** — more flush events (CPU/network overhead); watch busy time, throughput,
 checkpoint durations.
 **ACTION** — same protocol as W1.
 **WRONG IF** — throughput drops or checkpoint times regress; revert and record.
+
+**COMBINED ROUND (operator-approved 2026-09-30, `CHG-450`):** W2 is measured together with
+W1 in one round — `FLUSS_SCANNER_FETCH_WAIT_MAX_TIME_MS=2 BUFFER_TIMEOUT_MS=2`, smoke 200 s
+then main 900 s. Attribution without extra runs: W1 effect = W1-alone (2/10) − control
+(20/10); W2 marginal = combined (2/2) − W1-alone. A win ⇒ keep both, no W2-alone run; a
+regression ⇒ bisect with one W2-alone run (20/2). Both keys are already plumbed
+(`pipeline-lib.sh:1146,1170`) — env-only, no code change. The one-variable-per-round rule
+remains the fallback for W3–W5 (not implemented yet, so they cannot join a combined round).
 
 ### W3 — Checkpoint materialization churn (design first)
 
