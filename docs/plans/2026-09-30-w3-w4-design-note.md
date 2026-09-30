@@ -78,8 +78,9 @@ windows in 900 s, in two measured classes:
 | id | Lever | Expected gain | Cost / risk | Guardrails |
 |---|---|---|---|---|
 | **W3-a** | JVM/GC tuning (TM, ingestion): G1 pause target, young-gen sizing, heap ceiling | mid class −10–20 ms on spike windows; outliers only if ingestion-side | env-only per service; container recreate | 4 866 rows/s flat; pause/alloc counters; no heap growth |
-| **W3-b** | changelog storage → filesystem (dstl-dfs plugin on TM; CHG-443 path) | removes TM-memory churn; mid class | image/TM conf change; **restore drill both directions**; full gate | checkpoints COMPLETED; restore VALID; changelog size bounded |
+| **W3-b** | changelog storage → filesystem (dstl-dfs plugin on TM; CHG-443 path) — **ALREADY LIVE since 2026-09-29** (CHG-444: plugin mounted, `state.changelog.storage: filesystem`; 95/95 checkpoints, sync p99 663 → 20 ms). This row is retained for history only; nothing to implement. | — | — | — |
 | **W3-c** | materialization cadence/stagger tuning (periodic-materialize default 10 min; size trigger not yet pinned) | fewer/shorter rounds | config; longer restores | restore drills |
+| **W3-c (closed 2026-09-30)** | tried 30 min (CHG-454) in two 900 s rounds: no KPI gain; only the startup materialization batch occurred either way (the scheduler staggers the rest outside the window) | none measured | cost seen: changelog base path 1.9 GB, longer restore replay | **reverted (CHG-457)** |
 | **W3-d** | aggregator state-size reduction | cheaper materialization | code/design; correctness review | full gate; DEC-056 features untouched |
 | **W4'** | container CPU isolation (cpuset/pinning) | only if W3-i attributes outliers to host scheduling | compose change; dev-only finding | production sizing note |
 

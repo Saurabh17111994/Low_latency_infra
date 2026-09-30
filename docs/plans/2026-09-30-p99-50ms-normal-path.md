@@ -223,6 +223,13 @@ Next candidate: changelog path (wipe base path per run + `dstl.dfs` upload/clean
 — the e2e regression, the 465 registry WARNs and the TM ~300 % spike clusters all point
 there; optional host-quiet diagnostic (OpenObserve bursts, psi-cpu 13.0 at startup spike).
 
+**REVERT EXECUTED (2026-09-30, CHG-457):** tree back to the winner baseline
+(W1+W2+W3-a+W3-b); taskmanager recreated with the reverted keys verified absent; stale
+changelog base path wiped 1.9 GB → 4 KB. Next bundle in progress: **CHG-458** (per-phase
+changelog wipe in the profiler preflight + `state.changelog.dstl.dfs.preemptive-persist-threshold: 1mb`),
+tested with the **host quiet** (OpenObserve stopped during runs — operator-approved
+diagnostic).
+
 ### W4 — TM CPU contention / slot isolation (design)
 
 **GIVES YOU** — addresses the suspected second half of the single-subtask stalls: the

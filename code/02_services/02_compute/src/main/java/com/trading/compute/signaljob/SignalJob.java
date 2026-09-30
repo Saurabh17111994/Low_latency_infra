@@ -372,13 +372,6 @@ public final class SignalJob {
                                         .setOption("client.request-timeout",
                                                 config.sinkWriteStallTimeoutMs() + "ms")
                                         .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                                        // CT-4B (CHG-455): Fluss's 100 ms default
-                                        // batch-timeout is latency-additive on this
-                                        // sink (it shares the host subtask, so its
-                                        // flush window stalls checkpoint alignment);
-                                        // 1 ms is the measured optimum (D1,
-                                        // FlussWriteProfiles).
-                                        .setOption("client.writer.batch-timeout", "1ms")
                                         .build())
                         .name("strategy-host-candidates-sink")
                         .uid("strategy-host-candidates-sink");
@@ -396,10 +389,6 @@ public final class SignalJob {
                                         .setOption("client.request-timeout",
                                                 config.sinkWriteStallTimeoutMs() + "ms")
                                         .setOption("client.writer.retries", String.valueOf(config.writerRetries()))
-                                        // CT-4B (CHG-455): same 1 ms signal-sink
-                                        // linger as the candidates sink — this
-                                        // sink also rides the host subtask.
-                                        .setOption("client.writer.batch-timeout", "1ms")
                                         .build())
                         .name("strategy-host-candidates-current-sink")
                         .uid("strategy-host-candidates-current-sink");
