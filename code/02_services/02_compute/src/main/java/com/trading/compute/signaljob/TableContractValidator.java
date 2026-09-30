@@ -62,6 +62,8 @@ public final class TableContractValidator {
     private static final String MULTITF_CANDLE_CONTRACT =
             "2026-09-05 multi-TF aggregator Phase 0, CANDLE-MULTITF-001";
     private static final String FEATURE_VALUES_CONTRACT = "DEC-057, FEATURE-VALUES-SCHEMA-001";
+    private static final String MERGED_CANDLE_CONTRACT =
+            "DEC-059, MERGED-CANDLE-FEATURES-SCHEMA-001";
 
     private TableContractValidator() {}
 
@@ -184,6 +186,29 @@ public final class TableContractValidator {
         validateRouting(info,
                 CandleClosedColumns.COLUMN_NAMES.get(CandleClosedColumns.INSTRUMENT_TOKEN),
                 16, MULTITF_CANDLE_CONTRACT);
+    }
+
+    /**
+     * Merged candle+feature KV (Wave B/DEC-059, DDL 35): PK exactly
+     * [instrument_token, tf, window_start], instrument_token routing, exact
+     * 17-column schema — {@code candle_closed}'s 15 columns + features
+     * MAP&lt;INT, DOUBLE&gt; + sealed. Wired into
+     * {@code SignalJob#preflightTableContracts} whenever the merged writer or
+     * the sealed-only context reader touches it (Wave C W-C3).
+     */
+    public static void validateMergedCandleTable(TableInfo info) {
+        List<String> expectedPk = List.of(
+                MergedCandleFeaturesColumns.COLUMN_NAMES.get(MergedCandleFeaturesColumns.INSTRUMENT_TOKEN),
+                MergedCandleFeaturesColumns.COLUMN_NAMES.get(MergedCandleFeaturesColumns.TF),
+                MergedCandleFeaturesColumns.COLUMN_NAMES.get(MergedCandleFeaturesColumns.WINDOW_START));
+        requireExactPrimaryKey(info, expectedPk, MERGED_CANDLE_CONTRACT);
+        validateSchema(info, MergedCandleFeaturesColumns.COLUMN_NAMES,
+                MergedCandleFeaturesColumns.TYPE_ROOTS, "17-column merged candle_features",
+                MERGED_CANDLE_CONTRACT);
+        validateRouting(info,
+                MergedCandleFeaturesColumns.COLUMN_NAMES.get(
+                        MergedCandleFeaturesColumns.INSTRUMENT_TOKEN),
+                16, MERGED_CANDLE_CONTRACT);
     }
 
     /**

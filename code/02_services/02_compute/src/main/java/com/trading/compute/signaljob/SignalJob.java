@@ -159,6 +159,17 @@ public final class SignalJob {
         return stream.filter(row -> false).name(uid).uid(uid);
     }
 
+    /**
+     * Wave C W-C3: the merged candle_features table is preflight-validated
+     * whenever the merged writer persists to it or the sealed-only context
+     * reader reads it; every other combination keeps the pre-Wave-C
+     * validation set unchanged.
+     */
+    static boolean mergedCandleTableInUse(SignalJobConfig config) {
+        return config.mergedCandleFeaturesEnabled()
+                || config.mergedCandleTable().equals(config.candleContextTable());
+    }
+
     public static StreamExecutionEnvironment buildTopology(SignalJobConfig config) {
         // Read-only metadata preflight (tracker 14 P1 / re-scoped P2): prove
         // the deployed tables (candle KV, signal LOG, signal current-state KV)
@@ -819,6 +830,21 @@ public final class SignalJob {
                 LOG.info("signal-job: {}",
                         TableContractValidator.schemaReport(
                                 candleClosed, CandleClosedColumns.COLUMN_NULLABLE_IN_DDL));
+                // Wave C W-C3 (docs/plans/2026-09-30-wave-c-merged-cutover.md):
+                // the merged table is validated whenever the merged writer
+                // persists to it or the sealed-only context reader reads it.
+                if (mergedCandleTableInUse(config)) {
+                    org.apache.fluss.metadata.TableInfo merged = conn
+                            .getTable(org.apache.fluss.metadata.TablePath.of(
+                                    config.database(), config.mergedCandleTable()))
+                            .getTableInfo();
+                    TableContractValidator.validateMergedCandleTable(merged);
+                    LOG.info("signal-job: candle_features contract OK ({})",
+                            config.mergedCandleTable());
+                    LOG.info("signal-job: {}",
+                            TableContractValidator.schemaReport(
+                                    merged, MergedCandleFeaturesColumns.COLUMN_NULLABLE_IN_DDL));
+                }
             }
             if (config.featureLayerEnabled()) {
                 org.apache.fluss.metadata.TableInfo featureValues = conn

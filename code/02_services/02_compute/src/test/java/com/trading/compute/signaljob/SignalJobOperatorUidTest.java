@@ -2,6 +2,7 @@ package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
@@ -166,6 +167,9 @@ class SignalJobOperatorUidTest {
         ScratchTables.create(connection, admin, quarName,
                 ScratchTables.ingestionQuarantineSchema(), null, 16,
                 "quarantine LOG", TIMEOUT);
+        // The legacy tables must exist for the sink builders even while their
+        // branches are guarded (FlussSinkBuilder resolves the table at build
+        // time, measured 2026-09-30) — the dimmed sinks still deploy.
         ScratchTables.create(connection, admin, liveName, scratchCandleLiveSchema(),
                 List.of("instrument_token", "tf", "window_start"), 16, "candle_live KV", TIMEOUT);
         ScratchTables.create(connection, admin, closedName, scratchCandleClosedSchema(),
@@ -187,6 +191,8 @@ class SignalJobOperatorUidTest {
         cfg.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
         cfg.put("MERGED_CANDLE_TABLE", mergedName);
         cfg.put("LEGACY_CANDLE_SINKS_ENABLED", "false");
+        cfg.put("CANDLE_CONTEXT_TABLE", mergedName);
+        cfg.put("CANDLE_CONTEXT_SEALED_ONLY", "true");
 
         StreamExecutionEnvironment senv = SignalJob.buildTopology(SignalJobConfig.from(cfg));
         StreamGraph graph = senv.getStreamGraph();
@@ -211,6 +217,52 @@ class SignalJobOperatorUidTest {
         // The merged writer is the live path now.
         assertTrue(uidToName.containsKey("candle-features-sink-v1"),
                 "merged sink must be wired when the flag is on");
+    }
+
+    @Test
+    @DisplayName("merged table contract violation fails the build (W-C3 preflight)")
+    void mergedTableContractViolationFailsBuild() throws Exception {
+        String suffix = String.valueOf(System.nanoTime());
+        String candleName = "p6_uid_" + suffix + "_candle";
+        String signalName = "p6_uid_" + suffix + "_sig";
+        String currentName = "p6_uid_" + suffix + "_cur";
+        String quarName = "p6_uid_" + suffix + "_quar";
+        String liveName = "p6_uid_" + suffix + "_live";
+        String closedName = "p6_uid_" + suffix + "_closed";
+        String badMergedName = "p6_uid_" + suffix + "_merged_bad";
+        ScratchTables.create(connection, admin, candleName, ScratchTables.candleSchema(),
+                List.of("instrument_token", "window_start"), 16, "candle KV", TIMEOUT);
+        ScratchTables.create(connection, admin, signalName, ScratchTables.signalLogSchema(), null,
+                16, "signal LOG", TIMEOUT);
+        ScratchTables.create(connection, admin, currentName,
+                ScratchTables.signalCurrentSchema(), List.of("instrument_token"), 16,
+                "signal current KV", TIMEOUT);
+        ScratchTables.create(connection, admin, quarName,
+                ScratchTables.ingestionQuarantineSchema(), null, 16,
+                "quarantine LOG", TIMEOUT);
+        ScratchTables.create(connection, admin, liveName, scratchCandleLiveSchema(),
+                List.of("instrument_token", "tf", "window_start"), 16, "candle_live KV", TIMEOUT);
+        ScratchTables.create(connection, admin, closedName, scratchCandleClosedSchema(),
+                List.of("instrument_token", "tf", "window_start"), 16, "candle_closed KV", TIMEOUT);
+        // 15 columns — deliberately NOT the DDL 35 merged contract.
+        ScratchTables.create(connection, admin, badMergedName, scratchCandleClosedSchema(),
+                List.of("instrument_token", "tf", "window_start"), 16, "candle_features KV",
+                TIMEOUT);
+
+        Map<String, String> cfg = env();
+        cfg.put("CANDLE_TABLE", candleName);
+        cfg.put("SIGNAL_CANDIDATES_TABLE", signalName);
+        cfg.put("SIGNAL_CURRENT_TABLE", currentName);
+        cfg.put("QUARANTINE_TABLE", quarName);
+        cfg.put("MULTITF_ENABLED", "true");
+        cfg.put("CANDLE_LIVE_TABLE", liveName);
+        cfg.put("CANDLE_CLOSED_TABLE", closedName);
+        cfg.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
+        cfg.put("MERGED_CANDLE_TABLE", badMergedName);
+
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> SignalJob.buildTopology(SignalJobConfig.from(cfg)),
+                "the 15-column table must be refused by the W-C3 merged preflight");
     }
 
     private void assertTopology(boolean multiTfEnabled) throws Exception {

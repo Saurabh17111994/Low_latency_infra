@@ -21,7 +21,14 @@ sealed-only decode, 109/0/0 scoped, mutation-checked; full gate 19/19 —
 `logs/soak/monday-gates-20260930-204958`) · **W-C2 landed** (`CHG-477`: writer
 consolidation switch — `LEGACY_CANDLE_SINKS_ENABLED` + per-branch guard
 filters, sink UIDs stay, config 82/0/0 + UID pins 4/0/0, mutation-checked) ·
-W-C3..W-C5 pending.
+**W-C3 landed** (`CHG-478`: merged-table preflight contract + inclusion rule,
+144/0/0 unit scoped + 5/0/0 drill, mutation-checked) · W-C4..W-C5 pending.
+
+**Cadence (revised 2026-09-30, operator):** scoped checks per slice; **one full
+`make gate` at the cutover** (W-C5a certifying run) and one final full run after
+the W-C7 drop. The interrupted W-C2 gate run
+(`logs/soak/monday-gates-20260930-211832`) was aborted deliberately — not a
+repository failure.
 
 ## Verify-first census (tree `a68e54ff`, re-verified 2026-09-30)
 
@@ -72,6 +79,7 @@ code decommission commit, so the final commit lands with the tables already gone
 
 ## Risks / rollback
 - **Savepoint compatibility** — the closed-sink filter's `ValueState` and all UIDs are preserved by the W-C2 drop-filter approach; conditional wiring is explicitly rejected (restore would fail closed).
+- **Eager sink-table resolution (measured 2026-09-30, W-C3)** — `FlussSinkBuilder.build()` resolves its table at graph-build time, so the guarded legacy sinks still require `candle_live`/`candle_closed` to exist while they deploy (fine through W-C6). After the W-C7 drop, no fresh submit may happen before W-C5a deletes the legacy wiring — both happen back-to-back in the same session; the already-running job is unaffected until next submit.
 - **Reader staleness window** — order matters: W-C1 must land before W-C2 is flipped (reader first, then writer stop); the doc's slice order enforces it.
 - **Drops are irreversible** — W-C7 is separated by a soak window; until then rollback is a flag flip.
 - **DDL hazard** — corpus edits stay reconciled proposals (no live apply implied); the live drops are the dev-testing step only.

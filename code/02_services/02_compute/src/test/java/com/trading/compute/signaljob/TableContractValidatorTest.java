@@ -503,6 +503,74 @@ class TableContractValidatorTest {
                         candleClosed(CANDLE_CLOSED_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16, types, false)));
     }
 
+    // ── merged candle_features KV (DDL 35 proposal, DEC-059; Wave C W-C3) ──
+
+    private static final List<String> MERGED_NAMES = MergedCandleFeaturesColumns.COLUMN_NAMES;
+    private static final List<String> MERGED_TYPES = MergedCandleFeaturesColumns.TYPE_ROOTS;
+    private static final String MERGED_TABLE = "candle_features";
+
+    @Test
+    @DisplayName("candle_features KV with PK exactly [instrument_token, tf, window_start] passes")
+    void mergedKvExactPasses() {
+        assertDoesNotThrow(() -> TableContractValidator.validateMergedCandleTable(
+                merged(MERGED_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16)));
+    }
+
+    @Test
+    @DisplayName("candle_features KV without a primary key is rejected")
+    void mergedKvNoPkRejected() {
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateMergedCandleTable(
+                        merged(MERGED_TABLE, null, List.of(TOKEN), 16)));
+    }
+
+    @Test
+    @DisplayName("candle_features KV with schema drift is rejected (16 columns)")
+    void mergedKvSchemaDriftRejected() {
+        List<String> shortTypes = new java.util.ArrayList<>(MERGED_TYPES);
+        shortTypes.remove(16);
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateMergedCandleTable(
+                        merged(MERGED_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16, shortTypes, false)));
+    }
+
+    @Test
+    @DisplayName("candle_features KV with wrong bucket key is rejected")
+    void mergedKvWrongBucketKeyRejected() {
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateMergedCandleTable(
+                        merged(MERGED_TABLE, CANDLE_MULTITF_PK, List.of("window_start"), 16)));
+    }
+
+    @Test
+    @DisplayName("candle_features KV with wrong bucket count is rejected")
+    void mergedKvWrongBucketCountRejected() {
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateMergedCandleTable(
+                        merged(MERGED_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 17)));
+    }
+
+    @Test
+    @DisplayName("candle_features KV with wrong type root is rejected (sealed BOOLEAN vs STRING)")
+    void mergedKvWrongTypeRootRejected() {
+        List<String> types = new java.util.ArrayList<>(MERGED_TYPES);
+        types.set(16, "STRING");
+        assertThrows(TableContractValidator.ContractViolation.class,
+                () -> TableContractValidator.validateMergedCandleTable(
+                        merged(MERGED_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16, types, false)));
+    }
+
+    @Test
+    @DisplayName("candle_features schemaReport is informational")
+    void mergedSchemaReportIsInformational() {
+        TableInfo info = merged(MERGED_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16);
+        String report = TableContractValidator.schemaReport(
+                info, MergedCandleFeaturesColumns.COLUMN_NULLABLE_IN_DDL);
+        assertNotNull(report);
+        assertTrue(report.contains("features:MAP"));
+        assertTrue(report.contains("sealed:BOOLEAN"));
+    }
+
     // ── feature_values KV (DDL 34 proposal, DEC-057) ──
 
     @Test
@@ -648,6 +716,17 @@ class TableContractValidatorTest {
                 columnTypes, pkNonNullable);
     }
 
+    private static TableInfo merged(String name, List<String> schemaPk, List<String> bucketKeys,
+            int numBuckets) {
+        return table(name, schemaPk, bucketKeys, numBuckets, MERGED_NAMES, MERGED_TYPES, null, true);
+    }
+
+    private static TableInfo merged(String name, List<String> schemaPk, List<String> bucketKeys,
+            int numBuckets, List<String> columnTypes, boolean pkNonNullable) {
+        return table(name, schemaPk, bucketKeys, numBuckets, MERGED_NAMES, MERGED_TYPES,
+                columnTypes, pkNonNullable);
+    }
+
     private static TableInfo table(String name, List<String> schemaPk, List<String> bucketKeys,
             int numBuckets, List<String> names, List<String> typeRoots, List<String> columnTypes,
             boolean pkNonNullable) {
@@ -686,6 +765,9 @@ class TableContractValidatorTest {
                 break;
             case "DOUBLE":
                 t = DataTypes.DOUBLE();
+                break;
+            case "BOOLEAN":
+                t = DataTypes.BOOLEAN();
                 break;
             case "MAP":
                 t = DataTypes.MAP(DataTypes.INT(), DataTypes.DOUBLE());
