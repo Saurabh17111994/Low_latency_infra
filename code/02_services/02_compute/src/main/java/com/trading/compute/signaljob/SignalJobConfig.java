@@ -132,6 +132,7 @@ public record SignalJobConfig(
         boolean mergedCandleFeaturesEnabled,
         String candleLiveTable,
         String candleClosedTable,
+        String mergedCandleTable,
         // 2026-09-26 S5→S6 latency workstream (native fetch/flush tuning;
         // see docs/plans/2026-09-26-signal-source-latency-tuning.md).
         long flussScannerFetchMaxBytes,
@@ -216,6 +217,10 @@ public record SignalJobConfig(
                 booleanValue(env, "MERGED_CANDLE_FEATURES_ENABLED", false);
         String candleLiveTable = stringEnv(env, "CANDLE_LIVE_TABLE", "candle_live");
         String candleClosedTable = stringEnv(env, "CANDLE_CLOSED_TABLE", "candle_closed");
+        String mergedCandleTable = env.getOrDefault("MERGED_CANDLE_TABLE", "candle_features").trim();
+        if (mergedCandleTable.isEmpty()) {
+            throw new IllegalStateException("Config MERGED_CANDLE_TABLE must be non-blank");
+        }
         // 2026-09-26 S5→S6 latency workstream: native fetch/flush tuning.
         // The Fluss scanner's fetch chunk caps how long a raw tick waits in
         // Fluss before the source emits it (measured 2026-09-26 at 48.5k
@@ -372,6 +377,7 @@ public record SignalJobConfig(
                 mergedCandleFeaturesEnabled,
                 candleLiveTable,
                 candleClosedTable,
+                mergedCandleTable,
                 flussScannerFetchMaxBytes,
                 flussScannerFetchMaxBytesForBucket,
                 flussScannerFetchWaitMaxTimeMs,
@@ -447,6 +453,11 @@ public record SignalJobConfig(
     /** Fluss table for candle_closed (default candle_closed). */
     public String candleClosedTable() {
         return candleClosedTable;
+    }
+
+    /** Wave B (DEC-059): table for merged candle+feature upserts (default candle_features). */
+    public String mergedCandleTable() {
+        return mergedCandleTable;
     }
 
     /** True when the host emits stored feature rows (FEATURE_LAYER_ENABLED, default false). */

@@ -915,9 +915,12 @@ class SignalJobConfigTest {
         // old candle/feature tables stay authoritative until the cutover.
         assertFalse(SignalJobConfig.from(env()).mergedCandleFeaturesEnabled(),
                 "MERGED_CANDLE_FEATURES_ENABLED defaults to false");
+        assertEquals("candle_features", SignalJobConfig.from(env()).mergedCandleTable());
         Map<String, String> on = env();
         on.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
+        on.put("MERGED_CANDLE_TABLE", "candle_features_smoke");
         assertTrue(SignalJobConfig.from(on).mergedCandleFeaturesEnabled());
+        assertEquals("candle_features_smoke", SignalJobConfig.from(on).mergedCandleTable());
     }
 
     @Test

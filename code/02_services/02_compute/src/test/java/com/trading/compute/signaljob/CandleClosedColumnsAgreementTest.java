@@ -80,7 +80,9 @@ class CandleClosedColumnsAgreementTest {
         assertEquals(true, ddl.contains("'bucket.key' = 'instrument_token'"));
         assertEquals(true, ddl.contains("'bucket.num' = '16'"));
         assertEquals(true, ddl.contains("'table.log.ttl' = '7d'"));
-        assertEquals(true, ddl.contains("'table.datalake.enabled' = 'true'"));
+        // DEC-060 (2026-09-30): the definition ships archive-off; the configured
+        // archive list enables it via r2-archive-sync (the always-on policy is retired).
+        assertEquals(true, ddl.contains("'table.datalake.enabled' = 'false'"));
         assertEquals(true, ddl.contains("'table.datalake.format' = 'iceberg'"));
         assertEquals(true, ddl.contains("'table.datalake.freshness' = '5min'"));
     }

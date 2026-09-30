@@ -363,6 +363,28 @@ public final class SignalJob {
                             .uid("feature-values-sink-v1");
                 }
 
+                // Wave B (DEC-059): the merged candle+feature table — ONE
+                // writer (the host): forming upserts on the live cadence +
+                // sealed rows at close. Off by default; the old candle/feature
+                // sinks stay authoritative until the operator opens the cutover.
+                if (config.mergedCandleFeaturesEnabled()) {
+                    hostOutput
+                            .getSideOutput(StrategyHostFunction.MERGED_ROWS)
+                            .sinkTo(FlussSink.<RowData>builder()
+                                    .setBootstrapServers(config.bootstrapServers())
+                                    .setDatabase(config.database())
+                                    .setTable(config.mergedCandleTable())
+                                    .setSerializationSchema(
+                                            new RowDataSerializationSchema(false, false))
+                                    .setOption("client.request-timeout",
+                                            config.sinkWriteStallTimeoutMs() + "ms")
+                                    .setOption("client.writer.retries",
+                                            String.valueOf(config.writerRetries()))
+                                    .build())
+                            .name("candle-features-sink")
+                            .uid("candle-features-sink-v1");
+                }
+
                 strategySignals
                         .sinkTo(FlussSink.<RowData>builder()
                                         .setBootstrapServers(config.bootstrapServers())

@@ -82,6 +82,41 @@ class StrategyHostFeaturesTest {
         harness.open();
     }
 
+    /** Wave B (DEC-059): the merged write path is opt-in via the env flag. */
+    private void openWithMergedRows(String strategyId) throws Exception {
+        Map<String, String> env = env();
+        env.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
+        function = new StrategyHostFunction(SignalJobConfig.from(env), List.of(strategyId));
+        harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
+                function,
+                r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
+                r -> r.getLong(CandleClosedColumns.INSTRUMENT_TOKEN),
+                Types.LONG);
+        harness.open();
+    }
+
+    private List<RowData> mergedRows() {
+        java.util.Queue<org.apache.flink.streaming.runtime.streamrecord.StreamRecord<RowData>> records =
+                harness.getSideOutput(StrategyHostFunction.MERGED_ROWS);
+        List<RowData> out = new java.util.ArrayList<>();
+        if (records == null) {
+            return out; // no side output registered: nothing was ever emitted
+        }
+        for (org.apache.flink.streaming.runtime.streamrecord.StreamRecord<RowData> record : records) {
+            out.add(record.getValue());
+        }
+        return out;
+    }
+
+    private static java.util.Map<Integer, Double> mapOfMerged(RowData row) {
+        MapData map = row.getMap(MergedCandleFeaturesColumns.FEATURES);
+        java.util.Map<Integer, Double> out = new HashMap<>();
+        for (int i = 0; i < map.size(); i++) {
+            out.put(map.keyArray().getInt(i), map.valueArray().getDouble(i));
+        }
+        return out;
+    }
+
     private List<RowData> featureRows() {
         java.util.Queue<org.apache.flink.streaming.runtime.streamrecord.StreamRecord<RowData>> records =
                 harness.getSideOutput(StrategyHostFunction.FEATURE_ROWS);
@@ -152,6 +187,55 @@ class StrategyHostFeaturesTest {
         r.setField(CandleClosedColumns.LAST_EVENT_FINGERPRINT, StringData.fromString("fp"));
         r.setField(CandleClosedColumns.SCHEMA_VERSION, StringData.fromString("1"));
         return r;
+    }
+
+    @Test
+    void mergedRowsShipFormingAndSealedCandlesWhenEnabled() throws Exception {
+        // Wave B (DEC-059): one writer (this host) — a forming row per live
+        // cadence (sealed=false) and the final sealed row at close, carrying
+        // the same feature snapshot the stored layer would have.
+        openWithMergedRows(FeatureProbe.RULE_ID);
+        harness.processElement1(live(TOKEN, Timeframe.FIFTEEN_S, 0L, 12_345L, 100L, 5), 1_000L);
+
+        List<RowData> forming = mergedRows();
+        assertEquals(1, forming.size(), "one forming row per live cadence");
+        RowData formingRow = forming.get(0);
+        assertEquals(TOKEN, formingRow.getLong(MergedCandleFeaturesColumns.INSTRUMENT_TOKEN));
+        assertEquals(12_345L, formingRow.getLong(MergedCandleFeaturesColumns.CLOSE_PAISE));
+        assertEquals(
+                "1",
+                formingRow.getString(MergedCandleFeaturesColumns.SCHEMA_VERSION).toString());
+        assertFalse(formingRow.getBoolean(MergedCandleFeaturesColumns.SEALED));
+        assertEquals(
+                12_345.0,
+                mapOfMerged(formingRow).get(0),
+                1e-9,
+                "forming row carries the tick feature snapshot");
+
+        for (int i = 1; i <= 20; i++) {
+            harness.processElement2(
+                    closed(TOKEN, Timeframe.FIFTEEN_S.code(), i * 15_000L, i * 100L, 10L, 2),
+                    2_000L + i);
+        }
+        List<RowData> all = mergedRows();
+        assertEquals(21, all.size(), "forming rows + one sealed row per close");
+        RowData sealedRow = all.get(all.size() - 1);
+        assertTrue(sealedRow.getBoolean(MergedCandleFeaturesColumns.SEALED));
+        assertEquals(2_000L, sealedRow.getLong(MergedCandleFeaturesColumns.CLOSE_PAISE));
+        assertEquals(MergedCandleFeaturesColumns.FIELD_COUNT, sealedRow.getArity());
+    }
+
+    @Test
+    void mergedRowsStayOffByDefault() throws Exception {
+        // Wave B ships behind MERGED_CANDLE_FEATURES_ENABLED=false: the default
+        // host must never register the merged side output.
+        open(FeatureProbe.RULE_ID);
+        harness.processElement1(live(TOKEN, Timeframe.FIFTEEN_S, 0L, 100L, 10L, 1), 1_000L);
+        harness.processElement2(
+                closed(TOKEN, Timeframe.FIFTEEN_S.code(), 15_000L, 100L, 10L, 2), 2_000L);
+
+        assertEquals(List.of(), mergedRows());
+        assertEquals(0, function.mergedRowsEmittedForTest());
     }
 
     @Test

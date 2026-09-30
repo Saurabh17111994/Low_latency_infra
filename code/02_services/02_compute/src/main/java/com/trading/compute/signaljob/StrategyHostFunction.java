@@ -107,6 +107,16 @@ public class StrategyHostFunction
      */
     public static final OutputTag<RowData> FEATURE_ROWS = new OutputTag<RowData>("feature-rows") {};
 
+    /**
+     * Wave B (DEC-059): side output of merged {@code candle_features} rows —
+     * a forming row ({@code sealed=false}) per live cadence and the final
+     * sealed row at close. Wired to the merged sink in {@code SignalJob} only
+     * when {@code MERGED_CANDLE_FEATURES_ENABLED=true}; the host is the ONLY
+     * writer.
+     */
+    public static final OutputTag<RowData> MERGED_ROWS =
+            new OutputTag<RowData>("merged-candle-rows") {};
+
     /** Validated strategy ids, registration order (from config). */
     private final List<String> strategyIds;
 
@@ -115,6 +125,9 @@ public class StrategyHostFunction
 
     /** True when the host emits {@link #FEATURE_ROWS} (feature layer enabled). */
     private final boolean featureRowsEnabled;
+
+    /** Wave B (DEC-059): true when the host emits {@link #MERGED_ROWS}. */
+    private final boolean mergedRowsEnabled;
 
     /**
      * C1 test seam: builds the context provider. {@code null} (production)
@@ -166,6 +179,7 @@ public class StrategyHostFunction
     private transient Counter featureCloseUpdates;
     private transient Counter featureFailures;
     private transient Counter featureRowsEmitted;
+    private transient Counter mergedRowsEmitted;
 
     // Heap mirrors for tests that bypass the metric registry.
     private transient long emittedHeap;
@@ -177,6 +191,7 @@ public class StrategyHostFunction
     private transient long featureCloseUpdatesHeap;
     private transient long featureFailuresHeap;
     private transient long featureRowsEmittedHeap;
+    private transient long mergedRowsEmittedHeap;
     private final transient Map<String, Long> skippedPoisonHeap = new HashMap<>();
 
     public StrategyHostFunction(SignalJobConfig config, List<String> strategyIds) {
@@ -206,6 +221,7 @@ public class StrategyHostFunction
         this.config = Preconditions.checkNotNull(config, "config");
         this.strategyIds = List.copyOf(Preconditions.checkNotNull(strategyIds, "strategyIds"));
         this.featureRowsEnabled = featureRowsEnabled;
+        this.mergedRowsEnabled = config.mergedCandleFeaturesEnabled();
         this.providerFactory = providerFactory;
     }
 
@@ -250,6 +266,8 @@ public class StrategyHostFunction
                 getRuntimeContext().getMetricGroup().counter("compute.features.failed");
         featureRowsEmitted =
                 getRuntimeContext().getMetricGroup().counter("compute.features.rows.emitted");
+        mergedRowsEmitted =
+                getRuntimeContext().getMetricGroup().counter("compute.merged.rows.emitted");
         emittedByRule = new HashMap<>();
         // P2-174: one metrics handle per rule per subtask, shared by every
         // slot — not one HostMetrics per (token, ruleId).
@@ -313,6 +331,11 @@ public class StrategyHostFunction
         // DEC-056: features update before the fan-out so every strategy reads the
         // fresh value; a failing feature update is counted, never blocks delivery.
         updateFeaturesOnTick(slot, live, evtTime);
+        if (mergedRowsEnabled) {
+            // Wave B (DEC-059): forming-row upsert on the live cadence. Emitted
+            // before the fan-out so a failing strategy cannot skip it.
+            emitMergedRow(ctx, slot, live, false);
+        }
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: one strategy must not starve the others — isolate,
             // count, and continue to the next strategy.
@@ -341,6 +364,11 @@ public class StrategyHostFunction
         updateFeaturesOnClose(slot, closed);
         if (featureRowsEnabled) {
             emitFeatureRow(ctx, slot, closed);
+        }
+        if (mergedRowsEnabled) {
+            // Wave B (DEC-059): the final sealed write — the terminal row of
+            // this window (late ticks can never rewrite it).
+            emitMergedRow(ctx, slot, closed, true);
         }
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: same isolation on the closed path.
@@ -766,6 +794,31 @@ public class StrategyHostFunction
     /** Test seam: feature rows emitted to the stored layer by this subtask. */
     long featureRowsEmittedForTest() {
         return featureRowsEmittedHeap;
+    }
+
+    /**
+     * Wave B (DEC-059): one merged candle_features row — the candle row's 15
+     * columns + the feature snapshot for its timeframe + the seal flag. The
+     * host is the only writer; a failure here is counted, never delivered into
+     * the strategy fan-out (same contract as {@link #emitFeatureRow}).
+     */
+    private void emitMergedRow(Context ctx, HostSlot slot, RowData candle, boolean sealed) {
+        try {
+            Timeframe tf = Timeframe.fromCode(candle.getString(CandleClosedColumns.TF).toString());
+            Map<Integer, Double> snapshot = new HashMap<>();
+            slot.features.snapshot(tf, snapshot);
+            GenericRowData row = MergedCandleRows.fromCandleRow(candle, snapshot, sealed);
+            ctx.output(MERGED_ROWS, row);
+            mergedRowsEmitted.inc();
+            mergedRowsEmittedHeap++;
+        } catch (Exception e) {
+            countFeatureFailure("emit-merged", e);
+        }
+    }
+
+    /** Test seam: merged rows emitted by this subtask. */
+    long mergedRowsEmittedForTest() {
+        return mergedRowsEmittedHeap;
     }
 
     /** Test seam: live strategy instance for one instrument. */
