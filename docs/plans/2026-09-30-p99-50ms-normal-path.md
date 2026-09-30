@@ -57,7 +57,7 @@ downstream of the KPI point and is out of scope.
 
 #### P2 - lever rounds (one variable per round)
 
-- [ ] **W1** Fluss source fetch window 20 → 2 ms (env-only trial)
+- [~] **W1** Fluss source fetch window 20 → 2 ms (env-only trial)
 - [ ] **W2** Output-buffer flush timer 10 → 2–5 ms / buffer-debloat (env/config trial)
 - [ ] **W3** Checkpoint materialization churn (design first, then config/code)
 - [ ] **W4** TM CPU contention / slot isolation (design)
@@ -72,9 +72,9 @@ downstream of the KPI point and is out of scope.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | P1 - measurement lock | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
-| P2 - lever rounds (one variable per round) | 5 | 0 | 0 | 5 | 0 | 0 | 0 |
+| P2 - lever rounds (one variable per round) | 5 | 0 | 1 | 4 | 0 | 0 | 0 |
 | P3 - certification | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
-| **Total** | **7** | **1** | **0** | **6** | **0** | **0** | **0** |
+| **Total** | **7** | **1** | **1** | **5** | **0** | **0** | **0** |
 
 ## Overview
 
@@ -120,6 +120,16 @@ source throughput, Fluss server CPU during the run.
 If it wins and holds, propose the default change (code + CHG + full gate) in W6.
 **WRONG IF** — read errors, throughput drop, p99 unchanged or worse; revert the env
 value, record the failed round, fall back to an intermediate value (5 ms) as one more round.
+
+**ROUND RESULT (2026-09-30, CHG-449):** smoke + 900 s at 2 ms ran clean (fetchLatencyMs
+20 → 2 ms, errors 0, throughput 4 866 rows/s, 95/95 checkpoints). Medians improved on both
+KPIs (ingest p50 33 → 29, p99 med 75 → 71; tick p50 47 → 45, p99 med 93 → 89). Two of 60
+windows carried > 100 ms stalls (ingest/worst 416 ms) that are **not attributable to the
+lever** — the same class appears at the 20 ms default today (`logs/context-c4-smoke-…`:
+2/13 windows, max 186 ms) — but the magnitude exceeded anything seen at 20 ms so far
+(recorded, not hidden). Not an SLO pass (0/60 ≤ 50 ms). Marker stays `[~]` pending the
+operator's go/no-go; proposed next: one 20 ms control run (same protocol, same
+time-of-day) to bound today's tail rate before W2.
 
 ### W2 — Output-buffer flush timer / debloat (env/config trial)
 
