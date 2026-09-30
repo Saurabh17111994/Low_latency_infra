@@ -199,6 +199,14 @@ design-only until W3's GC instrumentation either proves a contention mechanism (
 fix is likely JVM/tuning, not slot isolation) or the mapping stays unreproduced (then close
 per the WRONG IF and rely on W3).
 
+**CLOSED AS NOT REPRODUCIBLE (2026-09-30, W3/W4 design note):** the premise is a unit
+misread (see above); no CPU saturation, back-pressure 0, and the TM JVM is exonerated for
+the large outliers (`gc.log` + JFR `tm-diag.jfr`: max 25.6 ms stop near the 354/424 ms
+spike; the largest pause of the whole run — 107 ms — produced no spike window). JVM and
+background-thread attribution moves to W3-i instrumentation; W4 reopens only if that
+attributes outliers to host/container scheduling (lever **W4'** in
+`docs/plans/2026-09-30-w3-w4-design-note.md`).
+
 ### W5 — Structural hop reduction (only if W1–W4 miss 50 ms)
 
 **GIVES YOU** — removes or merges one shuffle on the tick path (e.g. the host reading the
