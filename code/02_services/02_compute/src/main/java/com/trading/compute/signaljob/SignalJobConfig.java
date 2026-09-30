@@ -137,7 +137,16 @@ public record SignalJobConfig(
         // 2026-09-27 feature layer (DEC-056/057): the strategy host emits one
         // stored row per closed window (feature_values). Requires the host.
         boolean featureLayerEnabled,
-        String featureTable) implements Serializable {
+        String featureTable,
+        // C1 live-candle context provider (docs/plans/2026-09-30-strategy-
+        // context-live-fetch.md): the strategy host opens an on-demand
+        // candle_closed lookup provider behind STRATEGY_CONTEXT_ENABLED
+        // (default false). Budgets are the operator-approved defaults.
+        boolean strategyContextEnabled,
+        long contextCacheBytes,
+        int contextMaxInflight,
+        long contextFetchTimeoutMs,
+        long contextRetryCooldownMs) implements Serializable {
 
     /**
      * M3-1: the default out-of-orderness tolerance in one place — the config
@@ -245,6 +254,30 @@ public record SignalJobConfig(
         if (featureTable.isEmpty()) {
             throw new IllegalStateException("Config FEATURE_TABLE must be non-blank");
         }
+        // C1 live-candle context provider (docs/plans/2026-09-30-strategy-
+        // context-live-fetch.md): the provider runs inside the strategy host,
+        // so enabling it without the host is a config error, not a silent
+        // no-op. The budgets are the operator-approved defaults (8 MB cache,
+        // 32 in-flight fetches, 100 ms fetch timeout, 250 ms retry cooldown).
+        boolean strategyContextEnabled = booleanValue(env, "STRATEGY_CONTEXT_ENABLED", false);
+        if (strategyContextEnabled && !strategyHostEnabled) {
+            throw new IllegalStateException("Config STRATEGY_CONTEXT_ENABLED=true requires "
+                    + "STRATEGY_HOST_ENABLED=true — the context provider runs inside the "
+                    + "strategy host (docs/plans/2026-09-30-strategy-context-live-fetch.md)");
+        }
+        long contextCacheBytes =
+                positiveLong(env, "STRATEGY_CONTEXT_CACHE_BYTES", 8L * 1024 * 1024);
+        long contextMaxInflightRaw =
+                positiveLong(env, "STRATEGY_CONTEXT_MAX_INFLIGHT", 32L);
+        if (contextMaxInflightRaw > 4096) {
+            throw new IllegalStateException("Config STRATEGY_CONTEXT_MAX_INFLIGHT must be "
+                    + "<= 4096 (got " + contextMaxInflightRaw + ")");
+        }
+        int contextMaxInflight = (int) contextMaxInflightRaw;
+        long contextFetchTimeoutMs =
+                positiveLong(env, "STRATEGY_CONTEXT_FETCH_TIMEOUT_MS", 100L);
+        long contextRetryCooldownMs =
+                positiveLong(env, "STRATEGY_CONTEXT_RETRY_COOLDOWN_MS", 250L);
         // P2-166/167: single-resolve the S3 triple once — endpoint + both
         // secrets from the same read, null unless an s3:// URI is actually
         // in use. One read kills the transient-IO inconsistency window and
@@ -331,7 +364,12 @@ public record SignalJobConfig(
                 strategyHostEnabled,
                 strategyIds,
                 featureLayerEnabled,
-                featureTable);
+                featureTable,
+                strategyContextEnabled,
+                contextCacheBytes,
+                contextMaxInflight,
+                contextFetchTimeoutMs,
+                contextRetryCooldownMs);
     }
 
     /**
@@ -398,6 +436,31 @@ public record SignalJobConfig(
     /** Fluss table for stored feature rows (default feature_values). */
     public String featureTable() {
         return featureTable;
+    }
+
+    /** True when the host opens the on-demand context provider (C1, default false). */
+    public boolean strategyContextEnabled() {
+        return strategyContextEnabled;
+    }
+
+    /** Context cache budget in bytes per subtask (STRATEGY_CONTEXT_CACHE_BYTES). */
+    public long contextCacheBytes() {
+        return contextCacheBytes;
+    }
+
+    /** Max concurrent context fetches per subtask (STRATEGY_CONTEXT_MAX_INFLIGHT). */
+    public int contextMaxInflight() {
+        return contextMaxInflight;
+    }
+
+    /** Fetch timeout before a context transfer is counted absent (ms). */
+    public long contextFetchTimeoutMs() {
+        return contextFetchTimeoutMs;
+    }
+
+    /** Retry cooldown after a failed/absent/timed-out context fetch (ms). */
+    public long contextRetryCooldownMs() {
+        return contextRetryCooldownMs;
     }
 
     /** Fluss scanner request cap in bytes (default 512 KiB; Fluss default 16 MiB). */

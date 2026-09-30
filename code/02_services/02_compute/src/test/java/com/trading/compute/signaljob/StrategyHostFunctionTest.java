@@ -1,12 +1,16 @@
 package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.streaming.util.KeyedTwoInputStreamOperatorTestHarness;
 import org.apache.flink.streaming.util.ProcessFunctionTestHarnesses;
@@ -498,5 +502,63 @@ class StrategyHostFunctionTest {
         in1(live(222L, Timeframe.FIFTEEN_S, 0L, 100L));
         assertEquals(2, function.slotCountForTest());
         assertEquals(0L, function.droppedOversizeForTest());
+    }
+
+    // — context provider lifecycle (C1) ————————————————————————————————————
+    // (docs/plans/2026-09-30-strategy-context-live-fetch.md)
+
+    @Test
+    @DisplayName("context provider: absent by default, opened + closed behind the flag")
+    void contextProviderLifecycle() throws Exception {
+        // Flag off by default: open() must not build anything.
+        open(StubSmokeStrategy.RULE_ID);
+        assertNull(function.contextProviderForTest());
+
+        // Flag on with an injected factory: the host opens the provider at
+        // startup and closes it on operator close — no cluster involved.
+        AtomicBoolean closed = new AtomicBoolean();
+        CandleFetcher fetcher = new CandleFetcher() {
+            @Override
+            public CompletableFuture<ContextCandle> fetch(ContextKey key) {
+                return new CompletableFuture<>();
+            }
+
+            @Override
+            public void close() {
+                closed.set(true);
+            }
+        };
+        Map<String, String> env = env();
+        env.put("STRATEGY_HOST_ENABLED", "true");
+        env.put("MULTITF_ENABLED", "true");
+        env.put("STRATEGIES", StubSmokeStrategy.RULE_ID);
+        env.put("STRATEGY_CONTEXT_ENABLED", "true");
+
+        harness.close();
+        harness = null;
+        function = new StrategyHostFunction(
+                SignalJobConfig.from(env),
+                List.of(StubSmokeStrategy.RULE_ID),
+                false,
+                (config, metrics) -> new ContextProvider(
+                        fetcher,
+                        config.contextCacheBytes(),
+                        config.contextMaxInflight(),
+                        config.contextFetchTimeoutMs(),
+                        config.contextRetryCooldownMs(),
+                        System::currentTimeMillis,
+                        metrics));
+        harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
+                function,
+                r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
+                r -> r.getLong(CandleClosedColumns.INSTRUMENT_TOKEN),
+                Types.LONG);
+        harness.open();
+
+        assertNotNull(function.contextProviderForTest(),
+                "flag on must open the provider at startup");
+        harness.close();
+        harness = null;
+        assertTrue(closed.get(), "operator close must close the provider (and its fetcher)");
     }
 }

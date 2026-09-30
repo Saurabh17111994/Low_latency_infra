@@ -1,6 +1,7 @@
 package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -84,5 +85,60 @@ class StrategyHostConfigTest {
                 SignalJobConfig.parseStrategyIds("  , " + StubSmokeStrategy.RULE_ID + " ,, "));
         assertEquals(List.of(), SignalJobConfig.parseStrategyIds("  , ,"));
         assertEquals(List.of(), SignalJobConfig.parseStrategyIds(null));
+    }
+
+    // — C1 context provider (docs/plans/2026-09-30-strategy-context-live-fetch.md) —
+
+    @Test
+    @DisplayName("context provider off by default with the approved budgets")
+    void contextDefaultsOff() {
+        SignalJobConfig cfg = SignalJobConfig.from(env());
+        assertFalse(cfg.strategyContextEnabled());
+        assertEquals(8L * 1024 * 1024, cfg.contextCacheBytes());
+        assertEquals(32, cfg.contextMaxInflight());
+        assertEquals(100L, cfg.contextFetchTimeoutMs());
+        assertEquals(250L, cfg.contextRetryCooldownMs());
+    }
+
+    @Test
+    @DisplayName("context provider on requires the strategy host")
+    void contextRequiresHost() {
+        Map<String, String> env = env();
+        env.put("STRATEGY_CONTEXT_ENABLED", "true");
+        IllegalStateException e =
+                assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
+        assertTrue(e.getMessage().contains("STRATEGY_HOST_ENABLED"));
+    }
+
+    @Test
+    @DisplayName("context knobs parse when the host is on")
+    void contextKnobsParse() {
+        Map<String, String> env = env();
+        env.put("STRATEGY_HOST_ENABLED", "true");
+        env.put("MULTITF_ENABLED", "true");
+        env.put("STRATEGIES", StubSmokeStrategy.RULE_ID);
+        env.put("STRATEGY_CONTEXT_ENABLED", "true");
+        env.put("STRATEGY_CONTEXT_CACHE_BYTES", "1048576");
+        env.put("STRATEGY_CONTEXT_MAX_INFLIGHT", "8");
+        env.put("STRATEGY_CONTEXT_FETCH_TIMEOUT_MS", "50");
+        env.put("STRATEGY_CONTEXT_RETRY_COOLDOWN_MS", "125");
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertTrue(cfg.strategyContextEnabled());
+        assertEquals(1_048_576L, cfg.contextCacheBytes());
+        assertEquals(8, cfg.contextMaxInflight());
+        assertEquals(50L, cfg.contextFetchTimeoutMs());
+        assertEquals(125L, cfg.contextRetryCooldownMs());
+    }
+
+    @Test
+    @DisplayName("context max-inflight above the sanity cap fails fast")
+    void contextInflightAboveCapFailsFast() {
+        Map<String, String> env = env();
+        env.put("STRATEGY_HOST_ENABLED", "true");
+        env.put("MULTITF_ENABLED", "true");
+        env.put("STRATEGIES", StubSmokeStrategy.RULE_ID);
+        env.put("STRATEGY_CONTEXT_ENABLED", "true");
+        env.put("STRATEGY_CONTEXT_MAX_INFLIGHT", "5000");
+        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(env));
     }
 }

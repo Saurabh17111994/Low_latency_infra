@@ -32,7 +32,16 @@
 >   never match real ids — the old code scanned the whole map per emission and
 >   pruned nothing.
 > - Rollout flags, all default OFF: `MULTITF_ENABLED`, `STRATEGY_HOST_ENABLED`,
->   `EXECUTION_INTENT_ENABLED` (`STRATEGIES` must list the rule ids).
+>   `EXECUTION_INTENT_ENABLED`, `STRATEGY_CONTEXT_ENABLED` (`STRATEGIES` must list
+>   the rule ids).
+> - Live-candle context fetch (2026-09-30, C1, CHG-445): the strategy host can
+>   open an on-demand `candle_closed` provider (`ContextProvider` inside
+>   `StrategyHostFunction`, flag `STRATEGY_CONTEXT_ENABLED` default OFF) —
+>   asynchronous exact-PK Fluss lookups, single-flight, bounded (8 MB/subtask
+>   cache, 32 in-flight, 100 ms fetch timeout, 250 ms retry cooldown), heap-only,
+>   no new operators/tables/sinks. Strategies cannot reach it yet: the contract
+>   additions (`onContextReady`, last-live snapshot) and the first consumer land
+>   in C2/C3 (`docs/plans/2026-09-30-strategy-context-live-fetch.md`).
 > - Dev switch (2026-09-27, CHG-344): the flags live in the compose
 >   `flink-common` env anchor (`code/01_platform/01_docker/docker-compose.yml`,
 >   defaults OFF) and are set for dev in `01_docker/.env`; a `make up` recreate

@@ -15,6 +15,7 @@ import org.apache.flink.api.common.state.MapStateDescriptor;
 import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.Histogram;
+import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.streaming.api.functions.co.KeyedCoProcessFunction;
 import org.apache.flink.table.data.GenericMapData;
 import org.apache.flink.table.data.GenericRowData;
@@ -107,6 +108,19 @@ public class StrategyHostFunction
     /** True when the host emits {@link #FEATURE_ROWS} (feature layer enabled). */
     private final boolean featureRowsEnabled;
 
+    /**
+     * C1 test seam: builds the context provider. {@code null} (production)
+     * resolves to {@link ContextProvider#open}. Transient — a test sets it on
+     * the instance before the harness opens; Flink never serializes it.
+     */
+    private transient ContextProviderFactory providerFactory;
+
+    /** C1: on-demand closed-candle provider — null unless {@code STRATEGY_CONTEXT_ENABLED}. */
+    private transient ContextProvider contextProvider;
+
+    /** C1: strategy-facing view over {@link #contextProvider} (handed to strategies in C2). */
+    private transient ContextView contextView;
+
     /** Per-instrument heap slots — intentional amnesia, not checkpointed. */
     private final Map<Long, HostSlot> slots = new HashMap<>();
 
@@ -158,9 +172,33 @@ public class StrategyHostFunction
      */
     public StrategyHostFunction(
             SignalJobConfig config, List<String> strategyIds, boolean featureRowsEnabled) {
+        this(config, strategyIds, featureRowsEnabled, null);
+    }
+
+    /**
+     * @param providerFactory C1 test seam for the context provider; {@code null}
+     *     resolves to {@link ContextProvider#open} (a real Fluss connection)
+     *     when {@code STRATEGY_CONTEXT_ENABLED=true}
+     */
+    StrategyHostFunction(
+            SignalJobConfig config,
+            List<String> strategyIds,
+            boolean featureRowsEnabled,
+            ContextProviderFactory providerFactory) {
         this.config = Preconditions.checkNotNull(config, "config");
         this.strategyIds = List.copyOf(Preconditions.checkNotNull(strategyIds, "strategyIds"));
         this.featureRowsEnabled = featureRowsEnabled;
+        this.providerFactory = providerFactory;
+    }
+
+    /**
+     * Builds the operator's context provider (C1). The production default is
+     * {@link ContextProvider#open}; tests inject a fake-backed provider so the
+     * open/close lifecycle is provable without a Fluss cluster.
+     */
+    @FunctionalInterface
+    interface ContextProviderFactory {
+        ContextProvider create(SignalJobConfig config, MetricGroup metrics) throws Exception;
     }
 
     @Override
@@ -204,6 +242,30 @@ public class StrategyHostFunction
             sharedMetrics.put(id, new HostMetrics(id));
             emittedByRule.put(id, getRuntimeContext().getMetricGroup()
                     .addGroup("strategy", id).counter("emitted"));
+        }
+        if (config.strategyContextEnabled()) {
+            ContextProviderFactory factory =
+                    providerFactory != null ? providerFactory : ContextProvider::open;
+            contextProvider = factory.create(config, getRuntimeContext().getMetricGroup());
+            contextView = contextProvider.view();
+            LOG.info("strategy-host: context provider ready (table={}, cacheBytes={}, "
+                            + "maxInflight={}, fetchTimeoutMs={})",
+                    config.candleClosedTable(), config.contextCacheBytes(),
+                    config.contextMaxInflight(), config.contextFetchTimeoutMs());
+        }
+    }
+
+    /**
+     * C1: closes the context provider (and its Fluss client) when
+     * {@code STRATEGY_CONTEXT_ENABLED} opened one; a no-op otherwise, so
+     * flag-off behavior is unchanged.
+     */
+    @Override
+    public void close() throws Exception {
+        if (contextProvider != null) {
+            contextProvider.close();
+            contextProvider = null;
+            contextView = null;
         }
     }
 
@@ -568,6 +630,16 @@ public class StrategyHostFunction
     SignalStrategy strategyForTest(long token, String ruleId) {
         HostSlot slot = slots.get(token);
         return slot == null ? null : slot.strategies.get(ruleId);
+    }
+
+    /** C1 test seam: the context provider built by open() (null when disabled). */
+    ContextProvider contextProviderForTest() {
+        return contextProvider;
+    }
+
+    /** C1 test seam: the strategy-facing context view (null when disabled). */
+    ContextView contextViewForTest() {
+        return contextView;
     }
 
     /** Test seam: one instrument's shared feature state, or null when no slot exists. */
