@@ -47,7 +47,13 @@
 >   processing-time wake-up with the token's most recent live snapshot while a
 >   request is pending (idempotent per `(token, last_event_time)`; with the flag
 >   off the view is the disabled singleton, every read null, nothing scheduled).
->   First consumer: C3 (`docs/plans/2026-09-30-strategy-context-live-fetch.md`).
+>   C3 (CHG-447) lands the first consumer as an opt-in probe rule
+>   `ctx-probe-v1` (`ContextProbeStrategy`): on a ONE_M live row it fetches the
+>   previous window, emits nothing on a miss, and fires one deterministic row
+>   on the same live forming candle once ready — never on the close — with
+>   `strategy/ctx-probe-v1.{misses,ready_before_close,ready_after_close,emitted,
+>   suppressed}` counters; it is registered but inert unless a `STRATEGIES` list
+>   names it (`docs/plans/2026-09-30-strategy-context-live-fetch.md`).
 > - Dev switch (2026-09-27, CHG-344): the flags live in the compose
 >   `flink-common` env anchor (`code/01_platform/01_docker/docker-compose.yml`,
 >   defaults OFF) and are set for dev in `01_docker/.env`; a `make up` recreate

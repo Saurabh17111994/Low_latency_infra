@@ -41,6 +41,9 @@ public final class Strategies {
                 new LinkedHashMap<>();
         m.put(StubSmokeStrategy.RULE_ID, StubSmokeStrategy::new);
         m.put(N7RangeBreakoutStrategy.RULE_ID, N7RangeBreakoutStrategy::new);
+        // C3 test-only consumer (docs/plans/2026-09-30-strategy-context-live-fetch.md):
+        // registered so a smoke can list it in STRATEGIES; not a trading rule.
+        m.put(ContextProbeStrategy.RULE_ID, ContextProbeStrategy::new);
         return Collections.unmodifiableMap(m);
     }
 
