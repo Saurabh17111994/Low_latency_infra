@@ -1,10 +1,18 @@
 # Wave B — merged candle+feature table (staged, flags off)
 
 **Date:** 2026-09-30
-**Status:** operator-accepted design (DEC-059, 2026-09-30); implementing now in
+**Status:** operator-accepted design (DEC-059, 2026-09-30); implementing in
 staged slices, **rollout flags default off**, cutover/decommission NOT in scope.
 Constrained by **DEC-060**: the merged live table is one selectable archive
 entry; it never forces a merged lake table.
+
+**Progress:** **W-B1 landed** (`CHG-468`: DDL 35 + manifest 28 + contract test +
+audit pins) · **W-B2 landed** (`CHG-469`: `MergedCandleRow` + the terminal-seal
+rule + `MERGED_CANDLE_FEATURES_ENABLED=false`, failing-first 84/84) ·
+**W-B3 (writer wiring) is the next slice** — it adds the host's dual-write
+(forming upsert + sealed write) behind the same flag and its sink; W-B4
+(readers/docs) and W-B5 (200 s smoke + closure) follow. The final `make gate`
+runs after W-B5 (covering Wave A + R2 + Wave B).
 
 ## Goal (DEC-059)
 
