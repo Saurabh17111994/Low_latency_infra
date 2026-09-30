@@ -25,7 +25,11 @@ filters, sink UIDs stay, config 82/0/0 + UID pins 4/0/0, mutation-checked) ·
 144/0/0 unit scoped + 5/0/0 drill, mutation-checked) · **W-C4 landed**
 (`CHG-479`: stored feature layer retired — `FeatureValuesColumns` +
 `FEATURE_LAYER_ENABLED`/`FEATURE_TABLE` + sink/preflight gone, compute suite
-657/0/20, drill 5/0/0) · W-C6/W-C7/W-C5a pending.
+657/0/20, drill 5/0/0) · **W-C6 landed** (`CHG-480`: dev cutover flip smoke —
+merged-only writes proven live: `candle_features` +57,263 while
+`candle_live`/`candle_closed`/`feature_values` each +0; 498,110 sealed context
+hits / 23,959 forming-absents; 32/0 checkpoints; stack reverted) ·
+W-C7/W-C5a pending.
 
 **Cadence (revised 2026-09-30, operator):** scoped checks per slice; **one full
 `make gate` at the cutover** (W-C5a certifying run) and one final full run after
