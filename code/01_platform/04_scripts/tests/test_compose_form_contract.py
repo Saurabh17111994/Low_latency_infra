@@ -176,6 +176,14 @@ SITES: list[tuple[str, str, str, str]] = [
     ("start-all.sh", "docker compose version", "TEXT",
      "readiness capability probe (P6-698) — asks whether the compose plugin exists"),
     ("start-all.sh", "check docker compose logs", "TEXT", "error message"),
+    # 2026-09-30: docstring prose in the submit-env / stage-pin tests quotes
+    # compose commands as text — no invocation.
+    ("code/01_platform/04_scripts/tests/test_fetch_wait_submit_env.py",
+     "docker compose exec -e", "TEXT", "docstring prose"),
+    ("code/01_platform/04_scripts/tests/test_stage_instrumentation_pins.py",
+     "docker compose up -d flink-taskmanager", "TEXT", "docstring prose"),
+    ("code/01_platform/04_scripts/tests/test_strategy_context_submit_env.py",
+     "docker compose exec -e", "TEXT", "docstring prose"),
 ]
 
 # Compose variables: the definitions this test trusts (checked by test_definitions).

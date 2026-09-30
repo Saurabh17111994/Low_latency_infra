@@ -48,11 +48,11 @@ the cause natively.
 |---|---|---|---|---|---|---|---|
 | P1 - phase capture tooling | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
 | P2 - 10 s baseline and branch decision | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
-| P3 - root-cause fix (one branch only) | 2 | 1 | 0 | 1 | 0 | 0 | 0 |
-| P4 - insurance | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
+| P3 - root-cause fix (one branch only) | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
+| P4 - insurance | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
 | P5 - cadence decision | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
 | P6 - close-out | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
-| **Total** | **8** | **5** | **0** | **3** | **0** | **0** | **0** |
+| **Total** | **8** | **7** | **0** | **1** | **0** | **0** | **0** |
 
 ## Overview
 
