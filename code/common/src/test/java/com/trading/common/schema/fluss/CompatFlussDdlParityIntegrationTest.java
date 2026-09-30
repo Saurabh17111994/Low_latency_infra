@@ -91,11 +91,12 @@ class CompatFlussDdlParityIntegrationTest {
         manifest = MAPPER.readValue(
                 ddlDir.resolve("schema_manifest.json").toFile(), SchemaManifest.class);
         assertNotNull(manifest.tables, "manifest must carry tables");
-        // 28 since CHG-468 added DDL 35 candle_features (Wave B/DEC-059,
-        // sanctioned unapplied proposal); 27 held since CHG-349 added DDL 34
-        // feature_values; 26 held since e75f92bc retired the parked
-        // fingerprint_dedup DDL.
-        assertEquals(28, manifest.tables.size(), "approved manifest must hold 28 tables");
+        // 25 since Wave C W-C5a (2026-09-30, DEC-059) retired candle_live/
+        // candle_closed/feature_values with DDLs 32/33/34; 28 held since
+        // CHG-468 added DDL 35 candle_features (Wave B/DEC-059); 27 held since
+        // CHG-349 added DDL 34 feature_values; 26 held since e75f92bc retired
+        // the parked fingerprint_dedup DDL.
+        assertEquals(25, manifest.tables.size(), "approved manifest must hold 25 tables");
         try {
             Configuration conf = new Configuration();
             conf.setString("bootstrap.servers", bootstrap);
