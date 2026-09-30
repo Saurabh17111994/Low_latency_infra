@@ -116,6 +116,14 @@ rows/min, last bytes per table × timeframe).
    matrix attached.
 3. 900 s measurement round for the matrix when the operator releases it.
 
+**Smoke/main invocation recipe (learned 2026-09-30):** the phase needs
+`FEATURE_LAYER_ENABLED=true STRATEGY_HOST_ENABLED=true
+STRATEGIES=n7-range-breakout-v1` — the job's config guard rejects the feature
+layer without the host, and the host without a non-empty strategy list — and an
+**absolute `OUT`** (the fleet containers bind-mount it; a relative path fails
+docker create with exit 125). Attempts `smoke4`/`smoke4b`/`smoke4c` failed on
+those two invocation errors and carry no capture evidence.
+
 ## First smoke (2026-09-30, `logs/chg461-smoke-20260930-150031`) — what it caught
 
 All three new legs produced data; the gate failed on exactly one leg and the
@@ -258,7 +266,7 @@ implementation.
 | 8 | Staged dual-write cutover. |
 | 9 | All consumers migrate: strategy/signal, EOD/lake, UI/dashboards, replay/backtest. |
 | 10 | Old tables read-only, dropped after N days. |
-| 11 | Operator chose **separate lake tables**. **OPEN**: one Fluss table tiers natively to one Iceberg table; separate lake tables need a split step (or a second Fluss table). Reconcile before DDL. |
+| 11 | **Resolved (later round): one lake table** (candles + features together) — native tiering, no split step. (The earlier answer, separate lake tables, was overridden.) |
 | 12 | Merged retention **3 d + lake**. |
 | 20 | Merged forming rows serve the now-view. |
 | 48 | One TF-keyed table (not six). |
@@ -269,7 +277,7 @@ implementation.
 | Q | Decision |
 |---|---|
 | 13 | Live EOL = merged freeze (no separate live table in the merged world). |
-| 14 | kv.ttl 15 min recorded as the **fallback** if the merge is deferred; moot in the merged world (the rows are the history). **OPEN**: close out at merge landing. |
+| 14 | kv.ttl 15 min is a **fallback-only** value (if the merge is deferred); moot in the merged world — the rows are the history. Closed 2026-09-30 (later round). |
 | 15 | kv.ttl semantics verified by an isolated test first (fallback path only). |
 | 16 | Compaction/churn investigation included in the state work. |
 | 17 | Verify no consumer reads sealed rows from `candle_live` before cutover. |
@@ -277,12 +285,12 @@ implementation.
 | 19 | Rows-vs-churn split confirmed first (census fix + 900 s). |
 | 21 | Stored live leg is freshness-bound, not 75 ms-class. |
 | 22 | Live cadence **1 Hz/key** (halves churn; stored now-view floor ≈1 s). |
-| 23 | Per-tick scope: smallest TF only if ever enabled — load answer below. |
+| 23 | Per-tick, if ever enabled: **smallest TF only** (load answer below). |
 | 24 | Single global cadence. |
 | 25 | One record per key per emission (no batching) — request-rate watch item. |
 | 26 | All TFs keep live rows. |
-| 27 | **Prompt close at window end + grace** (not watermark close). **OPEN**: two-phase design (window end → grace → seal) so the Q4 sealed guard holds; grace value; provisional-row visibility. |
-| 50 | Strategies **may act on forming rows**. **OPEN**: in-memory per-tick forming context (fast path, ~26 ms p50) vs the stored 1 Hz forming row (~1 s stale) — if strategies read the stored row, Q22 conflicts with the 75 ms goal. |
+| 27 | **Revised (later round): keep today's watermark close** — prompt close not adopted (no two-phase flags, no grace). |
+| 50 | **Resolved: strategies act on the in-memory per-tick forming context** (~26 ms p50 path); stored forming rows (1 Hz) serve UI/dashboards/external readers. |
 
 ### Q23 load answer — per-tick emission
 
@@ -330,10 +338,13 @@ Recommendation stands: **smallest TF only** if per-tick is ever enabled.
 | 46 | No 1 s intermediate. |
 | 47 | No 1 s output TF. |
 
-### Open sub-decisions (one more round)
+### Open items — resolved (2026-09-30, later round)
 
-1. **Feature add/remove (Q1)** — confirm the MAP + registry path.
-2. **Lake split (Q11)** — one Iceberg table vs a split step.
-3. **kv.ttl (Q14)** — close as fallback/moot at merge landing.
-4. **Prompt close (Q27)** — grace + seal mechanics.
-5. **Forming strategies (Q50)** — in-memory context vs stored forming rows.
+| Item | Resolution |
+|---|---|
+| Lake (Q11) | **One lake table** (candles + features) — native tiering. |
+| Prompt close (Q27) | **Not adopted** — watermark close stays (measured ~0.9–1.3 s). |
+| Forming rows for strategies (Q50) | **In-memory per-tick context**; stored 1 Hz rows for UI/external readers. |
+| kv.ttl (Q14) | Fallback-only value; moot after the merge. |
+| Per-tick scope (Q23) | **Smallest TF only**, if ever enabled. |
+| Feature add/remove (Q1) | MAP + append-only registry path explained (one registry line + one pin line; `RETIRED` to remove) — **awaiting operator confirmation**. |
