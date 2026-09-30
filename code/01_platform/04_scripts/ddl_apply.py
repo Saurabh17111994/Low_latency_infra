@@ -316,12 +316,11 @@ def matrix_boundary(table_name):
     L848: "All DDLs have checksums and compatibility classes").
     """
     if table_name in (
-        # Multi-timeframe cutover 2026-09-05: candle_live/candle_closed are
-        # written by the Signal job's Fluss Flink connector sinks
-        # (MultiTimeframeSinks), so they ride the connector boundary — the
-        # same boundary the retired single-TF candle tables used.
-        "candle_live",
-        "candle_closed",
+        # Wave C W-C5a (2026-09-30, DEC-059): candle_features is the merged
+        # candle table written by the strategy host through the Fluss Flink
+        # connector sink, so it rides the connector boundary — the same
+        # boundary the retired candle tables used.
+        "candle_features",
         "Signal_Candidates",
         "Signal_Candidates_current",
         # Signal-job connector-written state tables (DEC-038 dedup index +

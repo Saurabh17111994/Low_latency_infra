@@ -99,7 +99,10 @@ EXPECTED_LIMITED = []
 # step 3 with the fix instead.
 # 2026-09-30: DDL 35 candle_features (Wave B/DEC-059, CHG-468) joined both
 # lists -> 28; AppliedTablesPinTest caught it in step 3 exactly as designed.
-APPLIED_TABLES = 28
+APPLIED_TABLES = 25
+# Wave C W-C5a (2026-09-30): 28 -> 25 — candle_live/candle_closed/feature_values
+# left the corpus with their DDLs (32/33/34) and tables; candle_features (35)
+# is the single candle table. See docs_audit C1/C9.
 # Real capability evidence when present (enrich_evidence just records path+sha).
 REAL_EVIDENCE = os.path.join(
     REPO_ROOT, "logs", "schema-compat", "composite-pk-raw-client-20260815.md"

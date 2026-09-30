@@ -39,14 +39,36 @@ def _columns(ddl_text: str) -> list[tuple[str, str]]:
 class CandleFeaturesDdlTest(unittest.TestCase):
     def test_merged_table_carries_the_candle_contract_plus_features_and_sealed(self) -> None:
         merged = (DDL_DIR / "35_candle_features.sql").read_text()
-        closed = (DDL_DIR / "33_candle_closed.sql").read_text()
+
+        # Wave C W-C5a (DEC-059): the old reference DDLs (32 candle_live,
+        # 33 candle_closed, 34 feature_values) were retired with their tables
+        # (dropped on dev in W-C7). The candle contract is pinned as literals
+        # here so column drift in the single surviving candle table still fails.
+        expected_candle = [
+            ("instrument_token", "BIGINT NOT NULL"),
+            ("exchange", "STRING"),
+            ("symbol", "STRING"),
+            ("tf", "STRING NOT NULL"),
+            ("window_start", "BIGINT NOT NULL"),
+            ("window_end", "BIGINT NOT NULL"),
+            ("open_paise", "BIGINT NOT NULL"),
+            ("high_paise", "BIGINT NOT NULL"),
+            ("low_paise", "BIGINT NOT NULL"),
+            ("close_paise", "BIGINT NOT NULL"),
+            ("volume", "BIGINT NOT NULL"),
+            ("tick_count", "INT NOT NULL"),
+            ("last_event_time", "BIGINT NOT NULL"),
+            ("last_event_fingerprint", "STRING"),
+            ("schema_version", "STRING NOT NULL"),
+        ]
 
         self.assertEqual("candle_features", ddl_apply.parse_table_name(merged))
-        self.assertEqual(ddl_apply.parse_primary_key(closed),
-                         ddl_apply.parse_primary_key(merged))
+        self.assertEqual(["instrument_token", "tf", "window_start"],
+                         [part.strip()
+                          for part in ddl_apply.parse_primary_key(merged).split(",")])
         self.assertEqual(
-            _columns(closed) + [("features", "MAP<INT, DOUBLE>"),
-                                ("sealed", "BOOLEAN NOT NULL")],
+            expected_candle + [("features", "MAP<INT, DOUBLE>"),
+                               ("sealed", "BOOLEAN NOT NULL")],
             _columns(merged))
 
     def test_merged_table_is_3d_and_lake_opt_in(self) -> None:

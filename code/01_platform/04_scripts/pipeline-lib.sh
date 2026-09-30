@@ -1008,8 +1008,8 @@ pipeline_purge_raw_table() {
   pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/02_raw_table_1.sql" raw
 }
 
-# Ensure the multi-timeframe candle tables exist (cutover: the strategy host
-# reads candle_live/candle_closed, DDLs 32/33). Create-if-absent, never drop.
+# Ensure the merged candle table exists (the strategy host writes candle_features,
+# DDL 35, DEC-059). Create-if-absent, never drop.
 # Uses the same create-if-absent TableEnsure pattern as pipeline_purge_table's
 # drop+recreate.
 pipeline_ensure_candle_tables() {
@@ -1159,12 +1159,11 @@ pipeline_submit_job() {
     -e EXECUTION_PARTITION_ID="${EXECUTION_PARTITION_ID:-}" \
     -e EXECUTION_PRODUCT_TYPE="${EXECUTION_PRODUCT_TYPE:-CNC}" \
     -e EXECUTION_TIME_IN_FORCE="${EXECUTION_TIME_IN_FORCE:-DAY}" \
-    -e FEATURE_LAYER_ENABLED="${FEATURE_LAYER_ENABLED:-false}" \
-    -e FEATURE_TABLE="${FEATURE_TABLE:-feature_values}" \
+    -e MERGED_CANDLE_TABLE="${MERGED_CANDLE_TABLE:-candle_features}" \
+    -e CANDLE_CONTEXT_TABLE="${CANDLE_CONTEXT_TABLE:-candle_features}" \
+    -e CANDLE_CONTEXT_SEALED_ONLY="${CANDLE_CONTEXT_SEALED_ONLY:-true}" \
     -e MULTITF_SESSION_BYPASS="${MULTITF_SESSION_BYPASS:-false}" \
     -e MULTITF_SIGNAL_CONTEXT_ENABLED="${MULTITF_SIGNAL_CONTEXT_ENABLED:-true}" \
-    -e CANDLE_LIVE_TABLE="${CANDLE_LIVE_TABLE:-candle_live}" \
-    -e CANDLE_CLOSED_TABLE="${CANDLE_CLOSED_TABLE:-candle_closed}" \
     -e MULTITF_LIVE_SNAPSHOT_INTERVAL_MS="${MULTITF_LIVE_SNAPSHOT_INTERVAL_MS:-1000}" \
     -e MULTITF_FAST_LIVE_FEED="${MULTITF_FAST_LIVE_FEED:-true}" \
     -e BUFFER_TIMEOUT_MS="${BUFFER_TIMEOUT_MS:-10}" \

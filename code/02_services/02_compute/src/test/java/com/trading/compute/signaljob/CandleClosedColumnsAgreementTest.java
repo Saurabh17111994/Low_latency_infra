@@ -1,6 +1,7 @@
 package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -15,14 +16,16 @@ import org.junit.jupiter.api.Test;
 
 /**
  * Phase 0 multi-TF aggregator contract: {@link CandleClosedColumns} must mirror
- * {@code code/01_platform/02_sql/ddl/33_candle_closed.sql} v1 (15 columns,
- * DDL order, types, nullability, PK instrument_token/tf/window_start)
- * — same pattern as {@link CandleLiveColumnsAgreementTest}.
+ * the first 15 columns of {@code code/01_platform/02_sql/ddl/35_candle_features.sql}
+ * (DDL order, types, nullability, PK instrument_token/tf/window_start) — the
+ * merged table's candle prefix. Wave C W-C5a retired DDL 32/33 with their
+ * tables, so the pin moved to the surviving DDL — same pattern as
+ * {@link CandleLiveColumnsAgreementTest}.
  */
 class CandleClosedColumnsAgreementTest {
 
     private static final Path DDL_DIR = Path.of("../../01_platform/02_sql/ddl").toAbsolutePath();
-    private static final String DDL_FILE = "33_candle_closed.sql";
+    private static final String DDL_FILE = "35_candle_features.sql";
 
     private static final Pattern COLUMN = Pattern.compile(
             "^\\s*([a-z_][a-z0-9_]*)\\s+(STRING|BIGINT|INT|BYTES|DOUBLE|FLOAT|BOOLEAN)(.*)$",
@@ -49,15 +52,16 @@ class CandleClosedColumnsAgreementTest {
     @Test
     void ddlDeclares15ColumnsInPinnedOrder() throws IOException {
         List<Column> cols = parseColumns();
-        assertEquals(CandleClosedColumns.FIELD_COUNT, cols.size());
+        assertTrue(cols.size() >= CandleClosedColumns.FIELD_COUNT,
+                "merged DDL carries the candle contract plus features + sealed");
         assertEquals(CandleClosedColumns.COLUMN_NAMES,
-                cols.stream().map(Column::name).toList());
+                cols.subList(0, CandleClosedColumns.FIELD_COUNT).stream().map(Column::name).toList());
     }
 
     @Test
     void ddlTypesMatchTypeRootsPerColumn() throws IOException {
         List<Column> cols = parseColumns();
-        for (int i = 0; i < cols.size(); i++) {
+        for (int i = 0; i < CandleClosedColumns.FIELD_COUNT; i++) {
             assertEquals(CandleClosedColumns.TYPE_ROOTS.get(i), cols.get(i).type(),
                     "column " + i + " (" + cols.get(i).name() + ") type root");
         }
@@ -66,7 +70,7 @@ class CandleClosedColumnsAgreementTest {
     @Test
     void ddlNullabilityMatchesPerColumn() throws IOException {
         List<Column> cols = parseColumns();
-        for (int i = 0; i < cols.size(); i++) {
+        for (int i = 0; i < CandleClosedColumns.FIELD_COUNT; i++) {
             assertEquals(CandleClosedColumns.COLUMN_NULLABLE_IN_DDL.get(i),
                     cols.get(i).nullableInDdl(),
                     "column " + i + " (" + cols.get(i).name() + ") nullability");
@@ -79,7 +83,7 @@ class CandleClosedColumnsAgreementTest {
         assertEquals(true, ddl.contains("PRIMARY KEY (instrument_token, tf, window_start) NOT ENFORCED"));
         assertEquals(true, ddl.contains("'bucket.key' = 'instrument_token'"));
         assertEquals(true, ddl.contains("'bucket.num' = '16'"));
-        assertEquals(true, ddl.contains("'table.log.ttl' = '7d'"));
+        assertEquals(true, ddl.contains("'table.log.ttl' = '3d'"));
         // DEC-060 (2026-09-30): the definition ships archive-off; the configured
         // archive list enables it via r2-archive-sync (the always-on policy is retired).
         assertEquals(true, ddl.contains("'table.datalake.enabled' = 'false'"));

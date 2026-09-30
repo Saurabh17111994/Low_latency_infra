@@ -163,9 +163,9 @@ class SoakO2EvidenceTest(unittest.TestCase):
         multi = payload(series([1], strategy="A"), series([999], strategy="B"))
         r = self.run_script(queue=[(multi, 200, "application/json")] * 10)
         recs = self.records(r)
-        self.assertEqual(len(recs), 20, "2 series x 10 queries")
+        self.assertEqual(len(recs), 16, "2 series x 8 queries")
         b_recs = [x for x in recs if x["series"].get("strategy") == "B"]
-        self.assertEqual([x["max"] for x in b_recs], [999.0] * 10)
+        self.assertEqual([x["max"] for x in b_recs], [999.0] * 8)
 
     def test_series_labels_are_rendered(self) -> None:  # disc
         multi = payload(series([5], strategy="A", host="h1"))
@@ -180,29 +180,29 @@ class SoakO2EvidenceTest(unittest.TestCase):
         record, so this passes on both revisions. It pins the shape."""
         r = self.run_script(queue=[(payload(), 200, "application/json")] * 10)
         recs = self.records(r)
-        self.assertEqual(len(recs), 10)
+        self.assertEqual(len(recs), 8)
         self.assertTrue(all(x["n_points"] == 0 and x["min"] is None for x in recs))
 
     # ---- P6-547: a non-JSON body is a query failure, not a crash ---------
     def test_html_error_page_does_not_abort_the_run(self) -> None:  # disc
         html = (b"<html><body>502 Bad Gateway</body></html>", 200, "text/html")
-        r = self.run_script(queue=[html] + self._ok(n=9))
+        r = self.run_script(queue=[html] + self._ok(n=7))
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertNotIn("Traceback", r.stderr)
         self.assertIn("FAILED", r.stderr)
-        # the remaining 9 queries still ran and produced records
-        self.assertEqual(len(self.records(r)), 9)
+        # the remaining 7 queries still ran and produced records
+        self.assertEqual(len(self.records(r)), 7)
 
     def test_non_utf8_body_does_not_abort_the_run(self) -> None:  # disc
         bad = (b"\xff\xfe\x00\x01not json", 200, "application/json")
-        r = self.run_script(queue=[bad] + self._ok(n=9))
+        r = self.run_script(queue=[bad] + self._ok(n=7))
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertNotIn("Traceback", r.stderr)
-        self.assertEqual(len(self.records(r)), 9)
+        self.assertEqual(len(self.records(r)), 7)
 
     def test_json_failure_is_reported_per_query(self) -> None:  # disc
         bad = (b"<html>", 200, "text/html")
-        r = self.run_script(queue=[bad] + self._ok(n=9))
+        r = self.run_script(queue=[bad] + self._ok(n=7))
         failed = [l for l in r.stderr.splitlines() if "FAILED" in l]
         self.assertEqual(len(failed), 1, r.stderr)
         self.assertIn("query session_filtered_post_close FAILED", failed[0])
@@ -282,7 +282,7 @@ class SoakO2EvidenceTest(unittest.TestCase):
     def test_baseline_fields_survive(self) -> None:
         r = self.run_script(queue=self._ok())
         recs = self.records(r)
-        self.assertEqual(len(recs), 10)
+        self.assertEqual(len(recs), 8)
         rec = recs[0]
         for key in ("soak_run", "job_id", "t_start_utc", "t_end_utc",
                     "query_name", "query", "n_points", "first", "last", "min", "max"):
@@ -295,16 +295,16 @@ class SoakO2EvidenceTest(unittest.TestCase):
     def test_one_request_per_query(self) -> None:
         r = self.run_script(queue=self._ok())
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertEqual(len(self.server.requests), 10)  # type: ignore[attr-defined]
+        self.assertEqual(len(self.server.requests), 8)  # type: ignore[attr-defined]
 
     def test_query_names_are_stable(self) -> None:
         r = self.run_script(queue=self._ok())
         names = [x["query_name"] for x in self.records(r)]
         self.assertEqual(names, [
             "session_filtered_post_close", "session_filtered_pre_open",
-            "aggregator_in_per_s", "source_in_per_s", "new_closed_sink_per_s",
-            "new_live_sink_per_s", "multitf_signal_emitted", "multitf_signal_suppressed",
-            "multitf_duplicate_window", "new_signal_sink_per_s",
+            "aggregator_in_per_s", "source_in_per_s", "candle_features_sink_per_s",
+            "multitf_signal_emitted", "multitf_signal_suppressed",
+            "new_signal_sink_per_s",
         ])
 
     def test_step_and_job_reach_the_request(self) -> None:

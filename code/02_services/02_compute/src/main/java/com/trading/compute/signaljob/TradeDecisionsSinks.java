@@ -47,7 +47,7 @@ import org.apache.fluss.flink.sink.serializer.RowDataSerializationSchema;
  * re-emitted only by a replay after checkpoint-restore, never by a second
  * publication (single-writer premise, REQ-FLS-008). The KV index is
  * therefore protected by a keyed first-write-wins filter (P4-076 — same
- * pattern as {@code MultiTimeframeClosedFirstWriteWinsFunction}): only the
+ * pattern as the retired candle first-write-wins filter): only the
  * first emission of an id reaches {@link TradeDecisionIndexMapper} and the
  * index sink; a replay after restore is dropped before it can overwrite the
  * canonical hash or {@code first_written_ts} (a divergent-hash replay would
@@ -67,7 +67,7 @@ public final class TradeDecisionsSinks {
      */
     public static void attach(DataStream<RowData> decisions, SignalJobConfig config) {
         // P2-242: wiring mistakes must fail at graph-build, not as an opaque
-        // NPE inside the builder chain (mirrors MultiTimeframeSinks).
+        // NPE inside the builder chain (mirrors the candle sinks' guard).
         Objects.requireNonNull(decisions, "decisions");
         Objects.requireNonNull(config, "config");
         // (a) immutable instruction LOG — append-only
@@ -80,7 +80,7 @@ public final class TradeDecisionsSinks {
                                 .setOption("client.request-timeout",
                                         config.sinkWriteStallTimeoutMs() + "ms")
                                 // P2-185: governed retry budget — same knob as
-                                // MultiTimeframeSinks, LOG and index stay consistent.
+                                // the candle sinks, LOG and index stay consistent.
                                 .setOption("client.writer.retries",
                                         String.valueOf(config.writerRetries()))
                                 .build())
@@ -136,7 +136,7 @@ public final class TradeDecisionsSinks {
      * REQ-FLS-008), so any re-arrival is a restore replay and must not
      * overwrite the first write. Empty input produces no elements.
      *
-     * <p>TTL/boundedness mirrors {@code MultiTimeframeClosedFirstWriteWinsFunction}:
+     * <p>TTL/boundedness mirrors the retired candle first-write-wins filter:
      * marker is {@code ValueState<Boolean>} with native {@code StateTtlConfig}
      * TTL 24 h (one trading day), {@code OnCreateAndWrite} +
      * {@code NeverReturnExpired}. State contract: exactly one Boolean per
@@ -154,8 +154,8 @@ public final class TradeDecisionsSinks {
         /**
          * Written-marker retention: one trading day. Covers restore-replay
          * lateness and same-day savepoint rollback with wide margin while
-         * bounding marker state (mirror of
-         * {@code MultiTimeframeClosedFirstWriteWinsFunction.WRITTEN_MARK_TTL}).
+         * bounding marker state (mirror of the candle filter's
+         * {@code WRITTEN_MARK_TTL}).
          * Package-visible so TTL-expiry test can advance the harness clock.
          */
         static final Duration WRITTEN_MARK_TTL = Duration.ofHours(WRITTEN_MARK_TTL_HOURS);

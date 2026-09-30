@@ -312,7 +312,9 @@ def g7c_reconcile(shortfall, candle_excess, drop_delta):
                   "equality claim)")
 
 
-# G7c parity compares candle_closed against the raw recount. The 15s family is
+# G7c parity compares candle_features against the raw recount (sealed rows
+# only: the merged table also carries the forming row of the current window).
+# The 15s family is
 # identified by WINDOW WIDTH, not by the `tf` label: tf carries an enum code
 # ("FIFTEEN_S", Timeframe.java) and a rename would silently empty the candle
 # side of the comparison - the same failure shape that made this leg read a
@@ -326,17 +328,21 @@ CANDLE_PARITY_WINDOW_MS = 15000
 
 
 def candle_parity_map(rows, window_ms=CANDLE_PARITY_WINDOW_MS):
-    """{(instrument_token, window_start): (tick_count, volume)} for one family.
+    """{(instrument_token, window_start): (tick_count, volume)} for the candle family.
 
     `rows` are dicts keyed by COLUMN NAME (FlussPrefixReader resolves names from
     the live TableInfo, P6-371), so a column reorder cannot silently shift the
     comparison the way the old index parse (f[3], f[9], f[10]) could. Rows of
-    another width are skipped; if that leaves nothing the caller's
-    g7c_measurement_guard fails on compared==0 rather than passing quietly.
+    another width are skipped; candle_features forming rows (`sealed: false`)
+    are skipped too, because only the sealed row is final; if that leaves
+    nothing the caller's g7c_measurement_guard fails on compared==0 rather than
+    passing quietly.
     """
     out = {}
     for r in rows:
         try:
+            if r.get("sealed") is False:
+                continue
             if int(r["window_end"]) - int(r["window_start"]) != window_ms:
                 continue
             out[(int(r["instrument_token"]), int(r["window_start"]))] = (
@@ -364,7 +370,7 @@ def g7c_measurement_guard(raw_read_ok, compared, candle_read_ok=True):
     if not raw_read_ok:
         return "G7c: raw recount unavailable — parity proof was not evaluated"
     if not candle_read_ok:
-        return ("G7c: candle_closed read failed — the parity proof was not "
+        return ("G7c: candle_features read failed — the parity proof was not "
                 "evaluated (a failed read must never read as 'no candles')")
     if compared == 0:
         return ("G7c: zero fully-closed (token,window) pairs compared — "
@@ -614,7 +620,7 @@ def collect_rows_stream(table, cp, out_dir, run_ms=30000, mode="offset"):
     return rows_path
 
 
-def read_candle_closed_rows(cp, out_dir, tokens, table="candle_closed",
+def read_candle_features_rows(cp, out_dir, tokens, table="candle_features",
                             bootstrap="localhost:9123", timeout_s=900):
     """Read every row of a KV candle table via fluss-probes/FlussPrefixReader.
 
@@ -645,7 +651,7 @@ def read_candle_closed_rows(cp, out_dir, tokens, table="candle_closed",
         return [], False
     tokens_csv = ",".join(str(t) for t in sorted(tokens))
     if not tokens_csv:
-        print("!! G7c: the raw recount yielded no token, so candle_closed "
+        print("!! G7c: the raw recount yielded no token, so candle_features "
               "cannot be read by prefix lookup")
         return [], False
     rows_path = os.path.join(out_dir, f"latency-{table}.jsonl")
@@ -722,15 +728,15 @@ def main():
 
     # ---- previews: UNAVAILABLE after the 2026-09-05 multi-timeframe cutover ----
     # The preview table (feature_candles_15s_preview, DDL 30) was retired with the
-    # candle-era schema, and its replacements (candle_live/candle_closed, DDLs
-    # 32/33) carry no landing-timestamp column (candle-era output_ts is gone), so
+    # candle-era schema, and its replacement (candle_features, DDL 35, DEC-059)
+    # carries no landing-timestamp column (candle-era output_ts is gone), so
     # preview write latency is not observable from the catalog at all. Report the
     # leg as unavailable instead of reading a dropped table — the dead read also
     # burned the reader's missing-table timeout on every drill run.
     prev_rows = []
     unavailable.append(
         "G6: preview latency leg — feature_candles_15s_preview retired "
-        "(DDL 30, 2026-09-05) and candle_live/candle_closed carry no landing "
+        "(DDL 30, 2026-09-05) and candle_features carries no landing "
         "timestamp (output_ts), so preview write latency cannot be measured")
     # Row (v2): (token,NSE,symbol,window_start,window_end,o,h,l,c,vol,tick_count,
     #            is_preview,output_ts,last_event_ts,ver)
@@ -782,20 +788,20 @@ def main():
           f"p95={fmt_ms(pct(freshness,95))} p99={fmt_ms(pct(freshness,99))} (n={len(freshness)})")
 
     # ---- Final candle path: the LATENCY leg only ----
-    # PARITY is measured from candle_closed near the raw recount (the live table
-    # carries tick_count + volume per (token, tf, window_start)). Only the
-    # LATENCY leg stays unavailable: the candle-era feature_candles_15s (DDL 03)
-    # that carried output_ts is gone and candle_closed (DDL 33) has window_end
-    # but no write timestamp, so "window-close → committed" cannot be computed
-    # from the catalog. Keep it fail-closed (never invent a number) rather than
-    # reading a dropped table; reviving it needs a landing-timestamp column or a
-    # redefined metric — its own change, falsified on a live drill.
+    # PARITY is measured from candle_features sealed rows near the raw recount
+    # (the table carries tick_count + volume per (token, tf, window_start)). Only
+    # the LATENCY leg stays unavailable: the candle-era feature_candles_15s
+    # (DDL 03) that carried output_ts is gone and candle_features (DDL 35) has
+    # window_end but no write timestamp, so "window-close → committed" cannot be
+    # computed from the catalog. Keep it fail-closed (never invent a number)
+    # rather than reading a dropped table; reviving it needs a landing-timestamp
+    # column or a redefined metric — its own change, falsified on a live drill.
     final_rows = []
     unavailable.append(
-        "G7c: final-candle latency leg — candle_closed (DDL 33) carries "
+        "G7c: final-candle latency leg — candle_features (DDL 35) carries "
         "window_end but no write timestamp (feature_candles_15s and its "
         "output_ts retired, DDL 03, 2026-09-05), so window-close → committed "
-        "is not observable (parity IS measured, from candle_closed)")
+        "is not observable (parity IS measured, from candle_features)")
     final_rows = list(dict.fromkeys(final_rows))  # same re-delivery dedupe
     close_lat = []
     for ln in final_rows:
@@ -1717,16 +1723,17 @@ def main():
             f"replayed frames?)")
 
     # final candles per (token, ws): tick_count + volume, read from
-    # candle_closed. The table is KV (PK token,tf,window_start), so the raw
+    # candle_features (sealed rows; forming rows are filtered out by
+    # candle_parity_map). The table is KV (PK token,tf,window_start), so the raw
     # path's log reader cannot see it - this uses the prefix reader, and the
     # candle side is keyed by COLUMN NAME so a reorder cannot shift it.
     candle_rows, candle_read_ok = [], False
     if raw_read_ok:
-        candle_rows, candle_read_ok = read_candle_closed_rows(
+        candle_rows, candle_read_ok = read_candle_features_rows(
             cp, out_dir, {tok for (tok, _ws) in win_ticks})
     final_by_key = candle_parity_map(candle_rows) if candle_read_ok else {}
     print(f"- G7c candle side: {len(final_by_key)} closed "
-          f"{CANDLE_PARITY_WINDOW_MS // 1000}s candle(s) from candle_closed "
+          f"{CANDLE_PARITY_WINDOW_MS // 1000}s candle(s) from candle_features "
           f"(read_ok={candle_read_ok}, {len(candle_rows)} raw row(s))")
 
     # compare fully-closed windows inside the run window (module-level

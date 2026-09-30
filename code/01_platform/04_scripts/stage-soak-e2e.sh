@@ -123,20 +123,15 @@ echo "SOAK-E2E: loadgen image fresh (stamp ${LIB_LOADGEN_STAMP:0:12})"
 pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/02_raw_table_1.sql" raw || fatal "raw purge failed"
 pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/05_signal_candidates.sql" signals || fatal "signal purge failed"
 pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/27_execution_intent.sql" intents || fatal "intent purge failed"
-# Cutover (2026-09-05): the job preflights + writes candle_live/candle_closed.
-# PURGE both (drop+recreate): they are LOG-append tables, so a run that only
-# "ensures" accumulates every prior run's rows. The old-chain tables (03
-# feature_candles_15s, 30 preview, 04 forming_bar, 31 tentative markers) are
-# deleted — the job no longer reads or writes them, so no purge remains.
+# Wave C W-C5a (2026-09-30): the job preflights + writes the merged
+# candle_features table (DEC-059). PURGE (drop+recreate): rows accumulate per
+# window, so a run that only "ensures" carries every prior run's rows. The
+# legacy candle_live/candle_closed tables and their DDLs (32/33) are retired.
 if [ "${MULTITF_ENABLED:-false}" = "true" ]; then
-  pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" candle_closed \
-    || fatal "candle_closed purge failed"
-  pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/32_candle_live.sql" candle_live \
-    || fatal "candle_live purge failed"
-  pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/32_candle_live.sql" "candle_live" \
-    || fatal "candle_live ensure failed"
-  pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" "candle_closed" \
-    || fatal "candle_closed ensure failed"
+  pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/35_candle_features.sql" candle_features \
+    || fatal "candle_features purge failed"
+  pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/35_candle_features.sql" "candle_features" \
+    || fatal "candle_features ensure failed"
 fi
 # --- feed: 1 faketool + 3 ingestions x PER_SLICE ---
 head -1 "$NSE" | grep -q "OptionType" || fatal "wrong universe file (missing OptionType column): $NSE"

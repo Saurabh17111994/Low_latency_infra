@@ -60,12 +60,14 @@ public final class EodControllerTool {
      * iceberg manifest is VERIFIED; otherwise the controller extends retention
      * via one {@code table.log.ttl} ALTER and fires a critical alert.
      *
-     * <p>{@code candle_closed} (DDL 33) replaced the retired
-     * {@code feature_candles_15s} in the default scope (multi-timeframe
-     * cutover 2026-09-05) — same 7d TTL and same EOD Iceberg offload contract.
+     * <p>{@code candle_features} (DDL 35, Wave C W-C5a 2026-09-30) succeeded
+     * the retired {@code candle_closed} (DDL 33) in the default scope — the
+     * merged candle+feature history table carries the archived candle chain
+     * (DEC-059); its DDL ships a 3d log TTL, with the controller's TTL option
+     * as the retention lever.
      */
     static final List<String> DEFAULT_TABLES = List.of(
-            "raw_table_1", "candle_closed", "ingestion_quarantine",
+            "raw_table_1", "candle_features", "ingestion_quarantine",
             "Order_Lifecycle", "suspected_discontinuities", "Postback_Quarantine",
             "Trade_Decisions", "Ranking_Results", "Portfolio_Reservations",
             "Postback_Projection_Ledger");

@@ -222,7 +222,7 @@ def test_probe_db_table_params(tmp_path):
     assert any("mydb myraw" in l for l in lag), lines
     assert not any("default raw_table_1" in l for l in lag), lines
     kv = [l for l in lines if "FlussKvProbe" in l]
-    assert kv and any("candle_live" in l for l in kv), lines
+    assert kv and any("candle_features" in l for l in kv), lines
 
 
 def test_probe_hang_bounded(tmp_path):

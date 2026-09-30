@@ -140,8 +140,6 @@ public final class ConfigKeys {
     public static final String N7_RULE_ID = "N7_RULE_ID";
     public static final String STRATEGY_HOST_ENABLED = "STRATEGY_HOST_ENABLED";
     public static final String STRATEGIES = "STRATEGIES";
-    public static final String CANDLE_LIVE_TABLE = "CANDLE_LIVE_TABLE";
-    public static final String CANDLE_CLOSED_TABLE = "CANDLE_CLOSED_TABLE";
     // 2026-09-26 S5→S6 latency workstream (native fetch/flush tuning).
     public static final String FLUSS_SCANNER_FETCH_MAX_BYTES =
             "FLUSS_SCANNER_FETCH_MAX_BYTES";

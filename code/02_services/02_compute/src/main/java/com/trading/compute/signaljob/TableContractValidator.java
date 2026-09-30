@@ -11,11 +11,10 @@ import org.apache.fluss.metadata.TableInfo;
  * deployed tables match the contracts the write paths rely on.
  *
  * <ul>
- *   <li>{@code candle_live} / {@code candle_closed} — the multi-timeframe
- *       candle KV tables (DDL 32/33, cutover 2026-09-05; contracts pinned by
- *       {@code CandleLiveColumns} / {@code CandleClosedColumns}, P4-334):
- *       exact per-table column schema and bucket routing, enforced by
- *       {@code validateCandleLiveTable} / {@code validateCandleClosedTable}.</li>
+ *   <li>{@code candle_features} — the merged candle+feature KV table
+ *       (DDL 35, DEC-059; contract pinned by
+ *       {@code MergedCandleFeaturesColumns}): exact 17-column schema and
+ *       bucket routing, enforced by {@code validateMergedCandleTable}.</li>
  *   <li>{@code Signal_Candidates} — immutable signal LOG (DEC-035, v3):
  *       <b>no</b> primary key, bucket.key exactly {@code instrument_token},
  *       16 buckets, exact 22-column schema.</li>
@@ -59,8 +58,6 @@ public final class TableContractValidator {
     private static final String EXECUTION_INTENT_CONTRACT =
             "REQ-EXE-004, EXECUTION-INTENT-SCHEMA-001";
     private static final String DEDUP_CONTRACT = "DEC-038, DEDUP-SCHEMA-001";
-    private static final String MULTITF_CANDLE_CONTRACT =
-            "2026-09-05 multi-TF aggregator Phase 0, CANDLE-MULTITF-001";
     private static final String MERGED_CANDLE_CONTRACT =
             "DEC-059, MERGED-CANDLE-FEATURES-SCHEMA-001";
 
@@ -146,54 +143,12 @@ public final class TableContractValidator {
     }
 
     /**
-     * Candle live KV (multi-TF aggregator Phase 0, 2026-09-05): PK exactly
-     * [instrument_token, tf, window_start], instrument_token routing, exact
-     * 15-column v1 schema. Ephemeral live snapshots overwritten every 1s;
-     * history lives in {@code candle_closed} (7d). Not wired into
-     * {@code SignalJob#preflightTableContracts} until Phase 4.
-     */
-    public static void validateCandleLiveTable(TableInfo info) {
-        List<String> expectedPk = List.of(
-                CandleLiveColumns.COLUMN_NAMES.get(CandleLiveColumns.INSTRUMENT_TOKEN),
-                CandleLiveColumns.COLUMN_NAMES.get(CandleLiveColumns.TF),
-                CandleLiveColumns.COLUMN_NAMES.get(CandleLiveColumns.WINDOW_START));
-        requireExactPrimaryKey(info, expectedPk, MULTITF_CANDLE_CONTRACT);
-        validateSchema(info, CandleLiveColumns.COLUMN_NAMES,
-                CandleLiveColumns.TYPE_ROOTS, "15-column v1 candle_live",
-                MULTITF_CANDLE_CONTRACT);
-        validateRouting(info,
-                CandleLiveColumns.COLUMN_NAMES.get(CandleLiveColumns.INSTRUMENT_TOKEN),
-                16, MULTITF_CANDLE_CONTRACT);
-    }
-
-    /**
-     * Candle closed KV (multi-TF aggregator Phase 0, 2026-09-05): PK exactly
-     * [instrument_token, tf, window_start], instrument_token routing, exact
-     * 15-column v1 schema. Immutable closed history, first-write-wins;
-     * Iceberg offloaded (7d, 5min freshness, auto-compaction). Wired into
-     * {@code SignalJob#preflightTableContracts} behind MULTITF_ENABLED.
-     */
-    public static void validateCandleClosedTable(TableInfo info) {
-        List<String> expectedPk = List.of(
-                CandleClosedColumns.COLUMN_NAMES.get(CandleClosedColumns.INSTRUMENT_TOKEN),
-                CandleClosedColumns.COLUMN_NAMES.get(CandleClosedColumns.TF),
-                CandleClosedColumns.COLUMN_NAMES.get(CandleClosedColumns.WINDOW_START));
-        requireExactPrimaryKey(info, expectedPk, MULTITF_CANDLE_CONTRACT);
-        validateSchema(info, CandleClosedColumns.COLUMN_NAMES,
-                CandleClosedColumns.TYPE_ROOTS, "15-column v1 candle_closed",
-                MULTITF_CANDLE_CONTRACT);
-        validateRouting(info,
-                CandleClosedColumns.COLUMN_NAMES.get(CandleClosedColumns.INSTRUMENT_TOKEN),
-                16, MULTITF_CANDLE_CONTRACT);
-    }
-
-    /**
      * Merged candle+feature KV (Wave B/DEC-059, DDL 35): PK exactly
      * [instrument_token, tf, window_start], instrument_token routing, exact
      * 17-column schema — {@code candle_closed}'s 15 columns + features
      * MAP&lt;INT, DOUBLE&gt; + sealed. Wired into
-     * {@code SignalJob#preflightTableContracts} whenever the merged writer or
-     * the sealed-only context reader touches it (Wave C W-C3).
+     * {@code SignalJob#preflightTableContracts} as the only candle table
+     * (Wave C W-C5a).
      */
     public static void validateMergedCandleTable(TableInfo info) {
         List<String> expectedPk = List.of(

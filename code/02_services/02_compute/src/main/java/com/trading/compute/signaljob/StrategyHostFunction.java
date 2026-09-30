@@ -103,9 +103,8 @@ public class StrategyHostFunction
     /**
      * Wave B (DEC-059): side output of merged {@code candle_features} rows —
      * a forming row ({@code sealed=false}) per live cadence and the final
-     * sealed row at close. Wired to the merged sink in {@code SignalJob} only
-     * when {@code MERGED_CANDLE_FEATURES_ENABLED=true}; the host is the ONLY
-     * writer.
+     * sealed row at close. Wired unconditionally to the merged sink in
+     * {@code SignalJob}; the host is the ONLY candle writer (DEC-059).
      */
     public static final OutputTag<RowData> MERGED_ROWS =
             new OutputTag<RowData>("merged-candle-rows") {};
@@ -115,9 +114,6 @@ public class StrategyHostFunction
 
     /** Job config handed to strategy constructors (rule identity, quantities). */
     private final SignalJobConfig config;
-
-    /** Wave B (DEC-059): true when the host emits {@link #MERGED_ROWS}. */
-    private final boolean mergedRowsEnabled;
 
     /**
      * C1 test seam: builds the context provider. {@code null} (production)
@@ -197,7 +193,6 @@ public class StrategyHostFunction
             ContextProviderFactory providerFactory) {
         this.config = Preconditions.checkNotNull(config, "config");
         this.strategyIds = List.copyOf(Preconditions.checkNotNull(strategyIds, "strategyIds"));
-        this.mergedRowsEnabled = config.mergedCandleFeaturesEnabled();
         this.providerFactory = providerFactory;
     }
 
@@ -261,7 +256,7 @@ public class StrategyHostFunction
             pendingLiveSnapshot = new HashMap<>();
             LOG.info("strategy-host: context provider ready (table={}, cacheBytes={}, "
                             + "maxInflight={}, fetchTimeoutMs={})",
-                    config.candleClosedTable(), config.contextCacheBytes(),
+                    config.candleContextTable(), config.contextCacheBytes(),
                     config.contextMaxInflight(), config.contextFetchTimeoutMs());
         } else {
             contextView = ContextView.disabled();
@@ -305,11 +300,9 @@ public class StrategyHostFunction
         // DEC-056: features update before the fan-out so every strategy reads the
         // fresh value; a failing feature update is counted, never blocks delivery.
         updateFeaturesOnTick(slot, live, evtTime);
-        if (mergedRowsEnabled) {
-            // Wave B (DEC-059): forming-row upsert on the live cadence. Emitted
-            // before the fan-out so a failing strategy cannot skip it.
-            emitMergedRow(ctx, slot, live, false);
-        }
+        // Wave B (DEC-059): forming-row upsert on the live cadence. Emitted
+        // before the fan-out so a failing strategy cannot skip it.
+        emitMergedRow(ctx, slot, live, false);
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: one strategy must not starve the others — isolate,
             // count, and continue to the next strategy.
@@ -336,11 +329,9 @@ public class StrategyHostFunction
         }
         // DEC-056: close features update before the fan-out (same contract as the tick path).
         updateFeaturesOnClose(slot, closed);
-        if (mergedRowsEnabled) {
-            // Wave B (DEC-059): the final sealed write — the terminal row of
-            // this window (late ticks can never rewrite it).
-            emitMergedRow(ctx, slot, closed, true);
-        }
+        // Wave B (DEC-059): the final sealed write — the terminal row of
+        // this window (late ticks can never rewrite it).
+        emitMergedRow(ctx, slot, closed, true);
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: same isolation on the closed path.
             try {

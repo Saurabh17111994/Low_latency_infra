@@ -54,16 +54,16 @@ OUT_DIR="${OUT_DIR:-logs/tracker-14/stage-capture-$(date +%Y%m%d-%H%M%S)}"
 INGESTION_JAVA_OUT="${INGESTION_JAVA_OUT:-}"
 FLUSS_PROBE_CP="${FLUSS_PROBE_CP:-}"       # classpath for FlussReadLagProbe/FlussKvProbe
 FLUSS_PROBE_DIR="${FLUSS_PROBE_DIR:-$SCRIPT_DIR/fluss-probes}"
-PROBE_TABLE="${PROBE_TABLE:-candle_live}"
-PROBE_CLOSED_TABLE="${PROBE_CLOSED_TABLE:-candle_closed}"
+PROBE_TABLE="${PROBE_TABLE:-candle_features}"
+PROBE_CLOSED_TABLE="${PROBE_CLOSED_TABLE:-candle_features}"
 PROBE_DB="${PROBE_DB:-default}"
 PROBE_RAW_TABLE="${PROBE_RAW_TABLE:-raw_table_1}"
 PROBE_TOKENS="${PROBE_TOKENS:-4,7,13,17,19}"
 PROBE_BOOTSTRAP="${PROBE_BOOTSTRAP:-localhost:9123}"
 
 # CHG-461 readability + state-growth facility (2026-09-30). The readability
-# probe is long-lived (tail candle_closed/feature_values at sub-ms resolution,
-# point-sample candle_live per timeframe); the state sampler records
+# probe is long-lived (tail candle_features sealed rows at sub-ms resolution,
+# point-sample candle_features per timeframe); the state sampler records
 # changelog/RocksDB/tablet bytes and per-table row counts on a slower cadence
 # so a latency round sees a small, fixed measurement duty cycle instead of a
 # per-tick disk traversal.
@@ -72,9 +72,9 @@ READ_PROBE_BUCKETS="${READ_PROBE_BUCKETS:-0,1}"               # of 16 per the DD
 READ_PROBE_LIVE_MS="${READ_PROBE_LIVE_MS:-1000}"              # live-sweep cadence
 STATE_SAMPLE_EVERY_TICKS="${STATE_SAMPLE_EVERY_TICKS:-3}"     # 5s tick -> 15s state rows
 STATE_TABLET_EVERY="${STATE_TABLET_EVERY:-2}"                 # tablet du every 2nd state sample
-STATE_TABLES="${STATE_TABLES:-candle_live,candle_closed,feature_values,Signal_Candidates,Signal_Candidates_current}"
+STATE_TABLES="${STATE_TABLES:-candle_features,Signal_Candidates,Signal_Candidates_current}"
 STATE_TF_CENSUS_EVERY="${STATE_TF_CENSUS_EVERY:-1}"           # every state sample -> per-TF KV census (smoke #3 ran once in 200s at 4)
-STATE_TF_TABLES="${STATE_TF_TABLES:-candle_live}"             # TTL-bounded tables whose CURRENT rows per TF matter
+STATE_TF_TABLES="${STATE_TF_TABLES:-candle_features}"        # TTL-bounded tables whose CURRENT rows per TF matter
 TM_CONTAINER_FILTER="${TM_CONTAINER_FILTER:-flink-taskmanager}"
 TABLET_CONTAINER_FILTER="${TABLET_CONTAINER_FILTER:-fluss-tablet}"
 
@@ -243,7 +243,7 @@ echo -e "epoch_ms\tmetric\tpresent" > "$OUT_DIR/metric-availability.tsv"
   [ -n "$FLUSS_PROBE_CP" ] && echo "featureread.tsv"
   [ -n "$FLUSS_PROBE_CP" ] && echo "state-growth.tsv"
   # CHG-461 per-timeframe state: cumulative rows/bytes from the readability
-  # probe's tails (all buckets) + the periodic candle_live KV census.
+  # probe's tails (all buckets) + the periodic candle_features KV census.
   [ -n "$FLUSS_PROBE_CP" ] && echo "state-tf.tsv"
   [ -n "$FLUSS_PROBE_CP" ] && echo "state-tf-live.tsv"
 } > "$OUT_DIR/.expected-outputs"
@@ -498,7 +498,7 @@ PYEOF
   #                    ALWAYS present=no for a SignalJob capture; they are kept
   #                    so the availability record states that rather than
   #                    implying this capture should have measured them.
-  custom_names="compute.dedup.first,compute.dedup.duplicates,compute.invalid.rows,compute.invalid.byReason,compute.startup.mode,compute.signal.kv.filtered.noncanonical,compute.latency.ingest_to_monitor,compute.candles.emitted,compute.candles.late.dropped,compute.candles.gap.detected,compute.candles.live.emitted,compute.candles.restored_timer_noop,compute.candles.multitf.duplicate_window,compute.session.filtered.pre_open,compute.session.filtered.post_close,compute.execution_intent.rejected,compute.latency.tick_to_intent,compute.latency.signal_to_intent,babysitter.positions.applied,babysitter.positions.conflict,babysitter.positions.duplicate,babysitter.positions.observed,babysitter.positions.stale,babysitter.positions.latest_observed_version,rows.malformed,rows.skipped,transitions.applied"
+  custom_names="compute.dedup.first,compute.dedup.duplicates,compute.invalid.rows,compute.invalid.byReason,compute.startup.mode,compute.signal.kv.filtered.noncanonical,compute.latency.ingest_to_monitor,compute.candles.emitted,compute.candles.late.dropped,compute.candles.gap.detected,compute.candles.live.emitted,compute.candles.restored_timer_noop,compute.session.filtered.pre_open,compute.session.filtered.post_close,compute.execution_intent.rejected,compute.latency.tick_to_intent,compute.latency.signal_to_intent,babysitter.positions.applied,babysitter.positions.conflict,babysitter.positions.duplicate,babysitter.positions.observed,babysitter.positions.stale,babysitter.positions.latest_observed_version,rows.malformed,rows.skipped,transitions.applied"
   local epoch_ms
   epoch_ms="$(date +%s%3N)"
   local names_file="$OUT_DIR/.vertex-names.tsv"
@@ -710,7 +710,7 @@ sample_probes() {
     FlussKvProbe "$PROBE_TABLE" 15000 "$PROBE_TOKENS" "$PROBE_BOOTSTRAP" \
     >> "$OUT_DIR/consumer-read.tsv" 2>"$OUT_DIR/probe-consumer.err" || echo "!! WARN: FlussKvProbe failed this tick (see $OUT_DIR/probe-consumer.err)" >&2
   # Probe 3: CLOSED candle table (CP9->CP10 for the closed leg).
-  # Same lookups against candle_closed. FlussKvProbe resolves window_end and
+  # Same lookups against candle_features (sealed rows). FlussKvProbe resolves window_end and
   # last_event_time BY NAME from the live table schema (wave 13, P6-371), so a
   # reordered table fails loudly instead of reading whatever sits at index 5/12.
   # A partial sample (some tokens failed or missed) exits 3 and is warned below;
@@ -775,11 +775,11 @@ sample_state_growth() {
       done >> "$OUT_DIR/state-growth.tsv" \
       || echo "!! WARN: state-growth: FlussTableStatsProbe failed this tick (see $OUT_DIR/probe-table-stats.err)" >&2
   fi
-  # CHG-461 per-timeframe state: candle_live's CURRENT rows per TF via a KV
+  # CHG-461 per-timeframe state: candle_features' CURRENT rows per TF via a KV
   # snapshot scan (TTL-bounded, so the scan stays small) every
   # STATE_TF_CENSUS_EVERY state samples. Rows are exact; bytes stay -1 (the
   # snapshot row API carries no size). The tail-based per-TF state for
-  # candle_closed/feature_values is written by the readability probe itself
+  # candle_features is written by the readability probe itself
   # (all buckets counted, latency logging stays sampled).
   if [ -n "$FLUSS_PROBE_CP" ] && [ -n "$STATE_TF_TABLES" ] \
       && [ "${STATE_TF_CENSUS_EVERY:-1}" -gt 0 ] \

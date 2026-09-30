@@ -379,7 +379,7 @@ class RolloutHarness(unittest.TestCase):
             # drop them, so a rollout silently reverted those flags).
             "multi-TF env forwarded": 'MULTITF_ENABLED MULTITF_SESSION_BYPASS MULTITF_SIGNAL_CONTEXT_ENABLED',
             "strategy env forwarded": 'STRATEGY_HOST_ENABLED STRATEGIES',
-            "feature env forwarded": 'FEATURE_LAYER_ENABLED FEATURE_TABLE',
+            "candle table env forwarded": 'MERGED_CANDLE_TABLE CANDLE_CONTEXT_TABLE CANDLE_CONTEXT_SEALED_ONLY',
             "execution identity forwarded": 'ACCOUNT_SCOPE_ID EXECUTION_PARTITION_ID EXECUTION_PRODUCT_TYPE',
             # CT-4A (2026-09-29): the changelog state backend flag must survive
             # a savepoint rollout both directions (enable on restore, disable

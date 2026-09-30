@@ -59,24 +59,21 @@ import org.apache.fluss.row.InternalRow;
  * sawtooth when a slow live sweep shared the loop with the scanners,
  * 2026-09-30):
  * <ul>
- *   <li><b>live</b> — KV point lookups of {@code candle_live} for every
+ *   <li><b>live</b> — KV point lookups of {@code candle_features} for every
  *       timeframe of a small token sample. All current-window lookups are
  *       issued as one fan-out and then collected (one RTT round, P6-086
  *       discipline); only the misses get a second fan-out against the
  *       previous window. {@code staleness_ms = read_ts - last_event_time} =
  *       how old the freshest tick visible in the live row is.
- *   <li><b>closed</b> — log tail of {@code candle_closed}, subscribed to ALL
- *       buckets from the CURRENT log end (fallback: from beginning with an
- *       age filter when listOffsets(latest) fails). One row per
- *       {@code (token, tf, window_start)} first sighting **on the latency
+ *   <li><b>closed</b> — log tail of {@code candle_features} SEALED rows,
+ *       subscribed to ALL buckets from the CURRENT log end (fallback: from
+ *       beginning with an age filter when listOffsets(latest) fails); one row
+ *       per {@code (token, tf, window_start)} first sighting **on the latency
  *       sample buckets** ({@code buckets_csv}, default 0,1);
  *       {@code latency_ms = read_ts - window_end} = window close -> readable.
- *   <li><b>features</b> — log tail of {@code feature_values} (no window_end
- *       column: derived as {@code window_start + tf length} — the exact
- *       expression MultiTimeframeAggregateFunction uses for emitted rows);
- *       same latency definition, plus the feature-id list carried by the row
- *       so the report can break down per registered feature id (0 last_price,
- *       1 sma_close_20, 2 rsi_close_14).
+ *   <li><b>features</b> — the same sealed-row tail with the feature-id list
+ *       carried by the row so the report can break down per registered
+ *       feature id (0 last_price, 1 sma_close_20, 2 rsi_close_14).
  * </ul>
  *
  * <p>State leg: the same two tails count EVERY record they see — per timeframe,
@@ -200,10 +197,10 @@ public final class FlussReadabilityProbe {
         try (Connection conn = ConnectionFactory.createConnection(conf);
                 Admin admin = conn.getAdmin()) {
             LiveSampler live = LiveSampler.open(conn, tokens, liveIntervalMs, liveOut);
-            Tail closed = Tail.open(conn, admin, "candle_closed", bucketsRaw, startedMs, closedOut, false);
-            Tail features = Tail.open(conn, admin, "feature_values", bucketsRaw, startedMs, featureOut, true);
+            Tail closed = Tail.open(conn, admin, "candle_features", bucketsRaw, startedMs, closedOut, false);
+            Tail features = Tail.open(conn, admin, "candle_features", bucketsRaw, startedMs, featureOut, true);
             TfSnapshotter snapshotter = new TfSnapshotter(
-                    stateOut, List.of(closed, features), startedMs);
+                    stateOut, List.of(features), startedMs);
 
             // One thread per leg: a record's read timestamp must never wait on
             // another leg's RPC, and the state snapshot must never stall the
@@ -291,12 +288,12 @@ public final class FlussReadabilityProbe {
 
         static LiveSampler open(Connection conn, List<Long> tokens, long intervalMs, Writer out)
                 throws Exception {
-            Table table = conn.getTable(TablePath.of("default", "candle_live"));
+            Table table = conn.getTable(TablePath.of("default", "candle_features"));
             List<String> names = table.getTableInfo().getSchema().getRowType().getFieldNames();
             int windowEndIdx = names.indexOf("window_end");
             int lastEventIdx = names.indexOf("last_event_time");
             if (windowEndIdx < 0 || lastEventIdx < 0) {
-                throw new InputException("candle_live has no window_end/last_event_time column"
+                throw new InputException("candle_features has no window_end/last_event_time column"
                         + " (columns: " + names + ")");
             }
             return new LiveSampler(table.newLookup().createLookuper(), windowEndIdx, lastEventIdx,
@@ -483,18 +480,20 @@ public final class FlussReadabilityProbe {
         private final int tfIdx;
         private final int windowStartIdx;
         private final int featuresIdx;
+        private final int sealedIdx;
         private final long startedMs;
         private final Set<Integer> latencyBuckets;
         private final Set<String> seen = new HashSet<>();
         private volatile long emitted;
         private long skippedOld;
+        private long skippedForming;
         /** Per-timeframe state counters (index = TF_ORDER position). */
         final AtomicLongArray rowsByTf = new AtomicLongArray(TF_ORDER.size());
         final AtomicLongArray bytesByTf = new AtomicLongArray(TF_ORDER.size());
 
         private Tail(String name, Table table, LogScanner scanner, Writer out, boolean featureTable,
-                int tokenIdx, int tfIdx, int windowStartIdx, int featuresIdx, long startedMs,
-                Set<Integer> latencyBuckets) {
+                int tokenIdx, int tfIdx, int windowStartIdx, int featuresIdx, int sealedIdx,
+                long startedMs, Set<Integer> latencyBuckets) {
             this.name = name;
             this.table = table;
             this.scanner = scanner;
@@ -504,6 +503,7 @@ public final class FlussReadabilityProbe {
             this.tfIdx = tfIdx;
             this.windowStartIdx = windowStartIdx;
             this.featuresIdx = featuresIdx;
+            this.sealedIdx = sealedIdx;
             this.startedMs = startedMs;
             this.latencyBuckets = latencyBuckets;
         }
@@ -518,6 +518,7 @@ public final class FlussReadabilityProbe {
             int tfIdx = names.indexOf("tf");
             int windowStartIdx = names.indexOf("window_start");
             int featuresIdx = featureTable ? names.indexOf("features") : -1;
+            int sealedIdx = names.indexOf("sealed");
             if (tokenIdx < 0 || tfIdx < 0 || windowStartIdx < 0 || (featureTable && featuresIdx < 0)) {
                 throw new InputException(tableName + " schema lacks expected columns (columns: "
                         + names + ")");
@@ -551,7 +552,8 @@ public final class FlussReadabilityProbe {
             System.out.println("FLUSS-READABILITY tail " + tableName + " buckets=ALL"
                     + " latency_sample=" + latency);
             return new Tail(tableName, table, scanner, out, featureTable,
-                    tokenIdx, tfIdx, windowStartIdx, featuresIdx, startedMs, new HashSet<>(latency));
+                    tokenIdx, tfIdx, windowStartIdx, featuresIdx, sealedIdx, startedMs,
+                    new HashSet<>(latency));
         }
 
         void runUntil(long deadlineMs) {
@@ -610,6 +612,12 @@ public final class FlussReadabilityProbe {
             // State counters: every record, every bucket, before any sampling.
             rowsByTf.incrementAndGet(tfIndex);
             bytesByTf.addAndGet(tfIndex, rec.getSizeInBytes());
+            // Wave C W-C5a: candle_features carries forming rows too — the
+            // close-read latency is a SEALED-row measure only.
+            if (sealedIdx >= 0 && !row.getBoolean(sealedIdx)) {
+                skippedForming++;
+                return 0;
+            }
             if (!latencyBuckets.contains(bucket)) {
                 return 0;
             }
@@ -643,6 +651,10 @@ public final class FlussReadabilityProbe {
             if (skippedOld > 0) {
                 System.err.println("FlussReadabilityProbe: " + name + " skipped " + skippedOld
                         + " replayed row(s) older than the age filter");
+            }
+            if (skippedForming > 0) {
+                System.err.println("FlussReadabilityProbe: " + name + " skipped " + skippedForming
+                        + " forming (unsealed) row(s)");
             }
             scanner.close();
             table.close();

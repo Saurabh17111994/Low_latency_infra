@@ -1,9 +1,7 @@
 # Wave C — merged candle+feature cutover (readers switch, legacy tables dropped)
 
 **Date:** 2026-09-30
-**Status:** **scope doc — awaiting operator approval** (per the wave protocol).
-Operator said to tackle the cutover (DEC-059's remaining step); this doc fixes the
-code map, slices, tests and decisions before any production-code edit.
+**Status:** **executing — W-C5a landed (`CHG-482`): decommission complete; scoped checks green (compute 627/0/20, common 769, pytest full green, docs-audit clean except the post-commit CHG-349/350 annotations); the single full `make gate` is the certifying run (D3 revised 2026-09-30).**
 
 **Constraints**
 - DEC-059: one writer (the strategy host), merged KV `candle_features`; DEC-060:
@@ -31,8 +29,14 @@ merged-only writes proven live: `candle_features` +57,263 while
 hits / 23,959 forming-absents; 32/0 checkpoints; stack reverted) ·
 **W-C7 landed** (`CHG-481`: the three legacy tables dropped from dev —
 list/drop/readback through the confirm-gated probe, tool `d23e01ad` + 11 runner
-tests; `candle_features` still live and growing) · **W-C5a + the single full
-gate pending**.
+tests; `candle_features` still live and growing) · **W-C5a landed** (`CHG-482`:
+the decommission — legacy sinks/flags/validators/columns classes deleted,
+DDLs 32/33/34 + manifest 25 tables, bootstrap registry rows removed, defaults
+flipped to `candle_features` + sealed-only, ops surface migrated
+(probes/tools/panels/env/runbooks), docs updated; scoped checks: compute
+627/0/20, common 769/0, pytest full green, docs-audit clean except the
+CHG-349/350 post-commit annotations) · **the single full gate pending** (the
+certifying run).
 
 **Cadence (revised 2026-09-30, operator):** scoped checks per slice; **one full
 `make gate` at the cutover** (W-C5a certifying run) and one final full run after

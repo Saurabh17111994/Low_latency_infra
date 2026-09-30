@@ -12,7 +12,7 @@ class EodControllerToolTest {
     @Test
     void defaultScopeIsTheDocumentedTenTables() {
         assertThat(EodControllerTool.DEFAULT_TABLES).hasSize(10)
-                .contains("raw_table_1", "candle_closed", "Trade_Decisions");
+                .contains("raw_table_1", "candle_features", "Trade_Decisions");
     }
 
     @Test

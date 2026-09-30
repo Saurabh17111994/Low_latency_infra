@@ -1207,8 +1207,7 @@ class TestCandlePathIsWired(Wave36Case):
                                    "INGESTION_STARTED"))]
         self.assertEqual(
             order,
-            ["PURGE_TABLE=candle_closed", "PURGE_TABLE=candle_live",
-             "ENSURE_TABLE=candle_live", "ENSURE_TABLE=candle_closed",
+            ["PURGE_TABLE=candle_features", "ENSURE_TABLE=candle_features",
              "INGESTION_STARTED"],
             "candle-table provisioning must run, in this order, before "
             "ingestion starts:\n" + res.stderr[-2000:])

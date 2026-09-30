@@ -35,9 +35,10 @@ import org.slf4j.LoggerFactory;
  * <p>Topology: {@code raw_table_1} (Fluss LOG source, full offsets) → raw
  * schema/validity gate → state-authoritative fingerprint dedup →
  * multi-timeframe aggregator (per-trade OHLCV forming rings for 15s/30s/1m/
- * 3m/5m/15m) → {@code candle_live} (Fluss KV evolving snapshots) +
- * {@code candle_closed} (Fluss KV immutable closed history) → strategy host
- * (config-driven strategies; N7 range-breakout first) → signal dual-sink
+ * 3m/5m/15m) → strategy host (config-driven strategies; N7 range-breakout
+ * first) — the host is the ONLY candle writer, upserting the merged
+ * {@code candle_features} KV table (forming + sealed rows, DEC-059) →
+ * signal dual-sink
  * (DEC-035): {@code Signal_Candidates} (Fluss LOG append, every signal) and
  * {@code Signal_Candidates_current} (Fluss KV upsert behind the
  * canonical-signal filter). Business Logic operator internals (candidate
@@ -68,9 +69,9 @@ public final class SignalJob {
         // P2-071 (sibling of the JobGraphDump instance): never log the whole
         // config record — record toString() prints s3AccessKey/s3SecretKey.
         LOG.info("signal-job: starting compute path (startupMode={} parallelism={} backend={} "
-                        + "liveTable={} closedTable={} signalTables={}/{})",
+                        + "candleTable={} signalTables={}/{})",
                 config.startupMode(), config.parallelism(), config.stateBackend(),
-                config.candleLiveTable(), config.candleClosedTable(),
+                config.mergedCandleTable(),
                 config.signalCandidatesTable(), config.signalCurrentTable());
         run(config);
     }
@@ -141,33 +142,6 @@ public final class SignalJob {
         return mode == SignalJobConfig.StartupMode.FULL_REPLAY
                 ? OffsetsInitializer.full()
                 : OffsetsInitializer.latest();
-    }
-
-    /**
-     * Wave C W-C2 (docs/plans/2026-09-30-wave-c-merged-cutover.md): with the
-     * legacy candle sinks disabled, route the branch through a stateless drop
-     * filter named {@code uid} instead of removing it — the downstream sink
-     * operators (including the keyed first-write-wins state) stay in the graph,
-     * so checkpoint-restore anchors hold and rollback is a flag flip. Enabled:
-     * the stream is returned unchanged (graph byte-identical to pre-cutover).
-     */
-    private static DataStream<RowData> legacySinkBranch(
-            DataStream<RowData> stream, boolean enabled, String uid) {
-        if (enabled) {
-            return stream;
-        }
-        return stream.filter(row -> false).name(uid).uid(uid);
-    }
-
-    /**
-     * Wave C W-C3: the merged candle_features table is preflight-validated
-     * whenever the merged writer persists to it or the sealed-only context
-     * reader reads it; every other combination keeps the pre-Wave-C
-     * validation set unchanged.
-     */
-    static boolean mergedCandleTableInUse(SignalJobConfig config) {
-        return config.mergedCandleFeaturesEnabled()
-                || config.mergedCandleTable().equals(config.candleContextTable());
     }
 
     public static StreamExecutionEnvironment buildTopology(SignalJobConfig config) {
@@ -330,18 +304,11 @@ public final class SignalJob {
             multiTfClosed = aggregator;
             multiTfLive = aggregator.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TAG);
 
-            // Closed rows: first-write-wins filter + KV sink. Wave C W-C2:
-            // LEGACY_CANDLE_SINKS_ENABLED=false gates the branch (guard filter)
-            // while the sink operators stay in the graph for restore anchors.
-            MultiTimeframeSinks.sinkClosed(
-                    legacySinkBranch(multiTfClosed, config.legacyCandleSinksEnabled(),
-                            "candle-closed-legacy-guard"),
-                    config, config.candleClosedTable());
-            // Live rows: KV upsert sink (1s overwrite)
-            MultiTimeframeSinks.sinkLive(
-                    legacySinkBranch(multiTfLive, config.legacyCandleSinksEnabled(),
-                            "candle-live-legacy-guard"),
-                    config, config.candleLiveTable());
+            // Wave C W-C5a (DEC-059 end state): the legacy candle sinks are
+            // retired — the host is the ONLY candle writer (merged side output
+            // below). Removing their operators also removes the keyed
+            // first-write-wins state; a pre-cutover checkpoint no longer
+            // restores (fail closed) — dev restarts fresh.
 
             // N7 retired (2026-09-05 cutover, batch 2): the range-breakout
             // rule runs ONLY as a host strategy (N7RangeBreakoutStrategy,
@@ -377,27 +344,24 @@ public final class SignalJob {
                         .uid("strategy-host-v1");
                 strategySignals = hostOutput;
 
-                // Wave B (DEC-059): the merged candle+feature table — ONE
-                // writer (the host): forming upserts on the live cadence +
-                // sealed rows at close. Off by default; the old candle/feature
-                // sinks stay authoritative until the operator opens the cutover.
-                if (config.mergedCandleFeaturesEnabled()) {
-                    hostOutput
-                            .getSideOutput(StrategyHostFunction.MERGED_ROWS)
-                            .sinkTo(FlussSink.<RowData>builder()
-                                    .setBootstrapServers(config.bootstrapServers())
-                                    .setDatabase(config.database())
-                                    .setTable(config.mergedCandleTable())
-                                    .setSerializationSchema(
-                                            new RowDataSerializationSchema(false, false))
-                                    .setOption("client.request-timeout",
-                                            config.sinkWriteStallTimeoutMs() + "ms")
-                                    .setOption("client.writer.retries",
-                                            String.valueOf(config.writerRetries()))
-                                    .build())
-                            .name("candle-features-sink")
-                            .uid("candle-features-sink-v1");
-                }
+                // Wave C W-C5a (DEC-059 end state): the merged candle+feature
+                // table is THE candle table — ONE writer (the host): forming
+                // upserts on the live cadence + sealed rows at close.
+                hostOutput
+                        .getSideOutput(StrategyHostFunction.MERGED_ROWS)
+                        .sinkTo(FlussSink.<RowData>builder()
+                                .setBootstrapServers(config.bootstrapServers())
+                                .setDatabase(config.database())
+                                .setTable(config.mergedCandleTable())
+                                .setSerializationSchema(
+                                        new RowDataSerializationSchema(false, false))
+                                .setOption("client.request-timeout",
+                                        config.sinkWriteStallTimeoutMs() + "ms")
+                                .setOption("client.writer.retries",
+                                        String.valueOf(config.writerRetries()))
+                                .build())
+                        .name("candle-features-sink")
+                        .uid("candle-features-sink-v1");
 
                 strategySignals
                         .sinkTo(FlussSink.<RowData>builder()
@@ -791,39 +755,18 @@ public final class SignalJob {
                     .getTableInfo();
             TableContractValidator.validateSignalCurrentKvTable(signalCurrent);
             if (config.multiTfEnabled()) {
-                org.apache.fluss.metadata.TableInfo candleLive = conn
+                // Wave C W-C5a: candle_features is the only candle table —
+                // validated fail-closed before the graph is built.
+                org.apache.fluss.metadata.TableInfo merged = conn
                         .getTable(org.apache.fluss.metadata.TablePath.of(
-                                config.database(), config.candleLiveTable()))
+                                config.database(), config.mergedCandleTable()))
                         .getTableInfo();
-                TableContractValidator.validateCandleLiveTable(candleLive);
-                org.apache.fluss.metadata.TableInfo candleClosed = conn
-                        .getTable(org.apache.fluss.metadata.TablePath.of(
-                                config.database(), config.candleClosedTable()))
-                        .getTableInfo();
-                TableContractValidator.validateCandleClosedTable(candleClosed);
-                LOG.info("signal-job: candle_live contract OK ({})", config.candleLiveTable());
+                TableContractValidator.validateMergedCandleTable(merged);
+                LOG.info("signal-job: candle_features contract OK ({})",
+                        config.mergedCandleTable());
                 LOG.info("signal-job: {}",
                         TableContractValidator.schemaReport(
-                                candleLive, CandleLiveColumns.COLUMN_NULLABLE_IN_DDL));
-                LOG.info("signal-job: candle_closed contract OK ({})", config.candleClosedTable());
-                LOG.info("signal-job: {}",
-                        TableContractValidator.schemaReport(
-                                candleClosed, CandleClosedColumns.COLUMN_NULLABLE_IN_DDL));
-                // Wave C W-C3 (docs/plans/2026-09-30-wave-c-merged-cutover.md):
-                // the merged table is validated whenever the merged writer
-                // persists to it or the sealed-only context reader reads it.
-                if (mergedCandleTableInUse(config)) {
-                    org.apache.fluss.metadata.TableInfo merged = conn
-                            .getTable(org.apache.fluss.metadata.TablePath.of(
-                                    config.database(), config.mergedCandleTable()))
-                            .getTableInfo();
-                    TableContractValidator.validateMergedCandleTable(merged);
-                    LOG.info("signal-job: candle_features contract OK ({})",
-                            config.mergedCandleTable());
-                    LOG.info("signal-job: {}",
-                            TableContractValidator.schemaReport(
-                                    merged, MergedCandleFeaturesColumns.COLUMN_NULLABLE_IN_DDL));
-                }
+                                merged, MergedCandleFeaturesColumns.COLUMN_NULLABLE_IN_DDL));
             }
             if (config.executionIntentEnabled()) {
                 org.apache.fluss.metadata.TableInfo executionIntent = conn

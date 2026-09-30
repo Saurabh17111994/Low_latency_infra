@@ -100,13 +100,15 @@ class SchemaComplianceFullSuiteTest {
         .isTrue();
     SchemaManifest manifest =
         new ObjectMapper().readValue(Files.readAllBytes(manifestPath), SchemaManifest.class);
-    // 28 since CHG-468 added DDL 35 candle_features (Wave B/DEC-059, a
-    // sanctioned unapplied proposal) to the manifest AND the ddl/ enumeration;
-    // 27 held since CHG-349 added DDL 34 feature_values; 26 held since
+    // 25 since Wave C W-C5a (DEC-059, 2026-09-30): candle_live, candle_closed
+    // and feature_values left the corpus with their tables (dropped on dev in
+    // W-C7); DDL 35 candle_features is the single candle table. 28 held since
+    // CHG-468 added DDL 35 (Wave B, a sanctioned unapplied proposal at the
+    // time); 27 held since CHG-349 added DDL 34 feature_values; 26 held since
     // e75f92bc retired the parked fingerprint_dedup DDL. Kept explicit rather
     // than derived, so an unintended addition or removal fails here instead of
     // silently moving the target.
-    assertThat(manifest.tables).hasSize(28);
+    assertThat(manifest.tables).hasSize(25);
     Map<String, String> boundaries = new HashMap<>();
     for (SchemaManifestEntry e : manifest.tables) {
       assertThat(e.ddlSha256).as(e.tableName + " ddl_sha256").isNotBlank();

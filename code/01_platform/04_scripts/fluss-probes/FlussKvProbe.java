@@ -26,8 +26,9 @@ import java.util.concurrent.TimeUnit;
  * event committed at last_event_time. window_end is the STATIC event-time
  * boundary of the sampled window (kept in the TSV shape so downstream
  * parsers keep working); last_event_time is the freshness signal (the
- * freshest raw event folded into the row). For candle_live rows emit ~1/s
- * per key, so staleness tracks emit cadence + read path. For candle_closed
+ * freshest raw event folded into the row). For candle_features rows emit at
+ * tick cadence while forming and settle once when sealed; for a sealed row
+ * staleness is the age of the last sealed window, i.e. read cadence only —
  * the probe reports the freshest CLOSED row's age the read path can see.
  * Same synthetic-clock caveat as before: the feed clock may run ahead of
  * wall, so small negative values can appear; a large positive value is
@@ -83,7 +84,7 @@ public class FlussKvProbe {
     }
 
     static int run(String[] args) throws Exception {
-        String table = args.length > 0 ? args[0] : "candle_live";
+        String table = args.length > 0 ? args[0] : "candle_features";
         long windowMs = args.length > 1 ? parsePositive(args[1], "window_ms") : 15000L;
         String tokensRaw = args.length > 2 ? args[2] : "4,7,13,17,19";
         String bootstrap = args.length > 3 ? args[3] : "localhost:9123";

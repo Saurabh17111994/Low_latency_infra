@@ -193,7 +193,7 @@ public final class DdlBootstrap {
      * built yet; {@code ensureTables} must never bootstrap-create those —
      * their creation is the offline DDL gate's job (schema reconciliation is
      * owned by {@code ddl_apply.py} / {@code schema_manifest.json}). The
-     * compute tables ({@code candle_live}, {@code candle_closed}, {@code
+     * compute tables ({@code candle_features}, {@code
      * Signal_Candidates}, {@code
      * Signal_Candidates_current}, …) are
      * provisioned out-of-band; this method only ever creates
@@ -464,64 +464,6 @@ public final class DdlBootstrap {
             .build();
 
     /**
-     * Full 15-column KV schema for candle_live matching DDL 32
-     * (32_candle_live.sql, schema v1): PK (instrument_token, tf,
-     * window_start) — live per-timeframe snapshots, upserted every 1s by the
-     * compute job's MultiTfAggregatorFunction; rows auto-expire via the 60s
-     * log TTL. Columns mirror
-     * {@code com.trading.compute.signaljob.CandleLiveColumns} — the shared
-     * contract the live sink serializes against. Registry-only
-     * (compute-owned, A4.4): existence-checked, never bootstrap-created.
-     */
-    private static final Schema CANDLE_LIVE_SCHEMA = Schema.newBuilder()
-            .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("exchange", org.apache.fluss.types.DataTypes.STRING())
-            .column("symbol", org.apache.fluss.types.DataTypes.STRING())
-            .column("tf", org.apache.fluss.types.DataTypes.STRING())
-            .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("window_end", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("open_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("high_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("low_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("close_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("volume", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("tick_count", org.apache.fluss.types.DataTypes.INT())
-            .column("last_event_time", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("last_event_fingerprint", org.apache.fluss.types.DataTypes.STRING())
-            .column("schema_version", org.apache.fluss.types.DataTypes.STRING())
-            .primaryKey("instrument_token", "tf", "window_start")
-            .build();
-
-    /**
-     * Full 15-column KV schema for candle_closed matching DDL 33
-     * (33_candle_closed.sql, schema v1): PK (instrument_token, tf,
-     * window_start) — immutable closed history, one row per non-empty bucket
-     * per timeframe per instrument, first-write-wins. Same 15 columns as
-     * candle_live in identical DDL order. Columns mirror
-     * {@code com.trading.compute.signaljob.CandleClosedColumns}.
-     * Registry-only (compute-owned, A4.4): existence-checked, never
-     * bootstrap-created.
-     */
-    private static final Schema CANDLE_CLOSED_SCHEMA = Schema.newBuilder()
-            .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("exchange", org.apache.fluss.types.DataTypes.STRING())
-            .column("symbol", org.apache.fluss.types.DataTypes.STRING())
-            .column("tf", org.apache.fluss.types.DataTypes.STRING())
-            .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("window_end", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("open_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("high_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("low_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("close_paise", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("volume", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("tick_count", org.apache.fluss.types.DataTypes.INT())
-            .column("last_event_time", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("last_event_fingerprint", org.apache.fluss.types.DataTypes.STRING())
-            .column("schema_version", org.apache.fluss.types.DataTypes.STRING())
-            .primaryKey("instrument_token", "tf", "window_start")
-            .build();
-
-    /**
      * Full 17-column KV schema for candle_features matching DDL 35
      * (35_candle_features.sql, Wave B/DEC-059): candle_closed's 15 columns +
      * features MAP<INT,DOUBLE> (DEC-057 append-only registry ids) +
@@ -548,25 +490,6 @@ public final class DdlBootstrap {
                     org.apache.fluss.types.DataTypes.INT(),
                     org.apache.fluss.types.DataTypes.DOUBLE()))
             .column("sealed", org.apache.fluss.types.DataTypes.BOOLEAN())
-            .primaryKey("instrument_token", "tf", "window_start")
-            .build();
-
-    /**
-     * Full 4-column KV schema for feature_values matching DDL 34
-     * (34_feature_values.sql, feature layer DEC-056/DEC-057): PK
-     * (instrument_token, tf, window_start); {@code features} is
-     * MAP&lt;INT, DOUBLE&gt; keyed by the append-only registry feature id.
-     * Columns mirror {@code com.trading.compute.signaljob.FeatureValuesColumns}
-     * — the shared contract the feature sink serializes against. Registry-only
-     * (compute-owned, A4.4): existence-checked, never bootstrap-created.
-     */
-    private static final Schema FEATURE_VALUES_SCHEMA = Schema.newBuilder()
-            .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("tf", org.apache.fluss.types.DataTypes.STRING())
-            .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
-            .column("features", org.apache.fluss.types.DataTypes.MAP(
-                    org.apache.fluss.types.DataTypes.INT(),
-                    org.apache.fluss.types.DataTypes.DOUBLE()))
             .primaryKey("instrument_token", "tf", "window_start")
             .build();
 
@@ -625,38 +548,9 @@ public final class DdlBootstrap {
                                     .property("table.datalake.freshness", "5min")
                                     .property("table.datalake.auto-compaction", "true")
                                     .build()),
-                    Map.entry("candle_live",
-                            TableDescriptor.builder()
-                                    .schema(CANDLE_LIVE_SCHEMA)
-                                    .distributedBy(16, "instrument_token")
-                                    .property("table.log.ttl", "60s")
-                                    .property("table.datalake.enabled", "false")
-                                    .property("table.kv.format-version", "2")
-                                    .build()),
-                    Map.entry("candle_closed",
-                            TableDescriptor.builder()
-                                    .schema(CANDLE_CLOSED_SCHEMA)
-                                    .distributedBy(16, "instrument_token")
-                                    .property("table.log.ttl", "7d")
-                                    // DEC-060 (2026-09-30): opt-in per table
-                                    // (r2-archive-sync enables the configured list).
-                                    .property("table.datalake.enabled", "false")
-                                    .property("table.datalake.format", "iceberg")
-                                    .property("table.datalake.freshness", "5min")
-                                    .property("table.datalake.auto-compaction", "true")
-                                    .property("table.kv.format-version", "2")
-                                    .build()),
-                    // Feature layer (DDL 34 proposal, DEC-056/DEC-057): the
-                    // strategy host writes one row per (instrument, tf, window);
-                    // registry-only like the other compute-owned tables.
-                    Map.entry("feature_values",
-                            TableDescriptor.builder()
-                                    .schema(FEATURE_VALUES_SCHEMA)
-                                    .distributedBy(16, "instrument_token")
-                                    .property("table.log.ttl", "7d")
-                                    .property("table.kv.format-version", "2")
-                                    .property("table.datalake.enabled", "false")
-                                    .build()),
+                    // Wave C W-C5a (DEC-059 end state): the merged table is the
+                    // only candle table — candle_live, candle_closed and
+                    // feature_values are retired (dropped on dev in W-C7).
                     // Wave B (DDL 35 proposal, DEC-059): the strategy host is
                     // the only writer (forming rows + the terminal sealed row);
                     // registry-only like the other compute-owned tables.

@@ -30,7 +30,7 @@ import org.apache.fluss.utils.CloseableIterator;
  * (Wave B/DEC-059, CHG-474; same route CHG-350 used for feature_values).
  *
  * <p>Creates the {@code candle_features} table with the exact DDL 35 (proposal) shape — KV,
- * PK {@code (instrument_token, tf, window_start)}, candle_closed's 15 columns +
+ * PK {@code (instrument_token, tf, window_start)}, the candle contract's 15 columns +
  * {@code features MAP<INT, DOUBLE>} + {@code sealed BOOLEAN}, 16 buckets routed by
  * {@code instrument_token}, 3d log TTL, lake OFF — and reads it back for evidence. The DDL
  * file stays an unapplied proposal; this probe exists only because the operator chose the
@@ -49,7 +49,7 @@ public final class CandleFeaturesTableProbe {
 
     private static final long TIMEOUT_MS = 60_000L;
     private static final Duration POLL_TIMEOUT = Duration.ofSeconds(15);
-    /** DDL 35 index order: candle_closed's 15 columns, then features, then sealed. */
+    /** DDL 35 index order: the candle contract's 15 columns, then features, then sealed. */
     private static final int TF_FIELD = 3;
     private static final int WINDOW_START_FIELD = 4;
     private static final int CLOSE_FIELD = 9;

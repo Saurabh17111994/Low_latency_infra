@@ -16,8 +16,8 @@
 #     FAILED_RETRYABLE and exits non-zero — never VERIFIED.
 #   - A second mock run for an already-VERIFIED day is a no-op (DAYS=0).
 #   - extend/reconcile on a clean or fully-VERIFIED state exit 0.
-#   - EOD protection targets the durable closed-candle table `candle_closed`
-#     (7d TTL, DDL 33). The retired 15s preview table (60s TTL) that used to
+#   - EOD protection targets the durable candle table `candle_features`
+#     (3d TTL, DDL 35, DEC-059). The retired 15s preview table (60s TTL) that used to
 #     exercise the EXTENSION_REQUIRED path is gone (2026-09-05 cutover).
 #
 # Env: EOD_TEST_PHASE=guards|smoke|main|all (default all)
@@ -38,7 +38,7 @@ RUN_DATE="${RUN_DATE:-$(TZ=Asia/Kolkata date +%F)}"
 EOD_TEST_PHASE="${EOD_TEST_PHASE:-all}"
 EOD_SMOKE_S="${EOD_SMOKE_S:-120}"
 EOD_MAIN_S="${EOD_MAIN_S:-600}"
-EOD_TABLES="candle_closed"   # 7d TTL durable closed-candle table (see header note)
+EOD_TABLES="candle_features"   # 3d TTL durable candle table (see header note)
 
 pass=0; fail=0
 FIXTURE_DIRS=()      # P6-362: mktemp dirs to remove on any exit path

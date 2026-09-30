@@ -29,7 +29,7 @@ import org.apache.fluss.utils.CloseableIterator;
  *
  * <p>Mode {@code tf-census}: a KV snapshot scan of every bucket, counting
  * CURRENT stored rows per timeframe — the per-timeframe state of a table whose
- * row count is TTL-bounded (candle_live), where the log-record count from
+ * row count is TTL-bounded (candle_features), where the log-record count from
  * {@code getTableStats} cannot show the live-state size.
  *
  * <pre>

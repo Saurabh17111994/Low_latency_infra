@@ -60,12 +60,20 @@ class SignalHarnessContractTest {
     // SIG-INT-001: pinned Fluss source/sink boundary — single-VM Fluss 0.9.1 endpoints
     @Test
     void sigInt001_pinnedFlussSourceSinkBoundary() {
-        // Live canon after the multi-timeframe cutover (2026-09-05): the retired
-        // single-TF candle KV and forming_bar KV are gone; the signal job writes
-        // candle_live (KV) and candle_closed (KV).
-        assertEquals("candle_live", MultiTimeframeSinks.DEFAULT_LIVE_TABLE);
-        assertEquals("candle_closed", MultiTimeframeSinks.DEFAULT_CLOSED_TABLE);
-        // Source is raw_table_1 LOG, sink is candle_live KV — never swapped.
-        assertNotEquals("raw_table_1", MultiTimeframeSinks.DEFAULT_LIVE_TABLE);
+        // Wave C W-C5a (DEC-059): the merged candle_features KV is the only
+        // candle table the signal job writes; the legacy candle KV pair was
+        // dropped on dev in W-C7.
+        java.util.Map<String, String> env = new java.util.HashMap<>();
+        env.put("DEDUP_WINDOW_ENTRIES", "200");
+        env.put("CANDLE_WINDOW_MS", "15000");
+        env.put("CHECKPOINT_INTERVAL_MS", "10000");
+        env.put("CHECKPOINT_TIMEOUT_MS", "30000");
+        env.put("MAX_CONCURRENT_CHECKPOINTS", "1");
+        env.put("ALLOW_FULL_REPLAY", "true");
+        SignalJobConfig cfg = SignalJobConfig.from(env);
+        assertEquals("candle_features", cfg.mergedCandleTable());
+        assertEquals("candle_features", cfg.candleContextTable());
+        // Source is raw_table_1 LOG, sink is candle_features KV — never swapped.
+        assertNotEquals("raw_table_1", cfg.mergedCandleTable());
     }
 }

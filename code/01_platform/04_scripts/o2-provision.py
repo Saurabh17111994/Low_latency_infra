@@ -378,19 +378,19 @@ DASHBOARDS = [
     },
     {
         "title": "COMPUTE - Candle Health",
-        "description": "Candle KV sink health (user requirement 2026-08-13: candle tables are KV-only, no LOG+KV twin — the LOG-vs-KV divergence view was removed with the KV twin). Upserts = candle_closed sink numRecordsIn (one upsert per closed window).",
+        "description": "Candle KV sink health (user requirement 2026-08-13: candle tables are KV-only, no LOG+KV twin — the LOG-vs-KV divergence view was removed with the KV twin). Upserts = candle_features sink numRecordsIn (one upsert per row update: forming + sealed windows, DEC-059 merged table).",
         "folder": "COMPUTE",
         "panels": [
             (
                 "Candle sink upserts (total)",
                 "promql",
-                'max(flink_taskmanager_job_task_numrecordsin{task_name="candle_closed_sink:_Writer"})',
+                'max(flink_taskmanager_job_task_numrecordsin{task_name="candle_features_sink:_Writer"})',
                 "flink_taskmanager_job_task_numrecordsin",
             ),
             (
                 "Candle sink rate (upserts/s)",
                 "promql",
-                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_closed_sink:_Writer"})',
+                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_features_sink:_Writer"})',
                 "flink_taskmanager_job_task_numrecordsinpersecond",
             ),
             (
@@ -615,7 +615,7 @@ DASHBOARDS = [
             (
                 "Branch throughput old vs new (records/s)",
                 "promql",
-                'sum by (task_name) (flink_taskmanager_job_task_numrecordsinpersecond{task_name=~"multi_tf_aggregator|candle_closed_sink:_Writer|candle_live_sink:_Writer|strategy_host_candidates_current_sink:_Writer"})',
+                'sum by (task_name) (flink_taskmanager_job_task_numrecordsinpersecond{task_name=~"multi_tf_aggregator|candle_features_sink:_Writer|strategy_host_candidates_current_sink:_Writer"})',
                 "flink_taskmanager_job_task_numrecordsinpersecond",
             ),
             (
@@ -637,15 +637,9 @@ DASHBOARDS = [
                 "flink_taskmanager_job_task_operator_compute_session_filtered_pre_open",
             ),
             (
-                "New closed-sink rate (upserts/s)",
+                "Merged candle-sink rate (upserts/s)",
                 "promql",
-                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_closed_sink:_Writer"})',
-                "flink_taskmanager_job_task_numrecordsinpersecond",
-            ),
-            (
-                "New live-sink rate (upserts/s)",
-                "promql",
-                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_live_sink:_Writer"})',
+                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_features_sink:_Writer"})',
                 "flink_taskmanager_job_task_numrecordsinpersecond",
             ),
             (
@@ -665,12 +659,6 @@ DASHBOARDS = [
                 "promql",
                 'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="strategy_host_candidates_current_sink:_Writer"})',
                 "flink_taskmanager_job_task_numrecordsinpersecond",
-            ),
-            (
-                "Duplicate-window guard hits (cumulative)",
-                "promql",
-                "max(flink_taskmanager_job_task_operator_compute_candles_multitf_duplicate_window)",
-                "flink_taskmanager_job_task_operator_compute_candles_multitf_duplicate_window",
             ),
         ],
     },
@@ -797,7 +785,7 @@ DASHBOARDS = [
             (
                 "New candles flowing? (0 = nothing coming)",
                 "promql",
-                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_closed_sink:_Writer"})',
+                'max(flink_taskmanager_job_task_numrecordsinpersecond{task_name="candle_features_sink:_Writer"})',
                 "flink_taskmanager_job_task_numrecordsinpersecond",
                 "upserts/s",
                 ">0 = fresh candles landing in the store.",
@@ -1090,7 +1078,7 @@ ALERTS = [
         name="SIGNAL-warn-candle-sink-zero",
         stream="flink_taskmanager_job_task_numrecordsinpersecond",
         conditions=[
-            ("task_name", "=", "candle_closed_sink:_Writer"),
+            ("task_name", "=", "candle_features_sink:_Writer"),
             ("value", "=", 0),
         ],
         period=2,

@@ -152,7 +152,7 @@ public class CandleVerify {
                             + a.tradeRows + "\t" + a.sumDeltaAll + "\t" + a.sumLastQtyAll + "\t" + a.rows);
                 }
             }
-            Lookuper lookuper = conn.getTable(TablePath.of("default", "candle_closed"))
+            Lookuper lookuper = conn.getTable(TablePath.of("default", "candle_features"))
                     .newLookup().createLookuper();
             int judged = 0;
             int matched = 0;
@@ -180,7 +180,12 @@ public class CandleVerify {
                     continue;
                 }
                 InternalRow candle = res == null ? null : res.getSingletonRow();
-                if (candle == null) {
+                // Wave C W-C5a: candle_features carries forming rows too — a
+                // verdict needs the terminal SEALED row, so an unsealed row
+                // counts as absent (the job has not closed the window yet).
+                boolean sealedRow = candle != null
+                        && candle.getBoolean(col("sealed", "candle_features"));
+                if (candle == null || !sealedRow) {
                     absent++;
                     // Distinguishes "the candle table has no row" from "this window
                     // had no trade at all, so there was nothing to open a candle
@@ -192,11 +197,11 @@ public class CandleVerify {
                     absentAge[(int) Math.min(periods, 16)]++;
                     continue;
                 }
-                int volumeIdx = col("volume", "candle_closed");
-                int tickCountIdx = col("tick_count", "candle_closed");
-                int highIdx = col("high_paise", "candle_closed");
+                int volumeIdx = col("volume", "candle_features");
+                int tickCountIdx = col("tick_count", "candle_features");
+                int highIdx = col("high_paise", "candle_features");
                 long candleVolume = candle.getLong(volumeIdx);
-                int lowIdx = col("low_paise", "candle_closed");
+                int lowIdx = col("low_paise", "candle_features");
                 int candleTicks = candle.getInt(tickCountIdx);
                 long candleHigh = candle.getLong(highIdx);
                 boolean ok = candleVolume == e.getValue().sumDeltaTrade;
@@ -252,11 +257,14 @@ public class CandleVerify {
 
     private static int col(String name, String table) {
         if (!RawTableSchema.TABLE.equals(table)) {
-            // candle_closed lives in its own DDL; resolve by reading the table's own schema
-            // is not available here, so the indices are pinned by the DDL order instead.
+            // candle_features lives in its own DDL; resolving by reading the
+            // table's own schema is not available here, so the indices are
+            // pinned by the DDL order instead (DDL 35: the 15 candle columns +
+            // features + sealed).
             String[] candleCols = {"instrument_token", "exchange", "symbol", "tf", "window_start",
                     "window_end", "open_paise", "high_paise", "low_paise", "close_paise", "volume",
-                    "tick_count", "last_event_time", "last_event_fingerprint"};
+                    "tick_count", "last_event_time", "last_event_fingerprint", "schema_version",
+                    "features", "sealed"};
             for (int i = 0; i < candleCols.length; i++) {
                 if (candleCols[i].equals(name)) {
                     return i;

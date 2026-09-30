@@ -131,34 +131,14 @@ class DdlBootstrapSchemaAgreementTest {
     @DisplayName("compute tables are never owned by the ingestion bootstrap (A4.4)")
     void computeTablesAreNotOwned() {
         for (String computeTable : List.of(
-                "candle_live", "candle_closed",
+                "candle_features",
                 "Signal_Candidates", "Signal_Candidates_current",
-                "feature_values",
                 "Ranking_Results", "Trade_Decisions",
                 "Portfolio_Reservations")) {
             assertFalse(DdlBootstrap.ownedTables().contains(computeTable),
                     computeTable + " is a compute-owned table — DdlBootstrap must not own it "
                             + "(A4.4, CANDLE-KV-REPLAY-001 P4)");
         }
-    }
-
-    @Test
-    @DisplayName("feature_values is registry-only and matches DDL 34 (CHG-349/CHG-358)")
-    void featureValuesRegistryMatchesDdl() throws IOException {
-        TableDescriptor featureValues = DdlBootstrap.tableRegistry().get("feature_values");
-        assertNotNull(featureValues,
-                "registry must carry the compute-owned feature_values entry (DDL 34)");
-        assertEquals(4, featureValues.getSchema().getColumns().size(),
-                "feature_values schema must declare instrument_token/tf/window_start/features");
-        assertEquals(List.of("instrument_token", "tf", "window_start"),
-                featureValues.getSchema().getPrimaryKeyColumnNames(),
-                "feature_values PK must be exactly (instrument_token, tf, window_start)");
-        assertEquals(List.of("instrument_token"), featureValues.getBucketKeys(),
-                "feature_values must be distributed by instrument_token");
-        assertEquals(4, parseColumns(readDdl(ddlFileFor("feature_values"))).size(),
-                "in-code schema must match DDL 34's column count");
-        assertFalse(DdlBootstrap.ownedTables().contains("feature_values"),
-                "feature_values is compute-owned — ensureTables must never create it (A4.4)");
     }
 
     @Test
@@ -181,24 +161,24 @@ class DdlBootstrapSchemaAgreementTest {
     }
 
     @Test
-    @DisplayName("retired candle/forming-bar entries are gone; candle_live carries the real schema")
+    @DisplayName("retired candle/feature entries are gone; candle_features carries the real schema")
     void candleRegistryEntriesUseRealSchemas() {
         for (String retired : List.of("feature_candles_15s", "feature_candles_15s_preview",
-                "feature_candles_15s_current", "forming_bar")) {
+                "feature_candles_15s_current", "forming_bar",
+                "candle_live", "candle_closed", "feature_values")) {
             assertFalse(DdlBootstrap.tableRegistry().containsKey(retired),
                     "registry must NOT contain " + retired + " — retired by the multi-timeframe "
-                            + "cutover (2026-09-05); candle_live/candle_closed are the live tables");
+                            + "cutover (2026-09-05) or the Wave C W-C5a decommission "
+                            + "(2026-09-30, DEC-059); candle_features is the live candle table");
         }
-        TableDescriptor live = DdlBootstrap.tableRegistry().get("candle_live");
-        assertNotNull(live, "registry missing candle_live");
+        TableDescriptor merged = DdlBootstrap.tableRegistry().get("candle_features");
+        assertNotNull(merged, "registry missing candle_features");
         assertEquals(List.of("instrument_token", "tf", "window_start"),
-                live.getSchema().getPrimaryKeyColumnNames(),
-                "candle_live PK must be exactly (instrument_token, tf, window_start)");
+                merged.getSchema().getPrimaryKeyColumnNames(),
+                "candle_features PK must be exactly (instrument_token, tf, window_start)");
         assertEquals(List.of("instrument_token"),
-                live.getBucketKeys(),
-                "candle_live must be distributed by instrument_token (per-ticker colocation)");
-        assertNotNull(DdlBootstrap.tableRegistry().get("candle_closed"),
-                "registry missing candle_closed");
+                merged.getBucketKeys(),
+                "candle_features must be distributed by instrument_token (per-ticker colocation)");
     }
 
     // ---- helpers ----

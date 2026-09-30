@@ -1207,7 +1207,7 @@ public final class DdlApplyTool {
             case BYTES -> new byte[] {(byte) (index + 1), 2};
             case DOUBLE -> 1.0d + index;
             case BOOLEAN -> true;
-            // feature_values (2026-09-27, DEC-056/057): MAP<INT, DOUBLE> keyed by
+            // candle_features (DDL 35, DEC-059): MAP<INT, DOUBLE> keyed by
             // the append-only registry id. One deterministic entry whose key and
             // value come from the declared child types — recursion keeps future
             // map shapes covered instead of hard-coding INT/DOUBLE here.

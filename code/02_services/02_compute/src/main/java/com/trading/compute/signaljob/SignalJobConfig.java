@@ -129,10 +129,6 @@ public record SignalJobConfig(
         // strategy host — ONE writer, sealed rows never rewritten. Default
         // false: the existing candle/feature tables stay authoritative until
         // the operator opens the cutover.
-        boolean mergedCandleFeaturesEnabled,
-        boolean legacyCandleSinksEnabled,
-        String candleLiveTable,
-        String candleClosedTable,
         String mergedCandleTable,
         // Wave C (docs/plans/2026-09-30-wave-c-merged-cutover.md): the strategy
         // context fetch source — legacy candle_closed until the cutover flip;
@@ -215,32 +211,19 @@ public record SignalJobConfig(
         // the strategy host in memory. Default true; set false for the old
         // snapshot-cadence feed (measurement/rollback kill-switch).
         boolean multiTfFastLiveFeed = booleanValue(env, "MULTITF_FAST_LIVE_FEED", true);
-        boolean mergedCandleFeaturesEnabled =
-                booleanValue(env, "MERGED_CANDLE_FEATURES_ENABLED", false);
-        // Wave C W-C2 (docs/plans/2026-09-30-wave-c-merged-cutover.md): when
-        // the merged writer is live, the two legacy candle sinks can be
-        // silenced — stateless guard filters gate their branches while the
-        // sink operators (and the keyed first-write-wins state) stay in the
-        // graph, so checkpoint-restore anchors hold; rollback is a flag flip.
-        boolean legacyCandleSinksEnabled =
-                booleanValue(env, "LEGACY_CANDLE_SINKS_ENABLED", true);
-        if (!legacyCandleSinksEnabled && !mergedCandleFeaturesEnabled) {
-            throw new IllegalStateException(
-                    "LEGACY_CANDLE_SINKS_ENABLED=false requires MERGED_CANDLE_FEATURES_ENABLED=true"
-                            + " — without the merged writer nothing would persist candles");
-        }
-        String candleLiveTable = stringEnv(env, "CANDLE_LIVE_TABLE", "candle_live");
-        String candleClosedTable = stringEnv(env, "CANDLE_CLOSED_TABLE", "candle_closed");
+        // Wave C W-C5a (docs/plans/2026-09-30-wave-c-merged-cutover.md): the
+        // merged table is THE candle table — the legacy sinks, their flags and
+        // the pre-cutover table names are gone; MERGED_CANDLE_TABLE is the
+        // single name the writer and the preflight use.
         String mergedCandleTable = env.getOrDefault("MERGED_CANDLE_TABLE", "candle_features").trim();
         if (mergedCandleTable.isEmpty()) {
             throw new IllegalStateException("Config MERGED_CANDLE_TABLE must be non-blank");
         }
-        // Wave C (docs/plans/2026-09-30-wave-c-merged-cutover.md): the strategy
-        // context fetch source is explicit — legacy candle_closed until the
-        // cutover flip; candle_features + sealed-only (finished windows) after.
-        String candleContextTable = stringEnv(env, "CANDLE_CONTEXT_TABLE", "candle_closed");
+        // Wave C W-C5a: the context fetch source defaults to the merged table
+        // with the finished-window rule; the knobs stay for tests/rollback.
+        String candleContextTable = stringEnv(env, "CANDLE_CONTEXT_TABLE", "candle_features");
         boolean candleContextSealedOnly =
-                booleanValue(env, "CANDLE_CONTEXT_SEALED_ONLY", false);
+                booleanValue(env, "CANDLE_CONTEXT_SEALED_ONLY", true);
         // 2026-09-26 S5→S6 latency workstream: native fetch/flush tuning.
         // The Fluss scanner's fetch chunk caps how long a raw tick waits in
         // Fluss before the source emits it (measured 2026-09-26 at 48.5k
@@ -382,10 +365,6 @@ public record SignalJobConfig(
                 multiTfSessionBypass,
                 multiTfSignalContextEnabled,
                 multiTfFastLiveFeed,
-                mergedCandleFeaturesEnabled,
-                legacyCandleSinksEnabled,
-                candleLiveTable,
-                candleClosedTable,
                 mergedCandleTable,
                 candleContextTable,
                 candleContextSealedOnly,
@@ -449,22 +428,7 @@ public record SignalJobConfig(
         return multiTfFastLiveFeed;
     }
 
-    /** Wave B (DEC-059): write the merged candle_features table (default false). */
-    public boolean mergedCandleFeaturesEnabled() {
-        return mergedCandleFeaturesEnabled;
-    }
-
-    /** Fluss table for candle_live (default candle_live). */
-    public String candleLiveTable() {
-        return candleLiveTable;
-    }
-
-    /** Fluss table for candle_closed (default candle_closed). */
-    public String candleClosedTable() {
-        return candleClosedTable;
-    }
-
-    /** Wave B (DEC-059): table for merged candle+feature upserts (default candle_features). */
+    /** The candle table — merged candle+features (DEC-059; default candle_features). */
     public String mergedCandleTable() {
         return mergedCandleTable;
     }

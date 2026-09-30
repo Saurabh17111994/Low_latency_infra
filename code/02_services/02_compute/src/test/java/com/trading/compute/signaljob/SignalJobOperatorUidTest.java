@@ -1,6 +1,7 @@
 package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -71,12 +72,10 @@ class SignalJobOperatorUidTest {
     private static final Map<String, String> EXPECTED_MULTITF_OPERATORS = new LinkedHashMap<>();
     static {
         EXPECTED_MULTITF_OPERATORS.put("multi-tf-aggregator-v1", "multi-tf-aggregator");
-        EXPECTED_MULTITF_OPERATORS.put("candle-live-sink", "candle-live-sink");
-        EXPECTED_MULTITF_OPERATORS.put("candle-closed-first-write-wins", "candle-closed-first-write-wins");
-        EXPECTED_MULTITF_OPERATORS.put("candle-closed-sink", "candle-closed-sink");
-        // N7 retired (2026-09-05 cutover, batch 2): n7-signal-v1, the
-        // multitf-*-sinks, and canonical-signal-filter-multitf are gone —
-        // N7 runs ONLY as a host strategy with identical candidate ids.
+        // Wave C W-C5a (DEC-059 end state): the legacy candle sinks
+        // (candle-live-sink, candle-closed-first-write-wins, candle-closed-sink)
+        // are retired — the host is the only candle writer; its merged sink is
+        // pinned in the host set below.
     }
 
     private static final Duration TIMEOUT = Duration.ofSeconds(20);
@@ -135,6 +134,10 @@ class SignalJobOperatorUidTest {
                 "strategy-host-candidates-sink", "strategy-host-candidates-sink");
         EXPECTED_STRATEGY_HOST_OPERATORS.put(
                 "strategy-host-candidates-current-sink", "strategy-host-candidates-current-sink");
+        // Wave C W-C5a (DEC-059): the merged candle+feature sink — the host is
+        // the only candle writer.
+        EXPECTED_STRATEGY_HOST_OPERATORS.put(
+                "candle-features-sink-v1", "candle-features-sink");
         // Note: canonical-signal-filter-strategy-host (the filter before the
         // KV sink) follows the multitf precedent — asserted present via
         // containsKey, not pinned in the required set.
@@ -147,15 +150,17 @@ class SignalJobOperatorUidTest {
     }
 
     @Test
-    @DisplayName("legacy sinks off: guard filters appear and the legacy sink UIDs stay (W-C2)")
-    void legacyCandleSinksDisabledAddsGuardsAndKeepsSinkUids() throws Exception {
+    @DisplayName("legacy candle sink UIDs are retired; the merged sink carries the write (W-C5a)")
+    void legacyCandleSinkUidsAreRetired() throws Exception {
+        // Wave C W-C5a (DEC-059 end state): the guarded legacy sinks and their
+        // guard filters are gone for good, and the end-state graph builds
+        // without candle_live/candle_closed existing anywhere (both were
+        // dropped on dev in W-C7 — this leg proves no code path needs them).
         String suffix = String.valueOf(System.nanoTime());
         String candleName = "p6_uid_" + suffix + "_candle";
         String signalName = "p6_uid_" + suffix + "_sig";
         String currentName = "p6_uid_" + suffix + "_cur";
         String quarName = "p6_uid_" + suffix + "_quar";
-        String liveName = "p6_uid_" + suffix + "_live";
-        String closedName = "p6_uid_" + suffix + "_closed";
         String mergedName = "p6_uid_" + suffix + "_merged";
         ScratchTables.create(connection, admin, candleName, ScratchTables.candleSchema(),
                 List.of("instrument_token", "window_start"), 16, "candle KV", TIMEOUT);
@@ -167,13 +172,6 @@ class SignalJobOperatorUidTest {
         ScratchTables.create(connection, admin, quarName,
                 ScratchTables.ingestionQuarantineSchema(), null, 16,
                 "quarantine LOG", TIMEOUT);
-        // The legacy tables must exist for the sink builders even while their
-        // branches are guarded (FlussSinkBuilder resolves the table at build
-        // time, measured 2026-09-30) — the dimmed sinks still deploy.
-        ScratchTables.create(connection, admin, liveName, scratchCandleLiveSchema(),
-                List.of("instrument_token", "tf", "window_start"), 16, "candle_live KV", TIMEOUT);
-        ScratchTables.create(connection, admin, closedName, scratchCandleClosedSchema(),
-                List.of("instrument_token", "tf", "window_start"), 16, "candle_closed KV", TIMEOUT);
         ScratchTables.create(connection, admin, mergedName, scratchMergedCandleSchema(),
                 List.of("instrument_token", "tf", "window_start"), 16, "candle_features KV",
                 TIMEOUT);
@@ -184,15 +182,10 @@ class SignalJobOperatorUidTest {
         cfg.put("SIGNAL_CURRENT_TABLE", currentName);
         cfg.put("QUARANTINE_TABLE", quarName);
         cfg.put("MULTITF_ENABLED", "true");
-        cfg.put("CANDLE_LIVE_TABLE", liveName);
-        cfg.put("CANDLE_CLOSED_TABLE", closedName);
         cfg.put("STRATEGY_HOST_ENABLED", "true");
         cfg.put("STRATEGIES", N7RangeBreakoutStrategy.RULE_ID);
-        cfg.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
         cfg.put("MERGED_CANDLE_TABLE", mergedName);
-        cfg.put("LEGACY_CANDLE_SINKS_ENABLED", "false");
         cfg.put("CANDLE_CONTEXT_TABLE", mergedName);
-        cfg.put("CANDLE_CONTEXT_SEALED_ONLY", "true");
 
         StreamExecutionEnvironment senv = SignalJob.buildTopology(SignalJobConfig.from(cfg));
         StreamGraph graph = senv.getStreamGraph();
@@ -203,20 +196,14 @@ class SignalJobOperatorUidTest {
             uidToName.put(uid, node.getOperatorName());
         }
 
-        // W-C2: the drop guards gate each legacy branch...
-        assertTrue(uidToName.containsKey("candle-closed-legacy-guard"),
-                "closed legacy guard must gate the branch when the sinks are off");
-        assertTrue(uidToName.containsKey("candle-live-legacy-guard"),
-                "live legacy guard must gate the branch when the sinks are off");
-        // ...while the sink operators and the keyed first-write-wins state
-        // stay in the graph — their UIDs are the checkpoint-restore anchors,
-        // so rollback stays a flag flip.
-        assertTrue(uidToName.containsKey("candle-closed-first-write-wins"));
-        assertTrue(uidToName.containsKey("candle-closed-sink"));
-        assertTrue(uidToName.containsKey("candle-live-sink"));
-        // The merged writer is the live path now.
+        for (String retired : List.of("candle-live-sink", "candle-closed-sink",
+                "candle-closed-first-write-wins", "candle-live-legacy-guard",
+                "candle-closed-legacy-guard")) {
+            assertFalse(uidToName.containsKey(retired),
+                    "retired legacy candle UID still present: " + retired);
+        }
         assertTrue(uidToName.containsKey("candle-features-sink-v1"),
-                "merged sink must be wired when the flag is on");
+                "the merged sink carries the candle write (DEC-059 end state)");
     }
 
     @Test
@@ -227,8 +214,6 @@ class SignalJobOperatorUidTest {
         String signalName = "p6_uid_" + suffix + "_sig";
         String currentName = "p6_uid_" + suffix + "_cur";
         String quarName = "p6_uid_" + suffix + "_quar";
-        String liveName = "p6_uid_" + suffix + "_live";
-        String closedName = "p6_uid_" + suffix + "_closed";
         String badMergedName = "p6_uid_" + suffix + "_merged_bad";
         ScratchTables.create(connection, admin, candleName, ScratchTables.candleSchema(),
                 List.of("instrument_token", "window_start"), 16, "candle KV", TIMEOUT);
@@ -240,10 +225,6 @@ class SignalJobOperatorUidTest {
         ScratchTables.create(connection, admin, quarName,
                 ScratchTables.ingestionQuarantineSchema(), null, 16,
                 "quarantine LOG", TIMEOUT);
-        ScratchTables.create(connection, admin, liveName, scratchCandleLiveSchema(),
-                List.of("instrument_token", "tf", "window_start"), 16, "candle_live KV", TIMEOUT);
-        ScratchTables.create(connection, admin, closedName, scratchCandleClosedSchema(),
-                List.of("instrument_token", "tf", "window_start"), 16, "candle_closed KV", TIMEOUT);
         // 15 columns — deliberately NOT the DDL 35 merged contract.
         ScratchTables.create(connection, admin, badMergedName, scratchCandleClosedSchema(),
                 List.of("instrument_token", "tf", "window_start"), 16, "candle_features KV",
@@ -255,14 +236,11 @@ class SignalJobOperatorUidTest {
         cfg.put("SIGNAL_CURRENT_TABLE", currentName);
         cfg.put("QUARANTINE_TABLE", quarName);
         cfg.put("MULTITF_ENABLED", "true");
-        cfg.put("CANDLE_LIVE_TABLE", liveName);
-        cfg.put("CANDLE_CLOSED_TABLE", closedName);
-        cfg.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
         cfg.put("MERGED_CANDLE_TABLE", badMergedName);
 
         assertThrows(TableContractValidator.ContractViolation.class,
                 () -> SignalJob.buildTopology(SignalJobConfig.from(cfg)),
-                "the 15-column table must be refused by the W-C3 merged preflight");
+                "the 15-column table must be refused by the merged preflight");
     }
 
     private void assertTopology(boolean multiTfEnabled) throws Exception {
@@ -285,21 +263,9 @@ class SignalJobOperatorUidTest {
         ScratchTables.create(connection, admin, quarName,
                 ScratchTables.ingestionQuarantineSchema(), null, 16,
                 "quarantine LOG", TIMEOUT);
-        // When multi-TF is enabled, also create its tables so preflight succeeds
-        String liveName = null;
-        String closedName = null;
-        if (multiTfEnabled) {
-            liveName = "p6_uid_" + suffix + "_live";
-            closedName = "p6_uid_" + suffix + "_closed";
-            ScratchTables.create(connection, admin, liveName, scratchCandleLiveSchema(),
-                    List.of("instrument_token", "tf", "window_start"), 16, "candle_live KV", TIMEOUT);
-            ScratchTables.create(connection, admin, closedName, scratchCandleClosedSchema(),
-                    List.of("instrument_token", "tf", "window_start"), 16, "candle_closed KV", TIMEOUT);
-        }
-        // buildTopology preflights the table contracts against live metadata.
-        // The scratch tables carry the DEC-035 contracts that the dev cluster's
-        // legacy tables only gain in Stage 6 (live DDL application), so the
-        // UID assertions never depend on Stage 6 having landed.
+        // Wave C W-C5a (DEC-059 end state): no legacy candle scratch tables —
+        // the multi-TF branch preflights only the merged candle_features table
+        // (the real dev table; read-only metadata check).
         Map<String, String> cfg = env();
         cfg.put("CANDLE_TABLE", candleName);
         cfg.put("SIGNAL_CANDIDATES_TABLE", signalName);
@@ -307,8 +273,6 @@ class SignalJobOperatorUidTest {
         cfg.put("QUARANTINE_TABLE", quarName);
         if (multiTfEnabled) {
             cfg.put("MULTITF_ENABLED", "true");
-            cfg.put("CANDLE_LIVE_TABLE", liveName);
-            cfg.put("CANDLE_CLOSED_TABLE", closedName);
         }
         if (hostEnabled) {
             cfg.put("STRATEGY_HOST_ENABLED", "true");
@@ -365,8 +329,6 @@ class SignalJobOperatorUidTest {
                     "multitf-*-sinks are retired with n7-signal-v1");
             assertTrue(!uidToName.containsKey("canonical-signal-filter-multitf"),
                     "canonical-signal-filter-multitf is retired with n7-signal-v1");
-            assertTrue(uidToName.containsKey("candle-closed-first-write-wins"),
-                    "MULTITF_ENABLED=true: closed first-write-wins must be present");
             int expectedTotal = EXPECTED_OPERATORS.size() + EXPECTED_MULTITF_OPERATORS.size();
             if (hostEnabled) {
                 for (Map.Entry<String, String> expected : EXPECTED_STRATEGY_HOST_OPERATORS.entrySet()) {
@@ -424,7 +386,7 @@ class SignalJobOperatorUidTest {
         return scratchCandleLiveSchema();
     }
 
-    /** DDL 35 shape (W-C2/W-C3): candle_closed's 15 columns + features + sealed. */
+    /** DDL 35 shape (the only candle table, W-C5a): 15 candle columns + features + sealed. */
     private static org.apache.fluss.metadata.Schema scratchMergedCandleSchema() {
         return org.apache.fluss.metadata.Schema.newBuilder()
                 .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())

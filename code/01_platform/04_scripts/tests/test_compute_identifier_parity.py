@@ -69,10 +69,6 @@ MTF_AGG = (
     "code/02_services/02_compute/src/main/java/com/trading/compute/signaljob/"
     "MultiTimeframeAggregateFunction.java"
 )
-MTF_SINKS = (
-    "code/02_services/02_compute/src/main/java/com/trading/compute/signaljob/"
-    "MultiTimeframeSinks.java"
-)
 STRATEGY_HOST = (
     "code/02_services/02_compute/src/main/java/com/trading/compute/signaljob/"
     "StrategyHostFunction.java"
@@ -182,7 +178,6 @@ EXPECTED += _rows("metric", MTF, MTF_AGG,
                    "compute.candles.gap.detected", "compute.candles.restored_timer_noop",
                    "compute.candles.live.emitted", "compute.session.filtered.pre_open",
                    "compute.session.filtered.post_close"])
-EXPECTED += _rows("metric", MTF, MTF_SINKS, ["compute.candles.multitf.duplicate_window"])
 
 # The two dynamic families. Leaves are static literals, so they get real rows; the
 # exported O2 stream flattens `strategy.<ruleId>.<leaf>` to `strategy_<leaf>`.

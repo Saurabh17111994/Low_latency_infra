@@ -240,21 +240,17 @@ run_phase() {
   # that opt-in gone the lib refuses, and the refusal must reach the phase
   # result: a measurement over stale rows is worse than no measurement.
   pipeline_purge_raw_table || return 1
-  # CHG-191: candle tables, for the same reason as raw — and one more.
-  # candle_live/candle_closed are LOG-append tables written by the multi-tf
-  # sinks, so a run that only "ensures" them accumulates every previous run's
-  # rows; the job also PREFLIGHTS both (TableContractValidator, behind
-  # MULTITF_ENABLED) and refuses to submit when either is absent. Purge-then-
-  # ensure mirrors stage-soak-e2e.sh L131-140. Inside the flag guard because the
-  # tables are untouched when the candle path is off.
+  # CHG-191: candle table, for the same reason as raw — and one more.
+  # candle_features (DEC-059, Wave C W-C5a) is written by the strategy host and
+  # accumulates one row per window, so a run that only "ensures" it carries
+  # every previous run's rows; the job also PREFLIGHTS it (TableContractValidator,
+  # behind MULTITF_ENABLED) and refuses to submit when it is absent. Purge-then-
+  # ensure mirrors stage-soak-e2e.sh. Inside the flag guard because the table
+  # is untouched when the candle path is off.
   if [ "$MULTITF_ENABLED" = "true" ]; then
-    pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" candle_closed \
+    pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/35_candle_features.sql" candle_features \
       || return 1
-    pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/32_candle_live.sql" candle_live \
-      || return 1
-    pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/32_candle_live.sql" "candle_live" \
-      || return 1
-    pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" "candle_closed" \
+    pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/35_candle_features.sql" "candle_features" \
       || return 1
   fi
   pipeline_start_faketool || return 1

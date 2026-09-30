@@ -828,8 +828,6 @@ class SignalJobConfigTest {
         SignalJobConfig cfg = SignalJobConfig.from(env());
         assertFalse(cfg.multiTfEnabled(), "MULTITF_ENABLED defaults to false");
         assertEquals(2_000L, cfg.liveSnapshotIntervalMs(), "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS default 2000 (two steplines -> effective 1 Hz/key)");
-        assertEquals("candle_live", cfg.candleLiveTable(), "CANDLE_LIVE_TABLE default candle_live");
-        assertEquals("candle_closed", cfg.candleClosedTable(), "CANDLE_CLOSED_TABLE default candle_closed");
     }
 
     @Test
@@ -887,85 +885,36 @@ class SignalJobConfigTest {
     }
 
     @Test
-    void tableNameAccessorsDefaultAndTrim() {
-        assertEquals("candle_live", SignalJobConfig.from(env()).candleLiveTable());
-        assertEquals("candle_closed", SignalJobConfig.from(env()).candleClosedTable());
-
-        Map<String, String> env = env();
-        env.put("CANDLE_LIVE_TABLE", "  my_live  ");
-        env.put("CANDLE_CLOSED_TABLE", " my_closed ");
-        SignalJobConfig cfg = SignalJobConfig.from(env);
-        assertEquals("my_live", cfg.candleLiveTable());
-        assertEquals("my_closed", cfg.candleClosedTable());
-
-        Map<String, String> blankLive = env();
-        blankLive.put("CANDLE_LIVE_TABLE", "   ");
-        assertEquals("candle_live", SignalJobConfig.from(blankLive).candleLiveTable(),
-                "blank CANDLE_LIVE_TABLE falls back to default");
-
-        Map<String, String> blankClosed = env();
-        blankClosed.put("CANDLE_CLOSED_TABLE", "");
-        assertEquals("candle_closed", SignalJobConfig.from(blankClosed).candleClosedTable(),
-                "blank CANDLE_CLOSED_TABLE falls back to default");
-    }
-
-    @Test
     void candleContextSourceDefaultsAndParses() {
-        // W-C1 (Wave C cutover, docs/plans/2026-09-30-wave-c-merged-cutover.md):
-        // the strategy-context fetch source is explicit — legacy candle_closed
-        // until the cutover flip, candle_features + sealed-only afterwards.
-        assertEquals("candle_closed", SignalJobConfig.from(env()).candleContextTable(),
-                "CANDLE_CONTEXT_TABLE default candle_closed");
-        assertFalse(SignalJobConfig.from(env()).candleContextSealedOnly(),
-                "CANDLE_CONTEXT_SEALED_ONLY default false");
+        // Wave C W-C5a (docs/plans/2026-09-30-wave-c-merged-cutover.md): the
+        // strategy-context fetch source defaults to the merged table with the
+        // finished-window rule; the knobs stay for tests.
+        assertEquals("candle_features", SignalJobConfig.from(env()).candleContextTable(),
+                "CANDLE_CONTEXT_TABLE default candle_features");
+        assertTrue(SignalJobConfig.from(env()).candleContextSealedOnly(),
+                "CANDLE_CONTEXT_SEALED_ONLY default true");
 
         Map<String, String> env = env();
-        env.put("CANDLE_CONTEXT_TABLE", " candle_features ");
-        env.put("CANDLE_CONTEXT_SEALED_ONLY", "true");
+        env.put("CANDLE_CONTEXT_TABLE", " candle_context_custom ");
+        env.put("CANDLE_CONTEXT_SEALED_ONLY", "false");
         SignalJobConfig cfg = SignalJobConfig.from(env);
-        assertEquals("candle_features", cfg.candleContextTable());
-        assertTrue(cfg.candleContextSealedOnly());
+        assertEquals("candle_context_custom", cfg.candleContextTable());
+        assertFalse(cfg.candleContextSealedOnly());
 
         Map<String, String> blank = env();
         blank.put("CANDLE_CONTEXT_TABLE", "   ");
-        assertEquals("candle_closed", SignalJobConfig.from(blank).candleContextTable(),
-                "blank CANDLE_CONTEXT_TABLE falls back to the legacy default");
+        assertEquals("candle_features", SignalJobConfig.from(blank).candleContextTable(),
+                "blank CANDLE_CONTEXT_TABLE falls back to candle_features");
     }
 
     @Test
-    void legacyCandleSinksDefaultOnAndRequireMergedWhenOff() {
-        // Wave C W-C2 (docs/plans/2026-09-30-wave-c-merged-cutover.md):
-        // silencing the legacy sinks is only legal once the merged writer
-        // persists candles — otherwise nothing would write.
-        assertTrue(SignalJobConfig.from(env()).legacyCandleSinksEnabled(),
-                "LEGACY_CANDLE_SINKS_ENABLED default true (legacy path authoritative)");
-        Map<String, String> off = env();
-        off.put("LEGACY_CANDLE_SINKS_ENABLED", "false");
-        IllegalStateException e = assertThrows(IllegalStateException.class,
-                () -> SignalJobConfig.from(off));
-        assertTrue(e.getMessage().contains("LEGACY_CANDLE_SINKS_ENABLED")
-                        && e.getMessage().contains("MERGED_CANDLE_FEATURES_ENABLED"),
-                "refusal names both flags: " + e.getMessage());
-
-        Map<String, String> cutover = env();
-        cutover.put("LEGACY_CANDLE_SINKS_ENABLED", "false");
-        cutover.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
-        assertFalse(SignalJobConfig.from(cutover).legacyCandleSinksEnabled(),
-                "the cutover combination parses");
-    }
-
-    @Test
-    void mergedCandleFeaturesDefaultsOffAndParses() {
-        // Wave B/DEC-059: the merged candle_features write path is opt-in; the
-        // old candle/feature tables stay authoritative until the cutover.
-        assertFalse(SignalJobConfig.from(env()).mergedCandleFeaturesEnabled(),
-                "MERGED_CANDLE_FEATURES_ENABLED defaults to false");
+    void candleTableNameDefaultsAndParsesACustomName() {
+        // Wave C W-C5a: candle_features is THE candle table; the name stays
+        // configurable for tests/scratch runs.
         assertEquals("candle_features", SignalJobConfig.from(env()).mergedCandleTable());
-        Map<String, String> on = env();
-        on.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
-        on.put("MERGED_CANDLE_TABLE", "candle_features_smoke");
-        assertTrue(SignalJobConfig.from(on).mergedCandleFeaturesEnabled());
-        assertEquals("candle_features_smoke", SignalJobConfig.from(on).mergedCandleTable());
+        Map<String, String> custom = env();
+        custom.put("MERGED_CANDLE_TABLE", "candle_features_smoke");
+        assertEquals("candle_features_smoke", SignalJobConfig.from(custom).mergedCandleTable());
     }
 
     @Test

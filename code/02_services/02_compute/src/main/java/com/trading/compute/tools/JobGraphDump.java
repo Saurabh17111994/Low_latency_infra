@@ -67,10 +67,10 @@ public final class JobGraphDump {
         // P2-071: never log the whole config record — record toString() prints
         // s3AccessKey/s3SecretKey. Field-selective: mode/parallelism/backend/
         // tables only, never credentials or full paths.
-        LOG.info("jobgraph-dump: startupMode={} parallelism={} backend={} liveTable={} "
-                        + "closedTable={} signalTables={}/{}",
+        LOG.info("jobgraph-dump: startupMode={} parallelism={} backend={} candleTable={} "
+                        + "signalTables={}/{}",
                 config.startupMode(), config.parallelism(), config.stateBackend(),
-                config.candleLiveTable(), config.candleClosedTable(),
+                config.mergedCandleTable(),
                 config.signalCandidatesTable(), config.signalCurrentTable());
 
         StreamExecutionEnvironment env = SignalJob.buildTopology(config);

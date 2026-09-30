@@ -7,10 +7,9 @@ as historical/superseded:
 
   * feature_candles_15s described as a LOG       -> it is the KV upsert table
                                                     (PK (instrument_token, window_start));
-                                                    the table is now candle_live
-                                                    (DDL 32_candle_live.sql) with its
-                                                    twin candle_closed
-                                                    (DDL 33_candle_closed.sql). The old
+                                                    the table is now candle_features
+                                                    (DDL 35_candle_features.sql, the
+                                                    DEC-059 merged table). The old
                                                     name stays a rule on purpose: dossiers
                                                     written before the rename still use it
   * Signal_Candidates described as a KV table    -> it is the append-only LOG;
@@ -377,16 +376,16 @@ TIER_RANK = {"LIVE-STALE": 0, "UNANNOTATED": 1, "SECTION-ANNOTATED": 2,
 # ---------------------------------------------------------------------------
 # DDL + manifest verification (--ddl): the 2026-08-13 re-scope table kinds as
 # carried by code/01_platform/02_sql/ddl/*.sql and schema_manifest.json.
-# The candle KV pair replaced feature_candles_15s when a329247 retired that DDL
+# The candle KV table replaced feature_candles_15s when a329247 retired that DDL
 # (multi-TF aggregator Phase 0): the re-scope's KV current-state kind now lives
-# on candle_live, with candle_closed as its immutable closed-history twin.
+# on candle_features (DEC-059 merged table; Wave C W-C5a merged the former
+# candle_live/candle_closed pair into it).
 # ---------------------------------------------------------------------------
 DEFAULT_DDL_DIR = ROOT / "code" / "01_platform" / "02_sql" / "ddl"
 
 # Expected kind and exact primary key per re-scope table.
 DDL_INVARIANTS = {
-    "candle_live": {"kind": "KV", "pk": ["instrument_token", "tf", "window_start"]},
-    "candle_closed": {"kind": "KV", "pk": ["instrument_token", "tf", "window_start"]},
+    "candle_features": {"kind": "KV", "pk": ["instrument_token", "tf", "window_start"]},
     "Signal_Candidates": {"kind": "LOG", "pk": []},
     "Signal_Candidates_current": {"kind": "KV", "pk": ["instrument_token"]},
 }

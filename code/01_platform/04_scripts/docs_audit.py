@@ -149,15 +149,16 @@ def c1_manifest():
     if m is None:
         return check("C1 manifest readable", False, p)
     tables = m.get("tables", [])
-    # 28 since 2026-09-30: DDL 35 candle_features (Wave B/DEC-059; runtime behind
-    # MERGED_CANDLE_FEATURES_ENABLED=false, a sanctioned unapplied proposal)
-    # joined both the manifest and the ddl/ enumeration. 27 held since
+    # 25 since 2026-09-30 (Wave C W-C5a/DEC-059): the retired candle_live,
+    # candle_closed and feature_values DDLs left the corpus with their tables
+    # (dropped on dev in W-C7), leaving DDL 35 candle_features as the single
+    # candle table. 28 held since 2026-09-30 when DDL 35 joined; 27 held since
     # 2026-09-27, when DDL 34 feature_values joined. 26 held since 2026-09-23,
     # when the parked fingerprint_dedup DDL moved to ddl/retired/ (out of the
     # applier's *.sql enumeration) and its manifest entry was dropped. The pin
     # is deliberate and is NOT made redundant by the agreement checks below:
     # only the pin notices a table being dropped from BOTH lists at once.
-    check("C1 manifest has 28 tables", len(tables) == 28, f"got {len(tables)}")
+    check("C1 manifest has 25 tables", len(tables) == 25, f"got {len(tables)}")
     # The literal above went stale (29 held for four retired tables) because
     # nothing tied the manifest to the DDL directory. These two do.
     ddl_names = {_ddl_table_name(f) for f in os.listdir(DDL_DIR) if f.endswith(".sql")}
@@ -455,7 +456,7 @@ REQ_FILES = {  # domain (as used in the matrix tables) -> (prefix, requirement f
 }
 NFR_DOMAIN = "Non-functional"
 
-INVENTORY_FILES = [  # all four table inventories must list the candle pair + ingestion_quarantine (DEC-039; CHG-339)
+INVENTORY_FILES = [  # all four table inventories must list candle_features + ingestion_quarantine (DEC-039/DEC-059; CHG-339/W-C5a)
     "02_requirements/04-data.md",
     "03_architecture/00-arch-overview.md",
     "03_architecture/02-data-pipeline.md",
@@ -727,13 +728,13 @@ def c9_dec039_invariants():
     ) or ""
     check("C9 ledger live-in-dev evidence", "Postback_Projection_Ledger 705" in foundation)
 
-    # --- SCH-19 index + SCH-23 EOD + REQ-EXE-004 intent DDL; 28 DDLs (the DEC-038 dedup
-    # DDL moved to ddl/retired/ on 2026-09-23 and is no longer applied; DDL 34 feature_values
-    # joined 2026-09-27; DDL 35 candle_features joined 2026-09-30 (Wave B/DEC-059) --
+    # --- SCH-19 index + SCH-23 EOD + REQ-EXE-004 intent DDL; 25 DDLs (the DEC-038 dedup
+    # DDL moved to ddl/retired/ on 2026-09-23 and is no longer applied; DDL 35
+    # candle_features is the single candle table since Wave C W-C5a 2026-09-30 --
     # see the C1 pin) ---
     sqls = sorted(f for f in os.listdir(DDL_DIR) if f.endswith(".sql"))
-    # 28: see the C1 pin. Both numbers are the same fact counted from either side.
-    check("C9 DDL count = 28", len(sqls) == 28, f"got {len(sqls)}")
+    # 25: see the C1 pin. Both numbers are the same fact counted from either side.
+    check("C9 DDL count = 25", len(sqls) == 25, f"got {len(sqls)}")
     check(
         "C9 dedup DDL on file",
         os.path.exists(os.path.join(DDL_DIR, "retired", "24_fingerprint_dedup.sql")),
@@ -761,16 +762,17 @@ def c9_dec039_invariants():
         "fingerprint_dedup" in rb and "24_fingerprint_dedup.sql" in rb,
     )
 
-    # --- inventories include the candle pair + ingestion_quarantine ---
-    # (CHG-339: `forming_bar` retired 2026-09-05; the multi-TF candle pair
-    # `candle_live`/`candle_closed` replaced `feature_candles_15s`/`forming_bar`.)
+    # --- inventories include the candle table + ingestion_quarantine ---
+    # (CHG-339: `forming_bar` retired 2026-09-05; then `candle_live`/`candle_closed`
+    # replaced `feature_candles_15s`/`forming_bar`; Wave C W-C5a 2026-09-30 merged
+    # the pair into `candle_features`, DEC-059.)
     missing_inv = []
     for f in INVENTORY_FILES:
         body = safe_read(os.path.join(DOCS_DIR, f)) or ""
-        for tbl in ("candle_live", "candle_closed", "ingestion_quarantine"):
+        for tbl in ("candle_features", "ingestion_quarantine"):
             if tbl not in body:
                 missing_inv.append(f"{f}: {tbl}")
-    check("C9 inventories include the candle pair + ingestion_quarantine",
+    check("C9 inventories include candle_features + ingestion_quarantine",
           not missing_inv, f"{missing_inv}")
 
 

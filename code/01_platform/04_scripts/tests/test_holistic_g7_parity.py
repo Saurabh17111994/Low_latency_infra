@@ -518,14 +518,15 @@ def guard_messages(src, listname):
 
 
 class G7cCandleSourceTests(unittest.TestCase):
-    """CHG-194 — the parity proof reads candle_closed, not an empty list.
+    """CHG-194 — the parity proof reads the candle table, not an empty list.
 
     feature_candles_15s was retired on 2026-09-05; the analyzer was patched to
     stop reading it but kept `final_rows = []`, so the candle side of G7c was
     structurally empty: every one of a run's ~22.5k windows reported "NO final
-    candle" and the harness could never pass. candle_closed (DDL 33) carries
-    tick_count + volume per (instrument_token, tf, window_start), so parity is
-    measurable without the retired table.
+    candle" and the harness could never pass. candle_features (DDL 35, DEC-059;
+    Wave C W-C5a merged the former candle_live/candle_closed pair into it)
+    carries tick_count + volume per (instrument_token, tf, window_start) and a
+    sealed flag, so parity is measurable without the retired tables.
     """
 
     def setUp(self):
@@ -541,8 +542,17 @@ class G7cCandleSourceTests(unittest.TestCase):
 
         self.assertEqual(mapping, {(25, 15000): (150, 9000)})
 
+    def test_forming_rows_are_not_compared(self):
+        """candle_features carries the forming row of the open window too;
+        only the sealed row is final, so sealed=false must not enter parity."""
+        mapping = self.mod.candle_parity_map([
+            dict(self._row(25, 15000, 150, 9000), sealed=False),
+            dict(self._row(26, 30000, 150, 1), sealed=True)])
+
+        self.assertEqual(mapping, {(26, 30000): (150, 1)})
+
     def test_other_timeframes_are_not_the_15s_family(self):
-        """candle_closed holds six TFs under the same window_start and the raw
+        """candle_features holds six TFs under the same window_start and the raw
         recount groups at 15s, so a 30s row must not be compared against it."""
         mapping = self.mod.candle_parity_map([
             self._row(25, 15000, 150, 9000),
@@ -580,7 +590,7 @@ class G7cCandleSourceTests(unittest.TestCase):
         message = self.mod.g7c_measurement_guard(True, 22528, False)
 
         self.assertIsNotNone(message, "a dead read was accepted as a real one")
-        self.assertIn("candle_closed read failed", message)
+        self.assertIn("candle_features read failed", message)
 
     def test_a_zero_comparison_is_still_rejected_when_the_read_worked(self):
         message = self.mod.g7c_measurement_guard(True, 0, True)
@@ -592,14 +602,14 @@ class G7cCandleSourceTests(unittest.TestCase):
         as `compared == 0` and be reported as a mere startup skip."""
         src = open(ANALYZE, encoding="utf-8").read()
 
-        self.assertIn("read_candle_closed_rows(", src,
-                      "main() no longer reads candle_closed")
+        self.assertIn("read_candle_features_rows(", src,
+                      "main() no longer reads candle_features")
         self.assertIn(
             "g7c_measurement_guard(raw_read_ok, compared, candle_read_ok)", src,
             "the candle read result never reaches the parity guard")
 
     def test_the_kv_read_never_falls_back_to_the_log_wildcard(self):
-        """candle_closed is a PRIMARY-KEY table: FlussPrefixReader's '*' means
+        """candle_features is a PRIMARY-KEY table: FlussPrefixReader's '*' means
         'no filter' only on the LOG path, and on the KV path it would parse '*'
         as a token, fail, and print __END__ 0 - a silent empty read (P6-082)."""
         src = open(ANALYZE, encoding="utf-8").read()
@@ -713,7 +723,7 @@ class CandleReaderGuardTests(unittest.TestCase):
             return SimpleNamespace(returncode=rc)
 
         with mock.patch.object(self.mod.subprocess, "run", side_effect=run):
-            result = self.mod.read_candle_closed_rows(
+            result = self.mod.read_candle_features_rows(
                 "unused", out_dir, set(tokens))
         return result, calls
 

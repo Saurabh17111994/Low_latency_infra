@@ -70,7 +70,7 @@ CHECKPOINT_INTERVAL_MS = 10_000  # compose pin (CHECKPOINT_INTERVAL_MS)
 # consecutive good polls), so the ceiling only bounds how long a stuck start may
 # wait. MEASURED 2026-09-28 (off-hours cold-start drill, real feed, 58.6M raw
 # records): the tablet needed 22 min 56 s to serve raw_table_1 - dominated by
-# candle_live/candle_closed KV changelog replay ("No snapshot found" per bucket),
+# candle KV changelog replay ("No snapshot found" per bucket),
 # so a 900 s ceiling went RED while recovery was still progressing. Default is
 # 60 min (~2.6x margin); the structural fix is reducing KV replay/retention (F8),
 # not a longer wait. Warm starts still exit in seconds.

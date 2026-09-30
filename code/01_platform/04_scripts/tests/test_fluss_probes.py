@@ -310,7 +310,7 @@ class SentinelTests(ProbeTestBase):
     """P6-080: a failure after startup must still print __END__ and exit non-zero."""
 
     def test_prefix_reader_prints_the_sentinel_when_the_cluster_is_unreachable(self) -> None:
-        proc = self.run_probe("FlussPrefixReader", ["candle_live", "4", "0", "0", DEAD])
+        proc = self.run_probe("FlussPrefixReader", ["candle_features", "4", "0", "0", DEAD])
         self.assert_no_classpath_error(self, proc)
         self.assertEqual(proc.returncode, 1, proc.stderr[-1500:])
         self.assertIn("__END__ 0", proc.stdout,
@@ -318,13 +318,13 @@ class SentinelTests(ProbeTestBase):
         self.assertIn("__ERROR__", proc.stderr)
 
     def test_prefix_reader_prints_the_sentinel_for_unusable_input(self) -> None:
-        proc = self.run_probe("FlussPrefixReader", ["candle_live", "4", "not-a-number", "0", DEAD])
+        proc = self.run_probe("FlussPrefixReader", ["candle_features", "4", "not-a-number", "0", DEAD])
         self.assertEqual(proc.returncode, 2, proc.stderr[-1500:])
         self.assertIn("__END__ 0", proc.stdout)
         self.assertIn("window_start_ms", proc.stderr)
 
     def test_prefix_reader_rejects_a_token_list_with_no_usable_token(self) -> None:
-        proc = self.run_probe("FlussPrefixReader", ["candle_live", "abc,def", "0", "0", DEAD])
+        proc = self.run_probe("FlussPrefixReader", ["candle_features", "abc,def", "0", "0", DEAD])
         self.assertEqual(proc.returncode, 2, proc.stderr[-1500:])
         self.assertIn("__END__ 0", proc.stdout)
         self.assertIn("no usable token", proc.stderr)
@@ -350,17 +350,17 @@ class InputValidationTests(ProbeTestBase):
     """P6-370 / P6-083: unusable input is refused before any RPC, with a clear message."""
 
     def test_kv_probe_rejects_zero_window_ms(self) -> None:
-        proc = self.run_probe("FlussKvProbe", ["candle_live", "0", "4", DEAD])
+        proc = self.run_probe("FlussKvProbe", ["candle_features", "0", "4", DEAD])
         self.assertEqual(proc.returncode, 2, proc.stderr[-1500:])
         self.assertIn("must be > 0", proc.stderr)
 
     def test_kv_probe_rejects_a_non_numeric_window_ms(self) -> None:
-        proc = self.run_probe("FlussKvProbe", ["candle_live", "fifteen", "4", DEAD])
+        proc = self.run_probe("FlussKvProbe", ["candle_features", "fifteen", "4", DEAD])
         self.assertEqual(proc.returncode, 2, proc.stderr[-1500:])
         self.assertIn("window_ms", proc.stderr)
 
     def test_kv_probe_rejects_a_token_list_with_no_usable_token(self) -> None:
-        proc = self.run_probe("FlussKvProbe", ["candle_live", "15000", "x,y", DEAD])
+        proc = self.run_probe("FlussKvProbe", ["candle_features", "15000", "x,y", DEAD])
         self.assertEqual(proc.returncode, 2, proc.stderr[-1500:])
         self.assertIn("no usable token", proc.stderr)
 
@@ -370,7 +370,7 @@ class LiveSmokeTests(ProbeTestBase):
     """The only layer that exercises filtering/formatting — needs the dev stack up."""
 
     def test_prefix_reader_reads_a_kv_table_by_token(self) -> None:
-        proc = self.run_probe("FlussPrefixReader", ["candle_live", "4", "0", "0", BOOTSTRAP],
+        proc = self.run_probe("FlussPrefixReader", ["candle_features", "4", "0", "0", BOOTSTRAP],
                               timeout=LIVE_TIMEOUT_S)
         self.assert_no_classpath_error(self, proc)
         self.assertIn("__END__ ", proc.stdout)
@@ -399,7 +399,7 @@ class LiveSmokeTests(ProbeTestBase):
         self.assertTrue(int(partitions) >= 1 and int(buckets) >= 1 and int(log_end) >= 0)
 
     def test_kv_probe_emits_tsv_rows_or_says_why_not(self) -> None:
-        proc = self.run_probe("FlussKvProbe", ["candle_live", "15000", "4,7", BOOTSTRAP],
+        proc = self.run_probe("FlussKvProbe", ["candle_features", "15000", "4,7", BOOTSTRAP],
                               timeout=LIVE_TIMEOUT_S)
         self.assert_no_classpath_error(self, proc)
         rows = [l for l in proc.stdout.splitlines() if _is_row(l, 6)]

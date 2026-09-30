@@ -74,15 +74,9 @@ class StrategyHostFeaturesTest {
 
     /** Wave B (DEC-059): the merged write path is opt-in via the env flag. */
     private void openWithMergedRows(String strategyId) throws Exception {
-        Map<String, String> env = env();
-        env.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
-        function = new StrategyHostFunction(SignalJobConfig.from(env), List.of(strategyId));
-        harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
-                function,
-                r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
-                r -> r.getLong(CandleClosedColumns.INSTRUMENT_TOKEN),
-                Types.LONG);
-        harness.open();
+        // Wave C W-C5a: merged rows are always on (the host is the only
+        // writer) — the helper stays for readable call sites.
+        open(strategyId);
     }
 
     private List<RowData> mergedRows() {
@@ -194,16 +188,19 @@ class StrategyHostFeaturesTest {
     }
 
     @Test
-    void mergedRowsStayOffByDefault() throws Exception {
-        // Wave B ships behind MERGED_CANDLE_FEATURES_ENABLED=false: the default
-        // host must never register the merged side output.
+    void mergedRowsShipByDefault() throws Exception {
+        // Wave C W-C5a (DEC-059 end state): the host is the only candle
+        // writer — the merged side output is always wired, no flag.
         open(FeatureProbe.RULE_ID);
         harness.processElement1(live(TOKEN, Timeframe.FIFTEEN_S, 0L, 100L, 10L, 1), 1_000L);
         harness.processElement2(
                 closed(TOKEN, Timeframe.FIFTEEN_S.code(), 15_000L, 100L, 10L, 2), 2_000L);
 
-        assertEquals(List.of(), mergedRows());
-        assertEquals(0, function.mergedRowsEmittedForTest());
+        List<RowData> rows = mergedRows();
+        assertEquals(2, rows.size(), "one forming + one sealed row by default");
+        assertFalse(rows.get(0).getBoolean(MergedCandleFeaturesColumns.SEALED));
+        assertTrue(rows.get(1).getBoolean(MergedCandleFeaturesColumns.SEALED));
+        assertEquals(2, function.mergedRowsEmittedForTest());
     }
 
     @Test
@@ -273,7 +270,9 @@ class StrategyHostFeaturesTest {
         harness.processElement1(liveCode(TOKEN, "NOPE", 0L, 777L, 10L, 1), 1_000L);
 
         assertEquals(0, function.featureTickUpdatesForTest());
-        assertEquals(1, function.featureFailuresForTest());
+        // W-C5a: the merged-row emission is always on, so the invalid TF is
+        // refused twice — once by the feature update, once by the emission.
+        assertEquals(2, function.featureFailuresForTest());
         assertEquals(1, probe().liveCalls, "strategy delivery must survive a feature failure");
     }
 
@@ -318,7 +317,9 @@ class StrategyHostFeaturesTest {
                 closed(TOKEN, "NOPE", 60_000L, 777L, 10L, 1), 2_000L);
 
         assertEquals(0, function.featureCloseUpdatesForTest());
-        assertEquals(1, function.featureFailuresForTest());
+        // W-C5a: two refusal sites again — the close-feature update + the
+        // always-on sealed merged row.
+        assertEquals(2, function.featureFailuresForTest());
         assertEquals(1, probe().closeCalls, "strategy delivery must survive a feature failure");
     }
 

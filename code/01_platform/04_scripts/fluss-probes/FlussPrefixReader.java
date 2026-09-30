@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit;
  * Reads every row of a KV table whose bucket key is {@code instrument_token}
  * by lookup (see org.apache.fluss.client.table.Table#newLookup docs; the PK
  * columns of the read table must START with instrument_token, which is true
- * for candle_live/candle_closed (PK token,tf,window_start)). When
+ * for candle_features (PK token,tf,window_start)). When
  * instrument_token is the WHOLE
  * primary key (e.g. the single-column Signal_Candidates_current), a prefix
  * lookup is illegal — the reader falls back to a full PK lookup instead
@@ -90,7 +90,7 @@ public class FlussPrefixReader {
     }
 
     static void run(String[] args) throws Exception {
-        String table = args.length > 0 ? args[0] : "candle_live";
+        String table = args.length > 0 ? args[0] : "candle_features";
         String tokensRaw = args.length > 1 ? args[1] : "";
         long ws = args.length > 2 ? parseWindowArg(args[2], "window_start_ms") : 0L;
         long we = args.length > 3 ? parseWindowArg(args[3], "window_end_ms") : 0L;
