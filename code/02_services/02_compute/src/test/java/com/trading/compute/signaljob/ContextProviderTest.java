@@ -107,7 +107,7 @@ class ContextProviderTest {
         assertEquals(1L, provider().metrics().misses.getCount());
 
         completeLast(key);
-        assertTrue(provider().drainArrivals());
+        assertFalse(provider().drainArrivals().isEmpty());
 
         ContextCandle hit = provider().lookup(key);
         assertNotNull(hit);
@@ -128,7 +128,7 @@ class ContextProviderTest {
         assertEquals(1, provider().pendingCount());
 
         completeLast(key);
-        assertTrue(provider().drainArrivals());
+        assertFalse(provider().drainArrivals().isEmpty());
         assertNotNull(provider().lookup(key));
     }
 
@@ -152,7 +152,7 @@ class ContextProviderTest {
         assertNull(provider().lookup(key));
         now[0] += TIMEOUT_MS + 1;
 
-        assertFalse(provider().drainArrivals(), "a timeout promotes nothing");
+        assertTrue(provider().drainArrivals().isEmpty(), "a timeout promotes nothing");
         assertEquals(1L, provider().metrics().timedout.getCount());
 
         assertNull(provider().lookup(key));
@@ -183,7 +183,7 @@ class ContextProviderTest {
         assertEquals(1, provider().pendingCount(), "the live fetch still owns the key");
 
         completeLast(key);
-        assertTrue(provider().drainArrivals());
+        assertFalse(provider().drainArrivals().isEmpty());
         assertNotNull(provider().lookup(key));
     }
 
@@ -194,7 +194,7 @@ class ContextProviderTest {
 
         assertNull(provider().lookup(key));
         fetcher.last(key).completeExceptionally(new RuntimeException("fluss down"));
-        assertFalse(provider().drainArrivals());
+        assertTrue(provider().drainArrivals().isEmpty());
 
         assertEquals(1L, provider().metrics().failed.getCount());
         assertEquals(0, provider().cacheCount());
@@ -213,7 +213,7 @@ class ContextProviderTest {
 
         assertNull(provider().lookup(key));
         fetcher.last(key).complete(null); // Fluss: no row for this PK
-        assertFalse(provider().drainArrivals());
+        assertTrue(provider().drainArrivals().isEmpty());
 
         assertEquals(1L, provider().metrics().absent.getCount());
         assertEquals(0, provider().cacheCount());
@@ -253,7 +253,7 @@ class ContextProviderTest {
         for (ContextKey k : List.of(k1, k2, k3)) {
             assertNull(provider.lookup(k));
             completeLast(k);
-            assertTrue(provider.drainArrivals());
+            assertFalse(provider.drainArrivals().isEmpty());
         }
 
         assertEquals(2, provider.cacheCount(), "budget holds two entries");
@@ -299,7 +299,7 @@ class ContextProviderTest {
         pool.shutdown();
         assertTrue(pool.awaitTermination(10, TimeUnit.SECONDS));
 
-        assertTrue(provider.drainArrivals());
+        assertFalse(provider.drainArrivals().isEmpty());
         assertEquals(n, provider.metrics().completed.getCount());
         assertEquals(n, provider.cacheCount());
         assertEquals(0L, provider.metrics().late.getCount());
@@ -317,7 +317,7 @@ class ContextProviderTest {
         ContextKey key = key(7L, Timeframe.ONE_M, 60_000L);
         assertNull(view.candle(key.token(), key.tf(), key.windowStart()));
         completeLast(key);
-        assertTrue(provider().drainArrivals());
+        assertFalse(provider().drainArrivals().isEmpty());
 
         ContextCandle c = view.candle(key.token(), key.tf(), key.windowStart());
         assertNotNull(c);
@@ -330,6 +330,39 @@ class ContextProviderTest {
         provider().close();
         assertTrue(fetcher.closed.get());
         provider = null; // torn down already
+    }
+
+    // ── C2 additions: promoted-key reporting + per-token pending ────────────
+
+    @Test
+    @DisplayName("drainArrivals returns exactly the keys promoted in that pass")
+    void drainReturnsPromotedKeys() {
+        ContextKey k1 = key(1L, Timeframe.ONE_M, 60_000L);
+        ContextKey k2 = key(2L, Timeframe.ONE_M, 60_000L);
+        assertNull(provider().lookup(k1));
+        assertNull(provider().lookup(k2));
+
+        completeLast(k1);
+        assertEquals(List.of(k1), provider().drainArrivals());
+        assertTrue(provider().drainArrivals().isEmpty(), "the pass already consumed k1");
+
+        completeLast(k2);
+        assertEquals(List.of(k2), provider().drainArrivals());
+    }
+
+    @Test
+    @DisplayName("hasPendingForToken reports only tokens with an in-flight fetch")
+    void hasPendingForToken() {
+        ContextKey k1 = key(1L, Timeframe.ONE_M, 60_000L);
+        assertFalse(provider().hasPendingForToken(1L), "nothing scheduled yet");
+
+        assertNull(provider().lookup(k1));
+        assertTrue(provider().hasPendingForToken(1L));
+        assertFalse(provider().hasPendingForToken(2L), "another token never counts");
+
+        completeLast(k1);
+        provider().drainArrivals();
+        assertFalse(provider().hasPendingForToken(1L), "resolved transfers stop counting");
     }
 
     // ── fakes ───────────────────────────────────────────────────────────────

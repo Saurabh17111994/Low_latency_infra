@@ -67,7 +67,7 @@ per-tick deep-copy cost, no consumer.
 #### P2 - build (each item starts only when its window opens)
 
 - [~] **C1** `ContextProvider` + `ContextView` skeleton (no consumer yet)
-- [ ] **C2** Contract additions + host wiring (default callbacks, last-live snapshot, timer wake-up)
+- [~] **C2** Contract additions + host wiring (default callbacks, last-live snapshot, timer wake-up)
 - [ ] **C3** First consumer proves live-candle firing end-to-end
 - [ ] **C4** Compact context derivation + warm-up (T3)
 
@@ -80,9 +80,9 @@ per-tick deep-copy cost, no consumer.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | P1 - design lock | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
-| P2 - build (each item starts only when its window opens) | 4 | 0 | 1 | 3 | 0 | 0 | 0 |
+| P2 - build (each item starts only when its window opens) | 4 | 0 | 2 | 2 | 0 | 0 | 0 |
 | P3 - certification | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
-| **Total** | **6** | **1** | **1** | **4** | **0** | **0** | **0** |
+| **Total** | **6** | **1** | **2** | **3** | **0** | **0** | **0** |
 
 ## Overview
 

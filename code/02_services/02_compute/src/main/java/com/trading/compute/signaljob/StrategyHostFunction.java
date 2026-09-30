@@ -16,6 +16,7 @@ import org.apache.flink.api.common.typeinfo.Types;
 import org.apache.flink.metrics.Counter;
 import org.apache.flink.metrics.Histogram;
 import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.streaming.api.TimerService;
 import org.apache.flink.streaming.api.functions.co.KeyedCoProcessFunction;
 import org.apache.flink.table.data.GenericMapData;
 import org.apache.flink.table.data.GenericRowData;
@@ -74,6 +75,13 @@ public class StrategyHostFunction
     @Deprecated
     static final int GLOBAL_SLOT_CAP = SUBTASK_SLOT_CAP;
 
+    /**
+     * C2: delay between a context miss and the keyed processing-time wake-up
+     * that promotes the completed fetch and re-evaluates waiting strategies
+     * (~2 ms; the lookup itself typically completes in single-digit ms).
+     */
+    static final long CONTEXT_WAKEUP_DELAY_MS = 2L;
+
     /** P2-058 horizon: newest-N ids kept per (rule, tf) ledger on compaction. */
     static final int EMITTED_IDS_RETAIN_PER_LEDGER = 16;
 
@@ -118,8 +126,18 @@ public class StrategyHostFunction
     /** C1: on-demand closed-candle provider — null unless {@code STRATEGY_CONTEXT_ENABLED}. */
     private transient ContextProvider contextProvider;
 
-    /** C1: strategy-facing view over {@link #contextProvider} (handed to strategies in C2). */
+    /**
+     * Strategy-facing view over {@link #contextProvider}; always non-null
+     * after {@code open()} — the disabled singleton when the flag is off (C2).
+     */
     private transient ContextView contextView;
+
+    /**
+     * C2: last live forming-candle snapshot per token, kept only while that
+     * token has a pending context request (bounded by the in-flight cap), plus
+     * the armed flag so at most one wake-up timer per token is outstanding.
+     */
+    private transient Map<Long, PendingLive> pendingLiveSnapshot;
 
     /** Per-instrument heap slots — intentional amnesia, not checkpointed. */
     private final Map<Long, HostSlot> slots = new HashMap<>();
@@ -248,15 +266,18 @@ public class StrategyHostFunction
                     providerFactory != null ? providerFactory : ContextProvider::open;
             contextProvider = factory.create(config, getRuntimeContext().getMetricGroup());
             contextView = contextProvider.view();
+            pendingLiveSnapshot = new HashMap<>();
             LOG.info("strategy-host: context provider ready (table={}, cacheBytes={}, "
                             + "maxInflight={}, fetchTimeoutMs={})",
                     config.candleClosedTable(), config.contextCacheBytes(),
                     config.contextMaxInflight(), config.contextFetchTimeoutMs());
+        } else {
+            contextView = ContextView.disabled();
         }
     }
 
     /**
-     * C1: closes the context provider (and its Fluss client) when
+     * C1/C2: closes the context provider (and its Fluss client) when
      * {@code STRATEGY_CONTEXT_ENABLED} opened one; a no-op otherwise, so
      * flag-off behavior is unchanged.
      */
@@ -266,6 +287,7 @@ public class StrategyHostFunction
             contextProvider.close();
             contextProvider = null;
             contextView = null;
+            pendingLiveSnapshot = null;
         }
     }
 
@@ -276,6 +298,12 @@ public class StrategyHostFunction
         HostSlot slot = slotFor(ctx.getCurrentKey());
         if (slot == null) {
             return;
+        }
+        if (contextProvider != null) {
+            // C2: promote any completed fetch before the fan-out, so a
+            // strategy whose data arrived since the last tick sees it now
+            // (the wake-up timer covers the between-ticks case).
+            contextProvider.drainArrivals();
         }
         // Low-latency KPI: age of the tick this in-memory read is based on.
         long evtTime = live.getLong(CandleLiveColumns.LAST_EVENT_TIME);
@@ -289,12 +317,15 @@ public class StrategyHostFunction
             // P2-057: one strategy must not starve the others — isolate,
             // count, and continue to the next strategy.
             try {
-                s.onLiveTick(live, slot.features, new DedupCollector(out, s.ruleId()));
+                s.onLiveTick(live, contextView, slot.features, new DedupCollector(out, s.ruleId()));
             } catch (Exception e) {
                 countFailedStrategy();
                 LOG.warn("strategy-host: dropping failed onLiveTick rule={} token={}: {}",
                         s.ruleId(), ctx.getCurrentKey(), e.toString());
             }
+        }
+        if (contextProvider != null) {
+            trackPendingContext(ctx.getCurrentKey(), live, ctx.timerService());
         }
     }
 
@@ -321,6 +352,117 @@ public class StrategyHostFunction
                         s.ruleId(), ctx.getCurrentKey(), e.toString());
             }
         }
+    }
+
+    /**
+     * C2 context wake-up: promotes completed fetches and re-evaluates waiting
+     * strategies on the live snapshot, then re-arms while the token still has
+     * a pending request. Never fires unless the provider flag is on and a
+     * strategy asked for context.
+     */
+    @Override
+    public void onTimer(long timestamp, OnTimerContext ctx, Collector<RowData> out)
+            throws Exception {
+        ContextProvider provider = contextProvider;
+        if (provider == null || pendingLiveSnapshot == null) {
+            return;
+        }
+        long key = ctx.getCurrentKey();
+        PendingLive self = pendingLiveSnapshot.get(key);
+        if (self != null) {
+            self.wakeupArmed = false;
+        }
+        List<ContextKey> promoted = provider.drainArrivals();
+        for (ContextKey ready : promoted) {
+            long token = ready.token();
+            HostSlot slot = slots.get(token);
+            PendingLive pending = pendingLiveSnapshot.get(token);
+            if (slot == null || pending == null || pending.live == null) {
+                continue;
+            }
+            for (SignalStrategy s : slot.strategies.values()) {
+                try {
+                    s.onContextReady(pending.live, contextView, slot.features,
+                            new DedupCollector(out, s.ruleId()));
+                } catch (Exception e) {
+                    countFailedStrategy();
+                    LOG.warn("strategy-host: dropping failed onContextReady rule={} token={}: {}",
+                            s.ruleId(), token, e.toString());
+                }
+            }
+        }
+        // The firing key's wake-up lifecycle. Timers are keyed, so only this
+        // key can be re-armed from here; a still-pending token keeps its own
+        // timer (or its next live tick re-arms it).
+        if (provider.hasPendingForToken(key)) {
+            armWakeup(key, ctx.timerService());
+        } else {
+            pendingLiveSnapshot.remove(key);
+        }
+        // A token whose data was just dispatched and has no further request
+        // needs no snapshot anymore.
+        for (ContextKey ready : promoted) {
+            long token = ready.token();
+            if (token != key && !provider.hasPendingForToken(token)) {
+                pendingLiveSnapshot.remove(token);
+            }
+        }
+    }
+
+    /**
+     * C2: after a live fan-out, keep the freshest live snapshot for the token
+     * while any strategy has a pending context request and make sure a wake-up
+     * timer is armed; once nothing is pending the snapshot is dropped.
+     */
+    private void trackPendingContext(long token, RowData live, TimerService timers) {
+        if (pendingLiveSnapshot == null) {
+            return;
+        }
+        if (contextProvider.hasPendingForToken(token)) {
+            PendingLive pending = pendingLiveSnapshot.get(token);
+            if (pending == null) {
+                pending = new PendingLive();
+                pendingLiveSnapshot.put(token, pending);
+            }
+            pending.live = copyLiveRow(live);
+            armWakeup(token, timers);
+        } else {
+            pendingLiveSnapshot.remove(token);
+        }
+    }
+
+    /** C2: arms at most one processing-time wake-up per pending token. */
+    private void armWakeup(long token, TimerService timers) {
+        PendingLive pending = pendingLiveSnapshot.get(token);
+        if (pending == null || pending.wakeupArmed) {
+            return;
+        }
+        pending.wakeupArmed = true;
+        timers.registerProcessingTimeTimer(timers.currentProcessingTime() + CONTEXT_WAKEUP_DELAY_MS);
+    }
+
+    /**
+     * C2: private copy of the live row retained while a token has a pending
+     * request. Generic rows are copied field-by-field so the snapshot can
+     * never alias a reused input object; any other RowData implementation is
+     * retained by reference (this job never enables object reuse, and every
+     * row on this path is a GenericRowData).
+     */
+    private static RowData copyLiveRow(RowData live) {
+        if (live instanceof GenericRowData generic) {
+            GenericRowData copy = new GenericRowData(generic.getArity());
+            for (int i = 0; i < generic.getArity(); i++) {
+                copy.setField(i, generic.getField(i));
+            }
+            return copy;
+        }
+        return live;
+    }
+
+    /** C2: the live snapshot for one token while its context request is pending. */
+    private static final class PendingLive {
+        RowData live;
+        boolean wakeupArmed;
     }
 
     private HostSlot slotFor(long key) {
@@ -640,6 +782,11 @@ public class StrategyHostFunction
     /** C1 test seam: the strategy-facing context view (null when disabled). */
     ContextView contextViewForTest() {
         return contextView;
+    }
+
+    /** C2 test seam: tokens with a retained live snapshot (pending context). */
+    int pendingLiveCountForTest() {
+        return pendingLiveSnapshot == null ? 0 : pendingLiveSnapshot.size();
     }
 
     /** Test seam: one instrument's shared feature state, or null when no slot exists. */

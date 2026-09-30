@@ -39,9 +39,15 @@
 >   `StrategyHostFunction`, flag `STRATEGY_CONTEXT_ENABLED` default OFF) —
 >   asynchronous exact-PK Fluss lookups, single-flight, bounded (8 MB/subtask
 >   cache, 32 in-flight, 100 ms fetch timeout, 250 ms retry cooldown), heap-only,
->   no new operators/tables/sinks. Strategies cannot reach it yet: the contract
->   additions (`onContextReady`, last-live snapshot) and the first consumer land
->   in C2/C3 (`docs/plans/2026-09-30-strategy-context-live-fetch.md`).
+>   no new operators/tables/sinks. C2 (CHG-446) wires the contract: the host
+>   hands a `ContextView` to the new `onLiveTick(live, context, features, out)`
+>   overload (default delegates to the existing feature-aware form, so
+>   non-fetching strategies are byte-identical) and fires the new default no-op
+>   `onContextReady(live, context, features, out)` on a 2 ms keyed
+>   processing-time wake-up with the token's most recent live snapshot while a
+>   request is pending (idempotent per `(token, last_event_time)`; with the flag
+>   off the view is the disabled singleton, every read null, nothing scheduled).
+>   First consumer: C3 (`docs/plans/2026-09-30-strategy-context-live-fetch.md`).
 > - Dev switch (2026-09-27, CHG-344): the flags live in the compose
 >   `flink-common` env anchor (`code/01_platform/01_docker/docker-compose.yml`,
 >   defaults OFF) and are set for dev in `01_docker/.env`; a `make up` recreate

@@ -1,8 +1,10 @@
 package com.trading.compute.signaljob;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -166,16 +168,31 @@ final class ContextProvider implements AutoCloseable {
     }
 
     /**
+     * Mailbox thread only: true when this token has at least one in-flight
+     * fetch. The host uses it to decide whether to keep a live snapshot and
+     * arm the wake-up timer (C2).
+     */
+    boolean hasPendingForToken(long token) {
+        for (ContextKey key : pending.keySet()) {
+            if (key.token() == token) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Mailbox thread only: moves completed fetches into the cache, expires
-     * transfers past the fetch timeout, and returns true when at least one
-     * value was promoted (C2 uses this to re-dispatch waiting strategies).
+     * transfers past the fetch timeout, and returns exactly the keys promoted
+     * in this pass (C2 re-dispatches those to the strategies waiting on the
+     * live path; an empty list means nothing became ready).
      *
      * <p>An arrival whose fetch sequence no longer matches the pending entry
      * (timed out, or superseded by a retry) is dropped as late — it must not
      * satisfy a newer request.
      */
-    boolean drainArrivals() {
-        boolean promoted = false;
+    List<ContextKey> drainArrivals() {
+        List<ContextKey> promoted = new ArrayList<>();
         long now = clock.getAsLong();
         if (!arrivals.isEmpty()) {
             for (Iterator<Map.Entry<ContextKey, Arrival>> it = arrivals.entrySet().iterator();
@@ -202,7 +219,7 @@ final class ContextProvider implements AutoCloseable {
                 }
                 putCache(key, arrival.candle());
                 metrics.completed.inc();
-                promoted = true;
+                promoted.add(key);
             }
         }
         if (!pending.isEmpty()) {

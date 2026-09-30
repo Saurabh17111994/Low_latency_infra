@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.trading.compute.feature.FeatureView;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -33,9 +34,16 @@ class StrategyHostFunctionTest {
 
     private KeyedTwoInputStreamOperatorTestHarness<Long, RowData, RowData, RowData> harness;
     private StrategyHostFunction function;
+    private FakeFetcher fetcher;
+    private final long[] contextNow = {1_000_000L};
+    private boolean probeRegistered;
 
     @AfterEach
     void tearDown() throws Exception {
+        if (probeRegistered) {
+            Strategies.unregisterForTest(ContextWiringProbe.RULE_ID);
+            probeRegistered = false;
+        }
         if (harness != null) {
             harness.close();
             harness = null;
@@ -560,5 +568,235 @@ class StrategyHostFunctionTest {
         harness.close();
         harness = null;
         assertTrue(closed.get(), "operator close must close the provider (and its fetcher)");
+    }
+
+    // — C2 context wiring ————————————————————————————————————————————————
+    // (docs/plans/2026-09-30-strategy-context-live-fetch.md)
+
+    private void openWithContextProbe(boolean refetchOnReady) throws Exception {
+        Strategies.registerForTest(ContextWiringProbe.RULE_ID,
+                (config, metrics) -> new ContextWiringProbe(refetchOnReady));
+        probeRegistered = true;
+        fetcher = new FakeFetcher();
+        Map<String, String> env = env();
+        env.put("STRATEGY_HOST_ENABLED", "true");
+        env.put("MULTITF_ENABLED", "true");
+        env.put("STRATEGIES", ContextWiringProbe.RULE_ID);
+        env.put("STRATEGY_CONTEXT_ENABLED", "true");
+        function = new StrategyHostFunction(
+                SignalJobConfig.from(env), List.of(ContextWiringProbe.RULE_ID), false,
+                (config, metrics) -> new ContextProvider(
+                        fetcher,
+                        config.contextCacheBytes(),
+                        config.contextMaxInflight(),
+                        config.contextFetchTimeoutMs(),
+                        config.contextRetryCooldownMs(),
+                        () -> contextNow[0],
+                        metrics));
+        harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
+                function,
+                r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
+                r -> r.getLong(CandleClosedColumns.INSTRUMENT_TOKEN),
+                Types.LONG);
+        harness.open();
+    }
+
+    private static ContextCandle candle(long token, Timeframe tf, long ws, long close) {
+        return new ContextCandle(token, tf, ws, ws + tf.windowMs(),
+                close, close + 50L, close - 50L, close, 10L, 3, ws + tf.windowMs() - 1_000L);
+    }
+
+    @Test
+    @DisplayName("C2: a miss arms a wake-up; the ready callback fires on the live snapshot")
+    void contextReadyFiresOnLiveSnapshot() throws Exception {
+        openWithContextProbe(false);
+
+        harness.processElement1(
+                live(ContextWiringProbe.TOKEN, Timeframe.ONE_M, 120_000L, 1_000L), 120_500L);
+
+        ContextWiringProbe probe = (ContextWiringProbe) function.strategyForTest(
+                ContextWiringProbe.TOKEN, ContextWiringProbe.RULE_ID);
+        assertNotNull(probe);
+
+        assertEquals(1, probe.missCount, "the first tick asks and misses");
+        assertEquals(0, probe.readyCount, "a miss must not evaluate the context path");
+        assertEquals(1, function.pendingLiveCountForTest(),
+                "a live snapshot is retained while the request is pending");
+        assertEquals(1, fetcher.fetchCount);
+
+        fetcher.of(new ContextKey(
+                        ContextWiringProbe.TOKEN, Timeframe.ONE_M, ContextWiringProbe.WINDOW))
+                .complete(candle(ContextWiringProbe.TOKEN, Timeframe.ONE_M,
+                        ContextWiringProbe.WINDOW, 1_234L));
+
+        harness.setProcessingTime(10_000L); // fire the wake-up timer
+
+        assertEquals(1, probe.readyCount, "the wake-up re-evaluates on the live candle");
+        assertEquals(1_234L, probe.lastReadyClosePaise, "the fetched candle is served from cache");
+        assertEquals(121_000L, probe.lastReadyEventTime,
+                "the callback carries the live snapshot (window start + 1s), never the closed candle");
+        assertEquals(0, function.pendingLiveCountForTest(),
+                "nothing pending → the snapshot is dropped");
+    }
+
+    @Test
+    @DisplayName("C2: a fetch past its timeout clears the snapshot and never calls back")
+    void contextTimeoutClearsSnapshotWithoutCallback() throws Exception {
+        openWithContextProbe(false);
+
+        harness.processElement1(
+                live(ContextWiringProbe.TOKEN, Timeframe.ONE_M, 120_000L, 1_000L), 120_500L);
+        ContextWiringProbe probe = (ContextWiringProbe) function.strategyForTest(
+                ContextWiringProbe.TOKEN, ContextWiringProbe.RULE_ID);
+        assertEquals(1, function.pendingLiveCountForTest());
+
+        contextNow[0] += 101; // past the 100 ms provider fetch timeout
+        harness.setProcessingTime(10_000L);
+
+        assertEquals(0, probe.readyCount, "a timed-out fetch is not a ready callback");
+        assertEquals(0, function.pendingLiveCountForTest());
+        assertEquals(1L, function.contextProviderForTest().metrics().timedout.getCount());
+    }
+
+    @Test
+    @DisplayName("C2: a request made inside onContextReady stays pending and resolves too")
+    void refetchOnReadyKeepsPending() throws Exception {
+        openWithContextProbe(true);
+
+        harness.processElement1(
+                live(ContextWiringProbe.TOKEN, Timeframe.ONE_M, 120_000L, 1_000L), 120_500L);
+        ContextWiringProbe probe = (ContextWiringProbe) function.strategyForTest(
+                ContextWiringProbe.TOKEN, ContextWiringProbe.RULE_ID);
+        fetcher.of(new ContextKey(
+                        ContextWiringProbe.TOKEN, Timeframe.ONE_M, ContextWiringProbe.WINDOW))
+                .complete(candle(ContextWiringProbe.TOKEN, Timeframe.ONE_M,
+                        ContextWiringProbe.WINDOW, 1_234L));
+        harness.setProcessingTime(10_000L);
+
+        assertEquals(1, probe.readyCount);
+        assertEquals(2, fetcher.fetchCount, "the ready callback asked for one more window");
+        assertEquals(1, function.pendingLiveCountForTest(),
+                "the follow-up request keeps the snapshot");
+
+        contextNow[0] += 10; // still inside the timeout
+        harness.setProcessingTime(20_000L);
+        assertEquals(1, probe.readyCount, "nothing new is ready yet");
+
+        fetcher.of(new ContextKey(ContextWiringProbe.TOKEN, Timeframe.ONE_M,
+                        ContextWiringProbe.WINDOW + 60_000L))
+                .complete(candle(ContextWiringProbe.TOKEN, Timeframe.ONE_M,
+                        ContextWiringProbe.WINDOW + 60_000L, 2_345L));
+        harness.setProcessingTime(30_000L);
+
+        assertEquals(2, probe.readyCount, "the follow-up completes on its own wake-up");
+        assertEquals(0, function.pendingLiveCountForTest());
+    }
+
+    @Test
+    @DisplayName("C2: flag on with a non-requesting strategy is inert")
+    void flagOnNonRequestingStrategyIsInert() throws Exception {
+        fetcher = new FakeFetcher();
+        Map<String, String> env = env();
+        env.put("STRATEGY_HOST_ENABLED", "true");
+        env.put("MULTITF_ENABLED", "true");
+        env.put("STRATEGIES", StubSmokeStrategy.RULE_ID);
+        env.put("STRATEGY_CONTEXT_ENABLED", "true");
+        function = new StrategyHostFunction(
+                SignalJobConfig.from(env), List.of(StubSmokeStrategy.RULE_ID), false,
+                (config, metrics) -> new ContextProvider(
+                        fetcher,
+                        config.contextCacheBytes(),
+                        config.contextMaxInflight(),
+                        config.contextFetchTimeoutMs(),
+                        config.contextRetryCooldownMs(),
+                        System::currentTimeMillis,
+                        metrics));
+        harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
+                function,
+                r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
+                r -> r.getLong(CandleClosedColumns.INSTRUMENT_TOKEN),
+                Types.LONG);
+        harness.open();
+
+        harness.processElement1(live(111L, Timeframe.FIFTEEN_S, 0L, 100L), 1_000L);
+        harness.processElement2(closed(111L, Timeframe.FIFTEEN_S, 0L, 100L), 1_000L);
+
+        assertEquals(0, function.pendingLiveCountForTest(), "no request → no snapshot");
+        assertEquals(0, function.contextProviderForTest().pendingCount());
+        assertEquals(0, fetcher.fetchCount);
+        assertNotNull(stubFor(111L), "the certified fan-out still runs");
+    }
+
+    /**
+     * C2 probe (registered for the test JVM via {@link Strategies#registerForTest}):
+     * asks for one old 1m candle on its first context-aware live tick, then
+     * records what the ready callback saw. Never emits — C3 proves emission.
+     */
+    static final class ContextWiringProbe implements SignalStrategy {
+        private static final long serialVersionUID = 1L;
+        static final String RULE_ID = "ctx-wiring-probe-v1";
+        static final long TOKEN = 777L;
+        static final long WINDOW = 60_000L;
+
+        private final boolean refetchOnReady;
+        private boolean requested;
+        long missCount;
+        long readyCount;
+        long lastReadyEventTime = -1L;
+        long lastReadyClosePaise = -1L;
+
+        ContextWiringProbe(boolean refetchOnReady) {
+            this.refetchOnReady = refetchOnReady;
+        }
+
+        @Override
+        public String ruleId() {
+            return RULE_ID;
+        }
+
+        @Override
+        public void onClosedCandle(RowData closed, Collector<RowData> out) {}
+
+        @Override
+        public void onLiveTick(RowData live, Collector<RowData> out) {}
+
+        @Override
+        public void onLiveTick(RowData live, ContextView context, FeatureView features,
+                Collector<RowData> out) {
+            if (!requested) {
+                requested = true;
+                if (context.candle(TOKEN, Timeframe.ONE_M, WINDOW) == null) {
+                    missCount++;
+                }
+            }
+        }
+
+        @Override
+        public void onContextReady(RowData live, ContextView context, FeatureView features,
+                Collector<RowData> out) {
+            readyCount++;
+            lastReadyEventTime = live.getLong(CandleLiveColumns.LAST_EVENT_TIME);
+            ContextCandle candle = context.candle(TOKEN, Timeframe.ONE_M, WINDOW);
+            lastReadyClosePaise = candle == null ? -1L : candle.closePaise();
+            if (refetchOnReady && readyCount == 1) {
+                context.candle(TOKEN, Timeframe.ONE_M, WINDOW + 60_000L);
+            }
+        }
+    }
+
+    /** C2 test fetcher: one controllable future per key. */
+    static final class FakeFetcher implements CandleFetcher {
+        private final Map<ContextKey, CompletableFuture<ContextCandle>> futures = new HashMap<>();
+        int fetchCount;
+
+        @Override
+        public CompletableFuture<ContextCandle> fetch(ContextKey key) {
+            fetchCount++;
+            return futures.computeIfAbsent(key, k -> new CompletableFuture<>());
+        }
+
+        CompletableFuture<ContextCandle> of(ContextKey key) {
+            return futures.get(key);
+        }
     }
 }

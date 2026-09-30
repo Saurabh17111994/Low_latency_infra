@@ -80,4 +80,52 @@ public interface SignalStrategy extends Serializable {
             throws Exception {
         onClosedCandle(closed, out);
     }
+
+    /**
+     * Context-aware overload (C2, live-candle context): the live forming-candle
+     * snapshot plus the {@link ContextView} for on-demand old data. The host
+     * calls <b>this</b> form; the default delegates to
+     * {@link #onLiveTick(RowData, FeatureView, Collector)}, so strategies that
+     * never fetch behave exactly as before. Override one form, not both.
+     *
+     * <p>A request whose value is not cached schedules exactly one
+     * asynchronous fetch and returns {@code null} for this tick; the host then
+     * calls {@link #onContextReady} with the same live candle as soon as the
+     * data arrives. Never block or wait inside this call.
+     */
+    default void onLiveTick(RowData live, ContextView context, FeatureView features,
+            Collector<RowData> out) throws Exception {
+        onLiveTick(live, features, out);
+    }
+
+    /**
+     * Context-ready re-evaluation (C2): the host calls this on the operator
+     * thread when data a strategy requested on
+     * {@link #onLiveTick(RowData, ContextView, FeatureView, Collector)} became
+     * available, passing the most recent live forming-candle snapshot. The
+     * strategy decides on that live candle — a decision is never deferred to
+     * the candle close (hard requirement,
+     * docs/plans/2026-09-30-strategy-context-live-fetch.md).
+     *
+     * <p><b>Idempotency (hard):</b> the same
+     * {@code (instrument_token, last_event_time)} may be evaluated more than
+     * once — one or more live ticks plus ready wake-ups. Implementations must
+     * be idempotent; emitted rows are deduped by their deterministic
+     * {@code candidate_id}.
+     *
+     * <p>Only data-ready transitions call this: a fetch that timed out or
+     * resolved absent is counted and retried after a cooldown, and the strategy
+     * is re-evaluated on its normal live ticks meanwhile.
+     */
+    default void onContextReady(RowData live, ContextView context, Collector<RowData> out)
+            throws Exception {}
+
+    /**
+     * Feature-aware {@link #onContextReady(RowData, ContextView, Collector)};
+     * the host calls this form.
+     */
+    default void onContextReady(RowData live, ContextView context, FeatureView features,
+            Collector<RowData> out) throws Exception {
+        onContextReady(live, context, out);
+    }
 }
