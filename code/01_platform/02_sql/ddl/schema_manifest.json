@@ -4,7 +4,7 @@
     {
       "table_name": "raw_table_1",
       "ddl_path": "02_raw_table_1.sql",
-      "ddl_sha256": "d6f848be427f458d14e5c5a3d7b9102949b66279d1018f0280721bad645e98aa",
+      "ddl_sha256": "e7318ade3f16ca4dfe6eae7664ff6abd52134289732b718d99cdb8e7ef2b2619",
       "table_kind": "LOG",
       "bucket_key": "instrument_token",
       "primary_key": null,
@@ -13,12 +13,12 @@
       "schema_version": "4",
       "writer_owner": "Ingestion",
       "retention_policy": "3d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Signal_Candidates",
       "ddl_path": "05_signal_candidates.sql",
-      "ddl_sha256": "898ab0e953a7071df41f755f4e41418977af4ef0bc87bd54d3b026997e0362a4",
+      "ddl_sha256": "4ae668f06ea9d81a822ae91d942ff0853f9038146540c245e6d6bccd6d648d58",
       "table_kind": "LOG",
       "bucket_key": "instrument_token",
       "primary_key": null,
@@ -27,12 +27,12 @@
       "schema_version": "2",
       "writer_owner": "Signal job",
       "retention_policy": "7d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Ranking_Results",
       "ddl_path": "06_ranking_results.sql",
-      "ddl_sha256": "c344e233a328d6fa257b5459097b9d17a8315f1b3df94a59e9acaf4c471df813",
+      "ddl_sha256": "b4fba5d82a5cd48c43dcfcf9c0b9a43ef9ca20ea24e39ff9d38568a9fbce2b39",
       "table_kind": "LOG",
       "bucket_key": "evaluation_id",
       "primary_key": null,
@@ -41,12 +41,12 @@
       "schema_version": "2",
       "writer_owner": "Signal job",
       "retention_policy": "7d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Trade_Decisions",
       "ddl_path": "07_trade_decisions.sql",
-      "ddl_sha256": "7b53c1ab33706f071a550b08a0aad32020f10ec4c11a48b8b243fd96b2a7bfb9",
+      "ddl_sha256": "e63d7d775912b6aa16e6d839184afd0eb728675bf7dfa01f3c2925a6f3d7cece",
       "table_kind": "LOG",
       "bucket_key": "instruction_id",
       "primary_key": null,
@@ -55,12 +55,12 @@
       "schema_version": "2",
       "writer_owner": "Signal job (sole writer)",
       "retention_policy": "7d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Fills",
       "ddl_path": "08_fills.sql",
-      "ddl_sha256": "45e64319389656142b0f6d21e81c3a0adc6f736a540b8ce7aeeb5adb07035e5e",
+      "ddl_sha256": "00ae40fc9897462fbb706165e277995948b11987f114b02ebd799f84153a1aa5",
       "table_kind": "LOG",
       "bucket_key": "postback_event_id",
       "primary_key": null,
@@ -69,12 +69,12 @@
       "schema_version": "2",
       "writer_owner": "Action Capture",
       "retention_policy": "7d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Order_Lifecycle",
       "ddl_path": "09_order_lifecycle.sql",
-      "ddl_sha256": "683b0cd95f2cc57ef5c296d9f4101c7760de7604930ab5d3832c225558ce5571",
+      "ddl_sha256": "ec90f1c03a3aa1fdef932511e11d11311f7f60a3733cc27c1138694284b64d37",
       "table_kind": "KV",
       "primary_key": "account_scope_id, broker_order_id",
       "bucket_key": null,
@@ -83,12 +83,12 @@
       "schema_version": "2",
       "writer_owner": "Action Capture",
       "retention_policy": "2d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Positions",
       "ddl_path": "10_positions.sql",
-      "ddl_sha256": "e58601213674fc206cc120f38cecb51487f5e89c2c95e2dd9f7a95f7ee3cee81",
+      "ddl_sha256": "8810294ff56b6d13333d18e688c0a0579c1e5a1eeb86dc2bfa4275222fa0a279",
       "table_kind": "KV",
       "primary_key": "position_id",
       "bucket_key": null,
@@ -97,12 +97,12 @@
       "schema_version": "2",
       "writer_owner": "Position projector (Action Capture, in-process)",
       "retention_policy": "90d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Execution_Gate",
       "ddl_path": "11_execution_gate.sql",
-      "ddl_sha256": "bca67903cf61190dea64f90bfda1c99dec4643b75c4c96082f53c2399793ea49",
+      "ddl_sha256": "dc06b264a988a02ebe012394995525361fb70e2392e0add1a0a03edcf455166f",
       "table_kind": "KV",
       "primary_key": "execution_partition_id",
       "bucket_key": null,
@@ -111,12 +111,12 @@
       "schema_version": "3",
       "writer_owner": "Executor",
       "retention_policy": "30d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Execution_Attempts",
       "ddl_path": "12_execution_attempts.sql",
-      "ddl_sha256": "a0a7352ef2c7397d074f1d0f9c14ab77d0ad7895cf418d4c87ce449c2c0438a6",
+      "ddl_sha256": "a0dbb1074d69995bbcb551d9453657bf3dd5866c4d3194a139a8912450d1b740",
       "table_kind": "KV",
       "primary_key": "execution_attempt_id",
       "bucket_key": null,
@@ -125,12 +125,12 @@
       "schema_version": "3",
       "writer_owner": "Executor",
       "retention_policy": "30d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Order_Correlation",
       "ddl_path": "13_order_correlation.sql",
-      "ddl_sha256": "78572f2ac793cbd718363dd8f56533a6654fb8eb34b7b1719799d0bffa32414f",
+      "ddl_sha256": "e9065ac4e4314a5c6fc6ab87eb4a0576f98cb645eecbd99855f2aea957722624",
       "table_kind": "KV",
       "primary_key": "instruction_id, execution_attempt_id",
       "bucket_key": null,
@@ -139,12 +139,12 @@
       "schema_version": "2",
       "writer_owner": "Executor",
       "retention_policy": "30d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Execution_Audit",
       "ddl_path": "14_execution_audit.sql",
-      "ddl_sha256": "9a21a83bec6125c9c4798085f11d084dd006587f111cc73a90c06cf7956b0784",
+      "ddl_sha256": "1af53a43e3d684695a4d306f162977250c4775588d9aa088cc5d8aba86d63fee",
       "table_kind": "LOG",
       "bucket_key": "audit_event_id",
       "primary_key": null,
@@ -153,7 +153,7 @@
       "schema_version": "2",
       "writer_owner": "Executor",
       "retention_policy": "5d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Portfolio_Reservations",
@@ -172,7 +172,7 @@
     {
       "table_name": "Postback_Quarantine",
       "ddl_path": "16_postback_quarantine.sql",
-      "ddl_sha256": "8c84a9a18c705e6893374b0c3730d61084650cb337b891d77db4fbdc8a7e1e26",
+      "ddl_sha256": "baa296dcac31df25fb37d28543feec43f846768282f78f844830309f9b1d3481",
       "table_kind": "LOG",
       "bucket_key": "quarantine_id",
       "primary_key": null,
@@ -181,7 +181,7 @@
       "schema_version": "2",
       "writer_owner": "Action Capture",
       "retention_policy": "2d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Postback_Projection_Ledger",
@@ -200,7 +200,7 @@
     {
       "table_name": "Safety_Halt_Requests",
       "ddl_path": "18_safety_halt_requests.sql",
-      "ddl_sha256": "6f7d24a596c0915727d857b0e358195fc836c446ecf0380e3553dd626f335cdb",
+      "ddl_sha256": "f73feddf54c78d3628cea0e4f6c81a00c66ee25059babb6b1e60c28b61f7855a",
       "table_kind": "KV",
       "primary_key": "halt_request_id",
       "bucket_key": null,
@@ -209,12 +209,12 @@
       "schema_version": "3",
       "writer_owner": "Authorized components (Signal job, Action Capture, platform health, operators)",
       "retention_policy": "30d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "suspected_discontinuities",
       "ddl_path": "19_suspected_discontinuities.sql",
-      "ddl_sha256": "b3ee44d9eed0a06883183adb2bd5a0a877cc96a6c94321e01da8f205ff0f484b",
+      "ddl_sha256": "a83bca661d2374bcb3ca0a41852c845cf08dbf91177b9e84ad87c22437988a3b",
       "table_kind": "LOG",
       "bucket_key": "discontinuity_id",
       "primary_key": null,
@@ -223,7 +223,7 @@
       "schema_version": "2",
       "writer_owner": "Ingestion",
       "retention_policy": "2d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "instruments",
@@ -256,7 +256,7 @@
     {
       "table_name": "Signal_Candidates_current",
       "ddl_path": "23_signal_candidates_current.sql",
-      "ddl_sha256": "b816c682b7af1baa6937a603401edf4890d154e527f3ba5fd9d78c13db38675b",
+      "ddl_sha256": "ee107b4037476c0fdf9df37d30be14a207bd0205a46d33a8cd43c91fa1fbdb68",
       "table_kind": "KV",
       "primary_key": "instrument_token",
       "bucket_key": null,
@@ -265,7 +265,7 @@
       "schema_version": "2",
       "writer_owner": "Signal job",
       "retention_policy": "7d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "trade_instruction_state",
@@ -298,7 +298,7 @@
     {
       "table_name": "Execution_Intent",
       "ddl_path": "27_execution_intent.sql",
-      "ddl_sha256": "f4306e98e73b2a95ac53d0dbdcf766395bd4bfd4f1758b2a38cc061836e64957",
+      "ddl_sha256": "5d285d29481472525084ca19622903e309c1b8bc5ceb30ccdec11464a7cc31b6",
       "table_kind": "LOG",
       "bucket_key": "instruction_id",
       "primary_key": null,
@@ -307,7 +307,7 @@
       "schema_version": "1",
       "writer_owner": "Signal job (sole writer)",
       "retention_policy": "7d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "Execution_Intent_Processed",
@@ -326,7 +326,7 @@
     {
       "table_name": "Position_State",
       "ddl_path": "29_position_state.sql",
-      "ddl_sha256": "4a5cd03ed0aa482fc956a51c083fee01fb1c10a22593114bd8f39561fcd97efa",
+      "ddl_sha256": "7947608cf8fab1e54a604d3178c766dc4bba52e382bf8121fd686f0b34b54827",
       "table_kind": "KV",
       "primary_key": "account_scope_id, instrument_token",
       "bucket_key": null,
@@ -335,7 +335,7 @@
       "schema_version": "2",
       "writer_owner": "Execution Gateway (Nautilus) \u2014 steady-state writer",
       "retention_policy": "none",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "candle_live",
@@ -354,7 +354,7 @@
     {
       "table_name": "candle_closed",
       "ddl_path": "33_candle_closed.sql",
-      "ddl_sha256": "4f3e60d881a2010634f67a83ff964681551d1c3cff8b5bfdc88501517b91478c",
+      "ddl_sha256": "393535776ff84b14f980db141466fd74ff6e0b58675445a9834ef0d8acb2b149",
       "table_kind": "KV",
       "primary_key": "instrument_token, tf, window_start",
       "bucket_key": null,
@@ -363,7 +363,7 @@
       "schema_version": "1",
       "writer_owner": "Signal job",
       "retention_policy": "7d",
-      "lake_policy": "enabled=true,format=iceberg,freshness=5min,auto-compaction=true"
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     },
     {
       "table_name": "feature_values",

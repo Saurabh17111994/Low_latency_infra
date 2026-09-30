@@ -62,7 +62,7 @@ CREATE TABLE Order_Correlation (
     'bucket.key' = 'instruction_id',
     'table.kv.format-version' = '2',
     'table.log.ttl' = '30d',
-    'table.datalake.enabled' = 'true',
+    'table.datalake.enabled' = 'false', -- DEC-060: opt-in via r2-archive-sync
     'table.datalake.format' = 'iceberg',
     'table.datalake.freshness' = '5min',
     'table.datalake.auto-compaction' = 'true'

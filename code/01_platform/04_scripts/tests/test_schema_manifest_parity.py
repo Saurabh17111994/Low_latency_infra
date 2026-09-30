@@ -52,10 +52,13 @@ def test_every_manifest_entry_equals_a_fresh_parse():
             f"regenerate with ddl_apply.py --force (never apply DDL)")
 
 
-def test_raw_table_1_lake_policy_is_enabled():
+def test_raw_table_1_lake_policy_is_opt_in():
+    # DEC-060 (2026-09-30): raw_table_1 ships lake-disabled; the configured
+    # archive list enables it through r2-archive-sync (the always-on policy
+    # that predates DEC-060 is retired).
     options = ddl_apply.parse_with_options((DDL_DIR / "02_raw_table_1.sql").read_text())
-    assert options.get("table.datalake.enabled") == "true"
-    assert ddl_apply.lake_policy_of(options).startswith("enabled=true")
+    assert options.get("table.datalake.enabled") == "false"
+    assert ddl_apply.lake_policy_of(options).startswith("enabled=false")
 
 
 def test_close_paren_semicolon_in_a_comment_cannot_truncate():

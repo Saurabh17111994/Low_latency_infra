@@ -62,7 +62,7 @@ CREATE TABLE Signal_Candidates (
     'bucket.num' = '16',
     'bucket.key' = 'instrument_token',
     'table.log.ttl' = '7d',
-    'table.datalake.enabled' = 'true',
+    'table.datalake.enabled' = 'false', -- DEC-060: opt-in via r2-archive-sync
     'table.datalake.format' = 'iceberg',
     'table.datalake.freshness' = '5min',
     'table.datalake.auto-compaction' = 'true'

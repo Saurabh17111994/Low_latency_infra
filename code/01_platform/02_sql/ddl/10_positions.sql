@@ -64,7 +64,7 @@ CREATE TABLE Positions (
     'bucket.num' = '8',
     'bucket.key' = 'position_id',
     'table.log.ttl' = '90d',
-    'table.datalake.enabled' = 'true',
+    'table.datalake.enabled' = 'false', -- DEC-060: opt-in via r2-archive-sync
     'table.datalake.format' = 'iceberg',
     'table.datalake.freshness' = '5min',
     'table.datalake.auto-compaction' = 'true'

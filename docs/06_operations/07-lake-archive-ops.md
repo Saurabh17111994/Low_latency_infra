@@ -1,7 +1,8 @@
 # Lake Archive Ops — R2 Iceberg Tiering (raw_table_1)
 
 > Runbook for the R2 lake tiering + daily-partition archive surface, live
-> since 2026-08-31 (CHG-117). Commands assume repo root; docker compose
+> since 2026-08-31 (CHG-117); per-table archive selection per DEC-060
+> (`r2-archive-sync`). Commands assume repo root; docker compose
 > needs `--env-file .env --env-file secrets.env` from `code/01_platform/01_docker/`.
 
 ## Scope
@@ -9,12 +10,38 @@
 - **Table**: `default.raw_table_1` v4 — 72 columns (indexes 0-20 unchanged as v3; 51 full-mode columns appended at 21-71, all BIGINT NULL), `event_day STRING`
   (yyyyMMdd, Asia/Kolkata) first, `PARTITIONED BY (event_day)`, auto-partition
   DAY (precreate 2 / retention 7d), bucket key `instrument_token` (16 buckets),
-  `table.datalake.enabled=true`.
+  `table.datalake.enabled=false` at create — archiving is opt-in (DEC-060: the
+  configured list enables it via `r2-archive-sync`).
 - **Lake layout**: `s3://<bucket>/lake/default/raw_table_1/data/event_day=<yyyyMMdd>/instrument_token_bucket=<N>/*.parquet`
 - **Archive history**: `s3://<bucket>/lake/_stale-20260831-v1/raw_table_1/` —
   62 pre-migration objects. **Do NOT delete** (rollback source, CHG-117).
-- The other nine 2d-TTL tables remain lake-disabled in dev (2026-08-13 note in
-  `08_implementation/02-schema-storage.md`); only raw_table_1 is migrated.
+- **Archive selection (DEC-060)**: every table ships
+  `table.datalake.enabled=false`; the configured list (`EOD_TABLES`) is the
+  authority — `r2-archive-sync` enables exactly those tables and disables any
+  other, and the gate preflight fails if a table outside the list is set to
+  archive. Nothing outside the list is archived.
+
+## Archive selection (DEC-060)
+
+Which tables archive to R2 is chosen by configuration — one list, nothing else.
+Per table, never merged: each selected table lands as its own lake table.
+
+```bash
+# what would change (default: dry run, read-only)
+python3 code/01_platform/04_scripts/r2_archive_sync.py --tables candle_closed
+
+# apply: enable exactly the listed tables, disable any unlisted enabled table
+python3 code/01_platform/04_scripts/r2_archive_sync.py --tables candle_closed --apply
+```
+
+- The same list is the EOD controller's scope (env `EOD_TABLES` in the deck).
+  The gate preflight fails when a live table outside it is set to archive
+  (fail-closed; an unset list means nothing may be enabled).
+- A legacy table (created before the cluster gained `datalake.format`) or one
+  whose lake name already exists with a different schema (stale pre-wipe
+  Iceberg table) refuses the ALTER: the tool reports it and exits 1 — recreate
+  the table, or archive/move the stale objects aside first (`EnableTiering.java`
+  notes), never delete.
 
 ## Bucket behaviour: versioning, retention, restore
 

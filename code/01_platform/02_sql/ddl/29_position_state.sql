@@ -51,7 +51,7 @@ CREATE TABLE Position_State (
     'bucket.num' = '16',
     'bucket.key' = 'instrument_token', -- P4-005: ⊆ composite PK
     'table.kv.format-version' = '2', -- L6-2: subset bucket key is raw-client writable only with v2 (COMPAT-FLUSS-005)
-    'table.datalake.enabled' = 'true',
+    'table.datalake.enabled' = 'false', -- DEC-060: opt-in via r2-archive-sync
     'table.datalake.format' = 'iceberg',
     'table.datalake.freshness' = '5min',
     'table.datalake.auto-compaction' = 'true'

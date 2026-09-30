@@ -75,7 +75,7 @@ CREATE TABLE Safety_Halt_Requests (
     'bucket.num' = '4',
     'bucket.key' = 'halt_request_id',
     'table.log.ttl' = '30d',
-    'table.datalake.enabled' = 'true',
+    'table.datalake.enabled' = 'false', -- DEC-060: opt-in via r2-archive-sync
     'table.datalake.format' = 'iceberg',
     'table.datalake.freshness' = '5min',
     'table.datalake.auto-compaction' = 'true'

@@ -166,7 +166,7 @@ CREATE TABLE raw_table_1 (
     'table.auto-partition.num-precreate' = '2',
     'table.auto-partition.num-retention' = '3', -- 2026-09-30 (A2): matches log.ttl 3d (partition GC alone must not drop before VERIFIED)
     'table.auto-partition.time-zone' = 'Asia/Kolkata',
-    'table.datalake.enabled' = 'true',
+    'table.datalake.enabled' = 'false', -- DEC-060: opt-in via r2-archive-sync
     'table.datalake.format' = 'iceberg',
     'table.datalake.freshness' = '5min',
     'table.datalake.auto-compaction' = 'true'

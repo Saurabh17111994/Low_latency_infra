@@ -120,7 +120,7 @@ CREATE TABLE Execution_Gate (
     'table.merge-engine' = 'versioned',
     'table.merge-engine.versioned.ver-column' = 'fence_token',
     'table.delete.behavior' = 'ignore',
-    'table.datalake.enabled' = 'true',
+    'table.datalake.enabled' = 'false', -- DEC-060: opt-in via r2-archive-sync
     'table.datalake.format' = 'iceberg',
     'table.datalake.freshness' = '5min',
     'table.datalake.auto-compaction' = 'true'
