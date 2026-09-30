@@ -12,13 +12,17 @@ rule + `MERGED_CANDLE_FEATURES_ENABLED=false`) · **W-B3 landed** (`CHG-470`: th
 host's dual-write — forming row per live cadence + sealed row at close, KV
 upsert sink, `MERGED_CANDLE_TABLE`, all behind the flag; compute 650/0/18) ·
 **W-B4 landed** (`CHG-472`: `isSealed`/`isForming` reader predicates) ·
-**W-B5 pending (live smoke)**: needs `candle_features` created on dev through a
-sanctioned path (registry-only; not on the stack today) plus a ~200 s run;
-until then the merged path is code- and test-complete but **live-unproven**.
+**W-B5 pending (live smoke) — now unblocked**: the dev scratch table exists
+(`CHG-474`, the CHG-350 probe route; live-proof create + upsert, ZK catalog
+29 tables) and the certifying gate passed 19/19 on tree `9b6a8f30`
+(`logs/soak/monday-gates-20260930-193447`, certificate
+`logs/tracker-14/gate-certificate-20260930.md`). Remaining: the ~200 s
+dual-write smoke; until it runs the merged path is code- and test-complete but
+**live-unproven**.
 
-**Decision note (2026-09-30):** the final `make gate` runs **before** W-B5 —
-the smoke needs a live table creation on dev (an operator-visible step), and
-the flag-off gate does not depend on it. W-B5 follows the gate.
+**Decision note (2026-09-30):** the final `make gate` ran **before** W-B5 (the
+smoke needs the live table creation, an operator-visible step; the flag-off gate
+does not depend on it) — **PASS, 19/19**. W-B5 follows on the certified tree.
 
 ## Goal (DEC-059)
 
