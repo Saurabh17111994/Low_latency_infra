@@ -124,6 +124,12 @@ public record SignalJobConfig(
         // mirror stream (MULTITF_LIVE_SNAPSHOT_INTERVAL_MS cadence) is
         // untouched. MULTITF_FAST_LIVE_FEED, default true.
         boolean multiTfFastLiveFeed,
+        // 2026-09-30 Wave B (DEC-059): write the merged candle_features table
+        // (candle columns + features MAP<INT,DOUBLE> + sealed) from the
+        // strategy host — ONE writer, sealed rows never rewritten. Default
+        // false: the existing candle/feature tables stay authoritative until
+        // the operator opens the cutover.
+        boolean mergedCandleFeaturesEnabled,
         String candleLiveTable,
         String candleClosedTable,
         // 2026-09-26 S5→S6 latency workstream (native fetch/flush tuning;
@@ -206,6 +212,8 @@ public record SignalJobConfig(
         // the strategy host in memory. Default true; set false for the old
         // snapshot-cadence feed (measurement/rollback kill-switch).
         boolean multiTfFastLiveFeed = booleanValue(env, "MULTITF_FAST_LIVE_FEED", true);
+        boolean mergedCandleFeaturesEnabled =
+                booleanValue(env, "MERGED_CANDLE_FEATURES_ENABLED", false);
         String candleLiveTable = stringEnv(env, "CANDLE_LIVE_TABLE", "candle_live");
         String candleClosedTable = stringEnv(env, "CANDLE_CLOSED_TABLE", "candle_closed");
         // 2026-09-26 S5→S6 latency workstream: native fetch/flush tuning.
@@ -361,6 +369,7 @@ public record SignalJobConfig(
                 multiTfSessionBypass,
                 multiTfSignalContextEnabled,
                 multiTfFastLiveFeed,
+                mergedCandleFeaturesEnabled,
                 candleLiveTable,
                 candleClosedTable,
                 flussScannerFetchMaxBytes,
@@ -423,6 +432,11 @@ public record SignalJobConfig(
     /** Fast per-tick live feed to the strategy host (default true). */
     public boolean multiTfFastLiveFeed() {
         return multiTfFastLiveFeed;
+    }
+
+    /** Wave B (DEC-059): write the merged candle_features table (default false). */
+    public boolean mergedCandleFeaturesEnabled() {
+        return mergedCandleFeaturesEnabled;
     }
 
     /** Fluss table for candle_live (default candle_live). */

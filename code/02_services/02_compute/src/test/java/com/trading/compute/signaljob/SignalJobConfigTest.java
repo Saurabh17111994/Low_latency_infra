@@ -910,6 +910,17 @@ class SignalJobConfigTest {
     }
 
     @Test
+    void mergedCandleFeaturesDefaultsOffAndParses() {
+        // Wave B/DEC-059: the merged candle_features write path is opt-in; the
+        // old candle/feature tables stay authoritative until the cutover.
+        assertFalse(SignalJobConfig.from(env()).mergedCandleFeaturesEnabled(),
+                "MERGED_CANDLE_FEATURES_ENABLED defaults to false");
+        Map<String, String> on = env();
+        on.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
+        assertTrue(SignalJobConfig.from(on).mergedCandleFeaturesEnabled());
+    }
+
+    @Test
     void liveSnapshotIntervalDefaultAndPositiveOnly() {
         assertEquals(2_000L, SignalJobConfig.from(env()).liveSnapshotIntervalMs());
 
