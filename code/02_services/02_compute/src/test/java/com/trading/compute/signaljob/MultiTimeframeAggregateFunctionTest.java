@@ -133,6 +133,46 @@ class MultiTimeframeAggregateFunctionTest {
     }
 
     @Test
+    @DisplayName("W3-d: live mirrors are scan-driven — no emission without a record, all due slots emit from one record")
+    void liveMirrorsAreScanDriven() throws Exception {
+        open();
+        long T0 = ist(2026, 9, 4, 10, 0, 0, 0); // in-session, aligned for all 6 TFs
+        long otherToken = TOKEN + 1;
+        // One accepted trade per key => live-mirror due markers for both.
+        harness.processElement(trade(T0 + 2_000L, "fp-a", 100_00L, 10L), T0 + 2_000L);
+        harness.processElement(
+                TestRawRows.row(otherToken, T0 + 2_000L, "fp-b", "TRADE", 200_00L, 5L), T0 + 2_000L);
+
+        // Advance BOTH clocks past the due markers WITHOUT feeding a record:
+        // the removed per-key live timers emitted here (old behavior, managed-
+        // state timer churn) — the scan design must stay silent.
+        harness.setProcessingTime(5_000L);
+        harness.processWatermark(new Watermark(T0 + 10_000L));
+        assertTrue(liveRows().isEmpty(),
+                "no live rows may appear without a record on the scan design; got " + liveRows().size());
+
+        // One quote record on ONE key drives the operator-scope scan: every
+        // due slot emits its forming mirror (the other key included). Quotes
+        // never touch OHLC, so both mirrors carry their pre-quote state.
+        harness.processElement(quote(T0 + 9_000L, "fp-q-scan", 150_00L), T0 + 9_000L);
+        List<RowData> lives = liveRows();
+        long tokenRows = lives.stream()
+                .filter(r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN) == TOKEN).count();
+        long otherRows = lives.stream()
+                .filter(r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN) == otherToken).count();
+        assertTrue(tokenRows >= 6,
+                "the non-ticking key must still emit one row per TF; got " + tokenRows);
+        assertTrue(otherRows >= 6,
+                "the ticking key must emit its due mirrors; got " + otherRows);
+
+        // No re-emission before the next due time (markers advanced past now/watermark).
+        int sizeAfter = liveRows().size();
+        harness.processElement(quote(T0 + 9_100L, "fp-q-scan2", 151_00L), T0 + 9_100L);
+        assertEquals(sizeAfter, liveRows().size(),
+                "no extra live rows before the next 1s due time");
+    }
+
+    @Test
     @DisplayName("smoke: 3 trades in one 1m bucket → closed OHLCV, live per TF, signal per trade, quote/pre-open dropped, late no duplicate")
     void smoke() throws Exception {
         open();
@@ -176,11 +216,15 @@ class MultiTimeframeAggregateFunctionTest {
         oneMForming.openPaise = 999999L;
         // Fetch again next signal to ensure live state unaffected (we will check after next tick)
 
-        // LIVE_TAG: trigger via both processing-time and event-time live timers
-        // Advance processing time to fire live proc timer (scheduled at proc 0+1000)
+        // LIVE_TAG (W3-d 2026-09-30): the 1s mirrors are emitted by the
+        // operator-scope scan on the record path — advance both clocks past
+        // the due markers, then drive one quote record to run the scan (quotes
+        // never touch OHLC and emit no signal, so the assertions stay exact).
+        // The "no emission without a record" property is guarded by
+        // liveMirrorsAreScanDriven.
         harness.setProcessingTime(5_000L);
-        // Also advance watermark to fire live event timer (first at t1+1000 = T0+3000)
         harness.processWatermark(new Watermark(T0 + 10_000L));
+        harness.processElement(quote(T0 + 8_500L, "fp-q-scan-a", 150_00L), T0 + 8_500L);
         List<RowData> lives = liveRows();
         // At least one live row per TF should have been emitted (timer fired at least once)
         assertTrue(lives.size() >= 6, "LIVE_TAG should have at least 6 rows (one per TF) after timer, got " + lives.size());
@@ -205,9 +249,10 @@ class MultiTimeframeAggregateFunctionTest {
         // Signal count must NOT increase for quote (per task TRADE-only signal)
         assertEquals(3, signalRows().size(), "quote tick must not emit SIGNAL_TAG per task contract");
         // LIVE after quote should remain same OHLC (quote never touches OHLC)
-        // Trigger another live snapshot
+        // Trigger another live snapshot (scan path: advance clocks, one record)
         harness.setProcessingTime(10_000L);
         harness.processWatermark(new Watermark(T0 + 12_000L));
+        harness.processElement(quote(T0 + 9_500L, "fp-q-scan-b", 152_00L), T0 + 9_500L);
         List<RowData> lives2 = liveRows();
         RowData liveOneM2 = lives2.stream().filter(r -> Timeframe.ONE_M.code().equals(r.getString(CandleLiveColumns.TF).toString()))
                 .reduce((first, second) -> second).orElse(null); // last
@@ -414,7 +459,7 @@ class MultiTimeframeAggregateFunctionTest {
         harness.open();
     }
 
-    /** Drives 3 in-session trades, fires live timers, closes the first 15s bucket. */
+    /** Drives 3 in-session trades, runs the live-mirror scan, closes the first 15s bucket. */
     private void driveThreeTradesAndClose(long T0) throws Exception {
         harness.processElement(trade(T0 + 2_000L, "fp-a", 100_00L, 10L), T0 + 2_000L);
         harness.processElement(trade(T0 + 5_000L, "fp-b", 101_00L, 20L), T0 + 5_000L);
@@ -423,6 +468,10 @@ class MultiTimeframeAggregateFunctionTest {
         harness.processWatermark(new Watermark(T0 + 10_000L));
         harness.processWatermark(new Watermark(T0 + 15_000L));
         harness.setProcessingTime(70_000L);
+        // W3-d: live mirrors are scan-driven — one quote record after the clock
+        // advances runs the scan for the due slot. Quotes never touch OHLC, so
+        // the closed/live OHLCV asserted by the callers stays identical.
+        harness.processElement(quote(T0 + 14_000L, "fp-q-drive", 150_00L), T0 + 14_000L);
     }
 
     private static String closedKey(RowData r) {

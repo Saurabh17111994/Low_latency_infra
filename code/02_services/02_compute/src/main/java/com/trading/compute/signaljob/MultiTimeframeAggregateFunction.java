@@ -30,7 +30,9 @@ import org.apache.flink.util.Preconditions;
  * NOT as Flink managed {@code ValueState}. A checkpoint-restore restarts empty and rebuilds strictly
  * from live ticks; restored event-time timers with no heap slot loud-noop via
  * {@code compute.candles.restored_timer_noop} and avoids per-tick RocksDB
- * read-modify-write. The job is launched under uid {@code multi-tf-aggregator-v1} so pre-redesign
+ * read-modify-write. W3-d (2026-09-30): the live mirrors are scan-driven — the only
+ * timers this operator registers are window boundaries and session close. The job is
+ * launched under uid {@code multi-tf-aggregator-v1} so pre-redesign
  * checkpoints fail closed (G-CHAIN-3). See design §C.2 §E.4.
  *
  * <p><b>Fail-fast caps:</b> Global slot cap {@code 65_536} and per-TF pending-close cap
@@ -46,7 +48,7 @@ import org.apache.flink.util.Preconditions;
  * rotate into ring (evict >15), emit main-output {@link CandleClosedColumns} row (first-write-wins
  * guard is sink-side, operator never re-emits same window — guarded via emitted map).</li>
  * <li>Session-end forced roll at 15:30 IST (last bucket) per §D/E — nothing carries overnight; overnight gap is expected, not a discontinuity.</li>
- * <li>Live snapshot every {@code liveSnapshotIntervalMs} per key → {@link #LIVE_TAG} side-output per TF (CandleLiveColumns), from forming accumulator.</li>
+ * <li>Live snapshot every {@code liveSnapshotIntervalMs} per key → {@link #LIVE_TAG} side-output per TF (CandleLiveColumns), from forming accumulator. W3-d: emitted by an operator-scope scan on the record path ({@link #maybeScanLiveMirrors}) — no per-key live timers, no timer-state churn.</li>
  * <li>Signal side-output {@link #SIGNAL_TAG} per accepted TRADE tick → {@link MultiTimeframeSignalContext} snapshot AFTER mutation, 6 TimeframeContext entries with newest-first closed copies (no alias).</li>
  * </ul>
  */
@@ -123,6 +125,18 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     /** Per-key heap slots — intentional amnesia, not checkpointed. */
     private final Map<Long, Slot> slots = new HashMap<>();
 
+    /**
+     * W3-d (2026-09-30): operator-scope live-mirror due markers — min over all
+     * slots of each slot's next live emission time. The 1s live mirrors are
+     * emitted by {@link #maybeScanLiveMirrors} on the record path instead of
+     * by per-key self-perpetuating timers, which re-registered every second
+     * per active key (~4 900 timer-state mutations/s; ~20 MB/min of changelog
+     * volume and the 94 MB checkpoint state). Plain heap fields — intentional
+     * amnesia, recomputed by every scan.
+     */
+    private long nextDueProcMs = Long.MIN_VALUE;
+    private long nextDueEventMs = Long.MIN_VALUE;
+
     // Metrics (transient)
     private transient Counter lateDroppedCounter;
     private transient Counter sessionFilteredPreCounter;
@@ -142,6 +156,8 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         final LinkedHashMap<Long, CandleAccumulator>[] pending = new LinkedHashMap[Timeframe.values().length];
         @SuppressWarnings("unchecked")
         final LinkedHashMap<Long, Boolean>[] emitted = new LinkedHashMap[Timeframe.values().length];
+        /** W3-d: next live-mirror due times consumed by the operator-scope scan
+         *  (plain heap markers — no timers, no managed state). */
         long nextLiveEventTimer = Long.MIN_VALUE;
         long nextLiveProcTimer = Long.MIN_VALUE;
         long sessionCloseTimer = Long.MIN_VALUE;
@@ -199,6 +215,8 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     @Override
     public void open(OpenContext openContext) {
         slots.clear();
+        nextDueProcMs = Long.MIN_VALUE;
+        nextDueEventMs = Long.MIN_VALUE;
         try {
             lateDroppedCounter = getRuntimeContext().getMetricGroup().counter("compute.candles.late.dropped");
             sessionFilteredPreCounter = getRuntimeContext().getMetricGroup().counter("compute.session.filtered.pre_open");
@@ -361,6 +379,9 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             if (!tick.isNullAt(RawTableColumns.EVENT_FINGERPRINT)) {
                 slot.state.lastFingerprint = tick.getString(RawTableColumns.EVENT_FINGERPRINT).toString();
             }
+            // W3-d: quotes drive the operator-scope live-mirror scan too — the
+            // 1s mirror cadence must survive a trade pause (quotes never touch OHLC).
+            maybeScanLiveMirrors(ctx);
             // No OHLC mutation, no signal emission (per task contract TRADE-only signal)
             return;
         }
@@ -413,17 +434,23 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             }
         }
 
-        // Schedule live snapshot timers (event-time + processing-time) if not already scheduled
+        // W3-d (2026-09-30): live-mirror due markers — no per-key timers. The
+        // marker keeps the removed timers' 1s stepline (first due at
+        // now/eventTime + interval); the operator-scope minima feed the scan's
+        // due-check. Intentional amnesia (plain heap fields, no managed state).
         long currentProcTime = ctx.timerService().currentProcessingTime();
         if (slot.nextLiveProcTimer == Long.MIN_VALUE) {
-            long nextProc = (currentProcTime == Long.MIN_VALUE ? 0L : currentProcTime) + liveSnapshotIntervalMs;
-            ctx.timerService().registerProcessingTimeTimer(nextProc);
-            slot.nextLiveProcTimer = nextProc;
+            slot.nextLiveProcTimer =
+                    (currentProcTime == Long.MIN_VALUE ? 0L : currentProcTime) + liveSnapshotIntervalMs;
+            if (nextDueProcMs == Long.MIN_VALUE || slot.nextLiveProcTimer < nextDueProcMs) {
+                nextDueProcMs = slot.nextLiveProcTimer;
+            }
         }
         if (slot.nextLiveEventTimer == Long.MIN_VALUE) {
-            long nextEvent = eventTime + liveSnapshotIntervalMs;
-            ctx.timerService().registerEventTimeTimer(nextEvent);
-            slot.nextLiveEventTimer = nextEvent;
+            slot.nextLiveEventTimer = eventTime + liveSnapshotIntervalMs;
+            if (nextDueEventMs == Long.MIN_VALUE || slot.nextLiveEventTimer < nextDueEventMs) {
+                nextDueEventMs = slot.nextLiveEventTimer;
+            }
         }
         // Schedule session-close forced-roll timer for this date if not already.
         // Session bypass (soak mode A): there is no session — event times can
@@ -617,6 +644,11 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             anyAccepted = true;
         }
 
+        // W3-d (2026-09-30): run the operator-scope live-mirror scan after this
+        // tick's mutations so a due mirror carries the freshest forming state;
+        // every record that reaches the loop drives it (see maybeScanLiveMirrors).
+        maybeScanLiveMirrors(ctx);
+
         // P2-143: a tick dropped on EVERY TF must never advance the gate or
         // emit an empty SIGNAL — bare !anyAccepted return, fresh slot or not.
         if (!anyAccepted) {
@@ -667,8 +699,9 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         }
     }
 
-    // Overload for OnTimerContext
-    private void emitLiveForTimerSlot(Slot slot, long token, OnTimerContext ctx) throws Exception {
+    // W3-d: called by the operator-scope scan (processElement's Context and the
+    // onTimer OnTimerContext both implement Context).
+    private void emitLiveForSlot(Slot slot, long token, Context ctx) throws Exception {
         for (Timeframe tf : Timeframe.values()) {
             int ord = tf.ordinal();
             long ws = slot.windowStarts[ord];
@@ -679,6 +712,58 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             GenericRowData row = buildLiveRow(token, tf, ws, we, acc);
             ctx.output(LIVE_TAG, row);
             if (liveEmittedCounter != null) liveEmittedCounter.inc();
+        }
+    }
+
+    /**
+     * W3-d (2026-09-30): emit the 1s live mirrors for every due slot from the
+     * record path — replaces the per-key self-perpetuating event/processing
+     * live timers (the job's dominant timer-state churn: 2 registrations/s per
+     * active key ~= 4 900/s, i.e. the ~20 MB/min changelog growth and the
+     * growing checkpoint state_size). Semantics kept: when a slot's due time
+     * is reached (processing clock or watermark), its forming rows are emitted
+     * exactly as the timer callback did, and the same 1s stepline advances.
+     * Any record drives the scan for all keys; with no records nothing is
+     * emitted (a stalled feed emits nothing — the mirror never needed that).
+     * A due slot emits at most once per scan even if the clock jumped several
+     * 1s steps (the skipped steps carried identical content).
+     */
+    private void maybeScanLiveMirrors(Context ctx) throws Exception {
+        long nowProc = ctx.timerService().currentProcessingTime();
+        if (nextDueProcMs != Long.MIN_VALUE && nowProc != Long.MIN_VALUE && nowProc >= nextDueProcMs) {
+            long min = Long.MAX_VALUE;
+            for (Map.Entry<Long, Slot> e : slots.entrySet()) {
+                Slot s = e.getValue();
+                long due = s.nextLiveProcTimer;
+                if (due == Long.MIN_VALUE) continue;
+                if (nowProc >= due) {
+                    emitLiveForSlot(s, e.getKey(), ctx);
+                    do {
+                        due += liveSnapshotIntervalMs;
+                    } while (due <= nowProc);
+                    s.nextLiveProcTimer = due;
+                }
+                if (due < min) min = due;
+            }
+            nextDueProcMs = min == Long.MAX_VALUE ? Long.MIN_VALUE : min;
+        }
+        long watermark = ctx.timerService().currentWatermark();
+        if (watermark != Long.MIN_VALUE && nextDueEventMs != Long.MIN_VALUE && watermark >= nextDueEventMs) {
+            long min = Long.MAX_VALUE;
+            for (Map.Entry<Long, Slot> e : slots.entrySet()) {
+                Slot s = e.getValue();
+                long due = s.nextLiveEventTimer;
+                if (due == Long.MIN_VALUE) continue;
+                if (watermark >= due) {
+                    emitLiveForSlot(s, e.getKey(), ctx);
+                    do {
+                        due += liveSnapshotIntervalMs;
+                    } while (due <= watermark);
+                    s.nextLiveEventTimer = due;
+                }
+                if (due < min) min = due;
+            }
+            nextDueEventMs = min == Long.MAX_VALUE ? Long.MIN_VALUE : min;
         }
     }
 
@@ -725,12 +810,9 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         }
 
         // P2-039: demultiplex on TimeDomain first, then timestamp — event-time
-        // boundary, event-time live, processing-time live and session-close
-        // share one namespace, and a live tick aligned with a boundary fired
-        // both (live emit before close) plus rescheduled both live timers.
+        // boundary and session-close share one namespace. (W3-d: the live
+        // timers that also shared it are gone — see maybeScanLiveMirrors.)
         TimeDomain domain = ctx.timeDomain();
-        boolean isLiveEvent = domain == TimeDomain.EVENT_TIME && timestamp == slot.nextLiveEventTimer;
-        boolean isLiveProc = domain == TimeDomain.PROCESSING_TIME && timestamp == slot.nextLiveProcTimer;
         boolean isSessionClose = domain == TimeDomain.EVENT_TIME && timestamp == slot.sessionCloseTimer;
 
         // Session bypass (soak mode A): never run the session-close forced
@@ -742,19 +824,10 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             isSessionClose = false;
         }
 
-        if (isLiveEvent) {
-            emitLiveForTimerSlot(slot, key, ctx);
-            long next = timestamp + liveSnapshotIntervalMs;
-            ctx.timerService().registerEventTimeTimer(next);
-            slot.nextLiveEventTimer = next;
-        }
-        if (isLiveProc) {
-            emitLiveForTimerSlot(slot, key, ctx);
-            // Use processing time base: next = timestamp + interval
-            long nextProc = timestamp + liveSnapshotIntervalMs;
-            ctx.timerService().registerProcessingTimeTimer(nextProc);
-            slot.nextLiveProcTimer = nextProc;
-        }
+        // W3-d (2026-09-30): the live mirrors no longer fire here — they are
+        // emitted by maybeScanLiveMirrors on the record path. A restored live
+        // timer from a pre-change checkpoint falls through to the stale-timer
+        // handling below (it is not re-registered and dies out).
         if (isSessionClose) {
             // Forced roll at 15:30 IST: seal any still-forming windows as final candles of the day
             for (Timeframe tf : Timeframe.values()) {
@@ -866,22 +939,11 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                     continue;
                 }
 
-                // Stale timer: no pending nor forming match. Only count as restored noop if this timestamp was expected as a boundary timer
-                // To avoid counting live timers as stale, skip counting when isLiveEvent||isLiveProc||isSessionClose
-                if (!isLiveEvent && !isLiveProc && !isSessionClose) {
-                    // Heuristic: if timestamp could be a boundary timer for this TF (i.e., timestamp % windowMs == appropriate alignment?),
-                    // but we have no history of registered timers, so we cannot know if this was ever registered.
-                    // For heap-like restored_amnesia, we count every stale boundary fire that finds no slot state.
-                    // We'll count only if slot has ever had any window for this TF (to avoid counting random live timestamps)
-                    // However for robustness we only count when there is no live and the timestamp looks like a plausible windowEnd
-                    // We choose to not increment for non-matching timers to keep metric quiet, unless slot had pending/emitted history.
-                    // For now, only increment if the timestamp is not a live/session timer and the slot had some emitted history
-                    // This keeps test quiet.
-                    // Uncomment to enable loud noop:
-                    // if (restoredTimerNoopCounter != null && (slot.emitted[ord].size() > 0 || slot.pending[ord].size()>0)) {
-                    //     restoredTimerNoopCounter.inc();
-                    // }
-                }
+                // Stale timer: no pending nor forming match. The loud-noop
+                // counter stays disabled for non-matching timestamps by design
+                // (heuristics in the W3-d change record). W3-d: live-timer
+                // timestamps no longer exist; this branch now receives only
+                // boundary/session timestamps that found nothing.
             }
         }
 
