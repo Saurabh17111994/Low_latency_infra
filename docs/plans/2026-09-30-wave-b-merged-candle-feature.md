@@ -1,8 +1,9 @@
 # Wave B — merged candle+feature table (staged, flags off)
 
 **Date:** 2026-09-30
-**Status:** operator-accepted design (DEC-059, 2026-09-30); implementing in
-staged slices, **rollout flags default off**, cutover/decommission NOT in scope.
+**Status:** operator-accepted design (DEC-059, 2026-09-30); **all five slices
+landed 2026-09-30 (W-B1..W-B5), the merged path live-proven on dev**, rollout
+flags default off, cutover/decommission NOT in scope.
 Constrained by **DEC-060**: the merged live table is one selectable archive
 entry; it never forces a merged lake table.
 
@@ -12,17 +13,20 @@ rule + `MERGED_CANDLE_FEATURES_ENABLED=false`) · **W-B3 landed** (`CHG-470`: th
 host's dual-write — forming row per live cadence + sealed row at close, KV
 upsert sink, `MERGED_CANDLE_TABLE`, all behind the flag; compute 650/0/18) ·
 **W-B4 landed** (`CHG-472`: `isSealed`/`isForming` reader predicates) ·
-**W-B5 pending (live smoke) — now unblocked**: the dev scratch table exists
-(`CHG-474`, the CHG-350 probe route; live-proof create + upsert, ZK catalog
-29 tables) and the certifying gate passed 19/19 on tree `9b6a8f30`
+**W-B5 landed** (`CHG-475`, 2026-09-30): the ~200 s dual-write live smoke on dev
+**PASSED** — fake feed → ingestion → `raw_table_1` → restored SignalJob with
+`MERGED_CANDLE_FEATURES_ENABLED=true`; `candle_features` 17,680 → 40,208 rows
+(final `sealed=39,183` / `forming=1,025`, all six timeframes),
+`candle_closed` +22,528 (the same close events), `feature_values` unchanged;
+stack reverted. Evidence `logs/soak/wave-b-wb5-20260930/`. The merged path is
+**live-proven on dev**. The 19/19 certifying gate covers the code at `9b6a8f30`
 (`logs/soak/monday-gates-20260930-193447`, certificate
-`logs/tracker-14/gate-certificate-20260930.md`). Remaining: the ~200 s
-dual-write smoke; until it runs the merged path is code- and test-complete but
-**live-unproven**.
+`logs/tracker-14/gate-certificate-20260930.md`).
 
 **Decision note (2026-09-30):** the final `make gate` ran **before** W-B5 (the
-smoke needs the live table creation, an operator-visible step; the flag-off gate
-does not depend on it) — **PASS, 19/19**. W-B5 follows on the certified tree.
+smoke needed the live table creation, an operator-visible step; the flag-off gate
+does not depend on it) — **PASS, 19/19**. W-B5 followed and passed the same day
+(`CHG-475`).
 
 ## Goal (DEC-059)
 
