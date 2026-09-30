@@ -16,8 +16,7 @@ Arrow market-data stream
       ├─ bounded best-effort fingerprint deduplication
       │    └─ dedup set: operator-local per-token count window (DEC-054; not checkpointed)
       ├─ multi-timeframe event-time candle state (keyed by instrument_token)
-      │    ├─ live forming snapshots: candle_live KV (60 s)
-      │    └─ durable closed rows: candle_closed KV (authoritative, 7 d + lake)
+      │    └─ candle_features KV (forming + sealed rows; authoritative, 3 d + lake opt-in)
       ├─ strategy-host signal detection (keyed by instrument_token)
       ├─ Signal_Candidates LOG
       ├─ Signal_Candidates_current KV
@@ -35,7 +34,7 @@ Arrow market-data stream
 
 **State boundary (DEC-038, DEC-042; current design):** the Signal Flink job computes; Fluss owns the authoritative durable hot state for Signal-job business state.
 
-Fluss durable candle state: `candle_live` KV (forming snapshots, 60 s) and `candle_closed` KV (closed rows, authoritative). Durable signal state is split between the immutable candidate event stream and its current-state projection. Flink owns source offsets, watermarks, window/lateness timers, in-flight accumulators, the operator-local dedup count window (DEC-054), and signal ring buffers. Flink checkpoints are small and are not a second copy of Fluss-owned Signal business state. Execution state is separate: Nautilus owns live order/fill/position behavior and event processing; Fluss stores immutable intent, control state, and projections of Nautilus execution events. **(Updated 2026-09-27: the `feature_candles_15s` candle table and the forming-bar path are RETIRED — 2026-09-05 cutover.)**
+Fluss durable candle state: `candle_features` KV (one KV row per window: forming while open, then sealed, authoritative). Durable signal state is split between the immutable candidate event stream and its current-state projection. Flink owns source offsets, watermarks, window/lateness timers, in-flight accumulators, the operator-local dedup count window (DEC-054), and signal ring buffers. Flink checkpoints are small and are not a second copy of Fluss-owned Signal business state. Execution state is separate: Nautilus owns live order/fill/position behavior and event processing; Fluss stores immutable intent, control state, and projections of Nautilus execution events. **(Updated 2026-09-27: the `feature_candles_15s` candle table and the forming-bar path are RETIRED — 2026-09-05 cutover.)**
 
 The candidate event stream is `Signal_Candidates` LOG and the current-state projection is `Signal_Candidates_current` KV.
 
@@ -127,8 +126,7 @@ Future `Position_Actions` are immutable structured records and pass through the 
 | Table | Type | Writer | Primary consumers | Retention/lake role |
 | --- | --- | --- | --- | --- |
 | `raw_table_1` | LOG | Ingestion | Signal job | ≥3 trading days; EOD Iceberg |
-| `candle_live` | KV (upsert, PK `(instrument_token, tf, window_start)` — forming snapshots, 60 s) | Signal job | Strategy host / ops | 60 s log TTL; no lake (transient) |
-| `candle_closed` | KV (first-write-wins, PK `(instrument_token, tf, window_start)` — closed rows) | Signal job | Strategy host / downstream/lake | 7 d; EOD Iceberg |
+| `candle_features` | KV (upsert, PK `(instrument_token, tf, window_start)` — forming + sealed rows, feature map + sealed flag) | Signal job | Strategy host / ops / downstream/lake | 3 d; EOD Iceberg (lake opt-in, DEC-060) |
 | `feature_candles_15s`, `forming_bar` | ~~KV~~ | ~~Signal job~~ | ~~Downstream/lake; Business Logic~~ | ~~≥3 trading days; EOD Iceberg~~ — **RETIRED 2026-09-05 (multi-TF cutover; replaced by the two rows above)** |
 | `Signal_Candidates` | LOG | Signal job | Audit/lake | Immutable; EOD Iceberg |
 | `Signal_Candidates_current` | KV | Signal job | Current-state readers/reconciliation | Current state; rebuildable from LOG |

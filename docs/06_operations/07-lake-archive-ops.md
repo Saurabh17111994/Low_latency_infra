@@ -28,10 +28,10 @@ Per table, never merged: each selected table lands as its own lake table.
 
 ```bash
 # what would change (default: dry run, read-only)
-python3 code/01_platform/04_scripts/r2_archive_sync.py --tables candle_closed
+python3 code/01_platform/04_scripts/r2_archive_sync.py --tables candle_features
 
 # apply: enable exactly the listed tables, disable any unlisted enabled table
-python3 code/01_platform/04_scripts/r2_archive_sync.py --tables candle_closed --apply
+python3 code/01_platform/04_scripts/r2_archive_sync.py --tables candle_features --apply
 ```
 
 - The same list is the EOD controller's scope (env `EOD_TABLES` in the deck).
@@ -169,7 +169,7 @@ provisioning runs — `docs/05_deployment/CLOUDPE_DAILY_VM.md` §3.
   cache / 19 GB images (pruneable at any time).
 - Fluss writes lock at 0.85 (~779 GB used) and recover below 0.80 (~733 GB);
   the 2026-09-25 reading was 70-75% used — one busy week reaches the lock.
-- Retention today: `candle_live` log TTL 60 s, `candle_closed` 7 d, `raw_table_1`
+- Retention today: `candle_features` 3 d, `raw_table_1`
   9 d (`table.log.ttl` and `table.auto-partition.num-retention`).
 - **Open action (operator):** measure one real week's growth before changing
   retention — `node_filesystem_avail_bytes` is already scraped into O2, so the

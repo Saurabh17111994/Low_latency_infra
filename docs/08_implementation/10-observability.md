@@ -190,13 +190,13 @@ as `COMPUTE - Multi-Timeframe` (11 panels, folder COMPUTE): branch
 throughput old-vs-new, aggregator input share of source, session-filtered
 drops (pre/post cumulative), new closed/live sink rates vs old closed-sink
 rate, multi-TF signals emitted vs latch-suppressed (cumulative), new
-signal-sink rate, duplicate-window guard hits. Every series is registered by
+signal-sink rate. (Duplicate-window guard hits retired with the legacy first-write-wins filter, Wave C W-C5a.) Every series is registered by
 `MultiTimeframeAggregateFunction` / `MultiTimeframeSignalProducer` and flows
 on the existing Flink->Prometheus->remote-write path — no new plumbing.
-The new legs persist to the `candle_live` table (KV current-state — live candle
-snapshots per timeframe) and the `candle_closed` table (KV immutable closed
-history per timeframe), created by DDL `32_candle_live.sql` /
-`33_candle_closed.sql`.
+The new legs persist to the `candle_features` table (KV, one row per
+`(instrument_token, tf, window_start)`: forming row then the sealed row),
+created by DDL `35_candle_features.sql`. (Wave C W-C5a 2026-09-30: the former
+`candle_live`/`candle_closed` tables and DDLs 32/33 are RETIRED — DEC-059.)
 Verified live 2026-09-05: dashboard present with 11 panels; all 11 panel
 queries return points over the 2026-09-04 soak window via O2 `query_range`
 (aggregator ~48.9k/s in, old closed-sink ~162-203/s, new legs 0 — the

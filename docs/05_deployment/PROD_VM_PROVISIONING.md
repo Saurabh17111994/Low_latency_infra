@@ -388,7 +388,7 @@ result (`09-production-swarm.md`).
 | `INGESTION_IMAGE`, `EXECUTION_BRIDGE_IMAGE`, `EXECUTION_GATEWAY_IMAGE`, `NAUTILUS_IMAGE` | built locally and never pushed — `image-publish.sh` produces digest-pinned values but has **not** run against GHCR, so no digest-pinned production environment exists yet (`runtime.lock` records the four as retired pins, CHG-218) |
 | `CHECKPOINT_DIR` | development runs `file:///checkpoints`; production needs an encrypted `s3://` prefix — use the R2 bucket (Decision 2026-09-21), e.g. `s3://<bucket>/checkpoints` |
 | `DDL_APPLY_IMAGE` | built locally and never pushed, like the four above; CHG-269 made the EOD scheduler its first consumer, so a deploy that leaves it empty now stops at interpolation instead of starting a service |
-| `EOD_TABLES` | an operator decision with no default: which tables the EOD manifest covers. The repository's own EOD test uses `candle_closed` (7-day TTL, durable) |
+| `EOD_TABLES` | an operator decision with no default: which tables the EOD manifest covers. The repository's own EOD test uses `candle_features` (3-day TTL, durable; DEC-059) |
 | `O2_PASSWORD` | OpenObserve's root password, interpolated into its environment (not a Swarm secret). `.env.example` ships it empty and `.env` carries no value either — CHG-271 added it to `required_vars`, where it was missing from every list, so the deploy stops at interpolation instead of starting an observability stack nobody can log into |
 
 Present but **not yet immutable**: `FLUSS_IMAGE`, `FLINK_IMAGE` and `OPENOBSERVE_IMAGE` are bare tags

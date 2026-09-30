@@ -185,7 +185,7 @@ Every managed and durable state category must have a defined capacity budget for
 | State category | Cardinality bound | Serialized size/entry | Checkpoint contribution | Owner / cleanup |
 | --- | --- | --- | --- | --- |
 | Fingerprint dedup | entries = 200 per token (`DEDUP_WINDOW_ENTRIES`) | ~64 B fingerprint + metadata | **None** — operator-local count window, intentionally not checkpointed (DEC-054) | Flink operator-local (transient); rebuilt from live ticks on restore |
-| Multi-TF candle windows | instruments × 6 TFs × (allowed_lateness + window_size) / window_size | Per-instrument, per-timeframe accumulator | Small in-flight accumulators; closed rows already Fluss KV | Flink (transient) + `candle_closed` KV (durable) + `candle_live` mirror |
+| Multi-TF candle windows | instruments × 6 TFs × (allowed_lateness + window_size) / window_size | Per-instrument, per-timeframe accumulator | Small in-flight accumulators; closed rows already Fluss KV | Flink (transient) + `candle_features` KV (durable; forming + sealed rows) |
 | Active candidates | configurable max per instrument × instruments | Per-candidate record ~1 KB | Small; output already Fluss LOG/KV | Flink (working) + `Signal_Candidates`/`_current` (durable) |
 | ~~Portfolio reservations~~ | ~~max concurrent × portfolios~~ | ~~Per-reservation record ~512 B~~ | ~~Included in Signal checkpoint~~ | **REMOVED 2026-08-15 (CHG-005)** |
 | Execution attempts | active + reconciliation window | Per-attempt record ~1 KB | N/A (KV durable state) | Fluss KV durable state |
@@ -202,8 +202,7 @@ The architecture mandates these logical tables before physical DDL generation:
 | Table | Type | Writer |
 | --- | --- | --- |
 | `raw_table_1` | LOG | Ingestion |
-| `candle_live` | KV (PK `instrument_token, tf, window_start` — forming snapshots, 60 s) | Signal job |
-| `candle_closed` | KV (PK `instrument_token, tf, window_start` — closed rows, first-write-wins, 7 d + lake tiering) | Signal job |
+| `candle_features` | KV (PK `instrument_token, tf, window_start` — forming + sealed rows, feature map + sealed flag; 3 d, lake opt-in) | Signal job |
 | `Signal_Candidates` | LOG | Signal job |
 | `Signal_Candidates_current` | KV | Signal job |
 | `Execution_Intent` | LOG | Signal job (strategy host, `EXECUTION_INTENT_ENABLED`) |

@@ -87,8 +87,8 @@ An overloaded `order_id` is prohibited.
 | Table                       | Type           | Writer               | Live retention                                            | Lake/audit                             |
 | --------------------------- | -------------- | -------------------- | --------------------------------------------------------- | -------------------------------------- |
 | `raw_table_1`               | LOG            | Ingestion            | ≤7 complete trading days (ceiling); extend while offload unverified | EOD Iceberg                            |
-| `candle_live`               | KV (PK `(instrument_token, tf, window_start)` — forming snapshots, 60 s) | Signal job           | 60 s log TTL (transient)                                  | No lake (transient)                    |
-| `candle_closed`             | KV (first-write-wins, PK `(instrument_token, tf, window_start)` — closed rows) | Signal job           | ≤7 complete trading days (ceiling); extend while offload unverified | EOD Iceberg                            |
+| `candle_features`           | KV (PK `(instrument_token, tf, window_start)` — forming + sealed rows, feature map + sealed flag) | Signal job           | 3 d log TTL; lake archive opt-in (DEC-060) | EOD Iceberg (opt-in)                   |
+| `candle_live`, `candle_closed`, `feature_values` | ~~KV~~ | ~~Signal job~~ | ~~60 s / 7 d / —~~ | **RETIRED 2026-09-30 (Wave C W-C5a, DEC-059; merged into `candle_features`)** |
 | `feature_candles_15s`, `forming_bar` | ~~KV~~ | ~~Signal job~~ | ~~≤7 days / current state~~ | ~~EOD Iceberg / raw replay~~ — **RETIRED 2026-09-05 (multi-TF cutover; replaced by `candle_live`/`candle_closed`)** |
 | `Signal_Candidates`         | LOG            | Signal job           | ≤7 complete trading days                                  | EOD Iceberg                            |
 | `Signal_Candidates_current` | KV             | Signal job           | Current state plus rebuild window                         | Rebuilt from LOG audit                |
@@ -121,9 +121,9 @@ Logical table names use Pascal_Snake_Case (e.g. ~~`Trade_Decisions`~~ — REMOVE
 
 Required fields: event/ingest/ack timestamps, instrument/routing data, verified typed trade/depth data, `connection_id`, `connection_epoch`, `event_fingerprint`, `fingerprint_version`, original packet bytes, payload hash, decoder/protocol version, validity state/reason, and schema version. Broker sequence is not required.
 
-### `candle_live` / `candle_closed`
+### `candle_features`
 
-Required fields (both): instrument, `tf`, window start/end, OHLCV, tick count, last event time/fingerprint, and schema version. `candle_live` is a KV upsert overwritten at the 1 s snapshot cadence (60 s log TTL, transient); `candle_closed` holds one final row per non-empty accepted window per timeframe (first-write-wins, immutable; no MVP correction rows; 7 d + EOD Iceberg). **(The single-timeframe `feature_candles_15s` schema is RETIRED 2026-09-05 — replaced by the two above.)**
+Required fields: instrument, `tf`, window start/end, OHLCV, tick count, last event time/fingerprint, schema version, `features MAP<INT, DOUBLE>` (append-only registry ids, DEC-057), and `sealed BOOLEAN`. The strategy host upserts one KV row per `(instrument_token, tf, window_start)` — the forming row while the window is open, flipped to `sealed=true` when the watermark closes it — so the same key serves the live read and the durable closed history: 3 d log TTL, lake archive opt-in per table (DEC-060). **(Wave C W-C5a 2026-09-30, DEC-059: `candle_live`, `candle_closed` and the stored `feature_values` layer are RETIRED — merged into this one table. The single-timeframe `feature_candles_15s` schema was RETIRED 2026-09-05.)**
 
 ### `Signal_Candidates`
 

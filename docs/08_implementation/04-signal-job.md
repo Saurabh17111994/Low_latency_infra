@@ -14,18 +14,17 @@
 > **raw ticks → validation → fingerprint dedup → multi-timeframe candles
 > (15 s / 30 s / 1 m / 3 m / 5 m / 15 m) → strategy host → signal LOG + KV →
 > (optional) `Execution_Intent`.**
-> - Candle tables: `candle_live` (forming snapshots, TTL 60 s) and
->   `candle_closed` (closed history, TTL 7 d + iceberg), both PK
->   `(instrument_token, tf, window_start)` — DDL `32_candle_live.sql` /
->   `33_candle_closed.sql`. `feature_candles_15s` does not exist.
->   **`candle_features` (DDL `35_candle_features.sql`, Wave B/DEC-059) is the
->   merge of the two candle tables + `feature_values`: one row per
->   `(instrument_token, tf, window_start)` with `features MAP<INT,DOUBLE>` +
->   `sealed`; one writer (the strategy host) emits a forming row per live
->   cadence and the terminal sealed row at close. Runtime behind
->   `MERGED_CANDLE_FEATURES_ENABLED=false` (and `MERGED_CANDLE_TABLE`, default
->   `candle_features`) — the old tables and sinks stay authoritative until the
->   operator opens the cutover (DEC-059/DEC-060).**
+> - Candle table: `candle_features` (DDL `35_candle_features.sql`, DEC-059) —
+>   one KV row per `(instrument_token, tf, window_start)` with the full candle
+>   contract, `features MAP<INT,DOUBLE>` (DEC-057 registry ids) and `sealed`;
+>   the strategy host is the single writer: it upserts a forming row at the
+>   live cadence and the terminal sealed row when the window closes.
+>   `feature_candles_15s` does not exist. **Wave C W-C5a (2026-09-30) retired
+>   `candle_live`/`candle_closed` (DDLs 32/33) and `feature_values` (DDL 34):
+>   the merged sink (`candle-features-sink-v1`) is unconditional, the old
+>   sinks/tables and the `MERGED_CANDLE_FEATURES_ENABLED`/
+>   `LEGACY_CANDLE_SINKS_ENABLED` flags are gone, and the legacy dev tables
+>   were dropped (W-C7, evidence `logs/soak/wave-c-wc7-20260930/`).**
 > - Operators: `MultiTimeframeAggregateFunction` (uid `multi-tf-aggregator-v1`);
 >   `StrategyHostFunction` runs the `STRATEGIES`-listed rules
 >   (`n7-range-breakout-v1` is the first registered real strategy; the stub
@@ -43,7 +42,7 @@
 >   `EXECUTION_INTENT_ENABLED`, `STRATEGY_CONTEXT_ENABLED` (`STRATEGIES` must list
 >   the rule ids).
 > - Live-candle context fetch (2026-09-30, C1, CHG-445): the strategy host can
->   open an on-demand `candle_closed` provider (`ContextProvider` inside
+>   open an on-demand `candle_features` sealed-row provider (`ContextProvider` inside
 >   `StrategyHostFunction`, flag `STRATEGY_CONTEXT_ENABLED` default OFF) —
 >   asynchronous exact-PK Fluss lookups, single-flight, bounded (8 MB/subtask
 >   cache, 32 in-flight, 100 ms fetch timeout, 250 ms retry cooldown), heap-only,
@@ -467,7 +466,7 @@ limit. Evidence: `logs/day/monday-20260928/latency-monitor-close.txt`, `logs/chg
 
 ### Feature layer — shared registry + strategy view (DEC-056/DEC-057, slices S1–S2)
 
-`com.trading.compute.feature` owns the registry (one `FeatureDef` line per feature: stable id, name, ACTIVE/RETIRED, TICK/CLOSE cadence, declared timeframes, computer factory) and the per-instrument state (`PerInstrumentFeatures`: `double[] tickLatest` + `double[feature][tf]` close values, one preallocated computer per slot, O(1) allocation-free updates, NaN-until-ready). The strategy host creates one state per instrument slot and updates it on the live tick and on each closed candle **before** the strategy fan-out — on the tick side, only the canonical `FIFTEEN_S` row updates the timeframe-independent TICK features: when `MULTITF_FAST_LIVE_FEED=false` the host receives all six TF forming rows per snapshot and every row still fans out to strategies, but `compute.features.updates.tick` counts one update per snapshot, not six (L3-4; an unparseable TF is counted like the close path), so every strategy reads the same fresh values through the new feature-aware default overloads of `SignalStrategy` — `onLiveTick(RowData, FeatureView, Collector)` and `onClosedCandle(RowData, FeatureView, Collector)`; the defaults delegate to the legacy two-argument methods, so existing strategies (N7, stub-smoke) are unchanged (pinned by `StrategyHostFeaturesTest`). New counters `compute.features.updates.tick`, `compute.features.updates.close`, `compute.features.failed`; a failing feature update is counted and dropped, never blocks signal delivery. Adding/removing a feature is one registry line + one pin-ledger line — ids are append-only and removal is status `RETIRED`, never a delete (guard: `FeatureRegistryPinTest` + the AGENTS.md hazard + the registry Javadoc). Storage (slice S3): DDL 34 `feature_values` (KV, PK `(instrument_token, tf, window_start)`, `features MAP<INT,DOUBLE>`, 16 buckets by `instrument_token`, 7d TTL, no lake) is a **proposal, not applied anywhere**; `FeatureValuesColumns` mirrors it for the writer; the host emits `FEATURE_ROWS` (one row per closed window, empty snapshots skipped) which `SignalJob` sinks through its own named operator (`feature-values-sink-v1`) instead of chaining it to the strategy fan-out; `FEATURE_LAYER_ENABLED` (default false, requires `STRATEGY_HOST_ENABLED=true`) turns the output on and the startup preflight then validates the table contract via `TableContractValidator.validateFeatureValuesTable` before the job starts. Re-emitted windows after a restore upsert the same PK with deterministic values; unlike candles there is no first-write-wins filter, so a registry change legitimately rewrites a recomputed window. S4 latency check (2026-09-28, dev; full 2,433-instrument fake feed at 4,866 ticks/s; two 240 s runs per side, savepoint-restored job): the median `compute.latency.tick_to_strategy` is unaffected by the layer (OFF 58/64 ms vs ON 65/63 ms) and calm-window p95/p99 are equal (≈92/102 vs ≈93–96/102 ms), but enabling it raises the frequency of 250–500 ms tail bursts (probe windows with p95 > 200 ms: 3/16 OFF vs 12/16 ON). Feature-row emission + the Fluss sink writer is the only enabled difference and is tunable (sink parallelism, writer batching); a production-rate re-measure (SLO envelope is 50k ticks/s) and any tuning land before the layer is enabled in production — evidence `logs/feature-layer-s4-20260927/REPORT.md`.
+`com.trading.compute.feature` owns the registry (one `FeatureDef` line per feature: stable id, name, ACTIVE/RETIRED, TICK/CLOSE cadence, declared timeframes, computer factory) and the per-instrument state (`PerInstrumentFeatures`: `double[] tickLatest` + `double[feature][tf]` close values, one preallocated computer per slot, O(1) allocation-free updates, NaN-until-ready). The strategy host creates one state per instrument slot and updates it on the live tick and on each closed candle **before** the strategy fan-out — on the tick side, only the canonical `FIFTEEN_S` row updates the timeframe-independent TICK features: when `MULTITF_FAST_LIVE_FEED=false` the host receives all six TF forming rows per snapshot and every row still fans out to strategies, but `compute.features.updates.tick` counts one update per snapshot, not six (L3-4; an unparseable TF is counted like the close path), so every strategy reads the same fresh values through the new feature-aware default overloads of `SignalStrategy` — `onLiveTick(RowData, FeatureView, Collector)` and `onClosedCandle(RowData, FeatureView, Collector)`; the defaults delegate to the legacy two-argument methods, so existing strategies (N7, stub-smoke) are unchanged (pinned by `StrategyHostFeaturesTest`). New counters `compute.features.updates.tick`, `compute.features.updates.close`, `compute.features.failed`; a failing feature update is counted and dropped, never blocks signal delivery. Adding/removing a feature is one registry line + one pin-ledger line — ids are append-only and removal is status `RETIRED`, never a delete (guard: `FeatureRegistryPinTest` + the AGENTS.md hazard + the registry Javadoc). Storage (slice S3): DDL 34 `feature_values` (KV, PK `(instrument_token, tf, window_start)`, `features MAP<INT,DOUBLE>`, 16 buckets by `instrument_token`, 7d TTL, no lake) is a **proposal, not applied anywhere**; `FeatureValuesColumns` mirrors it for the writer; the host emits `FEATURE_ROWS` (one row per closed window, empty snapshots skipped) which `SignalJob` sinks through its own named operator (`feature-values-sink-v1`) instead of chaining it to the strategy fan-out; `FEATURE_LAYER_ENABLED` (default false, requires `STRATEGY_HOST_ENABLED=true`) turns the output on and the startup preflight then validates the table contract via `TableContractValidator.validateFeatureValuesTable` before the job starts. Re-emitted windows after a restore upsert the same PK with deterministic values; unlike candles there is no first-write-wins filter, so a registry change legitimately rewrites a recomputed window. S4 latency check (2026-09-28, dev; full 2,433-instrument fake feed at 4,866 ticks/s; two 240 s runs per side, savepoint-restored job): the median `compute.latency.tick_to_strategy` is unaffected by the layer (OFF 58/64 ms vs ON 65/63 ms) and calm-window p95/p99 are equal (≈92/102 vs ≈93–96/102 ms), but enabling it raises the frequency of 250–500 ms tail bursts (probe windows with p95 > 200 ms: 3/16 OFF vs 12/16 ON). Feature-row emission + the Fluss sink writer is the only enabled difference and is tunable (sink parallelism, writer batching); a production-rate re-measure (SLO envelope is 50k ticks/s) and any tuning land before the layer is enabled in production — evidence `logs/feature-layer-s4-20260927/REPORT.md`. **RETIRED 2026-09-30 (Wave C W-C4 `5533ec2a` + W-C5a, DEC-059):** the stored `feature_values` layer, `FEATURE_LAYER_ENABLED`/`FEATURE_TABLE`, `FeatureValuesColumns`, the `feature-values-sink-v1` operator and DDL 34 were removed; features now ride the merged `candle_features` row (`features MAP<INT,DOUBLE>`), so there is no separate feature table, flag, writer or sink.
 
 ### Event-time contract
 
@@ -525,7 +524,7 @@ window_start, window_end
 algorithm/config version
 ```
 
-Active candle state SHALL NOT contain a list, collection, array, or map of individual ticks. Window state (accumulator + `emitted` flag) is deleted by Flink's window cleanup when the watermark passes `window_end + allowed_lateness`; the final candle row has already been written at first fire and is never corrected.
+Active candle state SHALL NOT contain a list, collection, array, or map of individual ticks. Window state (accumulator + `emitted` flag) is deleted by Flink's window cleanup when the watermark passes `window_end + allowed_lateness`; the merged `candle_features` row is upserted while forming and the terminal `sealed=true` row is written when the window closes, after which it is never corrected (Wave C W-C5a, DEC-059).
 
 Order key is `(event_time, deterministic_fingerprint_order)`. Price and quantity validation occurs before aggregation. Overflow/invalid numeric behavior is explicit and tested.
 
@@ -535,7 +534,7 @@ Order key is `(event_time, deterministic_fingerprint_order)`. Price and quantity
 
 Candle production requires `MULTITF_ENABLED=true` in the JM/TM environment
 (`SignalJobConfig` reads `System.getenv()`; the launcher's `-e` cannot reach a session-cluster
-job, and compose defaults the flag to false). With the flag off, `candle_live`/`candle_closed`
+job, and compose defaults the flag to false). With the flag off, `candle_features`
 have no writer at all - that is a configuration gap, not a runtime failure.
 
 The aggregate drops a tick whose `event_time` is not newer than the previous tick for the same

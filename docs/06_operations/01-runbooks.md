@@ -158,7 +158,7 @@ blank as clean.
 **Cold starts are the slow path (F1, 2026-09-28):** after a host reboot or any
 fully stopped stack, the Fluss tablet must finish recovering every table before
 it serves `raw_table_1` metadata. Measured off-hours with the real feed at 58.6M
-raw records: **22 min 56 s**, dominated by the `candle_live`/`candle_closed` KV
+raw records: **22 min 56 s**, dominated by the candle KV
 changelog replay ("No snapshot found" per bucket; the structural fix is F8 —
 KV snapshots/segment sizing — not a longer wait). `start` waits up to
 `DAY_READY_TIMEOUT_S` (default 3600 s; the wait is state-based and exits as soon
@@ -483,10 +483,10 @@ The job no longer reads any of these keys (verified by literal census of
 `SIGNAL_TENTATIVE_MARKERS_TABLE`, `FORMING_BAR_TABLE`. Their tables
 (`feature_candles_15s_preview`, `forming_bar`, `Signal_Tentative_Markers`) were deleted
 with DDLs 30/04/31. Preview-cadence work now rides the multi-timeframe path as live
-snapshots in `candle_live` (DDL 32); the authoritative env surface is the
-`SignalJobConfig` literal set (`CANDLE_LIVE_TABLE`, `CANDLE_CLOSED_TABLE`,
-`MULTITF_ENABLED`, `MULTITF_LIVE_SNAPSHOT_INTERVAL_MS`, `MULTITF_SESSION_BYPASS`,
-`MULTITF_SIGNAL_CONTEXT_ENABLED`) — defaults are deliberately not restated here.
+snapshots in `candle_features` (DDL 35, DEC-059); the authoritative env surface is the
+`SignalJobConfig` literal set (`MULTITF_ENABLED`, `MULTITF_LIVE_SNAPSHOT_INTERVAL_MS`,
+`MULTITF_SESSION_BYPASS`, `MULTITF_SIGNAL_CONTEXT_ENABLED`,
+`MERGED_CANDLE_TABLE`) — defaults are deliberately not restated here.
 `STATE_RECOVERY_PATH`/`ALLOW_FULL_REPLAY` are runtime-only and absent from
 `.env`; the fail-closed A3.3 gate governs both (no normal launch path supplies
 `ALLOW_FULL_REPLAY=true`).
@@ -583,7 +583,7 @@ Trigger: DDL/version preflight blocks startup (validation/contract gate).
 
 1. Capture the failing table, expected vs actual schema, and version matrix
    state.
-2. Check the table contract fields: PK, routing, bucket count, and the full column/type/nullability set (`TableContractValidator`: `Signal_Candidates` LOG + `Signal_Candidates_current` KV PK `[instrument_token]`; `candle_live`/`candle_closed` KV PK `(instrument_token, tf, window_start)` when multi-TF is enabled; `Execution_Intent` LOG when intent is enabled — SIGNAL-SCHEMA-001, implemented; candle targets added by the 2026-09-05 cutover).
+2. Check the table contract fields: PK, routing, bucket count, and the full column/type/nullability set (`TableContractValidator`: `Signal_Candidates` LOG + `Signal_Candidates_current` KV PK `[instrument_token]`; `candle_features` KV PK `(instrument_token, tf, window_start)` (the merged writer; unconditional since Wave C W-C5a, DEC-059); `Execution_Intent` LOG when intent is enabled — SIGNAL-SCHEMA-001, implemented).
 3. Do NOT bypass the gate; reconcile the DDL/schema with the manifest
    (`ddl_apply.py --force` regeneration must be byte-identical) and re-run.
 4. Closure: preflight passes, job starts in the intended mode.

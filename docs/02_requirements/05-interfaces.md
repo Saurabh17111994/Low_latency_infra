@@ -83,7 +83,7 @@ The job filters eligible trades, deduplicates best-effort, emits multi-timeframe
 
 The Signal job writes:
 
-- `candle_live` forming KV upsert rows + `candle_closed` final KV rows (PK `(instrument_token, tf, window_start)` — multi-TF since the 2026-09-05 cutover)
+- `candle_features` KV rows, one per `(instrument_token, tf, window_start)`: forming upserts then the terminal `sealed=true` row (DEC-059, Wave C W-C5a)
 - `Signal_Candidates` immutable LOG rows
 - `Execution_Intent` immutable LOG rows when `EXECUTION_INTENT_ENABLED=true`
 - ~~`Ranking_Results` immutable LOG rows~~ — **REMOVED 2026-08-15 (CHG-005)**

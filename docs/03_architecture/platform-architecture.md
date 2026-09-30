@@ -52,7 +52,7 @@ The Signal job contains Compute and Business Logic. **(Ranking is REMOVED 2026-0
 
 The deployment must provision or reconcile these logical tables before readiness:
 
-- Market: `raw_table_1`, `candle_live`, `candle_closed`, `suspected_discontinuities`, `instruments` (`feature_candles_15s` + `forming_bar` RETIRED 2026-09-05, replaced by `candle_live`/`candle_closed`)
+- Market: `raw_table_1`, `candle_features`, `suspected_discontinuities`, `instruments` (`feature_candles_15s` + `forming_bar` RETIRED 2026-09-05; `candle_live`/`candle_closed`/`feature_values` RETIRED 2026-09-30, merged into `candle_features` — DEC-059/Wave C W-C5a)
 - Strategy: `Signal_Candidates`, `Signal_Candidates_current`, `Execution_Intent` (**`Ranking_Results`, `Trade_Decisions`, `Portfolio_Reservations` REMOVED 2026-08-15, CHG-005**)
 - Postback/position: `Fills`, `Order_Lifecycle`, `Positions`, `Postback_Quarantine`, `Postback_Projection_Ledger`
 - Execution: `Execution_Gate`, `Execution_Attempts`, `Order_Correlation`, `Execution_Audit`, `Safety_Halt_Requests`
