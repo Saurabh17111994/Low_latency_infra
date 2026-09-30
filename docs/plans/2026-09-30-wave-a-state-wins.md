@@ -45,21 +45,52 @@ with a failing-first test pin + CHG; `make gate` at wave close (p99-plan rule:
 **Wrong if:** growth does not roughly halve, the live leg degrades beyond the
 agreed freshness class, or KPIs/throughput regress. **Revert:** drop the env.
 
-## A2 — `raw_table_1` retention: 9 d → 3 d (guard first)
+## A2 — `raw_table_1` retention: 9 d → 3 d (guard-first **reconciliation**, not a bare ALTER)
 
-**Verify-first (open):**
-- DDL `02_raw_table_1.sql`: `table.log.ttl = 9d` + `auto-partition.num-retention
-  = 9`; the P4-001 header requires the EOD VERIFIED buffer and forbids lowering
-  "without the controller guard in place".
-- Guard: `EodControllerTool` (common; extend/delete-block path; tests exist) —
-  operator Q36: guard behavior verified first.
-- Apply path: determine whether `table.log.ttl` / `auto-partition.num-retention`
-  are **ALTERable on Fluss 1.0.0** or create-time-only (DEC-052: create-time
-  options adopt via recreate). A recreate of `raw_table_1` carries
-  ingestion/offset implications — if ALTER is unsupported, A2 becomes a staged
-  recreate plan, not a config flip.
-**Expected:** +150.28 → ~50 MB/min (3 d ≈ 650 GB vs 1.9 TB).
-**Not started until the apply path and guard are verified.**
+**Verify-first (2026-09-30, read-only):**
+- **ALTER is the apply path, no recreate.** `table.log.ttl` and
+  `table.auto-partition.num-retention`/`num-precreate` are on Fluss 1.0.0's
+  alterable list; the log.ttl ALTER is proven accepted **and enforced** (A1/A2/
+  A2b probes GREEN 2026-09-25; `CHG-307`). The guard itself extends retention
+  with exactly that one ALTER (`EodControllerTool` → `Admin.alterTable`), and
+  `RawTableAlter`/`EnableTiering` show the one-shot tool pattern for live
+  option changes.
+- **The guard's floor rule fights a 3 d TTL.** `EodPlanner.plan`:
+  `protectedBound = max(3rd-most-recent trading day end + TTL, earliest
+  unverified day end + TTL)`; extension fires when `margin < EOD_SAFETY_FLOOR`
+  (default **7 d**; `EodRetentionPolicy.MIN_COMPLETE_TRADING_DAYS = 3`).
+  Today's 9 d TTL gives ~8 d margin → quiet. A 3 d TTL gives ~2 d margin
+  < 7 d → the controller extends to `TTL + EOD_EXTENSION` (30 d) **immediately**
+  — and the weekend math (Friday end + 3 d = Tuesday 00:00) makes the
+  "3 complete trading days" rule fire at any floor above ~30 min on Mondays.
+  So 3 d is only stable with a guard change; the operator already re-scoped the
+  contract in Q36 ("replay window ≤ 24 h; backfills from lake").
+- **Guard runtime:** on this PC EOD runs as a one-shot
+  (`make eod-controller ARGS="..."`, compose service `eod-controller`,
+  `restart: no`); the always-on scheduler is a production-deck service
+  (`docker-stack.yml`: `EOD_AT`/`EOD_ZONE`/`EOD_TABLES`/`EOD_OFFLOAD`). The
+  extend path is exercised in CHG-307's drills; the 3 d reconciliation is a
+  code+env change, testable offline.
+- **Live check owed before the ALTER:** `table.datalake.enabled` on the live
+  `raw_table_1` must be true (else there is no offload) + the live ZK options
+  (`9d`/`9` expected).
+
+**Proposed reconciliation (operator ack before the live ALTER):**
+- Keep "unverified day always extends"; replace the 3rd-most-recent-day floor
+  with a runway rule tied to the TTL (extend only when an **unverified** day's
+  bound is closer than a small runway; verified days never extend) — the
+  weekend/steady-state cases then stay quiet at 3 d.
+- Set `EOD_SAFETY_FLOOR` for a 3 d deployment (no steady-state firing) and
+  update the `EodRetentionPolicy`/`02_raw_table_1.sql` contract text
+  (7 d/9 d → 3 d).
+- Failing-first tests: Friday run → quiet; stuck-unverified day → extension
+  with runway; holiday weekend case.
+
+**Apply once acked:** ALTER `raw_table_1` (`table.log.ttl=3d`,
+`table.auto-partition.num-retention=3`); verify in-force (ZK) + post-ALTER
+write/read (the next round exercises both). Record the steady-state
+projection (≈650 GB vs ≈1.9 TB at the synthetic 2 Hz feed) — the growth
+**rate** is unchanged, only the ceiling moves, so no 900 s round can show it.
 
 ## A3 — compaction investigation (read-only first)
 
