@@ -221,6 +221,16 @@ x-flink-common: &flink-common
     # the 2.2.1 bytecode: TaskExecutorStateChangelogStoragesManager takes
     # taskManagerConfiguration). filesystem storage needs the flink-dstl-dfs
     # plugin mounted on the taskmanager — see flink-plugins/dstl-dfs/README.md.
+    # CHG-458: the FS storage persists accumulated changes at checkpoint time
+    # (every 10 s); the default 5 MB preemptive threshold lets a subtask
+    # accumulate several MB before quasi-continuous upload, so each checkpoint
+    # carries an upload burst on its async path. 1 MB starts the upload earlier
+    # and continuously, shrinking the checkpoint-time burst. Option names +
+    # defaults verified in the pinned flink-dstl-dfs-2.2.1.jar bytecode
+    # (FsStateChangelogOptions): persist-delay 10 ms, persist-size-threshold
+    # 10 MB, upload buffer 1 MB, 5 upload / 1 discard threads, in-flight limit
+    # 100 MB, retry fixed / 3 attempts / 500 ms backoff / 1 s timeout, cache
+    # idle 10 min — all left at their defaults.
     FLINK_PROPERTIES: |
       jobmanager.rpc.address: flink-jobmanager
       rest.address: flink-jobmanager
@@ -254,6 +264,7 @@ x-flink-common: &flink-common
       state.backend.rocksdb.metrics.block-cache-pinned-usage: true
       state.changelog.storage: filesystem
       state.changelog.dstl.dfs.base-path: file:///checkpoints/changelog
+      state.changelog.dstl.dfs.preemptive-persist-threshold: 1MB
     DEDUP_TTL_MS: "60000"
     CANDLE_WINDOW_MS: "15000"
     CHECKPOINT_INTERVAL_MS: "10000"

@@ -206,6 +206,17 @@ preflight() {
     [ "$i" -eq 12 ] && fail "taskmanager did not register with the jobmanager"
     sleep 5
   done
+  # CHG-458: fresh changelog storage per phase — the FS changelog base path is a
+  # persistent shared volume; after each TM restart the in-memory file registry
+  # no longer tracks earlier files, so leftovers produced the "state is not in
+  # tracking" WARN floods (457-465 per window) and unbounded growth (1.9 GB over
+  # a day). Profiler runs are independent measurements (no restore), so a fresh
+  # base path is the correct precondition. Fail closed: a dirty changelog
+  # invalidates the round's comparisons.
+  docker exec "$FLINK_TM_CONTAINER" sh -c \
+    'rm -rf /checkpoints/changelog && mkdir -p /checkpoints/changelog' \
+    >"$PHASE_DIR/changelog-wipe.log" 2>&1 \
+    || fail "changelog base-path wipe failed (see $PHASE_DIR/changelog-wipe.log)"
   export PIPELINE_PREFLIGHT_OK=1
   local want got
   want="$(pipeline_loadgen_input_stamp)" || fail "cannot compute the loadgen build stamp"

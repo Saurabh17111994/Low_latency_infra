@@ -29,6 +29,28 @@ PROFILER = (
 COMPOSE = REPO / "code" / "01_platform" / "01_docker" / "docker-compose.yml"
 
 
+def test_changelog_base_path_wiped_per_phase() -> None:
+    """CHG-458: the FS changelog base path is a persistent shared volume; without
+    a per-phase wipe, post-restart runs see stale files (457-465 "state is not
+    in tracking" WARNs/window) and the path grows unbounded (1.9 GB/day). The
+    profiler preflight must wipe it, fail-closed."""
+    src = PROFILER.read_text(encoding="utf-8")
+    assert "/checkpoints/changelog && mkdir -p /checkpoints/changelog" in src, (
+        "the per-phase changelog wipe is gone from stage-profile.sh preflight"
+    )
+
+
+def test_changelog_preemptive_persist_threshold_is_pinned() -> None:
+    """CHG-458: 1 MB preemptive persist (pinned 2.2.1 default: 5 MB) starts the
+    changelog upload before the checkpoint-time burst and shrinks the async
+    phase. Option name verified in the pinned flink-dstl-dfs-2.2.1.jar bytecode
+    (FsStateChangelogOptions)."""
+    src = COMPOSE.read_text(encoding="utf-8")
+    assert "state.changelog.dstl.dfs.preemptive-persist-threshold: 1MB" in src, (
+        "the CHG-458 preemptive-persist threshold is gone from docker-compose.yml"
+    )
+
+
 def test_tm_g1_pause_target_is_pinned() -> None:
     """W3-a (CHG-453): the TM runs a fixed 2.15 GiB heap with G1's default
     200 ms pause target; the instrumented round measured 40-48 ms pauses at the
