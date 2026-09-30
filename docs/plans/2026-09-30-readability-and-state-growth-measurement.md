@@ -236,3 +236,104 @@ mirror churn; `table.log.ttl` covers the changelog only, KV rows do not
 expire), `candle_closed` +2.6 MB/min, `feature_values` +0.5 MB/min. State is
 won with retention/offload, write cadence, and one-copy merges — not by
 adding tables or intermediates.
+
+## Locked decisions — 50-question round (2026-09-30)
+
+Operator answered all 50 questions; these are the working decisions for the
+merge/EOL/cadence/retention work. The merged-table contract decision is recorded
+as **DEC-059**. Items marked **OPEN** still need one clarification round before
+implementation.
+
+### Merge / table design (Q1–Q12, Q20, Q48–Q49)
+
+| Q | Decision |
+|---|---|
+| 1 | Merge `candle_live` + `candle_closed` + `feature_values` into one table. Feature add/remove friction is the open concern → the MAP + append-only registry path answers it (add = one registry line + pin line + computer; remove = `RETIRED`; ids never reused; no DDL/table/sink change). **OPEN**: operator confirmation. |
+| 2 | Single writer = strategy host. |
+| 3 | `sealed BOOLEAN` marks finality. |
+| 4 | Sealed rows are never rewritten; late ticks dropped/counted. |
+| 5 | `MAP<INT,DOUBLE>` features (DEC-057). |
+| 6 | Forming rows carry tick-cadence features only; sma/rsi null until seal. |
+| 7 | Feature column present/empty when the layer is off. |
+| 8 | Staged dual-write cutover. |
+| 9 | All consumers migrate: strategy/signal, EOD/lake, UI/dashboards, replay/backtest. |
+| 10 | Old tables read-only, dropped after N days. |
+| 11 | Operator chose **separate lake tables**. **OPEN**: one Fluss table tiers natively to one Iceberg table; separate lake tables need a split step (or a second Fluss table). Reconcile before DDL. |
+| 12 | Merged retention **3 d + lake**. |
+| 20 | Merged forming rows serve the now-view. |
+| 48 | One TF-keyed table (not six). |
+| 49 | sma/rsi null until computable. |
+
+### Live end-of-life / cadence (Q13–Q27, Q50)
+
+| Q | Decision |
+|---|---|
+| 13 | Live EOL = merged freeze (no separate live table in the merged world). |
+| 14 | kv.ttl 15 min recorded as the **fallback** if the merge is deferred; moot in the merged world (the rows are the history). **OPEN**: close out at merge landing. |
+| 15 | kv.ttl semantics verified by an isolated test first (fallback path only). |
+| 16 | Compaction/churn investigation included in the state work. |
+| 17 | Verify no consumer reads sealed rows from `candle_live` before cutover. |
+| 18 | Quiet-instrument rows may expire (fallback semantics). |
+| 19 | Rows-vs-churn split confirmed first (census fix + 900 s). |
+| 21 | Stored live leg is freshness-bound, not 75 ms-class. |
+| 22 | Live cadence **1 Hz/key** (halves churn; stored now-view floor ≈1 s). |
+| 23 | Per-tick scope: smallest TF only if ever enabled — load answer below. |
+| 24 | Single global cadence. |
+| 25 | One record per key per emission (no batching) — request-rate watch item. |
+| 26 | All TFs keep live rows. |
+| 27 | **Prompt close at window end + grace** (not watermark close). **OPEN**: two-phase design (window end → grace → seal) so the Q4 sealed guard holds; grace value; provisional-row visibility. |
+| 50 | Strategies **may act on forming rows**. **OPEN**: in-memory per-tick forming context (fast path, ~26 ms p50) vs the stored 1 Hz forming row (~1 s stale) — if strategies read the stored row, Q22 conflicts with the 75 ms goal. |
+
+### Q23 load answer — per-tick emission
+
+| Option | Writes @ smoke feed (2 433 instr × 2 Hz) | Writes @ busy feed (50 ticks/s/instr) | Note |
+|---|---|---|---|
+| today 2 Hz/key | ~29 k/s | ~29 k/s | fixed, bounded |
+| chosen 1 Hz/key | ~15 k/s | ~15 k/s | half churn |
+| per-tick, all TFs | ~29 k/s | ~730 k/s (~25×) | feed-proportional firehose |
+| per-tick, smallest TF only | ~5 k/s | ~122 k/s | near-constant share |
+
+Recommendation stands: **smallest TF only** if per-tick is ever enabled.
+
+### Retention / platform (Q34–Q38)
+
+| Q | Decision |
+|---|---|
+| 34 | `raw_table_1` retention **3 d + lake**. |
+| 35 | Longest Fluss replay window needed ≤24 h. |
+| 36 | Controller guard first, then lower retention. |
+| 37 | Decide from smoke extrapolation (no real-feed sizing round) — caveat: the smoke is a 2 Hz fake broker; revisit when real rates exist. |
+| 38 | Backfills older than retention come from the lake. |
+
+### p99 round (Q28–Q33)
+
+| Q | Decision |
+|---|---|
+| 28 | p99 work starts after these decisions. |
+| 29 | Tail instrumentation on all five suspects (source fetch/serde, dedup/window state, aggregator/host compute, GC pauses, network/contention). |
+| 30 | Per-stage p99 histograms — yes. |
+| 31 | Bar = **p99 ≤75 ms in every window of every TF**, strict — applied to the per-tick legs; stored legs are class-scored per Q21. |
+| 32 | No throughput/state regression accepted while chasing p99. |
+| 33 | GC/container tuning allowed with before/after evidence. |
+
+### Process (Q39–Q47)
+
+| Q | Decision |
+|---|---|
+| 39 | 900 s released: census fix + 200 s smoke first. |
+| 40 | Smoke first — yes. |
+| 41 | Prepared commits — done (`c5031a40`, `d5ac945c`). |
+| 42 | `make gate` after the next implementation wave. |
+| 43 | Records: this scope doc + DEC-059. |
+| 44 | Plan doc first, then implement. |
+| 45 | Trackers updated now. |
+| 46 | No 1 s intermediate. |
+| 47 | No 1 s output TF. |
+
+### Open sub-decisions (one more round)
+
+1. **Feature add/remove (Q1)** — confirm the MAP + registry path.
+2. **Lake split (Q11)** — one Iceberg table vs a split step.
+3. **kv.ttl (Q14)** — close as fallback/moot at merge landing.
+4. **Prompt close (Q27)** — grace + seal mechanics.
+5. **Forming strategies (Q50)** — in-memory context vs stored forming rows.
