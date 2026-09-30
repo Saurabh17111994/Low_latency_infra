@@ -27,6 +27,32 @@ PROFILER = (
     REPO / "code" / "01_platform" / "06_stage_profiler" / "stage-profile.sh"
 )
 COMPOSE = REPO / "code" / "01_platform" / "01_docker" / "docker-compose.yml"
+SIGNAL_JOB = (
+    REPO / "code" / "02_services" / "02_compute" / "src" / "main" / "java"
+    / "com" / "trading" / "compute" / "signaljob" / "SignalJob.java"
+)
+
+
+def test_signal_sink_linger_is_pinned() -> None:
+    """CT-4B (CHG-455): both sinks on the strategy-host subtask must carry the
+    1 ms Fluss linger (client.writer.batch-timeout). Fluss's 100 ms default is
+    latency-additive and stalls the host subtask's checkpoint alignment; D1
+    (FlussWriteProfiles) measured 102.67 ms p50 @ linger 100 vs 2.29 ms @ 1."""
+    src = SIGNAL_JOB.read_text(encoding="utf-8")
+    got = src.count('.setOption("client.writer.batch-timeout", "1ms")')
+    assert got == 2, (
+        "CT-4B: expected the 1 ms linger on both signal sinks "
+        f"(candidates + current), found {got}"
+    )
+
+
+def test_buffer_debloat_enabled_is_pinned() -> None:
+    """CT-5 (CHG-456): the operator-approved p99 < 50 ms headroom option — one
+    cluster key; the 1 s target is the Flink default."""
+    src = COMPOSE.read_text(encoding="utf-8")
+    assert "taskmanager.network.memory.buffer-debloat.enabled: true" in src, (
+        "the CT-5 buffer-debloat key is gone from docker-compose.yml"
+    )
 
 
 def test_changelog_materialization_interval_is_pinned() -> None:

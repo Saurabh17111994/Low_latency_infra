@@ -227,6 +227,10 @@ x-flink-common: &flink-common
     # 30 min removes the in-window rounds; the trade is a larger single
     # materialization later and a longer restore replay — production adoption
     # needs the restore drill (design note W3-c guardrail).
+    # CT-5 (CHG-456): buffer debloat shrinks in-flight network data, so the
+    # unaligned-checkpoint payload and barrier travel shrink with it — the
+    # headroom option the CT plan reserved for a p99 < 50 ms requirement.
+    # (Target 1 s is the Flink default; the one key here flips it on.)
     FLINK_PROPERTIES: |
       jobmanager.rpc.address: flink-jobmanager
       rest.address: flink-jobmanager
@@ -236,6 +240,7 @@ x-flink-common: &flink-common
       metrics.reporter.prom.interval: 2 SECONDS
       metrics.latency.interval: 1000
       taskmanager.numberOfTaskSlots: 16
+      taskmanager.network.memory.buffer-debloat.enabled: true
       jobmanager.memory.process.size: 1600m
       taskmanager.memory.process.size: 7g
       taskmanager.memory.task.off-heap.size: 512m

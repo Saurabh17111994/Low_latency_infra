@@ -198,6 +198,17 @@ tail contributor (256 events ≥ 15 ms, max 48.6 ms; fixed 2.15 GiB heap, defaul
 the instrumented body is ~10 ms wider at p95/p99 than the non-instrumented combined run —
 final certification re-runs **without** instrumentation.
 
+**ROUND RESULT (900 s, W3-a + W3-c, CHG-454, `logs/w3ac-main-20260930-124510`):** ingest
+p50/p95/p99 med **22/54/64 ms — 0/60 windows > 100 ms** (best ingest tail yet; body also
+the best: p95 59→54, p99 69→64); tick 34/69/80 ms with **5/60 > 100 (max 236)** — tick
+spikes persist and grew vs the prior round. Attribution (TM logs): the materialization
+first batch fired 9 s before spike 1 and was the **only** materialization batch of the
+window; `TaskChangelogRegistryImpl` "state is not in tracking" bursts (457/window) sit at
+spikes 2/3; at the big spikes the TM burns ~300 % CPU with psi-cpu flat. → the residual
+tick tail tracks the **filesystem-changelog machinery** (uploads/registry/snapshots), not
+GC/host/materialization-rounds. Next bundle (operator-approved): **CT-4B** (signal-sink
+linger 1 ms) + **CT-5** (buffer debloat), CHG-455/456.
+
 ### W4 — TM CPU contention / slot isolation (design)
 
 **GIVES YOU** — addresses the suspected second half of the single-subtask stalls: the
