@@ -69,7 +69,7 @@ per-tick deep-copy cost, no consumer.
 - [~] **C1** `ContextProvider` + `ContextView` skeleton (no consumer yet)
 - [~] **C2** Contract additions + host wiring (default callbacks, last-live snapshot, timer wake-up)
 - [~] **C3** First consumer proves live-candle firing end-to-end
-- [ ] **C4** Compact context derivation + warm-up (T3)
+- [~] **C4** Compact context derivation + warm-up (T3)
 
 #### P3 - certification
 
@@ -80,9 +80,9 @@ per-tick deep-copy cost, no consumer.
 | Stage | Tasks | done | wip | todo | live | decide | skip |
 |---|---|---|---|---|---|---|---|
 | P1 - design lock | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
-| P2 - build (each item starts only when its window opens) | 4 | 0 | 3 | 1 | 0 | 0 | 0 |
+| P2 - build (each item starts only when its window opens) | 4 | 0 | 4 | 0 | 0 | 0 | 0 |
 | P3 - certification | 1 | 0 | 0 | 1 | 0 | 0 | 0 |
-| **Total** | **6** | **1** | **3** | **2** | **0** | **0** | **0** |
+| **Total** | **6** | **1** | **4** | **1** | **0** | **0** | **0** |
 
 ## Overview
 
@@ -209,6 +209,17 @@ certified thresholds); dossier rows (`docs/08_implementation/04-signal-job.md`);
 tracker closed.
 **ACTION** — run → extract → update docs → operator sign-off.
 **WRONG IF** — mixed results reported as pass; forbidden.
+
+**BLOCKED (2026-09-30; raised on the planned 900 s run):** C5's acceptance is "both KPIs
+within the certified thresholds" — i.e. the W6 thresholds of
+`docs/plans/2026-09-30-p99-50ms-normal-path.md`, which **do not exist yet** (W1–W5
+unimplemented; the certified reference today is the post-CT-4A 100 ms-target baseline,
+p99 ≈ 70–93 ms). A 900 s run now could only produce a no-regression statement, never C5 —
+and the context smokes so far ran at 60 s checkpoints / changelog-off, which is not the
+certified protocol either. C5 starts only after W6 certifies the thresholds; the same
+certification run then carries the context no-regression evidence on the final path.
+C1–C4 are landed (code + tests + functional smokes); the capability itself is proven live
+(see CHG-447's probe evidence).
 
 ## Risks
 
