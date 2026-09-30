@@ -522,6 +522,36 @@ public final class DdlBootstrap {
             .build();
 
     /**
+     * Full 17-column KV schema for candle_features matching DDL 35
+     * (35_candle_features.sql, Wave B/DEC-059): candle_closed's 15 columns +
+     * features MAP<INT,DOUBLE> (DEC-057 append-only registry ids) +
+     * sealed BOOLEAN. The strategy host is the only writer (forming rows and
+     * the terminal sealed row); registry-only like the other compute tables.
+     */
+    private static final Schema CANDLE_FEATURES_SCHEMA = Schema.newBuilder()
+            .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("exchange", org.apache.fluss.types.DataTypes.STRING())
+            .column("symbol", org.apache.fluss.types.DataTypes.STRING())
+            .column("tf", org.apache.fluss.types.DataTypes.STRING())
+            .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("window_end", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("open_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("high_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("low_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("close_paise", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("volume", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("tick_count", org.apache.fluss.types.DataTypes.INT())
+            .column("last_event_time", org.apache.fluss.types.DataTypes.BIGINT())
+            .column("last_event_fingerprint", org.apache.fluss.types.DataTypes.STRING())
+            .column("schema_version", org.apache.fluss.types.DataTypes.STRING())
+            .column("features", org.apache.fluss.types.DataTypes.MAP(
+                    org.apache.fluss.types.DataTypes.INT(),
+                    org.apache.fluss.types.DataTypes.DOUBLE()))
+            .column("sealed", org.apache.fluss.types.DataTypes.BOOLEAN())
+            .primaryKey("instrument_token", "tf", "window_start")
+            .build();
+
+    /**
      * Full 4-column KV schema for feature_values matching DDL 34
      * (34_feature_values.sql, feature layer DEC-056/DEC-057): PK
      * (instrument_token, tf, window_start); {@code features} is
@@ -587,7 +617,10 @@ public final class DdlBootstrap {
                                     .property("table.auto-partition.num-precreate", "2")
                                     .property("table.auto-partition.num-retention", RawTableSchema.PARTITION_RETENTION)
                                     .property("table.auto-partition.time-zone", "Asia/Kolkata")
-                                    .property("table.datalake.enabled", "true")
+                                    // DEC-060 (2026-09-30): archiving is opt-in
+                                    // per table; r2-archive-sync enables the
+                                    // configured list (nothing is archived by default).
+                                    .property("table.datalake.enabled", "false")
                                     .property("table.datalake.format", "iceberg")
                                     .property("table.datalake.freshness", "5min")
                                     .property("table.datalake.auto-compaction", "true")
@@ -605,7 +638,9 @@ public final class DdlBootstrap {
                                     .schema(CANDLE_CLOSED_SCHEMA)
                                     .distributedBy(16, "instrument_token")
                                     .property("table.log.ttl", "7d")
-                                    .property("table.datalake.enabled", "true")
+                                    // DEC-060 (2026-09-30): opt-in per table
+                                    // (r2-archive-sync enables the configured list).
+                                    .property("table.datalake.enabled", "false")
                                     .property("table.datalake.format", "iceberg")
                                     .property("table.datalake.freshness", "5min")
                                     .property("table.datalake.auto-compaction", "true")
@@ -621,6 +656,21 @@ public final class DdlBootstrap {
                                     .property("table.log.ttl", "7d")
                                     .property("table.kv.format-version", "2")
                                     .property("table.datalake.enabled", "false")
+                                    .build()),
+                    // Wave B (DDL 35 proposal, DEC-059): the strategy host is
+                    // the only writer (forming rows + the terminal sealed row);
+                    // registry-only like the other compute-owned tables.
+                    // DEC-060: archive-off at create (opt-in via r2-archive-sync).
+                    Map.entry("candle_features",
+                            TableDescriptor.builder()
+                                    .schema(CANDLE_FEATURES_SCHEMA)
+                                    .distributedBy(16, "instrument_token")
+                                    .property("table.log.ttl", "3d")
+                                    .property("table.kv.format-version", "2")
+                                    .property("table.datalake.enabled", "false")
+                                    .property("table.datalake.format", "iceberg")
+                                    .property("table.datalake.freshness", "5min")
+                                    .property("table.datalake.auto-compaction", "true")
                                     .build()),
                     Map.entry("Signal_Candidates",
                             TableDescriptor.builder().schema(SIGNAL_CANDIDATES_SCHEMA).distributedBy(16, "instrument_token").build()),

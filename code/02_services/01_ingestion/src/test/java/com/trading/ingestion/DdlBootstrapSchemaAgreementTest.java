@@ -162,6 +162,25 @@ class DdlBootstrapSchemaAgreementTest {
     }
 
     @Test
+    @DisplayName("candle_features is registry-only and matches DDL 35 (Wave B/DEC-059)")
+    void candleFeaturesRegistryMatchesDdl() throws IOException {
+        TableDescriptor candleFeatures = DdlBootstrap.tableRegistry().get("candle_features");
+        assertNotNull(candleFeatures,
+                "registry must carry the compute-owned candle_features entry (DDL 35)");
+        assertEquals(17, candleFeatures.getSchema().getColumns().size(),
+                "candle_features schema must carry candle_closed's 15 columns + features + sealed");
+        assertEquals(List.of("instrument_token", "tf", "window_start"),
+                candleFeatures.getSchema().getPrimaryKeyColumnNames(),
+                "candle_features PK must be exactly (instrument_token, tf, window_start)");
+        assertEquals(List.of("instrument_token"), candleFeatures.getBucketKeys(),
+                "candle_features must be distributed by instrument_token");
+        assertEquals(17, parseColumns(readDdl(ddlFileFor("candle_features"))).size(),
+                "in-code schema must match DDL 35's column count");
+        assertFalse(DdlBootstrap.ownedTables().contains("candle_features"),
+                "candle_features is compute-owned — ensureTables must never create it (A4.4)");
+    }
+
+    @Test
     @DisplayName("retired candle/forming-bar entries are gone; candle_live carries the real schema")
     void candleRegistryEntriesUseRealSchemas() {
         for (String retired : List.of("feature_candles_15s", "feature_candles_15s_preview",

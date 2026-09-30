@@ -29,10 +29,12 @@ import org.apache.fluss.types.DataTypes;
  * alterable on them; recreating lake-enabled also collides with orphaned R2
  * lake objects. (Not a create-only limit: 1.0.0 can ALTER the option in place
  * on tables created after enablement — A1 probe 2026-09-25,
- * logs/soak/a1-alter-probe-20260924T190226Z/.) Production DDLs keep
- * {@code enabled=true} (the blueprint); the dev cluster and this parser
- * deviate, documented in docs/08_implementation/02-schema-storage.md Phase C
- * lake-state note.
+ * logs/soak/a1-alter-probe-20260924T190226Z/.) Since DEC-060 (2026-09-30) the
+ * production definitions and the ingestion bootstrap ship {@code enabled=false}
+ * too — archiving is opt-in per table and the configured list enables it via
+ * r2-archive-sync — so this forcing only matters for fixtures that still
+ * declare {@code true}; the dev lake-state note lives in
+ * docs/08_implementation/02-schema-storage.md.
  */
 public final class DdlText {
 
