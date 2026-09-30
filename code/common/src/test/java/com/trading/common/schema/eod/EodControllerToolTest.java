@@ -63,6 +63,37 @@ class EodControllerToolTest {
     }
 
     @Test
+    void parseTieringModesForTheR2ArchiveSelection() {
+        // DEC-060 (S2): `tiering` lists every live table's archive flag;
+        // `--set on|off` flips exactly one table. The selection rules live in
+        // r2_archive_selection.py — this tool stays dumb so sync + guard
+        // share one rule source.
+        EodControllerTool.Options list = EodControllerTool.Options.parse(
+                new String[] {"tiering"});
+        assertThat(list.tieringSet()).isNull();
+        assertThat(list.tables()).isNotEmpty();
+
+        EodControllerTool.Options explicit = EodControllerTool.Options.parse(
+                new String[] {"tiering", "--list"});
+        assertThat(explicit.tieringSet()).isNull();
+
+        assertThatThrownBy(() -> EodControllerTool.Options.parse(
+                new String[] {"tiering", "--list", "--set", "on", "--tables", "a"}))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("mutually exclusive");
+
+        EodControllerTool.Options on = EodControllerTool.Options.parse(
+                new String[] {"tiering", "--set", "on", "--tables", "raw_table_1"});
+        assertThat(on.tieringSet()).isEqualTo("on");
+        assertThat(on.tables()).containsExactly("raw_table_1");
+
+        assertThatThrownBy(() -> EodControllerTool.Options.parse(
+                new String[] {"tiering", "--set", "maybe"}))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("--set must be on or off");
+    }
+
+    @Test
     void ttlOptionRendersWholeUnits() {
         assertThat(EodControllerTool.ttlOption(Duration.ofDays(32))).isEqualTo("32d");
         assertThat(EodControllerTool.ttlOption(Duration.ofDays(2))).isEqualTo("2d");

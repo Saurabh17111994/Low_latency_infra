@@ -135,6 +135,7 @@ public final class EodControllerTool {
                 case "extend" -> extend(opts, admin, liveTtlsFor.apply("extend"), zone, now);
                 case "reconcile" -> reconcile(opts, liveTtlsFor.apply("reconcile"), now);
                 case "reset" -> reset(opts, now);
+                case "tiering" -> tiering(opts, admin);
                 default -> usage();
             };
         }
@@ -431,6 +432,83 @@ public final class EodControllerTool {
         }
     }
 
+    // ── R2 archive selection (DEC-060, 2026-09-30) ───────────────────────
+
+    /**
+     * {@code tiering [--set on|off] [--tables <name>]} — the cluster half of
+     * the R2 archive selection (DEC-060): the default ({@code --list}) prints
+     * every live table's {@code table.datalake.enabled} flag as
+     * {@code tiering <name>=enabled|disabled|unreadable}; {@code --set} flips
+     * it on exactly one named table. The selection <b>rules</b> live in
+     * {@code r2_archive_selection.py} (one list, nothing outside it) — this
+     * tool is deliberately dumb so the sync and the gate guard share one rule
+     * source. Exit 1 when any flag is unreadable (fail-closed for the guard).
+     */
+    private static int tiering(Options opts, Admin admin) throws Exception {
+        if (opts.tieringSet() == null) {
+            List<String> tables = admin.listTables(opts.database())
+                    .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            int enabled = 0;
+            int unreadable = 0;
+            for (String table : tables) {
+                Boolean on = datalakeEnabled(admin, opts.database(), table);
+                if (on == null) {
+                    unreadable++;
+                    System.out.println("tiering " + table + "=unreadable");
+                } else {
+                    if (on) {
+                        enabled++;
+                    }
+                    System.out.println("tiering " + table + "="
+                            + (on ? "enabled" : "disabled"));
+                }
+            }
+            System.out.println("eod-controller: RESULT="
+                    + (unreadable == 0 ? "OK" : "UNREADABLE")
+                    + " EXIT=" + (unreadable == 0 ? 0 : 1)
+                    + " TABLES=" + tables.size() + " ENABLED=" + enabled);
+            return unreadable == 0 ? 0 : 1;
+        }
+        if (opts.tables().size() != 1) {
+            System.err.println("eod-controller: --set needs exactly one table"
+                    + " (--tables <name>)");
+            return 2;
+        }
+        String table = opts.tables().get(0);
+        boolean on = "on".equals(opts.tieringSet());
+        try {
+            admin.alterTable(TablePath.of(opts.database(), table),
+                    List.of(TableChange.set("table.datalake.enabled", on ? "true" : "false")),
+                    false).get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            System.out.println("eod-controller: ALTER " + table
+                    + " table.datalake.enabled=" + (on ? "true" : "false"));
+            return 0;
+        } catch (Exception e) {
+            System.err.println("eod-controller: ALTER table.datalake.enabled="
+                    + (on ? "true" : "false") + " failed for " + table + ": " + e);
+            if (String.valueOf(e).contains("InvalidAlterTableException")) {
+                System.err.println("eod-controller: this looks like a legacy table"
+                        + " (created before the cluster gained datalake.format) — a"
+                        + " one-time recreate is required before it can be archived");
+            }
+            return 1;
+        }
+    }
+
+    /** The live {@code table.datalake.enabled} flag; {@code null} on read failure. */
+    static Boolean datalakeEnabled(Admin admin, String database, String table) {
+        try {
+            TableInfo info = admin.getTableInfo(TablePath.of(database, table))
+                    .get(TIMEOUT.toMillis(), TimeUnit.MILLISECONDS);
+            return "true".equalsIgnoreCase(
+                    info.getProperties().toMap().get("table.datalake.enabled"));
+        } catch (Exception e) {
+            System.err.println("eod-controller: cannot read table.datalake.enabled for "
+                    + table + ": " + e);
+            return null;
+        }
+    }
+
     /** Render a Duration as a Fluss TTL option value (2d / 1h / 30m / 5000ms). */
     static String ttlOption(Duration d) {
         long dayMs = Duration.ofDays(1).toMillis();
@@ -474,7 +552,7 @@ public final class EodControllerTool {
 
     private static int usage() {
         System.err.println("""
-                usage: eod-controller <status|run|extend|reconcile|reset> [options]
+                usage: eod-controller <status|run|extend|reconcile|reset|tiering> [options]
                   --bootstrap <addr>   (env FLUSS_BOOTSTRAP, default localhost:9123)
                   --database <db>      (env FLUSS_DATABASE, default default)
                   --state-table <name> (env EOD_STATE_TABLE, default eod_offload_state)
@@ -488,6 +566,8 @@ public final class EodControllerTool {
                   --schema-version <v> (env EOD_SCHEMA_VERSION, default 1)
                   --offload none|mock|lake  (env EOD_OFFLOAD, default none — fail-closed)
                   --table <name>       (reset: single table scope)
+                  --list               (tiering: list every table's archive flag — the default)
+                  --set on|off         (tiering: flip table.datalake.enabled on exactly one --tables entry)
                   --apply              (extend: apply the table.log.ttl ALTER)
                   --dry-run            (run/extend: print, don't write)
                   --approve            (reset: destructive approval)
@@ -522,12 +602,12 @@ public final class EodControllerTool {
                    List<String> tables, Duration ttlDefault, Duration safetyFloor,
                    Duration extension, Duration leaseTtl, String zone, String runDate,
                    String schemaVersion, String offloadMode, String singleTable,
-                   boolean apply, boolean dryRun, boolean approve) {
+                   String tieringSet, boolean apply, boolean dryRun, boolean approve) {
 
         static Options parse(String[] args) {
             if (args.length == 0) {
                 throw new IllegalArgumentException("subcommand required "
-                        + "(status|run|extend|reconcile|reset)");
+                        + "(status|run|extend|reconcile|reset|tiering)");
             }
             String subcommand = args[0];
             String bootstrap = System.getenv().getOrDefault("FLUSS_BOOTSTRAP", "localhost:9123");
@@ -544,6 +624,8 @@ public final class EodControllerTool {
             String schemaVersion = System.getenv().getOrDefault("EOD_SCHEMA_VERSION", "1");
             String offloadMode = System.getenv().getOrDefault("EOD_OFFLOAD", "none");
             String singleTable = null;
+            String tieringSet = null;
+            boolean tieringList = false;
             boolean apply = false;
             boolean dryRun = false;
             boolean approve = false;
@@ -576,6 +658,15 @@ public final class EodControllerTool {
                             nextArg(args, ++i, "--schema-version");
                     case "--offload" -> offloadMode = nextArg(args, ++i, "--offload");
                     case "--table" -> singleTable = nextArg(args, ++i, "--table");
+                    case "--list" -> tieringList = true;
+                    case "--set" -> {
+                        String value = nextArg(args, ++i, "--set");
+                        if (!value.equals("on") && !value.equals("off")) {
+                            throw new IllegalArgumentException("--set must be on or off, got "
+                                    + value);
+                        }
+                        tieringSet = value;
+                    }
                     case "--apply" -> apply = true;
                     case "--dry-run" -> dryRun = true;
                     case "--approve" -> approve = true;
@@ -586,6 +677,9 @@ public final class EodControllerTool {
                     && !offloadMode.equalsIgnoreCase("lake")) {
                 throw new IllegalArgumentException("--offload must be none, mock or lake, got "
                         + offloadMode);
+            }
+            if (tieringList && tieringSet != null) {
+                throw new IllegalArgumentException("--list and --set are mutually exclusive");
             }
             if (runDate != null && !runDate.matches("\\d{4}-\\d{2}-\\d{2}")) {
                 throw new IllegalArgumentException("--run-date must be yyyy-MM-dd, got " + runDate);
@@ -607,7 +701,7 @@ public final class EodControllerTool {
             }
             return new Options(subcommand, bootstrap, database, stateTable, tables,
                     ttlDefault, safetyFloor, extension, leaseTtl, zone, runDate, schemaVersion,
-                    offloadMode, singleTable, apply, dryRun, approve);
+                    offloadMode, singleTable, tieringSet, apply, dryRun, approve);
         }
 
         // P4-274/283: a trailing flag (e.g. `run --bootstrap`) threw
