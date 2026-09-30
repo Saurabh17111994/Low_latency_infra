@@ -378,6 +378,20 @@
       "writer_owner": "Signal job",
       "retention_policy": "7d",
       "lake_policy": "enabled=false"
+    },
+    {
+      "table_name": "candle_features",
+      "ddl_path": "35_candle_features.sql",
+      "ddl_sha256": "f41e9ccfd1198eb35272cdfc1be713f111f72fac8cef2839a1828b73dba461e4",
+      "table_kind": "KV",
+      "primary_key": "instrument_token, tf, window_start",
+      "bucket_key": null,
+      "compatibility_class": "UNKNOWN",
+      "validated_matrix": "VM-FLUSS-SRV-005",
+      "schema_version": "1",
+      "writer_owner": "Signal job strategy host (ONE writer \u2014 DEC-059)",
+      "retention_policy": "3d",
+      "lake_policy": "enabled=false,format=iceberg,freshness=5min,auto-compaction=true"
     }
   ]
 }

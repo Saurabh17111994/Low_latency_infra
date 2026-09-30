@@ -149,14 +149,15 @@ def c1_manifest():
     if m is None:
         return check("C1 manifest readable", False, p)
     tables = m.get("tables", [])
-    # 27 since 2026-09-27: DDL 34 feature_values (feature layer S3a, CHG-349;
-    # a sanctioned unapplied proposal) joined both the manifest and the ddl/
-    # enumeration. 26 held since 2026-09-23, when the parked fingerprint_dedup
-    # DDL moved to ddl/retired/ (out of the applier's *.sql enumeration) and
-    # its manifest entry was dropped. The pin is deliberate and is NOT made
-    # redundant by the agreement checks below: only the pin notices a table
-    # being dropped from BOTH lists at once.
-    check("C1 manifest has 27 tables", len(tables) == 27, f"got {len(tables)}")
+    # 28 since 2026-09-30: DDL 35 candle_features (Wave B/DEC-059; runtime behind
+    # MERGED_CANDLE_FEATURES_ENABLED=false, a sanctioned unapplied proposal)
+    # joined both the manifest and the ddl/ enumeration. 27 held since
+    # 2026-09-27, when DDL 34 feature_values joined. 26 held since 2026-09-23,
+    # when the parked fingerprint_dedup DDL moved to ddl/retired/ (out of the
+    # applier's *.sql enumeration) and its manifest entry was dropped. The pin
+    # is deliberate and is NOT made redundant by the agreement checks below:
+    # only the pin notices a table being dropped from BOTH lists at once.
+    check("C1 manifest has 28 tables", len(tables) == 28, f"got {len(tables)}")
     # The literal above went stale (29 held for four retired tables) because
     # nothing tied the manifest to the DDL directory. These two do.
     ddl_names = {_ddl_table_name(f) for f in os.listdir(DDL_DIR) if f.endswith(".sql")}
@@ -726,12 +727,13 @@ def c9_dec039_invariants():
     ) or ""
     check("C9 ledger live-in-dev evidence", "Postback_Projection_Ledger 705" in foundation)
 
-    # --- SCH-19 index + SCH-23 EOD + REQ-EXE-004 intent DDL; 27 DDLs (the DEC-038 dedup
+    # --- SCH-19 index + SCH-23 EOD + REQ-EXE-004 intent DDL; 28 DDLs (the DEC-038 dedup
     # DDL moved to ddl/retired/ on 2026-09-23 and is no longer applied; DDL 34 feature_values
-    # joined on 2026-09-27 as a sanctioned unapplied proposal -- see the C1 pin) ---
+    # joined 2026-09-27; DDL 35 candle_features joined 2026-09-30 (Wave B/DEC-059) --
+    # see the C1 pin) ---
     sqls = sorted(f for f in os.listdir(DDL_DIR) if f.endswith(".sql"))
-    # 27: see the C1 pin. Both numbers are the same fact counted from either side.
-    check("C9 DDL count = 27", len(sqls) == 27, f"got {len(sqls)}")
+    # 28: see the C1 pin. Both numbers are the same fact counted from either side.
+    check("C9 DDL count = 28", len(sqls) == 28, f"got {len(sqls)}")
     check(
         "C9 dedup DDL on file",
         os.path.exists(os.path.join(DDL_DIR, "retired", "24_fingerprint_dedup.sql")),

@@ -18,6 +18,12 @@
 >   `candle_closed` (closed history, TTL 7 d + iceberg), both PK
 >   `(instrument_token, tf, window_start)` — DDL `32_candle_live.sql` /
 >   `33_candle_closed.sql`. `feature_candles_15s` does not exist.
+>   **`candle_features` (DDL `35_candle_features.sql`, Wave B/DEC-059) is the
+>   staged merge of the two candle tables + `feature_values`: one row per
+>   `(instrument_token, tf, window_start)` with `features MAP<INT,DOUBLE>` +
+>   `sealed`; one writer (the strategy host); runtime behind
+>   `MERGED_CANDLE_FEATURES_ENABLED=false` — the old tables stay authoritative
+>   until the operator opens the cutover (DEC-059/DEC-060).**
 > - Operators: `MultiTimeframeAggregateFunction` (uid `multi-tf-aggregator-v1`);
 >   `StrategyHostFunction` runs the `STRATEGIES`-listed rules
 >   (`n7-range-breakout-v1` is the first registered real strategy; the stub
