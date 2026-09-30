@@ -151,6 +151,17 @@ regression ⇒ bisect with one W2-alone run (20/2). Both keys are already plumbe
 (`pipeline-lib.sh:1146,1170`) — env-only, no code change. The one-variable-per-round rule
 remains the fallback for W3–W5 (not implemented yet, so they cannot join a combined round).
 
+**ROUND RESULT (2026-09-30, CHG-450):** smoke + 900 s at 2/2 ran clean (errors 0,
+throughput 4 866 rows/s, 95/95 checkpoints; lever values live). W2 marginal vs W1-alone:
+ingest p50 −6 / p95 −11 / p99 med −13 ms; tick p50 −14 / p95 −17 / p99 med −18 ms —
+larger than projected. W1+W2 total vs control: ingest p50 37 → 23, p99 med 81 → 58; tick
+50.5 → 31, p99 med 99 → 71. Cost recorded: checkpoint e2e med 75 ms (W1 53 / control 40),
+sync medians 8–10 ms — sub-0.75 % duty, all COMPLETED, re-check in the W1–W4 round;
+fallback `BUFFER_TIMEOUT_MS=5` if it grows. Tail split: 5/6 spike windows align with
+materialization events; the largest (354/424) does not — the unexplained class goes to the
+W3 GC/background-thread instrumentation. W2 passes; marker stays `[~]` until the deferred
+gate.
+
 ### W3 — Checkpoint materialization churn (design first)
 
 **GIVES YOU** — removes the 100–211 ms single-subtask spikes that set the worst windows.
