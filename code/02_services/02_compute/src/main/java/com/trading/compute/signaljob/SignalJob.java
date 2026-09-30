@@ -143,6 +143,22 @@ public final class SignalJob {
                 : OffsetsInitializer.latest();
     }
 
+    /**
+     * Wave C W-C2 (docs/plans/2026-09-30-wave-c-merged-cutover.md): with the
+     * legacy candle sinks disabled, route the branch through a stateless drop
+     * filter named {@code uid} instead of removing it — the downstream sink
+     * operators (including the keyed first-write-wins state) stay in the graph,
+     * so checkpoint-restore anchors hold and rollback is a flag flip. Enabled:
+     * the stream is returned unchanged (graph byte-identical to pre-cutover).
+     */
+    private static DataStream<RowData> legacySinkBranch(
+            DataStream<RowData> stream, boolean enabled, String uid) {
+        if (enabled) {
+            return stream;
+        }
+        return stream.filter(row -> false).name(uid).uid(uid);
+    }
+
     public static StreamExecutionEnvironment buildTopology(SignalJobConfig config) {
         // Read-only metadata preflight (tracker 14 P1 / re-scoped P2): prove
         // the deployed tables (candle KV, signal LOG, signal current-state KV)
@@ -303,10 +319,18 @@ public final class SignalJob {
             multiTfClosed = aggregator;
             multiTfLive = aggregator.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TAG);
 
-            // Closed rows: first-write-wins filter + KV sink
-            MultiTimeframeSinks.sinkClosed(multiTfClosed, config, config.candleClosedTable());
+            // Closed rows: first-write-wins filter + KV sink. Wave C W-C2:
+            // LEGACY_CANDLE_SINKS_ENABLED=false gates the branch (guard filter)
+            // while the sink operators stay in the graph for restore anchors.
+            MultiTimeframeSinks.sinkClosed(
+                    legacySinkBranch(multiTfClosed, config.legacyCandleSinksEnabled(),
+                            "candle-closed-legacy-guard"),
+                    config, config.candleClosedTable());
             // Live rows: KV upsert sink (1s overwrite)
-            MultiTimeframeSinks.sinkLive(multiTfLive, config, config.candleLiveTable());
+            MultiTimeframeSinks.sinkLive(
+                    legacySinkBranch(multiTfLive, config.legacyCandleSinksEnabled(),
+                            "candle-live-legacy-guard"),
+                    config, config.candleLiveTable());
 
             // N7 retired (2026-09-05 cutover, batch 2): the range-breakout
             // rule runs ONLY as a host strategy (N7RangeBreakoutStrategy,

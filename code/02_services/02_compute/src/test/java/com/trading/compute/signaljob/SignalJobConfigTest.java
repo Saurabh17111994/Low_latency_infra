@@ -933,6 +933,28 @@ class SignalJobConfigTest {
     }
 
     @Test
+    void legacyCandleSinksDefaultOnAndRequireMergedWhenOff() {
+        // Wave C W-C2 (docs/plans/2026-09-30-wave-c-merged-cutover.md):
+        // silencing the legacy sinks is only legal once the merged writer
+        // persists candles — otherwise nothing would write.
+        assertTrue(SignalJobConfig.from(env()).legacyCandleSinksEnabled(),
+                "LEGACY_CANDLE_SINKS_ENABLED default true (legacy path authoritative)");
+        Map<String, String> off = env();
+        off.put("LEGACY_CANDLE_SINKS_ENABLED", "false");
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> SignalJobConfig.from(off));
+        assertTrue(e.getMessage().contains("LEGACY_CANDLE_SINKS_ENABLED")
+                        && e.getMessage().contains("MERGED_CANDLE_FEATURES_ENABLED"),
+                "refusal names both flags: " + e.getMessage());
+
+        Map<String, String> cutover = env();
+        cutover.put("LEGACY_CANDLE_SINKS_ENABLED", "false");
+        cutover.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
+        assertFalse(SignalJobConfig.from(cutover).legacyCandleSinksEnabled(),
+                "the cutover combination parses");
+    }
+
+    @Test
     void mergedCandleFeaturesDefaultsOffAndParses() {
         // Wave B/DEC-059: the merged candle_features write path is opt-in; the
         // old candle/feature tables stay authoritative until the cutover.

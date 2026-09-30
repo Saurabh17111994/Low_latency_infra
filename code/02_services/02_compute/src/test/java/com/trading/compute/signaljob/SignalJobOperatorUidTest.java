@@ -145,6 +145,74 @@ class SignalJobOperatorUidTest {
         assertTopology(true, true);
     }
 
+    @Test
+    @DisplayName("legacy sinks off: guard filters appear and the legacy sink UIDs stay (W-C2)")
+    void legacyCandleSinksDisabledAddsGuardsAndKeepsSinkUids() throws Exception {
+        String suffix = String.valueOf(System.nanoTime());
+        String candleName = "p6_uid_" + suffix + "_candle";
+        String signalName = "p6_uid_" + suffix + "_sig";
+        String currentName = "p6_uid_" + suffix + "_cur";
+        String quarName = "p6_uid_" + suffix + "_quar";
+        String liveName = "p6_uid_" + suffix + "_live";
+        String closedName = "p6_uid_" + suffix + "_closed";
+        String mergedName = "p6_uid_" + suffix + "_merged";
+        ScratchTables.create(connection, admin, candleName, ScratchTables.candleSchema(),
+                List.of("instrument_token", "window_start"), 16, "candle KV", TIMEOUT);
+        ScratchTables.create(connection, admin, signalName, ScratchTables.signalLogSchema(), null,
+                16, "signal LOG", TIMEOUT);
+        ScratchTables.create(connection, admin, currentName,
+                ScratchTables.signalCurrentSchema(), List.of("instrument_token"), 16,
+                "signal current KV", TIMEOUT);
+        ScratchTables.create(connection, admin, quarName,
+                ScratchTables.ingestionQuarantineSchema(), null, 16,
+                "quarantine LOG", TIMEOUT);
+        ScratchTables.create(connection, admin, liveName, scratchCandleLiveSchema(),
+                List.of("instrument_token", "tf", "window_start"), 16, "candle_live KV", TIMEOUT);
+        ScratchTables.create(connection, admin, closedName, scratchCandleClosedSchema(),
+                List.of("instrument_token", "tf", "window_start"), 16, "candle_closed KV", TIMEOUT);
+        ScratchTables.create(connection, admin, mergedName, scratchMergedCandleSchema(),
+                List.of("instrument_token", "tf", "window_start"), 16, "candle_features KV",
+                TIMEOUT);
+
+        Map<String, String> cfg = env();
+        cfg.put("CANDLE_TABLE", candleName);
+        cfg.put("SIGNAL_CANDIDATES_TABLE", signalName);
+        cfg.put("SIGNAL_CURRENT_TABLE", currentName);
+        cfg.put("QUARANTINE_TABLE", quarName);
+        cfg.put("MULTITF_ENABLED", "true");
+        cfg.put("CANDLE_LIVE_TABLE", liveName);
+        cfg.put("CANDLE_CLOSED_TABLE", closedName);
+        cfg.put("STRATEGY_HOST_ENABLED", "true");
+        cfg.put("STRATEGIES", N7RangeBreakoutStrategy.RULE_ID);
+        cfg.put("MERGED_CANDLE_FEATURES_ENABLED", "true");
+        cfg.put("MERGED_CANDLE_TABLE", mergedName);
+        cfg.put("LEGACY_CANDLE_SINKS_ENABLED", "false");
+
+        StreamExecutionEnvironment senv = SignalJob.buildTopology(SignalJobConfig.from(cfg));
+        StreamGraph graph = senv.getStreamGraph();
+        Map<String, String> uidToName = new HashMap<>();
+        for (StreamNode node : graph.getStreamNodes()) {
+            String uid = node.getTransformationUID();
+            assertNotNull(uid, "operator '" + node.getOperatorName() + "' has NO explicit UID");
+            uidToName.put(uid, node.getOperatorName());
+        }
+
+        // W-C2: the drop guards gate each legacy branch...
+        assertTrue(uidToName.containsKey("candle-closed-legacy-guard"),
+                "closed legacy guard must gate the branch when the sinks are off");
+        assertTrue(uidToName.containsKey("candle-live-legacy-guard"),
+                "live legacy guard must gate the branch when the sinks are off");
+        // ...while the sink operators and the keyed first-write-wins state
+        // stay in the graph — their UIDs are the checkpoint-restore anchors,
+        // so rollback stays a flag flip.
+        assertTrue(uidToName.containsKey("candle-closed-first-write-wins"));
+        assertTrue(uidToName.containsKey("candle-closed-sink"));
+        assertTrue(uidToName.containsKey("candle-live-sink"));
+        // The merged writer is the live path now.
+        assertTrue(uidToName.containsKey("candle-features-sink-v1"),
+                "merged sink must be wired when the flag is on");
+    }
+
     private void assertTopology(boolean multiTfEnabled) throws Exception {
         assertTopology(multiTfEnabled, false);
     }
@@ -302,6 +370,32 @@ class SignalJobOperatorUidTest {
 
     private static org.apache.fluss.metadata.Schema scratchCandleClosedSchema() {
         return scratchCandleLiveSchema();
+    }
+
+    /** DDL 35 shape (W-C2/W-C3): candle_closed's 15 columns + features + sealed. */
+    private static org.apache.fluss.metadata.Schema scratchMergedCandleSchema() {
+        return org.apache.fluss.metadata.Schema.newBuilder()
+                .column("instrument_token", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("exchange", org.apache.fluss.types.DataTypes.STRING())
+                .column("symbol", org.apache.fluss.types.DataTypes.STRING())
+                .column("tf", org.apache.fluss.types.DataTypes.STRING())
+                .column("window_start", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("window_end", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("open_paise", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("high_paise", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("low_paise", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("close_paise", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("volume", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("tick_count", org.apache.fluss.types.DataTypes.INT())
+                .column("last_event_time", org.apache.fluss.types.DataTypes.BIGINT())
+                .column("last_event_fingerprint", org.apache.fluss.types.DataTypes.STRING())
+                .column("schema_version", org.apache.fluss.types.DataTypes.STRING())
+                .column("features", org.apache.fluss.types.DataTypes.MAP(
+                        org.apache.fluss.types.DataTypes.INT(),
+                        org.apache.fluss.types.DataTypes.DOUBLE()))
+                .column("sealed", org.apache.fluss.types.DataTypes.BOOLEAN())
+                .primaryKey("instrument_token", "tf", "window_start")
+                .build();
     }
 
     private static Map<String, String> env() {

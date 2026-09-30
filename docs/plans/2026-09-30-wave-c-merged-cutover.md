@@ -17,7 +17,11 @@ code map, slices, tests and decisions before any production-code edit.
   authoritative today (dual-write was only ever transient).
 
 **Progress:** **W-C1 landed** (`CHG-476`: context reader switch — config +
-sealed-only decode, 109/0/0 scoped, mutation-checked) · W-C2..W-C5 pending.
+sealed-only decode, 109/0/0 scoped, mutation-checked; full gate 19/19 —
+`logs/soak/monday-gates-20260930-204958`) · **W-C2 landed** (`CHG-477`: writer
+consolidation switch — `LEGACY_CANDLE_SINKS_ENABLED` + per-branch guard
+filters, sink UIDs stay, config 82/0/0 + UID pins 4/0/0, mutation-checked) ·
+W-C3..W-C5 pending.
 
 ## Verify-first census (tree `a68e54ff`, re-verified 2026-09-30)
 

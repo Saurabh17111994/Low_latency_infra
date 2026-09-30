@@ -130,6 +130,7 @@ public record SignalJobConfig(
         // false: the existing candle/feature tables stay authoritative until
         // the operator opens the cutover.
         boolean mergedCandleFeaturesEnabled,
+        boolean legacyCandleSinksEnabled,
         String candleLiveTable,
         String candleClosedTable,
         String mergedCandleTable,
@@ -220,6 +221,18 @@ public record SignalJobConfig(
         boolean multiTfFastLiveFeed = booleanValue(env, "MULTITF_FAST_LIVE_FEED", true);
         boolean mergedCandleFeaturesEnabled =
                 booleanValue(env, "MERGED_CANDLE_FEATURES_ENABLED", false);
+        // Wave C W-C2 (docs/plans/2026-09-30-wave-c-merged-cutover.md): when
+        // the merged writer is live, the two legacy candle sinks can be
+        // silenced — stateless guard filters gate their branches while the
+        // sink operators (and the keyed first-write-wins state) stay in the
+        // graph, so checkpoint-restore anchors hold; rollback is a flag flip.
+        boolean legacyCandleSinksEnabled =
+                booleanValue(env, "LEGACY_CANDLE_SINKS_ENABLED", true);
+        if (!legacyCandleSinksEnabled && !mergedCandleFeaturesEnabled) {
+            throw new IllegalStateException(
+                    "LEGACY_CANDLE_SINKS_ENABLED=false requires MERGED_CANDLE_FEATURES_ENABLED=true"
+                            + " — without the merged writer nothing would persist candles");
+        }
         String candleLiveTable = stringEnv(env, "CANDLE_LIVE_TABLE", "candle_live");
         String candleClosedTable = stringEnv(env, "CANDLE_CLOSED_TABLE", "candle_closed");
         String mergedCandleTable = env.getOrDefault("MERGED_CANDLE_TABLE", "candle_features").trim();
@@ -386,6 +399,7 @@ public record SignalJobConfig(
                 multiTfSignalContextEnabled,
                 multiTfFastLiveFeed,
                 mergedCandleFeaturesEnabled,
+                legacyCandleSinksEnabled,
                 candleLiveTable,
                 candleClosedTable,
                 mergedCandleTable,
