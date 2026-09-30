@@ -187,6 +187,17 @@ per-phase restart rejected for the certification round — CHG-451 limitations) 
 scheduling** (psi-cpu 8 % at the outlier vs 0–4 % elsewhere). Marker stays `[~]` until the
 instrumented combined round lands and a gate certifies.
 
+**ROUND RESULT (900 s instrumented, CHG-452, `logs/w3i-main-20260930-120611`):** ingest
+p50/p95/p99 med **25/59/69 ms — 0/60 windows > 100 ms** (the 354 ms class did not
+reproduce); tick 35/74/85 ms, 4/60 > 100 (max 150, was 424); **0/60 windows ≤ 50 ms —
+SLO still missed.** Attribution: tick spikes sit at job warmup (TM 312 % CPU; TM GC pause
+43 ms 2 s before) and one psi-io event (0.3 → 5.15); ingestion writers clean (max 25 ms);
+host psi-cpu steady (p50 8.6 — not discriminating); TM GC is the largest remaining JVM
+tail contributor (256 events ≥ 15 ms, max 48.6 ms; fixed 2.15 GiB heap, default
+`MaxGCPauseMillis=200`) → **W3-a engaged** (`-XX:MaxGCPauseMillis=20`, CHG-453). Caveat:
+the instrumented body is ~10 ms wider at p95/p99 than the non-instrumented combined run —
+final certification re-runs **without** instrumentation.
+
 ### W4 — TM CPU contention / slot isolation (design)
 
 **GIVES YOU** — addresses the suspected second half of the single-subtask stalls: the
