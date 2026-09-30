@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Test;
  * DDL agreement pin for {@link MergedCandleFeaturesColumns}: the column
  * contract the writer emits must mirror {@code 35_candle_features.sql} v1
  * (names, order, types, primary key, routing, DEC-060 opt-in lake). Same
- * pattern as {@link FeatureValuesColumnsAgreementTest}.
+ * pattern as {@link CandleClosedColumnsAgreementTest}.
  */
 class MergedCandleFeaturesColumnsAgreementTest {
 

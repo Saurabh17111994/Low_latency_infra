@@ -148,10 +148,6 @@ public record SignalJobConfig(
         StartupMode startupMode,
         boolean strategyHostEnabled,
         List<String> strategyIds,
-        // 2026-09-27 feature layer (DEC-056/057): the strategy host emits one
-        // stored row per closed window (feature_values). Requires the host.
-        boolean featureLayerEnabled,
-        String featureTable,
         // C1 live-candle context provider (docs/plans/2026-09-30-strategy-
         // context-live-fetch.md): the strategy host opens an on-demand
         // candle_closed lookup provider behind STRATEGY_CONTEXT_ENABLED
@@ -286,18 +282,6 @@ public record SignalJobConfig(
                     + "live/closed streams; with MULTITF_ENABLED=false no strategy-host "
                     + "branch would be wired and the listed strategies would never run");
         }
-        // Feature layer (DEC-056/057, 2026-09-27): the stored layer is computed
-        // inside the strategy host, so enabling it without the host is a config
-        // error, not a silent no-op.
-        boolean featureLayerEnabled = booleanValue(env, "FEATURE_LAYER_ENABLED", false);
-        String featureTable = env.getOrDefault("FEATURE_TABLE", "feature_values").trim();
-        if (featureLayerEnabled && !strategyHostEnabled) {
-            throw new IllegalStateException("Config FEATURE_LAYER_ENABLED=true requires "
-                    + "STRATEGY_HOST_ENABLED=true (features are computed in the strategy host)");
-        }
-        if (featureTable.isEmpty()) {
-            throw new IllegalStateException("Config FEATURE_TABLE must be non-blank");
-        }
         // C1 live-candle context provider (docs/plans/2026-09-30-strategy-
         // context-live-fetch.md): the provider runs inside the strategy host,
         // so enabling it without the host is a config error, not a silent
@@ -412,8 +396,6 @@ public record SignalJobConfig(
                 mode,
                 strategyHostEnabled,
                 strategyIds,
-                featureLayerEnabled,
-                featureTable,
                 strategyContextEnabled,
                 contextCacheBytes,
                 contextMaxInflight,
@@ -485,16 +467,6 @@ public record SignalJobConfig(
     /** Wave B (DEC-059): table for merged candle+feature upserts (default candle_features). */
     public String mergedCandleTable() {
         return mergedCandleTable;
-    }
-
-    /** True when the host emits stored feature rows (FEATURE_LAYER_ENABLED, default false). */
-    public boolean featureLayerEnabled() {
-        return featureLayerEnabled;
-    }
-
-    /** Fluss table for stored feature rows (default feature_values). */
-    public String featureTable() {
-        return featureTable;
     }
 
     /** True when the host opens the on-demand context provider (C1, default false). */

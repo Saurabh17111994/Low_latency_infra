@@ -49,7 +49,7 @@ class ContextProbeStrategyTest {
         env.put("STRATEGIES", ContextProbeStrategy.RULE_ID);
         env.put("STRATEGY_CONTEXT_ENABLED", "true");
         function = new StrategyHostFunction(
-                SignalJobConfig.from(env), List.of(ContextProbeStrategy.RULE_ID), false,
+                SignalJobConfig.from(env), List.of(ContextProbeStrategy.RULE_ID),
                 (config, metrics) -> new ContextProvider(
                         fetcher,
                         config.contextCacheBytes(),

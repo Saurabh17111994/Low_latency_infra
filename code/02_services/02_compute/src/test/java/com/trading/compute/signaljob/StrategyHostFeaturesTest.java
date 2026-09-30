@@ -72,16 +72,6 @@ class StrategyHostFeaturesTest {
         harness.open();
     }
 
-    private void openWithFeatureRows(String strategyId) throws Exception {
-        function = new StrategyHostFunction(SignalJobConfig.from(env()), List.of(strategyId), true);
-        harness = ProcessFunctionTestHarnesses.forKeyedCoProcessFunction(
-                function,
-                r -> r.getLong(CandleLiveColumns.INSTRUMENT_TOKEN),
-                r -> r.getLong(CandleClosedColumns.INSTRUMENT_TOKEN),
-                Types.LONG);
-        harness.open();
-    }
-
     /** Wave B (DEC-059): the merged write path is opt-in via the env flag. */
     private void openWithMergedRows(String strategyId) throws Exception {
         Map<String, String> env = env();
@@ -110,28 +100,6 @@ class StrategyHostFeaturesTest {
 
     private static java.util.Map<Integer, Double> mapOfMerged(RowData row) {
         MapData map = row.getMap(MergedCandleFeaturesColumns.FEATURES);
-        java.util.Map<Integer, Double> out = new HashMap<>();
-        for (int i = 0; i < map.size(); i++) {
-            out.put(map.keyArray().getInt(i), map.valueArray().getDouble(i));
-        }
-        return out;
-    }
-
-    private List<RowData> featureRows() {
-        java.util.Queue<org.apache.flink.streaming.runtime.streamrecord.StreamRecord<RowData>> records =
-                harness.getSideOutput(StrategyHostFunction.FEATURE_ROWS);
-        List<RowData> out = new java.util.ArrayList<>();
-        if (records == null) {
-            return out; // no side output registered: nothing was ever emitted
-        }
-        for (org.apache.flink.streaming.runtime.streamrecord.StreamRecord<RowData> record : records) {
-            out.add(record.getValue());
-        }
-        return out;
-    }
-
-    private static java.util.Map<Integer, Double> mapOf(RowData row) {
-        MapData map = row.getMap(FeatureValuesColumns.FEATURES);
         java.util.Map<Integer, Double> out = new HashMap<>();
         for (int i = 0; i < map.size(); i++) {
             out.put(map.keyArray().getInt(i), map.valueArray().getDouble(i));
@@ -355,51 +323,31 @@ class StrategyHostFeaturesTest {
     }
 
     @Test
-    void closedCandleEmitsOneFeatureRowPerWindowWhenEnabled() throws Exception {
-        openWithFeatureRows(LegacyProbe.RULE_ID);
+    void sealedMergedRowsCarryTheClosedFeatureSnapshot() throws Exception {
+        // W-C4 (DEC-059 collapse): the stored feature layer is retired; the
+        // sealed merged row carries the same snapshot the layer would have.
+        openWithMergedRows(FeatureProbe.RULE_ID);
         harness.processElement1(live(TOKEN, Timeframe.FIFTEEN_S, 0L, 12_345L, 100L, 5), 500L);
         for (int i = 1; i <= 20; i++) {
             harness.processElement2(
                     closed(TOKEN, Timeframe.ONE_M.code(), i * 60_000L, i * 100L, 10L, 2), 1_000L + i);
         }
 
-        List<RowData> rows = featureRows();
-        assertEquals(20, rows.size());
-        assertEquals(20, function.featureRowsEmittedForTest());
-        RowData last = rows.get(rows.size() - 1);
-        assertEquals(TOKEN, last.getLong(FeatureValuesColumns.INSTRUMENT_TOKEN));
-        assertEquals("ONE_M", last.getString(FeatureValuesColumns.TF).toString());
-        assertEquals(20 * 60_000L, last.getLong(FeatureValuesColumns.WINDOW_START));
-        java.util.Map<Integer, Double> features = mapOf(last);
+        List<RowData> sealedRows = new java.util.ArrayList<>();
+        for (RowData row : mergedRows()) {
+            if (row.getBoolean(MergedCandleFeaturesColumns.SEALED)) {
+                sealedRows.add(row);
+            }
+        }
+        assertEquals(20, sealedRows.size());
+        RowData last = sealedRows.get(sealedRows.size() - 1);
+        assertEquals(TOKEN, last.getLong(MergedCandleFeaturesColumns.INSTRUMENT_TOKEN));
+        assertEquals("ONE_M", last.getString(MergedCandleFeaturesColumns.TF).toString());
+        assertEquals(20 * 60_000L, last.getLong(MergedCandleFeaturesColumns.WINDOW_START));
+        java.util.Map<Integer, Double> features = mapOfMerged(last);
         assertEquals(12_345.0, features.get(0).doubleValue(), 1e-9); // last_price (tick)
         assertEquals(1_050.0, features.get(1).doubleValue(), 1e-9); // sma_close_20
         assertEquals(100.0, features.get(2).doubleValue(), 1e-9); // rsi_close_14 (rising)
-    }
-
-    @Test
-    void featureRowsStayOffByDefault() throws Exception {
-        open(LegacyProbe.RULE_ID);
-        harness.processElement1(live(TOKEN, Timeframe.FIFTEEN_S, 0L, 500L, 10L, 1), 500L);
-        harness.processElement2(
-                closed(TOKEN, Timeframe.ONE_M.code(), 60_000L, 100L, 10L, 1), 1_000L);
-
-        assertTrue(
-                featureRows().isEmpty(),
-                "the stored layer must stay silent unless enabled");
-        assertEquals(0, function.featureRowsEmittedForTest());
-    }
-
-    @Test
-    void emptySnapshotEmitsNoRow() throws Exception {
-        openWithFeatureRows(LegacyProbe.RULE_ID);
-        // One close with no tick and no filled period: every feature is still NaN.
-        harness.processElement2(
-                closed(TOKEN, Timeframe.ONE_M.code(), 60_000L, 100L, 10L, 1), 1_000L);
-
-        assertTrue(
-                featureRows().isEmpty(),
-                "not-ready features must not produce a placeholder row");
-        assertEquals(0, function.featureRowsEmittedForTest());
     }
 
     /** Overrides the feature-aware overloads: the host calls these, not the legacy pair. */

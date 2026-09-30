@@ -1033,37 +1033,6 @@ class SignalJobConfigTest {
         assertTrue(e.getMessage().contains("MULTITF_SIGNAL_CONTEXT_ENABLED"), e.getMessage());
     }
 
-    // ── feature layer flags (DEC-056/057, 2026-09-27) ──
-
-    @Test
-    void featureLayerDefaultsOffWithDefaultTable() {
-        SignalJobConfig cfg = SignalJobConfig.from(env());
-        assertFalse(cfg.featureLayerEnabled(), "feature layer is opt-in");
-        assertEquals("feature_values", cfg.featureTable());
-    }
-
-    @Test
-    void featureLayerRequiresTheStrategyHost() {
-        Map<String, String> bad = env();
-        bad.put("FEATURE_LAYER_ENABLED", "true");
-        IllegalStateException e = assertThrows(IllegalStateException.class,
-                () -> SignalJobConfig.from(bad));
-        assertTrue(e.getMessage().contains("STRATEGY_HOST_ENABLED"), e.getMessage());
-    }
-
-    @Test
-    void featureLayerWithHostAcceptsACustomTable() {
-        Map<String, String> ok = env();
-        ok.put("FEATURE_LAYER_ENABLED", "true");
-        ok.put("STRATEGY_HOST_ENABLED", "true");
-        ok.put("MULTITF_ENABLED", "true");
-        ok.put("STRATEGIES", "n7-range-breakout-v1");
-        ok.put("FEATURE_TABLE", "feature_values_dev");
-        SignalJobConfig cfg = SignalJobConfig.from(ok);
-        assertTrue(cfg.featureLayerEnabled());
-        assertEquals("feature_values_dev", cfg.featureTable());
-    }
-
     @Test
     @DisplayName("M3-3: STRATEGY_HOST_ENABLED=true requires MULTITF_ENABLED=true (fail closed)")
     void hostRequiresMultiTf() {
@@ -1078,12 +1047,5 @@ class SignalJobConfigTest {
         // The coherent pair parses — the rule is composition, not a ban.
         bad.put("MULTITF_ENABLED", "true");
         assertTrue(SignalJobConfig.from(bad).strategyHostEnabled());
-    }
-
-    @Test
-    void blankFeatureTableIsRejected() {
-        Map<String, String> bad = env();
-        bad.put("FEATURE_TABLE", "   ");
-        assertThrows(IllegalStateException.class, () -> SignalJobConfig.from(bad));
     }
 }

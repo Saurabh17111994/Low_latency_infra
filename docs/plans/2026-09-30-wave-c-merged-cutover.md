@@ -22,7 +22,10 @@ sealed-only decode, 109/0/0 scoped, mutation-checked; full gate 19/19 —
 consolidation switch — `LEGACY_CANDLE_SINKS_ENABLED` + per-branch guard
 filters, sink UIDs stay, config 82/0/0 + UID pins 4/0/0, mutation-checked) ·
 **W-C3 landed** (`CHG-478`: merged-table preflight contract + inclusion rule,
-144/0/0 unit scoped + 5/0/0 drill, mutation-checked) · W-C4..W-C5 pending.
+144/0/0 unit scoped + 5/0/0 drill, mutation-checked) · **W-C4 landed**
+(`CHG-479`: stored feature layer retired — `FeatureValuesColumns` +
+`FEATURE_LAYER_ENABLED`/`FEATURE_TABLE` + sink/preflight gone, compute suite
+657/0/20, drill 5/0/0) · W-C6/W-C7/W-C5a pending.
 
 **Cadence (revised 2026-09-30, operator):** scoped checks per slice; **one full
 `make gate` at the cutover** (W-C5a certifying run) and one final full run after

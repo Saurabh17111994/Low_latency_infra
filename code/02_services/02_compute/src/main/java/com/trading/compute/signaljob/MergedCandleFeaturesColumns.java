@@ -17,10 +17,9 @@ import org.apache.flink.table.types.logical.VarCharType;
  * {@code features MAP<INT, DOUBLE>} (DEC-057: append-only registry ids) and
  * {@code sealed BOOLEAN}.
  *
- * <p>Mirrors {@link CandleClosedColumns} and {@link FeatureValuesColumns} in
- * shape: index constants, name/type/nullability lists for the contract
- * validator and the DDL-agreement pin, plus the {@link InternalTypeInfo} the
- * writer emits.
+ * <p>Mirrors {@link CandleClosedColumns} in shape: index constants,
+ * name/type/nullability lists for the contract validator and the
+ * DDL-agreement pin, plus the {@link InternalTypeInfo} the writer emits.
  */
 public final class MergedCandleFeaturesColumns {
 

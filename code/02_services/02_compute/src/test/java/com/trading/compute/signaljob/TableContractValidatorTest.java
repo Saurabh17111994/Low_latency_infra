@@ -376,10 +376,6 @@ class TableContractValidatorTest {
     private static final String CANDLE_CLOSED_TABLE = "candle_closed";
     private static final List<String> CANDLE_MULTITF_PK = List.of("instrument_token", "tf", "window_start");
 
-    private static final List<String> FEATURE_VALUES_NAMES = FeatureValuesColumns.COLUMN_NAMES;
-    private static final List<String> FEATURE_VALUES_TYPES = FeatureValuesColumns.TYPE_ROOTS;
-    private static final String FEATURE_VALUES_TABLE = "feature_values";
-
     @Test
     @DisplayName("candle_live KV with PK exactly [instrument_token, tf, window_start] and matching routing passes")
     void candleLiveKvExactPasses() {
@@ -571,42 +567,6 @@ class TableContractValidatorTest {
         assertTrue(report.contains("sealed:BOOLEAN"));
     }
 
-    // ── feature_values KV (DDL 34 proposal, DEC-057) ──
-
-    @Test
-    @DisplayName("feature_values KV with PK exactly [instrument_token, tf, window_start] passes")
-    void featureValuesExactPasses() {
-        assertDoesNotThrow(() -> TableContractValidator.validateFeatureValuesTable(
-                featureValues(FEATURE_VALUES_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16)));
-    }
-
-    @Test
-    @DisplayName("feature_values without a primary key is rejected")
-    void featureValuesNoPkRejected() {
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateFeatureValuesTable(
-                        featureValues(FEATURE_VALUES_TABLE, null, List.of(TOKEN), 16)));
-    }
-
-    @Test
-    @DisplayName("feature_values with a non-MAP features column is rejected")
-    void featureValuesNonMapFeaturesRejected() {
-        List<String> types = new java.util.ArrayList<>(FEATURE_VALUES_TYPES);
-        types.set(FeatureValuesColumns.FEATURES, "STRING");
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateFeatureValuesTable(
-                        featureValues(FEATURE_VALUES_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 16,
-                                types, true)));
-    }
-
-    @Test
-    @DisplayName("feature_values with the wrong bucket count is rejected")
-    void featureValuesWrongBucketCountRejected() {
-        assertThrows(TableContractValidator.ContractViolation.class,
-                () -> TableContractValidator.validateFeatureValuesTable(
-                        featureValues(FEATURE_VALUES_TABLE, CANDLE_MULTITF_PK, List.of(TOKEN), 8)));
-    }
-
     // ── fixtures ──
 
     /**
@@ -696,18 +656,6 @@ class TableContractValidatorTest {
     private static TableInfo candleClosed(String name, List<String> schemaPk, List<String> bucketKeys,
             int numBuckets) {
         return table(name, schemaPk, bucketKeys, numBuckets, CANDLE_CLOSED_NAMES, CANDLE_CLOSED_TYPES, null, true);
-    }
-
-    private static TableInfo featureValues(String name, List<String> schemaPk, List<String> bucketKeys,
-            int numBuckets) {
-        return table(name, schemaPk, bucketKeys, numBuckets, FEATURE_VALUES_NAMES, FEATURE_VALUES_TYPES,
-                null, true);
-    }
-
-    private static TableInfo featureValues(String name, List<String> schemaPk, List<String> bucketKeys,
-            int numBuckets, List<String> columnTypes, boolean pkNonNullable) {
-        return table(name, schemaPk, bucketKeys, numBuckets, FEATURE_VALUES_NAMES, FEATURE_VALUES_TYPES,
-                columnTypes, pkNonNullable);
     }
 
     private static TableInfo candleClosed(String name, List<String> schemaPk, List<String> bucketKeys,

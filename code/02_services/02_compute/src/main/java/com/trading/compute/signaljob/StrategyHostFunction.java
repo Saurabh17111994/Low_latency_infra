@@ -101,13 +101,6 @@ public class StrategyHostFunction
     }
 
     /**
-     * Side output of the DEC-056 stored layer: one row per closed window
-     * carrying every ready feature for that timeframe. Wired to the feature
-     * sink in {@code SignalJob}; empty snapshots emit nothing.
-     */
-    public static final OutputTag<RowData> FEATURE_ROWS = new OutputTag<RowData>("feature-rows") {};
-
-    /**
      * Wave B (DEC-059): side output of merged {@code candle_features} rows —
      * a forming row ({@code sealed=false}) per live cadence and the final
      * sealed row at close. Wired to the merged sink in {@code SignalJob} only
@@ -122,9 +115,6 @@ public class StrategyHostFunction
 
     /** Job config handed to strategy constructors (rule identity, quantities). */
     private final SignalJobConfig config;
-
-    /** True when the host emits {@link #FEATURE_ROWS} (feature layer enabled). */
-    private final boolean featureRowsEnabled;
 
     /** Wave B (DEC-059): true when the host emits {@link #MERGED_ROWS}. */
     private final boolean mergedRowsEnabled;
@@ -178,7 +168,6 @@ public class StrategyHostFunction
     private transient Counter featureTickUpdates;
     private transient Counter featureCloseUpdates;
     private transient Counter featureFailures;
-    private transient Counter featureRowsEmitted;
     private transient Counter mergedRowsEmitted;
 
     // Heap mirrors for tests that bypass the metric registry.
@@ -190,22 +179,11 @@ public class StrategyHostFunction
     private transient long featureTickUpdatesHeap;
     private transient long featureCloseUpdatesHeap;
     private transient long featureFailuresHeap;
-    private transient long featureRowsEmittedHeap;
     private transient long mergedRowsEmittedHeap;
     private final transient Map<String, Long> skippedPoisonHeap = new HashMap<>();
 
     public StrategyHostFunction(SignalJobConfig config, List<String> strategyIds) {
-        this(config, strategyIds, false);
-    }
-
-    /**
-     * @param featureRowsEnabled true to emit {@link #FEATURE_ROWS} on each closed
-     *     window ({@code FEATURE_LAYER_ENABLED}); false keeps the host exactly as
-     *     before this feature layer existed
-     */
-    public StrategyHostFunction(
-            SignalJobConfig config, List<String> strategyIds, boolean featureRowsEnabled) {
-        this(config, strategyIds, featureRowsEnabled, null);
+        this(config, strategyIds, null);
     }
 
     /**
@@ -216,11 +194,9 @@ public class StrategyHostFunction
     StrategyHostFunction(
             SignalJobConfig config,
             List<String> strategyIds,
-            boolean featureRowsEnabled,
             ContextProviderFactory providerFactory) {
         this.config = Preconditions.checkNotNull(config, "config");
         this.strategyIds = List.copyOf(Preconditions.checkNotNull(strategyIds, "strategyIds"));
-        this.featureRowsEnabled = featureRowsEnabled;
         this.mergedRowsEnabled = config.mergedCandleFeaturesEnabled();
         this.providerFactory = providerFactory;
     }
@@ -264,8 +240,6 @@ public class StrategyHostFunction
                 getRuntimeContext().getMetricGroup().counter("compute.features.updates.close");
         featureFailures =
                 getRuntimeContext().getMetricGroup().counter("compute.features.failed");
-        featureRowsEmitted =
-                getRuntimeContext().getMetricGroup().counter("compute.features.rows.emitted");
         mergedRowsEmitted =
                 getRuntimeContext().getMetricGroup().counter("compute.merged.rows.emitted");
         emittedByRule = new HashMap<>();
@@ -362,9 +336,6 @@ public class StrategyHostFunction
         }
         // DEC-056: close features update before the fan-out (same contract as the tick path).
         updateFeaturesOnClose(slot, closed);
-        if (featureRowsEnabled) {
-            emitFeatureRow(ctx, slot, closed);
-        }
         if (mergedRowsEnabled) {
             // Wave B (DEC-059): the final sealed write — the terminal row of
             // this window (late ticks can never rewrite it).
@@ -768,34 +739,6 @@ public class StrategyHostFunction
      * never carries a placeholder). A failure here is counted, never delivered
      * into the strategy fan-out.
      */
-    private void emitFeatureRow(Context ctx, HostSlot slot, RowData closed) {
-        try {
-            Timeframe tf = Timeframe.fromCode(closed.getString(CandleClosedColumns.TF).toString());
-            Map<Integer, Double> snapshot = new HashMap<>();
-            slot.features.snapshot(tf, snapshot);
-            if (snapshot.isEmpty()) {
-                return;
-            }
-            GenericRowData row = new GenericRowData(FeatureValuesColumns.FIELD_COUNT);
-            row.setField(FeatureValuesColumns.INSTRUMENT_TOKEN, ctx.getCurrentKey());
-            row.setField(FeatureValuesColumns.TF, closed.getString(CandleClosedColumns.TF));
-            row.setField(
-                    FeatureValuesColumns.WINDOW_START,
-                    closed.getLong(CandleClosedColumns.WINDOW_START));
-            row.setField(FeatureValuesColumns.FEATURES, new GenericMapData(snapshot));
-            ctx.output(FEATURE_ROWS, row);
-            featureRowsEmitted.inc();
-            featureRowsEmittedHeap++;
-        } catch (Exception e) {
-            countFeatureFailure("emit", e);
-        }
-    }
-
-    /** Test seam: feature rows emitted to the stored layer by this subtask. */
-    long featureRowsEmittedForTest() {
-        return featureRowsEmittedHeap;
-    }
-
     /**
      * Wave B (DEC-059): one merged candle_features row — the candle row's 15
      * columns + the feature snapshot for its timeframe + the seal flag. The

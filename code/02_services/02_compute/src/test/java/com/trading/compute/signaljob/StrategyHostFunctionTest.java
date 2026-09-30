@@ -547,7 +547,6 @@ class StrategyHostFunctionTest {
         function = new StrategyHostFunction(
                 SignalJobConfig.from(env),
                 List.of(StubSmokeStrategy.RULE_ID),
-                false,
                 (config, metrics) -> new ContextProvider(
                         fetcher,
                         config.contextCacheBytes(),
@@ -584,7 +583,7 @@ class StrategyHostFunctionTest {
         env.put("STRATEGIES", ContextWiringProbe.RULE_ID);
         env.put("STRATEGY_CONTEXT_ENABLED", "true");
         function = new StrategyHostFunction(
-                SignalJobConfig.from(env), List.of(ContextWiringProbe.RULE_ID), false,
+                SignalJobConfig.from(env), List.of(ContextWiringProbe.RULE_ID),
                 (config, metrics) -> new ContextProvider(
                         fetcher,
                         config.contextCacheBytes(),
@@ -702,7 +701,7 @@ class StrategyHostFunctionTest {
         env.put("STRATEGIES", StubSmokeStrategy.RULE_ID);
         env.put("STRATEGY_CONTEXT_ENABLED", "true");
         function = new StrategyHostFunction(
-                SignalJobConfig.from(env), List.of(StubSmokeStrategy.RULE_ID), false,
+                SignalJobConfig.from(env), List.of(StubSmokeStrategy.RULE_ID),
                 (config, metrics) -> new ContextProvider(
                         fetcher,
                         config.contextCacheBytes(),
