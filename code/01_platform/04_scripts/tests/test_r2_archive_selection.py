@@ -26,7 +26,7 @@ SCRIPTS = str(Path(__file__).resolve().parents[1])
 if SCRIPTS not in sys.path:
     sys.path.insert(0, SCRIPTS)
 
-from r2_archive_selection import parse_selection, plan  # noqa: E402
+from r2_archive_selection import enabled_outside, parse_selection, plan  # noqa: E402
 
 
 class ParseSelectionTest(unittest.TestCase):
@@ -89,6 +89,18 @@ class PlanTest(unittest.TestCase):
     def test_clean_plan_when_everything_already_matches(self) -> None:
         live = {"a": True, "b": False}
         self.assertTrue(plan(live, ["a"]).is_clean())
+
+
+class EnabledOutsideTest(unittest.TestCase):
+    """The guard-side rule: enabled tables the list does not allow."""
+
+    def test_lists_enabled_tables_outside_the_selection(self) -> None:
+        live = {"a": True, "b": False, "c": True}
+        self.assertEqual(["a", "c"], enabled_outside(live, []))
+        self.assertEqual(["c"], enabled_outside(live, ["a"]))
+
+    def test_empty_when_every_enabled_table_is_listed(self) -> None:
+        self.assertEqual([], enabled_outside({"a": True}, ["a", "b"]))
 
 
 if __name__ == "__main__":

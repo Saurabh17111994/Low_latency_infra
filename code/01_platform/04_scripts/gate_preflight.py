@@ -36,7 +36,10 @@ Checks
      Read-only via tablet-orphan-sweep.py --check (the drill step sweeps its own
      leftovers with the same script);
   7. tablet registry — advisory when /fluss/tabletservers/tables clearly leaks
-     (stale drop entries accumulate until a tablet restart reconciles them).
+     (stale drop entries accumulate until a tablet restart reconciles them);
+  8. archive selection (DEC-060) — no live table outside the configured archive
+     list (env EOD_TABLES) may be set to archive; with no list configured,
+     nothing may be enabled at all (fail-closed).
 
 Exit codes: 0 = verified; 1 = drift (do not start the gate); 2 = prerequisite
 missing (the caller must record a SKIP, never a pass — see run-monday-gates.sh).
@@ -51,6 +54,8 @@ import re
 import shutil
 import subprocess
 import sys
+
+from r2_archive_selection import enabled_outside  # DEC-060 archive-selection guard
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "..", ".."))
@@ -218,6 +223,63 @@ def catalog_tables() -> int | None:
     return None
 
 
+# DEC-060 (2026-09-30): the archive-selection guard — nothing outside the
+# configured list may be set to archive. The key may be absent (= disabled) or
+# carry 'true'/'false' through the ZK payload's quoting.
+ARCHIVE_FLAG = re.compile(
+    r"table\.datalake\.enabled['\"]?\s*[:=]\s*['\"]?(true|false)")
+
+
+def table_archive_flags() -> dict[str, bool] | None:
+    """Live `table.datalake.enabled` per table, read from ZK (no JVM needed).
+
+    None = unreadable (the guard fails closed). A table without the key is
+    disabled: archiving is opt-in per table.
+    """
+    listing = run(["docker", "exec", ZK_CONTAINER, ZK_CLI, "-server", "127.0.0.1:2181",
+                   "ls", ZK_PATH])
+    if listing.returncode != 0:
+        return None
+    names: list[str] = []
+    for line in listing.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            names = [entry.strip() for entry in line.strip("[]").split(",") if entry.strip()]
+    if not names:
+        return None
+    flags: dict[str, bool] = {}
+    for name in names:
+        result = run(["docker", "exec", ZK_CONTAINER, ZK_CLI, "-server", "127.0.0.1:2181",
+                      "get", f"{ZK_PATH}/{name}"])
+        if result.returncode != 0:
+            return None
+        match = ARCHIVE_FLAG.search(result.stdout)
+        flags[name] = bool(match) and match.group(1) == "true"
+    return flags
+
+
+def archive_selection_drift(live: dict[str, bool] | None,
+                            selected_csv: str | None) -> list[str]:
+    """[] when the DEC-060 rule holds; one drift line when it does not.
+
+    Pure: `live` is {table: datalake.enabled} from `table_archive_flags()`; an
+    unset/empty configured list means nothing may be enabled at all.
+    """
+    if live is None:
+        return ["archive-selection guard: live table.datalake.enabled flags unreadable "
+                "from zookeeper (fail-closed, DEC-060)"]
+    selected = [t.strip() for t in (selected_csv or "").split(",") if t.strip()]
+    extras = enabled_outside(live, selected)
+    if not extras:
+        return []
+    if not selected:
+        return [f"archive-selection guard: no archive list is configured (EOD_TABLES), but "
+                f"{len(extras)} table(s) are set to archive: {', '.join(extras)} — set the "
+                f"list to the intended tables or disable them (DEC-060)"]
+    return [f"archive-selection guard: table(s) outside the configured archive list are "
+            f"set to archive: {', '.join(extras)} — the list rules (DEC-060)"]
+
+
 def manifest_tables() -> int | None:
     try:
         with open(MANIFEST, encoding="utf-8") as handle:
@@ -346,6 +408,18 @@ def main(certifying: bool = True) -> int:
         drift.append(f"catalog has {live}/{expected} tables (wiped or partial) — run `make up`")
     else:
         print(f"  OK    catalog {live}/{expected} tables")
+
+    if not prereq:
+        flags = table_archive_flags()
+        guard = archive_selection_drift(flags, os.environ.get("EOD_TABLES"))
+        if guard:
+            drift.extend(guard)
+        else:
+            listed = (os.environ.get("EOD_TABLES") or "").strip()
+            enabled_count = sum(1 for on in (flags or {}).values() if on)
+            print(f"  OK    archive selection: {enabled_count} of {len(flags or {})} tables "
+                  f"enabled, none outside the configured list"
+                  + ("" if listed else " (EOD_TABLES unset -> nothing may be enabled)"))
 
     if not prereq:
         remote_dir, interval = tablet_remote_dir()

@@ -49,6 +49,17 @@ class SelectionPlan:
         return lines
 
 
+def enabled_outside(live: Mapping[str, bool], selected: Sequence[str]) -> list[str]:
+    """Live-enabled tables the list does not allow (the guard-side rule).
+
+    Unlike `plan`, an empty `selected` is legal: it means "nothing may be
+    archived", so every enabled table is outside the list. Sorted for
+    deterministic reports.
+    """
+    allowed = set(selected)
+    return sorted(t for t, on in live.items() if on and t not in allowed)
+
+
 def parse_selection(csv: str) -> list[str]:
     """Parse the configured list; refuse an empty result (config error)."""
     if csv is None:
@@ -76,9 +87,8 @@ def plan(live: Mapping[str, bool], selected: Sequence[str]) -> SelectionPlan:
         raise ValueError(
             "selection list is empty — refusing to plan (a config error must "
             "not mass-disable)")
-    selected_set = set(selected)
     enable = [t for t in selected if live.get(t) is False]
     ok = [t for t in selected if live.get(t) is True]
     missing = [t for t in selected if t not in live]
-    disable = sorted(t for t, on in live.items() if on and t not in selected_set)
+    disable = enabled_outside(live, selected)
     return SelectionPlan(enable=enable, disable=disable, ok=ok, missing=missing)
