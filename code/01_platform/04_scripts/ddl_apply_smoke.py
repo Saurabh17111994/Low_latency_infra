@@ -97,7 +97,9 @@ EXPECTED_LIMITED = []
 # not this one, so step 11 failed 40 min into the 2026-09-29 certificate run;
 # AppliedTablesPinTest now ties this constant to the corpus and fails in
 # step 3 with the fix instead.
-APPLIED_TABLES = 27
+# 2026-09-30: DDL 35 candle_features (Wave B/DEC-059, CHG-468) joined both
+# lists -> 28; AppliedTablesPinTest caught it in step 3 exactly as designed.
+APPLIED_TABLES = 28
 # Real capability evidence when present (enrich_evidence just records path+sha).
 REAL_EVIDENCE = os.path.join(
     REPO_ROOT, "logs", "schema-compat", "composite-pk-raw-client-20260815.md"
