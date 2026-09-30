@@ -55,6 +55,24 @@ windows in 900 s, in two measured classes:
     hand this pass).
   - **W3-l (levers), only on W3-i evidence:** the menu below.
 
+### 3.1 W3-i implementation notes (2026-09-30) — two premise corrections
+
+- **The ingestion writer already had GC+safepoint logging.** `stage-profile.sh` launches it
+  with `-Xlog:gc*,safepoint:file=/logs/gc.log` on the `java` command line; every run dir
+  already carried `capture/j1-*/gc.log`. W3-i adds the missing **JFR**, keeps the
+  JAVA_TOOL_OPTIONS copy as branch hardening, materialises the JFR via a **graceful stop**
+  before teardown, and wires the **summariser** in. Running the summariser over the combined
+  run's writer logs **exonerates the ingestion-writer JVM**: max stop 27.1 ms, zero ≥ 28 ms
+  events, nothing near the 11:12:23 IST outlier. Suspects remaining: **Fluss tablet, host
+  scheduling**.
+- **Host pressure rides in the stats sampler.** `stages/docker-stats.log` now also carries
+  `/proc/pressure/{cpu,io,memory}` per sample (8 % psi-cpu at the 354 ms outlier vs 0–4 %
+  elsewhere) — the host-vs-container discriminator.
+- **Tablet JFR remains uncaptured** (digest-pinned image strips `jcmd`/`jdk.jcmd`; its
+  JVM-level recording is a long-expired 900 s window). Per-phase tablet restart was rejected
+  for the certification round (cold-tablet bias); a dedicated diagnostics round can restart
+  it if PSI/CPU evidence points there. See CHG-451 "Limitations".
+
 ## 4. Lever menu (for operator selection)
 
 | id | Lever | Expected gain | Cost / risk | Guardrails |

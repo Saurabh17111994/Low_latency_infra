@@ -175,6 +175,18 @@ checkpoint duration/recovery — restore drills both directions required.
 **WRONG IF** — checkpoint failures/durations regress or spikes persist; revert, keep the
 evidence, and let W4 carry the stall investigation.
 
+**W3-i IMPLEMENTED (2026-09-30, CHG-451; design note §3.1).** Instrumentation only, no
+behavior change: per-run ingestion **JFR** (GC+safepoint logging already existed on the
+`java` command line — premise corrected in the design note and CHG-451), graceful-stop
+materialisation, TM + ingestion `gc.log`/JFR pulled into every phase dir, per-phase
+`docker stats` **+ host PSI** sampler, and `stage_gc_summary.py` wired after each phase.
+Read-only findings while implementing: the **ingestion-writer JVM is exonerated** for the
+known outliers (max stop 27.1 ms on the combined run, zero ≥ 28 ms events, nothing near
+11:12:23 IST). Remaining suspects: the **Fluss tablet** (digest-pinned image strips `jcmd`;
+per-phase restart rejected for the certification round — CHG-451 limitations) and **host
+scheduling** (psi-cpu 8 % at the outlier vs 0–4 % elsewhere). Marker stays `[~]` until the
+instrumented combined round lands and a gate certifies.
+
 ### W4 — TM CPU contention / slot isolation (design)
 
 **GIVES YOU** — addresses the suspected second half of the single-subtask stalls: the

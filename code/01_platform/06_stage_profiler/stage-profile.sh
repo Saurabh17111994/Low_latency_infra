@@ -71,10 +71,18 @@ CP_FILE="$ROOT/code/02_services/01_ingestion/target/cp.txt"
 
 FAKETOOL_NAME="sp-faketool"
 ING_PREFIX="sp-ingestion-"
+# W3-i (docs/plans/2026-09-30-w3-w4-design-note.md): JVM instrumentation for the
+# residual-stall attribution. The profiler's java command already logs GC to
+# /logs/gc.log (captured via the j1 mount); this adds the bounded JFR recording
+# plus an independent /tmp GC copy, on every per-run ingestion writer. Both are
+# pulled into the round evidence by stop_fleet(). No application behaviour
+# change; an empty value disables it.
+INGESTION_JAVA_TOOL_OPTIONS="${INGESTION_JAVA_TOOL_OPTIONS:--Xlog:gc*,safepoint:file=/tmp/gc.log:time,uptime,level,tags:filecount=1,filesize=50m -XX:StartFlightRecording=settings=profile,duration=1800s,filename=/tmp/ing-diag.jfr,maxsize=64m}"
 LOG_PIDS=()
 JOB_ID=""
 CP=""
 CP_PHASES_PID=""
+STATS_PID=""
 PROBE_BIN=""
 PHASE_NAME=""
 PHASE_DIR=""
@@ -126,15 +134,35 @@ stop_fleet() {
     kill "$CP_PHASES_PID" 2>/dev/null || true
     CP_PHASES_PID=""
   fi
+  if [ -n "${STATS_PID:-}" ]; then
+    kill "$STATS_PID" 2>/dev/null || true
+    STATS_PID=""
+  fi
   if [ -n "${PHASE_DIR:-}" ] && [ -d "$PHASE_DIR/capture" ]; then
     mkdir -p "$PHASE_DIR/capture/ticks"
     for i in $(seq 0 $((INGESTION_CONTAINERS - 1))); do
       c="$ING_PREFIX$i"
       if docker inspect "$c" >/dev/null 2>&1; then
+        # W3-i: stop gracefully FIRST — the ingestion JFR is configured with a
+        # filename and only materialises when the recording ends (duration
+        # expiry or JVM exit); `docker rm -f` (SIGKILL) would leave 0 bytes.
+        docker stop -t 10 "$c" >/dev/null 2>&1 || true
         docker cp "$c:/tmp/arrow-tick-counts.txt" \
           "$PHASE_DIR/capture/ticks/$c.tick-counts.txt" 2>/dev/null || true
+        docker cp "$c:/tmp/gc.log" \
+          "$PHASE_DIR/capture/ticks/$c.gc.log" 2>/dev/null || true
+        docker cp "$c:/tmp/ing-diag.jfr" \
+          "$PHASE_DIR/capture/ticks/$c.jfr" 2>/dev/null || true
       fi
     done
+  fi
+  # W3-i: the TM JVM's own GC log + JFR (fresh per phase — preflight restarts
+  # the taskmanager); both are the primary evidence for spike attribution.
+  if [ -n "${PHASE_DIR:-}" ] && [ -d "$PHASE_DIR/stages" ]; then
+    docker cp "$FLINK_TM_CONTAINER:/opt/flink/log/gc.log" \
+      "$PHASE_DIR/stages/tm-gc.log" 2>/dev/null || true
+    docker cp "$FLINK_TM_CONTAINER:/opt/flink/log/tm-diag.jfr" \
+      "$PHASE_DIR/stages/tm-diag.jfr" 2>/dev/null || true
   fi
   for i in $(seq 0 $((INGESTION_CONTAINERS - 1))); do
     docker rm -f "$ING_PREFIX$i" >/dev/null 2>&1 || true
@@ -256,6 +284,7 @@ start_fleet() {
       --env-file "$LIB_SECRETS_FILE" \
       -e "ARROW_APP_ID=$real_app_id" -e "ARROW_USER_ID=$real_user_id" \
       -e ARROW_FEED=token \
+      -e "JAVA_TOOL_OPTIONS=$INGESTION_JAVA_TOOL_OPTIONS" \
       -e "ARROW_HFT_CONNECTIONS=$slots" -e ARROW_HFT_MULTI_CONNECTION_APPROVED=true \
       -e INSTRUMENT_MANIFEST_PATH=/run/manifest-00.csv \
       -e FLUSS_BOOTSTRAP=fluss-coordinator:9123 -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 \
@@ -316,6 +345,7 @@ start_fleet() {
       -e DEPLOYMENT_ENV=dev \
       --env-file "$LIB_SECRETS_FILE" \
       -e "ARROW_APP_ID=${ARROW_APP_ID:-testd}" -e "ARROW_USER_ID=${ARROW_USER_ID:-testd-user}" \
+      -e "JAVA_TOOL_OPTIONS=$INGESTION_JAVA_TOOL_OPTIONS" \
       -e "INSTRUMENT_MANIFEST_PATH=/run/manifest-$i.csv" \
       -e FLUSS_BOOTSTRAP=fluss-coordinator:9123 -e FLUSS_BOOTSTRAP_SERVERS=fluss-coordinator:9123 \
       -e RAW_TABLE_NAME=raw_table_1 -e ARROW_HFT_CONNECTIONS=1 \
@@ -408,6 +438,31 @@ warmup() {
   say "WARN: warm-up window ended without two growing raw samples; continuing (capture will show it)"
 }
 
+# W3-i: per-container CPU/memory sampled at ~1 s during the phase — separates
+# host/container scheduling stalls from JVM-internal stops when the next round's
+# spike windows are attributed (W3/W4 design note). Killed by stop_fleet().
+start_stats_sampler() {
+  local f="$1"
+  say "container stats sampler: docker stats -> $f"
+  (
+    while :; do
+      printf 'ts=%s utc=%s\n' "$(date +%s.%N)" "$(date -u +%H:%M:%S)"
+      docker stats --no-stream \
+        --format '{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}' 2>/dev/null || true
+      # Host pressure (PSI): a container preempted by the host shows up as
+      # psi-cpu/io "some" rising while its own CPU% drops — the only host-level
+      # discriminator between scheduling stalls and in-container stalls.
+      for r in cpu io memory; do
+        printf 'psi-%s ' "$r"
+        head -1 "/proc/pressure/$r" 2>/dev/null || true
+      done
+      printf -- '--\n'
+      sleep 1
+    done
+  ) >"$f" 2>&1 &
+  STATS_PID=$!
+}
+
 run_capture() {
   local secs="$1"
   say "capture ${secs}s -> $PHASE_DIR/stages"
@@ -478,11 +533,16 @@ run_phase() {
   submit_job
   compile_probes
   start_cp_phase_sampler "$secs"
+  start_stats_sampler "$PHASE_DIR/stages/docker-stats.log"
   warmup
   run_capture "$secs"
   wait_cp_phase_sampler
   sample_raw
   stop_fleet
+  if [ -r "$SCRIPTS_DIR/stage_gc_summary.py" ]; then
+    python3 "$SCRIPTS_DIR/stage_gc_summary.py" "$PHASE_DIR" \
+      || say "WARN: gc summary failed (non-fatal)"
+  fi
   say "phase '$PHASE_NAME' done"
 }
 
