@@ -8,6 +8,12 @@ verified in the pinned jars (`fluss-client-1.0.0`, `flink-streaming-java-2.2.1`)
 DEC-040 / DEC-054 / DEC-056 / DEC-057; DDLs `32_candle_live.sql`, `33_candle_closed.sql`,
 `34_feature_values.sql`.
 
+**Wave C supersession (2026-10-01, CHG-482):** the decommission retired DDLs
+`32_candle_live.sql`/`33_candle_closed.sql`/`34_feature_values.sql` and the
+`candle_closed` table; the context reader (`FlussCandleFetcher`) now defaults to
+`candle_features` + sealed-only. The C1–C4 text below records the landing
+context; the merged table keeps the same 15-column candle prefix (DDL 35).
+
 ## Requirement (hard constraints, operator 2026-09-30)
 
 1. **Live candle, never close-wait (hard).** A decision that needs old data must fire while

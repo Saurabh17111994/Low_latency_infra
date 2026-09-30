@@ -1,7 +1,11 @@
 # Wave C — merged candle+feature cutover (readers switch, legacy tables dropped)
 
 **Date:** 2026-09-30
-**Status:** **executing — W-C5a landed (`CHG-482`): decommission complete; scoped checks green (compute 627/0/20, common 769, pytest full green, docs-audit clean except the post-commit CHG-349/350 annotations); the single full `make gate` is the certifying run (D3 revised 2026-09-30).**
+**Status:** **COMPLETE — certified.** W-C5a landed and the single full `make gate`
+passed **19/19 (0 skipped)** on 2026-10-01 (`logs/soak/monday-gates-20261001-012918`,
+tree `2bcf54fe`; certificate `logs/tracker-14/gate-certificate-wc5a-20261001.md`).
+Scoped checks before it: compute 627/0/20, common 769, pytest full green,
+docs-audit clean (D3 revised 2026-09-30).
 
 **Constraints**
 - DEC-059: one writer (the strategy host), merged KV `candle_features`; DEC-060:
@@ -35,12 +39,16 @@ DDLs 32/33/34 + manifest 25 tables, bootstrap registry rows removed, defaults
 flipped to `candle_features` + sealed-only, ops surface migrated
 (probes/tools/panels/env/runbooks), docs updated; scoped checks: compute
 627/0/20, common 769/0, pytest full green, docs-audit clean except the
-CHG-349/350 post-commit annotations) · **the single full gate pending** (the
-certifying run).
+CHG-349/350 post-commit annotations) · **certified** — the single full `make
+gate` passed 19/19 on the decommissioned tree (`2bcf54fe`,
+`logs/soak/monday-gates-20261001-012918`) after two drill-leg follow-ups the
+run itself exposed (`327a0183`: `CompatFlussDdlParityIntegrationTest` manifest
+pin 28 → 25; `2bcf54fe`: `B4SignalIntentE2ETest` reads `candle_features` sealed
+rows instead of the dropped `candle_live`).
 
 **Cadence (revised 2026-09-30, operator):** scoped checks per slice; **one full
-`make gate` at the cutover** (W-C5a certifying run) and one final full run after
-the W-C7 drop. The interrupted W-C2 gate run
+`make gate` at the cutover** — done 2026-10-01, 19/19, the wave's single
+certifying run covering the W-C7 drop state. The interrupted W-C2 gate run
 (`logs/soak/monday-gates-20260930-211832`) was aborted deliberately — not a
 repository failure.
 
