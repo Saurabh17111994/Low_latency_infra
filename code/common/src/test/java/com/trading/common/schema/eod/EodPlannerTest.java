@@ -38,65 +38,87 @@ class EodPlannerTest {
     }
 
     @Test
-    void allVerifiedDaysPlanAgainstTheThreeDayFloor() {
+    void allVerifiedDaysNeverExtend() {
+        // The 3-complete-trading-day floor is retired (2026-09-30, operator
+        // Q36: live replay window <= 24h, backfills from the lake). Verified
+        // days carry no protected bound and never force an extension.
         EodPlanner.Plan plan = EodPlanner.plan(
                 List.of(verified(D1), verified(D2), verified(D3), verified(D4)),
                 KOLKATA, LIVE_TTL, SAFETY_FLOOR, Instant.ofEpochMilli(NOW));
         assertThat(plan.allVerified()).isTrue();
         assertThat(plan.earliestUnverifiedDate()).isNull();
-        // protected bound = third-most-recent day's source-expiry bound
-        assertThat(plan.protectedExpiryBound())
-                .isEqualTo(EodRetentionPolicy.sourceExpiryBound(D2, KOLKATA, LIVE_TTL));
+        assertThat(plan.protectedExpiryBound()).isNull();
+        assertThat(plan.marginMs()).isEqualTo(Long.MAX_VALUE);
+        assertThat(plan.requiresExtension()).isFalse();
     }
 
     @Test
-    void unverifiedDayExtendsTheProtectedBoundBeyondTheFloor() {
-        // newest day pending → its source-expiry bound is later than the 3-day floor
+    void unverifiedDayIsTheOnlyProtectedBound() {
         EodPlanner.Plan plan = EodPlanner.plan(
                 List.of(verified(D1), verified(D2), verified(D3), pending(D4)),
                 KOLKATA, LIVE_TTL, SAFETY_FLOOR, Instant.ofEpochMilli(NOW));
         assertThat(plan.allVerified()).isFalse();
         assertThat(plan.earliestUnverifiedDate()).isEqualTo(D4);
         assertThat(plan.protectedExpiryBound())
-                .isEqualTo(EodRetentionPolicy.sourceExpiryBound(D4, KOLKATA, LIVE_TTL))
-                .as("an unverified day always extends the protected bound past the floor");
+                .isEqualTo(EodRetentionPolicy.sourceExpiryBound(D4, KOLKATA, LIVE_TTL));
     }
 
     @Test
-    void oldestUnverifiedDayWinsEvenWhenTheFloorIsLater() {
-        // oldest day pending → its bound is earlier than the floor; the floor holds
+    void oldestUnverifiedDayWins() {
         EodPlanner.Plan plan = EodPlanner.plan(
                 List.of(pending(D1), verified(D2), verified(D3), verified(D4)),
                 KOLKATA, LIVE_TTL, SAFETY_FLOOR, Instant.ofEpochMilli(NOW));
         assertThat(plan.earliestUnverifiedDate()).isEqualTo(D1);
         assertThat(plan.protectedExpiryBound())
-                .isEqualTo(EodRetentionPolicy.sourceExpiryBound(D2, KOLKATA, LIVE_TTL))
-                .as("the protected bound is the later of unverified and floor — never the floor's loss");
+                .isEqualTo(EodRetentionPolicy.sourceExpiryBound(D1, KOLKATA, LIVE_TTL));
     }
 
     @Test
-    void fewerThanThreeDaysFallsBackToTheOldestDay() {
+    void weekendWithThreeDayRetentionStaysQuietWhenVerified() {
+        // Monday 23:30 IST, only Friday and Monday on file, all verified, 3d
+        // TTL. Under the retired floor rule Friday's bound (Tue 00:00) left a
+        // 30-minute margin and forced a weekly extension; now: quiet.
+        LocalDate friday = LocalDate.of(2026, 8, 14);
+        LocalDate monday = LocalDate.of(2026, 8, 17);
+        Instant mondayLate = monday.atTime(23, 30).atZone(KOLKATA).toInstant();
         EodPlanner.Plan plan = EodPlanner.plan(
-                List.of(verified(D3), verified(D4)),
-                KOLKATA, LIVE_TTL, SAFETY_FLOOR, Instant.ofEpochMilli(NOW));
+                List.of(verified(friday), verified(monday)),
+                KOLKATA, Duration.ofDays(3), Duration.ofDays(1), mondayLate);
         assertThat(plan.allVerified()).isTrue();
-        assertThat(plan.protectedExpiryBound())
-                .isEqualTo(EodRetentionPolicy.sourceExpiryBound(D3, KOLKATA, LIVE_TTL));
+        assertThat(plan.requiresExtension()).isFalse();
+        assertThat(plan.protectedExpiryBound()).isNull();
+    }
+
+    @Test
+    void stuckUnverifiedDayExtendsWhenTheRunwayCollapses() {
+        // Unverified Friday, 3d TTL: bound = Tue 00:00. With a 24h runway, 48h
+        // before the bound is quiet; 12h before it forces the extension.
+        LocalDate friday = LocalDate.of(2026, 8, 14);
+        Instant bound = EodRetentionPolicy.sourceExpiryBound(
+                friday, KOLKATA, Duration.ofDays(3));
+        EodPlanner.Plan roomy = EodPlanner.plan(
+                List.of(pending(friday)), KOLKATA, Duration.ofDays(3),
+                Duration.ofDays(1), bound.minus(Duration.ofHours(48)));
+        assertThat(roomy.requiresExtension()).isFalse();
+        EodPlanner.Plan tight = EodPlanner.plan(
+                List.of(pending(friday)), KOLKATA, Duration.ofDays(3),
+                Duration.ofDays(1), bound.minus(Duration.ofHours(12)));
+        assertThat(tight.requiresExtension()).isTrue();
+        assertThat(tight.marginMs()).isLessThan(Duration.ofDays(1).toMillis());
     }
 
     @Test
     void extensionFiresOnlyWhenMarginCollapsesBelowTheFloor() {
-        Instant closeToBound = EodRetentionPolicy.sourceExpiryBound(D2, KOLKATA, LIVE_TTL)
-                .minus(Duration.ofHours(6));
+        Instant bound = EodRetentionPolicy.sourceExpiryBound(D4, KOLKATA, LIVE_TTL);
+        Instant closeToBound = bound.minus(Duration.ofHours(6));
+
         EodPlanner.Plan tight = EodPlanner.plan(
-                List.of(verified(D1), verified(D2), verified(D3), verified(D4)),
-                KOLKATA, LIVE_TTL, Duration.ofDays(30), closeToBound);
+                List.of(pending(D4)), KOLKATA, LIVE_TTL, Duration.ofDays(1), closeToBound);
         assertThat(tight.requiresExtension()).isTrue();
-        assertThat(tight.marginMs()).isLessThan(Duration.ofDays(30).toMillis());
+        assertThat(tight.marginMs()).isLessThan(Duration.ofDays(1).toMillis());
 
         EodPlanner.Plan roomy = EodPlanner.plan(
-                List.of(verified(D1), verified(D2), verified(D3), verified(D4)),
-                KOLKATA, LIVE_TTL, Duration.ofHours(1), closeToBound);
+                List.of(pending(D4)), KOLKATA, LIVE_TTL, Duration.ofHours(1), closeToBound);
         assertThat(roomy.requiresExtension()).isFalse();
         assertThat(roomy.marginMs()).isGreaterThanOrEqualTo(Duration.ofHours(1).toMillis());
     }

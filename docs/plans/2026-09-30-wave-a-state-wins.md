@@ -2,9 +2,10 @@
 
 **Date:** 2026-09-30
 **Status:** operator-directed order approved 2026-09-30 ("Wave A first, then the
-merged table as staged Wave B"). A1 verify-first complete; A2/A3 verify-first in
-progress. Every item is judged on the three axes (low latency + high throughput
-+ less state growth) with the CHG-461 meters; any non-winner is reverted.
+merged table as staged Wave B"). **A1 landed (`CHG-462`); A2 landed (`CHG-463`);
+A3 findings recorded** — wave code complete, `make gate` at close. Every item is
+judged on the three axes (low latency + high throughput + less state growth)
+with the CHG-461 meters; any non-winner is reverted.
 `make gate` after the wave's code changes (operator Q42); runs follow the
 standing smoke-before-long-run rule.
 
@@ -89,11 +90,16 @@ agreed freshness class, or KPIs/throughput regress. **Revert:** drop the env.
   (`docker-stack.yml`: `EOD_AT`/`EOD_ZONE`/`EOD_TABLES`/`EOD_OFFLOAD`). The
   extend path is exercised in CHG-307's drills; the 3 d reconciliation is a
   code+env change, testable offline.
-- **Live check owed before the ALTER:** `table.datalake.enabled` on the live
-  `raw_table_1` must be true (else there is no offload) + the live ZK options
-  (`9d`/`9` expected).
+- **Live check (2026-09-30): DONE.** The live `raw_table_1` reported
+  `ttl=9d num-retention=9 partitions=[event_day]` and
+  `table.datalake.enabled=false` — the dev table predates the lake options
+  (recreation-only; `EnableTiering.java` exists for exactly this). The DDL
+  carries `datalake.enabled=true`/iceberg/5min/auto-compaction
+  (`02_raw_table_1.sql:169-172`), so fresh tables are correct; the dev lake
+  path and the real tiering-service proof stay tracked in the native-adoption
+  plan — not claimed here.
 
-**Proposed reconciliation (operator ack before the live ALTER):**
+**Reconciliation implemented (2026-09-30, CHG-463) — operator accepted:**
 - Keep "unverified day always extends"; replace the 3rd-most-recent-day floor
   with a runway rule tied to the TTL (extend only when an **unverified** day's
   bound is closer than a small runway; verified days never extend) — the
@@ -104,11 +110,23 @@ agreed freshness class, or KPIs/throughput regress. **Revert:** drop the env.
 - Failing-first tests: Friday run → quiet; stuck-unverified day → extension
   with runway; holiday weekend case.
 
-**Apply once acked:** ALTER `raw_table_1` (`table.log.ttl=3d`,
-`table.auto-partition.num-retention=3`); verify in-force (ZK) + post-ALTER
-write/read (the next round exercises both). Record the steady-state
-projection (≈650 GB vs ≈1.9 TB at the synthetic 2 Hz feed) — the growth
-**rate** is unchanged, only the ceiling moves, so no 900 s round can show it.
+**Applied (2026-09-30, `CHG-463`):**
+- Guard: verified days never extend (3-day floor retired); unverified days
+  extend when margin < runway; defaults `EOD_TTL=3d`, `EOD_SAFETY_FLOOR=1d`;
+  the extension now raises **both** expiry clocks (`table.log.ttl` +
+  `auto-partition.num-retention` on partitioned tables — a partition ages out
+  by GC as well as TTL, so the old TTL-only ALTER could not protect it).
+- Failing-first: 4 red (default 1d, null bound for all-verified,
+  oldest-unverified bound, weekend quiet) → green; `Eod*` 70/70;
+  `make test` 768 + 559 green; `static-check` 0; gate test 4/4.
+- Live ALTER via `fluss-repair/SetRawRetention.java`:
+  `before: ttl=9d num-retention=9 datalake.enabled=false` →
+  `ALTER OK: ttl=3d num-retention=3 changes=2`; guard status
+  `RESULT=OK EXIT=0`; stats probe reads 4 738 673 rows.
+- Post-ALTER write/read rides the wave-close `make gate` (the dev feed was
+  idle at apply time: `FEED_STALLED`/BACKOFF). Steady-state projection
+  ≈650 GB vs ≈1.9 TB — rate unchanged, ceiling moved; no 900 s round can
+  show it.
 
 ## A3 — compaction investigation (read-only first)
 
@@ -119,6 +137,20 @@ options, log-segment sizing/TTL, snapshot settings; measure with the S12 series
 **Deliverable:** a short findings note; if a safe lever exists, a config trial
 judged on the meters; otherwise document why cadence/retention are the only
 levers.
+
+**Findings (2026-09-30, read-only):**
+- `candle_live`'s **log** side is bounded: 60 s `table.log.ttl` (DDL 32), so
+  its log segments age out on their own; the ≈97 % churn share sits on the
+  **KV/LSM** side (upsert replay into the KV store).
+- Fluss 1.0 exposes **no compaction-scheduling knob**: the tablet config
+  surface (`FLUSS_PROPERTIES`) carries `log.segment.file-size`,
+  `log.retention.check-interval`, `remote.log.task-interval-duration`,
+  `kv.snapshot.interval` — memory/sizing knobs, not compaction cadence; no
+  `kv.ttl` server default (seal-time deletes are deferred).
+- Therefore the only safe levers on the churn meters are **write cadence**
+  (A1, landed) and **retention/ceiling** (A2, landed); a multi-hour series
+  could quantify KV boundedness but would turn no runtime knob. **No trial
+  opened** — acceptable per the A3 plan line.
 
 ## Measurement protocol (per item)
 

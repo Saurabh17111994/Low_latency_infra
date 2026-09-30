@@ -155,11 +155,14 @@ public final class EodControllerTool {
                             + " — no days on file");
                     continue;
                 }
+                EodPlanner.Plan plan = p.plan();
                 System.out.println("eod-controller: status " + p.table()
-                        + " earliestUnverified=" + p.plan().earliestUnverifiedDate()
-                        + " protectedBound=" + p.plan().protectedExpiryBound()
-                        + " margin=" + p.plan().marginMs() + "ms"
-                        + " requiresExtension=" + p.plan().requiresExtension()
+                        + " earliestUnverified=" + (plan.earliestUnverifiedDate() == null
+                                ? "-" : plan.earliestUnverifiedDate())
+                        + " protectedBound=" + (plan.protectedExpiryBound() == null
+                                ? "-" : plan.protectedExpiryBound())
+                        + " margin=" + (plan.allVerified() ? "-" : plan.marginMs() + "ms")
+                        + " requiresExtension=" + plan.requiresExtension()
                         + " verified=" + p.verifiedDays() + " unverified=" + p.unverifiedDays());
                 for (EodOffloadRecord d : p.days()) {
                     System.out.println("eod-controller:   day " + d.tradingDate()
@@ -183,13 +186,12 @@ public final class EodControllerTool {
             // earliestUnverified day's sourceExpiryBound is the protected bound —
             // Fluss delete is blocked until that day's iceberg manifest is
             // VERIFIED. Emit a critical alert so the weekend EOD-fail scenario
-            // (Fri offload unverified → Fri-Sun must survive past 2d, now 7d)
+            // (Fri offload unverified → Fri-Sun must survive past the 3d TTL)
             // is observable. The EOD controller's extend path then holds the data.
             if (s == EodController.Status.EXTENSION_REQUIRED) {
                 for (EodController.TablePlan p : plans) {
                     if (!p.noDays() && p.plan().requiresExtension()) {
-                        String when = p.plan().earliestUnverifiedDate() != null
-                                ? p.plan().earliestUnverifiedDate().toString() : "floor";
+                        String when = p.plan().earliestUnverifiedDate().toString();
                         System.err.println("eod-controller: ALERT CRITICAL — retention extension required for "
                                 + p.table() + " earliestUnverified=" + when
                                 + " protectedBound=" + p.plan().protectedExpiryBound()
@@ -399,10 +401,28 @@ public final class EodControllerTool {
             long timeoutMs) {
         String ttl = ttlOption(newTtl);
         try {
-            admin.alterTable(TablePath.of(database, table),
-                    List.of(TableChange.set("table.log.ttl", ttl)), false)
+            List<TableChange> changes = new java.util.ArrayList<>();
+            changes.add(TableChange.set("table.log.ttl", ttl));
+            // 2026-09-30 (A2): a partitioned table has TWO expiry mechanisms —
+            // the log TTL and auto-partition GC (table.auto-partition.num-retention
+            // days). Extending only the TTL would leave the partition to drop at
+            // its original count, so the guard raises both on partitioned tables.
+            TableInfo info = admin.getTableInfo(TablePath.of(database, table))
                     .get(timeoutMs, TimeUnit.MILLISECONDS);
-            System.out.println("eod-controller: ALTER " + table + " table.log.ttl=" + ttl);
+            boolean partitioned = info.getPartitionKeys() != null
+                    && !info.getPartitionKeys().isEmpty();
+            if (partitioned) {
+                long dayMs = Duration.ofDays(1).toMillis();
+                long days = Math.max(1, (newTtl.toMillis() + dayMs - 1) / dayMs);
+                changes.add(TableChange.set("table.auto-partition.num-retention",
+                        Long.toString(days)));
+            }
+            admin.alterTable(TablePath.of(database, table), changes, false)
+                    .get(timeoutMs, TimeUnit.MILLISECONDS);
+            System.out.println("eod-controller: ALTER " + table + " table.log.ttl=" + ttl
+                    + (partitioned ? " table.auto-partition.num-retention="
+                            + (newTtl.toMillis() + Duration.ofDays(1).toMillis() - 1)
+                                    / Duration.ofDays(1).toMillis() : ""));
             return true;
         } catch (Exception e) {
             System.err.println("eod-controller: ALTER table.log.ttl=" + ttl
@@ -459,8 +479,8 @@ public final class EodControllerTool {
                   --database <db>      (env FLUSS_DATABASE, default default)
                   --state-table <name> (env EOD_STATE_TABLE, default eod_offload_state)
                   --tables <t1,t2>     (env EOD_TABLES — EOD-eligible tables)
-                  --ttl <ttl>          (env EOD_TTL, default 7d — live-TTL fallback; T8 hardened was 2d)
-                  --safety-floor <ttl> (env EOD_SAFETY_FLOOR, default 7d)
+                  --ttl <ttl>          (env EOD_TTL, default 3d — live-TTL fallback)
+                  --safety-floor <ttl> (env EOD_SAFETY_FLOOR, default 1d — extension runway for unverified days)
                   --extension <ttl>    (env EOD_EXTENSION, default 30d)
                   --lease-ttl <ttl>    (env EOD_LEASE_TTL, default 30m)
                   --zone <zone>        (env EOD_ZONE, default Asia/Kolkata)
@@ -515,8 +535,8 @@ public final class EodControllerTool {
             String stateTable = System.getenv().getOrDefault("EOD_STATE_TABLE",
                     "eod_offload_state");
             String tablesRaw = System.getenv().getOrDefault("EOD_TABLES", null);
-            Duration ttlDefault = parseEnvTtl("EOD_TTL", Duration.ofDays(7));
-            Duration safetyFloor = parseEnvTtl("EOD_SAFETY_FLOOR", Duration.ofDays(7));
+            Duration ttlDefault = parseEnvTtl("EOD_TTL", Duration.ofDays(3));
+            Duration safetyFloor = parseEnvTtl("EOD_SAFETY_FLOOR", Duration.ofDays(1));
             Duration extension = parseEnvTtl("EOD_EXTENSION", Duration.ofDays(30));
             Duration leaseTtl = parseEnvTtl("EOD_LEASE_TTL", Duration.ofMinutes(30));
             String zone = System.getenv().getOrDefault("EOD_ZONE", "Asia/Kolkata");

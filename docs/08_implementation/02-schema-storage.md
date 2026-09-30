@@ -210,7 +210,7 @@ PENDING → WRITING → COMMITTED → VERIFYING → VERIFIED
                     ↘ FAILED_MANUAL
 ```
 
-Source data cannot expire unless state is `VERIFIED`, and at least three complete trading days remain live. Unverified or retryable state extends retention through a tested control mechanism; a fixed DDL TTL comment is insufficient.
+Source data cannot expire while its state is unverified: an unverified, retryable, or under-reconciliation day extends retention through a tested control mechanism (one ALTER — `table.log.ttl` plus `auto-partition.num-retention` on partitioned tables), firing once the day's remaining source life falls below the runway (`EOD_SAFETY_FLOOR`, default 1d). Verified days never force an extension — the 3-complete-trading-day floor is retired (2026-09-30, Wave A/A2; operator Q36: live replay window <= 24h, backfills from the lake). A fixed DDL TTL comment is insufficient.
 
 ### Test requirements
 

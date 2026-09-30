@@ -84,14 +84,13 @@ class EodControllerTest {
     }
 
     @Test
-    void statusIsExtensionRequiredWhenMarginCollapses() {
+    void statusIsExtensionRequiredWhenAnUnverifiedDaysMarginCollapses() {
+        // The guard protects UNVERIFIED days only: a pending day whose
+        // source-expiry bound is inside the runway forces the extension. The
+        // retired 3-day floor (verified days) never does -- see
+        // EodPlannerTest.weekendWithThreeDayRetentionStaysQuietWhenVerified.
         List<EodOffloadRecord> days = List.of(
-                verifiedDay(LocalDate.of(2026, 8, 10)),
-                verifiedDay(LocalDate.of(2026, 8, 11)),
-                verifiedDay(LocalDate.of(2026, 8, 12)),
-                verifiedDay(LocalDate.of(2026, 8, 13)));
-        // floor bound = D2 (third-most-recent) expiry: 2026-08-14T00:00 IST + 2d;
-        // a now 6h before it collapses the 7d floor.
+                EodOffloadRecord.initial(LocalDate.of(2026, 8, 11), TABLE, "2", NOW_MS));
         Instant tight = EodRetentionPolicy.sourceExpiryBound(
                 LocalDate.of(2026, 8, 11), KOLKATA, LIVE_TTL).minus(Duration.ofHours(6));
         List<EodController.TablePlan> plans = EodController.planTables(

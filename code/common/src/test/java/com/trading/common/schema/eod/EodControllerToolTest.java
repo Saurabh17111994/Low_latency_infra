@@ -23,7 +23,7 @@ class EodControllerToolTest {
         assertThat(opts.stateTable()).isEqualTo("eod_offload_state");
         assertThat(opts.zone()).isEqualTo("Asia/Kolkata");
         assertThat(opts.tables()).containsExactlyElementsOf(EodControllerTool.DEFAULT_TABLES);
-        assertThat(opts.safetyFloor()).isEqualTo(Duration.ofDays(7));
+        assertThat(opts.safetyFloor()).isEqualTo(Duration.ofDays(1));
         assertThat(opts.extension()).isEqualTo(Duration.ofDays(30));
         assertThat(opts.offloadMode()).isEqualTo("none");
     }

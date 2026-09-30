@@ -364,7 +364,7 @@ drill evidence relies on), or run a measurement while the tablet shows
 3. Capture table/schema version, date, source range, rows/bytes, checksums, commit state, S3 errors, and expiry margin.
 4. Retry with approved bounded backoff.
 5. Verify the Iceberg commit and manifest before marking success.
-6. Do not expire the source day; maintain at least three complete trading days live.
+6. Do not expire the source day; the live window is 3 days with a 1d extension runway — verified days never extend, unverified days extend automatically (one ALTER).
 
 ## Observability outage
 

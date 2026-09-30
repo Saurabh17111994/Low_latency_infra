@@ -16,11 +16,6 @@ class EodRetentionPolicyTest {
     private static final Duration TWO_DAYS = Duration.ofDays(2);
 
     @Test
-    void contractKeepsAtLeastThreeCompleteTradingDaysLive() {
-        assertThat(EodRetentionPolicy.MIN_COMPLETE_TRADING_DAYS).isEqualTo(3);
-    }
-
-    @Test
     void sourceExpiryBoundIsEndOfTradingDayPlusLiveTtl() {
         // 2026-08-14 trading day ends 2026-08-15T00:00 IST == 2026-08-14T18:30Z;
         // + 2d live TTL == 2026-08-16T18:30Z.

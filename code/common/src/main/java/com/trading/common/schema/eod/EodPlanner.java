@@ -15,28 +15,32 @@ import java.util.List;
  * ("Unverified or retryable state extends retention through a tested control
  * mechanism; a fixed DDL TTL comment is insufficient").
  *
- * <p>Protected bound = the later of:
+ * <p>Protected bound = the source-expiry bound of the <b>earliest unverified</b>
+ * day — source data for a trading day must not expire while its manifest is
+ * unverified, retryable, or under reconciliation. When every day on file is
+ * verified there is nothing to protect: no bound, no extension (the retired
+ * 3-complete-trading-day floor, 2026-09-30 — operator Q36 re-scoped the live
+ * replay window to &lt;= 24h with backfills from the lake; what stays live is
+ * the table's own TTL).
  *
- * <ol>
- *   <li>the source-expiry bound of the <b>earliest unverified</b> day —
- *       source data for a trading day must not expire while its manifest is
- *       unverified, retryable, or under reconciliation;</li>
- *   <li>the source-expiry bound of the <b>third-most-recent</b> trading day —
- *       at least three complete trading days remain live even after
- *       successful offload (the 3-day floor; with fewer than three days on
- *       file the floor is the oldest day).</li>
- * </ol>
- *
- * <p>If the margin between now and that bound is below the safety floor, the
- * controller must extend live retention (in Fluss 0.9.1: a controlled table
- * rewrite with {@link EodRetentionPolicy#extendedTtl}). All logic is pure —
- * no cluster, no clock.
+ * <p>If the margin between now and that bound is below the safety floor (the
+ * extension runway; default 1d since 2026-09-30), the controller must extend
+ * live retention with one {@code table.log.ttl} ALTER
+ * ({@link EodRetentionPolicy#extendedTtl}). All logic is pure — no cluster,
+ * no clock.
  */
 public final class EodPlanner {
 
     private EodPlanner() {}
 
-    /** Output of one planning pass for one table. */
+    /**
+     * Output of one planning pass for one table.
+     *
+     * <p>{@code protectedExpiryBound} and {@code marginMs} describe the
+     * earliest unverified day's remaining source life; when every day on file
+     * is verified both are absent ({@code null} / {@link Long#MAX_VALUE}) —
+     * verified days never force an extension (the retired 3-day floor).
+     */
     public record Plan(LocalDate earliestUnverifiedDate, Instant protectedExpiryBound,
                        long marginMs, boolean requiresExtension) {
         /** True when every trading day on file is VERIFIED. */
@@ -51,7 +55,8 @@ public final class EodPlanner {
      * @param days per-day offload records (any order; sorted by trading date here)
      * @param zone trading-day timezone (e.g. Asia/Kolkata)
      * @param liveTtl the table's effective live {@code table.log.ttl}
-     * @param safetyFloor minimum acceptable margin before extension fires
+     * @param safetyFloor extension runway — minimum acceptable margin before
+     *        an unverified day's extension fires (verified days never fire)
      * @param now the planner clock
      * @throws IllegalArgumentException when {@code days} is empty
      */
@@ -70,17 +75,15 @@ public final class EodPlanner {
                 .min(Comparator.naturalOrder())
                 .orElse(null);
 
-        // 3-day floor: the third-most-recent trading day (the oldest when the
-        // table has fewer than three days on file) must remain live.
-        LocalDate floorDate = sorted.get(Math.max(0, sorted.size()
-                - EodRetentionPolicy.MIN_COMPLETE_TRADING_DAYS)).tradingDateAsLocalDate();
-        Instant floorBound = EodRetentionPolicy.sourceExpiryBound(floorDate, zone, liveTtl);
-
-        Instant unverifiedBound = earliestUnverified == null ? null
-                : EodRetentionPolicy.sourceExpiryBound(earliestUnverified, zone, liveTtl);
-        Instant protectedBound = unverifiedBound != null && unverifiedBound.isAfter(floorBound)
-                ? unverifiedBound : floorBound;
-
+        if (earliestUnverified == null) {
+            // All days verified: nothing to protect. The 3-complete-trading-day
+            // floor is retired (2026-09-30, operator Q36: live replay window
+            // <= 24h, backfills from the lake); extension is reserved for
+            // unverified days.
+            return new Plan(null, null, Long.MAX_VALUE, false);
+        }
+        Instant protectedBound = EodRetentionPolicy.sourceExpiryBound(
+                earliestUnverified, zone, liveTtl);
         long margin = EodRetentionPolicy.marginMs(now, protectedBound);
         boolean requiresExtension =
                 EodRetentionPolicy.requiresExtension(margin, safetyFloor.toMillis());

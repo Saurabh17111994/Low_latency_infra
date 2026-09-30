@@ -2,10 +2,11 @@
 -- Owner: Ingestion
 -- Type: LOG (no primary key)
 -- Bucket key: instrument_token
--- Retention: 9 calendar days via table.log.ttl (P4-001: EOD VERIFIED buffer —
--- was 7d; live 7d + partition-retention 7d both expired ticks before the
--- iceberg manifest was VERIFIED. The block-delete-unverified guard is the
--- EodControllerTool extend path (isDeleteBlocked/planTables/extend), not a
+-- Retention: 3 calendar days via table.log.ttl (2026-09-30, Wave A/A2 — was 9d;
+-- operator Q36 re-scoped the live replay window to <= 24h with backfills from
+-- the lake). The block-delete-unverified guard is the EodControllerTool extend
+-- path (planTables/extend: one ALTER raising table.log.ttl AND
+-- auto-partition.num-retention on partitioned tables; 1d runway default), not a
 -- Fluss-side lock — see EodControllerTool "extend". Do not lower this or
 -- num-retention without the controller guard in place).
 -- Lake: EOD Iceberg offload (R-011: datalake options restored — they were
@@ -54,7 +55,7 @@
 -- an old event_time writes to its old partition, NOT today's — by design
 -- (audit fidelity: the tick belongs to its event day). There is NO late-tick
 -- quarantine path and NO ingest_ts derivation — a partition older than the
--- 9d retention is already GC'd and the write fails visibly, never silently.
+-- 3d retention is already GC'd and the write fails visibly, never silently.
 -- Backfill older than retention is unsupported (replay the day's lake data).
 -- ack_ts (P4-171): NULL-allowed in DDL (frozen nullability), but BOTH live
 -- converters write 0L for unknown (TypedFlussRowConverter + generic 0L path,
@@ -155,15 +156,15 @@ CREATE TABLE raw_table_1 (
 ) PARTITIONED BY (event_day) WITH (
     'bucket.num' = '16',
     'bucket.key' = 'instrument_token',
-    'table.log.ttl' = '9d', -- P4-001: VERIFIED buffer (was 7d); keep > num-retention + EOD SLA
-    -- daily partitions: IST day boundary; retains last 9 closed IST days + 2
-    -- precreated extra (P4-015: live + precreated = up to 11 physical; the
-    -- EOD job plans against the protected bound so the ±1-day IST-midnight
+    'table.log.ttl' = '3d', -- 2026-09-30 (A2): 3d live window; the EOD guard extends unverified days (1d runway)
+    -- daily partitions: IST day boundary; retains last 3 closed IST days + 2
+    -- precreated extra (P4-015: live + precreated = up to 5 physical; the EOD
+    -- job plans against the unverified day's bound so the ±1-day IST-midnight
     -- skew between partition GC (day-granular) and log TTL (commit-time) is covered)
     'table.auto-partition.enabled' = 'true',
     'table.auto-partition.time-unit' = 'DAY',
     'table.auto-partition.num-precreate' = '2',
-    'table.auto-partition.num-retention' = '9', -- P4-001/P4-015: matches log.ttl 9d (both were 7d; partition GC alone could drop before VERIFIED)
+    'table.auto-partition.num-retention' = '3', -- 2026-09-30 (A2): matches log.ttl 3d (partition GC alone must not drop before VERIFIED)
     'table.auto-partition.time-zone' = 'Asia/Kolkata',
     'table.datalake.enabled' = 'true',
     'table.datalake.format' = 'iceberg',

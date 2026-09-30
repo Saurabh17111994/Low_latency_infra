@@ -12,18 +12,21 @@ import java.util.regex.Pattern;
  * docs/08_implementation/02-schema-storage.md "EOD controller and offload
  * gate", docs/04_contracts/02-storage.md "Retention and lake").
  *
- * <p><b>T8 G1/G4 7d hardening (2026-08-22)</b>: live DDL TTL is 7d (was 2d) +
- * block-delete-unverified guard — source data for a trading day cannot expire
- * while its iceberg manifest is unverified; unverified days always extend
- * (one table.log.ttl ALTER) and fire a critical alert.
+ * <p><b>3d retention + 1d runway (2026-09-30, Wave A/A2)</b>: the live DDL TTL
+ * moves to 3d with the block-delete-unverified guard — source data for a
+ * trading day cannot expire while its iceberg manifest is unverified;
+ * unverified days extend (one table.log.ttl ALTER) and fire a critical alert
+ * once their source-expiry margin falls below the runway
+ * (EOD_SAFETY_FLOOR, default 1d; the earlier 7d TTL / 7d-floor pair assumed a
+ * 9d table).
  *
- * <p>Load-bearing rules encoded here (updated 7d):
+ * <p>Load-bearing rules encoded here:
  *
  * <ul>
  *   <li>Source data for a trading day cannot expire while its manifest is
  *       unverified — unverified days always extend;</li>
- *   <li>at least three complete trading days remain live even after successful
- *       offload;</li>
+ *   <li>verified days never force an extension (the 3-complete-trading-day
+ *       floor is retired — Q36: live replay window &lt;= 24h, lake backfills);</li>
  *   <li>retention extension is automatic while the manifest is unverified,
  *       retryable, or under reconciliation.</li>
  * </ul>
@@ -36,9 +39,6 @@ import java.util.regex.Pattern;
 public final class EodRetentionPolicy {
 
     private EodRetentionPolicy() {}
-
-    /** Storage contract: at least three complete trading days remain live (T8: 7d TTL + block-guard ensures this across weekend). */
-    public static final int MIN_COMPLETE_TRADING_DAYS = 3;
 
     /**
      * The instant a trading day's live data expires: records are written
