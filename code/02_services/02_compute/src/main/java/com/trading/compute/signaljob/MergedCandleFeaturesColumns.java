@@ -74,6 +74,20 @@ public final class MergedCandleFeaturesColumns {
 
     private static final String[] NAMES = COLUMN_NAMES.toArray(new String[0]);
 
+    /**
+     * Wave B reader rule (DEC-059): finished windows filter {@code sealed=true};
+     * the now-view reads the forming row ({@code sealed=false}). These tiny
+     * predicates exist so every reader spells the rule the same way.
+     */
+    public static boolean isSealed(RowData row) {
+        return row.getBoolean(SEALED);
+    }
+
+    /** The now-view predicate: true while the row is still forming. */
+    public static boolean isForming(RowData row) {
+        return !isSealed(row);
+    }
+
     /** Stream type info for emitted merged rows (DDL 35 order). */
     public static final InternalTypeInfo<RowData> ROW_TYPE_INFO = InternalTypeInfo.ofFields(
             new LogicalType[] {

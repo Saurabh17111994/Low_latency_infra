@@ -76,4 +76,17 @@ class MergedCandleRowsTest {
         assertThat(row.getMap(MergedCandleFeaturesColumns.FEATURES).size()).isZero();
         assertThat(row.getBoolean(MergedCandleFeaturesColumns.SEALED)).isFalse();
     }
+
+    @Test
+    void readerPredicatesMatchTheSealFlag() {
+        // DEC-059 reader rule: finished windows filter sealed=true, the
+        // now-view reads the forming row.
+        GenericRowData sealedRow = MergedCandleRows.fromCandleRow(candle(), Map.of(), true);
+        GenericRowData formingRow = MergedCandleRows.fromCandleRow(candle(), Map.of(), false);
+
+        assertThat(MergedCandleFeaturesColumns.isSealed(sealedRow)).isTrue();
+        assertThat(MergedCandleFeaturesColumns.isForming(sealedRow)).isFalse();
+        assertThat(MergedCandleFeaturesColumns.isSealed(formingRow)).isFalse();
+        assertThat(MergedCandleFeaturesColumns.isForming(formingRow)).isTrue();
+    }
 }

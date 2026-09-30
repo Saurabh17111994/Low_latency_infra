@@ -8,11 +8,17 @@ entry; it never forces a merged lake table.
 
 **Progress:** **W-B1 landed** (`CHG-468`: DDL 35 + manifest 28 + contract test +
 audit pins) · **W-B2 landed** (`CHG-469`: `MergedCandleRow` + the terminal-seal
-rule + `MERGED_CANDLE_FEATURES_ENABLED=false`, failing-first 84/84) ·
-**W-B3 (writer wiring) is the next slice** — it adds the host's dual-write
-(forming upsert + sealed write) behind the same flag and its sink; W-B4
-(readers/docs) and W-B5 (200 s smoke + closure) follow. The final `make gate`
-runs after W-B5 (covering Wave A + R2 + Wave B).
+rule + `MERGED_CANDLE_FEATURES_ENABLED=false`) · **W-B3 landed** (`CHG-470`: the
+host's dual-write — forming row per live cadence + sealed row at close, KV
+upsert sink, `MERGED_CANDLE_TABLE`, all behind the flag; compute 650/0/18) ·
+**W-B4 landed** (`CHG-472`: `isSealed`/`isForming` reader predicates) ·
+**W-B5 pending (live smoke)**: needs `candle_features` created on dev through a
+sanctioned path (registry-only; not on the stack today) plus a ~200 s run;
+until then the merged path is code- and test-complete but **live-unproven**.
+
+**Decision note (2026-09-30):** the final `make gate` runs **before** W-B5 —
+the smoke needs a live table creation on dev (an operator-visible step), and
+the flag-off gate does not depend on it. W-B5 follows the gate.
 
 ## Goal (DEC-059)
 
