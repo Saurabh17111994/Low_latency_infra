@@ -36,6 +36,24 @@ would be a no-op.
 
 **Trial change:** env-only `MULTITF_LIVE_SNAPSHOT_INTERVAL_MS=2000` added to the
 W3-d 900 s protocol. No tracked file is touched in the trial round.
+
+**Smoke (2026-09-30 17:01 IST, `logs/wave-a-a1-smoke-20260930-170130`): GREEN.**
+Presence zero failures; all legs populated (S10 live 15 048 samples, S11 closed
++ features 8 652 + 8 652, S12 304 + 516 series). The lever landed: live-mirror
+emissions **14 603 rows/s = exactly half** the 29 247 baseline (interval env
+reached the job). Smoke-window `candle_live` +47.66 MB/min (vs +85.45 in the
+feature-off 900 s baseline; smoke had the feature layer on — the 900 s round is
+the verdict). Live staleness p50 1505 / p99 1610 ms — the expected freshness
+class for a 2 s stepline.
+
+**Result (900 s, 2026-09-30): PASS — landed as CHG-462.**
+`candle_live` **+85.45 → +47.25 MB/min (−45 %)**; `candle_closed` +2.85
+(unchanged); `raw_table_1` +141.79 (feed); Flink changelog +0.87; ingest e2e
+p99 71 ms and tick→strategy p99 80–88 ms (vs 86–93) — no latency/throughput
+cost; live-read staleness p50 749 / p99 2 126 ms (freshness class, Q21). The
+landing is the code default flip (`SignalJobConfig` 1000 → 2000 ms + test
+pins; failing-first 2 failures before, 79/79 after; full compute suite
+638/0/18-skipped). Evidence `logs/wave-a-a1-main-20260930-170808`.
 **Expected:** `candle_live` growth ≈ halved (~42–45 MB/min); live freshness
 floor ≈ p50 0.5–0.7 s / p99 ≈1.3–1.5 s (freshness-bound class, operator Q21);
 emissions ≈ 14.6 k rows/s; KPIs/throughput unchanged.

@@ -827,7 +827,7 @@ class SignalJobConfigTest {
     void multiTfDefaultsToDisabled() {
         SignalJobConfig cfg = SignalJobConfig.from(env());
         assertFalse(cfg.multiTfEnabled(), "MULTITF_ENABLED defaults to false");
-        assertEquals(1_000L, cfg.liveSnapshotIntervalMs(), "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS default 1000");
+        assertEquals(2_000L, cfg.liveSnapshotIntervalMs(), "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS default 2000 (two steplines -> effective 1 Hz/key)");
         assertEquals("candle_live", cfg.candleLiveTable(), "CANDLE_LIVE_TABLE default candle_live");
         assertEquals("candle_closed", cfg.candleClosedTable(), "CANDLE_CLOSED_TABLE default candle_closed");
     }
@@ -911,7 +911,7 @@ class SignalJobConfigTest {
 
     @Test
     void liveSnapshotIntervalDefaultAndPositiveOnly() {
-        assertEquals(1_000L, SignalJobConfig.from(env()).liveSnapshotIntervalMs());
+        assertEquals(2_000L, SignalJobConfig.from(env()).liveSnapshotIntervalMs());
 
         Map<String, String> env = env();
         env.put("MULTITF_LIVE_SNAPSHOT_INTERVAL_MS", "500");

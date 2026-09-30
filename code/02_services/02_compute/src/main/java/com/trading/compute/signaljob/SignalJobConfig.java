@@ -120,8 +120,9 @@ public record SignalJobConfig(
         boolean multiTfSessionBypass,
         boolean multiTfSignalContextEnabled,
         // 2026-09-26 low-latency signal path: per-tick forming row to the
-        // strategy host in memory (no snapshot-cadence wait). The 1s LIVE_TAG
-        // mirror stream is untouched. MULTITF_FAST_LIVE_FEED, default true.
+        // strategy host in memory (no snapshot-cadence wait). The LIVE_TAG
+        // mirror stream (MULTITF_LIVE_SNAPSHOT_INTERVAL_MS cadence) is
+        // untouched. MULTITF_FAST_LIVE_FEED, default true.
         boolean multiTfFastLiveFeed,
         String candleLiveTable,
         String candleClosedTable,
@@ -178,7 +179,13 @@ public record SignalJobConfig(
         boolean multiTfEnabled = booleanValue(env, "MULTITF_ENABLED", false);
         String n7RuleId = env.getOrDefault("N7_RULE_ID",
                 SignalCandidatesTableColumns.CANONICAL_N7_RULE_ID);
-        long liveSnapshotIntervalMs = positiveLong(env, "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS", 1_000L);
+        // 2026-09-30 (CHG-462, Wave A/A1): default 2000ms. The operator-scope
+        // live-mirror scan runs TWO steplines per slot (processing-time +
+        // watermark), so the effective cadence is 2 emissions per interval =
+        // 1 Hz/key at 2000ms (at the old 1000ms default it was 2 Hz/key).
+        // Measured 900s: emissions 29 247 -> 14 603 rows/s, candle_live churn
+        // +85.45 -> +47.25 MB/min, tick->strategy p99 unchanged.
+        long liveSnapshotIntervalMs = positiveLong(env, "MULTITF_LIVE_SNAPSHOT_INTERVAL_MS", 2_000L);
         // Phase 5 soak mode A (2026-09-05): lets the multi-TF aggregator run
         // against the 15s fake-broker feed OUTSIDE market hours (weekend /
         // after close). Default false — production never bypasses the
@@ -408,7 +415,7 @@ public record SignalJobConfig(
         return n7RuleId;
     }
 
-    /** Live snapshot interval for the multi-TF aggregator (default 1000ms). */
+    /** Live snapshot interval for the multi-TF aggregator (default 2000ms; two steplines = effective 1 Hz/key — CHG-462). */
     public long liveSnapshotIntervalMs() {
         return liveSnapshotIntervalMs;
     }

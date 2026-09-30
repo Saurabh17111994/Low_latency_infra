@@ -108,7 +108,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
      * Low-latency signal path (2026-09-26): when true, every accepted trade
      * tick emits the smallest-TF forming row to {@link #LIVE_TICK_TAG} so the
      * strategy host reads in-memory state at tick latency instead of the
-     * snapshot cadence. The 1s {@link #LIVE_TAG} mirror is unaffected.
+     * snapshot cadence. The configured {@link #LIVE_TAG} mirror is unaffected.
      */
     private final boolean emitLiveTick;
 
@@ -127,8 +127,9 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
 
     /**
      * W3-d (2026-09-30): operator-scope live-mirror due markers — min over all
-     * slots of each slot's next live emission time. The 1s live mirrors are
-     * emitted by {@link #maybeScanLiveMirrors} on the record path instead of
+     * slots of each slot's next live emission time. The live mirrors (the
+     * configured {@code liveSnapshotIntervalMs} cadence) are emitted by
+     * {@link #maybeScanLiveMirrors} on the record path instead of
      * by per-key self-perpetuating timers, which re-registered every second
      * per active key (~4 900 timer-state mutations/s; ~20 MB/min of changelog
      * volume and the 94 MB checkpoint state). Plain heap fields — intentional
@@ -716,17 +717,18 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     }
 
     /**
-     * W3-d (2026-09-30): emit the 1s live mirrors for every due slot from the
+     * W3-d (2026-09-30): emit the due live mirrors for every due slot from the
      * record path — replaces the per-key self-perpetuating event/processing
      * live timers (the job's dominant timer-state churn: 2 registrations/s per
      * active key ~= 4 900/s, i.e. the ~20 MB/min changelog growth and the
      * growing checkpoint state_size). Semantics kept: when a slot's due time
      * is reached (processing clock or watermark), its forming rows are emitted
-     * exactly as the timer callback did, and the same 1s stepline advances.
+     * exactly as the timer callback did, and the same configured stepline
+     * advances ({@code liveSnapshotIntervalMs}; default 2000ms since CHG-462).
      * Any record drives the scan for all keys; with no records nothing is
      * emitted (a stalled feed emits nothing — the mirror never needed that).
      * A due slot emits at most once per scan even if the clock jumped several
-     * 1s steps (the skipped steps carried identical content).
+     * interval steps (the skipped steps carried identical content).
      */
     private void maybeScanLiveMirrors(Context ctx) throws Exception {
         long nowProc = ctx.timerService().currentProcessingTime();
