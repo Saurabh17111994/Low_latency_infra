@@ -719,6 +719,60 @@ class CheckpointSamplingTests(unittest.TestCase):
         self.assertLess(age, 10_000)
 
 
+class TableProbeTests(unittest.TestCase):
+    """CHG-510: the board samples the merged candle table.
+
+    ``feature_candles_15s`` was dropped with the Wave C legacy candle tables
+    (CHG-481/482); probing it left I4's candle leg permanently not-ok, so
+    signals were the only leg that could carry I4. The collector must probe
+    ``candle_features`` (DDL 35, DEC-059)."""
+
+    def test_collect_samples_candle_features(self):
+        probed = []
+
+        class _Probe(day_run.Collector):
+            def __init__(self):
+                super().__init__(runner=day_run.Runner(out=io.StringIO()),
+                                 window_s=20)
+
+            def services(self):
+                return {"fluss-coordinator": {"state": "running"}}
+
+            def expected_services(self):
+                return []
+
+            def jobs(self):
+                return [{"id": "j1", "name": day_run.SIGNAL_JOB_NAME,
+                         "state": "RUNNING"}]
+
+            def checkpoints(self, jobs):
+                return {}
+
+            def state_paths(self):
+                return {}
+
+            def container_env(self, services):
+                return day_run.EnvProbe()
+
+            def nautilus_halted(self):
+                return False
+
+            def log_errors(self, since):
+                return []
+
+            def effective_tokens(self, ingestion_running):
+                return 2433
+
+            def fluss_log_end(self, table):
+                probed.append(table)
+                return {"ok": True, "log_end": 1000}
+
+        with mock.patch.object(day_run.time, "sleep", lambda *_: None):
+            _Probe().collect(samples=True)
+        self.assertIn("candle_features", probed)
+        self.assertNotIn("feature_candles_15s", probed)
+
+
 # --------------------------------------------------------------------------
 # readiness probe memory safety
 # 2026-09-28: the 5s readiness poll ran the full collector, whose log reads

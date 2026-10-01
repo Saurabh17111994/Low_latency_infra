@@ -988,14 +988,14 @@ class Collector:
 
         want_samples = session["open"] if samples is None else samples
         for key, table in (("raw", "raw_table_1"),
-                           ("candles", "feature_candles_15s"),
+                           ("candles", "candle_features"),
                            ("signals", "Signal_Candidates")):
             first = self.fluss_log_end(table)
             facts.fluss[key] = first
         if want_samples and facts.fluss.get("raw", {}).get("ok"):
             time.sleep(self.window_s)
             for key, table in (("raw", "raw_table_1"),
-                               ("candles", "feature_candles_15s"),
+                               ("candles", "candle_features"),
                                ("signals", "Signal_Candidates")):
                 second = self.fluss_log_end(table)
                 if second.get("ok") and facts.fluss.get(key, {}).get("ok"):
