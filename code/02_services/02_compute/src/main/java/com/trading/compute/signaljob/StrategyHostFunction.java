@@ -179,6 +179,14 @@ public class StrategyHostFunction
     private transient Counter featureFailures;
     private transient Counter mergedRowsEmitted;
 
+    /**
+     * Unaligned-checkpoint legacy rows (2026-10-02): an in-flight record
+     * serialized by a job that predates the market section restores as a
+     * 16-column live row. Its market decode is skipped (nothing to decode);
+     * counted so the skip is never silent.
+     */
+    private transient Counter legacyMarketRow;
+
     // Heap mirrors for tests that bypass the metric registry.
     private transient long emittedHeap;
     private transient long suppressedHeap;
@@ -189,6 +197,7 @@ public class StrategyHostFunction
     private transient long featureCloseUpdatesHeap;
     private transient long featureFailuresHeap;
     private transient long mergedRowsEmittedHeap;
+    private transient long legacyMarketRowHeap;
     private final transient Map<String, Long> skippedPoisonHeap = new HashMap<>();
 
     public StrategyHostFunction(SignalJobConfig config, List<String> strategyIds) {
@@ -255,6 +264,8 @@ public class StrategyHostFunction
                 getRuntimeContext().getMetricGroup().counter("compute.features.failed");
         mergedRowsEmitted =
                 getRuntimeContext().getMetricGroup().counter("compute.merged.rows.emitted");
+        legacyMarketRow =
+                getRuntimeContext().getMetricGroup().counter("compute.market.row.legacy");
         emittedByRule = new HashMap<>();
         // P2-174: one metrics handle per rule per subtask, shared by every
         // slot — not one HostMetrics per (token, ruleId).
@@ -311,7 +322,9 @@ public class StrategyHostFunction
         // forming candle: no features, no KPI, no onLiveTick, no context. The
         // callback's default is a no-op, so existing strategies are unchanged.
         if (CandleLiveColumns.TF_MARKET_TICK.equals(tfCode)) {
-            decodeMarketSnapshot(slot.market, live);
+            if (!decodeMarketSnapshot(slot.market, live)) {
+                countLegacyMarketRow();
+            }
             for (SignalStrategy s : slot.strategies.values()) {
                 try {
                     s.onMarketUpdate(live, slot.view, new DedupCollector(out, s.ruleId()));
@@ -341,7 +354,9 @@ public class StrategyHostFunction
             // into the slot's MarketSnapshot before the fan-out so every
             // strategy reads the fresh values through the shared view. A
             // non-canonical row never touches the snapshot.
-            decodeMarketSnapshot(slot.market, live);
+            if (!decodeMarketSnapshot(slot.market, live)) {
+                countLegacyMarketRow();
+            }
         }
         if (canonicalTick && liveAge != null && evtTime > 0L) {
             liveAge.update(Math.max(0L, System.currentTimeMillis() - evtTime));
@@ -402,8 +417,16 @@ public class StrategyHostFunction
      * aggregator already carries the latest-known value of every field on this
      * row, so overwriting is exact — no merge against the previous row.
      * Package-private for the unit guard test.
+     *
+     * <p>Returns {@code false} and changes nothing when the row predates the
+     * market section (16-column live row replayed from an unaligned checkpoint
+     * taken by a pre-CHG-501 job): a short row is a valid candle tick, but it
+     * carries no market values. The caller counts the skip.
      */
-    static void decodeMarketSnapshot(MarketSnapshot m, RowData live) {
+    static boolean decodeMarketSnapshot(MarketSnapshot m, RowData live) {
+        if (live.getArity() < CandleLiveColumns.FIELD_COUNT) {
+            return false;
+        }
         m.totalBuyQty = longOrZero(live, CandleLiveColumns.MKT_TOTAL_BUY_QTY);
         m.totalSellQty = longOrZero(live, CandleLiveColumns.MKT_TOTAL_SELL_QTY);
         m.dayOpenPaise = longOrZero(live, CandleLiveColumns.MKT_DAY_OPEN_PAISE);
@@ -448,6 +471,7 @@ public class StrategyHostFunction
         m.askOrd5 = longOrZero(live, CandleLiveColumns.MKT_ASK_ORD_5);
         m.statsChangedAt = longOrZero(live, CandleLiveColumns.MKT_STATS_CHANGED_AT);
         m.depthChangedAt = longOrZero(live, CandleLiveColumns.MKT_DEPTH_CHANGED_AT);
+        return true;
     }
 
     private static long longOrZero(RowData row, int index) {
@@ -825,6 +849,13 @@ public class StrategyHostFunction
         failedStrategyHeap++;
     }
 
+    private void countLegacyMarketRow() {
+        if (legacyMarketRow != null) {
+            legacyMarketRow.inc();
+        }
+        legacyMarketRowHeap++;
+    }
+
     private void countDroppedUnkeyed() {
         if (droppedUnkeyed != null) {
             droppedUnkeyed.inc();
@@ -999,6 +1030,11 @@ public class StrategyHostFunction
     /** Test seam: per-strategy failures isolated by the fan-out (P2-057). */
     long failedStrategyForTest() {
         return failedStrategyHeap;
+    }
+
+    /** Test seam: pre-market-section in-flight rows whose decode was skipped. */
+    long legacyMarketRowsForTest() {
+        return legacyMarketRowHeap;
     }
 
     /** Test seam: unkeyed emissions dropped, not thrown (P2-057). */

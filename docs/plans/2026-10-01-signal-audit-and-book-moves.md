@@ -1,13 +1,20 @@
 # Scope — signal-row audit + book-move firing (2026-10-01)
 
-- **Status:** implemented 2026-10-02 (CHG-504 audit, CHG-505 market rows) — code
-  + tests green, full compute suite 673/0/0; live smoke pending. Landing note:
+- **Status:** implemented 2026-10-02 (CHG-504 audit, CHG-505 market rows, CHG-506
+  restore fix) — code + tests green, full compute suite 678/0/0; live smoke
+  **PASS** on the restored job (24,444 market rows, 0 strategy failures,
+  evidence `logs/tracker-14/20261002-signal-market-tick-live-smoke.md`); the v2
+  audit on a live fire remains unit-verified until the first live N7 signal.
+  Landing note:
   the market row reuses the **existing** `LIVE_TICK_TAG` fast side output
   instead of a new `MARKET_TICK_TAG` + union — a union is an operator with no
   pinned UID, while reusing the tag keeps the job graph byte-identical with the
   flag on *or* off (strictly better for restore; the host already discriminates
   rows by `TF`). Candle-prefix fields are zero-defaulted rather than null (the
   layout's NOT NULL contract on the transport), never read on a market row.
+  The restore smoke also exposed and fixed an upgrade-restore defect (CHG-506):
+  unaligned checkpoints replay pre-market-section 16-column rows; the host now
+  skips their decode and counts `compute.market.row.legacy` instead of crashing.
 - **Source:** operator request 2026-10-01 ("Why did this signal fire?" audit on
   the signal row; strategy firing on book moves alone).
 - **DDL freeze note:** no schema change is proposed. The audit rides the

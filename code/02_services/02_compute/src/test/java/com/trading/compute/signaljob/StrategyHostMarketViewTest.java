@@ -146,6 +146,32 @@ class StrategyHostMarketViewTest {
         return r;
     }
 
+    /**
+     * The pre-market-section 16-column live row (2026-10-02): exactly what an
+     * unaligned checkpoint taken by a pre-CHG-501 job replays as an in-flight
+     * record. Same prefix, no market section.
+     */
+    private static RowData legacyLive(long token, Timeframe tf, long ws, long price) {
+        GenericRowData r = new GenericRowData(CandleLiveColumns.MARKET_SECTION_START);
+        r.setField(CandleLiveColumns.INSTRUMENT_TOKEN, token);
+        r.setField(CandleLiveColumns.EXCHANGE, StringData.fromString("NSE"));
+        r.setField(CandleLiveColumns.SYMBOL, StringData.fromString("TEST"));
+        r.setField(CandleLiveColumns.TF, StringData.fromString(tf.code()));
+        r.setField(CandleLiveColumns.WINDOW_START, ws);
+        r.setField(CandleLiveColumns.WINDOW_END, ws + tf.windowMs());
+        r.setField(CandleLiveColumns.OPEN_PAISE, price);
+        r.setField(CandleLiveColumns.HIGH_PAISE, price);
+        r.setField(CandleLiveColumns.LOW_PAISE, price);
+        r.setField(CandleLiveColumns.CLOSE_PAISE, price);
+        r.setField(CandleLiveColumns.VOLUME, 10L);
+        r.setField(CandleLiveColumns.TICK_COUNT, 1);
+        r.setField(CandleLiveColumns.LAST_EVENT_TIME, ws + 1_000L);
+        r.setField(CandleLiveColumns.LAST_EVENT_FINGERPRINT, StringData.fromString("fp"));
+        r.setField(CandleLiveColumns.SCHEMA_VERSION, StringData.fromString("1"));
+        r.setField(CandleLiveColumns.INGEST_TS, 0L);
+        return r;
+    }
+
     /** A TF=MKT row as the aggregator emits it (CHG-505): identity + market, no candle. */
     private static RowData marketTick(long token, long bidPx1, long statsChangedAt,
             long depthChangedAt) {
@@ -226,6 +252,19 @@ class StrategyHostMarketViewTest {
     }
 
     @Test
+    @DisplayName("a pre-market-section 16-column row decodes nothing and never crashes")
+    void legacyRowSkipsMarketDecode() {
+        GenericRowData legacy =
+                (GenericRowData) legacyLive(TOKEN, Timeframe.FIFTEEN_S, 120_000L, 1_000L);
+        MarketSnapshot m = new MarketSnapshot();
+        m.vwapPaise = 777L; // a value already in the snapshot must survive the skip
+
+        assertFalse(StrategyHostFunction.decodeMarketSnapshot(m, legacy));
+        assertEquals(777L, m.vwapPaise(), "a legacy row must not wipe the snapshot");
+        assertFalse(m.hasDepth());
+    }
+
+    @Test
     @DisplayName("canonical row fills the view; non-canonical rows never touch it; closed sees the same snapshot")
     void canonicalRowFillsViewForLiveAndClosedCallbacks() throws Exception {
         open();
@@ -257,6 +296,26 @@ class StrategyHostMarketViewTest {
         assertSame(view, probe.lastView);
         assertEquals(10_000L, probe.lastClosedBidPx1);
         assertEquals(5_001L, probe.lastView.market().depthChangedAt());
+    }
+
+    @Test
+    @DisplayName("a legacy canonical row still fans out and is counted; the next full row refreshes")
+    void legacyCanonicalRowFansOutAndIsCounted() throws Exception {
+        open();
+        long ws = 120_000L;
+        harness.processElement1(legacyLive(TOKEN, Timeframe.FIFTEEN_S, ws, 1_000L), ws + 1_000L);
+
+        ViewProbe probe = probe();
+        assertEquals(1, probe.liveCalls, "a legacy row is still a valid candle tick");
+        assertEquals(1L, function.legacyMarketRowsForTest(), "the skipped decode is counted");
+        assertFalse(probe.lastView.market().hasDepth(), "nothing to decode from a legacy row");
+
+        // The next full row refreshes the snapshot; only the legacy row counted.
+        harness.processElement1(
+                withMarket(live(TOKEN, Timeframe.FIFTEEN_S, ws, 1_000L)), ws + 2_000L);
+        assertEquals(2, probe.liveCalls);
+        assertEquals(10_000L, probe.lastView.market().bidPxPaise(1));
+        assertEquals(1L, function.legacyMarketRowsForTest());
     }
 
     @Test
