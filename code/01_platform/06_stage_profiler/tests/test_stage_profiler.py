@@ -158,6 +158,22 @@ class ReadabilityMatrixTest(unittest.TestCase):
         self.assertEqual((2, 1, 200.0), stats["FIFTEEN_S"])
         self.assertEqual((1, 0, 3.0), stats["ONE_M"])
 
+    def test_s10_repointed_to_informational_latest_sealed_age(self):
+        """CHG-489: no forming rows exist, so S10 reports sealed age as info."""
+        self.assertIn("latest sealed candle age", sp.STAGES[9].boundary)
+        self.assertIn("informational", sp.STAGES[9].boundary)
+        detail = sp._readability_detail_tables(
+            [("FIFTEEN_S", 0, 5.0)],
+            {"FIFTEEN_S": [10.0]},
+            {"FIFTEEN_S": [10.0]},
+            {},
+        )
+        self.assertIn("sealed-age samples", detail)
+        self.assertIn("carried by the closed + feature legs", detail)
+        self.assertIn("sealed-age windows >75 ms (info)", detail)
+        self.assertNotIn("live candles", detail)
+        self.assertNotIn("live readability", detail)
+
     def test_closeread_groups_by_tf(self):
         text = (
             "epoch_ms\ttoken\ttf\twindow_start\twindow_end\tlatency_ms\n"

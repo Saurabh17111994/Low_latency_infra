@@ -64,7 +64,11 @@ import org.apache.fluss.row.InternalRow;
  *       issued as one fan-out and then collected (one RTT round, P6-086
  *       discipline); only the misses get a second fan-out against the
  *       previous window. {@code staleness_ms = read_ts - last_event_time} =
- *       how old the freshest tick visible in the live row is.
+ *       age of the newest sealed candle a reader can see. Since closed-only
+ *       storage (CHG-485/486) there is no forming row, so this series is a
+ *       sawtooth 0..TF by construction — informational (repointed 2026-10-01,
+ *       CHG-489); the readability SLO is window close -> first read (the
+ *       closed/features legs).
  *   <li><b>closed</b> — log tail of {@code candle_features} SEALED rows,
  *       subscribed to ALL buckets from the CURRENT log end (fallback: from
  *       beginning with an age filter when listOffsets(latest) fails); one row

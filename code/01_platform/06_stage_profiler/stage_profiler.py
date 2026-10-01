@@ -166,8 +166,8 @@ STAGES: tuple[Stage, ...] = (
     ),
     Stage(
         "S10",
-        "table readability — live candles (tick -> fresh-reader visible)",
-        "liveread.tsv staleness samples, per-timeframe (CHG-461)",
+        "table readability — latest sealed candle age (informational, 0..TF by construction)",
+        "liveread.tsv staleness samples, per-timeframe (CHG-461; repointed CHG-489)",
         "samples/s per timeframe",
     ),
     Stage(
@@ -484,7 +484,7 @@ DEFAULT_PRESENCE_RULES: tuple[PresenceRule, ...] = (
     PresenceRule("S9.last_sink", 1, "last-operator tracker latency samples"),
     # CHG-461: the readability matrix + state growth are measurement outputs;
     # an empty leg must refuse the main phase the same way S1..S9 do.
-    PresenceRule("S10.live_read", 1, "per-timeframe live readability samples"),
+    PresenceRule("S10.live_read", 1, "per-timeframe latest-sealed-age samples"),
     PresenceRule("S11.closed_read", 1, "closed-candle close->read rows"),
     PresenceRule("S11.feature_read", 1, "feature close->read rows"),
     PresenceRule("S12.state_growth", 1, "state-growth samples (bytes + table rows)"),
@@ -749,9 +749,12 @@ def _tsv_data_rows(text: str):
 def parse_liveread(text: str) -> list[tuple[str, int, float]]:
     """liveread.tsv -> [(tf, window_start, staleness_ms)].
 
-    Negative staleness (feed clock ahead of wall clock, a documented synthetic
-    feed artifact) is dropped, never clamped to 0 — a fake 0 would fabricate
-    headroom against the SLO.
+    staleness_ms = read - last_event_time of the newest sealed window a reader
+    can see (a 0..TF sawtooth by construction; informational since CHG-489 —
+    closed-only storage leaves no forming row to read). Negative staleness
+    (feed clock ahead of wall clock, a documented synthetic feed artifact) is
+    dropped, never clamped to 0 — a fake 0 would fabricate headroom against
+    the SLO.
     """
     rows: list[tuple[str, int, float]] = []
     for parts in _tsv_data_rows(text):
@@ -817,11 +820,12 @@ def values_by_tf(rows: Sequence[tuple[str, int, float]]) -> dict[str, list[float
 def live_window_stats(
     rows: Sequence[tuple[str, int, float]],
 ) -> dict[str, tuple[int, int, float | None]]:
-    """Per-TF window scoring for the live leg: (windows, windows>SLO, worst p99).
+    """Per-TF window scoring for the informational latest-sealed-age leg.
 
-    The SLO is per window of every timeframe; for a live sample that window is
-    the timeframe window it was taken in, and its score is the p99 of the
-    staleness samples inside it.
+    Returns (windows, windows > 75 ms, worst p99). The readability SLO is
+    carried by the closed/feature legs — with closed-only storage there is no
+    forming row, so this leg's sawtooth (0..TF by construction) is context
+    only (repointed 2026-10-01, CHG-489).
     """
     by_window: dict[tuple[str, int], list[float]] = {}
     for tf, window_start, staleness in rows:
@@ -954,12 +958,13 @@ def _readability_detail_tables(
     lines = [
         "",
         "### Per-timeframe readability, fresh reader (CHG-461; SLO p99 <= "
-        f"{READABILITY_SLO_MS:.0f} ms in every window of every timeframe)",
+        f"{READABILITY_SLO_MS:.0f} ms in every window of every timeframe, carried by the "
+        "closed + feature legs)",
         "",
-        "| tf | live samples | live p50 | live p95 | live p99 | live windows"
-        " | live windows >SLO | live worst window p99 | closed rows | closed p50"
-        " | closed p95 | closed p99 | closed >SLO | feature rows | feature p50"
-        " | feature p95 | feature p99 | feature >SLO |",
+        "| tf | sealed-age samples | sealed-age p50 | sealed-age p95 | sealed-age p99"
+        " | sealed-age windows | sealed-age windows >75 ms (info) | sealed-age worst window p99"
+        " | closed rows | closed p50 | closed p95 | closed p99 | closed >SLO | feature rows"
+        " | feature p50 | feature p95 | feature p99 | feature >SLO |",
         "|" + "|".join("---" for _ in range(18)) + "|",
     ]
     for tf in TF_ORDER:
@@ -1444,8 +1449,10 @@ def build_report(phase: Path) -> tuple[list[ProfileRow], str, dict[str, int]]:
                                source="sink tracker absent"))
 
     # CHG-461: per-timeframe readability (fresh reader) + full-platform state
-    # growth. S10/S11 are the operator-approved SLO carriers: p99 <= 75 ms in
-    # every window of every timeframe; S12 shows where state is accumulating.
+    # growth. S11 is the operator-approved readability SLO carrier: p99 <=
+    # 75 ms in every window of every timeframe. S10 was repointed 2026-10-01
+    # (CHG-489, the CHG-486 follow-up) to the informational latest-sealed age —
+    # closed-only storage left no forming row to read.
     live_rows = parse_liveread(_read(stages_dir / "liveread.tsv"))
     closed_matrix = parse_closeread(_read(stages_dir / "closeread.tsv"))
     feature_matrix, feature_by_name = parse_featureread(_read(stages_dir / "featureread.tsv"))
@@ -1459,7 +1466,9 @@ def build_report(phase: Path) -> tuple[list[ProfileRow], str, dict[str, int]]:
             STAGES[9].boundary,
             f"{len(live_rows)} samples, {sum(v[0] for v in live_stats.values())} window(s)",
             Summary.of(live_values) if live_values else None,
-            source="fresh-reader live staleness (read - last_event_time); "
+            source="latest sealed candle age (read - last_event_time of the newest "
+            "sealed row; 0..TF sawtooth by construction — informational, no forming "
+            "row exists since closed-only storage CHG-485/486; SLO carried by S11); "
             + summary_line(live_stats),
         )
     )

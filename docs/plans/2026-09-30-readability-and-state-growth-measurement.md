@@ -400,6 +400,14 @@ host's in-memory view. Smoke evidence
 +8,658 rows/min vs +301,888/min in the CHG-484 smoke (~35x); zero unsealed rows
 observed; live-path metrics unchanged.
 
+**S10 leg repointed 2026-10-01 (CHG-489).** With closed-only storage there is no
+forming row, so the profiler's live-readability leg reads the newest sealed
+window and reports a 0..TF sawtooth; it is now labelled *latest sealed candle
+age (informational)* and the ≤75 ms readability SLO is carried by the closed +
+features legs (S11). No pipeline change; the probe data is unchanged (the
+historical "live p50" values above are the same measurement under its old
+label).
+
 **Finding (c) — the raw-table compression pin is a no-op (CHG-487, 2026-10-01).**
 The 2026-10-01 probe predicted `table.log.arrow.compression.type=zstd` would cut
 raw storage ~542 → ~192 B/row; the recreate applied it and the smoke measured
