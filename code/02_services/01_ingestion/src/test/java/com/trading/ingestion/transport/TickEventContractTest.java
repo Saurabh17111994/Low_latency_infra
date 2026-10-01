@@ -113,11 +113,9 @@ class TickEventContractTest {
             .setCreatedMs(1_720_000_000_000L)
             .addEvents(sampleEvent(RAW_PAYLOADS[0]))
             .addEvents(sampleEvent(RAW_PAYLOADS[1]))
-            .setBatchPayloadHash(ByteString.copyFrom(new byte[]{1, 2}))
             .build();
         MarketDataBatch back = MarketDataBatch.parseFrom(batch.toByteArray());
         assertEquals(batch, back);
         assertEquals(2, back.getEventsCount());
-        assertTrue(back.getBatchPayloadHash().size() == 2);
     }
 }

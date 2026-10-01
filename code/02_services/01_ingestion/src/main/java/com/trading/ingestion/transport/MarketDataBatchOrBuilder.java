@@ -80,14 +80,4 @@ public interface MarketDataBatchOrBuilder extends
    */
   com.trading.ingestion.transport.TickEventOrBuilder getEventsOrBuilder(
       int index);
-
-  /**
-   * <pre>
-   * sha256 over concatenated raw payloads (Q5, computed in Go)
-   * </pre>
-   *
-   * <code>bytes batch_payload_hash = 6;</code>
-   * @return The batchPayloadHash.
-   */
-  com.google.protobuf.ByteString getBatchPayloadHash();
 }

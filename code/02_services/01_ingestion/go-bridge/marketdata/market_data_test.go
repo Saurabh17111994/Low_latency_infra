@@ -211,7 +211,6 @@ func TestT1C1_Batch(t *testing.T) {
 			sampleTick().ToTickEvent("s", "c", 1, 0, 1, rawPayloads[0]),
 			sampleTick().ToTickEvent("s", "c", 1, 0, 2, rawPayloads[1]),
 		},
-		BatchPayloadHash: []byte{0x01, 0x02},
 	}
 	b, err := proto.Marshal(batch)
 	if err != nil {

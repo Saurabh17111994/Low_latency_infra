@@ -392,6 +392,9 @@ public interface TickEventOrBuilder extends
   /**
    * <pre>
    * payload integrity (Q5): sha256 of raw_payload, computed ONCE in Go
+   * (32 bytes); Java verifies it at tick admission before any other gate
+   * (M4-6, always-on: missing -&gt; MISSING_PAYLOAD_HASH quarantine, mismatch -&gt;
+   * HASH_MISMATCH, malformed length -&gt; INVALID_SCHEMA; never append)
    * </pre>
    *
    * <code>bytes payload_hash = 30;</code>

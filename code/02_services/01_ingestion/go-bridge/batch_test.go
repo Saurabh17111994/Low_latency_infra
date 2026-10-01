@@ -284,12 +284,6 @@ func TestT2S2_BatchSeqMonotonic(t *testing.T) {
 			t.Fatalf("batch %d seq: got %d want %d", i, batch.BatchSeq, i+1)
 		}
 	}
-	// batch payload hash present
-	for i, batch := range rec.batches {
-		if len(batch.BatchPayloadHash) != sha256.Size {
-			t.Fatalf("batch %d missing payload hash (%d bytes)", i, len(batch.BatchPayloadHash))
-		}
-	}
 }
 
 // T2-H — hash-once: payload_hash computed once per event at Add, carried.
@@ -594,15 +588,6 @@ func TestT2R1_AddCarriesRawPayload(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("RawPayload[%d]: got %d want %d (not carried/copied)", i, got[i], want[i])
-		}
-	}
-	wantHash := sha256.Sum256(want)
-	if rec.batches[0].BatchPayloadHash == nil {
-		t.Fatal("BatchPayloadHash missing")
-	}
-	for i := range wantHash {
-		if rec.batches[0].BatchPayloadHash[i] != wantHash[i] {
-			t.Fatal("BatchPayloadHash does not cover the carried payload")
 		}
 	}
 }

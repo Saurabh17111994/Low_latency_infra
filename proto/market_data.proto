@@ -48,7 +48,12 @@ message MarketDataBatch {
   int64  batch_seq = 3;        // per-connection monotonic batch counter
   int64  created_ms = 4;       // T2 (batch creation, ms epoch)
   repeated TickEvent events = 5;
-  bytes  batch_payload_hash = 6; // sha256 over concatenated raw payloads (Q5, computed in Go)
+  // removed 2026-10-01 (CHG-490): batch_payload_hash was computed in Go but
+  // never verified by any consumer; the per-event payload_hash (field 30) is
+  // the verified integrity mechanism. Reserved so the number and name cannot
+  // be silently reused.
+  reserved 6;
+  reserved "batch_payload_hash";
 }
 
 // ── One tick event ───────────────────────────────────────────────────────────

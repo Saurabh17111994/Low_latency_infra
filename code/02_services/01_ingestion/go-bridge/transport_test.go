@@ -1,6 +1,6 @@
 // transport_test.go — T6 proto emitter tests:
 //   - frame shape (length-prefixed, parseable back)
-//   - batching (count flush, age flush, batch_seq/batch_payload_hash)
+//   - batching (count flush, age flush, batch_seq)
 //   - control records ride same transport, distinguished, immediate
 //   - payload_hash computed once, raw payload bit-exact
 //   - TRANSPORT selection (proto vs NDJSON fallback)
@@ -102,9 +102,6 @@ func TestProtoEmitterFrames(t *testing.T) {
 	}
 	if mb.ConnectionId != "hft-0" || mb.ConnectionEpoch != 1 || mb.BatchSeq != 1 {
 		t.Errorf("batch identity wrong: %+v", mb)
-	}
-	if len(mb.BatchPayloadHash) != 32 {
-		t.Errorf("batch_payload_hash not sha256: %d bytes", len(mb.BatchPayloadHash))
 	}
 }
 

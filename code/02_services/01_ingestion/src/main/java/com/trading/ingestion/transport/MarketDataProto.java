@@ -43,58 +43,58 @@ public final class MarketDataProto {
       descriptor;
   static {
     java.lang.String[] descriptorData = {
-      "\n\021market_data.proto\022\nmarketdata\"\254\001\n\017Mark" +
+      "\n\021market_data.proto\022\nmarketdata\"\252\001\n\017Mark" +
       "etDataBatch\022\025\n\rconnection_id\030\001 \001(\t\022\030\n\020co" +
       "nnection_epoch\030\002 \001(\003\022\021\n\tbatch_seq\030\003 \001(\003\022" +
       "\022\n\ncreated_ms\030\004 \001(\003\022%\n\006events\030\005 \003(\0132\025.ma" +
-      "rketdata.TickEvent\022\032\n\022batch_payload_hash" +
-      "\030\006 \001(\014\"\320\010\n\tTickEvent\022\017\n\007slot_id\030\001 \001(\t\022\014\n" +
-      "\004mode\030\002 \001(\t\022\r\n\005token\030\003 \001(\005\022\014\n\004feed\030\035 \001(\t" +
-      "\022\r\n\005ts_ms\030\004 \001(\003\022\023\n\013received_ms\030\005 \001(\003\022\033\n\023" +
-      "feed_sequence_local\030\006 \001(\003\022\021\n\tltp_paise\030\007" +
-      " \001(\003\022\023\n\013close_paise\030\010 \001(\003\022\022\n\nopen_paise\030" +
-      "\t \001(\003\022\022\n\nhigh_paise\030\n \001(\003\022\021\n\tlow_paise\030\013" +
-      " \001(\003\022\022\n\nvwap_paise\030\014 \001(\003\022\013\n\003ltq\030\r \001(\003\022\016\n" +
-      "\006volume\030\016 \001(\003\022\025\n\rtotal_buy_qty\030\017 \001(\003\022\026\n\016" +
-      "total_sell_qty\030\020 \001(\003\022\025\n\ropen_interest\030\021 " +
-      "\001(\003\022\016\n\006bid_px\030\022 \003(\005\022\016\n\006ask_px\030\023 \003(\005\022\017\n\007b" +
-      "id_qty\030\024 \003(\005\022\017\n\007ask_qty\030\025 \003(\005\022\022\n\nbid_ord" +
-      "ers\030\026 \003(\r\022\022\n\nask_orders\030\027 \003(\r\022\023\n\013raw_pay" +
-      "load\030\030 \001(\014\022\033\n\023fingerprint_version\030\031 \001(\t\022" +
-      "\031\n\021event_fingerprint\030\032 \001(\t\022\027\n\017decoder_ve" +
-      "rsion\030\033 \001(\t\022\030\n\020protocol_version\030\034 \001(\t\022\024\n" +
-      "\014payload_hash\030\036 \001(\014\022\026\n\016go_received_ms\030\037 " +
-      "\001(\003\022\022\n\ngo_emit_ms\030  \001(\003\022\030\n\013change_flag\030!" +
-      " \001(\005H\000\210\001\001\022\030\n\013oi_day_high\030\" \001(\003H\001\210\001\001\022\027\n\no" +
-      "i_day_low\030# \001(\003H\002\210\001\001\022\031\n\021lower_limit_pais" +
-      "e\030$ \001(\003\022\031\n\021upper_limit_paise\030% \001(\003\022\032\n\rim" +
-      "balance_qty\030& \001(\003H\003\210\001\001\022#\n\026indicative_clo" +
-      "se_paise\030\' \001(\003H\004\210\001\001\022\034\n\017ref_price_paise\030(" +
-      " \001(\003H\005\210\001\001\022\016\n\006ltt_ms\030) \001(\003\022\020\n\003atv\030* \001(\003H\006" +
-      "\210\001\001\022\020\n\003btv\030+ \001(\003H\007\210\001\001\022\031\n\014volume_delta\030, " +
-      "\001(\003H\010\210\001\001B\016\n\014_change_flagB\016\n\014_oi_day_high" +
-      "B\r\n\013_oi_day_lowB\020\n\016_imbalance_qtyB\031\n\027_in" +
-      "dicative_close_paiseB\022\n\020_ref_price_paise" +
-      "B\006\n\004_atvB\006\n\004_btvB\017\n\r_volume_delta\"\334\003\n\rCo" +
-      "ntrolRecord\022\023\n\013record_type\030\001 \001(\t\022\030\n\020cont" +
-      "ract_version\030\002 \001(\005\022\r\n\005event\030\003 \001(\t\022\017\n\007slo" +
-      "t_id\030\004 \001(\t\022\025\n\rconnection_id\030\005 \001(\t\022\030\n\020con" +
-      "nection_epoch\030\006 \001(\003\022\r\n\005state\030\007 \001(\t\022\027\n\017as" +
-      "signed_tokens\030\010 \001(\005\022\033\n\023acknowledged_toke" +
-      "ns\030\t \001(\005\022\027\n\017rejected_tokens\030\n \001(\005\022\016\n\006rea" +
-      "son\030\013 \001(\t\022\026\n\016received_ts_ms\030\014 \001(\003\022\034\n\024man" +
-      "ifest_fingerprint\030\r \001(\t\022\037\n\027assigned_toke" +
-      "n_set_hash\030\016 \001(\t\022\035\n\025reconnect_consecutiv" +
-      "e\030\017 \001(\005\022\026\n\016active_sockets\030\020 \001(\005\022\025\n\rgo_go" +
-      "routines\030\021 \001(\005\022\r\n\005ts_ms\030\022 \001(\003\022\023\n\013raw_pay" +
-      "load\030\023 \001(\014\022\024\n\014broker_error\030\024 \001(\t\"\230\001\n\016Tra" +
-      "nsportFrame\0223\n\014market_batch\030\001 \001(\0132\033.mark" +
-      "etdata.MarketDataBatchH\000\022,\n\007control\030\002 \001(" +
-      "\0132\031.marketdata.ControlRecordH\000\022\030\n\020protoc" +
-      "ol_version\030\003 \001(\005B\t\n\007payloadBk\n\037com.tradi" +
-      "ng.ingestion.transportB\017MarketDataProtoP" +
-      "\001Z5github.com/trading/arrow-bridge/marke" +
-      "tdata;marketdatab\006proto3"
+      "rketdata.TickEventJ\004\010\006\020\007R\022batch_payload_" +
+      "hash\"\320\010\n\tTickEvent\022\017\n\007slot_id\030\001 \001(\t\022\014\n\004m" +
+      "ode\030\002 \001(\t\022\r\n\005token\030\003 \001(\005\022\014\n\004feed\030\035 \001(\t\022\r" +
+      "\n\005ts_ms\030\004 \001(\003\022\023\n\013received_ms\030\005 \001(\003\022\033\n\023fe" +
+      "ed_sequence_local\030\006 \001(\003\022\021\n\tltp_paise\030\007 \001" +
+      "(\003\022\023\n\013close_paise\030\010 \001(\003\022\022\n\nopen_paise\030\t " +
+      "\001(\003\022\022\n\nhigh_paise\030\n \001(\003\022\021\n\tlow_paise\030\013 \001" +
+      "(\003\022\022\n\nvwap_paise\030\014 \001(\003\022\013\n\003ltq\030\r \001(\003\022\016\n\006v" +
+      "olume\030\016 \001(\003\022\025\n\rtotal_buy_qty\030\017 \001(\003\022\026\n\016to" +
+      "tal_sell_qty\030\020 \001(\003\022\025\n\ropen_interest\030\021 \001(" +
+      "\003\022\016\n\006bid_px\030\022 \003(\005\022\016\n\006ask_px\030\023 \003(\005\022\017\n\007bid" +
+      "_qty\030\024 \003(\005\022\017\n\007ask_qty\030\025 \003(\005\022\022\n\nbid_order" +
+      "s\030\026 \003(\r\022\022\n\nask_orders\030\027 \003(\r\022\023\n\013raw_paylo" +
+      "ad\030\030 \001(\014\022\033\n\023fingerprint_version\030\031 \001(\t\022\031\n" +
+      "\021event_fingerprint\030\032 \001(\t\022\027\n\017decoder_vers" +
+      "ion\030\033 \001(\t\022\030\n\020protocol_version\030\034 \001(\t\022\024\n\014p" +
+      "ayload_hash\030\036 \001(\014\022\026\n\016go_received_ms\030\037 \001(" +
+      "\003\022\022\n\ngo_emit_ms\030  \001(\003\022\030\n\013change_flag\030! \001" +
+      "(\005H\000\210\001\001\022\030\n\013oi_day_high\030\" \001(\003H\001\210\001\001\022\027\n\noi_" +
+      "day_low\030# \001(\003H\002\210\001\001\022\031\n\021lower_limit_paise\030" +
+      "$ \001(\003\022\031\n\021upper_limit_paise\030% \001(\003\022\032\n\rimba" +
+      "lance_qty\030& \001(\003H\003\210\001\001\022#\n\026indicative_close" +
+      "_paise\030\' \001(\003H\004\210\001\001\022\034\n\017ref_price_paise\030( \001" +
+      "(\003H\005\210\001\001\022\016\n\006ltt_ms\030) \001(\003\022\020\n\003atv\030* \001(\003H\006\210\001" +
+      "\001\022\020\n\003btv\030+ \001(\003H\007\210\001\001\022\031\n\014volume_delta\030, \001(" +
+      "\003H\010\210\001\001B\016\n\014_change_flagB\016\n\014_oi_day_highB\r" +
+      "\n\013_oi_day_lowB\020\n\016_imbalance_qtyB\031\n\027_indi" +
+      "cative_close_paiseB\022\n\020_ref_price_paiseB\006" +
+      "\n\004_atvB\006\n\004_btvB\017\n\r_volume_delta\"\334\003\n\rCont" +
+      "rolRecord\022\023\n\013record_type\030\001 \001(\t\022\030\n\020contra" +
+      "ct_version\030\002 \001(\005\022\r\n\005event\030\003 \001(\t\022\017\n\007slot_" +
+      "id\030\004 \001(\t\022\025\n\rconnection_id\030\005 \001(\t\022\030\n\020conne" +
+      "ction_epoch\030\006 \001(\003\022\r\n\005state\030\007 \001(\t\022\027\n\017assi" +
+      "gned_tokens\030\010 \001(\005\022\033\n\023acknowledged_tokens" +
+      "\030\t \001(\005\022\027\n\017rejected_tokens\030\n \001(\005\022\016\n\006reaso" +
+      "n\030\013 \001(\t\022\026\n\016received_ts_ms\030\014 \001(\003\022\034\n\024manif" +
+      "est_fingerprint\030\r \001(\t\022\037\n\027assigned_token_" +
+      "set_hash\030\016 \001(\t\022\035\n\025reconnect_consecutive\030" +
+      "\017 \001(\005\022\026\n\016active_sockets\030\020 \001(\005\022\025\n\rgo_goro" +
+      "utines\030\021 \001(\005\022\r\n\005ts_ms\030\022 \001(\003\022\023\n\013raw_paylo" +
+      "ad\030\023 \001(\014\022\024\n\014broker_error\030\024 \001(\t\"\230\001\n\016Trans" +
+      "portFrame\0223\n\014market_batch\030\001 \001(\0132\033.market" +
+      "data.MarketDataBatchH\000\022,\n\007control\030\002 \001(\0132" +
+      "\031.marketdata.ControlRecordH\000\022\030\n\020protocol" +
+      "_version\030\003 \001(\005B\t\n\007payloadBk\n\037com.trading" +
+      ".ingestion.transportB\017MarketDataProtoP\001Z" +
+      "5github.com/trading/arrow-bridge/marketd" +
+      "ata;marketdatab\006proto3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,
@@ -105,7 +105,7 @@ public final class MarketDataProto {
     internal_static_marketdata_MarketDataBatch_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessageV3.FieldAccessorTable(
         internal_static_marketdata_MarketDataBatch_descriptor,
-        new java.lang.String[] { "ConnectionId", "ConnectionEpoch", "BatchSeq", "CreatedMs", "Events", "BatchPayloadHash", });
+        new java.lang.String[] { "ConnectionId", "ConnectionEpoch", "BatchSeq", "CreatedMs", "Events", });
     internal_static_marketdata_TickEvent_descriptor =
       getDescriptor().getMessageTypes().get(1);
     internal_static_marketdata_TickEvent_fieldAccessorTable = new

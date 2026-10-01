@@ -40,15 +40,14 @@ const (
 )
 
 type MarketDataBatch struct {
-	state            protoimpl.MessageState `protogen:"open.v1"`
-	ConnectionId     string                 `protobuf:"bytes,1,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`           // "ingestion-local/hft-0"
-	ConnectionEpoch  int64                  `protobuf:"varint,2,opt,name=connection_epoch,json=connectionEpoch,proto3" json:"connection_epoch,omitempty"` // monotonic per slot, increments per reconnect
-	BatchSeq         int64                  `protobuf:"varint,3,opt,name=batch_seq,json=batchSeq,proto3" json:"batch_seq,omitempty"`                      // per-connection monotonic batch counter
-	CreatedMs        int64                  `protobuf:"varint,4,opt,name=created_ms,json=createdMs,proto3" json:"created_ms,omitempty"`                   // T2 (batch creation, ms epoch)
-	Events           []*TickEvent           `protobuf:"bytes,5,rep,name=events,proto3" json:"events,omitempty"`
-	BatchPayloadHash []byte                 `protobuf:"bytes,6,opt,name=batch_payload_hash,json=batchPayloadHash,proto3" json:"batch_payload_hash,omitempty"` // sha256 over concatenated raw payloads (Q5, computed in Go)
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	ConnectionId    string                 `protobuf:"bytes,1,opt,name=connection_id,json=connectionId,proto3" json:"connection_id,omitempty"`           // "ingestion-local/hft-0"
+	ConnectionEpoch int64                  `protobuf:"varint,2,opt,name=connection_epoch,json=connectionEpoch,proto3" json:"connection_epoch,omitempty"` // monotonic per slot, increments per reconnect
+	BatchSeq        int64                  `protobuf:"varint,3,opt,name=batch_seq,json=batchSeq,proto3" json:"batch_seq,omitempty"`                      // per-connection monotonic batch counter
+	CreatedMs       int64                  `protobuf:"varint,4,opt,name=created_ms,json=createdMs,proto3" json:"created_ms,omitempty"`                   // T2 (batch creation, ms epoch)
+	Events          []*TickEvent           `protobuf:"bytes,5,rep,name=events,proto3" json:"events,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *MarketDataBatch) Reset() {
@@ -116,13 +115,6 @@ func (x *MarketDataBatch) GetEvents() []*TickEvent {
 	return nil
 }
 
-func (x *MarketDataBatch) GetBatchPayloadHash() []byte {
-	if x != nil {
-		return x.BatchPayloadHash
-	}
-	return nil
-}
-
 type TickEvent struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// control / provenance
@@ -162,6 +154,9 @@ type TickEvent struct {
 	DecoderVersion     string `protobuf:"bytes,27,opt,name=decoder_version,json=decoderVersion,proto3" json:"decoder_version,omitempty"`       // SET IN JAVA at row-build (not from Go)
 	ProtocolVersion    string `protobuf:"bytes,28,opt,name=protocol_version,json=protocolVersion,proto3" json:"protocol_version,omitempty"`    // SET IN JAVA at row-build (not from Go)
 	// payload integrity (Q5): sha256 of raw_payload, computed ONCE in Go
+	// (32 bytes); Java verifies it at tick admission before any other gate
+	// (M4-6, always-on: missing -> MISSING_PAYLOAD_HASH quarantine, mismatch ->
+	// HASH_MISMATCH, malformed length -> INVALID_SCHEMA; never append)
 	PayloadHash []byte `protobuf:"bytes,30,opt,name=payload_hash,json=payloadHash,proto3" json:"payload_hash,omitempty"`
 	// T8 staged-latency timestamps (ms epoch, monotonic — never persisted,
 	// transport-only provenance for the T8 latency budget):
@@ -831,15 +826,14 @@ var File_market_data_proto protoreflect.FileDescriptor
 const file_market_data_proto_rawDesc = "" +
 	"\n" +
 	"\x11market_data.proto\x12\n" +
-	"marketdata\"\xfa\x01\n" +
+	"marketdata\"\xe6\x01\n" +
 	"\x0fMarketDataBatch\x12#\n" +
 	"\rconnection_id\x18\x01 \x01(\tR\fconnectionId\x12)\n" +
 	"\x10connection_epoch\x18\x02 \x01(\x03R\x0fconnectionEpoch\x12\x1b\n" +
 	"\tbatch_seq\x18\x03 \x01(\x03R\bbatchSeq\x12\x1d\n" +
 	"\n" +
 	"created_ms\x18\x04 \x01(\x03R\tcreatedMs\x12-\n" +
-	"\x06events\x18\x05 \x03(\v2\x15.marketdata.TickEventR\x06events\x12,\n" +
-	"\x12batch_payload_hash\x18\x06 \x01(\fR\x10batchPayloadHash\"\xc7\f\n" +
+	"\x06events\x18\x05 \x03(\v2\x15.marketdata.TickEventR\x06eventsJ\x04\b\x06\x10\aR\x12batch_payload_hash\"\xc7\f\n" +
 	"\tTickEvent\x12\x17\n" +
 	"\aslot_id\x18\x01 \x01(\tR\x06slotId\x12\x12\n" +
 	"\x04mode\x18\x02 \x01(\tR\x04mode\x12\x14\n" +

@@ -18,7 +18,6 @@ private static final long serialVersionUID = 0L;
   private MarketDataBatch() {
     connectionId_ = "";
     events_ = java.util.Collections.emptyList();
-    batchPayloadHash_ = com.google.protobuf.ByteString.EMPTY;
   }
 
   @java.lang.Override
@@ -179,21 +178,6 @@ private static final long serialVersionUID = 0L;
     return events_.get(index);
   }
 
-  public static final int BATCH_PAYLOAD_HASH_FIELD_NUMBER = 6;
-  private com.google.protobuf.ByteString batchPayloadHash_ = com.google.protobuf.ByteString.EMPTY;
-  /**
-   * <pre>
-   * sha256 over concatenated raw payloads (Q5, computed in Go)
-   * </pre>
-   *
-   * <code>bytes batch_payload_hash = 6;</code>
-   * @return The batchPayloadHash.
-   */
-  @java.lang.Override
-  public com.google.protobuf.ByteString getBatchPayloadHash() {
-    return batchPayloadHash_;
-  }
-
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -223,9 +207,6 @@ private static final long serialVersionUID = 0L;
     for (int i = 0; i < events_.size(); i++) {
       output.writeMessage(5, events_.get(i));
     }
-    if (!batchPayloadHash_.isEmpty()) {
-      output.writeBytes(6, batchPayloadHash_);
-    }
     getUnknownFields().writeTo(output);
   }
 
@@ -254,10 +235,6 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeMessageSize(5, events_.get(i));
     }
-    if (!batchPayloadHash_.isEmpty()) {
-      size += com.google.protobuf.CodedOutputStream
-        .computeBytesSize(6, batchPayloadHash_);
-    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -283,8 +260,6 @@ private static final long serialVersionUID = 0L;
         != other.getCreatedMs()) return false;
     if (!getEventsList()
         .equals(other.getEventsList())) return false;
-    if (!getBatchPayloadHash()
-        .equals(other.getBatchPayloadHash())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -311,8 +286,6 @@ private static final long serialVersionUID = 0L;
       hash = (37 * hash) + EVENTS_FIELD_NUMBER;
       hash = (53 * hash) + getEventsList().hashCode();
     }
-    hash = (37 * hash) + BATCH_PAYLOAD_HASH_FIELD_NUMBER;
-    hash = (53 * hash) + getBatchPayloadHash().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -453,7 +426,6 @@ private static final long serialVersionUID = 0L;
         eventsBuilder_.clear();
       }
       bitField0_ = (bitField0_ & ~0x00000010);
-      batchPayloadHash_ = com.google.protobuf.ByteString.EMPTY;
       return this;
     }
 
@@ -511,9 +483,6 @@ private static final long serialVersionUID = 0L;
       }
       if (((from_bitField0_ & 0x00000008) != 0)) {
         result.createdMs_ = createdMs_;
-      }
-      if (((from_bitField0_ & 0x00000020) != 0)) {
-        result.batchPayloadHash_ = batchPayloadHash_;
       }
     }
 
@@ -601,9 +570,6 @@ private static final long serialVersionUID = 0L;
           }
         }
       }
-      if (other.getBatchPayloadHash() != com.google.protobuf.ByteString.EMPTY) {
-        setBatchPayloadHash(other.getBatchPayloadHash());
-      }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
       return this;
@@ -663,11 +629,6 @@ private static final long serialVersionUID = 0L;
               }
               break;
             } // case 42
-            case 50: {
-              batchPayloadHash_ = input.readBytes();
-              bitField0_ |= 0x00000020;
-              break;
-            } // case 50
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -1147,50 +1108,6 @@ private static final long serialVersionUID = 0L;
         events_ = null;
       }
       return eventsBuilder_;
-    }
-
-    private com.google.protobuf.ByteString batchPayloadHash_ = com.google.protobuf.ByteString.EMPTY;
-    /**
-     * <pre>
-     * sha256 over concatenated raw payloads (Q5, computed in Go)
-     * </pre>
-     *
-     * <code>bytes batch_payload_hash = 6;</code>
-     * @return The batchPayloadHash.
-     */
-    @java.lang.Override
-    public com.google.protobuf.ByteString getBatchPayloadHash() {
-      return batchPayloadHash_;
-    }
-    /**
-     * <pre>
-     * sha256 over concatenated raw payloads (Q5, computed in Go)
-     * </pre>
-     *
-     * <code>bytes batch_payload_hash = 6;</code>
-     * @param value The batchPayloadHash to set.
-     * @return This builder for chaining.
-     */
-    public Builder setBatchPayloadHash(com.google.protobuf.ByteString value) {
-      if (value == null) { throw new NullPointerException(); }
-      batchPayloadHash_ = value;
-      bitField0_ |= 0x00000020;
-      onChanged();
-      return this;
-    }
-    /**
-     * <pre>
-     * sha256 over concatenated raw payloads (Q5, computed in Go)
-     * </pre>
-     *
-     * <code>bytes batch_payload_hash = 6;</code>
-     * @return This builder for chaining.
-     */
-    public Builder clearBatchPayloadHash() {
-      bitField0_ = (bitField0_ & ~0x00000020);
-      batchPayloadHash_ = getDefaultInstance().getBatchPayloadHash();
-      onChanged();
-      return this;
     }
     @java.lang.Override
     public final Builder setUnknownFields(

@@ -442,6 +442,16 @@ Per-session budget at the test rate drops ~56 → ~50 GB; local steady state
 (3-day window) ~170 → ~150 GB. `event_fingerprint` stays — recomputing it would
 move SHA-256 cost onto the strategy path for no disk win that matters.
 
+**Footnote closed — the transport's batch-level hash is retired (CHG-490, 2026-10-01).**
+The same audit noted the Go bridge also computed a batch-level `sha256` over the
+concatenated `raw_payload`s (proto field 6, `batch_payload_hash`) that no
+consumer ever verified or stored. It is removed natively: field 6 and its name
+are `reserved` in `proto/market_data.proto`, the flush-path computation is
+deleted, and the generated Go/Java code was regenerated from the schema. The
+per-event `payload_hash` (verified in memory at admission, M4-6) remains the
+single integrity mechanism. Wire/CPU hygiene only — no storage or latency
+consequence.
+
 Note: the p99 ≤ 75 ms per-window SLO is **not** met by any stored leg by
 construction (watermark close, Q27 — measured close→read ≈0.7–1.2 s); the
 per-tick strategy path remains the 75 ms-class leg.

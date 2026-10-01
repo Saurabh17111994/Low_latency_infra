@@ -165,7 +165,7 @@ func (b *Batcher) Add(slotID, connID string, epoch int64, ev *marketdata.TickEve
 	ev.PayloadHash = h[:]
 	// P1-002/003 fail-fast: Add carries raw onto the event itself (copied —
 	// the caller may reuse its buffer). Never rely on the caller to pre-fill
-	// RawPayload; flushLocked hashes this field for the batch hash.
+	// RawPayload; it is carried verbatim to Java as raw_payload.
 	ev.RawPayload = append([]byte(nil), raw...)
 
 	now := b.now()
@@ -258,13 +258,6 @@ func (b *Batcher) flushLocked(now time.Time) error {
 	if b.cur.BatchSeq == 0 {
 		b.cur.BatchSeq = b.nextBatchSeq(b.cur.ConnectionId)
 	}
-	// batch_payload_hash: sha256 over concatenated raw payloads (Q5, batch-level)
-	h := sha256.New()
-	for _, e := range b.cur.Events {
-		h.Write(e.RawPayload)
-	}
-	b.cur.BatchPayloadHash = h.Sum(nil)
-
 	toFlush := b.cur
 	toBytes := b.curBytes
 	if err := b.flush(toFlush); err != nil {
