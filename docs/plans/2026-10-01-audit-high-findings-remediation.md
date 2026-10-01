@@ -1,8 +1,8 @@
 # Audit findings remediation — 2026-10-01 full-project audit
 
-**Created:** 2026-10-01 · **Status:** all batches landed (CHG-495…500). The single final 19-step
-gate runs after this tracker; H1 (push/tag) and two destructive hygiene actions await the
-operator.
+**Created:** 2026-10-01 · **Status:** all batches landed (CHG-495…500) and certified — final
+19-step gate **PASS 19/19** (`logs/soak/monday-gates-20261001-190238`, tree `7057e4b2`).
+H1 (push/tag) and the gitbutler-branch decision await the operator.
 
 **Source:** full-project audit 2026-10-01 (four domain auditors + a repo-hygiene pass); operator
 approved fixing all HIGH + medium/low findings, with one gate at the end.
@@ -56,8 +56,9 @@ keys removed; cwd-relative evidence defaults fixed (clean-break/disaster/stage-c
 
 1. **H1 push/tag** — nothing is pushed; `origin` and `local-backup` are both at `cffb148e`
    (2026-09-24). This is the only unrecoverable-failure-risk item.
-2. **Stale `streaming_project_p6` worktree** (3.8 GB, branch `p6-independent-waves`, 1 unmerged
-   commit "preserve uncommitted instrument-import work") — removal needs explicit approval.
+2. **Resolved 2026-10-01:** the stale `streaming_project_p6` worktree was backed up (commit
+   `c6e01135` → `local-backup` `archive/p6-instrument-import-20260919` + 28K bundle + 19K logs
+   tarball) and then removed with branch `p6-independent-waves`; 3.8 GB freed.
 3. **Stale `gitbutler/*` branches** (2026-08-23/26) — deletion needs explicit approval.
 
 ## Verification
@@ -67,5 +68,7 @@ keys removed; cwd-relative evidence defaults fixed (clean-break/disaster/stage-c
   `test_change_control_check.py` (updated) — failing-first for every new guard.
 - `make docs-audit` all pass; `make static-check` 0 failures; `make test-09` 68 passed;
   `make test` green (batch 2).
-- **Final 19-step gate: run after this tracker update; result recorded in the evidence log
-  for this remediation.**
+- **Final 19-step gate: PASS 19/19** — `logs/soak/monday-gates-20261001-190238` (tree
+  `7057e4b2`), 2026-10-01; gate result recorded in
+  `logs/audit-remediation-20261001/checks.txt`. The earlier partial run
+  (`monday-gates-20261001-182817`) is marked `ABORTED.txt`.
