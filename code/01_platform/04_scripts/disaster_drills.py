@@ -41,7 +41,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
 COMPOSE_FILE = "code/01_platform/01_docker/docker-compose.yml"
 STACK_DIR = os.path.join(REPO_ROOT, "code", "01_platform", "01_docker")
 DEFAULT_PROJECT = "01_docker"
-EVIDENCE_DIR = "logs/disaster-drills"
+EVIDENCE_DIR = os.path.join(REPO_ROOT, "logs", "disaster-drills")
 O2_URL = "http://localhost:5080/api/default/dashboards"
 
 

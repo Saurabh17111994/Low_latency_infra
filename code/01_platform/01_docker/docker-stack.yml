@@ -770,17 +770,15 @@ services:
         state.backend.rocksdb.localdir: /tmp/flink-rocksdb
         fs.s3a.server-side-encryption-algorithm: AES256
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
-      # Prod wiring for Position_State handshake (Option B, Position_State DDL 29):
+      # Prod wiring for the Fluss signal job:
       # Swarm must be explicit — compose resolves fluss-coordinator via DNS,
       # SignalJobConfig accepts either FLUSS_BOOTSTRAP_SERVERS or the alias
-      # FLUSS_BOOTSTRAP (explicit SERVERS wins). POSITION_STATE_TABLE pins the
-      # DDL 29 table so DDL drift is caught at `docker stack config` time.
+      # FLUSS_BOOTSTRAP (explicit SERVERS wins).
       # CHG-252: literal - the nested form rendered literal, and a plain
       # ${FLUSS_BOOTSTRAP} reads the deploy env, NOT the sibling key two lines
       # up (interpolation is env-only). Keep in sync with FLUSS_BOOTSTRAP.
       FLUSS_BOOTSTRAP_SERVERS: fluss-coordinator:9123
       FLUSS_DATABASE: ${FLUSS_DATABASE:-default}
-      POSITION_STATE_TABLE: ${POSITION_STATE_TABLE:-Position_State}
     volumes:
       - flink-checkpoints:/checkpoints
       - flink-logs:/opt/flink/log
@@ -875,11 +873,10 @@ services:
         state.backend.rocksdb.localdir: /tmp/flink-rocksdb
         fs.s3a.server-side-encryption-algorithm: AES256
       FLUSS_BOOTSTRAP: fluss-coordinator:9123
-      # Prod wiring for Position_State handshake (Option B, DDL 29) — mirrors JM.
-      # CHG-252: literal, keep in sync with FLUSS_BOOTSTRAP (see JM).
+      # Prod Fluss wiring — mirrors JM. CHG-252: literal, keep in sync with
+      # FLUSS_BOOTSTRAP (see JM).
       FLUSS_BOOTSTRAP_SERVERS: fluss-coordinator:9123
       FLUSS_DATABASE: ${FLUSS_DATABASE:-default}
-      POSITION_STATE_TABLE: ${POSITION_STATE_TABLE:-Position_State}
     volumes:
       - flink-checkpoints:/checkpoints
       - flink-logs:/opt/flink/log

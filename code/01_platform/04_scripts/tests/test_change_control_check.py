@@ -19,6 +19,7 @@ GOOD_RECORD = """\
 The signal-job serializer changes.
 
 ```text
+change_record_id: CHG-001
 affected_artifacts: schema_manifest.json, 04-signal-job.md
 compatibility_class: COMPATIBLE_WITH_LIMITATION
 savepoint_impact: migration — new serializer, old savepoints unreadable
@@ -38,11 +39,12 @@ def record_without(field):
 
 
 class ParseTests(unittest.TestCase):
-    def test_parses_all_six_fields(self):
+    def test_parses_all_fields(self):
         fields = ccc.parse_record(GOOD_RECORD)
         self.assertEqual(
             set(fields),
             {
+                "change_record_id",
                 "affected_artifacts",
                 "compatibility_class",
                 "savepoint_impact",

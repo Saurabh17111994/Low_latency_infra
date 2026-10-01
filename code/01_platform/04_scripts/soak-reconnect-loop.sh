@@ -30,7 +30,11 @@
 # performs. Non-destructive: never touches Fluss data, never places orders.
 #
 # Seams (env, for tests and non-default layouts):
-#   LOG_FILE, OUT_DIR, JAVA_MATCH, BRIDGE_MATCH, INGESTION_SRC, PROC_ROOT
+#   LOG_FILE     journal path (default: newest ingestion-*.json under
+#                ${SOAK_JOURNAL_DIR:-/tmp/soak-journal}, then
+#                $PROJECT_ROOT/logs/ingestion; an explicit path always wins,
+#                and in CONTAINER mode it must be the IN-CONTAINER path)
+#   OUT_DIR, JAVA_MATCH, BRIDGE_MATCH, INGESTION_SRC, PROC_ROOT
 #   CONTAINER    ingestion container name; when set, discovery/SIGKILL/grep run
 #                inside its PID namespace via `docker exec` (R-222)
 #   CYCLES/SETTLE_SEC  also positional: ./soak-reconnect-loop.sh [cycles] [settle_seconds]
@@ -52,7 +56,31 @@ set -euo pipefail
 # ── Config (override via env; defaults derived from the script location) ─────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
-LOG_FILE="${LOG_FILE:-$PROJECT_ROOT/code/logs/ingestion.json}"
+# The writer emits ${LOG_DIR}/ingestion-<HOST>-<VM_ID>.json (log4j2.xml), and
+# the soak overlay mounts that dir at ${SOAK_JOURNAL_DIR:-/tmp/soak-journal};
+# the host launcher writes under $PROJECT_ROOT/logs/ingestion. Resolve the
+# newest journal there; an explicit LOG_FILE always wins. Resolution never
+# fails: with no journal present it returns the deterministic expected path
+# and main()'s existing "journal not found" fatal is unchanged.
+SOAK_JOURNAL_DIR="${SOAK_JOURNAL_DIR:-/tmp/soak-journal}"
+resolve_journal() {
+	local dir newest f
+	for dir in "$SOAK_JOURNAL_DIR" "$PROJECT_ROOT/logs/ingestion"; do
+		newest=""
+		for f in "$dir"/ingestion-*.json; do
+			[ -f "$f" ] || continue
+			if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+				newest="$f"
+			fi
+		done
+		if [ -n "$newest" ]; then
+			printf '%s\n' "$newest"
+			return 0
+		fi
+	done
+	printf '%s\n' "$PROJECT_ROOT/logs/ingestion/ingestion-${HOSTNAME:-unknown}-${VM_ID:-vm0}.json"
+}
+LOG_FILE="${LOG_FILE:-$(resolve_journal)}"
 OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/logs/soak}"
 JAVA_MATCH="${JAVA_MATCH:-com.trading.ingestion.IngestionService}"
 BRIDGE_MATCH="${BRIDGE_MATCH:-arrow-bridge}"

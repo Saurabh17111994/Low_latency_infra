@@ -37,6 +37,11 @@ import json
 import os
 import sys
 
+# Evidence defaults are repo-anchored: a cwd-relative default dropped artifacts
+# into whatever tree the caller stood in (running from code/ wrote code/logs/).
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))))
+
 
 def load_plan(path):
     try:
@@ -70,7 +75,7 @@ def main(argv=None):
                         help="acknowledge the destructive reset (drop + replay) — REQUIRED")
     parser.add_argument("--dry-run", action="store_true",
                         help="validate + print the plan only; touch nothing")
-    parser.add_argument("--out", default=os.path.join(os.getcwd(), "logs", "clean-break"))
+    parser.add_argument("--out", default=os.path.join(REPO_ROOT, "logs", "clean-break"))
     args = parser.parse_args(argv)
 
     plan = load_plan(args.plan_file)

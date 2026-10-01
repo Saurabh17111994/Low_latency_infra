@@ -28,11 +28,13 @@
 #   0 pass · 1 FATAL (unusable arguments/journal) · 3 AT CAPACITY · 4 no ack rows.
 #
 # Usage:  ./soak-headroom.sh [log_file]
-#   e.g.   ./soak-headroom.sh                 # default code/logs/ingestion.json
+#   e.g.   ./soak-headroom.sh                 # newest journal (see LOG_FILE below)
 #          ./soak-headroom.sh logs/ingestion-2026-08-03.log
 #
 # Seams (env, for tests and non-default layouts):
-#   LOG_FILE     journal path        (default code/logs/ingestion.json)
+#   LOG_FILE     journal path        (default: newest ingestion-*.json under
+#                ${SOAK_JOURNAL_DIR:-/tmp/soak-journal}, then
+#                $PROJECT_ROOT/logs/ingestion; CLI arg or env wins)
 #   OUT_DIR      evidence directory  (default logs/soak)
 #   CAP_TOKENS   per-connection cap  (default 1024, must be a positive integer)
 #   SLOT         optional slot filter, e.g. SLOT=hft-1
@@ -42,9 +44,33 @@ set -euo pipefail
 # ── Config (override via env; defaults derived from the script location) ─────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
+# The writer emits ${LOG_DIR}/ingestion-<HOST>-<VM_ID>.json (log4j2.xml), and
+# the soak overlay mounts that dir at ${SOAK_JOURNAL_DIR:-/tmp/soak-journal};
+# the host launcher writes under $PROJECT_ROOT/logs/ingestion. Resolve the
+# newest journal there. Resolution never fails: with no journal present it
+# returns the deterministic expected path and main()'s existing "no journal"
+# fatal is unchanged.
+SOAK_JOURNAL_DIR="${SOAK_JOURNAL_DIR:-/tmp/soak-journal}"
+resolve_journal() {
+	local dir newest f
+	for dir in "$SOAK_JOURNAL_DIR" "$PROJECT_ROOT/logs/ingestion"; do
+		newest=""
+		for f in "$dir"/ingestion-*.json; do
+			[ -f "$f" ] || continue
+			if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+				newest="$f"
+			fi
+		done
+		if [ -n "$newest" ]; then
+			printf '%s\n' "$newest"
+			return 0
+		fi
+	done
+	printf '%s\n' "$PROJECT_ROOT/logs/ingestion/ingestion-${HOSTNAME:-unknown}-${VM_ID:-vm0}.json"
+}
 # Precedence: CLI argument, then the LOG_FILE env seam (the header documents it,
-# and the wave-28 monitor honours it the same way), then the repo default.
-LOG_FILE="${1:-${LOG_FILE:-$PROJECT_ROOT/code/logs/ingestion.json}}"
+# and the wave-28 monitor honours it the same way), then the resolved default.
+LOG_FILE="${1:-${LOG_FILE:-$(resolve_journal)}}"
 OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/logs/soak}"
 SLOT="${SLOT:-}"
 

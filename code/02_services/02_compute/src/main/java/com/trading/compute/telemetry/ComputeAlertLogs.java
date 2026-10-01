@@ -71,7 +71,8 @@ public final class ComputeAlertLogs {
      * (tracker 14 P8.0 box 828). Best-effort: a collector outage must never
      * fail the job, so any failure is logged and swallowed.
      *
-     * @param collectorHostPort host:port of the collector (OTLP HTTP 4318)
+     * @param collectorHostPort host:port of the collector (OTLP HTTP 4318),
+     *     optionally scheme-qualified ({@code http://} or {@code https://})
      * @param severity INFO/WARN/ERROR (maps to OTLP severity text + number)
      * @param event stable event name, e.g. {@code startup-mode}
      * @param detail human-readable one-line detail (no credentials)
@@ -84,15 +85,20 @@ public final class ComputeAlertLogs {
             String json = buildLogsJson(severity, event, detail);
             // P2-191: fail closed on injection-shaped input — an unvalidated
             // host:port can smuggle a path/authority override (?/#/@//) into
-            // the URL and forces cleartext HTTP.
+            // the URL. An optional http(s):// scheme is allowed so a
+            // TLS-terminated production collector can be configured.
             if (collectorHostPort == null
-                    || !collectorHostPort.matches("[A-Za-z0-9._-]+(:\\d+)?")) {
+                    || !collectorHostPort.matches("(https?://)?[A-Za-z0-9._-]+(:\\d+)?")) {
                 LOG.warn("compute-otlp: invalid collectorHostPort '{}', event={} skipped",
                         collectorHostPort, event);
                 return;
             }
-            // TODO: support https:// collector endpoint for production (P2-191).
-            URL url = URI.create("http://" + collectorHostPort + "/v1/logs").toURL();
+            // P2-191: no scheme stays cleartext HTTP (backwards compatible);
+            // https:// selects TLS.
+            String base = collectorHostPort.contains("://")
+                    ? collectorHostPort
+                    : "http://" + collectorHostPort;
+            URL url = URI.create(base + "/v1/logs").toURL();
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("POST");
             conn.setRequestProperty("Content-Type", "application/json");

@@ -72,6 +72,10 @@ logs/ingestion.log
 **/execution-arrow-bridge
 **/faketool/faketool
 
+# 2026-10-01 (audit): the capture-marketdata tool writes this runtime capture
+# into go-bridge/ (its default output) — never commit captured market data.
+code/02_services/01_ingestion/go-bridge/marketdata-capture.jsonl
+
 # Eclipse/IDE metadata generated on this host.
 # P5-024: dotfile names only — *.project matched any foo.project file.
 .project

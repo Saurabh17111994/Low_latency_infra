@@ -58,7 +58,14 @@ public final class JobGraphDump {
     private JobGraphDump() {}
 
     public static void main(String[] args) throws Exception {
-        Path outDir = args.length > 0 ? Path.of(args[0]) : Path.of("logs/candle-kv-replay-001/jobgraph");
+        // The default is cwd-relative: run the tool from the repo root (or set
+        // JOBGRAPH_OUT_DIR) so evidence lands in the tree the runbook names.
+        String outDirEnv = System.getenv("JOBGRAPH_OUT_DIR");
+        Path outDir = args.length > 0
+                ? Path.of(args[0])
+                : Path.of(outDirEnv == null || outDirEnv.isBlank()
+                        ? "logs/candle-kv-replay-001/jobgraph"
+                        : outDirEnv);
         Files.createDirectories(outDir);
 
         SignalJobConfig config = SignalJobConfig.fromEnv();

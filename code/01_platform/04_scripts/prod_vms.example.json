@@ -3,7 +3,7 @@
   "access": {
     "ssh_user": "ubuntu",
     "ssh_port": 22,
-    "ssh_key": "/home/saurabh/.ssh/id_ed25519",
+    "ssh_key": "/home/<user>/.ssh/id_ed25519",
     "connect_timeout_s": 8
   },
   "disk_min_gb": 250,

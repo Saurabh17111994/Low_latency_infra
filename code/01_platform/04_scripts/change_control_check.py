@@ -56,6 +56,7 @@ DEFAULT_RECORDS_DIR = os.path.join(ROOT, "docs", "05_deployment", "change-record
 
 # The six required fields from 01-foundation.md "Change control" (orig L205).
 REQUIRED_FIELDS = [
+    "change_record_id",
     "affected_artifacts",
     "compatibility_class",
     "savepoint_impact",

@@ -78,6 +78,11 @@ export ARROW_FEED="${ARROW_FEED:-token}"
 export FLUSS_BOOTSTRAP="${FLUSS_BOOTSTRAP:-localhost:9123}"
 export FLUSS_BOOTSTRAP_SERVERS="${FLUSS_BOOTSTRAP_SERVERS:-localhost:9123}"
 export RAW_TABLE_NAME="${RAW_TABLE_NAME:-raw_table_1}"
+# 2026-10-01 (audit): log4j2's JSON journal is written to
+# ${LOG_DIR}/ingestion-<HOST>-<VM_ID>.json; the JVM default (/data/ingestion/logs)
+# does not exist on the dev host, so the JSON journal was silently lost.
+# Default to the repo logs tree.
+export LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs/ingestion}"
 export ARROW_BRIDGE_BIN="$CODE_DIR/02_services/01_ingestion/go-bridge/arrow-bridge"
 # Default NTP list: servers reachable from this network (pool.ntp.org is
 # unreachable on this host). Tried in order until one answers.

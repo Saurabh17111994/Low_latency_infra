@@ -28,7 +28,9 @@
 # recording bridge_fds=0 forever is not observation (P6-197).
 #
 # Seams (env, for tests and non-default layouts):
-#   LOG_FILE     journal path            (default code/logs/ingestion.json)
+#   LOG_FILE     journal path            (default: newest ingestion-*.json under
+#                ${SOAK_JOURNAL_DIR:-/tmp/soak-journal}, then
+#                $PROJECT_ROOT/logs/ingestion; an explicit path always wins)
 #   OUT_DIR      evidence directory      (default logs/soak)
 #   JAVA_MATCH   Java process pattern    (default com.trading.ingestion.IngestionService)
 #   BRIDGE_MATCH bridge process pattern  (default arrow-bridge)
@@ -46,7 +48,31 @@ set -euo pipefail
 # ── Config (override via env; defaults derived from the script location) ─────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
-LOG_FILE="${LOG_FILE:-$PROJECT_ROOT/code/logs/ingestion.json}"
+# The writer emits ${LOG_DIR}/ingestion-<HOST>-<VM_ID>.json (log4j2.xml), and
+# the soak overlay mounts that dir at ${SOAK_JOURNAL_DIR:-/tmp/soak-journal};
+# the host launcher writes under $PROJECT_ROOT/logs/ingestion. Resolve the
+# newest journal there; an explicit LOG_FILE always wins. Resolution never
+# fails: with no journal present it returns the deterministic expected path
+# and main()'s existing "journal not found" fatal is unchanged.
+SOAK_JOURNAL_DIR="${SOAK_JOURNAL_DIR:-/tmp/soak-journal}"
+resolve_journal() {
+	local dir newest f
+	for dir in "$SOAK_JOURNAL_DIR" "$PROJECT_ROOT/logs/ingestion"; do
+		newest=""
+		for f in "$dir"/ingestion-*.json; do
+			[ -f "$f" ] || continue
+			if [ -z "$newest" ] || [ "$f" -nt "$newest" ]; then
+				newest="$f"
+			fi
+		done
+		if [ -n "$newest" ]; then
+			printf '%s\n' "$newest"
+			return 0
+		fi
+	done
+	printf '%s\n' "$PROJECT_ROOT/logs/ingestion/ingestion-${HOSTNAME:-unknown}-${VM_ID:-vm0}.json"
+}
+LOG_FILE="${LOG_FILE:-$(resolve_journal)}"
 OUT_DIR="${OUT_DIR:-$PROJECT_ROOT/logs/soak}"
 JAVA_MATCH="${JAVA_MATCH:-com.trading.ingestion.IngestionService}"
 BRIDGE_MATCH="${BRIDGE_MATCH:-arrow-bridge}"

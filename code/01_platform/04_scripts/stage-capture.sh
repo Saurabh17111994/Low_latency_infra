@@ -31,6 +31,9 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Evidence is repo-anchored: a cwd-relative default dropped captures into
+# whatever tree the caller stood in (running from code/ wrote code/logs/).
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 
 FLINK_REST_URL="${FLINK_REST_URL:-http://localhost:8081}"
 TM_PROM_URL="${TM_PROM_URL:-http://localhost:9250}"
@@ -41,7 +44,7 @@ CAPTURE_INTERVAL_S="${CAPTURE_INTERVAL_S:-5}"
 # `[ -ge ]` / `$(( ))` / `sleep` errors are replaced by one clear line.
 case "$DURATION_S" in ''|*[!0-9]*|0) echo "!! FAIL: DURATION_S must be a positive integer (got '$DURATION_S')" >&2; exit 1;; esac
 case "$CAPTURE_INTERVAL_S" in ''|*[!0-9]*|0) echo "!! FAIL: CAPTURE_INTERVAL_S must be a positive integer (got '$CAPTURE_INTERVAL_S')" >&2; exit 1;; esac
-OUT_DIR="${OUT_DIR:-logs/tracker-14/stage-capture-$(date +%Y%m%d-%H%M%S)}"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/logs/tracker-14/stage-capture-$(date +%Y%m%d-%H%M%S)}"
 
 # B2 hooks (2026-09-02): optional, env-gated. When set, each tick also samples
 # the ingestion JVM's OTLP metrics payloads (java.out) into ingestion.tsv and
