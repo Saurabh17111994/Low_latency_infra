@@ -85,6 +85,8 @@ count_tokens() { # count_tokens <csv>
 # /proc/<pid>/environ. Same git-ignored file the compose commands and
 # run-ingestion-full.sh use, with the R-212/P6-682 hardening: refuse symlinks,
 # accept owner-only modes (GNU or BSD stat), fail fast on a missing key.
+# CHG-511: the three Arrow keys are also EXPORTED — the JVM inherits the
+# process environment, and the current IngestionConfig requires them.
 SECRETS_FILE="${SECRETS_FILE:-$ROOT/code/01_platform/01_docker/secrets.env}"
 resolve_arrow_credentials() {
   [ -f "$SECRETS_FILE" ] || fail "secrets file missing: $SECRETS_FILE (create it from the template, chmod 600)"
@@ -101,6 +103,11 @@ resolve_arrow_credentials() {
   : "${ARROW_APP_SECRET:?ARROW_APP_SECRET must be set in $SECRETS_FILE}"
   : "${ARROW_PASSWORD:?ARROW_PASSWORD must be set in $SECRETS_FILE}"
   : "${ARROW_TOTP_KEY:?ARROW_TOTP_KEY must be set in $SECRETS_FILE}"
+  # CHG-511: `source` keeps the values shell-local; the JVM child inherits the
+  # process environment, so without the export the rebuilt jar failed its
+  # required-key validation and the feed never started. Export only the three
+  # Arrow auth keys — the file's other secrets stay shell-local.
+  export ARROW_APP_SECRET ARROW_PASSWORD ARROW_TOTP_KEY
   echo "secrets: loaded from $SECRETS_FILE (mode $mode; values not printed)"
 }
 
@@ -291,6 +298,7 @@ RAW_TABLE_NAME="raw_table_1" ARROW_HFT_CONNECTIONS="1" \
 ARROW_MAX_EVENT_AGE_MS="5000" ARROW_MAX_FUTURE_EVENT_SKEW_MS="2000" \
 ARROW_HFT_LATENCY_MS="50" CLOCK_CHECK_REQUIRED="false" OTEL_COLLECTOR_HOST="localhost:4318" \
 FLUSS_WRITER_MODE="generic" FLUSS_WRITERS="1" FLUSS_WRITER_BATCH_SIZE_BYTES="0" \
+DEPLOYMENT_ENV="dev" \
 java --add-opens=java.base/java.nio=ALL-UNNAMED \
   -Xms512m -Xmx512m -XX:MaxDirectMemorySize=512m \
   -Dlog.dir="$OUT/j1" \
