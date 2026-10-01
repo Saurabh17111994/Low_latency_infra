@@ -74,7 +74,7 @@ Counts this gate: `cargo --offline` 148 Rust lib PASS, `go test -race` 18.7 s in
 
 ## 7. EOD manifest / offload / retention
 
-Live evidence `logs/schema-compat/` audit chain + `docs_audit` C15 evidence-ownership PASS. Retention approval `SAURABH-1Y-APPROVAL-2026-08-20` (CHG-055, T0 bundle) — approved 2026-08-20 by Saurabh (DEC-044). Real offload/retention drills on prod stack are D-era.
+Live evidence `logs/schema-compat/` audit chain + `docs_audit` C15 evidence-ownership PASS. Retention approval `SAURABH-1Y-APPROVAL-2026-08-20` (CHG-055, T0 bundle) (CHG-055 record absent — see its tombstone; claim unverified) — approved 2026-08-20 by Saurabh (DEC-044). Real offload/retention drills on prod stack are D-era.
 
 ---
 
@@ -104,7 +104,7 @@ Live evidence `logs/schema-compat/` audit chain + `docs_audit` C15 evidence-owne
 
 - O2 outage → durable local audit proven (`OPS-FAIL-001` — `RETAIN_ON_CANCELLATION` + `BABYSITTER_STATE_RECOVERY_PATH`).
 - Alert thresholds data-derived — **BLOCKED: needs D4/D5 measurements**; seed dashboards `seed_dashboards.py` exists but live dashboards await D7.
-- Runbooks `docs/06_operations/01-runbooks.md` § Execution service runbooks (CHG-055).
+- Runbooks `docs/06_operations/01-runbooks.md` § Execution service runbooks (CHG-055; CHG-055 record absent — see its tombstone; claim unverified).
 
 ---
 
@@ -171,7 +171,7 @@ Every row in `docs/02_requirements/09-acceptance-matrix.md` (152 rows) maps to t
 | `AC-AC-*` | `001–017` | `05-execution-core.md` | Projection writers + ledger + quarantine live-verified; differential parity PASS; crash/ledger replay harness green; live fill A3 → PARTIAL | `CHG-052/053` |
 | `AC-BB-*` | `001–009` | `05-execution-core.md` | Observe-only graph + restore `RETAIN_ON_CANCELLATION` proven; live storm 0-action deferred | `CHG-072` / `b5-*` |
 | `AC-EXE-*` | `001–016` | `05-execution-core.md` | Gate/attempt/audit/fencing/reconciliation + crash fence prove exists; live order A2 deferred | `CHG-062..071` / `b1-*..b8-*` |
-| `AC-OBS-*` | `001–010` | `10-observability.md` | O2 local audit proven, dashboards/thresholds await D5/D7 | `CHG-055` + D7 deferred |
+| `AC-OBS-*` | `001–010` | `10-observability.md` | O2 local audit proven, dashboards/thresholds await D5/D7 | `CHG-055` (CHG-055 record absent — see its tombstone; claim unverified) + D7 deferred |
 | `AC-PF-*` | `001–019` | `08/09` | Compose isolation 12/12 + network check PASS; Swarm quorum/replication/1-VM loss/perf on prod VMs deferred | `t8 12/12`, `execution_network_check`  |
 | `AC-NFR-*` | `001–012` | cross-cutting | Security/perf halo: pin-check + secret scrub + 50k synthetic PASS; prod perf/legal-hold D-era | `E2 12/12 gate`, `C4` |
 
