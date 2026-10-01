@@ -400,6 +400,17 @@ host's in-memory view. Smoke evidence
 +8,658 rows/min vs +301,888/min in the CHG-484 smoke (~35x); zero unsealed rows
 observed; live-path metrics unchanged.
 
+**Finding (c) — the raw-table compression pin is a no-op (CHG-487, 2026-10-01).**
+The 2026-10-01 probe predicted `table.log.arrow.compression.type=zstd` would cut
+raw storage ~542 → ~192 B/row; the recreate applied it and the smoke measured
+**+146.90 MB/min vs the +148.42 MB/min baseline (~508 vs ~542 B/row)** — no
+change, because Fluss already defaults to ARROW + ZSTD level 3 (0.9.1 and 1.0.0)
+and the live per-bucket batches (~100 rows/s/bucket at a 1 ms linger) are ~1 row,
+so compression has nothing to work with. The recreate still fixed the
+`RawTableSchema` retention drift (9d/9 → 3d/3, guarded by tests). Raw bytes/row
+are therefore **structural** at the current writer cadence/linger; the explicit
+pin stays for determinism.
+
 Note: the p99 ≤ 75 ms per-window SLO is **not** met by any stored leg by
 construction (watermark close, Q27 — measured close→read ≈0.7–1.2 s); the
 per-tick strategy path remains the 75 ms-class leg.

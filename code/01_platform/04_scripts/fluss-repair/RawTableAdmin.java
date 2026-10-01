@@ -139,6 +139,8 @@ public class RawTableAdmin {
                 .partitionedBy(RawTableSchema.PARTITION_KEY)
                 .distributedBy(RawTableSchema.BUCKET_COUNT, RawTableSchema.BUCKET_KEY)
                 .property("table.log.ttl", RawTableSchema.LOG_TTL)
+                .property("table.log.arrow.compression.type",
+                        RawTableSchema.LOG_ARROW_COMPRESSION_TYPE)
                 .property("table.auto-partition.enabled", "true")
                 .property("table.auto-partition.time-unit", "DAY")
                 .property("table.auto-partition.num-precreate", "2")

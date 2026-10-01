@@ -14,6 +14,18 @@
 -- Scope: none (global market data, not per-account — P4-013: raw ticks carry
 -- no account_scope_id column; no per-account projection is possible)
 -- Schema version: 4
+-- v5 (2026-10-01, storage options only — row contract unchanged, Schema version
+--   stays 4): pin table.log.arrow.compression.type=zstd explicitly. Fluss 1.0.0
+--   supports arrow (default) | indexed | compacted and arrow compression
+--   none | lz4_frame | zstd; the option is CREATE-ONLY (not in the 1.0
+--   alterable allowlist), so applying it is drop + create. It is a determinism
+--   pin, NOT a storage reduction: both 0.9.1 and 1.0.0 default to ARROW + ZSTD
+--   level 3 (ConfigOptions source), so the pre-v5 table was already zstd.
+--   Measured on the live path (CHG-487 smoke 2026-10-01): +146.90 MB/min vs
+--   +148.42 before (unchanged; ~508 vs ~542 B/row physical). The scratch-batch
+--   probe's ~192 B/row was an artifact of its high replay rate: at live
+--   per-bucket arrival (~100 rows/s per bucket, 16 buckets, 1 ms linger) each
+--   stored batch is ~1 row, so compression has almost nothing to work with.
 -- v4 (2026-09-24, full-mode field capture): the bridge already carried every
 -- full-mode field and this table stored only 4 of them. The 51 columns at
 -- indexes 21-71 now capture all of them, so ONE schema serves BOTH feeds (the
@@ -157,6 +169,9 @@ CREATE TABLE raw_table_1 (
     'bucket.num' = '16',
     'bucket.key' = 'instrument_token',
     'table.log.ttl' = '3d', -- 2026-09-30 (A2): 3d live window; the EOD guard extends unverified days (1d runway)
+    -- CHG-487 (2026-10-01): create-only; the recreate is what applies it. Keep in
+    -- sync with RawTableSchema.LOG_ARROW_COMPRESSION_TYPE (bootstrap + repair tools).
+    'table.log.arrow.compression.type' = 'zstd',
     -- daily partitions: IST day boundary; retains last 3 closed IST days + 2
     -- precreated extra (P4-015: live + precreated = up to 5 physical; the EOD
     -- job plans against the unverified day's bound so the ±1-day IST-midnight

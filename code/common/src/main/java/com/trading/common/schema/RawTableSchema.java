@@ -9,8 +9,16 @@ import java.util.List;
  * <p>One table carries every accepted market tick as an immutable LOG row:
  * <ul>
  *   <li>{@link #TABLE} — LOG (no primary key), bucket key
- *       {@code instrument_token}, 16 buckets, 7-day TTL, Iceberg offload.</li>
+ *       {@code instrument_token}, 16 buckets, 3-day TTL (A2, 2026-09-30),
+ *       Iceberg offload (opt-in).</li>
  * </ul>
+ *
+ * <p>Storage options are pinned here because the bootstrap/repair tools recreate
+ * the table from this class: {@code table.log.arrow.compression.type=zstd}
+ * (CHG-487). Fluss already defaults to ARROW + ZSTD level 3 on 0.9.1 and 1.0.0,
+ * so the pin is for determinism, not a storage win (measured no change:
+ * +146.90 vs +148.42 MB/min). It is create-only, which is why applying it took
+ * a recreate.
  *
  * <p>This class is the <b>single source of truth</b> for the 72-column
  * raw-table layout (configuration-driven plan SC1, 2026-08-29). The DDL
@@ -35,11 +43,20 @@ public final class RawTableSchema {
     /** Table kind — LOG (no primary key). */
     public static final String TABLE_KIND = "LOG";
 
-    /** Live log retention (DDL {@code table.log.ttl}). */
-    public static final String LOG_TTL = "9d";
+    /** Live log retention (DDL {@code table.log.ttl}; 3d since Wave A/A2, 2026-09-30). */
+    public static final String LOG_TTL = "3d";
 
     /** Live partition retention (DDL {@code table.auto-partition.num-retention}). */
-    public static final String PARTITION_RETENTION = "9";
+    public static final String PARTITION_RETENTION = "3";
+
+    /**
+     * Arrow log compression (DDL {@code table.log.arrow.compression.type},
+     * CHG-487, 2026-10-01). Explicit for determinism — Fluss already defaults to
+     * ARROW + ZSTD level 3 on 0.9.1 and 1.0.0, so a descriptor missing it is not
+     * a storage regression (measured no change, CHG-487). Create-only: a
+     * recreate is the only way to apply it.
+     */
+    public static final String LOG_ARROW_COMPRESSION_TYPE = "zstd";
 
     /** The table routes by instrument_token (16 buckets). */
     public static final String BUCKET_KEY = "instrument_token";

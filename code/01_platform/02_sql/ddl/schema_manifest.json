@@ -4,7 +4,7 @@
     {
       "table_name": "raw_table_1",
       "ddl_path": "02_raw_table_1.sql",
-      "ddl_sha256": "e7318ade3f16ca4dfe6eae7664ff6abd52134289732b718d99cdb8e7ef2b2619",
+      "ddl_sha256": "20909693dacbbad0be42aaff563cee31980eddca0d3ea56dd85d93ad7ec086ce",
       "table_kind": "LOG",
       "bucket_key": "instrument_token",
       "primary_key": null,
@@ -340,7 +340,7 @@
     {
       "table_name": "candle_features",
       "ddl_path": "35_candle_features.sql",
-      "ddl_sha256": "f41e9ccfd1198eb35272cdfc1be713f111f72fac8cef2839a1828b73dba461e4",
+      "ddl_sha256": "9367b1ca79fb29c242194acd99acad624e0291ca56d730abc35410c5582e4b3e",
       "table_kind": "KV",
       "primary_key": "instrument_token, tf, window_start",
       "bucket_key": null,

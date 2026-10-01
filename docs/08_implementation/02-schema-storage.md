@@ -328,6 +328,20 @@ upstream is complete.
 > `TypedFlussRowConverter.TickRow`, which are each verified against the schema at
 > class load. See `08_implementation/03-ingestion.md` for the per-feed NULL matrix
 > and the `volume_delta` / `tick_type` semantics.
+>
+> **raw_table_1 v5 (2026-10-01, CHG-487 — options only, row contract v4):**
+> `table.log.arrow.compression.type=zstd` is pinned explicitly and the table was
+> recreated (the option is create-only; dev synthetic data dropped and refilled).
+> **No storage gain:** Fluss defaults to ARROW + ZSTD level 3 on 0.9.1 and 1.0.0,
+> so the legacy table was already zstd — smoke `logs/chg487-smoke-20261001-120429`
+> measured +146.90 MB/min vs +148.42 before (~508 vs ~542 B/row). The recreate
+> did fix a real drift: `RawTableSchema.LOG_TTL`/`PARTITION_RETENTION` still said
+> 9d/9 while this DDL has said 3d/3 since A2 (2026-09-30), so a
+> bootstrap/repair-created table would have kept data 9 days; both constants are
+> now 3d/3 and guarded by `RawTableDdlContractTest.storageOptionsArePinned` +
+> `DdlBootstrapSchemaAgreementTest.rawTableStorageOptionsMatchTheDdl`. The
+> probe that predicted ~192 B/row was misled by its replay rate — see the
+> correction in `logs/soak/raw-compression-probe-linger1ms-20261001-114821/`.
 
 #### Phase D: Runtime enforcement (straddles Ingestion, Signal, Executor phases)
 

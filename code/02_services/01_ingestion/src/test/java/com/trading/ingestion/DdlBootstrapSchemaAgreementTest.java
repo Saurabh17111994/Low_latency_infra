@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.trading.common.schema.RawTableSchema;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -179,6 +180,23 @@ class DdlBootstrapSchemaAgreementTest {
         assertEquals(List.of("instrument_token"),
                 merged.getBucketKeys(),
                 "candle_features must be distributed by instrument_token (per-ticker colocation)");
+    }
+
+    @Test
+    @DisplayName("raw_table_1 bootstrap pins the DDL storage options (arrow+zstd, 3-day retention)")
+    void rawTableStorageOptionsMatchTheDdl() {
+        TableDescriptor raw = DdlBootstrap.tableRegistry().get("raw_table_1");
+        assertNotNull(raw, "registry missing raw_table_1");
+        Map<String, String> props = raw.getProperties();
+        assertEquals("zstd", props.get("table.log.arrow.compression.type"),
+                "bootstrap must pin arrow+zstd — DropRawTable ensure recreates the table "
+                        + "from this descriptor (CHG-487)");
+        assertEquals(RawTableSchema.LOG_TTL, props.get("table.log.ttl"),
+                "bootstrap table.log.ttl must equal RawTableSchema.LOG_TTL (3d)");
+        assertEquals(
+                RawTableSchema.PARTITION_RETENTION,
+                props.get("table.auto-partition.num-retention"),
+                "bootstrap num-retention must equal RawTableSchema.PARTITION_RETENTION (3)");
     }
 
     // ---- helpers ----

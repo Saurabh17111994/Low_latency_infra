@@ -30,6 +30,8 @@ class RawTableDdlContractTest {
 
     private static final Pattern CREATE_TABLE = Pattern.compile(
             "(?i)\\bCREATE\\s+TABLE\\s+([A-Za-z_][A-Za-z0-9_]*)");
+    private static final Pattern OPTION = Pattern.compile(
+            "'([^']+)'\\s*=\\s*'([^']*)'");
     private static final Pattern BUCKET_KEY = Pattern.compile(
             "'bucket\\.key'\\s*=\\s*'([^']*)'");
     private static final Pattern BUCKET_NUM = Pattern.compile(
@@ -70,6 +72,25 @@ class RawTableDdlContractTest {
                 "raw_table_1 must route by instrument_token");
         assertEquals("16", bucketNum(ddl), "raw_table_1 must use 16 buckets");
         assertNotNull(RawTableSchema.COLUMNS);
+    }
+
+    @Test
+    @DisplayName("raw_table_1 pins arrow+zstd and the shared 3-day retention constants (CHG-487)")
+    void storageOptionsArePinned() throws IOException {
+        String ddl = readDdl("02_raw_table_1.sql");
+        assertEquals("zstd", option(ddl, "table.log.arrow.compression.type"),
+                "raw_table_1 must pin table.log.arrow.compression.type=zstd "
+                        + "explicitly (CHG-487). The Fluss default already is zstd "
+                        + "level 3 — the pin is a determinism guard, not a storage "
+                        + "win (measured +146.90 vs +148.42 MB/min)");
+        assertEquals(RawTableSchema.LOG_TTL, option(ddl, "table.log.ttl"),
+                "DDL table.log.ttl must equal RawTableSchema.LOG_TTL — the bootstrap "
+                        + "recreates the table from that constant, so a drift would "
+                        + "silently recreate with the wrong retention");
+        assertEquals(
+                RawTableSchema.PARTITION_RETENTION,
+                option(ddl, "table.auto-partition.num-retention"),
+                "DDL num-retention must equal RawTableSchema.PARTITION_RETENTION");
     }
 
     @Test
@@ -118,5 +139,16 @@ class RawTableDdlContractTest {
     private static String bucketNum(String ddl) {
         Matcher m = BUCKET_NUM.matcher(ddl);
         return m.find() ? m.group(1) : null;
+    }
+
+    /** First value of {@code 'key' = 'value'} in the DDL (WITH block), or null. */
+    private static String option(String ddl, String key) {
+        Matcher m = OPTION.matcher(ddl);
+        while (m.find()) {
+            if (m.group(1).equals(key)) {
+                return m.group(2);
+            }
+        }
+        return null;
     }
 }
