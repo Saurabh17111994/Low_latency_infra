@@ -41,7 +41,41 @@ python3 code/01_platform/04_scripts/r2_archive_sync.py --tables candle_features 
   whose lake name already exists with a different schema (stale pre-wipe
   Iceberg table) refuses the ALTER: the tool reports it and exits 1 — recreate
   the table, or archive/move the stale objects aside first (`EnableTiering.java`
-  notes), never delete.
+  notes). Deletion is a last resort and only through the guarded
+  `r2-delete-prefix.sh` below (CHG-503).
+
+## Deleting objects (operator cleanup, CHG-503)
+
+The never-delete convention was relaxed on 2026-10-01 for explicit operator
+cleanup of stale/test objects. The sanctioned path is `r2-delete-prefix.sh` —
+dry-run by default, so the first invocation always previews:
+
+```bash
+# preview: lists every key + size, sends no mutating request
+bash code/01_platform/04_scripts/r2-delete-prefix.sh lake/_stale-20261001/raw_table_1/
+
+# delete: deletes, then re-lists each prefix and exits 1 if anything survived
+bash code/01_platform/04_scripts/r2-delete-prefix.sh --apply <prefix> [<prefix>...]
+```
+
+Guards: empty, duplicate and overlapping prefixes are refused before any
+request; a prefix that is or covers `lake/default/raw_table_1/metadata/` (the
+live Iceberg table) is refused unless `--allow-live` is passed; the final
+listing must be empty or the run fails. Deletion is irreversible — preview
+first, and keep the v3 rollback archive
+(`lake/_stale-20260831-v1/raw_table_1/`) unless the operator explicitly
+retires it.
+
+**2026-10-01 cleanup (CHG-503):** 550 objects / 1.18 GB removed — the moved
+old raw data (`lake/_stale-20261001/`, `lake/_stale-20260831/`), the orphaned
+v3 parquet under the live table
+(`lake/default/raw_table_1/data/event_day=20260831/`), the test probes
+(`lake/fluss/`, `lake/fluss-checkpoints/`, `lake-scratch-20260923T094956Z/`,
+`flink-checkpoints/`), two retired tables' metadata (`candle_closed`,
+`feature_candles_15s`) and the remote-log test artifacts (`remote-data/`).
+Kept: the v3 rollback archive, `candle_scale_log` (T5.7 read proof), and the
+live/current tables' metadata. Evidence:
+`logs/soak/r2-cleanup-20261001T174717Z/`.
 
 ## Bucket behaviour: versioning, retention, restore
 
