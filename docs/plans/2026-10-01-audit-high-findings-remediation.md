@@ -1,8 +1,9 @@
 # Audit findings remediation — 2026-10-01 full-project audit
 
-**Created:** 2026-10-01 · **Status:** all batches landed (CHG-495…500) and certified — final
-19-step gate **PASS 19/19** (`logs/soak/monday-gates-20261001-190238`, tree `7057e4b2`).
-H1 (push/tag) and the gitbutler-branch decision await the operator.
+**Created:** 2026-10-01 · **Status:** complete — all batches landed (CHG-495…500), certified by
+the final 19-step gate **PASS 19/19** (`logs/soak/monday-gates-20261001-190238`, tree
+`7057e4b2`), and published: `main` + tag `v2026.10.01` pushed to `origin` and `local-backup`
+(2026-10-01). Only the optional image republication is untouched.
 
 **Source:** full-project audit 2026-10-01 (four domain auditors + a repo-hygiene pass); operator
 approved fixing all HIGH + medium/low findings, with one gate at the end.
@@ -11,7 +12,7 @@ approved fixing all HIGH + medium/low findings, with one gate at the end.
 
 | # | Finding (short) | Batch | State |
 |---|---|---|---|
-| H1 | remotes stale; 312+ commits local-only; no tag since 2026-09-23 | 5 | **operator decision** |
+| H1 | remotes stale; 312+ commits local-only; no tag since 2026-09-23 | 5 | **landed 2026-10-01** — `main` `cffb148e..89b04ffa` + `v2026.10.01` on origin and local-backup |
 | H2 | contracts said forming-row upserts (superseded by CHG-486 closed-only) | 1 | landed CHG-495 |
 | H3 | 20+ dossier evidence paths missing from disk | 4 | reconciled CHG-498 (evidence unrecoverable; claims marked) |
 | H4 | two `logs/tracker-14/` files are 68-byte C14 placeholders cited as proof | 4 | reconciled CHG-498 |
@@ -52,14 +53,17 @@ keys removed; cwd-relative evidence defaults fixed (clean-break/disaster/stage-c
 - `code/logs/` stray dir — gitignored local artifact; soak tool defaults fixed instead.
 - CHG date inversions (CHG-231/244) — recorded history, left untouched.
 
-## Pending operator decisions
+## Operator decisions
 
-1. **H1 push/tag** — nothing is pushed; `origin` and `local-backup` are both at `cffb148e`
-   (2026-09-24). This is the only unrecoverable-failure-risk item.
-2. **Resolved 2026-10-01:** the stale `streaming_project_p6` worktree was backed up (commit
-   `c6e01135` → `local-backup` `archive/p6-instrument-import-20260919` + 28K bundle + 19K logs
-   tarball) and then removed with branch `p6-independent-waves`; 3.8 GB freed.
-3. **Stale `gitbutler/*` branches** (2026-08-23/26) — deletion needs explicit approval.
+1. **H1 push/tag — done 2026-10-01:** `main` (`cffb148e..89b04ffa`) and annotated tag
+   `v2026.10.01` pushed to `origin` and `local-backup`.
+2. **Stale `streaming_project_p6` worktree — done 2026-10-01:** commit `c6e01135` archived to
+   `local-backup` `archive/p6-instrument-import-20260919` + 28K bundle + 19K logs tarball, then
+   the worktree and branch `p6-independent-waves` were removed; 3.8 GB freed.
+3. **Stale `gitbutler/*` branches — done 2026-10-01:** `gitbutler/target`, `gitbutler/workspace`
+   deleted (local-only; nothing matching on origin).
+4. **Optional, not done:** republication of the 8 built images to GHCR (would change digests and
+   require a `runtime.lock` re-pin) — needs its own decision.
 
 ## Verification
 
