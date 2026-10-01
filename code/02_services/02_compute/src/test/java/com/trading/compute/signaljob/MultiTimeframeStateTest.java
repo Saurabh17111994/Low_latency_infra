@@ -226,10 +226,17 @@ class MultiTimeframeStateTest {
         state.lastBidSize = 5L;
         state.lastAskSize = 7L;
         state.lastQuoteEventTime = 123456789L;
+        state.lastDayHighPaise = 2222L;
+        state.lastVwapPaise = 3333L;
+        state.lastTotalBuyQty = 4444L;
+        state.lastTotalSellQty = 5555L;
+        state.lastOpenInterest = 6666L;
+        state.lastLowerLimitPaise = 7777L;
+        state.lastUpperLimitPaise = 8888L;
         state.lastFingerprint = "fp-xyz";
 
         // P2-152: gate + marker are explicit params now — gap-drop sets,
-        // overnight clears; quote snapshot always survives.
+        // overnight clears; the market snapshot always survives.
         state.resetForming(555L, true);
 
         assertEquals(1000L, state.lastBidPaise);
@@ -237,6 +244,13 @@ class MultiTimeframeStateTest {
         assertEquals(5L, state.lastBidSize);
         assertEquals(7L, state.lastAskSize);
         assertEquals(123456789L, state.lastQuoteEventTime);
+        assertEquals(2222L, state.lastDayHighPaise);
+        assertEquals(3333L, state.lastVwapPaise);
+        assertEquals(4444L, state.lastTotalBuyQty);
+        assertEquals(5555L, state.lastTotalSellQty);
+        assertEquals(6666L, state.lastOpenInterest);
+        assertEquals(7777L, state.lastLowerLimitPaise);
+        assertEquals(8888L, state.lastUpperLimitPaise);
         assertTrue(state.discontinuityPending);
         assertEquals(555L, state.lastDiscontinuityEventTime);
         assertEquals(555L, state.lastEventTime);

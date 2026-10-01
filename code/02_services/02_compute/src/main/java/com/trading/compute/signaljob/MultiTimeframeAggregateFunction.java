@@ -288,7 +288,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     }
 
     private static GenericRowData buildLiveRow(long token, Timeframe tf, long windowStart, long windowEnd,
-            CandleAccumulator acc) {
+            CandleAccumulator acc, MultiTimeframeState state) {
         GenericRowData row = new GenericRowData(CandleLiveColumns.FIELD_COUNT);
         row.setField(CandleLiveColumns.INSTRUMENT_TOKEN, token);
         row.setField(CandleLiveColumns.EXCHANGE, acc.exchange == null ? null : StringData.fromString(acc.exchange));
@@ -311,7 +311,115 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         // reports compute.latency.ingest_to_strategy. Sentinel Long.MIN_VALUE
         // means unknown — never fabricated, never persisted.
         row.setField(CandleLiveColumns.INGEST_TS, acc.lastIngestTs);
+        // Strategy market snapshot (2026-10-01): latest known raw extras,
+        // captured from every accepted tick. 0 = never seen -> NULL (never a
+        // fabricated zero); see updateMarketSnapshot for the capture rules.
+        setNullableLong(row, CandleLiveColumns.MKT_TOTAL_BUY_QTY, state.lastTotalBuyQty);
+        setNullableLong(row, CandleLiveColumns.MKT_TOTAL_SELL_QTY, state.lastTotalSellQty);
+        setNullableLong(row, CandleLiveColumns.MKT_DAY_OPEN_PAISE, state.lastDayOpenPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_DAY_HIGH_PAISE, state.lastDayHighPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_DAY_LOW_PAISE, state.lastDayLowPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_PREV_CLOSE_PAISE, state.lastPrevClosePaise);
+        setNullableLong(row, CandleLiveColumns.MKT_VWAP_PAISE, state.lastVwapPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_OPEN_INTEREST, state.lastOpenInterest);
+        setNullableLong(row, CandleLiveColumns.MKT_OI_DAY_HIGH, state.lastOiDayHigh);
+        setNullableLong(row, CandleLiveColumns.MKT_OI_DAY_LOW, state.lastOiDayLow);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_PX_1, state.lastBidPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_BID_QTY_1, state.lastBidSize);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_PX_1, state.lastAskPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_ASK_QTY_1, state.lastAskSize);
+        setNullableLong(row, CandleLiveColumns.MKT_LOWER_LIMIT_PAISE, state.lastLowerLimitPaise);
+        setNullableLong(row, CandleLiveColumns.MKT_UPPER_LIMIT_PAISE, state.lastUpperLimitPaise);
         return row;
+    }
+
+    /** BIGINT NULL transport helper: 0 means "not yet seen" (the row carries NULL). */
+    private static void setNullableLong(GenericRowData row, int index, long value) {
+        if (value == 0L) {
+            row.setField(index, null);
+        } else {
+            row.setField(index, value);
+        }
+    }
+
+    /**
+     * Strategy market snapshot capture (2026-10-01): read the 16 raw extras
+     * strategies consume from every accepted tick — trade or quote. Latest
+     * non-null wins per field: a tick that does not carry a field (lighter
+     * feed mode, other tick type) never erases the last known value, and a
+     * field never seen stays 0 (rendered NULL on the forming row). Quote ticks
+     * update the snapshot but still emit no forming row and never touch OHLC;
+     * the next accepted trade tick carries the fresh values.
+     */
+    private static void updateMarketSnapshot(MultiTimeframeState state, RowData tick, long eventTime) {
+        boolean updated = false;
+        if (!tick.isNullAt(RawTableColumns.TOTAL_BUY_QTY)) {
+            state.lastTotalBuyQty = tick.getLong(RawTableColumns.TOTAL_BUY_QTY);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.TOTAL_SELL_QTY)) {
+            state.lastTotalSellQty = tick.getLong(RawTableColumns.TOTAL_SELL_QTY);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.OPEN_PAISE)) {
+            state.lastDayOpenPaise = tick.getLong(RawTableColumns.OPEN_PAISE);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.HIGH_PAISE)) {
+            state.lastDayHighPaise = tick.getLong(RawTableColumns.HIGH_PAISE);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.LOW_PAISE)) {
+            state.lastDayLowPaise = tick.getLong(RawTableColumns.LOW_PAISE);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.CLOSE_PAISE)) {
+            state.lastPrevClosePaise = tick.getLong(RawTableColumns.CLOSE_PAISE);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.VWAP_PAISE)) {
+            state.lastVwapPaise = tick.getLong(RawTableColumns.VWAP_PAISE);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.OPEN_INTEREST)) {
+            state.lastOpenInterest = tick.getLong(RawTableColumns.OPEN_INTEREST);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.OI_DAY_HIGH)) {
+            state.lastOiDayHigh = tick.getLong(RawTableColumns.OI_DAY_HIGH);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.OI_DAY_LOW)) {
+            state.lastOiDayLow = tick.getLong(RawTableColumns.OI_DAY_LOW);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.BID_PX_1)) {
+            state.lastBidPaise = tick.getLong(RawTableColumns.BID_PX_1);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.BID_QTY_1)) {
+            state.lastBidSize = tick.getLong(RawTableColumns.BID_QTY_1);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.ASK_PX_1)) {
+            state.lastAskPaise = tick.getLong(RawTableColumns.ASK_PX_1);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.ASK_QTY_1)) {
+            state.lastAskSize = tick.getLong(RawTableColumns.ASK_QTY_1);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.LOWER_LIMIT_PAISE)) {
+            state.lastLowerLimitPaise = tick.getLong(RawTableColumns.LOWER_LIMIT_PAISE);
+            updated = true;
+        }
+        if (!tick.isNullAt(RawTableColumns.UPPER_LIMIT_PAISE)) {
+            state.lastUpperLimitPaise = tick.getLong(RawTableColumns.UPPER_LIMIT_PAISE);
+            updated = true;
+        }
+        if (updated) {
+            state.lastQuoteEventTime = eventTime;
+        }
     }
 
     @Override
@@ -379,6 +487,11 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
         String tickTypeStr = tickTypeData == null ? null : tickTypeData.toString();
         long qty = tick.isNullAt(RawTableColumns.VOLUME_DELTA) ? 0L : tick.getLong(RawTableColumns.VOLUME_DELTA);
         boolean isTrade = "TRADE".equals(tickTypeStr) && qty > 0;
+
+        // Strategy market snapshot (2026-10-01): capture the raw extras every
+        // forming row carries — BOTH trade and quote ticks update it; only
+        // accepted trades emit rows (the quote branch below returns).
+        updateMarketSnapshot(slot.state, tick, eventTime);
 
         if (!isTrade) {
             // Quote-only / zero-qty TRADE: quote snapshot side, but never OHLC.
@@ -693,7 +806,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
                     continue;
                 }
                 ctx.output(LIVE_TICK_TAG,
-                        buildLiveRow(key, tf, ws, ws + tf.windowMs(), acc));
+                        buildLiveRow(key, tf, ws, ws + tf.windowMs(), acc, slot.state));
                 emitted = true;
             }
             // KPI stays per accepted tick, not per row: one tick now carries up
@@ -731,7 +844,7 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             CandleAccumulator acc = slot.state.forming(tf);
             if (acc.firstEventTime == Long.MAX_VALUE) continue;
             long we = ws + tf.windowMs();
-            GenericRowData row = buildLiveRow(token, tf, ws, we, acc);
+            GenericRowData row = buildLiveRow(token, tf, ws, we, acc, slot.state);
             ctx.output(LIVE_TAG, row);
             if (liveEmittedCounter != null) liveEmittedCounter.inc();
         }

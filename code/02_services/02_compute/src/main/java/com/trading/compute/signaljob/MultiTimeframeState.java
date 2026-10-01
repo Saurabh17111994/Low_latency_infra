@@ -49,12 +49,30 @@ public class MultiTimeframeState implements Serializable {
     public MultiTimeframeClosedRing closedFiveM;
     public MultiTimeframeClosedRing closedFifteenM;
 
-    // ── quote snapshot (QUOTE-only ticks) ────────────────────────────────
+    // ── market snapshot (2026-10-01): level-1 quote + day stats + limits ──
+    // Latest non-null raw value per field (0 = not yet seen); updated by every
+    // accepted tick (trade or quote), never cleared by resetForming — the same
+    // survival contract the original quote snapshot had (P2-152).
     public long lastBidPaise;
     public long lastAskPaise;
     public long lastBidSize;
     public long lastAskSize;
+    /** Event time of the last tick that updated any market-snapshot field. */
     public long lastQuoteEventTime;
+
+    public long lastDayOpenPaise;
+    public long lastDayHighPaise;
+    public long lastDayLowPaise;
+    /** PREVIOUS day's close (raw close_paise) — not today's. */
+    public long lastPrevClosePaise;
+    public long lastVwapPaise;
+    public long lastTotalBuyQty;
+    public long lastTotalSellQty;
+    public long lastOpenInterest;
+    public long lastOiDayHigh;
+    public long lastOiDayLow;
+    public long lastLowerLimitPaise;
+    public long lastUpperLimitPaise;
 
     // ── discontinuity marker ─────────────────────────────────────────────
     public boolean discontinuityPending;
@@ -85,6 +103,19 @@ public class MultiTimeframeState implements Serializable {
         lastBidSize = 0L;
         lastAskSize = 0L;
         lastQuoteEventTime = 0L;
+
+        lastDayOpenPaise = 0L;
+        lastDayHighPaise = 0L;
+        lastDayLowPaise = 0L;
+        lastPrevClosePaise = 0L;
+        lastVwapPaise = 0L;
+        lastTotalBuyQty = 0L;
+        lastTotalSellQty = 0L;
+        lastOpenInterest = 0L;
+        lastOiDayHigh = 0L;
+        lastOiDayLow = 0L;
+        lastLowerLimitPaise = 0L;
+        lastUpperLimitPaise = 0L;
 
         discontinuityPending = false;
         lastDiscontinuityEventTime = 0L;

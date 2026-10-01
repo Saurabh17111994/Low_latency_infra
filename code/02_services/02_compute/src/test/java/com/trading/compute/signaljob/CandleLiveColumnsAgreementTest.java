@@ -1,6 +1,7 @@
 package com.trading.compute.signaljob;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
@@ -98,6 +99,28 @@ class CandleLiveColumnsAgreementTest {
         List<Column> cols = parseColumns();
         assertNotEquals("ingest_ts", cols.get(CandleLiveColumns.DDL_FIELD_COUNT).name(),
                 "ingest_ts must never leak into the stored merged-table schema");
+    }
+
+    @Test
+    void marketSectionIsTrailingTransportOnlyAndAbsentFromTheDdl() throws IOException {
+        // 2026-10-01 strategy market snapshot: the trailing section after the
+        // ingest probe is transport-only (never persisted), all BIGINT NULL.
+        assertEquals(CandleLiveColumns.INGEST_TS + 1, CandleLiveColumns.MARKET_SECTION_START,
+                "the market section must sit immediately after the ingest probe");
+        assertEquals(CandleLiveColumns.MARKET_FIELD_COUNT,
+                CandleLiveColumns.FIELD_COUNT - CandleLiveColumns.MARKET_SECTION_START);
+        java.util.Set<String> ddlNames = new java.util.HashSet<>();
+        for (Column c : parseColumns()) {
+            ddlNames.add(c.name());
+        }
+        for (int i = CandleLiveColumns.MARKET_SECTION_START; i < CandleLiveColumns.FIELD_COUNT; i++) {
+            assertEquals("BIGINT", CandleLiveColumns.TYPE_ROOTS.get(i), "market column " + i + " type");
+            assertEquals(Boolean.TRUE, CandleLiveColumns.COLUMN_NULLABLE_IN_DDL.get(i),
+                    "market column " + i + " must be nullable");
+            assertFalse(ddlNames.contains(CandleLiveColumns.COLUMN_NAMES.get(i)),
+                    "market column " + CandleLiveColumns.COLUMN_NAMES.get(i)
+                            + " must never leak into the stored merged-table schema");
+        }
     }
 
     @Test

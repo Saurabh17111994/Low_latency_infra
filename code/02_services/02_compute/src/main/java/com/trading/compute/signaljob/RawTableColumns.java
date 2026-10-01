@@ -53,6 +53,43 @@ public final class RawTableColumns {
      */
     public static final int VOLUME_DELTA = 27;
 
+    // --- strategy market snapshot (2026-10-01): the 16 raw extras the signal
+    // job carries to strategies on every forming row. Add a constant when a
+    // reader lands; MultiTimeframeAggregateFunction#updateMarketSnapshot is
+    // the only reader today. ---
+    /** Day open. */
+    public static final int OPEN_PAISE = 21;
+    /** Day high. */
+    public static final int HIGH_PAISE = 22;
+    /** Day low. */
+    public static final int LOW_PAISE = 23;
+    /** PREVIOUS day's close — not today's. */
+    public static final int CLOSE_PAISE = 24;
+    /** Day VWAP. */
+    public static final int VWAP_PAISE = 25;
+    /** Cumulative day buy quantity (TBQ). */
+    public static final int TOTAL_BUY_QTY = 28;
+    /** Cumulative day sell quantity (TSQ). */
+    public static final int TOTAL_SELL_QTY = 29;
+    /** Open interest. */
+    public static final int OPEN_INTEREST = 30;
+    /** Level-1 best bid price. */
+    public static final int BID_PX_1 = 31;
+    /** Level-1 best bid quantity. */
+    public static final int BID_QTY_1 = 36;
+    /** Level-1 best ask price. */
+    public static final int ASK_PX_1 = 46;
+    /** Level-1 best ask quantity. */
+    public static final int ASK_QTY_1 = 51;
+    /** OI day high (standard token stream only). */
+    public static final int OI_DAY_HIGH = 62;
+    /** OI day low (standard token stream only). */
+    public static final int OI_DAY_LOW = 63;
+    /** Lower circuit limit. */
+    public static final int LOWER_LIMIT_PAISE = 64;
+    /** Upper circuit limit. */
+    public static final int UPPER_LIMIT_PAISE = 65;
+
     public static final int FIELD_COUNT = 72;
 
     /** DDL column names in index order (diagnostics). Do not expose mutably. */
@@ -99,6 +136,22 @@ public final class RawTableColumns {
         check(VALIDITY_REASON == RawTableSchema.COLUMNS.indexOf("validity_reason"), "VALIDITY_REASON");
         check(SCHEMA_VERSION == RawTableSchema.COLUMNS.indexOf("schema_version"), "SCHEMA_VERSION");
         check(VOLUME_DELTA == RawTableSchema.COLUMNS.indexOf("volume_delta"), "VOLUME_DELTA");
+        check(OPEN_PAISE == RawTableSchema.COLUMNS.indexOf("open_paise"), "OPEN_PAISE");
+        check(HIGH_PAISE == RawTableSchema.COLUMNS.indexOf("high_paise"), "HIGH_PAISE");
+        check(LOW_PAISE == RawTableSchema.COLUMNS.indexOf("low_paise"), "LOW_PAISE");
+        check(CLOSE_PAISE == RawTableSchema.COLUMNS.indexOf("close_paise"), "CLOSE_PAISE");
+        check(VWAP_PAISE == RawTableSchema.COLUMNS.indexOf("vwap_paise"), "VWAP_PAISE");
+        check(TOTAL_BUY_QTY == RawTableSchema.COLUMNS.indexOf("total_buy_qty"), "TOTAL_BUY_QTY");
+        check(TOTAL_SELL_QTY == RawTableSchema.COLUMNS.indexOf("total_sell_qty"), "TOTAL_SELL_QTY");
+        check(OPEN_INTEREST == RawTableSchema.COLUMNS.indexOf("open_interest"), "OPEN_INTEREST");
+        check(BID_PX_1 == RawTableSchema.COLUMNS.indexOf("bid_px_1"), "BID_PX_1");
+        check(BID_QTY_1 == RawTableSchema.COLUMNS.indexOf("bid_qty_1"), "BID_QTY_1");
+        check(ASK_PX_1 == RawTableSchema.COLUMNS.indexOf("ask_px_1"), "ASK_PX_1");
+        check(ASK_QTY_1 == RawTableSchema.COLUMNS.indexOf("ask_qty_1"), "ASK_QTY_1");
+        check(OI_DAY_HIGH == RawTableSchema.COLUMNS.indexOf("oi_day_high"), "OI_DAY_HIGH");
+        check(OI_DAY_LOW == RawTableSchema.COLUMNS.indexOf("oi_day_low"), "OI_DAY_LOW");
+        check(LOWER_LIMIT_PAISE == RawTableSchema.COLUMNS.indexOf("lower_limit_paise"), "LOWER_LIMIT_PAISE");
+        check(UPPER_LIMIT_PAISE == RawTableSchema.COLUMNS.indexOf("upper_limit_paise"), "UPPER_LIMIT_PAISE");
     }
 
     private static void check(boolean ok, String col) {

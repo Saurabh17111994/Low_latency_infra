@@ -24,6 +24,15 @@ import org.apache.flink.table.types.logical.VarCharType;
  * (ingestion accept -> host read). The probe is never written to any table
  * and is not part of the pinned DDL prefix.
  *
+ * <p>The trailing {@link #MARKET_SECTION_START}..{@link #FIELD_COUNT}-1
+ * section is the strategy market snapshot (2026-10-01): the latest known raw
+ * extras — level-1 quote, day stats, limits — captured by the aggregator from
+ * every accepted tick (trade or quote) and carried on each forming row so
+ * strategies can read them in {@code onLiveTick}. Null means "this feed did
+ * not provide the field" (never zero), and a value is latest-known, not
+ * necessarily from the tick that formed the row. Transport-only: never
+ * persisted, absent from every DDL.
+ *
  * <p>Phase 0 multi-TF aggregator contract: tf discriminator values are
  * {@code FIFTEEN_S, THIRTY_S, ONE_M, THREE_M, FIVE_M, FIFTEEN_M}.
  */
@@ -53,28 +62,63 @@ public final class CandleLiveColumns {
      */
     public static final int INGEST_TS = 15;
 
-    public static final int FIELD_COUNT = 16;
+    // ── market snapshot section (transport-only; see class javadoc) ──────
+    /** First market-snapshot index — immediately after the ingest probe. */
+    public static final int MARKET_SECTION_START = 16;
+    public static final int MKT_TOTAL_BUY_QTY = 16;
+    public static final int MKT_TOTAL_SELL_QTY = 17;
+    public static final int MKT_DAY_OPEN_PAISE = 18;
+    public static final int MKT_DAY_HIGH_PAISE = 19;
+    public static final int MKT_DAY_LOW_PAISE = 20;
+    public static final int MKT_PREV_CLOSE_PAISE = 21;
+    public static final int MKT_VWAP_PAISE = 22;
+    public static final int MKT_OPEN_INTEREST = 23;
+    public static final int MKT_OI_DAY_HIGH = 24;
+    public static final int MKT_OI_DAY_LOW = 25;
+    public static final int MKT_BID_PX_1 = 26;
+    public static final int MKT_BID_QTY_1 = 27;
+    public static final int MKT_ASK_PX_1 = 28;
+    public static final int MKT_ASK_QTY_1 = 29;
+    public static final int MKT_LOWER_LIMIT_PAISE = 30;
+    public static final int MKT_UPPER_LIMIT_PAISE = 31;
 
-    /** Leading columns pinned to the merged-table DDL prefix; the probe follows. */
+    /** Number of market-snapshot columns. */
+    public static final int MARKET_FIELD_COUNT = 16;
+
+    public static final int FIELD_COUNT = 32;
+
+    /** Leading columns pinned to the merged-table DDL prefix; probes follow. */
     public static final int DDL_FIELD_COUNT = 15;
 
     public static final String SCHEMA_VERSION_V1 = "1";
 
-    /** Fluss {@code DataTypeRoot} name per column, DDL index order. */
+    /** Fluss {@code DataTypeRoot} name per column; the market section is BIGINT NULL by construction. */
     public static final List<String> TYPE_ROOTS = List.of(
             "BIGINT", "STRING", "STRING", "STRING",
             "BIGINT", "BIGINT",
             "BIGINT", "BIGINT", "BIGINT", "BIGINT",
             "BIGINT", "INTEGER", "BIGINT", "STRING", "STRING",
-            "BIGINT");
+            "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT",
+            "BIGINT", "BIGINT", "BIGINT", "BIGINT");
 
-    /** DDL nullability per column (35 DDL prefix v1): exchange, symbol, last_event_fingerprint nullable. */
+    /**
+     * DDL nullability per column (35 DDL prefix v1): exchange, symbol,
+     * last_event_fingerprint nullable. Trailing probes/market columns are
+     * nullable by construction, not by DDL.
+     */
     public static final List<Boolean> COLUMN_NULLABLE_IN_DDL = List.of(
             false, true, true, false,
             false, false,
             false, false, false, false,
             false, false, false, true, false,
-            false);
+            false,
+            true, true, true, true,
+            true, true, true, true,
+            true, true, true, true,
+            true, true, true, true);
 
     /** DDL column names in index order (diagnostics + agreement pin). */
     private static final String[] NAMES = {
@@ -83,7 +127,13 @@ public final class CandleLiveColumns {
             "open_paise", "high_paise", "low_paise", "close_paise",
             "volume", "tick_count",
             "last_event_time", "last_event_fingerprint", "schema_version",
-            "ingest_ts"
+            "ingest_ts",
+            "mkt_total_buy_qty", "mkt_total_sell_qty",
+            "mkt_day_open_paise", "mkt_day_high_paise", "mkt_day_low_paise",
+            "mkt_prev_close_paise", "mkt_vwap_paise",
+            "mkt_open_interest", "mkt_oi_day_high", "mkt_oi_day_low",
+            "mkt_bid_px_1", "mkt_bid_qty_1", "mkt_ask_px_1", "mkt_ask_qty_1",
+            "mkt_lower_limit_paise", "mkt_upper_limit_paise"
     };
 
     /** Immutable DDL column names in index order (diagnostics + agreement pin). */
@@ -93,7 +143,13 @@ public final class CandleLiveColumns {
             "open_paise", "high_paise", "low_paise", "close_paise",
             "volume", "tick_count",
             "last_event_time", "last_event_fingerprint", "schema_version",
-            "ingest_ts");
+            "ingest_ts",
+            "mkt_total_buy_qty", "mkt_total_sell_qty",
+            "mkt_day_open_paise", "mkt_day_high_paise", "mkt_day_low_paise",
+            "mkt_prev_close_paise", "mkt_vwap_paise",
+            "mkt_open_interest", "mkt_oi_day_high", "mkt_oi_day_low",
+            "mkt_bid_px_1", "mkt_bid_qty_1", "mkt_ask_px_1", "mkt_ask_qty_1",
+            "mkt_lower_limit_paise", "mkt_upper_limit_paise");
 
     /** Stream type info for emitted candle_live rows (v1 DDL order). */
     public static final InternalTypeInfo<RowData> ROW_TYPE_INFO = InternalTypeInfo.ofFields(
@@ -113,7 +169,15 @@ public final class CandleLiveColumns {
                 new BigIntType(false),                       // last_event_time (NOT NULL)
                 new VarCharType(VarCharType.MAX_LENGTH),     // last_event_fingerprint (nullable)
                 new VarCharType(false, VarCharType.MAX_LENGTH), // schema_version (NOT NULL)
-                new BigIntType(false)                        // ingest_ts probe (NOT NULL set on emit)
+                new BigIntType(false),                       // ingest_ts probe (NOT NULL set on emit)
+                new BigIntType(true), new BigIntType(true),  // market snapshot: nullable
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true),
+                new BigIntType(true), new BigIntType(true)
             },
             NAMES.clone());
 
@@ -146,6 +210,28 @@ public final class CandleLiveColumns {
         checkIndex(LAST_EVENT_FINGERPRINT, "last_event_fingerprint");
         checkIndex(SCHEMA_VERSION, "schema_version");
         checkIndex(INGEST_TS, "ingest_ts");
+        checkIndex(MKT_TOTAL_BUY_QTY, "mkt_total_buy_qty");
+        checkIndex(MKT_TOTAL_SELL_QTY, "mkt_total_sell_qty");
+        checkIndex(MKT_DAY_OPEN_PAISE, "mkt_day_open_paise");
+        checkIndex(MKT_DAY_HIGH_PAISE, "mkt_day_high_paise");
+        checkIndex(MKT_DAY_LOW_PAISE, "mkt_day_low_paise");
+        checkIndex(MKT_PREV_CLOSE_PAISE, "mkt_prev_close_paise");
+        checkIndex(MKT_VWAP_PAISE, "mkt_vwap_paise");
+        checkIndex(MKT_OPEN_INTEREST, "mkt_open_interest");
+        checkIndex(MKT_OI_DAY_HIGH, "mkt_oi_day_high");
+        checkIndex(MKT_OI_DAY_LOW, "mkt_oi_day_low");
+        checkIndex(MKT_BID_PX_1, "mkt_bid_px_1");
+        checkIndex(MKT_BID_QTY_1, "mkt_bid_qty_1");
+        checkIndex(MKT_ASK_PX_1, "mkt_ask_px_1");
+        checkIndex(MKT_ASK_QTY_1, "mkt_ask_qty_1");
+        checkIndex(MKT_LOWER_LIMIT_PAISE, "mkt_lower_limit_paise");
+        checkIndex(MKT_UPPER_LIMIT_PAISE, "mkt_upper_limit_paise");
+        if (MARKET_SECTION_START != INGEST_TS + 1
+                || MARKET_FIELD_COUNT != FIELD_COUNT - MARKET_SECTION_START) {
+            throw new IllegalStateException(
+                    "CandleLiveColumns drift: market section must start at "
+                            + (INGEST_TS + 1) + " and span the trailing columns");
+        }
     }
 
     private static void checkIndex(int index, String expected) {
