@@ -181,7 +181,10 @@ final class TypedFlussRowConverter implements FlussRowConverter {
         row.last_price_paise = packet.lastPricePaise();
         row.last_qty = packet.lastQty();
         row.raw_payload = raw != null ? raw.rawPayload() : new byte[0]; // P1-087: retained copy
-        row.payload_hash = raw != null ? raw.payloadHash() : "";
+        // CHG-488: intentionally empty. The SHA-256 is verified in memory at
+        // admission (PayloadHashValidator) and is recomputable from raw_payload
+        // at any time; the stored text had no reader and cost ~20-35 bytes/row.
+        row.payload_hash = "";
         row.decoder_version = raw != null ? raw.decoderVersion() : "go-arrow-sdk";
         row.protocol_version = raw != null ? raw.protocolVersion() : "";
         row.validity_state = packet.validity().name();

@@ -422,6 +422,18 @@ linger; raising the linger was previously measured to raise append p99
 latency-critical, so no storage change may slow the write path.** Raw bytes/row
 stay as measured; no further raw-table work is scheduled.
 
+**Finding (d) — payload_hash removal is a real, lossless cut (CHG-488, 2026-10-01).**
+The audit found the two hash columns were not equal: `event_fingerprint` is read
+on the compute hot path (dedup key + candle tiebreak), while `payload_hash` is a
+pure function of `raw_payload`, verified in memory at admission, with **no
+reader anywhere** — and stored as a UTF-8-mangled rendition of the 32-byte
+digest. Both writers now store `""` (column and indexes unchanged). Smoke
+`logs/chg488-smoke-20261001-132511`: raw_table_1 **+146.90 → +134.18 MB/min
+(−8.7 %, ~43 B/row, 503 → 460)** with latency unchanged (S4 p50 16 / p99 33 ms).
+Per-session budget at the test rate drops ~56 → ~50 GB; local steady state
+(3-day window) ~170 → ~150 GB. `event_fingerprint` stays — recomputing it would
+move SHA-256 cost onto the strategy path for no disk win that matters.
+
 Note: the p99 ≤ 75 ms per-window SLO is **not** met by any stored leg by
 construction (watermark close, Q27 — measured close→read ≈0.7–1.2 s); the
 per-tick strategy path remains the 75 ms-class leg.

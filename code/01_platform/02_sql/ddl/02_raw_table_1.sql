@@ -26,6 +26,13 @@
 --   probe's ~192 B/row was an artifact of its high replay rate: at live
 --   per-bucket arrival (~100 rows/s per bucket, 16 buckets, 1 ms linger) each
 --   stored batch is ~1 row, so compression has almost nothing to work with.
+-- v6 (2026-10-01, value semantics only — column set, order and Schema version
+--   4 unchanged): writers store "" in payload_hash (CHG-488). The SHA-256 is
+--   verified in memory at admission (PayloadHashValidator, proto bytes) and is
+--   recomputable from raw_payload at any time; the stored text had no reader
+--   (audit 2026-10-01 across Java/Go/Python) and cost ~20-35 bytes/row. The
+--   column stays for schema stability; pre-v6 rows keep their legacy text
+--   until TTL expiry.
 -- v4 (2026-09-24, full-mode field capture): the bridge already carried every
 -- full-mode field and this table stored only 4 of them. The 51 columns at
 -- indexes 21-71 now capture all of them, so ONE schema serves BOTH feeds (the
@@ -108,7 +115,7 @@ CREATE TABLE raw_table_1 (
     last_price_paise        BIGINT      NOT NULL,
     last_qty                BIGINT      NOT NULL,
     raw_payload             BYTES       NOT NULL,
-    payload_hash            STRING      NOT NULL,
+    payload_hash            STRING      NOT NULL, -- CHG-488 (v6): writers store ""; SHA-256 verified in memory at admission + recomputable from raw_payload; never read
     decoder_version         STRING      NOT NULL,
     protocol_version        STRING      NOT NULL,
     validity_state          STRING      NOT NULL,

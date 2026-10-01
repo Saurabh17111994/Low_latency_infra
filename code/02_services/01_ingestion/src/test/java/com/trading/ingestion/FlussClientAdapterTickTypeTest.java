@@ -67,4 +67,17 @@ class FlussClientAdapterTickTypeTest {
         assertEquals(25L, writer.rows.get(0).getLong(volumeDelta),
                 "the trade tick stores its own quantity as the delta");
     }
+
+    @Test
+    @DisplayName("CHG-488: payload_hash is verified in memory, never persisted")
+    void payloadHashIsNotPersisted() throws Exception {
+        FakeAppendWriter writer = new FakeAppendWriter();
+        RealFlussRowConverter converter =
+                new RealFlussRowConverter(writer, null, "default.raw_table_1");
+        converter.append(TickPacketFixtures.validTrade(1)).get();
+        assertEquals("", writer.rows.get(0).getString(col("payload_hash")).toString(),
+                "the stored payload_hash must stay empty: the SHA-256 is checked at admission and "
+                        + "is recomputable from raw_payload, and no consumer ever read the stored "
+                        + "text (CHG-488 audit, 2026-10-01)");
+    }
 }

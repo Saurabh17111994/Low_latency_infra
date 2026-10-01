@@ -342,6 +342,18 @@ upstream is complete.
 > `DdlBootstrapSchemaAgreementTest.rawTableStorageOptionsMatchTheDdl`. The
 > probe that predicted ~192 B/row was misled by its replay rate — see the
 > correction in `logs/soak/raw-compression-probe-linger1ms-20261001-114821/`.
+>
+> **raw_table_1 v6 (2026-10-01, CHG-488 — value semantics only, column set and
+> row contract v4 unchanged):** both writers store `""` in `payload_hash`. The
+> SHA-256 is verified in memory at admission (`PayloadHashValidator`, proto
+> bytes) and is recomputable from `raw_payload`; a read-only audit across
+> Java/Go/Python found no consumer ever read the stored text, which was a
+> UTF-8-mangled rendition of the 32-byte digest costing ~20–35 stored bytes/row.
+> The column stays for schema stability; pre-v6 rows keep the legacy text until
+> TTL expiry. Guards:
+> `TypedFlussRowConverterTest.payloadHashIsNotPersisted` and
+> `FlussClientAdapterTickTypeTest.payloadHashIsNotPersisted` (both failing-first
+> on the legacy `abc123` cell). Live effect is measured by the 200 s smoke.
 
 #### Phase D: Runtime enforcement (straddles Ingestion, Signal, Executor phases)
 

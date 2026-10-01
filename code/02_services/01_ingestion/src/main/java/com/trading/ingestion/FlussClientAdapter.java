@@ -261,7 +261,9 @@ class RealFlussRowConverter implements FlussRowConverter {
                 //   CandleAggregateFunction:102 sum cumulative volume into candle volume)
                 // payload preservation
                 raw != null ? raw.rawPayload() : new byte[0],               // raw_payload BYTES (P1-087: retained copy)
-                bs(raw != null ? raw.payloadHash() : ""),           // payload_hash STRING
+                bs(""),   // payload_hash STRING — CHG-488: intentionally empty (verified in
+                          // memory at admission, recomputable from raw_payload; the stored
+                          // text had no reader and cost ~20-35 bytes/row)
                 bs(raw != null ? raw.decoderVersion() : "go-arrow-sdk"), // decoder_version STRING
                 bs(raw != null ? raw.protocolVersion() : ""),       // protocol_version STRING
                 // provenance

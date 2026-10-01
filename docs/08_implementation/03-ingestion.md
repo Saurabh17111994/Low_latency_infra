@@ -156,6 +156,13 @@ receive proto frame from stdin
 
 Ingestion appends an accepted raw packet even if its fingerprint was seen before. Compute performs bounded logical deduplication (the durable dedup set is Fluss-authoritative under DEC-038). No time-based or record-count-based application batching is permitted: each accepted tick is submitted individually. The Fluss client may coalesce rows into transport batches, bounded at 20 ms linger (`client.writer.batch-timeout`).
 
+**Stored-value note (CHG-488, 2026-10-01):** the payload SHA-256 is verified in
+memory at admission (`PayloadHashValidator`, proto bytes) and is recomputable from
+`raw_payload`; both converters now write `""` into `raw_table_1.payload_hash`
+(a read-only audit found no consumer ever read the stored text — a UTF-8-mangled
+rendition of the 32-byte digest that cost ~20–35 stored bytes/row). The column
+stays for schema stability; pre-v6 rows keep the legacy text until TTL expiry.
+
 > **Broker burst cadence (2026-08-26, Arrow HFT protocol docs):** `latency` is the per-symbol tick interval (project `ARROW_HFT_LATENCY_MS=50` → 1 tick per stock per 50 ms); broker frames are zstd-compressed and multiple instrument ticks are **concatenated in a single message**. So 1,024/3,000 instruments arrive as one burst block every 50 ms, not spread across the window. The `client.writer.batch-timeout=20 ms` linger therefore splits a 50 ms burst into ~2–3 partial sends. This is a documented tuning-mismatch candidate (align to 50 ms), not a proven bottleneck — measurement (below) does not show the single reader+writer choking at the target rate.
 
 ### v4 full-mode field capture (2026-09-24)

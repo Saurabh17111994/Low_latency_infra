@@ -70,6 +70,19 @@ class TypedFlussRowConverterTest {
     }
 
     @Test
+    @DisplayName("CHG-488: payload_hash is verified in memory, never persisted")
+    void payloadHashIsNotPersisted() throws Exception {
+        FakeTypedWriter writer = new FakeTypedWriter();
+        TypedFlussRowConverter converter =
+                new TypedFlussRowConverter(writer, new FakeConnection(), "default.raw_table_1");
+        converter.append(trade()).get();
+        assertEquals("", writer.rows.get(0).payload_hash,
+                "the stored payload_hash must stay empty: the SHA-256 is checked at admission and "
+                        + "is recomputable from raw_payload, and no consumer ever read the stored "
+                        + "text (CHG-488 audit, 2026-10-01)");
+    }
+
+    @Test
     @DisplayName("v4: tick_type needs a positive volume_delta, not just TRADE validity")
     void tickTypeFollowsVolumeDeltaNotValidity() throws Exception {
         FakeTypedWriter writer = new FakeTypedWriter();
