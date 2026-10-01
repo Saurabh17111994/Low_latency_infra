@@ -97,9 +97,10 @@ import org.apache.fluss.row.InternalRow;
  *       printed as huge fake latencies and never added to the state counters.
  *   <li>one failing lookup/table is reported on stderr and the other legs keep
  *       sampling; a broken schema is fail-fast input (exit 2).
- *   <li>the feature leg requires the job to run with FEATURE_LAYER_ENABLED=true
- *       (default off) — an empty featureread.tsv with the flag off is data,
- *       not a probe fault.
+ *   <li>the feature leg reads the merged candle_features sealed rows (DEC-059,
+ *       Wave C W-C5a): every sealed row carries its feature map, so an empty
+ *       featureread.tsv means no sealed row was visible — data, not a probe
+ *       fault.
  * </ul>
  *
  * <p>Exit codes: 0 all three latency legs emitted rows, 3 partial (some leg

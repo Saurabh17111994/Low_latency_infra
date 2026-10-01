@@ -230,11 +230,14 @@ purge_tables() {
   export PURGE_STRICT=true ALLOW_FULL_REPLAY=false
   pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/02_raw_table_1.sql" raw
   pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/05_signal_candidates.sql" signals
+  # Wave C W-C5a (CHG-482): candle_live/candle_closed/feature_values are
+  # retired; the merged candle_features table (DDL 35) is the single candle
+  # store, written by the strategy host. Purge it like holistic-measure.sh
+  # does, so the fresh job's from-earliest replay and the evidence reads stay
+  # bounded to this phase.
   if [ "$MULTITF_ENABLED" = "true" ]; then
-    pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/32_candle_live.sql" candle_live
-    pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" candle_closed
-    pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/32_candle_live.sql" candle_live
-    pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/33_candle_closed.sql" candle_closed
+    pipeline_purge_table "$ROOT/code/01_platform/02_sql/ddl/35_candle_features.sql" candle_features
+    pipeline_ensure_candle_tables "$ROOT/code/01_platform/02_sql/ddl/35_candle_features.sql" candle_features
   fi
 }
 

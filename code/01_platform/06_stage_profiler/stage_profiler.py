@@ -154,8 +154,8 @@ STAGES: tuple[Stage, ...] = (
     ),
     Stage(
         "S8",
-        "Flink -> feature tables (window close -> readable)",
-        "first-seen minus window end on candle_live / candle_closed polls",
+        "Flink -> candle_features (window close -> readable)",
+        "first-seen minus window end on the candle_features sealed-row tails",
         "sink records delta + feature row counts",
     ),
     Stage(
@@ -689,7 +689,8 @@ def source_records_rate(stages_tsv: str) -> float | None:
 
 
 def close_to_visible(tsv_text: str) -> list[float]:
-    """`window_end -> first sighting` from closed-read.tsv (candle_closed).
+    """`window_end -> first sighting` from closed-read.tsv (candle_features
+    sealed rows).
 
     FlussKvProbe rewrites the latest window on every poll; only the first
     sighting at or after the window end counts, so this is a lower-bound
@@ -874,7 +875,7 @@ def _state_key(layer: str, key: str) -> str:
 
     RocksDB dirs are per-subtask; the operator name is the stable part, and
     the series below sums its subtasks per sample. Fluss tablet dirs carry a
-    numeric table id ('candle_closed-20644') that a recreate changes.
+    numeric table id ('candle_features-20644') that a recreate changes.
     """
     if layer == "flink.rocksdb.bytes":
         m = _ROCKSDB_DIR_RE.match(key)
@@ -1420,7 +1421,7 @@ def build_report(phase: Path) -> tuple[list[ProfileRow], str, dict[str, int]]:
             STAGES[7].boundary,
             f"{feature_rate:,.1f} windows/s (sampled)" if feature_rate else PLACEHOLDER,
             Summary.of(closed_lags) if closed_lags else None,
-            source="candle_closed first sighting minus window end (probe samples)",
+            source="candle_features sealed-row first sighting minus window end (probe samples)",
         )
     )
 
