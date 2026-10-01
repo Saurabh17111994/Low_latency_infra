@@ -262,6 +262,11 @@ class StrategyHostFeaturesTest {
                 probe().lastPrice,
                 1e-9,
                 "every strategy reads the shared tick value (the FIFTEEN_S one)");
+        assertEquals(
+                1,
+                mergedRows().size(),
+                "only the canonical FIFTEEN_S forming row is stored — the other five "
+                        + "TFs' evolving candles are in-memory strategy views, written at seal");
     }
 
     @Test
@@ -270,9 +275,9 @@ class StrategyHostFeaturesTest {
         harness.processElement1(liveCode(TOKEN, "NOPE", 0L, 777L, 10L, 1), 1_000L);
 
         assertEquals(0, function.featureTickUpdatesForTest());
-        // W-C5a: the merged-row emission is always on, so the invalid TF is
-        // refused twice — once by the feature update, once by the emission.
-        assertEquals(2, function.featureFailuresForTest());
+        // 2026-10-01: an unparseable TF is not the canonical tick row, so it is
+        // refused once (the feature update); the forming write is not attempted.
+        assertEquals(1, function.featureFailuresForTest());
         assertEquals(1, probe().liveCalls, "strategy delivery must survive a feature failure");
     }
 

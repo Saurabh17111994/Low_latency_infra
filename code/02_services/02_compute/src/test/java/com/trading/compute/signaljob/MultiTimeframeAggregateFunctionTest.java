@@ -98,7 +98,7 @@ class MultiTimeframeAggregateFunctionTest {
     }
 
     @Test
-    @DisplayName("low-latency: fast live feed emits one LIVE_TICK_TAG row per accepted trade with fresh OHLC")
+    @DisplayName("low-latency: fast live feed emits every TF's forming row per accepted trade, FIFTEEN_S first")
     void fastLiveTickFeedEmitsPerTrade() throws Exception {
         fn = new MultiTimeframeAggregateFunction(LIVE_INTERVAL, false, true, true);
         harness = ProcessFunctionTestHarnesses.forKeyedProcessFunction(
@@ -114,8 +114,14 @@ class MultiTimeframeAggregateFunctionTest {
         List<RowData> fast = new ArrayList<>();
         harness.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TICK_TAG)
                 .forEach(r -> fast.add(r.getValue()));
-        assertEquals(2, fast.size(), "one fast live row per accepted trade tick");
-        RowData second = fast.get(1);
+        assertEquals(12, fast.size(), "six forming rows per accepted trade tick (one per TF)");
+        // Emission order is Timeframe.values(): FIFTEEN_S first, FIFTEEN_M last.
+        assertEquals(Timeframe.FIFTEEN_S.code(),
+                fast.get(0).getString(CandleLiveColumns.TF).toString());
+        assertEquals(Timeframe.FIFTEEN_M.code(),
+                fast.get(5).getString(CandleLiveColumns.TF).toString());
+
+        RowData second = fast.get(6); // second tick's FIFTEEN_S forming row
         assertEquals(TOKEN, second.getLong(CandleLiveColumns.INSTRUMENT_TOKEN));
         assertEquals(Timeframe.FIFTEEN_S.code(), second.getString(CandleLiveColumns.TF).toString());
         assertEquals(100_00L, second.getLong(CandleLiveColumns.OPEN_PAISE));
@@ -124,12 +130,19 @@ class MultiTimeframeAggregateFunctionTest {
         assertEquals(17L, second.getLong(CandleLiveColumns.VOLUME));
         assertEquals(T0 + 2_000L, second.getLong(CandleLiveColumns.LAST_EVENT_TIME));
 
+        // Every other TF's evolving candle is in the same tick's feed: the
+        // second ONE_M row (Timeframe.values() index 2) reflects trade two too.
+        RowData oneM = fast.get(8);
+        assertEquals(Timeframe.ONE_M.code(), oneM.getString(CandleLiveColumns.TF).toString());
+        assertEquals(102_00L, oneM.getLong(CandleLiveColumns.HIGH_PAISE));
+        assertEquals(102_00L, oneM.getLong(CandleLiveColumns.CLOSE_PAISE));
+
         // Quote-only ticks carry no OHLC mutation and must not emit.
         harness.processElement(quote(T0 + 3_000L, "fp-fast-q", 103_00L), T0 + 3_000L);
         List<RowData> afterQuote = new ArrayList<>();
         harness.getSideOutput(MultiTimeframeAggregateFunction.LIVE_TICK_TAG)
                 .forEach(r -> afterQuote.add(r.getValue()));
-        assertEquals(2, afterQuote.size(), "quote tick must not emit a fast live row");
+        assertEquals(12, afterQuote.size(), "quote tick must not emit a fast live row");
     }
 
     @Test

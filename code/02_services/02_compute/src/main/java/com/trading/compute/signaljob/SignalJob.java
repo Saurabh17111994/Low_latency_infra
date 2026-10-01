@@ -286,10 +286,12 @@ public final class SignalJob {
         DataStream<RowData> multiTfLive = null;
         DataStream<RowData> strategySignals = null;
         if (config.multiTfEnabled()) {
-            // Low-latency signal path (2026-09-26): the strategy host reads
-            // the per-tick in-memory feed; the 1s snapshot stream stays the
-            // Fluss mirror. MULTITF_FAST_LIVE_FEED=false restores the old
-            // snapshot feed without a code change.
+            // Low-latency signal path (2026-09-26; all six TFs since
+            // 2026-10-01): the strategy host reads every TF's forming row per
+            // accepted trade tick in memory — strategies must see the evolving
+            // candle of every timeframe. MULTITF_FAST_LIVE_FEED=false restores
+            // the old 1s all-TF snapshot feed without a code change; the 1s
+            // snapshot stream itself stays the Fluss mirror cadence.
             boolean fastLive = config.strategyHostEnabled() && config.multiTfFastLiveFeed();
             SingleOutputStreamOperator<RowData> aggregator = monitored
                     .keyBy(row -> row.getLong(RawTableColumns.INSTRUMENT_TOKEN))

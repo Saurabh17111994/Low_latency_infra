@@ -386,13 +386,15 @@ interleaved with sealed rows. Consumers that tail the merged changelog
 
 **Finding (b) — merged now-view coverage conflict (recorded in
 `01-foundation.md`).** Q22/Q26/Q50 require stored forming rows for all six TFs
-at ~1 Hz/key; post-cutover the strategy host (the only writer) consumes only
-`LIVE_TICK_TAG` (smallest TF, per tick) and the aggregator's all-TF `LIVE_TAG`
-snapshot stream has no consumer. Operator decision required between: (a) connect
-the snapshot stream to the host (all-TF 1 Hz now-views; ~876 k versions/min
-churn), (b) formally retire Q26 (smallest-TF-only stored now-views — state-leanest),
-(c) `MULTITF_FAST_LIVE_FEED=false` (all-TF snapshots but the in-memory strategy
-feed becomes snapshot-cadence, conflicting with Q50).
+at ~1 Hz/key; post-cutover the strategy host (the only writer) consumed only
+the smallest TF per tick and the aggregator's all-TF `LIVE_TAG` snapshot stream
+had no consumer. **Strategy half resolved 2026-10-01 (CHG-484):** the fast feed
+now carries every TF's forming row per tick — strategies see all six evolving
+candles in memory; only the FIFTEEN_S forming row is stored per tick. The
+**storage half remains open** (owner = operator): (a) store all-TF forming
+rows at the 1 Hz/key snapshot cadence (~876 k vs ~300 k forming-versions/min
+measured), (b) keep smallest-TF-only stored forming rows (state-leanest), or
+(c) a tuned per-TF storage cadence.
 
 Note: the p99 ≤ 75 ms per-window SLO is **not** met by any stored leg by
 construction (watermark close, Q27 — measured close→read ≈0.7–1.2 s); the

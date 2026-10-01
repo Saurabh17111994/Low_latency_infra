@@ -70,13 +70,14 @@ Per the `00-start-here.md` conflict rule (`docs/08_implementation/00-start-here.
   (`logs/wave-c-stage-profile-20261001-065919`, 900 s, 2 Hz x 2 433): FIFTEEN_S forming rows are
   fresh (p50 232 ms) but THIRTY_S..FIFTEEN_M have **no current-window row** — a fresh reader falls
   back to the just-sealed window (p50 15.8 s / 30.8 s / 89.9 s / 132.8 s / 188.9 s vs ~750 ms for
-  every TF before the cutover). Not resolved silently: owner = operator (Q22/Q26 vs the "less
-  state growth" bar). Options: (a) connect the `LIVE_TAG` snapshot stream to the host as a live
-  input — restores all-TF 1 Hz now-views at ~3x forming-version churn (~876 k vs ~300 k
-  versions/min measured); (b) formally retire Q26 — document smallest-TF-only stored now-views
-  (state-leanest; larger-TF UI candles are seal-time); (c) `MULTITF_FAST_LIVE_FEED=false` — all-TF
-  snapshots but the in-memory strategy feed becomes snapshot-cadence (conflicts with Q50). Any
-  now-view/UI commitment for TFs above FIFTEEN_S stays blocked until this is decided.
+  every TF before the cutover). **Strategy half resolved 2026-10-01 (CHG-484):** the fast feed now carries every TF's forming
+  row per tick, so strategies see all six evolving candles in memory (only the FIFTEEN_S forming
+  row is stored per tick). The **storage half remains open** (owner = operator): (a) store all-TF
+  forming rows at the 1 Hz/key snapshot cadence (restores stored now-views at ~876 k vs ~300 k
+  forming-versions/min measured); (b) formally retire Q26 for storage — keep smallest-TF-only
+  stored forming rows (state-leanest; larger-TF UI candles are seal-time); (c) a tuned per-TF
+  storage cadence (longer TFs refreshed less often). Any UI/now-view commitment for stored TFs
+  above FIFTEEN_S stays blocked until this is decided.
 
 ### Fixed scope
 

@@ -32,7 +32,7 @@ The `dedup_horizon` is the maximum supported append retry, connector replay/rewi
 
 ## Typed handoff to Business Logic
 
-Compute SHALL expose both typed live (forming) candle events and typed closed-candle events to the strategy host within the Signal job. Each event includes instrument, window boundaries (`tf`, `window_start`, `window_end`), source schema/configuration versions, deterministic ordering metadata, and event/processing timestamps. The strategy host SHALL not reconstruct these events by reading the candle table back. **(Updated 2026-09-27: `portfolio_id` removed with the ranking scope, CHG-005; the live event is the `candle_features` forming-row stream — the host reads the per-tick `LIVE_TICK_TAG` feed when `MULTITF_FAST_LIVE_FEED=true`, the default.)**
+Compute SHALL expose both typed live (forming) candle events and typed closed-candle events to the strategy host within the Signal job. Each event includes instrument, window boundaries (`tf`, `window_start`, `window_end`), source schema/configuration versions, deterministic ordering metadata, and event/processing timestamps. The strategy host SHALL not reconstruct these events by reading the candle table back. **(Updated 2026-09-27: `portfolio_id` removed with the ranking scope, CHG-005; the live event is the `candle_features` forming-row stream — the host reads the per-tick `LIVE_TICK_TAG` feed when `MULTITF_FAST_LIVE_FEED=true`, the default. Updated 2026-10-01 (CHG-484): the feed carries every timeframe's forming row per accepted trade tick, so strategies see all six evolving candles in memory; only the FIFTEEN_S forming row is stored per tick.)**
 
 ## Outputs
 

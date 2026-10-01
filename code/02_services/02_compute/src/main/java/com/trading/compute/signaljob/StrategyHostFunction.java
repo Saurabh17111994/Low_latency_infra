@@ -35,10 +35,11 @@ import org.slf4j.LoggerFactory;
  *
  * <p><b>Operator shape.</b> {@code KeyedCoProcessFunction} keyed by
  * {@code instrument_token} (same inputs the retired N7 operator used):
- * input 1 = live forming candles ({@link CandleLiveColumns}, 1s cadence),
- * input 2 = completed candles ({@link CandleClosedColumns}). Each input
- * fans out to every registered strategy of that instrument, in registration
- * order.
+ * input 1 = live forming candles ({@link CandleLiveColumns}; one row per
+ * timeframe per accepted trade tick on the fast feed, or the six-row 1s
+ * snapshot fallback), input 2 = completed candles
+ * ({@link CandleClosedColumns}). Each input fans out to every registered
+ * strategy of that instrument, in registration order.
  *
  * <p><b>State.</b> Per-instrument strategy instances live on the heap
  * (intentional amnesia, same rationale as N7: a restore rebuilds from
@@ -294,15 +295,25 @@ public class StrategyHostFunction
         }
         // Low-latency KPI: age of the tick this in-memory read is based on.
         long evtTime = live.getLong(CandleLiveColumns.LAST_EVENT_TIME);
-        if (liveAge != null && evtTime > 0L) {
+        // 2026-10-01: all six TF forming rows arrive per tick (fast feed). The
+        // canonical FIFTEEN_S row owns the per-tick KPI, the stored forming row
+        // and the C2 pending snapshot; every row fans out to strategies below.
+        boolean canonicalTick = Timeframe.FIFTEEN_S.code()
+                .equals(String.valueOf(live.getString(CandleLiveColumns.TF)));
+        if (canonicalTick && liveAge != null && evtTime > 0L) {
             liveAge.update(Math.max(0L, System.currentTimeMillis() - evtTime));
         }
         // DEC-056: features update before the fan-out so every strategy reads the
         // fresh value; a failing feature update is counted, never blocks delivery.
+        // (Inside, only FIFTEEN_S updates the timeframe-independent tick features.)
         updateFeaturesOnTick(slot, live, evtTime);
-        // Wave B (DEC-059): forming-row upsert on the live cadence. Emitted
-        // before the fan-out so a failing strategy cannot skip it.
-        emitMergedRow(ctx, slot, live, false);
+        // Wave B (DEC-059): forming-row upsert on the live cadence — the
+        // canonical tick row only, so feeding all six TF rows per tick does not
+        // multiply the stored forming churn. The other TFs' evolving candles
+        // reach strategies in memory (fan-out below) and Fluss at seal.
+        if (canonicalTick) {
+            emitMergedRow(ctx, slot, live, false);
+        }
         for (SignalStrategy s : slot.strategies.values()) {
             // P2-057: one strategy must not starve the others — isolate,
             // count, and continue to the next strategy.
@@ -314,6 +325,10 @@ public class StrategyHostFunction
                         s.ruleId(), ctx.getCurrentKey(), e.toString());
             }
         }
+        // C2: while a request is pending the retained snapshot is the freshest
+        // live row. With the all-TF feed that is the last TF row of the tick
+        // (same event time/price); the KPI and stored forming row above stay
+        // pinned to the canonical FIFTEEN_S row.
         if (contextProvider != null) {
             trackPendingContext(ctx.getCurrentKey(), live, ctx.timerService());
         }

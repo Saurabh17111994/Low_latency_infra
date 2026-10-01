@@ -115,7 +115,8 @@ image and job config):
 - **CHG-316**: per-tick `LIVE_TICK_TAG` side output to the strategy host (Fluss
   mirror untouched), the `compute.latency.tick_to_strategy` KPI, the
   `MULTITF_FAST_LIVE_FEED` kill switch (default true), and the profiler
-  `RATE_HZ=2` default.
+  `RATE_HZ=2` default. (2026-10-01, CHG-484: the feed now carries all six
+  timeframes' forming rows per tick, FIFTEEN_S first.)
 - **CHG-317**: the bridge T2 age flush (`MaxAge`, default 1 ms) had no
   production caller; wiring the ticker collapsed the one-tick-period shoulder
   the 2 Hz feed exposed (S1 p90 481→9 ms, S3 p90 479→4 ms, S5 p99 534→56 ms).

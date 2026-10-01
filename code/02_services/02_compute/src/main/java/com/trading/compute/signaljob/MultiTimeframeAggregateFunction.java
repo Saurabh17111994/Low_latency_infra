@@ -64,10 +64,13 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
     public static final OutputTag<RowData> LIVE_TAG = new OutputTag<RowData>("candle-live") {};
 
     /**
-     * Fast per-tick live feed (2026-09-26 low-latency signal path): the
-     * smallest-TF forming row emitted on every accepted trade tick. Consumed
-     * by the strategy host in memory — never written to Fluss. The 1s
-     * {@link #LIVE_TAG} snapshot stays the mirror cadence.
+     * Fast per-tick live feed (2026-09-26 low-latency signal path; all six
+     * timeframes since 2026-10-01): every accepted trade tick emits each TF's
+     * forming row ({@link CandleLiveColumns}), FIFTEEN_S first, so the strategy
+     * host reads the evolving candle of every timeframe in memory at tick
+     * latency. Consumed by the strategy host only — the host stores just the
+     * FIFTEEN_S forming row per tick, so this feed does not multiply the Fluss
+     * forming churn. The 1s {@link #LIVE_TAG} snapshot stays the mirror cadence.
      */
     public static final OutputTag<RowData> LIVE_TICK_TAG = new OutputTag<RowData>("candle-live-tick") {};
 
@@ -664,21 +667,33 @@ public class MultiTimeframeAggregateFunction extends KeyedProcessFunction<Long, 
             slot.state.lastFingerprint = tick.getString(RawTableColumns.EVENT_FINGERPRINT).toString();
         }
 
-        // Fast per-tick live feed (2026-09-26 low-latency signal path): one
-        // smallest-TF forming row per accepted trade — the strategy host reads
-        // it in memory at tick latency. The Fluss mirror keeps the 1s LIVE_TAG
-        // cadence and is not affected.
+        // Fast per-tick live feed (2026-09-26 low-latency signal path; all six
+        // TFs since 2026-10-01): every accepted trade tick emits each TF's
+        // forming row so the strategy host reads the evolving candle of every
+        // timeframe in memory at tick latency — the multi-TF forming view is a
+        // strategy requirement, independent of what the table stores. Emission
+        // order is Timeframe.values() (FIFTEEN_S first), so single-TF strategies
+        // keep evaluating on the canonical tick row. The Fluss mirror keeps the
+        // 1s LIVE_TAG cadence and is not affected; the merged writer stores only
+        // the FIFTEEN_S forming row per tick (StrategyHostFunction) until the
+        // storage cadence is decided.
         if (emitLiveTick) {
-            int fastOrd = Timeframe.FIFTEEN_S.ordinal();
-            long fastWs = slot.windowStarts[fastOrd];
-            CandleAccumulator fastAcc = slot.state.forming(Timeframe.FIFTEEN_S);
-            if (fastWs != Long.MIN_VALUE && fastAcc.firstEventTime != Long.MAX_VALUE) {
-                ctx.output(LIVE_TICK_TAG,
-                        buildLiveRow(key, Timeframe.FIFTEEN_S, fastWs,
-                                fastWs + Timeframe.FIFTEEN_S.windowMs(), fastAcc));
-                if (liveTickEmittedCounter != null) {
-                    liveTickEmittedCounter.inc();
+            boolean emitted = false;
+            for (Timeframe tf : Timeframe.values()) {
+                int ord = tf.ordinal();
+                long ws = slot.windowStarts[ord];
+                CandleAccumulator acc = slot.state.forming(tf);
+                if (ws == Long.MIN_VALUE || acc.firstEventTime == Long.MAX_VALUE) {
+                    continue;
                 }
+                ctx.output(LIVE_TICK_TAG,
+                        buildLiveRow(key, tf, ws, ws + tf.windowMs(), acc));
+                emitted = true;
+            }
+            // KPI stays per accepted tick, not per row: one tick now carries up
+            // to six forming rows (compute.candles.live.tick.emitted).
+            if (emitted && liveTickEmittedCounter != null) {
+                liveTickEmittedCounter.inc();
             }
         }
 
