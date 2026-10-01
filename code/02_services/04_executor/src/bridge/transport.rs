@@ -1251,16 +1251,24 @@ mod tests {
     }
 
     /// In-process Go-bridge-compatible command endpoint used by the round-trip tests.
-    async fn serve_bridge(addr: &str, token: String) -> tokio::task::JoinHandle<()> {
+    /// Returns the bound address: the callers bind `127.0.0.1:0` so an unrelated
+    /// process on the dev machine can never redden the suite with `AddrInUse`
+    /// (measured 2026-10-01: a local tool held 18787 and failed gate step 15).
+    async fn serve_bridge(
+        addr: &str,
+        token: String,
+    ) -> (tokio::task::JoinHandle<()>, std::net::SocketAddr) {
         let listener = TcpListener::bind(addr).await.unwrap();
-        tokio::spawn(async move {
+        let local = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
                     continue;
                 };
                 tokio::spawn(handle_conn(stream, token.clone()));
             }
-        })
+        });
+        (handle, local)
     }
 
     async fn handle_conn(mut stream: TcpStream, token: String) {
@@ -1353,9 +1361,9 @@ mod tests {
 
     #[tokio::test]
     async fn send_command_round_trip_accepted() {
-        let _l = serve_bridge("127.0.0.1:18787", "s3cret".into()).await;
+        let (_l, addr) = serve_bridge("127.0.0.1:0", "s3cret".into()).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let mut client = HttpBridgeClient::new("http://127.0.0.1:18787".into(), "s3cret".into());
+        let mut client = HttpBridgeClient::new(format!("http://{addr}"), "s3cret".into());
         let report = client.send_command(command_env()).await.unwrap();
         assert_eq!(report.outcome, ReportOutcome::Success.as_str());
         assert_eq!(report.order_status.as_deref(), Some("ACCEPTED"));
@@ -1365,9 +1373,9 @@ mod tests {
 
     #[tokio::test]
     async fn send_command_rejects_unauthorized() {
-        let _l = serve_bridge("127.0.0.1:18788", "s3cret".into()).await;
+        let (_l, addr) = serve_bridge("127.0.0.1:0", "s3cret".into()).await;
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let mut client = HttpBridgeClient::new("http://127.0.0.1:18788".into(), "wrong".into());
+        let mut client = HttpBridgeClient::new(format!("http://{addr}"), "wrong".into());
         let err = client.send_command(command_env()).await.unwrap_err();
         assert!(err.to_string().contains("401"), "got: {err}");
         // H1-2: 401 is emitted before dispatch — the command never ran, so a bounded retry is
