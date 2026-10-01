@@ -116,6 +116,29 @@ class VmGoldenRecipeTests(unittest.TestCase):
         self.assertIn("UNIVERSE=full", text)
         self.assertIn("DEPLOYMENT_ENV=dev", text)
 
+    def test_check_proves_the_runtime_artifacts_the_vm_boots_with(self):
+        """CHG-493: images are not enough — the instrument manifest tree lives
+        outside the repo, and compute.jar + the plugin jars are gitignored
+        (rsync-only). A snapshot that passes `--check` without them dies at
+        09:15 on the VM, so the check must fail before the snapshot.
+        """
+        text = SCRIPT.read_text()
+        for probe in (
+            "Arrow_broker/instruments/cash_stocks",
+            "target/compute.jar",
+            "fluss-plugins/iceberg",
+            "flink-plugins/dstl-dfs",
+        ):
+            self.assertIn(probe, text,
+                          f"--check must prove {probe!r} before the snapshot")
+
+    def test_guide_transfers_the_runtime_artifacts_not_just_the_repo(self):
+        """CHG-493: a repo-only transfer misses the manifest tree; a git clone
+        cannot carry the gitignored jars. The guide must name both."""
+        text = DOC.read_text()
+        self.assertIn("Arrow_broker", text)
+        self.assertIn("compute.jar", text)
+
     def test_guide_keeps_the_daily_commands_and_the_safe_to_destroy_rule(self):
         text = DOC.read_text()
         self.assertIn('make day ARGS="start"', text)

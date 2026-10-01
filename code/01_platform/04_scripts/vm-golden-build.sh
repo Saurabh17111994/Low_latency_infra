@@ -112,6 +112,23 @@ if [ "$CHECK" = 1 ]; then
     || fail "--check: .env.vm must set ALLOW_FRESH=1 (fresh disk every morning)"
   grep -q '^DAY_STOP_REQUIRE_EOD=1$' "$ENV_DIR/.env.vm" \
     || fail "--check: .env.vm must set DAY_STOP_REQUIRE_EOD=1 (archive before the disk dies)"
+  # CHG-493: the snapshot must also own the runtime artifacts the compose stack
+  # bind-mounts. A repo-only transfer misses the instrument manifest tree (it
+  # lives OUTSIDE the repo: day_run reads $REPO/../Arrow_broker/...), and a git
+  # clone cannot carry the gitignored jars (compute.jar, Flink/Fluss plugins) —
+  # the VM has no JDK to rebuild them. Fail before the snapshot, not at 09:15.
+  manifest_dir="$(cd "$REPO/.." && pwd)/Arrow_broker/instruments/cash_stocks"
+  for manifest in "NSE_CM_EQUITY.csv" "NSE_CM_EQUITY (1024).csv"; do
+    [ -s "$manifest_dir/$manifest" ] \
+      || fail "--check: manifest missing/empty: $manifest_dir/$manifest (transfer ../Arrow_broker/ with the repo)"
+  done
+  [ -s "$REPO/code/02_services/02_compute/target/compute.jar" ] \
+    || fail "--check: compute.jar missing/empty (build it on the dev PC and rsync it — the VM has no JDK)"
+  for plugin_dir in "$REPO/code/01_platform/01_docker/fluss-plugins/iceberg" \
+                    "$REPO/code/01_platform/01_docker/flink-plugins/dstl-dfs"; do
+    compgen -G "$plugin_dir/*.jar" >/dev/null \
+      || fail "--check: no plugin jars in $plugin_dir (gitignored — rsync carries them)"
+  done
   say "--check: OK — nothing was changed"
   exit 0
 fi

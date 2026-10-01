@@ -34,10 +34,22 @@ CloudPe dashboard → Compute → create VM (Ubuntu, recommended flavor, 100 GB,
 public network, your SSH key).
 
 ### 2.2 Put the repo on it (one of)
+- **from the dev PC** (no push needed; the complete route — it also carries the
+  gitignored runtime artifacts):
+  `rsync -a --delete --exclude logs --exclude code/02_services/04_executor/target ./ saurabh@<vm>:/opt/trading/streaming_project/`
+  `rsync -a ../Arrow_broker/ saurabh@<vm>:/opt/trading/Arrow_broker/`
+  The manifest tree lives **outside** the repo — `day_run` reads
+  `<repo>/../Arrow_broker/instruments/cash_stocks/` — so a repo-only transfer
+  makes `make day ARGS="start"` refuse with "manifest has no instrument rows".
 - **git clone** (after pushing the commit you want baked):
   `git clone git@github.com:Saurabh17111994/Low_latency_infra.git /opt/trading/streaming_project`
-- **from the dev PC** (no push needed):
-  `rsync -a --delete --exclude logs --exclude code/02_services/04_executor/target ./ saurabh@<vm>:/opt/trading/streaming_project/`
+  Then add what a clone cannot carry: the `Arrow_broker/` manifest tree (the
+  second rsync above) and the gitignored jars —
+  `code/02_services/02_compute/target/compute.jar` (host-mounted; the VM has no
+  JDK) and the Flink/Fluss plugin jars under
+  `code/01_platform/01_docker/{fluss-plugins/iceberg,flink-plugins/dstl-dfs}/`.
+  The rsync route is the one that carries all of this by construction; `--check`
+  (§2.5) refuses a snapshot without them (CHG-493).
 
 ### 2.3 Run the build script (on the VM)
 
@@ -61,7 +73,9 @@ The script warns when the project image set is missing; that is what §2.4 loads
 additionally proves the in-image toolchain before you snapshot — the ingestion JDK and
 `/app/probe/FlussReadLagProbe.class`, the EOD image's java + controller + m2 repo, and the
 `.env.vm` runner/fresh-start/stop-gate keys — so a snapshot that boots a VM unable to run the day
-fails here instead of at 09:15.
+fails here instead of at 09:15. Since CHG-493 it also proves the runtime artifacts the stack
+bind-mounts: the `Arrow_broker` manifest tree, `code/02_services/02_compute/target/compute.jar`,
+and the Flink/Fluss plugin jars under `code/01_platform/01_docker/`.
 
 The daily VM intentionally runs the **dev + full** universe (`DEPLOYMENT_ENV=dev`,
 `UNIVERSE=full` from `.env.vm`): the real 2433-instrument NSE cash manifest over the three
@@ -103,7 +117,8 @@ sudo bash /opt/trading/streaming_project/code/01_platform/04_scripts/vm-golden-b
 ```
 
 `--check` must print OK: Docker present, all 7 project images present, `.env`
-and `.env.vm` present. Then Dashboard → Volumes → boot volume → Snapshots →
+and `.env.vm` present, the `Arrow_broker` manifests present, `compute.jar`
+present and the plugin jars present. Then Dashboard → Volumes → boot volume → Snapshots →
 create snapshot → **Create Image** (KB: *Creating a New Virtual Machine Using
 a Snapshot of a Volume*). Name it by date, e.g. `trading-golden-20260928`.
 
@@ -152,3 +167,6 @@ launch is boring enough to script.
 | "no RUNNING tiering job" | the day's parquet will not reach R2 | `bash code/01_platform/04_scripts/tiering-start.sh`; if it dies, `docs/06_operations/07-lake-archive-ops.md` §Recovery |
 | compose starts **building** an image | the image set was not loaded | repeat §2.4, then rebuild the golden image |
 | No alert fires all day | the fresh OpenObserve was never provisioned | §3 step 4 (`provision-observability.sh`) |
+| `start` refused: "manifest has no instrument rows" | `Arrow_broker/` was never transferred (it lives outside the repo) | §2.2 manifest rsync, then re-run `start` |
+| SignalJob never starts / the launcher FATALs on `/opt/flink-jobs/compute.jar` | `compute.jar` missing — the VM has no JDK to build it | rsync `code/02_services/02_compute/target/compute.jar` from the dev PC (after `mvn package`), re-run `--check`, re-snapshot |
+| Flink lake/tiering or changelog plugin errors | the gitignored Flink/Fluss plugin jars were not transferred | §2.2; `--check` fails on this before a snapshot (CHG-493) |
