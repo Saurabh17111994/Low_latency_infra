@@ -411,6 +411,17 @@ so compression has nothing to work with. The recreate still fixed the
 are therefore **structural** at the current writer cadence/linger; the explicit
 pin stays for determinism.
 
+**Linger is closed as a lever (operator decision, 2026-10-01 — latency-first).**
+The batch/linger sweep (`RawBatchProbe`,
+`logs/soak/raw-batch-sweep-20261001/findings.md`) showed default == zstd exactly
+(2,785 vs 2,787 B/row) and a strong smooth-arrival curve (5/10/25 ms →
+918/556/313 B/row at the live per-writer rate), but the live path is bursty
+(~811 ticks/container per 500 ms) and already stores ~508 B/row at the 1 ms
+linger; raising the linger was previously measured to raise append p99
+10.5 → 38 ms (O-2) and the operator rejected it outright: **the facility is
+latency-critical, so no storage change may slow the write path.** Raw bytes/row
+stay as measured; no further raw-table work is scheduled.
+
 Note: the p99 ≤ 75 ms per-window SLO is **not** met by any stored leg by
 construction (watermark close, Q27 — measured close→read ≈0.7–1.2 s); the
 per-tick strategy path remains the 75 ms-class leg.
